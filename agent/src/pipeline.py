@@ -1129,10 +1129,15 @@ def run_task(
             # question) and PR workflows (pr_iteration already has its own
             # answer-only path). Fail-safe: if the marker is somehow present on a
             # read-only task we still just hold (nothing to lose).
+            # Primary signal: the agent CALLED the request_clarification tool
+            # (deterministic — a tool call, captured by the runner). Fallback:
+            # the legacy first-line text sentinel (kept so a model that types the
+            # marker instead of calling the tool still holds). Either → hold.
+            clarification_q = (agent_result.clarification_question or "").strip()
             needs_input = bool(
                 not artifact_workflow
                 and not config.is_pr_workflow
-                and _starts_with_needs_input_marker(agent_result.result_text)
+                and (clarification_q or _starts_with_needs_input_marker(agent_result.result_text))
             )
 
             # Post-hooks (agent_result is guaranteed set by the try/except above)
@@ -1326,7 +1331,9 @@ def run_task(
             # the question, not our internal sentinel.
             if needs_input:
                 code_changed = False
-                answer_text = _strip_needs_input_marker(answer_text)
+                # Prefer the tool's ``question`` arg (clean, no marker); fall back
+                # to the final message with the legacy sentinel stripped.
+                answer_text = clarification_q or _strip_needs_input_marker(answer_text)
 
             # Build TaskResult
             usage = agent_result.usage

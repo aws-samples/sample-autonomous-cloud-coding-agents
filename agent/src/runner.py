@@ -30,6 +30,11 @@ import subprocess
 from typing import Any
 from urllib.parse import quote
 
+from clarification_tool import (
+    CLARIFICATION_SERVER_NAME,
+    CLARIFICATION_TOOL_NAME,
+    build_clarification_server,
+)
 from config import AGENT_WORKSPACE
 from models import AgentResult, TaskConfig, TokenUsage
 from progress_writer import _ProgressWriter
@@ -280,6 +285,21 @@ _FULL_TOOL_SURFACE = ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch
 # Tools that mutate the working tree — dropped from the SDK surface for any
 # read-only workflow.
 _WRITE_TOOLS = frozenset(("Write", "Edit"))
+# Clarify-before-spend (UX #4): workflows that do NOT get the request_clarification
+# tool. pr-iteration already has its own answer-only path; decompose emits a plan
+# artifact (its "ask for more detail" is `decompose:false` with reasoning); web/
+# default artifact tasks don't open PRs. Only the plain PR-producing new_task path
+# benefits from an ask-instead-of-guess signal.
+_NO_CLARIFICATION_WORKFLOW_IDS = frozenset(
+    (
+        "coding/pr-iteration-v1",
+        "coding/pr-review-v1",
+        "coding/restack-v1",
+        "coding/decompose-v1",
+        "default/agent-v1",
+        "web/research-v1",
+    )
+)
 
 
 def _resolve_allowed_tools(config: TaskConfig) -> list[str]:
@@ -381,6 +401,25 @@ async def run_agent(
         progress=progress,
     )
 
+    # Clarify-before-spend (UX #4): register the in-process request_clarification
+    # tool for writeable PR-producing workflows (new_task). It lets the agent STOP
+    # and ask a question instead of guessing on a vague request; the runner
+    # captures the call below. Gated OFF for read-only workflows (pr-review) and
+    # artifact planners (decompose) — they have their own terminal shapes and
+    # shouldn't grow an ask-instead path. Best-effort: a null server (SDK missing)
+    # just means the tool isn't offered.
+    mcp_servers: dict[str, Any] = {}
+    workflow_id = (config.resolved_workflow or {}).get("id", "")
+    offer_clarification = not config.read_only and workflow_id not in _NO_CLARIFICATION_WORKFLOW_IDS
+    if offer_clarification:
+        clar_server = build_clarification_server()
+        if clar_server is not None:
+            mcp_servers[CLARIFICATION_SERVER_NAME] = clar_server
+            # Under bypassPermissions MCP tools surface without being in
+            # allowed_tools, but list it explicitly so intent is clear + robust
+            # to a future permission-mode change.
+            allowed_tools = [*allowed_tools, CLARIFICATION_TOOL_NAME]
+
     options = ClaudeAgentOptions(
         model=config.anthropic_model,
         system_prompt=system_prompt,
@@ -392,6 +431,7 @@ async def run_agent(
         hooks=hooks,
         max_budget_usd=config.max_budget_usd,
         stderr=_on_stderr,
+        **({"mcp_servers": mcp_servers} if mcp_servers else {}),
     )
 
     result = AgentResult()
@@ -436,7 +476,22 @@ async def run_agent(
                         turn_text += block.text + "\n"
                     elif isinstance(block, ToolUseBlock):
                         tool_input = block.input
-                        if block.name == "Bash":
+                        # Clarify-before-spend (UX #4): the agent called the
+                        # request_clarification tool → capture its question. This
+                        # is the deterministic hold signal (a tool call, not a
+                        # reproduced sentinel). Last call wins if it somehow asks
+                        # twice; the pipeline treats any non-empty value as a hold.
+                        if block.name == CLARIFICATION_TOOL_NAME:
+                            q = ""
+                            if isinstance(tool_input, dict):
+                                q = str(tool_input.get("question", "")).strip()
+                            # Any non-empty value flags the hold; " " if the arg
+                            # was blank so the signal still fires.
+                            result.clarification_question = (
+                                q or result.clarification_question or " "
+                            )
+                            log("TOOL", f"request_clarification: {truncate(q, 300)}")
+                        elif block.name == "Bash":
                             cmd = tool_input.get("command", "")
                             log("TOOL", f"Bash: {truncate(cmd, 300)}")
                         elif block.name in ("Read", "Glob", "Grep"):

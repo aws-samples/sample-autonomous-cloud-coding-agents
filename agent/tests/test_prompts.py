@@ -139,11 +139,12 @@ class TestGetSystemPrompt:
 
     def test_new_task_has_clarify_before_spend_branch(self):
         # Clarify-before-spend (UX #4): the new_task workflow must tell the agent
-        # to ask a clarifying question (with the hold marker) instead of guessing
-        # on a genuinely vague request, and to not build unrequested scope.
+        # to ASK via the request_clarification tool instead of guessing on a
+        # genuinely vague request, and to not build unrequested scope.
         prompt = get_system_prompt("coding/new-task-v1")
-        assert "{needs_input_marker}" in prompt  # substituted at build time
-        assert "clarifying question" in prompt
+        assert "request_clarification" in prompt  # the deterministic tool signal
+        assert "{needs_input_marker}" in prompt  # marker fallback, substituted at build time
+        assert "clarifying question" in prompt or "clarification" in prompt
         # Scope discipline (the typo->button case).
         assert "weren't requested" in prompt or "not requested" in prompt
 
