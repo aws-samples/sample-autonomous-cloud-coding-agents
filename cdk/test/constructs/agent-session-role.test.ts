@@ -17,6 +17,7 @@
  *  SOFTWARE.
  */
 
+import * as bedrock from '@aws-cdk/aws-bedrock-alpha';
 import { App, Stack } from 'aws-cdk-lib';
 import { Template, Match } from 'aws-cdk-lib/assertions';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
@@ -191,6 +192,52 @@ describe('AgentSessionRole construct', () => {
     );
     expect(bundledTrust).toBeDefined();
     expect(JSON.stringify(trustDoc)).toContain('ComputeRole');
+  });
+
+  test('grants bedrock:InvokeModel on the supplied invokables when invokableModels is set (#215)', () => {
+    const app = new App();
+    const stack = new Stack(app, 'BedrockStack');
+    const computeRole = new iam.Role(stack, 'ComputeRole', {
+      assumedBy: new iam.ServicePrincipal('bedrock-agentcore.amazonaws.com'),
+    });
+    const table = new dynamodb.Table(stack, 'T', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+    });
+    const model = new bedrock.BedrockFoundationModel('anthropic.claude-sonnet-4-6', {
+      supportsCrossRegion: true,
+    });
+    new AgentSessionRole(stack, 'SR', {
+      assumingRoles: [computeRole],
+      taskScopedTables: [table],
+      traceArtifactsBucket: new s3.Bucket(stack, 'TB'),
+      attachmentsBucket: new s3.Bucket(stack, 'AB'),
+      invokableModels: [model],
+    });
+
+    const stackTemplate = Template.fromStack(stack);
+    const sessionPolicy = Object.entries(
+      stackTemplate.findResources('AWS::IAM::Policy'),
+    ).find(([id]) => id.includes('SR'))![1];
+    const statements = sessionPolicy.Properties.PolicyDocument.Statement;
+    // grantInvoke emits the wildcard-suffixed action bedrock:InvokeModel*.
+    const bedrockStatement = statements.find((s: { Action: string | string[] }) => {
+      const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+      return actions.some((a: string) => a.startsWith('bedrock:InvokeModel'));
+    });
+    expect(bedrockStatement).toBeDefined();
+    // The model ARN must be present, scoped (no Resource:'*').
+    expect(JSON.stringify(bedrockStatement.Resource)).toContain('anthropic.claude-sonnet-4-6');
+    expect(bedrockStatement.Resource).not.toBe('*');
+  });
+
+  test('omitting invokableModels grants no bedrock action (isolated tests)', () => {
+    const { template: t } = createStack();
+    const policies = t.findResources('AWS::IAM::Policy');
+    const sessionPolicy = Object.entries(policies).find(([id]) =>
+      id.includes('AgentSessionRole'),
+    )![1];
+    const serialized = JSON.stringify(sessionPolicy.Properties.PolicyDocument.Statement);
+    expect(serialized).not.toContain('bedrock:InvokeModel');
   });
 
   test('admitComputeRole wires both trust and grant for an additional compute role', () => {

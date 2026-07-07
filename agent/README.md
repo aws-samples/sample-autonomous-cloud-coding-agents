@@ -372,7 +372,6 @@ agent/
 │   ├── task_state.py    Best-effort DynamoDB task status and heartbeat writes (no-op if TASK_TABLE_NAME unset)
 │   ├── observability.py OpenTelemetry helpers (e.g. AgentCore session id)
 │   ├── memory.py        Optional memory / episode integration for the agent
-│   ├── system_prompt.py Behavioral contract (PRD Section 11)
 │   └── prompts/         System prompt templates, keyed by resolved workflow id (#248)
 │       ├── __init__.py  Prompt registry — get_system_prompt(workflow_id) maps each workflow id to its template; warns + falls back for an unregistered id
 │       ├── base.py      Shared base template for coding workflows (environment, rules, git/branch/PR placeholders)
@@ -381,6 +380,9 @@ agent/
 │       ├── pr_review.py     Workflow fragment for coding/pr-review-v1 (read-only analysis, structured review comments)
 │       ├── default_agent.py Repo-less prompt for default/agent-v1 (no git/branch/PR; deliverable is the final message)
 │       └── web_research.py  Repo-less research prompt for knowledge/web-research-v1 (WebFetch sourcing, structured cited answer)
+├── scripts/diagnostics/ Optional ops diagnostics (not bundled in the production image)
+│   ├── test_sdk_smoke.py        Minimal SDK smoke test (ClaudeSDKClient → CLI → Bedrock)
+│   └── test_subprocess_threading.py  Subprocess-in-background-thread verification
 ├── prepare-commit-msg.sh Git hook (Task-Id / Prompt-Version trailers on commits)
 ├── run.sh               Build + run helper for local/server mode with AgentCore constraints
 ├── tests/               pytest unit tests (pythonpath: src/)
@@ -391,8 +393,8 @@ agent/
 │   ├── test_pipeline.py     Pipeline tests (cedar_policies injection, _resolve_overall_task_status, _chain_prior_agent_error)
 │   ├── test_shell.py        Shell utility tests (slugify, redact_secrets, truncate, format_bytes)
 │   └── ...
-├── test_sdk_smoke.py    Diagnostic: minimal SDK smoke test (ClaudeSDKClient → CLI → Bedrock)
-└── test_subprocess_threading.py  Diagnostic: subprocess-in-background-thread verification
 ```
 
 The container **CMD** runs the app under `opentelemetry-instrument` with **uvicorn** using the **asyncio** event loop (not uvloop), avoiding known subprocess issues with uvloop.
+
+**Diagnostics:** `scripts/diagnostics/` holds optional smoke tests for local AgentCore debugging. They are not copied into the production Docker image.
