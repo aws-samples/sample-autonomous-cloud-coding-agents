@@ -1,136 +1,89 @@
 # AGENTS.md
 
-This file provides context for AI coding assistants (Kiro, Cursor, GitHub Copilot, Claude Code, etc.) working with this repository.
+Context for AI coding assistants (Cursor, Claude Code, GitHub Copilot, etc.) working in this repository.
+
+**Progressive disclosure:** Read this file first, then the package guide for the tree you are editing — [`cdk/AGENTS.md`](./cdk/AGENTS.md), [`cli/AGENTS.md`](./cli/AGENTS.md), [`agent/AGENTS.md`](./agent/AGENTS.md), or [`docs/AGENTS.md`](./docs/AGENTS.md).
 
 ## Your role
 
-You are an **AWS CDK (Cloud Development Kit) and TypeScript** expert. This project is **ABCA (Autonomous Background Coding Agents on AWS)**: a self-hosted platform where users create background coding agents, submit coding tasks, and the agents work autonomously in isolated cloud environments — cloning repos, writing code, running tests, and opening pull requests for review. The codebase is CDK infrastructure (TypeScript) plus Python agent code that runs inside the compute environment.
+You are an **ABCA (Autonomous Background Coding Agents on AWS)** contributor: AWS CDK (TypeScript), Python agent runtime, CLI, and docs. Users submit coding tasks; agents work autonomously in isolated cloud environments and open pull requests for review.
 
-## Project knowledge
+Deeper design: [Developer guide](./docs/guides/DEVELOPER_GUIDE.md), [Architecture](./docs/design/ARCHITECTURE.md), [Orchestrator](./docs/design/ORCHESTRATOR.md).
 
-To get started and understand the developer flow, follow the [Developer guide](./docs/guides/DEVELOPER_GUIDE.md). For architecture and design, see [docs/design/](./docs/design/ARCHITECTURE.md). Task lifecycle and handler contracts are summarized in [Orchestrator design](./docs/design/ORCHESTRATOR.md) (including **API and agent contracts**).
+## Commands (run these)
 
-### Where to make changes
+```bash
+mise run install          # yarn workspaces + agent Python (uv)
+mise run build            # agent quality + cdk + cli + docs (parallel)
+mise run security         # secrets, deps, sast, grype, retire, gh-actions, agent
+mise run hooks:install    # prek git hooks (also runs at end of install)
+mise run hooks:run        # pre-commit + pre-push locally
+```
 
-Use this routing before editing so the right package and tests get updated:
+Security subtasks: `mise run security:secrets`, `security:sast`, `security:sast:masking`, `security:deps`, `security:retire`, `security:gh-actions`. For `security:sast:masking` allowlist intentional fallbacks with an inline `nosemgrep: <rule-id> -- <reason>` comment.
 
-| Change | Primary location | Also update |
-|--------|------------------|-------------|
-| REST API, Lambdas, task validation, orchestration | `cdk/src/handlers/`, `cdk/src/stacks/`, `cdk/src/constructs/` | Matching tests under `cdk/test/` |
-| Shared API request/response shapes | `cdk/src/handlers/shared/types.ts` | **`cli/src/types.ts`** (must stay in sync) |
-| `bgagent` CLI commands and HTTP client | `cli/src/`, `cli/test/` | `cli/src/types.ts` if API types change |
-| Agent runtime (clone, tools, prompts, container) | `agent/src/` (`pipeline.py`, `runner.py`, `config.py`, `hooks.py`, `policy.py`, `prompts/`, Dockerfile, etc.) | `agent/tests/`, `agent/README.md` for env/PAT |
-| Agent progress events (written to `TaskEventsTable` from the MicroVM; read by `bgagent watch`) | `agent/src/progress_writer.py`, `agent/src/pipeline.py` and `agent/src/runner.py` (integration points) | `agent/tests/test_progress_writer.py`; `cli/src/commands/watch.ts` for the consumer side |
-| User-facing or design prose | `docs/guides/`, `docs/design/` | Run **`mise //docs:sync`** or **`mise //docs:build`** (do not edit `docs/src/content/docs/` by hand) |
-| Architecture decisions (ADRs) | `docs/decisions/` | Run **`mise //docs:sync`** after adding or editing an ADR |
-| Monorepo tasks, CI glue | Root `mise.toml`, `scripts/`, `.github/workflows/` | — |
+Package commands: [cdk/AGENTS.md](./cdk/AGENTS.md), [cli/AGENTS.md](./cli/AGENTS.md), [agent/AGENTS.md](./agent/AGENTS.md), [docs/AGENTS.md](./docs/AGENTS.md).
 
-### CDK handler tests (quick map)
+Run `mise tasks --all` with `MISE_EXPERIMENTAL=1` for the full list. Prefer mise tasks over raw `jest`, `tsc`, or `cdk` for full suites; package guides show targeted `npx jest` / `uv run pytest` for single files.
 
-Colocated tests under `cdk/test/handlers/shared/` cover most shared logic:
+## Git workflow
 
-- `validation.test.ts` — request validation
-- `preflight.test.ts` — preflight / admission checks
-- `create-task-core.test.ts` — task creation core path
-- `context-hydration.test.ts` — prompt / context assembly
-- `repo-config.test.ts`, `memory.test.ts`, `gateway.test.ts`, `response.test.ts`, `prompt-version.test.ts` — respective modules
+```
+approved issue → git fetch origin main → worktree → branch → implement → local checks → PR
+```
 
-Handler entry tests: `cdk/test/handlers/orchestrate-task.test.ts`, `create-task.test.ts`, `webhook-create-task.test.ts`. Construct wiring: `cdk/test/constructs/task-orchestrator.test.ts`, `task-api.test.ts`.
+Branch names: `(feat|fix|chore|docs)/<issue-number>-short-description` (e.g. `docs/191-agents-md-split`).
 
-### Common mistakes
+**After merging `main` into your branch:**
 
-- **Starting implementation without an approved GitHub issue** — Conversational approval ("yes, do it", "go ahead", "start with X") is NOT governance approval. The correct sequence is: create a GitHub issue with acceptance criteria → get the `approved` label from an admin → self-assign → comment "Starting implementation" → then begin work. Even if the user explicitly directs the work in conversation, create the durable artifact (issue) first. See [ADR-003](./docs/decisions/ADR-003-contribution-governance.md).
-- **Creating branches without an issue reference** — Branch names must follow the pattern `(feat|fix|chore|docs)/<issue-number>-short-description`. A branch without an issue number is unauthorized work. Example: `feat/148-operational-knowledge-stack`.
-- Editing **`docs/src/content/docs/`** instead of **`docs/guides/`** or **`docs/design/`** — content is generated; sync from sources.
-- Adding or editing files in **`docs/design/`** or **`docs/guides/`** without running **`cd docs && node scripts/sync-starlight.mjs`** — CI will reject ("Fail build on mutation") because the Starlight mirror files in `docs/src/content/docs/` are stale. Always commit the regenerated mirrors alongside source changes.
-- Changing **`cdk/.../types.ts`** without updating **`cli/src/types.ts`** — CLI and API drift.
-- Running raw **`jest`/`tsc`/`cdk`** from muscle memory — prefer **`mise //cdk:test`**, **`mise //cdk:compile`**, **`mise //cdk:synth`** (see [Commands you can use](#commands-you-can-use)).
-- **Bundling Lambda assets in CDK unit tests** — `Template.fromStack()` triggers a full synth that bundles every `NodejsFunction` via esbuild (~28s for `AgentStack`). Unit tests assert on CloudFormation structure, not bundled code, so for those assertions it is overhead — plus a smoke-test of Lambda `entry` resolution and handler compilation that unit tests intentionally cede to the `agent/` build (a broken entry path or handler TS error stops surfacing at `Template.fromStack()` and instead fails at real synth/deploy or in the `agent/` build). The `cdk/` Jest config disables it globally via `test/setup/disable-bundling.ts` (sets `aws:cdk:bundling-stacks: []` in `CDK_CONTEXT_JSON`), which a bare `new App()` picks up automatically. This does not stop tests from synthesizing — `Template.fromStack()` still runs a full synth; it only skips the esbuild step. **Do not re-enable bundling** in a test unless you are specifically asserting on the bundled-asset output (hash / S3 key) — and if you must, opt out narrowly via that test's `App` `postCliContext` (e.g. `new App({ postCliContext: { 'aws:cdk:bundling-stacks': ['**'] } })`), not globally. Note that constructor `context` does **not** work for this key: CDK overwrites it with `CDK_CONTEXT_JSON`, so only `postCliContext` (applied last) overrides the global disable. Minimize full-stack synths regardless: synthesize each distinct stack config once in `beforeAll` and assert against the cached `Template`. See #366.
-- **`MISE_EXPERIMENTAL=1`** — required for namespaced tasks like **`mise //cdk:build`** (see [CONTRIBUTING.md](./CONTRIBUTING.md)).
-- **`mise run build`** builds **`//agent:quality`** alongside **`//cdk:build`** (the deployed image bundles **`agent/`**, so agent quality is part of the build) — these run as parallel `depends`, not in a fixed order; agent changes belong in the **`agent/`** tree.
-- **`prek install`** fails if Git **`core.hooksPath`** is set — another hook manager owns hooks; see [CONTRIBUTING.md](./CONTRIBUTING.md).
-- **Editing on `main` directly** — ALWAYS create a worktree with a feature branch for changes, even trivial ones. Main should stay clean; all work flows through worktree → branch → PR → merge.
-- **Git worktrees** — Always **`git fetch origin main`** before creating a new worktree to ensure you branch from the latest remote state. `node_modules/` and `agent/.venv/` are per-tree (not shared). Run **`mise run install`** in each new worktree before building. All CDK path references (`__dirname`-relative) and mise `config_roots` resolve correctly without extra setup.
-- **Bumping Cedar engines in isolation** — `cedarpy` (Python, `agent/pyproject.toml`) and `@cedar-policy/cedar-wasm` (TypeScript, `cdk/package.json`) are two language bindings over the same Cedar Rust core. They MUST move together; even patch-version drift between bindings can yield divergent `(decision, matching_rule_ids)` on the same `(policy, input)` — invisible to per-side unit tests, caught (only) by `contracts/cedar-parity/` golden fixtures in CI. If you bump one engine you MUST bump the other to a tested-compatible version AND refresh the parity fixtures in the same commit. Both pins are EXACT (no `^`/`~`). See `docs/design/CEDAR_HITL_GATES.md` §15.6 (decision #23) and the parity-contract banner in `mise.toml`. **DO NOT** accept upstream's "Update branch" or auto-merge suggestions on cedarpy without verifying parity with cedar-wasm.
+1. `mise //cdk:eslint` and `mise //cli:eslint` (both use `--fix`)
+2. Commit any auto-fixes (CI "Fail build on mutation" rejects uncommitted lint output)
+3. `mise run build`
 
-### Tech stack
+**Worktrees:** `node_modules/` and `agent/.venv/` are per-tree. Run `mise run install` in each new worktree.
 
-- **Language / runtime** — TypeScript (Node 20.x–24.x), Python 3.9+ (agent code in `agent/`)
-- **Infrastructure** — AWS CDK v2 (awscdk), CDK constructs v10.x
-- **CDK / AWS** — `@aws-cdk/aws-bedrock-alpha`, `@aws-cdk/aws-bedrock-agentcore-alpha`, `cdk-nag`
-- **Tooling** — [mise](https://mise.jdx.dev/) for monorepo task orchestration and tool versions; Yarn workspaces; ESLint (with cdklabs, jsdoc, jest, license-header plugins); Jest for tests
-- **Generated files** — Docs site content under `docs/src/content/docs/` is synced from source guides/design files via `docs/scripts/sync-starlight.mjs`
+## Where to make changes
 
-### Repository structure
-
-- **`mise.toml`** (root) — Monorepo mise config: **`config_roots`** `cdk`, `agent`, `cli`, `docs`; tasks **`install`**, **`build`**, etc. Package-level **`mise.toml`** files live under those directories.
-- **`scripts/`** (root) — Optional cross-package helpers; **`scripts/ci-build.sh`** runs the full monorepo build (same as CI).
-- **`cdk/`** — CDK app package (`@abca/cdk`): `cdk/src/`, `cdk/test/`, `cdk/cdk.json`, `cdk/tsconfig.json`, `cdk/tsconfig.dev.json`, and `cdk/eslint.config.mjs` (ESLint flat config; `cli/` uses `cli/eslint.config.mjs`).
-- **`cli/`** — `@backgroundagent/cli` — CLI tool for interacting with the deployed REST API (see below).
-- **`agent/`** — Python code that runs inside the agent compute environment (entrypoint, server, system prompt, Dockerfile, requirements). The system prompt is refactored into `agent/src/prompts/` with a shared base template and per-workflow variants (`coding/new-task-v1`, `coding/pr-iteration-v1`, `coding/pr-review-v1`).
-- **`docs/`** — Authoritative Markdown in `guides/` (developer, user, prompt) and `design/`; assets in `imgs/`. The Starlight docs site lives here (`astro.config.mjs`, `package.json`); `src/content/docs/` is refreshed via `docs/scripts/sync-starlight.mjs`.
-- **`CONTRIBUTING.md`** — Contribution guidelines at the repository root.
-- **`package.json`** (root), **`yarn.lock`** — Yarn workspace root (minimal manifest); dependencies live in **`cdk/`**, **`cli/`**, and **`docs/`** package manifests.
-
-### CLI package (`cli/`)
-
-The `@backgroundagent/cli` package provides the `bgagent` executable for submitting and managing tasks through the deployed REST API with Cognito authentication.
-
-**Structure:**
-
-- `src/bin/bgagent.ts` — Entry point (`#!/usr/bin/env node`, commander program setup)
-- `src/commands/` — One file per command: `configure`, `login`, `submit`, `list`, `status`, `cancel`, `events`
-- `src/api-client.ts` — HTTP client wrapping `fetch` with auth header injection
-- `src/auth.ts` — Cognito login, token caching (`~/.bgagent/credentials.json`), auto-refresh
-- `src/config.ts` — Read/write `~/.bgagent/config.json`
-- `src/types.ts` — API request/response types (mirrored from `cdk/src/handlers/shared/types.ts`), including `workflow_ref` / `ResolvedWorkflow` (workflow ids like `coding/new-task-v1`, `coding/pr-iteration-v1`, `coding/pr-review-v1`; replaced the former `TaskType` enum, #248)
-- `src/format.ts` — Output formatting (table, detail view, JSON)
-- `src/debug.ts` — Verbose/debug logging (`--verbose` flag)
-- `src/errors.ts` — `CliError` and `ApiError` classes
-- `test/` — Jest tests for all modules
-
-**Key conventions:**
-
-- The `no-console` ESLint rule is disabled for CLI source files (console output is the product).
-- Runtime deps (`commander`, `@aws-sdk/client-cognito-identity-provider`) are declared in `cli/package.json`.
-- The CLI build is run via `mise //cli:build` (or `cd cli && mise run build`), and included in root `mise run build`.
-- The API URL from the `ApiUrl` stack output already includes the stage name (`/v1/`), so the CLI appends only resource paths (`/tasks`, `/tasks/{id}`, etc.).
-
-## Commands you can use
-
-Run `mise tasks --all` (with `MISE_EXPERIMENTAL=1`) for the full list. Common commands:
-
-- **`mise run install`** — One **`yarn install`** at the repo root for all Yarn workspaces (**`cdk`**, **`cli`**, **`docs`**), then **`mise run install`** in **`agent/`** for Python (uv).
-- **`mise run build`** — Runs **`//agent:quality`** (agent is bundled by CDK), **`//cdk:build`**, **`//cli:build`**, and **`//docs:build`** as parallel `depends` (DAG-scheduled, no fixed order), plus the drift-prevention checks.
-- **`mise //cdk:compile`** — Compile CDK TypeScript.
-- **`mise //cdk:test`** — Run CDK Jest tests.
-- **`mise //cdk:synth`** — Synthesize CDK app to `cdk/cdk.out/`.
-- **`mise //cdk:deploy`** — Deploy the CDK stack to the current AWS account.
-- **`mise //cdk:destroy`** — Destroy the deployed CDK stack.
-- **`mise //cdk:diff`** — Diff deployed stack vs. current code.
-- **`mise //cli:build`** — Build CLI package.
-- **`mise //docs:build`** — Sync and build docs site.
-- **`mise run security:secrets`** — Gitleaks at repo root.
-- **`mise run security:sast`** — Semgrep on the repo (root; includes **`agent/`** Python among paths).
-- **`mise run security:sast:masking`** — Custom semgrep rules for silent-success masking (`catch`/`except` returning empty defaults, AI004). Blocking; emits SARIF to `test-reports/`. Allowlist intentional fallbacks with an inline justified `nosemgrep: <rule-id> -- <reason>` comment.
-- **`mise run security:deps`** — OSV Scanner on **`yarn.lock`** (all JS workspaces) and **`agent/uv.lock`**.
-- **`mise run security`** — Runs **`security:secrets`**, **`security:deps`**, **`security:sast`**, **`security:sast:masking`**, **`security:grype`**, **`security:retire`**, **`security:gh-actions`**, and **`//agent:security`**.
-- **`mise run security:retire`** — Retire.js on CDK, CLI, and docs packages.
-- **`mise run security:gh-actions`** — Static analysis of GitHub Actions under **`.github/`** ([zizmor](https://github.com/zizmorcore/zizmor)).
-- **`mise run hooks:install`** — Re-install **[prek](https://github.com/j178/prek)** git hooks (also run automatically at the end of **`mise run install`** inside a Git checkout). See [CONTRIBUTING.md](./CONTRIBUTING.md) if `core.hooksPath` blocks install.
-- **`mise run hooks:run`** — Run the same **pre-commit** and **pre-push** hook stages on all files (local verification).
-
-Use these instead of running `tsc`, `jest`, or `cdk` directly when possible, so the project's scripts and config stay consistent.
-
-To build or test only the CLI subproject:
-
-- **`cd cli && mise run build`** — Full CLI build (compile, test, lint).
-- **`cd cli && mise run test`** — Run CLI tests only.
-- **`cd cli && mise run compile`** — Compile CLI TypeScript only.
+| Change | Primary location | Also update | Package guide |
+|--------|------------------|-------------|---------------|
+| REST API, Lambdas, orchestration | `cdk/src/handlers/`, `cdk/src/stacks/`, `cdk/src/constructs/` | `cdk/test/` | [cdk/AGENTS.md](./cdk/AGENTS.md) |
+| Shared API types | `cdk/src/handlers/shared/types.ts` | **`cli/src/types.ts`** | [cdk/AGENTS.md](./cdk/AGENTS.md), [cli/AGENTS.md](./cli/AGENTS.md) |
+| `bgagent` CLI | `cli/src/`, `cli/test/` | `cli/src/types.ts` if API changes | [cli/AGENTS.md](./cli/AGENTS.md) |
+| Agent runtime | `agent/src/` | `agent/tests/`, `agent/README.md` | [agent/AGENTS.md](./agent/AGENTS.md) |
+| Progress events | `agent/src/progress_writer.py`, `agent/src/pipeline.py`, `agent/src/runner.py` | `agent/tests/test_progress_writer.py`; `cli/src/commands/watch.ts` | [agent/AGENTS.md](./agent/AGENTS.md), [cli/AGENTS.md](./cli/AGENTS.md) |
+| User-facing / design prose | `docs/guides/`, `docs/design/` | `mise //docs:sync` | [docs/AGENTS.md](./docs/AGENTS.md) |
+| ADRs | `docs/decisions/` | `mise //docs:sync` | [docs/AGENTS.md](./docs/AGENTS.md) |
+| Monorepo CI / tasks | `mise.toml`, `scripts/`, `.github/workflows/` | — | — |
 
 ## Boundaries
 
-- **Generated docs (CI will reject if stale)** — Editing files in `docs/guides/`, `docs/design/`, or `CONTRIBUTING.md` requires regenerating Starlight mirrors under `docs/src/content/docs/`. Run **`cd docs && node scripts/sync-starlight.mjs`** (fast, <1 s) or **`mise //docs:sync`**, then commit the updated mirrors alongside your source changes. The pre-commit hook `docs-sync` does this automatically when prek hooks are installed, but if you bypass hooks (e.g. `--no-verify`), CI's "Fail build on mutation" step will catch it.
-- **Dependencies** — Add dependencies to the owning package `package.json` (`cdk/`, `cli/`, or `docs/`), then install via workspace/root install.
-- **Build before commit** — Run a full build (`mise run build`) when done so tests/synth/docs/security checks stay in sync. This is especially critical for docs changes — the build includes `//docs:sync` which regenerates Starlight mirrors, and CI will fail if the committed mirrors don't match what the build produces.
-- **Major changes** — Before modifying existing files in a major way (large refactors, new stacks, changing the agent contract), ask first.
+- ✅ **Always:** Use an approved GitHub issue before implementing ([ADR-003](./docs/decisions/ADR-003-contribution-governance.md)); branch from `main` via worktree; run `mise run build` before opening a PR; regenerate Starlight mirrors when editing `docs/guides/`, `docs/design/`, or `CONTRIBUTING.md`; add dependencies to the owning package `package.json` (`cdk/`, `cli/`, or `docs/`)
+- ⚠️ **Ask first:** New CDK stacks or constructs, agent contract changes, new dependencies, major refactors, CI workflow edits
+- 🚫 **Never:** Edit on `main`; edit `docs/src/content/docs/` by hand; commit secrets; implement without an `approved` issue (conversational "go ahead" is not approval); run raw `jest`/`tsc`/`cdk` when a mise task exists
+
+## Common mistakes
+
+- **No approved issue** — Create issue → `approved` label → self-assign → comment "Starting implementation". See [ADR-003](./docs/decisions/ADR-003-contribution-governance.md).
+- **Branch without issue number** — Unauthorized work.
+- **`MISE_EXPERIMENTAL=1`** — Required for `mise //cdk:build` and other namespaced tasks ([CONTRIBUTING.md](./CONTRIBUTING.md)).
+- **`prek install` fails** — Another hook manager owns `core.hooksPath`; see [CONTRIBUTING.md](./CONTRIBUTING.md).
+- **Package-specific pitfalls** — API type drift, CDK test bundling, Cedar parity, generated docs: see package `AGENTS.md` files.
+
+## Tech stack
+
+- **Node** 22 (mise) · **TypeScript** 6.x · **Python** ≥3.13 (agent, uv)
+- **AWS CDK** `aws-cdk-lib` 2.x · `@aws-cdk/aws-bedrock-alpha`, `@aws-cdk/aws-bedrock-agentcore-alpha`, `cdk-nag`
+- **Test / lint** — Jest 30, ESLint flat config (`cdk/eslint.config.mjs`, `cli/eslint.config.mjs`), Ruff (agent)
+- **Cedar** — `@cedar-policy/cedar-wasm` 4.8.2 (cdk) + `cedarpy==4.8.4` (agent); must bump together
+- **Tooling** — mise, Yarn workspaces, prek hooks, Starlight docs sync
+
+## Repository structure
+
+| Path | Role |
+|------|------|
+| `cdk/` | CDK app (`@abca/cdk`) — [cdk/AGENTS.md](./cdk/AGENTS.md) |
+| `cli/` | `bgagent` CLI — [cli/AGENTS.md](./cli/AGENTS.md) |
+| `agent/` | Python runtime (bundled into CDK image) — [agent/AGENTS.md](./agent/AGENTS.md) |
+| `docs/` | Guides, design, Starlight site — [docs/AGENTS.md](./docs/AGENTS.md) |
+| `mise.toml` | Monorepo tasks; `config_roots`: cdk, agent, cli, docs |
+| `CONTRIBUTING.md` | Contribution guidelines |

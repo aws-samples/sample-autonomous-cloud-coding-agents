@@ -20,7 +20,7 @@ Describe what you intend to contribute. This avoids duplicate work and gives mai
 
 Follow the [Quick Start](./docs/guides/QUICK_START.mdx) to clone, install, and build the project. See the [Developer guide](/sample-autonomous-cloud-coding-agents/developer-guide/introduction) for local testing and the development workflow.
 
-Use **[AGENTS.md](/sample-autonomous-cloud-coding-agents/architecture/agents)** to understand where to make changes (CDK vs CLI vs agent vs docs), which tests to extend, and common pitfalls (generated docs, mirrored API types, `mise` tasks).
+Use **[AGENTS.md](/sample-autonomous-cloud-coding-agents/architecture/agents)** to understand where to make changes (CDK vs CLI vs agent vs docs), which tests to extend, and common pitfalls (generated docs, mirrored API types, `mise` tasks). Package-specific detail lives in **`AGENTS.md`** under `cdk/`, `cli/`, `agent/`, and `docs/`.
 
 ### 3. Implement your change
 
