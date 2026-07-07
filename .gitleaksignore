@@ -6,9 +6,7 @@
 0dca2171f244f693ac7c649ecf376d1ce6af2b38:docs/backlog/CLI_COGNITO_NEW_PASSWORD_CHALLENGE.md:aws-account-id:5
 0dca2171f244f693ac7c649ecf376d1ce6af2b38:docs/diagrams/phase3-cedar-hitl.drawio:aws-account-id:28
 
-# False positive: generic-api-key on a test idempotency-key fixture
-# ('orch_abc_SUB-1', not a real credential) in a file that no longer exists at
-# HEAD — it was removed when the #76 bounded-parallel perf commit was reverted
-# (e8bee5e). The finding lives only in history at f98f47a, so it can't be
-# scrubbed without rewriting shared `main`; fingerprint it instead. See #530.
-f98f47abc6f7820d7e5ce0375cf22551cb664b37:cdk/test/handlers/shared/orchestration-release.test.ts:generic-api-key:125
+# NOTE: the orch_abc_SUB-1 test-fixture false positive (formerly baselined here
+# by commit-SHA fingerprint, #530) is now suppressed SHA-independently via a
+# stopword allowlist in .gitleaks.toml — a commit-SHA fingerprint here broke when
+# history was rewritten. See #537.
