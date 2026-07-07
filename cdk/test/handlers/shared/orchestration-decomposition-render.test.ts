@@ -117,6 +117,15 @@ describe('renderPlanProposal — content', () => {
     expect(md).not.toMatch(/\bminutes?\b|\bhours?\b/i); // no absolute-time estimate (#299)
   });
 
+  test('POLISH-9: the cost line is framed as a spending CAP, not an estimate', () => {
+    const md = renderPlanProposal(FANOUT, { autoRun: false });
+    // Reads as a guardrail ("cap"/"safety limit"), not a forecast that anchors
+    // the reviewer at ~10x actual (QA: $0.42 actual vs a $4 cap).
+    expect(md).toMatch(/cap|safety limit/i);
+    expect(md).toMatch(/not an estimate|fraction/i);
+    expect(md).toContain('$10'); // still the real ceiling number
+  });
+
   test('a PURE chain (cp === n) says they run one after another, with NO phantom "the rest" clause', () => {
     const md = renderPlanProposal(CHAIN, { autoRun: false }); // 3-deep chain, all 3 nodes in sequence
     expect(md).toContain('they run one after another');
@@ -280,6 +289,15 @@ describe('the note renderers', () => {
     expect(renderSingleTaskNote('')).not.toContain('()');
   });
 
+  test('POLISH-6: the :auto single-task note names WHY it started without asking', () => {
+    const auto = renderSingleTaskNote('small fix', true);
+    expect(auto).toMatch(/:auto|auto-run/i);
+    expect(auto).toMatch(/without asking|no approval|starting now/i);
+    // The default (non-auto) note stays generic — no auto-run claim.
+    const plain = renderSingleTaskNote('small fix');
+    expect(plain).not.toMatch(/auto-run label/i);
+  });
+
   test('already-decomposed note explains the no-op', () => {
     expect(renderAlreadyDecomposedNote()).toContain('already has sub-issues');
   });
@@ -363,6 +381,12 @@ describe('renderLabelHelp / renderMultiPartHint (label discoverability)', () => 
     // auto has no approval gate, so it must NOT promise an approve step.
     expect(auto).not.toMatch(/to approve/i);
     expect(isBotAuthoredComment(auto)).toBe(true);
+
+    // CONFUSING-3: both branches set an honest expectation ("~1-2 minutes") and
+    // drop the vague "shortly" that oversold a 30-120s wait (tester waited 2.5min).
+    expect(propose).not.toMatch(/shortly/i);
+    expect(propose).toMatch(/1-2 min/i);
+    expect(auto).toMatch(/1-2 min/i);
   });
 
   test('multi-part hint points at :decompose without blocking the run, bot-authored', () => {

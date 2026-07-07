@@ -341,6 +341,42 @@ describe('reconcileDecomposePlan — idempotency (live-caught: ABCA-498 3 duplic
     // The losing redelivery never reached the S3 plan fetch.
     expect(s3SendMock).toHaveBeenCalledTimes(1);
   });
+
+  test('CONFUSING-3: an :auto single-task dispatch carries the full Linear OAuth metadata', async () => {
+    // Root of the ~9.5-min "zero output" :auto run the QA tester hit: the
+    // single-task createTaskCore was missing linear_oauth_secret_arn /
+    // linear_workspace_slug, so the agent couldn't authenticate to Linear and
+    // never posted "🤖 Starting" / transitioned state / reacted. Assert the
+    // dispatched task now carries the freshly-resolved OAuth metadata.
+    createTaskCoreMock.mockReset().mockResolvedValue({ statusCode: 201, body: '{}' });
+    // A single-node plan collapses to single_task; :auto trusts the decline + runs.
+    s3SendMock.mockImplementation(async () => ({
+      Body: {
+        transformToString: async () => JSON.stringify({
+          decompose: false,
+          reasoning: 'one cohesive change',
+          sub_issues: [{ title: 'Only', description: 'x', size: 'S', depends_on: [] }],
+        }),
+      },
+    }));
+    ddbSend.mockImplementation(async () => ({}));
+
+    await handler({
+      Records: [decomposeRecord({
+        task_id: 'PLAN-AUTO-1',
+        status: 'COMPLETED',
+        mode: 'auto',
+        artifact_uri: 's3://ArtifactsBucket/artifacts/PLAN-AUTO-1/result.md',
+        max_sub_issues: '6',
+      })],
+    } as never);
+
+    expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+    const ctx = createTaskCoreMock.mock.calls[0][1];
+    expect(ctx.channelMetadata.linear_oauth_secret_arn).toBe('arn:secret');
+    expect(ctx.channelMetadata.linear_workspace_slug).toBe('ws');
+    expect(ctx.channelSource).toBe('linear');
+  });
 });
 
 /** Mock the GSI lookup + loadOrchestration Query for a child set. */

@@ -154,10 +154,16 @@ export function renderPlanProposal(
   } else {
     sequencing = `up to ${cp} run one after another (the rest run at the same time)`;
   }
+  // POLISH-9: the number here is a SPENDING CAP (Σ of per-size safety limits),
+  // not a forecast — actual spend ran ~10× lower in QA ($0.42 vs a $4 cap). The
+  // old copy "Most this could cost is $X" read as an estimate and anchored the
+  // reviewer at the ceiling. Frame it as the guardrail it is ("I'll stop at") so
+  // it's not mistaken for a budget figure. (A real typical estimate needs per-repo
+  // cost history wired into the planner — not available yet; deferred.)
   lines.push(
     `**In short:** ${plan.nodes.length} pieces — ${sequencing}. `
-    + `Most this could cost is **$${formatUsd(totalBudget(plan))}** `
-    + '(usually less — that\'s the ceiling, not the estimate).',
+    + `I'll cap spending at **$${formatUsd(totalBudget(plan))}** — that's a safety limit, `
+    + 'not an estimate; actual cost is usually a small fraction of it.',
   );
   lines.push('');
 
@@ -271,11 +277,14 @@ export function renderRevisionFailedNote(): string {
  * approval), :decompose posts a plan to approve first.
  */
 export function renderDecomposeStartedNote(auto: boolean): string {
+  // CONFUSING-3: "shortly" oversold a 30-120s wait (the tester waited ~2.5 min
+  // and thought it had stalled). Give an honest "~1-2 minutes" so the silence is
+  // expected, not alarming.
   return auto
     ? `${PLAN_PROPOSAL_PREFIX} On it — working out how to break this up, then I'll create the pieces and start. `
-      + 'This takes a moment while I read the repo.'
+      + 'I need to read the repo first, so this takes ~1-2 minutes.'
     : `${PLAN_PROPOSAL_PREFIX} On it — working out how to break this into a plan for you to approve. `
-      + 'This takes a moment while I read the repo; I\'ll post the breakdown here shortly.';
+      + 'I need to read the repo first, so this takes ~1-2 minutes; I\'ll post the breakdown here when it\'s ready.';
 }
 
 /**
@@ -380,11 +389,19 @@ export function renderRevisionOverCapNote(capMessage: string): string {
  * Render the note posted when the planner judged the issue NOT worth
  * decomposing — the issue runs as a single task (the normal path) and we just
  * explain why, so a user who asked for decomposition isn't left confused.
+ *
+ * POLISH-6: when this fires on the ``:auto`` path (``autoRun`` true), name WHY it
+ * ran without asking — on a single-task issue ``abca`` / ``:auto`` / ``:decompose``
+ * all produce the same outcome, so the reviewer can't otherwise tell the labels
+ * apart at the moment it matters. The explainer makes the ``:auto`` choice visible.
  */
-export function renderSingleTaskNote(reasoning: string): string {
+export function renderSingleTaskNote(reasoning: string, autoRun = false): string {
+  const auto = autoRun
+    ? ' Starting now without asking first, since you used the auto-run label (`:auto`).'
+    : '';
   return (
     `${PLAN_PROPOSAL_PREFIX} This issue looks like a single cohesive change, so I'm running it as `
-    + `one task rather than decomposing it.${reasoning ? ` (${reasoning})` : ''}`
+    + `one task rather than decomposing it.${reasoning ? ` (${reasoning})` : ''}${auto}`
   );
 }
 
