@@ -188,6 +188,19 @@ describe('applyDecompositionResult — #299 agent-native entry (pre-parsed plan,
     expect(e.graphql).not.toHaveBeenCalled();
   });
 
+  test('#299 T2: a plan carrying repoDigest+sha threads them into putPendingPlan', async () => {
+    const e = effects();
+    const withDigest: DecompositionResult = {
+      kind: 'plan', plan: PLAN, repoDigest: 'modules: api/, ui/', repoDigestSha: 'a1b2c3d4',
+    };
+    await applyDecompositionResult({
+      parentIssueId: PARENT, planned: withDigest, underspecified: false, caps: CAPS, autoRun: false, effects: e,
+    });
+    const put = (e.putPendingPlan as jest.Mock).mock.calls[0][0];
+    expect(put.repoDigest).toBe('modules: api/, ui/');
+    expect(put.repoDigestSha).toBe('a1b2c3d4');
+  });
+
   test('auto (:auto) → writes back immediately, returns a seed graph with real ids', async () => {
     const e = effects();
     const r = await applyDecompositionResult({

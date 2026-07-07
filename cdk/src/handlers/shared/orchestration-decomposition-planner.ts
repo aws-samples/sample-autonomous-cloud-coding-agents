@@ -65,10 +65,19 @@ export type DecompositionResult =
   // The plan had <2 nodes → single task. ``reasoning`` is the plan's own
   // rationale (surfaced so the user sees WHY it wasn't split, even when asked).
   | { readonly kind: 'single_task'; readonly reasoning: string }
-  // A valid, DAG-checked plan ready to gate against caps + render.
-  | { readonly kind: 'plan'; readonly plan: DecompositionPlan }
+  // A valid, DAG-checked plan ready to gate against caps + render. ``repoDigest``
+  // (#299 plan-mode T2) is the agent's reusable structural summary of the repo —
+  // persisted on the pending-plan row and fed back into a later revise run so it
+  // starts from this understanding instead of re-exploring. Absent on older
+  // agents / when the field wasn't emitted.
+  | { readonly kind: 'plan'; readonly plan: DecompositionPlan; readonly repoDigest?: string; readonly repoDigestSha?: string }
   // The plan text was unusable or self-contradictory (unparseable / invalid DAG).
   | { readonly kind: 'error'; readonly message: string };
+
+/** #299 plan-mode T2: cap the persisted digest so a runaway blob can't bloat the
+ *  pending-plan row (DDB item limit) or the next prompt. Generous vs the prompt's
+ *  ~1500-char guidance; a longer digest is truncated with an honest marker. */
+const MAX_REPO_DIGEST_CHARS = 4000;
 
 /**
  * Parse + validate a decomposition plan's raw JSON into a {@link DecompositionResult}.
@@ -91,6 +100,18 @@ export function parseDecomposerResponse(
 
   const reasoning = typeof obj.reasoning === 'string' ? obj.reasoning.trim() : '';
   const rawNodes = Array.isArray(obj.sub_issues) ? obj.sub_issues : [];
+  // #299 plan-mode T2: the agent's reusable structural summary of the repo. Only
+  // carried on a plan (a single-task decline has nothing to re-plan against).
+  // Capped so it can't bloat the DDB row / next prompt.
+  const rawDigest = typeof obj.repo_digest === 'string' ? obj.repo_digest.trim() : '';
+  const repoDigest = rawDigest.length > MAX_REPO_DIGEST_CHARS
+    ? `${rawDigest.slice(0, MAX_REPO_DIGEST_CHARS)}\n…(truncated)`
+    : rawDigest;
+  // The repo HEAD sha the agent cloned to (echoed from the {repo_head_sha} the
+  // prompt injected). Travels with the digest so the next run can drift-check.
+  // Basic hex-sha shape guard so a hallucinated value can't poison the key.
+  const rawSha = typeof obj.repo_digest_sha === 'string' ? obj.repo_digest_sha.trim() : '';
+  const repoDigestSha = /^[0-9a-f]{7,40}$/i.test(rawSha) ? rawSha : '';
 
   // The plan has nothing worth orchestrating (<2 nodes) → single task.
   if (rawNodes.length < 2) {
@@ -139,6 +160,8 @@ export function parseDecomposerResponse(
   return {
     kind: 'plan',
     plan: { shouldDecompose: true, reasoning, nodes },
+    ...(repoDigest && { repoDigest }),
+    ...(repoDigest && repoDigestSha && { repoDigestSha }),
   };
 }
 

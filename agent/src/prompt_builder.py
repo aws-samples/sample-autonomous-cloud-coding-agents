@@ -41,6 +41,27 @@ def build_system_prompt(
     )
     system_prompt = system_prompt.replace("{setup_notes}", setup_notes)
 
+    # #299 plan-mode T2 (warm digest): a revise-round decompose task carries the
+    # PRIOR run's repo_digest in channel_metadata (a NON-guardrail-screened
+    # channel — task_description is screened, this isn't; see create-task-core).
+    # Inject it so the agent starts from the cached structural understanding
+    # instead of re-deriving it. Cache-key discipline: the prior run recorded the
+    # sha it cloned to (decompose_repo_digest_sha); if the repo has since moved,
+    # the agent is told the digest may be stale for changed areas and to re-verify
+    # there (drift handling, agent-side — the platform has no GitHub token to
+    # pre-check, by P5 least-privilege design). Harmless no-op for a prompt
+    # without the placeholder or a round-0 task with no prior digest.
+    system_prompt = system_prompt.replace(
+        "{prior_repo_digest}",
+        _render_prior_repo_digest(config, setup),
+    )
+    # #299 plan-mode T2: the sha the repo was cloned to, echoed into the plan
+    # JSON's ``repo_digest_sha`` so a later revise run can drift-check the cached
+    # digest. Empty when unknown (best-effort — the platform's sha-shape guard
+    # then just treats the digest as un-versioned). Harmless no-op without the
+    # placeholder.
+    system_prompt = system_prompt.replace("{repo_head_sha}", setup.head_sha_before or "")
+
     # Inject memory context from orchestrator hydration
     memory_context_text = "(No previous knowledge available for this repository.)"
     if hydrated_context and hydrated_context.memory_context:
@@ -114,6 +135,55 @@ def build_repoless_system_prompt(
         system_prompt += channel_addendum
 
     return system_prompt
+
+
+def _render_prior_repo_digest(config: TaskConfig, setup: RepoSetup) -> str:
+    """#299 plan-mode T2 — render the cached prior repo digest into the decompose
+    prompt, or empty string when there is none (round-0 plan / non-decompose).
+
+    A revise-round ``coding/decompose-v1`` task carries the previous run's
+    ``repo_digest`` + the sha it was built at in ``channel_metadata`` (keys
+    ``decompose_repo_digest`` / ``decompose_repo_digest_sha``). channel_metadata is
+    NOT guardrail-screened (unlike task_description), so a large structural blob
+    rides here safely. We inject it as reference DATA so the agent starts from the
+    prior structural understanding rather than re-deriving it — the exploration is
+    the expensive part of a revise round, and structural facts rarely change
+    between rounds.
+
+    Drift: the prior run recorded the sha it cloned to. If the repo has since moved
+    (``head_sha_before`` differs), the digest may be stale for changed areas, so we
+    say so and tell the agent to re-verify there. The platform can't pre-check the
+    sha (no GitHub token — P5 least-privilege), so this agent-side compare IS the
+    drift handling. A blank prior sha (older task) is treated as "unknown → trust
+    but re-verify if anything looks off".
+    """
+    cm = config.channel_metadata or {}
+    digest = (cm.get("decompose_repo_digest") or "").strip()
+    if not digest:
+        return ""  # round-0 or no cached digest → the agent explores fresh
+    prior_sha = (cm.get("decompose_repo_digest_sha") or "").strip()
+    current_sha = (setup.head_sha_before or "").strip()
+    if prior_sha and current_sha and prior_sha != current_sha:
+        freshness = (
+            "NOTE: the repository has changed since this digest was captured "
+            f"(digest @ {prior_sha[:8]}, repo now @ {current_sha[:8]}). Treat it as "
+            "a starting map, and re-verify any area your plan touches that may have "
+            "moved."
+        )
+    else:
+        freshness = (
+            "This reflects the repository at its current state; use it as your "
+            "starting map and only re-read files where this revision's feedback "
+            "requires deeper detail."
+        )
+    return (
+        "\n   **Prior exploration of this repository (reuse this — don't re-derive "
+        "from scratch):**\n"
+        f"   {freshness}\n"
+        "   ```\n"
+        f"   {digest}\n"
+        "   ```"
+    )
 
 
 def _render_memory_context(hydrated_context: HydratedContext | None) -> str:

@@ -86,6 +86,33 @@ class TestSetupRepoHappyPath:
         # base_branch from orchestrator wins for PR workflows — no detection call.
         assert setup.default_branch == "develop"
 
+    def test_non_pr_task_captures_head_sha_for_digest(self, monkeypatch):
+        # #299 plan-mode T2: a NON-PR workflow (e.g. coding/decompose-v1) must also
+        # capture the cloned HEAD sha (via the post-setup rev-parse) so the planner
+        # can echo it into repo_digest_sha. The PR path captures its own sha; this
+        # covers the else/default clone path that decompose uses.
+        fake = _fake_run_cmd(stdouts={"head-sha-after-setup": "deadbeefcafe1234\n"})
+        _patch_common(monkeypatch, fake)
+        monkeypatch.setattr(repo, "detect_default_branch", lambda url, d: "main")
+
+        setup = repo.setup_repo(_config())
+
+        assert "head-sha-after-setup" in fake.labels()
+        assert setup.head_sha_before == "deadbeefcafe1234"
+
+    def test_pr_workflow_does_not_double_capture_head_sha(self, monkeypatch):
+        # The PR path already set head_sha_before, so the post-setup fallback must
+        # NOT run (guarded on `if not head_sha_before`).
+        fake = _fake_run_cmd(stdouts={"head-sha-before": "aaaa1111bbbb2222\n"})
+        _patch_common(monkeypatch, fake)
+
+        setup = repo.setup_repo(
+            _config(is_pr_workflow=True, branch_name="feature/x", base_branch="develop")
+        )
+
+        assert setup.head_sha_before == "aaaa1111bbbb2222"
+        assert "head-sha-after-setup" not in fake.labels()
+
 
 class TestDetectDefaultBranch:
     def test_returns_detected_branch(self, monkeypatch):

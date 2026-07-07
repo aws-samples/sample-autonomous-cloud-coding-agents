@@ -84,6 +84,10 @@ export interface DecompositionEffects {
     nodes: DecompositionPlan['nodes'];
     proposalCommentId?: string;
     revisionRound?: number;
+    /** #299 plan-mode T2: the agent's reusable repo digest + the sha it was built
+     *  at, persisted for a later revise run to reuse. */
+    repoDigest?: string;
+    repoDigestSha?: string;
   }) => Promise<boolean>;
   /** Atomically take the pending plan (approve). Returns its nodes, or null. */
   readonly consumePendingPlan: () => Promise<{ nodes: DecompositionPlan['nodes'] } | null>;
@@ -215,6 +219,10 @@ export async function applyDecompositionResult(
     nodes: planned.plan.nodes,
     ...(proposalCommentId !== null && { proposalCommentId }),
     ...(revisionRound !== undefined && { revisionRound }),
+    // #299 plan-mode T2: persist the agent's repo digest + its sha so a later
+    // revise run reuses the exploration instead of re-deriving it.
+    ...(planned.repoDigest !== undefined && { repoDigest: planned.repoDigest }),
+    ...(planned.repoDigestSha !== undefined && { repoDigestSha: planned.repoDigestSha }),
   });
   if (!persisted) {
     logger.info('Mode B proposal: pending plan already existed (redelivery)', { parent_issue_id: parentIssueId });

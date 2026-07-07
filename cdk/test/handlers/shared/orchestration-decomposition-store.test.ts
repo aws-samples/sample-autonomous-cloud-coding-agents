@@ -136,6 +136,44 @@ describe('putPendingPlan — create-once', () => {
     const cmd = ddb.send.mock.calls[0][0] as PutCommand;
     expect(cmd.input.Item!.revision_round).toBe(0);
   });
+
+  test('#299 T2: persists repo_digest + repo_digest_sha when provided; round-trips via getPendingPlan', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    await putPendingPlan({
+      ddb: ddb as never,
+      tableName: 'OrchTable',
+      parentLinearIssueId: PARENT,
+      linearWorkspaceId: 'WS',
+      repo: 'owner/repo',
+      nodes: NODES,
+      platformUserId: 'u1',
+      repoDigest: 'modules: api/, ui/; tests in test/',
+      repoDigestSha: 'a1b2c3d4e5f6',
+      now: NOW,
+      ttlEpochSeconds: TTL,
+    });
+    const cmd = ddb.send.mock.calls[0][0] as PutCommand;
+    expect(cmd.input.Item!.repo_digest).toBe('modules: api/, ui/; tests in test/');
+    expect(cmd.input.Item!.repo_digest_sha).toBe('a1b2c3d4e5f6');
+  });
+
+  test('#299 T2: repo_digest fields are omitted when not provided (no undefined attrs)', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    await putPendingPlan({
+      ddb: ddb as never,
+      tableName: 'OrchTable',
+      parentLinearIssueId: PARENT,
+      linearWorkspaceId: 'WS',
+      repo: 'owner/repo',
+      nodes: NODES,
+      platformUserId: 'u1',
+      now: NOW,
+      ttlEpochSeconds: TTL,
+    });
+    const cmd = ddb.send.mock.calls[0][0] as PutCommand;
+    expect('repo_digest' in cmd.input.Item!).toBe(false);
+    expect('repo_digest_sha' in cmd.input.Item!).toBe(false);
+  });
 });
 
 describe('replacePendingPlan — unconditional upsert (#299 revise loop)', () => {
@@ -178,6 +216,8 @@ describe('getPendingPlan — read-only', () => {
           nodes: NODES,
           platform_user_id: 'u1',
           proposal_comment_id: 'c-1',
+          repo_digest: 'modules: api/, ui/',
+          repo_digest_sha: 'a1b2c3d4',
           created_at: NOW,
         },
       }),
@@ -187,6 +227,9 @@ describe('getPendingPlan — read-only', () => {
     expect(plan!.nodes).toEqual(NODES);
     expect(plan!.platform_user_id).toBe('u1');
     expect(plan!.proposal_comment_id).toBe('c-1');
+    // #299 T2: the cached digest + sha round-trip so the revise path can reuse them.
+    expect(plan!.repo_digest).toBe('modules: api/, ui/');
+    expect(plan!.repo_digest_sha).toBe('a1b2c3d4');
   });
 
   test('returns undefined when absent', async () => {

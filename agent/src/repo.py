@@ -264,6 +264,22 @@ def setup_repo(config: TaskConfig) -> RepoSetup:
     # Install prepare-commit-msg hook for code attribution
     _install_commit_hook(repo_dir)
 
+    # #299 plan-mode T2 (warm digest): ensure the cloned HEAD sha is captured for
+    # NON-PR workflows too (the PR branch above already set it). The
+    # coding/decompose-v1 planner echoes this into its plan's ``repo_digest_sha``
+    # so a later revise run can tell if the repo moved since the digest was built.
+    # Best-effort: a read failure leaves it '' (the platform's sha-shape guard then
+    # just treats the digest as un-versioned — trust-but-reverify).
+    if not head_sha_before:
+        head_res = run_cmd(
+            ["git", "rev-parse", "HEAD"],
+            label="head-sha-after-setup",
+            cwd=repo_dir,
+            check=False,
+        )
+        if head_res.returncode == 0:
+            head_sha_before = head_res.stdout.strip()
+
     return RepoSetup(
         repo_dir=repo_dir,
         branch=branch,

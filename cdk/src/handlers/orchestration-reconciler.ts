@@ -1429,7 +1429,7 @@ async function reconcileDecomposePlan(evt: DecomposePlanEvent): Promise<void> {
     ...(evt.revisionRound !== undefined && { revisionRound: evt.revisionRound }),
     effects: {
       postComment,
-      putPendingPlan: async ({ nodes, proposalCommentId, revisionRound }) => {
+      putPendingPlan: async ({ nodes, proposalCommentId, revisionRound, repoDigest, repoDigestSha }) => {
         const row = {
           ddb,
           tableName: ORCHESTRATION_TABLE,
@@ -1441,6 +1441,10 @@ async function reconcileDecomposePlan(evt: DecomposePlanEvent): Promise<void> {
           platformUserId: evt.platformUserId,
           ...(proposalCommentId !== undefined && { proposalCommentId }),
           ...(revisionRound !== undefined && { revisionRound }),
+          // #299 plan-mode T2: persist the agent's repo digest + its sha so the
+          // next revise run reuses the exploration.
+          ...(repoDigest !== undefined && { repoDigest }),
+          ...(repoDigestSha !== undefined && { repoDigestSha }),
           now: new Date().toISOString(),
           ttlEpochSeconds: Math.floor(Date.now() / 1000) + PENDING_PLAN_TTL_SECONDS,
         };
