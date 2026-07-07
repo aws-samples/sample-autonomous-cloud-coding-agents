@@ -57,10 +57,13 @@ import {
 } from './shared/orchestration-decomposition-mode';
 import {
   renderAlreadyDecomposedNote,
+  renderCommandCollapseNote,
   renderDecomposeStartedNote,
   renderLabelHelp,
   renderMultiPartHint,
   renderPendingPlanNudge,
+  renderPlanCommandError,
+  renderPlanProposal,
   renderRevisingNote,
   renderRevisionCapNote,
   renderRevisionFailedNote,
@@ -71,8 +74,9 @@ import {
   getPendingPlan,
   type PendingPlan,
   putPendingPlan as putPendingPlanRow,
+  replacePendingPlan as replacePendingPlanRow,
 } from './shared/orchestration-decomposition-store';
-import { DEFAULT_MAX_SUB_ISSUES } from './shared/orchestration-decomposition-types';
+import { DEFAULT_MAX_SUB_ISSUES, type DecompositionPlan } from './shared/orchestration-decomposition-types';
 import { linearGraphqlFn } from './shared/orchestration-decomposition-writeback';
 import { discoverOrchestration } from './shared/orchestration-discovery';
 import { declarativeGraphSource } from './shared/orchestration-graph-source';
@@ -82,6 +86,7 @@ import {
   suggestClosestNode,
   looksLikeNewWork,
 } from './shared/orchestration-parent-comment';
+import { applyPlanCommand, parsePlanCommand, type PlanCommand } from './shared/orchestration-plan-commands';
 import { readConcurrencyBudget, releaseReadyChildren } from './shared/orchestration-release';
 import { upsertEpicPanel } from './shared/orchestration-rollup';
 import { claimCommentAck, deriveOrchestrationId, loadOrchestration, setStatusCommentId, type OrchestrationReleaseContext } from './shared/orchestration-store';
@@ -1086,6 +1091,24 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
   // (so "approve" on a normal sub-issue isn't hijacked).
   const verdict = parsePlanVerdict(trigger.instruction);
   const pending = await getPendingPlan(ddb, ORCHESTRATION_TABLE, commentedIssueId);
+
+  // #299 plan-mode T4: a STRUCTURAL command ("drop 3", "merge 1 and 2", "make #2
+  // small") on a pending plan is applied DETERMINISTICALLY here — no clone, no
+  // agent, instant + free — instead of spending a ~2-min re-plan round. Checked
+  // BEFORE the verdict/revise routing: a recognized command is a definite edit
+  // intent (approve/reject aren't command verbs, so they don't collide; a bare
+  // "no" isn't a command → still routes to nudge). Anything not a recognized
+  // command falls through to the semantic revise loop below.
+  if (pending) {
+    const command = parsePlanCommand(trigger.instruction);
+    if (command) {
+      await handlePlanCommand({
+        pending, command, commentId, commentedIssueId, workspaceId, resolved,
+      });
+      return;
+    }
+  }
+
   if (pending && (verdict === 'approve' || verdict === 'reject')) {
     // Claim-once on this comment so a webhook redelivery doesn't double-seed
     // (the consume is also atomic, but this skips the duplicate 👀/work).
@@ -1330,6 +1353,104 @@ async function handlePlanRevision(args: {
   }
   await upsertStatusComment(feedbackCtx, commentedIssueId, renderRevisingNote(priorRound + 1));
   logger.info('Mode B revise: re-plan task dispatched', { issue_id: commentedIssueId, round: priorRound + 1 });
+}
+
+/**
+ * #299 plan-mode T4 — apply a STRUCTURAL command ("drop 3", "merge 1 and 2",
+ * "make #2 small") to a pending plan DETERMINISTICALLY: mutate the node list,
+ * re-index the positional ``depends_on`` edges, REPLACE the pending-plan row, and
+ * re-render the proposal — no clone, no agent, instant + free. This is the bulk
+ * of what a reviewer's revisions actually are (structural, not semantic), so it
+ * skips the ~2-min agent re-plan the {@link handlePlanRevision} path spends.
+ *
+ * Idempotent: claim-once on the comment id (a webhook redelivery is a no-op).
+ * Preserves ``revision_round`` (a structural edit isn't an agent round — it
+ * doesn't consume the re-plan budget). On an edit that collapses the plan to <2
+ * sub-issues, or an out-of-range index, posts a note and leaves the plan
+ * UNTOUCHED (approvable) — never silently destroys or mis-edits. Never throws.
+ */
+async function handlePlanCommand(args: {
+  pending: PendingPlan;
+  command: PlanCommand;
+  commentId: string;
+  commentedIssueId: string;
+  workspaceId: string;
+  resolved: { oauthSecretArn: string; workspaceSlug: string };
+}): Promise<void> {
+  if (!ORCHESTRATION_TABLE || !WORKSPACE_REGISTRY_TABLE) return;
+  const { pending, command, commentId, commentedIssueId, workspaceId } = args;
+  const feedbackCtx = { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE };
+
+  // Claim-once so a webhook redelivery doesn't apply the edit twice (a second
+  // "drop 3" on the already-edited plan would drop a DIFFERENT node).
+  const won = await claimCommentAck(
+    ddb, ORCHESTRATION_TABLE, deriveOrchestrationId(commentedIssueId), commentId,
+    new Date().toISOString(), Math.floor(Date.now() / 1000) + ACK_CLAIM_TTL_SECONDS,
+  );
+  if (!won) {
+    logger.info('Mode B command: redelivery already handled this comment — skipping', { comment_id: commentId });
+    return;
+  }
+
+  await reactToComment(feedbackCtx, commentId, EMOJI_STARTED);
+
+  const result = applyPlanCommand(pending.nodes, command);
+  if (result.kind === 'error') {
+    await upsertStatusComment(feedbackCtx, commentedIssueId, renderPlanCommandError(result.message));
+    logger.info('Mode B command: invalid — posted error, plan untouched', {
+      issue_id: commentedIssueId, command: command.kind,
+    });
+    return;
+  }
+  if (result.kind === 'collapses') {
+    // The edit would leave <2 sub-issues — nothing to orchestrate. Don't silently
+    // apply it; tell the reviewer their options (approve to run as one task, or
+    // give different feedback). The current plan stays pending + approvable.
+    await upsertStatusComment(feedbackCtx, commentedIssueId, renderCommandCollapseNote());
+    logger.info('Mode B command: would collapse to single task — plan untouched', {
+      issue_id: commentedIssueId, command: command.kind, remaining: result.remaining,
+    });
+    return;
+  }
+
+  // Persist the edited node list (unconditional upsert — the claim-once above
+  // gates redelivery). Preserve revision_round: a structural edit is not an agent
+  // re-plan round, so it must not consume the revise budget.
+  await replacePendingPlanRow({
+    ddb,
+    tableName: ORCHESTRATION_TABLE,
+    parentLinearIssueId: commentedIssueId,
+    linearWorkspaceId: workspaceId,
+    repo: pending.repo,
+    ...(pending.linear_project_id !== undefined && { linearProjectId: pending.linear_project_id }),
+    nodes: result.nodes,
+    platformUserId: pending.platform_user_id,
+    ...(pending.proposal_comment_id !== undefined && { proposalCommentId: pending.proposal_comment_id }),
+    ...(pending.revision_round !== undefined && { revisionRound: pending.revision_round }),
+    now: new Date().toISOString(),
+    ttlEpochSeconds: Math.floor(Date.now() / 1000) + PENDING_PLAN_TTL_SECONDS,
+  });
+
+  // Re-render the proposal from the edited nodes. Reuse renderPlanProposal so the
+  // layout matches every other proposal (numbered list, deps, summary, footer);
+  // keep the "Updated breakdown" header when this plan had already been revised.
+  const editedPlan: DecompositionPlan = {
+    shouldDecompose: true,
+    reasoning: '',
+    nodes: result.nodes,
+  };
+  await upsertStatusComment(
+    feedbackCtx,
+    commentedIssueId,
+    renderPlanProposal(editedPlan, {
+      autoRun: false,
+      ...(pending.revision_round !== undefined && pending.revision_round > 0
+        && { revisionRound: pending.revision_round }),
+    }),
+  );
+  logger.info('Mode B command applied — plan edited deterministically (no agent)', {
+    issue_id: commentedIssueId, command: command.kind, node_count: result.nodes.length,
+  });
 }
 
 /**
