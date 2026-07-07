@@ -64,7 +64,6 @@ import {
   renderPendingPlanNudge,
   renderPlanCommandError,
   renderPlanProposal,
-  renderRevisingNote,
   renderRevisionCapNote,
   renderRevisionFailedNote,
   renderSingleTaskCancelled,
@@ -1321,6 +1320,12 @@ async function handlePlanRevision(args: {
   // empty issue text still yields a valid data-shaped description.
   const issueText = await fetchIssueText(resolved.accessToken, commentedIssueId);
 
+  // #299 F-revise-in-place: 👀 on the reviewer's FEEDBACK comment is the "on it"
+  // ack — no separate "updating…" comment (that split the conversation across two
+  // threads AND was never settled, so it read as stuck). The reconciler swaps this
+  // 👀 → ✅ on the SAME comment when the revised plan lands (thread the feedback
+  // comment id below), so the reviewer sees their comment go 👀→✅ while the ONE
+  // plan comment updates in place. Mirrors the A6-iteration ack pattern.
   await reactToComment(feedbackCtx, commentId, EMOJI_STARTED);
 
   const planMeta: Record<string, string> = {
@@ -1334,6 +1339,9 @@ async function handlePlanRevision(args: {
     decompose_mode: 'decompose',
     decompose_parent_issue_id: commentedIssueId,
     decompose_revision_round: String(priorRound + 1),
+    // #299 F-revise-in-place: the feedback comment to settle 👀→✅ when the revised
+    // plan lands (rides on the task → back on the terminal record → reconciler).
+    decompose_revising_feedback_comment_id: commentId,
     decompose_caps_max_sub_issues: String(caps.max_sub_issues),
     decompose_caps_allowed: String(caps.decompose_allowed),
     ...(caps.max_parent_budget_usd !== undefined && {
@@ -1348,11 +1356,7 @@ async function handlePlanRevision(args: {
     ...(pending.repo_digest !== undefined && { decompose_repo_digest: pending.repo_digest }),
     ...(pending.repo_digest_sha !== undefined && { decompose_repo_digest_sha: pending.repo_digest_sha }),
   };
-  // Dispatch FIRST, THEN post the "on it (round N)" ack — only once the task is
-  // accepted. The old order posted "revised plan shortly" before dispatch, so a
-  // rejected dispatch (e.g. a guardrail block) left the user with a promise that
-  // never arrived PLUS a raw error (customer-caught). Now a failure posts a
-  // single honest note and never makes a promise it can't keep.
+
   const planResult = await createTaskCore(
     {
       repo: pending.repo,
@@ -1366,13 +1370,14 @@ async function handlePlanRevision(args: {
     logger.warn('Mode B revise: re-plan task creation returned non-201', {
       status: planResult.statusCode, issue_id: commentedIssueId, body: planResult.body,
     });
-    // Friendly + honest: the current plan is untouched and still approvable. Do
-    // NOT surface the raw "blocked by content policy" string (it reads as if the
-    // user did something wrong) and do NOT leave a dangling "shortly" promise.
+    // Dispatch failed → the reconciler never runs to settle the 👀, so swap it to
+    // ❓ here (the request needs the reviewer's attention, not "done") and post the
+    // honest failure note. The current plan is untouched + still approvable; NO raw
+    // "blocked by content policy" string (reads as if the user erred).
+    await swapCommentReaction(feedbackCtx, commentId, EMOJI_NEEDS_INPUT);
     await upsertStatusComment(feedbackCtx, commentedIssueId, renderRevisionFailedNote());
     return;
   }
-  await upsertStatusComment(feedbackCtx, commentedIssueId, renderRevisingNote(priorRound + 1));
   logger.info('Mode B revise: re-plan task dispatched', { issue_id: commentedIssueId, round: priorRound + 1 });
 }
 

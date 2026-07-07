@@ -73,8 +73,14 @@ import { writeBackPlan, type GraphqlFn } from './orchestration-decomposition-wri
 export interface DecompositionEffects {
   /** Linear GraphQL transport for write-back (B5). */
   readonly graphql: GraphqlFn;
-  /** Post a top-level comment on the parent; returns the new comment id (or null). */
-  readonly postComment: (issueId: string, body: string) => Promise<string | null>;
+  /**
+   * Post a top-level comment on the parent; returns the new comment id (or null).
+   * When ``existingCommentId`` is given, EDIT that comment in place instead of
+   * posting a fresh one (#299 F-revise-in-place: a semantic revise matures the ONE
+   * plan comment rather than stacking "Updated breakdown" comments) — returns the
+   * same id on success, null on a failed edit.
+   */
+  readonly postComment: (issueId: string, body: string, existingCommentId?: string) => Promise<string | null>;
   /**
    * Persist a pending plan. Returns true if this call persisted it. The caller's
    * impl chooses create-once (round 0 — a redelivery returns false) vs. replace
@@ -143,6 +149,14 @@ export interface ApplyDecompositionResultParams {
    */
   readonly singleTaskDescription?: string;
   /**
+   * #299 F-revise-in-place: on a REVISION, the comment id of the plan proposal
+   * already on the issue (from the pending-plan row). When present, the revised
+   * plan EDITS that comment in place instead of posting a fresh "Updated
+   * breakdown" — so the thread keeps ONE maturing plan comment. Absent on round 0
+   * (nothing to edit yet → post fresh).
+   */
+  readonly priorProposalCommentId?: string;
+  /**
    * #299 revise loop: revision number (0/absent = original proposal; N≥1 = the
    * Nth re-plan from reviewer feedback). Threaded into the proposal render
    * ("Revised breakdown (round N)") and passed to putPendingPlan so the persisted
@@ -176,6 +190,7 @@ export async function applyDecompositionResult(
 ): Promise<DecompositionFlowResult> {
   const {
     parentIssueId, planned, underspecified, caps, autoRun, effects, revisionRound, singleTaskDescription,
+    priorProposalCommentId,
   } = params;
 
   if (planned.kind === 'error') {
@@ -254,11 +269,23 @@ export async function applyDecompositionResult(
     return finalizeWriteBack(parentIssueId, planned.plan, effects);
   }
 
-  // MANUAL: persist the pending plan + post the proposal, then wait for approval.
-  const proposalCommentId = await effects.postComment(
+  // MANUAL: post/UPDATE the proposal + persist the pending plan, then wait for
+  // approval. #299 F-revise-in-place: on a revision, EDIT the existing plan
+  // comment in place (priorProposalCommentId) so the thread keeps ONE maturing
+  // plan comment instead of stacking a fresh "Updated breakdown" each round. If
+  // the edit fails (comment deleted, transient error) postComment returns null →
+  // fall back to a fresh post so the revised plan is never lost.
+  let proposalCommentId = await effects.postComment(
     parentIssueId,
     renderPlanProposal(planned.plan, { autoRun: false, ...(revisionRound !== undefined && { revisionRound }) }),
+    priorProposalCommentId,
   );
+  if (proposalCommentId === null && priorProposalCommentId !== undefined) {
+    proposalCommentId = await effects.postComment(
+      parentIssueId,
+      renderPlanProposal(planned.plan, { autoRun: false, ...(revisionRound !== undefined && { revisionRound }) }),
+    );
+  }
   const persisted = await effects.putPendingPlan({
     nodes: planned.plan.nodes,
     ...(proposalCommentId !== null && { proposalCommentId }),

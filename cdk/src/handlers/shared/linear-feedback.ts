@@ -77,6 +77,14 @@ mutation UpdateComment($id: String!, $body: String!) {
 }
 `.trim();
 
+/** Delete a comment (#299 F-revise-in-place: remove the transient "on it" ack
+ *  once the revised plan has matured in place). */
+const COMMENT_DELETE_MUTATION = `
+mutation DeleteComment($id: String!) {
+  commentDelete(id: $id) { success }
+}
+`.trim();
+
 /**
  * Post a THREADED REPLY beneath an existing comment (#247 UX.3 ack trail).
  * ``parentId`` is the comment being replied to; the reply notifies and reads
@@ -359,6 +367,22 @@ export async function upsertStatusComment(
   const data = await graphqlData(token, COMMENT_CREATE_RETURNING_ID_MUTATION, { issueId, body });
   const created = data?.commentCreate as { success?: boolean; comment?: { id?: string } } | undefined;
   return created?.success && created.comment?.id ? created.comment.id : null;
+}
+
+/**
+ * #299 F-revise-in-place: delete a comment (the transient "🗂️ On it — updating…"
+ * ack, once the revised plan has matured in place). Best-effort: returns true on
+ * success, false on any failure (a lingering ack is a cosmetic nit, never a
+ * breakage). Note Linear may already have fired a notification for the ack that
+ * deletion can't un-send — acceptable.
+ */
+export async function deleteComment(
+  ctx: LinearFeedbackContext,
+  commentId: string,
+): Promise<boolean> {
+  const token = await resolveToken(ctx);
+  if (!token) return false;
+  return (await graphqlRequest(token, COMMENT_DELETE_MUTATION, { id: commentId })).ok;
 }
 
 /**

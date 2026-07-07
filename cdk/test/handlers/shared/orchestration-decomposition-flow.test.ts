@@ -201,6 +201,50 @@ describe('applyDecompositionResult — #299 agent-native entry (pre-parsed plan,
     expect(put.repoDigestSha).toBe('a1b2c3d4');
   });
 
+  test('#299 F-revise-in-place: a revision with priorProposalCommentId EDITS that comment in place', async () => {
+    const e = effects({ postComment: jest.fn().mockResolvedValue('plan-comment-1') });
+    await applyDecompositionResult({
+      parentIssueId: PARENT,
+      planned: { kind: 'plan', plan: PLAN },
+      underspecified: false,
+      caps: CAPS,
+      autoRun: false,
+      revisionRound: 1,
+      priorProposalCommentId: 'plan-comment-1',
+      effects: e,
+    });
+    // postComment called with the existing comment id (3rd arg) → edit in place,
+    // NOT a fresh post.
+    const call = (e.postComment as jest.Mock).mock.calls[0];
+    expect(call[2]).toBe('plan-comment-1');
+    // Only one postComment (no fresh fallback, since the edit "succeeded").
+    expect((e.postComment as jest.Mock)).toHaveBeenCalledTimes(1);
+  });
+
+  test('#299 F-revise-in-place: a failed in-place edit (null) falls back to a fresh post', async () => {
+    // First call (edit attempt) returns null → the revised plan must still land.
+    const postComment = jest.fn()
+      .mockResolvedValueOnce(null) // edit-in-place failed (comment gone)
+      .mockResolvedValueOnce('new-comment'); // fresh fallback
+    const e = effects({ postComment });
+    const r = await applyDecompositionResult({
+      parentIssueId: PARENT,
+      planned: { kind: 'plan', plan: PLAN },
+      underspecified: false,
+      caps: CAPS,
+      autoRun: false,
+      revisionRound: 2,
+      priorProposalCommentId: 'stale-id',
+      effects: e,
+    });
+    expect(postComment).toHaveBeenCalledTimes(2); // edit attempt + fresh fallback
+    expect(postComment.mock.calls[0][2]).toBe('stale-id'); // tried in place
+    expect(postComment.mock.calls[1][2]).toBeUndefined(); // then fresh
+    // The pending plan is persisted with the fallback comment id.
+    expect((e.putPendingPlan as jest.Mock).mock.calls[0][0].proposalCommentId).toBe('new-comment');
+    expect(r.kind).toBe('handled');
+  });
+
   test('auto (:auto) → writes back immediately, returns a seed graph with real ids', async () => {
     const e = effects();
     const r = await applyDecompositionResult({

@@ -56,7 +56,7 @@ import { logger } from './shared/logger';
 import { applyDecompositionResult } from './shared/orchestration-decomposition-flow';
 import { parseDecomposerResponse } from './shared/orchestration-decomposition-planner';
 import { renderDecomposeUnavailableNote, renderRevisionToSingleNote } from './shared/orchestration-decomposition-render';
-import { putPendingPlan, replacePendingPlan } from './shared/orchestration-decomposition-store';
+import { getPendingPlan, putPendingPlan, replacePendingPlan } from './shared/orchestration-decomposition-store';
 import type { ProjectDecompositionCaps } from './shared/orchestration-decomposition-types';
 import { linearGraphqlFn } from './shared/orchestration-decomposition-writeback';
 import { discoverOrchestration } from './shared/orchestration-discovery';
@@ -1230,6 +1230,14 @@ interface DecomposePlanEvent {
    * (upsert) instead of create-once, and the proposal renders "round N".
    */
   readonly revisionRound?: number;
+  /**
+   * #299 F-revise-in-place: the reviewer's FEEDBACK comment id (rides in
+   * channel_metadata so it's task-scoped). The webhook put 👀 on it as the "on it"
+   * ack; when the revised plan lands the reconciler swaps 👀 → ✅ on this SAME
+   * comment so the reviewer can tell it finished (the 👀 previously never settled —
+   * read as stuck). Absent on round 0.
+   */
+  readonly revisingFeedbackCommentId?: string;
 }
 
 /**
@@ -1273,6 +1281,7 @@ export function parseDecomposePlanRecord(record: DynamoDBRecord): DecomposePlanE
   const revisionRoundStr = cm?.decompose_revision_round?.S;
   const revisionRound = revisionRoundStr !== undefined && Number.isFinite(Number(revisionRoundStr))
     ? Number(revisionRoundStr) : undefined;
+  const revisingFeedbackCommentId = cm?.decompose_revising_feedback_comment_id?.S;
 
   return {
     taskId,
@@ -1289,6 +1298,7 @@ export function parseDecomposePlanRecord(record: DynamoDBRecord): DecomposePlanE
     ...(artifactUri !== undefined && { artifactUri }),
     ...(taskDescription !== undefined && { taskDescription }),
     ...(revisionRound !== undefined && { revisionRound }),
+    ...(revisingFeedbackCommentId !== undefined && { revisingFeedbackCommentId }),
   };
 }
 
@@ -1366,8 +1376,10 @@ async function reconcileDecomposePlan(evt: DecomposePlanEvent): Promise<void> {
   const feedbackCtx: LinearFeedbackContext = {
     linearWorkspaceId: evt.workspaceId, registryTableName: registryTable,
   };
-  const postComment = async (issueId: string, body: string): Promise<string | null> =>
-    upsertStatusComment(feedbackCtx, issueId, body);
+  // #299 F-revise-in-place: forward an optional existingCommentId so the flow can
+  // EDIT the plan comment in place on a revision (vs. posting a fresh one).
+  const postComment = async (issueId: string, body: string, existingCommentId?: string): Promise<string | null> =>
+    upsertStatusComment(feedbackCtx, issueId, body, existingCommentId);
 
   // Planning RUN did not complete (session failed to start — e.g. a compute
   // substrate error — cancelled, etc.). Post the honest "couldn't plan, nothing
@@ -1417,6 +1429,16 @@ async function reconcileDecomposePlan(evt: DecomposePlanEvent): Promise<void> {
     ...(evt.maxParentBudgetUsd !== undefined && { max_parent_budget_usd: evt.maxParentBudgetUsd }),
   };
 
+  // #299 F-revise-in-place: on a REVISION, read the prior plan proposal's comment
+  // id so applyDecompositionResult edits THAT comment in place instead of stacking
+  // a fresh "Updated breakdown". Only on a revision (round 0 has nothing to edit);
+  // best-effort (a missing row just falls back to a fresh post).
+  let priorProposalCommentId: string | undefined;
+  if (evt.revisionRound !== undefined && evt.revisionRound > 0) {
+    const existing = await getPendingPlan(ddb, ORCHESTRATION_TABLE, evt.parentIssueId);
+    priorProposalCommentId = existing?.proposal_comment_id;
+  }
+
   const result = await applyDecompositionResult({
     parentIssueId: evt.parentIssueId,
     planned: parsed,
@@ -1427,6 +1449,7 @@ async function reconcileDecomposePlan(evt: DecomposePlanEvent): Promise<void> {
     caps,
     autoRun: evt.mode === 'auto',
     ...(evt.revisionRound !== undefined && { revisionRound: evt.revisionRound }),
+    ...(priorProposalCommentId !== undefined && { priorProposalCommentId }),
     // #299 single-task gate: the parent's task_description, so a MANUAL
     // (``:decompose``) decline can PROPOSE the single task (persist a
     // pending_kind:'single' plan + wait for approve) instead of auto-running it.
@@ -1467,6 +1490,22 @@ async function reconcileDecomposePlan(evt: DecomposePlanEvent): Promise<void> {
       graphql: linearGraphqlFn(resolved?.accessToken ?? ''),
     },
   });
+
+  // #299 F-revise-in-place: the revised plan has now matured (edited in place, or a
+  // collapse/over-cap note posted), so settle the reviewer's FEEDBACK comment
+  // 👀 → ✅ — that's how they can tell the re-plan finished (the 👀 the webhook put
+  // on it at dispatch previously never settled → read as stuck). The ONE plan
+  // comment updated in place; their feedback comment now shows ✅. Best-effort —
+  // never throws out of the reconcile. Only on a revision that carried the id.
+  if (evt.revisingFeedbackCommentId) {
+    try {
+      await swapCommentReaction(feedbackCtx, evt.revisingFeedbackCommentId, EMOJI_SUCCESS);
+    } catch (err) {
+      logger.warn('F-revise-in-place: failed to settle feedback comment 👀→✅ (non-fatal)', {
+        parent_issue_id: evt.parentIssueId, error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
 
   if (result.kind === 'seed') {
     // :auto wrote back real Linear sub-issues → seed the executor + release roots.

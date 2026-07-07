@@ -30,6 +30,7 @@ import {
   addIssueReaction,
   appendOnceToComment,
   type LinearFeedbackContext,
+  deleteComment,
   postIssueComment,
   reactToComment,
   replyToComment,
@@ -429,6 +430,26 @@ describe('linear-feedback', () => {
     test('no token → null, no fetch', async () => {
       resolveLinearOauthTokenMock.mockResolvedValueOnce(null);
       expect(await upsertStatusComment(CTX, ISSUE_ID, 'body')).toBeNull();
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('deleteComment (#299 F-revise-in-place — remove the transient ack)', () => {
+    test('success → true, sends commentDelete with the id', async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse({ data: { commentDelete: { success: true } } }));
+      expect(await deleteComment(CTX, 'cmt-ack')).toBe(true);
+      const vars = JSON.parse(fetchMock.mock.calls[0][1].body).variables;
+      expect(vars).toEqual({ id: 'cmt-ack' });
+    });
+
+    test('GraphQL error → false (best-effort, never throws)', async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse({ errors: [{ message: 'not found' }] }));
+      expect(await deleteComment(CTX, 'cmt-ack')).toBe(false);
+    });
+
+    test('no token → false, no fetch', async () => {
+      resolveLinearOauthTokenMock.mockResolvedValueOnce(null);
+      expect(await deleteComment(CTX, 'cmt-ack')).toBe(false);
       expect(fetchMock).not.toHaveBeenCalled();
     });
   });
