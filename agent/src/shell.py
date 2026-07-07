@@ -188,3 +188,88 @@ def run_cmd(
     else:
         log("CMD", f"{label}: OK")
     return result
+
+
+# Signatures a transient (retryable) dependency/registry failure leaves in a
+# command's stderr — network blips, DNS hiccups, registry 5xx / rate limits.
+# NOT a permanent auth/not-found error: those are re-run-won't-help and would
+# just waste backoff time. Deliberately conservative (#251 dependency_unreachable).
+_TRANSIENT_CMD_SIGNATURES: tuple[str, ...] = (
+    "could not resolve host",
+    "temporary failure in name resolution",
+    "connection timed out",
+    "connection reset",
+    "operation timed out",
+    "timeout was reached",
+    "the requested url returned error: 5",  # curl/git HTTP 5xx
+    "503 service unavailable",
+    "502 bad gateway",
+    "504 gateway",
+    "429 too many requests",
+    "eai_again",
+    "network is unreachable",
+    "tls handshake timeout",
+    "unexpected eof",
+)
+
+
+def is_transient_cmd_failure(stderr: str) -> bool:
+    """True if *stderr* looks like a transient (retryable) dependency failure.
+
+    Used by :func:`run_cmd_with_backoff` to decide whether another attempt is
+    worthwhile. Permanent failures (auth denied, repo not found, 4xx other than
+    429) return False so we fail fast instead of burning the backoff budget.
+    """
+    low = (stderr or "").lower()
+    return any(sig in low for sig in _TRANSIENT_CMD_SIGNATURES)
+
+
+def run_cmd_with_backoff(
+    cmd: list[str],
+    label: str,
+    *,
+    cwd: str | None = None,
+    timeout: int = 600,
+    max_attempts: int = 3,
+    base_delay_s: float = 2.0,
+    on_retry=None,
+    sleep=time.sleep,
+) -> subprocess.CompletedProcess:
+    """Run ``cmd`` with bounded retries on *transient* failures (#251, Phase 2).
+
+    Retries up to ``max_attempts`` times with exponential backoff
+    (``base_delay_s * 2**(attempt-1)``) ONLY when the failure looks transient
+    (:func:`is_transient_cmd_failure`). Permanent failures return immediately.
+    Always runs with ``check=False`` internally so the caller inspects
+    ``returncode`` — self-remediation must never raise mid-retry.
+
+    ``on_retry(attempt, max_attempts, stderr)`` is an optional auditable-event
+    callback fired before each backoff sleep (kept as a callback so ``shell``
+    stays free of ``hooks``/``progress`` imports — the caller wires in the
+    blocker event). ``sleep`` is injectable so tests don't actually wait.
+
+    Self-remediation is scope-preserving BY CONSTRUCTION: it only re-invokes the
+    exact same ``cmd`` with the same environment. It grants no new credentials
+    and mutates no IAM policy or egress allowlist — a retried ``git clone`` uses
+    the same token and DNS rules as the first attempt.
+    """
+    # ``max(1, ...)`` guarantees the loop body runs at least once, so ``result``
+    # is always bound by the time we return it — no None-typed fall-through.
+    result = run_cmd(cmd, label, cwd=cwd, timeout=timeout, check=False)
+    for attempt in range(1, max(1, max_attempts) + 1):
+        if attempt > 1:
+            result = run_cmd(cmd, label, cwd=cwd, timeout=timeout, check=False)
+        if result.returncode == 0:
+            return result
+        stderr = result.stderr or ""
+        if attempt >= max_attempts or not is_transient_cmd_failure(stderr):
+            break
+        if on_retry is not None:
+            on_retry(attempt, max_attempts, stderr)
+        delay = base_delay_s * (2 ** (attempt - 1))
+        log(
+            "CMD",
+            f"{label}: transient failure — retrying in {delay:.0f}s ({attempt}/{max_attempts})",
+        )
+        sleep(delay)
+    return result

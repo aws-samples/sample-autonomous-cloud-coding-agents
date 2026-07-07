@@ -352,6 +352,43 @@ const PATTERNS: readonly ErrorPattern[] = [
 const BLOCKED_KIND = /BLOCKED\[([a-z_]+)\]/i;
 const BLOCKED_RESOURCE = /\(resource:\s*([^)]+)\)/i;
 
+/** Closed blocker-kind set — mirrors ``BLOCKER_KINDS`` in agent/src/progress_writer.py. */
+export type BlockerKind =
+  | 'missing_secret'
+  | 'egress_denied'
+  | 'dependency_unreachable'
+  | 'policy_fail_closed'
+  | 'auth_failure'
+  | 'unknown_environmental';
+
+/**
+ * Build the canonical terminal-reason string for an orchestration-side blocker
+ * (#251, decision D) — the TypeScript twin of ``format_blocker_reason`` in
+ * ``agent/src/progress_writer.py``. Produces ``BLOCKED[<kind>]: <detail>`` with
+ * `` (resource: <resource>)`` appended when ``resource`` is set, so the same
+ * ``classifyError`` regex that handles agent-carried reasons also classifies
+ * reasons written directly by the orchestrator (e.g. a missing secret detected
+ * during hydration).
+ */
+const BLOCKER_KINDS: ReadonlySet<string> = new Set<BlockerKind>([
+  'missing_secret',
+  'egress_denied',
+  'dependency_unreachable',
+  'policy_fail_closed',
+  'auth_failure',
+  'unknown_environmental',
+]);
+
+export function formatBlockerReason(kind: BlockerKind, detail: string, resource?: string): string {
+  // Normalise an out-of-set kind to unknown_environmental — matches the Python
+  // format_blocker_reason fallback so a value cast via `as BlockerKind` (or a
+  // future non-literal caller) can never emit a reason the classifier's closed
+  // taxonomy won't recognise.
+  const safeKind = BLOCKER_KINDS.has(kind) ? kind : 'unknown_environmental';
+  const base = `BLOCKED[${safeKind}]: ${detail}`;
+  return resource ? `${base} (resource: ${resource})` : base;
+}
+
 /** Per-kind blocker remedy builder. ``resource`` is the extracted name (secret, host, …). */
 function blockerClassification(kind: string, resource: string | undefined): ErrorClassification {
   const res = resource?.trim();

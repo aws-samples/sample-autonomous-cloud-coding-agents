@@ -19,9 +19,18 @@
 
 // --- Mocks (before imports) ---
 const mockSmSend = jest.fn();
+// Stand-in for the SDK's ResourceNotFoundException so the `instanceof` check in
+// resolveGitHubToken (#251) has a real constructor to test against.
+class MockResourceNotFoundException extends Error {
+  constructor(message = 'Secrets Manager can’t find the specified secret.') {
+    super(message);
+    this.name = 'ResourceNotFoundException';
+  }
+}
 jest.mock('@aws-sdk/client-secrets-manager', () => ({
   SecretsManagerClient: jest.fn(() => ({ send: mockSmSend })),
   GetSecretValueCommand: jest.fn((input: unknown) => ({ _type: 'GetSecretValue', input })),
+  ResourceNotFoundException: MockResourceNotFoundException,
 }));
 
 jest.mock('../../../src/handlers/shared/memory', () => ({

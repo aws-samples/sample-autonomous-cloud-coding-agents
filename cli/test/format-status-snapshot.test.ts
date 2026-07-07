@@ -523,4 +523,32 @@ describe('formatStatusSnapshot', () => {
     expect(rendered).toContain('Description:   Fix the bug');
     expect(rendered).not.toContain('  Description:     ');
   });
+
+  // --- #251: blocker surface ---
+
+  test('surfaces the latest agent_blocked event with resource + hint', () => {
+    const task = buildTask();
+    const events: TaskEvent[] = [
+      mkEvent({
+        event_id: '01ARZ3NDEKTSV4RRFFQ69G5F10',
+        event_type: 'agent_blocked',
+        timestamp: '2026-04-29T15:29:20Z', // 60s before NOW
+        metadata: {
+          kind: 'egress_denied',
+          detail: 'connection refused',
+          remediation_hint: 'allowlist registry.npmjs.org in DNS Firewall',
+          retryable: false,
+          resource: 'registry.npmjs.org',
+        },
+      }),
+    ];
+    const rendered = formatStatusSnapshot(task, events, NOW);
+    expect(rendered).toContain('Blocker:       egress_denied [registry.npmjs.org] (1m 00s ago) — allowlist registry.npmjs.org in DNS Firewall');
+  });
+
+  test('omits the Blocker line when there is no agent_blocked event', () => {
+    const task = buildTask();
+    const rendered = formatStatusSnapshot(task, [], NOW);
+    expect(rendered).not.toContain('Blocker:');
+  });
 });

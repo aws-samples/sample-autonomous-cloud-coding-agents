@@ -19,9 +19,18 @@
 
 // --- Mocks ---
 const mockSmSend = jest.fn();
+// Minimal stand-in for the SDK's ResourceNotFoundException so `instanceof`
+// checks in resolveGitHubToken work against thrown mock errors (#251).
+class MockResourceNotFoundException extends Error {
+  constructor(message = 'Secrets Manager can’t find the specified secret.') {
+    super(message);
+    this.name = 'ResourceNotFoundException';
+  }
+}
 jest.mock('@aws-sdk/client-secrets-manager', () => ({
   SecretsManagerClient: jest.fn(() => ({ send: mockSmSend })),
   GetSecretValueCommand: jest.fn((input: unknown) => ({ _type: 'GetSecretValue', input })),
+  ResourceNotFoundException: MockResourceNotFoundException,
 }));
 
 const mockBedrockSend = jest.fn();
@@ -120,9 +129,27 @@ describe('resolveGitHubToken', () => {
     expect(mockSmSend).toHaveBeenCalledTimes(1); // Only one SM call
   });
 
-  test('throws when secret is empty', async () => {
+  test('throws a missing_secret blocker when secret is empty', async () => {
     mockSmSend.mockResolvedValueOnce({ SecretString: undefined });
-    await expect(resolveGitHubToken('arn:test')).rejects.toThrow('GitHub token secret is empty');
+    // #251: empty secret → canonical BLOCKED[missing_secret] reason naming the ARN.
+    await expect(resolveGitHubToken('arn:test')).rejects.toThrow(
+      'BLOCKED[missing_secret]: the required GitHub token secret is empty (resource: arn:test)',
+    );
+  });
+
+  test('throws a missing_secret blocker when secret does not exist', async () => {
+    mockSmSend.mockRejectedValueOnce(new MockResourceNotFoundException());
+    // #251: ResourceNotFoundException → canonical reason naming the ARN so the
+    // classifier can tell the operator exactly which secret to wire.
+    const arn = 'arn:aws:secretsmanager:us-east-1:123:secret:missing';
+    await expect(resolveGitHubToken(arn)).rejects.toThrow(
+      `BLOCKED[missing_secret]: the required GitHub token secret does not exist (resource: ${arn})`,
+    );
+  });
+
+  test('propagates non-missing-secret SM errors unchanged', async () => {
+    mockSmSend.mockRejectedValueOnce(new Error('ThrottlingException'));
+    await expect(resolveGitHubToken('arn:test')).rejects.toThrow('ThrottlingException');
   });
 
   test('caches tokens per ARN (different ARNs get different tokens)', async () => {

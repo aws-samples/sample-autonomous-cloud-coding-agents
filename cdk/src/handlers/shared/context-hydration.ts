@@ -18,7 +18,8 @@
  */
 
 import { ApplyGuardrailCommand, BedrockRuntimeClient } from '@aws-sdk/client-bedrock-runtime';
-import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
+import { GetSecretValueCommand, ResourceNotFoundException, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
+import { formatBlockerReason } from './error-classifier';
 import { logger } from './logger';
 import { loadMemoryContext, type MemoryContext } from './memory';
 import { sanitizeExternalContent } from './sanitization';
@@ -170,6 +171,21 @@ export class AttachmentResolutionError extends AttachmentError {
   constructor(message: string, options?: { cause?: unknown }) {
     super(message, options);
     this.name = 'AttachmentResolutionError';
+  }
+}
+
+/**
+ * A required secret was never wired into the blueprint (#251, missing_secret
+ * blocker). Carries the canonical ``BLOCKED[missing_secret]: … (resource: …)``
+ * reason as its message so the hydration catch can propagate it verbatim to
+ * ``failTask`` and ``classifyError`` surfaces the exact remedy — rather than
+ * silently degrading to minimal context, which strands the task with an opaque
+ * failure the agent cannot recover from (it has no token to clone/push).
+ */
+export class MissingSecretError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'MissingSecretError';
   }
 }
 
@@ -327,9 +343,28 @@ export async function resolveGitHubToken(secretArn: string): Promise<string> {
     return cached.token;
   }
 
-  const result = await smClient.send(new GetSecretValueCommand({ SecretId: secretArn }));
+  // #251: a secret that does not exist or is empty is a `missing_secret`
+  // blocker — the required credential was never wired into the blueprint.
+  // Throw a typed error carrying the canonical reason (with the secret ARN as
+  // the resource) so callers can propagate it to a precise terminal remedy
+  // instead of silently degrading. The blocker is NOT retryable and the agent
+  // must never acquire the secret itself.
+  let result;
+  try {
+    result = await smClient.send(new GetSecretValueCommand({ SecretId: secretArn }));
+  } catch (err) {
+    if (err instanceof ResourceNotFoundException) {
+      throw new MissingSecretError(
+        formatBlockerReason('missing_secret', 'the required GitHub token secret does not exist', secretArn),
+        { cause: err },
+      );
+    }
+    throw err;
+  }
   if (!result.SecretString) {
-    throw new Error('GitHub token secret is empty');
+    throw new MissingSecretError(
+      formatBlockerReason('missing_secret', 'the required GitHub token secret is empty', secretArn),
+    );
   }
 
   tokenCache.set(secretArn, { token: result.SecretString, expiresAt: Date.now() + CACHE_TTL_MS });
@@ -1033,6 +1068,10 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
             const token = await resolveGitHubToken(tokenSecretArn);
             return await fetchGitHubIssue(repo, task.issue_number, token) ?? undefined;
           } catch (err) {
+            // A missing secret is a blocker, not optional-context degradation —
+            // propagate so the outer catch fails the task with the canonical
+            // reason (#251). Other fetch errors stay best-effort.
+            if (err instanceof MissingSecretError) throw err;
             logger.warn('Failed to resolve GitHub token or fetch issue', {
               task_id: task.task_id, error: err instanceof Error ? err.message : String(err),
             });
@@ -1051,6 +1090,8 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
             const token = await resolveGitHubToken(tokenSecretArn);
             return await fetchGitHubPullRequest(repo, task.pr_number, token) ?? undefined;
           } catch (err) {
+            // Missing secret → propagate as a blocker (#251); see issue-fetch note.
+            if (err instanceof MissingSecretError) throw err;
             logger.warn('Failed to fetch PR context', {
               task_id: task.task_id,
               pr_number: task.pr_number,
@@ -1235,6 +1276,13 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
     }
     // Attachment errors must propagate — user explicitly provided attachments; proceeding without them is wrong
     if (err instanceof AttachmentError) {
+      throw err;
+    }
+    // Missing-secret blockers must propagate (#251) — degrading to minimal
+    // context would strand the task: the agent has no token to clone/push and
+    // would fail opaquely. Propagating carries the canonical BLOCKED[missing_secret]
+    // reason to failTask so classifyError surfaces the exact secret to wire.
+    if (err instanceof MissingSecretError) {
       throw err;
     }
     // Programming errors (bugs) should fail the task, not silently degrade context
