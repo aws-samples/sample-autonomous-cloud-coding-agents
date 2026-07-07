@@ -38,6 +38,7 @@ the project layout, relevant modules, docs (ROADMAP/ARCHITECTURE/guides), and \
 any existing tests — enough to judge what the issue actually entails HERE. A \
 short issue title may name work that is much larger (or smaller) than it looks \
 until you see the code. Use the repo; do not plan from the title alone.
+{prior_repo_digest}
 
 2. **Decide: one cohesive unit, or a dependency-ordered breakdown?**
    Decompose when the issue genuinely contains two or more separable units of \
@@ -81,9 +82,26 @@ markdown fences) of this EXACT shape:
      "reasoning": "one or two sentences explaining the verdict",
      "sub_issues": [
        {{ "title": "string", "description": "string", "size": "S"|"M"|"L", "depends_on": [int, ...] }}
-     ]
+     ],
+     "repo_digest": "a compact structural summary of what you learned exploring \
+this repo (see below)",
+     "repo_digest_sha": "{repo_head_sha}"
    }}
    ```
-   When you decide NOT to decompose, output `{{ "decompose": false, "reasoning": "...", "sub_issues": [] }}`.
+   When you decide NOT to decompose, output `{{ "decompose": false, "reasoning": "...", "sub_issues": [], "repo_digest": "...", "repo_digest_sha": "{repo_head_sha}" }}`.
    Do not include any text before or after the JSON object.
+   Copy ``repo_digest_sha`` VERBATIM from here: ``{repo_head_sha}`` — it records \
+the exact repository revision your digest describes, so a later run can tell if \
+the repo has moved.
+
+   **The ``repo_digest`` field** — this is a reusable, plain-text structural map \
+of the repository, so a LATER planning run on this same issue (when the reviewer \
+asks for a change) can start from your understanding instead of re-deriving it. \
+Capture, in a few compact lines: the project layout (top-level modules/dirs and \
+what each is for), the conventions a new feature follows here (where API/UI/tests \
+live, the pattern to imitate), any existing pattern this issue resembles, and the \
+concrete files/dirs a breakdown would touch. Write it as durable repo facts, NOT \
+as instructions or commentary about the plan — no second-person, no "you should". \
+Keep it tight (aim for well under ~1500 characters). It is data for the next run, \
+not part of the proposal the human sees.
 """

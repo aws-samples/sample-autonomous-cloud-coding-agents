@@ -218,3 +218,64 @@ describe('parseDecomposerResponse — malformed + adversarial', () => {
     if (r.kind === 'plan') expect(r.plan.nodes[0].description).toBe('Only a title');
   });
 });
+
+describe('parseDecomposerResponse — #299 T2 repo_digest extraction', () => {
+  const SHA = 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0';
+  const withDigest = (digest: unknown, sha: unknown) =>
+    JSON.stringify({
+      reasoning: 'r',
+      repo_digest: digest,
+      repo_digest_sha: sha,
+      sub_issues: [
+        { title: 'A', description: 'a', size: 'S', depends_on: [] },
+        { title: 'B', description: 'b', size: 'M', depends_on: [0] },
+      ],
+    });
+
+  test('a plan carries repoDigest + a valid repoDigestSha', () => {
+    const r = parseDecomposerResponse(withDigest('modules: api/, ui/. tests in test/.', SHA), 8, FALLBACK_REASON);
+    expect(r.kind).toBe('plan');
+    if (r.kind === 'plan') {
+      expect(r.repoDigest).toBe('modules: api/, ui/. tests in test/.');
+      expect(r.repoDigestSha).toBe(SHA);
+    }
+  });
+
+  test('a plan with no digest fields → repoDigest/Sha undefined (older agent)', () => {
+    const r = parseDecomposerResponse(DECOMPOSER_JSON([
+      { title: 'A', description: 'a', size: 'S', depends_on: [] },
+      { title: 'B', description: 'b', size: 'M', depends_on: [0] },
+    ]), 8, FALLBACK_REASON);
+    expect(r.kind).toBe('plan');
+    if (r.kind === 'plan') {
+      expect(r.repoDigest).toBeUndefined();
+      expect(r.repoDigestSha).toBeUndefined();
+    }
+  });
+
+  test('a hallucinated / non-sha repo_digest_sha is dropped (not used as a cache key)', () => {
+    const r = parseDecomposerResponse(withDigest('map', 'not-a-sha!'), 8, FALLBACK_REASON);
+    expect(r.kind).toBe('plan');
+    if (r.kind === 'plan') {
+      expect(r.repoDigest).toBe('map');
+      expect(r.repoDigestSha).toBeUndefined(); // shape guard rejected it
+    }
+  });
+
+  test('an over-long digest is truncated with an honest marker', () => {
+    const big = 'x'.repeat(5000);
+    const r = parseDecomposerResponse(withDigest(big, SHA), 8, FALLBACK_REASON);
+    expect(r.kind).toBe('plan');
+    if (r.kind === 'plan') {
+      expect(r.repoDigest!.length).toBeLessThan(5000);
+      expect(r.repoDigest!).toMatch(/truncated/);
+    }
+  });
+
+  test('a single_task decline carries NO digest (nothing to re-plan against)', () => {
+    const raw = JSON.stringify({ reasoning: 'cohesive', repo_digest: 'map', repo_digest_sha: SHA, sub_issues: [] });
+    const r = parseDecomposerResponse(raw, 8, FALLBACK_REASON);
+    expect(r.kind).toBe('single_task');
+    // The single_task variant has no repoDigest field by type — just assert kind.
+  });
+});

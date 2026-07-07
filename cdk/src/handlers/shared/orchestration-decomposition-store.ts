@@ -72,6 +72,21 @@ export interface PendingPlan {
    * to cap runaway re-plan loops and to render "Revised breakdown (round N)".
    */
   readonly revision_round?: number;
+  /**
+   * #299 plan-mode T2 (warm digest): the planning agent's reusable structural
+   * summary of the repo, from the run that produced this plan. Fed back into a
+   * later revise run (via channel_metadata — a non-guardrail-screened channel) so
+   * the agent starts from this understanding instead of re-exploring. Absent on
+   * older plans / when the agent emitted no digest.
+   */
+  readonly repo_digest?: string;
+  /**
+   * #299 plan-mode T2: the repo HEAD sha the agent cloned to when it built
+   * ``repo_digest``. The next run compares it to what IT clones to; a mismatch
+   * means the digest may be stale for changed areas (agent-side drift handling —
+   * the platform has no GitHub token to pre-check, by P5 least-privilege design).
+   */
+  readonly repo_digest_sha?: string;
   readonly created_at: string;
 }
 
@@ -87,6 +102,10 @@ export interface PutPendingPlanParams {
   readonly proposalCommentId?: string;
   /** #299 revise loop: revision number for this plan (0 = original). */
   readonly revisionRound?: number;
+  /** #299 plan-mode T2: the agent's reusable repo digest (see {@link PendingPlan}). */
+  readonly repoDigest?: string;
+  /** #299 plan-mode T2: the repo HEAD sha the digest was built at. */
+  readonly repoDigestSha?: string;
   readonly now: string;
   /** Absolute epoch-seconds expiry for the row (un-acted plans self-clean). */
   readonly ttlEpochSeconds: number;
@@ -105,6 +124,8 @@ function buildPendingPlanItem(params: PutPendingPlanParams): Record<string, unkn
     platform_user_id: params.platformUserId,
     ...(params.proposalCommentId !== undefined && { proposal_comment_id: params.proposalCommentId }),
     ...(params.revisionRound !== undefined && { revision_round: params.revisionRound }),
+    ...(params.repoDigest !== undefined && { repo_digest: params.repoDigest }),
+    ...(params.repoDigestSha !== undefined && { repo_digest_sha: params.repoDigestSha }),
     created_at: params.now,
     ttl: params.ttlEpochSeconds,
   };
@@ -229,6 +250,8 @@ function parsePendingPlan(item: Record<string, unknown>): PendingPlan {
     platform_user_id: String(item.platform_user_id ?? ''),
     ...(item.proposal_comment_id !== undefined && { proposal_comment_id: String(item.proposal_comment_id) }),
     ...(item.revision_round !== undefined && Number.isFinite(Number(item.revision_round)) && { revision_round: Number(item.revision_round) }),
+    ...(item.repo_digest !== undefined && { repo_digest: String(item.repo_digest) }),
+    ...(item.repo_digest_sha !== undefined && { repo_digest_sha: String(item.repo_digest_sha) }),
     created_at: String(item.created_at ?? ''),
   };
 }

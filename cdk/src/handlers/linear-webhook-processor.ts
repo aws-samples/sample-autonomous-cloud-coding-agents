@@ -1326,6 +1326,14 @@ async function handlePlanRevision(args: {
     ...(caps.max_parent_budget_usd !== undefined && {
       decompose_caps_max_parent_budget_usd: String(caps.max_parent_budget_usd),
     }),
+    // #299 plan-mode T2 (warm digest): carry the PRIOR run's repo digest + its sha
+    // into this revise task via channel_metadata — a NON-guardrail-screened channel
+    // (task_description IS screened; a large structural blob there would trip
+    // PROMPT_ATTACK, the bfc57c5 class). The agent reads decompose_repo_digest from
+    // channel_metadata and starts from that understanding instead of re-exploring;
+    // the sha lets it drift-check. Absent on plans from older agents (no digest).
+    ...(pending.repo_digest !== undefined && { decompose_repo_digest: pending.repo_digest }),
+    ...(pending.repo_digest_sha !== undefined && { decompose_repo_digest_sha: pending.repo_digest_sha }),
   };
   // Dispatch FIRST, THEN post the "on it (round N)" ack — only once the task is
   // accepted. The old order posted "revised plan shortly" before dispatch, so a
@@ -1458,6 +1466,10 @@ async function handlePlanCommand(args: {
     platformUserId: pending.platform_user_id,
     ...(carriedCommentId !== undefined && { proposalCommentId: carriedCommentId }),
     ...(pending.revision_round !== undefined && { revisionRound: pending.revision_round }),
+    // #299 plan-mode T2: a structural command doesn't change the repo — carry the
+    // cached digest + sha forward so a later semantic revise still reuses it.
+    ...(pending.repo_digest !== undefined && { repoDigest: pending.repo_digest }),
+    ...(pending.repo_digest_sha !== undefined && { repoDigestSha: pending.repo_digest_sha }),
     now: new Date().toISOString(),
     ttlEpochSeconds: Math.floor(Date.now() / 1000) + PENDING_PLAN_TTL_SECONDS,
   });

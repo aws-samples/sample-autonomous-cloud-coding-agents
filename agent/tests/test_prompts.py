@@ -386,3 +386,62 @@ class TestCrossLanguageHashParity:
         for v in vectors:
             actual = hashlib.sha256(v["input"].encode("utf-8")).hexdigest()
             assert actual == v["sha256"], f"Hash mismatch for: {v['note']}"
+
+
+class TestDecomposePriorRepoDigest:
+    """#299 plan-mode T2 — the warm-digest injection into the decompose prompt."""
+
+    def _setup(self, head_sha: str = "a1b2c3d4e5f6a7b8"):
+        from models import RepoSetup
+
+        return RepoSetup(repo_dir="/w/repo", branch="feat/x", head_sha_before=head_sha)
+
+    def _decompose_config(self, channel_metadata=None) -> TaskConfig:
+        return _config(
+            task_id="t-1",
+            resolved_workflow={"id": "coding/decompose-v1", "version": "1.0.0"},
+            channel_source="linear",
+            channel_metadata=channel_metadata or {},
+        )
+
+    def test_round0_no_prior_digest_leaves_placeholder_empty(self):
+        from prompt_builder import build_system_prompt
+
+        prompt = build_system_prompt(self._decompose_config(), self._setup(), None, "")
+        # The placeholder is always substituted (never leaks a literal {token}).
+        assert "{prior_repo_digest}" not in prompt
+        assert "{repo_head_sha}" not in prompt
+        # Round 0: no "prior exploration" block.
+        assert "Prior exploration of this repository" not in prompt
+
+    def test_revise_injects_prior_digest_and_current_sha_echo(self):
+        from prompt_builder import build_system_prompt
+
+        cfg = self._decompose_config(
+            {
+                "decompose_repo_digest": "modules: api/, ui/; tests in test/",
+                "decompose_repo_digest_sha": "a1b2c3d4e5f6a7b8",
+            }
+        )
+        prompt = build_system_prompt(cfg, self._setup("a1b2c3d4e5f6a7b8"), None, "")
+        assert "Prior exploration of this repository" in prompt
+        assert "modules: api/, ui/; tests in test/" in prompt
+        # Same sha → the "current state" freshness note, not the drift warning.
+        assert "current state" in prompt
+        assert "has changed since this digest" not in prompt
+        # The sha is echoed for the agent to copy into repo_digest_sha.
+        assert "a1b2c3d4e5f6a7b8" in prompt
+
+    def test_drift_note_when_repo_moved(self):
+        from prompt_builder import build_system_prompt
+
+        cfg = self._decompose_config(
+            {
+                "decompose_repo_digest": "modules: api/, ui/",
+                "decompose_repo_digest_sha": "0000000aaaaaaaaa",  # prior sha
+            }
+        )
+        # Repo now at a DIFFERENT sha → the agent is warned to re-verify.
+        prompt = build_system_prompt(cfg, self._setup("ffffffff11111111"), None, "")
+        assert "has changed since this digest" in prompt
+        assert "re-verify" in prompt
