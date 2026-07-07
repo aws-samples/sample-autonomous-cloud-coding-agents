@@ -19,6 +19,15 @@ stopwords = ["wat-opaque-123"]
 description = "Test fixture signing secret in Slack verification unit test (not a real credential)."
 stopwords = ["test-signing-secret-abc123"]
 
+[[allowlists]]
+# Test idempotency-key fixture in orchestration-release.test.ts (not a real
+# credential). Suppressed by stopword rather than a .gitleaksignore commit-SHA
+# fingerprint: the finding lives in history and SHA fingerprints break whenever
+# history is rewritten (rebases / dep-bump merges), which is exactly how #530's
+# baseline regressed. A stopword is SHA-independent. See #537 (regression of #530).
+description = "Test idempotency-key fixture 'orch_abc_SUB-1' (not a real credential)."
+stopwords = ["orch_abc_SUB-1"]
+
 # Catch bare 12-digit AWS account IDs. The default ruleset does not flag these,
 # which is how a real account ID reached a committed comment in the #236 integ
 # work. RE2 (Go) has no lookarounds, so the non-digit neighbours are captured in
