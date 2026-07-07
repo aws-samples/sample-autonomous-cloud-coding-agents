@@ -30,6 +30,7 @@ import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as cr from 'aws-cdk-lib/custom-resources';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct, IConstruct } from 'constructs';
+import { AdmissionQueuePickup } from '../constructs/admission-queue-pickup';
 import { AgentMemory } from '../constructs/agent-memory';
 import { AgentSessionRole } from '../constructs/agent-session-role';
 import { AgentVpc } from '../constructs/agent-vpc';
@@ -637,6 +638,18 @@ export class AgentStack extends Stack {
     new ConcurrencyReconciler(this, 'ConcurrencyReconciler', {
       taskTable: taskTable.table,
       userConcurrencyTable: userConcurrencyTable.table,
+    });
+
+    // --- Admission-queue pickup (#441) ---
+    // Drains QUEUED tasks (parked by the orchestrator when the per-user
+    // concurrency cap is hit) in FIFO order as slots free up: flips
+    // QUEUED -> SUBMITTED and re-invokes the orchestrator, whose atomic
+    // admissionControl remains the single writer of the counter.
+    new AdmissionQueuePickup(this, 'AdmissionQueuePickup', {
+      taskTable: taskTable.table,
+      taskEventsTable: taskEventsTable.table,
+      userConcurrencyTable: userConcurrencyTable.table,
+      orchestratorFunctionArn: orchestrator.alias.functionArn,
     });
 
     // --- Stranded-task reconciler ---

@@ -56,6 +56,10 @@ export function formatTaskDetail(task: TaskDetail): string {
   if (task.branch_name) {
     lines.push(`Branch:      ${task.branch_name}`);
   }
+  // Admission queue (#441): show FIFO position + rough ETA while QUEUED.
+  if (task.status === 'QUEUED' && task.queue_position !== null) {
+    lines.push(`Queue:       position ${task.queue_position}${formatQueueEta(task.estimated_wait_s)}`);
+  }
   if (task.max_turns !== null) {
     lines.push(`Max Turns:   ${task.max_turns}`);
   }
@@ -94,6 +98,16 @@ export function formatTaskDetail(task: TaskDetail): string {
     lines.push(`Build:       ${formatVerdict(task.build_passed)}`);
   }
   return lines.join('\n');
+}
+
+/** Render the ``~Xm wait`` suffix for a queued task's position line (#441).
+ *  Empty string when the server could not estimate a wait. */
+function formatQueueEta(estimatedWaitS: number | null): string {
+  if (estimatedWaitS === null || !Number.isFinite(estimatedWaitS)) {
+    return '';
+  }
+  const minutes = Math.max(1, Math.round(estimatedWaitS / 60));
+  return ` (est. wait ~${minutes}m)`;
 }
 
 /** Format a list of TaskSummary as an aligned table. */
@@ -194,6 +208,11 @@ export function formatStatusSnapshot(
   // terminal without truncating information the user already typed.
   if (task.task_description) {
     lines.push(...formatDescriptionLines(task.task_description));
+  }
+  // Admission queue (#441): while QUEUED the pipeline has not started, so
+  // position + ETA are the most useful lines a user can see.
+  if (task.status === 'QUEUED' && task.queue_position !== null) {
+    lines.push(`  Queue:         position ${task.queue_position}${formatQueueEta(task.estimated_wait_s)}`);
   }
   lines.push(
     `  Turn:          ${describeTurn(task, lastTurnEvent)}`,

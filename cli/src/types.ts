@@ -41,6 +41,7 @@ export type AttachmentType = 'image' | 'file' | 'url';
  */
 export type TaskStatusType =
   | 'PENDING_UPLOADS'
+  | 'QUEUED'
   | 'SUBMITTED'
   | 'HYDRATING'
   | 'RUNNING'
@@ -151,6 +152,18 @@ export interface TaskDetail {
   /** Cedar HITL: when ``status = AWAITING_APPROVAL``, the
    *  ``request_id`` of the pending approval row. Null otherwise. */
   readonly awaiting_approval_request_id: string | null;
+  /** Admission queue (#441): ISO timestamp the task first entered
+   *  QUEUED; null for tasks that were admitted directly. Mirrors
+   *  ``cdk/src/handlers/shared/types.ts::TaskDetail``. */
+  readonly queued_at: string | null;
+  /** Admission queue (#441): 1-based FIFO position among the caller's
+   *  QUEUED tasks when ``status = QUEUED``; null otherwise. Computed
+   *  at read time by the server — it changes as the queue drains. */
+  readonly queue_position: number | null;
+  /** Admission queue (#441): rough ETA (seconds) until pickup, derived
+   *  from queue position and recent task durations. Null when
+   *  ``queue_position`` is null. */
+  readonly estimated_wait_s: number | null;
 }
 
 /** Response body of ``GET /v1/tasks/{task_id}/trace`` (design §10.1). */

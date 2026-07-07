@@ -215,6 +215,19 @@ export interface TaskRecord {
    * atomically on resume (§10.2, §9).
    */
   readonly awaiting_approval_request_id?: string;
+  /**
+   * Admission queue (#441): ISO timestamp of the task's FIRST entry
+   * into QUEUED (set once; a re-queue after a lost admission race does
+   * not overwrite it). Used for observability — FIFO order itself is
+   * keyed on ``created_at``, which never changes.
+   */
+  readonly queued_at?: string;
+  /**
+   * Admission queue (#441): number of admission attempts made by the
+   * queue pickup Lambda. Incremented on each pickup attempt; used to
+   * spot tasks that repeatedly lose the admission race.
+   */
+  readonly admission_attempts?: number;
 }
 
 /** Per-channel override for one notification channel. See
@@ -314,6 +327,18 @@ export interface TaskDetail {
   /** Cedar HITL: when ``status = AWAITING_APPROVAL``, the
    *  ``request_id`` of the pending approval row. Null otherwise. */
   readonly awaiting_approval_request_id: string | null;
+  /** Admission queue (#441): ISO timestamp the task first entered
+   *  QUEUED; null for tasks that were admitted directly. */
+  readonly queued_at: string | null;
+  /** Admission queue (#441): 1-based FIFO position among the caller's
+   *  QUEUED tasks when ``status = QUEUED``. Computed at read time by
+   *  the get-task handler (never persisted — it changes as the queue
+   *  drains); null otherwise or when the handler could not compute it. */
+  readonly queue_position: number | null;
+  /** Admission queue (#441): rough ETA (seconds) until this task is
+   *  picked up, derived from queue_position × the recent average task
+   *  duration heuristic. Null when queue_position is null. */
+  readonly estimated_wait_s: number | null;
 }
 
 /**
@@ -681,9 +706,15 @@ export interface AgentAttachmentPayload {
  * the helper when adding new numeric fields.
  *
  * @param record - the DynamoDB task record.
+ * @param queueInfo - read-time queue position/ETA for QUEUED tasks (#441).
+ *   Computed by the caller (get-task) because position changes as the
+ *   queue drains and must never be persisted; omitted everywhere else.
  * @returns the API-facing task detail.
  */
-export function toTaskDetail(record: TaskRecord): TaskDetail {
+export function toTaskDetail(
+  record: TaskRecord,
+  queueInfo?: { readonly queue_position: number; readonly estimated_wait_s: number | null },
+): TaskDetail {
   const ctx = { task_id: record.task_id };
   return {
     task_id: record.task_id,
@@ -737,6 +768,9 @@ export function toTaskDetail(record: TaskRecord): TaskDetail {
       logger,
     ),
     awaiting_approval_request_id: record.awaiting_approval_request_id ?? null,
+    queued_at: record.queued_at ?? null,
+    queue_position: queueInfo?.queue_position ?? null,
+    estimated_wait_s: queueInfo?.estimated_wait_s ?? null,
   };
 }
 

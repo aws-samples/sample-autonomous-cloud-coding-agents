@@ -25,11 +25,13 @@ jest.mock('@aws-sdk/client-dynamodb', () => ({ DynamoDBClient: jest.fn(() => ({}
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
   DynamoDBDocumentClient: { from: jest.fn(() => ({ send: mockSend })) },
   GetCommand: jest.fn((input: unknown) => ({ _type: 'Get', input })),
+  QueryCommand: jest.fn((input: unknown) => ({ _type: 'Query', input })),
 }));
 
 jest.mock('ulid', () => ({ ulid: jest.fn(() => 'REQ-ULID') }));
 
 process.env.TASK_TABLE_NAME = 'Tasks';
+process.env.MAX_CONCURRENT_TASKS_PER_USER = '3';
 
 import { handler } from '../../src/handlers/get-task';
 
@@ -131,6 +133,79 @@ describe('get-task handler', () => {
     expect(result.statusCode).toBe(200);
     const body = JSON.parse(result.body);
     expect(body.data.channel_source).toBe('webhook');
+  });
+
+  test('non-QUEUED task carries null queue fields and issues no GSI query', async () => {
+    mockSend.mockReset();
+    mockSend.mockResolvedValueOnce({ Item: TASK_RECORD });
+
+    const result = await handler(makeEvent());
+    const body = JSON.parse(result.body);
+    expect(body.data.queue_position).toBeNull();
+    expect(body.data.estimated_wait_s).toBeNull();
+    expect(body.data.queued_at).toBeNull();
+    expect(mockSend).toHaveBeenCalledTimes(1); // GetCommand only
+  });
+
+  test('QUEUED task returns 1-based FIFO position among the user\'s queued tasks (#441)', async () => {
+    mockSend.mockReset();
+    mockSend
+      .mockResolvedValueOnce({
+        Item: {
+          ...TASK_RECORD,
+          status: 'QUEUED',
+          status_created_at: 'QUEUED#2025-03-15T10:30:05Z',
+          queued_at: '2025-03-15T10:30:05Z',
+        },
+      })
+      // UserStatusIndex query: two tasks queued before ours, one after.
+      .mockResolvedValueOnce({
+        Items: [
+          { task_id: 'older-1', created_at: '2025-03-15T10:28:00Z' },
+          { task_id: 'older-2', created_at: '2025-03-15T10:29:00Z' },
+          { task_id: 'task-1', created_at: '2025-03-15T10:30:00Z' },
+          { task_id: 'newer-1', created_at: '2025-03-15T10:31:00Z' },
+        ],
+      });
+
+    const result = await handler(makeEvent());
+    expect(result.statusCode).toBe(200);
+    const body = JSON.parse(result.body);
+    expect(body.data.queue_position).toBe(3); // 2 ahead + 1
+    expect(body.data.estimated_wait_s).toBe(600); // ceil(3/3) * 600
+    expect(body.data.queued_at).toBe('2025-03-15T10:30:05Z');
+  });
+
+  test('QUEUED task queue-position lookup fails open to null on GSI error', async () => {
+    mockSend.mockReset();
+    mockSend
+      .mockResolvedValueOnce({
+        Item: { ...TASK_RECORD, status: 'QUEUED', status_created_at: 'QUEUED#2025-03-15T10:30:05Z' },
+      })
+      .mockRejectedValueOnce(new Error('GSI throttled'));
+
+    const result = await handler(makeEvent());
+    expect(result.statusCode).toBe(200); // GET still succeeds
+    const body = JSON.parse(result.body);
+    expect(body.data.status).toBe('QUEUED');
+    expect(body.data.queue_position).toBeNull();
+    expect(body.data.estimated_wait_s).toBeNull();
+  });
+
+  test('QUEUED task that left the queue between reads reports null position (no stale rank)', async () => {
+    mockSend.mockReset();
+    mockSend
+      .mockResolvedValueOnce({
+        Item: { ...TASK_RECORD, status: 'QUEUED', status_created_at: 'QUEUED#2025-03-15T10:30:05Z' },
+      })
+      // Query result no longer contains task-1 (picked up concurrently).
+      .mockResolvedValueOnce({
+        Items: [{ task_id: 'other', created_at: '2025-03-15T10:28:00Z' }],
+      });
+
+    const result = await handler(makeEvent());
+    const body = JSON.parse(result.body);
+    expect(body.data.queue_position).toBeNull();
   });
 
   test('returns 401 when user is not authenticated', async () => {
