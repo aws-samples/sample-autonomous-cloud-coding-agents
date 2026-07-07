@@ -1413,9 +1413,40 @@ async function handlePlanCommand(args: {
     return;
   }
 
+  // Re-render the proposal from the edited nodes. Reuse renderPlanProposal so the
+  // layout matches every other proposal (numbered list, deps, summary, footer);
+  // keep the "Updated breakdown" header when this plan had already been revised.
+  const editedPlan: DecompositionPlan = {
+    shouldDecompose: true,
+    reasoning: '',
+    nodes: result.nodes,
+  };
+  // #299 plan-mode T5: EDIT the existing proposal comment in place rather than
+  // posting a fresh one. A reviewer firing several structural commands in a row
+  // ("drop 3", then "merge 1 2", …) is watching the plan mature — a stack of N
+  // full re-rendered proposals is noise, and Linear's chat.update-style edit is
+  // the async channel's closest thing to the plan firming up live. The 👀 on
+  // each command comment is the per-edit ack; the single plan comment is the
+  // source of truth. Falls back to a fresh comment when no prior id was captured
+  // (best-effort — upsertStatusComment returns null on a failed edit, and we then
+  // don't clobber the stored id).
+  const renderedId = await upsertStatusComment(
+    feedbackCtx,
+    commentedIssueId,
+    renderPlanProposal(editedPlan, {
+      autoRun: false,
+      ...(pending.revision_round !== undefined && pending.revision_round > 0
+        && { revisionRound: pending.revision_round }),
+    }),
+    pending.proposal_comment_id,
+  );
+
   // Persist the edited node list (unconditional upsert — the claim-once above
   // gates redelivery). Preserve revision_round: a structural edit is not an agent
-  // re-plan round, so it must not consume the revise budget.
+  // re-plan round, so it must not consume the revise budget. Carry the proposal
+  // comment id forward (the freshly-created one if we had none, else the edited
+  // one) so the NEXT command edits the same comment in place.
+  const carriedCommentId = renderedId ?? pending.proposal_comment_id;
   await replacePendingPlanRow({
     ddb,
     tableName: ORCHESTRATION_TABLE,
@@ -1425,31 +1456,17 @@ async function handlePlanCommand(args: {
     ...(pending.linear_project_id !== undefined && { linearProjectId: pending.linear_project_id }),
     nodes: result.nodes,
     platformUserId: pending.platform_user_id,
-    ...(pending.proposal_comment_id !== undefined && { proposalCommentId: pending.proposal_comment_id }),
+    ...(carriedCommentId !== undefined && { proposalCommentId: carriedCommentId }),
     ...(pending.revision_round !== undefined && { revisionRound: pending.revision_round }),
     now: new Date().toISOString(),
     ttlEpochSeconds: Math.floor(Date.now() / 1000) + PENDING_PLAN_TTL_SECONDS,
   });
 
-  // Re-render the proposal from the edited nodes. Reuse renderPlanProposal so the
-  // layout matches every other proposal (numbered list, deps, summary, footer);
-  // keep the "Updated breakdown" header when this plan had already been revised.
-  const editedPlan: DecompositionPlan = {
-    shouldDecompose: true,
-    reasoning: '',
-    nodes: result.nodes,
-  };
-  await upsertStatusComment(
-    feedbackCtx,
-    commentedIssueId,
-    renderPlanProposal(editedPlan, {
-      autoRun: false,
-      ...(pending.revision_round !== undefined && pending.revision_round > 0
-        && { revisionRound: pending.revision_round }),
-    }),
-  );
   logger.info('Mode B command applied — plan edited deterministically (no agent)', {
-    issue_id: commentedIssueId, command: command.kind, node_count: result.nodes.length,
+    issue_id: commentedIssueId,
+    command: command.kind,
+    node_count: result.nodes.length,
+    edited_in_place: pending.proposal_comment_id !== undefined && renderedId === pending.proposal_comment_id,
   });
 }
 
