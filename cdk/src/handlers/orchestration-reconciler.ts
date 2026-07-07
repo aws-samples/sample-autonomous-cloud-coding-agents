@@ -1427,9 +1427,13 @@ async function reconcileDecomposePlan(evt: DecomposePlanEvent): Promise<void> {
     caps,
     autoRun: evt.mode === 'auto',
     ...(evt.revisionRound !== undefined && { revisionRound: evt.revisionRound }),
+    // #299 single-task gate: the parent's task_description, so a MANUAL
+    // (``:decompose``) decline can PROPOSE the single task (persist a
+    // pending_kind:'single' plan + wait for approve) instead of auto-running it.
+    ...(evt.taskDescription !== undefined && { singleTaskDescription: evt.taskDescription }),
     effects: {
       postComment,
-      putPendingPlan: async ({ nodes, proposalCommentId, revisionRound, repoDigest, repoDigestSha }) => {
+      putPendingPlan: async ({ nodes, proposalCommentId, revisionRound, repoDigest, repoDigestSha, pendingKind, singleTaskDescription }) => {
         const row = {
           ddb,
           tableName: ORCHESTRATION_TABLE,
@@ -1445,6 +1449,10 @@ async function reconcileDecomposePlan(evt: DecomposePlanEvent): Promise<void> {
           // next revise run reuses the exploration.
           ...(repoDigest !== undefined && { repoDigest }),
           ...(repoDigestSha !== undefined && { repoDigestSha }),
+          // #299 single-task gate: mark a 'single' pending plan + carry the
+          // task_description approve will run.
+          ...(pendingKind !== undefined && { pendingKind }),
+          ...(singleTaskDescription !== undefined && { singleTaskDescription }),
           now: new Date().toISOString(),
           ttlEpochSeconds: Math.floor(Date.now() / 1000) + PENDING_PLAN_TTL_SECONDS,
         };

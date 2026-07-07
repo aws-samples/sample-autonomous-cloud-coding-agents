@@ -67,6 +67,7 @@ import {
   renderRevisingNote,
   renderRevisionCapNote,
   renderRevisionFailedNote,
+  renderSingleTaskCancelled,
 } from './shared/orchestration-decomposition-render';
 import {
   consumePendingPlan as consumePendingPlanRow,
@@ -1129,6 +1130,18 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
       linear_workspace_slug: resolved.workspaceSlug,
     };
     const verdictProjectId = pending.linear_project_id ?? '';
+
+    // #299 single-task gate (F-single-gate): the pending plan is a SINGLE task
+    // (a ``:decompose`` that declined to split), not a graph. Approve → run ONE
+    // coding task (no write-back, no orchestration); reject → discard. Handled
+    // here rather than runPlanVerdict (which is graph-only: consume→writeBack→seed).
+    if (pending.pending_kind === 'single') {
+      await handleSingleTaskVerdict({
+        pending, verdict, commentedIssueId, workspaceId, projectId: verdictProjectId, resolved,
+      });
+      return;
+    }
+
     const effects = buildDecompositionEffects(
       commentedIssueId, workspaceId, pending.repo, pending.platform_user_id,
       verdictProjectId, verdictChannelMetadata, resolved.accessToken,
@@ -1361,6 +1374,73 @@ async function handlePlanRevision(args: {
   }
   await upsertStatusComment(feedbackCtx, commentedIssueId, renderRevisingNote(priorRound + 1));
   logger.info('Mode B revise: re-plan task dispatched', { issue_id: commentedIssueId, round: priorRound + 1 });
+}
+
+/**
+ * #299 single-task gate (F-single-gate) — the ``@bgagent approve``/``reject``
+ * verdict on a SINGLE-task pending plan (a ``:decompose`` that declined to
+ * split). Approve → run the parent issue as ONE coding task (no write-back, no
+ * orchestration — this is NOT a graph); reject → discard. Distinct from the
+ * graph verdict path (``runPlanVerdict`` → writeBack → seed). The claim-once +
+ * 👀 already fired in the caller. Never throws.
+ */
+async function handleSingleTaskVerdict(args: {
+  pending: PendingPlan;
+  verdict: 'approve' | 'reject';
+  commentedIssueId: string;
+  workspaceId: string;
+  projectId: string;
+  resolved: { oauthSecretArn: string; workspaceSlug: string };
+}): Promise<void> {
+  if (!ORCHESTRATION_TABLE || !WORKSPACE_REGISTRY_TABLE) return;
+  const { pending, verdict, commentedIssueId, workspaceId, projectId, resolved } = args;
+  const feedbackCtx = { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE };
+
+  // Consume the pending plan either way (approve runs it, reject discards it).
+  // The atomic delete also guards a racing second verdict (only one wins).
+  const taken = await consumePendingPlanRow(ddb, ORCHESTRATION_TABLE, commentedIssueId);
+  if (!taken) {
+    logger.info('Mode B single-task verdict: no pending plan (raced/expired) — skipping', { issue_id: commentedIssueId });
+    return;
+  }
+
+  if (verdict === 'reject') {
+    await upsertStatusComment(feedbackCtx, commentedIssueId, renderSingleTaskCancelled());
+    logger.info('Mode B single-task verdict: rejected', { issue_id: commentedIssueId });
+    return;
+  }
+
+  // approve → spawn ONE coding task, exactly like the reconciler's auto-run
+  // single-task path (:auto), with the normal Linear channel_metadata so the
+  // fanout dispatcher posts the completion + the agent posts its PR-opened
+  // comment. The description was persisted on the pending plan at propose time.
+  const result = await createTaskCore(
+    {
+      repo: pending.repo,
+      task_description: taken.single_task_description ?? `Implement ${commentedIssueId}`,
+    },
+    {
+      userId: pending.platform_user_id,
+      channelSource: 'linear',
+      channelMetadata: {
+        linear_issue_id: commentedIssueId,
+        linear_workspace_id: workspaceId,
+        ...(projectId && { linear_project_id: projectId }),
+        linear_oauth_secret_arn: resolved.oauthSecretArn,
+        linear_workspace_slug: resolved.workspaceSlug,
+      },
+    },
+    `decompose-single-approve-${deriveOrchestrationId(commentedIssueId)}`.slice(0, MAX_IDEMPOTENCY_KEY_LENGTH),
+  );
+  if (result.statusCode !== 201) {
+    logger.warn('Mode B single-task verdict: task creation returned non-201', {
+      status: result.statusCode, issue_id: commentedIssueId,
+    });
+    await safeReportIssueFailure(commentedIssueId, workspaceId,
+      buildCreateTaskFailureMessage(result.statusCode, result.body));
+    return;
+  }
+  logger.info('Mode B single-task verdict: approved — single task dispatched', { issue_id: commentedIssueId });
 }
 
 /**
