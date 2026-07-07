@@ -28,6 +28,7 @@ import {
   replyToComment,
   reportIssueFailure,
   swapCommentReaction,
+  transitionIssueState,
   upsertStatusComment,
   upsertThreadedReply,
   EMOJI_STARTED,
@@ -824,11 +825,21 @@ export async function handler(event: ProcessorEvent): Promise<void> {
             new Date().toISOString(), Math.floor(Date.now() / 1000) + ACK_CLAIM_TTL_SECONDS,
           );
           if (won) {
+            const decomposeCtx = { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE };
             await upsertStatusComment(
-              { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE },
+              decomposeCtx,
               issue.id,
               renderDecomposeStartedNote(decompositionDecision.mode === 'auto'),
             );
+            // CONFUSING-4 (state vs thread disagree): the decompose planning task
+            // is a read_only agent that deliberately does NOT touch Linear state
+            // (Bug C's minimal prompt), so the issue used to stay in Backlog through
+            // planning + approval — the board looked untouched while the bot worked,
+            // and the help text says to watch comments (the WRONG place on the board).
+            // Move it to a visible "started" state here so the board reflects reality,
+            // mirroring the plain-abca path (which the agent transitions at runtime).
+            // Idempotent + backward-safe inside transitionIssueState; best-effort.
+            await transitionIssueState(decomposeCtx, issue.id, 'started', ['In Progress']);
           }
         } catch (err) {
           logger.warn('Failed to post decompose upfront ack (non-fatal)', {

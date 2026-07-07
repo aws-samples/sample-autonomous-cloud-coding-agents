@@ -1533,6 +1533,13 @@ async function reconcileDecomposePlan(evt: DecomposePlanEvent): Promise<void> {
     logger.info('Decompose planner declined — creating single task', {
       parent_issue_id: evt.parentIssueId, reason: result.reason,
     });
+    // CONFUSING-3 (silent :auto window): thread the FULL Linear OAuth metadata —
+    // this was the ~9.5-min "zero output" run the QA tester hit on the :auto
+    // single-task path. Without linear_oauth_secret_arn / linear_workspace_slug
+    // the agent can't authenticate to Linear, so it never posts "🤖 Starting",
+    // never transitions state, and never reacts — the run is a total black box
+    // until the PR lands (same metadata-dropping class as ABCA-487/488). The
+    // secret arn rotates, so we pass the freshly-resolved one, not a stored id.
     await createTaskCore(
       {
         repo: evt.repo,
@@ -1545,6 +1552,8 @@ async function reconcileDecomposePlan(evt: DecomposePlanEvent): Promise<void> {
           linear_issue_id: evt.parentIssueId,
           linear_workspace_id: evt.workspaceId,
           linear_project_id: evt.projectId,
+          ...(resolved?.oauthSecretArn && { linear_oauth_secret_arn: resolved.oauthSecretArn }),
+          ...(resolved?.workspaceSlug && { linear_workspace_slug: resolved.workspaceSlug }),
         },
       },
       `decompose-single-${evt.taskId}`.slice(0, MAX_IDEMPOTENCY_KEY_LENGTH),

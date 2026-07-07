@@ -233,8 +233,10 @@ export async function applyDecompositionResult(
     }
     // ``:auto`` (or a caller without a task_description): trust the decline and
     // run one task now — applyDecompositionResult posted the note; the caller
-    // creates the task on ``single_task``.
-    await effects.postComment(parentIssueId, renderSingleTaskNote(planned.reasoning));
+    // creates the task on ``single_task``. POLISH-6: pass autoRun so the note
+    // names why it started without asking (only :auto reaches here with autoRun;
+    // a task_description-less caller is not the :auto label, so it stays generic).
+    await effects.postComment(parentIssueId, renderSingleTaskNote(planned.reasoning, autoRun));
     return { kind: 'single_task', reason: 'judge_declined' };
   }
 

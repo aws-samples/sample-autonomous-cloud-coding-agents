@@ -322,6 +322,9 @@ describe('applyDecompositionResult — #299 agent-native entry (pre-parsed plan,
     });
     expect(r).toEqual({ kind: 'single_task', reason: 'judge_declined' });
     expect(e.putPendingPlan).not.toHaveBeenCalled();
+    // POLISH-6: the :auto note names WHY it started without asking.
+    const note = (e.postComment as jest.Mock).mock.calls[0][1] as string;
+    expect(note).toMatch(/:auto|auto-run/i);
   });
 
   test('#299 F-single-gate: :decompose decline WITHOUT a description falls back to auto-run (back-compat)', async () => {

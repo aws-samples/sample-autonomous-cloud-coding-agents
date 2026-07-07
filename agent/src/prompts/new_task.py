@@ -19,6 +19,12 @@ problem, e.g.:
    - "make it faster" / "improve performance" — no page/flow named, no metric \
 or target (which part is slow? by how much? what's the budget?)
    - "make it better" / "improve the UI" / "clean it up" — no direction
+   - "make the site nicer" / "it feels a bit plain" / "make it pop" / "more \
+modern" — a whole-site or whole-page aesthetic verdict is NOT a concrete target: \
+no page or element is named and "nicer"/"plain" doesn't say what to change. An \
+adjective describing how something FEELS is a direction-without-substance, not a \
+named problem — ask which page/section and what "nicer" means to them (colours? \
+spacing? imagery? animation?) rather than picking a redesign and shipping it.
    - "fix the bug" — no reproduction, no error, and none findable in the code
    In these cases do NOT pick a plausible interpretation and ship it (even a \
 "safe, universally-good" change is still a guess at what they wanted, and they \

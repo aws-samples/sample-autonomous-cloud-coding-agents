@@ -187,6 +187,8 @@ The base trigger label (default `bgagent`, or whatever you passed to `--label` a
 | `bgagent:auto` | **Plan it and start immediately** — same breakdown as `:decompose`, but no approval step. | You trust ABCA to split the work and want it to just go. |
 | `bgagent:help` | **Explain the labels.** Posts a one-time comment describing what each label does, then creates no task. Remove it afterward. | You're new to ABCA on this issue and want a reminder of the options. |
 
+> **Create these labels in Linear and give each a one-line description.** ABCA matches labels by name, so you create them yourself (Linear → Settings → Labels, or inline on any issue). Add a short description to each — Linear shows it on hover in the label picker, which is the only discoverability a first-time teammate gets. Suggested descriptions: **`bgagent`** — "Hand this issue to ABCA — makes the change and opens a PR"; **`bgagent:decompose`** — "ABCA proposes a plan first and waits for your approval"; **`bgagent:auto`** — "ABCA plans and starts immediately, no approval"; **`bgagent:help`** — "ABCA explains what its labels do". Grouping them under a shared label prefix/group also keeps them together and away from unrelated labels in the picker.
+
 Notes:
 
 - **The approval conversation is interactive.** After a `:decompose` plan is posted, reply `@bgagent approve` to run it, `@bgagent reject` to discard it, or just tell it what to change in plain language — e.g. `@bgagent make it 2 tasks instead of 3` — and it re-plans and posts an updated breakdown. Repeat until you're happy, then approve.
