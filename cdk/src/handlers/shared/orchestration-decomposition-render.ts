@@ -362,6 +362,27 @@ export function renderSingleTaskNote(reasoning: string): string {
   );
 }
 
+/** #299 single-task gate: the note posted when a single-task proposal is rejected. */
+export function renderSingleTaskCancelled(): string {
+  return `${PLAN_PROPOSAL_PREFIX} Cancelled — nothing was run.`;
+}
+
+/**
+ * #299 single-task gate (F-single-gate): the PROPOSE-and-wait note for a
+ * ``:decompose`` (approve-first) run that declined to split. Unlike
+ * {@link renderSingleTaskNote} (which announces an immediate auto-run), this asks
+ * for approval first — because the user chose the spend-safe ``:decompose`` label,
+ * so nothing should run until they say go. ``:auto`` still uses the auto-run note.
+ */
+export function renderSingleTaskProposal(reasoning: string): string {
+  return (
+    `${PLAN_PROPOSAL_PREFIX} This looks like a single cohesive change — not worth splitting into `
+    + `sub-issues.${reasoning ? ` (${reasoning})` : ''} Reply \`@bgagent approve\` to run it as one `
+    + 'task, or `@bgagent reject` to cancel. (You used the approve-first label, so I haven\'t started '
+    + 'anything yet.)'
+  );
+}
+
 /**
  * Render the note posted when the planner returned an UNUSABLE plan (couldn't be
  * parsed into a valid breakdown) and we fall back to running the issue as ONE

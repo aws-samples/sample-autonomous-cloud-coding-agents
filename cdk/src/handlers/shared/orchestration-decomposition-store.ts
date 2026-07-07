@@ -60,8 +60,22 @@ export interface PendingPlan {
   readonly repo: string;
   /** Linear project id — needed to rebuild the release context at approval. */
   readonly linear_project_id?: string;
-  /** The proposed sub-issues (with index-based ``depends_on``). */
+  /** The proposed sub-issues (with index-based ``depends_on``). Empty for a
+   *  single-task pending plan (``pending_kind: 'single'``). */
   readonly nodes: readonly PlannedSubIssue[];
+  /**
+   * #299 single-task gate (F-single-gate): what ``@bgagent approve`` should DO.
+   * Absent/``'graph'`` = the normal breakdown → write back sub-issues + seed the
+   * executor. ``'single'`` = the planner declined to decompose under ``:decompose``
+   * (the approve-first label), so approve runs the parent as ONE coding task (no
+   * sub-issues, no orchestration). Honors the ``:decompose`` contract — nothing
+   * spends until the user approves — where the pre-fix code silently auto-ran.
+   * (``:auto`` still auto-runs a single-cohesive issue; it opted out of approval.)
+   */
+  readonly pending_kind?: 'graph' | 'single';
+  /** #299 single-task gate: the task_description to run when a ``'single'`` pending
+   *  plan is approved (the issue's own title+body). Absent for a graph plan. */
+  readonly single_task_description?: string;
   /** Platform user the eventual child tasks attribute to (the submitter). */
   readonly platform_user_id: string;
   /** The Linear comment id of the posted proposal (for the approve/reject reply target). */
@@ -106,6 +120,10 @@ export interface PutPendingPlanParams {
   readonly repoDigest?: string;
   /** #299 plan-mode T2: the repo HEAD sha the digest was built at. */
   readonly repoDigestSha?: string;
+  /** #299 single-task gate: 'single' = approve runs one coding task (see {@link PendingPlan}). */
+  readonly pendingKind?: 'graph' | 'single';
+  /** #299 single-task gate: the task_description to run when a 'single' plan is approved. */
+  readonly singleTaskDescription?: string;
   readonly now: string;
   /** Absolute epoch-seconds expiry for the row (un-acted plans self-clean). */
   readonly ttlEpochSeconds: number;
@@ -126,6 +144,8 @@ function buildPendingPlanItem(params: PutPendingPlanParams): Record<string, unkn
     ...(params.revisionRound !== undefined && { revision_round: params.revisionRound }),
     ...(params.repoDigest !== undefined && { repo_digest: params.repoDigest }),
     ...(params.repoDigestSha !== undefined && { repo_digest_sha: params.repoDigestSha }),
+    ...(params.pendingKind !== undefined && { pending_kind: params.pendingKind }),
+    ...(params.singleTaskDescription !== undefined && { single_task_description: params.singleTaskDescription }),
     created_at: params.now,
     ttl: params.ttlEpochSeconds,
   };
@@ -252,6 +272,8 @@ function parsePendingPlan(item: Record<string, unknown>): PendingPlan {
     ...(item.revision_round !== undefined && Number.isFinite(Number(item.revision_round)) && { revision_round: Number(item.revision_round) }),
     ...(item.repo_digest !== undefined && { repo_digest: String(item.repo_digest) }),
     ...(item.repo_digest_sha !== undefined && { repo_digest_sha: String(item.repo_digest_sha) }),
+    ...(item.pending_kind === 'single' && { pending_kind: 'single' as const }),
+    ...(item.single_task_description !== undefined && { single_task_description: String(item.single_task_description) }),
     created_at: String(item.created_at ?? ''),
   };
 }

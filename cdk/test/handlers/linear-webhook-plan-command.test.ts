@@ -189,3 +189,62 @@ describe('plan-command path (T4/T5) through the real handler', () => {
     expect(putNodes[1].max_budget_usd).toBe(1);
   });
 });
+
+/** A SINGLE-task pending plan (a :decompose that declined to split — F-single-gate). */
+function singlePendingItem(): Record<string, unknown> {
+  return {
+    orchestration_id: 'orch_x',
+    sub_issue_id: PENDING_PLAN_SK,
+    parent_linear_issue_id: 'parent-1',
+    linear_workspace_id: 'org-1',
+    repo: 'o/r',
+    linear_project_id: 'project-1',
+    platform_user_id: 'user-1',
+    nodes: [],
+    pending_kind: 'single',
+    single_task_description: 'ABC-1: add the amplify build spec',
+    created_at: '2026-07-07T00:00:00.000Z',
+  };
+}
+
+describe('single-task verdict path (F-single-gate) through the real handler', () => {
+  beforeEach(() => {
+    ddbSend.mockReset();
+    createTaskCoreMock.mockReset().mockResolvedValue({ statusCode: 201, body: '' });
+    reactToCommentMock.mockReset().mockResolvedValue(undefined);
+    upsertStatusCommentMock.mockReset().mockResolvedValue('c-1');
+    resolveLinearOauthTokenMock.mockReset().mockResolvedValue({
+      accessToken: 'lin_at',
+      workspaceSlug: 'acme',
+      oauthSecretArn: 'arn:aws:secretsmanager:us-east-1:123:secret:bgagent-linear-oauth-acme',
+    });
+    // Get → the single pending plan; Update(claim) → win; Delete(consume) → ALL_OLD.
+    ddbSend.mockImplementation((cmd: { _type?: string; input?: { Key?: unknown } }) => {
+      if (cmd._type === 'Get') return Promise.resolve({ Item: singlePendingItem() });
+      if (cmd._type === 'Update') return Promise.resolve({});
+      if (cmd._type === 'Delete') return Promise.resolve({ Attributes: singlePendingItem() });
+      return Promise.resolve({});
+    });
+  });
+
+  test('approve on a single pending plan → runs ONE coding task (no seed), carries the stored description', async () => {
+    await handler(commentEvent('@bgagent approve'));
+    expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+    const [req, ctx] = createTaskCoreMock.mock.calls[0];
+    // A single coding task — NOT a decompose-v1 re-plan, NOT a graph seed.
+    expect(req.workflow_ref).toBeUndefined(); // default coding/new-task-v1
+    expect(req.task_description).toBe('ABC-1: add the amplify build spec');
+    expect(ctx.channelSource).toBe('linear');
+    expect(ctx.channelMetadata.linear_issue_id).toBe('parent-1');
+    // Consumed the pending plan (a Delete fired).
+    expect(ddbSend.mock.calls.some((c) => c[0]?._type === 'Delete')).toBe(true);
+  });
+
+  test('reject on a single pending plan → discards, runs nothing', async () => {
+    await handler(commentEvent('@bgagent reject'));
+    expect(createTaskCoreMock).not.toHaveBeenCalled();
+    expect(ddbSend.mock.calls.some((c) => c[0]?._type === 'Delete')).toBe(true);
+    const note = upsertStatusCommentMock.mock.calls.map((c) => c[2]).join(' ');
+    expect(note).toMatch(/cancelled/i);
+  });
+});

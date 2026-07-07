@@ -219,10 +219,11 @@ describe('applyDecompositionResult — #299 agent-native entry (pre-parsed plan,
     expect(e.putPendingPlan).not.toHaveBeenCalled();
   });
 
-  test('agent decline is TRUSTED (underspecified:false) → single_task, NOT the ask-for-detail path', async () => {
+  test('agent decline is TRUSTED (underspecified:false), NOT the ask-for-detail path', async () => {
     // The agent planned with full repo context, so a decline is a confident
     // one-cohesive-unit judgement — even for a short reasoning. The reconciler
     // always passes underspecified:false; assert we never route to the HOLD note.
+    // (autoRun:true = :auto → runs immediately; the :decompose GATE is tested below.)
     const e = effects();
     const declined: DecompositionResult = { kind: 'single_task', reasoning: 'one cohesive change' };
     const r = await applyDecompositionResult({
@@ -230,13 +231,63 @@ describe('applyDecompositionResult — #299 agent-native entry (pre-parsed plan,
       planned: declined,
       underspecified: false,
       caps: CAPS,
-      autoRun: false,
+      autoRun: true,
       effects: e,
     });
     expect(r).toEqual({ kind: 'single_task', reason: 'judge_declined' });
     const note = (e.postComment as jest.Mock).mock.calls[0][1];
     expect(note).toMatch(/single cohesive change/i);
     expect(note).not.toMatch(/add a bit more detail/i);
+  });
+
+  test('#299 F-single-gate: :decompose decline PROPOSES a single task + persists pending_kind:single (no auto-run)', async () => {
+    const e = effects();
+    const declined: DecompositionResult = { kind: 'single_task', reasoning: 'one cohesive change' };
+    const r = await applyDecompositionResult({
+      parentIssueId: PARENT,
+      planned: declined,
+      underspecified: false,
+      caps: CAPS,
+      autoRun: false, // :decompose (approve-first)
+      singleTaskDescription: 'ABC-1: do the thing\n\nfull body',
+      effects: e,
+    });
+    // Gated: handled + awaiting approval, NOT single_task (which would auto-run).
+    expect(r).toEqual({ kind: 'handled', reason: 'awaiting_single_approval' });
+    const note = (e.postComment as jest.Mock).mock.calls[0][1] as string;
+    expect(note).toMatch(/@bgagent approve/);
+    expect(note).toMatch(/haven't started/i);
+    // Persisted a single-kind pending plan carrying the description approve will run.
+    const put = (e.putPendingPlan as jest.Mock).mock.calls[0][0];
+    expect(put.pendingKind).toBe('single');
+    expect(put.singleTaskDescription).toBe('ABC-1: do the thing\n\nfull body');
+    expect(put.nodes).toEqual([]);
+  });
+
+  test('#299 F-single-gate: :auto decline still auto-runs (opted out of approval)', async () => {
+    const e = effects();
+    const declined: DecompositionResult = { kind: 'single_task', reasoning: 'one cohesive change' };
+    const r = await applyDecompositionResult({
+      parentIssueId: PARENT,
+      planned: declined,
+      underspecified: false,
+      caps: CAPS,
+      autoRun: true, // :auto
+      singleTaskDescription: 'ABC-1: do the thing',
+      effects: e,
+    });
+    expect(r).toEqual({ kind: 'single_task', reason: 'judge_declined' });
+    expect(e.putPendingPlan).not.toHaveBeenCalled();
+  });
+
+  test('#299 F-single-gate: :decompose decline WITHOUT a description falls back to auto-run (back-compat)', async () => {
+    const e = effects();
+    const declined: DecompositionResult = { kind: 'single_task', reasoning: 'cohesive' };
+    const r = await applyDecompositionResult({
+      parentIssueId: PARENT, planned: declined, underspecified: false, caps: CAPS, autoRun: false, effects: e,
+    });
+    expect(r).toEqual({ kind: 'single_task', reason: 'judge_declined' });
+    expect(e.putPendingPlan).not.toHaveBeenCalled();
   });
 
   test('unparseable/invalid plan (kind:error) → honest planner-error note + single_task', async () => {

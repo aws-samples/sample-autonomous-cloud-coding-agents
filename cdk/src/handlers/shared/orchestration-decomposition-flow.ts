@@ -53,6 +53,7 @@ import {
   renderPlanProposal,
   renderRevisionOverCapNote,
   renderSingleTaskNote,
+  renderSingleTaskProposal,
   renderUnderspecifiedDecomposeNote,
 } from './orchestration-decomposition-render';
 import type { DecompositionPlan, ProjectDecompositionCaps } from './orchestration-decomposition-types';
@@ -88,6 +89,10 @@ export interface DecompositionEffects {
      *  at, persisted for a later revise run to reuse. */
     repoDigest?: string;
     repoDigestSha?: string;
+    /** #299 single-task gate: 'single' → approve runs one coding task, not seed. */
+    pendingKind?: 'graph' | 'single';
+    /** #299 single-task gate: the task_description approve should run (single kind). */
+    singleTaskDescription?: string;
   }) => Promise<boolean>;
   /** Atomically take the pending plan (approve). Returns its nodes, or null. */
   readonly consumePendingPlan: () => Promise<{ nodes: DecompositionPlan['nodes'] } | null>;
@@ -126,6 +131,18 @@ export interface ApplyDecompositionResultParams {
   readonly caps: ProjectDecompositionCaps;
   readonly autoRun: boolean;
   /**
+   * #299 single-task gate (F-single-gate): the parent issue's own task_description,
+   * used when a ``:decompose`` (manual) run declines to split. Instead of
+   * auto-running the single task (which silently bypassed the approve-first
+   * contract the ``:decompose`` label promises), we PROPOSE it — persist a
+   * ``pending_kind:'single'`` plan carrying this description + post an approve
+   * prompt — so nothing spends until ``@bgagent approve``. ``:auto`` still
+   * auto-runs (it opted out of approval), and this is unused there. Absent → the
+   * gate can't persist a single pending plan, so it falls back to the old
+   * auto-run (back-compat; the reconciler always supplies it).
+   */
+  readonly singleTaskDescription?: string;
+  /**
    * #299 revise loop: revision number (0/absent = original proposal; N≥1 = the
    * Nth re-plan from reviewer feedback). Threaded into the proposal render
    * ("Revised breakdown (round N)") and passed to putPendingPlan so the persisted
@@ -157,7 +174,9 @@ export interface ApplyDecompositionResultParams {
 export async function applyDecompositionResult(
   params: ApplyDecompositionResultParams,
 ): Promise<DecompositionFlowResult> {
-  const { parentIssueId, planned, underspecified, caps, autoRun, effects, revisionRound } = params;
+  const {
+    parentIssueId, planned, underspecified, caps, autoRun, effects, revisionRound, singleTaskDescription,
+  } = params;
 
   if (planned.kind === 'error') {
     // ABCA-490: the planner errored or TIMED OUT. Post the honest,
@@ -175,6 +194,31 @@ export async function applyDecompositionResult(
       await effects.postComment(parentIssueId, renderUnderspecifiedDecomposeNote());
       return { kind: 'handled', reason: 'underspecified' };
     }
+    // #299 single-task gate (F-single-gate): a MANUAL (``:decompose``) run that
+    // declines to split must still honor the approve-first contract — propose the
+    // single task and WAIT for ``@bgagent approve`` rather than auto-running it
+    // (the pre-fix code silently spent on one task, making ``:decompose`` behave
+    // exactly like ``:auto`` on a single-cohesive issue — the whole point of the
+    // approval gate was lost precisely there). ``:auto`` still auto-runs (it opted
+    // out of approval). Requires the parent's task_description to persist for the
+    // approve to run; without it (older caller) fall back to the old auto-run.
+    if (!autoRun && singleTaskDescription) {
+      await effects.postComment(parentIssueId, renderSingleTaskProposal(planned.reasoning));
+      const persisted = await effects.putPendingPlan({
+        nodes: [],
+        pendingKind: 'single',
+        singleTaskDescription,
+        ...(revisionRound !== undefined && { revisionRound }),
+      });
+      if (!persisted) {
+        logger.info('Mode B single-task proposal: pending plan already existed (redelivery)', { parent_issue_id: parentIssueId });
+        return { kind: 'noop', reason: 'duplicate_single_proposal' };
+      }
+      return { kind: 'handled', reason: 'awaiting_single_approval' };
+    }
+    // ``:auto`` (or a caller without a task_description): trust the decline and
+    // run one task now — applyDecompositionResult posted the note; the caller
+    // creates the task on ``single_task``.
     await effects.postComment(parentIssueId, renderSingleTaskNote(planned.reasoning));
     return { kind: 'single_task', reason: 'judge_declined' };
   }

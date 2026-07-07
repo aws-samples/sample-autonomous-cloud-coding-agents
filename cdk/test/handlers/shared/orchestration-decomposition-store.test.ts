@@ -157,6 +157,32 @@ describe('putPendingPlan — create-once', () => {
     expect(cmd.input.Item!.repo_digest_sha).toBe('a1b2c3d4e5f6');
   });
 
+  test('#299 F-single-gate: persists pending_kind + single_task_description; getPendingPlan reads them back', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    await putPendingPlan({
+      ddb: ddb as never,
+      tableName: 'OrchTable',
+      parentLinearIssueId: PARENT,
+      linearWorkspaceId: 'WS',
+      repo: 'owner/repo',
+      nodes: [],
+      platformUserId: 'u1',
+      pendingKind: 'single',
+      singleTaskDescription: 'ABC-1: do the thing',
+      now: NOW,
+      ttlEpochSeconds: TTL,
+    });
+    const cmd = ddb.send.mock.calls[0][0] as PutCommand;
+    expect(cmd.input.Item!.pending_kind).toBe('single');
+    expect(cmd.input.Item!.single_task_description).toBe('ABC-1: do the thing');
+
+    // read back
+    const readDdb = { send: jest.fn().mockResolvedValue({ Item: cmd.input.Item }) };
+    const plan = await getPendingPlan(readDdb as never, 'OrchTable', PARENT);
+    expect(plan!.pending_kind).toBe('single');
+    expect(plan!.single_task_description).toBe('ABC-1: do the thing');
+  });
+
   test('#299 T2: repo_digest fields are omitted when not provided (no undefined attrs)', async () => {
     const ddb = { send: jest.fn().mockResolvedValue({}) };
     await putPendingPlan({
