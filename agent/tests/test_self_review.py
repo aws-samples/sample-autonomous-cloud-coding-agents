@@ -3,10 +3,12 @@
 from unittest.mock import MagicMock, patch
 
 from models import AgentResult, RepoSetup, TaskConfig
+from prompts.self_review import SELF_REVIEW_PROMPT
 from self_review import (
     _MAX_DIFF_CHARS,
     _SUMMARY_FILENAME,
     _get_diff,
+    _render_review_prompt,
     _truncate_diff,
     read_self_review_summary,
     run_self_review,
@@ -179,6 +181,59 @@ class TestTruncateDiff:
         diff = "a" * (_MAX_DIFF_CHARS + 1)
         result = _truncate_diff(diff)
         assert "truncated" in result
+
+
+class TestRenderReviewPrompt:
+    """Test _render_review_prompt — custom template with fail-open fallback."""
+
+    def test_none_template_uses_builtin(self):
+        result = _render_review_prompt(None, "the-diff", "the-task")
+        assert result == SELF_REVIEW_PROMPT.format(diff="the-diff", task_description="the-task")
+
+    def test_custom_template_rendered(self):
+        template = "Review only security.\n<diff>{diff}</diff>\nTask: {task_description}"
+        result = _render_review_prompt(template, "the-diff", "the-task")
+        assert result == "Review only security.\n<diff>the-diff</diff>\nTask: the-task"
+
+    def test_custom_template_may_omit_task_description(self):
+        template = "Focus on tests.\n{diff}"
+        result = _render_review_prompt(template, "the-diff", "the-task")
+        assert result == "Focus on tests.\nthe-diff"
+
+    def test_fallback_when_template_lacks_diff(self):
+        template = "Review the changes for task: {task_description}"
+        result = _render_review_prompt(template, "the-diff", "the-task")
+        assert result == SELF_REVIEW_PROMPT.format(diff="the-diff", task_description="the-task")
+
+    def test_fallback_on_unknown_placeholder(self):
+        template = "{diff} and {not_a_placeholder}"
+        result = _render_review_prompt(template, "the-diff", "the-task")
+        assert result == SELF_REVIEW_PROMPT.format(diff="the-diff", task_description="the-task")
+
+    def test_fallback_on_stray_brace(self):
+        template = "{diff} with a stray } brace"
+        result = _render_review_prompt(template, "the-diff", "the-task")
+        assert result == SELF_REVIEW_PROMPT.format(diff="the-diff", task_description="the-task")
+
+    @patch("self_review._get_diff", return_value="diff --git a/f\n+line\n")
+    @patch("self_review.asyncio.run")
+    @patch("self_review._render_review_prompt", wraps=_render_review_prompt)
+    def test_run_self_review_forwards_template(self, mock_render, mock_asyncio_run, mock_diff):
+        mock_asyncio_run.return_value = AgentResult(status="success", turns=1, num_turns=1)
+        config = _make_config()
+        setup = _make_setup()
+        agent_result = _make_agent_result()
+
+        run_self_review(
+            config,
+            setup,
+            agent_result,
+            MagicMock(),
+            MagicMock(),
+            prompt_template="Custom: {diff}",
+        )
+
+        assert mock_render.call_args[0][0] == "Custom: {diff}"
 
 
 class TestBudgetAndTurnComputation:
@@ -481,7 +536,12 @@ class TestSelfReviewStepHandler:
                 "agent_config": {"tier": "standard", "allowed_tools": ["Bash"]},
                 "steps": [
                     {"kind": "run_agent"},
-                    {"kind": "self_review", "name": "review", "max_turns": 4},
+                    {
+                        "kind": "self_review",
+                        "name": "review",
+                        "max_turns": 4,
+                        "prompt": "Custom review: {diff}",
+                    },
                 ],
                 "terminal_outcomes": {"primary": "pr_url"},
                 "status": "production",
@@ -509,8 +569,9 @@ class TestSelfReviewStepHandler:
         with patch("self_review.run_self_review", return_value=review) as mock_review:
             outcome = _handle_self_review(step, ctx)
 
-        # The step's max_turns (4) is forwarded to run_self_review.
+        # The step's max_turns (4) and prompt are forwarded to run_self_review.
         assert mock_review.call_args.kwargs["max_turns"] == 4
+        assert mock_review.call_args.kwargs["prompt_template"] == "Custom review: {diff}"
         assert outcome.status == "succeeded"
         assert outcome.data["self_review_ran"] is True
         # Review turns/cost accumulated onto the shared agent_result.
@@ -574,5 +635,7 @@ class TestSelfReviewStepHandler:
         with patch("self_review.run_self_review", return_value=review) as mock_review:
             _handle_self_review(step, ctx)
         assert mock_review.call_args.kwargs["max_turns"] == _DEFAULT_SELF_REVIEW_MAX_TURNS
+        # No step prompt ⇒ the built-in review prompt is used.
+        assert mock_review.call_args.kwargs["prompt_template"] is None
         # Step model unused beyond fixture; keep import referenced.
         assert Step is not None

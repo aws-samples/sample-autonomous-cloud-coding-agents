@@ -93,6 +93,31 @@ def _build_review_system_prompt(config: TaskConfig, setup: RepoSetup) -> str:
     )
 
 
+def _render_review_prompt(prompt_template: str | None, diff: str, task_description: str) -> str:
+    """Render the review user prompt from a workflow-supplied template.
+
+    The template (the ``self_review`` step's ``prompt`` field) is rendered with
+    ``{diff}`` and ``{task_description}`` placeholders. Fail-open: a template
+    that is malformed (stray braces, unknown placeholders) or omits ``{diff}``
+    — a review prompt that never shows the diff reviews nothing — falls back to
+    the built-in ``SELF_REVIEW_PROMPT`` with a logged warning, so a bad
+    workflow edit degrades the review rather than breaking it.
+    """
+    if prompt_template is not None:
+        try:
+            rendered = prompt_template.format(diff=diff, task_description=task_description)
+            if diff in rendered:
+                return rendered
+            log("WARN", "self_review: custom prompt lacks {diff} — using built-in prompt")
+        except (KeyError, IndexError, ValueError) as e:
+            log(
+                "WARN",
+                f"self_review: custom prompt failed to render "
+                f"({type(e).__name__}: {e}) — using built-in prompt",
+            )
+    return SELF_REVIEW_PROMPT.format(diff=diff, task_description=task_description)
+
+
 def _milestone(progress: _ProgressWriter | None, name: str, detail: str) -> None:
     """Emit a progress milestone if a writer is wired up (no-op otherwise)."""
     if progress is not None:
@@ -107,6 +132,7 @@ def run_self_review(
     progress: _ProgressWriter | None,
     *,
     max_turns: int = _DEFAULT_REVIEW_MAX_TURNS,
+    prompt_template: str | None = None,
 ) -> AgentResult | None:
     """Run the self-review phase: LLM critiques its own diff and fixes issues.
 
@@ -114,6 +140,9 @@ def run_self_review(
     the resolved workflow is the enablement signal — there is no separate
     feature flag; ``max_turns`` comes from the step (``self_review.max_turns``,
     default 5) and caps the review loop within the task's remaining allowance.
+    ``prompt_template`` (the step's ``prompt`` field) replaces the built-in
+    review prompt when supplied — see ``_render_review_prompt`` for the
+    placeholder contract and fail-open fallback.
 
     Returns the AgentResult from the review phase, or None if skipped.
     Fail-open: errors are logged but never block the pipeline.
@@ -156,7 +185,7 @@ def run_self_review(
 
     # Build the review prompt
     task_desc = config.task_description or f"Issue #{config.issue_number}"
-    user_prompt = SELF_REVIEW_PROMPT.format(diff=diff, task_description=task_desc)
+    user_prompt = _render_review_prompt(prompt_template, diff, task_desc)
     system_prompt = _build_review_system_prompt(config, setup)
 
     # Build a modified config for the review run

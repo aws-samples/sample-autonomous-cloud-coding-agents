@@ -144,6 +144,9 @@ class Step(BaseModel):
     # self_review: cap on turns the review loop may use (default applied by the
     # handler when omitted).
     max_turns: int | None = None
+    # self_review: optional custom review prompt template ({diff} /
+    # {task_description} placeholders); the built-in prompt when omitted.
+    prompt: str | None = None
 
 
 class TerminalOutcomes(BaseModel):

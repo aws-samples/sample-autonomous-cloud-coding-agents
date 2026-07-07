@@ -219,6 +219,11 @@
             "description": "For self_review: cap on agent turns the self-review loop may use (drawn from the task's remaining turn/budget allowance). Defaults to 5 when omitted.",
             "minimum": 1,
             "maximum": 20
+          },
+          "prompt": {
+            "type": "string",
+            "description": "For self_review: custom review prompt template, rendered with {diff} and {task_description} placeholders. Must contain {diff}. The built-in prompt is used when omitted, and as a logged fail-open fallback when the template is malformed or lacks {diff}.",
+            "minLength": 1
           }
         }
       }

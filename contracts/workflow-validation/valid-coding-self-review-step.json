@@ -1,6 +1,6 @@
 {
   "name": "valid-coding-self-review-step",
-  "description": "Coding workflow with an optional pre-PR self_review step (advisory, on_failure: continue). self_review is repo-only and non-side-effecting, so on_failure: continue is permitted (unlike ensure_pr).",
+  "description": "Coding workflow with an optional pre-PR self_review step (advisory, on_failure: continue). self_review is repo-only and non-side-effecting, so on_failure: continue is permitted (unlike ensure_pr). The step also carries a custom review prompt ({diff} / {task_description} placeholders), exercising the configurable-prompt shape.",
   "workflow": {
     "id": "coding/new-task-v1",
     "version": "1.0.0",
@@ -61,7 +61,8 @@
         "kind": "self_review",
         "name": "review",
         "on_failure": "continue",
-        "max_turns": 5
+        "max_turns": 5,
+        "prompt": "Review the following diff with a security-first focus.\n<diff>{diff}</diff>\nTask: {task_description}\nWrite findings to .self-review-summary.md."
       },
       {
         "kind": "verify_build",

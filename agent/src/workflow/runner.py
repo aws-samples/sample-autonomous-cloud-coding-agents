@@ -573,6 +573,8 @@ def _handle_self_review(step: Step, ctx: StepContext) -> StepOutcome:
     capped at ``step.max_turns`` turns (default 5) drawn from the task's
     remaining turn/budget allowance, and accumulates the review's turns/cost back
     onto ``ctx.agent_result`` so the terminal result reflects the full task.
+    ``step.prompt``, when set, replaces the built-in review prompt (rendered
+    with ``{diff}`` / ``{task_description}``; fail-open to the built-in).
 
     Authored as an advisory step (``on_failure: continue``): a review that is
     skipped (read-only, no diff, no remaining turns) or fails is recorded but
@@ -604,6 +606,7 @@ def _handle_self_review(step: Step, ctx: StepContext) -> StepOutcome:
         ctx.trajectory,
         ctx.progress,
         max_turns=step.max_turns or _DEFAULT_SELF_REVIEW_MAX_TURNS,
+        prompt_template=step.prompt,
     )
     if review_result is None:
         # Skipped (read-only / empty diff / no remaining turns) — not a failure.
