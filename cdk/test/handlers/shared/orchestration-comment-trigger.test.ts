@@ -19,6 +19,7 @@
 
 import {
   buildIterationInstruction,
+  detectNearMissMention,
   isBotAuthoredComment,
   parseCommentTrigger,
 } from '../../../src/handlers/shared/orchestration-comment-trigger';
@@ -121,5 +122,55 @@ describe('buildIterationInstruction', () => {
   test('falls back to a generic directive for a bare mention', () => {
     expect(buildIterationInstruction({ triggered: true, instruction: '' }))
       .toMatch(/latest review feedback/i);
+  });
+});
+
+describe('detectNearMissMention (#299 BLOCKER-2 — @abca black hole)', () => {
+  test('@abca (label-name confusion) is a near-miss → nudge', () => {
+    expect(detectNearMissMention('@abca approve')).toBe(true);
+    expect(detectNearMissMention('hey @abca can you make it 2 tasks')).toBe(true);
+    // …even with a :suffix the reviewer copied from the label.
+    expect(detectNearMissMention('@abca:decompose please')).toBe(true);
+  });
+
+  test('a boundary-miss @bgagent handle is a near-miss (parseCommentTrigger deliberately skips it)', () => {
+    // parseCommentTrigger's `@bgagent(?![\w.])` does NOT trigger on these …
+    expect(parseCommentTrigger('ping @bgagentbot for help').triggered).toBe(false);
+    // … so detectNearMissMention catches them for the nudge instead of a silent drop.
+    expect(detectNearMissMention('ping @bgagentbot for help')).toBe(true);
+    expect(detectNearMissMention('@bgagentx approve')).toBe(true);
+  });
+
+  test('spelled-out / hyphenated variants are near-misses', () => {
+    expect(detectNearMissMention('@bg-agent approve')).toBe(true);
+    expect(detectNearMissMention('@bg_agent approve')).toBe(true);
+    expect(detectNearMissMention('@background-agent approve')).toBe(true);
+    expect(detectNearMissMention('@bgbot approve')).toBe(true);
+  });
+
+  test('the CORRECT @bgagent handle is NOT a near-miss (it triggers normally)', () => {
+    // A real trigger never reaches the near-miss branch, but assert it here too:
+    // the exact token must not be flagged as a wrong handle.
+    expect(detectNearMissMention('@bgagent approve')).toBe(false);
+    expect(detectNearMissMention('@bgagent make it 2 tasks')).toBe(false);
+  });
+
+  test('an email-like foo@bgagent.io is NOT a near-miss (not a mention at all)', () => {
+    expect(detectNearMissMention('email me at foo@bgagent.io')).toBe(false);
+  });
+
+  test('ordinary human discussion with no bot handle → not a near-miss', () => {
+    expect(detectNearMissMention('this looks good, merging soon')).toBe(false);
+    expect(detectNearMissMention('cc @teammate can you review')).toBe(false);
+    expect(detectNearMissMention('')).toBe(false);
+    expect(detectNearMissMention(null)).toBe(false);
+    expect(detectNearMissMention(undefined)).toBe(false);
+  });
+
+  test("the bot's own comments are never near-misses (no self-nudge loop)", () => {
+    // The wrong-mention nudge is 👋-prefixed → bot-authored → must not re-detect.
+    expect(detectNearMissMention('👋 I answer to `@bgagent` — I don\'t pick up other @-names')).toBe(false);
+    // A plan comment embeds a literal "@bgagent approve" example — still not a near-miss.
+    expect(detectNearMissMention('🗂️ Proposed breakdown … reply `@bgagent approve`')).toBe(false);
   });
 });

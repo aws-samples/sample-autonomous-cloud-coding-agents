@@ -104,6 +104,55 @@ export function isBotAuthoredComment(body: string): boolean {
 }
 
 /**
+ * #299 BLOCKER-2 (@abca black hole) — near-miss mention handles. A reviewer who
+ * addresses the bot by the WRONG handle (most often ``@abca`` — confusing the
+ * trigger LABEL for the mention handle — or a boundary-miss like ``@bgagentx``)
+ * previously fell into a silent black hole: {@link parseCommentTrigger} returned
+ * ``triggered: false`` and the webhook dropped the comment with no reply and no
+ * reaction, so the reviewer had no idea their instruction was never seen.
+ *
+ * This is a DELIBERATELY NARROW allowlist of handles that are clearly meant for
+ * THIS bot but aren't the exact ``@bgagent`` token — so the near-miss nudge never
+ * fires on a real teammate mention. Generic words (``@agent``/``@bot``) are
+ * intentionally EXCLUDED (they can be real usernames); only bot-specific
+ * near-misses qualify. Matching is done by {@link detectNearMissMention}.
+ */
+const NEAR_MISS_MENTION_PATTERNS: readonly RegExp[] = [
+  // @abca (+ optional :suffix like @abca:decompose) — the label-name confusion.
+  /@abca\b/i,
+  // @bgagent immediately followed by a word char — a boundary-miss that
+  // parseCommentTrigger's `@bgagent(?![\w.])` deliberately does NOT trigger
+  // (@bgagentbot, @bgagentx). NOT `@bgagent ` (a space → real trigger) nor
+  // `@bgagent.` (an email-like foo@bgagent.io → not a mention).
+  /@bgagent\w/i,
+  // Hyphen/underscore variants. The separator is REQUIRED (not optional) so these
+  // match @bg-agent / @bg_agent but NOT the canonical @bgagent (which parses as a
+  // real trigger, not a near-miss) — an optional separator would wrongly flag it.
+  /@bg[-_]agent\b/i,
+  // @bgbot / @bg-bot / @bg_bot — a plausible shorthand. Distinct from @bgagent.
+  /@bg[-_]?bot\b/i,
+  // The spelled-out name — @backgroundagent / @background-agent. Distinct too.
+  /@background[-_]?agent\b/i,
+];
+
+/**
+ * #299 BLOCKER-2 — detect a NEAR-MISS bot mention: the reviewer clearly meant to
+ * address the bot but used the wrong handle (``@abca``, ``@bgagentx``, …), so
+ * {@link parseCommentTrigger} didn't fire. Returns true so the caller can nudge
+ * ("I answer to ``@bgagent``") instead of silently dropping the comment.
+ *
+ * Only consulted in the NOT-triggered branch (a real ``@bgagent`` never reaches
+ * here). Skips the bot's own comments (never nudge ourselves). Strict allowlist
+ * ({@link NEAR_MISS_MENTION_PATTERNS}) so it can't misfire on human discussion or
+ * a genuine teammate mention.
+ */
+export function detectNearMissMention(body: string | undefined | null): boolean {
+  if (!body) return false;
+  if (isBotAuthoredComment(body)) return false;
+  return NEAR_MISS_MENTION_PATTERNS.some((re) => re.test(body));
+}
+
+/**
  * Build the task description handed to ``coding/pr-iteration-v1`` from the
  * comment instruction. When the reviewer left explicit text, that IS the
  * instruction; when they only mentioned ``@bgagent`` with no text, fall back

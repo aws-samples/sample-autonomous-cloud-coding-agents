@@ -41,7 +41,7 @@ import { resolveLinearOauthToken } from './shared/linear-oauth-resolver';
 import { fetchIssueParentId, type SubIssueNode } from './shared/linear-subissue-fetch';
 import { resolveTaskByLinearIssue, prNumberFromTask } from './shared/linear-task-by-issue';
 import { logger } from './shared/logger';
-import { buildIterationInstruction, parseCommentTrigger, parsePlanVerdict, type CommentTrigger } from './shared/orchestration-comment-trigger';
+import { buildIterationInstruction, detectNearMissMention, parseCommentTrigger, parsePlanVerdict, type CommentTrigger } from './shared/orchestration-comment-trigger';
 import { readProjectCaps } from './shared/orchestration-decomposition-caps';
 import {
   runPlanVerdict,
@@ -67,6 +67,7 @@ import {
   renderRevisionCapNote,
   renderRevisionFailedNote,
   renderSingleTaskCancelled,
+  renderWrongMentionNudge,
 } from './shared/orchestration-decomposition-render';
 import {
   consumePendingPlan as consumePendingPlanRow,
@@ -1049,6 +1050,51 @@ async function seedAndReleaseFromGraph(args: {
 }
 
 /**
+ * #299 BLOCKER-2 (@abca black hole) — a comment addressed the bot by the WRONG
+ * handle (@abca — mistaking the trigger label for the mention handle — or a
+ * boundary-miss like @bgagentx). {@link parseCommentTrigger} didn't fire, so the
+ * comment used to vanish silently (no reply, no reaction) and the reviewer never
+ * learned their instruction wasn't seen. Post a one-line nudge to the right
+ * handle + react ❓ so it's visibly acknowledged.
+ *
+ * Idempotent: claim-once on the comment id (a webhook redelivery is a no-op) —
+ * keyed under a distinct ``wrong-mention:`` action so it doesn't collide with the
+ * real-trigger claim if the reviewer later fixes the handle on the same thread.
+ * Best-effort throughout; never throws out of the webhook.
+ */
+async function handleNearMissMention(payload: LinearCommentEvent): Promise<void> {
+  if (!ORCHESTRATION_TABLE || !WORKSPACE_REGISTRY_TABLE) return;
+  const commentedIssueId = payload.data?.issueId ?? payload.data?.issue?.id;
+  const workspaceId = payload.organizationId ?? '';
+  const commentId = payload.data?.id;
+  if (!commentedIssueId || !workspaceId || !commentId) return;
+
+  const resolved = await resolveLinearOauthToken(workspaceId, WORKSPACE_REGISTRY_TABLE);
+  if (!resolved) {
+    logger.info('Near-miss mention: workspace not resolvable — ignoring', { linear_workspace_id: workspaceId });
+    return;
+  }
+
+  const feedbackCtx = { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE };
+  const won = await claimCommentAck(
+    ddb, ORCHESTRATION_TABLE, deriveOrchestrationId(commentedIssueId), `wrong-mention:${commentId}`,
+    new Date().toISOString(), Math.floor(Date.now() / 1000) + ACK_CLAIM_TTL_SECONDS,
+  );
+  if (!won) {
+    logger.info('Near-miss mention: redelivery already handled — skipping', { comment_id: commentId });
+    return;
+  }
+
+  // ❓ on the reviewer's comment + a one-line "I answer to @bgagent" reply, so a
+  // wrong-handle mention is visibly acknowledged instead of vanishing. The reply
+  // is 👋-prefixed (self-trigger guard skips it), so it can't loop.
+  await reactToComment(feedbackCtx, commentId, EMOJI_NEEDS_INPUT);
+  const replyTargetId = payload.data?.parentId ?? commentId;
+  await replyToComment(feedbackCtx, commentedIssueId, replyTargetId, renderWrongMentionNudge());
+  logger.info('Near-miss mention: nudged reviewer to @bgagent', { issue_id: commentedIssueId, comment_id: commentId });
+}
+
+/**
  * #247 A6 comment trigger. A Linear comment with an ``@bgagent`` mention on an
  * orchestrated sub-issue runs a ``coding/pr-iteration-v1`` task on that
  * sub-issue's PR; the comment text is the instruction. When that task
@@ -1068,7 +1114,15 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
   const body = payload.data?.body;
   const trigger = parseCommentTrigger(body);
   if (!trigger.triggered) {
-    // Ordinary human discussion or the agent's own progress comment — ignore.
+    // #299 BLOCKER-2 (@abca black hole): before silently dropping, check for a
+    // NEAR-MISS mention — the reviewer addressed the bot by the wrong handle
+    // (@abca, @bgagentx). That used to vanish with no reply/reaction, so the
+    // reviewer had no idea their instruction was never seen. Nudge them to the
+    // right handle. A genuine non-mention comment (human discussion, the bot's own
+    // progress) still falls through to a silent ignore.
+    if (detectNearMissMention(body)) {
+      await handleNearMissMention(payload);
+    }
     return;
   }
   const subIssueId = payload.data?.issueId ?? payload.data?.issue?.id;
