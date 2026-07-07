@@ -8,9 +8,10 @@ name: integ
 # Trigger model mirrors deploy.yml: build.yml completes -> workflow_run picks it
 # up in the trusted base-repo context (secrets/OIDC available even for fork PRs)
 # -> we resolve whether the PR touches cdk/** or agent/** -> an admin approves
-# the `integ` environment gate -> deploy/assert/destroy runs against the shared
-# account -> a commit status `integ-smoke` is posted back to the PR head so it
-# shows up as a (required) check that blocks merge.
+# the `deploy` environment gate (reused — same gate and role as deploy.yml) ->
+# deploy/assert/destroy runs against the shared account -> a commit status
+# `integ-smoke` is posted back to the PR head so it shows up as a (required)
+# check that blocks merge.
 #
 # Local dev path is unchanged: run `mise //cdk:integ` with your own AWS creds.
 #
@@ -19,9 +20,10 @@ name: integ
 on:
   # zizmor: ignore[dangerous-triggers] — intentional; workflow_run is required so
   # fork PRs can run against the shared account (a fork `pull_request` job gets no
-  # secrets/OIDC). Mitigations: build-success guard, path-filter, `integ`
-  # environment approval gate (admin reviews fork test code before it runs with
-  # the privileged role), least-privilege role, status-only tokens per job.
+  # secrets/OIDC). Mitigations: build-success guard, path-filter, fork
+  # `safe-to-test` label gate, `deploy` environment approval gate (admin reviews
+  # fork test code before it runs with the deploy role), status-only tokens per
+  # job.
   workflow_run:
     workflows: [build]
     types: [completed]
@@ -41,7 +43,7 @@ jobs:
   # docs/cli-only PRs get an immediate green (skipped) status and never deadlock
   # the required check.
   resolve:
-    # Manual dispatch is restricted to main (defence in depth — the `integ`
+    # Manual dispatch is restricted to main (defence in depth — the `deploy`
     # environment approval is the primary gate). PR runs come via workflow_run.
     if: >-
       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
@@ -131,7 +133,7 @@ jobs:
 
           # Fork-PR safety: only run fork-authored code after a maintainer has
           # applied the `safe-to-test` label (defence in depth on top of the
-          # `integ` environment approval). If it's absent, leave the status
+          # `deploy` environment approval). If it's absent, leave the status
           # pending and don't run — re-trigger once the label is added.
           if [[ "$WF_HEAD_REPO" != "$REPO" ]]; then
             if ! LABELS=$(gh api "repos/$REPO/issues/$PR_NUMBER/labels" --jq '.[].name'); then
@@ -166,15 +168,16 @@ jobs:
             echo "PR #$PR_NUMBER has no cdk/** or agent/** changes — integ skipped (green)."
           fi
 
-  # The admin-gated deploy -> assert -> destroy. The `integ` environment's
-  # required reviewer is the approval gate; while it waits, the integ-smoke
-  # status stays pending and merge stays blocked.
+  # The admin-gated deploy -> assert -> destroy. The `deploy` environment's
+  # required reviewers (coding-agents-admin / coding-agents-maintainers) are the
+  # approval gate; while it waits, the integ-smoke status stays pending and merge
+  # stays blocked. Reuses deploy.yml's environment/role — no separate integ role.
   integ:
     needs: resolve
     if: needs.resolve.outputs.applicable == 'true'
     name: CDK integ smoke (Task API)
     runs-on: ubuntu-latest
-    environment: integ
+    environment: deploy
     timeout-minutes: 45
     permissions:
       id-token: write
@@ -186,8 +189,8 @@ jobs:
       - name: Checkout PR head (incl. forks)
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
-          # Approving the `integ` environment authorizes this fork-authored test
-          # code to run with the privileged role — the approver MUST review
+          # Approving the `deploy` environment authorizes this fork-authored test
+          # code to run with the deploy role — the approver MUST review
           # cdk/test/integ/** changes before approving.
           repository: ${{ needs.resolve.outputs.head_repo }}
           ref: ${{ needs.resolve.outputs.head_sha }}
