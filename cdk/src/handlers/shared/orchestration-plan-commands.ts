@@ -133,11 +133,20 @@ export function parsePlanCommand(instruction: string): PlanCommand | null {
     return { kind: 'drop', indices: idxs.map((n) => n - 1) };
   }
 
-  // MERGE: "merge 1 and 2" / "combine 2, 3" / "merge #1 #3". Needs ≥2 indices.
+  // MERGE: "merge 1 and 2" / "combine 2, 3" / "merge #1 #3". Needs ≥2 distinct
+  // indices. Two cases when it's a merge verb but the indices don't make ≥2
+  // distinct targets:
+  //  - NO indices ("merge them all") → not a concrete command → revise loop (null).
+  //  - Concrete-but-invalid indices ("merge 1 1", "merge 2") → an EXPLICIT
+  //    structural intent the reviewer typed. Return the command so applyPlanCommand
+  //    rejects it with "needs at least two distinct sub-issues" and the plan is
+  //    LEFT UNTOUCHED. (Bug: previously we deduped BEFORE this check, so "merge 1 1"
+  //    collapsed to one index → null → fell through to the semantic re-plan, which
+  //    fabricated a "merge the first two" and silently rewrote the plan — ABCA-598.)
   if (MERGE_VERBS.includes(firstWord)) {
-    const idxs = dedupe(extractIndices(text));
-    if (idxs.length < 2) return null; // "merge them all" → revise loop
-    return { kind: 'merge', indices: idxs.map((n) => n - 1) };
+    const raw = extractIndices(text);
+    if (raw.length === 0) return null; // "merge them all" → revise loop
+    return { kind: 'merge', indices: dedupe(raw).map((n) => n - 1) };
   }
 
   return null;

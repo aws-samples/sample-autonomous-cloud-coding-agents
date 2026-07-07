@@ -768,6 +768,25 @@ export async function handler(event: ProcessorEvent): Promise<void> {
           decompose_caps_max_parent_budget_usd: String(decompositionCaps.max_parent_budget_usd),
         }),
       };
+      // Dedup guard (ABCA-606): a rapid label off/on toggle — or a webhook
+      // redelivery — re-enters this branch and would dispatch a SECOND (third…)
+      // decompose-v1 planning task for the same issue, since nothing here consults
+      // the pending-plan/active-task state (getPendingPlan is only on the comment
+      // path). Claim once per issue+mode over the redelivery window; a lost claim
+      // means a planning run for this issue+mode is already in flight, so skip.
+      // (A genuine re-decompose after the plan is consumed/expired is rare and is
+      // caught downstream by the pending-plan + already-decomposed guards.)
+      const planClaimTtl = Math.floor(Date.now() / 1000) + ACK_CLAIM_TTL_SECONDS;
+      const planClaimWon = await claimCommentAck(
+        ddb, ORCHESTRATION_TABLE, deriveOrchestrationId(issue.id),
+        `decompose-dispatch:${decompositionDecision.mode}`, new Date().toISOString(), planClaimTtl,
+      );
+      if (!planClaimWon) {
+        logger.info('Mode B decompose: a planning task for this issue+mode is already in flight — skipping duplicate dispatch', {
+          issue_id: issue.id, mode: decompositionDecision.mode,
+        });
+        return;
+      }
       const planReqId = crypto.randomUUID();
       const planResult = await createTaskCore(
         {
