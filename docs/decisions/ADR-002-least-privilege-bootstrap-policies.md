@@ -68,5 +68,5 @@ The implementation is decomposed into 8 sub-issues, each independently reviewabl
 - RFC #120 — parent issue with full design and sub-issue breakdown
 - `docs/design/DEPLOYMENT_ROLES.md` — current documentation (will become generated)
 - PR #46 — original policy derivation and validation methodology
-- [CDK default bootstrap template](https://github.com/aws/aws-cdk/blob/main/packages/aws-cdk/lib/api/bootstrap/bootstrap-template.yaml)
+- [CDK bootstrapping your environment](https://docs.aws.amazon.com/cdk/v2/guide/bootstrapping-env.html)
 - [IAM managed policy size limit](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_iam-quotas.html)

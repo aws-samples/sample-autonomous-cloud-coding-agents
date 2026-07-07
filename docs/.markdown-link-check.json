@@ -1,0 +1,7 @@
+{
+  "ignorePatterns": [
+    { "pattern": "^https?://", "_comment": "External URLs are not checked: network/bot-block flakiness must not gate every PR (drift-prevention runs on all PRs). Only internal/relative links are validated." },
+    { "pattern": "^/sample-autonomous-cloud-coding-agents/" },
+    { "pattern": "^link$", "_comment": "Masks intentional placeholder in ADR-004 example prose" }
+  ]
+}
