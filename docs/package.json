@@ -8,11 +8,13 @@
     "docs:build": "npm run sync && astro build",
     "build": "npm run docs:build",
     "preview": "astro preview",
-    "security:retire": "retire --path . --severity high"
+    "security:retire": "retire --path . --severity high",
+    "link-check": "bash scripts/link-check.sh"
   },
   "devDependencies": {
     "jest": "^30.4.2",
     "jest-junit": "^17",
+    "markdown-link-check": "^3.13.6",
     "retire": "^5.4.3"
   },
   "dependencies": {
