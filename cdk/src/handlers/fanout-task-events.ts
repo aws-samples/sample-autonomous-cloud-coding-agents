@@ -960,14 +960,18 @@ export function renderLinearFinalStatusComment(args: {
     '',
     `cost: ${costStr} • turns: ${turnsStr} • duration: ${durationStr}`,
   ];
-  // Render the PR URL only on the ⚠️ "shipped a PR but stopped early"
-  // path — that's the case where the agent's own step-2 "PR opened"
-  // comment is *not* guaranteed to have fired (the agent may have
-  // crashed between opening the PR and posting the comment, e.g.
-  // ABCA-91 hitting max-turns on turn 101). On the ✅ success path the
-  // agent's step-2 comment reliably carries the PR link, so duplicating
-  // it here is just noise.
-  if (args.prUrl && shippedDespiteFailure) {
+  // Render the PR URL whenever the task produced one — on BOTH the ✅ success and
+  // the ⚠️ "shipped a PR but stopped early" paths. The prior code rendered it only
+  // on ⚠️, on the assumption that "on ✅ the agent's own step-2 'PR opened' comment
+  // reliably carries the link, so duplicating it is noise." That assumption FAILS
+  // when the agent skips its PR-opened comment — live-caught on ABCA-584, where a
+  // decompose→single task opened PR #395 (pr_url on the record) but posted no
+  // PR-opened comment, so the ✅ completion comment omitted it and the link was
+  // LOST entirely. The completion comment is the terminal, platform-owned surface;
+  // rendering pr_url here guarantees the link is never lost, and a duplicate with
+  // the agent's own comment is far cheaper than a missing PR. (This is the ONE
+  // terminal comment per task, so it can't spam.)
+  if (args.prUrl) {
     lines.push('', `PR: ${args.prUrl}`);
   }
   lines.push('', `_task ${args.taskId}_`);
