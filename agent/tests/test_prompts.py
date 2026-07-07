@@ -445,3 +445,63 @@ class TestDecomposePriorRepoDigest:
         prompt = build_system_prompt(cfg, self._setup("ffffffff11111111"), None, "")
         assert "has changed since this digest" in prompt
         assert "re-verify" in prompt
+
+
+class TestDecomposeRevisionDirective:
+    """#299 BLOCKER-1 — the revise-in-place directive injected on a REVISION round.
+
+    Without it the decompose prompt reads as "plan from scratch" and the agent
+    silently reverts edits the reviewer already accepted; with it the agent is
+    told to EDIT the current plan (apply only the requested change, keep the rest)
+    and report the diff in ``change_summary``.
+    """
+
+    def _setup(self, head_sha: str = "a1b2c3d4e5f6a7b8"):
+        from models import RepoSetup
+
+        return RepoSetup(repo_dir="/w/repo", branch="feat/x", head_sha_before=head_sha)
+
+    def _decompose_config(self, channel_metadata=None) -> TaskConfig:
+        return _config(
+            task_id="t-1",
+            resolved_workflow={"id": "coding/decompose-v1", "version": "1.0.0"},
+            channel_source="linear",
+            channel_metadata=channel_metadata or {},
+        )
+
+    def test_round0_no_revision_directive(self):
+        from prompt_builder import build_system_prompt
+
+        prompt = build_system_prompt(self._decompose_config(), self._setup(), None, "")
+        # The placeholder is always substituted (never leaks a literal {token}).
+        assert "{revision_directive}" not in prompt
+        # Round 0: no "this is a REVISION" framing.
+        assert "This is a REVISION" not in prompt
+
+    def test_revision_round_injects_edit_in_place_directive(self):
+        from prompt_builder import build_system_prompt
+
+        cfg = self._decompose_config({"decompose_revision_round": "1"})
+        prompt = build_system_prompt(cfg, self._setup(), None, "")
+        assert "This is a REVISION" in prompt
+        # It tells the agent to preserve untouched sub-issues and not re-derive.
+        assert "keep every other sub-issue" in prompt
+        assert "do NOT silently undo edits" in prompt.replace("\n", " ")
+        # And to report the diff via change_summary.
+        assert "change_summary" in prompt
+
+    def test_zero_or_garbage_revision_round_is_treated_as_round0(self):
+        from prompt_builder import build_system_prompt
+
+        for raw in ("0", "", "not-a-number"):
+            cfg = self._decompose_config({"decompose_revision_round": raw})
+            prompt = build_system_prompt(cfg, self._setup(), None, "")
+            assert "This is a REVISION" not in prompt, f"round={raw!r} should be round-0"
+
+    def test_change_summary_field_documented_in_emit_step(self):
+        from prompt_builder import build_system_prompt
+
+        # The change_summary field is part of the plan JSON shape regardless of
+        # round (empty on round 0), so the emit step documents it either way.
+        prompt = build_system_prompt(self._decompose_config(), self._setup(), None, "")
+        assert '"change_summary"' in prompt

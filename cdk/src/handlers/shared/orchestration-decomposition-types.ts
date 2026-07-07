@@ -69,6 +69,15 @@ export interface DecompositionPlan {
    * "single cohesive change — running as one task".)
    */
   readonly reasoning: string;
+  /**
+   * #299 BLOCKER-1 (revise-forgets-edits): on a REVISION, the agent's one-sentence
+   * plain-language diff of what it changed from the prior breakdown and what it
+   * kept (e.g. "Split the checkout work into two and left the other three as they
+   * were."). Surfaced ABOVE the updated plan so the reviewer can catch an
+   * unintended revert — the whole point of the fix is that the delta is visible,
+   * not silent. Empty/absent on a first-time (round-0) plan.
+   */
+  readonly changeSummary?: string;
 }
 
 /**

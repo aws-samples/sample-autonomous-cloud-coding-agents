@@ -112,6 +112,15 @@ export function renderPlanProposal(
     ? `**Updated breakdown** — ${plan.nodes.length} sub-issues`
     : `**Proposed breakdown** — ${plan.nodes.length} sub-issues`;
   lines.push(`${PLAN_PROPOSAL_PREFIX} ${header}`);
+  // #299 BLOCKER-1 (revise-forgets-edits): on a revision, lead with the agent's
+  // plain-language diff of what it changed and what it kept, so the reviewer can
+  // immediately catch an unintended revert (a dropped node reappearing, a title
+  // snapping back) instead of having to re-read the whole breakdown. Only on a
+  // revision (round > 0) and only when the agent actually reported a change.
+  if (round > 0 && plan.changeSummary) {
+    lines.push('');
+    lines.push(`**What changed:** ${plan.changeSummary}`);
+  }
   if (plan.reasoning) {
     lines.push('');
     lines.push(`> ${plan.reasoning}`);
@@ -179,6 +188,23 @@ export function renderPendingPlanNudge(): string {
     `${PLAN_PROPOSAL_PREFIX} There's a proposed breakdown above waiting on you. Reply `
     + '`@bgagent approve` to create the sub-issues and start, `@bgagent reject` to discard it, '
     + 'or tell me what to change (e.g. "make it 2 tasks") and I\'ll re-plan.'
+  );
+}
+
+/**
+ * #299 BLOCKER-2 (@abca black hole): posted when a reviewer addresses the bot by
+ * the WRONG handle (most often ``@abca`` — mistaking the trigger LABEL for the
+ * mention handle — or a boundary-miss like ``@bgagentx``). Previously such a
+ * comment fell into a silent black hole (parseCommentTrigger returned
+ * ``triggered: false`` → dropped, no reply, no reaction), so the reviewer never
+ * learned their instruction wasn't seen. This one-liner tells them the right
+ * handle. Bot-prefixed (👋) so the self-trigger guard skips it.
+ */
+export function renderWrongMentionNudge(): string {
+  return (
+    '👋 I answer to `@bgagent` — I don\'t pick up other @-names (the labels are '
+    + '`…:decompose` / `…:auto`, but to talk to me in a comment, mention `@bgagent`). '
+    + 'Re-send your message mentioning `@bgagent` and I\'ll get right on it.'
   );
 }
 

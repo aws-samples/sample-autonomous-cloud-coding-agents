@@ -36,6 +36,7 @@ import {
   renderRevisionFailedNote,
   renderSingleTaskNote,
   renderUnderspecifiedDecomposeNote,
+  renderWrongMentionNudge,
 } from '../../../src/handlers/shared/orchestration-decomposition-render';
 import type { DecompositionPlan, PlannedSubIssue } from '../../../src/handlers/shared/orchestration-decomposition-types';
 
@@ -164,6 +165,31 @@ describe('renderPlanProposal — content', () => {
     // Footer invites more feedback (the iterative loop), not just approve/reject.
     expect(rev).toMatch(/reply with .*@bgagent/i);
   });
+
+  test('#299 BLOCKER-1: a revision with a changeSummary leads with "What changed" so a revert is visible', () => {
+    const revised: DecompositionPlan = {
+      ...FANOUT,
+      changeSummary: 'Split the checkout work into two and left the other two as they were.',
+    };
+    const md = renderPlanProposal(revised, { autoRun: false, revisionRound: 1 });
+    expect(md).toContain('**What changed:**');
+    expect(md).toContain('Split the checkout work into two and left the other two as they were.');
+    // It sits ABOVE the numbered plan (so the reviewer reads the diff first).
+    expect(md.indexOf('What changed')).toBeLessThan(md.indexOf('1. **'));
+  });
+
+  test('#299 BLOCKER-1: changeSummary is suppressed on a first-time (round-0) plan', () => {
+    const withSummary: DecompositionPlan = { ...FANOUT, changeSummary: 'irrelevant on round 0' };
+    // Even if the field somehow rode on a round-0 plan, the round guard hides it.
+    const md = renderPlanProposal(withSummary, { autoRun: false });
+    expect(md).not.toContain('What changed');
+  });
+
+  test('#299 BLOCKER-1: a revision with NO changeSummary (older agent) omits the line cleanly', () => {
+    const md = renderPlanProposal(FANOUT, { autoRun: false, revisionRound: 2 });
+    expect(md).not.toContain('What changed');
+    expect(md).toContain('Updated breakdown'); // still a normal revision render
+  });
 });
 
 describe('renderRevisingNote / renderRevisionCapNote (#299 revise loop)', () => {
@@ -189,6 +215,15 @@ describe('renderRevisingNote / renderRevisionCapNote (#299 revise loop)', () => 
     expect(md).toContain('@bgagent reject');
     expect(md).toMatch(/what to change|re-plan/i);
     expect(isBotAuthoredComment(md)).toBe(true);
+  });
+
+  test('#299 BLOCKER-2: wrong-mention nudge names the right handle and is bot-authored (no self-loop)', () => {
+    const md = renderWrongMentionNudge();
+    expect(md).toContain('@bgagent');
+    // Bot-authored (👋-prefixed) so parseCommentTrigger/detectNearMissMention skip it.
+    expect(isBotAuthoredComment(md)).toBe(true);
+    // Steers the reviewer to re-send mentioning the right handle.
+    expect(md).toMatch(/re-?send|mention/i);
   });
 
   test('over-cap REVISION note keeps the prior plan approvable — no "not started"/"re-label" dead-end', () => {

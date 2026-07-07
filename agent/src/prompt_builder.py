@@ -55,6 +55,21 @@ def build_system_prompt(
         "{prior_repo_digest}",
         _render_prior_repo_digest(config, setup),
     )
+    # #299 BLOCKER-1 (revise-forgets-edits): on a REVISION round the task carries
+    # the CURRENT breakdown (in the guardrail-screened task_description, as
+    # "Earlier proposed breakdown") plus the reviewer's requested change. Without
+    # explicit framing the decompose prompt reads as "plan this issue from
+    # scratch", so the agent re-derives from the issue text and silently reverts
+    # edits the reviewer had already accepted (a dropped node reappears, a reworded
+    # title snaps back). This directive — injected ONLY on a revision — reframes
+    # the task as EDIT-the-current-plan: apply only the requested change, keep
+    # everything else verbatim, and report the diff in ``change_summary``. It lives
+    # in the trusted system prompt (NOT the screened task_description, which can't
+    # carry imperatives without tripping PROMPT_ATTACK — Bug #1a). Empty on round 0.
+    system_prompt = system_prompt.replace(
+        "{revision_directive}",
+        _render_revision_directive(config),
+    )
     # #299 plan-mode T2: the sha the repo was cloned to, echoed into the plan
     # JSON's ``repo_digest_sha`` so a later revise run can drift-check the cached
     # digest. Empty when unknown (best-effort — the platform's sha-shape guard
@@ -183,6 +198,48 @@ def _render_prior_repo_digest(config: TaskConfig, setup: RepoSetup) -> str:
         "   ```\n"
         f"   {digest}\n"
         "   ```"
+    )
+
+
+def _render_revision_directive(config: TaskConfig) -> str:
+    """#299 BLOCKER-1 — render the revise-in-place directive for a REVISION round,
+    or empty string for a first-time plan.
+
+    A revise-round ``coding/decompose-v1`` task carries the CURRENT breakdown in
+    its (guardrail-screened) task_description as reference data, plus the
+    reviewer's requested change. Without explicit framing the decompose prompt
+    reads as "plan this issue from scratch" and the agent re-derives the whole
+    breakdown, silently reverting edits the reviewer had already accepted (dropped
+    nodes reappear, reworded titles snap back — the customer-caught BLOCKER 1).
+
+    This directive reframes the task as an EDIT of the current plan: start FROM it,
+    apply ONLY the requested change, keep every other sub-issue verbatim, and
+    report the diff in ``change_summary``. It must live in the trusted system
+    prompt — the screened task_description can't carry imperatives ("start from
+    this plan and change only X") without tripping the PROMPT_ATTACK filter (Bug
+    #1a). Gated on ``decompose_revision_round`` (set by the webhook only on a
+    revise dispatch); a blank/zero/absent value → round 0 → empty (no-op).
+    """
+    cm = config.channel_metadata or {}
+    raw_round = (cm.get("decompose_revision_round") or "").strip()
+    try:
+        revision_round = int(raw_round)
+    except ValueError:
+        revision_round = 0
+    if revision_round <= 0:
+        return ""
+    return (
+        "\n**This is a REVISION of an existing breakdown, not a fresh plan.** The "
+        "current breakdown and the reviewer's requested change are given below "
+        '(under "Earlier proposed breakdown" and "Requested changes"). Treat '
+        "the current breakdown as your starting point: apply ONLY the change the "
+        "reviewer asked for and keep every other sub-issue EXACTLY as it is — same "
+        "titles, scopes, sizes, and dependencies — unless their change requires "
+        "touching it. Do NOT re-derive the whole breakdown from the issue text and "
+        "do NOT silently undo edits already reflected in the current breakdown "
+        "(e.g. a sub-issue that was dropped stays dropped; a reworded title stays "
+        "reworded). Then set ``change_summary`` (see step 4) to one honest sentence "
+        "describing what you changed and what you kept.\n"
     )
 
 
