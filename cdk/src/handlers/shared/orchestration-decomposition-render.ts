@@ -183,6 +183,31 @@ export function renderPendingPlanNudge(): string {
 }
 
 /**
+ * #299 plan-mode T4: posted when a structural command ("drop 5", "merge 2 and 7")
+ * names a sub-issue that isn't in the plan (out-of-range index). The plan is left
+ * untouched + approvable; ``detail`` carries the specifics ("There's no sub-issue
+ * #5 — the plan has 3 …"). Bot-prefixed so the self-trigger guard skips it.
+ */
+export function renderPlanCommandError(detail: string): string {
+  return `${PLAN_PROPOSAL_PREFIX} ${detail} The plan above is unchanged — `
+    + 'try again with a number from the list, `@bgagent approve` to run it, or tell me what to change.';
+}
+
+/**
+ * #299 plan-mode T4: posted when a structural command (drop/merge) would collapse
+ * the plan to fewer than 2 sub-issues — nothing left to orchestrate. We do NOT
+ * apply it (the plan stays as-is, approvable); hand the reviewer the decision, the
+ * same way a revision-to-single is handled.
+ */
+export function renderCommandCollapseNote(): string {
+  return (
+    `${PLAN_PROPOSAL_PREFIX} That edit would leave just one unit — there's nothing left to split. `
+    + 'The plan above is unchanged: reply `@bgagent approve` to run it, `@bgagent reject` to discard '
+    + 'it, or tell me what to change.'
+  );
+}
+
+/**
  * #299 revise loop: posted when a REVISION collapses the plan to a single unit
  * (the reviewer's feedback merged everything). We do NOT auto-run — the reviewer
  * is mid-planning, so hand them the decision rather than spawning a task from the
