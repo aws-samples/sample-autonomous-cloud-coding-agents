@@ -174,6 +174,8 @@ function decomposeRecord(fields: {
   max_parent_budget_usd?: string;
   artifact_uri?: string;
   task_description?: string;
+  revision_round?: string;
+  revising_feedback_comment_id?: string;
   eventName?: 'INSERT' | 'MODIFY' | 'REMOVE';
 }): DynamoDBRecord {
   const img: Record<string, unknown> = {};
@@ -192,6 +194,8 @@ function decomposeRecord(fields: {
   if (fields.max_sub_issues) cm.decompose_caps_max_sub_issues = { S: fields.max_sub_issues };
   if (fields.decompose_allowed) cm.decompose_caps_allowed = { S: fields.decompose_allowed };
   if (fields.max_parent_budget_usd) cm.decompose_caps_max_parent_budget_usd = { S: fields.max_parent_budget_usd };
+  if (fields.revision_round) cm.decompose_revision_round = { S: fields.revision_round };
+  if (fields.revising_feedback_comment_id) cm.decompose_revising_feedback_comment_id = { S: fields.revising_feedback_comment_id };
   img.channel_metadata = { M: cm };
   return {
     eventName: fields.eventName ?? 'MODIFY',
@@ -247,6 +251,23 @@ describe('parseDecomposePlanRecord', () => {
 
   test('null for a non-terminal status', () => {
     expect(parseDecomposePlanRecord(decomposeRecord({ task_id: 'P5', status: 'RUNNING', mode: 'decompose' }))).toBeNull();
+  });
+
+  test('#299 F-revise-in-place: extracts revisionRound + revisingFeedbackCommentId on a revision', () => {
+    const evt = parseDecomposePlanRecord(decomposeRecord({
+      task_id: 'P6',
+      status: 'COMPLETED',
+      mode: 'decompose',
+      revision_round: '1',
+      revising_feedback_comment_id: 'feedback-cmt-1',
+    }));
+    expect(evt?.revisionRound).toBe(1);
+    expect(evt?.revisingFeedbackCommentId).toBe('feedback-cmt-1');
+  });
+
+  test('#299 F-revise-in-place: revisingFeedbackCommentId absent on round 0', () => {
+    const evt = parseDecomposePlanRecord(decomposeRecord({ task_id: 'P7', status: 'COMPLETED', mode: 'decompose' }));
+    expect(evt?.revisingFeedbackCommentId).toBeUndefined();
   });
 
   test('null when the decompose_mode is missing/invalid (not a Mode B task)', () => {
