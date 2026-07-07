@@ -29,6 +29,11 @@ export const ErrorCategory = {
   GUARDRAIL: 'guardrail',
   CONFIG: 'config',
   TIMEOUT: 'timeout',
+  // Environmental blocker (#251): agent could not progress for a missing
+  // secret, egress denial, unreachable dependency, or fail-closed policy
+  // engine error. Distinct from AUTH/CONFIG so operators can spot the
+  // typed, self-diagnosed faults the platform names precisely.
+  BLOCKED: 'blocked',
   UNKNOWN: 'unknown',
 } as const;
 
@@ -329,6 +334,80 @@ const PATTERNS: readonly ErrorPattern[] = [
   },
 ];
 
+/**
+ * Canonical blocker-reason contract (#251, decision D). Matches
+ * ``BLOCKED[<kind>]`` and, separately, the optional `` (resource: <resource>)``
+ * segment ``format_blocker_reason`` appends. This is the SINGLE source of truth
+ * on the CDK side and must stay in lockstep with ``format_blocker_reason`` in
+ * ``agent/src/progress_writer.py`` and the taxonomy table in
+ * ``docs/design/CEDAR_HITL_GATES.md`` §13.
+ *
+ * The two parts are matched independently (not one ``$``-anchored regex)
+ * because ``failTask`` persists ``TaskResult.error`` verbatim and it may be
+ * wrapped with trailing text or a stack trace after the reason — anchoring the
+ * resource group to end-of-string would silently drop the host/secret name in
+ * exactly that case. ``kind`` is matched case-insensitively and lowercased
+ * before dispatch so a mixed-case producer still routes to the right remedy.
+ */
+const BLOCKED_KIND = /BLOCKED\[([a-z_]+)\]/i;
+const BLOCKED_RESOURCE = /\(resource:\s*([^)]+)\)/i;
+
+/** Per-kind blocker remedy builder. ``resource`` is the extracted name (secret, host, …). */
+function blockerClassification(kind: string, resource: string | undefined): ErrorClassification {
+  const res = resource?.trim();
+  switch (kind) {
+    case 'missing_secret':
+      return {
+        category: ErrorCategory.BLOCKED,
+        title: 'Blocked: missing secret',
+        description: `A required secret${res ? ` (\`${res}\`)` : ''} was never wired into the blueprint, so the agent could not proceed.`,
+        remedy: `Wire the secret${res ? ` \`${res}\`` : ''} into this repo's blueprint (Secrets Manager) and resubmit. The agent never acquires secrets itself.`,
+        retryable: false,
+      };
+    case 'egress_denied':
+      return {
+        category: ErrorCategory.BLOCKED,
+        title: 'Blocked: egress denied',
+        description: `The agent's connection to a non-allowlisted host${res ? ` (\`${res}\`)` : ''} was blocked by the DNS Firewall.`,
+        remedy: `Allowlist the domain${res ? ` \`${res}\`` : ''} in the DNS Firewall rule group if it is a legitimate dependency, then resubmit. The agent never widens egress itself.`,
+        retryable: false,
+      };
+    case 'dependency_unreachable':
+      return {
+        category: ErrorCategory.BLOCKED,
+        title: 'Blocked: dependency unreachable',
+        description: `A dependency or registry${res ? ` (\`${res}\`)` : ''} could not be reached after bounded retries.`,
+        remedy: 'Check whether the registry is up and reachable from the agent VPC. This is often transient — retry the task.',
+        retryable: true,
+      };
+    case 'policy_fail_closed':
+      return {
+        category: ErrorCategory.BLOCKED,
+        title: 'Blocked: policy engine fail-closed',
+        description: 'The Cedar policy engine errored or was unavailable, so the tool call was denied fail-closed. This is a misconfiguration signal, not an intentional hard-deny.',
+        remedy: 'Check the agent policy-engine logs (cedarpy load / policy compilation). Fix the policy bundle or engine availability, then resubmit.',
+        retryable: false,
+      };
+    case 'auth_failure':
+      return {
+        category: ErrorCategory.BLOCKED,
+        title: 'Blocked: authentication rejected',
+        description: `A credential was present but rejected${res ? ` for \`${res}\`` : ''}.`,
+        remedy: 'Verify the credential is valid and has the required scopes, then resubmit.',
+        retryable: false,
+      };
+    default:
+      // unknown_environmental + any future/mis-typed kind
+      return {
+        category: ErrorCategory.BLOCKED,
+        title: 'Blocked: environmental fault',
+        description: `The agent was blocked by an environmental fault${res ? ` involving \`${res}\`` : ''} that could not be classified further.`,
+        remedy: 'Check the agent logs for the blocker detail. This is an environmental issue, not a code problem.',
+        retryable: false,
+      };
+  }
+}
+
 const UNKNOWN_CLASSIFICATION: ErrorClassification = {
   category: ErrorCategory.UNKNOWN,
   title: 'Unexpected error',
@@ -347,6 +426,15 @@ const UNKNOWN_CLASSIFICATION: ErrorClassification = {
 export function classifyError(errorMessage: string | undefined | null): ErrorClassification | null {
   if (!errorMessage) {
     return null;
+  }
+
+  // Environmental blockers (#251) carry a canonical ``BLOCKED[<kind>]`` prefix
+  // and an extractable resource — check them first so the remedy can name the
+  // exact secret / host rather than falling through to a generic pattern.
+  const kindMatch = BLOCKED_KIND.exec(errorMessage);
+  if (kindMatch) {
+    const resource = BLOCKED_RESOURCE.exec(errorMessage)?.[1];
+    return blockerClassification(kindMatch[1].toLowerCase(), resource);
   }
 
   for (const { pattern, exclude, classification } of PATTERNS) {
