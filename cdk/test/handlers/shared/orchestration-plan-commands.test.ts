@@ -61,11 +61,25 @@ describe('parsePlanCommand', () => {
     expect(parsePlanCommand('no, just 2 tasks')).toBeNull();
     expect(parsePlanCommand('split the API into read and write')).toBeNull();
     expect(parsePlanCommand('drop the last one')).toBeNull(); // no numeric index
-    expect(parsePlanCommand('merge them all')).toBeNull(); // <2 indices
-    expect(parsePlanCommand('merge 1')).toBeNull(); // merge needs ≥2
+    expect(parsePlanCommand('merge them all')).toBeNull(); // no numeric index → vague
     expect(parsePlanCommand('make it simpler')).toBeNull(); // size verb, no (index,size)
     expect(parsePlanCommand('approve')).toBeNull();
     expect(parsePlanCommand('')).toBeNull();
+  });
+
+  test('ABCA-598: explicit-but-invalid merge is a COMMAND (apply rejects it), NOT a silent re-plan', () => {
+    // Regression: "merge 1 1" / "merge 2" have a merge verb + a concrete index, so
+    // they're an explicit structural intent. They must return a merge command (which
+    // applyPlanCommand then rejects, leaving the plan untouched) — NOT null, which
+    // used to fall through to the semantic re-plan and fabricate a "merge the first
+    // two" edit that silently rewrote the plan.
+    expect(parsePlanCommand('merge 1 1')).toEqual({ kind: 'merge', indices: [0] });
+    expect(parsePlanCommand('merge 2')).toEqual({ kind: 'merge', indices: [1] });
+    // and applyPlanCommand rejects the self-merge with a clear message, plan intact:
+    const nodes = plan([[], [0], [1]]); // 3-node chain
+    const r = applyPlanCommand(nodes, { kind: 'merge', indices: [0] });
+    expect(r.kind).toBe('error');
+    if (r.kind === 'error') expect(r.message).toMatch(/two distinct/i);
   });
 
   test('dedupe repeated indices', () => {
