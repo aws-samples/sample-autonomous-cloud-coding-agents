@@ -290,7 +290,7 @@ def test_run_task_background_starts_and_stops_heartbeat(monkeypatch):
 
 def test_run_task_background_propagates_correlation_envelope(monkeypatch):
     """The background task thread propagates {session_id, user_id, repo} into
-    OTEL baggage via set_session_id (#245).
+    OTEL baggage via propagate_correlation_context (#245).
 
     Regression guard for the widened trigger: correlation must propagate even
     when session_id is empty but user_id/repo are known — the branch the whole
@@ -299,14 +299,14 @@ def test_run_task_background_propagates_correlation_envelope(monkeypatch):
     calls: list[dict] = []
     monkeypatch.setattr(
         server,
-        "set_session_id",
+        "propagate_correlation_context",
         lambda session_id, **kw: calls.append({"session_id": session_id, **kw}),
     )
     monkeypatch.setattr(server, "run_task", lambda **_kwargs: None)
     monkeypatch.setattr(server.task_state, "write_heartbeat", lambda *a, **kw: None)
     monkeypatch.setattr(server.task_state, "write_terminal", lambda *a, **kw: None)
 
-    # No session_id, but user_id + repo_url known → set_session_id must still run.
+    # No session_id, but user_id + repo_url known → propagation must still run.
     server._run_task_background(
         task_id="t-corr",
         repo_url="o/r",

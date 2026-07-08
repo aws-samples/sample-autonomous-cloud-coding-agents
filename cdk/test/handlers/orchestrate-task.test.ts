@@ -70,6 +70,7 @@ process.env.MEMORY_ID = 'mem-test-default';
 import {
   admissionControl,
   emitTaskEvent,
+  envelopeFor,
   failTask,
   finalizeTask,
   hydrateAndTransition,
@@ -342,6 +343,34 @@ describe('emitTaskEvent — correlation envelope (#245)', () => {
     const item = mockDdbSend.mock.calls.find((c: any) => c[0]._type === 'Put')[0].input.Item;
     expect(item).not.toHaveProperty('user_id');
     expect(item).not.toHaveProperty('repo');
+  });
+});
+
+describe('envelopeFor — single source for log context + event correlation (#245)', () => {
+  function captureLine(fn: () => void): Record<string, unknown> {
+    const lines: string[] = [];
+    const spy = jest.spyOn(process.stdout, 'write').mockImplementation((chunk: unknown) => {
+      lines.push(String(chunk));
+      return true;
+    });
+    try { fn(); } finally { spy.mockRestore(); }
+    return JSON.parse(lines[0]) as Record<string, unknown>;
+  }
+
+  test('log child and correlation both carry user_id + repo', () => {
+    const { log, correlation } = envelopeFor({ task_id: 't-1', user_id: 'u-1', repo: 'o/r' });
+    // Regression guard for the loadBlueprintConfig gap: the log child must carry
+    // user_id, not just task_id/repo — every admission→terminal line needs it.
+    expect(captureLine(() => log.info('x'))).toMatchObject({ task_id: 't-1', user_id: 'u-1', repo: 'o/r' });
+    expect(correlation).toEqual({ user_id: 'u-1', repo: 'o/r' });
+  });
+
+  test('repo-less: repo omitted from the log line and left undefined on correlation', () => {
+    const { log, correlation } = envelopeFor({ task_id: 't-1', user_id: 'u-1' });
+    const line = captureLine(() => log.info('x'));
+    expect(line).toMatchObject({ task_id: 't-1', user_id: 'u-1' });
+    expect(line).not.toHaveProperty('repo');
+    expect(correlation.repo).toBeUndefined();
   });
 });
 

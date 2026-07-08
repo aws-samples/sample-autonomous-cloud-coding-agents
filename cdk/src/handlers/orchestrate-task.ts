@@ -26,6 +26,7 @@ import { logger } from './shared/logger';
 import {
   admissionControl,
   emitTaskEvent,
+  envelopeFor,
   failTask,
   finalizeTask,
   hydrateAndTransition,
@@ -62,7 +63,7 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
   // lifecycle log line so admission→terminal transitions join to TaskEvents
   // and the agent trace without hand-adding fields per call. `repo` is
   // undefined for repo-less workflows (#248 Phase 3).
-  const log = logger.child({ task_id: taskId, user_id: task.user_id, ...(task.repo && { repo: task.repo }) });
+  const { log, correlation } = envelopeFor(task);
 
   // Step 1b: Load blueprint config (per-repo overrides)
   const blueprintConfig = await context.step('load-blueprint', async () => {
@@ -84,7 +85,7 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
     const result = await admissionControl(task);
     if (!result) {
       await failTask(taskId, current.status, 'User concurrency limit reached', task.user_id, false, task.repo);
-      await emitTaskEvent(taskId, 'admission_rejected', { reason: 'concurrency_limit' }, { user_id: task.user_id, repo: task.repo });
+      await emitTaskEvent(taskId, 'admission_rejected', { reason: 'concurrency_limit' }, correlation);
       // Channel feedback is non-fatal: a throw here would re-run failTask +
       // emitTaskEvent on the durable-execution retry, producing duplicate events.
       try {
@@ -131,7 +132,7 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
           reason: result.failureReason,
           detail: result.failureDetail,
           checks: result.checks,
-        }, { user_id: task.user_id, repo: task.repo });
+        }, correlation);
       }
       return result.passed;
     } catch (err) {
@@ -182,7 +183,7 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
       await emitTaskEvent(taskId, 'session_started', {
         session_id: handle.sessionId,
         strategy_type: handle.strategyType,
-      }, { user_id: task.user_id, repo: task.repo });
+      }, correlation);
 
       log.info('Session started', {
         session_id: handle.sessionId,

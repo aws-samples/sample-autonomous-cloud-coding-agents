@@ -37,8 +37,8 @@ export interface Logger {
  *
  * @param context - persistent fields merged into every line (see `child`).
  */
-// ponytail: closure over a context obj, not Powertools — no child-of-child
-// depth or sampling needed, just a persistent correlation envelope.
+// Closure over a context obj, not Powertools — no child-of-child depth or
+// sampling needed, just a persistent correlation envelope.
 function makeLogger(context: Record<string, unknown> = {}): Logger {
   const write = (stream: NodeJS.WriteStream, level: string, message: string, data?: Record<string, unknown>): void => {
     stream.write(JSON.stringify({ level, message, ...context, ...data }) + '\n');

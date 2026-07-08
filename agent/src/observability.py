@@ -86,9 +86,13 @@ def current_otel_trace_id() -> str | None:
         return None
 
 
-def set_session_id(
+def propagate_correlation_context(
     session_id: str,
     user_id: str = "",
+    # ``user_id`` uses ""-means-absent (Cognito sub, mirrors AgentConfig.user_id
+    # which is never None); ``repo`` uses None-means-absent (mirrors the optional
+    # TaskRecord.repo). Both conventions flow from upstream config types; the
+    # ``if x:`` guards below flatten either to "don't set the baggage key".
     repo: str | None = None,
 ) -> None:
     """Propagate the correlation envelope via OTEL baggage.
@@ -96,7 +100,8 @@ def set_session_id(
     *session_id* correlates custom spans to the AgentCore session; *user_id*
     and *repo* (#245) carry the platform identity and target repo so baggage
     survives across pipeline phases on the task thread. Empty/None fields are
-    not set. *repo* is None for repo-less workflows (#248 Phase 3).
+    not set — so this runs (and is useful) even when *session_id* is empty but
+    the identity is known. *repo* is None for repo-less workflows (#248 Phase 3).
 
     The attached context is intentionally not detached: the background thread
     runs a single task then exits, so the context is garbage-collected with the

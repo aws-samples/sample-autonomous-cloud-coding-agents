@@ -22,7 +22,7 @@ import { S3Client } from '@aws-sdk/client-s3';
 import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { ulid } from 'ulid';
 import { AttachmentBudgetExceededError, AttachmentConfigurationError, AttachmentResolutionError, hydrateContext, resolveGitHubToken } from './context-hydration';
-import { logger } from './logger';
+import { logger, type Logger } from './logger';
 import { writeMinimalEpisode } from './memory';
 import { coerceNumericOrNull } from './numeric';
 import { computePromptVersion } from './prompt-version';
@@ -177,6 +177,23 @@ export interface EventCorrelation {
 }
 
 /**
+ * Build the correlation envelope (#245) for a task from its identity fields:
+ * a `log` child stamping `{task_id, user_id, repo}` on every line, and the
+ * matching `correlation` for `emitTaskEvent`. Single source so the log context
+ * and the event envelope can't drift. `repo` is omitted (not null/empty) for
+ * repo-less workflows.
+ */
+export function envelopeFor(
+  identity: { task_id: string; user_id: string; repo?: string },
+): { log: Logger; correlation: EventCorrelation } {
+  const { task_id, user_id, repo } = identity;
+  return {
+    log: logger.child({ task_id, user_id, ...(repo && { repo }) }),
+    correlation: { user_id, repo },
+  };
+}
+
+/**
  * Emit a task event to the audit log.
  * @param taskId - the task ID.
  * @param eventType - the event type string.
@@ -219,7 +236,7 @@ const MAX_POLL_INTERVAL_MS = 300_000;
 export async function loadBlueprintConfig(task: TaskRecord): Promise<BlueprintConfig> {
   // Correlation envelope (#245) on this shared function's logs too, matching the
   // orchestrate handler's child logger. `repo` omitted for repo-less workflows.
-  const log = logger.child({ task_id: task.task_id, ...(task.repo && { repo: task.repo }) });
+  const { log } = envelopeFor(task);
 
   // Repo-less workflows (#248 Phase 3) have no per-repo Blueprint — use platform
   // defaults directly rather than a RepoTable lookup on a missing repo.
@@ -343,8 +360,7 @@ function isValidApprovalGateCap(value: unknown): value is number {
  * @returns the assembled payload for the agent runtime.
  */
 export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: BlueprintConfig): Promise<Record<string, unknown>> {
-  const correlation: EventCorrelation = { user_id: task.user_id, repo: task.repo };
-  const log = logger.child({ task_id: task.task_id, user_id: task.user_id, ...(task.repo && { repo: task.repo }) });
+  const { log, correlation } = envelopeFor(task);
   await transitionTask(task.task_id, TaskStatus.SUBMITTED, TaskStatus.HYDRATING);
   await emitTaskEvent(task.task_id, 'hydration_started', undefined, correlation);
 
@@ -672,10 +688,9 @@ export async function finalizeTask(
 ): Promise<void> {
   const task = await loadTask(taskId);
   const currentStatus = task.status;
-  const correlation: EventCorrelation = { user_id: task.user_id, repo: task.repo };
   // Correlation envelope (#245) on this function's own log lines too, not just
   // the events it emits — admission→terminal logs must join by {user_id, repo}.
-  const log = logger.child({ task_id: taskId, user_id: task.user_id, ...(task.repo && { repo: task.repo }) });
+  const { log, correlation } = envelopeFor(task);
 
   // Lost session: RUNNING but agent heartbeats stopped (crash/OOM) — fail fast
   if (
@@ -869,7 +884,7 @@ export async function failTask(
     });
     transitioned = true;
   } catch (err) {
-    const log = logger.child({ task_id: taskId, user_id: userId, ...(repo && { repo }) });
+    const { log } = envelopeFor({ task_id: taskId, user_id: userId, repo });
     log.warn('Failed to transition task to FAILED', {
       error: err instanceof Error ? err.message : String(err),
     });

@@ -26,7 +26,7 @@ from pydantic import BaseModel
 import task_state
 from config import resolve_github_token
 from models import TaskResult
-from observability import set_session_id
+from observability import propagate_correlation_context
 from pipeline import run_task
 
 # --- _debug_cw / _warn_cw failure counter -------------------------------
@@ -457,7 +457,7 @@ def _run_task_background(
         # identity in CloudWatch (#245). Runs whenever any field is present —
         # session_id may be empty while user_id/repo are known.
         if session_id or user_id or repo_url:
-            set_session_id(session_id, user_id=user_id, repo=repo_url or None)
+            propagate_correlation_context(session_id, user_id=user_id, repo=repo_url or None)
 
         run_task(
             repo_url=repo_url,
