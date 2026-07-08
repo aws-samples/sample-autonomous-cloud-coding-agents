@@ -41,6 +41,13 @@ function getS3Client(): S3Client {
 
 const ECS_CLUSTER_ARN = process.env.ECS_CLUSTER_ARN;
 const ECS_TASK_DEFINITION_ARN = process.env.ECS_TASK_DEFINITION_ARN;
+/**
+ * #299 ECS_RIGHTSIZED_PLANNING: the smaller read-only planning task def. Used for
+ * read-only workflows (coding/decompose-v1) so a clone+read plan doesn't run on
+ * the 64 GB build box. Falls back to the build def when unset (older deploy that
+ * hasn't wired the planning def) — never worse than today.
+ */
+const ECS_PLANNING_TASK_DEFINITION_ARN = process.env.ECS_PLANNING_TASK_DEFINITION_ARN;
 const ECS_SUBNETS = process.env.ECS_SUBNETS;
 const ECS_SECURITY_GROUP = process.env.ECS_SECURITY_GROUP;
 const ECS_CONTAINER_NAME = process.env.ECS_CONTAINER_NAME ?? 'AgentContainer';
@@ -96,6 +103,7 @@ export class EcsComputeStrategy implements ComputeStrategy {
     userId: string;
     payload: Record<string, unknown>;
     blueprintConfig: BlueprintConfig;
+    readOnly?: boolean;
   }): Promise<SessionHandle> {
     if (!ECS_CLUSTER_ARN || !ECS_TASK_DEFINITION_ARN || !ECS_SUBNETS || !ECS_SECURITY_GROUP) {
       // Config/deploy mismatch: this repo is compute_type=ecs but the stack was
@@ -113,7 +121,15 @@ export class EcsComputeStrategy implements ComputeStrategy {
     }
 
     const subnets = ECS_SUBNETS.split(',').map(s => s.trim()).filter(Boolean);
-    const { taskId, payload, blueprintConfig } = input;
+    const { taskId, payload, blueprintConfig, readOnly } = input;
+
+    // #299 ECS_RIGHTSIZED_PLANNING: a read-only workflow (decompose-v1 planning)
+    // runs on the smaller planning task def when it's wired; everything else runs
+    // on the 64 GB build def. Falls back to the build def if the planning def
+    // isn't configured (older deploy) — safe, just the pre-rightsize behavior.
+    const taskDefinition = readOnly && ECS_PLANNING_TASK_DEFINITION_ARN
+      ? ECS_PLANNING_TASK_DEFINITION_ARN
+      : ECS_TASK_DEFINITION_ARN;
 
     // The ECS container's default CMD starts the FastAPI server (uvicorn) which
     // waits for HTTP POST to /invocations — but in standalone ECS nobody sends
@@ -205,7 +221,7 @@ export class EcsComputeStrategy implements ComputeStrategy {
 
     const command = new RunTaskCommand({
       cluster: ECS_CLUSTER_ARN,
-      taskDefinition: ECS_TASK_DEFINITION_ARN,
+      taskDefinition,
       launchType: 'FARGATE',
       networkConfiguration: {
         awsvpcConfiguration: {
@@ -235,6 +251,9 @@ export class EcsComputeStrategy implements ComputeStrategy {
       task_id: taskId,
       ecs_task_arn: ecsTask.taskArn,
       cluster: ECS_CLUSTER_ARN,
+      // #299: which def was selected — planning (read-only) vs build.
+      task_definition: taskDefinition,
+      read_only: Boolean(readOnly),
     });
 
     return {

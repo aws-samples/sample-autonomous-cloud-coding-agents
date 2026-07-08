@@ -48,6 +48,15 @@ export interface ComputeStrategy {
     userId: string;
     payload: Record<string, unknown>;
     blueprintConfig: BlueprintConfig;
+    /**
+     * #299 ECS_RIGHTSIZED_PLANNING: true for a read-only workflow (e.g.
+     * coding/decompose-v1) that clones + reads + emits an artifact but never
+     * builds. The ECS strategy uses it to pick the smaller planning task def
+     * instead of the 64 GB build def. AgentCore ignores it (its microVM is a
+     * single fixed size). Optional so callers/tests that omit it default to the
+     * build def (never worse than today).
+     */
+    readOnly?: boolean;
   }): Promise<SessionHandle>;
   pollSession(handle: SessionHandle): Promise<SessionStatus>;
   stopSession(handle: SessionHandle): Promise<void>;

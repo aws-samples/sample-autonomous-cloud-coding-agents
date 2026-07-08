@@ -702,6 +702,9 @@ export class AgentStack extends Stack {
         ecsConfig: {
           clusterArn: ecsCluster.cluster.clusterArn,
           taskDefinitionArn: ecsCluster.taskDefinition.taskDefinitionArn,
+          // #299 ECS_RIGHTSIZED_PLANNING: the smaller read-only planning def, so a
+          // decompose-v1 task doesn't over-allocate the 64 GB build box.
+          planningTaskDefinitionArn: ecsCluster.planningTaskDefinition.taskDefinitionArn,
           subnets: agentVpc.vpc.selectSubnets({ subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS }).subnetIds.join(','),
           securityGroup: ecsCluster.securityGroup.securityGroupId,
           containerName: ecsCluster.containerName,

@@ -98,6 +98,65 @@ describe('EcsAgentCluster construct', () => {
     });
   });
 
+  test('creates a second, smaller PLANNING task def (2 vCPU / 8 GB) for read-only workflows (#299 ECS_RIGHTSIZED_PLANNING)', () => {
+    // Two task defs now exist: the 64 GB build def (asserted above) and this
+    // 8 GB planning def. decompose-v1 (read_only) runs on the smaller one so a
+    // clone+read plan doesn't over-allocate the build box.
+    baseTemplate.resourceCountIs('AWS::ECS::TaskDefinition', 2);
+    baseTemplate.hasResourceProperties('AWS::ECS::TaskDefinition', {
+      Cpu: '2048',
+      Memory: '8192',
+      RequiresCompatibilities: ['FARGATE'],
+      RuntimePlatform: {
+        CpuArchitecture: 'ARM64',
+        OperatingSystemFamily: 'LINUX',
+      },
+    });
+  });
+
+  test('both task defs share ONE task role and ONE execution role (parity by construction — the ABCA-488/#502 lesson)', () => {
+    // The build and planning defs pass the SAME shared task+execution roles, so a
+    // grant added for one is present on the other by construction (no drift). The
+    // template therefore holds exactly two ECS roles (task + execution), each
+    // referenced by both defs' TaskRoleArn/ExecutionRoleArn.
+    const roles = baseTemplate.findResources('AWS::IAM::Role', {
+      Properties: {
+        AssumeRolePolicyDocument: {
+          Statement: Match.arrayWith([
+            Match.objectLike({
+              Principal: { Service: 'ecs-tasks.amazonaws.com' },
+            }),
+          ]),
+        },
+      },
+    });
+    expect(Object.keys(roles)).toHaveLength(2);
+
+    const taskDefs = baseTemplate.findResources('AWS::ECS::TaskDefinition');
+    const taskRoleRefs = new Set<string>();
+    const execRoleRefs = new Set<string>();
+    for (const def of Object.values(taskDefs)) {
+      taskRoleRefs.add(JSON.stringify(def.Properties.TaskRoleArn));
+      execRoleRefs.add(JSON.stringify(def.Properties.ExecutionRoleArn));
+    }
+    // Both defs point at the same single task role and same single exec role.
+    expect(taskRoleRefs.size).toBe(1);
+    expect(execRoleRefs.size).toBe(1);
+  });
+
+  test('the PLANNING def carries no BUILD_VERIFY_TIMEOUT_S (a read-only planner runs no build verify)', () => {
+    const taskDefs = baseTemplate.findResources('AWS::ECS::TaskDefinition');
+    const planningDef = Object.values(taskDefs).find(
+      d => d.Properties.Cpu === '2048' && d.Properties.Memory === '8192',
+    );
+    expect(planningDef).toBeDefined();
+    const env = planningDef!.Properties.ContainerDefinitions[0].Environment ?? [];
+    expect(env.some((e: { Name: string }) => e.Name === 'BUILD_VERIFY_TIMEOUT_S')).toBe(false);
+    // …but the shared env (Bedrock, task table) IS present on the planning def too.
+    expect(env.some((e: { Name: string }) => e.Name === 'CLAUDE_CODE_USE_BEDROCK')).toBe(true);
+    expect(env.some((e: { Name: string }) => e.Name === 'TASK_TABLE_NAME')).toBe(true);
+  });
+
   test('creates a security group with TCP 443 egress only', () => {
     baseTemplate.hasResourceProperties('AWS::EC2::SecurityGroup', {
       GroupDescription: 'ECS Agent Tasks - egress TCP 443 only',
@@ -289,7 +348,12 @@ describe('EcsAgentCluster construct', () => {
       // statements). The task-role policy must NOT contain any unconditioned
       // task-table DDB grant — that access now lives only on the SessionRole.
       const taskRolePolicies = Object.entries(policies).filter(([id, p]) =>
-        id.includes('TaskDefTaskRole')
+        // #299 ECS_RIGHTSIZED_PLANNING: the task role is now a SHARED standalone
+        // `TaskRole` construct (was the auto-generated role nested under the single
+        // FargateTaskDefinition, id `...TaskDefTaskRole...`), so both the build and
+        // planning defs pass the same role — its logical id is `...TaskRole...` and
+        // `ExecutionRole` doesn't match this substring.
+        id.includes('TaskRole')
         && p.Properties.PolicyDocument.Statement.some((s: { Action: string | string[] }) => {
           const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
           return actions.includes('sts:AssumeRole');
