@@ -152,6 +152,13 @@ export interface TaskOrchestratorProps {
   readonly ecsConfig?: {
     readonly clusterArn: string;
     readonly taskDefinitionArn: string;
+    /**
+     * #299 ECS_RIGHTSIZED_PLANNING: the smaller read-only PLANNING task def. The
+     * ECS strategy selects it for read-only workflows (coding/decompose-v1) so
+     * planning doesn't run on the 64 GB build box. Shares the build def's roles,
+     * so the RunTask/PassRole grants below cover it with no extra role ARNs.
+     */
+    readonly planningTaskDefinitionArn: string;
     readonly subnets: string;
     readonly securityGroup: string;
     readonly containerName: string;
@@ -269,6 +276,8 @@ export class TaskOrchestrator extends Construct {
         ...(props.ecsConfig && {
           ECS_CLUSTER_ARN: props.ecsConfig.clusterArn,
           ECS_TASK_DEFINITION_ARN: props.ecsConfig.taskDefinitionArn,
+          // #299 ECS_RIGHTSIZED_PLANNING: read-only workflows run on this smaller def.
+          ECS_PLANNING_TASK_DEFINITION_ARN: props.ecsConfig.planningTaskDefinitionArn,
           ECS_SUBNETS: props.ecsConfig.subnets,
           ECS_SECURITY_GROUP: props.ecsConfig.securityGroup,
           ECS_CONTAINER_NAME: props.ecsConfig.containerName,

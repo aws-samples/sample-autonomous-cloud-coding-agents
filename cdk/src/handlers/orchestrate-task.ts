@@ -162,6 +162,9 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
         userId: task.user_id,
         payload,
         blueprintConfig,
+        // #299 ECS_RIGHTSIZED_PLANNING: a read-only workflow (decompose-v1 planning)
+        // runs on the smaller ECS planning task def. Ignored by AgentCore.
+        readOnly: workflowIsReadOnly(task.resolved_workflow?.id ?? 'coding/new-task-v1'),
       });
 
       // Build compute metadata for the task record so cancel-task can stop the right backend

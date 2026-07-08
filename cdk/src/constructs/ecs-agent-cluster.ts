@@ -92,7 +92,19 @@ const HTTPS_PORT = 443;
 
 export class EcsAgentCluster extends Construct {
   public readonly cluster: ecs.Cluster;
+  /** The 64 GB / 16 vCPU BUILD task def — for coding workflows that run a full
+   *  CI-parity build. Selected by the orchestrator for non-read-only workflows. */
   public readonly taskDefinition: ecs.FargateTaskDefinition;
+  /**
+   * The smaller read-only PLANNING task def (8 GB / 2 vCPU) — for
+   * ``coding/decompose-v1`` (and any read_only workflow) that clones + reads +
+   * emits an artifact but never builds. Same image/role/env/grants as the build
+   * def (shared task+execution role + a shared container spec, so grants can't
+   * drift — the ABCA-488/#502 parity lesson); the ONLY difference is cpu/mem.
+   * The orchestrator selects this for read-only workflows on an ECS repo, so
+   * planning doesn't over-allocate the 64 GB build box. (#299 / ECS_RIGHTSIZED_PLANNING.)
+   */
+  public readonly planningTaskDefinition: ecs.FargateTaskDefinition;
   public readonly securityGroup: ec2.SecurityGroup;
   public readonly containerName: string;
   public readonly taskRoleArn: string;
@@ -128,13 +140,73 @@ export class EcsAgentCluster extends Construct {
       removalPolicy: RemovalPolicy.DESTROY,
     });
 
-    // Task execution role (used by ECS agent to pull images, write logs)
-    // CDK creates this automatically via taskDefinition, but we need to
-    // grant additional permissions to the task role.
+    // SHARED task + execution roles for BOTH task defs (#299 ECS_RIGHTSIZED_PLANNING).
+    // The build def and the planning def MUST have identical IAM + env or an
+    // ECS-parity bug hides on one substrate (the ABCA-488/#502 class: a token or
+    // grant present on one def and missing on the other). Rather than grant twice,
+    // we create the roles ONCE here and pass the SAME roles to both task defs, and
+    // build the container from a single shared spec. So there is exactly one place
+    // grants/env can be edited, and both defs stay in lockstep by construction.
+    const taskRole = new iam.Role(this, 'TaskRole', {
+      assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
+    });
+    const executionRole = new iam.Role(this, 'ExecutionRole', {
+      assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
+      managedPolicies: [
+        iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AmazonECSTaskExecutionRolePolicy'),
+      ],
+    });
 
-    // Fargate task definition. Sized for heavy CI-parity builds (e.g. ABCA's
-    // own ~2800-test `mise run build` + cdk synth). Sizing history (all
-    // live-caught dogfooding ABCA-on-ABCA, 2026-06-29):
+    // The container spec shared by both task defs — image, logging, env are
+    // IDENTICAL; only the enclosing task def's cpu/mem differ. BUILD_VERIFY_TIMEOUT_S
+    // is a build-tier concern (a read-only planner never runs the post-agent build
+    // verify), so it's set per-def below, not here.
+    const baseEnvironment: Record<string, string> = {
+      CLAUDE_CODE_USE_BEDROCK: '1',
+      TASK_TABLE_NAME: props.taskTable.tableName,
+      TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
+      USER_CONCURRENCY_TABLE_NAME: props.userConcurrencyTable.tableName,
+      LOG_GROUP_NAME: logGroup.logGroupName,
+      GITHUB_TOKEN_SECRET_ARN: props.githubTokenSecret.secretArn,
+      ...(props.memoryId && { MEMORY_ID: props.memoryId }),
+      // #502: the payload bucket name so the orchestrator-issued
+      // AGENT_PAYLOAD_S3_URI can be fetched. (The orchestrator sets the URI
+      // per-task via container override; this is informational parity.)
+      ...(props.payloadBucket && { ECS_PAYLOAD_BUCKET: props.payloadBucket.bucketName }),
+      // #299 ECS-parity: artifact workflows (coding/decompose-v1) deliver their
+      // plan JSON to this bucket. The AgentCore runtime has ARTIFACTS_BUCKET_NAME;
+      // the ECS task needs it too or deliver_artifact raises "ARTIFACTS_BUCKET_NAME
+      // is not configured" (live-caught on an ecs-repo :decompose).
+      ...(props.artifactsBucket && { ARTIFACTS_BUCKET_NAME: props.artifactsBucket.bucketName }),
+      // Per-session IAM scoping (#209): when a SessionRole is wired, the
+      // agent assumes it for tenant-data access (see aws_session.py).
+      ...(props.agentSessionRole && {
+        AGENT_SESSION_ROLE_ARN: props.agentSessionRole.role.roleArn,
+      }),
+    };
+    const image = ecs.ContainerImage.fromDockerImageAsset(props.agentImageAsset);
+    const makeTaskDef = (id: string, cpu: number, memoryLimitMiB: number, extraEnv: Record<string, string>) => {
+      const def = new ecs.FargateTaskDefinition(this, id, {
+        cpu,
+        memoryLimitMiB,
+        taskRole,
+        executionRole,
+        runtimePlatform: {
+          cpuArchitecture: ecs.CpuArchitecture.ARM64,
+          operatingSystemFamily: ecs.OperatingSystemFamily.LINUX,
+        },
+      });
+      def.addContainer(this.containerName, {
+        image,
+        logging: ecs.LogDrivers.awsLogs({ logGroup, streamPrefix: 'agent' }),
+        environment: { ...baseEnvironment, ...extraEnv },
+      });
+      return def;
+    };
+
+    // BUILD task def — sized for heavy CI-parity builds (e.g. ABCA's own
+    // ~2800-test `mise run build` + cdk synth). Sizing history (all live-caught
+    // dogfooding ABCA-on-ABCA, 2026-06-29):
     //   - 4 GB / 2 vCPU  → OOM-killed even the AgentCore microVM.
     //   - 32 GB / 8 vCPU → ran ~50 min then OOM-killed (exit 137) at the cap;
     //     peak working set ~31.6 GB when the root build fans out 4 heavy jobs
@@ -143,58 +215,23 @@ export class EcsAgentCluster extends Construct {
     //     Lambda bundling). 32 GB had no headroom for that concurrent peak.
     //   - 64 GB / 16 vCPU (current) → 2× the memory headroom for the parallel
     //     storm, and 16 vCPU shortens wall-clock (paired with
-    //     BUILD_VERIFY_TIMEOUT_S=3600 below so the ~longer-than-30-min build
-    //     isn't mis-reported as a timeout). Valid Fargate ARM64 combo (16 vCPU
-    //     admits 32–120 GB in 8 GB steps).
-    this.taskDefinition = new ecs.FargateTaskDefinition(this, 'TaskDef', {
-      cpu: 16384,
-      memoryLimitMiB: 65536,
-      runtimePlatform: {
-        cpuArchitecture: ecs.CpuArchitecture.ARM64,
-        operatingSystemFamily: ecs.OperatingSystemFamily.LINUX,
-      },
+    //     BUILD_VERIFY_TIMEOUT_S=3600 so the ~longer-than-30-min build isn't
+    //     mis-reported as a timeout). Valid Fargate ARM64 combo (16 vCPU admits
+    //     32–120 GB in 8 GB steps).
+    this.taskDefinition = makeTaskDef('TaskDef', 16384, 65536, {
+      // Heavy CI-parity builds legitimately run longer than the 1800s default.
+      BUILD_VERIFY_TIMEOUT_S: '3600',
     });
 
-    // Container
-    this.taskDefinition.addContainer(this.containerName, {
-      image: ecs.ContainerImage.fromDockerImageAsset(props.agentImageAsset),
-      logging: ecs.LogDrivers.awsLogs({
-        logGroup,
-        streamPrefix: 'agent',
-      }),
-      environment: {
-        CLAUDE_CODE_USE_BEDROCK: '1',
-        TASK_TABLE_NAME: props.taskTable.tableName,
-        TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
-        USER_CONCURRENCY_TABLE_NAME: props.userConcurrencyTable.tableName,
-        LOG_GROUP_NAME: logGroup.logGroupName,
-        GITHUB_TOKEN_SECRET_ARN: props.githubTokenSecret.secretArn,
-        // Heavy CI-parity builds on this big-box substrate legitimately run
-        // longer than the 1800s default (ABCA's own `mise run build` is
-        // ~50 min cold). Raise the post-agent build-verify cap so a slow-but-
-        // healthy build isn't mis-reported as a timeout (see post_hooks.py
-        // BUILD_VERIFY_TIMEOUT_S). ECS-only: AgentCore repos keep the default.
-        BUILD_VERIFY_TIMEOUT_S: '3600',
-        ...(props.memoryId && { MEMORY_ID: props.memoryId }),
-        // #502: the payload bucket name so the orchestrator-issued
-        // AGENT_PAYLOAD_S3_URI can be fetched. (The orchestrator sets the URI
-        // per-task via container override; this is informational parity.)
-        ...(props.payloadBucket && { ECS_PAYLOAD_BUCKET: props.payloadBucket.bucketName }),
-        // #299 ECS-parity: artifact workflows (coding/decompose-v1) deliver their
-        // plan JSON to this bucket. The AgentCore runtime has ARTIFACTS_BUCKET_NAME;
-        // the ECS task needs it too or deliver_artifact raises "ARTIFACTS_BUCKET_NAME
-        // is not configured" (live-caught on an ecs-repo :decompose).
-        ...(props.artifactsBucket && { ARTIFACTS_BUCKET_NAME: props.artifactsBucket.bucketName }),
-        // Per-session IAM scoping (#209): when a SessionRole is wired, the
-        // agent assumes it for tenant-data access (see aws_session.py).
-        ...(props.agentSessionRole && {
-          AGENT_SESSION_ROLE_ARN: props.agentSessionRole.role.roleArn,
-        }),
-      },
-    });
-
-    // Task role permissions
-    const taskRole = this.taskDefinition.taskRole;
+    // PLANNING task def (#299 ECS_RIGHTSIZED_PLANNING) — for read-only workflows
+    // (coding/decompose-v1) that clone + read + emit a plan artifact but NEVER
+    // build. 8 GB / 2 vCPU: a clone + a bounded set of file reads into the model
+    // context, no parallel build storm. Same image/roles/env as the build def (so
+    // Linear OAuth, artifact delivery, payload fetch all work identically); NO
+    // BUILD_VERIFY_TIMEOUT_S (a read-only planner runs no build verify). If 8 GB
+    // proves tight on a very large clone, 16 GB / 4 vCPU is the next step — size up
+    // on Container-Insights evidence, mirroring the build def's empirical history.
+    this.planningTaskDefinition = makeTaskDef('PlanningTaskDef', 2048, 8192, {});
 
     // DynamoDB: when a SessionRole (#209) is wired, tenant-data access lives on
     // that tag-scoped role and the task role only needs to assume it. Without
@@ -292,20 +329,25 @@ export class EcsAgentCluster extends Construct {
     // CloudWatch Logs write
     logGroup.grantWrite(taskRole);
 
-    // Expose role ARNs for scoped iam:PassRole in the orchestrator
+    // Expose role ARNs for scoped iam:PassRole in the orchestrator. Both task
+    // defs share these roles, so one ARN pair covers both defs' PassRole grants.
     this.taskRoleArn = taskRole.roleArn;
-    this.executionRoleArn = this.taskDefinition.executionRole!.roleArn;
+    this.executionRoleArn = executionRole.roleArn;
 
-    NagSuppressions.addResourceSuppressions(this.taskDefinition, [
-      {
-        id: 'AwsSolutions-IAM5',
-        reason: 'DynamoDB index/* wildcards from CDK grantReadWriteData (UserConcurrencyTable, and task tables only when no SessionRole is wired); Secrets Manager wildcards from CDK grantRead (GitHub token) and the bgagent-linear-oauth-*/bgagent-jira-oauth-* prefix grant (ABCA-488 — per-workspace channel OAuth tokens are created by the CLI at setup, name unknown at synth, GetSecretValue only); CloudWatch Logs wildcards from CDK grantWrite; S3 object/* wildcard from CDK grantRead on the ECS payload bucket (read-only, scoped to that bucket — #502) and from grantReadWrite on the artifacts bucket (scoped to that bucket — coding/decompose-v1 delivers its plan artifact there, #299). Bedrock InvokeModel is scoped to explicit model/inference-profile ARNs (no wildcard resource).',
-      },
-      {
-        id: 'AwsSolutions-ECS2',
-        reason: 'Environment variables contain table names and configuration, not secrets — GitHub token is fetched from Secrets Manager at runtime',
-      },
-    ], true);
+    // Same nag posture on BOTH task defs (they share roles/env, so the same
+    // wildcards + env-vars-not-secrets rationale applies verbatim to each).
+    for (const def of [this.taskDefinition, this.planningTaskDefinition]) {
+      NagSuppressions.addResourceSuppressions(def, [
+        {
+          id: 'AwsSolutions-IAM5',
+          reason: 'DynamoDB index/* wildcards from CDK grantReadWriteData (UserConcurrencyTable, and task tables only when no SessionRole is wired); Secrets Manager wildcards from CDK grantRead (GitHub token) and the bgagent-linear-oauth-*/bgagent-jira-oauth-* prefix grant (ABCA-488 — per-workspace channel OAuth tokens are created by the CLI at setup, name unknown at synth, GetSecretValue only); CloudWatch Logs wildcards from CDK grantWrite; S3 object/* wildcard from CDK grantRead on the ECS payload bucket (read-only, scoped to that bucket — #502) and from grantReadWrite on the artifacts bucket (scoped to that bucket — coding/decompose-v1 delivers its plan artifact there, #299). Bedrock InvokeModel is scoped to explicit model/inference-profile ARNs (no wildcard resource).',
+        },
+        {
+          id: 'AwsSolutions-ECS2',
+          reason: 'Environment variables contain table names and configuration, not secrets — GitHub token is fetched from Secrets Manager at runtime',
+        },
+      ], true);
+    }
 
     NagSuppressions.addResourceSuppressions(this.cluster, [
       {
