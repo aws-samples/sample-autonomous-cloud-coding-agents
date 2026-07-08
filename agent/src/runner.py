@@ -483,7 +483,12 @@ async def run_agent(
     # invocations we fall back to a fresh writer with no accumulator.
     if trajectory is None:
         trajectory = _TrajectoryWriter(config.task_id or "unknown")
-    progress = _ProgressWriter(config.task_id or "unknown", trace=config.trace)
+    progress = _ProgressWriter(
+        config.task_id or "unknown",
+        trace=config.trace,
+        user_id=config.user_id,
+        repo=config.repo_url,
+    )
 
     # Map tool_use_id → tool_name so we can label ToolResultBlocks that arrive
     # in UserMessages (ToolResultBlock carries only the id, not the name).

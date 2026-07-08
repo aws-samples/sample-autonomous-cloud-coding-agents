@@ -44,3 +44,46 @@ class TestCurrentOtelTraceId:
         span.get_span_context.return_value = ctx
         with patch.object(observability.trace, "get_current_span", return_value=span):
             assert observability.current_otel_trace_id() is None
+
+    def test_degrades_to_none_when_tracer_raises(self):
+        # A broken/misconfigured tracer must not propagate: callers read this
+        # inside DDB-write try-blocks, where a raise would be misclassified as a
+        # DDB failure and trip the shared progress circuit breaker (#245 review).
+        with patch.object(
+            observability.trace, "get_current_span", side_effect=RuntimeError("tracer boom")
+        ):
+            assert observability.current_otel_trace_id() is None
+
+
+class TestPropagateCorrelationContext:
+    """``propagate_correlation_context`` propagates the correlation envelope
+    (#245) via OTEL baggage, setting only the fields that are present."""
+
+    def test_sets_all_envelope_fields_when_present(self):
+        with (
+            patch.object(observability, "baggage") as bag,
+            patch.object(observability, "context") as ctx,
+        ):
+            bag.set_baggage.return_value = "CTX"
+            observability.propagate_correlation_context("sess-1", user_id="user-1", repo="org/repo")
+        # Baggage-key ordering is not part of the contract — compare as a set.
+        keys = {c.args[0] for c in bag.set_baggage.call_args_list}
+        assert keys == {"session.id", "user.id", "repo.url"}
+        ctx.attach.assert_called_once()
+
+    def test_omits_absent_fields(self):
+        # Empty user_id and None repo → only session.id is set on the baggage.
+        with patch.object(observability, "baggage") as bag, patch.object(observability, "context"):
+            bag.set_baggage.return_value = "CTX"
+            observability.propagate_correlation_context("sess-1")
+        keys = {c.args[0] for c in bag.set_baggage.call_args_list}
+        assert keys == {"session.id"}
+
+    def test_empty_session_id_is_not_stamped(self):
+        # Reachable via server.py's widened trigger (user_id known, no session):
+        # an empty session_id must not write an empty-string session.id baggage.
+        with patch.object(observability, "baggage") as bag, patch.object(observability, "context"):
+            bag.set_baggage.return_value = "CTX"
+            observability.propagate_correlation_context("", user_id="user-1")
+        keys = {c.args[0] for c in bag.set_baggage.call_args_list}
+        assert keys == {"user.id"}

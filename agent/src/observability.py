@@ -64,24 +64,54 @@ def current_otel_trace_id() -> str | None:
     bundle) so operators can join the task to its CloudWatch/X-Ray trace. Returns
     ``None`` when there is no recording span (e.g. tracing disabled locally) or
     the context is invalid, so callers can treat it as a graceful-missing field.
+
+    Never raises: a broken/misconfigured tracer degrades to ``None`` rather than
+    propagating. Callers read this inside DDB-write try-blocks (progress_writer),
+    where a raised trace error would otherwise be misclassified as a DDB failure
+    and trip the shared progress circuit breaker.
     """
-    span = trace.get_current_span()
-    ctx = span.get_span_context()
-    if not ctx.is_valid:
+    try:
+        span = trace.get_current_span()
+        ctx = span.get_span_context()
+        if not ctx.is_valid:
+            return None
+        # format_trace_id renders the 128-bit id as zero-padded 32-char hex — the
+        # OTEL format, so it joins directly in CloudWatch Transaction Search. Note
+        # the X-Ray console renders trace ids as ``1-{8hex}-{24hex}``; to look this
+        # up there, transform to that form (the timestamp is the first 8 hex chars).
+        return trace.format_trace_id(ctx.trace_id)
+    except Exception:
+        # nosemgrep: py-silent-success-masking -- trace id is a graceful-missing
+        # correlation field; a tracer fault must not fail the caller's write path.
         return None
-    # format_trace_id renders the 128-bit id as zero-padded 32-char hex — the
-    # OTEL format, so it joins directly in CloudWatch Transaction Search. Note
-    # the X-Ray console renders trace ids as ``1-{8hex}-{24hex}``; to look this
-    # up there, transform to that form (the timestamp is the first 8 hex chars).
-    return trace.format_trace_id(ctx.trace_id)
 
 
-def set_session_id(session_id: str) -> None:
-    """Propagate *session_id* via OTEL baggage for AgentCore session correlation.
+def propagate_correlation_context(
+    session_id: str,
+    user_id: str = "",
+    # ``user_id`` uses ""-means-absent (Cognito sub, mirrors AgentConfig.user_id
+    # which is never None); ``repo`` uses None-means-absent (mirrors the optional
+    # TaskRecord.repo). Both conventions flow from upstream config types; the
+    # ``if x:`` guards below flatten either to "don't set the baggage key".
+    repo: str | None = None,
+) -> None:
+    """Propagate the correlation envelope via OTEL baggage.
+
+    *session_id* correlates custom spans to the AgentCore session; *user_id*
+    and *repo* (#245) carry the platform identity and target repo so baggage
+    survives across pipeline phases on the task thread. Empty/None fields are
+    not set — so this runs (and is useful) even when *session_id* is empty but
+    the identity is known. *repo* is None for repo-less workflows (#248 Phase 3).
 
     The attached context is intentionally not detached: the background thread
     runs a single task then exits, so the context is garbage-collected with the
     thread.
     """
-    ctx = baggage.set_baggage("session.id", session_id)
+    ctx = context.get_current()
+    if session_id:
+        ctx = baggage.set_baggage("session.id", session_id, context=ctx)
+    if user_id:
+        ctx = baggage.set_baggage("user.id", user_id, context=ctx)
+    if repo:
+        ctx = baggage.set_baggage("repo.url", repo, context=ctx)
     context.attach(ctx)  # token not stored — thread-scoped lifetime

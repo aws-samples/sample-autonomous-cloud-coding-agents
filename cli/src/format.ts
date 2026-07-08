@@ -162,6 +162,7 @@ export function formatStatusSnapshot(
   const lastCostEvent = findLatest(sorted, 'agent_cost_update');
   const lastTurnEvent = findLatest(sorted, 'agent_turn');
   const lastActivityEvent = findLatestActivity(sorted);
+  const blockerEvent = findLatest(sorted, 'agent_blocked');
 
   // ``TaskEvent.timestamp`` is typed ``string``, but the event table is
   // weakly typed at the storage layer — an agent regression could write
@@ -201,6 +202,15 @@ export function formatStatusSnapshot(
     `  Current:       ${describeCurrent(task, lastActivityEvent)}`,
     `  Cost:          ${describeCost(task, lastCostEvent)}`,
   );
+  // #251: surface the latest environmental blocker prominently — a missing
+  // secret / egress denial is the single most actionable thing a watcher can
+  // see, and it may precede the terminal failure by many turns. Suppress it on
+  // a COMPLETED task: the blocker was recovered from (e.g. self-remediated), so
+  // a historical ⛔ line would misrepresent a successful outcome as blocked.
+  const blockerLine = task.status === 'COMPLETED' ? null : describeBlocker(blockerEvent, now);
+  if (blockerLine !== null) {
+    lines.push(`  Blocker:       ${blockerLine}`);
+  }
   // Non-COMPLETED terminal statuses should show the reason inline so
   // users do not have to chase it through ``status --wait`` or an
   // ``events`` log grep. Prefer the structured classification when the
@@ -498,6 +508,21 @@ function describeMilestone(milestoneEvent: TaskEvent | null, now: number): strin
   const name = readStringField(milestoneEvent.metadata, 'milestone') ?? 'milestone';
   const ago = relativeTime(milestoneEvent.timestamp, now);
   return ago ? `${name} (${ago} ago)` : name;
+}
+
+/** Render the latest ``agent_blocked`` event for the status snapshot (#251).
+ *  Returns ``null`` when there is no blocker so the caller skips the line. */
+function describeBlocker(blockerEvent: TaskEvent | null, now: number): string | null {
+  if (!blockerEvent) return null;
+  const kind = readStringField(blockerEvent.metadata, 'kind') ?? 'unknown_environmental';
+  const resource = readStringField(blockerEvent.metadata, 'resource');
+  const hint = readStringField(blockerEvent.metadata, 'remediation_hint');
+  const ago = relativeTime(blockerEvent.timestamp, now);
+  let line = kind;
+  if (resource) line += ` [${resource}]`;
+  if (ago) line += ` (${ago} ago)`;
+  if (hint) line += ` — ${hint}`;
+  return line;
 }
 
 function describeCurrent(task: TaskDetail, activity: TaskEvent | null): string {

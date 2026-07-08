@@ -89,7 +89,7 @@ The platform uses the [Claude Agent SDK](https://github.com/anthropics/claude-ag
 
 **System prompt:** Selected by workflow from a shared base template (`agent/src/prompts/base.py`) with per-workflow sections (`coding/new-task-v1`, `coding/pr-iteration-v1`, `coding/pr-review-v1`). The platform defines what the agent should do; the harness executes it.
 
-**Result contract:** The agent does not call back to the platform. It follows the contract (push work, create PR) and exits. The orchestrator infers the outcome from GitHub state and the agent's poll response.
+**Result contract:** The agent does not call back to the platform. It follows the contract (push work, create PR) and exits. The orchestrator infers the outcome from GitHub state and the agent's poll response. When the agent is stopped by an *environmental* fault (missing secret, egress denial, unreachable dependency, fail-closed policy-engine error), it emits a typed `agent_blocked` event and carries a canonical `BLOCKED[<kind>]: …` reason in its terminal error so the orchestrator's classifier attaches a precise remedy — see [Cedar HITL gates §13.16](/sample-autonomous-cloud-coding-agents/architecture/cedar-hitl-gates#1316-observable-blocker-signal-251).
 
 ### Tool set
 

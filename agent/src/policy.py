@@ -205,6 +205,7 @@ class PolicyDecision:
     __slots__ = (
         "cache_hit_metadata",
         "duration_ms",
+        "fail_closed",
         "matching_rule_ids",
         "outcome",
         "reason",
@@ -223,6 +224,7 @@ class PolicyDecision:
         matching_rule_ids: tuple[str, ...] = (),
         duration_ms: float = 0.0,
         cache_hit_metadata: dict | None = None,
+        fail_closed: bool = False,
     ) -> None:
         if outcome is None and allowed is None:
             raise TypeError("PolicyDecision requires either outcome= or allowed=")
@@ -244,6 +246,16 @@ class PolicyDecision:
         # decisions with different original_decision_ts values still
         # represent the same deny outcome.
         self.cache_hit_metadata = cache_hit_metadata
+        # #251 (decision E): structured discriminator for environmental
+        # fail-closed denies (Cedar engine errored / unavailable) vs.
+        # intentional hard-denies and cache-driven denies. The hook branches
+        # on THIS flag — not a brittle ``reason.startswith("fail-closed:")``
+        # string match — to decide whether to emit a ``policy_fail_closed``
+        # blocker event. Set True ONLY at engine-error/unavailable deny sites;
+        # hard-deny and cache-deny leave it False. Like ``cache_hit_metadata``,
+        # NOT part of __eq__/__hash__ (it is derived from outcome+reason, and
+        # legacy equality-based tests predate the field).
+        self.fail_closed = fail_closed
 
     @property
     def allowed(self) -> bool:
@@ -296,8 +308,15 @@ class PolicyDecision:
         return cls(outcome=Outcome.ALLOW, reason=reason, duration_ms=duration_ms)
 
     @classmethod
-    def deny(cls, reason: str, duration_ms: float = 0.0) -> PolicyDecision:
-        return cls(outcome=Outcome.DENY, reason=reason, duration_ms=duration_ms)
+    def deny(
+        cls, reason: str, duration_ms: float = 0.0, fail_closed: bool = False
+    ) -> PolicyDecision:
+        return cls(
+            outcome=Outcome.DENY,
+            reason=reason,
+            duration_ms=duration_ms,
+            fail_closed=fail_closed,
+        )
 
     @classmethod
     def require_approval(
@@ -1153,6 +1172,7 @@ class PolicyEngine:
             return PolicyDecision.deny(
                 reason="policy engine unavailable",
                 duration_ms=(time.monotonic() - start) * 1000,
+                fail_closed=True,
             )
 
         base_context = {
@@ -1174,6 +1194,7 @@ class PolicyEngine:
             return PolicyDecision.deny(
                 reason="fail-closed: unhashable_tool_input",
                 duration_ms=(time.monotonic() - start) * 1000,
+                fail_closed=True,
             )
 
         try:
@@ -1306,6 +1327,7 @@ class PolicyEngine:
             return PolicyDecision.deny(
                 reason=f"fail-closed: {type(exc).__name__}",
                 duration_ms=(time.monotonic() - start) * 1000,
+                fail_closed=True,
             )
 
     # ---- Per-action routing ------------------------------------------------
