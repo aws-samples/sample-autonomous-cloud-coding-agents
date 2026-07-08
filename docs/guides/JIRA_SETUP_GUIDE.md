@@ -4,7 +4,7 @@ Set up the ABCA Jira Cloud integration so that adding a label to a Jira issue tr
 
 ## Prerequisites
 
-- ABCA CDK stack deployed (see [Developer guide](./DEVELOPER_GUIDE.md))
+- ABCA CDK stack deployed **at a version that includes the Jira integration** ([#302](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/pull/302), merged 2026-06-17) — a stack deployed before that has no Jira resources and needs a sync + redeploy first (see [Developer guide](./DEVELOPER_GUIDE.md))
 - A Cognito user account configured (see [User guide](./USER_GUIDE.md))
 - A Jira Cloud site where you have **admin** access (to create the OAuth app and the webhook)
 - The `bgagent` CLI installed and logged in (`bgagent configure` + `bgagent login`)
@@ -21,7 +21,7 @@ Inbound (Jira → ABCA):
 
 ```
 Jira Cloud webhook
-  → POST /jira/webhook   (API GW, no Cognito, HMAC-verified)
+  → POST /v1/jira/webhook  (API GW, no Cognito, HMAC-verified)
   → JiraWebhookFn        (verify X-Hub-Signature, dedup, async invoke)
   → JiraWebhookProcessorFn (resolve tenant OAuth, look up project→repo,
                             build task, call createTaskCore)
@@ -88,6 +88,8 @@ This runs the OAuth 3LO dance:
 4. If your account can access multiple Atlassian sites, the CLI lists them and asks you to pick one. It records the selected site's `cloud_id` and `site_url`.
 5. Stores the OAuth token bundle in `bgagent-jira-oauth-<cloudId>` and records the tenant in the workspace registry.
 
+> **If `setup` hangs at "Waiting for browser callback…"** the consent redirect never reached the CLI's localhost listener. Usual causes: the consent tab was completed in a *different* browser/profile than the one `setup` opened, the tab was closed before clicking Authorize, or something else is bound to port 8080. Ctrl-C and re-run `bgagent jira setup` — re-running is safe and idempotent (it re-mints the token bundle and re-registers the tenant; nothing is half-written by an aborted attempt).
+
 ### 3. Configure the Jira webhook
 
 `setup` then prompts for a **webhook signing secret**. Unlike Linear, Atlassian does **not** auto-generate one — the operator chooses it at webhook-create time. In a second terminal, open **Jira → Settings → System → Webhooks → Create a Webhook** and enter:
@@ -104,7 +106,7 @@ Paste that same secret value back at the `Webhook signing secret:` prompt. ABCA 
 bgagent jira map <cloud-id> <PROJECT-KEY> --repo owner/repo
 ```
 
-- `<cloud-id>` — the tenant UUID `setup` printed (`cloud_id: …`)
+- `<cloud-id>` — the tenant UUID. `setup`'s final **Next steps** block prints this exact `map` command with the cloudId pre-filled — paste it and swap in your project key and repo. If that terminal output is gone, recover the cloudId from `https://<your-site>.atlassian.net/_edge/tenant_info` (returns it as JSON) or from the workspace-registry table — it is *not* shown anywhere in the Jira UI
 - `<PROJECT-KEY>` — the Jira project key, e.g. `ENG` (uppercase, starts with a letter)
 - `--repo owner/repo` — the GitHub repository tasks from this project route to
 - `--label <name>` — trigger label (default `bgagent`)
@@ -121,7 +123,28 @@ bgagent jira link <code>
 
 The CLI shows the Jira identity (name + email) and the tenant, and asks for confirmation **before** writing the mapping row — so a mis-issued code is caught before it binds.
 
-> The `invite-user` issuing command is not yet implemented. Until it lands, an admin can populate the user-mapping row manually (`accountId` → platform user id) for the tenant.
+> The `invite-user` issuing command is not yet implemented (tracked in [#553](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/553)). Until it lands, an admin can write the user-mapping row directly. Note that until the row exists, a labeled issue from the unlinked user produces no task — the processor comments "Run `bgagent jira link <code>`" on the issue, but no code can be issued yet.
+
+**Interim manual linking (admin IAM).** Write an `active` row to the user-mapping table (stack output `JiraUserMappingTableName`), keyed exactly as `jira-link.ts` would write it:
+
+```bash
+aws dynamodb put-item \
+  --table-name <JiraUserMappingTableName> \
+  --item '{
+    "jira_identity":    {"S": "<cloudId>#<accountId>"},
+    "platform_user_id": {"S": "<cognito-sub>"},
+    "jira_cloud_id":    {"S": "<cloudId>"},
+    "jira_account_id":  {"S": "<accountId>"},
+    "linked_at":        {"S": "<ISO-8601 timestamp>"},
+    "status":           {"S": "active"},
+    "link_method":      {"S": "manual"}
+  }'
+```
+
+Where to find the two identity values:
+
+- **Atlassian `accountId`** — open your Jira profile (avatar → Profile); the URL ends `/people/<accountId>`. Or call `GET https://api.atlassian.com/ex/jira/<cloudId>/rest/api/3/myself` with the stored token.
+- **Cognito sub (platform user id)** — `aws cognito-idp admin-get-user --user-pool-id <pool> --username <email> --query 'UserAttributes[?Name==`sub`].Value' --output text`.
 
 ### 6. Test
 
@@ -172,6 +195,16 @@ aws secretsmanager get-secret-value \
   --secret-id bgagent-jira-oauth-<cloudId> \
   --query SecretString --output text | jq .webhook_signing_secret
 ```
+
+### `setup` hangs at "Waiting for browser callback…"
+
+The consent redirect never reached the CLI's localhost listener — see the note under [Step 2](#2-authorize-the-app-on-the-tenant). Ctrl-C and re-run `bgagent jira setup`; re-running is safe.
+
+### 401 when calling the Jira API directly after setup
+
+Expected, not a broken install. The stored access token lives ~1 hour and is only refreshed by the **trusted Lambda paths** when they next run — i.e. on the next webhook delivery (see [Limits and quotas](#limits-and-quotas)). If you fetch the token from Secrets Manager right after `setup` to verify it and get a 401, the integration is still fine: add the trigger label to an issue and the processor will refresh the bundle before using it.
+
+**Do not refresh the token manually.** Atlassian rotates the `refresh_token` on every use, and the rotated bundle must be written back to Secrets Manager *preserving every other field* — in particular `webhook_signing_secret`. A manual refresh that drops a field or loses the rotated refresh token bricks the tenant install (the only recovery is re-running `bgagent jira setup`). If you need a live token for debugging, trigger a label event and read the bundle the Lambda just wrote.
 
 ### Agent doesn't comment back on Jira
 
