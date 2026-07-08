@@ -156,6 +156,7 @@ Async `require_approval` after `pr_created` must state that the PR already exist
 ## 9. Out of scope
 
 - Replacing tool Cedar with event rules
+- Cedar-on-events (rejected — see §10; declarative matchers are permanent)
 - Stream-only HITL (race with fast agents)
 - EventBridge as primary internal bus
 - Separate approve commands for event vs tool gates
@@ -166,6 +167,6 @@ Async `require_approval` after `pr_created` must state that the PR already exist
 
 | Question | Resolution |
 |----------|------------|
-| Rule language | Declarative field matchers (Phase 0–1); Cedar-on-events deferred to ADR |
+| Rule language | **Resolved: declarative field matchers are the permanent language; Cedar-on-events is rejected.** Cedar is an *authorization* language (`principal-action-resource-context` → permit/forbid) with no aggregation — it cannot express `cost_usd_gte` / `turn_count_gte`, and event actions (`notify`/`escalate`/`cancel_task`/`inject_nudge`) are ECA automation, not authorization decisions. A Cedar port would still need a bespoke action layer, and it would add a third Cedar runtime alongside the two we already must bump in lockstep (`cedar-wasm`, `cedarpy`) for zero gain. The two-plane split stands: Cedar governs tool execution (fail-closed); the declarative matcher governs events. The matcher already has cross-language parity, schema validation, and fixture parity tests. |
 | Checkpoint trust | Pipeline-emitted only |
 | Scope algebra (tool + event overlap) | Idempotency key; document in runbooks |

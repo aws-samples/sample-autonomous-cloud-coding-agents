@@ -84,7 +84,84 @@ describe('event-governance-async module', () => {
     expect(result1.forceFanOut).toBe(true);
   });
 
-  test('evaluateAsyncEventRules executes cancel_task action in enforce mode', async () => {
+  test('bumps durable cost high-water mark and evaluates against it', async () => {
+    // No cumulative value on the event itself; the ceiling must be met from
+    // the persisted high-water mark alone (the cross-restart case).
+    mockSend
+      .mockResolvedValueOnce({}) // high-water UpdateCommand
+      .mockResolvedValueOnce({}) // idempotency claim
+      .mockResolvedValueOnce({}) // Put policy_decision
+      .mockResolvedValueOnce({}) // Update cancel
+      .mockResolvedValueOnce({}); // Put task_cancelled
+    const mod = await import('../../../src/handlers/shared/event-governance-async');
+    await mod.evaluateAsyncEventRules(
+      {
+        task_id: 't3',
+        event_id: 'e3',
+        event_type: 'agent_cost_update',
+        metadata: { cost_usd: 5 }, // this session is cheap...
+      },
+      {
+        task: {
+          task_id: 't3',
+          status: 'RUNNING',
+          gov_cumulative_cost_usd: 40, // ...but a prior session already crossed
+          event_rules: [
+            {
+              id: 'cap',
+              on: 'agent_cost_update',
+              when: { aggregate: { cost_usd_gte: 25 } },
+              action: 'cancel_task',
+              mode: 'enforce',
+              evaluation: 'async',
+            },
+          ],
+        } as any,
+      },
+    );
+    // First send is the high-water UpdateCommand with a climb-only condition.
+    const firstCall = mockSend.mock.calls[0][0];
+    expect(firstCall._type).toBe('Update');
+    expect(firstCall.input.ConditionExpression).toContain('gov_cumulative_cost_usd < :c');
+    // The cancel fired — resolved aggregate (max(40, 5)=40) still ≥ 25.
+    const cancelUpdate = mockSend.mock.calls.find(
+      (c) => c[0]._type === 'Update' && String(c[0].input.UpdateExpression).includes('#status'),
+    );
+    expect(cancelUpdate).toBeDefined();
+  });
+
+  test('turn_count_gte rule fires on turn_count metadata', async () => {
+    mockSend.mockResolvedValue({});
+    const mod = await import('../../../src/handlers/shared/event-governance-async');
+    const result = await mod.evaluateAsyncEventRules(
+      {
+        task_id: 't4',
+        event_id: 'e4',
+        event_type: 'agent_turn',
+        metadata: { turn_count: 35 },
+      },
+      {
+        task: {
+          task_id: 't4',
+          status: 'RUNNING',
+          event_rules: [
+            {
+              id: 'turns',
+              on: 'agent_turn',
+              when: { aggregate: { turn_count_gte: 30 } },
+              action: 'escalate',
+              mode: 'enforce',
+              evaluation: 'async',
+              notify_channels: ['slack'],
+            },
+          ],
+        } as any,
+      },
+    );
+    expect(result.notifyChannels).toContain('slack');
+  });
+
+  test('executes cancel_task action in enforce mode', async () => {
     mockSend
       .mockResolvedValueOnce({}) // idempotency
       .mockResolvedValueOnce({}) // Put policy_decision

@@ -29,6 +29,7 @@ import {
   buildPolicyDecisionMetadata,
   matchEventRules,
   parseEventRules,
+  type AggregateState,
   type EvaluableEvent,
 } from './event-rule-evaluator';
 import { logger } from './logger';
@@ -186,6 +187,88 @@ function correlationId(event: EvaluableEvent & { event_id?: string }, rule: Even
   return `${base}:${rule.id}`;
 }
 
+/** Extract the incoming cumulative cost/turn from a cost/turn event's metadata. */
+function incomingAggregate(event: EvaluableEvent): { cost?: number; turns?: number } {
+  const meta = event.metadata;
+  const out: { cost?: number; turns?: number } = {};
+  if (event.event_type === 'agent_cost_update') {
+    const raw = meta.cumulative_cost_usd ?? meta.cost_usd;
+    const cost = typeof raw === 'number' ? raw : Number(raw);
+    if (Number.isFinite(cost)) out.cost = cost;
+  }
+  if (event.event_type === 'agent_turn' || event.event_type === 'agent_cost_update') {
+    const raw = meta.turn_count ?? meta.turn;
+    const turns = typeof raw === 'number' ? raw : Number(raw);
+    if (Number.isFinite(turns)) out.turns = turns;
+  }
+  return out;
+}
+
+/**
+ * Bump the durable high-water marks on the TaskRecord and return the effective
+ * aggregate state for rule evaluation (#230). Uses ``if_not_exists`` + a max
+ * ConditionExpression so the value only ever climbs — a stream retry or an
+ * out-of-order event can't lower it, and it survives the per-session SDK reset
+ * across container restarts / PR-fix retries. On any DDB error we fall back to
+ * the just-observed value so evaluation still proceeds (fail-open to the live
+ * reading, never below it).
+ */
+async function persistAndResolveAggregate(
+  taskId: string,
+  event: EvaluableEvent,
+  task: TaskRecord | undefined,
+): Promise<AggregateState | undefined> {
+  const incoming = incomingAggregate(event);
+  if (incoming.cost === undefined && incoming.turns === undefined) {
+    // Not a cost/turn event — use whatever is already persisted.
+    if (!task) return undefined;
+    return { cumulative_cost_usd: task.gov_cumulative_cost_usd, turn_count: task.gov_cumulative_turn_count };
+  }
+
+  const priorCost = task?.gov_cumulative_cost_usd ?? 0;
+  const priorTurns = task?.gov_cumulative_turn_count ?? 0;
+  const resolved: AggregateState = {
+    cumulative_cost_usd: incoming.cost !== undefined ? Math.max(priorCost, incoming.cost) : task?.gov_cumulative_cost_usd,
+    turn_count: incoming.turns !== undefined ? Math.max(priorTurns, incoming.turns) : task?.gov_cumulative_turn_count,
+  };
+
+  if (!TASK_TABLE) return resolved;
+
+  const sets: string[] = [];
+  const conds: string[] = [];
+  const values: Record<string, unknown> = {};
+  if (incoming.cost !== undefined) {
+    sets.push('gov_cumulative_cost_usd = :c');
+    conds.push('(attribute_not_exists(gov_cumulative_cost_usd) OR gov_cumulative_cost_usd < :c)');
+    values[':c'] = incoming.cost;
+  }
+  if (incoming.turns !== undefined) {
+    sets.push('gov_cumulative_turn_count = :t');
+    conds.push('(attribute_not_exists(gov_cumulative_turn_count) OR gov_cumulative_turn_count < :t)');
+    values[':t'] = incoming.turns;
+  }
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: TASK_TABLE,
+      Key: { task_id: taskId },
+      UpdateExpression: `SET ${sets.join(', ')}`,
+      // Only write when at least one mark climbs; a no-op (retry with equal or
+      // lower value) fails the condition and is silently skipped.
+      ConditionExpression: `attribute_exists(task_id) AND (${conds.join(' OR ')})`,
+      ExpressionAttributeValues: values,
+    }));
+  } catch (err) {
+    const name = (err as { name?: string })?.name;
+    if (name !== 'ConditionalCheckFailedException') {
+      logger.warn('[event-governance] aggregate high-water update failed', {
+        task_id: taskId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  return resolved;
+}
+
 function idempotencyEventId(taskId: string, ruleId: string, corr: string): string {
   return `gov-idem#${taskId}#${ruleId}#${corr}`;
 }
@@ -237,9 +320,15 @@ export async function evaluateAsyncEventRules(
   const rules = parseEventRules(task?.event_rules);
   if (rules.length === 0) return { notifyChannels: [], forceFanOut: false };
 
+  // Resolve aggregates against the durable high-water mark so ceiling rules
+  // survive the per-session SDK cost/turn reset (#230). ``ctx.aggregateState``
+  // (the caller's live reading) is the fallback when no durable value applies.
+  const aggregateState = await persistAndResolveAggregate(event.task_id, event, task)
+    ?? ctx.aggregateState;
+
   const matched = matchEventRules(rules, event, {
     evaluation: 'async',
-    aggregateState: ctx.aggregateState,
+    aggregateState,
   });
   const notifyChannels: string[] = [];
   let forceFanOut = false;

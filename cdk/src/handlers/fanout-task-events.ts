@@ -1271,24 +1271,12 @@ export const handler = async (
       try {
         if (EVENT_GOVERNANCE_ENABLED) {
           const taskForGov = await loadTaskForGovernance(ev.task_id);
-          const rawCost = ev.metadata?.cumulative_cost_usd ?? ev.metadata?.cost_usd;
-          const parsedCost = typeof rawCost === 'number' ? rawCost : Number(rawCost);
-          const rawTurns = ev.metadata?.turn_count;
-          const parsedTurns = typeof rawTurns === 'number' ? rawTurns : Number(rawTurns);
-          const aggregateState = ev.event_type === 'agent_cost_update'
-            || ev.event_type === 'agent_turn'
-            ? {
-              ...(ev.event_type === 'agent_cost_update' && {
-                cumulative_cost_usd: Number.isFinite(parsedCost) ? parsedCost : taskForGov?.cost_usd,
-              }),
-              ...(ev.event_type === 'agent_turn' && Number.isFinite(parsedTurns) && {
-                turn_count: parsedTurns,
-              }),
-            }
-            : undefined;
+          // Aggregate high-water tracking is owned by evaluateAsyncEventRules,
+          // which persists and resolves the durable marks (#230); the handler
+          // just forwards the event and task record.
           const govResult = await evaluateAsyncEventRules(
             { ...ev, metadata: ev.metadata ?? {} },
-            { task: taskForGov, aggregateState },
+            { task: taskForGov },
           );
           governanceForcedChannels = govResult.notifyChannels.filter(
             (ch): ch is NotificationChannel => ch in DISPATCHERS,

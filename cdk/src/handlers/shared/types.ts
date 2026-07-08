@@ -121,6 +121,18 @@ export interface TaskRecord {
   readonly started_at?: string;
   readonly completed_at?: string;
   readonly cost_usd?: number;
+  /**
+   * Durable high-water marks for event-governance aggregate rules (#230).
+   * The FanOut stream consumer bumps these monotonically as ``agent_cost_update``
+   * / ``agent_turn`` events flow, so ``cost_usd_gte`` / ``turn_count_gte`` rules
+   * survive container restarts (the per-session SDK total resets; these do not).
+   * ponytail: monotonic max of session totals, not a cross-session SUM — a
+   * multi-session task's ceiling reflects its largest single session. Sum
+   * accounting (seed baseline from here on the agent restart path) is the
+   * upgrade if PR-fix retries must accrue.
+   */
+  readonly gov_cumulative_cost_usd?: number;
+  readonly gov_cumulative_turn_count?: number;
   readonly duration_s?: number;
   readonly build_passed?: boolean;
   /** Whether the post-run lint gate passed (#515). Written with `build_passed`
