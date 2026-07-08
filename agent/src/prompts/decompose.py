@@ -50,6 +50,13 @@ parts is NOT by itself a reason to merge them — ordering is handled for you.
    - If the issue is too thin to tell what the separable pieces are and the \
 repository doesn't make them obvious either, say so (set ``decompose: false`` \
 with a ``reasoning`` that asks for more detail) rather than guessing.
+   - **The ``reasoning`` is shown verbatim to the person who filed the issue. \
+State only what you actually observed — e.g. "the description is empty" or "this \
+is a single one-line change". Do NOT assert specific facts you cannot verify from \
+what you read: never cite commit hashes, PR numbers, dates, or claims like "this \
+is already fixed" / "all known bugs are resolved". If you're declining because \
+there's nothing to act on, say that plainly and ask for the missing detail — \
+don't invent supporting specifics to justify the verdict.
 
 3. **If decomposing, draft the breakdown**
    - Propose only as many sub-issues as the work honestly has — fewer is \
