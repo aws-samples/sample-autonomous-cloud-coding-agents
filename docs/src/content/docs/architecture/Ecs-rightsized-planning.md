@@ -2,13 +2,18 @@
 title: Ecs rightsized planning
 ---
 
-# Design proposal — right-sized ECS task def for read-only planning
+# Right-sized ECS task def for read-only planning
 
-> **Status:** PROPOSAL for the ECS-substrate workstream (K12/K14 / `feat/slack-channel-mapping`).
-> NOT part of the plan-mode stack (T1/T4/T5/T2 on `fix/492-t1-short-negation`). No code written yet.
+> **Status:** IMPLEMENTED (2026-07-07). Built as designed below: a second 8 GB / 2 vCPU planning
+> Fargate task def in `EcsAgentCluster`, selected by `workflowIsReadOnly` in the ECS compute
+> strategy. Deployed to dev with `--context compute_type=ecs` and live-verified (a `:decompose` on
+> the ECS-substrate fork project runs on the planning def; a normal coding task still runs on the
+> 64 GB build def). Held on `linear-vercel`; not yet on `main`.
 > **Author:** plan-mode QA/design session, 2026-07-07. Prompted by ABCA-583 (a `:decompose` on the
-> ECS-substrate `abca-fork-dev` project) failing at session-start because the dev stack has no ECS
-> substrate — and, more fundamentally, by the question "does *planning* need the 64 GB build box?"
+> ECS-substrate `abca-fork-dev` project) failing at session-start because that stack had no ECS
+> substrate provisioned — and, more fundamentally, by the question "does *planning* need the 64 GB
+> build box?" The sections below describe the shipped design; a few `.ts:NNN` line anchors are from
+> the design snapshot and may have drifted.
 
 ## 1. Problem
 
@@ -89,18 +94,20 @@ workflows.
   The dev stack is currently `ComputeSubstrate: agentcore` (no ECS resources), so this is a net-new
   infra deploy — appropriately that workstream's call, not a plan-mode side effect.
 
-## 5. Verification plan (for whoever builds it)
-1. Deploy with `--context compute_type=ecs` (provisions both task defs).
-2. `:decompose` on an ECS repo (e.g. `abca-fork-dev` / ABCA-583 re-run) → planning task runs on the
-   **8 GB planning def** (confirm via the ECS task's `taskDefinitionArn` + CloudWatch), emits a plan,
-   proposal posts. No OOM.
-3. A normal coding task on the same repo → runs on the **64 GB build def** (confirm the build def is
-   still selected for non-read-only workflows).
-4. Confirm the shared container helper kept env/grants identical across both defs (ABCA-488/#502
-   parity — Linear OAuth reaction fires, artifact delivers, payload fetches).
+## 5. Verification (done — 2026-07-07)
+1. Deployed with `--context compute_type=ecs` (provisions both task defs). ✅
+2. `:decompose` on the ECS-substrate fork project → planning task ran on the **8 GB planning def**
+   (confirmed via the ECS task's `taskDefinitionArn`), emitted a plan, proposal posted. No OOM. ✅
+3. A normal coding task on the same repo → ran on the **64 GB build def** (build def still selected
+   for non-read-only workflows). ✅
+4. Shared container helper (`makeTaskDef` + one `baseEnvironment`) keeps env/grants identical across
+   both defs (ABCA-488/#502 parity — Linear OAuth reaction fires, artifact delivers, payload
+   fetches). Enforced by construction and asserted in `ecs-agent-cluster.test.ts`. ✅
+5. AgentCore regression: `:decompose` on an AgentCore repo (`abca-demo`) still plans on the microVM,
+   unaffected by the `readOnly` flag (AgentCore ignores it). ✅
 
-## 6. Open sizing question
-8 GB is a starting guess. The honest input the builder needs: what's the largest ECS-onboarded repo,
-and what's a decompose-v1 clone + read peak on it? If unknown, deploy at 8 GB, watch Container
-Insights `MemoryUtilized` on a few real plans, and size up in 8 GB steps only if it approaches the
-cap (same empirical method the 64 GB build def was arrived at).
+## 6. Open sizing question (starting point: 8 GB)
+8 GB / 2 vCPU is the initial size. If a very large ECS-onboarded repo makes a decompose-v1
+clone + read approach the cap, size up in 8 GB steps on Container Insights `MemoryUtilized` evidence
+(the same empirical method the 64 GB build def was arrived at) — bump the `PlanningTaskDef` cpu/mem
+in `ecs-agent-cluster.ts`. No code path change is needed to grow it.
