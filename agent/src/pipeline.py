@@ -679,13 +679,18 @@ def run_task(
             "repo.url": config.repo_url,
             "issue.number": config.issue_number,
             "agent.model": config.anthropic_model,
+            # Correlation envelope (#245): user.id joins agent spans to
+            # orchestrator logs by the platform identity, not just task/repo.
+            **({"user.id": config.user_id} if config.user_id else {}),
         },
     ) as root_span:
         task_state.write_running(config.task_id)
         task_state.write_heartbeat(config.task_id)
 
         agent_result: AgentResult | None = None
-        progress = _ProgressWriter(config.task_id, trace=trace)
+        progress = _ProgressWriter(
+            config.task_id, trace=trace, user_id=config.user_id, repo=config.repo_url
+        )
         # #251: clear any blocker latched by a prior task. The agent container
         # is one-task-per-process today, but the FastAPI server thread-pool can
         # in principle dispatch a second run_task in the same process — reset

@@ -452,10 +452,12 @@ def _run_task_background(
         hb_thread.start()
 
     try:
-        # Propagate session ID into this thread's OTEL context so spans
-        # are correlated with the AgentCore session in CloudWatch.
-        if session_id:
-            set_session_id(session_id)
+        # Propagate the correlation envelope into this thread's OTEL context
+        # so spans are correlated with the AgentCore session and the platform
+        # identity in CloudWatch (#245). Runs whenever any field is present —
+        # session_id may be empty while user_id/repo are known.
+        if session_id or user_id or repo_url:
+            set_session_id(session_id, user_id=user_id, repo=repo_url or None)
 
         run_task(
             repo_url=repo_url,

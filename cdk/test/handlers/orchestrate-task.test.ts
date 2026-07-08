@@ -286,6 +286,32 @@ describe('hydrateAndTransition', () => {
     expect(metadata.truncated).toBe(false);
     expect(metadata.content_trust).toEqual({ task_description: 'trusted' });
   });
+
+  test('lifecycle events carry the {user_id, repo} correlation envelope (#245)', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    await hydrateAndTransition(baseTask as any);
+    const events = mockDdbSend.mock.calls
+      .filter((c: any) => c[0]._type === 'Put')
+      .map((c: any) => c[0].input.Item);
+    for (const eventType of ['hydration_started', 'hydration_complete']) {
+      const evt = events.find((e: any) => e.event_type === eventType);
+      expect(evt).toMatchObject({ user_id: 'user-123', repo: 'org/repo' });
+    }
+  });
+
+  test('repo-less task omits repo but still stamps user_id (#245, #248)', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    const { repo: _repo, ...repoLess } = baseTask;
+    await hydrateAndTransition(repoLess as any);
+    const started = mockDdbSend.mock.calls
+      .filter((c: any) => c[0]._type === 'Put')
+      .map((c: any) => c[0].input.Item)
+      .find((e: any) => e.event_type === 'hydration_started');
+    expect(started.user_id).toBe('user-123');
+    expect(started).not.toHaveProperty('repo');
+  });
 });
 
 describe('hydrateAndTransition — Cedar HITL payload threading', () => {
@@ -808,6 +834,8 @@ describe('finalizeTask', () => {
     const eventCall = mockDdbSend.mock.calls[2][0];
     expect(eventCall.input.Item.event_type).toBe('task_failed');
     expect(eventCall.input.Item.metadata.reason).toBe('agent_heartbeat_stale');
+    // Terminal event carries the correlation envelope (#245).
+    expect(eventCall.input.Item).toMatchObject({ user_id: 'user-123', repo: 'org/repo' });
   });
 
   test('transitions RUNNING to TIMED_OUT on poll timeout', async () => {

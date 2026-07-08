@@ -38,6 +38,8 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Literal
 
+from observability import current_otel_trace_id
+
 # Preview field cap defaults (design §10.1):
 #   - 200 chars for normal tasks — small DDB rows, cheap watch-stream bytes.
 #   - 4096 chars (4 KB) for ``--trace`` opt-in tasks — full enough to
@@ -373,8 +375,19 @@ class _ProgressWriter:
 
     _MAX_FAILURES = 3
 
-    def __init__(self, task_id: str, trace: bool = False) -> None:
+    def __init__(
+        self,
+        task_id: str,
+        trace: bool = False,
+        user_id: str = "",
+        repo: str | None = None,
+    ) -> None:
         self._task_id = task_id
+        # Correlation envelope (#245): stamped on every event so the agent-side
+        # event stream joins to orchestrator logs and the X-Ray trace. ``repo``
+        # is None for repo-less workflows (#248 Phase 3).
+        self._user_id = user_id
+        self._repo = repo
         self._table_name = os.environ.get("TASK_EVENTS_TABLE_NAME")
         self._table = None
         # Per-instance preview cap — design §10.1. ``trace=True`` raises
@@ -467,6 +480,11 @@ class _ProgressWriter:
                 return
 
             now = datetime.now(UTC)
+            # Correlation envelope (#245): trace_id is read per-event from the
+            # active span (it may be None early, before the root span opens);
+            # user_id/repo are stamped when known. All are omitted when
+            # empty/None so the item shape stays stable for consumers.
+            trace_id = current_otel_trace_id()
             item = {
                 "task_id": self._task_id,
                 "event_id": _generate_ulid(),
@@ -478,6 +496,12 @@ class _ProgressWriter:
                 "timestamp": now.isoformat(),
                 "ttl": int(now.timestamp()) + _TTL_SECONDS,
             }
+            if self._user_id:
+                item["user_id"] = self._user_id
+            if self._repo:
+                item["repo"] = self._repo
+            if trace_id:
+                item["trace_id"] = trace_id
             self._table.put_item(Item=item)
 
             # Success: reset the shared failure counter.  We do NOT flip

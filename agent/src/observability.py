@@ -76,12 +76,27 @@ def current_otel_trace_id() -> str | None:
     return trace.format_trace_id(ctx.trace_id)
 
 
-def set_session_id(session_id: str) -> None:
-    """Propagate *session_id* via OTEL baggage for AgentCore session correlation.
+def set_session_id(
+    session_id: str,
+    user_id: str = "",
+    repo: str | None = None,
+) -> None:
+    """Propagate the correlation envelope via OTEL baggage.
+
+    *session_id* correlates custom spans to the AgentCore session; *user_id*
+    and *repo* (#245) carry the platform identity and target repo so baggage
+    survives across pipeline phases on the task thread. Empty/None fields are
+    not set. *repo* is None for repo-less workflows (#248 Phase 3).
 
     The attached context is intentionally not detached: the background thread
     runs a single task then exits, so the context is garbage-collected with the
     thread.
     """
-    ctx = baggage.set_baggage("session.id", session_id)
+    ctx = context.get_current()
+    if session_id:
+        ctx = baggage.set_baggage("session.id", session_id, context=ctx)
+    if user_id:
+        ctx = baggage.set_baggage("user.id", user_id, context=ctx)
+    if repo:
+        ctx = baggage.set_baggage("repo.url", repo, context=ctx)
     context.attach(ctx)  # token not stored — thread-scoped lifetime
