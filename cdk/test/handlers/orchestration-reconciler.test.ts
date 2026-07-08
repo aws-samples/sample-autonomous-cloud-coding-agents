@@ -349,6 +349,29 @@ describe('reconcileDecomposePlan — idempotency (live-caught: ABCA-498 3 duplic
     expect(revertIssueToNotStartedMock).toHaveBeenCalledWith(expect.anything(), 'PARENT');
   });
 
+  test('F-decompose-inprogress: an ESCALATED REVISION round also reverts In Progress once the revised plan is handled', async () => {
+    // PM-stress follow-on: the webhook's escalated-revise path now flips the issue
+    // to In Progress (visibility fix) — so the reconciler must revert it when the
+    // revised plan lands, not just on round 0. Only the escalated revise reaches
+    // this handler (the deterministic revise settles inline), so reverting on a
+    // revision round is correct and doesn't flicker the board.
+    ddbSend.mockImplementation(async () => ({})); // replacePendingPlan upsert + ack claim
+    await handler({
+      Records: [decomposeRecord({
+        task_id: 'PLAN-REV-1',
+        status: 'COMPLETED',
+        mode: 'decompose',
+        artifact_uri: 's3://ArtifactsBucket/artifacts/PLAN-REV-1/result.md',
+        max_sub_issues: '6',
+        revision_round: '1',
+        revising_feedback_comment_id: 'feedback-1',
+      })],
+    } as never);
+
+    // The revised plan is HANDLED (awaiting approval) → revert to not-started.
+    expect(revertIssueToNotStartedMock).toHaveBeenCalledWith(expect.anything(), 'PARENT');
+  });
+
   test('CONFUSING-3: an :auto single-task dispatch carries the full Linear OAuth metadata', async () => {
     // Root of the ~9.5-min "zero output" :auto run the QA tester hit: the
     // single-task createTaskCore was missing linear_oauth_secret_arn /
