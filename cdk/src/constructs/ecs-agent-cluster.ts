@@ -90,6 +90,17 @@ const BEDROCK_MODEL_IDS = [
 /** HTTPS port — the only egress allowed from the agent task ENIs. */
 const HTTPS_PORT = 443;
 
+/**
+ * Fargate task sizes (vCPU units / MiB). The empirical sizing history that
+ * justifies these lives on the two ``makeTaskDef`` call sites below.
+ *  - BUILD: 16 vCPU / 64 GB — headroom for ABCA's parallel ``mise run build`` storm.
+ *  - PLANNING (#299): 2 vCPU / 8 GB — read-only clone+plan, no build.
+ */
+const BUILD_TASK_CPU = 16384;
+const BUILD_TASK_MEMORY_MIB = 65536;
+const PLANNING_TASK_CPU = 2048;
+const PLANNING_TASK_MEMORY_MIB = 8192;
+
 export class EcsAgentCluster extends Construct {
   public readonly cluster: ecs.Cluster;
   /** The 64 GB / 16 vCPU BUILD task def — for coding workflows that run a full
@@ -185,8 +196,8 @@ export class EcsAgentCluster extends Construct {
       }),
     };
     const image = ecs.ContainerImage.fromDockerImageAsset(props.agentImageAsset);
-    const makeTaskDef = (id: string, cpu: number, memoryLimitMiB: number, extraEnv: Record<string, string>) => {
-      const def = new ecs.FargateTaskDefinition(this, id, {
+    const makeTaskDef = (taskDefId: string, cpu: number, memoryLimitMiB: number, extraEnv: Record<string, string>) => {
+      const def = new ecs.FargateTaskDefinition(this, taskDefId, {
         cpu,
         memoryLimitMiB,
         taskRole,
@@ -218,7 +229,7 @@ export class EcsAgentCluster extends Construct {
     //     BUILD_VERIFY_TIMEOUT_S=3600 so the ~longer-than-30-min build isn't
     //     mis-reported as a timeout). Valid Fargate ARM64 combo (16 vCPU admits
     //     32–120 GB in 8 GB steps).
-    this.taskDefinition = makeTaskDef('TaskDef', 16384, 65536, {
+    this.taskDefinition = makeTaskDef('TaskDef', BUILD_TASK_CPU, BUILD_TASK_MEMORY_MIB, {
       // Heavy CI-parity builds legitimately run longer than the 1800s default.
       BUILD_VERIFY_TIMEOUT_S: '3600',
     });
@@ -231,7 +242,7 @@ export class EcsAgentCluster extends Construct {
     // BUILD_VERIFY_TIMEOUT_S (a read-only planner runs no build verify). If 8 GB
     // proves tight on a very large clone, 16 GB / 4 vCPU is the next step — size up
     // on Container-Insights evidence, mirroring the build def's empirical history.
-    this.planningTaskDefinition = makeTaskDef('PlanningTaskDef', 2048, 8192, {});
+    this.planningTaskDefinition = makeTaskDef('PlanningTaskDef', PLANNING_TASK_CPU, PLANNING_TASK_MEMORY_MIB, {});
 
     // DynamoDB: when a SessionRole (#209) is wired, tenant-data access lives on
     // that tag-scoped role and the task role only needs to assume it. Without

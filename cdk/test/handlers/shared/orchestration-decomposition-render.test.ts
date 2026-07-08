@@ -22,9 +22,11 @@ import {
   criticalPathLength,
   PLAN_PROPOSAL_PREFIX,
   renderAlreadyDecomposedNote,
+  renderApprovedPlanReference,
   renderCapRejection,
   renderDecomposeStartedNote,
   renderDecomposeUnavailableNote,
+  renderDiscardedPlanReference,
   renderLabelHelp,
   renderMultiPartHint,
   renderPlannerErrorNote,
@@ -286,6 +288,57 @@ describe('renderPlanProposal — self-trigger guard (UX.20)', () => {
     expect(isBotAuthoredComment(renderAlreadyDecomposedNote())).toBe(true);
     expect(isBotAuthoredComment(renderPlannerErrorNote())).toBe(true);
     expect(isBotAuthoredComment(renderUnderspecifiedDecomposeNote())).toBe(true);
+  });
+
+  test('the frozen plan-reference renderers are bot-authored (never re-trigger)', () => {
+    // The reference is EDITED IN PLACE onto the proposal comment; it must keep
+    // reading as bot-authored so a webhook update-event can't loop.
+    expect(isBotAuthoredComment(renderApprovedPlanReference(FANOUT))).toBe(true);
+    expect(isBotAuthoredComment(renderDiscardedPlanReference())).toBe(true);
+  });
+});
+
+describe('renderApprovedPlanReference (#299 plan-cleanup)', () => {
+  test('freezes to an "Approved plan" header with the sub-issue count + no action footer', () => {
+    const ref = renderApprovedPlanReference(FANOUT);
+    expect(ref.startsWith(PLAN_PROPOSAL_PREFIX)).toBe(true);
+    expect(ref).toMatch(/Approved plan/);
+    expect(ref).toContain('3 sub-issues');
+    // The stale approve/reject prompt is GONE (the panel is live now).
+    expect(ref).not.toMatch(/@bgagent approve/i);
+    expect(ref).not.toMatch(/@bgagent reject/i);
+    // Re-lists the agreed breakdown so it reads continuously with what was approved.
+    expect(ref).toContain('Pricing route');
+    expect(ref).toContain('Stripe checkout');
+    // Points at the live panel for status.
+    expect(ref).toMatch(/panel below/i);
+  });
+
+  test('no "refined over N rounds" footnote on a round-0 (never-revised) plan', () => {
+    expect(renderApprovedPlanReference(FANOUT)).not.toMatch(/refined over/i);
+    expect(renderApprovedPlanReference(FANOUT, { revisionRound: 0 })).not.toMatch(/refined over/i);
+  });
+
+  test('adds a singular/plural-correct "refined over N rounds" footnote when revised', () => {
+    expect(renderApprovedPlanReference(FANOUT, { revisionRound: 1 })).toMatch(/refined over 1 round\b/);
+    expect(renderApprovedPlanReference(FANOUT, { revisionRound: 3 })).toMatch(/refined over 3 rounds\b/);
+  });
+
+  test('preserves dependency notes from the plan (chain vs fan-out)', () => {
+    const ref = renderApprovedPlanReference(CHAIN);
+    // "API" depends on #1 (Schema) → the "after #1" note carries into the reference.
+    expect(ref).toMatch(/after #1/);
+  });
+});
+
+describe('renderDiscardedPlanReference (#299 plan-cleanup)', () => {
+  test('one-line discarded record — nothing ran, no breakdown re-listed', () => {
+    const ref = renderDiscardedPlanReference();
+    expect(ref.startsWith(PLAN_PROPOSAL_PREFIX)).toBe(true);
+    expect(ref).toMatch(/discarded/i);
+    expect(ref).toMatch(/nothing ran/i);
+    // A discard doesn't re-list sub-issues (there are none to keep).
+    expect(ref).not.toMatch(/1\.\s+\*\*/);
   });
 });
 

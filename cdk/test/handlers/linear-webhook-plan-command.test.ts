@@ -49,6 +49,7 @@ jest.mock('../../src/handlers/shared/create-task-core', () => ({
 const reactToCommentMock = jest.fn();
 const upsertStatusCommentMock = jest.fn();
 const swapCommentReactionMock = jest.fn();
+const sweepDecompositionNotesMock = jest.fn();
 jest.mock('../../src/handlers/shared/linear-feedback', () => {
   const actual = jest.requireActual('../../src/handlers/shared/linear-feedback');
   return {
@@ -56,6 +57,9 @@ jest.mock('../../src/handlers/shared/linear-feedback', () => {
     reactToComment: (...args: unknown[]) => reactToCommentMock(...args),
     upsertStatusComment: (...args: unknown[]) => upsertStatusCommentMock(...args),
     swapCommentReaction: (...args: unknown[]) => swapCommentReactionMock(...args),
+    // #299 plan-cleanup: the sweep hits the network (list + delete comments);
+    // stub it so verdict tests don't fetch, and we can assert it fired.
+    sweepDecompositionNotes: (...args: unknown[]) => sweepDecompositionNotesMock(...args),
   };
 });
 
@@ -201,6 +205,41 @@ describe('plan-command path (T4/T5) through the real handler', () => {
   });
 });
 
+describe('graph verdict cleanup (#299 plan-cleanup) through the real handler', () => {
+  beforeEach(() => {
+    ddbSend.mockReset();
+    createTaskCoreMock.mockReset();
+    reactToCommentMock.mockReset().mockResolvedValue(undefined);
+    upsertStatusCommentMock.mockReset().mockResolvedValue('comment-plan-1');
+    sweepDecompositionNotesMock.mockReset().mockResolvedValue(2);
+    resolveLinearOauthTokenMock.mockReset().mockResolvedValue({
+      accessToken: 'lin_at',
+      workspaceSlug: 'acme',
+      oauthSecretArn: 'arn:aws:secretsmanager:us-east-1:123:secret:bgagent-linear-oauth-acme',
+    });
+    // Get → the GRAPH pending plan; Update(claim) → win; Delete(consume for reject) → ALL_OLD.
+    ddbSend.mockImplementation((cmd: { _type?: string }) => {
+      if (cmd._type === 'Get') return Promise.resolve({ Item: pendingPlanItem() });
+      if (cmd._type === 'Update') return Promise.resolve({});
+      if (cmd._type === 'Delete') return Promise.resolve({ Attributes: pendingPlanItem() });
+      return Promise.resolve({});
+    });
+  });
+
+  test('reject on a GRAPH pending plan → freezes the plan comment to "discarded" + sweeps the notes', async () => {
+    await handler(commentEvent('@bgagent reject'));
+    // No graph seeded (nothing to write back), nothing dispatched.
+    expect(createTaskCoreMock).not.toHaveBeenCalled();
+    // cleanupPlanThread: the proposal comment is EDITED IN PLACE (4th arg = its id)
+    // to the frozen "discarded" reference.
+    const freezeCall = upsertStatusCommentMock.mock.calls.find((c) => c[3] === 'comment-plan-1');
+    expect(freezeCall).toBeDefined();
+    expect(freezeCall![2]).toMatch(/discarded/i);
+    // …and the transient notes are swept, keeping that frozen reference.
+    expect(sweepDecompositionNotesMock).toHaveBeenCalledWith(expect.anything(), 'parent-1', 'comment-plan-1');
+  });
+});
+
 /** A SINGLE-task pending plan (a :decompose that declined to split — F-single-gate). */
 function singlePendingItem(): Record<string, unknown> {
   return {
@@ -224,6 +263,7 @@ describe('single-task verdict path (F-single-gate) through the real handler', ()
     createTaskCoreMock.mockReset().mockResolvedValue({ statusCode: 201, body: '' });
     reactToCommentMock.mockReset().mockResolvedValue(undefined);
     upsertStatusCommentMock.mockReset().mockResolvedValue('c-1');
+    sweepDecompositionNotesMock.mockReset().mockResolvedValue(0);
     resolveLinearOauthTokenMock.mockReset().mockResolvedValue({
       accessToken: 'lin_at',
       workspaceSlug: 'acme',
@@ -249,6 +289,8 @@ describe('single-task verdict path (F-single-gate) through the real handler', ()
     expect(ctx.channelMetadata.linear_issue_id).toBe('parent-1');
     // Consumed the pending plan (a Delete fired).
     expect(ddbSend.mock.calls.some((c) => c[0]?._type === 'Delete')).toBe(true);
+    // #299 plan-cleanup: the transient planning notes are swept once the task runs.
+    expect(sweepDecompositionNotesMock).toHaveBeenCalledWith(expect.anything(), 'parent-1');
   });
 
   test('reject on a single pending plan → discards, runs nothing', async () => {
@@ -257,5 +299,8 @@ describe('single-task verdict path (F-single-gate) through the real handler', ()
     expect(ddbSend.mock.calls.some((c) => c[0]?._type === 'Delete')).toBe(true);
     const note = upsertStatusCommentMock.mock.calls.map((c) => c[2]).join(' ');
     expect(note).toMatch(/cancelled/i);
+    // #299 plan-cleanup: sweep fires BEFORE the durable "cancelled" note is posted,
+    // so the note (posted fresh, after) survives.
+    expect(sweepDecompositionNotesMock).toHaveBeenCalledWith(expect.anything(), 'parent-1');
   });
 });

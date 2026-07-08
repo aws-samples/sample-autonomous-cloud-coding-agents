@@ -259,6 +259,10 @@ describe('applyDecompositionResult — #299 agent-native entry (pre-parsed plan,
     if (r.kind === 'seed') {
       expect(r.children.map((c) => c.id)).toEqual(['new-A', 'new-B']);
       expect(r.children[1].depends_on).toEqual(['new-A']);
+      // #299 plan-cleanup: the :auto seed carries the proposal comment id (the
+      // effects mock's postComment returns 'comment-1') so the seed site can
+      // freeze it into the "Approved plan" reference.
+      expect(r.proposalCommentId).toBe('comment-1');
     }
     expect(e.putPendingPlan).not.toHaveBeenCalled();
   });
