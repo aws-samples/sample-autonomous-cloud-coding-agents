@@ -60,8 +60,10 @@ class TestSetSessionId:
     baggage, setting only the fields that are present."""
 
     def test_sets_all_envelope_fields_when_present(self):
-        with patch.object(observability, "baggage") as bag, \
-                patch.object(observability, "context") as ctx:
+        with (
+            patch.object(observability, "baggage") as bag,
+            patch.object(observability, "context") as ctx,
+        ):
             bag.set_baggage.return_value = "CTX"
             observability.set_session_id("sess-1", user_id="user-1", repo="org/repo")
         keys = [c.args[0] for c in bag.set_baggage.call_args_list]
@@ -70,8 +72,7 @@ class TestSetSessionId:
 
     def test_omits_absent_fields(self):
         # Empty user_id and None repo → only session.id is set on the baggage.
-        with patch.object(observability, "baggage") as bag, \
-                patch.object(observability, "context"):
+        with patch.object(observability, "baggage") as bag, patch.object(observability, "context"):
             bag.set_baggage.return_value = "CTX"
             observability.set_session_id("sess-1")
         keys = [c.args[0] for c in bag.set_baggage.call_args_list]
@@ -80,8 +81,7 @@ class TestSetSessionId:
     def test_empty_session_id_is_not_stamped(self):
         # Reachable via server.py's widened trigger (user_id known, no session):
         # an empty session_id must not write an empty-string session.id baggage.
-        with patch.object(observability, "baggage") as bag, \
-                patch.object(observability, "context"):
+        with patch.object(observability, "baggage") as bag, patch.object(observability, "context"):
             bag.set_baggage.return_value = "CTX"
             observability.set_session_id("", user_id="user-1")
         keys = [c.args[0] for c in bag.set_baggage.call_args_list]

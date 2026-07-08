@@ -298,7 +298,8 @@ def test_run_task_background_propagates_correlation_envelope(monkeypatch):
     """
     calls: list[dict] = []
     monkeypatch.setattr(
-        server, "set_session_id",
+        server,
+        "set_session_id",
         lambda session_id, **kw: calls.append({"session_id": session_id, **kw}),
     )
     monkeypatch.setattr(server, "run_task", lambda **_kwargs: None)
