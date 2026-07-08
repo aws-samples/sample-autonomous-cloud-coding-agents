@@ -163,6 +163,79 @@ class TestReadOnlyBaselineSkip:
         assert setup.lint_before is True
 
 
+class TestBaselineBuildTimeout:
+    """ABCA-659 Bug B: the pre-agent baseline build/lint must run with the SAME
+    generous wall-clock ceiling as the post-agent gate (BUILD_VERIFY_TIMEOUT_S,
+    30min) — NOT run_cmd's 600s default — and a TIMEOUT must be GUARDED so a
+    slow-but-valid CI-parity build no longer raises out of setup_repo and crashes
+    the whole task before the agent ever runs (the 661/662 symptom: no PR, issue
+    stuck in Backlog, indistinguishable from a real failure)."""
+
+    class _RecordingFake:
+        """run_cmd fake that records the ``timeout`` kwarg and can raise
+        TimeoutExpired for a label substring."""
+
+        def __init__(self, timeout_on: str | None = None):
+            self.calls: list[dict] = []
+            self._timeout_on = timeout_on
+
+        def __call__(self, cmd, label, cwd=None, timeout=600, check=True, **kwargs):
+            self.calls.append({"label": label, "timeout": timeout})
+            if self._timeout_on and self._timeout_on in label:
+                raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        def timeout_for(self, label: str) -> int | None:
+            for c in self.calls:
+                if label in c["label"]:
+                    return c["timeout"]
+            return None
+
+    def test_baseline_build_uses_the_generous_verify_ceiling_not_600s(self, monkeypatch):
+        from post_hooks import BUILD_VERIFY_TIMEOUT_S
+
+        fake = self._RecordingFake()
+        monkeypatch.setattr(repo, "run_cmd", fake)
+        monkeypatch.setattr(repo, "run_cmd_with_backoff", fake)
+        monkeypatch.setattr(repo, "_install_commit_hook", lambda repo_dir: None)
+        monkeypatch.setattr(repo, "detect_default_branch", lambda url, d: "main")
+
+        repo.setup_repo(_config(read_only=False))
+
+        assert fake.timeout_for("verify-build-pre") == BUILD_VERIFY_TIMEOUT_S
+        assert fake.timeout_for("verify-lint-pre") == BUILD_VERIFY_TIMEOUT_S
+        assert BUILD_VERIFY_TIMEOUT_S > 600  # the whole point: not the old default
+
+    def test_baseline_build_timeout_is_guarded_not_a_task_crash(self, monkeypatch):
+        # The heavy build times out. setup_repo must NOT propagate TimeoutExpired
+        # (which crashed the task pre-agent); it degrades to "no baseline" and the
+        # run proceeds with build_before=True (a timeout is not a regression).
+        fake = self._RecordingFake(timeout_on="verify-build-pre")
+        monkeypatch.setattr(repo, "run_cmd", fake)
+        monkeypatch.setattr(repo, "run_cmd_with_backoff", fake)
+        monkeypatch.setattr(repo, "_install_commit_hook", lambda repo_dir: None)
+        monkeypatch.setattr(repo, "detect_default_branch", lambda url, d: "main")
+
+        setup = repo.setup_repo(_config(read_only=False))  # must not raise
+
+        assert setup.build_before is True  # timeout → not treated as a regression
+        assert setup.build_gate_inert is False
+        assert any("did not finish within" in n for n in setup.notes)
+
+    def test_baseline_lint_timeout_is_guarded(self, monkeypatch):
+        fake = self._RecordingFake(timeout_on="verify-lint-pre")
+        monkeypatch.setattr(repo, "run_cmd", fake)
+        monkeypatch.setattr(repo, "run_cmd_with_backoff", fake)
+        monkeypatch.setattr(repo, "_install_commit_hook", lambda repo_dir: None)
+        monkeypatch.setattr(repo, "detect_default_branch", lambda url, d: "main")
+
+        setup = repo.setup_repo(_config(read_only=False))  # must not raise
+
+        assert setup.lint_before is True
+        assert setup.lint_gate_inert is False
+        assert any("Initial lint" in n and "did not finish within" in n for n in setup.notes)
+
+
 class TestDetectDefaultBranch:
     def test_returns_detected_branch(self, monkeypatch):
         def fake_run(*args, **kwargs):
