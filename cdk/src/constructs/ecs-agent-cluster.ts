@@ -334,14 +334,31 @@ export class EcsAgentCluster extends Construct {
     this.taskRoleArn = taskRole.roleArn;
     this.executionRoleArn = executionRole.roleArn;
 
-    // Same nag posture on BOTH task defs (they share roles/env, so the same
-    // wildcards + env-vars-not-secrets rationale applies verbatim to each).
+    // cdk-nag suppressions. The task role + execution role are now SHARED standalone
+    // constructs (#299 ECS_RIGHTSIZED_PLANNING) rather than roles auto-created under a
+    // single task def, so the IAM suppressions must target the ROLES directly — a
+    // def-level `applyToChildren` suppression no longer reaches them (they're siblings
+    // of the task defs, not children). ECS2 (container env-vars-not-secrets) still
+    // belongs on each task def.
+    NagSuppressions.addResourceSuppressions(taskRole, [
+      {
+        id: 'AwsSolutions-IAM5',
+        reason: 'DynamoDB index/* wildcards from CDK grantReadWriteData (UserConcurrencyTable, and task tables only when no SessionRole is wired); Secrets Manager wildcards from CDK grantRead (GitHub token) and the bgagent-linear-oauth-*/bgagent-jira-oauth-* prefix grant (ABCA-488 — per-workspace channel OAuth tokens are created by the CLI at setup, name unknown at synth, GetSecretValue only); CloudWatch Logs wildcards from CDK grantWrite; S3 object/* wildcard from CDK grantRead on the ECS payload bucket (read-only, scoped to that bucket — #502) and from grantReadWrite on the artifacts bucket (scoped to that bucket — coding/decompose-v1 delivers its plan artifact there, #299). Bedrock InvokeModel is scoped to explicit model/inference-profile ARNs (no wildcard resource).',
+      },
+    ], true);
+    NagSuppressions.addResourceSuppressions(executionRole, [
+      {
+        id: 'AwsSolutions-IAM4',
+        reason: 'AmazonECSTaskExecutionRolePolicy is the AWS-recommended managed policy for ECS Fargate task execution (ECR image pull + CloudWatch Logs); shared by both the build and planning task defs.',
+      },
+      {
+        id: 'AwsSolutions-IAM5',
+        reason: 'ecr:GetAuthorizationToken requires Resource:* (CDK grantPull for the agent image asset); the remaining ECR pull + CloudWatch Logs wildcards are CDK-generated grants scoped to the image repo and the task log group.',
+      },
+    ], true);
+    // Same ECS2 posture on BOTH task defs (they share the container spec).
     for (const def of [this.taskDefinition, this.planningTaskDefinition]) {
       NagSuppressions.addResourceSuppressions(def, [
-        {
-          id: 'AwsSolutions-IAM5',
-          reason: 'DynamoDB index/* wildcards from CDK grantReadWriteData (UserConcurrencyTable, and task tables only when no SessionRole is wired); Secrets Manager wildcards from CDK grantRead (GitHub token) and the bgagent-linear-oauth-*/bgagent-jira-oauth-* prefix grant (ABCA-488 — per-workspace channel OAuth tokens are created by the CLI at setup, name unknown at synth, GetSecretValue only); CloudWatch Logs wildcards from CDK grantWrite; S3 object/* wildcard from CDK grantRead on the ECS payload bucket (read-only, scoped to that bucket — #502) and from grantReadWrite on the artifacts bucket (scoped to that bucket — coding/decompose-v1 delivers its plan artifact there, #299). Bedrock InvokeModel is scoped to explicit model/inference-profile ARNs (no wildcard resource).',
-        },
         {
           id: 'AwsSolutions-ECS2',
           reason: 'Environment variables contain table names and configuration, not secrets — GitHub token is fetched from Secrets Manager at runtime',

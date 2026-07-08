@@ -1,10 +1,10 @@
 # Right-sized ECS task def for read-only planning
 
-> **Status:** IMPLEMENTED (2026-07-07). Built as designed below: a second 8 GB / 2 vCPU planning
+> **Status:** IMPLEMENTED (2026-07-08). Built as designed below: a second 8 GB / 2 vCPU planning
 > Fargate task def in `EcsAgentCluster`, selected by `workflowIsReadOnly` in the ECS compute
-> strategy. Deployed to dev with `--context compute_type=ecs` and live-verified (a `:decompose` on
-> the ECS-substrate fork project runs on the planning def; a normal coding task still runs on the
-> 64 GB build def). Held on `linear-vercel`; not yet on `main`.
+> strategy. Full CDK build green (2999 tests). Deployed to dev with `--context compute_type=ecs`
+> and live-verified on the ECS-substrate fork project (a `:decompose` runs on the planning def; a
+> normal coding task still runs on the 64 GB build def). Held on `linear-vercel`; not yet on `main`.
 > **Author:** plan-mode QA/design session, 2026-07-07. Prompted by ABCA-583 (a `:decompose` on the
 > ECS-substrate `abca-fork-dev` project) failing at session-start because that stack had no ECS
 > substrate provisioned — and, more fundamentally, by the question "does *planning* need the 64 GB
