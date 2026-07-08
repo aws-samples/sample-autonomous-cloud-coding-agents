@@ -79,10 +79,6 @@ export type DecompositionResult =
  *  ~1500-char guidance; a longer digest is truncated with an honest marker. */
 const MAX_REPO_DIGEST_CHARS = 4000;
 
-/** #299 BLOCKER-1: cap the revision change-summary so a runaway sentence can't
- *  bloat the plan comment. Generous vs the prompt's "one short sentence" ask. */
-const MAX_CHANGE_SUMMARY_CHARS = 500;
-
 /**
  * Parse + validate a decomposition plan's raw JSON into a {@link DecompositionResult}.
  * Pure. Handles markdown-fenced or prose-wrapped JSON (the ``coding/decompose-v1``
@@ -103,13 +99,6 @@ export function parseDecomposerResponse(
   }
 
   const reasoning = typeof obj.reasoning === 'string' ? obj.reasoning.trim() : '';
-  // #299 BLOCKER-1 (revise-forgets-edits): the agent's one-sentence diff of what it
-  // changed vs. the prior breakdown (only emitted on a revision; empty on round 0).
-  // Capped so a runaway string can't bloat the comment; surfaced above the plan.
-  const rawChangeSummary = typeof obj.change_summary === 'string' ? obj.change_summary.trim() : '';
-  const changeSummary = rawChangeSummary.length > MAX_CHANGE_SUMMARY_CHARS
-    ? `${rawChangeSummary.slice(0, MAX_CHANGE_SUMMARY_CHARS)}…`
-    : rawChangeSummary;
   const rawNodes = Array.isArray(obj.sub_issues) ? obj.sub_issues : [];
   // #299 plan-mode T2: the agent's reusable structural summary of the repo. Only
   // carried on a plan (a single-task decline has nothing to re-plan against).
@@ -170,7 +159,7 @@ export function parseDecomposerResponse(
 
   return {
     kind: 'plan',
-    plan: { shouldDecompose: true, reasoning, nodes, ...(changeSummary && { changeSummary }) },
+    plan: { shouldDecompose: true, reasoning, nodes },
     ...(repoDigest && { repoDigest }),
     ...(repoDigest && repoDigestSha && { repoDigestSha }),
   };

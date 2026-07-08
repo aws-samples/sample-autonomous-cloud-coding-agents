@@ -32,6 +32,7 @@ import {
   upsertStatusComment,
   upsertThreadedReply,
   EMOJI_STARTED,
+  EMOJI_SUCCESS,
   EMOJI_NEEDS_INPUT,
 } from './shared/linear-feedback';
 import {
@@ -43,7 +44,7 @@ import { fetchIssueParentId, type SubIssueNode } from './shared/linear-subissue-
 import { resolveTaskByLinearIssue, prNumberFromTask } from './shared/linear-task-by-issue';
 import { logger } from './shared/logger';
 import { buildIterationInstruction, detectNearMissMention, parseCommentTrigger, parsePlanVerdict, type CommentTrigger } from './shared/orchestration-comment-trigger';
-import { readProjectCaps } from './shared/orchestration-decomposition-caps';
+import { applyPlanCaps, readProjectCaps } from './shared/orchestration-decomposition-caps';
 import {
   runPlanVerdict,
   type DecompositionEffects,
@@ -67,6 +68,11 @@ import {
   renderPlanProposal,
   renderRevisionCapNote,
   renderRevisionFailedNote,
+  renderRevisionOverCapNote,
+  renderRevisionToSingleNote,
+  renderReviseEscalatedNote,
+  renderReviseNoChangeNote,
+  renderReviseUnclearNote,
   renderSingleTaskCancelled,
   renderWrongMentionNudge,
 } from './shared/orchestration-decomposition-render';
@@ -89,6 +95,8 @@ import {
   looksLikeNewWork,
 } from './shared/orchestration-parent-comment';
 import { applyPlanCommand, parsePlanCommand, type PlanCommand } from './shared/orchestration-plan-commands';
+import { applyPlanEdits, diffPlans, renderPlanDiff } from './shared/orchestration-plan-revise';
+import { bedrockInvokeRevise, interpretRevise, type InvokeReviseFn } from './shared/orchestration-plan-revise-interpret';
 import { readConcurrencyBudget, releaseReadyChildren } from './shared/orchestration-release';
 import { upsertEpicPanel } from './shared/orchestration-rollup';
 import { claimCommentAck, deriveOrchestrationId, loadOrchestration, setStatusCommentId, type OrchestrationReleaseContext } from './shared/orchestration-store';
@@ -116,6 +124,11 @@ const PENDING_PLAN_TTL_SECONDS = 604_800;
 // loop is real spend. At the cap we stop re-planning and tell the reviewer to
 // approve the current plan, reject, or edit the issue + re-label to start over.
 const MAX_DECOMPOSE_REVISIONS = 3;
+// #299 BLOCKER-1: the model transport for the deterministic revise INTERPRET step
+// (current plan + digest + instruction → structured edits). Lazily binds a Bedrock
+// client on first use (cold-start cost only paid on the revise path). Module-level
+// so it's reused across warm invocations.
+const reviseInvoke: InvokeReviseFn = bedrockInvokeRevise();
 // createTaskCore rejects idempotency keys longer than this; synthesized keys
 // are sliced to fit the validated /^[A-Za-z0-9_-]{1,128}$/ pattern.
 const MAX_IDEMPOTENCY_KEY_LENGTH = 128;
@@ -1398,19 +1411,158 @@ async function handlePlanRevision(args: {
     if (mapping.Item) caps = readProjectCaps(mapping.Item);
   }
 
+  // #299 F-revise-in-place: 👀 on the reviewer's FEEDBACK comment is the "on it"
+  // ack. The deterministic path settles it 👀→✅ inline the moment the plan updates;
+  // the escalation path leaves it 👀 and the reconciler settles it (as before).
+  await reactToComment(feedbackCtx, commentId, EMOJI_STARTED);
+
+  // #299 BLOCKER-1 (revise amnesia + fabricated "What changed"): FIRST try to
+  // interpret the instruction as EDITS to the CURRENT plan and apply them
+  // deterministically — no clone, no re-derive. This is the fix for the round-2
+  // repro (drop Careers → merge FAQ+Privacy → Careers reappeared): the old path
+  // re-planned from the ISSUE (which still lists Careers) so dropped nodes came
+  // back, and the model-authored "What changed" then invented a justification.
+  // Editing the stored plan in code means untouched nodes survive verbatim and
+  // edits STACK; the "What changed" line is a computed old→new diff that can't lie.
+  // Only a genuinely repo-dependent change (needs_repo) or an interpret failure
+  // escalates to the repo-cloning agent revise below.
+  const interpretation = await interpretRevise({
+    nodes: pending.nodes,
+    instruction: feedback,
+    ...(pending.repo_digest !== undefined && { repoDigest: pending.repo_digest }),
+    invoke: reviseInvoke,
+  });
+
+  if (interpretation.kind === 'edits') {
+    const applied = applyPlanEdits(pending.nodes, interpretation.edits);
+    if (applied.kind === 'error') {
+      // The interpreter proposed an edit that doesn't hold against the plan (bad
+      // ref, cycle). Don't escalate to a 2-min clone for a bad edit — surface the
+      // reason, leave the plan approvable, settle the ack to ❓ (needs input).
+      await swapCommentReaction(feedbackCtx, commentId, EMOJI_NEEDS_INPUT);
+      await upsertStatusComment(feedbackCtx, commentedIssueId, renderReviseUnclearNote(applied.message));
+      logger.info('Mode B revise (deterministic): edit invalid — plan untouched', {
+        issue_id: commentedIssueId, message: applied.message,
+      });
+      return;
+    }
+    if (applied.kind === 'collapses') {
+      // The edits leave <2 sub-issues — a revision-to-single. Don't auto-run (the
+      // reviewer is mid-planning); hand them the decision, same as the agent path.
+      await swapCommentReaction(feedbackCtx, commentId, EMOJI_SUCCESS);
+      await upsertStatusComment(feedbackCtx, commentedIssueId, renderRevisionToSingleNote());
+      logger.info('Mode B revise (deterministic): collapses to single unit — awaiting decision', {
+        issue_id: commentedIssueId,
+      });
+      return;
+    }
+
+    // Caps still gate a revised plan (a merge can't exceed the cap, but an add
+    // can). Over-cap → keep the current plan, tell the reviewer (revision-aware
+    // note — no "re-label" dead-end), settle the ack.
+    const capResult = applyPlanCaps(
+      { shouldDecompose: true, reasoning: '', nodes: applied.nodes },
+      caps,
+    );
+    if (capResult.kind === 'rejected') {
+      await swapCommentReaction(feedbackCtx, commentId, EMOJI_NEEDS_INPUT);
+      await upsertStatusComment(feedbackCtx, commentedIssueId, renderRevisionOverCapNote(capResult.summary));
+      logger.info('Mode B revise (deterministic): over cap — plan untouched', {
+        issue_id: commentedIssueId, reason: capResult.reason,
+      });
+      return;
+    }
+
+    // Compute the honest before→after diff (NEVER model self-report) and render it
+    // as the "What changed" line via renderPlanProposal's changeSummary slot.
+    const diff = diffPlans(pending.nodes, applied.nodes);
+    if (diff.unchanged) {
+      // The edit resolved to a no-op — say so plainly, don't fake an "Updated".
+      await swapCommentReaction(feedbackCtx, commentId, EMOJI_SUCCESS);
+      await upsertStatusComment(feedbackCtx, commentedIssueId, renderReviseNoChangeNote());
+      logger.info('Mode B revise (deterministic): no-op edit — plan unchanged', { issue_id: commentedIssueId });
+      return;
+    }
+    const nextRound = priorRound + 1;
+    const revisedPlan: DecompositionPlan = {
+      shouldDecompose: true,
+      reasoning: '',
+      nodes: applied.nodes,
+      changeSummary: renderPlanDiff(diff),
+    };
+    // Edit the ONE plan comment in place (F-revise-in-place), keeping the "Updated
+    // breakdown" header + the computed "What changed" line.
+    const renderedId = await upsertStatusComment(
+      feedbackCtx,
+      commentedIssueId,
+      renderPlanProposal(revisedPlan, { autoRun: false, revisionRound: nextRound }),
+      pending.proposal_comment_id,
+    );
+    const carriedCommentId = renderedId ?? pending.proposal_comment_id;
+    // Persist the edited nodes as the new pending plan (replace — a revision must
+    // overwrite). Bump revision_round; carry the digest + sha forward unchanged
+    // (a plan edit doesn't change the repo). Preserves the same idempotency the
+    // structural-command path uses.
+    await replacePendingPlanRow({
+      ddb,
+      tableName: ORCHESTRATION_TABLE,
+      parentLinearIssueId: commentedIssueId,
+      linearWorkspaceId: workspaceId,
+      repo: pending.repo,
+      ...(pending.linear_project_id !== undefined && { linearProjectId: pending.linear_project_id }),
+      nodes: applied.nodes,
+      platformUserId: pending.platform_user_id,
+      ...(carriedCommentId !== undefined && { proposalCommentId: carriedCommentId }),
+      revisionRound: nextRound,
+      ...(pending.repo_digest !== undefined && { repoDigest: pending.repo_digest }),
+      ...(pending.repo_digest_sha !== undefined && { repoDigestSha: pending.repo_digest_sha }),
+      now: new Date().toISOString(),
+      ttlEpochSeconds: Math.floor(Date.now() / 1000) + PENDING_PLAN_TTL_SECONDS,
+    });
+    // Settle the reviewer's feedback comment 👀→✅ inline (the deterministic path
+    // completes synchronously — no reconciler round to do it).
+    await swapCommentReaction(feedbackCtx, commentId, EMOJI_SUCCESS);
+    logger.info('Mode B revise applied deterministically (no clone, no re-derive)', {
+      issue_id: commentedIssueId,
+      round: nextRound,
+      node_count: applied.nodes.length,
+      removed: diff.removed.length,
+      added: diff.added.length,
+      modified: diff.modified.length,
+    });
+    return;
+  }
+
+  if (interpretation.kind === 'unclear') {
+    // Not an actionable edit (a question / too vague). Nudge with the interpreter's
+    // clarifying ask; leave the plan approvable. Settle the ack to ❓ (needs input).
+    await swapCommentReaction(feedbackCtx, commentId, EMOJI_NEEDS_INPUT);
+    await upsertStatusComment(feedbackCtx, commentedIssueId, renderReviseUnclearNote(interpretation.message));
+    logger.info('Mode B revise: instruction not an actionable edit — nudged', { issue_id: commentedIssueId });
+    return;
+  }
+
+  // needs_repo OR interpret error → ESCALATE to the repo-cloning agent revise.
+  // Even here it REVISES the current plan (the agent gets the prior plan + digest
+  // as the base), never regenerates from the issue. Post an honest "taking a closer
+  // look" ack on needs_repo (leave the 👀 for the reconciler to settle); a raw
+  // interpret error escalates silently (the ack already shows 👀).
+  if (interpretation.kind === 'needs_repo') {
+    await upsertStatusComment(feedbackCtx, commentedIssueId, renderReviseEscalatedNote(interpretation.reason));
+    logger.info('Mode B revise: escalating to repo-cloning agent (needs_repo)', {
+      issue_id: commentedIssueId, reason: interpretation.reason,
+    });
+  } else {
+    logger.info('Mode B revise: interpret unavailable — escalating to repo-cloning agent', {
+      issue_id: commentedIssueId, detail: interpretation.message,
+    });
+  }
+
   // Fetch the issue's real title+body so the revision description leads with the
   // SAME plain-issue text the round-0 description used (which passes the guardrail),
   // then appends the prior plan + feedback as reference data. Best-effort — an
   // empty issue text still yields a valid data-shaped description.
   const issueText = await fetchIssueText(resolved.accessToken, commentedIssueId);
-
-  // #299 F-revise-in-place: 👀 on the reviewer's FEEDBACK comment is the "on it"
-  // ack — no separate "updating…" comment (that split the conversation across two
-  // threads AND was never settled, so it read as stuck). The reconciler swaps this
-  // 👀 → ✅ on the SAME comment when the revised plan lands (thread the feedback
-  // comment id below), so the reviewer sees their comment go 👀→✅ while the ONE
-  // plan comment updates in place. Mirrors the A6-iteration ack pattern.
-  await reactToComment(feedbackCtx, commentId, EMOJI_STARTED);
 
   const planMeta: Record<string, string> = {
     linear_issue_id: commentedIssueId,

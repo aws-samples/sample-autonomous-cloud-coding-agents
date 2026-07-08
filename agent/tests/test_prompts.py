@@ -487,8 +487,6 @@ class TestDecomposeRevisionDirective:
         # It tells the agent to preserve untouched sub-issues and not re-derive.
         assert "keep every other sub-issue" in prompt
         assert "do NOT silently undo edits" in prompt.replace("\n", " ")
-        # And to report the diff via change_summary.
-        assert "change_summary" in prompt
 
     def test_zero_or_garbage_revision_round_is_treated_as_round0(self):
         from prompt_builder import build_system_prompt
@@ -498,10 +496,12 @@ class TestDecomposeRevisionDirective:
             prompt = build_system_prompt(cfg, self._setup(), None, "")
             assert "This is a REVISION" not in prompt, f"round={raw!r} should be round-0"
 
-    def test_change_summary_field_documented_in_emit_step(self):
+    def test_change_summary_field_retired_from_plan_shape(self):
         from prompt_builder import build_system_prompt
 
-        # The change_summary field is part of the plan JSON shape regardless of
-        # round (empty on round 0), so the emit step documents it either way.
+        # #299 BLOCKER-1 round 2: the agent-authored change_summary was RETIRED
+        # (it fabricated a justification for a re-added dropped node). The "what
+        # changed" line is now computed by the platform from the before→after diff,
+        # so the emit-step JSON shape must NOT ask for change_summary anymore.
         prompt = build_system_prompt(self._decompose_config(), self._setup(), None, "")
-        assert '"change_summary"' in prompt
+        assert '"change_summary"' not in prompt

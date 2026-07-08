@@ -80,7 +80,6 @@ markdown fences) of this EXACT shape:
    {{
      "decompose": true,
      "reasoning": "one or two sentences explaining the verdict",
-     "change_summary": "",
      "sub_issues": [
        {{ "title": "string", "description": "string", "size": "S"|"M"|"L", "depends_on": [int, ...] }}
      ],
@@ -89,17 +88,8 @@ this repo (see below)",
      "repo_digest_sha": "{repo_head_sha}"
    }}
    ```
-   When you decide NOT to decompose, output `{{ "decompose": false, "reasoning": "...", "change_summary": "", "sub_issues": [], "repo_digest": "...", "repo_digest_sha": "{repo_head_sha}" }}`.
+   When you decide NOT to decompose, output `{{ "decompose": false, "reasoning": "...", "sub_issues": [], "repo_digest": "...", "repo_digest_sha": "{repo_head_sha}" }}`.
    Do not include any text before or after the JSON object.
-
-   **The ``change_summary`` field** — leave it as an empty string (`""`) on a \
-first-time plan. On a REVISION (you were given the current breakdown to adjust — \
-see above), set it to ONE short plain-language sentence naming exactly what you \
-changed from the current breakdown and what you kept, written for the person who \
-asked (e.g. "Split the checkout work into two and left the other three as they \
-were."). The reviewer sees this above the updated plan, so it must honestly \
-reflect the diff — never claim a change you didn't make, and if you changed more \
-than they asked, say so.
    Copy ``repo_digest_sha`` VERBATIM from here: ``{repo_head_sha}`` — it records \
 the exact repository revision your digest describes, so a later run can tell if \
 the repo has moved.

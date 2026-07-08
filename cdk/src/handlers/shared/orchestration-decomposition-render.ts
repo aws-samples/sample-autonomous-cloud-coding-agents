@@ -268,6 +268,44 @@ export function renderRevisionFailedNote(): string {
 }
 
 /**
+ * #299 BLOCKER-1 (deterministic revise): posted when the interpreter couldn't turn
+ * the reviewer's comment into a concrete edit — it wasn't clear which sub-issue was
+ * meant, or it was a question rather than a change. Carries the interpreter's short
+ * clarifying ask (``detail``) so the reviewer knows exactly what to say next. The
+ * current plan is untouched + approvable. Bot-prefixed so the self-trigger guard skips it.
+ */
+export function renderReviseUnclearNote(detail: string): string {
+  const ask = detail.trim() || 'which sub-issue would you like to change, and how?';
+  return `${PLAN_PROPOSAL_PREFIX} ${ask} The breakdown above is unchanged — `
+    + 'tell me the change (e.g. "drop the careers page", "merge the first two") or reply '
+    + '`@bgagent approve` to run it as-is.';
+}
+
+/**
+ * #299 BLOCKER-1: posted when an edit resolved cleanly but changed NOTHING (a no-op —
+ * e.g. "keep it as is", or an edit that matches the current state). Honest: says
+ * nothing changed rather than a misleading "Updated". The computed diff drives this
+ * (an empty {@link PlanDiff}); never a model claim. Bot-prefixed.
+ */
+export function renderReviseNoChangeNote(): string {
+  return `${PLAN_PROPOSAL_PREFIX} That leaves the breakdown exactly as it is above — nothing to change. `
+    + 'Reply `@bgagent approve` to run it, or tell me a different change.';
+}
+
+/**
+ * #299 BLOCKER-1: the ack posted when a revise needs a closer look at the code (the
+ * interpreter returned ``needs_repo`` — feasibility / new-scope the cached repo notes
+ * can't settle), so we escalate to a repo-cloning revise. ``reason`` names what's being
+ * checked. Honest about the short wait, mirrors renderDecomposeStartedNote's "~1-2 min".
+ * Bot-prefixed. The current plan stays approvable while this runs.
+ */
+export function renderReviseEscalatedNote(reason: string): string {
+  const why = reason.trim() ? ` (${reason.trim()})` : '';
+  return `${PLAN_PROPOSAL_PREFIX} Taking a closer look at the code to get this right${why} — `
+    + 'this takes ~1-2 minutes; I\'ll update the breakdown above when it\'s ready.';
+}
+
+/**
  * PM-6: the IMMEDIATE ack posted the instant a ``:decompose``/``:auto`` label
  * dispatches the planning agent. Planning clones the repo and reasons over full
  * context — 30-120s — during which the issue was previously silent (the first
