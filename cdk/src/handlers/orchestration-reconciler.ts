@@ -1564,19 +1564,24 @@ async function reconcileDecomposePlan(evt: DecomposePlanEvent): Promise<void> {
   // (redelivery) → nothing more; a comment was already posted.
   logger.info('Decompose plan reconciled', { parent_issue_id: evt.parentIssueId, result: result.kind, reason: result.reason });
 
-  // #299 F-decompose-inprogress: the ROUND-0 :decompose plan is now POSTED and
-  // AWAITING the reviewer's approve — nothing is running. The webhook moved the
-  // issue to In Progress at dispatch so the board showed the ~1-2 min planning was
-  // happening; now that it's just a pending plan, In Progress would mislead
-  // ("looks like work started while it's awaiting your go"). Revert it to a
-  // not-started state (Todo/Backlog). Only when:
-  //   - round 0 (a revise keeps the conversation In Progress — reverting each round
-  //     would flicker the board), AND
-  //   - the plan is HANDLED (awaiting approval / single-task proposal / over-cap) —
-  //     NOT 'seed' (:auto → real work is starting, stay In Progress).
+  // #299 F-decompose-inprogress: the :decompose plan is now POSTED and AWAITING the
+  // reviewer's approve — nothing is running. The issue was moved to In Progress so
+  // the board showed the ~1-2 min planning was happening (round 0: the webhook's
+  // dispatch flip; a revise that ESCALATES to this reconciler: the webhook's
+  // handlePlanRevision escalation flip — the PM-stress visibility fix); now that
+  // it's just a pending plan, In Progress would mislead ("looks like work started
+  // while it's awaiting your go"). Revert it to a not-started state (Todo/Backlog)
+  // whenever the plan is HANDLED (awaiting approval / single-task proposal /
+  // over-cap) — NOT 'seed' (:auto → real work is starting, stay In Progress).
+  //
+  // This fires for BOTH round-0 AND escalated-revise rounds: only the ESCALATED
+  // revise reaches this reconciler (the deterministic interpret→apply revise settles
+  // inline in the webhook with no agent task, so it never flips state and never
+  // arrives here), and that path DID flip to In Progress, so it needs the symmetric
+  // revert. No board flicker — one flip up at dispatch, one flip down here.
   // approve → the seed path moves it back to In Progress. Guarded + best-effort
   // inside revertIssueToNotStarted (only demotes an issue still in OUR In Progress).
-  if (result.kind === 'handled' && evt.revisionRound === undefined) {
+  if (result.kind === 'handled') {
     try {
       await revertIssueToNotStarted(feedbackCtx, evt.parentIssueId);
     } catch (err) {
