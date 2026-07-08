@@ -584,4 +584,26 @@ describe('formatStatusSnapshot', () => {
     const rendered = formatStatusSnapshot(task, [], NOW);
     expect(rendered).not.toContain('Blocker:');
   });
+
+  test('suppresses a historical Blocker line on a COMPLETED task (#251 review)', () => {
+    // A task that hit a blocker, self-remediated, and reached COMPLETED must not
+    // show the stale ⛔ — that would misrepresent a success as blocked.
+    const task = buildTask({ status: 'COMPLETED' });
+    const events: TaskEvent[] = [
+      mkEvent({
+        event_id: '01ARZ3NDEKTSV4RRFFQ69G5F30',
+        event_type: 'agent_blocked',
+        timestamp: '2026-04-29T15:29:20Z',
+        metadata: {
+          kind: 'dependency_unreachable',
+          detail: 'npm registry timeout',
+          remediation_hint: 'retry the task',
+          retryable: true,
+          resource: 'registry.npmjs.org',
+        },
+      }),
+    ];
+    const rendered = formatStatusSnapshot(task, events, NOW);
+    expect(rendered).not.toContain('Blocker:');
+  });
 });

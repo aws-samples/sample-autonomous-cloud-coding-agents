@@ -547,7 +547,7 @@ class TestCloneAndHydrateHandlers:
 
         called = {"n": 0}
 
-        def fake_setup_repo(_config):
+        def fake_setup_repo(_config, progress=None):
             called["n"] += 1
             return RepoSetup(repo_dir="/fresh", branch="fresh")
 
@@ -571,7 +571,8 @@ class TestCloneAndHydrateHandlers:
         from workflow.runner import _handle_clone_repo
 
         monkeypatch.setattr(
-            "repo.setup_repo", lambda _c: RepoSetup(repo_dir="/fresh", branch="fresh")
+            "repo.setup_repo",
+            lambda _c, progress=None: RepoSetup(repo_dir="/fresh", branch="fresh"),
         )
         wf = _workflow(
             [

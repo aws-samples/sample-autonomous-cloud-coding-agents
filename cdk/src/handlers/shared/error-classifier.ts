@@ -425,14 +425,24 @@ function blockerClassification(kind: string, resource: string | undefined): Erro
         remedy: 'Check the agent policy-engine logs (cedarpy load / policy compilation). Fix the policy bundle or engine availability, then resubmit.',
         retryable: false,
       };
-    case 'auth_failure':
+    case 'auth_failure': {
+      // A Secrets Manager ARN resource means the secret exists but couldn't be
+      // read (AccessDenied / throttling) — the fix is IAM on the task role or
+      // blueprint wiring, NOT PAT scopes (#251 review). A non-ARN resource is a
+      // runtime credential rejection where scope/validity is the right advice.
+      const isSecretArn = res?.startsWith('arn:aws:secretsmanager:') ?? false;
       return {
         category: ErrorCategory.BLOCKED,
         title: 'Blocked: authentication rejected',
-        description: `A credential was present but rejected${res ? ` for \`${res}\`` : ''}.`,
-        remedy: 'Verify the credential is valid and has the required scopes, then resubmit.',
+        description: isSecretArn
+          ? `The GitHub token secret${res ? ` (\`${res}\`)` : ''} exists but could not be read (access denied or throttled).`
+          : `A credential was present but rejected${res ? ` for \`${res}\`` : ''}.`,
+        remedy: isSecretArn
+          ? 'Grant the task role `secretsmanager:GetSecretValue` on this secret (check the secret resource policy and the blueprint wiring), then resubmit.'
+          : 'Verify the credential is valid and has the required scopes, then resubmit.',
         retryable: false,
       };
+    }
     default:
       // unknown_environmental + any future/mis-typed kind
       return {

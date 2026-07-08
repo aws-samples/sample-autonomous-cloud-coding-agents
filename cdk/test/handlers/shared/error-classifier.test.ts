@@ -387,11 +387,23 @@ describe('classifyError', () => {
       expect(result!.title).toBe('Blocked: missing secret');
     });
 
-    test('classifies auth_failure', () => {
+    test('classifies auth_failure (runtime credential rejection → scope advice)', () => {
       const result = classifyError('BLOCKED[auth_failure]: credential rejected (resource: github.com)');
       expect(result!.category).toBe(ErrorCategory.BLOCKED);
       expect(result!.title).toBe('Blocked: authentication rejected');
       expect(result!.retryable).toBe(false);
+      expect(result!.remedy).toContain('scopes');
+    });
+
+    test('auth_failure with a Secrets Manager ARN gives IAM remedy, not PAT scopes (#251 review)', () => {
+      const arn = 'arn:aws:secretsmanager:us-east-1:123456789012:secret:gh-token-abc';
+      const result = classifyError(`BLOCKED[auth_failure]: the required GitHub token secret could not be read (resource: ${arn})`);
+      expect(result!.category).toBe(ErrorCategory.BLOCKED);
+      expect(result!.title).toBe('Blocked: authentication rejected');
+      expect(result!.retryable).toBe(false);
+      // IAM/blueprint advice — NOT the "verify PAT scopes" copy.
+      expect(result!.remedy).toContain('secretsmanager:GetSecretValue');
+      expect(result!.remedy).not.toContain('scopes');
     });
 
     test('falls back to environmental for an unknown kind', () => {

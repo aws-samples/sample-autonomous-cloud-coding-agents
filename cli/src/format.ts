@@ -204,8 +204,10 @@ export function formatStatusSnapshot(
   );
   // #251: surface the latest environmental blocker prominently — a missing
   // secret / egress denial is the single most actionable thing a watcher can
-  // see, and it may precede the terminal failure by many turns.
-  const blockerLine = describeBlocker(blockerEvent, now);
+  // see, and it may precede the terminal failure by many turns. Suppress it on
+  // a COMPLETED task: the blocker was recovered from (e.g. self-remediated), so
+  // a historical ⛔ line would misrepresent a successful outcome as blocked.
+  const blockerLine = task.status === 'COMPLETED' ? null : describeBlocker(blockerEvent, now);
   if (blockerLine !== null) {
     lines.push(`  Blocker:       ${blockerLine}`);
   }

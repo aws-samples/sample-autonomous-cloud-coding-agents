@@ -214,30 +214,31 @@ describe('runPreflightChecks', () => {
     expect(failedChecks).toHaveLength(2);
   });
 
-  test('fails GITHUB_UNREACHABLE when Secrets Manager is unavailable', async () => {
+  test('fails GITHUB_TOKEN_SECRET_UNREADABLE when Secrets Manager is unavailable', async () => {
     mockSmSend.mockRejectedValueOnce(new Error('Service unavailable'));
 
     const result = await runPreflightChecks('owner/repo', baseBlueprintConfig);
 
     expect(result.passed).toBe(false);
-    expect(result.failureReason).toBe(PreflightFailureReason.GITHUB_UNREACHABLE);
-    // #251 review fix: an unreadable token secret is now wrapped as an
-    // auth_failure blocker, so the preflight detail carries the canonical reason
-    // (the raw SM error is preserved on .cause).
+    // #251 review fix: an unreadable token secret is a misconfiguration, not
+    // GitHub being unreachable — the failureReason now reflects that, and the
+    // detail carries the canonical auth_failure reason (raw SM error on .cause).
+    expect(result.failureReason).toBe(PreflightFailureReason.GITHUB_TOKEN_SECRET_UNREADABLE);
     expect(result.failureDetail).toContain('BLOCKED[auth_failure]');
     expect(result.checks).toHaveLength(1);
     expect(result.checks[0].check).toBe('github_token_resolution');
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
-  test('fails GITHUB_UNREACHABLE when token secret is empty', async () => {
+  test('fails GITHUB_TOKEN_SECRET_MISSING when token secret is empty', async () => {
     mockSmSend.mockResolvedValueOnce({ SecretString: undefined });
 
     const result = await runPreflightChecks('owner/repo', baseBlueprintConfig);
 
     expect(result.passed).toBe(false);
-    expect(result.failureReason).toBe(PreflightFailureReason.GITHUB_UNREACHABLE);
-    expect(result.failureDetail).toContain('empty');
+    // #251 review fix: empty/absent secret → missing, distinct from unreachable.
+    expect(result.failureReason).toBe(PreflightFailureReason.GITHUB_TOKEN_SECRET_MISSING);
+    expect(result.failureDetail).toContain('BLOCKED[missing_secret]');
     expect(mockFetch).not.toHaveBeenCalled();
   });
 

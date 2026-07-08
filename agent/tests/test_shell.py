@@ -103,7 +103,10 @@ class TestRunCmdWithBackoff:
         assert len(calls) == 1  # no retries
 
     def test_retries_then_succeeds_on_transient(self):
-        seq = [self._proc(1, "Could not resolve host: x"), self._proc(0)]
+        # Host-less transient (name-resolution blip, no nameable endpoint) →
+        # retryable. A host-NAMING failure bails instead — see
+        # test_does_not_retry_when_stderr_names_a_host.
+        seq = [self._proc(1, "Temporary failure in name resolution"), self._proc(0)]
         retries = []
         with patch("shell.run_cmd", side_effect=lambda *a, **k: seq.pop(0)):
             result = run_cmd_with_backoff(
@@ -114,6 +117,26 @@ class TestRunCmdWithBackoff:
             )
         assert result.returncode == 0
         assert len(retries) == 1  # one retry fired an audit callback
+
+    def test_does_not_retry_when_stderr_names_a_host(self):
+        # #251 review fix: "Could not resolve host: <host>" names a firewalled /
+        # non-existent endpoint — retrying never helps. Backoff must bail on the
+        # first failure (no retry, no dependency_unreachable audit event) so
+        # _fail_setup_command can reclassify it to non-retryable egress_denied.
+        attempts = []
+        proc = self._proc(1, "fatal: unable to access: Could not resolve host: github.com")
+        retries = []
+        with patch("shell.run_cmd", side_effect=self._counting(proc, attempts)):
+            result = run_cmd_with_backoff(
+                ["git", "clone"],
+                "clone",
+                max_attempts=3,
+                on_retry=lambda *a: retries.append(a),
+                sleep=lambda _: None,
+            )
+        assert result.returncode == 1
+        assert len(attempts) == 1  # bailed on first failure — no retry
+        assert retries == []  # no misleading dependency_unreachable audit event
 
     def test_gives_up_after_max_attempts_on_persistent_transient(self):
         attempts = []
