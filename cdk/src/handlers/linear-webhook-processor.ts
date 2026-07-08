@@ -1098,6 +1098,13 @@ async function maybeRetryTerminalEpic(
       await releaseReadyChildren(
         ddb, ORCHESTRATION_TABLE, releasableRows, releaseCtx,
         createTaskCore, now, freshChildren, 'main', budget,
+        // ABCA-659: salt the idempotency key with each child's prior (failed)
+        // task id so the retry spawns a NEW task instead of idempotently
+        // replaying the failed one. releasableRows carry the old child_task_id
+        // (the reset only changed child_status) — exactly the salt releaseChild
+        // needs. Without this the row flips to 'released' but points at the dead
+        // task and nothing actually re-runs (live-caught on the first retry pass).
+        true,
       );
     }
   }
