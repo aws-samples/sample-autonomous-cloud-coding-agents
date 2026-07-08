@@ -78,7 +78,10 @@ describe('EcsComputeStrategy', () => {
 
       const call = mockSend.mock.calls[0][0];
       expect(call.input.cluster).toBe(CLUSTER_ARN);
-      expect(call.input.taskDefinition).toBe(TASK_DEF_ARN);
+      // Dispatch against the task-def FAMILY, not the pinned revision, so a deploy
+      // that deregisters the old revision can't strand the task ("TaskDefinition is
+      // inactive", ABCA-660/663). TASK_DEF_ARN ends in `agent:1` → family `agent`.
+      expect(call.input.taskDefinition).toBe('agent');
       expect(call.input.launchType).toBe('FARGATE');
       expect(call.input.networkConfiguration.awsvpcConfiguration.subnets).toEqual(['subnet-aaa', 'subnet-bbb']);
       expect(call.input.networkConfiguration.awsvpcConfiguration.securityGroups).toEqual(['sg-12345']);
@@ -124,7 +127,8 @@ describe('EcsComputeStrategy', () => {
         readOnly: true,
       });
 
-      expect(mockSend.mock.calls[0][0].input.taskDefinition).toBe(TASK_DEF_ARN);
+      // No planning def wired → build def, resolved to its family (`agent`).
+      expect(mockSend.mock.calls[0][0].input.taskDefinition).toBe('agent');
     });
 
     test('throws when RunTask returns no task', async () => {
@@ -503,7 +507,8 @@ describe('EcsComputeStrategy read-only planning-def selection (#299 ECS_RIGHTSIZ
       blueprintConfig: { compute_type: 'ecs', runtime_arn: '' },
       readOnly: true,
     });
-    expect(mockSend.mock.calls[0][0].input.taskDefinition).toBe(PLANNING_DEF_ARN);
+    // read-only → planning def, resolved to its family (`agent-planning`).
+    expect(mockSend.mock.calls[0][0].input.taskDefinition).toBe('agent-planning');
   });
 
   test('a non-read-only workflow still runs on the BUILD def even when a planning def is wired', async () => {
@@ -516,7 +521,7 @@ describe('EcsComputeStrategy read-only planning-def selection (#299 ECS_RIGHTSIZ
       blueprintConfig: { compute_type: 'ecs', runtime_arn: '' },
       readOnly: false,
     });
-    expect(mockSend.mock.calls[0][0].input.taskDefinition).toBe(TASK_DEF_ARN);
+    expect(mockSend.mock.calls[0][0].input.taskDefinition).toBe('agent');
   });
 
   test('omitting readOnly defaults to the BUILD def', async () => {
@@ -528,7 +533,7 @@ describe('EcsComputeStrategy read-only planning-def selection (#299 ECS_RIGHTSIZ
       payload: { repo_url: 'org/repo' },
       blueprintConfig: { compute_type: 'ecs', runtime_arn: '' },
     });
-    expect(mockSend.mock.calls[0][0].input.taskDefinition).toBe(TASK_DEF_ARN);
+    expect(mockSend.mock.calls[0][0].input.taskDefinition).toBe('agent');
   });
 });
 

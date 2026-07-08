@@ -1683,7 +1683,8 @@ describe('fanout-task-events: Linear dispatcher (issue #239)', () => {
       expect(body).toMatch(/^❌/);
       expect(body).toMatch(/Exceeded max turns/i); // classified
       expect(body).toMatch(/CloudWatch for task `t-lin`/);
-      expect(body).toMatch(/reply with guidance/i);
+      // retryable agent/timeout → plain reply-to-retry next step (retryGuidance).
+      expect(body).toMatch(/reply here with any extra guidance/i);
     });
 
     test('task_completed but build_passed=false → ❌ build/test reply pointing at the CloudWatch build log (UX.5/K2)', async () => {

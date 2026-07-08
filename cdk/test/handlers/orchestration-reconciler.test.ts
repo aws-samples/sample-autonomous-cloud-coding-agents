@@ -1101,7 +1101,8 @@ describe('orchestration-reconciler handler — A6 iteration ack reply (#247 UX.3
     expect(body).toMatch(/^❌/);
     expect(body).toMatch(/Exceeded max turns/i); // classified
     expect(body).toMatch(/CloudWatch for task `iter-task-1`/);
-    expect(body).toMatch(/reply with guidance/i);
+    // retryable agent/timeout → plain reply-to-retry next step (retryGuidance).
+    expect(body).toMatch(/reply here with any extra guidance/i);
     // A failed iteration still does not cascade onto dependents.
     expect(createTaskCoreMock).not.toHaveBeenCalled();
     // #247 UX.21: the trigger comment's 👀 swaps to ❌, but the sub-issue state
