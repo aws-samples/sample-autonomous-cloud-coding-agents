@@ -20,7 +20,7 @@
 // Admission / pre-invoke checks before orchestration. See docs/design/ORCHESTRATOR.md (admission control).
 // Tests: cdk/test/handlers/shared/preflight.test.ts
 
-import { resolveGitHubToken } from './context-hydration';
+import { resolveGitHubToken, MissingSecretError, SecretUnreadableError } from './context-hydration';
 import { logger } from './logger';
 import type { BlueprintConfig } from './repo-config';
 
@@ -34,6 +34,11 @@ export const PreflightFailureReason = {
   REPO_NOT_FOUND_OR_NO_ACCESS: 'REPO_NOT_FOUND_OR_NO_ACCESS',
   RUNTIME_UNAVAILABLE: 'RUNTIME_UNAVAILABLE',
   PR_NOT_FOUND_OR_CLOSED: 'PR_NOT_FOUND_OR_CLOSED',
+  // #251: token-secret blockers are misconfiguration, not GitHub being
+  // unreachable — an accurate reason so tooling keyed on failureReason routes
+  // operators to the secret/IAM fix rather than a network red herring.
+  GITHUB_TOKEN_SECRET_MISSING: 'GITHUB_TOKEN_SECRET_MISSING',
+  GITHUB_TOKEN_SECRET_UNREADABLE: 'GITHUB_TOKEN_SECRET_UNREADABLE',
 } as const;
 
 export type PreflightFailureReasonType = typeof PreflightFailureReason[keyof typeof PreflightFailureReason];
@@ -292,6 +297,10 @@ async function checkRuntimeAvailability(): Promise<PreflightCheckResult> {
 
 /** Order for surfacing the most actionable failure when multiple checks fail. */
 const PREFLIGHT_FAILURE_PRIORITY: readonly PreflightFailureReasonType[] = [
+  // Token-secret misconfiguration is the most actionable + specific — surface
+  // it ahead of the generic unreachable reason (#251).
+  PreflightFailureReason.GITHUB_TOKEN_SECRET_MISSING,
+  PreflightFailureReason.GITHUB_TOKEN_SECRET_UNREADABLE,
   PreflightFailureReason.GITHUB_UNREACHABLE,
   PreflightFailureReason.INSUFFICIENT_GITHUB_REPO_PERMISSIONS,
   PreflightFailureReason.REPO_NOT_FOUND_OR_NO_ACCESS,
@@ -349,18 +358,28 @@ export async function runPreflightChecks(
       token = await resolveGitHubToken(blueprintConfig.github_token_secret_arn);
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
-      logger.error('GitHub token resolution failed', { repo, error: detail });
+      // #251: distinguish token-secret misconfiguration from GitHub being
+      // unreachable. resolveGitHubToken throws MissingSecretError (absent/empty)
+      // or SecretUnreadableError (AccessDenied/throttling); anything else stays
+      // GITHUB_UNREACHABLE. The canonical BLOCKED[...] detail still drives
+      // classifyError; this only corrects the failureReason label.
+      const reason = err instanceof MissingSecretError
+        ? PreflightFailureReason.GITHUB_TOKEN_SECRET_MISSING
+        : err instanceof SecretUnreadableError
+          ? PreflightFailureReason.GITHUB_TOKEN_SECRET_UNREADABLE
+          : PreflightFailureReason.GITHUB_UNREACHABLE;
+      logger.error('GitHub token resolution failed', { repo, error: detail, reason });
       checks.push({
         check: 'github_token_resolution',
         passed: false,
-        reason: PreflightFailureReason.GITHUB_UNREACHABLE,
+        reason,
         detail,
         durationMs: Date.now() - tokenStart,
       });
       return {
         passed: false,
         checks,
-        failureReason: PreflightFailureReason.GITHUB_UNREACHABLE,
+        failureReason: reason,
         failureDetail: detail,
       };
     }

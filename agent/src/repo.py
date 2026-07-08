@@ -2,17 +2,134 @@
 
 import os
 import subprocess
+from typing import Any
 
 from config import AGENT_WORKSPACE
 from models import RepoSetup, TaskConfig
-from shell import log, run_cmd, slugify
+from shell import log, run_cmd, run_cmd_with_backoff, slugify
 
 
-def setup_repo(config: TaskConfig) -> RepoSetup:
+def _clone_backoff_reporter(progress: Any, label: str):
+    """Build an ``on_retry`` callback that emits a ``dependency_unreachable``
+    blocker event per transient retry (#251, Phase 2) — auditable in the live
+    stream + 90d record. Returns ``None`` when no progress writer is wired so
+    ``run_cmd_with_backoff`` simply logs to CMD."""
+    if progress is None:
+        return None
+
+    from hooks import _try_progress
+
+    def _on_retry(attempt: int, max_attempts: int, stderr: str) -> None:
+        _try_progress(
+            progress,
+            "write_agent_blocked",
+            kind="dependency_unreachable",
+            detail=f"{label} transient failure (attempt {attempt}/{max_attempts})",
+            remediation_hint=(
+                "Retrying with backoff; check registry/network reachability if this persists."
+            ),
+            retryable=True,
+        )
+
+    return _on_retry
+
+
+class DependencyUnreachableError(RuntimeError):
+    """Raised when repo setup cannot reach a dependency after bounded retries
+    (#251, Phase 2). Its message is the canonical ``BLOCKED[dependency_unreachable]``
+    reason so the crash path carries it into the terminal ``error`` verbatim and
+    the CDK classifier attaches a precise remedy."""
+
+
+def _fail_setup_command(label: str, resource: str, stderr: str, progress: Any) -> None:
+    """Handle a failed clone/fetch after bounded retries.
+
+    Three-way classification, in priority order:
+
+    1. **Egress denial** — the stderr matches a name-resolution / connection
+       signature naming a host (``detect_egress_denial``). A firewalled host is
+       NOT a transient blip: retrying never helps, and the true remedy is
+       "allowlist the host", not "retry the task". Report a non-retryable
+       ``egress_denied`` blocker naming the host so the classifier routes to the
+       DNS-Firewall remedy — the same verdict the PostToolUse egress detector
+       reaches for the identical stderr (they must not disagree).
+    2. **Transient** — a DNS/registry blip that survived the retries with no
+       nameable host: report a retryable ``dependency_unreachable`` blocker.
+    3. **Permanent** — repo not found, auth denied: re-raise a plain
+       ``RuntimeError`` carrying the redacted git stderr, preserving the pre-#251
+       ``check=True`` behavior so the classifier routes it to the right (auth /
+       not-found) remedy rather than mislabeling it retryable.
+
+    Never widens creds/egress — it only reports."""
+    # (1) Egress denial takes priority over the transient set: several signatures
+    # ("could not resolve host", "network is unreachable", EAI_AGAIN) live in
+    # BOTH the transient set and the egress patterns. A captured host means a
+    # firewalled endpoint — non-retryable — so classify it as egress_denied
+    # before the transient branch, matching hooks.detect_egress_denial.
+    from hooks import _record_blocker_reason, _try_progress, detect_egress_denial
+    from shell import is_transient_cmd_failure, redact_secrets
+
+    egress_detected, host = detect_egress_denial(stderr)
+    if egress_detected and host:
+        detail = f"{label} could not reach {host!r} (host not allowlisted)"
+        _record_blocker_reason("egress_denied", detail, host)
+        if progress is not None:
+            _try_progress(
+                progress,
+                "write_agent_blocked",
+                kind="egress_denied",
+                detail=detail,
+                remediation_hint=(
+                    f"Allowlist {host!r} in the DNS Firewall rule group if it is a "
+                    "legitimate dependency, then resubmit. The agent never widens egress itself."
+                ),
+                retryable=False,
+                resource=host,
+            )
+        from progress_writer import format_blocker_reason
+
+        raise DependencyUnreachableError(format_blocker_reason("egress_denied", detail, host))
+
+    if not is_transient_cmd_failure(stderr):
+        # (3) Permanent. Redact before raising — this message is persisted to
+        # TaskResult.error (DynamoDB, `bgagent status`). The pre-#251 check=True
+        # path redacted here (shell.py run_cmd); preserve that so a credential in
+        # git stderr never lands in cleartext.
+        snippet = redact_secrets((stderr or "").strip()[:500])
+        raise RuntimeError(f"{label} failed (non-transient): {snippet}")
+
+    # (2) Transient with no nameable host.
+    from progress_writer import format_blocker_reason
+
+    detail = f"{label} failed after bounded retries"
+    _record_blocker_reason("dependency_unreachable", detail, resource)
+    if progress is not None:
+        _try_progress(
+            progress,
+            "write_agent_blocked",
+            kind="dependency_unreachable",
+            detail=detail,
+            remediation_hint=(
+                "The dependency/registry stayed unreachable after retries. "
+                "Check network/DNS reachability from the agent VPC, then retry the task."
+            ),
+            retryable=True,
+            resource=resource,
+        )
+    raise DependencyUnreachableError(
+        format_blocker_reason("dependency_unreachable", detail, resource)
+    )
+
+
+def setup_repo(config: TaskConfig, progress: Any = None) -> RepoSetup:
     """Clone repo, create branch, configure git auth, run mise install.
 
     Returns a RepoSetup with repo_dir, branch, notes, build_before,
     lint_before, and default_branch.
+
+    ``progress`` is optional (preserves legacy/test call shape). When present,
+    transient clone/fetch retries emit ``dependency_unreachable`` blocker
+    events (#251, Phase 2).
     """
     repo_dir = f"{AGENT_WORKSPACE}/{config.task_id}"
     notes: list[str] = []
@@ -37,12 +154,15 @@ def setup_repo(config: TaskConfig) -> RepoSetup:
         label="safe-directory",
     )
 
-    # Clone
+    # Clone — bounded retry on transient network/registry failures (#251).
     log("SETUP", f"Cloning {config.repo_url}...")
-    run_cmd(
+    clone_result = run_cmd_with_backoff(
         ["gh", "repo", "clone", config.repo_url, repo_dir],
         label="clone",
+        on_retry=_clone_backoff_reporter(progress, "clone"),
     )
+    if clone_result.returncode != 0:
+        _fail_setup_command("clone", config.repo_url, clone_result.stderr, progress)
 
     # Pin the remote to the plain https URL (no embedded credentials) and
     # authenticate git push via gh's credential helper. Embedding the token
@@ -72,11 +192,14 @@ def setup_repo(config: TaskConfig) -> RepoSetup:
     # Branch setup
     if config.is_pr_workflow and config.branch_name:
         log("SETUP", f"Checking out existing PR branch: {branch}")
-        run_cmd(
+        fetch_result = run_cmd_with_backoff(
             ["git", "fetch", "origin", branch],
             label="fetch-pr-branch",
             cwd=repo_dir,
+            on_retry=_clone_backoff_reporter(progress, "fetch-pr-branch"),
         )
+        if fetch_result.returncode != 0:
+            _fail_setup_command("fetch-pr-branch", branch, fetch_result.stderr, progress)
         run_cmd(
             ["git", "checkout", "-b", branch, f"origin/{branch}"],
             label="checkout-pr-branch",

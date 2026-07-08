@@ -469,6 +469,16 @@ def _resolve_overall_task_status(
     if agent_status in ("success", "end_turn") and build_ok:
         return "success", err
 
+    # #251 carry-path: a hook may have detected an environmental blocker mid-run
+    # (egress denial, policy fail-closed) that the SDK surfaced only as a generic
+    # failure or as a missing ResultMessage. Promote the canonical
+    # ``BLOCKED[<kind>]: …`` reason so the CDK classifier attaches a precise
+    # remedy. Import locally to avoid a module-load cycle (hooks imports
+    # pipeline-adjacent modules).
+    from hooks import last_blocker_reason
+
+    blocker = last_blocker_reason()
+
     if agent_status == "unknown":
         if pr_url:
             log(
@@ -480,10 +490,17 @@ def _resolve_overall_task_status(
                 "INFO",
                 "No ResultMessage from SDK; build_ok=True (informational; task still failed)",
             )
+        # An egress denial that kills the agent's outbound calls is a likely
+        # cause of a missing ResultMessage — prefer the specific blocker reason
+        # over the generic SDK-no-result message when both are present.
+        if blocker and not err:
+            return "error", blocker
         merged = f"{err}; {_SDK_NO_RESULT_MESSAGE}" if err else _SDK_NO_RESULT_MESSAGE
         return "error", merged
 
     if not err:
+        if blocker:
+            return "error", blocker
         err = f"Task did not succeed (agent_status={agent_status!r}, build_ok={build_ok})"
     return "error", err
 
@@ -669,6 +686,14 @@ def run_task(
 
         agent_result: AgentResult | None = None
         progress = _ProgressWriter(config.task_id, trace=trace)
+        # #251: clear any blocker latched by a prior task. The agent container
+        # is one-task-per-process today, but the FastAPI server thread-pool can
+        # in principle dispatch a second run_task in the same process — reset
+        # here so a stale BLOCKED[...] reason can never leak into this task's
+        # terminal error_message (the latch is a scalar, not task_id-keyed).
+        from hooks import reset_blocker_reason
+
+        reset_blocker_reason()
         # --trace accumulator (design §10.1): when the task opted into
         # trace, ``_TrajectoryWriter`` keeps an in-memory copy of each
         # event so the pipeline can gzip+upload the full trajectory to
@@ -794,7 +819,7 @@ def run_task(
 
             # Setup repo (deterministic pre-hooks)
             with task_span("task.repo_setup") as setup_span:
-                setup = setup_repo(config)
+                setup = setup_repo(config, progress=progress)
                 setup_span.set_attribute("build.before", setup.build_before)
             progress.write_agent_milestone(
                 "repo_setup_complete",

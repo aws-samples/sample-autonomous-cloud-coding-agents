@@ -349,6 +349,99 @@ describe('classifyError', () => {
     });
   });
 
+  // --- Environmental blockers (#251) ---
+
+  describe('blocker errors (canonical BLOCKED[<kind>] prefix)', () => {
+    test('classifies missing_secret and extracts the secret name', () => {
+      const result = classifyError('BLOCKED[missing_secret]: required secret not wired (resource: OPENAI_API_KEY)');
+      expect(result!.category).toBe(ErrorCategory.BLOCKED);
+      expect(result!.title).toBe('Blocked: missing secret');
+      expect(result!.remedy).toContain('OPENAI_API_KEY');
+      expect(result!.retryable).toBe(false);
+    });
+
+    test('classifies egress_denied and names the host to allowlist', () => {
+      const result = classifyError('BLOCKED[egress_denied]: connection refused (resource: registry.npmjs.org)');
+      expect(result!.category).toBe(ErrorCategory.BLOCKED);
+      expect(result!.title).toBe('Blocked: egress denied');
+      expect(result!.remedy).toContain('registry.npmjs.org');
+      expect(result!.retryable).toBe(false);
+    });
+
+    test('classifies dependency_unreachable as retryable', () => {
+      const result = classifyError('BLOCKED[dependency_unreachable]: pypi timed out (resource: pypi.org)');
+      expect(result!.category).toBe(ErrorCategory.BLOCKED);
+      expect(result!.retryable).toBe(true);
+    });
+
+    test('classifies policy_fail_closed distinctly from a hard-deny', () => {
+      const result = classifyError('BLOCKED[policy_fail_closed]: Cedar engine unavailable');
+      expect(result!.category).toBe(ErrorCategory.BLOCKED);
+      expect(result!.title).toBe('Blocked: policy engine fail-closed');
+      expect(result!.retryable).toBe(false);
+    });
+
+    test('handles a blocker reason without a resource suffix', () => {
+      const result = classifyError('BLOCKED[missing_secret]: a required secret was not wired');
+      expect(result!.category).toBe(ErrorCategory.BLOCKED);
+      expect(result!.title).toBe('Blocked: missing secret');
+    });
+
+    test('classifies auth_failure (runtime credential rejection → scope advice)', () => {
+      const result = classifyError('BLOCKED[auth_failure]: credential rejected (resource: github.com)');
+      expect(result!.category).toBe(ErrorCategory.BLOCKED);
+      expect(result!.title).toBe('Blocked: authentication rejected');
+      expect(result!.retryable).toBe(false);
+      expect(result!.remedy).toContain('scopes');
+    });
+
+    test('auth_failure with a Secrets Manager ARN gives IAM remedy, not PAT scopes (#251 review)', () => {
+      const arn = 'arn:aws:secretsmanager:us-east-1:123456789012:secret:gh-token-abc';
+      const result = classifyError(`BLOCKED[auth_failure]: the required GitHub token secret could not be read (resource: ${arn})`);
+      expect(result!.category).toBe(ErrorCategory.BLOCKED);
+      expect(result!.title).toBe('Blocked: authentication rejected');
+      expect(result!.retryable).toBe(false);
+      // IAM/blueprint advice — NOT the "verify PAT scopes" copy.
+      expect(result!.remedy).toContain('secretsmanager:GetSecretValue');
+      expect(result!.remedy).not.toContain('scopes');
+    });
+
+    test('falls back to environmental for an unknown kind', () => {
+      const result = classifyError('BLOCKED[unknown_environmental]: something odd happened');
+      expect(result!.category).toBe(ErrorCategory.BLOCKED);
+      expect(result!.title).toBe('Blocked: environmental fault');
+    });
+
+    test('classifies a BLOCKED prefix appearing mid-message (agent carry-path)', () => {
+      // failTask persists TaskResult.error verbatim; it may be wrapped.
+      const result = classifyError('Task failed: BLOCKED[egress_denied]: refused (resource: api.example.com)');
+      expect(result!.category).toBe(ErrorCategory.BLOCKED);
+      expect(result!.remedy).toContain('api.example.com');
+    });
+
+    test('extracts resource when the reason is wrapped with trailing text', () => {
+      // The reason is NOT the end of the string — a wrapper may append context
+      // or a stack trace after it. Resource extraction must still succeed.
+      const result = classifyError('BLOCKED[egress_denied]: refused (resource: api.example.com) at step 3');
+      expect(result!.category).toBe(ErrorCategory.BLOCKED);
+      expect(result!.remedy).toContain('api.example.com');
+    });
+
+    test('extracts resource when a stack trace follows on a new line', () => {
+      const result = classifyError(
+        'BLOCKED[missing_secret]: not wired (resource: OPENAI_API_KEY)\n  at foo (bar.py:12)',
+      );
+      expect(result!.category).toBe(ErrorCategory.BLOCKED);
+      expect(result!.remedy).toContain('OPENAI_API_KEY');
+    });
+
+    test('routes a mixed-case kind to the right remedy (case-insensitive)', () => {
+      const result = classifyError('BLOCKED[Egress_Denied]: refused (resource: host.com)');
+      expect(result!.category).toBe(ErrorCategory.BLOCKED);
+      expect(result!.title).toBe('Blocked: egress denied');
+    });
+  });
+
   // --- Unknown errors ---
 
   describe('unknown errors', () => {
