@@ -178,6 +178,49 @@ class TestSetupRepoDependencyUnreachable:
 
         monkeypatch.setattr(repo, "run_cmd_with_backoff", fake_backoff)
 
+    def test_named_host_clone_bails_through_real_backoff_no_retry_events(self, monkeypatch):
+        """#251 review (end-to-end): drive the REAL run_cmd_with_backoff (not the
+        fake) so the shell.py DNS-bail + repo.py egress reclassification are proven
+        together. A named-host DNS failure must produce ZERO dependency_unreachable
+        retry events and exactly one non-retryable egress_denied — and the clone
+        command must run only once (no burned retries)."""
+        clone_calls = []
+
+        def fake_run_cmd(cmd, label, cwd=None, timeout=600, check=True, **kwargs):
+            if "clone" in label:
+                clone_calls.append(cmd)
+                return SimpleNamespace(
+                    returncode=1,
+                    stdout="",
+                    stderr="fatal: unable to access: Could not resolve host: github.com",
+                )
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        # Patch shell.run_cmd (what the REAL run_cmd_with_backoff calls) AND
+        # repo.run_cmd (the non-clone setup commands). run_cmd_with_backoff itself
+        # is NOT patched — the real DNS-bail logic runs.
+        monkeypatch.setattr("shell.run_cmd", fake_run_cmd)
+        monkeypatch.setattr(repo, "run_cmd", fake_run_cmd)
+        monkeypatch.setattr(repo, "_install_commit_hook", lambda repo_dir: None)
+        progress = _RecordingProgress()
+
+        import pytest
+
+        with pytest.raises(repo.DependencyUnreachableError) as excinfo:
+            repo.setup_repo(_config(), progress=progress)
+
+        # Bailed on the first clone attempt — no retries burned.
+        assert len(clone_calls) == 1
+        # Terminal reason is egress_denied naming the host, not dependency_unreachable.
+        assert str(excinfo.value).startswith("BLOCKED[egress_denied]:")
+        assert "(resource: github.com)" in str(excinfo.value)
+        blocked = [c for c in progress.calls if c[0] == "write_agent_blocked"]
+        # No misleading dependency_unreachable retry events; exactly one egress_denied.
+        assert not [c for c in blocked if c[1]["kind"] == "dependency_unreachable"]
+        egress = [c for c in blocked if c[1]["kind"] == "egress_denied"]
+        assert len(egress) == 1
+        assert egress[0][1]["retryable"] is False
+
     def test_exhausted_clone_reports_and_raises_canonical_reason(self, monkeypatch):
         fake = _fake_run_cmd()
         # A hostless transient blip (connection reset, no nameable host) → the

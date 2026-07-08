@@ -224,25 +224,31 @@ def is_transient_cmd_failure(stderr: str) -> bool:
     return any(sig in low for sig in _TRANSIENT_CMD_SIGNATURES)
 
 
+# DNS name-resolution failures that NAME a host — a firewalled / non-existent
+# endpoint whose name cannot be resolved. Retrying never helps, so backoff bails
+# immediately (#251 review). Deliberately NARROWER than hooks.detect_egress_denial:
+# a TCP-connect failure ("Failed to connect to <host> ... Connection timed out")
+# to an ALLOWLISTED host is genuinely transient and must stay retryable — so
+# ``Failed to connect``/``Connection refused`` are excluded here. A persistent
+# TCP failure is still reclassified to egress_denied by _fail_setup_command
+# AFTER the retries exhaust; only the pre-exhaustion bail is DNS-scoped.
+_UNRESOLVABLE_HOST_RE = re.compile(
+    r"could not resolve host:?\s+[A-Za-z0-9._-]+"
+    r"|getaddrinfo (?:ENOTFOUND|EAI_AGAIN)\s+[A-Za-z0-9._-]+"
+    r"|Failed to resolve '[A-Za-z0-9._-]+'",
+    re.IGNORECASE,
+)
+
+
 def _names_unresolvable_host(stderr: str) -> bool:
-    """True when *stderr* names a host that could not be reached (#251).
+    """True when *stderr* is a DNS name-resolution failure naming a host (#251).
 
-    A failure that names a host (``Could not resolve host: github.com``,
-    ``Failed to connect to <host>``) is a firewalled / non-existent endpoint,
-    NOT a transient blip — retrying can never help, so backoff must bail out
-    immediately rather than burn its budget and emit misleading
-    ``dependency_unreachable`` retry events. ``_fail_setup_command`` then
-    reclassifies it to the non-retryable ``egress_denied`` remedy.
-
-    Reuses ``hooks.detect_egress_denial`` (function-local import to avoid the
-    ``shell`` ↔ ``hooks`` cycle — hooks imports shell at module load; repo.py
-    uses the same pattern). Only host-capturing signatures bail: a host-less
-    ``Temporary failure in name resolution`` stays retryable via the transient
-    set above."""
-    from hooks import detect_egress_denial
-
-    detected, host = detect_egress_denial(stderr)
-    return detected and host is not None
+    Such a host cannot be reached no matter how often we retry (non-existent or
+    firewalled at DNS), so backoff bails immediately rather than burn its budget
+    and emit misleading ``dependency_unreachable`` events. A host-less
+    ``Temporary failure in name resolution`` (no nameable endpoint) and a
+    transient TCP-connect timeout to an allowlisted host both stay retryable."""
+    return bool(_UNRESOLVABLE_HOST_RE.search(stderr or ""))
 
 
 def run_cmd_with_backoff(

@@ -606,4 +606,27 @@ describe('formatStatusSnapshot', () => {
     const rendered = formatStatusSnapshot(task, events, NOW);
     expect(rendered).not.toContain('Blocker:');
   });
+
+  test('still shows the Blocker line on a FAILED task (#251 review — guard is COMPLETED-only)', () => {
+    // The suppression is narrow: on a failure state the blocker is the
+    // actionable cause and must stay visible. Guards against a mistaken
+    // broadening to isTerminalStatus().
+    const task = buildTask({ status: 'FAILED' });
+    const events: TaskEvent[] = [
+      mkEvent({
+        event_id: '01ARZ3NDEKTSV4RRFFQ69G5F40',
+        event_type: 'agent_blocked',
+        timestamp: '2026-04-29T15:29:20Z',
+        metadata: {
+          kind: 'egress_denied',
+          detail: 'connection refused',
+          remediation_hint: 'allowlist api.example.com in DNS Firewall',
+          retryable: false,
+          resource: 'api.example.com',
+        },
+      }),
+    ];
+    const rendered = formatStatusSnapshot(task, events, NOW);
+    expect(rendered).toContain('Blocker:       egress_denied [api.example.com]');
+  });
 });

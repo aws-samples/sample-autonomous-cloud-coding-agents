@@ -138,6 +138,27 @@ class TestRunCmdWithBackoff:
         assert len(attempts) == 1  # bailed on first failure — no retry
         assert retries == []  # no misleading dependency_unreachable audit event
 
+    def test_tcp_connect_timeout_to_named_host_still_retries(self):
+        # #251 review: "Failed to connect to <host> ... Connection timed out" is a
+        # transient TCP timeout to a (likely allowlisted) host — NOT a DNS
+        # resolution failure. The bail is DNS-scoped, so this must still retry;
+        # a persistent one is reclassified to egress_denied only AFTER exhaustion.
+        stderr = (
+            "fatal: unable to access 'https://github.com/o/r': "
+            "Failed to connect to github.com port 443: Connection timed out"
+        )
+        seq = [self._proc(1, stderr), self._proc(0)]
+        retries = []
+        with patch("shell.run_cmd", side_effect=lambda *a, **k: seq.pop(0)):
+            result = run_cmd_with_backoff(
+                ["git", "clone"],
+                "clone",
+                on_retry=lambda *a: retries.append(a),
+                sleep=lambda _: None,
+            )
+        assert result.returncode == 0
+        assert len(retries) == 1  # retried the transient TCP timeout
+
     def test_gives_up_after_max_attempts_on_persistent_transient(self):
         attempts = []
         proc = self._proc(1, "connection timed out")
