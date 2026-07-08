@@ -27,6 +27,7 @@ import {
   reactToComment,
   replyToComment,
   reportIssueFailure,
+  sweepDecompositionNotes,
   swapCommentReaction,
   transitionIssueState,
   upsertStatusComment,
@@ -59,8 +60,10 @@ import {
 } from './shared/orchestration-decomposition-mode';
 import {
   renderAlreadyDecomposedNote,
+  renderApprovedPlanReference,
   renderCommandCollapseNote,
   renderDecomposeStartedNote,
+  renderDiscardedPlanReference,
   renderLabelHelp,
   renderMultiPartHint,
   renderPendingPlanNudge,
@@ -84,7 +87,7 @@ import {
   putPendingPlan as putPendingPlanRow,
   replacePendingPlan as replacePendingPlanRow,
 } from './shared/orchestration-decomposition-store';
-import { DEFAULT_MAX_SUB_ISSUES, type DecompositionPlan } from './shared/orchestration-decomposition-types';
+import { DEFAULT_MAX_SUB_ISSUES, type DecompositionPlan, type PlannedSubIssue } from './shared/orchestration-decomposition-types';
 import { linearGraphqlFn } from './shared/orchestration-decomposition-writeback';
 import { discoverOrchestration } from './shared/orchestration-discovery';
 import { declarativeGraphSource } from './shared/orchestration-graph-source';
@@ -988,6 +991,60 @@ function buildDecompositionEffects(
 }
 
 /**
+ * #299 plan-cleanup — once a plan is settled (approved → seeded, or rejected →
+ * discarded), converge the thread on the SAME shape as Mode A sub-issue
+ * orchestration: ONE frozen plan-reference comment + (on approve) the live epic
+ * panel, with all the transient decomposition notes swept away. Live-proven on
+ * ABCA-670 that Linear has no comment fold, so we don't keep a bulky history —
+ * the reference carries a compact "· refined over N rounds" footnote instead.
+ *
+ * Two moves, both best-effort (a cleanup failure is cosmetic, never blocks the
+ * approve/reject that already happened):
+ *  1. FREEZE the plan-proposal comment in place — edit it to the static
+ *     {@link renderApprovedPlanReference} (approve) or {@link
+ *     renderDiscardedPlanReference} (reject), dropping the now-stale action
+ *     footer. On approve, requires the plan ``nodes`` (from the consumed pending
+ *     row) to re-list the agreed breakdown; ``revisionRound`` drives the
+ *     footnote. If there's no tracked proposal comment id (older plan), skip the
+ *     freeze — the sweep still tidies the notes.
+ *  2. SWEEP every other bot ``🗂️``/``👋`` note off the issue, keeping the frozen
+ *     reference (and the differently-prefixed live panel, which the sweep can't
+ *     match).
+ */
+async function cleanupPlanThread(args: {
+  issueId: string;
+  workspaceId: string;
+  proposalCommentId?: string;
+  outcome:
+    | { readonly kind: 'approved'; readonly nodes: readonly PlannedSubIssue[]; readonly revisionRound?: number }
+    | { readonly kind: 'rejected' };
+}): Promise<void> {
+  if (!WORKSPACE_REGISTRY_TABLE) return;
+  const { issueId, workspaceId, proposalCommentId, outcome } = args;
+  const ctx = { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE };
+  try {
+    // 1. Freeze the plan reference in place (only if we tracked its id).
+    if (proposalCommentId) {
+      const frozenBody = outcome.kind === 'approved'
+        ? renderApprovedPlanReference(
+          { shouldDecompose: true, reasoning: '', nodes: outcome.nodes },
+          outcome.revisionRound !== undefined ? { revisionRound: outcome.revisionRound } : {},
+        )
+        : renderDiscardedPlanReference();
+      await upsertStatusComment(ctx, issueId, frozenBody, proposalCommentId);
+    }
+    // 2. Sweep the transient notes, keeping the frozen reference.
+    await sweepDecompositionNotes(ctx, issueId, proposalCommentId);
+  } catch (err) {
+    logger.warn('Plan-thread cleanup failed (non-fatal)', {
+      issue_id: issueId,
+      outcome: outcome.kind,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/**
  * #299 Mode B — seed the #247 executor from a planner-produced graph (real
  * Linear sub-issue ids) and release roots. Reuses the SAME discovery → release
  * → panel path as Mode A by passing a ``declarativeGraphSource`` rather than
@@ -1242,6 +1299,12 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
       commentedIssueId, workspaceId, pending.repo, pending.platform_user_id,
       verdictProjectId, verdictChannelMetadata, resolved.accessToken,
     );
+    // Capture the plan shape BEFORE runPlanVerdict consumes the pending row —
+    // the frozen reference re-lists the AGREED breakdown (pending.nodes), and the
+    // footnote needs the revision round.
+    const settledNodes = pending.nodes;
+    const settledRound = pending.revision_round;
+    const settledProposalCommentId = pending.proposal_comment_id;
     const flow = await runPlanVerdict({ parentIssueId: commentedIssueId, verdict, effects });
     if (flow.kind === 'seed') {
       await seedAndReleaseFromGraph({
@@ -1252,6 +1315,23 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
         platformUserId: pending.platform_user_id,
         channelMetadata: verdictChannelMetadata,
         children: flow.children,
+      });
+      // #299 plan-cleanup: the panel is now live — freeze the plan comment into a
+      // reference + sweep the transient notes so the thread matches Mode A.
+      await cleanupPlanThread({
+        issueId: commentedIssueId,
+        workspaceId,
+        ...(settledProposalCommentId !== undefined && { proposalCommentId: settledProposalCommentId }),
+        outcome: { kind: 'approved', nodes: settledNodes, ...(settledRound !== undefined && { revisionRound: settledRound }) },
+      });
+    } else if (verdict === 'reject' && flow.kind === 'handled') {
+      // Rejected → discard: freeze the plan comment to a one-line "discarded"
+      // record + sweep the notes (incl. runPlanVerdict's own "Plan discarded" ack).
+      await cleanupPlanThread({
+        issueId: commentedIssueId,
+        workspaceId,
+        ...(settledProposalCommentId !== undefined && { proposalCommentId: settledProposalCommentId }),
+        outcome: { kind: 'rejected' },
       });
     }
     logger.info('Mode B verdict handled', { issue_id: commentedIssueId, verdict, kind: flow.kind });
@@ -1664,6 +1744,12 @@ async function handleSingleTaskVerdict(args: {
   }
 
   if (verdict === 'reject') {
+    // #299 plan-cleanup: sweep the transient planning notes (decompose-started
+    // ack + single-task proposal), THEN post the durable "cancelled" record so it
+    // survives the sweep (posted fresh after → the sweep's list didn't see it).
+    // A single-task plan tracks no proposal comment id, so there's nothing to
+    // freeze — the swept-clean thread + this one line is the whole record.
+    await sweepDecompositionNotes(feedbackCtx, commentedIssueId);
     await upsertStatusComment(feedbackCtx, commentedIssueId, renderSingleTaskCancelled());
     logger.info('Mode B single-task verdict: rejected', { issue_id: commentedIssueId });
     return;
@@ -1699,6 +1785,10 @@ async function handleSingleTaskVerdict(args: {
       buildCreateTaskFailureMessage(result.statusCode, result.body));
     return;
   }
+  // #299 plan-cleanup: the single coding task is dispatched and the agent posts
+  // its own 🤖 progress from here — sweep the transient planning notes (started
+  // ack + single-task proposal) so the thread isn't cluttered by the plan phase.
+  await sweepDecompositionNotes(feedbackCtx, commentedIssueId);
   logger.info('Mode B single-task verdict: approved — single task dispatched', { issue_id: commentedIssueId });
 }
 

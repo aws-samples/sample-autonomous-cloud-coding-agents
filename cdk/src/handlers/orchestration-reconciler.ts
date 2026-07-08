@@ -49,15 +49,15 @@ import type { DynamoDBRecord, DynamoDBStreamEvent } from 'aws-lambda';
 import { createTaskCore } from './shared/create-task-core';
 import { renderFailureReply, renderPanelFailureReason } from './shared/failure-reply';
 import { isNoChangeIteration, renderMaturingReply } from './shared/iteration-reply';
-import { EMOJI_FAILURE, EMOJI_NEEDS_INPUT, EMOJI_SUCCESS, type LinearFeedbackContext, replyToComment, revertIssueToNotStarted, swapCommentReaction, transitionIssueState, upsertStatusComment, upsertThreadedReply } from './shared/linear-feedback';
+import { EMOJI_FAILURE, EMOJI_NEEDS_INPUT, EMOJI_SUCCESS, type LinearFeedbackContext, replyToComment, revertIssueToNotStarted, sweepDecompositionNotes, swapCommentReaction, transitionIssueState, upsertStatusComment, upsertThreadedReply } from './shared/linear-feedback';
 import { resolveLinearOauthToken } from './shared/linear-oauth-resolver';
 import type { SubIssueNode } from './shared/linear-subissue-fetch';
 import { logger } from './shared/logger';
 import { applyDecompositionResult } from './shared/orchestration-decomposition-flow';
 import { parseDecomposerResponse } from './shared/orchestration-decomposition-planner';
-import { renderDecomposeUnavailableNote, renderRevisionToSingleNote } from './shared/orchestration-decomposition-render';
+import { renderApprovedPlanReference, renderDecomposeUnavailableNote, renderRevisionToSingleNote } from './shared/orchestration-decomposition-render';
 import { getPendingPlan, putPendingPlan, replacePendingPlan } from './shared/orchestration-decomposition-store';
-import type { ProjectDecompositionCaps } from './shared/orchestration-decomposition-types';
+import type { PlannedSubIssue, ProjectDecompositionCaps } from './shared/orchestration-decomposition-types';
 import { linearGraphqlFn } from './shared/orchestration-decomposition-writeback';
 import { discoverOrchestration } from './shared/orchestration-discovery';
 import { declarativeGraphSource } from './shared/orchestration-graph-source';
@@ -1509,7 +1509,16 @@ async function reconcileDecomposePlan(evt: DecomposePlanEvent): Promise<void> {
 
   if (result.kind === 'seed') {
     // :auto wrote back real Linear sub-issues → seed the executor + release roots.
-    await seedDecomposedGraph(evt, result.children, resolved!.oauthSecretArn, resolved!.workspaceSlug);
+    // #299 plan-cleanup: pass the agreed plan nodes + the proposal comment id so
+    // the seed path can FREEZE the proposal into an "Approved plan" reference +
+    // sweep the started ack, converging on the same shape as the approve path.
+    await seedDecomposedGraph(
+      evt, result.children, resolved!.oauthSecretArn, resolved!.workspaceSlug,
+      {
+        planNodes: parsed.kind === 'plan' ? parsed.plan.nodes : [],
+        ...(result.proposalCommentId !== undefined && { proposalCommentId: result.proposalCommentId }),
+      },
+    );
     return;
   }
   if (result.kind === 'single_task') {
@@ -1603,6 +1612,7 @@ async function seedDecomposedGraph(
   children: readonly SubIssueNode[],
   oauthSecretArn: string,
   workspaceSlug: string,
+  cleanup?: { planNodes: readonly PlannedSubIssue[]; proposalCommentId?: string },
 ): Promise<void> {
   const releaseContext: OrchestrationReleaseContext = {
     platform_user_id: evt.platformUserId,
@@ -1653,6 +1663,30 @@ async function seedDecomposedGraph(
       logger.warn('Decompose :auto seed: panel post failed (non-fatal)', {
         parent_issue_id: evt.parentIssueId, error: err instanceof Error ? err.message : String(err),
       });
+    }
+    // #299 plan-cleanup: freeze the :auto proposal comment into a static "Approved
+    // plan" reference + sweep the started ack, so the thread converges on the SAME
+    // shape as the approve path (frozen reference + live panel). Best-effort;
+    // cleanup failure is cosmetic. Only when we have the proposal id to freeze.
+    if (cleanup) {
+      const ctx = { linearWorkspaceId: evt.workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE };
+      try {
+        if (cleanup.proposalCommentId) {
+          await upsertStatusComment(
+            ctx, evt.parentIssueId,
+            renderApprovedPlanReference(
+              { shouldDecompose: true, reasoning: '', nodes: cleanup.planNodes },
+              evt.revisionRound !== undefined ? { revisionRound: evt.revisionRound } : {},
+            ),
+            cleanup.proposalCommentId,
+          );
+        }
+        await sweepDecompositionNotes(ctx, evt.parentIssueId, cleanup.proposalCommentId);
+      } catch (err) {
+        logger.warn('Decompose :auto seed: plan-thread cleanup failed (non-fatal)', {
+          parent_issue_id: evt.parentIssueId, error: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
   }
   logger.info('Decompose :auto: orchestration seeded from agent plan', {

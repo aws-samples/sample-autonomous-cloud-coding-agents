@@ -36,6 +36,7 @@ import {
   replyToComment,
   reportIssueFailure,
   revertIssueToNotStarted,
+  sweepDecompositionNotes,
   swapCommentReaction,
   swapIssueReaction,
   transitionIssueState,
@@ -630,6 +631,76 @@ describe('linear-feedback', () => {
       const id = await upsertThreadedReply(CTX, ISSUE_ID, 'parent-1', '✅ Updated.', REPLY_ID);
       expect(id).toBe(REPLY_ID);
       expect(fetchMock).toHaveBeenCalledTimes(1); // straight update, no read
+    });
+  });
+
+  describe('sweepDecompositionNotes (#299 plan-cleanup)', () => {
+    // A representative plan-phase thread: the frozen plan reference (KEEP), the
+    // transient decompose notes (🗂️/👋 → DELETE), the live epic panel (🔄 → a
+    // different prefix, KEEP), and a human comment (no bot prefix, KEEP).
+    const THREAD = {
+      data: {
+        issue: {
+          comments: {
+            nodes: [
+              { id: 'plan-ref', body: '🗂️ **Approved plan** — 2 sub-issues' },
+              { id: 'started-ack', body: '🗂️ On it — working out how to break this up…' },
+              { id: 'nudge', body: '👋 I answer to `@bgagent`…' },
+              { id: 'panel', body: '🔄 **ABCA orchestration** · 0/2 complete' },
+              { id: 'human', body: 'looks good, ship it' },
+            ],
+          },
+        },
+      },
+    };
+
+    test('deletes the transient 🗂️/👋 notes, keeps the frozen reference + panel + human comment', async () => {
+      fetchMock
+        .mockResolvedValueOnce(jsonResponse(THREAD)) // the comments list
+        .mockResolvedValue(jsonResponse({ data: { commentDelete: { success: true } } }));
+      const deleted = await sweepDecompositionNotes(CTX, ISSUE_ID, 'plan-ref');
+      // started-ack + nudge deleted; plan-ref (kept), panel (🔄), human (no prefix) survive.
+      expect(deleted).toBe(2);
+      const deletedIds = fetchMock.mock.calls
+        .slice(1)
+        .map((c) => JSON.parse(c[1].body).variables.id);
+      expect(deletedIds.sort()).toEqual(['nudge', 'started-ack']);
+      expect(deletedIds).not.toContain('plan-ref');
+      expect(deletedIds).not.toContain('panel');
+      expect(deletedIds).not.toContain('human');
+    });
+
+    test('with no keepCommentId, sweeps ALL bot notes incl. the (untracked) reference — single-task/older-plan path', async () => {
+      fetchMock
+        .mockResolvedValueOnce(jsonResponse(THREAD))
+        .mockResolvedValue(jsonResponse({ data: { commentDelete: { success: true } } }));
+      const deleted = await sweepDecompositionNotes(CTX, ISSUE_ID);
+      // plan-ref + started-ack + nudge (all 🗂️/👋); panel + human still spared.
+      expect(deleted).toBe(3);
+    });
+
+    test('no token → no fetch, sweeps nothing', async () => {
+      resolveLinearOauthTokenMock.mockResolvedValueOnce(null);
+      const deleted = await sweepDecompositionNotes(CTX, ISSUE_ID, 'plan-ref');
+      expect(deleted).toBe(0);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    test('a failed comments-list is a clean no-op (best-effort, never throws)', async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse({ errors: [{ message: 'boom' }] }, 200));
+      const deleted = await sweepDecompositionNotes(CTX, ISSUE_ID, 'plan-ref');
+      expect(deleted).toBe(0);
+      expect(fetchMock).toHaveBeenCalledTimes(1); // only the (failed) list; no deletes
+    });
+
+    test('a leading-whitespace bot note is still matched (trimStart)', async () => {
+      fetchMock
+        .mockResolvedValueOnce(jsonResponse({
+          data: { issue: { comments: { nodes: [{ id: 'ws', body: '\n  🗂️ over-cap note' }] } } },
+        }))
+        .mockResolvedValue(jsonResponse({ data: { commentDelete: { success: true } } }));
+      const deleted = await sweepDecompositionNotes(CTX, ISSUE_ID, 'plan-ref');
+      expect(deleted).toBe(1);
     });
   });
 });

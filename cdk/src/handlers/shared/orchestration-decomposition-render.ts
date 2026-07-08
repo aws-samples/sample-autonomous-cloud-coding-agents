@@ -536,6 +536,57 @@ export function renderAlreadyDecomposedNote(): string {
   );
 }
 
+/**
+ * #299 plan-cleanup: freeze the plan-proposal comment into a static REFERENCE
+ * once the plan is approved and the live epic panel takes over. The proposal's
+ * action footer ("Reply `@bgagent approve`…") and the sequencing/cost preamble
+ * are now stale — what the reviewer needs from here on is a compact record of
+ * WHAT was agreed and its sub-issues, with the live status living on the panel
+ * (Mode A). We re-render the numbered breakdown (same shape as the proposal, so
+ * the reference reads continuously with what they approved) under a frozen
+ * "Approved" header, dropping the footer entirely.
+ *
+ * ``revisionRound`` (>0) adds a plain-language "· refined over N rounds"
+ * footnote — the one durable trace that the plan was iterated, since the
+ * interim revise notes are swept at approval and Linear has no fold to tuck a
+ * full history into (live-proven on ABCA-670: threaded replies don't collapse).
+ * The last round's computed "What changed" line already lives in the proposal
+ * body, so the most recent "why" survives; older rounds don't — the deliberate
+ * "if it clutters, don't" trade-off the user chose.
+ *
+ * Still ``🗂️``-prefixed so the self-trigger guard keeps skipping it (UX.20).
+ */
+export function renderApprovedPlanReference(
+  plan: DecompositionPlan,
+  opts: { readonly revisionRound?: number } = {},
+): string {
+  const lines: string[] = [];
+  const round = opts.revisionRound ?? 0;
+  const refined = round > 0 ? ` · refined over ${round} ${round === 1 ? 'round' : 'rounds'}` : '';
+  lines.push(`${PLAN_PROPOSAL_PREFIX} **Approved plan** — ${plan.nodes.length} sub-issues${refined}`);
+  lines.push('');
+  plan.nodes.forEach((node, i) => {
+    lines.push(`${i + 1}. **${node.title}** \`${SIZE_GLYPH[node.size]}\`${dependsNote(node)}`);
+    if (node.description && node.description !== node.title) {
+      lines.push(`   ${node.description}`);
+    }
+  });
+  lines.push('');
+  lines.push('_Live status is on the orchestration panel below._');
+  return lines.join('\n');
+}
+
+/**
+ * #299 plan-cleanup: freeze the plan comment when the plan is REJECTED (discard).
+ * The breakdown is gone, so we don't re-list it — just a one-line record that a
+ * plan existed and was discarded (nothing ran). Replaces the transient
+ * "Plan discarded" ack (which is swept with the other notes) so the thread keeps
+ * exactly ONE durable line instead of a scatter. Bot-prefixed (self-trigger guard).
+ */
+export function renderDiscardedPlanReference(): string {
+  return `${PLAN_PROPOSAL_PREFIX} **Plan discarded** — no sub-issues were created, nothing ran.`;
+}
+
 /** Money with at most 2 decimals, trailing zeros trimmed. */
 function formatUsd(n: number): string {
   return Number(n.toFixed(2)).toString();

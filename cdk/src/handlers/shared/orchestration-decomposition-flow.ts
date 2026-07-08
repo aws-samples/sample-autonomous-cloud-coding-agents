@@ -109,7 +109,12 @@ export interface DecompositionEffects {
 /** Outcome of a proposal/verdict run — tells the processor exactly what to do next. */
 export type DecompositionFlowResult =
   // The graph is ready: seed the executor from these real-Linear-id nodes.
-  | { readonly kind: 'seed'; readonly children: readonly SubIssueNode[] }
+  // ``proposalCommentId`` (#299 plan-cleanup): on the :auto path this is the id of
+  // the plan-proposal comment just posted, so the seed site can FREEZE it into a
+  // static "Approved plan" reference + sweep the started ack (matching Mode A).
+  // Absent on the approve-verdict seed (that path already knows the id from the
+  // consumed pending row).
+  | { readonly kind: 'seed'; readonly children: readonly SubIssueNode[]; readonly proposalCommentId?: string }
   // Mode B DECLINED (planner said single, errored, or decomposition disabled).
   // A note was posted; the processor should create the normal single task.
   | { readonly kind: 'single_task'; readonly reason: string }
@@ -267,8 +272,16 @@ export async function applyDecompositionResult(
   // AUTO: write back immediately, return the graph to seed. (A revision is
   // always manual — never auto — so revisionRound doesn't apply here.)
   if (autoRun) {
-    await effects.postComment(parentIssueId, renderPlanProposal(planned.plan, { autoRun: true }));
-    return finalizeWriteBack(parentIssueId, planned.plan, effects);
+    // #299 plan-cleanup: capture the proposal comment id so the seed site can
+    // FREEZE it into the "Approved plan" reference (:auto has no approve step, so
+    // the proposal comment IS the reference once seeding starts).
+    const autoProposalCommentId = await effects.postComment(
+      parentIssueId, renderPlanProposal(planned.plan, { autoRun: true }),
+    );
+    return finalizeWriteBack(
+      parentIssueId, planned.plan, effects,
+      autoProposalCommentId ?? undefined,
+    );
   }
 
   // MANUAL: post/UPDATE the proposal + persist the pending plan, then wait for
@@ -347,11 +360,14 @@ export async function runPlanVerdict(params: RunVerdictParams): Promise<Decompos
   return result;
 }
 
-/** Write the plan back to Linear and return either a seed graph or a terminal error. */
+/** Write the plan back to Linear and return either a seed graph or a terminal error.
+ *  ``proposalCommentId`` (#299 plan-cleanup) rides on the seed result so the :auto
+ *  seed site can freeze that comment into the "Approved plan" reference. */
 async function finalizeWriteBack(
   parentIssueId: string,
   plan: DecompositionPlan,
   effects: Pick<DecompositionEffects, 'postComment' | 'graphql'>,
+  proposalCommentId?: string,
 ): Promise<DecompositionFlowResult> {
   const wb = await writeBackPlan({ graphql: effects.graphql, parentIssueId, nodes: plan.nodes });
   if (wb.kind === 'error') {
@@ -361,7 +377,7 @@ async function finalizeWriteBack(
   logger.info('Mode B: plan written back — handing graph to the executor', {
     parent_issue_id: parentIssueId, created: wb.created, reused: wb.reused,
   });
-  return { kind: 'seed', children: wb.children };
+  return { kind: 'seed', children: wb.children, ...(proposalCommentId !== undefined && { proposalCommentId }) };
 }
 
 /** Convenience for the suffix-suppressed (already-decomposed) note (B6 routing). */
