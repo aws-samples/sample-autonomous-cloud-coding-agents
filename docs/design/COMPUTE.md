@@ -73,6 +73,19 @@ The platform works around this by splitting storage:
 
 See [ORCHESTRATOR.md](./ORCHESTRATOR.md) for how the orchestrator handles these timeouts.
 
+## ECS Fargate task sizing (build vs. planning)
+
+When a repo is `compute_type: ecs`, `EcsAgentCluster` provisions **two** Fargate task definitions, and the orchestrator picks between them per task by whether the resolved workflow is **read-only**:
+
+| Task def | Size | Runs | Selected when |
+|----------|------|------|---------------|
+| Build | 16 vCPU / 64 GB | Coding workflows (`new-task`, `pr-iteration`, …) that clone and run a full CI-parity build | `workflowIsReadOnly(workflow) === false` (the default) |
+| Planning | 2 vCPU / 8 GB | Read-only workflows (`coding/decompose-v1`) that clone, read/grep to explore, and emit a plan artifact — **never build** | `workflowIsReadOnly(workflow) === true` |
+
+The 64 GB build def is sized from empirical OOM history: ABCA's own parallel `mise run build` peaks ~31.6 GB and OOM-killed a 32 GB task, so the build tier needs 64 GB headroom. Running a read-only `:decompose` plan on that box is a large over-allocation, so planning gets its own right-sized 8 GB def.
+
+Both defs **share one task role, one execution role, one container image, and one base environment** (a single `makeTaskDef` helper + `baseEnvironment` object in `ecs-agent-cluster.ts`), so IAM grants and env vars cannot drift between them — a lesson from ECS-parity bugs (ABCA-488, #502) where a grant present on one path was missing on another. The only differences are `cpu`/`memoryLimitMiB` and the build-tier-only `BUILD_VERIFY_TIMEOUT_S`. Routing is a fallback-safe boolean: an older deploy without the planning def wired simply runs read-only workflows on the build def (never worse than before). Substrate **family** routing is unchanged — an ECS repo always plans on ECS (never silently downgraded to the AgentCore microVM, which a large repo could OOM just reading); this only picks *which ECS task def*. AgentCore has a single fixed MicroVM size and ignores the read-only flag. See [ECS_RIGHTSIZED_PLANNING.md](./ECS_RIGHTSIZED_PLANNING.md).
+
 ## Agent harness
 
 The agent harness is the layer around the LLM that manages the execution loop: context, tools, guardrails, and lifecycle. It is not the agent itself but the infrastructure that makes long-running autonomous agents reliable.
