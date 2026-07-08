@@ -1725,6 +1725,9 @@ async function handlePlanCommand(args: {
 
   const result = applyPlanCommand(pending.nodes, command);
   if (result.kind === 'error') {
+    // F-command-ack-stuck: settle the 👀 to ❓ — the command needs the reviewer's
+    // attention (bad index etc.), it didn't silently succeed.
+    await swapCommentReaction(feedbackCtx, commentId, EMOJI_NEEDS_INPUT);
     await upsertStatusComment(feedbackCtx, commentedIssueId, renderPlanCommandError(result.message));
     logger.info('Mode B command: invalid — posted error, plan untouched', {
       issue_id: commentedIssueId, command: command.kind,
@@ -1735,6 +1738,8 @@ async function handlePlanCommand(args: {
     // The edit would leave <2 sub-issues — nothing to orchestrate. Don't silently
     // apply it; tell the reviewer their options (approve to run as one task, or
     // give different feedback). The current plan stays pending + approvable.
+    // F-command-ack-stuck: settle 👀→❓ (awaiting the reviewer's decision).
+    await swapCommentReaction(feedbackCtx, commentId, EMOJI_NEEDS_INPUT);
     await upsertStatusComment(feedbackCtx, commentedIssueId, renderCommandCollapseNote());
     logger.info('Mode B command: would collapse to single task — plan untouched', {
       issue_id: commentedIssueId, command: command.kind, remaining: result.remaining,
@@ -1745,10 +1750,15 @@ async function handlePlanCommand(args: {
   // Re-render the proposal from the edited nodes. Reuse renderPlanProposal so the
   // layout matches every other proposal (numbered list, deps, summary, footer);
   // keep the "Updated breakdown" header when this plan had already been revised.
+  // Lead with the computed before→after diff (same honest "What changed" line the
+  // semantic revise path uses — never model-authored), so a command edit is as
+  // legible as a semantic one.
+  const commandDiff = diffPlans(pending.nodes, result.nodes);
   const editedPlan: DecompositionPlan = {
     shouldDecompose: true,
     reasoning: '',
     nodes: result.nodes,
+    ...(!commandDiff.unchanged && { changeSummary: renderPlanDiff(commandDiff) }),
   };
   // #299 plan-mode T5: EDIT the existing proposal comment in place rather than
   // posting a fresh one. A reviewer firing several structural commands in a row
@@ -1794,6 +1804,12 @@ async function handlePlanCommand(args: {
     now: new Date().toISOString(),
     ttlEpochSeconds: Math.floor(Date.now() / 1000) + PENDING_PLAN_TTL_SECONDS,
   });
+
+  // F-command-ack-stuck: settle the 👀 on the command comment to ✅ — the edit
+  // applied + the plan comment updated in place, so the reviewer can tell it
+  // finished (the 👀 previously never swapped → read as stuck). Synchronous, no
+  // reconciler round-trip.
+  await swapCommentReaction(feedbackCtx, commentId, EMOJI_SUCCESS);
 
   logger.info('Mode B command applied — plan edited deterministically (no agent)', {
     issue_id: commentedIssueId,

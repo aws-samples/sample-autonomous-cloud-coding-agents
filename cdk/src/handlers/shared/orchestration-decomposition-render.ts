@@ -104,20 +104,22 @@ export function renderPlanProposal(
 ): string {
   const lines: string[] = [];
   const round = opts.revisionRound ?? 0;
-  // Plain-English headers — a reviewer shouldn't have to decode an internal
-  // "round N" loop counter (customer-caught jargon). "Updated breakdown" reads
-  // as the natural result of "I asked for a change"; the count of edits isn't
-  // something the human needs to track.
-  const header = round > 0
+  // "Updated breakdown" whenever this render reflects a change to a prior plan —
+  // either a semantic revise round (round > 0) OR a structural command edit that
+  // produced a computed diff (changeSummary present even at round 0, since a
+  // command edit doesn't consume the revise-round budget). Plain-English header:
+  // a reviewer shouldn't have to decode an internal loop counter (customer-caught
+  // jargon), and an edited plan should never still read "Proposed".
+  const edited = round > 0 || Boolean(plan.changeSummary);
+  const header = edited
     ? `**Updated breakdown** — ${plan.nodes.length} sub-issues`
     : `**Proposed breakdown** — ${plan.nodes.length} sub-issues`;
   lines.push(`${PLAN_PROPOSAL_PREFIX} ${header}`);
-  // #299 BLOCKER-1 (revise-forgets-edits): on a revision, lead with the agent's
-  // plain-language diff of what it changed and what it kept, so the reviewer can
-  // immediately catch an unintended revert (a dropped node reappearing, a title
-  // snapping back) instead of having to re-read the whole breakdown. Only on a
-  // revision (round > 0) and only when the agent actually reported a change.
-  if (round > 0 && plan.changeSummary) {
+  // #299 BLOCKER-1 (revise-forgets-edits): lead with the COMPUTED before→after
+  // diff (never model self-report) so the reviewer can immediately catch an
+  // unintended revert (a dropped node reappearing, a title snapping back) instead
+  // of re-reading the whole breakdown. Shown whenever a change actually happened.
+  if (edited && plan.changeSummary) {
     lines.push('');
     lines.push(`**What changed:** ${plan.changeSummary}`);
   }

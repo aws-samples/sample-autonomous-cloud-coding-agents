@@ -704,3 +704,62 @@ export async function transitionIssueState(
   }
   return ok;
 }
+
+/**
+ * #299 F-decompose-inprogress — move an issue BACKWARD to a not-started state
+ * (``unstarted`` "Todo", else ``backlog``), used when a ``:decompose`` planning
+ * run finishes and the issue is now awaiting the reviewer's approve. The webhook
+ * moved it to In Progress at dispatch (so the board showed the ~1-2 min planning
+ * WAS happening — {@link transitionIssueState}); once the plan is posted and
+ * nothing is running, "In Progress" would lie ("looks like work started while
+ * it's just a pending plan"). So we revert it.
+ *
+ * This is the ONE sanctioned backward move, and it's tightly guarded to avoid
+ * clobbering a human: it ONLY fires when the issue is CURRENTLY in a ``started``
+ * state (i.e. still the In Progress we set) — if a human already pushed it to
+ * Done/Canceled, or pulled it back to Backlog themselves, we leave it. Prefers a
+ * "Todo" then "Backlog" target name; falls back to the lowest-position
+ * unstarted/backlog state. Best-effort, never throws.
+ */
+export async function revertIssueToNotStarted(
+  ctx: LinearFeedbackContext,
+  issueId: string,
+): Promise<boolean> {
+  const token = await resolveToken(ctx);
+  if (!token) return false;
+
+  const data = await graphqlData(token, ISSUE_TEAM_STATES_QUERY, { issueId });
+  const issue = data?.issue as
+    | { state?: TeamState; team?: { states?: { nodes?: TeamState[] } } }
+    | undefined;
+  const states = issue?.team?.states?.nodes ?? [];
+  const current = issue?.state;
+  if (states.length === 0 || !current) return false;
+
+  // Only revert OUR "In Progress" — never demote a human-advanced (completed/
+  // canceled) or a human-pulled-back (already backlog/unstarted) issue.
+  if (current.type !== 'started') {
+    logger.info('Revert-to-not-started: issue not in a started state — leaving it', {
+      issue_id: issueId, current_state: current.name, current_type: current.type,
+    });
+    return false;
+  }
+
+  // Prefer an unstarted "Todo" (the natural "not started, waiting" state); fall
+  // back to backlog. Within a type, prefer the named state, else lowest position.
+  const target = pickState(states, 'unstarted', ['Todo', 'To Do'])
+    ?? pickState(states, 'backlog', ['Backlog', 'Triage']);
+  if (!target) {
+    logger.info('Revert-to-not-started: no unstarted/backlog state on the team — leaving it', { issue_id: issueId });
+    return false;
+  }
+  if (target.id === current.id) return false;
+
+  const ok = (await graphqlRequest(token, ISSUE_SET_STATE_MUTATION, { issueId, stateId: target.id })).ok;
+  if (ok) {
+    logger.info('Linear issue reverted to not-started (awaiting approval)', {
+      issue_id: issueId, from: current.name, to: target.name,
+    });
+  }
+  return ok;
+}

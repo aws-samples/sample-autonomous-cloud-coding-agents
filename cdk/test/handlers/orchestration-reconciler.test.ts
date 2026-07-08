@@ -52,6 +52,7 @@ const upsertStatusCommentMock = jest.fn();
 const swapIssueReactionMock = jest.fn();
 const swapCommentReactionMock = jest.fn();
 const transitionIssueStateMock = jest.fn();
+const revertIssueToNotStartedMock = jest.fn();
 const replyToCommentMock = jest.fn();
 const upsertThreadedReplyMock = jest.fn();
 jest.mock('../../src/handlers/shared/linear-feedback', () => ({
@@ -60,6 +61,7 @@ jest.mock('../../src/handlers/shared/linear-feedback', () => ({
   swapIssueReaction: (...args: unknown[]) => swapIssueReactionMock(...args),
   swapCommentReaction: (...args: unknown[]) => swapCommentReactionMock(...args),
   transitionIssueState: (...args: unknown[]) => transitionIssueStateMock(...args),
+  revertIssueToNotStarted: (...args: unknown[]) => revertIssueToNotStartedMock(...args),
   replyToComment: (...args: unknown[]) => replyToCommentMock(...args),
   upsertThreadedReply: (...args: unknown[]) => upsertThreadedReplyMock(...args),
   EMOJI_SUCCESS: 'white_check_mark',
@@ -295,6 +297,7 @@ describe('reconcileDecomposePlan — idempotency (live-caught: ABCA-498 3 duplic
     s3SendMock.mockReset();
     upsertStatusCommentMock.mockReset();
     resolveLinearOauthTokenMock.mockReset();
+    revertIssueToNotStartedMock.mockReset().mockResolvedValue(true);
     // The plan artifact S3 read returns the agent's plan JSON.
     s3SendMock.mockImplementation(async () => ({
       Body: { transformToString: async () => PLAN_JSON },
@@ -340,6 +343,10 @@ describe('reconcileDecomposePlan — idempotency (live-caught: ABCA-498 3 duplic
     expect(proposals).toHaveLength(1);
     // The losing redelivery never reached the S3 plan fetch.
     expect(s3SendMock).toHaveBeenCalledTimes(1);
+    // F-decompose-inprogress: a round-0 plan awaiting approval reverts the issue
+    // from In Progress (set by the webhook at dispatch) back to a not-started
+    // state — In Progress would mislead as "working" while it's just pending.
+    expect(revertIssueToNotStartedMock).toHaveBeenCalledWith(expect.anything(), 'PARENT');
   });
 
   test('CONFUSING-3: an :auto single-task dispatch carries the full Linear OAuth metadata', async () => {
