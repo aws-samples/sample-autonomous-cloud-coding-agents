@@ -103,12 +103,13 @@ description = "Dead-code ratchet (#282): fail only if knip's issue count rises a
 run = "node scripts/check-deadcode-ratchet.mjs"
 
 [tasks."drift-prevention"]
-description = "Run checks to prevent drift in contracts between packages"
+description = "Run checks to prevent drift in contracts between packages and documentation links"
 run = [
   { task = "sync:abca-commands" },
   { task = "check:constants-sync" },
   { task = "check:types-sync" },
   { task = "check:coverage-thresholds-sync" },
+  { task = "//docs:link-check" },
 ]
 
 ##################
