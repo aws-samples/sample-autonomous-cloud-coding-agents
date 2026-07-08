@@ -495,6 +495,46 @@ async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
     }
   }
 
+  // 1b. ABCA-659 — reconcile a FAILED child's OWN Linear state. The agent moves
+  //     a writeable child to "In Review" only on AGENT success; but the platform
+  //     build gate is independent — a child can finish COMPLETED-with-build_passed
+  //     =false (PR opened, build red), and a child that succeeded on an EARLIER
+  //     run (→ "In Review") then fails a RETRY leaves the "In Review" behind (the
+  //     agent's failure path leaves state as-is; transitions never move backward).
+  //     Either way the graph says `failed` while Linear still reads "In Review"
+  //     with a PR link — the exact inconsistency the user hit. The reconciler
+  //     holds the authoritative verdict, so when a terminal child did NOT succeed
+  //     we pull its issue back out of any bot-set "In Review"/"In Progress" state.
+  //     `revertIssueToNotStarted` is tightly guarded (only demotes an issue still
+  //     in a bot-set `started` state — never a human-advanced Done/Canceled or a
+  //     human-pulled-back one) and idempotent on replay. The ❌ reaction + K1
+  //     failure reason on the panel convey "it failed"; a reply re-runs it (the
+  //     retry re-drives the state Backlog → In Progress). Skip the integration
+  //     node (synthetic id, no real Linear issue). Best-effort; never throws.
+  if (WORKSPACE_REGISTRY_TABLE && !plan.terminalSucceeded && !isIntegrationNode(subIssueId)) {
+    const feedbackCtx: LinearFeedbackContext = {
+      linearWorkspaceId: snapshot.meta.linear_workspace_id,
+      registryTableName: WORKSPACE_REGISTRY_TABLE,
+    };
+    try {
+      const reverted = await revertIssueToNotStarted(feedbackCtx, subIssueId);
+      if (reverted) {
+        logger.info('Reconciler reverted a failed child out of In Review (state now matches the graph)', {
+          orchestration_id: orchestrationId,
+          sub_issue_id: subIssueId,
+          task_status: outcome.status,
+          build_passed: outcome.build_passed,
+        });
+      }
+    } catch (err) {
+      logger.warn('Failed to reconcile failed child Linear state (non-fatal)', {
+        orchestration_id: orchestrationId,
+        sub_issue_id: subIssueId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   // 2. Re-evaluate releasability against a FRESH read, not the initial
   //    snapshot.
   //

@@ -515,6 +515,46 @@ describe('orchestration-reconciler handler', () => {
     expect(createTaskCoreMock).not.toHaveBeenCalled();
   });
 
+  test('ABCA-659: build-gate-failed child (COMPLETED, build_passed=false) reverts its OWN Linear state out of In Review', async () => {
+    // The agent moves a writeable child to "In Review" on agent-success, but the
+    // platform build gate independently marks it failed. Left alone, the graph
+    // says failed while Linear reads "In Review" with a PR link (the user's
+    // inconsistency). The reconciler pulls the child back to not-started.
+    revertIssueToNotStartedMock.mockReset().mockResolvedValue(true);
+    mockOrchestration({
+      subIssueId: 'A',
+      children: [{ sub_issue_id: 'A', child_status: 'released' }],
+    });
+    await handler({
+      Records: [taskRecord({ task_id: 'TA', status: 'COMPLETED', build_passed: false, orchestration_id: 'orch_1' })],
+    } as never);
+    expect(revertIssueToNotStartedMock).toHaveBeenCalledWith(expect.anything(), 'A');
+  });
+
+  test('ABCA-659: a genuinely FAILED child also reverts its Linear state', async () => {
+    revertIssueToNotStartedMock.mockReset().mockResolvedValue(true);
+    mockOrchestration({
+      subIssueId: 'A',
+      children: [{ sub_issue_id: 'A', child_status: 'released' }],
+    });
+    await handler({
+      Records: [taskRecord({ task_id: 'TA', status: 'FAILED', orchestration_id: 'orch_1' })],
+    } as never);
+    expect(revertIssueToNotStartedMock).toHaveBeenCalledWith(expect.anything(), 'A');
+  });
+
+  test('ABCA-659: a SUCCEEDING child is never reverted (leaves In Review intact)', async () => {
+    revertIssueToNotStartedMock.mockReset().mockResolvedValue(true);
+    mockOrchestration({
+      subIssueId: 'A',
+      children: [{ sub_issue_id: 'A', child_status: 'released' }],
+    });
+    await handler({
+      Records: [taskRecord({ task_id: 'TA', status: 'COMPLETED', orchestration_id: 'orch_1' })],
+    } as never);
+    expect(revertIssueToNotStartedMock).not.toHaveBeenCalledWith(expect.anything(), 'A');
+  });
+
   test('non-orchestration / non-terminal records are skipped entirely', async () => {
     await handler({
       Records: [
