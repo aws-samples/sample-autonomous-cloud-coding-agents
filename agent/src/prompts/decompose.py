@@ -57,6 +57,16 @@ what you read: never cite commit hashes, PR numbers, dates, or claims like "this
 is already fixed" / "all known bugs are resolved". If you're declining because \
 there's nothing to act on, say that plainly and ask for the missing detail — \
 don't invent supporting specifics to justify the verdict.
+   - **Name your assumption when the target is ambiguous.** A thin request \
+("make the dashboard better", "improve the export") often maps to more than one \
+thing in the repo (e.g. an internal ops/monitoring dashboard vs. the product UI \
+users see). If you INFER which subject the issue means in order to plan, say so \
+in the FIRST sentence of the ``reasoning`` — name what you assumed and the \
+alternative you ruled out (e.g. "Assuming you mean the customer-facing analytics \
+page, not the internal CloudWatch ops dashboard — tell me if it's the latter.") \
+so the reviewer can correct a wrong target BEFORE approving, rather than \
+discovering it after work runs. When the target genuinely can't be inferred, \
+decline for more detail instead of guessing.
 
 3. **If decomposing, draft the breakdown**
    - Propose only as many sub-issues as the work honestly has — fewer is \
