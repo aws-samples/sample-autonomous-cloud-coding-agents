@@ -280,46 +280,9 @@ describe('parseDecomposerResponse — #299 T2 repo_digest extraction', () => {
   });
 });
 
-describe('parseDecomposerResponse — #299 BLOCKER-1 change_summary (revise diff)', () => {
-  const withChangeSummary = (summary: unknown) =>
-    JSON.stringify({
-      reasoning: 'r',
-      change_summary: summary,
-      sub_issues: [
-        { title: 'A', description: 'a', size: 'S', depends_on: [] },
-        { title: 'B', description: 'b', size: 'M', depends_on: [0] },
-      ],
-    });
-
-  test('a revision plan carries change_summary → plan.changeSummary', () => {
-    const r = parseDecomposerResponse(withChangeSummary('Split the API work in two; kept the other two as they were.'), 8, FALLBACK_REASON);
-    expect(r.kind).toBe('plan');
-    if (r.kind === 'plan') {
-      expect(r.plan.changeSummary).toBe('Split the API work in two; kept the other two as they were.');
-    }
-  });
-
-  test('a first-time plan (empty change_summary) → changeSummary omitted (round-0 render suppresses it)', () => {
-    const r = parseDecomposerResponse(withChangeSummary(''), 8, FALLBACK_REASON);
-    expect(r.kind).toBe('plan');
-    if (r.kind === 'plan') expect(r.plan.changeSummary).toBeUndefined();
-  });
-
-  test('no change_summary field at all → changeSummary omitted (older agent)', () => {
-    const r = parseDecomposerResponse(DECOMPOSER_JSON([
-      { title: 'A', description: 'a', size: 'S', depends_on: [] },
-      { title: 'B', description: 'b', size: 'M', depends_on: [0] },
-    ]), 8, FALLBACK_REASON);
-    expect(r.kind).toBe('plan');
-    if (r.kind === 'plan') expect(r.plan.changeSummary).toBeUndefined();
-  });
-
-  test('a runaway change_summary is truncated (can\'t bloat the comment)', () => {
-    const r = parseDecomposerResponse(withChangeSummary('y'.repeat(1000)), 8, FALLBACK_REASON);
-    expect(r.kind).toBe('plan');
-    if (r.kind === 'plan') {
-      expect(r.plan.changeSummary!.length).toBeLessThanOrEqual(501); // 500 + ellipsis
-      expect(r.plan.changeSummary!).toMatch(/…$/);
-    }
-  });
-});
+// NOTE: the agent-authored ``change_summary`` field was RETIRED (#299 BLOCKER-1,
+// round 2) — the model fabricated a justification for a silently re-added dropped
+// node. The "What changed" line is now a COMPUTED before→after diff (see
+// orchestration-plan-revise.test.ts diffPlans/renderPlanDiff), so the planner no
+// longer parses change_summary. renderPlanProposal still renders the changeSummary
+// slot (now fed the computed diff) — covered in the render test.

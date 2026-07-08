@@ -314,10 +314,35 @@ export class LinearIntegration extends Construct {
         ],
       }));
     }
-    // #299 agent-native planning: the webhook processor no longer calls
-    // bedrock:InvokeModel — decomposition planning moved into the
-    // ``coding/decompose-v1`` agent (which has its own model grant), so the
-    // former inline-planner InvokeModel grant was removed (least-privilege).
+    // #299 BLOCKER-1: the DETERMINISTIC revise path (interpret a plan-edit
+    // instruction → structured edits, applied to the current plan in code) makes
+    // ONE short bedrock:InvokeModel call to the interpret model. Scoped to the
+    // single sonnet foundation-model + its cross-region inference-profile ARN
+    // (parity with the ecs-agent-cluster + agent.ts grants), NOT the '*' the
+    // retired inline PLANNER once held — the planner itself stays in the
+    // ``coding/decompose-v1`` agent. Only the tiny "which edit did they mean"
+    // classification runs inline here (full-plan generation never does).
+    for (const arn of [
+      Stack.of(this).formatArn({
+        service: 'bedrock',
+        region: '*',
+        account: '',
+        resource: 'foundation-model',
+        resourceName: 'anthropic.claude-sonnet-4-6',
+        arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
+      }),
+      Stack.of(this).formatArn({
+        service: 'bedrock',
+        resource: 'inference-profile',
+        resourceName: 'us.anthropic.claude-sonnet-4-6',
+        arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
+      }),
+    ]) {
+      webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
+        actions: ['bedrock:InvokeModel'],
+        resources: [arn],
+      }));
+    }
     // Issue descriptions can carry markdown `![alt](https://…)` images, which
     // `extractImageUrlAttachments` (linear-webhook-processor.ts) turns into
     // URL attachments. `createTaskCore` then uploads the screened bytes to

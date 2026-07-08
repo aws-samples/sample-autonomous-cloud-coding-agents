@@ -70,12 +70,13 @@ export interface DecompositionPlan {
    */
   readonly reasoning: string;
   /**
-   * #299 BLOCKER-1 (revise-forgets-edits): on a REVISION, the agent's one-sentence
-   * plain-language diff of what it changed from the prior breakdown and what it
-   * kept (e.g. "Split the checkout work into two and left the other three as they
-   * were."). Surfaced ABOVE the updated plan so the reviewer can catch an
-   * unintended revert — the whole point of the fix is that the delta is visible,
-   * not silent. Empty/absent on a first-time (round-0) plan.
+   * #299 BLOCKER-1 (revise-forgets-edits): on a REVISION, a plain-language "what
+   * changed" line surfaced ABOVE the updated plan so the reviewer can catch an
+   * unintended revert. This is a COMPUTED before→after diff (see
+   * ``renderPlanDiff`` in orchestration-plan-revise.ts), NEVER a model self-report
+   * — an earlier cut had the agent describe its own changes and it fabricated a
+   * justification for a silently re-added dropped node. Set by the webhook's
+   * deterministic revise path just before render; empty/absent on a round-0 plan.
    */
   readonly changeSummary?: string;
 }

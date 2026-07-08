@@ -63,9 +63,11 @@ def build_system_prompt(
     # edits the reviewer had already accepted (a dropped node reappears, a reworded
     # title snaps back). This directive — injected ONLY on a revision — reframes
     # the task as EDIT-the-current-plan: apply only the requested change, keep
-    # everything else verbatim, and report the diff in ``change_summary``. It lives
-    # in the trusted system prompt (NOT the screened task_description, which can't
-    # carry imperatives without tripping PROMPT_ATTACK — Bug #1a). Empty on round 0.
+    # everything else verbatim. It lives in the trusted system prompt (NOT the
+    # screened task_description, which can't carry imperatives without tripping
+    # PROMPT_ATTACK — Bug #1a). Empty on round 0. NOTE: only the ESCALATION path
+    # reaches this agent now — most revises are applied deterministically in the
+    # webhook (interpret → edit the stored plan in code, no clone, no re-derive).
     system_prompt = system_prompt.replace(
         "{revision_directive}",
         _render_revision_directive(config),
@@ -213,12 +215,21 @@ def _render_revision_directive(config: TaskConfig) -> str:
     nodes reappear, reworded titles snap back — the customer-caught BLOCKER 1).
 
     This directive reframes the task as an EDIT of the current plan: start FROM it,
-    apply ONLY the requested change, keep every other sub-issue verbatim, and
-    report the diff in ``change_summary``. It must live in the trusted system
-    prompt — the screened task_description can't carry imperatives ("start from
-    this plan and change only X") without tripping the PROMPT_ATTACK filter (Bug
-    #1a). Gated on ``decompose_revision_round`` (set by the webhook only on a
-    revise dispatch); a blank/zero/absent value → round 0 → empty (no-op).
+    apply ONLY the requested change, keep every other sub-issue verbatim. It must
+    live in the trusted system prompt — the screened task_description can't carry
+    imperatives ("start from this plan and change only X") without tripping the
+    PROMPT_ATTACK filter (Bug #1a). Gated on ``decompose_revision_round`` (set by
+    the webhook only on a revise dispatch); a blank/zero/absent value → round 0 →
+    empty (no-op).
+
+    NOTE: most revises never reach this agent — the webhook interprets the change
+    into structured edits and applies them to the stored plan DETERMINISTICALLY
+    (no clone, no re-derive). This directive only governs the ESCALATION path,
+    where a change genuinely needs the repo (feasibility / new scope). The
+    reviewer-facing "what changed" line is computed by the platform from the
+    before→after diff — the agent does NOT self-report it (an earlier cut had the
+    agent describe its own changes and it fabricated a justification for a
+    silently re-added dropped node).
     """
     cm = config.channel_metadata or {}
     raw_round = (cm.get("decompose_revision_round") or "").strip()
@@ -238,8 +249,7 @@ def _render_revision_directive(config: TaskConfig) -> str:
         "touching it. Do NOT re-derive the whole breakdown from the issue text and "
         "do NOT silently undo edits already reflected in the current breakdown "
         "(e.g. a sub-issue that was dropped stays dropped; a reworded title stays "
-        "reworded). Then set ``change_summary`` (see step 4) to one honest sentence "
-        "describing what you changed and what you kept.\n"
+        "reworded).\n"
     )
 
 
