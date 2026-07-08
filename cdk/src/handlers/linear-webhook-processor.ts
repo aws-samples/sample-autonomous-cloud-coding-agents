@@ -24,6 +24,7 @@ import { buildClarifyResumeDescription, isClarifyHold } from './shared/clarify-r
 import { createTaskCore } from './shared/create-task-core';
 import { renderMaturingReply } from './shared/iteration-reply';
 import {
+  deleteComment,
   reactToComment,
   replyToComment,
   reportIssueFailure,
@@ -1039,6 +1040,16 @@ async function maybeRetryTerminalEpic(
   // Nothing failed/skipped → nothing to retry.
   if (plan.statusUpdates.length === 0) {
     if (!ctx) return;
+    // Post these advisory notes at most once per re-trigger window (a webhook
+    // redelivery of the SAME label event must not repost). Distinct claim key
+    // from the retry itself. Crucially this also stops a redelivery that arrives
+    // AFTER a successful retry (children now released/running, none failed) from
+    // re-posting the misleading "running the existing graph" note.
+    const won = await claimCommentAck(
+      ddb, ORCHESTRATION_TABLE, orchestrationId, 'retrigger-note',
+      now, Math.floor(Date.now() / 1000) + ACK_CLAIM_TTL_SECONDS,
+    );
+    if (!won) return;
     if (plan.succeededCount > 0 && plan.succeededCount === snapshot.children.length) {
       // Every child succeeded — the epic is genuinely done.
       await upsertStatusComment(ctx, parentIssueId, renderEpicAlreadyCompleteNote());
@@ -1047,6 +1058,29 @@ async function maybeRetryTerminalEpic(
       // re-apply; keep the existing already-decomposed copy.
       await maybePostAlreadyDecomposedNote(decompositionDecision, false, parentIssueId, workspaceId);
     }
+    return;
+  }
+
+  // Claim-once for THIS retry round so a webhook redelivery doesn't re-reset +
+  // re-release + re-note. Keyed on the epic + the current terminal-child
+  // fingerprint (the failed/skipped ids), so a genuine LATER retry (after the
+  // children fail again) is a distinct claim and proceeds, but a redelivery of
+  // the same re-label — where the fingerprint is unchanged — no-ops. Without
+  // this, two deliveries each post a retry note (the duplicate the user saw).
+  const retryFingerprint = snapshot.children
+    .filter((c) => c.child_status === 'failed' || c.child_status === 'skipped')
+    .map((c) => c.sub_issue_id)
+    .sort()
+    .join(',');
+  const retryClaimKey = `retry:${hashRetryFingerprint(retryFingerprint)}`;
+  const retryClaimWon = await claimCommentAck(
+    ddb, ORCHESTRATION_TABLE, orchestrationId, retryClaimKey,
+    now, Math.floor(Date.now() / 1000) + ACK_CLAIM_TTL_SECONDS,
+  );
+  if (!retryClaimWon) {
+    logger.info('ABCA-659 epic retry: redelivery of the same retry — skipping (already handled)', {
+      orchestration_id: orchestrationId,
+    });
     return;
   }
 
@@ -1109,8 +1143,15 @@ async function maybeRetryTerminalEpic(
     }
   }
 
-  // 4. Honest note + refresh the panel so the reset rows stop showing ❌/⏭️ and
-  //    the header reverts to in-progress.
+  // 4. Honest note + REPOSITION the live panel beneath it. The maturing panel is
+  //    a single edited-in-place comment that was first posted at seed time — so on
+  //    a much-later retry it's buried far up the thread, above all the newer
+  //    notes, and "I'll update the panel below" points at a comment that's
+  //    actually ABOVE (the confusing surface the user hit: couldn't tell what was
+  //    running). Fix: post the retry note, then DELETE the old panel comment and
+  //    re-post it fresh so the live status sits right under the note. The new
+  //    comment id replaces status_comment_id, so the reconciler keeps editing the
+  //    same (now-repositioned) panel in place on every later event.
   if (ctx) {
     await upsertStatusComment(
       ctx, parentIssueId,
@@ -1119,20 +1160,37 @@ async function maybeRetryTerminalEpic(
     try {
       const refreshed = await loadOrchestration(ddb, ORCHESTRATION_TABLE, orchestrationId);
       const meta = (refreshed ?? fresh ?? snapshot).meta;
-      await upsertEpicPanel({
+      const children = (refreshed ?? fresh ?? snapshot).children;
+      // Delete the stale panel comment (best-effort) so we don't leave two panels.
+      if (meta.status_comment_id) {
+        await deleteComment(ctx, meta.status_comment_id);
+      }
+      // Post the panel FRESH (no statusCommentId → new comment, below the note).
+      const newPanelId = await upsertEpicPanel({
         ctx,
         parentLinearIssueId: parentIssueId,
-        ...(meta.status_comment_id !== undefined && { statusCommentId: meta.status_comment_id }),
-        children: (refreshed ?? fresh ?? snapshot).children,
+        children,
         inProgress: true,
         mirrorParentState: true,
       });
+      if (newPanelId) {
+        await setStatusCommentId(ddb, ORCHESTRATION_TABLE, orchestrationId, newPanelId);
+      }
     } catch (err) {
-      logger.warn('ABCA-659 epic retry: panel refresh failed (non-fatal)', {
+      logger.warn('ABCA-659 epic retry: panel reposition failed (non-fatal)', {
         orchestration_id: orchestrationId, error: err instanceof Error ? err.message : String(err),
       });
     }
   }
+}
+
+/** Hex chars of the retry-fingerprint hash kept for the claim key — enough to avoid
+ *  collision across an epic's retry rounds while keeping the DDB sort key short. */
+const RETRY_FINGERPRINT_HASH_LEN = 16;
+
+/** Stable short hash of the retry fingerprint for the claim key (crypto, not Math.random). */
+function hashRetryFingerprint(fingerprint: string): string {
+  return crypto.createHash('sha256').update(fingerprint).digest('hex').slice(0, RETRY_FINGERPRINT_HASH_LEN);
 }
 
 /**
