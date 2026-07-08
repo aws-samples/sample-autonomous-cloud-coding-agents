@@ -107,9 +107,10 @@ function isBuildTimeout(input: Pick<FailureReplyInput, 'errorMessage'>): boolean
   return !!input.errorMessage && BUILD_GATE_TIMEOUT_RE.test(input.errorMessage);
 }
 
-/** Collapse whitespace + clip to EXCERPT_MAX chars with an ellipsis. */
+/** Collapse whitespace + clip to EXCERPT_MAX chars with an ellipsis. Strips the
+ *  internal `[auto-retried]` marker (it drives the guidance, not user-facing text). */
 function excerpt(raw: string): string {
-  const oneLine = raw.replace(/\s+/g, ' ').trim();
+  const oneLine = raw.replace(/\s*\[auto-retried\]\s*/gi, ' ').replace(/\s+/g, ' ').trim();
   return oneLine.length > EXCERPT_MAX ? `${oneLine.slice(0, EXCERPT_MAX)}…` : oneLine;
 }
 
@@ -149,13 +150,22 @@ export function renderFailureReply(input: FailureReplyInput): string {
   const classification = classifyError(input.errorMessage);
   const title = classification?.title ?? "the task didn't complete";
   const detail = input.errorMessage ? ` ${excerpt(input.errorMessage)}` : '';
+  // The orchestrator stamps `[auto-retried]` on a session-start error that already
+  // auto-retried once (transient) — so the guidance says "I tried again, still
+  // failed" instead of "reply to retry".
+  const autoRetried = wasAutoRetried(input.errorMessage);
   const nextStep = classification
-    ? retryGuidance(classification)
+    ? retryGuidance(classification, autoRetried)
     : 'Reply here with any extra guidance and I\'ll try again.';
   return (
     `❌ ${title} —${detail} see CloudWatch for task \`${input.taskId}\`. `
     + nextStep
   );
+}
+
+/** True when the orchestrator marked this failure as already auto-retried once. */
+function wasAutoRetried(errorMessage?: string | null): boolean {
+  return !!errorMessage && /\[auto-retried\]/i.test(errorMessage);
 }
 
 /**
@@ -201,6 +211,8 @@ export function renderPanelFailureReason(input: {
   // sub-line lives) knows whether to just retry or escalate — the exact "can I
   // retry, or is this an admin thing?" gap the ABCA-659 rollup left open on the
   // "Agent session failed to start" (deploy-race) rows.
-  const nextStep = classification ? ` ${retryGuidance(classification)}` : '';
+  const nextStep = classification
+    ? ` ${retryGuidance(classification, wasAutoRetried(input.errorMessage))}`
+    : '';
   return `${title} — see CloudWatch for task \`${input.taskId}\`.${nextStep}`;
 }
