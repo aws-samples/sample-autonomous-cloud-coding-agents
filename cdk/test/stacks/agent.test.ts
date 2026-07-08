@@ -421,9 +421,11 @@ describe('AgentStack with the ECS substrate gate (--context compute_type=ecs)', 
     template = Template.fromStack(stack);
   });
 
-  test('provisions an ECS cluster + Fargate task definition', () => {
+  test('provisions an ECS cluster + both Fargate task definitions (build + planning)', () => {
     template.resourceCountIs('AWS::ECS::Cluster', 1);
-    template.resourceCountIs('AWS::ECS::TaskDefinition', 1);
+    // #299 ECS_RIGHTSIZED_PLANNING: two task defs now — the 64 GB build def and
+    // the 8 GB read-only planning def (decompose-v1 runs on the smaller one).
+    template.resourceCountIs('AWS::ECS::TaskDefinition', 2);
   });
 
   test('outputs ComputeSubstrate=ecs so the CLI allows compute_type=ecs onboarding', () => {
