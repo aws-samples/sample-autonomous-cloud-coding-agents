@@ -156,6 +156,15 @@ which sub-issue is meant):
 Rules:
 - Resolve references by meaning: "drop the careers page" → the sub-issue about careers; \
 "combine the first two" → merge 1 and 2; "make the API task smaller" → edit that node's size.
+- COUNT TARGETS: a request to reach a specific TOTAL number of sub-issues ("just 2 tasks", \
+"no more than 2 total", "make it fewer — 3 max", "combine the smaller ones so there are only 2") \
+is a valid, common edit. Translate it into the merge(s) that reach that count: pick the most \
+related/smallest sub-issues to combine so the RESULT has the requested total. E.g. a 4-item plan \
+→ "only 2 tasks" → two merge ops that fold the 4 into 2 cohesive groups (or one merge of the 3 \
+smallest if that yields 2). Each "merge" must list 2+ DISTINCT sub-issue numbers, and a given \
+sub-issue number must appear in AT MOST ONE op (never both dropped and merged, never merged twice). \
+If the target count is impossible or you cannot decide a sensible grouping from the notes, return \
+"unclear" with a short question — do NOT emit contradictory edits.
 - ONLY use "add" when the reviewer names a concrete new piece AND you can scope it from \
 the notes above. If scoping it needs the repo, use "needs_repo".
 - Prefer "edit" for rename/re-scope/resize (fill only the fields that change).

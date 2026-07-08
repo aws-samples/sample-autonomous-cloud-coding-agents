@@ -1544,11 +1544,29 @@ async function handlePlanRevision(args: {
 
   // needs_repo OR interpret error → ESCALATE to the repo-cloning agent revise.
   // Even here it REVISES the current plan (the agent gets the prior plan + digest
-  // as the base), never regenerates from the issue. Post an honest "taking a closer
-  // look" ack on needs_repo (leave the 👀 for the reconciler to settle); a raw
-  // interpret error escalates silently (the ack already shows 👀).
+  // as the base), never regenerates from the issue.
+  //
+  // PM-BLOCKER (persona stress test): the escalation runs a 2-10 min repo-cloning
+  // re-plan, but this path used to post an ack ONLY on needs_repo and was SILENT on
+  // the interpret-error branch, and NEVER flipped the issue state. So a perfectly
+  // valid revise looked dropped for 10+ min — no ack, no board movement — while the
+  // initial :decompose posts an "On it" comment AND flips to In Progress (PM-6/#157).
+  // Fix: ALWAYS post the "taking a closer look" ack (both branches) AND flip the
+  // issue to In Progress here, mirroring the initial-decompose path, so the revise
+  // is as visible as the first plan. The 👀 on the feedback comment stays for the
+  // reconciler to settle 👀→✅ when the revised plan lands.
+  const escalateReason = interpretation.kind === 'needs_repo' ? interpretation.reason : '';
+  await upsertStatusComment(feedbackCtx, commentedIssueId, renderReviseEscalatedNote(escalateReason));
+  // Flip to a visible "started" state for the duration of the re-plan (idempotent +
+  // forward-only inside transitionIssueState; best-effort — never block the re-plan).
+  try {
+    await transitionIssueState(feedbackCtx, commentedIssueId, 'started', ['In Progress']);
+  } catch (err) {
+    logger.warn('Mode B revise: failed to flip issue to In Progress (non-fatal)', {
+      issue_id: commentedIssueId, error: err instanceof Error ? err.message : String(err),
+    });
+  }
   if (interpretation.kind === 'needs_repo') {
-    await upsertStatusComment(feedbackCtx, commentedIssueId, renderReviseEscalatedNote(interpretation.reason));
     logger.info('Mode B revise: escalating to repo-cloning agent (needs_repo)', {
       issue_id: commentedIssueId, reason: interpretation.reason,
     });
