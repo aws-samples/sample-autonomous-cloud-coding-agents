@@ -11,11 +11,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from progress_writer import (
+    BLOCKER_KINDS,
     _classify_ddb_error,
     _generate_ulid,
     _ProgressWriter,
     _reset_circuit_breakers,
     _truncate_preview,
+    format_blocker_reason,
 )
 
 
@@ -192,6 +194,54 @@ class TestProgressWriterPutEvent:
         assert item["metadata"]["error_type"] == "RuntimeError"
         assert item["metadata"]["message_preview"] == "something broke"
 
+    def test_write_agent_blocked_event_shape(self, writer, mock_table):
+        writer.write_agent_blocked(
+            kind="egress_denied",
+            detail="connection to registry.npmjs.org refused",
+            remediation_hint="allowlist registry.npmjs.org in DNS Firewall",
+            retryable=False,
+            resource="registry.npmjs.org",
+        )
+        item = mock_table.put_item.call_args[1]["Item"]
+        assert item["event_type"] == "agent_blocked"
+        meta = item["metadata"]
+        assert meta["kind"] == "egress_denied"
+        assert meta["detail"] == "connection to registry.npmjs.org refused"
+        assert meta["remediation_hint"] == "allowlist registry.npmjs.org in DNS Firewall"
+        assert meta["retryable"] is False
+        assert meta["resource"] == "registry.npmjs.org"
+
+    def test_write_agent_blocked_omits_resource_when_absent(self, writer, mock_table):
+        writer.write_agent_blocked(
+            kind="policy_fail_closed",
+            detail="Cedar engine unavailable",
+            remediation_hint="check policy engine health",
+            retryable=False,
+        )
+        meta = mock_table.put_item.call_args[1]["Item"]["metadata"]
+        assert "resource" not in meta
+
+    def test_write_agent_blocked_normalises_unknown_kind(self, writer, mock_table):
+        writer.write_agent_blocked(
+            kind="not_a_real_kind",
+            detail="something odd",
+            remediation_hint="investigate",
+            retryable=False,
+        )
+        meta = mock_table.put_item.call_args[1]["Item"]["metadata"]
+        assert meta["kind"] == "unknown_environmental"
+
+    def test_write_agent_blocked_truncates_detail(self, writer, mock_table):
+        writer.write_agent_blocked(
+            kind="dependency_unreachable",
+            detail="x" * 500,
+            remediation_hint="y" * 500,
+            retryable=True,
+        )
+        meta = mock_table.put_item.call_args[1]["Item"]["metadata"]
+        assert len(meta["detail"]) <= 203
+        assert len(meta["remediation_hint"]) <= 203
+
     def test_preview_fields_truncated(self, writer, mock_table):
         long_text = "x" * 500
         writer.write_agent_turn(
@@ -215,6 +265,59 @@ class TestProgressWriterPutEvent:
 
         ttl_90_days = 90 * 24 * 60 * 60
         assert before + ttl_90_days <= item["ttl"] <= after + ttl_90_days + 1
+
+
+# ---------------------------------------------------------------------------
+# _ProgressWriter — correlation envelope (#245)
+# ---------------------------------------------------------------------------
+
+
+class TestCorrelationEnvelope:
+    """Every emitted event stamps {user_id, repo, trace_id} when known, so the
+    agent-side event stream joins to orchestrator logs and the X-Ray trace."""
+
+    def _writer(self, monkeypatch, **kwargs):
+        monkeypatch.setenv("TASK_EVENTS_TABLE_NAME", "events-table")
+        writer = _ProgressWriter("task-42", **kwargs)
+        writer._table = MagicMock()
+        return writer
+
+    def test_stamps_user_repo_trace_when_present(self, monkeypatch):
+        writer = self._writer(monkeypatch, user_id="user-1", repo="org/repo")
+        with patch("progress_writer.current_otel_trace_id", return_value="a" * 32):
+            writer.write_agent_milestone("m", "")
+        item = writer._table.put_item.call_args[1]["Item"]
+        assert item["user_id"] == "user-1"
+        assert item["repo"] == "org/repo"
+        assert item["trace_id"] == "a" * 32
+
+    def test_repo_less_omits_repo(self, monkeypatch):
+        # repo-less workflow (#248 Phase 3): repo is None → key omitted, not null.
+        writer = self._writer(monkeypatch, user_id="user-1", repo=None)
+        with patch("progress_writer.current_otel_trace_id", return_value="b" * 32):
+            writer.write_agent_milestone("m", "")
+        item = writer._table.put_item.call_args[1]["Item"]
+        assert item["user_id"] == "user-1"
+        assert "repo" not in item
+
+    def test_missing_trace_id_omits_key(self, monkeypatch):
+        # No recording span (tracing disabled) → trace_id key omitted entirely.
+        writer = self._writer(monkeypatch, user_id="user-1", repo="org/repo")
+        with patch("progress_writer.current_otel_trace_id", return_value=None):
+            writer.write_agent_milestone("m", "")
+        item = writer._table.put_item.call_args[1]["Item"]
+        assert "trace_id" not in item
+
+    def test_defaults_omit_all_correlation_keys(self, monkeypatch):
+        # Back-compat: a writer built without the envelope (empty user_id) stamps
+        # none of the optional keys, keeping the historical item shape.
+        writer = self._writer(monkeypatch)
+        with patch("progress_writer.current_otel_trace_id", return_value=None):
+            writer.write_agent_milestone("m", "")
+        item = writer._table.put_item.call_args[1]["Item"]
+        assert "user_id" not in item
+        assert "repo" not in item
+        assert "trace_id" not in item
 
 
 # ---------------------------------------------------------------------------
@@ -1066,3 +1169,31 @@ class TestApprovalMilestoneHelpers:
         _, metadata = self._last_event(writer)
         # Default preview cap is 200 chars; preserve DDB budget under adversarial reasons.
         assert len(metadata["cached_reason"]) <= 210
+
+
+class TestFormatBlockerReason:
+    """The canonical terminal-reason contract (decision D) — must stay in
+    lockstep with the CDK classifier's ``BLOCKED[<kind>]`` regex."""
+
+    def test_basic_format(self):
+        assert format_blocker_reason("missing_secret", "no OPENAI_API_KEY") == (
+            "BLOCKED[missing_secret]: no OPENAI_API_KEY"
+        )
+
+    def test_appends_resource_when_set(self):
+        assert (
+            format_blocker_reason("egress_denied", "host blocked", resource="pypi.org")
+            == "BLOCKED[egress_denied]: host blocked (resource: pypi.org)"
+        )
+
+    def test_unknown_kind_falls_back(self):
+        assert format_blocker_reason("bogus", "detail").startswith(
+            "BLOCKED[unknown_environmental]:"
+        )
+
+    def test_every_kind_round_trips(self):
+        # Each kind produces a prefix the classifier can key on.
+        for kind in BLOCKER_KINDS:
+            reason = format_blocker_reason(kind, "detail", resource="res")
+            assert reason.startswith(f"BLOCKED[{kind}]:")
+            assert reason.endswith("(resource: res)")

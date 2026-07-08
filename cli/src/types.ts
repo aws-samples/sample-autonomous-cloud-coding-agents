@@ -66,7 +66,7 @@ export type TaskStatusType =
 export type ChannelSource = 'api' | 'webhook' | 'slack' | 'linear' | 'jira';
 
 /** Error categories produced by the runtime error classifier. */
-export type ErrorCategoryType = 'auth' | 'network' | 'concurrency' | 'compute' | 'agent' | 'guardrail' | 'config' | 'timeout' | 'unknown';
+export type ErrorCategoryType = 'auth' | 'network' | 'concurrency' | 'compute' | 'agent' | 'guardrail' | 'config' | 'timeout' | 'blocked' | 'unknown';
 
 /** Structured classification of a task error (computed by the API from error_message). */
 export interface ErrorClassification {
@@ -182,6 +182,10 @@ export interface ReplayEvent {
   readonly event_type: string;
   readonly timestamp: string;
   readonly metadata: Record<string, unknown>;
+  // Correlation envelope (#245): present per-event when the source stamped it.
+  readonly user_id?: string;
+  readonly repo?: string;
+  readonly trace_id?: string;
 }
 
 /**
@@ -236,6 +240,11 @@ export interface TaskEvent {
   readonly event_type: string;
   readonly timestamp: string;
   readonly metadata: Record<string, unknown>;
+  // Correlation envelope (#245): present per-event when the source stamped it;
+  // absent on task_created and pre-envelope safety-net writers.
+  readonly user_id?: string;
+  readonly repo?: string;
+  readonly trace_id?: string;
 }
 
 /**

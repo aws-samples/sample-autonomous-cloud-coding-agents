@@ -70,6 +70,7 @@ process.env.MEMORY_ID = 'mem-test-default';
 import {
   admissionControl,
   emitTaskEvent,
+  envelopeFor,
   failTask,
   finalizeTask,
   hydrateAndTransition,
@@ -285,6 +286,91 @@ describe('hydrateAndTransition', () => {
     expect(metadata.token_estimate).toBe(20);
     expect(metadata.truncated).toBe(false);
     expect(metadata.content_trust).toEqual({ task_description: 'trusted' });
+  });
+
+  test('lifecycle events carry the {user_id, repo} correlation envelope (#245)', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    await hydrateAndTransition(baseTask as any);
+    const events = mockDdbSend.mock.calls
+      .filter((c: any) => c[0]._type === 'Put')
+      .map((c: any) => c[0].input.Item);
+    for (const eventType of ['hydration_started', 'hydration_complete']) {
+      const evt = events.find((e: any) => e.event_type === eventType);
+      expect(evt).toMatchObject({ user_id: 'user-123', repo: 'org/repo' });
+    }
+  });
+
+  test('repo-less task omits repo but still stamps user_id (#245, #248)', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    const { repo: _repo, ...repoLess } = baseTask;
+    await hydrateAndTransition(repoLess as any);
+    const started = mockDdbSend.mock.calls
+      .filter((c: any) => c[0]._type === 'Put')
+      .map((c: any) => c[0].input.Item)
+      .find((e: any) => e.event_type === 'hydration_started');
+    expect(started.user_id).toBe('user-123');
+    expect(started).not.toHaveProperty('repo');
+  });
+});
+
+describe('emitTaskEvent — correlation envelope (#245)', () => {
+  test('stamps user_id and repo as top-level fields when supplied', async () => {
+    mockDdbSend.mockResolvedValue({});
+    await emitTaskEvent('TASK001', 'session_started', { session_id: 's-1' }, { user_id: 'user-123', repo: 'org/repo' });
+    const item = mockDdbSend.mock.calls.find((c: any) => c[0]._type === 'Put')[0].input.Item;
+    expect(item).toMatchObject({
+      task_id: 'TASK001',
+      event_type: 'session_started',
+      user_id: 'user-123',
+      repo: 'org/repo',
+    });
+    expect(item.metadata).toEqual({ session_id: 's-1' });
+  });
+
+  test('omits repo (not null/empty) when repo-less, keeps user_id', async () => {
+    mockDdbSend.mockResolvedValue({});
+    await emitTaskEvent('TASK001', 'task_failed', undefined, { user_id: 'user-123', repo: undefined });
+    const item = mockDdbSend.mock.calls.find((c: any) => c[0]._type === 'Put')[0].input.Item;
+    expect(item.user_id).toBe('user-123');
+    expect(item).not.toHaveProperty('repo');
+  });
+
+  test('omits both when no correlation is supplied (back-compat)', async () => {
+    mockDdbSend.mockResolvedValue({});
+    await emitTaskEvent('TASK001', 'task_created');
+    const item = mockDdbSend.mock.calls.find((c: any) => c[0]._type === 'Put')[0].input.Item;
+    expect(item).not.toHaveProperty('user_id');
+    expect(item).not.toHaveProperty('repo');
+  });
+});
+
+describe('envelopeFor — single source for log context + event correlation (#245)', () => {
+  function captureLine(fn: () => void): Record<string, unknown> {
+    const lines: string[] = [];
+    const spy = jest.spyOn(process.stdout, 'write').mockImplementation((chunk: unknown) => {
+      lines.push(String(chunk));
+      return true;
+    });
+    try { fn(); } finally { spy.mockRestore(); }
+    return JSON.parse(lines[0]) as Record<string, unknown>;
+  }
+
+  test('log child and correlation both carry user_id + repo', () => {
+    const { log, correlation } = envelopeFor({ task_id: 't-1', user_id: 'u-1', repo: 'o/r' });
+    // Regression guard for the loadBlueprintConfig gap: the log child must carry
+    // user_id, not just task_id/repo — every admission→terminal line needs it.
+    expect(captureLine(() => log.info('x'))).toMatchObject({ task_id: 't-1', user_id: 'u-1', repo: 'o/r' });
+    expect(correlation).toEqual({ user_id: 'u-1', repo: 'o/r' });
+  });
+
+  test('repo-less: repo omitted from the log line and left undefined on correlation', () => {
+    const { log, correlation } = envelopeFor({ task_id: 't-1', user_id: 'u-1' });
+    const line = captureLine(() => log.info('x'));
+    expect(line).toMatchObject({ task_id: 't-1', user_id: 'u-1' });
+    expect(line).not.toHaveProperty('repo');
+    expect(correlation.repo).toBeUndefined();
   });
 });
 
@@ -808,6 +894,8 @@ describe('finalizeTask', () => {
     const eventCall = mockDdbSend.mock.calls[2][0];
     expect(eventCall.input.Item.event_type).toBe('task_failed');
     expect(eventCall.input.Item.metadata.reason).toBe('agent_heartbeat_stale');
+    // Terminal event carries the correlation envelope (#245).
+    expect(eventCall.input.Item).toMatchObject({ user_id: 'user-123', repo: 'org/repo' });
   });
 
   test('transitions RUNNING to TIMED_OUT on poll timeout', async () => {

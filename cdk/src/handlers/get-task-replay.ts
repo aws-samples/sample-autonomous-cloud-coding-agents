@@ -197,6 +197,10 @@ export function assembleBundle(
     event_type: e.event_type,
     timestamp: e.timestamp,
     metadata: e.metadata ?? {},
+    // Correlation envelope (#245): passed through per-event, omitted when absent.
+    ...(e.user_id && { user_id: e.user_id }),
+    ...(e.repo && { repo: e.repo }),
+    ...(e.trace_id && { trace_id: e.trace_id }),
   }));
 
   // Verification is non-null only when at least one gate result was persisted.

@@ -203,6 +203,39 @@ describe('renderEvent', () => {
     expect(output).toContain('something broke');
   });
 
+  test('renders agent_blocked with kind, resource, and remediation hint', () => {
+    const event = makeEvent({
+      event_type: 'agent_blocked',
+      metadata: {
+        kind: 'egress_denied',
+        detail: 'connection to registry.npmjs.org refused',
+        remediation_hint: 'allowlist registry.npmjs.org in DNS Firewall',
+        retryable: false,
+        resource: 'registry.npmjs.org',
+      },
+    });
+    const output = renderEvent(event);
+    expect(output).toContain('⛔ BLOCKED (egress_denied)');
+    expect(output).toContain('[registry.npmjs.org]');
+    expect(output).toContain('connection to registry.npmjs.org refused');
+    expect(output).toContain('↳ allowlist registry.npmjs.org in DNS Firewall');
+  });
+
+  test('renders agent_blocked without a resource', () => {
+    const event = makeEvent({
+      event_type: 'agent_blocked',
+      metadata: {
+        kind: 'policy_fail_closed',
+        detail: 'Cedar engine unavailable',
+        remediation_hint: 'check policy engine health',
+        retryable: false,
+      },
+    });
+    const output = renderEvent(event);
+    expect(output).toContain('⛔ BLOCKED (policy_fail_closed)');
+    expect(output).not.toContain('[undefined]');
+  });
+
   test('renders unknown event type with JSON metadata', () => {
     const event = makeEvent({
       event_type: 'custom_event',

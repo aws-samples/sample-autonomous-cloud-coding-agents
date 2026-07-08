@@ -22,7 +22,7 @@ import { S3Client } from '@aws-sdk/client-s3';
 import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { ulid } from 'ulid';
 import { AttachmentBudgetExceededError, AttachmentConfigurationError, AttachmentResolutionError, hydrateContext, resolveGitHubToken } from './context-hydration';
-import { logger } from './logger';
+import { logger, type Logger } from './logger';
 import { writeMinimalEpisode } from './memory';
 import { coerceNumericOrNull } from './numeric';
 import { computePromptVersion } from './prompt-version';
@@ -168,16 +168,45 @@ export async function transitionTask(
   }));
 }
 
+/** Correlation envelope stamped on orchestrator-plane task events (#245). */
+export interface EventCorrelation {
+  readonly user_id?: string;
+  /** `owner/repo`, or absent for repo-less workflows (#248 Phase 3). Matches
+   *  the source `TaskRecord.repo` (`string | undefined`). */
+  readonly repo?: string;
+}
+
+/**
+ * Build the correlation envelope (#245) for a task from its identity fields:
+ * a `log` child stamping `{task_id, user_id, repo}` on every line, and the
+ * matching `correlation` for `emitTaskEvent`. Single source so the log context
+ * and the event envelope can't drift. `repo` is omitted (not null/empty) for
+ * repo-less workflows.
+ */
+export function envelopeFor(
+  identity: { task_id: string; user_id: string; repo?: string },
+): { log: Logger; correlation: EventCorrelation } {
+  const { task_id, user_id, repo } = identity;
+  return {
+    log: logger.child({ task_id, user_id, ...(repo && { repo }) }),
+    correlation: { user_id, repo },
+  };
+}
+
 /**
  * Emit a task event to the audit log.
  * @param taskId - the task ID.
  * @param eventType - the event type string.
  * @param metadata - optional event metadata.
+ * @param correlation - optional `{ user_id, repo }` stamped as top-level fields
+ *   so the event stream joins to orchestrator logs by the correlation envelope
+ *   (#245). `repo` is omitted when null/absent (repo-less workflows).
  */
 export async function emitTaskEvent(
   taskId: string,
   eventType: string,
   metadata?: Record<string, unknown>,
+  correlation?: EventCorrelation,
 ): Promise<void> {
   await ddb.send(new PutCommand({
     TableName: EVENTS_TABLE_NAME,
@@ -187,6 +216,8 @@ export async function emitTaskEvent(
       event_type: eventType,
       timestamp: new Date().toISOString(),
       ttl: computeTtlEpoch(TASK_RETENTION_DAYS),
+      ...(correlation?.user_id && { user_id: correlation.user_id }),
+      ...(correlation?.repo && { repo: correlation.repo }),
       ...(metadata && { metadata }),
     },
   }));
@@ -203,24 +234,23 @@ const MAX_POLL_INTERVAL_MS = 300_000;
  * @returns the merged blueprint config.
  */
 export async function loadBlueprintConfig(task: TaskRecord): Promise<BlueprintConfig> {
+  // Correlation envelope (#245) on this shared function's logs too, matching the
+  // orchestrate handler's child logger. `repo` omitted for repo-less workflows.
+  const { log } = envelopeFor(task);
+
   // Repo-less workflows (#248 Phase 3) have no per-repo Blueprint — use platform
   // defaults directly rather than a RepoTable lookup on a missing repo.
   const repoConfig = task.repo ? await loadRepoConfig(task.repo) : null;
 
   if (repoConfig) {
-    logger.info('Loaded per-repo blueprint config', {
-      task_id: task.task_id,
-      repo: task.repo,
+    log.info('Loaded per-repo blueprint config', {
       has_runtime_override: !!repoConfig.runtime_arn,
       has_model_override: !!repoConfig.model_id,
       has_prompt_override: !!repoConfig.system_prompt_overrides,
       has_token_override: !!repoConfig.github_token_secret_arn,
     });
   } else {
-    logger.info('No per-repo config found, using platform defaults', {
-      task_id: task.task_id,
-      repo: task.repo,
-    });
+    log.info('No per-repo config found, using platform defaults');
   }
 
   // Clamp poll_interval_ms to safe range
@@ -228,8 +258,7 @@ export async function loadBlueprintConfig(task: TaskRecord): Promise<BlueprintCo
   if (pollIntervalMs !== undefined) {
     const clamped = Math.min(Math.max(pollIntervalMs, MIN_POLL_INTERVAL_MS), MAX_POLL_INTERVAL_MS);
     if (clamped !== pollIntervalMs) {
-      logger.warn('poll_interval_ms clamped to safe range', {
-        repo: task.repo,
+      log.warn('poll_interval_ms clamped to safe range', {
         original: pollIntervalMs,
         clamped,
         min: MIN_POLL_INTERVAL_MS,
@@ -331,8 +360,9 @@ function isValidApprovalGateCap(value: unknown): value is number {
  * @returns the assembled payload for the agent runtime.
  */
 export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: BlueprintConfig): Promise<Record<string, unknown>> {
+  const { log, correlation } = envelopeFor(task);
   await transitionTask(task.task_id, TaskStatus.SUBMITTED, TaskStatus.HYDRATING);
-  await emitTaskEvent(task.task_id, 'hydration_started');
+  await emitTaskEvent(task.task_id, 'hydration_started', undefined, correlation);
 
   const hydratedContext = await hydrateContext(task, {
     githubTokenSecretArn: blueprintConfig?.github_token_secret_arn,
@@ -350,10 +380,9 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
         sources: hydratedContext.sources,
         token_estimate: hydratedContext.token_estimate,
         ...(hydratedContext.content_trust && { content_trust: hydratedContext.content_trust }),
-      });
+      }, correlation);
     } catch (eventErr) {
-      logger.error('Failed to emit guardrail_blocked event', {
-        task_id: task.task_id,
+      log.error('Failed to emit guardrail_blocked event', {
         error: eventErr instanceof Error ? eventErr.message : String(eventErr),
       });
     }
@@ -371,8 +400,7 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
         ExpressionAttributeValues: { ':bn': hydratedContext.resolved_branch_name, ':now': new Date().toISOString() },
       }));
     } catch (err) {
-      logger.error('Failed to update branch_name from PR head_ref — task record will show stale placeholder', {
-        task_id: task.task_id,
+      log.error('Failed to update branch_name from PR head_ref — task record will show stale placeholder', {
         resolved_branch: hydratedContext.resolved_branch_name,
         error: err instanceof Error ? err.message : String(err),
       });
@@ -394,8 +422,8 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
       ExpressionAttributeValues: { ':pv': promptVersion, ':now': new Date().toISOString() },
     }));
   } catch (err) {
-    logger.warn('Failed to store prompt_version on task record', {
-      task_id: task.task_id, error: err instanceof Error ? err.message : String(err),
+    log.warn('Failed to store prompt_version on task record', {
+      error: err instanceof Error ? err.message : String(err),
     });
   }
 
@@ -413,8 +441,7 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     task.approval_gate_cap !== undefined
     && !isValidApprovalGateCap(task.approval_gate_cap)
   ) {
-    logger.warn('TaskRecord.approval_gate_cap is not a valid integer in bounds; omitting from agent payload', {
-      task_id: task.task_id,
+    log.warn('TaskRecord.approval_gate_cap is not a valid integer in bounds; omitting from agent payload', {
       approval_gate_cap: task.approval_gate_cap,
       min: APPROVAL_GATE_CAP_MIN,
       max: APPROVAL_GATE_CAP_MAX,
@@ -469,8 +496,7 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
           );
         }
 
-        logger.warn('Failed to resolve GitHub token for URL attachment fetch (no GitHub URLs in batch — proceeding)', {
-          task_id: task.task_id,
+        log.warn('Failed to resolve GitHub token for URL attachment fetch (no GitHub URLs in batch — proceeding)', {
           error: err instanceof Error ? err.message : String(err),
         });
       }
@@ -564,8 +590,7 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
   };
 
   if (hydratedContext.fallback_error) {
-    logger.warn('Context hydration fell back to minimal payload', {
-      task_id: task.task_id,
+    log.warn('Context hydration fell back to minimal payload', {
       fallback_error: hydratedContext.fallback_error,
     });
   }
@@ -578,7 +603,7 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     has_memory_context: !!hydratedContext.memory_context,
     ...(hydratedContext.content_trust && { content_trust: hydratedContext.content_trust }),
     ...(hydratedContext.fallback_error && { fallback_error: hydratedContext.fallback_error }),
-  });
+  }, correlation);
   return payload;
 }
 
@@ -663,6 +688,9 @@ export async function finalizeTask(
 ): Promise<void> {
   const task = await loadTask(taskId);
   const currentStatus = task.status;
+  // Correlation envelope (#245) on this function's own log lines too, not just
+  // the events it emits — admission→terminal logs must join by {user_id, repo}.
+  const { log, correlation } = envelopeFor(task);
 
   // Lost session: RUNNING but agent heartbeats stopped (crash/OOM) — fail fast
   if (
@@ -680,8 +708,7 @@ export async function finalizeTask(
     } catch (err) {
       // Task may have transitioned concurrently (e.g. agent wrote terminal status).
       // Re-read to avoid double-decrement or contradictory events.
-      logger.warn('Finalization transition to FAILED (heartbeat) failed, task may have transitioned concurrently', {
-        task_id: taskId,
+      log.warn('Finalization transition to FAILED (heartbeat) failed, task may have transitioned concurrently', {
         error: err instanceof Error ? err.message : String(err),
       });
     }
@@ -689,21 +716,21 @@ export async function finalizeTask(
       await emitTaskEvent(taskId, 'task_failed', {
         reason: 'agent_heartbeat_stale',
         poll_attempts: pollState.attempts,
-      });
+      }, correlation);
       await decrementConcurrency(userId);
     } else {
       // Transition failed — re-read task to determine actual state.
       // If already terminal the block below will handle TTL + concurrency.
       const reread = await loadTask(taskId);
       if (TERMINAL_STATUSES.includes(reread.status)) {
-        logger.info('Heartbeat path: task already terminal after failed transition', { task_id: taskId, status: reread.status });
+        log.info('Heartbeat path: task already terminal after failed transition', { status: reread.status });
         await emitTaskEvent(taskId, `task_${reread.status.toLowerCase()}`, {
           final_status: reread.status,
           poll_attempts: pollState.attempts,
-        });
+        }, correlation);
         await decrementConcurrency(userId);
       } else {
-        logger.warn('Heartbeat path: task in unexpected state after failed transition, releasing concurrency', { task_id: taskId, status: reread.status });
+        log.warn('Heartbeat path: task in unexpected state after failed transition, releasing concurrency', { status: reread.status });
         await decrementConcurrency(userId);
       }
     }
@@ -712,7 +739,7 @@ export async function finalizeTask(
 
   // If the agent already wrote a terminal status, just finalize
   if (TERMINAL_STATUSES.includes(currentStatus)) {
-    logger.info('Task already in terminal state', { task_id: taskId, status: currentStatus });
+    log.info('Task already in terminal state', { status: currentStatus });
 
     try {
       await ddb.send(new UpdateCommand({
@@ -723,12 +750,12 @@ export async function finalizeTask(
         ExpressionAttributeValues: { ':ttl': computeTtlEpoch(TASK_RETENTION_DAYS) },
       }));
     } catch (err) {
-      logger.warn('Failed to stamp TTL on terminal task', { task_id: taskId, error: err instanceof Error ? err.message : String(err) });
+      log.warn('Failed to stamp TTL on terminal task', { error: err instanceof Error ? err.message : String(err) });
     }
 
     // Memory fallback: if the agent did not write memory, write a minimal episode
     if (MEMORY_ID && !task.memory_written) {
-      logger.info('Agent did not write memory — writing fallback episode', { task_id: taskId });
+      log.info('Agent did not write memory — writing fallback episode');
       try {
         // Coerce at the shared helper rather than ``Number(...)`` so a
         // corrupt string ``cost_usd`` from the DDB Document client
@@ -758,11 +785,10 @@ export async function finalizeTask(
           costUsd ?? undefined,
         );
         if (!written) {
-          logger.warn('Fallback episode write returned false', { task_id: taskId });
+          log.warn('Fallback episode write returned false');
         }
       } catch (err) {
-        logger.warn('Fallback episode write threw unexpectedly (fail-open)', {
-          task_id: taskId,
+        log.warn('Fallback episode write threw unexpectedly (fail-open)', {
           error: err instanceof Error ? err.message : String(err),
         });
       }
@@ -771,7 +797,7 @@ export async function finalizeTask(
     await emitTaskEvent(taskId, `task_${currentStatus.toLowerCase()}`, {
       final_status: currentStatus,
       poll_attempts: pollState.attempts,
-    });
+    }, correlation);
     await decrementConcurrency(userId);
     return;
   }
@@ -796,14 +822,14 @@ export async function finalizeTask(
       });
     } catch (err) {
       // Task may have transitioned concurrently — re-read and accept
-      logger.warn('Finalization transition failed, task may have transitioned concurrently', { task_id: taskId, error: err instanceof Error ? err.message : String(err) });
+      log.warn('Finalization transition failed, task may have transitioned concurrently', { error: err instanceof Error ? err.message : String(err) });
     }
     await emitTaskEvent(taskId, 'task_timed_out', {
       reason: currentStatus === TaskStatus.AWAITING_APPROVAL
         ? 'approval_poll_timeout'
         : 'poll_timeout',
       poll_attempts: pollState.attempts,
-    });
+    }, correlation);
     await decrementConcurrency(userId);
     return;
   }
@@ -817,18 +843,18 @@ export async function finalizeTask(
         error_message: 'Session never started — poll timeout exceeded while still HYDRATING',
       });
     } catch (err) {
-      logger.warn('Finalization transition from HYDRATING failed, task may have transitioned concurrently', { task_id: taskId, error: err instanceof Error ? err.message : String(err) });
+      log.warn('Finalization transition from HYDRATING failed, task may have transitioned concurrently', { error: err instanceof Error ? err.message : String(err) });
     }
     await emitTaskEvent(taskId, 'task_failed', {
       reason: 'session_never_started',
       poll_attempts: pollState.attempts,
-    });
+    }, correlation);
     await decrementConcurrency(userId);
     return;
   }
 
   // Unexpected state — log and release concurrency
-  logger.error('Unexpected task state during finalization', { task_id: taskId, status: currentStatus });
+  log.error('Unexpected task state during finalization', { status: currentStatus });
   await decrementConcurrency(userId);
 }
 
@@ -839,6 +865,8 @@ export async function finalizeTask(
  * @param errorMessage - the error reason.
  * @param userId - the user who owns the task.
  * @param releaseConcurrency - whether to decrement the concurrency counter.
+ * @param repo - optional target repo (`owner/repo`) for the correlation
+ *   envelope (#245); omit for repo-less workflows.
  */
 export async function failTask(
   taskId: string,
@@ -846,6 +874,7 @@ export async function failTask(
   errorMessage: string,
   userId: string,
   releaseConcurrency: boolean,
+  repo?: string,
 ): Promise<void> {
   let transitioned = false;
   try {
@@ -855,13 +884,16 @@ export async function failTask(
     });
     transitioned = true;
   } catch (err) {
-    logger.warn('Failed to transition task to FAILED', { task_id: taskId, error: err instanceof Error ? err.message : String(err) });
+    const { log } = envelopeFor({ task_id: taskId, user_id: userId, repo });
+    log.warn('Failed to transition task to FAILED', {
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
   // Only emit / release concurrency after a successful transition. Callers such as
   // orchestrate-task rethrow after failTask; Durable Execution retries the step and
   // would otherwise re-run emit + decrement while the task is already FAILED.
   if (transitioned) {
-    await emitTaskEvent(taskId, 'task_failed', { error_message: errorMessage });
+    await emitTaskEvent(taskId, 'task_failed', { error_message: errorMessage }, { user_id: userId, repo });
     if (releaseConcurrency) {
       await decrementConcurrency(userId);
     }
