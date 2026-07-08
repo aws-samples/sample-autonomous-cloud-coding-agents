@@ -1,0 +1,76 @@
+---
+/** Landing-page diagram: Channels → ABCA → Outcomes. Inline SVG avoids base-path and theme issues. */
+---
+
+<div class="platform-diagram" role="img" aria-label="ABCA platform — channels, orchestration engine, and outcomes">
+	<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400" width="400" height="400">
+		<defs>
+			<style>
+				.label { font: 600 11px system-ui, -apple-system, Segoe UI, sans-serif; fill: #545b64; }
+				.box-text { font: 500 10px system-ui, -apple-system, Segoe UI, sans-serif; fill: #16191f; }
+				.sub { font: 400 9px system-ui, -apple-system, Segoe UI, sans-serif; fill: #545b64; }
+				.title { font: 700 20px system-ui, -apple-system, Segoe UI, sans-serif; fill: #16191f; }
+			</style>
+			<marker id="arrow" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
+				<path d="M0,0 L6,3 L0,6 Z" fill="#879596"></path>
+			</marker>
+		</defs>
+		<text x="52" y="118" text-anchor="middle" class="label">Channels</text>
+		<g class="channels">
+			<rect x="12" y="128" width="80" height="22" rx="4" fill="#f1f8ff" stroke="#0073bb" stroke-width="1.2"></rect>
+			<text x="52" y="143" text-anchor="middle" class="box-text">Slack</text>
+			<rect x="12" y="156" width="80" height="22" rx="4" fill="#f1f8ff" stroke="#0073bb" stroke-width="1.2"></rect>
+			<text x="52" y="171" text-anchor="middle" class="box-text">Jira</text>
+			<rect x="12" y="184" width="80" height="22" rx="4" fill="#f1f8ff" stroke="#0073bb" stroke-width="1.2"></rect>
+			<text x="52" y="199" text-anchor="middle" class="box-text">CI/CD</text>
+			<rect x="12" y="212" width="80" height="22" rx="4" fill="#f1f8ff" stroke="#0073bb" stroke-width="1.2"></rect>
+			<text x="52" y="227" text-anchor="middle" class="box-text">Cron</text>
+			<rect x="12" y="240" width="80" height="22" rx="4" fill="#f1f8ff" stroke="#0073bb" stroke-width="1.2"></rect>
+			<text x="52" y="255" text-anchor="middle" class="box-text">API / CLI</text>
+		</g>
+		<line x1="98" y1="200" x2="128" y2="200" stroke="#879596" stroke-width="1.5" marker-end="url(#arrow)"></line>
+		<line x1="272" y1="200" x2="302" y2="200" stroke="#879596" stroke-width="1.5" marker-end="url(#arrow)"></line>
+		<rect x="138" y="165" width="124" height="70" rx="6" fill="var(--diagram-surface, #fff)" stroke="#ff9900" stroke-width="2"></rect>
+		<text x="200" y="198" text-anchor="middle" class="title">ABCA</text>
+		<text x="200" y="216" text-anchor="middle" class="sub">Orchestrate &amp; run tasks</text>
+		<text x="348" y="118" text-anchor="middle" class="label">Outcomes</text>
+		<g class="outcomes">
+			<rect x="308" y="128" width="80" height="22" rx="4" fill="#f2fcf3" stroke="#1d8102" stroke-width="1.2"></rect>
+			<text x="348" y="143" text-anchor="middle" class="box-text">GitHub PR</text>
+			<rect x="308" y="156" width="80" height="22" rx="4" fill="#f2fcf3" stroke="#1d8102" stroke-width="1.2"></rect>
+			<text x="348" y="171" text-anchor="middle" class="box-text">Code review</text>
+			<rect x="308" y="184" width="80" height="22" rx="4" fill="#f2fcf3" stroke="#1d8102" stroke-width="1.2"></rect>
+			<text x="348" y="199" text-anchor="middle" class="box-text">Research</text>
+			<rect x="308" y="212" width="80" height="22" rx="4" fill="#f2fcf3" stroke="#1d8102" stroke-width="1.2"></rect>
+			<text x="348" y="227" text-anchor="middle" class="box-text">Artifacts</text>
+		</g>
+	</svg>
+</div>
+
+<style>
+	.platform-diagram {
+		--diagram-surface: var(--sl-color-bg);
+		width: min(70%, 20rem);
+		margin-inline: auto;
+		background: var(--sl-color-bg);
+	}
+
+	.platform-diagram svg {
+		display: block;
+		width: 100%;
+		height: auto;
+	}
+
+	:root[data-theme='dark'] .platform-diagram {
+		--diagram-surface: hsl(224, 19%, 97%);
+		background: hsl(224, 19%, 97%);
+		border-radius: 0.5rem;
+	}
+
+	@media (min-width: 50rem) {
+		.platform-diagram {
+			order: 2;
+			width: min(100%, 25rem);
+		}
+	}
+</style>

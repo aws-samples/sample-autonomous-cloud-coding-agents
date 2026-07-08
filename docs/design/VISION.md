@@ -13,7 +13,7 @@ We are building toward **lights-sparse**, **graduated** autonomy (defined below)
 
 ### What "lights-sparse" means
 
-**Lights-sparse** is project vocabulary (not general industry jargon): it names the autonomy posture ABCA targets today, drawn from the **software dark factory** analogy in the [introduction](../src/content/docs/index.md).
+**Lights-sparse** is project vocabulary (not general industry jargon): it names the autonomy posture ABCA targets today, drawn from the **software dark factory** analogy below.
 
 - **Lights-out** (the analogy’s end state): humans set goals, policy, and constraints; production runs without people on the floor.
 - **Lights-sparse** (where teams are now): the **implementation loop** — edit code, run tests, open pull requests — is increasingly **unattended**, while **governance, merge authority, and production release** stay **supervised**. Humans are not at the keyboard for every step; they are still accountable for what ships.
@@ -25,6 +25,42 @@ ABCA is built for that posture: asynchronous tasks, policy-gated escalation when
 **Graduated** autonomy is not a single on/off switch: operators tighten or loosen gates over time (Cedar policies, `--pre-approve`, per-repo posture) without forking the deployment. See tenet 2 and [CEDAR_HITL_GATES.md](./CEDAR_HITL_GATES.md).
 
 Success looks like teams that can **submit work and walk away**, trust that doomed work fails fast and cheaply, inspect every important decision in an audit trail, and see **measurable improvement** over time (fewer revision cycles, higher first-review merge rates, predictable cost).
+
+### Software dark factory
+
+ABCA is a step toward what the industry is starting to call a **software dark factory** — a software-delivery system that takes high-level intent as input and autonomously produces code changes, validation evidence, and deployable artifacts under remote supervision. The analogy is the "lights-out" factory in manufacturing: humans set goals, constraints, and policies; the production system absorbs the cognition that used to sit in engineers' heads and keyboards.
+
+A software dark factory is not the same thing as "an agent that writes code." A dark factory surrounds the coding agent with durable control-plane services, memory, validation, policy, and replay.
+
+#### Key attributes
+
+Eight attributes distinguish a real dark factory from a coding agent wrapped in automation:
+
+1. **Machine-actionable intake** — issues, specs, and incidents become typed work items the platform can reason about, not free-form prompts.
+2. **Isolated execution** — each task runs in a bounded environment with scoped credentials and no shared state with other runs.
+3. **Durable, replayable orchestration** — the platform survives retries, timeouts, cancellations, and operator intervention without losing task state.
+4. **Intrinsic evaluation** — tests, linting, policy checks, and risk scoring are part of the execution loop, not an afterthought performed by humans later.
+5. **Persistent memory with guardrails** — lessons carry across sessions via semantic, episodic, procedural, and review-rule memory, without polluting future runs.
+6. **Observability, attribution, and auditability** — every decision is traceable to a task, prompt version, model, and memory retrieval set.
+7. **Metered cost, capacity, and blast radius** — budgets, concurrency, and scope are enforced rather than advisory.
+8. **Governed, reversible release path** — promotion, approvals, and rollback are policy-aware and tied to the same lineage as the work that produced them.
+
+#### Where ABCA stands today
+
+Maturity along these axes is a continuum, not a binary. Organizations typically stop at a lights-sparse state for a long time, because the governance burden rises sharply as autonomy expands from code generation to deployment authority.
+
+| # | Attribute | Status | Evidence in this sample |
+|---|-----------|--------|-------------------------|
+| 1 | Machine-actionable intake | Strong | Typed task schema, CLI/REST API with idempotency keys, HMAC webhooks, input guardrails |
+| 2 | Isolated execution | Strong | AgentCore Runtime MicroVM per task, VPC with private subnets, DNS firewall, per-blueprint scoped credentials |
+| 3 | Durable, replayable orchestration | Partial | Lambda Durable Functions with checkpoint/resume, typed state machine, concurrency drift reconciliation; deterministic replay bundles are planned |
+| 4 | Intrinsic evaluation | Partial | Pre-flight checks, build/lint verification, Bedrock Guardrails, Cedar tool policy; tiered validation, PR risk classification, and evaluation pipeline are planned |
+| 5 | Persistent memory with guardrails | Partial | AgentCore Memory with semantic and episodic strategies, SHA-256 provenance, fail-open writes; trust-aware retrieval, decay, quarantine, and procedural memory are planned |
+| 6 | Observability, attribution, and auditability | Strong | OpenTelemetry spans, operator dashboard, TaskEvents audit trail, model-invocation logging, prompt versioning, per-commit `Task-Id` trailers |
+| 7 | Metered cost, capacity, and blast radius | Partial | Per-task turn caps, USD budget, per-user concurrency, WAF rate limits, tool-call policy; team/monthly budgets and cost-aware routing are planned |
+| 8 | Governed, reversible release path | Planned | Human PR review is the current gate; signed artifacts, staging→prod promotion, deployment evidence bundles, and rollback lineage are planned |
+
+Planned work to move each row from Partial or Planned to Strong is tracked as [GitHub issues](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues) with priority labels (`P0`, `P1`, etc.).
 
 ## Tenets
 
@@ -145,6 +181,6 @@ These are out of scope for the project vision. Proposals that primarily serve th
 | [CEDAR_HITL_GATES.md](./CEDAR_HITL_GATES.md) | HITL approval gates, pre-approve scopes, graduated in-run autonomy |
 | [INTERACTIVE_AGENTS.md](./INTERACTIVE_AGENTS.md) | Async UX, watch/nudge, notification plane, approval state machine |
 | [docs/decisions/](../decisions/) | Recorded choices when tenets conflict or ambiguity is resolved |
-| [docs/src/content/docs/index.md](../src/content/docs/index.md) (synced intro) | Public-facing narrative including dark-factory attribute table |
+| [docs/src/content/docs/index.mdx](../src/content/docs/index.mdx) (splash landing) | Public-facing entry point with hero CTAs and value cards |
 
 When tenets and architecture principles overlap, **tenets win for review judgment**; **architecture and ADRs win for implementation detail** once a direction is chosen.

@@ -49,6 +49,14 @@ function rewriteDocsLinkTarget(target) {
     DEPLOY_PREVIEW_SCREENSHOTS_GUIDE: '/using/deploy-preview-screenshots-guide',
     CEDAR_POLICY_GUIDE: '/customizing/cedar-policies',
     DEPLOYMENT_GUIDE: '/getting-started/deployment-guide',
+    INTRODUCTION: '/introduction/introduction',
+    TROUBLESHOOTING: '/troubleshooting/troubleshooting',
+    LEARNING_PATH: '/getting-started/learning-path',
+    HOW_THE_PLATFORM_WORKS: '/concepts/how-the-platform-works',
+    USE_CASES_INDEX: '/use-cases/use-cases-index',
+    IMPLEMENT_FROM_ISSUE: '/use-cases/implement-from-issue',
+    AUTOMATED_PR_REVIEW: '/use-cases/automated-pr-review',
+    WEB_RESEARCH_BRIEF: '/use-cases/web-research-brief',
   };
 
   /** `splitGuide` emits each `##` from DEVELOPER_GUIDE as its own page — map #anchors to those routes. */
@@ -85,6 +93,24 @@ function rewriteDocsLinkTarget(target) {
 
   if (explicitGuideRoutes[stem]) {
     return `${explicitGuideRoutes[stem]}${anchorSuffix}`;
+  }
+
+  if (normalizedPath.includes('/guides/concepts/')) {
+    const sub = normalizedPath.split('/guides/concepts/')[1].replace(/\.mdx?$/i, '');
+    const slugPath = sub
+      .split('/')
+      .map((p) => normalizeFileStem(p).toLowerCase())
+      .join('/');
+    return `/concepts/${slugPath}${anchorSuffix}`;
+  }
+
+  if (normalizedPath.includes('/guides/use-cases/')) {
+    const sub = normalizedPath.split('/guides/use-cases/')[1].replace(/\.mdx?$/i, '');
+    const slugPath = sub
+      .split('/')
+      .map((p) => normalizeFileStem(p).toLowerCase())
+      .join('/');
+    return `/use-cases/${slugPath}${anchorSuffix}`;
   }
 
   if (normalizedPath.includes('/guides/') || normalizedPath.startsWith('../guides/')) {
@@ -171,6 +197,41 @@ function mirrorDirectory(sourceDir, targetDirRelative) {
 // Recursively copy a source asset directory into the site's public/ tree so
 // every committed image/diagram is served at its rewritten absolute URL.
 // Filenames are preserved verbatim (markdown references them as-is).
+function mirrorGuideTree(sourceDir, targetDirRelative) {
+  if (!fs.existsSync(sourceDir)) {
+    return;
+  }
+
+  function walk(relDir = '') {
+    const absDir = path.join(sourceDir, relDir);
+    for (const entry of fs.readdirSync(absDir, { withFileTypes: true })) {
+      if (entry.name.startsWith('_')) {
+        continue;
+      }
+      const relPath = relDir ? path.join(relDir, entry.name) : entry.name;
+      if (entry.isDirectory()) {
+        walk(relPath);
+        continue;
+      }
+      if (!entry.name.endsWith('.md')) {
+        continue;
+      }
+      const sourcePath = path.join(absDir, entry.name);
+      const raw = fs.readFileSync(sourcePath, 'utf8');
+      const stem = path.basename(entry.name, '.md');
+      const fallbackTitle = normalizeFileStem(stem).replace(/-/g, ' ');
+      const out = ensureFrontmatter(raw, fallbackTitle);
+      const relWithoutExt = relPath.replace(/\.md$/i, '');
+      const segments = relWithoutExt.split(path.sep).map((part) => normalizeFileStem(part));
+      const fileName = `${segments.pop()}.md`;
+      const subDir = segments.length ? path.join(...segments) : '';
+      writeFile(path.join(docsRoot, targetDirRelative, subDir, fileName), out);
+    }
+  }
+
+  walk();
+}
+
 function copyAssetDir(sourceDir, targetDir) {
   if (!fs.existsSync(sourceDir)) {
     return;
@@ -315,6 +376,30 @@ mirrorDirectory(path.join(docsRoot, 'design'), path.join('src', 'content', 'docs
 
 // --- Decision records (ADRs): mirror to decisions/ ---
 mirrorDirectory(path.join(docsRoot, 'decisions'), path.join('src', 'content', 'docs', 'decisions'));
+
+// --- Concepts and use cases ---
+mirrorGuideTree(
+  path.join(docsRoot, 'guides', 'concepts'),
+  path.join('src', 'content', 'docs', 'concepts'),
+);
+mirrorGuideTree(
+  path.join(docsRoot, 'guides', 'use-cases'),
+  path.join('src', 'content', 'docs', 'use-cases'),
+);
+
+// --- Introduction, troubleshooting, learning path ---
+mirrorMarkdownFile(
+  path.join(docsRoot, 'guides', 'INTRODUCTION.md'),
+  path.join('src', 'content', 'docs', 'introduction', 'Introduction.md'),
+);
+mirrorMarkdownFile(
+  path.join(docsRoot, 'guides', 'TROUBLESHOOTING.md'),
+  path.join('src', 'content', 'docs', 'troubleshooting', 'Troubleshooting.md'),
+);
+mirrorMarkdownFile(
+  path.join(docsRoot, 'guides', 'LEARNING_PATH.md'),
+  path.join('src', 'content', 'docs', 'getting-started', 'Learning-path.md'),
+);
 
 // --- Static assets: copy source image dir into the site's public/ ---
 // Guides reference images as `../imgs/foo.png`; ensureFrontmatter() turns

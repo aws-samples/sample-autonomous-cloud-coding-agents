@@ -4,7 +4,7 @@ set -euo pipefail
 filelist=$(mktemp)
 trap 'rm -f "$filelist"' EXIT
 
-{ find guides design decisions -name '*.md' -print0; find .. -maxdepth 1 -name '*.md' -print0; } > "$filelist"
+{ find guides design decisions -name '*.md' ! -path '*/_templates/*' -print0; find .. -maxdepth 1 -name '*.md' -print0; } > "$filelist"
 
 count=$(tr '\0' '\n' < "$filelist" | grep -c .)
 if [ "$count" -lt 10 ]; then

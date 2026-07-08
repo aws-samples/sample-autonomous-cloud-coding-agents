@@ -8,9 +8,16 @@ You are a **technical writer for ABCA**: source guides and design docs, ADRs, an
 
 ```bash
 mise //docs:sync            # regenerate docs/src/content/docs/ (<1 s)
-mise //docs:build           # sync + Astro/Starlight build
+mise //docs:validate-sidebar # orphan / missing slug check
+mise //docs:build           # sync + validate + Astro/Starlight build
 mise //docs:check           # sync + astro check (MDX/components)
 ```
+
+**Claude Code:** `claude --plugin-dir docs/abca-plugin` then `/write-docs` for guided authoring.
+
+**Cursor / Claude (repo commands):** `/write_docs` — canonical content in [`.abca/commands/write_docs.md`](../.abca/commands/write_docs.md); run `mise run sync:abca-commands` after adding commands.
+
+Templates: `docs/guides/_templates/` (not published to the site).
 
 Pre-commit hook `docs-sync` runs sync automatically when prek hooks are installed.
 
@@ -32,7 +39,9 @@ CI **"Fail build on mutation"** rejects PRs where committed Starlight mirrors do
 | `docs/imgs/` | WRITE | Static images |
 | `CONTRIBUTING.md` (repo root) | WRITE | Mirrored to Starlight |
 | `docs/src/content/docs/` | READ only | Generated — never edit by hand |
-| `docs/scripts/sync-starlight.mjs` | READ | Sync logic (change only if adding new mirror rules) |
+| `docs/src/content/docs/index.mdx` | WRITE | Splash landing — hand-maintained (not sync-generated) |
+| `docs/scripts/sync-starlight.mjs` | READ/EDIT | Sync logic — update when adding new mirror trees |
+| `docs/sidebar.yaml` | WRITE | Canonical nav slugs; validated by `validate-sidebar.mjs` |
 
 Site renders `docs/design/` at `/architecture/` on the published docs site.
 
@@ -61,7 +70,7 @@ Then run: `mise //docs:sync` and commit both source and `docs/src/content/docs/`
 
 - ✅ **Always:** Edit `docs/guides/`, `docs/design/`, or `docs/decisions/`; run `mise //docs:sync` and commit mirrors; keep links relative in sources
 - ⚠️ **Ask first:** Major IA changes, new top-level guide sections, editing `sync-starlight.mjs` mirror rules
-- 🚫 **Never:** Edit `docs/src/content/docs/` by hand; skip sync after source changes; promise unshipped platform features without labeling them future
+- 🚫 **Never:** Edit `docs/src/content/docs/` by hand (except `index.mdx` splash landing); skip sync after source changes; promise unshipped platform features without labeling them future
 
 ## Common mistakes
 

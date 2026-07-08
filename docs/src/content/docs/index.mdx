@@ -1,0 +1,63 @@
+---
+title: ABCA Docs
+description: Autonomous agents on AWS in your account — self-hosted background work for coding, PR reviews, research, and more.
+template: splash
+editUrl: false
+tableOfContents: false
+hero:
+  title: Autonomous agents on AWS, in your account
+  tagline: A self-hosted platform for background work - coding tasks, PR reviews, research, and more. Submit intent; get governed outcomes.
+  actions:
+    - text: Get started
+      link: /sample-autonomous-cloud-coding-agents/getting-started/quick-start/
+      icon: right-arrow
+    - text: View on GitHub
+      link: https://github.com/aws-samples/sample-autonomous-cloud-coding-agents
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+## Why teams use ABCA
+
+<CardGrid>
+  <Card title="Background agents" icon="rocket">
+    Task in, PR or outcome out — fire and forget. [How tasks run](/sample-autonomous-cloud-coding-agents/using/task-lifecycle).
+  </Card>
+  <Card title="Isolated environments" icon="laptop">
+    Every task runs in its own MicroVM with scoped credentials. [Compute and isolation](/sample-autonomous-cloud-coding-agents/architecture/compute).
+  </Card>
+  <Card title="Workflow-driven" icon="list-format">
+    Versioned workflows — coding, review, and research — not one-off prompts. [Workflows](/sample-autonomous-cloud-coding-agents/using/workflows).
+  </Card>
+  <Card title="Governance built in" icon="approve-check">
+    Cedar policy, guardrails, and an audit trail on every run. [Security model](/sample-autonomous-cloud-coding-agents/architecture/security).
+  </Card>
+  <Card title="Beyond coding" icon="open-book">
+    Research briefs and ops workflows on the same platform. [Introduction](/sample-autonomous-cloud-coding-agents/introduction/introduction/#beyond-coding).
+  </Card>
+  <Card title="Your AWS account" icon="star">
+    CDK-deployed sample you control — not a SaaS black box. [Deployment guide](/sample-autonomous-cloud-coding-agents/getting-started/deployment-guide).
+  </Card>
+</CardGrid>
+
+## Put agents to work
+
+<CardGrid>
+  <LinkCard title="Fix from issue" href="/sample-autonomous-cloud-coding-agents/getting-started/quick-start/" description="Onboard a repo and submit your first task." />
+  <LinkCard title="Review every PR" href="/sample-autonomous-cloud-coding-agents/using/workflows/" description="Automated PR review workflow." />
+  <LinkCard title="Patch dependencies" href="/sample-autonomous-cloud-coding-agents/using/overview/" description="Background maintenance tasks." />
+  <LinkCard title="Iterate on feedback" href="/sample-autonomous-cloud-coding-agents/using/workflows/" description="Address review comments on an open PR." />
+  <LinkCard title="Research a topic" href="/sample-autonomous-cloud-coding-agents/use-cases/web-research-brief/" description="Repo-optional knowledge workflow." />
+  <LinkCard title="Triage from Linear" href="/sample-autonomous-cloud-coding-agents/using/linear-setup-guide/" description="Connect Linear to ABCA." />
+</CardGrid>
+
+## What will you do?
+
+<CardGrid>
+  <LinkCard title="Get started" href="/sample-autonomous-cloud-coding-agents/getting-started/quick-start/" description="Deploy in about 30 minutes." />
+  <LinkCard title="Understand concepts" href="/sample-autonomous-cloud-coding-agents/concepts/how-the-platform-works/" description="How the platform fits together." />
+  <LinkCard title="Explore use cases" href="/sample-autonomous-cloud-coding-agents/use-cases/use-cases-index/" description="Outcome-first tutorials." />
+  <LinkCard title="Contribute" href="/sample-autonomous-cloud-coding-agents/developer-guide/introduction/" description="Platform developers." />
+</CardGrid>

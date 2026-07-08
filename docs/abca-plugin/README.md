@@ -26,8 +26,11 @@ Or add to your project's `.claude/settings.json`:
 | `/deploy` | Deploy, diff, destroy | Deploy, diff, or destroy the CDK stack |
 | `/onboard-repo` | Add a repository | Onboard a GitHub repo via Blueprint CDK construct |
 | `/submit-task` | Submit a coding task | Submit tasks with prompt quality guidance and cost controls (supports quick mode, `--trace`) |
+| `/write-docs` | Write or update docs | Add guides, tutorials, or design docs (Diátaxis, sync, `mise //docs:build`) |
 | `/troubleshoot` | Debug, errors, failures | Diagnose build, deployment, auth, and task execution issues (supports `--verbose`) |
 | `/status` | Status, health check | Check stack health, running tasks, and recent history |
+
+Repo slash commands (Cursor / Claude): [`.abca/commands/write_docs.md`](../../.abca/commands/write_docs.md) (`/write_docs`) — stubs synced via `mise run sync:abca-commands`.
 
 ### Agents
 
@@ -55,9 +58,12 @@ docs/abca-plugin/
     deploy/SKILL.md        # CDK deployment management
     onboard-repo/SKILL.md  # Repository onboarding
     submit-task/SKILL.md   # Task submission workflow (guided + quick mode)
+    write-docs/SKILL.md    # Documentation authoring (Diátaxis + docs-as-code)
     troubleshoot/SKILL.md  # Troubleshooting guide
     status/SKILL.md        # Platform status checks
 ```
+
+For Cursor / Claude project commands, see also `.abca/commands/write_docs.md` (synced with `mise run sync:abca-commands`).
 
 ## Testing
 

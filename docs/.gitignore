@@ -37,7 +37,7 @@ dist/
 !/astro.config.mjs
 !/tsconfig.json
 !/src/content.config.ts
-!/src/content/docs/index.md
+!/src/content/docs/index.mdx
 !/src/content/docs/developer-guide/Introduction.md
 !/src/content/docs/developer-guide/Repository-preparation.md
 !/src/content/docs/developer-guide/Installation.md
