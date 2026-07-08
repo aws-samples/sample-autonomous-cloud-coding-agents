@@ -537,6 +537,45 @@ export function renderAlreadyDecomposedNote(): string {
 }
 
 /**
+ * ABCA-659 — re-trigger of an already-terminal epic that HAS failed/skipped
+ * children: we're retrying them. Names exactly what's being re-run so the note
+ * is honest (the old copy claimed "running the existing sub-issue graph" while
+ * nothing actually re-ran). ``succeeded`` nodes are left alone and called out so
+ * the user knows finished work isn't being redone.
+ */
+export function renderEpicRetryNote(counts: {
+  failed: number;
+  skipped: number;
+  succeeded: number;
+}): string {
+  const retried = counts.failed + counts.skipped;
+  const parts: string[] = [];
+  if (counts.failed > 0) parts.push(`${counts.failed} failed`);
+  if (counts.skipped > 0) parts.push(`${counts.skipped} skipped`);
+  const kept = counts.succeeded > 0
+    ? ` The ${counts.succeeded} that already succeeded ${counts.succeeded === 1 ? 'is' : 'are'} left as-is.`
+    : '';
+  return (
+    `${PLAN_PROPOSAL_PREFIX} Re-running the parts of this epic that didn't finish — `
+    + `${retried} sub-issue${retried === 1 ? '' : 's'} (${parts.join(' + ')}).${kept} `
+    + "I'll update the panel below as they go."
+  );
+}
+
+/**
+ * ABCA-659 — re-trigger of an epic that already finished with EVERY child
+ * succeeded. Nothing to retry; say so plainly instead of the misleading
+ * "running the existing sub-issue graph".
+ */
+export function renderEpicAlreadyCompleteNote(): string {
+  return (
+    `${PLAN_PROPOSAL_PREFIX} This epic already finished — every sub-issue succeeded, so there's `
+    + 'nothing to re-run. To change something, comment on the specific sub-issue with '
+    + '`@bgagent <what to change>`.'
+  );
+}
+
+/**
  * #299 plan-cleanup: freeze the plan-proposal comment into a static REFERENCE
  * once the plan is approved and the live epic panel takes over. The proposal's
  * action footer ("Reply `@bgagent approve`…") and the sequencing/cost preamble

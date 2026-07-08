@@ -225,13 +225,15 @@ def setup_repo(config: TaskConfig) -> RepoSetup:
             # passing every task. A configured command that fails to run is the
             # operator's typo, not the silent-default trap, so only flag the
             # unconfigured (mise-default) case.
-            if not config.build_command and is_verify_command_inert(result.returncode, result.stderr):
+            if not config.build_command and is_verify_command_inert(
+                result.returncode, result.stderr
+            ):
                 build_gate_inert = True
                 notes.append(
-                    "⚠️ Build-regression gating is INERT: no runnable `mise run build` task in this "
-                    "repo and no build command configured. A change that breaks the build will still "
-                    "report success. Set pipeline.buildCommand in the repo's blueprint (e.g. "
-                    "'npm run build') to enable gating."
+                    "⚠️ Build-regression gating is INERT: no runnable `mise run build` task in "
+                    "this repo and no build command configured. A change that breaks the build "
+                    "will still report success. Set pipeline.buildCommand in the repo's blueprint "
+                    "(e.g. 'npm run build') to enable gating."
                 )
         else:
             notes.append(f"Initial build ({build_cmd_str}): OK")
@@ -254,7 +256,9 @@ def setup_repo(config: TaskConfig) -> RepoSetup:
             # red lint baseline is misleading (e.g. a Node repo with no mise lint
             # task perpetually shows lint FAIL). Only flag inert for the
             # unconfigured-default case, mirroring build_gate_inert.
-            if not config.lint_command and is_verify_command_inert(result.returncode, result.stderr):
+            if not config.lint_command and is_verify_command_inert(
+                result.returncode, result.stderr
+            ):
                 lint_gate_inert = True
                 lint_before = True  # no real lint baseline → don't treat as a regression source
                 notes.append(
