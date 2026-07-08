@@ -147,9 +147,23 @@ describe('resolveGitHubToken', () => {
     );
   });
 
-  test('propagates non-missing-secret SM errors unchanged', async () => {
-    mockSmSend.mockRejectedValueOnce(new Error('ThrottlingException'));
-    await expect(resolveGitHubToken('arn:test')).rejects.toThrow('ThrottlingException');
+  test('wraps an unreadable-secret SM error as an auth_failure blocker', async () => {
+    // #251 review fix: a secret that exists but can't be read (AccessDenied,
+    // throttling exhausted) is an environmental auth_failure — not a missing
+    // secret and not a silent-degrade. Wrap with the canonical reason naming the
+    // ARN so the classifier routes to the auth remedy instead of stranding the
+    // task with minimal context and no token.
+    const arn = 'arn:aws:secretsmanager:us-east-1:123:secret:denied';
+    mockSmSend.mockRejectedValueOnce(new Error('AccessDeniedException'));
+    await expect(resolveGitHubToken(arn)).rejects.toThrow(
+      `BLOCKED[auth_failure]: the required GitHub token secret could not be read (resource: ${arn})`,
+    );
+  });
+
+  test('preserves the underlying SM error as the cause on an unreadable secret', async () => {
+    const underlying = new Error('AccessDeniedException');
+    mockSmSend.mockRejectedValueOnce(underlying);
+    await expect(resolveGitHubToken('arn:test')).rejects.toMatchObject({ cause: underlying });
   });
 
   test('caches tokens per ARN (different ARNs get different tokens)', async () => {
@@ -729,15 +743,15 @@ describe('hydrateContext', () => {
     process.env.GITHUB_TOKEN_SECRET_ARN = originalArn;
   });
 
-  test('Secrets Manager failure — proceeds without issue', async () => {
+  test('unreadable token secret propagates as an auth_failure blocker (no silent degrade)', async () => {
+    // #251 review fix: a token secret that exists but can't be read (SM
+    // AccessDenied / unavailable) must NOT degrade to minimal context — the
+    // agent would have no token to clone/push and fail opaquely. Propagate the
+    // canonical BLOCKED[auth_failure] reason so the classifier surfaces it.
     mockSmSend.mockRejectedValueOnce(new Error('SM unavailable'));
 
     const task = { ...baseTask, issue_number: 42, task_description: 'Fix' };
-    const result = await hydrateContext(task as any);
-
-    expect(result.sources).not.toContain('issue');
-    expect(result.sources).toContain('task_description');
-    expect(result.user_prompt).toContain('Fix');
+    await expect(hydrateContext(task as any)).rejects.toThrow('BLOCKED[auth_failure]:');
   });
 
   test('no issue and no task description — minimal prompt', async () => {

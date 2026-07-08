@@ -180,8 +180,11 @@ class TestSetupRepoDependencyUnreachable:
 
     def test_exhausted_clone_reports_and_raises_canonical_reason(self, monkeypatch):
         fake = _fake_run_cmd()
+        # A hostless transient blip (connection reset, no nameable host) → the
+        # retryable dependency_unreachable branch. A name-resolution failure that
+        # names a host is egress_denied instead — see the egress test below.
         self._patch_backoff_to_fail(
-            monkeypatch, fake, transient_stderr="Could not resolve host: github.com"
+            monkeypatch, fake, transient_stderr="error: RPC failed; connection reset"
         )
         progress = _RecordingProgress()
 
@@ -194,11 +197,43 @@ class TestSetupRepoDependencyUnreachable:
         assert str(excinfo.value).startswith("BLOCKED[dependency_unreachable]:")
         assert "(resource: owner/repo)" in str(excinfo.value)
 
-        # Each transient retry + the final exhaustion emitted an auditable event.
+        # Each transient retry + the final exhaustion emitted an auditable event:
+        # _patch_backoff_to_fail fires on_retry twice (attempts 1,2) and
+        # _fail_setup_command emits the terminal blocker → exactly 3.
         blocked = [c for c in progress.calls if c[0] == "write_agent_blocked"]
-        assert len(blocked) >= 1
+        assert len(blocked) == 3
         assert all(c[1]["kind"] == "dependency_unreachable" for c in blocked)
         assert all(c[1]["retryable"] is True for c in blocked)
+
+    def test_exhausted_clone_naming_host_is_egress_denied_not_retryable(self, monkeypatch):
+        """#251 review fix: a name-resolution failure naming a host is a
+        firewalled endpoint, NOT a transient blip. It must classify as
+        non-retryable egress_denied (allowlist remedy) — the same verdict the
+        PostToolUse egress detector reaches for identical stderr — rather than
+        retryable dependency_unreachable ("retry the task", which never helps)."""
+        fake = _fake_run_cmd()
+        self._patch_backoff_to_fail(
+            monkeypatch,
+            fake,
+            transient_stderr="fatal: unable to access: Could not resolve host: github.com",
+        )
+        progress = _RecordingProgress()
+
+        import pytest
+
+        with pytest.raises(repo.DependencyUnreachableError) as excinfo:
+            repo.setup_repo(_config(), progress=progress)
+
+        # Reclassified to egress_denied naming the exact host to allowlist.
+        assert str(excinfo.value).startswith("BLOCKED[egress_denied]:")
+        assert "(resource: github.com)" in str(excinfo.value)
+
+        # The terminal blocker is egress_denied and non-retryable.
+        blocked = [c for c in progress.calls if c[0] == "write_agent_blocked"]
+        terminal = [c for c in blocked if c[1]["kind"] == "egress_denied"]
+        assert terminal, "expected an egress_denied blocker event"
+        assert all(c[1]["retryable"] is False for c in terminal)
+        assert all(c[1]["resource"] == "github.com" for c in terminal)
 
     def test_permanent_clone_failure_is_not_reported_as_dependency_unreachable(self, monkeypatch):
         """A permanent failure (repo not found / auth denied) must raise a plain
@@ -236,6 +271,38 @@ class TestSetupRepoDependencyUnreachable:
         with pytest.raises(RuntimeError) as excinfo:
             repo.setup_repo(_config(), progress=_RecordingProgress())
         assert "ghp_SECRETTOKEN123" not in str(excinfo.value)
+
+    def test_exhausted_pr_branch_fetch_reports_branch_as_resource(self, monkeypatch):
+        """The PR-workflow fetch path (repo.py) mirrors the clone path but its
+        blocker resource is the branch name, not the repo. Clone succeeds; the
+        transient fetch failure exhausts retries → dependency_unreachable naming
+        the branch."""
+        fake = _fake_run_cmd()
+        monkeypatch.setattr(repo, "run_cmd", fake)
+        monkeypatch.setattr(repo, "_install_commit_hook", lambda repo_dir: None)
+
+        def fake_backoff(cmd, label, *, on_retry=None, **kwargs):
+            # Clone succeeds; only the PR-branch fetch fails transiently.
+            if label == "fetch-pr-branch":
+                return SimpleNamespace(returncode=1, stdout="", stderr="connection timed out")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(repo, "run_cmd_with_backoff", fake_backoff)
+        progress = _RecordingProgress()
+
+        import pytest
+
+        with pytest.raises(repo.DependencyUnreachableError) as excinfo:
+            repo.setup_repo(
+                _config(is_pr_workflow=True, branch_name="feature/x", base_branch="main"),
+                progress=progress,
+            )
+
+        # Resource is the branch, not the repo — this is the fetch path.
+        assert str(excinfo.value).startswith("BLOCKED[dependency_unreachable]:")
+        assert "(resource: feature/x)" in str(excinfo.value)
+        blocked = [c for c in progress.calls if c[0] == "write_agent_blocked"]
+        assert any(c[1].get("resource") == "feature/x" for c in blocked)
 
     def test_remediation_does_not_widen_creds_or_egress(self, monkeypatch):
         """Invariant (AC): remediation only re-runs the same command. It must

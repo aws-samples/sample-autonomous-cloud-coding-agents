@@ -189,6 +189,22 @@ export class MissingSecretError extends Error {
   }
 }
 
+/**
+ * A required secret exists but could not be read (#251, auth_failure blocker) —
+ * e.g. Secrets Manager AccessDenied or exhausted throttling. Distinct from
+ * MissingSecretError (secret absent/empty): the credential is present but the
+ * agent's principal cannot retrieve it, so this is an environmental fault, not
+ * a code bug. Carries the canonical ``BLOCKED[auth_failure]: … (resource: …)``
+ * reason so the hydration catch propagates it verbatim rather than silently
+ * degrading to minimal context and stranding the task with no token.
+ */
+export class SecretUnreadableError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'SecretUnreadableError';
+  }
+}
+
 /** Image attachments exceed the token budget available for text context. */
 export class AttachmentBudgetExceededError extends AttachmentError {
   constructor(message: string, options?: { cause?: unknown }) {
@@ -359,7 +375,14 @@ export async function resolveGitHubToken(secretArn: string): Promise<string> {
         { cause: err },
       );
     }
-    throw err;
+    // Secret exists but is unreadable (AccessDenied, throttling exhausted, …) —
+    // an environmental auth_failure, not a code bug. Carry the canonical reason
+    // so the hydration catch propagates it instead of degrading to minimal
+    // context (which would strand the task: no token to clone/push). (#251)
+    throw new SecretUnreadableError(
+      formatBlockerReason('auth_failure', 'the required GitHub token secret could not be read', secretArn),
+      { cause: err },
+    );
   }
   if (!result.SecretString) {
     throw new MissingSecretError(
@@ -1068,10 +1091,10 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
             const token = await resolveGitHubToken(tokenSecretArn);
             return await fetchGitHubIssue(repo, task.issue_number, token) ?? undefined;
           } catch (err) {
-            // A missing secret is a blocker, not optional-context degradation —
-            // propagate so the outer catch fails the task with the canonical
-            // reason (#251). Other fetch errors stay best-effort.
-            if (err instanceof MissingSecretError) throw err;
+            // A missing or unreadable secret is a blocker, not optional-context
+            // degradation — propagate so the outer catch fails the task with the
+            // canonical reason (#251). Other fetch errors stay best-effort.
+            if (err instanceof MissingSecretError || err instanceof SecretUnreadableError) throw err;
             logger.warn('Failed to resolve GitHub token or fetch issue', {
               task_id: task.task_id, error: err instanceof Error ? err.message : String(err),
             });
@@ -1090,8 +1113,8 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
             const token = await resolveGitHubToken(tokenSecretArn);
             return await fetchGitHubPullRequest(repo, task.pr_number, token) ?? undefined;
           } catch (err) {
-            // Missing secret → propagate as a blocker (#251); see issue-fetch note.
-            if (err instanceof MissingSecretError) throw err;
+            // Missing/unreadable secret → propagate as a blocker (#251); see issue-fetch note.
+            if (err instanceof MissingSecretError || err instanceof SecretUnreadableError) throw err;
             logger.warn('Failed to fetch PR context', {
               task_id: task.task_id,
               pr_number: task.pr_number,
@@ -1283,6 +1306,13 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
     // would fail opaquely. Propagating carries the canonical BLOCKED[missing_secret]
     // reason to failTask so classifyError surfaces the exact secret to wire.
     if (err instanceof MissingSecretError) {
+      throw err;
+    }
+    // Unreadable-secret blockers must propagate too (#251, auth_failure) — the
+    // secret is wired but the agent's principal can't read it (AccessDenied /
+    // throttling). Degrading strands the task with no token, same as a missing
+    // secret; the canonical BLOCKED[auth_failure] reason routes to the remedy.
+    if (err instanceof SecretUnreadableError) {
       throw err;
     }
     // Programming errors (bugs) should fail the task, not silently degrade context

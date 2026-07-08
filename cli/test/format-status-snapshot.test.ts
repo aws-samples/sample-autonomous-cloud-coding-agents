@@ -546,6 +546,39 @@ describe('formatStatusSnapshot', () => {
     expect(rendered).toContain('Blocker:       egress_denied [registry.npmjs.org] (1m 00s ago) — allowlist registry.npmjs.org in DNS Firewall');
   });
 
+  test('surfaces the most recent blocker when several were emitted', () => {
+    const task = buildTask();
+    const events: TaskEvent[] = [
+      mkEvent({
+        event_id: '01ARZ3NDEKTSV4RRFFQ69G5F10',
+        event_type: 'agent_blocked',
+        timestamp: '2026-04-29T15:00:00Z', // earlier
+        metadata: {
+          kind: 'dependency_unreachable',
+          detail: 'npm registry timeout',
+          remediation_hint: 'retry the task',
+          retryable: true,
+          resource: 'registry.npmjs.org',
+        },
+      }),
+      mkEvent({
+        event_id: '01ARZ3NDEKTSV4RRFFQ69G5F20',
+        event_type: 'agent_blocked',
+        timestamp: '2026-04-29T15:29:20Z', // later → wins
+        metadata: {
+          kind: 'egress_denied',
+          detail: 'connection refused',
+          remediation_hint: 'allowlist api.example.com in DNS Firewall',
+          retryable: false,
+          resource: 'api.example.com',
+        },
+      }),
+    ];
+    const rendered = formatStatusSnapshot(task, events, NOW);
+    expect(rendered).toContain('Blocker:       egress_denied [api.example.com]');
+    expect(rendered).not.toContain('dependency_unreachable');
+  });
+
   test('omits the Blocker line when there is no agent_blocked event', () => {
     const task = buildTask();
     const rendered = formatStatusSnapshot(task, [], NOW);

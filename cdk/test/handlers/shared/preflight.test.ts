@@ -221,7 +221,10 @@ describe('runPreflightChecks', () => {
 
     expect(result.passed).toBe(false);
     expect(result.failureReason).toBe(PreflightFailureReason.GITHUB_UNREACHABLE);
-    expect(result.failureDetail).toContain('Service unavailable');
+    // #251 review fix: an unreadable token secret is now wrapped as an
+    // auth_failure blocker, so the preflight detail carries the canonical reason
+    // (the raw SM error is preserved on .cause).
+    expect(result.failureDetail).toContain('BLOCKED[auth_failure]');
     expect(result.checks).toHaveLength(1);
     expect(result.checks[0].check).toBe('github_token_resolution');
     expect(mockFetch).not.toHaveBeenCalled();
