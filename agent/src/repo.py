@@ -305,6 +305,7 @@ def setup_repo(config: TaskConfig, progress: Any = None) -> RepoSetup:
     # Initial build (record whether the project builds before agent changes).
     # #1: use the repo's configured build command (default mise run build).
     from post_hooks import (
+        BUILD_VERIFY_TIMEOUT_S,
         DEFAULT_BUILD_COMMAND,
         DEFAULT_LINT_COMMAND,
         is_verify_command_inert,
@@ -332,47 +333,90 @@ def setup_repo(config: TaskConfig, progress: Any = None) -> RepoSetup:
         build_argv = resolve_verify_argv(config.build_command, DEFAULT_BUILD_COMMAND)
         build_cmd_str = " ".join(build_argv)
         log("SETUP", f"Running initial build ({build_cmd_str})...")
-        result = run_cmd(
-            build_argv,
-            label="verify-build-pre",
-            cwd=repo_dir,
-            check=False,
-        )
-        if result.returncode != 0:
-            note = f"Initial build ({build_cmd_str}) FAILED before agent changes"
-            notes.append(note)
-            build_before = False
-            # #1: if the build command could not RUN (no task / not found) AND no
-            # explicit build_command was configured, build-regression gating is
-            # INERT — flag it so the agent warns on the PR rather than silently
-            # passing every task. A configured command that fails to run is the
-            # operator's typo, not the silent-default trap, so only flag the
-            # unconfigured (mise-default) case.
-            if not config.build_command and is_verify_command_inert(
-                result.returncode, result.stderr
-            ):
-                build_gate_inert = True
-                notes.append(
-                    "⚠️ Build-regression gating is INERT: no runnable `mise run build` task in "
-                    "this repo and no build command configured. A change that breaks the build "
-                    "will still report success. Set pipeline.buildCommand in the repo's blueprint "
-                    "(e.g. 'npm run build') to enable gating."
-                )
-        else:
-            notes.append(f"Initial build ({build_cmd_str}): OK")
+        # ABCA-659 Bug B: use the same generous wall-clock ceiling as the
+        # POST-agent gate (BUILD_VERIFY_TIMEOUT_S, 30min) — NOT run_cmd's 600s
+        # default — and GUARD the timeout. A heavy CI-parity baseline build
+        # (install + compile + full test suite + synth) legitimately runs longer
+        # than 10min; at 600s it raised TimeoutExpired here (this call had no
+        # try/except) and crashed the whole task BEFORE the agent ever ran, so
+        # the issue got no PR and sat in Backlog — indistinguishable from a real
+        # failure (the 661/662 symptom). The baseline is only informational (it
+        # seeds regression gating); a timeout means "no usable baseline", NOT
+        # "the agent broke it", so we treat it as no-known-regression and let the
+        # run proceed. The post-agent gate re-runs the build with the same
+        # ceiling and surfaces an honest "timed out" if it's genuinely too slow.
+        try:
+            result = run_cmd(
+                build_argv,
+                label="verify-build-pre",
+                cwd=repo_dir,
+                check=False,
+                timeout=BUILD_VERIFY_TIMEOUT_S,
+            )
+        except subprocess.TimeoutExpired:
+            log(
+                "WARN",
+                f"Initial build ({build_cmd_str}) did not finish within "
+                f"{BUILD_VERIFY_TIMEOUT_S}s — skipping baseline (not a regression)",
+            )
+            notes.append(
+                f"Initial build ({build_cmd_str}) did not finish within "
+                f"{BUILD_VERIFY_TIMEOUT_S}s — baseline skipped (not treated as a regression)"
+            )
             build_before = True
+        else:
+            if result.returncode != 0:
+                note = f"Initial build ({build_cmd_str}) FAILED before agent changes"
+                notes.append(note)
+                build_before = False
+                # #1: if the build command could not RUN (no task / not found) AND no
+                # explicit build_command was configured, build-regression gating is
+                # INERT — flag it so the agent warns on the PR rather than silently
+                # passing every task. A configured command that fails to run is the
+                # operator's typo, not the silent-default trap, so only flag the
+                # unconfigured (mise-default) case.
+                if not config.build_command and is_verify_command_inert(
+                    result.returncode, result.stderr
+                ):
+                    build_gate_inert = True
+                    notes.append(
+                        "⚠️ Build-regression gating is INERT: no runnable `mise run build` task "
+                        "in this repo and no build command configured. A change that breaks the "
+                        "build will still report success. Set pipeline.buildCommand in the repo's "
+                        "blueprint (e.g. 'npm run build') to enable gating."
+                    )
+            else:
+                notes.append(f"Initial build ({build_cmd_str}): OK")
+                build_before = True
 
         # Initial lint baseline (record whether lint passes before agent changes)
         lint_argv = resolve_verify_argv(config.lint_command, DEFAULT_LINT_COMMAND)
         lint_cmd_str = " ".join(lint_argv)
         log("SETUP", f"Running initial lint ({lint_cmd_str})...")
-        result = run_cmd(
-            lint_argv,
-            label="verify-lint-pre",
-            cwd=repo_dir,
-            check=False,
-        )
-        if result.returncode != 0:
+        # ABCA-659 Bug B: same generous ceiling + timeout guard as the build
+        # baseline above (a slow lint must not crash the task before the agent
+        # runs). A timeout → no usable lint baseline → treat as not-a-regression.
+        try:
+            result = run_cmd(
+                lint_argv,
+                label="verify-lint-pre",
+                cwd=repo_dir,
+                check=False,
+                timeout=BUILD_VERIFY_TIMEOUT_S,
+            )
+        except subprocess.TimeoutExpired:
+            log(
+                "WARN",
+                f"Initial lint ({lint_cmd_str}) did not finish within "
+                f"{BUILD_VERIFY_TIMEOUT_S}s — skipping baseline (not a regression)",
+            )
+            notes.append(
+                f"Initial lint ({lint_cmd_str}) did not finish within "
+                f"{BUILD_VERIFY_TIMEOUT_S}s — baseline skipped (not treated as a regression)"
+            )
+            lint_before = True
+            result = None
+        if result is not None and result.returncode != 0:
             # #72: distinguish "lint couldn't RUN" (no `mise run lint` task and no
             # configured lint_command — the default fired and the task doesn't exist)
             # from a genuine lint failure. The former is INERT: recording it as a
@@ -393,7 +437,8 @@ def setup_repo(config: TaskConfig, progress: Any = None) -> RepoSetup:
                 note = f"Initial lint ({lint_cmd_str}) FAILED before agent changes"
                 notes.append(note)
                 lint_before = False
-        else:
+        elif result is not None:
+            # Ran and passed (the timeout path already noted + set lint_before).
             notes.append(f"Initial lint ({lint_cmd_str}): OK")
             lint_before = True
 
