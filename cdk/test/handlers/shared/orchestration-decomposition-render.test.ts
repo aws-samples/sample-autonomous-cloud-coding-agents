@@ -27,6 +27,8 @@ import {
   renderDecomposeStartedNote,
   renderDecomposeUnavailableNote,
   renderDiscardedPlanReference,
+  renderEpicAlreadyCompleteNote,
+  renderEpicRetryNote,
   renderLabelHelp,
   renderMultiPartHint,
   renderPlannerErrorNote,
@@ -328,6 +330,41 @@ describe('renderApprovedPlanReference (#299 plan-cleanup)', () => {
     const ref = renderApprovedPlanReference(CHAIN);
     // "API" depends on #1 (Schema) → the "after #1" note carries into the reference.
     expect(ref).toMatch(/after #1/);
+  });
+});
+
+describe('renderEpicRetryNote / renderEpicAlreadyCompleteNote (ABCA-659 re-trigger)', () => {
+  test('retry note names exactly what is being re-run (failed + skipped) + keeps succeeded', () => {
+    const note = renderEpicRetryNote({ failed: 2, skipped: 3, succeeded: 1 });
+    expect(note.startsWith(PLAN_PROPOSAL_PREFIX)).toBe(true);
+    expect(note).toMatch(/Re-running/i);
+    expect(note).toContain('5 sub-issues'); // 2 + 3
+    expect(note).toContain('2 failed');
+    expect(note).toContain('3 skipped');
+    expect(note).toMatch(/1 that already succeeded is left as-is/);
+    // NOT the misleading "running the existing sub-issue graph".
+    expect(note).not.toMatch(/running the existing sub-issue graph/);
+  });
+
+  test('retry note omits the succeeded clause when none succeeded, pluralizes correctly', () => {
+    const note = renderEpicRetryNote({ failed: 1, skipped: 0, succeeded: 0 });
+    expect(note).toContain('1 sub-issue ('); // singular
+    expect(note).toContain('1 failed');
+    expect(note).not.toContain('skipped');
+    expect(note).not.toMatch(/left as-is/);
+  });
+
+  test('already-complete note says nothing to re-run + points at per-sub-issue comments', () => {
+    const note = renderEpicAlreadyCompleteNote();
+    expect(note).toMatch(/already finished/i);
+    expect(note).toMatch(/nothing to re-run/i);
+    expect(note).toMatch(/@bgagent/);
+    expect(note).not.toMatch(/running the existing sub-issue graph/);
+  });
+
+  test('both re-trigger notes are bot-authored (never self-trigger)', () => {
+    expect(isBotAuthoredComment(renderEpicRetryNote({ failed: 1, skipped: 1, succeeded: 0 }))).toBe(true);
+    expect(isBotAuthoredComment(renderEpicAlreadyCompleteNote())).toBe(true);
   });
 });
 

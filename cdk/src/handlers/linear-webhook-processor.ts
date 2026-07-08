@@ -19,7 +19,7 @@
 
 import * as crypto from 'crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { buildClarifyResumeDescription, isClarifyHold } from './shared/clarify-resume';
 import { createTaskCore } from './shared/create-task-core';
 import { renderMaturingReply } from './shared/iteration-reply';
@@ -64,6 +64,8 @@ import {
   renderCommandCollapseNote,
   renderDecomposeStartedNote,
   renderDiscardedPlanReference,
+  renderEpicAlreadyCompleteNote,
+  renderEpicRetryNote,
   renderLabelHelp,
   renderMultiPartHint,
   renderPendingPlanNudge,
@@ -100,9 +102,10 @@ import {
 import { applyPlanCommand, parsePlanCommand, type PlanCommand } from './shared/orchestration-plan-commands';
 import { applyPlanEdits, diffPlans, renderPlanDiff } from './shared/orchestration-plan-revise';
 import { bedrockInvokeRevise, interpretRevise, type InvokeReviseFn } from './shared/orchestration-plan-revise-interpret';
+import { computeEpicRetryPlan } from './shared/orchestration-reconcile';
 import { readConcurrencyBudget, releaseReadyChildren } from './shared/orchestration-release';
 import { upsertEpicPanel } from './shared/orchestration-rollup';
-import { claimCommentAck, deriveOrchestrationId, loadOrchestration, setStatusCommentId, type OrchestrationReleaseContext } from './shared/orchestration-store';
+import { claimCommentAck, clearRollupClaim, deriveOrchestrationId, loadOrchestration, setStatusCommentId, type OrchestrationReleaseContext } from './shared/orchestration-store';
 import type { Attachment } from './shared/types';
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -681,12 +684,13 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       // releases them as predecessors finish. A re-trigger with no new nodes
       // returns empty → nothing to do.
       if (discovery.addedSubIssueIds.length === 0) {
-        // Pure re-trigger, no new nodes. If a decompose/auto suffix drove it, say
-        // the suffix is a no-op on an already-decomposed epic (F-already-decomposed);
-        // otherwise it's a benign re-apply and stays quiet. alreadyExisted=true here
-        // (this epic was seeded before), so pass true → the note posts once per the
-        // decision, and a decompose-suffix re-trigger isn't silently ignored.
-        await maybePostAlreadyDecomposedNote(decompositionDecision, false, issue.id, workspaceId);
+        // Pure re-trigger, no new nodes. ABCA-659: if the existing graph already
+        // reached terminal WITH failures (failed/skipped children), a re-label is
+        // the user asking to RETRY the parts that didn't finish — re-run them
+        // instead of the old misleading "running the existing sub-issue graph"
+        // note that re-ran nothing. A still-running or all-succeeded epic has
+        // nothing to retry and reports honestly.
+        await maybeRetryTerminalEpic(discovery.orchestrationId, issue.id, workspaceId, decompositionDecision);
         logger.info('Linear orchestration re-trigger — no new sub-issues to add', {
           issue_id: issue.id, orchestration_id: discovery.orchestrationId,
         });
@@ -988,6 +992,140 @@ function buildDecompositionEffects(
     },
     discardPendingPlan: async () => { await discardPendingPlanRow(ddb, ORCHESTRATION_TABLE!, parentIssueId); },
   };
+}
+
+/**
+ * ABCA-659 — retry an already-terminal epic on a pure re-trigger (re-label with
+ * no new sub-issues). The seed/extend paths never re-run terminal children, so a
+ * re-label of an epic that finished WITH failures previously re-ran nothing while
+ * claiming it was "running the existing sub-issue graph". This resets the
+ * failed + skipped children and re-releases the now-ready layer (the forward
+ * reconciler cascade carries the rest as retried predecessors re-succeed),
+ * mirroring the recovery-cascade shape. ``succeeded`` nodes are never touched.
+ *
+ * Three outcomes, all with honest copy:
+ *  - failed/skipped children exist → RETRY them (reset + re-release + re-open the
+ *    rollup claim so the panel re-settles) and post {@link renderEpicRetryNote}.
+ *  - every child succeeded → post {@link renderEpicAlreadyCompleteNote} (nothing to run).
+ *  - the epic is still RUNNING (a child released/running, none failed/skipped) →
+ *    fall back to the existing already-decomposed note (benign re-apply).
+ *
+ * Best-effort throughout; never throws out of the webhook. Idempotency: the retry
+ * is naturally convergent — a redelivery finds the nodes already reset to
+ * ready/blocked/released (computeEpicRetryPlan sees 0 failed/skipped) and no-ops.
+ */
+async function maybeRetryTerminalEpic(
+  orchestrationId: string,
+  parentIssueId: string,
+  workspaceId: string,
+  decompositionDecision: { mode: string },
+): Promise<void> {
+  if (!ORCHESTRATION_TABLE) return;
+  const snapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, orchestrationId);
+  if (!snapshot) return;
+  const now = new Date().toISOString();
+  const plan = computeEpicRetryPlan(
+    snapshot.children.map((c) => ({
+      sub_issue_id: c.sub_issue_id,
+      depends_on: c.depends_on,
+      child_status: c.child_status,
+    })),
+  );
+
+  const ctx = WORKSPACE_REGISTRY_TABLE
+    ? { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE }
+    : undefined;
+
+  // Nothing failed/skipped → nothing to retry.
+  if (plan.statusUpdates.length === 0) {
+    if (!ctx) return;
+    if (plan.succeededCount > 0 && plan.succeededCount === snapshot.children.length) {
+      // Every child succeeded — the epic is genuinely done.
+      await upsertStatusComment(ctx, parentIssueId, renderEpicAlreadyCompleteNote());
+    } else {
+      // Still running (nodes released/running, none terminal-failed) — benign
+      // re-apply; keep the existing already-decomposed copy.
+      await maybePostAlreadyDecomposedNote(decompositionDecision, false, parentIssueId, workspaceId);
+    }
+    return;
+  }
+
+  logger.info('ABCA-659 epic retry: resetting failed/skipped children', {
+    orchestration_id: orchestrationId,
+    failed: plan.failedCount,
+    skipped: plan.skippedCount,
+    succeeded: plan.succeededCount,
+    re_releasing: plan.toRelease.length,
+  });
+
+  // 1. Persist the resets (failed→ready/blocked, skipped→blocked), including the
+  //    toRelease rows — releaseReadyChildren's conditional write accepts
+  //    child_status IN (blocked, ready), so a row must be one of those before we
+  //    release it (same ordering the recovery path relies on).
+  for (const update of plan.statusUpdates) {
+    try {
+      await ddb.send(new UpdateCommand({
+        TableName: ORCHESTRATION_TABLE,
+        Key: { orchestration_id: orchestrationId, sub_issue_id: update.sub_issue_id },
+        UpdateExpression: 'SET child_status = :s, updated_at = :now',
+        ConditionExpression: 'child_status <> :s',
+        ExpressionAttributeValues: { ':s': update.child_status, ':now': now },
+      }));
+    } catch (err) {
+      // A racing redelivery already flipped it — fine, keep going.
+      if ((err as { name?: string })?.name === 'ConditionalCheckFailedException') continue;
+      throw err;
+    }
+  }
+
+  // 2. The epic had settled to "⚠️ finished with failures" — release the once-only
+  //    rollup claim so the parent state re-settles (❌→🔄→✅) as the retried work
+  //    lands (same as the recovery path).
+  await clearRollupClaim(ddb, ORCHESTRATION_TABLE, orchestrationId, now);
+
+  // 3. Re-release the now-ready layer against a fresh read, gated on the budget.
+  const fresh = await loadOrchestration(ddb, ORCHESTRATION_TABLE, orchestrationId);
+  const freshChildren = fresh?.children ?? snapshot.children;
+  if (plan.toRelease.length > 0) {
+    const releasableRows = freshChildren
+      .filter((c) => plan.toRelease.includes(c.sub_issue_id))
+      .map((c) => ({ ...c, child_status: 'ready' as const }));
+    if (releasableRows.length > 0) {
+      const releaseCtx = (fresh ?? snapshot).meta.release_context;
+      const budget = USER_CONCURRENCY_TABLE
+        ? await readConcurrencyBudget(ddb, USER_CONCURRENCY_TABLE, releaseCtx.platform_user_id, MAX_CONCURRENT)
+        : undefined;
+      await releaseReadyChildren(
+        ddb, ORCHESTRATION_TABLE, releasableRows, releaseCtx,
+        createTaskCore, now, freshChildren, 'main', budget,
+      );
+    }
+  }
+
+  // 4. Honest note + refresh the panel so the reset rows stop showing ❌/⏭️ and
+  //    the header reverts to in-progress.
+  if (ctx) {
+    await upsertStatusComment(
+      ctx, parentIssueId,
+      renderEpicRetryNote({ failed: plan.failedCount, skipped: plan.skippedCount, succeeded: plan.succeededCount }),
+    );
+    try {
+      const refreshed = await loadOrchestration(ddb, ORCHESTRATION_TABLE, orchestrationId);
+      const meta = (refreshed ?? fresh ?? snapshot).meta;
+      await upsertEpicPanel({
+        ctx,
+        parentLinearIssueId: parentIssueId,
+        ...(meta.status_comment_id !== undefined && { statusCommentId: meta.status_comment_id }),
+        children: (refreshed ?? fresh ?? snapshot).children,
+        inProgress: true,
+        mirrorParentState: true,
+      });
+    } catch (err) {
+      logger.warn('ABCA-659 epic retry: panel refresh failed (non-fatal)', {
+        orchestration_id: orchestrationId, error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
 }
 
 /**

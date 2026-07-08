@@ -18,6 +18,7 @@
  */
 
 import {
+  computeEpicRetryPlan,
   computeReconcilePlan,
   computeRecoveryPlan,
   type ReconcileChild,
@@ -278,5 +279,83 @@ describe('computeRecoveryPlan (#75 — comment-fix a failed child re-releases sk
     expect(u.BAD).toBe('succeeded');
     expect(u.INTEG).toBe('blocked'); // reset; both deps now succeeded → releasable
     expect(plan.toRelease).toEqual(['INTEG']);
+  });
+});
+
+describe('computeEpicRetryPlan (ABCA-659 — re-trigger a terminal epic retries failed/skipped)', () => {
+  function retryUpdatesById(plan: ReturnType<typeof computeEpicRetryPlan>): Record<string, ChildStatus> {
+    return Object.fromEntries(plan.statusUpdates.map((u) => [u.sub_issue_id, u.child_status]));
+  }
+
+  test('the exact ABCA-659 shape: root failed, its dependents skipped → reset all, release the root', () => {
+    // 660 failed (root), 661/662 skipped (dep on 660), 663 failed (independent root),
+    // integration skipped (dep on all). Mirrors the live store dump.
+    const children = [
+      row('660', 'failed'),
+      row('661', 'skipped', ['660']),
+      row('662', 'skipped', ['660']),
+      row('663', 'failed'),
+      row('INTEG', 'skipped', ['660', '661', '662', '663']),
+    ];
+    const plan = computeEpicRetryPlan(children);
+    const u = retryUpdatesById(plan);
+    expect(plan.failedCount).toBe(2);
+    expect(plan.skippedCount).toBe(3);
+    expect(plan.succeededCount).toBe(0);
+    // Both failed roots reset to ready (no preds); skipped nodes → blocked.
+    expect(u['660']).toBe('ready');
+    expect(u['663']).toBe('ready');
+    expect(u['661']).toBe('blocked');
+    expect(u['662']).toBe('blocked');
+    expect(u.INTEG).toBe('blocked');
+    // Only the two ready roots release now; the rest ride the forward cascade.
+    expect(plan.toRelease.sort()).toEqual(['660', '663']);
+  });
+
+  test('a failed node BEHIND another failed node resets to blocked (waits for the cascade), not ready', () => {
+    const children = [
+      row('A', 'failed'),
+      row('B', 'failed', ['A']), // B failed AND depends on the also-failed A
+    ];
+    const plan = computeEpicRetryPlan(children);
+    const u = retryUpdatesById(plan);
+    expect(u.A).toBe('ready'); // root, no preds
+    expect(u.B).toBe('blocked'); // A isn't succeeded yet → B waits
+    expect(plan.toRelease).toEqual(['A']);
+  });
+
+  test('succeeded nodes are NEVER touched or re-run', () => {
+    const children = [
+      row('A', 'succeeded'),
+      row('B', 'failed', ['A']),
+    ];
+    const plan = computeEpicRetryPlan(children);
+    const u = retryUpdatesById(plan);
+    expect(u.A).toBeUndefined(); // untouched
+    expect(u.B).toBe('ready'); // its only pred (A) already succeeded
+    expect(plan.toRelease).toEqual(['B']);
+    expect(plan.succeededCount).toBe(1);
+  });
+
+  test('nothing failed/skipped → empty plan (still-running or all-succeeded epic)', () => {
+    const running = computeEpicRetryPlan([row('A', 'released'), row('B', 'blocked', ['A'])]);
+    expect(running.statusUpdates).toEqual([]);
+    expect(running.toRelease).toEqual([]);
+
+    const done = computeEpicRetryPlan([row('A', 'succeeded'), row('B', 'succeeded', ['A'])]);
+    expect(done.statusUpdates).toEqual([]);
+    expect(done.succeededCount).toBe(2);
+  });
+
+  test('idempotent: re-running the plan on the reset graph is a no-op', () => {
+    const children = [row('A', 'failed'), row('B', 'skipped', ['A'])];
+    const first = computeEpicRetryPlan(children);
+    // Apply the first plan to a new graph.
+    const applied = children.map((c) => {
+      const upd = first.statusUpdates.find((u) => u.sub_issue_id === c.sub_issue_id);
+      return upd ? row(c.sub_issue_id, upd.child_status, c.depends_on) : c;
+    });
+    const second = computeEpicRetryPlan(applied);
+    expect(second.statusUpdates).toEqual([]); // A now ready, B blocked → nothing failed/skipped
   });
 });

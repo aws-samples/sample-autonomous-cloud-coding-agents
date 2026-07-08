@@ -285,3 +285,91 @@ export function computeRecoveryPlan(
 
   return { statusUpdates: updates, toRelease };
 }
+
+export interface EpicRetryPlan {
+  /** Status writes to apply (failed→ready/blocked, skipped→blocked). */
+  readonly statusUpdates: readonly StatusUpdate[];
+  /** Sub-issue ids now releasable (a reset node with all predecessors succeeded). */
+  readonly toRelease: readonly string[];
+  /** Count of nodes that were failed before this retry (for the honest reply copy). */
+  readonly failedCount: number;
+  /** Count of nodes that were skipped before this retry. */
+  readonly skippedCount: number;
+  /** Count of nodes left untouched because they already succeeded. */
+  readonly succeededCount: number;
+}
+
+/**
+ * ABCA-659 — RETRY the whole epic. A human re-applied the trigger label (or
+ * re-triggered) on a parent whose orchestration is already TERMINAL: some
+ * children ``failed`` (and their dependents transitively ``skipped``). The
+ * seed/extend paths don't re-run terminal children — the seed path only releases
+ * on first-seed, extend only releases genuinely-NEW nodes — so a bare re-trigger
+ * of a finished-with-failures epic previously re-ran nothing while the note
+ * claimed it was "running the existing sub-issue graph" (the misleading copy the
+ * user hit). This makes a re-trigger a real "retry the failed parts":
+ *
+ *   1. Every ``failed`` node → ``ready`` if all its predecessors are ``succeeded``,
+ *      else ``blocked`` (its own failed/skipped predecessor is being retried too,
+ *      and the forward cascade releases it once that predecessor re-succeeds).
+ *   2. Every ``skipped`` node → ``blocked`` (it never ran; put it back in the
+ *      waiting state the forward cascade understands, exactly like recovery).
+ *   3. ``succeeded`` nodes are LEFT ALONE — we never re-run work that landed.
+ *   4. Release every now-``ready`` node whose predecessors are ALL ``succeeded``
+ *      (the immediate layer); deeper layers release via the forward cascade as
+ *      their retried predecessors re-succeed.
+ *
+ * Returns an all-zero-count / empty plan when NOTHING is failed or skipped (a
+ * healthy or still-running epic) so the caller can distinguish "retried N" from
+ * "nothing to retry" and post honest copy. Pure (no I/O); the handler persists +
+ * releases + resets the reconcile-complete marker. Mirrors {@link computeRecoveryPlan}
+ * but keyed on the whole graph rather than one recovered node.
+ */
+export function computeEpicRetryPlan(
+  children: readonly ReconcileChild[],
+): EpicRetryPlan {
+  const statusOf = new Map<string, ChildStatus>(
+    children.map((c) => [c.sub_issue_id, c.child_status]),
+  );
+  const failedCount = children.filter((c) => c.child_status === 'failed').length;
+  const skippedCount = children.filter((c) => c.child_status === 'skipped').length;
+  const succeededCount = children.filter((c) => c.child_status === 'succeeded').length;
+
+  // Nothing to retry — no failed/skipped nodes. Empty plan; the caller reports
+  // honestly (already running, or already all-succeeded) instead of re-releasing.
+  if (failedCount === 0 && skippedCount === 0) {
+    return { statusUpdates: [], toRelease: [], failedCount, skippedCount, succeededCount };
+  }
+
+  const updates: StatusUpdate[] = [];
+  const setStatus = (id: string, s: ChildStatus): void => {
+    statusOf.set(id, s);
+    updates.push({ sub_issue_id: id, child_status: s });
+  };
+
+  // 1 + 2. Reset failed → ready/blocked (by whether preds are already succeeded)
+  //        and skipped → blocked. We compute failed→ready against the CURRENT
+  //        (pre-reset) statuses first so a failed node whose preds all succeeded
+  //        goes straight to ready; a failed node behind another failed/skipped
+  //        node goes blocked and waits for the forward cascade.
+  for (const c of children) {
+    if (c.child_status === 'failed') {
+      const allDepsSucceeded = c.depends_on.every((dep) => statusOf.get(dep) === 'succeeded');
+      setStatus(c.sub_issue_id, allDepsSucceeded ? 'ready' : 'blocked');
+    } else if (c.child_status === 'skipped') {
+      setStatus(c.sub_issue_id, 'blocked');
+    }
+  }
+
+  // 3. succeeded/released nodes are untouched (never re-run landed work).
+
+  // 4. Release every now-ready node whose predecessors are ALL succeeded.
+  const toRelease: string[] = [];
+  for (const c of children) {
+    if (statusOf.get(c.sub_issue_id) !== 'ready') continue;
+    const allSucceeded = c.depends_on.every((dep) => statusOf.get(dep) === 'succeeded');
+    if (allSucceeded) toRelease.push(c.sub_issue_id);
+  }
+
+  return { statusUpdates: updates, toRelease, failedCount, skippedCount, succeededCount };
+}
