@@ -1841,10 +1841,9 @@ describe('renderLinearFinalStatusComment', () => {
   });
 
   test('⚠️ frame renders the classifier title (ABCA-91 contextual reason)', () => {
-    // Krokoko's review item #4: the most useful context for the ⚠️
-    // case is *why* the agent stopped early. Render the classifier
-    // title alongside "Shipped a PR but stopped early" so the
-    // requester sees both outcomes.
+    // The most useful context for the warning frame is *why* the agent
+    // stopped early. Render the classifier title alongside "Shipped a
+    // PR but stopped early" so the requester sees both outcomes.
     const body = renderLinearFinalStatusComment({
       eventType: 'task_failed',
       prUrl: 'https://github.com/owner/repo/pull/35',
@@ -2078,7 +2077,7 @@ describe('fanout-task-events: agent_milestone routing (effective event type)', (
 });
 
 // ---------------------------------------------------------------------------
-// Krokoko code review findings #1 + #5 — partial-batch response contract
+// Partial-batch response contract for fanout delivery.
 // ---------------------------------------------------------------------------
 
 /**

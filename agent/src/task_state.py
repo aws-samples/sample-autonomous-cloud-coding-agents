@@ -297,9 +297,11 @@ def write_terminal(task_id: str, status: str, result: dict | None = None) -> Non
                 update_parts.append("memory_written = :mw")
                 expr_values[":mw"] = result["memory_written"]
             # Persist the post-hook verify outcomes so they're observable on the
-            # task record (and visible to the orchestration reconciler / dashboards),
-            # not just consumed in-process by the gate. Absent these, a consumer
-            # can see only `status` and not WHY a task passed/failed verification.
+            # task record (orchestration reconciler / dashboards / #515 replay
+            # bundle), not just consumed in-process by the gate. build_passed/
+            # lint_passed were historically dropped here (present on TaskResult but
+            # never written) — persist both so a consumer sees WHY a task passed/
+            # failed verification, as a structured signal.
             if result.get("build_passed") is not None:
                 update_parts.append("build_passed = :bp")
                 expr_values[":bp"] = bool(result["build_passed"])
@@ -325,6 +327,11 @@ def write_terminal(task_id: str, status: str, result: dict | None = None) -> Non
                 # Bound the persisted answer so a verbose agent can't bloat the
                 # row; the reply renderer truncates again for display.
                 expr_values[":ans"] = str(result["answer_text"])[:2000]
+            # OTEL trace id (#515) for cross-plane correlation. Absent on tasks
+            # that predate this field and when tracing is unavailable.
+            if result.get("otel_trace_id"):
+                update_parts.append("otel_trace_id = :otid")
+                expr_values[":otid"] = result["otel_trace_id"]
             # --trace artifact URI (design §10.1). Written atomically
             # with the terminal-status transition so a consumer that
             # reads TaskRecord.trace_s3_uri immediately after

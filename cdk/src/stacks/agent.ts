@@ -34,6 +34,7 @@ import { AgentSessionRole } from '../constructs/agent-session-role';
 import { AgentVpc } from '../constructs/agent-vpc';
 import { ApprovalMetricsPublisherConsumer } from '../constructs/approval-metrics-publisher-consumer';
 import { AttachmentsBucket } from '../constructs/attachments-bucket';
+import { resolveBedrockModelIds } from '../constructs/bedrock-models';
 import { Blueprint } from '../constructs/blueprint';
 import { CedarWasmLayer } from '../constructs/cedar-wasm-layer';
 import { ConcurrencyReconciler } from '../constructs/concurrency-reconciler';
@@ -314,7 +315,11 @@ export class AgentStack extends Stack {
       AWS_REGION: process.env.AWS_REGION ?? 'us-east-1',
       CLAUDE_CODE_USE_BEDROCK: '1',
       ANTHROPIC_LOG: 'debug',
-      ANTHROPIC_DEFAULT_HAIKU_MODEL: 'anthropic.claude-haiku-4-5-20251001-v1:0',
+      // Cross-region inference-profile id (``us.`` prefix), NOT the bare
+      // foundation-model id: Claude 4.x can't be invoked on-demand by bare id
+      // (400 "on-demand throughput isn't supported"). Must match a granted
+      // profile (see bedrock-models.ts). runner.py re-sets this at spawn time.
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
       TASK_TABLE_NAME: taskTable.table.tableName,
       TASK_EVENTS_TABLE_NAME: taskEventsTable.table.tableName,
       NUDGES_TABLE_NAME: taskNudgesTable.table.tableName,
@@ -451,44 +456,28 @@ export class AgentStack extends Stack {
     applicationLogGroup.grantWrite(runtime);
     agentMemory.grantReadWrite(runtime);
 
-    const model = new bedrock.BedrockFoundationModel('anthropic.claude-sonnet-4-6', {
-      supportsAgents: true,
-      supportsCrossRegion: true,
-    });
-
-    // Create a cross-region inference profile for Claude Sonnet 4.6
-    const inferenceProfile = bedrock.CrossRegionInferenceProfile.fromConfig({
-      geoRegion: bedrock.CrossRegionInferenceProfileRegion.US,
-      model: model,
-    });
-
-    const model3 = new bedrock.BedrockFoundationModel('anthropic.claude-opus-4-20250514-v1:0', {
-      supportsAgents: true,
-      supportsCrossRegion: true,
-    });
-
-    const inferenceProfile3 = bedrock.CrossRegionInferenceProfile.fromConfig({
-      geoRegion: bedrock.CrossRegionInferenceProfileRegion.US,
-      model: model3,
-    });
-
-    const model2 = new bedrock.BedrockFoundationModel('anthropic.claude-haiku-4-5-20251001-v1:0', {
-      supportsAgents: true,
-      supportsCrossRegion: true,
-    });
-
-    // Create a cross-region inference profile for Claude Haiku 4.5
-    const inferenceProfile2 = bedrock.CrossRegionInferenceProfile.fromConfig({
-      geoRegion: bedrock.CrossRegionInferenceProfileRegion.US,
-      model: model2,
-    });
-
-    model.grantInvoke(runtime);
-    inferenceProfile.grantInvoke(runtime);
-    model3.grantInvoke(runtime);
-    inferenceProfile3.grantInvoke(runtime);
-    model2.grantInvoke(runtime);
-    inferenceProfile2.grantInvoke(runtime);
+    // Grant the runtime invoke on each configured foundation model + its US
+    // cross-Region inference profile. The model set is a single source of truth
+    // (constructs/bedrock-models.ts, #434), shared with the ECS task role and
+    // overridable via the `bedrockModels` CDK context. Each invokable is also
+    // collected so the same set is granted to the SessionRole below (#215 cost
+    // attribution) — the two grants derive from one list and can't drift.
+    // Scoping stays per-model (no Resource:'*'); account-level Bedrock access
+    // remains the outer gate.
+    const invokableBedrockModels: bedrock.IBedrockInvokable[] = [];
+    for (const modelId of resolveBedrockModelIds(this.node)) {
+      const foundationModel = new bedrock.BedrockFoundationModel(modelId, {
+        supportsAgents: true,
+        supportsCrossRegion: true,
+      });
+      const crossRegionProfile = bedrock.CrossRegionInferenceProfile.fromConfig({
+        geoRegion: bedrock.CrossRegionInferenceProfileRegion.US,
+        model: foundationModel,
+      });
+      foundationModel.grantInvoke(runtime);
+      crossRegionProfile.grantInvoke(runtime);
+      invokableBedrockModels.push(foundationModel, crossRegionProfile);
+    }
 
     // --- Per-task SessionRole (#209) ---
     // Holds the tenant-data grants (the four task_id-partitioned tables, plus
@@ -508,6 +497,10 @@ export class AgentStack extends Stack {
       ],
       traceArtifactsBucket: traceArtifactsBucket.bucket,
       attachmentsBucket: attachmentsBucket.bucket,
+      // #215: session-tagged Bedrock grant for cost attribution — the same
+      // invokables grantInvoke-ed to the runtime above, so the grants stay in
+      // lockstep.
+      invokableModels: invokableBedrockModels,
     });
     sessionRoleArnHolder = agentSessionRole.role.roleArn;
 
@@ -1286,8 +1279,14 @@ export class AgentStack extends Stack {
             cloudWatchConfig: {
               logGroupName: invocationLogGroup.logGroupName,
               roleArn: bedrockLoggingRole.roleArn,
-              // Required by API schema but unused — text logs go to CloudWatch only.
-              largeDataDeliveryS3Config: { bucketName: '', keyPrefix: '' },
+              // largeDataDeliveryS3Config is OPTIONAL and intentionally omitted:
+              // it only governs S3 delivery of oversized payloads, which this
+              // stack does not use (text logs go to CloudWatch). Sending it with
+              // an empty bucketName fails client-side validation
+              // ("valid min length: 3") — and because the errors below are
+              // swallowed and onUpdate never re-fires (static props), that
+              // failure silently leaves model-invocation logging DISABLED, which
+              // in turn means Bedrock records no requestMetadata (#215 Track 2).
             },
             textDataDeliveryEnabled: true,
             imageDataDeliveryEnabled: false,
@@ -1295,7 +1294,11 @@ export class AgentStack extends Stack {
           },
         },
         physicalResourceId: cr.PhysicalResourceId.of('bedrock-invocation-logging'),
-        ignoreErrorCodesMatching: '.*',
+        // Scope the ignore to genuine service-side errors (e.g. a concurrent
+        // account-level change). Do NOT use '.*' — that also hides client-side
+        // ValidationExceptions like the empty-bucket bug above, turning a
+        // deploy-time misconfiguration into silently-absent logging.
+        ignoreErrorCodesMatching: 'ThrottlingException|ServiceUnavailableException|InternalServerException',
       },
       // onUpdate re-applies the same config to handle drift (e.g., if another
       // stack or manual action changed the account-level logging config).
@@ -1307,7 +1310,6 @@ export class AgentStack extends Stack {
             cloudWatchConfig: {
               logGroupName: invocationLogGroup.logGroupName,
               roleArn: bedrockLoggingRole.roleArn,
-              largeDataDeliveryS3Config: { bucketName: '', keyPrefix: '' },
             },
             textDataDeliveryEnabled: true,
             imageDataDeliveryEnabled: false,
@@ -1315,7 +1317,7 @@ export class AgentStack extends Stack {
           },
         },
         physicalResourceId: cr.PhysicalResourceId.of('bedrock-invocation-logging'),
-        ignoreErrorCodesMatching: '.*',
+        ignoreErrorCodesMatching: 'ThrottlingException|ServiceUnavailableException|InternalServerException',
       },
       // onDelete intentionally omitted — model invocation logging is account-level;
       // deleting one stack should not disable logging that another stack relies on.
@@ -1326,6 +1328,16 @@ export class AgentStack extends Stack {
             'bedrock:DeleteModelInvocationLoggingConfiguration',
           ],
           resources: ['*'],
+        }),
+        // PutModelInvocationLoggingConfiguration hands bedrockLoggingRole to the
+        // Bedrock service (so Bedrock can write to the log group), which requires
+        // the caller to hold iam:PassRole on that role. Scoped to the one role —
+        // not a wildcard. (Previously masked by the empty-bucket validation error
+        // that ignoreErrorCodesMatching: '.*' swallowed; now that the call
+        // actually reaches Bedrock, this is required.)
+        new iam.PolicyStatement({
+          actions: ['iam:PassRole'],
+          resources: [bedrockLoggingRole.roleArn],
         }),
       ]),
     });

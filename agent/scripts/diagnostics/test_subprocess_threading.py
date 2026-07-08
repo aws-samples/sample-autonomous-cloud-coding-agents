@@ -7,9 +7,9 @@ Simulates the exact server.py → entrypoint.py architecture:
 Tests both Python and Node.js child processes (the actual Claude Code CLI
 is Node.js, whose stdout buffering behaviour may differ from Python).
 
-Run locally:     python test_subprocess_threading.py
-Run in Docker:   docker run --rm -v $PWD:/app python:3.13-slim \
-                 python /app/test_subprocess_threading.py
+Run locally:     python agent/scripts/diagnostics/test_subprocess_threading.py
+Run in Docker:   docker run --rm -v $PWD/agent:/app python:3.13-slim \
+                 python /app/scripts/diagnostics/test_subprocess_threading.py
 """
 
 import asyncio

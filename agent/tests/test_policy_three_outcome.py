@@ -26,6 +26,8 @@ Covers:
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 # Hard import — the policy engine requires cedarpy; skipping would hide drift.
 import cedarpy  # noqa: F401  (sanity import)
 import pytest
@@ -143,6 +145,60 @@ class TestPolicyDecisionConstruction:
         )
         assert bare == with_meta
         assert hash(bare) == hash(with_meta)
+
+    # -- #251 (decision E): fail_closed discriminator --------------------
+
+    def test_fail_closed_defaults_false(self):
+        # Hard-denies and allows must NOT be flagged fail-closed.
+        assert PolicyDecision.allow().fail_closed is False
+        assert PolicyDecision.deny("Hard-deny: force_push_main").fail_closed is False
+
+    def test_deny_can_be_marked_fail_closed(self):
+        d = PolicyDecision.deny("fail-closed: RuntimeError", fail_closed=True)
+        assert d.outcome == Outcome.DENY
+        assert d.fail_closed is True
+
+    def test_fail_closed_not_in_equality(self):
+        # Like cache_hit_metadata, fail_closed is derived observability and
+        # must not perturb __eq__/__hash__ for legacy set/dict callers.
+        bare = PolicyDecision(outcome=Outcome.DENY, reason="x")
+        flagged = PolicyDecision(outcome=Outcome.DENY, reason="x", fail_closed=True)
+        assert bare == flagged
+        assert hash(bare) == hash(flagged)
+
+
+class TestEvaluateToolUseFailClosed:
+    """The fail_closed flag must be True at engine-error/unavailable sites and
+    False for intentional hard-deny + cache-deny (§13.16, decision E)."""
+
+    def test_engine_unavailable_is_fail_closed(self):
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+        # Force the "policy engine unavailable" guard.
+        engine._cedarpy = None
+        d = engine.evaluate_tool_use("Bash", {"command": "echo hi"})
+        assert d.outcome == Outcome.DENY
+        assert d.fail_closed is True
+
+    def test_unhashable_tool_input_is_fail_closed(self):
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+        # A non-JSON-serialisable input trips the unhashable fail-closed path.
+        d = engine.evaluate_tool_use("Bash", {"command": {1, 2, 3}})
+        assert d.outcome == Outcome.DENY
+        assert d.fail_closed is True
+
+    def test_cedar_eval_exception_is_fail_closed(self):
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+        with patch.object(engine, "_eval_for_tool", side_effect=RuntimeError("cedar boom")):
+            d = engine.evaluate_tool_use("Bash", {"command": "echo hi"})
+        assert d.outcome == Outcome.DENY
+        assert d.fail_closed is True
+
+    def test_hard_deny_is_not_fail_closed(self):
+        # A read-only engine hard-denies Write — an INTENTIONAL deny.
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo", read_only=True)
+        d = engine.evaluate_tool_use("Write", {"file_path": "x.py", "content": "y"})
+        assert d.outcome == Outcome.DENY
+        assert d.fail_closed is False
 
 
 # ---------------------------------------------------------------------------

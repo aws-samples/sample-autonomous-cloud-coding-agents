@@ -142,6 +142,19 @@ describe('AgentStack', () => {
     }
   });
 
+  test('default Haiku model env var is the cross-region inference profile (us.), not the bare model id', () => {
+    // Claude 4.x on Bedrock cannot be invoked on-demand by bare foundation-model
+    // id (400 "on-demand throughput isn't supported"); WebFetch's Haiku sub-calls
+    // hit this. The env var must be the granted us.* inference profile.
+    const runtimes = template.findResources('AWS::BedrockAgentCore::Runtime');
+    for (const rt of Object.values(runtimes)) {
+      const envVars = (rt as { Properties?: { EnvironmentVariables?: Record<string, unknown> } })
+        .Properties?.EnvironmentVariables ?? {};
+      expect(envVars.ANTHROPIC_DEFAULT_HAIKU_MODEL)
+        .toBe('us.anthropic.claude-haiku-4-5-20251001-v1:0');
+    }
+  });
+
   test('outputs TaskTableName', () => {
     template.hasOutput('TaskTableName', {
       Description: 'Name of the DynamoDB task state table',
@@ -239,6 +252,65 @@ describe('AgentStack', () => {
     expect(serialized).toMatch(/"Fn::GetAtt":\["Runtime[0-9A-F]+","AgentRuntimeArn"\]/);
   });
 
+  test('runtime is granted the default Bedrock model set (#433)', () => {
+    // Default (no bedrockModels context): the runtime execution role must hold
+    // bedrock:InvokeModel on the three default foundation models + their US
+    // inference profiles, scoped (never Resource: '*').
+    const serialized = JSON.stringify(template.findResources('AWS::IAM::Policy'));
+    expect(serialized).toContain('foundation-model/anthropic.claude-sonnet-4-6');
+    expect(serialized).toContain('inference-profile/us.anthropic.claude-sonnet-4-6');
+    expect(serialized).toContain('anthropic.claude-opus-4-20250514-v1:0');
+    expect(serialized).toContain('anthropic.claude-haiku-4-5-20251001-v1:0');
+  });
+
+  test('bedrockModels context override propagates to the runtime execution role (#433)', () => {
+    // The other half of #433's acceptance criteria (the ECS side is covered in
+    // ecs-agent-cluster.test.ts): a context override must replace the runtime's
+    // granted models too — overridden model present, defaults absent, still scoped.
+    const app = new App({ context: { bedrockModels: ['anthropic.claude-opus-4-8'] } });
+    const stack = new AgentStack(app, 'OverrideAgentStack', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    });
+    const overridden = Template.fromStack(stack);
+
+    // Collect every bedrock:InvokeModel statement's Resource across the IAM
+    // policies the ``bedrockModels`` override GOVERNS: the runtime execution role
+    // and the per-task session role (the coding agent's task-model grants). The
+    // override replaces the model set for the WORKLOAD; these are its surfaces.
+    //
+    // Deliberately EXCLUDES the Linear webhook processor's policy: the #299
+    // deterministic-revise interpreter (linear-integration.ts) makes one tiny
+    // "which plan-edit did they mean?" classification call pinned to a FIXED
+    // model (DEFAULT_REVISE_MODEL_ID = sonnet), by design independent of the
+    // per-task ``bedrockModels`` override — you don't want a cheap classification
+    // running on whatever heavyweight coding model an operator selected. That
+    // grant is scoped to its single fixed model (asserted in the linear
+    // integration tests), so it's not a wildcard/drift risk; it just isn't part
+    // of the override contract this test checks.
+    const OVERRIDE_GOVERNED_POLICY_PREFIXES = ['RuntimeExecutionRole', 'AgentSessionRole'];
+    const policies = overridden.findResources('AWS::IAM::Policy');
+    const bedrockResources: unknown[] = [];
+    for (const [logicalId, p] of Object.entries(policies)) {
+      if (!OVERRIDE_GOVERNED_POLICY_PREFIXES.some((prefix) => logicalId.startsWith(prefix))) continue;
+      for (const s of (p.Properties?.PolicyDocument?.Statement ?? []) as Array<{ Action?: string | string[]; Resource?: unknown }>) {
+        const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+        if (actions.some((a) => typeof a === 'string' && a.startsWith('bedrock:InvokeModel'))) {
+          bedrockResources.push(s.Resource);
+        }
+      }
+    }
+    const serialized = JSON.stringify(bedrockResources);
+    expect(bedrockResources.length).toBeGreaterThan(0);
+    // Overridden model is granted...
+    expect(serialized).toContain('foundation-model/anthropic.claude-opus-4-8');
+    expect(serialized).toContain('inference-profile/us.anthropic.claude-opus-4-8');
+    // ...defaults are NOT (override replaces, not appends)...
+    expect(serialized).not.toContain('claude-sonnet-4-6');
+    expect(serialized).not.toContain('claude-haiku-4-5');
+    // ...and the grant is never a bare wildcard.
+    expect(serialized).not.toContain('"*"');
+  });
+
   test('outputs ApiUrl', () => {
     template.hasOutput('ApiUrl', {
       Description: 'URL of the Task API',
@@ -333,6 +405,53 @@ describe('AgentStack', () => {
       return joined.includes('putModelInvocationLoggingConfiguration');
     });
     expect(loggingConfigs.length).toBe(1);
+  });
+
+  test('model invocation logging does NOT send an empty largeDataDeliveryS3Config', () => {
+    // Regression guard (#215): sending largeDataDeliveryS3Config with an empty
+    // bucketName fails client-side validation ("valid min length: 3"), and with
+    // a catch-all ignoreErrorCodesMatching that failure silently leaves logging
+    // DISABLED — so Bedrock records no requestMetadata. The field is optional;
+    // omit it entirely. Assert it never reappears with an empty bucket.
+    const customs = template.findResources('Custom::AWS');
+    const logging = Object.values(customs).find(r =>
+      JSON.stringify(r.Properties?.Create).includes('putModelInvocationLoggingConfiguration'),
+    );
+    expect(logging).toBeDefined();
+    for (const phase of ['Create', 'Update'] as const) {
+      const body = JSON.stringify(logging!.Properties?.[phase] ?? '');
+      // Either absent, or — if ever re-added — must carry a real bucket name.
+      expect(body).not.toContain('largeDataDeliveryS3Config');
+    }
+  });
+
+  test('model invocation logging ignores only transient errors, not client-side validation', () => {
+    // A catch-all '.*' would also swallow the empty-bucket ValidationException
+    // above, hiding a deploy-time misconfiguration as silently-absent logging.
+    const customs = template.findResources('Custom::AWS');
+    const logging = Object.values(customs).find(r =>
+      JSON.stringify(r.Properties?.Create).includes('putModelInvocationLoggingConfiguration'),
+    );
+    const create = JSON.stringify(logging!.Properties?.Create ?? '');
+    expect(create).not.toContain('".*"');
+    expect(create).toContain('ThrottlingException');
+  });
+
+  test('model invocation logging custom resource can iam:PassRole the logging role', () => {
+    // PutModelInvocationLoggingConfiguration passes BedrockLoggingRole to the
+    // Bedrock service, so the custom resource's role needs iam:PassRole on it.
+    // Without this the API call fails at deploy (was previously masked by the
+    // empty-bucket validation error). Assert the policy grants PassRole.
+    template.hasResourceProperties('AWS::IAM::Policy', {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Action: 'iam:PassRole',
+            Effect: 'Allow',
+          }),
+        ]),
+      },
+    });
   });
 
   test('enables session storage with persistent filesystem', () => {

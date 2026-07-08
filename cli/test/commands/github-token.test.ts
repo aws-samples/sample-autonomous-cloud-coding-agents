@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { GetSecretValueCommand, PutSecretValueCommand } from '@aws-sdk/client-secrets-manager';
+import { PutSecretValueCommand } from '@aws-sdk/client-secrets-manager';
 import { GetCommand } from '@aws-sdk/lib-dynamodb';
 import { CliError } from '../../src/errors';
 import {

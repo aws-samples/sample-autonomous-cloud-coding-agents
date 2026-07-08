@@ -50,7 +50,7 @@ import { classifyError } from './shared/error-classifier';
 import { renderFailureReply } from './shared/failure-reply';
 import { renderCommentBody, upsertTaskComment } from './shared/github-comment';
 import { renderMaturingReply } from './shared/iteration-reply';
-import { EMOJI_FAILURE, EMOJI_NEEDS_INPUT, EMOJI_SUCCESS, postIssueComment, replyToComment, swapCommentReaction, upsertThreadedReply } from './shared/linear-feedback';
+import { EMOJI_FAILURE, EMOJI_NEEDS_INPUT, EMOJI_SUCCESS, postIssueComment, swapCommentReaction, upsertThreadedReply } from './shared/linear-feedback';
 import { logger } from './shared/logger';
 import { coerceNumericOrNull } from './shared/numeric';
 import { loadRepoConfig } from './shared/repo-config';
@@ -1506,7 +1506,7 @@ export async function routeEvent(
  * design §6 + §8.9 expectations. Successful records are NOT in
  * ``batchItemFailures`` and advance the stream checkpoint normally.
  *
- * Refs: PR #52 krokoko code review findings #1 and #5 (the fanout
+ * Refs: PR #52 findings #1 and #5 (the fanout
  * handler returned ``void`` despite ``reportBatchItemFailures: true``,
  * and a ``routeEvent`` throw from ``resolveTokenSecretArn`` could crash
  * the whole batch).

@@ -188,3 +188,120 @@ def run_cmd(
     else:
         log("CMD", f"{label}: OK")
     return result
+
+
+# Signatures a transient (retryable) dependency/registry failure leaves in a
+# command's stderr — network blips, DNS hiccups, registry 5xx / rate limits.
+# NOT a permanent auth/not-found error: those are re-run-won't-help and would
+# just waste backoff time. Deliberately conservative (#251 dependency_unreachable).
+_TRANSIENT_CMD_SIGNATURES: tuple[str, ...] = (
+    "could not resolve host",
+    "temporary failure in name resolution",
+    "connection timed out",
+    "connection reset",
+    "operation timed out",
+    "timeout was reached",
+    "the requested url returned error: 5",  # curl/git HTTP 5xx
+    "503 service unavailable",
+    "502 bad gateway",
+    "504 gateway",
+    "429 too many requests",
+    "eai_again",
+    "network is unreachable",
+    "tls handshake timeout",
+    "unexpected eof",
+)
+
+
+def is_transient_cmd_failure(stderr: str) -> bool:
+    """True if *stderr* looks like a transient (retryable) dependency failure.
+
+    Used by :func:`run_cmd_with_backoff` to decide whether another attempt is
+    worthwhile. Permanent failures (auth denied, repo not found, 4xx other than
+    429) return False so we fail fast instead of burning the backoff budget.
+    """
+    low = (stderr or "").lower()
+    return any(sig in low for sig in _TRANSIENT_CMD_SIGNATURES)
+
+
+# DNS name-resolution failures that NAME a host — a firewalled / non-existent
+# endpoint whose name cannot be resolved. Retrying never helps, so backoff bails
+# immediately (#251 review). Deliberately NARROWER than hooks.detect_egress_denial:
+# a TCP-connect failure ("Failed to connect to <host> ... Connection timed out")
+# to an ALLOWLISTED host is genuinely transient and must stay retryable — so
+# ``Failed to connect``/``Connection refused`` are excluded here. A persistent
+# TCP failure is still reclassified to egress_denied by _fail_setup_command
+# AFTER the retries exhaust; only the pre-exhaustion bail is DNS-scoped.
+_UNRESOLVABLE_HOST_RE = re.compile(
+    r"could not resolve host:?\s+[A-Za-z0-9._-]+"
+    r"|getaddrinfo (?:ENOTFOUND|EAI_AGAIN)\s+[A-Za-z0-9._-]+"
+    r"|Failed to resolve '[A-Za-z0-9._-]+'",
+    re.IGNORECASE,
+)
+
+
+def _names_unresolvable_host(stderr: str) -> bool:
+    """True when *stderr* is a DNS name-resolution failure naming a host (#251).
+
+    Such a host cannot be reached no matter how often we retry (non-existent or
+    firewalled at DNS), so backoff bails immediately rather than burn its budget
+    and emit misleading ``dependency_unreachable`` events. A host-less
+    ``Temporary failure in name resolution`` (no nameable endpoint) and a
+    transient TCP-connect timeout to an allowlisted host both stay retryable."""
+    return bool(_UNRESOLVABLE_HOST_RE.search(stderr or ""))
+
+
+def run_cmd_with_backoff(
+    cmd: list[str],
+    label: str,
+    *,
+    cwd: str | None = None,
+    timeout: int = 600,
+    max_attempts: int = 3,
+    base_delay_s: float = 2.0,
+    on_retry=None,
+    sleep=time.sleep,
+) -> subprocess.CompletedProcess:
+    """Run ``cmd`` with bounded retries on *transient* failures (#251, Phase 2).
+
+    Retries up to ``max_attempts`` times with exponential backoff
+    (``base_delay_s * 2**(attempt-1)``) ONLY when the failure looks transient
+    (:func:`is_transient_cmd_failure`). Permanent failures return immediately.
+    Always runs with ``check=False`` internally so the caller inspects
+    ``returncode`` — self-remediation must never raise mid-retry.
+
+    ``on_retry(attempt, max_attempts, stderr)`` is an optional auditable-event
+    callback fired before each backoff sleep (kept as a callback so ``shell``
+    stays free of ``hooks``/``progress`` imports — the caller wires in the
+    blocker event). ``sleep`` is injectable so tests don't actually wait.
+
+    Self-remediation is scope-preserving BY CONSTRUCTION: it only re-invokes the
+    exact same ``cmd`` with the same environment. It grants no new credentials
+    and mutates no IAM policy or egress allowlist — a retried ``git clone`` uses
+    the same token and DNS rules as the first attempt.
+    """
+    # ``max(1, ...)`` guarantees the loop body runs at least once, so ``result``
+    # is always bound by the time we return it — no None-typed fall-through.
+    result = run_cmd(cmd, label, cwd=cwd, timeout=timeout, check=False)
+    for attempt in range(1, max(1, max_attempts) + 1):
+        if attempt > 1:
+            result = run_cmd(cmd, label, cwd=cwd, timeout=timeout, check=False)
+        if result.returncode == 0:
+            return result
+        stderr = result.stderr or ""
+        # A named-host failure is a firewalled/non-existent endpoint — retrying
+        # never helps and would emit misleading dependency_unreachable events
+        # (#251 review). Bail immediately so _fail_setup_command reclassifies it
+        # to the non-retryable egress_denied remedy.
+        exhausted = attempt >= max_attempts
+        if exhausted or not is_transient_cmd_failure(stderr) or _names_unresolvable_host(stderr):
+            break
+        if on_retry is not None:
+            on_retry(attempt, max_attempts, stderr)
+        delay = base_delay_s * (2 ** (attempt - 1))
+        log(
+            "CMD",
+            f"{label}: transient failure — retrying in {delay:.0f}s ({attempt}/{max_attempts})",
+        )
+        sleep(delay)
+    return result

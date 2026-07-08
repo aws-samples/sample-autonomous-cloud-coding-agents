@@ -20,15 +20,13 @@ description = "Test fixture signing secret in Slack verification unit test (not 
 stopwords = ["test-signing-secret-abc123"]
 
 [[allowlists]]
-# #247: the orchestration idempotencyKey fixtures (`orch_<id>_<subissue>`) are
-# made-up test values, but generic-api-key flags the key-ish assignment. Scope
-# the exemption to the orchestration test files (no real credentials there).
-description = "Orchestration idempotencyKey test fixtures (not real credentials)."
-targetRules = ["generic-api-key"]
-paths = [
-    "^cdk/test/handlers/shared/orchestration-release\\.test\\.ts$",
-    "^cdk/test/handlers/orchestration-reconciler\\.test\\.ts$",
-]
+# Test idempotency-key fixture in orchestration tests (not a real credential).
+# Suppressed by stopword rather than a .gitleaksignore commit-SHA fingerprint:
+# the finding lives in history and SHA fingerprints break whenever history is
+# rewritten (rebases / dep-bump merges), which is exactly how #530's baseline
+# regressed. A stopword is SHA-independent. See #537 (regression of #530).
+description = "Test idempotency-key fixture 'orch_abc_SUB-1' (not a real credential)."
+stopwords = ["orch_abc_SUB-1"]
 
 # Catch bare 12-digit AWS account IDs. The default ruleset does not flag these,
 # which is how a real account ID reached a committed comment in the #236 integ

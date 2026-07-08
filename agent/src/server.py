@@ -335,10 +335,6 @@ class InvocationRequest(BaseModel):
     input: dict[str, Any]
 
 
-class InvocationResponse(BaseModel):
-    output: dict[str, Any]
-
-
 @app.get("/ping")
 async def ping():
     """Health check endpoint.

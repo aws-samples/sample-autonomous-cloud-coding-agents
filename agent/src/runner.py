@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import os
 import subprocess
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import quote
 
 from clarification_tool import (
@@ -64,6 +64,58 @@ def _parse_token_usage(raw_usage: Any) -> TokenUsage:
     return TokenUsage(**values)
 
 
+def _setup_bedrock_cost_attribution(config: TaskConfig) -> None:
+    """Wire Bedrock cost attribution for the Claude Code subprocess (#215).
+
+    Claude Code makes the ``InvokeModel`` calls, so attribution is configured
+    through *its* credential + header channels, not the agent's boto3:
+
+    1. **Per-user/repo chargeback (CUR 2.0 / Cost Explorer).** Write the
+       SessionRole ARN + ``{user_id, repo, task_id}`` STS tags to a 0600 file
+       that ``bedrock_creds_helper.py`` reads. Claude Code's managed-settings
+       ``awsCredentialExport`` runs that helper and signs Bedrock requests with
+       the tagged assumed-role credentials. Skipped when ``AGENT_SESSION_ROLE_ARN``
+       is unset (local/dev) — the helper then fails open to ambient creds.
+
+    2. **Per-call forensics (model-invocation logs).** Set
+       ``X-Amzn-Bedrock-Request-Metadata`` via ``ANTHROPIC_CUSTOM_HEADERS`` on the
+       process env. One container = one task = one Claude Code session, so a
+       static-per-process header is effectively per-task. Set via the process
+       env (not project settings) so the untrusted cloned repo cannot alter it.
+    """
+    import json
+
+    from aws_session import MAX_TAG_VALUE_LEN, build_session_tags
+
+    role_arn = os.environ.get("AGENT_SESSION_ROLE_ARN", "").strip()
+    tags = build_session_tags(config.user_id, config.repo_url, config.task_id)
+    if role_arn and tags:
+        try:
+            from bedrock_creds_helper import write_attribution_file
+
+            write_attribution_file(role_arn, tags)
+        except OSError as exc:
+            # Fail open: attribution is observability, not isolation. Bedrock
+            # still works on the compute role; we just lose tagged chargeback.
+            log("WARN", f"Bedrock attribution file not written ({exc}); spend will be untagged")
+
+    # Per-request metadata mirrors the STS tag values. Bedrock limits keys/values
+    # to 256 chars and records them under ``requestMetadata`` in invocation logs.
+    #
+    # Unlike the tenant-data tags (kept out of os.environ so untrusted repo
+    # subprocesses don't inherit them), this header MUST go on os.environ —
+    # Claude Code reads ANTHROPIC_CUSTOM_HEADERS from the process env. The
+    # exposure is acceptable: the values are the task's OWN {user_id, repo,
+    # task_id} (self-referential, non-secret), so a spawned subprocess learns
+    # only who it is already running for. json.dumps escapes newlines/quotes, so
+    # a crafted repo slug cannot inject an extra (newline-separated) header.
+    metadata = {t["Key"]: t["Value"][:MAX_TAG_VALUE_LEN] for t in tags}
+    if metadata:
+        os.environ["ANTHROPIC_CUSTOM_HEADERS"] = (
+            f"X-Amzn-Bedrock-Request-Metadata: {json.dumps(metadata, separators=(',', ':'))}"
+        )
+
+
 def _setup_agent_env(config: TaskConfig) -> tuple[str | None, str | None]:
     """Configure process environment for the Claude Code CLI subprocess.
 
@@ -77,13 +129,21 @@ def _setup_agent_env(config: TaskConfig) -> tuple[str | None, str | None]:
     os.environ["ANTHROPIC_MODEL"] = config.anthropic_model
     os.environ["GITHUB_TOKEN"] = config.github_token
     os.environ["GH_TOKEN"] = config.github_token
+
+    _setup_bedrock_cost_attribution(config)
     # DO NOT set ANTHROPIC_LOG — any logging level causes the CLI to write to
     # stderr, which fills the OS pipe buffer (64 KB) and deadlocks the
     # single-threaded Node.js CLI process (blocked stderr write prevents stdout
     # writes, while the SDK is waiting on stdout).  The stderr callback in
     # ClaudeAgentOptions cannot drain fast enough to prevent this.
     os.environ.pop("ANTHROPIC_LOG", None)
-    os.environ["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = "anthropic.claude-haiku-4-5-20251001-v1:0"
+    # Small/fast auxiliary model (WebFetch summarization etc.), from config like
+    # ANTHROPIC_MODEL above — resolved from the deployed ANTHROPIC_DEFAULT_HAIKU_MODEL
+    # env (agent.ts) with a platform default in config.py. Must be a cross-region
+    # INFERENCE-PROFILE id (``us.`` prefix): Claude 4.x cannot be invoked on-demand
+    # by bare model id on Bedrock (400 "on-demand throughput isn't supported",
+    # seen on WebFetch's Haiku sub-calls); config.py resolves that default.
+    os.environ["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = config.haiku_model
 
     # Save OTLP endpoint/protocol configured by ADOT auto-instrumentation
     # before stripping, so we can re-use it for Claude Code CLI telemetry.
@@ -301,29 +361,85 @@ _NO_CLARIFICATION_WORKFLOW_IDS = frozenset(
     )
 )
 
+# Tools that DEFER work off-session and are hard-blocked for every task. These
+# launch detached / cross-session orchestration that a one-shot headless agent
+# has no supervisor to await: the ``Workflow`` tool returns a task id and runs
+# in the background (its result arrives via a notification into an interactive
+# session that does not exist here), and ``Task``/``Agent`` can spawn background
+# subagents. We saw a repo-less task launch a background ``Workflow`` and then
+# finalize on the first ResultMessage with a placeholder artifact while the real
+# research ran on, detached (task 01KWDEFQH6...). CRITICAL: ``allowed_tools`` is
+# only an auto-APPROVE list — per the Agent SDK docs it does NOT restrict the
+# surface; unlisted tools fall through to ``permission_mode``, and under
+# ``bypassPermissions`` they are simply allowed. ``disallowed_tools`` is the
+# only hard lock (it removes the tool from the model's context even under
+# bypass), so the block must live there, not in the allow-list.
+# ``Workflow`` (background multi-agent orchestration) is the one that bit us;
+# ``Task``/``Agent`` are the sub-agent spawners (name varies by CLI version, so
+# block both); ``Monitor`` streams a background command's output mid-turn;
+# ``SendMessage`` resumes/relaunches background agents; the ``Cron*`` tools
+# schedule deferred work. All are "return now, work continues off-session"
+# vectors a one-shot task cannot await. NOT blockable here: background ``Bash``
+# (a ``run_in_background`` PARAMETER of Bash, not a tool name) — but a detached
+# Bash child dies with the MicroVM on return, so it can't produce
+# arrives-later work the way a cloud Workflow does; the deliver-artifact
+# deferral guard (deliverers._reject_if_deferral) is the backstop for anything
+# that still ends in a placeholder.
+_DISALLOWED_TOOLS = [
+    "Workflow",
+    "Task",
+    "Agent",
+    "Monitor",
+    "SendMessage",
+    "CronCreate",
+    "CronDelete",
+    "CronList",
+]
+
 
 def _resolve_allowed_tools(config: TaskConfig) -> list[str]:
-    """Resolve the SDK ``allowed_tools`` list for a task.
-
-    This is the second enforcement layer the design promises alongside Cedar's
-    ``context.read_only`` (WORKFLOWS.md §"Agent configuration"):
+    """Resolve the SDK ``allowed_tools`` (auto-approve) list for a task.
 
     - The resolved workflow's ``agent_config.allowed_tools`` (threaded onto
       ``config.allowed_tools``) is passed to the SDK verbatim. An empty list —
       legacy/batch callers that never resolved a workflow — falls back to the
       built-in full surface.
-    - ``Write``/``Edit`` are dropped whenever ``config.read_only`` is true, so a
-      read-only lane physically cannot mutate the tree even where Cedar's
-      ``read_only`` rules do not fire (e.g. a ``read_only:false`` default that
-      restricts tools by list alone, like ``default/agent-v1``).
+    - ``Write``/``Edit`` are dropped whenever ``config.read_only`` is true.
 
-    The Cedar PreToolUse hooks still enforce per-task restrictions on top of
-    whatever is allowed here; this list only ever narrows the surface.
+    IMPORTANT: this list only governs auto-approval, NOT the reachable surface.
+    Per the Agent SDK, a tool omitted here is not blocked — it falls through to
+    ``permission_mode`` (``bypassPermissions`` ⇒ allowed). The actual surface
+    lock is ``_DISALLOWED_TOOLS`` passed to ``disallowed_tools``. NOTE the Cedar
+    PreToolUse hooks are NOT a backstop for an unknown tool name: the engine
+    default-permits on no-match (``policy.py``), so it only denies the specific
+    actions it has ``forbid`` rules for (e.g. Write/Edit under read_only) —
+    ``Workflow``/``Task``/``Agent`` match nothing and would be allowed. So
+    ``disallowed_tools`` is the ONLY thing keeping them out; do not rely on this
+    allow-list, nor on Cedar, to remove a tool from the surface.
     """
     tools = list(config.allowed_tools) if config.allowed_tools else list(_FULL_TOOL_SURFACE)
     if config.read_only:
         tools = [t for t in tools if t not in _WRITE_TOOLS]
     return tools
+
+
+def _resolve_setting_sources(config: TaskConfig) -> list[Literal["user", "project", "local"]]:
+    """Which on-disk Claude Code settings the CLI may load for this task.
+
+    A task with a cloned repo loads ``["project"]`` so the repo's own
+    ``.claude/`` config is honored. A task with no repo loads nothing —
+    defense-in-depth that also stops a stray on-disk skill (e.g. one that spawns
+    a background Workflow) from being reachable. Kept as a named helper so the
+    policy is unit-testable without driving the SDK.
+
+    Keys on ``repo_url`` (repo presence), NOT ``requires_repo`` (a static
+    workflow property): a repo-optional workflow given a repo takes the
+    repo-bound clone path (``pipeline.py`` gates on ``not requires_repo and not
+    repo_url``), so keying on ``requires_repo`` would clone the repo but drop
+    its ``.claude/`` config. Mirrors ``create-task-core.ts`` keying
+    ``branch_name`` on repo presence for the same reason.
+    """
+    return ["project"] if config.repo_url else []
 
 
 async def run_agent(
@@ -424,10 +540,15 @@ async def run_agent(
         model=config.anthropic_model,
         system_prompt=system_prompt,
         allowed_tools=allowed_tools,
+        # Hard surface lock (NOT allowed_tools — that is auto-approve only). Keeps
+        # off-session/defer vectors out of the model's context even under
+        # bypassPermissions, so a one-shot headless task cannot launch detached
+        # work it has no supervisor to await. See _DISALLOWED_TOOLS.
+        disallowed_tools=list(_DISALLOWED_TOOLS),
         permission_mode="bypassPermissions",
         cwd=cwd,
         max_turns=config.max_turns,
-        setting_sources=["project"],
+        setting_sources=_resolve_setting_sources(config),
         hooks=hooks,
         max_budget_usd=config.max_budget_usd,
         stderr=_on_stderr,

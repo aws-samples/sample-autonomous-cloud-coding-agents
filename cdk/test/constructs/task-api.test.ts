@@ -119,23 +119,34 @@ describe('TaskApi construct', () => {
     });
   });
 
-  test('creates 5 Lambda functions without webhookTable', () => {
-    baseTemplate.resourceCountIs('AWS::Lambda::Function', 5);
+  test('creates 6 Lambda functions without webhookTable', () => {
+    // 6 = create, get, list, cancel, get-events, get-replay (#515).
+    baseTemplate.resourceCountIs('AWS::Lambda::Function', 6);
   });
 
-  test('creates 10 Lambda functions with webhookTable', () => {
-    webhookTemplate.resourceCountIs('AWS::Lambda::Function', 10);
+  test('creates 11 Lambda functions with webhookTable', () => {
+    webhookTemplate.resourceCountIs('AWS::Lambda::Function', 11);
   });
 
   test('Lambda functions use ARM_64 architecture and Node.js 24', () => {
     const functions = baseTemplate.findResources('AWS::Lambda::Function');
     const fnIds = Object.keys(functions);
 
-    expect(fnIds.length).toBe(5);
+    expect(fnIds.length).toBe(6);
     for (const fnId of fnIds) {
       expect(functions[fnId].Properties.Runtime).toBe('nodejs24.x');
       expect(functions[fnId].Properties.Architectures).toEqual(['arm64']);
     }
+  });
+
+  test('GetTaskReplayFn gets raised timeout/memory, not the 3s/128MB defaults (#523)', () => {
+    // Replay is the heaviest read path (GetItem + multi-page Query + full-bundle
+    // serialization); inheriting the defaults risks INIT-timeout 502s and OOM.
+    const functions = baseTemplate.findResources('AWS::Lambda::Function');
+    const replayFn = Object.entries(functions).find(([id]) => id.startsWith('TaskApiGetTaskReplayFn'));
+    expect(replayFn).toBeDefined();
+    expect(replayFn![1].Properties.Timeout).toBe(15);
+    expect(replayFn![1].Properties.MemorySize).toBe(512);
   });
 
   test('Lambda functions have correct environment variables', () => {
@@ -161,14 +172,20 @@ describe('TaskApi construct', () => {
     baseTemplate.hasResourceProperties('AWS::ApiGateway::Resource', {
       PathPart: 'events',
     });
+
+    // Replay sub-resource (#515): GET /tasks/{task_id}/replay.
+    baseTemplate.hasResourceProperties('AWS::ApiGateway::Resource', {
+      PathPart: 'replay',
+    });
   });
 
-  test('creates 5 API methods with Cognito authorization (no webhooks)', () => {
+  test('creates 6 API methods with Cognito authorization (no webhooks)', () => {
     const methods = baseTemplate.findResources('AWS::ApiGateway::Method');
     const nonOptionsMethods = Object.entries(methods).filter(
       ([_, resource]) => (resource as any).Properties.HttpMethod !== 'OPTIONS',
     );
-    expect(nonOptionsMethods.length).toBe(5);
+    // 6 = POST /tasks, GET /tasks, GET+DELETE /tasks/{id}, GET events, GET replay.
+    expect(nonOptionsMethods.length).toBe(6);
 
     for (const [_, resource] of nonOptionsMethods) {
       expect((resource as any).Properties.AuthorizationType).toBe('COGNITO_USER_POOLS');
@@ -354,13 +371,13 @@ describe('TaskApi construct with webhooks', () => {
     });
   });
 
-  test('creates 9 non-OPTIONS API methods with webhooks', () => {
+  test('creates 10 non-OPTIONS API methods with webhooks', () => {
     const methods = template.findResources('AWS::ApiGateway::Method');
     const nonOptionsMethods = Object.entries(methods).filter(
       ([_, resource]) => (resource as any).Properties.HttpMethod !== 'OPTIONS',
     );
-    // 5 existing + 4 webhook (POST/GET /webhooks, DELETE /webhooks/{id}, POST /webhooks/tasks)
-    expect(nonOptionsMethods.length).toBe(9);
+    // 6 base (incl. GET replay #515) + 4 webhook (POST/GET /webhooks, DELETE /webhooks/{id}, POST /webhooks/tasks)
+    expect(nonOptionsMethods.length).toBe(10);
   });
 
   test('webhook task creation uses CUSTOM authorization', () => {
