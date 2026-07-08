@@ -188,71 +188,87 @@ def setup_repo(config: TaskConfig) -> RepoSetup:
         resolve_verify_argv,
     )
 
+    # #299 ECS_RIGHTSIZED_PLANNING: a read_only workflow (coding/decompose-v1)
+    # clones, reads/greps to plan, and emits an artifact — it NEVER edits code,
+    # runs the post-agent build/lint gate, or opens a PR. Running the full
+    # pre-agent `mise run build` + lint baseline for it is pure waste: on a big
+    # repo that baseline is the multi-minute CI-parity build the 64 GB box was
+    # sized for, and it will not fit the 8 GB read-only planning task def (it
+    # would stall or OOM the planner before it ever reads a file). Skip both
+    # baselines for read_only and record neutral "OK" values (there is no
+    # regression to gate against — nothing gets committed). No baseline is ever
+    # compared for a read_only run, so these values are informational only.
     build_gate_inert = False
-    build_argv = resolve_verify_argv(config.build_command, DEFAULT_BUILD_COMMAND)
-    build_cmd_str = " ".join(build_argv)
-    log("SETUP", f"Running initial build ({build_cmd_str})...")
-    result = run_cmd(
-        build_argv,
-        label="verify-build-pre",
-        cwd=repo_dir,
-        check=False,
-    )
-    if result.returncode != 0:
-        note = f"Initial build ({build_cmd_str}) FAILED before agent changes"
-        notes.append(note)
-        build_before = False
-        # #1: if the build command could not RUN (no task / not found) AND no
-        # explicit build_command was configured, build-regression gating is
-        # INERT — flag it so the agent warns on the PR rather than silently
-        # passing every task. A configured command that fails to run is the
-        # operator's typo, not the silent-default trap, so only flag the
-        # unconfigured (mise-default) case.
-        if not config.build_command and is_verify_command_inert(result.returncode, result.stderr):
-            build_gate_inert = True
-            notes.append(
-                "⚠️ Build-regression gating is INERT: no runnable `mise run build` task in this "
-                "repo and no build command configured. A change that breaks the build will still "
-                "report success. Set pipeline.buildCommand in the repo's blueprint (e.g. "
-                "'npm run build') to enable gating."
-            )
-    else:
-        notes.append(f"Initial build ({build_cmd_str}): OK")
-        build_before = True
-
-    # Initial lint baseline (record whether lint passes before agent changes)
     lint_gate_inert = False
-    lint_argv = resolve_verify_argv(config.lint_command, DEFAULT_LINT_COMMAND)
-    lint_cmd_str = " ".join(lint_argv)
-    log("SETUP", f"Running initial lint ({lint_cmd_str})...")
-    result = run_cmd(
-        lint_argv,
-        label="verify-lint-pre",
-        cwd=repo_dir,
-        check=False,
-    )
-    if result.returncode != 0:
-        # #72: distinguish "lint couldn't RUN" (no `mise run lint` task and no
-        # configured lint_command — the default fired and the task doesn't exist)
-        # from a genuine lint failure. The former is INERT: recording it as a
-        # red lint baseline is misleading (e.g. a Node repo with no mise lint
-        # task perpetually shows lint FAIL). Only flag inert for the
-        # unconfigured-default case, mirroring build_gate_inert.
-        if not config.lint_command and is_verify_command_inert(result.returncode, result.stderr):
-            lint_gate_inert = True
-            lint_before = True  # no real lint baseline → don't treat as a regression source
-            notes.append(
-                f"Initial lint ({lint_cmd_str}) did not run (no runnable lint task); "
-                "lint verification is INERT for this repo. Set pipeline.lintCommand in the "
-                "repo's blueprint (e.g. 'npm run lint') to enable lint reporting."
-            )
-        else:
-            note = f"Initial lint ({lint_cmd_str}) FAILED before agent changes"
-            notes.append(note)
-            lint_before = False
-    else:
-        notes.append(f"Initial lint ({lint_cmd_str}): OK")
+    if config.read_only:
+        log("SETUP", "Skipping build/lint baseline for read-only workflow (no build, no PR)")
+        notes.append("Read-only workflow: skipped pre-agent build/lint baseline (planning only)")
+        build_before = True
         lint_before = True
+    else:
+        build_argv = resolve_verify_argv(config.build_command, DEFAULT_BUILD_COMMAND)
+        build_cmd_str = " ".join(build_argv)
+        log("SETUP", f"Running initial build ({build_cmd_str})...")
+        result = run_cmd(
+            build_argv,
+            label="verify-build-pre",
+            cwd=repo_dir,
+            check=False,
+        )
+        if result.returncode != 0:
+            note = f"Initial build ({build_cmd_str}) FAILED before agent changes"
+            notes.append(note)
+            build_before = False
+            # #1: if the build command could not RUN (no task / not found) AND no
+            # explicit build_command was configured, build-regression gating is
+            # INERT — flag it so the agent warns on the PR rather than silently
+            # passing every task. A configured command that fails to run is the
+            # operator's typo, not the silent-default trap, so only flag the
+            # unconfigured (mise-default) case.
+            if not config.build_command and is_verify_command_inert(result.returncode, result.stderr):
+                build_gate_inert = True
+                notes.append(
+                    "⚠️ Build-regression gating is INERT: no runnable `mise run build` task in this "
+                    "repo and no build command configured. A change that breaks the build will still "
+                    "report success. Set pipeline.buildCommand in the repo's blueprint (e.g. "
+                    "'npm run build') to enable gating."
+                )
+        else:
+            notes.append(f"Initial build ({build_cmd_str}): OK")
+            build_before = True
+
+        # Initial lint baseline (record whether lint passes before agent changes)
+        lint_argv = resolve_verify_argv(config.lint_command, DEFAULT_LINT_COMMAND)
+        lint_cmd_str = " ".join(lint_argv)
+        log("SETUP", f"Running initial lint ({lint_cmd_str})...")
+        result = run_cmd(
+            lint_argv,
+            label="verify-lint-pre",
+            cwd=repo_dir,
+            check=False,
+        )
+        if result.returncode != 0:
+            # #72: distinguish "lint couldn't RUN" (no `mise run lint` task and no
+            # configured lint_command — the default fired and the task doesn't exist)
+            # from a genuine lint failure. The former is INERT: recording it as a
+            # red lint baseline is misleading (e.g. a Node repo with no mise lint
+            # task perpetually shows lint FAIL). Only flag inert for the
+            # unconfigured-default case, mirroring build_gate_inert.
+            if not config.lint_command and is_verify_command_inert(result.returncode, result.stderr):
+                lint_gate_inert = True
+                lint_before = True  # no real lint baseline → don't treat as a regression source
+                notes.append(
+                    f"Initial lint ({lint_cmd_str}) did not run (no runnable lint task); "
+                    "lint verification is INERT for this repo. Set pipeline.lintCommand in the "
+                    "repo's blueprint (e.g. 'npm run lint') to enable lint reporting."
+                )
+            else:
+                note = f"Initial lint ({lint_cmd_str}) FAILED before agent changes"
+                notes.append(note)
+                lint_before = False
+        else:
+            notes.append(f"Initial lint ({lint_cmd_str}): OK")
+            lint_before = True
 
     # Detect default branch (used as the PR base + the commit-diff range).
     # - PR tasks: base_branch from the orchestrator (the PR's real base).

@@ -114,6 +114,51 @@ class TestSetupRepoHappyPath:
         assert "head-sha-after-setup" not in fake.labels()
 
 
+class TestReadOnlyBaselineSkip:
+    """#299 ECS_RIGHTSIZED_PLANNING: a read_only workflow (coding/decompose-v1)
+    never edits code, runs the post-agent gate, or opens a PR, so the pre-agent
+    build + lint baseline is pure waste — and on a big repo the full CI-parity
+    `mise run build` won't fit the 8 GB read-only planning task def (it would
+    stall/OOM before the planner reads a file). setup_repo must skip both
+    baselines for read_only and still return neutral OK values."""
+
+    def test_read_only_skips_build_and_lint_baseline(self, monkeypatch):
+        fake = _fake_run_cmd()
+        _patch_common(monkeypatch, fake)
+        monkeypatch.setattr(repo, "detect_default_branch", lambda url, d: "main")
+
+        setup = repo.setup_repo(_config(read_only=True))
+
+        labels = fake.labels()
+        # The heavy build + lint baselines must NOT run.
+        assert "verify-build-pre" not in labels
+        assert "verify-lint-pre" not in labels
+        # But the clone/branch/mise-install setup still happens.
+        assert "clone" in labels
+        assert "mise-install" in labels
+        # Neutral OK baselines (nothing gets committed, so nothing to gate).
+        assert setup.build_before is True
+        assert setup.lint_before is True
+        assert setup.build_gate_inert is False
+        assert setup.lint_gate_inert is False
+        assert any("Read-only workflow" in n for n in setup.notes)
+
+    def test_non_read_only_still_runs_build_and_lint_baseline(self, monkeypatch):
+        # Regression guard: the default (write) workflow must still run both
+        # baselines — the skip is gated strictly on read_only.
+        fake = _fake_run_cmd()
+        _patch_common(monkeypatch, fake)
+        monkeypatch.setattr(repo, "detect_default_branch", lambda url, d: "main")
+
+        setup = repo.setup_repo(_config(read_only=False))
+
+        labels = fake.labels()
+        assert "verify-build-pre" in labels
+        assert "verify-lint-pre" in labels
+        assert setup.build_before is True  # fake run_cmd returns rc 0
+        assert setup.lint_before is True
+
+
 class TestDetectDefaultBranch:
     def test_returns_detected_branch(self, monkeypatch):
         def fake_run(*args, **kwargs):
