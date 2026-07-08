@@ -17,7 +17,7 @@ Set up the ABCA Jira Cloud integration so that adding a label to a Jira issue tr
 
 ## How it works
 
-A Jira-site admin creates an Atlassian OAuth 2.0 (3LO) app and authorizes it on the site. The OAuth token bundle is stored in a per-tenant Secrets Manager secret (`bgagent-jira-oauth-<cloudId>`). When a user adds the trigger label to a Jira issue, Jira fires a webhook to ABCA; the receiver verifies the `X-Hub-Signature` HMAC, dedupes, and async-invokes the processor, which resolves the tenant, looks up the project→repo mapping, and creates a task. The agent clones the repo, opens a PR, and comments on the Jira issue via the Jira REST v3 API (using the same stored OAuth token).
+A Jira-site admin creates an Atlassian OAuth 2.0 (3LO) app and authorizes it on the site. The OAuth token bundle is stored in a per-tenant Secrets Manager secret (`bgagent-jira-oauth-<cloudId>`). When a user adds the trigger label to a Jira issue, Jira fires a webhook to ABCA; the receiver verifies the `X-Hub-Signature` HMAC, dedupes, and async-invokes the processor, which resolves the tenant, looks up the project→repo mapping, and creates a task. Jira-triggered tasks always run the `coding/new-task-v1` workflow (the processor pins `workflow_ref` explicitly, since a label-triggered task always targets a mapped repo). The agent clones the repo, opens a PR, and comments on the Jira issue via the Jira REST v3 API (using the same stored OAuth token).
 
 **Tenant key.** Everything is indexed on `cloudId` — the Atlassian tenant UUID, *not* the site domain or name. Webhook payloads and the OAuth flow both surface `cloudId`; it is the join key across the project-mapping, user-mapping, and workspace-registry tables.
 
