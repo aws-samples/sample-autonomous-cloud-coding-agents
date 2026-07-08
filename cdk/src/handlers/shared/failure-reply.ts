@@ -41,7 +41,7 @@
  * iteration on the same PR (UX.3). Pure + deterministic; no I/O.
  */
 
-import { classifyError } from './error-classifier';
+import { classifyError, retryGuidance } from './error-classifier';
 import type { TaskStatusType } from '../../constructs/task-status';
 
 /** Max chars of the raw agent error surfaced inline (the rest is in CloudWatch). */
@@ -140,13 +140,21 @@ export function renderFailureReply(input: FailureReplyInput): string {
     );
   }
 
-  // Agent-itself failure: classified title + truncated excerpt + CloudWatch.
+  // Agent-itself failure: classified title + truncated excerpt + CloudWatch +
+  // a category-aware NEXT STEP. The old copy always ended "Reply with guidance
+  // and I'll try again" — misleading for an infra/deploy-race failure (the user's
+  // guidance is irrelevant; it's a plain retry) and for a not-retryable auth/
+  // config/guardrail failure (a retry won't help; an admin or an edit is needed).
+  // retryGuidance answers the user's real question — "retry, or tell my admin?"
   const classification = classifyError(input.errorMessage);
   const title = classification?.title ?? "the task didn't complete";
   const detail = input.errorMessage ? ` ${excerpt(input.errorMessage)}` : '';
+  const nextStep = classification
+    ? retryGuidance(classification)
+    : 'Reply here with any extra guidance and I\'ll try again.';
   return (
     `❌ ${title} —${detail} see CloudWatch for task \`${input.taskId}\`. `
-    + 'Reply with guidance and I\'ll try again.'
+    + nextStep
   );
 }
 
@@ -189,5 +197,10 @@ export function renderPanelFailureReason(input: {
   }
   const classification = classifyError(input.errorMessage);
   const title = classification?.title ?? "the task didn't complete";
-  return `${title} — see CloudWatch for task \`${input.taskId}\`.`;
+  // Append the category-aware next step so a reader of the epic panel (where this
+  // sub-line lives) knows whether to just retry or escalate — the exact "can I
+  // retry, or is this an admin thing?" gap the ABCA-659 rollup left open on the
+  // "Agent session failed to start" (deploy-race) rows.
+  const nextStep = classification ? ` ${retryGuidance(classification)}` : '';
+  return `${title} — see CloudWatch for task \`${input.taskId}\`.${nextStep}`;
 }

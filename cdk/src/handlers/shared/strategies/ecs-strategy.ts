@@ -49,6 +49,30 @@ const ECS_TASK_DEFINITION_ARN = process.env.ECS_TASK_DEFINITION_ARN;
  */
 const ECS_PLANNING_TASK_DEFINITION_ARN = process.env.ECS_PLANNING_TASK_DEFINITION_ARN;
 const ECS_SUBNETS = process.env.ECS_SUBNETS;
+
+/**
+ * Reduce a task-definition reference to its FAMILY (drop the `:revision` suffix),
+ * so `RunTask` always resolves the LATEST ACTIVE revision instead of a pinned one.
+ *
+ * ROOT CAUSE (live-caught, ABCA-660/663 "InvalidParameterException: TaskDefinition
+ * is inactive"): the orchestrator env carries a revision-pinned ARN
+ * (`…:task-definition/<family>:<rev>`, from `taskDefinition.taskDefinitionArn`).
+ * Every deploy that rebuilds the agent image registers a NEW revision and CDK/ECS
+ * deregisters the old one. A task dispatched against the now-stale pinned revision
+ * (e.g. approving an epic minutes after a deploy) fails at RunTask with "inactive".
+ * ECS accepts `family` (bare, no revision) and resolves it to the latest ACTIVE
+ * revision at call time, which is deploy-race-proof. We accept either a full ARN
+ * (`arn:aws:ecs:…:task-definition/<family>:<rev>`) or a plain `<family>:<rev>` and
+ * return just `<family>`; a value with no `/` and no `:` is returned unchanged.
+ */
+export function toTaskDefinitionFamily(ref: string): string {
+  // Take the segment after `task-definition/` when it's a full ARN, else the whole
+  // value; then strip a trailing `:<digits>` revision suffix.
+  const afterSlash = ref.includes('task-definition/')
+    ? ref.slice(ref.lastIndexOf('task-definition/') + 'task-definition/'.length)
+    : ref;
+  return afterSlash.replace(/:\d+$/, '');
+}
 const ECS_SECURITY_GROUP = process.env.ECS_SECURITY_GROUP;
 const ECS_CONTAINER_NAME = process.env.ECS_CONTAINER_NAME ?? 'AgentContainer';
 const ECS_PAYLOAD_BUCKET = process.env.ECS_PAYLOAD_BUCKET;
@@ -127,9 +151,16 @@ export class EcsComputeStrategy implements ComputeStrategy {
     // runs on the smaller planning task def when it's wired; everything else runs
     // on the 64 GB build def. Falls back to the build def if the planning def
     // isn't configured (older deploy) — safe, just the pre-rightsize behavior.
-    const taskDefinition = readOnly && ECS_PLANNING_TASK_DEFINITION_ARN
+    const taskDefinitionRef = readOnly && ECS_PLANNING_TASK_DEFINITION_ARN
       ? ECS_PLANNING_TASK_DEFINITION_ARN
       : ECS_TASK_DEFINITION_ARN;
+    // Dispatch against the task-def FAMILY (not the pinned revision) so ECS
+    // resolves the latest ACTIVE revision at call time. A deploy that rebuilds the
+    // agent image registers a new revision + deregisters the old one; a task
+    // dispatched minutes after a deploy against the stale pinned revision failed
+    // with "InvalidParameterException: TaskDefinition is inactive" (ABCA-660/663).
+    // Using the family is deploy-race-proof.
+    const taskDefinition = toTaskDefinitionFamily(taskDefinitionRef);
 
     // The ECS container's default CMD starts the FastAPI server (uvicorn) which
     // waits for HTTP POST to /invocations — but in standalone ECS nobody sends

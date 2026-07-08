@@ -104,7 +104,33 @@ describe('renderFailureReply (#247 UX.5 — failure is a conversation)', () => {
       expect(body).toMatch(/^❌/);
       expect(body).toMatch(/Exceeded max turns/i); // classified title
       expect(body).toMatch(/CloudWatch for task `task-xyz`/);
-      expect(body).toMatch(/reply with guidance/i);
+      // TIMEOUT + retryable → a plain reply-to-retry next step.
+      expect(body).toMatch(/reply here with any extra guidance/i);
+    });
+
+    test('infra/compute failure → "temporary, retry, else contact admin" next step (not a generic guidance ask)', () => {
+      // The ABCA-659 shape: a coding child hit a transient compute failure. The
+      // user's question was "retry, or tell my admin?" — the reply must answer it.
+      const body = renderFailureReply({
+        status: TaskStatus.FAILED,
+        errorMessage: 'Session start failed: InvalidParameterException: TaskDefinition is inactive',
+        taskId: 'task-infra',
+      });
+      expect(body).toMatch(/temporary infrastructure issue|mid-update|compute environment/i);
+      expect(body).toMatch(/reply here to try again/i);
+      expect(body).toMatch(/contact your ABCA admin/i);
+      // It must NOT ask for "guidance" — the user's input is irrelevant to an infra retry.
+      expect(body).not.toMatch(/extra guidance/i);
+    });
+
+    test('not-retryable auth failure → says a retry won\'t help + names the admin', () => {
+      const body = renderFailureReply({
+        status: TaskStatus.FAILED,
+        errorMessage: 'INSUFFICIENT_GITHUB_REPO_PERMISSIONS',
+        taskId: 'task-auth',
+      });
+      expect(body).toMatch(/won'?t fix this|won'?t help/i);
+      expect(body).toMatch(/admin/i);
     });
 
     test('truncates a long raw error to an excerpt with an ellipsis', () => {

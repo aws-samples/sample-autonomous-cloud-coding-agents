@@ -130,6 +130,21 @@ const PATTERNS: readonly ErrorPattern[] = [
 
   // --- Compute ---
   {
+    // A task dispatched against a task-def revision that was deregistered by a
+    // deploy (ABCA-660/663). Transient + self-clearing on retry; the family-based
+    // RunTask fix prevents it going forward, but keep a precise classification so
+    // any historical/edge occurrence reads as "temporary, just retry", not a
+    // scary compute-health alarm.
+    pattern: /TaskDefinition is inactive/i,
+    classification: {
+      category: ErrorCategory.COMPUTE,
+      title: 'Couldn\'t start — the compute environment was mid-update',
+      description: 'The task was dispatched against an ECS task definition revision that a concurrent deployment had just replaced.',
+      remedy: 'This is a transient deploy-timing race, not a problem with your request. Retry the task; it will pick up the current task definition. If it persists, an admin should check for a stuck/failed deployment.',
+      retryable: true,
+    },
+  },
+  {
     pattern: /Session start failed/i,
     classification: {
       category: ErrorCategory.COMPUTE,
@@ -362,4 +377,51 @@ export function classifyError(errorMessage: string | undefined | null): ErrorCla
   }
 
   return UNKNOWN_CLASSIFICATION;
+}
+
+/**
+ * One short, user-facing NEXT-STEP line for a classified failure — the answer to
+ * "should I just retry this, or tell my admin?" that a channel reader (Linear/
+ * Slack) can act on WITHOUT reading CloudWatch. Derived purely from the
+ * classification's ``category`` + ``retryable`` (never the raw error), so it stays
+ * safe to show and consistent with the CLI's structured display.
+ *
+ * The split the user asked for:
+ *   - **Infra / transient** (compute, network, concurrency — all retryable): the
+ *     failure is on ABCA's side, not their request. Say "reply to retry; if it
+ *     keeps happening, contact your ABCA admin" — e.g. the ECS "TaskDefinition is
+ *     inactive" deploy-race (ABCA-660/663), a NAT blip, or a concurrency cap.
+ *   - **Their input, not retryable** (auth, guardrail, config-non-retryable):
+ *     retrying the SAME thing won't help — name whose job the fix is (admin for
+ *     access/config; the author for guardrail/rephrase).
+ *   - **Agent / timeout, retryable**: a plain reply-to-retry (guidance may help).
+ *   - **Not-retryable / unknown**: don't promise a retry will work; point at the
+ *     admin as the safe default.
+ * Returned WITHOUT a trailing space; callers add their own separator.
+ */
+export function retryGuidance(classification: ErrorClassification): string {
+  const { category, retryable } = classification;
+  if (category === ErrorCategory.COMPUTE
+    || category === ErrorCategory.NETWORK
+    || category === ErrorCategory.CONCURRENCY) {
+    // Transient infra — the request is fine; a retry usually clears it.
+    return 'This is usually a temporary infrastructure issue, not a problem with your request — '
+      + 'reply here to try again. If it keeps happening, contact your ABCA admin.';
+  }
+  if (category === ErrorCategory.AUTH || category === ErrorCategory.CONFIG) {
+    // Access / configuration — a plain retry won't change the outcome; an admin owns it.
+    return retryable
+      ? 'This looks like a configuration issue — reply to try again, but if it repeats it likely needs your ABCA admin to fix the setup.'
+      : 'Retrying as-is won\'t fix this — it needs your ABCA admin to correct the access or configuration, then re-apply the label.';
+  }
+  if (category === ErrorCategory.GUARDRAIL) {
+    // The author owns this one — the content itself was blocked.
+    return 'Retrying the same text won\'t help — edit the request to remove the flagged content, then re-apply the label.';
+  }
+  if (retryable) {
+    // Agent / timeout that a fresh attempt (or guidance) can clear.
+    return 'Reply here with any extra guidance and I\'ll try again.';
+  }
+  // Not-retryable agent/unknown — don't promise a retry will work.
+  return 'A retry may not resolve this on its own — if it repeats, contact your ABCA admin with the task id above.';
 }
