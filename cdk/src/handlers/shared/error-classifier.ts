@@ -396,6 +396,25 @@ const PATTERNS: readonly ErrorPattern[] = [
 
   // --- Timeout ---
   {
+    // The build/verify command shelled out and was KILLED at the wall-clock cap
+    // (Python subprocess `TimeoutExpired … timed out after N seconds`). Live-caught
+    // on ABCA-667: the fork's full `mise run build` (~2800 tests) exceeded the
+    // 600s default and surfaced as a bare "Unexpected error". This is NOT a code
+    // failure — the build didn't fail, it ran too long — so name it precisely and
+    // point at the timeout, not the diff. On a big repo the fix is a higher
+    // BUILD_VERIFY_TIMEOUT_S (or the ECS build box), which an admin sets — but a
+    // one-off may just be slow, so it's a user-actionable "retry / raise the cap".
+    pattern: /TimeoutExpired.*timed out after \d+ ?s(econds)?|Command .*build.* timed out/i,
+    classification: {
+      category: ErrorCategory.TIMEOUT,
+      title: 'Build/tests didn\'t finish in time (timed out)',
+      description: 'The configured build/verify command was still running when it hit the time limit and was stopped — it did not fail, it ran too long.',
+      remedy: 'This is usually a slow build, not broken code. Retry (a one-off may just be slow); if this repo\'s build is legitimately long, an admin can raise BUILD_VERIFY_TIMEOUT_S or move it to the larger ECS build compute.',
+      retryable: true,
+      errorClass: ErrorClass.USER,
+    },
+  },
+  {
     pattern: /poll timeout exceeded/i,
     classification: {
       category: ErrorCategory.TIMEOUT,
