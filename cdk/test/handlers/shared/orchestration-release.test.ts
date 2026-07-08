@@ -103,6 +103,73 @@ describe('releaseChild — idempotency key is accepted by the REAL validator', (
   });
 });
 
+describe('releaseChild — ABCA-659 retry salts the idempotency key with the prior task id', () => {
+  test('retry=true + a prior child_task_id → key salted so a NEW task is created', async () => {
+    const createTaskCore = created('T-new');
+    await releaseChild({
+      ddb: { send: jest.fn().mockResolvedValue({}) } as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow({ child_task_id: '01KX0WFC2DAKSEQY78ZX7WY0W4' }), // the prior FAILED task
+      platformUserId: 'user-1',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+      retry: true,
+    });
+    const ctx = createTaskCore.mock.calls[0][1];
+    // Salted with the prior task id → distinct from the original 'orch_abc_SUB-1'
+    // key, so createTaskCore does NOT idempotently replay the failed task.
+    expect(ctx.idempotencyKey).toBe('orch_abc_SUB-1_01KX0WFC2DAKSEQY78ZX7WY0W4');
+    expect(isValidIdempotencyKey(ctx.idempotencyKey)).toBe(true);
+  });
+
+  test('retry=true but NO prior task id (never-run child) → back-compat key', async () => {
+    const createTaskCore = created('T-1');
+    await releaseChild({
+      ddb: { send: jest.fn().mockResolvedValue({}) } as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow(), // no child_task_id
+      platformUserId: 'user-1',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+      retry: true,
+    });
+    expect(createTaskCore.mock.calls[0][1].idempotencyKey).toBe('orch_abc_SUB-1');
+  });
+
+  test('retry defaults false → key is never salted (seed/extend/cascade unaffected)', async () => {
+    const createTaskCore = created('T-1');
+    await releaseChild({
+      ddb: { send: jest.fn().mockResolvedValue({}) } as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow({ child_task_id: 'OLD-TASK' }),
+      platformUserId: 'user-1',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+    expect(createTaskCore.mock.calls[0][1].idempotencyKey).toBe('orch_abc_SUB-1');
+  });
+
+  test('salted key stays valid + within 128 chars for production-shaped ids (uuid + ulid)', async () => {
+    const createTaskCore = created('T-new');
+    await releaseChild({
+      ddb: { send: jest.fn().mockResolvedValue({}) } as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow({
+        orchestration_id: deriveOrchestrationId('d27fcf21-4876-4be2-96c0-78099bf152de'),
+        sub_issue_id: 'a00650a1-4b97-46a3-9977-baede9a8f001',
+        child_task_id: '01KX0WFC2DAKSEQY78ZX7WY0W4',
+      }),
+      platformUserId: 'user-1',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+      retry: true,
+    });
+    const key = createTaskCore.mock.calls[0][1].idempotencyKey;
+    expect(key.length).toBeLessThanOrEqual(128);
+    expect(isValidIdempotencyKey(key)).toBe(true);
+  });
+});
+
 describe('releaseChild — happy path', () => {
   test('creates a task and flips the row to released', async () => {
     const ddb = { send: jest.fn().mockResolvedValue({}) };

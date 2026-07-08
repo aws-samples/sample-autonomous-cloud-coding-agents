@@ -128,6 +128,18 @@ export interface ReleaseChildParams {
    * attributes its children to the right plane. #247 trigger-agnostic seam.
    */
   readonly channelSource?: ChannelSource;
+  /**
+   * ABCA-659 epic RETRY: when true, the idempotency key is salted with the
+   * child's PRIOR ``child_task_id`` so a re-run creates a genuinely NEW task
+   * rather than idempotently replaying the failed one. The prior task id is
+   * distinct per retry round (each round's prior task differs) yet stable within
+   * a round (a webhook redelivery of the same retry sees the same prior id →
+   * one new task, not many). A first release (no prior task id) is unaffected —
+   * the key stays the back-compat ``orch_sub``. Without this, a retry flips the
+   * row to ``released`` but ``createTaskCore`` returns the OLD failed task (200
+   * idempotent replay) and nothing actually re-runs (live-caught on ABCA-659).
+   */
+  readonly retry?: boolean;
 }
 
 export type ReleaseChildResult =
@@ -213,7 +225,17 @@ export async function releaseChild(params: ReleaseChildParams): Promise<ReleaseC
   // the child silently never starts. orchestration_id (orch_<32hex>) +
   // '_' + sub_issue_id (a UUID, all hyphens) stays within 128 chars and
   // inside the allowed charset.
-  const idempotencyKey = `${row.orchestration_id}_${row.sub_issue_id}`;
+  //
+  // ABCA-659 epic RETRY: salt with the prior child_task_id so a re-run of a
+  // failed child creates a NEW task instead of idempotently replaying the failed
+  // one. The prior id (a ULID, 26 alnum chars) keeps the key inside the charset;
+  // orch_<32> + _ + <uuid 36> + _ + <ulid 26> ≈ 100 chars, under the 128 cap.
+  // Only applied on retry AND when a prior task exists (a first release is
+  // unchanged). Redelivery-safe: same prior id → same key → one new task.
+  const baseKey = `${row.orchestration_id}_${row.sub_issue_id}`;
+  const idempotencyKey = params.retry && row.child_task_id
+    ? `${baseKey}_${row.child_task_id}`
+    : baseKey;
 
   let result;
   try {
@@ -345,6 +367,13 @@ export async function releaseReadyChildren(
    * A value ``<= 0`` releases nothing this pass.
    */
   maxToRelease?: number,
+  /**
+   * ABCA-659 epic RETRY: salt each child's idempotency key with its prior
+   * ``child_task_id`` so a re-run spawns a NEW task instead of replaying the
+   * failed one. Only the epic-retry path passes true; every other caller
+   * (seed, extend, forward cascade, recovery) omits it → back-compat key.
+   */
+  retry = false,
 ): Promise<readonly ReleaseChildResult[]> {
   const all = allChildren ?? rows;
   const branchOf = new Map(
@@ -400,6 +429,7 @@ export async function releaseReadyChildren(
       ...(selection.merge_branches.length > 0 && { mergeBranches: selection.merge_branches }),
       createTaskCore,
       now,
+      retry,
     }));
   }
   return results;
