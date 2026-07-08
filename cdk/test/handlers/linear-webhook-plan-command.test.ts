@@ -48,12 +48,14 @@ jest.mock('../../src/handlers/shared/create-task-core', () => ({
 
 const reactToCommentMock = jest.fn();
 const upsertStatusCommentMock = jest.fn();
+const swapCommentReactionMock = jest.fn();
 jest.mock('../../src/handlers/shared/linear-feedback', () => {
   const actual = jest.requireActual('../../src/handlers/shared/linear-feedback');
   return {
     ...actual,
     reactToComment: (...args: unknown[]) => reactToCommentMock(...args),
     upsertStatusComment: (...args: unknown[]) => upsertStatusCommentMock(...args),
+    swapCommentReaction: (...args: unknown[]) => swapCommentReactionMock(...args),
   };
 });
 
@@ -119,6 +121,7 @@ describe('plan-command path (T4/T5) through the real handler', () => {
     createTaskCoreMock.mockReset();
     reactToCommentMock.mockReset().mockResolvedValue(undefined);
     upsertStatusCommentMock.mockReset().mockResolvedValue('comment-plan-1');
+    swapCommentReactionMock.mockReset().mockResolvedValue(undefined);
     resolveLinearOauthTokenMock.mockReset().mockResolvedValue({
       accessToken: 'lin_at',
       workspaceSlug: 'acme',
@@ -134,6 +137,12 @@ describe('plan-command path (T4/T5) through the real handler', () => {
     expect(createTaskCoreMock).not.toHaveBeenCalled();
     // 👀 on the command comment.
     expect(reactToCommentMock).toHaveBeenCalled();
+    // F-command-ack-stuck: the 👀 must SETTLE to ✅ (white_check_mark) — not left
+    // hanging as if stuck. The edit applied fine, so it's a success settle.
+    expect(swapCommentReactionMock).toHaveBeenCalledWith(expect.anything(), 'cmd-comment-1', 'white_check_mark');
+    // The re-rendered proposal leads with the computed "What changed" diff.
+    const [, , dropBody] = upsertStatusCommentMock.mock.calls[0];
+    expect(dropBody).toMatch(/What changed/);
     // T5: edited the existing proposal comment IN PLACE (4th arg = the stored id).
     expect(upsertStatusCommentMock).toHaveBeenCalledTimes(1);
     const [, issueId, body, existingCommentId] = upsertStatusCommentMock.mock.calls[0];
@@ -168,7 +177,7 @@ describe('plan-command path (T4/T5) through the real handler', () => {
     expect(putCalls).toHaveLength(0);
   });
 
-  test('an out-of-range index → error note, plan NOT persisted', async () => {
+  test('an out-of-range index → error note, plan NOT persisted, 👀 settled to ❓', async () => {
     wireDdb(pendingPlanItem());
     await handler(commentEvent('@bgagent drop 9'));
     expect(createTaskCoreMock).not.toHaveBeenCalled();
@@ -176,6 +185,8 @@ describe('plan-command path (T4/T5) through the real handler', () => {
     expect(body).toMatch(/no sub-issue #9/i);
     const putCalls = ddbSend.mock.calls.filter((c) => c[0]?._type === 'Put');
     expect(putCalls).toHaveLength(0);
+    // F-command-ack-stuck: a bad command settles 👀→❓ (needs the reviewer), not stuck.
+    expect(swapCommentReactionMock).toHaveBeenCalledWith(expect.anything(), 'cmd-comment-1', 'question');
   });
 
   test('"make #2 small" edits size in place, no agent', async () => {

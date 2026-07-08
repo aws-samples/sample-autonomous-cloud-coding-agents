@@ -49,7 +49,7 @@ import type { DynamoDBRecord, DynamoDBStreamEvent } from 'aws-lambda';
 import { createTaskCore } from './shared/create-task-core';
 import { renderFailureReply, renderPanelFailureReason } from './shared/failure-reply';
 import { isNoChangeIteration, renderMaturingReply } from './shared/iteration-reply';
-import { EMOJI_FAILURE, EMOJI_NEEDS_INPUT, EMOJI_SUCCESS, type LinearFeedbackContext, replyToComment, swapCommentReaction, transitionIssueState, upsertStatusComment, upsertThreadedReply } from './shared/linear-feedback';
+import { EMOJI_FAILURE, EMOJI_NEEDS_INPUT, EMOJI_SUCCESS, type LinearFeedbackContext, replyToComment, revertIssueToNotStarted, swapCommentReaction, transitionIssueState, upsertStatusComment, upsertThreadedReply } from './shared/linear-feedback';
 import { resolveLinearOauthToken } from './shared/linear-oauth-resolver';
 import type { SubIssueNode } from './shared/linear-subissue-fetch';
 import { logger } from './shared/logger';
@@ -1563,6 +1563,28 @@ async function reconcileDecomposePlan(evt: DecomposePlanEvent): Promise<void> {
   // 'handled' (awaiting approval / over-cap / write-back error) or 'noop'
   // (redelivery) → nothing more; a comment was already posted.
   logger.info('Decompose plan reconciled', { parent_issue_id: evt.parentIssueId, result: result.kind, reason: result.reason });
+
+  // #299 F-decompose-inprogress: the ROUND-0 :decompose plan is now POSTED and
+  // AWAITING the reviewer's approve — nothing is running. The webhook moved the
+  // issue to In Progress at dispatch so the board showed the ~1-2 min planning was
+  // happening; now that it's just a pending plan, In Progress would mislead
+  // ("looks like work started while it's awaiting your go"). Revert it to a
+  // not-started state (Todo/Backlog). Only when:
+  //   - round 0 (a revise keeps the conversation In Progress — reverting each round
+  //     would flicker the board), AND
+  //   - the plan is HANDLED (awaiting approval / single-task proposal / over-cap) —
+  //     NOT 'seed' (:auto → real work is starting, stay In Progress).
+  // approve → the seed path moves it back to In Progress. Guarded + best-effort
+  // inside revertIssueToNotStarted (only demotes an issue still in OUR In Progress).
+  if (result.kind === 'handled' && evt.revisionRound === undefined) {
+    try {
+      await revertIssueToNotStarted(feedbackCtx, evt.parentIssueId);
+    } catch (err) {
+      logger.warn('F-decompose-inprogress: failed to revert issue to not-started (non-fatal)', {
+        parent_issue_id: evt.parentIssueId, error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
 }
 
 /**

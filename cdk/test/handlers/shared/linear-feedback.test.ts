@@ -35,6 +35,7 @@ import {
   reactToComment,
   replyToComment,
   reportIssueFailure,
+  revertIssueToNotStarted,
   swapCommentReaction,
   swapIssueReaction,
   transitionIssueState,
@@ -515,6 +516,53 @@ describe('linear-feedback', () => {
       );
       const ok = await transitionIssueState(CTX, ISSUE_ID, 'completed');
       expect(ok).toBe(false);
+    });
+  });
+
+  describe('revertIssueToNotStarted (#299 F-decompose-inprogress)', () => {
+    const TEAM_STATES = [
+      { id: 's-backlog', type: 'backlog', name: 'Backlog', position: 0 },
+      { id: 's-todo', type: 'unstarted', name: 'Todo', position: 1 },
+      { id: 's-inprogress', type: 'started', name: 'In Progress', position: 2 },
+      { id: 's-done', type: 'completed', name: 'Done', position: 3 },
+    ];
+    const statesResp = (current: { id: string; type: string; name: string; position: number }) =>
+      jsonResponse({ data: { issue: { state: current, team: { states: { nodes: TEAM_STATES } } } } });
+    const cur = (id: string) => TEAM_STATES.find((s) => s.id === id)!;
+
+    test('In Progress → Todo: our In-Progress reverts to the unstarted state', async () => {
+      fetchMock
+        .mockResolvedValueOnce(statesResp(cur('s-inprogress')))
+        .mockResolvedValueOnce(jsonResponse({ data: { issueUpdate: { success: true } } }));
+      const ok = await revertIssueToNotStarted(CTX, ISSUE_ID);
+      expect(ok).toBe(true);
+      expect(JSON.parse(fetchMock.mock.calls[1][1].body).variables.stateId).toBe('s-todo');
+    });
+
+    test('falls back to Backlog when the team has no unstarted state', async () => {
+      const noUnstarted = TEAM_STATES.filter((s) => s.type !== 'unstarted');
+      fetchMock
+        .mockResolvedValueOnce(
+          jsonResponse({ data: { issue: { state: cur('s-inprogress'), team: { states: { nodes: noUnstarted } } } } }),
+        )
+        .mockResolvedValueOnce(jsonResponse({ data: { issueUpdate: { success: true } } }));
+      const ok = await revertIssueToNotStarted(CTX, ISSUE_ID);
+      expect(ok).toBe(true);
+      expect(JSON.parse(fetchMock.mock.calls[1][1].body).variables.stateId).toBe('s-backlog');
+    });
+
+    test('does NOT demote a human-completed issue (only reverts a started state)', async () => {
+      fetchMock.mockResolvedValueOnce(statesResp(cur('s-done')));
+      const ok = await revertIssueToNotStarted(CTX, ISSUE_ID);
+      expect(ok).toBe(false);
+      expect(fetchMock).toHaveBeenCalledTimes(1); // query only, no mutation
+    });
+
+    test('no-op when the issue is already in a not-started (backlog) state', async () => {
+      fetchMock.mockResolvedValueOnce(statesResp(cur('s-backlog')));
+      const ok = await revertIssueToNotStarted(CTX, ISSUE_ID);
+      expect(ok).toBe(false);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
     });
   });
 

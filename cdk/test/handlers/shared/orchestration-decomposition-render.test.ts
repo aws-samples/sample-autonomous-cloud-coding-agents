@@ -187,11 +187,21 @@ describe('renderPlanProposal — content', () => {
     expect(md.indexOf('What changed')).toBeLessThan(md.indexOf('1. **'));
   });
 
-  test('#299 BLOCKER-1: changeSummary is suppressed on a first-time (round-0) plan', () => {
-    const withSummary: DecompositionPlan = { ...FANOUT, changeSummary: 'irrelevant on round 0' };
-    // Even if the field somehow rode on a round-0 plan, the round guard hides it.
-    const md = renderPlanProposal(withSummary, { autoRun: false });
+  test('a fresh round-0 plan with NO changeSummary reads "Proposed breakdown", no "What changed"', () => {
+    const md = renderPlanProposal(FANOUT, { autoRun: false });
+    expect(md).toContain('Proposed breakdown');
     expect(md).not.toContain('What changed');
+  });
+
+  test('F-command-ack-stuck: a changeSummary present (structural command, round 0) shows "Updated" + the diff', () => {
+    // A drop/merge/size command edit produces a computed changeSummary without
+    // bumping the revise round. The render must still read "Updated breakdown"
+    // (it WAS edited — never leave it "Proposed") and lead with the diff.
+    const edited: DecompositionPlan = { ...FANOUT, changeSummary: 'Removed “Comparison table”.' };
+    const md = renderPlanProposal(edited, { autoRun: false });
+    expect(md).toContain('Updated breakdown');
+    expect(md).toContain('**What changed:** Removed “Comparison table”.');
+    expect(md.indexOf('What changed')).toBeLessThan(md.indexOf('1. **'));
   });
 
   test('#299 BLOCKER-1: a revision with NO changeSummary (older agent) omits the line cleanly', () => {
