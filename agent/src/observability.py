@@ -64,16 +64,26 @@ def current_otel_trace_id() -> str | None:
     bundle) so operators can join the task to its CloudWatch/X-Ray trace. Returns
     ``None`` when there is no recording span (e.g. tracing disabled locally) or
     the context is invalid, so callers can treat it as a graceful-missing field.
+
+    Never raises: a broken/misconfigured tracer degrades to ``None`` rather than
+    propagating. Callers read this inside DDB-write try-blocks (progress_writer),
+    where a raised trace error would otherwise be misclassified as a DDB failure
+    and trip the shared progress circuit breaker.
     """
-    span = trace.get_current_span()
-    ctx = span.get_span_context()
-    if not ctx.is_valid:
+    try:
+        span = trace.get_current_span()
+        ctx = span.get_span_context()
+        if not ctx.is_valid:
+            return None
+        # format_trace_id renders the 128-bit id as zero-padded 32-char hex — the
+        # OTEL format, so it joins directly in CloudWatch Transaction Search. Note
+        # the X-Ray console renders trace ids as ``1-{8hex}-{24hex}``; to look this
+        # up there, transform to that form (the timestamp is the first 8 hex chars).
+        return trace.format_trace_id(ctx.trace_id)
+    except Exception:
+        # nosemgrep: py-silent-success-masking -- trace id is a graceful-missing
+        # correlation field; a tracer fault must not fail the caller's write path.
         return None
-    # format_trace_id renders the 128-bit id as zero-padded 32-char hex — the
-    # OTEL format, so it joins directly in CloudWatch Transaction Search. Note
-    # the X-Ray console renders trace ids as ``1-{8hex}-{24hex}``; to look this
-    # up there, transform to that form (the timestamp is the first 8 hex chars).
-    return trace.format_trace_id(ctx.trace_id)
 
 
 def set_session_id(

@@ -171,8 +171,9 @@ export async function transitionTask(
 /** Correlation envelope stamped on orchestrator-plane task events (#245). */
 export interface EventCorrelation {
   readonly user_id?: string;
-  /** `owner/repo`, or `null`/absent for repo-less workflows (#248 Phase 3). */
-  readonly repo?: string | null;
+  /** `owner/repo`, or absent for repo-less workflows (#248 Phase 3). Matches
+   *  the source `TaskRecord.repo` (`string | undefined`). */
+  readonly repo?: string;
 }
 
 /**
@@ -852,7 +853,7 @@ export async function finalizeTask(
  * @param userId - the user who owns the task.
  * @param releaseConcurrency - whether to decrement the concurrency counter.
  * @param repo - optional target repo (`owner/repo`) for the correlation
- *   envelope (#245); omit/null for repo-less workflows.
+ *   envelope (#245); omit for repo-less workflows.
  */
 export async function failTask(
   taskId: string,
@@ -860,7 +861,7 @@ export async function failTask(
   errorMessage: string,
   userId: string,
   releaseConcurrency: boolean,
-  repo?: string | null,
+  repo?: string,
 ): Promise<void> {
   let transitioned = false;
   try {

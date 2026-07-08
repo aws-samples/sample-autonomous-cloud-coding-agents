@@ -45,6 +45,15 @@ class TestCurrentOtelTraceId:
         with patch.object(observability.trace, "get_current_span", return_value=span):
             assert observability.current_otel_trace_id() is None
 
+    def test_degrades_to_none_when_tracer_raises(self):
+        # A broken/misconfigured tracer must not propagate: callers read this
+        # inside DDB-write try-blocks, where a raise would be misclassified as a
+        # DDB failure and trip the shared progress circuit breaker (#245 review).
+        with patch.object(
+            observability.trace, "get_current_span", side_effect=RuntimeError("tracer boom")
+        ):
+            assert observability.current_otel_trace_id() is None
+
 
 class TestSetSessionId:
     """``set_session_id`` propagates the correlation envelope (#245) via OTEL
