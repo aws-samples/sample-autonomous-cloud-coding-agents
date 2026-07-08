@@ -314,6 +314,37 @@ describe('hydrateAndTransition', () => {
   });
 });
 
+describe('emitTaskEvent — correlation envelope (#245)', () => {
+  test('stamps user_id and repo as top-level fields when supplied', async () => {
+    mockDdbSend.mockResolvedValue({});
+    await emitTaskEvent('TASK001', 'session_started', { session_id: 's-1' }, { user_id: 'user-123', repo: 'org/repo' });
+    const item = mockDdbSend.mock.calls.find((c: any) => c[0]._type === 'Put')[0].input.Item;
+    expect(item).toMatchObject({
+      task_id: 'TASK001',
+      event_type: 'session_started',
+      user_id: 'user-123',
+      repo: 'org/repo',
+    });
+    expect(item.metadata).toEqual({ session_id: 's-1' });
+  });
+
+  test('omits repo (not null/empty) when repo-less, keeps user_id', async () => {
+    mockDdbSend.mockResolvedValue({});
+    await emitTaskEvent('TASK001', 'task_failed', undefined, { user_id: 'user-123', repo: undefined });
+    const item = mockDdbSend.mock.calls.find((c: any) => c[0]._type === 'Put')[0].input.Item;
+    expect(item.user_id).toBe('user-123');
+    expect(item).not.toHaveProperty('repo');
+  });
+
+  test('omits both when no correlation is supplied (back-compat)', async () => {
+    mockDdbSend.mockResolvedValue({});
+    await emitTaskEvent('TASK001', 'task_created');
+    const item = mockDdbSend.mock.calls.find((c: any) => c[0]._type === 'Put')[0].input.Item;
+    expect(item).not.toHaveProperty('user_id');
+    expect(item).not.toHaveProperty('repo');
+  });
+});
+
 describe('hydrateAndTransition — Cedar HITL payload threading', () => {
   const mockHydratedContext = {
     version: 1,

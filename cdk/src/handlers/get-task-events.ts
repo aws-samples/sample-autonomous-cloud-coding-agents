@@ -219,12 +219,18 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       });
     }
 
-    // 6. Strip task_id from event records (redundant in response context)
+    // 6. Strip task_id from event records (redundant in response context).
+    //    Pass through the correlation envelope (#245) per-event, omitting each
+    //    field when the source didn't stamp it (e.g. task_created) so the shape
+    //    stays stable for consumers.
     const eventData = events.map(e => ({
       event_id: e.event_id,
       event_type: e.event_type,
       timestamp: e.timestamp,
       metadata: e.metadata ?? {},
+      ...(e.user_id && { user_id: e.user_id }),
+      ...(e.repo && { repo: e.repo }),
+      ...(e.trace_id && { trace_id: e.trace_id }),
     }));
 
     // For descending scans we intentionally suppress ``next_token``. DDB's

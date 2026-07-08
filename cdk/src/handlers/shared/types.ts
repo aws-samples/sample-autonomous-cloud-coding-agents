@@ -344,6 +344,11 @@ export interface EventRecord {
   readonly timestamp: string;
   readonly metadata?: Record<string, unknown>;
   readonly ttl?: number;
+  // Correlation envelope (#245): present on events written after task creation;
+  // absent on `task_created` and any pre-envelope safety-net writer.
+  readonly user_id?: string;
+  readonly repo?: string;
+  readonly trace_id?: string;
 }
 
 /**
@@ -358,6 +363,10 @@ export interface ReplayEvent {
   readonly event_type: string;
   readonly timestamp: string;
   readonly metadata: Record<string, unknown>;
+  // Correlation envelope (#245): present per-event when the source stamped it.
+  readonly user_id?: string;
+  readonly repo?: string;
+  readonly trace_id?: string;
 }
 
 /**

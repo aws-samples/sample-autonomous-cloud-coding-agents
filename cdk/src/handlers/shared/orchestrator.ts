@@ -217,24 +217,23 @@ const MAX_POLL_INTERVAL_MS = 300_000;
  * @returns the merged blueprint config.
  */
 export async function loadBlueprintConfig(task: TaskRecord): Promise<BlueprintConfig> {
+  // Correlation envelope (#245) on this shared function's logs too, matching the
+  // orchestrate handler's child logger. `repo` omitted for repo-less workflows.
+  const log = logger.child({ task_id: task.task_id, ...(task.repo && { repo: task.repo }) });
+
   // Repo-less workflows (#248 Phase 3) have no per-repo Blueprint — use platform
   // defaults directly rather than a RepoTable lookup on a missing repo.
   const repoConfig = task.repo ? await loadRepoConfig(task.repo) : null;
 
   if (repoConfig) {
-    logger.info('Loaded per-repo blueprint config', {
-      task_id: task.task_id,
-      repo: task.repo,
+    log.info('Loaded per-repo blueprint config', {
       has_runtime_override: !!repoConfig.runtime_arn,
       has_model_override: !!repoConfig.model_id,
       has_prompt_override: !!repoConfig.system_prompt_overrides,
       has_token_override: !!repoConfig.github_token_secret_arn,
     });
   } else {
-    logger.info('No per-repo config found, using platform defaults', {
-      task_id: task.task_id,
-      repo: task.repo,
-    });
+    log.info('No per-repo config found, using platform defaults');
   }
 
   // Clamp poll_interval_ms to safe range
@@ -242,8 +241,7 @@ export async function loadBlueprintConfig(task: TaskRecord): Promise<BlueprintCo
   if (pollIntervalMs !== undefined) {
     const clamped = Math.min(Math.max(pollIntervalMs, MIN_POLL_INTERVAL_MS), MAX_POLL_INTERVAL_MS);
     if (clamped !== pollIntervalMs) {
-      logger.warn('poll_interval_ms clamped to safe range', {
-        repo: task.repo,
+      log.warn('poll_interval_ms clamped to safe range', {
         original: pollIntervalMs,
         clamped,
         min: MIN_POLL_INTERVAL_MS,
@@ -871,10 +869,8 @@ export async function failTask(
     });
     transitioned = true;
   } catch (err) {
-    logger.warn('Failed to transition task to FAILED', {
-      task_id: taskId,
-      user_id: userId,
-      ...(repo && { repo }),
+    const log = logger.child({ task_id: taskId, user_id: userId, ...(repo && { repo }) });
+    log.warn('Failed to transition task to FAILED', {
       error: err instanceof Error ? err.message : String(err),
     });
   }

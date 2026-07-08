@@ -329,6 +329,8 @@ Returns the audit trail for a task: state transitions, hydration events, session
 
 **Event types:** `task_created`, `uploads_confirmed`, `attachment_blocked`, `admission_rejected`, `preflight_failed`, `hydration_started`, `hydration_complete`, `session_started`, `pr_created`, `task_completed`, `task_failed`, `task_cancelled`, `task_timed_out`. Custom blueprint steps emit `{step_name}_started`, `{step_name}_completed`, `{step_name}_failed`. (There is no `admission_passed` or `session_ended` event — admission success is implicit in the subsequent `hydration_started`, and session end is captured by the terminal event.)
 
+**Correlation envelope (#245):** each event optionally carries top-level `user_id`, `repo`, and `trace_id` (the agent's OTEL trace id) so the event stream joins to structured logs and X-Ray. Each field is present only when the event's source stamped it — `task_created` predates the envelope and carries none; events from `hydration_started` onward carry `user_id`/`repo`, and agent-emitted events additionally carry `trace_id`. Fields are omitted (not `null`) when absent. See [OBSERVABILITY.md](./OBSERVABILITY.md#correlation-envelope).
+
 **Errors:** `401 UNAUTHORIZED`, `403 FORBIDDEN`, `404 TASK_NOT_FOUND`.
 
 ### Approve / deny a Cedar HITL gate
@@ -414,7 +416,7 @@ Fields sourced from stores that may not have run for a given task are returned a
 - `otel_trace_id` is `null` on tasks created before the field existed or that ran with tracing unavailable; `session_id` is the available correlation id in that case.
 - `verification` is `null` when no gate result was persisted (e.g. a repo-less workflow has no build/lint step).
 - The embedded `events` list is capped both by count (`MAX_REPLAY_EVENTS`) and by total size (`MAX_REPLAY_EVENT_BYTES`, to stay under Lambda's 6 MB response limit — relevant for `--trace` tasks whose events carry large previews); whichever cap trips first truncates the tail. When that happens, `events_truncation` is non-null (`{ reason: "max_events" | "max_bytes", returned_events }`) so a consumer can detect a partial list; it is `null` when the full list fit. Use `GET /v1/tasks/{task_id}/events` for the full paginated feed.
-- Each embedded event has the same shape as the `/events` feed — `event_id`, `event_type`, `timestamp`, and `metadata` (always present, `{}` when the event stored none); the internal `task_id`/`ttl` are stripped.
+- Each embedded event has the same shape as the `/events` feed — `event_id`, `event_type`, `timestamp`, `metadata` (always present, `{}` when the event stored none), and the optional correlation envelope (`user_id`, `repo`, `trace_id`) when the source stamped it; the internal `task_id`/`ttl` are stripped.
 
 **Response: `200 OK`**
 
