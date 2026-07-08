@@ -749,7 +749,7 @@ Opt-in per task: 4 KB previews + full trajectory to S3 with TTL.
 
 ### Deferred
 
-- **LLM-synthesized status summary** — `bgagent ask` without targeting the agent; Lambda calls an LLM to narrate state. Cost + hallucination trade-offs; revisit if v1 feedback warrants. Tracked on the product roadmap as **LLM-synthesized status summary (optional)** under **Smart progress updates** ([ROADMAP.md](/sample-autonomous-cloud-coding-agents/roadmap/roadmap)).
+- **LLM-synthesized status summary** — `bgagent ask` without targeting the agent; Lambda calls an LLM to narrate state. Cost + hallucination trade-offs; revisit if v1 feedback warrants. Tracked as a [GitHub issue](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues) under **Smart progress updates**.
 - **Cedar `effect: "advise"` tier** — non-blocking FYI policy tier for post-v1. Design sketch in [`CEDAR_HITL_GATES.md`](/sample-autonomous-cloud-coding-agents/architecture/cedar-hitl-gates).
 - **Outbound WebSocket from agent** — only if a concrete sub-200 ms latency requirement surfaces. Agent-initiated egress avoids dual-auth problems and works on any compute.
 - **Multi-user watch** — multiple users attached to the same task's live event stream (teams).

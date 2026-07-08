@@ -69,7 +69,7 @@ export function isAllowedScreenshotUrl(rawUrl: string): boolean {
   // unique-local `fc00::/7` (e.g. `[fc00::1]`), NAT64, and IPv4-mapped
   // forms. A colon is the unambiguous IPv6 signal: DNS hostnames can't
   // contain one, and the port has already been split off onto
-  // `parsed.port`. (krokoko PR-241 round-3 finding 2.)
+  // Enumerating ranges missed by naive host checks. (screenshot URL hardening)
   if (rawHost.startsWith('[') || hostname.includes(':')) return false;
 
   // IPv4 literals: reject any dotted-quad (preview URLs come from DNS).

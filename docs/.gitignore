@@ -55,7 +55,6 @@ dist/
 !/src/content/docs/user-guide/Viewing-logs.md
 !/src/content/docs/user-guide/Tips.md
 !/src/content/docs/user-guide/Prompt-guide.md
-!/src/content/docs/roadmap/Roadmap.md
 !/src/content/docs/design/Agent-harness.md
 !/src/content/docs/design/Api-contract.md
 !/src/content/docs/design/Architecture.md

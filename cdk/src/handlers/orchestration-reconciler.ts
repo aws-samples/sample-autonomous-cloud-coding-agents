@@ -49,7 +49,7 @@ import type { DynamoDBRecord, DynamoDBStreamEvent } from 'aws-lambda';
 import { createTaskCore } from './shared/create-task-core';
 import { renderFailureReply, renderPanelFailureReason } from './shared/failure-reply';
 import { isNoChangeIteration, renderMaturingReply } from './shared/iteration-reply';
-import { EMOJI_FAILURE, EMOJI_NEEDS_INPUT, EMOJI_SUCCESS, type LinearFeedbackContext, replyToComment, revertIssueToNotStarted, sweepDecompositionNotes, swapCommentReaction, transitionIssueState, upsertStatusComment, upsertThreadedReply } from './shared/linear-feedback';
+import { EMOJI_FAILURE, EMOJI_NEEDS_INPUT, EMOJI_SUCCESS, type LinearFeedbackContext, revertIssueToNotStarted, sweepDecompositionNotes, swapCommentReaction, transitionIssueState, upsertStatusComment, upsertThreadedReply } from './shared/linear-feedback';
 import { resolveLinearOauthToken } from './shared/linear-oauth-resolver';
 import type { SubIssueNode } from './shared/linear-subissue-fetch';
 import { logger } from './shared/logger';

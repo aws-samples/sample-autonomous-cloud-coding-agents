@@ -8,7 +8,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for helping improve ABCA. Please check [open](https://github.com/krokoko/bgagent/issues) and [recently closed](https://github.com/krokoko/bgagent/issues?q=is%3Aissue+is%3Aclosed) issues first.
+        Thanks for helping improve ABCA. Please check [open](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues) and [recently closed](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues?q=is%3Aissue+is%3Aclosed) issues first.
   - type: dropdown
     id: component
     attributes:

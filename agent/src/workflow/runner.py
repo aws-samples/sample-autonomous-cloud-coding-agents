@@ -388,7 +388,11 @@ def _handle_clone_repo(step: Step, ctx: StepContext) -> StepOutcome:
 
     reused = ctx.setup is not None
     if not reused:
-        ctx.setup = setup_repo(ctx.config)
+        # Thread progress so bounded-retry blocker events (#251, dependency_
+        # unreachable / egress_denied during clone/fetch backoff) reach the live
+        # stream — matching the inline pipeline path. Terminal reason still
+        # propagates via the raised exception even when progress is None.
+        ctx.setup = setup_repo(ctx.config, progress=ctx.progress)
     setup = ctx.setup
     return StepOutcome(
         kind=step.kind,

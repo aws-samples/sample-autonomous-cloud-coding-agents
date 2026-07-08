@@ -105,7 +105,6 @@ export function computeReconcilePlan(
   outcome: TerminalOutcome,
   children: readonly ReconcileChild[],
 ): ReconcilePlan {
-  const byId = new Map(children.map((c) => [c.sub_issue_id, c]));
   const succeeded = isSuccess(outcome);
 
   // Working copy of statuses so we can reason about "all predecessors

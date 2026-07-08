@@ -367,6 +367,10 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     {
       repo,
       task_description: taskDescription,
+      // Explicit coding workflow: a label-triggered Jira task always targets a
+      // mapped repo, so it must not fall through the resolution ladder to the
+      // repo-less default/agent-v1 (which never commits or opens a PR). #546
+      workflow_ref: 'coding/new-task-v1',
       ...(attachments.length > 0 && { attachments }),
     },
     {

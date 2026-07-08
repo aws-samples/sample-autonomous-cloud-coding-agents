@@ -132,6 +132,9 @@ describe('createTaskCore', () => {
     const body = JSON.parse(result.body);
     expect(body.data.status).toBe('SUBMITTED');
     expect(body.data.repo).toBeNull();
+    // Repo-less ⇒ no branch is created (the agent never clones/branches/PRs), so
+    // branch_name is empty rather than a misleading bgagent/<id>/... slug.
+    expect(body.data.branch_name).toBe('');
     // Repo-less ⇒ the onboarding/blueprint RepoTable lookup is skipped entirely.
     expect(mockLookupRepo).not.toHaveBeenCalled();
     expect(mockSend).toHaveBeenCalledTimes(2); // task + event
@@ -276,6 +279,37 @@ describe('createTaskCore', () => {
     expect(body.data.task_description).toBe('Original work');
     expect(mockSend).toHaveBeenCalledTimes(2);
     expect(mockLambdaSend).not.toHaveBeenCalled();
+  });
+
+  test('returns 200 for a repo-less idempotency replay despite empty branch_name', async () => {
+    // Regression: a repo-less record legitimately persists branch_name='' (and
+    // no repo). The replay completeness check must not treat those falsy fields
+    // as "missing" and 500 — only true identity/audit fields are required.
+    const existingItem = {
+      task_id: 'existing-repoless',
+      user_id: 'user-123',
+      status: 'SUBMITTED',
+      resolved_workflow: { id: 'knowledge/web-research-v1', version: '1.0.0' },
+      task_description: 'Summarise these papers',
+      branch_name: '',
+      channel_source: 'api',
+      status_created_at: 'SUBMITTED#2020-01-01T00:00:00.000Z',
+      created_at: '2020-01-01T00:00:00.000Z',
+      updated_at: '2020-01-01T00:00:00.000Z',
+      idempotency_key: 'rl-key',
+    };
+    mockSend
+      .mockResolvedValueOnce({ Items: [{ task_id: 'existing-repoless' }] })
+      .mockResolvedValueOnce({ Item: existingItem });
+
+    const result = await createTaskCore(
+      { workflow_ref: 'knowledge/web-research-v1', task_description: 'Summarise these papers' },
+      makeContext({ idempotencyKey: 'rl-key' }),
+      'req-1',
+    );
+    expect(result.statusCode).toBe(200);
+    expect(result.headers?.['Idempotent-Replay']).toBe('true');
+    expect(JSON.parse(result.body).data.task_id).toBe('existing-repoless');
   });
 
   test('returns 409 when idempotency key belongs to another user', async () => {

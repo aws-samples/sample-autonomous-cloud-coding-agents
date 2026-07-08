@@ -44,4 +44,9 @@ attempt to clone a repository, create a branch, or open a pull request.
 - Cite each non-obvious claim with the source it came from (URL or title).
 - Your final message IS the deliverable — it is uploaded as the task artifact,
   so make it self-contained and complete rather than a pointer to work elsewhere.
+- Do the research yourself in this session and finish before you stop. There is
+  no human watching and no follow-up turn: do NOT defer the work to a background
+  job, workflow, or sub-agent, and never end with "results will follow" or
+  "watch progress elsewhere". If you cannot complete it within the turn budget,
+  deliver your best partial answer with what you found — not a promise.
 """

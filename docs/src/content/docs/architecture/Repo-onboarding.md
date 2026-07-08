@@ -149,7 +149,7 @@ The orchestrator reads `RepoConfig` at task time. Each pipeline step consumes sp
 
 Blueprints customize the orchestrator pipeline through three progressively powerful layers. See [ORCHESTRATOR.md](/sample-autonomous-cloud-coding-agents/architecture/orchestrator) for how the framework enforces invariants regardless of customization.
 
-> **Implementation status:** Only **Layer 1** is shipped today. The Blueprint construct's `pipeline` prop currently exposes a single override, `pollIntervalMs` (`cdk/src/constructs/blueprint.ts`); there is no `customSteps`/`stepSequence` support, no `CustomStepConfig`/`StepRef` wiring, and no `INVALID_STEP_SEQUENCE` validation in code. **Layer 2 (Lambda-backed custom steps)** and **Layer 3 (custom step sequences)** below describe a planned design — see the "Blueprint custom steps and step sequences" item in [ROADMAP.md](/sample-autonomous-cloud-coding-agents/roadmap/roadmap). The interfaces and validation rules in those subsections are forward-looking, not current behavior.
+> **Implementation status:** Only **Layer 1** is shipped today. The Blueprint construct's `pipeline` prop currently exposes a single override, `pollIntervalMs` (`cdk/src/constructs/blueprint.ts`); there is no `customSteps`/`stepSequence` support, no `CustomStepConfig`/`StepRef` wiring, and no `INVALID_STEP_SEQUENCE` validation in code. **Layer 2 (Lambda-backed custom steps)** and **Layer 3 (custom step sequences)** below describe a planned design — tracked as [GitHub issues](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues). The interfaces and validation rules in those subsections are forward-looking, not current behavior.
 
 ### Layer 1: Parameterized strategies
 

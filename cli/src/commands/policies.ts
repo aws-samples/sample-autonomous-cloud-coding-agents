@@ -19,7 +19,7 @@
 
 import { Command } from 'commander';
 import { ApiClient } from '../api-client';
-import { ApiError, CliError } from '../errors';
+import { ApiError, CliError, mapApiError } from '../errors';
 import { formatJson } from '../format';
 import type { GetPoliciesResponse, PolicyRuleSummary } from '../types';
 
@@ -125,24 +125,9 @@ function renderRules(rules: readonly PolicyRuleSummary[]): void {
 }
 
 function mapPoliciesError(err: ApiError): CliError {
-  switch (err.statusCode) {
-    case 401:
-      return new CliError(
-        `Not authenticated (${err.errorCode}). Run \`bgagent login\` to re-authenticate.`,
-      );
-    case 404:
-      return new CliError(
-        `Repository not onboarded or no policies configured (${err.errorCode}).`,
-      );
-    case 429:
-      return new CliError(
-        `Rate limit exceeded (${err.errorCode}). policies list is rate-limited.`,
-      );
-    case 503:
-      return new CliError(
-        `Policy service temporarily unavailable (${err.errorCode}): ${err.message}`,
-      );
-    default:
-      return new CliError(err.message);
-  }
+  return mapApiError(err, {
+    404: (e) => `Repository not onboarded or no policies configured (${e.errorCode}).`,
+    429: (e) => `Rate limit exceeded (${e.errorCode}). policies list is rate-limited.`,
+    503: (e) => `Policy service temporarily unavailable (${e.errorCode}): ${e.message}`,
+  });
 }

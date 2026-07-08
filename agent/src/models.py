@@ -154,6 +154,11 @@ class TaskConfig(BaseModel):
     github_token: str = ""
     aws_region: str
     anthropic_model: str = "us.anthropic.claude-sonnet-4-6"
+    # The "small/fast" model Claude Code uses for auxiliary work (e.g. WebFetch
+    # page summarization). Must be a cross-region INFERENCE-PROFILE id (``us.``
+    # prefix), not a bare foundation-model id — Claude 4.x cannot be invoked
+    # on-demand by bare id on Bedrock. Threaded to ANTHROPIC_DEFAULT_HAIKU_MODEL.
+    haiku_model: str = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
     dry_run: bool = False
     max_turns: int = 10
     max_budget_usd: float | None = None
@@ -369,8 +374,13 @@ class TaskResult(BaseModel):
     status: str
     agent_status: str = "unknown"
     pr_url: str | None = None
-    build_passed: bool = False
-    lint_passed: bool = False
+    # Tri-state (#515): True/False once the post-run gate runs; None when it did
+    # not (repo-less workflow has no build/lint; a crash before post-hooks). The
+    # None case is persisted as "absent" by write_terminal's `is not None` guard,
+    # so the replay bundle reports verification:null rather than a fictional
+    # build_passed:false for a gate that never executed.
+    build_passed: bool | None = None
+    lint_passed: bool | None = None
     cost_usd: float | None = None
     # Rev-5 DATA-1: historically the `turns` field was set to the SDK's
     # `ResultMessage.num_turns`, which INCLUDES the attempted turn that
@@ -426,3 +436,7 @@ class TaskResult(BaseModel):
     # iterations on one PR overlap (else "newest task" mis-attributes it). Empty
     # when unknown (rev-parse failed / non-PR run) → webhook falls back to newest.
     head_sha: str = ""
+    # OTEL trace id (32-char hex) of the task's root span, captured at terminal
+    # write so the replay bundle (#515) can correlate the task to its
+    # CloudWatch/X-Ray trace. ``None`` when tracing is unavailable (local/dev).
+    otel_trace_id: str | None = None

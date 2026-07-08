@@ -7,7 +7,7 @@ title: Vision
 This document states the long-term direction of **ABCA (Autonomous Background Coding Agents on AWS)** and the **tenets** that should guide design, implementation, and review. Use it when evaluating pull requests, RFCs, and ADRs: if a change clearly advances the vision and respects the tenets, it belongs; if it trades tenets away without an explicit, documented rationale, it needs more discussion.
 
 - **Use this doc for:** alignment checks in review — “does this fit where we are going?”
-- **Not a substitute for:** [ARCHITECTURE.md](/sample-autonomous-cloud-coding-agents/architecture/architecture) (system shape), [ROADMAP.md](/sample-autonomous-cloud-coding-agents/roadmap/roadmap) (what ships when), or [docs/decisions/](../decisions/) (specific accepted choices).
+- **Not a substitute for:** [ARCHITECTURE.md](/sample-autonomous-cloud-coding-agents/architecture/architecture) (system shape), [GitHub issues](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues) (planned work and priorities), or [docs/decisions/](../decisions/) (specific accepted choices).
 
 ## Vision
 
@@ -48,7 +48,7 @@ Tenets are durable preferences. They can conflict; resolving conflict is a desig
 **The same deployment should support different autonomy postures** so teams can adopt incrementally: tight gates early, broader pre-approval and fewer interrupts later — without forking the platform.
 
 - Autonomy is expressed through **configuration and policy** (Blueprint, Cedar policies, submit-time `--pre-approve`, per-repo overrides) — not hard-coded per customer in core orchestrator logic.
-- A repo can run **fully gated** (many soft-deny rules, narrow pre-approve), **mostly autonomous** (`all_session` pre-approve with hard-deny still enforced), or anywhere between; platform maturity moves along the [ROADMAP.md](/sample-autonomous-cloud-coding-agents/roadmap/roadmap) scorecard, not a single global on/off switch.
+- A repo can run **fully gated** (many soft-deny rules, narrow pre-approve), **mostly autonomous** (`all_session` pre-approve with hard-deny still enforced), or anywhere between; platform maturity is tracked via [GitHub issues](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues) with priority labels (`P0`, `P1`, etc.), not a single global on/off switch.
 - **Merge and release authority** stay human regardless of autonomy level; raising autonomy means fewer *in-run* interruptions, not unsupervised production promotion.
 - **In review:** Prefer knobs that let operators tighten or loosen autonomy per repo/task; flag designs that lock everyone to one posture or that bypass policy to “make demos easier.”
 
@@ -104,7 +104,7 @@ Tenets are durable preferences. They can conflict; resolving conflict is a desig
 
 **The platform should get better with use: memory, review feedback, and evaluation — not just execute one-off tasks.**
 
-- Learnings are scoped, provenance-tracked, and subject to integrity and (roadmap) trust controls.
+- Learnings are scoped, provenance-tracked, and subject to integrity and (planned) trust controls.
 - Outcomes (merge, revision cycles, CI pass rate) are the feedback signal, not vanity task counts.
 - **In review:** Connect features to learning or evaluation loops; avoid “write once, never read” memory paths.
 
@@ -112,7 +112,7 @@ Tenets are durable preferences. They can conflict; resolving conflict is a desig
 
 **ABCA is an AWS sample and reference architecture — experimental, fork-friendly, honest about gaps.**
 
-- We document what is **roadmap** versus **shipped**; we do not imply production completeness we have not built.
+- We document what is **planned** versus **shipped**; we do not imply production completeness we have not built.
 - Breaking changes and operational burden are acceptable when they serve clarity for builders studying the pattern.
 - **In review:** Avoid scope that turns the repo into a generic SaaS control plane; keep the narrative “deployable reference for dark-factory patterns on AWS.”
 
@@ -144,7 +144,7 @@ These are out of scope for the project vision. Proposals that primarily serve th
 | Document | Role |
 |----------|------|
 | [ARCHITECTURE.md](/sample-autonomous-cloud-coding-agents/architecture/architecture) | Component design and design principles for the current system |
-| [ROADMAP.md](/sample-autonomous-cloud-coding-agents/roadmap/roadmap) | Sequenced delivery and maturity scorecard |
+| [GitHub issues](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues) | Planned work, priorities (`P0`, `P1`, etc.), and maturity tracking |
 | [SECURITY.md](/sample-autonomous-cloud-coding-agents/architecture/security) | Threat model and controls (tenets 4–5 in depth) |
 | [CEDAR_HITL_GATES.md](/sample-autonomous-cloud-coding-agents/architecture/cedar-hitl-gates) | HITL approval gates, pre-approve scopes, graduated in-run autonomy |
 | [INTERACTIVE_AGENTS.md](/sample-autonomous-cloud-coding-agents/architecture/interactive-agents) | Async UX, watch/nudge, notification plane, approval state machine |

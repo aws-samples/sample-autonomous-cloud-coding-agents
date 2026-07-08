@@ -28,7 +28,7 @@ from context import assemble_prompt, fetch_github_issue
 from jira_reactions import comment_task_finished, comment_task_started
 from linear_reactions import react_task_finished, react_task_started
 from models import AgentResult, HydratedContext, RepoSetup, TaskConfig, TaskResult
-from observability import task_span
+from observability import current_otel_trace_id, task_span
 from post_hooks import (
     _extract_agent_notes,
     ensure_committed,
@@ -39,7 +39,6 @@ from post_hooks import (
 from progress_writer import _ProgressWriter
 from prompt_builder import build_system_prompt, discover_project_config
 from shell import log, log_error_cw
-from system_prompt import SYSTEM_PROMPT
 from telemetry import (
     _TrajectoryWriter,
     format_bytes,
@@ -409,6 +408,7 @@ def _run_repoless_task(
         cache_read_input_tokens=usage.cache_read_input_tokens if usage else None,
         cache_creation_input_tokens=usage.cache_creation_input_tokens if usage else None,
         trace_s3_uri=trace_s3_uri,
+        otel_trace_id=current_otel_trace_id(),
     )
     result_dict = result.model_dump()
 
@@ -551,6 +551,16 @@ def _resolve_overall_task_status(
     if agent_status in ("success", "end_turn") and build_ok:
         return "success", err
 
+    # #251 carry-path: a hook may have detected an environmental blocker mid-run
+    # (egress denial, policy fail-closed) that the SDK surfaced only as a generic
+    # failure or as a missing ResultMessage. Promote the canonical
+    # ``BLOCKED[<kind>]: …`` reason so the CDK classifier attaches a precise
+    # remedy. Import locally to avoid a module-load cycle (hooks imports
+    # pipeline-adjacent modules).
+    from hooks import last_blocker_reason
+
+    blocker = last_blocker_reason()
+
     if agent_status == "unknown":
         if pr_url:
             log(
@@ -562,10 +572,20 @@ def _resolve_overall_task_status(
                 "INFO",
                 "No ResultMessage from SDK; build_ok=True (informational; task still failed)",
             )
+        # An egress denial that kills the agent's outbound calls is a likely
+        # cause of a missing ResultMessage — prefer the specific blocker reason
+        # over the generic SDK-no-result message when both are present.
+        if blocker and not err:
+            return "error", blocker
         merged = f"{err}; {_SDK_NO_RESULT_MESSAGE}" if err else _SDK_NO_RESULT_MESSAGE
         return "error", merged
 
     if not err:
+        # #251: a latched blocker (e.g. egress_denied naming a host) is the more
+        # specific, authoritative terminal reason — prefer it over the generic
+        # build-gate copy so the classifier attaches the precise remedy.
+        if blocker:
+            return "error", blocker
         # The agent finished cleanly but the build gate failed. If that failure
         # was a TIMEOUT, mark it distinctly (``build_ok=timeout``) so the
         # platform's failure copy reads "timed out", not "build/tests failed".
@@ -763,6 +783,14 @@ def run_task(
 
         agent_result: AgentResult | None = None
         progress = _ProgressWriter(config.task_id, trace=trace)
+        # #251: clear any blocker latched by a prior task. The agent container
+        # is one-task-per-process today, but the FastAPI server thread-pool can
+        # in principle dispatch a second run_task in the same process — reset
+        # here so a stale BLOCKED[...] reason can never leak into this task's
+        # terminal error_message (the latch is a scalar, not task_id-keyed).
+        from hooks import reset_blocker_reason
+
+        reset_blocker_reason()
         # --trace accumulator (design §10.1): when the task opted into
         # trace, ``_TrajectoryWriter`` keeps an in-memory copy of each
         # event so the pipeline can gzip+upload the full trajectory to
@@ -888,7 +916,7 @@ def run_task(
 
             # Setup repo (deterministic pre-hooks)
             with task_span("task.repo_setup") as setup_span:
-                setup = setup_repo(config)
+                setup = setup_repo(config, progress=progress)
                 setup_span.set_attribute("build.before", setup.build_before)
             progress.write_agent_milestone(
                 "repo_setup_complete",
@@ -1385,6 +1413,7 @@ def run_task(
                 # becomes the reply); a normal edit's reply is the PR link.
                 answer_text=answer_text if code_changed is False else "",
                 head_sha=head_sha_after,
+                otel_trace_id=current_otel_trace_id(),
             )
 
             result_dict = result.model_dump()
@@ -1395,8 +1424,11 @@ def run_task(
                 root_span.set_attribute("agent.cost_usd", float(result.cost_usd))
             if result.turns:
                 root_span.set_attribute("agent.turns", int(result.turns))
-            root_span.set_attribute("build.passed", result.build_passed)
-            root_span.set_attribute("lint.passed", result.lint_passed)
+            # On the repo path these are always real bools (computed by the post
+            # hooks above); coalesce for the span attribute since the field type
+            # is now tri-state (bool | None) for the repo-less/crash case.
+            root_span.set_attribute("build.passed", bool(result.build_passed))
+            root_span.set_attribute("lint.passed", bool(result.lint_passed))
             root_span.set_attribute("pr.url", result.pr_url or "")
             root_span.set_attribute("task.duration_s", result.duration_s)
             if usage:
@@ -1450,6 +1482,10 @@ def run_task(
                 task_id=config.task_id,
                 agent_status=agent_for_chain.status if agent_for_chain else "unknown",
                 trace_s3_uri=crash_trace_s3_uri,
+                # Still inside `with task_span()`, so the id is live — capture it
+                # here too or FAILED tasks (the primary post-mortem case for the
+                # replay bundle, #515) persist otel_trace_id: null.
+                otel_trace_id=current_otel_trace_id(),
             )
             task_state.write_terminal(config.task_id, "FAILED", crash_result.model_dump())
             # Best-effort ❌ on the Linear issue so the stale 👀 doesn't linger.
@@ -1546,17 +1582,13 @@ def main():
                 config.repo_url, config.issue_number, config.github_token
             )
         prompt = assemble_prompt(config)
-        system_prompt = SYSTEM_PROMPT.replace("{repo_url}", config.repo_url)
-        system_prompt = system_prompt.replace("{task_id}", config.task_id)
-        system_prompt = system_prompt.replace("{workspace}", AGENT_WORKSPACE)
-        system_prompt = system_prompt.replace("{branch_name}", "bgagent/{task_id}/dry-run")
-        system_prompt = system_prompt.replace("{default_branch}", "main")
-        system_prompt = system_prompt.replace("{max_turns}", str(config.max_turns))
-        system_prompt = system_prompt.replace("{setup_notes}", "(dry run — setup not executed)")
-        system_prompt = system_prompt.replace("{memory_context}", "(dry run — memory not loaded)")
-        overrides = config.system_prompt_overrides
-        if overrides:
-            system_prompt += f"\n\n## Additional instructions\n\n{overrides}"
+        dry_setup = RepoSetup(
+            repo_dir=f"{AGENT_WORKSPACE}/{config.task_id}",
+            branch=f"bgagent/{config.task_id}/dry-run",
+            default_branch="main",
+            notes=["(dry run — setup not executed)"],
+        )
+        system_prompt = build_system_prompt(config, dry_setup, None, config.system_prompt_overrides)
         system_prompt_hash = hashlib.sha256(system_prompt.encode("utf-8")).hexdigest()[:12]
         prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:12]
         print("\n--- SYSTEM PROMPT (REDACTED) ---")

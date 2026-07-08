@@ -68,12 +68,18 @@ export interface WorkflowDescriptor {
 
 /**
  * Platform allow-list of Bedrock model ids a workflow may pin via
- * `agent_config.model.id` (WORKFLOWS.md rule 13 / §"Model selection"). Mirrors
- * the foundation models the agent runtime is granted to invoke (`BEDROCK_MODEL_IDS`
- * in `cdk/src/constructs/ecs-agent-cluster.ts`), accepting both the bare id and
- * the `us.`-prefixed cross-region inference-profile form the runtime resolves.
- * A future Phase 4 will source this from the repo Blueprint; until then it is a
- * single platform-wide list checked at admission.
+ * `agent_config.model.id` (WORKFLOWS.md rule 13 / §"Model selection"). Should
+ * mirror the foundation models the agent runtime is granted to invoke — the
+ * shared list in `cdk/src/constructs/bedrock-models.ts`
+ * (`DEFAULT_BEDROCK_MODEL_IDS` / the `bedrockModels` context, #433) — accepting
+ * both the bare id and the `us.`-prefixed cross-region inference-profile form.
+ *
+ * NOTE (#433 follow-up): this is a SEPARATE, hand-maintained list from the IAM
+ * grant source. The `repo onboard --model` path is NOT gated by it (repo
+ * `model_id` isn't validated here), but a custom workflow pinning a model added
+ * via the `bedrockModels` context would still be rejected at create-task until
+ * it's added here too. A future Phase 4 will source this from the repo
+ * Blueprint; consolidating it with `bedrock-models.ts` is tracked separately.
  */
 export const WORKFLOW_MODEL_ALLOWLIST: readonly string[] = [
   'anthropic.claude-sonnet-4-6',

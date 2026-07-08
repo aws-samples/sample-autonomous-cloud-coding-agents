@@ -2,7 +2,6 @@
 
 > **Status:** Core implemented; this document remains the authoritative design reference.
 > **Companion:** [`INTERACTIVE_AGENTS.md`](./INTERACTIVE_AGENTS.md) §9.3 (pointing here), §7 (state machine).
-> **Visual:** [`../diagrams/phase3-cedar-hitl.drawio`](../diagrams/phase3-cedar-hitl.drawio) (12 pages; supplemented by inline Mermaid diagrams below).
 > **Design locked:** 2026-04-23 (Sam ↔ assistant discussion).
 > **Rev:** 5 (2026-05-06 — fold in parallel adversarial + advocate review of the timeout design: late-approval re-read on TIMED_OUT ConditionCheckFailed; user-visible timeout-cap milestones; ceiling-shrink milestone; Runtime JWT bound verified as auto-refreshed IAM; three new tuning metrics; explicit off-hours trade-off section; notification-delivery-failure boundary. IMPL-24 through IMPL-28 added.).
 > **Implementation:** Core shipped. The 3-outcome engine (`agent/src/policy.py`), default policy sets (`agent/policies/hard_deny.cedar`, `agent/policies/soft_deny.cedar`), approval Lambdas (`cdk/src/handlers/{approve-task,deny-task,get-pending,get-policies}.ts`) wired into `cdk/src/constructs/task-api.ts` (routes `/tasks/{id}/approve`, `/deny`, `/pending`, `/repos/{repo_id}/policies`), the cross-engine parity fixtures (`contracts/cedar-parity/`), and the exact engine pins are all on `main`. §15's task list is preserved as a historical implementation record; see the note at the top of §15 for what (if anything) remains unbuilt.
@@ -144,7 +143,7 @@ Settled during the 2026-04-23 design discussion and extended after the 2026-04-2
 
 ## 4. End-to-end request flow
 
-Narrative walk-through of the happy path. Sequence diagrams in [phase3-cedar-hitl.drawio pages 3-6](../diagrams/phase3-cedar-hitl.drawio), supplemented by the round-trip Mermaid below.
+Narrative walk-through of the happy path. Sequence diagrams in the round-trip Mermaid below.
 
 ### Setup (task start)
 
@@ -1813,7 +1812,7 @@ The scenario is bounded by the polling cadence (2-5s ticks) and DDB's strongly-c
 
 ### 13.13 Runtime JWT expiry during approval wait
 
-**Context in this codebase (verified 2026-05-06).** The AgentCore Runtime container authenticates outbound AWS API calls (DynamoDB, Secrets Manager, etc.) via the container's IAM role, which the SDK resolves through the instance-metadata-service equivalent and auto-refreshes transparently. There is no user-presented JWT with a short rolling expiry consumed by the container's own API calls — `grep -rn -iE 'runtime.jwt|jwt.refresh|token_expiry' agent/src/` returns nothing (only `token_usage` for LLM billing and `GITHUB_TOKEN` for git operations). AgentCore Runtime invocation on the Lambda side uses sigv4 via `InvokeAgentRuntimeCommand` (see `cdk/src/handlers/shared/strategies/agentcore-strategy.ts`) — also auto-refreshed AWS credentials, not a user JWT. The "Runtime-JWT" label in §4 step 6 and the phase3-cedar-hitl.drawio diagrams refers to the **caller-facing SSE auth** (Terminal A's Cognito ID token presented to API Gateway to stream task events) — it does not authenticate the container's own DDB writes.
+**Context in this codebase (verified 2026-05-06).** The AgentCore Runtime container authenticates outbound AWS API calls (DynamoDB, Secrets Manager, etc.) via the container's IAM role, which the SDK resolves through the instance-metadata-service equivalent and auto-refreshes transparently. There is no user-presented JWT with a short rolling expiry consumed by the container's own API calls — `grep -rn -iE 'runtime.jwt|jwt.refresh|token_expiry' agent/src/` returns nothing (only `token_usage` for LLM billing and `GITHUB_TOKEN` for git operations). AgentCore Runtime invocation on the Lambda side uses sigv4 via `InvokeAgentRuntimeCommand` (see `cdk/src/handlers/shared/strategies/agentcore-strategy.ts`) — also auto-refreshed AWS credentials, not a user JWT. The "Runtime-JWT" label in §4 step 6 and the sequence diagrams below refers to the **caller-facing SSE auth** (Terminal A's Cognito ID token presented to API Gateway to stream task events) — it does not authenticate the container's own DDB writes.
 
 **Therefore, for v1: no separate Runtime JWT expiry term is required in the ceiling computation.** The `maxLifetime` term (AgentCore's hard lifetime of 8h) is the only upper bound we control; IAM credentials refresh automatically within that window. The ceiling definition in decision #6 stands as `min(1h, maxLifetime_remaining - cleanup_margin)`.
 
@@ -1853,6 +1852,36 @@ flowchart LR
 ```
 
 Every exceptional branch terminates in DENY. The only path to ALLOW is the happy path through a valid approval or pre-approval — no failure mode accidentally approves.
+
+### 13.16 Observable blocker signal (#251)
+
+When the agent cannot make progress for an **environmental** reason — a missing secret, an egress denial, an unreachable dependency, or a fail-closed *policy-engine error* (as opposed to an intentional hard-deny) — it emits a typed, machine-readable **`agent_blocked`** progress event instead of silently burning turns or failing opaquely. This is distinct from the HITL `AWAITING_APPROVAL` pause (§11): that pause is for *policy* decisions a human must make; a blocker is for *environmental* faults the platform or agent can diagnose or (where safe) fix.
+
+A blocker does **not** introduce a new task status. Blockers surface as events during `RUNNING`; the terminal outcome stays `FAILED` (or `COMPLETED` if self-remediation succeeds), just with precise classification.
+
+**Blocker taxonomy (closed set).** The kind set is defined once, agent-side, in `agent/src/progress_writer.py` (`BLOCKER_KINDS`), and mirrored by the CDK error classifier (`cdk/src/handlers/shared/error-classifier.ts`). Keep all three — code, classifier, and this table — in lockstep.
+
+| kind | meaning | retryable | remediation posture |
+|---|---|---|---|
+| `missing_secret` | a required secret was never wired into the blueprint | no | report the exact secret name; never acquire |
+| `egress_denied` | a connection to a non-allowlisted host was blocked | no | report the exact host to allowlist; never widen egress |
+| `dependency_unreachable` | transient failure reaching a dependency/registry | yes | bounded retry with backoff, then report |
+| `policy_fail_closed` | Cedar engine error/unavailable (NOT an intentional hard-deny — see §13.4, §13.15) | no | report; distinct from hard-deny |
+| `auth_failure` | credential present but rejected | no | report; no self-heal (reserved — no v1 detection site) |
+| `unknown_environmental` | environmental fault not otherwise classified | no | report best-effort detail (fallback only) |
+
+**`agent_blocked` event metadata schema:** `{ kind, detail, remediation_hint, retryable: bool, resource?: str }`. `detail` and `remediation_hint` are truncated to the standard preview cap (§10.1).
+
+**Canonical terminal-reason contract (single source of truth).** When a blocker reaches finalization, the agent's `TaskResult.error` carries a canonical string so the orchestrator's `failTask` persists it verbatim and the classifier can attach a precise remedy:
+
+```
+BLOCKED[<kind>]: <detail>
+BLOCKED[<kind>]: <detail> (resource: <resource>)   # when a resource is named
+```
+
+`format_blocker_reason(kind, detail, resource=None)` in `agent/src/progress_writer.py` produces this string (and `formatBlockerReason` in `cdk/src/handlers/shared/error-classifier.ts` is the orchestration-side twin for reasons written directly by the platform, e.g. a missing secret detected during hydration); the classifier keys on the `BLOCKED[<kind>]` prefix (case-insensitively) and separately extracts the `(resource: …)` segment so the operator-facing remedy names the exact secret or host — the two are matched independently rather than one end-anchored regex, so a reason wrapped with trailing text or a stack trace by `failTask` still yields the resource (e.g. "wire the secret `OPENAI_API_KEY` into the blueprint", "allowlist the domain `registry.npmjs.org` in the DNS Firewall"). `auth_failure` and `unknown_environmental` are in the closed enum but have no v1 detection site — reserved so callers and the classifier can handle them without a follow-up enum change.
+
+**Bounded self-remediation (safe-by-default).** For `dependency_unreachable` only, repo setup retries the exact same network command (`git clone` / PR-branch `git fetch`) with capped exponential backoff (`run_cmd_with_backoff` in `agent/src/shell.py`) when the failure signature looks transient (DNS blip, registry 5xx / 429, connection reset). Each retry emits an auditable `agent_blocked` event; on exhaustion the task fails with the canonical `dependency_unreachable` reason. Permanent failures (auth denied, repo not found) fail fast without retry. A **DNS name-resolution failure that names a host** (`could not resolve host: <host>`, `getaddrinfo ENOTFOUND <host>`) bails out of backoff immediately — it is not retried and emits no `dependency_unreachable` events — and is reclassified as a non-retryable `egress_denied` naming that host: a name that cannot be resolved is a firewalled / non-existent endpoint, and retrying never helps. A transient **TCP-connect** failure to an otherwise-reachable host (`failed to connect to <host> … connection timed out`) and a host-*less* name-resolution blip (`temporary failure in name resolution`) both stay retryable; if a TCP failure persists past the retries it is still reclassified to `egress_denied` at exhaustion. Either way the setup path and the PostToolUse egress detector reach a consistent verdict. `missing_secret` and `egress_denied` are **report-only, never self-healed** — remediation is scope-preserving by construction: it re-invokes the same command with the same credentials and DNS rules, granting no new scope and mutating no IAM policy or egress allowlist. Model-issued installs (`npm install` in a Bash tool call) cannot be retried in-hook under the Agent SDK — PostToolUse fires post-execution — so they are only *reported* as blockers, not retried.
 
 ---
 

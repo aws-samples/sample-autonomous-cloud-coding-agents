@@ -286,7 +286,15 @@ export const MAX_TOTAL_ATTACHMENT_SIZE_BYTES = MAX_TOTAL_ATTACHMENT_SIZE_MB * 10
 /** Compile-time exhaustiveness check for AttachmentType. */
 const ATTACHMENT_TYPE_LIST = ['image', 'file', 'url'] as const satisfies readonly AttachmentType[];
 type _AssertAttachmentExhaustive = Exclude<AttachmentType, (typeof ATTACHMENT_TYPE_LIST)[number]> extends never ? true : never;
+// The ASSIGNMENT is the guard: if AttachmentType gains a member missing from
+// ATTACHMENT_TYPE_LIST, _AssertAttachmentExhaustive resolves to `never` and
+// assigning `true` is a hard compile error. (A `true as never` assertion would
+// NOT error — assertions are permitted whenever either side is assignable — so
+// it must stay an assignment.) `void` consumes the binding to satisfy
+// tsconfig noUnusedLocals, which — unlike @typescript-eslint/no-unused-vars,
+// already exempt via its ^_ varsIgnorePattern — does not honor the _ prefix.
 const _attachmentExhaustiveCheck: _AssertAttachmentExhaustive = true;
+void _attachmentExhaustiveCheck;
 const VALID_ATTACHMENT_TYPES = new Set<string>(ATTACHMENT_TYPE_LIST);
 
 /** Allowed image MIME types (PNG and JPEG only — passed directly to Bedrock). */
@@ -411,7 +419,7 @@ export function isValidFilename(filename: string): boolean {
 }
 
 /** Generate a default filename when none was provided. */
-function generateFilename(type: string, contentType: string, index: number): string {
+function generateFilename(_type: string, contentType: string, index: number): string {
   const ext = MIME_TO_EXTENSION[contentType] ?? 'bin';
   return `attachment_${index}.${ext}`;
 }

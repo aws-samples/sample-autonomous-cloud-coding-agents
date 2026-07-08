@@ -4,9 +4,9 @@ Tests the actual claude-agent-sdk → Claude Code CLI → Bedrock pipeline
 with a trivial prompt, outside the web server / background thread context.
 If this yields 0 messages, the issue is SDK/CLI/Bedrock — not threading.
 
-Usage (inside the running container via ECS Exec or docker exec):
+Usage (from repo root, with agent venv active):
 
-    python /app/test_sdk_smoke.py
+    python agent/scripts/diagnostics/test_sdk_smoke.py
 
 Requires the same env vars as the agent:
     CLAUDE_CODE_USE_BEDROCK=1

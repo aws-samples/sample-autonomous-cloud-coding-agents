@@ -166,7 +166,7 @@ jest.mock('../../../src/handlers/shared/logger', () => ({
 describe('resolveUrlAttachments', () => {
   const dns = jest.requireMock('dns').promises;
   const { screenImage } = jest.requireMock('../../../src/handlers/shared/attachment-screening');
-  const { isAllowedMimeType, validateMagicBytes } = jest.requireMock('../../../src/handlers/shared/validation');
+  const { isAllowedMimeType } = jest.requireMock('../../../src/handlers/shared/validation');
 
   const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 

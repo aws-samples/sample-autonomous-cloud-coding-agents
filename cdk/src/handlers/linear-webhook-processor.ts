@@ -482,7 +482,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     await safeReportIssueFailure(
       issue.id,
       workspaceId,
-      "❌ This Linear user isn't linked to a platform user. In v1 only the API-token owner can submit tasks from Linear; multi-user OAuth support is on the v3 roadmap.",
+      "❌ This Linear user isn't linked to a platform user. In v1 only the API-token owner can submit tasks from Linear; multi-user OAuth support is planned (tracked as a GitHub issue).",
     );
     return;
   }
@@ -966,7 +966,7 @@ function buildDecompositionEffects(
   repo: string,
   platformUserId: string,
   projectId: string,
-  channelMetadata: Record<string, string>,
+  _channelMetadata: Record<string, string>,
   accessToken: string,
 ): DecompositionEffects {
   const feedbackCtx = { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE! };

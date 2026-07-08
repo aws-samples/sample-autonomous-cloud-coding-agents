@@ -66,7 +66,7 @@ describe('verifyGitHubSignature', () => {
     expect(verifyGitHubSignature(SECRET_VALUE, sig, '{"hello":"WORLD"}')).toBe(false);
   });
 
-  // theagenticguy PR-241 review B2: the headline empty-secret fail-open guard.
+  // Empty-secret fail-open guard at the headline check.
   // HMAC('', body) was previously accepted by `crypto.createHmac` and would
   // pass `timingSafeEqual` if the attacker computed the same HMAC.
   test('rejects empty webhookSecret even with a syntactically-valid signature', () => {
@@ -115,9 +115,8 @@ describe('getGitHubWebhookSecret', () => {
     expect(smSend).toHaveBeenCalledTimes(2);
   });
 
-  // theagenticguy PR-241 review B2: empty-secret fails closed at the
-  // fetch layer, not just the verify layer. An operator who wrote `""`
-  // out of band must not have it cached and used.
+  // Empty-secret fails closed at the fetch layer, not just the verify layer.
+  // An operator who wrote `""` out of band must not have it cached and used.
   test('returns null when SecretString is the empty string', async () => {
     smSend.mockResolvedValueOnce({ SecretString: '' });
     expect(await getGitHubWebhookSecret(SECRET_ID)).toBeNull();
