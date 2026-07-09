@@ -283,6 +283,22 @@ export class EcsAgentCluster extends Construct {
       resources: bedrockResources,
     }));
 
+    // ECS-parity: a CDK-based target repo's build gate runs `cdk synth`, and a
+    // stack wired to a concrete env ({account, region}) does a synth-time
+    // availability-zone context lookup (ec2:DescribeAvailabilityZones). On a
+    // developer box the gitignored cdk.context.json caches the answer so synth
+    // is hermetic; the agent clones fresh, so there's no cache and synth fires
+    // the live lookup. Without this grant the ECS task role hit AccessDenied →
+    // "Synthesis finished with errors" → a FALSE build-gate failure on code that
+    // builds fine everywhere else (live-caught on the ABCA fork; same class as
+    // the ABCA-488 GetSecretValue and F-2 CreateEvent ECS-parity gaps). This is a
+    // read-only describe with no resource-level scoping in IAM, so Resource:* is
+    // required (suppressed below); it grants no mutation and no data access.
+    taskRole.addToPrincipalPolicy(new iam.PolicyStatement({
+      actions: ['ec2:DescribeAvailabilityZones'],
+      resources: ['*'],
+    }));
+
     // CloudWatch Logs write
     logGroup.grantWrite(taskRole);
 
@@ -293,7 +309,7 @@ export class EcsAgentCluster extends Construct {
     NagSuppressions.addResourceSuppressions(this.taskDefinition, [
       {
         id: 'AwsSolutions-IAM5',
-        reason: 'DynamoDB index/* wildcards from CDK grantReadWriteData (UserConcurrencyTable, and task tables only when no SessionRole is wired); Secrets Manager wildcards from CDK grantRead (GitHub token) and the bgagent-linear-oauth-*/bgagent-jira-oauth-* prefix grant (ABCA-488 — per-workspace channel OAuth tokens are created by the CLI at setup, name unknown at synth, GetSecretValue only); CloudWatch Logs wildcards from CDK grantWrite; S3 object/* wildcard from CDK grantRead on the ECS payload bucket (read-only, scoped to that bucket — #502) and from grantReadWrite on the artifacts bucket (scoped to that bucket — coding/decompose-v1 delivers its plan artifact there, #299). Bedrock InvokeModel is scoped to explicit model/inference-profile ARNs (no wildcard resource).',
+        reason: 'DynamoDB index/* wildcards from CDK grantReadWriteData (UserConcurrencyTable, and task tables only when no SessionRole is wired); Secrets Manager wildcards from CDK grantRead (GitHub token) and the bgagent-linear-oauth-*/bgagent-jira-oauth-* prefix grant (ABCA-488 — per-workspace channel OAuth tokens are created by the CLI at setup, name unknown at synth, GetSecretValue only); CloudWatch Logs wildcards from CDK grantWrite; S3 object/* wildcard from CDK grantRead on the ECS payload bucket (read-only, scoped to that bucket — #502) and from grantReadWrite on the artifacts bucket (scoped to that bucket — coding/decompose-v1 delivers its plan artifact there, #299). Bedrock InvokeModel is scoped to explicit model/inference-profile ARNs (no wildcard resource). ec2:DescribeAvailabilityZones requires Resource:* (EC2 describe actions have no resource-level scoping) — read-only, no mutation/data access; needed so a CDK target repo\'s `cdk synth` build gate can resolve AZ context on a fresh clone (ECS-parity, no cdk.context.json cache in the container).',
       },
       {
         id: 'AwsSolutions-ECS2',
