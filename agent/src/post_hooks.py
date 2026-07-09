@@ -138,19 +138,35 @@ def is_infra_failure(returncode: int, stderr: str) -> bool:
 # 0, and the chain's lint/test NEVER ran, so a broken build reported "OK").
 _SHELL_OPERATORS = ("&&", "||", "|", ";", ">", "<", "$(", "`")
 
+# A leading ``VAR=value`` env-assignment prefix (one or more) is shell syntax:
+# ``MISE_EXPERIMENTAL=1 mise //cdk:eslint`` only sets the env when run through a
+# shell. Exec'd directly (shlex-split), the FIRST token ``MISE_EXPERIMENTAL=1``
+# is treated as the program name → ``FileNotFoundError``. Detect it so such a
+# command is routed through ``bash -lc`` like the operator case. NAME must be a
+# valid POSIX env identifier so a plain arg like ``a=b`` in a real program's
+# args (unusual as a leading token, but be precise) is matched only when it truly
+# leads. Live-caught: a configured ``lint_command`` of ``MISE_EXPERIMENTAL=1 mise
+# //cdk:eslint`` crashed the whole task at exit 1 before the build ran.
+_ENV_ASSIGN_PREFIX = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
 
 def resolve_verify_argv(command: str | None, default: str) -> list[str]:
     """Resolve a configured verify command into an argv for :func:`run_cmd`.
 
     Empty/whitespace/None ``command`` → the default (mise). A plain command with
     args (``npm run build``) is ``shlex``-split and exec'd directly. A command
-    containing shell operators (``&&``, ``|``, ``;``, redirects, command
-    substitution) is wrapped as ``bash -lc '<command>'`` so the chain executes as
-    written — otherwise the operators are passed as literal args to the first
-    program and silently ignored (#72: chained build commands couldn't gate).
+    that needs a shell to behave as written — it contains shell operators (``&&``,
+    ``|``, ``;``, redirects, command substitution) OR begins with a ``VAR=value``
+    env-assignment prefix — is wrapped as ``bash -lc '<command>'``; otherwise the
+    operators/assignment are passed as literal args to (or AS) the first program
+    and mis-run (#72: chained build commands silently no-op'd; ABCA-662 follow-up:
+    an env-prefixed lint command exec'd ``VAR=value`` as the binary → crash).
     """
     cmd = (command or "").strip() or default
-    if any(op in cmd for op in _SHELL_OPERATORS):
+    needs_shell = any(op in cmd for op in _SHELL_OPERATORS) or bool(
+        _ENV_ASSIGN_PREFIX.match(cmd)
+    )
+    if needs_shell:
         return ["bash", "-lc", cmd]
     return shlex.split(cmd)
 
