@@ -34,8 +34,10 @@ on:
     types: [completed]
   workflow_dispatch: {}
 
-# Only one integ run at a time against the shared account — overlapping deploys
-# would collide on the single hardcoded `backgroundagent-integ` stack name.
+# Only one integ run at a time against the shared account. Stack names are now
+# run-unique (`int-<sha>`, see the integ job) so this is no longer a correctness
+# requirement — it bounds shared-account cost/parallelism rather than preventing
+# a name collision.
 concurrency:
   group: cdk-integ
   cancel-in-progress: false
@@ -228,10 +230,17 @@ jobs:
         run: yarn install --immutable
 
       - name: Run integ tests (deploy → assert → destroy)
-        # COMMIT_HASH drives the per-run unique stack name `int-<hash>` (see
-        # cdk/test/integ/integ.task-lifecycle.ts + cdk/mise.toml). Using the
-        # resolved head SHA means a stranded stack from a failed teardown never
-        # collides with / blocks a later run on a different commit.
+        # Two integ tests deploy in this one integ-runner pass and MUST get
+        # distinct CloudFormation names, so each reads its own env var:
+        #   • Phase-0 smoke (integ.task-api-smoke.ts) → INTEG_STACK_NAME
+        #     (`int-<sha>-<run>`; the run number distinguishes same-commit
+        #     re-runs). Fixed default `backgroundagent-integ-local` for local runs.
+        #   • Phase-1 lifecycle (integ.task-lifecycle.ts) → COMMIT_HASH
+        #     (`int-<hash>`, see cdk/mise.toml). Read via process.env because
+        #     integ-runner synths in a subprocess that inherits the env but not
+        #     our shell's CDK context.
+        # Per-run-unique names mean a stranded stack from a cancelled/crashed run
+        # never collides with or head-of-line blocks a later run.
         #
         # INTEG_SANDBOX_REPO / INTEG_PAT_SECRET_ID bind the gate scenarios (3 & 4)
         # to the account's provisioned sandbox repo + PAT secret instead of a
@@ -240,54 +249,19 @@ jobs:
         # clone-failures (still synthesizes).
         env:
           COMMIT_HASH: ${{ needs.resolve.outputs.head_sha }}
+          INTEG_STACK_NAME: int-${{ needs.resolve.outputs.head_sha }}-${{ github.run_number }}
           INTEG_SANDBOX_REPO: ${{ vars.INTEG_SANDBOX_REPO }}
           INTEG_PAT_SECRET_ID: ${{ vars.INTEG_PAT_SECRET_ID }}
         run: mise //cdk:integ
 
-      # Safety net: integ-runner forces teardown on success and failure, but if
-      # the run is cancelled or crashes mid-deploy a stack can be stranded in
-      # the shared account. Delete them directly via CloudFormation so we never
-      # leak billable resources.
-      #
-      # NOTE: `cdk destroy <stack>` would NOT work here — it synthesizes the
-      # main app (src/main.ts), which does not contain the integ stacks, so it
-      # exits 0 having deleted nothing. Target each stack by its literal
-      # CloudFormation name instead. delete-stack is idempotent (no-op if
-      # already gone), so `|| true` only guards transient API errors.
-      #
-      # Best-effort delete-stack safety net for crash/cancel cases. integ-runner
-      # already runs its own destroy (and tolerates the expected ENI DELETE_FAILED
-      # via expectError); this only catches a run that died BEFORE integ-runner's
-      # own teardown (e.g. the job was cancelled mid-deploy).
-      #
-      # Stacks swept: backgroundagent-integ (Phase-0 smoke, fixed name) and the
-      # Phase-1 per-run stack `int-<short-sha>` (matches the name computed in
-      # cdk/test/integ/integ.task-lifecycle.ts from the same head SHA).
-      #
-      # IMPORTANT — this step does NOT retry-until-deleted and does NOT fail the
-      # job on a stranded stack. The AgentCore Runtime's service-managed
-      # `agentic_ai` ENIs are released asynchronously by AWS (minutes to hours),
-      # so an immediate delete reliably hits DELETE_FAILED on the subnets/SG/VPC.
-      # Because the stack name is now per-commit-UNIQUE, a stranded `int-<sha>`
-      # stack never blocks a future run, so we leave it for the out-of-band
-      # ephemeral sweeper (.github/workflows/integ-sweeper.yml) to reclaim once the
-      # ENIs detach — that sweeper FAILS LOUDLY + files an issue for any int-*
-      # stack still stuck past its alarm age, so leaks surface rather than
-      # accumulate. Here we just fire one delete to start the teardown and move on.
-      - name: Ensure stacks torn down (best effort)
-        if: always()
-        env:
-          AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
-          AWS_DEFAULT_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
-          HEAD_SHA: ${{ needs.resolve.outputs.head_sha }}
-        run: |
-          set -uo pipefail
-          INT_STACK="int-$(printf '%s' "$HEAD_SHA" | cut -c1-8)"
-          for stack in backgroundagent-integ "$INT_STACK"; do
-            echo "Best-effort delete-stack: $stack"
-            aws cloudformation delete-stack --stack-name "$stack" || true
-          done
-          echo "Initiated teardown; stranded int-* stacks (if any) are reclaimed by the ephemeral sweeper once their ENIs detach."
+      # Teardown: integ-runner forces `cdk destroy` on success and failure (via
+      # the CDK bootstrap roles, which hold the CloudFormation permissions). No
+      # raw-CLI CloudFormation safety net here — the GitHub OIDC role has no
+      # cloudformation:DeleteStack/DescribeStacks, so such a step can only
+      # AccessDenied and fail an otherwise-passing run (#566/#567). If a
+      # cancelled/crashed run strands a stack, the per-run-unique `int-*` name
+      # keeps it from blocking later runs; reclaim is owned by the scheduled
+      # sweep (integ-sweeper.yml / #72) and non-blocking cleanup (#400).
 
       # Sandbox cleanup for the gate scenarios (3 & 4): coding/new-task-v1 pushes
       # a `bgagent/<task_id>/<slug>` branch and (on approve) opens a PR on the

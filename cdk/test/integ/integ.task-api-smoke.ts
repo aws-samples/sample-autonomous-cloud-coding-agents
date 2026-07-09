@@ -89,8 +89,15 @@ class TaskApiSmokeStack extends Stack {
   }
 }
 
+// Stack name is run-unique in CI (`int-<short-sha>-<run-number>`, set by
+// integ.yml) so a stranded stack from a cancelled/crashed run never collides
+// with — or blocks — a later run under one fixed name. Falls back to a stable
+// local name so the `mise //cdk:integ` dev path is unchanged. The `int-` prefix
+// keeps it letter-led and the rest is lowercase-alphanumeric + hyphens, so the
+// name is CloudFormation-valid.
 const app = new App();
-const stack = new TaskApiSmokeStack(app, 'backgroundagent-integ');
+const stackName = process.env.INTEG_STACK_NAME || 'backgroundagent-integ-local';
+const stack = new TaskApiSmokeStack(app, stackName);
 
 const integ = new IntegTest(app, 'TaskApiSmoke', {
   testCases: [stack],
