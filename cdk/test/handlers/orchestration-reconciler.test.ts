@@ -515,12 +515,14 @@ describe('orchestration-reconciler handler', () => {
     expect(createTaskCoreMock).not.toHaveBeenCalled();
   });
 
-  test('ABCA-659: build-gate-failed child (COMPLETED, build_passed=false) reverts its OWN Linear state out of In Review', async () => {
-    // The agent moves a writeable child to "In Review" on agent-success, but the
-    // platform build gate independently marks it failed. Left alone, the graph
-    // says failed while Linear reads "In Review" with a PR link (the user's
-    // inconsistency). The reconciler pulls the child back to not-started.
+  test('ABCA-659: build-gate-failed child (COMPLETED, build_passed=false) reverts state AND swaps its ✅ reaction to ❌', async () => {
+    // The agent moves a writeable child to "In Review" + reacts ✅ on agent-success
+    // (regression-only build gate), but the platform gate independently marks it
+    // failed. Left alone, the graph says failed while Linear reads "In Review" with
+    // a ✅ reaction + PR link (the user's inconsistency). The reconciler pulls the
+    // child back to not-started AND settles the reaction ✅→❌.
     revertIssueToNotStartedMock.mockReset().mockResolvedValue(true);
+    swapIssueReactionMock.mockReset().mockResolvedValue(true);
     mockOrchestration({
       subIssueId: 'A',
       children: [{ sub_issue_id: 'A', child_status: 'released' }],
@@ -529,10 +531,12 @@ describe('orchestration-reconciler handler', () => {
       Records: [taskRecord({ task_id: 'TA', status: 'COMPLETED', build_passed: false, orchestration_id: 'orch_1' })],
     } as never);
     expect(revertIssueToNotStartedMock).toHaveBeenCalledWith(expect.anything(), 'A');
+    expect(swapIssueReactionMock).toHaveBeenCalledWith(expect.anything(), 'A', 'x');
   });
 
-  test('ABCA-659: a genuinely FAILED child also reverts its Linear state', async () => {
+  test('ABCA-659: a genuinely FAILED child also reverts state + swaps reaction to ❌', async () => {
     revertIssueToNotStartedMock.mockReset().mockResolvedValue(true);
+    swapIssueReactionMock.mockReset().mockResolvedValue(true);
     mockOrchestration({
       subIssueId: 'A',
       children: [{ sub_issue_id: 'A', child_status: 'released' }],
@@ -541,10 +545,12 @@ describe('orchestration-reconciler handler', () => {
       Records: [taskRecord({ task_id: 'TA', status: 'FAILED', orchestration_id: 'orch_1' })],
     } as never);
     expect(revertIssueToNotStartedMock).toHaveBeenCalledWith(expect.anything(), 'A');
+    expect(swapIssueReactionMock).toHaveBeenCalledWith(expect.anything(), 'A', 'x');
   });
 
-  test('ABCA-659: a SUCCEEDING child is never reverted (leaves In Review intact)', async () => {
+  test('ABCA-659: a SUCCEEDING child is never reverted or ❌-reacted (leaves ✅ + In Review intact)', async () => {
     revertIssueToNotStartedMock.mockReset().mockResolvedValue(true);
+    swapIssueReactionMock.mockReset().mockResolvedValue(true);
     mockOrchestration({
       subIssueId: 'A',
       children: [{ sub_issue_id: 'A', child_status: 'released' }],
@@ -553,6 +559,7 @@ describe('orchestration-reconciler handler', () => {
       Records: [taskRecord({ task_id: 'TA', status: 'COMPLETED', orchestration_id: 'orch_1' })],
     } as never);
     expect(revertIssueToNotStartedMock).not.toHaveBeenCalledWith(expect.anything(), 'A');
+    expect(swapIssueReactionMock).not.toHaveBeenCalledWith(expect.anything(), 'A', 'x');
   });
 
   test('non-orchestration / non-terminal records are skipped entirely', async () => {
