@@ -217,30 +217,14 @@ jobs:
       - name: Install dependencies
         run: yarn install --immutable
 
+      # Teardown: integ-runner forces `cdk destroy` on success and failure (via
+      # the CDK bootstrap roles, which hold the CloudFormation permissions). No
+      # raw-CLI safety net here: the GitHub OIDC role has no
+      # cloudformation:DeleteStack/DescribeStacks, so such a step can only fail
+      # (#566). If a cancelled/crashed run strands `backgroundagent-integ`,
+      # reclaim is the stranded-stack cleanup owned by #400/#72.
       - name: Run integ tests (deploy → assert → destroy)
         run: mise //cdk:integ
-
-      # Safety net: integ-runner forces teardown on success and failure, but if
-      # the run is cancelled or crashes mid-deploy the stack can be stranded in
-      # the shared account. Delete it directly via CloudFormation so we never
-      # leak billable resources.
-      #
-      # NOTE: `cdk destroy backgroundagent-integ` would NOT work here — it
-      # synthesizes the main app (src/main.ts), which does not contain the integ
-      # stack, so it exits 0 having deleted nothing. Target the stack by its
-      # literal CloudFormation name instead. delete-stack is idempotent (no-op if
-      # already gone), so `|| true` only guards transient API errors.
-      - name: Ensure stack torn down
-        if: always()
-        env:
-          AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
-          AWS_DEFAULT_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
-        run: |
-          set -euo pipefail
-          aws cloudformation delete-stack --stack-name backgroundagent-integ || true
-          # No `|| true` on the wait: a DELETE_FAILED must surface loudly so we
-          # never silently leak billable resources in the shared account.
-          aws cloudformation wait stack-delete-complete --stack-name backgroundagent-integ
 
   # Post the final integ-smoke status back to the PR head so the check flips from
   # pending to success/failure. Skipped for workflow_dispatch (no PR to gate).
