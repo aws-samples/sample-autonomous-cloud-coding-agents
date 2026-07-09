@@ -145,6 +145,32 @@ class TestVerifyBuildHonorsCommand:
         assert outcome.passed is False
         assert outcome.inert is False
 
+    def test_ENOSPC_is_INFRA_failure_not_a_build_failure(self, monkeypatch):
+        # ABCA-659 #2: disk-full mid-build means the build couldn't COMPLETE on
+        # this host — an infra fault, not broken code. Must flag infra_failed
+        # (not a plain failure, not inert) so the platform reports "retry / needs
+        # capacity", not "build/tests failed".
+        enospc = "yarn error ENOSPC: no space left on device, write"
+        monkeypatch.setattr(
+            post_hooks,
+            "run_cmd",
+            lambda argv, **kw: SimpleNamespace(returncode=1, stderr=enospc),
+        )
+        outcome = verify_build("/repo", "mise run build")
+        assert outcome.passed is False
+        assert outcome.infra_failed is True
+        assert outcome.inert is False  # NOT a config problem
+
+    def test_OOM_sigkill_137_is_INFRA_failure(self, monkeypatch):
+        monkeypatch.setattr(
+            post_hooks,
+            "run_cmd",
+            lambda argv, **kw: SimpleNamespace(returncode=137, stderr="Killed"),
+        )
+        outcome = verify_build("/repo", "mise run build")
+        assert outcome.passed is False
+        assert outcome.infra_failed is True
+
 
 class TestIsVerifyCommandInert:
     def test_mise_no_tasks_defined_is_inert(self):
