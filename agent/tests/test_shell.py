@@ -280,3 +280,57 @@ class TestRunCmdFailureLogging:
         logs = self._run_capturing_logs(proc)
         blob = "\n".join(text for _, text in logs)
         assert "lots of build output" not in blob
+
+
+class TestRunCmdStreaming:
+    """stream=True tees the command's output to the log LINE-BY-LINE as it runs
+    (so the full log reaches CloudWatch verbatim) AND returns a CompletedProcess
+    matching subprocess.run's contract. Uses real `sh -c` — exercises the actual
+    Popen + drain-thread path (the buffered summary hid build failures — ABCA-662)."""
+
+    def _run(self, argv, check=False):
+        logs = []
+        with patch("shell.log", side_effect=lambda prefix, text: logs.append((prefix, text))):
+            result = run_cmd(argv, "verify-build-post", check=check, stream=True)
+        blob = "\n".join(text for _, text in logs)
+        return result, blob
+
+    def test_streams_stdout_lines_live_and_returns_captured(self):
+        result, blob = self._run(["sh", "-c", "echo out-line-A; echo out-line-B"])
+        assert result.returncode == 0
+        # every line reached the log (verbatim, live)
+        assert "out-line-A" in blob and "out-line-B" in blob
+        # and the CompletedProcess still carries stdout for callers
+        assert "out-line-A" in result.stdout and "out-line-B" in result.stdout
+
+    def test_keeps_stdout_and_stderr_separate(self):
+        result, _ = self._run(["sh", "-c", "echo to-out; echo to-err 1>&2"])
+        assert "to-out" in result.stdout
+        assert "to-err" in result.stderr
+        assert "to-err" not in result.stdout  # streams not merged
+
+    def test_nonzero_exit_surfaces_failing_line(self):
+        # A mid-stream failure line is streamed AND flagged in the failing-lines
+        # pointer — the whole reason streaming exists.
+        result, blob = self._run(
+            ["sh", "-c", "echo passing; echo 'FAIL test/x.test.ts'; exit 1"]
+        )
+        assert result.returncode == 1
+        assert "FAIL test/x.test.ts" in blob
+        assert "failing lines" in blob  # the streamed-path pointer
+
+    def test_stream_redacts_secrets_in_live_output(self):
+        # Redaction happens inside the real log(); assert redact_secrets covers the
+        # streamed line (the test patches log(), so check the redactor directly on
+        # what the drain thread hands it — that's the line that reaches CloudWatch).
+        from shell import redact_secrets
+
+        assert "ghp_streamedsecretABC123" not in redact_secrets(
+            "  token=ghp_streamedsecretABC123"
+        )
+
+    def test_stream_raises_on_check_true_failure(self):
+        import pytest
+
+        with pytest.raises(RuntimeError):
+            self._run(["sh", "-c", "exit 3"], check=True)
