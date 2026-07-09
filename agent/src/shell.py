@@ -182,6 +182,17 @@ def run_cmd(
         if result.stderr:
             for line in result.stderr.strip().splitlines()[:20]:
                 log("CMD", f"  {line}")
+        # ALSO surface stdout on failure. Build/test tooling (jest, tsc, the mise
+        # task DAG) writes the ACTUAL failing-task error to STDOUT, not stderr —
+        # stderr often carries only the runner's plan echo. Logging stderr alone
+        # made build-gate failures undebuggable: a red ``mise run build`` showed
+        # every task STARTING but never WHICH one failed or why (ABCA-662 — a 7s
+        # exit-1 with zero captured cause, indistinguishable in CloudWatch from a
+        # phantom). Tail (last 20 lines) — build errors surface at the end — and
+        # redact, since repo build output is untrusted and may echo secrets.
+        if result.stdout:
+            for line in redact_secrets(result.stdout.strip()).splitlines()[-20:]:
+                log("CMD", f"  {line}")
         if check:
             stderr_snippet = redact_secrets(result.stderr.strip()[:500]) if result.stderr else ""
             raise RuntimeError(f"{label} failed (exit {result.returncode}): {stderr_snippet}")

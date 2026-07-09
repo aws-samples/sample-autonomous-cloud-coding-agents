@@ -6,6 +6,7 @@ from unittest.mock import patch
 from shell import (
     is_transient_cmd_failure,
     redact_secrets,
+    run_cmd,
     run_cmd_with_backoff,
     slugify,
     truncate,
@@ -185,3 +186,59 @@ class TestRunCmdWithBackoff:
         with patch("shell.run_cmd", side_effect=lambda *a, **k: seq.pop(0)):
             run_cmd_with_backoff(["git", "clone"], "clone", base_delay_s=2.0, sleep=delays.append)
         assert delays == [2.0, 4.0]  # 2 * 2**0, 2 * 2**1
+
+
+class TestRunCmdFailureLogging:
+    """A failing command must surface its ACTUAL error. Build/test tooling (jest,
+    tsc, the mise task DAG) writes the failing-task error to STDOUT, not stderr —
+    so logging stderr alone made build-gate failures undebuggable (ABCA-662: a red
+    ``mise run build`` showed every task starting but never WHICH one failed)."""
+
+    def _completed(self, rc, stdout="", stderr=""):
+        return SimpleNamespace(returncode=rc, stdout=stdout, stderr=stderr)
+
+    def _run_capturing_logs(self, proc):
+        logs = []
+        with (
+            patch("shell.subprocess.run", return_value=proc),
+            patch("shell.log", side_effect=lambda prefix, text: logs.append((prefix, text))),
+        ):
+            run_cmd(["mise", "run", "build"], "verify-build-post", check=False)
+        return logs
+
+    def test_stdout_is_logged_on_failure(self):
+        # The failing task's error lives in stdout — it MUST reach the log.
+        proc = self._completed(
+            1,
+            stdout="[//cdk:test] FAIL test/foo.test.ts\n  expected 1 got 2\n[//cdk:test] exit 1",
+            stderr="",
+        )
+        logs = self._run_capturing_logs(proc)
+        blob = "\n".join(text for _, text in logs)
+        assert "FAIL test/foo.test.ts" in blob
+        assert "expected 1 got 2" in blob
+
+    def test_stdout_is_tailed_last_20_lines(self):
+        # Build errors surface at the END — tail, don't head.
+        proc = self._completed(
+            1,
+            stdout="\n".join(f"line {i}" for i in range(50)),
+            stderr="",
+        )
+        logs = self._run_capturing_logs(proc)
+        blob = "\n".join(text for _, text in logs)
+        assert "line 49" in blob  # last line present
+        assert "line 0" not in blob  # earliest lines dropped by the tail
+
+    def test_stdout_is_redacted(self):
+        proc = self._completed(1, stdout="pushing with ghp_supersecrettoken123", stderr="")
+        logs = self._run_capturing_logs(proc)
+        blob = "\n".join(text for _, text in logs)
+        assert "ghp_supersecrettoken123" not in blob
+
+    def test_success_does_not_dump_stdout(self):
+        # On success we don't spam stdout — only the OK line.
+        proc = self._completed(0, stdout="lots of build output", stderr="")
+        logs = self._run_capturing_logs(proc)
+        blob = "\n".join(text for _, text in logs)
+        assert "lots of build output" not in blob
