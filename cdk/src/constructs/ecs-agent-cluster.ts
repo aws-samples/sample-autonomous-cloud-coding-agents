@@ -86,7 +86,15 @@ const HTTPS_PORT = 443;
  *  - PLANNING (#299): 2 vCPU / 8 GB — read-only clone+plan, no build.
  */
 const BUILD_TASK_CPU = 16384;
-const BUILD_TASK_MEMORY_MIB = 65536;
+// 120 GB — the MAX Fargate allows at 16 vCPU (32–120 GB in 8 GB steps). Raised
+// from 64 GB after ABCA-662: dogfooding ABCA-on-ABCA, the full parallel
+// ``mise run build`` peak still OOM-killed (exit 137) at 64 GB. Each build task
+// is memory-ISOLATED (its own Fargate microVM), so concurrency caps don't help a
+// single over-64 GB build — only more per-task RAM (this) or less build
+// parallelism (serialize the DAG / cap jest --maxWorkers) does. 120 GB is the
+// clean experiment: if the build still OOMs here, we're at the platform ceiling
+// and the parallelism cap is the only remaining lever.
+const BUILD_TASK_MEMORY_MIB = 122880;
 const PLANNING_TASK_CPU = 2048;
 const PLANNING_TASK_MEMORY_MIB = 8192;
 
@@ -233,11 +241,14 @@ export class EcsAgentCluster extends Construct {
     //     in PARALLEL (agent:quality ‖ cdk:build ‖ cli:build ‖ docs:build),
     //     each spawning its own worker fleet (jest maxWorkers, pytest, esbuild
     //     Lambda bundling). 32 GB had no headroom for that concurrent peak.
-    //   - 64 GB / 16 vCPU (current) → 2× the memory headroom for the parallel
-    //     storm, and 16 vCPU shortens wall-clock (paired with
-    //     BUILD_VERIFY_TIMEOUT_S=3600 so the ~longer-than-30-min build isn't
-    //     mis-reported as a timeout). Valid Fargate ARM64 combo (16 vCPU admits
-    //     32–120 GB in 8 GB steps).
+    //   - 64 GB / 16 vCPU → still OOM-killed (exit 137) on ABCA-662's baseline
+    //     build: the parallel storm's peak exceeded 64 GB too. The false
+    //     "build_before=broken" that followed is fixed in repo.py, but the build
+    //     itself genuinely needs more RAM.
+    //   - 120 GB / 16 vCPU (current) → the MAX Fargate admits at 16 vCPU (32–120
+    //     GB in 8 GB steps). If a build OOMs even here, the fix is to cut the
+    //     build's peak parallelism (serialize the mise DAG / cap jest workers),
+    //     not more RAM — there is none. Paired with BUILD_VERIFY_TIMEOUT_S=3600.
     this.taskDefinition = makeTaskDef('TaskDef', BUILD_TASK_CPU, BUILD_TASK_MEMORY_MIB, {
       // Heavy CI-parity builds legitimately run longer than the 1800s default.
       BUILD_VERIFY_TIMEOUT_S: '3600',
