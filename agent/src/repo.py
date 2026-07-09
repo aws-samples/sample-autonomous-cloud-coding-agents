@@ -308,6 +308,7 @@ def setup_repo(config: TaskConfig, progress: Any = None) -> RepoSetup:
         BUILD_VERIFY_TIMEOUT_S,
         DEFAULT_BUILD_COMMAND,
         DEFAULT_LINT_COMMAND,
+        is_infra_failure,
         is_verify_command_inert,
         resolve_verify_argv,
     )
@@ -365,7 +366,34 @@ def setup_repo(config: TaskConfig, progress: Any = None) -> RepoSetup:
             )
             build_before = True
         else:
-            if result.returncode != 0:
+            if result.returncode != 0 and is_infra_failure(result.returncode, result.stderr):
+                # An ENVIRONMENT fault (OOM / exit 137 / out of disk) means the
+                # baseline build was KILLED, not that the code is broken. Treat it
+                # exactly like the timeout case above: there is NO usable baseline,
+                # so record no-known-regression (build_before=True) rather than the
+                # false "the project was already broken" (build_before=False).
+                #
+                # This was the ABCA-662 root cause: several heavy CI-parity builds
+                # shared one ECS box, the baseline was OOM-killed (exit 137), and
+                # the generic non-zero branch below mislabeled it build_before=False.
+                # That false "already red" flag then told the regression gate
+                # "red-before → red-after isn't the agent's fault → ✅" AND flowed
+                # into the absolute orchestration gate as a node failure — a task
+                # that GitHub built green. The post-agent gate already had this OOM
+                # check (is_infra_failure); the pre-agent baseline was missing it.
+                log(
+                    "WARN",
+                    f"Initial build ({build_cmd_str}) was KILLED by an environment "
+                    f"fault (exit {result.returncode}: out of memory/disk) — no usable "
+                    "baseline, treating as no-known-regression (not 'already broken')",
+                )
+                notes.append(
+                    f"Initial build ({build_cmd_str}) hit an environment fault "
+                    f"(exit {result.returncode}: out of memory/disk) before agent "
+                    "changes — baseline skipped (not treated as a regression)"
+                )
+                build_before = True
+            elif result.returncode != 0:
                 note = f"Initial build ({build_cmd_str}) FAILED before agent changes"
                 notes.append(note)
                 build_before = False
