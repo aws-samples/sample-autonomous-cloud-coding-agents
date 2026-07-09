@@ -126,10 +126,18 @@ export interface TaskRecord {
    * The FanOut stream consumer bumps these monotonically as ``agent_cost_update``
    * / ``agent_turn`` events flow, so ``cost_usd_gte`` / ``turn_count_gte`` rules
    * survive container restarts (the per-session SDK total resets; these do not).
+   *
+   * NOT a second source of truth for task cost: ``cost_usd`` remains the
+   * authoritative final figure (written by the agent's task_state terminal
+   * path). ``gov_cumulative_cost_usd`` is a governance-owned monotonic ceiling
+   * that is SEEDED from ``cost_usd`` (Math.max), so it is always ≥ the
+   * authoritative value and the two never contradict — one is the final total,
+   * the other the running max used only for ceiling evaluation.
    * ponytail: monotonic max of session totals, not a cross-session SUM — a
    * multi-session task's ceiling reflects its largest single session. Sum
-   * accounting (seed baseline from here on the agent restart path) is the
-   * upgrade if PR-fix retries must accrue.
+   * accounting (per-session delta keyed by session_id) is the upgrade if
+   * PR-fix retries must accrue; deferred because it trades the DynamoDB
+   * stream's free idempotency for a dedup table.
    */
   readonly gov_cumulative_cost_usd?: number;
   readonly gov_cumulative_turn_count?: number;

@@ -67,6 +67,18 @@ export function listBuiltinEventRulePacks(): ReadonlyArray<{
   }];
 }
 
+/** Thrown when a blueprint/workflow pins an event-rule-pack that does not
+ *  resolve. Fail loud rather than silently applying zero governance rules —
+ *  a mis-pinned pack must surface at submit / via the API, not leave a task
+ *  running with a ceiling rule that was never loaded (#230). */
+export class UnknownEventRulePackError extends Error {
+  constructor(public readonly packRef: EventRulePackRef) {
+    super(`Unknown event-rule-pack pin: ${packRef.id}@${packRef.version}. `
+      + 'No such pack/version is bundled; check the Blueprint\'s security.eventRulePack.');
+    this.name = 'UnknownEventRulePackError';
+  }
+}
+
 export function resolveEventRules(options: {
   readonly inlineRules?: readonly EventRule[];
   readonly packRef?: EventRulePackRef;
@@ -75,7 +87,10 @@ export function resolveEventRules(options: {
   if (!options.packRef) return [...inline];
 
   const versionMap = BUILTIN_PACKS[options.packRef.id];
-  const packRules = versionMap?.[options.packRef.version] ?? [];
+  const packRules = versionMap?.[options.packRef.version];
+  if (packRules === undefined) {
+    throw new UnknownEventRulePackError(options.packRef);
+  }
   if (inline.length === 0) {
     return packRules.map(r => ({
       ...r,

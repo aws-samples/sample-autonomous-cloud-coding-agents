@@ -22,6 +22,8 @@
  */
 
 import type { EventRule, EventRuleEvaluation, PolicyDecisionMetadata } from './event-governance-types';
+import { logger } from './logger';
+import { coerceNumericOrNull } from './numeric';
 
 export interface EvaluableEvent {
   readonly event_type: string;
@@ -53,6 +55,29 @@ function fieldsMatch(when: EventRule['when'], metadata: Readonly<Record<string, 
   return true;
 }
 
+/**
+ * Canonical metadata field names for aggregate values, each with its accepted
+ * aliases (base field a producer emits ↔ cumulative field the rule reads). The
+ * evaluator normalizes here so producers emit ONE name and rules match without
+ * every producer having to echo a duplicate alias. See #230.
+ */
+const AGGREGATE_FIELDS = {
+  cost: ['cumulative_cost_usd', 'cost_usd'],
+  turns: ['turn_count', 'turn'],
+} as const;
+
+/** First finite value among the metadata aliases, coerced from string/number. */
+function readAggregate(
+  metadata: Readonly<Record<string, unknown>>,
+  aliases: readonly string[],
+): number | null {
+  for (const key of aliases) {
+    const n = coerceNumericOrNull(metadata[key] as number | string | null | undefined, { field: key }, logger);
+    if (n !== null) return n;
+  }
+  return null;
+}
+
 function aggregateMatch(
   when: EventRule['when'],
   metadata: Readonly<Record<string, unknown>>,
@@ -61,21 +86,13 @@ function aggregateMatch(
   const agg = when?.aggregate;
   if (!agg) return true;
   if (agg.cost_usd_gte !== undefined) {
-    let cumulative = aggregateState?.cumulative_cost_usd;
-    if (cumulative === undefined) {
-      const raw = metadata.cumulative_cost_usd;
-      cumulative = typeof raw === 'number' ? raw : Number(raw);
-    }
-    if (!Number.isFinite(cumulative)) return false;
+    const cumulative = aggregateState?.cumulative_cost_usd ?? readAggregate(metadata, AGGREGATE_FIELDS.cost);
+    if (cumulative === null || cumulative === undefined) return false;
     if (cumulative < agg.cost_usd_gte) return false;
   }
   if (agg.turn_count_gte !== undefined) {
-    let turns = aggregateState?.turn_count;
-    if (turns === undefined) {
-      const raw = metadata.turn_count;
-      turns = typeof raw === 'number' ? raw : Number(raw);
-    }
-    if (!Number.isFinite(turns)) return false;
+    const turns = aggregateState?.turn_count ?? readAggregate(metadata, AGGREGATE_FIELDS.turns);
+    if (turns === null || turns === undefined) return false;
     if (turns < agg.turn_count_gte) return false;
   }
   return true;

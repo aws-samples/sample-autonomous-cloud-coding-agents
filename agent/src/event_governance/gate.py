@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from event_governance.evaluator import EventRule
 
+import task_state
 from hooks import _handle_require_approval
 from policy import PolicyDecision
 
@@ -32,6 +33,11 @@ async def gate_on_event_async(
     ts_module: Any = None,
 ) -> EventGateResult:
     """Block on human approval for an event rule (enforce + require_approval)."""
+    # Default to the real task_state module. _handle_require_approval dereferences
+    # ``ts`` unconditionally (increment_approval_gate_count_in_ddb,
+    # transact_write_approval_request); a None here crashes the gate instead of
+    # pausing for approval. The parameter stays overridable for tests. See #230.
+    ts_module = ts_module if ts_module is not None else task_state
     checkpoint = metadata.get("checkpoint") or rule.on
     tool_input = {"checkpoint": checkpoint, "event_type": event_type, **metadata}
     decision = PolicyDecision.require_approval(

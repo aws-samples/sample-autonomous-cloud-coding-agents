@@ -48,6 +48,31 @@ def _fields_match(rule_when: dict[str, Any], metadata: dict[str, Any]) -> bool:
     return True
 
 
+# Canonical aggregate metadata fields ↔ accepted aliases (base field a producer
+# emits ↔ cumulative field the rule reads). Parity with the CDK evaluator's
+# AGGREGATE_FIELDS: the evaluator normalizes so producers emit ONE name. See #230.
+_AGGREGATE_ALIASES = {
+    "cost": ("cumulative_cost_usd", "cost_usd"),
+    "turns": ("turn_count", "turn"),
+}
+
+
+def _read_aggregate(
+    metadata: dict[str, Any],
+    aliases: tuple[str, ...],
+) -> float | None:
+    """First value among ``aliases`` that coerces to a finite float."""
+    for key in aliases:
+        raw = metadata.get(key)
+        if raw is None:
+            continue
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def _aggregate_match(
     rule_when: dict[str, Any],
     metadata: dict[str, Any],
@@ -62,7 +87,7 @@ def _aggregate_match(
     if cost_gte is not None:
         cumulative = aggregate_state.get("cumulative_cost_usd") if aggregate_state else None
         if cumulative is None:
-            cumulative = metadata.get("cumulative_cost_usd")
+            cumulative = _read_aggregate(metadata, _AGGREGATE_ALIASES["cost"])
         if cumulative is None:
             return False
         try:
@@ -74,7 +99,7 @@ def _aggregate_match(
     if turn_gte is not None:
         turns = aggregate_state.get("turn_count") if aggregate_state else None
         if turns is None:
-            turns = metadata.get("turn_count")
+            turns = _read_aggregate(metadata, _AGGREGATE_ALIASES["turns"])
         if turns is None:
             return False
         try:

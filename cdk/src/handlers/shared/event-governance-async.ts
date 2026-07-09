@@ -33,6 +33,7 @@ import {
   type EvaluableEvent,
 } from './event-rule-evaluator';
 import { logger } from './logger';
+import { coerceNumericOrNull } from './numeric';
 import { NUDGE_MAX_MESSAGE_LENGTH, type EventRule, type TaskRecord } from './types';
 import { computeTtlEpoch } from './validation';
 import { TaskStatus, TERMINAL_STATUSES } from '../../constructs/task-status';
@@ -66,6 +67,22 @@ export interface AsyncGovernanceResult {
   readonly forceFanOut: boolean;
 }
 
+/** Names of AWS SDK errors that a stream-record retry can plausibly clear
+ *  (throttles, transient 5xx). Distinguishes "retry the record" from a
+ *  poison-pill that would stall the shard forever. */
+const RETRYABLE_AWS_ERROR = /Throttling|ProvisionedThroughputExceeded|RequestLimitExceeded|ServiceUnavailable|InternalServerError|InternalFailure|TransactionInProgress|5\d\d/i;
+
+export function isRetryableInfraError(err: unknown): boolean {
+  if (err && typeof err === 'object') {
+    const e = err as { name?: string; $retryable?: unknown; $metadata?: { httpStatusCode?: number } };
+    if (e.$retryable) return true;
+    const status = e.$metadata?.httpStatusCode;
+    if (typeof status === 'number' && status >= 500) return true;
+    if (e.name && RETRYABLE_AWS_ERROR.test(e.name)) return true;
+  }
+  return false;
+}
+
 export async function loadTaskForGovernance(taskId: string): Promise<TaskRecord | undefined> {
   if (!TASK_TABLE) return undefined;
   try {
@@ -75,7 +92,11 @@ export async function loadTaskForGovernance(taskId: string): Promise<TaskRecord 
     }));
     return result.Item as TaskRecord | undefined;
   } catch (err) {
-    logger.warn('[event-governance] task load failed', {
+    // A throttle/5xx here would silently disable every ``&& task`` enforce
+    // action (cancel_task, require_approval). Rethrow infra errors so the
+    // fanout flags the record for retry; swallow only benign failures. See #230.
+    if (isRetryableInfraError(err)) throw err;
+    logger.warn('[event-governance] task load failed (non-retryable) — continuing', {
       task_id: taskId,
       error: err instanceof Error ? err.message : String(err),
     });
@@ -187,31 +208,58 @@ function correlationId(event: EvaluableEvent & { event_id?: string }, rule: Even
   return `${base}:${rule.id}`;
 }
 
-/** Extract the incoming cumulative cost/turn from a cost/turn event's metadata. */
+/** First finite value among the metadata aliases, coerced from string/number. */
+function readAggregate(meta: Readonly<Record<string, unknown>>, aliases: readonly string[]): number | undefined {
+  for (const key of aliases) {
+    const n = coerceNumericOrNull(meta[key] as number | string | null | undefined, { field: key }, logger);
+    if (n !== null) return n;
+  }
+  return undefined;
+}
+
+/**
+ * Extract the incoming cumulative cost/turn from an event's metadata (#230).
+ * Cost is sourced from ``agent_cost_update`` (SDK session ``total_cost_usd``),
+ * turns from ``agent_turn`` (the ``result.turns`` AssistantMessage counter).
+ * Each aggregate has exactly ONE producing event so the two turn counters the
+ * SDK exposes (``result.turns`` vs ``num_turns``) never mix into one mark.
+ */
 function incomingAggregate(event: EvaluableEvent): { cost?: number; turns?: number } {
   const meta = event.metadata;
   const out: { cost?: number; turns?: number } = {};
   if (event.event_type === 'agent_cost_update') {
-    const raw = meta.cumulative_cost_usd ?? meta.cost_usd;
-    const cost = typeof raw === 'number' ? raw : Number(raw);
-    if (Number.isFinite(cost)) out.cost = cost;
+    out.cost = readAggregate(meta, ['cumulative_cost_usd', 'cost_usd']);
   }
-  if (event.event_type === 'agent_turn' || event.event_type === 'agent_cost_update') {
-    const raw = meta.turn_count ?? meta.turn;
-    const turns = typeof raw === 'number' ? raw : Number(raw);
-    if (Number.isFinite(turns)) out.turns = turns;
+  if (event.event_type === 'agent_turn') {
+    out.turns = readAggregate(meta, ['turn_count', 'turn']);
   }
   return out;
 }
 
 /**
  * Bump the durable high-water marks on the TaskRecord and return the effective
- * aggregate state for rule evaluation (#230). Uses ``if_not_exists`` + a max
- * ConditionExpression so the value only ever climbs — a stream retry or an
- * out-of-order event can't lower it, and it survives the per-session SDK reset
- * across container restarts / PR-fix retries. On any DDB error we fall back to
- * the just-observed value so evaluation still proceeds (fail-open to the live
- * reading, never below it).
+ * aggregate state for rule evaluation (#230).
+ *
+ * The mark is a monotonic MAX (``if_not_exists`` + a ``<`` ConditionExpression),
+ * NOT a cross-session sum. Two reasons max is the correct semantic here:
+ *   1. Idempotency. The source is a DynamoDB stream with at-least-once delivery
+ *      and partial-batch retries; a SUM would double-count on every replay,
+ *      whereas re-applying a max is a no-op. A ceiling rule must not fire early
+ *      because a batch was retried.
+ *   2. A normal task is single-session (one ClaudeSDKClient per run_agent), so
+ *      the SDK ``total_cost_usd`` / ``result.turns`` are already the true task
+ *      totals; max just makes them durable across a container restart, where
+ *      the per-session counter resets to 0.
+ * ponytail: on a restart whose *second* session out-costs the first only in
+ * aggregate (each session individually cheaper than the first), max under-counts
+ * the true lifetime sum. The upgrade is per-session delta accounting keyed by
+ * session_id — deferred until multi-session tasks are common, because it trades
+ * the stream's free idempotency for a dedup table.
+ *
+ * Cost also seeds from the authoritative ``TaskRecord.cost_usd`` (written by the
+ * agent's task_state terminal path) so a cost event that arrives without cost
+ * metadata, or the first evaluation of an already-costed task, still counts.
+ * On any DDB error we fall back to the resolved value so evaluation proceeds.
  */
 async function persistAndResolveAggregate(
   taskId: string,
@@ -219,16 +267,26 @@ async function persistAndResolveAggregate(
   task: TaskRecord | undefined,
 ): Promise<AggregateState | undefined> {
   const incoming = incomingAggregate(event);
+  // Authoritative task cost (may be a string from the DDB doc-client) is a floor
+  // for the cost mark — bridges the gap the removed inline fallback used to fill.
+  const taskCost = coerceNumericOrNull(
+    task?.cost_usd as number | string | null | undefined,
+    { field: 'cost_usd', task_id: taskId },
+    logger,
+  );
   if (incoming.cost === undefined && incoming.turns === undefined) {
-    // Not a cost/turn event — use whatever is already persisted.
+    // Not a cost/turn event — use whatever is already persisted, seeded by
+    // task.cost_usd so a ceiling can still trip on a non-cost event.
     if (!task) return undefined;
-    return { cumulative_cost_usd: task.gov_cumulative_cost_usd, turn_count: task.gov_cumulative_turn_count };
+    const cost = Math.max(task.gov_cumulative_cost_usd ?? 0, taskCost ?? 0) || undefined;
+    return { cumulative_cost_usd: cost ?? task.gov_cumulative_cost_usd, turn_count: task.gov_cumulative_turn_count };
   }
 
-  const priorCost = task?.gov_cumulative_cost_usd ?? 0;
+  const priorCost = Math.max(task?.gov_cumulative_cost_usd ?? 0, taskCost ?? 0);
   const priorTurns = task?.gov_cumulative_turn_count ?? 0;
+  const resolvedCost = incoming.cost !== undefined ? Math.max(priorCost, incoming.cost) : priorCost || task?.gov_cumulative_cost_usd;
   const resolved: AggregateState = {
-    cumulative_cost_usd: incoming.cost !== undefined ? Math.max(priorCost, incoming.cost) : task?.gov_cumulative_cost_usd,
+    cumulative_cost_usd: resolvedCost,
     turn_count: incoming.turns !== undefined ? Math.max(priorTurns, incoming.turns) : task?.gov_cumulative_turn_count,
   };
 
@@ -238,9 +296,11 @@ async function persistAndResolveAggregate(
   const conds: string[] = [];
   const values: Record<string, unknown> = {};
   if (incoming.cost !== undefined) {
+    // Persist the resolved value (max of prior mark, task.cost_usd seed, and the
+    // incoming reading) so the seed is durable, not just used for this eval.
     sets.push('gov_cumulative_cost_usd = :c');
     conds.push('(attribute_not_exists(gov_cumulative_cost_usd) OR gov_cumulative_cost_usd < :c)');
-    values[':c'] = incoming.cost;
+    values[':c'] = resolvedCost ?? incoming.cost;
   }
   if (incoming.turns !== undefined) {
     sets.push('gov_cumulative_turn_count = :t');
@@ -260,6 +320,9 @@ async function persistAndResolveAggregate(
   } catch (err) {
     const name = (err as { name?: string })?.name;
     if (name !== 'ConditionalCheckFailedException') {
+      // Rethrow throttles/5xx so the record is retried — otherwise the mark
+      // fails to advance and a cost ceiling under-counts with no signal.
+      if (isRetryableInfraError(err)) throw err;
       logger.warn('[event-governance] aggregate high-water update failed', {
         task_id: taskId,
         error: err instanceof Error ? err.message : String(err),
@@ -303,10 +366,11 @@ async function claimIdempotency(taskId: string, ruleId: string, corr: string): P
   }
 }
 
-function escalateChannels(rule: EventRule): string[] {
+/** Channels for a notify/escalate rule; falls back to a default so a rule with
+ *  no ``notify_channels`` still delivers rather than silently doing nothing. */
+function resolveChannels(rule: EventRule, fallback: string[]): string[] {
   const base = rule.notify_channels ?? [];
-  if (base.length > 0) return [...base];
-  return ['email', 'slack'];
+  return base.length > 0 ? [...base] : fallback;
 }
 
 /**
@@ -346,13 +410,13 @@ export async function evaluateAsyncEventRules(
       continue;
     }
 
-    if (rule.action === 'notify' && rule.notify_channels) {
-      notifyChannels.push(...rule.notify_channels);
+    if (rule.action === 'notify') {
+      notifyChannels.push(...resolveChannels(rule, ['slack']));
       forceFanOut = true;
     }
 
     if (rule.action === 'escalate') {
-      notifyChannels.push(...escalateChannels(rule));
+      notifyChannels.push(...resolveChannels(rule, ['email', 'slack']));
       forceFanOut = true;
     }
 

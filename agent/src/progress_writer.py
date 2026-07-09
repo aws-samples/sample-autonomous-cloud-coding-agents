@@ -612,10 +612,6 @@ class _ProgressWriter:
             "agent_turn",
             {
                 "turn": turn,
-                # Cumulative alias read by event-governance aggregate rules
-                # (turn_count_gte). ``turn`` is the SDK's running turn index, so
-                # it is already the per-session cumulative count. See #230.
-                "turn_count": turn,
                 "model": model,
                 "thinking_preview": self._preview(thinking),
                 "text_preview": self._preview(text),
@@ -690,14 +686,9 @@ class _ProgressWriter:
             "agent_cost_update",
             {
                 "cost_usd": cost_usd,
-                # Cumulative alias read by event-governance aggregate rules
-                # (cost_usd_gte). SDK ``total_cost_usd`` is the running
-                # session total, so it is already cumulative. See #230.
-                "cumulative_cost_usd": cost_usd,
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
                 "turn": turn,
-                "turn_count": turn,
             },
         )
 

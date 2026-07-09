@@ -31,7 +31,7 @@ import type { APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
 import { isDegeneratePattern, parseApprovalScope } from './approval-scope';
 import { screenImage, screenTextFile, AttachmentScreeningError, type ScreeningConfig } from './attachment-screening';
-import { resolveEventRules } from './event-rule-pack-resolver';
+import { resolveEventRules, UnknownEventRulePackError } from './event-rule-pack-resolver';
 import { generateBranchName } from './gateway';
 import { estimateImageTokensFromBuffer } from './image-tokens';
 import { logger } from './logger';
@@ -94,6 +94,24 @@ function describeRequiredInputs(requiredInputs: { allOf?: readonly string[]; one
     parts.push(`one of ${requiredInputs.oneOf.join(' or ')}`);
   }
   return parts.length > 0 ? parts.join(', plus ') : 'a task specification';
+}
+
+/** 503 for a blueprint/workflow that pins an unresolvable event-rule-pack —
+ *  a platform misconfiguration, same class as an out-of-bounds approval cap. */
+function unknownPackResponse(repo: string | undefined, err: UnknownEventRulePackError, requestId: string): APIGatewayProxyResult {
+  logger.error('Blueprint misconfiguration — unknown event-rule-pack pin', {
+    repo,
+    pack_id: err.packRef.id,
+    pack_version: err.packRef.version,
+    request_id: requestId,
+  });
+  return errorResponse(
+    503,
+    ErrorCode.SERVICE_UNAVAILABLE,
+    `Blueprint misconfiguration: event-rule-pack '${err.packRef.id}@${err.packRef.version}' `
+      + `for '${repo}' does not resolve. Ask the platform admin to re-deploy the blueprint with a valid pack pin.`,
+    requestId,
+  );
 }
 
 /**
@@ -212,19 +230,33 @@ export async function createTaskCore(
       resolvedApprovalGateCap = blueprintCap;
       capFromBlueprint = true;
     }
-    resolvedEventRules = resolveEventRules({
-      inlineRules: repoConfig?.event_rules,
-      packRef: repoConfig?.event_rule_pack ?? workflow.eventRulePack,
-    });
     const packRef = repoConfig?.event_rule_pack ?? workflow.eventRulePack;
+    try {
+      resolvedEventRules = resolveEventRules({
+        inlineRules: repoConfig?.event_rules,
+        packRef,
+      });
+    } catch (err) {
+      if (err instanceof UnknownEventRulePackError) {
+        return unknownPackResponse(body.repo, err, requestId);
+      }
+      throw err;
+    }
     if (packRef) {
       eventRulePackId = packRef.id;
       eventRulePackVersion = packRef.version;
     }
   } else {
-    resolvedEventRules = resolveEventRules({
-      packRef: workflow.eventRulePack,
-    });
+    try {
+      resolvedEventRules = resolveEventRules({
+        packRef: workflow.eventRulePack,
+      });
+    } catch (err) {
+      if (err instanceof UnknownEventRulePackError) {
+        return unknownPackResponse(body.repo, err, requestId);
+      }
+      throw err;
+    }
     if (workflow.eventRulePack) {
       eventRulePackId = workflow.eventRulePack.id;
       eventRulePackVersion = workflow.eventRulePack.version;

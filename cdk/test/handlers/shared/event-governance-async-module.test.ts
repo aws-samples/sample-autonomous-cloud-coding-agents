@@ -161,6 +161,97 @@ describe('event-governance-async module', () => {
     expect(result.notifyChannels).toContain('slack');
   });
 
+  test('isRetryableInfraError classifies infra vs benign errors', async () => {
+    const mod = await import('../../../src/handlers/shared/event-governance-async');
+    expect(mod.isRetryableInfraError({ $retryable: {} })).toBe(true);
+    expect(mod.isRetryableInfraError({ $metadata: { httpStatusCode: 503 } })).toBe(true);
+    expect(mod.isRetryableInfraError({ name: 'ProvisionedThroughputExceededException' })).toBe(true);
+    expect(mod.isRetryableInfraError({ name: 'ThrottlingException' })).toBe(true);
+    // Benign / client errors and non-objects must not trigger a retry.
+    expect(mod.isRetryableInfraError({ name: 'ValidationException' })).toBe(false);
+    expect(mod.isRetryableInfraError({ $metadata: { httpStatusCode: 400 } })).toBe(false);
+    expect(mod.isRetryableInfraError(new Error('plain'))).toBe(false);
+    expect(mod.isRetryableInfraError('boom')).toBe(false);
+    expect(mod.isRetryableInfraError(undefined)).toBe(false);
+  });
+
+  test('loadTaskForGovernance rethrows retryable infra errors', async () => {
+    const throttle = Object.assign(new Error('rate exceeded'), {
+      name: 'ProvisionedThroughputExceededException',
+    });
+    mockSend.mockRejectedValueOnce(throttle);
+    const mod = await import('../../../src/handlers/shared/event-governance-async');
+    await expect(mod.loadTaskForGovernance('t-retry')).rejects.toBe(throttle);
+  });
+
+  test('seeds cost mark from task.cost_usd on a non-cost event', async () => {
+    // agent_milestone carries no cost metadata; the ceiling must still trip
+    // from the authoritative task.cost_usd floor (may arrive as a string).
+    mockSend.mockResolvedValue({});
+    const mod = await import('../../../src/handlers/shared/event-governance-async');
+    mod._resetGovernanceIdempotencyCache();
+    const result = await mod.evaluateAsyncEventRules(
+      {
+        task_id: 't-seed',
+        event_id: 'e-seed',
+        event_type: 'agent_milestone',
+        metadata: { milestone: 'pr_created' },
+      },
+      {
+        task: {
+          task_id: 't-seed',
+          status: 'RUNNING',
+          cost_usd: '30' as any, // doc-client string; floors the mark ≥ 25
+          event_rules: [
+            {
+              id: 'cap',
+              on: 'pr_created',
+              when: { aggregate: { cost_usd_gte: 25 } },
+              action: 'escalate',
+              mode: 'enforce',
+              evaluation: 'async',
+            },
+          ],
+        } as any,
+      },
+    );
+    // escalate with no notify_channels falls back to the default set.
+    expect(result.notifyChannels).toEqual(expect.arrayContaining(['email', 'slack']));
+  });
+
+  test('rethrows retryable error from high-water update', async () => {
+    const throttle = Object.assign(new Error('throttled'), { name: 'ThrottlingException' });
+    mockSend.mockRejectedValueOnce(throttle); // high-water UpdateCommand fails
+    const mod = await import('../../../src/handlers/shared/event-governance-async');
+    mod._resetGovernanceIdempotencyCache();
+    await expect(
+      mod.evaluateAsyncEventRules(
+        {
+          task_id: 't-hw',
+          event_id: 'e-hw',
+          event_type: 'agent_cost_update',
+          metadata: { cumulative_cost_usd: 30 },
+        },
+        {
+          task: {
+            task_id: 't-hw',
+            status: 'RUNNING',
+            event_rules: [
+              {
+                id: 'cap',
+                on: 'agent_cost_update',
+                when: { aggregate: { cost_usd_gte: 25 } },
+                action: 'cancel_task',
+                mode: 'enforce',
+                evaluation: 'async',
+              },
+            ],
+          } as any,
+        },
+      ),
+    ).rejects.toBe(throttle);
+  });
+
   test('executes cancel_task action in enforce mode', async () => {
     mockSend
       .mockResolvedValueOnce({}) // idempotency

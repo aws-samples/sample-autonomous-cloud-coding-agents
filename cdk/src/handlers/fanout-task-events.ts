@@ -47,7 +47,7 @@ import type {
 } from 'aws-lambda';
 import { clearTokenCache, resolveGitHubToken } from './shared/context-hydration';
 import { classifyError } from './shared/error-classifier';
-import { evaluateAsyncEventRules, loadTaskForGovernance } from './shared/event-governance-async';
+import { evaluateAsyncEventRules, isRetryableInfraError, loadTaskForGovernance } from './shared/event-governance-async';
 import { renderCommentBody, upsertTaskComment } from './shared/github-comment';
 import { postIssueComment } from './shared/linear-feedback';
 import { logger } from './shared/logger';
@@ -1284,6 +1284,11 @@ export const handler = async (
           governanceForceFanOut = govResult.forceFanOut || governanceForcedChannels.length > 0;
         }
       } catch (govErr) {
+        // Infra errors (DDB throttle / 5xx) must retry the record — otherwise an
+        // enforce cancel_task / require_approval is silently skipped and the
+        // cost/turn high-water mark under-counts (#230). Benign failures degrade
+        // to fanout-only, as before, to preserve poison-pill isolation.
+        if (isRetryableInfraError(govErr)) throw govErr;
         logger.warn('[fanout] event governance evaluation failed — continuing fanout', {
           task_id: ev.task_id,
           event_id: ev.event_id,

@@ -21,7 +21,7 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
-import { listBuiltinEventRulePacks, resolveEventRules } from './shared/event-rule-pack-resolver';
+import { listBuiltinEventRulePacks, resolveEventRules, UnknownEventRulePackError } from './shared/event-rule-pack-resolver';
 import { extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
 import { formatMinuteBucket, RATE_LIMIT_ROW_TTL_SECONDS } from './shared/rate-limit';
@@ -107,7 +107,12 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       }
     }
 
-    const cached = cache.get(repoId);
+    // Cache key includes workflow_ref: resolved rules depend on the workflow's
+    // eventRulePack, so keying on repo alone would serve one workflow's rules
+    // for another within the TTL window (#230).
+    const workflowRef = event.queryStringParameters?.workflow_ref;
+    const cacheKey = `${repoId}\n${workflowRef ?? ''}`;
+    const cached = cache.get(cacheKey);
     if (cached && cached.expiresAt > Date.now()) {
       return successResponse(200, cached.response, requestId);
     }
@@ -123,13 +128,20 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     const repoConfig = await loadRepoConfig(repoId);
-    const workflowRef = event.queryStringParameters?.workflow_ref;
     const workflow = workflowRef ? getWorkflowDescriptor(workflowRef) : undefined;
     const packRef = repoConfig?.event_rule_pack ?? workflow?.eventRulePack;
-    const resolved = resolveEventRules({
-      inlineRules: repoConfig?.event_rules,
-      packRef,
-    });
+    let resolved: EventRule[];
+    try {
+      resolved = resolveEventRules({
+        inlineRules: repoConfig?.event_rules,
+        packRef,
+      });
+    } catch (err) {
+      if (err instanceof UnknownEventRulePackError) {
+        return errorResponse(422, ErrorCode.VALIDATION_ERROR, err.message, requestId);
+      }
+      throw err;
+    }
 
     const response: GetEventRulesResponse = {
       repo_id: repoId,
@@ -138,7 +150,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       registry_packs: listBuiltinEventRulePacks(),
     };
 
-    cache.set(repoId, { response, expiresAt: Date.now() + CACHE_TTL_MS });
+    cache.set(cacheKey, { response, expiresAt: Date.now() + CACHE_TTL_MS });
     return successResponse(200, response, requestId);
   } catch (err) {
     logger.error('get-event-rules failed', {
