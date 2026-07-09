@@ -218,8 +218,8 @@ class TestRunCmdFailureLogging:
         assert "FAIL test/foo.test.ts" in blob
         assert "expected 1 got 2" in blob
 
-    def test_stdout_is_tailed_last_20_lines(self):
-        # Build errors surface at the END — tail, don't head.
+    def test_no_markers_falls_back_to_tail(self):
+        # Unknown tool output with no failure signature → fall back to the tail.
         proc = self._completed(
             1,
             stdout="\n".join(f"line {i}" for i in range(50)),
@@ -227,11 +227,49 @@ class TestRunCmdFailureLogging:
         )
         logs = self._run_capturing_logs(proc)
         blob = "\n".join(text for _, text in logs)
-        assert "line 49" in blob  # last line present
-        assert "line 0" not in blob  # earliest lines dropped by the tail
+        assert "line 49" in blob  # last line present (tail)
+        assert "line 0" not in blob  # earliest lines dropped
+
+    def test_failure_line_in_the_MIDDLE_is_surfaced(self):
+        # ABCA-662 root cause of the tooling gap: a PARALLEL mise DAG interleaves
+        # output, so the failing task's line is in the MIDDLE while the tail is a
+        # passing package's coverage table. The failing line MUST be surfaced.
+        mid = "[//cdk:test] FAIL test/handlers/foo.test.ts — expected 1 got 2"
+        stdout = (
+            "\n".join(f"[//cdk:test] passing line {i}" for i in range(30))
+            + f"\n{mid}\n"
+            + "\n".join(f"[//agent:test] coverage {i} | 100 | 100" for i in range(30))
+        )
+        proc = self._completed(1, stdout=stdout, stderr="")
+        logs = self._run_capturing_logs(proc)
+        blob = "\n".join(text for _, text in logs)
+        assert "FAIL test/handlers/foo.test.ts" in blob  # the mid-DAG red is surfaced
+        assert "coverage 29" in blob  # tail context still present
+
+    def test_coverage_threshold_failure_is_surfaced(self):
+        # jest prints a coverage table then exits 1 with "does not meet threshold"
+        # — no ✕/FAIL line. That threshold line must be surfaced.
+        stdout = (
+            "\n".join(f"file{i}.ts | 100 | 100 | 100 | 100" for i in range(40))
+            + '\nJest: "global" coverage threshold for branches (82%) not met: 79%'
+        )
+        proc = self._completed(1, stdout=stdout, stderr="")
+        logs = self._run_capturing_logs(proc)
+        blob = "\n".join(text for _, text in logs)
+        assert "coverage threshold for branches" in blob
+
+    def test_benign_zero_errors_line_not_surfaced_as_failure(self):
+        # "0 errors" / "no error" must NOT be pulled in as a failure marker.
+        stdout = "eslint: 0 errors, 0 warnings\n" + "\n".join(f"ok {i}" for i in range(20))
+        proc = self._completed(1, stdout=stdout, stderr="")
+        logs = self._run_capturing_logs(proc)
+        # It falls back to tail (no real failure markers); the "0 errors" line is
+        # not falsely elevated as THE failure.
+        blob = "\n".join(text for _, text in logs)
+        assert "ok 19" in blob
 
     def test_stdout_is_redacted(self):
-        proc = self._completed(1, stdout="pushing with ghp_supersecrettoken123", stderr="")
+        proc = self._completed(1, stdout="error: pushing with ghp_supersecrettoken123", stderr="")
         logs = self._run_capturing_logs(proc)
         blob = "\n".join(text for _, text in logs)
         assert "ghp_supersecrettoken123" not in blob
