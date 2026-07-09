@@ -55,6 +55,32 @@ class TestResolveVerifyArgv:
         # No operators → still a direct exec (no shell wrapper).
         assert resolve_verify_argv("npm run build", "") == ["npm", "run", "build"]
 
+    def test_env_assignment_prefix_wraps_in_shell(self):
+        # ABCA-662 follow-up: a leading VAR=value env-prefix is shell syntax. Exec'd
+        # directly, shlex-split makes the FIRST token the "program" (VAR=value) →
+        # FileNotFoundError, crashing the task before the build runs. Must route
+        # through bash -lc so the assignment takes effect. (Live-caught: a
+        # lint_command of `MISE_EXPERIMENTAL=1 mise //cdk:eslint` crashed at exit 1.)
+        assert resolve_verify_argv("MISE_EXPERIMENTAL=1 mise //cdk:eslint", "") == [
+            "bash",
+            "-lc",
+            "MISE_EXPERIMENTAL=1 mise //cdk:eslint",
+        ]
+
+    def test_multiple_env_assignments_wrap(self):
+        cmd = "FOO=1 BAR=2 make build"
+        assert resolve_verify_argv(cmd, "") == ["bash", "-lc", cmd]
+
+    def test_equals_not_at_start_is_not_an_env_prefix(self):
+        # An `=` inside a later arg (not a leading VAR= token) is NOT an env prefix
+        # — a plain command with such an arg still execs directly.
+        assert resolve_verify_argv("npm run build --define=X=1", "") == [
+            "npm",
+            "run",
+            "build",
+            "--define=X=1",
+        ]
+
 
 class TestVerifyBuildHonorsCommand:
     def _capture_argv(self, monkeypatch):
