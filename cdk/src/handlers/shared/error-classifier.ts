@@ -306,6 +306,25 @@ const PATTERNS: readonly ErrorPattern[] = [
   // (live-caught on ABCA-483: a task hit the 100-turn cap but the reply
   // said "Unexpected error"). Match either ``agent_status=``/``subtype=``.
   {
+    // ABCA-662: max_turns hit while SPINNING on a failing operation (the agent's
+    // stuck-guard latched a failure-dominated trailing window and the pipeline
+    // appended "spinning on failing tool calls (last: …)"). This is a CORRECT
+    // max_turns classification, but the cause is NOT "task too big" — it's a
+    // repeated failure the agent couldn't get past (e.g. a git-push auth failure,
+    // 662). Raising --max-turns would just thrash longer, so give the honest
+    // remedy: it's the underlying failure to fix, not the turn budget. Ordered
+    // before the generic error_max_turns bucket so this specific case wins.
+    pattern: /error_max_turns.*spinning on failing tool calls/i,
+    classification: {
+      category: ErrorCategory.TIMEOUT,
+      title: 'Ran out of turns while stuck on a failing step',
+      description: 'The agent hit its max-turns limit, but it was repeatedly retrying a failing operation (see the detail below) rather than making progress — so the cause is that failing step, not the size of the task.',
+      remedy: 'Raising --max-turns won\'t help — it would just retry the same failure longer. Look at the failing operation in the detail below: if it\'s an environment/tooling problem (auth, credentials, network, disk) an admin should fix it, then reply here to retry. If it\'s the request, refine it and retry.',
+      retryable: true,
+      errorClass: ErrorClass.USER,
+    },
+  },
+  {
     pattern: /(?:agent_status|subtype)=['"]?error_max_turns['"]?/i,
     classification: {
       category: ErrorCategory.TIMEOUT,
