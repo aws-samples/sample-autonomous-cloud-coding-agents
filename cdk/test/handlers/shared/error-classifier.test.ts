@@ -157,6 +157,27 @@ describe('classifyError', () => {
       expect(result!.retryable).toBe(true);
     });
 
+    test('classifies claude Exec-format / broken-shim as a transient image issue (ABCA-659, not "Unexpected error")', () => {
+      // The raw run_agent failure the broken agent image produced.
+      const result = classifyError(
+        "Workflow run_agent step failed: OSError: [Errno 8] Exec format error: 'claude'",
+      );
+      expect(result!.category).toBe(ErrorCategory.COMPUTE);
+      expect(result!.title).toBe('Couldn\'t start the coding agent (environment issue)');
+      expect(result!.retryable).toBe(true);
+      // MUST be transient so retryGuidance tells the user to just reply-to-retry
+      // (and escalate to an admin only if it persists) — not the bare
+      // "Unexpected error" with no guidance it used to fall through to.
+      expect(result!.errorClass).toBe(ErrorClass.TRANSIENT);
+      expect(result!.remedy).toMatch(/try again|rebuild|admin/i);
+    });
+
+    test('classifies the claude shim self-report ("native binary not installed")', () => {
+      const result = classifyError('Error: claude native binary not installed.');
+      expect(result!.category).toBe(ErrorCategory.COMPUTE);
+      expect(result!.errorClass).toBe(ErrorClass.TRANSIENT);
+    });
+
     test('classifies ECS exit without terminal status', () => {
       const result = classifyError(
         'ECS task exited successfully but agent never wrote terminal status after 5 polls',
