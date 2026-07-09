@@ -146,7 +146,8 @@ describe('createTaskCore', () => {
     expect(JSON.parse(result.body).error.code).toBe('VALIDATION_ERROR');
   });
 
-  test('returns 400 for invalid repo', async () => {    const result = await createTaskCore({ repo: 'invalid' } as any, makeContext(), 'req-1');
+  test('returns 400 for invalid repo', async () => {
+    const result = await createTaskCore({ repo: 'invalid' } as any, makeContext(), 'req-1');
     expect(result.statusCode).toBe(400);
     expect(JSON.parse(result.body).error.code).toBe('VALIDATION_ERROR');
   });
