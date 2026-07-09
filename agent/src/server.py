@@ -529,7 +529,7 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
     # #1: per-repo build/lint verification commands. Empty → agent defaults to mise.
     build_command = inp.get("build_command", "")
     lint_command = inp.get("lint_command", "")
-    max_turns = int(inp.get("max_turns", 0)) or int(os.environ.get("MAX_TURNS", "100"))
+    max_turns = int(inp.get("max_turns", 0)) or int(os.environ.get("MAX_TURNS", "200"))
     max_budget_usd = float(inp.get("max_budget_usd", 0)) or None
     aws_region = inp.get("aws_region") or os.environ.get("AWS_REGION", "")
     task_id = inp.get("task_id", "")

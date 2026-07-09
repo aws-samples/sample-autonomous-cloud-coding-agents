@@ -31,7 +31,7 @@ import { type WorkflowRequiredInputs } from './workflows';
 import { TaskStatus } from '../../constructs/task-status';
 
 /** Default maximum agent turns per task. */
-export const DEFAULT_MAX_TURNS = 100;
+export const DEFAULT_MAX_TURNS = 200;
 /** Minimum allowed value for max_turns. */
 export const MIN_MAX_TURNS = 1;
 /** Maximum allowed value for max_turns. */

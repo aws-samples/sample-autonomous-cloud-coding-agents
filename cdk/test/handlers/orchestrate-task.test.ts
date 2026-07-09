@@ -170,11 +170,11 @@ describe('hydrateAndTransition', () => {
     expect(payload.max_turns).toBe(50);
   });
 
-  test('defaults max_turns to 100 when not on task record and no blueprint config', async () => {
+  test('defaults max_turns to 200 when not on task record and no blueprint config', async () => {
     mockDdbSend.mockResolvedValue({});
     mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
     const payload = await hydrateAndTransition(baseTask as any);
-    expect(payload.max_turns).toBe(100);
+    expect(payload.max_turns).toBe(200);
   });
 
   test('threads trace: true into the agent payload when set on the task record', async () => {
