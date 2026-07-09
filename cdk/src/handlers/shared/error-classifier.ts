@@ -306,20 +306,24 @@ const PATTERNS: readonly ErrorPattern[] = [
   // (live-caught on ABCA-483: a task hit the 100-turn cap but the reply
   // said "Unexpected error"). Match either ``agent_status=``/``subtype=``.
   {
-    // ABCA-662: max_turns hit while SPINNING on a failing operation (the agent's
-    // stuck-guard latched a failure-dominated trailing window and the pipeline
-    // appended "spinning on failing tool calls (last: …)"). This is a CORRECT
-    // max_turns classification, but the cause is NOT "task too big" — it's a
-    // repeated failure the agent couldn't get past (e.g. a git-push auth failure,
-    // 662). Raising --max-turns would just thrash longer, so give the honest
-    // remedy: it's the underlying failure to fix, not the turn budget. Ordered
+    // ABCA-662: max_turns hit while the last several tool calls were the SAME
+    // repeated failure (the agent's stuck-guard latched a failure-dominated
+    // trailing window; the pipeline appended "spinning on failing tool calls
+    // (last: …)"). This SURFACES what it was stuck on — but deliberately does NOT
+    // assert "more turns won't help", because the window alone can't distinguish
+    // (a) a HARD blocker no turn count fixes (bad creds, no permission) from
+    // (b) a LONG task that hit a transient/recoverable snag late and just ran out
+    // (662 itself: siblings 661/663 pushed fine with the same token → its
+    // 'invalid credentials' was a transient race that MORE turns / a retry would
+    // have cleared). So we name the failing operation and offer BOTH remedies;
+    // the failure KIND (in the detail) tells the reader which applies. Ordered
     // before the generic error_max_turns bucket so this specific case wins.
     pattern: /error_max_turns.*spinning on failing tool calls/i,
     classification: {
       category: ErrorCategory.TIMEOUT,
-      title: 'Ran out of turns while stuck on a failing step',
-      description: 'The agent hit its max-turns limit, but it was repeatedly retrying a failing operation (see the detail below) rather than making progress — so the cause is that failing step, not the size of the task.',
-      remedy: 'Raising --max-turns won\'t help — it would just retry the same failure longer. Look at the failing operation in the detail below: if it\'s an environment/tooling problem (auth, credentials, network, disk) an admin should fix it, then reply here to retry. If it\'s the request, refine it and retry.',
+      title: 'Ran out of turns retrying a failing step',
+      description: 'The agent hit its max-turns limit while the last several tool calls were the same repeated failure (see the detail below). That means one of two things — the failing step is a hard blocker no extra turns can fix, OR the task was long and hit a recoverable snag near the end and simply ran out of turns.',
+      remedy: 'Check the failing operation in the detail below. If it is an environment/tooling blocker (auth, credentials, permission, network, disk), retrying more won\'t help — fix the environment (an admin), then reply here to retry. If it looks transient or recoverable (a flaky/temporary error, or a sibling task with a shorter to-do got past the same thing), just reply to retry and/or raise --max-turns.',
       retryable: true,
       errorClass: ErrorClass.USER,
     },
