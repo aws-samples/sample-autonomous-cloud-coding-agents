@@ -312,9 +312,7 @@ class TestRunCmdStreaming:
     def test_nonzero_exit_surfaces_failing_line(self):
         # A mid-stream failure line is streamed AND flagged in the failing-lines
         # pointer — the whole reason streaming exists.
-        result, blob = self._run(
-            ["sh", "-c", "echo passing; echo 'FAIL test/x.test.ts'; exit 1"]
-        )
+        result, blob = self._run(["sh", "-c", "echo passing; echo 'FAIL test/x.test.ts'; exit 1"])
         assert result.returncode == 1
         assert "FAIL test/x.test.ts" in blob
         assert "failing lines" in blob  # the streamed-path pointer
@@ -325,9 +323,7 @@ class TestRunCmdStreaming:
         # what the drain thread hands it — that's the line that reaches CloudWatch).
         from shell import redact_secrets
 
-        assert "ghp_streamedsecretABC123" not in redact_secrets(
-            "  token=ghp_streamedsecretABC123"
-        )
+        assert "ghp_streamedsecretABC123" not in redact_secrets("  token=ghp_streamedsecretABC123")
 
     def test_stream_raises_on_check_true_failure(self):
         import pytest
