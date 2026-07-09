@@ -163,9 +163,7 @@ def resolve_verify_argv(command: str | None, default: str) -> list[str]:
     an env-prefixed lint command exec'd ``VAR=value`` as the binary → crash).
     """
     cmd = (command or "").strip() or default
-    needs_shell = any(op in cmd for op in _SHELL_OPERATORS) or bool(
-        _ENV_ASSIGN_PREFIX.match(cmd)
-    )
+    needs_shell = any(op in cmd for op in _SHELL_OPERATORS) or bool(_ENV_ASSIGN_PREFIX.match(cmd))
     if needs_shell:
         return ["bash", "-lc", cmd]
     return shlex.split(cmd)
