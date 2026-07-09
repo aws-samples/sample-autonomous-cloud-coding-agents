@@ -177,7 +177,7 @@ _FAILURE_LINE_MARKERS = (
     "npm err!",
     "does not meet",  # jest coverage-threshold "global … does not meet threshold"
     "coverage threshold",
-    "jest: \"global\"",
+    'jest: "global"',
     "not trusted",  # mise untrusted config
     "no task ",  # mise "no task named"
     "missing script",  # npm missing script
