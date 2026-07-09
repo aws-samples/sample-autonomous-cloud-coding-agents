@@ -27,6 +27,14 @@ process.env.ECS_TASK_DEFINITION_ARN = TASK_DEF_ARN;
 process.env.ECS_SUBNETS = 'subnet-aaa,subnet-bbb';
 process.env.ECS_SECURITY_GROUP = 'sg-12345';
 process.env.ECS_CONTAINER_NAME = 'AgentContainer';
+// The top-of-file import's inline-fallback / no-op tests assume these OPTIONAL
+// vars are ABSENT at load time. They are unset in a dev shell but the real ECS
+// agent container HAS ECS_PAYLOAD_BUCKET set (#502) — so leaving this to ambient
+// env made the build pass locally yet FAIL on ECS ("works local, dies on ECS").
+// The #502 / #299 describe blocks below set these via isolateModules; delete them
+// here so the top-of-file import is hermetic regardless of the runner's env.
+delete process.env.ECS_PAYLOAD_BUCKET;
+delete process.env.ECS_PLANNING_TASK_DEFINITION_ARN;
 
 const mockSend = jest.fn();
 jest.mock('@aws-sdk/client-ecs', () => ({
