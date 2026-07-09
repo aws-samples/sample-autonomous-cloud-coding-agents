@@ -29,8 +29,10 @@ on:
     types: [completed]
   workflow_dispatch: {}
 
-# Only one integ run at a time against the shared account — overlapping deploys
-# would collide on the single hardcoded `backgroundagent-integ` stack name.
+# Only one integ run at a time against the shared account. Stack names are now
+# run-unique (`int-<sha>`, see the integ job) so this is no longer a correctness
+# requirement — it bounds shared-account cost/parallelism rather than preventing
+# a name collision.
 concurrency:
   group: cdk-integ
   cancel-in-progress: false
@@ -221,10 +223,23 @@ jobs:
       # the CDK bootstrap roles, which hold the CloudFormation permissions). No
       # raw-CLI safety net here: the GitHub OIDC role has no
       # cloudformation:DeleteStack/DescribeStacks, so such a step can only fail
-      # (#566). If a cancelled/crashed run strands `backgroundagent-integ`,
-      # reclaim is the stranded-stack cleanup owned by #400/#72.
+      # (#566). If a cancelled/crashed run strands the stack, reclaim is the
+      # stranded-stack cleanup owned by #400/#72 — and the run-unique name below
+      # means a stranded stack never blocks a later run.
+      #
+      # INTEG_STACK_NAME maps the stack to the commit under test (`int-<sha>`),
+      # replacing the single fixed `backgroundagent-integ` name. The `int-`
+      # prefix marks it ephemeral for #72's sweep. HEAD_SHA is the resolved PR
+      # head (or dispatched ref); the substring is already lowercase-hex so it
+      # needs no further sanitizing to be CloudFormation-valid.
       - name: Run integ tests (deploy → assert → destroy)
-        run: mise //cdk:integ
+        env:
+          HEAD_SHA: ${{ needs.resolve.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          export INTEG_STACK_NAME="int-${HEAD_SHA:0:12}"
+          echo "Integ stack name: $INTEG_STACK_NAME"
+          mise //cdk:integ
 
   # Post the final integ-smoke status back to the PR head so the check flips from
   # pending to success/failure. Skipped for workflow_dispatch (no PR to gate).
