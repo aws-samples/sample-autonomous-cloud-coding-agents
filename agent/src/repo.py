@@ -8,6 +8,26 @@ from config import AGENT_WORKSPACE
 from models import RepoSetup, TaskConfig
 from shell import log, run_cmd, run_cmd_with_backoff, slugify
 
+# Directories never worth scanning for nested mise configs (huge, and any
+# ``mise.toml`` inside a dependency tree is not ours to trust). Bounds the walk
+# on a large clone so the trust step stays fast.
+_MISE_CONFIG_SKIP_DIRS = frozenset({".git", "node_modules", ".venv", "cdk.out", "dist", "build"})
+
+
+def _find_mise_configs(repo_dir: str) -> list[str]:
+    """Return every ``mise.toml`` under *repo_dir* EXCEPT the root one (already
+    trusted by ``mise trust <repo_dir>``), skipping vendored/build dirs.
+
+    A monorepo has per-package config roots (``cdk/mise.toml`` etc.); each must
+    be trusted or ``mise run <task>`` fanning into it fails at the trust gate.
+    """
+    configs: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(repo_dir):
+        dirnames[:] = [d for d in dirnames if d not in _MISE_CONFIG_SKIP_DIRS]
+        if "mise.toml" in filenames and os.path.abspath(dirpath) != os.path.abspath(repo_dir):
+            configs.append(os.path.join(dirpath, "mise.toml"))
+    return configs
+
 
 def _clone_backoff_reporter(progress: Any, label: str):
     """Build an ``on_retry`` callback that emits a ``dependency_unreachable``
@@ -280,13 +300,30 @@ def setup_repo(config: TaskConfig, progress: Any = None) -> RepoSetup:
         log("SETUP", f"Creating branch: {branch}")
         run_cmd(["git", "checkout", "-b", branch], label="create-branch", cwd=repo_dir)
 
-    # Trust mise config files in the cloned repo (required before mise install)
+    # Trust mise config files in the cloned repo (required before mise install
+    # AND before every `mise run <task>`). ``mise trust <dir>`` trusts only the
+    # ROOT ``mise.toml`` — but a monorepo has per-package config ROOTS
+    # (``cdk/mise.toml``, ``cli/mise.toml``, ``agent/mise.toml``, ``docs/mise.toml``
+    # here). When ``mise run build`` fans out into ``//cdk:eslint`` etc. it loads
+    # the nested config, which is UNtrusted → ``mise ERROR Config files … are not
+    # trusted`` → exit 1, and the whole build/lint gate dies in seconds BEFORE
+    # anything compiles. (`mise trust --all` only covers cwd + PARENTS, not
+    # children, so it doesn't help.) Trust every ``mise.toml`` in the clone.
+    # Live-caught (ABCA-662 follow-up): fresh-clone fork builds failed the baseline
+    # at the trust gate, indistinguishable in the log from a red build.
     run_cmd(
         ["mise", "trust", repo_dir],
         label="mise-trust",
         cwd=repo_dir,
         check=False,
     )
+    for cfg in _find_mise_configs(repo_dir):
+        run_cmd(
+            ["mise", "trust", cfg],
+            label="mise-trust-nested",
+            cwd=repo_dir,
+            check=False,
+        )
 
     # mise install (deterministic — not left to the LLM)
     log("SETUP", "Running mise install...")

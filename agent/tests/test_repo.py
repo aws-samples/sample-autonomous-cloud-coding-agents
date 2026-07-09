@@ -281,6 +281,48 @@ class TestBaselineBuildTimeout:
         assert any("FAILED before agent changes" in n for n in setup.notes)
 
 
+class TestFindMiseConfigs:
+    """ABCA-662 follow-up: `mise trust <repo_dir>` trusts only the ROOT config;
+    a monorepo's per-package `mise.toml` roots must ALSO be trusted or
+    `mise run build` fanning into `//cdk:*` etc. dies at the trust gate."""
+
+    def _mk(self, root, rels):
+        import os
+
+        for r in rels:
+            d = os.path.dirname(r)
+            if d:
+                os.makedirs(os.path.join(root, d), exist_ok=True)
+            open(os.path.join(root, r), "w").close()
+
+    def _rel(self, root, configs):
+        import os
+
+        return sorted(os.path.relpath(c, root) for c in configs)
+
+    def test_returns_nested_configs_excluding_root(self, tmp_path):
+        root = str(tmp_path)
+        self._mk(root, ["mise.toml", "cdk/mise.toml", "cli/mise.toml", "agent/mise.toml"])
+        got = self._rel(root, repo._find_mise_configs(root))
+        # root already trusted by `mise trust <repo_dir>`, so it's excluded
+        assert "mise.toml" not in got
+        assert got == ["agent/mise.toml", "cdk/mise.toml", "cli/mise.toml"]
+
+    def test_skips_vendored_and_build_dirs(self, tmp_path):
+        root = str(tmp_path)
+        self._mk(
+            root,
+            ["mise.toml", "cdk/mise.toml", "node_modules/pkg/mise.toml", "cdk/cdk.out/a/mise.toml"],
+        )
+        got = self._rel(root, repo._find_mise_configs(root))
+        assert got == ["cdk/mise.toml"]  # node_modules + cdk.out pruned
+
+    def test_no_nested_configs_returns_empty(self, tmp_path):
+        root = str(tmp_path)
+        self._mk(root, ["mise.toml"])  # only the root
+        assert repo._find_mise_configs(root) == []
+
+
 class TestDetectDefaultBranch:
     def test_returns_detected_branch(self, monkeypatch):
         def fake_run(*args, **kwargs):
