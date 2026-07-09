@@ -49,7 +49,7 @@ import type { DynamoDBRecord, DynamoDBStreamEvent } from 'aws-lambda';
 import { createTaskCore } from './shared/create-task-core';
 import { renderFailureReply, renderPanelFailureReason } from './shared/failure-reply';
 import { isNoChangeIteration, renderMaturingReply } from './shared/iteration-reply';
-import { EMOJI_FAILURE, EMOJI_NEEDS_INPUT, EMOJI_SUCCESS, type LinearFeedbackContext, revertIssueToNotStarted, sweepDecompositionNotes, swapCommentReaction, transitionIssueState, upsertStatusComment, upsertThreadedReply } from './shared/linear-feedback';
+import { EMOJI_FAILURE, EMOJI_NEEDS_INPUT, EMOJI_SUCCESS, type LinearFeedbackContext, revertIssueToNotStarted, sweepDecompositionNotes, swapCommentReaction, swapIssueReaction, transitionIssueState, upsertStatusComment, upsertThreadedReply } from './shared/linear-feedback';
 import { resolveLinearOauthToken } from './shared/linear-oauth-resolver';
 import type { SubIssueNode } from './shared/linear-subissue-fetch';
 import { logger } from './shared/logger';
@@ -518,16 +518,32 @@ async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
     };
     try {
       const reverted = await revertIssueToNotStarted(feedbackCtx, subIssueId);
-      if (reverted) {
-        logger.info('Reconciler reverted a failed child out of In Review (state now matches the graph)', {
+      // Also settle the child's ISSUE reaction to ❌. The agent reacts ✅ on its
+      // OWN verdict (agent-success + regression-only build gate — a build that was
+      // already red before the agent isn't counted as the agent's regression, so
+      // it posts ✅ and "Task completed"). The orchestration gate is stricter
+      // (build_passed===false ⇒ failed, absolute), so a child can legitimately end
+      // agent-✅ but graph-failed — leaving a ✅ reaction that contradicts the
+      // failed node (live-caught on ABCA-659: PR opened, agent ✅, build red).
+      // swapIssueReaction deletes only the bot's own status emojis (✅/👀/❓) and
+      // adds ❌ — a human's reaction is never touched, and it's idempotent on
+      // replay. This makes the reaction agree with the reverted state + the panel's
+      // ❌ row. (The stale "✅ Task completed" fanout COMMENT is left as history —
+      // Linear can't edit another actor's comment; the reaction + state + panel are
+      // the authoritative signals, and a reply re-runs the child.)
+      const reactionSwapped = await swapIssueReaction(feedbackCtx, subIssueId, EMOJI_FAILURE);
+      if (reverted || reactionSwapped) {
+        logger.info('Reconciler settled a failed child to match the graph (state + reaction)', {
           orchestration_id: orchestrationId,
           sub_issue_id: subIssueId,
           task_status: outcome.status,
           build_passed: outcome.build_passed,
+          state_reverted: reverted,
+          reaction_swapped: reactionSwapped,
         });
       }
     } catch (err) {
-      logger.warn('Failed to reconcile failed child Linear state (non-fatal)', {
+      logger.warn('Failed to reconcile failed child Linear state/reaction (non-fatal)', {
         orchestration_id: orchestrationId,
         sub_issue_id: subIssueId,
         error: err instanceof Error ? err.message : String(err),
