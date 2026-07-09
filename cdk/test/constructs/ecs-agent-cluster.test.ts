@@ -271,6 +271,26 @@ describe('EcsAgentCluster construct', () => {
     expect(serialized).toContain('anthropic.claude-haiku-4-5-20251001-v1:0');
   });
 
+  test('task role can DescribeAvailabilityZones so a CDK target repo can `cdk synth` on a fresh clone (ECS-parity)', () => {
+    // REGRESSION: `mise run build` on a CDK-based target repo runs `cdk synth`,
+    // and a stack wired to a concrete env does a synth-time AZ context lookup
+    // (ec2:DescribeAvailabilityZones). A dev box caches the answer in the
+    // gitignored cdk.context.json; the agent clones fresh (no cache) → the live
+    // lookup fires. Without this grant the ECS task role hit AccessDenied →
+    // "Synthesis finished with errors" → a FALSE build-gate failure. Pin the
+    // read-only describe (Resource:* — EC2 describe has no resource scoping).
+    const policies = baseTemplate.findResources('AWS::IAM::Policy');
+    let azStatement: { Resource: unknown } | undefined;
+    for (const p of Object.values(policies)) {
+      for (const s of p.Properties.PolicyDocument.Statement) {
+        const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+        if (actions.includes('ec2:DescribeAvailabilityZones')) azStatement = s;
+      }
+    }
+    expect(azStatement).toBeDefined();
+    expect(azStatement!.Resource).toEqual('*');
+  });
+
   test('bedrockModels context override changes the granted model ARNs (#433)', () => {
     const template = createStack({ bedrockModels: ['anthropic.claude-opus-4-8'] }).template;
     const policies = template.findResources('AWS::IAM::Policy');
