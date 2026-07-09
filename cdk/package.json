@@ -77,7 +77,7 @@
       "<rootDir>/@(src|test)/**/*(*.)@(spec|test).ts?(x)",
       "<rootDir>/@(src|test)/**/__tests__/**/*.ts?(x)"
     ],
-    "maxWorkers": "50%",
+    "maxWorkers": "25%",
     "workerIdleMemoryLimit": "1536MB",
     "clearMocks": true,
     "collectCoverage": true,
