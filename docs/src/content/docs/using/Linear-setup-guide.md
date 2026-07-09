@@ -8,8 +8,8 @@ Set up the ABCA Linear integration so that applying a label to a Linear issue tr
 
 ## Prerequisites
 
-- ABCA CDK stack deployed (see [Developer guide](/developer-guide/introduction))
-- A Cognito user account configured (see [User guide](/using/overview))
+- ABCA CDK stack deployed (see [Developer guide](/sample-autonomous-cloud-coding-agents/developer-guide/introduction))
+- A Cognito user account configured (see [User guide](/sample-autonomous-cloud-coding-agents/using/overview))
 - A Linear workspace where you have **admin** access
 - The `bgagent` CLI installed and logged in (`bgagent configure` + `bgagent login`)
 
@@ -114,7 +114,7 @@ The CLI shows a picker of human Linear members in the workspace. After you pick 
 
 The teammate needs their own ABCA account first (Cognito user + configured CLI). If they don't have one yet:
 
-1. **Admin** runs `bgagent admin invite-user teammate@example.com` to create their Cognito user (see [User guide → Joining an existing deployment](/using/overview#joining-an-existing-deployment) for the full Cognito-side flow).
+1. **Admin** runs `bgagent admin invite-user teammate@example.com` to create their Cognito user (see [User guide → Joining an existing deployment](/sample-autonomous-cloud-coding-agents/using/overview#joining-an-existing-deployment) for the full Cognito-side flow).
 2. **Teammate** pastes the bundle + password from the admin into:
 
    ```bash

@@ -48,28 +48,33 @@ Run these steps in order, verifying each:
 6. `mise run install` — Install all workspace dependencies
 7. `mise run build` — Full monorepo build (agent quality + CDK + CLI + docs)
 
-If `mise run install` fails with "yarn: command not found", Corepack wasn't activated. If `prek install` fails about `core.hooksPath`, another hook manager owns hooks — suggest `git config --unset-all core.hooksPath`.
+Common Phase 2 snags to pre-empt (don't let these read as a broken environment):
+- "yarn: command not found" → Corepack wasn't activated (step 3).
+- `prek install` fails about `core.hooksPath` → another hook manager owns hooks; suggest `git config --unset-all core.hooksPath`.
+- Node, Yarn, AND CDK all "not found" at once → expected before `mise install` finishes; mise provisions them.
+- `mise install` fails Node on GPG verification (headless/EC2, no gpg-agent) → `mise settings set node.gpg_verify false` (still checksum-verified), retry.
+- "config not trusted" for `~/.config/mise/config.toml` → run `mise trust` on the user-global config too, not just the project one.
+- In a non-interactive/spawned shell, `mise` may not be on `PATH` → use `~/.local/bin/mise` or `mise exec --`.
 
-## Phase 3: One-Time AWS Setup
+## Phase 3: One-Time Host Setup (build architecture)
 
-On a fresh AWS account, X-Ray needs a CloudWatch Logs resource policy before it can write spans. Run both commands — the first creates the policy, the second sets the destination:
+The agent image is built for **linux/arm64** (AgentCore runs on Graviton). On an **x86_64** build host this is the most common first-deploy blocker — the image build dies with `exec /bin/sh: exec format error`. Register QEMU emulation once per host:
 
 ```bash
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-aws logs put-resource-policy \
-  --policy-name xray-spans-policy \
-  --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Sid\":\"XRaySpansAccess\",\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"xray.amazonaws.com\"},\"Action\":[\"logs:PutLogEvents\",\"logs:CreateLogGroup\",\"logs:CreateLogStream\"],\"Resource\":[\"arn:aws:logs:*:${ACCOUNT_ID}:log-group:aws/spans\",\"arn:aws:logs:*:${ACCOUNT_ID}:log-group:aws/spans:*\"]}]}"
-aws xray update-trace-segment-destination --destination CloudWatchLogs
+docker run --privileged --rm tonistiigi/binfmt --install arm64
 ```
 
-These must be run once per AWS account before first deployment. If the `put-resource-policy` step is skipped, the `update-trace-segment-destination` command fails with `AccessDeniedException`.
+If `docker run --privileged` is blocked (security-managed hosts), deploy from a **native arm64 host** (Graviton EC2 / Apple Silicon) instead. On Apple Silicon / arm64 hosts, skip this phase.
+
+**X-Ray tracing is OPTIONAL — do not gate deployment on it.** The stack ships with X-Ray→CloudWatch-Logs export disabled (`tracingEnabled` in `agent.ts`), so it deploys and runs fully without any X-Ray setup. Do NOT run `aws xray update-trace-segment-destination` as a prerequisite — on a security-managed AWS Org account an SCP can make that call fail with `AccessDeniedException` no matter what, dead-ending the user on a step the platform doesn't use. Mention tracing only as an opt-in extra.
 
 ## Phase 4: First Deployment
 
 Guide through:
 
 1. `mise //cdk:bootstrap` — Bootstrap CDK (if not already done for this account/region)
-2. `mise //cdk:deploy` — Deploy the stack (~9.5 minutes)
+2. `mise //cdk:deploy -- --require-approval never` — Deploy the stack (~9.5 minutes). The flag avoids the approval prompt hanging in a non-interactive shell.
+   - If the deploy rolls back on a missing IAM permission and lands in `ROLLBACK_COMPLETE`, the stack can't be updated — `mise //cdk:destroy` then redeploy. Teardown can stall in `DELETE_FAILED` for ~20–40 min while AgentCore's service-managed (Hyperplane) ENIs are reclaimed; wait, then retry destroy. Never force-delete past stuck VPC resources (orphans the VPC; VPCs are quota-capped per Region).
 3. Retrieve stack outputs:
    ```bash
    aws cloudformation describe-stacks --stack-name backgroundagent-dev \

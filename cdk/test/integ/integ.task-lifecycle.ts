@@ -338,7 +338,7 @@ pollFail
 // submit (else 422 REPO_NOT_ONBOARDED), so both onboard steps precede their
 // submits. Gate approve/deny run sequentially since each POST needs the
 // request_id read from the parked task's approval row.
-let chain = createUser
+const chain = createUser
   .next(setPassword)
   .next(auth)
   .next(onboardFailRepo)
@@ -533,7 +533,8 @@ if (gatesEnabled) {
 
   // Splice the gate steps into the chain. seedPut/onboardSandbox precede the gate
   // submits (token + onboarding must exist first); approve/deny run sequentially.
-  chain = chain
+  // `.next()` registers ordering by side effect, so the returned tail is unused.
+  chain
     .next(seedGet)
     .next(seedPut)
     .next(onboardSandbox)

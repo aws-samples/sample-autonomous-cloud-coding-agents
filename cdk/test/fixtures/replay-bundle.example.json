@@ -1,0 +1,33 @@
+{
+  "task_id": "01HZX9Q2K3M4N5P6R7S8T9V0WX",
+  "workflow_ref": "coding/new-task-v1",
+  "resolved_workflow": { "id": "coding/new-task-v1", "version": "1" },
+  "prompt_version": "coding/new-task-v1@1",
+  "events": [
+    {
+      "event_id": "01HZX9Q2K3000000000000000A",
+      "event_type": "task_started",
+      "timestamp": "2026-06-30T17:00:00.000Z",
+      "metadata": {}
+    },
+    {
+      "event_id": "01HZX9Q2K3000000000000000B",
+      "event_type": "agent_turn",
+      "timestamp": "2026-06-30T17:00:12.000Z",
+      "metadata": { "turn": 1 }
+    },
+    {
+      "event_id": "01HZX9Q2K3000000000000000C",
+      "event_type": "agent_cost_update",
+      "timestamp": "2026-06-30T17:01:30.000Z",
+      "metadata": { "cost_usd": 0.0421 }
+    }
+  ],
+  "events_truncation": null,
+  "verification": { "build_passed": true, "lint_passed": true },
+  "trace_uri": "s3://backgroundagent-dev-traceartifacts/traces/e4c80468-8051-7062-032c-01689f5711d3/01HZX9Q2K3M4N5P6R7S8T9V0WX.jsonl.gz",
+  "otel_trace_id": "1a2b3c4d5e6f70819293a4b5c6d7e8f9",
+  "session_id": "sess-01HZX9Q2K3M4N5P6R7S8T9V0WX",
+  "cost_usd": 0.0421,
+  "collected_at": "2026-06-30T17:05:00.000Z"
+}

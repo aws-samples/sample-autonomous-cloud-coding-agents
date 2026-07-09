@@ -112,6 +112,7 @@ const PROGRESS_EVENT_TYPES = new Set([
   'agent_milestone',
   'agent_cost_update',
   'agent_error',
+  'agent_blocked',
 ]);
 
 /** Format an event timestamp to a short local time string. */
@@ -219,6 +220,19 @@ export function renderEvent(event: TaskEvent): string {
       const errType = meta.error_type ?? 'Error';
       const msg = meta.message_preview ?? '';
       return `[${time}] ✖ ${errType}: ${msg}`;
+    }
+    case 'agent_blocked': {
+      // #251: environmental blocker (missing secret, egress denial, …). Render
+      // distinctly with the kind, the named resource (secret/host), and the
+      // remediation hint so the operator sees the fix without a status round-trip.
+      const kind = String(meta.kind ?? 'unknown_environmental');
+      const resource = meta.resource != null ? ` [${String(meta.resource)}]` : '';
+      const detail = meta.detail ? `: ${String(meta.detail)}` : '';
+      let line = `[${time}] ⛔ BLOCKED (${kind})${resource}${detail}`;
+      if (meta.remediation_hint) {
+        line += `\n         ↳ ${String(meta.remediation_hint)}`;
+      }
+      return line;
     }
     default:
       return `[${time}] ${event.event_type}: ${JSON.stringify(meta)}`;
