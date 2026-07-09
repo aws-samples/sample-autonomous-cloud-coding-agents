@@ -55,6 +55,19 @@ from dataclasses import dataclass, field
 # retry-after-fix ("ran it, changed something, ran it again — different result").
 STEER_THRESHOLD = 3
 
+# ABCA-662: a SECOND spin shape the per-signature streak can't see — the agent
+# tries a DIFFERENT command each turn toward the SAME failing goal (e.g. a git
+# push that keeps failing on 'invalid credentials', retried via http.extraheader,
+# then a token remote URL, then GITHUB_TOKEN env, then gh auth status …). Each is
+# a distinct signature, so no single streak reaches STEER_THRESHOLD, and the run
+# thrashes to the max_turns cap. We also track a TRAILING WINDOW of the last
+# ``WINDOW`` tool outcomes: when at least ``WINDOW_FAIL_THRESHOLD`` of them FAILED
+# (regardless of signature), the agent is stuck spinning on failures — steer, and
+# expose a summary so a max_turns terminal reason can say WHY it capped ("spinning
+# on failing tool calls: …") vs. a task that genuinely needed the turns.
+WINDOW = 6
+WINDOW_FAIL_THRESHOLD = 5
+
 # Max chars of the offending command surfaced in the steer message. Short:
 # this is a hint, not a log dump (and the command is untrusted repo content).
 _CMD_PREVIEW_LEN = 80
@@ -178,9 +191,28 @@ class StuckGuard:
     _sigs: dict[str, _SigState] = field(default_factory=dict)
     _steered: set[str] = field(default_factory=set)
     _last_failing_sig: str | None = None
+    # ABCA-662 trailing window: recent tool outcomes as (failed: bool, preview,
+    # fingerprint), newest last, capped at WINDOW. Drives the window-based steer
+    # (loop-of-variations) and the max_turns "why" summary.
+    _window: list[tuple[bool, str, str]] = field(default_factory=list)
+    _window_steered: bool = False
 
     def record_tool_result(self, tool_name: str, tool_input: object, tool_response: str) -> None:
         """Called from PostToolUse for every tool call. Updates failure streaks."""
+        # Trailing-window bookkeeping (ABCA-662): record every outcome, newest
+        # last, capped at WINDOW — signature-agnostic, so a loop of *different*
+        # commands all failing is visible even though no single streak grows.
+        failed = _looks_failed(tool_response)
+        self._window.append(
+            (
+                failed,
+                _command_preview(tool_input),
+                _failure_fingerprint(tool_response) if failed else "",
+            )
+        )
+        if len(self._window) > WINDOW:
+            self._window.pop(0)
+
         sig = _signature(tool_name, tool_input)
         state = self._sigs.setdefault(sig, _SigState())
         if _looks_failed(tool_response):
@@ -235,4 +267,89 @@ class StuckGuard:
                 ),
             )
 
+        # ABCA-662: window-based steer — the last WINDOW tool calls are dominated
+        # by the SAME recurring failure even though the COMMANDS varied (a
+        # loop-of-variations toward one failing goal, e.g. retrying git-push auth
+        # every which way and getting "invalid credentials" each time). Requiring a
+        # dominant repeated failure — not just N failures — is what keeps a healthy
+        # iterate-and-fix loop (same command, a DIFFERENT test failing each run)
+        # from tripping this (K10). Steer ONCE, and NOT if the per-signature path
+        # already steered this same spin (avoid double-nudging one loop). Advisory.
+        dominant = self._dominant_window_failure()
+        if not self._window_steered and dominant is not None and sig not in self._steered:
+            self._window_steered = True
+            _, last_fail = dominant
+            fail_count = sum(1 for failed, _, _ in self._window if failed)
+            return StuckAction(
+                kind="steer",
+                signature="__window__",
+                message=(
+                    f"⚠️ {fail_count} of your last {len(self._window)} tool calls FAILED with "
+                    f"the same error, across different commands (most recently `{last_fail}`) — "
+                    "you are spinning on one failing operation without progress. STOP. If this is "
+                    "an environment/tooling problem (auth, missing credentials, disk, network), it "
+                    "will NOT resolve by retrying — finish now and state clearly in your summary "
+                    "what failed and why, so a human can fix the environment."
+                ),
+            )
+
         return StuckAction(kind="none")
+
+    def _dominant_window_failure(self) -> tuple[str, str] | None:
+        """If the trailing window is dominated by ONE recurring failure, return
+        ``(fingerprint, last_matching_command_preview)``; else None.
+
+        "Dominated" = the window is full AND at least ``WINDOW_FAIL_THRESHOLD`` of
+        its entries are failures sharing the SAME failure fingerprint (the
+        collapsed output prefix, NOT digit-blurred — see below). This is the
+        signal-agnostic spin detector: the SAME error recurring across VARIED
+        commands (662: 'invalid credentials' on every push variant), NOT a
+        productive loop where each failure differs.
+
+        Crucially we compare EXACT (whitespace-collapsed) fingerprints and do NOT
+        blur digits: an earlier attempt normalized ``\\d+ → #`` to catch volatile
+        suffixes, but that ALSO collapsed a healthy iterate-and-fix loop (same
+        command, ``FAIL test/file_0``, ``file_1``, … — a DIFFERENT failing test
+        each run, which is PROGRESS) into one fingerprint and false-steered it
+        (K10). Requiring byte-identical failure output means only a genuinely
+        stuck spin (the same error verbatim) trips this; a working agent whose
+        output changes run-to-run never does."""
+        if len(self._window) < WINDOW:
+            return None
+        # Count failures by EXACT fingerprint (no digit blur — see docstring).
+        counts: dict[str, tuple[int, str]] = {}
+        for failed, prev, fp in self._window:
+            if not failed:
+                continue
+            n, _ = counts.get(fp, (0, prev))
+            counts[fp] = (n + 1, prev)  # keep the latest preview for this fp
+        if not counts:
+            return None
+        top_fp, (top_n, top_prev) = max(counts.items(), key=lambda kv: kv[1][0])
+        if top_n >= WINDOW_FAIL_THRESHOLD:
+            return (top_fp, top_prev)
+        return None
+
+    def recent_failure_summary(self) -> str | None:
+        """A one-line "why it spun" summary for a max_turns terminal reason.
+
+        Returns None unless the trailing window is failure-dominated (the same
+        bar the window-steer uses) — so a task that genuinely used its turns
+        making progress yields no summary and its max_turns reason is unchanged.
+        Names the dominant recent failing command + a short slice of its output,
+        so the platform can say "hit max turns while stuck on: <cmd> → <err>"
+        instead of a bare "Exceeded max turns".
+        """
+        dominant = self._dominant_window_failure()
+        if dominant is None:
+            return None
+        _, prev = dominant
+        # Recover a short slice of the actual (un-normalized) output for the last
+        # failure matching the dominant command, for the human-readable detail.
+        detail = ""
+        for failed, p, fp in reversed(self._window):
+            if failed and p == prev:
+                detail = re.sub(r"\s+", " ", fp).strip()[:120]
+                break
+        base = f"spinning on failing tool calls (last: `{prev}`"
+        return f"{base} — {detail})" if detail else f"{base})"

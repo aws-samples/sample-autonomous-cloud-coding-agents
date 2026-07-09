@@ -173,6 +173,27 @@ def reset_blocker_reason() -> None:
 _reset_blocker_reason_for_tests = reset_blocker_reason
 
 
+# ABCA-662: latch of the stuck-guard's "why it's spinning" summary, refreshed by
+# the between-turns hook. Read by the pipeline's terminal path so a max_turns
+# failure can say WHY it capped ("Exceeded max turns — spinning on failing tool
+# calls: git push → invalid credentials") vs. a task that genuinely used its
+# turns. Process-lifetime (one task), last-writer-wins (the most recent window
+# is the most relevant to the cap). Distinct from the blocker latch: this is a
+# SOFT diagnostic (advisory), not a canonical BLOCKED[…] terminal reason.
+_LAST_STUCK_SUMMARY: str | None = None
+
+
+def last_stuck_summary() -> str | None:
+    """Return the latched stuck-guard summary for the max_turns terminal reason."""
+    return _LAST_STUCK_SUMMARY
+
+
+def reset_stuck_summary() -> None:
+    """Clear the stuck-summary latch (per-task, alongside the blocker latch)."""
+    global _LAST_STUCK_SUMMARY
+    _LAST_STUCK_SUMMARY = None
+
+
 def detect_egress_denial(text: str) -> tuple[bool, str | None]:
     """Scan tool output for an egress-denial signature (#251).
 
@@ -1436,6 +1457,12 @@ def _stuck_guard_between_turns_hook(ctx: dict) -> list[str]:
         return []
     try:
         action = guard.evaluate()
+        # ABCA-662: refresh the "why it's spinning" latch every turn. When the
+        # trailing window is failure-dominated this returns a one-liner; otherwise
+        # None (which clears the latch — a task that recovered isn't "stuck"). Read
+        # by the terminal path so a later max_turns cap explains itself.
+        global _LAST_STUCK_SUMMARY
+        _LAST_STUCK_SUMMARY = guard.recent_failure_summary()
     except Exception as exc:
         log("WARN", f"stuck-guard evaluate raised (ignored): {type(exc).__name__}: {exc}")
         return []
