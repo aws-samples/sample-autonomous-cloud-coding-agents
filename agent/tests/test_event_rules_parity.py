@@ -9,7 +9,7 @@ import pytest
 
 from event_governance.evaluator import match_rules, parse_rules
 
-FIXTURES = Path(__file__).resolve().parents[2] / "contracts" / "event-rules" / "fixtures"
+FIXTURES = Path(__file__).resolve().parents[1] / "event-rules" / "fixtures"
 
 
 def _fixture_paths() -> list[Path]:

@@ -7,7 +7,7 @@ from pathlib import Path
 
 from event_governance.evaluator import match_rules, parse_rules
 
-FIXTURES = Path(__file__).resolve().parents[2] / "contracts" / "event-rules" / "fixtures"
+FIXTURES = Path(__file__).resolve().parents[1] / "event-rules" / "fixtures"
 
 
 def _load_fixture(name: str) -> dict:

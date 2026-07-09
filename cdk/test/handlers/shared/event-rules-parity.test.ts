@@ -21,7 +21,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { matchEventRules, parseEventRules } from '../../../src/handlers/shared/event-rule-evaluator';
 
-const FIXTURE_DIR = path.resolve(__dirname, '..', '..', '..', '..', 'contracts', 'event-rules', 'fixtures');
+const FIXTURE_DIR = path.resolve(__dirname, '..', '..', '..', '..', 'agent', 'event-rules', 'fixtures');
 
 interface FixtureFile {
   description?: string;

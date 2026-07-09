@@ -40,7 +40,7 @@ Each rule has:
 | `mode` | `observe_only` or `enforce` |
 | `evaluation` | `sync` (in-agent) or `async` (stream consumer) |
 
-Schema: `contracts/event-rules/schema.json`.
+Schema: `agent/event-rules/schema.json`.
 
 ### 1.3 Sync evaluation
 
@@ -84,6 +84,8 @@ Blueprint `security.eventRules` — array of rules persisted in RepoTable, froze
 ### 3.2 Registry-native (Phase 3)
 
 Blueprint `security.eventRulePack: { id, version }` resolves from agent asset registry. Inline rules merge as overrides; pack rules take precedence unless overridden per-rule.
+
+Packs are authored under `agent/event-rules/packs/*.json`, alongside `agent/workflows/` — one asset tree, one authoring UX, validated against `agent/event-rules/schema.json`. Today the CDK resolver bundles these at build time (`resolveEventRules`); its interface matches the future `RegistryService.resolve('event-rule-pack')`, so the registry swap is local to the resolver. The agent runtime never loads pack files — it receives already-resolved `event_rules` frozen on the TaskRecord at submit time, which keeps the sync/async evaluators reading one source.
 
 ---
 

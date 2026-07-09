@@ -45,7 +45,7 @@ const REPO_CONFIG_CR_TIMEOUT_MINUTES = 5;
 /** TTL (days) applied to a RepoConfig row on blueprint delete before cleanup. */
 const REMOVED_REPO_TTL_DAYS = 30;
 
-/** Inline event governance rule (issue #230). Schema: contracts/event-rules/schema.json */
+/** Inline event governance rule (issue #230). Schema: agent/event-rules/schema.json */
 export interface BlueprintEventRule {
   readonly id: string;
   readonly on: string;

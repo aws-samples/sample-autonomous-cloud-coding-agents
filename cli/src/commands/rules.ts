@@ -34,7 +34,7 @@ interface FixtureFile {
 
 function loadFixture(name: string): FixtureFile {
   const repoRoot = path.resolve(__dirname, '../../..');
-  const fixturePath = path.join(repoRoot, 'contracts/event-rules/fixtures', `${name}.json`);
+  const fixturePath = path.join(repoRoot, 'agent/event-rules/fixtures', `${name}.json`);
   return JSON.parse(fs.readFileSync(fixturePath, 'utf8')) as FixtureFile;
 }
 
@@ -86,7 +86,7 @@ export function makeRulesCommand(): Command {
   rules
     .command('eval')
     .description('Evaluate a golden fixture locally')
-    .requiredOption('--fixture <name>', 'Fixture basename under contracts/event-rules/fixtures/')
+    .requiredOption('--fixture <name>', 'Fixture basename under agent/event-rules/fixtures/')
     .option('--output <format>', 'Output format (text or json)', 'text')
     .action((opts: { fixture: string; output: string }) => {
       const fixture = loadFixture(opts.fixture);

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://abca.dev/contracts/event-rules/schema.json",
+  "$id": "https://abca.dev/agent/event-rules/schema.json",
   "title": "EventRulePack",
   "type": "object",
   "required": ["rules"],

@@ -20,14 +20,15 @@
 /**
  * Resolve event rules from inline config and registry pack pins (#230 Phase 3).
  *
- * Until the agent asset registry (#246) ships, packs are loaded from
- * ``contracts/event-rules/packs/*.json`` at bundle time. The resolver
- * interface matches the future ``RegistryService.resolve('event-rule-pack')``.
+ * Packs are authored alongside workflows under ``agent/event-rules/packs/*.json``
+ * and bundled into the resolver at build time. Until the agent asset registry
+ * (#246) ships, this file IS the registry; the resolver interface matches the
+ * future ``RegistryService.resolve('event-rule-pack')`` so the swap is local.
  */
 
 import type { EventRule, EventRulePackRef } from './event-governance-types';
 import { parseEventRules } from './event-rule-evaluator';
-import platformDefaultPack from '../../../../contracts/event-rules/packs/platform-default-v1.json';
+import platformDefaultPack from '../../../../agent/event-rules/packs/platform-default-v1.json';
 
 interface PackFile {
   readonly pack_id?: string;

@@ -21,8 +21,8 @@
  * Event rule evaluator tests (issue #230).
  */
 
-import aggregateFixture from '../../../../contracts/event-rules/fixtures/aggregate-cost-cancel.json';
-import observeFixture from '../../../../contracts/event-rules/fixtures/observe-repo-setup.json';
+import aggregateFixture from '../../../../agent/event-rules/fixtures/aggregate-cost-cancel.json';
+import observeFixture from '../../../../agent/event-rules/fixtures/observe-repo-setup.json';
 import type { EventRule } from '../../../src/handlers/shared/event-governance-types';
 import {
   buildPolicyDecisionMetadata,
