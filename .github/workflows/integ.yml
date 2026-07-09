@@ -227,17 +227,20 @@ jobs:
       # stranded-stack cleanup owned by #400/#72 — and the run-unique name below
       # means a stranded stack never blocks a later run.
       #
-      # INTEG_STACK_NAME maps the stack to the commit under test (`int-<sha>`),
-      # replacing the single fixed `backgroundagent-integ` name. The `int-`
-      # prefix marks it ephemeral for #72's sweep. HEAD_SHA is the resolved PR
-      # head (or dispatched ref); the substring is already lowercase-hex so it
-      # needs no further sanitizing to be CloudFormation-valid.
+      # INTEG_STACK_NAME maps the stack to the commit under test plus the run
+      # number (`int-<sha>-<run>`), replacing the single fixed
+      # `backgroundagent-integ` name. The run number makes same-commit re-runs
+      # distinct; the `int-` prefix marks it ephemeral for #72's sweep. HEAD_SHA
+      # is the resolved PR head (or dispatched ref) and RUN_NUMBER is a positive
+      # integer, so both are already lowercase-alphanumeric — no sanitizing
+      # needed to stay CloudFormation-valid.
       - name: Run integ tests (deploy → assert → destroy)
         env:
           HEAD_SHA: ${{ needs.resolve.outputs.head_sha }}
+          RUN_NUMBER: ${{ github.run_number }}
         run: |
           set -euo pipefail
-          export INTEG_STACK_NAME="int-${HEAD_SHA:0:12}"
+          export INTEG_STACK_NAME="int-${HEAD_SHA:0:12}-${RUN_NUMBER}"
           echo "Integ stack name: $INTEG_STACK_NAME"
           mise //cdk:integ
 
