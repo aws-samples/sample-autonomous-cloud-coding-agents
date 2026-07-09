@@ -152,3 +152,71 @@ class TestStuckGuardLifecycle:
         action = g.evaluate()
         assert action.kind == "steer"
         assert "loop" in action.message.lower()
+
+
+# DIFFERENT command each turn (distinct signatures, so no per-signature streak
+# grows) but the SAME recurring error — exactly the 662 push-auth thrash: the
+# agent retried the push every which way, each getting 'invalid credentials'.
+_ERR = "remote: invalid credentials\nfatal: exit 128"
+_PUSH_FAILS = [
+    ({"command": "git push origin HEAD"}, _ERR),
+    ({"command": "git config http.extraheader ... && git push"}, _ERR),
+    ({"command": "git remote set-url origin https://x-access-token@... && git push"}, _ERR),
+    ({"command": "GITHUB_TOKEN=$GH_TOKEN git push"}, _ERR),
+    ({"command": "git -c credential.helper= push"}, _ERR),
+    ({"command": "git push --force-with-lease"}, _ERR),
+]
+
+
+class TestWindowSpin:
+    """ABCA-662: the loop-of-VARIATIONS the per-signature streak can't see — the
+    agent tries a different command each turn toward the same failing goal (a git
+    push that keeps failing on 'invalid credentials'). No single signature reaches
+    STEER_THRESHOLD, but the trailing window is failure-dominated."""
+
+    def test_window_steers_on_loop_of_distinct_failing_commands(self):
+        g = StuckGuard()
+        for cmd, out in _PUSH_FAILS:
+            g.record_tool_result("Bash", cmd, out)
+        action = g.evaluate()
+        assert action.kind == "steer"
+        assert action.signature == "__window__"
+        assert "spinning" in action.message.lower()
+
+    def test_window_steer_fires_at_most_once(self):
+        g = StuckGuard()
+        for cmd, out in _PUSH_FAILS:
+            g.record_tool_result("Bash", cmd, out)
+        assert g.evaluate().kind == "steer"
+        # A subsequent failing turn must not re-steer the window.
+        g.record_tool_result("Bash", {"command": "git push again"}, _ERR)
+        assert g.evaluate().kind == "none"
+
+    def test_recent_failure_summary_names_the_last_failure(self):
+        g = StuckGuard()
+        for cmd, out in _PUSH_FAILS:
+            g.record_tool_result("Bash", cmd, out)
+        summary = g.recent_failure_summary()
+        assert summary is not None
+        assert "spinning on failing tool calls" in summary
+        assert "git push --force-with-lease" in summary  # most recent failing command
+        assert "invalid credentials" in summary  # the recurring error detail
+
+    def test_no_summary_when_window_is_mostly_successful(self):
+        # A productive agent (varied commands, mostly succeeding) must yield no
+        # spin summary — so its max_turns reason stays unchanged.
+        g = StuckGuard()
+        for i in range(6):
+            g.record_tool_result("Bash", {"command": f"step {i}"}, OK)
+        assert g.recent_failure_summary() is None
+        assert g.evaluate().kind == "none"
+
+    def test_healthy_iteration_below_window_threshold_no_steer(self):
+        # 4/6 failing is below WINDOW_FAIL_THRESHOLD(5) — a normal fix-iterate loop
+        # (some fail, some pass) must NOT trip the window steer.
+        g = StuckGuard()
+        outcomes = [OOM, OK, OOM, OK, OOM, OOM]  # 4 fails / 6
+        for i, out in enumerate(outcomes):
+            g.record_tool_result("Bash", {"command": f"cmd {i}"}, out)
+        assert g.evaluate().kind == "none"
+        assert g.recent_failure_summary() is None
