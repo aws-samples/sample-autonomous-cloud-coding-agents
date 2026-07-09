@@ -160,6 +160,83 @@ def _clean_env() -> dict[str, str]:
     return env
 
 
+# Substrings that mark a line as a real failure in build/test tool output — used
+# to pull the FAILING line out of the MIDDLE of a large interleaved parallel-DAG
+# log (a plain tail misses it). Lower-cased comparison; conservative so we don't
+# flood on benign "warning"/"0 errors" lines.
+_FAILURE_LINE_MARKERS = (
+    "fail ",  # jest "FAIL test/foo.test.ts", pytest "FAILED"
+    "failed",
+    "✕",
+    "✗",
+    "✖",
+    "●",  # jest failed-assertion bullet
+    "error ts",  # tsc "error TS2345:"
+    "error:",
+    "elifecycle",  # yarn/npm lifecycle failure
+    "npm err!",
+    "does not meet",  # jest coverage-threshold "global … does not meet threshold"
+    "coverage threshold",
+    'jest: "global"',
+    "not trusted",  # mise untrusted config
+    "no task ",  # mise "no task named"
+    "missing script",  # npm missing script
+    "assertionerror",
+    "traceback (most recent call last)",
+    "task failed",  # mise "[//pkg:task] ERROR task failed"
+)
+
+# Benign lines that CONTAIN a marker substring but are not failures — filtered so
+# the surfaced set stays signal. e.g. "0 errors", "--no-error-on-unmatched".
+_FAILURE_LINE_NOISE = (
+    "0 errors",
+    "0 failed",
+    "no error",
+    "--no-error",
+    "0 problems",
+    "may fail",  # advisory prose
+)
+
+# Cap surfaced failure lines so a genuinely huge red run (hundreds of failing
+# assertions) can't flood CloudWatch; the count + a tail still convey scale.
+_MAX_SURFACED_FAILURE_LINES = 40
+_FAILURE_TAIL_LINES = 15
+
+
+def _surface_failure_lines(stdout: str) -> list[str]:
+    """From a failed command's stdout, return the lines most likely to name the
+    cause: every failure-signature line (scanning the WHOLE output, not just the
+    tail — a parallel task DAG interleaves output so the red line is often in the
+    middle) followed by a trailing-context tail. Deduped, order-preserving,
+    capped. This is the fix for build-gate failures that a plain tail couldn't
+    explain (ABCA-662: the tail was a passing package's coverage table)."""
+    lines = stdout.strip().splitlines()
+    matched: list[str] = []
+    for ln in lines:
+        low = ln.lower()
+        if any(m in low for m in _FAILURE_LINE_MARKERS) and not any(
+            n in low for n in _FAILURE_LINE_NOISE
+        ):
+            matched.append(ln.rstrip())
+            if len(matched) >= _MAX_SURFACED_FAILURE_LINES:
+                matched.append("… (more failure lines truncated)")
+                break
+    tail = [ln.rstrip() for ln in lines[-_FAILURE_TAIL_LINES:]]
+    # Order: failure-signature lines first (the WHY), then the tail (context),
+    # dropping tail lines already surfaced as matches.
+    seen = set(matched)
+    out = list(matched)
+    if matched and tail:
+        out.append("--- (trailing output) ---")
+    for ln in tail:
+        if ln not in seen:
+            out.append(ln)
+            seen.add(ln)
+    # Fallback: nothing matched a failure marker (unknown tool) → just the tail,
+    # so we never log NOTHING on a failure.
+    return out or tail
+
+
 def run_cmd(
     cmd: list[str],
     label: str,
@@ -186,13 +263,20 @@ def run_cmd(
         # task DAG) writes the ACTUAL failing-task error to STDOUT, not stderr —
         # stderr often carries only the runner's plan echo. Logging stderr alone
         # made build-gate failures undebuggable: a red ``mise run build`` showed
-        # every task STARTING but never WHICH one failed or why (ABCA-662 — a 7s
-        # exit-1 with zero captured cause, indistinguishable in CloudWatch from a
-        # phantom). Tail (last 20 lines) — build errors surface at the end — and
-        # redact, since repo build output is untrusted and may echo secrets.
+        # every task STARTING but never WHICH one failed or why (ABCA-662).
+        #
+        # A plain tail is NOT enough for a PARALLEL task DAG: `mise run build`
+        # runs 4 packages concurrently and interleaves their output, so the
+        # failing task's error scrolls into the MIDDLE while the tail captures
+        # whatever finished LAST (e.g. a passing package's coverage table) —
+        # ABCA-662 follow-up: the tail showed a coverage table, not the red task.
+        # So FIRST scan the whole output for failure-signature lines and surface
+        # those (this is what names the failing sub-task), THEN a larger tail for
+        # trailing context. Redact — repo build output is untrusted.
         if result.stdout:
-            for line in redact_secrets(result.stdout.strip()).splitlines()[-20:]:
-                log("CMD", f"  {line}")
+            surfaced = _surface_failure_lines(result.stdout)
+            for line in surfaced:
+                log("CMD", f"  {redact_secrets(line)}")
         if check:
             stderr_snippet = redact_secrets(result.stderr.strip()[:500]) if result.stderr else ""
             raise RuntimeError(f"{label} failed (exit {result.returncode}): {stderr_snippet}")
