@@ -175,14 +175,23 @@ class TestBaselineBuildTimeout:
         """run_cmd fake that records the ``timeout`` kwarg and can raise
         TimeoutExpired for a label substring."""
 
-        def __init__(self, timeout_on: str | None = None):
+        def __init__(
+            self,
+            timeout_on: str | None = None,
+            rc_on: tuple[str, int, str] | None = None,
+        ):
             self.calls: list[dict] = []
             self._timeout_on = timeout_on
+            # (label_substring, returncode, stderr) to force a non-zero exit on a
+            # specific labelled command (e.g. an OOM-killed baseline build).
+            self._rc_on = rc_on
 
         def __call__(self, cmd, label, cwd=None, timeout=600, check=True, **kwargs):
             self.calls.append({"label": label, "timeout": timeout})
             if self._timeout_on and self._timeout_on in label:
                 raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
+            if self._rc_on and self._rc_on[0] in label:
+                return SimpleNamespace(returncode=self._rc_on[1], stdout="", stderr=self._rc_on[2])
             return SimpleNamespace(returncode=0, stdout="", stderr="")
 
         def timeout_for(self, label: str) -> int | None:
@@ -234,6 +243,42 @@ class TestBaselineBuildTimeout:
         assert setup.lint_before is True
         assert setup.lint_gate_inert is False
         assert any("Initial lint" in n and "did not finish within" in n for n in setup.notes)
+
+    def test_baseline_build_OOM_kill_is_not_a_regression(self, monkeypatch):
+        # ABCA-662 root cause: the pre-agent baseline build was OOM-KILLED (exit
+        # 137) because several heavy CI-parity builds shared one ECS box. Exit 137
+        # is an ENVIRONMENT fault, NOT broken code — so build_before must be True
+        # (no usable baseline, no known regression), NOT False ("already broken").
+        # A False here poisons the whole verdict: the regression gate reads
+        # "red-before → red-after isn't the agent's fault → ✅" while the absolute
+        # orchestration gate fails the node — a task GitHub built green.
+        fake = self._RecordingFake(rc_on=("verify-build-pre", 137, "Killed"))
+        monkeypatch.setattr(repo, "run_cmd", fake)
+        monkeypatch.setattr(repo, "run_cmd_with_backoff", fake)
+        monkeypatch.setattr(repo, "_install_commit_hook", lambda repo_dir: None)
+        monkeypatch.setattr(repo, "detect_default_branch", lambda url, d: "main")
+
+        setup = repo.setup_repo(_config(read_only=False))
+
+        assert setup.build_before is True  # OOM → no baseline, NOT "already broken"
+        assert setup.build_gate_inert is False  # an OOM kill is not an inert gate
+        assert any("environment fault" in n for n in setup.notes)
+        # And it must NOT be recorded as a pre-existing build failure.
+        assert not any("FAILED before agent changes" in n for n in setup.notes)
+
+    def test_baseline_build_genuine_failure_still_marks_regression_baseline(self, monkeypatch):
+        # Guard the other side: a REAL red build (exit 1, not an infra signal) must
+        # still record build_before=False so genuine regressions are gated.
+        fake = self._RecordingFake(rc_on=("verify-build-pre", 1, "TS2345: type error"))
+        monkeypatch.setattr(repo, "run_cmd", fake)
+        monkeypatch.setattr(repo, "run_cmd_with_backoff", fake)
+        monkeypatch.setattr(repo, "_install_commit_hook", lambda repo_dir: None)
+        monkeypatch.setattr(repo, "detect_default_branch", lambda url, d: "main")
+
+        setup = repo.setup_repo(_config(read_only=False))
+
+        assert setup.build_before is False  # a real red build IS the baseline
+        assert any("FAILED before agent changes" in n for n in setup.notes)
 
 
 class TestDetectDefaultBranch:
