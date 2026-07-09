@@ -255,6 +255,30 @@ const PATTERNS: readonly ErrorPattern[] = [
       errorClass: ErrorClass.TRANSIENT,
     },
   },
+  {
+    // The `claude` CLI on the agent image couldn't be exec'd: either the OS
+    // refused the binary (`OSError: [Errno 8] Exec format error: 'claude'`) or
+    // the claude-code shim reports its platform-native binary was never placed
+    // ("claude native binary not installed" — its postinstall silently fell
+    // back at image-build time). Live-caught on ABCA-659's retry: all 3 ECS runs
+    // died at the run_agent step this way on a freshly rebuilt image, while the
+    // native binary was present but unwired. This is an IMAGE/infra fault, NOT a
+    // problem with the user's request — a fresh attempt usually lands on a host
+    // that materializes the image cleanly; a persistent one is a bad build an
+    // admin must rebuild. Without this bucket it fell through to a bare
+    // "Unexpected error" with no guidance (the anti-pattern the error-feedback
+    // work set out to kill). Matched before AGENT/UNKNOWN so the precise,
+    // retry-oriented copy wins.
+    pattern: /Exec format error.*claude|claude.*Exec format error|claude native binary not installed/i,
+    classification: {
+      category: ErrorCategory.COMPUTE,
+      title: 'Couldn\'t start the coding agent (environment issue)',
+      description: 'The agent runtime couldn\'t launch the `claude` CLI on the compute image — an infrastructure/image problem, not a problem with your request or code.',
+      remedy: 'This is usually a transient image/compute hiccup. Reply here to try again — a fresh attempt typically clears it. If every attempt fails the same way, the agent image needs a rebuild: contact your ABCA admin with the task id above.',
+      retryable: true,
+      errorClass: ErrorClass.TRANSIENT,
+    },
+  },
 
   // --- Agent ---
   {
