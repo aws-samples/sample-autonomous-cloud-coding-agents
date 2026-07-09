@@ -19,7 +19,7 @@
 
 import { Command } from 'commander';
 import { ApiClient } from '../api-client';
-import { ApiError, CliError } from '../errors';
+import { ApiError, CliError, mapApiError } from '../errors';
 import { formatJson } from '../format';
 import type { PendingApprovalSummary } from '../types';
 
@@ -77,20 +77,9 @@ function renderText(pending: readonly PendingApprovalSummary[]): void {
 }
 
 function mapPendingError(err: ApiError): CliError {
-  switch (err.statusCode) {
-    case 401:
-      return new CliError(
-        `Not authenticated (${err.errorCode}). Run \`bgagent login\` to re-authenticate.`,
-      );
-    case 429:
-      return new CliError(
-        `Rate limit exceeded (${err.errorCode}). \`bgagent pending\` is rate-limited; slow down \`watch\` polls.`,
-      );
-    case 503:
-      return new CliError(
-        `Service temporarily unavailable (${err.errorCode}): ${err.message}`,
-      );
-    default:
-      return new CliError(err.message);
-  }
+  return mapApiError(err, {
+    429: (e) =>
+      `Rate limit exceeded (${e.errorCode}). \`bgagent pending\` is rate-limited; slow down \`watch\` polls.`,
+    503: (e) => `Service temporarily unavailable (${e.errorCode}): ${e.message}`,
+  });
 }

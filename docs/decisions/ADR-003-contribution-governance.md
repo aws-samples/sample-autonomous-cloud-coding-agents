@@ -23,9 +23,9 @@ Every PR references an issue. The issue provides rationale, sufficient context f
 
 An issue is "ready for work" when the body, together with its linked context — comments, replies, predecessor issues, related PRs (open and merged), and downstream goals — gives the implementer enough to proceed without ambiguity. The body is the primary directive; comments and threads add solution-space context; predecessors establish environmental architecture; downstream issues inform alignment.
 
-### Roadmap alignment
+### Priority alignment
 
-Issues align to the [product roadmap](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/docs/guides/ROADMAP.md). Issues that do not align require explicit approval from a permitted user.
+Issues are prioritized with GitHub labels (`P0`, `P1`, etc.). Issues without a clear priority require explicit approval from a permitted user.
 
 ### Gated approval
 
@@ -123,7 +123,6 @@ Prose governance is necessary but insufficient. The following enforcement points
 ## References
 
 - Issue #134 — full RFC with open questions and automation requirements
-- Roadmap: Scale and collaboration (Agent swarm, Multi-user and teams)
 - ADR-001 — delivery methodology referenced by completion rules
 - ADR-012 (proposed) — operational knowledge stack; planned enforcement via skill gates
 - ADR-013 (proposed) — tiered validation; planned enforcement hooks at Tier 0 and Tier 1

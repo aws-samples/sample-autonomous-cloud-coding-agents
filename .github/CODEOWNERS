@@ -18,6 +18,7 @@
 .semgrep                            @aws-samples/coding-agents-admin
 .threat-composer                    @aws-samples/coding-agents-admin
 AGENTS.md                           @aws-samples/coding-agents-admin
+**/AGENTS.md                        @aws-samples/coding-agents-admin
 CLAUDE.md                           @aws-samples/coding-agents-admin
 CODE_OF_CONDUCT.md                  @aws-samples/coding-agents-admin
 contracts                           @aws-samples/coding-agents-admin

@@ -35,14 +35,14 @@ describe('buildScreenshotKey', () => {
   test('replaces ALL slashes in the repo slug, not just the first', () => {
     // Defensive: GitHub repo names are owner/name (one slash), but
     // `replace('/', '_')` would silently leave a second slash through.
-    // (theagenticguy PR-241 review nit.)
+    // Reject keys without a random suffix.
     const key = buildScreenshotKey('owner/sub/repo', 'abc1234');
     expect(key.split('/')[0]).toBe('screenshots');
     expect(key.split('/')[1]).toBe('owner_sub_repo');
   });
 
   test('high-entropy suffix differs across calls (URL is not enumerable)', () => {
-    // theagenticguy PR-241 review: keys without a random suffix are
+    // Keys without a random suffix are rejected.
     // guessable from the public PR (org+repo+sha all visible).
     const seen = new Set<string>();
     for (let i = 0; i < 100; i++) {
@@ -112,7 +112,7 @@ describe('isAllowedScreenshotUrl', () => {
     ['https://[::ffff:10.0.0.1]/', 'IPv4-mapped IPv6'],
     ['https://[2001:db8::1]:8443/path', 'global IPv6 with port + path'],
   ])('rejects every IPv6 literal %s (%s)', (url) => {
-    // krokoko PR-241 round-3 finding 2: enumerating ranges missed
+    // Enumerating ranges missed by naive host checks.
     // fc00::/7 and NAT64. Preview URLs are always DNS names, so any
     // IPv6 literal is rejected wholesale.
     expect(isAllowedScreenshotUrl(url)).toBe(false);
@@ -128,7 +128,7 @@ describe('isAllowedScreenshotUrl', () => {
 
 describe('encodeMarkdownUrl', () => {
   test('percent-encodes parens so a crafted path cannot break out of a markdown link', () => {
-    // krokoko PR-241 round-3 finding 1: the WHATWG URL parser keeps `)`
+    // WHATWG URL parser keeps `)` in the host component.
     // in the path, so a clean-hostname URL can still close the `](…)`
     // early and inject content into a comment posted under ABCA's token.
     const attack = 'https://preview.vercel.app/x)](https://evil/a.png)';

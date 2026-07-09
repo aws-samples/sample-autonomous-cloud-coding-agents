@@ -64,6 +64,10 @@ const EVENT_ITEMS = [
     event_type: 'session_started',
     timestamp: '2025-03-15T10:31:00Z',
     metadata: { session_id: 'sess-1' },
+    // Correlation envelope (#245) stamped on post-creation events.
+    user_id: 'user-123',
+    repo: 'org/repo',
+    trace_id: 'a'.repeat(32),
   },
 ];
 
@@ -134,6 +138,21 @@ describe('get-task-events handler', () => {
     // task_id should be stripped from event data
     expect(body.data[0].task_id).toBeUndefined();
     expect(body.pagination.has_more).toBe(false);
+  });
+
+  test('passes through the correlation envelope (#245), omitting absent fields', async () => {
+    const result = await handler(makeEvent());
+    const body = JSON.parse(result.body);
+    // task_created predates the envelope → no correlation fields.
+    expect(body.data[0]).not.toHaveProperty('user_id');
+    expect(body.data[0]).not.toHaveProperty('repo');
+    expect(body.data[0]).not.toHaveProperty('trace_id');
+    // session_started carries the full envelope.
+    expect(body.data[1]).toMatchObject({
+      user_id: 'user-123',
+      repo: 'org/repo',
+      trace_id: 'a'.repeat(32),
+    });
   });
 
   test('returns 401 when user is not authenticated', async () => {

@@ -1,0 +1,26 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "ignore": [
+    ".semgrep/**",
+    "scripts/**"
+  ],
+  "ignoreBinaries": [
+    "mise"
+  ],
+  "workspaces": {
+    "cdk": {
+      "entry": ["src/main.ts!", "src/handlers/*.ts!"],
+      "project": ["src/**/*.ts!"],
+      "ignoreDependencies": ["esbuild", "ts-node", "@aws-cdk/integ-runner", "@aws-cdk/integ-tests-alpha"]
+    },
+    "cli": {
+      "entry": ["src/bin/bgagent.ts!", "src/index.ts!"],
+      "project": ["src/**/*.ts!"]
+    },
+    "docs": {
+      "entry": ["astro.config.mjs", "src/content.config.ts", "src/components/**/*.astro"],
+      "project": ["src/**/*.{astro,ts,tsx}"],
+      "ignoreDependencies": ["@astrojs/check", "remark-gfm", "@pagefind/default-ui", "jest"]
+    }
+  }
+}

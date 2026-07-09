@@ -234,9 +234,7 @@ describe('confirm-uploads handler', () => {
     });
 
     // Use mockImplementation for S3 calls to handle interleaving
-    let s3CallCount = 0;
     s3Send.mockImplementation((cmd: any) => {
-      s3CallCount++;
       if (cmd._type === 'S3Head') {
         // HeadObject — return valid metadata
         const isAtt1 = cmd.input.Key?.includes('att-1');
