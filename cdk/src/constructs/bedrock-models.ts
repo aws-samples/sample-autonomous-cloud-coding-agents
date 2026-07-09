@@ -34,6 +34,10 @@ import { Node } from 'constructs';
 export const DEFAULT_BEDROCK_MODEL_IDS: readonly string[] = [
   'anthropic.claude-sonnet-4-6',
   'anthropic.claude-opus-4-20250514-v1:0',
+  // Claude Opus 4.8 — the default agent model (agent/src/config.py). REQUIRED in
+  // this grant list or the agent's InvokeModel 403s (both the AgentCore runtime
+  // and the ECS task role scope Bedrock to these IDs via resolveBedrockModelIds).
+  'anthropic.claude-opus-4-8',
   'anthropic.claude-haiku-4-5-20251001-v1:0',
 ];
 

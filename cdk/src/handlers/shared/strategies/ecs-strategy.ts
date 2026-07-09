@@ -205,7 +205,7 @@ export class EcsComputeStrategy implements ComputeStrategy {
       { name: 'REPO_URL', value: String(payload.repo_url ?? '') },
       ...(payload.prompt ? [{ name: 'TASK_DESCRIPTION', value: String(payload.prompt) }] : []),
       ...(payload.issue_number ? [{ name: 'ISSUE_NUMBER', value: String(payload.issue_number) }] : []),
-      { name: 'MAX_TURNS', value: String(payload.max_turns ?? 100) },
+      { name: 'MAX_TURNS', value: String(payload.max_turns ?? 200) },
       ...(payload.max_budget_usd !== undefined ? [{ name: 'MAX_BUDGET_USD', value: String(payload.max_budget_usd) }] : []),
       ...(blueprintConfig.model_id ? [{ name: 'ANTHROPIC_MODEL', value: blueprintConfig.model_id }] : []),
       ...(blueprintConfig.system_prompt_overrides ? [{ name: 'SYSTEM_PROMPT_OVERRIDES', value: blueprintConfig.system_prompt_overrides }] : []),

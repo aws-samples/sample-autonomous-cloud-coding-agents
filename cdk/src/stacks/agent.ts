@@ -347,7 +347,7 @@ export class AgentStack extends Stack {
       ARTIFACTS_BUCKET_NAME: traceArtifactsBucket.bucket.bucketName,
       LOG_GROUP_NAME: applicationLogGroup.logGroupName,
       MEMORY_ID: agentMemory.memory.memoryId,
-      MAX_TURNS: '100',
+      MAX_TURNS: '200',
       // Session storage: the S3-backed FUSE mount at /mnt/workspace does NOT
       // support flock(). Only caches whose tools never call flock() go there.
       // Everything else stays on local ephemeral disk.

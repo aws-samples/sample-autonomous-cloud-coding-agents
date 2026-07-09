@@ -501,7 +501,7 @@ def build_config(
     resolved_github_token = github_token or resolve_github_token()
     resolved_aws_region = aws_region or os.environ.get("AWS_REGION", "")
     resolved_anthropic_model = anthropic_model or os.environ.get(
-        "ANTHROPIC_MODEL", "us.anthropic.claude-sonnet-4-6"
+        "ANTHROPIC_MODEL", "us.anthropic.claude-opus-4-8"
     )
     # Small/fast auxiliary model (WebFetch summarization etc.). Falls back to the
     # deployed ANTHROPIC_DEFAULT_HAIKU_MODEL env, then the platform default. Must
@@ -625,7 +625,7 @@ def get_config() -> TaskConfig:
             issue_number=os.environ.get("ISSUE_NUMBER", ""),
             github_token=os.environ.get("GITHUB_TOKEN", ""),
             anthropic_model=os.environ.get("ANTHROPIC_MODEL", ""),
-            max_turns=int(os.environ.get("MAX_TURNS", "100")),
+            max_turns=int(os.environ.get("MAX_TURNS", "200")),
             max_budget_usd=float(os.environ.get("MAX_BUDGET_USD", "0")) or None,
             aws_region=os.environ.get("AWS_REGION", ""),
             dry_run=os.environ.get("DRY_RUN", "").lower() in ("1", "true", "yes"),
