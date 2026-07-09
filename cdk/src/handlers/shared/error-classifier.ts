@@ -339,6 +339,23 @@ const PATTERNS: readonly ErrorPattern[] = [
     },
   },
   {
+    // ABCA-659 #2: the build gate was KILLED by an environment fault (out of
+    // disk / OOM) — the code was never verified. The agent tags the verdict
+    // ``build_ok=infra`` so this reads as a retryable INFRA fault, not "your
+    // build failed" and not a bogus ✅ (a build also killed before the agent
+    // would otherwise look "already red → not a regression → success"). Matched
+    // before the generic ``Task did not succeed.*agent_status=`` catch-all.
+    pattern: /Task did not succeed.*build_ok=infra/i,
+    classification: {
+      category: ErrorCategory.COMPUTE,
+      title: 'Build couldn\'t finish — the build machine ran out of resources',
+      description: 'The build/verify step was stopped because the build environment ran out of disk or memory, so your changes were never actually verified — this is an infrastructure limit, not a problem with your code.',
+      remedy: 'Reply here to try again — a fresh run usually clears a transient resource crunch (e.g. several builds sharing a box at once). If it keeps happening on this repo, its build needs more capacity: contact your ABCA admin to raise the build task\'s disk/memory.',
+      retryable: true,
+      errorClass: ErrorClass.TRANSIENT,
+    },
+  },
+  {
     pattern: /Task did not succeed.*agent_status=/i,
     classification: {
       category: ErrorCategory.AGENT,

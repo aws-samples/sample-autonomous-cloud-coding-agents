@@ -244,6 +244,21 @@ describe('classifyError', () => {
       expect(result!.retryable).toBe(false);
     });
 
+    test('ABCA-659 #2: build_ok=infra is a retryable COMPUTE fault, not "did not succeed"/build-failed', () => {
+      // A build killed by ENOSPC/OOM never verified the code — must read as a
+      // transient infra fault (retry / more capacity), NOT the generic
+      // agent-did-not-succeed or a bogus build failure. Ordered before the
+      // agent_status catch-all so it wins.
+      const result = classifyError(
+        "Task did not succeed (agent_status='success', build_ok=infra)",
+      );
+      expect(result!.category).toBe(ErrorCategory.COMPUTE);
+      expect(result!.title).toMatch(/ran out of resources/i);
+      expect(result!.retryable).toBe(true);
+      expect(result!.errorClass).toBe(ErrorClass.TRANSIENT);
+      expect(result!.remedy).toMatch(/try again|capacity|admin/i);
+    });
+
     test('classifies error_max_turns as TIMEOUT with specific title (ordered before generic catch-all)', () => {
       // Regression guard: pre-fix, the agent's specific
       // ``agent_status='error_max_turns'`` signal was swallowed by the

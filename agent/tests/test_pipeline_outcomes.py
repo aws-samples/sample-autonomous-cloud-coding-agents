@@ -58,6 +58,33 @@ class TestResolveOverallTaskStatus:
         assert overall == "success"
         assert err is None
 
+    def test_infra_failed_build_forces_error_even_when_gate_would_pass(self):
+        # ABCA-659 #2: the build was killed by ENOSPC/OOM (build_infra_failed).
+        # Even if the regression-only gate would pass (build_ok=True — e.g. the
+        # pre-agent baseline was ALSO infra-killed, so "already red → not a
+        # regression"), we must NOT report a false ✅ on unverified code. Forces
+        # an error with a build_ok=infra marker for the platform's honest copy.
+        ar = AgentResult(status="success", error=None)
+        overall, err = _resolve_overall_task_status(
+            ar,
+            build_ok=True,
+            pr_url="https://pr",
+            build_infra_failed=True,
+        )
+        assert overall == "error"
+        assert "build_ok=infra" in (err or "")
+
+    def test_infra_failed_marker_present_when_gate_also_fails(self):
+        ar = AgentResult(status="end_turn", error=None)
+        overall, err = _resolve_overall_task_status(
+            ar,
+            build_ok=False,
+            pr_url=None,
+            build_infra_failed=True,
+        )
+        assert overall == "error"
+        assert "build_ok=infra" in (err or "")
+
     def test_unknown_is_always_error_even_with_pr(self):
         ar = AgentResult(status="unknown", error=None)
         overall, err = _resolve_overall_task_status(

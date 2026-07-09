@@ -100,6 +100,23 @@ describe('EcsAgentCluster construct', () => {
     });
   });
 
+  test('the BUILD def raises ephemeral storage past the 20 GiB Fargate default (ABCA-659 #2: concurrent builds → ENOSPC)', () => {
+    baseTemplate.hasResourceProperties('AWS::ECS::TaskDefinition', {
+      Cpu: '16384',
+      Memory: '65536',
+      EphemeralStorage: { SizeInGiB: 100 },
+    });
+  });
+
+  test('the PLANNING def keeps the 20 GiB default (no EphemeralStorage — a clone+read planner needs no extra disk)', () => {
+    const taskDefs = baseTemplate.findResources('AWS::ECS::TaskDefinition');
+    const planning = Object.values(taskDefs).find(
+      d => d.Properties.Cpu === '2048' && d.Properties.Memory === '8192',
+    );
+    expect(planning).toBeDefined();
+    expect(planning!.Properties.EphemeralStorage).toBeUndefined();
+  });
+
   test('creates a second, smaller PLANNING task def (2 vCPU / 8 GB) for read-only workflows (#299 ECS_RIGHTSIZED_PLANNING)', () => {
     // Two task defs now exist: the 64 GB build def (asserted above) and this
     // 8 GB planning def. decompose-v1 (read_only) runs on the smaller one so a

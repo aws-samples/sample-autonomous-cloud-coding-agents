@@ -52,13 +52,21 @@ class VerifyOutcome:
       already existed but was only consulted at repo SETUP; now the post-agent
       gate consults it too.
 
-    A timeout / inert result still counts as not-passed for gating, but the
-    pipeline surfaces each as its own reason.
+    - ``infra_failed`` — the command was KILLED by an environment fault (the
+      build box ran out of disk/ENOSPC or memory/OOM), so the build could not
+      complete on this host. Like ``inert`` this is NOT the agent's code being
+      broken — it's an infrastructure fault that a retry (fresh host) or more
+      capacity clears. Live-caught on ABCA-659: 3 concurrent ABCA builds filled
+      the 20 GiB Fargate root fs → ENOSPC mid-build → bogus ``build_passed=False``.
+
+    A timeout / inert / infra_failed result still counts as not-passed for
+    gating, but the pipeline surfaces each as its own reason.
     """
 
     passed: bool
     timed_out: bool = False
     inert: bool = False
+    infra_failed: bool = False
 
 
 # POSIX shell exit code for "command not found" — an inert build signal (the
@@ -89,6 +97,38 @@ def is_verify_command_inert(returncode: int, stderr: str) -> bool:
         or ("mise" in s and "not found" in s)
         or "command not found" in s
     )
+
+
+# Exit code for a process killed by SIGKILL (128 + 9) — how the OOM-killer and
+# some disk-full kills surface. Paired with the ENOSPC/OOM stderr signatures.
+SIGKILL_EXIT = 137
+
+
+def is_infra_failure(returncode: int, stderr: str) -> bool:
+    """True when a verify command was killed by an ENVIRONMENT fault, not a real
+    build failure — the build box ran out of disk or memory.
+
+    Distinct from :func:`is_verify_command_inert` (the command isn't runnable —
+    a CONFIG problem) and from a genuine red build (command ran, tests failed).
+    An out-of-disk / OOM kill means the build *couldn't complete on this host*,
+    so reporting ``build_passed=False`` is a false "your code is broken" — it's
+    an infrastructure fault a retry (on a fresh host) or more capacity clears.
+    Live-caught on ABCA-659: 3 concurrent ABCA builds filled the 20 GiB Fargate
+    root fs → ``ENOSPC: no space left on device`` mid-build → bogus build-fail.
+
+    Conservative — only the unambiguous ENOSPC / OOM signatures, or a SIGKILL
+    (137) accompanied by one of them (a bare 137 alone is left to the timeout /
+    genuine-failure paths, since a test can also be SIGKILLed for other reasons).
+    """
+    s = (stderr or "").lower()
+    disk_full = "no space left on device" in s or "enospc" in s or "errno 28" in s
+    oom = (
+        "out of memory" in s
+        or "oomkilled" in s
+        or "cannot allocate memory" in s
+        or ("killed" in s and returncode == SIGKILL_EXIT)
+    )
+    return disk_full or oom
 
 
 # Shell metacharacters that mean the command can't be a single argv exec and
@@ -141,11 +181,27 @@ def _run_verify(repo_dir: str, command: str, default: str, label: str) -> Verify
         )
         return VerifyOutcome(passed=False, timed_out=True)
     if result.returncode != 0:
+        stderr = getattr(result, "stderr", "") or ""
+        # An ENVIRONMENT fault (out of disk / OOM) means the build couldn't
+        # complete on this host — NOT that the code is broken. Check this BEFORE
+        # the inert/genuine-failure paths: it's the most specific signal, and a
+        # disk-full mid-build otherwise looks like a random non-zero exit and gets
+        # mis-reported as "build/tests failed" (ABCA-659: concurrent builds filled
+        # the Fargate root fs → ENOSPC → bogus build-fail). Surface as infra so the
+        # platform reports "retry / needs more capacity", not the agent's code.
+        if is_infra_failure(result.returncode, stderr):
+            log(
+                "WARN",
+                f"Post-agent {label} was KILLED by an environment fault (exit "
+                f"{result.returncode}: out of disk/memory) — infrastructure issue, "
+                "not a build failure",
+            )
+            return VerifyOutcome(passed=False, infra_failed=True)
         # Distinguish "couldn't RUN" (exit 127 / no-such-task → the gate is
         # inert, a config problem) from "ran and failed" (real red build). An
         # inert gate verified nothing, so reporting it as a build FAILURE is a
         # false "your code is broken" — surface it as inert instead. K8.
-        if is_verify_command_inert(result.returncode, getattr(result, "stderr", "") or ""):
+        if is_verify_command_inert(result.returncode, stderr):
             log(
                 "WARN",
                 f"Post-agent {label} could not RUN (exit {result.returncode}) "

@@ -535,6 +535,7 @@ def _resolve_overall_task_status(
     build_ok: bool,
     pr_url: str | None,
     build_timed_out: bool = False,
+    build_infra_failed: bool = False,
 ) -> tuple[str, str | None]:
     """Map agent outcome + build gate to (overall_status, error_for_task_result).
 
@@ -544,9 +545,24 @@ def _resolve_overall_task_status(
     build gate failed ONLY because it timed out, the error_message carries a
     ``build_ok=timeout`` marker so the platform surfaces "build timed out"
     rather than the misleading "build/tests failed".
+
+    ``build_infra_failed`` marks a build KILLED by an environment fault (out of
+    disk / OOM) — we could not VERIFY the code on this host. This forces an error
+    verdict EVEN IF the regression-only gate would otherwise pass (a build that
+    was also infra-killed BEFORE the agent looks "already red → not a regression",
+    which would wrongly report ✅ success on unverified code — the ABCA-659 false
+    ✅). The ``build_ok=infra`` marker makes the platform surface a retryable
+    infrastructure fault, not "build/tests failed" or a bogus success.
     """
     agent_status = agent_result.status
     err = agent_result.error
+
+    # Infra-killed build (ENOSPC/OOM) → we have NO valid build verdict. Surface a
+    # retryable infra fault regardless of the regression gate, so it neither reads
+    # as a false ✅ (regression-only saw red-before+red-after) nor as "your build
+    # failed". Checked before the success short-circuit for exactly that reason.
+    if build_infra_failed and agent_status in ("success", "end_turn"):
+        return "error", (f"Task did not succeed (agent_status={agent_status!r}, build_ok=infra)")
 
     if agent_status in ("success", "end_turn") and build_ok:
         return "success", err
@@ -1184,6 +1200,7 @@ def run_task(
                     lint_passed = True
                     build_timed_out = False
                     build_inert = False
+                    build_infra_failed = False
                     safety_committed = False
                     pr_url = None
                     log("POST", "Clarify-before-spend: agent asked for input — holding (no PR)")
@@ -1193,6 +1210,7 @@ def run_task(
                     lint_passed = True
                     build_timed_out = False
                     build_inert = False
+                    build_infra_failed = False
                     safety_committed = False
                     pr_url = None
                     artifact_uri = _deliver_plan_artifact(
@@ -1214,6 +1232,15 @@ def run_task(
                     # a different problem than a broken build). Threaded into the task
                     # error_message below so the platform's failure copy reflects it.
                     build_timed_out = build_outcome.timed_out
+                    # ABCA-659 #2: the build was KILLED by an environment fault (out
+                    # of disk / OOM) — we could NOT verify the code. Unlike inert, do
+                    # NOT treat this as passing: an infra-killed build gives no
+                    # verdict, and if the pre-agent baseline was ALSO infra-killed the
+                    # regression-only gate would wrongly conclude "already red → not a
+                    # regression → success" (the false ✅). Threaded into the verdict
+                    # + error_message (build_ok=infra) so the platform reports a
+                    # retryable infra fault, not "build failed" and not a bogus ✅.
+                    build_infra_failed = build_outcome.infra_failed
                     # K8: an INERT build gate (exit 127 / no-such-task — the command
                     # couldn't run, e.g. yarn missing) verified NOTHING. Treat it like
                     # the lint-inert path: do NOT gate on it (it's a config problem,
@@ -1296,6 +1323,7 @@ def run_task(
                 build_ok=build_ok,
                 pr_url=pr_url,
                 build_timed_out=build_timed_out,
+                build_infra_failed=build_infra_failed,
             )
             # Clarify-before-spend: a hold-for-input run is a SUCCESSFUL outcome
             # (the agent did the right thing by asking), not a failure — the
