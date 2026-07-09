@@ -242,7 +242,13 @@ jobs:
           set -euo pipefail
           export INTEG_STACK_NAME="int-${HEAD_SHA:0:12}-${RUN_NUMBER}"
           echo "Integ stack name: $INTEG_STACK_NAME"
-          mise //cdk:integ
+          mise //cdk:integ -- --all --require-approval never \
+            -c stackName="integ-${{ github.run_id }}-${{ github.run_attempt }}" \
+            -c github:sha="$(git rev-parse HEAD)" \
+            -c github:ref="$(git branch --show-current || echo "detached")" \
+            -c github:actor="${{ github.triggering_actor }}" \
+            -c github:repository="$(gh repo view --json nameWithOwner --jq .nameWithOwner)" \
+            -c github:clean="$([ -z "$(git status --porcelain)" ] && echo true || echo false)"
 
   # Post the final integ-smoke status back to the PR head so the check flips from
   # pending to success/failure. Skipped for workflow_dispatch (no PR to gate).
