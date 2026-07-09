@@ -88,10 +88,10 @@ describe('EcsAgentCluster construct', () => {
     });
   });
 
-  test('creates a Fargate task definition with 16 vCPU and 64 GB (K14: full parallel mise build OOM\'d at 32 GB)', () => {
+  test('creates a Fargate task definition with 16 vCPU and 120 GB (ABCA-662: full parallel mise build OOM\'d at 64 GB → max Fargate RAM)', () => {
     baseTemplate.hasResourceProperties('AWS::ECS::TaskDefinition', {
       Cpu: '16384',
-      Memory: '65536',
+      Memory: '122880',
       RequiresCompatibilities: ['FARGATE'],
       RuntimePlatform: {
         CpuArchitecture: 'ARM64',

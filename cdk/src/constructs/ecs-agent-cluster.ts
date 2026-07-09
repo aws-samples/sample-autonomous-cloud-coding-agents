@@ -130,14 +130,17 @@ export class EcsAgentCluster extends Construct {
     //     in PARALLEL (agent:quality ‖ cdk:build ‖ cli:build ‖ docs:build),
     //     each spawning its own worker fleet (jest maxWorkers, pytest, esbuild
     //     Lambda bundling). 32 GB had no headroom for that concurrent peak.
-    //   - 64 GB / 16 vCPU (current) → 2× the memory headroom for the parallel
-    //     storm, and 16 vCPU shortens wall-clock (paired with
-    //     BUILD_VERIFY_TIMEOUT_S=3600 below so the ~longer-than-30-min build
-    //     isn't mis-reported as a timeout). Valid Fargate ARM64 combo (16 vCPU
-    //     admits 32–120 GB in 8 GB steps).
+    //   - 64 GB / 16 vCPU → still OOM-killed (exit 137) on ABCA-662's baseline
+    //     build: the parallel storm's peak exceeded 64 GB too. The false
+    //     "build_before=broken" that followed is fixed in repo.py, but the build
+    //     itself genuinely needs more RAM.
+    //   - 120 GB / 16 vCPU (current) → the MAX Fargate admits at 16 vCPU (32–120
+    //     GB in 8 GB steps). If a build OOMs even here, the fix is to cut the
+    //     build's peak parallelism (serialize the mise DAG / cap jest workers),
+    //     not more RAM — there is none. Paired with BUILD_VERIFY_TIMEOUT_S=3600.
     this.taskDefinition = new ecs.FargateTaskDefinition(this, 'TaskDef', {
       cpu: 16384,
-      memoryLimitMiB: 65536,
+      memoryLimitMiB: 122880,
       runtimePlatform: {
         cpuArchitecture: ecs.CpuArchitecture.ARM64,
         operatingSystemFamily: ecs.OperatingSystemFamily.LINUX,
