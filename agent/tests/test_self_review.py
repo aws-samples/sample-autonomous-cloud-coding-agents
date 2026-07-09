@@ -7,6 +7,7 @@ from prompts.self_review import SELF_REVIEW_PROMPT
 from self_review import (
     _MAX_DIFF_CHARS,
     _SUMMARY_FILENAME,
+    _build_review_system_prompt,
     _get_diff,
     _render_review_prompt,
     _truncate_diff,
@@ -234,6 +235,33 @@ class TestRenderReviewPrompt:
         )
 
         assert mock_render.call_args[0][0] == "Custom: {diff}"
+
+
+class TestReviewSystemPrompt:
+    """The critic is read-only (#262 finding #1).
+
+    The system prompt handed to ``run_agent`` must agree with the built-in
+    user prompt: both instruct a read-only reviewer that reports findings
+    rather than editing/committing. Previously the system prompt told the
+    critic to "fix issues and commit" — the exact opposite — so a default run
+    had undefined behaviour.
+    """
+
+    def test_system_prompt_is_read_only(self):
+        prompt = _build_review_system_prompt(_make_config(), _make_setup())
+        assert "READ-ONLY" in prompt
+        # Must NOT invite mutation/commits — the contradiction we removed.
+        lowered = prompt.lower()
+        assert "commit fixes" not in lowered
+        assert "fix any issues you find directly" not in lowered
+
+    def test_system_and_user_prompts_agree(self):
+        system = _build_review_system_prompt(_make_config(), _make_setup()).lower()
+        user = SELF_REVIEW_PROMPT.lower()
+        # Both prohibit modifying files / committing.
+        assert "do not modify any files" in user
+        assert "do not make commits" in user
+        assert "do not" in system and "modify" in system
 
 
 class TestBudgetAndTurnComputation:

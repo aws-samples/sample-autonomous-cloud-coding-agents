@@ -1051,12 +1051,22 @@ def run_task(
                 )
                 ensure_pr_strategy = "create"
 
+            # Safety net #1: commit any tracked changes the implement phase left
+            # uncommitted (skip for read-only tasks) BEFORE self-review. The
+            # critic's diff is ``git diff origin/{default}...HEAD`` — committed
+            # work only — so reviewing first would hide uncommitted changes from
+            # it entirely. Worst case (turn-limit/timeout runs that leave
+            # everything uncommitted — exactly where review matters most) the
+            # diff comes back empty and the review silently skips.
+            safety_committed = False if workflow_read_only else ensure_committed(setup.repo_dir)
+
             # Self-review step: if the resolved workflow declares a ``self_review``
             # step, drive it through the workflow runner (same pattern as
             # ``_execute_agent_step``). The step has the LLM critique its own diff
-            # and fix issues, accumulating its turns/cost onto ``agent_result``.
-            # Runs AFTER the cancel short-circuit so a cancelled task never starts
-            # a second agent loop, and BEFORE post-hooks so fixes land in the PR.
+            # (read-only) and report findings to a summary file, accumulating its
+            # turns/cost onto ``agent_result``. Runs AFTER the cancel short-circuit
+            # so a cancelled task never starts a second agent loop, and AFTER the
+            # safety-net commit above so the critic sees all implement-phase work.
             # Fail-open: a review failure/skip never blocks PR creation.
             self_review_ran = _execute_self_review_step(
                 _workflow,
@@ -1070,8 +1080,11 @@ def run_task(
 
             # Post-hooks (agent_result is guaranteed set by the try/except above)
             with task_span("task.post_hooks") as post_span:
-                # Safety net: commit any uncommitted tracked changes (skip for read-only tasks)
-                safety_committed = False if workflow_read_only else ensure_committed(setup.repo_dir)
+                # Safety net #2: defensive re-check. Self-review is read-only and
+                # should leave the tree clean, so this is normally a no-op; it
+                # still runs to catch any stray tracked changes before PR creation.
+                if not workflow_read_only and ensure_committed(setup.repo_dir):
+                    safety_committed = True
                 post_span.set_attribute("safety_net.committed", safety_committed)
 
                 build_passed = verify_build(setup.repo_dir)

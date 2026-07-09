@@ -792,6 +792,150 @@ class TestCancelSkipsPostHooks:
         return span
 
 
+class TestSafetyCommitBeforeSelfReview:
+    """The safety-net commit must run BEFORE self-review (#262 review finding).
+
+    The critic's diff is ``git diff origin/{default}...HEAD`` — committed work
+    only. If ``ensure_committed`` ran after the review, any uncommitted
+    implement-phase work would be invisible to the critic; in the worst case
+    (turn-limit/timeout runs that leave everything uncommitted) the diff is
+    empty and the review silently skips.
+    """
+
+    @patch("runner.run_agent")
+    @patch("pipeline.build_system_prompt")
+    @patch("pipeline.discover_project_config")
+    @patch("repo.setup_repo")
+    @patch("pipeline.task_span")
+    def test_ensure_committed_runs_before_self_review(
+        self,
+        mock_task_span,
+        mock_setup_repo,
+        _mock_discover,
+        _mock_build_prompt,
+        mock_run_agent,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+
+        mock_setup_repo.return_value = RepoSetup(
+            repo_dir="/workspace/repo",
+            branch="bgagent/test/branch",
+            build_before=True,
+        )
+
+        async def fake_run_agent(_prompt, _system_prompt, _config, cwd=None, trajectory=None):
+            return AgentResult(status="success", turns=2, cost_usd=0.01, num_turns=2)
+
+        mock_run_agent.side_effect = fake_run_agent
+
+        mock_span = MagicMock()
+        mock_span.__enter__ = MagicMock(return_value=mock_span)
+        mock_span.__exit__ = MagicMock(return_value=False)
+        mock_task_span.return_value = mock_span
+
+        # Record the interleaving of the safety commit and the review step.
+        call_order: list[str] = []
+        mock_ensure_committed = MagicMock(
+            side_effect=lambda *_a, **_k: call_order.append("ensure_committed") or True,
+        )
+        mock_self_review = MagicMock(
+            side_effect=lambda *_a, **_k: call_order.append("self_review") or False,
+        )
+
+        with (
+            patch("pipeline.ensure_committed", mock_ensure_committed),
+            patch("pipeline._execute_self_review_step", mock_self_review),
+            patch("pipeline.verify_build", return_value=True),
+            patch("pipeline.verify_lint", return_value=True),
+            patch("pipeline.ensure_pr", return_value="https://github.com/o/r/pull/1"),
+            patch("pipeline.get_disk_usage", return_value=0),
+            patch("pipeline.print_metrics"),
+            patch("pipeline.task_state") as mock_task_state_mod,
+        ):
+            mock_task_state_mod.get_task = MagicMock(return_value={"status": "RUNNING"})
+            mock_task_state_mod.TaskFetchError = Exception  # type: ignore[attr-defined]
+
+            from pipeline import run_task
+
+            run_task(
+                repo_url="o/r",
+                task_description="x",
+                github_token="ghp_test",
+                aws_region="us-east-1",
+                task_id="t-commit-before-review",
+            )
+
+        assert "self_review" in call_order
+        # The FIRST ensure_committed call precedes the review; a second
+        # (post-review) safety-net call is allowed and expected.
+        assert call_order.index("ensure_committed") < call_order.index("self_review")
+
+    @patch("runner.run_agent")
+    @patch("pipeline.build_system_prompt")
+    @patch("pipeline.discover_project_config")
+    @patch("repo.setup_repo")
+    @patch("pipeline.task_span")
+    def test_read_only_workflow_never_calls_ensure_committed(
+        self,
+        mock_task_span,
+        mock_setup_repo,
+        _mock_discover,
+        _mock_build_prompt,
+        mock_run_agent,
+        monkeypatch,
+    ):
+        """Moving the safety commit earlier must not leak it into read-only runs."""
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+
+        mock_setup_repo.return_value = RepoSetup(
+            repo_dir="/workspace/repo",
+            branch="bgagent/test/branch",
+            build_before=True,
+        )
+
+        async def fake_run_agent(_prompt, _system_prompt, _config, cwd=None, trajectory=None):
+            return AgentResult(status="success", turns=1, cost_usd=0.01, num_turns=1)
+
+        mock_run_agent.side_effect = fake_run_agent
+
+        mock_span = MagicMock()
+        mock_span.__enter__ = MagicMock(return_value=mock_span)
+        mock_span.__exit__ = MagicMock(return_value=False)
+        mock_task_span.return_value = mock_span
+
+        mock_ensure_committed = MagicMock(return_value=True)
+
+        with (
+            patch("pipeline.ensure_committed", mock_ensure_committed),
+            patch("pipeline.verify_build", return_value=True),
+            patch("pipeline.verify_lint", return_value=True),
+            patch("pipeline.ensure_pr", return_value=None),
+            patch("pipeline.get_disk_usage", return_value=0),
+            patch("pipeline.print_metrics"),
+            patch("pipeline.task_state") as mock_task_state_mod,
+        ):
+            mock_task_state_mod.get_task = MagicMock(return_value={"status": "RUNNING"})
+            mock_task_state_mod.TaskFetchError = Exception  # type: ignore[attr-defined]
+
+            from pipeline import run_task
+
+            # pr-review-v1 is the read-only workflow.
+            run_task(
+                repo_url="o/r",
+                task_description="review it",
+                github_token="ghp_test",
+                aws_region="us-east-1",
+                task_id="t-read-only",
+                pr_number="7",
+                resolved_workflow={"id": "coding/pr-review-v1", "version": "1.0.0"},
+            )
+
+        mock_ensure_committed.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # Chunk K1 — trace threading into TaskConfig (design §10.1)
 # ---------------------------------------------------------------------------

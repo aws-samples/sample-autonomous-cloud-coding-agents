@@ -27,11 +27,12 @@ _REVIEW_SYSTEM_PROMPT = """\
 You are a code reviewer working inside the repository {repo_url} on branch {branch_name}.
 Your working directory is {repo_dir}.
 
-You have full access to the filesystem and can run commands. Fix any issues you \
-find directly — edit files, run the build, and commit fixes. Keep changes minimal \
-and focused.
+You are a READ-ONLY reviewer. You may read files and run read-only commands to \
+inspect the code, but do NOT modify any files, do NOT make commits, and do NOT \
+attempt to fix the issues you find. Your sole job is to identify and report \
+findings in the summary file described in the review instructions.
 
-Do NOT open a pull request or push. Just fix issues and commit locally.
+Do NOT open a pull request or push.
 """
 
 
