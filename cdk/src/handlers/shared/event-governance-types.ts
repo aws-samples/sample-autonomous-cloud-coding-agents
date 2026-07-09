@@ -51,7 +51,7 @@ export interface EventRule {
   readonly mode: EventRuleMode;
   readonly evaluation: EventRuleEvaluation;
   readonly reason?: string;
-  readonly severity?: 'low' | 'medium' | 'high' | 'critical';
+  readonly severity?: 'low' | 'medium' | 'high';
   readonly timeout_s?: number;
   readonly notify_channels?: readonly NotificationChannelWithWebhook[];
   readonly rule_pack_id?: string;

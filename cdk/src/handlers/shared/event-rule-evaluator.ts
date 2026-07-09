@@ -154,10 +154,21 @@ export function buildPolicyDecisionMetadata(
 export function parseEventRules(raw: unknown): EventRule[] {
   if (!Array.isArray(raw)) return [];
   const out: EventRule[] = [];
-  for (const item of raw) {
-    if (!item || typeof item !== 'object') continue;
+  for (const [index, item] of raw.entries()) {
+    if (!item || typeof item !== 'object') {
+      logger.warn('[event-governance] dropped malformed rule — not an object', { index });
+      continue;
+    }
     const r = item as Record<string, unknown>;
-    if (typeof r.id !== 'string' || typeof r.on !== 'string') continue;
+    if (typeof r.id !== 'string' || typeof r.on !== 'string') {
+      // Fail loud: a dropped ceiling/approval rule means zero enforcement with no
+      // other signal. Mirror the fail-loud stance the pack resolver takes (#230).
+      logger.warn('[event-governance] dropped malformed rule — missing id/on', {
+        index,
+        id: typeof r.id === 'string' ? r.id : undefined,
+      });
+      continue;
+    }
     out.push({
       id: r.id,
       on: r.on,

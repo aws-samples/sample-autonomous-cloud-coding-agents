@@ -53,9 +53,6 @@ function matchRules(fixture: FixtureFile): string[] {
   for (const raw of fixture.rules) {
     const rule = raw as Record<string, unknown>;
     if (rule.on !== name) continue;
-    if (rule.evaluation === 'async' || rule.evaluation === 'sync') {
-      // evaluation filter applied by caller in full evaluator; fixtures are single-mode
-    }
     const when = rule.when as { fields?: Record<string, unknown>; aggregate?: { cost_usd_gte?: number; turn_count_gte?: number } } | undefined;
     if (when?.fields) {
       let ok = true;

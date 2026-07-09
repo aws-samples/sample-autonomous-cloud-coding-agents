@@ -143,4 +143,22 @@ describe('get-event-rules', () => {
     const ruleIds = body.data.rules.map((r: { rule_id: string }) => r.rule_id);
     expect(ruleIds).toContain('observe-repo-setup');
   });
+
+  test('422 VALIDATION_ERROR when repo pins an unknown event-rule-pack', async () => {
+    mockSend.mockResolvedValue({});
+    mockLoadRepoConfig.mockResolvedValue({
+      repo: 'owner/repo',
+      status: 'active',
+      onboarded_at: '',
+      updated_at: '',
+      event_rule_pack: { id: 'does-not-exist', version: '9.9.9' },
+    });
+
+    const res = await handler(makeEvent());
+    // Fail loud rather than silently applying zero governance rules (#230).
+    expect(res.statusCode).toBe(422);
+    const body = JSON.parse(res.body);
+    expect(body.error.code).toBe('VALIDATION_ERROR');
+    expect(body.error.message).toContain('does-not-exist@9.9.9');
+  });
 });

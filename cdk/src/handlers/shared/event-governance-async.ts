@@ -22,7 +22,7 @@
  */
 
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { DeleteCommand, DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { ulid } from 'ulid';
 import { createAsyncEventApproval } from './event-governance-approval';
 import {
@@ -34,6 +34,7 @@ import {
 } from './event-rule-evaluator';
 import { logger } from './logger';
 import { coerceNumericOrNull } from './numeric';
+import { isRetryableInfraError } from './retryable-error';
 import { NUDGE_MAX_MESSAGE_LENGTH, type EventRule, type TaskRecord } from './types';
 import { computeTtlEpoch } from './validation';
 import { TaskStatus, TERMINAL_STATUSES } from '../../constructs/task-status';
@@ -67,21 +68,10 @@ export interface AsyncGovernanceResult {
   readonly forceFanOut: boolean;
 }
 
-/** Names of AWS SDK errors that a stream-record retry can plausibly clear
- *  (throttles, transient 5xx). Distinguishes "retry the record" from a
- *  poison-pill that would stall the shard forever. */
-const RETRYABLE_AWS_ERROR = /Throttling|ProvisionedThroughputExceeded|RequestLimitExceeded|ServiceUnavailable|InternalServerError|InternalFailure|TransactionInProgress|5\d\d/i;
-
-export function isRetryableInfraError(err: unknown): boolean {
-  if (err && typeof err === 'object') {
-    const e = err as { name?: string; $retryable?: unknown; $metadata?: { httpStatusCode?: number } };
-    if (e.$retryable) return true;
-    const status = e.$metadata?.httpStatusCode;
-    if (typeof status === 'number' && status >= 500) return true;
-    if (e.name && RETRYABLE_AWS_ERROR.test(e.name)) return true;
-  }
-  return false;
-}
+// Re-exported so existing importers/tests keep resolving it from this module;
+// the canonical definition lives in ./retryable-error so the approval path can
+// consume it without a circular import back into this module.
+export { isRetryableInfraError };
 
 export async function loadTaskForGovernance(taskId: string): Promise<TaskRecord | undefined> {
   if (!TASK_TABLE) return undefined;
@@ -158,11 +148,17 @@ async function cancelTaskByRule(taskId: string, rule: EventRule, reason: string)
       }));
     }
   } catch (err) {
-    logger.warn('[event-governance] cancel_task skipped', {
+    // cancel_task IS the enforcement action ("cancel if cost exceeds $25"). A
+    // throttle/5xx here must retry the record, not silently let the task run on
+    // past its ceiling. The Update's ConditionExpression makes a re-run safe.
+    if (isRetryableInfraError(err)) throw err;
+    logger.error('[event-governance] cancel_task failed (non-retryable) — enforcement gap', {
       task_id: taskId,
       rule_id: rule.id,
+      error_id: 'EVENT_GOV_CANCEL_FAILED',
       error: err instanceof Error ? err.message : String(err),
     });
+    throw err;
   }
 }
 
@@ -195,7 +191,12 @@ async function injectNudgeByRule(
       ConditionExpression: 'attribute_not_exists(nudge_id)',
     }));
   } catch (err) {
-    logger.warn('[event-governance] inject_nudge skipped', {
+    // The nudge row is keyed by a fresh ULID, so the attribute_not_exists guard
+    // only ever fires on a genuine ULID collision (never) — any CCF here is
+    // effectively an infra fault. Rethrow retryable errors so steering isn't
+    // silently dropped on a transient blip.
+    if (isRetryableInfraError(err)) throw err;
+    logger.warn('[event-governance] inject_nudge skipped (non-retryable)', {
       task_id: task.task_id,
       rule_id: rule.id,
       error: err instanceof Error ? err.message : String(err),
@@ -366,6 +367,27 @@ async function claimIdempotency(taskId: string, ruleId: string, corr: string): P
   }
 }
 
+/** Delete the idempotency marker so a rethrown (retried) record can re-claim
+ *  and re-run the enforcement action. Best-effort: if this delete is itself
+ *  throttled the marker survives and the retry is a no-op (the action is lost),
+ *  but that is strictly better than double-firing, and the enforce actions
+ *  (cancel/approval) are themselves conditional so re-running is safe. */
+async function releaseIdempotency(taskId: string, ruleId: string, corr: string): Promise<void> {
+  if (!EVENTS_TABLE) return;
+  try {
+    await ddb.send(new DeleteCommand({
+      TableName: EVENTS_TABLE,
+      Key: { task_id: taskId, event_id: idempotencyEventId(taskId, ruleId, corr) },
+    }));
+  } catch (err) {
+    logger.warn('[event-governance] idempotency release failed', {
+      task_id: taskId,
+      rule_id: ruleId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
 /** Channels for a notify/escalate rule; falls back to a default so a rule with
  *  no ``notify_channels`` still delivers rather than silently doing nothing. */
 function resolveChannels(rule: EventRule, fallback: string[]): string[] {
@@ -406,42 +428,48 @@ export async function evaluateAsyncEventRules(
     const meta = buildPolicyDecisionMetadata(rule, event, enforce, corr);
     await emitPolicyDecision(event.task_id, { ...meta, correlation_id: corr });
 
-    if (rule.action === 'observe_only' || (rule.action === 'require_approval' && !enforce)) {
-      continue;
-    }
+    // observe_only mode records the policy_decision above but must NOT fire the
+    // action — that is the whole "would have fired" contract (design §8).
+    if (!enforce) continue;
 
-    if (rule.action === 'notify') {
-      notifyChannels.push(...resolveChannels(rule, ['slack']));
-      forceFanOut = true;
-    }
+    // An enforce action that throws a retryable infra error must retry the whole
+    // record; release the idempotency marker first so the retry can re-claim and
+    // re-run, rather than being suppressed as a duplicate.
+    try {
+      if (rule.action === 'notify') {
+        notifyChannels.push(...resolveChannels(rule, ['slack']));
+        forceFanOut = true;
+      }
 
-    if (rule.action === 'escalate') {
-      notifyChannels.push(...resolveChannels(rule, ['email', 'slack']));
-      forceFanOut = true;
-    }
+      if (rule.action === 'escalate') {
+        notifyChannels.push(...resolveChannels(rule, ['email', 'slack']));
+        forceFanOut = true;
+      }
 
-    if (rule.action === 'inject_nudge' && enforce && task) {
-      await injectNudgeByRule(task, rule, event.metadata);
-    }
+      if (rule.action === 'inject_nudge' && task) {
+        await injectNudgeByRule(task, rule, event.metadata);
+      }
 
-    if (rule.action === 'require_approval' && enforce && task) {
-      await createAsyncEventApproval({
-        task,
-        rule,
-        eventType: event.event_type,
-        metadata: event.metadata,
-      });
-      forceFanOut = true;
-    }
+      if (rule.action === 'require_approval' && task) {
+        await createAsyncEventApproval({
+          task,
+          rule,
+          eventType: event.event_type,
+          metadata: event.metadata,
+        });
+        forceFanOut = true;
+      }
 
-    if (rule.action === 'cancel_task' && enforce && task) {
-      if (!TERMINAL_STATUSES.includes(task.status)) {
+      if (rule.action === 'cancel_task' && task && !TERMINAL_STATUSES.includes(task.status)) {
         await cancelTaskByRule(
           event.task_id,
           rule,
           rule.reason ?? `Event rule ${rule.id} triggered cancel_task`,
         );
       }
+    } catch (err) {
+      await releaseIdempotency(event.task_id, rule.id, corr);
+      throw err;
     }
   }
 

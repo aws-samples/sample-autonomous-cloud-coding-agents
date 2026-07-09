@@ -51,7 +51,7 @@ export interface BlueprintEventRule {
   readonly on: string;
   readonly when?: {
     readonly fields?: Readonly<Record<string, unknown>>;
-    readonly aggregate?: { readonly cost_usd_gte?: number };
+    readonly aggregate?: { readonly cost_usd_gte?: number; readonly turn_count_gte?: number };
   };
   readonly action: string;
   readonly mode: string;

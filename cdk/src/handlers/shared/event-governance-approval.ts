@@ -30,6 +30,7 @@ import {
 import { ulid } from 'ulid';
 import type { EventRule } from './event-governance-types';
 import { logger } from './logger';
+import { isRetryableInfraError } from './retryable-error';
 import type { TaskRecord } from './types';
 import { TaskStatus } from '../../constructs/task-status';
 
@@ -131,12 +132,29 @@ export async function createAsyncEventApproval(options: {
     }
     return requestId;
   } catch (err) {
-    logger.warn('[event-governance] async require_approval skipped', {
+    const name = (err as { name?: string })?.name;
+    // Benign: the task already left RUNNING (TransactWrite condition), or this
+    // request_id already exists (a settled duplicate). The gate did not need to
+    // fire again — swallow without a retry.
+    if (name === 'ConditionalCheckFailedException' || name === 'TransactionCanceledException') {
+      logger.info('[event-governance] async require_approval already settled', {
+        task_id: options.task.task_id,
+        rule_id: options.rule.id,
+        status: options.task.status,
+      });
+      return undefined;
+    }
+    // A throttle/5xx must retry the record — otherwise the approval row is never
+    // written, the task never transitions to AWAITING_APPROVAL, and the gate is
+    // silently skipped while the caller reports it fired (#230).
+    if (isRetryableInfraError(err)) throw err;
+    logger.error('[event-governance] async require_approval failed (non-retryable) — enforcement gap', {
       task_id: options.task.task_id,
       rule_id: options.rule.id,
       status: options.task.status,
+      error_id: 'EVENT_GOV_APPROVAL_FAILED',
       error: err instanceof Error ? err.message : String(err),
     });
-    return undefined;
+    throw err;
   }
 }

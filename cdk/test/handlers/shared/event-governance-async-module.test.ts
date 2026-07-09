@@ -34,6 +34,8 @@ jest.mock('@aws-sdk/lib-dynamodb', () => ({
   GetCommand: jest.fn((input: unknown) => ({ _type: 'Get', input })),
   PutCommand: jest.fn((input: unknown) => ({ _type: 'Put', input })),
   UpdateCommand: jest.fn((input: unknown) => ({ _type: 'Update', input })),
+  DeleteCommand: jest.fn((input: unknown) => ({ _type: 'Delete', input })),
+  TransactWriteCommand: jest.fn((input: unknown) => ({ _type: 'TransactWrite', input })),
 }));
 
 describe('event-governance-async module', () => {
@@ -42,6 +44,7 @@ describe('event-governance-async module', () => {
     mockSend.mockReset();
     process.env.TASK_TABLE_NAME = 'Tasks';
     process.env.TASK_EVENTS_TABLE_NAME = 'Events';
+    process.env.TASK_APPROVALS_TABLE_NAME = 'Approvals';
   });
 
   test('loadTaskForGovernance returns undefined on Get failure', async () => {
@@ -286,6 +289,273 @@ describe('event-governance-async module', () => {
       },
     );
     expect(mockSend).toHaveBeenCalled();
+  });
+
+  test('observe_only notify does NOT push channels or force fan-out', async () => {
+    mockSend
+      .mockResolvedValueOnce({}) // idempotency claim
+      .mockResolvedValueOnce({}); // Put policy_decision (audit only)
+    const mod = await import('../../../src/handlers/shared/event-governance-async');
+    mod._resetGovernanceIdempotencyCache();
+    const result = await mod.evaluateAsyncEventRules(
+      {
+        task_id: 't-obs',
+        event_id: 'e-obs',
+        event_type: 'agent_milestone',
+        metadata: { milestone: 'pr_created' },
+      },
+      {
+        task: {
+          task_id: 't-obs',
+          event_rules: [
+            {
+              id: 'notify-observe',
+              on: 'pr_created',
+              action: 'notify',
+              mode: 'observe_only',
+              evaluation: 'async',
+              notify_channels: ['slack'],
+            },
+          ],
+        } as any,
+      },
+    );
+    // "Would have fired": audit record written, but no action.
+    expect(result.notifyChannels).toEqual([]);
+    expect(result.forceFanOut).toBe(false);
+  });
+
+  test('enforce require_approval creates an approval row and forces fan-out', async () => {
+    mockSend
+      .mockResolvedValueOnce({}) // idempotency claim
+      .mockResolvedValueOnce({}) // Put policy_decision
+      .mockResolvedValueOnce({}); // TransactWrite approval (RUNNING task)
+    const mod = await import('../../../src/handlers/shared/event-governance-async');
+    mod._resetGovernanceIdempotencyCache();
+    const result = await mod.evaluateAsyncEventRules(
+      {
+        task_id: 't-appr',
+        event_id: 'e-appr',
+        event_type: 'agent_milestone',
+        metadata: { milestone: 'pr_created', pr_url: 'https://github.com/o/r/pull/1' },
+      },
+      {
+        task: {
+          task_id: 't-appr',
+          user_id: 'u1',
+          status: 'RUNNING',
+          event_rules: [
+            {
+              id: 'approve-pr',
+              on: 'pr_created',
+              action: 'require_approval',
+              mode: 'enforce',
+              evaluation: 'async',
+            },
+          ],
+        } as any,
+      },
+    );
+    expect(result.forceFanOut).toBe(true);
+    const approvalCall = mockSend.mock.calls.find((c) => c[0]._type === 'TransactWrite');
+    expect(approvalCall).toBeDefined();
+  });
+
+  test('observe_only require_approval does NOT create an approval row', async () => {
+    mockSend
+      .mockResolvedValueOnce({}) // idempotency claim
+      .mockResolvedValueOnce({}); // Put policy_decision (audit only)
+    const mod = await import('../../../src/handlers/shared/event-governance-async');
+    mod._resetGovernanceIdempotencyCache();
+    await mod.evaluateAsyncEventRules(
+      {
+        task_id: 't-appr-obs',
+        event_id: 'e-appr-obs',
+        event_type: 'agent_milestone',
+        metadata: { milestone: 'pr_created' },
+      },
+      {
+        task: {
+          task_id: 't-appr-obs',
+          user_id: 'u1',
+          status: 'RUNNING',
+          event_rules: [
+            {
+              id: 'approve-observe',
+              on: 'pr_created',
+              action: 'require_approval',
+              mode: 'observe_only',
+              evaluation: 'async',
+            },
+          ],
+        } as any,
+      },
+    );
+    expect(mockSend.mock.calls.some((c) => c[0]._type === 'TransactWrite')).toBe(false);
+    expect(mockSend.mock.calls.some((c) => c[0]._type === 'Put')).toBe(true); // policy_decision only
+  });
+
+  test('enforce inject_nudge writes a nudge, truncated to the max length', async () => {
+    process.env.NUDGES_TABLE_NAME = 'Nudges';
+    mockSend
+      .mockResolvedValueOnce({}) // idempotency claim
+      .mockResolvedValueOnce({}) // Put policy_decision
+      .mockResolvedValueOnce({}); // Put nudge
+    const mod = await import('../../../src/handlers/shared/event-governance-async');
+    mod._resetGovernanceIdempotencyCache();
+    const longReason = 'x'.repeat(5000);
+    await mod.evaluateAsyncEventRules(
+      {
+        task_id: 't-nudge',
+        event_id: 'e-nudge',
+        event_type: 'agent_milestone',
+        metadata: { milestone: 'plan_ready' },
+      },
+      {
+        task: {
+          task_id: 't-nudge',
+          user_id: 'u1',
+          status: 'RUNNING',
+          event_rules: [
+            {
+              id: 'nudge',
+              on: 'plan_ready',
+              action: 'inject_nudge',
+              mode: 'enforce',
+              evaluation: 'async',
+              reason: longReason,
+            },
+          ],
+        } as any,
+      },
+    );
+    const nudgeCall = mockSend.mock.calls.find(
+      (c) => c[0]._type === 'Put' && c[0].input?.Item?.source === 'event_rule' && c[0].input?.Item?.nudge_id,
+    );
+    expect(nudgeCall).toBeDefined();
+    expect(nudgeCall![0].input.Item.message.length).toBeLessThanOrEqual(2000);
+    delete process.env.NUDGES_TABLE_NAME;
+  });
+
+  test('idempotency dedup skips the action on a replayed record', async () => {
+    // The idempotency claim (a conditional Put of a governance_idempotency row)
+    // fails → the marker already exists → the cancel_task transition must be
+    // suppressed. Route the CCF to the claim Put only, by command shape.
+    const ccf = Object.assign(new Error('exists'), { name: 'ConditionalCheckFailedException' });
+    mockSend.mockImplementation((cmd: any) =>
+      cmd?._type === 'Put' && cmd.input?.Item?.event_type === 'governance_idempotency'
+        ? Promise.reject(ccf)
+        : Promise.resolve({}),
+    );
+    const mod = await import('../../../src/handlers/shared/event-governance-async');
+    mod._resetGovernanceIdempotencyCache();
+    await mod.evaluateAsyncEventRules(
+      {
+        task_id: 't-dup',
+        event_id: 'e-dup',
+        event_type: 'agent_cost_update',
+        metadata: { cumulative_cost_usd: 30 },
+      },
+      {
+        aggregateState: { cumulative_cost_usd: 30 },
+        task: {
+          task_id: 't-dup',
+          status: 'RUNNING',
+          event_rules: [
+            {
+              id: 'cap',
+              on: 'agent_cost_update',
+              when: { aggregate: { cost_usd_gte: 25 } },
+              action: 'cancel_task',
+              mode: 'enforce',
+              evaluation: 'async',
+            },
+          ],
+        } as any,
+      },
+    );
+    // The high-water persist may run, but the cancel transition must NOT — the
+    // replayed record was deduped by the failed idempotency claim.
+    expect(mockSend.mock.calls.some(isCancelUpdate)).toBe(false);
+  });
+
+  // The cancel_task write is the only Update carrying a #status transition;
+  // the high-water-mark persist is also an Update, so tests key on #status.
+  const isCancelUpdate = (c: any) =>
+    c[0]._type === 'Update' && String(c[0].input?.UpdateExpression ?? '').includes('#status');
+
+  test('cancel_task is skipped when the task is already terminal', async () => {
+    mockSend.mockResolvedValue({});
+    const mod = await import('../../../src/handlers/shared/event-governance-async');
+    mod._resetGovernanceIdempotencyCache();
+    await mod.evaluateAsyncEventRules(
+      {
+        task_id: 't-term',
+        event_id: 'e-term',
+        event_type: 'agent_cost_update',
+        metadata: { cumulative_cost_usd: 30 },
+      },
+      {
+        aggregateState: { cumulative_cost_usd: 30 },
+        task: {
+          task_id: 't-term',
+          status: 'COMPLETED',
+          event_rules: [
+            {
+              id: 'cap',
+              on: 'agent_cost_update',
+              when: { aggregate: { cost_usd_gte: 25 } },
+              action: 'cancel_task',
+              mode: 'enforce',
+              evaluation: 'async',
+            },
+          ],
+        } as any,
+      },
+    );
+    // No cancel transition issued against an already-terminal task.
+    expect(mockSend.mock.calls.some(isCancelUpdate)).toBe(false);
+  });
+
+  test('retryable error in cancel_task releases idempotency and rethrows', async () => {
+    const throttle = Object.assign(new Error('throttled'), { name: 'ThrottlingException' });
+    // Route by command shape so we don't depend on call ordering: only the
+    // cancel transition throttles; everything else (high-water, claim, audit,
+    // release) succeeds.
+    mockSend.mockImplementation((cmd: any) =>
+      isCancelUpdate([cmd]) ? Promise.reject(throttle) : Promise.resolve({}),
+    );
+    const mod = await import('../../../src/handlers/shared/event-governance-async');
+    mod._resetGovernanceIdempotencyCache();
+    await expect(
+      mod.evaluateAsyncEventRules(
+        {
+          task_id: 't-throttle',
+          event_id: 'e-throttle',
+          event_type: 'agent_cost_update',
+          metadata: { cumulative_cost_usd: 30 },
+        },
+        {
+          aggregateState: { cumulative_cost_usd: 30 },
+          task: {
+            task_id: 't-throttle',
+            status: 'RUNNING',
+            event_rules: [
+              {
+                id: 'cap',
+                on: 'agent_cost_update',
+                when: { aggregate: { cost_usd_gte: 25 } },
+                action: 'cancel_task',
+                mode: 'enforce',
+                evaluation: 'async',
+              },
+            ],
+          } as any,
+        },
+      ),
+    ).rejects.toBe(throttle);
+    // The idempotency marker was released (Delete) so the retried record re-runs.
+    expect(mockSend.mock.calls.some((c) => c[0]._type === 'Delete')).toBe(true);
   });
 });
 

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -144,8 +147,15 @@ def parse_rules(
     if not raw:
         return []
     out: list[EventRule] = []
-    for item in raw:
-        if not isinstance(item, dict) or not item.get("id"):
+    for index, item in enumerate(raw):
+        # Require both id and on, matching the CDK parser — a rule missing either
+        # is dropped with a warning rather than silently vanishing or raising a
+        # KeyError mid-loop (a dropped ceiling/approval rule = zero enforcement).
+        if not isinstance(item, dict) or not item.get("id") or not item.get("on"):
+            logger.warning(
+                "[event-governance] dropped malformed rule — missing id/on (index=%s)",
+                index,
+            )
             continue
         out.append(
             EventRule(

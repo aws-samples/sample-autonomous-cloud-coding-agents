@@ -577,7 +577,7 @@ export type EventRule = {
   readonly mode: EventRuleMode;
   readonly evaluation: EventRuleEvaluation;
   readonly reason?: string;
-  readonly severity?: 'low' | 'medium' | 'high' | 'critical';
+  readonly severity?: 'low' | 'medium' | 'high';
   readonly timeout_s?: number;
   readonly notify_channels?: readonly ('slack' | 'email' | 'github' | 'linear' | 'webhook')[];
   readonly rule_pack_id?: string;
