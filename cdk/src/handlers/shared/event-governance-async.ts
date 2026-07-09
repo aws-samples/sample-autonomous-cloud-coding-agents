@@ -148,9 +148,21 @@ async function cancelTaskByRule(taskId: string, rule: EventRule, reason: string)
       }));
     }
   } catch (err) {
+    const name = (err as { name?: string })?.name;
+    // Benign: the task raced to a terminal status between loadTaskForGovernance
+    // and this Update, so the climb-only ConditionExpression rejected it. The
+    // task is already done/cancelled — nothing to enforce. Swallow (mirrors the
+    // approval path) rather than parking the record in batchItemFailures forever.
+    if (name === 'ConditionalCheckFailedException') {
+      logger.info('[event-governance] cancel_task skipped — task already terminal', {
+        task_id: taskId,
+        rule_id: rule.id,
+      });
+      return;
+    }
     // cancel_task IS the enforcement action ("cancel if cost exceeds $25"). A
     // throttle/5xx here must retry the record, not silently let the task run on
-    // past its ceiling. The Update's ConditionExpression makes a re-run safe.
+    // past its ceiling.
     if (isRetryableInfraError(err)) throw err;
     logger.error('[event-governance] cancel_task failed (non-retryable) — enforcement gap', {
       task_id: taskId,
@@ -357,8 +369,13 @@ async function claimIdempotency(taskId: string, ruleId: string, corr: string): P
     return true;
   } catch (err) {
     const name = (err as { name?: string })?.name;
+    // Marker already exists — a genuine duplicate delivery. Skip the rule.
     if (name === 'ConditionalCheckFailedException') return false;
-    logger.warn('[event-governance] idempotency claim failed — proceeding', {
+    // A throttle/5xx on the claim itself must retry the whole record rather than
+    // proceed: proceeding on an unclaimed marker risks double-firing a notify /
+    // escalate (which are not conditional-safe) on the eventual retry (#230).
+    if (isRetryableInfraError(err)) throw err;
+    logger.warn('[event-governance] idempotency claim failed (non-retryable) — proceeding', {
       task_id: taskId,
       rule_id: ruleId,
       error: err instanceof Error ? err.message : String(err),
@@ -426,46 +443,49 @@ export async function evaluateAsyncEventRules(
 
     const enforce = rule.mode === 'enforce';
     const meta = buildPolicyDecisionMetadata(rule, event, enforce, corr);
-    await emitPolicyDecision(event.task_id, { ...meta, correlation_id: corr });
 
-    // observe_only mode records the policy_decision above but must NOT fire the
-    // action — that is the whole "would have fired" contract (design §8).
-    if (!enforce) continue;
-
-    // An enforce action that throws a retryable infra error must retry the whole
-    // record; release the idempotency marker first so the retry can re-claim and
-    // re-run, rather than being suppressed as a duplicate.
+    // The audit emit AND the enforce action share one release-guarded try: the
+    // idempotency marker is already claimed, so if EITHER throws a retryable
+    // error we must release the marker before the record retries — otherwise the
+    // retry re-claims false and the rule is skipped entirely, silently dropping
+    // the audit record (observe_only) or the enforcement action (#230).
     try {
-      if (rule.action === 'notify') {
-        notifyChannels.push(...resolveChannels(rule, ['slack']));
-        forceFanOut = true;
-      }
+      await emitPolicyDecision(event.task_id, { ...meta, correlation_id: corr });
 
-      if (rule.action === 'escalate') {
-        notifyChannels.push(...resolveChannels(rule, ['email', 'slack']));
-        forceFanOut = true;
-      }
+      // observe_only records the policy_decision above but must NOT fire the
+      // action — the "would have fired" contract (design §8).
+      if (enforce) {
+        if (rule.action === 'notify') {
+          notifyChannels.push(...resolveChannels(rule, ['slack']));
+          forceFanOut = true;
+        }
 
-      if (rule.action === 'inject_nudge' && task) {
-        await injectNudgeByRule(task, rule, event.metadata);
-      }
+        if (rule.action === 'escalate') {
+          notifyChannels.push(...resolveChannels(rule, ['email', 'slack']));
+          forceFanOut = true;
+        }
 
-      if (rule.action === 'require_approval' && task) {
-        await createAsyncEventApproval({
-          task,
-          rule,
-          eventType: event.event_type,
-          metadata: event.metadata,
-        });
-        forceFanOut = true;
-      }
+        if (rule.action === 'inject_nudge' && task) {
+          await injectNudgeByRule(task, rule, event.metadata);
+        }
 
-      if (rule.action === 'cancel_task' && task && !TERMINAL_STATUSES.includes(task.status)) {
-        await cancelTaskByRule(
-          event.task_id,
-          rule,
-          rule.reason ?? `Event rule ${rule.id} triggered cancel_task`,
-        );
+        if (rule.action === 'require_approval' && task) {
+          await createAsyncEventApproval({
+            task,
+            rule,
+            eventType: event.event_type,
+            metadata: event.metadata,
+          });
+          forceFanOut = true;
+        }
+
+        if (rule.action === 'cancel_task' && task && !TERMINAL_STATUSES.includes(task.status)) {
+          await cancelTaskByRule(
+            event.task_id,
+            rule,
+            rule.reason ?? `Event rule ${rule.id} triggered cancel_task`,
+          );
+        }
       }
     } catch (err) {
       await releaseIdempotency(event.task_id, rule.id, corr);

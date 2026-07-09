@@ -36,6 +36,10 @@ const POLICIES_RATE_LIMIT_PER_MINUTE = Number(process.env.POLICIES_RATE_LIMIT_PE
 
 const CACHE_TTL_MINUTES = 5;
 const CACHE_TTL_MS = CACHE_TTL_MINUTES * 60 * 1000;
+// Best-effort, per-Lambda-instance cache — not shared across concurrent
+// instances, and a blueprint edit takes up to CACHE_TTL_MINUTES to surface.
+// Harmless at current scale (read-only rule listing); revisit if staleness or
+// cross-instance consistency ever matters.
 const cache = new Map<string, { response: GetEventRulesResponse; expiresAt: number }>();
 
 function summarizeRule(rule: EventRule): {

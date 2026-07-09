@@ -557,5 +557,133 @@ describe('event-governance-async module', () => {
     // The idempotency marker was released (Delete) so the retried record re-runs.
     expect(mockSend.mock.calls.some((c) => c[0]._type === 'Delete')).toBe(true);
   });
+
+  const isPolicyDecisionPut = (c: any) =>
+    c[0]._type === 'Put' && c[0].input?.Item?.event_type === 'policy_decision';
+  const isIdemClaim = (c: any) =>
+    c[0]._type === 'Put' && c[0].input?.Item?.event_type === 'governance_idempotency';
+
+  test('retryable error in policy_decision emit releases idempotency and rethrows', async () => {
+    // The audit emit runs AFTER the claim but must be release-guarded too: if it
+    // throttles, the marker has to be released so the retry re-claims and re-runs
+    // rather than being deduped away with the enforcement action never fired.
+    const throttle = Object.assign(new Error('throttled'), { name: 'ThrottlingException' });
+    mockSend.mockImplementation((cmd: any) =>
+      isPolicyDecisionPut([cmd]) ? Promise.reject(throttle) : Promise.resolve({}),
+    );
+    const mod = await import('../../../src/handlers/shared/event-governance-async');
+    mod._resetGovernanceIdempotencyCache();
+    await expect(
+      mod.evaluateAsyncEventRules(
+        {
+          task_id: 't-emit',
+          event_id: 'e-emit',
+          event_type: 'agent_cost_update',
+          metadata: { cumulative_cost_usd: 30 },
+        },
+        {
+          aggregateState: { cumulative_cost_usd: 30 },
+          task: {
+            task_id: 't-emit',
+            status: 'RUNNING',
+            event_rules: [
+              {
+                id: 'cap',
+                on: 'agent_cost_update',
+                when: { aggregate: { cost_usd_gte: 25 } },
+                action: 'cancel_task',
+                mode: 'enforce',
+                evaluation: 'async',
+              },
+            ],
+          } as any,
+        },
+      ),
+    ).rejects.toBe(throttle);
+    expect(mockSend.mock.calls.some((c) => c[0]._type === 'Delete')).toBe(true);
+    // The enforcement action never ran (emit failed first).
+    expect(mockSend.mock.calls.some(isCancelUpdate)).toBe(false);
+  });
+
+  test('cancel_task swallows a benign ConditionalCheckFailedException (terminal race)', async () => {
+    // Task passed the loaded-snapshot terminal check but raced to terminal before
+    // the Update — the climb-only condition rejects it. That must NOT park the
+    // record in batchItemFailures; it should be swallowed and NOT released.
+    const ccf = Object.assign(new Error('stale'), { name: 'ConditionalCheckFailedException' });
+    mockSend.mockImplementation((cmd: any) =>
+      isCancelUpdate([cmd]) ? Promise.reject(ccf) : Promise.resolve({}),
+    );
+    const mod = await import('../../../src/handlers/shared/event-governance-async');
+    mod._resetGovernanceIdempotencyCache();
+    // Resolves (no throw) — the record is considered handled.
+    await expect(
+      mod.evaluateAsyncEventRules(
+        {
+          task_id: 't-race',
+          event_id: 'e-race',
+          event_type: 'agent_cost_update',
+          metadata: { cumulative_cost_usd: 30 },
+        },
+        {
+          aggregateState: { cumulative_cost_usd: 30 },
+          task: {
+            task_id: 't-race',
+            status: 'RUNNING',
+            event_rules: [
+              {
+                id: 'cap',
+                on: 'agent_cost_update',
+                when: { aggregate: { cost_usd_gte: 25 } },
+                action: 'cancel_task',
+                mode: 'enforce',
+                evaluation: 'async',
+              },
+            ],
+          } as any,
+        },
+      ),
+    ).resolves.toBeDefined();
+    // Benign CCF is not a failure — marker stays claimed, no release.
+    expect(mockSend.mock.calls.some((c) => c[0]._type === 'Delete')).toBe(false);
+  });
+
+  test('retryable error in idempotency claim rethrows instead of double-firing', async () => {
+    // A throttle on the claim Put must retry the whole record, not proceed on an
+    // unclaimed marker (which would risk a double notify/escalate on retry).
+    const throttle = Object.assign(new Error('throttled'), { name: 'ProvisionedThroughputExceededException' });
+    mockSend.mockImplementation((cmd: any) =>
+      isIdemClaim([cmd]) ? Promise.reject(throttle) : Promise.resolve({}),
+    );
+    const mod = await import('../../../src/handlers/shared/event-governance-async');
+    mod._resetGovernanceIdempotencyCache();
+    await expect(
+      mod.evaluateAsyncEventRules(
+        {
+          task_id: 't-claim',
+          event_id: 'e-claim',
+          event_type: 'agent_milestone',
+          metadata: { milestone: 'pr_created' },
+        },
+        {
+          task: {
+            task_id: 't-claim',
+            status: 'RUNNING',
+            event_rules: [
+              {
+                id: 'notify',
+                on: 'pr_created',
+                action: 'notify',
+                mode: 'enforce',
+                evaluation: 'async',
+                notify_channels: ['slack'],
+              },
+            ],
+          } as any,
+        },
+      ),
+    ).rejects.toBe(throttle);
+    // No audit emit — we bailed at the claim, before any side effect.
+    expect(mockSend.mock.calls.some(isPolicyDecisionPut)).toBe(false);
+  });
 });
 

@@ -46,6 +46,13 @@ function eventName(eventType: string, metadata: Record<string, unknown>): string
   return eventType;
 }
 
+// Local, deliberately-minimal matcher for the `rules eval` dry-run. It does NOT
+// filter by `evaluation` (fixtures are single-mode) and is a third copy of the
+// matching logic — the authoritative implementations are
+// agent/src/event_governance/evaluator.py and cdk .../event-rule-evaluator.ts,
+// kept in lockstep by the shared-fixture parity suites. If this drifts, those
+// parity tests are the source of truth; keep this in sync by hand or route
+// through a shared package when one exists.
 function matchRules(fixture: FixtureFile): string[] {
   const name = eventName(fixture.event.event_type, fixture.event.metadata ?? {});
   const meta = fixture.event.metadata ?? {};
