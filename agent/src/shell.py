@@ -237,46 +237,126 @@ def _surface_failure_lines(stdout: str) -> list[str]:
     return out or tail
 
 
+def _run_cmd_streaming(
+    cmd: list[str], label: str, cwd: str | None, timeout: int
+) -> subprocess.CompletedProcess:
+    """Run *cmd* streaming BOTH pipes live to the log while capturing them.
+
+    The buffered ``subprocess.run(capture_output=True)`` path holds the ENTIRE
+    output in memory and never writes it to container stdout — so awslogs (→
+    CloudWatch) never sees the raw stream, and the only record is whatever the
+    caller's post-hoc summary chooses to emit. For a heavy, long, opaque command
+    (``mise run build``: 4 parallel packages, 3000+ tests, ~30 min) that meant a
+    build failure was diagnosable ONLY if the summary happened to capture the
+    right lines — the ABCA-662 investigation burned days because the failing
+    sub-task's error was buffered away and never shipped (design §build-gate gap).
+
+    Streaming fixes that at the source: every line is written to the log (→
+    CloudWatch verbatim, redacted) AS IT HAPPENS, so the full build log always
+    exists — no curated slice, no guessing which lines matter, plus live progress
+    instead of a silent multi-minute gap. Two drain threads (one per pipe) avoid
+    the classic single-thread PIPE deadlock and keep stdout/stderr SEPARATE so the
+    returned ``CompletedProcess`` matches ``subprocess.run``'s contract exactly
+    (callers still read ``.stdout`` / ``.stderr`` / ``.returncode`` unchanged).
+    """
+    proc = subprocess.Popen(
+        cmd,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,  # line-buffered so each line streams promptly
+        env=_clean_env(),
+    )
+    out_lines: list[str] = []
+    err_lines: list[str] = []
+
+    def _drain(pipe, buf: list[str]) -> None:
+        # log() redacts each line; the buffer keeps the raw text for the caller
+        # (the failure classifier redacts again before it re-emits anything).
+        try:
+            for line in pipe:
+                line = line.rstrip("\n")
+                buf.append(line)
+                log("CMD", f"  {line}")
+        finally:
+            pipe.close()
+
+    t_out = threading.Thread(target=_drain, args=(proc.stdout, out_lines), daemon=True)
+    t_err = threading.Thread(target=_drain, args=(proc.stderr, err_lines), daemon=True)
+    t_out.start()
+    t_err.start()
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        # Let the drain threads finish flushing the pipes the kill closes, so
+        # nothing is lost, then re-raise for the caller's timeout handling.
+        t_out.join(timeout=10)
+        t_err.join(timeout=10)
+        raise
+    t_out.join(timeout=10)
+    t_err.join(timeout=10)
+    return subprocess.CompletedProcess(
+        cmd, proc.returncode or 0, "\n".join(out_lines), "\n".join(err_lines)
+    )
+
+
 def run_cmd(
     cmd: list[str],
     label: str,
     cwd: str | None = None,
     timeout: int = 600,
     check: bool = True,
+    stream: bool = False,
 ) -> subprocess.CompletedProcess:
-    """Run a command with logging."""
+    """Run a command with logging.
+
+    ``stream=True`` tees the command's output to the log line-by-line as it runs
+    (so the FULL output reaches CloudWatch verbatim + gives live progress) —
+    used for the long/opaque build & lint verify commands where a buffered,
+    post-hoc summary hid the real failure. Default (buffered) is unchanged for
+    the many short commands (git/gh/mise-install) where a curated summary is
+    plenty and streaming would just add noise.
+    """
     log("CMD", redact_secrets(f"{label}: {' '.join(cmd)}"))
-    result = subprocess.run(
-        cmd,
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        env=_clean_env(),
-    )
+    if stream:
+        result = _run_cmd_streaming(cmd, label, cwd, timeout)
+    else:
+        result = subprocess.run(
+            cmd,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=_clean_env(),
+        )
     if result.returncode != 0:
         log("CMD", f"{label}: FAILED (exit {result.returncode})")
-        if result.stderr:
-            for line in result.stderr.strip().splitlines()[:20]:
-                log("CMD", f"  {line}")
-        # ALSO surface stdout on failure. Build/test tooling (jest, tsc, the mise
-        # task DAG) writes the ACTUAL failing-task error to STDOUT, not stderr —
-        # stderr often carries only the runner's plan echo. Logging stderr alone
-        # made build-gate failures undebuggable: a red ``mise run build`` showed
-        # every task STARTING but never WHICH one failed or why (ABCA-662).
-        #
-        # A plain tail is NOT enough for a PARALLEL task DAG: `mise run build`
-        # runs 4 packages concurrently and interleaves their output, so the
-        # failing task's error scrolls into the MIDDLE while the tail captures
-        # whatever finished LAST (e.g. a passing package's coverage table) —
-        # ABCA-662 follow-up: the tail showed a coverage table, not the red task.
-        # So FIRST scan the whole output for failure-signature lines and surface
-        # those (this is what names the failing sub-task), THEN a larger tail for
-        # trailing context. Redact — repo build output is untrusted.
-        if result.stdout:
-            surfaced = _surface_failure_lines(result.stdout)
-            for line in surfaced:
-                log("CMD", f"  {redact_secrets(line)}")
+        # When streaming, the FULL output already reached the log live — don't
+        # re-dump it. Just point at the surfaced failure lines for a quick jump.
+        if stream:
+            surfaced = _surface_failure_lines(result.stdout or "")
+            if surfaced:
+                log("CMD", f"{label}: failing lines (full output streamed above):")
+                for line in surfaced:
+                    log("CMD", f"  {redact_secrets(line)}")
+        else:
+            if result.stderr:
+                for line in result.stderr.strip().splitlines()[:20]:
+                    log("CMD", f"  {line}")
+            # ALSO surface stdout on failure. Build/test tooling (jest, tsc, the
+            # mise task DAG) writes the ACTUAL failing-task error to STDOUT, not
+            # stderr. A plain tail is NOT enough for a PARALLEL task DAG (the
+            # failing line scrolls into the MIDDLE while the tail is a passing
+            # package's coverage table — ABCA-662), so scan the whole output for
+            # failure-signature lines FIRST, then a tail for context. Redact —
+            # repo build output is untrusted. (Buffered path only; the streaming
+            # path above already emitted everything verbatim.)
+            if result.stdout:
+                surfaced = _surface_failure_lines(result.stdout)
+                for line in surfaced:
+                    log("CMD", f"  {redact_secrets(line)}")
         if check:
             stderr_snippet = redact_secrets(result.stderr.strip()[:500]) if result.stderr else ""
             raise RuntimeError(f"{label} failed (exit {result.returncode}): {stderr_snippet}")

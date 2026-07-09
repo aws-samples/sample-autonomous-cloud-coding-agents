@@ -186,6 +186,9 @@ def _run_verify(repo_dir: str, command: str, default: str, label: str) -> Verify
             cwd=repo_dir,
             check=False,
             timeout=BUILD_VERIFY_TIMEOUT_S,
+            # Stream the build/lint output live → full log reaches CloudWatch
+            # verbatim (a buffered summary hid which sub-task failed — ABCA-662).
+            stream=True,
         )
     except subprocess.TimeoutExpired:
         log(

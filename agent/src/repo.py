@@ -390,6 +390,9 @@ def setup_repo(config: TaskConfig, progress: Any = None) -> RepoSetup:
                 cwd=repo_dir,
                 check=False,
                 timeout=BUILD_VERIFY_TIMEOUT_S,
+                # Stream live → the full baseline-build log reaches CloudWatch
+                # verbatim (buffered capture hid the failing sub-task — ABCA-662).
+                stream=True,
             )
         except subprocess.TimeoutExpired:
             log(
@@ -468,6 +471,7 @@ def setup_repo(config: TaskConfig, progress: Any = None) -> RepoSetup:
                 cwd=repo_dir,
                 check=False,
                 timeout=BUILD_VERIFY_TIMEOUT_S,
+                stream=True,  # full lint output → CloudWatch verbatim (ABCA-662)
             )
         except subprocess.TimeoutExpired:
             log(
