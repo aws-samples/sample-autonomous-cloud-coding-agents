@@ -38,6 +38,8 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Literal
 
+from observability import current_otel_trace_id
+
 # Preview field cap defaults (design §10.1):
 #   - 200 chars for normal tasks — small DDB rows, cheap watch-stream bytes.
 #   - 4096 chars (4 KB) for ``--trace`` opt-in tasks — full enough to
@@ -87,6 +89,65 @@ def _truncate_preview(value: str | None, max_len: int = _PREVIEW_MAX_LEN) -> str
     if len(value) <= max_len:
         return value
     return value[:max_len] + "..."
+
+
+# ---------------------------------------------------------------------------
+# Blocker taxonomy + canonical reason contract (#251, design §13)
+# ---------------------------------------------------------------------------
+#
+# THE single source of truth for the closed blocker-kind set and the canonical
+# terminal-reason string (decision D). Three layers reference this contract:
+#   1. the ``agent_blocked`` progress event metadata (``write_agent_blocked``);
+#   2. the agent's ``TaskResult.error`` carry-path — a terminal blocker sets
+#      ``error`` to ``format_blocker_reason(...)`` so ``failTask`` persists it
+#      verbatim;
+#   3. the CDK error classifier (``cdk/.../error-classifier.ts``), whose regex
+#      keys on the ``BLOCKED[<kind>]`` prefix produced here.
+#
+# Keep this set and ``error-classifier.ts`` + ``docs/design/CEDAR_HITL_GATES.md``
+# §13 in lockstep — a new kind means a new classifier pattern and a doc row.
+#
+# ``auth_failure`` and ``unknown_environmental`` are reserved: they are valid
+# kinds so callers/classifier can handle them without a follow-up enum change,
+# but have no v1 detection site.
+
+BlockerKind = Literal[
+    "missing_secret",
+    "egress_denied",
+    "dependency_unreachable",
+    "policy_fail_closed",
+    "auth_failure",
+    "unknown_environmental",
+]
+
+BLOCKER_KINDS: frozenset[str] = frozenset(
+    {
+        "missing_secret",
+        "egress_denied",
+        "dependency_unreachable",
+        "policy_fail_closed",
+        "auth_failure",
+        "unknown_environmental",
+    }
+)
+
+
+def format_blocker_reason(kind: str, detail: str, resource: str | None = None) -> str:
+    """Build the canonical terminal-reason string for a blocker (decision D).
+
+    Format: ``BLOCKED[<kind>]: <detail>`` with `` (resource: <resource>)``
+    appended when *resource* is set. This exact shape is what the CDK
+    classifier regex matches, so it must not drift.
+
+    Unknown *kind* values fall back to ``unknown_environmental`` rather than
+    raising — a blocker reason must always be constructible on the failure
+    path, never itself the source of a new failure.
+    """
+    safe_kind = kind if kind in BLOCKER_KINDS else "unknown_environmental"
+    reason = f"BLOCKED[{safe_kind}]: {detail}"
+    if resource:
+        reason += f" (resource: {resource})"
+    return reason
 
 
 # ---------------------------------------------------------------------------
@@ -314,8 +375,19 @@ class _ProgressWriter:
 
     _MAX_FAILURES = 3
 
-    def __init__(self, task_id: str, trace: bool = False) -> None:
+    def __init__(
+        self,
+        task_id: str,
+        trace: bool = False,
+        user_id: str = "",
+        repo: str | None = None,
+    ) -> None:
         self._task_id = task_id
+        # Correlation envelope (#245): stamped on every event so the agent-side
+        # event stream joins to orchestrator logs and the X-Ray trace. ``repo``
+        # is None for repo-less workflows (#248 Phase 3).
+        self._user_id = user_id
+        self._repo = repo
         self._table_name = os.environ.get("TASK_EVENTS_TABLE_NAME")
         self._table = None
         # Per-instance preview cap — design §10.1. ``trace=True`` raises
@@ -408,6 +480,11 @@ class _ProgressWriter:
                 return
 
             now = datetime.now(UTC)
+            # Correlation envelope (#245): trace_id is read per-event from the
+            # active span (it may be None early, before the root span opens);
+            # user_id/repo are stamped when known. All are omitted when
+            # empty/None so the item shape stays stable for consumers.
+            trace_id = current_otel_trace_id()
             item = {
                 "task_id": self._task_id,
                 "event_id": _generate_ulid(),
@@ -419,6 +496,12 @@ class _ProgressWriter:
                 "timestamp": now.isoformat(),
                 "ttl": int(now.timestamp()) + _TTL_SECONDS,
             }
+            if self._user_id:
+                item["user_id"] = self._user_id
+            if self._repo:
+                item["repo"] = self._repo
+            if trace_id:
+                item["trace_id"] = trace_id
             self._table.put_item(Item=item)
 
             # Success: reset the shared failure counter.  We do NOT flip
@@ -607,6 +690,36 @@ class _ProgressWriter:
                 "message_preview": self._preview(message),
             },
         )
+
+    def write_agent_blocked(
+        self,
+        *,
+        kind: str,
+        detail: str,
+        remediation_hint: str,
+        retryable: bool,
+        resource: str | None = None,
+    ) -> None:
+        """Emit an ``agent_blocked`` event for an environmental fault (#251, §13).
+
+        Distinct event type (not an ``agent_milestone`` variant) so consumers
+        get a closed taxonomy and clean ⛔ rendering. ``kind`` is one of
+        :data:`BLOCKER_KINDS`; an unrecognised value is normalised to
+        ``unknown_environmental`` (same fallback as
+        :func:`format_blocker_reason`) so a mis-typed kind can never drop the
+        event. ``detail``/``remediation_hint`` are routed through
+        :meth:`_preview` for truncation; the circuit breaker is automatic via
+        :meth:`_put_event`.
+        """
+        metadata: dict = {
+            "kind": kind if kind in BLOCKER_KINDS else "unknown_environmental",
+            "detail": self._preview(detail),
+            "remediation_hint": self._preview(remediation_hint),
+            "retryable": retryable,
+        }
+        if resource:
+            metadata["resource"] = resource
+        self._put_event("agent_blocked", metadata)
 
     # -- approval-gate milestones (§11.1, Chunk 3) -----------------------------
     #

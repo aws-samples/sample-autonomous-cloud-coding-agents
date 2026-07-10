@@ -1857,6 +1857,36 @@ flowchart LR
 
 Every exceptional branch terminates in DENY. The only path to ALLOW is the happy path through a valid approval or pre-approval — no failure mode accidentally approves.
 
+### 13.16 Observable blocker signal (#251)
+
+When the agent cannot make progress for an **environmental** reason — a missing secret, an egress denial, an unreachable dependency, or a fail-closed *policy-engine error* (as opposed to an intentional hard-deny) — it emits a typed, machine-readable **`agent_blocked`** progress event instead of silently burning turns or failing opaquely. This is distinct from the HITL `AWAITING_APPROVAL` pause (§11): that pause is for *policy* decisions a human must make; a blocker is for *environmental* faults the platform or agent can diagnose or (where safe) fix.
+
+A blocker does **not** introduce a new task status. Blockers surface as events during `RUNNING`; the terminal outcome stays `FAILED` (or `COMPLETED` if self-remediation succeeds), just with precise classification.
+
+**Blocker taxonomy (closed set).** The kind set is defined once, agent-side, in `agent/src/progress_writer.py` (`BLOCKER_KINDS`), and mirrored by the CDK error classifier (`cdk/src/handlers/shared/error-classifier.ts`). Keep all three — code, classifier, and this table — in lockstep.
+
+| kind | meaning | retryable | remediation posture |
+|---|---|---|---|
+| `missing_secret` | a required secret was never wired into the blueprint | no | report the exact secret name; never acquire |
+| `egress_denied` | a connection to a non-allowlisted host was blocked | no | report the exact host to allowlist; never widen egress |
+| `dependency_unreachable` | transient failure reaching a dependency/registry | yes | bounded retry with backoff, then report |
+| `policy_fail_closed` | Cedar engine error/unavailable (NOT an intentional hard-deny — see §13.4, §13.15) | no | report; distinct from hard-deny |
+| `auth_failure` | credential present but rejected | no | report; no self-heal (reserved — no v1 detection site) |
+| `unknown_environmental` | environmental fault not otherwise classified | no | report best-effort detail (fallback only) |
+
+**`agent_blocked` event metadata schema:** `{ kind, detail, remediation_hint, retryable: bool, resource?: str }`. `detail` and `remediation_hint` are truncated to the standard preview cap (§10.1).
+
+**Canonical terminal-reason contract (single source of truth).** When a blocker reaches finalization, the agent's `TaskResult.error` carries a canonical string so the orchestrator's `failTask` persists it verbatim and the classifier can attach a precise remedy:
+
+```
+BLOCKED[<kind>]: <detail>
+BLOCKED[<kind>]: <detail> (resource: <resource>)   # when a resource is named
+```
+
+`format_blocker_reason(kind, detail, resource=None)` in `agent/src/progress_writer.py` produces this string (and `formatBlockerReason` in `cdk/src/handlers/shared/error-classifier.ts` is the orchestration-side twin for reasons written directly by the platform, e.g. a missing secret detected during hydration); the classifier keys on the `BLOCKED[<kind>]` prefix (case-insensitively) and separately extracts the `(resource: …)` segment so the operator-facing remedy names the exact secret or host — the two are matched independently rather than one end-anchored regex, so a reason wrapped with trailing text or a stack trace by `failTask` still yields the resource (e.g. "wire the secret `OPENAI_API_KEY` into the blueprint", "allowlist the domain `registry.npmjs.org` in the DNS Firewall"). `auth_failure` and `unknown_environmental` are in the closed enum but have no v1 detection site — reserved so callers and the classifier can handle them without a follow-up enum change.
+
+**Bounded self-remediation (safe-by-default).** For `dependency_unreachable` only, repo setup retries the exact same network command (`git clone` / PR-branch `git fetch`) with capped exponential backoff (`run_cmd_with_backoff` in `agent/src/shell.py`) when the failure signature looks transient (DNS blip, registry 5xx / 429, connection reset). Each retry emits an auditable `agent_blocked` event; on exhaustion the task fails with the canonical `dependency_unreachable` reason. Permanent failures (auth denied, repo not found) fail fast without retry. A **DNS name-resolution failure that names a host** (`could not resolve host: <host>`, `getaddrinfo ENOTFOUND <host>`) bails out of backoff immediately — it is not retried and emits no `dependency_unreachable` events — and is reclassified as a non-retryable `egress_denied` naming that host: a name that cannot be resolved is a firewalled / non-existent endpoint, and retrying never helps. A transient **TCP-connect** failure to an otherwise-reachable host (`failed to connect to <host> … connection timed out`) and a host-*less* name-resolution blip (`temporary failure in name resolution`) both stay retryable; if a TCP failure persists past the retries it is still reclassified to `egress_denied` at exhaustion. Either way the setup path and the PostToolUse egress detector reach a consistent verdict. `missing_secret` and `egress_denied` are **report-only, never self-healed** — remediation is scope-preserving by construction: it re-invokes the same command with the same credentials and DNS rules, granting no new scope and mutating no IAM policy or egress allowlist. Model-issued installs (`npm install` in a Bash tool call) cannot be retried in-hook under the Agent SDK — PostToolUse fires post-execution — so they are only *reported* as blockers, not retried.
+
 ---
 
 ## 14. Sample scenarios

@@ -114,6 +114,38 @@ describe('createTaskCore', () => {
     expect(mockLambdaSend).toHaveBeenCalledTimes(1);
   });
 
+  test('accepts an initial_approvals pattern whose value contains a colon', async () => {
+    // Regression: the degenerate-pattern guard used split(':', 2)[1], which
+    // truncated the value at the next colon. For "ab:cdefgh" that yields the
+    // 2-char fragment "ab", which isDegeneratePattern flags as degenerate —
+    // a spurious 400. The full value "ab:cdefgh" is not degenerate, so the
+    // scope must be accepted.
+    const result = await createTaskCore(
+      {
+        repo: 'org/repo',
+        task_description: 'Fix the bug',
+        initial_approvals: ['bash_pattern:ab:cdefgh'],
+      } as any,
+      makeContext(),
+      'req-1',
+    );
+    expect(result.statusCode).toBe(201);
+  });
+
+  test('still rejects a genuinely degenerate initial_approvals pattern', async () => {
+    const result = await createTaskCore(
+      {
+        repo: 'org/repo',
+        task_description: 'Fix the bug',
+        initial_approvals: ['bash_pattern:*'],
+      } as any,
+      makeContext(),
+      'req-1',
+    );
+    expect(result.statusCode).toBe(400);
+    expect(JSON.parse(result.body).error.code).toBe('VALIDATION_ERROR');
+  });
+
   test('returns 400 for invalid repo', async () => {
     const result = await createTaskCore({ repo: 'invalid' } as any, makeContext(), 'req-1');
     expect(result.statusCode).toBe(400);
