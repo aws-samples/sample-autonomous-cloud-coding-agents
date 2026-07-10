@@ -1,10 +1,27 @@
 """Shared fixtures for agent unit tests."""
 
+import faulthandler
+import sys
 from types import SimpleNamespace
 
 import pytest
 
 from models import TaskConfig
+
+# Session-wide hang backstop, immune to what pytest-timeout's SIGALRM cannot
+# reach. SIGALRM fires only in the MAIN thread during a test's *call* phase, so a
+# deadlock in a WORKER thread, a fixture, collection, or a C-level socket read the
+# main thread never returns from stalls the whole `mise run build` silently — up
+# to the platform's 3600s build-verify ceiling (the ECS-only stall seen on
+# ABCA-684/686/688 and the warm-cache run: 53 min of dead air, signal never
+# fired). faulthandler runs a dedicated C watchdog thread that the GIL and blocked
+# syscalls can't stall: at 1200s (20 min — comfortably inside the 3600s ceiling,
+# far above the whole suite's normal ~3 min) it dumps EVERY thread's Python stack
+# to stderr and hard-exits, converting a blind stall into a self-diagnosing crash
+# that names the exact file:line. Complements the per-test faulthandler_timeout in
+# pyproject.toml (which dumps but does not exit). ``exit=True`` guarantees the
+# non-zero exit even if the hang is uninterruptible.
+faulthandler.dump_traceback_later(1200, exit=True, file=sys.stderr)
 
 
 class FakeRunCmd:
@@ -99,6 +116,24 @@ _AGENT_ENV_VARS = [
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
-    """Remove agent-related env vars before every test."""
+    """Remove agent-related env vars and reset the AWS session cache each test.
+
+    The env cleanup keeps host state from leaking into agent code that reads
+    ``os.environ`` at import/call time.
+
+    The session reset closes a cross-test leak: ``aws_session`` caches the
+    resolved boto3 session in a MODULE GLOBAL (``_session``/``_scoped``), and
+    ``tenant_client`` returns ``session.client(...)`` from that cache when
+    ``_scoped`` is True — bypassing a downstream ``@patch("boto3.client")``. If an
+    earlier test left a scoped session cached (only ``test_aws_session`` cleans up
+    after itself), a later test like ``test_attachments`` would get a REAL client
+    despite its mock → a live S3 call that hangs on the ECS network (no route/no
+    creds) in a socket read SIGALRM can't interrupt. Resetting the cache before
+    every test guarantees each test resolves the session under its own patches.
+    """
     for var in _AGENT_ENV_VARS:
         monkeypatch.delenv(var, raising=False)
+
+    from aws_session import reset_session_cache
+
+    reset_session_cache()
