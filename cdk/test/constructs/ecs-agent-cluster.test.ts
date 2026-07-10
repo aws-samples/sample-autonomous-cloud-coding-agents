@@ -26,10 +26,11 @@ import * as ecr_assets from 'aws-cdk-lib/aws-ecr-assets';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
+import { AgentMemory } from '../../src/constructs/agent-memory';
 import { AgentSessionRole } from '../../src/constructs/agent-session-role';
 import { EcsAgentCluster } from '../../src/constructs/ecs-agent-cluster';
 
-function createStack(overrides?: { memoryId?: string; bedrockModels?: string[] }): { stack: Stack; template: Template } {
+function createStack(overrides?: { memoryId?: string; bedrockModels?: string[]; withMemory?: boolean }): { stack: Stack; template: Template } {
   const app = new App({
     context: overrides?.bedrockModels ? { bedrockModels: overrides.bedrockModels } : undefined,
   });
@@ -56,6 +57,8 @@ function createStack(overrides?: { memoryId?: string; bedrockModels?: string[] }
 
   const githubTokenSecret = new secretsmanager.Secret(stack, 'GitHubTokenSecret');
 
+  const agentMemory = overrides?.withMemory ? new AgentMemory(stack, 'AgentMemory') : undefined;
+
   new EcsAgentCluster(stack, 'EcsAgentCluster', {
     vpc,
     agentImageAsset,
@@ -64,6 +67,7 @@ function createStack(overrides?: { memoryId?: string; bedrockModels?: string[] }
     userConcurrencyTable,
     githubTokenSecret,
     memoryId: overrides?.memoryId,
+    agentMemory,
   });
 
   const template = Template.fromStack(stack);
@@ -344,6 +348,36 @@ describe('EcsAgentCluster construct', () => {
           ]),
         }),
       ]),
+    });
+  });
+
+  // F-2 ECS-parity regression guard. The task role must be able to WRITE cross-
+  // task memory (bedrock-agentcore:CreateEvent), or episodic/semantic writes fail
+  // closed on ECS (memory_written: false — live-caught on the fork). This
+  // regressed silently because MEMORY_ID was wired into the env WITHOUT the
+  // matching grant, so the agent attempted a write it had no permission for.
+  describe('AgentCore Memory grant (F-2)', () => {
+    test('grants the task role bedrock-agentcore write when agentMemory is passed', () => {
+      const { template } = createStack({ withMemory: true });
+      template.hasResourceProperties('AWS::IAM::Policy', {
+        PolicyDocument: {
+          Statement: Match.arrayWith([
+            Match.objectLike({
+              Effect: 'Allow',
+              Action: Match.arrayWith([Match.stringLikeRegexp('bedrock-agentcore:.*Event')]),
+            }),
+          ]),
+        },
+      });
+    });
+
+    test('does NOT grant bedrock-agentcore write when agentMemory is omitted', () => {
+      // Negative proof: the isolated-construct default (no memory) must not
+      // emit a memory grant — otherwise the positive test proves nothing.
+      const { stack } = createStack();
+      const policies = Template.fromStack(stack).findResources('AWS::IAM::Policy');
+      const asJson = JSON.stringify(policies);
+      expect(asJson).not.toMatch(/bedrock-agentcore:[A-Za-z]*Event/);
     });
   });
 
