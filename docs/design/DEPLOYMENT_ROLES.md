@@ -238,6 +238,7 @@ CloudFormation stack operations, IAM roles/policies, VPC networking, and Route 5
         "route53resolver:UpdateFirewallDomains",
         "route53resolver:AssociateFirewallRuleGroup",
         "route53resolver:DisassociateFirewallRuleGroup",
+        "route53resolver:UpdateFirewallRuleGroupAssociation",
         "route53resolver:GetFirewallRuleGroupAssociation",
         "route53resolver:ListFirewallRuleGroupAssociations",
         "route53resolver:UpdateFirewallConfig",
