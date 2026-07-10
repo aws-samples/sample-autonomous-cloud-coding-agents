@@ -25,8 +25,6 @@ import {
 import { GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
 import { ApiClient } from '../../src/api-client';
 import {
-  generateInviteCode,
-  INVITE_CODE_ALPHABET,
   isWebhookSecretConfigured,
   JIRA_WEBHOOK_SECRET_PLACEHOLDER_KEY,
   makeJiraCommand,
@@ -35,6 +33,7 @@ import {
   upsertOauthSecret,
 } from '../../src/commands/jira';
 import * as config from '../../src/config';
+import { generateInviteCode, INVITE_CODE_ALPHABET } from '../../src/invite-code';
 import type { StoredJiraOauthToken } from '../../src/jira-oauth';
 
 // child_process.execFile — `openBrowser` shells out to the OS opener.
@@ -317,6 +316,9 @@ describe('jira invite-user action', () => {
           status: 'active',
         },
       })
+      // Existing-link lookup: no active mapping for the picked Jira identity.
+      .mockResolvedValueOnce({})
+      // PutCommand writing the pending# row.
       .mockResolvedValueOnce({});
     smSend.mockResolvedValueOnce({
       SecretString: JSON.stringify(sampleToken({
@@ -365,7 +367,9 @@ describe('jira invite-user action', () => {
       headers: { Authorization: 'Bearer access-xyz' },
     });
 
-    const putCmd = ddbSend.mock.calls[1][0] as PutCommand;
+    // calls[0] = registry GetCommand, calls[1] = existing-link GetCommand,
+    // calls[2] = the pending# PutCommand.
+    const putCmd = ddbSend.mock.calls[2][0] as PutCommand;
     expect(putCmd).toBeInstanceOf(PutCommand);
     expect(putCmd.input.TableName).toBe('JiraUsersTable');
     expect(putCmd.input.Item).toMatchObject({
@@ -402,7 +406,7 @@ describe('jira invite-user action', () => {
     const lookupUrl = new URL(String(fetchMock.mock.calls[0][0]));
     expect(lookupUrl.pathname).toBe('/ex/jira/cloud-123/rest/api/3/user');
     expect(lookupUrl.searchParams.get('accountId')).toBe('acct-1');
-    const putCmd = ddbSend.mock.calls[1][0] as PutCommand;
+    const putCmd = ddbSend.mock.calls[2][0] as PutCommand;
     expect(putCmd.input.Item).toMatchObject({
       jira_account_id: 'acct-1',
       jira_user_name: 'Maya K',
@@ -515,7 +519,7 @@ describe('jira invite-user action', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
     const searchUrl = new URL(String(fetchMock.mock.calls[1][0]));
     expect(searchUrl.pathname).toBe('/ex/jira/cloud-123/rest/api/3/user/search');
-    const putCmd = ddbSend.mock.calls[1][0] as PutCommand;
+    const putCmd = ddbSend.mock.calls[2][0] as PutCommand;
     expect(putCmd.input.Item).toMatchObject({ jira_account_id: 'acct-1' });
   });
 
@@ -556,6 +560,100 @@ describe('jira invite-user action', () => {
 
     expect(smSend).toHaveBeenCalledTimes(1);
     expect(ddbSend).toHaveBeenCalledTimes(1);
+  });
+
+  test('warns (but still writes the invite) when the Jira identity is already linked', async () => {
+    // Registry GetCommand → active tenant; existing-link GetCommand → an
+    // active mapping for the resolved account; PutCommand → the pending row.
+    ddbSend
+      .mockResolvedValueOnce({
+        Item: {
+          jira_cloud_id: 'cloud-123',
+          site_url: 'https://acme.atlassian.net',
+          oauth_secret_arn: 'arn:jira-oauth',
+          status: 'active',
+        },
+      })
+      .mockResolvedValueOnce({ Item: { jira_identity: 'cloud-123#acct-1', status: 'active' } })
+      .mockResolvedValueOnce({});
+    smSend.mockResolvedValueOnce({
+      SecretString: JSON.stringify(sampleToken({
+        cloud_id: 'cloud-123',
+        site_url: 'https://acme.atlassian.net',
+        expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      })),
+    });
+    const fetchMock = jest.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ accountId: 'acct-1', displayName: 'Maya K', active: true, accountType: 'atlassian' }),
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await runInvite(['cloud-123', 'acct-1']);
+
+    // Existing-link lookup keyed on `<cloudId>#<accountId>`.
+    const linkLookup = ddbSend.mock.calls[1][0] as GetCommand;
+    expect(linkLookup).toBeInstanceOf(GetCommand);
+    expect(linkLookup.input.Key).toEqual({ jira_identity: 'cloud-123#acct-1' });
+    expect(logSpy.mock.calls.some((call) => String(call[0]).includes('already linked'))).toBe(true);
+    // The invite is still written despite the warning.
+    expect(ddbSend.mock.calls[2][0]).toBeInstanceOf(PutCommand);
+  });
+
+  test('refuses to invite an inactive or app Jira account', async () => {
+    mockRegistryAndSecret();
+    const fetchMock = jest.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ accountId: 'acct-1', displayName: 'Bot', active: false, accountType: 'app' }),
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(runInvite(['cloud-123', 'acct-1'])).rejects.toThrow(/inactive or is an app account/);
+
+    // Registry + secret read happened, but no invite row was written.
+    expect(ddbSend).toHaveBeenCalledTimes(1);
+  });
+
+  test('fails with an actionable error when the OAuth secret is malformed JSON', async () => {
+    ddbSend.mockResolvedValueOnce({
+      Item: {
+        jira_cloud_id: 'cloud-123',
+        site_url: 'https://acme.atlassian.net',
+        oauth_secret_arn: 'arn:jira-oauth',
+        status: 'active',
+      },
+    });
+    smSend.mockResolvedValueOnce({ SecretString: '{not-json' });
+
+    await expect(runInvite(['cloud-123', 'maya@example.test'])).rejects.toThrow(/is not valid JSON/);
+
+    expect(ddbSend).toHaveBeenCalledTimes(1);
+  });
+
+  test('fails when the registry row is missing oauth_secret_arn', async () => {
+    ddbSend.mockResolvedValueOnce({
+      Item: {
+        jira_cloud_id: 'cloud-123',
+        site_url: 'https://acme.atlassian.net',
+        status: 'active',
+      },
+    });
+
+    await expect(runInvite(['cloud-123', 'maya@example.test'])).rejects.toThrow(/missing oauth_secret_arn/);
+
+    expect(smSend).not.toHaveBeenCalled();
+  });
+
+  test('throws a clear error when required stack outputs are missing (not deployed)', async () => {
+    cfnSend.mockReset().mockResolvedValue({ Stacks: [{ Outputs: [] }] });
+
+    await expect(runInvite(['cloud-123', 'maya@example.test']))
+      .rejects.toThrow(/missing outputs .*JiraWorkspaceRegistryTableName.*JiraUserMappingTableName/s);
+
+    expect(ddbSend).not.toHaveBeenCalled();
+    expect(smSend).not.toHaveBeenCalled();
   });
 });
 

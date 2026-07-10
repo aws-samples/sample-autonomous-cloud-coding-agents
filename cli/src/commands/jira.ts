@@ -34,6 +34,7 @@ import { ApiClient } from '../api-client';
 import { loadConfig, loadCredentials } from '../config';
 import { CliError } from '../errors';
 import { formatJson } from '../format';
+import { generateInviteCode } from '../invite-code';
 import {
   buildAuthorizationUrl,
   computeExpiresAt,
@@ -42,6 +43,7 @@ import {
   generatePkce,
   isAccessTokenExpiring,
   jiraOauthSecretName,
+  parseStoredJiraOauthToken,
   refreshAccessToken,
   StoredJiraOauthToken,
 } from '../jira-oauth';
@@ -55,9 +57,6 @@ const DEFAULT_LABEL_FILTER = 'bgagent';
  *  allows longer alphanumeric keys (and digits). Accept what Atlassian
  *  accepts at creation time. */
 const PROJECT_KEY_RE = /^[A-Z][A-Z0-9_]{1,99}$/;
-
-/** Alphabet used by {@link generateInviteCode}. */
-export const INVITE_CODE_ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
 
 /** Width of the ═ rule used to frame the setup banner. */
 const BANNER_WIDTH = 72;
@@ -263,57 +262,12 @@ function isWebhookSecretPlaceholder(value: string): boolean {
   }
 }
 
-export function generateInviteCode(): string {
-  const INVITE_CODE_RANDOM_BYTES = 8;
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { randomBytes } = require('crypto') as typeof import('crypto');
-  const bytes = randomBytes(INVITE_CODE_RANDOM_BYTES);
-  let out = 'link-';
-  for (const b of bytes) {
-    out += INVITE_CODE_ALPHABET[b % INVITE_CODE_ALPHABET.length];
-  }
-  return out;
-}
-
 interface JiraUserSearchResult {
   readonly accountId?: string;
   readonly displayName?: string;
   readonly emailAddress?: string;
   readonly active?: boolean;
   readonly accountType?: string;
-}
-
-function parseStoredJiraOauthToken(secretString: string | undefined, secretId: string): StoredJiraOauthToken {
-  if (!secretString) {
-    throw new CliError(`OAuth secret '${secretId}' has no SecretString. Re-run \`bgagent jira setup\`.`);
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(secretString);
-  } catch {
-    throw new CliError(`OAuth secret '${secretId}' is not valid JSON. Re-run \`bgagent jira setup\`.`);
-  }
-  if (typeof parsed !== 'object' || parsed === null) {
-    throw new CliError(`OAuth secret '${secretId}' has an unexpected shape. Re-run \`bgagent jira setup\`.`);
-  }
-  const obj = parsed as Record<string, unknown>;
-  const required = [
-    'access_token',
-    'refresh_token',
-    'expires_at',
-    'client_id',
-    'client_secret',
-    'cloud_id',
-    'site_url',
-  ];
-  const missing = required.filter((key) => typeof obj[key] !== 'string' || (obj[key] as string).length === 0);
-  if (missing.length > 0) {
-    throw new CliError(
-      `OAuth secret '${secretId}' is missing required field${missing.length === 1 ? '' : 's'} ${missing.join(', ')}. `
-      + `Re-run \`bgagent jira setup\` for tenant '${String(obj.cloud_id ?? 'unknown')}'.`,
-    );
-  }
-  return parsed as StoredJiraOauthToken;
 }
 
 function isJiraUser(value: unknown): value is JiraUserSearchResult {
@@ -859,6 +813,19 @@ export function makeJiraCommand(): Command {
         } catch (err) {
           console.log(' ✗');
           throw err;
+        }
+
+        // Warn (don't block) if this Jira identity is already linked, so the
+        // admin knows a fresh invite will re-link an existing teammate. The
+        // active row key mirrors the jira-link handler: `<cloudId>#<accountId>`.
+        const existing = await ddb.send(new GetCommand({
+          TableName: userMappingTable!,
+          Key: { jira_identity: `${cloudId}#${picked.accountId}` },
+        }));
+        if (existing.Item && existing.Item.status === 'active') {
+          console.log();
+          console.log(`  ⚠ ${formatJiraUserLabel(picked)} is already linked in this tenant.`);
+          console.log('    Redeeming this code will re-link them to whoever runs `bgagent jira link`.');
         }
 
         const code = generateInviteCode();
