@@ -127,10 +127,14 @@ pythonpath = ["src"]
 # unmocked network/subprocess/Bedrock call with no timeout of its own) otherwise
 # hangs the whole `mise run build` until the 3600s build-verify ceiling kills it,
 # turning one flaky test into an un-diagnosable 60-min stall (ABCA-684/686). With
-# this, the offending test fails with a dumped stack in 120s and the suite moves
-# on. `thread` method works without SIGALRM restrictions in threads/containers.
+# this, the offending test fails with a dumped stack in 120s and the suite moves on.
+# method="signal" (SIGALRM) actually ABORTS the hung test — pytest runs
+# single-threaded in the main thread here, so the alarm interrupts even a blocked
+# C-level/socket call. method="thread" only PRINTS the stack and cannot interrupt a
+# syscall-blocked test (proven live on ABCA-688: the thread method dumped the stack
+# but the build kept hanging ~55 min until the 3600s ceiling). signal is the real fix.
 timeout = 120
-timeout_method = "thread"
+timeout_method = "signal"
 
 [tool.coverage.run]
 branch = true
