@@ -40,8 +40,17 @@ run = ["mkdir -p $TMPDIR", "yarn synth:quiet"]
 description = "cdk deploy (pass args after --)"
 run = "npx cdk deploy"
 
+# Bootstraps with ComputeTypes=agentcore (the template default). To ALSO enable the
+# ECS compute backend you must set the ComputeTypes CFN *parameter* — `cdk bootstrap`
+# has no way to pass template parameters (no --parameters flag; --context sets CDK
+# construct context, NOT a CFN parameter), so run this task once, then set the
+# parameter directly on the CDKToolkit stack:
+#   aws cloudformation update-stack --stack-name CDKToolkit --use-previous-template \
+#     --capabilities CAPABILITY_NAMED_IAM \
+#     --parameters ParameterKey=ComputeTypes,ParameterValue=agentcore\,ecs
+#   # verify: aws cloudformation describe-stacks --stack-name CDKToolkit --query 'Stacks[0].Parameters'
 [tasks.bootstrap]
-description = "Bootstrap CDK with least-privilege policies (pass -- --context ComputeTypes=agentcore,ecs for ECS)"
+description = "Bootstrap CDK with least-privilege policies (ComputeTypes=agentcore; for ECS set the ComputeTypes CFN param on CDKToolkit — see comment above the task)"
 depends = [":install", ":bootstrap:generate"]
 run = "npx cdk bootstrap --template bootstrap/bootstrap-template.yaml"
 
