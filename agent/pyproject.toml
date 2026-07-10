@@ -49,6 +49,14 @@ dependencies = [
     "jsonschema==4.26.0", #https://pypi.org/project/jsonschema/
 ]
 
+# The uv-missing-dependency-cooldown rule wants a global exclude-newer window.
+# We intentionally do NOT set one: deps are exact-pinned (==) and lockfile-managed
+# via upgrade-main.yml, and a global cooldown conflicts with fresh exact pins
+# (fastapi/bedrock-agentcore/boto3 were published within the last week) — it makes
+# `uv sync` unsatisfiable and re-breaks on every pin bump. The rule's threat model
+# (surprise malicious/unstable version) is already covered by exact pins + reviewed
+# lock upgrades. See #532.
+# nosemgrep: uv-missing-dependency-cooldown
 [tool.uv]
 constraint-dependencies = [
     "pyjwt>=2.13.0",  # PYSEC-2026-175/177/178/179 — transitive via mcp; remove when mcp bumps floor (#267)
