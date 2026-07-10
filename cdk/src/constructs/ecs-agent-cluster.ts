@@ -254,16 +254,19 @@ export class EcsAgentCluster extends Construct {
       BUILD_VERIFY_TIMEOUT_S: '3600',
       // Cap the ABCA cdk-test jest fleet to an ABSOLUTE worker count on ECS.
       // jest `maxWorkers: 25%` is CORE-relative, and each worker holds a full
-      // ~700-resource CDK stack synth in memory. On this 16-vCPU box 25% = 4
-      // workers, and 4 concurrent synths + the resident agent blew past the
-      // 120 GB cap → OOM exit 137 (live-caught: MemoryUtilized pinned at
-      // 122879/122880 for 8 min). The box is big FOR SPEED, but core-relative
-      // workers turned that into a memory blow-up. An absolute cap of 2 decouples
-      // peak RAM from core count (the exact "cap jest workers" the sizing comment
-      // above anticipated). The ABCA test script reads JEST_MAX_WORKERS with a
-      // 25% default, so this ONLY tightens the big shared ECS box — CI (2–4 cores,
-      // ~16 GB) and dev machines keep 25% and are unaffected.
-      JEST_MAX_WORKERS: '2',
+      // ~700-resource CDK stack synth in memory (~15-18 GB/worker). On this
+      // 16-vCPU box 25% = 4 workers, and 4 concurrent synths + the resident agent
+      // blew past the 120 GB cap → OOM exit 137 (live-caught ABCA-685:
+      // MemoryUtilized pinned 122879/122880 for 8 min). An absolute cap decouples
+      // peak RAM from core count (the "cap jest workers" the sizing comment above
+      // anticipated). Empirical envelope: 2 workers ran clean (ABCA-687); 4 OOM'd
+      // (ABCA-685). 3 is the measured-safe bump — ~50% more parallelism on the
+      // DOMINANT phase (cdk:test is ~99% of build wall-clock, 3099 tests / ~156s
+      // at 4 local workers) while staying clearly under the OOM level. Raise to 4
+      // only if a live MemoryUtilized curve shows headroom. The ABCA test script
+      // reads JEST_MAX_WORKERS (default 25%), so this ONLY tightens the big shared
+      // ECS box — CI (2–4 cores, ~16 GB) and dev machines keep 25%, unaffected.
+      JEST_MAX_WORKERS: '3',
     }, BUILD_TASK_EPHEMERAL_STORAGE_GIB);
 
     // PLANNING task def (#299 ECS_RIGHTSIZED_PLANNING) — for read-only workflows
