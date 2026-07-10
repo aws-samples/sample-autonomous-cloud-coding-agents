@@ -266,6 +266,20 @@ export class EcsAgentCluster extends Construct {
       // JEST_MAX_WORKERS (default 25%), so this only pins the shared ECS box — CI
       // (2–4 cores) and dev machines keep 25%, unaffected.
       JEST_MAX_WORKERS: '4',
+      // Skip the target repo's pre-push TEST hook inside the agent container.
+      // `mise run install` installs prek git hooks, incl. a pre-push hook that
+      // re-runs the FULL cdk+cli+agent test suite on every `git push`. In this
+      // container that suite already ran TWICE (baseline + post-agent build gate)
+      // and GitHub CI runs it again — so the pre-push run is pure redundancy, AND
+      // it runs UNcapped (no JEST_MAX_WORKERS), stacking on the resident agent →
+      // OOM. The agent's only escape was `git push --no-verify`, which silently
+      // bypassed ALL hooks (incl. the security scan) and trained a
+      // skip-verification habit. SKIP is the pre-commit/prek standard env var
+      // (comma-separated hook ids); scoping it to the tests hook lets the push
+      // succeed WITHOUT --no-verify while KEEPING the pre-push security scan.
+      // Propagates to both the platform push (post_hooks.py) and the agent's own
+      // git-tool pushes via shell.py::_clean_env (blacklist — passes SKIP through).
+      SKIP: 'monorepo-tests-pre-push',
     }, BUILD_TASK_EPHEMERAL_STORAGE_GIB);
 
     // PLANNING task def (#299 ECS_RIGHTSIZED_PLANNING) — for read-only workflows
