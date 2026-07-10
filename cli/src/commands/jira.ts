@@ -830,21 +830,33 @@ export function makeJiraCommand(): Command {
 
         const code = generateInviteCode();
         const ttl = Math.floor(Date.now() / 1000) + 24 * 60 * 60;
-        await ddb.send(new PutCommand({
-          TableName: userMappingTable!,
-          Item: {
-            jira_identity: `pending#${code}`,
-            status: 'pending',
-            jira_cloud_id: cloudId,
-            jira_site_url: siteUrl,
-            jira_account_id: picked.accountId,
-            jira_user_name: picked.displayName ?? '',
-            jira_user_email: picked.emailAddress ?? '',
-            invited_at: new Date().toISOString(),
-            invited_by_platform_user_id: callerCognitoSub,
-            ttl,
-          },
-        }));
+        try {
+          await ddb.send(new PutCommand({
+            TableName: userMappingTable!,
+            // Guard against clobbering an existing pending invite on the
+            // (astronomically unlikely) chance the generated code collides.
+            // Better to fail loudly and let the admin re-run than silently
+            // overwrite a still-valid code.
+            ConditionExpression: 'attribute_not_exists(jira_identity)',
+            Item: {
+              jira_identity: `pending#${code}`,
+              status: 'pending',
+              jira_cloud_id: cloudId,
+              jira_site_url: siteUrl,
+              jira_account_id: picked.accountId,
+              jira_user_name: picked.displayName ?? '',
+              jira_user_email: picked.emailAddress ?? '',
+              invited_at: new Date().toISOString(),
+              invited_by_platform_user_id: callerCognitoSub,
+              ttl,
+            },
+          }));
+        } catch (err) {
+          if ((err as { name?: string }).name === 'ConditionalCheckFailedException') {
+            throw new CliError(`Invite code '${code}' collided with an existing invite. Re-run the command to mint a fresh code.`);
+          }
+          throw err;
+        }
 
         console.log();
         console.log('✅ Invite created.');

@@ -616,6 +616,51 @@ describe('jira invite-user action', () => {
     expect(ddbSend).toHaveBeenCalledTimes(1);
   });
 
+  test('guards the pending row against code collisions with a conditional put', async () => {
+    mockRegistryAndSecret();
+    const fetchMock = jest.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ accountId: 'acct-1', displayName: 'Maya K', active: true, accountType: 'atlassian' }),
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await runInvite(['cloud-123', 'acct-1']);
+
+    const putCmd = ddbSend.mock.calls[2][0] as PutCommand;
+    expect(putCmd.input.ConditionExpression).toBe('attribute_not_exists(jira_identity)');
+  });
+
+  test('surfaces an actionable error when the generated code collides', async () => {
+    ddbSend
+      .mockResolvedValueOnce({
+        Item: {
+          jira_cloud_id: 'cloud-123',
+          site_url: 'https://acme.atlassian.net',
+          oauth_secret_arn: 'arn:jira-oauth',
+          status: 'active',
+        },
+      })
+      .mockResolvedValueOnce({}) // existing-link lookup: not linked
+      .mockRejectedValueOnce(Object.assign(new Error('conditional check failed'), {
+        name: 'ConditionalCheckFailedException',
+      }));
+    smSend.mockResolvedValueOnce({
+      SecretString: JSON.stringify(sampleToken({
+        cloud_id: 'cloud-123',
+        expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      })),
+    });
+    const fetchMock = jest.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ accountId: 'acct-1', displayName: 'Maya K', active: true, accountType: 'atlassian' }),
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(runInvite(['cloud-123', 'acct-1'])).rejects.toThrow(/collided with an existing invite/);
+  });
+
   test('fails with an actionable error when the OAuth secret is malformed JSON', async () => {
     ddbSend.mockResolvedValueOnce({
       Item: {
