@@ -645,6 +645,11 @@ export class AgentStack extends Stack {
         userConcurrencyTable: userConcurrencyTable.table,
         githubTokenSecret,
         memoryId: agentMemory.memory.memoryId,
+        // F-2 ECS-parity: pass the Memory construct (not just its id) so the task
+        // role gets grantReadWrite — MEMORY_ID alone makes the agent ATTEMPT the
+        // write, which fails closed (bedrock-agentcore:CreateEvent AccessDenied)
+        // without this grant. The AgentCore runtime gets the equivalent at :457.
+        agentMemory,
         // #502: read-only grant so the container can fetch its payload from S3.
         payloadBucket: ecsPayloadBucket!.bucket,
         // #299 ECS-parity: the same bucket the runtime uses for ARTIFACTS_BUCKET_NAME —

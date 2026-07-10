@@ -41,6 +41,21 @@ export interface EcsAgentClusterProps {
   readonly memoryId?: string;
 
   /**
+   * Cross-task AgentCore Memory (ABCA-488-class / F-2 ECS-parity). Passing
+   * ``memoryId`` alone wires ``MEMORY_ID`` into the container so the agent
+   * ATTEMPTS episodic/semantic writes — but the write uses the task role's
+   * ambient credentials, so without an IAM grant the write fails closed with
+   * ``AccessDeniedException … bedrock-agentcore:CreateEvent`` (live-caught on the
+   * fork: ``memory_written: false``, both write_task_episode + write_repo_learnings
+   * denied). The AgentCore runtime gets the equivalent grant via
+   * ``agentMemory.grantReadWrite(runtime)``; the ECS task role needs the SAME.
+   * Passing the construct (not just the id) lets us grant read+write here.
+   * Omitted in isolated construct tests → no grant (and no MEMORY_ID unless
+   * ``memoryId`` is also passed).
+   */
+  readonly agentMemory?: { grantReadWrite(grantee: iam.IGrantable): void };
+
+  /**
    * S3 bucket holding per-task ECS payloads (#502). The orchestrator writes the
    * payload (incl. the large hydrated_context, which can't fit in the 8 KB
    * RunTask containerOverrides limit) here and passes only an
@@ -324,6 +339,18 @@ export class EcsAgentCluster extends Construct {
     // this bucket. Stays on the task role — delivery is a terminal step.
     if (props.artifactsBucket) {
       props.artifactsBucket.grantReadWrite(taskRole);
+    }
+
+    // F-2 ECS-parity: grant the task role read+write on the cross-task AgentCore
+    // Memory. MEMORY_ID in the container env makes the agent ATTEMPT episodic +
+    // semantic writes; those calls (bedrock-agentcore:CreateEvent et al.) use the
+    // task role's ambient creds, so without this grant they fail closed with
+    // AccessDeniedException and cross-task learning silently no-ops on ECS
+    // (memory_written: false — live-caught on the fork). Mirrors the AgentCore
+    // runtime's own agentMemory.grantReadWrite(runtime). Stays on the task role
+    // (the memory write is a terminal step, not gated behind the SessionRole).
+    if (props.agentMemory) {
+      props.agentMemory.grantReadWrite(taskRole);
     }
 
     // ABCA-488: per-workspace Linear/Jira OAuth tokens live in Secrets Manager
