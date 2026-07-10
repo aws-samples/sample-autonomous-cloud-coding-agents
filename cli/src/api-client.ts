@@ -22,10 +22,13 @@ import { loadConfig } from './config';
 import { debug, isVerbose, redactSensitive } from './debug';
 import { ApiError, CliError } from './errors';
 import {
+  ApiKeyDetail,
   ApprovalRequest,
   ApprovalResponse,
   ApprovalScope,
   CancelTaskResponse,
+  CreateApiKeyRequest,
+  CreateApiKeyResponse,
   CreateTaskRequest,
   CreateTaskResponse,
   CreateWebhookRequest,
@@ -49,9 +52,26 @@ import {
   WebhookDetail,
 } from './types';
 
+/** Options for constructing an {@link ApiClient}. */
+export interface ApiClientOptions {
+  /**
+   * Platform API key to authenticate with instead of a Cognito session.
+   * When set (or when `BGAGENT_API_KEY` is in the environment), requests carry
+   * the `X-API-Key` header and no `bgagent login` is required. Only the
+   * endpoints the key is scoped for will succeed (Phase 1: `webhooks:manage`).
+   */
+  readonly apiKey?: string;
+}
+
 /** HTTP client for the Background Agent REST API. */
 export class ApiClient {
   private baseUrl: string | undefined;
+
+  private readonly apiKey: string | undefined;
+
+  constructor(options: ApiClientOptions = {}) {
+    this.apiKey = options.apiKey ?? process.env.BGAGENT_API_KEY ?? undefined;
+  }
 
   private getBaseUrl(): string {
     if (!this.baseUrl) {
@@ -69,7 +89,10 @@ export class ApiClient {
     headers?: Record<string, string>,
     signal?: AbortSignal,
   ): Promise<T> {
-    const token = await getAuthToken();
+    // API-key mode skips Cognito entirely: no cached token, no refresh.
+    const authHeaders: Record<string, string> = this.apiKey
+      ? { 'X-API-Key': this.apiKey }
+      : { Authorization: await getAuthToken() };
     const url = `${this.getBaseUrl()}${path}`;
 
     debug(`${method} ${url}`);
@@ -82,7 +105,7 @@ export class ApiClient {
     const res = await fetch(url, {
       method,
       headers: {
-        'Authorization': token,
+        ...authHeaders,
         'Content-Type': 'application/json',
         ...headers,
       },
@@ -419,6 +442,34 @@ export class ApiClient {
   /** DELETE /webhooks/{webhook_id} — revoke a webhook. */
   async revokeWebhook(webhookId: string): Promise<WebhookDetail> {
     const res = await this.request<SuccessResponse<WebhookDetail>>('DELETE', `/webhooks/${encodeURIComponent(webhookId)}`);
+    return res.data;
+  }
+
+  /** POST /api-keys — mint a new platform API key (Cognito-authenticated). */
+  async createApiKey(req: CreateApiKeyRequest): Promise<CreateApiKeyResponse> {
+    const res = await this.request<SuccessResponse<CreateApiKeyResponse>>('POST', '/api-keys', req);
+    return res.data;
+  }
+
+  /** GET /api-keys — list platform API keys. */
+  async listApiKeys(opts?: {
+    includeRevoked?: boolean;
+    limit?: number;
+    nextToken?: string;
+  }): Promise<PaginatedResponse<ApiKeyDetail>> {
+    const params = new URLSearchParams();
+    if (opts?.includeRevoked) params.set('include_revoked', 'true');
+    if (opts?.limit) params.set('limit', String(opts.limit));
+    if (opts?.nextToken) params.set('next_token', opts.nextToken);
+
+    const qs = params.toString();
+    const path = `/api-keys${qs ? `?${qs}` : ''}`;
+    return this.request<PaginatedResponse<ApiKeyDetail>>('GET', path);
+  }
+
+  /** DELETE /api-keys/{key_id} — revoke a platform API key. */
+  async revokeApiKey(keyId: string): Promise<ApiKeyDetail> {
+    const res = await this.request<SuccessResponse<ApiKeyDetail>>('DELETE', `/api-keys/${encodeURIComponent(keyId)}`);
     return res.data;
   }
 

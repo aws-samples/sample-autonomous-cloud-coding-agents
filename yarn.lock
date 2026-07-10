@@ -3637,6 +3637,11 @@ aws-cdk@^2:
   resolved "https://registry.yarnpkg.com/aws-cdk/-/aws-cdk-2.1128.1.tgz#6887a7089de63f5d79526b0dfdf045129ae82ea5"
   integrity sha512-y9OHn5/BOcIiq409vPvpypMIr7/8M1ScFe8IkFMSCN1/GI/5c73fQ4pfzNq+VDkj86T5zxs7BQ1qU2lQQytdXA==
 
+aws-jwt-verify@^5.2.1:
+  version "5.2.1"
+  resolved "https://registry.yarnpkg.com/aws-jwt-verify/-/aws-jwt-verify-5.2.1.tgz#d96e529a4a87ad96d39df09ab3d334b615fe40e0"
+  integrity sha512-J+buA4M+qvQDk58WXFBLkDodkEX3DDL1ac5XFQPW3opxAsaLXYu5hYnlSHsaBRDBUXBAn695kE/cw/mdyJKwJg==
+
 axobject-query@^4.1.0:
   version "4.1.0"
   resolved "https://registry.yarnpkg.com/axobject-query/-/axobject-query-4.1.0.tgz#28768c76d0e3cff21bc62a9e2d0b6ac30042a1ee"
