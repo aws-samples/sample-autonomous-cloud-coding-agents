@@ -252,21 +252,20 @@ export class EcsAgentCluster extends Construct {
     this.taskDefinition = makeTaskDef('TaskDef', BUILD_TASK_CPU, BUILD_TASK_MEMORY_MIB, {
       // Heavy CI-parity builds legitimately run longer than the 1800s default.
       BUILD_VERIFY_TIMEOUT_S: '3600',
-      // Cap the ABCA cdk-test jest fleet to an ABSOLUTE worker count on ECS.
-      // jest `maxWorkers: 25%` is CORE-relative, and each worker holds a full
-      // ~700-resource CDK stack synth in memory (~15-18 GB/worker). On this
-      // 16-vCPU box 25% = 4 workers, and 4 concurrent synths + the resident agent
-      // blew past the 120 GB cap → OOM exit 137 (live-caught ABCA-685:
-      // MemoryUtilized pinned 122879/122880 for 8 min). An absolute cap decouples
-      // peak RAM from core count (the "cap jest workers" the sizing comment above
-      // anticipated). Empirical envelope: 2 workers ran clean (ABCA-687); 4 OOM'd
-      // (ABCA-685). 3 is the measured-safe bump — ~50% more parallelism on the
-      // DOMINANT phase (cdk:test is ~99% of build wall-clock, 3099 tests / ~156s
-      // at 4 local workers) while staying clearly under the OOM level. Raise to 4
-      // only if a live MemoryUtilized curve shows headroom. The ABCA test script
-      // reads JEST_MAX_WORKERS (default 25%), so this ONLY tightens the big shared
-      // ECS box — CI (2–4 cores, ~16 GB) and dev machines keep 25%, unaffected.
-      JEST_MAX_WORKERS: '3',
+      // Pin the ABCA cdk-test jest fleet to an ABSOLUTE worker count on ECS.
+      // jest `maxWorkers: 25%` is CORE-relative → 4 workers on this 16-vCPU box.
+      // MEASURED: cdk:test at 4 workers peaks at only ~2.2 GB (whole process tree,
+      // sampled locally on a 16 GB Mac with no swap) — NOT the tens-of-GB once
+      // assumed. The ABCA-685 OOM was NOT cdk:test's worker count; it was TOTAL
+      // concurrency — full-parallel mise ran cdk:test + agent:test + cli + docs +
+      // cdk:synth + the resident coding agent all at once. So the real memory
+      // driver is cross-package build parallelism, not jest's internal workers.
+      // 4 is therefore comfortably safe on the 120 GB box even alongside the other
+      // packages + agent. Kept as an explicit env (not core-relative) so a future
+      // bigger box can't silently over-spawn. The ABCA test script reads
+      // JEST_MAX_WORKERS (default 25%), so this only pins the shared ECS box — CI
+      // (2–4 cores) and dev machines keep 25%, unaffected.
+      JEST_MAX_WORKERS: '4',
     }, BUILD_TASK_EPHEMERAL_STORAGE_GIB);
 
     // PLANNING task def (#299 ECS_RIGHTSIZED_PLANNING) — for read-only workflows
