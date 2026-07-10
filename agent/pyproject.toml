@@ -135,6 +135,17 @@ pythonpath = ["src"]
 # but the build kept hanging ~55 min until the 3600s ceiling). signal is the real fix.
 timeout = 120
 timeout_method = "signal"
+# faulthandler backstop for hangs signal-timeout CANNOT interrupt. SIGALRM only
+# fires in the MAIN thread during a test's call phase, so a hang in a WORKER
+# thread (a deadlocked Barrier/join), a fixture, or a C-level socket read the
+# main thread never returns from is invisible to it — exactly the ECS-only stall
+# chased across ABCA-684/686/688 and again on the warm-cache run (53 min of
+# silence, signal never fired). This arms faulthandler's dedicated C watchdog
+# thread (immune to the GIL and blocked syscalls) to dump EVERY thread's Python
+# stack after 300s in a test, so the next hang self-reports the exact file:line
+# instead of stalling blind to the 3600s build ceiling. A session-level
+# hard-exit watchdog for hangs OUTSIDE any test lives in tests/conftest.py.
+faulthandler_timeout = 300
 
 [tool.coverage.run]
 branch = true
