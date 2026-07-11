@@ -338,6 +338,27 @@ describe('EcsAgentCluster construct', () => {
     });
   });
 
+  test('build def caps build parallelism to prevent OOM (K14 / ABCA-691)', () => {
+    // The build task def serializes the mise DAG (MISE_JOBS=1) and pins the jest
+    // fleet (JEST_MAX_WORKERS=4) so the cross-package build storm can't OOM the
+    // box while the coding agent is still resident. Asserted per-var (one
+    // arrayWith objectLike each): a single arrayWith with multiple objectLike
+    // entries is matched unreliably by the CDK assertions matcher, so each env
+    // var gets its own hasResourceProperties call — which also pins each to the
+    // SAME build container (the one carrying BUILD_VERIFY_TIMEOUT_S).
+    const envHas = (name: string, value: string) =>
+      baseTemplate.hasResourceProperties('AWS::ECS::TaskDefinition', {
+        ContainerDefinitions: Match.arrayWith([
+          Match.objectLike({
+            Environment: Match.arrayWith([Match.objectLike({ Name: name, Value: value })]),
+          }),
+        ]),
+      });
+    envHas('MISE_JOBS', '1');
+    envHas('JEST_MAX_WORKERS', '4');
+    envHas('BUILD_VERIFY_TIMEOUT_S', '3600');
+  });
+
   test('includes MEMORY_ID in container env when provided', () => {
     const { template } = createStack({ memoryId: 'mem-test-123' });
     template.hasResourceProperties('AWS::ECS::TaskDefinition', {

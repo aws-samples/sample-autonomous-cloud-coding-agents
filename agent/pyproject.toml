@@ -123,6 +123,16 @@ ignore = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+# Non-TTY output ergonomics. In a captured/piped context (the ECS build gate, CI,
+# an agent's Bash tool) pytest's default is a wall of featureless progress dots
+# with the "N passed" summary easy to lose in a tail — live-caught on ABCA-691,
+# where an agent burned ~6 turns re-running the full suite with different flags
+# because it couldn't confirm the result from the dots. ``count`` renders progress
+# as an explicit "N/M passed" so a captured log always shows how far it got and how
+# many passed; ``-ra`` appends a short summary of every non-passing outcome (with
+# reasons) at the end. Both are display-only — they never change test results.
+addopts = "-ra"
+console_output_style = "count"
 # pytest-timeout: hard wall-clock cap PER TEST. A unit test that blocks (an
 # unmocked network/subprocess/Bedrock call with no timeout of its own) otherwise
 # hangs the whole `mise run build` until the 3600s build-verify ceiling kills it,

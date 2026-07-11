@@ -281,6 +281,26 @@ export class EcsAgentCluster extends Construct {
       // JEST_MAX_WORKERS (default 25%), so this only pins the shared ECS box — CI
       // (2–4 cores) and dev machines keep 25%, unaffected.
       JEST_MAX_WORKERS: '4',
+      // Serialize the mise task DAG (K14 OOM prevention). `mise run build` fans
+      // out its `depends` (agent:quality ‖ cdk:build ‖ cli:build ‖ docs:build) up
+      // to MISE_JOBS in parallel (default 4); each package then spawns its OWN
+      // worker fleet (jest, pytest, esbuild, cdk synth). The MEASURED memory
+      // driver of the 32/64/120 GB OOMs was this CROSS-PACKAGE storm summing on
+      // top of the resident coding agent — not any single package. At 120 GB
+      // (Fargate's max at 16 vCPU) there is no more RAM to add, so the documented
+      // remedy is to cut peak parallelism. MISE_JOBS=1 runs the four packages
+      // SEQUENTIALLY → peak ≈ max(single package) instead of sum(all four),
+      // while still building every package and keeping BOTH gates (baseline +
+      // post-agent). Within-package parallelism (JEST_MAX_WORKERS=4, pytest) is
+      // untouched, so a single package still uses the box's cores. Cost is
+      // wall-clock (~serial sum, still minutes) — trivial against
+      // BUILD_VERIFY_TIMEOUT_S=3600. Live-caught on ABCA-691: the POST-agent
+      // build OOM'd (exit 137) stacking on the still-resident agent; the platform
+      // now classifies that 137 as infra (non-gating) rather than a false build
+      // failure, but a gate that OOMs verified NOTHING — serializing lets it
+      // actually COMPLETE and gate. Only affects `mise run <task>` (the build
+      // legs); the agent's direct `uv run pytest` calls are unaffected.
+      MISE_JOBS: '1',
       // Skip the target repo's pre-push TEST hook inside the agent container.
       // `mise run install` installs prek git hooks, incl. a pre-push hook that
       // re-runs the FULL cdk+cli+agent test suite on every `git push`. In this
