@@ -197,6 +197,45 @@ class TestVerifyBuildHonorsCommand:
         assert outcome.passed is False
         assert outcome.infra_failed is True
 
+    def test_bare_sigkill_137_no_stderr_signature_is_INFRA_not_inert(self, monkeypatch):
+        # ABCA-691 live regression: the container/cgroup OOM-killer delivers
+        # SIGKILL and writes "Killed process …" to the KERNEL log, not the build
+        # process's own stderr — so an OOM'd `mise run build` exits 137 with NO
+        # "killed"/"out of memory" string captured. Such a 137 was mislabeled
+        # INERT (the greedy `mise`+`not found` heuristic matched an unrelated
+        # webhook-test fixture line in the big streamed log). A bare 137 must be
+        # INFRA (retry/capacity), never inert (config) and never a build failure.
+        mise_and_notfound = (
+            "[//agent:test] tests/test_attachments.py ...\n"
+            "[//cdk:test] Linear project is not found — skipping\n"
+            "ERROR task failed"
+        )
+        monkeypatch.setattr(
+            post_hooks,
+            "run_cmd",
+            lambda argv, **kw: SimpleNamespace(returncode=137, stderr=mise_and_notfound),
+        )
+        outcome = verify_build("/repo", "mise run build")
+        assert outcome.passed is False
+        assert outcome.infra_failed is True
+        assert outcome.inert is False  # infra checked BEFORE inert
+
+    def test_bare_sigkill_137_plain_output_is_INFRA_not_a_build_failure(self, monkeypatch):
+        # The dangerous fall-through: a 137 whose captured output trips NEITHER the
+        # inert nor OOM string heuristics would have been reported as a GENUINE
+        # build FAILURE → a false gate blocking healthy code (and, in an epic,
+        # poisoning the dependent cascade). SIGKILL is a resource kill, not a
+        # test result, so it must be infra.
+        monkeypatch.setattr(
+            post_hooks,
+            "run_cmd",
+            lambda argv, **kw: SimpleNamespace(returncode=137, stderr="compiling...\naborting"),
+        )
+        outcome = verify_build("/repo", "mise run build")
+        assert outcome.passed is False
+        assert outcome.infra_failed is True
+        assert outcome.inert is False
+
 
 class TestIsVerifyCommandInert:
     def test_mise_no_tasks_defined_is_inert(self):

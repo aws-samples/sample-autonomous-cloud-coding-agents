@@ -116,19 +116,24 @@ def is_infra_failure(returncode: int, stderr: str) -> bool:
     Live-caught on ABCA-659: 3 concurrent ABCA builds filled the 20 GiB Fargate
     root fs → ``ENOSPC: no space left on device`` mid-build → bogus build-fail.
 
-    Conservative — only the unambiguous ENOSPC / OOM signatures, or a SIGKILL
-    (137) accompanied by one of them (a bare 137 alone is left to the timeout /
-    genuine-failure paths, since a test can also be SIGKILLed for other reasons).
+    A bare SIGKILL (137) with no accompanying signature is ALSO treated as infra:
+    the container-runtime / cgroup OOM-killer delivers SIGKILL and writes its
+    "Killed process …" line to the KERNEL log, not the build process's own stderr,
+    so an OOM'd `mise run build` frequently exits 137 with NO "killed"/"out of
+    memory" string captured (live-caught on ABCA-691: a post-agent build OOM at
+    137 fell through to the inert heuristic and was mislabeled "command not
+    found"; a 137 with plain build output would fall through to a GENUINE build
+    FAILURE → a false gate on healthy code). SIGKILL is never something a healthy
+    `mise run build` does to itself — a real test failure exits with the runner's
+    own non-zero code (1/2), not 137. So 137 ⇒ resource kill ⇒ infra, and this is
+    checked BEFORE the inert/genuine-failure paths in ``_run_verify``.
     """
     s = (stderr or "").lower()
     disk_full = "no space left on device" in s or "enospc" in s or "errno 28" in s
-    oom = (
-        "out of memory" in s
-        or "oomkilled" in s
-        or "cannot allocate memory" in s
-        or ("killed" in s and returncode == SIGKILL_EXIT)
-    )
-    return disk_full or oom
+    oom = "out of memory" in s or "oomkilled" in s or "cannot allocate memory" in s
+    # A SIGKILL (137) is a resource/OOM kill by the runtime, not a build result —
+    # infra regardless of what (if anything) reached the captured stderr.
+    return disk_full or oom or returncode == SIGKILL_EXIT
 
 
 # Shell metacharacters that mean the command can't be a single argv exec and
