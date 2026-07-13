@@ -59,7 +59,7 @@ export interface AgentMemoryProps {
  *   The extraction strategies use namespace templates to place extracted records
  *   into hierarchical paths keyed by repository:
  *
- *   - Semantic: `/{actorId}/knowledge/`  →  e.g. `/krokoko/agent-plugins/knowledge/`
+ *   - Semantic: `/{actorId}/knowledge/`  →  e.g. `/awslabs/agent-plugins/knowledge/`
  *   - Episodic: `/{actorId}/episodes/{sessionId}/`  →  per-task episodes
  *   - Episodic reflection: `/{actorId}/episodes/`  →  cross-task summaries
  */

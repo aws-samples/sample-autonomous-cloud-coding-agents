@@ -188,7 +188,7 @@ class TestStopHookHonoursCancel:
 
 
 class TestCancelShortCircuitsNudgeConsumption:
-    """Regression for krokoko PR #52 review finding #3.
+    """Regression for cancel-before-nudge short-circuit.
 
     Before the fix, :func:`stop_hook` iterated ALL between-turns hooks BEFORE
     checking ``_cancel_requested`` — so when cancel fired, the nudge hook had

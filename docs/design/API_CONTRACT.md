@@ -65,6 +65,7 @@ The gateway extracts `user_id` from the authenticated identity and attaches it t
 | `POST` | `/v1/tasks/{task_id}/deny` | Cognito | Deny a paused Cedar HITL gate (returns `202`) |
 | `POST` | `/v1/tasks/{task_id}/nudge` | Cognito | Send a mid-run nudge message to a running agent (returns `202`) |
 | `GET` | `/v1/tasks/{task_id}/trace` | Cognito | Get a presigned download URL for the task's `--trace` artifact |
+| `GET` | `/v1/tasks/{task_id}/replay` | Cognito | Get an aggregated operator replay bundle for a task |
 | `GET` | `/v1/pending` | Cognito | List the caller's pending approval requests |
 | `GET` | `/v1/repos/{repo_id}/policies` | Cognito | List the repo's Cedar hard/soft policy rules |
 | `POST` | `/v1/webhooks` | Cognito | Create webhook integration |
@@ -328,6 +329,8 @@ Returns the audit trail for a task: state transitions, hydration events, session
 
 **Event types:** `task_created`, `uploads_confirmed`, `attachment_blocked`, `admission_rejected`, `preflight_failed`, `hydration_started`, `hydration_complete`, `session_started`, `pr_created`, `task_completed`, `task_failed`, `task_cancelled`, `task_timed_out`. Custom blueprint steps emit `{step_name}_started`, `{step_name}_completed`, `{step_name}_failed`. (There is no `admission_passed` or `session_ended` event — admission success is implicit in the subsequent `hydration_started`, and session end is captured by the terminal event.)
 
+**Correlation envelope (#245):** each event optionally carries top-level `user_id`, `repo`, and `trace_id` (the agent's OTEL trace id) so the event stream joins to structured logs and X-Ray. Each field is present only when the event's source stamped it — `task_created` predates the envelope and carries none; events from `hydration_started` onward carry `user_id`/`repo`, and agent-emitted events additionally carry `trace_id`. Fields are omitted (not `null`) when absent. See [OBSERVABILITY.md](./OBSERVABILITY.md#correlation-envelope).
+
 **Errors:** `401 UNAUTHORIZED`, `403 FORBIDDEN`, `404 TASK_NOT_FOUND`.
 
 ### Approve / deny a Cedar HITL gate
@@ -396,6 +399,51 @@ Issues a short-lived presigned download URL for the task's `--trace` trajectory 
 **Response: `200 OK`** — `{ "data": { "url": "https://s3...", "expires_at": "2025-03-15T10:40:00Z" } }`.
 
 **Errors:** `401 UNAUTHORIZED`, `403 FORBIDDEN`, `404 TASK_NOT_FOUND`, `404 TRACE_NOT_AVAILABLE`.
+
+### Get replay bundle
+
+```
+GET /v1/tasks/{task_id}/replay
+```
+
+Returns a single operator-facing **replay bundle** that aggregates a task's existing telemetry — chronological `events`, verification verdict, `--trace` S3 URI, `prompt_version` / `workflow_ref`, OTEL correlation id, and cost — so a task can be post-mortem'd or fed to the eval harness without manually correlating CloudWatch, DynamoDB, and S3. It introduces no new persistence: every field is read from stores that already exist.
+
+Auth is identical to `GET /v1/tasks/{task_id}` — Cognito-authenticated and owner-scoped (the caller must own the task).
+
+Fields sourced from stores that may not have run for a given task are returned as `null`/empty rather than omitted, so consumers see a stable schema:
+
+- `trace_uri` is `null` when the task ran without `--trace` (or the upload had not completed).
+- `otel_trace_id` is `null` on tasks created before the field existed or that ran with tracing unavailable; `session_id` is the available correlation id in that case.
+- `verification` is `null` when no gate result was persisted (e.g. a repo-less workflow has no build/lint step).
+- The embedded `events` list is capped both by count (`MAX_REPLAY_EVENTS`) and by total size (`MAX_REPLAY_EVENT_BYTES`, to stay under Lambda's 6 MB response limit — relevant for `--trace` tasks whose events carry large previews); whichever cap trips first truncates the tail. When that happens, `events_truncation` is non-null (`{ reason: "max_events" | "max_bytes", returned_events }`) so a consumer can detect a partial list; it is `null` when the full list fit. Use `GET /v1/tasks/{task_id}/events` for the full paginated feed.
+- Each embedded event has the same shape as the `/events` feed — `event_id`, `event_type`, `timestamp`, `metadata` (always present, `{}` when the event stored none), and the optional correlation envelope (`user_id`, `repo`, `trace_id`) when the source stamped it; the internal `task_id`/`ttl` are stripped.
+
+**Response: `200 OK`**
+
+```json
+{
+  "data": {
+    "task_id": "01HZX...",
+    "workflow_ref": "coding/new-task-v1",
+    "resolved_workflow": { "id": "coding/new-task-v1", "version": "1" },
+    "prompt_version": "coding/new-task-v1@1",
+    "events": [
+      { "event_id": "01HZX...A", "event_type": "task_started", "timestamp": "2026-06-30T17:00:00.000Z", "metadata": {} }
+    ],
+    "events_truncation": null,
+    "verification": { "build_passed": true, "lint_passed": true },
+    "trace_uri": "s3://<trace-bucket>/traces/<user_id>/01HZX....jsonl.gz",
+    "otel_trace_id": "1a2b3c4d5e6f70819293a4b5c6d7e8f9",
+    "session_id": "sess-01HZX...",
+    "cost_usd": 0.0421,
+    "collected_at": "2026-06-30T17:05:00.000Z"
+  }
+}
+```
+
+A complete example is checked in at `cdk/test/fixtures/replay-bundle.example.json` (validated against the `ReplayBundle` type in the handler test). CLI: `bgagent replay <task-id> [--json] [--output <file>]`.
+
+**Errors:** `401 UNAUTHORIZED`, `400 VALIDATION_ERROR`, `403 FORBIDDEN`, `404 TASK_NOT_FOUND`, `500 INTERNAL_ERROR`.
 
 ## Webhook integration
 

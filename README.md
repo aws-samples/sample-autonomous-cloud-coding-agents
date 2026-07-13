@@ -58,7 +58,7 @@ For the full architecture, see [ARCHITECTURE.md](./docs/design/ARCHITECTURE.md).
 
 ABCA is under active development. The platform ships iteratively — each iteration adds features and builds on the previous one.
 
-See the full [ROADMAP](./docs/guides/ROADMAP.md) for details on current status and planned work.
+See [GitHub issues](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues) for planned work; use priority labels (`P0`, `P1`, etc.) to indicate urgency.
 
 ## Getting started
 
@@ -140,7 +140,7 @@ Then, follow the [User Guide](./docs/guides/USER_GUIDE.md) to learn how to use t
 
 ## Documentation
 
-A documentation site is available containing all design documents, roadmap and guides to deploy and use the platform. You can access it [here](https://aws-samples.github.io/sample-autonomous-cloud-coding-agents/).
+A documentation site is available containing design documents and guides to deploy and use the platform. You can access it [here](https://aws-samples.github.io/sample-autonomous-cloud-coding-agents/).
 
 ## Disclaimer
 

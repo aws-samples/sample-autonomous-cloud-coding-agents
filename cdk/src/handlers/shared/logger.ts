@@ -17,36 +17,46 @@
  *  SOFTWARE.
  */
 
+/** Structured logger surface: the three level methods plus `child`. */
+export interface Logger {
+  info(message: string, data?: Record<string, unknown>): void;
+  warn(message: string, data?: Record<string, unknown>): void;
+  error(message: string, data?: Record<string, unknown>): void;
+  /**
+   * Return a logger that merges `context` (e.g. the correlation envelope
+   * `{ task_id, user_id, repo }`) into every line, so per-call sites don't
+   * repeat it. Per-call `data` wins on key collision.
+   */
+  child(context: Record<string, unknown>): Logger;
+}
+
 /**
  * Minimal structured logger that writes JSON to stdout/stderr.
  * Uses process.stdout.write / process.stderr.write to avoid the
  * `no-console` eslint rule. CloudWatch captures both streams.
+ *
+ * @param context - persistent fields merged into every line (see `child`).
  */
-export const logger = {
-  /**
-   * Log an informational message.
-   * @param message - the log message.
-   * @param data - optional structured data to include.
-   */
-  info(message: string, data?: Record<string, unknown>): void {
-    process.stdout.write(JSON.stringify({ level: 'INFO', message, ...data }) + '\n');
-  },
+// Closure over a context obj, not Powertools — no child-of-child depth or
+// sampling needed, just a persistent correlation envelope.
+function makeLogger(context: Record<string, unknown> = {}): Logger {
+  const write = (stream: NodeJS.WriteStream, level: string, message: string, data?: Record<string, unknown>): void => {
+    stream.write(JSON.stringify({ level, message, ...context, ...data }) + '\n');
+  };
+  return {
+    info(message, data) {
+      write(process.stdout, 'INFO', message, data);
+    },
+    warn(message, data) {
+      write(process.stdout, 'WARN', message, data);
+    },
+    error(message, data) {
+      write(process.stderr, 'ERROR', message, data);
+    },
+    child(childContext) {
+      return makeLogger({ ...context, ...childContext });
+    },
+  };
+}
 
-  /**
-   * Log a warning message.
-   * @param message - the log message.
-   * @param data - optional structured data to include.
-   */
-  warn(message: string, data?: Record<string, unknown>): void {
-    process.stdout.write(JSON.stringify({ level: 'WARN', message, ...data }) + '\n');
-  },
-
-  /**
-   * Log an error message.
-   * @param message - the log message.
-   * @param data - optional structured data to include.
-   */
-  error(message: string, data?: Record<string, unknown>): void {
-    process.stderr.write(JSON.stringify({ level: 'ERROR', message, ...data }) + '\n');
-  },
-};
+export const logger: Logger = makeLogger();

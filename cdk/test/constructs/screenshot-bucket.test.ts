@@ -31,7 +31,7 @@ describe('ScreenshotBucket', () => {
     template = Template.fromStack(stack);
   });
 
-  // theagenticguy PR-241 review B3 + repo hygiene: lock in the
+  // Lock in the screenshot bucket lifecycle defaults.
   // fully-private posture so a future "simplify" doesn't drop
   // BlockPublicAccess. The synth-time assertion is the cheapest way to
   // catch a regression before it hits the deployed stack.

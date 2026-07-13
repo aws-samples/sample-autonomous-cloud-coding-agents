@@ -288,6 +288,41 @@ def test_run_task_background_starts_and_stops_heartbeat(monkeypatch):
     assert heartbeat_calls[0] == "t-heartbeat"
 
 
+def test_run_task_background_propagates_correlation_envelope(monkeypatch):
+    """The background task thread propagates {session_id, user_id, repo} into
+    OTEL baggage via propagate_correlation_context (#245).
+
+    Regression guard for the widened trigger: correlation must propagate even
+    when session_id is empty but user_id/repo are known — the branch the whole
+    envelope-in-baggage feature depends on.
+    """
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        server,
+        "propagate_correlation_context",
+        lambda session_id, **kw: calls.append({"session_id": session_id, **kw}),
+    )
+    monkeypatch.setattr(server, "run_task", lambda **_kwargs: None)
+    monkeypatch.setattr(server.task_state, "write_heartbeat", lambda *a, **kw: None)
+    monkeypatch.setattr(server.task_state, "write_terminal", lambda *a, **kw: None)
+
+    # No session_id, but user_id + repo_url known → propagation must still run.
+    server._run_task_background(
+        task_id="t-corr",
+        repo_url="o/r",
+        task_description="x",
+        issue_number="",
+        github_token="",
+        anthropic_model="",
+        max_turns=10,
+        max_budget_usd=None,
+        aws_region="us-east-1",
+        user_id="user-1",
+    )
+
+    assert calls == [{"session_id": "", "user_id": "user-1", "repo": "o/r"}]
+
+
 def test_validate_required_params_pr_workflows_require_pr_number():
     """PR-iteration and PR-review workflows need a pr_number regardless."""
     missing = server._validate_required_params(
