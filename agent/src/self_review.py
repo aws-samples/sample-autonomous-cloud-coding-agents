@@ -65,16 +65,24 @@ def _truncate_diff(diff: str, max_chars: int = _MAX_DIFF_CHARS) -> str:
         return diff
 
     # Find the last hunk header that starts before max_chars
-    truncated = diff[:max_chars]
-    last_hunk = truncated.rfind("\n@@")
-    if last_hunk > 0:
-        # Cut just before this hunk header
-        truncated = truncated[:last_hunk]
+    window = diff[:max_chars]
+    last_hunk = window.rfind("\n@@")
+    # Cutting just before the last hunk header keeps whole hunks. But for a
+    # large single-hunk diff (one big new file, or a hunk wider than the
+    # window), the only marker sits near the top, so this cut would discard
+    # the entire hunk body and leave only diff/index/---/+++ header lines —
+    # the critic would then review an essentially empty diff. Detect that case
+    # (does any hunk header start at offset 0, i.e. is the hunk body dropped?)
+    # and fall back to the line-boundary hard-cut so we keep real content.
+    first_hunk = window.find("\n@@")
+    if last_hunk > 0 and last_hunk != first_hunk:
+        # More than one hunk header fits — cut just before the last one.
+        truncated = window[:last_hunk]
     else:
-        # No hunk boundary found — hard-cut at max_chars
-        last_newline = truncated.rfind("\n")
-        if last_newline > 0:
-            truncated = truncated[:last_newline]
+        # Single hunk (or none) in the window — hard-cut at a line boundary
+        # so we keep the hunk body rather than discarding it to the header.
+        last_newline = window.rfind("\n")
+        truncated = window[:last_newline] if last_newline > 0 else window
 
     total_lines = diff.count("\n")
     kept_lines = truncated.count("\n")
@@ -189,11 +197,20 @@ def run_self_review(
     user_prompt = _render_review_prompt(prompt_template, diff, task_desc)
     system_prompt = _build_review_system_prompt(config, setup)
 
-    # Build a modified config for the review run
+    # Build a modified config for the review run.
+    #
+    # read_only=True makes the critic structurally read-only rather than relying
+    # on prompt text alone: runner._resolve_allowed_tools drops Write/Edit, and
+    # PolicyEngine is constructed with read_only=True so the read_only_forbid_write
+    # / read_only_forbid_edit Cedar rules fire. Without this the critic inherits
+    # the full coding tool surface (Bash/Write/Edit) under bypassPermissions, so
+    # a prompt-injection payload embedded in the attacker-influenceable diff could
+    # steer it into editing/committing tracked files that then land in the PR.
     review_config = config.model_copy(
         update={
             "max_turns": review_turns,
             "max_budget_usd": review_budget,
+            "read_only": True,
         }
     )
 

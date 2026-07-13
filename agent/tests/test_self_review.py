@@ -173,6 +173,26 @@ class TestTruncateDiff:
         assert len(result) < len(big_diff)
         assert "truncated" in result
 
+    def test_single_large_hunk_keeps_body(self):
+        # #262 finding #2: a large single-hunk diff has its only @@ marker near
+        # the top. Cutting to the last hunk header would discard the entire hunk
+        # body and leave only file-header lines. The fallback must keep content.
+        header = "diff --git a/big.py b/big.py\n--- a/big.py\n+++ b/big.py\n"
+        body = "@@ -1,8000 +1,8000 @@\n" + "+code line\n" * 8000
+        big_diff = header + body
+        assert len(big_diff) > _MAX_DIFF_CHARS
+        result = _truncate_diff(big_diff)
+        assert "truncated" in result
+        # Real hunk-body content survives — not just the header lines.
+        assert result.count("+code line") > 100
+
+    def test_single_wide_hunk_over_window_keeps_body(self):
+        # A single hunk header at offset 0 whose body exceeds max_chars.
+        big_diff = "@@ -1,5000 +1,5000 @@\n" + "+x\n" * 40000
+        result = _truncate_diff(big_diff, max_chars=1000)
+        assert "truncated" in result
+        assert result.count("+x") > 10
+
     def test_exact_limit_no_truncation(self):
         diff = "a" * _MAX_DIFF_CHARS
         result = _truncate_diff(diff)
@@ -262,6 +282,30 @@ class TestReviewSystemPrompt:
         assert "do not modify any files" in user
         assert "do not make commits" in user
         assert "do not" in system and "modify" in system
+
+
+class TestReadOnlyEnforcement:
+    """The critic runs read-only structurally, not just via prompt text (#262 finding #1).
+
+    The config handed to ``run_agent`` must carry ``read_only=True`` so
+    ``runner._resolve_allowed_tools`` drops Write/Edit and PolicyEngine enforces
+    the read-only Cedar rules — otherwise a prompt-injection payload in the
+    attacker-influenceable diff could steer the critic into mutating tracked
+    files that then land in the PR.
+    """
+
+    @patch("self_review._get_diff", return_value="diff --git a/f\n+line\n")
+    @patch("self_review.asyncio.run")
+    @patch("runner.run_agent")
+    def test_review_config_is_read_only(self, mock_run_agent, mock_asyncio_run, mock_diff):
+        mock_asyncio_run.return_value = AgentResult(status="success", turns=1, num_turns=1)
+        config = _make_config()
+        assert config.read_only is False  # coding config is not read-only
+
+        run_self_review(config, _make_setup(), _make_agent_result(), MagicMock(), MagicMock())
+
+        review_config = mock_run_agent.call_args[0][2]
+        assert review_config.read_only is True
 
 
 class TestBudgetAndTurnComputation:
