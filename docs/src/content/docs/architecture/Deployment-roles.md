@@ -571,6 +571,7 @@ Bedrock Guardrails, CloudWatch Logs/Dashboards/Alarms, X-Ray, S3 (CDK assets), K
         "cloudwatch:TagResource",
         "cloudwatch:UntagResource",
         "logs:CreateDelivery",
+        "logs:UpdateDeliveryConfiguration",
         "logs:DescribeDeliveries",
         "logs:GetDelivery",
         "logs:GetDeliveryDestination",
