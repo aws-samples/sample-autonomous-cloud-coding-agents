@@ -8,9 +8,10 @@ name: integ
 # Trigger model mirrors deploy.yml: build.yml completes -> workflow_run picks it
 # up in the trusted base-repo context (secrets/OIDC available even for fork PRs)
 # -> we resolve whether the PR touches cdk/** or agent/** -> an admin approves
-# the `integ` environment gate -> deploy/assert/destroy runs against the shared
-# account -> a commit status `integ-smoke` is posted back to the PR head so it
-# shows up as a (required) check that blocks merge.
+# the `deploy` environment gate (reused — same gate and role as deploy.yml) ->
+# deploy/assert/destroy runs against the shared account -> a commit status
+# `integ-smoke` is posted back to the PR head so it shows up as a (required)
+# check that blocks merge.
 #
 # Local dev path is unchanged: run `mise //cdk:integ` with your own AWS creds.
 #
@@ -19,16 +20,19 @@ name: integ
 on:
   # zizmor: ignore[dangerous-triggers] — intentional; workflow_run is required so
   # fork PRs can run against the shared account (a fork `pull_request` job gets no
-  # secrets/OIDC). Mitigations: build-success guard, path-filter, `integ`
-  # environment approval gate (admin reviews fork test code before it runs with
-  # the privileged role), least-privilege role, status-only tokens per job.
+  # secrets/OIDC). Mitigations: build-success guard, path-filter, fork
+  # `safe-to-test` label gate, `deploy` environment approval gate (admin reviews
+  # fork test code before it runs with the deploy role), status-only tokens per
+  # job.
   workflow_run:
     workflows: [build]
     types: [completed]
   workflow_dispatch: {}
 
-# Only one integ run at a time against the shared account — overlapping deploys
-# would collide on the single hardcoded `backgroundagent-integ` stack name.
+# Only one integ run at a time against the shared account. Stack names are now
+# run-unique (`int-<sha>`, see the integ job) so this is no longer a correctness
+# requirement — it bounds shared-account cost/parallelism rather than preventing
+# a name collision.
 concurrency:
   group: cdk-integ
   cancel-in-progress: false
@@ -41,7 +45,7 @@ jobs:
   # docs/cli-only PRs get an immediate green (skipped) status and never deadlock
   # the required check.
   resolve:
-    # Manual dispatch is restricted to main (defence in depth — the `integ`
+    # Manual dispatch is restricted to main (defence in depth — the `deploy`
     # environment approval is the primary gate). PR runs come via workflow_run.
     if: >-
       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
@@ -131,7 +135,7 @@ jobs:
 
           # Fork-PR safety: only run fork-authored code after a maintainer has
           # applied the `safe-to-test` label (defence in depth on top of the
-          # `integ` environment approval). If it's absent, leave the status
+          # `deploy` environment approval). If it's absent, leave the status
           # pending and don't run — re-trigger once the label is added.
           if [[ "$WF_HEAD_REPO" != "$REPO" ]]; then
             if ! LABELS=$(gh api "repos/$REPO/issues/$PR_NUMBER/labels" --jq '.[].name'); then
@@ -166,15 +170,16 @@ jobs:
             echo "PR #$PR_NUMBER has no cdk/** or agent/** changes — integ skipped (green)."
           fi
 
-  # The admin-gated deploy -> assert -> destroy. The `integ` environment's
-  # required reviewer is the approval gate; while it waits, the integ-smoke
-  # status stays pending and merge stays blocked.
+  # The admin-gated deploy -> assert -> destroy. The `deploy` environment's
+  # required reviewers (coding-agents-admin / coding-agents-maintainers) are the
+  # approval gate; while it waits, the integ-smoke status stays pending and merge
+  # stays blocked. Reuses deploy.yml's environment/role — no separate integ role.
   integ:
     needs: resolve
     if: needs.resolve.outputs.applicable == 'true'
     name: CDK integ smoke (Task API)
     runs-on: ubuntu-latest
-    environment: integ
+    environment: deploy
     timeout-minutes: 45
     permissions:
       id-token: write
@@ -184,17 +189,17 @@ jobs:
       MISE_EXPERIMENTAL: "1"
     steps:
       - name: Checkout PR head (incl. forks)
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          # Approving the `integ` environment authorizes this fork-authored test
-          # code to run with the privileged role — the approver MUST review
+          # Approving the `deploy` environment authorizes this fork-authored test
+          # code to run with the deploy role — the approver MUST review
           # cdk/test/integ/** changes before approving.
           repository: ${{ needs.resolve.outputs.head_repo }}
           ref: ${{ needs.resolve.outputs.head_sha }}
           persist-credentials: false
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@e7f100cf4c008499ea8adda475de1042d6975c7b # v6.2.0
+        uses: aws-actions/configure-aws-credentials@254c19bd240aabef8777f48595e9d2d7b972184b # v6.2.1
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           # Fall back to us-east-1 if the repo variable is unset, so the action
@@ -202,7 +207,7 @@ jobs:
           aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
 
       - name: Install mise
-        uses: jdx/mise-action@dba19683ed58901619b14f395a24841710cb4925 # v4.1.0
+        uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
         with:
           cache: true
 
@@ -214,30 +219,36 @@ jobs:
       - name: Install dependencies
         run: yarn install --immutable
 
-      - name: Run integ tests (deploy → assert → destroy)
-        run: mise //cdk:integ
-
-      # Safety net: integ-runner forces teardown on success and failure, but if
-      # the run is cancelled or crashes mid-deploy the stack can be stranded in
-      # the shared account. Delete it directly via CloudFormation so we never
-      # leak billable resources.
+      # Teardown: integ-runner forces `cdk destroy` on success and failure (via
+      # the CDK bootstrap roles, which hold the CloudFormation permissions). No
+      # raw-CLI safety net here: the GitHub OIDC role has no
+      # cloudformation:DeleteStack/DescribeStacks, so such a step can only fail
+      # (#566). If a cancelled/crashed run strands the stack, reclaim is the
+      # stranded-stack cleanup owned by #400/#72 — and the run-unique name below
+      # means a stranded stack never blocks a later run.
       #
-      # NOTE: `cdk destroy backgroundagent-integ` would NOT work here — it
-      # synthesizes the main app (src/main.ts), which does not contain the integ
-      # stack, so it exits 0 having deleted nothing. Target the stack by its
-      # literal CloudFormation name instead. delete-stack is idempotent (no-op if
-      # already gone), so `|| true` only guards transient API errors.
-      - name: Ensure stack torn down
-        if: always()
+      # INTEG_STACK_NAME maps the stack to the commit under test plus the run
+      # number (`int-<sha>-<run>`), replacing the single fixed
+      # `backgroundagent-integ` name. The run number makes same-commit re-runs
+      # distinct; the `int-` prefix marks it ephemeral for #72's sweep. HEAD_SHA
+      # is the resolved PR head (or dispatched ref) and RUN_NUMBER is a positive
+      # integer, so both are already lowercase-alphanumeric — no sanitizing
+      # needed to stay CloudFormation-valid.
+      - name: Run integ tests (deploy → assert → destroy)
         env:
-          AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
-          AWS_DEFAULT_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+          HEAD_SHA: ${{ needs.resolve.outputs.head_sha }}
+          RUN_NUMBER: ${{ github.run_number }}
         run: |
           set -euo pipefail
-          aws cloudformation delete-stack --stack-name backgroundagent-integ || true
-          # No `|| true` on the wait: a DELETE_FAILED must surface loudly so we
-          # never silently leak billable resources in the shared account.
-          aws cloudformation wait stack-delete-complete --stack-name backgroundagent-integ
+          export INTEG_STACK_NAME="int-${HEAD_SHA:0:12}-${RUN_NUMBER}"
+          echo "Integ stack name: $INTEG_STACK_NAME"
+          mise //cdk:integ -- --all --require-approval never \
+            -c stackName="integ-${{ github.run_id }}-${{ github.run_attempt }}" \
+            -c github:sha="$(git rev-parse HEAD)" \
+            -c github:ref="$(git branch --show-current || echo "detached")" \
+            -c github:actor="${{ github.triggering_actor }}" \
+            -c github:repository="$(gh repo view --json nameWithOwner --jq .nameWithOwner)" \
+            -c github:clean="$([ -z "$(git status --porcelain)" ] && echo true || echo false)"
 
   # Post the final integ-smoke status back to the PR head so the check flips from
   # pending to success/failure. Skipped for workflow_dispatch (no PR to gate).

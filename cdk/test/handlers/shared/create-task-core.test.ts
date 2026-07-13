@@ -114,6 +114,38 @@ describe('createTaskCore', () => {
     expect(mockLambdaSend).toHaveBeenCalledTimes(1);
   });
 
+  test('accepts an initial_approvals pattern whose value contains a colon', async () => {
+    // Regression: the degenerate-pattern guard used split(':', 2)[1], which
+    // truncated the value at the next colon. For "ab:cdefgh" that yields the
+    // 2-char fragment "ab", which isDegeneratePattern flags as degenerate —
+    // a spurious 400. The full value "ab:cdefgh" is not degenerate, so the
+    // scope must be accepted.
+    const result = await createTaskCore(
+      {
+        repo: 'org/repo',
+        task_description: 'Fix the bug',
+        initial_approvals: ['bash_pattern:ab:cdefgh'],
+      } as any,
+      makeContext(),
+      'req-1',
+    );
+    expect(result.statusCode).toBe(201);
+  });
+
+  test('still rejects a genuinely degenerate initial_approvals pattern', async () => {
+    const result = await createTaskCore(
+      {
+        repo: 'org/repo',
+        task_description: 'Fix the bug',
+        initial_approvals: ['bash_pattern:*'],
+      } as any,
+      makeContext(),
+      'req-1',
+    );
+    expect(result.statusCode).toBe(400);
+    expect(JSON.parse(result.body).error.code).toBe('VALIDATION_ERROR');
+  });
+
   test('returns 400 for invalid repo', async () => {
     const result = await createTaskCore({ repo: 'invalid' } as any, makeContext(), 'req-1');
     expect(result.statusCode).toBe(400);
@@ -132,6 +164,9 @@ describe('createTaskCore', () => {
     const body = JSON.parse(result.body);
     expect(body.data.status).toBe('SUBMITTED');
     expect(body.data.repo).toBeNull();
+    // Repo-less ⇒ no branch is created (the agent never clones/branches/PRs), so
+    // branch_name is empty rather than a misleading bgagent/<id>/... slug.
+    expect(body.data.branch_name).toBe('');
     // Repo-less ⇒ the onboarding/blueprint RepoTable lookup is skipped entirely.
     expect(mockLookupRepo).not.toHaveBeenCalled();
     expect(mockSend).toHaveBeenCalledTimes(2); // task + event
@@ -276,6 +311,37 @@ describe('createTaskCore', () => {
     expect(body.data.task_description).toBe('Original work');
     expect(mockSend).toHaveBeenCalledTimes(2);
     expect(mockLambdaSend).not.toHaveBeenCalled();
+  });
+
+  test('returns 200 for a repo-less idempotency replay despite empty branch_name', async () => {
+    // Regression: a repo-less record legitimately persists branch_name='' (and
+    // no repo). The replay completeness check must not treat those falsy fields
+    // as "missing" and 500 — only true identity/audit fields are required.
+    const existingItem = {
+      task_id: 'existing-repoless',
+      user_id: 'user-123',
+      status: 'SUBMITTED',
+      resolved_workflow: { id: 'knowledge/web-research-v1', version: '1.0.0' },
+      task_description: 'Summarise these papers',
+      branch_name: '',
+      channel_source: 'api',
+      status_created_at: 'SUBMITTED#2020-01-01T00:00:00.000Z',
+      created_at: '2020-01-01T00:00:00.000Z',
+      updated_at: '2020-01-01T00:00:00.000Z',
+      idempotency_key: 'rl-key',
+    };
+    mockSend
+      .mockResolvedValueOnce({ Items: [{ task_id: 'existing-repoless' }] })
+      .mockResolvedValueOnce({ Item: existingItem });
+
+    const result = await createTaskCore(
+      { workflow_ref: 'knowledge/web-research-v1', task_description: 'Summarise these papers' },
+      makeContext({ idempotencyKey: 'rl-key' }),
+      'req-1',
+    );
+    expect(result.statusCode).toBe(200);
+    expect(result.headers?.['Idempotent-Replay']).toBe('true');
+    expect(JSON.parse(result.body).data.task_id).toBe('existing-repoless');
   });
 
   test('returns 409 when idempotency key belongs to another user', async () => {

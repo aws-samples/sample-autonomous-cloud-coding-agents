@@ -118,7 +118,16 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       );
     }
 
-    const afterValid = typeof afterRaw === 'string' && afterRaw.length === ULID_LENGTH ? afterRaw : undefined;
+    // Normalize the cursor to upper-case before it reaches the DynamoDB key
+    // condition. ``isValidUlid`` accepts lower-case callers (it uppercases
+    // before matching), but stored ``event_id``s are upper-case Crockford
+    // Base32. DynamoDB compares raw bytes, and lower-case ASCII sorts *after*
+    // upper-case, so a lower-case cursor would be "greater than" every stored
+    // id and ``event_id > :after`` would return zero rows — silently dropping
+    // the rest of the event stream for a contract-valid input.
+    const afterValid = typeof afterRaw === 'string' && afterRaw.length === ULID_LENGTH
+      ? afterRaw.toUpperCase()
+      : undefined;
 
     // 3b. ``desc`` combined with ``after`` makes no semantic sense: ``after``
     // is a forward-walking ULID cursor. Reject the combination rather than
@@ -219,12 +228,18 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       });
     }
 
-    // 6. Strip task_id from event records (redundant in response context)
+    // 6. Strip task_id from event records (redundant in response context).
+    //    Pass through the correlation envelope (#245) per-event, omitting each
+    //    field when the source didn't stamp it (e.g. task_created) so the shape
+    //    stays stable for consumers.
     const eventData = events.map(e => ({
       event_id: e.event_id,
       event_type: e.event_type,
       timestamp: e.timestamp,
       metadata: e.metadata ?? {},
+      ...(e.user_id && { user_id: e.user_id }),
+      ...(e.repo && { repo: e.repo }),
+      ...(e.trace_id && { trace_id: e.trace_id }),
     }));
 
     // For descending scans we intentionally suppress ``next_token``. DDB's

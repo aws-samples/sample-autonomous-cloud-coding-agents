@@ -30,11 +30,11 @@ curl -X POST "$API_URL/tasks" \
 curl -X POST "$API_URL/tasks" \
   -H "Authorization: $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"repo": "krokoko/agent-plugins", "task_description": "add codeowners field to RFC issue template"}'
+  -d '{"repo": "awslabs/agent-plugins", "task_description": "add codeowners field to RFC issue template"}'
 ```
 
 ```json
-{"data":{"task_id":"01KN36YGQV6BEPDD7CVMKP1PF3","status":"SUBMITTED","repo":"krokoko/agent-plugins","issue_number":null,"task_description":"add codeowners field to RFC issue template","branch_name":"bgagent/01KN36YGQV6BEPDD7CVMKP1PF3/add-codeowners-field-to-rfc-issue-template","session_id":null,"pr_url":null,"error_message":null,"error_classification":null,"created_at":"2026-04-01T00:26:30.011Z","updated_at":"2026-04-01T00:26:30.011Z","started_at":null,"completed_at":null,"duration_s":null,"cost_usd":null,"build_passed":null,"max_turns":null,"max_budget_usd":null,"prompt_version":null}}
+{"data":{"task_id":"01KN36YGQV6BEPDD7CVMKP1PF3","status":"SUBMITTED","repo":"awslabs/agent-plugins","issue_number":null,"task_description":"add codeowners field to RFC issue template","branch_name":"bgagent/01KN36YGQV6BEPDD7CVMKP1PF3/add-codeowners-field-to-rfc-issue-template","session_id":null,"pr_url":null,"error_message":null,"error_classification":null,"created_at":"2026-04-01T00:26:30.011Z","updated_at":"2026-04-01T00:26:30.011Z","started_at":null,"completed_at":null,"duration_s":null,"cost_usd":null,"build_passed":null,"max_turns":null,"max_budget_usd":null,"prompt_version":null}}
 ```
 
 To create a task from a GitHub issue:
@@ -82,7 +82,7 @@ curl -X POST "$API_URL/tasks" \
   -d '{"repo": "owner/repo", "workflow_ref": "coding/pr-review-v1", "pr_number": 55, "task_description": "Focus on security implications and error handling"}'
 ```
 
-> **Selecting a workflow.** `workflow_ref` chooses which workflow runs the task, in the form `<id>[@<constraint>]` (e.g. `coding/new-task-v1`). It replaced the old `task_type` field (see [Workflows](/architecture/workflows)). Omit it and the platform resolves a default — the repo's Blueprint default if configured, otherwise the conservative `default/agent-v1`. The one-to-one mapping from the retired `task_type` values is `new_task → coding/new-task-v1`, `pr_iteration → coding/pr-iteration-v1`, `pr_review → coding/pr-review-v1`.
+> **Selecting a workflow.** `workflow_ref` chooses which workflow runs the task, in the form `<id>[@<constraint>]` (e.g. `coding/new-task-v1`). It replaced the old `task_type` field (see [Workflows](/sample-autonomous-cloud-coding-agents/architecture/workflows)). Omit it and the platform resolves a default — the repo's Blueprint default if configured, otherwise the conservative `default/agent-v1`. The one-to-one mapping from the retired `task_type` values is `new_task → coding/new-task-v1`, `pr_iteration → coding/pr-iteration-v1`, `pr_review → coding/pr-review-v1`.
 
 **Request body fields:**
 
@@ -145,7 +145,7 @@ curl "$API_URL/tasks/01KN36YGQV6BEPDD7CVMKP1PF3" -H "Authorization: $TOKEN"
 ```
 
 ```json
-{"data":{"task_id":"01KN36YGQV6BEPDD7CVMKP1PF3","status":"COMPLETED","repo":"krokoko/agent-plugins","issue_number":null,"task_description":"add codeowners field to RFC issue template","branch_name":"bgagent/01KN36YGQV6BEPDD7CVMKP1PF3/add-codeowners-field-to-rfc-issue-template","session_id":"3eb8f3fb-808d-47d6-8557-309fb9369ea7","pr_url":"https://github.com/krokoko/agent-plugins/pull/59","error_message":null,"error_classification":null,"created_at":"2026-04-01T00:26:30.011Z","updated_at":"2026-04-01T00:26:35.350Z","started_at":"2026-04-01T00:26:35.350Z","completed_at":"2026-04-01T00:30:32Z","duration_s":125.9,"cost_usd":0.15938219999999997,"build_passed":null,"max_turns":null,"max_budget_usd":null,"prompt_version":"1c9c10e027a2"}}
+{"data":{"task_id":"01KN36YGQV6BEPDD7CVMKP1PF3","status":"COMPLETED","repo":"awslabs/agent-plugins","issue_number":null,"task_description":"add codeowners field to RFC issue template","branch_name":"bgagent/01KN36YGQV6BEPDD7CVMKP1PF3/add-codeowners-field-to-rfc-issue-template","session_id":"3eb8f3fb-808d-47d6-8557-309fb9369ea7","pr_url":"https://github.com/awslabs/agent-plugins/pull/42","error_message":null,"error_classification":null,"created_at":"2026-04-01T00:26:30.011Z","updated_at":"2026-04-01T00:26:35.350Z","started_at":"2026-04-01T00:26:35.350Z","completed_at":"2026-04-01T00:30:32Z","duration_s":125.9,"cost_usd":0.15938219999999997,"build_passed":null,"max_turns":null,"max_budget_usd":null,"prompt_version":"1c9c10e027a2"}}
 ```
 
 ### Cancel a task

@@ -35,6 +35,7 @@ import { ApiClient } from '../api-client';
 import { loadConfig, loadCredentials } from '../config';
 import { CliError } from '../errors';
 import { formatJson } from '../format';
+import { generateInviteCode } from '../invite-code';
 import {
   buildAuthorizationUrl,
   computeExpiresAt,
@@ -45,6 +46,7 @@ import {
   StoredLinearOauthToken,
 } from '../linear-oauth';
 import { awaitOauthCallback, CALLBACK_URL } from '../oauth-callback-server';
+import { promptSecret } from '../prompt-secret';
 
 /** Default label that triggers an ABCA task when applied to a Linear issue. */
 const DEFAULT_LABEL_FILTER = 'bgagent';
@@ -1507,65 +1509,6 @@ export function makeLinearCommand(): Command {
 
 // ─── Prompts ─────────────────────────────────────────────────────────────────
 
-function promptSecret(label: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stderr,
-      terminal: false,
-    });
-
-    process.stderr.write(label);
-
-    if (process.stdin.isTTY) {
-      process.stdin.setRawMode(true);
-      process.stdin.resume();
-
-      let value = '';
-
-      const onData = (chunk: Buffer) => {
-        const str = chunk.toString();
-        for (const char of str) {
-          if (char === '\n' || char === '\r') {
-            cleanup();
-            process.stderr.write('\n');
-            resolve(value.trim());
-            return;
-          } else if (char === '\u0003') {
-            cleanup();
-            process.stderr.write('\n');
-            reject(new Error('Cancelled.'));
-            return;
-          } else if (char === '\u007f' || char === '\b') {
-            if (value.length > 0) {
-              value = value.slice(0, -1);
-              process.stderr.write('\b \b');
-            }
-          } else {
-            value += char;
-            process.stderr.write('*');
-          }
-        }
-      };
-
-      const cleanup = () => {
-        process.stdin.removeListener('data', onData);
-        process.stdin.setRawMode(false);
-        process.stdin.pause();
-        rl.close();
-      };
-
-      process.stdin.on('data', onData);
-    } else {
-      rl.once('line', (line) => {
-        rl.close();
-        resolve(line.trim());
-      });
-      rl.once('close', () => reject(new Error('No input provided.')));
-    }
-  });
-}
-
 /**
  * Read a single line from stdin, with an optional default that's accepted on
  * empty input (Enter without typing). Visible echo — use only for non-secret
@@ -1789,31 +1732,6 @@ async function runSelfLinkPicker(args: {
   const label = `${picked.name ?? picked.id}${picked.email ? ` (${picked.email})` : ''}`;
   console.log(`  ✓ Linked Linear user ${label} → your platform user`);
   return true;
-}
-
-/**
- * Generate a short, human-typeable invite code for the teammate-invite
- * flow. `link-` prefix makes it grep-friendly when an operator pastes it
- * into chat alongside the command. 8 random chars from a 31-char alphabet
- * = 40 bits of entropy — over a 24h TTL window with ~10 codes outstanding,
- * collision probability is negligible.
- *
- * Alphabet excludes ambiguous glyphs (0/O, 1/l/I) so codes copy-pasted
- * across fonts don't get mistyped.
- */
-/** Alphabet used by {@link generateInviteCode}. Exposed so tests can
- *  assert that generated codes only use these characters. */
-export const INVITE_CODE_ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
-
-export function generateInviteCode(): string {
-  const INVITE_CODE_RANDOM_BYTES = 8;
-  const bytes = new Uint8Array(INVITE_CODE_RANDOM_BYTES);
-  crypto.getRandomValues(bytes);
-  let out = 'link-';
-  for (const b of bytes) {
-    out += INVITE_CODE_ALPHABET[b % INVITE_CODE_ALPHABET.length];
-  }
-  return out;
 }
 
 /**

@@ -297,6 +297,9 @@ describe('jira-webhook-processor handler', () => {
     expect(reqBody.repo).toBe('org/repo');
     expect(reqBody.task_description).toContain('ENG-42: Fix the login bug');
     expect(reqBody.task_description).toContain('Users cannot log in.');
+    // Must pin the coding workflow — an absent workflow_ref falls through the
+    // resolution ladder to default/agent-v1, which never opens a PR (#546).
+    expect(reqBody.workflow_ref).toBe('coding/new-task-v1');
     expect(ctx.userId).toBe('cognito-user-1');
     expect(ctx.channelSource).toBe('jira');
     expect(ctx.channelMetadata).toMatchObject({

@@ -320,9 +320,9 @@ describe('linear-webhook handler — multi-workspace signature verification', ()
     // signing secret into the stack-wide one. If a workspace later gets
     // revoked, the stack-wide secret still matches its requests. Without
     // a distinct `revoked` outcome the receiver would silently fall
-    // through to the stack-wide fallback and re-grant access — the bypass
-    // krokoko's PR-200 review-1 flagged. This test pins the no-fallback
-    // rule: a revoked workspace whose orgId is in the registry MUST fail
+    // through to the stack-wide fallback and re-grant access. A revoked
+    // workspace whose orgId is in the registry MUST fail closed — this test
+    // pins the no-fallback rule.
     // verification regardless of how the request is signed.
     configureRegistry({
       [WORKSPACE_A_ID]: { oauth_secret_arn: WORKSPACE_A_SECRET_ARN, status: 'revoked', workspace_slug: 'acme-A' },

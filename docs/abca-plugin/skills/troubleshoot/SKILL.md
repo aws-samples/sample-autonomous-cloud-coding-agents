@@ -12,6 +12,8 @@ description: >-
 
 You are diagnosing an issue with the ABCA platform. Follow a systematic approach: gather symptoms, check the most common causes, and apply targeted fixes.
 
+> **Running the CLI:** commands below call `node cli/lib/bin/bgagent.js …`. In a non-interactive or mise-managed shell `node` may not be on `PATH` — prefix with `mise exec --`. Ironically, `node: command not found` is itself a common symptom (the shell hasn't activated mise); that's a missing prefix, not a broken install.
+
 ## Step 1: Identify the Problem Category
 
 Determine which area the issue falls into:
@@ -71,8 +73,9 @@ aws cognito-idp admin-get-user \
 
 ## Task Submission Issues (422 / 400)
 
-**"Repository not onboarded" (422):**
-- The repo needs a Blueprint construct. Use the `onboard-repo` skill.
+**"Repository not onboarded" / `REPO_NOT_ONBOARDED` (422):**
+- The repo isn't registered. Fastest fix: `bgagent repo onboard <owner/repo>` (operator path — writes the RepoTable record at runtime, no redeploy). A CDK Blueprint is only needed for declarative config. Use the `onboard-repo` skill for details.
+- Also confirm the `owner/repo` matches **exactly** what you pass to `bgagent submit --repo`.
 
 **"GUARDRAIL_BLOCKED" (400):**
 - Task description triggered Bedrock Guardrails content screening
@@ -108,8 +111,9 @@ node cli/lib/bin/bgagent.js events <TASK_ID> --output json
 - Common: repo build/test commands not documented in CLAUDE.md
 
 **403 "not authorized to perform bedrock:InvokeModelWithResponseStream":**
-- The Blueprint specifies a model that the runtime IAM role doesn't have permissions for
-- Fix: add `grantInvoke` for the model and its cross-region inference profile in `cdk/src/stacks/agent.ts`, then redeploy
+- The repo's `model_id` is a model the runtime IAM role wasn't granted. The runtime only has `grantInvoke` for the models in the stack's configured set (Sonnet 4.6, Opus 4, Haiku 4.5 by default).
+- **Quick fix:** point the repo at an already-granted model — `bgagent repo onboard <owner/repo> --model us.anthropic.claude-sonnet-4-6` (no redeploy).
+- **To add a new model to the runtime:** grant it in the stack and redeploy. The model set is the shared list in `cdk/src/constructs/bedrock-models.ts` — add the model via the `bedrockModels` CDK context (`cdk.json`) so both the AgentCore and ECS backends grant it (#433). Adding a model also requires **account-level Bedrock access** for it (separate from IAM — see the next row).
 
 **Model not enabled / "not available on your Bedrock deployment" (often immediate failure, few turns, zero or near-zero tokens):**
 - **IAM is necessary but not sufficient.** The AgentCore role may already have `bedrock:InvokeModel*`, but the **account** must also satisfy [Amazon Bedrock model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html): Marketplace subscription flow on first serverless use (with `aws-marketplace:Subscribe` / `ViewSubscriptions` where needed), Anthropic **first-time use** details (`PutUseCaseForModelAccess` or the console model catalog), and a valid payment method for Marketplace-backed models.
