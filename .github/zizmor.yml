@@ -8,6 +8,11 @@ rules:
       # Approve-only job: never checks out or runs PR code, only calls the
       # review API; gated on the 'auto-approve' label.
       - auto-approve.yml
+      # Comments-only PR gate: never checks out or runs PR code (pure gh
+      # api/curl); workflow_run is required for the trusted base-repo context
+      # so secrets/PAT are available for fork PRs. Untrusted event fields flow
+      # through env only.
+      - review-gate.yml
   # These secrets are intentionally repo-level, not environment-scoped:
   # CODECOV_TOKEN is an upload-only token; AUTOMATION_GITHUB_TOKEN is the PAT
   # the upgrade-main PR job needs so its PRs trigger the build workflow.
@@ -15,3 +20,7 @@ rules:
     ignore:
       - build.yml
       - upgrade-main.yml
+      # ABCA_WEBHOOK_SECRET + AUTOMATION_GITHUB_TOKEN are intentionally repo-level:
+      # the gate has no environment/approval boundary (it only reads state, posts
+      # comments, and fires the review webhook).
+      - review-gate.yml
