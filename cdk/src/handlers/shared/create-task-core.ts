@@ -31,6 +31,7 @@ import type { APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
 import { isDegeneratePattern, parseApprovalScope } from './approval-scope';
 import { screenImage, screenTextFile, AttachmentScreeningError, type ScreeningConfig } from './attachment-screening';
+import { resolveEventRules, UnknownEventRulePackError } from './event-rule-pack-resolver';
 import { generateBranchName } from './gateway';
 import { estimateImageTokensFromBuffer } from './image-tokens';
 import { logger } from './logger';
@@ -95,6 +96,24 @@ function describeRequiredInputs(requiredInputs: { allOf?: readonly string[]; one
   return parts.length > 0 ? parts.join(', plus ') : 'a task specification';
 }
 
+/** 503 for a blueprint/workflow that pins an unresolvable event-rule-pack —
+ *  a platform misconfiguration, same class as an out-of-bounds approval cap. */
+function unknownPackResponse(repo: string | undefined, err: UnknownEventRulePackError, requestId: string): APIGatewayProxyResult {
+  logger.error('Blueprint misconfiguration — unknown event-rule-pack pin', {
+    repo,
+    pack_id: err.packRef.id,
+    pack_version: err.packRef.version,
+    request_id: requestId,
+  });
+  return errorResponse(
+    503,
+    ErrorCode.SERVICE_UNAVAILABLE,
+    `Blueprint misconfiguration: event-rule-pack '${err.packRef.id}@${err.packRef.version}' `
+      + `for '${repo}' does not resolve. Ask the platform admin to re-deploy the blueprint with a valid pack pin.`,
+    requestId,
+  );
+}
+
 /**
  * Core task creation logic shared by the Cognito create-task handler
  * and the webhook create-task handler.
@@ -156,6 +175,9 @@ export async function createTaskCore(
   //     shift the cap beneath a running task). A repo-less task takes the
   //     platform default cap.
   let resolvedApprovalGateCap: number = APPROVAL_GATE_CAP_DEFAULT;
+  let resolvedEventRules: ReturnType<typeof resolveEventRules> = [];
+  let eventRulePackId: string | undefined;
+  let eventRulePackVersion: string | undefined;
   // Whether the cap came from a blueprint (vs the platform default) — surfaced
   // in the "Task created" log. A repo-less submission has no blueprint, so it
   // stays false.
@@ -207,6 +229,37 @@ export async function createTaskCore(
       }
       resolvedApprovalGateCap = blueprintCap;
       capFromBlueprint = true;
+    }
+    const packRef = repoConfig?.event_rule_pack ?? workflow.eventRulePack;
+    try {
+      resolvedEventRules = resolveEventRules({
+        inlineRules: repoConfig?.event_rules,
+        packRef,
+      });
+    } catch (err) {
+      if (err instanceof UnknownEventRulePackError) {
+        return unknownPackResponse(body.repo, err, requestId);
+      }
+      throw err;
+    }
+    if (packRef) {
+      eventRulePackId = packRef.id;
+      eventRulePackVersion = packRef.version;
+    }
+  } else {
+    try {
+      resolvedEventRules = resolveEventRules({
+        packRef: workflow.eventRulePack,
+      });
+    } catch (err) {
+      if (err instanceof UnknownEventRulePackError) {
+        return unknownPackResponse(body.repo, err, requestId);
+      }
+      throw err;
+    }
+    if (workflow.eventRulePack) {
+      eventRulePackId = workflow.eventRulePack.id;
+      eventRulePackVersion = workflow.eventRulePack.version;
     }
   }
 
@@ -651,6 +704,9 @@ export async function createTaskCore(
     // platform default of 50. Persisted so a container restart or a
     // mid-task blueprint edit cannot shift the cap beneath the task.
     approval_gate_cap: resolvedApprovalGateCap,
+    ...(resolvedEventRules.length > 0 && { event_rules: resolvedEventRules }),
+    ...(eventRulePackId && { event_rule_pack_id: eventRulePackId }),
+    ...(eventRulePackVersion && { event_rule_pack_version: eventRulePackVersion }),
   };
 
   // 6. Write task record

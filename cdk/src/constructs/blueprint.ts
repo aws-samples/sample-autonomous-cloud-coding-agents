@@ -45,6 +45,28 @@ const REPO_CONFIG_CR_TIMEOUT_MINUTES = 5;
 /** TTL (days) applied to a RepoConfig row on blueprint delete before cleanup. */
 const REMOVED_REPO_TTL_DAYS = 30;
 
+/** Inline event governance rule (issue #230). Schema: agent/event-rules/schema.json */
+export interface BlueprintEventRule {
+  readonly id: string;
+  readonly on: string;
+  readonly when?: {
+    readonly fields?: Readonly<Record<string, unknown>>;
+    readonly aggregate?: { readonly cost_usd_gte?: number; readonly turn_count_gte?: number };
+  };
+  readonly action: string;
+  readonly mode: string;
+  readonly evaluation: string;
+  readonly reason?: string;
+  readonly severity?: string;
+  readonly timeout_s?: number;
+  readonly notify_channels?: readonly string[];
+}
+
+export interface BlueprintEventRulePackRef {
+  readonly id: string;
+  readonly version: string;
+}
+
 /**
  * Properties for the Blueprint construct.
  */
@@ -135,6 +157,16 @@ export interface BlueprintProps {
      * back to the platform default of 50 defined in the handler layer.
      */
     readonly approvalGateCap?: number;
+
+    /**
+     * Event governance rules (issue #230). Inline until registry pack is pinned.
+     */
+    readonly eventRules?: readonly BlueprintEventRule[];
+
+    /**
+     * Registry pin for an event-rule-pack asset (Phase 3).
+     */
+    readonly eventRulePack?: BlueprintEventRulePackRef;
   };
 
   /**
@@ -183,12 +215,21 @@ export class Blueprint extends Construct {
    */
   public readonly approvalGateCap?: number;
 
+  /**
+   * Event governance rules from security.eventRules.
+   */
+  public readonly eventRules: readonly BlueprintEventRule[];
+
+  public readonly eventRulePack?: BlueprintEventRulePackRef;
+
   constructor(scope: Construct, id: string, props: BlueprintProps) {
     super(scope, id);
 
     this.egressAllowlist = [...(props.networking?.egressAllowlist ?? [])];
     this.cedarPolicies = [...(props.security?.cedarPolicies ?? [])];
     this.approvalGateCap = props.security?.approvalGateCap;
+    this.eventRules = [...(props.security?.eventRules ?? [])];
+    this.eventRulePack = props.security?.eventRulePack;
 
     // Chunk 7c: emit a synth-time info annotation when the blueprint did
     // not configure an override so operators see a signal that this repo
@@ -247,6 +288,13 @@ export class Blueprint extends Construct {
     }
     if (this.approvalGateCap !== undefined) {
       item.approval_gate_cap = { N: String(this.approvalGateCap) };
+    }
+    if (this.eventRules.length > 0) {
+      item.event_rules = { S: JSON.stringify(this.eventRules) };
+    }
+    if (this.eventRulePack) {
+      item.event_rule_pack_id = { S: this.eventRulePack.id };
+      item.event_rule_pack_version = { S: this.eventRulePack.version };
     }
 
     new cr.AwsCustomResource(this, 'RepoConfigCR', {
@@ -320,6 +368,11 @@ export class Blueprint extends Construct {
     if (this.egressAllowlist.length > 0) fields.push(', #egress_allowlist = :egress_allowlist');
     if (this.cedarPolicies.length > 0) fields.push(', #cedar_policies = :cedar_policies');
     if (this.approvalGateCap !== undefined) fields.push(', #approval_gate_cap = :approval_gate_cap');
+    if (this.eventRules.length > 0) fields.push(', #event_rules = :event_rules');
+    if (this.eventRulePack) {
+      fields.push(', #event_rule_pack_id = :event_rule_pack_id');
+      fields.push(', #event_rule_pack_version = :event_rule_pack_version');
+    }
     return fields.join('');
   }
 
@@ -335,6 +388,11 @@ export class Blueprint extends Construct {
     if (this.egressAllowlist.length > 0) names['#egress_allowlist'] = 'egress_allowlist';
     if (this.cedarPolicies.length > 0) names['#cedar_policies'] = 'cedar_policies';
     if (this.approvalGateCap !== undefined) names['#approval_gate_cap'] = 'approval_gate_cap';
+    if (this.eventRules.length > 0) names['#event_rules'] = 'event_rules';
+    if (this.eventRulePack) {
+      names['#event_rule_pack_id'] = 'event_rule_pack_id';
+      names['#event_rule_pack_version'] = 'event_rule_pack_version';
+    }
     return names;
   }
 
@@ -350,6 +408,11 @@ export class Blueprint extends Construct {
     if (this.egressAllowlist.length > 0) values[':egress_allowlist'] = { L: this.egressAllowlist.map(d => ({ S: d })) };
     if (this.cedarPolicies.length > 0) values[':cedar_policies'] = { L: this.cedarPolicies.map(p => ({ S: p })) };
     if (this.approvalGateCap !== undefined) values[':approval_gate_cap'] = { N: String(this.approvalGateCap) };
+    if (this.eventRules.length > 0) values[':event_rules'] = { S: JSON.stringify(this.eventRules) };
+    if (this.eventRulePack) {
+      values[':event_rule_pack_id'] = { S: this.eventRulePack.id };
+      values[':event_rule_pack_version'] = { S: this.eventRulePack.version };
+    }
     return values;
   }
 }

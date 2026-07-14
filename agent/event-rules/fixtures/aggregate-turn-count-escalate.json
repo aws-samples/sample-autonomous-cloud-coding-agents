@@ -1,0 +1,28 @@
+{
+  "description": "Aggregate turn-count ceiling triggers escalate",
+  "event": {
+    "event_type": "agent_turn",
+    "metadata": {
+      "turn_count": 40
+    }
+  },
+  "rules": [
+    {
+      "id": "turn-ceiling",
+      "on": "agent_turn",
+      "when": {
+        "aggregate": {
+          "turn_count_gte": 30
+        }
+      },
+      "action": "escalate",
+      "mode": "enforce",
+      "evaluation": "async",
+      "reason": "Turn count exceeded 30"
+    }
+  ],
+  "expected_matches": ["turn-ceiling"],
+  "aggregate_state": {
+    "turn_count": 40
+  }
+}

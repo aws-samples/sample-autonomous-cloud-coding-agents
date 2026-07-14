@@ -980,7 +980,27 @@ export class TaskApi extends Construct {
           new apigw.LambdaIntegration(getPoliciesFn),
           cognitoAuthOptions,
         );
-        allFunctions.push(getPoliciesFn);
+        const eventRules = repoById.addResource('event-rules');
+        const getEventRulesFn = new lambda.NodejsFunction(this, 'GetEventRulesFn', {
+          entry: path.join(handlersDir, 'get-event-rules.ts'),
+          handler: 'handler',
+          runtime: Runtime.NODEJS_24_X,
+          architecture: Architecture.ARM_64,
+          environment: {
+            ...approvalEnv,
+            REPO_TABLE_NAME: props.repoTable.tableName,
+          },
+          bundling: commonBundling,
+          timeout: Duration.seconds(API_HANDLER_TIMEOUT_SECONDS),
+        });
+        props.taskApprovalsTable.grantReadWriteData(getEventRulesFn);
+        props.repoTable.grantReadData(getEventRulesFn);
+        eventRules.addMethod(
+          'GET',
+          new apigw.LambdaIntegration(getEventRulesFn),
+          cognitoAuthOptions,
+        );
+        allFunctions.push(getPoliciesFn, getEventRulesFn);
       }
     }
 

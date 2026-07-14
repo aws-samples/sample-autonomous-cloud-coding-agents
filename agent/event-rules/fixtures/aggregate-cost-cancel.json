@@ -1,0 +1,28 @@
+{
+  "description": "Aggregate cost ceiling triggers cancel",
+  "event": {
+    "event_type": "agent_cost_update",
+    "metadata": {
+      "cumulative_cost_usd": 26.5
+    }
+  },
+  "rules": [
+    {
+      "id": "cost-ceiling",
+      "on": "agent_cost_update",
+      "when": {
+        "aggregate": {
+          "cost_usd_gte": 25
+        }
+      },
+      "action": "cancel_task",
+      "mode": "enforce",
+      "evaluation": "async",
+      "reason": "Cumulative cost exceeded $25"
+    }
+  ],
+  "expected_matches": ["cost-ceiling"],
+  "aggregate_state": {
+    "cumulative_cost_usd": 26.5
+  }
+}

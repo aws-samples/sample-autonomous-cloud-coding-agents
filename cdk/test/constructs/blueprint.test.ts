@@ -484,6 +484,23 @@ describe('Blueprint construct', () => {
     expect(infos).toHaveLength(0);
   });
 
+  test('persists event_rules JSON when security.eventRules is configured', () => {
+    const rule = {
+      id: 'plan-review',
+      on: 'repo_setup_complete',
+      action: 'require_approval',
+      mode: 'observe_only',
+      evaluation: 'sync',
+    };
+    const { template } = createStack({
+      security: { eventRules: [rule] },
+    });
+    const parts = getCreateJoinParts(template);
+    const serialized = parts.join('');
+    expect(serialized).toContain('event_rules');
+    expect(serialized).toContain('plan-review');
+  });
+
   test('onUpdate uses DynamoDB updateItem to preserve onboarded_at', () => {
     const { template } = createStack();
     const parts = getUpdateJoinParts(template);

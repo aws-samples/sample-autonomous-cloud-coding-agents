@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://abca.dev/agent/event-rules/schema.json",
+  "title": "EventRulePack",
+  "type": "object",
+  "required": ["rules"],
+  "properties": {
+    "pack_id": { "type": "string" },
+    "pack_version": { "type": "string" },
+    "rules": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/EventRule" }
+    }
+  },
+  "$defs": {
+    "EventRule": {
+      "type": "object",
+      "required": ["id", "on", "action", "mode", "evaluation"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "on": { "type": "string", "minLength": 1 },
+        "when": {
+          "type": "object",
+          "properties": {
+            "fields": {
+              "type": "object",
+              "additionalProperties": true
+            },
+            "aggregate": {
+              "type": "object",
+              "properties": {
+                "cost_usd_gte": { "type": "number", "minimum": 0 },
+                "turn_count_gte": { "type": "integer", "minimum": 1 }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "require_approval",
+            "notify",
+            "escalate",
+            "cancel_task",
+            "inject_nudge",
+            "observe_only"
+          ]
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["observe_only", "enforce"]
+        },
+        "evaluation": {
+          "type": "string",
+          "enum": ["sync", "async"]
+        },
+        "reason": { "type": "string" },
+        "severity": {
+          "type": "string",
+          "enum": ["low", "medium", "high"]
+        },
+        "timeout_s": { "type": "integer", "minimum": 30, "maximum": 3600 },
+        "notify_channels": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["slack", "email", "github", "linear", "webhook"]
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

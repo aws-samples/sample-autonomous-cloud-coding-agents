@@ -113,6 +113,7 @@ const PROGRESS_EVENT_TYPES = new Set([
   'agent_cost_update',
   'agent_error',
   'agent_blocked',
+  'policy_decision',
 ]);
 
 /** Format an event timestamp to a short local time string. */
@@ -233,6 +234,27 @@ export function renderEvent(event: TaskEvent): string {
         line += `\n         ↳ ${String(meta.remediation_hint)}`;
       }
       return line;
+    }
+    case 'policy_decision': {
+      const mode = meta.enforcement_mode === 'observe_only' ? '[observe] ' : '';
+      const ruleIds = meta.matching_rule_ids;
+      const firstRule = Array.isArray(ruleIds) && ruleIds.length > 0 ? String(ruleIds[0]) : undefined;
+      const ruleId = meta.rule_id != null ? String(meta.rule_id) : (firstRule ?? 'rule');
+      const action = meta.action ?? meta.decision ?? 'observe';
+      const trigger = meta.checkpoint ?? meta.trigger_milestone ?? meta.trigger_event_type ?? '';
+      const would = meta.would_block ? ' (would block)' : '';
+      const prNote = trigger === 'pr_created' && action === 'require_approval'
+        ? ' — PR already exists'
+        : '';
+      if (action === 'require_approval' && meta.enforcement_mode === 'enforce' && !meta.would_block) {
+        const label = trigger === 'checkpoint:before_execution'
+          ? 'Plan verified — awaiting your approval'
+          : trigger === 'checkpoint:before_open_pr'
+            ? 'Pre-PR review — awaiting your approval'
+            : `Approval required at ${trigger || 'checkpoint'}`;
+        return `[${time}] ${mode}${label}: rule "${ruleId}"${prNote}`;
+      }
+      return `[${time}] ${mode}Policy ${action} on ${trigger}: rule "${ruleId}"${would}${prNote}`;
     }
     default:
       return `[${time}] ${event.event_type}: ${JSON.stringify(meta)}`;

@@ -35,8 +35,11 @@ const mockDdbSend = jest.fn().mockResolvedValue({ Item: undefined });
 // that surfaces as ``GetItemCommand is not a constructor``.
 jest.mock('@aws-sdk/client-dynamodb', () => ({ DynamoDBClient: jest.fn(() => ({})) }));
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
-  DynamoDBDocumentClient: { from: jest.fn(() => ({ send: mockDdbSend })) },
+  DynamoDBDocumentClient: {
+    from: jest.fn(() => ({ send: mockDdbSend })),
+  },
   GetCommand: jest.fn((input: unknown) => ({ _type: 'Get', input })),
+  PutCommand: jest.fn((input: unknown) => ({ _type: 'Put', input })),
   UpdateCommand: jest.fn((input: unknown) => ({ _type: 'Update', input })),
 }));
 
@@ -110,6 +113,9 @@ jest.mock('../../src/handlers/shared/linear-feedback', () => ({
 process.env.TASK_TABLE_NAME = 'Tasks';
 process.env.GITHUB_TOKEN_SECRET_ARN = 'arn:aws:secretsmanager:us-east-1:0:secret:platform';
 process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME = 'LinearWorkspaceRegistry';
+// Governance adds extra DDB reads/writes per stream record; existing
+// dispatcher tests script precise Get/Update sequences and disable it.
+process.env.EVENT_GOVERNANCE_ENABLED = 'false';
 
 import {
   CHANNEL_DEFAULTS,

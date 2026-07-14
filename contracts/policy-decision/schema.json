@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://abca.dev/contracts/policy-decision/schema.json",
+  "title": "PolicyDecisionEventMetadata",
+  "type": "object",
+  "required": ["decision", "source", "enforcement_mode"],
+  "properties": {
+    "decision": {
+      "type": "string",
+      "enum": ["allow", "deny", "require_approval", "observe"]
+    },
+    "source": {
+      "type": "string",
+      "enum": ["cedar_tool", "event_rule", "submission"]
+    },
+    "enforcement_mode": {
+      "type": "string",
+      "enum": ["observe_only", "enforce"]
+    },
+    "rule_id": { "type": "string" },
+    "rule_pack_id": { "type": "string" },
+    "trigger_event_type": { "type": "string" },
+    "trigger_milestone": { "type": "string" },
+    "checkpoint": { "type": "string" },
+    "correlation_id": { "type": "string" },
+    "matching_rule_ids": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "reason": { "type": "string" },
+    "severity": {
+      "type": "string",
+      "enum": ["low", "medium", "high", "critical"]
+    },
+    "timeout_s": { "type": "integer" },
+    "action": { "type": "string" },
+    "would_block": { "type": "boolean" }
+  },
+  "additionalProperties": true
+}

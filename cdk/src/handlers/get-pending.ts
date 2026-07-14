@@ -128,6 +128,10 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
         timeout_s,
         expires_at,
         matching_rule_ids: coerceStringList(row.matching_rule_ids),
+        ...(row.source != null && { source: row.source === 'event' ? 'event' : 'tool' }),
+        ...(row.event_type != null && { event_type: String(row.event_type) }),
+        ...(row.checkpoint != null && { checkpoint: String(row.checkpoint) }),
+        ...(row.rule_id != null && { rule_id: String(row.rule_id) }),
       };
     });
 

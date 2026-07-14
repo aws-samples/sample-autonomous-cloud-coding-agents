@@ -548,6 +548,64 @@ export interface DenyResponse {
  */
 export type Severity = 'low' | 'medium' | 'high';
 
+/** Event governance types (issue #230). Mirrors ``cdk/src/handlers/shared/event-governance-types.ts``. */
+export type EventRuleAction =
+  | 'require_approval'
+  | 'notify'
+  | 'escalate'
+  | 'cancel_task'
+  | 'inject_nudge'
+  | 'observe_only';
+
+export type EventRuleMode = 'observe_only' | 'enforce';
+export type EventRuleEvaluation = 'sync' | 'async';
+export type ApprovalSource = 'tool' | 'event';
+
+export type EventRuleWhen = {
+  readonly fields?: Readonly<Record<string, unknown>>;
+  readonly aggregate?: {
+    readonly cost_usd_gte?: number;
+    readonly turn_count_gte?: number;
+  };
+};
+
+export type EventRule = {
+  readonly id: string;
+  readonly on: string;
+  readonly when?: EventRuleWhen;
+  readonly action: EventRuleAction;
+  readonly mode: EventRuleMode;
+  readonly evaluation: EventRuleEvaluation;
+  readonly reason?: string;
+  readonly severity?: 'low' | 'medium' | 'high';
+  readonly timeout_s?: number;
+  readonly notify_channels?: readonly ('slack' | 'email' | 'github' | 'linear' | 'webhook')[];
+  readonly rule_pack_id?: string;
+};
+
+export type EventRulePackRef = {
+  readonly id: string;
+  readonly version: string;
+};
+
+export type PolicyDecisionMetadata = {
+  readonly decision: 'allow' | 'deny' | 'require_approval' | 'observe';
+  readonly source: 'cedar_tool' | 'event_rule' | 'submission';
+  readonly enforcement_mode: EventRuleMode;
+  readonly rule_id?: string;
+  readonly rule_pack_id?: string;
+  readonly trigger_event_type?: string;
+  readonly trigger_milestone?: string;
+  readonly checkpoint?: string;
+  readonly correlation_id?: string;
+  readonly matching_rule_ids?: readonly string[];
+  readonly reason?: string;
+  readonly severity?: string;
+  readonly timeout_s?: number;
+  readonly action?: string;
+  readonly would_block?: boolean;
+};
+
 /** Pending approval summary returned by `GET /v1/pending`. */
 export interface PendingApprovalSummary {
   readonly task_id: string;
@@ -563,6 +621,10 @@ export interface PendingApprovalSummary {
    *  ``bgagent pending`` so users can see which rule fired without
    *  spelunking TaskEventsTable. */
   readonly matching_rule_ids: readonly string[];
+  readonly source?: ApprovalSource;
+  readonly event_type?: string;
+  readonly checkpoint?: string;
+  readonly rule_id?: string;
 }
 
 /** GET /v1/pending response body. */
@@ -586,6 +648,28 @@ export interface GetPoliciesResponse {
     readonly hard: readonly PolicyRuleSummary[];
     readonly soft: readonly PolicyRuleSummary[];
   };
+}
+
+/** Event rule summary from GET /v1/repos/{repo_id}/event-rules. */
+export interface EventRuleSummary {
+  readonly rule_id: string;
+  readonly on: string;
+  readonly action: string;
+  readonly mode: string;
+  readonly evaluation: string;
+  readonly reason?: string;
+}
+
+/** GET /v1/repos/{repo_id}/event-rules response body. */
+export interface GetEventRulesResponse {
+  readonly repo_id: string;
+  readonly event_rule_pack?: EventRulePackRef;
+  readonly rules: readonly EventRuleSummary[];
+  readonly registry_packs: readonly {
+    readonly id: string;
+    readonly version: string;
+    readonly rule_count: number;
+  }[];
 }
 
 /** Maximum deny reason length after server-side sanitization. */
