@@ -25,6 +25,7 @@ import { reportIssueFailure } from './shared/jira-feedback';
 import { resolveJiraOauthToken } from './shared/jira-oauth-resolver';
 import { logger } from './shared/logger';
 import type { Attachment } from './shared/types';
+import { CODING_WORKFLOW_ID } from './shared/workflows';
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
@@ -370,7 +371,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       // Explicit coding workflow: a label-triggered Jira task always targets a
       // mapped repo, so it must not fall through the resolution ladder to the
       // repo-less default/agent-v1 (which never commits or opens a PR). #546
-      workflow_ref: 'coding/new-task-v1',
+      workflow_ref: CODING_WORKFLOW_ID,
       ...(attachments.length > 0 && { attachments }),
     },
     {

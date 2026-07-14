@@ -67,17 +67,92 @@ function toAdfDocument(message: string): Record<string, unknown> {
 }
 
 /**
+ * A single run of comment text with optional inline emphasis / hyperlink.
+ * The ADF serializer ({@link buildAdfDocument}) maps ``strong``/``em`` onto
+ * ADF ``marks`` and ``href`` onto an ADF ``link`` mark. Callers that need
+ * plain text simply omit all flags. This is the smallest content model that
+ * lets the fan-out final-status comment render a bold header, an italic
+ * task-id footer, and a clickable PR link without hand-building ADF at every
+ * call site (issue #573).
+ *
+ * ``href`` matters because ADF — unlike Linear's Markdown — does NOT
+ * auto-linkify a bare URL sitting in a plain text node: it renders as
+ * unclickable text unless the run carries an explicit ``link`` mark.
+ */
+export interface AdfTextRun {
+  readonly text: string;
+  readonly strong?: boolean;
+  readonly em?: boolean;
+  /** When set, the run renders as a clickable hyperlink to this URL. */
+  readonly href?: string;
+}
+
+/** A paragraph is a list of runs; an empty run list renders a blank line. */
+export type AdfParagraph = ReadonlyArray<AdfTextRun>;
+
+/**
+ * Build a multi-paragraph ADF document. Each element of ``paragraphs``
+ * becomes one ADF ``paragraph`` node; an empty run list yields an empty
+ * paragraph (Jira renders it as a blank line, which is how we get the
+ * spacing between the header, the metrics line, and the footer without
+ * embedding ``\n`` — ADF text nodes do not honor newlines).
+ *
+ * Exported for the fan-out final-status renderer + its tests. The
+ * single-paragraph {@link toAdfDocument} stays for the short processor
+ * messages that have no structure to preserve.
+ */
+export function buildAdfDocument(paragraphs: ReadonlyArray<AdfParagraph>): Record<string, unknown> {
+  return {
+    type: 'doc',
+    version: 1,
+    content: paragraphs.map((runs) => ({
+      type: 'paragraph',
+      content: runs.map((run) => {
+        const marks: Array<Record<string, unknown>> = [];
+        if (run.strong) marks.push({ type: 'strong' });
+        if (run.em) marks.push({ type: 'em' });
+        // ADF ``link`` mark — the only way to make a URL clickable in a
+        // Jira comment; a bare URL in a text node stays plain text.
+        if (run.href) marks.push({ type: 'link', attrs: { href: run.href } });
+        return marks.length > 0
+          ? { type: 'text', text: run.text, marks }
+          : { type: 'text', text: run.text };
+      }),
+    })),
+  };
+}
+
+/**
+ * Classified outcome of a comment POST, mirroring Linear's
+ * ``LinearPostResult``. ``retryable`` distinguishes transient failures
+ * (network error, request timeout, HTTP 5xx/429) — where a Lambda retry
+ * may genuinely succeed — from terminal ones (bad issue id, revoked
+ * credential, malformed request) where it cannot. The best-effort
+ * boolean-returning {@link postIssueComment} collapses this to
+ * ``ok``/``!ok``; the fan-out dispatcher branches on ``retryable`` to
+ * decide whether to escalate to the partial-batch retry path (#573).
+ */
+export type JiraPostResult =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly retryable: boolean };
+
+/**
  * Outcome of a single comment POST. We distinguish auth rejection (401/403)
  * from other failures so the caller can react to the former with a forced
- * token refresh + retry, and treat the latter as terminal.
+ * token refresh + retry. Non-auth failures carry a ``retryable`` flag so the
+ * classified caller ({@link postCommentWithResult}) can tell a transient
+ * 5xx/429/network blip from a terminal 4xx.
  */
-type PostOutcome = 'ok' | 'auth' | 'error';
+type PostOutcome =
+  | { readonly kind: 'ok' }
+  | { readonly kind: 'auth' }
+  | { readonly kind: 'error'; readonly retryable: boolean };
 
 async function postComment(
   accessToken: string,
   cloudId: string,
   issueIdOrKey: string,
-  message: string,
+  body: Record<string, unknown>,
 ): Promise<PostOutcome> {
   // The 3LO token (audience=api.atlassian.com) is only valid against the
   // gateway base scoped by cloudId — see JIRA_API_BASE. Posting to the raw
@@ -96,23 +171,32 @@ async function postComment(
         'Content-Type': 'application/json',
         'Accept': 'application/json',
       },
-      body: JSON.stringify({ body: toAdfDocument(message) }),
+      body: JSON.stringify({ body }),
       signal: controller.signal,
     });
-    if (resp.ok) return 'ok';
-    // 401/403 are recoverable: the stored access token may be dead despite a
-    // not-yet-reached `expires_at` (server-side revocation, scope re-issue, or
-    // a value cached past its out-of-band rotation). Signal the caller to
-    // force-refresh and retry once. Any other non-2xx is terminal.
-    const outcome: PostOutcome = resp.status === 401 || resp.status === 403 ? 'auth' : 'error';
-    logger.warn('Jira feedback REST non-2xx', { status: resp.status, url, outcome });
-    return outcome;
+    if (resp.ok) return { kind: 'ok' };
+    // 401/403 are recoverable via a forced refresh: the stored access token
+    // may be dead despite a not-yet-reached `expires_at` (server-side
+    // revocation, scope re-issue, or a value cached past its out-of-band
+    // rotation). Signal the caller to force-refresh and retry once. 5xx is a
+    // Jira-side outage and 429 a rate limit — both may clear on a Lambda
+    // retry. Any other non-2xx (400/404…) is terminal: re-sending the same
+    // request cannot change the answer.
+    if (resp.status === 401 || resp.status === 403) {
+      logger.warn('Jira feedback REST auth rejection', { status: resp.status, url });
+      return { kind: 'auth' };
+    }
+    const retryable = resp.status >= 500 || resp.status === 429;
+    logger.warn('Jira feedback REST non-2xx', { status: resp.status, url, retryable });
+    return { kind: 'error', retryable };
   } catch (err) {
+    // fetch rejection: DNS/connect failure or the AbortController timeout —
+    // transient by nature, so worth a retry.
     logger.warn('Jira feedback request failed', {
       error: err instanceof Error ? err.message : String(err),
       url,
     });
-    return 'error';
+    return { kind: 'error', retryable: true };
   } finally {
     clearTimeout(timer);
   }
@@ -174,22 +258,55 @@ export async function postIssueComment(
   issueIdOrKey: string,
   body: string,
 ): Promise<boolean> {
+  const result = await postCommentWithResult(ctx, issueIdOrKey, toAdfDocument(body));
+  return result.ok;
+}
+
+/**
+ * Post a pre-built ADF document onto a Jira issue, returning a classified
+ * {@link JiraPostResult} so a caller with a retry mechanism (the fan-out
+ * dispatcher's partial-batch path, #573) can distinguish transient failures
+ * worth a Lambda retry from terminal ones. Never throws.
+ *
+ * Shares the 401/403 forced-refresh-and-retry-once behaviour with
+ * {@link postIssueComment} (issue #370). The auth-refresh path always
+ * classifies its final failure as terminal ``{ retryable: false }`` — a
+ * bad/revoked credential is not fixed by re-running the whole dispatcher.
+ */
+export async function postIssueCommentAdf(
+  ctx: JiraFeedbackContext,
+  issueIdOrKey: string,
+  body: Record<string, unknown>,
+): Promise<JiraPostResult> {
+  return postCommentWithResult(ctx, issueIdOrKey, body);
+}
+
+async function postCommentWithResult(
+  ctx: JiraFeedbackContext,
+  issueIdOrKey: string,
+  body: Record<string, unknown>,
+): Promise<JiraPostResult> {
   const resolved = await resolveTenantToken(ctx);
-  if (!resolved) return false;
+  // Token resolution collapses every failure cause (registry miss, revoked
+  // workspace, unreadable secret, transient DDB/SM throttle) into null. As
+  // with linear-feedback, there is no signal left to tell a throttle from an
+  // unregistered workspace, so we classify it terminal — the dispatcher's
+  // marker-gated retry would not resolve a genuinely-missing credential.
+  if (!resolved) return { ok: false, retryable: false };
 
   const outcome = await postComment(resolved.accessToken, ctx.cloudId, issueIdOrKey, body);
-  if (outcome === 'ok') return true;
-  if (outcome === 'error') return false;
+  if (outcome.kind === 'ok') return { ok: true };
+  if (outcome.kind === 'error') return { ok: false, retryable: outcome.retryable };
 
-  // outcome === 'auth': the stored access token was rejected. Force a refresh
-  // (bypassing the resolver's cache and proactive-expiry short-circuit) and
-  // retry once with the freshly-minted token.
+  // outcome.kind === 'auth': the stored access token was rejected. Force a
+  // refresh (bypassing the resolver's cache and proactive-expiry
+  // short-circuit) and retry once with the freshly-minted token.
   logger.info('Jira feedback got auth rejection — forcing token refresh and retrying once', {
     jira_cloud_id: ctx.cloudId,
     issue_id_or_key: issueIdOrKey,
   });
   const refreshed = await resolveTenantToken(ctx, true);
-  if (!refreshed) return false;
+  if (!refreshed) return { ok: false, retryable: false };
   // If the refresh handed back the same access token, the retry can only
   // reproduce the 401 — skip the redundant network call.
   if (refreshed.accessToken === resolved.accessToken) {
@@ -197,9 +314,15 @@ export async function postIssueComment(
       jira_cloud_id: ctx.cloudId,
       issue_id_or_key: issueIdOrKey,
     });
-    return false;
+    return { ok: false, retryable: false };
   }
-  return (await postComment(refreshed.accessToken, ctx.cloudId, issueIdOrKey, body)) === 'ok';
+  const retryOutcome = await postComment(refreshed.accessToken, ctx.cloudId, issueIdOrKey, body);
+  if (retryOutcome.kind === 'ok') return { ok: true };
+  // A second auth rejection means the credential is genuinely unusable —
+  // terminal. A transient error on the retry stays retryable so the
+  // dispatcher can escalate for a Lambda retry.
+  if (retryOutcome.kind === 'error') return { ok: false, retryable: retryOutcome.retryable };
+  return { ok: false, retryable: false };
 }
 
 /**
