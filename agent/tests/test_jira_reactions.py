@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import jira_reactions
-from jira_reactions import comment_task_finished, comment_task_started
+from jira_reactions import comment_task_started
 
 JIRA_META = {"jira_cloud_id": "cloud-1", "jira_issue_key": "KAN-1"}
 
@@ -36,7 +36,6 @@ class TestChannelGate:
         monkeypatch.setenv("JIRA_API_TOKEN", "jira_at")
         with patch("jira_reactions.requests.post") as post:
             comment_task_started("linear", JIRA_META)
-            comment_task_finished("linear", JIRA_META, success=True)
             post.assert_not_called()
 
     def test_empty_metadata_is_noop(self, monkeypatch):
@@ -74,31 +73,14 @@ class TestStartComment:
             post.assert_not_called()
 
 
-class TestFinishComment:
-    def test_success_with_pr_includes_pr_url(self, monkeypatch):
-        monkeypatch.setenv("JIRA_API_TOKEN", "jira_at")
-        with patch("jira_reactions.requests.post", return_value=_resp(201)) as post:
-            comment_task_finished(
-                "jira", JIRA_META, success=True, pr_url="https://github.com/o/r/pull/7"
-            )
-        text = post.call_args[1]["json"]["body"]["content"][0]["content"][0]["text"]
-        assert "✅" in text
-        assert "https://github.com/o/r/pull/7" in text
+class TestTerminalCommentDemoted:
+    """Since issue #573 the fan-out plane (``dispatchToJira``) owns the Jira
+    terminal comment, so the agent no longer exposes ``comment_task_finished``.
+    This pins the demotion so a future refactor can't silently re-introduce a
+    duplicate terminal comment on the agent side."""
 
-    def test_success_without_pr_notes_no_pr(self, monkeypatch):
-        monkeypatch.setenv("JIRA_API_TOKEN", "jira_at")
-        with patch("jira_reactions.requests.post", return_value=_resp(201)) as post:
-            comment_task_finished("jira", JIRA_META, success=True, pr_url=None)
-        text = post.call_args[1]["json"]["body"]["content"][0]["content"][0]["text"]
-        assert "✅" in text
-        assert "No pull request" in text
-
-    def test_failure_comment(self, monkeypatch):
-        monkeypatch.setenv("JIRA_API_TOKEN", "jira_at")
-        with patch("jira_reactions.requests.post", return_value=_resp(201)) as post:
-            comment_task_finished("jira", JIRA_META, success=False, pr_url=None)
-        text = post.call_args[1]["json"]["body"]["content"][0]["content"][0]["text"]
-        assert "❌" in text
+    def test_comment_task_finished_is_gone(self):
+        assert not hasattr(jira_reactions, "comment_task_finished")
 
 
 class TestFailureIsSwallowed:
@@ -107,7 +89,6 @@ class TestFailureIsSwallowed:
         with patch("jira_reactions.requests.post", return_value=_resp(500, "boom")):
             # Must not raise.
             comment_task_started("jira", JIRA_META)
-            comment_task_finished("jira", JIRA_META, success=True)
 
     def test_request_exception_does_not_raise(self, monkeypatch):
         import requests
@@ -130,7 +111,7 @@ class TestAuthCircuitBreaker:
             calls_after_open = post.call_count
             # Further calls short-circuit without hitting the network.
             comment_task_started("jira", JIRA_META)
-            comment_task_finished("jira", JIRA_META, success=True)
+            comment_task_started("jira", JIRA_META)
             assert post.call_count == calls_after_open
 
     def test_2xx_resets_failure_counter(self, monkeypatch):

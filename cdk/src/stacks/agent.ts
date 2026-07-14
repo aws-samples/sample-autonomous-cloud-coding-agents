@@ -914,9 +914,10 @@ export class AgentStack extends Stack {
     // Slack / GitHub / Linear / email per per-channel default filters.
     // GitHub dispatcher edits a single issue comment in place; Slack
     // dispatcher (issue #64) reads per-workspace bot tokens from
-    // ``bgagent/slack/*``; Linear dispatcher (issue #239) posts a single
-    // deterministic final-status comment with cost/turns/duration.
-    // Email remains a log-only stub until SES wires.
+    // ``bgagent/slack/*``; Linear dispatcher (issue #239) + Jira dispatcher
+    // (issue #573) each post a single deterministic final-status comment
+    // with cost/turns/duration. Email remains a log-only stub until SES
+    // wires.
     new FanOutConsumer(this, 'FanOutConsumer', {
       taskEventsTable: taskEventsTable.table,
       taskTable: taskTable.table,
@@ -941,6 +942,18 @@ export class AgentStack extends Stack {
         service: 'secretsmanager',
         resource: 'secret',
         resourceName: 'bgagent-linear-oauth-*',
+        arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+      }),
+      // Jira dispatcher (issue #573) posts a deterministic final-status
+      // comment with cost/turns/duration on Jira-origin terminal tasks.
+      // Same scope `bgagent-jira-oauth-*` as the orchestrator and Jira
+      // webhook processor — Lambdas in this stack share the rotated-token
+      // write path.
+      jiraWorkspaceRegistryTable: jiraIntegration.workspaceRegistryTable,
+      jiraOauthSecretArnPattern: Stack.of(this).formatArn({
+        service: 'secretsmanager',
+        resource: 'secret',
+        resourceName: 'bgagent-jira-oauth-*',
         arnFormat: ArnFormat.COLON_RESOURCE_NAME,
       }),
     });

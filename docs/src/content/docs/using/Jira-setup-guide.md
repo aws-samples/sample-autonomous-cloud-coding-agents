@@ -4,7 +4,7 @@ title: Jira setup guide
 
 # Jira integration setup guide
 
-Set up the ABCA Jira Cloud integration so that adding a label to a Jira issue triggers an autonomous task. The agent posts progress comments back on the issue as it works.
+Set up the ABCA Jira Cloud integration so that adding a label to a Jira issue triggers an autonomous task. ABCA posts progress comments back on the issue as it works — a "started" comment from the agent and a final status comment (with cost, turns, and duration) from the platform when the task finishes.
 
 ## Prerequisites
 
@@ -17,7 +17,7 @@ Set up the ABCA Jira Cloud integration so that adding a label to a Jira issue tr
 
 ## How it works
 
-A Jira-site admin creates an Atlassian OAuth 2.0 (3LO) app and authorizes it on the site. The OAuth token bundle is stored in a per-tenant Secrets Manager secret (`bgagent-jira-oauth-<cloudId>`). When a user adds the trigger label to a Jira issue, Jira fires a webhook to ABCA; the receiver verifies the `X-Hub-Signature` HMAC, dedupes, and async-invokes the processor, which resolves the tenant, looks up the project→repo mapping, and creates a task. Jira-triggered tasks always run the `coding/new-task-v1` workflow (the processor pins `workflow_ref` explicitly, since a label-triggered task always targets a mapped repo). The agent clones the repo, opens a PR, and comments on the Jira issue via the Jira REST v3 API (using the same stored OAuth token).
+A Jira-site admin creates an Atlassian OAuth 2.0 (3LO) app and authorizes it on the site. The OAuth token bundle is stored in a per-tenant Secrets Manager secret (`bgagent-jira-oauth-<cloudId>`). When a user adds the trigger label to a Jira issue, Jira fires a webhook to ABCA; the receiver verifies the `X-Hub-Signature` HMAC, dedupes, and async-invokes the processor, which resolves the tenant, looks up the project→repo mapping, and creates a task. Jira-triggered tasks always run the `coding/new-task-v1` workflow (the processor pins `workflow_ref` explicitly, since a label-triggered task always targets a mapped repo). The agent clones the repo, opens a PR, and posts a "started" comment on the Jira issue via the Jira REST v3 API (using the same stored OAuth token). When the task reaches a terminal state, the platform's fan-out plane posts a single final status comment — outcome, cost, turns, duration, and PR link — via the same REST v3 endpoint (see [How it works](#how-it-works) below).
 
 **Tenant key.** Everything is indexed on `cloudId` — the Atlassian tenant UUID, *not* the site domain or name. Webhook payloads and the OAuth flow both surface `cloudId`; it is the join key across the project-mapping, user-mapping, and workspace-registry tables.
 
@@ -38,13 +38,36 @@ Outbound (Agent → Jira) — REST v3:
 runner picks task with channel_source="jira"
   → jira_reactions resolves the OAuth access token from
     bgagent-jira-oauth-<cloudId> (JIRA_API_TOKEN)
-  → agent posts a "started" comment, then a terminal "succeeded /
-    failed (+ PR link)" comment, via
+  → agent posts a "started" comment via
     POST api.atlassian.com/ex/jira/{cloudId}/rest/api/3/issue/{key}/comment
 ```
 
+Outbound terminal status (Platform → Jira) — REST v3, deterministic:
+
+```
+task reaches a terminal event (completed / failed / cancelled /
+  stranded / timed out) → TaskEventsTable DynamoDB Stream → fan-out
+  Lambda's dispatchToJira resolves the OAuth token and posts ONE
+  final-status comment with cost, turns, duration, task id, and the
+  PR link, via the same REST v3 comment endpoint
+```
+
+The **start** comment is posted by the agent. The **terminal** comment is
+posted by the platform's fan-out plane, not the agent — so it always includes
+cost / turns / duration and fires even when the agent crashes before
+completing (max-turns, OOM). The final comment frames three outcomes:
+
+- ✅ **Task completed** — with the PR link when one was opened.
+- ⚠️ **Shipped a PR but stopped early** — the PR link plus the reason it
+  stopped (e.g. "Hit max-turns cap"), so you can review and decide.
+- ❌ **Task failed / cancelled / timed out** — with a short classifier reason.
+
 Comments are advisory and best-effort: network/auth failures are logged and
-swallowed (with an auth circuit-breaker), never gating the pipeline.
+swallowed (the agent path has an auth circuit-breaker; the platform path
+classifies transient failures as retryable and retries the record), never
+gating the task itself. Jira has no comment-edit API, so the terminal comment
+is posted exactly once (a per-task marker guards against duplicate posts on
+stream retries).
 
 > **Why REST, not the Atlassian Remote MCP?** The hosted MCP
 > (`mcp.atlassian.com`) requires an interactive, browser-based OAuth 2.1 flow
@@ -56,7 +79,7 @@ swallowed (with an auth circuit-breaker), never gating the pipeline.
 > it is expected to fail to connect today and the outbound path does not
 > depend on it.
 
-There is no DynamoDB Streams consumer and no outbound-notify Lambda — this is an inbound-only adapter, matching Linear.
+Inbound admission (webhook → task) is Jira-specific and has no DynamoDB Streams consumer of its own. The **terminal** status comment, however, is delivered by the shared fan-out plane's DynamoDB Streams consumer (`dispatchToJira`) — the same platform-side surface that posts Linear final-status comments — so it behaves identically to Linear for terminal outcomes.
 
 ## Setup walkthrough
 

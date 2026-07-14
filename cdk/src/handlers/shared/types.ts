@@ -175,6 +175,16 @@ export interface TaskRecord {
    * record). Absent until the first successful post.
    */
   readonly linear_final_comment_event_id?: string;
+  /**
+   * Event ID of the terminal event whose Jira final-status comment was
+   * successfully posted (fan-out plane). Jira has no comment edit API,
+   * so the dispatcher is post-once: this marker makes the post
+   * idempotent across partial-batch Lambda retries (a sibling channel's
+   * infra rejection re-runs every dispatcher for the record). The Jira
+   * analogue of ``linear_final_comment_event_id``. Absent until the
+   * first successful post.
+   */
+  readonly jira_final_comment_event_id?: string;
   readonly attachments?: AttachmentRecord[];
   /**
    * Cedar HITL: per-task default approval timeout (design §10.2).
@@ -239,6 +249,7 @@ export interface TaskNotificationsConfig {
   readonly email?: ChannelConfig;
   readonly github?: ChannelConfig;
   readonly linear?: ChannelConfig;
+  readonly jira?: ChannelConfig;
 }
 
 /**

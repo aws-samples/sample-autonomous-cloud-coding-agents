@@ -48,6 +48,11 @@ import type {
 import { clearTokenCache, resolveGitHubToken } from './shared/context-hydration';
 import { classifyError } from './shared/error-classifier';
 import { renderCommentBody, upsertTaskComment } from './shared/github-comment';
+import {
+  buildAdfDocument,
+  postIssueCommentAdf,
+  type AdfParagraph,
+} from './shared/jira-feedback';
 import { postIssueComment } from './shared/linear-feedback';
 import { logger } from './shared/logger';
 import { coerceNumericOrNull } from './shared/numeric';
@@ -107,7 +112,7 @@ const APPROVAL_NOTIFICATION_EVENTS = [
  *   - Per-user rate limit of 10 approval-related messages per minute
  *     is enforced in the dispatcher, not in this filter.
  */
-export type NotificationChannel = 'slack' | 'email' | 'github' | 'linear';
+export type NotificationChannel = 'slack' | 'email' | 'github' | 'linear' | 'jira';
 
 export const CHANNEL_DEFAULTS: Record<NotificationChannel, ReadonlySet<string>> = {
   // Slack is the "on-call" channel per §6.2 — all terminal outcomes
@@ -171,6 +176,26 @@ export const CHANNEL_DEFAULTS: Record<NotificationChannel, ReadonlySet<string>> 
   // are excluded for the same reason — N comments rather than 1.
   linear: new Set<string>([
     ...TERMINAL_EVENT_TYPES,
+  ]),
+  // Jira posts a single deterministic final-status comment on terminal
+  // events — the Jira analogue of the Linear default above (issue #573).
+  // Before this, Jira-origin tasks relied solely on the agent-side
+  // ``jira_reactions.py`` terminal comment, which only carried
+  // success/failure + PR URL and never fired at all if the agent crashed
+  // before reaching its final-comment path (max-turns, OOM). This
+  // dispatcher owns the terminal comment instead — with cost / turns /
+  // duration — and fires even on an agent crash. ``task_timed_out`` is
+  // included (unlike Linear, which predates it) because the orchestrator
+  // now emits it as a distinct terminal event (``orchestrator.ts``); the
+  // Slack + email defaults already subscribe to it.
+  //
+  // Jira has no comment-edit API (same as Linear), so this is post-once:
+  // idempotency across partial-batch retries rides on the
+  // ``jira_final_comment_event_id`` marker. The agent-side start comment
+  // ("🤖 ABCA picked up this issue…") stays for in-flight progress.
+  jira: new Set<string>([
+    ...TERMINAL_EVENT_TYPES,
+    'task_timed_out',
   ]),
 };
 
@@ -574,6 +599,24 @@ async function saveLinearCommentState(taskId: string, eventId: string): Promise<
     values: { ':eid': eventId },
     channel: 'linear',
     errorId: 'FANOUT_LINEAR_PERSIST_FAILED',
+    logContext: { event_id: eventId },
+  });
+}
+
+/**
+ * Persist the post-once marker after a successful Jira final-status comment
+ * (see ``dispatchToJira``). The Jira analogue of ``saveLinearCommentState`` —
+ * Jira has no comment-edit API, so the marker is what makes the post
+ * idempotent across partial-batch retries.
+ */
+async function saveJiraCommentState(taskId: string, eventId: string): Promise<void> {
+  await saveDispatchMarker({
+    taskId,
+    updateExpression: 'SET jira_final_comment_event_id = :eid',
+    conditionExpression: 'attribute_exists(task_id) AND attribute_not_exists(jira_final_comment_event_id)',
+    values: { ':eid': eventId },
+    channel: 'jira',
+    errorId: 'FANOUT_JIRA_PERSIST_FAILED',
     logContext: { event_id: eventId },
   });
 }
@@ -1101,6 +1144,226 @@ async function dispatchToLinear(event: FanOutEvent): Promise<void> {
   }
 }
 
+/**
+ * Render the Jira final-status comment as ADF paragraphs. Mirrors
+ * ``renderLinearFinalStatusComment`` framing exactly — the only difference
+ * is the output shape (ADF runs vs Markdown string), because Jira REST v3
+ * comments require Atlassian Document Format, not Markdown.
+ *
+ * Three outcomes based on ``(eventType, prUrl)``:
+ *
+ *   1. ``task_completed``                        → ✅ "Task completed"
+ *   2. any non-completed terminal event WITH PR  → ⚠️ "Shipped a PR but stopped early"
+ *   3. any non-completed terminal event NO PR    → ❌ "Task <subtype>" + classifier title
+ *
+ * Unlike Linear, the PR URL is rendered on the ✅ success path too (issue
+ * #573 decision): demoting the agent-side ``jira_reactions.py`` terminal
+ * comment to this dispatcher removes Jira's only other surviving PR-link
+ * surface, whereas Linear keeps the agent's step-2 "PR opened" comment.
+ *
+ * Missing metric values render as ``—``. The result is a list of ADF
+ * paragraphs (blank lines are empty paragraphs — ADF text nodes do not
+ * honor ``\n``), fed to ``buildAdfDocument``.
+ */
+export function renderJiraFinalStatusComment(args: {
+  eventType: string;
+  prUrl: string | null;
+  costUsd: number | null;
+  turns: number | null;
+  maxTurns: number | null;
+  durationS: number | null;
+  taskId: string;
+  errorTitle: string | null;
+}): ReadonlyArray<AdfParagraph> {
+  const isCompleted = args.eventType === 'task_completed';
+  const shippedDespiteFailure = !isCompleted && args.prUrl != null;
+
+  let header: string;
+  if (isCompleted) {
+    header = '✅ Task completed';
+  } else if (shippedDespiteFailure) {
+    const reason = args.errorTitle ? ` — ${args.errorTitle}` : '';
+    header = `⚠️ Shipped a PR but stopped early${reason} — review and decide if more work is needed`;
+  } else {
+    const reason = args.errorTitle ? `: ${args.errorTitle}` : '';
+    header = `❌ Task ${args.eventType.replace(/^task_/, '')}${reason}`;
+  }
+
+  const costStr = args.costUsd != null ? `$${args.costUsd.toFixed(2)}` : '—';
+  const turnsStr = args.turns != null
+    ? `${args.turns}${args.maxTurns != null ? ` / ${args.maxTurns}` : ''}`
+    : '—';
+  const durationStr = args.durationS != null
+    ? formatDuration(args.durationS)
+    : '—';
+
+  const paragraphs: AdfParagraph[] = [
+    [{ text: header, strong: true }],
+    [{ text: `cost: ${costStr} • turns: ${turnsStr} • duration: ${durationStr}` }],
+  ];
+  // Render the PR link whenever one exists — on both the ✅ success path and
+  // the ⚠️ shipped-but-stopped path. This diverges from Linear (which omits
+  // it on success) because Jira no longer has the agent-side terminal
+  // comment carrying the link (issue #573 decision).
+  if (args.prUrl) {
+    paragraphs.push([{ text: `PR: ${args.prUrl}` }]);
+  }
+  paragraphs.push([{ text: `task ${args.taskId}`, em: true }]);
+  return paragraphs;
+}
+
+/**
+ * Jira dispatcher — posts a deterministic final-status comment when a
+ * Jira-origin task reaches a terminal event. The Jira analogue of
+ * ``dispatchToLinear`` (issue #573); structurally identical:
+ *
+ *   1. Guard on ``JIRA_WORKSPACE_REGISTRY_TABLE_NAME`` (deploy-misconfig).
+ *   2. Load TaskRecord. Skip if missing (TTL eviction race).
+ *   3. Gate on ``channel_source === 'jira'`` so non-Jira tasks short-circuit
+ *      after one DDB Get.
+ *   4. Read ``jira_cloud_id`` + ``jira_issue_key`` from ``channel_metadata``.
+ *      Skip if either is missing — defensive; shouldn't happen for a
+ *      properly-admitted Jira task.
+ *   5. Idempotency: skip if the ``jira_final_comment_event_id`` marker is set.
+ *   6. Render ADF + post via ``postIssueCommentAdf`` (which owns the
+ *      OAuth-refresh-and-retry-once behaviour), then persist the marker.
+ *
+ * Failure handling matches Linear: terminal failures log-and-resolve (a
+ * retry cannot fix a revoked tenant or bad issue key); retryable failures
+ * THROW so ``routeEvent`` records an infra rejection and the record lands
+ * in ``batchItemFailures`` for a Lambda retry. The retry is idempotent —
+ * the marker is persisted only after a successful post.
+ */
+async function dispatchToJira(event: FanOutEvent): Promise<void> {
+  const registryTableName = process.env.JIRA_WORKSPACE_REGISTRY_TABLE_NAME;
+  if (!registryTableName) {
+    // WARN with error_id so this is alarmable — same shape as the Linear
+    // dispatcher. The final-status comment is the only completion signal
+    // that survives an agent crash, so a misconfigured env var would
+    // silently drop every Jira-origin task's metrics.
+    logger.warn('[fanout/jira] JIRA_WORKSPACE_REGISTRY_TABLE_NAME not set — skipping', {
+      event: 'fanout.jira.missing_env',
+      error_id: 'FANOUT_JIRA_MISSING_ENV',
+      task_id: event.task_id,
+    });
+    return;
+  }
+
+  const task = await loadTaskForComment(event.task_id);
+  if (!task) {
+    logger.warn('[fanout/jira] task not found — skipping comment', {
+      event: 'fanout.jira.task_missing',
+      task_id: event.task_id,
+    });
+    return;
+  }
+
+  // channel_source gate — short-circuit non-Jira tasks after one DDB Get.
+  if (task.channel_source !== 'jira') {
+    return;
+  }
+
+  const cloudId = task.channel_metadata?.jira_cloud_id;
+  const issueKey = task.channel_metadata?.jira_issue_key;
+  if (!cloudId || !issueKey) {
+    logger.warn('[fanout/jira] task missing jira_cloud_id or jira_issue_key — skipping', {
+      event: 'fanout.jira.metadata_missing',
+      task_id: event.task_id,
+      has_cloud_id: Boolean(cloudId),
+      has_issue_key: Boolean(issueKey),
+    });
+    return;
+  }
+
+  // Idempotency across partial-batch retries: Jira has no comment edit API,
+  // so a re-run (e.g. a sibling channel's infra rejection pushed the whole
+  // stream record into batchItemFailures) would post a duplicate. The
+  // marker is persisted after the first successful post below.
+  if (task.jira_final_comment_event_id) {
+    logger.info('[fanout/jira] final comment already posted — skipping (idempotent retry)', {
+      event: 'fanout.jira.already_posted',
+      task_id: task.task_id,
+      posted_event_id: task.jira_final_comment_event_id,
+      event_id: event.event_id,
+    });
+    return;
+  }
+
+  // Same classifier the Linear dispatcher + API surface use — "Hit max-turns
+  // cap", "Insufficient GitHub permissions", etc. Returns null only when
+  // error_message is empty (the task_completed case).
+  const classification = classifyError(task.error_message);
+
+  const paragraphs = renderJiraFinalStatusComment({
+    eventType: event.event_type,
+    prUrl: task.pr_url ?? null,
+    // DDB returns numeric attributes as strings at the Document-client
+    // boundary; coerce so toFixed/comparisons work. Same pattern the
+    // GitHub + Linear dispatchers use.
+    costUsd: coerceNumericOrNull(
+      task.cost_usd,
+      { field: 'cost_usd', task_id: task.task_id, event_id: event.event_id },
+      logger,
+    ),
+    turns: coerceNumericOrNull(
+      task.turns_attempted,
+      { field: 'turns_attempted', task_id: task.task_id, event_id: event.event_id },
+      logger,
+    ),
+    maxTurns: coerceNumericOrNull(
+      task.max_turns,
+      { field: 'max_turns', task_id: task.task_id, event_id: event.event_id },
+      logger,
+    ),
+    durationS: coerceNumericOrNull(
+      task.duration_s,
+      { field: 'duration_s', task_id: task.task_id, event_id: event.event_id },
+      logger,
+    ),
+    taskId: task.task_id,
+    errorTitle: classification?.title ?? null,
+  });
+
+  const postResult = await postIssueCommentAdf(
+    { cloudId, registryTableName },
+    issueKey,
+    buildAdfDocument(paragraphs),
+  );
+
+  if (postResult.ok) {
+    logger.info('[fanout/jira] comment dispatched', {
+      event: 'fanout.jira.dispatched',
+      task_id: task.task_id,
+      jira_cloud_id: cloudId,
+      jira_issue_key: issueKey,
+      event_type: event.event_type,
+      posted: true,
+    });
+    await saveJiraCommentState(task.task_id, event.event_id);
+  } else {
+    logger.warn('[fanout/jira] postIssueCommentAdf failed — Jira REST path failed', {
+      event: 'fanout.jira.post_failed',
+      error_id: 'FANOUT_JIRA_POST_FAILED',
+      task_id: task.task_id,
+      jira_cloud_id: cloudId,
+      jira_issue_key: issueKey,
+      event_type: event.event_type,
+      posted: false,
+      retryable: postResult.retryable,
+    });
+    if (postResult.retryable) {
+      // Escalate to routeEvent's Promise.allSettled so the record enters
+      // batchItemFailures and Lambda retries. Safe because the marker above
+      // was NOT persisted — the retry posts the missing comment or, if a
+      // concurrent run won, short-circuits on the marker. Terminal failures
+      // stay log-only: a retry cannot fix them.
+      throw new Error(
+        `[fanout/jira] transient Jira post failure for task ${task.task_id} — escalating for batch retry`,
+      );
+    }
+  }
+}
+
 /** Exposed for testing: the per-channel dispatcher callable by the
  *  handler. Each key's absence from the routing map disables its
  *  dispatcher; the signature is uniform so adding a channel is one
@@ -1109,6 +1372,7 @@ const DISPATCHERS: Record<NotificationChannel, (ev: FanOutEvent) => Promise<void
   slack: dispatchToSlack,
   github: dispatchToGitHubComment,
   linear: dispatchToLinear,
+  jira: dispatchToJira,
   email: dispatchToEmail,
 };
 
@@ -1163,8 +1427,8 @@ export async function routeEvent(
     attempted.push(ch);
     tasks.push(DISPATCHERS[ch](ev));
   }
-  // Parallelism is bounded by the dispatcher list (4 channels:
-  // slack/github/linear/email), not by program input, so the
+  // Parallelism is bounded by the dispatcher list (5 channels:
+  // slack/github/linear/jira/email), not by program input, so the
   // unbounded-parallelism lint does not apply.
 
   const results = await Promise.allSettled(tasks);

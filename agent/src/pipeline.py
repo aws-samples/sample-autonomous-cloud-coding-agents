@@ -23,7 +23,7 @@ from config import (
     resolve_linear_api_token,
 )
 from context import assemble_prompt, fetch_github_issue
-from jira_reactions import comment_task_finished, comment_task_started
+from jira_reactions import comment_task_started
 from linear_reactions import react_task_finished, react_task_started
 from models import AgentResult, HydratedContext, RepoSetup, TaskConfig, TaskResult
 from observability import current_otel_trace_id, task_span
@@ -1106,14 +1106,14 @@ def run_task(
                 started_reaction_id=linear_eyes_reaction_id,
             )
 
-            # Terminal status comment on the Jira issue (REST shim, with the
-            # PR link when one was opened). No-op for non-Jira tasks.
-            comment_task_finished(
-                config.channel_source,
-                config.channel_metadata,
-                success=(overall_status == "success"),
-                pr_url=pr_url,
-            )
+            # NOTE: the terminal status comment on the Jira issue is NOT posted
+            # here. Since issue #573 the deterministic fan-out plane
+            # (``cdk/src/handlers/fanout-task-events.ts`` ``dispatchToJira``)
+            # owns the Jira final-status comment — it carries cost/turns/
+            # duration and, crucially, fires even if this agent crashes before
+            # reaching this point (max-turns, OOM). Posting here too would
+            # double-comment. The agent still posts the *start* comment
+            # (``comment_task_started`` above) for in-flight progress.
 
             # --trace trajectory S3 upload (design §10.1). Runs AFTER
             # post-hooks but BEFORE ``write_terminal`` so the resulting
@@ -1244,14 +1244,11 @@ def run_task(
                 success=False,
                 started_reaction_id=linear_eyes_reaction_id,
             )
-            # Best-effort failure comment on the Jira issue. No-op for
-            # non-Jira tasks; network failures are swallowed.
-            comment_task_finished(
-                config.channel_source,
-                config.channel_metadata,
-                success=False,
-                pr_url=None,
-            )
+            # NOTE: no Jira failure comment here — the fan-out plane's
+            # ``dispatchToJira`` (issue #573) owns the Jira terminal comment
+            # and fires on the platform side even when this crash path runs,
+            # so posting here would double-comment. (Contrast the Linear ❌
+            # reaction above, which the fan-out plane does not replicate.)
             raise
 
 
