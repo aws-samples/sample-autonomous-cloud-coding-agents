@@ -969,7 +969,7 @@ def run_task(
                 resolve_linear_api_token(config.channel_metadata)
             elif config.channel_source == "jira":
                 resolve_jira_oauth_token(config.channel_metadata)
-            configure_channel_mcp(setup.repo_dir, config.channel_source)
+            configure_channel_mcp(setup.repo_dir, config.channel_source, config.channel_metadata)
 
             # 👀 on the Linear issue — acknowledges the task is picked up.
             # No-op for non-Linear tasks. Best-effort; failures are logged
