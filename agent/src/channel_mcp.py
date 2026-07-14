@@ -168,7 +168,7 @@ def _build_linear_entry(channel_metadata: dict[str, str] | None) -> dict[str, An
         # Gateway configured for the workspace but the token mint failed — do
         # NOT silently fall back to the direct path (the per-thread LINEAR_API_
         # TOKEN may not even be set once a workspace is gateway-managed). Surface it.
-        log("WARN", "Linear gateway_url present but M2M token mint failed; using direct MCP path as fallback")
+        log("WARN", "Linear gateway_url present but M2M token mint failed; using direct MCP path")
     return _linear_server_entry()
 
 

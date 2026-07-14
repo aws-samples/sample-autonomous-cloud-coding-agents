@@ -73,6 +73,13 @@ export const GATEWAY_LINEAR_SCOPES = LINEAR_OAUTH_SCOPES;
 /** Prefix for the per-workspace resource names so they're greppable + sortable. */
 export const GATEWAY_NAME_PREFIX = 'bgagent-linear';
 
+/** Poll interval (ms) when waiting for a gateway/target to become ready. */
+const POLL_INTERVAL_MS = 4000;
+/** Max poll attempts for a gateway to reach READY (~80s at 4s). */
+const GATEWAY_READY_MAX_ATTEMPTS = 20;
+/** Max poll attempts for a target to leave CREATE_PENDING_AUTH (~120s at 4s). */
+const TARGET_READY_MAX_ATTEMPTS = 30;
+
 /**
  * Build the resource names for a workspace's gateway stack. Names must match
  * AgentCore's pattern ([0-9a-zA-Z][-]?){1,100}; slugs are already validated
@@ -284,8 +291,8 @@ export async function waitForTargetReady(
   opts: { intervalMs?: number; maxAttempts?: number } = {},
 ): Promise<{ status: string; statusReasons?: string[] }> {
   const client = makeClient(deps);
-  const intervalMs = opts.intervalMs ?? 4000;
-  const maxAttempts = opts.maxAttempts ?? 30;
+  const intervalMs = opts.intervalMs ?? POLL_INTERVAL_MS;
+  const maxAttempts = opts.maxAttempts ?? TARGET_READY_MAX_ATTEMPTS;
   for (let i = 0; i < maxAttempts; i++) {
     const t = await client.send(new GetGatewayTargetCommand({
       gatewayIdentifier: gatewayId,
@@ -307,8 +314,8 @@ export async function waitForGatewayReady(
   opts: { intervalMs?: number; maxAttempts?: number } = {},
 ): Promise<string> {
   const client = makeClient(deps);
-  const intervalMs = opts.intervalMs ?? 4000;
-  const maxAttempts = opts.maxAttempts ?? 20;
+  const intervalMs = opts.intervalMs ?? POLL_INTERVAL_MS;
+  const maxAttempts = opts.maxAttempts ?? GATEWAY_READY_MAX_ATTEMPTS;
   for (let i = 0; i < maxAttempts; i++) {
     const g = await client.send(new GetGatewayCommand({ gatewayIdentifier: gatewayId }));
     if (g.status === 'READY') return 'READY';

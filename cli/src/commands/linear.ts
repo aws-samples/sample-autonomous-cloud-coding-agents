@@ -36,6 +36,12 @@ import { loadConfig, loadCredentials } from '../config';
 import { CliError } from '../errors';
 import { formatJson } from '../format';
 import {
+  provisionGatewayPhase1,
+  provisionGatewayPhase2,
+  waitForGatewayReady,
+  waitForTargetReady,
+} from '../linear-gateway';
+import {
   buildAuthorizationUrl,
   computeExpiresAt,
   exchangeAuthorizationCode,
@@ -44,12 +50,6 @@ import {
   linearOauthSecretName,
   StoredLinearOauthToken,
 } from '../linear-oauth';
-import {
-  provisionGatewayPhase1,
-  provisionGatewayPhase2,
-  waitForGatewayReady,
-  waitForTargetReady,
-} from '../linear-gateway';
 import { awaitOauthCallback, CALLBACK_URL } from '../oauth-callback-server';
 import { promptSecret } from '../prompt-secret';
 
