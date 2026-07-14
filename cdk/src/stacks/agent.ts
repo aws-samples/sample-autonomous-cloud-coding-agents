@@ -579,8 +579,9 @@ export class AgentStack extends Stack {
     // --- ECS Fargate compute backend (CONTEXT-GATED) ---
     // K12 (2026-06-29): AgentCore's fixed microVM envelope OOM-kills heavy
     // CI-parity builds (ABCA's own ~2800-test `mise run build`). ECS Fargate
-    // gives a tunable 64 GB / 16 vCPU task (see EcsAgentCluster) for repos that
-    // set ``compute_type: 'ecs'``. GATED on the ``compute_type`` deploy context
+    // gives a bigger, tunable task (see EcsAgentCluster for the exact vCPU/memory
+    // sizing + its OOM history — 64 GB was itself OOM-killed, so it runs larger)
+    // for repos that set ``compute_type: 'ecs'``. GATED on the ``compute_type`` deploy context
     // (default 'agentcore') — ECS resources only synthesize when you deploy with
     // ``--context compute_type=ecs``, so the default synth (and the
     // bootstrap-coverage test that synths with default context) stays

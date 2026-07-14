@@ -1275,6 +1275,21 @@ _PAYLOAD_STR_KEYS = frozenset({"issue_number", "pr_number"})
 #: shadow it). Any payload key not in this set is ignored, never passed through.
 _RUN_TASK_PARAMS = frozenset(inspect.signature(run_task).parameters)
 
+#: Orchestrator payload keys we KNOW about that ``run_task`` does not (yet)
+#: accept as a parameter. Dropping one of these is expected today (e.g.
+#: ``base_branch`` is consumed via ``hydrated_context``, not a run_task kwarg;
+#: ``github_token_secret_arn`` is resolved before this call), but a key that
+#: shows up here AND is silently dropped is exactly the "wired one side of an
+#: orchestrator→agent field, forgot the other" no-op that ABCA-487 was — so we
+#: WARN when we drop one, making a future contract gap visible instead of silent.
+#: Keys not in this set (genuinely foreign) are dropped quietly as before.
+_KNOWN_ORCHESTRATOR_KEYS = frozenset({
+    "build_command",
+    "merge_branches",
+    "base_branch",
+    "github_token_secret_arn",
+})
+
 
 def run_task_from_payload(payload: dict) -> dict:
     """Invoke :func:`run_task` from a full orchestrator payload dict.
@@ -1301,7 +1316,15 @@ def run_task_from_payload(payload: dict) -> dict:
     for key, value in (payload or {}).items():
         target = _PAYLOAD_KEY_ALIASES.get(key, key)
         if target not in _RUN_TASK_PARAMS:
-            continue  # not a run_task parameter — ignore (e.g. github_token_secret_arn)
+            # Not a run_task parameter — ignore. A KNOWN orchestrator key being
+            # dropped is expected today but worth a breadcrumb: if run_task ever
+            # grows a matching param, this WARN is where a "forgot to wire it
+            # through" no-op surfaces (N4 / ABCA-487 class). Foreign keys are
+            # dropped quietly.
+            if key in _KNOWN_ORCHESTRATOR_KEYS and value is not None:
+                log("WARN", f"run_task_from_payload: dropping known orchestrator key '{key}' "
+                    f"(not a run_task parameter) — consumed elsewhere or not yet wired")
+            continue
         if value is None:
             continue  # let run_task's default apply
         if target in _PAYLOAD_STR_KEYS:

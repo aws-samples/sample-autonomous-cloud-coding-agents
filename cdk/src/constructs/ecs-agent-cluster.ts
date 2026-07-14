@@ -83,8 +83,9 @@ export interface EcsAgentClusterProps {
    * ``bedrock-agentcore:CreateEvent``) succeed on the ECS substrate. The
    * AgentCore runtime role already gets this via ``agentMemory.grantReadWrite``
    * in agent.ts; without the same grant here, memory writes hit AccessDenied and
-   * silently no-op on ECS (WARN), so learning never persists on an ECS-only
-   * deployment. Omitted in isolated construct tests / memory-less deployments.
+   * no-op on ECS (logged, non-fatal — memory.py treats an AccessDenied as an
+   * infra failure), so learning never persists on an ECS-only deployment.
+   * Omitted in isolated construct tests / memory-less deployments.
    */
   readonly agentMemory?: AgentMemory;
 }
@@ -240,8 +241,8 @@ export class EcsAgentCluster extends Construct {
     // (write_task_episode / write_repo_learnings → bedrock-agentcore:CreateEvent)
     // succeed on ECS. The AgentCore runtime role gets this via
     // agentMemory.grantReadWrite(runtime) in agent.ts; without the same grant
-    // here the writes hit AccessDenied and silently no-op (WARN) on the ECS
-    // substrate, so learning never persists on an ECS-only deployment.
+    // here the writes hit AccessDenied and no-op on the ECS substrate (logged,
+    // non-fatal), so learning never persists on an ECS-only deployment.
     if (props.agentMemory) {
       props.agentMemory.grantReadWrite(taskRole);
     }
@@ -253,7 +254,9 @@ export class EcsAgentCluster extends Construct {
     // 👀→✅ reaction and drive the channel MCP. The AgentCore runtime role +
     // orchestrator/fanout/screenshot roles all have this prefix grant; the ECS
     // task role did NOT, so on ECS the token fetch hit AccessDenied and
-    // reactions/MCP silently no-op'd (ECS-parity gap, live-caught on ABCA-488).
+    // reactions/MCP no-op'd — logged by config.py's token resolver, not silent,
+    // but the channel effect (no 👀→✅, no MCP) is invisible to the user
+    // (ECS-parity gap, live-caught on ABCA-488).
     // GetSecretValue only — the container reads the token; the orchestrator owns
     // refresh/PutSecretValue.
     taskRole.addToPrincipalPolicy(new iam.PolicyStatement({

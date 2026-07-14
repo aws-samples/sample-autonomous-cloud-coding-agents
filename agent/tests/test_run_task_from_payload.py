@@ -142,3 +142,22 @@ class TestRunTaskFromPayload:
             }
         )
         assert set(seen).issubset(accepted)
+
+    def test_warns_when_dropping_a_known_orchestrator_key(self):
+        # N4: a KNOWN orchestrator key that run_task doesn't accept is dropped
+        # (expected today) but logged, so a future "wired one side, forgot the
+        # other" contract gap (the ABCA-487 class) is visible, not silent.
+        logs: list[tuple[str, str]] = []
+        with patch("pipeline.log", side_effect=lambda level, msg, **kw: logs.append((level, msg))):
+            _capture({"build_command": "mise run build", "repo_url": "r"})
+        assert [m for level, m in logs if level == "WARN" and "build_command" in m], (
+            "expected a WARN when dropping the known orchestrator key build_command"
+        )
+
+    def test_does_NOT_warn_when_dropping_a_foreign_key(self):
+        # A genuinely-foreign key (not a known orchestrator field) is dropped
+        # quietly — no log noise for keys we never expected to forward.
+        logs: list[tuple[str, str]] = []
+        with patch("pipeline.log", side_effect=lambda level, msg, **kw: logs.append((level, msg))):
+            _capture({"some_future_unrelated_key": "v", "repo_url": "r"})
+        assert not [m for level, m in logs if "some_future_unrelated_key" in m]
