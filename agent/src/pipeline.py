@@ -1286,6 +1286,14 @@ _KNOWN_ORCHESTRATOR_KEYS = frozenset(
         "merge_branches",
         "base_branch",
         "github_token_secret_arn",
+        # AgentCore's server.py exports task_started_at as TASK_STARTED_AT, which
+        # hooks._remaining_maxlifetime_s() uses to clip the Cedar HITL approval-gate
+        # maxLifetime. The ECS boot path bypasses server.py and does not (yet) set
+        # that env, so this key is dropped here — a silent AgentCore↔ECS HITL
+        # divergence (fail-open: the clip returns None, gate uses the task default).
+        # Listing it makes the drop WARN so the parity gap is visible until the ECS
+        # strategy sets TASK_STARTED_AT in containerEnv (tracked as a follow-up).
+        "task_started_at",
     }
 )
 
@@ -1332,7 +1340,14 @@ def run_task_from_payload(payload: dict) -> dict:
         if target in _PAYLOAD_STR_KEYS:
             value = str(value)
         elif target == "max_turns":
-            value = int(value)
+            # Defensive, matching how every other field is handled: a malformed
+            # max_turns must not crash the whole boot — drop it and let run_task's
+            # default apply (with a breadcrumb) rather than raise a ValueError.
+            try:
+                value = int(value)
+            except (TypeError, ValueError):
+                log("WARN", f"run_task_from_payload: ignoring non-integer max_turns {value!r}")
+                continue
         kwargs[target] = value
 
     kwargs.setdefault("aws_region", os.environ.get("AWS_REGION", ""))

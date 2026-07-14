@@ -161,3 +161,26 @@ class TestRunTaskFromPayload:
         with patch("pipeline.log", side_effect=lambda level, msg, **kw: logs.append((level, msg))):
             _capture({"some_future_unrelated_key": "v", "repo_url": "r"})
         assert not [m for level, m in logs if "some_future_unrelated_key" in m]
+
+    def test_warns_when_dropping_task_started_at_HITL_parity(self):
+        # task_started_at drives the AgentCore HITL maxLifetime clip via
+        # TASK_STARTED_AT; the ECS path doesn't set it yet, so its drop must WARN
+        # (surface the AgentCore↔ECS parity gap, not silently fail-open).
+        logs: list[tuple[str, str]] = []
+        with patch("pipeline.log", side_effect=lambda level, msg, **kw: logs.append((level, msg))):
+            _capture({"task_started_at": "2026-07-14T00:00:00Z", "repo_url": "r"})
+        assert [m for level, m in logs if level == "WARN" and "task_started_at" in m]
+
+    def test_malformed_max_turns_is_dropped_not_raised(self):
+        # A non-integer max_turns must not crash the boot — it's dropped (run_task
+        # default applies) with a WARN, matching how every other field defaults.
+        logs: list[tuple[str, str]] = []
+        with patch("pipeline.log", side_effect=lambda level, msg, **kw: logs.append((level, msg))):
+            seen = _capture({"repo_url": "r", "max_turns": "not-a-number"})
+        assert "max_turns" not in seen
+        assert [m for level, m in logs if level == "WARN" and "max_turns" in m]
+
+    def test_valid_max_turns_still_coerced_to_int(self):
+        seen = _capture({"repo_url": "r", "max_turns": "50"})
+        assert seen["max_turns"] == 50
+        assert isinstance(seen["max_turns"], int)
