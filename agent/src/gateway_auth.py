@@ -27,8 +27,10 @@ from shell import log
 GATEWAY_M2M_SECRET_ENV = "LINEAR_GATEWAY_M2M_SECRET_ARN"  # noqa: S105 — env var *name*, not a secret value
 
 #: Cache the minted token in-process. client_credentials tokens are ~1h; we
-#: refresh a minute early. Keyed by nothing (one M2M client per deployment).
-_token_cache: dict[str, object] = {"access_token": "", "expires_at": 0.0}
+#: refresh a minute early. One M2M client per deployment, so a module-level
+#: cache is enough (the agent runs one task per container).
+_cached_token: str = ""
+_cached_expires_at: float = 0.0
 
 #: Refresh margin (seconds) before the cached token's expiry.
 _REFRESH_MARGIN_S = 60
@@ -72,10 +74,12 @@ def _request_token(bundle: dict[str, str]) -> tuple[str, float] | None:
 
     Returns (access_token, expires_at_epoch) or None on failure.
     """
-    body = urllib.parse.urlencode({
-        "grant_type": "client_credentials",
-        **({"scope": bundle["scope"]} if bundle.get("scope") else {}),
-    }).encode("utf-8")
+    body = urllib.parse.urlencode(
+        {
+            "grant_type": "client_credentials",
+            **({"scope": bundle["scope"]} if bundle.get("scope") else {}),
+        }
+    ).encode("utf-8")
     # Cognito wants HTTP Basic auth (client_id:client_secret) for confidential clients.
     basic = base64.b64encode(f"{bundle['client_id']}:{bundle['client_secret']}".encode()).decode()
     # token_url comes from our own CDK-managed secret (a Cognito https endpoint),
@@ -110,10 +114,10 @@ def get_gateway_bearer_token() -> str:
     failed) — the caller should use the direct ``mcp.linear.app`` path. Caches
     the token in-process and refreshes a minute before expiry.
     """
+    global _cached_token, _cached_expires_at
     now = time.time()
-    cached = str(_token_cache.get("access_token") or "")
-    if cached and float(_token_cache.get("expires_at") or 0) - _REFRESH_MARGIN_S > now:
-        return cached
+    if _cached_token and _cached_expires_at - _REFRESH_MARGIN_S > now:
+        return _cached_token
 
     bundle = _load_m2m_bundle()
     if bundle is None:
@@ -122,13 +126,14 @@ def get_gateway_bearer_token() -> str:
     if result is None:
         return ""
     token, expires_at = result
-    _token_cache["access_token"] = token
-    _token_cache["expires_at"] = expires_at
+    _cached_token = token
+    _cached_expires_at = expires_at
     log("TASK", "gateway_auth: minted M2M gateway bearer token")
     return token
 
 
 def reset_token_cache() -> None:
     """Clear the in-process token cache (tests)."""
-    _token_cache["access_token"] = ""
-    _token_cache["expires_at"] = 0.0
+    global _cached_token, _cached_expires_at
+    _cached_token = ""
+    _cached_expires_at = 0.0
