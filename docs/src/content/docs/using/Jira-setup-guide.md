@@ -205,18 +205,20 @@ The body must be verified as the *raw unparsed bytes* — never parsed-and-restr
 As a Jira-triggered task progresses, the agent moves the originating issue across its workflow so the board reflects reality — the same at-a-glance signal Linear-origin tasks already give:
 
 - **Task start** → the issue moves to an **In Progress** status.
-- **PR opened** → the issue moves to a status named **In Review** (when the workflow has one).
+- **PR opened** → the issue moves to a **review** status (default **In Review**, falling back to In Progress so a stock board isn't skipped).
 - **Task failed or no PR opened** → the status is **left unchanged**; the ❌ final-status comment is the signal, and bouncing a card back and forth is noisier than leaving it where a human sees the failure.
+- **Already at or past the target** → the transition is **skipped**, so a re-triggered task never drags a card backward (e.g. from In Review back to In Progress). This mirrors the Linear integration.
 
 Humans still move the card to **Done** after merging the PR — ABCA never closes issues.
 
-**How a target status is resolved** (evaluated per lifecycle point, first match wins):
+**How a target status is resolved** (evaluated per lifecycle point, first match wins — modeled on the Linear integration):
 
-1. **Per-project override** — the `--status-on-start` / `--status-on-pr` names configured on the project mapping. Matched case-insensitively against the destination status name. An override that isn't reachable from the current status is a deliberate skip (no fallback).
-2. **Heuristic** (no config needed for standard workflows):
-   - On start, the transition whose destination `statusCategory` is *In Progress* (`indeterminate`).
-   - On PR opened, a transition whose destination is named `In Review` (case-insensitive).
-3. **Skip with a warning** — nothing matches, the transition requires a screen with required fields, or the authorizing user lacks permission. The task is never affected.
+1. **Per-project override** — the `--status-on-start` / `--status-on-pr` names configured on the project mapping. Matched case-insensitively against the destination status name. An override is a deliberate instruction: it's honored regardless of the current status, and if it isn't reachable, ABCA skips (no heuristic fallback).
+2. **Name match** (no config needed for standard workflows):
+   - On start, a transition whose destination is named **In Progress**.
+   - On PR opened, a transition named **In Review**, then common synonyms (`Code Review`, `Review`, `Peer Review`, `Reviewing`), then **In Progress** as a last resort.
+3. **Category fallback** — any transition whose destination `statusCategory` is *In Progress* (`indeterminate`), **excluding `Blocked`** (which shares that category but is never what "move to In Progress" means). The name match in step 2 is what keeps the heuristic from landing on `Blocked` when both are available.
+4. **Skip with a warning** — nothing matches, the transition requires a screen with required fields, or the authorizing user lacks permission. The task is never affected.
 
 Transitions are **best-effort**, exactly like comments: short timeout, errors logged and swallowed, sharing the same `401`/`403` auth circuit breaker. A transition failure never fails, blocks, or retries the task. Transition IDs are workflow- and current-status-specific, so they are resolved per-issue at call time (by matching destination name / category) — never configured or hard-coded.
 

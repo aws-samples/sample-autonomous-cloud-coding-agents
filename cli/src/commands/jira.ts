@@ -947,6 +947,14 @@ export function makeJiraCommand(): Command {
           process.exit(1);
         }
 
+        // Trim transition-status overrides and treat blank/whitespace-only as
+        // unset. A whitespace value is truthy in JS, so without this it would
+        // be persisted and then permanently no-op at the agent (`.strip()` → ""
+        // matches no status, with no fallback) — silently disabling the
+        // project's transition (#605).
+        const statusOnStart = opts.statusOnStart?.trim() || undefined;
+        const statusOnPr = opts.statusOnPr?.trim() || undefined;
+
         const now = new Date().toISOString();
         const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
         await ddb.send(new PutCommand({
@@ -960,8 +968,8 @@ export function makeJiraCommand(): Command {
             // Optional per-project workflow-transition overrides (issue #572).
             // Only persisted when supplied so the agent falls back to its
             // statusCategory / "In Review" heuristics otherwise.
-            ...(opts.statusOnStart && { status_on_start: opts.statusOnStart }),
-            ...(opts.statusOnPr && { status_on_pr: opts.statusOnPr }),
+            ...(statusOnStart && { status_on_start: statusOnStart }),
+            ...(statusOnPr && { status_on_pr: statusOnPr }),
             status: 'active',
             onboarded_at: now,
             updated_at: now,
@@ -970,11 +978,11 @@ export function makeJiraCommand(): Command {
 
         console.log(`✓ Mapped Jira project ${cloudId}#${projectKey} → ${opts.repo}`);
         console.log(`  Trigger label: ${opts.label}`);
-        if (opts.statusOnStart) {
-          console.log(`  Status on task start: ${opts.statusOnStart}`);
+        if (statusOnStart) {
+          console.log(`  Status on task start: ${statusOnStart}`);
         }
-        if (opts.statusOnPr) {
-          console.log(`  Status on PR opened: ${opts.statusOnPr}`);
+        if (statusOnPr) {
+          console.log(`  Status on PR opened: ${statusOnPr}`);
         }
       }),
   );

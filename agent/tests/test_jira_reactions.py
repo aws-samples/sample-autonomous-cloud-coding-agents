@@ -37,12 +37,23 @@ def _transition(
     return {"id": transition_id, "name": to_name, "hasScreen": has_screen, "to": to}
 
 
-def _transitions_resp(*transitions: dict) -> MagicMock:
-    """Build a 200 GET /transitions response wrapping the given transitions."""
+def _issue_resp(
+    *transitions: dict,
+    current_name: str = "To Do",
+    current_category: str = "new",
+) -> MagicMock:
+    """Build a 200 GET issue (?fields=status&expand=transitions) response.
+
+    Includes both the issue's current ``status`` (default ``To Do``/``new``) and
+    the available ``transitions`` — the shape ``_get_issue_transitions`` reads.
+    """
     r = MagicMock()
     r.status_code = 200
     r.text = ""
-    r.json.return_value = {"transitions": list(transitions)}
+    r.json.return_value = {
+        "fields": {"status": {"name": current_name, "statusCategory": {"key": current_category}}},
+        "transitions": list(transitions),
+    }
     return r
 
 
@@ -182,46 +193,123 @@ class TestTransitionChannelGate:
 
 
 class TestStartTransitionSelection:
-    def test_prefers_indeterminate_category(self, monkeypatch):
+    def test_prefers_in_progress_by_name_over_blocked(self, monkeypatch):
+        """#605: both Blocked and In Progress are `indeterminate`; a name match
+        must land on In Progress regardless of list order."""
         monkeypatch.setenv("JIRA_API_TOKEN", "jira_at")
-        transitions = _transitions_resp(
-            _transition("11", "Done", category="done"),
+        # Blocked listed FIRST — a category-only heuristic would wrongly pick it.
+        issue = _issue_resp(
+            _transition("71", "Blocked", category="indeterminate"),
             _transition("21", "In Progress", category="indeterminate"),
-            _transition("31", "Backlog", category="new"),
         )
         with (
-            patch("jira_reactions.requests.get", return_value=transitions),
+            patch("jira_reactions.requests.get", return_value=issue),
             patch("jira_reactions.requests.post", return_value=_resp(204)) as post,
         ):
             transition_task_started("jira", JIRA_META)
-        assert post.call_count == 1
-        url = post.call_args[0][0]
-        assert url == (
-            "https://api.atlassian.com/ex/jira/cloud-1/rest/api/3/issue/KAN-1/transitions"
-        )
         assert post.call_args[1]["json"] == {"transition": {"id": "21"}}
+        # POST still goes to the transitions endpoint.
+        assert post.call_args[0][0].endswith("/rest/api/3/issue/KAN-1/transitions")
+
+    def test_falls_back_to_indeterminate_category(self, monkeypatch):
+        """No In-Progress-named transition → any indeterminate (not Blocked)."""
+        monkeypatch.setenv("JIRA_API_TOKEN", "jira_at")
+        issue = _issue_resp(
+            _transition("11", "Done", category="done"),
+            _transition("41", "Doing", category="indeterminate"),
+            _transition("31", "Backlog", category="new"),
+        )
+        with (
+            patch("jira_reactions.requests.get", return_value=issue),
+            patch("jira_reactions.requests.post", return_value=_resp(204)) as post,
+        ):
+            transition_task_started("jira", JIRA_META)
+        assert post.call_args[1]["json"] == {"transition": {"id": "41"}}
+
+    def test_category_fallback_never_picks_blocked(self, monkeypatch):
+        """#605: if the only indeterminate transition is Blocked, skip — the
+        category fallback must not silently land on Blocked."""
+        monkeypatch.setenv("JIRA_API_TOKEN", "jira_at")
+        issue = _issue_resp(
+            _transition("71", "Blocked", category="indeterminate"),
+            _transition("11", "Done", category="done"),
+        )
+        with (
+            patch("jira_reactions.requests.get", return_value=issue),
+            patch("jira_reactions.requests.post") as post,
+        ):
+            transition_task_started("jira", JIRA_META)
+        post.assert_not_called()
+
+    def test_skips_when_already_in_progress(self, monkeypatch):
+        """#605: a re-trigger on an already-In-Progress issue must not move it
+        (and must not move it backward)."""
+        monkeypatch.setenv("JIRA_API_TOKEN", "jira_at")
+        issue = _issue_resp(
+            _transition("31", "To Do", category="new"),
+            current_name="In Progress",
+            current_category="indeterminate",
+        )
+        with (
+            patch("jira_reactions.requests.get", return_value=issue),
+            patch("jira_reactions.requests.post") as post,
+        ):
+            transition_task_started("jira", JIRA_META)
+        post.assert_not_called()
+
+    def test_skips_when_already_in_review(self, monkeypatch):
+        """Already past In Progress (In Review is indeterminate too) → skip."""
+        monkeypatch.setenv("JIRA_API_TOKEN", "jira_at")
+        issue = _issue_resp(
+            _transition("21", "In Progress", category="indeterminate"),
+            current_name="In Review",
+            current_category="indeterminate",
+        )
+        with (
+            patch("jira_reactions.requests.get", return_value=issue),
+            patch("jira_reactions.requests.post") as post,
+        ):
+            transition_task_started("jira", JIRA_META)
+        post.assert_not_called()
 
     def test_override_status_takes_precedence(self, monkeypatch):
         monkeypatch.setenv("JIRA_API_TOKEN", "jira_at")
         meta = {**JIRA_META, "jira_status_on_start": "Doing"}
-        transitions = _transitions_resp(
+        issue = _issue_resp(
             _transition("21", "In Progress", category="indeterminate"),
             _transition("41", "Doing", category="indeterminate"),
         )
         with (
-            patch("jira_reactions.requests.get", return_value=transitions),
+            patch("jira_reactions.requests.get", return_value=issue),
             patch("jira_reactions.requests.post", return_value=_resp(204)) as post,
         ):
             transition_task_started("jira", meta)
-        # Name match on the override wins over the category heuristic.
+        # Name match on the override wins over the In-Progress name heuristic.
         assert post.call_args[1]["json"] == {"transition": {"id": "41"}}
 
     def test_override_matches_case_insensitively(self, monkeypatch):
         monkeypatch.setenv("JIRA_API_TOKEN", "jira_at")
         meta = {**JIRA_META, "jira_status_on_start": "doing"}
-        transitions = _transitions_resp(_transition("41", "Doing", category="indeterminate"))
+        issue = _issue_resp(_transition("41", "Doing", category="indeterminate"))
         with (
-            patch("jira_reactions.requests.get", return_value=transitions),
+            patch("jira_reactions.requests.get", return_value=issue),
+            patch("jira_reactions.requests.post", return_value=_resp(204)) as post,
+        ):
+            transition_task_started("jira", meta)
+        assert post.call_args[1]["json"] == {"transition": {"id": "41"}}
+
+    def test_override_honored_even_when_already_in_progress(self, monkeypatch):
+        """An explicit override is a deliberate instruction — honor it
+        regardless of the current status (no already-past skip)."""
+        monkeypatch.setenv("JIRA_API_TOKEN", "jira_at")
+        meta = {**JIRA_META, "jira_status_on_start": "Doing"}
+        issue = _issue_resp(
+            _transition("41", "Doing", category="indeterminate"),
+            current_name="In Progress",
+            current_category="indeterminate",
+        )
+        with (
+            patch("jira_reactions.requests.get", return_value=issue),
             patch("jira_reactions.requests.post", return_value=_resp(204)) as post,
         ):
             transition_task_started("jira", meta)
@@ -230,26 +318,24 @@ class TestStartTransitionSelection:
     def test_missing_override_target_skips_without_fallback(self, monkeypatch):
         monkeypatch.setenv("JIRA_API_TOKEN", "jira_at")
         meta = {**JIRA_META, "jira_status_on_start": "Nonexistent"}
-        transitions = _transitions_resp(
-            _transition("21", "In Progress", category="indeterminate"),
-        )
+        issue = _issue_resp(_transition("21", "In Progress", category="indeterminate"))
         with (
-            patch("jira_reactions.requests.get", return_value=transitions),
+            patch("jira_reactions.requests.get", return_value=issue),
             patch("jira_reactions.requests.post") as post,
         ):
             transition_task_started("jira", meta)
         # An explicit override that isn't reachable must NOT fall back to the
-        # category heuristic — it's a deliberate skip.
+        # name/category heuristic — it's a deliberate skip.
         post.assert_not_called()
 
     def test_no_indeterminate_transition_skips(self, monkeypatch):
         monkeypatch.setenv("JIRA_API_TOKEN", "jira_at")
-        transitions = _transitions_resp(
+        issue = _issue_resp(
             _transition("11", "Done", category="done"),
             _transition("31", "Backlog", category="new"),
         )
         with (
-            patch("jira_reactions.requests.get", return_value=transitions),
+            patch("jira_reactions.requests.get", return_value=issue),
             patch("jira_reactions.requests.post") as post,
         ):
             transition_task_started("jira", JIRA_META)
@@ -259,7 +345,7 @@ class TestStartTransitionSelection:
         """GET returns [] when the OAuth user lacks Transition Issues perm."""
         monkeypatch.setenv("JIRA_API_TOKEN", "jira_at")
         with (
-            patch("jira_reactions.requests.get", return_value=_transitions_resp()),
+            patch("jira_reactions.requests.get", return_value=_issue_resp()),
             patch("jira_reactions.requests.post") as post,
         ):
             transition_task_started("jira", JIRA_META)
@@ -267,11 +353,11 @@ class TestStartTransitionSelection:
 
     def test_skips_transition_requiring_screen(self, monkeypatch):
         monkeypatch.setenv("JIRA_API_TOKEN", "jira_at")
-        transitions = _transitions_resp(
+        issue = _issue_resp(
             _transition("21", "In Progress", category="indeterminate", has_screen=True),
         )
         with (
-            patch("jira_reactions.requests.get", return_value=transitions),
+            patch("jira_reactions.requests.get", return_value=issue),
             patch("jira_reactions.requests.post") as post,
         ):
             transition_task_started("jira", JIRA_META)
@@ -282,12 +368,14 @@ class TestStartTransitionSelection:
 class TestPrTransitionSelection:
     def test_matches_in_review_by_name(self, monkeypatch):
         monkeypatch.setenv("JIRA_API_TOKEN", "jira_at")
-        transitions = _transitions_resp(
+        issue = _issue_resp(
             _transition("21", "In Progress", category="indeterminate"),
             _transition("51", "In Review", category="indeterminate"),
+            current_name="In Progress",
+            current_category="indeterminate",
         )
         with (
-            patch("jira_reactions.requests.get", return_value=transitions),
+            patch("jira_reactions.requests.get", return_value=issue),
             patch("jira_reactions.requests.post", return_value=_resp(204)) as post,
         ):
             transition_pr_opened("jira", JIRA_META)
@@ -295,37 +383,109 @@ class TestPrTransitionSelection:
 
     def test_matches_in_review_case_insensitively(self, monkeypatch):
         monkeypatch.setenv("JIRA_API_TOKEN", "jira_at")
-        transitions = _transitions_resp(_transition("51", "IN REVIEW"))
+        issue = _issue_resp(
+            _transition("51", "IN REVIEW", category="indeterminate"),
+            current_name="In Progress",
+            current_category="indeterminate",
+        )
         with (
-            patch("jira_reactions.requests.get", return_value=transitions),
+            patch("jira_reactions.requests.get", return_value=issue),
             patch("jira_reactions.requests.post", return_value=_resp(204)) as post,
         ):
             transition_pr_opened("jira", JIRA_META)
         assert post.call_args[1]["json"] == {"transition": {"id": "51"}}
 
-    def test_no_review_status_leaves_unchanged(self, monkeypatch):
+    def test_matches_code_review_synonym(self, monkeypatch):
+        """#605: a 'Code Review' column (no literal 'In Review') still matches."""
         monkeypatch.setenv("JIRA_API_TOKEN", "jira_at")
-        transitions = _transitions_resp(
-            _transition("21", "In Progress", category="indeterminate"),
-            _transition("11", "Done", category="done"),
+        issue = _issue_resp(
+            _transition("61", "Code Review", category="indeterminate"),
+            current_name="In Progress",
+            current_category="indeterminate",
         )
         with (
-            patch("jira_reactions.requests.get", return_value=transitions),
+            patch("jira_reactions.requests.get", return_value=issue),
+            patch("jira_reactions.requests.post", return_value=_resp(204)) as post,
+        ):
+            transition_pr_opened("jira", JIRA_META)
+        assert post.call_args[1]["json"] == {"transition": {"id": "61"}}
+
+    def test_prefers_in_review_over_code_review(self, monkeypatch):
+        """When both exist, the higher-priority 'In Review' name wins."""
+        monkeypatch.setenv("JIRA_API_TOKEN", "jira_at")
+        issue = _issue_resp(
+            _transition("61", "Code Review", category="indeterminate"),
+            _transition("51", "In Review", category="indeterminate"),
+            current_name="In Progress",
+            current_category="indeterminate",
+        )
+        with (
+            patch("jira_reactions.requests.get", return_value=issue),
+            patch("jira_reactions.requests.post", return_value=_resp(204)) as post,
+        ):
+            transition_pr_opened("jira", JIRA_META)
+        assert post.call_args[1]["json"] == {"transition": {"id": "51"}}
+
+    def test_stock_board_falls_back_to_in_progress(self, monkeypatch):
+        """#605: a board with no review status stays at / moves to In Progress
+        rather than silently no-opping (mirrors Linear's fallback)."""
+        monkeypatch.setenv("JIRA_API_TOKEN", "jira_at")
+        # Issue is still To Do (start hook may have failed); PR hook should at
+        # least advance it to In Progress via the name fallback.
+        issue = _issue_resp(
+            _transition("21", "In Progress", category="indeterminate"),
+            _transition("11", "Done", category="done"),
+            current_name="To Do",
+            current_category="new",
+        )
+        with (
+            patch("jira_reactions.requests.get", return_value=issue),
+            patch("jira_reactions.requests.post", return_value=_resp(204)) as post,
+        ):
+            transition_pr_opened("jira", JIRA_META)
+        assert post.call_args[1]["json"] == {"transition": {"id": "21"}}
+
+    def test_skips_when_already_done(self, monkeypatch):
+        """Only skip the PR transition if the issue is already Done."""
+        monkeypatch.setenv("JIRA_API_TOKEN", "jira_at")
+        issue = _issue_resp(
+            _transition("51", "In Review", category="indeterminate"),
+            current_name="Done",
+            current_category="done",
+        )
+        with (
+            patch("jira_reactions.requests.get", return_value=issue),
             patch("jira_reactions.requests.post") as post,
         ):
             transition_pr_opened("jira", JIRA_META)
-        # No "In Review"-named destination → status unchanged.
+        post.assert_not_called()
+
+    def test_no_review_or_in_progress_leaves_unchanged(self, monkeypatch):
+        monkeypatch.setenv("JIRA_API_TOKEN", "jira_at")
+        issue = _issue_resp(
+            _transition("11", "Done", category="done"),
+            current_name="In Progress",
+            current_category="indeterminate",
+        )
+        with (
+            patch("jira_reactions.requests.get", return_value=issue),
+            patch("jira_reactions.requests.post") as post,
+        ):
+            transition_pr_opened("jira", JIRA_META)
+        # No review-named, no In Progress name, only a Done transition → skip.
         post.assert_not_called()
 
     def test_override_status_on_pr(self, monkeypatch):
         monkeypatch.setenv("JIRA_API_TOKEN", "jira_at")
         meta = {**JIRA_META, "jira_status_on_pr": "Code Review"}
-        transitions = _transitions_resp(
-            _transition("51", "In Review"),
-            _transition("61", "Code Review"),
+        issue = _issue_resp(
+            _transition("51", "In Review", category="indeterminate"),
+            _transition("61", "Code Review", category="indeterminate"),
+            current_name="In Progress",
+            current_category="indeterminate",
         )
         with (
-            patch("jira_reactions.requests.get", return_value=transitions),
+            patch("jira_reactions.requests.get", return_value=issue),
             patch("jira_reactions.requests.post", return_value=_resp(204)) as post,
         ):
             transition_pr_opened("jira", meta)
@@ -373,11 +533,9 @@ class TestTransitionFailureIsSwallowed:
 
     def test_post_500_does_not_raise(self, monkeypatch):
         monkeypatch.setenv("JIRA_API_TOKEN", "jira_at")
-        transitions = _transitions_resp(
-            _transition("21", "In Progress", category="indeterminate"),
-        )
+        issue = _issue_resp(_transition("21", "In Progress", category="indeterminate"))
         with (
-            patch("jira_reactions.requests.get", return_value=transitions),
+            patch("jira_reactions.requests.get", return_value=issue),
             patch("jira_reactions.requests.post", return_value=_resp(500, "boom")),
         ):
             # Must not raise even though the POST fails.
@@ -408,4 +566,20 @@ class TestTransitionFailureIsSwallowed:
             patch("jira_reactions.requests.post") as post,
         ):
             transition_task_started("jira", JIRA_META)
+            post.assert_not_called()
+
+    @pytest.mark.parametrize("body", [None, [], 42, "scalar"])
+    def test_non_dict_json_does_not_raise(self, monkeypatch, body):
+        """#605: valid JSON that isn't an object must not raise AttributeError
+        (which would propagate out of the hook and flip the task to FAILED)."""
+        monkeypatch.setenv("JIRA_API_TOKEN", "jira_at")
+        r = MagicMock()
+        r.status_code = 200
+        r.text = ""
+        r.json.return_value = body
+        with (
+            patch("jira_reactions.requests.get", return_value=r),
+            patch("jira_reactions.requests.post") as post,
+        ):
+            transition_task_started("jira", JIRA_META)  # must not raise
             post.assert_not_called()

@@ -236,27 +236,58 @@ def comment_task_started(
 # must never fail, block, or retry the task.
 
 #: Jira ``statusCategory.key`` for the "In Progress" band. The start transition
-#: prefers a destination in this category so standard workflows work with no
-#: per-project config. (Categories: ``new`` = To Do, ``indeterminate`` = In
-#: Progress, ``done`` = Done — the only three, and they are stable API values.)
+#: falls back to this category so standard workflows work with no per-project
+#: config. (Categories: ``new`` = To Do, ``indeterminate`` = In Progress,
+#: ``done`` = Done — the only three, and they are stable API values.)
 _IN_PROGRESS_CATEGORY = "indeterminate"
 
-#: Default destination-name match for the PR-opened transition when no override
-#: is configured. Compared case-insensitively against ``to.name``.
-_DEFAULT_REVIEW_STATUS = "in review"
+#: Ordinal rank of the three status categories, low → high. Used to skip a
+#: transition that would move the card *backward* (e.g. a re-triggered task on
+#: an issue that's already In Review must not drag it back to In Progress).
+_CATEGORY_RANK = {"new": 0, "indeterminate": 1, "done": 2}
+
+#: Preferred destination *name* for the start transition (matched
+#: case-insensitively before the category fallback). Both ``In Progress`` and
+#: ``Blocked`` share the ``indeterminate`` category, so a name match is what
+#: keeps a category-only heuristic from landing on ``Blocked`` (#605).
+_START_STATUS_NAME = "in progress"
+
+#: Preferred destination names for the PR-opened transition, tried in order.
+#: Mirrors Linear's "In Review → In Progress" fallback while also matching
+#: common review-column names, so a "Code Review" column isn't silently skipped
+#: and a stock board (no review status) still advances to / stays at In Progress
+#: rather than no-opping (#605). Ends with In Progress as the safe fallback.
+_REVIEW_STATUS_NAMES = (
+    "in review",
+    "code review",
+    "review",
+    "peer review",
+    "reviewing",
+    _START_STATUS_NAME,
+)
+
+#: Destination names the category fallback must never auto-pick. ``Blocked``
+#: shares the ``indeterminate`` category with ``In Progress``; a bare
+#: first-indeterminate heuristic could land there (#605), which is never what
+#: "move to In Progress" means. A configured override can still target it.
+_CATEGORY_FALLBACK_DENY = ("blocked",)
 
 
-def _get_transitions(cloud_id: str, issue_key: str, token: str) -> list[dict[str, Any]] | None:
-    """GET the transitions valid from the issue's current status.
+def _get_issue_transitions(
+    cloud_id: str, issue_key: str, token: str
+) -> tuple[dict[str, Any], list[dict[str, Any]]] | None:
+    """GET the issue's current status + the transitions valid from it.
 
-    Returns the ``transitions`` list (possibly empty) on success, or ``None``
-    on any failure. An empty list is normal — Jira returns one when the OAuth
-    user lacks the *Transition Issues* permission — and callers treat it as
-    "nothing to do", not an error.
+    Fetches ``?fields=status&expand=transitions`` so a single call yields both
+    the current ``status`` (to skip moving a card backward, #605) and the
+    ``transitions`` list. Returns ``(current_status, transitions)`` on success,
+    or ``None`` on any failure. An empty transitions list is normal — Jira
+    returns one when the OAuth user lacks the *Transition Issues* permission —
+    and callers treat it as "nothing to do", not an error.
     """
     url = (
         f"{JIRA_API_BASE}/{quote(cloud_id, safe='')}"
-        f"/rest/api/3/issue/{quote(issue_key, safe='')}/transitions"
+        f"/rest/api/3/issue/{quote(issue_key, safe='')}?fields=status&expand=transitions"
     )
     try:
         resp = requests.get(
@@ -268,7 +299,7 @@ def _get_transitions(cloud_id: str, issue_key: str, token: str) -> list[dict[str
             timeout=REQUEST_TIMEOUT_SECONDS,
         )
     except requests.RequestException as e:
-        log("WARN", f"jira_reactions: transitions GET failed ({type(e).__name__}): {e}")
+        log("WARN", f"jira_reactions: issue GET failed ({type(e).__name__}): {e}")
         # nosemgrep: py-silent-success-masking -- Jira transitions are best-effort on network blips
         return None
 
@@ -276,57 +307,97 @@ def _get_transitions(cloud_id: str, issue_key: str, token: str) -> list[dict[str
         _note_auth_status(resp.status_code)
         return None
     if resp.status_code != HTTPStatus.OK:
-        log("WARN", f"jira_reactions: transitions GET HTTP {resp.status_code}: {resp.text[:200]}")
+        log("WARN", f"jira_reactions: issue GET HTTP {resp.status_code}: {resp.text[:200]}")
         return None
 
     _note_auth_status(resp.status_code)
     try:
-        transitions = resp.json().get("transitions", [])
+        payload = resp.json()
     except ValueError as e:
-        log("WARN", f"jira_reactions: transitions GET returned non-JSON: {e}")
+        log("WARN", f"jira_reactions: issue GET returned non-JSON: {e}")
         # nosemgrep: py-silent-success-masking -- Jira transitions are best-effort on bad responses
         return None
-    return transitions if isinstance(transitions, list) else []
+    # A well-formed response is a JSON object. Guard against valid-but-unexpected
+    # JSON (``null``, a bare list, a scalar) — ``.get`` would raise
+    # AttributeError, which is NOT best-effort: it propagates out of the pipeline
+    # hook and flips the task to FAILED (#605).
+    if not isinstance(payload, dict):
+        log("WARN", "jira_reactions: issue GET returned non-object JSON — skipping")
+        return None
+    current_status = (payload.get("fields") or {}).get("status") or {}
+    transitions = payload.get("transitions", [])
+    if not isinstance(current_status, dict):
+        current_status = {}
+    if not isinstance(transitions, list):
+        transitions = []
+    return current_status, transitions
+
+
+def _to_name(t: dict[str, Any]) -> str:
+    """Lowercased destination status name of a transition, or ``""``."""
+    return ((t.get("to") or {}).get("name") or "").strip().lower()
+
+
+def _to_category(t: dict[str, Any]) -> str | None:
+    """``statusCategory.key`` of a transition's destination, or ``None``."""
+    return ((t.get("to") or {}).get("statusCategory") or {}).get("key")
+
+
+def _usable(t: dict[str, Any]) -> bool:
+    """A transition we can execute unattended.
+
+    ``hasScreen`` transitions may demand required fields we can't supply, so we
+    skip them — a missing field would 400 the POST.
+    """
+    return isinstance(t, dict) and not t.get("hasScreen", False)
 
 
 def _select_transition(
     transitions: list[dict[str, Any]],
     *,
-    target_status: str | None,
-    prefer_category: str | None,
+    override: str | None,
+    prefer_names: tuple[str, ...],
+    fallback_category: str | None,
 ) -> dict[str, Any] | None:
     """Pick a transition by the resolution ladder, or ``None`` if nothing fits.
 
-    ``target_status`` (a per-project override or the ``In Review`` default) is
-    matched case-insensitively against ``to.name`` first. Only if it is unset
-    does ``prefer_category`` (a ``statusCategory.key``) act as the fallback.
-    Transitions that require a screen are skipped — filling required fields is
-    out of scope and a missing field would 400 the POST.
+    Ladder (first match wins), mirroring the Linear reference this feature is
+    modeled on (``prompt_builder.py``):
+
+    1. ``override`` — a per-project configured status name, matched
+       case-insensitively against the destination name. An override that isn't
+       reachable is a deliberate skip (no fallback — the user asked for a
+       specific status).
+    2. ``prefer_names`` — preferred destination names in priority order (e.g.
+       ``In Progress`` on start; ``In Review`` → ``Code Review`` → … on PR).
+       This is what stops a category-only heuristic from landing on ``Blocked``
+       (which shares the ``indeterminate`` category with ``In Progress``).
+    3. ``fallback_category`` — any usable transition whose destination is in
+       this ``statusCategory`` (keeps stock boards working with no config).
+
+    Screen-gated transitions are skipped throughout.
     """
+    usable = [t for t in transitions if _usable(t)]
 
-    def _usable(t: dict[str, Any]) -> bool:
-        # ``hasScreen`` transitions may demand required fields we can't supply.
-        return isinstance(t, dict) and not t.get("hasScreen", False)
+    if override:
+        wanted = override.strip().lower()
+        return next((t for t in usable if _to_name(t) == wanted), None)
 
-    if target_status:
-        wanted = target_status.strip().lower()
-        for t in transitions:
-            if not _usable(t):
-                continue
-            to_name = (t.get("to") or {}).get("name") or ""
-            if to_name.strip().lower() == wanted:
-                return t
-        # An explicit target that isn't reachable is a deliberate skip — do not
-        # silently fall back to a category heuristic the user didn't ask for.
-        return None
+    for name in prefer_names:
+        match = next((t for t in usable if _to_name(t) == name), None)
+        if match:
+            return match
 
-    if prefer_category:
-        for t in transitions:
-            if not _usable(t):
-                continue
-            category = ((t.get("to") or {}).get("statusCategory") or {}).get("key")
-            if category == prefer_category:
-                return t
+    if fallback_category:
+        return next(
+            (
+                t
+                for t in usable
+                if _to_category(t) == fallback_category
+                and _to_name(t) not in _CATEGORY_FALLBACK_DENY
+            ),
+            None,
+        )
     return None
 
 
@@ -369,15 +440,19 @@ def _transition(
     channel_metadata: dict[str, str] | None,
     *,
     lifecycle: str,
-    target_status: str | None,
-    prefer_category: str | None,
+    override: str | None,
+    prefer_names: tuple[str, ...],
+    fallback_category: str | None,
+    max_source_rank: int | None,
 ) -> None:
     """Shared best-effort transition path. No-op for non-Jira tasks.
 
-    Resolves ``(cloud_id, issue_key)``, discovers valid transitions, selects one
-    via the resolution ladder, and POSTs it. Every failure mode — disabled,
-    open circuit, missing token, empty transition list, no match, network /
-    HTTP error — is logged and swallowed so the pipeline is never affected.
+    Resolves ``(cloud_id, issue_key)``, fetches the current status + valid
+    transitions, skips if the card is already at/past the target band
+    (``max_source_rank``), selects a transition via the resolution ladder, and
+    POSTs it. Every failure mode — disabled, open circuit, missing token, empty
+    transition list, no match, network / HTTP error — is logged and swallowed
+    so the pipeline is never affected.
     """
     target = _enabled(channel_source, channel_metadata)
     if not target:
@@ -393,9 +468,29 @@ def _transition(
         log("WARN", "jira_reactions: JIRA_API_TOKEN not set; skipping transition")
         return
 
-    transitions = _get_transitions(cloud_id, issue_key, token)
+    result = _get_issue_transitions(cloud_id, issue_key, token)
+    if result is None:
+        log("WARN", f"jira_reactions: could not read issue {issue_key} — skipping {lifecycle}")
+        return
+    current_status, transitions = result
+
+    # Don't move the card backward. If the current status is already at or past
+    # the highest category this lifecycle point should advance to, skip — a
+    # re-triggered task on an already-In-Review issue must not drag it back to
+    # In Progress (mirrors Linear's "already in a later state" skip).
+    if max_source_rank is not None:
+        current_category = (current_status.get("statusCategory") or {}).get("key")
+        current_rank = _CATEGORY_RANK.get(current_category)
+        if current_rank is not None and current_rank >= max_source_rank:
+            log(
+                "TASK",
+                f"jira_reactions: {lifecycle} skip issue={issue_key} — already at "
+                f"{current_status.get('name')!r} (category {current_category!r})",
+            )
+            return
+
     if not transitions:
-        # None (error) or [] (no permission / no transitions) — both are skips.
+        # [] (no permission / no transitions) — a normal skip.
         log(
             "WARN",
             f"jira_reactions: no available transitions for {lifecycle} "
@@ -404,13 +499,17 @@ def _transition(
         return
 
     chosen = _select_transition(
-        transitions, target_status=target_status, prefer_category=prefer_category
+        transitions,
+        override=override,
+        prefer_names=prefer_names,
+        fallback_category=fallback_category,
     )
     if not chosen:
         log(
             "WARN",
             f"jira_reactions: no matching {lifecycle} transition for issue={issue_key} "
-            f"(target={target_status!r} category={prefer_category!r}) — skipping",
+            f"(override={override!r} names={prefer_names} category={fallback_category!r}) "
+            "— skipping",
         )
         return
 
@@ -428,8 +527,9 @@ def transition_task_started(
 ) -> None:
     """Move the Jira issue to an in-progress status at task start.
 
-    Uses the ``jira_status_on_start`` override when configured, else prefers a
-    transition into the ``indeterminate`` (In Progress) status category.
+    Resolution: ``jira_status_on_start`` override → a destination named
+    ``In Progress`` → any ``indeterminate``-category destination. Skips if the
+    issue is already In Progress or later (won't move a card backward).
     Best-effort; no-op for non-Jira tasks.
     """
     override = (channel_metadata or {}).get("jira_status_on_start")
@@ -437,8 +537,12 @@ def transition_task_started(
         channel_source,
         channel_metadata,
         lifecycle="start",
-        target_status=override,
-        prefer_category=None if override else _IN_PROGRESS_CATEGORY,
+        override=override,
+        prefer_names=() if override else (_START_STATUS_NAME,),
+        fallback_category=None if override else _IN_PROGRESS_CATEGORY,
+        # Skip if already In Progress (indeterminate) or Done. An override is a
+        # deliberate instruction, so honor it regardless of current status.
+        max_source_rank=None if override else _CATEGORY_RANK[_IN_PROGRESS_CATEGORY],
     )
 
 
@@ -448,18 +552,22 @@ def transition_pr_opened(
 ) -> None:
     """Move the Jira issue to a review status once a PR is opened.
 
-    Uses the ``jira_status_on_pr`` override when configured, else matches a
-    destination named ``In Review`` (case-insensitive). If neither is
-    reachable, the status is left unchanged. Best-effort; no-op for non-Jira
-    tasks.
+    Resolution: ``jira_status_on_pr`` override → a destination named
+    ``In Review`` (or a common review-column synonym) → any
+    ``indeterminate``-category destination (Linear's In Review→In Progress
+    fallback, so a stock board isn't silently skipped, #605). Skips only if the
+    issue is already Done. Best-effort; no-op for non-Jira tasks.
     """
     override = (channel_metadata or {}).get("jira_status_on_pr")
     _transition(
         channel_source,
         channel_metadata,
         lifecycle="pr_opened",
-        target_status=override or _DEFAULT_REVIEW_STATUS,
-        prefer_category=None,
+        override=override,
+        prefer_names=() if override else _REVIEW_STATUS_NAMES,
+        fallback_category=None if override else _IN_PROGRESS_CATEGORY,
+        # Only skip if already Done — moving In Progress → In Review is forward.
+        max_source_rank=None if override else _CATEGORY_RANK["done"],
     )
 
 

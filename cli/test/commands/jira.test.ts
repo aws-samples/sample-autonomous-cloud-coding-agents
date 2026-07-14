@@ -204,6 +204,33 @@ describe('jira map action', () => {
     expect(putCmd.input.Item).not.toHaveProperty('status_on_start');
     expect(putCmd.input.Item).not.toHaveProperty('status_on_pr');
   });
+
+  test('trims override values before persisting', async () => {
+    const program = makeJiraCommand();
+    await program.parseAsync([
+      'node', 'bgagent', 'map', 'cloud-1', 'ENG', '--repo', 'org/repo',
+      '--status-on-start', '  Doing  ',
+      '--status-on-pr', '  Code Review  ',
+    ]);
+
+    const putCmd = ddbSend.mock.calls[0][0] as PutCommand;
+    expect(putCmd.input.Item).toMatchObject({ status_on_start: 'Doing', status_on_pr: 'Code Review' });
+  });
+
+  test('treats whitespace-only overrides as unset (not persisted)', async () => {
+    // #605: a truthy whitespace value would otherwise persist and permanently
+    // no-op at the agent (strip() -> "" matches no status, no fallback).
+    const program = makeJiraCommand();
+    await program.parseAsync([
+      'node', 'bgagent', 'map', 'cloud-1', 'ENG', '--repo', 'org/repo',
+      '--status-on-start', '   ',
+      '--status-on-pr', '\t',
+    ]);
+
+    const putCmd = ddbSend.mock.calls[0][0] as PutCommand;
+    expect(putCmd.input.Item).not.toHaveProperty('status_on_start');
+    expect(putCmd.input.Item).not.toHaveProperty('status_on_pr');
+  });
 });
 
 describe('generateInviteCode', () => {
