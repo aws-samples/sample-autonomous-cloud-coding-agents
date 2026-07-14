@@ -132,6 +132,49 @@ export function jiraOauthSecretName(cloudId: string): string {
 }
 
 /**
+ * Deserialize and validate a stored Jira OAuth bundle read from Secrets
+ * Manager. Enforces the required-field contract so a truncated or
+ * malformed secret surfaces an actionable "re-run setup" error instead
+ * of a downstream `undefined` deref. `secretId` is echoed into the error
+ * so operators know which secret to fix.
+ */
+export function parseStoredJiraOauthToken(
+  secretString: string | undefined,
+  secretId: string,
+): StoredJiraOauthToken {
+  if (!secretString) {
+    throw new CliError(`OAuth secret '${secretId}' has no SecretString. Re-run \`bgagent jira setup\`.`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(secretString);
+  } catch {
+    throw new CliError(`OAuth secret '${secretId}' is not valid JSON. Re-run \`bgagent jira setup\`.`);
+  }
+  if (typeof parsed !== 'object' || parsed === null) {
+    throw new CliError(`OAuth secret '${secretId}' has an unexpected shape. Re-run \`bgagent jira setup\`.`);
+  }
+  const obj = parsed as Record<string, unknown>;
+  const required = [
+    'access_token',
+    'refresh_token',
+    'expires_at',
+    'client_id',
+    'client_secret',
+    'cloud_id',
+    'site_url',
+  ];
+  const missing = required.filter((key) => typeof obj[key] !== 'string' || (obj[key] as string).length === 0);
+  if (missing.length > 0) {
+    throw new CliError(
+      `OAuth secret '${secretId}' is missing required field${missing.length === 1 ? '' : 's'} ${missing.join(', ')}. `
+      + `Re-run \`bgagent jira setup\` for tenant '${String(obj.cloud_id ?? 'unknown')}'.`,
+    );
+  }
+  return parsed as StoredJiraOauthToken;
+}
+
+/**
  * Compute when an access token should be considered "stale and needs
  * refresh." We refresh if there's <60s left.
  */

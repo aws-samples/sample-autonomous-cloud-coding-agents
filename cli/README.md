@@ -302,6 +302,25 @@ With no flags, writes to the platform default `GitHubTokenSecretArn` stack outpu
 
 Configure the preview-deploy screenshot pipeline webhook. See [Deploy preview screenshots guide](../docs/guides/DEPLOY_PREVIEW_SCREENSHOTS_GUIDE.md).
 
+### `bgagent jira setup` / `map` / `invite-user` / `link`
+
+Manage the Jira Cloud integration. `setup` authorizes a tenant via OAuth (3LO) and stores the token in Secrets Manager; `map` routes a Jira project to a GitHub repo; the two-step `invite-user` → `link` handshake links a teammate's Jira identity to their platform user. See the [Jira setup guide](../docs/guides/JIRA_SETUP_GUIDE.md) for the full walkthrough.
+
+```
+bgagent jira setup \
+  --stack-name backgroundagent-dev
+
+bgagent jira map <cloud-id> <PROJECT-KEY> --repo owner/repo
+
+bgagent jira invite-user <cloud-id> <account-id-or-email> \
+  --region <region>            AWS region (defaults to configured region) \
+  --stack-name <name>          CloudFormation stack name (default: backgroundagent-dev)
+
+bgagent jira link <code>
+```
+
+`invite-user` resolves the teammate's Jira identity through the tenant OAuth token, then writes a `pending#<code>` row (24h TTL) and prints the `bgagent jira link <code>` the teammate runs from their own machine. The teammate previews the Jira identity before confirming, so a wrong pick can be aborted rather than misattributed. If the identity is already linked, the command warns but still issues the code.
+
 ### `bgagent admin invite-user` / `list-users` / `delete-user` / `reset-password`
 
 Manage Cognito users with operator AWS credentials (`cognito-idp:Admin*` on the deployment user pool). Works **before** `bgagent configure` when `--stack-name` is passed (reads `UserPoolId` from CloudFormation).

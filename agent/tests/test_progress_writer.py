@@ -268,6 +268,59 @@ class TestProgressWriterPutEvent:
 
 
 # ---------------------------------------------------------------------------
+# _ProgressWriter — correlation envelope (#245)
+# ---------------------------------------------------------------------------
+
+
+class TestCorrelationEnvelope:
+    """Every emitted event stamps {user_id, repo, trace_id} when known, so the
+    agent-side event stream joins to orchestrator logs and the X-Ray trace."""
+
+    def _writer(self, monkeypatch, **kwargs):
+        monkeypatch.setenv("TASK_EVENTS_TABLE_NAME", "events-table")
+        writer = _ProgressWriter("task-42", **kwargs)
+        writer._table = MagicMock()
+        return writer
+
+    def test_stamps_user_repo_trace_when_present(self, monkeypatch):
+        writer = self._writer(monkeypatch, user_id="user-1", repo="org/repo")
+        with patch("progress_writer.current_otel_trace_id", return_value="a" * 32):
+            writer.write_agent_milestone("m", "")
+        item = writer._table.put_item.call_args[1]["Item"]
+        assert item["user_id"] == "user-1"
+        assert item["repo"] == "org/repo"
+        assert item["trace_id"] == "a" * 32
+
+    def test_repo_less_omits_repo(self, monkeypatch):
+        # repo-less workflow (#248 Phase 3): repo is None → key omitted, not null.
+        writer = self._writer(monkeypatch, user_id="user-1", repo=None)
+        with patch("progress_writer.current_otel_trace_id", return_value="b" * 32):
+            writer.write_agent_milestone("m", "")
+        item = writer._table.put_item.call_args[1]["Item"]
+        assert item["user_id"] == "user-1"
+        assert "repo" not in item
+
+    def test_missing_trace_id_omits_key(self, monkeypatch):
+        # No recording span (tracing disabled) → trace_id key omitted entirely.
+        writer = self._writer(monkeypatch, user_id="user-1", repo="org/repo")
+        with patch("progress_writer.current_otel_trace_id", return_value=None):
+            writer.write_agent_milestone("m", "")
+        item = writer._table.put_item.call_args[1]["Item"]
+        assert "trace_id" not in item
+
+    def test_defaults_omit_all_correlation_keys(self, monkeypatch):
+        # Back-compat: a writer built without the envelope (empty user_id) stamps
+        # none of the optional keys, keeping the historical item shape.
+        writer = self._writer(monkeypatch)
+        with patch("progress_writer.current_otel_trace_id", return_value=None):
+            writer.write_agent_milestone("m", "")
+        item = writer._table.put_item.call_args[1]["Item"]
+        assert "user_id" not in item
+        assert "repo" not in item
+        assert "trace_id" not in item
+
+
+# ---------------------------------------------------------------------------
 # _ProgressWriter — --trace preview cap (design §10.1)
 # ---------------------------------------------------------------------------
 

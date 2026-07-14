@@ -21,13 +21,12 @@ import { PutCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
 import {
   autoLinkTokenOwner,
   findReusableOauthAppCredentials,
-  generateInviteCode,
-  INVITE_CODE_ALPHABET,
   isWebhookSecretConfigured,
   queryLinearTeamKeys,
   renderLinearAppTemplate,
 } from '../../src/commands/linear';
 import * as config from '../../src/config';
+import { generateInviteCode, INVITE_CODE_ALPHABET } from '../../src/invite-code';
 
 jest.mock('@aws-sdk/lib-dynamodb', () => {
   const actual = jest.requireActual('@aws-sdk/lib-dynamodb');
