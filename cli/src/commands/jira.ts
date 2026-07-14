@@ -922,6 +922,8 @@ export function makeJiraCommand(): Command {
       .argument('<project-key>', 'Jira project key (e.g. ENG)')
       .requiredOption('--repo <owner/repo>', 'GitHub repository the mapped project should route tasks to')
       .option('--label <label>', `Label that triggers a task (default: ${DEFAULT_LABEL_FILTER})`, DEFAULT_LABEL_FILTER)
+      .option('--status-on-start <name>', 'Jira status to move the issue to when a task starts (overrides the In Progress heuristic)')
+      .option('--status-on-pr <name>', 'Jira status to move the issue to when a PR is opened (overrides the "In Review" default)')
       .option('--region <region>', 'AWS region (defaults to configured region)')
       .option('--stack-name <name>', 'CloudFormation stack name', 'backgroundagent-dev')
       .action(async (cloudId: string, projectKey: string, opts) => {
@@ -955,6 +957,11 @@ export function makeJiraCommand(): Command {
             project_key: projectKey,
             repo: opts.repo,
             label_filter: opts.label,
+            // Optional per-project workflow-transition overrides (issue #572).
+            // Only persisted when supplied so the agent falls back to its
+            // statusCategory / "In Review" heuristics otherwise.
+            ...(opts.statusOnStart && { status_on_start: opts.statusOnStart }),
+            ...(opts.statusOnPr && { status_on_pr: opts.statusOnPr }),
             status: 'active',
             onboarded_at: now,
             updated_at: now,
@@ -963,6 +970,12 @@ export function makeJiraCommand(): Command {
 
         console.log(`✓ Mapped Jira project ${cloudId}#${projectKey} → ${opts.repo}`);
         console.log(`  Trigger label: ${opts.label}`);
+        if (opts.statusOnStart) {
+          console.log(`  Status on task start: ${opts.statusOnStart}`);
+        }
+        if (opts.statusOnPr) {
+          console.log(`  Status on PR opened: ${opts.statusOnPr}`);
+        }
       }),
   );
 

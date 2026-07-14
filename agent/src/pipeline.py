@@ -23,7 +23,11 @@ from config import (
     resolve_linear_api_token,
 )
 from context import assemble_prompt, fetch_github_issue
-from jira_reactions import comment_task_started
+from jira_reactions import (
+    comment_task_started,
+    transition_pr_opened,
+    transition_task_started,
+)
 from linear_reactions import react_task_finished, react_task_started
 from models import AgentResult, HydratedContext, RepoSetup, TaskConfig, TaskResult
 from observability import current_otel_trace_id, task_span
@@ -862,6 +866,14 @@ def run_task(
                 config.channel_metadata,
             )
 
+            # Move the Jira card To Do → In Progress so the board reflects that
+            # work has started (issue #572). No-op for non-Jira tasks.
+            # Best-effort; failures are logged and never block the pipeline.
+            transition_task_started(
+                config.channel_source,
+                config.channel_metadata,
+            )
+
             # Download attachments from S3 (version-pinned, integrity-verified)
             prepared_attachments: list = []
             if config.attachments:
@@ -1057,6 +1069,14 @@ def run_task(
                 post_span.set_attribute("pr.url", pr_url or "")
             if pr_url:
                 progress.write_agent_milestone("pr_created", pr_url)
+                # Move the Jira card In Progress → In Review now that a PR is
+                # open (issue #572). Only fires when a PR was actually opened —
+                # failed / no-PR tasks leave the card where humans can see the
+                # failure comment. No-op for non-Jira tasks; best-effort.
+                transition_pr_opened(
+                    config.channel_source,
+                    config.channel_metadata,
+                )
 
             # Memory write — capture task episode and repo learnings
             memory_written = False
