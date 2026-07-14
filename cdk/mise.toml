@@ -63,10 +63,26 @@ description = "CDK deploy-then-verify integration tests (integ-runner). Needs AW
 depends = [":compile"]
 run = [
   "mkdir -p $TMPDIR",
+  # Per-run unique stack naming: the lifecycle test names its stack `int-<hash>`
+  # from the COMMIT_HASH env var (read directly via process.env in the test —
+  # integ-runner synths in a subprocess that inherits the env but not our shell's
+  # CDK context). A stranded stack (the AgentCore ENI teardown race) then never
+  # blocks the next run. Source: COMMIT_HASH (set by CI from the resolved head
+  # SHA), falling back to the local git SHA, then "local" outside a checkout.
+  #
   # No --update-on-failed: .snapshot/ is gitignored, so there is no committed
   # snapshot to diff against or update. --force re-runs the deploy-then-verify
   # unconditionally, which is what we want in CI.
-  "npx integ-runner --language typescript --directory test/integ --force",
+  #
+  # --verbose: integ-runner otherwise prints only a one-line pass/fail per test,
+  # which hides WHICH assertion failed and its actual-vs-expected payload. The
+  # lifecycle test polls DynamoDB for terminal task status; without --verbose a
+  # failure (e.g. task stuck at SUBMITTED instead of COMPLETED) is undiagnosable
+  # from the log alone. Verbose surfaces the assertion diffs we need.
+  '''
+  export COMMIT_HASH="${COMMIT_HASH:-$(git rev-parse HEAD 2>/dev/null || echo local)}"
+  npx integ-runner --language typescript --directory test/integ --force --verbose
+  ''',
 ]
 
 [tasks.bundle]
