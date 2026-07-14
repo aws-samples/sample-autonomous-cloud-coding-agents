@@ -343,6 +343,19 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     jira_issue_key: issue.key,
   };
 
+  // Optional per-project workflow-transition overrides (issue #572). When an
+  // admin configured `bgagent jira map ... --status-on-start/--status-on-pr`,
+  // stamp them so the agent's best-effort transition helpers prefer these
+  // status names over the built-in statusCategory / "In Review" heuristics.
+  const statusOnStart = mapping.Item.status_on_start as string | undefined;
+  const statusOnPr = mapping.Item.status_on_pr as string | undefined;
+  if (statusOnStart) {
+    channelMetadata.jira_status_on_start = statusOnStart;
+  }
+  if (statusOnPr) {
+    channelMetadata.jira_status_on_pr = statusOnPr;
+  }
+
   // Stash the resolved OAuth secret ARN on the task so the agent runtime
   // doesn't have to re-do the registry lookup. Also blocks tasks from
   // tenants that only verified via the stack-wide fallback (workspace
