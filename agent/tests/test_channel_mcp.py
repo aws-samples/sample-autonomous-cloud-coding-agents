@@ -221,9 +221,7 @@ class TestLinearGatewayRouting:
         return _read_mcp(str(tmp_path))["mcpServers"][LINEAR_MCP_SERVER_KEY]
 
     def test_routes_through_gateway_when_url_and_token_present(self, tmp_path, monkeypatch):
-        import channel_mcp
-        monkeypatch.setattr(channel_mcp, "get_gateway_bearer_token", lambda: "m2m-token-xyz", raising=False)
-        # patch the lazily-imported symbol used inside _build_linear_entry
+        # _build_linear_entry imports gateway_auth lazily, so patch it there.
         monkeypatch.setattr("gateway_auth.get_gateway_bearer_token", lambda: "m2m-token-xyz")
         gw = "https://gw-abc.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp"
         wrote = configure_channel_mcp(str(tmp_path), "linear", {"gateway_url": gw})
@@ -238,7 +236,7 @@ class TestLinearGatewayRouting:
         assert entry["url"] == LINEAR_MCP_URL
         assert entry["headers"]["Authorization"] == f"Bearer ${{{LINEAR_API_TOKEN_ENV}}}"
 
-    def test_falls_back_to_direct_when_gateway_url_but_token_mint_fails(self, tmp_path, monkeypatch):
+    def test_falls_back_to_direct_when_token_mint_fails(self, tmp_path, monkeypatch):
         # gateway_url present but the M2M token mint returns "" → direct path.
         monkeypatch.setattr("gateway_auth.get_gateway_bearer_token", lambda: "")
         gw = "https://gw-abc.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp"
