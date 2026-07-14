@@ -198,7 +198,9 @@ class TestWindowSpin:
             g.record_tool_result("Bash", cmd, out)
         summary = g.recent_failure_summary()
         assert summary is not None
-        assert "spinning on failing tool calls" in summary
+        # Neutral observation only — names WHAT repeated, makes no causal claim.
+        assert "last tool calls repeated" in summary
+        assert "spinning" not in summary  # must not editorialize
         assert "git push --force-with-lease" in summary  # most recent failing command
         assert "invalid credentials" in summary  # the recurring error detail
 
