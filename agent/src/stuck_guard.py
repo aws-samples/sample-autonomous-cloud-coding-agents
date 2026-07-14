@@ -331,14 +331,20 @@ class StuckGuard:
         return None
 
     def recent_failure_summary(self) -> str | None:
-        """A one-line "why it spun" summary for a max_turns terminal reason.
+        """A one-line NEUTRAL observation of the recent repeated failure, for a
+        max_turns terminal reason.
 
         Returns None unless the trailing window is failure-dominated (the same
         bar the window-steer uses) — so a task that genuinely used its turns
         making progress yields no summary and its max_turns reason is unchanged.
-        Names the dominant recent failing command + a short slice of its output,
-        so the platform can say "hit max turns while stuck on: <cmd> → <err>"
-        instead of a bare "Exceeded max turns".
+        Names the dominant recent failing command + a short slice of its output.
+
+        Deliberately states only WHAT was observed, not WHY it capped: the window
+        is the last few tool calls, which can't tell a hard blocker from a long
+        task that hit a recoverable snag near the end. So the platform can say
+        "hit max turns; last tool calls repeated: <cmd> → <err>" and let the
+        reader judge — it must NOT assert the task was "spinning" or that more
+        turns wouldn't have helped.
         """
         dominant = self._dominant_window_failure()
         if dominant is None:
@@ -351,5 +357,5 @@ class StuckGuard:
             if failed and p == prev:
                 detail = re.sub(r"\s+", " ", fp).strip()[:120]
                 break
-        base = f"spinning on failing tool calls (last: `{prev}`"
-        return f"{base} — {detail})" if detail else f"{base})"
+        base = f"last tool calls repeated: `{prev}`"
+        return f"{base} — {detail}" if detail else base
