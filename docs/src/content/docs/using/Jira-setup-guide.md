@@ -119,7 +119,20 @@ This writes an `active` row keyed `<cloudId>#<projectKey>` into the project-mapp
 
 ### 5. Link your Jira identity
 
-So tasks triggered from Jira attribute to your platform user (concurrency caps, billing, `bgagent list`), link your Atlassian `accountId` to your ABCA account. An admin issues you a one-time invite code, then you redeem it:
+So tasks triggered from Jira attribute to your platform user (concurrency caps, billing, `bgagent list`), link your Atlassian `accountId` to your ABCA account. An admin issues a one-time invite code, then the teammate redeems it.
+
+#### Admin: generate the invite
+
+```bash
+bgagent jira invite-user <cloud-id> <account-id-or-email>
+```
+
+The command resolves the Jira user through the tenant OAuth token, writes a `pending#<code>` row with a 24-hour TTL, and prints the `bgagent jira link <code>` command to send to the teammate. It requires admin IAM for the stack tables/secrets and a logged-in `bgagent` CLI session for the `invited_by_platform_user_id` audit field.
+
+- `<cloud-id>` — the tenant UUID from `setup` or `https://<your-site>.atlassian.net/_edge/tenant_info`
+- `<account-id-or-email>` — the teammate's Atlassian `accountId` or email address. If email search is hidden/ambiguous, use `accountId`; Jira profile URLs end in `/people/<accountId>`.
+
+#### Teammate: redeem the invite
 
 ```bash
 bgagent jira link <code>
@@ -127,28 +140,7 @@ bgagent jira link <code>
 
 The CLI shows the Jira identity (name + email) and the tenant, and asks for confirmation **before** writing the mapping row — so a mis-issued code is caught before it binds.
 
-> The `invite-user` issuing command is not yet implemented (tracked in [#553](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/553)). Until it lands, an admin can write the user-mapping row directly. Note that until the row exists, a labeled issue from the unlinked user produces no task — the processor comments "Run `bgagent jira link <code>`" on the issue, but no code can be issued yet.
-
-**Interim manual linking (admin IAM).** Write an `active` row to the user-mapping table (stack output `JiraUserMappingTableName`), keyed exactly as `jira-link.ts` would write it:
-
-```bash
-aws dynamodb put-item \
-  --table-name <JiraUserMappingTableName> \
-  --item '{
-    "jira_identity":    {"S": "<cloudId>#<accountId>"},
-    "platform_user_id": {"S": "<cognito-sub>"},
-    "jira_cloud_id":    {"S": "<cloudId>"},
-    "jira_account_id":  {"S": "<accountId>"},
-    "linked_at":        {"S": "<ISO-8601 timestamp>"},
-    "status":           {"S": "active"},
-    "link_method":      {"S": "manual"}
-  }'
-```
-
-Where to find the two identity values:
-
-- **Atlassian `accountId`** — open your Jira profile (avatar → Profile); the URL ends `/people/<accountId>`. Or call `GET https://api.atlassian.com/ex/jira/<cloudId>/rest/api/3/myself` with the stored token.
-- **Cognito sub (platform user id)** — `aws cognito-idp admin-get-user --user-pool-id <pool> --username <email> --query 'UserAttributes[?Name==`sub`].Value' --output text`.
+The teammate needs their own ABCA account first (Cognito user + configured CLI). If they do not have one yet, the admin runs `bgagent admin invite-user teammate@example.com`, then the teammate runs `bgagent configure --from-bundle <bundle>` and `bgagent login --username teammate@example.com` before redeeming the Jira invite.
 
 ### 6. Test
 
