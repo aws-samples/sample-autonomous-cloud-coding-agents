@@ -1697,3 +1697,81 @@ class TestRemainingMaxlifetime:
     def test_unparseable_started_at_returns_none(self, monkeypatch):
         monkeypatch.setenv("TASK_STARTED_AT", "not-a-timestamp")
         assert hooks._remaining_maxlifetime_s() is None
+
+
+class TestStuckGuardHookIntegration:
+    """K7: PostToolUse feeds the guard; the between-turns hook steers (advisory)."""
+
+    def _oom(self):
+        return "[//cdk:test] FAILED (exit 134)\nJavaScript heap out of memory"
+
+    def test_post_tool_use_records_failures_into_the_guard(self):
+        from stuck_guard import STEER_THRESHOLD, StuckGuard
+
+        guard = StuckGuard()
+        cmd = {"command": "mise //cdk:test"}
+        for _ in range(STEER_THRESHOLD):
+            hook_input = {
+                "hook_event_name": "PostToolUse",
+                "tool_name": "Bash",
+                "tool_input": cmd,
+                "tool_response": self._oom(),
+            }
+            _run(post_tool_use_hook(hook_input, "t", {}, stuck_guard=guard))
+        # the guard now has enough failures to steer
+        assert guard.evaluate().kind == "steer"
+
+    def test_post_tool_use_record_error_never_blocks_screening(self):
+        # A guard that raises on record must not break the PASS_THROUGH path.
+        from stuck_guard import StuckGuard
+
+        class _Boom(StuckGuard):
+            def record_tool_result(self, *a, **k):
+                raise RuntimeError("boom")
+
+        hook_input = {
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "echo hi"},
+            "tool_response": "hi",
+        }
+        result = _run(post_tool_use_hook(hook_input, "t", {}, stuck_guard=_Boom()))
+        assert result["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
+
+    def test_stop_hook_steers_not_bails(self):
+        # Advisory-only: a persistent identical-failure spin produces a STEER
+        # (a 'block' decision that injects the nudge as the next user message),
+        # NEVER a continue_=False kill. The max_turns cap is the real backstop.
+        from stuck_guard import STEER_THRESHOLD, StuckGuard
+
+        guard = StuckGuard()
+        cmd = {"command": "mise //cdk:test"}
+        for _ in range(STEER_THRESHOLD + 5):
+            guard.record_tool_result("Bash", cmd, self._oom())
+        result = _run(hooks.stop_hook({}, None, {}, task_id="t", stuck_guard=guard))
+        # a steer is a 'block' decision carrying the advisory text; never a kill
+        assert result.get("continue_") is not False
+        assert result.get("decision") == "block"
+        assert "STOP retrying" in (result.get("reason") or "")
+
+    def test_stop_hook_steers_when_guard_says_so(self):
+        from stuck_guard import STEER_THRESHOLD, StuckGuard
+
+        guard = StuckGuard()
+        cmd = {"command": "mise //cdk:test"}
+        for _ in range(STEER_THRESHOLD):
+            guard.record_tool_result("Bash", cmd, self._oom())
+        result = _run(hooks.stop_hook({}, None, {}, task_id="t", stuck_guard=guard))
+        # a steer is injected as a block decision (SDK continues with the text)
+        assert result.get("decision") == "block"
+        assert "STOP retrying" in result.get("reason", "")
+
+    def test_stop_hook_no_guard_is_a_noop(self):
+        # Back-compat: absent a guard, the stuck path never fires.
+        result = _run(hooks.stop_hook({}, None, {}, task_id="t"))
+        assert result == {}
+
+    def test_build_hook_matchers_creates_a_guard_without_crashing(self):
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+        matchers = build_hook_matchers(engine, task_id="t")
+        assert "PostToolUse" in matchers and "Stop" in matchers

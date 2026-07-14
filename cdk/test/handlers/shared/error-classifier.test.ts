@@ -258,6 +258,28 @@ describe('classifyError', () => {
       expect(result!.remedy).toMatch(/--max-turns/);
     });
 
+    test('ABCA-662: max_turns with an observed repeated failure stays "Exceeded max turns" and makes NO causal claim', () => {
+      // When the agent capped out with the last several calls being the same
+      // repeated failure, the pipeline appends a NEUTRAL observation ("last tool
+      // calls repeated: …"). The classification must NOT re-title the failure as
+      // "retrying a failing step" or assert more turns wouldn't help — the window
+      // (last few calls) can't tell a hard blocker from a long task that hit a
+      // recoverable snag late (662: siblings pushed fine → transient). It stays the
+      // plain max_turns bucket; the observed detail rides along in the message.
+      const result = classifyError(
+        "Agent session error (subtype='error_max_turns') — last tool calls repeated: "
+        + '`git push --force-with-lease` — remote: invalid credentials fatal: exit 128',
+      );
+      expect(result!.category).toBe(ErrorCategory.TIMEOUT);
+      expect(result!.title).toBe('Exceeded max turns');
+      expect(result!.retryable).toBe(true);
+      // Does not editorialize: no "spinning" / "won't help" claim. It points the
+      // reader at the detail and still offers the environment-blocker path.
+      expect(result!.title).not.toMatch(/retrying a failing step/i);
+      expect(result!.remedy).toMatch(/detail/i);
+      expect(result!.remedy).toMatch(/environment|auth|credentials/i);
+    });
+
     test('classifies error_max_budget_usd as TIMEOUT with specific title', () => {
       const result = classifyError(
         "Task did not succeed (agent_status='error_max_budget_usd', build_ok=False)",

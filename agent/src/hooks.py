@@ -34,6 +34,7 @@ from output_scanner import scan_tool_output
 from policy import APPROVAL_RATE_LIMIT, FLOOR_TIMEOUT_S, Outcome
 from progress_writer import _generate_ulid
 from shell import log, log_error_cw
+from stuck_guard import StuckGuard
 
 if TYPE_CHECKING:
     from policy import PolicyEngine
@@ -170,6 +171,27 @@ def reset_blocker_reason() -> None:
 
 # Back-compat alias for test fixtures that import the old name.
 _reset_blocker_reason_for_tests = reset_blocker_reason
+
+
+# ABCA-662: latch of the stuck-guard's "why it's spinning" summary, refreshed by
+# the between-turns hook. Read by the pipeline's terminal path so a max_turns
+# failure can say WHY it capped ("Exceeded max turns — spinning on failing tool
+# calls: git push → invalid credentials") vs. a task that genuinely used its
+# turns. Process-lifetime (one task), last-writer-wins (the most recent window
+# is the most relevant to the cap). Distinct from the blocker latch: this is a
+# SOFT diagnostic (advisory), not a canonical BLOCKED[…] terminal reason.
+_LAST_STUCK_SUMMARY: str | None = None
+
+
+def last_stuck_summary() -> str | None:
+    """Return the latched stuck-guard summary for the max_turns terminal reason."""
+    return _LAST_STUCK_SUMMARY
+
+
+def reset_stuck_summary() -> None:
+    """Clear the stuck-summary latch (per-task, alongside the blocker latch)."""
+    global _LAST_STUCK_SUMMARY
+    _LAST_STUCK_SUMMARY = None
 
 
 def detect_egress_denial(text: str) -> tuple[bool, str | None]:
@@ -1039,6 +1061,7 @@ async def post_tool_use_hook(
     *,
     trajectory: _TrajectoryWriter | None = None,
     progress: Any = None,
+    stuck_guard: StuckGuard | None = None,
 ) -> dict:
     """PostToolUse hook: screen tool output for secrets/PII.
 
@@ -1051,6 +1074,11 @@ async def post_tool_use_hook(
     present, an egress-denial signature in the tool output emits an
     ``egress_denied`` blocker event (#251) — best-effort observability,
     never alters the screening decision.
+
+    K7: when a ``stuck_guard`` is supplied, every tool result is recorded so a
+    between-turns hook can detect a repeating failing command (the ABCA-483
+    spin loop) and steer / bail. Recording is best-effort and never alters the
+    screening outcome.
     """
     _PASS_THROUGH: dict = {"hookSpecificOutput": {"hookEventName": "PostToolUse"}}
     _FAIL_CLOSED: dict = {
@@ -1112,6 +1140,14 @@ async def post_tool_use_hook(
                 retryable=False,
                 resource=host,
             )
+
+    # K7: feed the stuck-guard (best-effort — a tracking error must never block
+    # the screening path that follows).
+    if stuck_guard is not None:
+        try:
+            stuck_guard.record_tool_result(tool_name, hook_input.get("tool_input"), tool_response)
+        except Exception as exc:
+            log("WARN", f"stuck-guard record raised (ignored): {type(exc).__name__}: {exc}")
 
     try:
         result = scan_tool_output(tool_response)
@@ -1395,6 +1431,49 @@ def _cancel_between_turns_hook(ctx: dict) -> list[str]:
     return []
 
 
+def _stuck_guard_between_turns_hook(ctx: dict) -> list[str]:
+    """K7: nudge the agent when it repeats the SAME failing command (ABCA-483).
+
+    Reads the per-task :class:`StuckGuard` stamped on ``ctx`` (by
+    :func:`stop_hook`). When the same command has failed with identical output
+    enough times in a row, the guard returns a ``steer`` action — a ONE-TIME
+    advisory message telling the agent to stop retrying and either work around
+    the failure or finish with what it has. Returned as injected text, so the
+    SDK continues the turn with the steer as the next user message.
+
+    ADVISORY ONLY: the guard never kills the task (the bail path was removed —
+    distinguishing a true spin from a legitimately-iterating agent is too
+    fragile to justify an auto-kill; the ``max_turns`` cap is the real
+    backstop). A false positive here costs exactly one extra advisory comment.
+
+    Runs AFTER cancel (cancel wins — never steer a dying agent) but its own
+    no-op-when-cancelled guard makes ordering robust. Fail-open: any error is
+    swallowed so a guard bug can never wedge a healthy agent.
+    """
+    if ctx.get("_cancel_requested"):
+        return []
+    guard = ctx.get("stuck_guard")
+    if guard is None:
+        return []
+    try:
+        action = guard.evaluate()
+        # ABCA-662: refresh the "why it's spinning" latch every turn. When the
+        # trailing window is failure-dominated this returns a one-liner; otherwise
+        # None (which clears the latch — a task that recovered isn't "stuck"). Read
+        # by the terminal path so a later max_turns cap explains itself.
+        global _LAST_STUCK_SUMMARY
+        _LAST_STUCK_SUMMARY = guard.recent_failure_summary()
+    except Exception as exc:
+        log("WARN", f"stuck-guard evaluate raised (ignored): {type(exc).__name__}: {exc}")
+        return []
+
+    if action.kind == "steer":
+        _emit_nudge_milestone(ctx, "stuck_steer", action.message[:_NUDGE_PREVIEW_LEN])
+        log("NUDGE", f"stuck-guard STEER injected: {action.signature}")
+        return [action.message]
+    return []
+
+
 # Global list of between-turns hooks.  Cancel MUST run first so it can
 # short-circuit nudges on cancelled tasks (no point injecting nudges into a
 # dying agent — worse, the nudge reader mutates DDB state that the agent will
@@ -1406,6 +1485,10 @@ def _cancel_between_turns_hook(ctx: dict) -> list[str]:
 # nudge reader to preserve cancel-wins semantics.
 between_turns_hooks: list[BetweenTurnsHook] = [
     _cancel_between_turns_hook,
+    # K7 stuck-guard (advisory): injects a one-time "stop retrying X" nudge when
+    # the same command keeps failing identically. Runs after cancel (never steer
+    # a dying agent); order vs nudge/denial is cosmetic since it never bails.
+    _stuck_guard_between_turns_hook,
     _nudge_between_turns_hook,
     # Chunk 3 (finding #2): denial injection runs LAST so both cancel and
     # nudge short-circuits pre-empt it. The hook explicitly re-checks
@@ -1423,6 +1506,7 @@ async def stop_hook(
     task_id: str,
     progress: Any = None,
     engine: Any = None,
+    stuck_guard: Any = None,
 ) -> dict:
     """Stop hook: run registered between-turns hooks; block if they produce text.
 
@@ -1445,6 +1529,7 @@ async def stop_hook(
         "task_id": task_id,
         "progress": progress,
         "engine": engine,
+        "stuck_guard": stuck_guard,
     }
 
     # Cancel-before-nudge short-circuit.
@@ -1526,6 +1611,11 @@ def build_hook_matchers(
         SyncHookJSONOutput,
     )
 
+    # K7: one stuck-guard per task (== per build_hook_matchers call). The
+    # PostToolUse closure feeds it every tool result; the Stop closure reads it
+    # between turns to steer / bail on a repeating failing command.
+    _stuck_guard = StuckGuard()
+
     # Closure-based wrapper matches the HookCallback signature exactly:
     # (HookInput, str | None, HookContext) -> Awaitable[HookJSONOutput]
     async def _pre(
@@ -1568,7 +1658,12 @@ def build_hook_matchers(
     ) -> HookJSONOutput:
         try:
             result = await post_tool_use_hook(
-                hook_input, tool_use_id, ctx, trajectory=trajectory, progress=progress
+                hook_input,
+                tool_use_id,
+                ctx,
+                trajectory=trajectory,
+                progress=progress,
+                stuck_guard=_stuck_guard,
             )
             return SyncHookJSONOutput(**result)
         except Exception as exc:
@@ -1593,6 +1688,7 @@ def build_hook_matchers(
                 task_id=stop_task_id,
                 progress=progress,
                 engine=engine,
+                stuck_guard=_stuck_guard,
             )
         except Exception as exc:
             log(

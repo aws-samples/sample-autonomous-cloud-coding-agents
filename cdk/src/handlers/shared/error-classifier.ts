@@ -306,12 +306,21 @@ const PATTERNS: readonly ErrorPattern[] = [
   // (live-caught on ABCA-483: a task hit the 100-turn cap but the reply
   // said "Unexpected error"). Match either ``agent_status=``/``subtype=``.
   {
+    // A max-turns cap is a correct, self-explanatory classification. When the
+    // stuck-guard observed the last several tool calls repeating the SAME failure
+    // it is appended to the reason as a neutral OBSERVATION ("last tool calls
+    // repeated: `<cmd>` → <err>") — we surface WHAT was on screen but deliberately
+    // make NO causal claim about whether more turns would have helped: the
+    // trailing window (last 6 calls) can't distinguish a hard blocker from a long
+    // task that hit a recoverable snag only at the tail, so re-framing the whole
+    // run as "retrying a failing step" would misrepresent the latter. The reader
+    // sees the observed detail and the neutral remedy and decides.
     pattern: /(?:agent_status|subtype)=['"]?error_max_turns['"]?/i,
     classification: {
       category: ErrorCategory.TIMEOUT,
       title: 'Exceeded max turns',
-      description: 'The agent reached the configured ``max_turns`` limit before completing.',
-      remedy: 'Raise ``--max-turns`` on the submit call, simplify the task, or break it into smaller sub-tasks.',
+      description: 'The agent reached the configured ``max_turns`` limit before completing. If a repeated tool failure was observed near the end, it is shown in the detail below.',
+      remedy: 'Look at the detail below to see what the agent was doing when it ran out. Raise ``--max-turns`` on the submit call, simplify the task, or break it into smaller sub-tasks — and if the detail shows an environment/tooling blocker (auth, credentials, permission, network, disk), fix that first, then reply here to retry.',
       retryable: true,
       errorClass: ErrorClass.USER,
     },
