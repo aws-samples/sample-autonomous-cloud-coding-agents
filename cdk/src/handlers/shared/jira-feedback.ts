@@ -67,17 +67,24 @@ function toAdfDocument(message: string): Record<string, unknown> {
 }
 
 /**
- * A single run of comment text with optional inline emphasis. The ADF
- * serializer ({@link buildAdfDocument}) maps ``strong``/``em`` onto ADF
- * ``marks``. Callers that need plain text simply omit both flags. This is
- * the smallest content model that lets the fan-out final-status comment
- * render a bold header + italic task-id footer without hand-building ADF
- * at every call site (issue #573).
+ * A single run of comment text with optional inline emphasis / hyperlink.
+ * The ADF serializer ({@link buildAdfDocument}) maps ``strong``/``em`` onto
+ * ADF ``marks`` and ``href`` onto an ADF ``link`` mark. Callers that need
+ * plain text simply omit all flags. This is the smallest content model that
+ * lets the fan-out final-status comment render a bold header, an italic
+ * task-id footer, and a clickable PR link without hand-building ADF at every
+ * call site (issue #573).
+ *
+ * ``href`` matters because ADF — unlike Linear's Markdown — does NOT
+ * auto-linkify a bare URL sitting in a plain text node: it renders as
+ * unclickable text unless the run carries an explicit ``link`` mark.
  */
 export interface AdfTextRun {
   readonly text: string;
   readonly strong?: boolean;
   readonly em?: boolean;
+  /** When set, the run renders as a clickable hyperlink to this URL. */
+  readonly href?: string;
 }
 
 /** A paragraph is a list of runs; an empty run list renders a blank line. */
@@ -101,9 +108,12 @@ export function buildAdfDocument(paragraphs: ReadonlyArray<AdfParagraph>): Recor
     content: paragraphs.map((runs) => ({
       type: 'paragraph',
       content: runs.map((run) => {
-        const marks: Array<{ type: string }> = [];
+        const marks: Array<Record<string, unknown>> = [];
         if (run.strong) marks.push({ type: 'strong' });
         if (run.em) marks.push({ type: 'em' });
+        // ADF ``link`` mark — the only way to make a URL clickable in a
+        // Jira comment; a bare URL in a text node stays plain text.
+        if (run.href) marks.push({ type: 'link', attrs: { href: run.href } });
         return marks.length > 0
           ? { type: 'text', text: run.text, marks }
           : { type: 'text', text: run.text };

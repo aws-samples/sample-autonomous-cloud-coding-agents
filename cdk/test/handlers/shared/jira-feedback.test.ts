@@ -296,6 +296,32 @@ describe('jira-feedback: buildAdfDocument (multi-paragraph ADF, #573)', () => {
     const content = doc.content as Array<{ type: string; content: unknown[] }>;
     expect(content[0]).toEqual({ type: 'paragraph', content: [] });
   });
+
+  test('an href run emits an ADF link mark (bare URLs are not auto-linked)', () => {
+    const doc = buildAdfDocument([[
+      { text: 'PR: ' },
+      { text: 'https://github.com/o/r/pull/7', href: 'https://github.com/o/r/pull/7' },
+    ]]);
+    const runs = (doc.content as Array<{ content: Array<Record<string, unknown>> }>)[0].content;
+    expect(runs[0]).toEqual({ type: 'text', text: 'PR: ' });
+    expect(runs[1]).toEqual({
+      type: 'text',
+      text: 'https://github.com/o/r/pull/7',
+      marks: [{ type: 'link', attrs: { href: 'https://github.com/o/r/pull/7' } }],
+    });
+  });
+
+  test('href composes with strong/em marks on the same run', () => {
+    const doc = buildAdfDocument([[
+      { text: 'link', strong: true, href: 'https://x.example/pull/1' },
+    ]]);
+    const runs = (doc.content as Array<{ content: Array<Record<string, unknown>> }>)[0].content;
+    expect(runs[0]).toEqual({
+      type: 'text',
+      text: 'link',
+      marks: [{ type: 'strong' }, { type: 'link', attrs: { href: 'https://x.example/pull/1' } }],
+    });
+  });
 });
 
 describe('jira-feedback: postIssueCommentAdf (classified result, #573)', () => {

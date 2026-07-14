@@ -2107,6 +2107,11 @@ describe('renderJiraFinalStatusComment', () => {
     expect(text).toContain('PR: https://github.com/o/r/pull/7');
     // The header run is bold (ADF strong mark) — the serializer maps this.
     expect(paragraphs[0][0]).toEqual({ text: '✅ Task completed', strong: true });
+    // The URL run carries an href so buildAdfDocument emits a clickable
+    // link mark — a bare URL in ADF text is NOT auto-linked (issue #573
+    // follow-up). Find the run whose text is the URL and assert its href.
+    const urlRun = paragraphs.flat().find((r) => r.text === 'https://github.com/o/r/pull/7');
+    expect(urlRun).toEqual({ text: 'https://github.com/o/r/pull/7', href: 'https://github.com/o/r/pull/7' });
   });
 
   test('✅ success path without a PR omits the PR line', () => {

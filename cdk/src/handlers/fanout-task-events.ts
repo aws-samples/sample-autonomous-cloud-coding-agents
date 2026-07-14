@@ -1204,9 +1204,15 @@ export function renderJiraFinalStatusComment(args: {
   // Render the PR link whenever one exists — on both the ✅ success path and
   // the ⚠️ shipped-but-stopped path. This diverges from Linear (which omits
   // it on success) because Jira no longer has the agent-side terminal
-  // comment carrying the link (issue #573 decision).
+  // comment carrying the link (issue #573 decision). The URL run carries an
+  // ``href`` so it renders as a clickable hyperlink — ADF does not
+  // auto-linkify a bare URL in a plain text node the way Linear's Markdown
+  // does, so without this the requester would have to copy-paste it.
   if (args.prUrl) {
-    paragraphs.push([{ text: `PR: ${args.prUrl}` }]);
+    paragraphs.push([
+      { text: 'PR: ' },
+      { text: args.prUrl, href: args.prUrl },
+    ]);
   }
   paragraphs.push([{ text: `task ${args.taskId}`, em: true }]);
   return paragraphs;
