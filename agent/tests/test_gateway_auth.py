@@ -13,7 +13,7 @@ class _FakeSM:
     def __init__(self, secret_obj):
         self._s = json.dumps(secret_obj)
 
-    def get_secret_value(self, SecretId):  # noqa: N803 - boto3 kwarg name
+    def get_secret_value(self, SecretId):
         return {"SecretString": self._s}
 
 

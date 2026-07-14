@@ -24,7 +24,7 @@ import urllib.request
 from shell import log
 
 #: Env var naming the Secrets Manager secret with the M2M client bundle.
-GATEWAY_M2M_SECRET_ENV = "LINEAR_GATEWAY_M2M_SECRET_ARN"
+GATEWAY_M2M_SECRET_ENV = "LINEAR_GATEWAY_M2M_SECRET_ARN"  # noqa: S105 — env var *name*, not a secret value
 
 #: Cache the minted token in-process. client_credentials tokens are ~1h; we
 #: refresh a minute early. Keyed by nothing (one M2M client per deployment).
@@ -61,7 +61,7 @@ def _load_m2m_bundle() -> dict[str, str] | None:
     except (BotoCoreError, ClientError, KeyError, json.JSONDecodeError, TypeError) as e:
         log("WARN", f"gateway_auth: could not read/parse M2M secret: {type(e).__name__}: {e}")
         return None
-    if not bundle.get("client_id") or not bundle.get("client_secret") or not bundle.get("token_url"):
+    if not (bundle.get("client_id") and bundle.get("client_secret") and bundle.get("token_url")):
         log("WARN", "gateway_auth: M2M secret missing client_id/client_secret/token_url")
         return None
     return bundle
@@ -78,7 +78,9 @@ def _request_token(bundle: dict[str, str]) -> tuple[str, float] | None:
     }).encode("utf-8")
     # Cognito wants HTTP Basic auth (client_id:client_secret) for confidential clients.
     basic = base64.b64encode(f"{bundle['client_id']}:{bundle['client_secret']}".encode()).decode()
-    req = urllib.request.Request(
+    # token_url comes from our own CDK-managed secret (a Cognito https endpoint),
+    # not user input — S310 scheme-audit is not a concern here.
+    req = urllib.request.Request(  # noqa: S310 — trusted https Cognito token URL from our secret
         bundle["token_url"],
         data=body,
         headers={
@@ -88,9 +90,9 @@ def _request_token(bundle: dict[str, str]) -> tuple[str, float] | None:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=15) as resp:  # noqa: S310 — trusted https Cognito token URL
             payload = json.loads(resp.read().decode("utf-8"))
-    except Exception as e:  # noqa: BLE001 - network/parse; degrade to direct path
+    except Exception as e:
         log("WARN", f"gateway_auth: token request failed: {type(e).__name__}: {e}")
         return None
     token = payload.get("access_token", "")
