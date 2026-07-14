@@ -18,7 +18,7 @@
  */
 
 import * as path from 'path';
-import { ArnFormat, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
+import { ArnFormat, Duration, RemovalPolicy, SecretValue, Stack } from 'aws-cdk-lib';
 import * as apigw from 'aws-cdk-lib/aws-apigateway';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
@@ -27,6 +27,7 @@ import { Runtime, Architecture, type LayerVersion } from 'aws-cdk-lib/aws-lambda
 import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
+import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as wafv2 from 'aws-cdk-lib/aws-wafv2';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
@@ -186,6 +187,23 @@ export interface TaskApiProps {
    * Required when attachmentsBucket is provided.
    */
   readonly userConcurrencyTable?: dynamodb.ITable;
+
+  /**
+   * When true, provision the machine-to-machine (client_credentials) Cognito
+   * app client the agent uses to authenticate to per-workspace Linear MCP
+   * gateways (their CUSTOM_JWT inbound authorizer trusts this pool). Adds a
+   * Cognito domain (required for the client_credentials token endpoint), a
+   * resource server + scope, and an app client with a generated secret.
+   * Gated on ``--context linearGateway=true`` at the stack. Additive — off by
+   * default. See docs/design/AGENTCORE_GATEWAY_MCP_SPIKE.md (F15/F16).
+   */
+  readonly enableLinearGatewayM2m?: boolean;
+
+  /**
+   * Domain prefix for the Cognito hosted domain when M2M is enabled. Must be
+   * globally unique within the region. Defaults to a stack-derived value.
+   */
+  readonly linearGatewayM2mDomainPrefix?: string;
 }
 
 /**
@@ -224,6 +242,19 @@ export class TaskApi extends Construct {
    */
   public readonly appClientId: string;
 
+  /**
+   * Machine-to-machine (client_credentials) app client for the agent→Linear-
+   * gateway inbound auth. Only set when ``enableLinearGatewayM2m`` is true.
+   */
+  public readonly linearGatewayM2mClient?: cognito.UserPoolClient;
+
+  /**
+   * Secrets Manager secret holding the M2M client's id + secret + token URL,
+   * for the agent to fetch a client_credentials token. Only set when
+   * ``enableLinearGatewayM2m`` is true.
+   */
+  public readonly linearGatewayM2mSecret?: secretsmanager.Secret;
+
   constructor(scope: Construct, id: string, props: TaskApiProps) {
     super(scope, id);
 
@@ -259,6 +290,63 @@ export class TaskApi extends Construct {
       { id: 'AwsSolutions-COG3', reason: 'Advanced security mode (Plus tier) not required for dev environment' },
       { id: 'AwsSolutions-COG8', reason: 'Cognito Plus tier / feature plan not required for dev environment — same rationale as COG3 (advanced security)' },
     ]);
+
+    // --- Machine-to-machine app client for the Linear MCP gateway (F15/F16) ---
+    // Per-workspace Linear gateways use a CUSTOM_JWT inbound authorizer (3LO
+    // outbound is rejected with AWS_IAM), so the AGENT — which otherwise runs on
+    // IAM creds with no JWT — needs a bearer token this pool issues. A
+    // client_credentials (machine-to-machine) app client gives the agent a
+    // pool-signed access token whose ``client_id`` the gateway's allowedClients
+    // trusts. Requires a Cognito domain (the token endpoint) + a resource server
+    // scope. Gated (additive) — only when the Linear gateway substrate is on.
+    if (props.enableLinearGatewayM2m) {
+      const domainPrefix = props.linearGatewayM2mDomainPrefix
+        ?? `bgagent-${Stack.of(this).account}-${Stack.of(this).region}`;
+      this.userPool.addDomain('LinearGatewayM2mDomain', {
+        cognitoDomain: { domainPrefix },
+      });
+
+      const invokeScope = new cognito.ResourceServerScope({
+        scopeName: 'invoke',
+        scopeDescription: 'Invoke per-workspace Linear MCP gateways',
+      });
+      const resourceServer = this.userPool.addResourceServer('LinearGatewayM2mResourceServer', {
+        identifier: 'bgagent-linear-gateway',
+        scopes: [invokeScope],
+      });
+
+      this.linearGatewayM2mClient = this.userPool.addClient('LinearGatewayM2mClient', {
+        generateSecret: true,
+        authFlows: {}, // client_credentials only — no user auth flows
+        oAuth: {
+          flows: { clientCredentials: true },
+          scopes: [cognito.OAuthScope.resourceServer(resourceServer, invokeScope)],
+        },
+      });
+
+      // Stash the client id + secret + token URL for the agent to fetch tokens.
+      // The agent reads this secret at task start (Linear-channel tasks only)
+      // and POSTs client_credentials to the token URL to mint the gateway bearer.
+      this.linearGatewayM2mSecret = new secretsmanager.Secret(this, 'LinearGatewayM2mSecret', {
+        secretName: 'bgagent-linear-gateway-m2m',
+        description: 'Cognito client_credentials app-client (id/secret/token URL) the agent uses to auth to Linear MCP gateways.',
+        secretObjectValue: {
+          client_id: SecretValue.unsafePlainText(this.linearGatewayM2mClient.userPoolClientId),
+          client_secret: this.linearGatewayM2mClient.userPoolClientSecret,
+          token_url: SecretValue.unsafePlainText(
+            `https://${domainPrefix}.auth.${Stack.of(this).region}.amazoncognito.com/oauth2/token`,
+          ),
+          scope: SecretValue.unsafePlainText('bgagent-linear-gateway/invoke'),
+        },
+        removalPolicy,
+      });
+      NagSuppressions.addResourceSuppressions(this.linearGatewayM2mSecret, [
+        {
+          id: 'AwsSolutions-SMG4',
+          reason: 'Holds a Cognito app-client id/secret (client_credentials), not a rotatable database/API credential. The secret value is the Cognito-managed client secret; rotating it requires rotating the app client itself (a redeploy), so Secrets Manager auto-rotation does not apply.',
+        },
+      ]);
+    }
 
     // --- REST API ---
     const apiAccessLogGroup = new logs.LogGroup(this, 'ApiAccessLogs', {

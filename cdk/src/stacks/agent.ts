@@ -288,8 +288,16 @@ export class AgentStack extends Stack {
       },
     });
 
+    // Linear MCP gateway substrate gate (context-gated, additive). Read here so
+    // TaskApi can provision the machine-to-machine Cognito client the agent uses
+    // to authenticate to per-workspace gateways (F15/F16). Also drives the
+    // gateway service-role + runtime grant block further below.
+    const linearGatewayEnabled = this.node.tryGetContext('linearGateway') === true
+      || this.node.tryGetContext('linearGateway') === 'true';
+
     // --- Task API (REST API + Cognito + Lambda handlers) ---
     const taskApi = new TaskApi(this, 'TaskApi', {
+      enableLinearGatewayM2m: linearGatewayEnabled,
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
       taskNudgesTable: taskNudgesTable.table,
@@ -348,6 +356,11 @@ export class AgentStack extends Stack {
       LOG_GROUP_NAME: applicationLogGroup.logGroupName,
       MEMORY_ID: agentMemory.memory.memoryId,
       MAX_TURNS: '200',
+      // Linear MCP gateway (F15/F16): the agent reads this secret (M2M Cognito
+      // client id/secret/token-url) to mint a bearer for the workspace's
+      // CUSTOM_JWT gateway. Empty string when the substrate is off — the agent
+      // then falls back to the direct mcp.linear.app path.
+      LINEAR_GATEWAY_M2M_SECRET_ARN: taskApi.linearGatewayM2mSecret?.secretArn ?? '',
       // Session storage: the S3-backed FUSE mount at /mnt/workspace does NOT
       // support flock(). Only caches whose tools never call flock() go there.
       // Everything else stays on local ephemeral disk.
@@ -620,9 +633,8 @@ export class AgentStack extends Stack {
     // stack-level IAM: the gateway service role the per-workspace gateways
     // assume for outbound (Gateway→Linear) auth, and the runtime's grant to
     // invoke those gateways. Resource names are scoped to the
-    // ``bgagent-linear-gw-*`` prefix the CLI uses.
-    const linearGatewayEnabled = this.node.tryGetContext('linearGateway') === true
-      || this.node.tryGetContext('linearGateway') === 'true';
+    // ``bgagent-linear-gw-*`` prefix the CLI uses. (linearGatewayEnabled is
+    // computed above, before TaskApi, so the M2M Cognito client is provisioned.)
     if (linearGatewayEnabled) {
       // Gateway service role: the per-workspace gateways assume this to reach
       // the AgentCore Identity token vault (OAuth token + refresh) and read the
@@ -660,6 +672,12 @@ export class AgentStack extends Stack {
           }),
         ],
       }));
+      NagSuppressions.addResourceSuppressions(gatewayServiceRole, [
+        {
+          id: 'AwsSolutions-IAM5',
+          reason: 'bedrock-agentcore identity actions (GetWorkloadAccessToken*/GetResourceOauth2Token/CompleteResourceTokenAuth) have no resource-level scoping in IAM, so Resource:* is required. The GetSecretValue wildcard is scoped to the bedrock-agentcore-identity!* prefix — AgentCore mints each per-workspace OAuth2 provider secret under that prefix with a name not known at synth time (created dynamically by bgagent linear add-workspace).',
+        },
+      ], true);
 
       // The agent runtime invokes the per-workspace gateways as an MCP client.
       // Gateways are created dynamically (name ``bgagent-linear-gw-<slug>`` with
@@ -676,10 +694,29 @@ export class AgentStack extends Stack {
         ],
       }));
 
+      // The agent reads the M2M secret to mint its gateway bearer token.
+      taskApi.linearGatewayM2mSecret?.grantRead(runtime.role);
+
       new CfnOutput(this, 'LinearGatewayServiceRoleArn', {
         value: gatewayServiceRole.roleArn,
         description: 'ARN of the service role per-workspace Linear MCP gateways assume (bgagent linear add-workspace passes this to create-gateway).',
       });
+
+      // The gateways' CUSTOM_JWT inbound authorizer must trust the M2M client
+      // the agent uses (NOT the human-login client). add-workspace reads this
+      // output and sets the gateway's allowedClients to it.
+      if (taskApi.linearGatewayM2mClient) {
+        new CfnOutput(this, 'LinearGatewayM2mClientId', {
+          value: taskApi.linearGatewayM2mClient.userPoolClientId,
+          description: 'Cognito machine-to-machine app-client id the per-workspace Linear gateways trust (allowedClients). The agent mints a token from it to invoke the gateways.',
+        });
+      }
+      if (taskApi.linearGatewayM2mSecret) {
+        new CfnOutput(this, 'LinearGatewayM2mSecretArn', {
+          value: taskApi.linearGatewayM2mSecret.secretArn,
+          description: 'ARN of the Secrets Manager secret holding the M2M client id/secret/token-url the agent reads to authenticate to Linear MCP gateways.',
+        });
+      }
     }
 
     // --- ECS Fargate compute backend (CONTEXT-GATED) ---
