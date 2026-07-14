@@ -1280,12 +1280,14 @@ _RUN_TASK_PARAMS = frozenset(inspect.signature(run_task).parameters)
 #: orchestrator→agent field, forgot the other" no-op that ABCA-487 was — so we
 #: WARN when we drop one, making a future contract gap visible instead of silent.
 #: Keys not in this set (genuinely foreign) are dropped quietly as before.
-_KNOWN_ORCHESTRATOR_KEYS = frozenset({
-    "build_command",
-    "merge_branches",
-    "base_branch",
-    "github_token_secret_arn",
-})
+_KNOWN_ORCHESTRATOR_KEYS = frozenset(
+    {
+        "build_command",
+        "merge_branches",
+        "base_branch",
+        "github_token_secret_arn",
+    }
+)
 
 
 def run_task_from_payload(payload: dict) -> dict:
@@ -1319,8 +1321,11 @@ def run_task_from_payload(payload: dict) -> dict:
             # through" no-op surfaces (N4 / ABCA-487 class). Foreign keys are
             # dropped quietly.
             if key in _KNOWN_ORCHESTRATOR_KEYS and value is not None:
-                log("WARN", f"run_task_from_payload: dropping known orchestrator key '{key}' "
-                    f"(not a run_task parameter) — consumed elsewhere or not yet wired")
+                log(
+                    "WARN",
+                    f"run_task_from_payload: dropping known orchestrator key '{key}' "
+                    f"(not a run_task parameter) — consumed elsewhere or not yet wired",
+                )
             continue
         if value is None:
             continue  # let run_task's default apply
