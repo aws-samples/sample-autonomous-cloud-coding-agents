@@ -43,9 +43,33 @@ LINEAR_MCP_SERVER_KEY = "linear-server"
 #: placeholder expansion. Populated from the OAuth secret by config.py.
 LINEAR_API_TOKEN_ENV = "LINEAR_API_TOKEN"  # noqa: S105 — env var *name*, not a secret value
 
+#: channel_metadata key carrying the per-workspace AgentCore Gateway MCP URL
+#: (stamped by the orchestrator from the LinearWorkspaceRegistry row when the
+#: workspace was onboarded with `bgagent linear add-workspace --gateway`).
+GATEWAY_URL_METADATA_KEY = "gateway_url"
 
-def _linear_server_entry() -> dict[str, Any]:
-    """Build the `mcpServers` entry for Linear's hosted MCP."""
+
+def _linear_server_entry(gateway_url: str = "", gateway_bearer: str = "") -> dict[str, Any]:
+    """Build the `mcpServers` entry for the Linear MCP.
+
+    Two modes:
+      * **Gateway federation** (``gateway_url`` set) — point at the workspace's
+        AgentCore Gateway endpoint, authenticating with the M2M bearer the agent
+        minted (the gateway's CUSTOM_JWT inbound). The gateway holds the Linear
+        OAuth token + owns its 24h refresh, so no per-thread Linear token is
+        injected into the container. See docs/design/AGENTCORE_GATEWAY_MCP_SPIKE.md.
+      * **Direct** (default) — point at Linear's hosted MCP with the per-thread
+        ``${LINEAR_API_TOKEN}`` bearer (resolved by config.py from the OAuth
+        secret). The pre-gateway path; unchanged fallback.
+    """
+    if gateway_url and gateway_bearer:
+        return {
+            "type": "http",
+            "url": gateway_url,
+            "headers": {
+                "Authorization": f"Bearer {gateway_bearer}",
+            },
+        }
     return {
         "type": "http",
         "url": LINEAR_MCP_URL,
@@ -126,7 +150,33 @@ def _read_existing_mcp_config(path: str) -> dict[str, Any]:
     return {}
 
 
-def configure_channel_mcp(repo_dir: str, channel_source: str) -> bool:
+def _build_linear_entry(channel_metadata: dict[str, str] | None) -> dict[str, Any]:
+    """Build the Linear ``mcpServers`` entry, routing through the per-workspace
+    AgentCore Gateway when the workspace was onboarded with one.
+
+    The orchestrator stamps ``gateway_url`` into channel_metadata from the
+    workspace's registry row. When present, mint the M2M bearer and point the
+    entry at the gateway; otherwise fall back to the direct Linear MCP path.
+    """
+    gateway_url = (channel_metadata or {}).get(GATEWAY_URL_METADATA_KEY, "")
+    if gateway_url:
+        from gateway_auth import get_gateway_bearer_token
+        bearer = get_gateway_bearer_token()
+        if bearer:
+            log("TASK", f"Linear MCP routed through AgentCore Gateway ({gateway_url})")
+            return _linear_server_entry(gateway_url=gateway_url, gateway_bearer=bearer)
+        # Gateway configured for the workspace but the token mint failed — do
+        # NOT silently fall back to the direct path (the per-thread LINEAR_API_
+        # TOKEN may not even be set once a workspace is gateway-managed). Surface it.
+        log("WARN", "Linear gateway_url present but M2M token mint failed; using direct MCP path as fallback")
+    return _linear_server_entry()
+
+
+def configure_channel_mcp(
+    repo_dir: str,
+    channel_source: str,
+    channel_metadata: dict[str, str] | None = None,
+) -> bool:
     """Write or merge a channel-specific ``.mcp.json`` into ``repo_dir``.
 
     Looks up ``channel_source`` in :data:`CHANNEL_MCP_BUILDERS`:
@@ -138,6 +188,9 @@ def configure_channel_mcp(repo_dir: str, channel_source: str) -> bool:
     Args:
       repo_dir: the cloned-repo working directory the SDK will use as ``cwd``.
       channel_source: inbound channel (``TaskConfig.channel_source``).
+      channel_metadata: per-task channel metadata (``TaskConfig.channel_metadata``).
+        For Linear, a ``gateway_url`` here routes the MCP through the workspace's
+        AgentCore Gateway instead of the direct hosted endpoint.
 
     Returns:
       True if a channel MCP entry was (re)written, False otherwise (channel
@@ -159,7 +212,12 @@ def configure_channel_mcp(repo_dir: str, channel_source: str) -> bool:
     servers = config.get("mcpServers")
     if not isinstance(servers, dict):
         servers = {}
-    servers[server_key] = build_entry()
+    # Linear supports gateway federation (channel_metadata-driven); other
+    # channels use their static zero-arg builder.
+    if channel_source == "linear":
+        servers[server_key] = _build_linear_entry(channel_metadata)
+    else:
+        servers[server_key] = build_entry()
     config["mcpServers"] = servers
 
     try:

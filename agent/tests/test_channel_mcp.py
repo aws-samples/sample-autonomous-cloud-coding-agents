@@ -210,3 +210,42 @@ class TestJiraMerge:
         merged = _read_mcp(str(tmp_path))
         assert LINEAR_MCP_SERVER_KEY in merged["mcpServers"]
         assert JIRA_MCP_SERVER_KEY in merged["mcpServers"]
+
+
+class TestLinearGatewayRouting:
+    """channel_metadata.gateway_url routes the Linear MCP through the workspace
+    gateway (F15/F16); absence keeps the direct hosted path."""
+
+    def _entry(self, tmp_path):
+        from channel_mcp import LINEAR_MCP_SERVER_KEY
+        return _read_mcp(str(tmp_path))["mcpServers"][LINEAR_MCP_SERVER_KEY]
+
+    def test_routes_through_gateway_when_url_and_token_present(self, tmp_path, monkeypatch):
+        import channel_mcp
+        monkeypatch.setattr(channel_mcp, "get_gateway_bearer_token", lambda: "m2m-token-xyz", raising=False)
+        # patch the lazily-imported symbol used inside _build_linear_entry
+        monkeypatch.setattr("gateway_auth.get_gateway_bearer_token", lambda: "m2m-token-xyz")
+        gw = "https://gw-abc.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp"
+        wrote = configure_channel_mcp(str(tmp_path), "linear", {"gateway_url": gw})
+        assert wrote is True
+        entry = self._entry(tmp_path)
+        assert entry["url"] == gw
+        assert entry["headers"]["Authorization"] == "Bearer m2m-token-xyz"
+
+    def test_falls_back_to_direct_when_no_gateway_url(self, tmp_path):
+        configure_channel_mcp(str(tmp_path), "linear", {"linear_oauth_secret_arn": "arn:x"})
+        entry = self._entry(tmp_path)
+        assert entry["url"] == LINEAR_MCP_URL
+        assert entry["headers"]["Authorization"] == f"Bearer ${{{LINEAR_API_TOKEN_ENV}}}"
+
+    def test_falls_back_to_direct_when_gateway_url_but_token_mint_fails(self, tmp_path, monkeypatch):
+        # gateway_url present but the M2M token mint returns "" → direct path.
+        monkeypatch.setattr("gateway_auth.get_gateway_bearer_token", lambda: "")
+        gw = "https://gw-abc.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp"
+        configure_channel_mcp(str(tmp_path), "linear", {"gateway_url": gw})
+        entry = self._entry(tmp_path)
+        assert entry["url"] == LINEAR_MCP_URL
+
+    def test_none_metadata_is_direct_path(self, tmp_path):
+        configure_channel_mcp(str(tmp_path), "linear", None)
+        assert self._entry(tmp_path)["url"] == LINEAR_MCP_URL
