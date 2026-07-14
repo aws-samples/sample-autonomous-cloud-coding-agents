@@ -198,13 +198,15 @@ class TestWindowSpin:
             g.record_tool_result("Bash", cmd, out)
         summary = g.recent_failure_summary()
         assert summary is not None
-        assert "spinning on failing tool calls" in summary
+        # Neutral observation only — names WHAT repeated, makes no causal claim.
+        assert "last tool calls repeated" in summary
+        assert "spinning" not in summary  # must not editorialize
         assert "git push --force-with-lease" in summary  # most recent failing command
         assert "invalid credentials" in summary  # the recurring error detail
 
     def test_no_summary_when_window_is_mostly_successful(self):
         # A productive agent (varied commands, mostly succeeding) must yield no
-        # spin summary — so its max_turns reason stays unchanged.
+        # summary — so its max_turns reason stays unchanged.
         g = StuckGuard()
         for i in range(6):
             g.record_tool_result("Bash", {"command": f"step {i}"}, OK)

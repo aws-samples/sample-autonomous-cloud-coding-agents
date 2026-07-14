@@ -258,24 +258,26 @@ describe('classifyError', () => {
       expect(result!.remedy).toMatch(/--max-turns/);
     });
 
-    test('ABCA-662: max_turns hit while retrying a failing step surfaces WHAT it was stuck on, and offers BOTH remedies (does not over-claim)', () => {
+    test('ABCA-662: max_turns with an observed repeated failure stays "Exceeded max turns" and makes NO causal claim', () => {
       // When the agent capped out with the last several calls being the same
-      // repeated failure (pipeline appended "spinning on failing tool calls"), we
-      // name the failing op — but must NOT assert "more turns won't help", because
-      // the window can't tell a hard blocker from a long task that hit a
-      // recoverable snag late (662: siblings pushed fine → transient). So the
-      // remedy presents BOTH paths. Ordered before the generic max_turns bucket.
+      // repeated failure, the pipeline appends a NEUTRAL observation ("last tool
+      // calls repeated: …"). The classification must NOT re-title the failure as
+      // "retrying a failing step" or assert more turns wouldn't help — the window
+      // (last few calls) can't tell a hard blocker from a long task that hit a
+      // recoverable snag late (662: siblings pushed fine → transient). It stays the
+      // plain max_turns bucket; the observed detail rides along in the message.
       const result = classifyError(
-        "Agent session error (subtype='error_max_turns') — spinning on failing tool calls "
-        + '(last: `git push --force-with-lease` — remote: invalid credentials fatal: exit 128)',
+        "Agent session error (subtype='error_max_turns') — last tool calls repeated: "
+        + '`git push --force-with-lease` — remote: invalid credentials fatal: exit 128',
       );
       expect(result!.category).toBe(ErrorCategory.TIMEOUT);
-      expect(result!.title).toBe('Ran out of turns retrying a failing step');
+      expect(result!.title).toBe('Exceeded max turns');
       expect(result!.retryable).toBe(true);
-      // Surfaces the environment-blocker path AND the transient/recoverable path —
-      // it does NOT flatly claim raising turns is useless.
-      expect(result!.remedy).toMatch(/environment/i);
-      expect(result!.remedy).toMatch(/transient|recoverable|raise --max-turns/i);
+      // Does not editorialize: no "spinning" / "won't help" claim. It points the
+      // reader at the detail and still offers the environment-blocker path.
+      expect(result!.title).not.toMatch(/retrying a failing step/i);
+      expect(result!.remedy).toMatch(/detail/i);
+      expect(result!.remedy).toMatch(/environment|auth|credentials/i);
     });
 
     test('classifies error_max_budget_usd as TIMEOUT with specific title', () => {

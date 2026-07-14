@@ -714,8 +714,8 @@ def run_task(
         from hooks import reset_blocker_reason, reset_stuck_summary
 
         reset_blocker_reason()
-        # ABCA-662: same per-task reset for the stuck-guard "why it spun" latch,
-        # so a prior task's spin summary can't leak into this task's max_turns copy.
+        # ABCA-662: same per-task reset for the stuck-guard recent-failure latch,
+        # so a prior task's observation can't leak into this task's max_turns copy.
         reset_stuck_summary()
         # --trace accumulator (design §10.1): when the task opted into
         # trace, ``_TrajectoryWriter`` keeps an in-memory copy of each
