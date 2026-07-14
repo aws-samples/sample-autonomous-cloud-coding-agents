@@ -1,9 +1,15 @@
 """Jira issue-comment helper for Jira-origin tasks.
 
-Posts a "starting" comment on the originating Jira issue at task start and a
-terminal "succeeded / failed (+ PR link)" comment at the end — the Jira
-analogue of ``linear_reactions`` (Linear uses emoji reactions; Jira's REST
-API has no lightweight reaction primitive, so comments are the right tool).
+Posts a "starting" comment on the originating Jira issue at task start — the
+Jira analogue of ``linear_reactions`` (Linear uses emoji reactions; Jira's
+REST API has no lightweight reaction primitive, so comments are the right
+tool).
+
+The *terminal* status comment is NOT posted from here: since issue #573 the
+deterministic fan-out plane (``cdk/src/handlers/fanout-task-events.ts``
+``dispatchToJira``) owns it, so it carries cost/turns/duration and fires even
+when this agent crashes before completing. This module only owns the start
+comment.
 
 Why a direct REST call instead of MCP: Atlassian's Remote MCP
 (``mcp.atlassian.com``) requires an interactive, browser-based OAuth 2.1
@@ -182,32 +188,13 @@ def comment_task_started(
     log("TASK", f"jira_reactions: comment_task_started issue={issue_key} ok={ok}")
 
 
-def comment_task_finished(
-    channel_source: str,
-    channel_metadata: dict[str, str] | None,
-    success: bool,
-    pr_url: str | None = None,
-) -> None:
-    """Post a terminal status comment on the Jira issue. No-op for non-Jira tasks."""
-    target = _enabled(channel_source, channel_metadata)
-    if not target:
-        return
-    cloud_id, issue_key = target
-    if success:
-        text = "✅ ABCA finished this task."
-        if pr_url:
-            text += f" Pull request: {pr_url}"
-        else:
-            text += " No pull request was opened."
-    else:
-        text = "❌ ABCA could not complete this task. Check the agent logs for details."
-        if pr_url:
-            text += f" A pull request was opened anyway: {pr_url}"
-    ok = _post_comment(cloud_id, issue_key, text)
-    log(
-        "TASK",
-        f"jira_reactions: comment_task_finished issue={issue_key} success={success} ok={ok}",
-    )
+# NOTE: there is deliberately no ``comment_task_finished`` here. Since issue
+# #573 the deterministic fan-out plane
+# (``cdk/src/handlers/fanout-task-events.ts`` ``dispatchToJira``) owns the Jira
+# terminal comment — it carries cost/turns/duration and, crucially, fires even
+# when the agent crashes before completing (max-turns, OOM). The agent only
+# posts the *start* comment (``comment_task_started`` above); posting a terminal
+# comment here too would double-comment on the issue.
 
 
 def _reset_state_for_testing() -> None:

@@ -22,6 +22,7 @@ import {
   PutSecretValueCommand,
   ResourceExistsException,
 } from '@aws-sdk/client-secrets-manager';
+import { GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
 import { ApiClient } from '../../src/api-client';
 import {
   isWebhookSecretConfigured,
@@ -32,11 +33,22 @@ import {
   upsertOauthSecret,
 } from '../../src/commands/jira';
 import * as config from '../../src/config';
+import { generateInviteCode, INVITE_CODE_ALPHABET } from '../../src/invite-code';
 import type { StoredJiraOauthToken } from '../../src/jira-oauth';
 
 // child_process.execFile — `openBrowser` shells out to the OS opener.
 const execFileMock = jest.fn();
 jest.mock('child_process', () => ({ execFile: (...args: unknown[]) => execFileMock(...args) }));
+
+// Secrets Manager — invite-user reads the per-tenant OAuth bundle.
+const smSend = jest.fn();
+jest.mock('@aws-sdk/client-secrets-manager', () => {
+  const actual = jest.requireActual('@aws-sdk/client-secrets-manager');
+  return {
+    ...actual,
+    SecretsManagerClient: jest.fn(() => ({ send: smSend })),
+  };
+});
 
 // OAuth callback server — avoid binding a real localhost socket in `setup`.
 const awaitOauthCallbackMock = jest.fn();
@@ -97,12 +109,18 @@ function sampleToken(overrides: Partial<StoredJiraOauthToken> = {}): StoredJiraO
   };
 }
 
+function fakeIdToken(sub: string): string {
+  const header = Buffer.from(JSON.stringify({ alg: 'none' })).toString('base64url');
+  const payload = Buffer.from(JSON.stringify({ sub })).toString('base64url');
+  return `${header}.${payload}.sig`;
+}
+
 describe('makeJiraCommand', () => {
   test('registers the expected subcommands', () => {
     const cmd = makeJiraCommand();
     expect(cmd.name()).toBe('jira');
     const names = cmd.commands.map((c) => c.name()).sort();
-    expect(names).toEqual(expect.arrayContaining(['app-template', 'setup', 'link', 'map']));
+    expect(names).toEqual(expect.arrayContaining(['app-template', 'setup', 'invite-user', 'link', 'map']));
   });
 
   test('`map` exposes a --label option defaulting to the trigger label', () => {
@@ -115,6 +133,24 @@ describe('makeJiraCommand', () => {
     expect(labelOpt!.defaultValue).toBe('bgagent');
     // `--repo` is required on map.
     expect(map!.options.find((o) => o.long === '--repo')?.required).toBe(true);
+  });
+});
+
+describe('generateInviteCode', () => {
+  test('emits "link-" prefix followed by exactly 8 alphabet characters', () => {
+    const code = generateInviteCode();
+    expect(code).toMatch(/^link-[a-z0-9]{8}$/);
+    expect(code).toHaveLength(13);
+  });
+
+  test('only uses characters from the unambiguous alphabet', () => {
+    for (let i = 0; i < 200; i++) {
+      const code = generateInviteCode();
+      const chars = code.slice('link-'.length);
+      for (const c of chars) {
+        expect(INVITE_CODE_ALPHABET).toContain(c);
+      }
+    }
   });
 });
 
@@ -233,6 +269,436 @@ describe('jira link action', () => {
       rlSpy.mockRestore();
       stdinSpy.mockRestore();
     }
+  });
+});
+
+describe('jira invite-user action', () => {
+  const originalFetch = global.fetch;
+  let loadConfigSpy: jest.SpiedFunction<typeof config.loadConfig>;
+  let loadCredentialsSpy: jest.SpiedFunction<typeof config.loadCredentials>;
+  let logSpy: jest.SpiedFunction<typeof console.log>;
+  let writeSpy: jest.SpiedFunction<typeof process.stdout.write>;
+
+  beforeEach(() => {
+    ddbSend.mockReset();
+    smSend.mockReset();
+    cfnSend.mockReset().mockResolvedValue({
+      Stacks: [{
+        Outputs: [
+          { OutputKey: 'JiraWorkspaceRegistryTableName', OutputValue: 'JiraRegistryTable' },
+          { OutputKey: 'JiraUserMappingTableName', OutputValue: 'JiraUsersTable' },
+        ],
+      }],
+    });
+    loadConfigSpy = jest.spyOn(config, 'loadConfig').mockReturnValue({ region: 'us-west-2' } as ReturnType<typeof config.loadConfig>);
+    loadCredentialsSpy = jest.spyOn(config, 'loadCredentials').mockReturnValue({
+      id_token: fakeIdToken('admin-sub'),
+    } as ReturnType<typeof config.loadCredentials>);
+    logSpy = jest.spyOn(console, 'log').mockImplementation();
+    writeSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
+  });
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+    loadConfigSpy.mockRestore();
+    loadCredentialsSpy.mockRestore();
+    logSpy.mockRestore();
+    writeSpy.mockRestore();
+  });
+
+  function mockRegistryAndSecret(overrides: Partial<StoredJiraOauthToken> = {}): void {
+    ddbSend
+      .mockResolvedValueOnce({
+        Item: {
+          jira_cloud_id: 'cloud-123',
+          site_url: 'https://acme.atlassian.net',
+          oauth_secret_arn: 'arn:jira-oauth',
+          status: 'active',
+        },
+      })
+      // Existing-link lookup: no active mapping for the picked Jira identity.
+      .mockResolvedValueOnce({})
+      // PutCommand writing the pending# row.
+      .mockResolvedValueOnce({});
+    smSend.mockResolvedValueOnce({
+      SecretString: JSON.stringify(sampleToken({
+        cloud_id: 'cloud-123',
+        site_url: 'https://acme.atlassian.net',
+        expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+        ...overrides,
+      })),
+    });
+  }
+
+  async function runInvite(args: string[]): Promise<void> {
+    const program = makeJiraCommand();
+    await program.parseAsync(['node', 'bgagent', 'invite-user', ...args]);
+  }
+
+  test('writes a pending invite row for a Jira user resolved by email', async () => {
+    mockRegistryAndSecret();
+    const fetchMock = jest.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ([{
+        accountId: 'acct-1',
+        displayName: 'Maya K',
+        emailAddress: 'maya@example.test',
+        active: true,
+        accountType: 'atlassian',
+      }]),
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await runInvite(['cloud-123', 'maya@example.test']);
+
+    const getCmd = ddbSend.mock.calls[0][0] as GetCommand;
+    expect(getCmd).toBeInstanceOf(GetCommand);
+    expect(getCmd.input).toMatchObject({
+      TableName: 'JiraRegistryTable',
+      Key: { jira_cloud_id: 'cloud-123' },
+    });
+
+    const searchUrl = new URL(String(fetchMock.mock.calls[0][0]));
+    expect(searchUrl.pathname).toBe('/ex/jira/cloud-123/rest/api/3/user/search');
+    expect(searchUrl.searchParams.get('query')).toBe('maya@example.test');
+    expect(searchUrl.searchParams.get('maxResults')).toBe('10');
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({
+      headers: { Authorization: 'Bearer access-xyz' },
+    });
+
+    // calls[0] = registry GetCommand, calls[1] = existing-link GetCommand,
+    // calls[2] = the pending# PutCommand.
+    const putCmd = ddbSend.mock.calls[2][0] as PutCommand;
+    expect(putCmd).toBeInstanceOf(PutCommand);
+    expect(putCmd.input.TableName).toBe('JiraUsersTable');
+    expect(putCmd.input.Item).toMatchObject({
+      status: 'pending',
+      jira_cloud_id: 'cloud-123',
+      jira_site_url: 'https://acme.atlassian.net',
+      jira_account_id: 'acct-1',
+      jira_user_name: 'Maya K',
+      jira_user_email: 'maya@example.test',
+      invited_by_platform_user_id: 'admin-sub',
+    });
+    expect(putCmd.input.Item?.jira_identity).toMatch(/^pending#link-[a-z0-9]{8}$/);
+    expect(putCmd.input.Item?.ttl).toBeGreaterThan(Math.floor(Date.now() / 1000) + 23 * 60 * 60);
+    expect(logSpy.mock.calls.some((call) => String(call[0]).includes('bgagent jira link link-'))).toBe(true);
+  });
+
+  test('resolves a direct Jira accountId without requiring an email search result', async () => {
+    mockRegistryAndSecret();
+    const fetchMock = jest.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        accountId: 'acct-1',
+        displayName: 'Maya K',
+        active: true,
+        accountType: 'atlassian',
+      }),
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await runInvite(['cloud-123', 'acct-1']);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const lookupUrl = new URL(String(fetchMock.mock.calls[0][0]));
+    expect(lookupUrl.pathname).toBe('/ex/jira/cloud-123/rest/api/3/user');
+    expect(lookupUrl.searchParams.get('accountId')).toBe('acct-1');
+    const putCmd = ddbSend.mock.calls[2][0] as PutCommand;
+    expect(putCmd.input.Item).toMatchObject({
+      jira_account_id: 'acct-1',
+      jira_user_name: 'Maya K',
+      jira_user_email: '',
+    });
+  });
+
+  test('refreshes and persists an expired Jira OAuth token before resolving the user', async () => {
+    mockRegistryAndSecret({
+      expires_at: new Date(Date.now() - 60_000).toISOString(),
+      webhook_signing_secret: 'tenant-secret',
+    });
+    const fetchMock = jest.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          access_token: 'new-access',
+          refresh_token: 'new-refresh',
+          token_type: 'Bearer',
+          expires_in: 3600,
+          scope: 'read:jira-work write:jira-work read:jira-user',
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ([{
+          accountId: 'acct-1',
+          displayName: 'Maya K',
+          emailAddress: 'maya@example.test',
+          active: true,
+          accountType: 'atlassian',
+        }]),
+      });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await runInvite(['cloud-123', 'maya@example.test']);
+
+    const putSecret = smSend.mock.calls[1][0] as PutSecretValueCommand;
+    expect(putSecret).toBeInstanceOf(PutSecretValueCommand);
+    expect(putSecret.input.SecretId).toBe('arn:jira-oauth');
+    const persisted = JSON.parse(putSecret.input.SecretString as string) as StoredJiraOauthToken;
+    expect(persisted).toMatchObject({
+      access_token: 'new-access',
+      refresh_token: 'new-refresh',
+      webhook_signing_secret: 'tenant-secret',
+    });
+    expect(fetchMock.mock.calls[1][1]).toMatchObject({
+      headers: { Authorization: 'Bearer new-access' },
+    });
+  });
+
+  test('fails before writing when the admin is not logged in', async () => {
+    loadCredentialsSpy.mockReturnValue(undefined as ReturnType<typeof config.loadCredentials>);
+
+    await expect(runInvite(['cloud-123', 'maya@example.test'])).rejects.toThrow(/Not authenticated/);
+
+    expect(ddbSend).not.toHaveBeenCalled();
+    expect(smSend).not.toHaveBeenCalled();
+  });
+
+  test('fails when the Jira tenant is not active in the registry', async () => {
+    ddbSend.mockResolvedValueOnce({ Item: { jira_cloud_id: 'cloud-123', status: 'revoked' } });
+
+    await expect(runInvite(['cloud-123', 'maya@example.test'])).rejects.toThrow(/not in the registry/);
+
+    expect(smSend).not.toHaveBeenCalled();
+    expect(ddbSend).toHaveBeenCalledTimes(1);
+  });
+
+  test('fails when the tenant OAuth secret has no stored value', async () => {
+    ddbSend.mockResolvedValueOnce({
+      Item: {
+        jira_cloud_id: 'cloud-123',
+        site_url: 'https://acme.atlassian.net',
+        oauth_secret_arn: 'arn:jira-oauth',
+        status: 'active',
+      },
+    });
+    smSend.mockResolvedValueOnce({});
+
+    await expect(runInvite(['cloud-123', 'maya@example.test'])).rejects.toThrow(/has no SecretString/);
+
+    expect(ddbSend).toHaveBeenCalledTimes(1);
+  });
+
+  test('falls back to Jira user search when a direct accountId lookup returns 404', async () => {
+    mockRegistryAndSecret();
+    const fetchMock = jest.fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 404,
+        json: async () => ({}),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ([{
+          accountId: 'acct-1',
+          displayName: 'Maya K',
+          active: true,
+          accountType: 'atlassian',
+        }]),
+      });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await runInvite(['cloud-123', 'acct-1']);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const searchUrl = new URL(String(fetchMock.mock.calls[1][0]));
+    expect(searchUrl.pathname).toBe('/ex/jira/cloud-123/rest/api/3/user/search');
+    const putCmd = ddbSend.mock.calls[2][0] as PutCommand;
+    expect(putCmd.input.Item).toMatchObject({ jira_account_id: 'acct-1' });
+  });
+
+  test('rejects an ambiguous Jira user search before writing an invite', async () => {
+    mockRegistryAndSecret();
+    const fetchMock = jest.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ([
+        { accountId: 'acct-1', displayName: 'Maya K', active: true, accountType: 'atlassian' },
+        { accountId: 'acct-2', displayName: 'Maya L', active: true, accountType: 'atlassian' },
+      ]),
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(runInvite(['cloud-123', 'maya@example.test'])).rejects.toThrow(/multiple users/);
+
+    expect(ddbSend).toHaveBeenCalledTimes(1);
+  });
+
+  test('fails if Atlassian refreshes an expired token without returning a rotated refresh token', async () => {
+    mockRegistryAndSecret({
+      expires_at: new Date(Date.now() - 60_000).toISOString(),
+    });
+    const fetchMock = jest.fn().mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        access_token: 'new-access',
+        token_type: 'Bearer',
+        expires_in: 3600,
+        scope: 'read:jira-work write:jira-work read:jira-user',
+      }),
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(runInvite(['cloud-123', 'maya@example.test'])).rejects.toThrow(/returned no refresh_token/);
+
+    expect(smSend).toHaveBeenCalledTimes(1);
+    expect(ddbSend).toHaveBeenCalledTimes(1);
+  });
+
+  test('warns (but still writes the invite) when the Jira identity is already linked', async () => {
+    // Registry GetCommand → active tenant; existing-link GetCommand → an
+    // active mapping for the resolved account; PutCommand → the pending row.
+    ddbSend
+      .mockResolvedValueOnce({
+        Item: {
+          jira_cloud_id: 'cloud-123',
+          site_url: 'https://acme.atlassian.net',
+          oauth_secret_arn: 'arn:jira-oauth',
+          status: 'active',
+        },
+      })
+      .mockResolvedValueOnce({ Item: { jira_identity: 'cloud-123#acct-1', status: 'active' } })
+      .mockResolvedValueOnce({});
+    smSend.mockResolvedValueOnce({
+      SecretString: JSON.stringify(sampleToken({
+        cloud_id: 'cloud-123',
+        site_url: 'https://acme.atlassian.net',
+        expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      })),
+    });
+    const fetchMock = jest.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ accountId: 'acct-1', displayName: 'Maya K', active: true, accountType: 'atlassian' }),
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await runInvite(['cloud-123', 'acct-1']);
+
+    // Existing-link lookup keyed on `<cloudId>#<accountId>`.
+    const linkLookup = ddbSend.mock.calls[1][0] as GetCommand;
+    expect(linkLookup).toBeInstanceOf(GetCommand);
+    expect(linkLookup.input.Key).toEqual({ jira_identity: 'cloud-123#acct-1' });
+    expect(logSpy.mock.calls.some((call) => String(call[0]).includes('already linked'))).toBe(true);
+    // The invite is still written despite the warning.
+    expect(ddbSend.mock.calls[2][0]).toBeInstanceOf(PutCommand);
+  });
+
+  test('refuses to invite an inactive or app Jira account', async () => {
+    mockRegistryAndSecret();
+    const fetchMock = jest.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ accountId: 'acct-1', displayName: 'Bot', active: false, accountType: 'app' }),
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(runInvite(['cloud-123', 'acct-1'])).rejects.toThrow(/inactive or is an app account/);
+
+    // Registry + secret read happened, but no invite row was written.
+    expect(ddbSend).toHaveBeenCalledTimes(1);
+  });
+
+  test('guards the pending row against code collisions with a conditional put', async () => {
+    mockRegistryAndSecret();
+    const fetchMock = jest.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ accountId: 'acct-1', displayName: 'Maya K', active: true, accountType: 'atlassian' }),
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await runInvite(['cloud-123', 'acct-1']);
+
+    const putCmd = ddbSend.mock.calls[2][0] as PutCommand;
+    expect(putCmd.input.ConditionExpression).toBe('attribute_not_exists(jira_identity)');
+  });
+
+  test('surfaces an actionable error when the generated code collides', async () => {
+    ddbSend
+      .mockResolvedValueOnce({
+        Item: {
+          jira_cloud_id: 'cloud-123',
+          site_url: 'https://acme.atlassian.net',
+          oauth_secret_arn: 'arn:jira-oauth',
+          status: 'active',
+        },
+      })
+      .mockResolvedValueOnce({}) // existing-link lookup: not linked
+      .mockRejectedValueOnce(Object.assign(new Error('conditional check failed'), {
+        name: 'ConditionalCheckFailedException',
+      }));
+    smSend.mockResolvedValueOnce({
+      SecretString: JSON.stringify(sampleToken({
+        cloud_id: 'cloud-123',
+        expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      })),
+    });
+    const fetchMock = jest.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ accountId: 'acct-1', displayName: 'Maya K', active: true, accountType: 'atlassian' }),
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(runInvite(['cloud-123', 'acct-1'])).rejects.toThrow(/collided with an existing invite/);
+  });
+
+  test('fails with an actionable error when the OAuth secret is malformed JSON', async () => {
+    ddbSend.mockResolvedValueOnce({
+      Item: {
+        jira_cloud_id: 'cloud-123',
+        site_url: 'https://acme.atlassian.net',
+        oauth_secret_arn: 'arn:jira-oauth',
+        status: 'active',
+      },
+    });
+    smSend.mockResolvedValueOnce({ SecretString: '{not-json' });
+
+    await expect(runInvite(['cloud-123', 'maya@example.test'])).rejects.toThrow(/is not valid JSON/);
+
+    expect(ddbSend).toHaveBeenCalledTimes(1);
+  });
+
+  test('fails when the registry row is missing oauth_secret_arn', async () => {
+    ddbSend.mockResolvedValueOnce({
+      Item: {
+        jira_cloud_id: 'cloud-123',
+        site_url: 'https://acme.atlassian.net',
+        status: 'active',
+      },
+    });
+
+    await expect(runInvite(['cloud-123', 'maya@example.test'])).rejects.toThrow(/missing oauth_secret_arn/);
+
+    expect(smSend).not.toHaveBeenCalled();
+  });
+
+  test('throws a clear error when required stack outputs are missing (not deployed)', async () => {
+    cfnSend.mockReset().mockResolvedValue({ Stacks: [{ Outputs: [] }] });
+
+    await expect(runInvite(['cloud-123', 'maya@example.test']))
+      .rejects.toThrow(/missing outputs .*JiraWorkspaceRegistryTableName.*JiraUserMappingTableName/s);
+
+    expect(ddbSend).not.toHaveBeenCalled();
+    expect(smSend).not.toHaveBeenCalled();
   });
 });
 

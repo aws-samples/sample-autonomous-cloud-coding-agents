@@ -170,6 +170,10 @@ describe('slack-command-processor handler', () => {
     expect(reqBody.repo).toBe('org/repo');
     expect(reqBody.issue_number).toBe(42);
     expect(reqBody.task_description).toBe('add validation');
+    // Must pin the coding workflow — an absent workflow_ref falls through the
+    // resolution ladder to default/agent-v1, which never opens a PR. Mirrors
+    // the Jira processor (#546/#547).
+    expect(reqBody.workflow_ref).toBe('coding/new-task-v1');
     expect(ctx.channelSource).toBe('slack');
     expect(ctx.userId).toBe('cognito-1');
     // mention_thread_ts flows to channel_metadata

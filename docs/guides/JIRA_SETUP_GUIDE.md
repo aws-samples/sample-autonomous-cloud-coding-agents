@@ -1,6 +1,6 @@
 # Jira integration setup guide
 
-Set up the ABCA Jira Cloud integration so that adding a label to a Jira issue triggers an autonomous task. The agent posts progress comments back on the issue as it works.
+Set up the ABCA Jira Cloud integration so that adding a label to a Jira issue triggers an autonomous task. ABCA posts progress comments back on the issue as it works — a "started" comment from the agent and a final status comment (with cost, turns, and duration) from the platform when the task finishes.
 
 ## Prerequisites
 
@@ -13,7 +13,7 @@ Set up the ABCA Jira Cloud integration so that adding a label to a Jira issue tr
 
 ## How it works
 
-A Jira-site admin creates an Atlassian OAuth 2.0 (3LO) app and authorizes it on the site. The OAuth token bundle is stored in a per-tenant Secrets Manager secret (`bgagent-jira-oauth-<cloudId>`). When a user adds the trigger label to a Jira issue, Jira fires a webhook to ABCA; the receiver verifies the `X-Hub-Signature` HMAC, dedupes, and async-invokes the processor, which resolves the tenant, looks up the project→repo mapping, and creates a task. Jira-triggered tasks always run the `coding/new-task-v1` workflow (the processor pins `workflow_ref` explicitly, since a label-triggered task always targets a mapped repo). The agent clones the repo, opens a PR, and comments on the Jira issue via the Jira REST v3 API (using the same stored OAuth token).
+A Jira-site admin creates an Atlassian OAuth 2.0 (3LO) app and authorizes it on the site. The OAuth token bundle is stored in a per-tenant Secrets Manager secret (`bgagent-jira-oauth-<cloudId>`). When a user adds the trigger label to a Jira issue, Jira fires a webhook to ABCA; the receiver verifies the `X-Hub-Signature` HMAC, dedupes, and async-invokes the processor, which resolves the tenant, looks up the project→repo mapping, and creates a task. Jira-triggered tasks always run the `coding/new-task-v1` workflow (the processor pins `workflow_ref` explicitly, since a label-triggered task always targets a mapped repo). The agent clones the repo, opens a PR, and posts a "started" comment on the Jira issue via the Jira REST v3 API (using the same stored OAuth token). When the task reaches a terminal state, the platform's fan-out plane posts a single final status comment — outcome, cost, turns, duration, and PR link — via the same REST v3 endpoint (see [How it works](#how-it-works) below).
 
 **Tenant key.** Everything is indexed on `cloudId` — the Atlassian tenant UUID, *not* the site domain or name. Webhook payloads and the OAuth flow both surface `cloudId`; it is the join key across the project-mapping, user-mapping, and workspace-registry tables.
 
@@ -34,13 +34,36 @@ Outbound (Agent → Jira) — REST v3:
 runner picks task with channel_source="jira"
   → jira_reactions resolves the OAuth access token from
     bgagent-jira-oauth-<cloudId> (JIRA_API_TOKEN)
-  → agent posts a "started" comment, then a terminal "succeeded /
-    failed (+ PR link)" comment, via
+  → agent posts a "started" comment via
     POST api.atlassian.com/ex/jira/{cloudId}/rest/api/3/issue/{key}/comment
 ```
 
+Outbound terminal status (Platform → Jira) — REST v3, deterministic:
+
+```
+task reaches a terminal event (completed / failed / cancelled /
+  stranded / timed out) → TaskEventsTable DynamoDB Stream → fan-out
+  Lambda's dispatchToJira resolves the OAuth token and posts ONE
+  final-status comment with cost, turns, duration, task id, and the
+  PR link, via the same REST v3 comment endpoint
+```
+
+The **start** comment is posted by the agent. The **terminal** comment is
+posted by the platform's fan-out plane, not the agent — so it always includes
+cost / turns / duration and fires even when the agent crashes before
+completing (max-turns, OOM). The final comment frames three outcomes:
+
+- ✅ **Task completed** — with the PR link when one was opened.
+- ⚠️ **Shipped a PR but stopped early** — the PR link plus the reason it
+  stopped (e.g. "Hit max-turns cap"), so you can review and decide.
+- ❌ **Task failed / cancelled / timed out** — with a short classifier reason.
+
 Comments are advisory and best-effort: network/auth failures are logged and
-swallowed (with an auth circuit-breaker), never gating the pipeline.
+swallowed (the agent path has an auth circuit-breaker; the platform path
+classifies transient failures as retryable and retries the record), never
+gating the task itself. Jira has no comment-edit API, so the terminal comment
+is posted exactly once (a per-task marker guards against duplicate posts on
+stream retries).
 
 > **Why REST, not the Atlassian Remote MCP?** The hosted MCP
 > (`mcp.atlassian.com`) requires an interactive, browser-based OAuth 2.1 flow
@@ -52,7 +75,7 @@ swallowed (with an auth circuit-breaker), never gating the pipeline.
 > it is expected to fail to connect today and the outbound path does not
 > depend on it.
 
-There is no DynamoDB Streams consumer and no outbound-notify Lambda — this is an inbound-only adapter, matching Linear.
+Inbound admission (webhook → task) is Jira-specific and has no DynamoDB Streams consumer of its own. The **terminal** status comment, however, is delivered by the shared fan-out plane's DynamoDB Streams consumer (`dispatchToJira`) — the same platform-side surface that posts Linear final-status comments — so it behaves identically to Linear for terminal outcomes.
 
 ## Setup walkthrough
 
@@ -115,7 +138,20 @@ This writes an `active` row keyed `<cloudId>#<projectKey>` into the project-mapp
 
 ### 5. Link your Jira identity
 
-So tasks triggered from Jira attribute to your platform user (concurrency caps, billing, `bgagent list`), link your Atlassian `accountId` to your ABCA account. An admin issues you a one-time invite code, then you redeem it:
+So tasks triggered from Jira attribute to your platform user (concurrency caps, billing, `bgagent list`), link your Atlassian `accountId` to your ABCA account. An admin issues a one-time invite code, then the teammate redeems it.
+
+#### Admin: generate the invite
+
+```bash
+bgagent jira invite-user <cloud-id> <account-id-or-email>
+```
+
+The command resolves the Jira user through the tenant OAuth token, writes a `pending#<code>` row with a 24-hour TTL, and prints the `bgagent jira link <code>` command to send to the teammate. It requires admin IAM for the stack tables/secrets and a logged-in `bgagent` CLI session for the `invited_by_platform_user_id` audit field.
+
+- `<cloud-id>` — the tenant UUID from `setup` or `https://<your-site>.atlassian.net/_edge/tenant_info`
+- `<account-id-or-email>` — the teammate's Atlassian `accountId` or email address. If email search is hidden/ambiguous, use `accountId`; Jira profile URLs end in `/people/<accountId>`.
+
+#### Teammate: redeem the invite
 
 ```bash
 bgagent jira link <code>
@@ -123,28 +159,7 @@ bgagent jira link <code>
 
 The CLI shows the Jira identity (name + email) and the tenant, and asks for confirmation **before** writing the mapping row — so a mis-issued code is caught before it binds.
 
-> The `invite-user` issuing command is not yet implemented (tracked in [#553](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/553)). Until it lands, an admin can write the user-mapping row directly. Note that until the row exists, a labeled issue from the unlinked user produces no task — the processor comments "Run `bgagent jira link <code>`" on the issue, but no code can be issued yet.
-
-**Interim manual linking (admin IAM).** Write an `active` row to the user-mapping table (stack output `JiraUserMappingTableName`), keyed exactly as `jira-link.ts` would write it:
-
-```bash
-aws dynamodb put-item \
-  --table-name <JiraUserMappingTableName> \
-  --item '{
-    "jira_identity":    {"S": "<cloudId>#<accountId>"},
-    "platform_user_id": {"S": "<cognito-sub>"},
-    "jira_cloud_id":    {"S": "<cloudId>"},
-    "jira_account_id":  {"S": "<accountId>"},
-    "linked_at":        {"S": "<ISO-8601 timestamp>"},
-    "status":           {"S": "active"},
-    "link_method":      {"S": "manual"}
-  }'
-```
-
-Where to find the two identity values:
-
-- **Atlassian `accountId`** — open your Jira profile (avatar → Profile); the URL ends `/people/<accountId>`. Or call `GET https://api.atlassian.com/ex/jira/<cloudId>/rest/api/3/myself` with the stored token.
-- **Cognito sub (platform user id)** — `aws cognito-idp admin-get-user --user-pool-id <pool> --username <email> --query 'UserAttributes[?Name==`sub`].Value' --output text`.
+The teammate needs their own ABCA account first (Cognito user + configured CLI). If they do not have one yet, the admin runs `bgagent admin invite-user teammate@example.com`, then the teammate runs `bgagent configure --from-bundle <bundle>` and `bgagent login --username teammate@example.com` before redeeming the Jira invite.
 
 ### 6. Test
 

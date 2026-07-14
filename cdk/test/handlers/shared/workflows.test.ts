@@ -21,6 +21,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as yaml from 'js-yaml';
 import {
+  CODING_WORKFLOW_ID,
   DEFAULT_WORKFLOW_ID,
   WORKFLOW_MODEL_ALLOWLIST,
   disallowedWorkflowModel,
@@ -72,10 +73,19 @@ describe('resolveWorkflowRef', () => {
     expect(resolveWorkflowRefError(undefined)).toBeNull();
   });
 
-  test('falls back to the platform default when ref is absent', () => {
+  test('falls back to the repo-less platform default when ref is absent', () => {
     expect(resolveWorkflowRef(undefined)).toEqual({ id: DEFAULT_WORKFLOW_ID, version: '1.0.0' });
     expect(resolveWorkflowRef(null)).toEqual({ id: DEFAULT_WORKFLOW_ID, version: '1.0.0' });
     expect(resolveWorkflowRef('')).toEqual({ id: DEFAULT_WORKFLOW_ID, version: '1.0.0' });
+  });
+
+  test('CODING_WORKFLOW_ID resolves to the disciplined coding workflow', () => {
+    // The channel processors pin this at the call site for a repo-bound task
+    // (the "repo task ⇒ coding workflow" decision lives per-channel, not in the
+    // resolver default). Assert the constant points at a real, repo-bound,
+    // non-read-only workflow so a descriptor rename can't silently mispoint it.
+    const resolved = resolveWorkflowRef(CODING_WORKFLOW_ID);
+    expect(resolved).toEqual({ id: 'coding/new-task-v1', version: '1.0.0' });
   });
 
   test('returns null for an unknown but well-formed ref', () => {

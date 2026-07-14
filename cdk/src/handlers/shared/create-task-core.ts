@@ -339,7 +339,11 @@ export async function createTaskCore(
         parseResult.scope.startsWith('bash_pattern:')
         || parseResult.scope.startsWith('write_path:')
       ) {
-        const value = parseResult.scope.split(':', 2)[1] ?? '';
+        // Take everything after the first colon — the value itself may
+        // contain colons (e.g. ``bash_pattern:git log --format=%h:%s``), so a
+        // ``split(':', 2)`` would truncate it and could turn a legitimate
+        // pattern into a degenerate-looking fragment, producing a spurious 400.
+        const value = parseResult.scope.slice(parseResult.scope.indexOf(':') + 1);
         if (isDegeneratePattern(value)) {
           return errorResponse(
             400,
