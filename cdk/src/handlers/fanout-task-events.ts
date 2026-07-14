@@ -52,6 +52,7 @@ import {
   buildAdfDocument,
   postIssueCommentAdf,
   type AdfParagraph,
+  type AdfTextRun,
 } from './shared/jira-feedback';
 import { postIssueComment } from './shared/linear-feedback';
 import { logger } from './shared/logger';
@@ -1146,9 +1147,9 @@ async function dispatchToLinear(event: FanOutEvent): Promise<void> {
 
 /**
  * Render the Jira final-status comment as ADF paragraphs. Mirrors
- * ``renderLinearFinalStatusComment`` framing exactly — the only difference
- * is the output shape (ADF runs vs Markdown string), because Jira REST v3
- * comments require Atlassian Document Format, not Markdown.
+ * ``renderLinearFinalStatusComment`` framing — the difference is the output
+ * shape (ADF runs vs Markdown string), because Jira REST v3 comments require
+ * Atlassian Document Format, not Markdown.
  *
  * Three outcomes based on ``(eventType, prUrl)``:
  *
@@ -1156,10 +1157,11 @@ async function dispatchToLinear(event: FanOutEvent): Promise<void> {
  *   2. any non-completed terminal event WITH PR  → ⚠️ "Shipped a PR but stopped early"
  *   3. any non-completed terminal event NO PR    → ❌ "Task <subtype>" + classifier title
  *
- * Unlike Linear, the PR URL is rendered on the ✅ success path too (issue
- * #573 decision): demoting the agent-side ``jira_reactions.py`` terminal
- * comment to this dispatcher removes Jira's only other surviving PR-link
- * surface, whereas Linear keeps the agent's step-2 "PR opened" comment.
+ * The PR URL is rendered on the ✅ success path too — not just the ⚠️ path —
+ * because the agent's own "PR opened" comment is not guaranteed to have fired
+ * (a decompose→single task, or an agent that skipped that step), so the
+ * platform comment must always carry the link or it can be lost entirely
+ * (ABCA-584). The same fix lands for Linear in #601.
  *
  * Missing metric values render as ``—``. The result is a list of ADF
  * paragraphs (blank lines are empty paragraphs — ADF text nodes do not
@@ -1178,15 +1180,28 @@ export function renderJiraFinalStatusComment(args: {
   const isCompleted = args.eventType === 'task_completed';
   const shippedDespiteFailure = !isCompleted && args.prUrl != null;
 
-  let header: string;
+  // Header runs. Bold scope mirrors Linear's Markdown: the ⚠️ frame bolds
+  // only through the reason and leaves the trailing "review and decide…"
+  // advice unbolded, so it's a two-run paragraph. The ✅ / ❌ frames are a
+  // single bold run.
+  let headerRuns: AdfTextRun[];
   if (isCompleted) {
-    header = '✅ Task completed';
+    headerRuns = [{ text: '✅ Task completed', strong: true }];
   } else if (shippedDespiteFailure) {
     const reason = args.errorTitle ? ` — ${args.errorTitle}` : '';
-    header = `⚠️ Shipped a PR but stopped early${reason} — review and decide if more work is needed`;
+    headerRuns = [
+      { text: `⚠️ Shipped a PR but stopped early${reason}`, strong: true },
+      { text: ' — review and decide if more work is needed' },
+    ];
   } else {
+    // Humanize the event subtype for the header: strip the ``task_`` prefix
+    // and turn underscores into spaces so ``task_timed_out`` reads "Task
+    // timed out" rather than the raw "Task timed_out". Jira is the only
+    // channel routing ``task_timed_out`` through this renderer, so this
+    // multi-word subtype is a case the copied-from-Linear code never hit.
+    const subtype = args.eventType.replace(/^task_/, '').replace(/_/g, ' ');
     const reason = args.errorTitle ? `: ${args.errorTitle}` : '';
-    header = `❌ Task ${args.eventType.replace(/^task_/, '')}${reason}`;
+    headerRuns = [{ text: `❌ Task ${subtype}${reason}`, strong: true }];
   }
 
   const costStr = args.costUsd != null ? `$${args.costUsd.toFixed(2)}` : '—';
@@ -1198,16 +1213,16 @@ export function renderJiraFinalStatusComment(args: {
     : '—';
 
   const paragraphs: AdfParagraph[] = [
-    [{ text: header, strong: true }],
+    headerRuns,
     [{ text: `cost: ${costStr} • turns: ${turnsStr} • duration: ${durationStr}` }],
   ];
   // Render the PR link whenever one exists — on both the ✅ success path and
-  // the ⚠️ shipped-but-stopped path. This diverges from Linear (which omits
-  // it on success) because Jira no longer has the agent-side terminal
-  // comment carrying the link (issue #573 decision). The URL run carries an
-  // ``href`` so it renders as a clickable hyperlink — ADF does not
-  // auto-linkify a bare URL in a plain text node the way Linear's Markdown
-  // does, so without this the requester would have to copy-paste it.
+  // the ⚠️ shipped-but-stopped path — because the agent's own "PR opened"
+  // comment may not have fired (ABCA-584), so this is the only guaranteed
+  // PR-link surface. The URL run carries an ``href`` so it renders as a
+  // clickable hyperlink — ADF does not auto-linkify a bare URL in a plain
+  // text node the way Linear's Markdown does, so without this the requester
+  // would have to copy-paste it.
   if (args.prUrl) {
     paragraphs.push([
       { text: 'PR: ' },

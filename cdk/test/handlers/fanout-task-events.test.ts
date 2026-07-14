@@ -2091,7 +2091,7 @@ describe('renderJiraFinalStatusComment', () => {
     expect(text).toContain('cost: — • turns: — • duration: —');
   });
 
-  test('✅ success path renders the PR link (diverges from Linear)', () => {
+  test('✅ success path renders the PR link (agent step-2 comment not guaranteed — ABCA-584)', () => {
     const paragraphs = renderJiraFinalStatusComment({
       eventType: 'task_completed',
       prUrl: 'https://github.com/o/r/pull/7',
@@ -2128,8 +2128,8 @@ describe('renderJiraFinalStatusComment', () => {
     expect(text).not.toContain('PR:');
   });
 
-  test('⚠️ frame renders the classifier title + PR link', () => {
-    const text = flatten(renderJiraFinalStatusComment({
+  test('⚠️ frame renders the classifier title + PR link, bolding only through the reason', () => {
+    const paragraphs = renderJiraFinalStatusComment({
       eventType: 'task_failed',
       prUrl: 'https://github.com/owner/repo/pull/35',
       costUsd: 3.44,
@@ -2138,11 +2138,37 @@ describe('renderJiraFinalStatusComment', () => {
       durationS: 1272,
       taskId: 't-abca-91',
       errorTitle: 'Hit max-turns cap',
-    }));
+    });
+    const text = flatten(paragraphs);
     expect(text).toContain('⚠️');
     expect(text).toContain('Shipped a PR but stopped early');
     expect(text).toContain('Hit max-turns cap');
     expect(text).toContain('PR: https://github.com/owner/repo/pull/35');
+    // Bold scope mirrors Linear: the reason is bold, the trailing advice is
+    // a separate un-bolded run (review comment #4).
+    expect(paragraphs[0][0]).toEqual({
+      text: '⚠️ Shipped a PR but stopped early — Hit max-turns cap',
+      strong: true,
+    });
+    expect(paragraphs[0][1]).toEqual({ text: ' — review and decide if more work is needed' });
+  });
+
+  test('❌ task_timed_out humanizes the subtype — "Task timed out", not "timed_out"', () => {
+    // Jira is the only channel routing task_timed_out through this renderer,
+    // so the multi-word subtype is a case the copied-from-Linear code never
+    // exercised (review comment #2).
+    const paragraphs = renderJiraFinalStatusComment({
+      eventType: 'task_timed_out',
+      prUrl: null,
+      costUsd: 0.1,
+      turns: 5,
+      maxTurns: 5,
+      durationS: 3600,
+      taskId: 't-timeout',
+      errorTitle: null,
+    });
+    expect(paragraphs[0][0]).toEqual({ text: '❌ Task timed out', strong: true });
+    expect(flatten(paragraphs)).not.toContain('timed_out');
   });
 
   test('❌ frame renders without a colon when errorTitle is null', () => {
