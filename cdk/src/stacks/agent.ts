@@ -607,6 +607,81 @@ export class AgentStack extends Stack {
       description: 'Name of the S3 bucket storing --trace trajectory artifacts (design §10.1)',
     });
 
+    // --- AgentCore Gateway for Linear MCP federation (CONTEXT-GATED) ---
+    // 2026-07-14: optionally front each Linear workspace's hosted MCP behind a
+    // dedicated per-workspace AgentCore Gateway so AgentCore Identity owns the
+    // OAuth token + its 24h refresh (instead of the agent container holding a
+    // per-thread bearer). GATED on ``--context linearGateway=true`` so the
+    // default synth is byte-unchanged. The per-workspace Gateway + OAuth2
+    // provider + Linear target are provisioned DYNAMICALLY by
+    // ``bgagent linear add-workspace`` (workspaces onboard at runtime, not
+    // deploy time) — see cli/src/linear-gateway.ts + the spike in
+    // docs/design/AGENTCORE_GATEWAY_MCP_SPIKE.md. This block only creates the
+    // stack-level IAM: the gateway service role the per-workspace gateways
+    // assume for outbound (Gateway→Linear) auth, and the runtime's grant to
+    // invoke those gateways. Resource names are scoped to the
+    // ``bgagent-linear-gw-*`` prefix the CLI uses.
+    const linearGatewayEnabled = this.node.tryGetContext('linearGateway') === true
+      || this.node.tryGetContext('linearGateway') === 'true';
+    if (linearGatewayEnabled) {
+      // Gateway service role: the per-workspace gateways assume this to reach
+      // the AgentCore Identity token vault (OAuth token + refresh) and read the
+      // vaulted client-secret. Scoped to the workload-identity/token-vault the
+      // gateways use + the ``bedrock-agentcore-identity!*`` secrets the OAuth2
+      // credential providers create (the known Identity gotcha — see
+      // project_agentcore_identity_gotchas).
+      const gatewayServiceRole = new iam.Role(this, 'LinearGatewayServiceRole', {
+        roleName: `bgagent-linear-gw-role-${this.region}`,
+        assumedBy: new iam.ServicePrincipal('bedrock-agentcore.amazonaws.com'),
+        description: 'Assumed by per-workspace Linear MCP gateways for outbound OAuth (Gateway→Linear).',
+      });
+      gatewayServiceRole.addToPolicy(new iam.PolicyStatement({
+        sid: 'GatewayVaultAccess',
+        actions: [
+          'bedrock-agentcore:GetWorkloadAccessToken',
+          'bedrock-agentcore:GetWorkloadAccessTokenForJWT',
+          'bedrock-agentcore:GetWorkloadAccessTokenForUserId',
+          'bedrock-agentcore:GetResourceOauth2Token',
+          'bedrock-agentcore:CompleteResourceTokenAuth',
+        ],
+        // These identity actions have no resource-level scoping in IAM.
+        resources: ['*'],
+      }));
+      gatewayServiceRole.addToPolicy(new iam.PolicyStatement({
+        sid: 'GatewayOauthProviderSecret',
+        actions: ['secretsmanager:GetSecretValue'],
+        resources: [
+          // AgentCore mints the OAuth2 provider's client-secret at this prefix.
+          Stack.of(this).formatArn({
+            service: 'secretsmanager',
+            resource: 'secret',
+            arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+            resourceName: 'bedrock-agentcore-identity!*',
+          }),
+        ],
+      }));
+
+      // The agent runtime invokes the per-workspace gateways as an MCP client.
+      // Gateways are created dynamically (name ``bgagent-linear-gw-<slug>`` with
+      // a service-appended suffix), so grant InvokeGateway on the name prefix.
+      runtime.role.addToPrincipalPolicy(new iam.PolicyStatement({
+        sid: 'InvokeLinearGateways',
+        actions: ['bedrock-agentcore:InvokeGateway'],
+        resources: [
+          Stack.of(this).formatArn({
+            service: 'bedrock-agentcore',
+            resource: 'gateway',
+            resourceName: 'bgagent-linear-gw-*',
+          }),
+        ],
+      }));
+
+      new CfnOutput(this, 'LinearGatewayServiceRoleArn', {
+        value: gatewayServiceRole.roleArn,
+        description: 'ARN of the service role per-workspace Linear MCP gateways assume (bgagent linear add-workspace passes this to create-gateway).',
+      });
+    }
+
     // --- ECS Fargate compute backend (CONTEXT-GATED) ---
     // K12 (2026-06-29): AgentCore's fixed microVM envelope OOM-kills heavy
     // CI-parity builds (ABCA's own ~2800-test `mise run build`). ECS Fargate
