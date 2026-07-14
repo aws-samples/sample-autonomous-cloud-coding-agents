@@ -1665,6 +1665,25 @@ describe('renderLinearFinalStatusComment', () => {
     expect(body).not.toContain('27 /');
   });
 
+  test('✅ task_completed with prUrl null → NO PR line (ABCA-584 guard)', () => {
+    // Relaxing the render guard to `if (args.prUrl)` makes "✅ completed +
+    // prUrl null → no PR: line" a LIVE branch (it was previously structurally
+    // guaranteed by the old ⚠️-only condition). Pin its absence so a future
+    // stray or `PR: null` line can't creep in unnoticed.
+    const body = renderLinearFinalStatusComment({
+      eventType: 'task_completed',
+      prUrl: null,
+      costUsd: 0.5,
+      turns: 10,
+      maxTurns: 100,
+      durationS: 60,
+      taskId: 't',
+      errorTitle: null,
+    });
+    expect(body).toContain('✅');
+    expect(body).not.toContain('PR:');
+  });
+
   test('formatDuration: under 60s → seconds only', () => {
     const body = renderLinearFinalStatusComment({
       eventType: 'task_completed',

@@ -850,6 +850,12 @@ async function dispatchToEmail(event: FanOutEvent): Promise<void> {
  * Render the Linear final-status comment body. Inputs are already
  * coerced to native types by the caller; this function only formats.
  *
+ * ``prUrl``, when present, renders on ALL frames — the ✅ success frame as much
+ * as the ⚠️ shipped-but-stopped one. The completion comment is the terminal,
+ * platform-owned surface, so it must carry the PR link authoritatively rather
+ * than assume the agent's own "PR opened" comment did (the ABCA-584 case — see
+ * the render note below). Only the framing/header flips on the outcome.
+ *
  * The framing flips between three outcomes based on `(eventType, prUrl)`:
  *
  *   1. ``task_completed``                        → ✅ "Task completed"
@@ -915,8 +921,11 @@ export function renderLinearFinalStatusComment(args: {
   // PR-opened comment, so the ✅ completion comment omitted it and the link was
   // LOST entirely. The completion comment is the terminal, platform-owned surface;
   // rendering pr_url here guarantees the link is never lost, and a duplicate with
-  // the agent's own comment is far cheaper than a missing PR. (This is the ONE
-  // terminal comment per task, so it can't spam.)
+  // the agent's own comment is far cheaper than a missing PR. (Duplicate terminal
+  // comments can't spam because the CALLER, `dispatchToLinear`, posts this body at
+  // most once per task via the `linear_final_comment_event_id` idempotency marker
+  // — this formatter is pure and enforces nothing; a future caller on a
+  // non-idempotent path would need its own guard.)
   if (args.prUrl) {
     lines.push('', `PR: ${args.prUrl}`);
   }
