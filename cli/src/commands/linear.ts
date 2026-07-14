@@ -44,6 +44,12 @@ import {
   linearOauthSecretName,
   StoredLinearOauthToken,
 } from '../linear-oauth';
+import {
+  provisionGatewayPhase1,
+  provisionGatewayPhase2,
+  waitForGatewayReady,
+  waitForTargetReady,
+} from '../linear-gateway';
 import { awaitOauthCallback, CALLBACK_URL } from '../oauth-callback-server';
 import { promptSecret } from '../prompt-secret';
 
@@ -792,6 +798,7 @@ export function makeLinearCommand(): Command {
       .option('--stack-name <name>', 'CloudFormation stack name', 'backgroundagent-dev')
       .option('--no-browser', 'Print the authorization URL instead of opening a browser (for SSH/headless)')
       .option('--no-actor-app', 'Drop actor=app from the OAuth flow (diagnostic)')
+      .option('--gateway', 'Also federate this workspace\'s Linear MCP behind a per-workspace AgentCore Gateway (managed OAuth refresh; needs the stack deployed with --context linearGateway=true)')
       .action(async (slug: string, opts) => {
         if (!SLUG_RE.test(slug)) {
           throw new CliError(
@@ -999,6 +1006,25 @@ export function makeLinearCommand(): Command {
         const oauthSecretArn = await upsertOauthSecret(sm, secretName, stored, slug);
         console.log(` ✓ (${secretName})`);
 
+        // ─── Optional: AgentCore Gateway federation (--gateway) ────────
+        // Provision a per-workspace gateway fronting the Linear MCP so
+        // AgentCore Identity owns the OAuth token + 24h refresh. Interactive
+        // (callback registration + browser consent); returns the gateway_url
+        // to record on the registry row so the agent routes MCP through it.
+        let gatewayInfo: { gatewayId: string; gatewayUrl: string } | null = null;
+        if (opts.gateway) {
+          gatewayInfo = await runGatewayProvisioning({
+            region,
+            stackName,
+            slug,
+            clientId,
+            clientSecret,
+            userPoolId: config.user_pool_id,
+            cognitoClientId: config.client_id,
+            actorApp: useActorApp,
+          });
+        }
+
         // ─── Persist registry + user-mapping rows ──────────────────────
         // Fetch team keys for prefix-routing (see same call in `setup`).
         const teamKeys = await queryLinearTeamKeys(`Bearer ${tokenResponse.access_token}`);
@@ -1013,6 +1039,7 @@ export function makeLinearCommand(): Command {
             updated_at: now,
             status: 'active',
             ...(teamKeys.length > 0 ? { team_keys: teamKeys } : {}),
+            ...(gatewayInfo ? { gateway_id: gatewayInfo.gatewayId, gateway_url: gatewayInfo.gatewayUrl } : {}),
           },
         }));
         console.log(
@@ -1548,6 +1575,110 @@ export function makeLinearCommand(): Command {
   );
 
   return linear;
+}
+
+// ─── AgentCore Gateway provisioning (--gateway on add-workspace/setup) ────────
+
+/**
+ * Provision a per-workspace AgentCore Gateway that federates this workspace's
+ * hosted Linear MCP, so AgentCore Identity owns the OAuth token + its 24h
+ * refresh (instead of the agent container holding a per-thread bearer). See
+ * docs/design/AGENTCORE_GATEWAY_MCP_SPIKE.md and cli/src/linear-gateway.ts.
+ *
+ * Two-phase + interactive by necessity: AgentCore mints a per-provider callback
+ * URL that must be registered on the Linear OAuth app BEFORE consent (Linear's
+ * API has no redirect-URI management), and the admin must complete a browser
+ * consent (authorization-code / 3LO). Returns the gateway_url to store on the
+ * workspace's registry row, or null if provisioning didn't complete.
+ */
+async function runGatewayProvisioning(input: {
+  region: string;
+  stackName: string;
+  slug: string;
+  clientId: string;
+  clientSecret: string;
+  userPoolId: string;
+  cognitoClientId: string;
+  actorApp: boolean;
+}): Promise<{ gatewayId: string; gatewayUrl: string } | null> {
+  const gatewayRoleArn = await getStackOutput(input.region, input.stackName, 'LinearGatewayServiceRoleArn');
+  if (!gatewayRoleArn) {
+    console.log();
+    console.log('  ⚠ Gateway provisioning skipped: stack output LinearGatewayServiceRoleArn not found.');
+    console.log('    Re-deploy with `mise //cdk:deploy -- --context linearGateway=true` to enable the');
+    console.log('    Linear MCP gateway substrate, then re-run with --gateway.');
+    return null;
+  }
+
+  console.log();
+  console.log(`  → Provisioning AgentCore Gateway for '${input.slug}' (federates the Linear MCP)...`);
+
+  // Phase 1 — OAuth2 credential provider (→ Linear) + CUSTOM_JWT gateway.
+  const p1 = await provisionGatewayPhase1(
+    { region: input.region },
+    {
+      slug: input.slug,
+      clientId: input.clientId,
+      clientSecret: input.clientSecret,
+      gatewayRoleArn,
+      userPoolId: input.userPoolId,
+      cognitoClientId: input.cognitoClientId,
+    },
+  );
+  console.log(`  ✓ Created gateway ${p1.gatewayId}`);
+  await waitForGatewayReady({ region: input.region }, p1.gatewayId);
+
+  // The provider's callback URL must be registered on the Linear OAuth app
+  // before consent can redirect back. This is a manual dashboard step —
+  // Linear's API does not expose redirect-URI management.
+  console.log();
+  console.log('  ── ACTION REQUIRED (one-time, this workspace) ──────────────────');
+  console.log('  Add this Redirect URI to your Linear OAuth app');
+  console.log('  (Linear → Settings → API → your OAuth app → Redirect URIs):');
+  console.log();
+  console.log(`      ${p1.callbackUrl}`);
+  console.log();
+  const proceed = (await promptLine('  Registered it? Press Enter to continue (or type "skip" to abort gateway setup)')).trim().toLowerCase();
+  if (proceed === 'skip') {
+    console.log('  ⚠ Gateway setup aborted — the OAuth provider + gateway were created but no target was added.');
+    console.log(`    Re-run later, or clean up: aws bedrock-agentcore-control delete-gateway --gateway-identifier ${p1.gatewayId}`);
+    return null;
+  }
+
+  // Phase 2 — Linear MCP target (3LO / authorization-code), returns the consent URL.
+  const p2 = await provisionGatewayPhase2(
+    { region: input.region },
+    {
+      slug: input.slug,
+      gatewayId: p1.gatewayId,
+      providerArn: p1.providerArn,
+      returnUrl: p1.callbackUrl,
+      actorApp: input.actorApp,
+    },
+  );
+
+  if (p2.status === 'CREATE_PENDING_AUTH' && p2.authorizationUrl) {
+    console.log();
+    console.log('  → Open this URL to authorize the app for this workspace (10-min window):');
+    console.log(`      ${p2.authorizationUrl}`);
+    console.log('    Approve the Linear consent screen; you can close the tab after the redirect.');
+    console.log();
+    await promptLine('  Press Enter once you have completed the consent');
+  }
+
+  process.stdout.write('  → Waiting for the gateway target to become ready...');
+  const ready = await waitForTargetReady({ region: input.region }, p1.gatewayId, p2.targetId, { maxAttempts: 45 });
+  if (ready.status !== 'READY') {
+    console.log(' ✗');
+    console.log(`  ⚠ Target status: ${ready.status}. ${ (ready.statusReasons ?? []).join('; ') }`);
+    console.log('    The gateway + provider exist but the Linear target did not finish authorizing.');
+    console.log('    Common causes: consent not completed in time, or the callback URL above was not');
+    console.log('    registered on the Linear app. Fix and re-run with --gateway.');
+    return null;
+  }
+  console.log(' ✓');
+  console.log(`  ✓ Gateway ready — Linear tools federated at ${p1.gatewayUrl}`);
+  return { gatewayId: p1.gatewayId, gatewayUrl: p1.gatewayUrl };
 }
 
 // ─── Prompts ─────────────────────────────────────────────────────────────────
