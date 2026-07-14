@@ -20,6 +20,7 @@
 import { withDurableExecution, type DurableExecutionHandler } from '@aws/durable-execution-sdk-js';
 import { TaskStatus, TERMINAL_STATUSES } from '../constructs/task-status';
 import { resolveComputeStrategy } from './shared/compute-strategy';
+import { classifyError, isTransientError } from './shared/error-classifier';
 import { reportIssueFailure as reportJiraIssueFailure } from './shared/jira-feedback';
 import { reportIssueFailure } from './shared/linear-feedback';
 import { logger } from './shared/logger';
@@ -159,14 +160,42 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
   // Step 4: Start agent session — resolve compute strategy, invoke runtime, transition to RUNNING
   // Returns the full SessionHandle (serializable) so ECS polling can use it in step 5.
   const sessionHandle = await context.step('start-session', async () => {
+    let autoRetried = false;
     try {
       const strategy = resolveComputeStrategy(blueprintConfig);
-      const handle = await strategy.startSession({
+      const startInput = {
         taskId,
         userId: task.user_id,
         payload,
         blueprintConfig,
-      });
+      };
+      // Transient-error AUTO-RETRY (once). session-start is the ONE place a retry
+      // is idempotent by construction — no repo clone, no commits, no PR have
+      // happened yet, so re-invoking RunTask/InvokeAgentRuntime can't double-run
+      // work. A transient hiccup here (ECS deploy-race "TaskDefinition is inactive",
+      // ENI/capacity delay, a Bedrock/agentcore throttle) usually clears on a second
+      // attempt — so we swallow the first transient failure and try once more before
+      // surfacing anything to the user. A NON-transient failure (bad config, missing
+      // ECS substrate) throws immediately — retrying it just wastes ~a minute. Mid-run
+      // crashes are NOT retried here (step 5); the agent may have pushed commits.
+      let handle;
+      try {
+        handle = await strategy.startSession(startInput);
+      } catch (firstErr) {
+        const classification = classifyError(`Session start failed: ${String(firstErr)}`);
+        if (!isTransientError(classification)) {
+          throw firstErr; // service/user error — a retry won't help; surface now.
+        }
+        autoRetried = true;
+        logger.warn('Session start hit a transient error — auto-retrying once', {
+          task_id: taskId,
+          error: firstErr instanceof Error ? firstErr.message : String(firstErr),
+        });
+        await emitTaskEvent(taskId, 'session_start_retry', {
+          reason: classification?.title ?? 'transient',
+        });
+        handle = await strategy.startSession(startInput);
+      }
 
       // Build compute metadata for the task record so cancel-task can stop the right backend
       const computeMetadata: Record<string, string> = handle.strategyType === 'ecs'
@@ -192,7 +221,12 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
 
       return handle;
     } catch (err) {
-      await failTask(taskId, TaskStatus.HYDRATING, `Session start failed: ${String(err)}`, task.user_id, true, task.repo);
+      // Carry the auto-retry fact into error_message so the channel surface can say
+      // "I already tried again" (a bare marker the classifier ignores but
+      // renderFailureReply detects — see AUTO_RETRIED_MARKER). Only stamped when the
+      // single transient retry above also failed.
+      const retriedNote = autoRetried ? ' [auto-retried]' : '';
+      await failTask(taskId, TaskStatus.HYDRATING, `Session start failed: ${String(err)}${retriedNote}`, task.user_id, true, task.repo);
       throw err;
     }
   });

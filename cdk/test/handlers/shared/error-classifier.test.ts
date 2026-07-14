@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { classifyError, ErrorCategory, type ErrorClassification } from '../../../src/handlers/shared/error-classifier';
+import { classifyError, ErrorCategory, ErrorClass, isTransientError, retryGuidance, type ErrorClassification } from '../../../src/handlers/shared/error-classifier';
 import { toTaskDetail, type TaskRecord } from '../../../src/handlers/shared/types';
 
 describe('classifyError', () => {
@@ -503,7 +503,63 @@ describe('classifyError', () => {
         expect(result.title.length).toBeGreaterThan(0);
         expect(result.description.length).toBeGreaterThan(0);
         expect(result.remedy.length).toBeGreaterThan(0);
+        // Every classification carries a 3-way errorClass (transient/service/user).
+        expect([ErrorClass.TRANSIENT, ErrorClass.SERVICE, ErrorClass.USER]).toContain(result.errorClass);
       }
+    });
+  });
+
+  // --- errorClass + retryGuidance (transient vs service vs user) ---
+
+  describe('errorClass axis + retryGuidance', () => {
+    test('the ECS deploy-race is TRANSIENT and isTransientError is true', () => {
+      const c = classifyError('Session start failed: InvalidParameterException: TaskDefinition is inactive')!;
+      expect(c.errorClass).toBe(ErrorClass.TRANSIENT);
+      expect(isTransientError(c)).toBe(true);
+    });
+
+    test('a generic session-start failure is TRANSIENT (compute infra)', () => {
+      expect(classifyError('Session start failed: boom')!.errorClass).toBe(ErrorClass.TRANSIENT);
+    });
+
+    test('auth/permission is SERVICE (admin fixes it), not transient', () => {
+      const c = classifyError('INSUFFICIENT_GITHUB_REPO_PERMISSIONS')!;
+      expect(c.errorClass).toBe(ErrorClass.SERVICE);
+      expect(isTransientError(c)).toBe(false);
+    });
+
+    test('a build/guardrail failure is USER (change the request/code)', () => {
+      expect(classifyError('Guardrail blocked: nope')!.errorClass).toBe(ErrorClass.USER);
+      expect(classifyError('Task did not succeed: agent_status="error_max_turns"')!.errorClass).toBe(ErrorClass.USER);
+    });
+
+    test('retryGuidance: TRANSIENT → "temporary … reply to retry … contact admin if it persists"', () => {
+      const g = retryGuidance(classifyError('Session start failed: boom')!);
+      expect(g).toMatch(/temporary infrastructure/i);
+      expect(g).toMatch(/reply here to try again/i);
+      expect(g).toMatch(/contact your ABCA admin/i);
+    });
+
+    test('retryGuidance: TRANSIENT + autoRetried → "I automatically tried again and it still failed"', () => {
+      const g = retryGuidance(classifyError('Session start failed: boom')!, true);
+      expect(g).toMatch(/automatically tried again/i);
+    });
+
+    test('retryGuidance: SERVICE → "retrying won\'t fix this … your ABCA admin"', () => {
+      const g = retryGuidance(classifyError('INSUFFICIENT_GITHUB_REPO_PERMISSIONS')!);
+      expect(g).toMatch(/won'?t fix this/i);
+      expect(g).toMatch(/admin/i);
+      expect(g).not.toMatch(/temporary infrastructure/i);
+    });
+
+    test('retryGuidance: USER guardrail → "edit the request"', () => {
+      const g = retryGuidance(classifyError('Guardrail blocked: nope')!);
+      expect(g).toMatch(/edit the request/i);
+    });
+
+    test('isTransientError is false for null / absent classification', () => {
+      expect(isTransientError(null)).toBe(false);
+      expect(isTransientError(undefined)).toBe(false);
     });
   });
 
