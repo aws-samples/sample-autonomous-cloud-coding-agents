@@ -47,6 +47,7 @@ function rewriteDocsLinkTarget(target) {
     LINEAR_PAK_MIGRATION_RUNBOOK: '/using/linear-pak-migration-runbook',
     JIRA_SETUP_GUIDE: '/using/jira-setup-guide',
     DEPLOY_PREVIEW_SCREENSHOTS_GUIDE: '/using/deploy-preview-screenshots-guide',
+    REVIEW_GATE_SETUP_GUIDE: '/using/review-gate-setup-guide',
     CEDAR_POLICY_GUIDE: '/customizing/cedar-policies',
     DEPLOYMENT_GUIDE: '/getting-started/deployment-guide',
   };
@@ -293,6 +294,12 @@ mirrorMarkdownFile(
 mirrorMarkdownFile(
   path.join(docsRoot, 'guides', 'DEPLOY_PREVIEW_SCREENSHOTS_GUIDE.md'),
   path.join('src', 'content', 'docs', 'using', 'Deploy-preview-screenshots-guide.md'),
+);
+
+// --- Automated PR review gate setup guide: mirror to using/ ---
+mirrorMarkdownFile(
+  path.join(docsRoot, 'guides', 'REVIEW_GATE_SETUP_GUIDE.md'),
+  path.join('src', 'content', 'docs', 'using', 'Review-gate-setup-guide.md'),
 );
 
 // --- Cedar Policy Guide: mirror to customizing/ (authoring reference for blueprint authors) ---
