@@ -37,6 +37,7 @@ import {
   type PollState,
 } from './shared/orchestrator';
 import { runPreflightChecks } from './shared/preflight';
+import { deleteEcsPayload } from './shared/strategies/ecs-strategy';
 import type { TaskRecord } from './shared/types';
 import { workflowIsReadOnly, workflowRequiresRepo } from './shared/workflows';
 
@@ -296,6 +297,14 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
   // Step 6: Finalize — update terminal status, emit events, release concurrency
   await context.step('finalize', async () => {
     await finalizeTask(taskId, finalPollState, task.user_id);
+    // #502: the task is terminal — the container has long since read its
+    // payload, so delete the ephemeral S3 payload object now. Best-effort
+    // (deleteEcsPayload swallows errors) and a no-op for AgentCore tasks /
+    // deployments without a payload bucket; the bucket's 1-day lifecycle rule
+    // is the backstop if this delete or the whole step never runs.
+    if (blueprintConfig.compute_type === 'ecs') {
+      await deleteEcsPayload(taskId);
+    }
   });
 };
 
