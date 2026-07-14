@@ -148,6 +148,32 @@ const DESCRIPTORS: Record<string, WorkflowDescriptor> = {
 /** The platform default workflow — the last rung of the resolution ladder. */
 export const DEFAULT_WORKFLOW_ID = 'default/agent-v1';
 
+/**
+ * The disciplined coding workflow (clone → edit → commit → push → platform
+ * opens the PR via ``ensure_pr``). A repo-bound task with no explicit
+ * ``workflow_ref`` must run THIS, not the repo-less {@link DEFAULT_WORKFLOW_ID}
+ * (which improvises against an empty local clone and records ``pr_url=null``).
+ *
+ * The channel processors (Linear/Jira/Slack) and the #247 orchestration release
+ * path pin this explicitly at their ``createTaskCore`` call sites — see
+ * ``jira-webhook-processor.ts`` (#546/#547, the first instance) — rather than
+ * relying on a resolver-level default, so the "repo task ⇒ coding workflow"
+ * decision lives at one visible place per channel and stays uniform across them.
+ */
+export const CODING_WORKFLOW_ID = 'coding/new-task-v1';
+
+// Fail at MODULE LOAD (deploy/import time), not at request time, if either
+// well-known id ever drifts out of DESCRIPTORS — e.g. a descriptor rename.
+// Without this a rename surfaces as an obscure runtime
+// ``TypeError: Cannot read properties of undefined (reading 'id')`` inside the
+// Lambda on the first affected task; TypeScript's ``Record<string, …>`` index
+// type will not catch it (N2).
+for (const requiredId of [DEFAULT_WORKFLOW_ID, CODING_WORKFLOW_ID]) {
+  if (!DESCRIPTORS[requiredId]) {
+    throw new Error(`Workflow descriptor "${requiredId}" is missing from DESCRIPTORS`);
+  }
+}
+
 /** Pattern for a valid workflow ref: ``<domain>/<name>-vN[@<constraint>]``. */
 const WORKFLOW_REF_PATTERN = /^[a-z][a-z0-9-]*\/[a-z][a-z0-9-]*-v\d+(@[^\s]+)?$/;
 
@@ -186,21 +212,16 @@ export type WorkflowResolutionError = 'unknown_id' | 'unsatisfiable_version';
  * resolution ladder (WORKFLOWS.md §"Replacing task types"):
  *   1. explicit ``workflow_ref`` (id + optional ``@constraint``);
  *   2. (Blueprint default — Phase 4, not yet wired);
- *   3a. no explicit ref BUT a repo is present ⇒ the coding default
- *       ``coding/new-task-v1`` (a repo-bound task is a coding task);
- *   3b. otherwise the repo-less platform default ``default/agent-v1``.
+ *   3. the repo-less platform default ``default/agent-v1``.
  *
- * Rung 3a restores the pre-#296 behaviour: before workflow-driven tasks, a
- * task with a repo and no explicit type ran as ``new_task`` →
- * ``coding/new-task-v1`` (edit locally, commit, push, platform opens the PR
- * via ``ensure_pr``). #296 introduced the resolution ladder but left the
- * repo-aware rung unwired, so every repo task fell through to
- * ``default/agent-v1`` — the freeform repo-less agent prompt with no git/PR
- * discipline — which broke PR-url reporting, screenshot→issue routing, and
- * #247 stacking (the agent improvised ``gh api``/``gh pr create`` against an
- * empty local clone). ``hasRepo`` re-wires that rung minimally until the
- * Blueprint router (Phase 4) lands. Callers WITHOUT an explicit ref pass
- * whether the request carries a repo.
+ * NOTE: an absent ref falls back to the repo-less default here regardless of
+ * whether the request carries a repo. A repo-bound channel task (Linear/Jira/
+ * Slack/#247) must NOT rely on this fallback — it pins an explicit
+ * ``workflow_ref: CODING_WORKFLOW_ID`` at its call site so a repo task runs the
+ * disciplined coding workflow (commit + push + PR), not the repo-less agent
+ * that records ``pr_url=null``. That decision lives at the call site, one per
+ * channel, mirroring ``jira-webhook-processor.ts`` (#546/#547) — see
+ * {@link CODING_WORKFLOW_ID}.
  *
  * Returns ``null`` when an explicit ref cannot be resolved — either the id is
  * unknown OR an ``@constraint`` pins a version the platform does not ship. The
@@ -208,10 +229,9 @@ export type WorkflowResolutionError = 'unknown_id' | 'unsatisfiable_version';
  * like ``coding/new-task-v1@2.0.0`` fails admission rather than quietly running
  * ``1.0.0``. Use {@link resolveWorkflowRefError} for which case, to craft the 400.
  */
-export function resolveWorkflowRef(ref?: string | null, hasRepo = false): ResolvedWorkflow | null {
+export function resolveWorkflowRef(ref?: string | null): ResolvedWorkflow | null {
   if (ref === undefined || ref === null || ref === '') {
-    const fallbackId = hasRepo ? 'coding/new-task-v1' : DEFAULT_WORKFLOW_ID;
-    const fallback = DESCRIPTORS[fallbackId];
+    const fallback = DESCRIPTORS[DEFAULT_WORKFLOW_ID];
     return { id: fallback.id, version: fallback.version };
   }
   const { id, constraint } = parseWorkflowRef(ref);
