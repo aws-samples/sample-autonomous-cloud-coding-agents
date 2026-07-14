@@ -1448,14 +1448,14 @@ describe('fanout-task-events: Linear dispatcher (issue #239)', () => {
     expect(body).toContain('$0.55');
     expect(body).toContain('27 / 100');
     expect(body).toContain('3m 41s');
-    // PR URL is intentionally NOT rendered on the ✅ success path —
-    // the agent's step-2 "PR opened" comment already carries it, so
-    // duplicating it here just stacks two near-identical links on the
-    // Linear issue. (Smoke-test feedback after the first dev deploy.)
-    // The ⚠️ "shipped a PR but stopped early" path DOES render it,
-    // because the agent may have crashed before its step-2 comment
-    // fired — see the ABCA-91 case test below.
-    expect(body).not.toContain('https://github.com/owner/repo/pull/13');
+    // F-prlink (ABCA-584): the PR URL IS rendered on the ✅ success path. The old
+    // behavior omitted it, assuming the agent's own step-2 "PR opened" comment
+    // always carries it — but that comment can silently not fire (live-caught: a
+    // decompose→single task opened a PR but posted no PR-opened comment, so the
+    // link was lost entirely). The terminal completion comment is the
+    // platform-owned surface, so it must carry the link; a duplicate is far
+    // cheaper than a missing PR.
+    expect(body).toContain('https://github.com/owner/repo/pull/13');
     expect(body).toContain('t-lin');
   });
 
@@ -1729,6 +1729,25 @@ describe('renderLinearFinalStatusComment', () => {
     });
     expect(body).toContain('turns: 27 ');
     expect(body).not.toContain('27 /');
+  });
+
+  test('✅ task_completed with prUrl null → NO PR line (ABCA-584 guard)', () => {
+    // Relaxing the render guard to `if (args.prUrl)` makes "✅ completed +
+    // prUrl null → no PR: line" a LIVE branch (it was previously structurally
+    // guaranteed by the old ⚠️-only condition). Pin its absence so a future
+    // stray or `PR: null` line can't creep in unnoticed.
+    const body = renderLinearFinalStatusComment({
+      eventType: 'task_completed',
+      prUrl: null,
+      costUsd: 0.5,
+      turns: 10,
+      maxTurns: 100,
+      durationS: 60,
+      taskId: 't',
+      errorTitle: null,
+    });
+    expect(body).toContain('✅');
+    expect(body).not.toContain('PR:');
   });
 
   test('formatDuration: under 60s → seconds only', () => {
