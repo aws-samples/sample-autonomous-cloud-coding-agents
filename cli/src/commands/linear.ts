@@ -1020,7 +1020,6 @@ export function makeLinearCommand(): Command {
             clientId,
             clientSecret,
             userPoolId: config.user_pool_id,
-            cognitoClientId: config.client_id,
             actorApp: useActorApp,
           });
         }
@@ -1598,13 +1597,15 @@ async function runGatewayProvisioning(input: {
   clientId: string;
   clientSecret: string;
   userPoolId: string;
-  cognitoClientId: string;
   actorApp: boolean;
 }): Promise<{ gatewayId: string; gatewayUrl: string } | null> {
-  const gatewayRoleArn = await getStackOutput(input.region, input.stackName, 'LinearGatewayServiceRoleArn');
-  if (!gatewayRoleArn) {
+  const [gatewayRoleArn, m2mClientId] = await Promise.all([
+    getStackOutput(input.region, input.stackName, 'LinearGatewayServiceRoleArn'),
+    getStackOutput(input.region, input.stackName, 'LinearGatewayM2mClientId'),
+  ]);
+  if (!gatewayRoleArn || !m2mClientId) {
     console.log();
-    console.log('  ⚠ Gateway provisioning skipped: stack output LinearGatewayServiceRoleArn not found.');
+    console.log('  ⚠ Gateway provisioning skipped: stack outputs LinearGatewayServiceRoleArn/LinearGatewayM2mClientId not found.');
     console.log('    Re-deploy with `mise //cdk:deploy -- --context linearGateway=true` to enable the');
     console.log('    Linear MCP gateway substrate, then re-run with --gateway.');
     return null;
@@ -1622,7 +1623,10 @@ async function runGatewayProvisioning(input: {
       clientSecret: input.clientSecret,
       gatewayRoleArn,
       userPoolId: input.userPoolId,
-      cognitoClientId: input.cognitoClientId,
+      // The gateway's CUSTOM_JWT inbound must trust the M2M client the AGENT
+      // authenticates with (from LinearGatewayM2mClientId) — NOT the human
+      // login client. This is what makes the agent's minted token accepted.
+      cognitoClientId: m2mClientId,
     },
   );
   console.log(`  ✓ Created gateway ${p1.gatewayId}`);
