@@ -17,7 +17,10 @@ class _FakeSM:
         return {"SecretString": self._s}
 
 
-def _patch_secret(monkeypatch, secret_obj, arn="arn:aws:secretsmanager:us-east-1:1:secret:bgagent-linear-gateway-m2m"):
+_TEST_ARN = "arn:aws:secretsmanager:us-east-1:1:secret:bgagent-linear-gateway-m2m"
+
+
+def _patch_secret(monkeypatch, secret_obj, arn=_TEST_ARN):
     monkeypatch.setenv(gateway_auth.GATEWAY_M2M_SECRET_ENV, arn)
     monkeypatch.setenv("AWS_REGION", "us-east-1")
     import boto3
