@@ -25,6 +25,7 @@ import { logger } from './shared/logger';
 import { slackFetch } from './shared/slack-api';
 import { getSlackSecret, SLACK_SECRET_PREFIX } from './shared/slack-verify';
 import type { Attachment } from './shared/types';
+import { CODING_WORKFLOW_ID } from './shared/workflows';
 import type { SlackCommandPayload } from './slack-commands';
 
 /**
@@ -243,6 +244,11 @@ async function handleSubmit(event: MentionEvent, args: string[], reply: ReplyFn)
       repo,
       issue_number: issueNumber,
       task_description: description,
+      // Explicit coding workflow: a Slack-submitted task targets a repo, so it
+      // must not fall through the resolution ladder to the repo-less
+      // default/agent-v1 (which never commits or opens a PR). Mirrors the Jira
+      // processor (#546/#547). See CODING_WORKFLOW_ID.
+      workflow_ref: CODING_WORKFLOW_ID,
       ...(attachments.length > 0 && { attachments }),
     },
     {
