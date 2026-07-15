@@ -1303,6 +1303,11 @@ _RUN_TASK_PARAMS = frozenset(inspect.signature(run_task).parameters)
 _KNOWN_ORCHESTRATOR_KEYS = frozenset(
     {
         "build_command",
+        # ``lint_command``'s sibling: neither is a run_task param today (the build/
+        # lint commands are consumed via repo config, not passed through here), but
+        # listing both makes a future "wired build_command, forgot lint_command"
+        # contract gap WARN instead of drop silently (N4).
+        "lint_command",
         "merge_branches",
         "base_branch",
         "github_token_secret_arn",

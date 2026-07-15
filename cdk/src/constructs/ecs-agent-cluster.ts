@@ -233,13 +233,16 @@ export class EcsAgentCluster extends Construct {
       props.payloadBucket.grantRead(taskRole);
     }
 
-    // #299 ECS-parity: an artifact workflow (coding/decompose-v1) WRITES its plan
-    // to the artifacts bucket via deliver_artifact, so grant read+write (the
-    // AgentCore runtime's SessionRole/exec-role has the equivalent). Scoped to
-    // this bucket. Stays on the task role — delivery is a terminal step.
-    if (props.artifactsBucket) {
-      props.artifactsBucket.grantReadWrite(taskRole);
-    }
+    // #299 ECS-parity: coding/decompose-v1 delivers its plan to the artifacts
+    // bucket via deliver_artifact — but the write goes through the assumed
+    // SessionRole (deliverers.py -> tenant_client), scoped to
+    // artifacts/${task_id}/*, exactly like the AgentCore runtime (whose task
+    // role likewise has NO direct artifacts grant). So the task role needs only
+    // the ARTIFACTS_BUCKET_NAME env (set above), not a bucket grant. Granting
+    // whole-bucket read+write here would over-privilege the untrusted-code role
+    // and break cross-task isolation (a task could read/clobber other tasks'
+    // artifacts/<other_id>/, traces/, attachments/ on the same bucket).
+    // (no props.artifactsBucket grant — intentional; see comment)
 
     // F-2 (ABCA-488-class parity): grant the task role read+write on the
     // AgentCore Memory so the agent's cross-task learning writes
@@ -341,7 +344,7 @@ export class EcsAgentCluster extends Construct {
     NagSuppressions.addResourceSuppressions(this.taskDefinition, [
       {
         id: 'AwsSolutions-IAM5',
-        reason: 'DynamoDB index/* wildcards from CDK grantReadWriteData (UserConcurrencyTable, and task tables only when no SessionRole is wired); Secrets Manager wildcards from CDK grantRead (GitHub token) and the bgagent-linear-oauth-*/bgagent-jira-oauth-* prefix grant (ABCA-488 — per-workspace channel OAuth tokens are created by the CLI at setup, name unknown at synth, GetSecretValue only); CloudWatch Logs wildcards from CDK grantWrite; S3 object/* wildcard from CDK grantRead on the ECS payload bucket (read-only, scoped to that bucket — #502) and from grantReadWrite on the artifacts bucket (scoped to that bucket — coding/decompose-v1 delivers its plan artifact there, #299). Bedrock InvokeModel is scoped to explicit model/inference-profile ARNs (no wildcard resource). ec2:DescribeAvailabilityZones requires Resource:* (EC2 describe actions have no resource-level scoping) — read-only, no mutation/data access; needed so a CDK target repo\'s `cdk synth` build gate can resolve AZ context on a fresh clone (ECS-parity, no cdk.context.json cache in the container).',
+        reason: 'DynamoDB index/* wildcards from CDK grantReadWriteData (UserConcurrencyTable, and task tables only when no SessionRole is wired); Secrets Manager wildcards from CDK grantRead (GitHub token) and the bgagent-linear-oauth-*/bgagent-jira-oauth-* prefix grant (ABCA-488 — per-workspace channel OAuth tokens are created by the CLI at setup, name unknown at synth, GetSecretValue only); CloudWatch Logs wildcards from CDK grantWrite; S3 object/* wildcard from CDK grantRead on the ECS payload bucket (read-only, scoped to that bucket — #502). Bedrock InvokeModel is scoped to explicit model/inference-profile ARNs (no wildcard resource). ec2:DescribeAvailabilityZones requires Resource:* (EC2 describe actions have no resource-level scoping) — read-only, no mutation/data access; needed so a CDK target repo\'s `cdk synth` build gate can resolve AZ context on a fresh clone (ECS-parity, no cdk.context.json cache in the container).',
       },
       {
         id: 'AwsSolutions-ECS2',
