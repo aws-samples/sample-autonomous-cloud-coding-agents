@@ -2415,7 +2415,17 @@ async function handleStandaloneCommentTrigger(args: {
     if (await maybeResumeClarifyHold({ issueId, task, workspaceId, commentId, replyTargetId, trigger, resolved, registryTableName })) {
       return;
     }
-    logger.info('A6 comment (standalone): ABCA task has no resolvable PR/repo — cannot iterate', {
+    // #614: a PR-less completed task (no-change-needed, failed-before-commit, or
+    // a question/investigation run) is NOT an iteration target — but a follow-up
+    // ``@bgagent <request>`` on it is almost always NEW work ("then just do X
+    // instead"). When the repo is known, dispatch a fresh new-task-v1 rather than
+    // dropping the comment silently (the old dead-end). Falls through to the
+    // no-op log below only when we genuinely can't act (no repo/user, or a bare
+    // mention with no instruction).
+    if (await maybeStartStandaloneNewWork({ issueId, task, workspaceId, commentId, replyTargetId, trigger, resolved, registryTableName })) {
+      return;
+    }
+    logger.info('A6 comment (standalone): PR-less task, no new-work dispatched (no repo/user or empty instruction)', {
       linear_issue_id: issueId, task_id: task.task_id, has_repo: Boolean(task.repo),
     });
     return;
@@ -2468,6 +2478,112 @@ async function handleStandaloneCommentTrigger(args: {
       error: err instanceof Error ? err.message : String(err),
     });
   }
+}
+
+/**
+ * #614: start NEW work from a follow-up comment on a PR-less completed task.
+ *
+ * The standalone path only knows how to *iterate* an existing PR. But a task
+ * can finish with no PR (no change needed, failed before committing, or a
+ * question/investigation run), and a follow-up ``@bgagent <request>`` on such an
+ * issue is almost always a fresh ask ("then just do X instead") — not iteration.
+ * Before #614 those comments hit a silent ``return`` and vanished. This dispatches
+ * a fresh ``coding/new-task-v1`` against the SAME repo, using the comment text as
+ * the task description, with the same 👀-ack + threaded reply + fanout terminal
+ * ownership as the iteration/clarify paths.
+ *
+ * Returns true when it handled the comment (a task was dispatched, OR a bare
+ * mention was answered with a "nothing to do" reply), false when it cannot act
+ * (no repo/user) so the caller falls through to its no-op log.
+ *
+ * Best-effort: a dispatch failure is logged and still returns true (we already
+ * ACKed) — the fanout terminal path reports the outcome.
+ */
+async function maybeStartStandaloneNewWork(args: {
+  issueId: string;
+  task: { task_id: string; repo?: string; user_id?: string };
+  workspaceId: string;
+  commentId: string;
+  replyTargetId: string;
+  trigger: CommentTrigger;
+  resolved: { accessToken: string; oauthSecretArn: string; workspaceSlug: string };
+  registryTableName: string;
+}): Promise<boolean> {
+  const { issueId, task, workspaceId, commentId, replyTargetId, trigger, resolved, registryTableName } = args;
+
+  // Can't act without a repo to work in or a user to attribute the task to —
+  // let the caller no-op-log. (These are the only genuinely unactionable cases.)
+  if (!task.repo || !task.user_id) return false;
+
+  const instruction = trigger.instruction.trim();
+  const feedbackCtx = { linearWorkspaceId: workspaceId, registryTableName };
+
+  // A bare ``@bgagent`` with no text has nothing to start. Unlike iteration
+  // (where an empty instruction means "address the latest review"), there is no
+  // PR to fall back on here — so acknowledge briefly rather than dispatch a
+  // vague task or stay silent. Handled (return true) so we don't no-op-log.
+  if (!instruction) {
+    await reactToComment(feedbackCtx, commentId, EMOJI_STARTED);
+    try {
+      await upsertThreadedReply(
+        feedbackCtx,
+        issueId,
+        replyTargetId,
+        'This task already finished and has no open PR to iterate on. Reply with what '
+          + "you'd like me to do (e.g. `@bgagent add a note to the README`) and I'll start it.",
+      );
+    } catch (err) {
+      logger.warn('A6 comment (standalone): bare-mention reply failed (non-fatal)', {
+        linear_issue_id: issueId, error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    logger.info('A6 comment (standalone): bare mention on PR-less task — replied, no dispatch', {
+      linear_issue_id: issueId, task_id: task.task_id,
+    });
+    return true;
+  }
+
+  // ACK immediately (👀 reaction + threaded "On it"), same as the iteration and
+  // clarify-resume paths.
+  await reactToComment(feedbackCtx, commentId, EMOJI_STARTED);
+  const iterationReplyId = await postIterationAck(workspaceId, registryTableName, issueId, replyTargetId);
+
+  // Idempotency: key on (issue, comment) so a webhook redelivery of the SAME
+  // comment doesn't spawn a second task. Distinct prefix from iterate_/clarify_.
+  const idempotencyKey = `newwork_${issueId}_${commentId}`.replace(/[^A-Za-z0-9_-]/g, '').slice(0, MAX_IDEMPOTENCY_KEY_LENGTH);
+  const channelMetadata: Record<string, string> = {
+    // NO orchestration_id / orchestration_iteration — the reconciler skips this;
+    // the fanout dispatcher posts the ✅/❌ reply on terminal. Reply to the thread
+    // ROOT (replyTargetId), never to a reply.
+    trigger_comment_id: replyTargetId,
+    linear_issue_id: issueId,
+    linear_workspace_id: workspaceId,
+    linear_oauth_secret_arn: resolved.oauthSecretArn,
+    linear_workspace_slug: resolved.workspaceSlug,
+    ...(iterationReplyId && { iteration_reply_comment_id: iterationReplyId }),
+  };
+
+  try {
+    const result = await createTaskCore(
+      {
+        repo: task.repo,
+        workflow_ref: 'coding/new-task-v1',
+        task_description: instruction,
+      },
+      { userId: task.user_id, channelSource: 'linear', channelMetadata, idempotencyKey },
+      idempotencyKey,
+    );
+    logger.info('A6 comment (standalone): fresh new-task dispatched from follow-up on PR-less task', {
+      linear_issue_id: issueId, prior_task_id: task.task_id, status_code: result.statusCode,
+    });
+  } catch (err) {
+    logger.error('A6 comment (standalone): createTaskCore threw for new-work dispatch', {
+      linear_issue_id: issueId,
+      prior_task_id: task.task_id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+  return true;
 }
 
 /**

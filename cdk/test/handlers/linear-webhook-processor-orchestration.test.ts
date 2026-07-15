@@ -56,6 +56,7 @@ const transitionIssueStateMock = jest.fn();
 const upsertStatusCommentMock = jest.fn();
 const reactToCommentMock = jest.fn();
 const replyToCommentMock = jest.fn();
+const upsertThreadedReplyMock = jest.fn();
 jest.mock('../../src/handlers/shared/linear-feedback', () => ({
   reportIssueFailure: (...args: unknown[]) => reportIssueFailureMock(...args),
   swapIssueReaction: (...args: unknown[]) => swapIssueReactionMock(...args),
@@ -64,6 +65,7 @@ jest.mock('../../src/handlers/shared/linear-feedback', () => ({
   upsertStatusComment: (...args: unknown[]) => upsertStatusCommentMock(...args),
   reactToComment: (...args: unknown[]) => reactToCommentMock(...args),
   replyToComment: (...args: unknown[]) => replyToCommentMock(...args),
+  upsertThreadedReply: (...args: unknown[]) => upsertThreadedReplyMock(...args),
   EMOJI_STARTED: 'eyes',
   EMOJI_SUCCESS: 'white_check_mark',
   EMOJI_FAILURE: 'x',
@@ -473,6 +475,7 @@ describe('linear-webhook-processor — #247 A6 comment trigger', () => {
     discoverOrchestrationMock.mockReset();
     reactToCommentMock.mockReset().mockResolvedValue(true);
     replyToCommentMock.mockReset().mockResolvedValue(true);
+    upsertThreadedReplyMock.mockReset().mockResolvedValue('reply-1');
   });
 
   test('@bgagent on a started sub-issue → pr-iteration task on its PR with cascade marker', async () => {
@@ -594,14 +597,51 @@ describe('linear-webhook-processor — #247 A6 comment trigger', () => {
       expect(createTaskCoreMock.mock.calls[0][0].pr_number).toBe(123);
     });
 
-    test('plain issue whose ABCA task opened NO PR → no task, no ack', async () => {
+    // #614: a follow-up on a PR-less completed task is NEW work, not a dead-end.
+    test('PR-less task + instruction → fresh new-task-v1 on the same repo, 👀 ack, NO orchestration markers', async () => {
       mockStandaloneOnly({ task_id: 'task-solo', user_id: 'u-solo', repo: 'o/r' }); // no pr
+      await handler(eventWith(comment())); // '@bgagent change the timeout to 30 min'
+
+      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+      const [body, ctx] = createTaskCoreMock.mock.calls[0];
+      expect(body.workflow_ref).toBe('coding/new-task-v1');
+      expect(body.pr_number).toBeUndefined(); // NEW work, not an iteration
+      expect(body.repo).toBe('o/r');
+      expect(body.task_description).toBe('change the timeout to 30 min');
+      expect(ctx.userId).toBe('u-solo');
+      expect(ctx.channelMetadata.trigger_comment_id).toBe('comment-1');
+      expect(ctx.channelMetadata.linear_issue_id).toBe('sub-issue-1');
+      expect(ctx.channelMetadata.orchestration_id).toBeUndefined();
+      expect(ctx.channelMetadata.orchestration_iteration).toBeUndefined();
+      expect(ctx.idempotencyKey).toContain('newwork_');
+      // 👀 ack on the comment.
+      expect(reactToCommentMock).toHaveBeenCalledWith(expect.anything(), 'comment-1', 'eyes');
+    });
+
+    test('PR-less task + BARE @bgagent (no instruction) → no task, but a threaded reply (not silent)', async () => {
+      mockStandaloneOnly({ task_id: 'task-solo', user_id: 'u-solo', repo: 'o/r' }); // no pr
+      await handler(eventWith(comment({ data: { id: 'comment-1', body: '@bgagent', issueId: 'sub-issue-1' } })));
+
+      expect(createTaskCoreMock).not.toHaveBeenCalled(); // nothing to start
+      expect(reactToCommentMock).toHaveBeenCalledWith(expect.anything(), 'comment-1', 'eyes');
+      expect(upsertThreadedReplyMock).toHaveBeenCalledTimes(1); // told the user what to do
+    });
+
+    test('PR-less task with NO repo → genuinely unactionable → no task, no ack', async () => {
+      mockStandaloneOnly({ task_id: 'task-solo', user_id: 'u-solo' }); // no pr, no repo
       await handler(eventWith(comment()));
       expect(createTaskCoreMock).not.toHaveBeenCalled();
       expect(reactToCommentMock).not.toHaveBeenCalled();
     });
 
-    test('plain issue task missing user_id → cannot attribute → no task', async () => {
+    test('PR-less task missing user_id → cannot attribute → no task, no ack', async () => {
+      mockStandaloneOnly({ task_id: 'task-solo', repo: 'o/r' }); // no user_id, no pr
+      await handler(eventWith(comment()));
+      expect(createTaskCoreMock).not.toHaveBeenCalled();
+      expect(reactToCommentMock).not.toHaveBeenCalled();
+    });
+
+    test('plain issue task missing user_id (has PR) → cannot attribute → no task', async () => {
       mockStandaloneOnly({ task_id: 'task-solo', repo: 'o/r', pr_number: 5 }); // no user_id
       await handler(eventWith(comment()));
       expect(createTaskCoreMock).not.toHaveBeenCalled();
