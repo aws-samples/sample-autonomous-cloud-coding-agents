@@ -29,7 +29,7 @@ import {
   ResourceExistsException,
   SecretsManagerClient,
 } from '@aws-sdk/client-secrets-manager';
-import { DynamoDBDocumentClient, PutCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, PutCommand, ScanCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { Command } from 'commander';
 import { ApiClient } from '../api-client';
 import { loadConfig, loadCredentials } from '../config';
@@ -1113,6 +1113,106 @@ export function makeLinearCommand(): Command {
           console.log('       bgagent linear onboard-project <linear-project-id> --repo owner/repo');
           console.log('  (To onboard teammates: `bgagent linear invite-user <slug>`.)');
         }
+      }),
+  );
+
+  linear.addCommand(
+    new Command('enable-gateway')
+      .description('Enable AgentCore Gateway federation for an ALREADY-onboarded Linear workspace (managed OAuth refresh) — reuses stored creds, no re-onboarding')
+      .argument('<slug>', 'Linear workspace urlKey of an already-onboarded workspace')
+      .option('--region <region>', 'AWS region (defaults to configured region)')
+      .option('--stack-name <name>', 'CloudFormation stack name', 'backgroundagent-dev')
+      .option('--no-actor-app', 'Drop actor=app from the OAuth flow (diagnostic)')
+      .action(async (slug: string, opts) => {
+        if (!SLUG_RE.test(slug)) {
+          throw new CliError(`Invalid workspace slug '${slug}'. Must be 4-50 chars matching [a-zA-Z0-9_-].`);
+        }
+        const config = loadConfig();
+        const region = opts.region || config.region;
+        const stackName = opts.stackName;
+
+        const workspaceRegistryTable = await getStackOutput(region, stackName, 'LinearWorkspaceRegistryTableName');
+        if (!workspaceRegistryTable) {
+          throw new CliError(`Stack '${stackName}' is missing output LinearWorkspaceRegistryTableName.`);
+        }
+
+        const sm = new SecretsManagerClient({ region });
+        const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
+
+        console.log(`bgagent linear enable-gateway — workspace '${slug}'`);
+        console.log(`  region: ${region}`);
+
+        // ─── Find the existing registry row for this slug ──────────────
+        // slug is not the PK (linear_workspace_id is), so scan for it — the
+        // registry is one small row per workspace.
+        const found = await ddb.send(new ScanCommand({
+          TableName: workspaceRegistryTable,
+          FilterExpression: 'workspace_slug = :slug',
+          ExpressionAttributeValues: { ':slug': slug },
+          Limit: 1,
+        }));
+        const row = found.Items?.[0];
+        if (!row) {
+          throw new CliError(
+            `Workspace '${slug}' is not in the registry. Run \`bgagent linear setup ${slug}\` or `
+            + '`add-workspace` first — enable-gateway only augments an already-onboarded workspace.',
+          );
+        }
+        if (row.gateway_url) {
+          throw new CliError(
+            `Workspace '${slug}' already has a gateway (${row.gateway_url as string}). `
+            + 'Remove gateway_id/gateway_url from the registry row (and delete the gateway) to re-provision.',
+          );
+        }
+
+        // ─── Reuse the stored OAuth app creds (no re-auth) ─────────────
+        const secretArn = row.oauth_secret_arn as string | undefined;
+        if (!secretArn) {
+          throw new CliError(`Workspace '${slug}' registry row has no oauth_secret_arn.`);
+        }
+        const secretVal = await sm.send(new GetSecretValueCommand({ SecretId: secretArn }));
+        if (!secretVal.SecretString) {
+          throw new CliError(`Workspace '${slug}' OAuth secret ${secretArn} has no value.`);
+        }
+        let stored: Partial<StoredLinearOauthToken>;
+        try {
+          stored = JSON.parse(secretVal.SecretString) as Partial<StoredLinearOauthToken>;
+        } catch (err) {
+          throw new CliError(`Workspace '${slug}' OAuth secret is not valid JSON: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        if (!stored.client_id || !stored.client_secret) {
+          throw new CliError(`Workspace '${slug}' OAuth secret is missing client_id/client_secret.`);
+        }
+
+        // ─── Provision the gateway (interactive: callback + consent) ───
+        const gatewayInfo = await runGatewayProvisioning({
+          region,
+          stackName,
+          slug,
+          clientId: stored.client_id,
+          clientSecret: stored.client_secret,
+          userPoolId: config.user_pool_id,
+          actorApp: opts.actorApp !== false,
+        });
+        if (!gatewayInfo) {
+          // runGatewayProvisioning already printed the reason.
+          throw new CliError('Gateway provisioning did not complete — see the messages above.');
+        }
+
+        // ─── Patch gateway_id/gateway_url onto the existing row ────────
+        await ddb.send(new UpdateCommand({
+          TableName: workspaceRegistryTable,
+          Key: { linear_workspace_id: row.linear_workspace_id },
+          UpdateExpression: 'SET gateway_id = :gid, gateway_url = :gurl, updated_at = :now',
+          ExpressionAttributeValues: {
+            ':gid': gatewayInfo.gatewayId,
+            ':gurl': gatewayInfo.gatewayUrl,
+            ':now': new Date().toISOString(),
+          },
+        }));
+        console.log();
+        console.log(`✅ Gateway enabled for '${slug}'. Linear-triggered tasks now route the Linear MCP through the gateway.`);
+        console.log('   (The gateway holds the Linear OAuth token + owns its 24h refresh; the agent no longer needs the per-thread token for MCP.)');
       }),
   );
 
