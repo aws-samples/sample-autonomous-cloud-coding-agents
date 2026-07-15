@@ -43,6 +43,7 @@ import {
   generatePkce,
   LINEAR_OAUTH_SECRET_PREFIX,
   linearOauthSecretName,
+  resolveWebhookSecretAction,
   StoredLinearOauthToken,
 } from '../linear-oauth';
 import { awaitOauthCallback, CALLBACK_URL } from '../oauth-callback-server';
@@ -601,6 +602,25 @@ export function makeLinearCommand(): Command {
         process.stdout.write('  → Storing OAuth token...');
         const sm = new SecretsManagerClient({ region });
         const now = new Date().toISOString();
+        // Preserve any EXISTING per-workspace webhook signing secret before the
+        // OAuth overwrite below. Re-running `setup` on an already-installed
+        // workspace must NOT clobber its working signing secret with the
+        // stack-wide fallback (which belongs to whichever workspace installed
+        // first) — that silently breaks signature verification (401 "Invalid
+        // signature") for every workspace after the first in a multi-workspace
+        // deployment. Rotation stays the job of `update-webhook-secret`.
+        let existingWebhookSecret: string | undefined;
+        try {
+          const prior = await sm.send(new GetSecretValueCommand({ SecretId: linearOauthSecretName(slug) }));
+          if (prior.SecretString) {
+            const priorBundle = JSON.parse(prior.SecretString) as Partial<StoredLinearOauthToken>;
+            if (priorBundle.webhook_signing_secret?.startsWith('lin_wh_')) {
+              existingWebhookSecret = priorBundle.webhook_signing_secret;
+            }
+          }
+        } catch {
+          // No prior bundle (first install) — nothing to preserve.
+        }
         const stored: StoredLinearOauthToken = {
           access_token: tokenResponse.access_token,
           refresh_token: tokenResponse.refresh_token ?? '',
@@ -687,8 +707,22 @@ export function makeLinearCommand(): Command {
         const stackWideAlreadyConfigured = await isWebhookSecretConfigured(sm, webhookSecretArn!);
         let webhookSigningSecret: string | undefined;
 
-        if (stackWideAlreadyConfigured) {
-          console.log('  ✓ Webhook signing secret already configured stack-wide (mirroring to per-workspace)');
+        const secretAction = resolveWebhookSecretAction(existingWebhookSecret, stackWideAlreadyConfigured);
+        if (secretAction.kind === 'preserve') {
+          // This workspace already had its own signing secret — keep it. Do NOT
+          // overwrite from the stack-wide fallback (a DIFFERENT workspace's
+          // secret once >1 is installed). Re-run case; rotation is
+          // `update-webhook-secret`'s job, not setup's.
+          console.log('  ✓ Preserving this workspace\'s existing webhook signing secret (re-run — not overwriting)');
+          webhookSigningSecret = secretAction.secret;
+        } else if (secretAction.kind === 'mirror-stackwide') {
+          // No per-workspace secret yet, but the stack-wide one is set. Safe to
+          // mirror ONLY when this is the first/only workspace — for a genuinely
+          // new ADDITIONAL workspace the stack-wide secret is the wrong one, so
+          // warn that the operator should verify (or run `update-webhook-secret`).
+          console.log('  ✓ No per-workspace secret yet; mirroring the stack-wide signing secret');
+          console.log('    (if this is an ADDITIONAL workspace, its Linear webhook secret differs —');
+          console.log(`     run \`bgagent linear update-webhook-secret ${slug}\` with this workspace's secret.)`);
           try {
             const value = await sm.send(new GetSecretValueCommand({ SecretId: webhookSecretArn! }));
             if (value.SecretString && value.SecretString.startsWith('lin_wh_')) {

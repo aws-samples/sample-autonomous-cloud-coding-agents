@@ -29,6 +29,7 @@ import {
   LINEAR_TOKEN_ENDPOINT,
   linearOauthSecretName,
   refreshAccessToken,
+  resolveWebhookSecretAction,
 } from '../src/linear-oauth';
 
 describe('linearOauthSecretName', () => {
@@ -279,5 +280,37 @@ describe('refreshAccessToken', () => {
       clientSecret: 'csec',
       fetchImpl: fetchImpl as unknown as typeof fetch,
     })).rejects.toThrow(CliError);
+  });
+});
+
+describe('resolveWebhookSecretAction', () => {
+  it('PRESERVES an existing per-workspace secret over the stack-wide one (multi-workspace re-run — the bug)', () => {
+    // The regression: re-running `setup` on an already-installed workspace must
+    // NOT overwrite its working signing secret with the stack-wide fallback
+    // (which belongs to a different workspace once >1 is installed) — that
+    // silently breaks signature verification (webhook 401 "Invalid signature").
+    const action = resolveWebhookSecretAction('lin_wh_thisWorkspace', true);
+    expect(action).toEqual({ kind: 'preserve', secret: 'lin_wh_thisWorkspace' });
+  });
+
+  it('preserves the existing secret even when no stack-wide secret is set', () => {
+    expect(resolveWebhookSecretAction('lin_wh_existing', false)).toEqual({
+      kind: 'preserve',
+      secret: 'lin_wh_existing',
+    });
+  });
+
+  it('mirrors the stack-wide secret when there is no per-workspace one yet (first workspace)', () => {
+    expect(resolveWebhookSecretAction(undefined, true)).toEqual({ kind: 'mirror-stackwide' });
+  });
+
+  it('prompts when neither a per-workspace nor a stack-wide secret exists (first install)', () => {
+    expect(resolveWebhookSecretAction(undefined, false)).toEqual({ kind: 'prompt' });
+  });
+
+  it('ignores a malformed existing secret (not lin_wh_) and falls through', () => {
+    // A corrupt/empty value must not be "preserved" as if valid.
+    expect(resolveWebhookSecretAction('garbage', true)).toEqual({ kind: 'mirror-stackwide' });
+    expect(resolveWebhookSecretAction('', false)).toEqual({ kind: 'prompt' });
   });
 });

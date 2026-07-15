@@ -293,3 +293,45 @@ function isLinearTokenResponse(value: unknown): value is LinearTokenResponse {
 export function computeExpiresAt(expiresInSeconds: number, now: Date = new Date()): string {
   return new Date(now.getTime() + expiresInSeconds * 1000).toISOString();
 }
+
+/** What `bgagent linear setup` should do about the webhook signing secret. */
+export type WebhookSecretAction =
+  /** This workspace already has its own signing secret — keep it (re-run). */
+  | { readonly kind: 'preserve'; readonly secret: string }
+  /** No per-workspace secret; mirror the stack-wide one (safe for the first
+   *  workspace, ambiguous for an additional one — caller should warn). */
+  | { readonly kind: 'mirror-stackwide' }
+  /** No secret anywhere — prompt the operator for it (first install). */
+  | { readonly kind: 'prompt' };
+
+/**
+ * Decide which webhook signing secret `setup` should use, WITHOUT clobbering a
+ * working per-workspace secret.
+ *
+ * The bug this fixes: re-running `setup` on an already-installed workspace used
+ * to lift the *stack-wide* signing secret into the per-workspace bundle. That's
+ * correct only for the FIRST workspace — the stack-wide secret belongs to
+ * whichever workspace installed first, so for any additional workspace it
+ * overwrites the correct per-workspace secret with the wrong one, silently
+ * breaking signature verification (webhook 401 "Invalid signature").
+ *
+ * Rule: an existing valid per-workspace secret always wins (rotation is
+ * `update-webhook-secret`'s job); else mirror the stack-wide secret if present;
+ * else prompt. Pure — the caller supplies what it read from Secrets Manager.
+ *
+ * @param existingPerWorkspaceSecret the `webhook_signing_secret` on this
+ *        workspace's OAuth bundle BEFORE the setup rewrite (undefined if none).
+ * @param stackWideConfigured whether the stack-wide fallback secret is set.
+ */
+export function resolveWebhookSecretAction(
+  existingPerWorkspaceSecret: string | undefined,
+  stackWideConfigured: boolean,
+): WebhookSecretAction {
+  if (existingPerWorkspaceSecret?.startsWith('lin_wh_')) {
+    return { kind: 'preserve', secret: existingPerWorkspaceSecret };
+  }
+  if (stackWideConfigured) {
+    return { kind: 'mirror-stackwide' };
+  }
+  return { kind: 'prompt' };
+}
