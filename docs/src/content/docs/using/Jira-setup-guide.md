@@ -4,7 +4,7 @@ title: Jira setup guide
 
 # Jira integration setup guide
 
-Set up the ABCA Jira Cloud integration so that adding a label to a Jira issue triggers an autonomous task. The agent posts progress comments back on the issue as it works.
+Set up the ABCA Jira Cloud integration so that adding a label to a Jira issue triggers an autonomous task. ABCA posts progress comments back on the issue as it works — a "started" comment from the agent and a final status comment (with cost, turns, and duration) from the platform when the task finishes.
 
 ## Prerequisites
 
@@ -17,7 +17,7 @@ Set up the ABCA Jira Cloud integration so that adding a label to a Jira issue tr
 
 ## How it works
 
-A Jira-site admin creates an Atlassian OAuth 2.0 (3LO) app and authorizes it on the site. The OAuth token bundle is stored in a per-tenant Secrets Manager secret (`bgagent-jira-oauth-<cloudId>`). When a user adds the trigger label to a Jira issue, Jira fires a webhook to ABCA; the receiver verifies the `X-Hub-Signature` HMAC, dedupes, and async-invokes the processor, which resolves the tenant, looks up the project→repo mapping, and creates a task. Jira-triggered tasks always run the `coding/new-task-v1` workflow (the processor pins `workflow_ref` explicitly, since a label-triggered task always targets a mapped repo). The agent clones the repo, opens a PR, and comments on the Jira issue via the Jira REST v3 API (using the same stored OAuth token).
+A Jira-site admin creates an Atlassian OAuth 2.0 (3LO) app and authorizes it on the site. The OAuth token bundle is stored in a per-tenant Secrets Manager secret (`bgagent-jira-oauth-<cloudId>`). When a user adds the trigger label to a Jira issue, Jira fires a webhook to ABCA; the receiver verifies the `X-Hub-Signature` HMAC, dedupes, and async-invokes the processor, which resolves the tenant, looks up the project→repo mapping, and creates a task. Jira-triggered tasks always run the `coding/new-task-v1` workflow (the processor pins `workflow_ref` explicitly, since a label-triggered task always targets a mapped repo). The agent clones the repo, opens a PR, and posts a "started" comment on the Jira issue via the Jira REST v3 API (using the same stored OAuth token). When the task reaches a terminal state, the platform's fan-out plane posts a single final status comment — outcome, cost, turns, duration, and PR link — via the same REST v3 endpoint (see [How it works](#how-it-works) below).
 
 **Tenant key.** Everything is indexed on `cloudId` — the Atlassian tenant UUID, *not* the site domain or name. Webhook payloads and the OAuth flow both surface `cloudId`; it is the join key across the project-mapping, user-mapping, and workspace-registry tables.
 
@@ -38,13 +38,49 @@ Outbound (Agent → Jira) — REST v3:
 runner picks task with channel_source="jira"
   → jira_reactions resolves the OAuth access token from
     bgagent-jira-oauth-<cloudId> (JIRA_API_TOKEN)
-  → agent posts a "started" comment, then a terminal "succeeded /
-    failed (+ PR link)" comment, via
+  → agent posts a "started" comment via
     POST api.atlassian.com/ex/jira/{cloudId}/rest/api/3/issue/{key}/comment
 ```
 
+Outbound terminal status (Platform → Jira) — REST v3, deterministic:
+
+```
+task reaches a terminal event (completed / failed / cancelled /
+  stranded / timed out) → TaskEventsTable DynamoDB Stream → fan-out
+  Lambda's dispatchToJira resolves the OAuth token and posts ONE
+  final-status comment with cost, turns, duration, task id, and the
+  PR link, via the same REST v3 comment endpoint
+```
+
+Outbound board transitions (Agent → Jira) — REST v3:
+
+```
+task starts → agent moves the issue to an In Progress status via
+  POST api.atlassian.com/ex/jira/{cloudId}/rest/api/3/issue/{key}/transitions
+PR opened → agent moves the issue to an "In Review" status via the same endpoint
+```
+
+So the Jira board reflects the task lifecycle at a glance, the agent transitions
+the originating issue as it works — the same signal Linear-origin tasks already
+give. See [Board transitions](#board-transitions) below for the resolution order
+and the permission it requires.
+
+The **start** comment is posted by the agent. The **terminal** comment is
+posted by the platform's fan-out plane, not the agent — so it always includes
+cost / turns / duration and fires even when the agent crashes before
+completing (max-turns, OOM). The final comment frames three outcomes:
+
+- ✅ **Task completed** — with the PR link when one was opened.
+- ⚠️ **Shipped a PR but stopped early** — the PR link plus the reason it
+  stopped (e.g. "Hit max-turns cap"), so you can review and decide.
+- ❌ **Task failed / cancelled / timed out** — with a short classifier reason.
+
 Comments are advisory and best-effort: network/auth failures are logged and
-swallowed (with an auth circuit-breaker), never gating the pipeline.
+swallowed (the agent path has an auth circuit-breaker; the platform path
+classifies transient failures as retryable and retries the record), never
+gating the task itself. Jira has no comment-edit API, so the terminal comment
+is posted exactly once (a per-task marker guards against duplicate posts on
+stream retries).
 
 > **Why REST, not the Atlassian Remote MCP?** The hosted MCP
 > (`mcp.atlassian.com`) requires an interactive, browser-based OAuth 2.1 flow
@@ -56,7 +92,7 @@ swallowed (with an auth circuit-breaker), never gating the pipeline.
 > it is expected to fail to connect today and the outbound path does not
 > depend on it.
 
-There is no DynamoDB Streams consumer and no outbound-notify Lambda — this is an inbound-only adapter, matching Linear.
+Inbound admission (webhook → task) is Jira-specific and has no DynamoDB Streams consumer of its own. The **terminal** status comment, however, is delivered by the shared fan-out plane's DynamoDB Streams consumer (`dispatchToJira`) — the same platform-side surface that posts Linear final-status comments — so it behaves identically to Linear for terminal outcomes.
 
 ## Setup walkthrough
 
@@ -114,6 +150,8 @@ bgagent jira map <cloud-id> <PROJECT-KEY> --repo owner/repo
 - `<PROJECT-KEY>` — the Jira project key, e.g. `ENG` (uppercase, starts with a letter)
 - `--repo owner/repo` — the GitHub repository tasks from this project route to
 - `--label <name>` — trigger label (default `bgagent`)
+- `--status-on-start <name>` — Jira status to move the issue to when a task starts (overrides the heuristic; see [Board transitions](#board-transitions))
+- `--status-on-pr <name>` — Jira status to move the issue to when a PR is opened (overrides the `In Review` default)
 
 This writes an `active` row keyed `<cloudId>#<projectKey>` into the project-mapping table. Requires admin IAM (it writes DynamoDB directly).
 
@@ -162,6 +200,32 @@ The body must be verified as the *raw unparsed bytes* — never parsed-and-restr
 - **`jira:issue_updated`** — triggers only if the label was **newly added** in this update. Jira reports label changes in `changelog.items[]` (`field: "labels"`, with `fromString` / `toString`), *not* by re-sending the full label list. The processor diffs the changelog rather than inspecting `issue.fields.labels`, so re-saving an issue that already has the label does not re-trigger.
 - All other event types get a silent `200`.
 
+## Board transitions
+
+As a Jira-triggered task progresses, the agent moves the originating issue across its workflow so the board reflects reality — the same at-a-glance signal Linear-origin tasks already give:
+
+- **Task start** → the issue moves to an **In Progress** status.
+- **PR opened** → the issue moves to a **review** status (default **In Review**, falling back to In Progress so a stock board isn't skipped).
+- **Task failed or no PR opened** → the status is **left unchanged**; the ❌ final-status comment is the signal, and bouncing a card back and forth is noisier than leaving it where a human sees the failure.
+- **Already at or past the target** → the transition is **skipped**, so a re-triggered task never drags a card backward (e.g. from In Review back to In Progress). This mirrors the Linear integration.
+
+Humans still move the card to **Done** after merging the PR — ABCA never closes issues.
+
+**How a target status is resolved** (evaluated per lifecycle point, first match wins — modeled on the Linear integration):
+
+1. **Per-project override** — the `--status-on-start` / `--status-on-pr` names configured on the project mapping. Matched case-insensitively against the destination status name. An override is a deliberate instruction: it's honored regardless of the current status, and if it isn't reachable, ABCA skips (no heuristic fallback).
+2. **Name match** (no config needed for standard workflows):
+   - On start, a transition whose destination is named **In Progress**.
+   - On PR opened, a transition named **In Review**, then common synonyms (`Code Review`, `Review`, `Peer Review`, `Reviewing`), then **In Progress** as a last resort.
+3. **Category fallback** — any transition whose destination `statusCategory` is *In Progress* (`indeterminate`), **excluding `Blocked`** (which shares that category but is never what "move to In Progress" means). The name match in step 2 is what keeps the heuristic from landing on `Blocked` when both are available.
+4. **Skip with a warning** — nothing matches, the transition requires a screen with required fields, or the authorizing user lacks permission. The task is never affected.
+
+Transitions are **best-effort**, exactly like comments: short timeout, errors logged and swallowed, sharing the same `401`/`403` auth circuit breaker. A transition failure never fails, blocks, or retries the task. Transition IDs are workflow- and current-status-specific, so they are resolved per-issue at call time (by matching destination name / category) — never configured or hard-coded.
+
+> **Permission prerequisite.** The transition uses the existing `read:jira-work` / `write:jira-work` scopes — **no new OAuth scopes and no re-authorization**. OAuth scopes do not, however, override Jira **project permissions**: the authorizing user must have the **Transition Issues** permission in each mapped project. When they don't, Jira's *get transitions* call returns an empty list (not an error), so ABCA simply skips the transition and logs a warning — comments still post as normal.
+
+The feature targets Jira **statuses**, not board columns. Because moving a card between columns *is* a status transition under the hood, no board-configuration API is involved. Multi-hop pathfinding is out of scope: if no single transition reaches the target from the current status, ABCA skips.
+
 ## Webhook dedup
 
 The receiver dedupes on `{issueKey}#{webhookEventTimestamp}` with an 8-hour TTL. Using the event timestamp (rather than event type) means two distinct label-adds in quick succession are not collapsed. Jira retries far less aggressively than Linear, so 8 hours is safe parity.
@@ -206,8 +270,18 @@ Expected, not a broken install. The stored access token lives ~1 hour and is onl
 
 - Verify the per-tenant OAuth secret exists: `aws secretsmanager describe-secret --secret-id bgagent-jira-oauth-<cloudId>`.
 - Verify the registry row's `oauth_secret_arn` matches and `status = 'active'`.
-- Check the agent container logs for `jira_reactions` lines (`comment_task_started` / `comment_task_finished`). Absence means `channel_source` wasn't `jira` on the task, or the tenant OAuth token didn't resolve. (The `jira-server` MCP entry is also written to `.mcp.json`, but it is a non-functional placeholder — its connection failure is expected and is not the cause.)
+- Check the agent container logs for `jira_reactions` lines (`comment_task_started`). Absence means `channel_source` wasn't `jira` on the task, or the tenant OAuth token didn't resolve. (The `jira-server` MCP entry is also written to `.mcp.json`, but it is a non-functional placeholder — its connection failure is expected and is not the cause.)
 - A `401`/`403` from Atlassian usually means the token was revoked tenant-side, or the stored access token expired and the agent (which never refreshes) failed closed — re-run `bgagent jira setup` to re-mint, then re-apply the label.
+
+### Jira card doesn't move across the board
+
+Board transitions are best-effort and never block the task, so a card can stay put while comments still post. Common causes:
+
+- **The authorizing user lacks *Transition Issues* permission** in the project. Jira then returns an empty transition list and ABCA skips with a warning. Grant the permission to the account that ran `bgagent jira setup`.
+- **No matching destination.** The standard heuristics look for an *In Progress*-category status on start and an `In Review`-named status on PR. Custom workflows may name these differently — configure `bgagent jira map ... --status-on-start "<name>" --status-on-pr "<name>"`.
+- **The transition requires a screen** with required fields. ABCA skips these by design (it can't fill required fields) — pick a screen-less transition or remove the required fields from the workflow.
+- **No single-hop transition reaches the target** from the issue's current status. ABCA does not chain transitions.
+- Check the agent container logs for `jira_reactions: transition …` lines — they name the chosen destination or the skip reason.
 
 ## Limits and quotas
 

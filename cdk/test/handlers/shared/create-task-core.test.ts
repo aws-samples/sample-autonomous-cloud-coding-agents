@@ -589,7 +589,13 @@ describe('createTaskCore', () => {
     expect(result.statusCode).toBe(201);
   });
 
-  test('resolves the coding workflow when workflow_ref is omitted AND a repo is present', async () => {
+  test('resolves the platform default when workflow_ref is omitted (repo present)', async () => {
+    // createTaskCore does NOT infer the coding workflow from the mere presence
+    // of a repo — that "repo task ⇒ coding workflow" decision is pinned by each
+    // CHANNEL processor at its call site (Linear/Jira/Slack pass
+    // workflow_ref: CODING_WORKFLOW_ID; see those processors' tests). A raw
+    // createTaskCore call with no ref falls through the resolution ladder to the
+    // repo-less platform default, whether or not a repo is attached.
     const result = await createTaskCore(
       { repo: 'org/repo', task_description: 'Fix the bug' },
       makeContext(),
@@ -597,11 +603,21 @@ describe('createTaskCore', () => {
     );
     expect(result.statusCode).toBe(201);
     const body = JSON.parse(result.body);
-    // No workflow_ref BUT a repo is present ⇒ the repo-aware fallback resolves
-    // to the disciplined coding workflow, not the repo-less default/agent-v1.
-    // (Pre-#296 behaviour; #296 left this rung unwired and every repo task
-    // fell through to default/agent-v1, breaking pr_url/screenshot/stacking.)
-    expect(body.data.resolved_workflow).toEqual({ id: 'coding/new-task-v1', version: '1.0.0' });
+    expect(body.data.resolved_workflow).toEqual({ id: 'default/agent-v1', version: '1.0.0' });
+  });
+
+  test('resolves the platform default when workflow_ref is omitted AND no repo (symmetric)', async () => {
+    // §6 symmetric coverage: the repo-less path through the real caller. Guards
+    // against a future fallback-branch inversion that a repo-pinned test would
+    // miss (the repo-less default must stay default/agent-v1).
+    const result = await createTaskCore(
+      { task_description: 'Do some research' },
+      makeContext(),
+      'req-default-norepo',
+    );
+    expect(result.statusCode).toBe(201);
+    const body = JSON.parse(result.body);
+    expect(body.data.resolved_workflow).toEqual({ id: 'default/agent-v1', version: '1.0.0' });
   });
 
   test('creates a pr-iteration workflow task with pr_number', async () => {

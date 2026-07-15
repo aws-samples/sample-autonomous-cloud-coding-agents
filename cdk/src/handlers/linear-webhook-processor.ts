@@ -108,6 +108,7 @@ import { readConcurrencyBudget, releaseReadyChildren } from './shared/orchestrat
 import { upsertEpicPanel } from './shared/orchestration-rollup';
 import { claimCommentAck, clearRollupClaim, deriveOrchestrationId, loadOrchestration, setStatusCommentId, type OrchestrationReleaseContext } from './shared/orchestration-store';
 import type { Attachment } from './shared/types';
+import { CODING_WORKFLOW_ID } from './shared/workflows';
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
@@ -884,6 +885,11 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     {
       repo,
       task_description: taskDescription,
+      // Explicit coding workflow: a label-triggered Linear task always targets a
+      // mapped repo, so it must not fall through the resolution ladder to the
+      // repo-less default/agent-v1 (which never commits or opens a PR). Mirrors
+      // the Jira processor (#546/#547). See CODING_WORKFLOW_ID.
+      workflow_ref: CODING_WORKFLOW_ID,
       ...(attachments.length > 0 && { attachments }),
     },
     {

@@ -33,13 +33,6 @@ import { Construct } from 'constructs';
 export const ECS_PAYLOAD_TTL_DAYS = 1;
 
 /**
- * Object-key prefix for ECS task payloads. Key layout:
- * ``<task_id>/payload.json``. Each task writes a single object under its own
- * task-id prefix; the orchestrator deletes it on terminal.
- */
-export const ECS_PAYLOAD_OBJECT_KEY_PREFIX = '';
-
-/**
  * Properties for the EcsPayloadBucket construct.
  */
 export interface EcsPayloadBucketProps {

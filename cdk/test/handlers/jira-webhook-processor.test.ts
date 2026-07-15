@@ -312,6 +312,44 @@ describe('jira-webhook-processor handler', () => {
     });
   });
 
+  test('stamps status_on_start/status_on_pr overrides into channelMetadata when configured', async () => {
+    ddbSend
+      .mockResolvedValueOnce({
+        Item: {
+          repo: 'org/repo',
+          status: 'active',
+          label_filter: 'bgagent',
+          status_on_start: 'Doing',
+          status_on_pr: 'Code Review',
+        },
+      })
+      .mockResolvedValueOnce({
+        Item: { platform_user_id: 'cognito-user-1', status: 'active' },
+      });
+    createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: '{}' });
+
+    await handler(eventWith(issue()));
+
+    const [, ctx] = createTaskCoreMock.mock.calls[0];
+    expect(ctx.channelMetadata.jira_status_on_start).toBe('Doing');
+    expect(ctx.channelMetadata.jira_status_on_pr).toBe('Code Review');
+  });
+
+  test('omits transition-override metadata when the mapping has no status overrides', async () => {
+    ddbSend
+      .mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'active', label_filter: 'bgagent' } })
+      .mockResolvedValueOnce({
+        Item: { platform_user_id: 'cognito-user-1', status: 'active' },
+      });
+    createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: '{}' });
+
+    await handler(eventWith(issue()));
+
+    const [, ctx] = createTaskCoreMock.mock.calls[0];
+    expect(ctx.channelMetadata).not.toHaveProperty('jira_status_on_start');
+    expect(ctx.channelMetadata).not.toHaveProperty('jira_status_on_pr');
+  });
+
   test('uses composite project mapping key {cloudId}#{projectKey}', async () => {
     // Two tenants can have the same project key — the composite key
     // disambiguates them. Belt-and-braces test that the lookup uses the
