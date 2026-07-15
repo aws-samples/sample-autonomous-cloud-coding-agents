@@ -55,7 +55,8 @@ RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && \
 RUN npm install -g npm@latest && \
     npm install -g @anthropic-ai/claude-code@2.1.191 && \
     CLAUDE_NPM_ROOT="$(npm root -g)/@anthropic-ai/claude-code" && \
-    npm --prefix "${CLAUDE_NPM_ROOT}" update tar minimatch glob cross-spawn picomatch
+    npm --prefix "${CLAUDE_NPM_ROOT}" update tar minimatch glob cross-spawn picomatch && \
+    node "${CLAUDE_NPM_ROOT}/install.cjs"
 
 # Install uv (fast Python package manager) — pinned for reproducibility
 COPY --from=ghcr.io/astral-sh/uv:0.11.14 /uv /usr/local/bin/uv
