@@ -848,6 +848,9 @@ export class AgentStack extends Stack {
       orchestratorFunctionArn: orchestrator.alias.functionArn,
       guardrailId: inputGuardrail.guardrailId,
       guardrailVersion: inputGuardrail.guardrailVersion,
+      // Lets the processor fetch, screen, and store Jira media attachments at
+      // task-admission time (#577). Same bucket the orchestrator hydrates from.
+      attachmentsBucket: attachmentsBucket.bucket,
     });
 
     // Agent runtime reads the per-tenant Jira OAuth token directly from
