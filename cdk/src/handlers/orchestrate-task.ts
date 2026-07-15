@@ -37,7 +37,7 @@ import {
   type PollState,
 } from './shared/orchestrator';
 import { runPreflightChecks } from './shared/preflight';
-import { startSessionWithRetry } from './shared/session-start-retry';
+import { isAutoRetried, startSessionWithRetry } from './shared/session-start-retry';
 import { deleteEcsPayload } from './shared/strategies/ecs-strategy';
 import type { TaskRecord } from './shared/types';
 import { workflowIsReadOnly, workflowRequiresRepo } from './shared/workflows';
@@ -217,9 +217,15 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
       // classification). It is a breadcrumb for a FORTHCOMING failure renderer to
       // detect and surface "I already tried again" to the channel — no consumer
       // renders it yet on this branch (retryGuidance() in error-classifier.ts is
-      // the intended copy source; it ships ahead of its consumer). Only stamped
-      // when the single transient retry above also failed.
-      const retriedNote = autoRetried ? ' [auto-retried]' : '';
+      // the intended copy source; it ships ahead of its consumer).
+      //
+      // Stamp on BOTH paths a retry ran (#599 N1): branch 3 sets `autoRetried`
+      // above then a LATER step throws; branch 4 (transient-then-transient) throws
+      // FROM startSessionWithRetry before `autoRetried` is assigned, so the local
+      // is still false — read the fact off the thrown error via isAutoRetried().
+      // Without this, a double-transient failure was told "reply to retry" instead
+      // of "I already retried" — the exact confusion the marker exists to prevent.
+      const retriedNote = (autoRetried || isAutoRetried(err)) ? ' [auto-retried]' : '';
       await failTask(taskId, TaskStatus.HYDRATING, `Session start failed: ${String(err)}${retriedNote}`, task.user_id, true, task.repo);
       throw err;
     }

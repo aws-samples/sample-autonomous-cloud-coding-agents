@@ -18,7 +18,7 @@
  */
 
 import type { SessionHandle } from '../../../src/handlers/shared/compute-strategy';
-import { startSessionWithRetry } from '../../../src/handlers/shared/session-start-retry';
+import { isAutoRetried, startSessionWithRetry } from '../../../src/handlers/shared/session-start-retry';
 
 const HANDLE: SessionHandle = {
   sessionId: 'sess-1',
@@ -79,15 +79,29 @@ describe('startSessionWithRetry — the 4 branches (#599 B2)', () => {
     expect(emitReasons).toHaveLength(1); // the session_start_retry event fired once
   });
 
-  it('4. transient then transient → throws the retry error (second failure surfaces)', async () => {
+  it('4. transient then transient → throws the retry error TAGGED autoRetried (#599 N1)', async () => {
     const secondErr = new Error('TaskDefinition is inactive (again)');
     const startSession = jest
       .fn()
       .mockRejectedValueOnce(TRANSIENT)
       .mockRejectedValueOnce(secondErr);
     const { d } = deps();
+    // The double-transient error must carry the retry fact across the throw so the
+    // caller stamps `[auto-retried]` (a first-attempt failure must NOT be tagged).
     await expect(startSessionWithRetry({ startSession }, {} as never, d)).rejects.toBe(secondErr);
     expect(startSession).toHaveBeenCalledTimes(2);
+    expect(isAutoRetried(secondErr)).toBe(true);
+  });
+
+  it('isAutoRetried is false for a first-attempt (non-transient) failure and non-objects', async () => {
+    // Branch 2's re-thrown error ran no retry → must NOT be tagged, else the caller
+    // would wrongly tell the user "I already retried".
+    const startSession = jest.fn().mockRejectedValueOnce(NON_TRANSIENT);
+    const { d } = deps();
+    await expect(startSessionWithRetry({ startSession }, {} as never, d)).rejects.toBe(NON_TRANSIENT);
+    expect(isAutoRetried(NON_TRANSIENT)).toBe(false);
+    expect(isAutoRetried(undefined)).toBe(false);
+    expect(isAutoRetried('a string error')).toBe(false);
   });
 });
 

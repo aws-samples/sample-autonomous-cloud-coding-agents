@@ -55,6 +55,20 @@ export interface StartSessionWithRetryResult {
 }
 
 /**
+ * Symbol tag pinned onto the error thrown from branch 4 (transient-then-transient)
+ * so the retry fact survives the throw — the ``autoRetried`` result field only
+ * exists on the success paths. Kept as a Symbol (not an own string prop) so it
+ * never collides with, or leaks into, the error's serialized shape. Read via
+ * {@link isAutoRetried}.
+ */
+const AUTO_RETRIED = Symbol('autoRetried');
+
+/** True iff ``err`` was thrown after an auto-retry already ran (branch 4). */
+export function isAutoRetried(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && (err as Record<symbol, unknown>)[AUTO_RETRIED] === true;
+}
+
+/**
  * Start a compute session, auto-retrying ONCE on a transient failure.
  *
  * Behaviour (the four branches #599 B2 asks be covered):
@@ -62,9 +76,13 @@ export interface StartSessionWithRetryResult {
  *   2. first attempt fails NON-transient → re-throw the original error (no retry).
  *   3. first attempt fails transient, retry succeeds → return it, ``autoRetried: true``.
  *   4. first attempt fails transient, retry also fails → throw the retry's error
- *      (with ``autoRetried`` observable via the thrown-from state; the caller
- *      stamps its own ``[auto-retried]`` marker — it owns ``autoRetried`` because
- *      this function throws rather than returns on the double-failure).
+ *      TAGGED with ``autoRetried = true`` (see {@link isAutoRetried}). The result
+ *      object carries ``autoRetried`` only on the success paths (1/3); on the
+ *      double-failure this function throws, so the fact is instead pinned onto the
+ *      thrown error itself — the caller reads it via {@link isAutoRetried} to stamp
+ *      the ``[auto-retried]`` marker. Without the tag the caller could not tell a
+ *      double-transient failure (retry ran) from a first-attempt failure (it did
+ *      not), and would wrongly tell the user "reply to retry" (N1).
  *
  * The ``emitRetryEvent`` call is BEST-EFFORT and internally guarded (B1): a
  * TaskEvents PutItem fault (throttle/timeout — exactly the conditions that
@@ -113,7 +131,18 @@ export async function startSessionWithRetry(
         error: emitErr instanceof Error ? emitErr.message : String(emitErr),
       });
     }
-    const handle = await strategy.startSession(input);
-    return { handle, autoRetried: true };
+    try {
+      const handle = await strategy.startSession(input);
+      return { handle, autoRetried: true };
+    } catch (retryErr) {
+      // Branch 4: the retry ALSO failed. Pin the retry fact onto the thrown error
+      // so the caller can stamp ``[auto-retried]`` (N1) — otherwise a double-
+      // transient failure is indistinguishable from a first-attempt failure and
+      // the user is wrongly told "reply to retry" instead of "I already retried".
+      if (typeof retryErr === 'object' && retryErr !== null) {
+        (retryErr as Record<symbol, unknown>)[AUTO_RETRIED] = true;
+      }
+      throw retryErr;
+    }
   }
 }
