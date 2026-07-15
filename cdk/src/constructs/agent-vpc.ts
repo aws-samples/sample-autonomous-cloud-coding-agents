@@ -54,17 +54,16 @@ export interface AgentVpcProps {
    *
    * Pin this to AZ names whose physical zone IDs are AgentCore-supported to
    * make a fresh deploy deterministic regardless of the account's
-   * name → zone-ID mapping. Discover the mapping with:
+   * name → zone-ID mapping. The supported zone-ID set differs per region and
+   * can change over time — see the AWS
+   * {@link https://aws.github.io/bedrock-agentcore-starter-toolkit/user-guide/security/agentcore-vpc/#supported-availability-zones Supported Availability Zones}
+   * table, and the per-region `AGENTCORE_SUPPORTED_AZ_IDS` map in
+   * `constructs/agentcore-azs.ts`.
    *
-   * ```sh
-   * aws ec2 describe-availability-zones --region <region> \
-   *   --query 'AvailabilityZones[].[ZoneName,ZoneId]' --output text
-   * ```
-   *
-   * then choose names whose zone IDs are in the AgentCore-supported set for
-   * the region (for `us-east-1` at time of writing: `use1-az1`, `use1-az2`,
-   * `use1-az4`). The error message returned by a failed Runtime creation also
-   * lists the currently supported zone IDs.
+   * Callers normally don't set this directly: `resolveAgentCoreAzs` (invoked
+   * from `main.ts`) auto-selects supported zone names for the target account,
+   * or honors the validated `agentcore:availabilityZones` context override, and
+   * passes the result through {@link AgentStackProps.availabilityZones}.
    *
    * When provided, takes precedence over {@link maxAzs}.
    * @default - CDK selects the first `maxAzs` zones by name

@@ -167,6 +167,31 @@ Triggers via `workflow_run` when `build.yml` completes successfully. The pipelin
 
 ## Known deployment issues
 
+### AgentCore unsupported Availability Zones
+
+**Affects:** Fresh deploys in accounts whose default Availability Zones don't line up with the zones AgentCore supports for the region.
+
+**Symptom:** The `AWS::BedrockAgentCore::Runtime` resource fails to stabilize (`NotStabilized` — "subnets are in unsupported availability zones") and the stack rolls back.
+
+**Root cause:** AgentCore Runtime only places its network interfaces in a subset of each region's Availability Zones, published as physical **zone IDs** (e.g. `use1-az1`, `use1-az2`, `use1-az4` for `us-east-1`). Zone IDs are stable across accounts, but zone *names* (`us-east-1a`) are aliased per-account — so `us-east-1a` can map to a different physical zone in your account than in another. Left to its default, CDK picks zones by name and can land the Runtime subnets in an unsupported zone. See the AWS [Supported Availability Zones](https://aws.github.io/bedrock-agentcore-starter-toolkit/user-guide/security/agentcore-vpc/#supported-availability-zones) table for the per-region set.
+
+**Default behavior (auto-pin):** When the stack is synthesized with a concrete account and region — the usual local `cdk deploy` / `mise //cdk:deploy` path — it resolves your account's zone name-to-ID mapping (`ec2:DescribeAvailabilityZones`) and pins the VPC to the AZ *names* whose IDs are AgentCore-supported. No action needed for supported regions.
+
+**When you must pin manually:** Env-agnostic synthesis skips auto-pin (there's no bound account to resolve the mapping) — this includes the CI-built artifact deployed by `deploy.yml`, and any region not yet in the built-in supported-AZ map. In those cases, set the `agentcore:availabilityZones` context override:
+
+1. Discover your account's zone name-to-ID mapping:
+   ```bash
+   aws ec2 describe-availability-zones --region <region> \
+     --query 'AvailabilityZones[].[ZoneName,ZoneId]' --output text
+   ```
+2. Pick the zone **names** whose **IDs** are in the AgentCore-supported set for the region (at least two, for high availability).
+3. Set the override in `cdk/cdk.context.json` (or via `-c`), then redeploy:
+   ```json
+   { "agentcore:availabilityZones": ["us-east-1b", "us-east-1c"] }
+   ```
+
+The override is validated at synth time: a non-array, an empty/non-string entry, or fewer than two zones fails the synth with a message naming the key and expected shape. The supported-AZ map and resolution logic live in `cdk/src/constructs/agentcore-azs.ts`.
+
 ### DNS Query Log Config replacement cascade (upgrading from pre-v0.5)
 
 **Affects:** Stacks deployed *before* the tag-exclusion fix ([#222](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/pull/222)). Stacks created after this fix are not affected.
