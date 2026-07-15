@@ -100,9 +100,22 @@ export interface ResolveAgentCoreAzsOptions {
  *   or lists fewer than {@link MIN_AGENTCORE_AZS} zones.
  */
 export function resolveAgentCoreAzOverride(node: Node): string[] | undefined {
-  const override = node.tryGetContext(AGENTCORE_AZS_CONTEXT_KEY);
-  if (override === undefined || override === null) {
+  const raw = node.tryGetContext(AGENTCORE_AZS_CONTEXT_KEY);
+  if (raw === undefined || raw === null) {
     return undefined;
+  }
+  // `cdk.context.json` delivers a real array, but `-c key=value` on the CLI
+  // (the recovery path this feature exists for) delivers a raw string. Parse the
+  // string form so both behave identically. A non-JSON string — a true typo —
+  // is left as-is and fails the Array.isArray check below with the same clear,
+  // key-named error.
+  let override: unknown = raw;
+  if (typeof raw === 'string') {
+    try {
+      override = JSON.parse(raw);
+    } catch {
+      override = raw;
+    }
   }
   if (!Array.isArray(override)) {
     throw new Error(
@@ -176,10 +189,11 @@ async function defaultDescribeAzs(region: string): Promise<AvailabilityZoneInfo[
  *     context value always wins (works even in env-agnostic synth, which is how
  *     the CI-built artifact and production stack pin zones).
  *  2. **Auto-pin (default path)** — when synth has a concrete account + region,
- *     resolve the account's name -> zone-ID mapping and intersect it with
- *     {@link AGENTCORE_SUPPORTED_AZ_IDS} for the region, so a fresh local
- *     `cdk deploy` lands only in supported zones without account-specific
- *     guesswork.
+ *     resolve the account's name -> zone-ID mapping, intersect it with
+ *     {@link AGENTCORE_SUPPORTED_AZ_IDS} for the region, and pin the first
+ *     {@link MIN_AGENTCORE_AZS} supported zones (matching AgentVpc's default
+ *     `maxAzs`), so a fresh local `cdk deploy` lands only in supported zones
+ *     without account-specific guesswork or widening the topology.
  *  3. **Fallback** — env-agnostic synth (token/undefined account or region), an
  *     unknown region, a failed lookup, or fewer than {@link MIN_AGENTCORE_AZS}
  *     supported zones all return `undefined`, leaving CDK's default AZ selection
@@ -220,7 +234,11 @@ export async function resolveAgentCoreAzs(options: ResolveAgentCoreAzsOptions): 
     const zones = await describeAzs(region);
     const names = selectSupportedAzNames(region, zones);
     if (names.length >= MIN_AGENTCORE_AZS) {
-      pinnedZones = names;
+      // Pin exactly MIN_AGENTCORE_AZS zones — the HA floor, matching AgentVpc's
+      // default `maxAzs` (2). Pinning every supported zone would silently widen
+      // an account that deploys fine today from 2 AZs to all supported (often 3
+      // -> 6 subnets), so cap the selection to keep the topology stable.
+      pinnedZones = names.slice(0, MIN_AGENTCORE_AZS);
     } else {
       Annotations.of(scope).addWarning(
         `[AgentCore AZs] Found only ${names.length} AgentCore-supported availability zone(s) in `

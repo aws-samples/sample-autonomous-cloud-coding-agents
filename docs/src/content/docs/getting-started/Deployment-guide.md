@@ -175,22 +175,26 @@ Triggers via `workflow_run` when `build.yml` completes successfully. The pipelin
 
 **Root cause:** AgentCore Runtime only places its network interfaces in a subset of each region's Availability Zones, published as physical **zone IDs** (e.g. `use1-az1`, `use1-az2`, `use1-az4` for `us-east-1`). Zone IDs are stable across accounts, but zone *names* (`us-east-1a`) are aliased per-account — so `us-east-1a` can map to a different physical zone in your account than in another. Left to its default, CDK picks zones by name and can land the Runtime subnets in an unsupported zone. See the AWS [Supported Availability Zones](https://aws.github.io/bedrock-agentcore-starter-toolkit/user-guide/security/agentcore-vpc/#supported-availability-zones) table for the per-region set.
 
-**Default behavior (auto-pin):** When the stack is synthesized with a concrete account and region — the usual local `cdk deploy` / `mise //cdk:deploy` path — it resolves your account's zone name-to-ID mapping (`ec2:DescribeAvailabilityZones`) and pins the VPC to the AZ *names* whose IDs are AgentCore-supported. No action needed for supported regions.
+**Default behavior (auto-pin) — local deploy only:** When the stack is synthesized with a concrete account and region — a local `cdk deploy` / `mise //cdk:deploy`, which resolves credentials at synth time — it reads your account's zone name-to-ID mapping (`ec2:DescribeAvailabilityZones`) and pins the VPC to the first two AZ *names* whose IDs are AgentCore-supported (two matches AgentVpc's default `maxAzs`, so enabling this doesn't widen an already-working topology). No action needed on that path for the regions in the built-in map.
 
-**When you must pin manually:** Env-agnostic synthesis skips auto-pin (there's no bound account to resolve the mapping) — this includes the CI-built artifact deployed by `deploy.yml`, and any region not yet in the built-in supported-AZ map. In those cases, set the `agentcore:availabilityZones` context override:
+**The CI/CD-deployed stack is NOT auto-pinned.** Auto-pin needs a bound account at synth time, and the pipeline doesn't have one: `build.yml` synthesizes `cdk.out` credential-less (env-agnostic), and `deploy.yml` deploys that pre-built artifact (`--app cdk/cdk.out`). So a team deploying through the pipeline falls back to CDK's default AZ selection and **must set the `agentcore:availabilityZones` override to pin zones**. The same applies to any region not yet in the built-in supported-AZ map. To set the override:
 
 1. Discover your account's zone name-to-ID mapping:
    ```bash
    aws ec2 describe-availability-zones --region <region> \
      --query 'AvailabilityZones[].[ZoneName,ZoneId]' --output text
    ```
-2. Pick the zone **names** whose **IDs** are in the AgentCore-supported set for the region (at least two, for high availability).
-3. Set the override in `cdk/cdk.context.json` (or via `-c`), then redeploy:
+2. Pick at least two zone **names** whose **IDs** are in the AgentCore-supported set for the region (high-availability floor).
+3. Set the override — either in `cdk/cdk.context.json`:
    ```json
    { "agentcore:availabilityZones": ["us-east-1b", "us-east-1c"] }
    ```
+   or on the CLI (note the value is a JSON array):
+   ```bash
+   cdk deploy -c 'agentcore:availabilityZones=["us-east-1b","us-east-1c"]'
+   ```
 
-The override is validated at synth time: a non-array, an empty/non-string entry, or fewer than two zones fails the synth with a message naming the key and expected shape. The supported-AZ map and resolution logic live in `cdk/src/constructs/agentcore-azs.ts`.
+The override is validated at synth time (both forms parse identically): a non-array, an empty/non-string entry, or fewer than two zones fails the synth with a message naming the key and expected shape. The supported-AZ map and resolution logic live in `cdk/src/constructs/agentcore-azs.ts`.
 
 ### DNS Query Log Config replacement cascade (upgrading from pre-v0.5)
 

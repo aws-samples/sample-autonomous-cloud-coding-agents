@@ -84,9 +84,23 @@ describe('resolveAgentCoreAzOverride', () => {
     ).toEqual(override);
   });
 
-  it('throws on a non-array override (typo guard)', () => {
+  it('throws on a bare (non-JSON) string override (typo guard)', () => {
     expect(() =>
       resolveAgentCoreAzOverride(nodeWithContext({ [AGENTCORE_AZS_CONTEXT_KEY]: 'us-east-1b' })),
+    ).toThrow(/must be a JSON array/);
+  });
+
+  it('parses a JSON-string array (the `-c key=value` CLI form)', () => {
+    // CDK delivers `-c agentcore:availabilityZones=[...]` as a raw string, not a
+    // parsed array — the documented mid-rollback recovery path must still work.
+    expect(
+      resolveAgentCoreAzOverride(nodeWithContext({ [AGENTCORE_AZS_CONTEXT_KEY]: '["us-east-1b","us-east-1c"]' })),
+    ).toEqual(['us-east-1b', 'us-east-1c']);
+  });
+
+  it('throws on a JSON string that does not parse to an array', () => {
+    expect(() =>
+      resolveAgentCoreAzOverride(nodeWithContext({ [AGENTCORE_AZS_CONTEXT_KEY]: '"us-east-1b"' })),
     ).toThrow(/must be a JSON array/);
   });
 
@@ -166,7 +180,9 @@ describe('resolveAgentCoreAzs', () => {
     expect(describeAzs).not.toHaveBeenCalled();
   });
 
-  it('auto-pins to the account supported zone names for a concrete env', async () => {
+  it('auto-pins the first two supported zone names (capped) for a concrete env', async () => {
+    // US_EAST_1_ZONES has three supported zones (az2/az4/az1 -> a/b/d); auto-pin
+    // caps at two to match AgentVpc's default maxAzs and avoid widening topology.
     const describeAzs = jest.fn<Promise<AvailabilityZoneInfo[]>, [string]>().mockResolvedValue(US_EAST_1_ZONES);
     const result = await resolveAgentCoreAzs({
       scope: scopeWithContext(),
@@ -174,7 +190,7 @@ describe('resolveAgentCoreAzs', () => {
       region: 'us-east-1',
       describeAzs,
     });
-    expect(result).toEqual(['us-east-1a', 'us-east-1b', 'us-east-1d']);
+    expect(result).toEqual(['us-east-1a', 'us-east-1b']);
     expect(describeAzs).toHaveBeenCalledWith('us-east-1');
   });
 
