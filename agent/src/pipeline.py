@@ -953,28 +953,23 @@ def run_task(
             if prompt_version:
                 os.environ["PROMPT_VERSION"] = prompt_version
 
-            # Setup repo (deterministic pre-hooks)
-            with task_span("task.repo_setup") as setup_span:
-                setup = setup_repo(config, progress=progress)
-                setup_span.set_attribute("build.before", setup.build_before)
-            progress.write_agent_milestone(
-                "repo_setup_complete",
-                f"branch={setup.branch} build_before={setup.build_before}",
-            )
-
-            system_prompt = build_system_prompt(config, setup, hc, system_prompt_overrides)
-
-            # Channel-specific MCP wiring. Must happen before
-            # discover_project_config so the scan picks up the file we just
-            # wrote. Resolve the per-channel access token from Secrets
-            # Manager *before* writing .mcp.json so the child SDK process
-            # inherits the env var that the MCP server entry references
-            # (${LINEAR_API_TOKEN} / ${JIRA_API_TOKEN}).
+            # ── Early ACK (ABCA-707) ─────────────────────────────────────────
+            # Acknowledge the task is picked up BEFORE the (potentially long)
+            # pre-agent baseline build in setup_repo(). On a large repo that
+            # baseline is minutes (up to the build-verify ceiling); posting the
+            # 👀 only *after* it left the issue looking dead for the whole phase
+            # (the ABCA-707 symptom: no reaction, comment, or state change for
+            # 30+ min). None of these calls needs the cloned repo — they act on
+            # the channel issue via its API token + issue id from channel
+            # metadata — so they belong before the clone/build.
+            #
+            # Resolve the per-channel access token from Secrets Manager first
+            # (react_task_started/comment_task_started read the env var it sets).
+            # configure_channel_mcp DOES need setup.repo_dir, so it stays below.
             if config.channel_source == "linear":
                 resolve_linear_api_token(config.channel_metadata)
             elif config.channel_source == "jira":
                 resolve_jira_oauth_token(config.channel_metadata)
-            configure_channel_mcp(setup.repo_dir, config.channel_source)
 
             # 👀 on the Linear issue — acknowledges the task is picked up.
             # No-op for non-Linear tasks. Best-effort; failures are logged
@@ -999,6 +994,31 @@ def run_task(
                 config.channel_source,
                 config.channel_metadata,
             )
+
+            # Setup repo (deterministic pre-hooks). A failure/timeout/OOM in the
+            # pre-agent baseline build raises here; it needs no local handler —
+            # the outer ``except Exception`` at the bottom of this ``try`` writes
+            # the task FAILED, swaps the 👀 (posted above) to ❌, and posts the
+            # failure comment. Before the Early-ACK move the 👀 didn't exist yet
+            # at this point, so a setup failure left the issue silently stuck
+            # (the ABCA-707 symptom); posting the 👀 earlier is what makes the
+            # outer handler's ❌-swap actually visible for setup failures.
+            with task_span("task.repo_setup") as setup_span:
+                setup = setup_repo(config, progress=progress)
+                setup_span.set_attribute("build.before", setup.build_before)
+            progress.write_agent_milestone(
+                "repo_setup_complete",
+                f"branch={setup.branch} build_before={setup.build_before}",
+            )
+
+            system_prompt = build_system_prompt(config, setup, hc, system_prompt_overrides)
+
+            # Channel-specific MCP wiring. Must happen before
+            # discover_project_config so the scan picks up the file we just
+            # wrote — and after the clone, since it writes .mcp.json into the
+            # repo dir. (Token resolution + the 👀/start ACK moved earlier so
+            # the user gets immediate feedback; see the Early ACK block above.)
+            configure_channel_mcp(setup.repo_dir, config.channel_source)
 
             # Download attachments from S3 (version-pinned, integrity-verified)
             prepared_attachments: list = []

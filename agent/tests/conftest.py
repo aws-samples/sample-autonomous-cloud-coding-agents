@@ -1,27 +1,55 @@
 """Shared fixtures for agent unit tests."""
 
 import faulthandler
+import os
 import sys
+import threading
 from types import SimpleNamespace
 
 import pytest
 
 from models import TaskConfig
 
-# Session-wide hang backstop, immune to what pytest-timeout's SIGALRM cannot
-# reach. SIGALRM fires only in the MAIN thread during a test's *call* phase, so a
-# deadlock in a WORKER thread, a fixture, collection, or a C-level socket read the
-# main thread never returns from stalls the whole `mise run build` silently — up
-# to the platform's 3600s build-verify ceiling (the ECS-only stall seen on
-# ABCA-684/686/688 and the warm-cache run: 53 min of dead air, signal never
-# fired). faulthandler runs a dedicated C watchdog thread that the GIL and blocked
-# syscalls can't stall: at 1200s (20 min — comfortably inside the 3600s ceiling,
-# far above the whole suite's normal ~3 min) it dumps EVERY thread's Python stack
-# to stderr and hard-exits, converting a blind stall into a self-diagnosing crash
-# that names the exact file:line. Complements the per-test faulthandler_timeout in
-# pyproject.toml (which dumps but does not exit). ``exit=True`` guarantees the
-# non-zero exit even if the hang is uninterruptible.
-faulthandler.dump_traceback_later(1200, exit=True, file=sys.stderr)
+# Session-wide hang backstop. SIGALRM (pytest-timeout method="signal") fires only
+# in the MAIN thread during a test's *call* phase, so a deadlock in a WORKER
+# thread, a fixture, collection, or a C-level socket read the main thread never
+# returns from stalls the whole `mise run build` silently — up to the platform's
+# 3600s build-verify ceiling (the ECS-only stall on ABCA-684/686/688, and again
+# on ABCA-707: 40+ min of dead air, container never reaped).
+#
+# The obvious instrument — ``faulthandler.dump_traceback_later(1200, exit=True)``
+# — does NOT work here: faulthandler has a SINGLE internal timer, and pytest's
+# ``faulthandler_timeout`` (pyproject.toml) RE-ARMS it at the start of every test
+# WITHOUT ``exit=True``. So a session-level exit timer is cancelled by the first
+# test, the per-test timer only DUMPS, and the suite hangs forever anyway
+# (exactly what happened on ABCA-707: a 300s dump fired, no exit followed).
+#
+# So own the reaper on a dedicated daemon thread pytest cannot touch. A blocked
+# socket read (the ABCA-707 failure mode) releases the GIL, so this thread runs;
+# it dumps every thread's stack for diagnosis and then HARD-EXITS the process, so
+# `mise run build` returns non-zero within seconds of the deadline instead of
+# burning to the 3600s ceiling. Deadline 600s: ~200x the whole suite's normal
+# ~3s… well above any legitimate run (per-test cap is 300s) yet far under the
+# build ceiling.
+_HANG_REAP_DEADLINE_S = 600
+
+
+def _reap_on_hang() -> None:
+    faulthandler.dump_traceback(all_threads=True, file=sys.stderr)
+    print(
+        f"\nCONFTEST HANG WATCHDOG: test session exceeded {_HANG_REAP_DEADLINE_S}s "
+        "— dumped all thread stacks above and hard-exiting so the build fails "
+        "fast instead of stalling to the build-verify ceiling.",
+        file=sys.stderr,
+        flush=True,
+    )
+    os._exit(1)
+
+
+# daemon=True so a clean, fast suite exit is never blocked waiting on this timer.
+_hang_watchdog = threading.Timer(_HANG_REAP_DEADLINE_S, _reap_on_hang)
+_hang_watchdog.daemon = True
+_hang_watchdog.start()
 
 
 class FakeRunCmd:
@@ -111,6 +139,16 @@ _AGENT_ENV_VARS = [
     "LOG_GROUP_NAME",
     "MEMORY_ID",
     "ENABLE_CLI_TELEMETRY",
+    # Per-session IAM scoping (PR #209). When this is set, ``aws_session`` resolves
+    # a *scoped* session and ``tenant_client`` returns ``session.client(...)`` —
+    # which BYPASSES a ``@patch("boto3.client")`` mock. On the ECS substrate the
+    # task def sets this, so a test that mocks ``boto3.client`` (e.g.
+    # ``test_attachments``) instead makes a REAL S3 call that hangs on the network
+    # (no egress). Stripping it here forces every test onto the unscoped path,
+    # where the ``boto3.client`` mock actually intercepts. Resetting the session
+    # cache below is NOT enough on its own — a fresh ``get_session()`` re-resolves
+    # as scoped while this var is still set. (Live-caught on ABCA-707, 2026-07-15.)
+    "AGENT_SESSION_ROLE_ARN",
 ]
 
 
@@ -121,15 +159,19 @@ def _clean_env(monkeypatch):
     The env cleanup keeps host state from leaking into agent code that reads
     ``os.environ`` at import/call time.
 
-    The session reset closes a cross-test leak: ``aws_session`` caches the
-    resolved boto3 session in a MODULE GLOBAL (``_session``/``_scoped``), and
-    ``tenant_client`` returns ``session.client(...)`` from that cache when
-    ``_scoped`` is True — bypassing a downstream ``@patch("boto3.client")``. If an
-    earlier test left a scoped session cached (only ``test_aws_session`` cleans up
-    after itself), a later test like ``test_attachments`` would get a REAL client
-    despite its mock → a live S3 call that hangs on the ECS network (no route/no
-    creds) in a socket read SIGALRM can't interrupt. Resetting the cache before
-    every test guarantees each test resolves the session under its own patches.
+    The env cleanup + session reset TOGETHER close a scoped-session leak that
+    hangs the suite on the ECS substrate: ``aws_session`` caches the resolved
+    boto3 session in a MODULE GLOBAL (``_session``/``_scoped``), and
+    ``tenant_client`` returns ``session.client(...)`` when ``_scoped`` is True —
+    bypassing a downstream ``@patch("boto3.client")``. Two things make a test
+    resolve *scoped*: a stale cached session (fixed by ``reset_session_cache``),
+    OR ``AGENT_SESSION_ROLE_ARN`` still being set when the cache is cold (fixed by
+    stripping it in ``_AGENT_ENV_VARS`` above — the ECS task def sets it, so on
+    that substrate the reset alone re-resolves scoped and the leak persists). With
+    the var gone AND the cache reset, every test resolves the unscoped path where
+    its ``boto3.client`` mock intercepts. Otherwise a mocked test (e.g.
+    ``test_attachments``) makes a REAL S3 call that hangs on the ECS network
+    (no egress) in a socket read SIGALRM can't interrupt. (Live-caught ABCA-707.)
     """
     for var in _AGENT_ENV_VARS:
         monkeypatch.delenv(var, raising=False)

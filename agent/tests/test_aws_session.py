@@ -79,6 +79,35 @@ class TestFailSafe:
         assert is_scoped() is False
 
 
+class TestConftestScrubsScopingEnv:
+    """Regression guard for the ECS test-hang (ABCA-707).
+
+    The bug: the ECS agent task def sets ``AGENT_SESSION_ROLE_ARN``. If that var
+    leaks into the test process, ``get_session()`` resolves a *scoped* session and
+    ``tenant_client`` returns ``session.client(...)`` — bypassing a
+    ``@patch("boto3.client")`` mock. A mocked test (e.g. ``test_attachments``)
+    then makes a REAL S3 call that hangs on the ECS network (no egress) in a
+    socket read SIGALRM can't interrupt → the whole ``mise run build`` stalls
+    silently for 40+ min. The ``_clean_env`` autouse fixture in conftest MUST
+    strip the var (resetting the session cache alone is not enough — a cold
+    ``get_session()`` re-resolves scoped while the var is still set).
+    """
+
+    def test_session_role_arn_not_visible_to_tests(self):
+        import os
+
+        # No monkeypatch here: this asserts the AUTOUSE fixture already scrubbed
+        # the var, even if the parent (ECS) environment had it set.
+        assert os.environ.get(SESSION_ROLE_ARN_ENV) is None
+
+    def test_session_resolves_unscoped_by_default(self):
+        # With the var scrubbed and the cache reset (both by _clean_env), a bare
+        # get_session() must be unscoped — the path where boto3.client mocks work.
+        with patch("boto3.Session", return_value=MagicMock()):
+            get_session()
+        assert is_scoped() is False
+
+
 # ---------------------------------------------------------------------------
 # Scoped: SessionRole ARN set → refreshable assumed-role session
 # ---------------------------------------------------------------------------
