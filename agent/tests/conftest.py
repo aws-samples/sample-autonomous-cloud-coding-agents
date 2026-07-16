@@ -28,8 +28,15 @@ from models import TaskConfig
 # socket read releases the GIL, so this thread runs; it dumps every thread's
 # stack for diagnosis and then HARD-EXITS the process, so `mise run build`
 # returns non-zero within seconds of the deadline instead of burning to the
-# ceiling. Deadline 600s: far above the whole suite's normal runtime (per-test
-# cap is 300s) yet well under the build ceiling.
+# ceiling. Deadline 600s: a SESSION backstop for the whole-suite hangs SIGALRM
+# can't interrupt — sized well above the longest healthy run (the suite normally
+# finishes in seconds; the per-test pytest-timeout cap is 120s, see
+# pyproject.toml) yet far under the 3600s build-verify ceiling.
+#
+# ``pytest_sessionfinish`` cancels the timer on a clean finish (below), so a
+# legitimately slow-but-passing run that lands near 600s — e.g. still in teardown
+# / coverage write — is NOT hard-exited into a bewildering red (#616 review N2).
+# ``os._exit`` skips atexit + buffer flush, so it must only fire on a TRUE hang.
 _HANG_REAP_DEADLINE_S = 600
 
 
@@ -49,6 +56,17 @@ def _reap_on_hang() -> None:
 _hang_watchdog = threading.Timer(_HANG_REAP_DEADLINE_S, _reap_on_hang)
 _hang_watchdog.daemon = True
 _hang_watchdog.start()
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Cancel the hang watchdog on a clean session finish (#616 review N2).
+
+    Without this, a legitimately slow-but-passing suite that finishes just after
+    the 600s deadline (e.g. during teardown / coverage write) would be hard-exited
+    by ``_reap_on_hang`` and turn green red with a thread-dump uncorrelated to any
+    failed test. ``Timer.cancel()`` is a no-op if the timer already fired (a true
+    hang), so this only prevents the false-positive kill."""
+    _hang_watchdog.cancel()
 
 
 class FakeRunCmd:
