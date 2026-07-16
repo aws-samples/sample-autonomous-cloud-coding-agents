@@ -334,18 +334,12 @@ jobs:
           # openssl output is "(stdin)= <hex>" or "SHA2-256(stdin)= <hex>"; take last.
           SIG="$(printf '%s' "$POST_BODY" | openssl dgst -sha256 -hmac "$ABCA_WEBHOOK_SECRET" | awk '{print $NF}')"
 
-          # The Task API validates Idempotency-Key against ^[a-zA-Z0-9_-]{1,128}$.
-          # $REPO carries a "/" (owner/repo), so map every disallowed char to "-"
-          # and cap at 128. Still per-(repo,PR,SHA) unique, which is all we need.
-          IDEMPOTENCY_KEY="$(printf 'review-%s-%s-%s' "$REPO" "$PR_NUMBER" "$HEAD_SHA" \
-            | tr -c 'a-zA-Z0-9_-' '-' | cut -c1-128)"
-
           HTTP_CODE="$(curl -sS -o /tmp/abca-resp.txt -w '%{http_code}' \
             -X POST "${ABCA_TASK_API_URL%/}/webhooks/tasks" \
             -H 'Content-Type: application/json' \
             -H "X-Webhook-Id: $ABCA_WEBHOOK_ID" \
             -H "X-Webhook-Signature: sha256=$SIG" \
-            -H "Idempotency-Key: $IDEMPOTENCY_KEY" \
+            -H "Idempotency-Key: review-$REPO-$PR_NUMBER-$HEAD_SHA" \
             --data-raw "$POST_BODY")"
 
           if [[ "$HTTP_CODE" =~ ^2 ]]; then
