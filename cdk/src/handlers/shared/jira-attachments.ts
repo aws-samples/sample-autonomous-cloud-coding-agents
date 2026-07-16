@@ -264,7 +264,11 @@ async function fetchAttachmentBytes(
       method: 'GET',
       headers: {
         Authorization: `Bearer ${accessToken}`,
-        Accept: 'application/octet-stream',
+        // The attachment-content endpoint returns the file's own content type
+        // (image/jpeg, application/pdf, …) and responds 406 Not Acceptable to a
+        // narrow `Accept: application/octet-stream`. Accept anything so the
+        // gateway can serve the real media type.
+        Accept: '*/*',
       },
       signal: controller.signal,
     });

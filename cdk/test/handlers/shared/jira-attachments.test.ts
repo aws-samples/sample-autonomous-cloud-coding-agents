@@ -141,6 +141,10 @@ describe('downloadScreenAndStoreJiraAttachments', () => {
     // GET was addressed by attachment id on the gateway base, not the raw content URL.
     const fetchUrl = (global.fetch as jest.Mock).mock.calls[0][0] as string;
     expect(fetchUrl).toContain('api.atlassian.com/ex/jira/cloud-1/rest/api/3/attachment/content/att-1');
+    // Accept must be permissive: the content endpoint 406s on
+    // `application/octet-stream` and serves the file's own media type.
+    const fetchInit = (global.fetch as jest.Mock).mock.calls[0][1] as { headers: Record<string, string> };
+    expect(fetchInit.headers.Accept).toBe('*/*');
   });
 
   test('routes images through screenImage and marks type image', async () => {
