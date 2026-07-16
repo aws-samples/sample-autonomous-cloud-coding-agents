@@ -28,6 +28,7 @@ import {
   LINEAR_OAUTH_SCOPES,
   LINEAR_TOKEN_ENDPOINT,
   linearOauthSecretName,
+  readExistingWebhookSecret,
   refreshAccessToken,
   resolveWebhookSecretAction,
 } from '../src/linear-oauth';
@@ -312,5 +313,55 @@ describe('resolveWebhookSecretAction', () => {
     // A corrupt/empty value must not be "preserved" as if valid.
     expect(resolveWebhookSecretAction('garbage', true)).toEqual({ kind: 'mirror-stackwide' });
     expect(resolveWebhookSecretAction('', false)).toEqual({ kind: 'prompt' });
+  });
+});
+
+describe('readExistingWebhookSecret — fail-closed pre-read (#612 review B1/B2)', () => {
+  const notFound = (err: unknown) => (err as { name?: string }).name === 'ResourceNotFoundException';
+  const bundle = (secret?: string) =>
+    JSON.stringify({ access_token: 'a', webhook_signing_secret: secret });
+
+  it('returns the existing lin_wh_ secret when the bundle has one (→ preserve, not clobber)', async () => {
+    const got = await readExistingWebhookSecret(async () => bundle('lin_wh_thisWorkspace'), notFound);
+    // This is the value that makes resolveWebhookSecretAction PRESERVE — the fix.
+    expect(got).toBe('lin_wh_thisWorkspace');
+    expect(resolveWebhookSecretAction(got, true)).toEqual({ kind: 'preserve', secret: 'lin_wh_thisWorkspace' });
+  });
+
+  it('returns undefined on ResourceNotFoundException (genuine first install)', async () => {
+    const got = await readExistingWebhookSecret(async () => {
+      throw Object.assign(new Error('no'), { name: 'ResourceNotFoundException' });
+    }, notFound);
+    expect(got).toBeUndefined();
+  });
+
+  it('returns undefined when the bundle exists but has no/malformed secret', async () => {
+    expect(await readExistingWebhookSecret(async () => bundle(undefined), notFound)).toBeUndefined();
+    expect(await readExistingWebhookSecret(async () => bundle('not-a-wh'), notFound)).toBeUndefined();
+    expect(await readExistingWebhookSecret(async () => undefined, notFound)).toBeUndefined();
+  });
+
+  it('THROWS (fails closed) on AccessDenied — must NOT default to undefined and clobber', async () => {
+    // The B1 bug: a bare catch here would return undefined → mirror-stackwide →
+    // the #611 clobber, silently. The pre-read must surface the error instead.
+    const accessDenied = Object.assign(new Error('denied'), { name: 'AccessDeniedException' });
+    await expect(
+      readExistingWebhookSecret(async () => { throw accessDenied; }, notFound),
+    ).rejects.toBe(accessDenied);
+  });
+
+  it('THROWS on KMSAccessDeniedException / Throttling / network (any non-not-found)', async () => {
+    for (const name of ['KMSAccessDeniedException', 'ThrottlingException', 'InternalServiceError']) {
+      const err = Object.assign(new Error(name), { name });
+      await expect(
+        readExistingWebhookSecret(async () => { throw err; }, notFound),
+      ).rejects.toBe(err);
+    }
+  });
+
+  it('THROWS on a corrupt-but-present bundle (JSON.parse) — not silently "nothing to preserve"', async () => {
+    await expect(
+      readExistingWebhookSecret(async () => '{not valid json', notFound),
+    ).rejects.toThrow();
   });
 });

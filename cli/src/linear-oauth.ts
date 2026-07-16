@@ -335,3 +335,46 @@ export function resolveWebhookSecretAction(
   }
   return { kind: 'prompt' };
 }
+
+/**
+ * Read this workspace's EXISTING `webhook_signing_secret` before `setup`
+ * overwrites the OAuth bundle — FAIL CLOSED (#612 review B1).
+ *
+ * `fetchSecretString` fetches the prior per-workspace OAuth `SecretString`
+ * (typically a `SecretsManagerClient.send(GetSecretValueCommand)` wrapper). The
+ * value fed to {@link resolveWebhookSecretAction} decides whether the existing
+ * secret is preserved or the stack-wide one is mirrored over it — so a wrong
+ * `undefined` here re-arms the #611 clobber. Therefore:
+ *
+ *   • secret missing (`ResourceNotFoundException`) → genuine first install,
+ *     return undefined (nothing to preserve).
+ *   • secret present with a valid `lin_wh_…` `webhook_signing_secret` → return it.
+ *   • secret present but no/malformed secret → return undefined (nothing valid
+ *     to preserve; the caller mirrors/prompts).
+ *   • ANY OTHER error (AccessDenied, KMSAccessDenied, Throttling, network, or a
+ *     corrupt-JSON bundle) → THROW. Swallowing it would leave undefined and
+ *     silently clobber a working secret behind a green "Setup complete".
+ *
+ * `isNotFound` classifies the fetch error; callers pass an
+ * `name === 'ResourceNotFoundException'` check. On a throw the caller re-raises
+ * a CliError with an IAM/KMS hint (mirroring `isWebhookSecretConfigured`).
+ */
+export async function readExistingWebhookSecret(
+  fetchSecretString: () => Promise<string | undefined>,
+  isNotFound: (err: unknown) => boolean,
+): Promise<string | undefined> {
+  let raw: string | undefined;
+  try {
+    raw = await fetchSecretString();
+  } catch (err) {
+    if (isNotFound(err)) return undefined; // genuine first install
+    throw err; // fail closed — caller wraps with an actionable CliError
+  }
+  if (!raw) return undefined;
+  // A corrupt-but-present bundle must surface (JSON.parse throws → propagates),
+  // NOT silently become "nothing to preserve" → mirror-stackwide.
+  const bundle = JSON.parse(raw) as Partial<StoredLinearOauthToken>;
+  return bundle.webhook_signing_secret?.startsWith('lin_wh_')
+    ? bundle.webhook_signing_secret
+    : undefined;
+}
