@@ -47,9 +47,11 @@ core tool, `Workflow`, is unavailable to headless tasks by construction:
   `disallowed_tools` block, not mere obscurity, is the guarantee: even though the file is on disk and
   reachable on that path, the tool it calls is off the surface.
 - The read-only review workflow (`coding/pr-review-v1`) cannot be steered into `/review_prs`: it is
-  bound to the `pr_review` system prompt (`agent/src/workflow/loader.py`) and drives the agent
-  through that fixed prompt — there is no "invoke a slash command" path, and `Workflow` is
-  deny-listed regardless.
+  bound to a fixed `pr_review` system prompt (`PR_REVIEW_WORKFLOW` in `agent/src/prompts/pr_review.py`,
+  selected by `get_system_prompt` in `agent/src/prompts/__init__.py`) that drives the agent through
+  fixed steps — there is no "invoke a slash command" path, and `Workflow` is deny-listed regardless.
+  (The `coding/pr-review-v1 → pr_review` entry in `agent/src/workflow/loader.py` is the Cedar
+  *principal* audit tag, not the prompt binding.)
 
 In short: operators run `/review_prs`; the ABCA runtime never does, and structurally cannot.
 
