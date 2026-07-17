@@ -29,22 +29,27 @@ bodies and agent transcripts. (Caveat: per-PR *summaries* still accrete linearly
 cannot be — executed by ABCA's headless agent runtime.** The distinction matters because Stage 2's
 core tool, `Workflow`, is unavailable to headless tasks by construction:
 
-- The runtime resolves its SDK tool surface from an **allowlist**, not the on-disk config:
-  `agent/src/runner.py` `_resolve_allowed_tools()` returns the workflow's `agent_config.allowed_tools`
-  or falls back to `_FULL_TOOL_SURFACE = ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch"]`
-  (`read_only` lanes drop `Write`/`Edit` on top). `Workflow`, `Task`, and `Agent` are **not in that
-  allowlist**, so a headless task physically cannot spawn a `Workflow` — the incident-driven
-  hardening against a repo-less task launching a detached background `Workflow` and finalizing on a
-  placeholder. Interactive Claude Code / Cursor sessions are not tool-gated this way, so `Workflow`
-  is available there — which is where this command runs.
-- The runtime does load project `.claude/` config (`ClaudeAgentOptions(setting_sources=["project"])`
-  in `runner.py`), so this command's stub **is** discoverable to a task that clones this repo. That
-  is precisely why the allowlist — not mere obscurity — is the guarantee: even though the file is on
-  disk, the tool it calls is off-surface.
+- The runtime hard-blocks `Workflow` via a **deny-list**, which is the load-bearing mechanism.
+  `agent/src/runner.py` passes `disallowed_tools=_DISALLOWED_TOOLS` (`= ["Workflow", "Task", "Agent",
+  "Monitor", "SendMessage", "CronCreate", "CronDelete", "CronList"]`) to `ClaudeAgentOptions` — the
+  incident-driven hardening after a repo-less task launched a detached background `Workflow` and
+  finalized on a placeholder. This is the *only* thing that removes the tool from the surface: the
+  runtime runs under `permission_mode="bypassPermissions"`, so a tool that is merely **absent from
+  the `allowed_tools` auto-approve list is auto-*allowed*, not blocked** (runner.py is emphatic:
+  "`disallowed_tools` is the only hard lock … do not rely on this allow-list, nor on Cedar, to remove
+  a tool from the surface" — Cedar PreToolUse default-permits on no-match). So the guarantee rests on
+  `disallowed_tools`, not on `Workflow` being off the allow-list. Interactive Claude Code / Cursor
+  sessions are not gated this way, so `Workflow` is available there — which is where this command runs.
+- The runtime loads project `.claude/` config only when a repo is cloned:
+  `_resolve_setting_sources(config)` returns `["project"]` when `config.repo_url` is set and `[]`
+  for a repo-less task (defense-in-depth that also stops a stray on-disk skill from being reachable).
+  So this command's stub **is** discoverable to a repo-cloning task — which is exactly why the
+  `disallowed_tools` block, not mere obscurity, is the guarantee: even though the file is on disk and
+  reachable on that path, the tool it calls is off the surface.
 - The read-only review workflow (`coding/pr-review-v1`) cannot be steered into `/review_prs`: it is
   bound to the `pr_review` system prompt (`agent/src/workflow/loader.py`) and drives the agent
-  through that fixed prompt over the allowlisted tool surface — there is no "invoke a slash command"
-  path, and `Workflow` is off-surface regardless.
+  through that fixed prompt — there is no "invoke a slash command" path, and `Workflow` is
+  deny-listed regardless.
 
 In short: operators run `/review_prs`; the ABCA runtime never does, and structurally cannot.
 
