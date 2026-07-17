@@ -470,6 +470,21 @@ def _resolve_overall_task_status(
     agent_status = agent_result.status
     err = agent_result.error
 
+    # ABCA-662: a max_turns cap is a CORRECT classification, but on its own it
+    # doesn't say WHETHER the task genuinely needed the turns or SPUN on a failing
+    # operation until it ran out (662 thrashed on a failing `git push` → invalid
+    # credentials, retried every which way, and capped). When the stuck-guard's
+    # trailing window was failure-dominated, append its one-line summary so the
+    # reason distinguishes "ran long" from "looped on an error" — the classifier
+    # still buckets it as max_turns, but a human sees the real cause. Only enriches
+    # the max_turns reason; a task that used its turns productively adds nothing.
+    if err and "error_max_turns" in err:
+        from hooks import last_stuck_summary
+
+        stuck = last_stuck_summary()
+        if stuck and stuck not in err:
+            err = f"{err} — {stuck}"
+
     if agent_status in ("success", "end_turn") and build_ok:
         return "success", err
 
@@ -700,9 +715,12 @@ def run_task(
         # in principle dispatch a second run_task in the same process — reset
         # here so a stale BLOCKED[...] reason can never leak into this task's
         # terminal error_message (the latch is a scalar, not task_id-keyed).
-        from hooks import reset_blocker_reason
+        from hooks import reset_blocker_reason, reset_stuck_summary
 
         reset_blocker_reason()
+        # ABCA-662: same per-task reset for the stuck-guard recent-failure latch,
+        # so a prior task's observation can't leak into this task's max_turns copy.
+        reset_stuck_summary()
         # --trace accumulator (design §10.1): when the task opted into
         # trace, ``_TrajectoryWriter`` keeps an in-memory copy of each
         # event so the pipeline can gzip+upload the full trajectory to

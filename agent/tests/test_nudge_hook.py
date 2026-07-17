@@ -319,13 +319,21 @@ class TestStopHook:
         assert "three" in result["reason"]
 
     def test_registry_default_contains_cancel_then_nudge(self):
-        # Freshly-imported registry: cancel runs first so it short-circuits
-        # nudge injection on cancelled tasks; nudge second for running tasks.
+        # Freshly-imported registry: cancel runs FIRST so it short-circuits
+        # nudge injection on cancelled tasks; nudge runs AFTER it for running
+        # tasks. The K7 stuck-guard is inserted between them (it also wants to
+        # short-circuit before the nudge reader mutates DDB on a bail), so the
+        # invariant we assert is the relative ORDER (cancel < stuck-guard <
+        # nudge), not exact adjacency.
         import importlib
 
         importlib.reload(hooks_mod)
-        assert hooks_mod.between_turns_hooks[0] is hooks_mod._cancel_between_turns_hook
-        assert hooks_mod.between_turns_hooks[1] is hooks_mod._nudge_between_turns_hook
+        reg = hooks_mod.between_turns_hooks
+        i_cancel = reg.index(hooks_mod._cancel_between_turns_hook)
+        i_stuck = reg.index(hooks_mod._stuck_guard_between_turns_hook)
+        i_nudge = reg.index(hooks_mod._nudge_between_turns_hook)
+        assert i_cancel == 0
+        assert i_cancel < i_stuck < i_nudge
 
 
 class TestInProcessDedup:

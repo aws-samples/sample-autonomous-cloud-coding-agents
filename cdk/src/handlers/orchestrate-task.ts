@@ -37,6 +37,7 @@ import {
   type PollState,
 } from './shared/orchestrator';
 import { runPreflightChecks } from './shared/preflight';
+import { isAutoRetried, startSessionWithRetry } from './shared/session-start-retry';
 import { deleteEcsPayload } from './shared/strategies/ecs-strategy';
 import type { TaskRecord } from './shared/types';
 import { workflowIsReadOnly, workflowRequiresRepo } from './shared/workflows';
@@ -160,14 +161,32 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
   // Step 4: Start agent session — resolve compute strategy, invoke runtime, transition to RUNNING
   // Returns the full SessionHandle (serializable) so ECS polling can use it in step 5.
   const sessionHandle = await context.step('start-session', async () => {
+    let autoRetried = false;
     try {
       const strategy = resolveComputeStrategy(blueprintConfig);
-      const handle = await strategy.startSession({
+      const startInput = {
         taskId,
         userId: task.user_id,
         payload,
         blueprintConfig,
-      });
+      };
+      // Transient-error AUTO-RETRY (once), extracted to startSessionWithRetry so
+      // the four branches are unit-tested (#599 B2). The retry-event emit is
+      // best-effort and guarded there (#599 B1): a TaskEvents PutItem fault can't
+      // abort or mis-attribute the retry. The correlation envelope is threaded so
+      // the session_start_retry event carries the same trace context as
+      // session_started below (#245).
+      const { handle, autoRetried: retried } = await startSessionWithRetry(
+        strategy,
+        startInput,
+        {
+          emitRetryEvent: (reason) =>
+            emitTaskEvent(taskId, 'session_start_retry', { reason }, correlation),
+          logger,
+          taskId,
+        },
+      );
+      autoRetried = retried;
 
       // Build compute metadata for the task record so cancel-task can stop the right backend
       const computeMetadata: Record<string, string> = handle.strategyType === 'ecs'
@@ -193,7 +212,21 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
 
       return handle;
     } catch (err) {
-      await failTask(taskId, TaskStatus.HYDRATING, `Session start failed: ${String(err)}`, task.user_id, true, task.repo);
+      // Carry the auto-retry fact into error_message: the `[auto-retried]` suffix
+      // is persisted verbatim (the classifier ignores it — it does not affect
+      // classification). It is a breadcrumb for a FORTHCOMING failure renderer to
+      // detect and surface "I already tried again" to the channel — no consumer
+      // renders it yet on this branch (retryGuidance() in error-classifier.ts is
+      // the intended copy source; it ships ahead of its consumer).
+      //
+      // Stamp on BOTH paths a retry ran (#599 N1): branch 3 sets `autoRetried`
+      // above then a LATER step throws; branch 4 (transient-then-transient) throws
+      // FROM startSessionWithRetry before `autoRetried` is assigned, so the local
+      // is still false — read the fact off the thrown error via isAutoRetried().
+      // Without this, a double-transient failure was told "reply to retry" instead
+      // of "I already retried" — the exact confusion the marker exists to prevent.
+      const retriedNote = (autoRetried || isAutoRetried(err)) ? ' [auto-retried]' : '';
+      await failTask(taskId, TaskStatus.HYDRATING, `Session start failed: ${String(err)}${retriedNote}`, task.user_id, true, task.repo);
       throw err;
     }
   });
