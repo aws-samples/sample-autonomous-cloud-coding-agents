@@ -176,6 +176,10 @@ describe('linear-webhook-processor handler', () => {
     expect(reqBody.repo).toBe('org/repo');
     expect(reqBody.task_description).toContain('ABC-42: Fix the login bug');
     expect(reqBody.task_description).toContain('Users cannot log in.');
+    // Must pin the coding workflow — an absent workflow_ref falls through the
+    // resolution ladder to default/agent-v1, which never opens a PR. Mirrors
+    // the Jira processor (#546/#547).
+    expect(reqBody.workflow_ref).toBe('coding/new-task-v1');
     expect(ctx.userId).toBe('cognito-user-1');
     expect(ctx.channelSource).toBe('linear');
     expect(ctx.channelMetadata).toMatchObject({

@@ -42,6 +42,7 @@ import { CedarWasmLayer } from '../constructs/cedar-wasm-layer';
 import { ConcurrencyReconciler } from '../constructs/concurrency-reconciler';
 import { DnsFirewall } from '../constructs/dns-firewall';
 // import { EcsAgentCluster } from '../constructs/ecs-agent-cluster';
+// import { EcsPayloadBucket } from '../constructs/ecs-payload-bucket';
 import { FanOutConsumer } from '../constructs/fanout-consumer';
 import { GitHubScreenshotIntegration } from '../constructs/github-screenshot-integration';
 import { JiraIntegration } from '../constructs/jira-integration';
@@ -595,6 +596,11 @@ export class AgentStack extends Stack {
     //   platform: ecr_assets.Platform.LINUX_ARM64,
     // });
     //
+    // // #502: ephemeral bucket for ECS task payloads — the orchestrator writes
+    // // the payload here (it exceeds the 8 KB RunTask containerOverrides limit)
+    // // and passes only an S3 URI pointer; the container fetches it on boot.
+    // const ecsPayloadBucket = new EcsPayloadBucket(this, 'EcsPayloadBucket');
+    //
     // const ecsCluster = new EcsAgentCluster(this, 'EcsAgentCluster', {
     //   vpc: agentVpc.vpc,
     //   agentImageAsset,
@@ -603,6 +609,8 @@ export class AgentStack extends Stack {
     //   userConcurrencyTable: userConcurrencyTable.table,
     //   githubTokenSecret,
     //   memoryId: agentMemory.memory.memoryId,
+    //   // #502: read-only grant so the container can fetch its payload.
+    //   payloadBucket: ecsPayloadBucket.bucket,
     //   // Per-session IAM scoping (#209): the ECS task role assumes the same
     //   // SessionRole as the AgentCore runtime for tenant-data access. The
     //   // construct admits the task role to the trust and injects
@@ -632,6 +640,9 @@ export class AgentStack extends Stack {
       //   taskRoleArn: ecsCluster.taskRoleArn,
       //   executionRoleArn: ecsCluster.executionRoleArn,
       // },
+      // // #502: pass the payload bucket so the orchestrator writes/deletes the
+      // // out-of-band payload and the ECS strategy builds the S3 URI pointer.
+      // ecsPayloadBucket: ecsPayloadBucket.bucket,
     });
 
     // Now that the orchestrator exists, resolve the Lazy used by TaskApi at synth.
@@ -922,9 +933,10 @@ export class AgentStack extends Stack {
     // Slack / GitHub / Linear / email per per-channel default filters.
     // GitHub dispatcher edits a single issue comment in place; Slack
     // dispatcher (issue #64) reads per-workspace bot tokens from
-    // ``bgagent/slack/*``; Linear dispatcher (issue #239) posts a single
-    // deterministic final-status comment with cost/turns/duration.
-    // Email remains a log-only stub until SES wires.
+    // ``bgagent/slack/*``; Linear dispatcher (issue #239) + Jira dispatcher
+    // (issue #573) each post a single deterministic final-status comment
+    // with cost/turns/duration. Email remains a log-only stub until SES
+    // wires.
     new FanOutConsumer(this, 'FanOutConsumer', {
       taskEventsTable: taskEventsTable.table,
       taskTable: taskTable.table,
@@ -949,6 +961,18 @@ export class AgentStack extends Stack {
         service: 'secretsmanager',
         resource: 'secret',
         resourceName: 'bgagent-linear-oauth-*',
+        arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+      }),
+      // Jira dispatcher (issue #573) posts a deterministic final-status
+      // comment with cost/turns/duration on Jira-origin terminal tasks.
+      // Same scope `bgagent-jira-oauth-*` as the orchestrator and Jira
+      // webhook processor — Lambdas in this stack share the rotated-token
+      // write path.
+      jiraWorkspaceRegistryTable: jiraIntegration.workspaceRegistryTable,
+      jiraOauthSecretArnPattern: Stack.of(this).formatArn({
+        service: 'secretsmanager',
+        resource: 'secret',
+        resourceName: 'bgagent-jira-oauth-*',
         arnFormat: ArnFormat.COLON_RESOURCE_NAME,
       }),
     });

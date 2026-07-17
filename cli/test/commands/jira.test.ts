@@ -134,6 +134,103 @@ describe('makeJiraCommand', () => {
     // `--repo` is required on map.
     expect(map!.options.find((o) => o.long === '--repo')?.required).toBe(true);
   });
+
+  test('`map` exposes optional --status-on-start / --status-on-pr flags', () => {
+    const cmd = makeJiraCommand();
+    const map = cmd.commands.find((c) => c.name() === 'map');
+    const startOpt = map!.options.find((o) => o.long === '--status-on-start');
+    const prOpt = map!.options.find((o) => o.long === '--status-on-pr');
+    expect(startOpt).toBeDefined();
+    expect(prOpt).toBeDefined();
+    // Optional: not mandatory and no default value (so the agent falls back to
+    // its heuristics when unset). `.required` here is Commander's "the option
+    // *argument* is required when the flag is present" (from `<name>`), not
+    // "the flag is mandatory" — that's `.mandatory`.
+    expect(startOpt!.mandatory).toBeFalsy();
+    expect(prOpt!.mandatory).toBeFalsy();
+    expect(startOpt!.defaultValue).toBeUndefined();
+    expect(prOpt!.defaultValue).toBeUndefined();
+  });
+});
+
+describe('jira map action', () => {
+  let loadConfigSpy: jest.SpiedFunction<typeof config.loadConfig>;
+  let logSpy: jest.SpiedFunction<typeof console.log>;
+
+  beforeEach(() => {
+    ddbSend.mockReset().mockResolvedValue({});
+    cfnSend.mockReset().mockResolvedValue({
+      Stacks: [{
+        Outputs: [
+          { OutputKey: 'JiraProjectMappingTableName', OutputValue: 'JiraProjectsTable' },
+        ],
+      }],
+    });
+    loadConfigSpy = jest.spyOn(config, 'loadConfig').mockReturnValue({ region: 'us-west-2' } as ReturnType<typeof config.loadConfig>);
+    logSpy = jest.spyOn(console, 'log').mockImplementation();
+  });
+
+  afterEach(() => {
+    loadConfigSpy.mockRestore();
+    logSpy.mockRestore();
+  });
+
+  test('persists status_on_start / status_on_pr when both flags are supplied', async () => {
+    const program = makeJiraCommand();
+    await program.parseAsync([
+      'node', 'bgagent', 'map', 'cloud-1', 'ENG',
+      '--repo', 'org/repo',
+      '--status-on-start', 'Doing',
+      '--status-on-pr', 'Code Review',
+    ]);
+
+    const putCmd = ddbSend.mock.calls[0][0] as PutCommand;
+    expect(putCmd).toBeInstanceOf(PutCommand);
+    expect(putCmd.input.Item).toMatchObject({
+      jira_project_identity: 'cloud-1#ENG',
+      repo: 'org/repo',
+      status_on_start: 'Doing',
+      status_on_pr: 'Code Review',
+    });
+  });
+
+  test('omits status_on_* keys entirely when the flags are not supplied', async () => {
+    const program = makeJiraCommand();
+    await program.parseAsync([
+      'node', 'bgagent', 'map', 'cloud-1', 'ENG', '--repo', 'org/repo',
+    ]);
+
+    const putCmd = ddbSend.mock.calls[0][0] as PutCommand;
+    expect(putCmd.input.Item).not.toHaveProperty('status_on_start');
+    expect(putCmd.input.Item).not.toHaveProperty('status_on_pr');
+  });
+
+  test('trims override values before persisting', async () => {
+    const program = makeJiraCommand();
+    await program.parseAsync([
+      'node', 'bgagent', 'map', 'cloud-1', 'ENG', '--repo', 'org/repo',
+      '--status-on-start', '  Doing  ',
+      '--status-on-pr', '  Code Review  ',
+    ]);
+
+    const putCmd = ddbSend.mock.calls[0][0] as PutCommand;
+    expect(putCmd.input.Item).toMatchObject({ status_on_start: 'Doing', status_on_pr: 'Code Review' });
+  });
+
+  test('treats whitespace-only overrides as unset (not persisted)', async () => {
+    // #605: a truthy whitespace value would otherwise persist and permanently
+    // no-op at the agent (strip() -> "" matches no status, no fallback).
+    const program = makeJiraCommand();
+    await program.parseAsync([
+      'node', 'bgagent', 'map', 'cloud-1', 'ENG', '--repo', 'org/repo',
+      '--status-on-start', '   ',
+      '--status-on-pr', '\t',
+    ]);
+
+    const putCmd = ddbSend.mock.calls[0][0] as PutCommand;
+    expect(putCmd.input.Item).not.toHaveProperty('status_on_start');
+    expect(putCmd.input.Item).not.toHaveProperty('status_on_pr');
+  });
 });
 
 describe('generateInviteCode', () => {
