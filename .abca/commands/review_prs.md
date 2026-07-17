@@ -145,7 +145,7 @@ export const meta = {
   description: 'Review a set of PRs, one review_pr per PR, return compact verdicts',
   phases: [{ title: 'Review' }],
 }
-const RESULT = { type: 'object', required: ['number', 'verdict', 'reviewUrl'], properties: {
+const RESULT = { type: 'object', required: ['number', 'verdict', 'rationale', 'reviewUrl'], properties: {
   number: { type: 'number' },
   verdict: { enum: ['APPROVE', 'COMMENT', 'REQUEST_CHANGES'] },
   rationale: { type: 'string' },
@@ -157,7 +157,7 @@ const results = await parallel(args.map((pr) => () =>
     `suggestions. Worktree: ${pr.worktreePath}. Diff: ${pr.diffPath}. commit_id: ${pr.headSha}. ` +
     `Base: ${pr.baseRef}${pr.baseRef !== 'main' ? ' (STACKED — diff is vs the base branch)' : ''}. ` +
     `Governance: gate is an approved backing issue; a pr/* branch is a waived nit. Read existing ` +
-    `review threads first and verify prior blocking claims. Submit via gh api (see review_pr).`,
+    `review threads first and verify prior blocking claims. Submit via gh api (see Stage 3).`,
     { label: `review:#${pr.number}`, phase: 'Review', schema: RESULT },
   )))
 return results.filter(Boolean)
