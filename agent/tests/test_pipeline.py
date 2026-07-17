@@ -1,5 +1,6 @@
 """Unit tests for pipeline.py — cedar_policies injection and pure helpers."""
 
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -141,6 +142,78 @@ class TestCedarPoliciesInjection:
 
         assert captured_config is not None
         assert captured_config.cedar_policies == []
+
+    @patch("runner.run_agent")
+    @patch("pipeline.build_system_prompt")
+    @patch("pipeline.discover_project_config")
+    @patch("repo.setup_repo")
+    @patch("pipeline.task_span")
+    @patch("pipeline.task_state")
+    def test_git_identity_uses_env_vars_not_global_config(
+        self,
+        _mock_task_state,
+        mock_task_span,
+        mock_setup_repo,
+        _mock_discover,
+        _mock_build_prompt,
+        mock_run_agent,
+        monkeypatch,
+    ):
+        """Git identity is set via GIT_AUTHOR/COMMITTER env vars, never
+        `git config --global`, so a developer's ~/.gitconfig is never
+        clobbered when the pipeline runs on a workstation (#622)."""
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        # Ensure a clean slate so the assertion proves the pipeline set them.
+        for var in (
+            "GIT_AUTHOR_NAME",
+            "GIT_AUTHOR_EMAIL",
+            "GIT_COMMITTER_NAME",
+            "GIT_COMMITTER_EMAIL",
+        ):
+            monkeypatch.delenv(var, raising=False)
+
+        mock_setup_repo.return_value = RepoSetup(
+            repo_dir="/workspace/repo",
+            branch="bgagent/test/branch",
+            build_before=True,
+        )
+
+        async def fake_run_agent(_prompt, _system_prompt, config, cwd=None, trajectory=None):
+            return AgentResult(status="success", turns=1, cost_usd=0.01, num_turns=1)
+
+        mock_run_agent.side_effect = fake_run_agent
+
+        mock_span = MagicMock()
+        mock_span.__enter__ = MagicMock(return_value=mock_span)
+        mock_span.__exit__ = MagicMock(return_value=False)
+        mock_task_span.return_value = mock_span
+
+        with (
+            patch("pipeline.ensure_committed", return_value=False),
+            patch("pipeline.verify_build", return_value=True),
+            patch("pipeline.verify_lint", return_value=True),
+            patch(
+                "pipeline.ensure_pr",
+                return_value="https://github.com/org/repo/pull/1",
+            ),
+            patch("pipeline.get_disk_usage", return_value=0),
+            patch("pipeline.print_metrics"),
+        ):
+            from pipeline import run_task
+
+            run_task(
+                repo_url="owner/repo",
+                task_description="fix bug",
+                github_token="ghp_test",
+                aws_region="us-east-1",
+                task_id="test-id",
+            )
+
+        assert os.environ["GIT_AUTHOR_NAME"] == "bgagent"
+        assert os.environ["GIT_AUTHOR_EMAIL"] == "bgagent@noreply.github.com"
+        assert os.environ["GIT_COMMITTER_NAME"] == "bgagent"
+        assert os.environ["GIT_COMMITTER_EMAIL"] == "bgagent@noreply.github.com"
 
 
 class TestRepoLessPipeline:
