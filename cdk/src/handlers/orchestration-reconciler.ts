@@ -481,16 +481,29 @@ async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
     // them to released conditionally); skip them here to avoid a
     // double-write race.
     if (plan.toRelease.includes(update.sub_issue_id)) continue;
+    // review #6: a `skipped` transition must only apply from a non-live source
+    // (blocked/ready). Without this, a skip cascade racing a recovery re-release
+    // could stamp a `released`/`releasing`/running child terminal-`skipped`,
+    // letting the epic claim its once-only rollup while work is still in flight.
+    // Other resets (failed→ready/blocked) keep the plain not-already-there guard.
+    const skipGuard = update.child_status === 'skipped';
+    const values: Record<string, unknown> = { ':s': update.child_status, ':now': now };
+    let condition = 'child_status <> :s';
+    if (skipGuard) {
+      values[':blocked'] = 'blocked';
+      values[':ready'] = 'ready';
+      condition = 'child_status IN (:blocked, :ready)';
+    }
     try {
       await ddb.send(new UpdateCommand({
         TableName: ORCHESTRATION_TABLE,
         Key: { orchestration_id: orchestrationId, sub_issue_id: update.sub_issue_id },
         UpdateExpression: 'SET child_status = :s, updated_at = :now',
-        ConditionExpression: 'child_status <> :s',
-        ExpressionAttributeValues: { ':s': update.child_status, ':now': now },
+        ConditionExpression: condition,
+        ExpressionAttributeValues: values,
       }));
     } catch (err) {
-      if (isConditionalCheckFailed(err)) continue; // already in target state
+      if (isConditionalCheckFailed(err)) continue; // already in target / not a skippable source
       throw err;
     }
   }

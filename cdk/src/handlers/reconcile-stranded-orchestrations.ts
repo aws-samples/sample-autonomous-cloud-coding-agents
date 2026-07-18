@@ -192,7 +192,11 @@ async function reconcileOrchestration(orchestrationId: string): Promise<number> 
         return s === 'failed' || s === 'skipped';
       });
       if (deadDep) {
-        await advanceChildStatus(orchestrationId, c.sub_issue_id, 'skipped', now);
+        // review #6: only skip from blocked/ready. A concurrent recovery could
+        // have re-released this child (blocked → releasing/released) between our
+        // snapshot and this write; the source-state guard makes that write a
+        // no-op instead of clobbering a running child into terminal 'skipped'.
+        await advanceChildStatus(orchestrationId, c.sub_issue_id, 'skipped', now, ['blocked', 'ready']);
         statusOf.set(c.sub_issue_id, 'skipped');
         changed = true;
       }
@@ -246,20 +250,41 @@ async function reconcileOrchestration(orchestrationId: string): Promise<number> 
   return released;
 }
 
-/** Conditionally advance a child row's status (no-op if already there). */
+/**
+ * Conditionally advance a child row's status (no-op if already there).
+ *
+ * ``fromStates`` (review blocker #6): when provided, the write additionally
+ * asserts the CURRENT status is one of them — so a transition can't clobber a
+ * child that has since moved to a state outside the allowed source set. The skip
+ * cascade passes ``['blocked','ready']`` so a live ``released``/``releasing``
+ * child (a recovery re-released it while this sweep raced) is NEVER stamped the
+ * terminal ``skipped`` — which would let the epic claim its once-only rollup
+ * while that child's work is still running. Recovery advances (released →
+ * succeeded/failed) pass no ``fromStates`` (any non-target source is fine).
+ */
 async function advanceChildStatus(
   orchestrationId: string,
   subIssueId: string,
   status: string,
   now: string,
+  fromStates?: readonly string[],
 ): Promise<void> {
+  const values: Record<string, unknown> = { ':s': status, ':now': now };
+  let condition = 'child_status <> :s';
+  if (fromStates && fromStates.length > 0) {
+    const names = fromStates.map((st, i) => {
+      values[`:from${i}`] = st;
+      return `:from${i}`;
+    });
+    condition = `child_status <> :s AND child_status IN (${names.join(', ')})`;
+  }
   try {
     await ddb.send(new UpdateCommand({
       TableName: ORCHESTRATION_TABLE,
       Key: { orchestration_id: orchestrationId, sub_issue_id: subIssueId },
       UpdateExpression: 'SET child_status = :s, updated_at = :now',
-      ConditionExpression: 'child_status <> :s',
-      ExpressionAttributeValues: { ':s': status, ':now': now },
+      ConditionExpression: condition,
+      ExpressionAttributeValues: values,
     }));
   } catch (err) {
     if ((err as { name?: string })?.name === 'ConditionalCheckFailedException') return;
