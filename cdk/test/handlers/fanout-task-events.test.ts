@@ -350,13 +350,16 @@ describe('fanout-task-events: per-channel filter contract (design §6.2)', () =>
     ]);
   });
 
-  test('Linear subscribes to terminal events only (post-once final-status comment)', () => {
+  test('Linear subscribes to terminal events + task_timed_out (post-once final-status comment)', () => {
+    // review should-fix: task_timed_out added so a Linear standalone iteration
+    // that times out still settles (matches Jira/Slack, which already had it).
     const f = CHANNEL_DEFAULTS.linear;
     expect([...f].sort()).toEqual([
       'task_cancelled',
       'task_completed',
       'task_failed',
       'task_stranded',
+      'task_timed_out',
     ]);
   });
 
@@ -483,12 +486,12 @@ describe('fanout-task-events: routeEvent (per-channel dispatch)', () => {
     expect([...outcome.dispatched].sort()).toEqual(['github', 'jira', 'linear', 'slack']);
   });
 
-  test('task_timed_out routes to Slack + Jira (Linear default predates it)', async () => {
-    // ``task_timed_out`` is a distinct terminal event the orchestrator
-    // emits. Slack and Email-... actually email does NOT include it; the
-    // Jira default (added in #573) does, Linear's (#239) does not.
+  test('task_timed_out routes to Slack + Jira + Linear (all three now subscribe)', async () => {
+    // ``task_timed_out`` is a distinct terminal event the orchestrator emits.
+    // Slack (#239) + Jira (#573) always had it; Linear now does too (review
+    // should-fix) so a timed-out standalone iteration settles. Email excludes it.
     const outcome = await routeEvent(mk('task_timed_out'));
-    expect([...outcome.dispatched].sort()).toEqual(['jira', 'slack']);
+    expect([...outcome.dispatched].sort()).toEqual(['jira', 'linear', 'slack']);
   });
 
   test('agent_error routes only to Slack', async () => {

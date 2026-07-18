@@ -198,8 +198,10 @@ describe('linear-webhook-processor — #247 orchestration routing', () => {
     // parent start signal mirrored — 👀 reaction + In Progress — via upsertEpicPanel.
     expect(upsertStatusCommentMock).toHaveBeenCalled();
     expect(swapIssueReactionMock).toHaveBeenCalledWith(expect.anything(), expect.any(String), 'eyes');
+    // The 5th arg (allowSameTypeRegression, #9b) is passed by the shared rollup
+    // re-open path; harmless on this forward Backlog→In Progress mirror.
     expect(transitionIssueStateMock).toHaveBeenCalledWith(
-      expect.anything(), expect.any(String), 'started', ['In Progress'],
+      expect.anything(), expect.any(String), 'started', ['In Progress'], true,
     );
   });
 
