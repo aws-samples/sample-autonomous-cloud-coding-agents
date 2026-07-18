@@ -46,10 +46,18 @@ const REQUEST_TIMEOUT_MS = 8000;
 const RELATION_TYPE_BLOCKS = 'blocks';
 
 /**
- * Page size for the children / relations connections. Bounded by
- * ``max_sub_issues`` policy downstream; a parent with more children
- * than this is over-cap and will be rejected before execution, so a
- * single page is sufficient for the MVP (no cursor pagination).
+ * Page size for the children / relations connections.
+ *
+ * review blocker #7: this query fetches a SINGLE page (no cursor loop). The old
+ * comment claimed a >100-child parent is "rejected before execution", but the
+ * Mode-A path (a human-authored sub-issue graph) has NO cap check — so an
+ * over-size epic was SILENTLY truncated to the first 100 AND its dropped
+ * children's dependency edges were filtered out, leaving survivors that release
+ * out of order. Rather than silently truncate, we now detect ``hasNextPage`` on
+ * either connection and return an explicit ``error`` (fail loud) so the operator
+ * splits the epic instead of getting a wrong-order run. 100 is the platform
+ * ceiling for a single Mode-A epic; a genuinely larger workload should be
+ * multiple epics.
  */
 const CONNECTION_PAGE_SIZE = 100;
 
@@ -58,7 +66,8 @@ const CONNECTION_PAGE_SIZE = 100;
  *
  * For child C, ``inverseRelations`` of type ``blocks`` are relations
  * whose *source* issue blocks C — i.e. C's predecessors. We take the
- * related issue id from each as a ``depends_on`` edge.
+ * related issue id from each as a ``depends_on`` edge. ``pageInfo.hasNextPage``
+ * on both connections lets us detect (and reject) a truncated over-size graph.
  */
 const SUB_ISSUE_GRAPH_QUERY = `
 query SubIssueGraph($issueId: String!, $first: Int!) {
@@ -66,11 +75,13 @@ query SubIssueGraph($issueId: String!, $first: Int!) {
     id
     identifier
     children(first: $first) {
+      pageInfo { hasNextPage }
       nodes {
         id
         identifier
         title
         inverseRelations(first: $first) {
+          pageInfo { hasNextPage }
           nodes {
             type
             issue { id }
@@ -113,18 +124,22 @@ interface RawRelationNode {
   readonly issue?: { readonly id?: string } | null;
 }
 
+interface RawPageInfo {
+  readonly hasNextPage?: boolean;
+}
+
 interface RawChildNode {
   readonly id?: string;
   readonly identifier?: string;
   readonly title?: string;
-  readonly inverseRelations?: { readonly nodes?: readonly RawRelationNode[] } | null;
+  readonly inverseRelations?: { readonly pageInfo?: RawPageInfo; readonly nodes?: readonly RawRelationNode[] } | null;
 }
 
 interface RawSubIssueGraph {
   readonly data?: {
     readonly issue?: {
       readonly id?: string;
-      readonly children?: { readonly nodes?: readonly RawChildNode[] } | null;
+      readonly children?: { readonly pageInfo?: RawPageInfo; readonly nodes?: readonly RawChildNode[] } | null;
     } | null;
   };
   readonly errors?: unknown;
@@ -202,6 +217,33 @@ export async function fetchSubIssueGraph(
   const childNodes = issue.children?.nodes ?? [];
   if (childNodes.length === 0) {
     return { kind: 'no_children', parentIssueId: issue.id };
+  }
+
+  // review blocker #7: fail LOUD on truncation instead of silently dropping
+  // children (and their dependency edges). If Linear reports more children than
+  // one page holds, or any child has more blockers than one page holds, we can't
+  // build a correct DAG from a single fetch — reject so the operator splits the
+  // epic rather than getting a silently-wrong-order run.
+  if (issue.children?.pageInfo?.hasNextPage) {
+    logger.warn('Linear sub-issue fetch truncated — parent has more children than one page', {
+      parent_issue_id: issue.id, page_size: CONNECTION_PAGE_SIZE,
+    });
+    return {
+      kind: 'error',
+      message: `This epic has more than ${CONNECTION_PAGE_SIZE} sub-issues — too many for a single `
+        + `orchestration. Split it into multiple epics of at most ${CONNECTION_PAGE_SIZE} sub-issues each.`,
+    };
+  }
+  const truncatedBlockersChild = childNodes.find((c) => c.inverseRelations?.pageInfo?.hasNextPage);
+  if (truncatedBlockersChild) {
+    logger.warn('Linear sub-issue fetch truncated — a child has more blockers than one page', {
+      parent_issue_id: issue.id, child_id: truncatedBlockersChild.id, page_size: CONNECTION_PAGE_SIZE,
+    });
+    return {
+      kind: 'error',
+      message: `A sub-issue has more than ${CONNECTION_PAGE_SIZE} blocking relations — too many to order `
+        + `reliably. Reduce the cross-dependencies on sub-issue ${truncatedBlockersChild.identifier ?? truncatedBlockersChild.id}.`,
+    };
   }
 
   // Restrict depends_on edges to ids that are themselves children of
