@@ -503,6 +503,31 @@ describe('linear-feedback', () => {
       expect(fetchMock).toHaveBeenCalledTimes(1);
     });
 
+    // review blocker #9b: the rollup re-open (In Review → In Progress, BOTH
+    // 'started') was silently blocked by the same-type position tiebreak.
+    test('same-type regression In Review → In Progress is BLOCKED by default', async () => {
+      fetchMock.mockResolvedValueOnce(statesResp(cur('s-inreview')));
+      const ok = await transitionIssueState(CTX, ISSUE_ID, 'started', ['In Progress']);
+      expect(ok).toBe(false); // In Progress (pos 2) < In Review (pos 1002) → backward
+      expect(fetchMock).toHaveBeenCalledTimes(1); // no mutation
+    });
+
+    test('same-type regression In Review → In Progress SUCCEEDS with allowSameTypeRegression (rollup re-open)', async () => {
+      fetchMock
+        .mockResolvedValueOnce(statesResp(cur('s-inreview')))
+        .mockResolvedValueOnce(jsonResponse({ data: { issueUpdate: { success: true } } }));
+      const ok = await transitionIssueState(CTX, ISSUE_ID, 'started', ['In Progress'], true);
+      expect(ok).toBe(true);
+      expect(JSON.parse(fetchMock.mock.calls[1][1].body).variables.stateId).toBe('s-inprogress');
+    });
+
+    test('allowSameTypeRegression does NOT permit a cross-type demotion (Done → In Progress still blocked)', async () => {
+      fetchMock.mockResolvedValueOnce(statesResp(cur('s-done')));
+      const ok = await transitionIssueState(CTX, ISSUE_ID, 'started', ['In Progress'], true);
+      expect(ok).toBe(false); // completed → started is cross-type; still refused
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
     test('returns false when token cannot be resolved', async () => {
       resolveLinearOauthTokenMock.mockResolvedValueOnce(null);
       const ok = await transitionIssueState(CTX, ISSUE_ID, 'started', ['In Review']);

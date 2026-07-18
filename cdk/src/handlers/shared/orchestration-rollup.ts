@@ -468,8 +468,12 @@ export async function upsertEpicPanel(params: UpsertEpicPanelParams): Promise<st
     const anyBad = rows.some((r) => r.child_status === 'failed' || r.child_status === 'skipped');
     try {
       if (inProgress) {
-        // Re-opened (or running): back to In Progress + 👀.
-        await transitionIssueState(params.ctx, params.parentLinearIssueId, 'started', ['In Progress']);
+        // Re-opened (or running): back to In Progress + 👀. Pass
+        // allowSameTypeRegression (#9b) — a settled epic is In Review (started),
+        // and In Progress is ALSO started but at a lower position, so the default
+        // backward-move guard silently blocked this deliberate re-open. Cross-type
+        // demotion (a human moved it to Done) is still blocked by the guard.
+        await transitionIssueState(params.ctx, params.parentLinearIssueId, 'started', ['In Progress'], true);
         await swapIssueReaction(params.ctx, params.parentLinearIssueId, 'eyes');
       } else if (!anyBad) {
         // Clean completion: work done, awaiting human merge → In Review + ✅.

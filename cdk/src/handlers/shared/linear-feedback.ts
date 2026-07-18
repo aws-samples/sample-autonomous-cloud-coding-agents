@@ -717,6 +717,16 @@ export async function transitionIssueState(
   issueId: string,
   targetType: 'started' | 'completed',
   preferredNames: readonly string[] = [],
+  /**
+   * review blocker #9b: allow a WITHIN-TYPE regression (e.g. In Review → In
+   * Progress, both ``started``). By default the backward-move guard blocks it —
+   * correct for most callers, but it silently no-op'd the orchestration rollup's
+   * deliberate re-open (a settled epic getting a new/re-run child must go back
+   * from In Review to In Progress, and both are ``started`` type so the
+   * position-tiebreak blocked it). Cross-TYPE demotion (completed → started) is
+   * still ALWAYS blocked — this only relaxes the same-type position tiebreak.
+   */
+  allowSameTypeRegression = false,
 ): Promise<boolean> {
   const token = await resolveToken(ctx);
   if (!token) return false;
@@ -755,12 +765,18 @@ export async function transitionIssueState(
     };
     const curRank = TYPE_RANK[current.type] ?? 0;
     const tgtRank = TYPE_RANK[target.type] ?? 0;
-    const backward = curRank > tgtRank || (curRank === tgtRank && current.position >= target.position);
+    const crossTypeDemotion = curRank > tgtRank;
+    const sameTypeRegression = curRank === tgtRank && current.position >= target.position;
+    // Cross-type demotion (e.g. completed → started) is NEVER allowed — a human
+    // or automation advanced it. A same-type regression (In Review → In Progress)
+    // is allowed ONLY when the caller opts in (#9b: the rollup re-open).
+    const backward = crossTypeDemotion || (sameTypeRegression && !allowSameTypeRegression);
     if (backward) {
       logger.info('Linear state transition: skipping backward move', {
         issue_id: issueId,
         current_state: current.name,
         target_state: target.name,
+        cross_type: crossTypeDemotion,
       });
       return false;
     }
