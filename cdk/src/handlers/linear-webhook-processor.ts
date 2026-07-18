@@ -1450,6 +1450,35 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
   // actual comment the human wrote (reactions work at any thread depth).
   const replyTargetId = payload.data.parentId ?? commentId;
 
+  // AUTHORIZATION (review MEDIUM): the issue→task path gates on lookupPlatformUser
+  // (a Linear actor with no linked ABCA user can't create tasks). The COMMENT
+  // path did NOT — so ANY workspace member or guest who can post @bgagent could
+  // approve/reject plans, drive plan commands, and START code-pushing agent runs,
+  // all attributed to and BILLED against the original requester. Resolve the
+  // commenter to a platform user BEFORE any verdict/command/dispatch. Unmapped →
+  // ❓ + a one-line reply, then stop. (The bot's own comments never carry the
+  // mention token, so they don't reach here; and an app-actor commenter is
+  // likewise unmapped, which is correct — the app can't authorize itself.)
+  const commenterId = payload.actor?.id;
+  const commenterPlatformUserId = commenterId
+    ? await lookupPlatformUser(workspaceId, commenterId)
+    : null;
+  if (!commenterPlatformUserId) {
+    logger.warn('A6 comment: commenter has no linked platform user — refusing to act on the trigger', {
+      linear_workspace_id: workspaceId, linear_user_id: commenterId, linear_issue_id: commentedIssueId,
+    });
+    const feedbackCtx = { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE };
+    await reactToComment(feedbackCtx, commentId, EMOJI_NEEDS_INPUT);
+    try {
+      await upsertThreadedReply(
+        feedbackCtx, commentedIssueId, replyTargetId,
+        'I can only act on `@bgagent` requests from a linked ABCA user. Link your Linear '
+          + 'account first (ask your ABCA admin / run `bgagent linear link`), then re-comment.',
+      );
+    } catch { /* best-effort reply */ }
+    return;
+  }
+
   // #299 Mode B: a comment on a parent that has a PENDING plan (proposed but not
   // yet executed). Checked BEFORE A6 routing because NO orchestration is seeded
   // yet — the parent has only a pending-plan row, so loadOrchestration misses it.

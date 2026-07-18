@@ -450,6 +450,12 @@ describe('linear-webhook-processor — #247 A6 comment trigger', () => {
         return { Items: opts.standalone ? [opts.standalone] : [] }; // resolveTaskByLinearIssue
       }
       if (cmd._type === 'Query') return { Items: [meta, child] }; // loadOrchestration
+      // Comment-trigger authorization: lookupPlatformUser Gets the user-mapping
+      // row keyed on linear_identity. Return a mapped commenter so the auth gate
+      // passes (the un-mapped case is covered by its own dedicated test).
+      if (cmd._type === 'Get' && (cmd.input.Key as { linear_identity?: string })?.linear_identity) {
+        return { Item: { platform_user_id: 'commenter-user', status: 'active' } };
+      }
       if (cmd._type === 'Get') return { Item: opts.prUrl ? { pr_url: opts.prUrl } : {} };
       return {};
     });
@@ -461,6 +467,10 @@ describe('linear-webhook-processor — #247 A6 comment trigger', () => {
     ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
       if (cmd._type === 'Query' && cmd.input.IndexName === 'LinearIssueIndex') {
         return { Items: standalone ? [standalone] : [] };
+      }
+      // Comment-trigger authorization: the commenter resolves to a mapped user.
+      if (cmd._type === 'Get' && (cmd.input.Key as { linear_identity?: string })?.linear_identity) {
+        return { Item: { platform_user_id: 'commenter-user', status: 'active' } };
       }
       return {};
     });
@@ -560,6 +570,23 @@ describe('linear-webhook-processor — #247 A6 comment trigger', () => {
     mockOrchWithChild({ subIssueId: 'sub-issue-1' }); // no childTaskId, no standalone
     await handler(eventWith(comment()));
     expect(createTaskCoreMock).not.toHaveBeenCalled();
+  });
+
+  test('review AUTH: an UNMAPPED commenter cannot drive a dispatch (❓ + reply, no task)', async () => {
+    // Even with a fully actionable iteration target, a commenter with NO linked
+    // platform user must not be able to start a code-pushing run billed to the
+    // requester. The mapping Get returns nothing → the gate blocks before dispatch.
+    fetchIssueParentIdMock.mockResolvedValue(null);
+    ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
+      if (cmd._type === 'Query' && cmd.input.IndexName === 'LinearIssueIndex') {
+        return { Items: [{ task_id: 'task-solo', user_id: 'u-solo', repo: 'o/r', pr_number: 99 }] };
+      }
+      // No user-mapping row for the commenter (linear_identity Get → empty).
+      return {};
+    });
+    await handler(eventWith(comment()));
+    expect(createTaskCoreMock).not.toHaveBeenCalled(); // blocked by auth
+    expect(reactToCommentMock).toHaveBeenCalledWith(expect.anything(), 'comment-1', 'question');
   });
 
   test('bare @bgagent (no text) → falls back to a generic iteration instruction', async () => {
@@ -721,7 +748,9 @@ describe('linear-webhook-processor — #247 A6 comment trigger', () => {
         if (cmd._type === 'Query' && cmd.input.IndexName === 'LinearIssueIndex') return { Items: [] };
         if (cmd._type === 'Query') return { Items: [meta, footer, news] }; // loadOrchestration (parent's own)
         if (cmd._type === 'Get') {
-          const key = cmd.input.Key as { task_id?: string; sub_issue_id?: string };
+          const key = cmd.input.Key as { task_id?: string; sub_issue_id?: string; linear_identity?: string };
+          // Comment-trigger authorization: mapped commenter (auth gate passes).
+          if (key.linear_identity) return { Item: { platform_user_id: 'commenter-user', status: 'active' } };
           // Mode B getPendingPlan Get is keyed on the #pending-plan SK — no plan
           // on this epic, so return no item (matches prod; a verdict-shaped
           // comment like "ship it" then falls through to the A6 no-match path).
