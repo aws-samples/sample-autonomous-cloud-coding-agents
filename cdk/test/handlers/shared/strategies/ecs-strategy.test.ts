@@ -91,6 +91,9 @@ describe('EcsComputeStrategy', () => {
       // inactive", ABCA-660/663). TASK_DEF_ARN ends in `agent:1` → family `agent`.
       expect(call.input.taskDefinition).toBe('agent');
       expect(call.input.launchType).toBe('FARGATE');
+      // review #5c: clientToken = taskId dedups a double-RunTask (client-side
+      // timeout on a launch that actually succeeded → auto-retry re-fires).
+      expect(call.input.clientToken).toBe('TASK001');
       expect(call.input.networkConfiguration.awsvpcConfiguration.subnets).toEqual(['subnet-aaa', 'subnet-bbb']);
       expect(call.input.networkConfiguration.awsvpcConfiguration.securityGroups).toEqual(['sg-12345']);
       expect(call.input.networkConfiguration.awsvpcConfiguration.assignPublicIp).toBe('DISABLED');

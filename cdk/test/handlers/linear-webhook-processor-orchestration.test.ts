@@ -456,7 +456,7 @@ describe('linear-webhook-processor — #247 A6 comment trigger', () => {
   }
 
   /** Mock for a PLAIN (non-orchestration) issue: no parent, no orchestration snapshot, only the GSI hit. */
-  function mockStandaloneOnly(standalone: { task_id: string; user_id?: string; repo?: string; pr_url?: string; pr_number?: number } | null): void {
+  function mockStandaloneOnly(standalone: { task_id: string; user_id?: string; repo?: string; pr_url?: string; pr_number?: number; status?: string } | null): void {
     fetchIssueParentIdMock.mockResolvedValue(null); // no parent ⇒ not a sub-issue
     ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
       if (cmd._type === 'Query' && cmd.input.IndexName === 'LinearIssueIndex') {
@@ -616,6 +616,23 @@ describe('linear-webhook-processor — #247 A6 comment trigger', () => {
       expect(ctx.idempotencyKey).toContain('newwork_');
       // 👀 ack on the comment.
       expect(reactToCommentMock).toHaveBeenCalledWith(expect.anything(), 'comment-1', 'eyes');
+    });
+
+    // review #5a (regression from #614): a follow-up comment while the task is
+    // still RUNNING (PR-less because it hasn't opened its PR yet) must NOT spawn
+    // a second parallel task — prNumber===null is not enough to mean "finished".
+    test('PR-less task still RUNNING → does NOT dispatch a parallel task, replies instead', async () => {
+      mockStandaloneOnly({ task_id: 'task-solo', user_id: 'u-solo', repo: 'o/r', status: 'RUNNING' });
+      await handler(eventWith(comment()));
+      expect(createTaskCoreMock).not.toHaveBeenCalled(); // no double-dispatch
+      expect(reactToCommentMock).toHaveBeenCalledWith(expect.anything(), 'comment-1', 'eyes');
+    });
+
+    test('PR-less task in a TERMINAL state (COMPLETED) → new work IS dispatched', async () => {
+      mockStandaloneOnly({ task_id: 'task-solo', user_id: 'u-solo', repo: 'o/r', status: 'COMPLETED' });
+      await handler(eventWith(comment()));
+      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+      expect(createTaskCoreMock.mock.calls[0][0].workflow_ref).toBe('coding/new-task-v1');
     });
 
     test('PR-less task + BARE @bgagent (no instruction) → no task, but a threaded reply (not silent)', async () => {
