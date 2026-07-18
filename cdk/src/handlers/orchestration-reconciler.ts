@@ -648,7 +648,7 @@ async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
  * edit is idempotent (same body = no-op), so it always runs; the parent-STATE
  * mirror is claimed once via ``claimRollup`` on the first all-terminal caller.
  */
-async function refreshPanelAndSettle(
+export async function refreshPanelAndSettle(
   orchestrationId: string,
   children: readonly OrchestrationChildRow[],
   meta: { linear_workspace_id: string; parent_linear_issue_id: string; status_comment_id?: string; release_context: { channel_source?: string } },

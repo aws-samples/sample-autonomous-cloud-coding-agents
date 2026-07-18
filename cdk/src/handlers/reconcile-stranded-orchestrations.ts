@@ -58,6 +58,7 @@ import {
   GetCommand,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
+import { refreshPanelAndSettle } from './orchestration-reconciler';
 import { createTaskCore } from './shared/create-task-core';
 import { logger } from './shared/logger';
 import { readConcurrencyBudget, releaseReadyChildren } from './shared/orchestration-release';
@@ -123,11 +124,24 @@ async function reconcileOrchestration(orchestrationId: string): Promise<number> 
   const snap = await loadOrchestration(ddb, ORCHESTRATION_TABLE, orchestrationId);
   if (!snap) return 0;
 
-  // Skip orchestrations already fully terminal — nothing to recover.
-  const allTerminal = snap.children.every((c) => TERMINAL_CHILD.has(c.child_status));
-  if (allTerminal) return 0;
-
   const now = new Date().toISOString();
+
+  // Already fully terminal: no children to release/recover — BUT the parent may
+  // never have been settled (review blocker #8: the last terminal event was lost,
+  // so the DDB rows are all terminal yet the Linear parent is stuck 🔄 In Progress
+  // forever). Attempt the idempotent settle before returning, instead of the old
+  // bare skip that guaranteed the epic never closed on the lossy path.
+  const allTerminal = snap.children.every((c) => TERMINAL_CHILD.has(c.child_status));
+  if (allTerminal) {
+    try {
+      await refreshPanelAndSettle(orchestrationId, snap.children, snap.meta, now);
+    } catch (err) {
+      logger.warn('Sweep settle (already-terminal epic) failed (will retry next sweep)', {
+        orchestration_id: orchestrationId, error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    return 0;
+  }
 
   // 1a. Recover a child STUCK in the transient ``releasing`` state (review #3
   //     flip-then-create): a releaser won the blocked|ready→releasing claim but
@@ -226,7 +240,31 @@ async function reconcileOrchestration(orchestrationId: string): Promise<number> 
     })
     .map((c) => ({ ...c, child_status: 'ready' as const }));
 
-  if (releasableRows.length === 0) return 0;
+  if (releasableRows.length === 0) {
+    // review blocker #8: nothing left to release. If EVERY child is now terminal
+    // but the parent was never settled — because the last child's terminal stream
+    // event was lost (the exact failure this sweep exists to recover) — the epic
+    // is 'done' in DynamoDB yet stuck showing 🔄 In Progress in Linear forever.
+    // The panel/rollup/settle side-effects lived ONLY on the (lossy) live-event
+    // path. Call the shared settle here so the sweep closes the loop: post the
+    // rollup + transition the parent. refreshPanelAndSettle is idempotent (body
+    // edit is a no-op if unchanged; the parent-state mirror is claimed once), so
+    // racing the live reconciler is safe.
+    const freshAllTerminal = fresh.children.every((c) => TERMINAL_CHILD.has(c.child_status));
+    if (freshAllTerminal) {
+      try {
+        await refreshPanelAndSettle(orchestrationId, fresh.children, fresh.meta, now);
+        logger.warn('Stranded orchestration settled by sweep — parent was never settled (lost terminal event)', {
+          orchestration_id: orchestrationId, parent_linear_issue_id: fresh.meta.parent_linear_issue_id,
+        });
+      } catch (err) {
+        logger.warn('Sweep settle failed (will retry next sweep)', {
+          orchestration_id: orchestrationId, error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    return 0;
+  }
 
   // #331: throttle the sweep's releases to the free budget too.
   const budget = USER_CONCURRENCY_TABLE

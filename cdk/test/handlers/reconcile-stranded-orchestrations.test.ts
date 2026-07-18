@@ -77,6 +77,15 @@ jest.mock('../../src/handlers/shared/logger', () => ({
   logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
 }));
 
+// review blocker #8: the sweep now imports refreshPanelAndSettle from the live
+// reconciler to settle an epic whose last terminal event was lost. Mock it so we
+// can assert the sweep CALLS it (its real body is exercised by the reconciler's
+// own suite).
+const refreshPanelAndSettleMock = jest.fn();
+jest.mock('../../src/handlers/orchestration-reconciler', () => ({
+  refreshPanelAndSettle: (...args: unknown[]) => refreshPanelAndSettleMock(...args),
+}));
+
 process.env.ORCHESTRATION_TABLE_NAME = 'OrchestrationTable';
 process.env.TASK_TABLE_NAME = 'TaskTable';
 
@@ -111,6 +120,7 @@ beforeEach(() => {
   orch.clear(); tasksTbl.clear(); fakeSend.mockClear();
   createTaskCoreMock.mockReset();
   createTaskCoreMock.mockResolvedValue({ statusCode: 201, body: JSON.stringify({ data: { task_id: 'new-task' } }) });
+  refreshPanelAndSettleMock.mockReset();
 });
 
 describe('#303 stranded-orchestration backstop', () => {
@@ -134,6 +144,32 @@ describe('#303 stranded-orchestration backstop', () => {
     await handler();
     expect(statusOf('o2', 'A')).toBe('succeeded');
     expect(statusOf('o2', 'B')).toBe('released');
+  });
+
+  // review blocker #8: the sweep must SETTLE the parent (post rollup + transition
+  // Linear), not just flip DDB rows — else a lost last-terminal event leaves the
+  // epic 'done' in DDB but stuck 🔄 In Progress in Linear forever.
+  test('lost LAST terminal event: the only remaining child completes → sweep settles the parent', async () => {
+    seed('o-settle', [
+      { sk: 'A', status: 'succeeded' },
+      { sk: 'B', deps: ['A'], status: 'released', taskId: 'task-B' },
+    ]);
+    tasksTbl.set('task-B', { task_id: 'task-B', status: 'COMPLETED', build_passed: true });
+    await handler();
+    // B advanced to terminal in DDB…
+    expect(statusOf('o-settle', 'B')).toBe('succeeded');
+    // …and, crucially, the parent was settled (the whole point of blocker #8).
+    expect(refreshPanelAndSettleMock).toHaveBeenCalled();
+    expect(createTaskCoreMock).not.toHaveBeenCalled(); // nothing left to release
+  });
+
+  test('already fully-terminal but unsettled epic → sweep still settles (idempotent)', async () => {
+    seed('o-done', [
+      { sk: 'A', status: 'succeeded' },
+      { sk: 'B', deps: ['A'], status: 'succeeded' },
+    ]);
+    await handler();
+    expect(refreshPanelAndSettleMock).toHaveBeenCalledWith('o-done', expect.any(Array), expect.any(Object), expect.any(String));
   });
 
   test('lost TERMINAL event with build_passed=false: A→failed, B→skipped, no release', async () => {
