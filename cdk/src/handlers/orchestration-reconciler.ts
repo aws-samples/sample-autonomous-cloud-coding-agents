@@ -573,13 +573,15 @@ async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
     .filter((c) =>
       // newly-unblocked: all predecessors now succeeded
       (c.child_status === 'blocked' && c.depends_on.every((d) => succeeded.has(d)))
-      // OR throttle-deferred: a prior pass (#331) left this child `ready` but
-      // un-started (no child_task_id) because the concurrency budget was full.
-      // Re-pick it here so ANY sibling completion drains the backlog as slots
-      // free, instead of it waiting up to ~10min for the #303 sweep. Roots have
-      // no predecessors so depends_on.every(...) is vacuously true. Safe against
-      // double-release: releaseReadyChildren's flip is conditional (ready→released).
-      || (c.child_status === 'ready' && !c.child_task_id && c.depends_on.every((d) => succeeded.has(d))))
+      // OR still `ready` and un-released: either throttle-deferred (#331, a prior
+      // pass left it ready when the concurrency budget was full) OR reset-to-ready
+      // by an epic retry (review #2 — it KEEPS its prior child_task_id so the
+      // idempotency salt spawns a fresh task). We no longer gate on !child_task_id:
+      // the old gate stranded retried children forever (review #1), and the
+      // flip-then-create claim (ready→releasing, review #3) is now the race guard —
+      // only one releaser wins, so re-picking a ready-with-id child is safe. Roots
+      // have no predecessors so depends_on.every(...) is vacuously true.
+      || (c.child_status === 'ready' && c.depends_on.every((d) => succeeded.has(d))))
     .map((c) => ({ ...c, child_status: 'ready' as const }));
 
   if (releasableRows.length > 0) {

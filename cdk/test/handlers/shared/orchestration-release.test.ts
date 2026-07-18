@@ -136,12 +136,32 @@ describe('releaseChild — ABCA-659 retry salts the idempotency key with the pri
     expect(createTaskCore.mock.calls[0][1].idempotencyKey).toBe('orch_abc_SUB-1');
   });
 
-  test('retry defaults false → key is never salted (seed/extend/cascade unaffected)', async () => {
+  test('review #2: key is salted whenever a prior child_task_id exists, even without retry=true', async () => {
+    // A child re-released while it still carries a child_task_id inherently means
+    // that prior task is TERMINAL (a live child is 'released', not back in
+    // ready/blocked). The salt must fire on the id's PRESENCE — NOT the retry
+    // flag — else a downstream chain child (reset to blocked, later released by
+    // the reconciler with retry=false) replays its dead task under the unsalted
+    // key. This is the fix; the OLD behavior (only salt on retry=true) was the bug.
     const createTaskCore = created('T-1');
     await releaseChild({
       ddb: { send: jest.fn().mockResolvedValue({}) } as never,
       tableName: 'OrchestrationTable',
       row: makeRow({ child_task_id: 'OLD-TASK' }),
+      platformUserId: 'user-1',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+      // NOTE: retry intentionally omitted (defaults false) — the salt still fires.
+    });
+    expect(createTaskCore.mock.calls[0][1].idempotencyKey).toBe('orch_abc_SUB-1_OLD-TASK');
+  });
+
+  test('first release (no prior task id) → unsalted back-compat key', async () => {
+    const createTaskCore = created('T-1');
+    await releaseChild({
+      ddb: { send: jest.fn().mockResolvedValue({}) } as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow(), // no child_task_id
       platformUserId: 'user-1',
       createTaskCore: createTaskCore as never,
       now: NOW,
@@ -202,12 +222,17 @@ describe('releaseChild — happy path', () => {
     });
     expect(requestId).toBe('orch_abc_SUB-1');
 
-    // Conditional update flips status + stamps task id.
-    const update = ddb.send.mock.calls[0][0] as UpdateCommand;
-    expect(update).toBeInstanceOf(UpdateCommand);
-    expect(update.input.ConditionExpression).toContain('child_status IN');
-    expect(update.input.ExpressionAttributeValues![':tid']).toBe('T-100');
-    expect(update.input.ExpressionAttributeValues![':released']).toBe('released');
+    // review #3 flip-then-create: TWO conditional updates now.
+    // Call 0 = the CLAIM (blocked|ready → releasing), BEFORE createTaskCore.
+    const claim = ddb.send.mock.calls[0][0] as UpdateCommand;
+    expect(claim).toBeInstanceOf(UpdateCommand);
+    expect(claim.input.ConditionExpression).toContain('child_status IN');
+    expect(claim.input.ExpressionAttributeValues![':releasing']).toBe('releasing');
+    // Call 1 = the FINALIZE (releasing → released), stamps task id + branch.
+    const finalize = ddb.send.mock.calls[1][0] as UpdateCommand;
+    expect(finalize.input.ConditionExpression).toBe('child_status = :releasing');
+    expect(finalize.input.ExpressionAttributeValues![':tid']).toBe('T-100');
+    expect(finalize.input.ExpressionAttributeValues![':released']).toBe('released');
   });
 
   test('PM-4: the planner scope (description) reaches the child task_description below the title', async () => {
@@ -328,8 +353,10 @@ describe('releaseChild — idempotency + failure', () => {
     expect(result).toEqual({ kind: 'already_released' });
   });
 
-  test('createTaskCore non-success → create_failed, no row update', async () => {
-    const ddb = { send: jest.fn() };
+  test('createTaskCore non-success → create_failed, claim rolled back to ready', async () => {
+    // review #3: the claim (call 0) succeeds, createTaskCore fails, so the claim
+    // is rolled BACK to 'ready' (call 1) — not left stranded in 'releasing'.
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
     const createTaskCore = jest.fn().mockResolvedValue({ statusCode: 503, body: '{"error":{"message":"down"}}' });
 
     const result = await releaseChild({
@@ -342,11 +369,16 @@ describe('releaseChild — idempotency + failure', () => {
     });
     expect(result.kind).toBe('create_failed');
     if (result.kind === 'create_failed') expect(result.statusCode).toBe(503);
-    expect(ddb.send).not.toHaveBeenCalled();
+    expect(ddb.send).toHaveBeenCalledTimes(2);
+    const claim = ddb.send.mock.calls[0][0] as UpdateCommand;
+    expect(claim.input.ExpressionAttributeValues![':releasing']).toBe('releasing');
+    const rollback = ddb.send.mock.calls[1][0] as UpdateCommand;
+    expect(rollback.input.ConditionExpression).toBe('child_status = :releasing');
+    expect(rollback.input.ExpressionAttributeValues![':ready']).toBe('ready');
   });
 
-  test('createTaskCore throw → error', async () => {
-    const ddb = { send: jest.fn() };
+  test('createTaskCore throw → error, claim rolled back to ready', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
     const createTaskCore = jest.fn().mockRejectedValue(new Error('boom'));
     const result = await releaseChild({
       ddb: ddb as never,
@@ -357,7 +389,33 @@ describe('releaseChild — idempotency + failure', () => {
       now: NOW,
     });
     expect(result.kind).toBe('error');
-    expect(ddb.send).not.toHaveBeenCalled();
+    // claim (call 0) + rollback (call 1)
+    expect(ddb.send).toHaveBeenCalledTimes(2);
+    const rollback = ddb.send.mock.calls[1][0] as UpdateCommand;
+    expect(rollback.input.ExpressionAttributeValues![':ready']).toBe('ready');
+  });
+
+  test('review #3: a racing releaser loses the claim (blocked|ready→releasing) and does NOT create a task', async () => {
+    // The core exactly-once guarantee: if the atomic claim fails
+    // (ConditionalCheckFailed — another releaser already claimed the row),
+    // releaseChild returns already_released and NEVER calls createTaskCore.
+    const ddb = {
+      send: jest.fn().mockRejectedValue(
+        Object.assign(new Error('claimed'), { name: 'ConditionalCheckFailedException' }),
+      ),
+    };
+    const createTaskCore = created('SHOULD-NOT-RUN');
+    const result = await releaseChild({
+      ddb: ddb as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow(),
+      platformUserId: 'user-1',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+    expect(result).toEqual({ kind: 'already_released' });
+    expect(createTaskCore).not.toHaveBeenCalled(); // no double-create
+    expect(ddb.send).toHaveBeenCalledTimes(1); // only the failed claim
   });
 
   test('non-conditional DDB error on flip → error', async () => {
@@ -461,11 +519,15 @@ describe('releaseReadyChildren — #331 concurrency throttle', () => {
       createTaskCore as never, NOW, rows, 'main', 2,
     );
     expect(results).toHaveLength(2);
-    // The two UpdateCommands that flip ready→released name L00 then L01.
-    const releasedSubs = (ddb.send.mock.calls as { 0: { input?: { Key?: { sub_issue_id?: string } } } }[])
+    // review #3 flip-then-create: each release now issues TWO UpdateCommands
+    // (claim ready→releasing, then finalize releasing→released), both keyed on
+    // the same sub_issue_id. Dedup consecutive duplicates to get the release
+    // ORDER, which must be sorted L00 then L01 (not the shuffled input order).
+    const subsPerCall = (ddb.send.mock.calls as { 0: { input?: { Key?: { sub_issue_id?: string } } } }[])
       .map((c) => c[0]?.input?.Key?.sub_issue_id)
       .filter(Boolean);
-    expect(releasedSubs).toEqual(['L00', 'L01']);
+    const releaseOrder = subsPerCall.filter((s, i) => s !== subsPerCall[i - 1]);
+    expect(releaseOrder).toEqual(['L00', 'L01']);
   });
 });
 

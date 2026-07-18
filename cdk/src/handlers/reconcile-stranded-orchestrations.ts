@@ -129,7 +129,39 @@ async function reconcileOrchestration(orchestrationId: string): Promise<number> 
 
   const now = new Date().toISOString();
 
-  // 1. Recover LOST TERMINAL events: a ``released`` child whose task has
+  // 1a. Recover a child STUCK in the transient ``releasing`` state (review #3
+  //     flip-then-create): a releaser won the blocked|ready→releasing claim but
+  //     crashed before createTaskCore (or before its rollback). No task exists,
+  //     so reset it to ``ready`` — step 2 re-releases it under a fresh claim.
+  //     Guard on still being ``releasing`` so we don't race a live finalize.
+  for (const child of snap.children) {
+    if (child.child_status !== 'releasing') continue;
+    try {
+      await ddb.send(new UpdateCommand({
+        TableName: ORCHESTRATION_TABLE,
+        Key: { orchestration_id: orchestrationId, sub_issue_id: child.sub_issue_id },
+        UpdateExpression: 'SET child_status = :ready, updated_at = :now',
+        ConditionExpression: 'child_status = :releasing',
+        ExpressionAttributeValues: { ':ready': 'ready', ':releasing': 'releasing', ':now': now },
+      }));
+      logger.info('Recovered orchestration child stuck in releasing → ready (crashed mid-release)', {
+        orchestration_id: orchestrationId, sub_issue_id: child.sub_issue_id,
+      });
+    } catch (err) {
+      // ConditionalCheckFailed = the row moved off 'releasing' (a live finalize
+      // won) — fine, nothing to recover. Anything else: log and let the next
+      // sweep retry.
+      if ((err as { name?: string })?.name !== 'ConditionalCheckFailedException') {
+        logger.warn('Failed to recover releasing child (will retry next sweep)', {
+          orchestration_id: orchestrationId,
+          sub_issue_id: child.sub_issue_id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  }
+
+  // 1b. Recover LOST TERMINAL events: a ``released`` child whose task has
   //    already reached terminal but whose row never advanced. Advance the
   //    row to succeeded/failed so step 2 can gate dependents correctly.
   for (const child of snap.children) {
@@ -180,7 +212,12 @@ async function reconcileOrchestration(orchestrationId: string): Promise<number> 
       const depsReady = c.depends_on.every((d) => statusOf.get(d) === 'succeeded');
       if (!depsReady) return false;
       if (s === 'blocked') return true;
-      if (s === 'ready' && !c.child_task_id) return true; // throttle-deferred
+      // `ready` (id-agnostic, review #1): a ready child left un-released by the
+      // #331 throttle OR reset-to-ready by an epic retry (which KEEPS its prior
+      // child_task_id for the salt, review #2). The old `!child_task_id` gate
+      // stranded retried children forever. Re-releasing is safe: the salt spawns
+      // a fresh task and the flip-then-create claim (review #3) is the race guard.
+      if (s === 'ready') return true;
       return false;
     })
     .map((c) => ({ ...c, child_status: 'ready' as const }));

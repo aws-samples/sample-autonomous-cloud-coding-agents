@@ -226,16 +226,68 @@ export async function releaseChild(params: ReleaseChildParams): Promise<ReleaseC
   // '_' + sub_issue_id (a UUID, all hyphens) stays within 128 chars and
   // inside the allowed charset.
   //
-  // ABCA-659 epic RETRY: salt with the prior child_task_id so a re-run of a
-  // failed child creates a NEW task instead of idempotently replaying the failed
-  // one. The prior id (a ULID, 26 alnum chars) keeps the key inside the charset;
-  // orch_<32> + _ + <uuid 36> + _ + <ulid 26> ≈ 100 chars, under the 128 cap.
-  // Only applied on retry AND when a prior task exists (a first release is
-  // unchanged). Redelivery-safe: same prior id → same key → one new task.
+  // RETRY REPLAY FIX (review blocker #2): salt the key with the prior
+  // child_task_id WHENEVER the row already carries one — NOT only when the
+  // caller passes retry=true. A child being (re-)released while it still has a
+  // child_task_id inherently means that prior task is TERMINAL (a live child is
+  // in 'released', never back in blocked/ready), so replaying it under the same
+  // key would return the OLD failed task (200) and nothing runs. This bit a
+  // dependency chain A→B: the epic-retry salts A (layer 0, retry=true) but B is
+  // reset to blocked and later released by the reconciler with retry=false → the
+  // unsalted key replayed B's dead task. Salting on the id's PRESENCE fixes both
+  // the immediate layer and the downstream cascade. The prior id (a ULID, 26
+  // alnum chars) keeps the key inside the charset; orch_<32> + _ + <uuid 36> +
+  // _ + <ulid 26> ≈ 100 chars, under the 128 cap. A first release (no prior id)
+  // is unchanged. Redelivery-safe: same prior id → same key → one new task.
   const baseKey = `${row.orchestration_id}_${row.sub_issue_id}`;
-  const idempotencyKey = params.retry && row.child_task_id
+  const idempotencyKey = row.child_task_id
     ? `${baseKey}_${row.child_task_id}`
     : baseKey;
+
+  // EXACTLY-ONCE FIX (review blocker #3): flip-then-create. The prior design
+  // was create-then-flip — createTaskCore ran FIRST (irreversible: mints a task
+  // + fire-and-forget invokes the orchestrator), and only afterward a conditional
+  // row flip "deduped". But createTaskCore's own idempotency is an
+  // eventually-consistent GSI read-then-write, so two concurrent releasers (the
+  // live TaskTable-stream reconciler AND the #303 stranded sweep) could BOTH
+  // pass the in-memory status check, BOTH createTaskCore before either flip
+  // committed, and BOTH miss the other's not-yet-propagated write → two ECS
+  // agents + two PRs for one sub-issue (documented in
+  // docs/research/orchestration-reconciler-correctness.md §5-6, never fixed).
+  //
+  // Now we ATOMICALLY CLAIM the row (blocked|ready → releasing) BEFORE creating
+  // the task. Only the invocation that wins this conditional Update proceeds to
+  // createTaskCore; a racing releaser gets ConditionalCheckFailed and returns
+  // already_released WITHOUT creating a task — the claim is the single
+  // serialization point, now correctly ahead of the irreversible create.
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: tableName,
+      Key: { orchestration_id: row.orchestration_id, sub_issue_id: row.sub_issue_id },
+      UpdateExpression: 'SET child_status = :releasing, updated_at = :now',
+      ConditionExpression: 'child_status IN (:blocked, :ready)',
+      ExpressionAttributeValues: {
+        ':releasing': 'releasing',
+        ':now': now,
+        ':blocked': 'blocked',
+        ':ready': 'ready',
+      },
+    }));
+  } catch (err) {
+    if (isConditionalCheckFailed(err)) {
+      logger.info('Orchestration child already claimed by a racing releaser (flip-then-create)', {
+        orchestration_id: row.orchestration_id,
+        sub_issue_id: row.sub_issue_id,
+      });
+      return { kind: 'already_released' };
+    }
+    logger.error('Failed to claim orchestration child for release', {
+      orchestration_id: row.orchestration_id,
+      sub_issue_id: row.sub_issue_id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return { kind: 'error', message: err instanceof Error ? err.message : String(err) };
+  }
 
   let result;
   try {
@@ -259,6 +311,13 @@ export async function releaseChild(params: ReleaseChildParams): Promise<ReleaseC
       sub_issue_id: row.sub_issue_id,
       error: err instanceof Error ? err.message : String(err),
     });
+    // We won the claim (row is now 'releasing') but createTaskCore threw — roll
+    // the claim BACK to 'ready' so a later reconcile/sweep can retry the release,
+    // instead of leaving the child stuck in the transient 'releasing' state
+    // forever. Conditional on still being 'releasing' (don't clobber a concurrent
+    // transition). Best-effort — a failed rollback still gets swept by the
+    // stranded-orchestration reconciler.
+    await rollbackClaim(ddb, tableName, row, now);
     return { kind: 'error', message: err instanceof Error ? err.message : String(err) };
   }
 
@@ -277,42 +336,49 @@ export async function releaseChild(params: ReleaseChildParams): Promise<ReleaseC
       response_body: result.body,
       idempotency_key: idempotencyKey,
     });
+    // Claim won but the create failed (e.g. transient 5xx, un-onboarded repo) —
+    // roll the claim back to 'ready' so the next reconcile/sweep retries it,
+    // rather than stranding the child in 'releasing'.
+    await rollbackClaim(ddb, tableName, row, now);
     return { kind: 'create_failed', statusCode: result.statusCode, body: result.body };
   }
 
   const { taskId, branchName } = extractTaskIdAndBranch(result.body);
 
-  // Flip the row to released, conditionally — only from a not-yet-started
-  // state. A racing release loses here (ConditionalCheckFailed) and
-  // returns already_released; createTaskCore's idempotency key means the
-  // loser created no second task.
+  // Finalize the claim: flip 'releasing' → 'released' and stamp the task id +
+  // branch. We already hold the claim (won the conditional above), so this is
+  // conditional only on still being 'releasing' — defensive against a concurrent
+  // cancel/skip that legitimately moved the row on (in which case we do NOT
+  // overwrite it; the created task's own terminal event reconciles).
   //
-  // #247 A4: also persist the child's branch_name so a DEPENDENT child's
-  // release can stack on / merge it (selectBaseBranch reads predecessor
-  // branch names off these rows).
+  // #247 A4: persist the child's branch_name so a DEPENDENT child's release can
+  // stack on / merge it (selectBaseBranch reads predecessor branch names).
   try {
     await ddb.send(new UpdateCommand({
       TableName: tableName,
       Key: { orchestration_id: row.orchestration_id, sub_issue_id: row.sub_issue_id },
       UpdateExpression:
         'SET child_status = :released, child_task_id = :tid, child_branch_name = :bn, updated_at = :now',
-      ConditionExpression: 'child_status IN (:blocked, :ready)',
+      ConditionExpression: 'child_status = :releasing',
       ExpressionAttributeValues: {
         ':released': 'released',
         ':tid': taskId,
         ':bn': branchName,
         ':now': now,
-        ':blocked': 'blocked',
-        ':ready': 'ready',
+        ':releasing': 'releasing',
       },
     }));
   } catch (err) {
     if (isConditionalCheckFailed(err)) {
-      logger.info('Orchestration child already released (idempotent race)', {
+      // The row moved off 'releasing' between our claim and finalize (a cancel
+      // or skip landed). The task was created (idempotency-keyed), so its own
+      // terminal event will reconcile — we just don't clobber the new state.
+      logger.info('Orchestration child left releasing state before finalize (concurrent transition)', {
         orchestration_id: row.orchestration_id,
         sub_issue_id: row.sub_issue_id,
+        task_id: taskId,
       });
-      return { kind: 'already_released' };
+      return { kind: 'released', taskId };
     }
     logger.error('Failed to mark orchestration child released', {
       orchestration_id: row.orchestration_id,
@@ -449,6 +515,38 @@ function extractTaskIdAndBranch(body: string): { taskId: string; branchName: str
     };
   } catch {
     return { taskId: '', branchName: '' };
+  }
+}
+
+/**
+ * Roll a claimed-but-not-created child back from the transient 'releasing' state
+ * to 'ready' so a later reconcile/sweep can retry the release. Conditional on the
+ * row still being 'releasing' (never clobber a concurrent transition). Best-effort:
+ * if the rollback itself fails, the stranded-orchestration sweep still recovers a
+ * child left in 'releasing' (it is treated as an in-flight release with no task id).
+ * Preserves child_task_id so the retry-replay salt still applies on the next try.
+ */
+async function rollbackClaim(
+  ddb: DynamoDBDocumentClient,
+  tableName: string,
+  row: OrchestrationChildRow,
+  now: string,
+): Promise<void> {
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: tableName,
+      Key: { orchestration_id: row.orchestration_id, sub_issue_id: row.sub_issue_id },
+      UpdateExpression: 'SET child_status = :ready, updated_at = :now',
+      ConditionExpression: 'child_status = :releasing',
+      ExpressionAttributeValues: { ':ready': 'ready', ':releasing': 'releasing', ':now': now },
+    }));
+  } catch (err) {
+    if (isConditionalCheckFailed(err)) return; // already moved on — fine
+    logger.warn('Failed to roll back orchestration child claim (sweep will recover)', {
+      orchestration_id: row.orchestration_id,
+      sub_issue_id: row.sub_issue_id,
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 }
 

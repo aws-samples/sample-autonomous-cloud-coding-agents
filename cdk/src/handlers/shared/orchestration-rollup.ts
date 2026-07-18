@@ -69,6 +69,7 @@ const STATUS_ICON: Record<string, string> = {
   failed: '❌',
   skipped: '⏭️',
   released: '🔄',
+  releasing: '🔄', // transient flip-then-create claim (review #3) — mid-launch
   ready: '🔄',
   blocked: '⏳',
 };
@@ -149,9 +150,11 @@ export function renderStatusBlock(children: readonly RollupChildView[]): string 
       const label = c.linear_identifier
         ? (c.title ? `${c.linear_identifier}: ${c.title}` : c.linear_identifier)
         : (c.title ?? c.sub_issue_id);
-      // Human-friendly status words for the in-flight view.
+      // Human-friendly status words for the in-flight view. 'releasing' (the
+      // transient flip-then-create claim, review #3) reads as running like
+      // released/ready — the child is mid-launch, not a distinct user-facing state.
       const word =
-        c.child_status === 'released' || c.child_status === 'ready' ? 'running'
+        c.child_status === 'released' || c.child_status === 'ready' || c.child_status === 'releasing' ? 'running'
           : c.child_status === 'blocked' ? 'blocked'
             : c.child_status;
       // #323: link the PR as soon as it is known, even mid-run.
@@ -291,7 +294,7 @@ export function renderEpicPanel(params: EpicPanelParams): string {
       }
       const icon = STATUS_ICON[r.child_status] ?? '•';
       const word =
-        r.child_status === 'released' || r.child_status === 'ready' ? 'running'
+        r.child_status === 'released' || r.child_status === 'ready' || r.child_status === 'releasing' ? 'running'
           : r.child_status === 'blocked' ? 'blocked'
             : r.child_status;
       const line = `- ${icon} ${label} — ${word}${pr}`;
