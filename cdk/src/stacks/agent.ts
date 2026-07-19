@@ -622,8 +622,10 @@ export class AgentStack extends Stack {
         // #502: read-only grant so the container can fetch its payload from S3.
         payloadBucket: ecsPayloadBucket!.bucket,
         // #299 ECS-parity: the same bucket the runtime uses for ARTIFACTS_BUCKET_NAME —
-        // coding/decompose-v1 delivers its plan artifact here (read+write grant in
-        // the construct). Without this, an ecs-repo :decompose fails at delivery.
+        // coding/decompose-v1 delivers its plan artifact here. Wires the
+        // ARTIFACTS_BUCKET_NAME env only; delivery writes go through the per-task
+        // SessionRole (no direct task-role grant — see construct). Without the
+        // env, an ecs-repo :decompose fails at delivery.
         artifactsBucket: traceArtifactsBucket.bucket,
         // Per-session IAM scoping (#209): the ECS task role assumes the same
         // SessionRole as the AgentCore runtime for tenant-data access. The

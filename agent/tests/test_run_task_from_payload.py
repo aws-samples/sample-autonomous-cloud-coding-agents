@@ -102,6 +102,18 @@ class TestRunTaskFromPayload:
         assert "github_token_secret_arn" not in seen
         assert "sources" not in seen
 
+    def test_github_token_secret_arn_dropped_quietly(self):
+        # N3: github_token_secret_arn is ALWAYS present and ALWAYS resolved via
+        # the GITHUB_TOKEN_SECRET_ARN env (never a run_task param), so its drop is
+        # 100% expected and must NOT fire the known-key WARN — that channel is for
+        # genuine future contract gaps, not this always-dropped key.
+        logs: list[tuple[str, str]] = []
+        with patch("pipeline.log", side_effect=lambda level, msg, **kw: logs.append((level, msg))):
+            _capture({"github_token_secret_arn": "arn:aws:secretsmanager:...", "repo_url": "r"})
+        assert not [m for level, m in logs if "github_token_secret_arn" in m], (
+            "github_token_secret_arn must drop quietly (N3) — it is always resolved via env"
+        )
+
     def test_drops_none_values_so_run_task_defaults_apply(self):
         seen = _capture({"repo_url": "org/repo", "base_branch": None, "channel_metadata": None})
         assert "base_branch" not in seen
@@ -142,6 +154,18 @@ class TestRunTaskFromPayload:
             }
         )
         assert set(seen).issubset(accepted)
+
+    def test_max_turns_rejects_surprising_inputs(self):
+        # N4: int() accepts a bool (int(True)==1) and truncates a float
+        # (int(3.9)==3). The orchestrator always emits a real int, but a corrupt
+        # / hand-edited payload must not silently become a bogus turn count —
+        # drop with a breadcrumb and let run_task's default apply.
+        assert "max_turns" not in _capture({"repo_url": "r", "max_turns": True})
+        assert "max_turns" not in _capture({"repo_url": "r", "max_turns": 3.9})
+        # Valid inputs still pass: a real int and an int-valued string / float.
+        assert _capture({"repo_url": "r", "max_turns": 50})["max_turns"] == 50
+        assert _capture({"repo_url": "r", "max_turns": "50"})["max_turns"] == 50
+        assert _capture({"repo_url": "r", "max_turns": 50.0})["max_turns"] == 50
 
     def test_warns_when_dropping_a_known_orchestrator_key(self):
         # N4: a KNOWN orchestrator key that run_task doesn't accept is dropped

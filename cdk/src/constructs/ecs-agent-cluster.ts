@@ -56,11 +56,14 @@ export interface EcsAgentClusterProps {
   /**
    * Artifacts bucket for repo-bound artifact workflows (#299 coding/decompose-v1
    * emits its plan JSON here via ``deliver_artifact``). The AgentCore runtime
-   * gets ``ARTIFACTS_BUCKET_NAME`` in its env; the ECS task needs the SAME env +
-   * read/write grant or an artifact workflow fails at delivery with
+   * gets ``ARTIFACTS_BUCKET_NAME`` in its env; the ECS task needs the SAME env
+   * (but NO bucket grant) or an artifact workflow fails at delivery with
    * "ARTIFACTS_BUCKET_NAME is not configured" (live-caught: a :decompose on an
-   * ecs-configured repo). Read/WRITE because the container DELIVERS the artifact
-   * (unlike the read-only payload bucket).
+   * ecs-configured repo). The delivery WRITE goes through the assumed per-task
+   * SessionRole (scoped to ``artifacts/${aws:PrincipalTag/task_id}/*``), so the
+   * task role gets only the env var — parity with the AgentCore runtime role,
+   * which likewise has no direct artifacts grant (see the grant block below for
+   * the rationale).
    *
    * NOTE: this wires only ``ARTIFACTS_BUCKET_NAME`` (artifact delivery). It does
    * NOT set ``TRACE_ARTIFACTS_BUCKET_NAME`` (telemetry.py reads that for the

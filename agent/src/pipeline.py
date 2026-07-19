@@ -1328,7 +1328,13 @@ _KNOWN_ORCHESTRATOR_KEYS = frozenset(
         "lint_command",
         "merge_branches",
         "base_branch",
-        "github_token_secret_arn",
+        # NB: ``github_token_secret_arn`` is deliberately NOT listed (N3). It is
+        # ALWAYS in the payload and ALWAYS dropped here (resolved via the
+        # ``GITHUB_TOKEN_SECRET_ARN`` env in build_config, never a run_task
+        # param), so listing it would fire the known-key WARN on 100% of ECS
+        # boots — pure noise that dilutes the channel meant to surface genuine
+        # future "wired one side, forgot the other" gaps. It falls through as a
+        # quiet foreign-key drop instead.
         # AgentCore's server.py exports task_started_at as TASK_STARTED_AT, which
         # hooks._remaining_maxlifetime_s() uses to clip the Cedar HITL approval-gate
         # maxLifetime. The ECS boot path bypasses server.py and does not (yet) set
@@ -1383,14 +1389,25 @@ def run_task_from_payload(payload: dict) -> dict:
         if target in _PAYLOAD_STR_KEYS:
             value = str(value)
         elif target == "max_turns":
-            # Defensive, matching how every other field is handled: a malformed
-            # max_turns must not crash the whole boot — drop it and let run_task's
-            # default apply (with a breadcrumb) rather than raise a ValueError.
+            # Defensive: a malformed max_turns must not crash the whole boot —
+            # drop it and let run_task's default apply (with a breadcrumb) rather
+            # than raise. Unlike the str keys above, this is the one field with a
+            # non-str coercion, so it also guards the surprising int() cases the
+            # orchestrator never emits but a hand-edited payload might: a bool
+            # (``int(True) == 1``) and a non-integral float (``int(3.9) == 3``)
+            # would both silently become a bogus turn count (N4).
+            if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+                log("WARN", f"run_task_from_payload: ignoring non-integer max_turns {value!r}")
+                continue
             try:
-                value = int(value)
+                coerced = int(value)
             except (TypeError, ValueError):
                 log("WARN", f"run_task_from_payload: ignoring non-integer max_turns {value!r}")
                 continue
+            if isinstance(value, float) and coerced != value:
+                log("WARN", f"run_task_from_payload: ignoring non-integral max_turns {value!r}")
+                continue
+            value = coerced
         kwargs[target] = value
 
     kwargs.setdefault("aws_region", os.environ.get("AWS_REGION", ""))
