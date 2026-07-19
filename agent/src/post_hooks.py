@@ -398,6 +398,79 @@ def _note_unpushed_commits(repo_dir: str, branch: str, config: TaskConfig) -> No
         log("WARN", f"Failed to post un-pushed-commits note: {type(e).__name__}: {e}")
 
 
+def _reconcile_pr_base(repo_dir: str, branch: str, config: TaskConfig, expected_base: str) -> None:
+    """Deterministically retarget an existing PR onto ``expected_base``.
+
+    The PR is created by the AGENT (its own ``gh pr create`` in the prompt
+    workflow), so the ``--base`` it chose is a model judgment call, not the
+    orchestrator's. Live-caught on the #247 chain stress test (2026-07-18):
+    a stacked child that branched off its predecessor's branch STILL opened
+    its PR against ``main`` — the agent reasoned "this was based off the
+    chain-Y branch, let me open the PR against main" and even a root whose
+    ``detect_default_branch`` correctly returned ``linear-vercel`` was pointed
+    at ``main``. Wrong base ⇒ the PR shows the whole default-branch divergence
+    (100s of files) instead of the child's real delta, and a stacked child's
+    PR merges onto the wrong branch.
+
+    ``expected_base`` is ``setup.default_branch`` — which is the orchestrator's
+    ``base_branch`` for a stacked child (the predecessor's branch, or ``main``
+    for a diamond) and ``detect_default_branch`` for a root. This post-hook
+    reads the PR's current base and, if it disagrees, retargets it via
+    ``gh pr edit --base`` — removing the agent's discretion without forbidding
+    it from opening the PR (which keeps the agent-authored title/body).
+
+    Best-effort: any failure is logged, never fatal — a mis-based PR is a
+    presentation/merge-target defect, not a reason to fail the whole task.
+    """
+    try:
+        view = subprocess.run(
+            [
+                "gh",
+                "pr",
+                "view",
+                branch,
+                "--repo",
+                config.repo_url,
+                "--json",
+                "baseRefName",
+                "-q",
+                ".baseRefName",
+            ],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        log("WARN", f"Could not read PR base to reconcile ({type(exc).__name__}) — leaving as-is")
+        return
+    if view.returncode != 0 or not view.stdout.strip():
+        # No PR / unreadable base — nothing to reconcile (creation path handles
+        # the no-PR case; a transient read error just leaves the base as-is).
+        return
+    current_base = view.stdout.strip()
+    if current_base == expected_base:
+        return
+    log(
+        "POST",
+        f"Retargeting PR base '{current_base}' → '{expected_base}' "
+        f"(deterministic; agent chose the wrong base)",
+    )
+    result = run_cmd(
+        ["gh", "pr", "edit", branch, "--repo", config.repo_url, "--base", expected_base],
+        label="reconcile-pr-base",
+        cwd=repo_dir,
+        check=False,
+    )
+    if result.returncode != 0:
+        stderr_msg = result.stderr.strip()[:200] if result.stderr else "(no stderr)"
+        log(
+            "WARN",
+            f"Failed to retarget PR base to '{expected_base}' (gh exit {result.returncode}): "
+            f"{stderr_msg} — PR remains based on '{current_base}'",
+        )
+
+
 def ensure_pr(
     config: TaskConfig,
     setup: RepoSetup,
@@ -491,6 +564,10 @@ def ensure_pr(
     if result.returncode == 0 and result.stdout.strip():
         pr_url = result.stdout.strip()
         log("POST", f"PR already exists: {pr_url}")
+        # The agent opened this PR and picked its own --base; correct it to the
+        # orchestrator-supplied / detected base if it disagrees (stacked-child
+        # + root wrong-base fix, 2026-07-18).
+        _reconcile_pr_base(repo_dir, branch, config, default_branch)
         return pr_url
 
     # Check if there are any commits on this branch beyond the default branch

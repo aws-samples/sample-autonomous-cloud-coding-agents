@@ -45,10 +45,18 @@ class _SubprocessRunRecorder:
         return _cp()
 
 
-def _pr_view(url: str) -> _SubprocessRunRecorder:
-    """Recorder whose ``gh pr view`` returns *url* (other calls rc=0, empty)."""
+def _pr_view(url: str, base: str = "main") -> _SubprocessRunRecorder:
+    """Recorder for the two ``gh pr view`` shapes ensure_pr issues.
+
+    The URL query (``--json url``) returns *url*; the base query
+    (``--json baseRefName``, used by ``_reconcile_pr_base``) returns *base*.
+    Defaulting *base* to ``main`` matches ``_setup``'s default_branch so the
+    reconcile is a no-op unless a test opts into a mismatch.
+    """
 
     def responder(cmd):
+        if "view" in cmd and "baseRefName" in cmd:
+            return _cp(returncode=0, stdout=base + "\n")
         if "view" in cmd:
             return _cp(returncode=0, stdout=url + "\n")
         return _cp()
@@ -182,17 +190,24 @@ class TestPushResolveFailureSurface:
 
 class TestEnsurePrCreate:
     def test_returns_existing_pr_when_already_open(self, monkeypatch):
-        # First `gh pr view` returns a URL -> short-circuit, no creation.
-        sub = _pr_view("https://github.com/o/r/pull/1")
+        # First `gh pr view` returns a URL -> short-circuit, no creation. The
+        # existing PR's base ("main") already matches default_branch, so the
+        # base reconcile is a no-op (no `gh pr edit`).
+        sub = _pr_view("https://github.com/o/r/pull/1", base="main")
         run_cmd = _RunCmdRecorder()
         monkeypatch.setattr(post_hooks.subprocess, "run", sub)
         monkeypatch.setattr(post_hooks, "run_cmd", run_cmd)
 
         url = post_hooks.ensure_pr(
-            _config(), _setup(), build_passed=True, lint_passed=True, strategy="create"
+            _config(),
+            _setup(default_branch="main"),
+            build_passed=True,
+            lint_passed=True,
+            strategy="create",
         )
         assert url == "https://github.com/o/r/pull/1"
         assert "create-pr" not in run_cmd.labels()
+        assert "reconcile-pr-base" not in run_cmd.labels()
 
     def test_no_commits_means_no_pr(self, monkeypatch):
         # pr view -> empty (no existing PR); git log diff -> empty (no commits).
@@ -249,3 +264,104 @@ class TestEnsurePrCreate:
         assert "Resolves #55" in body
         assert "**PASS**" in body  # build passed
         assert "**FAIL**" in body  # lint failed
+
+
+class TestReconcilePrBase:
+    """The agent picks its own PR --base; ensure_pr corrects it deterministically
+    to setup.default_branch (the orchestrator's base for a stacked child / the
+    detected repo default for a root). Live-caught on the #247 chain: a stacked
+    child + a root both opened against a wrong 'main'."""
+
+    def test_retargets_when_base_mismatches(self, monkeypatch):
+        # Existing PR is based on 'main' but the stacked child's real base is
+        # the predecessor branch -> ensure_pr issues `gh pr edit --base <pred>`.
+        pred = "bgagent/task-x/abca-1-predecessor"
+        sub = _pr_view("https://github.com/o/r/pull/7", base="main")
+        run_cmd = _RunCmdRecorder()
+        monkeypatch.setattr(post_hooks.subprocess, "run", sub)
+        monkeypatch.setattr(post_hooks, "run_cmd", run_cmd)
+
+        url = post_hooks.ensure_pr(
+            _config(),
+            _setup(default_branch=pred),
+            build_passed=True,
+            lint_passed=True,
+            strategy="create",
+        )
+        assert url == "https://github.com/o/r/pull/7"
+        assert "reconcile-pr-base" in run_cmd.labels()
+        edit_cmd = run_cmd.cmd_for("reconcile-pr-base")
+        assert "edit" in edit_cmd
+        assert edit_cmd[edit_cmd.index("--base") + 1] == pred
+
+    def test_noop_when_base_matches(self, monkeypatch):
+        # PR base already == default_branch -> no `gh pr edit`.
+        sub = _pr_view("https://github.com/o/r/pull/7", base="develop")
+        run_cmd = _RunCmdRecorder()
+        monkeypatch.setattr(post_hooks.subprocess, "run", sub)
+        monkeypatch.setattr(post_hooks, "run_cmd", run_cmd)
+
+        url = post_hooks.ensure_pr(
+            _config(),
+            _setup(default_branch="develop"),
+            build_passed=True,
+            lint_passed=True,
+            strategy="create",
+        )
+        assert url == "https://github.com/o/r/pull/7"
+        assert "reconcile-pr-base" not in run_cmd.labels()
+
+    def test_retarget_failure_warns_and_is_not_fatal(self, monkeypatch):
+        # `gh pr edit` fails -> WARN naming the consequence, URL still returned.
+        pred = "bgagent/task-x/abca-1-predecessor"
+        sub = _pr_view("https://github.com/o/r/pull/7", base="main")
+        run_cmd = _RunCmdRecorder(returncodes={"reconcile-pr-base": 1})
+        monkeypatch.setattr(post_hooks.subprocess, "run", sub)
+        monkeypatch.setattr(post_hooks, "run_cmd", run_cmd)
+        warns: list[str] = []
+        monkeypatch.setattr(
+            post_hooks, "log", lambda lvl, msg: warns.append(msg) if lvl == "WARN" else None
+        )
+
+        url = post_hooks.ensure_pr(
+            _config(),
+            _setup(default_branch=pred),
+            build_passed=True,
+            lint_passed=True,
+            strategy="create",
+        )
+        assert url == "https://github.com/o/r/pull/7"
+        assert any("PR remains based on 'main'" in w for w in warns)
+
+    def test_reconcile_skipped_for_freshly_created_pr_path(self, monkeypatch):
+        # When the agent did NOT pre-create the PR, ensure_pr creates it with the
+        # correct --base directly; no separate reconcile needed (create path
+        # already uses default_branch). Guards against double-work.
+        def responder(cmd):
+            if "view" in cmd:
+                return _cp(returncode=1, stderr="no pr")
+            if "log" in cmd and "--reverse" in cmd:
+                return _cp(returncode=0, stdout="feat: x\n")
+            if "log" in cmd:
+                return _cp(returncode=0, stdout="feat: x\n\n---")
+            return _cp()
+
+        sub = _SubprocessRunRecorder(responder=responder)
+        run_cmd = _RunCmdRecorder(stdouts={"create-pr": "https://github.com/o/r/pull/8\n"})
+        monkeypatch.setattr(post_hooks, "ensure_pushed", lambda d, b: True)
+        monkeypatch.setattr(post_hooks.subprocess, "run", sub)
+        monkeypatch.setattr(post_hooks, "run_cmd", run_cmd)
+
+        pred = "bgagent/task-x/abca-1-predecessor"
+        url = post_hooks.ensure_pr(
+            _config(),
+            _setup(default_branch=pred),
+            build_passed=True,
+            lint_passed=True,
+            strategy="create",
+        )
+        assert url == "https://github.com/o/r/pull/8"
+        # create path used the right base; no post-creation reconcile fired.
+        create_cmd = run_cmd.cmd_for("create-pr")
+        assert create_cmd[create_cmd.index("--base") + 1] == pred
+        assert "reconcile-pr-base" not in run_cmd.labels()
