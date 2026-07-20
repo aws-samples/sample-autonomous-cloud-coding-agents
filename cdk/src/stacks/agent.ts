@@ -18,10 +18,9 @@
  */
 
 import * as path from 'path';
-import * as agentcore from '@aws-cdk/aws-bedrock-agentcore-alpha';
 import * as bedrock from '@aws-cdk/aws-bedrock-alpha';
-import * as agentcoremixins from '@aws-cdk/mixins-preview/aws-bedrockagentcore';
 import { ArnFormat, AspectPriority, Aspects, Stack, StackProps, RemovalPolicy, CfnOutput, CfnResource, Duration, Fn, Lazy } from 'aws-cdk-lib';
+import * as agentcore from 'aws-cdk-lib/aws-bedrockagentcore';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 // ecr_assets import is only needed when the ECS block below is uncommented
 // import * as ecr_assets from 'aws-cdk-lib/aws-ecr-assets';
@@ -36,12 +35,15 @@ import { AgentSessionRole } from '../constructs/agent-session-role';
 import { AgentVpc } from '../constructs/agent-vpc';
 import { ApprovalMetricsPublisherConsumer } from '../constructs/approval-metrics-publisher-consumer';
 import { AttachmentsBucket } from '../constructs/attachments-bucket';
+import { resolveBedrockModelIds } from '../constructs/bedrock-models';
 import { Blueprint } from '../constructs/blueprint';
 import { CedarWasmLayer } from '../constructs/cedar-wasm-layer';
 import { ConcurrencyReconciler } from '../constructs/concurrency-reconciler';
 import { DnsFirewall } from '../constructs/dns-firewall';
 // import { EcsAgentCluster } from '../constructs/ecs-agent-cluster';
 import { FanOutConsumer } from '../constructs/fanout-consumer';
+import { GitHubScreenshotIntegration } from '../constructs/github-screenshot-integration';
+import { JiraIntegration } from '../constructs/jira-integration';
 import { LinearIntegration } from '../constructs/linear-integration';
 import { PendingUploadCleanup } from '../constructs/pending-upload-cleanup';
 import { RepoTable } from '../constructs/repo-table';
@@ -57,6 +59,15 @@ import { TaskTable } from '../constructs/task-table';
 import { TraceArtifactsBucket } from '../constructs/trace-artifacts-bucket';
 import { UserConcurrencyTable } from '../constructs/user-concurrency-table';
 import { WebhookTable } from '../constructs/webhook-table';
+
+/** Max length of the Bedrock Guardrail name (CloudFormation constraint). */
+const GUARDRAIL_NAME_MAX_LENGTH = 50;
+
+/** AgentCore Runtime session lifecycle ceiling (hours) — the AgentCore maximum. */
+const RUNTIME_SESSION_TIMEOUT_HOURS = 8;
+
+/** Index of the stage segment in a split API Gateway URL. */
+const API_URL_STAGE_SEGMENT_INDEX = 3;
 
 export class AgentStack extends Stack {
   constructor(scope: Construct, id: string, props: StackProps = {}) {
@@ -206,7 +217,7 @@ export class AgentStack extends Stack {
     // --- Bedrock Guardrail for prompt injection detection ---
     // (Declared early so TaskApi — constructed before the runtimes — can reference it.)
     const inputGuardrail = new bedrock.Guardrail(this, 'InputGuardrail', {
-      guardrailName: `task-input-guardrail-${this.stackName}`.slice(0, 50),
+      guardrailName: `task-input-guardrail-${this.stackName}`.slice(0, GUARDRAIL_NAME_MAX_LENGTH),
       description: 'Screens task submissions for prompt injection attacks',
       contentFilters: [
         {
@@ -298,7 +309,11 @@ export class AgentStack extends Stack {
       AWS_REGION: process.env.AWS_REGION ?? 'us-east-1',
       CLAUDE_CODE_USE_BEDROCK: '1',
       ANTHROPIC_LOG: 'debug',
-      ANTHROPIC_DEFAULT_HAIKU_MODEL: 'anthropic.claude-haiku-4-5-20251001-v1:0',
+      // Cross-region inference-profile id (``us.`` prefix), NOT the bare
+      // foundation-model id: Claude 4.x can't be invoked on-demand by bare id
+      // (400 "on-demand throughput isn't supported"). Must match a granted
+      // profile (see bedrock-models.ts). runner.py re-sets this at spawn time.
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
       TASK_TABLE_NAME: taskTable.table.tableName,
       TASK_EVENTS_TABLE_NAME: taskEventsTable.table.tableName,
       NUDGES_TABLE_NAME: taskNudgesTable.table.tableName,
@@ -352,8 +367,8 @@ export class AgentStack extends Stack {
     // LifecycleConfiguration — both timers set to the AgentCore 8h maximum so
     // long-running tasks (approval waits, heavy builds) are not evicted.
     const lifecycleConfiguration: agentcore.LifecycleConfiguration = {
-      idleRuntimeSessionTimeout: Duration.hours(8),
-      maxLifetime: Duration.hours(8),
+      idleRuntimeSessionTimeout: Duration.hours(RUNTIME_SESSION_TIMEOUT_HOURS),
+      maxLifetime: Duration.hours(RUNTIME_SESSION_TIMEOUT_HOURS),
     };
 
     // Construct id 'Runtime' is load-bearing — renaming it forces CFN to
@@ -365,6 +380,16 @@ export class AgentStack extends Stack {
       networkConfiguration: runtimeNetworkConfig,
       environmentVariables: runtimeEnvironmentVariables,
       lifecycleConfiguration: lifecycleConfiguration,
+      loggingConfigs: [
+        {
+          logType: agentcore.LogType.APPLICATION_LOGS,
+          destination: agentcore.LoggingDestination.cloudWatchLogs(applicationLogGroup),
+        },
+        {
+          logType: agentcore.LogType.USAGE_LOGS,
+          destination: agentcore.LoggingDestination.cloudWatchLogs(usageLogGroup),
+        },
+      ],
     });
 
     runtimeArnHolder = runtime.agentRuntimeArn;
@@ -400,44 +425,28 @@ export class AgentStack extends Stack {
     applicationLogGroup.grantWrite(runtime);
     agentMemory.grantReadWrite(runtime);
 
-    const model = new bedrock.BedrockFoundationModel('anthropic.claude-sonnet-4-6', {
-      supportsAgents: true,
-      supportsCrossRegion: true,
-    });
-
-    // Create a cross-region inference profile for Claude Sonnet 4.6
-    const inferenceProfile = bedrock.CrossRegionInferenceProfile.fromConfig({
-      geoRegion: bedrock.CrossRegionInferenceProfileRegion.US,
-      model: model,
-    });
-
-    const model3 = new bedrock.BedrockFoundationModel('anthropic.claude-opus-4-20250514-v1:0', {
-      supportsAgents: true,
-      supportsCrossRegion: true,
-    });
-
-    const inferenceProfile3 = bedrock.CrossRegionInferenceProfile.fromConfig({
-      geoRegion: bedrock.CrossRegionInferenceProfileRegion.US,
-      model: model3,
-    });
-
-    const model2 = new bedrock.BedrockFoundationModel('anthropic.claude-haiku-4-5-20251001-v1:0', {
-      supportsAgents: true,
-      supportsCrossRegion: true,
-    });
-
-    // Create a cross-region inference profile for Claude Haiku 4.5
-    const inferenceProfile2 = bedrock.CrossRegionInferenceProfile.fromConfig({
-      geoRegion: bedrock.CrossRegionInferenceProfileRegion.US,
-      model: model2,
-    });
-
-    model.grantInvoke(runtime);
-    inferenceProfile.grantInvoke(runtime);
-    model3.grantInvoke(runtime);
-    inferenceProfile3.grantInvoke(runtime);
-    model2.grantInvoke(runtime);
-    inferenceProfile2.grantInvoke(runtime);
+    // Grant the runtime invoke on each configured foundation model + its US
+    // cross-Region inference profile. The model set is a single source of truth
+    // (constructs/bedrock-models.ts, #434), shared with the ECS task role and
+    // overridable via the `bedrockModels` CDK context. Each invokable is also
+    // collected so the same set is granted to the SessionRole below (#215 cost
+    // attribution) — the two grants derive from one list and can't drift.
+    // Scoping stays per-model (no Resource:'*'); account-level Bedrock access
+    // remains the outer gate.
+    const invokableBedrockModels: bedrock.IBedrockInvokable[] = [];
+    for (const modelId of resolveBedrockModelIds(this.node)) {
+      const foundationModel = new bedrock.BedrockFoundationModel(modelId, {
+        supportsAgents: true,
+        supportsCrossRegion: true,
+      });
+      const crossRegionProfile = bedrock.CrossRegionInferenceProfile.fromConfig({
+        geoRegion: bedrock.CrossRegionInferenceProfileRegion.US,
+        model: foundationModel,
+      });
+      foundationModel.grantInvoke(runtime);
+      crossRegionProfile.grantInvoke(runtime);
+      invokableBedrockModels.push(foundationModel, crossRegionProfile);
+    }
 
     // --- Per-task SessionRole (#209) ---
     // Holds the tenant-data grants (the four task_id-partitioned tables, plus
@@ -457,15 +466,16 @@ export class AgentStack extends Stack {
       ],
       traceArtifactsBucket: traceArtifactsBucket.bucket,
       attachmentsBucket: attachmentsBucket.bucket,
+      // #215: session-tagged Bedrock grant for cost attribution — the same
+      // invokables grantInvoke-ed to the runtime above, so the grants stay in
+      // lockstep.
+      invokableModels: invokableBedrockModels,
     });
-    agentSessionRole.grantAssumeToComputeRole(runtime.role);
     sessionRoleArnHolder = agentSessionRole.role.roleArn;
 
-    runtime.with(agentcoremixins.mixins.CfnRuntimeLogsMixin.APPLICATION_LOGS.toLogGroup(applicationLogGroup));
     // X-Ray tracing disabled — requires account-level UpdateTraceSegmentDestination
-    // which needs CloudWatch Logs resource policy propagation. Re-enable once resolved.
-    // runtime.with(agentcoremixins.mixins.CfnRuntimeLogsMixin.TRACES.toXRay());
-    runtime.with(agentcoremixins.mixins.CfnRuntimeLogsMixin.USAGE_LOGS.toLogGroup(usageLogGroup));
+    // which needs CloudWatch Logs resource policy propagation. Re-enable via
+    // tracingEnabled: true once resolved.
 
     NagSuppressions.addResourceSuppressions(runtime, [
       {
@@ -650,28 +660,8 @@ export class AgentStack extends Stack {
       attachmentsBucket: attachmentsBucket.bucket,
     });
 
-    // --- Fan-out plane consumer ---
-    // Consumes TaskEventsTable DynamoDB Streams and dispatches events to
-    // Slack / GitHub / email per per-channel default filters. GitHub
-    // dispatcher edits a single issue comment in place; Slack
-    // dispatcher (issue #64) reads per-workspace bot tokens from
-    // ``bgagent/slack/*``. Email remains a log-only stub until Phase 2.
-    new FanOutConsumer(this, 'FanOutConsumer', {
-      taskEventsTable: taskEventsTable.table,
-      taskTable: taskTable.table,
-      repoTable: repoTable.table,
-      githubTokenSecret,
-      // Slack bot-token grant is guarded on this prop — pass the
-      // ``bgagent/slack/*`` prefix so the FanOutConsumer can read
-      // workspace tokens. Same scope SlackIntegration uses for its
-      // own writers (PR #79 review #2).
-      slackSecretArnPattern: Stack.of(this).formatArn({
-        service: 'secretsmanager',
-        resource: 'secret',
-        resourceName: 'bgagent/slack/*',
-        arnFormat: ArnFormat.COLON_RESOURCE_NAME,
-      }),
-    });
+    // FanOutConsumer is constructed below LinearIntegration so the
+    // Linear dispatcher can receive ``linearIntegration.workspaceRegistryTable``.
 
     // --- Cedar HITL approval metrics publisher (Chunk 8, §11.3 / IMPL-28) ---
     // Consumer #2 of the TaskEventsTable stream (FanOutConsumer is #1).
@@ -706,7 +696,7 @@ export class AgentStack extends Stack {
     // Pre-filled manifest URL: opens Slack's "Create New App" page with all
     // URLs, scopes, and events pre-configured. User just clicks Create.
     const apiHost = Fn.select(2, Fn.split('/', taskApi.api.url));
-    const apiStage = Fn.select(3, Fn.split('/', taskApi.api.url));
+    const apiStage = Fn.select(API_URL_STAGE_SEGMENT_INDEX, Fn.split('/', taskApi.api.url));
     const apiBase = Fn.join('', ['https://', apiHost, '/', apiStage]);
 
     // Build the YAML manifest as a string using Fn.join (API URL tokens resolve at deploy time).
@@ -837,6 +827,162 @@ export class AgentStack extends Stack {
       description: 'Name of the DynamoDB Linear workspace registry — `bgagent linear setup` writes a row per OAuth-installed workspace',
     });
 
+    // --- Jira Cloud integration (inbound webhook + agent-side REST outbound) ---
+    const jiraIntegration = new JiraIntegration(this, 'JiraIntegration', {
+      api: taskApi.api,
+      userPool: taskApi.userPool,
+      taskTable: taskTable.table,
+      taskEventsTable: taskEventsTable.table,
+      repoTable: repoTable.table,
+      orchestratorFunctionArn: orchestrator.alias.functionArn,
+      guardrailId: inputGuardrail.guardrailId,
+      guardrailVersion: inputGuardrail.guardrailVersion,
+    });
+
+    // Agent runtime reads the per-tenant Jira OAuth token directly from
+    // Secrets Manager. The CLI (`bgagent jira setup`) creates
+    // `bgagent-jira-oauth-<cloudId>` secrets at install time; the secret
+    // JSON contains access_token, refresh_token, expires_at, and the
+    // OAuth client_id/client_secret. The orchestrator passes
+    // `jira_oauth_secret_arn` to the agent via task.channel_metadata,
+    // so the agent looks up the exact ARN — no discovery needed.
+    //
+    // Agent has GetSecretValue ONLY — no Put. Same trust model as the
+    // Linear adapter: a compromised agent must not be able to overwrite
+    // any tenant's OAuth bundle. Lambdas (trusted code in this stack)
+    // own the in-place refresh path; the agent proceeds with whatever
+    // token Lambdas have most-recently written.
+    runtime.role.addToPrincipalPolicy(new iam.PolicyStatement({
+      actions: ['secretsmanager:GetSecretValue'],
+      resources: [
+        Stack.of(this).formatArn({
+          service: 'secretsmanager',
+          resource: 'secret',
+          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+          resourceName: 'bgagent-jira-oauth-*',
+        }),
+      ],
+    }));
+
+    // Pipe the workspace registry table + per-tenant OAuth-secret-prefix
+    // grant into the orchestrator so the concurrency-cap rejection path
+    // (`notifyJiraOnConcurrencyCap` in orchestrate-task.ts) can post a Jira
+    // comment. The orchestrator only resolves a token when
+    // `task.channel_source === 'jira'`, but the IAM grant is unconditional
+    // (per-tenant secrets are created lazily by setup). Put is needed because
+    // resolving an expiring token refreshes it in place (the orchestrator is
+    // a trusted Lambda; unlike the agent it owns the rotated-token write-back).
+    jiraIntegration.workspaceRegistryTable.grantReadData(orchestrator.fn);
+    orchestrator.fn.addEnvironment(
+      'JIRA_WORKSPACE_REGISTRY_TABLE_NAME',
+      jiraIntegration.workspaceRegistryTable.tableName,
+    );
+    orchestrator.fn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['secretsmanager:GetSecretValue', 'secretsmanager:PutSecretValue'],
+      resources: [
+        Stack.of(this).formatArn({
+          service: 'secretsmanager',
+          resource: 'secret',
+          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+          resourceName: 'bgagent-jira-oauth-*',
+        }),
+      ],
+    }));
+
+    new CfnOutput(this, 'JiraWebhookSecretArn', {
+      value: jiraIntegration.webhookSecret.secretArn,
+      description: 'Secrets Manager ARN for the Jira webhook signing secret — populate via `bgagent jira setup`',
+    });
+
+    new CfnOutput(this, 'JiraProjectMappingTableName', {
+      value: jiraIntegration.projectMappingTable.tableName,
+      description: 'Name of the DynamoDB Jira project → repo mapping table',
+    });
+
+    new CfnOutput(this, 'JiraUserMappingTableName', {
+      value: jiraIntegration.userMappingTable.tableName,
+      description: 'Name of the DynamoDB Jira user mapping table',
+    });
+
+    new CfnOutput(this, 'JiraWorkspaceRegistryTableName', {
+      value: jiraIntegration.workspaceRegistryTable.tableName,
+      description: 'Name of the DynamoDB Jira workspace registry — `bgagent jira setup` writes a row per OAuth-installed tenant',
+    });
+
+    // --- Fan-out plane consumer ---
+    // Consumes TaskEventsTable DynamoDB Streams and dispatches events to
+    // Slack / GitHub / Linear / email per per-channel default filters.
+    // GitHub dispatcher edits a single issue comment in place; Slack
+    // dispatcher (issue #64) reads per-workspace bot tokens from
+    // ``bgagent/slack/*``; Linear dispatcher (issue #239) posts a single
+    // deterministic final-status comment with cost/turns/duration.
+    // Email remains a log-only stub until SES wires.
+    new FanOutConsumer(this, 'FanOutConsumer', {
+      taskEventsTable: taskEventsTable.table,
+      taskTable: taskTable.table,
+      repoTable: repoTable.table,
+      githubTokenSecret,
+      // Slack bot-token grant is guarded on this prop — pass the
+      // ``bgagent/slack/*`` prefix so the FanOutConsumer can read
+      // workspace tokens. Same scope SlackIntegration uses for its
+      // own writers (PR #79 review #2).
+      slackSecretArnPattern: Stack.of(this).formatArn({
+        service: 'secretsmanager',
+        resource: 'secret',
+        resourceName: 'bgagent/slack/*',
+        arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+      }),
+      // Linear dispatcher reads workspace registry rows + per-workspace
+      // OAuth-secret JSON. Same scope `bgagent-linear-oauth-*` as the
+      // orchestrator and webhook processor — Lambdas in this stack share
+      // the rotated-token write path; the agent runtime gets read-only.
+      linearWorkspaceRegistryTable: linearIntegration.workspaceRegistryTable,
+      linearOauthSecretArnPattern: Stack.of(this).formatArn({
+        service: 'secretsmanager',
+        resource: 'secret',
+        resourceName: 'bgagent-linear-oauth-*',
+        arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+      }),
+    });
+
+    // --- GitHub deployment-status → screenshot pipeline ---
+    // Listens for GitHub deployment_status events from any provider
+    // (Vercel, Amplify Hosting, Netlify, GitHub Actions custom CD),
+    // screenshots the `deployment.environment_url` via AgentCore
+    // Browser, posts the image into a fresh PR comment. Default-on:
+    // any repo whose GitHub webhook is configured will get
+    // screenshotted on successful preview deploys; no opt-in flag.
+    const githubScreenshot = new GitHubScreenshotIntegration(this, 'GitHubScreenshotIntegration', {
+      api: taskApi.api,
+      githubTokenSecret,
+      // When the screenshot lands on a PR linked to a Linear issue
+      // (identifier in the PR title/body), also post the screenshot
+      // as a comment on that Linear issue. Wired through the existing
+      // workspace registry so token resolution reuses the per-workspace
+      // OAuth secrets created by `bgagent linear setup`.
+      linearWorkspaceRegistryTable: linearIntegration.workspaceRegistryTable,
+    });
+
+    new CfnOutput(this, 'GitHubWebhookUrl', {
+      value: `${taskApi.api.url}github/webhook`,
+      description: 'URL to configure as the GitHub webhook target on demo repos (deployment_status events)',
+    });
+
+    new CfnOutput(this, 'GitHubWebhookSecretArn', {
+      value: githubScreenshot.webhookSecret.secretArn,
+      description: 'Secrets Manager ARN for the GitHub webhook signing secret — paste GitHub\'s value here after configuring the webhook',
+    });
+
+    new CfnOutput(this, 'ScreenshotBucketName', {
+      value: githubScreenshot.screenshotBucket.bucket.bucketName,
+      description: 'Private S3 bucket hosting preview-deploy screenshots (served via CloudFront)',
+    });
+
+    new CfnOutput(this, 'ScreenshotCloudFrontDomain', {
+      value: githubScreenshot.screenshotBucket.distribution.domainName,
+      description: 'CloudFront domain that serves the screenshot bucket anonymously to GitHub PR / Linear renders',
+    });
+
     // --- Bedrock model invocation logging (account-level) ---
     const invocationLogGroup = new logs.LogGroup(this, 'ModelInvocationLogGroup', {
       logGroupName: `/aws/bedrock/model-invocation-logs/${this.stackName}`,
@@ -861,8 +1007,14 @@ export class AgentStack extends Stack {
             cloudWatchConfig: {
               logGroupName: invocationLogGroup.logGroupName,
               roleArn: bedrockLoggingRole.roleArn,
-              // Required by API schema but unused — text logs go to CloudWatch only.
-              largeDataDeliveryS3Config: { bucketName: '', keyPrefix: '' },
+              // largeDataDeliveryS3Config is OPTIONAL and intentionally omitted:
+              // it only governs S3 delivery of oversized payloads, which this
+              // stack does not use (text logs go to CloudWatch). Sending it with
+              // an empty bucketName fails client-side validation
+              // ("valid min length: 3") — and because the errors below are
+              // swallowed and onUpdate never re-fires (static props), that
+              // failure silently leaves model-invocation logging DISABLED, which
+              // in turn means Bedrock records no requestMetadata (#215 Track 2).
             },
             textDataDeliveryEnabled: true,
             imageDataDeliveryEnabled: false,
@@ -870,7 +1022,11 @@ export class AgentStack extends Stack {
           },
         },
         physicalResourceId: cr.PhysicalResourceId.of('bedrock-invocation-logging'),
-        ignoreErrorCodesMatching: '.*',
+        // Scope the ignore to genuine service-side errors (e.g. a concurrent
+        // account-level change). Do NOT use '.*' — that also hides client-side
+        // ValidationExceptions like the empty-bucket bug above, turning a
+        // deploy-time misconfiguration into silently-absent logging.
+        ignoreErrorCodesMatching: 'ThrottlingException|ServiceUnavailableException|InternalServerException',
       },
       // onUpdate re-applies the same config to handle drift (e.g., if another
       // stack or manual action changed the account-level logging config).
@@ -882,7 +1038,6 @@ export class AgentStack extends Stack {
             cloudWatchConfig: {
               logGroupName: invocationLogGroup.logGroupName,
               roleArn: bedrockLoggingRole.roleArn,
-              largeDataDeliveryS3Config: { bucketName: '', keyPrefix: '' },
             },
             textDataDeliveryEnabled: true,
             imageDataDeliveryEnabled: false,
@@ -890,7 +1045,7 @@ export class AgentStack extends Stack {
           },
         },
         physicalResourceId: cr.PhysicalResourceId.of('bedrock-invocation-logging'),
-        ignoreErrorCodesMatching: '.*',
+        ignoreErrorCodesMatching: 'ThrottlingException|ServiceUnavailableException|InternalServerException',
       },
       // onDelete intentionally omitted — model invocation logging is account-level;
       // deleting one stack should not disable logging that another stack relies on.
@@ -901,6 +1056,16 @@ export class AgentStack extends Stack {
             'bedrock:DeleteModelInvocationLoggingConfiguration',
           ],
           resources: ['*'],
+        }),
+        // PutModelInvocationLoggingConfiguration hands bedrockLoggingRole to the
+        // Bedrock service (so Bedrock can write to the log group), which requires
+        // the caller to hold iam:PassRole on that role. Scoped to the one role —
+        // not a wildcard. (Previously masked by the empty-bucket validation error
+        // that ignoreErrorCodesMatching: '.*' swallowed; now that the call
+        // actually reaches Bedrock, this is required.)
+        new iam.PolicyStatement({
+          actions: ['iam:PassRole'],
+          resources: [bedrockLoggingRole.roleArn],
         }),
       ]),
     });

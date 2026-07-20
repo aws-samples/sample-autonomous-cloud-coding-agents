@@ -288,6 +288,41 @@ def test_run_task_background_starts_and_stops_heartbeat(monkeypatch):
     assert heartbeat_calls[0] == "t-heartbeat"
 
 
+def test_run_task_background_propagates_correlation_envelope(monkeypatch):
+    """The background task thread propagates {session_id, user_id, repo} into
+    OTEL baggage via propagate_correlation_context (#245).
+
+    Regression guard for the widened trigger: correlation must propagate even
+    when session_id is empty but user_id/repo are known — the branch the whole
+    envelope-in-baggage feature depends on.
+    """
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        server,
+        "propagate_correlation_context",
+        lambda session_id, **kw: calls.append({"session_id": session_id, **kw}),
+    )
+    monkeypatch.setattr(server, "run_task", lambda **_kwargs: None)
+    monkeypatch.setattr(server.task_state, "write_heartbeat", lambda *a, **kw: None)
+    monkeypatch.setattr(server.task_state, "write_terminal", lambda *a, **kw: None)
+
+    # No session_id, but user_id + repo_url known → propagation must still run.
+    server._run_task_background(
+        task_id="t-corr",
+        repo_url="o/r",
+        task_description="x",
+        issue_number="",
+        github_token="",
+        anthropic_model="",
+        max_turns=10,
+        max_budget_usd=None,
+        aws_region="us-east-1",
+        user_id="user-1",
+    )
+
+    assert calls == [{"session_id": "", "user_id": "user-1", "repo": "o/r"}]
+
+
 def test_validate_required_params_pr_workflows_require_pr_number():
     """PR-iteration and PR-review workflows need a pr_number regardless."""
     missing = server._validate_required_params(
@@ -419,16 +454,19 @@ def test_debug_cw_write_blocking_bumps_failure_counter_on_boto_error(monkeypatch
 # container stdout to APPLICATION_LOGS).
 
 
-def test_warn_cw_prints_stamped_line_to_stdout(monkeypatch, capsys):
+def test_warn_cw_prints_stamped_line_to_stdout(monkeypatch, capfd):
     """stdout must still carry the ``[server/warn]`` prefix.
 
-    Local ``docker-compose`` runs rely on stdout; the existing
-    ``capsys``-based tests on ``_extract_invocation_params`` also rely
-    on the prefix so CloudWatch routing must NOT replace the local print.
+    Local ``docker-compose`` runs rely on stdout; the ``capfd``-based
+    tests on ``_extract_invocation_params`` also rely on the prefix so
+    CloudWatch routing must NOT replace the local emission. ``capfd``
+    (not ``capsys``) because ``_warn_cw`` writes via ``os.write(1, ...)``
+    — the same non-print sink as ``_debug_cw`` — so the line only
+    appears at the file-descriptor level.
     """
     monkeypatch.delenv("LOG_GROUP_NAME", raising=False)
     server._warn_cw("something went wrong", task_id="t-1")
-    captured = capsys.readouterr()
+    captured = capfd.readouterr()
     assert "[server/warn] something went wrong" in captured.out
 
 
@@ -640,7 +678,7 @@ class TestExtractUserId:
         )
         assert params["user_id"] == ""
 
-    def test_user_id_non_string_logs_warn(self, capsys):
+    def test_user_id_non_string_logs_warn(self, capfd):
         # Silent coercion is a documented anti-pattern in project
         # guidelines — if Stage 4 later skips the S3 upload because
         # ``user_id`` is empty, a user investigating "my trace never
@@ -649,7 +687,7 @@ class TestExtractUserId:
             self._base_payload(user_id=12345, task_id="t-warn"),
             self._fake_req(),
         )
-        captured = capsys.readouterr()
+        captured = capfd.readouterr()
         assert "[server/warn]" in captured.out
         assert "user_id payload field is not a string" in captured.out
         assert "type=int" in captured.out
@@ -698,13 +736,13 @@ class TestExtractInitialApprovalGateCount:
         )
         assert params["initial_approval_gate_count"] == 12
 
-    def test_non_numeric_string_coerces_to_zero_and_warns(self, capsys):
+    def test_non_numeric_string_coerces_to_zero_and_warns(self, capfd):
         params = server._extract_invocation_params(
             self._base_payload(initial_approval_gate_count="not-a-number", task_id="t-warn"),
             self._fake_req(),
         )
         assert params["initial_approval_gate_count"] == 0
-        captured = capsys.readouterr()
+        captured = capfd.readouterr()
         assert "[server/warn]" in captured.out
         assert "initial_approval_gate_count payload field is not an int" in captured.out
 
@@ -755,13 +793,13 @@ class TestExtractApprovalGateCap:
         )
         assert params["approval_gate_cap"] == 50
 
-    def test_non_numeric_string_coerces_to_none_and_warns(self, capsys):
+    def test_non_numeric_string_coerces_to_none_and_warns(self, capfd):
         params = server._extract_invocation_params(
             self._base_payload(approval_gate_cap="not-a-number", task_id="t-warn"),
             self._fake_req(),
         )
         assert params["approval_gate_cap"] is None
-        captured = capsys.readouterr()
+        captured = capfd.readouterr()
         assert "[server/warn]" in captured.out
         assert "approval_gate_cap payload field is not an int" in captured.out
 

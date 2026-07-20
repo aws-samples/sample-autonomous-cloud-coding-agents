@@ -12,6 +12,10 @@ PROJECT_NAME = "{{ config_root | basename }}"
 [tasks]
 install = "uv sync --all-groups"
 
+[tasks.upgrade]
+description = "Refresh uv.lock within the pins declared in pyproject.toml (exact pins, incl. cedarpy, are not rewritten)"
+run = "uv lock --upgrade"
+
 [tasks.info]
 description = "Print project information"
 run = '''
@@ -39,6 +43,10 @@ run = "uvx ruff format --check"
 [tasks.typecheck]
 description = "Type check with ty"
 run = "uv run ty check"
+
+[tasks."lint:deadcode"]
+description = "Dead-code detection with vulture (#282, cairn MVG gate #6): unused functions/classes/methods ruff F cannot see. Config + allowlist in pyproject.toml / .vulture_allowlist.py."
+run = "uv run vulture"
 
 [tasks.test]
 description = "Run tests with pytest (coverage floor enforced; use `uv run pytest --no-cov` for focused runs)"

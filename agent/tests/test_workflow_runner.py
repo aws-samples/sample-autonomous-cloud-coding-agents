@@ -399,75 +399,75 @@ class TestGateStatus:
     """The shared verify-gate semantics (verify_build / verify_lint)."""
 
     def test_passing_always_succeeds(self):
-        from workflow.runner import _gate_status
+        from workflow.runner import gate_status
 
         assert (
-            _gate_status(passed=True, gate="strict", read_only=False, was_passing_before=True)
+            gate_status(passed=True, gate="strict", read_only=False, was_passing_before=True)
             == "succeeded"
         )
 
     def test_strict_failure_gates(self):
-        from workflow.runner import _gate_status
+        from workflow.runner import gate_status
 
         assert (
-            _gate_status(passed=False, gate="strict", read_only=False, was_passing_before=True)
+            gate_status(passed=False, gate="strict", read_only=False, was_passing_before=True)
             == "failed"
         )
 
     def test_informational_never_gates(self):
-        from workflow.runner import _gate_status
+        from workflow.runner import gate_status
 
         assert (
-            _gate_status(
+            gate_status(
                 passed=False, gate="informational", read_only=False, was_passing_before=True
             )
             == "succeeded"
         )
 
     def test_read_only_never_gates(self):
-        from workflow.runner import _gate_status
+        from workflow.runner import gate_status
 
         # read_only workflows treat verify results as informational (matches
         # pipeline.py: pr_review build status is informational only).
         assert (
-            _gate_status(passed=False, gate="strict", read_only=True, was_passing_before=True)
+            gate_status(passed=False, gate="strict", read_only=True, was_passing_before=True)
             == "succeeded"
         )
 
     def test_regression_only_gates_a_regression(self):
-        from workflow.runner import _gate_status
+        from workflow.runner import gate_status
 
         # was passing before, fails now → regression → gates.
         assert (
-            _gate_status(
+            gate_status(
                 passed=False, gate="regression_only", read_only=False, was_passing_before=True
             )
             == "failed"
         )
 
     def test_regression_only_ignores_preexisting_failure(self):
-        from workflow.runner import _gate_status
+        from workflow.runner import gate_status
 
         # already broken before the agent ran → not a regression → does NOT gate
         # (mirrors pipeline.py build_ok = passed or not build_before).
         assert (
-            _gate_status(
+            gate_status(
                 passed=False, gate="regression_only", read_only=False, was_passing_before=False
             )
             == "succeeded"
         )
 
     def test_unset_gate_defaults_to_regression_only(self):
-        from workflow.runner import _gate_status
+        from workflow.runner import gate_status
 
         # An unset gate must mirror pipeline.py (which is always regression-only),
         # NOT default to strict: a regression gates, a pre-existing failure does not.
         assert (
-            _gate_status(passed=False, gate=None, read_only=False, was_passing_before=True)
+            gate_status(passed=False, gate=None, read_only=False, was_passing_before=True)
             == "failed"
         )
         assert (
-            _gate_status(passed=False, gate=None, read_only=False, was_passing_before=False)
+            gate_status(passed=False, gate=None, read_only=False, was_passing_before=False)
             == "succeeded"
         )
 
@@ -547,7 +547,7 @@ class TestCloneAndHydrateHandlers:
 
         called = {"n": 0}
 
-        def fake_setup_repo(_config):
+        def fake_setup_repo(_config, progress=None):
             called["n"] += 1
             return RepoSetup(repo_dir="/fresh", branch="fresh")
 
@@ -570,9 +570,16 @@ class TestCloneAndHydrateHandlers:
         from models import RepoSetup
         from workflow.runner import _handle_clone_repo
 
-        monkeypatch.setattr(
-            "repo.setup_repo", lambda _c: RepoSetup(repo_dir="/fresh", branch="fresh")
-        )
+        # #251 review: capture the progress kwarg to assert the runner threads
+        # ctx.progress through — bounded-retry blocker events depend on it, and a
+        # regression to setup_repo(ctx.config) would otherwise pass silently.
+        captured = {}
+
+        def fake_setup_repo(_config, progress=None):
+            captured["progress"] = progress
+            return RepoSetup(repo_dir="/fresh", branch="fresh")
+
+        monkeypatch.setattr("repo.setup_repo", fake_setup_repo)
         wf = _workflow(
             [
                 {"kind": "clone_repo"},
@@ -580,10 +587,12 @@ class TestCloneAndHydrateHandlers:
                 {"kind": "ensure_pr", "strategy": "create"},
             ]
         )
-        ctx = _real_ctx(wf)
+        sentinel_progress = _RecordingProgress()
+        ctx = _real_ctx(wf, progress=sentinel_progress)
         outcome = _handle_clone_repo(wf.steps[0], ctx)
         assert ctx.setup is not None and ctx.setup.repo_dir == "/fresh"
         assert outcome.data["reused"] is False
+        assert captured["progress"] is sentinel_progress  # threaded through, not dropped
 
     def test_hydrate_context_builds_system_prompt(self, monkeypatch):
         from models import RepoSetup

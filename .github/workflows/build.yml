@@ -1,6 +1,10 @@
 name: build
 on:
   pull_request: {}
+  # Required-status-check support: a check must run on the `merge_group` event to
+  # report inside the merge queue. Without this trigger, marking `build` a required
+  # check would deadlock the queue (the check never reports). See issue #327.
+  merge_group: {}
   workflow_dispatch:
     inputs:
       deploy:
@@ -54,8 +58,10 @@ jobs:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       AQUA_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      # Keep secret and dependency scanning enabled in CI; only disable the
-      # remaining tools that are intentionally skipped here.
+      # The `build` task DAG does not invoke any `security:*` task, so this only
+      # pre-disables the heavy scanners if a future build step pulls one in. Fast
+      # secret/dependency/workflow scanning runs as required PR checks in
+      # security-pr.yml (issue #327); the full image/SAST suite runs in security.yml.
       MISE_DISABLE_TOOLS: "aqua:aquasecurity/trivy,grype,semgrep"
     steps:
       - name: Free Disk Space
@@ -66,7 +72,7 @@ jobs:
             /usr/share/dotnet \
             /opt/hostedtoolcache || true
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 1  # shallow clone
           persist-credentials: false
@@ -220,7 +226,7 @@ jobs:
             }' > cdk/cdk.context.json
           cat cdk/cdk.context.json
       - name: Install mise
-        uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4.0.1
+        uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
         with:
           cache: true
       - name: Setup Node.js
@@ -229,19 +235,19 @@ jobs:
           node-version: 22.x
       - name: Cache node_modules
         id: cache-node-modules
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: node_modules
           key: node-modules-${{ runner.os }}-${{ hashFiles('yarn.lock') }}
       - name: Cache agent venv
         id: cache-agent-venv
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: agent/.venv
           key: agent-venv-${{ runner.os }}-${{ hashFiles('agent/uv.lock') }}
       - name: Cache Jest transforms
         id: cache-jest
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: cdk/.jest-cache
           key: jest-${{ runner.os }}-${{ hashFiles('yarn.lock') }}-${{ github.sha }}
@@ -249,7 +255,7 @@ jobs:
             jest-${{ runner.os }}-${{ hashFiles('yarn.lock') }}-
       - name: Cache TypeScript build info
         id: cache-tsc
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             cdk/tsconfig.tsbuildinfo
@@ -280,7 +286,7 @@ jobs:
           mise run build
           echo "::notice::Build completed in ${SECONDS}s ($(nproc) cores, mise parallel DAG)"
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@3f20e214133d0983f9a10f3d63b0faf9241a3daa # v6.0.0
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         continue-on-error: true
         with:
           token: ${{ secrets.CODECOV_TOKEN }}

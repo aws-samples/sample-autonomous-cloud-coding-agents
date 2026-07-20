@@ -29,11 +29,20 @@
  */
 
 /**
+ * TTL for rate-limit counter rows (seconds). Only the current minute
+ * bucket matters, so ~2 minutes covers clock skew before DDB reaps it.
+ */
+export const RATE_LIMIT_ROW_TTL_SECONDS = 120;
+
+/** Digits in the ``YYYY`` year component of a minute bucket. */
+const YEAR_DIGITS = 4;
+
+/**
  * UTC minute bucket as ``YYYYMMDDhhmm``. Stable across handlers — drift
  * here would invalidate per-minute rate-limit counters.
  */
 export function formatMinuteBucket(date: Date): string {
-  const y = date.getUTCFullYear().toString().padStart(4, '0');
+  const y = date.getUTCFullYear().toString().padStart(YEAR_DIGITS, '0');
   const m = (date.getUTCMonth() + 1).toString().padStart(2, '0');
   const d = date.getUTCDate().toString().padStart(2, '0');
   const h = date.getUTCHours().toString().padStart(2, '0');

@@ -7,8 +7,24 @@ import pytest
 
 cedarpy = pytest.importorskip("cedarpy")
 
-from hooks import build_hook_matchers, post_tool_use_hook, pre_tool_use_hook
+from hooks import (
+    _reset_blocker_reason_for_tests,
+    build_hook_matchers,
+    detect_egress_denial,
+    last_blocker_reason,
+    post_tool_use_hook,
+    pre_tool_use_hook,
+)
 from policy import PolicyEngine
+
+
+@pytest.fixture(autouse=True)
+def _reset_blocker_latch():
+    """Clear the #251 blocker latch between tests so one test's detected
+    blocker doesn't leak into the next (module-level, process-lifetime)."""
+    _reset_blocker_reason_for_tests()
+    yield
+    _reset_blocker_reason_for_tests()
 
 
 def _run(coro):
@@ -124,6 +140,83 @@ class TestPreToolUseHook:
         result = _run(pre_tool_use_hook(hook_input, "test-bad", {}, engine=engine))
         assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
         assert "unparseable tool input" in result["hookSpecificOutput"]["permissionDecisionReason"]
+
+    def _non_dict_hook_input(self, tool_input):
+        return {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Read",
+            "tool_input": tool_input,
+            "tool_use_id": "test-nd",
+            "session_id": "sess-1",
+            "transcript_path": "/tmp/t",
+            "cwd": "/workspace",
+        }
+
+    def test_denies_string_json_list_tool_input(self):
+        # A string that decodes to a JSON list ("[1,2]") is valid JSON but not
+        # an object — must fail closed with the explicit reason.
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+        result = _run(
+            pre_tool_use_hook(self._non_dict_hook_input("[1,2]"), "test-nd", {}, engine=engine)
+        )
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert (
+            "tool input is not an object"
+            in (result["hookSpecificOutput"]["permissionDecisionReason"])
+        )
+
+    def test_denies_string_json_scalar_tool_input(self):
+        # A string that decodes to a JSON scalar ('"foo"') is valid JSON but
+        # not an object.
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+        result = _run(
+            pre_tool_use_hook(self._non_dict_hook_input('"foo"'), "test-nd", {}, engine=engine)
+        )
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert (
+            "tool input is not an object"
+            in (result["hookSpecificOutput"]["permissionDecisionReason"])
+        )
+
+    def test_denies_direct_non_dict_tool_input(self):
+        # A non-dict passed directly (not via a JSON string) — e.g. a list.
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+        result = _run(
+            pre_tool_use_hook(self._non_dict_hook_input([1, 2]), "test-nd", {}, engine=engine)
+        )
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert (
+            "tool input is not an object"
+            in (result["hookSpecificOutput"]["permissionDecisionReason"])
+        )
+
+
+class TestTruncate:
+    def test_returns_text_when_under_max(self):
+        from hooks import _truncate
+
+        assert _truncate("hello", 100) == "hello"
+
+    def test_none_returns_empty(self):
+        from hooks import _truncate
+
+        assert _truncate(None, 10) == ""
+
+    def test_adds_ellipsis_when_over_max(self):
+        from hooks import _truncate
+
+        out = _truncate("abcdefghij", 8)
+        assert out == "abcde..."
+        assert len(out) == 8
+
+    def test_small_max_len_does_not_slice_negatively(self):
+        # Regression: for max_len <= 3, ``max_len - 3`` slices negatively
+        # (dropping chars off the END). Guard returns a plain prefix instead.
+        from hooks import _truncate
+
+        assert _truncate("abcdef", 2) == "ab"
+        assert _truncate("abcdef", 3) == "abc"
+        assert _truncate("abcdef", 0) == ""
 
 
 class TestPostToolUseHook:
@@ -267,6 +360,156 @@ class TestPostToolUseHook:
         assert any("SCANNER_ERROR" in f for f in call_args[0][1])
 
 
+class TestDetectEgressDenial:
+    """#251 egress-denial signature scan."""
+
+    def test_no_match_on_clean_output(self):
+        assert detect_egress_denial("Successfully installed package\n") == (False, None)
+        assert detect_egress_denial("") == (False, None)
+
+    def test_curl_could_not_resolve_host(self):
+        detected, host = detect_egress_denial("curl: (6) Could not resolve host: pypi.org")
+        assert detected is True
+        assert host == "pypi.org"
+
+    def test_npm_getaddrinfo_enotfound(self):
+        detected, host = detect_egress_denial(
+            "npm ERR! network getaddrinfo ENOTFOUND registry.npmjs.org"
+        )
+        assert detected is True
+        assert host == "registry.npmjs.org"
+
+    def test_git_failed_to_connect(self):
+        detected, host = detect_egress_denial(
+            "fatal: unable to access: Failed to connect to github.com port 443"
+        )
+        assert detected is True
+        assert host == "github.com"
+
+    def test_connection_refused_without_host(self):
+        # Detection-only signature — fires but names no host.
+        detected, host = detect_egress_denial("Error: connect ECONNREFUSED — Connection refused")
+        assert detected is True
+        assert host is None
+
+    def test_urllib3_captures_real_host_not_class_path(self):
+        # The requests/urllib3 error embeds the urllib3 class path BEFORE the
+        # real host; a naive lazy match would grab the class path. We anchor on
+        # HTTPSConnectionPool(host='…') / Failed to resolve '…' instead.
+        stderr = (
+            "HTTPSConnectionPool(host='pypi.org', port=443): Max retries exceeded "
+            "with url: /simple/ (Caused by NameResolutionError("
+            '"<urllib3.connection.HTTPSConnection object at 0x7f>: '
+            "Failed to resolve 'pypi.org' ([Errno -3] Temporary failure)\"))"
+        )
+        detected, host = detect_egress_denial(stderr)
+        assert detected is True
+        assert host == "pypi.org"
+        assert host != "urllib3.connection.HTTPSConnection"
+
+
+class TestPostToolUseEgressBlocker:
+    """#251: PostToolUse emits egress_denied + latches the terminal reason."""
+
+    def test_emits_egress_denied_event_with_host(self, progress):
+        hook_input = {
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_response": "npm ERR! network getaddrinfo ENOTFOUND registry.npmjs.org",
+        }
+        _run(post_tool_use_hook(hook_input, "t-egress", {}, progress=progress))
+        blocked = [c for c in progress.calls if c[0] == "write_agent_blocked"]
+        assert len(blocked) == 1
+        kwargs = blocked[0][1]
+        assert kwargs["kind"] == "egress_denied"
+        assert kwargs["resource"] == "registry.npmjs.org"
+        assert kwargs["retryable"] is False
+
+    def test_latches_canonical_reason_even_without_progress(self):
+        hook_input = {
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_response": "curl: (6) Could not resolve host: api.example.com",
+        }
+        _run(post_tool_use_hook(hook_input, "t-latch", {}))
+        reason = last_blocker_reason()
+        assert reason is not None
+        assert reason.startswith("BLOCKED[egress_denied]:")
+        assert "(resource: api.example.com)" in reason
+
+    def test_clean_output_does_not_latch_or_emit(self, progress):
+        hook_input = {
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Read",
+            "tool_response": "def hello():\n    return 'world'\n",
+        }
+        _run(post_tool_use_hook(hook_input, "t-clean", {}, progress=progress))
+        assert last_blocker_reason() is None
+        assert not [c for c in progress.calls if c[0] == "write_agent_blocked"]
+
+    def test_hostless_signature_emits_event_but_does_not_latch_terminal_reason(self, progress):
+        # A detection-only signature ("Connection refused") commonly fires for an
+        # internal localhost race, not an egress denial. It should surface as an
+        # observability event but MUST NOT poison the authoritative terminal
+        # reason (which would send the operator to the DNS Firewall for nothing).
+        hook_input = {
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_response": "curl http://127.0.0.1:8080 — Connection refused",
+        }
+        _run(post_tool_use_hook(hook_input, "t-hostless", {}, progress=progress))
+        # Event fired (heuristic live-stream signal)…
+        assert [c for c in progress.calls if c[0] == "write_agent_blocked"]
+        # …but the terminal carry-path was NOT latched (no host captured).
+        assert last_blocker_reason() is None
+
+
+class TestPreToolUsePolicyFailClosed:
+    """#251 (decision E): fail-closed denies emit policy_fail_closed; intentional
+    hard-denies do NOT. Branches on the structured flag, not a reason string."""
+
+    def _deny_input(self):
+        return {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "echo hi"},
+        }
+
+    def test_fail_closed_deny_emits_blocker(self, progress):
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+        engine._cedarpy = None  # force "policy engine unavailable" fail-closed
+        result = _run(
+            pre_tool_use_hook(self._deny_input(), "t-fc", {}, engine=engine, progress=progress)
+        )
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+        blocked = [c for c in progress.calls if c[0] == "write_agent_blocked"]
+        assert len(blocked) == 1
+        assert blocked[0][1]["kind"] == "policy_fail_closed"
+        # Terminal carry-path latched too.
+        assert (last_blocker_reason() or "").startswith("BLOCKED[policy_fail_closed]:")
+
+    def test_hard_deny_does_not_emit_blocker(self, progress):
+        # A read-only engine hard-denies Write — intentional, fail_closed=False.
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo", read_only=True)
+        hook_input = {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Write",
+            "tool_input": {"file_path": "x.py", "content": "y"},
+        }
+        result = _run(pre_tool_use_hook(hook_input, "t-hd", {}, engine=engine, progress=progress))
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert not [c for c in progress.calls if c[0] == "write_agent_blocked"]
+        assert last_blocker_reason() is None
+
+    def test_fail_closed_still_denies_without_progress(self):
+        # No-fail-closed-regression (cross-cutting AC): the deny is unchanged
+        # whether or not the blocker emit is wired.
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+        engine._cedarpy = None
+        result = _run(pre_tool_use_hook(self._deny_input(), "t-fc2", {}, engine=engine))
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
 class TestBuildHookMatchers:
     def test_returns_correct_structure(self):
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")
@@ -321,6 +564,7 @@ class TestBuildHookMatchers:
 import hashlib
 import json as _json
 from collections import deque
+from datetime import UTC
 from typing import Any
 
 import hooks
@@ -1412,3 +1656,44 @@ class TestDenialBetweenTurnsHook:
         # DDB and returns []. Denial should be injected.
         assert result.get("decision") == "block"
         assert "<user_denial" in result.get("reason", "")
+
+
+class TestRemainingMaxlifetime:
+    """_remaining_maxlifetime_s parses TASK_STARTED_AT correctly."""
+
+    def test_iso_timestamp_parsed_as_utc_regardless_of_local_tz(self, monkeypatch):
+        # The trailing Z means UTC. Before the fix, strptime produced a naive
+        # datetime whose .timestamp() used the container's local TZ, skewing
+        # the remaining-lifetime math by the UTC offset (wrong approval
+        # timeouts / spurious insufficient-lifetime denies on non-UTC hosts).
+        import time as time_module
+        from datetime import datetime
+
+        started = datetime(2026, 6, 11, 12, 0, 0, tzinfo=UTC)
+        monkeypatch.setenv("TASK_STARTED_AT", "2026-06-11T12:00:00Z")
+        monkeypatch.setenv("AGENTCORE_MAX_LIFETIME_S", "28800")
+        # Freeze "now" at exactly 1000s after the UTC start time.
+        monkeypatch.setattr(hooks.time, "time", lambda: started.timestamp() + 1000, raising=True)
+        # Simulate a non-UTC container: if the implementation regresses to
+        # local-time interpretation, the result shifts by the TZ offset.
+        monkeypatch.setenv("TZ", "America/New_York")
+        time_module.tzset()
+        try:
+            assert hooks._remaining_maxlifetime_s() == 28800 - 1000
+        finally:
+            monkeypatch.delenv("TZ")
+            time_module.tzset()
+
+    def test_epoch_seconds_passthrough(self, monkeypatch):
+        monkeypatch.setenv("TASK_STARTED_AT", "1000000")
+        monkeypatch.setenv("AGENTCORE_MAX_LIFETIME_S", "500")
+        monkeypatch.setattr(hooks.time, "time", lambda: 1000100, raising=True)
+        assert hooks._remaining_maxlifetime_s() == 400
+
+    def test_missing_started_at_returns_none(self, monkeypatch):
+        monkeypatch.delenv("TASK_STARTED_AT", raising=False)
+        assert hooks._remaining_maxlifetime_s() is None
+
+    def test_unparseable_started_at_returns_none(self, monkeypatch):
+        monkeypatch.setenv("TASK_STARTED_AT", "not-a-timestamp")
+        assert hooks._remaining_maxlifetime_s() is None

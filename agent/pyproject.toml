@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Background coding agent — runs tasks in isolated cloud environments and produces pull requests"
 requires-python = ">=3.13"
 dependencies = [
-    "boto3==1.43.9", #https://pypi.org/project/boto3/
+    "boto3==1.43.38", #https://pypi.org/project/boto3/
     # Vestigial from the parked AgentCore Identity flow (Phase 2.0a).
     # Phase 2.0b reads per-workspace Linear OAuth tokens directly from
     # Secrets Manager because AgentCore Identity's USER_FEDERATION
@@ -15,13 +15,13 @@ dependencies = [
     # try/except (ImportError, AttributeError), so removing this dep
     # would degrade gracefully — but for now we keep the dep to
     # preserve the clean code path.
-    "bedrock-agentcore==1.9.1", #https://pypi.org/project/bedrock-agentcore/
-    "claude-agent-sdk==0.2.82", #https://github.com/anthropics/claude-agent-sdk-python/releases/tag/v0.2.82
+    "bedrock-agentcore==1.16.0", #https://pypi.org/project/bedrock-agentcore/
+    "claude-agent-sdk==0.2.110", #https://github.com/anthropics/claude-agent-sdk-python/releases/tag/v0.2.110 (bundles claude CLI 2.1.191; kept in lockstep with the npm CLI pin in the Dockerfile, #215)
     "requests==2.34.2", #https://pypi.org/project/requests/
-    "fastapi==0.136.1", #https://pypi.org/project/fastapi/
-    "uvicorn==0.47.0", #https://pypi.org/project/uvicorn/
-    "aws-opentelemetry-distro==0.17.0", #https://pypi.org/project/aws-opentelemetry-distro/
-    "mcp==1.27.1", #https://pypi.org/project/mcp/
+    "fastapi==0.139.0", #https://pypi.org/project/fastapi/
+    "uvicorn==0.49.0", #https://pypi.org/project/uvicorn/
+    "aws-opentelemetry-distro==0.18.0", #https://pypi.org/project/aws-opentelemetry-distro/
+    "mcp==1.28.1", #https://pypi.org/project/mcp/
     # CEDAR ENGINE PARITY — DO NOT BUMP IN ISOLATION.
     # cedarpy (Python, agent runtime) and @cedar-policy/cedar-wasm (TypeScript,
     # CDK Lambdas) are two language bindings over the same Cedar Rust core.
@@ -33,7 +33,14 @@ dependencies = [
     # in cdk/package.json AND refresh the parity fixtures, in the same
     # commit. See docs/design/CEDAR_HITL_GATES.md §15.6 (decision #23) and
     # the parity-contract banner in mise.toml.
-    "cedarpy==4.8.4", #https://github.com/k9securityio/cedar-py — EXACT pin (no ^/~), parity with @cedar-policy/cedar-wasm@4.8.2 (both Cedar Rust 4.8.2)
+    # EXACT pin (no ^/~). The binding version (4.8.4) is the cedarpy package
+    # release, NOT the Cedar Rust core version — it differs from the TypeScript
+    # binding @cedar-policy/cedar-wasm (pinned at 4.8.2 in cdk/package.json).
+    # Matching binding version *strings* across languages is neither necessary
+    # nor sufficient for behavioral parity; parity is established empirically by
+    # the contracts/cedar-parity/ golden fixtures in CI, which assert identical
+    # (decision, matching_rule_ids) for both bindings on the same (policy, input).
+    "cedarpy==4.8.4", #https://github.com/k9securityio/cedar-py
     # Workflow-driven tasks (#248): the step runner loads YAML workflow files
     # and validates them against agent/workflows/schema/workflow.schema.json.
     # Both were previously only transitively present; declared directly so the
@@ -42,10 +49,27 @@ dependencies = [
     "jsonschema==4.26.0", #https://pypi.org/project/jsonschema/
 ]
 
+# The uv-missing-dependency-cooldown rule wants a global exclude-newer window.
+# We intentionally do NOT set one: deps are exact-pinned (==) and lockfile-managed
+# via upgrade-main.yml, and a global cooldown conflicts with fresh exact pins
+# (fastapi/bedrock-agentcore/boto3 were published within the last week) — it makes
+# `uv sync` unsatisfiable and re-breaks on every pin bump. The rule's threat model
+# (surprise malicious/unstable version) is already covered by exact pins + reviewed
+# lock upgrades. See #532.
+# nosemgrep: uv-missing-dependency-cooldown
 [tool.uv]
 constraint-dependencies = [
     "pyjwt>=2.13.0",  # PYSEC-2026-175/177/178/179 — transitive via mcp; remove when mcp bumps floor (#267)
+    "pydantic-settings>=2.14.2",  # GHSA-4xgf-cpjx-pc3j — transitive via mcp; remove when mcp bumps floor
 ]
+
+# Dead-code detection (#282, cairn MVG gate #6). ruff "F" catches unused
+# imports/locals; vulture catches unused module-level functions/classes/methods
+# that ruff cannot see. min_confidence 80 keeps the signal high; intentional
+# keeps (e.g. SDK-mandated hook params) live in .vulture_allowlist.py.
+[tool.vulture]
+paths = ["src", ".vulture_allowlist.py"]
+min_confidence = 80
 
 [tool.bandit]
 exclude_dirs = ["tests", ".venv"]
@@ -65,11 +89,16 @@ dev = [
     "pytest",
     "pygments==2.20.0",
     "pytest-cov==7.1.0",
+    "vulture==2.16",  # dead-code detection (#282): unused functions/classes ruff F can't see
 ]
 
 [tool.ruff]
 target-version = "py313"
 line-length = 100
+# The vulture allowlist is bare-name expressions by design (that is how vulture
+# "uses" a name to suppress it). ruff would flag every line F821/B018, so it is
+# not Python source ruff should lint. See .vulture_allowlist.py (#282).
+extend-exclude = [".vulture_allowlist.py"]
 
 [tool.ruff.lint]
 select = [
@@ -83,6 +112,10 @@ select = [
     "SIM",   # flake8-simplify
     "TCH",   # flake8-type-checking
     "RUF",   # ruff-specific rules
+    # AI007 guard (#258): magic-value comparisons should use named constants.
+    # Values shared across Python/TypeScript belong in contracts/constants.json
+    # (see contracts/constants.md).
+    "PLR2004",  # pylint magic-value-comparison
 ]
 ignore = [
     "S603",  # subprocess call — allowed for agent CLI operations
@@ -91,9 +124,8 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "src/entrypoint.py" = ["E402"]  # re-export shim: importlib.reload() call must precede re-export from-imports
-"src/system_prompt.py" = ["E501"]  # long prompt strings
 "src/prompts/*.py" = ["E501"]  # long prompt strings
-"tests/**" = ["S101", "S106", "S108", "E402"]  # assert; test tokens; /tmp paths; importorskip
+"tests/**" = ["S101", "S106", "S108", "E402", "PLR2004"]  # assert; test tokens; /tmp paths; importorskip; literal assertions
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -110,6 +142,16 @@ precision = 2
 show_missing = true
 skip_covered = true
 
+[tool.ty.rules]
+# asyncio.get_event_loop_policy() is deprecated in 3.14+; still valid on 3.13.
+deprecated = "ignore"
+
 [tool.ty.environment]
 python-version = "3.13"
 extra-paths = ["src"]
+
+[tool.ty.src]
+# The vulture allowlist is bare-name expressions by design, not type-checkable
+# Python — ty flags each line unresolved-reference. Excluded here for the same
+# reason ruff excludes it via extend-exclude (#282).
+exclude = [".vulture_allowlist.py"]

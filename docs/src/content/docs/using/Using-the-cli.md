@@ -23,6 +23,30 @@ node lib/bin/bgagent.js configure \
 node lib/bin/bgagent.js login --username user@example.com
 ```
 
+### Operator commands (stack admin)
+
+Stack admins can introspect deployment state and run smoke checks **without Cognito login** — these commands use operator AWS credentials (IAM profile / `AWS_REGION`):
+
+```bash
+# Print stack outputs (ApiUrl, UserPoolId, AppClientId, GitHubTokenSecretArn, …)
+bgagent platform outputs --stack-name backgroundagent-dev
+
+# Smoke-check API, Cognito, GitHub token, Bedrock model, onboarded repos
+bgagent platform doctor --stack-name backgroundagent-dev
+
+# List onboarded repositories
+bgagent repo list
+
+# Show RepoConfig for one repo (secret ARNs redacted)
+bgagent repo show owner/repo
+
+# Store the platform GitHub PAT (or a per-blueprint secret via --repo)
+bgagent github set-token
+bgagent github set-token --repo owner/repo
+```
+
+The read-only operator commands (`platform`, `repo`, `runtime`, `ops`, `webhook test`, `admin list-users`) accept `--output json`; the credential-writing `github` and `admin invite-user`/`delete-user`/`reset-password` commands do not. Region defaults to `bgagent configure --region` or `AWS_REGION`.
+
 ### Submitting a task
 
 ```bash
@@ -63,13 +87,13 @@ node lib/bin/bgagent.js submit --repo owner/repo --issue 42 --wait
 **Example** (default `text` output immediately after a successful submit  - task is `SUBMITTED`, branch name reserved):
 
 ```bash
-node lib/bin/bgagent.js submit --repo krokoko/agent-plugins --task "add codeowners field to RFC issue template"
+node lib/bin/bgagent.js submit --repo awslabs/agent-plugins --task "add codeowners field to RFC issue template"
 ```
 
 ```text
 Task:        01KN37PZ77P1W19D71DTZ15X6X
 Status:      SUBMITTED
-Repo:        krokoko/agent-plugins
+Repo:        awslabs/agent-plugins
 Description: add codeowners field to RFC issue template
 Branch:      bgagent/01KN37PZ77P1W19D71DTZ15X6X/add-codeowners-field-to-rfc-issue-template
 Created:     2026-04-01T00:39:51.271Z
@@ -172,11 +196,11 @@ node lib/bin/bgagent.js status 01KN37PZ77P1W19D71DTZ15X6X
 ```text
 Task:        01KN37PZ77P1W19D71DTZ15X6X
 Status:      COMPLETED
-Repo:        krokoko/agent-plugins
+Repo:        awslabs/agent-plugins
 Description: add codeowners field to RFC issue template
 Branch:      bgagent/01KN37PZ77P1W19D71DTZ15X6X/add-codeowners-field-to-rfc-issue-template
 Session:     9891af91-bfc6-488f-bfe6-ce8f8c9a63cf
-PR:          https://github.com/krokoko/agent-plugins/pull/60
+PR:          https://github.com/awslabs/agent-plugins/pull/43
 Created:     2026-04-01T00:39:51.271Z
 Started:     2026-04-01T00:39:56.647Z
 Completed:   2026-04-01T00:43:49Z

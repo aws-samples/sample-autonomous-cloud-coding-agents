@@ -31,8 +31,11 @@ import {
   AttachmentType,
   AttachmentUploadInstruction,
   CreateTaskRequest,
+  DEFAULT_CODING_WORKFLOW_ID,
   INITIAL_APPROVALS_MAX_ENTRIES,
   INITIAL_APPROVALS_MAX_ENTRY_LENGTH,
+  MAX_BUDGET_USD_MAX,
+  MAX_BUDGET_USD_MIN,
 } from '../types';
 import { exitCodeForStatus, waitForTask } from '../wait';
 
@@ -130,8 +133,8 @@ export function makeSubmitCommand(): Command {
         }
       }
       if (opts.maxBudget !== undefined) {
-        if (isNaN(opts.maxBudget) || opts.maxBudget < 0.01 || opts.maxBudget > 100) {
-          throw new CliError('--max-budget must be a number between 0.01 and 100.');
+        if (isNaN(opts.maxBudget) || opts.maxBudget < MAX_BUDGET_USD_MIN || opts.maxBudget > MAX_BUDGET_USD_MAX) {
+          throw new CliError(`--max-budget must be a number between ${MAX_BUDGET_USD_MIN} and ${MAX_BUDGET_USD_MAX}.`);
         }
       }
       if (opts.approvalTimeout !== undefined) {
@@ -205,7 +208,7 @@ export function makeSubmitCommand(): Command {
         // `bgagent submit --repo X --task Y` silently regresses from "opens a PR"
         // to "emits an S3 markdown artifact". A repo-less submit (no --repo, with
         // --workflow) is unaffected: it carries its explicit workflow_ref above.
-        workflowRef = 'coding/new-task-v1';
+        workflowRef = DEFAULT_CODING_WORKFLOW_ID;
       }
       const prNumber = opts.pr ?? opts.reviewPr;
 
@@ -239,7 +242,7 @@ export function makeSubmitCommand(): Command {
             throw new CliError(`No local file found for upload instruction: ${instruction.filename}`);
           }
           const filePath = attachmentArgs.find(arg =>
-            !arg.startsWith('http') && path.basename(safeResolvePath(arg)) === instruction.filename,
+            !isUrlArg(arg) && path.basename(safeResolvePath(arg)) === instruction.filename,
           );
           if (!filePath) {
             throw new CliError(`Cannot locate local file for presigned upload: ${instruction.filename}`);
@@ -300,6 +303,16 @@ const MIME_BY_EXT: Record<string, string> = {
 };
 
 const IMAGE_MIMES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+
+/** True when the attachment argument is a URL (http:// or https://) rather
+ *  than a local file path. Mirrors the scheme detection in
+ *  ``resolveAttachmentArg`` so URL vs. local-file classification stays
+ *  consistent across the upload-confirmation path. A bare ``http://`` is
+ *  still a URL here (it's rejected as non-HTTPS earlier in resolution); the
+ *  point is that it must never be treated as a local file path. */
+function isUrlArg(arg: string): boolean {
+  return arg.startsWith('https://') || arg.startsWith('http://');
+}
 
 /**
  * Resolve a CLI --attachment argument to an Attachment object.

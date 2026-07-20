@@ -17,11 +17,19 @@
  *  SOFTWARE.
  */
 
-/** Generic CLI error with a user-facing message. */
+/** Generic CLI error with a user-facing message.
+ *
+ * ``exitCode`` defaults to 1. Pass a different code when the failure class
+ * must be script-distinguishable — e.g. ``waitForTask`` uses 2 for
+ * "the CLI gave up waiting" so wrappers can tell a timeout apart from a
+ * genuinely FAILED task (which exits 1 via ``exitCodeForStatus``). */
 export class CliError extends Error {
-  constructor(message: string) {
+  readonly exitCode: number;
+
+  constructor(message: string, exitCode = 1) {
     super(message);
     this.name = 'CliError';
+    this.exitCode = exitCode;
   }
 }
 
@@ -38,4 +46,24 @@ export class ApiError extends Error {
     this.errorCode = errorCode;
     this.requestId = requestId;
   }
+}
+
+/**
+ * Map an {@link ApiError} to a user-facing {@link CliError}. ``cases`` supplies
+ * the command-specific messages (keyed by HTTP status); the shared 401 and
+ * fallthrough handling is the same across commands, so it lives here. A status
+ * with no case (and not 401) surfaces the server message verbatim.
+ */
+export function mapApiError(
+  err: ApiError,
+  cases: Partial<Record<number, (err: ApiError) => string>>,
+): CliError {
+  const handler = cases[err.statusCode];
+  if (handler) return new CliError(handler(err));
+  if (err.statusCode === 401) {
+    return new CliError(
+      `Not authenticated (${err.errorCode}). Run \`bgagent login\` to re-authenticate.`,
+    );
+  }
+  return new CliError(err.message);
 }

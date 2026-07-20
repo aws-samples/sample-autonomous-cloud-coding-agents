@@ -26,7 +26,7 @@ from pydantic import BaseModel
 import task_state
 from config import resolve_github_token
 from models import TaskResult
-from observability import set_session_id
+from observability import propagate_correlation_context
 from pipeline import run_task
 
 # --- _debug_cw / _warn_cw failure counter -------------------------------
@@ -42,15 +42,37 @@ _debug_cw_failures = 0
 _debug_cw_failures_lock = threading.Lock()
 _DEBUG_CW_FAILURE_EMIT_EVERY = 5
 
+# Only redact secrets at least this long — replacing very short strings
+# would mangle unrelated text that happens to contain them.
+_MIN_REDACTABLE_SECRET_LEN = 12
+
 
 def _redact_cached_credentials(text: str) -> str:
     """Remove cached env secrets from debug text before stdout / CloudWatch."""
     out = text
-    for env_key in ("GITHUB_TOKEN", "LINEAR_API_TOKEN"):
+    for env_key in ("GITHUB_TOKEN", "LINEAR_API_TOKEN", "JIRA_API_TOKEN"):
         secret = os.environ.get(env_key) or ""
-        if len(secret) >= 12:
+        if len(secret) >= _MIN_REDACTABLE_SECRET_LEN:
             out = out.replace(secret, f"<{env_key}_REDACTED>")
     return out
+
+
+def _emit_stdout_line(stamped: str) -> None:
+    """Write one line to stdout via ``os.write`` (fd 1).
+
+    Shared sink for ``_debug_cw`` / ``_warn_cw``. Using ``os.write``
+    instead of ``print``/``sys.stdout.write`` keeps lines visible in
+    local runs without tripping CodeQL's cleartext-logging sinks (which
+    model print and TextIOWrapper.write only) — callers MUST have
+    already routed content through ``_redact_cached_credentials``.
+    """
+    line = (stamped + "\n").encode("utf-8", errors="replace")
+    try:
+        while line:
+            n = os.write(1, line)
+            line = line[n:]
+    except OSError:
+        pass
 
 
 def _debug_cw(msg: str, *, task_id: str | None = None) -> None:
@@ -68,16 +90,7 @@ def _debug_cw(msg: str, *, task_id: str | None = None) -> None:
     """
     msg = _redact_cached_credentials(msg)
     stamped = f"[server/debug] {msg}"
-    # Emit via os.write(1, ...) instead of print/sys.stdout.write so debug lines stay
-    # visible locally without tripping CodeQL's cleartext-logging sinks (which model
-    # print and TextIOWrapper.write only). Content is still redacted above.
-    line = (stamped + "\n").encode("utf-8", errors="replace")
-    try:
-        while line:
-            n = os.write(1, line)
-            line = line[n:]
-    except OSError:
-        pass
+    _emit_stdout_line(stamped)
 
     log_group = os.environ.get("LOG_GROUP_NAME")
     if not log_group:
@@ -115,14 +128,20 @@ def _warn_cw(msg: str, *, task_id: str | None = None) -> None:
     the ``server_warn/<task_id>`` stream so operators can alarm on
     warn traffic separately from debug noise).
 
-    The stdout ``print`` is preserved so local ``docker-compose`` runs
-    and the existing ``capsys``-based unit tests still observe the
-    line. CloudWatch delivery is fire-and-forget — failures bump the
+    The stdout emission is preserved so local ``docker-compose`` runs
+    and the ``capfd``-based unit tests still observe the line.
+    CloudWatch delivery is fire-and-forget — failures bump the
     shared ``_debug_cw_failures`` counter via ``_warn_cw_write_blocking``
     so a silently broken writer still surfaces via that single metric.
     """
+    # Redact cached credentials and emit via the same os.write path as
+    # ``_debug_cw``: warn messages can embed payload fragments, so they
+    # get the same sanitizer + non-print sink treatment (CodeQL
+    # clear-text-logging models print/TextIOWrapper.write only; content
+    # is redacted above regardless).
+    msg = _redact_cached_credentials(msg)
     stamped = f"[server/warn] {msg}"
-    print(stamped, flush=True)
+    _emit_stdout_line(stamped)
 
     log_group = os.environ.get("LOG_GROUP_NAME")
     if not log_group:
@@ -316,10 +335,6 @@ class InvocationRequest(BaseModel):
     input: dict[str, Any]
 
 
-class InvocationResponse(BaseModel):
-    output: dict[str, Any]
-
-
 @app.get("/ping")
 async def ping():
     """Health check endpoint.
@@ -437,10 +452,12 @@ def _run_task_background(
         hb_thread.start()
 
     try:
-        # Propagate session ID into this thread's OTEL context so spans
-        # are correlated with the AgentCore session in CloudWatch.
-        if session_id:
-            set_session_id(session_id)
+        # Propagate the correlation envelope into this thread's OTEL context
+        # so spans are correlated with the AgentCore session and the platform
+        # identity in CloudWatch (#245). Runs whenever any field is present —
+        # session_id may be empty while user_id/repo are known.
+        if session_id or user_id or repo_url:
+            propagate_correlation_context(session_id, user_id=user_id, repo=repo_url or None)
 
         run_task(
             repo_url=repo_url,

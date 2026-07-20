@@ -356,8 +356,8 @@ agent/
 ├── src/                 Agent source modules (pythonpath configured in pyproject.toml)
 │   ├── __init__.py
 │   ├── entrypoint.py    Re-export shim for backward compatibility (tests); delegates to specific modules
-│   ├── config.py        Configuration: build_config(), get_config(), resolve_github_token(), TaskType validation
-│   ├── models.py        Pydantic data models (TaskConfig, RepoSetup, AgentResult, TaskResult, HydratedContext, etc.) and enumerations (TaskType StrEnum)
+│   ├── config.py        Configuration: build_config(), get_config(), resolve_github_token(), resolve_linear_api_token(); resolves the pinned workflow (resolved_workflow / ids like coding/new-task-v1) and validates required inputs per the workflow's requires_repo / read_only / is_pr_workflow (replaced TaskType in #248)
+│   ├── models.py        Pydantic data models (TaskConfig, RepoSetup, AgentResult, TaskResult, HydratedContext, AttachmentConfig, etc.). TaskConfig carries the workflow fields (resolved_workflow, policy_principal, read_only, allowed_tools, requires_repo, is_pr_workflow) that replaced the former TaskType enum (#248)
 │   ├── pipeline.py      Top-level pipeline: main() CLI entry, run_task() orchestration, status resolution, error chaining
 │   ├── runner.py        Agent runner: run_agent() — ClaudeSDKClient connect/query/receive_response
 │   ├── context.py       Context hydration: fetch_github_issue(), assemble_prompt() (local/dry-run only)
@@ -372,25 +372,29 @@ agent/
 │   ├── task_state.py    Best-effort DynamoDB task status and heartbeat writes (no-op if TASK_TABLE_NAME unset)
 │   ├── observability.py OpenTelemetry helpers (e.g. AgentCore session id)
 │   ├── memory.py        Optional memory / episode integration for the agent
-│   ├── system_prompt.py Behavioral contract (PRD Section 11)
-│   └── prompts/         Per-task-type system prompt workflows
-│       ├── __init__.py  Prompt registry — assembles base template + workflow for each task type
-│       ├── base.py      Shared base template (environment, rules, placeholders)
-│       ├── new_task.py  Workflow for new_task (create branch, implement, open PR)
-│       ├── pr_iteration.py  Workflow for pr_iteration (read feedback, address, push)
-│       └── pr_review.py     Workflow for pr_review (read-only analysis, structured review comments)
+│   └── prompts/         System prompt templates, keyed by resolved workflow id (#248)
+│       ├── __init__.py  Prompt registry — get_system_prompt(workflow_id) maps each workflow id to its template; warns + falls back for an unregistered id
+│       ├── base.py      Shared base template for coding workflows (environment, rules, git/branch/PR placeholders)
+│       ├── new_task.py  Workflow fragment for coding/new-task-v1 (create branch, implement, open PR)
+│       ├── pr_iteration.py  Workflow fragment for coding/pr-iteration-v1 (read feedback, address, push)
+│       ├── pr_review.py     Workflow fragment for coding/pr-review-v1 (read-only analysis, structured review comments)
+│       ├── default_agent.py Repo-less prompt for default/agent-v1 (no git/branch/PR; deliverable is the final message)
+│       └── web_research.py  Repo-less research prompt for knowledge/web-research-v1 (WebFetch sourcing, structured cited answer)
+├── scripts/diagnostics/ Optional ops diagnostics (not bundled in the production image)
+│   ├── test_sdk_smoke.py        Minimal SDK smoke test (ClaudeSDKClient → CLI → Bedrock)
+│   └── test_subprocess_threading.py  Subprocess-in-background-thread verification
 ├── prepare-commit-msg.sh Git hook (Task-Id / Prompt-Version trailers on commits)
 ├── run.sh               Build + run helper for local/server mode with AgentCore constraints
 ├── tests/               pytest unit tests (pythonpath: src/)
-│   ├── test_config.py       Config validation and TaskType tests
+│   ├── test_config.py       Config validation and workflow-resolution tests (requires_repo / read_only / is_pr_workflow, load-failure fallback)
 │   ├── test_hooks.py        PreToolUse hook and hook matcher tests
 │   ├── test_models.py       Pydantic model tests (construction, validation, frozen enforcement, model_dump)
 │   ├── test_policy.py       Cedar policy engine tests (fail-closed, deny-list)
 │   ├── test_pipeline.py     Pipeline tests (cedar_policies injection, _resolve_overall_task_status, _chain_prior_agent_error)
 │   ├── test_shell.py        Shell utility tests (slugify, redact_secrets, truncate, format_bytes)
 │   └── ...
-├── test_sdk_smoke.py    Diagnostic: minimal SDK smoke test (ClaudeSDKClient → CLI → Bedrock)
-└── test_subprocess_threading.py  Diagnostic: subprocess-in-background-thread verification
 ```
 
 The container **CMD** runs the app under `opentelemetry-instrument` with **uvicorn** using the **asyncio** event loop (not uvloop), avoiding known subprocess issues with uvloop.
+
+**Diagnostics:** `scripts/diagnostics/` holds optional smoke tests for local AgentCore debugging. They are not copied into the production Docker image.

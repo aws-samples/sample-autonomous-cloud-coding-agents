@@ -39,13 +39,14 @@ function rewriteDocsLinkTarget(target) {
   const explicitGuideRoutes = {
     PROMPT_GUIDE: '/customizing/prompt-engineering',
     QUICK_START: '/getting-started/quick-start',
-    ROADMAP: '/roadmap/roadmap',
     DEVELOPER_GUIDE: '/developer-guide/introduction',
     USER_GUIDE: '/using/overview',
     CONTRIBUTING: '/developer-guide/contributing',
     SLACK_SETUP_GUIDE: '/using/slack-setup-guide',
     LINEAR_SETUP_GUIDE: '/using/linear-setup-guide',
     LINEAR_PAK_MIGRATION_RUNBOOK: '/using/linear-pak-migration-runbook',
+    JIRA_SETUP_GUIDE: '/using/jira-setup-guide',
+    DEPLOY_PREVIEW_SCREENSHOTS_GUIDE: '/using/deploy-preview-screenshots-guide',
     CEDAR_POLICY_GUIDE: '/customizing/cedar-policies',
     DEPLOYMENT_GUIDE: '/getting-started/deployment-guide',
   };
@@ -95,10 +96,21 @@ function rewriteDocsLinkTarget(target) {
 function ensureFrontmatter(content, title) {
   const normalized = content
     .replaceAll('../imgs/', `${docsBase}/imgs/`)
-    .replaceAll('../diagrams/', `${docsBase}/diagrams/`)
     .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (match, label, target) => {
       const rewritten = rewriteDocsLinkTarget(target);
-      return rewritten ? `[${label}](${rewritten})` : match;
+      if (!rewritten) {
+        return match;
+      }
+      // The site is served under `base` (docsBase), so root-relative routes
+      // must carry that prefix — otherwise they resolve to the domain root
+      // and 404. Starlight prefixes its own nav links automatically, but our
+      // rewritten body links are raw markdown and need it added explicitly
+      // (same reason the image rewrites above include docsBase). Every
+      // non-undefined return from rewriteDocsLinkTarget is a `/…` route (bare
+      // `#…` anchors and external links return undefined and keep their
+      // original text above), so the prefix always applies.
+      // (Fixes the broken in-body design-doc links.)
+      return `[${label}](${docsBase}${rewritten})`;
     });
 
   const trimmed = normalized.trimStart();
@@ -131,7 +143,8 @@ function mirrorMarkdownFile(sourcePath, targetRelativePath) {
     return;
   }
   const raw = fs.readFileSync(sourcePath, 'utf8');
-  const stem = path.basename(sourcePath, '.md');
+  const ext = path.extname(sourcePath);
+  const stem = path.basename(sourcePath, ext);
   const fallbackTitle = normalizeFileStem(stem).replace(/-/g, ' ');
   const out = ensureFrontmatter(raw, fallbackTitle);
   writeFile(path.join(docsRoot, targetRelativePath), out);
@@ -152,6 +165,25 @@ function mirrorDirectory(sourceDir, targetDirRelative) {
     const out = ensureFrontmatter(raw, fallbackTitle);
     const normalizedName = `${normalizeFileStem(file)}.md`;
     writeFile(path.join(docsRoot, targetDirRelative, normalizedName), out);
+  }
+}
+
+// Recursively copy a source asset directory into the site's public/ tree so
+// every committed image/diagram is served at its rewritten absolute URL.
+// Filenames are preserved verbatim (markdown references them as-is).
+function copyAssetDir(sourceDir, targetDir) {
+  if (!fs.existsSync(sourceDir)) {
+    return;
+  }
+  fs.mkdirSync(targetDir, { recursive: true });
+  for (const entry of fs.readdirSync(sourceDir, { withFileTypes: true })) {
+    const from = path.join(sourceDir, entry.name);
+    const to = path.join(targetDir, entry.name);
+    if (entry.isDirectory()) {
+      copyAssetDir(from, to);
+    } else if (entry.isFile()) {
+      fs.copyFileSync(from, to);
+    }
   }
 }
 
@@ -209,16 +241,22 @@ for (const page of orphanedPages) {
   }
 }
 
-// --- Quick Start: mirror to getting-started/ ---
+// --- Quick Start: mirror to getting-started/ (MDX for Starlight Tabs) ---
 mirrorMarkdownFile(
-  path.join(docsRoot, 'guides', 'QUICK_START.md'),
-  path.join('src', 'content', 'docs', 'getting-started', 'Quick-start.md'),
+  path.join(docsRoot, 'guides', 'QUICK_START.mdx'),
+  path.join('src', 'content', 'docs', 'getting-started', 'Quick-start.mdx'),
 );
 
 // --- Deployment Guide: mirror to getting-started/ ---
 mirrorMarkdownFile(
   path.join(docsRoot, 'guides', 'DEPLOYMENT_GUIDE.md'),
   path.join('src', 'content', 'docs', 'getting-started', 'Deployment-guide.md'),
+);
+
+// --- Cost Attribution Guide: mirror to getting-started/ (operator FinOps setup) ---
+mirrorMarkdownFile(
+  path.join(docsRoot, 'guides', 'COST_ATTRIBUTION.md'),
+  path.join('src', 'content', 'docs', 'getting-started', 'Cost-attribution.md'),
 );
 
 // --- Prompt Guide: mirror to customizing/ ---
@@ -245,16 +283,22 @@ mirrorMarkdownFile(
   path.join('src', 'content', 'docs', 'using', 'Linear-pak-migration-runbook.md'),
 );
 
+// --- Jira Setup Guide: mirror to using/ ---
+mirrorMarkdownFile(
+  path.join(docsRoot, 'guides', 'JIRA_SETUP_GUIDE.md'),
+  path.join('src', 'content', 'docs', 'using', 'Jira-setup-guide.md'),
+);
+
+// --- Deploy preview screenshots guide: mirror to using/ ---
+mirrorMarkdownFile(
+  path.join(docsRoot, 'guides', 'DEPLOY_PREVIEW_SCREENSHOTS_GUIDE.md'),
+  path.join('src', 'content', 'docs', 'using', 'Deploy-preview-screenshots-guide.md'),
+);
+
 // --- Cedar Policy Guide: mirror to customizing/ (authoring reference for blueprint authors) ---
 mirrorMarkdownFile(
   path.join(docsRoot, 'guides', 'CEDAR_POLICY_GUIDE.md'),
   path.join('src', 'content', 'docs', 'customizing', 'Cedar-policies.md'),
-);
-
-// --- Roadmap: mirror to roadmap/ ---
-mirrorMarkdownFile(
-  path.join(docsRoot, 'guides', 'ROADMAP.md'),
-  path.join('src', 'content', 'docs', 'roadmap', 'Roadmap.md'),
 );
 
 // --- Contributing: mirror to developer-guide/ ---
@@ -271,6 +315,13 @@ mirrorDirectory(path.join(docsRoot, 'design'), path.join('src', 'content', 'docs
 
 // --- Decision records (ADRs): mirror to decisions/ ---
 mirrorDirectory(path.join(docsRoot, 'decisions'), path.join('src', 'content', 'docs', 'decisions'));
+
+// --- Static assets: copy source image dir into the site's public/ ---
+// Guides reference images as `../imgs/foo.png`; ensureFrontmatter() turns
+// those into absolute `/<base>/imgs/foo.png` URLs, which Astro serves from
+// public/. Copy the source dir here so every committed image is published —
+// otherwise a new image lands in docs/imgs/ but 404s on the site (#90).
+copyAssetDir(path.join(docsRoot, 'imgs'), path.join(docsRoot, 'public', 'imgs'));
 
 // Guardrail: ensure target tree exists when running in a clean checkout.
 fs.mkdirSync(targetRoot, { recursive: true });

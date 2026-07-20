@@ -15,4 +15,4 @@ If you submit a task against a repository that has not been onboarded, the API r
 }
 ```
 
-Contact your platform administrator to onboard a new repository. For details on how administrators register repositories, see the [Developer guide](/developer-guide/introduction#repository-onboarding).
+Contact your platform administrator to onboard a new repository. For details on how administrators register repositories, see the [Developer guide](/sample-autonomous-cloud-coding-agents/developer-guide/introduction#repository-onboarding).

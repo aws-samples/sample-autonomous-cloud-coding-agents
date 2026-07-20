@@ -29,6 +29,18 @@ import * as sqs from 'aws-cdk-lib/aws-sqs';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 
+/** DLQ message retention for persistent-failure records (days). */
+const DLQ_RETENTION_DAYS = 14;
+
+/** DLQ-depth alarm metric period (minutes). */
+const DLQ_ALARM_PERIOD_MINUTES = 5;
+
+/** Max batching window before the Lambda is invoked on a partial batch (seconds). */
+const DEFAULT_MAX_BATCHING_WINDOW_SECONDS = 5;
+
+/** Approval-metrics publisher Lambda memory (MB). */
+const PUBLISHER_MEMORY_MB = 256;
+
 /**
  * Properties for ``ApprovalMetricsPublisherConsumer`` — the Chunk 8
  * consumer that reads ``TaskEventsTable`` via DynamoDB Streams and
@@ -96,8 +108,10 @@ export class ApprovalMetricsPublisherConsumer extends Construct {
     this.dlq = new sqs.Queue(this, 'ApprovalMetricsPublisherDlq', {
       // Persistent failures (malformed records the handler's
       // per-record try/catch throws on three times in a row) land
-      // here for operator inspection.
-      retentionPeriod: Duration.days(14),
+      // here for operator inspection. Depth is alarmed below (#117);
+      // an SNS action can be attached to ``dlqAlarm`` once a
+      // notification channel is provisioned.
+      retentionPeriod: Duration.days(DLQ_RETENTION_DAYS),
       enforceSSL: true,
     });
 
@@ -121,7 +135,7 @@ export class ApprovalMetricsPublisherConsumer extends Construct {
       // lines) — 256 MB is more than enough. Timeout is 1 minute to
       // match fanout; actual invocations should finish in tens of ms.
       timeout: Duration.minutes(1),
-      memorySize: 256,
+      memorySize: PUBLISHER_MEMORY_MB,
       logGroup,
       bundling: {
         externalModules: ['@aws-sdk/*'],
@@ -146,7 +160,7 @@ export class ApprovalMetricsPublisherConsumer extends Construct {
     this.fn.addEventSource(new DynamoEventSource(props.taskEventsTable, {
       startingPosition: StartingPosition.LATEST,
       batchSize: props.batchSize ?? 100,
-      maxBatchingWindow: props.maxBatchingWindow ?? Duration.seconds(5),
+      maxBatchingWindow: props.maxBatchingWindow ?? Duration.seconds(DEFAULT_MAX_BATCHING_WINDOW_SECONDS),
       retryAttempts: 3,
       onFailure: new SqsDlq(this.dlq),
       reportBatchItemFailures: true,
@@ -157,7 +171,7 @@ export class ApprovalMetricsPublisherConsumer extends Construct {
     // accumulate without operator visibility.
     this.dlqAlarm = new cloudwatch.Alarm(this, 'DlqMessageAlarm', {
       metric: this.dlq.metricApproximateNumberOfMessagesVisible({
-        period: Duration.minutes(5),
+        period: Duration.minutes(DLQ_ALARM_PERIOD_MINUTES),
         statistic: 'Maximum',
       }),
       threshold: 1,

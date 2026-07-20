@@ -20,11 +20,13 @@
 import { withDurableExecution, type DurableExecutionHandler } from '@aws/durable-execution-sdk-js';
 import { TaskStatus, TERMINAL_STATUSES } from '../constructs/task-status';
 import { resolveComputeStrategy } from './shared/compute-strategy';
+import { reportIssueFailure as reportJiraIssueFailure } from './shared/jira-feedback';
 import { reportIssueFailure } from './shared/linear-feedback';
 import { logger } from './shared/logger';
 import {
   admissionControl,
   emitTaskEvent,
+  envelopeFor,
   failTask,
   finalizeTask,
   hydrateAndTransition,
@@ -46,6 +48,8 @@ const MAX_POLL_ATTEMPTS = 1020; // ~8.5h at 30s intervals
 const MAX_NON_RUNNING_POLLS = 10; // ~5min grace period for session to start
 const MAX_CONSECUTIVE_ECS_POLL_FAILURES = 3;
 const MAX_CONSECUTIVE_ECS_COMPLETED_POLLS = 5;
+/** Poll cadence when the blueprint doesn't override ``poll_interval_ms`` (seconds). */
+const DEFAULT_POLL_INTERVAL_SECONDS = 30;
 
 const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = async (event, context) => {
   const { task_id: taskId } = event;
@@ -55,12 +59,18 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
     return loadTask(taskId);
   });
 
+  // Correlation envelope (#245): stamp {task_id, user_id, repo} on every
+  // lifecycle log line so admission→terminal transitions join to TaskEvents
+  // and the agent trace without hand-adding fields per call. `repo` is
+  // undefined for repo-less workflows (#248 Phase 3).
+  const { log, correlation } = envelopeFor(task);
+
   // Step 1b: Load blueprint config (per-repo overrides)
   const blueprintConfig = await context.step('load-blueprint', async () => {
     try {
       return await loadBlueprintConfig(task);
     } catch (err) {
-      await failTask(taskId, task.status, `Blueprint config load failed: ${String(err)}`, task.user_id, false);
+      await failTask(taskId, task.status, `Blueprint config load failed: ${String(err)}`, task.user_id, false, task.repo);
       throw err;
     }
   });
@@ -74,15 +84,21 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
     }
     const result = await admissionControl(task);
     if (!result) {
-      await failTask(taskId, current.status, 'User concurrency limit reached', task.user_id, false);
-      await emitTaskEvent(taskId, 'admission_rejected', { reason: 'concurrency_limit' });
-      // Linear feedback is non-fatal: a throw here would re-run failTask +
+      await failTask(taskId, current.status, 'User concurrency limit reached', task.user_id, false, task.repo);
+      await emitTaskEvent(taskId, 'admission_rejected', { reason: 'concurrency_limit' }, correlation);
+      // Channel feedback is non-fatal: a throw here would re-run failTask +
       // emitTaskEvent on the durable-execution retry, producing duplicate events.
       try {
         await notifyLinearOnConcurrencyCap(task);
       } catch (err) {
-        logger.warn('Linear concurrency-cap feedback failed (non-fatal)', {
-          task_id: taskId,
+        log.warn('Linear concurrency-cap feedback failed (non-fatal)', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      try {
+        await notifyJiraOnConcurrencyCap(task);
+      } catch (err) {
+        log.warn('Jira concurrency-cap feedback failed (non-fatal)', {
           error: err instanceof Error ? err.message : String(err),
         });
       }
@@ -111,16 +127,16 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
       );
       if (!result.passed) {
         const errorMessage = `Pre-flight check failed: ${result.failureReason}${result.failureDetail ? ' — ' + result.failureDetail : ''}`;
-        await failTask(taskId, current.status, errorMessage, task.user_id, true);
+        await failTask(taskId, current.status, errorMessage, task.user_id, true, task.repo);
         await emitTaskEvent(taskId, 'preflight_failed', {
           reason: result.failureReason,
           detail: result.failureDetail,
           checks: result.checks,
-        });
+        }, correlation);
       }
       return result.passed;
     } catch (err) {
-      await failTask(taskId, task.status, `Pre-flight failed: ${String(err)}`, task.user_id, true);
+      await failTask(taskId, task.status, `Pre-flight failed: ${String(err)}`, task.user_id, true, task.repo);
       throw err;
     }
   });
@@ -135,7 +151,7 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
       return await hydrateAndTransition(task, blueprintConfig);
     } catch (err) {
       // Hydration may fail due to external cancellation, guardrail blocking, or guardrail API failure — fail the task and release concurrency
-      await failTask(taskId, TaskStatus.HYDRATING, `Hydration failed: ${String(err)}`, task.user_id, true);
+      await failTask(taskId, TaskStatus.HYDRATING, `Hydration failed: ${String(err)}`, task.user_id, true, task.repo);
       throw err;
     }
   });
@@ -167,17 +183,16 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
       await emitTaskEvent(taskId, 'session_started', {
         session_id: handle.sessionId,
         strategy_type: handle.strategyType,
-      });
+      }, correlation);
 
-      logger.info('Session started', {
-        task_id: taskId,
+      log.info('Session started', {
         session_id: handle.sessionId,
         strategy_type: handle.strategyType,
       });
 
       return handle;
     } catch (err) {
-      await failTask(taskId, TaskStatus.HYDRATING, `Session start failed: ${String(err)}`, task.user_id, true);
+      await failTask(taskId, TaskStatus.HYDRATING, `Session start failed: ${String(err)}`, task.user_id, true, task.repo);
       throw err;
     }
   });
@@ -212,11 +227,10 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
           const ecsStatus = await computeStrategy.pollSession(sessionHandle);
           if (ecsStatus.status === 'failed') {
             const errorMsg = 'error' in ecsStatus ? ecsStatus.error : 'ECS task failed';
-            logger.warn('ECS task failed before DDB terminal write', {
-              task_id: taskId,
+            log.warn('ECS task failed before DDB terminal write', {
               error: errorMsg,
             });
-            await failTask(taskId, ddbState.lastStatus, `ECS container failed: ${errorMsg}`, task.user_id, false);
+            await failTask(taskId, ddbState.lastStatus, `ECS container failed: ${errorMsg}`, task.user_id, false, task.repo);
             return { attempts: ddbState.attempts, lastStatus: TaskStatus.FAILED };
           }
           if (ecsStatus.status === 'completed') {
@@ -224,31 +238,27 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
             if (consecutiveEcsCompletedPolls >= MAX_CONSECUTIVE_ECS_COMPLETED_POLLS) {
               // ECS task exited successfully but DDB never reached terminal — the agent
               // likely crashed after container exit code 0 but before writing status.
-              logger.error('ECS task completed but DDB never caught up — failing task', {
-                task_id: taskId,
+              log.error('ECS task completed but DDB never caught up — failing task', {
                 consecutive_completed_polls: consecutiveEcsCompletedPolls,
               });
-              await failTask(taskId, ddbState.lastStatus, `ECS task exited successfully but agent never wrote terminal status after ${consecutiveEcsCompletedPolls} polls`, task.user_id, false);
+              await failTask(taskId, ddbState.lastStatus, `ECS task exited successfully but agent never wrote terminal status after ${consecutiveEcsCompletedPolls} polls`, task.user_id, false, task.repo);
               return { attempts: ddbState.attempts, lastStatus: TaskStatus.FAILED };
             }
-            logger.warn('ECS task completed but DDB not terminal — waiting for DDB catchup', {
-              task_id: taskId,
+            log.warn('ECS task completed but DDB not terminal — waiting for DDB catchup', {
               consecutive_completed_polls: consecutiveEcsCompletedPolls,
             });
           }
         } catch (err) {
           consecutiveEcsPollFailures = (state.consecutiveEcsPollFailures ?? 0) + 1;
           if (consecutiveEcsPollFailures >= MAX_CONSECUTIVE_ECS_POLL_FAILURES) {
-            logger.error('ECS pollSession failed repeatedly — failing task', {
-              task_id: taskId,
+            log.error('ECS pollSession failed repeatedly — failing task', {
               consecutive_failures: consecutiveEcsPollFailures,
               error: err instanceof Error ? err.message : String(err),
             });
-            await failTask(taskId, ddbState.lastStatus, `ECS poll failed ${consecutiveEcsPollFailures} consecutive times: ${err instanceof Error ? err.message : String(err)}`, task.user_id, false);
+            await failTask(taskId, ddbState.lastStatus, `ECS poll failed ${consecutiveEcsPollFailures} consecutive times: ${err instanceof Error ? err.message : String(err)}`, task.user_id, false, task.repo);
             return { attempts: ddbState.attempts, lastStatus: TaskStatus.FAILED };
           }
-          logger.warn('ECS pollSession check failed (non-fatal)', {
-            task_id: taskId,
+          log.warn('ECS pollSession check failed (non-fatal)', {
             consecutive_failures: consecutiveEcsPollFailures,
             error: err instanceof Error ? err.message : String(err),
           });
@@ -277,7 +287,7 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
         }
         const pollSeconds = blueprintConfig.poll_interval_ms
           ? Math.ceil(blueprintConfig.poll_interval_ms / 1000)
-          : 30;
+          : DEFAULT_POLL_INTERVAL_SECONDS;
         return { shouldContinue: true, delay: { seconds: pollSeconds } };
       },
     },
@@ -338,6 +348,49 @@ export async function notifyLinearOnConcurrencyCap(task: TaskRecord): Promise<vo
       task_id: task.task_id,
       linear_workspace_id: linearWorkspaceId,
       issue_id: issueId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/**
+ * Post a Jira issue comment when admission control rejects a task for the
+ * user concurrency cap. Jira-only; silently no-ops for other channels.
+ *
+ * Parity with {@link notifyLinearOnConcurrencyCap}: the webhook processor
+ * covers pre-`createTaskCore` rejections (unmapped project, unlinked actor,
+ * guardrail), while this hook covers the post-201 case where the orchestrator
+ * rejects on admission. Without it, a Jira user who hits the cap sees the
+ * integration silently drop the request (the agent — which would otherwise
+ * comment — never starts).
+ *
+ * Best-effort: `reportIssueFailure` swallows its own errors; we wrap in
+ * try/catch anyway because a transient throw during the registry lookup must
+ * never block the rejection path. Exported for unit testing.
+ */
+export async function notifyJiraOnConcurrencyCap(task: TaskRecord): Promise<void> {
+  if (task.channel_source !== 'jira') return;
+  const cloudId = task.channel_metadata?.jira_cloud_id;
+  const issueKey = task.channel_metadata?.jira_issue_key;
+  if (!cloudId || !issueKey) return;
+  const registryTableName = process.env.JIRA_WORKSPACE_REGISTRY_TABLE_NAME;
+  if (!registryTableName) {
+    logger.warn('Skipping Jira concurrency-cap feedback: JIRA_WORKSPACE_REGISTRY_TABLE_NAME not set', {
+      task_id: task.task_id,
+    });
+    return;
+  }
+  try {
+    await reportJiraIssueFailure(
+      { cloudId, registryTableName },
+      issueKey,
+      '❌ ABCA hit your concurrency limit — too many tasks running for your user. Wait for one to finish, then re-apply the trigger label.',
+    );
+  } catch (err) {
+    logger.warn('Jira concurrency-cap feedback failed (non-fatal)', {
+      task_id: task.task_id,
+      jira_cloud_id: cloudId,
+      issue_key: issueKey,
       error: err instanceof Error ? err.message : String(err),
     });
   }

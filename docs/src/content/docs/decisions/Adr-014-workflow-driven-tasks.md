@@ -4,8 +4,9 @@ title: Adr 014 workflow driven tasks
 
 # ADR-014: Workflow-driven tasks with an agent-side step runner
 
-**Status:** proposed
+**Status:** accepted
 **Date:** 2026-06-04
+**Implementation:** Shipped ([#248](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/248)). The `task_type` enum is removed; `workflow_ref` resolves to a pinned `resolved_workflow` ({id, version}) at the create-task boundary, and the agent runs first-party workflows (`coding/new-task-v1`, `coding/pr-iteration-v1`, `coding/pr-review-v1`, plus repo-less `default/agent-v1` and `knowledge/web-research-v1`) via the agent-side step runner. The Cedar `context.read_only` migration (Phase 2a) and the repo-optional schema freeze are in place (see the 2026-06-08 addenda).
 
 ## Context
 
@@ -26,7 +27,7 @@ Two forces constrain the design:
 
 ## Decision
 
-Introduce **workflows**: versioned, declarative YAML files describing how the agent executes one kind of task (ordered `steps`, system prompt, `agent_config` (tools, MCP servers, skills, plugins, rules/prompt-fragments, Cedar policy — mirroring the #246 registry asset kinds), how repo-discovered config is layered/gated, hydration sources, terminal outcomes, `domain`, `requires_repo`, `read_only`). The three shipped task types become the first three first-party workflows. The full schema and worked examples live in [docs/design/WORKFLOWS.md](/architecture/workflows).
+Introduce **workflows**: versioned, declarative YAML files describing how the agent executes one kind of task (ordered `steps`, system prompt, `agent_config` (tools, MCP servers, skills, plugins, rules/prompt-fragments, Cedar policy — mirroring the #246 registry asset kinds), how repo-discovered config is layered/gated, hydration sources, terminal outcomes, `domain`, `requires_repo`, `read_only`). The three shipped task types become the first three first-party workflows. The full schema and worked examples live in [docs/design/WORKFLOWS.md](/sample-autonomous-cloud-coding-agents/architecture/workflows).
 
 Four sub-decisions:
 
@@ -40,7 +41,7 @@ Four sub-decisions:
 
 ### Why agent-side over orchestrator-side steps
 
-The orchestrator-side `StepRef`/`step_sequence` model is real but unshipped, and pulling per-step workflow logic into durable Lambda steps would (a) be a far larger change to the durable execution path, (b) overlap the separate "Blueprint custom steps" roadmap item, and (c) contradict the issue's "inside the container" framing. Agent-side keeps the blast radius off durable orchestration: the platform's invariants (concurrency, audit, cancellation, timeouts) are untouched, and the workflow only reshapes the agent's own execution — which is exactly the unpredictable part the architecture already isolates in the compute session.
+The orchestrator-side `StepRef`/`step_sequence` model is real but unshipped, and pulling per-step workflow logic into durable Lambda steps would (a) be a far larger change to the durable execution path, (b) overlap the separate "Blueprint custom steps" planned work, and (c) contradict the issue's "inside the container" framing. Agent-side keeps the blast radius off durable orchestration: the platform's invariants (concurrency, audit, cancellation, timeouts) are untouched, and the workflow only reshapes the agent's own execution — which is exactly the unpredictable part the architecture already isolates in the compute session.
 
 ## Consequences
 
@@ -62,7 +63,7 @@ The orchestrator-side `StepRef`/`step_sequence` model is real but unshipped, and
 - (!) **Memory keying.** Long-term memory is keyed on `repo`; repo-less workflows need a fallback actorId (open question in WORKFLOWS.md, to coordinate with MEMORY.md).
 - (!) **Single `run_agent` invariant.** The runner enforces exactly one agentic step for now; lifting that (multi-agent workflows) is deliberately deferred to #99.
 - (!) **Cedar principal migration is security-load-bearing.** Read-only enforcement moves from a literal `"pr_review"` match to a `context.read_only`-driven rule so it applies to all read-only workflows; this must be done precisely and is gated by the existing Cedar parity fixtures. Because an error here *silently weakens* enforcement (the rule stops matching) rather than failing loudly, the policy rewrite + regenerated parity fixtures must be reviewed with that property front-of-mind. The schema enforces a policy floor (soft-deny mandatory for writeable workflows) so a workflow file cannot weaken the HITL posture by config. **(Superseded — see Addendum 2026-06-08 on Phase 2a sequencing.)**
-- (!) **Resume-aware steps, not orchestrator-durable steps.** The runner checkpoints step completion to persistent session storage (`/mnt/workspace`, survives stop/resume) and resumes the agent loop via the persisted SDK session UUID — so a stop/resume skips completed steps rather than replaying from turn 0. This is agent-side recovery; the orchestrator still treats the session as one `await-agent-completion` step (invariants stay agent-external). Worker-portable resume depends on the roadmap **S3-backed SDK session store**; until then a total worker loss falls back to a from-step-0 re-run, mitigated by mandatory step idempotency. `on_failure: continue` after side effects is forbidden; per-step compensation/rollback is a non-goal.
+- (!) **Resume-aware steps, not orchestrator-durable steps.** The runner checkpoints step completion to persistent session storage (`/mnt/workspace`, survives stop/resume) and resumes the agent loop via the persisted SDK session UUID — so a stop/resume skips completed steps rather than replaying from turn 0. This is agent-side recovery; the orchestrator still treats the session as one `await-agent-completion` step (invariants stay agent-external). Worker-portable resume depends on the planned **S3-backed SDK session store** (tracked as a GitHub issue); until then a total worker loss falls back to a from-step-0 re-run, mitigated by mandatory step idempotency. `on_failure: continue` after side effects is forbidden; per-step compensation/rollback is a non-goal.
 - (!) **Promotion gate bootstrapping.** A behavioral eval per workflow depends on #236; until it lands, the gate is a concrete test target and (when omitted) a reviewed manual step. "Earned, not set" arrives in stages, weakest for the phases that ship first.
 - (!) **Repo-optionality is a wider refactor than Phase 3's one-liner implies** — `repo` is required across ~6 TS interfaces + the agent config validator, and memory keying, SessionRole tenant tags, and artifact delivery all assume a repo. The `requires_repo:false` promise in the Phase-0 schema is a **forward-declaration, not a runnable path**: the `web_research` example is a schema-expressiveness fixture, not yet an executable acceptance test. The two blocking open questions (memory actorId, artifact delivery contract) **must be resolved as recorded decisions — a short ADR addendum — before the Phase-0 schema is frozen**, since either may add or reshape a schema field (e.g. `actor_namespace`, the `deliver_artifact` target contract) and deferring them past freeze risks a breaking schema revision.
 - (!) **Governance.** Publishing/promoting a `production` workflow is a trust decision and follows ADR-003; registry-era publish ACLs are Cedar-governed per #246 Phase 3.
@@ -81,7 +82,7 @@ What does **not** change: read-only is still enforced by *both* `allowed_tools` 
 
 ## Addendum (2026-06-08): repo-optional open questions resolved — schema freeze
 
-[WORKFLOWS.md](/architecture/workflows) open questions #1 (memory actorId for repo-less tasks) and #2 (artifact-delivery contract) were flagged as **blocking Phase 3 and requiring resolution before the Phase-0 schema is frozen**, because either might add or reshape a schema field. Both are now decided. The schema field reshape implied by #2 is applied in the same change as this addendum, so the schema can be treated as frozen.
+[WORKFLOWS.md](/sample-autonomous-cloud-coding-agents/architecture/workflows) open questions #1 (memory actorId for repo-less tasks) and #2 (artifact-delivery contract) were flagged as **blocking Phase 3 and requiring resolution before the Phase-0 schema is frozen**, because either might add or reshape a schema field. Both are now decided. The schema field reshape implied by #2 is applied in the same change as this addendum, so the schema can be treated as frozen.
 
 **Decision 1 — Memory actorId for repo-less tasks: per-user (`user:{id}`).** A repo-less task uses `actorId = user:{cognito_sub}` (the platform user id already threaded as `TaskConfig.user_id`), not the `repo` used by coding tasks (`memory.py`). Rationale: it is caller-scoped (no cross-tenant knowledge bleed — the same isolation property the per-user trace prefix already relies on), and it matches the platform's existing user-scoping pattern. Cross-*workflow* knowledge pooling (e.g. "all `web_research` tasks share learnings") is explicitly **not** adopted now — it mixes tenants in one namespace and is a larger privacy decision deferrable to the registry phase.
   - **Schema impact: none.** This is a fixed platform fallback, not author-configurable, so it adds **no** `actor_namespace` selector to the workflow schema. (The earlier note that it "may introduce an `actor_namespace` selector" is resolved in the negative — keeping the schema smaller.) It is a Phase-3 `memory.py` change: when `repo` is absent, key on `user:{user_id}`; coding tasks are unchanged.
@@ -100,10 +101,10 @@ With both resolved and the one schema reshape applied, the Phase-0 schema is **f
 - Issue [#245](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/245) — attribution on resolved capability
 - Issue [#236](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/236) — E2E verification (parity coverage)
 - Issue [#99](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/99) — AKW integration (broader vision; out-of-scope items defer here)
-- [docs/design/WORKFLOWS.md](/architecture/workflows) — the workflow schema, step catalog, and step-runner design
-- [docs/design/ORCHESTRATOR.md](/architecture/orchestrator) — durable lifecycle and extension points
-- [docs/design/REPO_ONBOARDING.md](/architecture/repo-onboarding) — the Blueprint construct and `step_sequence` model
-- [docs/design/CEDAR_HITL_GATES.md](/architecture/cedar-hitl-gates) — policy engine the `agent_config` feeds
+- [docs/design/WORKFLOWS.md](/sample-autonomous-cloud-coding-agents/architecture/workflows) — the workflow schema, step catalog, and step-runner design
+- [docs/design/ORCHESTRATOR.md](/sample-autonomous-cloud-coding-agents/architecture/orchestrator) — durable lifecycle and extension points
+- [docs/design/REPO_ONBOARDING.md](/sample-autonomous-cloud-coding-agents/architecture/repo-onboarding) — the Blueprint construct and `step_sequence` model
+- [docs/design/CEDAR_HITL_GATES.md](/sample-autonomous-cloud-coding-agents/architecture/cedar-hitl-gates) — policy engine the `agent_config` feeds
 - Prior art: `origin/merge/akw-integration` (commit `9d066a8`) — AKW YAML registry and models (reconciled, scoped down)
-- [ADR-013](/architecture/adr-013-tiered-validation-pyramid) — the validation pyramid the `promotion_gate` layers onto
-- [ADR-005](/architecture/adr-005-feedback-loop) — the feedback loop that workflow trajectory-evolution would extend (future, out of scope)
+- [ADR-013](/sample-autonomous-cloud-coding-agents/architecture/adr-013-tiered-validation-pyramid) — the validation pyramid the `promotion_gate` layers onto
+- [ADR-005](/sample-autonomous-cloud-coding-agents/architecture/adr-005-feedback-loop) — the feedback loop that workflow trajectory-evolution would extend (future, out of scope)

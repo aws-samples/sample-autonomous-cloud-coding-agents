@@ -24,6 +24,7 @@ import os
 import re
 import time
 from collections.abc import Callable
+from datetime import UTC
 from typing import TYPE_CHECKING, Any
 
 import nudge_reader
@@ -53,6 +54,7 @@ POLL_SLOW_INTERVAL_S: float = 5.0
 POLL_DEGRADED_FAILS: int = 3  # emit approval_poll_degraded at this count (§13.2)
 POLL_MAX_CONSECUTIVE_FAILS: int = 10  # treat as TIMED_OUT at this count (§13.2)
 TOOL_INPUT_PREVIEW_MAX: int = 256  # §6.5: strip-ANSI, truncate
+ELLIPSIS_LEN: int = 3  # chars reserved for the "..." truncation marker
 
 # ANSI CSI / OSC escape sequence stripper for ``tool_input_preview`` +
 # ``permissionDecisionReason`` fields (§12.7). Re-derives the pattern from
@@ -66,15 +68,19 @@ def _strip_ansi(text: str) -> str:
     return _ANSI_ESCAPE_RE.sub("", text)
 
 
-def _truncate(text: str, max_len: int) -> str:
+def _truncate(text: str | None, max_len: int) -> str:
     """Truncate ``text`` to ``max_len`` chars with an ellipsis marker."""
     if text is None:
         return ""
     if len(text) <= max_len:
         return text
     # Reserve 3 chars for the ellipsis so the returned string never
-    # exceeds ``max_len``.
-    return text[: max_len - 3] + "..."
+    # exceeds ``max_len``. For very small ``max_len`` (<= 3) there is no
+    # room for the ellipsis and ``max_len - 3`` would slice negatively
+    # (dropping characters off the END), so fall back to a plain prefix.
+    if max_len <= ELLIPSIS_LEN:
+        return text[:max_len]
+    return text[: max_len - ELLIPSIS_LEN] + "..."
 
 
 def _tool_input_preview(tool_input: Any, max_len: int = TOOL_INPUT_PREVIEW_MAX) -> str:
@@ -91,6 +97,102 @@ def _tool_input_preview(tool_input: Any, max_len: int = TOOL_INPUT_PREVIEW_MAX) 
     except (TypeError, ValueError):
         rendered = str(tool_input)
     return _truncate(_strip_ansi(rendered), max_len)
+
+
+# ---------------------------------------------------------------------------
+# Egress-denial detection (#251, Phase 1)
+# ---------------------------------------------------------------------------
+#
+# Best-effort, heuristic scan of a tool's output for the signatures a blocked
+# outbound connection leaves behind — a non-allowlisted host hitting the DNS
+# Firewall, a refused connection, or a name-resolution failure. When one
+# matches we emit an ``egress_denied`` blocker naming the host to allowlist.
+# This is intentionally a string-signature scan (not a network probe): the
+# model's Bash tool calls (``npm install``, ``git clone``, ``curl``) surface
+# their stderr here, and those tools use stable, well-known phrasings. Patterns
+# that capture a host use a named ``host`` group; detection-only patterns omit
+# it (host stays None → the event still fires, just without ``resource``).
+_EGRESS_DENIAL_PATTERNS: tuple[re.Pattern[str], ...] = (
+    # curl / libcurl, git-over-https
+    re.compile(r"[Cc]ould not resolve host:?\s+(?P<host>[A-Za-z0-9._-]+)"),
+    re.compile(r"[Ff]ailed to connect to\s+(?P<host>[A-Za-z0-9._-]+)"),
+    # Node (npm/yarn), python (requests/urllib), getaddrinfo
+    re.compile(r"getaddrinfo (?:ENOTFOUND|EAI_AGAIN)\s+(?P<host>[A-Za-z0-9._-]+)"),
+    # requests/urllib3: the real host appears in ``HTTPSConnectionPool(host='x')``
+    # or after ``Failed to resolve 'x'``. Match those anchors specifically —
+    # a bare ``NameResolutionError.*?<fqdn>`` lazy-match would instead capture
+    # the ``urllib3.connection.HTTPSConnection`` class path that precedes the host.
+    re.compile(r"HTTPS?ConnectionPool\(host='(?P<host>[A-Za-z0-9._-]+)'"),
+    re.compile(r"Failed to resolve '(?P<host>[A-Za-z0-9._-]+)'"),
+    re.compile(
+        r"nodename nor servname provided|Temporary failure in name resolution"
+        r"|Name or service not known|Connection refused|Network is unreachable"
+        r"|NameResolutionError|Failed to establish a new connection",
+    ),
+)
+
+
+# #251 carry-path: the most recent agent-detected blocker, as a canonical
+# ``BLOCKED[<kind>]: …`` reason string (see ``format_blocker_reason``). Blockers
+# are detected mid-turn in the hooks (egress in PostToolUse, fail-closed in
+# PreToolUse) but the terminal ``error_message`` is assembled later in the
+# pipeline. This latch bridges the two: the pipeline promotes it into
+# ``TaskResult.error`` ONLY when the task errored without a more specific
+# reason, so the CDK classifier surfaces a precise remedy. Process-lifetime
+# (== one task) like ``_INJECTED_NUDGES``; last-writer-wins is fine — the most
+# recent blocker is the most relevant to a terminal failure.
+_LAST_BLOCKER_REASON: str | None = None
+
+
+def _record_blocker_reason(kind: str, detail: str, resource: str | None = None) -> None:
+    """Latch the canonical reason for the most recent agent-detected blocker."""
+    global _LAST_BLOCKER_REASON
+    from progress_writer import format_blocker_reason
+
+    _LAST_BLOCKER_REASON = format_blocker_reason(kind, detail, resource)
+
+
+def last_blocker_reason() -> str | None:
+    """Return the latched canonical blocker reason for terminal promotion (#251)."""
+    return _LAST_BLOCKER_REASON
+
+
+def reset_blocker_reason() -> None:
+    """Clear the in-process blocker latch.
+
+    Called at the start of each ``run_task`` (the latch is a process-scalar,
+    not task_id-keyed, so it must be reset per task to avoid leaking a prior
+    task's blocker) and by test fixtures for isolation.
+    """
+    global _LAST_BLOCKER_REASON
+    _LAST_BLOCKER_REASON = None
+
+
+# Back-compat alias for test fixtures that import the old name.
+_reset_blocker_reason_for_tests = reset_blocker_reason
+
+
+def detect_egress_denial(text: str) -> tuple[bool, str | None]:
+    """Scan tool output for an egress-denial signature (#251).
+
+    Returns ``(detected, host_or_None)``: ``(True, host)`` on the first matching
+    signature (``host`` populated when a pattern captured one so the emitted
+    ``egress_denied`` event can name the exact domain to allowlist; ``None`` for
+    detection-only signatures), or ``(False, None)`` when nothing matches.
+
+    Best-effort and deliberately conservative: it only fires on the
+    well-known phrasings the common CLIs (curl/git/npm/pip) emit, so a task
+    log that merely *mentions* "connection refused" in prose could produce a
+    false positive — acceptable for an observability signal that never blocks.
+    """
+    if not text:
+        return False, None
+    for pattern in _EGRESS_DENIAL_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            host = match.groupdict().get("host") if match.groupdict() else None
+            return True, host
+    return False, None
 
 
 def _deny_response(reason: str) -> dict:
@@ -168,6 +270,17 @@ async def pre_tool_use_hook(
             log("WARN", f"PreToolUse hook failed to parse tool_input — denying {tool_name}")
             return _deny_response("unparseable tool input")
 
+    # Fail-closed contract: every downstream consumer (Cedar evaluation,
+    # the approval-row builder, the SHA-256 cache key) assumes ``tool_input``
+    # is a JSON object. A bare list/scalar (e.g. ``"[1,2]"`` or ``"\"foo\""``
+    # decoded by the branch above, or a non-dict passed in directly) would
+    # otherwise raise an AttributeError deep in the engine and rely on the
+    # SDK-boundary wrapper to catch it. Make the rejection explicit here so
+    # the deny reason names the malformed input rather than a stack trace.
+    if not isinstance(tool_input, dict):
+        log("WARN", f"PreToolUse hook received non-dict tool_input — denying {tool_name}")
+        return _deny_response("tool input is not an object")
+
     decision = engine.evaluate_tool_use(tool_name, tool_input)
 
     # Telemetry: ALLOW "permitted" is the quiet happy path; everything else
@@ -197,6 +310,30 @@ async def pre_tool_use_hook(
                 "write_policy_decision_cached",
                 **decision.cache_hit_metadata,
             )
+        # #251 (decision E): a fail-closed deny means the Cedar engine errored
+        # or was unavailable — an ENVIRONMENTAL fault (misconfiguration), NOT
+        # an intentional hard-deny. Emit a ``policy_fail_closed`` blocker event
+        # so it renders distinctly and carries a remediation hint. We branch on
+        # the structured ``decision.fail_closed`` flag, never a reason-string
+        # prefix. Intentional hard-denies / cache-denies (fail_closed=False)
+        # never emit. Emitted strictly BEFORE the deny; the deny itself is
+        # unchanged, so this adds observability without altering the outcome.
+        if getattr(decision, "fail_closed", False):
+            _record_blocker_reason("policy_fail_closed", decision.reason)
+            if progress is not None:
+                _try_progress(
+                    progress,
+                    "write_agent_blocked",
+                    kind="policy_fail_closed",
+                    detail=decision.reason,
+                    remediation_hint=(
+                        "The Cedar policy engine errored or was unavailable "
+                        "(fail-closed). Check the agent policy-engine logs and the "
+                        "policy bundle; this is a misconfiguration, not an "
+                        "intentional deny."
+                    ),
+                    retryable=False,
+                )
         log("POLICY", f"DENIED: {tool_name} — {decision.reason}")
         return _deny_response(decision.reason)
 
@@ -805,7 +942,12 @@ def _remaining_maxlifetime_s() -> int | None:
         else:
             from datetime import datetime
 
-            started_epoch = int(datetime.strptime(started_at, "%Y-%m-%dT%H:%M:%SZ").timestamp())
+            # The trailing Z means UTC; strptime returns a naive datetime whose
+            # .timestamp() would otherwise be interpreted in the container's
+            # local TZ, skewing remaining-lifetime math by the UTC offset.
+            started_epoch = int(
+                datetime.strptime(started_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC).timestamp()
+            )
     except (ValueError, AttributeError):
         return None
     elapsed = int(time.time()) - started_epoch
@@ -896,6 +1038,7 @@ async def post_tool_use_hook(
     hook_context: Any,
     *,
     trajectory: _TrajectoryWriter | None = None,
+    progress: Any = None,
 ) -> dict:
     """PostToolUse hook: screen tool output for secrets/PII.
 
@@ -903,6 +1046,11 @@ async def post_tool_use_hook(
     detected the response includes ``updatedMCPToolOutput`` containing the
     redacted version (steered enforcement — content is sanitized, not
     blocked).
+
+    ``progress`` is optional (preserves the Phase 1 test call shape). When
+    present, an egress-denial signature in the tool output emits an
+    ``egress_denied`` blocker event (#251) — best-effort observability,
+    never alters the screening decision.
     """
     _PASS_THROUGH: dict = {"hookSpecificOutput": {"hookEventName": "PostToolUse"}}
     _FAIL_CLOSED: dict = {
@@ -927,6 +1075,43 @@ async def post_tool_use_hook(
     # Normalise non-string responses
     if not isinstance(tool_response, str):
         tool_response = str(tool_response)
+
+    # #251: best-effort egress-denial detection. A blocked outbound connection
+    # (non-allowlisted host hitting the DNS Firewall, refused connection, name
+    # resolution failure) surfaces in the tool's stderr here. Emit an
+    # ``egress_denied`` blocker naming the host to allowlist. Observability
+    # only — never changes the pass-through / redaction decision below.
+    egress_detected, host = detect_egress_denial(tool_response)
+    if egress_detected:
+        detail = (
+            f"A connection to {host!r} was blocked"
+            if host
+            else "An outbound connection was blocked"
+        ) + f" during {tool_name}."
+        # Latch for terminal promotion ONLY when a host was captured. The latch
+        # feeds the authoritative TaskResult.error carry-path, so a host-less,
+        # detection-only signature ("Connection refused" / "Network is
+        # unreachable") — which commonly fires for an internal localhost race,
+        # not an egress denial — must not masquerade as the terminal cause. The
+        # observability event below still fires unconditionally (it never blocks
+        # and is clearly a heuristic signal in the live stream).
+        if host:
+            _record_blocker_reason("egress_denied", detail, host)
+        if progress is not None:
+            _try_progress(
+                progress,
+                "write_agent_blocked",
+                kind="egress_denied",
+                detail=detail,
+                remediation_hint=(
+                    f"Allowlist {host!r} in the DNS Firewall rule group"
+                    if host
+                    else "Allowlist the required host in the DNS Firewall rule group"
+                )
+                + " if it is a legitimate dependency. The agent never widens egress itself.",
+                retryable=False,
+                resource=host,
+            )
 
     try:
         result = scan_tool_output(tool_response)
@@ -971,6 +1156,11 @@ BetweenTurnsHook = Callable[[dict], list[str]]
 # exhausted.  Lives for the duration of the process (== task) so it doesn't
 # leak across tasks in the same runtime.
 _INJECTED_NUDGES: dict[str, set[str]] = {}
+
+# Preview length for the first nudge message in the milestone details
+# string.  Kept short so the whole details line stays under ~120 chars
+# (single terminal line in ``bgagent watch``).
+_NUDGE_PREVIEW_LEN = 60
 
 
 def _reset_injected_nudges_for_tests() -> None:
@@ -1043,7 +1233,7 @@ def _nudge_between_turns_hook(ctx: dict) -> list[str]:
         return []
 
     # Belt-and-braces second guard against the "cancel consumes nudges" hazard
-    # (krokoko PR #52 review finding #3).  The primary guard is the loop-level
+    # Cancel-before-nudge short-circuit.  The primary guard is the loop-level
     # break in :func:`stop_hook` which short-circuits the dispatcher as soon as
     # any earlier hook sets ``_cancel_requested``.  That assumes
     # ``_cancel_between_turns_hook`` runs BEFORE this hook — true for the
@@ -1061,6 +1251,7 @@ def _nudge_between_turns_hook(ctx: dict) -> list[str]:
         pending = nudge_reader.read_pending(task_id)
     except Exception as exc:
         log("WARN", f"nudge read_pending raised: {type(exc).__name__}: {exc}")
+        # nosemgrep: py-silent-success-masking -- fail-open hook; DDB blip must not block agent
         return []
 
     # Filter out any nudges already injected in this process (regardless of
@@ -1075,6 +1266,7 @@ def _nudge_between_turns_hook(ctx: dict) -> list[str]:
         formatted = nudge_reader.format_as_user_message(pending)
     except Exception as exc:
         log("WARN", f"nudge format failed: {type(exc).__name__}: {exc}")
+        # nosemgrep: py-silent-success-masking -- fail-open hook; bad nudge must not block agent
         return []
 
     # Record injection BEFORE mark_consumed so a persistent mark_consumed
@@ -1098,10 +1290,10 @@ def _nudge_between_turns_hook(ctx: dict) -> list[str]:
     # Short details string for the stream — preview the first nudge, total
     # count, and the nudge IDs for traceability.  Kept under ~120 chars so
     # it fits on a single terminal line.
-    first_msg = (pending[0].get("message") or "")[:60]
+    first_msg = (pending[0].get("message") or "")[:_NUDGE_PREVIEW_LEN]
     ids = ",".join(str(n.get("nudge_id", ""))[-8:] for n in pending)
     details = f"{count} nudge(s) acknowledged (ids=…{ids}): {first_msg}" + (
-        "…" if count > 1 or len(first_msg) == 60 else ""
+        "…" if count > 1 or len(first_msg) == _NUDGE_PREVIEW_LEN else ""
     )
     # AD-5: emit the ack BEFORE returning the injection list.
     _emit_nudge_milestone(ctx, "nudge_acknowledged", details)
@@ -1136,6 +1328,7 @@ def _denial_between_turns_hook(ctx: dict) -> list[str]:
         pending = engine.drain_denial_injections()
     except Exception as exc:  # pragma: no cover — defensive
         log("WARN", f"denial drain raised: {type(exc).__name__}: {exc}")
+        # nosemgrep: py-silent-success-masking -- fail-open hook; denial injection is best-effort
         return []
     if not pending:
         return []
@@ -1190,6 +1383,7 @@ def _cancel_between_turns_hook(ctx: dict) -> list[str]:
         record = task_state.get_task(task_id)
     except task_state.TaskFetchError as exc:
         log("WARN", f"cancel hook get_task raised: {type(exc).__name__}: {exc}")
+        # nosemgrep: py-silent-success-masking -- fail-open cancel; DDB blip delays one turn
         return []
     if record and record.get("status") == "CANCELLED":
         ctx["_cancel_requested"] = True
@@ -1204,7 +1398,7 @@ def _cancel_between_turns_hook(ctx: dict) -> list[str]:
 # Global list of between-turns hooks.  Cancel MUST run first so it can
 # short-circuit nudges on cancelled tasks (no point injecting nudges into a
 # dying agent — worse, the nudge reader mutates DDB state that the agent will
-# never act on; see krokoko PR #52 review finding #3).  The :func:`stop_hook`
+# never act on).  The :func:`stop_hook`
 # dispatcher breaks out of the loop as soon as ``_cancel_requested`` is set,
 # and :func:`_nudge_between_turns_hook` early-returns when the flag is already
 # present — belt-and-braces in case a future ``append`` reorders this list.
@@ -1253,7 +1447,7 @@ async def stop_hook(
         "engine": engine,
     }
 
-    # Cancel-before-nudge short-circuit (krokoko PR #52 review finding #3).
+    # Cancel-before-nudge short-circuit.
     # Previously the loop ran ALL hooks before checking ``_cancel_requested``,
     # which meant the nudge hook's ``read_pending`` + ``mark_consumed`` path
     # executed even on cancelled tasks — flipping the DDB rows to consumed
@@ -1373,7 +1567,9 @@ def build_hook_matchers(
         hook_input: HookInput, tool_use_id: str | None, ctx: HookContext
     ) -> HookJSONOutput:
         try:
-            result = await post_tool_use_hook(hook_input, tool_use_id, ctx, trajectory=trajectory)
+            result = await post_tool_use_hook(
+                hook_input, tool_use_id, ctx, trajectory=trajectory, progress=progress
+            )
             return SyncHookJSONOutput(**result)
         except Exception as exc:
             log("ERROR", f"PostToolUse wrapper crashed: {type(exc).__name__}: {exc}")

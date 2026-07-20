@@ -1,0 +1,67 @@
+name: monthly-repo-metrics
+# Files two issues on the 1st of each month with github/issue-metrics reports
+# (time-to-first-response, time-to-close, …) over last month's issues and PRs.
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: 0 2 1 * *
+permissions:
+  actions: none
+  attestations: none
+  checks: none
+  contents: none
+  deployments: none
+  discussions: none
+  id-token: none
+  issues: none
+  models: none
+  packages: none
+  pages: none
+  pull-requests: none
+  repository-projects: none
+  security-events: none
+  statuses: none
+jobs:
+  build:
+    name: metrics
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      pull-requests: read
+    if: github.repository == 'aws-samples/sample-autonomous-cloud-coding-agents'
+    steps:
+      - name: Get dates for last month
+        run: |-
+          # Calculate the first day of the previous month
+          first_day=$(date -d "last month" +%Y-%m-01)
+          # Calculate the last day of the previous month
+          last_day=$(date -d "$first_day +1 month -1 day" +%Y-%m-%d)
+          # Set an environment variable with the date range
+          echo "$first_day..$last_day"
+          echo "last_month=$first_day..$last_day" >> "$GITHUB_ENV"
+
+      - name: Report on issues
+        uses: github/issue-metrics@44173f9e0a3b2144a777a10a340e4c09a25ac9f8 # v4.2.8
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SEARCH_QUERY: repo:aws-samples/sample-autonomous-cloud-coding-agents is:issue created:${{ env.last_month }} -reason:"not planned"
+
+      - name: Create report for issues
+        uses: peter-evans/create-issue-from-file@fca9117c27cdc29c6c4db3b86c48e4115a786710 # v6.0.0
+        with:
+          title: Monthly issue metrics report
+          token: ${{ secrets.GITHUB_TOKEN }}
+          content-filepath: ./issue_metrics.md
+
+      - name: Report on PRs
+        uses: github/issue-metrics@44173f9e0a3b2144a777a10a340e4c09a25ac9f8 # v4.2.8
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SEARCH_QUERY: repo:aws-samples/sample-autonomous-cloud-coding-agents is:pr created:${{ env.last_month }} -is:draft
+
+      - name: Create report for PRs
+        uses: peter-evans/create-issue-from-file@fca9117c27cdc29c6c4db3b86c48e4115a786710 # v6.0.0
+        with:
+          title: Monthly PR metrics report
+          token: ${{ secrets.GITHUB_TOKEN }}
+          content-filepath: ./issue_metrics.md

@@ -193,6 +193,10 @@ describe('ApprovalMetricsPublisherConsumer', () => {
   test('creates a CloudWatch alarm on DLQ ApproximateNumberOfMessagesVisible (#117)', () => {
     const { template } = createStack();
 
+    // Exactly one alarm — guards against a future change accidentally
+    // duplicating the DLQ-depth alarm (the failure mode seen when this
+    // construct's near-identical FanOutConsumer twin merged with main).
+    template.resourceCountIs('AWS::CloudWatch::Alarm', 1);
     template.hasResourceProperties('AWS::CloudWatch::Alarm', {
       MetricName: 'ApproximateNumberOfMessagesVisible',
       Namespace: 'AWS/SQS',
@@ -202,6 +206,17 @@ describe('ApprovalMetricsPublisherConsumer', () => {
       TreatMissingData: 'notBreaching',
       Statistic: 'Maximum',
       Period: 300,
+      // The alarm must watch THIS construct's DLQ, not some other queue.
+      Dimensions: Match.arrayWith([
+        Match.objectLike({
+          Name: 'QueueName',
+          Value: Match.objectLike({
+            'Fn::GetAtt': Match.arrayWith([
+              Match.stringLikeRegexp('ApprovalMetricsPublisherDlq'),
+            ]),
+          }),
+        }),
+      ]),
     });
   });
 });

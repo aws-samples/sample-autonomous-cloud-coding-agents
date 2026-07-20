@@ -4,11 +4,18 @@ from __future__ import annotations
 
 from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from sanitization import sanitize_external_content
 
 
 class IssueComment(BaseModel):
-    """Single GitHub issue comment — mirrors ``IssueComment`` in context-hydration.ts."""
+    """Single GitHub issue comment — mirrors ``IssueComment`` in context-hydration.ts.
+
+    ``author`` and ``body`` are sanitized by a field validator at construction,
+    so EVERY instance — whatever code path built it — is safe by the time it
+    exists. Consumers must not sanitize again.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -16,9 +23,26 @@ class IssueComment(BaseModel):
     author: str
     body: str
 
+    @field_validator("author", "body", mode="after")
+    @classmethod
+    def _sanitize(cls, v: str) -> str:
+        # Enforced here, not at the fetch site, so a future second fetcher
+        # (or deserialization from a cache) cannot construct an instance
+        # carrying raw attacker-controllable GitHub content. Idempotent:
+        # re-validating already-sanitized text is a no-op.
+        return sanitize_external_content(v)
+
 
 class GitHubIssue(BaseModel):
-    """GitHub issue slice — mirrors ``GitHubIssueContext`` in context-hydration.ts."""
+    """GitHub issue slice — mirrors ``GitHubIssueContext`` in context-hydration.ts.
+
+    Externally-sourced fields (``title``, ``body``, and each comment's
+    ``author``/``body`` via :class:`IssueComment`) are sanitized by field
+    validators at construction: every construction path — ``fetch_github_issue``,
+    tests, any future fetcher or cache load — yields a sanitized instance.
+    Consumers (e.g. ``assemble_prompt``) must not sanitize again and only
+    apply presentation (untrusted-content delimiters).
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -26,6 +50,12 @@ class GitHubIssue(BaseModel):
     body: str = ""
     number: int
     comments: list[IssueComment] = Field(default_factory=list)
+
+    @field_validator("title", "body", mode="after")
+    @classmethod
+    def _sanitize(cls, v: str) -> str:
+        # See IssueComment._sanitize — same structural-enforcement rationale.
+        return sanitize_external_content(v)
 
 
 class MemoryContext(BaseModel):
@@ -46,6 +76,9 @@ SUPPORTED_HYDRATED_CONTEXT_VERSION = 1
 
 # Attachment types — mirrors AttachmentType in cdk/src/handlers/shared/types.ts.
 AttachmentType = Literal["image", "file", "url"]
+
+# A SHA-256 digest rendered as lowercase hex is always 64 characters.
+SHA256_HEX_LEN = 64
 
 
 class AttachmentConfig(BaseModel):
@@ -71,7 +104,7 @@ class AttachmentConfig(BaseModel):
         if not self.checksum_sha256:
             raise ValueError("checksum_sha256 is required for integrity verification")
         # checksum must be lowercase hex (SHA-256 = 64 hex chars)
-        if len(self.checksum_sha256) != 64 or not all(
+        if len(self.checksum_sha256) != SHA256_HEX_LEN or not all(
             c in "0123456789abcdef" for c in self.checksum_sha256
         ):
             raise ValueError("checksum_sha256 must be a 64-character lowercase hex string")
@@ -121,6 +154,11 @@ class TaskConfig(BaseModel):
     github_token: str = ""
     aws_region: str
     anthropic_model: str = "us.anthropic.claude-sonnet-4-6"
+    # The "small/fast" model Claude Code uses for auxiliary work (e.g. WebFetch
+    # page summarization). Must be a cross-region INFERENCE-PROFILE id (``us.``
+    # prefix), not a bare foundation-model id — Claude 4.x cannot be invoked
+    # on-demand by bare id on Bedrock. Threaded to ANTHROPIC_DEFAULT_HAIKU_MODEL.
+    haiku_model: str = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
     dry_run: bool = False
     max_turns: int = 10
     max_budget_usd: float | None = None
@@ -162,8 +200,9 @@ class TaskConfig(BaseModel):
     pr_number: str = ""
     task_id: str = ""
     # Inbound channel the task was submitted from (mirrors ChannelSource in
-    # cdk/src/handlers/shared/types.ts). Gates channel-specific MCP wiring and
-    # prompt additions. Empty string means "no channel context" (legacy / local).
+    # cdk/src/handlers/shared/types.ts: api | webhook | slack | linear | jira).
+    # Gates channel-specific MCP wiring and prompt additions. Empty string means
+    # "no channel context" (legacy / local).
     channel_source: str = ""
     channel_metadata: dict[str, str] = Field(default_factory=dict)
     # Platform user_id (Cognito ``sub``) threaded from the orchestrator
@@ -292,8 +331,13 @@ class TaskResult(BaseModel):
     status: str
     agent_status: str = "unknown"
     pr_url: str | None = None
-    build_passed: bool = False
-    lint_passed: bool = False
+    # Tri-state (#515): True/False once the post-run gate runs; None when it did
+    # not (repo-less workflow has no build/lint; a crash before post-hooks). The
+    # None case is persisted as "absent" by write_terminal's `is not None` guard,
+    # so the replay bundle reports verification:null rather than a fictional
+    # build_passed:false for a gate that never executed.
+    build_passed: bool | None = None
+    lint_passed: bool | None = None
     cost_usd: float | None = None
     # Rev-5 DATA-1: historically the `turns` field was set to the SDK's
     # `ResultMessage.num_turns`, which INCLUDES the attempted turn that
@@ -331,3 +375,7 @@ class TaskResult(BaseModel):
     # Phase 3), or ``None`` for coding tasks / when no artifact was delivered.
     # Surfaced on TaskDetail so the user can retrieve the knowledge-task output.
     artifact_uri: str | None = None
+    # OTEL trace id (32-char hex) of the task's root span, captured at terminal
+    # write so the replay bundle (#515) can correlate the task to its
+    # CloudWatch/X-Ray trace. ``None`` when tracing is unavailable (local/dev).
+    otel_trace_id: str | None = None

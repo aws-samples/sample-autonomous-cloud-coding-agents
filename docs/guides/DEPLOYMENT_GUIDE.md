@@ -1,6 +1,6 @@
 # Deployment guide
 
-This guide covers deploying ABCA into an AWS account, including compute backend choices, scale-to-zero characteristics, and the complete AWS service inventory. For day-to-day development workflow, see the [Developer guide](./DEVELOPER_GUIDE.md). For a quick first deployment, see the [Quick start](./QUICK_START.md). For least-privilege IAM deployment roles, see [DEPLOYMENT_ROLES.md](../design/DEPLOYMENT_ROLES.md).
+This guide covers deploying ABCA into an AWS account, including compute backend choices, scale-to-zero characteristics, and the complete AWS service inventory. For day-to-day development workflow, see the [Developer guide](./DEVELOPER_GUIDE.md). For a quick first deployment, see the [Quick start](./QUICK_START.mdx). For least-privilege IAM deployment roles, see [DEPLOYMENT_ROLES.md](../design/DEPLOYMENT_ROLES.md).
 
 ## Architecture overview
 
@@ -224,9 +224,10 @@ For users without AWS CLI access.
 
 ## Related docs
 
-- [Quick start](./QUICK_START.md) -- Zero-to-first-PR in 6 steps.
+- [Quick start](./QUICK_START.mdx) -- Zero-to-first-PR in 6 steps.
 - [Developer guide](./DEVELOPER_GUIDE.md) -- Local development, testing, repository onboarding.
 - [User guide](./USER_GUIDE.md) -- API reference, CLI usage, task management.
 - [DEPLOYMENT_ROLES.md](../design/DEPLOYMENT_ROLES.md) -- Least-privilege IAM policies for CloudFormation execution.
 - [COST_MODEL.md](../design/COST_MODEL.md) -- Per-task costs, cost guardrails, cost at scale.
+- [COST_ATTRIBUTION.md](./COST_ATTRIBUTION.md) -- Operator FinOps setup for per-user/per-repo Bedrock chargeback (Cost Explorer / CUR 2.0, invocation-log forensics).
 - [COMPUTE.md](../design/COMPUTE.md) -- Compute backend architecture and trade-offs.

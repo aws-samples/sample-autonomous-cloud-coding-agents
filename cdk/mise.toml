@@ -58,6 +58,17 @@ run = "npx cdk destroy"
 description = "cdk diff"
 run = "npx cdk diff"
 
+[tasks.integ]
+description = "CDK deploy-then-verify integration tests (integ-runner). Needs AWS creds for the shared integ account."
+depends = [":compile"]
+run = [
+  "mkdir -p $TMPDIR",
+  # No --update-on-failed: .snapshot/ is gitignored, so there is no committed
+  # snapshot to diff against or update. --force re-runs the deploy-then-verify
+  # unconditionally, which is what we want in CI.
+  "npx integ-runner --language typescript --directory test/integ --force",
+]
+
 [tasks.bundle]
 description = "No-op bundle step for cdk/cdk.json (NodejsFunction bundles at synth time)"
 run = "node -e \"process.exit(0)\""

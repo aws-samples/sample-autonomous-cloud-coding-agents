@@ -14,9 +14,9 @@ Describe what you intend to contribute. This avoids duplicate work and gives mai
 
 ### 2. Set up your environment
 
-Follow the [Quick Start](./docs/guides/QUICK_START.md) to clone, install, and build the project. See the [Developer guide](./docs/guides/DEVELOPER_GUIDE.md) for local testing and the development workflow.
+Follow the [Quick Start](./docs/guides/QUICK_START.mdx) to clone, install, and build the project. See the [Developer guide](./docs/guides/DEVELOPER_GUIDE.md) for local testing and the development workflow.
 
-Use **[AGENTS.md](./AGENTS.md)** to understand where to make changes (CDK vs CLI vs agent vs docs), which tests to extend, and common pitfalls (generated docs, mirrored API types, `mise` tasks).
+Use **[AGENTS.md](./AGENTS.md)** to understand where to make changes (CDK vs CLI vs agent vs docs), which tests to extend, and common pitfalls (generated docs, mirrored API types, `mise` tasks). Package-specific detail lives in **`AGENTS.md`** under `cdk/`, `cli/`, `agent/`, and `docs/`.
 
 ### 3. Implement your change
 
@@ -79,8 +79,15 @@ Common commands:
 | `mise //cli:build` | CLI only: compile + test + lint |
 | `mise //docs:build` | Docs only: sync sources + Astro build |
 | `mise run hooks:run` | Run pre-commit and pre-push checks locally |
+| `mise run upgrade` | Upgrade dependencies within declared ranges (Yarn workspaces + agent `uv.lock`) |
 
 Set `export MISE_EXPERIMENTAL=1` for namespaced tasks like `mise //cdk:build`.
+
+### Dependency upgrades
+
+The `upgrade-main` GitHub workflow runs `mise run upgrade` daily and opens a PR labeled `auto-approve` when lockfiles change. Upgrades stay within the ranges declared in each manifest — exact pins are never rewritten, which keeps the Cedar engine parity pair (`cedarpy` / `@cedar-policy/cedar-wasm`) untouched; those move only together, by hand, with refreshed parity fixtures.
+
+PRs labeled `auto-approve` are approved automatically by the `auto-approve` workflow; only apply the label to automated PRs whose changes are gated by the full build (e.g. the dependency-upgrade PRs).
 
 ### Git hooks
 

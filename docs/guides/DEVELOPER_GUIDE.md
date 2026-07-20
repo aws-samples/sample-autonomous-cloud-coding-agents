@@ -26,11 +26,11 @@ Before editing, decide which part of the monorepo owns the behavior. This keeps 
 | Agent runtime | `agent/` | Bundled into the image CDK deploys; run `mise run quality` in `agent/` or root build. |
 | Docs (source) | `docs/guides/`, `docs/design/` | After edits, run **`mise //docs:sync`** or **`mise //docs:build`**. Do not edit `docs/src/content/docs/` directly. |
 
-For a concise duplicate of this table, common pitfalls, and a CDK test file map, see **[AGENTS.md](../../AGENTS.md)** at the repo root (oriented toward automation-assisted contributors).
+For a concise duplicate of this table, common pitfalls, and a CDK test file map, see **[AGENTS.md](../../AGENTS.md)** at the repo root (oriented toward automation-assisted contributors). Package-specific detail lives in **`AGENTS.md`** under `cdk/`, `cli/`, `agent/`, and `docs/`.
 
 ## Repository preparation
 
-The [Quick Start](./QUICK_START.md) covers the basic setup: forking a sample repo, creating a PAT, registering a Blueprint, and storing the token in Secrets Manager. This section covers what you need beyond that.
+The [Quick Start](./QUICK_START.mdx) covers the basic setup: forking a sample repo, creating a PAT, registering a Blueprint, and storing the token in Secrets Manager. This section covers what you need beyond that.
 
 ### Pre-flight checks
 
@@ -62,8 +62,8 @@ The default is `awslabs/agent-plugins`. For a quick end-to-end test, fork that r
 To onboard additional repositories, add more `Blueprint` constructs in `cdk/src/stacks/agent.ts` and append them to the `blueprints` array (used to aggregate DNS egress allowlists):
 
 ```typescript
-new Blueprint(this, ‘MyServiceBlueprint’, {
-  repo: ‘acme/my-service’,
+new Blueprint(this, 'MyServiceBlueprint', {
+  repo: 'acme/my-service',
   repoTable: repoTable.table,
 });
 ```
@@ -87,7 +87,7 @@ new Blueprint(this, 'MyServiceBlueprint', {
 
 If you use a custom `compute.runtimeArn` or `credentials.githubTokenSecretArn`, pass the ARNs to `TaskOrchestrator` via `additionalRuntimeArns` and `additionalSecretArns` so the Lambda has IAM permission. See [Repo onboarding](../design/REPO_ONBOARDING.md) for the full model.
 
-Redeploy after changing Blueprints: `mise run //cdk:deploy`.
+Redeploy after changing Blueprints: `mise //cdk:deploy`.
 
 ### Customizing the agent image
 
@@ -106,7 +106,7 @@ See the [Cedar policy guide](./CEDAR_POLICY_GUIDE.md) for the full authoring ref
 
 ## Installation
 
-Follow the [Quick Start](./QUICK_START.md) to clone, install, deploy, and submit your first task. It covers prerequisites, toolchain setup, deployment, PAT configuration, Cognito user creation, and a smoke test.
+Follow the [Quick Start](./QUICK_START.mdx) to clone, install, deploy, and submit your first task. It covers prerequisites, toolchain setup, deployment, PAT configuration, Cognito user creation, and a smoke test.
 
 This section covers what the Quick Start does not: troubleshooting, local testing, and the development workflow.
 
@@ -199,7 +199,7 @@ curl http://localhost:8080/ping
 
 curl -X POST http://localhost:8080/invocations \
   -H "Content-Type: application/json" \
-  -d ‘{"input":{"prompt":"Fix the login bug","repo_url":"owner/repo"}}’
+  -d '{"input":{"prompt":"Fix the login bug","repo_url":"owner/repo"}}'
 ```
 
 #### Monitoring
@@ -256,18 +256,18 @@ For the full list, see `agent/README.md`.
 
 ### Deployment
 
-Follow the [Quick Start](./QUICK_START.md) steps 3-6 for first-time deployment. For subsequent deploys after code changes:
+Follow the [Quick Start](./QUICK_START.mdx) steps 3-6 for first-time deployment. For subsequent deploys after code changes:
 
 ```bash
 mise run build
-mise run //cdk:deploy
+mise //cdk:deploy
 ```
 
 A full deploy takes approximately 10 minutes. Expect variation by region and whether container layers are cached.
 
 ### Stack outputs
 
-After deployment, the stack emits these outputs (retrieve with `aws cloudformation describe-stacks --stack-name backgroundagent-dev --query ‘Stacks[0].Outputs’ --output table`):
+After deployment, the stack emits these outputs (retrieve with `aws cloudformation describe-stacks --stack-name backgroundagent-dev --query 'Stacks[0].Outputs' --output table`):
 
 | Output | Description |
 |---|---|
@@ -340,7 +340,7 @@ The code that runs inside the compute environment (AgentCore MicroVM). This is t
 | I want to... | Look at |
 |---|---|
 | Change what the agent does during a task | `agent/src/pipeline.py` (execution flow), `agent/src/runner.py` (CLI invocation) |
-| Modify system prompts | `agent/prompts/` - base template and per-task-type variants (`new_task`, `pr_iteration`, `pr_review`) |
+| Modify system prompts | `agent/src/prompts/` - base template and per-workflow variants (`coding/new-task-v1`, `coding/pr-iteration-v1`, `coding/pr-review-v1`) |
 | Change agent configuration or environment | `agent/src/config.py` |
 | Add or modify hooks (pre/post execution) | `agent/src/hooks.py` |
 | Change the Docker image (add runtimes, tools) | `agent/Dockerfile` |
@@ -367,9 +367,11 @@ Source docs live in `docs/guides/` and `docs/design/`. The Starlight site under 
 
 | I want to... | Look at |
 |---|---|
-| Update a user-facing guide | `docs/guides/` (USER_GUIDE.md, DEVELOPER_GUIDE.md, QUICK_START.md, PROMPT_GUIDE.md, ROADMAP.md) |
+| Update a user-facing guide | `docs/guides/` (USER_GUIDE.md, DEVELOPER_GUIDE.md, QUICK_START.mdx, PROMPT_GUIDE.md) |
 | Update an architecture doc | `docs/design/` |
 | Change the sidebar or site config | `docs/astro.config.mjs` |
 | Change how docs are synced | `docs/scripts/sync-starlight.mjs` |
 
 After editing source docs, run `mise //docs:sync` or `mise //docs:build` to regenerate the site.
+
+To validate that all cross-references are intact, run `mise //docs:link-check`. This checks all Markdown sources (`docs/guides/`, `docs/design/`, `docs/decisions/`, and root-level `.md` files) for broken internal (relative) links. The same check runs automatically in CI on every pull request, as part of the build's drift-prevention step. External `http(s)` URLs are deliberately not checked, so that network or bot-block flakiness cannot fail an unrelated PR.

@@ -35,6 +35,7 @@ import { ApiClient } from '../api-client';
 import { loadConfig, loadCredentials } from '../config';
 import { CliError } from '../errors';
 import { formatJson } from '../format';
+import { generateInviteCode } from '../invite-code';
 import {
   buildAuthorizationUrl,
   computeExpiresAt,
@@ -45,12 +46,16 @@ import {
   StoredLinearOauthToken,
 } from '../linear-oauth';
 import { awaitOauthCallback, CALLBACK_URL } from '../oauth-callback-server';
+import { promptSecret } from '../prompt-secret';
 
 /** Default label that triggers an ABCA task when applied to a Linear issue. */
 const DEFAULT_LABEL_FILTER = 'bgagent';
 
 /** Standard RFC 4122 UUID — Linear's `projects.nodes[].id` matches this shape. */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Width of the `═` banner bars in printed setup output. */
+const BANNER_WIDTH = 72;
 
 /**
  * Render the printable Linear OAuth app config. Standalone export so
@@ -81,7 +86,7 @@ export function renderLinearAppTemplate(opts: LinearAppTemplateOptions = {}): st
   // setup interactively from their machine.
   const callbackUrl = opts.awsCallbackUrl ?? 'http://localhost:8080/oauth/callback';
 
-  const bar = '═'.repeat(72);
+  const bar = '═'.repeat(BANNER_WIDTH);
   return [
     bar,
     'Linear OAuth app template',
@@ -197,7 +202,8 @@ function randomState(): string {
   // uses of this command file.
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { randomBytes } = require('crypto') as typeof import('crypto');
-  return randomBytes(32).toString('base64url');
+  const STATE_BYTES = 32;
+  return randomBytes(STATE_BYTES).toString('base64url');
 }
 
 /**
@@ -357,7 +363,7 @@ export function makeLinearCommand(): Command {
           );
         }
         const webhookUrl = `${config.api_url.replace(/\/+$/, '')}/linear/webhook`;
-        const bar = '═'.repeat(72);
+        const bar = '═'.repeat(BANNER_WIDTH);
         console.log(bar);
         console.log('Linear webhook configuration');
         console.log(bar);
@@ -623,6 +629,10 @@ export function makeLinearCommand(): Command {
         // ─── Step 5: Persist registry + user-mapping rows ─────────────
         const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
 
+        // Best-effort: fetch team keys so the screenshot processor can
+        // prefix-route Linear issue lookups (e.g. ABCA-42 → workspace
+        // owning ABCA) instead of scanning every active workspace.
+        const teamKeys = await queryLinearTeamKeys(`Bearer ${tokenResponse.access_token}`);
         await ddb.send(new PutCommand({
           TableName: workspaceRegistryTable!,
           Item: {
@@ -633,9 +643,14 @@ export function makeLinearCommand(): Command {
             installed_at: now,
             updated_at: now,
             status: 'active',
+            ...(teamKeys.length > 0 ? { team_keys: teamKeys } : {}),
           },
         }));
-        console.log('  ✓ Recorded workspace in registry');
+        console.log(
+          teamKeys.length > 0
+            ? `  ✓ Recorded workspace in registry (team keys: ${teamKeys.join(', ')})`
+            : '  ✓ Recorded workspace in registry',
+        );
 
         // We deliberately do NOT auto-link a user-mapping row here.
         // With actor=app, Linear's `viewer` query returns the OAuth
@@ -975,6 +990,8 @@ export function makeLinearCommand(): Command {
         console.log(` ✓ (${secretName})`);
 
         // ─── Persist registry + user-mapping rows ──────────────────────
+        // Fetch team keys for prefix-routing (see same call in `setup`).
+        const teamKeys = await queryLinearTeamKeys(`Bearer ${tokenResponse.access_token}`);
         await ddb.send(new PutCommand({
           TableName: workspaceRegistryTable!,
           Item: {
@@ -985,9 +1002,14 @@ export function makeLinearCommand(): Command {
             installed_at: now,
             updated_at: now,
             status: 'active',
+            ...(teamKeys.length > 0 ? { team_keys: teamKeys } : {}),
           },
         }));
-        console.log('  ✓ Recorded workspace in registry');
+        console.log(
+          teamKeys.length > 0
+            ? `  ✓ Recorded workspace in registry (team keys: ${teamKeys.join(', ')})`
+            : '  ✓ Recorded workspace in registry',
+        );
 
         // No auto-link — see the same comment in `setup` above. With
         // actor=app, Linear's `viewer` returns the bot user; auto-
@@ -1487,65 +1509,6 @@ export function makeLinearCommand(): Command {
 
 // ─── Prompts ─────────────────────────────────────────────────────────────────
 
-function promptSecret(label: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stderr,
-      terminal: false,
-    });
-
-    process.stderr.write(label);
-
-    if (process.stdin.isTTY) {
-      process.stdin.setRawMode(true);
-      process.stdin.resume();
-
-      let value = '';
-
-      const onData = (chunk: Buffer) => {
-        const str = chunk.toString();
-        for (const char of str) {
-          if (char === '\n' || char === '\r') {
-            cleanup();
-            process.stderr.write('\n');
-            resolve(value.trim());
-            return;
-          } else if (char === '\u0003') {
-            cleanup();
-            process.stderr.write('\n');
-            reject(new Error('Cancelled.'));
-            return;
-          } else if (char === '\u007f' || char === '\b') {
-            if (value.length > 0) {
-              value = value.slice(0, -1);
-              process.stderr.write('\b \b');
-            }
-          } else {
-            value += char;
-            process.stderr.write('*');
-          }
-        }
-      };
-
-      const cleanup = () => {
-        process.stdin.removeListener('data', onData);
-        process.stdin.setRawMode(false);
-        process.stdin.pause();
-        rl.close();
-      };
-
-      process.stdin.on('data', onData);
-    } else {
-      rl.once('line', (line) => {
-        rl.close();
-        resolve(line.trim());
-      });
-      rl.once('close', () => reject(new Error('No input provided.')));
-    }
-  });
-}
-
 /**
  * Read a single line from stdin, with an optional default that's accepted on
  * empty input (Enter without typing). Visible echo — use only for non-secret
@@ -1635,6 +1598,40 @@ interface LinearWorkspaceMember {
 }
 
 /**
+ * Query the workspace's team keys (e.g. `["ABCA", "PLAT"]`). Persisted on
+ * the registry row so the screenshot processor can prefix-route Linear
+ * issue lookups to the owning workspace instead of scanning every
+ * workspace's tokens. Returns an empty array on failure — callers persist
+ * what they got and the lookup falls back to scanning if `team_keys` is
+ * absent or stale.
+ */
+export async function queryLinearTeamKeys(authorizationHeader: string): Promise<string[]> {
+  try {
+    const res = await fetch('https://api.linear.app/graphql', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': authorizationHeader,
+      },
+      // first:100 caps at 100 teams. Workspaces with more are rare for
+      // ABCA's target use case; pagination is a v1.x followup.
+      body: JSON.stringify({
+        query: '{ teams(first: 100) { nodes { key } } }',
+      }),
+    });
+    if (!res.ok) return [];
+    const body = await res.json() as { data?: { teams?: { nodes?: Array<{ key?: string }> } } };
+    const keys = (body.data?.teams?.nodes ?? [])
+      .map((t) => t.key)
+      .filter((k): k is string => typeof k === 'string' && k.length > 0)
+      .map((k) => k.toUpperCase());
+    return Array.from(new Set(keys)).sort();
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Query the workspace's human members. Used by the inline self-link picker
  * in `setup` / `add-workspace` — surfaces the list of Linear users the
  * OAuth bot can see, so the admin can pick the right human without typing
@@ -1669,7 +1666,7 @@ async function queryLinearWorkspaceMembers(
     return body.data?.users?.nodes ?? [];
   } catch (err) {
     console.log(`  ⚠ Could not query Linear workspace members: ${err instanceof Error ? err.message : String(err)}`);
-    return null;
+    return null; // nosemgrep: ts-silent-success-masking -- setup self-link picker is optional UX; null skips the picker without failing setup
   }
 }
 
@@ -1738,30 +1735,6 @@ async function runSelfLinkPicker(args: {
 }
 
 /**
- * Generate a short, human-typeable invite code for the teammate-invite
- * flow. `link-` prefix makes it grep-friendly when an operator pastes it
- * into chat alongside the command. 8 random chars from a 31-char alphabet
- * = 40 bits of entropy — over a 24h TTL window with ~10 codes outstanding,
- * collision probability is negligible.
- *
- * Alphabet excludes ambiguous glyphs (0/O, 1/l/I) so codes copy-pasted
- * across fonts don't get mistyped.
- */
-/** Alphabet used by {@link generateInviteCode}. Exposed so tests can
- *  assert that generated codes only use these characters. */
-export const INVITE_CODE_ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
-
-export function generateInviteCode(): string {
-  const bytes = new Uint8Array(8);
-  crypto.getRandomValues(bytes);
-  let out = 'link-';
-  for (const b of bytes) {
-    out += INVITE_CODE_ALPHABET[b % INVITE_CODE_ALPHABET.length];
-  }
-  return out;
-}
-
-/**
  * Query the Linear `viewer` + `organization` GraphQL fields with whatever
  * Authorization header the caller hands us. Used both by the legacy
  * PAK-era auto-link (header value = bare `lin_api_…` token) and the
@@ -1794,7 +1767,7 @@ async function queryLinearIdentity(
     return { viewer: body.data.viewer, organization: body.data.organization };
   } catch (err) {
     console.log(`  ⚠ Could not query Linear identity: ${err instanceof Error ? err.message : String(err)}`);
-    return null;
+    return null; // nosemgrep: ts-silent-success-masking -- auto-link is optional setup UX; null skips gracefully so admin can link manually
   }
 }
 
@@ -1876,8 +1849,9 @@ function extractCognitoSub(): string {
   if (!creds?.id_token) {
     throw new Error('not authenticated — run `bgagent login`');
   }
+  const JWT_SEGMENTS = 3; // header.payload.signature
   const parts = creds.id_token.split('.');
-  if (parts.length !== 3) {
+  if (parts.length !== JWT_SEGMENTS) {
     throw new Error('malformed id_token in ~/.bgagent/credentials.json');
   }
   const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf-8')) as { sub?: string };
@@ -1902,7 +1876,7 @@ async function getStackOutput(region: string, stackName: string, outputKey: stri
     const name = (err as Error)?.name ?? '';
     const message = (err as Error)?.message ?? '';
     if (name === 'ValidationError' && /does not exist/i.test(message)) {
-      return null;
+      return null; // nosemgrep: ts-silent-success-masking -- "stack does not exist" is the not-deployed-yet contract; auth/other errors rethrow below
     }
     throw err;
   }

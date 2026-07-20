@@ -54,11 +54,24 @@ mutation ReactIssue($issueId: String!, $emoji: String!) {
 }
 `.trim();
 
+/**
+ * Outcome of a Linear API call. ``retryable`` distinguishes transient
+ * failures (network error, request timeout, HTTP 5xx/429) — where a
+ * retry may genuinely succeed — from terminal ones (auth rejection,
+ * GraphQL validation errors, unregistered workspace) where it cannot.
+ * Callers with a retry mechanism (the fan-out dispatcher's
+ * partial-batch path) escalate retryable failures; purely best-effort
+ * callers can branch on ``ok`` alone.
+ */
+export type LinearPostResult =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly retryable: boolean };
+
 async function graphqlRequest(
   accessToken: string,
   query: string,
   variables: Record<string, unknown>,
-): Promise<boolean> {
+): Promise<LinearPostResult> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
@@ -75,20 +88,28 @@ async function graphqlRequest(
       signal: controller.signal,
     });
     if (!resp.ok) {
-      logger.warn('Linear feedback GraphQL non-2xx', { status: resp.status });
-      return false;
+      // 5xx is a Linear-side outage and 429 a rate limit — both may
+      // clear on retry. Any other non-2xx (401/403/404…) is terminal:
+      // re-sending the same request cannot change the answer.
+      const retryable = resp.status >= 500 || resp.status === 429;
+      logger.warn('Linear feedback GraphQL non-2xx', { status: resp.status, retryable });
+      return { ok: false, retryable };
     }
     const body = (await resp.json()) as { errors?: unknown };
     if (body.errors) {
+      // GraphQL-level errors (bad issue id, missing scope) are
+      // request-shape problems, not infrastructure — terminal.
       logger.warn('Linear feedback GraphQL errors', { errors: body.errors });
-      return false;
+      return { ok: false, retryable: false };
     }
-    return true;
+    return { ok: true };
   } catch (err) {
+    // fetch rejection: DNS/connect failure or the AbortController
+    // timeout above — transient by nature.
     logger.warn('Linear feedback request failed', {
       error: err instanceof Error ? err.message : String(err),
     });
-    return false;
+    return { ok: false, retryable: true };
   } finally {
     clearTimeout(timer);
   }
@@ -116,35 +137,46 @@ async function resolveToken(ctx: LinearFeedbackContext): Promise<string | null> 
       linear_workspace_id: ctx.linearWorkspaceId,
       error: err instanceof Error ? err.message : String(err),
     });
-    return null;
+    return null; // nosemgrep: ts-silent-success-masking -- Linear feedback is best-effort; null token skips the comment without failing the caller
   }
 }
 
 /**
- * Post a comment onto a Linear issue. Returns true on success, false on any failure
- * (network, auth, GraphQL errors). Never throws — callers proceed regardless.
+ * Post a comment onto a Linear issue. Never throws — returns a
+ * {@link LinearPostResult} so callers can distinguish transient failures
+ * (worth a retry) from terminal ones (auth, bad issue id) without this
+ * helper ever gating task-rejection logic.
+ *
+ * Token-resolution failure is classified terminal: ``resolveLinearOauthToken``
+ * deliberately collapses every failure cause (registry miss, revoked
+ * workspace, unreadable secret, and also transient DDB throttles) into
+ * ``null`` as part of its graceful no-op contract, so there is no signal
+ * left here to tell a throttle from an unregistered workspace. Splitting
+ * that contract is a resolver-level refactor — see ``getRegistryRowStrict``
+ * for the precedent.
  */
 export async function postIssueComment(
   ctx: LinearFeedbackContext,
   issueId: string,
   body: string,
-): Promise<boolean> {
+): Promise<LinearPostResult> {
   const token = await resolveToken(ctx);
-  if (!token) return false;
+  if (!token) return { ok: false, retryable: false };
   return graphqlRequest(token, COMMENT_CREATE_MUTATION, { issueId, body });
 }
 
 /**
  * Add an emoji reaction onto a Linear issue. Defaults to ❌ — the failure marker
- * the agent uses on the success/failure side. Returns true on success.
+ * the agent uses on the success/failure side. Same result contract as
+ * {@link postIssueComment}.
  */
 export async function addIssueReaction(
   ctx: LinearFeedbackContext,
   issueId: string,
   emoji: string = EMOJI_FAILURE,
-): Promise<boolean> {
+): Promise<LinearPostResult> {
   const token = await resolveToken(ctx);
-  if (!token) return false;
+  if (!token) return { ok: false, retryable: false };
   return graphqlRequest(token, REACTION_CREATE_MUTATION, { issueId, emoji });
 }
 

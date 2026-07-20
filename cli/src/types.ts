@@ -57,15 +57,16 @@ export type TaskStatusType =
  * - ``webhook``: HMAC-signed inbound webhook submissions (generic webhook endpoint)
  * - ``slack``: Slack @mention / slash-command submissions
  * - ``linear``: Linear label-triggered submissions
+ * - ``jira``: Jira Cloud label-triggered submissions
  *
  * Mirrors ``cdk/src/handlers/shared/types.ts::ChannelSource`` per the CLI
  * types-sync contract so downstream switches/predicates get exhaustiveness
  * checking on both sides of the wire.
  */
-export type ChannelSource = 'api' | 'webhook' | 'slack' | 'linear';
+export type ChannelSource = 'api' | 'webhook' | 'slack' | 'linear' | 'jira';
 
 /** Error categories produced by the runtime error classifier. */
-export type ErrorCategoryType = 'auth' | 'network' | 'concurrency' | 'compute' | 'agent' | 'guardrail' | 'config' | 'timeout' | 'unknown';
+export type ErrorCategoryType = 'auth' | 'network' | 'concurrency' | 'compute' | 'agent' | 'guardrail' | 'config' | 'timeout' | 'blocked' | 'unknown';
 
 /** Structured classification of a task error (computed by the API from error_message). */
 export interface ErrorClassification {
@@ -107,6 +108,11 @@ export interface TaskDetail {
   readonly duration_s: number | null;
   readonly cost_usd: number | null;
   readonly build_passed: boolean | null;
+  /** Post-run lint gate result (#515); null on tasks that predate the field. */
+  readonly lint_passed: boolean | null;
+  /** OTEL trace id (32-char hex) for cross-plane correlation (#515); null when
+   *  unavailable or on tasks that predate the field. */
+  readonly otel_trace_id: string | null;
   readonly max_turns: number | null;
   readonly max_budget_usd: number | null;
   /** Rev-5 DATA-1: attempts counter from the SDK (may be `max_turns + 1`
@@ -155,6 +161,63 @@ export interface TraceUrlResponse {
   readonly expires_at: string;
 }
 
+/**
+ * Verification verdict in a {@link ReplayBundle}. Mirrors
+ * ``cdk/src/handlers/shared/types.ts::VerificationReport``. Either field is
+ * ``null`` when the corresponding gate did not run / predates persistence.
+ */
+export interface VerificationReport {
+  readonly build_passed: boolean | null;
+  readonly lint_passed: boolean | null;
+}
+
+/**
+ * A single event embedded in a {@link ReplayBundle}. Mirrors
+ * ``cdk/src/handlers/shared/types.ts::ReplayEvent``. Normalized to the same
+ * shape as the events feed ({@link TaskEvent}): ``task_id``/``ttl`` stripped and
+ * ``metadata`` defaulted to ``{}``, so ``event.metadata.x`` is always safe.
+ */
+export interface ReplayEvent {
+  readonly event_id: string;
+  readonly event_type: string;
+  readonly timestamp: string;
+  readonly metadata: Record<string, unknown>;
+  // Correlation envelope (#245): present per-event when the source stamped it.
+  readonly user_id?: string;
+  readonly repo?: string;
+  readonly trace_id?: string;
+}
+
+/**
+ * Truncation marker on a {@link ReplayBundle}. Mirrors
+ * ``cdk/src/handlers/shared/types.ts::ReplayTruncation``. Non-null when the
+ * event list was clipped by a cap; ``null`` when the full list fit.
+ */
+export interface ReplayTruncation {
+  readonly reason: 'max_events' | 'max_bytes';
+  readonly returned_events: number;
+}
+
+/**
+ * Response body of ``GET /v1/tasks/{task_id}/replay`` (#515). Mirrors
+ * ``cdk/src/handlers/shared/types.ts::ReplayBundle``. Aggregates existing
+ * telemetry; absent sources are ``null``/empty rather than omitted.
+ */
+export interface ReplayBundle {
+  readonly task_id: string;
+  readonly workflow_ref: string | null;
+  readonly resolved_workflow: ResolvedWorkflow | null;
+  readonly prompt_version: string | null;
+  readonly events: ReplayEvent[];
+  readonly events_truncation: ReplayTruncation | null;
+  readonly verification: VerificationReport | null;
+  readonly trace_uri: string | null;
+  readonly otel_trace_id: string | null;
+  readonly session_id: string | null;
+  readonly cost_usd: number | null;
+  readonly collected_at: string;
+}
+
 /** Task summary returned by GET /v1/tasks list responses. */
 export interface TaskSummary {
   readonly task_id: string;
@@ -177,6 +240,11 @@ export interface TaskEvent {
   readonly event_type: string;
   readonly timestamp: string;
   readonly metadata: Record<string, unknown>;
+  // Correlation envelope (#245): present per-event when the source stamped it;
+  // absent on task_created and pre-envelope safety-net writers.
+  readonly user_id?: string;
+  readonly repo?: string;
+  readonly trace_id?: string;
 }
 
 /**
@@ -366,6 +434,22 @@ export interface LinearLinkResponse {
   readonly linked_at?: string;
 }
 
+/** Jira link response from POST /v1/jira/link.
+ *
+ * Mirrors LinearLinkResponse semantics: `dry_run: true` returns the
+ * identity attached to the code without writing. The CLI uses dry-run
+ * to render a preview before the user confirms. `linked_at` is omitted
+ * from the dry-run response. */
+export interface JiraLinkResponse {
+  readonly dry_run?: boolean;
+  readonly jira_cloud_id: string;
+  readonly jira_site_url?: string;
+  readonly jira_account_id: string;
+  readonly jira_user_name?: string;
+  readonly jira_user_email?: string;
+  readonly linked_at?: string;
+}
+
 /** CLI config stored in ~/.bgagent/config.json. */
 export interface CliConfig {
   readonly api_url: string;
@@ -388,6 +472,16 @@ export interface Credentials {
 
 /** Terminal task statuses. */
 export const TERMINAL_STATUSES = ['COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT'] as const;
+
+/**
+ * Default coding workflow id. A bare ``bgagent submit --repo X --task Y``
+ * (no ``--workflow``/``--pr``/``--review-pr``) maps to this workflow — the
+ * old ``new_task`` default that clones, builds, and opens a PR. Also used by
+ * the formatters to suppress a redundant "Workflow:" line when the resolved
+ * workflow is just the default. Hoisted to a single constant so the literal
+ * is not duplicated across ``submit.ts`` and ``format.ts``.
+ */
+export const DEFAULT_CODING_WORKFLOW_ID = 'coding/new-task-v1';
 
 // ---------------------------------------------------------------------------
 // Cedar HITL approval types — mirrored from
@@ -511,3 +605,11 @@ export const APPROVAL_TIMEOUT_S_MAX = 3600;
 
 /** Default approval_timeout_s when the submit payload omits it. */
 export const APPROVAL_TIMEOUT_S_DEFAULT = 300;
+
+/** Minimum allowed max_budget_usd (1 cent).
+ *  Sourced from ``contracts/constants.json`` via cdk types.ts (#258). */
+export const MAX_BUDGET_USD_MIN = 0.01;
+
+/** Maximum allowed max_budget_usd ($100).
+ *  Sourced from ``contracts/constants.json`` via cdk types.ts (#258). */
+export const MAX_BUDGET_USD_MAX = 100;

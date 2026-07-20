@@ -347,10 +347,69 @@ class TestWriteTerminalArtifactUri:
         )
         assert "artifact_uri" not in calls[0]["UpdateExpression"]
 
+
+class TestWriteTerminalReplayFields:
+    """#515 — write_terminal persists the verification verdict and otel_trace_id
+    so the replay bundle carries them. Regression guard: build_passed/lint_passed
+    were historically present on TaskResult but dropped by the write allowlist."""
+
+    @staticmethod
+    def _capture(monkeypatch):
+        calls: list[dict] = []
+
+        class _FakeTable:
+            def update_item(self, **kwargs):
+                calls.append(kwargs)
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+        return calls
+
+    def test_build_and_lint_passed_written(self, monkeypatch):
+        calls = self._capture(monkeypatch)
+        task_state.write_terminal("t-v", "COMPLETED", {"build_passed": True, "lint_passed": False})
+        expr = calls[0]["UpdateExpression"]
+        values = calls[0]["ExpressionAttributeValues"]
+        assert "build_passed = :bp" in expr
+        assert "lint_passed = :lp" in expr
+        assert values[":bp"] is True
+        assert values[":lp"] is False
+
+    def test_build_passed_false_is_written_not_dropped(self, monkeypatch):
+        # `is not None` guard, not truthiness — a failing build must persist.
+        calls = self._capture(monkeypatch)
+        task_state.write_terminal("t-fail", "FAILED", {"build_passed": False})
+        assert calls[0]["ExpressionAttributeValues"][":bp"] is False
+
+    def test_otel_trace_id_written_when_present(self, monkeypatch):
+        calls = self._capture(monkeypatch)
+        task_state.write_terminal(
+            "t-otel", "COMPLETED", {"otel_trace_id": "aabbccddeeff00112233445566778899"}
+        )
+        expr = calls[0]["UpdateExpression"]
+        assert "otel_trace_id = :otid" in expr
+        assert calls[0]["ExpressionAttributeValues"][":otid"] == "aabbccddeeff00112233445566778899"
+
+    def test_otel_trace_id_omitted_when_absent(self, monkeypatch):
+        calls = self._capture(monkeypatch)
+        task_state.write_terminal("t-nootel", "COMPLETED", {"pr_url": "x"})
+        assert "otel_trace_id" not in calls[0]["UpdateExpression"]
+
+    def test_build_lint_omitted_when_none(self, monkeypatch):
+        # Repo-less / crash tasks leave build_passed/lint_passed as None (the
+        # gate did not run). They must be OMITTED, so the replay bundle reports
+        # verification:null rather than a fictional build_passed:false.
+        calls = self._capture(monkeypatch)
+        task_state.write_terminal(
+            "t-repoless", "COMPLETED", {"build_passed": None, "lint_passed": None}
+        )
+        expr = calls[0]["UpdateExpression"]
+        assert "build_passed" not in expr
+        assert "lint_passed" not in expr
+
     def test_conditional_check_failed_with_trace_uri_logs_orphan_diagnostic(
         self,
         monkeypatch,
-        capsys,
+        capfd,
     ):
         """K2 final review SIG-1: when ``write_terminal``'s precondition
         fails (typically: concurrent cancel) and a ``trace_s3_uri`` was
@@ -385,7 +444,7 @@ class TestWriteTerminalArtifactUri:
             "COMPLETED",
             {"trace_s3_uri": "s3://bucket/traces/u-1/t-orphan.jsonl.gz"},
         )
-        out = capsys.readouterr().out
+        out = capfd.readouterr().out
         # Generic skip message still prints (benign-case compatibility).
         assert "write_terminal skipped" in out
         # And the specific orphan log calls out the URI + actionable
@@ -400,7 +459,7 @@ class TestWriteTerminalArtifactUri:
     def test_conditional_check_failed_without_trace_uri_skips_orphan_log(
         self,
         monkeypatch,
-        capsys,
+        capfd,
     ):
         """The orphan diagnostic must NOT fire on the common
         benign-cancel case (where no S3 write happened) — otherwise
@@ -417,7 +476,7 @@ class TestWriteTerminalArtifactUri:
 
         monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
         task_state.write_terminal("t-benign", "COMPLETED", {"pr_url": "https://pr"})
-        out = capsys.readouterr().out
+        out = capfd.readouterr().out
         assert "write_terminal skipped" in out
         assert "orphaned" not in out
 
@@ -464,7 +523,7 @@ class TestWriteTraceUriConditional:
         assert values[":failed"] == "FAILED"
         assert values[":timed_out"] == "TIMED_OUT"
 
-    def test_uri_already_present_returns_false_and_logs_info(self, monkeypatch, capsys):
+    def test_uri_already_present_returns_false_and_logs_info(self, monkeypatch, capfd):
         """``ConditionalCheckFailedException`` → returns False, INFO log (benign)."""
         from botocore.exceptions import ClientError
 
@@ -480,7 +539,7 @@ class TestWriteTraceUriConditional:
             "t-already", "s3://bucket/traces/u/t-already.jsonl.gz"
         )
         assert healed is False
-        out = capsys.readouterr().out
+        out = capfd.readouterr().out
         assert "write_trace_uri_conditional skipped" in out
         assert "t-already" in out
 
@@ -501,7 +560,7 @@ class TestWriteTraceUriConditional:
         )
         assert healed is False
 
-    def test_transient_ddb_error_returns_false_and_logs_warn(self, monkeypatch, capsys):
+    def test_transient_ddb_error_returns_false_and_logs_warn(self, monkeypatch, capfd):
         """A non-CCF ClientError (e.g., throttling) → returns False, WARN log."""
         from botocore.exceptions import ClientError
 
@@ -522,7 +581,7 @@ class TestWriteTraceUriConditional:
             "t-throttle", "s3://b/traces/u/t-throttle.jsonl.gz"
         )
         assert healed is False
-        out = capsys.readouterr().out
+        out = capfd.readouterr().out
         assert "write_trace_uri_conditional failed" in out
         # Log surfaces the exception type name to aid triage.
         assert "ClientError" in out

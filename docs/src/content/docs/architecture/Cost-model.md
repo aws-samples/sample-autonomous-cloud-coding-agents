@@ -4,7 +4,7 @@ title: Cost model
 
 # Cost model
 
-This document provides an order-of-magnitude cost model for the platform. Cost efficiency is a first-class design principle (see [ARCHITECTURE.md](/architecture/architecture)). The model covers infrastructure baseline costs, per-task variable costs, and cost attribution guidance.
+This document provides an order-of-magnitude cost model for the platform. Cost efficiency is a first-class design principle (see [ARCHITECTURE.md](/sample-autonomous-cloud-coding-agents/architecture/architecture)). The model covers infrastructure baseline costs, per-task variable costs, and cost attribution guidance.
 
 Detailed cost management (per-user budgets, cost attribution dashboards, token budget enforcement) builds on this baseline analysis and focuses on the dominant cost drivers.
 
@@ -14,7 +14,7 @@ These costs are incurred regardless of task volume:
 
 | Component | Estimated cost | Notes |
 |---|---|---|
-| NAT Gateway (1×) | ~$32/month | Fixed hourly cost + data processing. Single AZ (see [COMPUTE.md  - Network architecture](/architecture/compute)). |
+| NAT Gateway (1×) | ~$32/month | Fixed hourly cost + data processing. Single AZ (see [COMPUTE.md  - Network architecture](/sample-autonomous-cloud-coding-agents/architecture/compute)). |
 | VPC Interface Endpoints (7×, 2 AZs) | ~$102/month | $0.01/hr × 7 endpoints × 2 AZs × 730 hrs. |
 | VPC Flow Logs | ~$3/month | CloudWatch ingestion. |
 | DynamoDB (on-demand, idle) | ~$0/month | Pay-per-request; 7 core tables (Tasks, Events, Nudges, Approvals, UserConcurrency, Webhooks, Repo). Integration tables add more when enabled (Slack: installation, user-mapping; Linear: project-mapping, user-mapping, workspace-registry, webhook-dedup). No cost when idle. |
@@ -27,7 +27,7 @@ These costs are incurred regardless of task volume:
 
 ### Scale-to-zero characteristics
 
-Most platform components are fully serverless and incur zero cost when idle: DynamoDB (PAY_PER_REQUEST, 7 core tables plus integration tables when Slack/Linear are enabled), Lambda, API Gateway, S3 (trace artifacts auto-expire in 7 days), SQS (fanout DLQ), ECS Fargate (cluster is free, when enabled), AgentCore Runtime (per-session), Bedrock (per-token), and Cognito (free tier). The stranded task reconciler adds <$0.01/month even when idle (288 Lambda invocations/day, early-exit). The always-on cost floor (~$140–150/month) is dominated by VPC networking infrastructure (NAT Gateway + 7 interface endpoints across 2 AZs) which is required for private subnet connectivity to AWS services and GitHub. See the [Deployment guide](/getting-started/deployment-guide) for the full scale-to-zero breakdown.
+Most platform components are fully serverless and incur zero cost when idle: DynamoDB (PAY_PER_REQUEST, 7 core tables plus integration tables when Slack/Linear are enabled), Lambda, API Gateway, S3 (trace artifacts auto-expire in 7 days), SQS (fanout DLQ), ECS Fargate (cluster is free, when enabled), AgentCore Runtime (per-session), Bedrock (per-token), and Cognito (free tier). The stranded task reconciler adds <$0.01/month even when idle (288 Lambda invocations/day, early-exit). The always-on cost floor (~$140–150/month) is dominated by VPC networking infrastructure (NAT Gateway + 7 interface endpoints across 2 AZs) which is required for private subnet connectivity to AWS services and GitHub. See the [Deployment guide](/sample-autonomous-cloud-coding-agents/getting-started/deployment-guide) for the full scale-to-zero breakdown.
 
 ## Per-task variable costs
 
@@ -50,6 +50,22 @@ Assuming a typical task: 1–2 hours, Claude Sonnet, ~100K input tokens, ~20K ou
 | NAT Gateway data | <$0.01 | GitHub API traffic: clone + push. Small repos: <10 MB. |
 | Custom step Lambdas | $0–0.05 | Only if configured. Per-invocation: ~$0.01 per step. |
 | **Total per task** | **$2–15** | Bedrock tokens dominate (>90% of per-task cost). New interactive features add <$0.01 per task. |
+
+### Optional: deploy-preview screenshots
+
+The screenshot pipeline (see [Deploy preview screenshots guide](/sample-autonomous-cloud-coding-agents/using/deploy-preview-screenshots-guide)) is opt-in per repo and deterministic — no LLM, no agent runtime. Only fires when a connected deploy provider posts `deployment_status: success`.
+
+| Component | Estimated cost per screenshot | Notes |
+|---|---|---|
+| AgentCore Browser session | $0.005–0.015 | ~30–60 s of `aws.browser.v1` for navigate + capture. Per-second billing. |
+| Lambda processor | <$0.001 | 512 MB, ~10–20 s wall time per invocation. |
+| S3 PutObject + storage | <$0.001 | One PNG (~200 KB–2 MB), 30-day TTL via lifecycle. |
+| CloudFront request + bytes-out | <$0.001 | First-render fetch from GitHub markdown image proxy + a small number of viewer fetches. |
+| **Total per screenshot** | **~$0.01** | Dominated by AgentCore Browser session time. |
+
+Baseline overhead (CloudFront distribution + S3 bucket idle) is <$1/month and absorbed into the existing infrastructure baseline above. CloudFront has no per-distribution monthly fee; you pay only per-request and per-byte-out.
+
+A high-volume team with ~500 preview deploys per month would add ~$5/month to the per-task variable line, which is rounding error compared to Bedrock token costs.
 
 ### Cost sensitivity analysis
 
@@ -76,10 +92,12 @@ These estimates assume Claude Sonnet with prompt caching enabled and average tas
 
 For multi-user deployments, cost should be attributable to individual users and repositories:
 
-- **Per-task:** Token usage and compute duration are captured in task metadata (`agent.cost_usd`, `agent.turns`  - see [OBSERVABILITY.md](/architecture/observability)).
+- **Per-task:** Token usage and compute duration are captured in task metadata (`agent.cost_usd`, `agent.turns`  - see [OBSERVABILITY.md](/sample-autonomous-cloud-coding-agents/architecture/observability)). Note: `agent.cost_usd` is the Claude Agent SDK's **client-side estimate** (a build-time price table), not authoritative billing — use it for guardrails, and AWS Cost Explorer / CUR 2.0 for the real bill (see [COST_ATTRIBUTION.md](../guides/COST_ATTRIBUTION.md)).
 - **Per-user:** Aggregate task costs by `user_id`.
 - **Per-repo:** Aggregate task costs by `repo`.
 - **Dashboard:** Cost attribution dashboards should be built from the same task-level metrics.
+
+For **AWS-native** chargeback of Bedrock spend (Cost Explorer / CUR 2.0 by `user_id` / `repo`, plus per-call invocation-log forensics) — beyond the in-app `cost_usd` meter above — see the operator guide [COST_ATTRIBUTION.md](../guides/COST_ATTRIBUTION.md) and the platform design [BEDROCK_COST_ATTRIBUTION.md](/sample-autonomous-cloud-coding-agents/architecture/bedrock-cost-attribution).
 
 ## Cost guardrails (current)
 
@@ -100,8 +118,8 @@ For multi-user deployments, cost should be attributable to individual users and 
 
 ## Reference
 
-- [COMPUTE.md](/architecture/compute) -- Compute option billing models and network architecture.
-- [ORCHESTRATOR.md](/architecture/orchestrator) -- Polling cost analysis.
-- [OBSERVABILITY.md](/architecture/observability) -- Cost-related metrics (`agent.cost_usd`, token usage).
-- [Deployment guide](/getting-started/deployment-guide) -- Deployment choices, scale-to-zero analysis, AWS services inventory.
-- [DEPLOYMENT_ROLES.md](/architecture/deployment-roles) -- Least-privilege IAM policies for deployment.
+- [COMPUTE.md](/sample-autonomous-cloud-coding-agents/architecture/compute) -- Compute option billing models and network architecture.
+- [ORCHESTRATOR.md](/sample-autonomous-cloud-coding-agents/architecture/orchestrator) -- Polling cost analysis.
+- [OBSERVABILITY.md](/sample-autonomous-cloud-coding-agents/architecture/observability) -- Cost-related metrics (`agent.cost_usd`, token usage).
+- [Deployment guide](/sample-autonomous-cloud-coding-agents/getting-started/deployment-guide) -- Deployment choices, scale-to-zero analysis, AWS services inventory.
+- [DEPLOYMENT_ROLES.md](/sample-autonomous-cloud-coding-agents/architecture/deployment-roles) -- Least-privilege IAM policies for deployment.

@@ -19,32 +19,29 @@ node cli/lib/bin/bgagent.js
 After deploying the stack (`cd cdk && npx cdk deploy`), extract the outputs and configure the CLI:
 
 ```bash
-# 1. Extract stack outputs into environment variables
-STACK_NAME="backgroundagent-dev"
-API_URL=$(aws cloudformation describe-stacks --stack-name $STACK_NAME \
-  --query 'Stacks[0].Outputs[?OutputKey==`ApiUrl`].OutputValue' --output text)
-USER_POOL_ID=$(aws cloudformation describe-stacks --stack-name $STACK_NAME \
-  --query 'Stacks[0].Outputs[?OutputKey==`UserPoolId`].OutputValue' --output text)
-APP_CLIENT_ID=$(aws cloudformation describe-stacks --stack-name $STACK_NAME \
-  --query 'Stacks[0].Outputs[?OutputKey==`AppClientId`].OutputValue' --output text)
+# 1. Print stack outputs (replaces manual aws cloudformation describe-stacks)
+bgagent platform outputs --stack-name backgroundagent-dev
 
-# 2. Configure the CLI
-bgagent configure \
-  --api-url "$API_URL" \
-  --region us-east-1 \
-  --user-pool-id "$USER_POOL_ID" \
-  --client-id "$APP_CLIENT_ID"
+# 2. Store the GitHub PAT (replaces aws secretsmanager put-secret-value)
+bgagent github set-token --stack-name backgroundagent-dev
 
-# 3. Log in with your Cognito credentials
+# 3. Configure the CLI (reads ApiUrl, UserPoolId, AppClientId from the stack)
+bgagent configure --region us-east-1 --stack-name backgroundagent-dev
+
+# Or pass fields explicitly / use --from-bundle from `admin invite-user`
+
+# 4. Log in with your Cognito credentials
 bgagent login --username you@example.com
 
-# 4. Submit a task
+# 5. Submit a task
 bgagent submit --repo owner/repo --issue 42
 
-# 5. Check status
+# 6. Check status
 bgagent list
 bgagent status <task-id>
 ```
+
+Operator commands (`platform`, `repo`, `github set-token`) use **operator AWS credentials** directly — Cognito login is not required.
 
 ## Commands
 
@@ -54,11 +51,15 @@ Save API endpoint and Cognito settings to `~/.bgagent/config.json`.
 
 ```
 bgagent configure \
-  --api-url <url>         API Gateway base URL (required)
-  --region <region>       AWS region (required)
-  --user-pool-id <id>     Cognito User Pool ID (required)
-  --client-id <id>        Cognito App Client ID (required)
+  --stack-name <name>     Read ApiUrl, UserPoolId, AppClientId from CloudFormation
+  --from-bundle <base64>  All four fields from `bgagent admin invite-user`
+  --api-url <url>         API Gateway base URL (override or manual configure)
+  --region <region>       AWS region (required with --stack-name if unset in env)
+  --user-pool-id <id>     Cognito User Pool ID
+  --client-id <id>        Cognito App Client ID
 ```
+
+First-time configure needs all four core fields. The easiest paths are `--stack-name backgroundagent-dev --region …` (same outputs as `bgagent platform outputs`) or `--from-bundle` after `admin invite-user`. Individual flags override stack-derived values.
 
 ### `bgagent login`
 
@@ -164,6 +165,181 @@ Revoke a webhook. Revoked webhooks can no longer create tasks.
 bgagent webhook revoke <webhook-id> \
   --output <text|json>         Output format (default: text)
 ```
+
+## Operator commands
+
+These commands support day-2 operations using **operator AWS credentials** (IAM profile or environment). They read CloudFormation outputs, DynamoDB, and Secrets Manager directly — no Cognito login required. The read-only and introspection commands (`platform`, `repo`, `runtime`, `ops`, `webhook test`, `admin list-users`) support `--output json` for scripting; the credential-writing commands (`github set-token`/`set-webhook-secret`, `admin invite-user`/`delete-user`/`reset-password`) do not.
+
+Shared flags:
+
+| Flag | Description |
+|------|-------------|
+| `--region <region>` | AWS region (defaults to `bgagent configure` region or `AWS_REGION`) |
+| `--stack-name <name>` | CloudFormation stack name (default: `backgroundagent-dev`) |
+
+### `bgagent platform outputs`
+
+Print CloudFormation stack outputs (`ApiUrl`, `UserPoolId`, `AppClientId`, `GitHubTokenSecretArn`, etc.).
+
+```
+bgagent platform outputs \
+  --output <text|json>         Output format (default: text)
+```
+
+### `bgagent platform doctor`
+
+Smoke-check deployed platform readiness: Task API reachable, Cognito pool/client valid, platform GitHub token populated, at least one active onboarded repo, Bedrock model visible.
+
+```
+bgagent platform doctor \
+  --output <text|json>         Output format (default: text)
+```
+
+Exits with code 1 when any check fails (warnings are acceptable).
+
+### `bgagent repo list`
+
+List repositories onboarded via Blueprint constructs (reads `RepoTable`).
+
+```
+bgagent repo list \
+  --status <active|removed>    Filter by status
+  --output <text|json>        Output format (default: text)
+```
+
+### `bgagent repo show <owner/repo>`
+
+Show full `RepoConfig` for a repository. Secret ARNs are redacted. When no per-blueprint token is configured, the output shows that the repo uses the **platform default** GitHub PAT (`GitHubTokenSecretArn`), not an empty/missing token.
+
+```
+bgagent repo show owner/repo \
+  --output <text|json>        Output format (default: text)
+```
+
+### `bgagent repo onboard <owner/repo>`
+
+Register or re-activate a repository in `RepoTable` without a CDK redeploy. With no overrides, tasks use the platform `RuntimeArn` and `GitHubTokenSecretArn` (IAM already granted at deploy). Custom `--runtime-arn` / `--token-secret-arn` values require matching `TaskOrchestrator` IAM via CDK — the command prints notes explaining this. Prefer CDK `Blueprint` constructs for durable lifecycle, Cedar policies, and egress validation.
+
+```
+bgagent repo onboard owner/repo \
+  --compute-type <agentcore|ecs> \
+  --runtime-arn <arn>         AgentCore runtime override (agentcore only) \
+  --model <model-id> \
+  --token-secret-arn <arn> \
+  --max-turns <n> \
+  --poll-interval <ms>        Default agent poll interval in milliseconds \
+  --output <text|json>
+```
+
+### `bgagent repo offboard <owner/repo>`
+
+Soft-delete a repository (`status=removed` + TTL), matching Blueprint delete semantics. An existing Blueprint will re-activate the repo on the next CDK deploy.
+
+```
+bgagent repo offboard owner/repo \
+  --output <text|json>
+```
+
+### `bgagent runtime status`
+
+Show **per-blueprint** effective compute substrate and runtime ARN (merged with platform `RuntimeArn`), then probe unique AgentCore runtimes via the control-plane API. ECS blueprints are listed separately — they use the platform ECS cluster/task definition, not per-repo `runtime_arn`.
+
+```
+bgagent runtime status \
+  --repo <owner/repo>         Limit to one repository \
+  --output <text|json>
+```
+
+### `bgagent ops stuck-tasks`
+
+List tasks in `SUBMITTED`, `HYDRATING`, or `AWAITING_APPROVAL` older than the stranded-task reconciler thresholds (defaults: 1200s / 7200s). Text output includes Cognito email plus username UUID.
+
+```
+bgagent ops stuck-tasks \
+  --stranded-timeout <seconds> \
+  --approval-timeout <seconds> \
+  --output <text|json>
+```
+
+### `bgagent ops concurrency`
+
+Compare `UserConcurrencyTable` counters with live active task counts per user. Resolves Cognito usernames to email (same as `bgagent admin list-users`).
+
+```
+bgagent ops concurrency \
+  --limit <n>                 Per-user limit (default: 3) \
+  --output <text|json>
+```
+
+### `bgagent webhook test <webhook-id>`
+
+Send a signed sample payload to `POST /v1/webhooks/tasks` (creates a real task — cancel afterward if this was only a connectivity check).
+
+```
+bgagent webhook test <webhook-id> \
+  --secret <secret>           From `webhook create` output \
+  --fetch-secret              Read secret from Secrets Manager (operator IAM) \
+  --repo <owner/repo>         Target repo (defaults to first active repo) \
+  --api-url <url>             Defaults to configure api_url or stack ApiUrl \
+  --output <text|json>
+```
+
+### `bgagent github set-token`
+
+Store a GitHub personal access token in Secrets Manager (interactive masked prompt).
+
+```
+bgagent github set-token \
+  --repo <owner/repo>         Target a blueprint's per-repo token secret (when configured)
+  --secret-arn <arn>          Write to an explicit Secrets Manager ARN
+  --region <region>           AWS region (defaults to configured region)
+  --stack-name <name>         CloudFormation stack name (default: backgroundagent-dev)
+```
+
+With no flags, writes to the platform default `GitHubTokenSecretArn` stack output. When `--repo` is used, the CLI reads `github_token_secret_arn` from `RepoTable` if the Blueprint configured `credentials.githubTokenSecretArn`; otherwise it falls back to the platform default with a notice.
+
+### `bgagent github webhook-info` / `set-webhook-secret`
+
+Configure the preview-deploy screenshot pipeline webhook. See [Deploy preview screenshots guide](../docs/guides/DEPLOY_PREVIEW_SCREENSHOTS_GUIDE.md).
+
+### `bgagent jira setup` / `map` / `invite-user` / `link`
+
+Manage the Jira Cloud integration. `setup` authorizes a tenant via OAuth (3LO) and stores the token in Secrets Manager; `map` routes a Jira project to a GitHub repo; the two-step `invite-user` → `link` handshake links a teammate's Jira identity to their platform user. See the [Jira setup guide](../docs/guides/JIRA_SETUP_GUIDE.md) for the full walkthrough.
+
+```
+bgagent jira setup \
+  --stack-name backgroundagent-dev
+
+bgagent jira map <cloud-id> <PROJECT-KEY> --repo owner/repo
+
+bgagent jira invite-user <cloud-id> <account-id-or-email> \
+  --region <region>            AWS region (defaults to configured region) \
+  --stack-name <name>          CloudFormation stack name (default: backgroundagent-dev)
+
+bgagent jira link <code>
+```
+
+`invite-user` resolves the teammate's Jira identity through the tenant OAuth token, then writes a `pending#<code>` row (24h TTL) and prints the `bgagent jira link <code>` the teammate runs from their own machine. The teammate previews the Jira identity before confirming, so a wrong pick can be aborted rather than misattributed. If the identity is already linked, the command warns but still issues the code.
+
+### `bgagent admin invite-user` / `list-users` / `delete-user` / `reset-password`
+
+Manage Cognito users with operator AWS credentials (`cognito-idp:Admin*` on the deployment user pool). Works **before** `bgagent configure` when `--stack-name` is passed (reads `UserPoolId` from CloudFormation).
+
+```
+bgagent admin invite-user <email> \
+  --stack-name backgroundagent-dev \
+  --password <pwd>              # optional; auto-generated if omitted
+
+bgagent admin list-users \
+  --output <text|json>
+
+bgagent admin delete-user <email>
+
+bgagent admin reset-password <email> \
+  --password <pwd>              # optional; auto-generated if omitted
+```
+
+`invite-user` creates the user, sets a permanent password, and writes credentials plus an optional configure bundle to `~/.bgagent/invites/<email>.txt` (mode 0600). Replaces Quick Start Step 5 raw `aws cognito-idp` commands.
 
 ## Output formats
 
