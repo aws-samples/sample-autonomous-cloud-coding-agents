@@ -75,6 +75,11 @@ export interface ErrorClassification {
   readonly description: string;
   readonly remedy: string;
   readonly retryable: boolean;
+  /** Retry-semantics axis: transient (self-heals on retry) vs service (admin
+   *  must fix) vs user (change the request/code). Optional (older classifications
+   *  omit it; absent ⇒ user). Inlined (not a named export) to mirror the cdk
+   *  ErrorClassification field without introducing a CLI-only exported type. */
+  readonly errorClass?: 'transient' | 'service' | 'user';
 }
 
 /** Task detail returned by GET /v1/tasks/{task_id}. */
