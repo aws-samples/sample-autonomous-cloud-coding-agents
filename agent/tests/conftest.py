@@ -156,15 +156,9 @@ _AGENT_ENV_VARS = [
     "LOG_GROUP_NAME",
     "MEMORY_ID",
     "ENABLE_CLI_TELEMETRY",
-    # Per-session IAM scoping (PR #209). When this is set, ``aws_session`` resolves
-    # a *scoped* session and ``tenant_client`` returns ``session.client(...)`` —
-    # which BYPASSES a ``@patch("boto3.client")`` mock. On the ECS substrate the
-    # task def sets this, so a test that mocks ``boto3.client`` (e.g.
-    # ``test_attachments``) instead makes a REAL S3 call that hangs on the network
-    # (no egress). Stripping it here forces every test onto the unscoped path,
-    # where the ``boto3.client`` mock actually intercepts. Resetting the session
-    # cache below is NOT enough on its own — a fresh ``get_session()`` re-resolves
-    # as scoped while this var is still set.
+    # Per-session IAM scoping (PR #209) — the scoped-session S3-hang guard.
+    # See the ``_clean_env`` docstring below for the full rationale (why the
+    # env strip AND the cache reset are both required).
     "AGENT_SESSION_ROLE_ARN",
 ]
 
