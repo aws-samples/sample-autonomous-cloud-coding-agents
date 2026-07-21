@@ -681,3 +681,70 @@ describe('Blueprint assets.mcpServers (#246)', () => {
     expect(() => app.synth()).toThrow(/Invalid registry ref/);
   });
 });
+
+// --- #246 PR 3: cedarPolicyModules + skills -----------------------------------
+
+describe('Blueprint assets.cedarPolicyModules + skills (#246 PR 3)', () => {
+  const cedarRef = 'registry://cedar_policy_module/acme/guard@^1.0.0';
+  const skillRef = 'registry://skill/acme/refactor@^1.0.0';
+
+  test('exposes cedarPolicyModules and skills as public properties', () => {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack');
+    const repoTable = new dynamodb.Table(stack, 'RepoTable', {
+      partitionKey: { name: 'repo', type: dynamodb.AttributeType.STRING },
+    });
+    const blueprint = new Blueprint(stack, 'Blueprint', {
+      repo: 'org/my-repo',
+      repoTable,
+      assets: { cedarPolicyModules: [cedarRef], skills: [skillRef] },
+    });
+    expect(blueprint.cedarPolicyModules).toEqual([cedarRef]);
+    expect(blueprint.skills).toEqual([skillRef]);
+  });
+
+  test('persists cedar_policy_modules and skills columns on create', () => {
+    const { template } = createStack({
+      assets: { cedarPolicyModules: [cedarRef], skills: [skillRef] },
+    });
+    const serialized = getCreateJoinParts(template).join('');
+    expect(serialized).toContain('cedar_policy_modules');
+    expect(serialized).toContain(cedarRef);
+    expect(serialized).toContain('skills');
+    expect(serialized).toContain(skillRef);
+  });
+
+  test('inline security.cedarPolicies and registry cedarPolicyModules coexist', () => {
+    // The mixed case the plan calls out: one inline Cedar policy + one registry
+    // module pin on the same blueprint. Inline lives in cedar_policies; the
+    // registry ref lives in cedar_policy_modules — distinct columns, no clash.
+    const app = new App();
+    const stack = new Stack(app, 'TestStack');
+    const repoTable = new dynamodb.Table(stack, 'RepoTable', {
+      partitionKey: { name: 'repo', type: dynamodb.AttributeType.STRING },
+    });
+    const blueprint = new Blueprint(stack, 'Blueprint', {
+      repo: 'org/my-repo',
+      repoTable,
+      security: { cedarPolicies: ['permit (principal, action, resource);'] },
+      assets: { cedarPolicyModules: [cedarRef] },
+    });
+    expect(blueprint.cedarPolicies).toHaveLength(1);
+    expect(blueprint.cedarPolicyModules).toEqual([cedarRef]);
+    expect(() => app.synth()).not.toThrow();
+  });
+
+  test('rejects invalid cedarPolicyModules / skills refs at synth', () => {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack');
+    const repoTable = new dynamodb.Table(stack, 'RepoTable', {
+      partitionKey: { name: 'repo', type: dynamodb.AttributeType.STRING },
+    });
+    new Blueprint(stack, 'Blueprint', {
+      repo: 'org/my-repo',
+      repoTable,
+      assets: { skills: ['registry://skill/acme/refactor'] }, // unpinned → invalid
+    });
+    expect(() => app.synth()).toThrow(/Invalid registry ref/);
+  });
+});

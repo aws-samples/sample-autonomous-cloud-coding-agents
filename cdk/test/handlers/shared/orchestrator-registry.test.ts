@@ -56,6 +56,30 @@ function mcpAsset(name: string, version: string, warnings: string[] = []): Resol
   };
 }
 
+function cedarAsset(name: string, version: string, content: string): ResolvedAsset {
+  return {
+    kind: 'cedar_policy_module',
+    namespace: 'acme',
+    name,
+    version,
+    descriptor: { summary: 's', permissions: [] },
+    content,
+    warnings: [],
+  };
+}
+
+function skillAsset(name: string, version: string, content: string): ResolvedAsset {
+  return {
+    kind: 'skill',
+    namespace: 'acme',
+    name,
+    version,
+    descriptor: { summary: 's', permissions: [] },
+    content,
+    warnings: [],
+  };
+}
+
 beforeEach(() => {
   jest.clearAllMocks();
   mockDdbSend.mockResolvedValue({});
@@ -123,5 +147,34 @@ describe('resolveRegistryAssetsForTask', () => {
       .map((c) => c[0].input)
       .find((i) => JSON.stringify(i?.Item ?? {}).includes('registry_assets_resolved'));
     expect(resolvedEvent).toBeDefined();
+  });
+
+  test('collects all three ref kinds and stamps triples for each', async () => {
+    mockResolveAll.mockResolvedValue({
+      mcp_servers: [mcpAsset('pdf-tools', '1.4.1')],
+      cedar_policy_modules: [cedarAsset('guard', '1.0.0', 'forbid(principal, action, resource);')],
+      skills: [skillAsset('refactor', '2.0.0', 'Preserve public APIs.')],
+    });
+    await resolveRegistryAssetsForTask(task, {
+      mcp_servers: ['registry://mcp_server/acme/pdf-tools@^1.0.0'],
+      cedar_policy_modules: ['registry://cedar_policy_module/acme/guard@^1.0.0'],
+      skills: ['registry://skill/acme/refactor@^2.0.0'],
+    } as BlueprintConfig);
+
+    // resolveAll got all three refs.
+    expect(mockResolveAll).toHaveBeenCalledWith([
+      'registry://mcp_server/acme/pdf-tools@^1.0.0',
+      'registry://cedar_policy_module/acme/guard@^1.0.0',
+      'registry://skill/acme/refactor@^2.0.0',
+    ]);
+
+    const stamp = mockDdbSend.mock.calls
+      .map((c) => c[0].input)
+      .find((i) => i?.ExpressionAttributeNames?.['#ra'] === 'resolved_assets');
+    expect(stamp.ExpressionAttributeValues[':ra']).toEqual([
+      { kind: 'mcp_server', id: 'acme/pdf-tools', version: '1.4.1' },
+      { kind: 'cedar_policy_module', id: 'acme/guard', version: '1.0.0' },
+      { kind: 'skill', id: 'acme/refactor', version: '2.0.0' },
+    ]);
   });
 });

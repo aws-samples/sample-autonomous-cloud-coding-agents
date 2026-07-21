@@ -37,30 +37,65 @@ describe('validatePublish', () => {
     expect(validatePublish(validMcp)).toEqual([]);
   });
 
-  test('accepts a cedar_policy_module with cedar_actions', () => {
+  test('accepts a cedar_policy_module with inline cedar_text', () => {
     expect(
       validatePublish({
         kind: 'cedar_policy_module',
         namespace: 'acme',
         name: 'guard',
         version: '1.0.0',
-        descriptor: { summary: 's', permissions: [], cedar_actions: ['Action::"ForcePush"'] },
-        artifact_b64: Buffer.from('permit(...)').toString('base64'),
+        descriptor: {
+          summary: 's',
+          permissions: [],
+          cedar_actions: ['Action::"ForcePush"'],
+          cedar_text: 'forbid(principal, action, resource);',
+        },
       }),
     ).toEqual([]);
   });
 
-  test('accepts a skill with tool_hints', () => {
+  test('accepts a skill with inline prompt_fragment', () => {
     expect(
       validatePublish({
         kind: 'skill',
         namespace: 'acme',
         name: 'refactor',
         version: '2.0.0',
-        descriptor: { summary: 's', permissions: [], tool_hints: ['Edit'] },
-        artifact_b64: Buffer.from('# skill').toString('base64'),
+        descriptor: {
+          summary: 's',
+          permissions: [],
+          tool_hints: ['Edit'],
+          prompt_fragment: 'When refactoring, preserve public APIs.',
+        },
       }),
     ).toEqual([]);
+  });
+
+  test('cedar_policy_module without cedar_text is rejected', () => {
+    const v = validatePublish({
+      kind: 'cedar_policy_module',
+      namespace: 'acme',
+      name: 'guard',
+      version: '1.0.0',
+      descriptor: { summary: 's', permissions: [], cedar_actions: [] },
+    });
+    expect(v.some((x) => x.field === 'descriptor.cedar_text')).toBe(true);
+  });
+
+  test('skill prompt_fragment over the size cap is rejected', () => {
+    const v = validatePublish({
+      kind: 'skill',
+      namespace: 'acme',
+      name: 'refactor',
+      version: '1.0.0',
+      descriptor: {
+        summary: 's',
+        permissions: [],
+        tool_hints: [],
+        prompt_fragment: 'x'.repeat(65_536 + 1),
+      },
+    });
+    expect(v.some((x) => x.field === 'descriptor.prompt_fragment')).toBe(true);
   });
 
   test('rejects a reserved kind (no loader in MVP)', () => {
@@ -123,16 +158,23 @@ describe('validatePublish', () => {
     expect(validatePublish(noArtifact).some((x) => x.field === 'artifact_b64')).toBe(true);
   });
 
-  test('cedar_policy_module still requires an artifact (no inline path)', () => {
+  test('cedar_policy_module with inline cedar_text needs no artifact', () => {
+    // PR 3: cedar_text inline satisfies the loadable-content requirement, same
+    // as mcp_server's server_config — no separate artifact needed.
     const v = validatePublish({
       kind: 'cedar_policy_module',
       namespace: 'acme',
       name: 'guard',
       version: '1.0.0',
-      descriptor: { summary: 's', permissions: [], cedar_actions: ['Action::"X"'] },
-      // no artifact_b64
+      descriptor: {
+        summary: 's',
+        permissions: [],
+        cedar_actions: ['Action::"X"'],
+        cedar_text: 'permit(principal, action, resource);',
+      },
+      // no artifact_b64 — inline cedar_text is the content
     });
-    expect(v.some((x) => x.field === 'artifact_b64')).toBe(true);
+    expect(v).toEqual([]);
   });
 });
 

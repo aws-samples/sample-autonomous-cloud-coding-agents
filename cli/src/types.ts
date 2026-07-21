@@ -94,6 +94,15 @@ export interface ResolvedAsset {
   readonly name: string;
   readonly version: string;
   readonly descriptor: RegistryDescriptor;
+  /**
+   * The loadable text content of the asset — Cedar policy text for a
+   * ``cedar_policy_module``, the prompt fragment for a ``skill``. Substrate-
+   * agnostic on purpose: the resolver populates it (MVP reads it inline from
+   * the descriptor; a future AgentCore/S3 substrate would fetch it) so callers
+   * never depend on WHERE the bytes live. Absent for kinds with no text body
+   * (e.g. ``mcp_server``, whose config rides in the descriptor's server_config).
+   */
+  readonly content?: string;
   readonly artifact_url?: string;
   readonly warnings: readonly string[];
 }

@@ -151,10 +151,30 @@ export async function resolveRef(
     name: top.name,
     version: top.version,
     descriptor: top.descriptor,
+    // Substrate-agnostic loadable text. MVP reads it inline from the descriptor
+    // (cedar_text / prompt_fragment); a future S3/AgentCore substrate would
+    // fetch it here instead — callers only ever see ``content``, never the
+    // storage location. Undefined for kinds with no text body (mcp_server).
+    content: extractContent(top),
     // artifact_url is attached by the resolve handler (presign); the library
     // returns descriptor-level data only.
     warnings,
   };
+}
+
+/**
+ * Extract the loadable text body from a record's descriptor (REGISTRY.md §3.3).
+ * This is the single place that knows WHERE inline content lives, so swapping to
+ * an S3/AgentCore-backed fetch later is confined here.
+ */
+function extractContent(record: RegistryAssetRecord): string | undefined {
+  const d = record.descriptor as Record<string, unknown>;
+  const raw = record.kind === 'cedar_policy_module'
+    ? d.cedar_text
+    : record.kind === 'skill'
+      ? d.prompt_fragment
+      : undefined;
+  return typeof raw === 'string' ? raw : undefined;
 }
 
 /**

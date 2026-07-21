@@ -49,6 +49,16 @@ export interface RepoConfig {
    */
   readonly mcp_servers?: string[];
   /**
+   * Registry (#246): Cedar policy module refs. Their resolved text is merged
+   * into the ``cedar_policies`` payload (byte-identical to inline policies).
+   */
+  readonly cedar_policy_modules?: string[];
+  /**
+   * Registry (#246): skill refs. Their resolved prompt fragments are appended
+   * to the agent's system prompt.
+   */
+  readonly skills?: string[];
+  /**
    * Cedar HITL: per-blueprint override for the per-task approval-gate cap
    * (design decision #13, §4 step 5). Written by the Blueprint construct
    * when ``security.approvalGateCap`` is supplied. Read by
@@ -80,6 +90,10 @@ export interface BlueprintConfig {
    * orchestrator's resolve-registry step can resolve them at task start.
    */
   readonly mcp_servers?: string[];
+  /** Registry (#246): Cedar policy module refs, resolved at task start. */
+  readonly cedar_policy_modules?: string[];
+  /** Registry (#246): skill refs, resolved at task start. */
+  readonly skills?: string[];
   /**
    * Cedar HITL: per-blueprint approval-gate cap override. Surfaced from
    * RepoConfig so downstream consumers (admission, orchestrator payload)

@@ -138,14 +138,20 @@ export function validatePublish(input: PublishInput): DescriptorViolation[] {
  * a ``server_config`` object the agent loader writes straight into ``.mcp.json``.
  */
 function hasInlineDescriptorContent(kind: RegistryAssetKind, descriptor: unknown): boolean {
-  if (kind !== 'mcp_server') {
-    return false;
-  }
   if (typeof descriptor !== 'object' || descriptor === null) {
     return false;
   }
-  const cfg = (descriptor as Record<string, unknown>).server_config;
-  return typeof cfg === 'object' && cfg !== null;
+  const d = descriptor as Record<string, unknown>;
+  switch (kind) {
+    case 'mcp_server':
+      return typeof d.server_config === 'object' && d.server_config !== null;
+    case 'cedar_policy_module':
+      return typeof d.cedar_text === 'string' && d.cedar_text.length > 0;
+    case 'skill':
+      return typeof d.prompt_fragment === 'string' && d.prompt_fragment.length > 0;
+    default:
+      return false;
+  }
 }
 
 /** Per-kind descriptor required-field checks (REGISTRY.md §3.3). */
@@ -167,16 +173,41 @@ function validateKindDescriptor(
       if (!Array.isArray(desc.cedar_actions)) {
         v.push({ field: 'descriptor.cedar_actions', message: 'cedar_policy_module descriptor requires cedar_actions array' });
       }
+      v.push(...validateInlineContent('descriptor.cedar_text', desc.cedar_text));
       break;
     case 'skill':
       if (!Array.isArray(desc.tool_hints)) {
         v.push({ field: 'descriptor.tool_hints', message: 'skill descriptor requires tool_hints array' });
       }
+      v.push(...validateInlineContent('descriptor.prompt_fragment', desc.prompt_fragment));
       break;
     default:
       break;
   }
   return v;
+}
+
+/**
+ * Max size of inline text content (cedar_text / prompt_fragment) at publish.
+ * Bounds the DynamoDB item (400 KB hard limit) and keeps skill fragments from
+ * bloating every task's system prompt. If a future asset genuinely needs more,
+ * that's the trigger to move content to an S3/AgentCore-backed artifact — the
+ * ``content`` seam on ResolvedAsset already makes that swap caller-invisible.
+ */
+export const MAX_INLINE_CONTENT_BYTES = 65_536; // 64 KiB
+
+/** Validate a required inline text field: present, a string, within the size cap. */
+function validateInlineContent(field: string, value: unknown): DescriptorViolation[] {
+  if (typeof value !== 'string' || value.length === 0) {
+    return [{ field, message: `${field} is required and must be a non-empty string` }];
+  }
+  if (Buffer.byteLength(value, 'utf8') > MAX_INLINE_CONTENT_BYTES) {
+    return [{
+      field,
+      message: `${field} exceeds the ${MAX_INLINE_CONTENT_BYTES}-byte inline limit`,
+    }];
+  }
+  return [];
 }
 
 /** Build the ``{kind}#{namespace}/{name}`` partition key. */

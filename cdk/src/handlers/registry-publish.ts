@@ -27,7 +27,6 @@ import { logger } from './shared/logger';
 import {
   artifactKey,
   asDescriptor,
-  KINDS_REQUIRING_ARTIFACT,
   publishPk,
   validatePublish,
   type PublishInput,
@@ -102,18 +101,20 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     const status: RegistryAssetStatus = autoApprove ? 'approved' : 'submitted';
     const now = new Date().toISOString();
 
-    // 1. Upload artifact (if the kind carries one). Keyed by the immutable
-    //    (kind, ns, name, version) tuple; a 409 below prevents overwrite races
-    //    for the DDB row, and the bucket is versioned so an artifact re-put is
-    //    recoverable.
+    // 1. Upload artifact ONLY when the request actually carries bytes. Kinds
+    //    with inline descriptor content (mcp_server server_config, cedar_text,
+    //    prompt_fragment) supply no artifact_b64 — validation already accepted
+    //    that (see hasInlineDescriptorContent), so uploading here would call
+    //    Buffer.from(undefined) and 500. Keyed by the immutable tuple; the
+    //    bucket is versioned so a re-put is recoverable.
     let artifactRef: string | undefined;
-    if (KINDS_REQUIRING_ARTIFACT.has(kind)) {
+    if (typeof body.artifact_b64 === 'string' && body.artifact_b64.length > 0) {
       artifactRef = artifactKey(kind, namespace, name, version);
       await s3.send(
         new PutObjectCommand({
           Bucket: BUCKET_NAME,
           Key: artifactRef,
-          Body: Buffer.from(body.artifact_b64 as string, 'base64'),
+          Body: Buffer.from(body.artifact_b64, 'base64'),
         }),
       );
     }

@@ -89,6 +89,28 @@ describe('registry publish handler', () => {
     expect(mockDdbSend).toHaveBeenCalledTimes(1);
   });
 
+  test('inline-content kind (cedar) publishes with NO S3 upload', async () => {
+    // #246 PR 3 regression: cedar/skill carry inline content and send no
+    // artifact_b64. The handler must NOT attempt an S3 upload (Buffer.from(
+    // undefined) → 500). It writes the DDB record only.
+    const cedarBody = {
+      kind: 'cedar_policy_module',
+      namespace: 'acme',
+      name: 'guard',
+      version: '1.0.0',
+      descriptor: {
+        summary: 'guard',
+        permissions: [],
+        cedar_actions: [],
+        cedar_text: 'forbid(principal, action, resource);',
+      },
+    };
+    const res = await handler(event({ groups: ['RegistryApprover'], body: cedarBody, autoApprove: true }));
+    expect(res.statusCode).toBe(201);
+    expect(mockS3Send).not.toHaveBeenCalled();
+    expect(mockDdbSend).toHaveBeenCalledTimes(1);
+  });
+
   test('auto_approve lands approved only for an approver', async () => {
     const approver = await handler(event({ groups: ['RegistryApprover'], body: validBody, autoApprove: true }));
     expect(JSON.parse(approver.body).data.status).toBe('approved');

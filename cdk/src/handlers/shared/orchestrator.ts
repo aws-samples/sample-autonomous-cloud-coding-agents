@@ -280,6 +280,8 @@ export async function loadBlueprintConfig(task: TaskRecord): Promise<BlueprintCo
     poll_interval_ms: pollIntervalMs,
     cedar_policies: repoConfig?.cedar_policies,
     mcp_servers: repoConfig?.mcp_servers,
+    cedar_policy_modules: repoConfig?.cedar_policy_modules,
+    skills: repoConfig?.skills,
     approval_gate_cap: repoConfig?.approval_gate_cap,
   };
 }
@@ -389,7 +391,14 @@ export async function resolveRegistryAssetsForTask(
   blueprintConfig?: BlueprintConfig,
 ): Promise<ResolvedAssetBundle> {
   const { log, correlation } = envelopeFor(task);
-  const refs = blueprintConfig?.mcp_servers ?? [];
+  // Collect every asset-kind's pins; resolveAll routes each ref to the right
+  // bundle slot by its parsed kind (#246 PR 3 adds cedar_policy_modules + skills
+  // alongside PR 2's mcp_servers).
+  const refs = [
+    ...(blueprintConfig?.mcp_servers ?? []),
+    ...(blueprintConfig?.cedar_policy_modules ?? []),
+    ...(blueprintConfig?.skills ?? []),
+  ];
   if (refs.length === 0) {
     return EMPTY_ASSET_BUNDLE;
   }
@@ -465,6 +474,20 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
   // Fail-closed: a RegistryResolutionError propagates to the caller, which
   // transitions the task to FAILED (same path as a guardrail block below).
   const resolvedAssets = await resolveRegistryAssetsForTask(task, blueprintConfig);
+
+  // Merge registry cedar_policy_module content into the same cedar_policies
+  // list the blueprint's inline policies use, so the agent's PolicyEngine sees
+  // one combined set — registry-sourced Cedar is byte-identical to inline
+  // (REGISTRY.md §8; the parity guarantee holds by construction because both
+  // arrive through the same payload field). Inline policies come first, then
+  // resolved modules in bundle order.
+  const registryCedarPolicies = resolvedAssets.cedar_policy_modules
+    .map((a) => a.content)
+    .filter((text): text is string => typeof text === 'string' && text.length > 0);
+  const mergedCedarPolicies = [
+    ...(blueprintConfig?.cedar_policies ?? []),
+    ...registryCedarPolicies,
+  ];
 
   const hydratedContext = await hydrateContext(task, {
     githubTokenSecretArn: blueprintConfig?.github_token_secret_arn,
@@ -650,7 +673,7 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     ...(task.trace === true && { trace: true }),
     ...(blueprintConfig?.model_id && { model_id: blueprintConfig.model_id }),
     ...(blueprintConfig?.system_prompt_overrides && { system_prompt_overrides: blueprintConfig.system_prompt_overrides }),
-    ...(blueprintConfig?.cedar_policies && blueprintConfig.cedar_policies.length > 0 && { cedar_policies: blueprintConfig.cedar_policies }),
+    ...(mergedCedarPolicies.length > 0 && { cedar_policies: mergedCedarPolicies }),
     // Registry (#246): the resolved asset bundle. Only threaded when the
     // blueprint pinned at least one asset, so the common no-registry path keeps
     // the payload slim and the agent's ``inp.get("resolved_assets")`` stays

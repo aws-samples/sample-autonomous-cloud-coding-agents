@@ -5,12 +5,15 @@ boundary and threads a ``resolved_assets`` bundle into the invocation payload
 (see docs/design/REGISTRY.md §7/§8). This module is the agent-side consumer:
 it takes that bundle and applies each asset kind with the right mechanism.
 
-MVP (this PR) wires ``mcp_server`` end-to-end — the resolved server config is
-merged into ``<repo_dir>/.mcp.json`` alongside whatever ``channel_mcp.py``
-wrote, so the Claude Agent SDK (``setting_sources=["project"]``) picks it up at
-session start. ``cedar_policy_module`` and ``skill`` are stubs here; PR 3 fills
-them in (Cedar text appended to the PolicyEngine set; skill prompt fragments
-into the SDK setting sources).
+Each asset kind lands where it is consumed:
+- ``mcp_server`` → merged into ``<repo_dir>/.mcp.json`` **here**, alongside
+  whatever ``channel_mcp.py`` wrote, so the Claude Agent SDK
+  (``setting_sources=["project"]``) picks it up at session start.
+- ``cedar_policy_module`` → applied ORCHESTRATOR-side (the resolved text is
+  merged into the ``cedar_policies`` payload, byte-identical to inline policies);
+  the loader below is log-only.
+- ``skill`` → applied at system-prompt assembly
+  (``prompt_builder._registry_skill_addendum``); the loader below is log-only.
 
 Design note — parity with channel_mcp.py: both write ``.mcp.json`` by
 read-merge-write on the ``mcpServers`` map, never clobbering other servers.
@@ -120,41 +123,53 @@ def apply_mcp_assets(repo_dir: str, resolved_mcp_servers: list[dict[str, Any]]) 
     return written
 
 
-def apply_cedar_modules(resolved_cedar_modules: list[dict[str, Any]]) -> list[str]:
-    """Return Cedar policy text for resolved cedar_policy_module assets.
+def apply_cedar_modules(resolved_cedar_modules: list[dict[str, Any]]) -> None:
+    """Log resolved cedar_policy_module assets (#246).
 
-    STUB (PR 3): the resolver already returns these assets, but wiring the text
-    into the PolicyEngine's policy set is deferred. Returns an empty list today
-    so callers can unconditionally extend their policy list.
+    Cedar text is applied ORCHESTRATOR-side: the resolved module ``content`` is
+    merged into the payload's ``cedar_policies`` list before it reaches the
+    agent, so registry-sourced Cedar is byte-identical to inline blueprint
+    policies and flows through the same ``PolicyEngine(extra_policies=...)``
+    path (REGISTRY.md §8). The agent therefore does NOT re-apply Cedar here —
+    doing so would double-load it. This only surfaces what resolved so it shows
+    in the task log alongside the MCP/skill loaders.
     """
     if resolved_cedar_modules:
+        names = ", ".join(
+            f"{a.get('namespace')}/{a.get('name')}@{a.get('version')}"
+            for a in resolved_cedar_modules
+        )
         log(
             "TASK",
             f"registry: {len(resolved_cedar_modules)} cedar_policy_module asset(s) "
-            "resolved but not yet applied (PR 3)",
+            f"applied via cedar_policies payload: {names}",
         )
-    return []
 
 
-def apply_skills(repo_dir: str, resolved_skills: list[dict[str, Any]]) -> int:
-    """Apply resolved skill assets to the SDK setting sources.
+def apply_skills(repo_dir: str, resolved_skills: list[dict[str, Any]]) -> None:
+    """Log resolved skill assets (#246).
 
-    STUB (PR 3): returns 0 today. The resolver returns these assets; loading the
-    prompt fragments into the SDK's setting_sources is deferred to PR 3.
+    Skill prompt fragments are applied when the system prompt is assembled
+    (``prompt_builder._registry_skill_addendum``), not here — a skill is prompt
+    text, so it must land in the prompt, and the prompt is built earlier in the
+    pipeline than this loader runs. This only surfaces what resolved so it shows
+    in the task log alongside the MCP/cedar loaders.
     """
     if resolved_skills:
-        log(
-            "TASK",
-            f"registry: {len(resolved_skills)} skill asset(s) resolved but not yet applied (PR 3)",
+        names = ", ".join(
+            f"{a.get('namespace')}/{a.get('name')}@{a.get('version')}" for a in resolved_skills
         )
-    return 0
+        log("TASK", f"registry: {len(resolved_skills)} skill asset(s) applied to prompt: {names}")
 
 
 def apply_resolved_assets(repo_dir: str, resolved_assets: dict[str, list[dict]]) -> None:
     """Apply an entire resolved-asset bundle to the runtime.
 
-    Dispatches each kind to its loader. MVP applies MCP servers; cedar/skills are
-    logged-only stubs (PR 3). Safe to call with an empty bundle (no-op).
+    Dispatches each kind. MCP servers are merged into ``.mcp.json`` here; Cedar
+    modules are applied orchestrator-side (merged into ``cedar_policies``) and
+    skills are applied at system-prompt assembly — the cedar/skill calls below
+    are log-only for those, since their content lands elsewhere in the pipeline.
+    Safe to call with an empty bundle (no-op).
     """
     if not resolved_assets:
         return

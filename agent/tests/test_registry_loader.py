@@ -81,12 +81,35 @@ class TestApplyMcpAssets:
         assert "acme-pdf" in _read_mcp(str(tmp_path))["mcpServers"]
 
 
-class TestStubs:
-    def test_cedar_modules_stub_returns_empty(self):
-        assert apply_cedar_modules([{"kind": "cedar_policy_module"}]) == []
+class TestLogOnlyLoaders:
+    # Cedar text is applied orchestrator-side (merged into cedar_policies) and
+    # skill fragments at system-prompt assembly, so these loaders are log-only —
+    # they return None and must not raise.
+    def test_cedar_modules_is_noop(self):
+        asset = {
+            "kind": "cedar_policy_module",
+            "namespace": "acme",
+            "name": "guard",
+            "version": "1.0.0",
+        }
+        assert apply_cedar_modules([asset]) is None
 
-    def test_skills_stub_returns_zero(self, tmp_path):
-        assert apply_skills(str(tmp_path), [{"kind": "skill"}]) == 0
+    def test_cedar_modules_empty_is_noop(self):
+        assert apply_cedar_modules([]) is None
+
+    def test_skills_is_noop(self, tmp_path):
+        assert (
+            apply_skills(
+                str(tmp_path),
+                [
+                    {"kind": "skill", "namespace": "acme", "name": "refactor", "version": "1.0.0"},
+                ],
+            )
+            is None
+        )
+
+    def test_skills_empty_is_noop(self, tmp_path):
+        assert apply_skills(str(tmp_path), []) is None
 
 
 class TestApplyResolvedAssets:

@@ -158,11 +158,8 @@ export interface BlueprintProps {
    * Registry assets (#246) this repo pins. Each entry is a
    * ``registry://kind/namespace/name@constraint`` reference resolved at the
    * create-task boundary; the pinned versions are stamped on the TaskRecord.
-   * See docs/design/REGISTRY.md.
-   *
-   * MVP wires ``mcpServers`` end-to-end; ``cedarPolicyModules`` and ``skills``
-   * follow in PR 3. Refs are validated at synth (floating constraints are
-   * rejected before deploy).
+   * See docs/design/REGISTRY.md. All three kinds are wired end-to-end. Refs
+   * are validated at synth (floating constraints are rejected before deploy).
    */
   readonly assets?: {
     /**
@@ -170,6 +167,19 @@ export interface BlueprintProps {
      * Resolved and merged into the agent's ``.mcp.json`` at task start.
      */
     readonly mcpServers?: string[];
+
+    /**
+     * Cedar policy module refs, e.g. ``registry://cedar_policy_module/acme/guard@^1.0.0``.
+     * Resolved text is merged into the agent's Cedar policy set (byte-identical
+     * to inline ``security.cedarPolicies``).
+     */
+    readonly cedarPolicyModules?: string[];
+
+    /**
+     * Skill refs, e.g. ``registry://skill/acme/refactor@^1.0.0``. Resolved
+     * prompt fragments are appended to the agent's system prompt.
+     */
+    readonly skills?: string[];
   };
 }
 
@@ -205,6 +215,20 @@ export class Blueprint extends Construct {
   public readonly mcpServers: readonly string[];
 
   /**
+   * Cedar policy module registry refs from assets.cedarPolicyModules (#246),
+   * exposed for inspection. Flattened into the RepoConfig ``cedar_policy_modules``
+   * column and resolved at the create-task boundary.
+   */
+  public readonly cedarPolicyModules: readonly string[];
+
+  /**
+   * Skill registry refs from assets.skills (#246), exposed for inspection.
+   * Flattened into the RepoConfig ``skills`` column and resolved at the
+   * create-task boundary.
+   */
+  public readonly skills: readonly string[];
+
+  /**
    * Cedar HITL: per-task approval-gate cap from the security.approvalGateCap
    * prop, exposed for inspection. Undefined when the blueprint did not
    * configure an override — the submit path then falls back to the
@@ -218,6 +242,8 @@ export class Blueprint extends Construct {
     this.egressAllowlist = [...(props.networking?.egressAllowlist ?? [])];
     this.cedarPolicies = [...(props.security?.cedarPolicies ?? [])];
     this.mcpServers = [...(props.assets?.mcpServers ?? [])];
+    this.cedarPolicyModules = [...(props.assets?.cedarPolicyModules ?? [])];
+    this.skills = [...(props.assets?.skills ?? [])];
     this.approvalGateCap = props.security?.approvalGateCap;
 
     // Chunk 7c: emit a synth-time info annotation when the blueprint did
@@ -237,7 +263,11 @@ export class Blueprint extends Construct {
     this.node.addValidation(new RepoFormatValidation(props.repo));
     this.node.addValidation(new DomainFormatValidation(this.egressAllowlist));
     this.node.addValidation(new ApprovalGateCapValidation(this.approvalGateCap));
-    this.node.addValidation(new RegistryRefValidation(this.mcpServers));
+    this.node.addValidation(new RegistryRefValidation([
+      ...this.mcpServers,
+      ...this.cedarPolicyModules,
+      ...this.skills,
+    ]));
 
     const now = new Date().toISOString();
 
@@ -278,6 +308,12 @@ export class Blueprint extends Construct {
     }
     if (this.mcpServers.length > 0) {
       item.mcp_servers = { L: this.mcpServers.map(r => ({ S: r })) };
+    }
+    if (this.cedarPolicyModules.length > 0) {
+      item.cedar_policy_modules = { L: this.cedarPolicyModules.map(r => ({ S: r })) };
+    }
+    if (this.skills.length > 0) {
+      item.skills = { L: this.skills.map(r => ({ S: r })) };
     }
     if (this.approvalGateCap !== undefined) {
       item.approval_gate_cap = { N: String(this.approvalGateCap) };
@@ -354,6 +390,8 @@ export class Blueprint extends Construct {
     if (this.egressAllowlist.length > 0) fields.push(', #egress_allowlist = :egress_allowlist');
     if (this.cedarPolicies.length > 0) fields.push(', #cedar_policies = :cedar_policies');
     if (this.mcpServers.length > 0) fields.push(', #mcp_servers = :mcp_servers');
+    if (this.cedarPolicyModules.length > 0) fields.push(', #cedar_policy_modules = :cedar_policy_modules');
+    if (this.skills.length > 0) fields.push(', #skills = :skills');
     if (this.approvalGateCap !== undefined) fields.push(', #approval_gate_cap = :approval_gate_cap');
     return fields.join('');
   }
@@ -370,6 +408,8 @@ export class Blueprint extends Construct {
     if (this.egressAllowlist.length > 0) names['#egress_allowlist'] = 'egress_allowlist';
     if (this.cedarPolicies.length > 0) names['#cedar_policies'] = 'cedar_policies';
     if (this.mcpServers.length > 0) names['#mcp_servers'] = 'mcp_servers';
+    if (this.cedarPolicyModules.length > 0) names['#cedar_policy_modules'] = 'cedar_policy_modules';
+    if (this.skills.length > 0) names['#skills'] = 'skills';
     if (this.approvalGateCap !== undefined) names['#approval_gate_cap'] = 'approval_gate_cap';
     return names;
   }
@@ -386,6 +426,8 @@ export class Blueprint extends Construct {
     if (this.egressAllowlist.length > 0) values[':egress_allowlist'] = { L: this.egressAllowlist.map(d => ({ S: d })) };
     if (this.cedarPolicies.length > 0) values[':cedar_policies'] = { L: this.cedarPolicies.map(p => ({ S: p })) };
     if (this.mcpServers.length > 0) values[':mcp_servers'] = { L: this.mcpServers.map(r => ({ S: r })) };
+    if (this.cedarPolicyModules.length > 0) values[':cedar_policy_modules'] = { L: this.cedarPolicyModules.map(r => ({ S: r })) };
+    if (this.skills.length > 0) values[':skills'] = { L: this.skills.map(r => ({ S: r })) };
     if (this.approvalGateCap !== undefined) values[':approval_gate_cap'] = { N: String(this.approvalGateCap) };
     return values;
   }

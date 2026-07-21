@@ -34,14 +34,18 @@ A **registry asset** is a versioned, immutable-per-version runtime artifact that
 
 ## 2. Asset kinds for MVP
 
-| Kind | MVP status | Artifact | Loaded by |
-|------|-----------|----------|-----------|
-| `mcp_server` | **implemented E2E** | MCP server config JSON (`mcpServers` entry) | agent → merged into `.mcp.json` |
-| `cedar_policy_module` | resolved + staged | Cedar policy text | agent → appended to `PolicyEngine` policies |
-| `skill` | resolved + staged | prompt fragment + tool hints | agent → SDK `setting_sources` |
+| Kind | MVP status | Inline content | Applied by |
+|------|-----------|----------------|-----------|
+| `mcp_server` | **implemented E2E** | `server_config` (an `mcpServers` entry) | agent → merged into `.mcp.json` |
+| `cedar_policy_module` | **implemented** | `cedar_text` (Cedar policy source) | orchestrator → merged into the `cedar_policies` payload (byte-identical to inline blueprint policies) → agent `PolicyEngine` |
+| `skill` | **implemented** | `prompt_fragment` (+ `tool_hints`) | agent → appended to the system prompt |
 | `plugin`, `subagent`, `prompt_fragment`, `capability` | **declared, not loaded** | — | — (reserved kinds; §12 of ADR-018) |
 
-`capability` is reserved for workflows (ADR-014 vocabulary); workflows do **not** migrate into the registry in this work (ADR-018 sub-decision 12). Reserved kinds are accepted by the schema so the grammar is stable, but publish rejects them until a loader ships.
+`capability` is reserved for workflows (ADR-014 vocabulary); workflows do **not** migrate into the registry in this work (ADR-018 sub-decision 12). Reserved kinds are accepted by the grammar but publish rejects them until a loader ships.
+
+**Inline content + the `content` seam.** All three MVP kinds carry their loadable body **inline in the descriptor** (`server_config` / `cedar_text` / `prompt_fragment`), capped at 64 KiB at publish. The resolver exposes it on `ResolvedAsset.content` (for the text kinds) so callers never depend on *where* the bytes live — swapping to an S3/AgentCore-backed fetch later (for larger assets or the preferred substrate) is confined to the resolver and invisible to the orchestrator and agent.
+
+**Cedar parity.** Registry Cedar text reaches the agent through the **same** `cedar_policies` payload field as inline blueprint policies, so it is byte-identical from the `PolicyEngine`'s view — the cedar-parity contract holds by construction. **Skills** are prompt text only: a skill cannot invoke tools; its `tool_hints` are advisory prose referencing tools an MCP server separately provides (no transitive dependency — the operator attaches both).
 
 ## 3. Schema
 
