@@ -29,7 +29,7 @@
  * The full ADF spec has dozens of node types; rolling a complete converter
  * here would dwarf the rest of the integration and add a new dependency
  * surface. The agent gets a coherent text rendering; richer rendering (tables,
- * mentions) can land in a follow-up.
+ * text marks) can land in a follow-up.
  *
  * Tests: cdk/test/handlers/jira-webhook-processor.test.ts (via the processor)
  * and cdk/test/handlers/shared/jira-attachments.test.ts (comment rendering).
@@ -43,6 +43,8 @@ export interface AdfNode {
   readonly text?: string;
   readonly attrs?: {
     readonly level?: number;
+    /** `mention` node: rendered account label, including the leading `@`. */
+    readonly text?: string;
     /** `media` node: `"external"` carries a direct `url`; `"file"`/`"link"`
      *  carry an attachment `id` that needs a Jira API call to resolve. */
     readonly type?: string;
@@ -133,6 +135,9 @@ function walkAdf(node: AdfNode | undefined, out: string[], depth: number): void 
     case 'text':
       if (node.text) out.push(node.text);
       return;
+    case 'mention':
+      if (node.attrs?.text) out.push(node.attrs.text);
+      return;
     default:
       // Unknown node — descend into its content if any so embedded text
       // (e.g. inside a panel or quote) isn't lost.
@@ -142,6 +147,8 @@ function walkAdf(node: AdfNode | undefined, out: string[], depth: number): void 
 
 function textOf(node: AdfNode): string {
   if (node.type === 'text' && node.text) return node.text;
+  if (node.type === 'mention' && node.attrs?.text) return node.attrs.text;
+  if (node.type === 'hardBreak') return '\n';
   if (node.content) return node.content.map(textOf).join('');
   return '';
 }
