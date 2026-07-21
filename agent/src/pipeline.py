@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
-import subprocess
 import sys
 import time
 from typing import TYPE_CHECKING
@@ -822,19 +821,17 @@ def run_task(
                     system_prompt_overrides=system_prompt_overrides,
                 )
 
-            # Configure git and gh auth before setup_repo() uses them
-            subprocess.run(
-                ["git", "config", "--global", "user.name", "bgagent"],
-                check=True,
-                capture_output=True,
-                timeout=60,
-            )
-            subprocess.run(
-                ["git", "config", "--global", "user.email", "bgagent@noreply.github.com"],
-                check=True,
-                capture_output=True,
-                timeout=60,
-            )
+            # Configure git identity and gh auth before setup_repo() uses them.
+            # Use GIT_AUTHOR_*/GIT_COMMITTER_* env vars rather than
+            # `git config --global`: git honors these for every commit (inherited
+            # by Claude Code and the safety-net commit in post_hooks) WITHOUT
+            # writing to any on-disk config. `--global` would clobber the real
+            # ~/.gitconfig — harmless in the ephemeral container, but destructive
+            # when this pipeline runs on a developer workstation (#622).
+            os.environ["GIT_AUTHOR_NAME"] = "bgagent"
+            os.environ["GIT_AUTHOR_EMAIL"] = "bgagent@noreply.github.com"
+            os.environ["GIT_COMMITTER_NAME"] = "bgagent"
+            os.environ["GIT_COMMITTER_EMAIL"] = "bgagent@noreply.github.com"
             os.environ["GITHUB_TOKEN"] = config.github_token
             os.environ["GH_TOKEN"] = config.github_token
 
