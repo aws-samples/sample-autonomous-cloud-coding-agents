@@ -40,10 +40,13 @@ const DEFAULT_TASK_RETENTION_DAYS = 90;
  * Webhook-processor Lambda timeout (seconds). The processor is invoked
  * asynchronously (not behind the API Gateway 30s deadline), so it can run
  * longer than the receiver. #577 added serial authenticated download +
- * Bedrock screening of up to 10 Jira attachments, so 60s leaves headroom over
- * the per-attachment fetch (10s) + screening-retry budget.
+ * Bedrock screening of up to 10 Jira attachments; the per-attachment fetch
+ * timeout alone (10s) can sum past 60s across a full batch, and a mid-loop
+ * kill would orphan objects and force an idempotent retry. 300s covers the
+ * worst-case serial batch with headroom. (A future optimization could
+ * parallelize the download/screen loop and lower this again.)
  */
-const WEBHOOK_PROCESSOR_TIMEOUT_SECONDS = 60;
+const WEBHOOK_PROCESSOR_TIMEOUT_SECONDS = 300;
 
 /**
  * Marker key embedded in the auto-generated stack-wide webhook-secret

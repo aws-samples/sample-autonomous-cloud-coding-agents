@@ -40,6 +40,15 @@ jest.mock('../../src/handlers/shared/jira-oauth-resolver', () => ({
   resolveJiraOauthToken: (...args: unknown[]) => resolveJiraOauthTokenMock(...args),
 }));
 
+// The processor screens the folded comment section via the Bedrock Guardrail
+// (fail-open on intervention). Mock the client so it passes by default; the
+// comment-block-dropped test overrides it to GUARDRAIL_INTERVENED.
+const bedrockSendMock = jest.fn();
+jest.mock('@aws-sdk/client-bedrock-runtime', () => ({
+  BedrockRuntimeClient: jest.fn(() => ({ send: bedrockSendMock })),
+  ApplyGuardrailCommand: jest.fn((input: unknown) => ({ _type: 'ApplyGuardrail', input })),
+}));
+
 // #577 context enrichment. The download/comment helpers are unit-tested in
 // jira-attachments.test.ts; here we mock them to test the processor wiring
 // (folding comments into the description, fail-closed attachment rejection)
@@ -122,6 +131,9 @@ describe('jira-webhook-processor handler', () => {
     fetchRecentHumanCommentsMock.mockResolvedValue([]);
     downloadJiraAttachmentsMock.mockReset();
     downloadJiraAttachmentsMock.mockResolvedValue([]);
+    // Default: comment guardrail screening passes (no intervention).
+    bedrockSendMock.mockReset();
+    bedrockSendMock.mockResolvedValue({ action: 'NONE' });
   });
 
   test('skips missing raw_body', async () => {
@@ -813,6 +825,45 @@ describe('jira-webhook-processor handler', () => {
       const [reqBody] = createTaskCoreMock.mock.calls[0];
       expect(reqBody.task_description.length).toBeLessThanOrEqual(10_000);
       expect(reqBody.task_description).toContain('recent comments truncated');
+    });
+
+    test('a policy-tripping comment is DROPPED (fail-open) — task still created without it', async () => {
+      // Third-party comment content that trips the guardrail must not fail the
+      // reporter's task (#577 review item 4). The comment section is dropped;
+      // the task is still created from the reporter-authored description.
+      fetchRecentHumanCommentsMock.mockResolvedValueOnce([
+        { author: 'Mallory', createdAt: '2026-07-01T00:00:00Z', markdown: 'SSN 123-45-6789' },
+      ]);
+      bedrockSendMock.mockResolvedValueOnce({ action: 'GUARDRAIL_INTERVENED' });
+
+      await handler(eventWith(issue()));
+
+      expect(createTaskCoreMock).toHaveBeenCalled();
+      expect(reportIssueFailureMock).not.toHaveBeenCalled();
+      const [reqBody] = createTaskCoreMock.mock.calls[0];
+      expect(reqBody.task_description).not.toContain('## Recent comments');
+      expect(reqBody.task_description).not.toContain('123-45-6789');
+    });
+
+    test('passes a deterministic idempotency key (issue + webhook timestamp)', async () => {
+      const payload = issue();
+      payload.timestamp = 1784079623761;
+
+      await handler(eventWith(payload));
+
+      const [, ctx] = createTaskCoreMock.mock.calls[0];
+      expect(ctx.idempotencyKey).toBe('jira-ENG-42-1784079623761');
+    });
+
+    test('idempotent replay (createTaskCore 200) is not a failure and posts no ❌ comment', async () => {
+      // Override the beforeEach 201 with a 200 replay.
+      createTaskCoreMock.mockReset();
+      createTaskCoreMock.mockResolvedValueOnce({ statusCode: 200, body: JSON.stringify({ data: { task_id: 'T1' } }) });
+      fetchRecentHumanCommentsMock.mockResolvedValueOnce([]);
+
+      await handler(eventWith(issue()));
+
+      expect(reportIssueFailureMock).not.toHaveBeenCalled();
     });
   });
 

@@ -183,7 +183,8 @@ describe('downloadScreenAndStoreJiraAttachments', () => {
   });
 
   test('respects remainingSlots (combined 10-attachment cap)', async () => {
-    (global.fetch as jest.Mock).mockResolvedValue(bytesResponse(TEXT_BYTES));
+    // Fresh response per call — bytesResponse's stream is single-use.
+    (global.fetch as jest.Mock).mockImplementation(() => Promise.resolve(bytesResponse(TEXT_BYTES)));
     screenTextFileMock.mockResolvedValue({
       content: TEXT_BYTES, contentType: 'text/plain', checksum: 's', screening: { status: 'passed' },
     });
@@ -196,18 +197,58 @@ describe('downloadScreenAndStoreJiraAttachments', () => {
     expect(records).toHaveLength(2);
   });
 
-  test('respects the 50MB running total cap', async () => {
-    (global.fetch as jest.Mock).mockResolvedValue(bytesResponse(TEXT_BYTES));
+  test('enforces the 50MB total cap on REAL downloaded bytes (declared size ignored)', async () => {
+    // Each body is a real ~9MB buffer, but the declared size lies ("1"). The
+    // cap must key off real bytes, so 6×9MB = 54MB > 50MB → throws mid-batch.
+    const nineMb = Buffer.alloc(9 * 1024 * 1024, 0x61); // 'a' — valid text bytes
+    (global.fetch as jest.Mock).mockImplementation(() => Promise.resolve(bytesResponse(nineMb)));
     screenTextFileMock.mockResolvedValue({
+      content: nineMb, contentType: 'text/plain', checksum: 's', screening: { status: 'passed' },
+    });
+    const raw = Array.from({ length: 6 }, (_, i) => ({
+      id: `att-${i}`, filename: `f${i}.log`, mimeType: 'text/plain', size: 1, // under-declared
+    }));
+
+    await expect(downloadScreenAndStoreJiraAttachments(raw, 10, storageCtx()))
+      .rejects.toThrow(/total size limit/);
+  });
+
+  test('rejects a zero-byte attachment fail-closed', async () => {
+    (global.fetch as jest.Mock).mockResolvedValueOnce(bytesResponse(Buffer.alloc(0)));
+    await expect(downloadScreenAndStoreJiraAttachments(
+      [{ id: 'att-1', filename: 'empty.log', mimeType: 'text/plain', size: 0 }],
+      10,
+      storageCtx(),
+    )).rejects.toThrow(/empty \(0 bytes\)/);
+    // Nothing screened or uploaded for an empty file.
+    expect(screenTextFileMock).not.toHaveBeenCalled();
+    expect(putSendMock).not.toHaveBeenCalled();
+  });
+
+  test('deletes already-uploaded objects when a later attachment fails (no orphans)', async () => {
+    // First attachment succeeds + uploads; second fails to download → the
+    // batch throws and the first object must be cleaned up.
+    (global.fetch as jest.Mock)
+      .mockResolvedValueOnce(bytesResponse(TEXT_BYTES))
+      .mockResolvedValueOnce(bytesResponse(Buffer.alloc(0), 500));
+    screenTextFileMock.mockResolvedValueOnce({
       content: TEXT_BYTES, contentType: 'text/plain', checksum: 's', screening: { status: 'passed' },
     });
-    const nineMb = 9 * 1024 * 1024;
-    // 6 x 9MB = 54MB > 50MB total; only the first 5 (45MB) fit.
-    const raw = Array.from({ length: 6 }, (_, i) => ({
-      id: `att-${i}`, filename: `f${i}.log`, mimeType: 'text/plain', size: nineMb,
-    }));
-    const records = await downloadScreenAndStoreJiraAttachments(raw, 10, storageCtx());
-    expect(records).toHaveLength(5);
+
+    await expect(downloadScreenAndStoreJiraAttachments(
+      [
+        { id: 'att-1', filename: 'a.log', mimeType: 'text/plain', size: TEXT_BYTES.length },
+        { id: 'att-2', filename: 'b.log', mimeType: 'text/plain', size: TEXT_BYTES.length },
+      ],
+      10,
+      storageCtx(),
+    )).rejects.toBeInstanceOf(JiraAttachmentError);
+
+    // One PutObject (att-1) then one DeleteObjects cleanup covering it.
+    const deleteCalls = putSendMock.mock.calls.filter(
+      (c: any) => c[0]?.constructor?.name === 'DeleteObjectsCommand' || c[0]?.input?.Delete,
+    );
+    expect(deleteCalls.length).toBeGreaterThanOrEqual(1);
   });
 
   test('magic-byte mismatch throws JiraAttachmentError (fail-closed)', async () => {

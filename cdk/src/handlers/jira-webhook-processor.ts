@@ -18,7 +18,7 @@
  */
 
 import * as crypto from 'crypto';
-import { BedrockRuntimeClient } from '@aws-sdk/client-bedrock-runtime';
+import { BedrockRuntimeClient, ApplyGuardrailCommand } from '@aws-sdk/client-bedrock-runtime';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { S3Client } from '@aws-sdk/client-s3';
 import { DynamoDBDocumentClient, GetCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
@@ -27,6 +27,7 @@ import type { ScreeningConfig } from './shared/attachment-screening';
 import { createTaskCore } from './shared/create-task-core';
 import { extractDescriptionMarkdown } from './shared/jira-adf';
 import {
+  cleanupPreScreenedAttachments,
   downloadScreenAndStoreJiraAttachments,
   fetchRecentHumanComments,
   JiraAttachmentError,
@@ -45,6 +46,9 @@ const PROJECT_MAPPING_TABLE = process.env.JIRA_PROJECT_MAPPING_TABLE_NAME!;
 const USER_MAPPING_TABLE = process.env.JIRA_USER_MAPPING_TABLE_NAME!;
 const WORKSPACE_REGISTRY_TABLE = process.env.JIRA_WORKSPACE_REGISTRY_TABLE_NAME;
 const DEFAULT_LABEL_FILTER = 'bgagent';
+
+/** Max length of the idempotency key (matches validation's IDEMPOTENCY_KEY_PATTERN). */
+const MAX_IDEMPOTENCY_KEY_LENGTH = 128;
 
 // Attachment enrichment (#577). The processor downloads Jira `media` file
 // attachments, screens them through the Bedrock Guardrail, and uploads the
@@ -415,7 +419,13 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     const tenantCtx = { cloudId, registryTableName: WORKSPACE_REGISTRY_TABLE };
 
     // Recent human comments — advisory context, never gate task creation.
-    comments = await fetchRecentHumanComments(tenantCtx, issue.key);
+    const fetchedComments = await fetchRecentHumanComments(tenantCtx, issue.key);
+    // Fail-OPEN on comment content policy: comments are third-party text the
+    // reporter didn't write, so a policy-tripping comment must not fail the
+    // reporter's task. Screen the rendered comment section on its own and drop
+    // it (not the task) if the guardrail intervenes. (createTaskCore separately
+    // screens the description, which the reporter authored.)
+    comments = await screenCommentsOrDrop(fetchedComments, issue.key, cloudId);
 
     const rawAttachments = issue.fields?.attachment;
     if (Array.isArray(rawAttachments) && rawAttachments.length > 0) {
@@ -481,10 +491,31 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       channelSource: 'jira',
       channelMetadata,
       taskId,
+      // Deterministic key so an async re-delivery of the same trigger event
+      // dedupes instead of minting a second task (and re-downloading every
+      // attachment). Keyed on issue + webhook timestamp, matching the
+      // receiver's dedup key shape.
+      idempotencyKey: buildIdempotencyKey(issue.key, payload.timestamp),
       ...(preScreenedAttachments.length > 0 && { preScreenedAttachments }),
     },
     requestId,
   );
+
+  if (result.statusCode === 200) {
+    // Idempotent replay: this is a duplicate delivery of the same trigger event
+    // (createTaskCore matched the deterministic idempotency key to an existing
+    // task). Not a failure — but the attachments we re-downloaded and uploaded
+    // this round are keyed on a fresh taskId the replayed task doesn't
+    // reference, so delete them rather than orphan them. No ❌ comment.
+    logger.info('Jira-triggered task was an idempotent replay (duplicate delivery)', {
+      issue_key: issue.key,
+      request_id: requestId,
+    });
+    if (preScreenedAttachments.length > 0 && s3Client && ATTACHMENTS_BUCKET) {
+      await cleanupPreScreenedAttachments(s3Client, ATTACHMENTS_BUCKET, preScreenedAttachments);
+    }
+    return;
+  }
 
   if (result.statusCode !== 201) {
     logger.warn('Jira-triggered task creation returned non-201', {
@@ -492,6 +523,11 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       body: result.body,
       issue_key: issue.key,
     });
+    // Don't orphan the attachment objects we uploaded before this call failed —
+    // createTaskCore only rolls back its own inline uploads, not ours.
+    if (preScreenedAttachments.length > 0 && s3Client && ATTACHMENTS_BUCKET) {
+      await cleanupPreScreenedAttachments(s3Client, ATTACHMENTS_BUCKET, preScreenedAttachments);
+    }
     await safeReportIssueFailure(
       issue.key,
       cloudId,
@@ -646,6 +682,71 @@ function truncateCommentSection(section: string, budget: number): string {
   const room = budget - COMMENT_TRUNCATION_NOTICE.length;
   if (room <= 0) return '';
   return section.slice(0, room) + COMMENT_TRUNCATION_NOTICE;
+}
+
+/**
+ * Screen the rendered comment block through the Bedrock Guardrail on its own,
+ * so third-party comment content that trips the policy is DROPPED (fail-open)
+ * rather than gating the reporter's task. Returns the comments unchanged when
+ * they pass, and `[]` when the guardrail intervenes or is unavailable — the
+ * task still proceeds with the reporter-authored summary/description (which
+ * createTaskCore screens separately). This keeps the comment-enrichment
+ * contract fail-open end to end (issue #577 review, item 4).
+ */
+async function screenCommentsOrDrop(
+  comments: RenderedComment[],
+  issueKey: string,
+  cloudId: string,
+): Promise<RenderedComment[]> {
+  if (comments.length === 0) return comments;
+  if (!bedrockClient || !GUARDRAIL_ID || !GUARDRAIL_VERSION) {
+    // No guardrail configured — drop unscreened third-party text rather than
+    // route it, unscreened, into the agent context.
+    logger.warn('Dropping Jira comments: guardrail not configured to screen them', {
+      issue_key: issueKey,
+      jira_cloud_id: cloudId,
+    });
+    return [];
+  }
+  const text = renderCommentSection(comments);
+  try {
+    const result = await bedrockClient.send(new ApplyGuardrailCommand({
+      guardrailIdentifier: GUARDRAIL_ID,
+      guardrailVersion: GUARDRAIL_VERSION,
+      source: 'INPUT',
+      content: [{ text: { text } }],
+    }));
+    if (result.action === 'GUARDRAIL_INTERVENED') {
+      logger.warn('Dropping Jira comments: blocked by content policy (task still proceeds)', {
+        issue_key: issueKey,
+        jira_cloud_id: cloudId,
+      });
+      return [];
+    }
+    return comments;
+  } catch (err) {
+    // Fail-open on a screening outage too — comments are advisory.
+    logger.warn('Dropping Jira comments: screening unavailable (task still proceeds)', {
+      issue_key: issueKey,
+      jira_cloud_id: cloudId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return [];
+  }
+}
+
+/**
+ * Deterministic idempotency key for a trigger event: `<issueKey>#<timestamp>`,
+ * sanitized to the allowed key charset (`[A-Za-z0-9_-]{1,128}`). A webhook
+ * re-delivery of the same event yields the same key so createTaskCore dedupes
+ * instead of creating a duplicate task (and re-downloading attachments). Falls
+ * back to undefined if we can't form a stable key, preserving prior behavior.
+ */
+function buildIdempotencyKey(issueKey: string, timestamp: number | undefined): string | undefined {
+  if (typeof timestamp !== 'number' || !Number.isFinite(timestamp)) return undefined;
+  const raw = `jira-${issueKey}-${timestamp}`;
+  const sanitized = raw.replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, MAX_IDEMPOTENCY_KEY_LENGTH);
+  return sanitized || undefined;
 }
 
 /**

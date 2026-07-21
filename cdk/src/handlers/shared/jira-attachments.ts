@@ -43,7 +43,7 @@
  * Tests: cdk/test/handlers/shared/jira-attachments.test.ts
  */
 
-import { PutObjectCommand, type S3Client } from '@aws-sdk/client-s3';
+import { PutObjectCommand, DeleteObjectsCommand, type S3Client } from '@aws-sdk/client-s3';
 import { screenImage, screenTextFile, AttachmentScreeningError, type ScreeningConfig } from './attachment-screening';
 import { estimateImageTokensFromBuffer } from './image-tokens';
 import { extractDescriptionMarkdown } from './jira-adf';
@@ -346,126 +346,197 @@ export async function downloadScreenAndStoreJiraAttachments(
   }
 
   const records: PassedAttachmentRecord[] = [];
+  // Keys uploaded so far this batch. On any failure we delete them so a
+  // partially-successful batch doesn't orphan objects in S3 (the caller's
+  // `cleanupOrphanedAttachments` only tracks inline uploads, not these).
+  const uploadedKeys: string[] = [];
+  // Running total of REAL downloaded bytes. selectAttachments enforces the
+  // total against attacker-declared `size`, which can under-report; enforce
+  // the real total here so a batch that lies about sizes can't blow past the
+  // documented 50 MB ceiling.
+  let totalBytes = 0;
 
-  for (const att of selected) {
-    let outcome = await fetchAttachmentBytes(token.accessToken, ctx.cloudId, att.id);
+  try {
+    for (const att of selected) {
+      let outcome = await fetchAttachmentBytes(token.accessToken, ctx.cloudId, att.id);
 
-    // Reactive refresh-and-retry-once on auth rejection, mirroring
-    // jira-feedback.postCommentWithResult: the stored token may be dead
-    // despite a not-yet-reached expiry (server-side revocation).
-    if (outcome.kind === 'auth') {
-      logger.info('Jira attachment download got auth rejection — forcing token refresh and retrying once', {
-        jira_cloud_id: ctx.cloudId,
-        attachment_filename: att.filename,
-      });
-      const refreshed = await resolveJiraOauthToken(ctx.cloudId, ctx.registryTableName, { forceRefresh: true });
-      if (!refreshed || refreshed.accessToken === token.accessToken) {
+      // Reactive refresh-and-retry-once on auth rejection, mirroring
+      // jira-feedback.postCommentWithResult: the stored token may be dead
+      // despite a not-yet-reached expiry (server-side revocation).
+      if (outcome.kind === 'auth') {
+        logger.info('Jira attachment download got auth rejection — forcing token refresh and retrying once', {
+          jira_cloud_id: ctx.cloudId,
+          attachment_filename: att.filename,
+        });
+        const refreshed = await resolveJiraOauthToken(ctx.cloudId, ctx.registryTableName, { forceRefresh: true });
+        if (!refreshed || refreshed.accessToken === token.accessToken) {
+          throw new JiraAttachmentError(
+            `Attachment '${att.filename}' could not be downloaded: Jira rejected the credential.`,
+          );
+        }
+        token = refreshed;
+        outcome = await fetchAttachmentBytes(token.accessToken, ctx.cloudId, att.id);
+      }
+
+      if (outcome.kind === 'auth') {
         throw new JiraAttachmentError(
           `Attachment '${att.filename}' could not be downloaded: Jira rejected the credential.`,
         );
       }
-      token = refreshed;
-      outcome = await fetchAttachmentBytes(token.accessToken, ctx.cloudId, att.id);
-    }
-
-    if (outcome.kind === 'auth') {
-      throw new JiraAttachmentError(
-        `Attachment '${att.filename}' could not be downloaded: Jira rejected the credential.`,
-      );
-    }
-    if (outcome.kind === 'error') {
-      throw new JiraAttachmentError(
-        `Attachment '${att.filename}' could not be downloaded (${outcome.message}).`,
-      );
-    }
-
-    const content = outcome.content;
-
-    // The declared metadata MIME already passed the allowlist; confirm the
-    // bytes actually match it (blocks a masquerading/polyglot payload).
-    if (!validateMagicBytes(content, att.mimeType)) {
-      throw new JiraAttachmentError(
-        `Attachment '${att.filename}' content does not match its declared type '${att.mimeType}'.`,
-      );
-    }
-
-    // Screen through the same Bedrock Guardrail pipeline as inline/URL
-    // attachments. Any block or screening failure is fail-closed.
-    let screenResult;
-    try {
-      screenResult = att.isImage
-        ? await screenImage(content, att.mimeType, att.filename, ctx.screeningConfig)
-        : await screenTextFile(content, att.mimeType, att.filename, ctx.screeningConfig);
-    } catch (err) {
-      if (err instanceof AttachmentScreeningError) {
+      if (outcome.kind === 'error') {
         throw new JiraAttachmentError(
-          `Attachment '${att.filename}' was blocked by content screening: ${err.message}`,
+          `Attachment '${att.filename}' could not be downloaded (${outcome.message}).`,
+        );
+      }
+
+      const content = outcome.content;
+
+      // Enforce the total-size ceiling on real bytes (declared sizes can lie).
+      totalBytes += content.length;
+      if (totalBytes > MAX_TOTAL_ATTACHMENT_SIZE_BYTES) {
+        throw new JiraAttachmentError(
+          `Issue attachments exceed the total size limit of ${MAX_TOTAL_ATTACHMENT_SIZE_BYTES} bytes.`,
+        );
+      }
+
+      // Reject an empty body. A 0-byte file (a common user mistake) would pass
+      // magic-byte + screening but trip createAttachmentRecord's size guard
+      // with a plain Error — outside the fail-closed conversion — so surface it
+      // as a JiraAttachmentError here to keep the reject-with-comment contract.
+      if (content.length === 0) {
+        throw new JiraAttachmentError(
+          `Attachment '${att.filename}' is empty (0 bytes).`,
+        );
+      }
+
+      // The declared metadata MIME already passed the allowlist; confirm the
+      // bytes actually match it (blocks a masquerading/polyglot payload).
+      if (!validateMagicBytes(content, att.mimeType)) {
+        throw new JiraAttachmentError(
+          `Attachment '${att.filename}' content does not match its declared type '${att.mimeType}'.`,
+        );
+      }
+
+      // Screen through the same Bedrock Guardrail pipeline as inline/URL
+      // attachments. Any block or screening failure is fail-closed.
+      let screenResult;
+      try {
+        screenResult = att.isImage
+          ? await screenImage(content, att.mimeType, att.filename, ctx.screeningConfig)
+          : await screenTextFile(content, att.mimeType, att.filename, ctx.screeningConfig);
+      } catch (err) {
+        if (err instanceof AttachmentScreeningError) {
+          throw new JiraAttachmentError(
+            `Attachment '${att.filename}' was blocked by content screening: ${err.message}`,
+            { cause: err },
+          );
+        }
+        throw new JiraAttachmentError(
+          `Attachment '${att.filename}' could not be screened: ${err instanceof Error ? err.message : String(err)}`,
           { cause: err },
         );
       }
-      throw new JiraAttachmentError(
-        `Attachment '${att.filename}' could not be screened: ${err instanceof Error ? err.message : String(err)}`,
-        { cause: err },
-      );
-    }
 
-    if (screenResult.screening.status === 'blocked') {
-      throw new JiraAttachmentError(
-        `Attachment '${att.filename}' was blocked by content policy: ${screenResult.screening.categories.join(', ')}`,
-      );
-    }
+      if (screenResult.screening.status === 'blocked') {
+        throw new JiraAttachmentError(
+          `Attachment '${att.filename}' was blocked by content policy: ${screenResult.screening.categories.join(', ')}`,
+        );
+      }
 
-    // Upload the cleaned bytes under the same key layout as the inline/URL
-    // paths so downstream hydration/authorization is uniform.
-    const attachmentId = att.id;
-    const s3Key = `${ATTACHMENT_OBJECT_KEY_PREFIX}${ctx.userId}/${ctx.taskId}/${attachmentId}/${att.filename}`;
-    let putResult;
-    try {
-      putResult = await ctx.s3Client.send(new PutObjectCommand({
-        Bucket: ctx.bucketName,
-        Key: s3Key,
-        Body: screenResult.content,
-        ContentType: att.mimeType,
-      }));
-    } catch (s3Err) {
-      logger.error('S3 upload failed for Jira attachment', {
+      // Upload the cleaned bytes under the same key layout as the inline/URL
+      // paths so downstream hydration/authorization is uniform.
+      const attachmentId = att.id;
+      const s3Key = `${ATTACHMENT_OBJECT_KEY_PREFIX}${ctx.userId}/${ctx.taskId}/${attachmentId}/${att.filename}`;
+      let putResult;
+      try {
+        putResult = await ctx.s3Client.send(new PutObjectCommand({
+          Bucket: ctx.bucketName,
+          Key: s3Key,
+          Body: screenResult.content,
+          ContentType: att.mimeType,
+        }));
+      } catch (s3Err) {
+        logger.error('S3 upload failed for Jira attachment', {
+          jira_cloud_id: ctx.cloudId,
+          attachment_filename: att.filename,
+          s3_key: s3Key,
+          error: s3Err instanceof Error ? s3Err.message : String(s3Err),
+          metric_type: 'jira_attachment_upload_failure',
+        });
+        throw new JiraAttachmentError(
+          `Attachment '${att.filename}' could not be stored.`,
+          { cause: s3Err },
+        );
+      }
+      uploadedKeys.push(s3Key);
+
+      const tokenEstimate = att.isImage
+        ? estimateImageTokensFromBuffer(screenResult.content, att.mimeType)
+        : undefined;
+
+      records.push(createAttachmentRecord({
+        attachment_id: attachmentId,
+        type: att.isImage ? 'image' : 'file',
+        content_type: att.mimeType,
+        filename: att.filename,
+        s3_key: s3Key,
+        s3_version_id: putResult.VersionId ?? 'unversioned',
+        size_bytes: screenResult.content.length,
+        screening: { status: 'passed', screened_at: new Date().toISOString() },
+        checksum_sha256: screenResult.checksum,
+        ...(tokenEstimate !== undefined && { token_estimate: tokenEstimate }),
+      }) as PassedAttachmentRecord);
+
+      logger.info('Jira attachment downloaded, screened, and stored', {
         jira_cloud_id: ctx.cloudId,
         attachment_filename: att.filename,
         s3_key: s3Key,
-        error: s3Err instanceof Error ? s3Err.message : String(s3Err),
-        metric_type: 'jira_attachment_upload_failure',
       });
-      throw new JiraAttachmentError(
-        `Attachment '${att.filename}' could not be stored.`,
-        { cause: s3Err },
-      );
     }
-
-    const tokenEstimate = att.isImage
-      ? estimateImageTokensFromBuffer(screenResult.content, att.mimeType)
-      : undefined;
-
-    records.push(createAttachmentRecord({
-      attachment_id: attachmentId,
-      type: att.isImage ? 'image' : 'file',
-      content_type: att.mimeType,
-      filename: att.filename,
-      s3_key: s3Key,
-      s3_version_id: putResult.VersionId ?? 'unversioned',
-      size_bytes: screenResult.content.length,
-      screening: { status: 'passed', screened_at: new Date().toISOString() },
-      checksum_sha256: screenResult.checksum,
-      ...(tokenEstimate !== undefined && { token_estimate: tokenEstimate }),
-    }) as PassedAttachmentRecord);
-
-    logger.info('Jira attachment downloaded, screened, and stored', {
-      jira_cloud_id: ctx.cloudId,
-      attachment_filename: att.filename,
-      s3_key: s3Key,
-    });
+  } catch (err) {
+    // Fail-closed: a mid-batch failure must not orphan the objects already
+    // uploaded this batch. Best-effort delete (the 90-day lifecycle is the
+    // backstop) before re-throwing so the caller still rejects the task.
+    await deleteS3Objects(ctx.s3Client, ctx.bucketName, uploadedKeys);
+    throw err;
   }
 
   return records;
+}
+
+/**
+ * Best-effort deletion of S3 objects by key. Never throws — cleanup failure is
+ * logged and left to the bucket's lifecycle policy. Mirrors
+ * `create-task-core.cleanupOrphanedAttachments`.
+ */
+async function deleteS3Objects(s3Client: S3Client, bucketName: string, keys: readonly string[]): Promise<void> {
+  if (keys.length === 0) return;
+  try {
+    const result = await s3Client.send(new DeleteObjectsCommand({
+      Bucket: bucketName,
+      Delete: { Objects: keys.map((Key) => ({ Key })) },
+    }));
+    if (result.Errors && result.Errors.length > 0) {
+      logger.error('Partial cleanup of Jira attachment objects — some remain', {
+        failed_keys: result.Errors.map((e) => e.Key),
+      });
+    }
+  } catch (err) {
+    logger.error('Cleanup of Jira attachment objects failed (90-day lifecycle is backstop)', {
+      keys,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/** Delete previously-stored pre-screened Jira attachment objects (exported for
+ *  the processor to call when createTaskCore rejects the task after upload). */
+export async function cleanupPreScreenedAttachments(
+  s3Client: S3Client,
+  bucketName: string,
+  records: readonly PassedAttachmentRecord[],
+): Promise<void> {
+  await deleteS3Objects(s3Client, bucketName, records.map((r) => r.s3_key).filter((k): k is string => Boolean(k)));
 }
 
 /** A rendered issue comment folded into the task context. */
