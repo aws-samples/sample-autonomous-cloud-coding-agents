@@ -6,7 +6,6 @@ import asyncio
 import hashlib
 import inspect
 import os
-import subprocess
 import sys
 import time
 from typing import TYPE_CHECKING
@@ -24,7 +23,11 @@ from config import (
     resolve_linear_api_token,
 )
 from context import assemble_prompt, fetch_github_issue
-from jira_reactions import comment_task_finished, comment_task_started
+from jira_reactions import (
+    comment_task_started,
+    transition_pr_opened,
+    transition_task_started,
+)
 from linear_reactions import react_task_finished, react_task_started
 from models import AgentResult, HydratedContext, RepoSetup, TaskConfig, TaskResult
 from observability import current_otel_trace_id, task_span
@@ -467,6 +470,21 @@ def _resolve_overall_task_status(
     agent_status = agent_result.status
     err = agent_result.error
 
+    # ABCA-662: a max_turns cap is a CORRECT classification, but on its own it
+    # doesn't say WHETHER the task genuinely needed the turns or SPUN on a failing
+    # operation until it ran out (662 thrashed on a failing `git push` → invalid
+    # credentials, retried every which way, and capped). When the stuck-guard's
+    # trailing window was failure-dominated, append its one-line summary so the
+    # reason distinguishes "ran long" from "looped on an error" — the classifier
+    # still buckets it as max_turns, but a human sees the real cause. Only enriches
+    # the max_turns reason; a task that used its turns productively adds nothing.
+    if err and "error_max_turns" in err:
+        from hooks import last_stuck_summary
+
+        stuck = last_stuck_summary()
+        if stuck and stuck not in err:
+            err = f"{err} — {stuck}"
+
     if agent_status in ("success", "end_turn") and build_ok:
         return "success", err
 
@@ -697,9 +715,12 @@ def run_task(
         # in principle dispatch a second run_task in the same process — reset
         # here so a stale BLOCKED[...] reason can never leak into this task's
         # terminal error_message (the latch is a scalar, not task_id-keyed).
-        from hooks import reset_blocker_reason
+        from hooks import reset_blocker_reason, reset_stuck_summary
 
         reset_blocker_reason()
+        # ABCA-662: same per-task reset for the stuck-guard recent-failure latch,
+        # so a prior task's observation can't leak into this task's max_turns copy.
+        reset_stuck_summary()
         # --trace accumulator (design §10.1): when the task opted into
         # trace, ``_TrajectoryWriter`` keeps an in-memory copy of each
         # event so the pipeline can gzip+upload the full trajectory to
@@ -801,19 +822,17 @@ def run_task(
                     system_prompt_overrides=system_prompt_overrides,
                 )
 
-            # Configure git and gh auth before setup_repo() uses them
-            subprocess.run(
-                ["git", "config", "--global", "user.name", "bgagent"],
-                check=True,
-                capture_output=True,
-                timeout=60,
-            )
-            subprocess.run(
-                ["git", "config", "--global", "user.email", "bgagent@noreply.github.com"],
-                check=True,
-                capture_output=True,
-                timeout=60,
-            )
+            # Configure git identity and gh auth before setup_repo() uses them.
+            # Use GIT_AUTHOR_*/GIT_COMMITTER_* env vars rather than
+            # `git config --global`: git honors these for every commit (inherited
+            # by Claude Code and the safety-net commit in post_hooks) WITHOUT
+            # writing to any on-disk config. `--global` would clobber the real
+            # ~/.gitconfig — harmless in the ephemeral container, but destructive
+            # when this pipeline runs on a developer workstation (#622).
+            os.environ["GIT_AUTHOR_NAME"] = "bgagent"
+            os.environ["GIT_AUTHOR_EMAIL"] = "bgagent@noreply.github.com"
+            os.environ["GIT_COMMITTER_NAME"] = "bgagent"
+            os.environ["GIT_COMMITTER_EMAIL"] = "bgagent@noreply.github.com"
             os.environ["GITHUB_TOKEN"] = config.github_token
             os.environ["GH_TOKEN"] = config.github_token
 
@@ -859,6 +878,14 @@ def run_task(
             # Remote MCP can't be used from a headless agent). No-op for
             # non-Jira tasks. Best-effort; failures are logged, never block.
             comment_task_started(
+                config.channel_source,
+                config.channel_metadata,
+            )
+
+            # Move the Jira card To Do → In Progress so the board reflects that
+            # work has started (issue #572). No-op for non-Jira tasks.
+            # Best-effort; failures are logged and never block the pipeline.
+            transition_task_started(
                 config.channel_source,
                 config.channel_metadata,
             )
@@ -1058,6 +1085,14 @@ def run_task(
                 post_span.set_attribute("pr.url", pr_url or "")
             if pr_url:
                 progress.write_agent_milestone("pr_created", pr_url)
+                # Move the Jira card In Progress → In Review now that a PR is
+                # open (issue #572). Only fires when a PR was actually opened —
+                # failed / no-PR tasks leave the card where humans can see the
+                # failure comment. No-op for non-Jira tasks; best-effort.
+                transition_pr_opened(
+                    config.channel_source,
+                    config.channel_metadata,
+                )
 
             # Memory write — capture task episode and repo learnings
             memory_written = False
@@ -1107,14 +1142,14 @@ def run_task(
                 started_reaction_id=linear_eyes_reaction_id,
             )
 
-            # Terminal status comment on the Jira issue (REST shim, with the
-            # PR link when one was opened). No-op for non-Jira tasks.
-            comment_task_finished(
-                config.channel_source,
-                config.channel_metadata,
-                success=(overall_status == "success"),
-                pr_url=pr_url,
-            )
+            # NOTE: the terminal status comment on the Jira issue is NOT posted
+            # here. Since issue #573 the deterministic fan-out plane
+            # (``cdk/src/handlers/fanout-task-events.ts`` ``dispatchToJira``)
+            # owns the Jira final-status comment — it carries cost/turns/
+            # duration and, crucially, fires even if this agent crashes before
+            # reaching this point (max-turns, OOM). Posting here too would
+            # double-comment. The agent still posts the *start* comment
+            # (``comment_task_started`` above) for in-flight progress.
 
             # --trace trajectory S3 upload (design §10.1). Runs AFTER
             # post-hooks but BEFORE ``write_terminal`` so the resulting
@@ -1245,14 +1280,11 @@ def run_task(
                 success=False,
                 started_reaction_id=linear_eyes_reaction_id,
             )
-            # Best-effort failure comment on the Jira issue. No-op for
-            # non-Jira tasks; network failures are swallowed.
-            comment_task_finished(
-                config.channel_source,
-                config.channel_metadata,
-                success=False,
-                pr_url=None,
-            )
+            # NOTE: no Jira failure comment here — the fan-out plane's
+            # ``dispatchToJira`` (issue #573) owns the Jira terminal comment
+            # and fires on the platform side even when this crash path runs,
+            # so posting here would double-comment. (Contrast the Linear ❌
+            # reaction above, which the fan-out plane does not replicate.)
             raise
 
 
@@ -1274,6 +1306,42 @@ _PAYLOAD_STR_KEYS = frozenset({"issue_number", "pr_number"})
 #: signature (not inside the function, so patching ``run_task`` in tests can't
 #: shadow it). Any payload key not in this set is ignored, never passed through.
 _RUN_TASK_PARAMS = frozenset(inspect.signature(run_task).parameters)
+
+#: Orchestrator payload keys we KNOW about that ``run_task`` does not (yet)
+#: accept as a parameter. Dropping one of these is expected today (e.g.
+#: ``base_branch`` is consumed via ``hydrated_context``, not a run_task kwarg;
+#: ``github_token_secret_arn`` is resolved before this call), but a key that
+#: shows up here AND is silently dropped is exactly the "wired one side of an
+#: orchestrator→agent field, forgot the other" no-op that ABCA-487 was — so we
+#: WARN when we drop one, making a future contract gap visible instead of silent.
+#: Keys not in this set (genuinely foreign) are dropped quietly as before.
+_KNOWN_ORCHESTRATOR_KEYS = frozenset(
+    {
+        "build_command",
+        # ``lint_command``'s sibling: neither is a run_task param today (the build/
+        # lint commands are consumed via repo config, not passed through here), but
+        # listing both makes a future "wired build_command, forgot lint_command"
+        # contract gap WARN instead of drop silently (N4).
+        "lint_command",
+        "merge_branches",
+        "base_branch",
+        # NB: ``github_token_secret_arn`` is deliberately NOT listed (N3). It is
+        # ALWAYS in the payload and ALWAYS dropped here (resolved via the
+        # ``GITHUB_TOKEN_SECRET_ARN`` env in build_config, never a run_task
+        # param), so listing it would fire the known-key WARN on 100% of ECS
+        # boots — pure noise that dilutes the channel meant to surface genuine
+        # future "wired one side, forgot the other" gaps. It falls through as a
+        # quiet foreign-key drop instead.
+        # AgentCore's server.py exports task_started_at as TASK_STARTED_AT, which
+        # hooks._remaining_maxlifetime_s() uses to clip the Cedar HITL approval-gate
+        # maxLifetime. The ECS boot path bypasses server.py and does not (yet) set
+        # that env, so this key is dropped here — a silent AgentCore↔ECS HITL
+        # divergence (fail-open: the clip returns None, gate uses the task default).
+        # Listing it makes the drop WARN so the parity gap is visible until the ECS
+        # strategy sets TASK_STARTED_AT in containerEnv (tracked as a follow-up).
+        "task_started_at",
+    }
+)
 
 
 def run_task_from_payload(payload: dict) -> dict:
@@ -1301,13 +1369,42 @@ def run_task_from_payload(payload: dict) -> dict:
     for key, value in (payload or {}).items():
         target = _PAYLOAD_KEY_ALIASES.get(key, key)
         if target not in _RUN_TASK_PARAMS:
-            continue  # not a run_task parameter — ignore (e.g. github_token_secret_arn)
+            # Not a run_task parameter — ignore. A KNOWN orchestrator key being
+            # dropped is expected today but worth a breadcrumb: if run_task ever
+            # grows a matching param, this WARN is where a "forgot to wire it
+            # through" no-op surfaces (N4 / ABCA-487 class). Foreign keys are
+            # dropped quietly.
+            if key in _KNOWN_ORCHESTRATOR_KEYS and value is not None:
+                log(
+                    "WARN",
+                    f"run_task_from_payload: dropping known orchestrator key '{key}' "
+                    f"(not a run_task parameter) — consumed elsewhere or not yet wired",
+                )
+            continue
         if value is None:
             continue  # let run_task's default apply
         if target in _PAYLOAD_STR_KEYS:
             value = str(value)
         elif target == "max_turns":
-            value = int(value)
+            # Defensive: a malformed max_turns must not crash the whole boot —
+            # drop it and let run_task's default apply (with a breadcrumb) rather
+            # than raise. Unlike the str keys above, this is the one field with a
+            # non-str coercion, so it also guards the surprising int() cases the
+            # orchestrator never emits but a hand-edited payload might: a bool
+            # (``int(True) == 1``) and a non-integral float (``int(3.9) == 3``)
+            # would both silently become a bogus turn count (N4).
+            if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+                log("WARN", f"run_task_from_payload: ignoring non-integer max_turns {value!r}")
+                continue
+            try:
+                coerced = int(value)
+            except (TypeError, ValueError):
+                log("WARN", f"run_task_from_payload: ignoring non-integer max_turns {value!r}")
+                continue
+            if isinstance(value, float) and coerced != value:
+                log("WARN", f"run_task_from_payload: ignoring non-integral max_turns {value!r}")
+                continue
+            value = coerced
         kwargs[target] = value
 
     kwargs.setdefault("aws_region", os.environ.get("AWS_REGION", ""))

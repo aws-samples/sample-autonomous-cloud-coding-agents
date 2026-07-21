@@ -557,20 +557,27 @@ describe('EcsAgentCluster artifacts bucket (#299 ECS-parity)', () => {
     });
   });
 
-  test('grants the task role READ + WRITE on the artifacts bucket (it delivers the plan artifact)', () => {
+  test('does NOT grant the task role write on the artifacts bucket (the scoped SessionRole owns delivery)', () => {
+    // #596 review B1: coding/decompose-v1 delivers via the assumed SessionRole
+    // (scoped to artifacts/${task_id}/*), exactly like the AgentCore runtime —
+    // whose task role likewise has no direct artifacts grant. A whole-bucket
+    // grantReadWrite here would over-privilege the untrusted-code role and break
+    // cross-task isolation. The task role gets only the ARTIFACTS_BUCKET_NAME env.
     const template = createWithArtifactsBucket();
     const policies = template.findResources('AWS::IAM::Policy');
-    const s3Actions = new Set<string>();
+    const s3WriteActions = new Set<string>();
     for (const policy of Object.values(policies)) {
       for (const stmt of policy.Properties.PolicyDocument.Statement) {
         const actions = Array.isArray(stmt.Action) ? stmt.Action : [stmt.Action];
         for (const a of actions) {
-          if (typeof a === 'string' && a.startsWith('s3:')) s3Actions.add(a);
+          // Only true S3 mutations — Put*/Delete*. The read-only payload bucket
+          // (#502) legitimately grants GetObject*/List* on the task role, so those
+          // are NOT flagged; what must be absent is any write to any S3 bucket.
+          if (typeof a === 'string' && /^s3:(Put|Delete)/.test(a)) s3WriteActions.add(a);
         }
       }
     }
-    expect([...s3Actions].some(a => a === 's3:GetObject' || a === 's3:GetObject*')).toBe(true);
-    expect([...s3Actions].some(a => a === 's3:PutObject' || a === 's3:PutObject*')).toBe(true);
+    expect([...s3WriteActions]).toEqual([]);
   });
 
   test('omits ARTIFACTS_BUCKET_NAME when no artifacts bucket is provided', () => {
