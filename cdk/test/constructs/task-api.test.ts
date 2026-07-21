@@ -204,6 +204,48 @@ describe('TaskApi construct', () => {
     });
   });
 
+  test('allows large HMAC-verified Jira webhook bodies through the WAF common rule set', () => {
+    const webAcls = baseTemplate.findResources('AWS::WAFv2::WebACL');
+    const webAcl = Object.values(webAcls)[0] as any;
+    const rules = webAcl.Properties.Rules as any[];
+    const largeBodyRule = rules.find(
+      rule => rule.Name === 'AWSManagedRulesCommonRuleSet-TaskPaths',
+    );
+    const fullCommonRule = rules.find(
+      rule => rule.Name === 'AWSManagedRulesCommonRuleSet',
+    );
+
+    expect(
+      largeBodyRule.Statement.ManagedRuleGroupStatement.ExcludedRules,
+    ).toEqual([{ Name: 'SizeRestrictions_BODY' }]);
+    expect(
+      largeBodyRule.Statement.ManagedRuleGroupStatement.ScopeDownStatement
+        .OrStatement.Statements,
+    ).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        ByteMatchStatement: expect.objectContaining({
+          PositionalConstraint: 'EXACTLY',
+          SearchString: '/v1/jira/webhook',
+        }),
+      }),
+    ]));
+    expect(
+      fullCommonRule.Statement.ManagedRuleGroupStatement.ScopeDownStatement
+        .AndStatement.Statements,
+    ).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        NotStatement: expect.objectContaining({
+          Statement: expect.objectContaining({
+            ByteMatchStatement: expect.objectContaining({
+              PositionalConstraint: 'EXACTLY',
+              SearchString: '/v1/jira/webhook',
+            }),
+          }),
+        }),
+      }),
+    ]));
+  });
+
   test('associates WAF with the API Gateway stage', () => {
     baseTemplate.resourceCountIs('AWS::WAFv2::WebACLAssociation', 1);
   });
