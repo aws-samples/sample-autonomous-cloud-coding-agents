@@ -898,4 +898,83 @@ describe('createTaskCore', () => {
     expect(mockLookupRepo).toHaveBeenCalledTimes(1);
     expect(mockLookupRepo).toHaveBeenCalledWith('org/repo');
   });
+
+  // --- #577: pre-screened attachments + caller-supplied taskId ---
+
+  describe('preScreenedAttachments and taskId (#577)', () => {
+    function persistedTaskItem() {
+      const putCall = mockSend.mock.calls.find(
+        (c: any) => c[0]?._type === 'Put' && c[0]?.input?.TableName === 'Tasks',
+      );
+      return putCall?.[0]?.input?.Item;
+    }
+
+    const passedRecord = {
+      attachment_id: 'att-jira-1',
+      type: 'file' as const,
+      content_type: 'text/plain',
+      filename: 'error.log',
+      s3_key: 'attachments/user-123/T-577/att-jira-1/error.log',
+      s3_version_id: 'v1',
+      size_bytes: 128,
+      checksum_sha256: 'sum',
+      screening: { status: 'passed' as const, screened_at: '2026-07-14T00:00:00Z' },
+    };
+
+    test('merges pre-screened records onto the task without re-screening', async () => {
+      const result = await createTaskCore(
+        { repo: 'org/repo', task_description: 'Fix', workflow_ref: 'coding/new-task-v1' },
+        makeContext({ preScreenedAttachments: [passedRecord] }),
+        'req-577-a',
+      );
+
+      expect(result.statusCode).toBe(201);
+      const item = persistedTaskItem();
+      expect(item.attachments).toHaveLength(1);
+      expect(item.attachments[0].attachment_id).toBe('att-jira-1');
+      expect(item.attachments[0].screening.status).toBe('passed');
+      // The pre-screened path must NOT re-run the guardrail on the attachment
+      // bytes. createTaskCore still screens the task DESCRIPTION text, so the
+      // guardrail may be called — but only with the description, never with any
+      // attachment content (the record carries no bytes to screen).
+      const guardrailContents = mockBedrockSend.mock.calls.map(
+        (c: any) => JSON.stringify(c[0]?.input?.content ?? []),
+      );
+      for (const content of guardrailContents) {
+        expect(content).not.toContain('error.log');
+        expect(content).toContain('Fix'); // only the description was screened
+      }
+    });
+
+    test('honors a caller-supplied taskId', async () => {
+      const result = await createTaskCore(
+        { repo: 'org/repo', task_description: 'Fix' },
+        makeContext({ taskId: 'T-explicit-577' }),
+        'req-577-b',
+      );
+
+      expect(result.statusCode).toBe(201);
+      expect(persistedTaskItem().task_id).toBe('T-explicit-577');
+      expect(JSON.parse(result.body).data.task_id).toBe('T-explicit-577');
+    });
+
+    test('fails closed if a pre-screened record is not in passed state', async () => {
+      const badRecord = {
+        ...passedRecord,
+        screening: { status: 'pending' as const },
+      };
+      const result = await createTaskCore(
+        { repo: 'org/repo', task_description: 'Fix' },
+        // Cast: this is a contract violation we deliberately construct to prove
+        // the fail-closed guard rejects it rather than persisting it.
+        makeContext({ preScreenedAttachments: [badRecord as never] }),
+        'req-577-c',
+      );
+
+      expect(result.statusCode).toBe(500);
+      expect(JSON.parse(result.body).error.code).toBe('INTERNAL_ERROR');
+      // No task persisted.
+      expect(persistedTaskItem()).toBeUndefined();
+    });
+  });
 });
