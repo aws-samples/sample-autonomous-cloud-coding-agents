@@ -18,13 +18,26 @@
  */
 
 import * as crypto from 'crypto';
+import { BedrockRuntimeClient, ApplyGuardrailCommand } from '@aws-sdk/client-bedrock-runtime';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { S3Client } from '@aws-sdk/client-s3';
 import { DynamoDBDocumentClient, GetCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
+import { ulid } from 'ulid';
+import type { ScreeningConfig } from './shared/attachment-screening';
 import { createTaskCore } from './shared/create-task-core';
+import { extractDescriptionMarkdown } from './shared/jira-adf';
+import {
+  cleanupPreScreenedAttachments,
+  downloadScreenAndStoreJiraAttachments,
+  fetchRecentHumanComments,
+  JiraAttachmentError,
+  type RenderedComment,
+} from './shared/jira-attachments';
 import { reportIssueFailure } from './shared/jira-feedback';
 import { resolveJiraOauthToken } from './shared/jira-oauth-resolver';
 import { logger } from './shared/logger';
-import type { Attachment } from './shared/types';
+import type { Attachment, PassedAttachmentRecord } from './shared/types';
+import { MAX_TASK_DESCRIPTION_LENGTH } from './shared/validation';
 import { CODING_WORKFLOW_ID } from './shared/workflows';
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -34,8 +47,23 @@ const USER_MAPPING_TABLE = process.env.JIRA_USER_MAPPING_TABLE_NAME!;
 const WORKSPACE_REGISTRY_TABLE = process.env.JIRA_WORKSPACE_REGISTRY_TABLE_NAME;
 const DEFAULT_LABEL_FILTER = 'bgagent';
 
-/** Deepest markdown heading level (`######`) ADF heading nodes are clamped to. */
-const MAX_MARKDOWN_HEADING_LEVEL = 6;
+/** Max length of the idempotency key (matches validation's IDEMPOTENCY_KEY_PATTERN). */
+const MAX_IDEMPOTENCY_KEY_LENGTH = 128;
+
+// Attachment enrichment (#577). The processor downloads Jira `media` file
+// attachments, screens them through the Bedrock Guardrail, and uploads the
+// cleaned bytes to S3 before creating the task. All three must be configured;
+// when they aren't, an issue carrying supported file attachments is rejected
+// (fail-closed) rather than silently dropping them.
+const ATTACHMENTS_BUCKET = process.env.ATTACHMENTS_BUCKET_NAME;
+const GUARDRAIL_ID = process.env.GUARDRAIL_ID;
+const GUARDRAIL_VERSION = process.env.GUARDRAIL_VERSION;
+const s3Client = ATTACHMENTS_BUCKET ? new S3Client({}) : undefined;
+const bedrockClient = GUARDRAIL_ID && GUARDRAIL_VERSION ? new BedrockRuntimeClient({}) : undefined;
+const screeningConfig: ScreeningConfig | undefined =
+  bedrockClient && GUARDRAIL_ID && GUARDRAIL_VERSION
+    ? { bedrockClient, guardrailId: GUARDRAIL_ID, guardrailVersion: GUARDRAIL_VERSION }
+    : undefined;
 
 /**
  * Post a Jira comment without ever propagating an error. Mirrors the
@@ -142,6 +170,8 @@ interface JiraIssueEvent {
       readonly summary?: string;
       readonly description?: unknown; // ADF document
       readonly labels?: string[];
+      /** Jira `media` file attachments. Shape validated in jira-attachments.ts. */
+      readonly attachment?: unknown[];
       readonly creator?: { readonly accountId?: string };
       readonly reporter?: { readonly accountId?: string };
       readonly project?: {
@@ -334,7 +364,6 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   // Convert the ADF description to markdown once and reuse it for both the
   // task body and image-attachment extraction.
   const descriptionMarkdown = extractDescriptionMarkdown(issue.fields?.description);
-  const taskDescription = buildTaskDescription(issue, descriptionMarkdown);
 
   const channelMetadata: Record<string, string> = {
     jira_cloud_id: cloudId,
@@ -374,7 +403,77 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     channelMetadata.jira_site_url = resolved.siteUrl;
   }
 
-  const attachments = extractImageUrlAttachments(descriptionMarkdown);
+  // Embedded HTTPS image URLs from the description (unchanged, #577 preserves).
+  const urlAttachments = extractImageUrlAttachments(descriptionMarkdown);
+
+  // Mint the task ID up front so pre-screened attachment S3 keys match the
+  // eventual task record (createTaskCore honors context.taskId, #577).
+  const taskId = ulid();
+
+  // Context enrichment (#577). Both need the workspace registry to resolve an
+  // OAuth token. Comments are fail-open (advisory); attachments are
+  // fail-closed (a selected-but-unscreenable attachment rejects the task).
+  let comments: RenderedComment[] = [];
+  let preScreenedAttachments: PassedAttachmentRecord[] = [];
+  if (WORKSPACE_REGISTRY_TABLE) {
+    const tenantCtx = { cloudId, registryTableName: WORKSPACE_REGISTRY_TABLE };
+
+    // Recent human comments — advisory context, never gate task creation.
+    const fetchedComments = await fetchRecentHumanComments(tenantCtx, issue.key);
+    // Fail-OPEN on comment content policy: comments are third-party text the
+    // reporter didn't write, so a policy-tripping comment must not fail the
+    // reporter's task. Screen the rendered comment section on its own and drop
+    // it (not the task) if the guardrail intervenes. (createTaskCore separately
+    // screens the description, which the reporter authored.)
+    comments = await screenCommentsOrDrop(fetchedComments, issue.key, cloudId);
+
+    const rawAttachments = issue.fields?.attachment;
+    if (Array.isArray(rawAttachments) && rawAttachments.length > 0) {
+      if (!s3Client || !ATTACHMENTS_BUCKET || !screeningConfig) {
+        // Fail-closed: the issue has attachments but the processor can't
+        // screen/store them. Don't silently drop selected context — reject
+        // with a clear comment so the operator can fix configuration.
+        logger.error('Jira issue has attachments but screening/storage is not configured (fail-closed)', {
+          issue_key: issue.key,
+          jira_cloud_id: cloudId,
+          has_bucket: Boolean(ATTACHMENTS_BUCKET),
+          has_guardrail: Boolean(screeningConfig),
+        });
+        await safeReportIssueFailure(
+          issue.key,
+          cloudId,
+          '❌ This Jira issue has file attachments, but ABCA attachment screening is not configured. Contact your ABCA admin.',
+        );
+        return;
+      }
+      // Combined cap: URL image attachments already consume slots.
+      const remainingSlots = 10 - urlAttachments.length;
+      try {
+        preScreenedAttachments = await downloadScreenAndStoreJiraAttachments(
+          rawAttachments,
+          remainingSlots,
+          { ...tenantCtx, s3Client, bucketName: ATTACHMENTS_BUCKET, screeningConfig, userId: platformUserId, taskId },
+        );
+      } catch (err) {
+        if (err instanceof JiraAttachmentError) {
+          logger.warn('Rejecting Jira task: attachment could not be safely processed', {
+            issue_key: issue.key,
+            jira_cloud_id: cloudId,
+            error: err.message,
+          });
+          await safeReportIssueFailure(
+            issue.key,
+            cloudId,
+            `❌ ABCA couldn't safely process an attachment on this issue: ${err.message} Remove or fix the attachment and re-apply the trigger label.`,
+          );
+          return;
+        }
+        throw err;
+      }
+    }
+  }
+
+  const taskDescription = buildTaskDescription(issue, descriptionMarkdown, comments);
 
   const requestId = crypto.randomUUID();
   const result = await createTaskCore(
@@ -385,15 +484,38 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       // mapped repo, so it must not fall through the resolution ladder to the
       // repo-less default/agent-v1 (which never commits or opens a PR). #546
       workflow_ref: CODING_WORKFLOW_ID,
-      ...(attachments.length > 0 && { attachments }),
+      ...(urlAttachments.length > 0 && { attachments: urlAttachments }),
     },
     {
       userId: platformUserId,
       channelSource: 'jira',
       channelMetadata,
+      taskId,
+      // Deterministic key so an async re-delivery of the same trigger event
+      // dedupes instead of minting a second task (and re-downloading every
+      // attachment). Keyed on issue + webhook timestamp, matching the
+      // receiver's dedup key shape.
+      idempotencyKey: buildIdempotencyKey(issue.key, payload.timestamp),
+      ...(preScreenedAttachments.length > 0 && { preScreenedAttachments }),
     },
     requestId,
   );
+
+  if (result.statusCode === 200) {
+    // Idempotent replay: this is a duplicate delivery of the same trigger event
+    // (createTaskCore matched the deterministic idempotency key to an existing
+    // task). Not a failure — but the attachments we re-downloaded and uploaded
+    // this round are keyed on a fresh taskId the replayed task doesn't
+    // reference, so delete them rather than orphan them. No ❌ comment.
+    logger.info('Jira-triggered task was an idempotent replay (duplicate delivery)', {
+      issue_key: issue.key,
+      request_id: requestId,
+    });
+    if (preScreenedAttachments.length > 0 && s3Client && ATTACHMENTS_BUCKET) {
+      await cleanupPreScreenedAttachments(s3Client, ATTACHMENTS_BUCKET, preScreenedAttachments);
+    }
+    return;
+  }
 
   if (result.statusCode !== 201) {
     logger.warn('Jira-triggered task creation returned non-201', {
@@ -401,6 +523,11 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       body: result.body,
       issue_key: issue.key,
     });
+    // Don't orphan the attachment objects we uploaded before this call failed —
+    // createTaskCore only rolls back its own inline uploads, not ours.
+    if (preScreenedAttachments.length > 0 && s3Client && ATTACHMENTS_BUCKET) {
+      await cleanupPreScreenedAttachments(s3Client, ATTACHMENTS_BUCKET, preScreenedAttachments);
+    }
     await safeReportIssueFailure(
       issue.key,
       cloudId,
@@ -500,6 +627,7 @@ function buildCreateTaskFailureMessage(statusCode: number, rawBody: string): str
 function buildTaskDescription(
   issue: NonNullable<JiraIssueEvent['issue']>,
   descriptionMarkdown: string,
+  comments: readonly RenderedComment[] = [],
 ): string {
   const parts: string[] = [];
   const summary = issue.fields?.summary?.trim();
@@ -512,133 +640,113 @@ function buildTaskDescription(
     parts.push('');
     parts.push(descriptionMarkdown.trim());
   }
-  return parts.join('\n');
+  const core = parts.join('\n');
+
+  // Fold recent human comments in (oldest-first, already rendered to markdown)
+  // under a clear heading so the agent can tell them from the description
+  // (#577). Comments are ADVISORY and must stay fail-open: they must never grow
+  // the description past MAX_TASK_DESCRIPTION_LENGTH and turn createTaskCore's
+  // length check into a hard rejection. Only append what fits the remaining
+  // budget (reserving a small margin), truncating the section if needed.
+  if (comments.length === 0) return core;
+  const commentSection = renderCommentSection(comments);
+  const separator = '\n';
+  const budget = MAX_TASK_DESCRIPTION_LENGTH - core.length - separator.length;
+  if (budget <= 0) return core; // description already fills the budget — drop comments
+  const fitted = commentSection.length <= budget
+    ? commentSection
+    : truncateCommentSection(commentSection, budget);
+  return fitted ? core + separator + fitted : core;
+}
+
+/** Notice appended when the comment section is truncated to fit the budget. */
+const COMMENT_TRUNCATION_NOTICE = '\n\n_(recent comments truncated)_';
+
+function renderCommentSection(comments: readonly RenderedComment[]): string {
+  const lines: string[] = ['', '## Recent comments'];
+  for (const c of comments) {
+    lines.push('');
+    const attribution = c.createdAt ? `**${c.author}** (${c.createdAt}):` : `**${c.author}**:`;
+    lines.push(attribution);
+    lines.push(c.markdown);
+  }
+  return lines.join('\n');
 }
 
 /**
- * Convert a Jira ADF (Atlassian Document Format) document into best-effort
- * markdown. Intentionally minimal — extract paragraphs, headings, and
- * list items as plain text. Anything else (panels, tables, embeds) is
- * collapsed to its textual content.
- *
- * The full ADF spec has dozens of node types; rolling a complete converter
- * here would dwarf the rest of the integration and add a new dependency
- * surface. The agent gets the issue title + a coherent text rendering of
- * the description; richer rendering (tables, mentions, attachments) can
- * land in a follow-up.
+ * Trim a rendered comment section to at most `budget` characters, leaving room
+ * for a truncation notice. Returns '' if even the heading + notice can't fit,
+ * so the caller cleanly drops the section.
  */
-function extractDescriptionMarkdown(description: unknown): string {
-  if (!description) return '';
-  if (typeof description === 'string') return description;
-  if (typeof description !== 'object') return '';
-
-  const lines: string[] = [];
-  walkAdf(description as AdfNode, lines, 0);
-  return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+function truncateCommentSection(section: string, budget: number): string {
+  const room = budget - COMMENT_TRUNCATION_NOTICE.length;
+  if (room <= 0) return '';
+  return section.slice(0, room) + COMMENT_TRUNCATION_NOTICE;
 }
 
-interface AdfNode {
-  readonly type?: string;
-  readonly text?: string;
-  readonly attrs?: {
-    readonly level?: number;
-    /** `media` node: `"external"` carries a direct `url`; `"file"`/`"link"`
-     *  carry an attachment `id` that needs a Jira API call to resolve. */
-    readonly type?: string;
-    readonly url?: string;
-    readonly alt?: string;
-  };
-  readonly content?: AdfNode[];
-}
-
-function walkAdf(node: AdfNode | undefined, out: string[], depth: number): void {
-  if (!node) return;
-  switch (node.type) {
-    case 'doc':
-      (node.content ?? []).forEach((c) => walkAdf(c, out, depth));
-      return;
-    case 'paragraph': {
-      const text = (node.content ?? []).map(textOf).join('');
-      if (text) {
-        out.push(text);
-        out.push('');
-      }
-      return;
-    }
-    case 'heading': {
-      const level = node.attrs?.level ?? 1;
-      const prefix = '#'.repeat(Math.max(1, Math.min(MAX_MARKDOWN_HEADING_LEVEL, level)));
-      const text = (node.content ?? []).map(textOf).join('');
-      if (text) {
-        out.push(`${prefix} ${text}`);
-        out.push('');
-      }
-      return;
-    }
-    case 'bulletList':
-    case 'orderedList': {
-      (node.content ?? []).forEach((item, idx) => {
-        const itemText = (item.content ?? [])
-          .flatMap((sub) => collectInlineLines(sub))
-          .join(' ')
-          .trim();
-        if (!itemText) return;
-        const bullet = node.type === 'orderedList' ? `${idx + 1}.` : '-';
-        out.push(`${' '.repeat(depth * 2)}${bullet} ${itemText}`);
+/**
+ * Screen the rendered comment block through the Bedrock Guardrail on its own,
+ * so third-party comment content that trips the policy is DROPPED (fail-open)
+ * rather than gating the reporter's task. Returns the comments unchanged when
+ * they pass, and `[]` when the guardrail intervenes or is unavailable — the
+ * task still proceeds with the reporter-authored summary/description (which
+ * createTaskCore screens separately). This keeps the comment-enrichment
+ * contract fail-open end to end (issue #577 review, item 4).
+ */
+async function screenCommentsOrDrop(
+  comments: RenderedComment[],
+  issueKey: string,
+  cloudId: string,
+): Promise<RenderedComment[]> {
+  if (comments.length === 0) return comments;
+  if (!bedrockClient || !GUARDRAIL_ID || !GUARDRAIL_VERSION) {
+    // No guardrail configured — drop unscreened third-party text rather than
+    // route it, unscreened, into the agent context.
+    logger.warn('Dropping Jira comments: guardrail not configured to screen them', {
+      issue_key: issueKey,
+      jira_cloud_id: cloudId,
+    });
+    return [];
+  }
+  const text = renderCommentSection(comments);
+  try {
+    const result = await bedrockClient.send(new ApplyGuardrailCommand({
+      guardrailIdentifier: GUARDRAIL_ID,
+      guardrailVersion: GUARDRAIL_VERSION,
+      source: 'INPUT',
+      content: [{ text: { text } }],
+    }));
+    if (result.action === 'GUARDRAIL_INTERVENED') {
+      logger.warn('Dropping Jira comments: blocked by content policy (task still proceeds)', {
+        issue_key: issueKey,
+        jira_cloud_id: cloudId,
       });
-      out.push('');
-      return;
+      return [];
     }
-    case 'codeBlock': {
-      const text = (node.content ?? []).map(textOf).join('');
-      out.push('```');
-      out.push(text);
-      out.push('```');
-      out.push('');
-      return;
-    }
-    case 'mediaSingle':
-    case 'mediaGroup':
-      // Container nodes — descend to the `media` children below.
-      (node.content ?? []).forEach((c) => walkAdf(c, out, depth));
-      return;
-    case 'media': {
-      // Jira embeds images as `media` nodes (not markdown image text). Only
-      // `external` media carry a directly-usable URL; `file`/`link` media
-      // reference an attachment `id` that needs a Jira API round-trip to
-      // resolve — out of scope for this minimal converter, so we skip those.
-      const url = node.attrs?.url;
-      if (node.attrs?.type === 'external' && typeof url === 'string' && url.startsWith('https://')) {
-        const alt = node.attrs?.alt ?? '';
-        out.push(`![${alt}](${url})`);
-        out.push('');
-      }
-      return;
-    }
-    case 'text':
-      if (node.text) out.push(node.text);
-      return;
-    default:
-      // Unknown node — descend into its content if any so embedded text
-      // (e.g. inside a panel or quote) isn't lost.
-      (node.content ?? []).forEach((c) => walkAdf(c, out, depth));
+    return comments;
+  } catch (err) {
+    // Fail-open on a screening outage too — comments are advisory.
+    logger.warn('Dropping Jira comments: screening unavailable (task still proceeds)', {
+      issue_key: issueKey,
+      jira_cloud_id: cloudId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return [];
   }
 }
 
-function textOf(node: AdfNode): string {
-  if (node.type === 'text' && node.text) return node.text;
-  if (node.content) return node.content.map(textOf).join('');
-  return '';
-}
-
-function collectInlineLines(node: AdfNode): string[] {
-  if (node.type === 'paragraph') {
-    return [(node.content ?? []).map(textOf).join('')];
-  }
-  if (node.type === 'text' && node.text) {
-    return [node.text];
-  }
-  return [];
+/**
+ * Deterministic idempotency key for a trigger event: `<issueKey>#<timestamp>`,
+ * sanitized to the allowed key charset (`[A-Za-z0-9_-]{1,128}`). A webhook
+ * re-delivery of the same event yields the same key so createTaskCore dedupes
+ * instead of creating a duplicate task (and re-downloading attachments). Falls
+ * back to undefined if we can't form a stable key, preserving prior behavior.
+ */
+function buildIdempotencyKey(issueKey: string, timestamp: number | undefined): string | undefined {
+  if (typeof timestamp !== 'number' || !Number.isFinite(timestamp)) return undefined;
+  const raw = `jira-${issueKey}-${timestamp}`;
+  const sanitized = raw.replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, MAX_IDEMPOTENCY_KEY_LENGTH);
+  return sanitized || undefined;
 }
 
 /**

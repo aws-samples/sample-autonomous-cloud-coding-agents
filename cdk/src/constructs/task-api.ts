@@ -341,6 +341,18 @@ export class TaskApi extends Construct {
                       },
                     },
                     {
+                      // Jira issue payloads include the full issue field set.
+                      // Attachment metadata can push them over 8 KB. The
+                      // receiver HMAC-verifies the raw body and the priority-4
+                      // rule below still rate-limits this route.
+                      byteMatchStatement: {
+                        fieldToMatch: { uriPath: {} },
+                        positionalConstraint: 'EXACTLY',
+                        searchString: '/v1/jira/webhook',
+                        textTransformations: [{ priority: 0, type: 'NONE' }],
+                      },
+                    },
+                    {
                       // GitHub deployment_status webhook (preview-deploy
                       // screenshot pipeline). The full payload (workflow run
                       // history + deploy URLs + deployment metadata) exceeds
@@ -385,6 +397,18 @@ export class TaskApi extends Construct {
                             fieldToMatch: { uriPath: {} },
                             positionalConstraint: 'STARTS_WITH',
                             searchString: '/v1/tasks',
+                            textTransformations: [{ priority: 0, type: 'NONE' }],
+                          },
+                        },
+                      },
+                    },
+                    {
+                      notStatement: {
+                        statement: {
+                          byteMatchStatement: {
+                            fieldToMatch: { uriPath: {} },
+                            positionalConstraint: 'EXACTLY',
+                            searchString: '/v1/jira/webhook',
                             textTransformations: [{ priority: 0, type: 'NONE' }],
                           },
                         },
