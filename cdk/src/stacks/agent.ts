@@ -645,7 +645,7 @@ export class AgentStack extends Stack {
       const gatewayServiceRole = new iam.Role(this, 'LinearGatewayServiceRole', {
         roleName: `bgagent-linear-gw-role-${this.region}`,
         assumedBy: new iam.ServicePrincipal('bedrock-agentcore.amazonaws.com'),
-        description: 'Assumed by per-workspace Linear MCP gateways for outbound OAuth (Gateway→Linear).',
+        description: 'Assumed by per-workspace Linear MCP gateways for outbound OAuth (Gateway to Linear).',
       });
       gatewayServiceRole.addToPolicy(new iam.PolicyStatement({
         sid: 'GatewayVaultAccess',
