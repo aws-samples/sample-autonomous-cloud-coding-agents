@@ -28,19 +28,23 @@ import {
   ResourceExistsException,
   SecretsManagerClient,
 } from '@aws-sdk/client-secrets-manager';
-import { DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
 import { Command } from 'commander';
 import { ApiClient } from '../api-client';
 import { loadConfig, loadCredentials } from '../config';
 import { CliError } from '../errors';
 import { formatJson } from '../format';
+import { generateInviteCode } from '../invite-code';
 import {
   buildAuthorizationUrl,
   computeExpiresAt,
   exchangeAuthorizationCode,
   fetchAccessibleResources,
   generatePkce,
+  isAccessTokenExpiring,
   jiraOauthSecretName,
+  parseStoredJiraOauthToken,
+  refreshAccessToken,
   StoredJiraOauthToken,
 } from '../jira-oauth';
 import { awaitOauthCallback, CALLBACK_URL } from '../oauth-callback-server';
@@ -256,6 +260,137 @@ function isWebhookSecretPlaceholder(value: string): boolean {
     // (malformed) operator value rather than silently re-seeding over it.
     return false; // nosemgrep: ts-silent-success-masking -- unparseable secret is conservatively treated as operator-set (not the placeholder), so setup never overwrites it
   }
+}
+
+interface JiraUserSearchResult {
+  readonly accountId?: string;
+  readonly displayName?: string;
+  readonly emailAddress?: string;
+  readonly active?: boolean;
+  readonly accountType?: string;
+}
+
+function isJiraUser(value: unknown): value is JiraUserSearchResult {
+  if (typeof value !== 'object' || value === null) return false;
+  const obj = value as Record<string, unknown>;
+  return typeof obj.accountId === 'string' && obj.accountId.length > 0;
+}
+
+function isLinkableJiraUser(user: JiraUserSearchResult): boolean {
+  return user.active !== false && user.accountType !== 'app';
+}
+
+function formatJiraUserLabel(user: JiraUserSearchResult): string {
+  const name = user.displayName || user.accountId || '(unknown)';
+  return `${name}${user.emailAddress ? ` (${user.emailAddress})` : ''}`;
+}
+
+async function parseJiraJson(response: Response, context: string): Promise<unknown> {
+  try {
+    return await response.json();
+  } catch {
+    throw new CliError(`Atlassian ${context} returned non-JSON: HTTP ${response.status}.`);
+  }
+}
+
+async function fetchJiraUserByAccountId(
+  accessToken: string,
+  cloudId: string,
+  accountId: string,
+  fetchImpl: typeof fetch,
+): Promise<JiraUserSearchResult | null> {
+  const url = new URL(`https://api.atlassian.com/ex/jira/${encodeURIComponent(cloudId)}/rest/api/3/user`);
+  url.searchParams.set('accountId', accountId);
+  const response = await fetchImpl(url.toString(), {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      Accept: 'application/json',
+    },
+  });
+  if (response.status === 404) return null;
+  if (!response.ok) {
+    throw new CliError(
+      `Atlassian Jira user lookup failed: HTTP ${response.status}. `
+      + 'The stored OAuth token may be expired/revoked or missing read:jira-user.',
+    );
+  }
+  const parsed = await parseJiraJson(response, 'Jira user lookup');
+  if (!isJiraUser(parsed)) {
+    throw new CliError(`Atlassian Jira user lookup returned an unexpected shape: ${JSON.stringify(parsed).slice(0, 200)}`);
+  }
+  return parsed;
+}
+
+async function searchJiraUsers(
+  accessToken: string,
+  cloudId: string,
+  query: string,
+  fetchImpl: typeof fetch,
+): Promise<JiraUserSearchResult[]> {
+  const url = new URL(`https://api.atlassian.com/ex/jira/${encodeURIComponent(cloudId)}/rest/api/3/user/search`);
+  url.searchParams.set('query', query);
+  url.searchParams.set('maxResults', '10');
+  const response = await fetchImpl(url.toString(), {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      Accept: 'application/json',
+    },
+  });
+  if (!response.ok) {
+    throw new CliError(
+      `Atlassian Jira user search failed: HTTP ${response.status}. `
+      + 'The stored OAuth token may be expired/revoked or missing read:jira-user.',
+    );
+  }
+  const parsed = await parseJiraJson(response, 'Jira user search');
+  if (!Array.isArray(parsed)) {
+    throw new CliError(`Atlassian Jira user search returned an unexpected shape: ${JSON.stringify(parsed).slice(0, 200)}`);
+  }
+  return parsed.filter(isJiraUser);
+}
+
+async function resolveJiraUser(
+  accessToken: string,
+  cloudId: string,
+  accountIdOrEmail: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<JiraUserSearchResult> {
+  const query = accountIdOrEmail.trim();
+  if (!query) {
+    throw new CliError('Jira account id or email is required.');
+  }
+
+  if (!query.includes('@')) {
+    const direct = await fetchJiraUserByAccountId(accessToken, cloudId, query, fetchImpl);
+    if (direct) {
+      if (!isLinkableJiraUser(direct)) {
+        throw new CliError(`Jira account '${query}' is inactive or is an app account.`);
+      }
+      return direct;
+    }
+  }
+
+  const users = (await searchJiraUsers(accessToken, cloudId, query, fetchImpl)).filter(isLinkableJiraUser);
+  const exactAccountId = users.find((user) => user.accountId === query);
+  if (exactAccountId) return exactAccountId;
+
+  if (query.includes('@')) {
+    const lowerQuery = query.toLowerCase();
+    const exactEmail = users.find((user) => (user.emailAddress ?? '').toLowerCase() === lowerQuery);
+    if (exactEmail) return exactEmail;
+  }
+
+  if (users.length === 1) return users[0];
+  if (users.length === 0) {
+    throw new CliError(`No active Jira user found for '${query}' in tenant '${cloudId}'.`);
+  }
+
+  const candidates = users.map((user) => `- ${formatJiraUserLabel(user)} [${user.accountId}]`).join('\n');
+  throw new CliError(
+    `Jira user lookup for '${query}' returned multiple users. Re-run with the accountId for the intended user:\n${candidates}`,
+  );
 }
 
 function promptLine(label: string): Promise<string> {
@@ -576,9 +711,166 @@ export function makeJiraCommand(): Command {
         console.log('  1. Map a Jira project to a GitHub repo:');
         console.log(`       bgagent jira map ${cloudId} <PROJECT-KEY> --repo owner/repo`);
         console.log('  2. Link your Jira account so triggered tasks attribute to your platform user:');
-        console.log('       (an admin runs `bgagent jira invite-user` to issue you a code; this command');
-        console.log('        is not yet implemented — populate the user-mapping row manually for now.)');
+        console.log(`       bgagent jira invite-user ${cloudId} <account-id-or-email>`);
+        console.log('       bgagent jira link <code>');
         console.log(`  3. Add the trigger label '${DEFAULT_LABEL_FILTER}' to a Jira issue in a mapped project.`);
+      }),
+  );
+
+  // ─── invite-user ──────────────────────────────────────────────────────────
+  jira.addCommand(
+    new Command('invite-user')
+      .description('Generate a one-time code for a Jira teammate to redeem via `bgagent jira link <code>`')
+      .argument('<cloud-id>', 'Atlassian tenant cloudId (UUID)')
+      .argument('<account-id-or-email>', 'Jira accountId or email address for the teammate')
+      .option('--region <region>', 'AWS region (defaults to configured region)')
+      .option('--stack-name <name>', 'CloudFormation stack name', 'backgroundagent-dev')
+      .action(async (cloudId: string, accountIdOrEmail: string, opts) => {
+        const config = loadConfig();
+        const region = opts.region || config.region;
+        const stackName = opts.stackName;
+
+        const [workspaceRegistryTable, userMappingTable] = await Promise.all([
+          getStackOutput(region, stackName, 'JiraWorkspaceRegistryTableName'),
+          getStackOutput(region, stackName, 'JiraUserMappingTableName'),
+        ]);
+        const missing: string[] = [];
+        if (!workspaceRegistryTable) missing.push('JiraWorkspaceRegistryTableName');
+        if (!userMappingTable) missing.push('JiraUserMappingTableName');
+        if (missing.length > 0) {
+          throw new CliError(
+            `Stack '${stackName}' is missing outputs ${missing.join(', ')}. `
+            + 'Re-deploy with the JiraIntegration CDK changes (mise //cdk:deploy).',
+          );
+        }
+
+        const creds = loadCredentials();
+        if (!creds?.id_token) {
+          throw new CliError('Not authenticated — run `bgagent login` first.');
+        }
+        const callerCognitoSub = extractCognitoSub();
+
+        const sm = new SecretsManagerClient({ region });
+        const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
+
+        const registry = await ddb.send(new GetCommand({
+          TableName: workspaceRegistryTable!,
+          Key: { jira_cloud_id: cloudId },
+        }));
+        const registryRow = registry.Item;
+        if (!registryRow || registryRow.status !== 'active') {
+          throw new CliError(
+            `Jira tenant '${cloudId}' is not in the registry (or status != 'active'). `
+            + 'Run `bgagent jira setup` for that tenant first.',
+          );
+        }
+        const oauthSecretArn = registryRow.oauth_secret_arn as string | undefined;
+        if (!oauthSecretArn) {
+          throw new CliError(`Jira tenant '${cloudId}' registry row is missing oauth_secret_arn. Re-run \`bgagent jira setup\`.`);
+        }
+        const siteUrl = (registryRow.site_url as string | undefined) ?? '';
+
+        const oauthSecret = await sm.send(new GetSecretValueCommand({ SecretId: oauthSecretArn }));
+        let stored = parseStoredJiraOauthToken(oauthSecret.SecretString, oauthSecretArn);
+
+        console.log(`bgagent jira invite-user — tenant '${cloudId}'`);
+        console.log(`  region: ${region}`);
+        if (siteUrl) {
+          console.log(`  site:   ${siteUrl}`);
+        }
+
+        if (isAccessTokenExpiring(stored.expires_at)) {
+          process.stdout.write('  → Refreshing Jira OAuth token...');
+          const refreshed = await refreshAccessToken({
+            refreshToken: stored.refresh_token,
+            clientId: stored.client_id,
+            clientSecret: stored.client_secret,
+          });
+          if (!refreshed.refresh_token) {
+            console.log(' ✗');
+            throw new CliError('Atlassian refresh_token grant returned no refresh_token. Re-run `bgagent jira setup`.');
+          }
+          stored = {
+            ...stored,
+            access_token: refreshed.access_token,
+            refresh_token: refreshed.refresh_token,
+            expires_at: computeExpiresAt(refreshed.expires_in),
+            scope: refreshed.scope,
+            updated_at: new Date().toISOString(),
+          };
+          await sm.send(new PutSecretValueCommand({
+            SecretId: oauthSecretArn,
+            SecretString: JSON.stringify(stored),
+          }));
+          console.log(' ✓');
+        }
+
+        process.stdout.write('  → Resolving Jira user...');
+        let picked: JiraUserSearchResult;
+        try {
+          picked = await resolveJiraUser(stored.access_token, cloudId, accountIdOrEmail);
+          console.log(` ✓ (${formatJiraUserLabel(picked)})`);
+        } catch (err) {
+          console.log(' ✗');
+          throw err;
+        }
+
+        // Warn (don't block) if this Jira identity is already linked, so the
+        // admin knows a fresh invite will re-link an existing teammate. The
+        // active row key mirrors the jira-link handler: `<cloudId>#<accountId>`.
+        const existing = await ddb.send(new GetCommand({
+          TableName: userMappingTable!,
+          Key: { jira_identity: `${cloudId}#${picked.accountId}` },
+        }));
+        if (existing.Item && existing.Item.status === 'active') {
+          console.log();
+          console.log(`  ⚠ ${formatJiraUserLabel(picked)} is already linked in this tenant.`);
+          console.log('    Redeeming this code will re-link them to whoever runs `bgagent jira link`.');
+        }
+
+        const code = generateInviteCode();
+        const ttl = Math.floor(Date.now() / 1000) + 24 * 60 * 60;
+        try {
+          await ddb.send(new PutCommand({
+            TableName: userMappingTable!,
+            // Guard against clobbering an existing pending invite on the
+            // (astronomically unlikely) chance the generated code collides.
+            // Better to fail loudly and let the admin re-run than silently
+            // overwrite a still-valid code.
+            ConditionExpression: 'attribute_not_exists(jira_identity)',
+            Item: {
+              jira_identity: `pending#${code}`,
+              status: 'pending',
+              jira_cloud_id: cloudId,
+              jira_site_url: siteUrl,
+              jira_account_id: picked.accountId,
+              jira_user_name: picked.displayName ?? '',
+              jira_user_email: picked.emailAddress ?? '',
+              invited_at: new Date().toISOString(),
+              invited_by_platform_user_id: callerCognitoSub,
+              ttl,
+            },
+          }));
+        } catch (err) {
+          if ((err as { name?: string }).name === 'ConditionalCheckFailedException') {
+            throw new CliError(`Invite code '${code}' collided with an existing invite. Re-run the command to mint a fresh code.`);
+          }
+          throw err;
+        }
+
+        console.log();
+        console.log('✅ Invite created.');
+        console.log();
+        console.log('  Send this to the teammate (Slack/email/etc):');
+        console.log();
+        console.log(`      bgagent jira link ${code}`);
+        console.log();
+        console.log(`  Picked Jira user: ${formatJiraUserLabel(picked)}`);
+        console.log(`  Jira tenant:      ${siteUrl || cloudId}`);
+        console.log(`  Code expires:     ${new Date(ttl * 1000).toISOString()} (24h)`);
+        console.log();
+        console.log('  The teammate sees the Jira identity above and confirms before the');
+        console.log('  mapping is written. If you picked the wrong user, the teammate aborts.');
       }),
   );
 
@@ -630,6 +922,8 @@ export function makeJiraCommand(): Command {
       .argument('<project-key>', 'Jira project key (e.g. ENG)')
       .requiredOption('--repo <owner/repo>', 'GitHub repository the mapped project should route tasks to')
       .option('--label <label>', `Label that triggers a task (default: ${DEFAULT_LABEL_FILTER})`, DEFAULT_LABEL_FILTER)
+      .option('--status-on-start <name>', 'Jira status to move the issue to when a task starts (overrides the In Progress heuristic)')
+      .option('--status-on-pr <name>', 'Jira status to move the issue to when a PR is opened (overrides the "In Review" default)')
       .option('--region <region>', 'AWS region (defaults to configured region)')
       .option('--stack-name <name>', 'CloudFormation stack name', 'backgroundagent-dev')
       .action(async (cloudId: string, projectKey: string, opts) => {
@@ -653,6 +947,14 @@ export function makeJiraCommand(): Command {
           process.exit(1);
         }
 
+        // Trim transition-status overrides and treat blank/whitespace-only as
+        // unset. A whitespace value is truthy in JS, so without this it would
+        // be persisted and then permanently no-op at the agent (`.strip()` → ""
+        // matches no status, with no fallback) — silently disabling the
+        // project's transition (#605).
+        const statusOnStart = opts.statusOnStart?.trim() || undefined;
+        const statusOnPr = opts.statusOnPr?.trim() || undefined;
+
         const now = new Date().toISOString();
         const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
         await ddb.send(new PutCommand({
@@ -663,6 +965,11 @@ export function makeJiraCommand(): Command {
             project_key: projectKey,
             repo: opts.repo,
             label_filter: opts.label,
+            // Optional per-project workflow-transition overrides (issue #572).
+            // Only persisted when supplied so the agent falls back to its
+            // statusCategory / "In Review" heuristics otherwise.
+            ...(statusOnStart && { status_on_start: statusOnStart }),
+            ...(statusOnPr && { status_on_pr: statusOnPr }),
             status: 'active',
             onboarded_at: now,
             updated_at: now,
@@ -671,6 +978,12 @@ export function makeJiraCommand(): Command {
 
         console.log(`✓ Mapped Jira project ${cloudId}#${projectKey} → ${opts.repo}`);
         console.log(`  Trigger label: ${opts.label}`);
+        if (statusOnStart) {
+          console.log(`  Status on task start: ${statusOnStart}`);
+        }
+        if (statusOnPr) {
+          console.log(`  Status on PR opened: ${statusOnPr}`);
+        }
       }),
   );
 

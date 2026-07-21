@@ -35,6 +35,7 @@ import { ApiClient } from '../api-client';
 import { loadConfig, loadCredentials } from '../config';
 import { CliError } from '../errors';
 import { formatJson } from '../format';
+import { generateInviteCode } from '../invite-code';
 import {
   buildAuthorizationUrl,
   computeExpiresAt,
@@ -1731,31 +1732,6 @@ async function runSelfLinkPicker(args: {
   const label = `${picked.name ?? picked.id}${picked.email ? ` (${picked.email})` : ''}`;
   console.log(`  ✓ Linked Linear user ${label} → your platform user`);
   return true;
-}
-
-/**
- * Generate a short, human-typeable invite code for the teammate-invite
- * flow. `link-` prefix makes it grep-friendly when an operator pastes it
- * into chat alongside the command. 8 random chars from a 31-char alphabet
- * = 40 bits of entropy — over a 24h TTL window with ~10 codes outstanding,
- * collision probability is negligible.
- *
- * Alphabet excludes ambiguous glyphs (0/O, 1/l/I) so codes copy-pasted
- * across fonts don't get mistyped.
- */
-/** Alphabet used by {@link generateInviteCode}. Exposed so tests can
- *  assert that generated codes only use these characters. */
-export const INVITE_CODE_ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
-
-export function generateInviteCode(): string {
-  const INVITE_CODE_RANDOM_BYTES = 8;
-  const bytes = new Uint8Array(INVITE_CODE_RANDOM_BYTES);
-  crypto.getRandomValues(bytes);
-  let out = 'link-';
-  for (const b of bytes) {
-    out += INVITE_CODE_ALPHABET[b % INVITE_CODE_ALPHABET.length];
-  }
-  return out;
 }
 
 /**

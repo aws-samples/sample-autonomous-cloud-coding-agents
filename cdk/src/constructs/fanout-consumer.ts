@@ -107,6 +107,27 @@ export interface FanOutConsumerProps {
   readonly linearOauthSecretArnPattern?: string;
 
   /**
+   * JiraWorkspaceRegistryTable — the Jira dispatcher reads this to resolve
+   * per-tenant OAuth tokens at comment-post time (issue #573). Optional:
+   * when omitted, the dispatcher logs and skips so a deployment without
+   * Jira onboarding doesn't accumulate dangling IAM grants. Mirrors
+   * ``linearWorkspaceRegistryTable``.
+   */
+  readonly jiraWorkspaceRegistryTable?: dynamodb.ITable;
+
+  /**
+   * Secrets Manager ARN-prefix pattern for per-tenant Jira OAuth bundles.
+   * Mirrors ``linearOauthSecretArnPattern`` — typically
+   * ``bgagent-jira-oauth-*``. Required when ``jiraWorkspaceRegistryTable``
+   * is set; without it the dispatcher would resolve the registry row but
+   * fail at the SM GetSecretValue call. GetSecretValue + PutSecretValue
+   * because the resolver rotates an expiring token in place (the fan-out
+   * Lambda is trusted stack code, same as the orchestrator + webhook
+   * processor).
+   */
+  readonly jiraOauthSecretArnPattern?: string;
+
+  /**
    * Maximum batch size delivered to the Lambda per invocation.
    *
    * @default 100 (DynamoDB Stream default)
@@ -231,6 +252,29 @@ export class FanOutConsumer extends Construct {
       }));
     }
 
+    // Jira dispatcher plumbing (issue #573). Same guarded shape as Linear:
+    // a deployment without Jira onboarding gets no IAM grants and the
+    // dispatcher logs-and-skips on missing env. The registry table resolves
+    // the per-tenant OAuth-secret ARN; the secret holds the access token
+    // ``postIssueCommentAdf`` uses to POST the final-status comment via the
+    // Jira REST v3 API.
+    if (props.jiraWorkspaceRegistryTable) {
+      props.jiraWorkspaceRegistryTable.grantReadData(this.fn);
+      this.fn.addEnvironment(
+        'JIRA_WORKSPACE_REGISTRY_TABLE_NAME',
+        props.jiraWorkspaceRegistryTable.tableName,
+      );
+    }
+    if (props.jiraOauthSecretArnPattern) {
+      this.fn.addToRolePolicy(new iam.PolicyStatement({
+        // GetSecretValue + PutSecretValue: resolving an expiring token
+        // refreshes it in place — same grants the orchestrator + Jira
+        // webhook-processor Lambdas hold.
+        actions: ['secretsmanager:GetSecretValue', 'secretsmanager:PutSecretValue'],
+        resources: [props.jiraOauthSecretArnPattern],
+      }));
+    }
+
     // Alarm on any record landing in the DLQ. Notifications are
     // best-effort by design, so individual failures don't fail the
     // batch — which means the DLQ is the ONLY persistent signal of a
@@ -244,7 +288,7 @@ export class FanOutConsumer extends Construct {
       threshold: 1,
       evaluationPeriods: 1,
       alarmDescription:
-        'Fan-out DLQ has undelivered task-event records — Slack/GitHub/Linear notifications are failing',
+        'Fan-out DLQ has undelivered task-event records — Slack/GitHub/Linear/Jira notifications are failing',
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
 

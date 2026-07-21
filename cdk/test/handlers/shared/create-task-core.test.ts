@@ -114,6 +114,38 @@ describe('createTaskCore', () => {
     expect(mockLambdaSend).toHaveBeenCalledTimes(1);
   });
 
+  test('accepts an initial_approvals pattern whose value contains a colon', async () => {
+    // Regression: the degenerate-pattern guard used split(':', 2)[1], which
+    // truncated the value at the next colon. For "ab:cdefgh" that yields the
+    // 2-char fragment "ab", which isDegeneratePattern flags as degenerate —
+    // a spurious 400. The full value "ab:cdefgh" is not degenerate, so the
+    // scope must be accepted.
+    const result = await createTaskCore(
+      {
+        repo: 'org/repo',
+        task_description: 'Fix the bug',
+        initial_approvals: ['bash_pattern:ab:cdefgh'],
+      } as any,
+      makeContext(),
+      'req-1',
+    );
+    expect(result.statusCode).toBe(201);
+  });
+
+  test('still rejects a genuinely degenerate initial_approvals pattern', async () => {
+    const result = await createTaskCore(
+      {
+        repo: 'org/repo',
+        task_description: 'Fix the bug',
+        initial_approvals: ['bash_pattern:*'],
+      } as any,
+      makeContext(),
+      'req-1',
+    );
+    expect(result.statusCode).toBe(400);
+    expect(JSON.parse(result.body).error.code).toBe('VALIDATION_ERROR');
+  });
+
   test('returns 400 for invalid repo', async () => {
     const result = await createTaskCore({ repo: 'invalid' } as any, makeContext(), 'req-1');
     expect(result.statusCode).toBe(400);
@@ -557,7 +589,13 @@ describe('createTaskCore', () => {
     expect(result.statusCode).toBe(201);
   });
 
-  test('resolves the default workflow when workflow_ref is omitted', async () => {
+  test('resolves the platform default when workflow_ref is omitted (repo present)', async () => {
+    // createTaskCore does NOT infer the coding workflow from the mere presence
+    // of a repo — that "repo task ⇒ coding workflow" decision is pinned by each
+    // CHANNEL processor at its call site (Linear/Jira/Slack pass
+    // workflow_ref: CODING_WORKFLOW_ID; see those processors' tests). A raw
+    // createTaskCore call with no ref falls through the resolution ladder to the
+    // repo-less platform default, whether or not a repo is attached.
     const result = await createTaskCore(
       { repo: 'org/repo', task_description: 'Fix the bug' },
       makeContext(),
@@ -565,7 +603,20 @@ describe('createTaskCore', () => {
     );
     expect(result.statusCode).toBe(201);
     const body = JSON.parse(result.body);
-    // No workflow_ref ⇒ the resolution ladder falls to the platform default.
+    expect(body.data.resolved_workflow).toEqual({ id: 'default/agent-v1', version: '1.0.0' });
+  });
+
+  test('resolves the platform default when workflow_ref is omitted AND no repo (symmetric)', async () => {
+    // §6 symmetric coverage: the repo-less path through the real caller. Guards
+    // against a future fallback-branch inversion that a repo-pinned test would
+    // miss (the repo-less default must stay default/agent-v1).
+    const result = await createTaskCore(
+      { task_description: 'Do some research' },
+      makeContext(),
+      'req-default-norepo',
+    );
+    expect(result.statusCode).toBe(201);
+    const body = JSON.parse(result.body);
     expect(body.data.resolved_workflow).toEqual({ id: 'default/agent-v1', version: '1.0.0' });
   });
 

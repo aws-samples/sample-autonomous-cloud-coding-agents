@@ -25,6 +25,7 @@ import { reportIssueFailure } from './shared/jira-feedback';
 import { resolveJiraOauthToken } from './shared/jira-oauth-resolver';
 import { logger } from './shared/logger';
 import type { Attachment } from './shared/types';
+import { CODING_WORKFLOW_ID } from './shared/workflows';
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
@@ -342,6 +343,19 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     jira_issue_key: issue.key,
   };
 
+  // Optional per-project workflow-transition overrides (issue #572). When an
+  // admin configured `bgagent jira map ... --status-on-start/--status-on-pr`,
+  // stamp them so the agent's best-effort transition helpers prefer these
+  // status names over the built-in statusCategory / "In Review" heuristics.
+  const statusOnStart = mapping.Item.status_on_start as string | undefined;
+  const statusOnPr = mapping.Item.status_on_pr as string | undefined;
+  if (statusOnStart) {
+    channelMetadata.jira_status_on_start = statusOnStart;
+  }
+  if (statusOnPr) {
+    channelMetadata.jira_status_on_pr = statusOnPr;
+  }
+
   // Stash the resolved OAuth secret ARN on the task so the agent runtime
   // doesn't have to re-do the registry lookup. Also blocks tasks from
   // tenants that only verified via the stack-wide fallback (workspace
@@ -370,7 +384,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       // Explicit coding workflow: a label-triggered Jira task always targets a
       // mapped repo, so it must not fall through the resolution ladder to the
       // repo-less default/agent-v1 (which never commits or opens a PR). #546
-      workflow_ref: 'coding/new-task-v1',
+      workflow_ref: CODING_WORKFLOW_ID,
       ...(attachments.length > 0 && { attachments }),
     },
     {

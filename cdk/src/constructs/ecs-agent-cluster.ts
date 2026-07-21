@@ -55,12 +55,20 @@ export interface EcsAgentClusterProps {
 
   /**
    * Artifacts bucket for repo-bound artifact workflows (#299 coding/decompose-v1
-   * emits its plan JSON here via ``deliver_artifact``; also the ``--trace``
-   * upload target). The AgentCore runtime gets ``ARTIFACTS_BUCKET_NAME`` in its
-   * env; the ECS task needs the SAME env + read/write grant or an artifact
-   * workflow fails at delivery with "ARTIFACTS_BUCKET_NAME is not configured"
-   * (live-caught: a :decompose on an ecs-configured repo). Read/WRITE because the
-   * container DELIVERS the artifact (unlike the read-only payload bucket).
+   * emits its plan JSON here via ``deliver_artifact``). The AgentCore runtime
+   * gets ``ARTIFACTS_BUCKET_NAME`` in its env; the ECS task needs the SAME env
+   * (but NO bucket grant) or an artifact workflow fails at delivery with
+   * "ARTIFACTS_BUCKET_NAME is not configured" (live-caught: a :decompose on an
+   * ecs-configured repo). The delivery WRITE goes through the assumed per-task
+   * SessionRole (scoped to ``artifacts/${aws:PrincipalTag/task_id}/*``), so the
+   * task role gets only the env var — parity with the AgentCore runtime role,
+   * which likewise has no direct artifacts grant (see the grant block below for
+   * the rationale).
+   *
+   * NOTE: this wires only ``ARTIFACTS_BUCKET_NAME`` (artifact delivery). It does
+   * NOT set ``TRACE_ARTIFACTS_BUCKET_NAME`` (telemetry.py reads that for the
+   * ``--trace`` upload), so ``--trace`` silently skips on ECS today — a separate
+   * ECS-parity gap, not wired here.
    * Omitted in isolated construct tests → no env/grant.
    */
   readonly artifactsBucket?: s3.IBucket;
@@ -83,8 +91,9 @@ export interface EcsAgentClusterProps {
    * ``bedrock-agentcore:CreateEvent``) succeed on the ECS substrate. The
    * AgentCore runtime role already gets this via ``agentMemory.grantReadWrite``
    * in agent.ts; without the same grant here, memory writes hit AccessDenied and
-   * silently no-op on ECS (WARN), so learning never persists on an ECS-only
-   * deployment. Omitted in isolated construct tests / memory-less deployments.
+   * no-op on ECS (logged, non-fatal — memory.py treats an AccessDenied as an
+   * infra failure), so learning never persists on an ECS-only deployment.
+   * Omitted in isolated construct tests / memory-less deployments.
    */
   readonly agentMemory?: AgentMemory;
 }
@@ -227,21 +236,24 @@ export class EcsAgentCluster extends Construct {
       props.payloadBucket.grantRead(taskRole);
     }
 
-    // #299 ECS-parity: an artifact workflow (coding/decompose-v1) WRITES its plan
-    // to the artifacts bucket via deliver_artifact, so grant read+write (the
-    // AgentCore runtime's SessionRole/exec-role has the equivalent). Scoped to
-    // this bucket. Stays on the task role — delivery is a terminal step.
-    if (props.artifactsBucket) {
-      props.artifactsBucket.grantReadWrite(taskRole);
-    }
+    // #299 ECS-parity: coding/decompose-v1 delivers its plan to the artifacts
+    // bucket via deliver_artifact — but the write goes through the assumed
+    // SessionRole (deliverers.py -> tenant_client), scoped to
+    // artifacts/${task_id}/*, exactly like the AgentCore runtime (whose task
+    // role likewise has NO direct artifacts grant). So the task role needs only
+    // the ARTIFACTS_BUCKET_NAME env (set above), not a bucket grant. Granting
+    // whole-bucket read+write here would over-privilege the untrusted-code role
+    // and break cross-task isolation (a task could read/clobber other tasks'
+    // artifacts/<other_id>/, traces/, attachments/ on the same bucket).
+    // (no props.artifactsBucket grant — intentional; see comment)
 
     // F-2 (ABCA-488-class parity): grant the task role read+write on the
     // AgentCore Memory so the agent's cross-task learning writes
     // (write_task_episode / write_repo_learnings → bedrock-agentcore:CreateEvent)
     // succeed on ECS. The AgentCore runtime role gets this via
     // agentMemory.grantReadWrite(runtime) in agent.ts; without the same grant
-    // here the writes hit AccessDenied and silently no-op (WARN) on the ECS
-    // substrate, so learning never persists on an ECS-only deployment.
+    // here the writes hit AccessDenied and no-op on the ECS substrate (logged,
+    // non-fatal), so learning never persists on an ECS-only deployment.
     if (props.agentMemory) {
       props.agentMemory.grantReadWrite(taskRole);
     }
@@ -253,7 +265,9 @@ export class EcsAgentCluster extends Construct {
     // 👀→✅ reaction and drive the channel MCP. The AgentCore runtime role +
     // orchestrator/fanout/screenshot roles all have this prefix grant; the ECS
     // task role did NOT, so on ECS the token fetch hit AccessDenied and
-    // reactions/MCP silently no-op'd (ECS-parity gap, live-caught on ABCA-488).
+    // reactions/MCP no-op'd — logged by config.py's token resolver, not silent,
+    // but the channel effect (no 👀→✅, no MCP) is invisible to the user
+    // (ECS-parity gap, live-caught on ABCA-488).
     // GetSecretValue only — the container reads the token; the orchestrator owns
     // refresh/PutSecretValue.
     taskRole.addToPrincipalPolicy(new iam.PolicyStatement({
@@ -333,7 +347,7 @@ export class EcsAgentCluster extends Construct {
     NagSuppressions.addResourceSuppressions(this.taskDefinition, [
       {
         id: 'AwsSolutions-IAM5',
-        reason: 'DynamoDB index/* wildcards from CDK grantReadWriteData (UserConcurrencyTable, and task tables only when no SessionRole is wired); Secrets Manager wildcards from CDK grantRead (GitHub token) and the bgagent-linear-oauth-*/bgagent-jira-oauth-* prefix grant (ABCA-488 — per-workspace channel OAuth tokens are created by the CLI at setup, name unknown at synth, GetSecretValue only); CloudWatch Logs wildcards from CDK grantWrite; S3 object/* wildcard from CDK grantRead on the ECS payload bucket (read-only, scoped to that bucket — #502) and from grantReadWrite on the artifacts bucket (scoped to that bucket — coding/decompose-v1 delivers its plan artifact there, #299). Bedrock InvokeModel is scoped to explicit model/inference-profile ARNs (no wildcard resource). ec2:DescribeAvailabilityZones requires Resource:* (EC2 describe actions have no resource-level scoping) — read-only, no mutation/data access; needed so a CDK target repo\'s `cdk synth` build gate can resolve AZ context on a fresh clone (ECS-parity, no cdk.context.json cache in the container).',
+        reason: 'DynamoDB index/* wildcards from CDK grantReadWriteData (UserConcurrencyTable, and task tables only when no SessionRole is wired); Secrets Manager wildcards from CDK grantRead (GitHub token) and the bgagent-linear-oauth-*/bgagent-jira-oauth-* prefix grant (ABCA-488 — per-workspace channel OAuth tokens are created by the CLI at setup, name unknown at synth, GetSecretValue only); CloudWatch Logs wildcards from CDK grantWrite; S3 object/* wildcard from CDK grantRead on the ECS payload bucket (read-only, scoped to that bucket — #502). Bedrock InvokeModel is scoped to explicit model/inference-profile ARNs (no wildcard resource). ec2:DescribeAvailabilityZones requires Resource:* (EC2 describe actions have no resource-level scoping) — read-only, no mutation/data access; needed so a CDK target repo\'s `cdk synth` build gate can resolve AZ context on a fresh clone (ECS-parity, no cdk.context.json cache in the container).',
       },
       {
         id: 'AwsSolutions-ECS2',
