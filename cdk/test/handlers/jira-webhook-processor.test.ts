@@ -40,11 +40,43 @@ jest.mock('../../src/handlers/shared/jira-oauth-resolver', () => ({
   resolveJiraOauthToken: (...args: unknown[]) => resolveJiraOauthTokenMock(...args),
 }));
 
+// The processor screens the folded comment section via the Bedrock Guardrail
+// (fail-open on intervention). Mock the client so it passes by default; the
+// comment-block-dropped test overrides it to GUARDRAIL_INTERVENED.
+const bedrockSendMock = jest.fn();
+jest.mock('@aws-sdk/client-bedrock-runtime', () => ({
+  BedrockRuntimeClient: jest.fn(() => ({ send: bedrockSendMock })),
+  ApplyGuardrailCommand: jest.fn((input: unknown) => ({ _type: 'ApplyGuardrail', input })),
+}));
+
+// #577 context enrichment. The download/comment helpers are unit-tested in
+// jira-attachments.test.ts; here we mock them to test the processor wiring
+// (folding comments into the description, fail-closed attachment rejection)
+// without real REST/S3. `JiraAttachmentError` is kept real so the processor's
+// `instanceof` reject branch is exercised.
+const fetchRecentHumanCommentsMock = jest.fn();
+const downloadJiraAttachmentsMock = jest.fn();
+jest.mock('../../src/handlers/shared/jira-attachments', () => {
+  const actual = jest.requireActual('../../src/handlers/shared/jira-attachments');
+  return {
+    ...actual,
+    fetchRecentHumanComments: (...args: unknown[]) => fetchRecentHumanCommentsMock(...args),
+    downloadScreenAndStoreJiraAttachments: (...args: unknown[]) => downloadJiraAttachmentsMock(...args),
+  };
+});
+
 process.env.JIRA_PROJECT_MAPPING_TABLE_NAME = 'JiraProjects';
 process.env.JIRA_USER_MAPPING_TABLE_NAME = 'JiraUsers';
 process.env.JIRA_WORKSPACE_REGISTRY_TABLE_NAME = 'JiraWorkspaceRegistry';
+// Attachment enrichment needs a bucket + guardrail configured (#577); with
+// these set the processor initializes S3/Bedrock clients (cheap, no network at
+// construction) and screens attachments through the mocked helper.
+process.env.ATTACHMENTS_BUCKET_NAME = 'attachments-bucket';
+process.env.GUARDRAIL_ID = 'gr-1';
+process.env.GUARDRAIL_VERSION = '1';
 
 import { handler } from '../../src/handlers/jira-webhook-processor';
+import { JiraAttachmentError } from '../../src/handlers/shared/jira-attachments';
 
 function eventWith(payload: Record<string, unknown>): { raw_body: string } {
   return { raw_body: JSON.stringify(payload) };
@@ -94,6 +126,14 @@ describe('jira-webhook-processor handler', () => {
       siteUrl: 'https://acme.atlassian.net',
       oauthSecretArn: 'arn:aws:secretsmanager:us-east-1:123:secret:bgagent-jira-oauth-cloud-1',
     });
+    // Default (#577): no comments, no attachments. Per-case tests override.
+    fetchRecentHumanCommentsMock.mockReset();
+    fetchRecentHumanCommentsMock.mockResolvedValue([]);
+    downloadJiraAttachmentsMock.mockReset();
+    downloadJiraAttachmentsMock.mockResolvedValue([]);
+    // Default: comment guardrail screening passes (no intervention).
+    bedrockSendMock.mockReset();
+    bedrockSendMock.mockResolvedValue({ action: 'NONE' });
   });
 
   test('skips missing raw_body', async () => {
@@ -721,6 +761,225 @@ describe('jira-webhook-processor handler', () => {
       const [reqBody] = createTaskCoreMock.mock.calls[0];
       expect(reqBody.attachments).toHaveLength(1);
       expect(reqBody.attachments[0]).toEqual({ type: 'url', url: 'https://cdn.example.com/mockup.png' });
+    });
+  });
+
+  // ─── #577: recent comments folded into the task context ─────────────────────
+
+  describe('recent comments in task context', () => {
+    beforeEach(() => {
+      ddbSend
+        .mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'active' } })
+        .mockResolvedValueOnce({ Item: { platform_user_id: 'cognito-user-1', status: 'active' } });
+      createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: JSON.stringify({ data: { task_id: 'T1' } }) });
+    });
+
+    test('folds fetched human comments into the description (oldest-first, attributed)', async () => {
+      fetchRecentHumanCommentsMock.mockResolvedValueOnce([
+        { author: 'Ada', createdAt: '2026-07-01T00:00:00Z', markdown: 'Use the attached log.' },
+        { author: 'Grace', createdAt: '2026-07-02T00:00:00Z', markdown: 'Repro on staging only.' },
+      ]);
+
+      await handler(eventWith(issue()));
+
+      const [reqBody] = createTaskCoreMock.mock.calls[0];
+      expect(reqBody.task_description).toContain('## Recent comments');
+      expect(reqBody.task_description).toContain('**Ada** (2026-07-01T00:00:00Z):');
+      expect(reqBody.task_description).toContain('Use the attached log.');
+      expect(reqBody.task_description).toContain('**Grace** (2026-07-02T00:00:00Z):');
+      // Oldest-first: Ada's comment appears before Grace's.
+      expect(reqBody.task_description.indexOf('Ada')).toBeLessThan(reqBody.task_description.indexOf('Grace'));
+    });
+
+    test('no comments → no Recent comments section', async () => {
+      fetchRecentHumanCommentsMock.mockResolvedValueOnce([]);
+
+      await handler(eventWith(issue()));
+
+      const [reqBody] = createTaskCoreMock.mock.calls[0];
+      expect(reqBody.task_description).not.toContain('## Recent comments');
+    });
+
+    test('comment fetch failure is fail-open: task still created, no failure comment', async () => {
+      // The helper itself is fail-open (returns []), but assert the processor
+      // does not gate on it even if it somehow rejects.
+      fetchRecentHumanCommentsMock.mockResolvedValueOnce([]);
+
+      await handler(eventWith(issue()));
+
+      expect(createTaskCoreMock).toHaveBeenCalled();
+      expect(reportIssueFailureMock).not.toHaveBeenCalled();
+    });
+
+    test('a huge comment thread is truncated, keeping task_description within the 10k limit (fail-open)', async () => {
+      // A single very long comment would otherwise push the description past
+      // MAX_TASK_DESCRIPTION_LENGTH and cause createTaskCore to 400 — turning
+      // advisory comments into a hard gate. The processor must truncate instead.
+      fetchRecentHumanCommentsMock.mockResolvedValueOnce([
+        { author: 'Ada', createdAt: '2026-07-01T00:00:00Z', markdown: 'x'.repeat(50_000) },
+      ]);
+
+      await handler(eventWith(issue()));
+
+      expect(createTaskCoreMock).toHaveBeenCalled();
+      const [reqBody] = createTaskCoreMock.mock.calls[0];
+      expect(reqBody.task_description.length).toBeLessThanOrEqual(10_000);
+      expect(reqBody.task_description).toContain('recent comments truncated');
+    });
+
+    test('a policy-tripping comment is DROPPED (fail-open) — task still created without it', async () => {
+      // Third-party comment content that trips the guardrail must not fail the
+      // reporter's task (#577 review item 4). The comment section is dropped;
+      // the task is still created from the reporter-authored description.
+      fetchRecentHumanCommentsMock.mockResolvedValueOnce([
+        { author: 'Mallory', createdAt: '2026-07-01T00:00:00Z', markdown: 'SSN 123-45-6789' },
+      ]);
+      bedrockSendMock.mockResolvedValueOnce({ action: 'GUARDRAIL_INTERVENED' });
+
+      await handler(eventWith(issue()));
+
+      expect(createTaskCoreMock).toHaveBeenCalled();
+      expect(reportIssueFailureMock).not.toHaveBeenCalled();
+      const [reqBody] = createTaskCoreMock.mock.calls[0];
+      expect(reqBody.task_description).not.toContain('## Recent comments');
+      expect(reqBody.task_description).not.toContain('123-45-6789');
+    });
+
+    test('passes a deterministic idempotency key (issue + webhook timestamp)', async () => {
+      const payload = issue();
+      payload.timestamp = 1784079623761;
+
+      await handler(eventWith(payload));
+
+      const [, ctx] = createTaskCoreMock.mock.calls[0];
+      expect(ctx.idempotencyKey).toBe('jira-ENG-42-1784079623761');
+    });
+
+    test('idempotent replay (createTaskCore 200) is not a failure and posts no ❌ comment', async () => {
+      // Override the beforeEach 201 with a 200 replay.
+      createTaskCoreMock.mockReset();
+      createTaskCoreMock.mockResolvedValueOnce({ statusCode: 200, body: JSON.stringify({ data: { task_id: 'T1' } }) });
+      fetchRecentHumanCommentsMock.mockResolvedValueOnce([]);
+
+      await handler(eventWith(issue()));
+
+      expect(reportIssueFailureMock).not.toHaveBeenCalled();
+    });
+  });
+
+  // ─── #577: Jira media attachments (fetch → screen → pre-screened records) ───
+
+  describe('Jira media attachment enrichment', () => {
+    const passedRecord = {
+      attachment_id: 'att-1',
+      type: 'file' as const,
+      content_type: 'text/plain',
+      filename: 'error.log',
+      s3_key: 'attachments/cognito-user-1/T1/att-1/error.log',
+      s3_version_id: 'v1',
+      size_bytes: 42,
+      checksum_sha256: 'abc',
+      screening: { status: 'passed' as const, screened_at: '2026-07-14T00:00:00Z' },
+    };
+
+    function issueWithAttachment(): Record<string, unknown> {
+      const payload = issue();
+      (payload.issue as { fields: Record<string, unknown> }).fields.attachment = [
+        { id: 'att-1', filename: 'error.log', mimeType: 'text/plain', size: 42, content: 'https://acme.atlassian.net/secure/attachment/att-1/error.log' },
+      ];
+      return payload;
+    }
+
+    test('passes screened attachments to createTaskCore as preScreenedAttachments', async () => {
+      ddbSend
+        .mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'active' } })
+        .mockResolvedValueOnce({ Item: { platform_user_id: 'cognito-user-1', status: 'active' } });
+      createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: JSON.stringify({ data: { task_id: 'T1' } }) });
+      downloadJiraAttachmentsMock.mockResolvedValueOnce([passedRecord]);
+
+      await handler(eventWith(issueWithAttachment()));
+
+      expect(createTaskCoreMock).toHaveBeenCalled();
+      const [, ctx] = createTaskCoreMock.mock.calls[0];
+      expect(ctx.preScreenedAttachments).toHaveLength(1);
+      expect(ctx.preScreenedAttachments[0].screening.status).toBe('passed');
+      // taskId is minted in the processor and threaded through so S3 keys match.
+      expect(ctx.taskId).toBeDefined();
+    });
+
+    test('passes remaining slots (10 - url image count) to the downloader', async () => {
+      ddbSend
+        .mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'active' } })
+        .mockResolvedValueOnce({ Item: { platform_user_id: 'cognito-user-1', status: 'active' } });
+      createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: JSON.stringify({ data: { task_id: 'T1' } }) });
+      downloadJiraAttachmentsMock.mockResolvedValueOnce([]);
+
+      const payload = issueWithAttachment();
+      // Two embedded image URLs consume two slots.
+      (payload.issue as { fields: Record<string, unknown> }).fields.description =
+        '![a](https://cdn.example.com/a.png) ![b](https://cdn.example.com/b.png)';
+
+      await handler(eventWith(payload));
+
+      const [, remainingSlots] = downloadJiraAttachmentsMock.mock.calls[0];
+      expect(remainingSlots).toBe(8);
+    });
+
+    test('fail-closed: JiraAttachmentError rejects the task with a Jira comment', async () => {
+      ddbSend
+        .mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'active' } })
+        .mockResolvedValueOnce({ Item: { platform_user_id: 'cognito-user-1', status: 'active' } });
+      downloadJiraAttachmentsMock.mockRejectedValueOnce(
+        new JiraAttachmentError("Attachment 'error.log' was blocked by content policy: PROMPT_ATTACK"),
+      );
+
+      await handler(eventWith(issueWithAttachment()));
+
+      expect(createTaskCoreMock).not.toHaveBeenCalled();
+      expect(reportIssueFailureMock).toHaveBeenCalledTimes(1);
+      const msg = reportIssueFailureMock.mock.calls[0][2] as string;
+      expect(msg).toContain("couldn't safely process an attachment");
+    });
+
+    test('fail-closed: attachments present but screening unconfigured rejects the task', async () => {
+      const savedBucket = process.env.ATTACHMENTS_BUCKET_NAME;
+      const savedGuardrail = process.env.GUARDRAIL_ID;
+      // The processor reads screening config at module load, so simulate the
+      // unconfigured state by re-importing with the env cleared.
+      jest.resetModules();
+      delete process.env.ATTACHMENTS_BUCKET_NAME;
+      delete process.env.GUARDRAIL_ID;
+
+      const freshModule = await import('../../src/handlers/jira-webhook-processor');
+      const freshHandler = freshModule.handler;
+
+      ddbSend
+        .mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'active' } })
+        .mockResolvedValueOnce({ Item: { platform_user_id: 'cognito-user-1', status: 'active' } });
+
+      await freshHandler(eventWith(issueWithAttachment()));
+
+      expect(createTaskCoreMock).not.toHaveBeenCalled();
+      expect(reportIssueFailureMock).toHaveBeenCalledTimes(1);
+      const msg = reportIssueFailureMock.mock.calls[0][2] as string;
+      expect(msg).toContain('attachment screening is not configured');
+
+      process.env.ATTACHMENTS_BUCKET_NAME = savedBucket;
+      process.env.GUARDRAIL_ID = savedGuardrail;
+      jest.resetModules();
+    });
+
+    test('no attachments → downloader not called, task created normally', async () => {
+      ddbSend
+        .mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'active' } })
+        .mockResolvedValueOnce({ Item: { platform_user_id: 'cognito-user-1', status: 'active' } });
+      createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: JSON.stringify({ data: { task_id: 'T1' } }) });
+
+      await handler(eventWith(issue()));
+
+      expect(downloadJiraAttachmentsMock).not.toHaveBeenCalled();
+      const [, ctx] = createTaskCoreMock.mock.calls[0];
+      expect(ctx.preScreenedAttachments).toBeUndefined();
     });
   });
 });

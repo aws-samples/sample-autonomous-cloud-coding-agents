@@ -44,6 +44,15 @@ RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
 
+# Enable Corepack so ``yarn`` / ``pnpm`` resolve out of the box. Many target
+# repos (including ABCA itself) drive installs with ``yarn install`` via their
+# build command; without this, ``yarn`` is "command not found" (exit 127) and
+# the build-verification GATE runs inert — a green build is reported for a repo
+# we never actually built (live-caught 2026-06-29 dogfooding ABCA-on-ABCA: the
+# agent had to hand-build a ``~/bin/yarn`` shim every run). Corepack ships with
+# Node 24; ``enable`` installs the yarn/pnpm shims onto PATH.
+RUN corepack enable && corepack prepare yarn@stable --activate || corepack enable
+
 # Install Claude Code CLI (the Python SDK requires this binary)
 # Then update known vulnerable transitive packages where fixed versions exist.
 # Pinned 2.1.191 to match the CLI bundled by claude-agent-sdk 0.2.110 (see

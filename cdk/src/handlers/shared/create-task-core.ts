@@ -66,6 +66,28 @@ export interface TaskCreationContext {
   readonly channelSource: ChannelSource;
   readonly channelMetadata: Record<string, string>;
   readonly idempotencyKey?: string;
+  /**
+   * Task ID to use instead of minting one. Only trusted server-side callers
+   * set this — a webhook processor that downloads + screens + uploads
+   * attachments to S3 *before* calling createTaskCore needs the task ID up
+   * front so the S3 object keys match the eventual task record (issue #577).
+   */
+  readonly taskId?: string;
+  /**
+   * Attachment records the caller has already downloaded, screened (status
+   * `passed`), and uploaded to S3 — e.g. Jira `media` file attachments a
+   * trusted webhook processor fetched authenticated and ran through the same
+   * Bedrock Guardrail pipeline (issue #577). Merged verbatim into the
+   * persisted attachments and NOT re-screened here. Every record MUST be a
+   * passed record with storage fields populated; a non-`passed` record is a
+   * caller contract violation and fails the request closed.
+   *
+   * These bypass the wire `Attachment`/`validateAttachments` path (which caps
+   * inline at 500 KB and can't authenticate a Jira download), so the caller is
+   * responsible for enforcing the per-file / total-size / count limits before
+   * upload.
+   */
+  readonly preScreenedAttachments?: readonly AttachmentRecord[];
 }
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -386,8 +408,11 @@ export async function createTaskCore(
     }
   }
 
-  // Generate task ID early so attachment S3 keys use the correct task ID
-  const taskId = ulid();
+  // Generate task ID early so attachment S3 keys use the correct task ID.
+  // A trusted server-side caller (e.g. the Jira webhook processor, #577) may
+  // supply the ID so the S3 keys of attachments it uploaded before this call
+  // match the eventual task record.
+  const taskId = context.taskId ?? ulid();
 
   // 2b. Process inline attachments: screen (with retry + EXIF strip), upload to S3, build records.
   // Presigned attachments are deferred to confirm-uploads; URL attachments are resolved during hydration.
@@ -535,6 +560,31 @@ export async function createTaskCore(
         screening: { status: 'pending' },
       }));
     }
+  }
+
+  // Pre-screened attachments: records a trusted server-side caller already
+  // downloaded, screened (passed), and uploaded to S3 — e.g. Jira `media`
+  // attachments fetched authenticated by the webhook processor (#577). They
+  // bypass the wire `Attachment` path, so they are merged verbatim and never
+  // re-screened. Fail closed on a caller contract violation: a non-`passed`
+  // record must never reach the agent.
+  if (context.preScreenedAttachments && context.preScreenedAttachments.length > 0) {
+    for (const rec of context.preScreenedAttachments) {
+      if (rec.screening.status !== 'passed') {
+        logger.error('Pre-screened attachment is not in passed state (fail-closed)', {
+          attachment_filename: rec.filename,
+          screening_status: rec.screening.status,
+          request_id: requestId,
+          metric_type: 'prescreened_attachment_invalid',
+        });
+        // Roll back any inline uploads this call made (empty on the Jira
+        // webhook path, which supplies no wire attachments) before failing.
+        if (s3Client) await cleanupOrphanedAttachments(s3Client, uploadedS3Keys);
+        return errorResponse(500, ErrorCode.INTERNAL_ERROR,
+          'A pre-screened attachment was not in a passed state.', requestId);
+      }
+    }
+    attachmentRecords.push(...context.preScreenedAttachments);
   }
 
   // 3. Check idempotency key
