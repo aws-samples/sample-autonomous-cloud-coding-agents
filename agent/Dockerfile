@@ -51,7 +51,7 @@ RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && \
 # we never actually built (live-caught 2026-06-29 dogfooding ABCA-on-ABCA: the
 # agent had to hand-build a ``~/bin/yarn`` shim every run). Corepack ships with
 # Node 24; ``enable`` installs the yarn/pnpm shims onto PATH.
-RUN corepack enable && corepack prepare yarn@stable --activate 2>/dev/null || corepack enable
+RUN corepack enable && corepack prepare yarn@stable --activate || corepack enable
 
 # Install Claude Code CLI (the Python SDK requires this binary)
 # Then update known vulnerable transitive packages where fixed versions exist.
