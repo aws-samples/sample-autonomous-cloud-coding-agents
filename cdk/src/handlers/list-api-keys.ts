@@ -37,6 +37,20 @@ const DEFAULT_PAGE_LIMIT = 20;
 const MAX_PAGE_LIMIT = 100;
 
 /**
+ * Cap on DynamoDB `Query` round-trips per request. `Limit` is applied to
+ * *scanned* items before `FilterExpression`, so filtering out revoked keys can
+ * leave a page short; we page until it is full (below). This bounds the work a
+ * caller with many revoked keys can trigger — the token still advances, so the
+ * next request resumes rather than silently truncating.
+ */
+const MAX_QUERY_PAGES = 10;
+
+/** GSI key attributes DynamoDB needs to resume a `UserIndex` query. */
+function startKeyForRecord(record: ApiKeyRecord): Record<string, unknown> {
+  return { key_id: record.key_id, user_id: record.user_id, created_at: record.created_at };
+}
+
+/**
  * GET /v1/api-keys — List API keys for the authenticated user.
  */
 export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
@@ -49,7 +63,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     const limit = parseLimit(event.queryStringParameters?.limit, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT);
-    const startKey = decodePaginationToken(event.queryStringParameters?.next_token);
     const includeRevoked = event.queryStringParameters?.include_revoked === 'true';
 
     let filterExpression: string | undefined;
@@ -60,24 +73,57 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       expressionAttributeValues[':active'] = 'active';
     }
 
-    const result = await ddb.send(new QueryCommand({
-      TableName: TABLE_NAME,
-      IndexName: 'UserIndex',
-      KeyConditionExpression: 'user_id = :uid',
-      ...(filterExpression && {
-        FilterExpression: filterExpression,
-        ExpressionAttributeNames: { '#s': 'status' },
-      }),
-      ExpressionAttributeValues: expressionAttributeValues,
-      Limit: limit,
-      ScanIndexForward: false,
-      ...(startKey && { ExclusiveStartKey: startKey }),
-    }));
+    // Accumulate until we have a full page of post-filter items (or run out).
+    // Over-fetch one extra so we can tell whether a further page exists without
+    // returning a short page that still advertises `has_more`.
+    let startKey = decodePaginationToken(event.queryStringParameters?.next_token);
+    const items: ApiKeyRecord[] = [];
 
-    const items = (result.Items ?? []) as ApiKeyRecord[];
-    const nextToken = encodePaginationToken(result.LastEvaluatedKey as Record<string, unknown> | undefined);
+    for (let page = 0; page < MAX_QUERY_PAGES; page += 1) {
+      const result = await ddb.send(new QueryCommand({
+        TableName: TABLE_NAME,
+        IndexName: 'UserIndex',
+        KeyConditionExpression: 'user_id = :uid',
+        ...(filterExpression && {
+          FilterExpression: filterExpression,
+          ExpressionAttributeNames: { '#s': 'status' },
+        }),
+        ExpressionAttributeValues: expressionAttributeValues,
+        Limit: limit + 1,
+        ScanIndexForward: false,
+        ...(startKey && { ExclusiveStartKey: startKey }),
+      }));
 
-    return paginatedResponse(items.map(toApiKeyDetail), nextToken, requestId);
+      items.push(...((result.Items ?? []) as ApiKeyRecord[]));
+      startKey = result.LastEvaluatedKey as Record<string, unknown> | undefined;
+
+      if (items.length > limit) {
+        // Enough for this page plus proof another item exists.
+        break;
+      }
+      if (!startKey) {
+        // Table exhausted — whatever we have is the final page.
+        break;
+      }
+    }
+
+    const pageItems = items.slice(0, limit);
+
+    // Build the resume token:
+    // - Trimmed (more accumulated than the page holds): resume from the last
+    //   *returned* record. DynamoDB's LastEvaluatedKey points past the extra
+    //   over-fetched items we dropped, so using it would skip them.
+    // - Not trimmed but a scan cursor is still pending (we hit the page cap
+    //   before filling the page): resume from that raw cursor so the caller can
+    //   continue rather than being told, falsely, that the list is complete.
+    let nextToken: string | null = null;
+    if (items.length > limit) {
+      nextToken = encodePaginationToken(startKeyForRecord(pageItems[pageItems.length - 1]));
+    } else if (startKey) {
+      nextToken = encodePaginationToken(startKey);
+    }
+
+    return paginatedResponse(pageItems.map(toApiKeyDetail), nextToken, requestId);
   } catch (err) {
     logger.error('Failed to list API keys', { error: String(err), request_id: requestId });
     return errorResponse(500, ErrorCode.INTERNAL_ERROR, 'Internal server error.', requestId);

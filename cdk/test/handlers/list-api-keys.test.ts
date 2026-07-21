@@ -52,16 +52,20 @@ function makeEvent(overrides: Partial<APIGatewayProxyEvent> = {}): APIGatewayPro
   };
 }
 
-const record = {
-  key_id: 'k1',
-  user_id: 'owner-1',
-  name: 'ci',
-  key_hash: 'deadbeef',
-  scopes: ['webhooks:manage'],
-  status: 'active',
-  created_at: '2026-01-01T00:00:00Z',
-  updated_at: '2026-01-01T00:00:00Z',
-};
+function makeRecord(n: number, status: 'active' | 'revoked' = 'active') {
+  return {
+    key_id: `k${n}`,
+    user_id: 'owner-1',
+    name: `ci-${n}`,
+    key_hash: 'deadbeef',
+    scopes: ['webhooks:manage'],
+    status,
+    created_at: `2026-01-01T00:00:${String(n).padStart(2, '0')}Z`,
+    updated_at: '2026-01-01T00:00:00Z',
+  };
+}
+
+const record = makeRecord(1);
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -110,5 +114,72 @@ describe('list-api-keys handler', () => {
     mockDdbSend.mockRejectedValueOnce(new Error('DDB error'));
     const result = await handler(makeEvent());
     expect(result.statusCode).toBe(500);
+  });
+
+  describe('pagination (finding #1: Limit is applied pre-filter)', () => {
+    test('over-fetches limit+1 so a full page can prove another item exists', async () => {
+      await handler(makeEvent({ queryStringParameters: { limit: '20' } }));
+      const q = mockDdbSend.mock.calls[0][0].input;
+      expect(q.Limit).toBe(21);
+    });
+
+    test('a single page short of the limit reports has_more=false with no token', async () => {
+      // Fewer active items than requested, table exhausted (no LastEvaluatedKey).
+      mockDdbSend.mockResolvedValueOnce({ Items: [makeRecord(1), makeRecord(2)] });
+      const result = await handler(makeEvent({ queryStringParameters: { limit: '20' } }));
+      const body = JSON.parse(result.body);
+      expect(body.data).toHaveLength(2);
+      expect(body.pagination.has_more).toBe(false);
+      expect(body.pagination.next_token).toBeNull();
+      expect(mockDdbSend).toHaveBeenCalledTimes(1);
+    });
+
+    test('keeps querying past filtered-out pages until the page is full', async () => {
+      // Page 1: Limit applied before filter yields 0 active but a cursor remains.
+      mockDdbSend.mockResolvedValueOnce({ Items: [], LastEvaluatedKey: { key_id: 'k0' } });
+      // Page 2: enough active keys to fill limit=2 plus one extra.
+      mockDdbSend.mockResolvedValueOnce({
+        Items: [makeRecord(3), makeRecord(2), makeRecord(1)],
+        LastEvaluatedKey: { key_id: 'k1' },
+      });
+
+      const result = await handler(makeEvent({ queryStringParameters: { limit: '2' } }));
+      const body = JSON.parse(result.body);
+
+      expect(mockDdbSend).toHaveBeenCalledTimes(2);
+      expect(body.data).toHaveLength(2);
+      expect(body.data.map((k: { key_id: string }) => k.key_id)).toEqual(['k3', 'k2']);
+      expect(body.pagination.has_more).toBe(true);
+      expect(body.pagination.next_token).not.toBeNull();
+    });
+
+    test('next_token resumes from the last returned record, not the scan boundary', async () => {
+      mockDdbSend.mockResolvedValueOnce({
+        Items: [makeRecord(3), makeRecord(2), makeRecord(1)],
+        LastEvaluatedKey: { key_id: 'k-scanned-past' },
+      });
+      const result = await handler(makeEvent({ queryStringParameters: { limit: '2' } }));
+      const body = JSON.parse(result.body);
+
+      const decoded = JSON.parse(Buffer.from(body.pagination.next_token, 'base64').toString('utf-8'));
+      // Boundary is the last item actually returned (k2), so k1 is not skipped.
+      expect(decoded).toEqual({ key_id: 'k2', user_id: 'owner-1', created_at: makeRecord(2).created_at });
+    });
+
+    test('stops after the page cap and still advances the raw cursor', async () => {
+      // Every page filters to nothing but keeps returning a cursor.
+      mockDdbSend.mockResolvedValue({ Items: [], LastEvaluatedKey: { key_id: 'kX' } });
+      const result = await handler(makeEvent({ queryStringParameters: { limit: '20' } }));
+      const body = JSON.parse(result.body);
+
+      expect(mockDdbSend).toHaveBeenCalledTimes(10); // MAX_QUERY_PAGES
+      expect(body.data).toHaveLength(0);
+      // We bailed on the cap with a scan cursor still pending, so hand it back
+      // rather than falsely reporting the list is complete. No boundary record
+      // exists (nothing returned), so we fall through to DynamoDB's raw cursor.
+      expect(body.pagination.has_more).toBe(true);
+      const decoded = JSON.parse(Buffer.from(body.pagination.next_token, 'base64').toString('utf-8'));
+      expect(decoded).toEqual({ key_id: 'kX' });
+    });
   });
 });

@@ -55,9 +55,21 @@ describe('ApiKeyTable construct', () => {
             { AttributeName: 'user_id', KeyType: 'HASH' },
             { AttributeName: 'created_at', KeyType: 'RANGE' },
           ],
-          Projection: { ProjectionType: 'ALL' },
+          Projection: {
+            ProjectionType: 'INCLUDE',
+            NonKeyAttributes: ['name', 'status', 'scopes', 'updated_at', 'expires_at', 'revoked_at'],
+          },
         },
       ],
     });
+  });
+
+  test('UserIndex does not project key_hash (defense-in-depth)', () => {
+    const gsis = template.findResources('AWS::DynamoDB::Table');
+    const attrs = Object.values(gsis)
+      .flatMap((r) => r.Properties.GlobalSecondaryIndexes ?? [])
+      .filter((gsi: { IndexName: string }) => gsi.IndexName === 'UserIndex')
+      .flatMap((gsi: { Projection: { NonKeyAttributes?: string[] } }) => gsi.Projection.NonKeyAttributes ?? []);
+    expect(attrs).not.toContain('key_hash');
   });
 });

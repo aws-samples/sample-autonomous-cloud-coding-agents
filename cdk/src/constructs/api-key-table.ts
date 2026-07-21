@@ -56,6 +56,10 @@ export interface ApiKeyTableProps {
  *
  * GSIs:
  * - UserIndex (PK: user_id, SK: created_at) — list API keys for a user.
+ *   Projects only the attributes the list response needs; `key_hash` is
+ *   deliberately excluded so the secret hash is never replicated into the index
+ *   (defense-in-depth — the list path already strips it, this stops it being
+ *   readable via the GSI at all).
  */
 export class ApiKeyTable extends Construct {
   /**
@@ -90,7 +94,10 @@ export class ApiKeyTable extends Construct {
       indexName: ApiKeyTable.USER_INDEX,
       partitionKey: { name: 'user_id', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'created_at', type: dynamodb.AttributeType.STRING },
-      projectionType: dynamodb.ProjectionType.ALL,
+      // Everything the list response needs, minus `key_hash`. Key attributes
+      // (key_id, user_id, created_at) are projected automatically.
+      projectionType: dynamodb.ProjectionType.INCLUDE,
+      nonKeyAttributes: ['name', 'status', 'scopes', 'updated_at', 'expires_at', 'revoked_at'],
     });
   }
 }
