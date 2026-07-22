@@ -179,6 +179,72 @@ const ACK_CLAIM_TTL_SECONDS = 86_400;
  */
 const LINEAR_START_COMMENT = '🤖 Starting on this issue — I\'ll open a PR and report back here when it\'s ready.';
 
+/** Outcome of {@link hydrateLinearIssueAttachments}. */
+type HydrateResult =
+  | { readonly ok: true; readonly records: PassedAttachmentRecord[] }
+  | { readonly ok: false; readonly message: string };
+
+/**
+ * Fetch + screen + store an issue's uploads.linear.app attachments (description
+ * links AND native paperclips), returning `passed` records for
+ * `preScreenedAttachments`. Shared by the single-task path AND the Mode-A
+ * orchestration seed (a parent with pre-existing sub-issues) so BOTH inherit the
+ * parent's attachments (finding #1 — Mode A was previously blind).
+ *
+ * Fail-closed: returns `{ok:false, message}` when the issue HAS uploads but they
+ * can't be screened (screening unconfigured, or a fetch/screen failure) — the
+ * caller rejects the task/epic with that message. Returns `{ok:true, records:[]}`
+ * when there's genuinely nothing to hydrate.
+ */
+async function hydrateLinearIssueAttachments(
+  issue: LinearIssueEvent['data'],
+  workspaceId: string,
+  platformUserId: string,
+  accessToken: string,
+  taskOrEpicId: string,
+  remainingSlots: number,
+  probedAttachments: readonly LinearProbeAttachment[],
+): Promise<HydrateResult> {
+  const uploadsPaperclips = probedAttachments.filter((a) => isLinearUploadsUrl(a.url));
+  const descHasUploads = Boolean(issue.description && issue.description.includes('uploads.linear.app'));
+  if (!descHasUploads && uploadsPaperclips.length === 0) return { ok: true, records: [] };
+
+  if (!attachmentsS3Client || !ATTACHMENTS_BUCKET || !attachmentsScreeningConfig) {
+    logger.error('Linear issue has uploads.linear.app attachments but screening/storage is not configured (fail-closed)', {
+      issue_id: issue.id,
+      linear_workspace_id: workspaceId,
+      has_bucket: Boolean(ATTACHMENTS_BUCKET),
+      has_guardrail: Boolean(attachmentsScreeningConfig),
+    });
+    return { ok: false, message: 'This Linear issue has uploaded attachments, but ABCA attachment screening is not configured. Contact your ABCA admin.' };
+  }
+  try {
+    const records = await downloadScreenAndStoreLinearAttachments(
+      issue.description,
+      remainingSlots,
+      {
+        s3Client: attachmentsS3Client,
+        bucketName: ATTACHMENTS_BUCKET,
+        screeningConfig: attachmentsScreeningConfig,
+        userId: platformUserId,
+        taskId: taskOrEpicId,
+        accessToken,
+        linearWorkspaceId: workspaceId,
+      },
+      uploadsPaperclips,
+    );
+    return { ok: true, records };
+  } catch (err) {
+    if (err instanceof LinearAttachmentError) {
+      logger.warn('Rejecting Linear task: attachment could not be safely processed', {
+        issue_id: issue.id, linear_workspace_id: workspaceId, error: err.message,
+      });
+      return { ok: false, message: `ABCA couldn't safely process an attachment on this issue: ${err.message} Remove or fix the attachment and re-apply the trigger label.` };
+    }
+    throw err;
+  }
+}
+
 /**
  * Post a Linear comment + ❌ reaction without ever propagating an error.
  *
@@ -589,6 +655,30 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   //   - transient Linear error → terminal comment; do NOT silently
   //     degrade to a single task (that would drop the epic structure).
   if (ORCHESTRATION_TABLE && resolvedAccessToken) {
+    // finding #1 (Mode A): a parent with pre-existing sub-issues seeds HERE, not
+    // through the reconciler's Mode-B path — so hydrate the parent's attachments
+    // and stamp them on the meta row (releaseContext) so every child inherits
+    // them. The helper no-ops (no S3/DDB) when the issue has no uploads, so the
+    // common fall-through-to-single_task case pays nothing. Replay-safe without a
+    // gate: the S3 key is derived deterministically from the upload URL (stable
+    // across redeliveries → same key, idempotent PUT) and seedOrchestration is
+    // frozen-at-first-seed (the meta row's pinned records never change on a
+    // re-trigger), so a replay can only re-screen identical bytes, never orphan a
+    // pinned version (#4).
+    let epicAttachments: PassedAttachmentRecord[] = [];
+    {
+      const hydrated = await hydrateLinearIssueAttachments(
+        issue, workspaceId, platformUserId, resolvedAccessToken,
+        `epic-${issue.id}`, 10, probedAttachments,
+      );
+      if (!hydrated.ok) {
+        // Fail-closed: don't seed children blind to a spec they may need.
+        await safeReportIssueFailure(issue.id, workspaceId, `❌ ${hydrated.message}`);
+        return;
+      }
+      epicAttachments = hydrated.records;
+    }
+
     const releaseContext: OrchestrationReleaseContext = {
       platform_user_id: platformUserId,
       // This orchestration was seeded by the Linear trigger; stamp the
@@ -602,6 +692,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
         linear_workspace_slug: channelMetadata.linear_workspace_slug,
       }),
       linear_project_id: projectId,
+      ...(epicAttachments.length > 0 && { pre_screened_attachments: epicAttachments }),
     };
 
     const discovery = await discoverOrchestration({
@@ -939,61 +1030,20 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   const taskId = ulid();
 
   // ADR-016: fetch uploads.linear.app files with the workspace OAuth token,
-  // screen, store, and inject as preScreenedAttachments — the agent has no
-  // Linear MCP to fetch them at runtime. Covers BOTH description-embedded links
-  // AND native paperclip attachments (finding #1). Fail-closed: a
-  // selected-but-unscreenable attachment rejects the whole task.
-  const uploadsPaperclips = probedAttachments.filter((a) => isLinearUploadsUrl(a.url));
-  const descHasUploads = Boolean(issue.description && issue.description.includes('uploads.linear.app'));
+  // screen, store, inject as preScreenedAttachments (finding #1). Fail-closed via
+  // the shared helper — an unscreenable attachment rejects the whole task.
+  // Combined cap: public-URL image attachments already consume slots.
   let preScreenedAttachments: PassedAttachmentRecord[] = [];
-  if (resolvedAccessToken && (descHasUploads || uploadsPaperclips.length > 0)) {
-    if (!attachmentsS3Client || !ATTACHMENTS_BUCKET || !attachmentsScreeningConfig) {
-      logger.error('Linear issue has uploads.linear.app attachments but screening/storage is not configured (fail-closed)', {
-        issue_id: issue.id,
-        linear_workspace_id: workspaceId,
-        has_bucket: Boolean(ATTACHMENTS_BUCKET),
-        has_guardrail: Boolean(attachmentsScreeningConfig),
-      });
-      await safeReportIssueFailure(
-        issue.id,
-        workspaceId,
-        '❌ This Linear issue has uploaded attachments, but ABCA attachment screening is not configured. Contact your ABCA admin.',
-      );
+  if (resolvedAccessToken) {
+    const hydrated = await hydrateLinearIssueAttachments(
+      issue, workspaceId, platformUserId, resolvedAccessToken,
+      taskId, 10 - attachments.length, probedAttachments,
+    );
+    if (!hydrated.ok) {
+      await safeReportIssueFailure(issue.id, workspaceId, `❌ ${hydrated.message}`);
       return;
     }
-    // Combined cap: public-URL image attachments already consume slots.
-    const remainingSlots = 10 - attachments.length;
-    try {
-      preScreenedAttachments = await downloadScreenAndStoreLinearAttachments(
-        issue.description,
-        remainingSlots,
-        {
-          s3Client: attachmentsS3Client,
-          bucketName: ATTACHMENTS_BUCKET,
-          screeningConfig: attachmentsScreeningConfig,
-          userId: platformUserId,
-          taskId,
-          accessToken: resolvedAccessToken,
-          linearWorkspaceId: workspaceId,
-        },
-        uploadsPaperclips,
-      );
-    } catch (err) {
-      if (err instanceof LinearAttachmentError) {
-        logger.warn('Rejecting Linear task: attachment could not be safely processed', {
-          issue_id: issue.id,
-          linear_workspace_id: workspaceId,
-          error: err.message,
-        });
-        await safeReportIssueFailure(
-          issue.id,
-          workspaceId,
-          `❌ ABCA couldn't safely process an attachment on this issue: ${err.message} Remove or fix the attachment and re-apply the trigger label.`,
-        );
-        return;
-      }
-      throw err;
-    }
+    preScreenedAttachments = hydrated.records;
   }
 
   const requestId = crypto.randomUUID();
