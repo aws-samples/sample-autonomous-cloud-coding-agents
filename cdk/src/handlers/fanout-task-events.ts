@@ -167,20 +167,23 @@ export const CHANNEL_DEFAULTS: Record<NotificationChannel, ReadonlySet<string>> 
     ...TERMINAL_EVENT_TYPES,
     'pr_created',
   ]),
-  // Linear posts a single deterministic final-status comment on
-  // terminal events. The agent's three-comment prompt contract (start /
-  // PR-opened / completion) covers in-flight progress; this dispatcher
-  // only fires once the task reaches a terminal state, with cost /
-  // turns / duration / pr_url metrics the requester wouldn't otherwise
-  // see. Crucially, this fires even when the agent crashes (e.g.
-  // error_max_turns, OOM) before reaching its own step-3 completion
-  // comment — the GH issue #239 motivating example.
+  // Linear posts deterministic status comments on the platform tier
+  // (ADR-016: Linear is fully deterministic — the agent has no Linear MCP
+  // and posts nothing itself). Two events:
+  //   * ``pr_created`` — the first-run "🔗 PR opened" courtesy comment (or,
+  //     for a comment-iteration, matures the threaded reply to "🔄 Working").
+  //     This replaces the agent's old step-2 MCP save_comment.
+  //   * terminal — the final ✅/⚠️/❌ status with cost / turns / duration /
+  //     pr_url metrics. Fires even when the agent crashes (error_max_turns,
+  //     OOM) before any PR — the GH issue #239 motivating example.
   //
-  // Linear's `save_comment` doesn't support edit, so this is post-once
-  // (no live updates a la GitHub edit-in-place). Approvals / milestones
-  // are excluded for the same reason — N comments rather than 1.
+  // Linear's `save_comment` doesn't support edit, so each is post-once (no
+  // live updates a la GitHub edit-in-place), idempotent across partial-batch
+  // retries via per-event markers. The start "🤖 Starting" comment is posted
+  // even earlier, at task-admission in the webhook processor (ADR-016 P4.5).
   linear: new Set<string>([
     ...TERMINAL_EVENT_TYPES,
+    'pr_created',
   ]),
   // Jira posts a single deterministic final-status comment on terminal
   // events — the Jira analogue of the Linear default above (issue #573).
@@ -640,6 +643,24 @@ async function saveLinearCommentState(taskId: string, eventId: string): Promise<
 }
 
 /**
+ * Persist the post-once marker after a successful first-run Linear "PR opened"
+ * courtesy comment (ADR-016 P4.5). The pr_created analogue of
+ * ``saveLinearCommentState`` — a distinct attribute so the PR-opened and
+ * terminal comments are independently idempotent.
+ */
+async function saveLinearPrCommentState(taskId: string, eventId: string): Promise<void> {
+  await saveDispatchMarker({
+    taskId,
+    updateExpression: 'SET linear_pr_comment_event_id = :eid',
+    conditionExpression: 'attribute_exists(task_id) AND attribute_not_exists(linear_pr_comment_event_id)',
+    values: { ':eid': eventId },
+    channel: 'linear',
+    errorId: 'FANOUT_LINEAR_PR_PERSIST_FAILED',
+    logContext: { event_id: eventId },
+  });
+}
+
+/**
  * Persist the post-once marker after a successful Jira final-status comment
  * (see ``dispatchToJira``). The Jira analogue of ``saveLinearCommentState`` —
  * Jira has no comment-edit API, so the marker is what makes the post
@@ -926,6 +947,16 @@ async function dispatchToEmail(event: FanOutEvent): Promise<void> {
 }
 
 /**
+ * Render the first-run "PR opened" courtesy comment (ADR-016 P4.5). Kept short
+ * — the 🔗 prefix is in the self-trigger guard's bot-comment markers so it never
+ * re-triggers ABCA, and the terminal comment carries the authoritative outcome.
+ */
+export function renderLinearPrOpenedComment(prUrl: string, prNumber: number | null): string {
+  const ref = prNumber != null ? `PR #${prNumber}` : 'a pull request';
+  return `🔗 Opened ${ref}: ${prUrl}`;
+}
+
+/**
  * Render the Linear final-status comment body. Inputs are already
  * coerced to native types by the caller; this function only formats.
  *
@@ -1128,9 +1159,13 @@ async function dispatchToLinear(event: FanOutEvent): Promise<void> {
   const triggerCommentId = task.channel_metadata?.trigger_comment_id;
   const isIteration = Boolean(triggerCommentId);
 
-  // pr_created milestone on an iteration → mature the reply to "🔄 Working".
-  // (Non-iteration tasks ignore pr_created here — the agent's own headline
-  // "🤖 PR opened" comment covers the first task; the terminal comment follows.)
+  // pr_created milestone:
+  //   * iteration → mature the threaded reply to "🔄 Working".
+  //   * first-run (non-iteration) → post the "🔗 PR opened" courtesy comment.
+  //     This replaces the agent's old step-2 `mcp__linear-server__save_comment`
+  //     (ADR-016 P4.5): the agent has no Linear MCP, so the platform posts it.
+  //     Post-once via `linear_pr_comment_event_id` so a pr_created redelivery
+  //     (or a sibling channel's infra-rejection re-run) doesn't duplicate it.
   if (event.event_type === 'agent_milestone') {
     if (isIteration && iterationReplyId && triggerCommentId) {
       await upsertThreadedReply(
@@ -1143,8 +1178,33 @@ async function dispatchToLinear(event: FanOutEvent): Promise<void> {
         }),
         iterationReplyId,
       );
+      return;
     }
-    return; // milestones never post the top-level status comment
+    // First-run PR-opened comment. Skip if we've already posted it, or if
+    // there's no PR URL yet (nothing to link).
+    if (task.linear_pr_comment_event_id || !task.pr_url) return;
+    const prBody = renderLinearPrOpenedComment(task.pr_url, task.pr_number ?? null);
+    const prResult = await postIssueComment(
+      { linearWorkspaceId: workspaceId, registryTableName },
+      issueId,
+      prBody,
+    );
+    if (prResult.ok) {
+      logger.info('[fanout/linear] PR-opened comment dispatched', {
+        event: 'fanout.linear.pr_comment_dispatched',
+        task_id: task.task_id,
+        issue_id: issueId,
+      });
+      await saveLinearPrCommentState(task.task_id, event.event_id);
+    } else {
+      logger.warn('[fanout/linear] PR-opened comment post failed', {
+        event: 'fanout.linear.pr_comment_failed',
+        error_id: 'FANOUT_LINEAR_PR_COMMENT_FAILED',
+        task_id: task.task_id,
+        issue_id: issueId,
+      });
+    }
+    return; // milestones never post the terminal status comment
   }
 
   // Idempotency across partial-batch retries: Linear has no comment

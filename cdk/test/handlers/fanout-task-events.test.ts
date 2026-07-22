@@ -198,6 +198,19 @@ function mkEvent(type: string, taskId = 't-1'): DynamoDBRecord {
   });
 }
 
+/** An ``agent_milestone`` event carrying ``metadata.milestone`` — the real
+ *  shape the agent emits for pr_created (progress_writer.write_agent_milestone),
+ *  which ``effectiveEventType`` unwraps for routing. */
+function mkMilestone(milestone: string, taskId = 't-1'): DynamoDBRecord {
+  return mkRecord('INSERT', {
+    task_id: { S: taskId },
+    event_id: { S: `01ABC${milestone}` },
+    event_type: { S: 'agent_milestone' },
+    timestamp: { S: '2026-04-22T04:00:00Z' },
+    metadata: { M: { milestone: { S: milestone } } },
+  });
+}
+
 describe('fanout-task-events: parseStreamRecord', () => {
   test('parses a well-formed INSERT into FanOutEvent', () => {
     const rec = mkEvent('task_completed', 't-parse-1');
@@ -350,9 +363,10 @@ describe('fanout-task-events: per-channel filter contract (design §6.2)', () =>
     ]);
   });
 
-  test('Linear subscribes to terminal events only (post-once final-status comment)', () => {
+  test('Linear subscribes to pr_created + terminal events (ADR-016 P4.5 courtesy comment + post-once final-status)', () => {
     const f = CHANNEL_DEFAULTS.linear;
     expect([...f].sort()).toEqual([
+      'pr_created',
       'task_cancelled',
       'task_completed',
       'task_failed',
@@ -496,9 +510,9 @@ describe('fanout-task-events: routeEvent (per-channel dispatch)', () => {
     expect(outcome.dispatched).toEqual(['slack']);
   });
 
-  test('pr_created routes to GitHub only (not Slack — task_completed already carries View PR)', async () => {
+  test('pr_created routes to GitHub + Linear (ADR-016 P4.5 courtesy comment), not Slack', async () => {
     const outcome = await routeEvent(mk('pr_created'));
-    expect(outcome.dispatched).toEqual(['github']);
+    expect([...outcome.dispatched].sort()).toEqual(['github', 'linear']);
     expect(outcome.dispatched).not.toContain('slack');
   });
 
@@ -1541,6 +1555,58 @@ describe('fanout-task-events: Linear dispatcher (issue #239)', () => {
     expect(mockPostIssueComment).not.toHaveBeenCalled();
   });
 
+  // ─── ADR-016 P4.5: first-run "PR opened" courtesy comment on pr_created ─────
+
+  test('pr_created posts a "🔗 Opened PR" comment for a first-run task', async () => {
+    mockGet({ ...TASK_RECORD_LINEAR, pr_number: 13 });
+
+    const event: DynamoDBStreamEvent = { Records: [mkMilestone('pr_created', 't-lin')] };
+    await handler(event);
+
+    expect(mockPostIssueComment).toHaveBeenCalledTimes(1);
+    const [, issueId, body] = mockPostIssueComment.mock.calls[0];
+    expect(issueId).toBe('issue-uuid-42');
+    expect(body).toContain('🔗');
+    expect(body).toContain('PR #13');
+    expect(body).toContain('https://github.com/owner/repo/pull/13');
+  });
+
+  test('pr_created without a PR url yet posts nothing (nothing to link)', async () => {
+    mockGet({ ...TASK_RECORD_LINEAR, pr_url: undefined });
+
+    const event: DynamoDBStreamEvent = { Records: [mkMilestone('pr_created', 't-lin')] };
+    await handler(event);
+
+    expect(mockPostIssueComment).not.toHaveBeenCalled();
+  });
+
+  test('pr_created is post-once — already-posted marker skips the comment', async () => {
+    mockGet({ ...TASK_RECORD_LINEAR, pr_number: 13, linear_pr_comment_event_id: 'prior-event' });
+
+    const event: DynamoDBStreamEvent = { Records: [mkMilestone('pr_created', 't-lin')] };
+    await handler(event);
+
+    expect(mockPostIssueComment).not.toHaveBeenCalled();
+  });
+
+  test('pr_created on an iteration matures the threaded reply instead of posting a top-level comment', async () => {
+    mockGet({
+      ...TASK_RECORD_LINEAR,
+      pr_number: 13,
+      channel_metadata: {
+        ...TASK_RECORD_LINEAR.channel_metadata,
+        trigger_comment_id: 'trigger-c1',
+        iteration_reply_comment_id: 'reply-c1',
+      },
+    });
+
+    const event: DynamoDBStreamEvent = { Records: [mkMilestone('pr_created', 't-lin')] };
+    await handler(event);
+
+    expect(mockUpsertThreadedReply).toHaveBeenCalledTimes(1);
+    expect(mockPostIssueComment).not.toHaveBeenCalled();
+  });
+
   test('Linear-origin task missing channel_metadata.linear_issue_id — skip with warning', async () => {
     // Defensive: a properly-admitted Linear task should always have
     // these fields, but if it doesn't we'd rather log + skip than
@@ -2496,9 +2562,12 @@ describe('fanout-task-events: agent_milestone routing (effective event type)', (
     expect(shouldFanOut(colliding)).toBe(false);
   });
 
-  test('routeEvent dispatches agent_milestone(pr_created) to GitHub only (Slack opted out to avoid duplicate View PR)', async () => {
+  test('routeEvent dispatches agent_milestone(pr_created) to GitHub + Linear (ADR-016 P4.5), not Slack', async () => {
+    // Slack stays opted out (task_completed carries View PR); Linear joined
+    // for the first-run "🔗 PR opened" courtesy comment.
     const outcome = await routeEvent(makeMilestone('pr_created'));
-    expect(outcome.dispatched).toEqual(['github']);
+    expect([...outcome.dispatched].sort()).toEqual(['github', 'linear']);
+    expect(outcome.dispatched).not.toContain('slack');
   });
 
   test('routeEvent drops agent_milestone(agent_turn-like) that no channel subscribes to', async () => {

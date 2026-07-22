@@ -219,6 +219,14 @@ export interface TaskRecord {
    */
   readonly linear_final_comment_event_id?: string;
   /**
+   * Event ID of the ``pr_created`` milestone whose Linear "PR opened"
+   * courtesy comment was successfully posted (fan-out plane, ADR-016 P4.5).
+   * Makes the first-run PR-opened comment post-once across partial-batch
+   * Lambda retries — the analogue of ``linear_final_comment_event_id`` for
+   * the mid-run PR notification. Absent until the first successful post.
+   */
+  readonly linear_pr_comment_event_id?: string;
+  /**
    * Event ID of the terminal event whose Jira final-status comment was
    * successfully posted (fan-out plane). Jira has no comment edit API,
    * so the dispatcher is post-once: this marker makes the post

@@ -31,6 +31,7 @@ import { cleanupPreScreenedAttachments, downloadScreenAndStoreLinearAttachments,
 import {
   deleteComment,
   fetchRecentComments,
+  postIssueComment,
   reactToComment,
   replyToComment,
   reportIssueFailure,
@@ -168,6 +169,14 @@ const MAX_IDEMPOTENCY_KEY_LENGTH = 128;
  * slack so a delayed redelivery still dedups; the row self-expires after.
  */
 const ACK_CLAIM_TTL_SECONDS = 86_400;
+
+/**
+ * First-run "starting" courtesy comment (ADR-016 P4.5). The 🤖 prefix matches
+ * the bot-comment markers the self-trigger guard skips (isBotAuthoredComment),
+ * so this never re-triggers ABCA. Kept short — the terminal fan-out comment
+ * carries the outcome + cost + PR link.
+ */
+const LINEAR_START_COMMENT = '🤖 Starting on this issue — I\'ll open a PR and report back here when it\'s ready.';
 
 /**
  * Post a Linear comment + ❌ reaction without ever propagating an error.
@@ -1023,6 +1032,30 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     repo,
     request_id: requestId,
   });
+
+  // ADR-016 P4.5: post the first-run "🤖 Starting" courtesy comment from the
+  // Lambda tier. This used to be the agent's own `mcp__linear-server__save_comment`
+  // call — with the Linear MCP removed (Linear is fully deterministic), the
+  // platform owns the comment. Only the single-task first-run path posts it:
+  // orchestration/decompose seeds and comment-iterations returned earlier (their
+  // panel / maturing reply already narrate start). Best-effort — never gates the
+  // run that already started. The 👀 reaction + In Progress transition still
+  // happen agent-side (linear_reactions.react_task_started); this is the human-
+  // readable companion, posted at admission so it lands before the container
+  // cold-starts. The terminal ✅/⚠️/❌ + PR link is posted by the fan-out plane.
+  if (WORKSPACE_REGISTRY_TABLE) {
+    try {
+      await postIssueComment(
+        { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE },
+        issue.id,
+        LINEAR_START_COMMENT,
+      );
+    } catch (err) {
+      logger.warn('Failed to post Linear start comment (non-fatal)', {
+        issue_id: issue.id, error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
 
   // Multi-part hint (customer-caught): a PLAIN ``bgagent`` label on an issue
   // that looks like several separate parts still runs as ONE task — but the
