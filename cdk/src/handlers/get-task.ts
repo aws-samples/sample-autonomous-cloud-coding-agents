@@ -76,7 +76,13 @@ async function computeQueueInfo(
       for (const item of resp.Items ?? []) {
         if (item.task_id === record.task_id) {
           found = true;
-        } else if (typeof item.created_at === 'string' && item.created_at < record.created_at) {
+        } else if (
+          typeof item.created_at === 'string'
+          && (item.created_at < record.created_at
+            || (item.created_at === record.created_at
+              && typeof item.task_id === 'string'
+              && item.task_id < record.task_id))
+        ) {
           ahead++;
         }
       }
