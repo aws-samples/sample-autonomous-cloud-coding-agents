@@ -1,4 +1,9 @@
-"""Unit tests for channel_mcp.configure_channel_mcp — Linear/Jira MCP gating + merge."""
+"""Unit tests for channel_mcp.configure_channel_mcp — Jira MCP gating + merge.
+
+Linear is NOT tested here: ABCA runs Linear 100% deterministically (ADR-016),
+so there is no Linear MCP entry. The gate below asserts that channel_source=='linear'
+is now a no-op (no .mcp.json written).
+"""
 
 from __future__ import annotations
 
@@ -9,9 +14,6 @@ from channel_mcp import (
     JIRA_API_TOKEN_ENV,
     JIRA_MCP_SERVER_KEY,
     JIRA_MCP_URL,
-    LINEAR_API_TOKEN_ENV,
-    LINEAR_MCP_SERVER_KEY,
-    LINEAR_MCP_URL,
     configure_channel_mcp,
 )
 
@@ -23,7 +25,23 @@ def _read_mcp(repo_dir: str) -> dict:
 
 
 class TestChannelGate:
-    """Only channel_source=='linear' writes anything — everything else is a no-op."""
+    """Only channel_source with a wired MCP writes anything — everything else is a no-op."""
+
+    def test_no_op_for_linear_channel(self, tmp_path):
+        # ADR-016: Linear is fully deterministic — no Linear MCP is written.
+        wrote = configure_channel_mcp(str(tmp_path), "linear")
+        assert wrote is False
+        assert not (tmp_path / ".mcp.json").exists()
+
+    def test_no_op_for_linear_channel_ignores_gateway_url(self, tmp_path):
+        # A stale gateway_url in metadata must not resurrect a Linear MCP entry.
+        wrote = configure_channel_mcp(
+            str(tmp_path),
+            "linear",
+            {"gateway_url": "https://gw.example/mcp"},
+        )
+        assert wrote is False
+        assert not (tmp_path / ".mcp.json").exists()
 
     def test_no_op_for_slack_channel(self, tmp_path):
         wrote = configure_channel_mcp(str(tmp_path), "slack")
@@ -46,101 +64,16 @@ class TestChannelGate:
         assert not (tmp_path / ".mcp.json").exists()
 
 
-class TestLinearWrite:
-    """channel_source=='linear' writes .mcp.json with the linear-server entry."""
-
-    def test_creates_mcp_json_with_linear_server_key(self, tmp_path):
-        wrote = configure_channel_mcp(str(tmp_path), "linear")
-        assert wrote is True
-        config = _read_mcp(str(tmp_path))
-        assert LINEAR_MCP_SERVER_KEY in config["mcpServers"]
-
-    def test_renders_linear_url_and_token_placeholder(self, tmp_path):
-        configure_channel_mcp(str(tmp_path), "linear")
-        entry = _read_mcp(str(tmp_path))["mcpServers"][LINEAR_MCP_SERVER_KEY]
-        assert entry["type"] == "http"
-        assert entry["url"] == LINEAR_MCP_URL
-        assert entry["headers"]["Authorization"] == f"Bearer ${{{LINEAR_API_TOKEN_ENV}}}"
-
-    def test_server_key_is_linear_server(self):
-        # If this ever changes, tools surface under a different mcp__ prefix and
-        # the agent prompt (prompt_builder._channel_prompt_addendum) must be
-        # updated in lockstep.
-        assert LINEAR_MCP_SERVER_KEY == "linear-server"
-
-
-class TestMerge:
-    """Existing .mcp.json must not be clobbered."""
-
-    def test_adds_linear_to_existing_empty_mcp_json(self, tmp_path):
-        (tmp_path / ".mcp.json").write_text("{}")
-        wrote = configure_channel_mcp(str(tmp_path), "linear")
-        assert wrote is True
-        assert LINEAR_MCP_SERVER_KEY in _read_mcp(str(tmp_path))["mcpServers"]
-
-    def test_preserves_existing_mcp_servers(self, tmp_path):
-        existing = {
-            "mcpServers": {
-                "other-server": {"type": "stdio", "command": "/usr/bin/my-mcp"},
-            },
-        }
-        (tmp_path / ".mcp.json").write_text(json.dumps(existing))
-
-        configure_channel_mcp(str(tmp_path), "linear")
-        merged = _read_mcp(str(tmp_path))
-        assert "other-server" in merged["mcpServers"]
-        assert merged["mcpServers"]["other-server"]["command"] == "/usr/bin/my-mcp"
-        assert LINEAR_MCP_SERVER_KEY in merged["mcpServers"]
-
-    def test_overwrites_existing_linear_server_entry(self, tmp_path):
-        # If someone committed a stale Linear entry with a wrong token var, we
-        # want the fresh ABCA-written entry to win — otherwise the MCP would
-        # fail to auth.
-        existing = {
-            "mcpServers": {
-                LINEAR_MCP_SERVER_KEY: {
-                    "type": "http",
-                    "url": "https://stale.example",
-                    "headers": {"Authorization": "Bearer stale"},
-                },
-            },
-        }
-        (tmp_path / ".mcp.json").write_text(json.dumps(existing))
-
-        configure_channel_mcp(str(tmp_path), "linear")
-        entry = _read_mcp(str(tmp_path))["mcpServers"][LINEAR_MCP_SERVER_KEY]
-        assert entry["url"] == LINEAR_MCP_URL
-        assert "stale" not in entry["headers"]["Authorization"]
-
-    def test_tolerates_mcp_json_without_mcpservers_key(self, tmp_path):
-        # A .mcp.json that only has unrelated top-level keys should still
-        # gain an mcpServers map.
-        (tmp_path / ".mcp.json").write_text(json.dumps({"version": 1}))
-        configure_channel_mcp(str(tmp_path), "linear")
-        merged = _read_mcp(str(tmp_path))
-        assert merged["version"] == 1
-        assert LINEAR_MCP_SERVER_KEY in merged["mcpServers"]
-
-    def test_malformed_mcp_json_is_replaced(self, tmp_path):
-        # Malformed JSON is treated as absent (logged as a warning in shell.log)
-        # rather than crashing the pipeline.
-        (tmp_path / ".mcp.json").write_text("{not json")
-        wrote = configure_channel_mcp(str(tmp_path), "linear")
-        assert wrote is True
-        merged = _read_mcp(str(tmp_path))
-        assert LINEAR_MCP_SERVER_KEY in merged["mcpServers"]
-
-
 class TestRepoDirGuard:
     """Missing repo_dir must not raise — the pipeline should keep going."""
 
     def test_missing_repo_dir(self, tmp_path):
         missing = tmp_path / "does-not-exist"
-        wrote = configure_channel_mcp(str(missing), "linear")
+        wrote = configure_channel_mcp(str(missing), "jira")
         assert wrote is False
 
     def test_empty_repo_dir_string(self):
-        wrote = configure_channel_mcp("", "linear")
+        wrote = configure_channel_mcp("", "jira")
         assert wrote is False
 
 
@@ -168,6 +101,12 @@ class TestJiraWrite:
 
 class TestJiraMerge:
     """Jira entry must coexist with other servers and overwrite stale jira entries."""
+
+    def test_adds_jira_to_existing_empty_mcp_json(self, tmp_path):
+        (tmp_path / ".mcp.json").write_text("{}")
+        wrote = configure_channel_mcp(str(tmp_path), "jira")
+        assert wrote is True
+        assert JIRA_MCP_SERVER_KEY in _read_mcp(str(tmp_path))["mcpServers"]
 
     def test_preserves_existing_mcp_servers(self, tmp_path):
         existing = {
@@ -200,13 +139,18 @@ class TestJiraMerge:
         assert entry["url"] == JIRA_MCP_URL
         assert "stale" not in entry["headers"]["Authorization"]
 
-    def test_linear_and_jira_can_coexist(self, tmp_path):
-        # Belt-and-braces: a repo that committed a Linear entry and then
-        # gets onboarded to Jira (or vice-versa) must keep both. The current
-        # code path only writes one channel per run, but this test guards
-        # against a future refactor that writes the wrong key.
-        configure_channel_mcp(str(tmp_path), "linear")
+    def test_tolerates_mcp_json_without_mcpservers_key(self, tmp_path):
+        (tmp_path / ".mcp.json").write_text(json.dumps({"version": 1}))
         configure_channel_mcp(str(tmp_path), "jira")
         merged = _read_mcp(str(tmp_path))
-        assert LINEAR_MCP_SERVER_KEY in merged["mcpServers"]
+        assert merged["version"] == 1
+        assert JIRA_MCP_SERVER_KEY in merged["mcpServers"]
+
+    def test_malformed_mcp_json_is_replaced(self, tmp_path):
+        # Malformed JSON is treated as absent (logged as a warning in shell.log)
+        # rather than crashing the pipeline.
+        (tmp_path / ".mcp.json").write_text("{not json")
+        wrote = configure_channel_mcp(str(tmp_path), "jira")
+        assert wrote is True
+        merged = _read_mcp(str(tmp_path))
         assert JIRA_MCP_SERVER_KEY in merged["mcpServers"]

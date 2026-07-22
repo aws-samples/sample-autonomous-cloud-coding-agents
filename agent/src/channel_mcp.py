@@ -6,17 +6,28 @@ with ``setting_sources=["project"]`` — picks up the channel MCP at session
 start and exposes the server's tools.
 
 Currently wired channels:
-- ``linear``  → Linear hosted MCP (``mcp__linear-server__*`` tools) — functional.
 - ``jira``    → Atlassian Remote MCP entry — a NON-FUNCTIONAL placeholder. It
   is written for forward-compatibility but cannot connect from a headless
   agent (interactive OAuth 2.1 only); live outbound Jira comments go through
   the REST shim in ``jira_reactions.py``. See ``JIRA_MCP_URL`` below + ADR-015.
 
+Linear is NOT here: ABCA runs Linear 100% deterministically (ADR-016 "Linear
+is fully deterministic"). There is no Linear MCP — issue text, recent comments,
+and attachments are pre-hydrated at the Lambda tier (the webhook processor +
+``linear-attachments.ts`` / ``linear-feedback.fetchRecentComments``), and
+outbound reactions / state transitions go through direct GraphQL in
+``linear_reactions.py`` (which reads ``LINEAR_API_TOKEN`` set by config.py —
+independent of this module). Linear MCP via the AgentCore Gateway was removed
+after it proved non-functional on a single OAuth app (actor=user data reads
+error; actor=app can't re-consent an installed app). The Gateway itself
+remains ABCA's general MCP control plane for OTHER servers — see
+``gateway_auth.py`` for the reusable M2M bearer mint.
+
 For all other channel sources this is a no-op: no MCP is written, and the
 SDK sees no channel-specific tools.
 
 See: cdk/src/handlers/{linear,jira}-webhook-processor.ts (inbound),
-runner.py (SDK invocation).
+runner.py (SDK invocation), ADR-016 (Linear determinism).
 """
 
 from __future__ import annotations
@@ -29,31 +40,6 @@ from shell import log
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-
-# ─── Linear ──────────────────────────────────────────────────────────────────
-
-#: Linear MCP endpoint — hosted by Linear, Streamable HTTP transport.
-LINEAR_MCP_URL = "https://mcp.linear.app/mcp"
-
-#: Key name inside ``mcpServers``. Tools surface as
-#: ``mcp__linear-server__*`` in the Agent SDK.
-LINEAR_MCP_SERVER_KEY = "linear-server"
-
-#: Env var name the MCP server entry reads via ``${LINEAR_API_TOKEN}``
-#: placeholder expansion. Populated from the OAuth secret by config.py.
-LINEAR_API_TOKEN_ENV = "LINEAR_API_TOKEN"  # noqa: S105 — env var *name*, not a secret value
-
-
-def _linear_server_entry() -> dict[str, Any]:
-    """Build the `mcpServers` entry for Linear's hosted MCP."""
-    return {
-        "type": "http",
-        "url": LINEAR_MCP_URL,
-        "headers": {
-            "Authorization": f"Bearer ${{{LINEAR_API_TOKEN_ENV}}}",
-        },
-    }
-
 
 # ─── Jira (Atlassian Remote MCP — NON-FUNCTIONAL PLACEHOLDER) ────────────────
 
@@ -101,7 +87,6 @@ def _jira_server_entry() -> dict[str, Any]:
 #: have a hosted MCP (api, webhook, slack) intentionally have no entry here —
 #: the gate in ``configure_channel_mcp`` short-circuits on missing keys.
 CHANNEL_MCP_BUILDERS: dict[str, tuple[str, Callable[[], dict[str, Any]]]] = {
-    "linear": (LINEAR_MCP_SERVER_KEY, _linear_server_entry),
     "jira": (JIRA_MCP_SERVER_KEY, _jira_server_entry),
 }
 
@@ -126,7 +111,11 @@ def _read_existing_mcp_config(path: str) -> dict[str, Any]:
     return {}
 
 
-def configure_channel_mcp(repo_dir: str, channel_source: str) -> bool:
+def configure_channel_mcp(
+    repo_dir: str,
+    channel_source: str,
+    channel_metadata: dict[str, str] | None = None,
+) -> bool:
     """Write or merge a channel-specific ``.mcp.json`` into ``repo_dir``.
 
     Looks up ``channel_source`` in :data:`CHANNEL_MCP_BUILDERS`:
@@ -138,11 +127,15 @@ def configure_channel_mcp(repo_dir: str, channel_source: str) -> bool:
     Args:
       repo_dir: the cloned-repo working directory the SDK will use as ``cwd``.
       channel_source: inbound channel (``TaskConfig.channel_source``).
+      channel_metadata: per-task channel metadata (``TaskConfig.channel_metadata``).
+        Currently unused by the wired channels (Jira's entry is static); retained
+        for call-site compatibility and future channel builders that need it.
 
     Returns:
       True if a channel MCP entry was (re)written, False otherwise (channel
       unmapped, missing repo_dir, or write failure).
     """
+    _ = channel_metadata  # reserved for future channel builders (see docstring)
     builder_entry = CHANNEL_MCP_BUILDERS.get(channel_source)
     if builder_entry is None:
         return False
