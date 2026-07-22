@@ -166,6 +166,59 @@ describe('repo command JSON output', () => {
     expect(payload.repo.github_token_secret_arn).toContain('****');
   });
 
+  test('onboard --compute-type ecs is REFUSED when the stack has no ECS substrate', async () => {
+    // Per-key outputs: RepoTableName present, ComputeSubstrate=agentcore (deployed
+    // without --context compute_type=ecs).
+    getStackOutputMock.mockReset().mockImplementation((_r: string, _s: string, key: string) =>
+      Promise.resolve(key === 'ComputeSubstrate' ? 'agentcore' : 'RepoTable-dev'));
+
+    const cmd = makeRepoCommand();
+    await expect(cmd.parseAsync([
+      'node', 'test', 'onboard', 'acme/a', '--region', 'us-east-1', '--compute-type', 'ecs',
+    ])).rejects.toThrow(/without the ECS substrate|compute_type=ecs/i);
+    // Must NOT write the repo row when it would be dead-on-arrival.
+    expect(onboardRepoMock).not.toHaveBeenCalled();
+  });
+
+  test('onboard --compute-type ecs is ALLOWED when the stack provisioned ECS', async () => {
+    getStackOutputMock.mockReset().mockImplementation((_r: string, _s: string, key: string) =>
+      Promise.resolve(key === 'ComputeSubstrate' ? 'ecs' : 'RepoTable-dev'));
+    onboardRepoMock.mockResolvedValue({ repo: 'acme/a', status: 'active', compute_type: 'ecs' });
+
+    const cmd = makeRepoCommand();
+    await cmd.parseAsync([
+      'node', 'test', 'onboard', 'acme/a', '--region', 'us-east-1', '--compute-type', 'ecs',
+    ]);
+    expect(onboardRepoMock).toHaveBeenCalledWith(
+      'us-east-1', 'RepoTable-dev', 'acme/a', expect.objectContaining({ computeType: 'ecs' }));
+  });
+
+  test('onboard --compute-type ecs proceeds against an OLDER stack lacking ComputeSubstrate (null → unknown)', async () => {
+    // Back-compat: pre-output stacks return null for ComputeSubstrate; don't hard-block
+    // (the runtime error is the backstop there).
+    getStackOutputMock.mockReset().mockImplementation((_r: string, _s: string, key: string) =>
+      Promise.resolve(key === 'ComputeSubstrate' ? null : 'RepoTable-dev'));
+    onboardRepoMock.mockResolvedValue({ repo: 'acme/a', status: 'active', compute_type: 'ecs' });
+
+    const cmd = makeRepoCommand();
+    await cmd.parseAsync([
+      'node', 'test', 'onboard', 'acme/a', '--region', 'us-east-1', '--compute-type', 'ecs',
+    ]);
+    expect(onboardRepoMock).toHaveBeenCalled();
+  });
+
+  test('onboard --compute-type agentcore is unaffected by ComputeSubstrate', async () => {
+    getStackOutputMock.mockReset().mockImplementation((_r: string, _s: string, key: string) =>
+      Promise.resolve(key === 'ComputeSubstrate' ? 'agentcore' : 'RepoTable-dev'));
+    onboardRepoMock.mockResolvedValue({ repo: 'acme/a', status: 'active', compute_type: 'agentcore' });
+
+    const cmd = makeRepoCommand();
+    await cmd.parseAsync([
+      'node', 'test', 'onboard', 'acme/a', '--region', 'us-east-1', '--compute-type', 'agentcore',
+    ]);
+    expect(onboardRepoMock).toHaveBeenCalled();
+  });
+
   test('repo offboard --output json redacts the per-repo secret ARN', async () => {
     offboardRepoMock.mockResolvedValue({
       repo: 'acme/a',

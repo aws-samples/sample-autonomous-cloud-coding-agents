@@ -70,6 +70,12 @@ describe('AgentStack', () => {
     });
   });
 
+  test('outputs ComputeSubstrate=agentcore on the default (no-gate) deploy', () => {
+    // The CLI reads this to refuse onboarding a repo as compute_type=ecs on a
+    // stack that never provisioned the ECS substrate.
+    template.hasOutput('ComputeSubstrate', { Value: 'agentcore' });
+  });
+
   test('outputs CedarWasmLayerArn', () => {
     template.hasOutput('CedarWasmLayerArn', {});
   });
@@ -501,5 +507,28 @@ describe('AgentStack', () => {
         }),
       ]),
     });
+  });
+});
+
+describe('AgentStack with the ECS substrate gate (--context compute_type=ecs)', () => {
+  let template: Template;
+
+  beforeAll(() => {
+    // Deploying with the gate on provisions the Fargate substrate alongside the
+    // always-present AgentCore runtime; the ComputeSubstrate output flips to 'ecs'.
+    const app = new App({ context: { compute_type: 'ecs' } });
+    const stack = new AgentStack(app, 'TestAgentStackEcs', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    });
+    template = Template.fromStack(stack);
+  });
+
+  test('provisions an ECS cluster + Fargate task definition', () => {
+    template.resourceCountIs('AWS::ECS::Cluster', 1);
+    template.resourceCountIs('AWS::ECS::TaskDefinition', 1);
+  });
+
+  test('outputs ComputeSubstrate=ecs so the CLI allows compute_type=ecs onboarding', () => {
+    template.hasOutput('ComputeSubstrate', { Value: 'ecs' });
   });
 });
