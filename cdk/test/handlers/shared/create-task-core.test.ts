@@ -114,6 +114,77 @@ describe('createTaskCore', () => {
     expect(mockLambdaSend).toHaveBeenCalledTimes(1);
   });
 
+  test('hoists tenant-scoped Jira issue identity for the sparse lookup index', async () => {
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_description: 'Fix the Jira issue' },
+      makeContext({
+        channelSource: 'jira',
+        channelMetadata: {
+          jira_cloud_id: 'cloud-1',
+          jira_issue_key: 'ENG-42',
+        },
+      }),
+      'req-jira-identity',
+    );
+
+    expect(result.statusCode).toBe(201);
+    const taskPut = mockSend.mock.calls.find(
+      ([command]) => command._type === 'Put' && command.input.TableName === 'Tasks',
+    );
+    expect(taskPut![0].input.Item.jira_issue_identity).toBe('cloud-1#ENG-42');
+  });
+
+  test('does not hoist Jira issue identity for incomplete or non-Jira metadata', async () => {
+    await createTaskCore(
+      { repo: 'org/repo', task_description: 'Regular task' },
+      makeContext({
+        channelSource: 'api',
+        channelMetadata: {
+          jira_cloud_id: 'cloud-1',
+          jira_issue_key: 'ENG-42',
+        },
+      }),
+      'req-no-jira-identity',
+    );
+
+    const taskPut = mockSend.mock.calls.find(
+      ([command]) => command._type === 'Put' && command.input.TableName === 'Tasks',
+    );
+    expect(taskPut![0].input.Item).not.toHaveProperty('jira_issue_identity');
+  });
+
+  test('accepts an initial_approvals pattern whose value contains a colon', async () => {
+    // Regression: the degenerate-pattern guard used split(':', 2)[1], which
+    // truncated the value at the next colon. For "ab:cdefgh" that yields the
+    // 2-char fragment "ab", which isDegeneratePattern flags as degenerate —
+    // a spurious 400. The full value "ab:cdefgh" is not degenerate, so the
+    // scope must be accepted.
+    const result = await createTaskCore(
+      {
+        repo: 'org/repo',
+        task_description: 'Fix the bug',
+        initial_approvals: ['bash_pattern:ab:cdefgh'],
+      } as any,
+      makeContext(),
+      'req-1',
+    );
+    expect(result.statusCode).toBe(201);
+  });
+
+  test('still rejects a genuinely degenerate initial_approvals pattern', async () => {
+    const result = await createTaskCore(
+      {
+        repo: 'org/repo',
+        task_description: 'Fix the bug',
+        initial_approvals: ['bash_pattern:*'],
+      } as any,
+      makeContext(),
+      'req-1',
+    );
+    expect(result.statusCode).toBe(400);
+    expect(JSON.parse(result.body).error.code).toBe('VALIDATION_ERROR');
+  });
+
   test('returns 400 for invalid repo', async () => {
     const result = await createTaskCore({ repo: 'invalid' } as any, makeContext(), 'req-1');
     expect(result.statusCode).toBe(400);
@@ -557,7 +628,13 @@ describe('createTaskCore', () => {
     expect(result.statusCode).toBe(201);
   });
 
-  test('resolves the default workflow when workflow_ref is omitted', async () => {
+  test('resolves the platform default when workflow_ref is omitted (repo present)', async () => {
+    // createTaskCore does NOT infer the coding workflow from the mere presence
+    // of a repo — that "repo task ⇒ coding workflow" decision is pinned by each
+    // CHANNEL processor at its call site (Linear/Jira/Slack pass
+    // workflow_ref: CODING_WORKFLOW_ID; see those processors' tests). A raw
+    // createTaskCore call with no ref falls through the resolution ladder to the
+    // repo-less platform default, whether or not a repo is attached.
     const result = await createTaskCore(
       { repo: 'org/repo', task_description: 'Fix the bug' },
       makeContext(),
@@ -565,7 +642,20 @@ describe('createTaskCore', () => {
     );
     expect(result.statusCode).toBe(201);
     const body = JSON.parse(result.body);
-    // No workflow_ref ⇒ the resolution ladder falls to the platform default.
+    expect(body.data.resolved_workflow).toEqual({ id: 'default/agent-v1', version: '1.0.0' });
+  });
+
+  test('resolves the platform default when workflow_ref is omitted AND no repo (symmetric)', async () => {
+    // §6 symmetric coverage: the repo-less path through the real caller. Guards
+    // against a future fallback-branch inversion that a repo-pinned test would
+    // miss (the repo-less default must stay default/agent-v1).
+    const result = await createTaskCore(
+      { task_description: 'Do some research' },
+      makeContext(),
+      'req-default-norepo',
+    );
+    expect(result.statusCode).toBe(201);
+    const body = JSON.parse(result.body);
     expect(body.data.resolved_workflow).toEqual({ id: 'default/agent-v1', version: '1.0.0' });
   });
 
@@ -846,5 +936,84 @@ describe('createTaskCore', () => {
     );
     expect(mockLookupRepo).toHaveBeenCalledTimes(1);
     expect(mockLookupRepo).toHaveBeenCalledWith('org/repo');
+  });
+
+  // --- #577: pre-screened attachments + caller-supplied taskId ---
+
+  describe('preScreenedAttachments and taskId (#577)', () => {
+    function persistedTaskItem() {
+      const putCall = mockSend.mock.calls.find(
+        (c: any) => c[0]?._type === 'Put' && c[0]?.input?.TableName === 'Tasks',
+      );
+      return putCall?.[0]?.input?.Item;
+    }
+
+    const passedRecord = {
+      attachment_id: 'att-jira-1',
+      type: 'file' as const,
+      content_type: 'text/plain',
+      filename: 'error.log',
+      s3_key: 'attachments/user-123/T-577/att-jira-1/error.log',
+      s3_version_id: 'v1',
+      size_bytes: 128,
+      checksum_sha256: 'sum',
+      screening: { status: 'passed' as const, screened_at: '2026-07-14T00:00:00Z' },
+    };
+
+    test('merges pre-screened records onto the task without re-screening', async () => {
+      const result = await createTaskCore(
+        { repo: 'org/repo', task_description: 'Fix', workflow_ref: 'coding/new-task-v1' },
+        makeContext({ preScreenedAttachments: [passedRecord] }),
+        'req-577-a',
+      );
+
+      expect(result.statusCode).toBe(201);
+      const item = persistedTaskItem();
+      expect(item.attachments).toHaveLength(1);
+      expect(item.attachments[0].attachment_id).toBe('att-jira-1');
+      expect(item.attachments[0].screening.status).toBe('passed');
+      // The pre-screened path must NOT re-run the guardrail on the attachment
+      // bytes. createTaskCore still screens the task DESCRIPTION text, so the
+      // guardrail may be called — but only with the description, never with any
+      // attachment content (the record carries no bytes to screen).
+      const guardrailContents = mockBedrockSend.mock.calls.map(
+        (c: any) => JSON.stringify(c[0]?.input?.content ?? []),
+      );
+      for (const content of guardrailContents) {
+        expect(content).not.toContain('error.log');
+        expect(content).toContain('Fix'); // only the description was screened
+      }
+    });
+
+    test('honors a caller-supplied taskId', async () => {
+      const result = await createTaskCore(
+        { repo: 'org/repo', task_description: 'Fix' },
+        makeContext({ taskId: 'T-explicit-577' }),
+        'req-577-b',
+      );
+
+      expect(result.statusCode).toBe(201);
+      expect(persistedTaskItem().task_id).toBe('T-explicit-577');
+      expect(JSON.parse(result.body).data.task_id).toBe('T-explicit-577');
+    });
+
+    test('fails closed if a pre-screened record is not in passed state', async () => {
+      const badRecord = {
+        ...passedRecord,
+        screening: { status: 'pending' as const },
+      };
+      const result = await createTaskCore(
+        { repo: 'org/repo', task_description: 'Fix' },
+        // Cast: this is a contract violation we deliberately construct to prove
+        // the fail-closed guard rejects it rather than persisting it.
+        makeContext({ preScreenedAttachments: [badRecord as never] }),
+        'req-577-c',
+      );
+
+      expect(result.statusCode).toBe(500);
+      expect(JSON.parse(result.body).error.code).toBe('INTERNAL_ERROR');
+      // No task persisted.
+      expect(persistedTaskItem()).toBeUndefined();
+    });
   });
 });

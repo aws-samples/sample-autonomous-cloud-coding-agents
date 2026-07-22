@@ -293,3 +293,88 @@ function isLinearTokenResponse(value: unknown): value is LinearTokenResponse {
 export function computeExpiresAt(expiresInSeconds: number, now: Date = new Date()): string {
   return new Date(now.getTime() + expiresInSeconds * 1000).toISOString();
 }
+
+/** What `bgagent linear setup` should do about the webhook signing secret. */
+export type WebhookSecretAction =
+  /** This workspace already has its own signing secret — keep it (re-run). */
+  | { readonly kind: 'preserve'; readonly secret: string }
+  /** No per-workspace secret; mirror the stack-wide one (safe for the first
+   *  workspace, ambiguous for an additional one — caller should warn). */
+  | { readonly kind: 'mirror-stackwide' }
+  /** No secret anywhere — prompt the operator for it (first install). */
+  | { readonly kind: 'prompt' };
+
+/**
+ * Decide which webhook signing secret `setup` should use, WITHOUT clobbering a
+ * working per-workspace secret.
+ *
+ * The bug this fixes: re-running `setup` on an already-installed workspace used
+ * to lift the *stack-wide* signing secret into the per-workspace bundle. That's
+ * correct only for the FIRST workspace — the stack-wide secret belongs to
+ * whichever workspace installed first, so for any additional workspace it
+ * overwrites the correct per-workspace secret with the wrong one, silently
+ * breaking signature verification (webhook 401 "Invalid signature").
+ *
+ * Rule: an existing valid per-workspace secret always wins (rotation is
+ * `update-webhook-secret`'s job); else mirror the stack-wide secret if present;
+ * else prompt. Pure — the caller supplies what it read from Secrets Manager.
+ *
+ * @param existingPerWorkspaceSecret the `webhook_signing_secret` on this
+ *        workspace's OAuth bundle BEFORE the setup rewrite (undefined if none).
+ * @param stackWideConfigured whether the stack-wide fallback secret is set.
+ */
+export function resolveWebhookSecretAction(
+  existingPerWorkspaceSecret: string | undefined,
+  stackWideConfigured: boolean,
+): WebhookSecretAction {
+  if (existingPerWorkspaceSecret?.startsWith('lin_wh_')) {
+    return { kind: 'preserve', secret: existingPerWorkspaceSecret };
+  }
+  if (stackWideConfigured) {
+    return { kind: 'mirror-stackwide' };
+  }
+  return { kind: 'prompt' };
+}
+
+/**
+ * Read this workspace's EXISTING `webhook_signing_secret` before `setup`
+ * overwrites the OAuth bundle — FAIL CLOSED (#612 review B1).
+ *
+ * `fetchSecretString` fetches the prior per-workspace OAuth `SecretString`
+ * (typically a `SecretsManagerClient.send(GetSecretValueCommand)` wrapper). The
+ * value fed to {@link resolveWebhookSecretAction} decides whether the existing
+ * secret is preserved or the stack-wide one is mirrored over it — so a wrong
+ * `undefined` here re-arms the #611 clobber. Therefore:
+ *
+ *   • secret missing (`ResourceNotFoundException`) → genuine first install,
+ *     return undefined (nothing to preserve).
+ *   • secret present with a valid `lin_wh_…` `webhook_signing_secret` → return it.
+ *   • secret present but no/malformed secret → return undefined (nothing valid
+ *     to preserve; the caller mirrors/prompts).
+ *   • ANY OTHER error (AccessDenied, KMSAccessDenied, Throttling, network, or a
+ *     corrupt-JSON bundle) → THROW. Swallowing it would leave undefined and
+ *     silently clobber a working secret behind a green "Setup complete".
+ *
+ * `isNotFound` classifies the fetch error; callers pass an
+ * `name === 'ResourceNotFoundException'` check. On a throw the caller re-raises
+ * a CliError with an IAM/KMS hint (mirroring `isWebhookSecretConfigured`).
+ */
+export async function readExistingWebhookSecret(
+  fetchSecretString: () => Promise<string | undefined>,
+  isNotFound: (err: unknown) => boolean,
+): Promise<string | undefined> {
+  let raw: string | undefined;
+  try {
+    raw = await fetchSecretString();
+  } catch (err) {
+    if (isNotFound(err)) return undefined; // genuine first install
+    throw err; // fail closed — caller wraps with an actionable CliError
+  }
+  if (!raw) return undefined;
+  // A corrupt-but-present bundle must surface (JSON.parse throws → propagates),
+  // NOT silently become "nothing to preserve" → mirror-stackwide.
+  const bundle = JSON.parse(raw) as Partial<StoredLinearOauthToken>;
+  return bundle.webhook_signing_secret?.startsWith('lin_wh_')
+    ? bundle.webhook_signing_secret
+    : undefined;
+}

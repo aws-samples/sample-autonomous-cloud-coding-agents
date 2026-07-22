@@ -66,7 +66,7 @@ export type TaskStatusType =
 export type ChannelSource = 'api' | 'webhook' | 'slack' | 'linear' | 'jira';
 
 /** Error categories produced by the runtime error classifier. */
-export type ErrorCategoryType = 'auth' | 'network' | 'concurrency' | 'compute' | 'agent' | 'guardrail' | 'config' | 'timeout' | 'unknown';
+export type ErrorCategoryType = 'auth' | 'network' | 'concurrency' | 'compute' | 'agent' | 'guardrail' | 'config' | 'timeout' | 'blocked' | 'unknown';
 
 /** Structured classification of a task error (computed by the API from error_message). */
 export interface ErrorClassification {
@@ -75,6 +75,11 @@ export interface ErrorClassification {
   readonly description: string;
   readonly remedy: string;
   readonly retryable: boolean;
+  /** Retry-semantics axis: transient (self-heals on retry) vs service (admin
+   *  must fix) vs user (change the request/code). Optional (older classifications
+   *  omit it; absent ⇒ user). Inlined (not a named export) to mirror the cdk
+   *  ErrorClassification field without introducing a CLI-only exported type. */
+  readonly errorClass?: 'transient' | 'service' | 'user';
 }
 
 /** Task detail returned by GET /v1/tasks/{task_id}. */
@@ -182,6 +187,10 @@ export interface ReplayEvent {
   readonly event_type: string;
   readonly timestamp: string;
   readonly metadata: Record<string, unknown>;
+  // Correlation envelope (#245): present per-event when the source stamped it.
+  readonly user_id?: string;
+  readonly repo?: string;
+  readonly trace_id?: string;
 }
 
 /**
@@ -236,6 +245,11 @@ export interface TaskEvent {
   readonly event_type: string;
   readonly timestamp: string;
   readonly metadata: Record<string, unknown>;
+  // Correlation envelope (#245): present per-event when the source stamped it;
+  // absent on task_created and pre-envelope safety-net writers.
+  readonly user_id?: string;
+  readonly repo?: string;
+  readonly trace_id?: string;
 }
 
 /**

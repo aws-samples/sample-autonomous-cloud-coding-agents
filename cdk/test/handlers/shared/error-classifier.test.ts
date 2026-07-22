@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { classifyError, ErrorCategory, type ErrorClassification } from '../../../src/handlers/shared/error-classifier';
+import { classifyError, ErrorCategory, ErrorClass, isTransientError, retryGuidance, type ErrorClassification } from '../../../src/handlers/shared/error-classifier';
 import { toTaskDetail, type TaskRecord } from '../../../src/handlers/shared/types';
 
 describe('classifyError', () => {
@@ -157,6 +157,27 @@ describe('classifyError', () => {
       expect(result!.retryable).toBe(true);
     });
 
+    test('classifies claude Exec-format / broken-shim as a transient image issue (ABCA-659, not "Unexpected error")', () => {
+      // The raw run_agent failure the broken agent image produced.
+      const result = classifyError(
+        "Workflow run_agent step failed: OSError: [Errno 8] Exec format error: 'claude'",
+      );
+      expect(result!.category).toBe(ErrorCategory.COMPUTE);
+      expect(result!.title).toBe('Couldn\'t start the coding agent (environment issue)');
+      expect(result!.retryable).toBe(true);
+      // MUST be transient so retryGuidance tells the user to just reply-to-retry
+      // (and escalate to an admin only if it persists) — not the bare
+      // "Unexpected error" with no guidance it used to fall through to.
+      expect(result!.errorClass).toBe(ErrorClass.TRANSIENT);
+      expect(result!.remedy).toMatch(/try again|rebuild|admin/i);
+    });
+
+    test('classifies the claude shim self-report ("native binary not installed")', () => {
+      const result = classifyError('Error: claude native binary not installed.');
+      expect(result!.category).toBe(ErrorCategory.COMPUTE);
+      expect(result!.errorClass).toBe(ErrorClass.TRANSIENT);
+    });
+
     test('classifies ECS exit without terminal status', () => {
       const result = classifyError(
         'ECS task exited successfully but agent never wrote terminal status after 5 polls',
@@ -237,6 +258,28 @@ describe('classifyError', () => {
       expect(result!.remedy).toMatch(/--max-turns/);
     });
 
+    test('ABCA-662: max_turns with an observed repeated failure stays "Exceeded max turns" and makes NO causal claim', () => {
+      // When the agent capped out with the last several calls being the same
+      // repeated failure, the pipeline appends a NEUTRAL observation ("last tool
+      // calls repeated: …"). The classification must NOT re-title the failure as
+      // "retrying a failing step" or assert more turns wouldn't help — the window
+      // (last few calls) can't tell a hard blocker from a long task that hit a
+      // recoverable snag late (662: siblings pushed fine → transient). It stays the
+      // plain max_turns bucket; the observed detail rides along in the message.
+      const result = classifyError(
+        "Agent session error (subtype='error_max_turns') — last tool calls repeated: "
+        + '`git push --force-with-lease` — remote: invalid credentials fatal: exit 128',
+      );
+      expect(result!.category).toBe(ErrorCategory.TIMEOUT);
+      expect(result!.title).toBe('Exceeded max turns');
+      expect(result!.retryable).toBe(true);
+      // Does not editorialize: no "spinning" / "won't help" claim. It points the
+      // reader at the detail and still offers the environment-blocker path.
+      expect(result!.title).not.toMatch(/retrying a failing step/i);
+      expect(result!.remedy).toMatch(/detail/i);
+      expect(result!.remedy).toMatch(/environment|auth|credentials/i);
+    });
+
     test('classifies error_max_budget_usd as TIMEOUT with specific title', () => {
       const result = classifyError(
         "Task did not succeed (agent_status='error_max_budget_usd', build_ok=False)",
@@ -254,6 +297,23 @@ describe('classifyError', () => {
       expect(result!.category).toBe(ErrorCategory.AGENT);
       expect(result!.title).toBe('Agent errored during execution');
       expect(result!.retryable).toBe(true);
+    });
+
+    test('classifies the runner.py "Agent session error (subtype=...)" wrapper, not just agent_status= (K5, live-caught ABCA-483)', () => {
+      // runner.py:515 emits ``Agent session error (subtype='error_max_turns')``
+      // — a DIFFERENT wrapper from pipeline.py's ``agent_status=``. Pre-K5 this
+      // fell through to UNKNOWN → "Unexpected error" even though the task hit the
+      // 100-turn cap (live: a 1-line README task burned 101 turns, reply said
+      // "Unexpected error"). The pattern must match the subtype= wrapper too.
+      const turns = classifyError("Agent session error (subtype='error_max_turns')");
+      expect(turns!.title).toBe('Exceeded max turns');
+      expect(turns!.category).toBe(ErrorCategory.TIMEOUT);
+
+      const budget = classifyError("Agent session error (subtype='error_max_budget_usd')");
+      expect(budget!.title).toBe('Exceeded max budget');
+
+      const exec = classifyError("Agent session error (subtype='error_during_execution')");
+      expect(exec!.title).toBe('Agent errored during execution');
     });
 
     test('matches agent_status with or without quotes around the literal', () => {
@@ -347,6 +407,115 @@ describe('classifyError', () => {
       expect(result!.title).toBe('Task timed out');
       expect(result!.retryable).toBe(false);
     });
+
+    test('classifies a build/verify command TIMEOUT distinctly from a crash (ABCA-667 live-caught)', () => {
+      // The fork's full `mise run build` exceeded the 600s cap → Python
+      // TimeoutExpired. Before this pattern it fell to "Unexpected error"; now it
+      // reads as a build-time-out (user-actionable: retry / raise the cap), not a
+      // mysterious crash.
+      const result = classifyError(
+        "TimeoutExpired: Command '['bash', '-lc', 'mise run install && MISE_EXPERIMENTAL=1 mise run build']' timed out after 600 seconds",
+      );
+      expect(result!.category).toBe(ErrorCategory.TIMEOUT);
+      expect(result!.title).toMatch(/didn't finish in time|timed out/i);
+      // A timeout is user-actionable (retry / raise the cap), not a hard failure.
+      expect(result!.retryable).toBe(true);
+      // Must NOT fall through to the generic Unexpected error.
+      expect(result!.title).not.toMatch(/Unexpected error/i);
+    });
+  });
+
+  // --- Environmental blockers (#251) ---
+
+  describe('blocker errors (canonical BLOCKED[<kind>] prefix)', () => {
+    test('classifies missing_secret and extracts the secret name', () => {
+      const result = classifyError('BLOCKED[missing_secret]: required secret not wired (resource: OPENAI_API_KEY)');
+      expect(result!.category).toBe(ErrorCategory.BLOCKED);
+      expect(result!.title).toBe('Blocked: missing secret');
+      expect(result!.remedy).toContain('OPENAI_API_KEY');
+      expect(result!.retryable).toBe(false);
+    });
+
+    test('classifies egress_denied and names the host to allowlist', () => {
+      const result = classifyError('BLOCKED[egress_denied]: connection refused (resource: registry.npmjs.org)');
+      expect(result!.category).toBe(ErrorCategory.BLOCKED);
+      expect(result!.title).toBe('Blocked: egress denied');
+      expect(result!.remedy).toContain('registry.npmjs.org');
+      expect(result!.retryable).toBe(false);
+    });
+
+    test('classifies dependency_unreachable as retryable', () => {
+      const result = classifyError('BLOCKED[dependency_unreachable]: pypi timed out (resource: pypi.org)');
+      expect(result!.category).toBe(ErrorCategory.BLOCKED);
+      expect(result!.retryable).toBe(true);
+    });
+
+    test('classifies policy_fail_closed distinctly from a hard-deny', () => {
+      const result = classifyError('BLOCKED[policy_fail_closed]: Cedar engine unavailable');
+      expect(result!.category).toBe(ErrorCategory.BLOCKED);
+      expect(result!.title).toBe('Blocked: policy engine fail-closed');
+      expect(result!.retryable).toBe(false);
+    });
+
+    test('handles a blocker reason without a resource suffix', () => {
+      const result = classifyError('BLOCKED[missing_secret]: a required secret was not wired');
+      expect(result!.category).toBe(ErrorCategory.BLOCKED);
+      expect(result!.title).toBe('Blocked: missing secret');
+    });
+
+    test('classifies auth_failure (runtime credential rejection → scope advice)', () => {
+      const result = classifyError('BLOCKED[auth_failure]: credential rejected (resource: github.com)');
+      expect(result!.category).toBe(ErrorCategory.BLOCKED);
+      expect(result!.title).toBe('Blocked: authentication rejected');
+      expect(result!.retryable).toBe(false);
+      expect(result!.remedy).toContain('scopes');
+    });
+
+    test('auth_failure with a Secrets Manager ARN gives IAM remedy, not PAT scopes (#251 review)', () => {
+      const arn = 'arn:aws:secretsmanager:us-east-1:123456789012:secret:gh-token-abc';
+      const result = classifyError(`BLOCKED[auth_failure]: the required GitHub token secret could not be read (resource: ${arn})`);
+      expect(result!.category).toBe(ErrorCategory.BLOCKED);
+      expect(result!.title).toBe('Blocked: authentication rejected');
+      expect(result!.retryable).toBe(false);
+      // IAM/blueprint advice — NOT the "verify PAT scopes" copy.
+      expect(result!.remedy).toContain('secretsmanager:GetSecretValue');
+      expect(result!.remedy).not.toContain('scopes');
+    });
+
+    test('falls back to environmental for an unknown kind', () => {
+      const result = classifyError('BLOCKED[unknown_environmental]: something odd happened');
+      expect(result!.category).toBe(ErrorCategory.BLOCKED);
+      expect(result!.title).toBe('Blocked: environmental fault');
+    });
+
+    test('classifies a BLOCKED prefix appearing mid-message (agent carry-path)', () => {
+      // failTask persists TaskResult.error verbatim; it may be wrapped.
+      const result = classifyError('Task failed: BLOCKED[egress_denied]: refused (resource: api.example.com)');
+      expect(result!.category).toBe(ErrorCategory.BLOCKED);
+      expect(result!.remedy).toContain('api.example.com');
+    });
+
+    test('extracts resource when the reason is wrapped with trailing text', () => {
+      // The reason is NOT the end of the string — a wrapper may append context
+      // or a stack trace after it. Resource extraction must still succeed.
+      const result = classifyError('BLOCKED[egress_denied]: refused (resource: api.example.com) at step 3');
+      expect(result!.category).toBe(ErrorCategory.BLOCKED);
+      expect(result!.remedy).toContain('api.example.com');
+    });
+
+    test('extracts resource when a stack trace follows on a new line', () => {
+      const result = classifyError(
+        'BLOCKED[missing_secret]: not wired (resource: OPENAI_API_KEY)\n  at foo (bar.py:12)',
+      );
+      expect(result!.category).toBe(ErrorCategory.BLOCKED);
+      expect(result!.remedy).toContain('OPENAI_API_KEY');
+    });
+
+    test('routes a mixed-case kind to the right remedy (case-insensitive)', () => {
+      const result = classifyError('BLOCKED[Egress_Denied]: refused (resource: host.com)');
+      expect(result!.category).toBe(ErrorCategory.BLOCKED);
+      expect(result!.title).toBe('Blocked: egress denied');
+    });
   });
 
   // --- Unknown errors ---
@@ -393,7 +562,96 @@ describe('classifyError', () => {
         expect(result.title.length).toBeGreaterThan(0);
         expect(result.description.length).toBeGreaterThan(0);
         expect(result.remedy.length).toBeGreaterThan(0);
+        // Every classification carries a 3-way errorClass (transient/service/user).
+        expect([ErrorClass.TRANSIENT, ErrorClass.SERVICE, ErrorClass.USER]).toContain(result.errorClass);
       }
+    });
+  });
+
+  // --- errorClass + retryGuidance (transient vs service vs user) ---
+
+  describe('errorClass axis + retryGuidance', () => {
+    test('the ECS deploy-race is TRANSIENT and isTransientError is true', () => {
+      const c = classifyError('Session start failed: InvalidParameterException: TaskDefinition is inactive')!;
+      expect(c.errorClass).toBe(ErrorClass.TRANSIENT);
+      expect(isTransientError(c)).toBe(true);
+    });
+
+    test('a generic session-start failure is TRANSIENT (compute infra)', () => {
+      expect(classifyError('Session start failed: boom')!.errorClass).toBe(ErrorClass.TRANSIENT);
+    });
+
+    test('auth/permission is SERVICE (admin fixes it), not transient', () => {
+      const c = classifyError('INSUFFICIENT_GITHUB_REPO_PERMISSIONS')!;
+      expect(c.errorClass).toBe(ErrorClass.SERVICE);
+      expect(isTransientError(c)).toBe(false);
+    });
+
+    test('a build/guardrail failure is USER (change the request/code)', () => {
+      expect(classifyError('Guardrail blocked: nope')!.errorClass).toBe(ErrorClass.USER);
+      expect(classifyError('Task did not succeed: agent_status="error_max_turns"')!.errorClass).toBe(ErrorClass.USER);
+    });
+
+    test('retryGuidance: TRANSIENT → "temporary … reply to retry … contact admin if it persists"', () => {
+      const g = retryGuidance(classifyError('Session start failed: boom')!);
+      expect(g).toMatch(/temporary infrastructure/i);
+      expect(g).toMatch(/reply here to try again/i);
+      expect(g).toMatch(/contact your ABCA admin/i);
+    });
+
+    test('retryGuidance: TRANSIENT + autoRetried → "I automatically tried again and it still failed"', () => {
+      const g = retryGuidance(classifyError('Session start failed: boom')!, true);
+      expect(g).toMatch(/automatically tried again/i);
+    });
+
+    test('retryGuidance: SERVICE → "retrying won\'t fix this … your ABCA admin"', () => {
+      const g = retryGuidance(classifyError('INSUFFICIENT_GITHUB_REPO_PERMISSIONS')!);
+      expect(g).toMatch(/won'?t fix this/i);
+      expect(g).toMatch(/admin/i);
+      expect(g).not.toMatch(/temporary infrastructure/i);
+    });
+
+    test('retryGuidance: USER guardrail → "edit the request"', () => {
+      const g = retryGuidance(classifyError('Guardrail blocked: nope')!);
+      expect(g).toMatch(/edit the request/i);
+    });
+
+    // #599 N3: pin the two USER fall-through branches so the #247 failure-renderer
+    // contract can't rot silently. Built as explicit classifications (the exact
+    // category/errorClass/retryable each branch keys on) rather than relying on a
+    // sample string that might reclassify later.
+    test('retryGuidance: retryable USER (non-guardrail) → "reply here with any extra guidance"', () => {
+      const cls: ErrorClassification = {
+        category: ErrorCategory.AGENT,
+        title: 'build failed',
+        description: 'the build/test step failed',
+        remedy: 'fix the failing step',
+        retryable: true,
+        errorClass: ErrorClass.USER,
+      };
+      const g = retryGuidance(cls);
+      expect(g).toMatch(/extra guidance/i);
+      expect(g).toMatch(/try again/i);
+      expect(g).not.toMatch(/edit the request/i); // not the guardrail branch
+    });
+
+    test('retryGuidance: not-retryable USER/unknown → "a retry may not resolve this"', () => {
+      const cls: ErrorClassification = {
+        category: ErrorCategory.UNKNOWN,
+        title: 'agent reported non-success',
+        description: 'the agent finished without success',
+        remedy: 'review the task output',
+        retryable: false,
+        errorClass: ErrorClass.USER,
+      };
+      const g = retryGuidance(cls);
+      expect(g).toMatch(/may not resolve this/i);
+      expect(g).toMatch(/contact your ABCA admin/i);
+    });
+
+    test('isTransientError is false for null / absent classification', () => {
+      expect(isTransientError(null)).toBe(false);
+      expect(isTransientError(undefined)).toBe(false);
     });
   });
 

@@ -34,6 +34,7 @@ from output_scanner import scan_tool_output
 from policy import APPROVAL_RATE_LIMIT, FLOOR_TIMEOUT_S, Outcome
 from progress_writer import _generate_ulid
 from shell import log, log_error_cw
+from stuck_guard import StuckGuard
 
 if TYPE_CHECKING:
     from policy import PolicyEngine
@@ -97,6 +98,123 @@ def _tool_input_preview(tool_input: Any, max_len: int = TOOL_INPUT_PREVIEW_MAX) 
     except (TypeError, ValueError):
         rendered = str(tool_input)
     return _truncate(_strip_ansi(rendered), max_len)
+
+
+# ---------------------------------------------------------------------------
+# Egress-denial detection (#251, Phase 1)
+# ---------------------------------------------------------------------------
+#
+# Best-effort, heuristic scan of a tool's output for the signatures a blocked
+# outbound connection leaves behind — a non-allowlisted host hitting the DNS
+# Firewall, a refused connection, or a name-resolution failure. When one
+# matches we emit an ``egress_denied`` blocker naming the host to allowlist.
+# This is intentionally a string-signature scan (not a network probe): the
+# model's Bash tool calls (``npm install``, ``git clone``, ``curl``) surface
+# their stderr here, and those tools use stable, well-known phrasings. Patterns
+# that capture a host use a named ``host`` group; detection-only patterns omit
+# it (host stays None → the event still fires, just without ``resource``).
+_EGRESS_DENIAL_PATTERNS: tuple[re.Pattern[str], ...] = (
+    # curl / libcurl, git-over-https
+    re.compile(r"[Cc]ould not resolve host:?\s+(?P<host>[A-Za-z0-9._-]+)"),
+    re.compile(r"[Ff]ailed to connect to\s+(?P<host>[A-Za-z0-9._-]+)"),
+    # Node (npm/yarn), python (requests/urllib), getaddrinfo
+    re.compile(r"getaddrinfo (?:ENOTFOUND|EAI_AGAIN)\s+(?P<host>[A-Za-z0-9._-]+)"),
+    # requests/urllib3: the real host appears in ``HTTPSConnectionPool(host='x')``
+    # or after ``Failed to resolve 'x'``. Match those anchors specifically —
+    # a bare ``NameResolutionError.*?<fqdn>`` lazy-match would instead capture
+    # the ``urllib3.connection.HTTPSConnection`` class path that precedes the host.
+    re.compile(r"HTTPS?ConnectionPool\(host='(?P<host>[A-Za-z0-9._-]+)'"),
+    re.compile(r"Failed to resolve '(?P<host>[A-Za-z0-9._-]+)'"),
+    re.compile(
+        r"nodename nor servname provided|Temporary failure in name resolution"
+        r"|Name or service not known|Connection refused|Network is unreachable"
+        r"|NameResolutionError|Failed to establish a new connection",
+    ),
+)
+
+
+# #251 carry-path: the most recent agent-detected blocker, as a canonical
+# ``BLOCKED[<kind>]: …`` reason string (see ``format_blocker_reason``). Blockers
+# are detected mid-turn in the hooks (egress in PostToolUse, fail-closed in
+# PreToolUse) but the terminal ``error_message`` is assembled later in the
+# pipeline. This latch bridges the two: the pipeline promotes it into
+# ``TaskResult.error`` ONLY when the task errored without a more specific
+# reason, so the CDK classifier surfaces a precise remedy. Process-lifetime
+# (== one task) like ``_INJECTED_NUDGES``; last-writer-wins is fine — the most
+# recent blocker is the most relevant to a terminal failure.
+_LAST_BLOCKER_REASON: str | None = None
+
+
+def _record_blocker_reason(kind: str, detail: str, resource: str | None = None) -> None:
+    """Latch the canonical reason for the most recent agent-detected blocker."""
+    global _LAST_BLOCKER_REASON
+    from progress_writer import format_blocker_reason
+
+    _LAST_BLOCKER_REASON = format_blocker_reason(kind, detail, resource)
+
+
+def last_blocker_reason() -> str | None:
+    """Return the latched canonical blocker reason for terminal promotion (#251)."""
+    return _LAST_BLOCKER_REASON
+
+
+def reset_blocker_reason() -> None:
+    """Clear the in-process blocker latch.
+
+    Called at the start of each ``run_task`` (the latch is a process-scalar,
+    not task_id-keyed, so it must be reset per task to avoid leaking a prior
+    task's blocker) and by test fixtures for isolation.
+    """
+    global _LAST_BLOCKER_REASON
+    _LAST_BLOCKER_REASON = None
+
+
+# Back-compat alias for test fixtures that import the old name.
+_reset_blocker_reason_for_tests = reset_blocker_reason
+
+
+# ABCA-662: latch of the stuck-guard's "why it's spinning" summary, refreshed by
+# the between-turns hook. Read by the pipeline's terminal path so a max_turns
+# failure can say WHY it capped ("Exceeded max turns — spinning on failing tool
+# calls: git push → invalid credentials") vs. a task that genuinely used its
+# turns. Process-lifetime (one task), last-writer-wins (the most recent window
+# is the most relevant to the cap). Distinct from the blocker latch: this is a
+# SOFT diagnostic (advisory), not a canonical BLOCKED[…] terminal reason.
+_LAST_STUCK_SUMMARY: str | None = None
+
+
+def last_stuck_summary() -> str | None:
+    """Return the latched stuck-guard summary for the max_turns terminal reason."""
+    return _LAST_STUCK_SUMMARY
+
+
+def reset_stuck_summary() -> None:
+    """Clear the stuck-summary latch (per-task, alongside the blocker latch)."""
+    global _LAST_STUCK_SUMMARY
+    _LAST_STUCK_SUMMARY = None
+
+
+def detect_egress_denial(text: str) -> tuple[bool, str | None]:
+    """Scan tool output for an egress-denial signature (#251).
+
+    Returns ``(detected, host_or_None)``: ``(True, host)`` on the first matching
+    signature (``host`` populated when a pattern captured one so the emitted
+    ``egress_denied`` event can name the exact domain to allowlist; ``None`` for
+    detection-only signatures), or ``(False, None)`` when nothing matches.
+
+    Best-effort and deliberately conservative: it only fires on the
+    well-known phrasings the common CLIs (curl/git/npm/pip) emit, so a task
+    log that merely *mentions* "connection refused" in prose could produce a
+    false positive — acceptable for an observability signal that never blocks.
+    """
+    if not text:
+        return False, None
+    for pattern in _EGRESS_DENIAL_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            host = match.groupdict().get("host") if match.groupdict() else None
+            return True, host
+    return False, None
 
 
 def _deny_response(reason: str) -> dict:
@@ -214,6 +332,30 @@ async def pre_tool_use_hook(
                 "write_policy_decision_cached",
                 **decision.cache_hit_metadata,
             )
+        # #251 (decision E): a fail-closed deny means the Cedar engine errored
+        # or was unavailable — an ENVIRONMENTAL fault (misconfiguration), NOT
+        # an intentional hard-deny. Emit a ``policy_fail_closed`` blocker event
+        # so it renders distinctly and carries a remediation hint. We branch on
+        # the structured ``decision.fail_closed`` flag, never a reason-string
+        # prefix. Intentional hard-denies / cache-denies (fail_closed=False)
+        # never emit. Emitted strictly BEFORE the deny; the deny itself is
+        # unchanged, so this adds observability without altering the outcome.
+        if getattr(decision, "fail_closed", False):
+            _record_blocker_reason("policy_fail_closed", decision.reason)
+            if progress is not None:
+                _try_progress(
+                    progress,
+                    "write_agent_blocked",
+                    kind="policy_fail_closed",
+                    detail=decision.reason,
+                    remediation_hint=(
+                        "The Cedar policy engine errored or was unavailable "
+                        "(fail-closed). Check the agent policy-engine logs and the "
+                        "policy bundle; this is a misconfiguration, not an "
+                        "intentional deny."
+                    ),
+                    retryable=False,
+                )
         log("POLICY", f"DENIED: {tool_name} — {decision.reason}")
         return _deny_response(decision.reason)
 
@@ -918,6 +1060,8 @@ async def post_tool_use_hook(
     hook_context: Any,
     *,
     trajectory: _TrajectoryWriter | None = None,
+    progress: Any = None,
+    stuck_guard: StuckGuard | None = None,
 ) -> dict:
     """PostToolUse hook: screen tool output for secrets/PII.
 
@@ -925,6 +1069,16 @@ async def post_tool_use_hook(
     detected the response includes ``updatedMCPToolOutput`` containing the
     redacted version (steered enforcement — content is sanitized, not
     blocked).
+
+    ``progress`` is optional (preserves the Phase 1 test call shape). When
+    present, an egress-denial signature in the tool output emits an
+    ``egress_denied`` blocker event (#251) — best-effort observability,
+    never alters the screening decision.
+
+    K7: when a ``stuck_guard`` is supplied, every tool result is recorded so a
+    between-turns hook can detect a repeating failing command (the ABCA-483
+    spin loop) and steer / bail. Recording is best-effort and never alters the
+    screening outcome.
     """
     _PASS_THROUGH: dict = {"hookSpecificOutput": {"hookEventName": "PostToolUse"}}
     _FAIL_CLOSED: dict = {
@@ -949,6 +1103,51 @@ async def post_tool_use_hook(
     # Normalise non-string responses
     if not isinstance(tool_response, str):
         tool_response = str(tool_response)
+
+    # #251: best-effort egress-denial detection. A blocked outbound connection
+    # (non-allowlisted host hitting the DNS Firewall, refused connection, name
+    # resolution failure) surfaces in the tool's stderr here. Emit an
+    # ``egress_denied`` blocker naming the host to allowlist. Observability
+    # only — never changes the pass-through / redaction decision below.
+    egress_detected, host = detect_egress_denial(tool_response)
+    if egress_detected:
+        detail = (
+            f"A connection to {host!r} was blocked"
+            if host
+            else "An outbound connection was blocked"
+        ) + f" during {tool_name}."
+        # Latch for terminal promotion ONLY when a host was captured. The latch
+        # feeds the authoritative TaskResult.error carry-path, so a host-less,
+        # detection-only signature ("Connection refused" / "Network is
+        # unreachable") — which commonly fires for an internal localhost race,
+        # not an egress denial — must not masquerade as the terminal cause. The
+        # observability event below still fires unconditionally (it never blocks
+        # and is clearly a heuristic signal in the live stream).
+        if host:
+            _record_blocker_reason("egress_denied", detail, host)
+        if progress is not None:
+            _try_progress(
+                progress,
+                "write_agent_blocked",
+                kind="egress_denied",
+                detail=detail,
+                remediation_hint=(
+                    f"Allowlist {host!r} in the DNS Firewall rule group"
+                    if host
+                    else "Allowlist the required host in the DNS Firewall rule group"
+                )
+                + " if it is a legitimate dependency. The agent never widens egress itself.",
+                retryable=False,
+                resource=host,
+            )
+
+    # K7: feed the stuck-guard (best-effort — a tracking error must never block
+    # the screening path that follows).
+    if stuck_guard is not None:
+        try:
+            stuck_guard.record_tool_result(tool_name, hook_input.get("tool_input"), tool_response)
+        except Exception as exc:
+            log("WARN", f"stuck-guard record raised (ignored): {type(exc).__name__}: {exc}")
 
     try:
         result = scan_tool_output(tool_response)
@@ -1232,6 +1431,49 @@ def _cancel_between_turns_hook(ctx: dict) -> list[str]:
     return []
 
 
+def _stuck_guard_between_turns_hook(ctx: dict) -> list[str]:
+    """K7: nudge the agent when it repeats the SAME failing command (ABCA-483).
+
+    Reads the per-task :class:`StuckGuard` stamped on ``ctx`` (by
+    :func:`stop_hook`). When the same command has failed with identical output
+    enough times in a row, the guard returns a ``steer`` action — a ONE-TIME
+    advisory message telling the agent to stop retrying and either work around
+    the failure or finish with what it has. Returned as injected text, so the
+    SDK continues the turn with the steer as the next user message.
+
+    ADVISORY ONLY: the guard never kills the task (the bail path was removed —
+    distinguishing a true spin from a legitimately-iterating agent is too
+    fragile to justify an auto-kill; the ``max_turns`` cap is the real
+    backstop). A false positive here costs exactly one extra advisory comment.
+
+    Runs AFTER cancel (cancel wins — never steer a dying agent) but its own
+    no-op-when-cancelled guard makes ordering robust. Fail-open: any error is
+    swallowed so a guard bug can never wedge a healthy agent.
+    """
+    if ctx.get("_cancel_requested"):
+        return []
+    guard = ctx.get("stuck_guard")
+    if guard is None:
+        return []
+    try:
+        action = guard.evaluate()
+        # ABCA-662: refresh the "why it's spinning" latch every turn. When the
+        # trailing window is failure-dominated this returns a one-liner; otherwise
+        # None (which clears the latch — a task that recovered isn't "stuck"). Read
+        # by the terminal path so a later max_turns cap explains itself.
+        global _LAST_STUCK_SUMMARY
+        _LAST_STUCK_SUMMARY = guard.recent_failure_summary()
+    except Exception as exc:
+        log("WARN", f"stuck-guard evaluate raised (ignored): {type(exc).__name__}: {exc}")
+        return []
+
+    if action.kind == "steer":
+        _emit_nudge_milestone(ctx, "stuck_steer", action.message[:_NUDGE_PREVIEW_LEN])
+        log("NUDGE", f"stuck-guard STEER injected: {action.signature}")
+        return [action.message]
+    return []
+
+
 # Global list of between-turns hooks.  Cancel MUST run first so it can
 # short-circuit nudges on cancelled tasks (no point injecting nudges into a
 # dying agent — worse, the nudge reader mutates DDB state that the agent will
@@ -1243,6 +1485,10 @@ def _cancel_between_turns_hook(ctx: dict) -> list[str]:
 # nudge reader to preserve cancel-wins semantics.
 between_turns_hooks: list[BetweenTurnsHook] = [
     _cancel_between_turns_hook,
+    # K7 stuck-guard (advisory): injects a one-time "stop retrying X" nudge when
+    # the same command keeps failing identically. Runs after cancel (never steer
+    # a dying agent); order vs nudge/denial is cosmetic since it never bails.
+    _stuck_guard_between_turns_hook,
     _nudge_between_turns_hook,
     # Chunk 3 (finding #2): denial injection runs LAST so both cancel and
     # nudge short-circuits pre-empt it. The hook explicitly re-checks
@@ -1260,6 +1506,7 @@ async def stop_hook(
     task_id: str,
     progress: Any = None,
     engine: Any = None,
+    stuck_guard: Any = None,
 ) -> dict:
     """Stop hook: run registered between-turns hooks; block if they produce text.
 
@@ -1282,6 +1529,7 @@ async def stop_hook(
         "task_id": task_id,
         "progress": progress,
         "engine": engine,
+        "stuck_guard": stuck_guard,
     }
 
     # Cancel-before-nudge short-circuit.
@@ -1363,6 +1611,11 @@ def build_hook_matchers(
         SyncHookJSONOutput,
     )
 
+    # K7: one stuck-guard per task (== per build_hook_matchers call). The
+    # PostToolUse closure feeds it every tool result; the Stop closure reads it
+    # between turns to steer / bail on a repeating failing command.
+    _stuck_guard = StuckGuard()
+
     # Closure-based wrapper matches the HookCallback signature exactly:
     # (HookInput, str | None, HookContext) -> Awaitable[HookJSONOutput]
     async def _pre(
@@ -1404,7 +1657,14 @@ def build_hook_matchers(
         hook_input: HookInput, tool_use_id: str | None, ctx: HookContext
     ) -> HookJSONOutput:
         try:
-            result = await post_tool_use_hook(hook_input, tool_use_id, ctx, trajectory=trajectory)
+            result = await post_tool_use_hook(
+                hook_input,
+                tool_use_id,
+                ctx,
+                trajectory=trajectory,
+                progress=progress,
+                stuck_guard=_stuck_guard,
+            )
             return SyncHookJSONOutput(**result)
         except Exception as exc:
             log("ERROR", f"PostToolUse wrapper crashed: {type(exc).__name__}: {exc}")
@@ -1428,6 +1688,7 @@ def build_hook_matchers(
                 task_id=stop_task_id,
                 progress=progress,
                 engine=engine,
+                stuck_guard=_stuck_guard,
             )
         except Exception as exc:
             log(

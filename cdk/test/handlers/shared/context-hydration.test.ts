@@ -19,9 +19,18 @@
 
 // --- Mocks ---
 const mockSmSend = jest.fn();
+// Minimal stand-in for the SDK's ResourceNotFoundException so `instanceof`
+// checks in resolveGitHubToken work against thrown mock errors (#251).
+class MockResourceNotFoundException extends Error {
+  constructor(message = 'Secrets Manager can’t find the specified secret.') {
+    super(message);
+    this.name = 'ResourceNotFoundException';
+  }
+}
 jest.mock('@aws-sdk/client-secrets-manager', () => ({
   SecretsManagerClient: jest.fn(() => ({ send: mockSmSend })),
   GetSecretValueCommand: jest.fn((input: unknown) => ({ _type: 'GetSecretValue', input })),
+  ResourceNotFoundException: MockResourceNotFoundException,
 }));
 
 const mockBedrockSend = jest.fn();
@@ -66,6 +75,15 @@ global.fetch = mockFetch as unknown as typeof fetch;
 beforeEach(() => {
   jest.clearAllMocks();
   clearTokenCache();
+  // hydrateContext falls back to process.env.MEMORY_ID when no memoryId option
+  // is passed (context-hydration.ts:990). If MEMORY_ID leaks into the jest
+  // process env (set by another test file, or the deploy env when the suite
+  // runs in-container), the "memoryId not provided" tests would spuriously call
+  // loadMemoryContext and fail — an order/environment-dependent flake that
+  // forced the fork's build-gate to be bypassed with `git push --no-verify`.
+  // Pin a clean "no ambient memory" baseline; tests that want memory pass the
+  // memoryId option explicitly.
+  delete process.env.MEMORY_ID;
 });
 
 // ---------------------------------------------------------------------------
@@ -120,9 +138,41 @@ describe('resolveGitHubToken', () => {
     expect(mockSmSend).toHaveBeenCalledTimes(1); // Only one SM call
   });
 
-  test('throws when secret is empty', async () => {
+  test('throws a missing_secret blocker when secret is empty', async () => {
     mockSmSend.mockResolvedValueOnce({ SecretString: undefined });
-    await expect(resolveGitHubToken('arn:test')).rejects.toThrow('GitHub token secret is empty');
+    // #251: empty secret → canonical BLOCKED[missing_secret] reason naming the ARN.
+    await expect(resolveGitHubToken('arn:test')).rejects.toThrow(
+      'BLOCKED[missing_secret]: the required GitHub token secret is empty (resource: arn:test)',
+    );
+  });
+
+  test('throws a missing_secret blocker when secret does not exist', async () => {
+    mockSmSend.mockRejectedValueOnce(new MockResourceNotFoundException());
+    // #251: ResourceNotFoundException → canonical reason naming the ARN so the
+    // classifier can tell the operator exactly which secret to wire.
+    const arn = 'arn:aws:secretsmanager:us-east-1:123:secret:missing';
+    await expect(resolveGitHubToken(arn)).rejects.toThrow(
+      `BLOCKED[missing_secret]: the required GitHub token secret does not exist (resource: ${arn})`,
+    );
+  });
+
+  test('wraps an unreadable-secret SM error as an auth_failure blocker', async () => {
+    // #251 review fix: a secret that exists but can't be read (AccessDenied,
+    // throttling exhausted) is an environmental auth_failure — not a missing
+    // secret and not a silent-degrade. Wrap with the canonical reason naming the
+    // ARN so the classifier routes to the auth remedy instead of stranding the
+    // task with minimal context and no token.
+    const arn = 'arn:aws:secretsmanager:us-east-1:123:secret:denied';
+    mockSmSend.mockRejectedValueOnce(new Error('AccessDeniedException'));
+    await expect(resolveGitHubToken(arn)).rejects.toThrow(
+      `BLOCKED[auth_failure]: the required GitHub token secret could not be read (resource: ${arn})`,
+    );
+  });
+
+  test('preserves the underlying SM error as the cause on an unreadable secret', async () => {
+    const underlying = new Error('AccessDeniedException');
+    mockSmSend.mockRejectedValueOnce(underlying);
+    await expect(resolveGitHubToken('arn:test')).rejects.toMatchObject({ cause: underlying });
   });
 
   test('caches tokens per ARN (different ARNs get different tokens)', async () => {
@@ -702,15 +752,15 @@ describe('hydrateContext', () => {
     process.env.GITHUB_TOKEN_SECRET_ARN = originalArn;
   });
 
-  test('Secrets Manager failure — proceeds without issue', async () => {
+  test('unreadable token secret propagates as an auth_failure blocker (no silent degrade)', async () => {
+    // #251 review fix: a token secret that exists but can't be read (SM
+    // AccessDenied / unavailable) must NOT degrade to minimal context — the
+    // agent would have no token to clone/push and fail opaquely. Propagate the
+    // canonical BLOCKED[auth_failure] reason so the classifier surfaces it.
     mockSmSend.mockRejectedValueOnce(new Error('SM unavailable'));
 
     const task = { ...baseTask, issue_number: 42, task_description: 'Fix' };
-    const result = await hydrateContext(task as any);
-
-    expect(result.sources).not.toContain('issue');
-    expect(result.sources).toContain('task_description');
-    expect(result.user_prompt).toContain('Fix');
+    await expect(hydrateContext(task as any)).rejects.toThrow('BLOCKED[auth_failure]:');
   });
 
   test('no issue and no task description — minimal prompt', async () => {

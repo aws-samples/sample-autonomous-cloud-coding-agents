@@ -7,8 +7,27 @@ import pytest
 
 cedarpy = pytest.importorskip("cedarpy")
 
-from hooks import build_hook_matchers, post_tool_use_hook, pre_tool_use_hook
+from hooks import (
+    _reset_blocker_reason_for_tests,
+    _stuck_guard_between_turns_hook,
+    build_hook_matchers,
+    detect_egress_denial,
+    last_blocker_reason,
+    last_stuck_summary,
+    post_tool_use_hook,
+    pre_tool_use_hook,
+    reset_stuck_summary,
+)
 from policy import PolicyEngine
+
+
+@pytest.fixture(autouse=True)
+def _reset_blocker_latch():
+    """Clear the #251 blocker latch between tests so one test's detected
+    blocker doesn't leak into the next (module-level, process-lifetime)."""
+    _reset_blocker_reason_for_tests()
+    yield
+    _reset_blocker_reason_for_tests()
 
 
 def _run(coro):
@@ -342,6 +361,156 @@ class TestPostToolUseHook:
         call_args = trajectory.write_output_screening_decision.call_args
         assert call_args[0][0] == "Bash"
         assert any("SCANNER_ERROR" in f for f in call_args[0][1])
+
+
+class TestDetectEgressDenial:
+    """#251 egress-denial signature scan."""
+
+    def test_no_match_on_clean_output(self):
+        assert detect_egress_denial("Successfully installed package\n") == (False, None)
+        assert detect_egress_denial("") == (False, None)
+
+    def test_curl_could_not_resolve_host(self):
+        detected, host = detect_egress_denial("curl: (6) Could not resolve host: pypi.org")
+        assert detected is True
+        assert host == "pypi.org"
+
+    def test_npm_getaddrinfo_enotfound(self):
+        detected, host = detect_egress_denial(
+            "npm ERR! network getaddrinfo ENOTFOUND registry.npmjs.org"
+        )
+        assert detected is True
+        assert host == "registry.npmjs.org"
+
+    def test_git_failed_to_connect(self):
+        detected, host = detect_egress_denial(
+            "fatal: unable to access: Failed to connect to github.com port 443"
+        )
+        assert detected is True
+        assert host == "github.com"
+
+    def test_connection_refused_without_host(self):
+        # Detection-only signature — fires but names no host.
+        detected, host = detect_egress_denial("Error: connect ECONNREFUSED — Connection refused")
+        assert detected is True
+        assert host is None
+
+    def test_urllib3_captures_real_host_not_class_path(self):
+        # The requests/urllib3 error embeds the urllib3 class path BEFORE the
+        # real host; a naive lazy match would grab the class path. We anchor on
+        # HTTPSConnectionPool(host='…') / Failed to resolve '…' instead.
+        stderr = (
+            "HTTPSConnectionPool(host='pypi.org', port=443): Max retries exceeded "
+            "with url: /simple/ (Caused by NameResolutionError("
+            '"<urllib3.connection.HTTPSConnection object at 0x7f>: '
+            "Failed to resolve 'pypi.org' ([Errno -3] Temporary failure)\"))"
+        )
+        detected, host = detect_egress_denial(stderr)
+        assert detected is True
+        assert host == "pypi.org"
+        assert host != "urllib3.connection.HTTPSConnection"
+
+
+class TestPostToolUseEgressBlocker:
+    """#251: PostToolUse emits egress_denied + latches the terminal reason."""
+
+    def test_emits_egress_denied_event_with_host(self, progress):
+        hook_input = {
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_response": "npm ERR! network getaddrinfo ENOTFOUND registry.npmjs.org",
+        }
+        _run(post_tool_use_hook(hook_input, "t-egress", {}, progress=progress))
+        blocked = [c for c in progress.calls if c[0] == "write_agent_blocked"]
+        assert len(blocked) == 1
+        kwargs = blocked[0][1]
+        assert kwargs["kind"] == "egress_denied"
+        assert kwargs["resource"] == "registry.npmjs.org"
+        assert kwargs["retryable"] is False
+
+    def test_latches_canonical_reason_even_without_progress(self):
+        hook_input = {
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_response": "curl: (6) Could not resolve host: api.example.com",
+        }
+        _run(post_tool_use_hook(hook_input, "t-latch", {}))
+        reason = last_blocker_reason()
+        assert reason is not None
+        assert reason.startswith("BLOCKED[egress_denied]:")
+        assert "(resource: api.example.com)" in reason
+
+    def test_clean_output_does_not_latch_or_emit(self, progress):
+        hook_input = {
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Read",
+            "tool_response": "def hello():\n    return 'world'\n",
+        }
+        _run(post_tool_use_hook(hook_input, "t-clean", {}, progress=progress))
+        assert last_blocker_reason() is None
+        assert not [c for c in progress.calls if c[0] == "write_agent_blocked"]
+
+    def test_hostless_signature_emits_event_but_does_not_latch_terminal_reason(self, progress):
+        # A detection-only signature ("Connection refused") commonly fires for an
+        # internal localhost race, not an egress denial. It should surface as an
+        # observability event but MUST NOT poison the authoritative terminal
+        # reason (which would send the operator to the DNS Firewall for nothing).
+        hook_input = {
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_response": "curl http://127.0.0.1:8080 — Connection refused",
+        }
+        _run(post_tool_use_hook(hook_input, "t-hostless", {}, progress=progress))
+        # Event fired (heuristic live-stream signal)…
+        assert [c for c in progress.calls if c[0] == "write_agent_blocked"]
+        # …but the terminal carry-path was NOT latched (no host captured).
+        assert last_blocker_reason() is None
+
+
+class TestPreToolUsePolicyFailClosed:
+    """#251 (decision E): fail-closed denies emit policy_fail_closed; intentional
+    hard-denies do NOT. Branches on the structured flag, not a reason string."""
+
+    def _deny_input(self):
+        return {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "echo hi"},
+        }
+
+    def test_fail_closed_deny_emits_blocker(self, progress):
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+        engine._cedarpy = None  # force "policy engine unavailable" fail-closed
+        result = _run(
+            pre_tool_use_hook(self._deny_input(), "t-fc", {}, engine=engine, progress=progress)
+        )
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+        blocked = [c for c in progress.calls if c[0] == "write_agent_blocked"]
+        assert len(blocked) == 1
+        assert blocked[0][1]["kind"] == "policy_fail_closed"
+        # Terminal carry-path latched too.
+        assert (last_blocker_reason() or "").startswith("BLOCKED[policy_fail_closed]:")
+
+    def test_hard_deny_does_not_emit_blocker(self, progress):
+        # A read-only engine hard-denies Write — intentional, fail_closed=False.
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo", read_only=True)
+        hook_input = {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Write",
+            "tool_input": {"file_path": "x.py", "content": "y"},
+        }
+        result = _run(pre_tool_use_hook(hook_input, "t-hd", {}, engine=engine, progress=progress))
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert not [c for c in progress.calls if c[0] == "write_agent_blocked"]
+        assert last_blocker_reason() is None
+
+    def test_fail_closed_still_denies_without_progress(self):
+        # No-fail-closed-regression (cross-cutting AC): the deny is unchanged
+        # whether or not the blocker emit is wired.
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+        engine._cedarpy = None
+        result = _run(pre_tool_use_hook(self._deny_input(), "t-fc2", {}, engine=engine))
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
 class TestBuildHookMatchers:
@@ -1531,3 +1700,128 @@ class TestRemainingMaxlifetime:
     def test_unparseable_started_at_returns_none(self, monkeypatch):
         monkeypatch.setenv("TASK_STARTED_AT", "not-a-timestamp")
         assert hooks._remaining_maxlifetime_s() is None
+
+
+class TestStuckGuardHookIntegration:
+    """K7: PostToolUse feeds the guard; the between-turns hook steers (advisory)."""
+
+    def _oom(self):
+        return "[//cdk:test] FAILED (exit 134)\nJavaScript heap out of memory"
+
+    def test_post_tool_use_records_failures_into_the_guard(self):
+        from stuck_guard import STEER_THRESHOLD, StuckGuard
+
+        guard = StuckGuard()
+        cmd = {"command": "mise //cdk:test"}
+        for _ in range(STEER_THRESHOLD):
+            hook_input = {
+                "hook_event_name": "PostToolUse",
+                "tool_name": "Bash",
+                "tool_input": cmd,
+                "tool_response": self._oom(),
+            }
+            _run(post_tool_use_hook(hook_input, "t", {}, stuck_guard=guard))
+        # the guard now has enough failures to steer
+        assert guard.evaluate().kind == "steer"
+
+    def test_between_turns_hook_latches_stuck_summary_from_the_guard(self):
+        # #599 N2: pin the PRODUCTION write path for the _LAST_STUCK_SUMMARY latch
+        # (hooks.py:1464-1465). The enrichment tests monkeypatch the getter, so
+        # without this test deleting those two lines would leave the latch
+        # permanently None and every test would still pass. Drive the real hook
+        # with a failure-dominated guard and assert the module latch is populated.
+        from stuck_guard import WINDOW, StuckGuard
+
+        reset_stuck_summary()
+        assert last_stuck_summary() is None
+        guard = StuckGuard()
+        cmd = {"command": "mise //cdk:test"}
+        # recent_failure_summary needs a FULL window (>= WINDOW) of byte-identical
+        # failures (WINDOW_FAIL_THRESHOLD of them) — fill it past WINDOW.
+        for _ in range(WINDOW + 2):
+            guard.record_tool_result("Bash", cmd, self._oom())
+        # Precondition: the guard itself considers the window failure-dominated.
+        assert guard.recent_failure_summary() is not None
+
+        result = _stuck_guard_between_turns_hook({"stuck_guard": guard})
+        # advisory steer text returned…
+        assert isinstance(result, list)
+        # …and, crucially, the terminal-reason latch was written by the hook.
+        summary = last_stuck_summary()
+        assert summary is not None
+        assert "last tool calls repeated" in summary
+        reset_stuck_summary()
+
+    def test_between_turns_hook_clears_stuck_summary_when_not_failure_dominated(self):
+        # Symmetric guard: a recovered task (clean window) must CLEAR the latch,
+        # not leave a stale "stuck" summary that a later max_turns cap would echo.
+        # Pre-seed a stale latch via a failure-dominated guard.
+        from stuck_guard import WINDOW, StuckGuard
+
+        stuck = StuckGuard()
+        for _ in range(WINDOW + 2):
+            stuck.record_tool_result("Bash", {"command": "mise //cdk:test"}, self._oom())
+        _stuck_guard_between_turns_hook({"stuck_guard": stuck})
+        assert last_stuck_summary() is not None
+
+        # A fresh, healthy guard on the next turn clears it (recent_failure_summary None).
+        healthy = StuckGuard()
+        healthy.record_tool_result("Read", {"file": "a.py"}, "def hello(): return 1")
+        _stuck_guard_between_turns_hook({"stuck_guard": healthy})
+        assert last_stuck_summary() is None
+        reset_stuck_summary()
+
+    def test_post_tool_use_record_error_never_blocks_screening(self):
+        # A guard that raises on record must not break the PASS_THROUGH path.
+        from stuck_guard import StuckGuard
+
+        class _Boom(StuckGuard):
+            def record_tool_result(self, *a, **k):
+                raise RuntimeError("boom")
+
+        hook_input = {
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "echo hi"},
+            "tool_response": "hi",
+        }
+        result = _run(post_tool_use_hook(hook_input, "t", {}, stuck_guard=_Boom()))
+        assert result["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
+
+    def test_stop_hook_steers_not_bails(self):
+        # Advisory-only: a persistent identical-failure spin produces a STEER
+        # (a 'block' decision that injects the nudge as the next user message),
+        # NEVER a continue_=False kill. The max_turns cap is the real backstop.
+        from stuck_guard import STEER_THRESHOLD, StuckGuard
+
+        guard = StuckGuard()
+        cmd = {"command": "mise //cdk:test"}
+        for _ in range(STEER_THRESHOLD + 5):
+            guard.record_tool_result("Bash", cmd, self._oom())
+        result = _run(hooks.stop_hook({}, None, {}, task_id="t", stuck_guard=guard))
+        # a steer is a 'block' decision carrying the advisory text; never a kill
+        assert result.get("continue_") is not False
+        assert result.get("decision") == "block"
+        assert "STOP retrying" in (result.get("reason") or "")
+
+    def test_stop_hook_steers_when_guard_says_so(self):
+        from stuck_guard import STEER_THRESHOLD, StuckGuard
+
+        guard = StuckGuard()
+        cmd = {"command": "mise //cdk:test"}
+        for _ in range(STEER_THRESHOLD):
+            guard.record_tool_result("Bash", cmd, self._oom())
+        result = _run(hooks.stop_hook({}, None, {}, task_id="t", stuck_guard=guard))
+        # a steer is injected as a block decision (SDK continues with the text)
+        assert result.get("decision") == "block"
+        assert "STOP retrying" in result.get("reason", "")
+
+    def test_stop_hook_no_guard_is_a_noop(self):
+        # Back-compat: absent a guard, the stuck path never fires.
+        result = _run(hooks.stop_hook({}, None, {}, task_id="t"))
+        assert result == {}
+
+    def test_build_hook_matchers_creates_a_guard_without_crashing(self):
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+        matchers = build_hook_matchers(engine, task_id="t")
+        assert "PostToolUse" in matchers and "Stop" in matchers

@@ -160,6 +160,83 @@ def _clean_env() -> dict[str, str]:
     return env
 
 
+# Substrings that mark a line as a real failure in build/test tool output — used
+# to pull the FAILING line out of the MIDDLE of a large interleaved parallel-DAG
+# log (a plain tail misses it). Lower-cased comparison; conservative so we don't
+# flood on benign "warning"/"0 errors" lines.
+_FAILURE_LINE_MARKERS = (
+    "fail ",  # jest "FAIL test/foo.test.ts", pytest "FAILED"
+    "failed",
+    "✕",
+    "✗",
+    "✖",
+    "●",  # jest failed-assertion bullet
+    "error ts",  # tsc "error TS2345:"
+    "error:",
+    "elifecycle",  # yarn/npm lifecycle failure
+    "npm err!",
+    "does not meet",  # jest coverage-threshold "global … does not meet threshold"
+    "coverage threshold",
+    'jest: "global"',
+    "not trusted",  # mise untrusted config
+    "no task ",  # mise "no task named"
+    "missing script",  # npm missing script
+    "assertionerror",
+    "traceback (most recent call last)",
+    "task failed",  # mise "[//pkg:task] ERROR task failed"
+)
+
+# Benign lines that CONTAIN a marker substring but are not failures — filtered so
+# the surfaced set stays signal. e.g. "0 errors", "--no-error-on-unmatched".
+_FAILURE_LINE_NOISE = (
+    "0 errors",
+    "0 failed",
+    "no error",
+    "--no-error",
+    "0 problems",
+    "may fail",  # advisory prose
+)
+
+# Cap surfaced failure lines so a genuinely huge red run (hundreds of failing
+# assertions) can't flood CloudWatch; the count + a tail still convey scale.
+_MAX_SURFACED_FAILURE_LINES = 40
+_FAILURE_TAIL_LINES = 15
+
+
+def _surface_failure_lines(stdout: str) -> list[str]:
+    """From a failed command's stdout, return the lines most likely to name the
+    cause: every failure-signature line (scanning the WHOLE output, not just the
+    tail — a parallel task DAG interleaves output so the red line is often in the
+    middle) followed by a trailing-context tail. Deduped, order-preserving,
+    capped. This is the fix for build-gate failures that a plain tail couldn't
+    explain (ABCA-662: the tail was a passing package's coverage table)."""
+    lines = stdout.strip().splitlines()
+    matched: list[str] = []
+    for ln in lines:
+        low = ln.lower()
+        if any(m in low for m in _FAILURE_LINE_MARKERS) and not any(
+            n in low for n in _FAILURE_LINE_NOISE
+        ):
+            matched.append(ln.rstrip())
+            if len(matched) >= _MAX_SURFACED_FAILURE_LINES:
+                matched.append("… (more failure lines truncated)")
+                break
+    tail = [ln.rstrip() for ln in lines[-_FAILURE_TAIL_LINES:]]
+    # Order: failure-signature lines first (the WHY), then the tail (context),
+    # dropping tail lines already surfaced as matches.
+    seen = set(matched)
+    out = list(matched)
+    if matched and tail:
+        out.append("--- (trailing output) ---")
+    for ln in tail:
+        if ln not in seen:
+            out.append(ln)
+            seen.add(ln)
+    # Fallback: nothing matched a failure marker (unknown tool) → just the tail,
+    # so we never log NOTHING on a failure.
+    return out or tail
+
+
 def run_cmd(
     cmd: list[str],
     label: str,
@@ -182,9 +259,144 @@ def run_cmd(
         if result.stderr:
             for line in result.stderr.strip().splitlines()[:20]:
                 log("CMD", f"  {line}")
+        # ALSO surface stdout on failure. Build/test tooling (jest, tsc, the mise
+        # task DAG) writes the ACTUAL failing-task error to STDOUT, not stderr —
+        # stderr often carries only the runner's plan echo. Logging stderr alone
+        # made build-gate failures undebuggable: a red ``mise run build`` showed
+        # every task STARTING but never WHICH one failed or why (ABCA-662).
+        #
+        # A plain tail is NOT enough for a PARALLEL task DAG: `mise run build`
+        # runs 4 packages concurrently and interleaves their output, so the
+        # failing task's error scrolls into the MIDDLE while the tail captures
+        # whatever finished LAST (e.g. a passing package's coverage table) —
+        # ABCA-662 follow-up: the tail showed a coverage table, not the red task.
+        # So FIRST scan the whole output for failure-signature lines and surface
+        # those (this is what names the failing sub-task), THEN a larger tail for
+        # trailing context. Redact — repo build output is untrusted.
+        if result.stdout:
+            surfaced = _surface_failure_lines(result.stdout)
+            for line in surfaced:
+                log("CMD", f"  {redact_secrets(line)}")
         if check:
             stderr_snippet = redact_secrets(result.stderr.strip()[:500]) if result.stderr else ""
             raise RuntimeError(f"{label} failed (exit {result.returncode}): {stderr_snippet}")
     else:
         log("CMD", f"{label}: OK")
+    return result
+
+
+# Signatures a transient (retryable) dependency/registry failure leaves in a
+# command's stderr — network blips, DNS hiccups, registry 5xx / rate limits.
+# NOT a permanent auth/not-found error: those are re-run-won't-help and would
+# just waste backoff time. Deliberately conservative (#251 dependency_unreachable).
+_TRANSIENT_CMD_SIGNATURES: tuple[str, ...] = (
+    "could not resolve host",
+    "temporary failure in name resolution",
+    "connection timed out",
+    "connection reset",
+    "operation timed out",
+    "timeout was reached",
+    "the requested url returned error: 5",  # curl/git HTTP 5xx
+    "503 service unavailable",
+    "502 bad gateway",
+    "504 gateway",
+    "429 too many requests",
+    "eai_again",
+    "network is unreachable",
+    "tls handshake timeout",
+    "unexpected eof",
+)
+
+
+def is_transient_cmd_failure(stderr: str) -> bool:
+    """True if *stderr* looks like a transient (retryable) dependency failure.
+
+    Used by :func:`run_cmd_with_backoff` to decide whether another attempt is
+    worthwhile. Permanent failures (auth denied, repo not found, 4xx other than
+    429) return False so we fail fast instead of burning the backoff budget.
+    """
+    low = (stderr or "").lower()
+    return any(sig in low for sig in _TRANSIENT_CMD_SIGNATURES)
+
+
+# DNS name-resolution failures that NAME a host — a firewalled / non-existent
+# endpoint whose name cannot be resolved. Retrying never helps, so backoff bails
+# immediately (#251 review). Deliberately NARROWER than hooks.detect_egress_denial:
+# a TCP-connect failure ("Failed to connect to <host> ... Connection timed out")
+# to an ALLOWLISTED host is genuinely transient and must stay retryable — so
+# ``Failed to connect``/``Connection refused`` are excluded here. A persistent
+# TCP failure is still reclassified to egress_denied by _fail_setup_command
+# AFTER the retries exhaust; only the pre-exhaustion bail is DNS-scoped.
+_UNRESOLVABLE_HOST_RE = re.compile(
+    r"could not resolve host:?\s+[A-Za-z0-9._-]+"
+    r"|getaddrinfo (?:ENOTFOUND|EAI_AGAIN)\s+[A-Za-z0-9._-]+"
+    r"|Failed to resolve '[A-Za-z0-9._-]+'",
+    re.IGNORECASE,
+)
+
+
+def _names_unresolvable_host(stderr: str) -> bool:
+    """True when *stderr* is a DNS name-resolution failure naming a host (#251).
+
+    Such a host cannot be reached no matter how often we retry (non-existent or
+    firewalled at DNS), so backoff bails immediately rather than burn its budget
+    and emit misleading ``dependency_unreachable`` events. A host-less
+    ``Temporary failure in name resolution`` (no nameable endpoint) and a
+    transient TCP-connect timeout to an allowlisted host both stay retryable."""
+    return bool(_UNRESOLVABLE_HOST_RE.search(stderr or ""))
+
+
+def run_cmd_with_backoff(
+    cmd: list[str],
+    label: str,
+    *,
+    cwd: str | None = None,
+    timeout: int = 600,
+    max_attempts: int = 3,
+    base_delay_s: float = 2.0,
+    on_retry=None,
+    sleep=time.sleep,
+) -> subprocess.CompletedProcess:
+    """Run ``cmd`` with bounded retries on *transient* failures (#251, Phase 2).
+
+    Retries up to ``max_attempts`` times with exponential backoff
+    (``base_delay_s * 2**(attempt-1)``) ONLY when the failure looks transient
+    (:func:`is_transient_cmd_failure`). Permanent failures return immediately.
+    Always runs with ``check=False`` internally so the caller inspects
+    ``returncode`` — self-remediation must never raise mid-retry.
+
+    ``on_retry(attempt, max_attempts, stderr)`` is an optional auditable-event
+    callback fired before each backoff sleep (kept as a callback so ``shell``
+    stays free of ``hooks``/``progress`` imports — the caller wires in the
+    blocker event). ``sleep`` is injectable so tests don't actually wait.
+
+    Self-remediation is scope-preserving BY CONSTRUCTION: it only re-invokes the
+    exact same ``cmd`` with the same environment. It grants no new credentials
+    and mutates no IAM policy or egress allowlist — a retried ``git clone`` uses
+    the same token and DNS rules as the first attempt.
+    """
+    # ``max(1, ...)`` guarantees the loop body runs at least once, so ``result``
+    # is always bound by the time we return it — no None-typed fall-through.
+    result = run_cmd(cmd, label, cwd=cwd, timeout=timeout, check=False)
+    for attempt in range(1, max(1, max_attempts) + 1):
+        if attempt > 1:
+            result = run_cmd(cmd, label, cwd=cwd, timeout=timeout, check=False)
+        if result.returncode == 0:
+            return result
+        stderr = result.stderr or ""
+        # A named-host failure is a firewalled/non-existent endpoint — retrying
+        # never helps and would emit misleading dependency_unreachable events
+        # (#251 review). Bail immediately so _fail_setup_command reclassifies it
+        # to the non-retryable egress_denied remedy.
+        exhausted = attempt >= max_attempts
+        if exhausted or not is_transient_cmd_failure(stderr) or _names_unresolvable_host(stderr):
+            break
+        if on_retry is not None:
+            on_retry(attempt, max_attempts, stderr)
+        delay = base_delay_s * (2 ** (attempt - 1))
+        log(
+            "CMD",
+            f"{label}: transient failure — retrying in {delay:.0f}s ({attempt}/{max_attempts})",
+        )
+        sleep(delay)
     return result

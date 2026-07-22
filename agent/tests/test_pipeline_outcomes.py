@@ -1,11 +1,23 @@
 """Unit tests for pipeline task outcome resolution and error chaining."""
 
+import pytest
+
+from hooks import _record_blocker_reason, _reset_blocker_reason_for_tests
 from models import AgentResult
 from pipeline import (
     _chain_prior_agent_error,
     _compute_turns_completed,
     _resolve_overall_task_status,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_blocker_latch():
+    """#251 carry-path latch is module-level; reset around every test so a
+    detected blocker never leaks into an unrelated outcome-resolution case."""
+    _reset_blocker_reason_for_tests()
+    yield
+    _reset_blocker_reason_for_tests()
 
 
 class TestResolveOverallTaskStatus:
@@ -41,6 +53,39 @@ class TestResolveOverallTaskStatus:
         assert overall == "error"
         assert err is not None
         assert "agent_status='error'" in err
+
+    def test_error_promotes_latched_blocker_reason(self):
+        # #251 carry-path: a hook-detected blocker with no SDK error message is
+        # promoted into the terminal reason so the CDK classifier gives a remedy.
+        _record_blocker_reason("egress_denied", "blocked host", resource="pypi.org")
+        ar = AgentResult(status="error", error=None)
+        overall, err = _resolve_overall_task_status(ar, build_ok=True, pr_url=None)
+        assert overall == "error"
+        assert err == "BLOCKED[egress_denied]: blocked host (resource: pypi.org)"
+
+    def test_specific_agent_error_wins_over_latched_blocker(self):
+        # A concrete SDK error must NOT be overwritten by the latch.
+        _record_blocker_reason("egress_denied", "blocked host", resource="pypi.org")
+        ar = AgentResult(status="error", error="receive_response() failed: boom")
+        overall, err = _resolve_overall_task_status(ar, build_ok=True, pr_url=None)
+        assert overall == "error"
+        assert err == "receive_response() failed: boom"
+
+    def test_unknown_status_promotes_latched_blocker(self):
+        # An egress denial that kills outbound calls is a likely cause of a
+        # missing ResultMessage (agent_status=unknown). The precise blocker
+        # reason must win over the generic SDK-no-result message.
+        _record_blocker_reason("egress_denied", "blocked host", resource="pypi.org")
+        ar = AgentResult(status="unknown", error=None)
+        overall, err = _resolve_overall_task_status(ar, build_ok=False, pr_url=None)
+        assert overall == "error"
+        assert err == "BLOCKED[egress_denied]: blocked host (resource: pypi.org)"
+
+    def test_unknown_status_without_blocker_uses_sdk_message(self):
+        ar = AgentResult(status="unknown", error=None)
+        overall, err = _resolve_overall_task_status(ar, build_ok=False, pr_url=None)
+        assert overall == "error"
+        assert "ResultMessage" in (err or "")
 
     def test_error_status_preserves_bedrock_entitlement_message(self):
         """Runner maps ResultMessage.is_error to agent_status=error; pipeline must fail."""
@@ -116,3 +161,61 @@ class TestComputeTurnsCompleted:
         # Zero is treated the same as None (falsy) so we don't clamp it to a
         # negative / nonsensical value.
         assert _compute_turns_completed("error_max_turns", 0, max_turns=10) == 0
+
+
+class TestMaxTurnsStuckEnrichment:
+    """N3 wiring seam (#600): _resolve_overall_task_status enriches a max_turns
+    reason with the stuck-guard summary (hooks.last_stuck_summary). Previously
+    tested only at its two pure endpoints; this drives the append itself."""
+
+    def test_max_turns_appends_stuck_summary(self, monkeypatch):
+        import hooks
+
+        summary = "last tool calls repeated: git push — invalid credentials"
+        monkeypatch.setattr(hooks, "last_stuck_summary", lambda: summary)
+        ar = AgentResult(
+            status="error_max_turns",
+            error="Agent session error (subtype=error_max_turns)",
+        )
+        _, err = _resolve_overall_task_status(ar, build_ok=False, pr_url=None)
+        assert err is not None
+        assert "error_max_turns" in err
+        assert summary in err
+
+    def test_non_max_turns_error_is_not_enriched(self, monkeypatch):
+        # A generic failure must NOT pull in the stuck summary — only max_turns.
+        import hooks
+
+        monkeypatch.setattr(hooks, "last_stuck_summary", lambda: "last tool calls repeated: X")
+        ar = AgentResult(status="error", error="receive_response() failed: boom")
+        _, err = _resolve_overall_task_status(ar, build_ok=False, pr_url=None)
+        assert err is not None
+        assert "last tool calls repeated" not in err
+
+    def test_max_turns_with_no_stuck_summary_left_unchanged(self, monkeypatch):
+        # A task that used its turns productively (window not failure-dominated →
+        # summary None) leaves the max_turns reason unchanged.
+        import hooks
+
+        monkeypatch.setattr(hooks, "last_stuck_summary", lambda: None)
+        ar = AgentResult(
+            status="error_max_turns",
+            error="Agent session error (subtype=error_max_turns)",
+        )
+        _, err = _resolve_overall_task_status(ar, build_ok=False, pr_url=None)
+        assert err == "Agent session error (subtype=error_max_turns)"
+
+    def test_stuck_summary_not_double_appended(self, monkeypatch):
+        # Idempotent: if the summary is already in the reason (e.g. a durable
+        # re-resolution of the same result), it must not be appended twice.
+        import hooks
+
+        summary = "last tool calls repeated: git push — invalid credentials"
+        monkeypatch.setattr(hooks, "last_stuck_summary", lambda: summary)
+        ar = AgentResult(
+            status="error_max_turns",
+            error=f"Agent session error (subtype=error_max_turns) — {summary}",
+        )
+        _, err = _resolve_overall_task_status(ar, build_ok=False, pr_url=None)
+        assert err is not None
+        assert err.count(summary) == 1

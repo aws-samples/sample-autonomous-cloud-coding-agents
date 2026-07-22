@@ -547,7 +547,7 @@ class TestCloneAndHydrateHandlers:
 
         called = {"n": 0}
 
-        def fake_setup_repo(_config):
+        def fake_setup_repo(_config, progress=None):
             called["n"] += 1
             return RepoSetup(repo_dir="/fresh", branch="fresh")
 
@@ -570,9 +570,16 @@ class TestCloneAndHydrateHandlers:
         from models import RepoSetup
         from workflow.runner import _handle_clone_repo
 
-        monkeypatch.setattr(
-            "repo.setup_repo", lambda _c: RepoSetup(repo_dir="/fresh", branch="fresh")
-        )
+        # #251 review: capture the progress kwarg to assert the runner threads
+        # ctx.progress through — bounded-retry blocker events depend on it, and a
+        # regression to setup_repo(ctx.config) would otherwise pass silently.
+        captured = {}
+
+        def fake_setup_repo(_config, progress=None):
+            captured["progress"] = progress
+            return RepoSetup(repo_dir="/fresh", branch="fresh")
+
+        monkeypatch.setattr("repo.setup_repo", fake_setup_repo)
         wf = _workflow(
             [
                 {"kind": "clone_repo"},
@@ -580,10 +587,12 @@ class TestCloneAndHydrateHandlers:
                 {"kind": "ensure_pr", "strategy": "create"},
             ]
         )
-        ctx = _real_ctx(wf)
+        sentinel_progress = _RecordingProgress()
+        ctx = _real_ctx(wf, progress=sentinel_progress)
         outcome = _handle_clone_repo(wf.steps[0], ctx)
         assert ctx.setup is not None and ctx.setup.repo_dir == "/fresh"
         assert outcome.data["reused"] is False
+        assert captured["progress"] is sentinel_progress  # threaded through, not dropped
 
     def test_hydrate_context_builds_system_prompt(self, monkeypatch):
         from models import RepoSetup

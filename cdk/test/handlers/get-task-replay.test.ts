@@ -316,6 +316,29 @@ describe('assembleBundle', () => {
       { event_id: '01B', event_type: 'agent_turn', timestamp: 'ts2', metadata: { turn: 1 } },
     ]);
   });
+
+  test('passes through the correlation envelope (#245) per-event, omitting absent fields', () => {
+    const base = { task_id: 't', user_id: 'u' } as unknown as TaskRecord;
+    const evs = [
+      // task_created predates the envelope → no correlation fields.
+      { task_id: 't', event_id: '01A', event_type: 'task_created', timestamp: 'ts' },
+      // agent event carries the full envelope.
+      {
+        task_id: 't',
+        event_id: '01B',
+        event_type: 'agent_turn',
+        timestamp: 'ts2',
+        metadata: { turn: 1 },
+        user_id: 'u',
+        repo: 'org/repo',
+        trace_id: 'a'.repeat(32),
+      },
+    ] as unknown as EventRecord[];
+    const out = assembleBundle(base, evs).events;
+    expect(out[0]).not.toHaveProperty('user_id');
+    expect(out[0]).not.toHaveProperty('trace_id');
+    expect(out[1]).toMatchObject({ user_id: 'u', repo: 'org/repo', trace_id: 'a'.repeat(32) });
+  });
 });
 
 describe('replay-bundle.example.json fixture (#515 AC: example fixture in cdk/test/)', () => {
