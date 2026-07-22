@@ -84,14 +84,16 @@ const PDF_MAGIC = [0x25, 0x50, 0x44, 0x46, 0x2d] as const; // %PDF-
  * images inline (`!`) but attaches uploaded files (PDFs, logs, specs) as plain
  * links. The leading `!` is optional so both are captured.
  *
- * The URL may be wrapped in angle brackets — `[label](<https://…>)` — which is
- * the CommonMark autolink form Linear NORMALIZES uploaded-file links into (live-
- * caught on ABCA-744: a plain `[f](https://…)` link round-tripped through Linear
- * comes back as `(<https://…>)`, and the un-bracketed pattern silently dropped
- * it). The `<`/`>` are optional and excluded from the captured URL, and `>` is
- * excluded from the URL body so the closing bracket can't leak in.
+ * Capture groups: **1 = label** (the `[…]` text — for a file link this IS the
+ * original filename, e.g. `spec.docx`, surfaced in user-facing messages), **2 =
+ * URL**. The URL may be wrapped in angle brackets — `[label](<https://…>)` —
+ * which is the CommonMark autolink form Linear NORMALIZES uploaded-file links
+ * into (live-caught on ABCA-744: a plain `[f](https://…)` link round-tripped
+ * through Linear comes back as `(<https://…>)`, and the un-bracketed pattern
+ * silently dropped it). The `<`/`>` are optional and excluded from the captured
+ * URL, and `>` is excluded from the URL body so the closing bracket can't leak in.
  */
-const MARKDOWN_LINK_OR_IMAGE_PATTERN = /!?\[[^\]]*\]\(<?(https:\/\/[^)>]+)>?\)/g;
+const MARKDOWN_LINK_OR_IMAGE_PATTERN = /!?\[([^\]]*)\]\(<?(https:\/\/[^)>]+)>?\)/g;
 
 /**
  * Thrown when a Linear attachment that was SELECTED for inclusion cannot be
@@ -129,6 +131,13 @@ interface SelectedUpload {
   readonly filename: string;
   /** Stable id derived from the upload path (S3 key segment + on-disk dir). */
   readonly id: string;
+  /**
+   * Human-friendly name for USER-FACING messages/logs only (the markdown
+   * `[label]` — the original filename the user attached, e.g. `spec.docx`).
+   * Never used in an S3 key or on disk (that's {@link filename}, which is
+   * path-safe). Falls back to `filename` when the label is empty.
+   */
+  readonly displayName: string;
 }
 
 /** Is this a Linear-hosted upload URL (needs the OAuth bearer to fetch)? */
@@ -225,12 +234,16 @@ function selectLinearUploads(description: string | undefined, remainingSlots: nu
   MARKDOWN_LINK_OR_IMAGE_PATTERN.lastIndex = 0;
   while ((match = MARKDOWN_LINK_OR_IMAGE_PATTERN.exec(description)) !== null) {
     if (selected.length >= slotCap) break;
-    const url = match[1];
+    const label = (match[1] ?? '').trim();
+    const url = match[2];
     if (!isLinearUploadsUrl(url)) continue; // public CDN URLs go via the URL path
     const { id, filename } = deriveUploadIdentity(url, index++);
     if (seenIds.has(id)) continue;
     seenIds.add(id);
-    selected.push({ url, filename, id });
+    // The markdown label is the original filename for a file link (Linear sets
+    // it to the upload's name). Use it for user-facing messages only; fall back
+    // to the path-safe filename when the link had no/empty label.
+    selected.push({ url, filename, id, displayName: label || filename });
   }
   return selected;
 }
@@ -353,13 +366,13 @@ export async function downloadScreenAndStoreLinearAttachments(
       // itself is stale/invalid, not a refreshable token — fail closed.
       if (outcome.kind === 'auth') {
         throw new LinearAttachmentError(
-          `Attachment '${upload.filename}' could not be downloaded: Linear rejected the credential ` +
+          `Attachment '${upload.displayName}' could not be downloaded: Linear rejected the credential ` +
           '(the signed upload URL may have expired — re-trigger the task).',
         );
       }
       if (outcome.kind === 'error') {
         throw new LinearAttachmentError(
-          `Attachment '${upload.filename}' could not be downloaded (${outcome.message}).`,
+          `Attachment '${upload.displayName}' could not be downloaded (${outcome.message}).`,
         );
       }
 
@@ -372,16 +385,18 @@ export async function downloadScreenAndStoreLinearAttachments(
         );
       }
       if (content.length === 0) {
-        throw new LinearAttachmentError(`Attachment '${upload.filename}' is empty (0 bytes).`);
+        throw new LinearAttachmentError(`Attachment '${upload.displayName}' is empty (0 bytes).`);
       }
 
       // Infer the MIME from the response content-type, the filename extension,
-      // then the magic bytes (in that order of trust). Linear embeds uploaded
-      // images inline and attaches uploaded files (PDFs, logs, CSVs, JSON, text)
-      // as links — both come through here. The platform allowlist gates the
-      // supported set: images (PNG/JPEG) and files (PDF/text/csv/markdown/json/
-      // log). Anything else (docx, zip, …) fails the task closed below.
-      const mimeType = inferMime(outcome.contentType, upload.filename, content);
+      // then the magic bytes (in that order of trust). The extension comes from
+      // the markdown LABEL (displayName — the original filename like `design.pdf`),
+      // not the S3 filename (derived from the URL path, a UUID with no extension).
+      // Linear embeds uploaded images inline and attaches uploaded files (PDFs,
+      // logs, CSVs, JSON, text) as links — both come through here. The platform
+      // allowlist gates the supported set: images (PNG/JPEG) and files
+      // (PDF/text/csv/markdown/json/log). Anything else (docx, zip, …) fails closed.
+      const mimeType = inferMime(outcome.contentType, upload.displayName, content);
       const isImage = mimeType.startsWith('image/');
       const attachmentType = isImage ? 'image' : 'file';
       if (!mimeType || !isAllowedMimeType(mimeType, attachmentType)) {
@@ -392,7 +407,7 @@ export async function downloadScreenAndStoreLinearAttachments(
         // from the allowlist so it never drifts.
         logger.warn('Rejecting Linear task: unsupported attachment type', {
           linear_workspace_id: ctx.linearWorkspaceId,
-          attachment_filename: upload.filename,
+          attachment_filename: upload.displayName,
           content_type: outcome.contentType || 'unknown',
           inferred_mime: mimeType || 'unknown',
         });
@@ -400,7 +415,7 @@ export async function downloadScreenAndStoreLinearAttachments(
         // wrapper appends the "remove and re-apply the trigger label" instruction,
         // so we don't repeat it here.
         throw new LinearAttachmentError(
-          `Attachment '${upload.filename}' is not a supported file type ` +
+          `Attachment '${upload.displayName}' is not a supported file type ` +
           `(supported: ${SUPPORTED_ATTACHMENT_EXTENSIONS_LABEL}).`,
         );
       }
@@ -409,36 +424,40 @@ export async function downloadScreenAndStoreLinearAttachments(
       // valid, null-free UTF-8 instead.
       if (!validateMagicBytes(content, mimeType)) {
         throw new LinearAttachmentError(
-          `Attachment '${upload.filename}' content does not match its declared type '${mimeType}'.`,
+          `Attachment '${upload.displayName}' content does not match its declared type '${mimeType}'.`,
         );
       }
 
       // Screen through the same Bedrock Guardrail pipeline as every other
       // attachment — images visually, files as text. Any block or screening
-      // failure is fail-closed.
+      // failure is fail-closed. (Pass displayName — screening uses it only in
+      // its own error text, never as a path.)
       let screenResult;
       try {
         screenResult = isImage
-          ? await screenImage(content, mimeType, upload.filename, ctx.screeningConfig)
-          : await screenTextFile(content, mimeType, upload.filename, ctx.screeningConfig);
+          ? await screenImage(content, mimeType, upload.displayName, ctx.screeningConfig)
+          : await screenTextFile(content, mimeType, upload.displayName, ctx.screeningConfig);
       } catch (err) {
         if (err instanceof AttachmentScreeningError) {
           throw new LinearAttachmentError(
-            `Attachment '${upload.filename}' was blocked by content screening: ${err.message}`,
+            `Attachment '${upload.displayName}' was blocked by content screening: ${err.message}`,
             { cause: err },
           );
         }
         throw new LinearAttachmentError(
-          `Attachment '${upload.filename}' could not be screened: ${err instanceof Error ? err.message : String(err)}`,
+          `Attachment '${upload.displayName}' could not be screened: ${err instanceof Error ? err.message : String(err)}`,
           { cause: err },
         );
       }
       if (screenResult.screening.status === 'blocked') {
         throw new LinearAttachmentError(
-          `Attachment '${upload.filename}' was blocked by content policy: ${screenResult.screening.categories.join(', ')}`,
+          `Attachment '${upload.displayName}' was blocked by content policy: ${screenResult.screening.categories.join(', ')}`,
         );
       }
 
+      // S3 key + record filename stay path-safe (upload.filename) — the agent
+      // writes the attachment to disk at `<dir>/<filename>` (agent/src/attachments.py),
+      // so it must never carry the raw user label.
       const s3Key = `${ATTACHMENT_OBJECT_KEY_PREFIX}${ctx.userId}/${ctx.taskId}/${upload.id}/${upload.filename}`;
       let putResult;
       try {
@@ -451,13 +470,13 @@ export async function downloadScreenAndStoreLinearAttachments(
       } catch (s3Err) {
         logger.error('S3 upload failed for Linear attachment', {
           linear_workspace_id: ctx.linearWorkspaceId,
-          attachment_filename: upload.filename,
+          attachment_filename: upload.displayName,
           s3_key: s3Key,
           error: s3Err instanceof Error ? s3Err.message : String(s3Err),
           metric_type: 'linear_attachment_upload_failure',
         });
         throw new LinearAttachmentError(
-          `Attachment '${upload.filename}' could not be stored.`,
+          `Attachment '${upload.displayName}' could not be stored.`,
           { cause: s3Err },
         );
       }
@@ -484,7 +503,7 @@ export async function downloadScreenAndStoreLinearAttachments(
 
       logger.info('Linear attachment downloaded, screened, and stored', {
         linear_workspace_id: ctx.linearWorkspaceId,
-        attachment_filename: upload.filename,
+        attachment_filename: upload.displayName,
         s3_key: s3Key,
       });
     }

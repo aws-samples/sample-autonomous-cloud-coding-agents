@@ -76,6 +76,10 @@ function desc(...urls: string[]): string {
 function fileDesc(...urls: string[]): string {
   return `Some issue text\n\n${urls.map((u, i) => `[file${i}](${u})`).join('\n')}\n\nmore text`;
 }
+/** Description with an explicit markdown link label (the original filename). */
+function labeledDesc(label: string, url: string): string {
+  return `Some issue text\n\n[${label}](${url})\n\nmore text`;
+}
 
 /** A fetch Response-like object whose body streams the given buffer once. */
 function bytesResponse(buf: Buffer, status = 200, contentType = 'image/png'): Response {
@@ -235,10 +239,12 @@ describe('downloadScreenAndStoreLinearAttachments', () => {
     expect(fetchedUrl).toBe('https://uploads.linear.app/u/p/design.pdf');
   });
 
-  test('types a generic octet-stream response by its .log extension and screens as text', async () => {
+  test('types a generic octet-stream response by the .log extension in its markdown label', async () => {
+    // The extension comes from the markdown LABEL (the original filename), since
+    // the uploads.linear.app URL path is a UUID with no extension.
     (global.fetch as jest.Mock).mockResolvedValueOnce(bytesResponse(TEXT_BYTES, 200, 'application/octet-stream'));
     const records = await downloadScreenAndStoreLinearAttachments(
-      fileDesc('https://uploads.linear.app/u/l/output.log'), 10, storageCtx(),
+      labeledDesc('output.log', 'https://uploads.linear.app/u/l/9c8b-uuid'), 10, storageCtx(),
     );
     expect(records).toHaveLength(1);
     expect(records[0].type).toBe('file');
@@ -246,19 +252,42 @@ describe('downloadScreenAndStoreLinearAttachments', () => {
     expect(screenTextFileMock).toHaveBeenCalled();
   });
 
-  test('REJECTS an unsupported type (docx/zip) fail-closed, naming the supported types', async () => {
+  test('REJECTS an unsupported type fail-closed, naming the FRIENDLY filename + supported types', async () => {
     (global.fetch as jest.Mock).mockResolvedValueOnce(
       bytesResponse(Buffer.from([0x50, 0x4b, 0x03, 0x04]), 200, 'application/zip'),
     );
+    // The URL path is a UUID; the friendly name comes from the markdown label.
     await expect(
       downloadScreenAndStoreLinearAttachments(
-        fileDesc('https://uploads.linear.app/u/z/bundle.zip'), 10, storageCtx(),
+        labeledDesc('spec.docx', 'https://uploads.linear.app/u/z/9a8b7c6d-uuid'), 10, storageCtx(),
       ),
-    ).rejects.toThrow(/not a supported file type.*PDF/i);
+    ).rejects.toThrow(/Attachment 'spec\.docx' is not a supported file type.*PDF/i);
     // Never screened or stored — rejected before that.
     expect(screenImageMock).not.toHaveBeenCalled();
     expect(screenTextFileMock).not.toHaveBeenCalled();
     expect(putSendMock).not.toHaveBeenCalled();
+  });
+
+  test('surfaces the friendly filename (markdown label) in a screening-block error, not the UUID', async () => {
+    (global.fetch as jest.Mock).mockResolvedValueOnce(bytesResponse(PDF_BYTES, 200, 'application/pdf'));
+    screenTextFileMock.mockRejectedValueOnce(new AttachmentScreeningError('blocked: prompt attack'));
+    await expect(
+      downloadScreenAndStoreLinearAttachments(
+        labeledDesc('design.pdf', 'https://uploads.linear.app/u/p/deadbeef-uuid'), 10, storageCtx(),
+      ),
+    ).rejects.toThrow(/Attachment 'design\.pdf' was blocked by content screening/);
+  });
+
+  test('falls back to the path-safe filename when the markdown label is empty', async () => {
+    (global.fetch as jest.Mock).mockResolvedValueOnce(
+      bytesResponse(Buffer.from([0x50, 0x4b, 0x03, 0x04]), 200, 'application/zip'),
+    );
+    // Empty label `[]( … )` → displayName falls back to the derived filename (no crash, still rejects).
+    await expect(
+      downloadScreenAndStoreLinearAttachments(
+        labeledDesc('', 'https://uploads.linear.app/u/z/bundle-uuid'), 10, storageCtx(),
+      ),
+    ).rejects.toThrow(/not a supported file type/i);
   });
 
   test('sniffs JPEG when content-type is generic but bytes are a JPEG', async () => {
