@@ -251,6 +251,8 @@ export interface TaskRecord {
   readonly idempotency_key?: string;
   readonly channel_source: ChannelSource;
   readonly channel_metadata?: Record<string, string>;
+  /** Sparse JiraIssueIndex key (`{cloudId}#{issueKey}`); internal only. */
+  readonly jira_issue_identity?: string;
   readonly status_created_at: string;
   readonly created_at: string;
   readonly updated_at: string;

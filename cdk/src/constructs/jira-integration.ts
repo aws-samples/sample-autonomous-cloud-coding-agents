@@ -148,7 +148,7 @@ export class JiraIntegration extends Construct {
    */
   public readonly workspaceRegistryTable: dynamodb.Table;
 
-  /** Webhook dedup table — `{issueKey}#{webhookEvent}#{timestamp}` keys with 8h TTL. */
+  /** Webhook dedup table — issue timestamps or stable comment IDs, with an 8h TTL. */
   public readonly webhookDedupTable: dynamodb.Table;
 
   /** Jira webhook signing secret (placeholder — populated by `bgagent jira setup`). */
@@ -168,7 +168,8 @@ export class JiraIntegration extends Construct {
     this.workspaceRegistryTable = workspaceRegistry.table;
 
     // Dedup table: Jira webhook retries collapse to a single processor invoke
-    // within the 8h TTL window. Keyed on `{issueKey}#{webhookEvent}#{timestamp}`.
+    // within the 8h TTL window. Issue events use the event timestamp; comment
+    // events use the stable Jira comment ID.
     this.webhookDedupTable = new dynamodb.Table(this, 'WebhookDedupTable', {
       partitionKey: { name: 'dedup_key', type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
