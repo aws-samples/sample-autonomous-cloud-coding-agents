@@ -57,6 +57,8 @@ const upsertStatusCommentMock = jest.fn();
 const reactToCommentMock = jest.fn();
 const replyToCommentMock = jest.fn();
 const upsertThreadedReplyMock = jest.fn();
+const fetchRecentCommentsMock = jest.fn();
+const postIssueCommentMock = jest.fn();
 jest.mock('../../src/handlers/shared/linear-feedback', () => ({
   reportIssueFailure: (...args: unknown[]) => reportIssueFailureMock(...args),
   swapIssueReaction: (...args: unknown[]) => swapIssueReactionMock(...args),
@@ -66,6 +68,8 @@ jest.mock('../../src/handlers/shared/linear-feedback', () => ({
   reactToComment: (...args: unknown[]) => reactToCommentMock(...args),
   replyToComment: (...args: unknown[]) => replyToCommentMock(...args),
   upsertThreadedReply: (...args: unknown[]) => upsertThreadedReplyMock(...args),
+  fetchRecentComments: (...args: unknown[]) => fetchRecentCommentsMock(...args),
+  postIssueComment: (...args: unknown[]) => postIssueCommentMock(...args),
   EMOJI_STARTED: 'eyes',
   EMOJI_SUCCESS: 'white_check_mark',
   EMOJI_FAILURE: 'x',
@@ -141,6 +145,11 @@ describe('linear-webhook-processor — #247 orchestration routing', () => {
     createTaskCoreMock.mockResolvedValue({ statusCode: 201, body: JSON.stringify({ data: { task_id: 'child-task' } }) });
     reportIssueFailureMock.mockReset();
     reportIssueFailureMock.mockResolvedValue(undefined);
+    // ADR-016: single-task fall-through pre-hydrates comments + posts a start
+    // comment. Default to no comments / clean post so orchestration tests are
+    // unaffected.
+    fetchRecentCommentsMock.mockReset().mockResolvedValue([]);
+    postIssueCommentMock.mockReset().mockResolvedValue({ ok: true });
     resolveLinearOauthTokenMock.mockReset();
     discoverOrchestrationMock.mockReset();
     swapIssueReactionMock.mockReset().mockResolvedValue(true);
