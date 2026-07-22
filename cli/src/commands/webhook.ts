@@ -39,9 +39,10 @@ export function makeWebhookCommand(): Command {
     new Command('create')
       .description('Create a new webhook')
       .requiredOption('--name <name>', 'Webhook name')
+      .option('--api-key <key>', 'Platform API key (skips Cognito; else uses BGAGENT_API_KEY or login)')
       .option('--output <format>', 'Output format (text or json)', 'text')
       .action(async (opts) => {
-        const client = new ApiClient();
+        const client = new ApiClient({ apiKey: opts.apiKey });
         const result = await client.createWebhook({ name: opts.name });
 
         console.log(opts.output === 'json' ? formatJson(result) : formatWebhookCreated(result));
@@ -53,9 +54,10 @@ export function makeWebhookCommand(): Command {
       .description('List webhooks')
       .option('--include-revoked', 'Include revoked webhooks')
       .option('--limit <n>', 'Max number of webhooks to return', parseInt)
+      .option('--api-key <key>', 'Platform API key (skips Cognito; else uses BGAGENT_API_KEY or login)')
       .option('--output <format>', 'Output format (text or json)', 'text')
       .action(async (opts) => {
-        const client = new ApiClient();
+        const client = new ApiClient({ apiKey: opts.apiKey });
         const result = await client.listWebhooks({
           includeRevoked: opts.includeRevoked,
           limit: opts.limit,
@@ -177,9 +179,10 @@ export function makeWebhookCommand(): Command {
     new Command('revoke')
       .description('Revoke a webhook')
       .argument('<webhook-id>', 'Webhook ID')
+      .option('--api-key <key>', 'Platform API key (skips Cognito; else uses BGAGENT_API_KEY or login)')
       .option('--output <format>', 'Output format (text or json)', 'text')
       .action(async (webhookId: string, opts) => {
-        const client = new ApiClient();
+        const client = new ApiClient({ apiKey: opts.apiKey });
         const result = await client.revokeWebhook(webhookId);
 
         if (opts.output === 'json') {
