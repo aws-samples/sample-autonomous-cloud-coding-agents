@@ -592,9 +592,9 @@ async function saveDispatchMarker(opts: {
   readonly channel: string;
   readonly errorId: string;
   readonly logContext?: Record<string, unknown>;
-}): Promise<void> {
+}): Promise<boolean> {
   const tableName = process.env.TASK_TABLE_NAME;
-  if (!tableName) return;
+  if (!tableName) return true; // no table (local/test) — treat as claimed
   try {
     await ddb.send(new UpdateCommand({
       TableName: tableName,
@@ -603,6 +603,7 @@ async function saveDispatchMarker(opts: {
       ExpressionAttributeValues: opts.values,
       ConditionExpression: opts.conditionExpression,
     }));
+    return true; // won the claim / persisted
   } catch (err) {
     const name = (err as Error)?.name;
     if (name === CONDITIONAL_CHECK_FAILED) {
@@ -611,7 +612,7 @@ async function saveDispatchMarker(opts: {
         task_id: opts.taskId,
         ...opts.logContext,
       });
-      return;
+      return false; // lost the claim (a sibling already holds it)
     }
     logger.error(`[fanout/${opts.channel}] marker persist failed — next event/retry may duplicate`, {
       event: `fanout.${opts.channel}.marker_persist_failed`,
@@ -621,6 +622,9 @@ async function saveDispatchMarker(opts: {
       error: err instanceof Error ? err.message : String(err),
       ...opts.logContext,
     });
+    // A transient DDB error on the claim write: treat as NOT claimed so the
+    // caller doesn't post on an unpersisted marker (a retry re-claims cleanly).
+    return false;
   }
 }
 

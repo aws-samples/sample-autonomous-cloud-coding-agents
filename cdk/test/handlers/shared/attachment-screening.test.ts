@@ -424,6 +424,31 @@ describe('screenTextFile', () => {
     ).rejects.toThrow(/no extractable text/);
   });
 
+  test('FAILS CLOSED on a PDF with more pages than can be screened (finding #1 — no partial-screen-full-deliver)', async () => {
+    // 51-page PDF but we only screen the first 50 → the whole file would be
+    // delivered to the agent with page 51 unscreened. Reject instead.
+    pdfGetTextMock.mockResolvedValueOnce({ text: 'benign pages 1-50', total: 51, pages: [] });
+    const config = { bedrockClient: mockBedrockPass(), guardrailId: 'g', guardrailVersion: '1' };
+    await expect(
+      screenTextFile(Buffer.from('%PDF-1.4 big'), 'application/pdf', 'big.pdf', config),
+    ).rejects.toThrow(/over the .*page limit|fully screen/i);
+  });
+
+  test('FAILS CLOSED when extracted text exceeds the screened byte cap (finding #1)', async () => {
+    pdfGetTextMock.mockResolvedValueOnce({ text: 'x'.repeat(2 * 1024 * 1024), total: 3, pages: [] });
+    const config = { bedrockClient: mockBedrockPass(), guardrailId: 'g', guardrailVersion: '1' };
+    await expect(
+      screenTextFile(Buffer.from('%PDF-1.4 verbose'), 'application/pdf', 'verbose.pdf', config),
+    ).rejects.toThrow(/more text than .*can fully screen/i);
+  });
+
+  test('a within-limits PDF (≤50 pages) still screens + passes', async () => {
+    pdfGetTextMock.mockResolvedValueOnce({ text: 'short spec', total: 3, pages: [] });
+    const config = { bedrockClient: mockBedrockPass(), guardrailId: 'g', guardrailVersion: '1' };
+    const result = await screenTextFile(Buffer.from('%PDF-1.4 ok'), 'application/pdf', 'ok.pdf', config);
+    expect(result.screening.status).toBe('passed');
+  });
+
   test('a pdfjs/DOMMatrix parse error logs a BUNDLING diagnostic, not just "corrupt PDF" (ABCA-745 prevention)', async () => {
     // A Lambda that reaches this path but lacks the pdf-parse bundling carve-out
     // throws a pdfjs/native-binding error. Detect the signature + log an

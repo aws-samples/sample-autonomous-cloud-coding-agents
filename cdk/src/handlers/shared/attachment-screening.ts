@@ -305,20 +305,38 @@ async function extractPdfText(content: Buffer, filename: string): Promise<string
       timeoutId = setTimeout(() => reject(new Error('PDF extraction timed out')), PDF_EXTRACT_TIMEOUT_MS);
     });
 
-    // `first: N` parses only pages 1..N (the v2 page-cap knob; the v1 `max` option
-    // is gone). Screening the first PDF_MAX_PAGES pages is enough to catch injected
-    // instructions without unbounded work on a huge PDF.
+    // `first: N` parses only pages 1..N (the v2 page-cap knob). We cap pages +
+    // extracted-text bytes to bound cost/DoS — BUT the caller stores the WHOLE PDF
+    // and feeds it to the agent, so screening only a prefix while delivering the
+    // rest is a bypass (review #1 HIGH: injection on page 51 of a 51-page PDF).
+    // Fail CLOSED when the document exceeds what we can screen: reject rather than
+    // deliver unscreened pages. `result.total` is the PDF's full page count.
     const result = await Promise.race([
       parser.getText({ first: PDF_MAX_PAGES }),
       timeoutPromise,
     ]);
 
-    let text: string = result.text ?? '';
+    const totalPages = typeof result.total === 'number' ? result.total : undefined;
+    if (totalPages !== undefined && totalPages > PDF_MAX_PAGES) {
+      throw new AttachmentScreeningError(
+        `PDF "${filename}" has ${totalPages} pages, over the ${PDF_MAX_PAGES}-page limit ABCA can fully ` +
+        'screen. Split it or attach only the relevant pages so the whole document can be checked.',
+      );
+    }
+    const text: string = result.text ?? '';
     if (Buffer.byteLength(text, 'utf-8') > PDF_MAX_TEXT_BYTES) {
-      text = text.slice(0, PDF_MAX_TEXT_BYTES);
+      // The screened pages produced more text than we screen — we'd be delivering
+      // bytes we didn't fully check. Fail closed rather than truncate-and-pass.
+      throw new AttachmentScreeningError(
+        `PDF "${filename}" contains more text than ABCA can fully screen (over ${PDF_MAX_TEXT_BYTES} bytes). ` +
+        'Attach a smaller document so its full contents can be checked.',
+      );
     }
     return text;
   } catch (err) {
+    // Our own over-limit / no-text rejections are already user-facing — don't
+    // re-wrap them as "corrupt PDF".
+    if (err instanceof AttachmentScreeningError) throw err;
     // A DEPLOYMENT bug and a genuinely-bad PDF both land here, and they look
     // nothing alike to an operator. pdf-parse mangled by esbuild (a Lambda that
     // reaches this path but lacks `nodeModules: ['pdf-parse']`) throws with a

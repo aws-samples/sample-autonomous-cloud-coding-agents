@@ -190,8 +190,17 @@ describe('downloadScreenAndStoreLinearAttachments', () => {
     expect(records).toHaveLength(1);
   });
 
-  test('zero remainingSlots → no fetch', async () => {
-    const records = await downloadScreenAndStoreLinearAttachments(desc(UPLOAD_URL), 0, storageCtx());
+  test('zero remainingSlots WITH a Linear upload present → REJECTS (no silent drop, finding #6)', async () => {
+    // Regression: this used to silently return [] (the spec was dropped while the
+    // task ran). Now a Linear upload with no free slots fails loud.
+    await expect(
+      downloadScreenAndStoreLinearAttachments(desc(UPLOAD_URL), 0, storageCtx()),
+    ).rejects.toThrow(/already used up|limit/i);
+    expect(global.fetch).not.toHaveBeenCalled(); // rejected before fetching
+  });
+
+  test('zero remainingSlots with NO uploads → clean no-op', async () => {
+    const records = await downloadScreenAndStoreLinearAttachments('plain text, no uploads', 0, storageCtx());
     expect(records).toEqual([]);
     expect(global.fetch).not.toHaveBeenCalled();
   });
@@ -368,6 +377,35 @@ describe('downloadScreenAndStoreLinearAttachments', () => {
     );
     expect(records).toHaveLength(1);
     expect(records[0].content_type).toBe('image/jpeg');
+  });
+
+  test('a PDF served as text/plain is typed as PDF by magic bytes, NOT screened as raw text (finding #2)', async () => {
+    // Magic bytes are authoritative: %PDF- wins over a text/plain content-type,
+    // so it goes through PDF extraction (screenTextFile w/ application/pdf), never
+    // content.toString(utf-8) on binary bytes.
+    (global.fetch as jest.Mock).mockResolvedValueOnce(bytesResponse(PDF_BYTES, 200, 'text/plain'));
+    const records = await downloadScreenAndStoreLinearAttachments(
+      labeledDesc('sneaky.txt', 'https://uploads.linear.app/u/p/sneaky-uuid'), 10, storageCtx(),
+    );
+    expect(records).toHaveLength(1);
+    expect(records[0].content_type).toBe('application/pdf'); // typed by bytes, not the text/plain header
+    expect(screenTextFileMock).toHaveBeenCalledWith(expect.anything(), 'application/pdf', expect.anything(), expect.anything());
+  });
+
+  test('SSRF: an IPv4-mapped IPv6 metadata address (::ffff:169.254.169.254) is rejected (finding #8)', async () => {
+    dnsLookupMock.mockResolvedValueOnce([{ address: '::ffff:169.254.169.254', family: 6 }]);
+    await expect(
+      downloadScreenAndStoreLinearAttachments(desc(UPLOAD_URL), 10, storageCtx()),
+    ).rejects.toBeInstanceOf(LinearAttachmentError);
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test('SSRF: an fe80::/10 link-local address beyond the fe80 prefix (fea9::1) is rejected (finding #8)', async () => {
+    dnsLookupMock.mockResolvedValueOnce([{ address: 'fea9::1', family: 6 }]);
+    await expect(
+      downloadScreenAndStoreLinearAttachments(desc(UPLOAD_URL), 10, storageCtx()),
+    ).rejects.toBeInstanceOf(LinearAttachmentError);
+    expect(global.fetch).not.toHaveBeenCalled();
   });
 
   test('screening block → LinearAttachmentError (fail-closed)', async () => {

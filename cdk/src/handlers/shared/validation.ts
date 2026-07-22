@@ -348,25 +348,26 @@ export function validateMagicBytes(data: Buffer, contentType: string): boolean {
     return sig.bytes.every((b, i) => data[offset + i] === b);
   }
 
-  // Text types: must be valid, null-free UTF-8 in the first 8 KB. This blocks a
-  // binary payload (SVG/HTML/octet-stream) from masquerading as text/* just
-  // because a caller mislabeled it — the null-byte check alone let non-UTF-8
-  // binaries through (review finding #3). We decode with fatal:true so any
-  // invalid byte sequence throws, then reject embedded nulls (valid UTF-8 can
-  // still contain U+0000, which no real text attachment does).
+  // Text types: the WHOLE buffer must be valid, null-free UTF-8 (review #3 — an
+  // 8 KB ASCII preamble followed by binary must NOT pass; validate everything, not
+  // just a prefix). Attachments are already size-capped (MAX_ATTACHMENT_SIZE_BYTES),
+  // and this runs once at admission, so full-buffer decode is affordable.
+  //
+  // What this does and does NOT guarantee: it proves the bytes are decodable UTF-8
+  // text with no embedded NULs — enough to safely feed them to the text guardrail
+  // and store them. It does NOT prove the content is "harmless" — a valid-UTF-8
+  // SVG or HTML file labeled .txt passes (it IS text), and is then SCREENED AS TEXT
+  // by the Bedrock guardrail like any other text attachment. That's the intended
+  // contract: text is screened as text; binary (non-UTF-8 / NUL-bearing) is rejected.
   if (contentType.startsWith('text/') || contentType === 'application/json') {
-    const check = data.subarray(0, TEXT_MAGIC_BYTE_CHECK_BYTES);
     try {
-      // fatal:true makes an invalid UTF-8 sequence throw rather than yield U+FFFD.
-      // stream:true tolerates a multi-byte char split across the 8 KB cutoff (a
-      // truncated TRAILING sequence is buffered, not an error) so a legitimate
-      // large UTF-8 file isn't false-rejected at the boundary.
-      new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(check, { stream: true });
+      // fatal:true throws on any invalid UTF-8 sequence (no U+FFFD substitution).
+      new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(data);
     } catch {
-      return false; // not valid UTF-8 → not a text attachment
+      return false; // not valid UTF-8 end-to-end → not a text attachment
     }
-    for (let i = 0; i < check.length; i++) {
-      if (check[i] === 0) return false;
+    for (let i = 0; i < data.length; i++) {
+      if (data[i] === 0) return false; // embedded NUL → binary, not text
     }
     return true;
   }

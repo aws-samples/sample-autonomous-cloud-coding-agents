@@ -36,6 +36,7 @@ import {
   parseLimit,
   parseStatusFilter,
   EXTENSION_TO_MIME,
+  MIME_TO_EXTENSION,
   SUPPORTED_ATTACHMENT_EXTENSIONS_LABEL,
   validateAttachments,
   validateMagicBytes,
@@ -805,5 +806,15 @@ describe('attachment type maps (derived, single source of truth)', () => {
     }
     // Derived + upper-cased, comma-separated, no unsupported types leak in.
     expect(label).not.toMatch(/docx|zip/i);
+  });
+
+  test('every MIME in MIME_TO_EXTENSION is actually allowed by isAllowedMimeType (design concern)', () => {
+    // Guards against the allowlist + the extension map drifting: the rejection
+    // message (derived from the map) must never advertise a type that
+    // isAllowedMimeType still rejects.
+    for (const mime of Object.keys(MIME_TO_EXTENSION)) {
+      const kind = mime.startsWith('image/') ? 'image' : 'file';
+      expect(isAllowedMimeType(mime, kind)).toBe(true);
+    }
   });
 });

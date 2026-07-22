@@ -173,6 +173,9 @@ const OCTET_169_SECOND = 254;
 const OCTET_100_CGN = 100; // 100.64.0.0/10 (carrier-grade NAT)
 const OCTET_100_LO = 64;
 const OCTET_100_HI = 127;
+// IPv6 link-local fe80::/10 = first hextet in [0xfe80, 0xfebf].
+const IPV6_LINKLOCAL_LO = 0xfe80;
+const IPV6_LINKLOCAL_HI = 0xfebf;
 
 /** Reject private / internal IPs (basic SSRF guard for the resolved host). */
 function isPrivateIp(ip: string): boolean {
@@ -186,8 +189,21 @@ function isPrivateIp(ip: string): boolean {
     return false;
   }
   const lower = ip.toLowerCase();
-  // IPv6 loopback, link-local, unique-local, all-zeros.
-  return lower === '::1' || lower === '::' || lower.startsWith('fe80') || lower.startsWith('fc') || lower.startsWith('fd');
+  // IPv4-mapped / -compatible IPv6 (::ffff:169.254.169.254, ::ffff:10.0.0.1, …):
+  // extract the trailing dotted-quad and re-check it as IPv4, so an attacker
+  // can't reach the metadata endpoint or an RFC-1918 host via the v6 wrapper
+  // (review #8). Matches `::ffff:1.2.3.4` and `::1.2.3.4` forms.
+  const mapped = lower.match(/(?:::ffff:|::)(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
+  if (mapped && net.isIPv4(mapped[1])) return isPrivateIp(mapped[1]);
+  // IPv6 loopback + all-zeros.
+  if (lower === '::1' || lower === '::') return true;
+  // Unique-local fc00::/7 (fc.. / fd..).
+  if (lower.startsWith('fc') || lower.startsWith('fd')) return true;
+  // Link-local is the FULL fe80::/10 range = fe80..febf (not just the fe80
+  // prefix). The first hextet's high 10 bits are fixed: 0xfe80–0xfebf.
+  const firstHextet = parseInt(lower.split(':')[0] || '0', 16);
+  if (firstHextet >= IPV6_LINKLOCAL_LO && firstHextet <= IPV6_LINKLOCAL_HI) return true;
+  return false;
 }
 
 /**
@@ -377,7 +393,6 @@ export async function downloadScreenAndStoreLinearAttachments(
   ctx: LinearAttachmentStorage,
   paperclipAttachments: readonly LinearPaperclipAttachment[] = [],
 ): Promise<PassedAttachmentRecord[]> {
-  if (remainingSlots <= 0) return [];
   const all = collectLinearUploads(description);
 
   // Merge native paperclip attachments (uploads.linear.app only), de-duped by id
@@ -396,16 +411,21 @@ export async function downloadScreenAndStoreLinearAttachments(
 
   if (all.length === 0) return [];
 
-  // Overflow is a LOUD error, not a silent truncation (review finding #2): a user
-  // who attached 12 files shouldn't have 2 quietly dropped and the task run as if
-  // complete. The effective budget is the smaller of the remaining per-task slots
-  // (public-URL images already consumed some) and the per-issue Linear cap.
+  // Overflow is a LOUD error, not a silent truncation (review #2 + #6). This is
+  // reached AFTER collecting uploads (not short-circuited on remainingSlots<=0),
+  // so a Linear-hosted spec behind 10 public images is REJECTED, never silently
+  // dropped. Budget = the smaller of free per-task slots (public-URL images
+  // already consumed some) and the per-issue Linear cap.
   const budget = Math.min(remainingSlots, MAX_LINEAR_UPLOADS_PER_ISSUE, MAX_ATTACHMENTS_PER_TASK);
+  const slotsConsumedElsewhere = remainingSlots < MAX_LINEAR_UPLOADS_PER_ISSUE;
   if (all.length > budget) {
     throw new LinearAttachmentError(
-      `This issue has ${all.length} Linear attachments, over the limit of ${budget} that can be processed ` +
-      `for one task${remainingSlots < MAX_LINEAR_UPLOADS_PER_ISSUE ? ' (some slots are used by other images in the description)' : ''}. ` +
-      'Remove some attachments and re-apply the trigger label.',
+      budget <= 0
+        ? `This issue has ${all.length} Linear attachment(s), but the ${MAX_ATTACHMENTS_PER_TASK}-attachment ` +
+          'limit is already used up by other images in the description. Remove some and re-apply the trigger label.'
+        : `This issue has ${all.length} Linear attachments, over the limit of ${budget} that can be processed ` +
+          `for one task${slotsConsumedElsewhere ? ' (some slots are used by other images in the description)' : ''}. ` +
+          'Remove some attachments and re-apply the trigger label.',
     );
   }
   const selected = all;
@@ -598,20 +618,27 @@ function startsWith(content: Buffer, magic: readonly number[]): boolean {
  *      rejects a binary payload wearing a `.txt`/`.csv` label.
  * Returns '' if none applies (caller rejects the upload as unsupported).
  */
+/** Is this an allowed TEXT-family MIME (screened as UTF-8 text, never a binary)? */
+function isAllowedTextMime(mime: string): boolean {
+  return (mime.startsWith('text/') || mime === 'application/json') && isAllowedMimeType(mime, 'file');
+}
+
 function inferMime(contentType: string, label: string, content: Buffer): string {
-  if (contentType && (isAllowedMimeType(contentType, 'image') || isAllowedMimeType(contentType, 'file'))) {
-    return contentType;
-  }
-  // Binary types: bytes only. The label cannot vouch for these.
+  // BYTES ARE AUTHORITATIVE (review #2): a recognised binary magic signature wins
+  // over ANY content-type or label. This blocks a PDF served as `text/plain` (or
+  // labeled `.txt`) from skipping PDF extraction and being screened as raw text.
   if (startsWith(content, PNG_MAGIC)) return 'image/png';
   if (startsWith(content, JPEG_MAGIC)) return 'image/jpeg';
   if (startsWith(content, PDF_MAGIC)) return 'application/pdf';
-  // Text types: the label extension may narrow the flavour (txt/csv/md/json/log),
-  // but validateMagicBytes' UTF-8 gate is what actually keeps a binary out.
+  // No binary signature. A content-type claiming a BINARY allowed type (pdf/png/
+  // jpeg) but lacking the matching magic bytes is a mismatch → reject (don't store
+  // bytes lying about being a PDF/image). Only a TEXT content-type is trusted here,
+  // and validateMagicBytes' UTF-8 gate still confirms the bytes are really text.
+  if (contentType && isAllowedTextMime(contentType)) return contentType;
+  // Fall back to the label extension — TEXT types only. The label is
+  // attacker-controlled, so it can never promote bytes to a binary type (#3).
   const byExt = EXTENSION_TO_MIME[extensionOf(label)];
-  if (byExt && isAllowedMimeType(byExt, 'file') && !byExt.startsWith('image/') && byExt !== 'application/pdf') {
-    return byExt;
-  }
+  if (byExt && isAllowedTextMime(byExt)) return byExt;
   return '';
 }
 

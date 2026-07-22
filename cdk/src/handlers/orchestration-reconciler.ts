@@ -1628,10 +1628,27 @@ async function reconcileDecomposePlan(evt: DecomposePlanEvent): Promise<void> {
     // finding #1: when the planner DECLINES to decompose, this collapsed coding
     // task must still see the parent's attachments — otherwise a paperclip spec
     // on a :auto/:decompose issue is lost exactly as it was on the child path.
-    // Hydrate here too (best-effort; no attachments → runs as before).
-    const singleTaskAttachments = resolved?.accessToken
-      ? await hydrateParentAttachmentsForSeed(evt, resolved.accessToken)
-      : [];
+    // Fail-closed (review #5): an unscreenable attachment rejects the task with a
+    // comment rather than running it blind. (No attachments → returns [].)
+    let singleTaskAttachments: import('./shared/types').PassedAttachmentRecord[] = [];
+    if (resolved?.accessToken) {
+      try {
+        singleTaskAttachments = await hydrateParentAttachmentsForSeed(evt, resolved.accessToken);
+      } catch (err) {
+        if (err instanceof LinearAttachmentError) {
+          logger.warn('Decompose single-task: parent attachment could not be screened — not creating task (fail-closed)', {
+            parent_issue_id: evt.parentIssueId, error: err.message,
+          });
+          await postComment(
+            evt.parentIssueId,
+            `❌ ABCA couldn't safely process an attachment on this issue: ${err.message} ` +
+            'Fix or remove the attachment and re-apply the trigger label.',
+          );
+          return;
+        }
+        throw err;
+      }
+    }
     await createTaskCore(
       {
         repo: evt.repo,
@@ -1687,52 +1704,51 @@ async function reconcileDecomposePlan(evt: DecomposePlanEvent): Promise<void> {
 
 /**
  * finding #1: fetch + screen + store the parent issue's attachments at seed time,
- * so every child of the decomposed epic inherits them. Covers both native
- * paperclip attachments (from the context probe) and description-embedded
- * uploads.linear.app links (from the planning task's description, which is the
- * issue title+body — see DecomposePlanEvent.taskDescription). Best-effort: any
- * failure (no screening config, probe error, unscreenable file) logs and returns
- * [] so the epic still seeds — children just run without the parent attachments,
- * exactly as before this change. Returns `passed` records referencing S3 objects.
+ * so every child of the decomposed epic inherits them. Covers native paperclip
+ * attachments (from the context probe) and description-embedded uploads.linear.app
+ * links (from the planning task's description = the issue title+body).
+ *
+ * FAIL-CLOSED (review #5): if the issue HAS attachments but one can't be safely
+ * screened, this THROWS `LinearAttachmentError` — the caller rejects the epic
+ * rather than silently seeding children without a spec they may require. It
+ * returns `[]` ONLY when there's genuinely nothing to hydrate (no attachments) or
+ * screening isn't configured — the same "no attachments" outcome as before, not a
+ * swallowed failure. Returns `passed` records referencing S3 objects.
  */
 async function hydrateParentAttachmentsForSeed(
   evt: DecomposePlanEvent,
   accessToken: string,
 ): Promise<import('./shared/types').PassedAttachmentRecord[]> {
+  const probe = await probeLinearIssueContext(accessToken, evt.parentIssueId);
+  const paperclips = (probe.attachments ?? []).filter((a) => isLinearUploadsUrl(a.url));
+  const descHasUploads = Boolean(evt.taskDescription?.includes('uploads.linear.app'));
+  if (paperclips.length === 0 && !descHasUploads) return []; // nothing to hydrate
+
   const screeningConfig = attachmentScreeningConfig();
-  if (!screeningConfig || !ATTACHMENTS_BUCKET) return [];
-  try {
-    const probe = await probeLinearIssueContext(accessToken, evt.parentIssueId);
-    const paperclips = (probe.attachments ?? []).filter((a) => isLinearUploadsUrl(a.url));
-    const descHasUploads = Boolean(evt.taskDescription?.includes('uploads.linear.app'));
-    if (paperclips.length === 0 && !descHasUploads) return [];
-    return await downloadScreenAndStoreLinearAttachments(
-      evt.taskDescription,
-      10, // full per-task budget — the epic parent has no competing public-URL images here
-      {
-        s3Client: s3(),
-        bucketName: ATTACHMENTS_BUCKET,
-        screeningConfig,
-        userId: evt.platformUserId,
-        // Key parent attachments under a stable per-epic id so children share them.
-        taskId: `epic-${evt.parentIssueId}`,
-        accessToken,
-        linearWorkspaceId: evt.workspaceId,
-      },
-      paperclips,
+  if (!screeningConfig || !ATTACHMENTS_BUCKET) {
+    // The issue HAS attachments but we can't screen them — fail closed (mirrors
+    // the webhook single-task path's "screening not configured" rejection).
+    throw new LinearAttachmentError(
+      'This issue has attachments, but ABCA attachment screening is not configured. Contact your ABCA admin.',
     );
-  } catch (err) {
-    if (err instanceof LinearAttachmentError) {
-      logger.warn('Decompose seed: parent attachment hydration failed — seeding without attachments', {
-        parent_issue_id: evt.parentIssueId, error: err.message,
-      });
-      return [];
-    }
-    logger.warn('Decompose seed: unexpected error hydrating parent attachments — seeding without them', {
-      parent_issue_id: evt.parentIssueId, error: err instanceof Error ? err.message : String(err),
-    });
-    return [];
   }
+  // A screening/fetch failure here PROPAGATES (LinearAttachmentError) so the
+  // caller fails the epic closed — we do NOT swallow it to [].
+  return downloadScreenAndStoreLinearAttachments(
+    evt.taskDescription,
+    10, // full per-task budget — the epic parent has no competing public-URL images here
+    {
+      s3Client: s3(),
+      bucketName: ATTACHMENTS_BUCKET,
+      screeningConfig,
+      userId: evt.platformUserId,
+      // Key parent attachments under a stable per-epic id so children share them.
+      taskId: `epic-${evt.parentIssueId}`,
+      accessToken,
+      linearWorkspaceId: evt.workspaceId,
+    },
+    paperclips,
+  );
 }
 
 /**
@@ -1751,11 +1767,39 @@ async function seedDecomposedGraph(
 ): Promise<void> {
   // finding #1: hydrate the parent issue's attachments ONCE here so every child
   // inherits them (screened + stored to S3, referenced read-only by each child).
-  // Best-effort — a hydration failure logs + seeds without attachments rather than
-  // stranding the whole epic (the children can still do structural work).
-  const preScreenedAttachments = accessToken
-    ? await hydrateParentAttachmentsForSeed(evt, accessToken)
-    : [];
+  // FAIL-CLOSED (review #5): if the issue has an attachment that can't be safely
+  // screened, do NOT seed children blind to a spec they may need — reject the epic
+  // with a comment, mirroring the single-task path. (No attachments → returns [].)
+  //
+  // REPLAY-SAFE (review #4): only hydrate when the orchestration ISN'T already
+  // seeded. The upload key is stable (epic-<parentIssueId>), so a re-hydrate on
+  // redelivery would write a NEW S3 version while the already-persisted meta row
+  // still pins the OLD version_id — the old version then expires under the bucket's
+  // noncurrent-version lifecycle and children fail to download it. The first seed's
+  // records are authoritative; a replay skips straight to release with them.
+  const existingSnapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, deriveOrchestrationId(evt.parentIssueId));
+  let preScreenedAttachments: import('./shared/types').PassedAttachmentRecord[] = [];
+  if (accessToken && !existingSnapshot) {
+    try {
+      preScreenedAttachments = await hydrateParentAttachmentsForSeed(evt, accessToken);
+    } catch (err) {
+      if (err instanceof LinearAttachmentError) {
+        logger.warn('Decompose seed: parent attachment could not be screened — NOT seeding children (fail-closed)', {
+          parent_issue_id: evt.parentIssueId, error: err.message,
+        });
+        if (WORKSPACE_REGISTRY_TABLE) {
+          await upsertStatusComment(
+            { linearWorkspaceId: evt.workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE },
+            evt.parentIssueId,
+            `❌ ABCA couldn't safely process an attachment on this issue: ${err.message} ` +
+            'Fix or remove the attachment and re-apply the trigger label to decompose it.',
+          );
+        }
+        return;
+      }
+      throw err; // unexpected — let the handler's error path deal with it
+    }
+  }
 
   const releaseContext: OrchestrationReleaseContext = {
     platform_user_id: evt.platformUserId,
