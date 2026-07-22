@@ -22,8 +22,7 @@ import * as bedrock from '@aws-cdk/aws-bedrock-alpha';
 import { ArnFormat, AspectPriority, Aspects, Stack, StackProps, RemovalPolicy, CfnOutput, CfnResource, Duration, Fn, Lazy } from 'aws-cdk-lib';
 import * as agentcore from 'aws-cdk-lib/aws-bedrockagentcore';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
-// ecr_assets import is only needed when the ECS block below is uncommented
-// import * as ecr_assets from 'aws-cdk-lib/aws-ecr-assets';
+import * as ecr_assets from 'aws-cdk-lib/aws-ecr-assets';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
@@ -41,7 +40,8 @@ import { Blueprint } from '../constructs/blueprint';
 import { CedarWasmLayer } from '../constructs/cedar-wasm-layer';
 import { ConcurrencyReconciler } from '../constructs/concurrency-reconciler';
 import { DnsFirewall } from '../constructs/dns-firewall';
-// import { EcsAgentCluster } from '../constructs/ecs-agent-cluster';
+import { EcsAgentCluster } from '../constructs/ecs-agent-cluster';
+import { EcsPayloadBucket } from '../constructs/ecs-payload-bucket';
 import { FanOutConsumer } from '../constructs/fanout-consumer';
 import { GitHubScreenshotIntegration } from '../constructs/github-screenshot-integration';
 import { JiraIntegration } from '../constructs/jira-integration';
@@ -577,31 +577,76 @@ export class AgentStack extends Stack {
       description: 'Name of the S3 bucket storing --trace trajectory artifacts (design §10.1)',
     });
 
-    // --- ECS Fargate compute backend (optional) ---
-    // To enable ECS as an alternative compute backend, uncomment the block below
-    // and the EcsAgentCluster import at the top of this file. Repos can then use
-    // compute_type: 'ecs' in their blueprint config to route tasks to ECS Fargate.
-    //
-    // const agentImageAsset = new ecr_assets.DockerImageAsset(this, 'AgentImage', {
-    //   directory: repoRoot,
-    //   file: 'agent/Dockerfile',
-    //   platform: ecr_assets.Platform.LINUX_ARM64,
-    // });
-    //
-    // const ecsCluster = new EcsAgentCluster(this, 'EcsAgentCluster', {
-    //   vpc: agentVpc.vpc,
-    //   agentImageAsset,
-    //   taskTable: taskTable.table,
-    //   taskEventsTable: taskEventsTable.table,
-    //   userConcurrencyTable: userConcurrencyTable.table,
-    //   githubTokenSecret,
-    //   memoryId: agentMemory.memory.memoryId,
-    //   // Per-session IAM scoping (#209): the ECS task role assumes the same
-    //   // SessionRole as the AgentCore runtime for tenant-data access. The
-    //   // construct admits the task role to the trust and injects
-    //   // AGENT_SESSION_ROLE_ARN into the container.
-    //   agentSessionRole,
-    // });
+    // --- ECS Fargate compute backend (CONTEXT-GATED) ---
+    // K12 (2026-06-29): AgentCore's fixed microVM envelope OOM-kills heavy
+    // CI-parity builds (ABCA's own ~2800-test `mise run build`). ECS Fargate
+    // gives a bigger, tunable task (see EcsAgentCluster for the exact vCPU/memory
+    // sizing + its OOM history — 64 GB was itself OOM-killed, so it runs larger)
+    // for repos that set ``compute_type: 'ecs'``. GATED on the ``compute_type`` deploy context
+    // (default 'agentcore') — ECS resources only synthesize when you deploy with
+    // ``--context compute_type=ecs``, so the default synth (and the
+    // bootstrap-coverage test that synths with default context) stays
+    // agentcore-only. Mirrors upstream #164 (gate ECS construct on context).
+    const computeType = this.node.tryGetContext('compute_type') ?? 'agentcore';
+    // #502: ephemeral bucket for ECS task payloads — the orchestrator writes the
+    // payload here (it exceeds the 8 KB RunTask containerOverrides limit) and
+    // passes only an S3 URI pointer; the container fetches it on boot, the
+    // orchestrator deletes it at finalize. Only synthesized under the ecs gate.
+    const ecsPayloadBucket = computeType === 'ecs'
+      ? new EcsPayloadBucket(this, 'EcsPayloadBucket')
+      : undefined;
+    if (ecsPayloadBucket) {
+      NagSuppressions.addResourceSuppressions(ecsPayloadBucket.bucket, [
+        {
+          id: 'AwsSolutions-S1',
+          reason: 'Ephemeral per-task payloads (#502) with a 1-day TTL; writes confined to the orchestrator IAM role by grantPut, reads to the ECS task role by grantRead, both scoped to this bucket. Object deleted at finalize. Object-level audit intentionally omitted — CloudTrail data events / a log bucket are not justified for transient boot payloads.',
+        },
+      ]);
+    }
+    const ecsCluster = computeType === 'ecs'
+      ? new EcsAgentCluster(this, 'EcsAgentCluster', {
+        vpc: agentVpc.vpc,
+        agentImageAsset: new ecr_assets.DockerImageAsset(this, 'AgentImage', {
+          directory: repoRoot,
+          file: 'agent/Dockerfile',
+          platform: ecr_assets.Platform.LINUX_ARM64,
+        }),
+        taskTable: taskTable.table,
+        taskEventsTable: taskEventsTable.table,
+        userConcurrencyTable: userConcurrencyTable.table,
+        githubTokenSecret,
+        memoryId: agentMemory.memory.memoryId,
+        // F-2: grant the ECS task role read+write on AgentCore Memory so the
+        // agent's cross-task learning writes succeed on ECS (parity with the
+        // runtime's agentMemory.grantReadWrite below).
+        agentMemory,
+        // #502: read-only grant so the container can fetch its payload from S3.
+        payloadBucket: ecsPayloadBucket!.bucket,
+        // #299 ECS-parity: the same bucket the runtime uses for ARTIFACTS_BUCKET_NAME —
+        // coding/decompose-v1 delivers its plan artifact here. Wires the
+        // ARTIFACTS_BUCKET_NAME env only; delivery writes go through the per-task
+        // SessionRole (no direct task-role grant — see construct). Without the
+        // env, an ecs-repo :decompose fails at delivery.
+        artifactsBucket: traceArtifactsBucket.bucket,
+        // Per-session IAM scoping (#209): the ECS task role assumes the same
+        // SessionRole as the AgentCore runtime for tenant-data access. The
+        // construct admits the task role to the trust and injects
+        // AGENT_SESSION_ROLE_ARN into the container.
+        agentSessionRole,
+      })
+      : undefined;
+
+    // Advertise which compute substrate this deploy actually provisioned, so the
+    // CLI can refuse to onboard a repo as ``compute_type: ecs`` when the ECS gate
+    // wasn't on (``--context compute_type=ecs``) — otherwise that mismatch only
+    // surfaces per-task as "ECS compute strategy requires ECS_CLUSTER_ARN…" at
+    // runtime. ``ecs`` implies the AgentCore runtime is ALSO available (the ECS
+    // gate is additive), so an agentcore repo works on either substrate.
+    new CfnOutput(this, 'ComputeSubstrate', {
+      value: ecsCluster ? 'ecs' : 'agentcore',
+      description: 'Compute substrate provisioned by this deploy: "agentcore" (default) or "ecs" '
+        + '(deployed with --context compute_type=ecs; adds the Fargate substrate alongside AgentCore).',
+    });
 
     // --- Task Orchestrator (durable Lambda function) ---
     const orchestrator = new TaskOrchestrator(this, 'TaskOrchestrator', {
@@ -615,16 +660,22 @@ export class AgentStack extends Stack {
       guardrailId: inputGuardrail.guardrailId,
       guardrailVersion: inputGuardrail.guardrailVersion,
       attachmentsBucket: attachmentsBucket.bucket,
-      // To wire ECS, uncomment the ecsCluster block above and add:
-      // ecsConfig: {
-      //   clusterArn: ecsCluster.cluster.clusterArn,
-      //   taskDefinitionArn: ecsCluster.taskDefinition.taskDefinitionArn,
-      //   subnets: agentVpc.vpc.selectSubnets({ subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS }).subnetIds.join(','),
-      //   securityGroup: ecsCluster.securityGroup.securityGroupId,
-      //   containerName: ecsCluster.containerName,
-      //   taskRoleArn: ecsCluster.taskRoleArn,
-      //   executionRoleArn: ecsCluster.executionRoleArn,
-      // },
+      // K12: route ``compute_type: 'ecs'`` repos to the Fargate cluster above —
+      // only when the cluster was synthesized (deploy --context compute_type=ecs).
+      ...(ecsCluster && {
+        ecsConfig: {
+          clusterArn: ecsCluster.cluster.clusterArn,
+          taskDefinitionArn: ecsCluster.taskDefinition.taskDefinitionArn,
+          subnets: agentVpc.vpc.selectSubnets({ subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS }).subnetIds.join(','),
+          securityGroup: ecsCluster.securityGroup.securityGroupId,
+          containerName: ecsCluster.containerName,
+          taskRoleArn: ecsCluster.taskRoleArn,
+          executionRoleArn: ecsCluster.executionRoleArn,
+        },
+      }),
+      // #502: pass the payload bucket so the orchestrator writes/deletes the
+      // out-of-band payload and the ECS strategy builds the S3 URI pointer.
+      ...(ecsPayloadBucket && { ecsPayloadBucket: ecsPayloadBucket.bucket }),
     });
 
     // Now that the orchestrator exists, resolve the Lazy used by TaskApi at synth.
@@ -850,6 +901,9 @@ export class AgentStack extends Stack {
       orchestratorFunctionArn: orchestrator.alias.functionArn,
       guardrailId: inputGuardrail.guardrailId,
       guardrailVersion: inputGuardrail.guardrailVersion,
+      // Lets the processor fetch, screen, and store Jira media attachments at
+      // task-admission time (#577). Same bucket the orchestrator hydrates from.
+      attachmentsBucket: attachmentsBucket.bucket,
     });
 
     // Agent runtime reads the per-tenant Jira OAuth token directly from
@@ -927,9 +981,10 @@ export class AgentStack extends Stack {
     // Slack / GitHub / Linear / email per per-channel default filters.
     // GitHub dispatcher edits a single issue comment in place; Slack
     // dispatcher (issue #64) reads per-workspace bot tokens from
-    // ``bgagent/slack/*``; Linear dispatcher (issue #239) posts a single
-    // deterministic final-status comment with cost/turns/duration.
-    // Email remains a log-only stub until SES wires.
+    // ``bgagent/slack/*``; Linear dispatcher (issue #239) + Jira dispatcher
+    // (issue #573) each post a single deterministic final-status comment
+    // with cost/turns/duration. Email remains a log-only stub until SES
+    // wires.
     new FanOutConsumer(this, 'FanOutConsumer', {
       taskEventsTable: taskEventsTable.table,
       taskTable: taskTable.table,
@@ -954,6 +1009,18 @@ export class AgentStack extends Stack {
         service: 'secretsmanager',
         resource: 'secret',
         resourceName: 'bgagent-linear-oauth-*',
+        arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+      }),
+      // Jira dispatcher (issue #573) posts a deterministic final-status
+      // comment with cost/turns/duration on Jira-origin terminal tasks.
+      // Same scope `bgagent-jira-oauth-*` as the orchestrator and Jira
+      // webhook processor — Lambdas in this stack share the rotated-token
+      // write path.
+      jiraWorkspaceRegistryTable: jiraIntegration.workspaceRegistryTable,
+      jiraOauthSecretArnPattern: Stack.of(this).formatArn({
+        service: 'secretsmanager',
+        resource: 'secret',
+        resourceName: 'bgagent-jira-oauth-*',
         arnFormat: ArnFormat.COLON_RESOURCE_NAME,
       }),
     });

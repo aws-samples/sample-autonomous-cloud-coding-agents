@@ -190,6 +190,7 @@ export function infrastructurePolicy(): iam.PolicyDocument {
           'route53resolver:UpdateFirewallDomains',
           'route53resolver:AssociateFirewallRuleGroup',
           'route53resolver:DisassociateFirewallRuleGroup',
+          'route53resolver:UpdateFirewallRuleGroupAssociation',
           'route53resolver:GetFirewallRuleGroupAssociation',
           'route53resolver:ListFirewallRuleGroupAssociations',
           'route53resolver:UpdateFirewallConfig',

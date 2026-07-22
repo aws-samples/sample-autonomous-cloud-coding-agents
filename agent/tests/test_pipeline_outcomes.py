@@ -161,3 +161,61 @@ class TestComputeTurnsCompleted:
         # Zero is treated the same as None (falsy) so we don't clamp it to a
         # negative / nonsensical value.
         assert _compute_turns_completed("error_max_turns", 0, max_turns=10) == 0
+
+
+class TestMaxTurnsStuckEnrichment:
+    """N3 wiring seam (#600): _resolve_overall_task_status enriches a max_turns
+    reason with the stuck-guard summary (hooks.last_stuck_summary). Previously
+    tested only at its two pure endpoints; this drives the append itself."""
+
+    def test_max_turns_appends_stuck_summary(self, monkeypatch):
+        import hooks
+
+        summary = "last tool calls repeated: git push — invalid credentials"
+        monkeypatch.setattr(hooks, "last_stuck_summary", lambda: summary)
+        ar = AgentResult(
+            status="error_max_turns",
+            error="Agent session error (subtype=error_max_turns)",
+        )
+        _, err = _resolve_overall_task_status(ar, build_ok=False, pr_url=None)
+        assert err is not None
+        assert "error_max_turns" in err
+        assert summary in err
+
+    def test_non_max_turns_error_is_not_enriched(self, monkeypatch):
+        # A generic failure must NOT pull in the stuck summary — only max_turns.
+        import hooks
+
+        monkeypatch.setattr(hooks, "last_stuck_summary", lambda: "last tool calls repeated: X")
+        ar = AgentResult(status="error", error="receive_response() failed: boom")
+        _, err = _resolve_overall_task_status(ar, build_ok=False, pr_url=None)
+        assert err is not None
+        assert "last tool calls repeated" not in err
+
+    def test_max_turns_with_no_stuck_summary_left_unchanged(self, monkeypatch):
+        # A task that used its turns productively (window not failure-dominated →
+        # summary None) leaves the max_turns reason unchanged.
+        import hooks
+
+        monkeypatch.setattr(hooks, "last_stuck_summary", lambda: None)
+        ar = AgentResult(
+            status="error_max_turns",
+            error="Agent session error (subtype=error_max_turns)",
+        )
+        _, err = _resolve_overall_task_status(ar, build_ok=False, pr_url=None)
+        assert err == "Agent session error (subtype=error_max_turns)"
+
+    def test_stuck_summary_not_double_appended(self, monkeypatch):
+        # Idempotent: if the summary is already in the reason (e.g. a durable
+        # re-resolution of the same result), it must not be appended twice.
+        import hooks
+
+        summary = "last tool calls repeated: git push — invalid credentials"
+        monkeypatch.setattr(hooks, "last_stuck_summary", lambda: summary)
+        ar = AgentResult(
+            status="error_max_turns",
+            error=f"Agent session error (subtype=error_max_turns) — {summary}",
+        )
+        _, err = _resolve_overall_task_status(ar, build_ok=False, pr_url=None)
+        assert err is not None
+        assert err.count(summary) == 1
