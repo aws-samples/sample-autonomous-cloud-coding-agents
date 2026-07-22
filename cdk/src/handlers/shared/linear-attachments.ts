@@ -32,7 +32,9 @@
  * All platform-supported attachment types come through here, not just images:
  * images (PNG/JPEG) are screened visually, files (PDF/text/csv/markdown/json/
  * log) as text — same set the inline/URL paths and `jira-attachments.ts` allow.
- * Types outside the allowlist (docx, zip, …) are silently skipped, not errored.
+ * An unsupported type (docx, zip, …) FAILS the task closed with a message naming
+ * the supported types (user deletes it + re-triggers) — not silently skipped, so
+ * a user who attached a spec isn't left wondering why it was ignored.
  *
  * This is the Linear analog of `jira-attachments.ts` (#619) — same
  * select → fetch → magic-bytes → screen → upload → record shape, same
@@ -57,7 +59,7 @@ import { screenImage, screenTextFile, AttachmentScreeningError, type ScreeningCo
 import { estimateImageTokensFromBuffer } from './image-tokens';
 import { logger } from './logger';
 import { createAttachmentRecord, type PassedAttachmentRecord } from './types';
-import { EXTENSION_TO_MIME, isAllowedMimeType, isValidFilename, validateMagicBytes, MAX_ATTACHMENT_SIZE_BYTES, MAX_TOTAL_ATTACHMENT_SIZE_BYTES, MAX_ATTACHMENTS_PER_TASK } from './validation';
+import { EXTENSION_TO_MIME, isAllowedMimeType, isValidFilename, validateMagicBytes, MAX_ATTACHMENT_SIZE_BYTES, MAX_TOTAL_ATTACHMENT_SIZE_BYTES, MAX_ATTACHMENTS_PER_TASK, SUPPORTED_ATTACHMENT_EXTENSIONS_LABEL } from './validation';
 import { ATTACHMENT_OBJECT_KEY_PREFIX } from '../../constructs/attachments-bucket';
 
 /** Per-request timeout for a single attachment download. */
@@ -378,19 +380,29 @@ export async function downloadScreenAndStoreLinearAttachments(
       // images inline and attaches uploaded files (PDFs, logs, CSVs, JSON, text)
       // as links — both come through here. The platform allowlist gates the
       // supported set: images (PNG/JPEG) and files (PDF/text/csv/markdown/json/
-      // log). Anything else (docx, zip, …) is silently skipped, matching the
-      // pre-download filter contract — an unsupported upload is not a task error.
+      // log). Anything else (docx, zip, …) fails the task closed below.
       const mimeType = inferMime(outcome.contentType, upload.filename, content);
       const isImage = mimeType.startsWith('image/');
       const attachmentType = isImage ? 'image' : 'file';
       if (!mimeType || !isAllowedMimeType(mimeType, attachmentType)) {
-        logger.info('Skipping unsupported Linear upload type', {
+        // Unsupported type (docx, zip, …) — there's no safe screening path, so
+        // fail closed and tell the user to remove it and re-trigger. (We reject
+        // rather than silently skip: a user who attached a spec would otherwise
+        // get no signal it was ignored.) The supported-extension list is derived
+        // from the allowlist so it never drifts.
+        logger.warn('Rejecting Linear task: unsupported attachment type', {
           linear_workspace_id: ctx.linearWorkspaceId,
           attachment_filename: upload.filename,
           content_type: outcome.contentType || 'unknown',
           inferred_mime: mimeType || 'unknown',
         });
-        continue;
+        // Message states the fact + the supported set; the processor's reject
+        // wrapper appends the "remove and re-apply the trigger label" instruction,
+        // so we don't repeat it here.
+        throw new LinearAttachmentError(
+          `Attachment '${upload.filename}' is not a supported file type ` +
+          `(supported: ${SUPPORTED_ATTACHMENT_EXTENSIONS_LABEL}).`,
+        );
       }
       // Confirm the bytes match the resolved type (blocks a masquerading/polyglot
       // payload). Text types have no signature — validateMagicBytes checks for

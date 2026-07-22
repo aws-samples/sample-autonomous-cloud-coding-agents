@@ -35,6 +35,8 @@ import {
   parseBody,
   parseLimit,
   parseStatusFilter,
+  EXTENSION_TO_MIME,
+  SUPPORTED_ATTACHMENT_EXTENSIONS_LABEL,
   validateAttachments,
   validateMagicBytes,
   validateMaxBudgetUsd,
@@ -762,5 +764,27 @@ describe('createAttachmentRecord', () => {
     });
     expect(record.attachment_id).toBe('att-4');
     expect(record.token_estimate).toBeUndefined();
+  });
+});
+
+describe('attachment type maps (derived, single source of truth)', () => {
+  test('EXTENSION_TO_MIME is the reverse of the allowlist + covers the .jpeg alias', () => {
+    expect(EXTENSION_TO_MIME.pdf).toBe('application/pdf');
+    expect(EXTENSION_TO_MIME.png).toBe('image/png');
+    expect(EXTENSION_TO_MIME.jpg).toBe('image/jpeg');
+    expect(EXTENSION_TO_MIME.jpeg).toBe('image/jpeg'); // alias
+    expect(EXTENSION_TO_MIME.log).toBe('text/x-log');
+    // Unsupported extensions resolve to nothing.
+    expect(EXTENSION_TO_MIME.docx).toBeUndefined();
+    expect(EXTENSION_TO_MIME.zip).toBeUndefined();
+  });
+
+  test('SUPPORTED_ATTACHMENT_EXTENSIONS_LABEL is a human list derived from the allowlist', () => {
+    const label = SUPPORTED_ATTACHMENT_EXTENSIONS_LABEL;
+    for (const ext of ['PNG', 'JPG', 'TXT', 'CSV', 'MD', 'JSON', 'PDF', 'LOG']) {
+      expect(label).toContain(ext);
+    }
+    // Derived + upper-cased, comma-separated, no unsupported types leak in.
+    expect(label).not.toMatch(/docx|zip/i);
   });
 });

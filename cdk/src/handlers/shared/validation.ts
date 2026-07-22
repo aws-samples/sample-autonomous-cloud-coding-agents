@@ -479,6 +479,15 @@ export const EXTENSION_TO_MIME: Readonly<Record<string, string>> = Object.freeze
   jpeg: 'image/jpeg', // `.jpeg` is a common alias MIME_TO_EXTENSION collapses to `jpg`
 });
 
+/**
+ * Human-friendly list of supported attachment file extensions, derived from
+ * {@link MIME_TO_EXTENSION} (deduped, upper-cased) — e.g. "PNG, JPG, TXT, CSV,
+ * MD, JSON, PDF, LOG". For user-facing "unsupported file type" messages, so the
+ * list can never drift from the actual allowlist.
+ */
+export const SUPPORTED_ATTACHMENT_EXTENSIONS_LABEL: string =
+  [...new Set(Object.values(MIME_TO_EXTENSION))].map((e) => e.toUpperCase()).join(', ');
+
 export type AttachmentValidationResult =
   | { readonly valid: true; readonly parsed: ValidatedAttachment[] }
   | { readonly valid: false; readonly error: string };

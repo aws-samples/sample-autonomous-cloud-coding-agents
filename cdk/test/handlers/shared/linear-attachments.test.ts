@@ -246,14 +246,16 @@ describe('downloadScreenAndStoreLinearAttachments', () => {
     expect(screenTextFileMock).toHaveBeenCalled();
   });
 
-  test('silently SKIPS an unsupported type (docx/zip) — not a task error', async () => {
+  test('REJECTS an unsupported type (docx/zip) fail-closed, naming the supported types', async () => {
     (global.fetch as jest.Mock).mockResolvedValueOnce(
       bytesResponse(Buffer.from([0x50, 0x4b, 0x03, 0x04]), 200, 'application/zip'),
     );
-    const records = await downloadScreenAndStoreLinearAttachments(
-      fileDesc('https://uploads.linear.app/u/z/bundle.zip'), 10, storageCtx(),
-    );
-    expect(records).toHaveLength(0);
+    await expect(
+      downloadScreenAndStoreLinearAttachments(
+        fileDesc('https://uploads.linear.app/u/z/bundle.zip'), 10, storageCtx(),
+      ),
+    ).rejects.toThrow(/not a supported file type.*PDF/i);
+    // Never screened or stored — rejected before that.
     expect(screenImageMock).not.toHaveBeenCalled();
     expect(screenTextFileMock).not.toHaveBeenCalled();
     expect(putSendMock).not.toHaveBeenCalled();
