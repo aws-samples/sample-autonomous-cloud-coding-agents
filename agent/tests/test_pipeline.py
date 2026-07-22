@@ -9,6 +9,9 @@ from pydantic import ValidationError
 from models import AgentResult, RepoSetup, TaskConfig
 from pipeline import _chain_prior_agent_error, _resolve_overall_task_status
 
+# Minimal Linear channel metadata for the early-ACK ordering tests.
+_LINEAR_META = {"issue_id": "ABCA-1", "workspace_id": "ws-1"}
+
 
 class TestCedarPoliciesInjection:
     @patch("runner.run_agent")
@@ -1827,3 +1830,150 @@ class TestTraceCrashPath:
 
         # Terminal still written despite the upload failure.
         mock_task_state.write_terminal.assert_called()
+
+
+class TestEarlyAckOrdering:
+    """#616 review N4 — the early-ACK reorder must hold under future edits.
+
+    The fix moved the channel ACK (token resolve → 👀 react_task_started →
+    "starting" comment) to BEFORE the multi-minute ``setup_repo`` baseline so a
+    picked-up task doesn't look dead during the pre-agent build, and so a
+    setup-phase failure has a 👀 to swap to ❌. These tests pin both halves:
+    (1) the ACK fires before ``setup_repo``, and (2) a ``setup_repo`` crash still
+    swaps the 👀 to ❌ via ``react_task_finished(success=False,
+    started_reaction_id=<the id from the early react>)``.
+    """
+
+    @staticmethod
+    def _mock_span() -> MagicMock:
+        span = MagicMock()
+        span.__enter__ = MagicMock(return_value=span)
+        span.__exit__ = MagicMock(return_value=False)
+        return span
+
+    @patch("runner.run_agent")
+    @patch("pipeline.build_system_prompt")
+    @patch("pipeline.discover_project_config")
+    @patch("repo.setup_repo")
+    @patch("pipeline.task_span")
+    def test_channel_ack_fires_before_setup_repo(
+        self,
+        mock_task_span,
+        mock_setup_repo,
+        _mock_discover,
+        _mock_build_prompt,
+        mock_run_agent,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+
+        mock_setup_repo.return_value = RepoSetup(
+            repo_dir="/workspace/repo",
+            branch="bgagent/test/branch",
+            build_before=True,
+        )
+
+        async def fake_run_agent(_prompt, _system_prompt, _config, cwd=None, trajectory=None):
+            return AgentResult(status="success", turns=1, cost_usd=0.01, num_turns=1)
+
+        mock_run_agent.side_effect = fake_run_agent
+        mock_task_span.return_value = self._mock_span()
+
+        # Shared parent records the interleaving of the ACK calls vs setup_repo.
+        manager = MagicMock()
+        manager.attach_mock(mock_setup_repo, "setup_repo")
+
+        with (
+            patch("pipeline.resolve_linear_api_token") as m_resolve,
+            patch("pipeline.react_task_started", return_value="reaction-42") as m_react,
+            patch("pipeline.comment_task_started") as m_comment,
+            patch("pipeline.transition_task_started") as m_transition,
+            patch("pipeline.configure_channel_mcp"),
+            patch("pipeline.ensure_committed", return_value=False),
+            patch("pipeline.verify_build", return_value=True),
+            patch("pipeline.verify_lint", return_value=True),
+            patch("pipeline.ensure_pr", return_value="https://github.com/o/r/pull/1"),
+            patch("pipeline.get_disk_usage", return_value=0),
+            patch("pipeline.print_metrics"),
+            patch("pipeline.task_state"),
+        ):
+            manager.attach_mock(m_resolve, "resolve")
+            manager.attach_mock(m_react, "react")
+            manager.attach_mock(m_comment, "comment")
+            manager.attach_mock(m_transition, "transition")
+
+            from pipeline import run_task
+
+            run_task(
+                repo_url="o/r",
+                task_description="x",
+                github_token="ghp_test",
+                aws_region="us-east-1",
+                task_id="t-ack-order",
+                channel_source="linear",
+                channel_metadata=_LINEAR_META,
+            )
+
+        order = [name for name, _args, _kw in manager.mock_calls]
+        # The 👀 react and the token resolve it depends on both precede the
+        # (potentially minutes-long) setup_repo baseline — as does the Jira
+        # board move (issue #572), all part of the early ACK.
+        assert "react" in order and "setup_repo" in order
+        assert order.index("resolve") < order.index("react")
+        assert order.index("react") < order.index("setup_repo"), (
+            f"👀 react_task_started must fire before setup_repo; order was {order}"
+        )
+        assert order.index("comment") < order.index("setup_repo")
+        assert order.index("transition") < order.index("setup_repo")
+
+    @patch("runner.run_agent")
+    @patch("repo.setup_repo")
+    @patch("pipeline.task_span")
+    @patch("pipeline.task_state")
+    def test_setup_failure_swaps_eyes_to_cross(
+        self,
+        _mock_task_state,
+        mock_task_span,
+        mock_setup_repo,
+        _mock_run_agent,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+
+        # setup_repo raises (e.g. the pre-agent baseline build OOM/timeout) —
+        # the outer handler must still fire the ❌ swap with the early 👀 id.
+        mock_setup_repo.side_effect = RuntimeError("baseline build blew up")
+        mock_task_span.return_value = self._mock_span()
+
+        with (
+            patch("pipeline.resolve_linear_api_token"),
+            patch("pipeline.react_task_started", return_value="reaction-42"),
+            patch("pipeline.comment_task_started"),
+            patch("pipeline.transition_task_started"),
+            patch("pipeline.react_task_finished") as m_finished,
+            patch("pipeline.get_disk_usage", return_value=0),
+            patch("pipeline.print_metrics"),
+        ):
+            import pytest
+
+            from pipeline import run_task
+
+            with pytest.raises(RuntimeError, match="baseline build blew up"):
+                run_task(
+                    repo_url="o/r",
+                    task_description="x",
+                    github_token="ghp_test",
+                    aws_region="us-east-1",
+                    task_id="t-setup-fail",
+                    channel_source="linear",
+                    channel_metadata=_LINEAR_META,
+                )
+
+        # The 👀 posted before setup_repo is swapped to ❌: react_task_finished is
+        # called with success=False and the reaction id captured pre-setup.
+        m_finished.assert_called_once()
+        _args, kwargs = m_finished.call_args
+        assert kwargs.get("success") is False
+        assert kwargs.get("started_reaction_id") == "reaction-42"
