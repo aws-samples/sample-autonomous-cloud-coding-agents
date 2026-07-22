@@ -57,7 +57,7 @@ import { screenImage, screenTextFile, AttachmentScreeningError, type ScreeningCo
 import { estimateImageTokensFromBuffer } from './image-tokens';
 import { logger } from './logger';
 import { createAttachmentRecord, type PassedAttachmentRecord } from './types';
-import { isAllowedMimeType, isValidFilename, validateMagicBytes, MAX_ATTACHMENT_SIZE_BYTES, MAX_TOTAL_ATTACHMENT_SIZE_BYTES, MAX_ATTACHMENTS_PER_TASK } from './validation';
+import { EXTENSION_TO_MIME, isAllowedMimeType, isValidFilename, validateMagicBytes, MAX_ATTACHMENT_SIZE_BYTES, MAX_TOTAL_ATTACHMENT_SIZE_BYTES, MAX_ATTACHMENTS_PER_TASK } from './validation';
 import { ATTACHMENT_OBJECT_KEY_PREFIX } from '../../constructs/attachments-bucket';
 
 /** Per-request timeout for a single attachment download. */
@@ -90,20 +90,6 @@ const PDF_MAGIC = [0x25, 0x50, 0x44, 0x46, 0x2d] as const; // %PDF-
  * excluded from the URL body so the closing bracket can't leak in.
  */
 const MARKDOWN_LINK_OR_IMAGE_PATTERN = /!?\[[^\]]*\]\(<?(https:\/\/[^)>]+)>?\)/g;
-
-/** Extension → MIME for typing a Linear upload when the response content-type
- *  is generic (e.g. application/octet-stream). Only platform-allowed types. */
-const EXTENSION_TO_MIME: Record<string, string> = {
-  png: 'image/png',
-  jpg: 'image/jpeg',
-  jpeg: 'image/jpeg',
-  txt: 'text/plain',
-  log: 'text/x-log',
-  csv: 'text/csv',
-  md: 'text/markdown',
-  json: 'application/json',
-  pdf: 'application/pdf',
-};
 
 /**
  * Thrown when a Linear attachment that was SELECTED for inclusion cannot be

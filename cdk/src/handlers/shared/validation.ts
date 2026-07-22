@@ -448,7 +448,16 @@ function filenameFromUrl(url: string, index: number): string {
   return `url_attachment_${index}`;
 }
 
-const MIME_TO_EXTENSION: Record<string, string> = {
+/**
+ * Canonical MIME → file-extension map for the platform-allowed attachment types.
+ * This is the single source of truth for the type↔extension relationship: other
+ * modules that need the reverse (extension → MIME, e.g. to type a generic
+ * `application/octet-stream` download) derive it from {@link EXTENSION_TO_MIME}
+ * rather than re-listing the types — so adding a supported type is a one-line
+ * change here, inherited in both directions. Keep in step with
+ * ALLOWED_IMAGE_MIME_TYPES / ALLOWED_FILE_MIME_TYPES.
+ */
+export const MIME_TO_EXTENSION: Record<string, string> = {
   'image/png': 'png',
   'image/jpeg': 'jpg',
   'text/plain': 'txt',
@@ -458,6 +467,17 @@ const MIME_TO_EXTENSION: Record<string, string> = {
   'application/pdf': 'pdf',
   'text/x-log': 'log',
 };
+
+/**
+ * Reverse of {@link MIME_TO_EXTENSION}: file-extension → MIME, for typing a
+ * download whose HTTP content-type is generic. Derived (not hand-listed) so it
+ * can never drift from the canonical map. `jpg` → `image/jpeg` covers the common
+ * `.jpeg` alias too via the extra entry below.
+ */
+export const EXTENSION_TO_MIME: Readonly<Record<string, string>> = Object.freeze({
+  ...Object.fromEntries(Object.entries(MIME_TO_EXTENSION).map(([mime, ext]) => [ext, mime])),
+  jpeg: 'image/jpeg', // `.jpeg` is a common alias MIME_TO_EXTENSION collapses to `jpg`
+});
 
 export type AttachmentValidationResult =
   | { readonly valid: true; readonly parsed: ValidatedAttachment[] }
