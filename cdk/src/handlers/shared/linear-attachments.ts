@@ -22,18 +22,24 @@
  *
  * ABCA runs Linear 100% deterministically — there is NO Linear MCP (see
  * ADR-016 "Linear is fully deterministic"). The agent therefore cannot fetch
- * `uploads.linear.app`-hosted images at runtime (that used to be
+ * `uploads.linear.app`-hosted files at runtime (that used to be
  * `mcp__linear-server__extract_images`). Instead, the webhook processor fetches
  * them here at admission time, AUTHENTICATED with the workspace `@bgagent`
  * OAuth token, screens each through the same Bedrock Guardrail pipeline as
  * every other attachment, uploads the cleaned bytes to S3, and returns `passed`
  * AttachmentRecords for `createTaskCore` to persist verbatim.
  *
+ * All platform-supported attachment types come through here, not just images:
+ * images (PNG/JPEG) are screened visually, files (PDF/text/csv/markdown/json/
+ * log) as text — same set the inline/URL paths and `jira-attachments.ts` allow.
+ * Types outside the allowlist (docx, zip, …) are silently skipped, not errored.
+ *
  * This is the Linear analog of `jira-attachments.ts` (#619) — same
  * select → fetch → magic-bytes → screen → upload → record shape, same
  * fail-closed contract ({@link LinearAttachmentError}), same batch cleanup. The
  * one Linear-specific difference is the FETCH primitive: Linear embeds uploaded
- * images as `![alt](https://uploads.linear.app/…)` markdown in the issue
+ * images inline as `![alt](https://uploads.linear.app/…)` and attaches uploaded
+ * files as plain `[label](https://uploads.linear.app/…)` links in the issue
  * description, and those signed URLs require the workspace OAuth bearer (the
  * unauthenticated URL-resolver in `resolve-url-attachments.ts` deliberately
  * SKIPS `uploads.linear.app` for exactly this reason — see
@@ -47,7 +53,7 @@
 import * as dns from 'dns/promises';
 import * as net from 'net';
 import { PutObjectCommand, DeleteObjectsCommand, type S3Client } from '@aws-sdk/client-s3';
-import { screenImage, AttachmentScreeningError, type ScreeningConfig } from './attachment-screening';
+import { screenImage, screenTextFile, AttachmentScreeningError, type ScreeningConfig } from './attachment-screening';
 import { estimateImageTokensFromBuffer } from './image-tokens';
 import { logger } from './logger';
 import { createAttachmentRecord, type PassedAttachmentRecord } from './types';
@@ -57,24 +63,42 @@ import { ATTACHMENT_OBJECT_KEY_PREFIX } from '../../constructs/attachments-bucke
 /** Per-request timeout for a single attachment download. */
 const ATTACHMENT_FETCH_TIMEOUT_MS = 10_000;
 
-/** Cap on `uploads.linear.app` images pulled from one issue description. */
+/** Cap on `uploads.linear.app` files pulled from one issue description. */
 const MAX_LINEAR_UPLOADS_PER_ISSUE = 10;
 
 /** Max length of the derived, path-safe attachment id (S3 key segment). */
 const MAX_ATTACHMENT_ID_LENGTH = 128;
 
 /* eslint-disable @typescript-eslint/no-magic-numbers -- file-format magic-byte signatures */
-/** PNG/JPEG magic-byte signatures used to sniff a generic-content-type body. */
+/** Magic-byte signatures used to sniff a body when the content-type is generic. */
 const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47] as const;
 const JPEG_MAGIC = [0xff, 0xd8, 0xff] as const;
+const PDF_MAGIC = [0x25, 0x50, 0x44, 0x46, 0x2d] as const; // %PDF-
 /* eslint-enable @typescript-eslint/no-magic-numbers */
 
 /**
- * Markdown image reference: `![alt](https://…)`. Mirrors the pattern in
- * `linear-webhook-processor.extractImageUrlAttachments` so the two stay in
- * lockstep about what counts as an embedded image.
+ * Markdown reference to a `uploads.linear.app` file. Matches BOTH the image form
+ * `![alt](url)` AND the plain link form `[label](url)` — Linear embeds uploaded
+ * images inline (`!`) but attaches uploaded files (PDFs, logs, specs) as plain
+ * links. The leading `!` is optional so both are captured. Mirrors the image
+ * pattern in `linear-webhook-processor.extractImageUrlAttachments` (which only
+ * needs the `!` form for the public-CDN URL path).
  */
-const MARKDOWN_IMAGE_PATTERN = /!\[[^\]]*\]\((https:\/\/[^)]+)\)/g;
+const MARKDOWN_LINK_OR_IMAGE_PATTERN = /!?\[[^\]]*\]\((https:\/\/[^)]+)\)/g;
+
+/** Extension → MIME for typing a Linear upload when the response content-type
+ *  is generic (e.g. application/octet-stream). Only platform-allowed types. */
+const EXTENSION_TO_MIME: Record<string, string> = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  txt: 'text/plain',
+  log: 'text/x-log',
+  csv: 'text/csv',
+  md: 'text/markdown',
+  json: 'application/json',
+  pdf: 'application/pdf',
+};
 
 /**
  * Thrown when a Linear attachment that was SELECTED for inclusion cannot be
@@ -105,7 +129,7 @@ export interface LinearAttachmentStorage {
   readonly linearWorkspaceId: string;
 }
 
-/** A `uploads.linear.app` image selected from the description for download. */
+/** A `uploads.linear.app` file selected from the description for download. */
 interface SelectedUpload {
   readonly url: string;
   /** Path-traversal-safe, unique filename for the S3 key + on-disk name. */
@@ -177,15 +201,24 @@ function deriveUploadIdentity(url: string, index: number): { id: string; filenam
   // re-signed URL for the same object maps to the same id). Bounded length.
   const id = (pathname.replace(/[^A-Za-z0-9_-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '') || `upload-${index}`).slice(0, MAX_ATTACHMENT_ID_LENGTH);
   const sanitized = lastSegment.replace(/[^a-zA-Z0-9._-]/g, '_');
-  const filename = isValidFilename(sanitized) ? sanitized : `linear-upload-${index}.png`;
+  // No .png default: a link-form upload may be a PDF/log. A generic fallback name
+  // keeps the extension out of the type decision (content-type/magic-bytes win).
+  const filename = isValidFilename(sanitized) ? sanitized : `linear-upload-${index}`;
   return { id, filename };
 }
 
+/** Lowercased file extension (no dot) of a filename, or '' if none. */
+function extensionOf(filename: string): string {
+  const dot = filename.lastIndexOf('.');
+  return dot > 0 ? filename.slice(dot + 1).toLowerCase() : '';
+}
+
 /**
- * Scan an issue description for `uploads.linear.app` markdown images, capped at
+ * Scan an issue description for `uploads.linear.app` markdown files (both image
+ * `![](url)` and link `[](url)` forms), capped at
  * {@link MAX_LINEAR_UPLOADS_PER_ISSUE} and the remaining per-task slot budget.
- * Non-Linear-hosted images are ignored here (the unauthenticated URL path in
- * `resolve-url-attachments.ts` handles those). De-dupes by id.
+ * Non-Linear-hosted URLs are ignored here (the unauthenticated URL path in
+ * `resolve-url-attachments.ts` handles public images). De-dupes by id.
  */
 function selectLinearUploads(description: string | undefined, remainingSlots: number): SelectedUpload[] {
   if (!description) return [];
@@ -196,11 +229,11 @@ function selectLinearUploads(description: string | undefined, remainingSlots: nu
   const seenIds = new Set<string>();
   let index = 0;
   let match: RegExpExecArray | null;
-  MARKDOWN_IMAGE_PATTERN.lastIndex = 0;
-  while ((match = MARKDOWN_IMAGE_PATTERN.exec(description)) !== null) {
+  MARKDOWN_LINK_OR_IMAGE_PATTERN.lastIndex = 0;
+  while ((match = MARKDOWN_LINK_OR_IMAGE_PATTERN.exec(description)) !== null) {
     if (selected.length >= slotCap) break;
     const url = match[1];
-    if (!isLinearUploadsUrl(url)) continue; // public CDN images go via the URL path
+    if (!isLinearUploadsUrl(url)) continue; // public CDN URLs go via the URL path
     const { id, filename } = deriveUploadIdentity(url, index++);
     if (seenIds.has(id)) continue;
     seenIds.add(id);
@@ -288,7 +321,7 @@ async function fetchUploadBytes(
 }
 
 /**
- * Fetch, screen, and store the `uploads.linear.app` images embedded in an issue
+ * Fetch, screen, and store the `uploads.linear.app` files embedded in an issue
  * description, returning `passed` AttachmentRecords for `createTaskCore` to
  * persist verbatim.
  *
@@ -349,26 +382,42 @@ export async function downloadScreenAndStoreLinearAttachments(
         throw new LinearAttachmentError(`Attachment '${upload.filename}' is empty (0 bytes).`);
       }
 
-      // Infer the image MIME from the response content-type; fall back to
-      // sniffing the magic bytes. Only images are embedded via uploads.linear.app
-      // markdown, and screenImage + the allowlist enforce PNG/JPEG.
-      const mimeType = inferImageMime(outcome.contentType, content);
-      if (!mimeType || !isAllowedMimeType(mimeType, 'image')) {
-        throw new LinearAttachmentError(
-          `Attachment '${upload.filename}' is not a supported image type (${outcome.contentType || 'unknown'}).`,
-        );
+      // Infer the MIME from the response content-type, the filename extension,
+      // then the magic bytes (in that order of trust). Linear embeds uploaded
+      // images inline and attaches uploaded files (PDFs, logs, CSVs, JSON, text)
+      // as links — both come through here. The platform allowlist gates the
+      // supported set: images (PNG/JPEG) and files (PDF/text/csv/markdown/json/
+      // log). Anything else (docx, zip, …) is silently skipped, matching the
+      // pre-download filter contract — an unsupported upload is not a task error.
+      const mimeType = inferMime(outcome.contentType, upload.filename, content);
+      const isImage = mimeType.startsWith('image/');
+      const attachmentType = isImage ? 'image' : 'file';
+      if (!mimeType || !isAllowedMimeType(mimeType, attachmentType)) {
+        logger.info('Skipping unsupported Linear upload type', {
+          linear_workspace_id: ctx.linearWorkspaceId,
+          attachment_filename: upload.filename,
+          content_type: outcome.contentType || 'unknown',
+          inferred_mime: mimeType || 'unknown',
+        });
+        continue;
       }
+      // Confirm the bytes match the resolved type (blocks a masquerading/polyglot
+      // payload). Text types have no signature — validateMagicBytes checks for
+      // valid, null-free UTF-8 instead.
       if (!validateMagicBytes(content, mimeType)) {
         throw new LinearAttachmentError(
-          `Attachment '${upload.filename}' content does not match its declared image type '${mimeType}'.`,
+          `Attachment '${upload.filename}' content does not match its declared type '${mimeType}'.`,
         );
       }
 
       // Screen through the same Bedrock Guardrail pipeline as every other
-      // attachment. Any block or screening failure is fail-closed.
+      // attachment — images visually, files as text. Any block or screening
+      // failure is fail-closed.
       let screenResult;
       try {
-        screenResult = await screenImage(content, mimeType, upload.filename, ctx.screeningConfig);
+        screenResult = isImage
+          ? await screenImage(content, mimeType, upload.filename, ctx.screeningConfig)
+          : await screenTextFile(content, mimeType, upload.filename, ctx.screeningConfig);
       } catch (err) {
         if (err instanceof AttachmentScreeningError) {
           throw new LinearAttachmentError(
@@ -411,9 +460,15 @@ export async function downloadScreenAndStoreLinearAttachments(
       }
       uploadedKeys.push(s3Key);
 
+      // Only images carry a token estimate (files aren't fed to the model as
+      // vision tokens). Mirrors jira-attachments.
+      const tokenEstimate = isImage
+        ? estimateImageTokensFromBuffer(screenResult.content, mimeType)
+        : undefined;
+
       records.push(createAttachmentRecord({
         attachment_id: upload.id,
-        type: 'image',
+        type: attachmentType,
         content_type: mimeType,
         filename: upload.filename,
         s3_key: s3Key,
@@ -421,7 +476,7 @@ export async function downloadScreenAndStoreLinearAttachments(
         size_bytes: screenResult.content.length,
         screening: { status: 'passed', screened_at: new Date().toISOString() },
         checksum_sha256: screenResult.checksum,
-        token_estimate: estimateImageTokensFromBuffer(screenResult.content, mimeType),
+        ...(tokenEstimate !== undefined && { token_estimate: tokenEstimate }),
       }) as PassedAttachmentRecord);
 
       logger.info('Linear attachment downloaded, screened, and stored', {
@@ -445,12 +500,24 @@ function startsWith(content: Buffer, magic: readonly number[]): boolean {
   return magic.every((byte, i) => content[i] === byte);
 }
 
-/** PNG/JPEG magic bytes → MIME, preferring the response content-type when it
- *  is an allowed image type, else sniffing. Returns '' if neither yields one. */
-function inferImageMime(contentType: string, content: Buffer): string {
-  if (contentType === 'image/png' || contentType === 'image/jpeg') return contentType;
+/**
+ * Resolve the MIME type of a downloaded upload, in descending order of trust:
+ *   1. the response content-type, if it is itself a platform-allowed type;
+ *   2. the filename extension (covers generic `application/octet-stream`
+ *      responses — common for Linear file links to PDFs/logs/CSVs);
+ *   3. a recognised binary magic-byte signature (PNG/JPEG/PDF).
+ * Returns '' if none applies (caller silently skips the upload). Text types are
+ * never sniffed from bytes — they rely on the extension in step 2.
+ */
+function inferMime(contentType: string, filename: string, content: Buffer): string {
+  if (contentType && (isAllowedMimeType(contentType, 'image') || isAllowedMimeType(contentType, 'file'))) {
+    return contentType;
+  }
+  const byExt = EXTENSION_TO_MIME[extensionOf(filename)];
+  if (byExt) return byExt;
   if (startsWith(content, PNG_MAGIC)) return 'image/png';
   if (startsWith(content, JPEG_MAGIC)) return 'image/jpeg';
+  if (startsWith(content, PDF_MAGIC)) return 'application/pdf';
   return '';
 }
 

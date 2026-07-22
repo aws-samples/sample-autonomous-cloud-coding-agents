@@ -18,11 +18,13 @@
  */
 
 const screenImageMock = jest.fn();
+const screenTextFileMock = jest.fn();
 jest.mock('../../../src/handlers/shared/attachment-screening', () => {
   const actual = jest.requireActual('../../../src/handlers/shared/attachment-screening');
   return {
     ...actual,
     screenImage: (...args: unknown[]) => screenImageMock(...args),
+    screenTextFile: (...args: unknown[]) => screenTextFileMock(...args),
   };
 });
 
@@ -42,6 +44,8 @@ import { MAX_ATTACHMENT_SIZE_BYTES } from '../../../src/handlers/shared/validati
 
 const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00]);
 const JPEG_BYTES = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]);
+const PDF_BYTES = Buffer.from('%PDF-1.7\n1 0 obj\n<<>>\nendobj\n');
+const TEXT_BYTES = Buffer.from('log line one\nlog line two\n');
 
 const putSendMock = jest.fn();
 const s3Client = { send: putSendMock } as unknown as import('@aws-sdk/client-s3').S3Client;
@@ -67,6 +71,10 @@ function storageCtx() {
 const UPLOAD_URL = 'https://uploads.linear.app/aaaa-1111/bbbb-2222/screenshot.png?signature=abc';
 function desc(...urls: string[]): string {
   return `Some issue text\n\n${urls.map((u, i) => `![img${i}](${u})`).join('\n')}\n\nmore text`;
+}
+/** Description with plain-link (file) markdown `[label](url)` rather than image `![]()`. */
+function fileDesc(...urls: string[]): string {
+  return `Some issue text\n\n${urls.map((u, i) => `[file${i}](${u})`).join('\n')}\n\nmore text`;
 }
 
 /** A fetch Response-like object whose body streams the given buffer once. */
@@ -96,6 +104,12 @@ beforeEach(() => {
   screenImageMock.mockImplementation((content: Buffer) => Promise.resolve({
     content,
     checksum: 'sha256:abc',
+    screening: { status: 'passed', screened_at: '2026-07-22T00:00:00Z' },
+  }));
+  screenTextFileMock.mockReset();
+  screenTextFileMock.mockImplementation((content: Buffer) => Promise.resolve({
+    content,
+    checksum: 'sha256:def',
     screening: { status: 'passed', screened_at: '2026-07-22T00:00:00Z' },
   }));
   putSendMock.mockReset();
@@ -192,11 +206,42 @@ describe('downloadScreenAndStoreLinearAttachments', () => {
     expect(screenImageMock).not.toHaveBeenCalled();
   });
 
-  test('non-image content-type with no image magic bytes → LinearAttachmentError', async () => {
-    (global.fetch as jest.Mock).mockResolvedValueOnce(bytesResponse(Buffer.from('hello'), 200, 'text/plain'));
-    await expect(
-      downloadScreenAndStoreLinearAttachments(desc(UPLOAD_URL), 10, storageCtx()),
-    ).rejects.toBeInstanceOf(LinearAttachmentError);
+  test('fetches a PDF file link, screens it as text, returns a file record', async () => {
+    (global.fetch as jest.Mock).mockResolvedValueOnce(bytesResponse(PDF_BYTES, 200, 'application/pdf'));
+    const records = await downloadScreenAndStoreLinearAttachments(
+      fileDesc('https://uploads.linear.app/u/p/design.pdf'), 10, storageCtx(),
+    );
+    expect(records).toHaveLength(1);
+    expect(records[0].type).toBe('file');
+    expect(records[0].content_type).toBe('application/pdf');
+    expect(records[0].token_estimate).toBeUndefined(); // files don't carry a vision-token estimate
+    expect(screenTextFileMock).toHaveBeenCalled();
+    expect(screenImageMock).not.toHaveBeenCalled();
+    expect(putSendMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('types a generic octet-stream response by its .log extension and screens as text', async () => {
+    (global.fetch as jest.Mock).mockResolvedValueOnce(bytesResponse(TEXT_BYTES, 200, 'application/octet-stream'));
+    const records = await downloadScreenAndStoreLinearAttachments(
+      fileDesc('https://uploads.linear.app/u/l/output.log'), 10, storageCtx(),
+    );
+    expect(records).toHaveLength(1);
+    expect(records[0].type).toBe('file');
+    expect(records[0].content_type).toBe('text/x-log');
+    expect(screenTextFileMock).toHaveBeenCalled();
+  });
+
+  test('silently SKIPS an unsupported type (docx/zip) — not a task error', async () => {
+    (global.fetch as jest.Mock).mockResolvedValueOnce(
+      bytesResponse(Buffer.from([0x50, 0x4b, 0x03, 0x04]), 200, 'application/zip'),
+    );
+    const records = await downloadScreenAndStoreLinearAttachments(
+      fileDesc('https://uploads.linear.app/u/z/bundle.zip'), 10, storageCtx(),
+    );
+    expect(records).toHaveLength(0);
+    expect(screenImageMock).not.toHaveBeenCalled();
+    expect(screenTextFileMock).not.toHaveBeenCalled();
+    expect(putSendMock).not.toHaveBeenCalled();
   });
 
   test('sniffs JPEG when content-type is generic but bytes are a JPEG', async () => {
