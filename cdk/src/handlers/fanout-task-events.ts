@@ -572,17 +572,28 @@ async function saveCommentState(
 const CONDITIONAL_CHECK_FAILED = 'ConditionalCheckFailedException';
 
 /**
- * Shared post-once / dedup marker writer for channel dispatchers. Both the
- * GitHub comment-id persistence and the Linear post-once marker share the
- * same load-bearing invariant: a successful external post must NEVER turn
- * into a batch retry because the marker write failed (the retry IS the
- * duplicate the marker exists to prevent). So this helper never throws —
- * it classifies the failure instead:
+ * Shared post-once / dedup marker writer for channel dispatchers, called AFTER a
+ * successful external post to record that it happened so a later event/retry
+ * skips it. It does NOT gate the post (the post already occurred by the time this
+ * runs); it is best-effort dedup, not a claim.
  *
- *   - ConditionalCheckFailedException → benign INFO (TTL eviction, or a
- *     sibling invocation won the race; its post is the surviving one).
- *   - anything else → ERROR with the channel's ``error_id`` so operators
- *     can alarm on "next event/retry may duplicate" distinctly.
+ * Load-bearing invariant: a successful external post must NEVER turn into a batch
+ * retry because the marker write failed (the retry IS the duplicate the marker
+ * exists to prevent). So this helper never throws — it classifies the failure and
+ * returns:
+ *
+ *   - ConditionalCheckFailedException → benign INFO (TTL eviction, or a concurrent
+ *     invocation already wrote the marker — both posts may exist; cosmetic).
+ *   - anything else → ERROR with the channel's ``error_id`` so operators can alarm
+ *     on "marker unwritten → next event/retry may duplicate" distinctly.
+ *
+ * KNOWN GAP (review #7): because the marker is written after the post, two
+ * concurrent invocations — or a successful post whose marker write is throttled,
+ * then a sibling-channel partial-batch retry — can each post once. Closing this
+ * needs a claim-BEFORE-post protocol with release-on-retryable-failure (else a
+ * retryable post failure would strand the marker and DROP the comment); tracked
+ * as a fan-out-wide idempotency change, not done here. Impact: a rare duplicate
+ * courtesy/status comment, never a lost one.
  */
 async function saveDispatchMarker(opts: {
   readonly taskId: string;
@@ -592,9 +603,9 @@ async function saveDispatchMarker(opts: {
   readonly channel: string;
   readonly errorId: string;
   readonly logContext?: Record<string, unknown>;
-}): Promise<boolean> {
+}): Promise<void> {
   const tableName = process.env.TASK_TABLE_NAME;
-  if (!tableName) return true; // no table (local/test) — treat as claimed
+  if (!tableName) return;
   try {
     await ddb.send(new UpdateCommand({
       TableName: tableName,
@@ -603,7 +614,6 @@ async function saveDispatchMarker(opts: {
       ExpressionAttributeValues: opts.values,
       ConditionExpression: opts.conditionExpression,
     }));
-    return true; // won the claim / persisted
   } catch (err) {
     const name = (err as Error)?.name;
     if (name === CONDITIONAL_CHECK_FAILED) {
@@ -612,7 +622,7 @@ async function saveDispatchMarker(opts: {
         task_id: opts.taskId,
         ...opts.logContext,
       });
-      return false; // lost the claim (a sibling already holds it)
+      return;
     }
     logger.error(`[fanout/${opts.channel}] marker persist failed — next event/retry may duplicate`, {
       event: `fanout.${opts.channel}.marker_persist_failed`,
@@ -622,9 +632,6 @@ async function saveDispatchMarker(opts: {
       error: err instanceof Error ? err.message : String(err),
       ...opts.logContext,
     });
-    // A transient DDB error on the claim write: treat as NOT claimed so the
-    // caller doesn't post on an unpersisted marker (a retry re-claims cleanly).
-    return false;
   }
 }
 
