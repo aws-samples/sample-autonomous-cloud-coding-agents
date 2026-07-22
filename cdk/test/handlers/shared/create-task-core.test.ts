@@ -976,5 +976,46 @@ describe('createTaskCore', () => {
       // No task persisted.
       expect(persistedTaskItem()).toBeUndefined();
     });
+
+    test('rejects when COMBINED attachment size exceeds the task-wide limit (aggregate check)', async () => {
+      // Review: each source's own subtotal can pass while the merged set blows
+      // past the 50 MB task cap. Simulate that with several large passed records
+      // (the shape both Linear-hosted files and resolved public images arrive as
+      // by the time they reach createTaskCore). 6 × 10 MB = 60 MB > 50 MB.
+      const tenMB = 10 * 1024 * 1024;
+      const big = Array.from({ length: 6 }, (_, i) => ({
+        ...passedRecord,
+        attachment_id: `att-big-${i}`,
+        filename: `big-${i}.bin`,
+        s3_key: `attachments/user-123/T/att-big-${i}/big-${i}.bin`,
+        size_bytes: tenMB,
+      }));
+      const result = await createTaskCore(
+        { repo: 'org/repo', task_description: 'Fix', workflow_ref: 'coding/new-task-v1' },
+        makeContext({ preScreenedAttachments: big }),
+        'req-577-agg',
+      );
+      expect(result.statusCode).toBe(400);
+      expect(JSON.parse(result.body).error.message).toMatch(/Combined attachment size exceeds/i);
+      expect(persistedTaskItem()).toBeUndefined();
+    });
+
+    test('allows a combined size within the task-wide limit', async () => {
+      const fiveMB = 5 * 1024 * 1024;
+      const ok = Array.from({ length: 4 }, (_, i) => ({
+        ...passedRecord,
+        attachment_id: `att-ok-${i}`,
+        filename: `ok-${i}.bin`,
+        s3_key: `attachments/user-123/T/att-ok-${i}/ok-${i}.bin`,
+        size_bytes: fiveMB, // 4 × 5 MB = 20 MB < 50 MB
+      }));
+      const result = await createTaskCore(
+        { repo: 'org/repo', task_description: 'Fix', workflow_ref: 'coding/new-task-v1' },
+        makeContext({ preScreenedAttachments: ok }),
+        'req-577-agg-ok',
+      );
+      expect(result.statusCode).toBe(201);
+      expect(persistedTaskItem().attachments).toHaveLength(4);
+    });
   });
 });

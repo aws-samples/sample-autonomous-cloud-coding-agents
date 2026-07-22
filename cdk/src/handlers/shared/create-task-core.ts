@@ -53,7 +53,7 @@ import {
   type TaskRecord,
   toTaskDetail,
 } from './types';
-import { computeTtlEpoch, hasTaskSpec, isValidIdempotencyKey, isValidRepo, isValidTaskDescriptionLength, MAX_ATTACHMENT_SIZE_BYTES, MAX_TASK_DESCRIPTION_LENGTH, validateAttachments, validateMaxBudgetUsd, validateMaxTurns, validatePrNumber } from './validation';
+import { computeTtlEpoch, hasTaskSpec, isValidIdempotencyKey, isValidRepo, isValidTaskDescriptionLength, MAX_ATTACHMENT_SIZE_BYTES, MAX_TASK_DESCRIPTION_LENGTH, MAX_TOTAL_ATTACHMENT_SIZE_BYTES, validateAttachments, validateMaxBudgetUsd, validateMaxTurns, validatePrNumber } from './validation';
 import { disallowedWorkflowModel, getWorkflowDescriptor, isValidWorkflowRef, resolveWorkflowRef, resolveWorkflowRefError } from './workflows';
 import { ATTACHMENT_OBJECT_KEY_PREFIX } from '../../constructs/attachments-bucket';
 import { TaskStatus } from '../../constructs/task-status';
@@ -590,6 +590,34 @@ export async function createTaskCore(
       }
     }
     attachmentRecords.push(...context.preScreenedAttachments);
+  }
+
+  // Aggregate size ceiling ACROSS sources (review): each source enforces its own
+  // subtotal (wire inline, the URL resolver per-URL, the Linear batch's own total),
+  // but nothing summed the MERGED set — so N sources could each pass their own
+  // check and jointly blow past the task-wide cap (e.g. 5×10 MB public images +
+  // 5×10 MB Linear files ≈ 100 MB under a 50 MB limit). Sum every record whose
+  // size is known NOW (inline + pre-screened; presigned uploads are still `pending`
+  // and are bounded separately at confirm-uploads time) and fail closed.
+  const knownTotalBytes = attachmentRecords.reduce(
+    (sum, r) => sum + (typeof (r as { size_bytes?: number }).size_bytes === 'number' ? (r as { size_bytes: number }).size_bytes : 0),
+    0,
+  );
+  if (knownTotalBytes > MAX_TOTAL_ATTACHMENT_SIZE_BYTES) {
+    logger.warn('Combined attachment size exceeds the task-wide limit (fail-closed)', {
+      total_bytes: knownTotalBytes,
+      limit_bytes: MAX_TOTAL_ATTACHMENT_SIZE_BYTES,
+      attachment_count: attachmentRecords.length,
+      request_id: requestId,
+      metric_type: 'attachment_total_size_exceeded',
+    });
+    // Don't orphan any inline uploads this call made before rejecting.
+    if (s3Client) await cleanupOrphanedAttachments(s3Client, uploadedS3Keys);
+    return errorResponse(
+      400, ErrorCode.VALIDATION_ERROR,
+      `Combined attachment size exceeds the ${MAX_TOTAL_ATTACHMENT_SIZE_BYTES}-byte task limit.`,
+      requestId,
+    );
   }
 
   // 3. Check idempotency key
