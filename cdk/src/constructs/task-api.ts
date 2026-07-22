@@ -116,6 +116,20 @@ export interface TaskApiProps {
   readonly webhookTable?: dynamodb.ITable;
 
   /**
+   * The DynamoDB platform API key table. When provided, API key management
+   * endpoints are created and the webhook management endpoints accept an API
+   * key (with `webhooks:manage`) in addition to a Cognito JWT.
+   */
+  readonly apiKeyTable?: dynamodb.ITable;
+
+  /**
+   * Number of days to retain revoked API key records before DynamoDB TTL
+   * deletes them.
+   * @default 30
+   */
+  readonly apiKeyRetentionDays?: number;
+
+  /**
    * ARN of the orchestrator Lambda alias. When set, the create-task handler
    * async-invokes the orchestrator after writing the task record.
    */
@@ -198,10 +212,13 @@ export interface TaskApiProps {
  * - GET    /tasks/{task_id}      → getTask (Cognito)
  * - DELETE /tasks/{task_id}      → cancelTask (Cognito)
  * - GET    /tasks/{task_id}/events → getTaskEvents (Cognito)
- * - POST   /webhooks             → createWebhook (Cognito)
- * - GET    /webhooks             → listWebhooks (Cognito)
- * - DELETE /webhooks/{webhook_id} → deleteWebhook (Cognito)
+ * - POST   /webhooks             → createWebhook (Cognito, or JWT/API-key when apiKeyTable set)
+ * - GET    /webhooks             → listWebhooks (Cognito, or JWT/API-key when apiKeyTable set)
+ * - DELETE /webhooks/{webhook_id} → deleteWebhook (Cognito, or JWT/API-key when apiKeyTable set)
  * - POST   /webhooks/tasks       → webhookCreateTask (REQUEST authorizer)
+ * - POST   /api-keys             → createApiKey (Cognito)
+ * - GET    /api-keys             → listApiKeys (Cognito)
+ * - DELETE /api-keys/{key_id}    → deleteApiKey (Cognito)
  */
 export class TaskApi extends Construct {
   /**
@@ -327,6 +344,18 @@ export class TaskApi extends Construct {
                       },
                     },
                     {
+                      // Jira issue payloads include the full issue field set.
+                      // Attachment metadata can push them over 8 KB. The
+                      // receiver HMAC-verifies the raw body and the priority-4
+                      // rule below still rate-limits this route.
+                      byteMatchStatement: {
+                        fieldToMatch: { uriPath: {} },
+                        positionalConstraint: 'EXACTLY',
+                        searchString: '/v1/jira/webhook',
+                        textTransformations: [{ priority: 0, type: 'NONE' }],
+                      },
+                    },
+                    {
                       // GitHub deployment_status webhook (preview-deploy
                       // screenshot pipeline). The full payload (workflow run
                       // history + deploy URLs + deployment metadata) exceeds
@@ -371,6 +400,18 @@ export class TaskApi extends Construct {
                             fieldToMatch: { uriPath: {} },
                             positionalConstraint: 'STARTS_WITH',
                             searchString: '/v1/tasks',
+                            textTransformations: [{ priority: 0, type: 'NONE' }],
+                          },
+                        },
+                      },
+                    },
+                    {
+                      notStatement: {
+                        statement: {
+                          byteMatchStatement: {
+                            fieldToMatch: { uriPath: {} },
+                            positionalConstraint: 'EXACTLY',
+                            searchString: '/v1/jira/webhook',
                             textTransformations: [{ priority: 0, type: 'NONE' }],
                           },
                         },
@@ -984,6 +1025,95 @@ export class TaskApi extends Construct {
       }
     }
 
+    // --- Platform API key infrastructure (only when apiKeyTable is provided) ---
+    //
+    // Default: webhook management routes stay Cognito-only. When an API key
+    // table is wired, a unified REQUEST authorizer replaces Cognito on those
+    // routes so they accept EITHER a Cognito JWT OR a `webhooks:manage` API key
+    // (issue #376). Key *creation* stays Cognito-gated.
+    let webhookMgmtAuthOptions: apigw.MethodOptions = cognitoAuthOptions;
+
+    if (props.apiKeyTable) {
+      const apiKeyEnv: Record<string, string> = {
+        API_KEY_TABLE_NAME: props.apiKeyTable.tableName,
+        API_KEY_RETENTION_DAYS: String(props.apiKeyRetentionDays ?? DEFAULT_WEBHOOK_RETENTION_DAYS),
+      };
+
+      // --- Unified authorizer: Cognito JWT OR platform API key ---
+      const apiKeyAuthorizerFn = new lambda.NodejsFunction(this, 'ApiKeyAuthorizerFn', {
+        entry: path.join(handlersDir, 'api-key-authorizer.ts'),
+        handler: 'handler',
+        runtime: Runtime.NODEJS_24_X,
+        architecture: Architecture.ARM_64,
+        environment: {
+          API_KEY_TABLE_NAME: props.apiKeyTable.tableName,
+          API_KEY_REQUIRED_SCOPE: 'webhooks:manage',
+          USER_POOL_ID: this.userPool.userPoolId,
+          APP_CLIENT_ID: this.appClient.userPoolClientId,
+        },
+        bundling: commonBundling,
+      });
+      props.apiKeyTable.grantReadData(apiKeyAuthorizerFn);
+
+      // No fixed identity source: a request carries EITHER Authorization OR
+      // X-API-Key, never a guaranteed one. Multiple identity sources are AND-ed
+      // and would short-circuit to 401 before the Lambda runs, so we leave them
+      // empty and disable caching (the Lambda decides on every request).
+      const webhookMgmtAuthorizer = new apigw.RequestAuthorizer(this, 'ApiKeyOrJwtAuthorizer', {
+        handler: apiKeyAuthorizerFn,
+        identitySources: [],
+        resultsCacheTtl: Duration.seconds(0),
+      });
+
+      webhookMgmtAuthOptions = {
+        authorizer: webhookMgmtAuthorizer,
+        authorizationType: apigw.AuthorizationType.CUSTOM,
+        requestValidator,
+      };
+
+      // --- API key management Lambdas (Cognito-authenticated — minting a key
+      // requires a real interactive user) ---
+      const createApiKeyFn = new lambda.NodejsFunction(this, 'CreateApiKeyFn', {
+        entry: path.join(handlersDir, 'create-api-key.ts'),
+        handler: 'handler',
+        runtime: Runtime.NODEJS_24_X,
+        architecture: Architecture.ARM_64,
+        environment: apiKeyEnv,
+        bundling: commonBundling,
+      });
+
+      const listApiKeysFn = new lambda.NodejsFunction(this, 'ListApiKeysFn', {
+        entry: path.join(handlersDir, 'list-api-keys.ts'),
+        handler: 'handler',
+        runtime: Runtime.NODEJS_24_X,
+        architecture: Architecture.ARM_64,
+        environment: apiKeyEnv,
+        bundling: commonBundling,
+      });
+
+      const deleteApiKeyFn = new lambda.NodejsFunction(this, 'DeleteApiKeyFn', {
+        entry: path.join(handlersDir, 'delete-api-key.ts'),
+        handler: 'handler',
+        runtime: Runtime.NODEJS_24_X,
+        architecture: Architecture.ARM_64,
+        environment: apiKeyEnv,
+        bundling: commonBundling,
+      });
+
+      props.apiKeyTable.grantReadWriteData(createApiKeyFn);
+      props.apiKeyTable.grantReadData(listApiKeysFn);
+      props.apiKeyTable.grantReadWriteData(deleteApiKeyFn);
+
+      const apiKeys = this.api.root.addResource('api-keys');
+      apiKeys.addMethod('POST', new apigw.LambdaIntegration(createApiKeyFn), cognitoAuthOptions);
+      apiKeys.addMethod('GET', new apigw.LambdaIntegration(listApiKeysFn), cognitoAuthOptions);
+
+      const apiKeyById = apiKeys.addResource('{key_id}');
+      apiKeyById.addMethod('DELETE', new apigw.LambdaIntegration(deleteApiKeyFn), cognitoAuthOptions);
+
+      allFunctions.push(apiKeyAuthorizerFn, createApiKeyFn, listApiKeysFn, deleteApiKeyFn);
+    }
+
     // --- Webhook endpoints (only when webhookTable is provided) ---
     if (props.webhookTable) {
       const webhookEnv: Record<string, string> = {
@@ -1122,12 +1252,26 @@ export class TaskApi extends Construct {
       };
 
       // --- API resource tree: /webhooks ---
+      // Management routes use the unified authorizer when an API key table is
+      // wired (JWT or `webhooks:manage` key), else fall back to Cognito-only.
       const webhooks = this.api.root.addResource('webhooks');
-      webhooks.addMethod('POST', new apigw.LambdaIntegration(createWebhookFn), cognitoAuthOptions);
-      webhooks.addMethod('GET', new apigw.LambdaIntegration(listWebhooksFn), cognitoAuthOptions);
+      const createWebhookMethod = webhooks.addMethod('POST', new apigw.LambdaIntegration(createWebhookFn), webhookMgmtAuthOptions);
+      const listWebhooksMethod = webhooks.addMethod('GET', new apigw.LambdaIntegration(listWebhooksFn), webhookMgmtAuthOptions);
 
       const webhookById = webhooks.addResource('{webhook_id}');
-      webhookById.addMethod('DELETE', new apigw.LambdaIntegration(deleteWebhookFn), cognitoAuthOptions);
+      const deleteWebhookMethod = webhookById.addMethod('DELETE', new apigw.LambdaIntegration(deleteWebhookFn), webhookMgmtAuthOptions);
+
+      // When the unified authorizer is in use these methods are CUSTOM, not
+      // Cognito — suppress COG4 (the authorizer still enforces a Cognito JWT
+      // or a scoped API key; issue #376).
+      if (props.apiKeyTable) {
+        NagSuppressions.addResourceSuppressions([createWebhookMethod, listWebhooksMethod, deleteWebhookMethod], [
+          {
+            id: 'AwsSolutions-COG4',
+            reason: 'Webhook management uses a unified REQUEST authorizer accepting a Cognito JWT or a scoped platform API key — by design for headless automation (issue #376)',
+          },
+        ]);
+      }
 
       const webhookTasks = webhooks.addResource('tasks');
       const webhookTasksMethod = webhookTasks.addMethod('POST', new apigw.LambdaIntegration(webhookCreateTaskFn), webhookAuthOptions);

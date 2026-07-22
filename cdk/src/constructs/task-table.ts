@@ -20,6 +20,9 @@
 import { RemovalPolicy } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import { Construct } from 'constructs';
+import { JIRA_ISSUE_INDEX_NAME } from './task-table-indexes';
+
+export { JIRA_ISSUE_INDEX_NAME } from './task-table-indexes';
 
 /**
  * Properties for TaskTable construct.
@@ -47,13 +50,15 @@ export interface TaskTableProps {
 /**
  * DynamoDB table for persisting task state across the agent lifecycle.
  *
- * Schema: task_id (PK) with three GSIs for querying by user+status,
- * by status (queue processing), and by idempotency key (dedup).
+ * Schema: task_id (PK) with GSIs for querying by user+status, by status
+ * (queue processing), by idempotency key (dedup), and by Jira issue.
  *
  * GSIs:
  * - UserStatusIndex (PK: user_id, SK: status_created_at) — "my tasks" queries
  * - StatusIndex (PK: status, SK: created_at) — queue processing, monitoring
  * - IdempotencyIndex (PK: idempotency_key) — sparse index for dedup
+ * - JiraIssueIndex (PK: jira_issue_identity, SK: created_at) — sparse index
+ *   for resolving a Jira issue to its newest PR-producing task
  */
 export class TaskTable extends Construct {
   /**
@@ -73,6 +78,12 @@ export class TaskTable extends Construct {
    * PK: idempotency_key. Sparse index — only items with the key are projected.
    */
   public static readonly IDEMPOTENCY_INDEX = 'IdempotencyIndex';
+
+  /**
+   * GSI for resolving a tenant-scoped Jira issue to its newest ABCA task.
+   * PK: jira_issue_identity (`{cloudId}#{issueKey}`), SK: created_at.
+   */
+  public static readonly JIRA_ISSUE_INDEX = JIRA_ISSUE_INDEX_NAME;
 
   /**
    * The underlying DynamoDB table. Use this to grant access or read the table name.
@@ -117,6 +128,17 @@ export class TaskTable extends Construct {
       indexName: TaskTable.IDEMPOTENCY_INDEX,
       partitionKey: { name: 'idempotency_key', type: dynamodb.AttributeType.STRING },
       projectionType: dynamodb.ProjectionType.KEYS_ONLY,
+    });
+
+    // Sparse: only Jira-origin tasks with issue metadata carry the top-level
+    // jira_issue_identity attribute. Keep the projection limited to fields the
+    // comment-trigger resolver needs.
+    this.table.addGlobalSecondaryIndex({
+      indexName: TaskTable.JIRA_ISSUE_INDEX,
+      partitionKey: { name: 'jira_issue_identity', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'created_at', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.INCLUDE,
+      nonKeyAttributes: ['pr_url', 'pr_number', 'status', 'repo', 'user_id', 'channel_metadata'],
     });
   }
 }

@@ -39,13 +39,14 @@ describe('AgentStack', () => {
   test('creates exactly 18 DynamoDB tables', () => {
     // task, task-events, repo, user-concurrency, webhook, task-nudges,
     // task-approvals (Cedar HITL V2),
+    // api-key (platform API keys for headless webhook management, #376),
     // slack-installation, slack-user-mapping,
     // linear-project-mapping, linear-user-mapping, linear-webhook-dedup,
     // linear-workspace-registry (added in Phase 2.0b for OAuth bookkeeping),
     // jira-project-mapping, jira-user-mapping, jira-workspace-registry,
     // jira-webhook-dedup (added for the Jira Cloud integration),
     // github-webhook-dedup (added by GitHubScreenshotIntegration on main)
-    template.resourceCountIs('AWS::DynamoDB::Table', 18);
+    template.resourceCountIs('AWS::DynamoDB::Table', 19);
   });
 
   test('creates TaskApprovalsTable with user_id-status-index GSI', () => {
@@ -67,6 +68,12 @@ describe('AgentStack', () => {
     template.hasOutput('TaskApprovalsTableName', {
       Description: 'Name of the DynamoDB task approvals table (Cedar HITL)',
     });
+  });
+
+  test('outputs ComputeSubstrate=agentcore on the default (no-gate) deploy', () => {
+    // The CLI reads this to refuse onboarding a repo as compute_type=ecs on a
+    // stack that never provisioned the ECS substrate.
+    template.hasOutput('ComputeSubstrate', { Value: 'agentcore' });
   });
 
   test('outputs CedarWasmLayerArn', () => {
@@ -500,5 +507,28 @@ describe('AgentStack', () => {
         }),
       ]),
     });
+  });
+});
+
+describe('AgentStack with the ECS substrate gate (--context compute_type=ecs)', () => {
+  let template: Template;
+
+  beforeAll(() => {
+    // Deploying with the gate on provisions the Fargate substrate alongside the
+    // always-present AgentCore runtime; the ComputeSubstrate output flips to 'ecs'.
+    const app = new App({ context: { compute_type: 'ecs' } });
+    const stack = new AgentStack(app, 'TestAgentStackEcs', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    });
+    template = Template.fromStack(stack);
+  });
+
+  test('provisions an ECS cluster + Fargate task definition', () => {
+    template.resourceCountIs('AWS::ECS::Cluster', 1);
+    template.resourceCountIs('AWS::ECS::TaskDefinition', 1);
+  });
+
+  test('outputs ComputeSubstrate=ecs so the CLI allows compute_type=ecs onboarding', () => {
+    template.hasOutput('ComputeSubstrate', { Value: 'ecs' });
   });
 });

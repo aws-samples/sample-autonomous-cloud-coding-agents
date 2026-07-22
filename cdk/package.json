@@ -33,6 +33,7 @@
     "@smithy/protocol-http": "^5.5.5",
     "@smithy/signature-v4": "^5.6.1",
     "aws-cdk-lib": "^2.260.0",
+    "aws-jwt-verify": "^5.2.1",
     "cdk-nag": "^2.38.2",
     "constructs": "^10.6.0",
     "js-yaml": "^4.1.1",
