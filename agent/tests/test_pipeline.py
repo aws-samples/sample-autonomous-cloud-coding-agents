@@ -192,8 +192,8 @@ class TestCedarPoliciesInjection:
 
         with (
             patch("pipeline.ensure_committed", return_value=False),
-            patch("pipeline.verify_build", return_value=True),
-            patch("pipeline.verify_lint", return_value=True),
+            patch("pipeline.verify_build", return_value=VerifyOutcome(passed=True)),
+            patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
             patch(
                 "pipeline.ensure_pr",
                 return_value="https://github.com/org/repo/pull/1",

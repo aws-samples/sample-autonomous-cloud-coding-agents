@@ -1070,11 +1070,6 @@ async def post_tool_use_hook(
     redacted version (steered enforcement — content is sanitized, not
     blocked).
 
-    K7: when a ``stuck_guard`` is supplied, every tool result is recorded so a
-    between-turns hook can detect a repeating failing command (the ABCA-483
-    spin loop) and steer / bail. Recording is best-effort and never alters the
-    screening outcome.
-
     ``progress`` is optional (preserves the Phase 1 test call shape). When
     present, an egress-denial signature in the tool output emits an
     ``egress_denied`` blocker event (#251) — best-effort observability,
@@ -1108,14 +1103,6 @@ async def post_tool_use_hook(
     # Normalise non-string responses
     if not isinstance(tool_response, str):
         tool_response = str(tool_response)
-
-    # K7: feed the stuck-guard (best-effort — a tracking error must never block
-    # the screening path that follows).
-    if stuck_guard is not None:
-        try:
-            stuck_guard.record_tool_result(tool_name, hook_input.get("tool_input"), tool_response)
-        except Exception as exc:
-            log("WARN", f"stuck-guard record raised (ignored): {type(exc).__name__}: {exc}")
 
     # #251: best-effort egress-denial detection. A blocked outbound connection
     # (non-allowlisted host hitting the DNS Firewall, refused connection, name

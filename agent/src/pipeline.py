@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import inspect
 import os
+import subprocess
 import sys
 import time
 from typing import TYPE_CHECKING
