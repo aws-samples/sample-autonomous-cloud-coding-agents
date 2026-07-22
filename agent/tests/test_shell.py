@@ -268,6 +268,44 @@ class TestRunCmdFailureLogging:
         blob = "\n".join(text for _, text in logs)
         assert "ok 19" in blob
 
+    def test_marker_line_with_noise_term_is_filtered_by_allowlist(self):
+        # N3: the LOAD-BEARING allowlist case. A line that hits a real marker
+        # (`error:`) AND a noise term (`0 errors`) must be filtered OUT of the
+        # surfaced set. Placed in the MIDDLE (before the tail window) so it is
+        # only reachable via the marker scan — if _FAILURE_LINE_NOISE were
+        # deleted, this line WOULD be surfaced and the assertion would fail.
+        # A genuine failure line follows so the scan still produces a match set.
+        noisy = "error: eslint produced 0 errors after autofix retry"  # marker + noise
+        real = "[//cdk:test] FAIL test/handlers/bar.test.ts — boom"
+        # 30 trailing passing lines push both lines above out of the tail window,
+        # so `noisy` is only reachable via the marker scan (where the allowlist runs).
+        stdout = f"{noisy}\n{real}\n" + "\n".join(f"[//agent:test] passing {i}" for i in range(30))
+        proc = self._completed(1, stdout=stdout, stderr="")
+        logs = self._run_capturing_logs(proc)
+        blob = "\n".join(text for _, text in logs)
+        assert "FAIL test/handlers/bar.test.ts" in blob  # real failure surfaced
+        assert "0 errors after autofix retry" not in blob  # noisy marker filtered by allowlist
+
+    def test_surfaced_failure_lines_are_capped_and_truncation_marked(self):
+        # N4: a genuinely huge red run (more than _MAX_SURFACED_FAILURE_LINES
+        # marker lines) must be capped, with an explicit truncation breadcrumb —
+        # so it can't flood CloudWatch. Exercises the cap branch the other tests
+        # never reach.
+        from shell import _MAX_SURFACED_FAILURE_LINES
+
+        n = _MAX_SURFACED_FAILURE_LINES + 10
+        stdout = "\n".join(f"FAIL test/case_{i}.test.ts — assertion {i}" for i in range(n))
+        proc = self._completed(1, stdout=stdout, stderr="")
+        logs = self._run_capturing_logs(proc)
+        blob = "\n".join(text for _, text in logs)
+        # The marker-scan hit the cap and emitted the truncation breadcrumb.
+        assert "… (more failure lines truncated)" in blob
+        # The breadcrumb appears within the surfaced set BEFORE the tail divider —
+        # i.e. the matched-line scan was capped, not the whole output dumped.
+        head = blob.split("--- (trailing output) ---")[0]
+        head_cases = sum(1 for i in range(n) if f"case_{i}.test.ts" in head)
+        assert head_cases <= _MAX_SURFACED_FAILURE_LINES
+
     def test_stdout_is_redacted(self):
         proc = self._completed(1, stdout="error: pushing with ghp_supersecrettoken123", stderr="")
         logs = self._run_capturing_logs(proc)

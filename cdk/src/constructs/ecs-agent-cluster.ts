@@ -184,10 +184,13 @@ export class EcsAgentCluster extends Construct {
         LOG_GROUP_NAME: logGroup.logGroupName,
         GITHUB_TOKEN_SECRET_ARN: props.githubTokenSecret.secretArn,
         // Heavy CI-parity builds on this big-box substrate legitimately run
-        // longer than the 1800s default (ABCA's own `mise run build` is
-        // ~50 min cold). Raise the post-agent build-verify cap so a slow-but-
-        // healthy build isn't mis-reported as a timeout (see post_hooks.py
-        // BUILD_VERIFY_TIMEOUT_S). ECS-only: AgentCore repos keep the default.
+        // long (ABCA's own `mise run build` is ~50 min cold), so set a generous
+        // post-agent build-verify cap here for the ECS-only path. NOTE: the
+        // consuming side (verify_build/verify_lint reading BUILD_VERIFY_TIMEOUT_S
+        // and passing it as the subprocess timeout) ships with the ECS-substrate
+        // work; on `main` today the verify subprocess still uses run_cmd's
+        // default cap, so this env is provisioned ahead of the wiring rather
+        // than currently effective. ECS-only: AgentCore repos don't set it.
         BUILD_VERIFY_TIMEOUT_S: '3600',
         ...(props.memoryId && { MEMORY_ID: props.memoryId }),
         // #502: the payload bucket name so the orchestrator-issued
