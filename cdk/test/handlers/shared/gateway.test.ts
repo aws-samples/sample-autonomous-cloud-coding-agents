@@ -96,6 +96,18 @@ describe('extractUserId', () => {
     event.requestContext.authorizer = { claims: { sub: 123 } };
     expect(extractUserId(event)).toBeNull();
   });
+
+  test('extracts userId from a custom authorizer context (webhook / API-key path)', () => {
+    const event = makeEvent();
+    event.requestContext.authorizer = { userId: 'cognito+user-xyz' };
+    expect(extractUserId(event)).toBe('cognito+user-xyz');
+  });
+
+  test('prefers Cognito claims.sub over context userId when both present', () => {
+    const event = makeEvent();
+    event.requestContext.authorizer = { claims: { sub: 'from-claims' }, userId: 'from-ctx' };
+    expect(extractUserId(event)).toBe('from-claims');
+  });
 });
 
 describe('generateBranchName', () => {

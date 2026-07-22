@@ -21,6 +21,7 @@
 
 import { Command } from 'commander';
 import { makeAdminCommand } from '../commands/admin';
+import { makeApiKeyCommand } from '../commands/api-key';
 import { makeApproveCommand } from '../commands/approve';
 import { makeCancelCommand } from '../commands/cancel';
 import { makeConfigureCommand } from '../commands/configure';
@@ -87,6 +88,7 @@ program.addCommand(makeOpsCommand());
 program.addCommand(makeWatchCommand());
 program.addCommand(makeTraceCommand());
 program.addCommand(makeWebhookCommand());
+program.addCommand(makeApiKeyCommand());
 program.addCommand(makeAdminCommand());
 
 // Execute the CLI only when run directly. Importing this module (e.g.
