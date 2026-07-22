@@ -18,11 +18,16 @@
  */
 
 import * as crypto from 'crypto';
+import { BedrockRuntimeClient } from '@aws-sdk/client-bedrock-runtime';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { S3Client } from '@aws-sdk/client-s3';
 import { DynamoDBDocumentClient, GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { ulid } from 'ulid';
+import type { ScreeningConfig } from './shared/attachment-screening';
 import { buildClarifyResumeDescription, isClarifyHold } from './shared/clarify-resume';
 import { createTaskCore } from './shared/create-task-core';
 import { renderMaturingReply } from './shared/iteration-reply';
+import { cleanupPreScreenedAttachments, downloadScreenAndStoreLinearAttachments, LinearAttachmentError } from './shared/linear-attachments';
 import {
   deleteComment,
   reactToComment,
@@ -107,7 +112,7 @@ import { computeEpicRetryPlan } from './shared/orchestration-reconcile';
 import { readConcurrencyBudget, releaseReadyChildren } from './shared/orchestration-release';
 import { upsertEpicPanel } from './shared/orchestration-rollup';
 import { claimCommentAck, clearRollupClaim, deriveOrchestrationId, loadOrchestration, setStatusCommentId, type OrchestrationReleaseContext } from './shared/orchestration-store';
-import type { Attachment } from './shared/types';
+import type { Attachment, PassedAttachmentRecord } from './shared/types';
 import { CODING_WORKFLOW_ID } from './shared/workflows';
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -124,6 +129,20 @@ const DEFAULT_LABEL_FILTER = 'bgagent';
 // budget. Unset → release all roots (back-compat; admission still gates).
 const USER_CONCURRENCY_TABLE = process.env.USER_CONCURRENCY_TABLE_NAME;
 const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT_TASKS_PER_USER ?? '10');
+// Attachment enrichment (ADR-016): fetch uploads.linear.app images with the
+// workspace OAuth token at admission time, screen, store, inject as
+// preScreenedAttachments — Linear has no MCP so the agent can't fetch them.
+// Mirrors the Jira processor (#619). Absent env → the authenticated-fetch path
+// is off (the public-URL image path in extractImageUrlAttachments still runs).
+const ATTACHMENTS_BUCKET = process.env.ATTACHMENTS_BUCKET_NAME;
+const GUARDRAIL_ID = process.env.GUARDRAIL_ID;
+const GUARDRAIL_VERSION = process.env.GUARDRAIL_VERSION;
+const attachmentsS3Client = ATTACHMENTS_BUCKET ? new S3Client({}) : undefined;
+const attachmentsBedrockClient = GUARDRAIL_ID && GUARDRAIL_VERSION ? new BedrockRuntimeClient({}) : undefined;
+const attachmentsScreeningConfig: ScreeningConfig | undefined =
+  attachmentsBedrockClient && GUARDRAIL_ID && GUARDRAIL_VERSION
+    ? { bedrockClient: attachmentsBedrockClient, guardrailId: GUARDRAIL_ID, guardrailVersion: GUARDRAIL_VERSION }
+    : undefined;
 // #299 Mode B: TTL (seconds) for a persisted pending plan awaiting approval. A
 // week is ample for a human to approve; the row self-expires after.
 const PENDING_PLAN_TTL_SECONDS = 604_800;
@@ -876,9 +895,68 @@ export async function handler(event: ProcessorEvent): Promise<void> {
 
   const taskDescription = buildTaskDescription(issue, contextHint);
 
-  // Extract embedded image URLs from the issue description markdown.
-  // These become URL attachments that are fetched and screened during context hydration.
+  // Extract embedded image URLs from the issue description markdown. Non-Linear
+  // (public CDN) images become URL attachments fetched+screened during context
+  // hydration; uploads.linear.app images are handled below (they need auth).
   const attachments = extractImageUrlAttachments(issue.description);
+
+  // Mint the taskId up-front so pre-screened attachment S3 keys match the
+  // eventual task record (createTaskCore honors ctx.taskId). Mirrors Jira #619.
+  const taskId = ulid();
+
+  // ADR-016: fetch uploads.linear.app images with the workspace OAuth token,
+  // screen, store, and inject as preScreenedAttachments — the agent has no
+  // Linear MCP to fetch them at runtime. Fail-closed: a selected-but-
+  // unscreenable attachment rejects the whole task (mirrors the Jira processor).
+  let preScreenedAttachments: PassedAttachmentRecord[] = [];
+  if (resolvedAccessToken && issue.description && issue.description.includes('uploads.linear.app')) {
+    if (!attachmentsS3Client || !ATTACHMENTS_BUCKET || !attachmentsScreeningConfig) {
+      logger.error('Linear issue has uploads.linear.app attachments but screening/storage is not configured (fail-closed)', {
+        issue_id: issue.id,
+        linear_workspace_id: workspaceId,
+        has_bucket: Boolean(ATTACHMENTS_BUCKET),
+        has_guardrail: Boolean(attachmentsScreeningConfig),
+      });
+      await safeReportIssueFailure(
+        issue.id,
+        workspaceId,
+        '❌ This Linear issue has uploaded image attachments, but ABCA attachment screening is not configured. Contact your ABCA admin.',
+      );
+      return;
+    }
+    // Combined cap: public-URL image attachments already consume slots.
+    const remainingSlots = 10 - attachments.length;
+    try {
+      preScreenedAttachments = await downloadScreenAndStoreLinearAttachments(
+        issue.description,
+        remainingSlots,
+        {
+          s3Client: attachmentsS3Client,
+          bucketName: ATTACHMENTS_BUCKET,
+          screeningConfig: attachmentsScreeningConfig,
+          userId: platformUserId,
+          taskId,
+          accessToken: resolvedAccessToken,
+          linearWorkspaceId: workspaceId,
+        },
+      );
+    } catch (err) {
+      if (err instanceof LinearAttachmentError) {
+        logger.warn('Rejecting Linear task: attachment could not be safely processed', {
+          issue_id: issue.id,
+          linear_workspace_id: workspaceId,
+          error: err.message,
+        });
+        await safeReportIssueFailure(
+          issue.id,
+          workspaceId,
+          `❌ ABCA couldn't safely process an attachment on this issue: ${err.message} Remove or fix the attachment and re-apply the trigger label.`,
+        );
+        return;
+      }
+      throw err;
+    }
+  }
 
   const requestId = crypto.randomUUID();
   const result = await createTaskCore(
@@ -896,6 +974,8 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       userId: platformUserId,
       channelSource: 'linear',
       channelMetadata,
+      taskId,
+      ...(preScreenedAttachments.length > 0 && { preScreenedAttachments }),
     },
     requestId,
   );
@@ -906,6 +986,11 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       body: result.body,
       issue_id: issue.id,
     });
+    // Don't orphan the attachment objects we uploaded before this call failed —
+    // createTaskCore only rolls back its own inline uploads, not ours.
+    if (preScreenedAttachments.length > 0 && attachmentsS3Client && ATTACHMENTS_BUCKET) {
+      await cleanupPreScreenedAttachments(attachmentsS3Client, ATTACHMENTS_BUCKET, preScreenedAttachments);
+    }
     await safeReportIssueFailure(
       issue.id,
       workspaceId,

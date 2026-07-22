@@ -531,11 +531,30 @@ describe('linear-webhook-processor handler', () => {
       expect(reqBody.attachments).toBeUndefined();
     });
 
-    test('skips uploads.linear.app images so the unauthenticated URL resolver does not 401', async () => {
-      // Linear's CDN requires the workspace OAuth token to fetch, which the
-      // orchestrator's URL-resolver does NOT have. The agent picks these up
-      // at runtime via mcp__linear-server__extract_images instead, per the
-      // Linear-channel prompt addendum.
+    test('public-CDN markdown images still become URL attachments (uploads.linear.app handled separately)', async () => {
+      // ADR-016: uploads.linear.app images are now fetched AUTHENTICATED at
+      // admission time (downloadScreenAndStoreLinearAttachments); non-Linear
+      // public images stay on the URL-attachment path. Here, with attachment
+      // screening UNconfigured in the test env, a description containing ONLY a
+      // public image has no uploads.linear.app URL, so the authenticated path is
+      // never entered and the task is created with the public URL attachment.
+      const payload = issue();
+      const data = payload.data as Record<string, unknown>;
+      data.description = '![public](https://i.imgur.com/abc.png)';
+
+      await handler(eventWith(payload));
+
+      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+      const [reqBody] = createTaskCoreMock.mock.calls[0];
+      expect(reqBody.attachments).toHaveLength(1);
+      expect(reqBody.attachments[0].url).toBe('https://i.imgur.com/abc.png');
+    });
+
+    test('fails closed when a uploads.linear.app image is present but screening is not configured', async () => {
+      // ADR-016: uploads.linear.app images require the workspace OAuth token AND
+      // Bedrock-Guardrail screening. With ATTACHMENTS_BUCKET/GUARDRAIL unset in
+      // this test env, the processor must NOT silently drop the (selected)
+      // attachment — it rejects the task with a clear comment (fail-closed).
       const payload = issue();
       const data = payload.data as Record<string, unknown>;
       data.description = [
@@ -545,23 +564,11 @@ describe('linear-webhook-processor handler', () => {
 
       await handler(eventWith(payload));
 
-      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
-      const [reqBody] = createTaskCoreMock.mock.calls[0];
-      // Only the public image survives the filter.
-      expect(reqBody.attachments).toHaveLength(1);
-      expect(reqBody.attachments[0].url).toBe('https://i.imgur.com/abc.png');
-    });
-
-    test('drops attachments entirely when only uploads.linear.app images are present', async () => {
-      const payload = issue();
-      const data = payload.data as Record<string, unknown>;
-      data.description = '![only](https://uploads.linear.app/x/y/z)';
-
-      await handler(eventWith(payload));
-
-      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
-      const [reqBody] = createTaskCoreMock.mock.calls[0];
-      expect(reqBody.attachments).toBeUndefined();
+      // No task created; a fail-closed comment was posted instead.
+      expect(createTaskCoreMock).not.toHaveBeenCalled();
+      expect(reportIssueFailureMock).toHaveBeenCalledTimes(1);
+      const [, , message] = reportIssueFailureMock.mock.calls[0];
+      expect(String(message)).toMatch(/attachment screening is not configured/i);
     });
   });
 
