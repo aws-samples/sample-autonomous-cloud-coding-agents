@@ -20,6 +20,23 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import type { BedrockRuntimeClient } from '@aws-sdk/client-bedrock-runtime';
+
+// pdf-parse v2 exposes a `PDFParse` CLASS (`new PDFParse({data}).getText()`), not
+// the v1 callable default. Mock it at that shape so the PDF-screening tests drive
+// the real v2 contract (see the ABCA-745 regression tests below). pdfjs runs
+// headless in the nodejs24.x Lambda, but ts-jest's CJS transform can't spin its
+// ESM worker under jest — so unit-mock the class and prove the wiring here; the
+// real extraction is validated on the live deploy.
+const pdfGetTextMock = jest.fn();
+const pdfDestroyMock = jest.fn().mockResolvedValue(undefined);
+jest.mock('pdf-parse', () => ({
+  __esModule: true,
+  PDFParse: jest.fn().mockImplementation(() => ({
+    getText: (...args: unknown[]) => pdfGetTextMock(...args),
+    destroy: (...args: unknown[]) => pdfDestroyMock(...args),
+  })),
+}));
+
 import {
   assertImageUploadBytes,
   AttachmentScreeningError,
@@ -318,6 +335,19 @@ describe('screenImage', () => {
 });
 
 describe('screenTextFile', () => {
+  // jest config sets clearMocks:true, which wipes the PDFParse constructor's
+  // implementation + pdfDestroyMock's resolved value before each test. Re-establish
+  // them so `new PDFParse({data})` keeps returning the getText/destroy stubs.
+  beforeEach(() => {
+    (pdfDestroyMock as jest.Mock).mockResolvedValue(undefined);
+    // eslint-disable-next-line @typescript-eslint/no-require-imports -- re-arm the mocked ctor after clearMocks
+    const { PDFParse } = require('pdf-parse') as { PDFParse: jest.Mock };
+    PDFParse.mockImplementation(() => ({
+      getText: (...args: unknown[]) => pdfGetTextMock(...args),
+      destroy: (...args: unknown[]) => pdfDestroyMock(...args),
+    }));
+  });
+
   test('screens plain text content', async () => {
     const config = {
       bedrockClient: mockBedrockPass(),
@@ -360,24 +390,37 @@ describe('screenTextFile', () => {
     }
   });
 
-  test('throws for PDF with no extractable text', async () => {
-    // Mock pdf-parse to return empty text
-    jest.mock('pdf-parse', () => ({
-      __esModule: true,
-      default: jest.fn().mockResolvedValue({ text: '' }),
-    }), { virtual: true });
+  // pdf-parse v2 is mocked at the PDFParse-class level (see the jest.mock at the
+  // top of this file). The prior code called the v1 callable shape
+  // (`pdfParseFn(buf)`), undefined on v2, so every PDF fail-closed as
+  // "processing unavailable" (ABCA-745). These assert the v2 contract:
+  // `new PDFParse({data}).getText()` → `{ text }`. Real end-to-end PDF extraction
+  // is validated on the live deploy (pdfjs runs headless in nodejs24.x; ts-jest's
+  // CJS transform can't drive its ESM worker, so a class mock is the right unit).
 
+  test('extracts and screens a PDF via the v2 PDFParse class (ABCA-745 regression)', async () => {
+    pdfGetTextMock.mockResolvedValueOnce({ text: 'Design spec: add CONTRIBUTORS', total: 1, pages: [] });
     const config = {
       bedrockClient: mockBedrockPass(),
       guardrailId: 'test-guardrail',
       guardrailVersion: '1',
     };
+    const result = await screenTextFile(Buffer.from('%PDF-1.4 real'), 'application/pdf', 'design.pdf', config);
+    expect(result.screening.status).toBe('passed');
+    // The v2 API was actually driven: constructed with { data } + getText called.
+    expect(pdfGetTextMock).toHaveBeenCalledTimes(1);
+    expect(pdfDestroyMock).toHaveBeenCalledTimes(1); // worker released
+  });
 
-    // A minimal PDF-like buffer (pdf-parse is mocked so content doesn't matter)
-    const content = Buffer.from('%PDF-1.4 empty');
-
+  test('throws for PDF with no extractable text', async () => {
+    pdfGetTextMock.mockResolvedValueOnce({ text: '', total: 1, pages: [] });
+    const config = {
+      bedrockClient: mockBedrockPass(),
+      guardrailId: 'test-guardrail',
+      guardrailVersion: '1',
+    };
     await expect(
-      screenTextFile(content, 'application/pdf', 'empty.pdf', config),
+      screenTextFile(Buffer.from('%PDF-1.4 empty'), 'application/pdf', 'empty.pdf', config),
     ).rejects.toThrow(/no extractable text/);
   });
 

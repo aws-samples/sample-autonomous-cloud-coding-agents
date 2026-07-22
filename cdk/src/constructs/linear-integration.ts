@@ -195,6 +195,15 @@ export class LinearIntegration extends Construct {
     const commonBundling: lambda.BundlingOptions = {
       externalModules: ['@aws-sdk/*'],
     };
+    // pdf-parse (v2, pdfjs-based) can't be esbuild-bundled — its pdfjs/native
+    // (@napi-rs/canvas) deps break at import (`DOMMatrix is not defined`,
+    // ABCA-745). Ship it unbundled via `nodeModules` so it resolves natively at
+    // runtime. Mirrors TaskApi's attachment-screening bundling (task-api.ts) and
+    // the task-orchestrator. Used by the webhook processor's PDF attachment path.
+    const attachmentScreeningBundling: lambda.BundlingOptions = {
+      ...commonBundling,
+      nodeModules: ['pdf-parse'],
+    };
 
     // --- Task creation environment (matches TaskApi / SlackIntegration pattern) ---
     const createTaskEnv: Record<string, string> = {
@@ -262,7 +271,8 @@ export class LinearIntegration extends Construct {
           MAX_CONCURRENT_TASKS_PER_USER: String(props.maxConcurrentTasksPerUser ?? 10),
         }),
       },
-      bundling: commonBundling,
+      // Uses the PDF attachment-screening path — pdf-parse must stay unbundled.
+      bundling: attachmentScreeningBundling,
     });
     this.projectMappingTable.grantReadData(webhookProcessorFn);
     this.userMappingTable.grantReadData(webhookProcessorFn);

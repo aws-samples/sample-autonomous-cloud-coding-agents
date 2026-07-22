@@ -249,13 +249,19 @@ const PDF_MAX_TEXT_BYTES = 1024 * 1024; // 1 MB extracted text cap
 const PDF_EXTRACT_TIMEOUT_MS = 15_000;
 
 async function extractPdfText(content: Buffer, filename: string): Promise<string> {
-  // Dynamic import — pdf-parse is only used for PDF attachments.
-
-  let pdfParseFn: (data: Buffer, options?: { max?: number }) => Promise<{ text: string }>;
+  // pdf-parse v2 (^2.4.5) exposes a `PDFParse` CLASS — `new PDFParse({ data }).getText()` —
+  // NOT the v1 callable default export. It runs headless in the Node Lambda runtime
+  // (the `DOMMatrix`/`Path2D` warnings from pdfjs's optional canvas layer are benign
+  // for text extraction). Two things made this fail before (ABCA-745): the code called
+  // the v1 `pdfParseFn(buf)` shape (undefined for v2), AND the webhook-processor Lambdas
+  // bundled pdf-parse with esbuild instead of shipping it via `nodeModules`, mangling its
+  // pdfjs/native deps at import — see linear-integration/jira-integration bundling.
+  let PDFParse;
   try {
-    // pdf-parse uses a default export; handle both CJS and ESM module shapes.
-    const mod = await import(/* webpackIgnore: true */ 'pdf-parse');
-    pdfParseFn = (mod as any).default ?? mod;
+    // Destructure the class from the dynamic import and let TS infer its type from
+    // the value — a cross-mode `typeof import('pdf-parse').PDFParse` annotation trips
+    // the ESM-vs-CJS dual-`.d.ts` hazard under moduleResolution:nodenext.
+    ({ PDFParse } = await import(/* webpackIgnore: true */ 'pdf-parse'));
   } catch (importErr) {
     logger.error('pdf-parse module could not be imported — PDF screening unavailable', {
       error: importErr instanceof Error ? importErr.message : String(importErr),
@@ -268,13 +274,20 @@ async function extractPdfText(content: Buffer, filename: string): Promise<string
   }
 
   let timeoutId: ReturnType<typeof setTimeout>;
+  // A TypedArray is preferred (pdf-parse transfers ownership to its worker, lowering
+  // main-thread memory). Slice to the exact PDF bytes so a pooled Buffer's backing
+  // ArrayBuffer isn't handed over wholesale.
+  const parser = new PDFParse({ data: new Uint8Array(content.buffer, content.byteOffset, content.byteLength) });
   try {
     const timeoutPromise = new Promise<never>((_, reject) => {
       timeoutId = setTimeout(() => reject(new Error('PDF extraction timed out')), PDF_EXTRACT_TIMEOUT_MS);
     });
 
+    // `first: N` parses only pages 1..N (the v2 page-cap knob; the v1 `max` option
+    // is gone). Screening the first PDF_MAX_PAGES pages is enough to catch injected
+    // instructions without unbounded work on a huge PDF.
     const result = await Promise.race([
-      pdfParseFn(content, { max: PDF_MAX_PAGES }),
+      parser.getText({ first: PDF_MAX_PAGES }),
       timeoutPromise,
     ]);
 
@@ -291,6 +304,8 @@ async function extractPdfText(content: Buffer, filename: string): Promise<string
     );
   } finally {
     clearTimeout(timeoutId!);
+    // Release the pdfjs worker/document (v2 holds native + worker handles).
+    await parser.destroy().catch(() => { /* best-effort teardown */ });
   }
 }
 

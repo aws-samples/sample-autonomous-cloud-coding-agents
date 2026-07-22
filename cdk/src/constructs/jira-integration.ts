@@ -207,6 +207,15 @@ export class JiraIntegration extends Construct {
     const commonBundling: lambda.BundlingOptions = {
       externalModules: ['@aws-sdk/*'],
     };
+    // pdf-parse (v2, pdfjs-based) can't be esbuild-bundled — its pdfjs/native
+    // (@napi-rs/canvas) deps break at import (`DOMMatrix is not defined`,
+    // ABCA-745). Ship it unbundled via `nodeModules` so it resolves natively at
+    // runtime. Mirrors TaskApi's attachment-screening bundling. Jira's #619
+    // attachment path screens PDFs, so its webhook processor needs the carve-out.
+    const attachmentScreeningBundling: lambda.BundlingOptions = {
+      ...commonBundling,
+      nodeModules: ['pdf-parse'],
+    };
 
     // --- Task creation environment (matches LinearIntegration / SlackIntegration pattern) ---
     const createTaskEnv: Record<string, string> = {
@@ -258,7 +267,8 @@ export class JiraIntegration extends Construct {
         JIRA_USER_MAPPING_TABLE_NAME: this.userMappingTable.tableName,
         JIRA_WORKSPACE_REGISTRY_TABLE_NAME: this.workspaceRegistryTable.tableName,
       },
-      bundling: commonBundling,
+      // Uses the PDF attachment-screening path (#619) — pdf-parse must stay unbundled.
+      bundling: attachmentScreeningBundling,
     });
     this.projectMappingTable.grantReadData(webhookProcessorFn);
     this.userMappingTable.grantReadData(webhookProcessorFn);
