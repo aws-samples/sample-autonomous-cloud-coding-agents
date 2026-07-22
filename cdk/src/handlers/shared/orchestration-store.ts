@@ -46,6 +46,7 @@ import type { SubIssueNode } from './linear-subissue-fetch';
 import { logger } from './logger';
 import { validateDag } from './orchestration-dag';
 import { resolveEpicTip } from './orchestration-epic-tip';
+import type { AttachmentRecord } from './types';
 
 /** Orchestration-local lifecycle marker on each sub-issue row. */
 export type ChildStatus =
@@ -120,6 +121,15 @@ export interface OrchestrationReleaseContext {
   readonly linear_oauth_secret_arn?: string;
   readonly linear_workspace_slug?: string;
   readonly linear_project_id?: string;
+  /**
+   * Parent-issue attachments, screened + stored ONCE at seed time, so every
+   * child inherits them (finding #1 — the parent's attached spec must reach the
+   * agents that write code, not just the blind planner). These are `passed`
+   * AttachmentRecords (S3 keys, not bytes); each released child references the
+   * same S3 objects read-only via createTaskCore's preScreenedAttachments seam.
+   * The PARENT owns the objects' lifecycle — children never delete them.
+   */
+  readonly pre_screened_attachments?: readonly AttachmentRecord[];
 }
 
 export interface SeedOrchestrationParams {
@@ -157,6 +167,25 @@ const ORCH_ID_HASH_HEX_LENGTH = 32;
 export function deriveOrchestrationId(parentLinearIssueId: string): string {
   const hash = crypto.createHash('sha256').update(parentLinearIssueId).digest('hex').slice(0, ORCH_ID_HASH_HEX_LENGTH);
   return `orch_${hash}`;
+}
+
+/**
+ * Parse the meta row's ``pre_screened_attachments_json`` back into records.
+ * Best-effort: a malformed/absent value yields ``[]`` (children just run without
+ * the parent attachments rather than the whole epic failing to release).
+ */
+function parsePreScreenedAttachments(raw: unknown, orchestrationId: string): AttachmentRecord[] {
+  if (typeof raw !== 'string' || raw.length === 0) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as AttachmentRecord[]) : [];
+  } catch (err) {
+    logger.warn('Orchestration meta pre_screened_attachments_json unparseable — releasing children without them', {
+      orchestration_id: orchestrationId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return [];
+  }
 }
 
 /** DynamoDB BatchWriteItem hard limit: at most 25 put/delete requests per call. */
@@ -230,6 +259,12 @@ export async function seedOrchestration(
     }),
     ...(releaseContext.linear_project_id !== undefined && {
       linear_project_id: releaseContext.linear_project_id,
+    }),
+    // Parent attachments (finding #1) — stored as a JSON string so the nested
+    // AttachmentRecord[] round-trips cleanly through the Document client without
+    // per-field marshalling. Omitted when the parent had none.
+    ...(releaseContext.pre_screened_attachments && releaseContext.pre_screened_attachments.length > 0 && {
+      pre_screened_attachments_json: JSON.stringify(releaseContext.pre_screened_attachments),
     }),
     created_at: now,
     updated_at: now,
@@ -607,6 +642,8 @@ export async function loadOrchestration(
     .filter((i) => i.sub_issue_id !== PARENT_META_SK && !String(i.sub_issue_id).includes('#'))
     .map((i) => i as unknown as OrchestrationChildRow);
 
+  const preScreened = parsePreScreenedAttachments(metaItem.pre_screened_attachments_json, orchestrationId);
+
   const meta: OrchestrationMeta = {
     orchestration_id: orchestrationId,
     parent_linear_issue_id: metaItem.parent_linear_issue_id as string,
@@ -627,6 +664,7 @@ export async function loadOrchestration(
       ...(metaItem.linear_project_id !== undefined && {
         linear_project_id: metaItem.linear_project_id as string,
       }),
+      ...(preScreened.length > 0 && { pre_screened_attachments: preScreened }),
     },
     ...(metaItem.status_comment_id !== undefined && {
       status_comment_id: metaItem.status_comment_id as string,

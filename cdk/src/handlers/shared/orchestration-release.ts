@@ -54,7 +54,7 @@ import type {
   OrchestrationChildRow,
   OrchestrationReleaseContext,
 } from './orchestration-store';
-import type { ChannelSource } from './types';
+import type { AttachmentRecord, ChannelSource } from './types';
 
 /**
  * The trigger channel an orchestration runs under. Defaults to ``'linear'``
@@ -120,6 +120,14 @@ export interface ReleaseChildParams {
   readonly mergeBranches?: readonly string[];
   /** Injected createTaskCore (real handler in prod, mock in tests). */
   readonly createTaskCore: typeof CreateTaskCoreFn;
+  /**
+   * Parent-issue attachments (screened + stored once at seed time), inherited by
+   * every child so the coding agent sees the parent's attached spec (finding #1).
+   * Passed to createTaskCore's preScreenedAttachments seam. The PARENT owns these
+   * S3 objects — a child failure must NOT delete them (createTaskCore only rolls
+   * back its own inline uploads, of which children have none).
+   */
+  readonly preScreenedAttachments?: readonly AttachmentRecord[];
   /** ISO timestamp (injected for testability). */
   readonly now: string;
   /**
@@ -249,6 +257,12 @@ export async function releaseChild(params: ReleaseChildParams): Promise<ReleaseC
         channelSource,
         channelMetadata,
         idempotencyKey,
+        // Parent attachments (finding #1). Integration nodes are a pure merge of
+        // already-built branches, so they don't need the spec — only real feature
+        // children do. Records reference the parent's S3 objects (read-only).
+        ...(params.preScreenedAttachments && params.preScreenedAttachments.length > 0
+          && !isIntegrationNode(row.sub_issue_id)
+          && { preScreenedAttachments: params.preScreenedAttachments }),
       },
       // requestId — reuse the idempotency key for trace correlation.
       idempotencyKey,
@@ -422,6 +436,10 @@ export async function releaseReadyChildren(
       // child. ``releaseChild`` defaults to 'linear' when absent.
       ...(releaseContext.channel_source !== undefined && {
         channelSource: releaseContext.channel_source as ChannelSource,
+      }),
+      // finding #1: every child inherits the parent's screened attachments.
+      ...(releaseContext.pre_screened_attachments !== undefined && {
+        preScreenedAttachments: releaseContext.pre_screened_attachments,
       }),
       // Root → 'main' base, no merges (omit so today's off-main behavior
       // is unchanged). Linear → predecessor branch. Diamond → main + merges.

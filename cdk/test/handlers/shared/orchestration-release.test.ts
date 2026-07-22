@@ -490,3 +490,64 @@ describe('readConcurrencyBudget — #331', () => {
     expect(await readConcurrencyBudget(ddb as never, 'ConcTable', 'u1', 10)).toBe(10);
   });
 });
+
+describe('releaseChild — parent attachments inherited by children (finding #1)', () => {
+  const ATT = [{
+    attachment_id: 'a1',
+    type: 'file',
+    content_type: 'application/pdf',
+    filename: 'spec.pdf',
+    s3_key: 'attachments/user-1/epic-P/a1/spec.pdf',
+    s3_version_id: 'v1',
+    size_bytes: 42,
+    screening: { status: 'passed', screened_at: NOW },
+    checksum_sha256: 'x'.repeat(64),
+  }] as never;
+
+  test('a real feature child receives the parent preScreenedAttachments', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    const createTaskCore = created('T-1');
+    await releaseChild({
+      ddb: ddb as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow({ sub_issue_id: 'uuid-A' }),
+      platformUserId: 'user-1',
+      preScreenedAttachments: ATT,
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+    const ctx = createTaskCore.mock.calls[0][1];
+    expect(ctx.preScreenedAttachments).toHaveLength(1);
+    expect(ctx.preScreenedAttachments[0].s3_key).toBe('attachments/user-1/epic-P/a1/spec.pdf');
+  });
+
+  test('an INTEGRATION node does NOT receive attachments (pure merge, no spec needed)', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    const createTaskCore = created('T-1');
+    await releaseChild({
+      ddb: ddb as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow({ sub_issue_id: 'orch_abc__integration' }),
+      platformUserId: 'user-1',
+      preScreenedAttachments: ATT,
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+    const ctx = createTaskCore.mock.calls[0][1];
+    expect(ctx.preScreenedAttachments).toBeUndefined();
+  });
+
+  test('no attachments provided → context omits the field (back-compat)', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    const createTaskCore = created('T-1');
+    await releaseChild({
+      ddb: ddb as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow({ sub_issue_id: 'uuid-A' }),
+      platformUserId: 'user-1',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+    expect(createTaskCore.mock.calls[0][1].preScreenedAttachments).toBeUndefined();
+  });
+});

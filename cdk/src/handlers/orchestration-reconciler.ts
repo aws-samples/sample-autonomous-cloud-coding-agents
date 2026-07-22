@@ -36,6 +36,7 @@
  * terminal event neither double-releases nor regresses state.
  */
 
+import { BedrockRuntimeClient } from '@aws-sdk/client-bedrock-runtime';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { GetObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import {
@@ -46,10 +47,13 @@ import {
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
 import type { DynamoDBRecord, DynamoDBStreamEvent } from 'aws-lambda';
+import type { ScreeningConfig } from './shared/attachment-screening';
 import { createTaskCore } from './shared/create-task-core';
 import { renderFailureReply, renderPanelFailureReason } from './shared/failure-reply';
 import { isNoChangeIteration, renderMaturingReply } from './shared/iteration-reply';
+import { downloadScreenAndStoreLinearAttachments, isLinearUploadsUrl, LinearAttachmentError } from './shared/linear-attachments';
 import { EMOJI_FAILURE, EMOJI_NEEDS_INPUT, EMOJI_SUCCESS, type LinearFeedbackContext, revertIssueToNotStarted, sweepDecompositionNotes, swapCommentReaction, swapIssueReaction, transitionIssueState, upsertStatusComment, upsertThreadedReply } from './shared/linear-feedback';
+import { probeLinearIssueContext } from './shared/linear-issue-context-probe';
 import { resolveLinearOauthToken } from './shared/linear-oauth-resolver';
 import type { SubIssueNode } from './shared/linear-subissue-fetch';
 import { logger } from './shared/logger';
@@ -107,6 +111,12 @@ const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT_TASKS_PER_USER ?? '10')
 // terminal branch can't read plans and logs+skips (defensive; the construct
 // wires this alongside the read grant).
 const ARTIFACTS_BUCKET = process.env.ARTIFACTS_BUCKET_NAME;
+// finding #1: attachment hydration at decompose-seed time so every child inherits
+// the parent's screened attachments. Same env the webhook processor uses; unset →
+// the seed skips attachment hydration (children run without them, as before).
+const ATTACHMENTS_BUCKET = process.env.ATTACHMENTS_BUCKET_NAME;
+const GUARDRAIL_ID = process.env.GUARDRAIL_ID;
+const GUARDRAIL_VERSION = process.env.GUARDRAIL_VERSION;
 // #299 TTL for a persisted pending plan awaiting @bgagent approve — mirrors the
 // webhook's PENDING_PLAN_TTL_SECONDS (a week).
 const PENDING_PLAN_TTL_SECONDS = 604_800;
@@ -114,6 +124,14 @@ let sharedS3: S3Client | undefined;
 function s3(): S3Client {
   if (!sharedS3) sharedS3 = new S3Client({});
   return sharedS3;
+}
+let sharedAttachmentsBedrock: BedrockRuntimeClient | undefined;
+/** Lazily-built screening config for seed-time attachment hydration; null when
+ *  the bucket/guardrail env isn't configured (hydration then no-ops). */
+function attachmentScreeningConfig(): ScreeningConfig | null {
+  if (!ATTACHMENTS_BUCKET || !GUARDRAIL_ID || !GUARDRAIL_VERSION) return null;
+  if (!sharedAttachmentsBedrock) sharedAttachmentsBedrock = new BedrockRuntimeClient({});
+  return { bedrockClient: sharedAttachmentsBedrock, guardrailId: GUARDRAIL_ID, guardrailVersion: GUARDRAIL_VERSION };
 }
 
 /** Terminal task statuses that the reconciler reacts to. */
@@ -1574,6 +1592,7 @@ async function reconcileDecomposePlan(evt: DecomposePlanEvent): Promise<void> {
         planNodes: parsed.kind === 'plan' ? parsed.plan.nodes : [],
         ...(result.proposalCommentId !== undefined && { proposalCommentId: result.proposalCommentId }),
       },
+      resolved!.accessToken,
     );
     return;
   }
@@ -1658,6 +1677,56 @@ async function reconcileDecomposePlan(evt: DecomposePlanEvent): Promise<void> {
 }
 
 /**
+ * finding #1: fetch + screen + store the parent issue's attachments at seed time,
+ * so every child of the decomposed epic inherits them. Covers both native
+ * paperclip attachments (from the context probe) and description-embedded
+ * uploads.linear.app links (from the planning task's description, which is the
+ * issue title+body — see DecomposePlanEvent.taskDescription). Best-effort: any
+ * failure (no screening config, probe error, unscreenable file) logs and returns
+ * [] so the epic still seeds — children just run without the parent attachments,
+ * exactly as before this change. Returns `passed` records referencing S3 objects.
+ */
+async function hydrateParentAttachmentsForSeed(
+  evt: DecomposePlanEvent,
+  accessToken: string,
+): Promise<import('./shared/types').PassedAttachmentRecord[]> {
+  const screeningConfig = attachmentScreeningConfig();
+  if (!screeningConfig || !ATTACHMENTS_BUCKET) return [];
+  try {
+    const probe = await probeLinearIssueContext(accessToken, evt.parentIssueId);
+    const paperclips = (probe.attachments ?? []).filter((a) => isLinearUploadsUrl(a.url));
+    const descHasUploads = Boolean(evt.taskDescription?.includes('uploads.linear.app'));
+    if (paperclips.length === 0 && !descHasUploads) return [];
+    return await downloadScreenAndStoreLinearAttachments(
+      evt.taskDescription,
+      10, // full per-task budget — the epic parent has no competing public-URL images here
+      {
+        s3Client: s3(),
+        bucketName: ATTACHMENTS_BUCKET,
+        screeningConfig,
+        userId: evt.platformUserId,
+        // Key parent attachments under a stable per-epic id so children share them.
+        taskId: `epic-${evt.parentIssueId}`,
+        accessToken,
+        linearWorkspaceId: evt.workspaceId,
+      },
+      paperclips,
+    );
+  } catch (err) {
+    if (err instanceof LinearAttachmentError) {
+      logger.warn('Decompose seed: parent attachment hydration failed — seeding without attachments', {
+        parent_issue_id: evt.parentIssueId, error: err.message,
+      });
+      return [];
+    }
+    logger.warn('Decompose seed: unexpected error hydrating parent attachments — seeding without them', {
+      parent_issue_id: evt.parentIssueId, error: err instanceof Error ? err.message : String(err),
+    });
+    return [];
+  }
+}
+
+/**
  * Seed the #247 orchestration from a decompose plan's written-back children +
  * release roots. Mirrors the webhook's seedAndReleaseFromGraph, using the
  * reconciler's own primitives (discoverOrchestration over a declarativeGraphSource
@@ -1669,13 +1738,23 @@ async function seedDecomposedGraph(
   oauthSecretArn: string,
   workspaceSlug: string,
   cleanup?: { planNodes: readonly PlannedSubIssue[]; proposalCommentId?: string },
+  accessToken?: string,
 ): Promise<void> {
+  // finding #1: hydrate the parent issue's attachments ONCE here so every child
+  // inherits them (screened + stored to S3, referenced read-only by each child).
+  // Best-effort — a hydration failure logs + seeds without attachments rather than
+  // stranding the whole epic (the children can still do structural work).
+  const preScreenedAttachments = accessToken
+    ? await hydrateParentAttachmentsForSeed(evt, accessToken)
+    : [];
+
   const releaseContext: OrchestrationReleaseContext = {
     platform_user_id: evt.platformUserId,
     channel_source: 'linear',
     linear_oauth_secret_arn: oauthSecretArn,
     linear_workspace_slug: workspaceSlug,
     linear_project_id: evt.projectId,
+    ...(preScreenedAttachments.length > 0 && { pre_screened_attachments: preScreenedAttachments }),
   };
   const discovery = await discoverOrchestration({
     ddb,

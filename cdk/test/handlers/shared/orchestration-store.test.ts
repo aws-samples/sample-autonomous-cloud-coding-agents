@@ -363,6 +363,64 @@ describe('loadOrchestration — marker rows are not children (#247 UX.20)', () =
     expect(ids).toEqual(['orch_1__integration', 'uuid-A']); // ack# row excluded; integration kept
   });
 
+  test('round-trips pre_screened_attachments through the meta row (finding #1)', async () => {
+    const att = {
+      attachment_id: 'a1',
+      type: 'file',
+      content_type: 'application/pdf',
+      filename: 'spec.pdf',
+      s3_key: 'attachments/u1/epic-P/a1/spec.pdf',
+      s3_version_id: 'v1',
+      size_bytes: 42,
+      screening: { status: 'passed', screened_at: NOW },
+      checksum_sha256: 'x'.repeat(64),
+    };
+    // Seed writes the JSON string onto the meta row.
+    const seedDdb = makeDdb();
+    seedDdb.send.mockResolvedValueOnce({ Item: undefined }).mockResolvedValueOnce({});
+    await seedOrchestration({
+      ddb: seedDdb as never,
+      tableName: TABLE,
+      parentLinearIssueId: 'P',
+      linearWorkspaceId: 'WS',
+      repo: 'o/r',
+      children: [child('A')],
+      now: NOW,
+      releaseContext: { platform_user_id: 'u1', pre_screened_attachments: [att as never] },
+    });
+    const batch = seedDdb.send.mock.calls[1][0];
+    const metaPut = batch.input.RequestItems[TABLE].map((r: { PutRequest: { Item: Record<string, unknown> } }) => r.PutRequest.Item)
+      .find((i: Record<string, unknown>) => i.sub_issue_id === '#meta');
+    expect(typeof metaPut.pre_screened_attachments_json).toBe('string');
+
+    // Load parses it back into release_context.pre_screened_attachments.
+    const loadDdb = {
+      send: jest.fn().mockResolvedValueOnce({
+        Items: [
+          { orchestration_id: 'orch_1', sub_issue_id: '#meta', parent_linear_issue_id: 'P', linear_workspace_id: 'WS', repo: 'o/r', platform_user_id: 'u1', child_count: 1, pre_screened_attachments_json: JSON.stringify([att]) },
+          { orchestration_id: 'orch_1', sub_issue_id: 'uuid-A', depends_on: [], child_status: 'ready' },
+        ],
+      }),
+    };
+    const snap = await loadOrchestration(loadDdb as never, TABLE, 'orch_1');
+    expect(snap!.meta.release_context.pre_screened_attachments).toHaveLength(1);
+    expect(snap!.meta.release_context.pre_screened_attachments![0].s3_key).toBe('attachments/u1/epic-P/a1/spec.pdf');
+  });
+
+  test('a malformed pre_screened_attachments_json degrades to no attachments (best-effort)', async () => {
+    const loadDdb = {
+      send: jest.fn().mockResolvedValueOnce({
+        Items: [
+          { orchestration_id: 'orch_1', sub_issue_id: '#meta', parent_linear_issue_id: 'P', linear_workspace_id: 'WS', repo: 'o/r', platform_user_id: 'u1', child_count: 1, pre_screened_attachments_json: '{not json' },
+          { orchestration_id: 'orch_1', sub_issue_id: 'uuid-A', depends_on: [], child_status: 'ready' },
+        ],
+      }),
+    };
+    const snap = await loadOrchestration(loadDdb as never, TABLE, 'orch_1');
+    expect(snap).not.toBeNull();
+    expect(snap!.meta.release_context.pre_screened_attachments).toBeUndefined();
+  });
+
   test('paginates a multi-page Query so a large epic is NOT truncated to one 1MB page', async () => {
     // A single Query returns at most 1MB; a large epic (many children + ack#
     // markers) would otherwise silently drop children → mis-settle/strand. Two
