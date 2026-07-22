@@ -527,8 +527,7 @@ class TestBuildSystemPromptLinearChannel:
             aws_region="us-east-1",
         )
         prompt = _build_system_prompt(config, self._setup(), None, "")
-        assert "Linear issue progress updates" not in prompt
-        assert "Linear context discovery" not in prompt
+        assert "## Linear issue" not in prompt
 
     def test_no_addendum_for_slack_channel(self):
         config = TaskConfig(
@@ -540,8 +539,7 @@ class TestBuildSystemPromptLinearChannel:
             channel_source="slack",
         )
         prompt = _build_system_prompt(config, self._setup(), None, "")
-        assert "Linear issue progress updates" not in prompt
-        assert "Linear context discovery" not in prompt
+        assert "## Linear issue" not in prompt
 
     def test_addendum_present_for_linear_channel(self):
         config = TaskConfig(
@@ -558,13 +556,13 @@ class TestBuildSystemPromptLinearChannel:
             },
         )
         prompt = _build_system_prompt(config, self._setup(), None, "")
-        assert "Linear issue progress updates" in prompt
-        assert "Linear context discovery" in prompt
+        assert "## Linear issue" in prompt
         assert "ABC-42" in prompt
 
-    def test_linear_addendum_names_attachment_tools(self):
-        # The agent must know the exact MCP tool names — vague references
-        # would cause it to grope. Lock these in so a rename triggers the test.
+    def test_linear_addendum_references_no_mcp_tools(self):
+        # ADR-016: Linear is fully deterministic — the agent has no Linear MCP.
+        # The addendum must NOT name any mcp__linear-server__* tool (a leftover
+        # reference would send the agent groping for a tool that doesn't exist).
         config = TaskConfig(
             repo_url="o/r",
             task_id="t1",
@@ -575,43 +573,11 @@ class TestBuildSystemPromptLinearChannel:
             channel_metadata={"linear_issue_id": "issue-uuid-1"},
         )
         prompt = _build_system_prompt(config, self._setup(), None, "")
-        for tool in (
-            "mcp__linear-server__get_issue",
-            "mcp__linear-server__get_attachment",
-            "mcp__linear-server__extract_images",
-            "mcp__linear-server__list_documents",
-            "mcp__linear-server__get_document",
-            "mcp__linear-server__list_comments",
-        ):
-            assert tool in prompt, f"expected {tool} to be named in the Linear addendum"
+        assert "mcp__linear-server" not in prompt
 
-    def test_linear_addendum_inlines_issue_id_and_project_id(self):
-        config = TaskConfig(
-            repo_url="o/r",
-            task_id="t1",
-            max_turns=10,
-            github_token="ghp_test",
-            aws_region="us-east-1",
-            channel_source="linear",
-            channel_metadata={
-                "linear_issue_id": "issue-uuid-deadbeef",
-                "linear_project_id": "project-uuid-cafebabe",
-            },
-        )
-        prompt = _build_system_prompt(config, self._setup(), None, "")
-        # The agent shouldn't have to guess the ids — they're in the metadata,
-        # so we surface them directly in the prompt.
-        assert "issue-uuid-deadbeef" in prompt
-        assert "project-uuid-cafebabe" in prompt
-
-    def test_linear_addendum_warns_save_issue_no_ops_on_unknown_state(self):
-        # Regression-guard: many Linear teams do NOT have an `In Review`
-        # state. When the agent passes a state name that doesn't exist,
-        # save_issue silently no-ops — the response shows the unchanged
-        # state, but the agent claimed success on DEM-9 (2026-05-27).
-        # The prompt must (a) tell the agent to cache list_issue_statuses,
-        # (b) check the cached map before each transition, and (c) verify
-        # the response state.name matches what was asked.
+    def test_linear_addendum_states_context_prehydrated_and_status_automatic(self):
+        # The agent must be told (a) inbound context is already provided (nothing
+        # to fetch) and (b) not to post Linear comments or change state.
         config = TaskConfig(
             repo_url="o/r",
             task_id="t1",
@@ -622,26 +588,6 @@ class TestBuildSystemPromptLinearChannel:
             channel_metadata={"linear_issue_id": "i"},
         )
         prompt = _build_system_prompt(config, self._setup(), None, "")
-        assert "no-op" in prompt or "no op" in prompt
-        assert "cache" in prompt.lower()
-        # Must explicitly call out post-transition response verification.
-        assert "state.name" in prompt or "returned" in prompt.lower()
-
-    def test_linear_addendum_warns_against_embedding_uploads_linear_app_in_comments(self):
-        # Regression-guard: Linear's CDN signed URLs render fine in the
-        # original poster's context but show a broken-image icon when
-        # re-embedded by the bot in a comment. Hit on DEM-9 2026-05-27.
-        config = TaskConfig(
-            repo_url="o/r",
-            task_id="t1",
-            max_turns=10,
-            github_token="ghp_test",
-            aws_region="us-east-1",
-            channel_source="linear",
-            channel_metadata={"linear_issue_id": "i"},
-        )
-        prompt = _build_system_prompt(config, self._setup(), None, "")
-        assert "uploads.linear.app" in prompt
-        # The phrasing must be a prohibition for save_comment specifically,
-        # not just a passing mention — make sure we're forbidding the embed.
-        assert "Do NOT embed" in prompt or "do not embed" in prompt.lower()
+        assert "Context is already here" in prompt
+        assert "Status is automatic" in prompt
+        assert "Do NOT post Linear comments" in prompt

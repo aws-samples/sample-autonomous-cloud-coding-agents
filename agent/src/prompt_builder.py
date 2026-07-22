@@ -273,180 +273,55 @@ def _render_memory_context(hydrated_context: HydratedContext | None) -> str:
 def _channel_prompt_addendum(config: TaskConfig) -> str:
     """Return channel-specific prompt guidance, or empty string.
 
-    For Linear-origin tasks, instruct the agent to post progress comments and
-    transition state using the already-loaded Linear MCP tools. The tool names
-    are stated explicitly so the agent doesn't grope for them.
+    Linear-origin tasks (ADR-016 "Linear is fully deterministic"): the agent has
+    NO Linear MCP and NO Linear write access. All Linear I/O is handled by the
+    platform, not the agent:
+      * inbound context — the issue title/description, recent human comments, and
+        attachments are ALREADY pre-hydrated into the task description +
+        ``attachments`` at admission time (linear-webhook-processor +
+        linear-attachments.ts + linear-feedback.fetchRecentComments). There is
+        nothing to fetch at runtime.
+      * outbound status — 👀/✅/❌ reactions and Backlog→In Progress→In Review
+        state transitions are posted deterministically by ``linear_reactions.py``;
+        the "🤖 Starting" and PR-opened comments are posted at the Lambda tier;
+        the terminal ✅/⚠️/❌ summary (cost/turns/PR link) is posted by the
+        fan-out plane. So the addendum's whole job now is to tell the agent to
+        do the code work and NOT attempt any Linear calls.
 
     Jira-origin tasks intentionally get NO addendum: Atlassian's Remote MCP
     requires an interactive OAuth flow a headless agent can't complete, so the
-    MCP tools never load. Instructing the agent to use them just wastes turns.
-    Jira progress comments are posted out-of-band by ``jira_reactions`` (a REST
-    shim wired into the pipeline), not by the agent.
+    MCP tools never load. Jira progress comments are posted out-of-band by
+    ``jira_reactions`` (a REST shim wired into the pipeline), not by the agent.
     """
     if config.channel_source != "linear":
         return ""
     # #247 UX.16: a synthetic orchestration integration node has NO real Linear
     # sub-issue — `linear_issue_id` is intentionally omitted from its
     # channel_metadata (see orchestration-release.ts). Without a target issue
-    # the agent would grope via the MCP and post its "Starting"/"PR opened"
-    # comments onto the PARENT epic, cluttering the maturing panel (which
-    # already shows the integration row + combined PR + preview). Skip the
-    # progress addendum entirely for these nodes — the panel is the surface.
+    # there is nothing issue-specific to say; the parent panel is the surface.
     if not config.channel_metadata.get("linear_issue_id"):
         return ""
     issue_identifier = config.channel_metadata.get("linear_issue_identifier") or ""
     issue_ref = f" (`{issue_identifier}`)" if issue_identifier else ""
-    issue_id = config.channel_metadata.get("linear_issue_id") or ""
-    project_id = config.channel_metadata.get("linear_project_id") or ""
-
-    # iteration-UX: a comment-iteration (pr-iteration-v1, triggered by an
-    # @bgagent comment) is surfaced by the platform's single maturing threaded
-    # reply (👀 On it → 🔄 Working → ✅/💬 + cost). The agent's own top-level
-    # "🤖 Starting" / "🔗 PR opened" comments would just re-clutter the issue
-    # with the comments we removed (ABCA-430). So for iterations, suppress the
-    # progress-comment instructions and post ONLY the context-discovery half +
-    # the state-transition guidance. (new_task keeps its headline comments — they
-    # ARE the issue's first signal.)
-    workflow_id = (config.resolved_workflow or {}).get("id", "")
-
-    # #299 agent-native planning: a coding/decompose-v1 task PLANS, it doesn't
-    # change the repo. The platform posts the plan proposal (🗂️) from the agent's
-    # artifact and owns the whole approval conversation, so the agent must NOT do
-    # the coding-task Linear choreography: no "🤖 Starting" comment, no state
-    # transition (a planning run shouldn't move the issue to In Progress), no PR
-    # steps, no "task completed". Those cluttered the plan thread (live-caught on
-    # ABCA-510). MCP stays loaded for on-demand context discovery only.
-    if workflow_id == "coding/decompose-v1":
-        return (
-            "\n\n## Linear issue (planning only)\n\n"
-            f"This is a DECOMPOSITION-PLANNING task on Linear issue{issue_ref}. You are "
-            "planning how to break the work down; you are NOT changing the repo. The "
-            "platform posts your plan and runs the approval conversation. So do NOT "
-            "post any Linear comments (no 'Starting', no 'task completed'), and do NOT "
-            "transition the issue's state — just emit the plan JSON as your final "
-            "message per your workflow instructions. The Linear MCP is loaded ONLY for "
-            "on-demand context discovery below (read attachments / comments / documents "
-            "if you need them to plan).\n" + _linear_context_discovery_section(issue_id, project_id)
-        )
-
-    is_comment_iteration = workflow_id == "coding/pr-iteration-v1"
-    if is_comment_iteration:
-        return (
-            "\n\n## Linear issue progress (iteration)\n\n"
-            f"This is a follow-up iteration on Linear issue{issue_ref}, triggered "
-            "by a comment. The platform posts a single threaded status reply under "
-            "that comment (it shows progress + cost), so **do NOT post your own "
-            "'Starting' / 'PR opened' / 'task completed' Linear comments** — they "
-            "duplicate the platform reply and clutter the issue. The Linear MCP is "
-            "still loaded; use it ONLY for the on-demand context discovery below "
-            "(fetching attachments / comments / documents when you need them). Do "
-            "the code work and let the platform narrate it.\n"
-            + _linear_context_discovery_section(issue_id, project_id)
-        )
 
     return (
-        "\n\n## Linear issue progress updates (REQUIRED)\n\n"
-        f"This task was submitted from Linear issue{issue_ref}. The Linear MCP "
-        "server is loaded. You MUST perform these updates; they are part of "
-        "the task contract, not optional:\n\n"
-        "**State transitions — important.** Different Linear teams configure "
-        "different workflow states. Many teams do NOT have an `In Review` "
-        "state at all (e.g. only Backlog/Todo/In Progress/Done). When you "
-        "pass a state name that doesn't exist on the team's workflow, "
-        "`mcp__linear-server__save_issue` silently no-ops — it returns 200 "
-        "with the issue body unchanged, so it LOOKS like it worked but the "
-        "state never moves. To avoid this:\n"
-        "  - Call `mcp__linear-server__list_issue_statuses` once at the start "
-        "of the task and cache the names you got back.\n"
-        "  - Before each transition, check whether the target name is in the "
-        "cached list. If not, pick the closest available state per the "
-        "fallbacks below.\n"
-        "  - After each `save_issue`, look at the returned `state.name` field "
-        "in the response — if it's not what you asked for, the transition "
-        "didn't happen and you should NOT claim it did.\n\n"
-        "**Comment image rendering — important.** Do NOT embed "
-        "`uploads.linear.app/...` URLs in `save_comment` bodies. Linear's CDN "
-        "signed URLs work in the original poster's context but render as a "
-        "broken-image icon when re-embedded in a comment from a different "
-        "author. If you need to reference an image the user attached, link to "
-        "it in the GitHub PR (where GitHub's image proxy caches the bytes) or "
-        "describe it in words. Other URL hosts (imgur, github user-content) "
-        "are fine to embed.\n\n"
-        "1. **At start** — call `mcp__linear-server__save_comment` with a short "
-        '"🤖 Starting on this issue…" message, then call '
-        "`mcp__linear-server__list_issue_statuses` once to get the state map, "
-        "then call `mcp__linear-server__save_issue` to transition to "
-        "`In Progress` (fall back to `Todo` if that state doesn't exist). If "
-        "the issue is already in `In Progress` or any later state (`In Review`, "
-        "`Done`), skip the transition. If neither exists, skip — the comment "
-        "alone is enough. Do not invent state names.\n"
-        "2. **When you open the PR** — call `mcp__linear-server__save_comment` "
-        "with the PR URL, then call `mcp__linear-server__save_issue` to "
-        "transition to `In Review`. Use the cached state map from step 1. If "
-        "the team has no `In Review` state, fall back to leaving it at "
-        "`In Progress` — DO NOT silently fail by claiming you transitioned "
-        "when the response shows the state didn't change. Acknowledge in the "
-        "PR comment that the team workflow has no In-Review-equivalent.\n\n"
-        "**Do NOT post a final 'task completed' or 'task failed' comment.** "
-        "The platform fan-out plane (issue #239) posts a structured "
-        "✅/⚠️/❌ summary on terminal events with cost / turns / duration / "
-        "PR-link metrics that you don't have visibility into. A redundant "
-        "agent-side completion comment would just stack two near-identical "
-        "comments on the issue.\n\n"
-        "Keep the start + PR-opened comments concise. Do not mirror the full "
-        "agent transcript back to Linear.\n\n"
-        + _linear_context_discovery_section(issue_id, project_id)
-    )
-
-
-def _linear_context_discovery_section(issue_id: str, project_id: str) -> str:
-    """The on-demand Linear MCP context-discovery guidance.
-
-    Shared by the new-task progress addendum and the iteration addendum (where
-    the start/PR-opened comments are suppressed but context discovery still
-    applies). Pure string-builder.
-    """
-    return (
-        "## Linear context discovery (on demand)\n\n"
-        "The same Linear MCP exposes tools for fetching extra context on the "
-        "issue when you need it. Use them sparingly — only when the task "
-        "description references material you don't have, when the description "
-        "is ambiguous and project-level context would clarify, or when a "
-        "decision point benefits from a fresh look at the issue thread. Do "
-        "NOT call these on every task; the issue title + description are "
-        "usually sufficient.\n\n"
-        f"- **Issue + paperclip attachments.** Call `mcp__linear-server__get_issue` "
-        f'with `id: "{issue_id}"` to fetch the full issue, including its '
-        "`attachments` connection (paperclip-icon files like PDFs, logs, "
-        "spec docs that aren't embedded as markdown images). Read the "
-        "attachment titles first; for each one that looks relevant, call "
-        "`mcp__linear-server__get_attachment` with that attachment id. Skip "
-        "ones that look unrelated (e.g. screenshots from prior debugging "
-        "sessions).\n"
-        "- **Embedded images.** Description and comment images that look "
-        "like `![alt](https://uploads.linear.app/…)` may have stale signed "
-        "URLs by the time you run. If you need to actually look at one, call "
-        "`mcp__linear-server__extract_images` to get fresh signed URLs, then "
-        "use the built-in `WebFetch` tool to download. (The screened "
-        "description-image path runs at task-creation time and is separate "
-        "from this — you don't need to re-screen.)\n"
-        "- **Project documents.** When the issue belongs to a project and "
-        "the task is ambiguous enough that project-level context (specs, "
-        "design docs, RFCs) would help, call "
-        f"`mcp__linear-server__list_documents` filtered to "
-        f'`projectId: "{project_id}"` (skip if the issue has no project). '
-        "Read the titles. For documents that clearly relate to your task, "
-        "call `mcp__linear-server__get_document` to read the body. Don't "
-        "fetch every document.\n"
-        "- **Comments posted after task start.** Comments left while you're "
-        "running (e.g. clarifications, approve/deny signals from the "
-        "requester) are not in your task description. Before opening the PR, "
-        f"and again before merging if asked, call `mcp__linear-server__list_comments` "
-        f'with `issueId: "{issue_id}"` and look for new comments since '
-        "task start. Respect any clear approve / deny / block / hold signals "
-        "from the original requester (the issue creator or the person who "
-        "applied the trigger label) — if they say stop, stop and post a "
-        "comment explaining why."
+        "\n\n## Linear issue\n\n"
+        f"This task was submitted from Linear issue{issue_ref}. The platform "
+        "manages ALL Linear interaction for you — you have no Linear tools and "
+        "must not try to call any:\n\n"
+        "- **Context is already here.** The issue title, description, recent "
+        "human comments, and any attachments the reporter added have been "
+        "pre-fetched and included in your task description + attachments. There "
+        "is nothing to fetch from Linear — work from what you've been given.\n"
+        "- **Status is automatic.** The platform posts the issue reactions "
+        "(👀 on start, ✅/❌ on finish), moves the issue through its workflow "
+        "states (In Progress → In Review), posts the start + PR-opened comments, "
+        "and posts the final ✅/⚠️/❌ summary with cost/PR-link metrics. Do NOT "
+        "post Linear comments or change the issue state yourself — you'd only "
+        "duplicate the platform's messages.\n\n"
+        "Just do the code work: make the change, open the PR, and let the "
+        "platform narrate it. Reference issues/PRs in your GitHub PR description "
+        "as usual.\n"
     )
 
 

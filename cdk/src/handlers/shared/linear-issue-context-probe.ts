@@ -21,16 +21,20 @@ import { logger } from './logger';
 
 /**
  * Best-effort probe for additional Linear context attached to an issue —
- * paperclip attachments and project documents — that the agent should
- * fetch on demand via the Linear MCP at runtime.
+ * paperclip attachments (linked resources) and project documents — surfaced
+ * as a PRESENCE SIGNAL in the task description.
  *
- * The webhook payload itself does NOT carry attachments or
- * project.documents, so we ask Linear's GraphQL API once at task-creation
- * time. The result is a tiny presence signal (titles + counts) that lets
- * the webhook processor prepend a hint to the task description; it does
- * NOT pre-fetch bodies, screen content, or upload to S3 — that path is
- * still owned by `extractImageUrlAttachments` for description-embedded
- * markdown images.
+ * ADR-016: the agent runs Linear deterministically and has no Linear MCP, so
+ * it can't fetch these at runtime. This probe therefore just FLAGS that they
+ * exist (titles + counts) so the agent knows the issue may reference material
+ * it wasn't given, and can proceed with best judgment / note the gap rather
+ * than assume the description is complete. It does NOT pre-fetch bodies, screen
+ * content, or upload to S3 — description-embedded `uploads.linear.app` files are
+ * pre-hydrated separately by `linear-attachments.ts`, and recent human comments
+ * by `linear-feedback.fetchRecentComments`.
+ *
+ * The webhook payload itself does NOT carry attachments or project.documents,
+ * so we ask Linear's GraphQL API once at task-creation time.
  */
 
 const LINEAR_GRAPHQL_URL = 'https://api.linear.app/graphql';
@@ -149,9 +153,11 @@ export async function probeLinearIssueContext(
  * an empty string when there's nothing to hint about — the processor
  * skips the prepend in that case.
  *
- * The wording deliberately points at MCP tool names so the agent's
- * channel-prompt addendum reinforces (and is reinforced by) the same
- * vocabulary.
+ * ADR-016: the agent has no Linear MCP, so this is a PRESENCE SIGNAL only —
+ * it names what exists so the agent knows the issue may reference material it
+ * wasn't handed, WITHOUT pointing at any (now non-existent) fetch tool. The
+ * agent works from the description/attachments it was given and notes the gap
+ * if it turns out to matter.
  */
 export function renderIssueContextHint(probe: LinearIssueContextProbe): string {
   const bits: string[] = [];
@@ -160,13 +166,17 @@ export function renderIssueContextHint(probe: LinearIssueContextProbe): string {
       .slice(0, MAX_HINTED_ATTACHMENT_TITLES).map((t) => `"${t}"`).join(', ');
     const more = probe.attachmentTitles.length > MAX_HINTED_ATTACHMENT_TITLES
       ? ` (+${probe.attachmentTitles.length - MAX_HINTED_ATTACHMENT_TITLES} more)` : '';
-    bits.push(`paperclip attachments — ${titles}${more} (fetch via \`mcp__linear-server__get_issue\` then \`mcp__linear-server__get_attachment\`)`);
+    bits.push(`paperclip attachments — ${titles}${more}`);
   }
   if (probe.projectHasDocuments && probe.projectName) {
-    bits.push(`project "${probe.projectName}" has wiki documents (browse with \`mcp__linear-server__list_documents\` if the task is ambiguous)`);
+    bits.push(`project "${probe.projectName}" has wiki documents`);
   } else if (probe.projectHasDocuments) {
-    bits.push('the project has wiki documents (browse with `mcp__linear-server__list_documents` if the task is ambiguous)');
+    bits.push('the project has wiki documents');
   }
   if (bits.length === 0) return '';
-  return `Linear may have additional context for this issue: ${bits.join('; ')}.`;
+  return (
+    `The Linear issue references additional context not included here: ${bits.join('; ')}. ` +
+    'These live in Linear and are not attached to this task — work from the description and ' +
+    'attachments you were given, and if one of these turns out to be essential, say so in the PR rather than guessing.'
+  );
 }

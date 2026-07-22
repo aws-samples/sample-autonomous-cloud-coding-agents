@@ -717,10 +717,11 @@ describe('linear-webhook-processor handler', () => {
 
       expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
       const [reqBody] = createTaskCoreMock.mock.calls[0];
-      expect(reqBody.task_description).toContain('Linear may have additional context');
+      // ADR-016: presence signal only — names the attachments but NO MCP tool.
+      expect(reqBody.task_description).toContain('references additional context');
       expect(reqBody.task_description).toContain('design-spec.pdf');
       expect(reqBody.task_description).toContain('crash-trace.txt');
-      expect(reqBody.task_description).toContain('mcp__linear-server__get_attachment');
+      expect(reqBody.task_description).not.toContain('mcp__linear-server');
       // The original description must still be present, not replaced.
       expect(reqBody.task_description).toContain('Users cannot log in.');
     });
@@ -737,14 +738,14 @@ describe('linear-webhook-processor handler', () => {
       const [reqBody] = createTaskCoreMock.mock.calls[0];
       expect(reqBody.task_description).toContain('project "Onboarding"');
       expect(reqBody.task_description).toContain('wiki documents');
-      expect(reqBody.task_description).toContain('mcp__linear-server__list_documents');
+      expect(reqBody.task_description).not.toContain('mcp__linear-server');
     });
 
     test('omits the hint when probe finds nothing', async () => {
       // Default mock already returns an empty probe.
       await handler(eventWith(issue()));
       const [reqBody] = createTaskCoreMock.mock.calls[0];
-      expect(reqBody.task_description).not.toContain('Linear may have additional context');
+      expect(reqBody.task_description).not.toContain('references additional context');
       // Sanity: original task description still in place.
       expect(reqBody.task_description).toContain('ABC-42: Fix the login bug');
     });

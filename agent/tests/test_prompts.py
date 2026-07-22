@@ -31,7 +31,10 @@ class TestChannelPromptAddendum:
     def test_api_channel_returns_empty(self):
         assert _channel_prompt_addendum(_config(channel_source="api")) == ""
 
-    def test_linear_channel_includes_linear_tools(self):
+    def test_linear_addendum_is_deterministic_no_mcp(self):
+        # ADR-016: Linear is fully deterministic. The agent has no Linear tools,
+        # so the addendum must NOT reference any mcp__linear-server__* tool and
+        # must tell the agent context is pre-hydrated + status is automatic.
         addendum = _channel_prompt_addendum(
             _config(
                 channel_source="linear",
@@ -41,69 +44,31 @@ class TestChannelPromptAddendum:
                 },
             )
         )
-        assert "Linear issue progress updates" in addendum
-        assert "mcp__linear-server__save_comment" in addendum
         assert "ABC-42" in addendum
+        assert "mcp__linear-server" not in addendum
+        # Inbound context is pre-hydrated; outbound status is platform-managed.
+        assert "already" in addendum.lower()
+        assert "Do NOT post Linear comments" in addendum
 
-    def test_new_task_keeps_headline_progress_comments(self):
-        # A new_task (no resolved_workflow → default new-task-v1) keeps the
-        # "Starting" / PR-opened comment instructions — those ARE the issue's
-        # headline signal.
-        addendum = _channel_prompt_addendum(
-            _config(
-                channel_source="linear",
-                channel_metadata={"linear_issue_id": "issue-uuid-1"},
-            )
-        )
-        assert "🤖 Starting on this issue" in addendum
-
-    def test_comment_iteration_suppresses_progress_comments(self):
-        # iteration-UX: a pr-iteration (an @bgagent comment follow-up) is
-        # surfaced by the platform's single maturing threaded reply, so the
-        # agent must NOT post its own Starting / PR-opened / completed comments —
-        # they re-clutter the issue (ABCA-430). Context discovery still applies.
-        addendum = _channel_prompt_addendum(
-            _config(
-                channel_source="linear",
-                channel_metadata={"linear_issue_id": "issue-uuid-1"},
-                resolved_workflow={"id": "coding/pr-iteration-v1", "version": "1.0.0"},
-            )
-        )
-        assert "Linear issue progress (iteration)" in addendum
-        assert "do NOT post your own" in addendum
-        # The headline "🤖 Starting" instruction is gone for iterations…
-        assert "🤖 Starting on this issue" not in addendum
-        # …but the on-demand context-discovery half is still present.
-        assert "Linear context discovery" in addendum
-        assert "mcp__linear-server__list_comments" in addendum
-
-    def test_decompose_planning_suppresses_all_progress_and_state(self):
-        # #299 agent-native planning: a coding/decompose-v1 task PLANS only — the
-        # platform posts the 🗂️ plan + owns the approval conversation. The agent
-        # must post NO Linear comments and do NO state transition (live-caught on
-        # ABCA-510: 🤖-start + ✅-completed + In-Progress cluttered the plan thread).
-        addendum = _channel_prompt_addendum(
-            _config(
-                channel_source="linear",
-                channel_metadata={"linear_issue_id": "issue-uuid-1"},
-                resolved_workflow={"id": "coding/decompose-v1", "version": "1.0.0"},
-            )
-        )
-        assert "planning only" in addendum
-        assert "🤖 Starting on this issue" not in addendum
-        assert "do NOT post any Linear comments" in addendum
-        assert "do NOT" in addendum and "transition" in addendum
-        # No state-transition choreography from the coding-task block leaked in.
-        assert "In Review" not in addendum
-        # …but context discovery is still available for planning.
-        assert "Linear context discovery" in addendum
+    def test_linear_addendum_same_regardless_of_workflow(self):
+        # There is no longer per-workflow MCP choreography — new-task, iteration,
+        # and decompose all get the same deterministic "platform manages Linear"
+        # guidance, and none of them mention MCP tools.
+        base_meta = {"linear_issue_id": "issue-uuid-1", "linear_issue_identifier": "ABC-42"}
+        for wf in (None, "coding/pr-iteration-v1", "coding/decompose-v1", "coding/new-task-v1"):
+            overrides: dict[str, Any] = {"channel_source": "linear", "channel_metadata": base_meta}
+            if wf is not None:
+                overrides["resolved_workflow"] = {"id": wf, "version": "1.0.0"}
+            addendum = _channel_prompt_addendum(_config(**overrides))
+            assert "mcp__linear-server" not in addendum
+            assert "🤖 Starting on this issue" not in addendum
+            assert "Linear context discovery" not in addendum
 
     def test_linear_integration_node_gets_no_addendum(self):
         # #247 UX.16: the synthetic orchestration integration node is a Linear
         # task but has NO real sub-issue — channel_metadata omits
-        # linear_issue_id. Without a target issue the agent would grope via the
-        # MCP and post its "Starting"/"PR opened" comments onto the PARENT epic,
-        # cluttering the maturing panel. No issue id → no progress addendum.
+        # linear_issue_id. No issue id → no addendum (the parent panel is the
+        # surface).
         addendum = _channel_prompt_addendum(
             _config(
                 channel_source="linear",
