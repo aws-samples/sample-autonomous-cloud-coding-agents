@@ -152,6 +152,11 @@ export function applicationPolicy(): iam.PolicyDocument {
           'cognito-idp:DeleteUserPoolClient',
           'cognito-idp:DescribeUserPoolClient',
           'cognito-idp:UpdateUserPoolClient',
+          // Registry (#246) RegistryPublisher/RegistryApprover groups.
+          'cognito-idp:CreateGroup',
+          'cognito-idp:DeleteGroup',
+          'cognito-idp:GetGroup',
+          'cognito-idp:UpdateGroup',
           'cognito-idp:TagResource',
           'cognito-idp:UntagResource',
           'cognito-idp:ListTagsForResource',

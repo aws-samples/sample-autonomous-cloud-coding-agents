@@ -25,14 +25,14 @@
         "WebFetch"
       ],
       "mcp_servers": [
-        "registry://mcp/web-search-v1"
+        "registry://mcp_server/abca/web-search@^1.0.0"
       ],
       "cedar_policy_modules": [
         "builtin/hard_deny",
         "builtin/soft_deny"
       ],
       "skills": [
-        "registry://skill/research-synthesis-v1"
+        "registry://skill/abca/research-synthesis@^1.0.0"
       ]
     },
     "repo_config": {

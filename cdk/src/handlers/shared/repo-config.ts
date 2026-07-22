@@ -43,6 +43,12 @@ export interface RepoConfig {
   readonly egress_allowlist?: string[];
   readonly cedar_policies?: string[];
   /**
+   * Registry (#246): MCP server refs (``registry://mcp_server/...@constraint``)
+   * pinned by this repo's Blueprint. Resolved at the create-task boundary and
+   * merged into the agent's ``.mcp.json``. Written by the Blueprint construct.
+   */
+  readonly mcp_servers?: string[];
+  /**
    * Cedar HITL: per-blueprint override for the per-task approval-gate cap
    * (design decision #13, §4 step 5). Written by the Blueprint construct
    * when ``security.approvalGateCap`` is supplied. Read by
@@ -69,6 +75,11 @@ export interface BlueprintConfig {
   readonly poll_interval_ms?: number;
   readonly egress_allowlist?: string[];
   readonly cedar_policies?: string[];
+  /**
+   * Registry (#246): MCP server refs surfaced from RepoConfig so the
+   * orchestrator's resolve-registry step can resolve them at task start.
+   */
+  readonly mcp_servers?: string[];
   /**
    * Cedar HITL: per-blueprint approval-gate cap override. Surfaced from
    * RepoConfig so downstream consumers (admission, orchestrator payload)

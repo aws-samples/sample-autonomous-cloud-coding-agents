@@ -32,6 +32,30 @@ export function extractUserId(event: APIGatewayProxyEvent): string | null {
 }
 
 /**
+ * Extract the caller's Cognito group memberships from the authorizer claims.
+ * Cognito places groups in the ``cognito:groups`` claim, which API Gateway may
+ * surface either as a JSON-ish array or a comma/space-separated string
+ * depending on the integration — this normalizes both to a string array.
+ *
+ * Used by the registry (#246) publish/promote endpoints to gate on
+ * ``RegistryPublisher`` / ``RegistryApprover`` (REGISTRY.md §10).
+ * @param event - the API Gateway proxy event.
+ * @returns the caller's group names (empty array when none / unauthenticated).
+ */
+export function extractGroups(event: APIGatewayProxyEvent): string[] {
+  const raw = event.requestContext.authorizer?.claims?.['cognito:groups'];
+  if (!raw) return [];
+  if (Array.isArray(raw)) return raw.map(String);
+  // API Gateway commonly stringifies the list, e.g. "[Publisher Approver]" or
+  // "Publisher,Approver". Strip brackets, then split on comma or whitespace.
+  return String(raw)
+    .replace(/^\[|\]$/g, '')
+    .split(/[,\s]+/)
+    .map((g) => g.trim())
+    .filter((g) => g.length > 0);
+}
+
+/**
  * Generate a branch name from task ID and description.
  * Pattern: `bgagent/{taskId}/{slug}`
  * @param taskId - the ULID task identifier.

@@ -1,0 +1,6 @@
+{
+  "name": "grammar-invalid-underscore-kind-legacy",
+  "description": "PR #548 review: the SHIPPED regex only matched hyphenated 'mcp-server'. That hyphen form is NOT the #246 grammar (kinds are snake_case) and carries no pin — invalid.",
+  "ref": "registry://mcp-server/acme/pdf-tools",
+  "expected": { "valid": false }
+}

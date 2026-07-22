@@ -26,6 +26,10 @@ import { Construct, IValidation } from 'constructs';
 // the JSON directly rather than re-using ``handlers/shared/types.ts`` so
 // the construct layer stays decoupled from runtime-side types.
 import sharedConstants from '../../../contracts/constants.json';
+// Registry ref grammar (#246). Imported from the dependency-free registry-ref
+// module (NOT registry-resolver, which pulls in aws-sdk) so the construct layer
+// validates refs at synth without dragging the SDK into the synth graph.
+import { isRegistryRef } from '../handlers/shared/registry-ref';
 
 const REPO_PATTERN = /^[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+$/;
 const DOMAIN_PATTERN = /^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/;
@@ -149,6 +153,24 @@ export interface BlueprintProps {
      */
     readonly egressAllowlist?: string[];
   };
+
+  /**
+   * Registry assets (#246) this repo pins. Each entry is a
+   * ``registry://kind/namespace/name@constraint`` reference resolved at the
+   * create-task boundary; the pinned versions are stamped on the TaskRecord.
+   * See docs/design/REGISTRY.md.
+   *
+   * MVP wires ``mcpServers`` end-to-end; ``cedarPolicyModules`` and ``skills``
+   * follow in PR 3. Refs are validated at synth (floating constraints are
+   * rejected before deploy).
+   */
+  readonly assets?: {
+    /**
+     * MCP server registry refs, e.g. ``registry://mcp_server/acme/pdf-tools@^1.4.1``.
+     * Resolved and merged into the agent's ``.mcp.json`` at task start.
+     */
+    readonly mcpServers?: string[];
+  };
 }
 
 /**
@@ -176,6 +198,13 @@ export class Blueprint extends Construct {
   public readonly cedarPolicies: readonly string[];
 
   /**
+   * MCP server registry refs from the assets.mcpServers prop (#246), exposed
+   * for inspection. Flattened into the RepoConfig ``mcp_servers`` column and
+   * resolved at the create-task boundary.
+   */
+  public readonly mcpServers: readonly string[];
+
+  /**
    * Cedar HITL: per-task approval-gate cap from the security.approvalGateCap
    * prop, exposed for inspection. Undefined when the blueprint did not
    * configure an override — the submit path then falls back to the
@@ -188,6 +217,7 @@ export class Blueprint extends Construct {
 
     this.egressAllowlist = [...(props.networking?.egressAllowlist ?? [])];
     this.cedarPolicies = [...(props.security?.cedarPolicies ?? [])];
+    this.mcpServers = [...(props.assets?.mcpServers ?? [])];
     this.approvalGateCap = props.security?.approvalGateCap;
 
     // Chunk 7c: emit a synth-time info annotation when the blueprint did
@@ -207,6 +237,7 @@ export class Blueprint extends Construct {
     this.node.addValidation(new RepoFormatValidation(props.repo));
     this.node.addValidation(new DomainFormatValidation(this.egressAllowlist));
     this.node.addValidation(new ApprovalGateCapValidation(this.approvalGateCap));
+    this.node.addValidation(new RegistryRefValidation(this.mcpServers));
 
     const now = new Date().toISOString();
 
@@ -244,6 +275,9 @@ export class Blueprint extends Construct {
     }
     if (this.cedarPolicies.length > 0) {
       item.cedar_policies = { L: this.cedarPolicies.map(p => ({ S: p })) };
+    }
+    if (this.mcpServers.length > 0) {
+      item.mcp_servers = { L: this.mcpServers.map(r => ({ S: r })) };
     }
     if (this.approvalGateCap !== undefined) {
       item.approval_gate_cap = { N: String(this.approvalGateCap) };
@@ -319,6 +353,7 @@ export class Blueprint extends Construct {
     if (props.pipeline?.pollIntervalMs !== undefined) fields.push(', #poll_interval_ms = :poll_interval_ms');
     if (this.egressAllowlist.length > 0) fields.push(', #egress_allowlist = :egress_allowlist');
     if (this.cedarPolicies.length > 0) fields.push(', #cedar_policies = :cedar_policies');
+    if (this.mcpServers.length > 0) fields.push(', #mcp_servers = :mcp_servers');
     if (this.approvalGateCap !== undefined) fields.push(', #approval_gate_cap = :approval_gate_cap');
     return fields.join('');
   }
@@ -334,6 +369,7 @@ export class Blueprint extends Construct {
     if (props.pipeline?.pollIntervalMs !== undefined) names['#poll_interval_ms'] = 'poll_interval_ms';
     if (this.egressAllowlist.length > 0) names['#egress_allowlist'] = 'egress_allowlist';
     if (this.cedarPolicies.length > 0) names['#cedar_policies'] = 'cedar_policies';
+    if (this.mcpServers.length > 0) names['#mcp_servers'] = 'mcp_servers';
     if (this.approvalGateCap !== undefined) names['#approval_gate_cap'] = 'approval_gate_cap';
     return names;
   }
@@ -349,6 +385,7 @@ export class Blueprint extends Construct {
     if (props.pipeline?.pollIntervalMs !== undefined) values[':poll_interval_ms'] = { N: String(props.pipeline.pollIntervalMs) };
     if (this.egressAllowlist.length > 0) values[':egress_allowlist'] = { L: this.egressAllowlist.map(d => ({ S: d })) };
     if (this.cedarPolicies.length > 0) values[':cedar_policies'] = { L: this.cedarPolicies.map(p => ({ S: p })) };
+    if (this.mcpServers.length > 0) values[':mcp_servers'] = { L: this.mcpServers.map(r => ({ S: r })) };
     if (this.approvalGateCap !== undefined) values[':approval_gate_cap'] = { N: String(this.approvalGateCap) };
     return values;
   }
@@ -409,5 +446,26 @@ class ApprovalGateCapValidation implements IValidation {
       ];
     }
     return [];
+  }
+}
+
+/**
+ * Registry (#246) — validates that every assets.* ref matches the
+ * ``registry://kind/namespace/name@constraint`` grammar (REGISTRY.md §6).
+ * Rejecting a floating or malformed ref at synth means an invalid pin cannot
+ * deploy and then fail-closed at every task submit (fail-fast vs fail-late).
+ */
+class RegistryRefValidation implements IValidation {
+  constructor(private readonly refs: readonly string[]) {}
+
+  public validate(): string[] {
+    return this.refs
+      .filter((ref) => !isRegistryRef(ref))
+      .map(
+        (ref) =>
+          `Invalid registry ref: '${ref}'. Expected ` +
+          '\'registry://kind/namespace/name@constraint\' with a pinned semver ' +
+          '(exact, ^, or ~) — floating constraints (*, latest, >=) are rejected.',
+      );
   }
 }

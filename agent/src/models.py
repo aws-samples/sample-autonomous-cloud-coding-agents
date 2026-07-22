@@ -221,6 +221,12 @@ class TaskConfig(BaseModel):
     trace: bool = False
     # Enriched mid-flight by pipeline.py:
     cedar_policies: list[str] = []
+    # Registry (#246): the resolved asset bundle threaded from the orchestrator
+    # payload — ``{mcp_servers, cedar_policy_modules, skills}`` each a list of
+    # resolved-asset dicts. Applied by registry_loader.py at task start (MVP:
+    # mcp_servers merged into .mcp.json; cedar/skills staged for PR 3). Empty
+    # dict when the blueprint pinned no assets.
+    resolved_assets: dict[str, list[dict]] = {}
     # Cedar HITL (§7.3, §10.2). Per-task approval defaults threaded
     # from the orchestrator payload; consumed by PolicyEngine at
     # construction so the engine seeds ApprovalAllowlist and adopts

@@ -26,9 +26,10 @@ import { logger, type Logger } from './logger';
 import { writeMinimalEpisode } from './memory';
 import { coerceNumericOrNull } from './numeric';
 import { computePromptVersion } from './prompt-version';
+import { RegistryResolutionError, resolveAll } from './registry-resolver';
 import { loadRepoConfig, type BlueprintConfig, type ComputeType } from './repo-config';
 import { resolveUrlAttachments } from './resolve-url-attachments';
-import { APPROVAL_GATE_CAP_MAX, APPROVAL_GATE_CAP_MIN, type AgentAttachmentPayload, type AttachmentRecord, type TaskRecord } from './types';
+import { APPROVAL_GATE_CAP_MAX, APPROVAL_GATE_CAP_MIN, type AgentAttachmentPayload, type AttachmentRecord, type ResolvedAssetBundle, type ResolvedAssetSummary, type TaskRecord } from './types';
 import { computeTtlEpoch, DEFAULT_MAX_TURNS } from './validation';
 import { TaskStatus, TERMINAL_STATUSES, VALID_TRANSITIONS, type TaskStatusType } from '../../constructs/task-status';
 
@@ -278,6 +279,7 @@ export async function loadBlueprintConfig(task: TaskRecord): Promise<BlueprintCo
     github_token_secret_arn: repoConfig?.github_token_secret_arn ?? process.env.GITHUB_TOKEN_SECRET_ARN,
     poll_interval_ms: pollIntervalMs,
     cedar_policies: repoConfig?.cedar_policies,
+    mcp_servers: repoConfig?.mcp_servers,
     approval_gate_cap: repoConfig?.approval_gate_cap,
   };
 }
@@ -354,6 +356,100 @@ function isValidApprovalGateCap(value: unknown): value is number {
 }
 
 /**
+ * The empty registry bundle — returned when a blueprint pins no assets so the
+ * common (no-registry) path threads a stable, empty shape.
+ */
+const EMPTY_ASSET_BUNDLE: ResolvedAssetBundle = {
+  mcp_servers: [],
+  cedar_policy_modules: [],
+  skills: [],
+};
+
+/**
+ * Resolve the registry assets (#246) a blueprint pins, at the create-task
+ * boundary. Resolves every ``registry://`` ref to a concrete pinned version,
+ * stamps the ``{kind, id, version}`` audit triples on the TaskRecord, and
+ * returns the full bundle for the agent payload.
+ *
+ * Fail-closed (ADR-018 sub-decision 6): if any ref does not resolve, the
+ * {@link RegistryResolutionError} propagates so the caller fails admission with
+ * a ``registry_resolution_failed`` event — a task never runs with a partially
+ * resolved or substituted asset surface. A blueprint with no pins is a no-op
+ * that returns the empty bundle without a DDB write.
+ *
+ * MVP resolves ``mcp_servers`` only; cedar_policy_modules / skills refs on the
+ * blueprint follow in PR 3 (the resolver already handles all three kinds).
+ *
+ * @param task - the task record (source of task_id for the audit stamp).
+ * @param blueprintConfig - the merged per-repo config carrying the pins.
+ * @returns the resolved bundle grouped by kind (empty when nothing is pinned).
+ */
+export async function resolveRegistryAssetsForTask(
+  task: TaskRecord,
+  blueprintConfig?: BlueprintConfig,
+): Promise<ResolvedAssetBundle> {
+  const { log, correlation } = envelopeFor(task);
+  const refs = blueprintConfig?.mcp_servers ?? [];
+  if (refs.length === 0) {
+    return EMPTY_ASSET_BUNDLE;
+  }
+
+  let bundle: ResolvedAssetBundle;
+  try {
+    bundle = await resolveAll(refs);
+  } catch (err) {
+    if (err instanceof RegistryResolutionError) {
+      // Surface the specific reason on an audit event before the caller fails
+      // the task, so an operator can see WHICH pin broke and why.
+      await emitTaskEvent(task.task_id, 'registry_resolution_failed', {
+        ref: err.ref,
+        reason: err.reason,
+      }, correlation).catch((eventErr) => {
+        log.error('Failed to emit registry_resolution_failed event', {
+          error: eventErr instanceof Error ? eventErr.message : String(eventErr),
+        });
+      });
+    }
+    throw err;
+  }
+
+  // Flatten to {kind, id, version} audit triples and persist on the TaskRecord.
+  const summaries: ResolvedAssetSummary[] = [
+    ...bundle.mcp_servers,
+    ...bundle.cedar_policy_modules,
+    ...bundle.skills,
+  ].map((a) => ({ kind: a.kind, id: `${a.namespace}/${a.name}`, version: a.version }));
+
+  // Warn on any deprecated resolution so it is visible in the task timeline.
+  const deprecated = [...bundle.mcp_servers, ...bundle.cedar_policy_modules, ...bundle.skills]
+    .filter((a) => a.warnings.includes('DEPRECATED'))
+    .map((a) => `${a.kind}/${a.namespace}/${a.name}@${a.version}`);
+
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: TABLE_NAME,
+      Key: { task_id: task.task_id },
+      UpdateExpression: 'SET #ra = :ra, #ua = :now',
+      ExpressionAttributeNames: { '#ra': 'resolved_assets', '#ua': 'updated_at' },
+      ExpressionAttributeValues: { ':ra': summaries, ':now': new Date().toISOString() },
+    }));
+  } catch (err) {
+    // The stamp is for audit; a write failure must not silently drop it, but it
+    // also should not fail an otherwise-resolvable task. Log loudly.
+    log.error('Failed to stamp resolved_assets on task record', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  await emitTaskEvent(task.task_id, 'registry_assets_resolved', {
+    resolved_assets: summaries,
+    ...(deprecated.length > 0 && { deprecated }),
+  }, correlation).catch(() => undefined);
+
+  return bundle;
+}
+
+/**
  * Transition task to HYDRATING and assemble the invocation payload.
  * @param task - the task record.
  * @param blueprintConfig - optional per-repo blueprint config.
@@ -363,6 +459,12 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
   const { log, correlation } = envelopeFor(task);
   await transitionTask(task.task_id, TaskStatus.SUBMITTED, TaskStatus.HYDRATING);
   await emitTaskEvent(task.task_id, 'hydration_started', undefined, correlation);
+
+  // Resolve registry assets (#246) BEFORE hydration so a bad pin fails fast —
+  // no point paying for context hydration if the asset surface can't resolve.
+  // Fail-closed: a RegistryResolutionError propagates to the caller, which
+  // transitions the task to FAILED (same path as a guardrail block below).
+  const resolvedAssets = await resolveRegistryAssetsForTask(task, blueprintConfig);
 
   const hydratedContext = await hydrateContext(task, {
     githubTokenSecretArn: blueprintConfig?.github_token_secret_arn,
@@ -549,6 +651,13 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     ...(blueprintConfig?.model_id && { model_id: blueprintConfig.model_id }),
     ...(blueprintConfig?.system_prompt_overrides && { system_prompt_overrides: blueprintConfig.system_prompt_overrides }),
     ...(blueprintConfig?.cedar_policies && blueprintConfig.cedar_policies.length > 0 && { cedar_policies: blueprintConfig.cedar_policies }),
+    // Registry (#246): the resolved asset bundle. Only threaded when the
+    // blueprint pinned at least one asset, so the common no-registry path keeps
+    // the payload slim and the agent's ``inp.get("resolved_assets")`` stays
+    // absent. The agent-side loader (registry_loader.py) applies each kind.
+    ...((resolvedAssets.mcp_servers.length > 0
+      || resolvedAssets.cedar_policy_modules.length > 0
+      || resolvedAssets.skills.length > 0) && { resolved_assets: resolvedAssets }),
     // Cedar HITL: the agent's PreToolUse hook uses this to compute
     // the maxLifetime ceiling on per-gate approval timeouts (§6.5).
     // Stamped at HYDRATING → RUNNING transition time so the clock

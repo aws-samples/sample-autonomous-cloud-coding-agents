@@ -46,8 +46,23 @@ _REPO_ONLY_KINDS = frozenset(
 
 # Built-in (Phase 1-3) policy modules / MCP servers. Registry refs (registry://)
 # are accepted syntactically now and resolved against #246 in Phase 4 (rule 8).
+#
+# _REGISTRY_REF is the #246 asset grammar (docs/design/REGISTRY.md §6, ADR-018):
+#   registry://<kind>/<namespace>/<name>@<constraint>
+# The kind segment is snake_case (mcp_server, cedar_policy_module) and the
+# @<constraint> pin is MANDATORY (fail-closed, ADR-018 sub-decision 6) — exact,
+# caret, or tilde semver only; floating (*, latest, >=) is rejected. This regex
+# MUST stay byte-for-byte identical to the TypeScript ``parseRef``
+# (cdk/src/handlers/shared/registry-resolver.ts); the ``contracts/registry-resolution/``
+# corpus is the agreement both sides reproduce.
 _BUILTIN_REF = re.compile(r"^builtin/[a-z][a-z0-9_]*$")
-_REGISTRY_REF = re.compile(r"^registry://[a-z][a-z0-9-]*/[a-z0-9][a-z0-9./-]*$")
+_REGISTRY_REF = re.compile(
+    r"^registry://"
+    r"[a-z][a-z0-9_]*/"  # kind (snake_case)
+    r"[a-z][a-z0-9-]*/"  # namespace
+    r"[a-z0-9][a-z0-9._-]*"  # name
+    r"@[\^~]?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$"  # @constraint (exact/caret/tilde)
+)
 
 # Mutating built-in tools — forbidden under the read-only tier (rule 6) and when
 # read_only:true (rule 4, shape half is in the schema).
@@ -111,6 +126,16 @@ def _refs(data: dict[str, Any], field: str) -> list[str]:
 
 def _ref_resolves(ref: str) -> bool:
     return bool(_BUILTIN_REF.match(ref) or _REGISTRY_REF.match(ref))
+
+
+def is_registry_ref(ref: str) -> bool:
+    """True iff ``ref`` matches the #246 registry URI grammar (REGISTRY.md §6).
+
+    Public entry point for the ``contracts/registry-resolution/`` parity corpus:
+    this MUST agree byte-for-byte with the TypeScript ``parseRef``. Does not
+    match ``builtin/*`` — grammar only, not resolvability.
+    """
+    return bool(_REGISTRY_REF.match(ref))
 
 
 # --- the rules ---------------------------------------------------------------

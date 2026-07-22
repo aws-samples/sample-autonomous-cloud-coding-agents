@@ -1,0 +1,6 @@
+{
+  "name": "grammar-invalid-floating-range",
+  "description": "Range operator '>=' is rejected — only exact/caret/tilde allowed.",
+  "ref": "registry://mcp_server/acme/pdf-tools@>=1.0.0",
+  "expected": { "valid": false }
+}

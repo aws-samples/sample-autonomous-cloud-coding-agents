@@ -40,6 +40,7 @@ from post_hooks import (
 )
 from progress_writer import _ProgressWriter
 from prompt_builder import build_system_prompt, discover_project_config
+from registry_loader import apply_resolved_assets
 from shell import log, log_error_cw
 from telemetry import (
     _TrajectoryWriter,
@@ -616,6 +617,7 @@ def run_task(
     branch_name: str = "",
     pr_number: str = "",
     cedar_policies: list[str] | None = None,
+    resolved_assets: dict[str, list[dict]] | None = None,
     approval_timeout_s: int | None = None,
     initial_approvals: list[str] | None = None,
     initial_approval_gate_count: int = 0,
@@ -669,6 +671,12 @@ def run_task(
     # Inject Cedar policies into config for the PolicyEngine in runner.py
     if cedar_policies:
         config.cedar_policies = cedar_policies
+
+    # Registry (#246): thread the resolved asset bundle onto config so the
+    # loader (below, after channel MCP wiring) can apply it. Same post-build
+    # injection pattern as cedar_policies.
+    if resolved_assets:
+        config.resolved_assets = resolved_assets
 
     # Export session-tag values so tenant-data boto3 clients (DDB/S3) assume
     # the per-task SessionRole with {user_id, repo, task_id} tags. No-op when
@@ -864,6 +872,12 @@ def run_task(
             elif config.channel_source == "jira":
                 resolve_jira_oauth_token(config.channel_metadata)
             configure_channel_mcp(setup.repo_dir, config.channel_source)
+
+            # Registry (#246): apply resolved assets AFTER the channel MCP so a
+            # registry-published MCP server merges alongside (not over) the
+            # channel entry in .mcp.json, and both are present before
+            # discover_project_config scans. No-op when no assets were pinned.
+            apply_resolved_assets(setup.repo_dir, config.resolved_assets)
 
             # 👀 on the Linear issue — acknowledges the task is picked up.
             # No-op for non-Linear tasks. Best-effort; failures are logged

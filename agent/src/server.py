@@ -391,6 +391,7 @@ def _run_task_background(
     branch_name: str = "",
     pr_number: str = "",
     cedar_policies: list[str] | None = None,
+    resolved_assets: dict[str, list[dict]] | None = None,
     approval_timeout_s: int | None = None,
     initial_approvals: list[str] | None = None,
     initial_approval_gate_count: int = 0,
@@ -477,6 +478,7 @@ def _run_task_background(
             branch_name=branch_name,
             pr_number=pr_number,
             cedar_policies=cedar_policies,
+            resolved_assets=resolved_assets,
             approval_timeout_s=approval_timeout_s,
             initial_approvals=initial_approvals,
             initial_approval_gate_count=initial_approval_gate_count,
@@ -531,6 +533,10 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
     branch_name = inp.get("branch_name", "")
     pr_number = str(inp.get("pr_number", ""))
     cedar_policies = inp.get("cedar_policies") or []
+    # Registry (#246): the resolved asset bundle the orchestrator stamped after
+    # resolving the blueprint's pins. Absent when no assets were pinned; the
+    # loader treats an empty dict as a no-op.
+    resolved_assets = inp.get("resolved_assets") or {}
     # Cedar HITL (§7.3) — per-task approval defaults + seeded allowlist.
     # Both are forwarded verbatim to the pipeline; the engine
     # validates shape at construction time and raises on bad input.
@@ -637,6 +643,7 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
         "branch_name": branch_name,
         "pr_number": pr_number,
         "cedar_policies": cedar_policies,
+        "resolved_assets": resolved_assets,
         "approval_timeout_s": approval_timeout_s,
         "initial_approvals": initial_approvals,
         "initial_approval_gate_count": initial_approval_gate_count,

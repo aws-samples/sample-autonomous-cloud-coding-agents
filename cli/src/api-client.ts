@@ -39,6 +39,12 @@ import {
   LinearLinkResponse,
   NudgeRequest,
   NudgeResponse,
+  RegistryAssetKind,
+  RegistryListResponse,
+  RegistryPublishRequest,
+  RegistryPublishResponse,
+  RegistryShowResponse,
+  ResolvedAsset,
   SlackLinkResponse,
   PaginatedResponse,
   ReplayBundle,
@@ -401,6 +407,38 @@ export class ApiClient {
       'GET',
       `/tasks/${encodeURIComponent(taskId)}/replay`,
     );
+    return res.data;
+  }
+
+  /** POST /registry/assets — publish an asset version (#246). */
+  async publishRegistryAsset(req: RegistryPublishRequest, autoApprove?: boolean): Promise<RegistryPublishResponse> {
+    const path = autoApprove ? '/registry/assets?auto_approve=true' : '/registry/assets';
+    const res = await this.request<SuccessResponse<RegistryPublishResponse>>('POST', path, req);
+    return res.data;
+  }
+
+  /** GET /registry/resolve?ref= — resolve a registry ref to a pinned asset (#246). */
+  async resolveRegistryRef(ref: string): Promise<ResolvedAsset> {
+    const res = await this.request<SuccessResponse<ResolvedAsset>>(
+      'GET',
+      `/registry/resolve?ref=${encodeURIComponent(ref)}`,
+    );
+    return res.data;
+  }
+
+  /** GET /registry/assets?kind= — list assets of a kind (#246). */
+  async listRegistryAssets(kind: RegistryAssetKind, opts?: { namespace?: string; status?: string }): Promise<RegistryListResponse> {
+    const params = new URLSearchParams({ kind });
+    if (opts?.namespace) params.set('namespace', opts.namespace);
+    if (opts?.status) params.set('status', opts.status);
+    const res = await this.request<SuccessResponse<RegistryListResponse>>('GET', `/registry/assets?${params.toString()}`);
+    return res.data;
+  }
+
+  /** GET /registry/assets/:kind/:namespace/:name — show all versions (#246). */
+  async showRegistryAsset(kind: string, namespace: string, name: string): Promise<RegistryShowResponse> {
+    const path = `/registry/assets/${encodeURIComponent(kind)}/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}`;
+    const res = await this.request<SuccessResponse<RegistryShowResponse>>('GET', path);
     return res.data;
   }
 
