@@ -92,6 +92,11 @@ export class StrandedOrchestrationReconciler extends Construct {
       },
       bundling: {
         externalModules: ['@aws-sdk/*'],
+        // Imports createTaskCore (releases children, which can carry attachments) —
+        // its transitive attachment-screening PDF path needs pdf-parse unbundled.
+        // Kept in lockstep with the other attachment-screening constructs; see the
+        // //:check:pdf-parse-bundling guard that enforces this.
+        nodeModules: ['pdf-parse'],
       },
     });
 

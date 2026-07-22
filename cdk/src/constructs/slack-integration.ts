@@ -149,6 +149,15 @@ export class SlackIntegration extends Construct {
     const commonBundling: lambda.BundlingOptions = {
       externalModules: ['@aws-sdk/*'],
     };
+    // pdf-parse (v2, pdfjs-based) can't be esbuild-bundled — ship it unbundled so
+    // it resolves natively at runtime. The Slack command processor hands inline
+    // file attachments to createTaskCore, which screens them (screenTextFile →
+    // extractPdfText for a PDF). Any handler that reaches attachment-screening's
+    // PDF path needs this carve-out — see the //:check:pdf-parse-bundling guard.
+    const attachmentScreeningBundling: lambda.BundlingOptions = {
+      ...commonBundling,
+      nodeModules: ['pdf-parse'],
+    };
 
     // Secrets Manager ARN prefix for Slack secrets (bgagent/slack/*)
     const slackSecretArnPrefix = Stack.of(this).formatArn({
@@ -276,7 +285,8 @@ export class SlackIntegration extends Construct {
         SLACK_INSTALLATION_TABLE_NAME: this.installationTable.tableName,
         SLACK_CHANNEL_MAPPING_TABLE_NAME: this.channelMappingTable.tableName,
       },
-      bundling: commonBundling,
+      // Screens inline file attachments via createTaskCore — pdf-parse must stay unbundled.
+      bundling: attachmentScreeningBundling,
     });
     this.userMappingTable.grantReadWriteData(commandProcessorFn);
     this.installationTable.grantReadData(commandProcessorFn);

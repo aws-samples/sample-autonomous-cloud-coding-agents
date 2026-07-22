@@ -99,6 +99,15 @@ export class OrchestrationReconciler extends Construct {
       },
       bundling: {
         externalModules: ['@aws-sdk/*'],
+        // pdf-parse (v2, pdfjs-based) can't be esbuild-bundled — its pdfjs/native
+        // deps break at import. The reconciler screens the parent issue's PDF
+        // attachments at decompose-seed time (finding #1), so ship pdf-parse
+        // unbundled to resolve natively at runtime. MUST match the webhook
+        // processors' attachment-screening bundling — a Lambda that CALLS
+        // attachment-screening but omits this carve-out fails every PDF at
+        // runtime while passing every unit test (ABCA-745 class; live-caught on
+        // the decompose-seed path 2026-07-22).
+        nodeModules: ['pdf-parse'],
       },
     });
 

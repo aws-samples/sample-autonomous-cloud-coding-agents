@@ -424,6 +424,24 @@ describe('screenTextFile', () => {
     ).rejects.toThrow(/no extractable text/);
   });
 
+  test('a pdfjs/DOMMatrix parse error logs a BUNDLING diagnostic, not just "corrupt PDF" (ABCA-745 prevention)', async () => {
+    // A Lambda that reaches this path but lacks the pdf-parse bundling carve-out
+    // throws a pdfjs/native-binding error. Detect the signature + log an
+    // actionable diagnostic so it's not misread as a bad user PDF.
+    const { logger } = jest.requireActual('../../../src/handlers/shared/logger') as { logger: { error: (...a: unknown[]) => void } };
+    const errSpy = jest.spyOn(logger, 'error').mockImplementation(() => {});
+    pdfGetTextMock.mockRejectedValueOnce(new Error('DOMMatrix is not defined'));
+    const config = { bedrockClient: mockBedrockPass(), guardrailId: 'g', guardrailVersion: '1' };
+    await expect(
+      screenTextFile(Buffer.from('%PDF-1.4 real'), 'application/pdf', 'spec.pdf', config),
+    ).rejects.toBeInstanceOf(AttachmentScreeningError);
+    // The loud diagnostic names the bundling cause + the fix.
+    const logged = errSpy.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(logged).toMatch(/BUNDLING bug/);
+    expect(logged).toMatch(/nodeModules/);
+    errSpy.mockRestore();
+  });
+
   test('retries on transient Bedrock errors for text screening', async () => {
     const send = jest.fn()
       .mockRejectedValueOnce({ $metadata: { httpStatusCode: 503 }, message: 'service unavailable' })

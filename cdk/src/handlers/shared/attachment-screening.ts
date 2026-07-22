@@ -319,6 +319,25 @@ async function extractPdfText(content: Buffer, filename: string): Promise<string
     }
     return text;
   } catch (err) {
+    // A DEPLOYMENT bug and a genuinely-bad PDF both land here, and they look
+    // nothing alike to an operator. pdf-parse mangled by esbuild (a Lambda that
+    // reaches this path but lacks `nodeModules: ['pdf-parse']`) throws with a
+    // pdfjs/DOM signature — `DOMMatrix is not defined`, `Cannot find native
+    // binding`, `@napi-rs/canvas`. Detect that and log a LOUD, actionable
+    // diagnostic (with the fix) so it's not misread as "user's PDF is corrupt" —
+    // that misdiagnosis is exactly what cost a full debug loop (ABCA-745 +
+    // decompose-seed 2026-07-22). The user-facing message stays generic.
+    const msg = err instanceof Error ? err.message : String(err);
+    const looksLikeBundlingBug = /DOMMatrix|ImageData|Path2D|napi-rs\/canvas|Cannot find native binding|pdfjs/i.test(msg);
+    if (looksLikeBundlingBug) {
+      logger.error(
+        'PDF extraction hit a pdfjs/native-binding error — this is almost certainly a BUNDLING bug, ' +
+        'not a bad PDF: the Lambda screens PDFs but was esbuild-bundled without `nodeModules: [\'pdf-parse\']`. ' +
+        'Add the attachment-screening bundling carve-out to this function\'s construct (see the ' +
+        '//:check:pdf-parse-bundling guard).',
+        { error: msg, filename, metric_type: 'pdf_parse_bundling_error' },
+      );
+    }
     throw new AttachmentScreeningError(
       `PDF "${filename}" could not be processed. It may be corrupt or use unsupported features. ` +
       'Try exporting to a simpler PDF format.',
