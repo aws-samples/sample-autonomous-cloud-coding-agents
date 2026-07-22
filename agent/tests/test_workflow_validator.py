@@ -150,7 +150,7 @@ class TestIndividualRules:
         w["agent_config"]["tier"] = "read-only"
         w["agent_config"]["allowed_tools"] = ["Bash", "Read"]
         w["agent_config"]["cedar_policy_modules"] = ["builtin/hard_deny"]
-        w["agent_config"]["skills"] = ["registry://skill/x-v1"]
+        w["agent_config"]["skills"] = ["registry://skill/acme/x@^1.0.0"]
         w["steps"] = [
             {"kind": "clone_repo"},
             {"kind": "hydrate_context"},
@@ -165,7 +165,17 @@ class TestIndividualRules:
         "ref,bad",
         [
             ("builtin/soft_deny", False),
-            ("registry://cedar/custom-v1", False),
+            # #246 grammar (REGISTRY.md §6): registry://kind/namespace/name@constraint
+            ("registry://cedar_policy_module/acme/custom@^1.0.0", False),
+            ("registry://cedar_policy_module/acme/custom@1.0.0", False),
+            ("registry://cedar_policy_module/acme/custom@~1.2.3", False),
+            # legacy 2-segment form is no longer valid grammar (no namespace, no pin)
+            ("registry://cedar/custom-v1", True),
+            # unpinned 3-segment is rejected — pins are mandatory (fail-closed)
+            ("registry://cedar_policy_module/acme/custom", True),
+            # floating constraints rejected
+            ("registry://cedar_policy_module/acme/custom@latest", True),
+            ("registry://cedar_policy_module/acme/custom@>=1.0.0", True),
             ("http://evil", True),
             ("soft_deny", True),
         ],

@@ -1,0 +1,6 @@
+{
+  "name": "grammar-valid-exact",
+  "description": "Exact-version pin on a multi-word snake_case kind.",
+  "ref": "registry://cedar_policy_module/acme/force-push-guard@1.0.0",
+  "expected": { "valid": true, "parsed": { "kind": "cedar_policy_module", "namespace": "acme", "name": "force-push-guard", "constraint": "1.0.0" } }
+}

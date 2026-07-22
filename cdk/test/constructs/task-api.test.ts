@@ -461,6 +461,73 @@ describe('TaskApi construct with webhooks', () => {
   });
 });
 
+describe('TaskApi construct with registry (#246)', () => {
+  function createStackWithRegistry(): Template {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack');
+    const taskTable = new dynamodb.Table(stack, 'TaskTable', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+    });
+    const taskEventsTable = new dynamodb.Table(stack, 'TaskEventsTable', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'event_id', type: dynamodb.AttributeType.STRING },
+    });
+    const registryAssetsTable = new dynamodb.Table(stack, 'RegistryAssetsTable', {
+      partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'sk', type: dynamodb.AttributeType.STRING },
+    });
+    const registryArtifactsBucket = new s3.Bucket(stack, 'RegistryArtifactsBucket');
+
+    new TaskApi(stack, 'TaskApi', {
+      taskTable,
+      taskEventsTable,
+      registryAssetsTable,
+      registryArtifactsBucket,
+    });
+    return Template.fromStack(stack);
+  }
+
+  let template: Template;
+  beforeAll(() => {
+    template = createStackWithRegistry();
+  });
+
+  test('creates the /registry resource tree', () => {
+    for (const pathPart of ['registry', 'assets', 'resolve', '{kind}', '{namespace}', '{name}']) {
+      template.hasResourceProperties('AWS::ApiGateway::Resource', { PathPart: pathPart });
+    }
+  });
+
+  test('adds 4 registry methods (POST+GET /assets, GET show, GET resolve)', () => {
+    const methods = template.findResources('AWS::ApiGateway::Method');
+    const nonOptions = Object.values(methods).filter(
+      (r) => (r as { Properties: { HttpMethod: string } }).Properties.HttpMethod !== 'OPTIONS',
+    );
+    // 6 base (incl. GET replay) + 4 registry
+    expect(nonOptions.length).toBe(10);
+  });
+
+  test('registry Lambdas receive the table + bucket env vars', () => {
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: {
+        Variables: Match.objectLike({
+          REGISTRY_ASSETS_TABLE_NAME: Match.anyValue(),
+          REGISTRY_ARTIFACTS_BUCKET_NAME: Match.anyValue(),
+        }),
+      },
+    });
+  });
+
+  test('is not created when the registry props are absent', () => {
+    const bare = createStack().template;
+    const resources = bare.findResources('AWS::ApiGateway::Resource');
+    const hasRegistry = Object.values(resources).some(
+      (r) => (r as { Properties?: { PathPart?: string } }).Properties?.PathPart === 'registry',
+    );
+    expect(hasRegistry).toBe(false);
+  });
+});
+
 describe('TaskApi construct — nudge endpoint (Phase 2)', () => {
   let nudgeTemplate: Template;
 

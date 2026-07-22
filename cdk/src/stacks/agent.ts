@@ -46,6 +46,8 @@ import { GitHubScreenshotIntegration } from '../constructs/github-screenshot-int
 import { JiraIntegration } from '../constructs/jira-integration';
 import { LinearIntegration } from '../constructs/linear-integration';
 import { PendingUploadCleanup } from '../constructs/pending-upload-cleanup';
+import { RegistryArtifactsBucket } from '../constructs/registry-artifacts-bucket';
+import { RegistryAssetsTable } from '../constructs/registry-assets-table';
 import { RepoTable } from '../constructs/repo-table';
 import { SlackIntegration } from '../constructs/slack-integration';
 import { StrandedTaskReconciler } from '../constructs/stranded-task-reconciler';
@@ -106,6 +108,20 @@ export class AgentStack extends Stack {
     const userConcurrencyTable = new UserConcurrencyTable(this, 'UserConcurrencyTable');
     const webhookTable = new WebhookTable(this, 'WebhookTable');
     const repoTable = new RepoTable(this, 'RepoTable');
+
+    // Agent asset registry (#246). Storage + API only in PR 1 — nothing in the
+    // orchestrator/agent reads from these yet (purely additive). The
+    // orchestrator resolve step and agent-side loaders follow in PR 2. The
+    // TaskApi wires the /registry routes when both handles are supplied.
+    const registryAssetsTable = new RegistryAssetsTable(this, 'RegistryAssetsTable');
+    const registryArtifactsBucket = new RegistryArtifactsBucket(this, 'RegistryArtifactsBucket');
+
+    NagSuppressions.addResourceSuppressions(registryArtifactsBucket.bucket, [
+      {
+        id: 'AwsSolutions-S1',
+        reason: 'Registry artifact bytes (REGISTRY.md §3.4): writes confined to the publish Lambda (RegistryPublisher/Approver-gated) via grantPut; reads only via short-lived presigned URLs from the authn\'d resolve handler. Versioned for audit; immutability enforced at the DynamoDB write. A separate access-log bucket is not justified for this admin-published catalog.',
+      },
+    ]);
 
     // Cedar-wasm Lambda layer (§15.2 task 10). Instantiated here so the
     // asset is in the synthed template; Chunk 5 handlers (Approve,
@@ -298,6 +314,8 @@ export class AgentStack extends Stack {
       traceArtifactsBucket: traceArtifactsBucket.bucket,
       attachmentsBucket: attachmentsBucket.bucket,
       userConcurrencyTable: userConcurrencyTable.table,
+      registryAssetsTable: registryAssetsTable.table,
+      registryArtifactsBucket: registryArtifactsBucket.bucket,
     });
 
     // --- AgentCore Runtime (IAM-authed orchestrator path) ---

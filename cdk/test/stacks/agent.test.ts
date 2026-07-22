@@ -44,8 +44,9 @@ describe('AgentStack', () => {
     // linear-workspace-registry (added in Phase 2.0b for OAuth bookkeeping),
     // jira-project-mapping, jira-user-mapping, jira-workspace-registry,
     // jira-webhook-dedup (added for the Jira Cloud integration),
-    // github-webhook-dedup (added by GitHubScreenshotIntegration on main)
-    template.resourceCountIs('AWS::DynamoDB::Table', 18);
+    // github-webhook-dedup (added by GitHubScreenshotIntegration on main),
+    // registry-assets (agent asset registry, #246)
+    template.resourceCountIs('AWS::DynamoDB::Table', 19);
   });
 
   test('creates TaskApprovalsTable with user_id-status-index GSI', () => {

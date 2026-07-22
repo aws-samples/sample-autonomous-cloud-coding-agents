@@ -186,6 +186,20 @@ export interface TaskApiProps {
    * Required when attachmentsBucket is provided.
    */
   readonly userConcurrencyTable?: dynamodb.ITable;
+
+  /**
+   * Agent asset registry table (#246). When provided together with
+   * {@link registryArtifactsBucket}, the four ``/registry`` routes
+   * (publish/resolve/list/show) are created. See docs/design/REGISTRY.md.
+   */
+  readonly registryAssetsTable?: dynamodb.ITable;
+
+  /**
+   * Agent asset registry artifact bucket (#246). Publish writes artifact bytes
+   * here; resolve issues short-lived presigned GETs. Paired with
+   * {@link registryAssetsTable}.
+   */
+  readonly registryArtifactsBucket?: s3.IBucket;
 }
 
 /**
@@ -1165,6 +1179,81 @@ export class TaskApi extends Construct {
 
       // Add webhook functions to nag suppression list
       allFunctions.push(createWebhookFn, listWebhooksFn, deleteWebhookFn, webhookAuthorizerFn, webhookCreateTaskFn);
+    }
+
+    // --- Agent asset registry endpoints (#246) ---
+    // Created only when both storage handles are provided. Publish/resolve/
+    // list/show over the shared Cognito authorizer; publish additionally gates
+    // on the RegistryPublisher/RegistryApprover groups inside the handler.
+    if (props.registryAssetsTable && props.registryArtifactsBucket) {
+      const registryEnv = {
+        REGISTRY_ASSETS_TABLE_NAME: props.registryAssetsTable.tableName,
+        REGISTRY_ARTIFACTS_BUCKET_NAME: props.registryArtifactsBucket.bucketName,
+      };
+
+      const registryPublishFn = new lambda.NodejsFunction(this, 'RegistryPublishFn', {
+        entry: path.join(handlersDir, 'registry-publish.ts'),
+        handler: 'handler',
+        runtime: Runtime.NODEJS_24_X,
+        architecture: Architecture.ARM_64,
+        environment: registryEnv,
+        bundling: commonBundling,
+      });
+
+      const registryResolveFn = new lambda.NodejsFunction(this, 'RegistryResolveFn', {
+        entry: path.join(handlersDir, 'registry-resolve.ts'),
+        handler: 'handler',
+        runtime: Runtime.NODEJS_24_X,
+        architecture: Architecture.ARM_64,
+        environment: registryEnv,
+        bundling: commonBundling,
+      });
+
+      const registryListFn = new lambda.NodejsFunction(this, 'RegistryListFn', {
+        entry: path.join(handlersDir, 'registry-list.ts'),
+        handler: 'handler',
+        runtime: Runtime.NODEJS_24_X,
+        architecture: Architecture.ARM_64,
+        environment: registryEnv,
+        bundling: commonBundling,
+      });
+
+      const registryShowFn = new lambda.NodejsFunction(this, 'RegistryShowFn', {
+        entry: path.join(handlersDir, 'registry-show.ts'),
+        handler: 'handler',
+        runtime: Runtime.NODEJS_24_X,
+        architecture: Architecture.ARM_64,
+        environment: registryEnv,
+        bundling: commonBundling,
+      });
+
+      // IAM: publish read/writes the table + writes artifacts; resolve/list/
+      // show are read-only (least privilege, REGISTRY.md §11 grants table).
+      props.registryAssetsTable.grantReadWriteData(registryPublishFn);
+      props.registryArtifactsBucket.grantPut(registryPublishFn);
+      props.registryAssetsTable.grantReadData(registryResolveFn);
+      props.registryArtifactsBucket.grantRead(registryResolveFn);
+      props.registryAssetsTable.grantReadData(registryListFn);
+      props.registryAssetsTable.grantReadData(registryShowFn);
+
+      // --- API resource tree: /registry ---
+      const registry = this.api.root.addResource('registry');
+
+      const registryAssets = registry.addResource('assets');
+      registryAssets.addMethod('POST', new apigw.LambdaIntegration(registryPublishFn), cognitoAuthOptions);
+      registryAssets.addMethod('GET', new apigw.LambdaIntegration(registryListFn), cognitoAuthOptions);
+
+      // /registry/assets/{kind}/{namespace}/{name} — show all versions
+      const registryShowResource = registryAssets
+        .addResource('{kind}')
+        .addResource('{namespace}')
+        .addResource('{name}');
+      registryShowResource.addMethod('GET', new apigw.LambdaIntegration(registryShowFn), cognitoAuthOptions);
+
+      const registryResolve = registry.addResource('resolve');
+      registryResolve.addMethod('GET', new apigw.LambdaIntegration(registryResolveFn), cognitoAuthOptions);
+
+      allFunctions.push(registryPublishFn, registryResolveFn, registryListFn, registryShowFn);
     }
 
     // --- cdk-nag suppressions for CDK-generated IAM policies ---

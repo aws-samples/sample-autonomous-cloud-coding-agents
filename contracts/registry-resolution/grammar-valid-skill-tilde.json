@@ -1,0 +1,6 @@
+{
+  "name": "grammar-valid-skill-tilde",
+  "description": "skill kind with tilde constraint — PR #548 review case 'registry://skill/acme/refactor@~2.0.0'.",
+  "ref": "registry://skill/acme/refactor@~2.0.0",
+  "expected": { "valid": true, "parsed": { "kind": "skill", "namespace": "acme", "name": "refactor", "constraint": "~2.0.0" } }
+}

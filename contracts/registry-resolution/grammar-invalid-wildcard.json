@@ -1,0 +1,6 @@
+{
+  "name": "grammar-invalid-wildcard",
+  "description": "Wildcard x-range is rejected.",
+  "ref": "registry://mcp_server/acme/pdf-tools@1.x",
+  "expected": { "valid": false }
+}

@@ -42,7 +42,7 @@ from .runner import (
     gate_status,
     run_workflow,
 )
-from .validator import assert_valid, validate_workflow
+from .validator import assert_valid, is_registry_ref, validate_workflow
 
 __all__ = [
     "STEP_HANDLERS",
@@ -62,6 +62,7 @@ __all__ = [
     "WorkflowValidationError",
     "assert_valid",
     "gate_status",
+    "is_registry_ref",
     "load_workflow",
     "load_workflow_file",
     "policy_principal_for",

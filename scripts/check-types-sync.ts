@@ -104,6 +104,11 @@ const CDK_ONLY_ALLOWLIST = new Set<string>([
   // Internal extension shape used by create-task-core.ts to thread
   // Cedar HITL fields without widening the public CreateTaskRequest:
   'CreateTaskApprovalExtensions',
+  // Registry (#246) server-only persistence/audit shapes — the CLI consumes
+  // the resolved/wire types (RegistryRef, ResolvedAsset, etc.) but never the
+  // raw DDB row or its audit-event entries. See docs/design/REGISTRY.md §3.1.
+  'RegistryAssetRecord',
+  'RegistryStatusEvent',
   // Server-side bound constants — sourced from contracts/constants.json
   // (S9). Cross-language drift is enforced by scripts/check-constants-sync.ts.
   'APPROVAL_GATE_CAP_MIN',

@@ -1,0 +1,6 @@
+{
+  "name": "grammar-invalid-no-constraint",
+  "description": "3-segment but unpinned — pins are MANDATORY (ADR-018 sub-decision 6, fail-closed). Invalid grammar.",
+  "ref": "registry://mcp_server/acme/pdf-tools",
+  "expected": { "valid": false }
+}

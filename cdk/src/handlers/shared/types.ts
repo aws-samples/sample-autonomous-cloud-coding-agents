@@ -47,6 +47,158 @@ export type ResolvedWorkflow = {
   readonly version: string;
 };
 
+// --- Agent asset registry (#246) --------------------------------------------
+// See docs/design/REGISTRY.md and ADR-018. The registry is a versioned,
+// immutable-per-version catalog of runtime artifacts referenced from Blueprints
+// via ``registry://kind/namespace/name@constraint`` and resolved at the
+// create-task boundary. Types below are the shared contract between the CDK
+// handlers/resolver and (for the wire-facing ones) the CLI.
+
+/**
+ * Registry asset kinds. MVP loads ``mcp_server`` end-to-end; ``cedar_policy_module``
+ * and ``skill`` are resolved and staged. The remaining kinds are declared so the
+ * grammar is stable but are rejected at publish until a loader ships
+ * (ADR-018 sub-decision 1; REGISTRY.md §2).
+ *
+ * Keep in sync with ``cli/src/types.ts::RegistryAssetKind``.
+ */
+export type RegistryAssetKind =
+  | 'mcp_server'
+  | 'cedar_policy_module'
+  | 'skill'
+  | 'plugin'
+  | 'subagent'
+  | 'prompt_fragment'
+  | 'capability';
+
+/**
+ * Lifecycle status of a registry asset version (ADR-018 sub-decision 4/10;
+ * REGISTRY.md §5). ``approved`` is the single canonical resolvable state — the
+ * ADR prose word "active" is NOT a value in code (one token, byte-for-byte,
+ * across the TS resolver and the Python loader).
+ *
+ * Resolution: ``approved`` resolves silently; ``deprecated`` resolves with a
+ * warning; ``submitted``/``draft``/``rejected`` are not candidates; ``removed``
+ * fails with a distinct ``REMOVED`` reason.
+ *
+ * Keep in sync with ``cli/src/types.ts::RegistryAssetStatus``.
+ */
+export type RegistryAssetStatus =
+  | 'draft'
+  | 'submitted'
+  | 'approved'
+  | 'rejected'
+  | 'deprecated'
+  | 'removed';
+
+/**
+ * A parsed ``registry://kind/namespace/name@constraint`` reference. The
+ * ``constraint`` is mandatory (fail-closed; ADR-018 sub-decision 6) and is one
+ * of exact (``1.4.1``), caret (``^1.4.1``), or tilde (``~1.4.1``). Produced by
+ * ``registry-resolver.ts::parseRef``; its grammar must agree byte-for-byte with
+ * the Python ``_REGISTRY_REF`` (contracts/registry-resolution/).
+ *
+ * Keep in sync with ``cli/src/types.ts::RegistryRef``.
+ */
+export type RegistryRef = {
+  readonly kind: RegistryAssetKind;
+  readonly namespace: string;
+  readonly name: string;
+  readonly constraint: string;
+};
+
+/**
+ * One audit entry appended to a record on every lifecycle transition
+ * (REGISTRY.md §3.1/§10). Append-only; rich actor+timestamp+rationale is a MUST.
+ */
+export interface RegistryStatusEvent {
+  readonly status: RegistryAssetStatus;
+  /** Cognito ``sub`` of the actor who caused the transition. */
+  readonly actor: string;
+  readonly at: string;
+  readonly rationale?: string;
+}
+
+/**
+ * Typed per-kind descriptor validated at publish (REGISTRY.md §3.3). Shared
+ * required fields plus kind-specific keys carried as an open map (each handler
+ * validates its kind's required keys). ``artifact`` marks fields whose bytes
+ * live in S3 rather than inline.
+ */
+export interface RegistryDescriptor {
+  readonly summary: string;
+  readonly permissions: readonly string[];
+  readonly [key: string]: unknown;
+}
+
+/**
+ * Full registry asset record as stored in ``RegistryAssetsTable`` (REGISTRY.md
+ * §3.1). One row per published ``(kind, namespace, name, version)``. Immutable
+ * once written except for ``status`` and ``status_history``.
+ */
+export interface RegistryAssetRecord {
+  /** Partition key: ``{kind}#{namespace}/{name}``. */
+  readonly pk: string;
+  /** Sort key: the semver ``version`` string. */
+  readonly sk: string;
+  readonly kind: RegistryAssetKind;
+  readonly namespace: string;
+  readonly name: string;
+  readonly version: string;
+  readonly descriptor: RegistryDescriptor;
+  /** S3 key of the artifact bytes; empty for descriptor-only kinds. */
+  readonly artifact_ref?: string;
+  readonly status: RegistryAssetStatus;
+  /** Cognito ``sub`` of the publishing principal. */
+  readonly publisher: string;
+  readonly created_at: string;
+  readonly status_history: readonly RegistryStatusEvent[];
+}
+
+/**
+ * The result of resolving a single ``registry://`` ref against the catalog
+ * (REGISTRY.md §4.2). Carries the descriptor, the pinned version chosen, and
+ * any resolution warnings (e.g. ``DEPRECATED``). The artifact bytes are fetched
+ * separately (presigned URL) so this stays small on the task payload.
+ *
+ * Keep in sync with ``cli/src/types.ts::ResolvedAsset``.
+ */
+export interface ResolvedAsset {
+  readonly kind: RegistryAssetKind;
+  readonly namespace: string;
+  readonly name: string;
+  readonly version: string;
+  readonly descriptor: RegistryDescriptor;
+  readonly artifact_url?: string;
+  readonly warnings: readonly string[];
+}
+
+/**
+ * The bundle attached to the agent payload after resolving all of a task's
+ * registry refs (REGISTRY.md §7/§8). Grouped by kind so the agent-side loader
+ * applies each with the right mechanism.
+ *
+ * Keep in sync with ``cli/src/types.ts::ResolvedAssetBundle``.
+ */
+export interface ResolvedAssetBundle {
+  readonly mcp_servers: readonly ResolvedAsset[];
+  readonly cedar_policy_modules: readonly ResolvedAsset[];
+  readonly skills: readonly ResolvedAsset[];
+}
+
+/**
+ * Compact audit triple stamped on the TaskRecord — ``{kind, id, version}`` —
+ * answering "what asset versions did this task run" from a single field
+ * (ADR-018 sub-decision 5; REGISTRY.md §7). ``id`` is ``namespace/name``.
+ *
+ * Keep in sync with ``cli/src/types.ts::ResolvedAssetSummary``.
+ */
+export interface ResolvedAssetSummary {
+  readonly kind: RegistryAssetKind;
+  readonly id: string;
+  readonly version: string;
+}
+
 /** Shared across all attachment interfaces. Add new types here (e.g., 'audio'). */
 export type AttachmentType = 'image' | 'file' | 'url';
 

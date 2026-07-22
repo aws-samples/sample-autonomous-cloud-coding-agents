@@ -30,6 +30,94 @@ export type ResolvedWorkflow = {
   readonly version: string;
 };
 
+// --- Agent asset registry (#246) --------------------------------------------
+// Wire-facing types consumed by the ``bgagent registry`` commands. Mirror
+// ``cdk/src/handlers/shared/types.ts`` per the CLI types-sync contract. The DDB
+// record shape (``RegistryAssetRecord``) and audit-event shape are server-only
+// and intentionally not mirrored here. See docs/design/REGISTRY.md / ADR-018.
+
+/**
+ * Registry asset kinds. Mirrors
+ * ``cdk/src/handlers/shared/types.ts::RegistryAssetKind``.
+ */
+export type RegistryAssetKind =
+  | 'mcp_server'
+  | 'cedar_policy_module'
+  | 'skill'
+  | 'plugin'
+  | 'subagent'
+  | 'prompt_fragment'
+  | 'capability';
+
+/**
+ * Lifecycle status of a registry asset version. ``approved`` is the single
+ * canonical resolvable state ("active" is not a code value). Mirrors
+ * ``cdk/src/handlers/shared/types.ts::RegistryAssetStatus``.
+ */
+export type RegistryAssetStatus =
+  | 'draft'
+  | 'submitted'
+  | 'approved'
+  | 'rejected'
+  | 'deprecated'
+  | 'removed';
+
+/**
+ * A parsed ``registry://kind/namespace/name@constraint`` reference; the
+ * constraint pin is mandatory. Mirrors
+ * ``cdk/src/handlers/shared/types.ts::RegistryRef``.
+ */
+export type RegistryRef = {
+  readonly kind: RegistryAssetKind;
+  readonly namespace: string;
+  readonly name: string;
+  readonly constraint: string;
+};
+
+/**
+ * Typed per-kind descriptor (validated at publish). Mirrors
+ * ``cdk/src/handlers/shared/types.ts::RegistryDescriptor``.
+ */
+export interface RegistryDescriptor {
+  readonly summary: string;
+  readonly permissions: readonly string[];
+  readonly [key: string]: unknown;
+}
+
+/**
+ * Result of resolving one ``registry://`` ref. Mirrors
+ * ``cdk/src/handlers/shared/types.ts::ResolvedAsset``.
+ */
+export interface ResolvedAsset {
+  readonly kind: RegistryAssetKind;
+  readonly namespace: string;
+  readonly name: string;
+  readonly version: string;
+  readonly descriptor: RegistryDescriptor;
+  readonly artifact_url?: string;
+  readonly warnings: readonly string[];
+}
+
+/**
+ * All of a task's resolved assets grouped by kind. Mirrors
+ * ``cdk/src/handlers/shared/types.ts::ResolvedAssetBundle``.
+ */
+export interface ResolvedAssetBundle {
+  readonly mcp_servers: readonly ResolvedAsset[];
+  readonly cedar_policy_modules: readonly ResolvedAsset[];
+  readonly skills: readonly ResolvedAsset[];
+}
+
+/**
+ * Compact ``{kind, id, version}`` audit triple stamped on a task. Mirrors
+ * ``cdk/src/handlers/shared/types.ts::ResolvedAssetSummary``.
+ */
+export interface ResolvedAssetSummary {
+  readonly kind: RegistryAssetKind;
+  readonly id: string;
+  readonly version: string;
+}
+
 /** Shared across all attachment interfaces. Add new types here (e.g., 'audio'). */
 export type AttachmentType = 'image' | 'file' | 'url';
 
