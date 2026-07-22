@@ -61,10 +61,19 @@ RUN corepack enable && corepack prepare yarn@stable --activate || corepack enabl
 # returned creds are cached until 5 min before the JSON's `Expiration`, so an
 # 8 h task re-assumes the 1 h-capped SessionRole before expiry. Older builds
 # only refreshed hourly on a timer, racing the role-chaining cap.
+# claude-code@2.1.x ships an error-shim at bin/claude.exe that its postinstall
+# (install.cjs) replaces with the platform-native ELF binary. That postinstall
+# can silently fall back (leaving the shim in place) — the shim then dies at
+# runtime with "Exec format error: 'claude'" even though the native binary is
+# present as an optional dep, just never wired up. Re-run install.cjs explicitly
+# after the install so the native binary is placed at build time, and hard-verify
+# it exec's (``claude --version`` fails the build if the shim is still on PATH).
 RUN npm install -g npm@latest && \
     npm install -g @anthropic-ai/claude-code@2.1.191 && \
     CLAUDE_NPM_ROOT="$(npm root -g)/@anthropic-ai/claude-code" && \
-    npm --prefix "${CLAUDE_NPM_ROOT}" update tar minimatch glob cross-spawn picomatch
+    npm --prefix "${CLAUDE_NPM_ROOT}" update tar minimatch glob cross-spawn picomatch && \
+    node "${CLAUDE_NPM_ROOT}/install.cjs" && \
+    claude --version
 
 # Install uv (fast Python package manager) — pinned for reproducibility
 COPY --from=ghcr.io/astral-sh/uv:0.11.14 /uv /usr/local/bin/uv
