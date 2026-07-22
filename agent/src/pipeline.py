@@ -6,7 +6,6 @@ import asyncio
 import hashlib
 import inspect
 import os
-import subprocess
 import sys
 import time
 from typing import TYPE_CHECKING
@@ -935,19 +934,17 @@ def run_task(
                     system_prompt_overrides=system_prompt_overrides,
                 )
 
-            # Configure git and gh auth before setup_repo() uses them
-            subprocess.run(
-                ["git", "config", "--global", "user.name", "bgagent"],
-                check=True,
-                capture_output=True,
-                timeout=60,
-            )
-            subprocess.run(
-                ["git", "config", "--global", "user.email", "bgagent@noreply.github.com"],
-                check=True,
-                capture_output=True,
-                timeout=60,
-            )
+            # Configure git identity and gh auth before setup_repo() uses them.
+            # Use GIT_AUTHOR_*/GIT_COMMITTER_* env vars rather than
+            # `git config --global`: git honors these for every commit (inherited
+            # by Claude Code and the safety-net commit in post_hooks) WITHOUT
+            # writing to any on-disk config. `--global` would clobber the real
+            # ~/.gitconfig — harmless in the ephemeral container, but destructive
+            # when this pipeline runs on a developer workstation (#622).
+            os.environ["GIT_AUTHOR_NAME"] = "bgagent"
+            os.environ["GIT_AUTHOR_EMAIL"] = "bgagent@noreply.github.com"
+            os.environ["GIT_COMMITTER_NAME"] = "bgagent"
+            os.environ["GIT_COMMITTER_EMAIL"] = "bgagent@noreply.github.com"
             os.environ["GITHUB_TOKEN"] = config.github_token
             os.environ["GH_TOKEN"] = config.github_token
 
@@ -1620,6 +1617,34 @@ _PAYLOAD_STR_KEYS = frozenset({"issue_number", "pr_number"})
 #: shadow it). Any payload key not in this set is ignored, never passed through.
 _RUN_TASK_PARAMS = frozenset(inspect.signature(run_task).parameters)
 
+#: Orchestrator payload keys we KNOW about that ``run_task`` does not (yet)
+#: accept as a parameter. Dropping one of these is expected today, but a key that
+#: shows up here AND is silently dropped is exactly the "wired one side of an
+#: orchestrator→agent field, forgot the other" no-op that ABCA-487 was — so we
+#: WARN when we drop one, making a future contract gap visible instead of silent.
+#: Keys not in this set (genuinely foreign) are dropped quietly as before.
+#:
+#: NB (merge note): on this branch ``run_task`` DOES accept ``build_command``,
+#: ``lint_command``, ``base_branch`` and ``merge_branches`` (see its signature),
+#: so those are forwarded — NOT dropped — and must NOT be listed here (they would
+#: never hit the drop path). ``github_token_secret_arn`` is deliberately omitted
+#: too (N3): it is ALWAYS present and ALWAYS resolved via the
+#: ``GITHUB_TOKEN_SECRET_ARN`` env in build_config, so listing it would fire the
+#: WARN on 100% of ECS boots — pure noise. It falls through as a quiet
+#: foreign-key drop instead.
+_KNOWN_ORCHESTRATOR_KEYS = frozenset(
+    {
+        # AgentCore's server.py exports task_started_at as TASK_STARTED_AT, which
+        # hooks._remaining_maxlifetime_s() uses to clip the Cedar HITL approval-gate
+        # maxLifetime. The ECS boot path bypasses server.py and does not (yet) set
+        # that env, so this key is dropped here — a silent AgentCore↔ECS HITL
+        # divergence (fail-open: the clip returns None, gate uses the task default).
+        # Listing it makes the drop WARN so the parity gap is visible until the ECS
+        # strategy sets TASK_STARTED_AT in containerEnv (tracked as a follow-up).
+        "task_started_at",
+    }
+)
+
 
 def run_task_from_payload(payload: dict) -> dict:
     """Invoke :func:`run_task` from a full orchestrator payload dict.
@@ -1646,13 +1671,42 @@ def run_task_from_payload(payload: dict) -> dict:
     for key, value in (payload or {}).items():
         target = _PAYLOAD_KEY_ALIASES.get(key, key)
         if target not in _RUN_TASK_PARAMS:
-            continue  # not a run_task parameter — ignore (e.g. github_token_secret_arn)
+            # Not a run_task parameter — ignore. A KNOWN orchestrator key being
+            # dropped is expected today but worth a breadcrumb: if run_task ever
+            # grows a matching param, this WARN is where a "forgot to wire it
+            # through" no-op surfaces (N4 / ABCA-487 class). Foreign keys are
+            # dropped quietly.
+            if key in _KNOWN_ORCHESTRATOR_KEYS and value is not None:
+                log(
+                    "WARN",
+                    f"run_task_from_payload: dropping known orchestrator key '{key}' "
+                    f"(not a run_task parameter) — consumed elsewhere or not yet wired",
+                )
+            continue
         if value is None:
             continue  # let run_task's default apply
         if target in _PAYLOAD_STR_KEYS:
             value = str(value)
         elif target == "max_turns":
-            value = int(value)
+            # Defensive: a malformed max_turns must not crash the whole boot —
+            # drop it and let run_task's default apply (with a breadcrumb) rather
+            # than raise. Unlike the str keys above, this is the one field with a
+            # non-str coercion, so it also guards the surprising int() cases the
+            # orchestrator never emits but a hand-edited payload might: a bool
+            # (``int(True) == 1``) and a non-integral float (``int(3.9) == 3``)
+            # would both silently become a bogus turn count (N4).
+            if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+                log("WARN", f"run_task_from_payload: ignoring non-integer max_turns {value!r}")
+                continue
+            try:
+                coerced = int(value)
+            except (TypeError, ValueError):
+                log("WARN", f"run_task_from_payload: ignoring non-integer max_turns {value!r}")
+                continue
+            if isinstance(value, float) and coerced != value:
+                log("WARN", f"run_task_from_payload: ignoring non-integral max_turns {value!r}")
+                continue
+            value = coerced
         kwargs[target] = value
 
     kwargs.setdefault("aws_region", os.environ.get("AWS_REGION", ""))

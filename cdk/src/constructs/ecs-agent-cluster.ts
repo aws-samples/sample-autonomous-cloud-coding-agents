@@ -28,6 +28,7 @@ import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
+import { AgentMemory } from './agent-memory';
 import { AgentSessionRole } from './agent-session-role';
 import { resolveBedrockModelIds } from './bedrock-models';
 
@@ -39,21 +40,6 @@ export interface EcsAgentClusterProps {
   readonly userConcurrencyTable: dynamodb.ITable;
   readonly githubTokenSecret: secretsmanager.ISecret;
   readonly memoryId?: string;
-
-  /**
-   * Cross-task AgentCore Memory (ABCA-488-class / F-2 ECS-parity). Passing
-   * ``memoryId`` alone wires ``MEMORY_ID`` into the container so the agent
-   * ATTEMPTS episodic/semantic writes — but the write uses the task role's
-   * ambient credentials, so without an IAM grant the write fails closed with
-   * ``AccessDeniedException … bedrock-agentcore:CreateEvent`` (live-caught on the
-   * fork: ``memory_written: false``, both write_task_episode + write_repo_learnings
-   * denied). The AgentCore runtime gets the equivalent grant via
-   * ``agentMemory.grantReadWrite(runtime)``; the ECS task role needs the SAME.
-   * Passing the construct (not just the id) lets us grant read+write here.
-   * Omitted in isolated construct tests → no grant (and no MEMORY_ID unless
-   * ``memoryId`` is also passed).
-   */
-  readonly agentMemory?: { grantReadWrite(grantee: iam.IGrantable): void };
 
   /**
    * S3 bucket holding per-task ECS payloads (#502). The orchestrator writes the
@@ -69,12 +55,20 @@ export interface EcsAgentClusterProps {
 
   /**
    * Artifacts bucket for repo-bound artifact workflows (#299 coding/decompose-v1
-   * emits its plan JSON here via ``deliver_artifact``; also the ``--trace``
-   * upload target). The AgentCore runtime gets ``ARTIFACTS_BUCKET_NAME`` in its
-   * env; the ECS task needs the SAME env + read/write grant or an artifact
-   * workflow fails at delivery with "ARTIFACTS_BUCKET_NAME is not configured"
-   * (live-caught: a :decompose on an ecs-configured repo). Read/WRITE because the
-   * container DELIVERS the artifact (unlike the read-only payload bucket).
+   * emits its plan JSON here via ``deliver_artifact``). The AgentCore runtime
+   * gets ``ARTIFACTS_BUCKET_NAME`` in its env; the ECS task needs the SAME env
+   * (but NO bucket grant) or an artifact workflow fails at delivery with
+   * "ARTIFACTS_BUCKET_NAME is not configured" (live-caught: a :decompose on an
+   * ecs-configured repo). The delivery WRITE goes through the assumed per-task
+   * SessionRole (scoped to ``artifacts/${aws:PrincipalTag/task_id}/*``), so the
+   * task role gets only the env var — parity with the AgentCore runtime role,
+   * which likewise has no direct artifacts grant (see the grant block below for
+   * the rationale).
+   *
+   * NOTE: this wires only ``ARTIFACTS_BUCKET_NAME`` (artifact delivery). It does
+   * NOT set ``TRACE_ARTIFACTS_BUCKET_NAME`` (telemetry.py reads that for the
+   * ``--trace`` upload), so ``--trace`` silently skips on ECS today — a separate
+   * ECS-parity gap, not wired here.
    * Omitted in isolated construct tests → no env/grant.
    */
   readonly artifactsBucket?: s3.IBucket;
@@ -89,6 +83,19 @@ export interface EcsAgentClusterProps {
    * retains the legacy direct grants.
    */
   readonly agentSessionRole?: AgentSessionRole;
+
+  /**
+   * AgentCore Memory for cross-task learning (F-2 / ABCA-488-class parity). When
+   * provided, the ECS task role is granted read+write on it so the agent's
+   * memory writes (write_task_episode / write_repo_learnings →
+   * ``bedrock-agentcore:CreateEvent``) succeed on the ECS substrate. The
+   * AgentCore runtime role already gets this via ``agentMemory.grantReadWrite``
+   * in agent.ts; without the same grant here, memory writes hit AccessDenied and
+   * no-op on ECS (logged, non-fatal — memory.py treats an AccessDenied as an
+   * infra failure), so learning never persists on an ECS-only deployment.
+   * Omitted in isolated construct tests / memory-less deployments.
+   */
+  readonly agentMemory?: AgentMemory;
 }
 
 /** HTTPS port — the only egress allowed from the agent task ENIs. */
@@ -361,17 +368,16 @@ export class EcsAgentCluster extends Construct {
     // the ARTIFACTS_BUCKET_NAME env (set above), not a bucket grant. Granting
     // whole-bucket read+write here would over-privilege the untrusted-code role
     // and break cross-task isolation (a task could read/clobber other tasks'
-    // artifacts/<other_id>/, traces/, attachments/ on the same bucket). (#596 review B1)
+    // artifacts/<other_id>/, traces/, attachments/ on the same bucket).
     // (no props.artifactsBucket grant — intentional; see comment)
 
-    // F-2 ECS-parity: grant the task role read+write on the cross-task AgentCore
-    // Memory. MEMORY_ID in the container env makes the agent ATTEMPT episodic +
-    // semantic writes; those calls (bedrock-agentcore:CreateEvent et al.) use the
-    // task role's ambient creds, so without this grant they fail closed with
-    // AccessDeniedException and cross-task learning silently no-ops on ECS
-    // (memory_written: false — live-caught on the fork). Mirrors the AgentCore
-    // runtime's own agentMemory.grantReadWrite(runtime). Stays on the task role
-    // (the memory write is a terminal step, not gated behind the SessionRole).
+    // F-2 (ABCA-488-class parity): grant the task role read+write on the
+    // AgentCore Memory so the agent's cross-task learning writes
+    // (write_task_episode / write_repo_learnings → bedrock-agentcore:CreateEvent)
+    // succeed on ECS. The AgentCore runtime role gets this via
+    // agentMemory.grantReadWrite(runtime) in agent.ts; without the same grant
+    // here the writes hit AccessDenied and no-op on the ECS substrate (logged,
+    // non-fatal), so learning never persists on an ECS-only deployment.
     if (props.agentMemory) {
       props.agentMemory.grantReadWrite(taskRole);
     }
@@ -383,7 +389,9 @@ export class EcsAgentCluster extends Construct {
     // 👀→✅ reaction and drive the channel MCP. The AgentCore runtime role +
     // orchestrator/fanout/screenshot roles all have this prefix grant; the ECS
     // task role did NOT, so on ECS the token fetch hit AccessDenied and
-    // reactions/MCP silently no-op'd (ECS-parity gap, live-caught on ABCA-488).
+    // reactions/MCP no-op'd — logged by config.py's token resolver, not silent,
+    // but the channel effect (no 👀→✅, no MCP) is invisible to the user
+    // (ECS-parity gap, live-caught on ABCA-488).
     // GetSecretValue only — the container reads the token; the orchestrator owns
     // refresh/PutSecretValue.
     taskRole.addToPrincipalPolicy(new iam.PolicyStatement({

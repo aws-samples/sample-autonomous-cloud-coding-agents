@@ -1079,6 +1079,11 @@ async def post_tool_use_hook(
     present, an egress-denial signature in the tool output emits an
     ``egress_denied`` blocker event (#251) — best-effort observability,
     never alters the screening decision.
+
+    K7: when a ``stuck_guard`` is supplied, every tool result is recorded so a
+    between-turns hook can detect a repeating failing command (the ABCA-483
+    spin loop) and steer / bail. Recording is best-effort and never alters the
+    screening outcome.
     """
     _PASS_THROUGH: dict = {"hookSpecificOutput": {"hookEventName": "PostToolUse"}}
     _FAIL_CLOSED: dict = {
@@ -1148,6 +1153,14 @@ async def post_tool_use_hook(
                 retryable=False,
                 resource=host,
             )
+
+    # K7: feed the stuck-guard (best-effort — a tracking error must never block
+    # the screening path that follows).
+    if stuck_guard is not None:
+        try:
+            stuck_guard.record_tool_result(tool_name, hook_input.get("tool_input"), tool_response)
+        except Exception as exc:
+            log("WARN", f"stuck-guard record raised (ignored): {type(exc).__name__}: {exc}")
 
     try:
         result = scan_tool_output(tool_response)
@@ -1662,8 +1675,8 @@ def build_hook_matchers(
                 tool_use_id,
                 ctx,
                 trajectory=trajectory,
-                stuck_guard=_stuck_guard,
                 progress=progress,
+                stuck_guard=_stuck_guard,
             )
             return SyncHookJSONOutput(**result)
         except Exception as exc:

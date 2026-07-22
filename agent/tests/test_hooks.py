@@ -9,11 +9,14 @@ cedarpy = pytest.importorskip("cedarpy")
 
 from hooks import (
     _reset_blocker_reason_for_tests,
+    _stuck_guard_between_turns_hook,
     build_hook_matchers,
     detect_egress_denial,
     last_blocker_reason,
+    last_stuck_summary,
     post_tool_use_hook,
     pre_tool_use_hook,
+    reset_stuck_summary,
 )
 from policy import PolicyEngine
 
@@ -1720,6 +1723,53 @@ class TestStuckGuardHookIntegration:
             _run(post_tool_use_hook(hook_input, "t", {}, stuck_guard=guard))
         # the guard now has enough failures to steer
         assert guard.evaluate().kind == "steer"
+
+    def test_between_turns_hook_latches_stuck_summary_from_the_guard(self):
+        # #599 N2: pin the PRODUCTION write path for the _LAST_STUCK_SUMMARY latch
+        # (hooks.py:1464-1465). The enrichment tests monkeypatch the getter, so
+        # without this test deleting those two lines would leave the latch
+        # permanently None and every test would still pass. Drive the real hook
+        # with a failure-dominated guard and assert the module latch is populated.
+        from stuck_guard import WINDOW, StuckGuard
+
+        reset_stuck_summary()
+        assert last_stuck_summary() is None
+        guard = StuckGuard()
+        cmd = {"command": "mise //cdk:test"}
+        # recent_failure_summary needs a FULL window (>= WINDOW) of byte-identical
+        # failures (WINDOW_FAIL_THRESHOLD of them) — fill it past WINDOW.
+        for _ in range(WINDOW + 2):
+            guard.record_tool_result("Bash", cmd, self._oom())
+        # Precondition: the guard itself considers the window failure-dominated.
+        assert guard.recent_failure_summary() is not None
+
+        result = _stuck_guard_between_turns_hook({"stuck_guard": guard})
+        # advisory steer text returned…
+        assert isinstance(result, list)
+        # …and, crucially, the terminal-reason latch was written by the hook.
+        summary = last_stuck_summary()
+        assert summary is not None
+        assert "last tool calls repeated" in summary
+        reset_stuck_summary()
+
+    def test_between_turns_hook_clears_stuck_summary_when_not_failure_dominated(self):
+        # Symmetric guard: a recovered task (clean window) must CLEAR the latch,
+        # not leave a stale "stuck" summary that a later max_turns cap would echo.
+        # Pre-seed a stale latch via a failure-dominated guard.
+        from stuck_guard import WINDOW, StuckGuard
+
+        stuck = StuckGuard()
+        for _ in range(WINDOW + 2):
+            stuck.record_tool_result("Bash", {"command": "mise //cdk:test"}, self._oom())
+        _stuck_guard_between_turns_hook({"stuck_guard": stuck})
+        assert last_stuck_summary() is not None
+
+        # A fresh, healthy guard on the next turn clears it (recent_failure_summary None).
+        healthy = StuckGuard()
+        healthy.record_tool_result("Read", {"file": "a.py"}, "def hello(): return 1")
+        _stuck_guard_between_turns_hook({"stuck_guard": healthy})
+        assert last_stuck_summary() is None
+        reset_stuck_summary()
 
     def test_post_tool_use_record_error_never_blocks_screening(self):
         # A guard that raises on record must not break the PASS_THROUGH path.

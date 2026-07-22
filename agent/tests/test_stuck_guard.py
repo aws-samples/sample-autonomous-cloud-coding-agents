@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from stuck_guard import (
     STEER_THRESHOLD,
+    WINDOW,
+    WINDOW_FAIL_THRESHOLD,
     StuckGuard,
     _looks_failed,
     _signature,
@@ -206,7 +208,7 @@ class TestWindowSpin:
 
     def test_no_summary_when_window_is_mostly_successful(self):
         # A productive agent (varied commands, mostly succeeding) must yield no
-        # spin summary — so its max_turns reason stays unchanged.
+        # summary — so its max_turns reason stays unchanged.
         g = StuckGuard()
         for i in range(6):
             g.record_tool_result("Bash", {"command": f"step {i}"}, OK)
@@ -220,5 +222,29 @@ class TestWindowSpin:
         outcomes = [OOM, OK, OOM, OK, OOM, OOM]  # 4 fails / 6
         for i, out in enumerate(outcomes):
             g.record_tool_result("Bash", {"command": f"cmd {i}"}, out)
+        assert g.evaluate().kind == "none"
+        assert g.recent_failure_summary() is None
+
+    def test_window_steers_at_exactly_the_threshold(self):
+        # N4 boundary: exactly WINDOW_FAIL_THRESHOLD (5) same-fingerprint failures
+        # in a FULL window of WINDOW (6) — the `>=` edge where an off-by-one would
+        # hide. One OK dilutes the window to 5/6 fails, still == the threshold.
+        assert WINDOW == 6 and WINDOW_FAIL_THRESHOLD == 5  # pin the constants
+        g = StuckGuard()
+        outcomes = [OK, _ERR, _ERR, _ERR, _ERR, _ERR]  # 5 same-fp fails / full 6
+        for i, out in enumerate(outcomes):
+            g.record_tool_result("Bash", {"command": f"push {i}"}, out)
+        action = g.evaluate()
+        assert action.kind == "steer"
+        assert action.signature == "__window__"
+        assert g.recent_failure_summary() is not None
+
+    def test_no_steer_when_window_not_yet_full(self):
+        # N4 boundary: WINDOW_FAIL_THRESHOLD failures but the window has fewer than
+        # WINDOW entries — _dominant_window_failure requires a FULL window, so 5
+        # identical failures in a length-5 history must NOT steer yet.
+        g = StuckGuard()
+        for i in range(WINDOW_FAIL_THRESHOLD):  # 5 fails, window not yet at 6
+            g.record_tool_result("Bash", {"command": f"push {i}"}, _ERR)
         assert g.evaluate().kind == "none"
         assert g.recent_failure_summary() is None

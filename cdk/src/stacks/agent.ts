@@ -610,8 +610,9 @@ export class AgentStack extends Stack {
     // --- ECS Fargate compute backend (CONTEXT-GATED) ---
     // K12 (2026-06-29): AgentCore's fixed microVM envelope OOM-kills heavy
     // CI-parity builds (ABCA's own ~2800-test `mise run build`). ECS Fargate
-    // gives a tunable 64 GB / 16 vCPU task (see EcsAgentCluster) for repos that
-    // set ``compute_type: 'ecs'``. GATED on the ``compute_type`` deploy context
+    // gives a bigger, tunable task (see EcsAgentCluster for the exact vCPU/memory
+    // sizing + its OOM history — 64 GB was itself OOM-killed, so it runs larger)
+    // for repos that set ``compute_type: 'ecs'``. GATED on the ``compute_type`` deploy context
     // (default 'agentcore') — ECS resources only synthesize when you deploy with
     // ``--context compute_type=ecs``, so the default synth (and the
     // bootstrap-coverage test that synths with default context) stays
@@ -653,8 +654,10 @@ export class AgentStack extends Stack {
         // #502: read-only grant so the container can fetch its payload from S3.
         payloadBucket: ecsPayloadBucket!.bucket,
         // #299 ECS-parity: the same bucket the runtime uses for ARTIFACTS_BUCKET_NAME —
-        // coding/decompose-v1 delivers its plan artifact here (read+write grant in
-        // the construct). Without this, an ecs-repo :decompose fails at delivery.
+        // coding/decompose-v1 delivers its plan artifact here. Wires the
+        // ARTIFACTS_BUCKET_NAME env only; delivery writes go through the per-task
+        // SessionRole (no direct task-role grant — see construct). Without the
+        // env, an ecs-repo :decompose fails at delivery.
         artifactsBucket: traceArtifactsBucket.bucket,
         // Per-session IAM scoping (#209): the ECS task role assumes the same
         // SessionRole as the AgentCore runtime for tenant-data access. The
@@ -1102,6 +1105,9 @@ export class AgentStack extends Stack {
       orchestratorFunctionArn: orchestrator.alias.functionArn,
       guardrailId: inputGuardrail.guardrailId,
       guardrailVersion: inputGuardrail.guardrailVersion,
+      // Lets the processor fetch, screen, and store Jira media attachments at
+      // task-admission time (#577). Same bucket the orchestrator hydrates from.
+      attachmentsBucket: attachmentsBucket.bucket,
     });
 
     // Agent runtime reads the per-tenant Jira OAuth token directly from

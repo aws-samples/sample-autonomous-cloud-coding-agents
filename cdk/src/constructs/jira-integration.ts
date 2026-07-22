@@ -25,6 +25,7 @@ import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import { Runtime, Architecture } from 'aws-cdk-lib/aws-lambda';
 import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
+import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
@@ -35,8 +36,17 @@ import { JiraWorkspaceRegistryTable } from './jira-workspace-registry-table';
 /** Default task-record retention used for TTL computation (days). */
 const DEFAULT_TASK_RETENTION_DAYS = 90;
 
-/** Webhook-processor Lambda timeout (seconds). */
-const WEBHOOK_PROCESSOR_TIMEOUT_SECONDS = 30;
+/**
+ * Webhook-processor Lambda timeout (seconds). The processor is invoked
+ * asynchronously (not behind the API Gateway 30s deadline), so it can run
+ * longer than the receiver. #577 added serial authenticated download +
+ * Bedrock screening of up to 10 Jira attachments; the per-attachment fetch
+ * timeout alone (10s) can sum past 60s across a full batch, and a mid-loop
+ * kill would orphan objects and force an idempotent retry. 300s covers the
+ * worst-case serial batch with headroom. (A future optimization could
+ * parallelize the download/screen loop and lower this again.)
+ */
+const WEBHOOK_PROCESSOR_TIMEOUT_SECONDS = 300;
 
 /**
  * Marker key embedded in the auto-generated stack-wide webhook-secret
@@ -86,6 +96,14 @@ export interface JiraIntegrationProps {
 
   /** Bedrock Guardrail version for input screening. */
   readonly guardrailVersion?: string;
+
+  /**
+   * S3 bucket for task attachment storage. Required for the webhook processor
+   * to fetch, screen, and store Jira `media` file attachments at task-admission
+   * time (issue #577). When omitted, issues carrying supported file attachments
+   * are rejected with a Jira comment rather than silently dropping them.
+   */
+  readonly attachmentsBucket?: s3.IBucket;
 
   /** Task retention in days for TTL computation. */
   readonly taskRetentionDays?: number;
@@ -206,6 +224,9 @@ export class JiraIntegration extends Construct {
       createTaskEnv.GUARDRAIL_ID = props.guardrailId;
       createTaskEnv.GUARDRAIL_VERSION = props.guardrailVersion;
     }
+    if (props.attachmentsBucket) {
+      createTaskEnv.ATTACHMENTS_BUCKET_NAME = props.attachmentsBucket.bucketName;
+    }
 
     // --- Cognito Authorizer (for /jira/link) ---
     const cognitoAuthorizer = new apigw.CognitoUserPoolsAuthorizer(this, 'JiraCognitoAuthorizer', {
@@ -279,6 +300,13 @@ export class JiraIntegration extends Construct {
           }),
         ],
       }));
+    }
+    // The processor downloads Jira `media` attachments, screens them, and
+    // writes the cleaned bytes to the attachments bucket before creating the
+    // task (#577). ReadWrite mirrors the confirm-uploads path (Put + Get for
+    // multipart/versioned writes).
+    if (props.attachmentsBucket) {
+      props.attachmentsBucket.grantReadWrite(webhookProcessorFn);
     }
 
     // --- Webhook receiver (verifies HMAC, dedups, invokes processor) ---

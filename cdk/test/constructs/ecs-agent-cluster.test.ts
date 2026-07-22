@@ -648,7 +648,8 @@ describe('EcsAgentCluster artifacts bucket (#299 ECS-parity)', () => {
         const actions = Array.isArray(stmt.Action) ? stmt.Action : [stmt.Action];
         for (const a of actions) {
           // Only true S3 mutations — Put*/Delete*. The read-only payload bucket
-          // (#502) legitimately grants GetObject*/List* on the task role.
+          // (#502) legitimately grants GetObject*/List* on the task role, so those
+          // are NOT flagged; what must be absent is any write to any S3 bucket.
           if (typeof a === 'string' && /^s3:(Put|Delete)/.test(a)) s3WriteActions.add(a);
         }
       }

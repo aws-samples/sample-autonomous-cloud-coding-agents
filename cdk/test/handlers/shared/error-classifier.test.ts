@@ -630,6 +630,39 @@ describe('classifyError', () => {
       expect(g).toMatch(/edit the request/i);
     });
 
+    // #599 N3: pin the two USER fall-through branches so the #247 failure-renderer
+    // contract can't rot silently. Built as explicit classifications (the exact
+    // category/errorClass/retryable each branch keys on) rather than relying on a
+    // sample string that might reclassify later.
+    test('retryGuidance: retryable USER (non-guardrail) → "reply here with any extra guidance"', () => {
+      const cls: ErrorClassification = {
+        category: ErrorCategory.AGENT,
+        title: 'build failed',
+        description: 'the build/test step failed',
+        remedy: 'fix the failing step',
+        retryable: true,
+        errorClass: ErrorClass.USER,
+      };
+      const g = retryGuidance(cls);
+      expect(g).toMatch(/extra guidance/i);
+      expect(g).toMatch(/try again/i);
+      expect(g).not.toMatch(/edit the request/i); // not the guardrail branch
+    });
+
+    test('retryGuidance: not-retryable USER/unknown → "a retry may not resolve this"', () => {
+      const cls: ErrorClassification = {
+        category: ErrorCategory.UNKNOWN,
+        title: 'agent reported non-success',
+        description: 'the agent finished without success',
+        remedy: 'review the task output',
+        retryable: false,
+        errorClass: ErrorClass.USER,
+      };
+      const g = retryGuidance(cls);
+      expect(g).toMatch(/may not resolve this/i);
+      expect(g).toMatch(/contact your ABCA admin/i);
+    });
+
     test('isTransientError is false for null / absent classification', () => {
       expect(isTransientError(null)).toBe(false);
       expect(isTransientError(undefined)).toBe(false);
