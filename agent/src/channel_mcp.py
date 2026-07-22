@@ -17,11 +17,9 @@ and attachments are pre-hydrated at the Lambda tier (the webhook processor +
 ``linear-attachments.ts`` / ``linear-feedback.fetchRecentComments``), and
 outbound reactions / state transitions go through direct GraphQL in
 ``linear_reactions.py`` (which reads ``LINEAR_API_TOKEN`` set by config.py —
-independent of this module). Linear MCP via the AgentCore Gateway was removed
-after it proved non-functional on a single OAuth app (actor=user data reads
-error; actor=app can't re-consent an installed app). The Gateway itself
-remains ABCA's general MCP control plane for OTHER servers — see
-``gateway_auth.py`` for the reusable M2M bearer mint.
+independent of this module). The Linear MCP was removed after it proved
+non-functional against a single OAuth app (actor=user data reads error;
+actor=app can't re-consent an installed app).
 
 For all other channel sources this is a no-op: no MCP is written, and the
 SDK sees no channel-specific tools.
