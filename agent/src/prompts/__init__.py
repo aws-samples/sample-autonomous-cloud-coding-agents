@@ -13,6 +13,7 @@ from .default_agent import DEFAULT_AGENT_PROMPT
 from .new_task import NEW_TASK_WORKFLOW
 from .pr_iteration import PR_ITERATION_WORKFLOW
 from .pr_review import PR_REVIEW_WORKFLOW
+from .self_review import SELF_REVIEW_PROMPT as SELF_REVIEW_PROMPT
 from .web_research import WEB_RESEARCH_PROMPT
 
 DEFAULT_WORKFLOW_ID = "coding/new-task-v1"

@@ -42,6 +42,7 @@ steps:
   - { kind: clone_repo,      name: setup }
   - { kind: hydrate_context, name: context }
   - { kind: run_agent,       name: implement }
+  - { kind: self_review,     name: review, on_failure: continue, max_turns: 20 }
   - { kind: verify_build,    name: build, gate: regression_only }
   - { kind: ensure_pr,       name: open_pr, strategy: create }
 terminal_outcomes:
