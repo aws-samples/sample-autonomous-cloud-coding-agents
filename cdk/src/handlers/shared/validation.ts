@@ -348,9 +348,23 @@ export function validateMagicBytes(data: Buffer, contentType: string): boolean {
     return sig.bytes.every((b, i) => data[offset + i] === b);
   }
 
-  // Text types: valid UTF-8, no null bytes in first 8 KB
+  // Text types: must be valid, null-free UTF-8 in the first 8 KB. This blocks a
+  // binary payload (SVG/HTML/octet-stream) from masquerading as text/* just
+  // because a caller mislabeled it — the null-byte check alone let non-UTF-8
+  // binaries through (review finding #3). We decode with fatal:true so any
+  // invalid byte sequence throws, then reject embedded nulls (valid UTF-8 can
+  // still contain U+0000, which no real text attachment does).
   if (contentType.startsWith('text/') || contentType === 'application/json') {
     const check = data.subarray(0, TEXT_MAGIC_BYTE_CHECK_BYTES);
+    try {
+      // fatal:true makes an invalid UTF-8 sequence throw rather than yield U+FFFD.
+      // stream:true tolerates a multi-byte char split across the 8 KB cutoff (a
+      // truncated TRAILING sequence is buffered, not an error) so a legitimate
+      // large UTF-8 file isn't false-rejected at the boundary.
+      new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(check, { stream: true });
+    } catch {
+      return false; // not valid UTF-8 → not a text attachment
+    }
     for (let i = 0; i < check.length; i++) {
       if (check[i] === 0) return false;
     }
@@ -481,12 +495,14 @@ export const EXTENSION_TO_MIME: Readonly<Record<string, string>> = Object.freeze
 
 /**
  * Human-friendly list of supported attachment file extensions, derived from
- * {@link MIME_TO_EXTENSION} (deduped, upper-cased) — e.g. "PNG, JPG, TXT, CSV,
- * MD, JSON, PDF, LOG". For user-facing "unsupported file type" messages, so the
- * list can never drift from the actual allowlist.
+ * {@link EXTENSION_TO_MIME}'s KEYS (deduped, upper-cased) — e.g. "PNG, JPG, JPEG,
+ * TXT, CSV, MD, JSON, PDF, LOG". Keyed off EXTENSION_TO_MIME (not MIME_TO_EXTENSION)
+ * so the accepted `.jpeg` alias is listed too — the label is exactly the set of
+ * extensions the type-inference will actually accept. For user-facing
+ * "unsupported file type" messages, so the list can never drift from the allowlist.
  */
 export const SUPPORTED_ATTACHMENT_EXTENSIONS_LABEL: string =
-  [...new Set(Object.values(MIME_TO_EXTENSION))].map((e) => e.toUpperCase()).join(', ');
+  [...new Set(Object.keys(EXTENSION_TO_MIME))].map((e) => e.toUpperCase()).join(', ');
 
 export type AttachmentValidationResult =
   | { readonly valid: true; readonly parsed: ValidatedAttachment[] }

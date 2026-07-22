@@ -1589,6 +1589,32 @@ describe('fanout-task-events: Linear dispatcher (issue #239)', () => {
     expect(mockPostIssueComment).not.toHaveBeenCalled();
   });
 
+  test('pr_created RETRYABLE failure escalates to partial-batch retry, no marker persisted (finding #4)', async () => {
+    mockGet({ ...TASK_RECORD_LINEAR, pr_number: 13 });
+    mockPostIssueComment.mockReset().mockResolvedValue({ ok: false, retryable: true });
+
+    const event: DynamoDBStreamEvent = { Records: [mkMilestone('pr_created', 't-lin')] };
+    const result = await handler(event);
+
+    // Transient failure → record enters batchItemFailures so Lambda retries.
+    expect(result.batchItemFailures).toHaveLength(1);
+    expect(result.batchItemFailures[0].itemIdentifier).toBe(event.Records[0].eventID);
+    // Marker NOT persisted — the retry will re-post.
+    const updateCalls = mockDdbSend.mock.calls.filter((c) => (c[0] as { _type?: string })._type === 'Update');
+    expect(updateCalls).toHaveLength(0);
+  });
+
+  test('pr_created TERMINAL failure stays log-only (no retry, no marker)', async () => {
+    mockGet({ ...TASK_RECORD_LINEAR, pr_number: 13 });
+    mockPostIssueComment.mockReset().mockResolvedValue({ ok: false, retryable: false });
+
+    const event: DynamoDBStreamEvent = { Records: [mkMilestone('pr_created', 't-lin')] };
+    const result = await handler(event);
+
+    // Non-retryable (auth/bad-id) → don't burn retries; record is not flagged.
+    expect(result.batchItemFailures).toHaveLength(0);
+  });
+
   test('pr_created on an iteration matures the threaded reply instead of posting a top-level comment', async () => {
     mockGet({
       ...TASK_RECORD_LINEAR,

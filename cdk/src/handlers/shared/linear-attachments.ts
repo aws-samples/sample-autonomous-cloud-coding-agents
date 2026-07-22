@@ -68,6 +68,14 @@ const ATTACHMENT_FETCH_TIMEOUT_MS = 10_000;
 /** Cap on `uploads.linear.app` files pulled from one issue description. */
 const MAX_LINEAR_UPLOADS_PER_ISSUE = 10;
 
+/**
+ * Upper bound on how many markdown links we'll even enumerate while scanning a
+ * description, so a pathological body with thousands of links can't spin. Set
+ * well above any real cap — overflow past the real slot budget is handled with a
+ * clear error by the caller, not by this scan limit.
+ */
+const SCAN_HARD_CAP = 100;
+
 /** Max length of the derived, path-safe attachment id (S3 key segment). */
 const MAX_ATTACHMENT_ID_LENGTH = 128;
 
@@ -216,24 +224,23 @@ function extensionOf(filename: string): string {
 }
 
 /**
- * Scan an issue description for `uploads.linear.app` markdown files (both image
- * `![](url)` and link `[](url)` forms), capped at
- * {@link MAX_LINEAR_UPLOADS_PER_ISSUE} and the remaining per-task slot budget.
- * Non-Linear-hosted URLs are ignored here (the unauthenticated URL path in
- * `resolve-url-attachments.ts` handles public images). De-dupes by id.
+ * Collect the UNIQUE `uploads.linear.app` markdown files from a description (both
+ * image `![](url)` and link `[](url)` forms). Non-Linear-hosted URLs are ignored
+ * here (the unauthenticated URL path in `resolve-url-attachments.ts` handles
+ * public images). De-dupes by id. Does NOT apply the slot cap — the caller
+ * decides whether the count fits (so overflow is a loud error, not a silent
+ * truncation; review finding #2). Scanning is bounded by {@link SCAN_HARD_CAP}
+ * so a pathological description with thousands of links can't run unbounded.
  */
-function selectLinearUploads(description: string | undefined, remainingSlots: number): SelectedUpload[] {
+function collectLinearUploads(description: string | undefined): SelectedUpload[] {
   if (!description) return [];
-  const slotCap = Math.max(0, Math.min(remainingSlots, MAX_LINEAR_UPLOADS_PER_ISSUE, MAX_ATTACHMENTS_PER_TASK));
-  if (slotCap === 0) return [];
-
   const selected: SelectedUpload[] = [];
   const seenIds = new Set<string>();
   let index = 0;
   let match: RegExpExecArray | null;
   MARKDOWN_LINK_OR_IMAGE_PATTERN.lastIndex = 0;
   while ((match = MARKDOWN_LINK_OR_IMAGE_PATTERN.exec(description)) !== null) {
-    if (selected.length >= slotCap) break;
+    if (selected.length >= SCAN_HARD_CAP) break;
     const label = (match[1] ?? '').trim();
     const url = match[2];
     if (!isLinearUploadsUrl(url)) continue; // public CDN URLs go via the URL path
@@ -294,6 +301,13 @@ async function fetchUploadBytes(
         Accept: '*/*',
       },
       signal: controller.signal,
+      // SSRF hardening (review): the pre-fetch DNS check validates the ALLOWLISTED
+      // uploads.linear.app host, but a redirect could bounce the connection to an
+      // internal address the check never saw. A legitimate signed Linear upload
+      // URL serves the bytes directly (no redirect), so reject any redirect rather
+      // than blindly follow it to an unvalidated host. (Narrows the residual
+      // DNS-rebinding TOCTOU window too — the fetch can't be steered off-host.)
+      redirect: 'error',
     });
     if (resp.status === 401 || resp.status === 403) {
       return { kind: 'auth' };
@@ -326,27 +340,75 @@ async function fetchUploadBytes(
   }
 }
 
+/** A native "paperclip" attachment surfaced from the issue's `attachments`
+ *  connection (distinct from description-embedded markdown links). */
+export interface LinearPaperclipAttachment {
+  /** The attachment's URL (only `uploads.linear.app` ones are hydrated here). */
+  readonly url: string;
+  /** The attachment title — the original filename, used for messages + typing. */
+  readonly title: string;
+}
+
 /**
- * Fetch, screen, and store the `uploads.linear.app` files embedded in an issue
- * description, returning `passed` AttachmentRecords for `createTaskCore` to
- * persist verbatim.
+ * Fetch, screen, and store the `uploads.linear.app` files an issue carries,
+ * returning `passed` AttachmentRecords for `createTaskCore` to persist verbatim.
  *
- * @param description     the Linear issue description markdown (untrusted).
- * @param remainingSlots  attachment slots still free after public-URL image
- *                        extraction (so the combined total respects the
- *                        per-task cap of {@link MAX_ATTACHMENTS_PER_TASK}).
- * @param ctx             OAuth token + S3/screening storage deps.
+ * Sources BOTH kinds of Linear attachment (review finding #1):
+ *   - files embedded in the description as markdown `[label](uploads.linear.app/…)`;
+ *   - native paperclip attachments (the `attachments` connection) passed in via
+ *     `paperclipAttachments` — the webhook processor reads those from the context
+ *     probe. Only `uploads.linear.app`-hosted paperclips are hydrated; a paperclip
+ *     that's an external link (GitHub, Figma, …) is left alone.
+ * De-duped across both sources by upload id.
+ *
+ * @param description         the Linear issue description markdown (untrusted).
+ * @param remainingSlots      attachment slots still free after public-URL image
+ *                            extraction (so the combined total respects the
+ *                            per-task cap of {@link MAX_ATTACHMENTS_PER_TASK}).
+ * @param ctx                 OAuth token + S3/screening storage deps.
+ * @param paperclipAttachments native paperclip attachments from the probe (optional).
  * @throws LinearAttachmentError if a SELECTED upload cannot be safely fetched,
- *         validated, or screened (fail-closed — reject the task).
+ *         validated, or screened, or if the count overflows the budget
+ *         (fail-closed — reject the task).
  */
 export async function downloadScreenAndStoreLinearAttachments(
   description: string | undefined,
   remainingSlots: number,
   ctx: LinearAttachmentStorage,
+  paperclipAttachments: readonly LinearPaperclipAttachment[] = [],
 ): Promise<PassedAttachmentRecord[]> {
   if (remainingSlots <= 0) return [];
-  const selected = selectLinearUploads(description, remainingSlots);
-  if (selected.length === 0) return [];
+  const all = collectLinearUploads(description);
+
+  // Merge native paperclip attachments (uploads.linear.app only), de-duped by id
+  // against the description-scanned set so a file that's both attached AND linked
+  // isn't fetched twice.
+  const seenIds = new Set(all.map((u) => u.id));
+  let pcIndex = 0;
+  for (const pc of paperclipAttachments) {
+    if (all.length >= SCAN_HARD_CAP) break;
+    if (!isLinearUploadsUrl(pc.url)) continue; // external-link paperclip — not ours to fetch
+    const { id, filename } = deriveUploadIdentity(pc.url, pcIndex++);
+    if (seenIds.has(id)) continue;
+    seenIds.add(id);
+    all.push({ url: pc.url, filename, id, displayName: (pc.title || '').trim() || filename });
+  }
+
+  if (all.length === 0) return [];
+
+  // Overflow is a LOUD error, not a silent truncation (review finding #2): a user
+  // who attached 12 files shouldn't have 2 quietly dropped and the task run as if
+  // complete. The effective budget is the smaller of the remaining per-task slots
+  // (public-URL images already consumed some) and the per-issue Linear cap.
+  const budget = Math.min(remainingSlots, MAX_LINEAR_UPLOADS_PER_ISSUE, MAX_ATTACHMENTS_PER_TASK);
+  if (all.length > budget) {
+    throw new LinearAttachmentError(
+      `This issue has ${all.length} Linear attachments, over the limit of ${budget} that can be processed ` +
+      `for one task${remainingSlots < MAX_LINEAR_UPLOADS_PER_ISSUE ? ' (some slots are used by other images in the description)' : ''}. ` +
+      'Remove some attachments and re-apply the trigger label.',
+    );
+  }
+  const selected = all;
 
   const records: PassedAttachmentRecord[] = [];
   // Keys uploaded so far this batch — deleted on any failure so a
@@ -523,23 +585,33 @@ function startsWith(content: Buffer, magic: readonly number[]): boolean {
 }
 
 /**
- * Resolve the MIME type of a downloaded upload, in descending order of trust:
- *   1. the response content-type, if it is itself a platform-allowed type;
- *   2. the filename extension (covers generic `application/octet-stream`
- *      responses — common for Linear file links to PDFs/logs/CSVs);
- *   3. a recognised binary magic-byte signature (PNG/JPEG/PDF).
- * Returns '' if none applies (caller silently skips the upload). Text types are
- * never sniffed from bytes — they rely on the extension in step 2.
+ * Resolve the MIME type of a downloaded upload. Trust order — and crucially, the
+ * filename `label` is ATTACKER-CONTROLLED (it's the markdown `[label]`), so it
+ * must never by itself promote bytes to a BINARY type (review finding #3):
+ *   1. response content-type, if it is itself a platform-allowed type;
+ *   2. magic-byte signature for the BINARY types (PNG/JPEG/PDF) — proven by the
+ *      bytes, not the label;
+ *   3. the label extension, but ONLY when it maps to a TEXT type. Binary
+ *      extensions are ignored here — a `[x.pdf]` label can't make a non-PDF a
+ *      PDF; only step 2's magic bytes can. Text is safe to key on the label
+ *      because the caller then runs validateMagicBytes, whose UTF-8 check
+ *      rejects a binary payload wearing a `.txt`/`.csv` label.
+ * Returns '' if none applies (caller rejects the upload as unsupported).
  */
-function inferMime(contentType: string, filename: string, content: Buffer): string {
+function inferMime(contentType: string, label: string, content: Buffer): string {
   if (contentType && (isAllowedMimeType(contentType, 'image') || isAllowedMimeType(contentType, 'file'))) {
     return contentType;
   }
-  const byExt = EXTENSION_TO_MIME[extensionOf(filename)];
-  if (byExt) return byExt;
+  // Binary types: bytes only. The label cannot vouch for these.
   if (startsWith(content, PNG_MAGIC)) return 'image/png';
   if (startsWith(content, JPEG_MAGIC)) return 'image/jpeg';
   if (startsWith(content, PDF_MAGIC)) return 'application/pdf';
+  // Text types: the label extension may narrow the flavour (txt/csv/md/json/log),
+  // but validateMagicBytes' UTF-8 gate is what actually keeps a binary out.
+  const byExt = EXTENSION_TO_MIME[extensionOf(label)];
+  if (byExt && isAllowedMimeType(byExt, 'file') && !byExt.startsWith('image/') && byExt !== 'application/pdf') {
+    return byExt;
+  }
   return '';
 }
 

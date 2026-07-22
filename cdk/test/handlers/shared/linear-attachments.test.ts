@@ -166,11 +166,22 @@ describe('downloadScreenAndStoreLinearAttachments', () => {
     expect(global.fetch).not.toHaveBeenCalled();
   });
 
-  test('respects remainingSlots (combined 10-attachment cap)', async () => {
+  test('overflow past remainingSlots throws (loud, not a silent truncation) — finding #2', async () => {
     (global.fetch as jest.Mock).mockImplementation(() => Promise.resolve(bytesResponse(PNG_BYTES)));
     const urls = Array.from({ length: 5 }, (_, i) => `https://uploads.linear.app/u/${i}/p${i}.png`);
+    // 5 uploads but only 2 slots free → reject the task rather than drop 3 silently.
+    await expect(
+      downloadScreenAndStoreLinearAttachments(desc(...urls), 2, storageCtx()),
+    ).rejects.toThrow(/over the limit of 2|Remove some attachments/i);
+    // Nothing stored — rejected before the download loop.
+    expect(putSendMock).not.toHaveBeenCalled();
+  });
+
+  test('exactly filling the slot budget is fine (no overflow error)', async () => {
+    (global.fetch as jest.Mock).mockImplementation(() => Promise.resolve(bytesResponse(PNG_BYTES)));
+    const urls = Array.from({ length: 2 }, (_, i) => `https://uploads.linear.app/u/${i}/p${i}.png`);
     const records = await downloadScreenAndStoreLinearAttachments(desc(...urls), 2, storageCtx());
-    expect(records).toHaveLength(2); // only 2 slots free
+    expect(records).toHaveLength(2);
   });
 
   test('de-dupes the same upload referenced twice', async () => {
@@ -288,6 +299,66 @@ describe('downloadScreenAndStoreLinearAttachments', () => {
         labeledDesc('', 'https://uploads.linear.app/u/z/bundle-uuid'), 10, storageCtx(),
       ),
     ).rejects.toThrow(/not a supported file type/i);
+  });
+
+  test('a .txt-LABELED binary payload is REJECTED, not stored as text (finding #3)', async () => {
+    // Attacker labels a binary octet-stream `[diagram.txt]`. The label must NOT
+    // promote it to text/plain past the UTF-8 gate — bytes with invalid UTF-8 /
+    // nulls fail validateMagicBytes, so it's rejected as unsupported.
+    const binary = Buffer.from([0xff, 0xfe, 0x00, 0x01, 0x80, 0x81]); // invalid UTF-8 + null
+    (global.fetch as jest.Mock).mockResolvedValueOnce(bytesResponse(binary, 200, 'application/octet-stream'));
+    await expect(
+      downloadScreenAndStoreLinearAttachments(
+        labeledDesc('diagram.txt', 'https://uploads.linear.app/u/x/evil-uuid'), 10, storageCtx(),
+      ),
+    ).rejects.toThrow(/not a supported file type|does not match its declared type/i);
+    expect(screenTextFileMock).not.toHaveBeenCalled();
+    expect(putSendMock).not.toHaveBeenCalled();
+  });
+
+  test('a .pdf-LABELED non-PDF is NOT promoted to application/pdf by the label (finding #3)', async () => {
+    // Only magic bytes can vouch for a binary type. A `[x.pdf]` label over
+    // non-PDF octet-stream bytes must not be treated as a PDF.
+    (global.fetch as jest.Mock).mockResolvedValueOnce(
+      bytesResponse(Buffer.from([0x00, 0x01, 0x02, 0x03]), 200, 'application/octet-stream'),
+    );
+    await expect(
+      downloadScreenAndStoreLinearAttachments(
+        labeledDesc('notreally.pdf', 'https://uploads.linear.app/u/x/fake-uuid'), 10, storageCtx(),
+      ),
+    ).rejects.toThrow(/not a supported file type/i);
+  });
+
+  test('hydrates a native paperclip attachment (uploads.linear.app) — finding #1', async () => {
+    (global.fetch as jest.Mock).mockResolvedValueOnce(bytesResponse(PDF_BYTES, 200, 'application/pdf'));
+    // No description link; the file arrives via the paperclip list (4th arg).
+    const records = await downloadScreenAndStoreLinearAttachments(
+      'Implement the attached spec.', 10, storageCtx(),
+      [{ title: 'spec.pdf', url: 'https://uploads.linear.app/u/pc/paperclip-uuid' }],
+    );
+    expect(records).toHaveLength(1);
+    expect(records[0].type).toBe('file');
+    expect(records[0].content_type).toBe('application/pdf');
+    expect(screenTextFileMock).toHaveBeenCalled();
+  });
+
+  test('ignores an external-link paperclip (not uploads.linear.app)', async () => {
+    const records = await downloadScreenAndStoreLinearAttachments(
+      'See the design.', 10, storageCtx(),
+      [{ title: 'Figma', url: 'https://figma.com/file/abc' }],
+    );
+    expect(records).toHaveLength(0);
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test('de-dupes a file that is BOTH a paperclip and a description link', async () => {
+    (global.fetch as jest.Mock).mockImplementation(() => Promise.resolve(bytesResponse(PDF_BYTES, 200, 'application/pdf')));
+    const url = 'https://uploads.linear.app/u/dup/same-uuid';
+    const records = await downloadScreenAndStoreLinearAttachments(
+      labeledDesc('spec.pdf', url), 10, storageCtx(),
+      [{ title: 'spec.pdf', url }],
+    );
+    expect(records).toHaveLength(1); // fetched once, not twice
   });
 
   test('sniffs JPEG when content-type is generic but bytes are a JPEG', async () => {

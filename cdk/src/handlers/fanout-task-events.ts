@@ -1202,7 +1202,19 @@ async function dispatchToLinear(event: FanOutEvent): Promise<void> {
         error_id: 'FANOUT_LINEAR_PR_COMMENT_FAILED',
         task_id: task.task_id,
         issue_id: issueId,
+        retryable: prResult.retryable,
       });
+      if (prResult.retryable) {
+        // Mirror the terminal path: escalate a TRANSIENT failure (500/429/network)
+        // to routeEvent's Promise.allSettled so the record enters batchItemFailures
+        // and Lambda retries. Safe because the post-once marker was NOT persisted —
+        // the retry re-posts, or short-circuits on the marker if a concurrent run
+        // won. Terminal failures (auth, bad issue id) stay log-only — a retry can't
+        // fix them and would burn the event-source's bounded retryAttempts.
+        throw new Error(
+          `[fanout/linear] transient Linear PR-opened post failure for task ${task.task_id} — escalating for batch retry`,
+        );
+      }
     }
     return; // milestones never post the terminal status comment
   }

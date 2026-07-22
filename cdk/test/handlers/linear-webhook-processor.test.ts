@@ -147,6 +147,7 @@ describe('linear-webhook-processor handler', () => {
     probeLinearIssueContextMock.mockReset();
     probeLinearIssueContextMock.mockResolvedValue({
       attachmentTitles: [],
+      attachments: [],
       projectName: null,
       projectHasDocuments: false,
     });
@@ -709,6 +710,8 @@ describe('linear-webhook-processor handler', () => {
     test('prepends a hint listing paperclip attachment titles when present', async () => {
       probeLinearIssueContextMock.mockResolvedValueOnce({
         attachmentTitles: ['design-spec.pdf', 'crash-trace.txt'],
+        // Non-uploads paperclips (external links) → title hint only, not hydrated.
+        attachments: [{ title: 'design-spec.pdf', url: 'https://example.com/design-spec.pdf' }],
         projectName: 'Onboarding',
         projectHasDocuments: false,
       });
@@ -729,6 +732,7 @@ describe('linear-webhook-processor handler', () => {
     test('prepends a hint about project documents when the project has wiki docs', async () => {
       probeLinearIssueContextMock.mockResolvedValueOnce({
         attachmentTitles: [],
+        attachments: [],
         projectName: 'Onboarding',
         projectHasDocuments: true,
       });
@@ -815,13 +819,13 @@ describe('probeLinearIssueContext', () => {
     global.fetch = originalFetch;
   });
 
-  test('GraphQL query includes attachments and project.documents fields', async () => {
+  test('GraphQL query includes attachments (with url) and project.documents fields', async () => {
     fetchMock.mockResolvedValueOnce({
       ok: true,
       json: async () => ({
         data: {
           issue: {
-            attachments: { nodes: [{ id: 'att1', title: 'spec.pdf' }] },
+            attachments: { nodes: [{ id: 'att1', title: 'spec.pdf', url: 'https://uploads.linear.app/u/a/spec' }] },
             project: { id: 'proj1', name: 'P1', documents: { nodes: [{ id: 'doc1' }] } },
           },
         },
@@ -830,6 +834,7 @@ describe('probeLinearIssueContext', () => {
 
     const result = await realModule.probeLinearIssueContext('tok', 'issue-uuid-1') as {
       attachmentTitles: string[];
+      attachments: Array<{ title: string; url: string }>;
       projectName: string | null;
       projectHasDocuments: boolean;
     };
@@ -839,10 +844,12 @@ describe('probeLinearIssueContext', () => {
     const body = JSON.parse((init as { body: string }).body) as { query: string; variables: { id: string } };
     expect(body.variables.id).toBe('issue-uuid-1');
     expect(body.query).toContain('attachments');
+    expect(body.query).toContain('url'); // finding #1 — probe now returns fetchable URLs
     expect(body.query).toContain('project');
     expect(body.query).toContain('documents');
     expect(result).toEqual({
       attachmentTitles: ['spec.pdf'],
+      attachments: [{ title: 'spec.pdf', url: 'https://uploads.linear.app/u/a/spec' }],
       projectName: 'P1',
       projectHasDocuments: true,
     });

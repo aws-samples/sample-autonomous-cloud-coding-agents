@@ -54,6 +54,7 @@ query IssueContext($id: String!) {
       nodes {
         id
         title
+        url
       }
     }
     project {
@@ -67,9 +68,21 @@ query IssueContext($id: String!) {
 }
 `.trim();
 
+/** A native paperclip attachment (title + url) from the `attachments` connection. */
+export interface LinearProbeAttachment {
+  readonly title: string;
+  readonly url: string;
+}
+
 export interface LinearIssueContextProbe {
-  /** Paperclip attachment titles surfaced on the issue, if any. */
+  /** Paperclip attachment titles surfaced on the issue, if any (for the hint). */
   readonly attachmentTitles: readonly string[];
+  /**
+   * Native paperclip attachments with their URLs — the webhook processor
+   * hydrates the `uploads.linear.app` ones through the attachment pipeline
+   * (review finding #1). Distinct from description-embedded markdown links.
+   */
+  readonly attachments: readonly LinearProbeAttachment[];
   /** Project name (only present when the issue belongs to a project). */
   readonly projectName: string | null;
   /** True when the issue's project has at least one document attached. */
@@ -78,6 +91,7 @@ export interface LinearIssueContextProbe {
 
 const EMPTY: LinearIssueContextProbe = {
   attachmentTitles: [],
+  attachments: [],
   projectName: null,
   projectHasDocuments: false,
 };
@@ -113,7 +127,7 @@ export async function probeLinearIssueContext(
     const body = (await resp.json()) as {
       data?: {
         issue?: {
-          attachments?: { nodes?: Array<{ id?: string; title?: string }> };
+          attachments?: { nodes?: Array<{ id?: string; title?: string; url?: string }> };
           project?: {
             id?: string;
             name?: string;
@@ -129,13 +143,17 @@ export async function probeLinearIssueContext(
     }
     const issue = body.data?.issue;
     if (!issue) return EMPTY;
-    const attachmentTitles = (issue.attachments?.nodes ?? [])
+    const attachmentNodes = issue.attachments?.nodes ?? [];
+    const attachmentTitles = attachmentNodes
       .map((a) => (typeof a?.title === 'string' ? a.title.trim() : ''))
       .filter((t): t is string => t.length > 0);
+    const attachments = attachmentNodes
+      .filter((a): a is { title?: string; url: string } => typeof a?.url === 'string' && a.url.length > 0)
+      .map((a) => ({ title: typeof a.title === 'string' ? a.title.trim() : '', url: a.url }));
     const project = issue.project ?? null;
     const projectName = typeof project?.name === 'string' && project.name.trim() ? project.name.trim() : null;
     const projectHasDocuments = (project?.documents?.nodes ?? []).length > 0;
-    return { attachmentTitles, projectName, projectHasDocuments };
+    return { attachmentTitles, attachments, projectName, projectHasDocuments };
   } catch (err) {
     logger.warn('Linear issue context probe request failed', {
       issue_id: issueId,

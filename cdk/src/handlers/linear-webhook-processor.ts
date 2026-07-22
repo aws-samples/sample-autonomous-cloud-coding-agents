@@ -48,6 +48,7 @@ import {
 import {
   probeLinearIssueContext,
   renderIssueContextHint,
+  type LinearProbeAttachment,
 } from './shared/linear-issue-context-probe';
 import { resolveLinearOauthToken } from './shared/linear-oauth-resolver';
 import { fetchIssueParentId, type SubIssueNode } from './shared/linear-subissue-fetch';
@@ -330,8 +331,9 @@ interface ProcessorEvent {
  * - Detect whether the configured trigger label was just added (create) or present on update.
  * - Resolve the Linear project → GitHub repo mapping.
  * - Resolve the Linear actor → platform user mapping.
- * - Call `createTaskCore` with `channelSource: 'linear'` and metadata the agent uses
- *   to address the originating issue via the Linear MCP.
+ * - Call `createTaskCore` with `channelSource: 'linear'` and metadata that ties
+ *   the task back to the originating issue (the platform — not the agent —
+ *   handles all Linear I/O deterministically; there is no Linear MCP).
  */
 export async function handler(event: ProcessorEvent): Promise<void> {
   if (!event.raw_body) {
@@ -550,6 +552,9 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   // whenever the registry table is configured.
   let resolvedAccessToken: string | undefined;
   let contextHint = '';
+  // Native paperclip attachments (the `attachments` connection) surfaced by the
+  // probe — hydrated below alongside description-embedded links (finding #1).
+  let probedAttachments: readonly LinearProbeAttachment[] = [];
   if (WORKSPACE_REGISTRY_TABLE) {
     const resolved = await resolveLinearOauthToken(workspaceId, WORKSPACE_REGISTRY_TABLE);
     if (!resolved) {
@@ -562,12 +567,12 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     channelMetadata.linear_oauth_secret_arn = resolved.oauthSecretArn;
     channelMetadata.linear_workspace_slug = resolved.workspaceSlug;
     resolvedAccessToken = resolved.accessToken;
-    // Best-effort presence probe: ask Linear once whether the issue has
-    // paperclip attachments or sits in a project with documents. The agent
-    // will fetch the actual content via the Linear MCP at runtime — this
-    // step only flags that there's something worth fetching.
+    // Probe the issue once for native paperclip attachments + project docs. The
+    // uploads.linear.app paperclips are fetched/screened/stored below (like
+    // description links); the doc-presence + non-uploads paperclips become a hint.
     const probe = await probeLinearIssueContext(resolved.accessToken, issue.id);
     contextHint = renderIssueContextHint(probe);
+    probedAttachments = probe.attachments ?? [];
   }
 
   // #247 Mode A — parent/sub-issue orchestration. Env-var gated: until
@@ -843,11 +848,13 @@ export async function handler(event: ProcessorEvent): Promise<void> {
         return;
       }
       const planReqId = crypto.randomUUID();
+      const planHasAttachments = Boolean(issue.description?.includes('uploads.linear.app'))
+        || probedAttachments.some((a) => isLinearUploadsUrl(a.url));
       const planResult = await createTaskCore(
         {
           repo,
           workflow_ref: 'coding/decompose-v1',
-          task_description: buildDecompositionTaskDescription(issue),
+          task_description: buildDecompositionTaskDescription(issue, planHasAttachments),
         },
         { userId: platformUserId, channelSource: 'linear', channelMetadata: planMeta },
         planReqId,
@@ -931,12 +938,15 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   // eventual task record (createTaskCore honors ctx.taskId). Mirrors Jira #619.
   const taskId = ulid();
 
-  // ADR-016: fetch uploads.linear.app images with the workspace OAuth token,
+  // ADR-016: fetch uploads.linear.app files with the workspace OAuth token,
   // screen, store, and inject as preScreenedAttachments — the agent has no
-  // Linear MCP to fetch them at runtime. Fail-closed: a selected-but-
-  // unscreenable attachment rejects the whole task (mirrors the Jira processor).
+  // Linear MCP to fetch them at runtime. Covers BOTH description-embedded links
+  // AND native paperclip attachments (finding #1). Fail-closed: a
+  // selected-but-unscreenable attachment rejects the whole task.
+  const uploadsPaperclips = probedAttachments.filter((a) => isLinearUploadsUrl(a.url));
+  const descHasUploads = Boolean(issue.description && issue.description.includes('uploads.linear.app'));
   let preScreenedAttachments: PassedAttachmentRecord[] = [];
-  if (resolvedAccessToken && issue.description && issue.description.includes('uploads.linear.app')) {
+  if (resolvedAccessToken && (descHasUploads || uploadsPaperclips.length > 0)) {
     if (!attachmentsS3Client || !ATTACHMENTS_BUCKET || !attachmentsScreeningConfig) {
       logger.error('Linear issue has uploads.linear.app attachments but screening/storage is not configured (fail-closed)', {
         issue_id: issue.id,
@@ -947,7 +957,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       await safeReportIssueFailure(
         issue.id,
         workspaceId,
-        '❌ This Linear issue has uploaded image attachments, but ABCA attachment screening is not configured. Contact your ABCA admin.',
+        '❌ This Linear issue has uploaded attachments, but ABCA attachment screening is not configured. Contact your ABCA admin.',
       );
       return;
     }
@@ -966,6 +976,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
           accessToken: resolvedAccessToken,
           linearWorkspaceId: workspaceId,
         },
+        uploadsPaperclips,
       );
     } catch (err) {
       if (err instanceof LinearAttachmentError) {
@@ -3016,7 +3027,10 @@ function buildCreateTaskFailureMessage(statusCode: number, rawBody: string): str
  * the plan JSON as its artifact; no context hint, since it gathers context from
  * the clone itself (the whole point of moving planning into the agent).
  */
-function buildDecompositionTaskDescription(issue: LinearIssueEvent['data']): string {
+function buildDecompositionTaskDescription(
+  issue: LinearIssueEvent['data'],
+  hasAttachments: boolean = false,
+): string {
   const parts: string[] = [];
   if (issue.identifier && issue.title) {
     parts.push(`${issue.identifier}: ${issue.title}`);
@@ -3027,16 +3041,30 @@ function buildDecompositionTaskDescription(issue: LinearIssueEvent['data']): str
     parts.push('');
     parts.push(issue.description.trim());
   }
+  // finding #1 (planning mode): attachments are NOT hydrated on the decompose
+  // path — unlike a coding task, the planner gets no fetched files. Be honest
+  // about it so it plans structurally rather than assuming it read a spec it
+  // can't see. The implementing sub-tasks DO hydrate attachments, so the spec
+  // content lands where it's actually used.
+  if (hasAttachments) {
+    parts.push('');
+    parts.push(
+      '_Note: this issue has file attachments that are NOT included here — ' +
+      'plan the decomposition from the title/description, and where a sub-task ' +
+      'will need an attached file, say so in that sub-task (the implementing ' +
+      'task will receive the file)._',
+    );
+  }
   return parts.join('\n') || 'Plan a decomposition for this Linear issue.';
 }
 
 /**
  * #299 revise loop: the task description for a RE-PLAN. Gives the agent the
  * prior proposed breakdown + the reviewer's feedback so it revises rather than
- * starting cold. The agent still clones the repo for full context (and can
- * re-read the issue via the Linear MCP if it needs the original wording); the
- * key new signal is "here's what you proposed, here's what the human wants
- * changed." Depends_on is index-based within the plan, so we render it as such.
+ * starting cold. The agent still clones the repo for full context (the original
+ * issue wording is already in the task description — there is no Linear MCP to
+ * re-read it); the key new signal is "here's what you proposed, here's what the
+ * human wants changed." Depends_on is index-based within the plan, so render as such.
  */
 function buildRevisionTaskDescription(issueText: string, pending: PendingPlan, feedback: string): string {
   const priorPlan = pending.nodes.map((n, i) => {
