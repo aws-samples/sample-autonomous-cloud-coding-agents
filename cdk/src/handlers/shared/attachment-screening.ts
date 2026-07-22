@@ -248,14 +248,36 @@ const PDF_MAX_PAGES = 50;
 const PDF_MAX_TEXT_BYTES = 1024 * 1024; // 1 MB extracted text cap
 const PDF_EXTRACT_TIMEOUT_MS = 15_000;
 
+/**
+ * pdf-parse v2 is built on pdfjs, which references browser DOM globals
+ * (`DOMMatrix`/`ImageData`/`Path2D`) that don't exist in the Node Lambda runtime.
+ * For TEXT extraction (our only use) these are never actually invoked — pdfjs only
+ * touches them on its optional canvas RENDER path. But if they're merely *undefined*,
+ * pdfjs tries to load the native `@napi-rs/canvas` binding to supply them, which
+ * fails on Lambda (the cross-platform native binary isn't bundled) and cascades to
+ * `DOMMatrix is not defined` → PDF screening unavailable (ABCA-745, live-caught).
+ *
+ * Defining them as inert no-op stubs makes pdfjs skip the native-canvas load path
+ * entirely and extract text headless — no native binary, host-independent. Verified:
+ * `getText` returns the full text with canvas absent + these three stubs present.
+ * Idempotent + non-clobbering (only fills genuinely-missing globals).
+ */
+function ensurePdfDomGlobals(): void {
+  const g = globalThis as Record<string, unknown>;
+  if (typeof g.DOMMatrix === 'undefined') g.DOMMatrix = class { /* inert stub — text extraction never calls it */ };
+  if (typeof g.ImageData === 'undefined') g.ImageData = class { /* inert stub */ };
+  if (typeof g.Path2D === 'undefined') g.Path2D = class { /* inert stub */ };
+}
+
 async function extractPdfText(content: Buffer, filename: string): Promise<string> {
   // pdf-parse v2 (^2.4.5) exposes a `PDFParse` CLASS — `new PDFParse({ data }).getText()` —
-  // NOT the v1 callable default export. It runs headless in the Node Lambda runtime
-  // (the `DOMMatrix`/`Path2D` warnings from pdfjs's optional canvas layer are benign
-  // for text extraction). Two things made this fail before (ABCA-745): the code called
-  // the v1 `pdfParseFn(buf)` shape (undefined for v2), AND the webhook-processor Lambdas
-  // bundled pdf-parse with esbuild instead of shipping it via `nodeModules`, mangling its
-  // pdfjs/native deps at import — see linear-integration/jira-integration bundling.
+  // NOT the v1 callable default export. Three things made this fail before (ABCA-745):
+  // (1) the code called the v1 `pdfParseFn(buf)` shape (undefined on v2); (2) the
+  // webhook processors esbuild-bundled pdf-parse instead of shipping it via `nodeModules`,
+  // mangling its pdfjs/native deps; and (3) pdfjs tried to load the native
+  // `@napi-rs/canvas` binding for its DOM globals — absent on Lambda — instead of just
+  // extracting text. `ensurePdfDomGlobals` fixes (3); the bundling change fixes (2).
+  ensurePdfDomGlobals();
   let PDFParse;
   try {
     // Destructure the class from the dynamic import and let TS infer its type from
