@@ -3202,7 +3202,10 @@ async function screenCommentsOrDrop(
 function extractImageUrlAttachments(description: string | undefined): Attachment[] {
   if (!description) return [];
 
-  const imagePattern = /!\[[^\]]*\]\((https:\/\/[^)]+)\)/g;
+  // Angle-bracket URL form `![alt](<https://…>)` is the CommonMark autolink
+  // Linear normalizes links into (see linear-attachments.MARKDOWN_LINK_OR_IMAGE_PATTERN,
+  // ABCA-744). Optional `<`/`>`, excluded from the capture.
+  const imagePattern = /!\[[^\]]*\]\(<?(https:\/\/[^)>]+)>?\)/g;
   const attachments: Attachment[] = [];
   let skippedLinearUploads = 0;
   let match: RegExpExecArray | null;

@@ -80,11 +80,16 @@ const PDF_MAGIC = [0x25, 0x50, 0x44, 0x46, 0x2d] as const; // %PDF-
  * Markdown reference to a `uploads.linear.app` file. Matches BOTH the image form
  * `![alt](url)` AND the plain link form `[label](url)` — Linear embeds uploaded
  * images inline (`!`) but attaches uploaded files (PDFs, logs, specs) as plain
- * links. The leading `!` is optional so both are captured. Mirrors the image
- * pattern in `linear-webhook-processor.extractImageUrlAttachments` (which only
- * needs the `!` form for the public-CDN URL path).
+ * links. The leading `!` is optional so both are captured.
+ *
+ * The URL may be wrapped in angle brackets — `[label](<https://…>)` — which is
+ * the CommonMark autolink form Linear NORMALIZES uploaded-file links into (live-
+ * caught on ABCA-744: a plain `[f](https://…)` link round-tripped through Linear
+ * comes back as `(<https://…>)`, and the un-bracketed pattern silently dropped
+ * it). The `<`/`>` are optional and excluded from the captured URL, and `>` is
+ * excluded from the URL body so the closing bracket can't leak in.
  */
-const MARKDOWN_LINK_OR_IMAGE_PATTERN = /!?\[[^\]]*\]\((https:\/\/[^)]+)\)/g;
+const MARKDOWN_LINK_OR_IMAGE_PATTERN = /!?\[[^\]]*\]\(<?(https:\/\/[^)>]+)>?\)/g;
 
 /** Extension → MIME for typing a Linear upload when the response content-type
  *  is generic (e.g. application/octet-stream). Only platform-allowed types. */

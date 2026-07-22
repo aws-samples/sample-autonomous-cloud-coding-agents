@@ -220,6 +220,21 @@ describe('downloadScreenAndStoreLinearAttachments', () => {
     expect(putSendMock).toHaveBeenCalledTimes(1);
   });
 
+  test('matches the angle-bracket autolink URL form Linear normalizes links into (ABCA-744)', async () => {
+    // Linear round-trips `[f](https://…)` into `[f](<https://…>)`. The un-bracketed
+    // pattern dropped it silently (live-caught on ABCA-744) — the attachment
+    // never reached S3 and the task ran without it.
+    (global.fetch as jest.Mock).mockResolvedValueOnce(bytesResponse(PDF_BYTES, 200, 'application/pdf'));
+    const desc = 'See [design.pdf](<https://uploads.linear.app/u/p/design.pdf>) attached.';
+    const records = await downloadScreenAndStoreLinearAttachments(desc, 10, storageCtx());
+    expect(records).toHaveLength(1);
+    expect(records[0].type).toBe('file');
+    expect(records[0].content_type).toBe('application/pdf');
+    // The captured URL must NOT include the trailing '>' (the fetch must hit the real URL).
+    const fetchedUrl = (global.fetch as jest.Mock).mock.calls[0][0] as string;
+    expect(fetchedUrl).toBe('https://uploads.linear.app/u/p/design.pdf');
+  });
+
   test('types a generic octet-stream response by its .log extension and screens as text', async () => {
     (global.fetch as jest.Mock).mockResolvedValueOnce(bytesResponse(TEXT_BYTES, 200, 'application/octet-stream'));
     const records = await downloadScreenAndStoreLinearAttachments(
