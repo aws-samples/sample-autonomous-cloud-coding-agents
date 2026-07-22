@@ -33,6 +33,7 @@ import {
   loadBlueprintConfig,
   loadTask,
   pollTaskStatus,
+  queueTask,
   transitionTask,
   type PollState,
 } from './shared/orchestrator';
@@ -44,6 +45,14 @@ import { workflowIsReadOnly, workflowRequiresRepo } from './shared/workflows';
 
 interface OrchestrateTaskEvent {
   readonly task_id: string;
+  /**
+   * Per-pickup nonce set by the admission-queue pickup Lambda (#441)
+   * when re-invoking after a QUEUED -> SUBMITTED flip. Unused by the
+   * handler; it exists so the re-invoke payload differs from the
+   * original create-task invocation and no layer (Lambda async dedup,
+   * durable-execution idempotency) can mistake it for a replay.
+   */
+  readonly queue_pickup_id?: string;
 }
 
 const MAX_POLL_ATTEMPTS = 1020; // ~8.5h at 30s intervals
@@ -77,7 +86,10 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
     }
   });
 
-  // Step 2: Admission control — check concurrency limit
+  // Step 2: Admission control — check concurrency limit. At capacity the
+  // task is QUEUED (durable, FIFO on created_at) instead of FAILED (#441):
+  // the admission-queue pickup Lambda re-attempts admission as slots free
+  // up, flips QUEUED -> SUBMITTED, and re-invokes this orchestrator.
   const admitted = await context.step('admission-control', async () => {
     // Re-read status to detect external cancellation between steps
     const current = await loadTask(taskId);
@@ -86,23 +98,30 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
     }
     const result = await admissionControl(task);
     if (!result) {
-      await failTask(taskId, current.status, 'User concurrency limit reached', task.user_id, false, task.repo);
-      await emitTaskEvent(taskId, 'admission_rejected', { reason: 'concurrency_limit' }, correlation);
-      // Channel feedback is non-fatal: a throw here would re-run failTask +
-      // emitTaskEvent on the durable-execution retry, producing duplicate events.
-      try {
-        await notifyLinearOnConcurrencyCap(task);
-      } catch (err) {
-        log.warn('Linear concurrency-cap feedback failed (non-fatal)', {
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-      try {
-        await notifyJiraOnConcurrencyCap(task);
-      } catch (err) {
-        log.warn('Jira concurrency-cap feedback failed (non-fatal)', {
-          error: err instanceof Error ? err.message : String(err),
-        });
+      // Re-read for queue bookkeeping: `task` is the step-1 snapshot, but a
+      // pickup-cycle re-queue must preserve the CURRENT queued_at /
+      // admission_attempts, which the pickup Lambda may have advanced.
+      // queueTask emits the `admission_queued` event itself.
+      await queueTask(current);
+      // Channel feedback only on the FIRST queue entry — a pickup-cycle
+      // re-queue (lost admission race) would otherwise spam the issue with
+      // one comment per cycle. Non-fatal: a throw here would re-run
+      // queueTask on the durable-execution retry, producing duplicate events.
+      if (current.queued_at === undefined) {
+        try {
+          await notifyLinearOnConcurrencyCap(task);
+        } catch (err) {
+          log.warn('Linear concurrency-cap feedback failed (non-fatal)', {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+        try {
+          await notifyJiraOnConcurrencyCap(task);
+        } catch (err) {
+          log.warn('Jira concurrency-cap feedback failed (non-fatal)', {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
       }
     }
     return result;
@@ -344,13 +363,12 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
 export const handler = withDurableExecution(durableHandler);
 
 /**
- * Post a Linear comment + ❌ reaction when admission control rejects a task
- * for the user concurrency cap. Linear-only; silently no-ops for other
- * channels.
+ * Post a Linear comment when admission control queues a task on the user
+ * concurrency cap (#441). Linear-only; silently no-ops for other channels.
  *
  * The processor side (`linear-webhook-processor.ts`) already covers
  * pre-`createTaskCore` rejections (unmapped project, unlinked actor, guardrail);
- * this hook covers the post-201 case where the orchestrator rejects on
+ * this hook covers the post-201 case where the orchestrator queues on
  * admission. Without this, the only Linear-side signal would be the 👀
  * reaction the agent never gets to add — looks like the integration silently
  * dropped the request.
@@ -383,7 +401,7 @@ export async function notifyLinearOnConcurrencyCap(task: TaskRecord): Promise<vo
     await reportIssueFailure(
       { linearWorkspaceId, registryTableName },
       issueId,
-      '❌ ABCA hit your concurrency limit — too many tasks running for your user. Wait for one to finish, then re-apply the trigger label.',
+      '⏸️ ABCA hit your concurrency limit — this task has been queued and will start automatically when a slot frees up. No action needed.',
     );
   } catch (err) {
     logger.warn('Linear concurrency-cap feedback failed (non-fatal)', {
@@ -396,13 +414,13 @@ export async function notifyLinearOnConcurrencyCap(task: TaskRecord): Promise<vo
 }
 
 /**
- * Post a Jira issue comment when admission control rejects a task for the
- * user concurrency cap. Jira-only; silently no-ops for other channels.
+ * Post a Jira issue comment when admission control queues a task on the
+ * user concurrency cap (#441). Jira-only; silently no-ops for other channels.
  *
  * Parity with {@link notifyLinearOnConcurrencyCap}: the webhook processor
  * covers pre-`createTaskCore` rejections (unmapped project, unlinked actor,
  * guardrail), while this hook covers the post-201 case where the orchestrator
- * rejects on admission. Without it, a Jira user who hits the cap sees the
+ * queues on admission. Without it, a Jira user who hits the cap sees the
  * integration silently drop the request (the agent — which would otherwise
  * comment — never starts).
  *
@@ -426,7 +444,7 @@ export async function notifyJiraOnConcurrencyCap(task: TaskRecord): Promise<void
     await reportJiraIssueFailure(
       { cloudId, registryTableName },
       issueKey,
-      '❌ ABCA hit your concurrency limit — too many tasks running for your user. Wait for one to finish, then re-apply the trigger label.',
+      '⏸️ ABCA hit your concurrency limit — this task has been queued and will start automatically when a slot frees up. No action needed.',
     );
   } catch (err) {
     logger.warn('Jira concurrency-cap feedback failed (non-fatal)', {

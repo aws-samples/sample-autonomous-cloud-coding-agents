@@ -60,6 +60,9 @@ function buildTask(overrides: Partial<TaskDetail> = {}): TaskDetail {
     approval_gate_count: 0,
     approval_gate_cap: 50,
     awaiting_approval_request_id: null,
+    queued_at: null,
+    queue_position: null,
+    estimated_wait_s: null,
     ...overrides,
   };
 }
@@ -75,6 +78,25 @@ function mkEvent(overrides: Partial<TaskEvent>): TaskEvent {
 }
 
 describe('formatStatusSnapshot', () => {
+  test('QUEUED task shows queue position + ETA line (#441)', () => {
+    const task = buildTask({
+      status: 'QUEUED',
+      started_at: null,
+      queued_at: '2026-04-29T15:27:30Z',
+      queue_position: 2,
+      estimated_wait_s: 600,
+    });
+    const rendered = formatStatusSnapshot(task, [], NOW);
+    expect(rendered).toContain('Task abc123 — QUEUED');
+    expect(rendered).toContain('  Queue:         position 2 (est. wait ~10m)');
+  });
+
+  test('QUEUED task with null position omits the queue line (GSI fail-open)', () => {
+    const task = buildTask({ status: 'QUEUED', started_at: null, queue_position: null });
+    const rendered = formatStatusSnapshot(task, [], NOW);
+    expect(rendered).not.toContain('Queue:');
+  });
+
   test('happy path renders the full template', () => {
     const task = buildTask();
     // Events are newest-first per the ``?desc=1`` contract. ULIDs are

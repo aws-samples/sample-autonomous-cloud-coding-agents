@@ -22,14 +22,15 @@ import { ACTIVE_STATUSES, PRE_ACTIVE_STATUSES, TaskStatus, TaskStatusType, TERMI
 const ALL_STATUSES: TaskStatusType[] = Object.values(TaskStatus);
 
 describe('TaskStatus', () => {
-  test('defines exactly 10 states', () => {
-    // 8 original + AWAITING_APPROVAL (Cedar HITL gates, §10.3) + PENDING_UPLOADS (attachments).
-    expect(ALL_STATUSES).toHaveLength(10);
+  test('defines exactly 11 states', () => {
+    // 8 original + AWAITING_APPROVAL (Cedar HITL gates, §10.3)
+    // + PENDING_UPLOADS (attachments) + QUEUED (admission queue, #441).
+    expect(ALL_STATUSES).toHaveLength(11);
   });
 
   test('contains all expected states', () => {
     expect(ALL_STATUSES).toEqual(expect.arrayContaining([
-      'PENDING_UPLOADS', 'SUBMITTED', 'HYDRATING', 'RUNNING', 'AWAITING_APPROVAL', 'FINALIZING',
+      'PENDING_UPLOADS', 'QUEUED', 'SUBMITTED', 'HYDRATING', 'RUNNING', 'AWAITING_APPROVAL', 'FINALIZING',
       'COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT',
     ]));
   });
@@ -42,6 +43,11 @@ describe('TaskStatus', () => {
   test('PENDING_UPLOADS is included as a distinct state', () => {
     expect(TaskStatus.PENDING_UPLOADS).toBe('PENDING_UPLOADS');
     expect(ALL_STATUSES).toContain('PENDING_UPLOADS');
+  });
+
+  test('QUEUED is included as a distinct state (#441)', () => {
+    expect(TaskStatus.QUEUED).toBe('QUEUED');
+    expect(ALL_STATUSES).toContain('QUEUED');
   });
 });
 
@@ -79,20 +85,32 @@ describe('ACTIVE_STATUSES', () => {
 });
 
 describe('PRE_ACTIVE_STATUSES', () => {
-  test('contains exactly 1 pre-active state', () => {
-    expect(PRE_ACTIVE_STATUSES).toHaveLength(1);
+  test('contains exactly 2 pre-active states', () => {
+    expect(PRE_ACTIVE_STATUSES).toHaveLength(2);
   });
 
-  test('contains PENDING_UPLOADS', () => {
+  test('contains PENDING_UPLOADS and QUEUED', () => {
     expect(PRE_ACTIVE_STATUSES).toContain(TaskStatus.PENDING_UPLOADS);
+    expect(PRE_ACTIVE_STATUSES).toContain(TaskStatus.QUEUED);
   });
 
   test('PENDING_UPLOADS is NOT in ACTIVE_STATUSES (no concurrency slot consumed)', () => {
     expect(ACTIVE_STATUSES).not.toContain(TaskStatus.PENDING_UPLOADS);
   });
 
+  test('QUEUED is NOT in ACTIVE_STATUSES (#441 — counting it as active would deadlock the queue)', () => {
+    // The concurrency reconciler recomputes active_count from
+    // ACTIVE_STATUSES. If QUEUED counted as active, queued tasks would
+    // hold the very slots they are waiting for.
+    expect(ACTIVE_STATUSES).not.toContain(TaskStatus.QUEUED);
+  });
+
   test('PENDING_UPLOADS is NOT terminal', () => {
     expect(TERMINAL_STATUSES).not.toContain(TaskStatus.PENDING_UPLOADS);
+  });
+
+  test('QUEUED is NOT terminal', () => {
+    expect(TERMINAL_STATUSES).not.toContain(TaskStatus.QUEUED);
   });
 });
 
@@ -200,5 +218,27 @@ describe('VALID_TRANSITIONS', () => {
     for (const status of PRE_ACTIVE_STATUSES) {
       expect(VALID_TRANSITIONS[status].length).toBeGreaterThan(0);
     }
+  });
+
+  test('SUBMITTED can transition to QUEUED (admission cap hit, #441)', () => {
+    expect(VALID_TRANSITIONS[TaskStatus.SUBMITTED]).toContain(TaskStatus.QUEUED);
+  });
+
+  test('QUEUED can transition back to SUBMITTED (queue pickup)', () => {
+    expect(VALID_TRANSITIONS[TaskStatus.QUEUED]).toContain(TaskStatus.SUBMITTED);
+  });
+
+  test('QUEUED can transition to CANCELLED (user cancel removes from queue)', () => {
+    expect(VALID_TRANSITIONS[TaskStatus.QUEUED]).toContain(TaskStatus.CANCELLED);
+  });
+
+  test('QUEUED can transition to FAILED (queue-age backstop)', () => {
+    expect(VALID_TRANSITIONS[TaskStatus.QUEUED]).toContain(TaskStatus.FAILED);
+  });
+
+  test('QUEUED cannot skip admission to RUNNING or later states', () => {
+    expect(VALID_TRANSITIONS[TaskStatus.QUEUED]).not.toContain(TaskStatus.HYDRATING);
+    expect(VALID_TRANSITIONS[TaskStatus.QUEUED]).not.toContain(TaskStatus.RUNNING);
+    expect(VALID_TRANSITIONS[TaskStatus.QUEUED]).not.toContain(TaskStatus.FINALIZING);
   });
 });

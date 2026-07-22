@@ -122,6 +122,15 @@ export interface TaskApiProps {
   readonly orchestratorFunctionArn?: string;
 
   /**
+   * Maximum concurrent tasks per user (#441). Threaded to the get-task
+   * handler so the queue-wait ETA heuristic agrees with the
+   * orchestrator's admission cap. Must match
+   * ``TaskOrchestrator.maxConcurrentTasksPerUser``.
+   * @default 10
+   */
+  readonly maxConcurrentTasksPerUser?: number;
+
+  /**
    * API Gateway stage name.
    * @default 'v1'
    */
@@ -557,7 +566,12 @@ export class TaskApi extends Construct {
       handler: 'handler',
       runtime: Runtime.NODEJS_24_X,
       architecture: Architecture.ARM_64,
-      environment: commonEnv,
+      environment: {
+        ...commonEnv,
+        // #441: queue-position ETA heuristic must agree with the
+        // orchestrator's per-user admission cap.
+        MAX_CONCURRENT_TASKS_PER_USER: String(props.maxConcurrentTasksPerUser ?? 10),
+      },
       bundling: commonBundling,
     });
 

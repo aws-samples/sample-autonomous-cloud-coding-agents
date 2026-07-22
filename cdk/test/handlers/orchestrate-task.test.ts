@@ -77,6 +77,7 @@ import {
   loadBlueprintConfig,
   loadTask,
   pollTaskStatus,
+  queueTask,
   transitionTask,
 } from '../../src/handlers/shared/orchestrator';
 
@@ -993,6 +994,61 @@ describe('failTask', () => {
 
     await expect(failTask('TASK001', 'HYDRATING', 'durable replay', 'user-123', true)).resolves.toBeUndefined();
     expect(mockDdbSend).toHaveBeenCalledTimes(1); // transition attempt only; no Put, no concurrency Update
+  });
+});
+
+describe('queueTask (#441 admission queue)', () => {
+  test('transitions SUBMITTED -> QUEUED, stamps queued_at + admission_attempts, emits admission_queued', async () => {
+    mockDdbSend.mockResolvedValue({});
+    const result = await queueTask(baseTask as any);
+    expect(result).toBe(true);
+
+    const transition = mockDdbSend.mock.calls[0][0];
+    expect(transition._type).toBe('Update');
+    expect(transition.input.ExpressionAttributeValues[':fromStatus']).toBe('SUBMITTED');
+    expect(transition.input.ExpressionAttributeValues[':toStatus']).toBe('QUEUED');
+    // First queue entry stamps queued_at and attempts=1
+    expect(transition.input.ExpressionAttributeValues[':attr_queued_at']).toBeDefined();
+    expect(transition.input.ExpressionAttributeValues[':attr_admission_attempts']).toBe(1);
+
+    const event = mockDdbSend.mock.calls[1][0];
+    expect(event._type).toBe('Put');
+    expect(event.input.Item.event_type).toBe('admission_queued');
+    expect(event.input.Item.metadata.reason).toBe('concurrency_limit');
+  });
+
+  test('re-queue preserves original queued_at and increments admission_attempts', async () => {
+    mockDdbSend.mockResolvedValue({});
+    const requeued = { ...baseTask, queued_at: '2024-01-01T00:00:00Z', admission_attempts: 2 };
+    await queueTask(requeued as any);
+
+    const transition = mockDdbSend.mock.calls[0][0];
+    // queued_at already set — must NOT be overwritten
+    expect(transition.input.ExpressionAttributeValues[':attr_queued_at']).toBeUndefined();
+    expect(transition.input.ExpressionAttributeValues[':attr_admission_attempts']).toBe(3);
+  });
+
+  test('returns false without emitting when a concurrent transition wins the conditional check', async () => {
+    const condErr = new Error('The conditional request failed');
+    condErr.name = 'ConditionalCheckFailedException';
+    mockDdbSend.mockRejectedValueOnce(condErr);
+
+    const result = await queueTask(baseTask as any);
+    expect(result).toBe(false);
+    expect(mockDdbSend).toHaveBeenCalledTimes(1); // transition attempt only, no event
+  });
+
+  test('rethrows unexpected DDB errors so the durable step retries', async () => {
+    mockDdbSend.mockRejectedValueOnce(new Error('DDB timeout'));
+    await expect(queueTask(baseTask as any)).rejects.toThrow('DDB timeout');
+  });
+
+  test('never touches the concurrency counter (no slot held while QUEUED)', async () => {
+    mockDdbSend.mockResolvedValue({});
+    await queueTask(baseTask as any);
+    for (const call of mockDdbSend.mock.calls) {
+      expect(call[0].input.TableName).not.toBe('UserConcurrency');
+    }
   });
 });
 

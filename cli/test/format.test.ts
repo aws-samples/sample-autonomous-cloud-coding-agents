@@ -54,6 +54,9 @@ describe('format', () => {
     approval_gate_count: 0,
     approval_gate_cap: 50,
     awaiting_approval_request_id: null,
+    queued_at: null,
+    queue_position: null,
+    estimated_wait_s: null,
   };
 
   describe('formatTaskDetail', () => {
@@ -70,6 +73,39 @@ describe('format', () => {
       expect(output).toContain('Cost:        $0.1234');
       expect(output).toContain('Build:       PASSED');
       expect(output).toContain('Max Turns:   100');
+    });
+
+    test('renders queue position + ETA for a QUEUED task (#441)', () => {
+      const queued: TaskDetail = {
+        ...task,
+        status: 'QUEUED',
+        queued_at: '2026-01-01T00:00:30Z',
+        queue_position: 3,
+        estimated_wait_s: 600,
+      };
+      const output = formatTaskDetail(queued);
+      expect(output).toContain('Status:      QUEUED');
+      expect(output).toContain('Queue:       position 3 (est. wait ~10m)');
+    });
+
+    test('renders queue position without ETA when estimated_wait_s is null', () => {
+      const queued: TaskDetail = {
+        ...task,
+        status: 'QUEUED',
+        queue_position: 1,
+        estimated_wait_s: null,
+      };
+      const output = formatTaskDetail(queued);
+      expect(output).toContain('Queue:       position 1');
+      expect(output).not.toContain('est. wait');
+    });
+
+    test('omits the queue line when position is null (GSI fail-open) or task not QUEUED', () => {
+      const queuedNoPos: TaskDetail = { ...task, status: 'QUEUED', queue_position: null };
+      expect(formatTaskDetail(queuedNoPos)).not.toContain('Queue:');
+      // RUNNING task with a stale position value should not render it either.
+      const running: TaskDetail = { ...task, status: 'RUNNING', queue_position: 2 };
+      expect(formatTaskDetail(running)).not.toContain('Queue:');
     });
 
     test('omits null fields', () => {

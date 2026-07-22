@@ -859,6 +859,53 @@ export async function finalizeTask(
 }
 
 /**
+ * Queue a task that hit the per-user admission cap (#441). Transitions
+ * SUBMITTED -> QUEUED and stamps queue bookkeeping; the admission-queue
+ * pickup Lambda later re-attempts admission in FIFO order (by
+ * ``created_at``) as slots free up.
+ *
+ * ``queued_at`` is written only on the FIRST queue entry — a re-queue
+ * after a lost admission race preserves the original timestamp.
+ * ``admission_attempts`` increments on every pass through admission so
+ * repeatedly-losing tasks are visible to operators.
+ *
+ * No concurrency slot is held while QUEUED (admission explicitly did
+ * not acquire one), so there is nothing to release here.
+ *
+ * @param task - the task record (status must be SUBMITTED).
+ * @returns true if the task was queued; false if a concurrent
+ *   transition (e.g. user cancel) won the conditional check.
+ */
+export async function queueTask(task: TaskRecord): Promise<boolean> {
+  try {
+    await transitionTask(task.task_id, TaskStatus.SUBMITTED, TaskStatus.QUEUED, {
+      ...(task.queued_at === undefined && { queued_at: new Date().toISOString() }),
+      admission_attempts: (typeof task.admission_attempts === 'number' ? task.admission_attempts : 0) + 1,
+    });
+  } catch (err) {
+    // A concurrent transition (user cancel between our status read and
+    // this write) wins; the task is no longer SUBMITTED so it must not
+    // be queued. Anything else is unexpected — rethrow so the durable
+    // step retries.
+    if (err && typeof err === 'object' && 'name' in err && err.name === 'ConditionalCheckFailedException') {
+      logger.info('Queue transition lost to a concurrent status change — skipping', { task_id: task.task_id });
+      return false;
+    }
+    throw err;
+  }
+  await emitTaskEvent(task.task_id, 'admission_queued', {
+    reason: 'concurrency_limit',
+    admission_attempts: (typeof task.admission_attempts === 'number' ? task.admission_attempts : 0) + 1,
+  });
+  logger.info('Task queued on admission cap', {
+    task_id: task.task_id,
+    user_id: task.user_id,
+    prior_attempts: task.admission_attempts ?? 0,
+  });
+  return true;
+}
+
+/**
  * Fail a task and release concurrency. Used when admission or hydration fails.
  * @param taskId - the task ID.
  * @param fromStatus - the current status.
