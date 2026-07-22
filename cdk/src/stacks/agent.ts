@@ -70,8 +70,23 @@ const RUNTIME_SESSION_TIMEOUT_HOURS = 8;
 /** Index of the stage segment in a split API Gateway URL. */
 const API_URL_STAGE_SEGMENT_INDEX = 3;
 
+/** Properties for {@link AgentStack}. */
+export interface AgentStackProps extends StackProps {
+  /**
+   * Availability-zone *names* to pin the AgentCore VPC (and therefore the
+   * Runtime ENIs) into, so they land only in AgentCore-supported zones.
+   *
+   * Resolved in `main.ts` via `resolveAgentCoreAzs` — the validated
+   * `agentcore:availabilityZones` context override, else auto-selected from the
+   * account's supported zones when synth has a concrete account/region. Leave
+   * `undefined` (env-agnostic synth, unknown region) to keep CDK's default
+   * `maxAzs` selection.
+   */
+  readonly availabilityZones?: string[];
+}
+
 export class AgentStack extends Stack {
-  constructor(scope: Construct, id: string, props: StackProps = {}) {
+  constructor(scope: Construct, id: string, props: AgentStackProps = {}) {
     super(scope, id, props);
 
     // Build context is repo root (not agent/) so the Dockerfile can COPY
@@ -202,8 +217,18 @@ export class AgentStack extends Stack {
       },
     ]);
 
-    // Network isolation — VPC with restricted egress
-    const agentVpc = new AgentVpc(this, 'AgentVpc');
+    // Network isolation — VPC with restricted egress.
+    // AgentCore only supports a subset of physical availability zones per
+    // region, and AZ *names* are aliased per-account, so the default maxAzs
+    // selection can land the Runtime ENIs in an unsupported zone and fail the
+    // deploy. `props.availabilityZones` carries the AZ names resolved in
+    // main.ts (`resolveAgentCoreAzs`): the validated `agentcore:availabilityZones`
+    // override, else auto-selected from the account's AgentCore-supported zones
+    // when synth has a concrete account/region. Left undefined otherwise, so the
+    // construct keeps CDK's default AZ selection. See constructs/agentcore-azs.ts.
+    const agentVpc = new AgentVpc(this, 'AgentVpc', {
+      ...(props.availabilityZones ? { availabilityZones: props.availabilityZones } : {}),
+    });
 
     // DNS Firewall — domain-level egress filtering (observation mode for initial deployment)
     const additionalDomains = [...new Set(blueprints.flatMap(b => b.egressAllowlist))];

@@ -149,4 +149,55 @@ describe('AgentVpc with custom props', () => {
 
     template.resourceCountIs('AWS::EC2::NatGateway', 2);
   });
+
+  test('accepts explicit availabilityZones and ignores maxAzs', () => {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    });
+    new AgentVpc(stack, 'AgentVpc', {
+      availabilityZones: ['us-east-1b', 'us-east-1c'],
+      maxAzs: 3, // should be ignored when availabilityZones is provided
+    });
+    const template = Template.fromStack(stack);
+
+    // 2 explicit AZs × 2 subnet types = 4 subnets
+    template.resourceCountIs('AWS::EC2::Subnet', 4);
+
+    // Subnets are pinned to the requested AZ *names* — the whole point of the
+    // fix (a wrong-count assertion would pass even if AZs were unpinned).
+    template.hasResourceProperties('AWS::EC2::Subnet', { AvailabilityZone: 'us-east-1b' });
+    template.hasResourceProperties('AWS::EC2::Subnet', { AvailabilityZone: 'us-east-1c' });
+  });
+
+  test('env-agnostic synth falls back to Fn::GetAZs (no pinning, no crash)', () => {
+    const app = new App();
+    // No env → account/region are tokens. The production AgentStack synthesizes
+    // this way, so auto-pin is skipped and CDK selects AZs at deploy time.
+    const stack = new Stack(app, 'TestStack');
+    new AgentVpc(stack, 'AgentVpc');
+    const template = Template.fromStack(stack);
+
+    // Default maxAzs (2) → 4 subnets; AZ resolved at deploy via Fn::GetAZs.
+    template.resourceCountIs('AWS::EC2::Subnet', 4);
+    template.hasResourceProperties('AWS::EC2::Subnet', {
+      AvailabilityZone: {
+        'Fn::Select': Match.arrayWith([{ 'Fn::GetAZs': '' }]),
+      },
+    });
+  });
+
+  test('availabilityZones with 3 zones creates 6 subnets', () => {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    });
+    new AgentVpc(stack, 'AgentVpc', {
+      availabilityZones: ['us-east-1b', 'us-east-1c', 'us-east-1d'],
+    });
+    const template = Template.fromStack(stack);
+
+    // 3 AZs × 2 subnet types = 6 subnets
+    template.resourceCountIs('AWS::EC2::Subnet', 6);
+  });
 });

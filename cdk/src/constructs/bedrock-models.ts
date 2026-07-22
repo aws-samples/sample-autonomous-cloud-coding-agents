@@ -58,9 +58,21 @@ export const BEDROCK_MODELS_CONTEXT_KEY = 'bedrockModels';
  * granting nothing or an invalid ARN.
  */
 export function resolveBedrockModelIds(node: Node): readonly string[] {
-  const override = node.tryGetContext(BEDROCK_MODELS_CONTEXT_KEY);
-  if (override === undefined || override === null) {
+  const raw = node.tryGetContext(BEDROCK_MODELS_CONTEXT_KEY);
+  if (raw === undefined || raw === null) {
     return DEFAULT_BEDROCK_MODEL_IDS;
+  }
+  // `cdk.context.json` delivers a real array, but the `-c key=value` form
+  // documented above delivers a raw string. Parse the string form so both
+  // behave identically. A non-JSON string — a true typo — is left as-is and
+  // fails the array check below with the same clear, key-named error.
+  let override: unknown = raw;
+  if (typeof raw === 'string') {
+    try {
+      override = JSON.parse(raw);
+    } catch {
+      override = raw;
+    }
   }
   if (!Array.isArray(override) || override.length === 0) {
     throw new Error(

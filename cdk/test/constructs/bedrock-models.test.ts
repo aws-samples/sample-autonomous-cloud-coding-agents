@@ -41,6 +41,21 @@ describe('resolveBedrockModelIds', () => {
     expect(ids).toEqual(override);
   });
 
+  it('parses a JSON-string override (the `-c key=value` CLI form)', () => {
+    // CDK delivers `-c bedrockModels=[...]` as a raw string, not a parsed array;
+    // the documented `-c` form must work identically to the file/array form.
+    const ids = resolveBedrockModelIds(
+      nodeWithContext({ [BEDROCK_MODELS_CONTEXT_KEY]: '["anthropic.claude-opus-4-8","anthropic.claude-sonnet-4-6"]' }),
+    );
+    expect(ids).toEqual(['anthropic.claude-opus-4-8', 'anthropic.claude-sonnet-4-6']);
+  });
+
+  it('throws on a JSON string that does not parse to an array', () => {
+    expect(() =>
+      resolveBedrockModelIds(nodeWithContext({ [BEDROCK_MODELS_CONTEXT_KEY]: '"anthropic.claude-sonnet-4-6"' })),
+    ).toThrow(/must be a non-empty array/);
+  });
+
   it('throws on a non-array override (typo guard)', () => {
     expect(() =>
       resolveBedrockModelIds(nodeWithContext({ [BEDROCK_MODELS_CONTEXT_KEY]: 'anthropic.claude-opus-4-8' })),
