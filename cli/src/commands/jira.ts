@@ -672,7 +672,7 @@ export function makeJiraCommand(): Command {
         console.log('  Webhook signing secret needed for THIS tenant.');
         console.log('  In Jira → Settings → System → Webhooks → Create a Webhook:');
         console.log(`    URL:           ${apiBaseUrl}/jira/webhook`);
-        console.log('    Events:        Issue: created, updated');
+        console.log('    Events:        Issue: created, Issue: updated, Comment: created');
         console.log('    Secret:        choose a strong random value (e.g. `openssl rand -hex 32`)');
         console.log();
         const webhookSigningSecret = await promptSecret('Webhook signing secret: ');

@@ -4,7 +4,7 @@ title: Jira setup guide
 
 # Jira integration setup guide
 
-Set up the ABCA Jira Cloud integration so that adding a label to a Jira issue triggers an autonomous task. ABCA posts progress comments back on the issue as it works — a "started" comment from the agent and a final status comment (with cost, turns, and duration) from the platform when the task finishes.
+Set up the ABCA Jira Cloud integration so that adding a label to a Jira issue triggers an autonomous task. After ABCA opens a pull request, reviewers can comment `@bgagent <instruction>` on the same Jira issue to request another iteration. ABCA posts progress comments back on the issue as it works — a "started" comment from the agent and a final status comment (with cost, turns, and duration) from the platform when the task finishes.
 
 ## Prerequisites
 
@@ -17,7 +17,7 @@ Set up the ABCA Jira Cloud integration so that adding a label to a Jira issue tr
 
 ## How it works
 
-A Jira-site admin creates an Atlassian OAuth 2.0 (3LO) app and authorizes it on the site. The OAuth token bundle is stored in a per-tenant Secrets Manager secret (`bgagent-jira-oauth-<cloudId>`). When a user adds the trigger label to a Jira issue, Jira fires a webhook to ABCA; the receiver verifies the `X-Hub-Signature` HMAC, dedupes, and async-invokes the processor, which resolves the tenant, looks up the project→repo mapping, and creates a task. Jira-triggered tasks always run the `coding/new-task-v1` workflow (the processor pins `workflow_ref` explicitly, since a label-triggered task always targets a mapped repo). The agent clones the repo, opens a PR, and posts a "started" comment on the Jira issue via the Jira REST v3 API (using the same stored OAuth token). When the task reaches a terminal state, the platform's fan-out plane posts a single final status comment — outcome, cost, turns, duration, and PR link — via the same REST v3 endpoint (see [How it works](#how-it-works) below).
+A Jira-site admin creates an Atlassian OAuth 2.0 (3LO) app and authorizes it on the site. The OAuth token bundle is stored in a per-tenant Secrets Manager secret (`bgagent-jira-oauth-<cloudId>`). When a user adds the trigger label to a Jira issue, Jira fires a webhook to ABCA; the receiver verifies the `X-Hub-Signature` HMAC, dedupes, and async-invokes the processor, which resolves the tenant, looks up the project→repo mapping, enriches the task with the issue's recent comments and screened file attachments (see [Issue context](#issue-context-attachments-and-comments)), and creates a task. Jira-triggered tasks always run the `coding/new-task-v1` workflow (the processor pins `workflow_ref` explicitly, since a label-triggered task always targets a mapped repo). A later `@bgagent` comment resolves that Jira issue to its most recent ABCA pull request and runs `coding/pr-iteration-v1` against the same PR. The agent clones the repo, opens or updates the PR, and posts a "started" comment on the Jira issue via the Jira REST v3 API (using the same stored OAuth token). When the task reaches a terminal state, the platform's fan-out plane posts a single final status comment — outcome, cost, turns, duration, and PR link — via the same REST v3 endpoint (see [How it works](#how-it-works) below).
 
 **Tenant key.** Everything is indexed on `cloudId` — the Atlassian tenant UUID, *not* the site domain or name. Webhook payloads and the OAuth flow both surface `cloudId`; it is the join key across the project-mapping, user-mapping, and workspace-registry tables.
 
@@ -135,7 +135,7 @@ This runs the OAuth 3LO dance:
 `setup` then prompts for a **webhook signing secret**. Unlike Linear, Atlassian does **not** auto-generate one — the operator chooses it at webhook-create time. In a second terminal, open **Jira → Settings → System → Webhooks → Create a Webhook** and enter:
 
 - **URL** — the `…/jira/webhook` URL that `setup` prints
-- **Events** — *Issue: created* and *Issue: updated*
+- **Events** — *Issue: created*, *Issue: updated*, and *Comment: created*
 - **Secret** — a strong random value, e.g. `openssl rand -hex 32`
 
 Paste that same secret value back at the `Webhook signing secret:` prompt. ABCA stores it on the per-tenant OAuth bundle (and mirrors it stack-wide), and the receiver looks it up to verify `X-Hub-Signature` on each delivery.
@@ -182,7 +182,9 @@ The teammate needs their own ABCA account first (Cognito user + configured CLI).
 
 ### 6. Test
 
-Add the trigger label (`bgagent` by default) to a Jira issue in a mapped project. The agent should start within ~30 seconds, comment on the issue as it works, and post a PR link when ready. The issue **summary** plus the **description** (converted from Atlassian Document Format to markdown) becomes the task description.
+Add the trigger label (`bgagent` by default) to a Jira issue in a mapped project. The agent should start within ~30 seconds, comment on the issue as it works, and post a PR link when ready. The issue **summary** plus the **description** (converted from Atlassian Document Format to markdown), the issue's **recent comments**, and any supported **file attachments** become the task context — see [Issue context: attachments and comments](#issue-context-attachments-and-comments).
+
+After the PR exists, add a Jira comment such as `@bgagent update the README too`. ABCA should acknowledge the request on the issue and update the existing PR.
 
 ## How webhook signature verification works
 
@@ -198,7 +200,36 @@ The body must be verified as the *raw unparsed bytes* — never parsed-and-restr
 
 - **`jira:issue_created`** — triggers if the trigger label is already present on the new issue.
 - **`jira:issue_updated`** — triggers only if the label was **newly added** in this update. Jira reports label changes in `changelog.items[]` (`field: "labels"`, with `fromString` / `toString`), *not* by re-sending the full label list. The processor diffs the changelog rather than inspecting `issue.fields.labels`, so re-saving an issue that already has the label does not re-trigger.
+- **`comment_created`** — triggers only when the new comment contains a token-bounded `@bgagent` mention and the issue has a prior ABCA pull request.
 - All other event types get a silent `200`.
+
+## Comment-triggered PR iteration
+
+A `comment_created` webhook starts a PR iteration only when the comment contains the token-bounded mention `@bgagent` (case-insensitive). The remaining comment text becomes the `coding/pr-iteration-v1` instruction. A bare `@bgagent` asks the agent to address the latest PR review feedback.
+
+ABCA resolves the Jira tenant and issue key to the newest prior task that actually opened a PR. Newer attempts without a PR do not hide an older valid PR target. If no ABCA PR exists, ABCA posts a clear comment and creates no task.
+
+When the comment author has linked their Jira and ABCA accounts, the iteration is attributed to that user. Otherwise, ABCA falls back to the original task owner so a useful reviewer request is not dropped. Comments without the mention, app-authored comments, and ABCA's own generated status comments are no-ops.
+
+The acknowledgement is immediate after task admission. The existing platform fan-out path posts the terminal outcome and cost comment when the iteration finishes. Comment redelivery is idempotent: the webhook receiver deduplicates by Jira comment ID, and task creation uses a deterministic idempotency key as a second guard.
+
+## Issue context: attachments and comments
+
+Beyond the summary and description, the processor enriches the task with the practical context a Jira ticket usually carries — attached files and recent clarifications — so the agent isn't left guessing at "see the attached log" or an acceptance detail buried in a comment. Both are fetched **authenticated at task-admission time** using the tenant's existing `read:jira-work` scope (**no new OAuth scopes, no re-authorization**), because a headless agent can't fetch them itself.
+
+### File attachments
+
+Jira-hosted `media` attachments are downloaded through the Jira REST API, run through the **same Bedrock Guardrail content screening** as every other ABCA attachment, and stored for the agent — only after they pass.
+
+- **Supported types** — images `image/png`, `image/jpeg`; files `text/plain`, `text/csv`, `text/markdown`, `application/json`, `application/pdf`, `text/x-log`.
+- **Limits** — at most **10 attachments per task** (shared with any images embedded in the description), **10 MB per file**, **50 MB total**.
+- **Unsupported or oversized attachments are skipped silently** — they simply don't reach the agent; the task still runs with the rest of the context.
+- **Fail-closed on unsafe content** — if a *selected* attachment can't be safely downloaded or screened (blocked by the guardrail, a content/type mismatch, a download/auth failure, or missing screening configuration), the task is **rejected** with a ❌ comment on the issue rather than run with missing context. Fix or remove the attachment and re-apply the trigger label.
+- Embedded HTTPS image URLs in the description continue to work exactly as before.
+
+### Recent comments
+
+The most recent **human** comments (up to 10, oldest-first) are folded into the task description under a **Recent comments** heading, each attributed to its author. ABCA's own progress/final-status comments and other app/bot comments are excluded (filtered by Atlassian `accountType`). Comment enrichment is **best-effort / fail-open**: if the fetch fails, the task proceeds without comments (a warning is logged) — comments are advisory context, never a gate. Long comment histories are not fetched in full; only the recent window is included.
 
 ## Board transitions
 
@@ -228,11 +259,12 @@ The feature targets Jira **statuses**, not board columns. Because moving a card 
 
 ## Webhook dedup
 
-The receiver dedupes on `{issueKey}#{webhookEventTimestamp}` with an 8-hour TTL. Using the event timestamp (rather than event type) means two distinct label-adds in quick succession are not collapsed. Jira retries far less aggressively than Linear, so 8 hours is safe parity.
+The receiver dedupes issue events on `{issueKey}#{webhookEvent}#{timestamp}` and comment-created events on `{issueKey}#comment_created#{commentId}`, with an 8-hour TTL. The timestamp keeps distinct label additions separate; the stable comment ID collapses redelivery without merging separate comments. Jira retries far less aggressively than Linear, so 8 hours is safe parity.
 
 ## Usage
 
 - **Trigger a task**: add the trigger label to an issue in a mapped Jira project.
+- **Iterate on its PR**: comment `@bgagent <change>` on the Jira issue after ABCA has opened a PR.
 - **Check status**: from the Jira issue (progress comments) or `bgagent list` / `bgagent status <task-id>`.
 - **Cancel**: `bgagent cancel <task-id>`. Removing the Jira label does not cancel a running task.
 
