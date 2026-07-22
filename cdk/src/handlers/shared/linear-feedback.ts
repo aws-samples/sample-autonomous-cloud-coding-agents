@@ -26,8 +26,8 @@ import { isBotAuthoredComment } from './orchestration-comment-trigger';
  * Lambda-side helper for posting comments and reactions onto Linear issues
  * via direct GraphQL. Used by the webhook processor to give users feedback
  * on pre-container failures (guardrail block, concurrency cap, unmapped
- * project, etc.) — paths where the agent never starts and the agent-side
- * Linear MCP / `linear_reactions.py` cannot run.
+ * project, etc.) — paths where the agent never starts, so the agent-side
+ * `linear_reactions.py` (its only Linear I/O — there is no Linear MCP) can't run.
  *
  * All calls are best-effort. Errors are logged at WARN and swallowed —
  * Linear feedback is advisory and must never gate task-rejection logic.

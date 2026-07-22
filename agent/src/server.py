@@ -433,8 +433,8 @@ def _run_task_background(
         except (ImportError, AttributeError) as e:
             _warn_cw(
                 f"bedrock_agentcore workload-token bridge unavailable "
-                f"({type(e).__name__}: {e}); Linear MCP will resolve via "
-                "Secrets Manager fallback",
+                f"({type(e).__name__}: {e}); the Linear reactions token will "
+                "resolve via Secrets Manager fallback",
                 task_id=task_id,
             )
 

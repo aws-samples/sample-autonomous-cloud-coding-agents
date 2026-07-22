@@ -117,7 +117,8 @@ export interface OrchestrationReleaseContext {
    * release + rollup paths follow it without code changes here.
    */
   readonly channel_source?: string;
-  /** Linear OAuth secret ARN for the agent's outbound Linear MCP. */
+  /** Linear OAuth secret ARN for the agent's outbound Linear GraphQL
+   *  (reactions/state via linear_reactions.py — there is no Linear MCP). */
   readonly linear_oauth_secret_arn?: string;
   readonly linear_workspace_slug?: string;
   readonly linear_project_id?: string;

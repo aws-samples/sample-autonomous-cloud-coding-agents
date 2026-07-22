@@ -107,7 +107,8 @@ export interface ReleaseChildParams {
   readonly row: OrchestrationChildRow;
   /** Platform user the child task is attributed to (parent's submitter). */
   readonly platformUserId: string;
-  /** Linear OAuth secret ARN + slug for the agent's outbound Linear MCP. */
+  /** Linear OAuth secret ARN + slug for the agent's outbound Linear GraphQL
+   *  (reactions/state via linear_reactions.py — there is no Linear MCP). */
   readonly linearOauthSecretArn?: string;
   readonly linearWorkspaceSlug?: string;
   readonly linearProjectId?: string;

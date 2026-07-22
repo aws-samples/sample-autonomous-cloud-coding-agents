@@ -204,9 +204,9 @@ def _upload_to_s3(ctx: StepContext) -> str:
 def _post_comment(ctx: StepContext) -> bool:
     """Record the deliverable as a ``delivered_comment`` progress milestone.
 
-    The agent has no direct comment channel for a repo-less task (no GitHub repo;
-    Linear MCP is channel-gated). This records the result text as a
-    ``delivered_comment`` milestone on TaskEventsTable — visible in the live event
+    The agent has no direct comment channel for a repo-less task (no GitHub repo,
+    and the agent posts nothing to Linear directly — ADR-016). This records the
+    result text as a ``delivered_comment`` milestone on TaskEventsTable — visible in the live event
     stream (``bgagent watch``) and to any consumer of the task's events.
 
     NOTE: rendering this milestone to an external channel (Slack/email/GitHub) is

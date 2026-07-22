@@ -74,18 +74,17 @@ def resolve_linear_api_token(channel_metadata: dict[str, str] | None = None) -> 
     Pass that dict in via ``channel_metadata`` (the pipeline does this
     automatically). We fetch the per-workspace secret, parse the token
     JSON, refresh if expiring, and cache the access_token in
-    ``LINEAR_API_TOKEN`` so downstream consumers (the Linear MCP's
-    ``${LINEAR_API_TOKEN}`` placeholder in ``.mcp.json`` and
-    ``linear_reactions.py``'s GraphQL Authorization header) keep working
-    unchanged.
+    ``LINEAR_API_TOKEN`` so the one remaining consumer —
+    ``linear_reactions.py``'s direct-GraphQL Authorization header (reactions +
+    state transitions) — keeps working. (ADR-016: there is no Linear MCP; this
+    token no longer feeds an ``.mcp.json`` placeholder.)
 
     For local development, a pre-set ``LINEAR_API_TOKEN`` env var
     short-circuits the lookup so the agent can run outside the runtime.
 
-    Returns an empty string when the credential is absent — the agent-side
-    MCP config then renders with an unresolved ``${LINEAR_API_TOKEN}``
-    placeholder and the Linear MCP fails closed. This function is only
-    called when ``channel_source == 'linear'``.
+    Returns an empty string when the credential is absent — ``linear_reactions``
+    then skips its reactions/state calls (best-effort, logged). This function is
+    only called when ``channel_source == 'linear'``.
 
     Phase 2.0a (parked) used AgentCore Identity. Phase 2.0b-O2 reads
     Secrets Manager directly because AgentCore Identity's USER_FEDERATION
@@ -119,7 +118,7 @@ def resolve_linear_api_token(channel_metadata: dict[str, str] | None = None) -> 
         from botocore.exceptions import BotoCoreError, ClientError
     except ImportError as e:
         log("WARN", f"resolve_linear_api_token: boto3 unavailable ({e}); skipping")
-        # nosemgrep: py-silent-success-masking -- optional Linear MCP; boto3 unavailable
+        # nosemgrep: py-silent-success-masking -- optional Linear reactions token; boto3 unavailable
         return ""
 
     sm = boto3.client("secretsmanager", region_name=region)
@@ -130,8 +129,8 @@ def resolve_linear_api_token(channel_metadata: dict[str, str] | None = None) -> 
         Returns the parsed dict, or None if the SM payload can't be
         decoded as JSON (corrupted byte, missing SecretString key,
         etc.). The caller treats None like a missing secret — agent
-        proceeds without Linear MCP rather than crashing the task
-        pipeline thread on a raw traceback.
+        proceeds without the Linear reactions token rather than crashing
+        the task pipeline thread on a raw traceback.
         """
         resp = sm.get_secret_value(SecretId=secret_arn)
         try:
@@ -330,7 +329,7 @@ def resolve_linear_api_token(channel_metadata: dict[str, str] | None = None) -> 
         return ""
     if token_obj is None:
         # Corrupted secret JSON; already logged inside _fetch_token.
-        # Fail closed — Linear MCP renders with unresolved placeholder.
+        # Corrupted secret JSON → no token; linear_reactions skips (best-effort).
         return ""
 
     if _is_expiring(token_obj.get("expires_at", "")):

@@ -3213,19 +3213,14 @@ async function screenCommentsOrDrop(
  * Only HTTPS URLs are included (security: no HTTP, no data: URIs).
  * Capped at 10 images per issue to stay within attachment limits.
  *
- * Linear-hosted upload URLs (`uploads.linear.app`) are SKIPPED because
- * they require the workspace's OAuth token to fetch — the orchestrator's
- * URL-resolver runs unauthenticated and would fail closed with 401,
- * killing the task before the agent ever starts. The agent picks these
- * up at runtime via `mcp__linear-server__extract_images` (which mints
- * fresh signed URLs) per the on-demand prompt addendum, so dropping
- * them from the pre-fetch path doesn't lose coverage — it just shifts
- * the fetch from "Lambda with no auth" to "agent with the OAuth token."
- *
- * Trade-off: Linear-hosted images skip the Bedrock Guardrail screening
- * pass that runs at task-creation time. The description text itself is
- * still screened via the input guardrail; the bytes are not. Acceptable
- * for now — the agent treats those images as untrusted input anyway.
+ * Linear-hosted upload URLs (`uploads.linear.app`) are SKIPPED HERE because
+ * they require the workspace's OAuth token to fetch — the unauthenticated
+ * URL-resolver would fail closed with 401. They are NOT lost: the caller
+ * fetches them AUTHENTICATED at admission via `downloadScreenAndStoreLinearAttachments`
+ * (ADR-016), which screens the bytes through the Bedrock Guardrail and stores
+ * them to S3 as pre-screened attachments. So this function handles only the
+ * public-CDN images (imgur, github-user-content), which the URL-resolver fetches
+ * + screens during context hydration. There is no Linear MCP.
  */
 function extractImageUrlAttachments(description: string | undefined): Attachment[] {
   if (!description) return [];

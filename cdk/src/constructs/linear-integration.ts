@@ -123,9 +123,11 @@ export interface LinearIntegrationProps {
 /**
  * CDK construct that adds Linear integration to the ABCA platform.
  *
- * Inbound-only adapter: Linear → webhook → task creation. Outbound progress
- * updates happen agent-side via the Linear MCP server (see agent/src/channel_mcp.py),
- * so there is NO DynamoDB Streams consumer and NO outbound-notify Lambda here.
+ * Inbound-only adapter: Linear → webhook → task creation. Outbound updates are
+ * deterministic (ADR-016 — there is NO Linear MCP): reactions + state transitions
+ * from the agent's direct GraphQL (`linear_reactions.py`), and start / PR-opened /
+ * terminal comments from the Lambda tier (webhook processor + fan-out dispatcher).
+ * So there is NO DynamoDB Streams consumer and NO outbound-notify Lambda here.
  *
  * Creates:
  * - LinearProjectMappingTable (Linear project → GitHub repo mapping)
