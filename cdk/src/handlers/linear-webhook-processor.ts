@@ -18,7 +18,7 @@
  */
 
 import * as crypto from 'crypto';
-import { BedrockRuntimeClient } from '@aws-sdk/client-bedrock-runtime';
+import { BedrockRuntimeClient, ApplyGuardrailCommand } from '@aws-sdk/client-bedrock-runtime';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { S3Client } from '@aws-sdk/client-s3';
 import { DynamoDBDocumentClient, GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
@@ -30,6 +30,7 @@ import { renderMaturingReply } from './shared/iteration-reply';
 import { cleanupPreScreenedAttachments, downloadScreenAndStoreLinearAttachments, LinearAttachmentError } from './shared/linear-attachments';
 import {
   deleteComment,
+  fetchRecentComments,
   reactToComment,
   replyToComment,
   reportIssueFailure,
@@ -41,6 +42,7 @@ import {
   EMOJI_STARTED,
   EMOJI_SUCCESS,
   EMOJI_NEEDS_INPUT,
+  type RenderedComment,
 } from './shared/linear-feedback';
 import {
   probeLinearIssueContext,
@@ -113,6 +115,7 @@ import { readConcurrencyBudget, releaseReadyChildren } from './shared/orchestrat
 import { upsertEpicPanel } from './shared/orchestration-rollup';
 import { claimCommentAck, clearRollupClaim, deriveOrchestrationId, loadOrchestration, setStatusCommentId, type OrchestrationReleaseContext } from './shared/orchestration-store';
 import type { Attachment, PassedAttachmentRecord } from './shared/types';
+import { MAX_TASK_DESCRIPTION_LENGTH } from './shared/validation';
 import { CODING_WORKFLOW_ID } from './shared/workflows';
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -893,7 +896,22 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     }
   }
 
-  const taskDescription = buildTaskDescription(issue, contextHint);
+  // ADR-016 pre-hydration: fetch recent HUMAN comments and fold them into the
+  // task description — the agent has no Linear MCP to read the thread at
+  // runtime. Advisory + fail-open end to end: a fetch failure yields no
+  // comments, and third-party comment text that trips the guardrail is dropped
+  // (never the task; the reporter-authored description is screened separately by
+  // createTaskCore). Mirrors the Jira processor (#619/#577).
+  let recentComments: RenderedComment[] = [];
+  if (WORKSPACE_REGISTRY_TABLE && resolvedAccessToken) {
+    const fetched = await fetchRecentComments(
+      { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE },
+      issue.id,
+    );
+    recentComments = await screenCommentsOrDrop(fetched, issue.id, workspaceId);
+  }
+
+  const taskDescription = buildTaskDescription(issue, contextHint, recentComments);
 
   // Extract embedded image URLs from the issue description markdown. Non-Linear
   // (public CDN) images become URL attachments fetched+screened during context
@@ -3013,7 +3031,11 @@ function buildRevisionTaskDescription(issueText: string, pending: PendingPlan, f
   ].join('\n');
 }
 
-function buildTaskDescription(issue: LinearIssueEvent['data'], contextHint: string = ''): string {
+function buildTaskDescription(
+  issue: LinearIssueEvent['data'],
+  contextHint: string = '',
+  comments: readonly RenderedComment[] = [],
+): string {
   const parts: string[] = [];
   if (issue.identifier && issue.title) {
     parts.push(`${issue.identifier}: ${issue.title}`);
@@ -3028,7 +3050,99 @@ function buildTaskDescription(issue: LinearIssueEvent['data'], contextHint: stri
     parts.push('');
     parts.push(issue.description.trim());
   }
-  return parts.join('\n') || 'Linear issue';
+  const core = parts.join('\n') || 'Linear issue';
+
+  // Fold recent human comments under a clear heading so the agent can tell them
+  // from the description (ADR-016 pre-hydration). Comments are ADVISORY and must
+  // stay fail-open: they must never grow the description past
+  // MAX_TASK_DESCRIPTION_LENGTH and turn createTaskCore's length check into a
+  // hard rejection. Only append what fits the remaining budget, truncating the
+  // section if needed. Mirrors the Jira processor.
+  if (comments.length === 0) return core;
+  const commentSection = renderCommentSection(comments);
+  const separator = '\n';
+  const budget = MAX_TASK_DESCRIPTION_LENGTH - core.length - separator.length;
+  if (budget <= 0) return core; // description already fills the budget — drop comments
+  const fitted = commentSection.length <= budget
+    ? commentSection
+    : truncateCommentSection(commentSection, budget);
+  return fitted ? core + separator + fitted : core;
+}
+
+/** Notice appended when the comment section is truncated to fit the budget. */
+const COMMENT_TRUNCATION_NOTICE = '\n\n_(recent comments truncated)_';
+
+function renderCommentSection(comments: readonly RenderedComment[]): string {
+  const lines: string[] = ['', '## Recent comments'];
+  for (const c of comments) {
+    lines.push('');
+    const attribution = c.createdAt ? `**${c.author}** (${c.createdAt}):` : `**${c.author}**:`;
+    lines.push(attribution);
+    lines.push(c.markdown);
+  }
+  return lines.join('\n');
+}
+
+/**
+ * Trim a rendered comment section to at most ``budget`` characters, leaving room
+ * for a truncation notice. Returns '' if even the heading + notice can't fit, so
+ * the caller cleanly drops the section. Mirrors the Jira processor.
+ */
+function truncateCommentSection(section: string, budget: number): string {
+  const room = budget - COMMENT_TRUNCATION_NOTICE.length;
+  if (room <= 0) return '';
+  return section.slice(0, room) + COMMENT_TRUNCATION_NOTICE;
+}
+
+/**
+ * Screen the rendered comment block through the Bedrock Guardrail on its own, so
+ * third-party comment content that trips the policy is DROPPED (fail-open)
+ * rather than gating the reporter's task. Returns the comments unchanged when
+ * they pass, and ``[]`` when the guardrail intervenes or is unavailable — the
+ * task still proceeds with the reporter-authored title/description (which
+ * createTaskCore screens separately). Keeps the comment-enrichment contract
+ * fail-open end to end. Mirrors the Jira processor (#577 review, item 4).
+ */
+async function screenCommentsOrDrop(
+  comments: RenderedComment[],
+  issueId: string,
+  workspaceId: string,
+): Promise<RenderedComment[]> {
+  if (comments.length === 0) return comments;
+  if (!attachmentsBedrockClient || !GUARDRAIL_ID || !GUARDRAIL_VERSION) {
+    // No guardrail configured — drop unscreened third-party text rather than
+    // route it, unscreened, into the agent context.
+    logger.warn('Dropping Linear comments: guardrail not configured to screen them', {
+      issue_id: issueId,
+      linear_workspace_id: workspaceId,
+    });
+    return [];
+  }
+  const text = renderCommentSection(comments);
+  try {
+    const result = await attachmentsBedrockClient.send(new ApplyGuardrailCommand({
+      guardrailIdentifier: GUARDRAIL_ID,
+      guardrailVersion: GUARDRAIL_VERSION,
+      source: 'INPUT',
+      content: [{ text: { text } }],
+    }));
+    if (result.action === 'GUARDRAIL_INTERVENED') {
+      logger.warn('Dropping Linear comments: blocked by content policy (task still proceeds)', {
+        issue_id: issueId,
+        linear_workspace_id: workspaceId,
+      });
+      return [];
+    }
+    return comments;
+  } catch (err) {
+    // Fail-open on a screening outage too — comments are advisory.
+    logger.warn('Dropping Linear comments: screening unavailable (task still proceeds)', {
+      issue_id: issueId,
+      linear_workspace_id: workspaceId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return [];
+  }
 }
 
 /**

@@ -20,6 +20,7 @@
 import { preservePreviewSuffix } from './iteration-reply';
 import { resolveLinearOauthToken } from './linear-oauth-resolver';
 import { logger } from './logger';
+import { isBotAuthoredComment } from './orchestration-comment-trigger';
 
 /**
  * Lambda-side helper for posting comments and reactions onto Linear issues
@@ -99,6 +100,36 @@ query IssueComments($issueId: String!) {
   issue(id: $issueId) {
     comments(first: 100) {
       nodes { id body }
+    }
+  }
+}
+`.trim();
+
+/**
+ * Fetch comments with the author metadata needed to tell a human turn from a
+ * bot/integration one (ADR-016 pre-hydration — the agent has no Linear MCP to
+ * read the thread at runtime). ``user`` is the human author (null when a comment
+ * was posted by an OAuth app / integration); ``botActor`` is present precisely
+ * for those app/integration comments — so @bgagent's own progress and ack
+ * comments carry a ``botActor`` and no ``user``. ``createdAt`` orders the thread.
+ *
+ * We fetch the first 100 (matching {@link ISSUE_COMMENTS_QUERY}) and sort +
+ * slice to the most recent human comments CLIENT-SIDE, so the result is
+ * independent of Linear's connection sort direction. 100 covers every realistic
+ * issue thread; the rare over-100 issue simply may miss the oldest turns, which
+ * is acceptable for advisory context.
+ */
+const RECENT_COMMENTS_QUERY = `
+query RecentComments($issueId: String!) {
+  issue(id: $issueId) {
+    comments(first: 100) {
+      nodes {
+        id
+        body
+        createdAt
+        user { displayName name }
+        botActor { id }
+      }
     }
   }
 }
@@ -455,6 +486,82 @@ export async function sweepDecompositionNotes(
     });
   }
   return deleted;
+}
+
+/** A rendered issue comment folded into the task context (mirrors the Jira
+ *  ``RenderedComment`` shape so the two processors read alike). */
+export interface RenderedComment {
+  readonly author: string;
+  readonly createdAt: string;
+  readonly markdown: string;
+}
+
+/** Default cap on recent human comments folded into the task context. */
+const DEFAULT_MAX_RECENT_COMMENTS = 20;
+
+interface RawLinearComment {
+  readonly id?: string;
+  readonly body?: string;
+  readonly createdAt?: string;
+  readonly user?: { readonly displayName?: string; readonly name?: string } | null;
+  readonly botActor?: { readonly id?: string } | null;
+}
+
+/**
+ * Fetch the most recent HUMAN-authored comments on an issue, rendered to
+ * markdown oldest-first, for pre-hydrating the task context (ADR-016 — the agent
+ * has no Linear MCP to read the thread at runtime). Best-effort / fail-open: any
+ * failure (token, GraphQL error, malformed body) logs a WARN and returns ``[]``
+ * so the task still proceeds — comments are advisory context, not a gate.
+ *
+ * "Human" excludes app/integration comments two ways (belt and suspenders):
+ *   1. ``botActor`` present, or ``user`` absent → posted by an OAuth app /
+ *      integration (this is how @bgagent's own comments are marked);
+ *   2. the body starts with one of the bot's own rendered-comment markers
+ *      ({@link isBotAuthoredComment}) — catches anything mis-attributed to a user.
+ */
+export async function fetchRecentComments(
+  ctx: LinearFeedbackContext,
+  issueId: string,
+  maxComments: number = DEFAULT_MAX_RECENT_COMMENTS,
+): Promise<RenderedComment[]> {
+  const token = await resolveToken(ctx);
+  if (!token) return [];
+  const data = await graphqlData(token, RECENT_COMMENTS_QUERY, { issueId });
+  const issue = data?.issue as { comments?: { nodes?: RawLinearComment[] } } | undefined;
+  const nodes = issue?.comments?.nodes ?? [];
+
+  const human: RenderedComment[] = [];
+  for (const node of nodes) {
+    // Skip app/integration comments (bgagent + other bots): they carry a
+    // botActor and no human user.
+    if (node.botActor || !node.user) continue;
+    const body = (node.body ?? '').trim();
+    if (!body) continue;
+    // Belt and suspenders: drop anything that reads as one of our own rendered
+    // comments even if it slipped through as a "user" comment.
+    if (isBotAuthoredComment(body)) continue;
+    human.push({
+      author: node.user.displayName?.trim() || node.user.name?.trim() || 'Unknown',
+      createdAt: typeof node.createdAt === 'string' ? node.createdAt : '',
+      markdown: body,
+    });
+  }
+
+  // Order oldest-first so the thread reads naturally, then keep the most recent
+  // ``maxComments`` (sort is client-side — independent of Linear's connection
+  // sort direction). Comments without a timestamp sort last (treated as newest).
+  human.sort((a, b) => (a.createdAt || '￿').localeCompare(b.createdAt || '￿'));
+  const recent = human.length > maxComments ? human.slice(human.length - maxComments) : human;
+
+  if (recent.length > 0) {
+    logger.info('Fetched recent human Linear comments for task context', {
+      linear_workspace_id: ctx.linearWorkspaceId,
+      issue_id: issueId,
+      count: recent.length,
+    });
+  }
+  return recent;
 }
 
 /**

@@ -31,6 +31,7 @@ import {
   appendOnceToComment,
   type LinearFeedbackContext,
   deleteComment,
+  fetchRecentComments,
   postIssueComment,
   reactToComment,
   replyToComment,
@@ -701,6 +702,81 @@ describe('linear-feedback', () => {
         .mockResolvedValue(jsonResponse({ data: { commentDelete: { success: true } } }));
       const deleted = await sweepDecompositionNotes(CTX, ISSUE_ID, 'plan-ref');
       expect(deleted).toBe(1);
+    });
+  });
+
+  describe('fetchRecentComments (ADR-016 pre-hydration)', () => {
+    function commentsResponse(nodes: unknown[]): Response {
+      return jsonResponse({ data: { issue: { comments: { nodes } } } });
+    }
+
+    test('returns human comments oldest-first, rendered with author + timestamp', async () => {
+      fetchMock.mockResolvedValueOnce(commentsResponse([
+        { id: 'c2', body: 'second', createdAt: '2026-07-20T10:00:00Z', user: { displayName: 'Bob' } },
+        { id: 'c1', body: 'first', createdAt: '2026-07-19T09:00:00Z', user: { displayName: 'Alice' } },
+      ]));
+      const result = await fetchRecentComments(CTX, ISSUE_ID);
+      expect(result).toEqual([
+        { author: 'Alice', createdAt: '2026-07-19T09:00:00Z', markdown: 'first' },
+        { author: 'Bob', createdAt: '2026-07-20T10:00:00Z', markdown: 'second' },
+      ]);
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body as string) as { query: string; variables: Record<string, string> };
+      expect(body.query).toContain('botActor');
+      expect(body.variables).toEqual({ issueId: ISSUE_ID });
+    });
+
+    test('drops app/integration comments (botActor present, or no user)', async () => {
+      fetchMock.mockResolvedValueOnce(commentsResponse([
+        { id: 'h', body: 'human turn', createdAt: '2026-07-19T09:00:00Z', user: { displayName: 'Alice' } },
+        { id: 'b', body: 'bot progress', createdAt: '2026-07-19T09:05:00Z', botActor: { id: 'app-1' } },
+        { id: 'n', body: 'no author', createdAt: '2026-07-19T09:06:00Z', user: null },
+      ]));
+      const result = await fetchRecentComments(CTX, ISSUE_ID);
+      expect(result).toHaveLength(1);
+      expect(result[0].markdown).toBe('human turn');
+    });
+
+    test('drops bot-prefixed bodies even if attributed to a user (belt + suspenders)', async () => {
+      fetchMock.mockResolvedValueOnce(commentsResponse([
+        { id: 'p', body: '🤖 Starting…', createdAt: '2026-07-19T09:00:00Z', user: { displayName: 'Someone' } },
+        { id: 'h', body: 'real question', createdAt: '2026-07-19T09:01:00Z', user: { displayName: 'Alice' } },
+      ]));
+      const result = await fetchRecentComments(CTX, ISSUE_ID);
+      expect(result.map((c) => c.markdown)).toEqual(['real question']);
+    });
+
+    test('keeps only the most recent maxComments', async () => {
+      const nodes = Array.from({ length: 5 }, (_, i) => ({
+        id: `c${i}`,
+        body: `comment ${i}`,
+        createdAt: `2026-07-2${i}T00:00:00Z`,
+        user: { displayName: 'Alice' },
+      }));
+      fetchMock.mockResolvedValueOnce(commentsResponse(nodes));
+      const capped = await fetchRecentComments(CTX, ISSUE_ID, 2);
+      expect(capped.map((c) => c.markdown)).toEqual(['comment 3', 'comment 4']);
+    });
+
+    test('fail-open: no token → [] (never throws)', async () => {
+      resolveLinearOauthTokenMock.mockResolvedValueOnce(null);
+      const result = await fetchRecentComments(CTX, ISSUE_ID);
+      expect(result).toEqual([]);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    test('fail-open: GraphQL error → [] (never throws)', async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse({ errors: [{ message: 'boom' }] }));
+      const result = await fetchRecentComments(CTX, ISSUE_ID);
+      expect(result).toEqual([]);
+    });
+
+    test('skips comments with empty/whitespace bodies', async () => {
+      fetchMock.mockResolvedValueOnce(commentsResponse([
+        { id: 'e', body: '   ', createdAt: '2026-07-19T09:00:00Z', user: { displayName: 'Alice' } },
+        { id: 'h', body: 'kept', createdAt: '2026-07-19T09:01:00Z', user: { displayName: 'Bob' } },
+      ]));
+      const result = await fetchRecentComments(CTX, ISSUE_ID);
+      expect(result.map((c) => c.markdown)).toEqual(['kept']);
     });
   });
 });
