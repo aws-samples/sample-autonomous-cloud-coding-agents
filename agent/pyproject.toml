@@ -89,6 +89,7 @@ dev = [
     "pytest",
     "pygments==2.20.0",
     "pytest-cov==7.1.0",
+    "pytest-timeout==2.4.0",  # per-test wall-clock cap: a single hung test (network/subprocess/Bedrock without its own timeout) must fail LOUDLY with a traceback, not silently burn the whole build-verify budget (ABCA-684/686: one hang stalled the baseline build past its 3600s ceiling)
     "vulture==2.16",  # dead-code detection (#282): unused functions/classes ruff F can't see
 ]
 
@@ -130,6 +131,18 @@ ignore = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+# pytest-timeout: hard wall-clock cap PER TEST. A unit test that blocks (an
+# unmocked network/subprocess/Bedrock call with no timeout of its own) otherwise
+# hangs the whole `mise run build` until the 3600s build-verify ceiling kills it,
+# turning one flaky test into an un-diagnosable 60-min stall (ABCA-684/686). With
+# this, the offending test fails with a dumped stack in 120s and the suite moves on.
+# method="signal" (SIGALRM) actually ABORTS the hung test — pytest runs
+# single-threaded in the main thread here, so the alarm interrupts even a blocked
+# C-level/socket call. method="thread" only PRINTS the stack and cannot interrupt a
+# syscall-blocked test (proven live on ABCA-688: the thread method dumped the stack
+# but the build kept hanging ~55 min until the 3600s ceiling). signal is the real fix.
+timeout = 120
+timeout_method = "signal"
 
 [tool.coverage.run]
 branch = true
