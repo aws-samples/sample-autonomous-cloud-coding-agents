@@ -1624,6 +1624,14 @@ async function reconcileDecomposePlan(evt: DecomposePlanEvent): Promise<void> {
     // never transitions state, and never reacts — the run is a total black box
     // until the PR lands (same metadata-dropping class as ABCA-487/488). The
     // secret arn rotates, so we pass the freshly-resolved one, not a stored id.
+    //
+    // finding #1: when the planner DECLINES to decompose, this collapsed coding
+    // task must still see the parent's attachments — otherwise a paperclip spec
+    // on a :auto/:decompose issue is lost exactly as it was on the child path.
+    // Hydrate here too (best-effort; no attachments → runs as before).
+    const singleTaskAttachments = resolved?.accessToken
+      ? await hydrateParentAttachmentsForSeed(evt, resolved.accessToken)
+      : [];
     await createTaskCore(
       {
         repo: evt.repo,
@@ -1639,6 +1647,7 @@ async function reconcileDecomposePlan(evt: DecomposePlanEvent): Promise<void> {
           ...(resolved?.oauthSecretArn && { linear_oauth_secret_arn: resolved.oauthSecretArn }),
           ...(resolved?.workspaceSlug && { linear_workspace_slug: resolved.workspaceSlug }),
         },
+        ...(singleTaskAttachments.length > 0 && { preScreenedAttachments: singleTaskAttachments }),
       },
       `decompose-single-${evt.taskId}`.slice(0, MAX_IDEMPOTENCY_KEY_LENGTH),
     );
