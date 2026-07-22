@@ -36,6 +36,7 @@
     "constructs": "^10.6.0",
     "js-yaml": "^4.1.1",
     "pdf-parse": "^2.4.5",
+    "semver": "^7.8.5",
     "ulid": "^3.0.2",
     "ws": "^8.21.0"
   },
@@ -49,6 +50,7 @@
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^26",
     "@types/pdf-parse": "^1.1.5",
+    "@types/semver": "^7.7.1",
     "@types/ws": "^8.18.1",
     "@typescript-eslint/eslint-plugin": "^8",
     "@typescript-eslint/parser": "^8",

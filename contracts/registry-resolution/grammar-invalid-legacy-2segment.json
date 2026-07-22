@@ -1,0 +1,6 @@
+{
+  "name": "grammar-invalid-legacy-2segment",
+  "description": "Legacy WORKFLOWS.md 2-segment form (registry://kind/name) — no namespace, no pin. Superseded by the 3-segment ADR-018 grammar.",
+  "ref": "registry://skill/x-v1",
+  "expected": { "valid": false }
+}

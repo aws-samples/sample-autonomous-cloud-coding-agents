@@ -1,0 +1,6 @@
+{
+  "name": "grammar-invalid-scheme",
+  "description": "Non-registry scheme is rejected (rule-8 http://evil case).",
+  "ref": "http://evil/acme/x@1.0.0",
+  "expected": { "valid": false }
+}

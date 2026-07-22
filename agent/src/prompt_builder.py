@@ -76,6 +76,10 @@ def build_system_prompt(
     if channel_addendum:
         system_prompt += channel_addendum
 
+    # Registry (#246) skill fragments — appended after channel guidance so
+    # skill instructions also benefit from recency weighting.
+    system_prompt += _registry_skill_addendum(config)
+
     return system_prompt
 
 
@@ -109,7 +113,36 @@ def build_repoless_system_prompt(
     if channel_addendum:
         system_prompt += channel_addendum
 
+    system_prompt += _registry_skill_addendum(config)
+
     return system_prompt
+
+
+def _registry_skill_addendum(config: TaskConfig) -> str:
+    """Return the appended prompt text for registry-resolved skills (#246), or "".
+
+    Each resolved ``skill`` asset carries a ``content`` prompt fragment (resolved
+    from the descriptor; see REGISTRY.md §8) plus ``tool_hints`` in its
+    descriptor. We render one section per skill so the agent picks up the
+    guidance; ``tool_hints`` are advisory text (a skill cannot invoke tools — it
+    only references tools an MCP server separately provides).
+    """
+    skills = (config.resolved_assets or {}).get("skills") or []
+    sections: list[str] = []
+    for skill in skills:
+        content = skill.get("content")
+        if not isinstance(content, str) or not content:
+            continue
+        name = f"{skill.get('namespace')}/{skill.get('name')}"
+        descriptor = skill.get("descriptor") or {}
+        hints = descriptor.get("tool_hints")
+        hint_line = ""
+        if isinstance(hints, list) and hints:
+            hint_line = f"\n\n_Suggested tools: {', '.join(str(h) for h in hints)}._"
+        sections.append(f"\n\n## Skill: {name}\n\n{content}{hint_line}")
+    if sections:
+        log("TASK", f"registry: applied {len(sections)} skill fragment(s) to the system prompt")
+    return "".join(sections)
 
 
 def _render_memory_context(hydrated_context: HydratedContext | None) -> str:

@@ -1,0 +1,6 @@
+{
+  "name": "grammar-invalid-uppercase-kind",
+  "description": "Kind must be lowercase snake_case; uppercase is rejected.",
+  "ref": "registry://MCP_Server/acme/pdf-tools@1.0.0",
+  "expected": { "valid": false }
+}

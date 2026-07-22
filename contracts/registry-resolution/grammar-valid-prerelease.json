@@ -1,0 +1,6 @@
+{
+  "name": "grammar-valid-prerelease",
+  "description": "Exact pin to a prerelease version (REGISTRY.md §5 — prereleases rank below their base).",
+  "ref": "registry://mcp_server/acme/pdf-tools@1.4.1-rc.1",
+  "expected": { "valid": true, "parsed": { "kind": "mcp_server", "namespace": "acme", "name": "pdf-tools", "constraint": "1.4.1-rc.1" } }
+}

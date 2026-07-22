@@ -82,6 +82,14 @@ export interface TaskOrchestratorProps {
   readonly repoTable?: dynamodb.ITable;
 
   /**
+   * The registry assets table (#246). When provided, the orchestrator's
+   * resolve-registry step (run during hydration) can resolve the blueprint's
+   * ``registry://`` pins. Grants read access + sets REGISTRY_ASSETS_TABLE_NAME.
+   * Without it, a blueprint pinning any asset fails closed at task start.
+   */
+  readonly registryAssetsTable?: dynamodb.ITable;
+
+  /**
    * Maximum concurrent tasks per user.
    *
    * Raised from 3 to 10 in rev 5 to accommodate power-user CLI flows
@@ -259,6 +267,7 @@ export class TaskOrchestrator extends Construct {
         MAX_CONCURRENT_TASKS_PER_USER: String(maxConcurrent),
         TASK_RETENTION_DAYS: String(props.taskRetentionDays ?? DEFAULT_TASK_RETENTION_DAYS),
         ...(props.repoTable && { REPO_TABLE_NAME: props.repoTable.tableName }),
+        ...(props.registryAssetsTable && { REGISTRY_ASSETS_TABLE_NAME: props.registryAssetsTable.tableName }),
         ...(props.githubTokenSecretArn && { GITHUB_TOKEN_SECRET_ARN: props.githubTokenSecretArn }),
         ...(props.userPromptTokenBudget !== undefined && {
           USER_PROMPT_TOKEN_BUDGET: String(props.userPromptTokenBudget),
@@ -287,6 +296,9 @@ export class TaskOrchestrator extends Construct {
     props.userConcurrencyTable.grantReadWriteData(this.fn);
     if (props.repoTable) {
       props.repoTable.grantReadData(this.fn);
+    }
+    if (props.registryAssetsTable) {
+      props.registryAssetsTable.grantReadData(this.fn);
     }
 
     // Attachments bucket grants (URL fetch/screen/upload during hydration)

@@ -1,0 +1,6 @@
+{
+  "name": "grammar-valid-mcp-caret",
+  "description": "Canonical snake_case kind with caret constraint — the ADR-018 example that the SHIPPED regex rejected (PR #548 review). Must be valid.",
+  "ref": "registry://mcp_server/acme/pdf-tools@^1.4.1",
+  "expected": { "valid": true, "parsed": { "kind": "mcp_server", "namespace": "acme", "name": "pdf-tools", "constraint": "^1.4.1" } }
+}

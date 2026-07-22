@@ -1,0 +1,6 @@
+{
+  "name": "grammar-invalid-floating-latest",
+  "description": "Floating 'latest' constraint is rejected (REGISTRY.md §5).",
+  "ref": "registry://mcp_server/acme/pdf-tools@latest",
+  "expected": { "valid": false }
+}

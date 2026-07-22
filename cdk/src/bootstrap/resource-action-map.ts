@@ -63,6 +63,7 @@ export const RESOURCE_ACTION_MAP: Record<string, readonly string[]> = {
   'AWS::CloudWatch::Dashboard': ['cloudwatch:PutDashboard'],
   'AWS::Cognito::UserPool': ['cognito-idp:CreateUserPool'],
   'AWS::Cognito::UserPoolClient': ['cognito-idp:CreateUserPoolClient'],
+  'AWS::Cognito::UserPoolGroup': ['cognito-idp:CreateGroup'],
   'AWS::DynamoDB::Table': ['dynamodb:CreateTable'],
   'AWS::EC2::EIP': ['ec2:AllocateAddress'],
   'AWS::EC2::FlowLog': ['ec2:CreateFlowLogs'],
