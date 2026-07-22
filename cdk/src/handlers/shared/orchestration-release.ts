@@ -246,6 +246,21 @@ export async function releaseChild(params: ReleaseChildParams): Promise<ReleaseC
     ? `${baseKey}_${row.child_task_id}`
     : baseKey;
 
+  // Attachments a feature child receives: the PARENT epic's spec (inherited via
+  // release_context, finding #1) PLUS this sub-issue's OWN attachments (a mockup
+  // attached to just this piece, hydrated at seed onto the child row). Merge both,
+  // de-duped by attachment_id (a file both on the epic and the sub-issue isn't
+  // passed twice). Integration nodes are a pure branch merge — they need neither.
+  const inheritedAttachments = params.preScreenedAttachments ?? [];
+  const ownAttachments = row.pre_screened_attachments ?? [];
+  const mergedAttachments: AttachmentRecord[] = [];
+  const seenAttachmentIds = new Set<string>();
+  for (const rec of [...inheritedAttachments, ...ownAttachments]) {
+    if (seenAttachmentIds.has(rec.attachment_id)) continue;
+    seenAttachmentIds.add(rec.attachment_id);
+    mergedAttachments.push(rec);
+  }
+
   let result;
   try {
     result = await createTaskCore(
@@ -258,12 +273,12 @@ export async function releaseChild(params: ReleaseChildParams): Promise<ReleaseC
         channelSource,
         channelMetadata,
         idempotencyKey,
-        // Parent attachments (finding #1). Integration nodes are a pure merge of
-        // already-built branches, so they don't need the spec — only real feature
-        // children do. Records reference the parent's S3 objects (read-only).
-        ...(params.preScreenedAttachments && params.preScreenedAttachments.length > 0
+        // Parent spec + this child's own attachments. Integration nodes are a pure
+        // merge of already-built branches, so they don't need the spec — only real
+        // feature children do. Records reference existing S3 objects (read-only).
+        ...(mergedAttachments.length > 0
           && !isIntegrationNode(row.sub_issue_id)
-          && { preScreenedAttachments: params.preScreenedAttachments }),
+          && { preScreenedAttachments: mergedAttachments }),
       },
       // requestId — reuse the idempotency key for trace correlation.
       idempotencyKey,

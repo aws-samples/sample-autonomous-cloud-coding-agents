@@ -91,6 +91,15 @@ export interface OrchestrationChildRow {
    * Absent on the Mode-A path (existing sub-issue graph fetched by title only).
    */
   readonly description?: string;
+  /**
+   * This sub-issue's OWN screened attachments (distinct from the parent epic's,
+   * which ride on the meta row's release_context). A human-authored Mode-A
+   * sub-issue can carry a file attached to IT specifically (a mockup for just
+   * that piece); hydrated + stored at seed and merged with the inherited parent
+   * records when the child is released. JSON-encoded `passed` AttachmentRecords;
+   * absent when the sub-issue has no own attachments (the common case).
+   */
+  readonly pre_screened_attachments?: readonly AttachmentRecord[];
   readonly created_at: string;
   readonly updated_at: string;
   /** TTL epoch (seconds) for eventual cleanup. */
@@ -509,6 +518,34 @@ export async function clearRollupClaim(
     Key: { orchestration_id: orchestrationId, sub_issue_id: PARENT_META_SK },
     UpdateExpression: 'SET updated_at = :now REMOVE rollup_posted_at',
     ExpressionAttributeValues: { ':now': now },
+  }));
+}
+
+/**
+ * Persist a sub-issue's OWN screened attachments on its child row (finding: a
+ * Mode-A human-authored sub-issue can carry a file attached to IT, distinct from
+ * the parent epic's). Written as a native list (createTaskCore's records are
+ * plain JSON objects; DynamoDB stores nested lists/maps directly, so
+ * ``loadOrchestration``'s row cast reads them back as ``AttachmentRecord[]`` with
+ * no bespoke parse). Conditional on the child row existing so a racing TTL reap
+ * can't resurrect it. Best-effort at the call site — a child's own attachment is
+ * enrichment on top of the load-bearing inherited parent spec.
+ */
+export async function setChildOwnAttachments(
+  ddb: DynamoDBDocumentClient,
+  tableName: string,
+  orchestrationId: string,
+  subIssueId: string,
+  records: readonly AttachmentRecord[],
+  now: string,
+): Promise<void> {
+  if (records.length === 0) return;
+  await ddb.send(new UpdateCommand({
+    TableName: tableName,
+    Key: { orchestration_id: orchestrationId, sub_issue_id: subIssueId },
+    UpdateExpression: 'SET pre_screened_attachments = :recs, updated_at = :now',
+    ConditionExpression: 'attribute_exists(sub_issue_id)',
+    ExpressionAttributeValues: { ':recs': records, ':now': now },
   }));
 }
 

@@ -160,15 +160,17 @@ The fallback path keeps existing single-workspace deployments working without re
 Beyond the issue title and description, Linear stores additional context the agent may need:
 
 - **Paperclip attachments** (PDFs, logs, spec files attached to an issue)
+- **Inline images** embedded in the description or a comment (`![alt](https://…)`)
 - **Project documents** (Linear's wiki-style docs attached to a project)
-- **Comments posted after the task starts** (clarifications, approve / deny signals)
+- **Recent human comments** on the issue (clarifications, spec detail)
 
-ABCA does not pre-fetch this material into S3 or run it through Bedrock Guardrails — it stays in Linear, and the agent fetches it on demand at runtime via the Linear MCP. Concretely:
+All of this is **pre-hydrated by the platform** and handed to the agent as task context at task-creation time. The agent has **no Linear tools** and fetches nothing from Linear at runtime — it works from the snapshot it was given. Concretely:
 
-- The webhook processor calls Linear's GraphQL API once per triggered issue to check for paperclip attachments and project documents. If anything is present it prepends a one-line hint (`Linear may have additional context for this issue: …`) to the task description, naming the relevant MCP tools.
-- The agent's system prompt addendum tells it to call `mcp__linear-server__get_issue` for the full issue (including the `attachments` connection), `mcp__linear-server__get_attachment` per paperclip, `mcp__linear-server__list_documents` / `get_document` for project wikis, and `mcp__linear-server__list_comments` before opening the PR to pick up new comments.
+- Before a task is dispatched, the platform fetches the issue title + description, the recent human comments, the reporter's uploaded files (both inline images and paperclip attachments), and the content of any project wiki documents. This hydration runs on **every** trigger path — the initial labeled-issue path, the parent/sub-issue orchestration paths, and the `@bgagent` comment paths — so the agent always starts from a complete snapshot regardless of how the task began.
+- Every fetched attachment is screened through **Bedrock Guardrails** before it enters the agent's context, exactly like a file uploaded through the CLI.
+- **Supported attachment types** are images (PNG / JPEG) and text-family files (PDF, plain text, CSV, Markdown, JSON, log). Unsupported types (`.docx`, `.zip`, and similar) are **rejected** — the reporter gets a comment asking them to remove or convert the unsupported files and re-trigger the task.
 
-No additional setup is required — once Linear MCP is wired (steps above), this works automatically. Only embedded markdown images in the issue description (`![alt](https://…)`) are still pre-fetched and screened at task-creation time, because they enter the agent's context as URL attachments.
+No additional setup is required — this happens automatically once the workspace and project are onboarded (steps above).
 
 ## Usage
 
@@ -279,7 +281,7 @@ Re-run `bgagent linear setup` after fixing.
 
 - Verify the per-workspace OAuth secret exists: `aws secretsmanager describe-secret --secret-id bgagent-linear-oauth-<slug>`.
 - Verify the registry row's `oauth_secret_arn` matches that secret and `status = 'active'`.
-- Check the agent container logs for `Linear MCP configured at …`. Absence means `channel_source` wasn't set on the task or the workspace lookup failed.
+- Check the webhook-processor Lambda logs for the pre-hydration / attachment-screening step (comments, attachments, and project docs are fetched here before the task is dispatched). A failure to resolve the workspace token or screen an attachment shows up in these logs, not in the agent container.
 - Check for `WARN linear_reactions: HTTP 401 from Linear` — usually means the refresh token was revoked Linear-side. Re-run `bgagent linear setup <slug>`.
 - Check for `resolve_linear_api_token: invalid_grant` — Linear permanently rejected the refresh token. Re-run `bgagent linear setup <slug>` to issue a new one.
 

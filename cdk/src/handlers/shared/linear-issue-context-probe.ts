@@ -46,8 +46,11 @@ const REQUEST_TIMEOUT_MS = 5000;
  */
 const MAX_HINTED_ATTACHMENT_TITLES = 5;
 
+/** Cap on project documents whose CONTENT is pulled into the task context. */
+const MAX_HYDRATED_PROJECT_DOCS = 5;
+
 const ISSUE_CONTEXT_QUERY = `
-query IssueContext($id: String!) {
+query IssueContext($id: String!, $docs: Int!) {
   issue(id: $id) {
     id
     attachments(first: 25) {
@@ -60,8 +63,8 @@ query IssueContext($id: String!) {
     project {
       id
       name
-      documents(first: 1) {
-        nodes { id }
+      documents(first: $docs) {
+        nodes { id title content }
       }
     }
   }
@@ -72,6 +75,12 @@ query IssueContext($id: String!) {
 export interface LinearProbeAttachment {
   readonly title: string;
   readonly url: string;
+}
+
+/** A project wiki document's title + markdown body (ADR-016 doc pre-hydration). */
+export interface LinearProbeDocument {
+  readonly title: string;
+  readonly content: string;
 }
 
 export interface LinearIssueContextProbe {
@@ -87,6 +96,13 @@ export interface LinearIssueContextProbe {
   readonly projectName: string | null;
   /** True when the issue's project has at least one document attached. */
   readonly projectHasDocuments: boolean;
+  /**
+   * Project wiki documents WITH their content (ADR-016: pre-hydrated at
+   * task-creation because the agent has no Linear MCP to fetch them). The
+   * webhook processor screens these through the Bedrock Guardrail and folds them
+   * into the task description. Capped at {@link MAX_HYDRATED_PROJECT_DOCS}.
+   */
+  readonly projectDocuments: readonly LinearProbeDocument[];
 }
 
 const EMPTY: LinearIssueContextProbe = {
@@ -94,6 +110,7 @@ const EMPTY: LinearIssueContextProbe = {
   attachments: [],
   projectName: null,
   projectHasDocuments: false,
+  projectDocuments: [],
 };
 
 /**
@@ -116,7 +133,7 @@ export async function probeLinearIssueContext(
       },
       body: JSON.stringify({
         query: ISSUE_CONTEXT_QUERY,
-        variables: { id: issueId },
+        variables: { id: issueId, docs: MAX_HYDRATED_PROJECT_DOCS },
       }),
       signal: controller.signal,
     });
@@ -131,7 +148,7 @@ export async function probeLinearIssueContext(
           project?: {
             id?: string;
             name?: string;
-            documents?: { nodes?: Array<{ id?: string }> };
+            documents?: { nodes?: Array<{ id?: string; title?: string; content?: string }> };
           } | null;
         };
       };
@@ -152,8 +169,14 @@ export async function probeLinearIssueContext(
       .map((a) => ({ title: typeof a.title === 'string' ? a.title.trim() : '', url: a.url }));
     const project = issue.project ?? null;
     const projectName = typeof project?.name === 'string' && project.name.trim() ? project.name.trim() : null;
-    const projectHasDocuments = (project?.documents?.nodes ?? []).length > 0;
-    return { attachmentTitles, attachments, projectName, projectHasDocuments };
+    const documentNodes = project?.documents?.nodes ?? [];
+    const projectHasDocuments = documentNodes.length > 0;
+    // Keep docs that actually have body text (an empty wiki page adds nothing but
+    // noise + a guardrail round-trip). Title defaults to "Untitled document".
+    const projectDocuments = documentNodes
+      .filter((d): d is { title?: string; content: string } => typeof d?.content === 'string' && d.content.trim().length > 0)
+      .map((d) => ({ title: typeof d.title === 'string' && d.title.trim() ? d.title.trim() : 'Untitled document', content: d.content }));
+    return { attachmentTitles, attachments, projectName, projectHasDocuments, projectDocuments };
   } catch (err) {
     logger.warn('Linear issue context probe request failed', {
       issue_id: issueId,
@@ -171,11 +194,13 @@ export async function probeLinearIssueContext(
  * an empty string when there's nothing to hint about — the processor
  * skips the prepend in that case.
  *
- * ADR-016: the agent has no Linear MCP, so this is a PRESENCE SIGNAL only —
- * it names what exists so the agent knows the issue may reference material it
- * wasn't handed, WITHOUT pointing at any (now non-existent) fetch tool. The
- * agent works from the description/attachments it was given and notes the gap
- * if it turns out to matter.
+ * ADR-016: the agent has no Linear MCP, so this is a PRESENCE SIGNAL for the
+ * material we could NOT hand it (a non-uploads paperclip like a Figma/GitHub
+ * link; a project doc whose body was empty or beyond the hydration cap). Project
+ * documents WITH content are pre-hydrated into the description separately
+ * (see the processor's project-docs section), so they are NOT flagged here —
+ * flagging included content would wrongly tell the agent to go find it. Names
+ * what's missing WITHOUT pointing at any (now non-existent) fetch tool.
  */
 export function renderIssueContextHint(probe: LinearIssueContextProbe): string {
   const bits: string[] = [];
@@ -186,9 +211,15 @@ export function renderIssueContextHint(probe: LinearIssueContextProbe): string {
       ? ` (+${probe.attachmentTitles.length - MAX_HINTED_ATTACHMENT_TITLES} more)` : '';
     bits.push(`paperclip attachments — ${titles}${more}`);
   }
-  if (probe.projectHasDocuments && probe.projectName) {
+  // Only flag docs we did NOT hydrate content for (empty body, or over the cap).
+  // Hydrated docs are in the description already, so don't tell the agent to go
+  // hunt for them. (Default the array defensively — a hand-built probe object in
+  // a test may omit it.)
+  const hydratedDocCount = (probe.projectDocuments ?? []).length;
+  const unhydratedDocs = probe.projectHasDocuments && hydratedDocCount === 0;
+  if (unhydratedDocs && probe.projectName) {
     bits.push(`project "${probe.projectName}" has wiki documents`);
-  } else if (probe.projectHasDocuments) {
+  } else if (unhydratedDocs) {
     bits.push('the project has wiki documents');
   }
   if (bits.length === 0) return '';

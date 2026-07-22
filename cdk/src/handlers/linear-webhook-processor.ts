@@ -49,6 +49,7 @@ import {
   probeLinearIssueContext,
   renderIssueContextHint,
   type LinearProbeAttachment,
+  type LinearProbeDocument,
 } from './shared/linear-issue-context-probe';
 import { resolveLinearOauthToken } from './shared/linear-oauth-resolver';
 import { fetchIssueParentId, type SubIssueNode } from './shared/linear-subissue-fetch';
@@ -103,6 +104,7 @@ import { DEFAULT_MAX_SUB_ISSUES, type DecompositionPlan, type PlannedSubIssue } 
 import { linearGraphqlFn } from './shared/orchestration-decomposition-writeback';
 import { discoverOrchestration } from './shared/orchestration-discovery';
 import { declarativeGraphSource } from './shared/orchestration-graph-source';
+import { isIntegrationNode } from './shared/orchestration-integration-node';
 import {
   parseParentNodeReference,
   renderParentDisambiguationReply,
@@ -115,9 +117,9 @@ import { bedrockInvokeRevise, interpretRevise, type InvokeReviseFn } from './sha
 import { computeEpicRetryPlan } from './shared/orchestration-reconcile';
 import { readConcurrencyBudget, releaseReadyChildren } from './shared/orchestration-release';
 import { upsertEpicPanel } from './shared/orchestration-rollup';
-import { claimCommentAck, clearRollupClaim, deriveOrchestrationId, loadOrchestration, setStatusCommentId, type OrchestrationReleaseContext } from './shared/orchestration-store';
+import { claimCommentAck, clearRollupClaim, deriveOrchestrationId, loadOrchestration, setChildOwnAttachments, setStatusCommentId, type OrchestrationReleaseContext } from './shared/orchestration-store';
 import type { Attachment, PassedAttachmentRecord } from './shared/types';
-import { MAX_TASK_DESCRIPTION_LENGTH } from './shared/validation';
+import { MAX_ATTACHMENTS_PER_TASK, MAX_TASK_DESCRIPTION_LENGTH } from './shared/validation';
 import { CODING_WORKFLOW_ID } from './shared/workflows';
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -184,17 +186,87 @@ type HydrateResult =
   | { readonly ok: true; readonly records: PassedAttachmentRecord[] }
   | { readonly ok: false; readonly message: string };
 
+/** Inputs for {@link hydrateLinearAttachments} — the source of uploads can be an
+ *  issue description OR a comment body, and the paperclips come from a probe. */
+interface HydrateAttachmentsParams {
+  /** The Linear issue id (for logging + the reject message). */
+  readonly issueId: string;
+  /** Markdown scanned for `uploads.linear.app` links — issue description OR comment body. */
+  readonly uploadsText: string | undefined;
+  readonly workspaceId: string;
+  readonly platformUserId: string;
+  readonly accessToken: string;
+  /** S3 key namespace — the minted taskId (or `epic-<parentId>` for an epic). */
+  readonly taskId: string;
+  /** Free attachment slots after any public-URL images (usually the full cap). */
+  readonly remainingSlots: number;
+  /** Native paperclip attachments from a context probe (only uploads.linear.app ones are fetched). */
+  readonly paperclips: readonly LinearProbeAttachment[];
+  /** Wording tweak: the initial label path says "re-apply the trigger label";
+   *  a comment path says "re-comment". Defaults to the label phrasing. */
+  readonly retriggerHint?: string;
+}
+
 /**
- * Fetch + screen + store an issue's uploads.linear.app attachments (description
- * links AND native paperclips), returning `passed` records for
- * `preScreenedAttachments`. Shared by the single-task path AND the Mode-A
- * orchestration seed (a parent with pre-existing sub-issues) so BOTH inherit the
- * parent's attachments (finding #1 — Mode A was previously blind).
+ * Fetch + screen + store the `uploads.linear.app` attachments referenced by
+ * `uploadsText` (description or comment body) plus any native paperclips,
+ * returning `passed` records for `preScreenedAttachments`. Shared by EVERY
+ * Linear task-dispatch path — the initial single-task path, the Mode-A epic
+ * seed, the Mode-B decompose/revise/approve paths, and the A6 `@bgagent` comment
+ * paths — so the agent (which has no Linear MCP) always receives the files a
+ * human pointed it at, wherever they were attached.
  *
- * Fail-closed: returns `{ok:false, message}` when the issue HAS uploads but they
- * can't be screened (screening unconfigured, or a fetch/screen failure) — the
- * caller rejects the task/epic with that message. Returns `{ok:true, records:[]}`
- * when there's genuinely nothing to hydrate.
+ * Fail-closed: returns `{ok:false, message}` when uploads ARE present but can't
+ * be screened (screening unconfigured, or a fetch/screen failure) — the caller
+ * rejects the task/epic with that message rather than run the agent blind.
+ * Returns `{ok:true, records:[]}` when there's genuinely nothing to hydrate.
+ */
+async function hydrateLinearAttachments(params: HydrateAttachmentsParams): Promise<HydrateResult> {
+  const { issueId, uploadsText, workspaceId, platformUserId, accessToken, taskId, remainingSlots, paperclips } = params;
+  const retriggerHint = params.retriggerHint ?? 'Remove or fix the attachment and re-apply the trigger label.';
+  const uploadsPaperclips = paperclips.filter((a) => isLinearUploadsUrl(a.url));
+  const textHasUploads = Boolean(uploadsText && uploadsText.includes('uploads.linear.app'));
+  if (!textHasUploads && uploadsPaperclips.length === 0) return { ok: true, records: [] };
+
+  if (!attachmentsS3Client || !ATTACHMENTS_BUCKET || !attachmentsScreeningConfig) {
+    logger.error('Linear issue has uploads.linear.app attachments but screening/storage is not configured (fail-closed)', {
+      issue_id: issueId,
+      linear_workspace_id: workspaceId,
+      has_bucket: Boolean(ATTACHMENTS_BUCKET),
+      has_guardrail: Boolean(attachmentsScreeningConfig),
+    });
+    return { ok: false, message: 'This Linear issue has uploaded attachments, but ABCA attachment screening is not configured. Contact your ABCA admin.' };
+  }
+  try {
+    const records = await downloadScreenAndStoreLinearAttachments(
+      uploadsText,
+      remainingSlots,
+      {
+        s3Client: attachmentsS3Client,
+        bucketName: ATTACHMENTS_BUCKET,
+        screeningConfig: attachmentsScreeningConfig,
+        userId: platformUserId,
+        taskId,
+        accessToken,
+        linearWorkspaceId: workspaceId,
+      },
+      uploadsPaperclips,
+    );
+    return { ok: true, records };
+  } catch (err) {
+    if (err instanceof LinearAttachmentError) {
+      logger.warn('Rejecting Linear task: attachment could not be safely processed', {
+        issue_id: issueId, linear_workspace_id: workspaceId, error: err.message,
+      });
+      return { ok: false, message: `ABCA couldn't safely process an attachment: ${err.message} ${retriggerHint}` };
+    }
+    throw err;
+  }
+}
+
+/**
+ * Convenience wrapper for the issue-labeled paths (single-task + Mode-A seed):
+ * hydrate an issue's OWN attachments (description links + probed paperclips).
  */
 async function hydrateLinearIssueAttachments(
   issue: LinearIssueEvent['data'],
@@ -205,44 +277,154 @@ async function hydrateLinearIssueAttachments(
   remainingSlots: number,
   probedAttachments: readonly LinearProbeAttachment[],
 ): Promise<HydrateResult> {
-  const uploadsPaperclips = probedAttachments.filter((a) => isLinearUploadsUrl(a.url));
-  const descHasUploads = Boolean(issue.description && issue.description.includes('uploads.linear.app'));
-  if (!descHasUploads && uploadsPaperclips.length === 0) return { ok: true, records: [] };
+  return hydrateLinearAttachments({
+    issueId: issue.id,
+    uploadsText: issue.description,
+    workspaceId,
+    platformUserId,
+    accessToken,
+    taskId: taskOrEpicId,
+    remainingSlots,
+    paperclips: probedAttachments,
+  });
+}
 
-  if (!attachmentsS3Client || !ATTACHMENTS_BUCKET || !attachmentsScreeningConfig) {
-    logger.error('Linear issue has uploads.linear.app attachments but screening/storage is not configured (fail-closed)', {
-      issue_id: issue.id,
-      linear_workspace_id: workspaceId,
-      has_bucket: Boolean(ATTACHMENTS_BUCKET),
-      has_guardrail: Boolean(attachmentsScreeningConfig),
-    });
-    return { ok: false, message: 'This Linear issue has uploaded attachments, but ABCA attachment screening is not configured. Contact your ABCA admin.' };
+/**
+ * A6 comment paths: hydrate the attachments a human just pointed the bot at in a
+ * `@bgagent` comment. A file dropped INTO a comment becomes an
+ * `uploads.linear.app` markdown link in the comment body; a file attached to the
+ * ISSUE shows on its `attachments` connection. Cover both — scan the comment
+ * body, and (when `probeIssue`) probe the issue for current paperclips. The
+ * dispatched task gets all free slots (it's a fresh task, no inline images).
+ * Fail-closed like the issue paths: an unscreenable file rejects the dispatch so
+ * the agent never iterates blind on a spec it can't see.
+ */
+async function hydrateCommentAttachments(params: {
+  readonly issueId: string;
+  readonly commentBody: string | undefined;
+  readonly workspaceId: string;
+  readonly platformUserId: string;
+  readonly accessToken: string;
+  readonly taskId: string;
+  /** Also probe the issue for paperclips (true for fresh new-work; false for
+   *  PR-iteration/clarify where the new material rides in the comment body and
+   *  re-probing would re-screen the issue's existing files every round). */
+  readonly probeIssue: boolean;
+}): Promise<HydrateResult> {
+  const commentHasUploads = Boolean(params.commentBody && params.commentBody.includes('uploads.linear.app'));
+  let paperclips: readonly LinearProbeAttachment[] = [];
+  if (params.probeIssue) {
+    const probe = await probeLinearIssueContext(params.accessToken, params.issueId);
+    paperclips = probe.attachments ?? [];
   }
+  if (!commentHasUploads && !paperclips.some((a) => isLinearUploadsUrl(a.url))) {
+    return { ok: true, records: [] };
+  }
+  return hydrateLinearAttachments({
+    issueId: params.issueId,
+    uploadsText: params.commentBody,
+    workspaceId: params.workspaceId,
+    platformUserId: params.platformUserId,
+    accessToken: params.accessToken,
+    taskId: params.taskId,
+    remainingSlots: MAX_ATTACHMENTS_PER_TASK,
+    paperclips,
+    retriggerHint: 'Remove or fix the attachment and re-comment.',
+  });
+}
+
+/**
+ * Best-effort cleanup of S3 objects a comment-path hydrate uploaded when the
+ * subsequent createTaskCore did NOT mint a fresh task (non-201, incl. a 200
+ * idempotent replay) — those objects would otherwise orphan. No-op when there's
+ * nothing to clean or storage isn't configured. Never throws.
+ */
+async function cleanupPreScreenedForComment(records: readonly PassedAttachmentRecord[]): Promise<void> {
+  if (records.length === 0 || !attachmentsS3Client || !ATTACHMENTS_BUCKET) return;
   try {
-    const records = await downloadScreenAndStoreLinearAttachments(
-      issue.description,
-      remainingSlots,
-      {
-        s3Client: attachmentsS3Client,
-        bucketName: ATTACHMENTS_BUCKET,
-        screeningConfig: attachmentsScreeningConfig,
-        userId: platformUserId,
-        taskId: taskOrEpicId,
-        accessToken,
-        linearWorkspaceId: workspaceId,
-      },
-      uploadsPaperclips,
-    );
-    return { ok: true, records };
+    await cleanupPreScreenedAttachments(attachmentsS3Client, ATTACHMENTS_BUCKET, records);
   } catch (err) {
-    if (err instanceof LinearAttachmentError) {
-      logger.warn('Rejecting Linear task: attachment could not be safely processed', {
-        issue_id: issue.id, linear_workspace_id: workspaceId, error: err.message,
-      });
-      return { ok: false, message: `ABCA couldn't safely process an attachment on this issue: ${err.message} Remove or fix the attachment and re-apply the trigger label.` };
-    }
-    throw err;
+    logger.warn('Failed to clean up orphaned comment attachment objects (non-fatal)', {
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
+}
+
+/**
+ * Hydrate each Mode-A sub-issue's OWN attachments (a file attached to that
+ * sub-issue specifically, e.g. a mockup for just that piece) and stamp them on
+ * its child row so release merges them with the inherited parent spec. Probes
+ * each real child for its paperclips + scans its description for uploads links,
+ * screens under a per-child S3 key, and persists via {@link setChildOwnAttachments}.
+ *
+ * Fail-OPEN per child (unlike the epic's shared spec, which is fail-closed): a
+ * child's own file is enrichment, so a screening failure for one sub-issue skips
+ * THAT file and logs it rather than aborting the whole epic. Integration nodes
+ * (pure branch merges) are skipped. Returns the count of children stamped so the
+ * caller knows whether to re-load the snapshot. Best-effort end to end.
+ */
+async function hydrateChildrenOwnAttachments(
+  children: readonly { sub_issue_id: string; description?: string }[],
+  workspaceId: string,
+  platformUserId: string,
+  accessToken: string,
+  orchestrationId: string,
+): Promise<number> {
+  if (!attachmentsS3Client || !ATTACHMENTS_BUCKET || !attachmentsScreeningConfig) return 0;
+  const now = new Date().toISOString();
+  let stamped = 0;
+  for (const child of children) {
+    if (isIntegrationNode(child.sub_issue_id)) continue;
+    // Probe the sub-issue for its own paperclips; scan its own description for
+    // uploads links. Skip the round-trip when neither could exist.
+    let paperclips: readonly LinearProbeAttachment[] = [];
+    try {
+      const probe = await probeLinearIssueContext(accessToken, child.sub_issue_id);
+      paperclips = probe.attachments ?? [];
+    } catch (err) {
+      logger.warn('Child own-attachment probe failed (skipping this child, non-fatal)', {
+        orchestration_id: orchestrationId,
+        sub_issue_id: child.sub_issue_id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      continue;
+    }
+    const descHasUploads = Boolean(child.description && child.description.includes('uploads.linear.app'));
+    if (!descHasUploads && !paperclips.some((a) => isLinearUploadsUrl(a.url))) continue;
+    try {
+      // Per-child S3 namespace so a child's own files never collide with the
+      // epic key or another child's. taskId is a label here, not a real task id.
+      const hydrated = await hydrateLinearAttachments({
+        issueId: child.sub_issue_id,
+        uploadsText: child.description,
+        workspaceId,
+        platformUserId,
+        accessToken,
+        taskId: `child-${child.sub_issue_id}`,
+        remainingSlots: MAX_ATTACHMENTS_PER_TASK,
+        paperclips,
+      });
+      if (!hydrated.ok) {
+        // Fail-OPEN: log + skip this child's own file (the epic + its inherited
+        // spec still run). The reject message is a diagnostic, not user-facing.
+        logger.warn('Child own attachment could not be screened — releasing child WITHOUT it (non-fatal)', {
+          orchestration_id: orchestrationId, sub_issue_id: child.sub_issue_id, detail: hydrated.message,
+        });
+        continue;
+      }
+      if (hydrated.records.length > 0) {
+        await setChildOwnAttachments(ddb, ORCHESTRATION_TABLE!, orchestrationId, child.sub_issue_id, hydrated.records, now);
+        stamped++;
+      }
+    } catch (err) {
+      logger.warn('Child own-attachment hydrate/persist failed (non-fatal)', {
+        orchestration_id: orchestrationId,
+        sub_issue_id: child.sub_issue_id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  return stamped;
 }
 
 /**
@@ -621,6 +803,9 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   // Native paperclip attachments (the `attachments` connection) surfaced by the
   // probe — hydrated below alongside description-embedded links (finding #1).
   let probedAttachments: readonly LinearProbeAttachment[] = [];
+  // Project wiki documents WITH content (ADR-016 doc pre-hydration) — screened +
+  // folded into the task description below.
+  let probedDocuments: readonly LinearProbeDocument[] = [];
   if (WORKSPACE_REGISTRY_TABLE) {
     const resolved = await resolveLinearOauthToken(workspaceId, WORKSPACE_REGISTRY_TABLE);
     if (!resolved) {
@@ -635,10 +820,12 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     resolvedAccessToken = resolved.accessToken;
     // Probe the issue once for native paperclip attachments + project docs. The
     // uploads.linear.app paperclips are fetched/screened/stored below (like
-    // description links); the doc-presence + non-uploads paperclips become a hint.
+    // description links); project docs with content are screened + folded into
+    // the description; a non-uploads paperclip / empty-body doc becomes a hint.
     const probe = await probeLinearIssueContext(resolved.accessToken, issue.id);
     contextHint = renderIssueContextHint(probe);
     probedAttachments = probe.attachments ?? [];
+    probedDocuments = probe.projectDocuments ?? [];
   }
 
   // #247 Mode A — parent/sub-issue orchestration. Env-var gated: until
@@ -731,7 +918,24 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       // present, so a decompose/auto decision here was suffix-suppressed. Only on
       // the FIRST seed (not replays) + best-effort, like the panel below.
       await maybePostAlreadyDecomposedNote(decompositionDecision, discovery.alreadyExisted, issue.id, workspaceId);
-      const snapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId);
+      let snapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId);
+      // Child-OWN attachments: a human-authored Mode-A sub-issue can carry a file
+      // attached to IT specifically (a mockup for just that piece), distinct from
+      // the epic's shared spec that every child inherits. Hydrate each child's own
+      // attachments on the FIRST seed and stamp them on the child row so release
+      // merges them with the inherited parent records. Fail-OPEN per child (unlike
+      // the parent spec, which is fail-closed): a child's own file is enrichment,
+      // so a screening failure skips THAT file + notes it rather than nuking the
+      // whole epic. Re-load so releaseReadyChildren sees the stamped rows.
+      if (snapshot && !discovery.alreadyExisted && resolvedAccessToken) {
+        const stamped = await hydrateChildrenOwnAttachments(
+          snapshot.children, workspaceId, snapshot.meta.release_context.platform_user_id,
+          resolvedAccessToken, discovery.orchestrationId,
+        );
+        if (stamped > 0) {
+          snapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId);
+        }
+      }
       let releasedRoots = 0;
       if (snapshot) {
         // #331: throttle the root release to the user's free concurrency
@@ -941,19 +1145,43 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       const planReqId = crypto.randomUUID();
       const planHasAttachments = Boolean(issue.description?.includes('uploads.linear.app'))
         || probedAttachments.some((a) => isLinearUploadsUrl(a.url));
+      // ADR-016: hand the planner the ACTUAL attachment bytes, not just a "there
+      // are attachments" flag — a spec PDF / mockup is exactly what a good
+      // decomposition needs to see. Mint the plan taskId up front so the S3 keys
+      // match. Children get their own copy at seed time (the reconciler's
+      // hydrateParentAttachmentsForSeed), so this is the planner's view only.
+      // Fail-closed: an unscreenable attachment rejects the decompose.
+      const planTaskId = ulid();
+      const planHydrated = await hydrateLinearIssueAttachments(
+        issue, workspaceId, platformUserId, resolvedAccessToken,
+        planTaskId, MAX_ATTACHMENTS_PER_TASK, probedAttachments,
+      );
+      if (!planHydrated.ok) {
+        await safeReportIssueFailure(issue.id, workspaceId, `❌ ${planHydrated.message}`);
+        return;
+      }
       const planResult = await createTaskCore(
         {
           repo,
           workflow_ref: 'coding/decompose-v1',
           task_description: buildDecompositionTaskDescription(issue, planHasAttachments),
         },
-        { userId: platformUserId, channelSource: 'linear', channelMetadata: planMeta },
+        {
+          userId: platformUserId,
+          channelSource: 'linear',
+          channelMetadata: planMeta,
+          taskId: planTaskId,
+          ...(planHydrated.records.length > 0 && { preScreenedAttachments: planHydrated.records }),
+        },
         planReqId,
       );
       if (planResult.statusCode !== 201) {
         logger.warn('Mode B decompose-planning task creation returned non-201', {
           status: planResult.statusCode, issue_id: issue.id,
         });
+        if (attachmentsS3Client && ATTACHMENTS_BUCKET) {
+          await cleanupPreScreenedForComment(planHydrated.records);
+        }
         await safeReportIssueFailure(
           issue.id, workspaceId,
           buildCreateTaskFailureMessage(planResult.statusCode, planResult.body),
@@ -1018,7 +1246,13 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     recentComments = await screenCommentsOrDrop(fetched, issue.id, workspaceId);
   }
 
-  const taskDescription = buildTaskDescription(issue, contextHint, recentComments);
+  // ADR-016: project wiki docs the issue's project carries are pre-hydrated with
+  // CONTENT (the agent has no Linear MCP to fetch them at runtime). Screen the
+  // combined doc text on its own — third-party doc content that trips the
+  // guardrail is DROPPED (fail-open), never gating the reporter's task.
+  const projectDocs = await screenProjectDocsOrDrop(probedDocuments, issue.id, workspaceId);
+
+  const taskDescription = buildTaskDescription(issue, contextHint, recentComments, projectDocs);
 
   // Extract embedded image URLs from the issue description markdown. Non-Linear
   // (public CDN) images become URL attachments fetched+screened during context
@@ -1801,6 +2035,7 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
       snapshot: parentSnapshot,
       workspaceId,
       commentId,
+      commentBody: body,
       replyTargetId,
       trigger,
       resolved,
@@ -1825,6 +2060,7 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
       subIssueId: commentedIssueId,
       workspaceId,
       commentId,
+      commentBody: body,
       replyTargetId,
       trigger,
       resolved,
@@ -1839,6 +2075,7 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
     child,
     workspaceId,
     commentId,
+    commentBody: body,
     replyTargetId,
     trigger,
     resolved,
@@ -2097,19 +2334,47 @@ async function handlePlanRevision(args: {
     ...(pending.repo_digest_sha !== undefined && { decompose_repo_digest_sha: pending.repo_digest_sha }),
   };
 
+  // ADR-016: the re-planning agent clones the repo + reads the issue, so give it
+  // the issue's attachments too (a spec PDF the reviewer wants the revised plan to
+  // honor). The material lives on the ISSUE, not this feedback comment, so probe
+  // the issue (no comment body). Fail-closed: an unscreenable file settles the
+  // 👀→❓ and leaves the current plan approvable rather than re-planning blind.
+  const reviseTaskId = ulid();
+  const reviseHydrated = await hydrateCommentAttachments({
+    issueId: commentedIssueId,
+    commentBody: undefined,
+    workspaceId,
+    platformUserId: pending.platform_user_id,
+    accessToken: resolved.accessToken,
+    taskId: reviseTaskId,
+    probeIssue: true,
+  });
+  if (!reviseHydrated.ok) {
+    await swapCommentReaction(feedbackCtx, commentId, EMOJI_NEEDS_INPUT);
+    await upsertStatusComment(feedbackCtx, commentedIssueId, `❌ ${reviseHydrated.message}`);
+    return;
+  }
+
   const planResult = await createTaskCore(
     {
       repo: pending.repo,
       workflow_ref: 'coding/decompose-v1',
       task_description: buildRevisionTaskDescription(issueText, pending, feedback),
     },
-    { userId: pending.platform_user_id, channelSource: 'linear', channelMetadata: planMeta },
+    {
+      userId: pending.platform_user_id,
+      channelSource: 'linear',
+      channelMetadata: planMeta,
+      taskId: reviseTaskId,
+      ...(reviseHydrated.records.length > 0 && { preScreenedAttachments: reviseHydrated.records }),
+    },
     crypto.randomUUID(),
   );
   if (planResult.statusCode !== 201) {
     logger.warn('Mode B revise: re-plan task creation returned non-201', {
       status: planResult.statusCode, issue_id: commentedIssueId, body: planResult.body,
     });
+    await cleanupPreScreenedForComment(reviseHydrated.records);
     // Dispatch failed → the reconciler never runs to settle the 👀, so swap it to
     // ❓ here (the request needs the reviewer's attention, not "done") and post the
     // honest failure note. The current plan is untouched + still approvable; NO raw
@@ -2118,7 +2383,9 @@ async function handlePlanRevision(args: {
     await upsertStatusComment(feedbackCtx, commentedIssueId, renderRevisionFailedNote());
     return;
   }
-  logger.info('Mode B revise: re-plan task dispatched', { issue_id: commentedIssueId, round: priorRound + 1 });
+  logger.info('Mode B revise: re-plan task dispatched', {
+    issue_id: commentedIssueId, round: priorRound + 1, attachments: reviseHydrated.records.length,
+  });
 }
 
 /**
@@ -2135,7 +2402,7 @@ async function handleSingleTaskVerdict(args: {
   commentedIssueId: string;
   workspaceId: string;
   projectId: string;
-  resolved: { oauthSecretArn: string; workspaceSlug: string };
+  resolved: { accessToken: string; oauthSecretArn: string; workspaceSlug: string };
 }): Promise<void> {
   if (!ORCHESTRATION_TABLE || !WORKSPACE_REGISTRY_TABLE) return;
   const { pending, verdict, commentedIssueId, workspaceId, projectId, resolved } = args;
@@ -2161,6 +2428,25 @@ async function handleSingleTaskVerdict(args: {
     return;
   }
 
+  // ADR-016: the approved single task is a coding run that opens a PR — give it
+  // the issue's attachments (a spec PDF / mockup the plan was built around). The
+  // material lives on the ISSUE, so probe it (no comment body). Fail-closed: an
+  // unscreenable file surfaces a failure rather than running the task blind.
+  const singleTaskId = ulid();
+  const singleHydrated = await hydrateCommentAttachments({
+    issueId: commentedIssueId,
+    commentBody: undefined,
+    workspaceId,
+    platformUserId: pending.platform_user_id,
+    accessToken: resolved.accessToken,
+    taskId: singleTaskId,
+    probeIssue: true,
+  });
+  if (!singleHydrated.ok) {
+    await safeReportIssueFailure(commentedIssueId, workspaceId, `❌ ${singleHydrated.message}`);
+    return;
+  }
+
   // approve → spawn ONE coding task, exactly like the reconciler's auto-run
   // single-task path (:auto), with the normal Linear channel_metadata so the
   // fanout dispatcher posts the completion + the agent posts its PR-opened
@@ -2173,6 +2459,7 @@ async function handleSingleTaskVerdict(args: {
     {
       userId: pending.platform_user_id,
       channelSource: 'linear',
+      taskId: singleTaskId,
       channelMetadata: {
         linear_issue_id: commentedIssueId,
         linear_workspace_id: workspaceId,
@@ -2180,6 +2467,7 @@ async function handleSingleTaskVerdict(args: {
         linear_oauth_secret_arn: resolved.oauthSecretArn,
         linear_workspace_slug: resolved.workspaceSlug,
       },
+      ...(singleHydrated.records.length > 0 && { preScreenedAttachments: singleHydrated.records }),
     },
     `decompose-single-approve-${deriveOrchestrationId(commentedIssueId)}`.slice(0, MAX_IDEMPOTENCY_KEY_LENGTH),
   );
@@ -2187,6 +2475,7 @@ async function handleSingleTaskVerdict(args: {
     logger.warn('Mode B single-task verdict: task creation returned non-201', {
       status: result.statusCode, issue_id: commentedIssueId,
     });
+    await cleanupPreScreenedForComment(singleHydrated.records);
     await safeReportIssueFailure(commentedIssueId, workspaceId,
       buildCreateTaskFailureMessage(result.statusCode, result.body));
     return;
@@ -2371,12 +2660,14 @@ async function handleParentEpicCommentTrigger(args: {
   snapshot: NonNullable<Awaited<ReturnType<typeof loadOrchestration>>>;
   workspaceId: string;
   commentId: string;
+  /** Raw @bgagent comment body — carries any newly-attached uploads.linear.app links. */
+  commentBody: string | undefined;
   replyTargetId: string;
   trigger: CommentTrigger;
   resolved: { accessToken: string; oauthSecretArn: string; workspaceSlug: string };
   registryTableName: string;
 }): Promise<void> {
-  const { orchestrationId, snapshot, workspaceId, commentId, replyTargetId, trigger, resolved, registryTableName } = args;
+  const { orchestrationId, snapshot, workspaceId, commentId, commentBody, replyTargetId, trigger, resolved, registryTableName } = args;
   const feedbackCtx = { linearWorkspaceId: workspaceId, registryTableName };
 
   // #247 UX.20: claim-once BEFORE any side-effect. Linear redelivers a comment
@@ -2451,6 +2742,7 @@ async function handleParentEpicCommentTrigger(args: {
     child: childRow,
     workspaceId,
     commentId,
+    commentBody,
     replyTargetId,
     trigger,
     resolved,
@@ -2490,13 +2782,15 @@ async function iterateOrchestrationChild(args: {
    */
   triggerCommentIssueId?: string;
   trigger: CommentTrigger;
-  resolved: { oauthSecretArn: string; workspaceSlug: string };
+  /** Raw @bgagent comment body — carries any newly-attached uploads.linear.app links. */
+  commentBody: string | undefined;
+  resolved: { accessToken: string; oauthSecretArn: string; workspaceSlug: string };
   registryTableName: string;
   skipAck?: boolean;
   prNumber?: number;
 }): Promise<void> {
   const {
-    orchestrationId, snapshot, child, workspaceId, commentId, replyTargetId,
+    orchestrationId, snapshot, child, workspaceId, commentId, commentBody, replyTargetId,
     trigger, resolved, registryTableName,
   } = args;
   const subIssueId = child.sub_issue_id;
@@ -2553,6 +2847,28 @@ async function iterateOrchestrationChild(args: {
     ...(iterationReplyId && { iteration_reply_comment_id: iterationReplyId }),
   };
 
+  // ADR-016: a reviewer can drop a NEW screenshot/log into the @bgagent comment
+  // ("this is still broken, see attached"). The agent has no Linear MCP to fetch
+  // it, so hydrate the comment's uploads here and pass them to the iteration.
+  // The new material rides in the comment body — don't re-probe the issue (that
+  // would re-screen the issue's existing paperclips every round). Fail-closed:
+  // an unscreenable attachment aborts the iteration with a threaded reply rather
+  // than iterating blind on a spec the agent can't see.
+  const iterTaskId = ulid();
+  const iterHydrated = await hydrateCommentAttachments({
+    issueId: subIssueId,
+    commentBody,
+    workspaceId,
+    platformUserId,
+    accessToken: resolved.accessToken,
+    taskId: iterTaskId,
+    probeIssue: false,
+  });
+  if (!iterHydrated.ok) {
+    await replyToComment({ linearWorkspaceId: workspaceId, registryTableName }, triggerCommentIssueId, replyTargetId, `❌ ${iterHydrated.message}`);
+    return;
+  }
+
   try {
     const result = await createTaskCore(
       {
@@ -2561,13 +2877,32 @@ async function iterateOrchestrationChild(args: {
         pr_number: prNumber,
         task_description: buildIterationInstruction(trigger),
       },
-      { userId: platformUserId, channelSource: 'linear', channelMetadata, idempotencyKey },
+      {
+        userId: platformUserId,
+        channelSource: 'linear',
+        channelMetadata,
+        idempotencyKey,
+        taskId: iterTaskId,
+        ...(iterHydrated.records.length > 0 && { preScreenedAttachments: iterHydrated.records }),
+      },
       idempotencyKey,
     );
+    // A non-201 (validation reject, or a 200 idempotent replay on a webhook
+    // redelivery) means THIS call's freshly-minted taskId never became a task —
+    // its S3 uploads would orphan (the replay points at the first delivery's
+    // distinct key). Clean them up.
+    if (result.statusCode !== 201) {
+      await cleanupPreScreenedForComment(iterHydrated.records);
+    }
     logger.info('A6 comment: iteration task created for sub-issue PR', {
-      orchestration_id: orchestrationId, sub_issue_id: subIssueId, pr_number: prNumber, status_code: result.statusCode,
+      orchestration_id: orchestrationId,
+      sub_issue_id: subIssueId,
+      pr_number: prNumber,
+      status_code: result.statusCode,
+      attachments: iterHydrated.records.length,
     });
   } catch (err) {
+    await cleanupPreScreenedForComment(iterHydrated.records);
     logger.error('A6 comment: createTaskCore threw for iteration', {
       orchestration_id: orchestrationId,
       sub_issue_id: subIssueId,
@@ -2595,13 +2930,15 @@ async function handleStandaloneCommentTrigger(args: {
   subIssueId: string;
   workspaceId: string;
   commentId: string;
+  /** Raw @bgagent comment body — carries any newly-attached uploads.linear.app links. */
+  commentBody: string | undefined;
   /** Thread ROOT to reply to (= parentId when the trigger is a reply, else commentId). */
   replyTargetId: string;
   trigger: CommentTrigger;
   resolved: { accessToken: string; oauthSecretArn: string; workspaceSlug: string };
   registryTableName: string;
 }): Promise<void> {
-  const { subIssueId: issueId, workspaceId, commentId, replyTargetId, trigger, resolved, registryTableName } = args;
+  const { subIssueId: issueId, workspaceId, commentId, commentBody, replyTargetId, trigger, resolved, registryTableName } = args;
 
   const task = await resolveTaskByLinearIssue(ddb, process.env.TASK_TABLE_NAME!, issueId);
   if (!task) {
@@ -2615,7 +2952,7 @@ async function handleStandaloneCommentTrigger(args: {
     // answer_text=<question>, no PR). The GSI doesn't project those fields, so
     // read the full base row before giving up. If it's a hold, the user's reply
     // is the answer — re-dispatch the original task with it and resume.
-    if (await maybeResumeClarifyHold({ issueId, task, workspaceId, commentId, replyTargetId, trigger, resolved, registryTableName })) {
+    if (await maybeResumeClarifyHold({ issueId, task, workspaceId, commentId, commentBody, replyTargetId, trigger, resolved, registryTableName })) {
       return;
     }
     // #614: a PR-less completed task (no-change-needed, failed-before-commit, or
@@ -2625,7 +2962,9 @@ async function handleStandaloneCommentTrigger(args: {
     // dropping the comment silently (the old dead-end). Falls through to the
     // no-op log below only when we genuinely can't act (no repo/user, or a bare
     // mention with no instruction).
-    if (await maybeStartStandaloneNewWork({ issueId, task, workspaceId, commentId, replyTargetId, trigger, resolved, registryTableName })) {
+    if (await maybeStartStandaloneNewWork({
+      issueId, task, workspaceId, commentId, commentBody, replyTargetId, trigger, resolved, registryTableName,
+    })) {
       return;
     }
     logger.info('A6 comment (standalone): PR-less task, no new-work dispatched (no repo/user or empty instruction)', {
@@ -2661,6 +3000,24 @@ async function handleStandaloneCommentTrigger(args: {
     ...(iterationReplyId && { iteration_reply_comment_id: iterationReplyId }),
   };
 
+  // ADR-016: hydrate any file the reviewer dropped into this iteration comment
+  // (see iterateOrchestrationChild). New material rides in the comment body →
+  // don't re-probe the issue. Fail-closed: an unscreenable file aborts with a reply.
+  const iterTaskId = ulid();
+  const iterHydrated = await hydrateCommentAttachments({
+    issueId,
+    commentBody,
+    workspaceId,
+    platformUserId: task.user_id,
+    accessToken: resolved.accessToken,
+    taskId: iterTaskId,
+    probeIssue: false,
+  });
+  if (!iterHydrated.ok) {
+    await replyToComment(feedbackCtx, issueId, replyTargetId, `❌ ${iterHydrated.message}`);
+    return;
+  }
+
   try {
     const result = await createTaskCore(
       {
@@ -2669,13 +3026,27 @@ async function handleStandaloneCommentTrigger(args: {
         pr_number: prNumber,
         task_description: buildIterationInstruction(trigger),
       },
-      { userId: task.user_id, channelSource: 'linear', channelMetadata, idempotencyKey },
+      {
+        userId: task.user_id,
+        channelSource: 'linear',
+        channelMetadata,
+        idempotencyKey,
+        taskId: iterTaskId,
+        ...(iterHydrated.records.length > 0 && { preScreenedAttachments: iterHydrated.records }),
+      },
       idempotencyKey,
     );
+    if (result.statusCode !== 201) {
+      await cleanupPreScreenedForComment(iterHydrated.records);
+    }
     logger.info('A6 comment (standalone): iteration task created for issue PR', {
-      linear_issue_id: issueId, pr_number: prNumber, status_code: result.statusCode,
+      linear_issue_id: issueId,
+      pr_number: prNumber,
+      status_code: result.statusCode,
+      attachments: iterHydrated.records.length,
     });
   } catch (err) {
+    await cleanupPreScreenedForComment(iterHydrated.records);
     logger.error('A6 comment (standalone): createTaskCore threw for iteration', {
       linear_issue_id: issueId,
       error: err instanceof Error ? err.message : String(err),
@@ -2707,12 +3078,14 @@ async function maybeStartStandaloneNewWork(args: {
   task: { task_id: string; repo?: string; user_id?: string };
   workspaceId: string;
   commentId: string;
+  /** Raw @bgagent comment body — carries any newly-attached uploads.linear.app links. */
+  commentBody: string | undefined;
   replyTargetId: string;
   trigger: CommentTrigger;
   resolved: { accessToken: string; oauthSecretArn: string; workspaceSlug: string };
   registryTableName: string;
 }): Promise<boolean> {
-  const { issueId, task, workspaceId, commentId, replyTargetId, trigger, resolved, registryTableName } = args;
+  const { issueId, task, workspaceId, commentId, commentBody, replyTargetId, trigger, resolved, registryTableName } = args;
 
   // Can't act without a repo to work in or a user to attribute the task to —
   // let the caller no-op-log. (These are the only genuinely unactionable cases.)
@@ -2766,6 +3139,26 @@ async function maybeStartStandaloneNewWork(args: {
     ...(iterationReplyId && { iteration_reply_comment_id: iterationReplyId }),
   };
 
+  // ADR-016: this starts FRESH work from the comment, so hydrate BOTH the
+  // comment body's uploads AND any paperclip newly attached to the issue
+  // (probeIssue: true) — a "do X instead, see attached mockup" follow-up puts the
+  // file on the issue or in the comment. Fail-closed: an unscreenable file aborts
+  // with a reply rather than running the new task blind.
+  const newTaskId = ulid();
+  const newHydrated = await hydrateCommentAttachments({
+    issueId,
+    commentBody,
+    workspaceId,
+    platformUserId: task.user_id,
+    accessToken: resolved.accessToken,
+    taskId: newTaskId,
+    probeIssue: true,
+  });
+  if (!newHydrated.ok) {
+    await replyToComment(feedbackCtx, issueId, replyTargetId, `❌ ${newHydrated.message}`);
+    return true;
+  }
+
   try {
     const result = await createTaskCore(
       {
@@ -2773,13 +3166,27 @@ async function maybeStartStandaloneNewWork(args: {
         workflow_ref: 'coding/new-task-v1',
         task_description: instruction,
       },
-      { userId: task.user_id, channelSource: 'linear', channelMetadata, idempotencyKey },
+      {
+        userId: task.user_id,
+        channelSource: 'linear',
+        channelMetadata,
+        idempotencyKey,
+        taskId: newTaskId,
+        ...(newHydrated.records.length > 0 && { preScreenedAttachments: newHydrated.records }),
+      },
       idempotencyKey,
     );
+    if (result.statusCode !== 201) {
+      await cleanupPreScreenedForComment(newHydrated.records);
+    }
     logger.info('A6 comment (standalone): fresh new-task dispatched from follow-up on PR-less task', {
-      linear_issue_id: issueId, prior_task_id: task.task_id, status_code: result.statusCode,
+      linear_issue_id: issueId,
+      prior_task_id: task.task_id,
+      status_code: result.statusCode,
+      attachments: newHydrated.records.length,
     });
   } catch (err) {
+    await cleanupPreScreenedForComment(newHydrated.records);
     logger.error('A6 comment (standalone): createTaskCore threw for new-work dispatch', {
       linear_issue_id: issueId,
       prior_task_id: task.task_id,
@@ -2807,12 +3214,14 @@ async function maybeResumeClarifyHold(args: {
   task: { task_id: string; repo?: string; user_id?: string };
   workspaceId: string;
   commentId: string;
+  /** Raw @bgagent comment body — carries any newly-attached uploads.linear.app links. */
+  commentBody: string | undefined;
   replyTargetId: string;
   trigger: CommentTrigger;
   resolved: { accessToken: string; oauthSecretArn: string; workspaceSlug: string };
   registryTableName: string;
 }): Promise<boolean> {
-  const { issueId, task, workspaceId, commentId, replyTargetId, trigger, resolved, registryTableName } = args;
+  const { issueId, task, workspaceId, commentId, commentBody, replyTargetId, trigger, resolved, registryTableName } = args;
   // A bare mention with no answer text can't resume anything — let the caller
   // no-op rather than re-dispatch the same vague task.
   const answer = trigger.instruction.trim();
@@ -2859,6 +3268,24 @@ async function maybeResumeClarifyHold(args: {
     trigger_comment_id: replyTargetId,
     ...(iterationReplyId && { iteration_reply_comment_id: iterationReplyId }),
   };
+  // ADR-016: the reviewer may answer a clarifying question WITH a file ("here's
+  // the mockup you asked for"), attached to the issue or dropped in the reply.
+  // Hydrate both (probeIssue: true) so the resumed run sees it. Fail-closed.
+  const resumeTaskId = ulid();
+  const resumeHydrated = await hydrateCommentAttachments({
+    issueId,
+    commentBody,
+    workspaceId,
+    platformUserId: task.user_id,
+    accessToken: resolved.accessToken,
+    taskId: resumeTaskId,
+    probeIssue: true,
+  });
+  if (!resumeHydrated.ok) {
+    await replyToComment(feedbackCtx, issueId, replyTargetId, `❌ ${resumeHydrated.message}`);
+    return true;
+  }
+
   try {
     const result = await createTaskCore(
       {
@@ -2866,13 +3293,27 @@ async function maybeResumeClarifyHold(args: {
         workflow_ref: 'coding/new-task-v1',
         task_description: resumeDescription,
       },
-      { userId: task.user_id, channelSource: 'linear', channelMetadata, idempotencyKey },
+      {
+        userId: task.user_id,
+        channelSource: 'linear',
+        channelMetadata,
+        idempotencyKey,
+        taskId: resumeTaskId,
+        ...(resumeHydrated.records.length > 0 && { preScreenedAttachments: resumeHydrated.records }),
+      },
       idempotencyKey,
     );
+    if (result.statusCode !== 201) {
+      await cleanupPreScreenedForComment(resumeHydrated.records);
+    }
     logger.info('Clarify-resume: fresh new-task dispatched from the reviewer answer', {
-      linear_issue_id: issueId, prior_task_id: task.task_id, status_code: result.statusCode,
+      linear_issue_id: issueId,
+      prior_task_id: task.task_id,
+      status_code: result.statusCode,
+      attachments: resumeHydrated.records.length,
     });
   } catch (err) {
+    await cleanupPreScreenedForComment(resumeHydrated.records);
     logger.error('Clarify-resume: createTaskCore threw', {
       linear_issue_id: issueId, prior_task_id: task.task_id, error: err instanceof Error ? err.message : String(err),
     });
@@ -3091,18 +3532,17 @@ function buildDecompositionTaskDescription(
     parts.push('');
     parts.push(issue.description.trim());
   }
-  // finding #1 (planning mode): attachments are NOT hydrated on the decompose
-  // path — unlike a coding task, the planner gets no fetched files. Be honest
-  // about it so it plans structurally rather than assuming it read a spec it
-  // can't see. The implementing sub-tasks DO hydrate attachments, so the spec
-  // content lands where it's actually used.
+  // The issue's file attachments ARE now hydrated onto the decompose planning
+  // task (Gap #3) — the planner receives them like a coding task, so it can read
+  // a spec/mockup when carving the plan. Point it at them so it uses them rather
+  // than planning title-only. The implementing sub-tasks each also inherit them.
   if (hasAttachments) {
     parts.push('');
     parts.push(
-      '_Note: this issue has file attachments that are NOT included here — ' +
-      'plan the decomposition from the title/description, and where a sub-task ' +
+      '_Note: this issue\'s file attachments are included with this task — ' +
+      'read them when planning the decomposition, and where a specific sub-task ' +
       'will need an attached file, say so in that sub-task (the implementing ' +
-      'task will receive the file)._',
+      'task inherits the file too)._',
     );
   }
   return parts.join('\n') || 'Plan a decomposition for this Linear issue.';
@@ -3146,6 +3586,7 @@ function buildTaskDescription(
   issue: LinearIssueEvent['data'],
   contextHint: string = '',
   comments: readonly RenderedComment[] = [],
+  projectDocs: readonly LinearProbeDocument[] = [],
 ): string {
   const parts: string[] = [];
   if (issue.identifier && issue.title) {
@@ -3161,23 +3602,55 @@ function buildTaskDescription(
     parts.push('');
     parts.push(issue.description.trim());
   }
-  const core = parts.join('\n') || 'Linear issue';
+  let out = parts.join('\n') || 'Linear issue';
 
-  // Fold recent human comments under a clear heading so the agent can tell them
-  // from the description (ADR-016 pre-hydration). Comments are ADVISORY and must
-  // stay fail-open: they must never grow the description past
-  // MAX_TASK_DESCRIPTION_LENGTH and turn createTaskCore's length check into a
-  // hard rejection. Only append what fits the remaining budget, truncating the
-  // section if needed. Mirrors the Jira processor.
-  if (comments.length === 0) return core;
-  const commentSection = renderCommentSection(comments);
-  const separator = '\n';
-  const budget = MAX_TASK_DESCRIPTION_LENGTH - core.length - separator.length;
-  if (budget <= 0) return core; // description already fills the budget — drop comments
-  const fitted = commentSection.length <= budget
-    ? commentSection
-    : truncateCommentSection(commentSection, budget);
-  return fitted ? core + separator + fitted : core;
+  // Fold pre-hydrated context under clear headings so the agent can tell each
+  // apart from the description (ADR-016 — the agent has no Linear MCP to fetch
+  // any of it). ORDER: project docs (reference material the issue builds on),
+  // then recent comments (discussion). Both are ADVISORY + fail-open: neither may
+  // grow the description past MAX_TASK_DESCRIPTION_LENGTH and turn createTaskCore's
+  // length check into a hard rejection, so each is appended only if it fits the
+  // remaining budget (truncated if needed). Mirrors the Jira processor.
+  const sep = '\n';
+  if (projectDocs.length > 0) {
+    const section = renderProjectDocsSection(projectDocs);
+    const budget = MAX_TASK_DESCRIPTION_LENGTH - out.length - sep.length;
+    if (budget > 0) {
+      const fitted = section.length <= budget ? section : truncateSection(section, budget, DOC_TRUNCATION_NOTICE);
+      if (fitted) out = out + sep + fitted;
+    }
+  }
+  if (comments.length > 0) {
+    const commentSection = renderCommentSection(comments);
+    const budget = MAX_TASK_DESCRIPTION_LENGTH - out.length - sep.length;
+    if (budget > 0) {
+      const fitted = commentSection.length <= budget
+        ? commentSection
+        : truncateSection(commentSection, budget, COMMENT_TRUNCATION_NOTICE);
+      if (fitted) out = out + sep + fitted;
+    }
+  }
+  return out;
+}
+
+/** Notice appended when the project-docs section is truncated to fit the budget. */
+const DOC_TRUNCATION_NOTICE = '\n\n_(project documents truncated)_';
+
+/**
+ * Render pre-hydrated project wiki documents under a clear heading. Each doc gets
+ * a sub-heading (its title) so the agent can attribute the content. The raw
+ * markdown body is included verbatim (already guardrail-screened by the caller).
+ */
+function renderProjectDocsSection(docs: readonly LinearProbeDocument[]): string {
+  const lines: string[] = ['', '## Project documents', '',
+    '_Wiki documents from this issue\'s Linear project, included for reference:_'];
+  for (const d of docs) {
+    lines.push('');
+    lines.push(`### ${d.title}`);
+    lines.push('');
+    lines.push(d.content.trim());
+  }
+  return lines.join('\n');
 }
 
 /** Notice appended when the comment section is truncated to fit the budget. */
@@ -3195,14 +3668,59 @@ function renderCommentSection(comments: readonly RenderedComment[]): string {
 }
 
 /**
- * Trim a rendered comment section to at most ``budget`` characters, leaving room
- * for a truncation notice. Returns '' if even the heading + notice can't fit, so
- * the caller cleanly drops the section. Mirrors the Jira processor.
+ * Trim a rendered section to at most ``budget`` characters, leaving room for the
+ * given truncation notice. Returns '' if even the notice can't fit, so the caller
+ * cleanly drops the section. Shared by the comment + project-doc sections.
  */
-function truncateCommentSection(section: string, budget: number): string {
-  const room = budget - COMMENT_TRUNCATION_NOTICE.length;
+function truncateSection(section: string, budget: number, notice: string): string {
+  const room = budget - notice.length;
   if (room <= 0) return '';
-  return section.slice(0, room) + COMMENT_TRUNCATION_NOTICE;
+  return section.slice(0, room) + notice;
+}
+
+/**
+ * Screen the pre-hydrated project-doc block through the Bedrock Guardrail on its
+ * own, so third-party doc content that trips the policy is DROPPED (fail-open)
+ * rather than gating the reporter's task. Returns the docs unchanged when they
+ * pass, ``[]`` when the guardrail intervenes or is unavailable — the task still
+ * proceeds with the reporter-authored title/description. Mirrors
+ * {@link screenCommentsOrDrop}: doc content is advisory, fail-open end to end.
+ */
+async function screenProjectDocsOrDrop(
+  docs: readonly LinearProbeDocument[],
+  issueId: string,
+  workspaceId: string,
+): Promise<readonly LinearProbeDocument[]> {
+  if (docs.length === 0) return docs;
+  if (!attachmentsBedrockClient || !GUARDRAIL_ID || !GUARDRAIL_VERSION) {
+    logger.warn('Dropping Linear project docs: guardrail not configured to screen them', {
+      issue_id: issueId, linear_workspace_id: workspaceId,
+    });
+    return [];
+  }
+  const text = renderProjectDocsSection(docs);
+  try {
+    const result = await attachmentsBedrockClient.send(new ApplyGuardrailCommand({
+      guardrailIdentifier: GUARDRAIL_ID,
+      guardrailVersion: GUARDRAIL_VERSION,
+      source: 'INPUT',
+      content: [{ text: { text } }],
+    }));
+    if (result.action === 'GUARDRAIL_INTERVENED') {
+      logger.warn('Dropping Linear project docs: blocked by content policy (task still proceeds)', {
+        issue_id: issueId, linear_workspace_id: workspaceId,
+      });
+      return [];
+    }
+    return docs;
+  } catch (err) {
+    logger.warn('Dropping Linear project docs: screening unavailable (task still proceeds)', {
+      issue_id: issueId,
+      linear_workspace_id: workspaceId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return [];
+  }
 }
 
 /**

@@ -14,13 +14,14 @@ and the Linear issue id is present in ``channel_metadata``. All network
 errors are logged and swallowed — a transient Linear API failure must
 never fail the task itself (reactions are advisory UX, not load-bearing).
 
-Why a direct GraphQL call instead of MCP: Linear's MCP v1 does not expose
-a reactions tool (confirmed 2026-05-06). Once an MCP ``create_reaction``
-tool ships, this module should be retired in favour of a prompt addendum
-that has the agent call it directly.
+Why a direct GraphQL call: under ADR-016 Linear is 100% deterministic —
+the agent has NO Linear tools and never calls Linear itself. Reactions
+and state transitions are posted by the platform on its own credential
+(here, on the agent tier; the Lambda tier owns the rest). This is the
+permanent design, not a stopgap: there is no future in which the agent
+drives Linear through an MCP tool, so this module is not "awaiting" one.
 
-See: ``agent/src/channel_mcp.py`` for the parallel MCP gate, and
-``~/.claude/plans/linear-mcp-findings.md`` for the locked spec.
+See: ``agent/src/channel_mcp.py`` for why there is no Linear MCP.
 """
 
 from __future__ import annotations
@@ -35,7 +36,9 @@ import requests
 
 from shell import log
 
-#: Linear GraphQL endpoint. The same auth flow the MCP server uses.
+#: Linear GraphQL endpoint. Authenticated with the per-workspace
+#: ``actor=app`` OAuth token (``LINEAR_API_TOKEN``, set by config.py from the
+#: workspace's OAuth bundle) sent as the ``Authorization`` header.
 LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql"
 
 #: Request timeout — reactions are fire-and-forget status UX; never block

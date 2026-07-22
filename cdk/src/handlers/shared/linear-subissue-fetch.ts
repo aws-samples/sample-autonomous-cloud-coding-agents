@@ -70,6 +70,7 @@ query SubIssueGraph($issueId: String!, $first: Int!) {
         id
         identifier
         title
+        description
         inverseRelations(first: $first) {
           nodes {
             type
@@ -117,6 +118,7 @@ interface RawChildNode {
   readonly id?: string;
   readonly identifier?: string;
   readonly title?: string;
+  readonly description?: string;
   readonly inverseRelations?: { readonly nodes?: readonly RawRelationNode[] } | null;
 }
 
@@ -225,6 +227,12 @@ export async function fetchSubIssueGraph(
       id: c.id,
       ...(c.identifier !== undefined && { identifier: c.identifier }),
       ...(c.title !== undefined && { title: c.title }),
+      // #247 finding: a human-authored sub-issue often carries its OWN scope in
+      // the description (a checklist, an acceptance criterion). The Mode-A path
+      // used to fetch title-only, so the child agent built a title guess. Carry
+      // the description so buildChildDescription hands it to the coding agent
+      // (mirrors the Mode-B planner scope, which already populates this).
+      ...(typeof c.description === 'string' && c.description.trim() !== '' && { description: c.description }),
       // Dedup edges (Linear can surface a relation from both directions).
       depends_on: [...new Set(blockers)],
     });
