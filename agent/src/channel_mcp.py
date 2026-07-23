@@ -176,3 +176,63 @@ def configure_channel_mcp(
             "outbound Jira comments use the REST shim (jira_reactions.py), not MCP",
         )
     return True
+
+
+#: Substrings that mark an ``mcpServers`` entry as a Linear MCP server. Matched
+#: (case-insensitively) against the server KEY and, defensively, the JSON of its
+#: value (url / command / args / headers) so an entry named innocuously
+#: (``"specs": {url:"https://mcp.linear.app/sse"}``) or reading the token
+#: (``${LINEAR_API_TOKEN}``) is caught regardless of its key.
+_LINEAR_MCP_MARKERS = ("linear", "mcp.linear.app", "linear_api_token")
+
+
+def strip_linear_mcp_servers(repo_dir: str) -> int:
+    """Remove any Linear MCP server entry from the repo's ``.mcp.json``.
+
+    ADR-016 ENFORCEMENT (not just convention): Linear is 100% deterministic and
+    the agent must have NO Linear MCP tools. The prompt says so, but a prompt is
+    not a security boundary — a repo could COMMIT a ``.mcp.json`` with a
+    ``linear-server`` entry using ``${LINEAR_API_TOKEN}``; the SDK loads
+    ``project`` settings + we export ``LINEAR_API_TOKEN``, so under
+    ``bypassPermissions`` those tools would authenticate and run. This scrubs any
+    such entry from the on-disk config BEFORE the SDK reads it, on every task
+    with a repo, regardless of channel_source. Jira's own entry (written by
+    ``configure_channel_mcp`` for jira tasks) never matches these markers.
+
+    Returns the number of server entries removed (0 when none / no file).
+    Best-effort: a read/write failure logs and returns 0 (the prompt prohibition
+    + the absence of any platform-written Linear entry still hold).
+    """
+    if not repo_dir or not os.path.isdir(repo_dir):
+        return 0
+    mcp_path = os.path.join(repo_dir, ".mcp.json")
+    config = _read_existing_mcp_config(mcp_path)
+    servers = config.get("mcpServers")
+    if not isinstance(servers, dict) or not servers:
+        return 0
+
+    def _is_linear(key: str, value: object) -> bool:
+        hay = (key + " " + json.dumps(value, default=str)).lower()
+        return any(m in hay for m in _LINEAR_MCP_MARKERS)
+
+    offending = [k for k, v in servers.items() if _is_linear(k, v)]
+    if not offending:
+        return 0
+
+    for k in offending:
+        del servers[k]
+    config["mcpServers"] = servers
+    try:
+        with open(mcp_path, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2)
+            f.write("\n")
+    except OSError as e:
+        log("ERROR", f"strip_linear_mcp_servers: failed to rewrite {mcp_path}: {e}")
+        return 0
+    log(
+        "WARN",
+        f"Removed {len(offending)} Linear MCP server entr(ies) from {mcp_path} "
+        f"(ADR-016: Linear is deterministic; the agent has no Linear MCP). "
+        f"Keys: {', '.join(offending)}",
+    )
+    return len(offending)

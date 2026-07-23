@@ -98,6 +98,24 @@ jest.mock('../../src/handlers/shared/linear-subissue-fetch', () => ({
   fetchSubIssueGraph: (...args: unknown[]) => fetchSubIssueGraphMock(...args),
 }));
 
+// The context probe gates attachment hydration (review #5: a FAILED probe
+// fail-closes so a paperclip-only spec can't silently vanish). These routing
+// tests aren't about attachments, so stub a healthy empty probe (ok:true) —
+// otherwise the real fetch would fail in-test → ok:false → the epic/task would
+// be rejected with an attachment-error before routing runs.
+jest.mock('../../src/handlers/shared/linear-issue-context-probe', () => ({
+  probeLinearIssueContext: jest.fn().mockResolvedValue({
+    attachmentTitles: [],
+    attachments: [],
+    projectName: null,
+    projectHasDocuments: false,
+    projectDocuments: [],
+    ok: true,
+    projectDocumentCount: 0,
+  }),
+  renderIssueContextHint: jest.fn(() => ''),
+}));
+
 process.env.LINEAR_PROJECT_MAPPING_TABLE_NAME = 'LinearProjects';
 process.env.LINEAR_USER_MAPPING_TABLE_NAME = 'LinearUsers';
 process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME = 'LinearWorkspaceRegistry';

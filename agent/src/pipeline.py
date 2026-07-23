@@ -15,7 +15,7 @@ from pydantic import ValidationError
 
 import memory as agent_memory
 import task_state
-from channel_mcp import configure_channel_mcp
+from channel_mcp import configure_channel_mcp, strip_linear_mcp_servers
 from config import (
     AGENT_WORKSPACE,
     NEEDS_INPUT_MARKER,
@@ -1032,6 +1032,13 @@ def run_task(
             # repo dir. (Token resolution + the 👀/start ACK moved earlier so
             # the user gets immediate feedback; see the Early ACK block above.)
             configure_channel_mcp(setup.repo_dir, config.channel_source)
+            # ADR-016 ENFORCEMENT: strip any Linear MCP server a repo may have
+            # COMMITTED to its own .mcp.json before the SDK reads it — the prompt
+            # prohibition ("you have no Linear tools") is not a security boundary,
+            # and we export LINEAR_API_TOKEN + load project settings under
+            # bypassPermissions. Runs for every channel (defense-in-depth); never
+            # matches Jira's own entry.
+            strip_linear_mcp_servers(setup.repo_dir)
 
             # Download attachments from S3 (version-pinned, integrity-verified)
             prepared_attachments: list = []

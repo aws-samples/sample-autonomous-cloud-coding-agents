@@ -677,6 +677,44 @@ describe('linear-webhook-processor handler', () => {
       const [, , message] = reportIssueFailureMock.mock.calls[0];
       expect(String(message)).toMatch(/couldn't safely process an attachment/i);
     });
+
+    test('fail-closed (review #5): a FAILED context probe rejects the task rather than run blind', async () => {
+      // Probe errored (500/timeout) → ok:false → we can't see native paperclips,
+      // so a paperclip-only spec could be silently missing. Reject, don't run.
+      probeLinearIssueContextMock.mockResolvedValueOnce({
+        attachmentTitles: [],
+        attachments: [],
+        projectName: null,
+        projectHasDocuments: false,
+        projectDocuments: [],
+        ok: false,
+        projectDocumentCount: 0,
+      });
+
+      await handler(eventWith(issue()));
+
+      expect(createTaskCoreMock).not.toHaveBeenCalled();
+      expect(reportIssueFailureMock).toHaveBeenCalledTimes(1);
+      const [, , message] = reportIssueFailureMock.mock.calls[0];
+      expect(String(message)).toMatch(/couldn't read this issue's attachments|errored or timed out/i);
+    });
+
+    test('a HEALTHY empty probe (ok:true) proceeds normally — no false rejection', async () => {
+      probeLinearIssueContextMock.mockResolvedValueOnce({
+        attachmentTitles: [],
+        attachments: [],
+        projectName: null,
+        projectHasDocuments: false,
+        projectDocuments: [],
+        ok: true,
+        projectDocumentCount: 0,
+      });
+
+      await handler(eventWith(issue()));
+
+      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+      expect(reportIssueFailureMock).not.toHaveBeenCalled();
+    });
   });
 
   // ─── Linear issue context probe (paperclip attachments + project docs) ──────
@@ -729,12 +767,16 @@ describe('linear-webhook-processor handler', () => {
       expect(reqBody.task_description).toContain('Users cannot log in.');
     });
 
-    test('prepends a hint about project documents when the project has wiki docs', async () => {
+    test('prepends a hint about project documents when the project has UNHYDRATED wiki docs', async () => {
+      // 2 docs exist but none were hydrated (empty body / over cap) → flag them.
       probeLinearIssueContextMock.mockResolvedValueOnce({
         attachmentTitles: [],
         attachments: [],
         projectName: 'Onboarding',
         projectHasDocuments: true,
+        projectDocuments: [],
+        projectDocumentCount: 2,
+        ok: true,
       });
 
       await handler(eventWith(issue()));
@@ -743,6 +785,43 @@ describe('linear-webhook-processor handler', () => {
       expect(reqBody.task_description).toContain('project "Onboarding"');
       expect(reqBody.task_description).toContain('wiki documents');
       expect(reqBody.task_description).not.toContain('mcp__linear-server');
+    });
+
+    test('does NOT flag docs when ALL of them were hydrated (review #6: only the remainder)', async () => {
+      probeLinearIssueContextMock.mockResolvedValueOnce({
+        attachmentTitles: [],
+        attachments: [],
+        projectName: 'Onboarding',
+        projectHasDocuments: true,
+        projectDocuments: [{ title: 'Spec', content: 'body' }],
+        projectDocumentCount: 1, // 1 total, 1 hydrated → nothing left to flag
+        ok: true,
+      });
+
+      await handler(eventWith(issue()));
+
+      const [reqBody] = createTaskCoreMock.mock.calls[0];
+      // The doc content is folded in; no "go find it" hint for a fully-included set.
+      expect(reqBody.task_description).not.toContain('not included here');
+    });
+
+    test('flags ONLY the remainder when SOME docs hydrated and others did not (review #6)', async () => {
+      probeLinearIssueContextMock.mockResolvedValueOnce({
+        attachmentTitles: [],
+        attachments: [],
+        projectName: 'Onboarding',
+        projectHasDocuments: true,
+        projectDocuments: [{ title: 'Spec', content: 'body' }], // 1 hydrated
+        projectDocumentCount: 3, // of 3 total → 2 unhydrated
+        ok: true,
+      });
+
+      await handler(eventWith(issue()));
+
+      const [reqBody] = createTaskCoreMock.mock.calls[0];
+      expect(reqBody.task_description).toContain('## Project documents'); // hydrated one folded in
+      expect(reqBody.task_description).toContain('2 wiki documents'); // remainder flagged
+      expect(reqBody.task_description).toContain('not included here');
     });
 
     test('omits the hint when probe finds nothing', async () => {
@@ -911,6 +990,8 @@ describe('probeLinearIssueContext', () => {
       projectHasDocuments: true,
       // Only the doc with real body content is hydrated; the whitespace-only one is dropped.
       projectDocuments: [{ title: 'API contract', content: 'The endpoint returns 204 on success.' }],
+      ok: true, // probe reached Linear + parsed (review #5)
+      projectDocumentCount: 2, // 2 docs reported; 1 had empty body (review #6)
     });
   });
 

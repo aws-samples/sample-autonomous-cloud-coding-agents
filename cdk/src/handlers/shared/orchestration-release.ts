@@ -269,7 +269,12 @@ export async function releaseChild(params: ReleaseChildParams): Promise<ReleaseC
   }
   const mergedAttachments = dedupedAttachments.slice(0, MAX_ATTACHMENTS_PER_TASK);
   if (dedupedAttachments.length > MAX_ATTACHMENTS_PER_TASK) {
-    logger.warn('Child attachment set over the per-task cap — trimming (parent-spec files dropped first)', {
+    // BACKSTOP only: the webhook processor caps a child's OWN attachments against
+    // the inherited count at stamp time AND posts a user-visible note there
+    // (review #4). Reaching here means the merged set still overflowed (e.g. the
+    // epic's own attachment set is large) — keep own-first ordering and log; this
+    // is not the primary user-facing path, so a warn is the right level.
+    logger.warn('Child attachment set over the per-task cap at release — trimming (parent-spec files dropped first; user already notified at stamp time)', {
       orchestration_id: row.orchestration_id,
       sub_issue_id: row.sub_issue_id,
       own_count: ownAttachments.length,

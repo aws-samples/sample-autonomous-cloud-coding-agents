@@ -15,6 +15,7 @@ from channel_mcp import (
     JIRA_MCP_SERVER_KEY,
     JIRA_MCP_URL,
     configure_channel_mcp,
+    strip_linear_mcp_servers,
 )
 
 
@@ -154,3 +155,60 @@ class TestJiraMerge:
         assert wrote is True
         merged = _read_mcp(str(tmp_path))
         assert JIRA_MCP_SERVER_KEY in merged["mcpServers"]
+
+
+class TestStripLinearMcpServers:
+    """ADR-016 ENFORCEMENT (review finding #1): a repo can't smuggle a Linear MCP
+    server in via a committed .mcp.json — it's stripped before the SDK reads it."""
+
+    def test_removes_linear_server_by_key(self, tmp_path):
+        (tmp_path / ".mcp.json").write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "linear-server": {"type": "http", "url": "https://mcp.linear.app/sse"},
+                        "other": {"command": "some-tool"},
+                    }
+                }
+            )
+        )
+        removed = strip_linear_mcp_servers(str(tmp_path))
+        assert removed == 1
+        servers = _read_mcp(str(tmp_path))["mcpServers"]
+        assert "linear-server" not in servers
+        assert "other" in servers  # unrelated servers survive
+
+    def test_removes_entry_named_innocuously_but_referencing_linear_url(self, tmp_path):
+        # A non-obvious key can't hide a Linear MCP — the value is scanned too.
+        (tmp_path / ".mcp.json").write_text(
+            json.dumps(
+                {"mcpServers": {"specs": {"type": "http", "url": "https://mcp.linear.app/sse"}}}
+            )
+        )
+        removed = strip_linear_mcp_servers(str(tmp_path))
+        assert removed == 1
+        assert _read_mcp(str(tmp_path))["mcpServers"] == {}
+
+    def test_removes_entry_reading_linear_api_token(self, tmp_path):
+        (tmp_path / ".mcp.json").write_text(
+            json.dumps(
+                {"mcpServers": {"lin": {"command": "mcp", "env": {"TOKEN": "${LINEAR_API_TOKEN}"}}}}
+            )
+        )
+        removed = strip_linear_mcp_servers(str(tmp_path))
+        assert removed == 1
+
+    def test_leaves_jira_and_other_servers_untouched(self, tmp_path):
+        configure_channel_mcp(str(tmp_path), "jira")  # writes jira-server
+        removed = strip_linear_mcp_servers(str(tmp_path))
+        assert removed == 0
+        assert JIRA_MCP_SERVER_KEY in _read_mcp(str(tmp_path))["mcpServers"]
+
+    def test_noop_when_no_file(self, tmp_path):
+        assert strip_linear_mcp_servers(str(tmp_path)) == 0
+
+    def test_noop_when_no_linear_entry(self, tmp_path):
+        (tmp_path / ".mcp.json").write_text(
+            json.dumps({"mcpServers": {"jira-server": {"type": "http", "url": JIRA_MCP_URL}}})
+        )
+        assert strip_linear_mcp_servers(str(tmp_path)) == 0

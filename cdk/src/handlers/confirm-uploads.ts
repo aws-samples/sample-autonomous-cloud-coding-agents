@@ -35,7 +35,7 @@ import { estimateImageTokensFromBuffer } from './shared/image-tokens';
 import { logger } from './shared/logger';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
 import { type AttachmentRecord, createAttachmentRecord, type TaskRecord, toTaskDetail } from './shared/types';
-import { computeTtlEpoch } from './shared/validation';
+import { computeTtlEpoch, MAX_TOTAL_ATTACHMENT_SIZE_BYTES } from './shared/validation';
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const s3Client = new S3Client({});
@@ -275,6 +275,30 @@ export async function handler(event: APIGatewayProxyEvent, context: Context): Pr
       const screened = screenedAttachments.find(s => s.attachment_id === existing.attachment_id);
       return screened ?? existing;
     });
+
+    // 8b. Aggregate-size ceiling ACROSS the fully-resolved set (review finding #2).
+    // At create-task time the presigned uploads were still `pending` with no known
+    // size, so create-task-core's total-size check couldn't count them — a client
+    // could presign N×10 MB files that individually pass but jointly blow the
+    // task-wide cap. Now that every upload is confirmed + screened its real
+    // size_bytes is known, so re-sum here and fail-closed before SUBMITTED.
+    const totalBytes = finalAttachments.reduce((sum, a) => sum + (a.size_bytes ?? 0), 0);
+    if (totalBytes > MAX_TOTAL_ATTACHMENT_SIZE_BYTES) {
+      logger.warn('Confirmed attachments exceed the task-wide size limit (fail-closed)', {
+        task_id: taskId,
+        total_bytes: totalBytes,
+        limit_bytes: MAX_TOTAL_ATTACHMENT_SIZE_BYTES,
+        attachment_count: finalAttachments.length,
+        request_id: requestId,
+        metric_type: 'attachment_total_size_exceeded',
+      });
+      await cleanupAllAttachments(task, taskId);
+      return errorResponse(
+        400, ErrorCode.VALIDATION_ERROR,
+        `Combined attachment size exceeds the ${MAX_TOTAL_ATTACHMENT_SIZE_BYTES}-byte task limit.`,
+        requestId,
+      );
+    }
 
     // 9. Transition to SUBMITTED
     return await transitionToSubmitted(task, finalAttachments, requestId);

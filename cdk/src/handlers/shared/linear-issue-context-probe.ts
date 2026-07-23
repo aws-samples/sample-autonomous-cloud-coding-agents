@@ -103,6 +103,22 @@ export interface LinearIssueContextProbe {
    * into the task description. Capped at {@link MAX_HYDRATED_PROJECT_DOCS}.
    */
   readonly projectDocuments: readonly LinearProbeDocument[];
+  /**
+   * Whether the probe actually reached Linear and parsed a result. `false` on a
+   * non-2xx / GraphQL error / network failure / timeout — in which case the
+   * empty arrays mean "we don't KNOW", not "there is nothing". Attachment
+   * hydration keys on this to fail-CLOSED (reject the task) rather than run blind
+   * when a paperclip-only spec could be silently missing (review finding #5). The
+   * doc/hint consumers stay advisory (fail-open) as before.
+   */
+  readonly ok: boolean;
+  /**
+   * Total project documents Linear reported (incl. empty-body / over-cap ones NOT
+   * in `projectDocuments`). Lets the hint flag "there are docs we didn't hand you"
+   * precisely — hydratedCount < totalCount — instead of suppressing the hint the
+   * moment ANY doc is hydrated (review finding #6).
+   */
+  readonly projectDocumentCount: number;
 }
 
 const EMPTY: LinearIssueContextProbe = {
@@ -111,7 +127,13 @@ const EMPTY: LinearIssueContextProbe = {
   projectName: null,
   projectHasDocuments: false,
   projectDocuments: [],
+  ok: true,
+  projectDocumentCount: 0,
 };
+
+/** Probe result for the FAILURE case — same empty shape but `ok:false` so a
+ *  caller can distinguish "unknown" from "genuinely empty". */
+const PROBE_FAILED: LinearIssueContextProbe = { ...EMPTY, ok: false };
 
 /**
  * Issue the GraphQL query. Returns an empty probe on any failure
@@ -139,7 +161,7 @@ export async function probeLinearIssueContext(
     });
     if (!resp.ok) {
       logger.warn('Linear issue context probe non-2xx', { status: resp.status, issue_id: issueId });
-      return EMPTY;
+      return PROBE_FAILED;
     }
     const body = (await resp.json()) as {
       data?: {
@@ -156,9 +178,11 @@ export async function probeLinearIssueContext(
     };
     if (body.errors) {
       logger.warn('Linear issue context probe graphql errors', { issue_id: issueId, errors: body.errors });
-      return EMPTY;
+      return PROBE_FAILED;
     }
     const issue = body.data?.issue;
+    // A well-formed 2xx GraphQL response whose `issue` is null/absent (deleted /
+    // not visible) is a genuine "nothing here", not a transport failure → ok:true.
     if (!issue) return EMPTY;
     const attachmentNodes = issue.attachments?.nodes ?? [];
     const attachmentTitles = attachmentNodes
@@ -176,13 +200,21 @@ export async function probeLinearIssueContext(
     const projectDocuments = documentNodes
       .filter((d): d is { title?: string; content: string } => typeof d?.content === 'string' && d.content.trim().length > 0)
       .map((d) => ({ title: typeof d.title === 'string' && d.title.trim() ? d.title.trim() : 'Untitled document', content: d.content }));
-    return { attachmentTitles, attachments, projectName, projectHasDocuments, projectDocuments };
+    return {
+      attachmentTitles,
+      attachments,
+      projectName,
+      projectHasDocuments,
+      projectDocuments,
+      ok: true,
+      projectDocumentCount: documentNodes.length,
+    };
   } catch (err) {
     logger.warn('Linear issue context probe request failed', {
       issue_id: issueId,
       error: err instanceof Error ? err.message : String(err),
     });
-    return EMPTY;
+    return PROBE_FAILED;
   } finally {
     clearTimeout(timer);
   }
@@ -211,16 +243,28 @@ export function renderIssueContextHint(probe: LinearIssueContextProbe): string {
       ? ` (+${probe.attachmentTitles.length - MAX_HINTED_ATTACHMENT_TITLES} more)` : '';
     bits.push(`paperclip attachments — ${titles}${more}`);
   }
-  // Only flag docs we did NOT hydrate content for (empty body, or over the cap).
-  // Hydrated docs are in the description already, so don't tell the agent to go
-  // hunt for them. (Default the array defensively — a hand-built probe object in
-  // a test may omit it.)
+  // Flag docs we did NOT hydrate content for — empty body, or beyond the
+  // hydration cap. Hydrated docs are in the description already, so don't tell
+  // the agent to hunt for them; but if SOME docs were left out (hydrated < total)
+  // still flag the remainder (review finding #6 — a single hydrated doc used to
+  // suppress the hint for all the others). Default arrays defensively — a
+  // hand-built probe object in a test may omit the newer fields.
   const hydratedDocCount = (probe.projectDocuments ?? []).length;
-  const unhydratedDocs = probe.projectHasDocuments && hydratedDocCount === 0;
-  if (unhydratedDocs && probe.projectName) {
-    bits.push(`project "${probe.projectName}" has wiki documents`);
-  } else if (unhydratedDocs) {
-    bits.push('the project has wiki documents');
+  // Prefer the exact count; when a probe object omits it (older shape / test
+  // mock), infer: hydrated>0 → assume those are all (no extra); else if docs are
+  // known to exist → treat as ≥1 unhydrated so the presence hint still fires.
+  const totalDocCount = typeof probe.projectDocumentCount === 'number'
+    ? probe.projectDocumentCount
+    : (hydratedDocCount > 0 ? hydratedDocCount : (probe.projectHasDocuments ? 1 : 0));
+  const unhydratedDocCount = Math.max(0, totalDocCount - hydratedDocCount);
+  if (unhydratedDocCount > 0) {
+    const noun = unhydratedDocCount === 1 ? 'wiki document' : `${unhydratedDocCount} wiki documents`;
+    const qualifier = hydratedDocCount > 0 ? ' (empty or beyond the included set)' : '';
+    if (probe.projectName) {
+      bits.push(`project "${probe.projectName}" has ${noun}${qualifier} not included here`);
+    } else {
+      bits.push(`the project has ${noun}${qualifier} not included here`);
+    }
   }
   if (bits.length === 0) return '';
   return (

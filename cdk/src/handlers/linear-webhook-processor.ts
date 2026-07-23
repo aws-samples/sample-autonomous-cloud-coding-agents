@@ -369,6 +369,11 @@ async function hydrateChildrenOwnAttachments(
   platformUserId: string,
   accessToken: string,
   orchestrationId: string,
+  /** Count of parent-epic attachments every child inherits — used to trim a
+   *  child's OWN set so the merged (own + inherited) total never exceeds the cap
+   *  in releaseChild, and to NOTIFY the user which own files won't fit (review
+   *  finding #4 — no silent drop). */
+  inheritedCount: number,
 ): Promise<number> {
   if (!attachmentsS3Client || !ATTACHMENTS_BUCKET || !attachmentsScreeningConfig) return 0;
   const now = new Date().toISOString();
@@ -413,8 +418,33 @@ async function hydrateChildrenOwnAttachments(
         continue;
       }
       if (hydrated.records.length > 0) {
-        await setChildOwnAttachments(ddb, ORCHESTRATION_TABLE!, orchestrationId, child.sub_issue_id, hydrated.records, now);
-        stamped++;
+        // Review #4: cap the child's OWN set so own + inherited-parent ≤ the
+        // per-task limit, and SURFACE any drop (releaseChild's slice was a silent
+        // truncation — the very pattern the single-task path is loud about). Own
+        // files are kept ahead of the shared epic spec (most relevant to THIS
+        // piece); a note names what won't be included so the user can trim/split.
+        const ownBudget = Math.max(0, MAX_ATTACHMENTS_PER_TASK - inheritedCount);
+        const kept = hydrated.records.slice(0, ownBudget);
+        if (kept.length < hydrated.records.length) {
+          const dropped = hydrated.records.slice(kept.length).map((r) => r.filename).join(', ');
+          await safeReportIssueFailure(
+            child.sub_issue_id, workspaceId,
+            `⚠️ This sub-issue has more attachments than fit the ${MAX_ATTACHMENTS_PER_TASK}-file per-task limit `
+            + `once the epic's ${inheritedCount} shared file(s) are included, so these were NOT sent to the agent: `
+            + `${dropped}. Remove some attachments (here or on the epic) and re-apply the trigger label if the agent needs them.`,
+          );
+          logger.warn('Child own attachments trimmed to per-task cap — user notified', {
+            orchestration_id: orchestrationId,
+            sub_issue_id: child.sub_issue_id,
+            own: hydrated.records.length,
+            inherited: inheritedCount,
+            kept: kept.length,
+          });
+        }
+        if (kept.length > 0) {
+          await setChildOwnAttachments(ddb, ORCHESTRATION_TABLE!, orchestrationId, child.sub_issue_id, kept, now);
+          stamped++;
+        }
       }
     } catch (err) {
       logger.warn('Child own-attachment hydrate/persist failed (non-fatal)', {
@@ -806,6 +836,11 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   // Project wiki documents WITH content (ADR-016 doc pre-hydration) — screened +
   // folded into the task description below.
   let probedDocuments: readonly LinearProbeDocument[] = [];
+  // Whether the context probe actually reached Linear (review finding #5). When
+  // it FAILED (500/timeout), an empty `probedAttachments` means "unknown", not
+  // "none" — so a paperclip-only spec could be silently missing. Attachment
+  // hydration fails-closed on this rather than run blind.
+  let probeOk = true;
   if (WORKSPACE_REGISTRY_TABLE) {
     const resolved = await resolveLinearOauthToken(workspaceId, WORKSPACE_REGISTRY_TABLE);
     if (!resolved) {
@@ -826,6 +861,10 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     contextHint = renderIssueContextHint(probe);
     probedAttachments = probe.attachments ?? [];
     probedDocuments = probe.projectDocuments ?? [];
+    // Only an EXPLICIT false means the probe failed; treat a probe object missing
+    // the field (older shape / a hand-built test mock) as ok to avoid falsely
+    // rejecting every task.
+    probeOk = probe.ok !== false;
   }
 
   // #247 Mode A — parent/sub-issue orchestration. Env-var gated: until
@@ -862,6 +901,18 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     const graphResult = await graphSource();
     let epicAttachments: PassedAttachmentRecord[] = [];
     if (graphResult.kind === 'ok') {
+      // Review #5: a failed context probe means we can't see the parent's native
+      // paperclips — don't seed a whole epic whose children would inherit a spec
+      // we couldn't read. Fail-closed (the graph fetch above succeeded, so this
+      // is specifically an attachment-probe failure).
+      if (!probeOk) {
+        await safeReportIssueFailure(
+          issue.id, workspaceId,
+          "❌ ABCA couldn't read this epic's attachments from Linear (the API errored or timed out). "
+          + 'Re-apply the trigger label to retry rather than run the sub-issues on a possibly-missing spec.',
+        );
+        return;
+      }
       const hydrated = await hydrateLinearIssueAttachments(
         issue, workspaceId, platformUserId, resolvedAccessToken,
         `epic-${issue.id}`, 10, probedAttachments,
@@ -941,6 +992,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
         const stamped = await hydrateChildrenOwnAttachments(
           snapshot.children, workspaceId, snapshot.meta.release_context.platform_user_id,
           resolvedAccessToken, discovery.orchestrationId,
+          epicAttachments.length,
         );
         if (stamped > 0) {
           snapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId);
@@ -1039,7 +1091,29 @@ export async function handler(event: ProcessorEvent): Promise<void> {
         });
         return;
       }
-      const snapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId);
+      let snapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId);
+      // Review #3: hydrate the NEWLY-ADDED children's OWN attachments too — the
+      // seed-time pass only saw the original children, so a sub-issue added to an
+      // existing epic (with its own mockup) would otherwise release without it.
+      // Scope to just the added ids; reuse the meta row's inherited parent count
+      // for the per-task cap. Re-load so releaseReadyChildren sees stamped rows.
+      // (The parent epic's OWN attachments stay frozen-at-first-seed by design —
+      // see the retrigger note below; children still inherit the original spec.)
+      if (snapshot && resolvedAccessToken) {
+        const addedChildren = snapshot.children.filter(
+          (c) => discovery.addedSubIssueIds.includes(c.sub_issue_id),
+        );
+        if (addedChildren.length > 0) {
+          const inheritedCount = (snapshot.meta.release_context.pre_screened_attachments ?? []).length;
+          const stamped = await hydrateChildrenOwnAttachments(
+            addedChildren, workspaceId, snapshot.meta.release_context.platform_user_id,
+            resolvedAccessToken, discovery.orchestrationId, inheritedCount,
+          );
+          if (stamped > 0) {
+            snapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId);
+          }
+        }
+      }
       let releasedAdded = 0;
       if (snapshot) {
         // Release only the newly-added 'ready' nodes. Pass the FULL child set
@@ -1272,6 +1346,21 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   // Mint the taskId up-front so pre-screened attachment S3 keys match the
   // eventual task record (createTaskCore honors ctx.taskId). Mirrors Jira #619.
   const taskId = ulid();
+
+  // Review #5: if the context probe FAILED, we can't see native paperclips —
+  // a paperclip-only spec would silently vanish. Fail-closed rather than run the
+  // agent blind. (A description-embedded uploads link would still be caught by
+  // the hydrate below, but a paperclip attached with no link in the body is only
+  // discoverable via the probe.) Only rejects when the probe genuinely errored;
+  // a healthy empty probe proceeds as before.
+  if (resolvedAccessToken && !probeOk) {
+    await safeReportIssueFailure(
+      issue.id, workspaceId,
+      "❌ ABCA couldn't read this issue's attachments from Linear (the API errored or timed out). "
+      + 'Re-apply the trigger label to retry — this avoids running on a spec that may be attached but unreadable.',
+    );
+    return;
+  }
 
   // ADR-016: fetch uploads.linear.app files with the workspace OAuth token,
   // screen, store, inject as preScreenedAttachments (finding #1). Fail-closed via
