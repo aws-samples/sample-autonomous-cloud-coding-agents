@@ -28,13 +28,23 @@ import {
   ResourceExistsException,
   SecretsManagerClient,
 } from '@aws-sdk/client-secrets-manager';
-import { DynamoDBDocumentClient, GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
+import {
+  DynamoDBDocumentClient,
+  GetCommand,
+  PutCommand,
+  UpdateCommand,
+} from '@aws-sdk/lib-dynamodb';
 import { Command } from 'commander';
 import { ApiClient } from '../api-client';
 import { loadConfig, loadCredentials } from '../config';
 import { CliError } from '../errors';
 import { formatJson } from '../format';
 import { generateInviteCode } from '../invite-code';
+import {
+  JIRA_APP_ACTOR_MIN_SECRET_LENGTH,
+  probeJiraAppActor,
+  validateJiraAppActorProxyUrl,
+} from '../jira-app-actor';
 import {
   buildAuthorizationUrl,
   computeExpiresAt,
@@ -113,6 +123,22 @@ export function renderJiraAppTemplate(opts: JiraAppTemplateOptions = {}): string
     '    it as a togglable scope.',
     '  • The localhost callback removes the self-signed-cert browser warning',
     '    and works without a public hostname on the operator\'s machine.',
+    '',
+    'Dedicated outbound app identity (Forge):',
+    '  1. Open integrations/jira-forge-app in this repository.',
+    '  2. Run `npm install`, then `forge register bgagent`.',
+    '  3. Set a 32+ character shared secret in Forge:',
+    '       BGAGENT_PROXY_SECRET="$(openssl rand -hex 32)"',
+    '       forge variables set --encrypt BGAGENT_PROXY_SECRET "$BGAGENT_PROXY_SECRET"',
+    '  4. Run `forge deploy`, `forge install`, then `forge webtrigger create`.',
+    '     Select the bgagent-outbound trigger and copy its v2 URL.',
+    '  5. Register the same secret and URL with ABCA:',
+    '       bgagent jira app-setup <cloud-id> --proxy-url <forge-v2-url>',
+    '     Paste BGAGENT_PROXY_SECRET into the hidden prompt.',
+    '',
+    'The OAuth app remains required for inbound reads and user lookup. Forge',
+    'is the outbound writer: api.asApp().requestJira makes comments and',
+    'workflow transitions appear from the dedicated Jira app account.',
     bar,
   ].join('\n');
 }
@@ -158,12 +184,11 @@ export async function upsertOauthSecret(
   payload: StoredJiraOauthToken,
   cloudId: string,
 ): Promise<string> {
-  const secretString = JSON.stringify(payload);
   try {
     const create = await client.send(new CreateSecretCommand({
       Name: secretName,
       Description: `Jira OAuth token for tenant '${cloudId}'`,
-      SecretString: secretString,
+      SecretString: JSON.stringify(payload),
       Tags: [
         { Key: 'bgagent:integration', Value: 'jira' },
         { Key: 'bgagent:jira:cloud_id', Value: cloudId },
@@ -175,9 +200,35 @@ export async function upsertOauthSecret(
     return create.ARN;
   } catch (err) {
     if (err instanceof ResourceExistsException) {
+      // Re-running OAuth setup must not erase a previously configured Forge
+      // app actor. Preserve only the known app fields from the existing
+      // bundle; all OAuth/webhook fields come from the fresh setup payload.
+      let nextPayload = payload;
+      const existing = await client.send(new GetSecretValueCommand({ SecretId: secretName }));
+      if (existing.SecretString) {
+        try {
+          const value = JSON.parse(existing.SecretString) as Partial<StoredJiraOauthToken>;
+          nextPayload = {
+            ...payload,
+            ...(typeof value.app_actor_proxy_url === 'string'
+              && { app_actor_proxy_url: value.app_actor_proxy_url }),
+            ...(typeof value.app_actor_shared_secret === 'string'
+              && { app_actor_shared_secret: value.app_actor_shared_secret }),
+            ...(typeof value.app_actor_account_id === 'string'
+              && { app_actor_account_id: value.app_actor_account_id }),
+            ...(typeof value.app_actor_display_name === 'string'
+              && { app_actor_display_name: value.app_actor_display_name }),
+            ...(typeof value.app_actor_configured_at === 'string'
+              && { app_actor_configured_at: value.app_actor_configured_at }),
+          };
+        } catch { // nosemgrep: ts-silent-success-masking -- OAuth setup intentionally replaces malformed secret JSON
+          // OAuth setup is the recovery path for malformed secret JSON. It
+          // deliberately replaces the bad value instead of preserving it.
+        }
+      }
       const put = await client.send(new PutSecretValueCommand({
         SecretId: secretName,
-        SecretString: secretString,
+        SecretString: JSON.stringify(nextPayload),
       }));
       if (!put.ARN) {
         throw new CliError(`PutSecretValue returned no ARN for '${secretName}'.`);
@@ -431,7 +482,7 @@ async function getStackOutput(region: string, stackName: string, outputKey: stri
     const name = (err as Error)?.name ?? '';
     const message = (err as Error)?.message ?? '';
     if (name === 'ValidationError' && /does not exist/i.test(message)) {
-      return null;
+      return null; // nosemgrep: ts-silent-success-masking -- missing stack is the lookup helper's null contract
     }
     throw err;
   }
@@ -444,7 +495,7 @@ export function makeJiraCommand(): Command {
   // ─── app-template ─────────────────────────────────────────────────────────
   jira.addCommand(
     new Command('app-template')
-      .description('Print the field values to paste into Atlassian\'s developer-console OAuth app form')
+      .description('Print the Jira OAuth and Forge app identity setup template')
       .option('--developer-name <name>', 'Developer name shown on Atlassian\'s consent screen')
       .option('--description <text>', 'App description shown on Atlassian\'s consent screen')
       .option('--callback-url <url>', 'OAuth callback URL (defaults to localhost:8080/oauth/callback)')
@@ -639,16 +690,29 @@ export function makeJiraCommand(): Command {
 
         // ─── Step 5: Persist registry row ────────────────────────────────
         const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
-        await ddb.send(new PutCommand({
+        // Update instead of replacing the row so re-running OAuth setup keeps
+        // app-actor audit metadata written by `jira app-setup`.
+        await ddb.send(new UpdateCommand({
           TableName: workspaceRegistryTable!,
-          Item: {
-            jira_cloud_id: cloudId,
-            site_url: siteUrl,
-            oauth_secret_arn: oauthSecretArn,
-            installed_by_platform_user_id: cognitoSub,
-            installed_at: now,
-            updated_at: now,
-            status: 'active',
+          Key: { jira_cloud_id: cloudId },
+          UpdateExpression: [
+            'SET site_url = :siteUrl',
+            'oauth_secret_arn = :oauthSecretArn',
+            'installed_by_platform_user_id = :installedBy',
+            'installed_at = :installedAt',
+            'updated_at = :updatedAt',
+            '#status = :status',
+          ].join(', '),
+          ExpressionAttributeNames: {
+            '#status': 'status',
+          },
+          ExpressionAttributeValues: {
+            ':siteUrl': siteUrl,
+            ':oauthSecretArn': oauthSecretArn,
+            ':installedBy': cognitoSub,
+            ':installedAt': now,
+            ':updatedAt': now,
+            ':status': 'active',
           },
         }));
         console.log('  ✓ Recorded tenant in registry');
@@ -708,12 +772,137 @@ export function makeJiraCommand(): Command {
         console.log('✅ Setup complete.');
         console.log();
         console.log('Next steps:');
-        console.log('  1. Map a Jira project to a GitHub repo:');
+        console.log('  1. Install the Forge app identity, then register its v2 web-trigger URL:');
+        console.log(`       bgagent jira app-setup ${cloudId} --proxy-url <forge-v2-url>`);
+        console.log('  2. Map a Jira project to a GitHub repo:');
         console.log(`       bgagent jira map ${cloudId} <PROJECT-KEY> --repo owner/repo`);
-        console.log('  2. Link your Jira account so triggered tasks attribute to your platform user:');
+        console.log('  3. Link your Jira account so triggered tasks attribute to your platform user:');
         console.log(`       bgagent jira invite-user ${cloudId} <account-id-or-email>`);
         console.log('       bgagent jira link <code>');
-        console.log(`  3. Add the trigger label '${DEFAULT_LABEL_FILTER}' to a Jira issue in a mapped project.`);
+        console.log(`  4. Add the trigger label '${DEFAULT_LABEL_FILTER}' to a Jira issue in a mapped project.`);
+      }),
+  );
+
+  // ─── app-setup ───────────────────────────────────────────────────────────
+  jira.addCommand(
+    new Command('app-setup')
+      .description('Configure the dedicated Jira Forge app identity for outbound writes')
+      .argument('<cloud-id>', 'Atlassian tenant cloudId (UUID)')
+      .requiredOption('--proxy-url <url>', 'v2 URL from `forge webtrigger create`')
+      .option('--shared-secret <secret>', 'Forge BGAGENT_PROXY_SECRET (else prompted; prefer interactive)')
+      .option('--region <region>', 'AWS region (defaults to configured region)')
+      .option('--stack-name <name>', 'CloudFormation stack name', 'backgroundagent-dev')
+      .action(async (cloudId: string, opts) => {
+        const config = loadConfig();
+        const region = opts.region || config.region;
+        const registryTableName = await getStackOutput(
+          region,
+          opts.stackName,
+          'JiraWorkspaceRegistryTableName',
+        );
+        if (!registryTableName) {
+          throw new CliError(
+            `Stack '${opts.stackName}' is missing output JiraWorkspaceRegistryTableName. `
+            + 'Deploy the Jira integration before configuring its app identity.',
+          );
+        }
+
+        const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
+        const registry = await ddb.send(new GetCommand({
+          TableName: registryTableName,
+          Key: { jira_cloud_id: cloudId },
+        }));
+        const row = registry.Item;
+        if (!row || row.status !== 'active' || typeof row.oauth_secret_arn !== 'string') {
+          throw new CliError(
+            `Jira tenant '${cloudId}' is not active in the workspace registry. `
+            + 'Run `bgagent jira setup` first.',
+          );
+        }
+
+        const sharedSecret = (
+          opts.sharedSecret ?? await promptSecret('Forge BGAGENT_PROXY_SECRET: ')
+        ).trim();
+        if (sharedSecret.length < JIRA_APP_ACTOR_MIN_SECRET_LENGTH) {
+          throw new CliError('Forge proxy shared secret must be at least 32 characters.');
+        }
+        const proxyUrl = validateJiraAppActorProxyUrl(opts.proxyUrl);
+
+        const sm = new SecretsManagerClient({ region });
+        const secretResult = await sm.send(new GetSecretValueCommand({
+          SecretId: row.oauth_secret_arn as string,
+        }));
+        const stored = parseStoredJiraOauthToken(
+          secretResult.SecretString,
+          row.oauth_secret_arn as string,
+        );
+        if (stored.cloud_id !== cloudId) {
+          throw new CliError(
+            `Jira OAuth secret cloud_id '${stored.cloud_id}' does not match requested tenant '${cloudId}'.`,
+          );
+        }
+
+        process.stdout.write('  → Verifying Forge app identity...');
+        const identity = await probeJiraAppActor({
+          proxyUrl,
+          sharedSecret,
+          cloudId,
+          siteUrl: stored.site_url,
+        });
+        console.log(` ✓ (${identity.display_name}, accountType=app)`);
+
+        // The identity probe is a network round trip. Re-read the bundle
+        // afterward so a concurrent Lambda token refresh is not overwritten
+        // with the stale access/refresh pair read before the probe.
+        const latestSecret = await sm.send(new GetSecretValueCommand({
+          SecretId: row.oauth_secret_arn as string,
+        }));
+        const latestStored = parseStoredJiraOauthToken(
+          latestSecret.SecretString,
+          row.oauth_secret_arn as string,
+        );
+        if (latestStored.cloud_id !== cloudId) {
+          throw new CliError(
+            `Jira OAuth secret cloud_id '${latestStored.cloud_id}' changed during setup; retry.`,
+          );
+        }
+        const now = new Date().toISOString();
+        const updated: StoredJiraOauthToken = {
+          ...latestStored,
+          app_actor_proxy_url: proxyUrl,
+          app_actor_shared_secret: sharedSecret,
+          app_actor_account_id: identity.account_id,
+          app_actor_display_name: identity.display_name,
+          app_actor_configured_at: now,
+          updated_at: now,
+        };
+        await sm.send(new PutSecretValueCommand({
+          SecretId: row.oauth_secret_arn as string,
+          SecretString: JSON.stringify(updated),
+        }));
+        await ddb.send(new UpdateCommand({
+          TableName: registryTableName,
+          Key: { jira_cloud_id: cloudId },
+          UpdateExpression: [
+            'SET outbound_identity = :identity',
+            'app_actor_account_id = :account',
+            'app_actor_display_name = :display',
+            'app_actor_configured_at = :configured',
+            'updated_at = :updated',
+          ].join(', '),
+          ExpressionAttributeValues: {
+            ':identity': 'app',
+            ':account': identity.account_id,
+            ':display': identity.display_name,
+            ':configured': now,
+            ':updated': now,
+          },
+        }));
+
+        console.log('✅ Jira outbound app identity configured.');
+        console.log(`  tenant:  ${cloudId}`);
+        console.log(`  identity: ${identity.display_name} (${identity.account_id})`);
+        console.log('  3LO remains available for inbound reads; outbound failures will not fall back to it.');
       }),
   );
 

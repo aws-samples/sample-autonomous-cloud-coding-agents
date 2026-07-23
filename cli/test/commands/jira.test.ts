@@ -19,10 +19,11 @@
 
 import {
   CreateSecretCommand,
+  GetSecretValueCommand,
   PutSecretValueCommand,
   ResourceExistsException,
 } from '@aws-sdk/client-secrets-manager';
-import { GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { ApiClient } from '../../src/api-client';
 import {
   isWebhookSecretConfigured,
@@ -35,6 +36,15 @@ import {
 import * as config from '../../src/config';
 import { generateInviteCode, INVITE_CODE_ALPHABET } from '../../src/invite-code';
 import type { StoredJiraOauthToken } from '../../src/jira-oauth';
+
+const probeJiraAppActorMock = jest.fn();
+jest.mock('../../src/jira-app-actor', () => {
+  const actual = jest.requireActual('../../src/jira-app-actor');
+  return {
+    ...actual,
+    probeJiraAppActor: (...args: unknown[]) => probeJiraAppActorMock(...args),
+  };
+});
 
 // child_process.execFile — `openBrowser` shells out to the OS opener.
 const execFileMock = jest.fn();
@@ -120,7 +130,14 @@ describe('makeJiraCommand', () => {
     const cmd = makeJiraCommand();
     expect(cmd.name()).toBe('jira');
     const names = cmd.commands.map((c) => c.name()).sort();
-    expect(names).toEqual(expect.arrayContaining(['app-template', 'setup', 'invite-user', 'link', 'map']));
+    expect(names).toEqual(expect.arrayContaining([
+      'app-setup',
+      'app-template',
+      'setup',
+      'invite-user',
+      'link',
+      'map',
+    ]));
   });
 
   test('`map` exposes a --label option defaulting to the trigger label', () => {
@@ -923,6 +940,116 @@ describe('jira setup action', () => {
   });
 });
 
+describe('jira app-setup action', () => {
+  let loadConfigSpy: jest.SpiedFunction<typeof config.loadConfig>;
+  let logSpy: jest.SpiedFunction<typeof console.log>;
+  let writeSpy: jest.SpiedFunction<typeof process.stdout.write>;
+
+  beforeEach(() => {
+    loadConfigSpy = jest.spyOn(config, 'loadConfig').mockReturnValue({
+      region: 'us-west-2',
+    } as ReturnType<typeof config.loadConfig>);
+    logSpy = jest.spyOn(console, 'log').mockImplementation();
+    writeSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    cfnSend.mockReset().mockResolvedValue({
+      Stacks: [{
+        Outputs: [
+          { OutputKey: 'JiraWorkspaceRegistryTableName', OutputValue: 'JiraRegistry' },
+        ],
+      }],
+    });
+    ddbSend.mockReset().mockImplementation((command: unknown) => {
+      if (command instanceof GetCommand) {
+        return {
+          Item: {
+            jira_cloud_id: 'cloud-123',
+            status: 'active',
+            oauth_secret_arn: 'arn:jira-oauth',
+          },
+        };
+      }
+      return {};
+    });
+    smSend.mockReset().mockImplementation((command: unknown) => {
+      if (command instanceof GetSecretValueCommand) {
+        return { SecretString: JSON.stringify(sampleToken()) };
+      }
+      return {};
+    });
+    probeJiraAppActorMock.mockReset().mockResolvedValue({
+      account_id: 'app-account-1',
+      account_type: 'app',
+      display_name: 'bgagent',
+      site_url: 'https://acme.atlassian.net',
+    });
+  });
+
+  afterEach(() => {
+    loadConfigSpy.mockRestore();
+    logSpy.mockRestore();
+    writeSpy.mockRestore();
+  });
+
+  test('verifies and stores the app actor without replacing the OAuth bundle', async () => {
+    const program = makeJiraCommand();
+    await program.parseAsync([
+      'node',
+      'bgagent',
+      'app-setup',
+      'cloud-123',
+      '--proxy-url',
+      'https://install.webtrigger.atlassian.app/public/trigger',
+      '--shared-secret',
+      's'.repeat(64),
+    ]);
+
+    expect(probeJiraAppActorMock).toHaveBeenCalledWith({
+      proxyUrl: 'https://install.webtrigger.atlassian.app/public/trigger',
+      sharedSecret: 's'.repeat(64),
+      cloudId: 'cloud-123',
+      siteUrl: 'https://acme.atlassian.net',
+    });
+    const put = smSend.mock.calls
+      .map((call) => call[0])
+      .find((command) => command instanceof PutSecretValueCommand) as PutSecretValueCommand;
+    const stored = JSON.parse(put.input.SecretString!);
+    expect(stored).toMatchObject({
+      access_token: 'access-xyz',
+      app_actor_proxy_url: 'https://install.webtrigger.atlassian.app/public/trigger',
+      app_actor_shared_secret: 's'.repeat(64),
+      app_actor_account_id: 'app-account-1',
+      app_actor_display_name: 'bgagent',
+    });
+    const update = ddbSend.mock.calls
+      .map((call) => call[0])
+      .find((command) => command instanceof UpdateCommand) as UpdateCommand;
+    expect(update.input.ExpressionAttributeValues).toMatchObject({
+      ':identity': 'app',
+      ':account': 'app-account-1',
+      ':display': 'bgagent',
+    });
+  });
+
+  test('does not store configuration when the identity probe fails', async () => {
+    probeJiraAppActorMock.mockRejectedValueOnce(new Error('not an app'));
+    const program = makeJiraCommand();
+
+    await expect(program.parseAsync([
+      'node',
+      'bgagent',
+      'app-setup',
+      'cloud-123',
+      '--proxy-url',
+      'https://install.webtrigger.atlassian.app/public/trigger',
+      '--shared-secret',
+      's'.repeat(64),
+    ])).rejects.toThrow('not an app');
+
+    expect(smSend.mock.calls.some((call) => call[0] instanceof PutSecretValueCommand)).toBe(false);
+    expect(ddbSend.mock.calls.some((call) => call[0] instanceof UpdateCommand)).toBe(false);
+  });
+});
+
 describe('jira map action', () => {
   let loadConfigSpy: jest.SpiedFunction<typeof config.loadConfig>;
   let consoleLogSpy: jest.SpiedFunction<typeof console.log>;
@@ -997,6 +1124,8 @@ describe('renderJiraAppTemplate', () => {
     const out = renderJiraAppTemplate();
     expect(out).toContain('bgagent — ABCA');
     expect(out).toContain('read:jira-work, write:jira-work, read:jira-user');
+    expect(out).toContain('Dedicated outbound app identity (Forge)');
+    expect(out).toContain('api.asApp().requestJira');
   });
 
   test('honors developerName / description / callbackUrl overrides', () => {
@@ -1029,10 +1158,42 @@ describe('upsertOauthSecret', () => {
   test('falls back to PutSecretValue when the secret already exists', async () => {
     mockSend
       .mockRejectedValueOnce(new ResourceExistsException({ message: 'exists', $metadata: {} }))
+      .mockResolvedValueOnce({})
       .mockResolvedValueOnce({ ARN: 'arn:existing' });
     const arn = await upsertOauthSecret(mockClient, 'bgagent-jira-oauth-cloud-123', sampleToken(), 'cloud-123');
     expect(arn).toBe('arn:existing');
-    expect(mockSend.mock.calls[1][0]).toBeInstanceOf(PutSecretValueCommand);
+    expect(mockSend.mock.calls[1][0]).toBeInstanceOf(GetSecretValueCommand);
+    expect(mockSend.mock.calls[2][0]).toBeInstanceOf(PutSecretValueCommand);
+  });
+
+  test('preserves app actor fields when OAuth setup is re-run', async () => {
+    mockSend
+      .mockRejectedValueOnce(new ResourceExistsException({ message: 'exists', $metadata: {} }))
+      .mockResolvedValueOnce({
+        SecretString: JSON.stringify(sampleToken({
+          app_actor_proxy_url: 'https://install.webtrigger.atlassian.app/public/trigger',
+          app_actor_shared_secret: 's'.repeat(64),
+          app_actor_account_id: 'app-account-1',
+          app_actor_display_name: 'bgagent',
+          app_actor_configured_at: '2026-07-23T00:00:00.000Z',
+        })),
+      })
+      .mockResolvedValueOnce({ ARN: 'arn:existing' });
+
+    await upsertOauthSecret(
+      mockClient,
+      'bgagent-jira-oauth-cloud-123',
+      sampleToken({ access_token: 'new-oauth-token' }),
+      'cloud-123',
+    );
+
+    const put = mockSend.mock.calls[2][0] as PutSecretValueCommand;
+    expect(JSON.parse(put.input.SecretString!)).toMatchObject({
+      access_token: 'new-oauth-token',
+      app_actor_proxy_url: 'https://install.webtrigger.atlassian.app/public/trigger',
+      app_actor_shared_secret: 's'.repeat(64),
+      app_actor_account_id: 'app-account-1',
+    });
   });
 
   test('rethrows non-ResourceExists errors', async () => {
@@ -1054,6 +1215,7 @@ describe('upsertOauthSecret', () => {
   test('throws when PutSecretValue (existing-secret path) returns no ARN', async () => {
     mockSend
       .mockRejectedValueOnce(new ResourceExistsException({ message: 'exists', $metadata: {} }))
+      .mockResolvedValueOnce({})
       .mockResolvedValueOnce({});
     await expect(
       upsertOauthSecret(mockClient, 'bgagent-jira-oauth-cloud-123', sampleToken(), 'cloud-123'),

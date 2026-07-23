@@ -1,5 +1,6 @@
 """Unit tests for config.py — build_config and constants."""
 
+import os
 from datetime import UTC
 from unittest.mock import MagicMock, patch
 
@@ -548,6 +549,29 @@ class TestResolveJiraOauthToken:
             assert resolve_jira_oauth_token() == ""
             mock_boto.assert_not_called()
 
+    def test_metadata_bound_task_clears_stale_app_actor_when_secret_arn_missing(
+        self,
+        monkeypatch,
+    ):
+        """A malformed next task cannot inherit another tenant's Forge credentials."""
+        monkeypatch.delenv("JIRA_OAUTH_SECRET_ARN", raising=False)
+        monkeypatch.setenv("JIRA_API_TOKEN", "previous-human-token")
+        monkeypatch.setenv("JIRA_APP_ACTOR_CONFIGURED", "1")
+        monkeypatch.setenv(
+            "JIRA_APP_ACTOR_PROXY_URL",
+            "https://previous.webtrigger.atlassian.app/public/trigger",
+        )
+        monkeypatch.setenv("JIRA_APP_ACTOR_SHARED_SECRET", "s" * 64)
+
+        with patch("boto3.client") as mock_boto:
+            assert resolve_jira_oauth_token({"jira_cloud_id": "next-tenant"}) == ""
+            mock_boto.assert_not_called()
+
+        assert "JIRA_API_TOKEN" not in os.environ
+        assert "JIRA_APP_ACTOR_CONFIGURED" not in os.environ
+        assert "JIRA_APP_ACTOR_PROXY_URL" not in os.environ
+        assert "JIRA_APP_ACTOR_SHARED_SECRET" not in os.environ
+
     def test_returns_empty_when_region_missing(self, monkeypatch):
         """No region → can't construct boto3 client → empty + WARN, no SDK call."""
         monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
@@ -591,6 +615,69 @@ class TestResolveJiraOauthToken:
         assert _os.environ.get("JIRA_API_TOKEN") == "jira_oauth_fresh"
         # Reset for other tests.
         monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
+
+    def test_resolves_forge_app_actor_even_when_oauth_token_is_expiring(self, monkeypatch):
+        """Forge credentials are independent of the human 3LO token lifetime."""
+        import json
+        from datetime import datetime, timedelta
+
+        monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        soon = (datetime.now(UTC) + timedelta(seconds=10)).isoformat().replace("+00:00", "Z")
+        token_payload = {
+            "access_token": "expired-human-token",
+            "refresh_token": "refresh",
+            "expires_at": soon,
+            "scope": "read:jira-work write:jira-work",
+            "client_id": "cid",
+            "client_secret": "csec",
+            "cloud_id": "cloud-uuid",
+            "site_url": "https://acme.atlassian.net",
+            "installed_at": "2026-05-19T08:00:00Z",
+            "updated_at": "2026-05-19T08:00:00Z",
+            "installed_by_platform_user_id": "cog-sub",
+            "app_actor_proxy_url": ("https://install.webtrigger.atlassian.app/public/trigger"),
+            "app_actor_shared_secret": "s" * 64,
+            "app_actor_configured_at": "2026-07-23T00:00:00Z",
+        }
+        mock_sm = MagicMock()
+        mock_sm.get_secret_value.return_value = {"SecretString": json.dumps(token_payload)}
+
+        with patch("boto3.client", return_value=mock_sm):
+            assert resolve_jira_oauth_token({"jira_oauth_secret_arn": "arn:test"}) == ""
+
+        assert os.environ["JIRA_APP_ACTOR_CONFIGURED"] == "1"
+        assert os.environ["JIRA_APP_ACTOR_PROXY_URL"].endswith("/public/trigger")
+        assert os.environ["JIRA_APP_ACTOR_SHARED_SECRET"] == "s" * 64
+        monkeypatch.delenv("JIRA_APP_ACTOR_CONFIGURED", raising=False)
+        monkeypatch.delenv("JIRA_APP_ACTOR_PROXY_URL", raising=False)
+        monkeypatch.delenv("JIRA_APP_ACTOR_SHARED_SECRET", raising=False)
+
+    def test_metadata_only_app_actor_configuration_fails_closed(self, monkeypatch):
+        import json
+
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        token_payload = {
+            "access_token": "human-token",
+            "refresh_token": "refresh",
+            "expires_at": "2099-01-01T00:00:00Z",
+            "app_actor_account_id": "app-account-1",
+            "app_actor_proxy_url": ["not", "a", "string"],
+            "app_actor_shared_secret": 123,
+        }
+        mock_sm = MagicMock()
+        mock_sm.get_secret_value.return_value = {"SecretString": json.dumps(token_payload)}
+
+        with patch("boto3.client", return_value=mock_sm):
+            assert (
+                resolve_jira_oauth_token({"jira_oauth_secret_arn": "arn:metadata-only"})
+                == "human-token"
+            )
+
+        assert os.environ["JIRA_APP_ACTOR_CONFIGURED"] == "1"
+        assert "JIRA_APP_ACTOR_PROXY_URL" not in os.environ
+        assert "JIRA_APP_ACTOR_SHARED_SECRET" not in os.environ
+        monkeypatch.delenv("JIRA_APP_ACTOR_CONFIGURED", raising=False)
 
     def test_returns_empty_on_secrets_manager_access_denied(self, monkeypatch):
         """ClientError surfaces as empty + ERROR log, never crashes the agent."""

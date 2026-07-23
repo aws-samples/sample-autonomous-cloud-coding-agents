@@ -868,9 +868,9 @@ def run_task(
                 config.channel_metadata,
             )
 
-            # "Starting" comment on the Jira issue (REST shim — the Atlassian
-            # Remote MCP can't be used from a headless agent). No-op for
-            # non-Jira tasks. Best-effort; failures are logged, never block.
+            # "Starting" comment on the Jira issue through the Forge app actor
+            # (or legacy OAuth fallback). No-op for non-Jira tasks.
+            # Best-effort; failures are logged, never block.
             comment_task_started(
                 config.channel_source,
                 config.channel_metadata,

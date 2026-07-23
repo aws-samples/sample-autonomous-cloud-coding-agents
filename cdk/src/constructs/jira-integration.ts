@@ -115,11 +115,10 @@ export interface JiraIntegrationProps {
 /**
  * CDK construct that adds Jira Cloud integration to the ABCA platform.
  *
- * Inbound-only adapter: Jira → webhook → task creation. Outbound progress
- * updates happen agent-side via the Jira REST v3 API (see
- * agent/src/jira_reactions.py; ADR-015 explains why outbound is REST and not
- * the Atlassian Remote MCP), so there is NO DynamoDB Streams consumer and NO
- * outbound-notify Lambda here. Mirrors the Linear adapter shape.
+ * This construct owns Jira → webhook → task creation. Outbound progress uses
+ * the Forge app actor (or the OAuth migration fallback) through
+ * agent/src/jira_reactions.py and the shared fan-out consumer; those writers
+ * are wired outside this inbound construct. See ADR-015.
  *
  * Creates:
  * - JiraProjectMappingTable (`{cloudId}#{projectKey}` → GitHub repo)
