@@ -959,6 +959,10 @@ describe('probeLinearIssueContext', () => {
                   { id: 'doc2', title: 'Empty page', content: '   ' },
                 ],
               },
+              // Review #3: the id-only count connection reports MORE docs than the
+              // content page — 4 total vs the 2 hydrated — so the count reflects
+              // the true total, not the capped content page.
+              documentsForCount: { nodes: [{ id: 'doc1' }, { id: 'doc2' }, { id: 'doc3' }, { id: 'doc4' }] },
             },
           },
         },
@@ -975,14 +979,16 @@ describe('probeLinearIssueContext', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [, init] = fetchMock.mock.calls[0];
-    const body = JSON.parse((init as { body: string }).body) as { query: string; variables: { id: string; docs: number } };
+    const body = JSON.parse((init as { body: string }).body) as { query: string; variables: { id: string; docs: number; docCount: number } };
     expect(body.variables.id).toBe('issue-uuid-1');
     expect(body.variables.docs).toBeGreaterThan(0); // ADR-016 doc content hydration
+    expect(body.variables.docCount).toBeGreaterThan(body.variables.docs); // review #3 — count beyond the content cap
     expect(body.query).toContain('attachments');
     expect(body.query).toContain('url'); // finding #1 — probe now returns fetchable URLs
     expect(body.query).toContain('project');
     expect(body.query).toContain('documents');
     expect(body.query).toContain('content'); // ADR-016 — doc bodies pre-hydrated
+    expect(body.query).toContain('documentsForCount'); // review #3 — true-total count connection
     expect(result).toEqual({
       attachmentTitles: ['spec.pdf'],
       attachments: [{ title: 'spec.pdf', url: 'https://uploads.linear.app/u/a/spec' }],
@@ -991,7 +997,9 @@ describe('probeLinearIssueContext', () => {
       // Only the doc with real body content is hydrated; the whitespace-only one is dropped.
       projectDocuments: [{ title: 'API contract', content: 'The endpoint returns 204 on success.' }],
       ok: true, // probe reached Linear + parsed (review #5)
-      projectDocumentCount: 2, // 2 docs reported; 1 had empty body (review #6)
+      // review #3: TRUE total from the count connection (4), NOT the capped
+      // content page (2) — so the hint can flag the 3 unhydrated docs.
+      projectDocumentCount: 4,
     });
   });
 

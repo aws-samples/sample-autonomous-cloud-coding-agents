@@ -68,6 +68,24 @@ jest.mock('../../src/handlers/shared/linear-oauth-resolver', () => ({
   resolveLinearOauthToken: (...args: unknown[]) => resolveLinearOauthTokenMock(...args),
 }));
 
+// The single-task approve path hydrates the issue's attachments (probeIssue:true);
+// review #1 makes it fail-CLOSED when the probe errors (ok:false). Mock a healthy
+// empty probe so these non-attachment plan-command tests take the normal path —
+// otherwise the real probe's in-test fetch failure would (correctly) reject the
+// approve as attachment-unreadable and never call createTaskCore.
+jest.mock('../../src/handlers/shared/linear-issue-context-probe', () => ({
+  probeLinearIssueContext: jest.fn().mockResolvedValue({
+    attachmentTitles: [],
+    attachments: [],
+    projectName: null,
+    projectHasDocuments: false,
+    projectDocuments: [],
+    ok: true,
+    projectDocumentCount: 0,
+  }),
+  renderIssueContextHint: jest.fn(() => ''),
+}));
+
 process.env.LINEAR_PROJECT_MAPPING_TABLE_NAME = 'LinearProjects';
 process.env.LINEAR_USER_MAPPING_TABLE_NAME = 'LinearUsers';
 process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME = 'LinearWorkspaceRegistry';

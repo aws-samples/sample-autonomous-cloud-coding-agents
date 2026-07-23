@@ -165,6 +165,11 @@ function happyPreamble(): void {
 describe('linear-webhook-processor — #247 orchestration routing', () => {
   beforeEach(() => {
     ddbSend.mockReset();
+    // Default DDB response: an empty page. Review #2 added an alreadySeeded
+    // loadOrchestration(Query) before hydrating the parent — these fresh-seed
+    // tests want "not yet seeded" (Items:[]) so hydration runs as before.
+    // happyPreamble's mockResolvedValueOnce Get responses still take precedence.
+    ddbSend.mockResolvedValue({ Items: [] });
     createTaskCoreMock.mockReset();
     // Default: release path (now exercised in the seed test) returns a created task.
     createTaskCoreMock.mockResolvedValue({ statusCode: 201, body: JSON.stringify({ data: { task_id: 'child-task' } }) });

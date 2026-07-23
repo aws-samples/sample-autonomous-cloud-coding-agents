@@ -49,8 +49,19 @@ const MAX_HINTED_ATTACHMENT_TITLES = 5;
 /** Cap on project documents whose CONTENT is pulled into the task context. */
 const MAX_HYDRATED_PROJECT_DOCS = 5;
 
+/**
+ * Upper bound for COUNTING project docs (review #3). The content page is capped
+ * at {@link MAX_HYDRATED_PROJECT_DOCS}, but the presence-hint needs the TRUE
+ * total so it can flag docs beyond that cap (previously the count came from the
+ * capped content page, so docs 6+ were invisible to the hint). A second aliased
+ * id-only connection counts up to this bound cheaply (no bodies fetched); a
+ * project with more docs than this is vanishingly rare and the hint's "+N more"
+ * is approximate past it anyway.
+ */
+const MAX_COUNTED_PROJECT_DOCS = 50;
+
 const ISSUE_CONTEXT_QUERY = `
-query IssueContext($id: String!, $docs: Int!) {
+query IssueContext($id: String!, $docs: Int!, $docCount: Int!) {
   issue(id: $id) {
     id
     attachments(first: 25) {
@@ -65,6 +76,9 @@ query IssueContext($id: String!, $docs: Int!) {
       name
       documents(first: $docs) {
         nodes { id title content }
+      }
+      documentsForCount: documents(first: $docCount) {
+        nodes { id }
       }
     }
   }
@@ -159,7 +173,7 @@ export async function probeLinearIssueContext(
       },
       body: JSON.stringify({
         query: ISSUE_CONTEXT_QUERY,
-        variables: { id: issueId, docs: MAX_HYDRATED_PROJECT_DOCS },
+        variables: { id: issueId, docs: MAX_HYDRATED_PROJECT_DOCS, docCount: MAX_COUNTED_PROJECT_DOCS },
       }),
       signal: controller.signal,
     });
@@ -175,6 +189,7 @@ export async function probeLinearIssueContext(
             id?: string;
             name?: string;
             documents?: { nodes?: Array<{ id?: string; title?: string; content?: string }> };
+            documentsForCount?: { nodes?: Array<{ id?: string }> };
           } | null;
         };
       };
@@ -204,14 +219,20 @@ export async function probeLinearIssueContext(
     const projectDocuments = documentNodes
       .filter((d): d is { title?: string; content: string } => typeof d?.content === 'string' && d.content.trim().length > 0)
       .map((d) => ({ title: typeof d.title === 'string' && d.title.trim() ? d.title.trim() : 'Untitled document', content: d.content }));
+    // Review #3: the TRUE doc total from the id-only count connection (up to
+    // MAX_COUNTED_PROJECT_DOCS), NOT the capped content page — so the presence
+    // hint can flag docs beyond the hydration cap. Fall back to the content page
+    // length if the count connection is absent (older API shape / test mock).
+    const countNodes = project?.documentsForCount?.nodes;
+    const projectDocumentCount = Array.isArray(countNodes) ? countNodes.length : documentNodes.length;
     return {
       attachmentTitles,
       attachments,
       projectName,
-      projectHasDocuments,
+      projectHasDocuments: projectHasDocuments || projectDocumentCount > 0,
       projectDocuments,
       ok: true,
-      projectDocumentCount: documentNodes.length,
+      projectDocumentCount,
     };
   } catch (err) {
     logger.warn('Linear issue context probe request failed', {

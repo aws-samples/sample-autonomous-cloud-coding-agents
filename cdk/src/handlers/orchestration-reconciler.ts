@@ -1708,26 +1708,37 @@ async function reconcileDecomposePlan(evt: DecomposePlanEvent): Promise<void> {
  * attachments (from the context probe) and description-embedded uploads.linear.app
  * links (from the planning task's description = the issue title+body).
  *
- * FAIL-CLOSED (review #5): if the issue HAS attachments but one can't be safely
- * screened, this THROWS `LinearAttachmentError` — the caller rejects the epic
- * rather than silently seeding children without a spec they may require. It
- * returns `[]` ONLY when there's genuinely nothing to hydrate (no attachments) or
- * screening isn't configured — the same "no attachments" outcome as before, not a
- * swallowed failure. Returns `passed` records referencing S3 objects.
+ * FAIL-CLOSED (review #5 + #1): this THROWS `LinearAttachmentError` — the caller
+ * rejects the epic rather than seeding children blind — in ANY of three cases:
+ *   1. the context probe FAILED (ok:false: 500/timeout) — an empty paperclip list
+ *      then means "unknown", not "none", so a paperclip-only spec could be
+ *      present-but-unread (review #1: this path previously ignored probe.ok);
+ *   2. the issue HAS attachments but screening isn't configured;
+ *   3. a selected attachment can't be fetched/screened.
+ * Returns `[]` ONLY when the probe succeeded AND there's genuinely nothing to
+ * hydrate — not a swallowed failure. Returns `passed` records referencing S3.
  */
 async function hydrateParentAttachmentsForSeed(
   evt: DecomposePlanEvent,
   accessToken: string,
 ): Promise<import('./shared/types').PassedAttachmentRecord[]> {
   const probe = await probeLinearIssueContext(accessToken, evt.parentIssueId);
+  if (probe.ok === false) {
+    // Case 1: probe failure → fail closed. We can't see native paperclips, so a
+    // paperclip-only spec would vanish; don't seed the epic's children blind.
+    throw new LinearAttachmentError(
+      "ABCA couldn't read this issue's attachments from Linear (the API errored or timed out). "
+      + 'Re-apply the trigger label to retry rather than seed sub-issues on a possibly-missing spec.',
+    );
+  }
   const paperclips = (probe.attachments ?? []).filter((a) => isLinearUploadsUrl(a.url));
   const descHasUploads = Boolean(evt.taskDescription?.includes('uploads.linear.app'));
   if (paperclips.length === 0 && !descHasUploads) return []; // nothing to hydrate
 
   const screeningConfig = attachmentScreeningConfig();
   if (!screeningConfig || !ATTACHMENTS_BUCKET) {
-    // The issue HAS attachments but we can't screen them — fail closed (mirrors
-    // the webhook single-task path's "screening not configured" rejection).
+    // Case 2: the issue HAS attachments but we can't screen them — fail closed
+    // (mirrors the webhook single-task path's "screening not configured" reject).
     throw new LinearAttachmentError(
       'This issue has attachments, but ABCA attachment screening is not configured. Contact your ABCA admin.',
     );

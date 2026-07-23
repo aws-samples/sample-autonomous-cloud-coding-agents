@@ -314,4 +314,66 @@ describe('linear-webhook-processor — Mode A parent attachment hydration (findi
     );
     expect(childCreate).toBeDefined();
   });
+
+  test('review #2: a RETRIGGER of an already-seeded epic does NOT re-upload the parent attachment', async () => {
+    // seedOrchestration is frozen-at-first-seed; re-uploading on retrigger would
+    // PUT a new S3 version and demote the meta-pinned one to noncurrent (reaped by
+    // the 7-day rule → a delayed child references an expired version). So when the
+    // orchestration meta row already exists, the parent hydrate must be SKIPPED.
+    probeLinearIssueContextMock.mockResolvedValue({
+      attachmentTitles: ['spec.pdf'],
+      attachments: [{ title: 'spec.pdf', url: PAPERCLIP_URL }],
+      projectName: null,
+      projectHasDocuments: false,
+      projectDocuments: [],
+      ok: true,
+      projectDocumentCount: 0,
+    });
+    // loadOrchestration (the alreadySeeded probe) returns an existing meta row.
+    ddbSend.mockResolvedValue({
+      Items: [{ sub_issue_id: '#meta', orchestration_id: 'orch_abc', parent_linear_issue_id: 'issue-1', linear_workspace_id: 'org-1', repo: 'owner/repo', child_count: 1, platform_user_id: 'platform-user-1' }],
+    });
+    discoverOrchestrationMock.mockResolvedValueOnce({
+      kind: 'extended', orchestrationId: 'orch_abc', addedSubIssueIds: [], releasableSubIssueIds: [],
+    });
+
+    await handler(eventWith(epicIssue()));
+
+    // Even though the parent HAS a paperclip, the re-upload was skipped (already seeded).
+    expect(downloadMock).not.toHaveBeenCalled();
+  });
+
+  test('review #4: over-budget child paperclips are trimmed BEFORE upload + drop note uses friendly titles', async () => {
+    // 12 own paperclips on the child, 0 inherited → budget 10 → only 10 uploaded,
+    // 2 dropped. The old code uploaded all 12 then sliced (orphaning 2 in S3).
+    const many = Array.from({ length: 12 }, (_, i) => ({ title: `mock-${i}.png`, url: `${PAPERCLIP_URL}/${i}` }));
+    probeLinearIssueContextMock
+      .mockResolvedValueOnce({ attachmentTitles: [], attachments: [], projectName: null, projectHasDocuments: false, projectDocuments: [], ok: true, projectDocumentCount: 0 }) // parent (entry): no uploads
+      .mockResolvedValue({ attachmentTitles: [], attachments: many, projectName: null, projectHasDocuments: false, projectDocuments: [], ok: true, projectDocumentCount: 0 }); // child: 12 paperclips
+    downloadMock.mockResolvedValue([{ ...SCREENED_RECORD, attachment_id: 'k' }]);
+    discoverOrchestrationMock.mockResolvedValueOnce({
+      kind: 'seeded', orchestrationId: 'orch_abc', childCount: 1, rootSubIssueIds: ['sub-A'], alreadyExisted: false,
+    });
+    ddbSend.mockResolvedValue({
+      Items: [
+        { sub_issue_id: '#meta', orchestration_id: 'orch_abc', parent_linear_issue_id: 'issue-1', linear_workspace_id: 'org-1', repo: 'owner/repo', child_count: 1, platform_user_id: 'platform-user-1' },
+        { sub_issue_id: 'sub-A', orchestration_id: 'orch_abc', parent_linear_issue_id: 'issue-1', linear_workspace_id: 'org-1', repo: 'owner/repo', depends_on: [], child_status: 'ready' },
+      ],
+    });
+
+    await handler(eventWith(epicIssue()));
+
+    // The child-own hydrate received only the first 10 paperclips (trimmed BEFORE upload).
+    const childHydrateCall = downloadMock.mock.calls.find(
+      (c) => (c[2] as { taskId?: string })?.taskId?.startsWith('child-'),
+    );
+    expect(childHydrateCall).toBeDefined();
+    const passedPaperclips = childHydrateCall![3] as Array<{ url: string }>;
+    expect(passedPaperclips).toHaveLength(10);
+    // The drop note named the 2 dropped files by their friendly title (not a UUID).
+    const dropNote = reportIssueFailureMock.mock.calls.find(
+      (c) => typeof c[2] === 'string' && c[2].includes('mock-10.png') && c[2].includes('mock-11.png'),
+    );
+    expect(dropNote).toBeDefined();
+  });
 });

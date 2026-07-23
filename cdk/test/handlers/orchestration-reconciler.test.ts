@@ -73,6 +73,24 @@ jest.mock('../../src/handlers/shared/logger', () => ({
   logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
 }));
 
+// The decompose seed path probes the parent for attachments; review #1 makes it
+// fail-CLOSED (throw) when the probe errors (ok:false). Mock a healthy empty
+// probe (ok:true, no attachments) so these non-attachment reconciler tests take
+// the normal path — otherwise the real probe's in-test fetch failure would
+// (correctly) reject every decompose as attachment-unreadable.
+jest.mock('../../src/handlers/shared/linear-issue-context-probe', () => ({
+  probeLinearIssueContext: jest.fn().mockResolvedValue({
+    attachmentTitles: [],
+    attachments: [],
+    projectName: null,
+    projectHasDocuments: false,
+    projectDocuments: [],
+    ok: true,
+    projectDocumentCount: 0,
+  }),
+  renderIssueContextHint: jest.fn(() => ''),
+}));
+
 process.env.ORCHESTRATION_TABLE_NAME = 'OrchestrationTable';
 process.env.TASK_TABLE_NAME = 'TaskTable';
 // A6 surfacing (#34/#35): the cascade posts Linear comments only when the

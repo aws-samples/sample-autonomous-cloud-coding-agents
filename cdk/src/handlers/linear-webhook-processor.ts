@@ -315,6 +315,19 @@ async function hydrateCommentAttachments(params: {
   let paperclips: readonly LinearProbeAttachment[] = [];
   if (params.probeIssue) {
     const probe = await probeLinearIssueContext(params.accessToken, params.issueId);
+    // Review #1: fail-CLOSED on a probe error. When probeIssue is set, a
+    // newly-attached paperclip on the issue is a valid material source; if the
+    // probe couldn't read the issue (ok:false — 500/timeout) an empty paperclip
+    // list means "unknown", not "none", so a paperclip-only spec would silently
+    // vanish. Reject rather than dispatch blind. (The comment BODY was still read
+    // above; this only guards the probe-sourced paperclips.)
+    if (probe.ok === false) {
+      return {
+        ok: false,
+        message: "ABCA couldn't read this issue's attachments from Linear (the API errored or timed out). "
+          + 'Re-comment to retry rather than run on a spec that may be attached but unreadable.',
+      };
+    }
     paperclips = probe.attachments ?? [];
   }
   if (!commentHasUploads && !paperclips.some((a) => isLinearUploadsUrl(a.url))) {
@@ -397,10 +410,41 @@ async function hydrateChildrenOwnAttachments(
       continue;
     }
     const descHasUploads = Boolean(child.description && child.description.includes('uploads.linear.app'));
-    if (!descHasUploads && !paperclips.some((a) => isLinearUploadsUrl(a.url))) continue;
+    const ownPaperclips = paperclips.filter((a) => isLinearUploadsUrl(a.url));
+    if (!descHasUploads && ownPaperclips.length === 0) continue;
+    // Review #4a: cap the child's OWN budget = per-task limit − inherited parent
+    // files, and TRIM THE INPUT before hydrating so we never fetch+screen+UPLOAD
+    // files that would only be dropped afterward (the old code uploaded the full
+    // 10 then sliced, orphaning the excess in S3 until lifecycle expiry). The
+    // paperclip inputs carry a friendly `title`, so the drop note names real
+    // filenames (review #4b), not the path-safe UUID the record exposes.
+    const ownBudget = Math.max(0, MAX_ATTACHMENTS_PER_TASK - inheritedCount);
+    const keptPaperclips = ownPaperclips.slice(0, ownBudget);
+    const droppedPaperclips = ownPaperclips.slice(keptPaperclips.length);
+    if (droppedPaperclips.length > 0) {
+      const droppedNames = droppedPaperclips.map((a) => a.title || '(untitled)').join(', ');
+      await safeReportIssueFailure(
+        child.sub_issue_id, workspaceId,
+        `⚠️ This sub-issue has more attachments than fit the ${MAX_ATTACHMENTS_PER_TASK}-file per-task limit `
+        + `once the epic's ${inheritedCount} shared file(s) are included, so these were NOT sent to the agent: `
+        + `${droppedNames}. Remove some attachments (here or on the epic) and re-apply the trigger label if the agent needs them.`,
+      );
+      logger.warn('Child own attachments trimmed to per-task cap BEFORE upload — user notified', {
+        orchestration_id: orchestrationId,
+        sub_issue_id: child.sub_issue_id,
+        own_paperclips: ownPaperclips.length,
+        inherited: inheritedCount,
+        kept: keptPaperclips.length,
+      });
+    }
+    // If the budget is fully consumed by inherited files and there are no
+    // description-embedded uploads to try, there's nothing left to hydrate.
+    if (ownBudget === 0 && !descHasUploads) continue;
     try {
       // Per-child S3 namespace so a child's own files never collide with the
       // epic key or another child's. taskId is a label here, not a real task id.
+      // remainingSlots = ownBudget so the helper's own overflow guard matches the
+      // cap; description-derived uploads beyond it throw → caught fail-open below.
       const hydrated = await hydrateLinearAttachments({
         issueId: child.sub_issue_id,
         uploadsText: child.description,
@@ -408,8 +452,8 @@ async function hydrateChildrenOwnAttachments(
         platformUserId,
         accessToken,
         taskId: `child-${child.sub_issue_id}`,
-        remainingSlots: MAX_ATTACHMENTS_PER_TASK,
-        paperclips,
+        remainingSlots: ownBudget,
+        paperclips: keptPaperclips,
       });
       if (!hydrated.ok) {
         // Fail-OPEN: log + skip this child's own file (the epic + its inherited
@@ -420,37 +464,12 @@ async function hydrateChildrenOwnAttachments(
         continue;
       }
       if (hydrated.records.length > 0) {
-        // Review #4: cap the child's OWN set so own + inherited-parent ≤ the
-        // per-task limit, and SURFACE any drop (releaseChild's slice was a silent
-        // truncation — the very pattern the single-task path is loud about). Own
-        // files are kept ahead of the shared epic spec (most relevant to THIS
-        // piece); a note names what won't be included so the user can trim/split.
-        const ownBudget = Math.max(0, MAX_ATTACHMENTS_PER_TASK - inheritedCount);
-        const kept = hydrated.records.slice(0, ownBudget);
-        if (kept.length < hydrated.records.length) {
-          const dropped = hydrated.records.slice(kept.length).map((r) => r.filename).join(', ');
-          await safeReportIssueFailure(
-            child.sub_issue_id, workspaceId,
-            `⚠️ This sub-issue has more attachments than fit the ${MAX_ATTACHMENTS_PER_TASK}-file per-task limit `
-            + `once the epic's ${inheritedCount} shared file(s) are included, so these were NOT sent to the agent: `
-            + `${dropped}. Remove some attachments (here or on the epic) and re-apply the trigger label if the agent needs them.`,
-          );
-          logger.warn('Child own attachments trimmed to per-task cap — user notified', {
-            orchestration_id: orchestrationId,
-            sub_issue_id: child.sub_issue_id,
-            own: hydrated.records.length,
-            inherited: inheritedCount,
-            kept: kept.length,
-          });
-        }
-        if (kept.length > 0) {
-          await setChildOwnAttachments(ddb, ORCHESTRATION_TABLE!, orchestrationId, child.sub_issue_id, kept, now);
-          // Return the records so the caller can patch the in-memory snapshot
-          // directly — a re-loadOrchestration here is eventually-consistent and
-          // can read the pre-stamp replica, releasing the child WITHOUT its own
-          // attachment (live-caught on abca-demo: row had 1, task had 0).
-          stampedByChild.set(child.sub_issue_id, kept);
-        }
+        await setChildOwnAttachments(ddb, ORCHESTRATION_TABLE!, orchestrationId, child.sub_issue_id, hydrated.records, now);
+        // Return the records so the caller can patch the in-memory snapshot
+        // directly — a re-loadOrchestration here is eventually-consistent and
+        // could read a pre-stamp replica, releasing the child WITHOUT its own
+        // attachment. Patching in memory sidesteps that read-after-write window.
+        stampedByChild.set(child.sub_issue_id, hydrated.records);
       }
     } catch (err) {
       logger.warn('Child own-attachment hydrate/persist failed (non-fatal)', {
@@ -468,8 +487,8 @@ async function hydrateChildrenOwnAttachments(
  * set from `stampedByChild` (sub_issue_id → records). Used right after
  * {@link hydrateChildrenOwnAttachments} so the release path sees a child's OWN
  * attachments WITHOUT a re-loadOrchestration (that Query is eventually-consistent
- * and can read a replica from before the stamp write — live-caught on abca-demo:
- * the child row had the attachment but the released task had zero).
+ * and could read a replica from before the stamp write — the release would then
+ * omit the just-stamped attachment; patching in memory closes that window).
  */
 function patchChildOwnAttachments(
   snapshot: NonNullable<Awaited<ReturnType<typeof loadOrchestration>>>,
@@ -910,14 +929,8 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   if (ORCHESTRATION_TABLE && resolvedAccessToken) {
     // finding #1 (Mode A): a parent with pre-existing sub-issues seeds HERE, not
     // through the reconciler's Mode-B path — so hydrate the parent's attachments
-    // and stamp them on the meta row (releaseContext) so every child inherits
-    // them. The helper no-ops (no S3/DDB) when the issue has no uploads, so the
-    // common fall-through-to-single_task case pays nothing. Replay-safe without a
-    // gate: the S3 key is derived deterministically from the upload URL (stable
-    // across redeliveries → same key, idempotent PUT) and seedOrchestration is
-    // frozen-at-first-seed (the meta row's pinned records never change on a
-    // re-trigger), so a replay can only re-screen identical bytes, never orphan a
-    // pinned version (#4).
+    // and stamp them on the meta row (releaseContext) so every child inherits them.
+    //
     // Fetch the sub-issue graph ONCE up front so we can (a) only hydrate the
     // parent's attachments to the `epic-<id>` key when children ACTUALLY exist
     // (a plain issue that falls through to single_task must NOT hydrate here —
@@ -926,12 +939,25 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     // (b) hand the SAME graph to discoverOrchestration so it doesn't re-fetch.
     const graphSource = linearGraphSource(resolvedAccessToken, issue.id);
     const graphResult = await graphSource();
+    // Review #2: hydrate ONLY on the FIRST seed. seedOrchestration is
+    // frozen-at-first-seed, so on a RE-TRIGGER of an already-seeded epic the meta
+    // row's releaseContext already pins the original records (a specific
+    // s3_version_id). Re-uploading here would PUT a new current version and demote
+    // the pinned one to noncurrent — which the bucket's 7-day
+    // noncurrentVersionExpiration then reaps, so a child released/retried >7 days
+    // later would reference an expired version. (My earlier "replay re-screens
+    // identical bytes, never orphans a pinned version" comment was WRONG: S3
+    // versioning makes each PUT a new version.) So skip the re-upload when the
+    // orchestration meta row already exists.
+    const alreadySeeded = graphResult.kind === 'ok'
+      ? Boolean(await loadOrchestration(ddb, ORCHESTRATION_TABLE, deriveOrchestrationId(issue.id)))
+      : false;
     let epicAttachments: PassedAttachmentRecord[] = [];
-    if (graphResult.kind === 'ok') {
-      // Review #5: a failed context probe means we can't see the parent's native
-      // paperclips — don't seed a whole epic whose children would inherit a spec
-      // we couldn't read. Fail-closed (the graph fetch above succeeded, so this
-      // is specifically an attachment-probe failure).
+    if (graphResult.kind === 'ok' && !alreadySeeded) {
+      // Review #5/#1: a failed context probe means we can't see the parent's
+      // native paperclips — don't seed a whole epic whose children would inherit a
+      // spec we couldn't read. Fail-closed (the graph fetch above succeeded, so
+      // this is specifically an attachment-probe failure).
       if (!probeOk) {
         await safeReportIssueFailure(
           issue.id, workspaceId,
@@ -1259,6 +1285,18 @@ export async function handler(event: ProcessorEvent): Promise<void> {
         return;
       }
       const planReqId = crypto.randomUUID();
+      // Review #1: fail-CLOSED on a probe error. probedAttachments came from the
+      // entry probe; if that failed (ok:false) we can't see native paperclips, so
+      // don't dispatch the planner blind to a spec it can't retrieve (no Linear
+      // MCP). The description-embedded uploads check below still holds regardless.
+      if (!probeOk) {
+        await safeReportIssueFailure(
+          issue.id, workspaceId,
+          "❌ ABCA couldn't read this issue's attachments from Linear (the API errored or timed out). "
+          + 'Re-apply the trigger label to retry rather than plan a decomposition on a possibly-missing spec.',
+        );
+        return;
+      }
       const planHasAttachments = Boolean(issue.description?.includes('uploads.linear.app'))
         || probedAttachments.some((a) => isLinearUploadsUrl(a.url));
       // ADR-016: hand the planner the ACTUAL attachment bytes, not just a "there
