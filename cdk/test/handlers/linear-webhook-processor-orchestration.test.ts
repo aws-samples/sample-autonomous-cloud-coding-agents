@@ -87,8 +87,15 @@ jest.mock('../../src/handlers/shared/orchestration-discovery', () => ({
 }));
 
 const fetchIssueParentIdMock = jest.fn();
+// The handler fetches the sub-issue graph ONCE up front and reuses it for
+// discoverOrchestration (finding #1: only hydrate epic attachments when children
+// exist, and don't fetch the graph twice). discoverOrchestration is separately
+// mocked to drive routing, so this just needs to return a non-empty graph so the
+// handler proceeds into the discovery call. A single_task test overrides it.
+const fetchSubIssueGraphMock = jest.fn();
 jest.mock('../../src/handlers/shared/linear-subissue-fetch', () => ({
   fetchIssueParentId: (...args: unknown[]) => fetchIssueParentIdMock(...args),
+  fetchSubIssueGraph: (...args: unknown[]) => fetchSubIssueGraphMock(...args),
 }));
 
 process.env.LINEAR_PROJECT_MAPPING_TABLE_NAME = 'LinearProjects';
@@ -157,6 +164,12 @@ describe('linear-webhook-processor — #247 orchestration routing', () => {
     transitionIssueStateMock.mockReset().mockResolvedValue(true);
     upsertStatusCommentMock.mockReset().mockResolvedValue('cmt-status-1');
     fetchIssueParentIdMock.mockReset();
+    // Default: the labeled issue has a sub-issue graph so the handler proceeds
+    // into discoverOrchestration (whose mock drives the routing outcome). The
+    // single_task-fall-through test overrides with { kind: 'no_children' }.
+    fetchSubIssueGraphMock.mockReset().mockResolvedValue({
+      kind: 'ok', parentIssueId: 'issue-1', children: [{ id: 'A', depends_on: [] }],
+    });
   });
 
   test('seeded graph → no parent task created (reconciler owns children)', async () => {
@@ -265,6 +278,9 @@ describe('linear-webhook-processor — #247 orchestration routing', () => {
 
   test('no sub-issues → single_task falls through to normal task creation', async () => {
     happyPreamble();
+    // No graph → the handler must NOT hydrate epic attachments (finding #1); it
+    // falls through to the single-task path which hydrates once under the taskId.
+    fetchSubIssueGraphMock.mockResolvedValueOnce({ kind: 'no_children', parentIssueId: 'issue-1' });
     discoverOrchestrationMock.mockResolvedValueOnce({ kind: 'single_task', parentLinearIssueId: 'issue-1' });
     createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: JSON.stringify({ data: { task_id: 'T1' } }) });
 

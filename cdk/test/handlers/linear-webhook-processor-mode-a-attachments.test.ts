@@ -89,6 +89,16 @@ jest.mock('../../src/handlers/shared/orchestration-discovery', () => ({
   discoverOrchestration: (...args: unknown[]) => discoverOrchestrationMock(...args),
 }));
 
+// The handler now fetches the sub-issue graph ONCE up front (to gate epic-
+// attachment hydration on children actually existing — finding #1 double-screen
+// fix) and reuses it for discoverOrchestration. Mock it to report a real graph so
+// the epic-hydration path runs; discoverOrchestration itself is separately mocked.
+const fetchSubIssueGraphMock = jest.fn();
+jest.mock('../../src/handlers/shared/linear-subissue-fetch', () => ({
+  fetchSubIssueGraph: (...args: unknown[]) => fetchSubIssueGraphMock(...args),
+  fetchIssueParentId: jest.fn().mockResolvedValue(null),
+}));
+
 const probeLinearIssueContextMock = jest.fn();
 jest.mock('../../src/handlers/shared/linear-issue-context-probe', () => ({
   probeLinearIssueContext: (...args: unknown[]) => probeLinearIssueContextMock(...args),
@@ -174,6 +184,12 @@ describe('linear-webhook-processor — Mode A parent attachment hydration (findi
       accessToken: 'access-tok', oauthSecretArn: 'arn:secret', workspaceSlug: 'acme',
     });
     discoverOrchestrationMock.mockReset();
+    // Default: the issue HAS sub-issues (graph fetch returns children) so the
+    // epic-attachment hydration path runs. A single_task-fall-through test would
+    // override this with { kind: 'no_children' }.
+    fetchSubIssueGraphMock.mockReset().mockResolvedValue({
+      kind: 'ok', parentIssueId: 'issue-1', children: [{ id: 'A', depends_on: [] }],
+    });
     probeLinearIssueContextMock.mockReset().mockResolvedValue({
       attachmentTitles: [], attachments: [], projectName: null, projectHasDocuments: false,
     });

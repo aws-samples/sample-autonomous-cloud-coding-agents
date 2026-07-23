@@ -103,7 +103,7 @@ import {
 import { DEFAULT_MAX_SUB_ISSUES, type DecompositionPlan, type PlannedSubIssue } from './shared/orchestration-decomposition-types';
 import { linearGraphqlFn } from './shared/orchestration-decomposition-writeback';
 import { discoverOrchestration } from './shared/orchestration-discovery';
-import { declarativeGraphSource } from './shared/orchestration-graph-source';
+import { declarativeGraphSource, linearGraphSource } from './shared/orchestration-graph-source';
 import { isIntegrationNode } from './shared/orchestration-integration-node';
 import {
   parseParentNodeReference,
@@ -852,8 +852,16 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     // frozen-at-first-seed (the meta row's pinned records never change on a
     // re-trigger), so a replay can only re-screen identical bytes, never orphan a
     // pinned version (#4).
+    // Fetch the sub-issue graph ONCE up front so we can (a) only hydrate the
+    // parent's attachments to the `epic-<id>` key when children ACTUALLY exist
+    // (a plain issue that falls through to single_task must NOT hydrate here —
+    // that would double-screen the file and orphan the epic-keyed S3 object,
+    // since the single-task path below re-hydrates under the taskId), and
+    // (b) hand the SAME graph to discoverOrchestration so it doesn't re-fetch.
+    const graphSource = linearGraphSource(resolvedAccessToken, issue.id);
+    const graphResult = await graphSource();
     let epicAttachments: PassedAttachmentRecord[] = [];
-    {
+    if (graphResult.kind === 'ok') {
       const hydrated = await hydrateLinearIssueAttachments(
         issue, workspaceId, platformUserId, resolvedAccessToken,
         `epic-${issue.id}`, 10, probedAttachments,
@@ -891,6 +899,8 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       repo,
       now: new Date().toISOString(),
       releaseContext,
+      // Reuse the graph we already fetched above — don't hit Linear twice.
+      graphSource: async () => graphResult,
     });
 
     if (discovery.kind === 'rejected') {

@@ -550,4 +550,73 @@ describe('releaseChild — parent attachments inherited by children (finding #1)
     });
     expect(createTaskCore.mock.calls[0][1].preScreenedAttachments).toBeUndefined();
   });
+
+  // finding #2: a sub-issue's OWN attachments (stamped on the child row) merge
+  // with the inherited parent spec, de-duped, capped, own-first.
+  const ownRec = (id: string, name: string) => ({
+    attachment_id: id,
+    type: 'file',
+    content_type: 'image/png',
+    filename: name,
+    s3_key: `attachments/user-1/child-SUB/${id}/${name}`,
+    s3_version_id: 'v1',
+    size_bytes: 10,
+    screening: { status: 'passed', screened_at: NOW },
+    checksum_sha256: 'y'.repeat(64),
+  });
+
+  test('a child with its OWN attachment receives parent spec + own (merged, own first)', async () => {
+    const createTaskCore = created('T-1');
+    await releaseChild({
+      ddb: { send: jest.fn().mockResolvedValue({}) } as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow({ sub_issue_id: 'uuid-A', pre_screened_attachments: [ownRec('own1', 'mock.png')] as never }),
+      platformUserId: 'user-1',
+      preScreenedAttachments: ATT, // parent spec (a1)
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+    const ctx = createTaskCore.mock.calls[0][1];
+    expect(ctx.preScreenedAttachments).toHaveLength(2);
+    // own first, then inherited parent
+    expect(ctx.preScreenedAttachments.map((r: { attachment_id: string }) => r.attachment_id)).toEqual(['own1', 'a1']);
+  });
+
+  test('a file on BOTH parent and child is de-duped by attachment_id', async () => {
+    const createTaskCore = created('T-1');
+    await releaseChild({
+      ddb: { send: jest.fn().mockResolvedValue({}) } as never,
+      tableName: 'OrchestrationTable',
+      // child's own list re-declares a1 (same id as the parent spec)
+      row: makeRow({ sub_issue_id: 'uuid-A', pre_screened_attachments: [ownRec('a1', 'dup.pdf')] as never }),
+      platformUserId: 'user-1',
+      preScreenedAttachments: ATT,
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+    const ctx = createTaskCore.mock.calls[0][1];
+    expect(ctx.preScreenedAttachments).toHaveLength(1);
+    expect(ctx.preScreenedAttachments[0].attachment_id).toBe('a1');
+  });
+
+  test('merged set over the per-task cap is trimmed to 10, dropping parent-spec files first', async () => {
+    const createTaskCore = created('T-1');
+    const own = Array.from({ length: 8 }, (_, i) => ownRec(`own${i}`, `own${i}.png`));
+    const parent = Array.from({ length: 5 }, (_, i) => ({ ...ownRec(`par${i}`, `par${i}.pdf`), attachment_id: `par${i}` }));
+    await releaseChild({
+      ddb: { send: jest.fn().mockResolvedValue({}) } as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow({ sub_issue_id: 'uuid-A', pre_screened_attachments: own as never }),
+      platformUserId: 'user-1',
+      preScreenedAttachments: parent as never,
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+    const ctx = createTaskCore.mock.calls[0][1];
+    // 8 own + 5 parent = 13 → capped at 10; all 8 own survive, only 2 parent.
+    expect(ctx.preScreenedAttachments).toHaveLength(10);
+    const ids = ctx.preScreenedAttachments.map((r: { attachment_id: string }) => r.attachment_id);
+    expect(ids.filter((i: string) => i.startsWith('own'))).toHaveLength(8);
+    expect(ids.filter((i: string) => i.startsWith('par'))).toHaveLength(2);
+  });
 });

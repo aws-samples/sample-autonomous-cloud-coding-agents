@@ -55,6 +55,7 @@ import type {
   OrchestrationReleaseContext,
 } from './orchestration-store';
 import type { AttachmentRecord, ChannelSource } from './types';
+import { MAX_ATTACHMENTS_PER_TASK } from './validation';
 
 /**
  * The trigger channel an orchestration runs under. Defaults to ``'linear'``
@@ -251,14 +252,32 @@ export async function releaseChild(params: ReleaseChildParams): Promise<ReleaseC
   // attached to just this piece, hydrated at seed onto the child row). Merge both,
   // de-duped by attachment_id (a file both on the epic and the sub-issue isn't
   // passed twice). Integration nodes are a pure branch merge — they need neither.
+  //
+  // OWN attachments are listed FIRST so that, when the merged set would exceed the
+  // per-task cap, the child's own files (most relevant to THIS piece) survive and
+  // the shared epic spec is what gets trimmed. Capped at MAX_ATTACHMENTS_PER_TASK
+  // with a loud log (never a silent truncation) — each source is independently
+  // ≤10, so the merge can only overflow a pathological many-file epic+child.
   const inheritedAttachments = params.preScreenedAttachments ?? [];
   const ownAttachments = row.pre_screened_attachments ?? [];
-  const mergedAttachments: AttachmentRecord[] = [];
+  const dedupedAttachments: AttachmentRecord[] = [];
   const seenAttachmentIds = new Set<string>();
-  for (const rec of [...inheritedAttachments, ...ownAttachments]) {
+  for (const rec of [...ownAttachments, ...inheritedAttachments]) {
     if (seenAttachmentIds.has(rec.attachment_id)) continue;
     seenAttachmentIds.add(rec.attachment_id);
-    mergedAttachments.push(rec);
+    dedupedAttachments.push(rec);
+  }
+  const mergedAttachments = dedupedAttachments.slice(0, MAX_ATTACHMENTS_PER_TASK);
+  if (dedupedAttachments.length > MAX_ATTACHMENTS_PER_TASK) {
+    logger.warn('Child attachment set over the per-task cap — trimming (parent-spec files dropped first)', {
+      orchestration_id: row.orchestration_id,
+      sub_issue_id: row.sub_issue_id,
+      own_count: ownAttachments.length,
+      inherited_count: inheritedAttachments.length,
+      merged_count: dedupedAttachments.length,
+      kept: mergedAttachments.length,
+      cap: MAX_ATTACHMENTS_PER_TASK,
+    });
   }
 
   let result;
