@@ -297,6 +297,15 @@ export class TaskApi extends Construct {
           // attachments up to 3 MB, presigned upload metadata). Excludes
           // SizeRestrictions_BODY only; all other CRS rules apply. Payload
           // size is bounded by API GW (10 MB) and validateAttachments().
+          //
+          // NOTE (ABCA-858, backlog): CrossSiteScripting_BODY here BLOCKS a
+          // Linear/Jira webhook whose issue body contains HTML markup
+          // (``<head>``, ``<meta>``, ``<div>``) at the WAF edge with a 403
+          // before the Lambda runs — the task silently never starts and the
+          // sender gets an opaque 403. XSS protection is intentionally kept ON
+          // for now (a real defense-in-depth layer); the false-positive is
+          // tracked as a backlog item to fix deliberately (e.g. a considered
+          // per-route exclusion + operator alarm) rather than weaken WAF here.
           name: 'AWSManagedRulesCommonRuleSet-TaskPaths',
           priority: 1,
           overrideAction: { none: {} },
