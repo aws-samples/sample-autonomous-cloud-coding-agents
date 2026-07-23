@@ -466,6 +466,8 @@ describe('classifyError', () => {
       );
       expect(result!.category).toBe(ErrorCategory.TIMEOUT);
       expect(result!.title).toMatch(/didn't finish in time|timed out/i);
+      // A timeout is user-actionable (retry / raise the cap), not a hard failure.
+      expect(result!.retryable).toBe(true);
       expect(result!.errorClass).toBe(ErrorClass.USER);
       // Must NOT fall through to the generic Unexpected error.
       expect(result!.title).not.toMatch(/Unexpected error/i);

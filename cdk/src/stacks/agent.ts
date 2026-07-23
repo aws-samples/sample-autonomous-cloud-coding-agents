@@ -32,6 +32,7 @@ import { Construct, IConstruct } from 'constructs';
 import { AgentMemory } from '../constructs/agent-memory';
 import { AgentSessionRole } from '../constructs/agent-session-role';
 import { AgentVpc } from '../constructs/agent-vpc';
+import { ApiKeyTable } from '../constructs/api-key-table';
 import { ApprovalMetricsPublisherConsumer } from '../constructs/approval-metrics-publisher-consumer';
 import { AttachmentsBucket } from '../constructs/attachments-bucket';
 import { resolveBedrockModelIds } from '../constructs/bedrock-models';
@@ -111,6 +112,7 @@ export class AgentStack extends Stack {
     const taskApprovalsTable = new TaskApprovalsTable(this, 'TaskApprovalsTableV2');
     const userConcurrencyTable = new UserConcurrencyTable(this, 'UserConcurrencyTable');
     const webhookTable = new WebhookTable(this, 'WebhookTable');
+    const apiKeyTable = new ApiKeyTable(this, 'ApiKeyTable');
     const repoTable = new RepoTable(this, 'RepoTable');
 
     // Cedar-wasm Lambda layer (§15.2 task 10). Instantiated here so the
@@ -297,6 +299,7 @@ export class AgentStack extends Stack {
       cedarWasmLayer: cedarWasmLayer.layer,
       repoTable: repoTable.table,
       webhookTable: webhookTable.table,
+      apiKeyTable: apiKeyTable.table,
       orchestratorFunctionArn: lazyOrchestratorArn,
       guardrailId: inputGuardrail.guardrailId,
       guardrailVersion: inputGuardrail.guardrailVersion,
@@ -590,6 +593,11 @@ export class AgentStack extends Stack {
     new CfnOutput(this, 'WebhookTableName', {
       value: webhookTable.table.tableName,
       description: 'Name of the DynamoDB webhook table',
+    });
+
+    new CfnOutput(this, 'ApiKeyTableName', {
+      value: apiKeyTable.table.tableName,
+      description: 'Name of the DynamoDB platform API key table',
     });
 
     new CfnOutput(this, 'RepoTableName', {

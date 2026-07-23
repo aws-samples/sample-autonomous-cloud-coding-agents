@@ -20,6 +20,9 @@
 import { RemovalPolicy } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import { Construct } from 'constructs';
+import { JIRA_ISSUE_INDEX_NAME } from './task-table-indexes';
+
+export { JIRA_ISSUE_INDEX_NAME } from './task-table-indexes';
 
 /**
  * Properties for TaskTable construct.
@@ -47,8 +50,8 @@ export interface TaskTableProps {
 /**
  * DynamoDB table for persisting task state across the agent lifecycle.
  *
- * Schema: task_id (PK) with three GSIs for querying by user+status,
- * by status (queue processing), and by idempotency key (dedup).
+ * Schema: task_id (PK) with GSIs for querying by user+status, by status
+ * (queue processing), by idempotency key (dedup), and by Jira issue.
  *
  * GSIs:
  * - UserStatusIndex (PK: user_id, SK: status_created_at) — "my tasks" queries
@@ -57,6 +60,8 @@ export interface TaskTableProps {
  * - LinearIssueIndex (PK: linear_issue_id, SK: created_at) — sparse; resolve a
  *   Linear issue back to its newest ABCA task + PR (#247 UX.3 standalone
  *   comment trigger)
+ * - JiraIssueIndex (PK: jira_issue_identity, SK: created_at) — sparse index
+ *   for resolving a Jira issue to its newest PR-producing task (#640)
  */
 export class TaskTable extends Construct {
   /**
@@ -86,6 +91,12 @@ export class TaskTable extends Construct {
    * issue, where no orchestration row records the issue→PR link.
    */
   public static readonly LINEAR_ISSUE_INDEX = 'LinearIssueIndex';
+
+  /**
+   * GSI for resolving a tenant-scoped Jira issue to its newest ABCA task.
+   * PK: jira_issue_identity (`{cloudId}#{issueKey}`), SK: created_at.
+   */
+  public static readonly JIRA_ISSUE_INDEX = JIRA_ISSUE_INDEX_NAME;
 
   /**
    * The underlying DynamoDB table. Use this to grant access or read the table name.
@@ -158,6 +169,18 @@ export class TaskTable extends Construct {
       // running-total query does a per-task GetItem for cost_usd rather than
       // widening this projection. Keep this list as-is unless you create a NEW
       // index with a different name.
+      nonKeyAttributes: ['pr_url', 'pr_number', 'status', 'repo', 'user_id', 'channel_metadata'],
+    });
+
+    // GSI: Jira issue → newest PR-producing task (#640 comment-triggered PR
+    // iteration). Sparse: only Jira-origin tasks with issue metadata carry the
+    // top-level jira_issue_identity attribute. Same lean INCLUDE projection as
+    // the Linear index above — just the fields the comment-trigger resolver reads.
+    this.table.addGlobalSecondaryIndex({
+      indexName: TaskTable.JIRA_ISSUE_INDEX,
+      partitionKey: { name: 'jira_issue_identity', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'created_at', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.INCLUDE,
       nonKeyAttributes: ['pr_url', 'pr_number', 'status', 'repo', 'user_id', 'channel_metadata'],
     });
   }

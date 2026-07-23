@@ -36,9 +36,10 @@ describe('AgentStack', () => {
     expect(template).toBeDefined();
   });
 
-  test('creates exactly 20 DynamoDB tables', () => {
+  test('creates exactly 21 DynamoDB tables', () => {
     // task, task-events, repo, user-concurrency, webhook, task-nudges,
     // task-approvals (Cedar HITL V2),
+    // api-key (platform API keys for headless webhook management, #376/#579),
     // slack-installation, slack-user-mapping,
     // slack-channel-mapping (channel → default-repo onboarding),
     // linear-project-mapping, linear-user-mapping, linear-webhook-dedup,
@@ -47,8 +48,8 @@ describe('AgentStack', () => {
     // jira-project-mapping, jira-user-mapping, jira-workspace-registry,
     // jira-webhook-dedup (added for the Jira Cloud integration on main),
     // orchestration (added by #247 — parent/sub-issue DAG state).
-    // = 15 shared/base + 4 Jira + 1 orchestration = 20.
-    template.resourceCountIs('AWS::DynamoDB::Table', 20);
+    // = 16 shared/base + 4 Jira + 1 orchestration = 21.
+    template.resourceCountIs('AWS::DynamoDB::Table', 21);
   });
 
   test('creates TaskApprovalsTable with user_id-status-index GSI', () => {

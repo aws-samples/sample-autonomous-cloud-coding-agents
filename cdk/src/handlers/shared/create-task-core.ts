@@ -723,6 +723,16 @@ export async function createTaskCore(
     ...(context.channelMetadata?.linear_issue_id && {
       linear_issue_id: context.channelMetadata.linear_issue_id,
     }),
+    // DynamoDB GSIs cannot key on nested map values. Hoist the tenant-scoped
+    // Jira issue identity so JiraIssueIndex can resolve comment triggers back
+    // to the newest PR-producing task.
+    ...(context.channelSource === 'jira'
+      && context.channelMetadata?.jira_cloud_id
+      && context.channelMetadata?.jira_issue_key
+      && {
+        jira_issue_identity:
+          `${context.channelMetadata.jira_cloud_id}#${context.channelMetadata.jira_issue_key}`,
+      }),
     ...(attachmentRecords.length > 0 && { attachments: attachmentRecords }),
     status_created_at: `${initialStatus}#${now}`,
     created_at: now,

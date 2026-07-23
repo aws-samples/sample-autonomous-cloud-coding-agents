@@ -114,6 +114,45 @@ describe('createTaskCore', () => {
     expect(mockLambdaSend).toHaveBeenCalledTimes(1);
   });
 
+  test('hoists tenant-scoped Jira issue identity for the sparse lookup index', async () => {
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_description: 'Fix the Jira issue' },
+      makeContext({
+        channelSource: 'jira',
+        channelMetadata: {
+          jira_cloud_id: 'cloud-1',
+          jira_issue_key: 'ENG-42',
+        },
+      }),
+      'req-jira-identity',
+    );
+
+    expect(result.statusCode).toBe(201);
+    const taskPut = mockSend.mock.calls.find(
+      ([command]) => command._type === 'Put' && command.input.TableName === 'Tasks',
+    );
+    expect(taskPut![0].input.Item.jira_issue_identity).toBe('cloud-1#ENG-42');
+  });
+
+  test('does not hoist Jira issue identity for incomplete or non-Jira metadata', async () => {
+    await createTaskCore(
+      { repo: 'org/repo', task_description: 'Regular task' },
+      makeContext({
+        channelSource: 'api',
+        channelMetadata: {
+          jira_cloud_id: 'cloud-1',
+          jira_issue_key: 'ENG-42',
+        },
+      }),
+      'req-no-jira-identity',
+    );
+
+    const taskPut = mockSend.mock.calls.find(
+      ([command]) => command._type === 'Put' && command.input.TableName === 'Tasks',
+    );
+    expect(taskPut![0].input.Item).not.toHaveProperty('jira_issue_identity');
+  });
+
   test('accepts an initial_approvals pattern whose value contains a colon', async () => {
     // Regression: the degenerate-pattern guard used split(':', 2)[1], which
     // truncated the value at the next colon. For "ab:cdefgh" that yields the

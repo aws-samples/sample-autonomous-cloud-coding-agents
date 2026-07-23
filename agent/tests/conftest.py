@@ -14,23 +14,29 @@ from models import TaskConfig
 # in the MAIN thread during a test's *call* phase, so a deadlock in a WORKER
 # thread, a fixture, collection, or a C-level socket read the main thread never
 # returns from stalls the whole `mise run build` silently — up to the platform's
-# 3600s build-verify ceiling (the ECS-only stall on ABCA-684/686/688, and again
-# on ABCA-707: 40+ min of dead air, container never reaped).
+# 3600s build-verify ceiling (the ECS-only stall on ABCA-684/686/688, and the
+# scoped-session S3 hang the _clean_env reset below guards against: 40+ min of
+# dead air, container never reaped).
 #
 # The obvious instrument — ``faulthandler.dump_traceback_later(1200, exit=True)``
 # — does NOT work here: faulthandler has a SINGLE internal timer, and pytest's
 # ``faulthandler_timeout`` (pyproject.toml) RE-ARMS it at the start of every test
 # WITHOUT ``exit=True``. So a session-level exit timer is cancelled by the first
-# test, the per-test timer only DUMPS, and the suite hangs forever anyway
-# (exactly what happened on ABCA-707: a 300s dump fired, no exit followed).
+# test, the per-test timer only DUMPS, and the suite hangs forever anyway.
 #
 # So own the reaper on a dedicated daemon thread pytest cannot touch. A blocked
-# socket read (the ABCA-707 failure mode) releases the GIL, so this thread runs;
-# it dumps every thread's stack for diagnosis and then HARD-EXITS the process, so
-# `mise run build` returns non-zero within seconds of the deadline instead of
-# burning to the 3600s ceiling. Deadline 600s: ~200x the whole suite's normal
-# ~3s… well above any legitimate run (per-test cap is 300s) yet far under the
-# build ceiling.
+# socket read releases the GIL, so this thread runs; it dumps every thread's
+# stack for diagnosis and then HARD-EXITS the process, so `mise run build`
+# returns non-zero within seconds of the deadline instead of burning to the
+# ceiling. Deadline 600s: a SESSION backstop for the whole-suite hangs SIGALRM
+# can't interrupt — sized well above the longest healthy run (the suite normally
+# finishes in seconds; the per-test pytest-timeout cap is 120s, see
+# pyproject.toml) yet far under the 3600s build-verify ceiling.
+#
+# ``pytest_sessionfinish`` cancels the timer on a clean finish (below), so a
+# legitimately slow-but-passing run that lands near 600s — e.g. still in teardown
+# / coverage write — is NOT hard-exited into a bewildering red (#616 review N2).
+# ``os._exit`` skips atexit + buffer flush, so it must only fire on a TRUE hang.
 _HANG_REAP_DEADLINE_S = 600
 
 
@@ -50,6 +56,17 @@ def _reap_on_hang() -> None:
 _hang_watchdog = threading.Timer(_HANG_REAP_DEADLINE_S, _reap_on_hang)
 _hang_watchdog.daemon = True
 _hang_watchdog.start()
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Cancel the hang watchdog on a clean session finish (#616 review N2).
+
+    Without this, a legitimately slow-but-passing suite that finishes just after
+    the 600s deadline (e.g. during teardown / coverage write) would be hard-exited
+    by ``_reap_on_hang`` and turn green red with a thread-dump uncorrelated to any
+    failed test. ``Timer.cancel()`` is a no-op if the timer already fired (a true
+    hang), so this only prevents the false-positive kill."""
+    _hang_watchdog.cancel()
 
 
 class FakeRunCmd:
@@ -139,15 +156,9 @@ _AGENT_ENV_VARS = [
     "LOG_GROUP_NAME",
     "MEMORY_ID",
     "ENABLE_CLI_TELEMETRY",
-    # Per-session IAM scoping (PR #209). When this is set, ``aws_session`` resolves
-    # a *scoped* session and ``tenant_client`` returns ``session.client(...)`` —
-    # which BYPASSES a ``@patch("boto3.client")`` mock. On the ECS substrate the
-    # task def sets this, so a test that mocks ``boto3.client`` (e.g.
-    # ``test_attachments``) instead makes a REAL S3 call that hangs on the network
-    # (no egress). Stripping it here forces every test onto the unscoped path,
-    # where the ``boto3.client`` mock actually intercepts. Resetting the session
-    # cache below is NOT enough on its own — a fresh ``get_session()`` re-resolves
-    # as scoped while this var is still set. (Live-caught on ABCA-707, 2026-07-15.)
+    # Per-session IAM scoping (PR #209) — the scoped-session S3-hang guard.
+    # See the ``_clean_env`` docstring below for the full rationale (why the
+    # env strip AND the cache reset are both required).
     "AGENT_SESSION_ROLE_ARN",
 ]
 
@@ -155,9 +166,6 @@ _AGENT_ENV_VARS = [
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
     """Remove agent-related env vars and reset the AWS session cache each test.
-
-    The env cleanup keeps host state from leaking into agent code that reads
-    ``os.environ`` at import/call time.
 
     The env cleanup + session reset TOGETHER close a scoped-session leak that
     hangs the suite on the ECS substrate: ``aws_session`` caches the resolved
@@ -171,7 +179,7 @@ def _clean_env(monkeypatch):
     the var gone AND the cache reset, every test resolves the unscoped path where
     its ``boto3.client`` mock intercepts. Otherwise a mocked test (e.g.
     ``test_attachments``) makes a REAL S3 call that hangs on the ECS network
-    (no egress) in a socket read SIGALRM can't interrupt. (Live-caught ABCA-707.)
+    (no egress) in a socket read SIGALRM can't interrupt.
     """
     for var in _AGENT_ENV_VARS:
         monkeypatch.delenv(var, raising=False)

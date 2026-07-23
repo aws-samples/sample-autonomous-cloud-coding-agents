@@ -19,7 +19,7 @@
 
 import { App, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
-import { TaskTable } from '../../src/constructs/task-table';
+import { JIRA_ISSUE_INDEX_NAME, TaskTable } from '../../src/constructs/task-table';
 
 describe('TaskTable', () => {
   let template: Template;
@@ -122,6 +122,31 @@ describe('TaskTable', () => {
     });
   });
 
+  test('creates sparse JiraIssueIndex GSI with the resolver projection', () => {
+    template.hasResourceProperties('AWS::DynamoDB::Table', {
+      GlobalSecondaryIndexes: Match.arrayWith([
+        Match.objectLike({
+          IndexName: 'JiraIssueIndex',
+          KeySchema: [
+            { AttributeName: 'jira_issue_identity', KeyType: 'HASH' },
+            { AttributeName: 'created_at', KeyType: 'RANGE' },
+          ],
+          Projection: {
+            ProjectionType: 'INCLUDE',
+            NonKeyAttributes: Match.arrayWith([
+              'pr_url',
+              'pr_number',
+              'status',
+              'repo',
+              'user_id',
+              'channel_metadata',
+            ]),
+          },
+        }),
+      ]),
+    });
+  });
+
   test('declares all required attribute definitions', () => {
     template.hasResourceProperties('AWS::DynamoDB::Table', {
       AttributeDefinitions: Match.arrayWith([
@@ -132,6 +157,7 @@ describe('TaskTable', () => {
         { AttributeName: 'created_at', AttributeType: 'S' },
         { AttributeName: 'idempotency_key', AttributeType: 'S' },
         { AttributeName: 'linear_issue_id', AttributeType: 'S' },
+        { AttributeName: 'jira_issue_identity', AttributeType: 'S' },
       ]),
     });
   });
@@ -150,6 +176,8 @@ describe('TaskTable', () => {
     expect(TaskTable.STATUS_INDEX).toBe('StatusIndex');
     expect(TaskTable.IDEMPOTENCY_INDEX).toBe('IdempotencyIndex');
     expect(TaskTable.LINEAR_ISSUE_INDEX).toBe('LinearIssueIndex');
+    expect(TaskTable.JIRA_ISSUE_INDEX).toBe('JiraIssueIndex');
+    expect(JIRA_ISSUE_INDEX_NAME).toBe(TaskTable.JIRA_ISSUE_INDEX);
   });
 });
 

@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { CreateWebhookResponse, DEFAULT_CODING_WORKFLOW_ID, ReplayBundle, TaskDetail, TaskEvent, TaskSummary, TERMINAL_STATUSES, WebhookDetail } from './types';
+import { ApiKeyDetail, CreateApiKeyResponse, CreateWebhookResponse, DEFAULT_CODING_WORKFLOW_ID, ReplayBundle, TaskDetail, TaskEvent, TaskSummary, TERMINAL_STATUSES, WebhookDetail } from './types';
 
 /** Decimal places when rendering USD cost figures (tenth of a cent matters for LLM spend). */
 export const COST_USD_DECIMALS = 4;
@@ -370,6 +370,58 @@ export function formatWebhookDetail(webhook: WebhookDetail): string {
   ];
   if (webhook.revoked_at) {
     lines.push(`Revoked:     ${webhook.revoked_at}`);
+  }
+  return lines.join('\n');
+}
+
+/** Format a newly created API key (includes the one-time key material). */
+export function formatApiKeyCreated(res: CreateApiKeyResponse): string {
+  return [
+    `Key ID:      ${res.key_id}`,
+    `Name:        ${res.name}`,
+    `Scopes:      ${res.scopes.join(', ')}`,
+    `Expires:     ${res.expires_at ?? 'never'}`,
+    `Created:     ${res.created_at}`,
+    '',
+    'API key (store securely — shown only once):',
+    res.key,
+    '',
+    'Use it with `--api-key <key>` or the BGAGENT_API_KEY environment variable.',
+  ].join('\n');
+}
+
+/** Format a list of ApiKeyDetail as an aligned table. */
+export function formatApiKeyList(keys: ApiKeyDetail[]): string {
+  if (keys.length === 0) {
+    return 'No API keys found.';
+  }
+
+  const headers = ['KEY ID', 'NAME', 'SCOPES', 'STATUS', 'EXPIRES', 'CREATED'];
+  const rows = keys.map(k => [
+    k.key_id,
+    k.name,
+    k.scopes.join(','),
+    k.status,
+    k.expires_at ?? 'never',
+    k.created_at,
+  ]);
+
+  return formatTable(headers, rows);
+}
+
+/** Format an ApiKeyDetail as a key-value detail view. */
+export function formatApiKeyDetail(key: ApiKeyDetail): string {
+  const lines: string[] = [
+    `Key ID:      ${key.key_id}`,
+    `Name:        ${key.name}`,
+    `Scopes:      ${key.scopes.join(', ')}`,
+    `Status:      ${key.status}`,
+    `Expires:     ${key.expires_at ?? 'never'}`,
+    `Created:     ${key.created_at}`,
+    `Updated:     ${key.updated_at}`,
+  ];
+  if (key.revoked_at) {
+    lines.push(`Revoked:     ${key.revoked_at}`);
   }
   return lines.join('\n');
 }

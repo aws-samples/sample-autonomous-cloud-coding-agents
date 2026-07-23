@@ -127,6 +127,8 @@ export interface TaskRecord {
    * (which keeps the GSI sparse).
    */
   readonly linear_issue_id?: string;
+  /** Sparse JiraIssueIndex key (`{cloudId}#{issueKey}`); internal only. */
+  readonly jira_issue_identity?: string;
   readonly status_created_at: string;
   readonly created_at: string;
   readonly updated_at: string;
@@ -953,6 +955,95 @@ export function toWebhookDetail(record: WebhookRecord): WebhookDetail {
     status: record.status,
     created_at: record.created_at,
     updated_at: record.updated_at,
+    revoked_at: record.revoked_at ?? null,
+  };
+}
+
+/**
+ * Scopes a platform API key may hold. Phase 1 ships `webhooks:manage`;
+ * the remaining values are reserved for Phase 2 (read-only task APIs) so keys
+ * minted now can be validated against a stable vocabulary.
+ */
+export type ApiKeyScope = 'webhooks:manage' | 'webhooks:invoke' | 'tasks:read' | 'tasks:cancel';
+
+/** Scopes recognized by the platform. Order is not significant. */
+export const API_KEY_SCOPES: readonly ApiKeyScope[] = [
+  'webhooks:manage',
+  'webhooks:invoke',
+  'tasks:read',
+  'tasks:cancel',
+];
+
+/**
+ * Full platform API key record as stored in DynamoDB.
+ *
+ * `key_hash` is the SHA-256 hex digest of the secret portion of the presented
+ * key. The raw secret is never stored — it is returned once at creation.
+ */
+export interface ApiKeyRecord {
+  readonly key_id: string;
+  readonly user_id: string;
+  readonly name: string;
+  readonly key_hash: string;
+  readonly scopes: readonly ApiKeyScope[];
+  readonly status: 'active' | 'revoked';
+  readonly created_at: string;
+  readonly updated_at: string;
+  readonly expires_at?: string;
+  readonly revoked_at?: string;
+  readonly ttl?: number;
+}
+
+/**
+ * Platform API key detail for API responses. Excludes `key_hash` and `user_id`.
+ */
+export interface ApiKeyDetail {
+  readonly key_id: string;
+  readonly name: string;
+  readonly scopes: readonly ApiKeyScope[];
+  readonly status: 'active' | 'revoked';
+  readonly created_at: string;
+  readonly updated_at: string;
+  readonly expires_at: string | null;
+  readonly revoked_at: string | null;
+}
+
+/**
+ * Create API key request body.
+ */
+export interface CreateApiKeyRequest {
+  readonly name: string;
+  readonly scopes?: readonly ApiKeyScope[];
+  readonly expires_at?: string;
+}
+
+/**
+ * Create API key response — includes the full key material (shown only once).
+ * The `key` is the value the caller sends in the `X-API-Key` header.
+ */
+export interface CreateApiKeyResponse {
+  readonly key_id: string;
+  readonly name: string;
+  readonly key: string;
+  readonly scopes: readonly ApiKeyScope[];
+  readonly expires_at: string | null;
+  readonly created_at: string;
+}
+
+/**
+ * Map a DynamoDB API key record to the API detail response shape.
+ * @param record - the DynamoDB API key record.
+ * @returns the API-facing API key detail (never includes the hash or owner).
+ */
+export function toApiKeyDetail(record: ApiKeyRecord): ApiKeyDetail {
+  return {
+    key_id: record.key_id,
+    name: record.name,
+    scopes: record.scopes,
+    status: record.status,
+    created_at: record.created_at,
+    updated_at: record.updated_at,
+    expires_at: record.expires_at ?? null,
     revoked_at: record.revoked_at ?? null,
   };
 }
