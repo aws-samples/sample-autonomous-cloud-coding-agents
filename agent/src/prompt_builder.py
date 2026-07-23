@@ -276,11 +276,12 @@ def _channel_prompt_addendum(config: TaskConfig) -> str:
     Linear-origin tasks (ADR-016 "Linear is fully deterministic"): the agent has
     NO Linear MCP and NO Linear write access. All Linear I/O is handled by the
     platform, not the agent:
-      * inbound context — the issue title/description, recent human comments, and
-        attachments are ALREADY pre-hydrated into the task description +
-        ``attachments`` at admission time (linear-webhook-processor +
-        linear-attachments.ts + linear-feedback.fetchRecentComments). There is
-        nothing to fetch at runtime.
+      * inbound context — the issue title/description, recent human comments,
+        project wiki-document CONTENT, and attachments are ALREADY pre-hydrated
+        into the task description + ``attachments`` at admission time
+        (linear-webhook-processor + linear-attachments.ts +
+        linear-feedback.fetchRecentComments + linear-issue-context-probe's doc
+        fetch). There is nothing to fetch at runtime.
       * outbound status — 👀/✅/❌ reactions and Backlog→In Progress→In Review
         state transitions are posted deterministically by ``linear_reactions.py``;
         the "🤖 Starting" and PR-opened comments are posted at the Lambda tier;
@@ -310,13 +311,15 @@ def _channel_prompt_addendum(config: TaskConfig) -> str:
         "manages ALL Linear interaction for you — you have no Linear tools and "
         "must not try to call any:\n\n"
         "- **Context is already here.** The issue title, description, recent "
-        "human comments, and the reporter's uploaded files (both inline images "
-        "and paperclip attachments) have been pre-fetched and included in your "
-        "task description + attachments. You have no way to fetch more from "
-        "Linear, so work from what you've been given. If the task clearly "
-        "references material that ISN'T in your context (an external link, a "
-        "project wiki doc, a file you can't see), don't guess — say so in the "
-        "PR and proceed with best effort on what you have.\n"
+        "human comments, the reporter's uploaded files (inline images and "
+        "paperclip attachments), and the content of any project wiki documents "
+        "have been pre-fetched and included in your task description (see the "
+        "`## Project documents` and `## Recent comments` sections if present) + "
+        "attachments. You have no way to fetch more from Linear, so work from "
+        "what you've been given. If the task clearly references material that "
+        "ISN'T in your context (an external link, a file you can't see, or a doc "
+        "noted as present-but-not-included), don't guess — say so in the PR and "
+        "proceed with best effort on what you have.\n"
         "- **Status is automatic.** The platform posts the issue reactions "
         "(👀 on start, ✅/❌ on finish), moves the issue through its workflow "
         "states (In Progress → In Review), posts the start + PR-opened comments, "
