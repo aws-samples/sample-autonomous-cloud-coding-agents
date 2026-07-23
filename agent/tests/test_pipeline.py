@@ -1495,7 +1495,11 @@ class TestTraceS3Upload:
             patch("pipeline.ensure_committed", return_value=False),
             patch("pipeline.verify_build", return_value=VerifyOutcome(passed=True)),
             patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
-            patch("pipeline.ensure_pr", return_value=None),
+            # A DELIVERED task (a PR was opened) — this test is about trace-upload
+            # fail-open, not the ABCA-815 no-deliverable gate. Returning a PR keeps
+            # the delivery gate out of the picture so the assertion isolates the
+            # trace behavior (a real no-PR task is covered in TestDeliveryGate).
+            patch("pipeline.ensure_pr", return_value="https://github.com/owner/repo/pull/1"),
             patch("pipeline.get_disk_usage", return_value=0),
             patch("pipeline.print_metrics"),
         ):

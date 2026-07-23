@@ -33,6 +33,12 @@ def _patch_common(monkeypatch, fake: FakeRunCmd):
     # _install_commit_hook touches the filesystem; stub it out (it's its own
     # best-effort path and not under test here).
     monkeypatch.setattr(repo, "_install_commit_hook", lambda repo_dir: None)
+    # ABCA-815: the clone is faked here, so the real workspace never gets a
+    # `.git`. Stub the pre-clean + git-root backstop (tested directly in
+    # TestCloneWorkspaceGuards) so the hermetic clone tests don't trip the
+    # assertion on a non-existent/empty workspace path.
+    monkeypatch.setattr(repo, "_prepare_clone_dir", lambda repo_dir, notes: None)
+    monkeypatch.setattr(repo, "_assert_clone_root", lambda repo_dir: None)
 
 
 class TestSetupRepoHappyPath:
@@ -207,6 +213,12 @@ class TestBaselineBuildTimeout:
         monkeypatch.setattr(repo, "run_cmd", fake)
         monkeypatch.setattr(repo, "run_cmd_with_backoff", fake)
         monkeypatch.setattr(repo, "_install_commit_hook", lambda repo_dir: None)
+        # ABCA-815: the clone is faked here, so the real workspace never gets a
+        # `.git`. Stub the pre-clean + git-root backstop (tested directly in
+        # TestCloneWorkspaceGuards) so the hermetic clone tests don't trip the
+        # assertion on a non-existent/empty workspace path.
+        monkeypatch.setattr(repo, "_prepare_clone_dir", lambda repo_dir, notes: None)
+        monkeypatch.setattr(repo, "_assert_clone_root", lambda repo_dir: None)
         monkeypatch.setattr(repo, "detect_default_branch", lambda url, d: "main")
 
         repo.setup_repo(_config(read_only=False))
@@ -223,6 +235,12 @@ class TestBaselineBuildTimeout:
         monkeypatch.setattr(repo, "run_cmd", fake)
         monkeypatch.setattr(repo, "run_cmd_with_backoff", fake)
         monkeypatch.setattr(repo, "_install_commit_hook", lambda repo_dir: None)
+        # ABCA-815: the clone is faked here, so the real workspace never gets a
+        # `.git`. Stub the pre-clean + git-root backstop (tested directly in
+        # TestCloneWorkspaceGuards) so the hermetic clone tests don't trip the
+        # assertion on a non-existent/empty workspace path.
+        monkeypatch.setattr(repo, "_prepare_clone_dir", lambda repo_dir, notes: None)
+        monkeypatch.setattr(repo, "_assert_clone_root", lambda repo_dir: None)
         monkeypatch.setattr(repo, "detect_default_branch", lambda url, d: "main")
 
         setup = repo.setup_repo(_config(read_only=False))  # must not raise
@@ -236,6 +254,12 @@ class TestBaselineBuildTimeout:
         monkeypatch.setattr(repo, "run_cmd", fake)
         monkeypatch.setattr(repo, "run_cmd_with_backoff", fake)
         monkeypatch.setattr(repo, "_install_commit_hook", lambda repo_dir: None)
+        # ABCA-815: the clone is faked here, so the real workspace never gets a
+        # `.git`. Stub the pre-clean + git-root backstop (tested directly in
+        # TestCloneWorkspaceGuards) so the hermetic clone tests don't trip the
+        # assertion on a non-existent/empty workspace path.
+        monkeypatch.setattr(repo, "_prepare_clone_dir", lambda repo_dir, notes: None)
+        monkeypatch.setattr(repo, "_assert_clone_root", lambda repo_dir: None)
         monkeypatch.setattr(repo, "detect_default_branch", lambda url, d: "main")
 
         setup = repo.setup_repo(_config(read_only=False))  # must not raise
@@ -256,6 +280,12 @@ class TestBaselineBuildTimeout:
         monkeypatch.setattr(repo, "run_cmd", fake)
         monkeypatch.setattr(repo, "run_cmd_with_backoff", fake)
         monkeypatch.setattr(repo, "_install_commit_hook", lambda repo_dir: None)
+        # ABCA-815: the clone is faked here, so the real workspace never gets a
+        # `.git`. Stub the pre-clean + git-root backstop (tested directly in
+        # TestCloneWorkspaceGuards) so the hermetic clone tests don't trip the
+        # assertion on a non-existent/empty workspace path.
+        monkeypatch.setattr(repo, "_prepare_clone_dir", lambda repo_dir, notes: None)
+        monkeypatch.setattr(repo, "_assert_clone_root", lambda repo_dir: None)
         monkeypatch.setattr(repo, "detect_default_branch", lambda url, d: "main")
 
         setup = repo.setup_repo(_config(read_only=False))
@@ -273,6 +303,12 @@ class TestBaselineBuildTimeout:
         monkeypatch.setattr(repo, "run_cmd", fake)
         monkeypatch.setattr(repo, "run_cmd_with_backoff", fake)
         monkeypatch.setattr(repo, "_install_commit_hook", lambda repo_dir: None)
+        # ABCA-815: the clone is faked here, so the real workspace never gets a
+        # `.git`. Stub the pre-clean + git-root backstop (tested directly in
+        # TestCloneWorkspaceGuards) so the hermetic clone tests don't trip the
+        # assertion on a non-existent/empty workspace path.
+        monkeypatch.setattr(repo, "_prepare_clone_dir", lambda repo_dir, notes: None)
+        monkeypatch.setattr(repo, "_assert_clone_root", lambda repo_dir: None)
         monkeypatch.setattr(repo, "detect_default_branch", lambda url, d: "main")
 
         setup = repo.setup_repo(_config(read_only=False))
@@ -447,6 +483,12 @@ class TestSetupRepoDependencyUnreachable:
         report/raise path fires, while run_cmd (non-clone commands) stays faked."""
         monkeypatch.setattr(repo, "run_cmd", fake)
         monkeypatch.setattr(repo, "_install_commit_hook", lambda repo_dir: None)
+        # ABCA-815: the clone is faked here, so the real workspace never gets a
+        # `.git`. Stub the pre-clean + git-root backstop (tested directly in
+        # TestCloneWorkspaceGuards) so the hermetic clone tests don't trip the
+        # assertion on a non-existent/empty workspace path.
+        monkeypatch.setattr(repo, "_prepare_clone_dir", lambda repo_dir, notes: None)
+        monkeypatch.setattr(repo, "_assert_clone_root", lambda repo_dir: None)
 
         def fake_backoff(cmd, label, *, on_retry=None, **kwargs):
             # Mirror the real helper: on_retry only fires for transient failures.
@@ -484,6 +526,12 @@ class TestSetupRepoDependencyUnreachable:
         monkeypatch.setattr("shell.run_cmd", fake_run_cmd)
         monkeypatch.setattr(repo, "run_cmd", fake_run_cmd)
         monkeypatch.setattr(repo, "_install_commit_hook", lambda repo_dir: None)
+        # ABCA-815: the clone is faked here, so the real workspace never gets a
+        # `.git`. Stub the pre-clean + git-root backstop (tested directly in
+        # TestCloneWorkspaceGuards) so the hermetic clone tests don't trip the
+        # assertion on a non-existent/empty workspace path.
+        monkeypatch.setattr(repo, "_prepare_clone_dir", lambda repo_dir, notes: None)
+        monkeypatch.setattr(repo, "_assert_clone_root", lambda repo_dir: None)
         progress = _RecordingProgress()
 
         import pytest
@@ -605,6 +653,12 @@ class TestSetupRepoDependencyUnreachable:
         fake = _fake_run_cmd()
         monkeypatch.setattr(repo, "run_cmd", fake)
         monkeypatch.setattr(repo, "_install_commit_hook", lambda repo_dir: None)
+        # ABCA-815: the clone is faked here, so the real workspace never gets a
+        # `.git`. Stub the pre-clean + git-root backstop (tested directly in
+        # TestCloneWorkspaceGuards) so the hermetic clone tests don't trip the
+        # assertion on a non-existent/empty workspace path.
+        monkeypatch.setattr(repo, "_prepare_clone_dir", lambda repo_dir, notes: None)
+        monkeypatch.setattr(repo, "_assert_clone_root", lambda repo_dir: None)
 
         def fake_backoff(cmd, label, *, on_retry=None, **kwargs):
             # Clone succeeds; only the PR-branch fetch fails transiently.
@@ -648,3 +702,58 @@ class TestSetupRepoDependencyUnreachable:
         assert "set-remote-url" not in labels
         assert "configure-git-credential-helper" not in labels
         assert "safe-directory" in labels  # only the pre-clone step ran
+
+
+class TestCloneWorkspaceGuards:
+    """ABCA-815: the clone-time slate-clean + git-root backstop that stop a
+    stacked child from silently editing a NESTED working tree the pipeline's
+    git ops never see (which reported a false COMPLETED with the work lost)."""
+
+    def test_prepare_clears_non_empty_workspace_and_notes(self, tmp_path):
+        repo_dir = tmp_path / "task-abc"
+        repo_dir.mkdir()
+        (repo_dir / "stale.txt").write_text("residue from a prior run")
+        (repo_dir / "nested").mkdir()
+        notes: list[str] = []
+
+        repo._prepare_clone_dir(str(repo_dir), notes)
+
+        # The whole dir is removed so the clone lands directly at the root.
+        assert not repo_dir.exists()
+        assert any("residue" in n for n in notes)
+
+    def test_prepare_leaves_empty_workspace_untouched_no_note(self, tmp_path):
+        repo_dir = tmp_path / "task-abc"
+        repo_dir.mkdir()  # exists but empty — a normal fresh workspace
+        notes: list[str] = []
+
+        repo._prepare_clone_dir(str(repo_dir), notes)
+
+        assert repo_dir.exists()  # empty dir is fine; clone lands into it
+        assert notes == []
+
+    def test_prepare_absent_workspace_is_noop(self, tmp_path):
+        repo_dir = tmp_path / "does-not-exist"
+        notes: list[str] = []
+
+        repo._prepare_clone_dir(str(repo_dir), notes)  # must not raise
+
+        assert not repo_dir.exists()
+        assert notes == []
+
+    def test_assert_root_passes_when_git_dir_present(self, tmp_path):
+        repo_dir = tmp_path / "task-abc"
+        (repo_dir / ".git").mkdir(parents=True)
+
+        repo._assert_clone_root(str(repo_dir))  # must not raise
+
+    def test_assert_root_raises_when_git_missing(self, tmp_path):
+        import pytest
+
+        repo_dir = tmp_path / "task-abc"
+        repo_dir.mkdir()
+        # A nested clone: .git lives one level deep, NOT at repo_dir root.
+        (repo_dir / "inner" / ".git").mkdir(parents=True)
+
+        with pytest.raises(RuntimeError, match="git repository at the workspace root"):
+            repo._assert_clone_root(str(repo_dir))

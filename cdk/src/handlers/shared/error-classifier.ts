@@ -365,6 +365,40 @@ const PATTERNS: readonly ErrorPattern[] = [
     },
   },
   {
+    // ABCA-815: a new-work coding task reported agent-success but no commit
+    // reached the branch and no PR was opened — the agent's changes were LOST
+    // (live cause: a stacked child edited a nested working tree that was never
+    // the branch's tree, so nothing committed). This is an environment/infra
+    // fault, not the user's code, and a fresh run usually lands the work — so
+    // it reads as retryable, NOT the non-retryable "your task didn't succeed".
+    // Ordered before the generic ``agent_status=`` catch-all so it wins.
+    pattern: /deliverable=lost/i,
+    classification: {
+      category: ErrorCategory.AGENT,
+      title: 'The change was not saved',
+      description: 'The agent finished, but none of its changes were committed to the branch and no pull request was opened — the work did not land in the repository. This is usually a transient workspace fault (e.g. the clone ended up in an unexpected directory), not a problem with your request.',
+      remedy: 'Reply here to try again — a fresh run normally saves the work correctly. If it keeps happening on this repo, share the task ID with your ABCA admin to check the agent workspace setup.',
+      retryable: true,
+      errorClass: ErrorClass.TRANSIENT,
+    },
+  },
+  {
+    // ABCA-815 sibling: a commit DID land on the branch but the PR never
+    // opened (e.g. ``gh pr create`` failed after the push). The code is safe on
+    // the branch; the only missing step is opening the PR — so a retry (or an
+    // operator opening it by hand) recovers it. Distinct copy from the
+    // work-lost case so the reader knows the change is NOT gone.
+    pattern: /deliverable=no_pr/i,
+    classification: {
+      category: ErrorCategory.AGENT,
+      title: 'Change saved, but the pull request did not open',
+      description: 'The agent committed its changes to the branch, but the pull request could not be created (the push succeeded; opening the PR did not). Your work is safe on the branch.',
+      remedy: 'Reply here to try again — it will find the existing commit and open the PR. If it persists, an admin can open a PR from the task branch manually, or check the GitHub token\'s Pull requests (Read and write) scope.',
+      retryable: true,
+      errorClass: ErrorClass.TRANSIENT,
+    },
+  },
+  {
     pattern: /Task did not succeed.*agent_status=/i,
     classification: {
       category: ErrorCategory.AGENT,

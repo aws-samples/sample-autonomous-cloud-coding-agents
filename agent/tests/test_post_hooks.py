@@ -6,6 +6,7 @@ The two seams are ``subprocess.run`` (read-only git/gh queries) and
 ``shell.run_cmd`` (mutating git/gh commands) — both faked with recorders.
 """
 
+import subprocess
 from types import SimpleNamespace
 
 import post_hooks
@@ -249,3 +250,88 @@ class TestEnsurePrCreate:
         assert "Resolves #55" in body
         assert "**PASS**" in body  # build passed
         assert "**FAIL**" in body  # lint failed
+
+
+class TestReconcileAgentBranch:
+    """ABCA-815 root cause: reconcile the platform branch when the agent
+    committed on its OWN branch instead of the pre-checked-out platform branch.
+
+    Real git (tmp_path) — this is pure git plumbing, so a real repo gives far
+    higher confidence than faking subprocess. The two seams (subprocess.run for
+    the branch read, run_cmd for the mutating ops) both hit the tmp repo."""
+
+    @staticmethod
+    def _git(repo, *args):
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True)
+
+    def _make_repo(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        self._git(repo, "init", "-q")
+        self._git(repo, "config", "user.email", "t@t")
+        self._git(repo, "config", "user.name", "t")
+        (repo / "f.txt").write_text("base\n")
+        self._git(repo, "add", "-A")
+        self._git(repo, "commit", "-qm", "base")
+        # Rename default branch to a stable name for the test.
+        self._git(repo, "branch", "-M", "main")
+        return str(repo)
+
+    def _head_sha(self, repo):
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+    def _sha_of(self, repo, ref):
+        return subprocess.run(
+            ["git", "rev-parse", ref], cwd=repo, check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+    def test_reconciles_when_agent_on_own_branch(self, tmp_path):
+        repo = self._make_repo(tmp_path)
+        platform = "bgagent/task-1/fix"
+        # Platform creates its (empty) branch, as setup_repo does.
+        self._git(repo, "checkout", "-qb", platform)
+        # Agent goes rogue: its own branch + a commit (the live ABCA-815 case).
+        self._git(repo, "checkout", "-qb", "agent-own-branch")
+        (tmp_path / "repo" / "f.txt").write_text("base\nagent change\n")
+        self._git(repo, "commit", "-qam", "agent work")
+        agent_head = self._head_sha(repo)
+
+        moved = post_hooks.reconcile_agent_branch(repo, platform)
+
+        assert moved is True
+        # Platform branch now points at the agent's commit …
+        assert self._sha_of(repo, platform) == agent_head
+        # … and it is the checked-out branch, so downstream delivery uses it.
+        assert post_hooks._current_branch(repo) == platform
+
+    def test_noop_when_already_on_platform_branch(self, tmp_path):
+        repo = self._make_repo(tmp_path)
+        platform = "bgagent/task-1/fix"
+        self._git(repo, "checkout", "-qb", platform)
+        (tmp_path / "repo" / "f.txt").write_text("base\non platform\n")
+        self._git(repo, "commit", "-qam", "work on platform")
+        before = self._head_sha(repo)
+
+        moved = post_hooks.reconcile_agent_branch(repo, platform)
+
+        assert moved is False
+        assert self._sha_of(repo, platform) == before
+        assert post_hooks._current_branch(repo) == platform
+
+    def test_noop_on_detached_head(self, tmp_path):
+        repo = self._make_repo(tmp_path)
+        platform = "bgagent/task-1/fix"
+        self._git(repo, "checkout", "-qb", platform)
+        # Detach HEAD at the current commit.
+        self._git(repo, "checkout", "-q", "--detach")
+
+        moved = post_hooks.reconcile_agent_branch(repo, platform)
+
+        assert moved is False  # nothing to adopt
+
+    def test_current_branch_reports_none_when_detached(self, tmp_path):
+        repo = self._make_repo(tmp_path)
+        self._git(repo, "checkout", "-q", "--detach")
+        assert post_hooks._current_branch(repo) is None

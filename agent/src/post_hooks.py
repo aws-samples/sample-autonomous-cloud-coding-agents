@@ -324,6 +324,97 @@ def ensure_committed(repo_dir: str) -> bool:
     return False
 
 
+def _current_branch(repo_dir: str) -> str | None:
+    """Return the checked-out branch name, or None if detached / git fails."""
+    try:
+        res = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=repo_dir,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if res.returncode != 0:
+        return None
+    name = res.stdout.strip()
+    # "HEAD" is git's sentinel for a detached HEAD — not a branch name.
+    return name or None if name != "HEAD" else None
+
+
+def reconcile_agent_branch(repo_dir: str, branch: str) -> bool:
+    """ABCA-815 root cause: make delivery tolerant of the agent switching off the
+    platform-provided branch.
+
+    The platform checks out ``branch`` (``config.branch_name``, e.g.
+    ``bgagent/<task_id>/<slug>``) BEFORE the agent runs, and every delivery git op
+    (ensure_committed / ensure_pr's commit-diff / ensure_pushed) is keyed to it.
+    But the agent doesn't always stay there: live on backgroundagent-dev it
+    sometimes ran ``git checkout -b <its-own-short-branch>``, committed + opened
+    its own PR there, and left the platform branch empty. ensure_pr then saw no
+    commits on ``branch`` → skipped → the task looked delivered-nothing (the
+    ABCA-815 signature), and for a #247 stacked child the successor had no branch
+    to stack on. It is NON-deterministic (the same task succeeds on a retry when
+    the agent happens to stay put), so a prompt tweak alone can't be relied on.
+
+    This reconciles deterministically: if HEAD is on a DIFFERENT branch than the
+    platform ``branch`` and that HEAD carries commits, fast-forward the platform
+    branch to the agent's HEAD (``git branch -f`` + checkout) so all downstream
+    delivery runs against the branch the platform tracks. The agent's commits are
+    preserved verbatim — we only re-point the platform branch label at them.
+
+    Returns True if it moved the platform branch, False otherwise (already on it,
+    detached HEAD with no branch to adopt, or a git failure — all handled by the
+    existing ensure_committed/ensure_pr/delivery-gate chain). Best-effort: never
+    raises, so a reconcile failure degrades to the pre-existing behavior."""
+    head_branch = _current_branch(repo_dir)
+    if head_branch is None or head_branch == branch:
+        # On the platform branch already (the common, healthy case) or detached
+        # with nothing to adopt — nothing to reconcile.
+        return False
+    log(
+        "POST",
+        f"Agent left the platform branch: HEAD is on '{head_branch}', expected "
+        f"'{branch}'. Reconciling the platform branch to the agent's commits so "
+        "the work is delivered on the tracked branch (ABCA-815).",
+    )
+    try:
+        # Re-point the platform branch at the agent's HEAD (force: the platform
+        # branch was created empty at setup, so this only ever fast-forwards it
+        # to the work the agent actually did). Then check it out so ensure_committed
+        # / ensure_pr / ensure_pushed all operate on the tracked branch.
+        force_res = run_cmd(
+            ["git", "branch", "-f", branch, "HEAD"],
+            label="reconcile-branch-force",
+            cwd=repo_dir,
+            check=False,
+        )
+        if force_res.returncode != 0:
+            stderr = (force_res.stderr or "").strip()[:200]
+            log("WARN", f"reconcile: git branch -f failed (exit {force_res.returncode}): {stderr}")
+            return False
+        checkout_res = run_cmd(
+            ["git", "checkout", branch],
+            label="reconcile-branch-checkout",
+            cwd=repo_dir,
+            check=False,
+        )
+        if checkout_res.returncode != 0:
+            stderr = (checkout_res.stderr or "").strip()[:200]
+            log(
+                "WARN",
+                f"reconcile: checkout '{branch}' failed (exit {checkout_res.returncode}): {stderr}",
+            )
+            return False
+    except (OSError, subprocess.SubprocessError) as e:
+        log("WARN", f"reconcile: git op raised {type(e).__name__}: {e}")
+        return False
+    log("POST", f"Reconciled: platform branch '{branch}' now points at the agent's work")
+    return True
+
+
 def ensure_pushed(repo_dir: str, branch: str) -> bool:
     """Push the branch if there are unpushed commits."""
     result = subprocess.run(

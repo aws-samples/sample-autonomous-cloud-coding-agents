@@ -244,6 +244,86 @@ def _allow_response(reason: str = "permitted") -> dict:
     }
 
 
+# ABCA-815 layer 1 (workspace-integrity guard). The repo is ALREADY cloned and
+# checked out at the agent's cwd (``repo_dir``); the platform tracks that dir for
+# commit/branch/PR/push. Live on backgroundagent-dev the agent sometimes ran its
+# OWN ``gh repo clone``/``git clone`` of the SAME repo into a sibling dir
+# (``/workspace/<repo-name>``) and did all its work there, leaving repo_dir empty
+# → the platform saw no commits (delivery gate: ``deliverable=lost``) and, for a
+# #247 stacked child, the successor had no branch to stack on. The industry norm
+# is a filesystem sandbox that makes a divergent clone impossible; lacking that
+# (raw Bash + bypassPermissions + open GitHub egress), a harness-enforced deny of
+# the re-clone is the closest robust analog — and Claude Code hook denies fire
+# even under bypassPermissions and survive prompt-injection. We match ONLY a
+# re-clone of the TASK's OWN repo (not legitimate dependency/submodule clones),
+# keyed off the ``owner/repo`` slug in any of the URL forms gh/git accept.
+#
+# The clone verb must appear as an actual COMMAND — at the start of the string or
+# right after a shell separator (``&&``, ``||``, ``|``, ``;``, newline, ``(``) —
+# NOT as text buried inside a quoted argument. Live-caught on ABCA-856: a
+# ``gh pr create --body "…do not run gh repo clone…"`` was wrongly blocked because
+# the phrase appeared inside the PR body. Anchoring to command position (and, in
+# ``_is_self_reclone``, truncating at the first argument that carries free text)
+# removes that false positive while still catching every real re-clone.
+_CLONE_CMD_RE = re.compile(
+    r"(?:^|[;&|\n(]|&&|\|\|)\s*(?:gh\s+repo\s+clone|git\s+(?:-C\s+\S+\s+)?clone)\b",
+    re.IGNORECASE,
+)
+
+# Arguments after which the rest of the command is free-form TEXT (a PR/issue/
+# commit body or title), where a mention of "gh repo clone" is prose, not a
+# command. We stop scanning for the clone verb at the first of these so a body
+# quoting the clone command can't trip the guard (ABCA-856 false positive).
+_FREE_TEXT_ARG_RE = re.compile(
+    r"(?:^|\s)(?:-m|--message|--body|--body-file|-b|--title|-t|-F|--field|--raw-field)\b",
+    re.IGNORECASE,
+)
+
+
+def _repo_slug_variants(repo_url: str) -> list[str]:
+    """Return the ``owner/repo`` slug forms a clone command could name.
+
+    ``config.repo_url`` is the canonical ``owner/repo``. A clone command may
+    reference it as ``owner/repo``, ``https://github.com/owner/repo(.git)``, or
+    ``git@github.com:owner/repo(.git)`` — all normalize to the same slug, so we
+    just need the bare ``owner/repo`` (with and without ``.git``) to substring-
+    match against the command text after normalization."""
+    slug = (repo_url or "").strip().removesuffix(".git").strip("/").lower()
+    if not slug:
+        return []
+    return [slug, f"{slug}.git"]
+
+
+def _is_self_reclone(command: str, repo_url: str) -> bool:
+    """True when *command* clones the task's OWN repo (any URL form).
+
+    Deliberately narrow on two axes so legitimate commands pass:
+      * the clone verb must be in COMMAND position (start / after a shell
+        separator), not inside a quoted argument — see ``_CLONE_CMD_RE``; and
+      * the scan stops at the first free-text argument (``--body``/``-m``/…), so a
+        PR/commit body that merely QUOTES "gh repo clone" is not treated as a
+        clone (ABCA-856); and
+      * a clone of a DIFFERENT repo (dependency, fixture, example) is allowed —
+        only a re-clone of the TASK repo threatens the workspace invariant."""
+    if not command or not repo_url:
+        return False
+    # Only consider the segment BEFORE any free-text argument — a --body/-m value
+    # that quotes the clone command is prose, not an executed clone.
+    m = _FREE_TEXT_ARG_RE.search(command)
+    scan = command[: m.start()] if m else command
+    if not _CLONE_CMD_RE.search(scan):
+        return False
+    variants = _repo_slug_variants(repo_url)
+    if not variants:
+        return False
+    # Normalize the command's URL punctuation to the bare slug space: drop the
+    # scheme/host and the scp-style ``git@host:`` prefix so ``.../owner/repo.git``
+    # and ``git@github.com:owner/repo`` both reduce to a substring carrying
+    # ``owner/repo``. Search the SAME pre-free-text segment.
+    haystack = scan.lower().replace("git@github.com:", "github.com/")
+    return any(v in haystack for v in variants)
+
+
 async def pre_tool_use_hook(
     hook_input: Any,
     tool_use_id: str | None,
@@ -255,6 +335,7 @@ async def pre_tool_use_hook(
     user_id: str | None = None,
     progress: Any = None,
     task_state_module: Any = None,
+    repo_url: str | None = None,
 ) -> dict:
     """PreToolUse hook: three-outcome Cedar policy enforcement (§6.5).
 
@@ -302,6 +383,28 @@ async def pre_tool_use_hook(
     if not isinstance(tool_input, dict):
         log("WARN", f"PreToolUse hook received non-dict tool_input — denying {tool_name}")
         return _deny_response("tool input is not an object")
+
+    # ABCA-815 layer 1: block a Bash re-clone of the task's OWN repo before Cedar
+    # eval. The repo is already checked out at the agent's cwd; a self-reclone
+    # into a sibling dir strands the work off the platform-tracked branch (the
+    # delivery gate then fails it as ``deliverable=lost``). Deny it here with a
+    # redirect so the agent works in place instead. Scoped to the task repo only
+    # (dependency/fixture clones pass). Fires even under bypassPermissions.
+    if tool_name == "Bash" and repo_url:
+        command = tool_input.get("command", "")
+        if isinstance(command, str) and _is_self_reclone(command, repo_url):
+            reason = (
+                f"The repository '{repo_url}' is ALREADY cloned and checked out in "
+                "your working directory — do NOT clone it again or work in another "
+                "directory. Your commits must land in the current working directory "
+                "so the platform can open the pull request on the correct branch. "
+                "Remove the clone command and work in place (edit, commit, and push "
+                "from where you already are)."
+            )
+            log("POLICY", f"DENIED self-reclone of {repo_url}: {command[:160]}")
+            if trajectory:
+                trajectory.write_policy_decision("Bash", False, "self_reclone_blocked", 0)
+            return _deny_response(reason)
 
     decision = engine.evaluate_tool_use(tool_name, tool_input)
 
@@ -1588,6 +1691,7 @@ def build_hook_matchers(
     task_id: str = "",
     progress: Any = None,
     user_id: str = "",
+    repo_url: str = "",
 ) -> dict:
     """Build hook matchers dict for ClaudeAgentOptions.
 
@@ -1638,6 +1742,7 @@ def build_hook_matchers(
                 task_id=task_id or None,
                 user_id=user_id or None,
                 progress=progress,
+                repo_url=repo_url or None,
             )
         except Exception as exc:
             log(

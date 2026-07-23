@@ -335,6 +335,7 @@ def _initialize_policy_engine_and_hooks(
         task_id=config.task_id or "",
         progress=progress,
         user_id=config.user_id or "",
+        repo_url=config.repo_url or "",
     )
     return policy_engine, hooks
 

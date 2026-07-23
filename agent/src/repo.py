@@ -141,6 +141,50 @@ def _fail_setup_command(label: str, resource: str, stderr: str, progress: Any) -
     )
 
 
+def _prepare_clone_dir(repo_dir: str, notes: list[str]) -> None:
+    """ABCA-815 root cause: guarantee a clean slate at *repo_dir* before cloning.
+
+    On persistent session storage the workspace path (``/workspace/<task_id>``)
+    can carry residue from a prior run/task sharing the id or mount. If repo_dir
+    already exists and is NON-EMPTY, ``gh repo clone <url> <repo_dir>`` exits 128
+    ("directory not empty") WITHOUT nesting — but the agent, whose cwd IS
+    repo_dir, then works against whatever stale tree is there (or re-clones into a
+    subdir), while every pipeline git op (ensure_committed / ensure_pr /
+    ensure_pushed) runs against repo_dir's ROOT. Those trees diverge silently:
+    the agent's edits/commits land in the inner tree, the outer tree stays clean,
+    ensure_committed sees nothing to commit, ensure_pr finds no commits, and the
+    task reports a false COMPLETED with the work lost (the ABCA-815 stacked-child
+    favorites regression). Removing the residue so the clone lands DIRECTLY in an
+    empty repo_dir closes that divergence at the source; :func:`_assert_clone_root`
+    is the post-clone backstop."""
+    if os.path.exists(repo_dir) and os.listdir(repo_dir):
+        log(
+            "SETUP",
+            f"Workspace {repo_dir} is non-empty before clone (persistent-storage "
+            "residue) — clearing it so the clone lands at the root, not nested",
+        )
+        notes.append("cleared pre-existing workspace residue before clone")
+        import shutil
+
+        shutil.rmtree(repo_dir, ignore_errors=True)
+
+
+def _assert_clone_root(repo_dir: str) -> None:
+    """ABCA-815 backstop: assert the clone produced a git root AT *repo_dir*.
+
+    If ``.git`` is missing here the working tree the agent will edit (cwd=repo_dir)
+    is NOT a checkout the pipeline's git ops can see — every commit/PR step would
+    silently no-op and the task would report a false success with the work lost.
+    Fail loudly at setup (a plain RuntimeError → terminal FAILED with a clear
+    reason) instead of after the agent has burned a run."""
+    if not os.path.isdir(os.path.join(repo_dir, ".git")):
+        raise RuntimeError(
+            "clone did not produce a git repository at the workspace root "
+            f"({repo_dir}/.git missing after clone) — the agent's working tree "
+            "would not be the tracked checkout; refusing to run so no work is lost"
+        )
+
+
 def setup_repo(config: TaskConfig, progress: Any = None) -> RepoSetup:
     """Clone repo, create branch, configure git auth, run mise install.
 
@@ -179,6 +223,9 @@ def setup_repo(config: TaskConfig, progress: Any = None) -> RepoSetup:
         slug = slugify(title)
         branch = f"bgagent/{config.task_id}/{slug}"
 
+    # ABCA-815 root cause: guarantee a clean slate at repo_dir BEFORE cloning.
+    _prepare_clone_dir(repo_dir, notes)
+
     # Mark the repo directory as safe for git.  On persistent session storage
     # the mount may be owned by a different UID than the container user,
     # triggering git's "dubious ownership" check on clone/resume.
@@ -196,6 +243,9 @@ def setup_repo(config: TaskConfig, progress: Any = None) -> RepoSetup:
     )
     if clone_result.returncode != 0:
         _fail_setup_command("clone", config.repo_url, clone_result.stderr, progress)
+
+    # ABCA-815 backstop: assert the clone produced a git root AT repo_dir.
+    _assert_clone_root(repo_dir)
 
     # Pin the remote to the plain https URL (no embedded credentials) and
     # authenticate git push via gh's credential helper. Embedding the token

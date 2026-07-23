@@ -6,6 +6,7 @@ from config import NEEDS_INPUT_MARKER
 from hooks import _record_blocker_reason, _reset_blocker_reason_for_tests
 from models import AgentResult
 from pipeline import (
+    _apply_delivery_gate,
     _chain_prior_agent_error,
     _compute_turns_completed,
     _resolve_overall_task_status,
@@ -158,6 +159,97 @@ class TestResolveOverallTaskStatus:
         assert overall == "error"
         assert err is not None
         assert "not available" in err
+
+
+class TestDeliveryGate:
+    """ABCA-815: a create-strategy new-work task that reported success but
+    shipped NOTHING (no PR AND no commit) must be failed loudly, not COMPLETED.
+
+    Common args factory keeps each case to just the axis under test."""
+
+    @staticmethod
+    def _gate(
+        overall_status: str = "success",
+        result_error: str | None = None,
+        *,
+        workflow_read_only: bool = False,
+        artifact_workflow: bool = False,
+        needs_input: bool = False,
+        ensure_pr_strategy: str = "create",
+        pr_url: str | None = None,
+        commit_landed: bool = False,
+    ) -> tuple[str, str | None]:
+        # Explicit typed kwargs (not **overrides) so `ty` can check each arg
+        # against _apply_delivery_gate's signature.
+        return _apply_delivery_gate(
+            overall_status,
+            result_error,
+            workflow_read_only=workflow_read_only,
+            artifact_workflow=artifact_workflow,
+            needs_input=needs_input,
+            ensure_pr_strategy=ensure_pr_strategy,
+            pr_url=pr_url,
+            commit_landed=commit_landed,
+        )
+
+    def test_success_no_pr_no_commit_becomes_lost(self):
+        # The ABCA-815 case: agent-success, create strategy, nothing shipped.
+        overall, err = self._gate()
+        assert overall == "error"
+        assert err is not None
+        assert "deliverable=lost" in err
+
+    def test_success_no_pr_but_commit_landed_is_no_pr(self):
+        # A commit reached the branch but the PR failed to open — recoverable,
+        # and the copy must say the work is NOT gone.
+        overall, err = self._gate(commit_landed=True)
+        assert overall == "error"
+        assert err is not None
+        assert "deliverable=no_pr" in err
+
+    def test_success_with_pr_is_untouched(self):
+        overall, err = self._gate(pr_url="https://github.com/o/r/pull/1")
+        assert overall == "success"
+        assert err is None
+
+    def test_read_only_success_no_pr_stays_success(self):
+        # pr_review ships no PR by design — never gate it.
+        overall, err = self._gate(workflow_read_only=True)
+        assert overall == "success"
+        assert err is None
+
+    def test_artifact_workflow_success_no_pr_stays_success(self):
+        # decompose delivers an artifact_uri, not a PR.
+        overall, err = self._gate(artifact_workflow=True)
+        assert overall == "success"
+        assert err is None
+
+    def test_needs_input_success_no_pr_stays_success(self):
+        # Clarify-and-hold is the one sanctioned new_task no-op.
+        overall, err = self._gate(needs_input=True)
+        assert overall == "success"
+        assert err is None
+
+    def test_non_create_strategy_success_no_pr_stays_success(self):
+        # pr_iteration (push_resolve/resolve) legitimately opens no NEW PR.
+        overall, err = self._gate(ensure_pr_strategy="push_resolve")
+        assert overall == "success"
+        assert err is None
+
+    def test_already_error_is_left_error(self):
+        # A task that already failed for another reason keeps that reason —
+        # the gate only promotes a FALSE success, never rewrites a real error.
+        overall, err = self._gate(overall_status="error", result_error="build failed")
+        assert overall == "error"
+        assert err == "build failed"
+
+    def test_lost_reason_matches_classifier_pattern(self):
+        # Contract with the CDK error-classifier: the reason must carry the
+        # ``deliverable=lost`` token the classifier keys on.
+        _, err = self._gate()
+        assert err is not None
+        assert "agent_status=success" in err
+        assert "deliverable=lost" in err
 
 
 class TestChainPriorAgentError:

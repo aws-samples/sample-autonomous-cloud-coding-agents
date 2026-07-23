@@ -37,6 +37,7 @@ from post_hooks import (
     _extract_agent_notes,
     ensure_committed,
     ensure_pr,
+    reconcile_agent_branch,
     verify_build,
     verify_lint,
 )
@@ -627,6 +628,94 @@ def _resolve_overall_task_status(
         build_marker = "timeout" if build_timed_out else build_ok
         err = f"Task did not succeed (agent_status={agent_status!r}, build_ok={build_marker})"
     return "error", err
+
+
+def _branch_has_new_commits(repo_dir: str, default_branch: str) -> bool:
+    """True if HEAD carries commits beyond ``origin/<default_branch>``.
+
+    The same ``origin/<default_branch>..HEAD`` diff ``ensure_pr`` consults to
+    decide whether there is anything to open a PR from (see
+    ``post_hooks._ensure_pr``). Used by the ABCA-815 delivery gate to tell
+    "a commit landed but the PR failed to open" (recoverable) from "no commit
+    ever reached the branch — the work was lost". For a #247 A4 stacked child
+    ``default_branch`` IS its predecessor branch (``config.base_branch``), so
+    this asks the right question: did this child add anything on top of its
+    base? Best-effort — a git failure returns ``False`` (assume nothing landed,
+    the conservative read for a gate whose job is to catch a lost deliverable)."""
+    try:
+        res = subprocess.run(
+            ["git", "log", f"origin/{default_branch}..HEAD", "--oneline"],
+            cwd=repo_dir,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return res.returncode == 0 and bool(res.stdout.strip())
+
+
+def _apply_delivery_gate(
+    overall_status: str,
+    result_error: str | None,
+    *,
+    workflow_read_only: bool,
+    artifact_workflow: bool,
+    needs_input: bool,
+    ensure_pr_strategy: str,
+    pr_url: str | None,
+    commit_landed: bool,
+) -> tuple[str, str | None]:
+    """ABCA-815: fail a new-work coding task that reported success but shipped
+    nothing (no PR AND no commit on its branch) — the deliverable was lost.
+
+    Live cause: a #247 A4 stacked child edited its files in a NESTED working tree
+    (persistent-storage residue left the clone one level deep inside repo_dir),
+    so every pipeline git op ran against the outer clean tree —
+    ``ensure_committed`` saw nothing, ``ensure_pr`` found no commits and skipped —
+    yet the task reported COMPLETED/build_passed. That silent success poisoned the
+    integration: the child's feature never reached the branch its successor
+    stacked on. This gate turns that into a loud, retryable FAILED.
+
+    Mirrors the repo-LESS artifact gate (``run_task`` arm 2): a sanctioned no-op
+    is EXPECTED to ship nothing, so this fires ONLY for create-strategy new work —
+      * read-only (pr_review) / artifact (decompose) ship no PR by design;
+      * push_resolve / resolve (pr_iteration) legitimately add no NEW PR, and a
+        question-only iteration is handled via the ``code_changed=False``
+        "answered" path — none MUST open a PR;
+      * clarify-and-hold (needs_input) is the one intentional new_task no-op, and
+        the caller forces it to success right after this gate.
+
+    ``commit_landed`` (from :func:`_branch_has_new_commits`) distinguishes
+    "a commit reached the branch but the PR failed to open" (``deliverable=no_pr``
+    — recoverable, the work is safe on the branch) from "no commit ever landed"
+    (``deliverable=lost`` — the work is gone) so the failure copy is honest.
+    Returns the (possibly unchanged) ``(overall_status, result_error)``.
+    """
+    delivery_expected = (
+        not workflow_read_only
+        and not artifact_workflow
+        and not needs_input
+        and ensure_pr_strategy == "create"
+    )
+    if not (overall_status == "success" and delivery_expected and not pr_url):
+        return overall_status, result_error
+    if commit_landed:
+        reason = (
+            "Task did not succeed (agent_status=success, deliverable=no_pr): a "
+            "commit reached the branch but no PR was opened — the change is on the "
+            "branch but was not delivered."
+        )
+    else:
+        reason = (
+            "Task did not succeed (agent_status=success, deliverable=lost): the "
+            "coding task reported success but no commit reached the branch and no "
+            "PR was opened — the agent's changes did not land in the task's "
+            "repository."
+        )
+    log("WARN", f"ABCA-815 delivery gate: {reason}")
+    return "error", reason
 
 
 def _compute_turns_completed(
@@ -1281,6 +1370,17 @@ def run_task(
                     )
                     post_span.set_attribute("artifact.uri", artifact_uri or "")
                 else:
+                    # ABCA-815 root cause: if the agent switched off the platform
+                    # branch (it sometimes runs `git checkout -b <own-branch>` and
+                    # commits/opens its PR there — live-caught on backgroundagent-dev),
+                    # re-point the platform branch at the agent's HEAD so the
+                    # safety-net commit, build verify, PR, and push below all run on
+                    # the branch the platform tracks. No-op on the healthy case
+                    # (agent stayed on the platform branch). Skip for read-only
+                    # (no commit/PR to deliver). The delivery gate stays as the
+                    # backstop if reconcile can't recover the work.
+                    if not workflow_read_only:
+                        reconcile_agent_branch(setup.repo_dir, setup.branch)
                     # Safety net: commit any uncommitted tracked changes (skip read-only tasks)
                     safety_committed = (
                         False if workflow_read_only else ensure_committed(setup.repo_dir)
@@ -1395,6 +1495,35 @@ def run_task(
                 pr_url=pr_url,
                 build_timed_out=build_timed_out,
                 build_infra_failed=build_infra_failed,
+            )
+            # ABCA-815 delivery gate: a create-strategy new-work task that
+            # reported success but opened no PR AND landed no commit shipped
+            # nothing — fail it loudly (retryable) instead of a false COMPLETED
+            # that would poison a #247 stacked DAG. The branch-diff is only run
+            # when the gate is actually in play (success + no pr_url) so a normal
+            # PR-producing run pays nothing. See :func:`_apply_delivery_gate`.
+            gate_in_play = (
+                overall_status == "success"
+                and not pr_url
+                and not workflow_read_only
+                and not artifact_workflow
+                and not needs_input
+                and ensure_pr_strategy == "create"
+            )
+            commit_landed = (
+                _branch_has_new_commits(setup.repo_dir, setup.default_branch)
+                if gate_in_play
+                else False
+            )
+            overall_status, result_error = _apply_delivery_gate(
+                overall_status,
+                result_error,
+                workflow_read_only=workflow_read_only,
+                artifact_workflow=artifact_workflow,
+                needs_input=needs_input,
+                ensure_pr_strategy=ensure_pr_strategy,
+                pr_url=pr_url,
+                commit_landed=commit_landed,
             )
             # Clarify-before-spend: a hold-for-input run is a SUCCESSFUL outcome
             # (the agent did the right thing by asking), not a failure — the
