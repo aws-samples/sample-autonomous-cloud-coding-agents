@@ -374,10 +374,10 @@ async function hydrateChildrenOwnAttachments(
    *  in releaseChild, and to NOTIFY the user which own files won't fit (review
    *  finding #4 — no silent drop). */
   inheritedCount: number,
-): Promise<number> {
-  if (!attachmentsS3Client || !ATTACHMENTS_BUCKET || !attachmentsScreeningConfig) return 0;
+): Promise<Map<string, PassedAttachmentRecord[]>> {
+  const stampedByChild = new Map<string, PassedAttachmentRecord[]>();
+  if (!attachmentsS3Client || !ATTACHMENTS_BUCKET || !attachmentsScreeningConfig) return stampedByChild;
   const now = new Date().toISOString();
-  let stamped = 0;
   for (const child of children) {
     if (isIntegrationNode(child.sub_issue_id)) continue;
     // Probe the sub-issue for its own paperclips; scan its own description for
@@ -443,7 +443,11 @@ async function hydrateChildrenOwnAttachments(
         }
         if (kept.length > 0) {
           await setChildOwnAttachments(ddb, ORCHESTRATION_TABLE!, orchestrationId, child.sub_issue_id, kept, now);
-          stamped++;
+          // Return the records so the caller can patch the in-memory snapshot
+          // directly — a re-loadOrchestration here is eventually-consistent and
+          // can read the pre-stamp replica, releasing the child WITHOUT its own
+          // attachment (live-caught on abca-demo: row had 1, task had 0).
+          stampedByChild.set(child.sub_issue_id, kept);
         }
       }
     } catch (err) {
@@ -454,7 +458,28 @@ async function hydrateChildrenOwnAttachments(
       });
     }
   }
-  return stamped;
+  return stampedByChild;
+}
+
+/**
+ * Return a copy of `snapshot` with each child row's `pre_screened_attachments`
+ * set from `stampedByChild` (sub_issue_id → records). Used right after
+ * {@link hydrateChildrenOwnAttachments} so the release path sees a child's OWN
+ * attachments WITHOUT a re-loadOrchestration (that Query is eventually-consistent
+ * and can read a replica from before the stamp write — live-caught on abca-demo:
+ * the child row had the attachment but the released task had zero).
+ */
+function patchChildOwnAttachments(
+  snapshot: NonNullable<Awaited<ReturnType<typeof loadOrchestration>>>,
+  stampedByChild: Map<string, PassedAttachmentRecord[]>,
+): NonNullable<Awaited<ReturnType<typeof loadOrchestration>>> {
+  return {
+    ...snapshot,
+    children: snapshot.children.map((c) => {
+      const own = stampedByChild.get(c.sub_issue_id);
+      return own && own.length > 0 ? { ...c, pre_screened_attachments: own } : c;
+    }),
+  };
 }
 
 /**
@@ -989,13 +1014,16 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       // so a screening failure skips THAT file + notes it rather than nuking the
       // whole epic. Re-load so releaseReadyChildren sees the stamped rows.
       if (snapshot && !discovery.alreadyExisted && resolvedAccessToken) {
-        const stamped = await hydrateChildrenOwnAttachments(
+        const stampedByChild = await hydrateChildrenOwnAttachments(
           snapshot.children, workspaceId, snapshot.meta.release_context.platform_user_id,
           resolvedAccessToken, discovery.orchestrationId,
           epicAttachments.length,
         );
-        if (stamped > 0) {
-          snapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId);
+        // Patch the in-memory snapshot with the stamped records (NOT a reload —
+        // that Query is eventually-consistent and can miss the just-written
+        // stamp, releasing a child without its own attachment).
+        if (stampedByChild.size > 0) {
+          snapshot = patchChildOwnAttachments(snapshot, stampedByChild);
         }
       }
       let releasedRoots = 0;
@@ -1096,7 +1124,8 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       // seed-time pass only saw the original children, so a sub-issue added to an
       // existing epic (with its own mockup) would otherwise release without it.
       // Scope to just the added ids; reuse the meta row's inherited parent count
-      // for the per-task cap. Re-load so releaseReadyChildren sees stamped rows.
+      // for the per-task cap. Patch the in-memory snapshot with the stamped
+      // records (NOT a reload — eventually-consistent, can miss the write).
       // (The parent epic's OWN attachments stay frozen-at-first-seed by design —
       // see the retrigger note below; children still inherit the original spec.)
       if (snapshot && resolvedAccessToken) {
@@ -1105,12 +1134,12 @@ export async function handler(event: ProcessorEvent): Promise<void> {
         );
         if (addedChildren.length > 0) {
           const inheritedCount = (snapshot.meta.release_context.pre_screened_attachments ?? []).length;
-          const stamped = await hydrateChildrenOwnAttachments(
+          const stampedByChild = await hydrateChildrenOwnAttachments(
             addedChildren, workspaceId, snapshot.meta.release_context.platform_user_id,
             resolvedAccessToken, discovery.orchestrationId, inheritedCount,
           );
-          if (stamped > 0) {
-            snapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId);
+          if (stampedByChild.size > 0) {
+            snapshot = patchChildOwnAttachments(snapshot, stampedByChild);
           }
         }
       }

@@ -276,4 +276,42 @@ describe('linear-webhook-processor — Mode A parent attachment hydration (findi
     }).releaseContext;
     expect(releaseContext.pre_screened_attachments).toEqual([SCREENED_RECORD]);
   });
+
+  test('child-own attachment reaches the released child EVEN IF the post-stamp reload is stale (race regression)', async () => {
+    // Live-caught on abca-demo: the child ROW got its own attachment stamped, but
+    // the released TASK had zero — because the post-stamp loadOrchestration Query
+    // is eventually-consistent and read the pre-stamp replica. Fix: patch the
+    // in-memory snapshot with the stamped records instead of reloading. Here the
+    // ddbSend Query DELIBERATELY returns a child row WITHOUT pre_screened_attachments
+    // (the stale replica); the released child's createTaskCore must STILL carry it.
+    const CHILD_REC = { ...SCREENED_RECORD, attachment_id: 'own-abc', s3_key: 'attachments/u/child-A/own-abc/mock.png', filename: 'mock.png' };
+    // Parent has NO uploads (so epic hydrate no-ops); the CHILD's probe surfaces one.
+    probeLinearIssueContextMock
+      .mockResolvedValueOnce({ attachmentTitles: [], attachments: [], projectName: null, projectHasDocuments: false }) // parent probe (entry)
+      .mockResolvedValue({ attachmentTitles: ['mock.png'], attachments: [{ title: 'mock.png', url: PAPERCLIP_URL }], projectName: null, projectHasDocuments: false }); // per-child probe
+    downloadMock.mockResolvedValue([CHILD_REC]);
+    discoverOrchestrationMock.mockResolvedValueOnce({
+      kind: 'seeded', orchestrationId: 'orch_abc', childCount: 1, rootSubIssueIds: ['sub-A'], alreadyExisted: false,
+    });
+    // Every loadOrchestration Query returns a ready child row with NO own
+    // attachments (the stale replica the fix must NOT depend on).
+    const staleSnapshot = {
+      Items: [
+        { sub_issue_id: '#meta', orchestration_id: 'orch_abc', parent_linear_issue_id: 'issue-1', linear_workspace_id: 'org-1', repo: 'owner/repo', child_count: 1, platform_user_id: 'platform-user-1' },
+        { sub_issue_id: 'sub-A', orchestration_id: 'orch_abc', parent_linear_issue_id: 'issue-1', linear_workspace_id: 'org-1', repo: 'owner/repo', depends_on: [], child_status: 'ready' },
+      ],
+    };
+    // preamble already queued 2 Get responses in beforeEach; subsequent Query/Update calls hit this.
+    ddbSend.mockResolvedValue(staleSnapshot);
+
+    await handler(eventWith(epicIssue()));
+
+    // The child was released and createTaskCore got the own attachment despite the
+    // stale reload — sourced from the in-memory patch, not the DB read.
+    const childCreate = createTaskCoreMock.mock.calls.find(
+      (c) => (c[1] as { preScreenedAttachments?: Array<{ attachment_id: string }> }).preScreenedAttachments
+        ?.some((r) => r.attachment_id === 'own-abc'),
+    );
+    expect(childCreate).toBeDefined();
+  });
 });

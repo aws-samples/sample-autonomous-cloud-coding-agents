@@ -211,7 +211,12 @@ class TestStripLinearMcpServers:
         # Linear was the only server but the file carries other config → keep it,
         # just with an empty mcpServers.
         (tmp_path / ".mcp.json").write_text(
-            json.dumps({"version": 3, "mcpServers": {"linear-server": {"url": "https://mcp.linear.app/sse"}}})
+            json.dumps(
+                {
+                    "version": 3,
+                    "mcpServers": {"linear-server": {"url": "https://mcp.linear.app/sse"}},
+                }
+            )
         )
         removed = strip_linear_mcp_servers(str(tmp_path))
         assert removed == 1
