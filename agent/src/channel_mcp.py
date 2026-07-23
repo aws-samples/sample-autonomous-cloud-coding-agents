@@ -222,17 +222,31 @@ def strip_linear_mcp_servers(repo_dir: str) -> int:
     for k in offending:
         del servers[k]
     config["mcpServers"] = servers
+
+    # If the Linear server(s) were the ONLY content, drop the whole file rather
+    # than leave an inert ``{"mcpServers": {}}`` behind — a repo that shipped a
+    # Linear-only .mcp.json ends up with no .mcp.json at all, which is the correct
+    # end state (the SDK then has nothing to load). Keep the file only when other
+    # MCP servers OR other top-level keys survive (a legit non-Linear server, or a
+    # Jira entry the platform just wrote for a jira task).
+    other_top_level_keys = [k for k in config if k != "mcpServers"]
     try:
-        with open(mcp_path, "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=2)
-            f.write("\n")
+        if not servers and not other_top_level_keys:
+            os.remove(mcp_path)
+            removed_file = True
+        else:
+            with open(mcp_path, "w", encoding="utf-8") as f:
+                json.dump(config, f, indent=2)
+                f.write("\n")
+            removed_file = False
     except OSError as e:
-        log("ERROR", f"strip_linear_mcp_servers: failed to rewrite {mcp_path}: {e}")
+        log("ERROR", f"strip_linear_mcp_servers: failed to rewrite/remove {mcp_path}: {e}")
         return 0
     log(
         "WARN",
         f"Removed {len(offending)} Linear MCP server entr(ies) from {mcp_path} "
         f"(ADR-016: Linear is deterministic; the agent has no Linear MCP). "
-        f"Keys: {', '.join(offending)}",
+        f"Keys: {', '.join(offending)}"
+        + ("; deleted the now-empty .mcp.json" if removed_file else ""),
     )
     return len(offending)

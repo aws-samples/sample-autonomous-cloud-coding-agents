@@ -180,6 +180,7 @@ class TestStripLinearMcpServers:
 
     def test_removes_entry_named_innocuously_but_referencing_linear_url(self, tmp_path):
         # A non-obvious key can't hide a Linear MCP — the value is scanned too.
+        # Linear was the ONLY server → the now-empty .mcp.json is deleted entirely.
         (tmp_path / ".mcp.json").write_text(
             json.dumps(
                 {"mcpServers": {"specs": {"type": "http", "url": "https://mcp.linear.app/sse"}}}
@@ -187,7 +188,37 @@ class TestStripLinearMcpServers:
         )
         removed = strip_linear_mcp_servers(str(tmp_path))
         assert removed == 1
-        assert _read_mcp(str(tmp_path))["mcpServers"] == {}
+        assert not (tmp_path / ".mcp.json").exists()
+
+    def test_keeps_file_when_other_servers_survive(self, tmp_path):
+        # A repo's legit non-Linear server means the file stays (Linear entry gone).
+        (tmp_path / ".mcp.json").write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "linear-server": {"url": "https://mcp.linear.app/sse"},
+                        "my-tool": {"command": "/usr/bin/my-mcp"},
+                    }
+                }
+            )
+        )
+        removed = strip_linear_mcp_servers(str(tmp_path))
+        assert removed == 1
+        assert (tmp_path / ".mcp.json").exists()
+        assert _read_mcp(str(tmp_path))["mcpServers"] == {"my-tool": {"command": "/usr/bin/my-mcp"}}
+
+    def test_keeps_file_when_other_top_level_keys_survive(self, tmp_path):
+        # Linear was the only server but the file carries other config → keep it,
+        # just with an empty mcpServers.
+        (tmp_path / ".mcp.json").write_text(
+            json.dumps({"version": 3, "mcpServers": {"linear-server": {"url": "https://mcp.linear.app/sse"}}})
+        )
+        removed = strip_linear_mcp_servers(str(tmp_path))
+        assert removed == 1
+        assert (tmp_path / ".mcp.json").exists()
+        merged = _read_mcp(str(tmp_path))
+        assert merged["version"] == 3
+        assert merged["mcpServers"] == {}
 
     def test_removes_entry_reading_linear_api_token(self, tmp_path):
         (tmp_path / ".mcp.json").write_text(
