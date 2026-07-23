@@ -360,8 +360,10 @@ async function cleanupPreScreenedForComment(records: readonly PassedAttachmentRe
  * Fail-OPEN per child (unlike the epic's shared spec, which is fail-closed): a
  * child's own file is enrichment, so a screening failure for one sub-issue skips
  * THAT file and logs it rather than aborting the whole epic. Integration nodes
- * (pure branch merges) are skipped. Returns the count of children stamped so the
- * caller knows whether to re-load the snapshot. Best-effort end to end.
+ * (pure branch merges) are skipped. Returns a Map of sub_issue_id → the stamped
+ * records so the caller can patch the in-memory snapshot directly (a re-load
+ * here would be eventually-consistent and could miss the just-written stamp).
+ * Best-effort end to end.
  */
 async function hydrateChildrenOwnAttachments(
   children: readonly { sub_issue_id: string; description?: string }[],
@@ -1012,7 +1014,8 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       // merges them with the inherited parent records. Fail-OPEN per child (unlike
       // the parent spec, which is fail-closed): a child's own file is enrichment,
       // so a screening failure skips THAT file + notes it rather than nuking the
-      // whole epic. Re-load so releaseReadyChildren sees the stamped rows.
+      // whole epic. The stamped records are patched into the in-memory snapshot
+      // below (NOT via re-load — that Query is eventually-consistent).
       if (snapshot && !discovery.alreadyExisted && resolvedAccessToken) {
         const stampedByChild = await hydrateChildrenOwnAttachments(
           snapshot.children, workspaceId, snapshot.meta.release_context.platform_user_id,

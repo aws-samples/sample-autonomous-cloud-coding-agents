@@ -136,9 +136,13 @@ const EMPTY: LinearIssueContextProbe = {
 const PROBE_FAILED: LinearIssueContextProbe = { ...EMPTY, ok: false };
 
 /**
- * Issue the GraphQL query. Returns an empty probe on any failure
- * (network, auth, GraphQL errors). Never throws — the caller treats
- * absence of context the same as no extra context being available.
+ * Issue the GraphQL query. Never throws. On failure (network, auth, GraphQL
+ * errors, timeout) returns a probe with `ok:false` + empty arrays; on a genuine
+ * empty result (2xx, issue has no attachments/docs) returns `ok:true`. The
+ * distinction matters: a failed probe means "we don't KNOW" (a paperclip-only
+ * spec could be present-but-unread), so the attachment-hydration caller
+ * fails-CLOSED on `ok:false` rather than treating it as "nothing here" (review
+ * finding #5). The doc/hint consumers stay advisory (fail-open) either way.
  */
 export async function probeLinearIssueContext(
   accessToken: string,

@@ -11,18 +11,25 @@ Currently wired channels:
   agent (interactive OAuth 2.1 only); live outbound Jira comments go through
   the REST shim in ``jira_reactions.py``. See ``JIRA_MCP_URL`` below + ADR-015.
 
-Linear is NOT here: ABCA runs Linear 100% deterministically (ADR-016 "Linear
-is fully deterministic"). There is no Linear MCP — issue text, recent comments,
-and attachments are pre-hydrated at the Lambda tier (the webhook processor +
-``linear-attachments.ts`` / ``linear-feedback.fetchRecentComments``), and
-outbound reactions / state transitions go through direct GraphQL in
+Linear is NOT written here: ABCA runs Linear 100% deterministically (ADR-016
+"Linear is fully deterministic"). There is no Linear MCP — issue text, recent
+comments, and attachments are pre-hydrated at the Lambda tier (the webhook
+processor + ``linear-attachments.ts`` / ``linear-feedback.fetchRecentComments``),
+and outbound reactions / state transitions go through direct GraphQL in
 ``linear_reactions.py`` (which reads ``LINEAR_API_TOKEN`` set by config.py —
 independent of this module). The Linear MCP was removed after it proved
 non-functional against a single OAuth app (actor=user data reads error;
 actor=app can't re-consent an installed app).
 
-For all other channel sources this is a no-op: no MCP is written, and the
-SDK sees no channel-specific tools.
+Beyond WRITING channel entries, this module also ENFORCES the Linear-no-MCP
+guarantee: {@link strip_linear_mcp_servers} removes any Linear MCP server a repo
+may have COMMITTED to its own ``.mcp.json`` before the SDK loads it (the prompt
+prohibition is not a security boundary — the SDK loads ``project`` settings and
+we export ``LINEAR_API_TOKEN``). The pipeline calls it after
+``configure_channel_mcp`` on every task with a repo.
+
+For all other channel sources ``configure_channel_mcp`` is a no-op: no MCP is
+written (though the scrub above still runs).
 
 See: cdk/src/handlers/{linear,jira}-webhook-processor.ts (inbound),
 runner.py (SDK invocation), ADR-016 (Linear determinism).
