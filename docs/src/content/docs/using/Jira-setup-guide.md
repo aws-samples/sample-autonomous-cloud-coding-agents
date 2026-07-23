@@ -4,20 +4,26 @@ title: Jira setup guide
 
 # Jira integration setup guide
 
-Set up the ABCA Jira Cloud integration so that adding a label to a Jira issue triggers an autonomous task. After ABCA opens a pull request, reviewers can comment `@bgagent <instruction>` on the same Jira issue to request another iteration. ABCA posts progress comments back on the issue as it works — a "started" comment from the agent and a final status comment (with cost, turns, and duration) from the platform when the task finishes.
+Set up the ABCA Jira Cloud integration so that adding a label to a Jira issue triggers an autonomous task. After ABCA opens a pull request, reviewers can comment `@bgagent <instruction>` on the same Jira issue to request another iteration. A dedicated Forge app named `bgagent` writes progress comments and workflow transitions, while the human who triggered the task remains its platform owner.
 
 ## Prerequisites
 
 - ABCA CDK stack deployed **at a version that includes the Jira integration** ([#302](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/pull/302), merged 2026-06-17) — a stack deployed before that has no Jira resources and needs a sync + redeploy first (see [Developer guide](/sample-autonomous-cloud-coding-agents/developer-guide/introduction))
 - A Cognito user account configured (see [User guide](/sample-autonomous-cloud-coding-agents/using/overview))
-- A Jira Cloud site where you have **admin** access (to create the OAuth app and the webhook)
+- A Jira Cloud site where you have **admin** access (to create the OAuth app, install the Forge app, and create the webhook)
 - The `bgagent` CLI installed and logged in (`bgagent configure` + `bgagent login`)
+- Node.js 22 and the [Atlassian Forge CLI](https://developer.atlassian.com/platform/forge/getting-started/#install-the-forge-cli) for the dedicated outbound app identity
 
 > **Jira Cloud only.** Jira Server / Data Center are out of scope. The integration uses Jira REST v3 and Atlassian Cloud webhooks.
 
 ## How it works
 
-A Jira-site admin creates an Atlassian OAuth 2.0 (3LO) app and authorizes it on the site. The OAuth token bundle is stored in a per-tenant Secrets Manager secret (`bgagent-jira-oauth-<cloudId>`). When a user adds the trigger label to a Jira issue, Jira fires a webhook to ABCA; the receiver verifies the `X-Hub-Signature` HMAC, dedupes, and async-invokes the processor, which resolves the tenant, looks up the project→repo mapping, enriches the task with the issue's recent comments and screened file attachments (see [Issue context](#issue-context-attachments-and-comments)), and creates a task. Jira-triggered tasks always run the `coding/new-task-v1` workflow (the processor pins `workflow_ref` explicitly, since a label-triggered task always targets a mapped repo). A later `@bgagent` comment resolves that Jira issue to its most recent ABCA pull request and runs `coding/pr-iteration-v1` against the same PR. The agent clones the repo, opens or updates the PR, and posts a "started" comment on the Jira issue via the Jira REST v3 API (using the same stored OAuth token). When the task reaches a terminal state, the platform's fan-out plane posts a single final status comment — outcome, cost, turns, duration, and PR link — via the same REST v3 endpoint (see [How it works](#how-it-works) below).
+A Jira-site admin configures two Atlassian identities with distinct responsibilities:
+
+- An **OAuth 2.0 (3LO) integration** reads inbound issue context and resolves human users. Atlassian 3LO acts on behalf of the person who authorized it, so it cannot provide a bot author for outbound writes.
+- A **Forge app** handles outbound comments and transitions through `api.asApp().requestJira(...)`. Jira attributes those actions to the app account named `bgagent`.
+
+The OAuth bundle and signed Forge proxy configuration are stored together in the per-tenant Secrets Manager secret (`bgagent-jira-oauth-<cloudId>`). When a user adds the trigger label, Jira fires a webhook to ABCA; the receiver verifies the `X-Hub-Signature` HMAC, dedupes, resolves the human task owner through `JiraUserMappingTable`, enriches the task with issue context, and creates a task. A later `@bgagent` comment runs `coding/pr-iteration-v1` against the issue's latest ABCA pull request. The human trigger attribution is unchanged by the outbound app identity.
 
 **Tenant key.** Everything is indexed on `cloudId` — the Atlassian tenant UUID, *not* the site domain or name. Webhook payloads and the OAuth flow both surface `cloudId`; it is the join key across the project-mapping, user-mapping, and workspace-registry tables.
 
@@ -32,32 +38,31 @@ Jira Cloud webhook
   → existing orchestrator pipeline (unchanged)
 ```
 
-Outbound (Agent → Jira) — REST v3:
+Outbound (Agent → Jira) — Forge app actor:
 
 ```
 runner picks task with channel_source="jira"
-  → jira_reactions resolves the OAuth access token from
-    bgagent-jira-oauth-<cloudId> (JIRA_API_TOKEN)
-  → agent posts a "started" comment via
-    POST api.atlassian.com/ex/jira/{cloudId}/rest/api/3/issue/{key}/comment
+  → jira_reactions resolves the signed Forge proxy configuration from
+    bgagent-jira-oauth-<cloudId>
+  → agent sends an HMAC-authenticated, operation-allowlisted request
+  → Forge calls api.asApp().requestJira(...)
 ```
 
-Outbound terminal status (Platform → Jira) — REST v3, deterministic:
+Outbound terminal status (Platform → Jira) — Forge app actor, deterministic:
 
 ```
 task reaches a terminal event (completed / failed / cancelled /
   stranded / timed out) → TaskEventsTable DynamoDB Stream → fan-out
-  Lambda's dispatchToJira resolves the OAuth token and posts ONE
-  final-status comment with cost, turns, duration, task id, and the
-  PR link, via the same REST v3 comment endpoint
+  Lambda's dispatchToJira resolves the same Forge proxy and posts ONE
+  app-authored final-status comment with cost, turns, duration, task id,
+  and the PR link
 ```
 
-Outbound board transitions (Agent → Jira) — REST v3:
+Outbound board transitions (Agent → Jira) — Forge app actor:
 
 ```
-task starts → agent moves the issue to an In Progress status via
-  POST api.atlassian.com/ex/jira/{cloudId}/rest/api/3/issue/{key}/transitions
-PR opened → agent moves the issue to an "In Review" status via the same endpoint
+task starts → signed proxy → Forge app moves the issue to In Progress
+PR opened → signed proxy → Forge app moves the issue to In Review
 ```
 
 So the Jira board reflects the task lifecycle at a glance, the agent transitions
@@ -75,34 +80,29 @@ completing (max-turns, OOM). The final comment frames three outcomes:
   stopped (e.g. "Hit max-turns cap"), so you can review and decide.
 - ❌ **Task failed / cancelled / timed out** — with a short classifier reason.
 
-Comments are advisory and best-effort: network/auth failures are logged and
-swallowed (the agent path has an auth circuit-breaker; the platform path
-classifies transient failures as retryable and retries the record), never
-gating the task itself. Jira has no comment-edit API, so the terminal comment
-is posted exactly once (a per-task marker guards against duplicate posts on
-stream retries).
+Comments are advisory and best-effort: network/auth failures are logged and swallowed (the agent path has an auth circuit-breaker; the platform path classifies transient failures as retryable and retries the record), never gating the task itself. Jira has no comment-edit API, so the terminal comment is posted exactly once (a per-task marker guards against duplicate posts on stream retries).
 
-> **Why REST, not the Atlassian Remote MCP?** The hosted MCP
+**Identity selection rule.** A complete Forge app configuration always wins for every outbound path. If that configured proxy, signature, permission, or Jira API call fails, ABCA logs the failure and skips the advisory write; it does **not** retry as the 3LO user. Tenants with no Forge configuration retain the old 3LO writer as an explicit migration fallback, with a warning.
+
+> **Why Forge app-auth, not 3LO or the Atlassian Remote MCP?** Atlassian 3LO
+> authorizes calls on behalf of the consenting user, so renaming that OAuth
+> integration cannot make Jira history show a bot actor. The hosted MCP
 > (`mcp.atlassian.com`) requires an interactive, browser-based OAuth 2.1 flow
-> with dynamic client registration and won't accept the stored REST OAuth
-> token as a Bearer header, so it can't connect from a headless agent. The
-> REST v3 API accepts the same token (it carries `write:jira-work`). See
-> [ADR-015](/sample-autonomous-cloud-coding-agents/architecture/adr-015-jira-integration). A `jira-server` MCP
-> entry is still written to `.mcp.json` as a forward-looking placeholder, but
-> it is expected to fail to connect today and the outbound path does not
-> depend on it.
+> and cannot connect from a headless agent. Forge provides the supported app
+> actor through `api.asApp().requestJira(...)`. See
+> [ADR-015](/sample-autonomous-cloud-coding-agents/architecture/adr-015-jira-integration).
 
 Inbound admission (webhook → task) is Jira-specific and has no DynamoDB Streams consumer of its own. The **terminal** status comment, however, is delivered by the shared fan-out plane's DynamoDB Streams consumer (`dispatchToJira`) — the same platform-side surface that posts Linear final-status comments — so it behaves identically to Linear for terminal outcomes.
 
 ## Setup walkthrough
 
-### 1. Print the OAuth app template
+### 1. Print the Atlassian app template
 
 ```bash
 bgagent jira app-template
 ```
 
-This prints the exact field values to paste into Atlassian's developer console, including the three required scopes:
+This prints the OAuth fields and the Forge app-actor workflow. The 3LO integration needs these scopes:
 
 - `read:jira-work` — read issues
 - `write:jira-work` — post comments, transition issues
@@ -140,7 +140,54 @@ This runs the OAuth 3LO dance:
 
 Paste that same secret value back at the `Webhook signing secret:` prompt. ABCA stores it on the per-tenant OAuth bundle (and mirrors it stack-wide), and the receiver looks it up to verify `X-Hub-Signature` on each delivery.
 
-### 4. Map a project to a repository
+### 4. Install the dedicated outbound app
+
+The repository includes a narrow Forge app under `integrations/jira-forge-app`. Its web trigger accepts only four signed operations: identity probe, comment, read transitions, and perform transition. It does not expose a general Jira REST proxy.
+
+```bash
+cd integrations/jira-forge-app
+npm install
+forge login
+forge register bgagent
+```
+
+`forge register bgagent` replaces the placeholder `app.id` in `manifest.yml` with an app ID owned by your Atlassian developer account.
+
+Generate a shared secret, then store it in Forge:
+
+```bash
+BGAGENT_PROXY_SECRET="$(openssl rand -hex 32)"
+forge variables set --encrypt BGAGENT_PROXY_SECRET "$BGAGENT_PROXY_SECRET"
+```
+
+The value is held in the current shell without being written to shell history. Keep that terminal open for the final `bgagent` command; never commit or print the value.
+
+Deploy and install the app on the Jira site:
+
+```bash
+forge deploy
+forge install --product jira --site <your-site>.atlassian.net
+forge webtrigger create
+```
+
+Select the installation and the `bgagent-outbound` trigger. Forge prints a v2 installation URL shaped like:
+
+```text
+https://<installation-id>.webtrigger.atlassian.app/public/<trigger-id>
+```
+
+Register that URL and the same shared secret with ABCA:
+
+```bash
+bgagent jira app-setup <cloud-id> \
+  --proxy-url https://<installation-id>.webtrigger.atlassian.app/public/<trigger-id>
+```
+
+Paste `BGAGENT_PROXY_SECRET` into the hidden prompt. The CLI sends an HMAC-signed identity probe and refuses to save unless Jira reports `accountType=app` and `/rest/api/3/serverInfo` identifies the selected tenant. It stores the proxy URL and secret on `bgagent-jira-oauth-<cloudId>` and non-secret identity metadata in `JiraWorkspaceRegistryTable`. Run `unset BGAGENT_PROXY_SECRET` after setup. The `--shared-secret` option is available for non-interactive automation, but exposes the value to local process inspection while the command runs.
+
+The Forge app scopes authorize API families, but Jira project permissions still apply. Ensure the installed app has **Browse Projects**, **Add Comments**, and **Transition Issues** access in each mapped project.
+
+### 5. Map a project to a repository
 
 ```bash
 bgagent jira map <cloud-id> <PROJECT-KEY> --repo owner/repo
@@ -155,7 +202,7 @@ bgagent jira map <cloud-id> <PROJECT-KEY> --repo owner/repo
 
 This writes an `active` row keyed `<cloudId>#<projectKey>` into the project-mapping table. Requires admin IAM (it writes DynamoDB directly).
 
-### 5. Link your Jira identity
+### 6. Link your Jira identity
 
 So tasks triggered from Jira attribute to your platform user (concurrency caps, billing, `bgagent list`), link your Atlassian `accountId` to your ABCA account. An admin issues a one-time invite code, then the teammate redeems it.
 
@@ -180,11 +227,19 @@ The CLI shows the Jira identity (name + email) and the tenant, and asks for conf
 
 The teammate needs their own ABCA account first (Cognito user + configured CLI). If they do not have one yet, the admin runs `bgagent admin invite-user teammate@example.com`, then the teammate runs `bgagent configure --from-bundle <bundle>` and `bgagent login --username teammate@example.com` before redeeming the Jira invite.
 
-### 6. Test
+### 7. Test
 
 Add the trigger label (`bgagent` by default) to a Jira issue in a mapped project. The agent should start within ~30 seconds, comment on the issue as it works, and post a PR link when ready. The issue **summary** plus the **description** (converted from Atlassian Document Format to markdown), the issue's **recent comments**, and any supported **file attachments** become the task context — see [Issue context: attachments and comments](#issue-context-attachments-and-comments).
 
 After the PR exists, add a Jira comment such as `@bgagent update the README too`. ABCA should acknowledge the request on the issue and update the existing PR.
+
+The progress comment author and transition actor should be the `bgagent` app. The task owner shown by `bgagent list`, audit records, concurrency accounting, and cost attribution should remain the linked human who triggered the Jira event.
+
+## Migrating an existing Jira tenant
+
+Existing installs continue to work before Forge is configured, but their outbound comments and transitions still use the 3LO credential and therefore appear as the user who ran `bgagent jira setup`. Complete [Step 4](#4-install-the-dedicated-outbound-app) for each tenant to migrate.
+
+Re-running `bgagent jira setup` preserves an existing app-actor configuration. Once any app-actor configuration is present, ABCA never silently falls back to the 3LO writer: a malformed secret, bad signature, missing app permission, or proxy/API failure is logged and the advisory Jira write is skipped. The underlying coding task continues.
 
 ## How webhook signature verification works
 
@@ -249,11 +304,11 @@ Humans still move the card to **Done** after merging the PR — ABCA never close
    - On start, a transition whose destination is named **In Progress**.
    - On PR opened, a transition named **In Review**, then common synonyms (`Code Review`, `Review`, `Peer Review`, `Reviewing`), then **In Progress** as a last resort.
 3. **Category fallback** — any transition whose destination `statusCategory` is *In Progress* (`indeterminate`), **excluding `Blocked`** (which shares that category but is never what "move to In Progress" means). The name match in step 2 is what keeps the heuristic from landing on `Blocked` when both are available.
-4. **Skip with a warning** — nothing matches, the transition requires a screen with required fields, or the authorizing user lacks permission. The task is never affected.
+4. **Skip with a warning** — nothing matches, the transition requires a screen with required fields, or the selected outbound identity lacks permission. The task is never affected.
 
 Transitions are **best-effort**, exactly like comments: short timeout, errors logged and swallowed, sharing the same `401`/`403` auth circuit breaker. A transition failure never fails, blocks, or retries the task. Transition IDs are workflow- and current-status-specific, so they are resolved per-issue at call time (by matching destination name / category) — never configured or hard-coded.
 
-> **Permission prerequisite.** The transition uses the existing `read:jira-work` / `write:jira-work` scopes — **no new OAuth scopes and no re-authorization**. OAuth scopes do not, however, override Jira **project permissions**: the authorizing user must have the **Transition Issues** permission in each mapped project. When they don't, Jira's *get transitions* call returns an empty list (not an error), so ABCA simply skips the transition and logs a warning — comments still post as normal.
+> **Permission prerequisite.** The Forge manifest declares `read:jira-work` / `write:jira-work`, but scopes do not override Jira **project permissions**. The installed `bgagent` app needs **Transition Issues** in each mapped project. Jira returns an empty transition list when it lacks that permission, so ABCA skips with a warning and the task continues. An unmigrated tenant using the OAuth fallback instead depends on the 3LO authorizing user's project permissions.
 
 The feature targets Jira **statuses**, not board columns. Because moving a card between columns *is* a status transition under the hood, no board-configuration API is involved. Multi-hop pathfinding is out of scope: if no single transition reaches the target from the current status, ABCA skips.
 
@@ -302,14 +357,17 @@ Expected, not a broken install. The stored access token lives ~1 hour and is onl
 
 - Verify the per-tenant OAuth secret exists: `aws secretsmanager describe-secret --secret-id bgagent-jira-oauth-<cloudId>`.
 - Verify the registry row's `oauth_secret_arn` matches and `status = 'active'`.
-- Check the agent container logs for `jira_reactions` lines (`comment_task_started`). Absence means `channel_source` wasn't `jira` on the task, or the tenant OAuth token didn't resolve. (The `jira-server` MCP entry is also written to `.mcp.json`, but it is a non-functional placeholder — its connection failure is expected and is not the cause.)
-- A `401`/`403` from Atlassian usually means the token was revoked tenant-side, or the stored access token expired and the agent (which never refreshes) failed closed — re-run `bgagent jira setup` to re-mint, then re-apply the label.
+- Confirm `outbound_identity = app` and `app_actor_display_name = bgagent` on the registry row.
+- Check the tenant secret for `app_actor_proxy_url`, `app_actor_shared_secret`, and `app_actor_configured_at` without printing the secret value.
+- Check the agent logs for `jira_reactions: comment_task_started`. A proxy `401` means Forge and ABCA have different `BGAGENT_PROXY_SECRET` values or the signed request is stale. A Jira `403` means the app lacks a required scope or project permission.
+- Re-run `bgagent jira app-setup <cloud-id> --proxy-url <url>` after rotating the Forge secret or recreating the web-trigger URL. The identity probe catches a wrong secret, dead URL, wrong actor type, wrong Jira tenant, and missing app access before saving.
+- If no app-actor fields exist, ABCA logs that it is using the OAuth migration fallback. A fallback `401`/`403` usually means the 3LO token was revoked; re-run `bgagent jira setup`.
 
 ### Jira card doesn't move across the board
 
 Board transitions are best-effort and never block the task, so a card can stay put while comments still post. Common causes:
 
-- **The authorizing user lacks *Transition Issues* permission** in the project. Jira then returns an empty transition list and ABCA skips with a warning. Grant the permission to the account that ran `bgagent jira setup`.
+- **The selected writer lacks *Transition Issues*.** For migrated tenants, grant the installed `bgagent` Forge app access to transition issues in the project. For OAuth-fallback tenants, grant it to the user who ran `bgagent jira setup`.
 - **No matching destination.** The standard heuristics look for an *In Progress*-category status on start and an `In Review`-named status on PR. Custom workflows may name these differently — configure `bgagent jira map ... --status-on-start "<name>" --status-on-pr "<name>"`.
 - **The transition requires a screen** with required fields. ABCA skips these by design (it can't fill required fields) — pick a screen-less transition or remove the required fields from the workflow.
 - **No single-hop transition reaches the target** from the issue's current status. ABCA does not chain transitions.
@@ -317,7 +375,7 @@ Board transitions are best-effort and never block the task, so a card can stay p
 
 ## Limits and quotas
 
-Atlassian access tokens are short-lived. The **trusted Lambda paths** (`jira-oauth-resolver.ts` — the webhook processor and orchestrator) auto-refresh via the stored `refresh_token` (which is why `offline_access` is required) and write the rotated bundle back to Secrets Manager. The **agent never refreshes**: Atlassian rotates the `refresh_token` on every use and the agent role has `GetSecretValue` only, so an agent-side refresh would burn the stored token without being able to persist its replacement. The agent uses whatever token the Lambdas most-recently wrote (resolved just before the session starts) and fails closed on an already-expiring token. Jira Cloud REST rate limits are generous relative to a typical task's handful of API calls.
+Atlassian 3LO access tokens are short-lived. The **trusted Lambda paths** auto-refresh them for inbound reads and write the rotated bundle back to Secrets Manager. The **agent never refreshes** because Atlassian rotates refresh tokens and the agent has read-only secret access. Forge app-actor writes do not depend on the 3LO token lifetime; the agent can still post through the signed proxy when the stored OAuth access token is expiring. Forge invocation limits and Jira REST rate limits apply, but each task makes only a handful of outbound calls.
 
 ## Removing the integration
 
@@ -347,3 +405,5 @@ aws dynamodb update-item \
 ```
 
 Then delete the webhook from **Jira → Settings → System → Webhooks** and remove the OAuth app from the Atlassian developer console.
+
+Also run `forge uninstall` from `integrations/jira-forge-app` for the tenant, then remove or revoke the Forge app in the Atlassian developer console. Deleting the tenant secret removes both OAuth and app-actor proxy configuration.

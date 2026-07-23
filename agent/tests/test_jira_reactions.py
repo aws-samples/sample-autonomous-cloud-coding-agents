@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -64,6 +65,12 @@ def _reset_circuit():
     Autouse so it applies to module-level functions AND methods inside test
     classes (a module-level ``setup_function`` does not run for class methods).
     """
+    for key in (
+        "JIRA_APP_ACTOR_CONFIGURED",
+        "JIRA_APP_ACTOR_PROXY_URL",
+        "JIRA_APP_ACTOR_SHARED_SECRET",
+    ):
+        os.environ.pop(key, None)
     jira_reactions._reset_state_for_testing()
     yield
     jira_reactions._reset_state_for_testing()
@@ -91,6 +98,46 @@ class TestChannelGate:
 
 
 class TestStartComment:
+    def test_uses_signed_forge_app_actor_when_configured(self, monkeypatch):
+        import hashlib
+        import hmac
+        import json
+
+        monkeypatch.setenv("JIRA_API_TOKEN", "human-oauth-token")
+        monkeypatch.setenv("JIRA_APP_ACTOR_CONFIGURED", "1")
+        monkeypatch.setenv(
+            "JIRA_APP_ACTOR_PROXY_URL",
+            "https://install.webtrigger.atlassian.app/public/trigger",
+        )
+        monkeypatch.setenv("JIRA_APP_ACTOR_SHARED_SECRET", "s" * 64)
+        with patch("jira_reactions.requests.post", return_value=_resp(201)) as post:
+            comment_task_started("jira", JIRA_META)
+
+        assert post.call_args[0][0].endswith(".webtrigger.atlassian.app/public/trigger")
+        assert "json" not in post.call_args.kwargs
+        headers = post.call_args.kwargs["headers"]
+        assert "Authorization" not in headers
+        raw_body = post.call_args.kwargs["data"].decode()
+        payload = json.loads(raw_body)
+        assert payload["operation"] == "comment"
+        assert payload["issue_key"] == "KAN-1"
+        timestamp = headers["X-Bgagent-Timestamp"]
+        expected = hmac.new(
+            ("s" * 64).encode(),
+            f"{timestamp}.{raw_body}".encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        assert headers["X-Bgagent-Signature"] == f"sha256={expected}"
+
+    def test_invalid_configured_app_actor_never_falls_back_to_oauth(self, monkeypatch):
+        monkeypatch.setenv("JIRA_API_TOKEN", "human-oauth-token")
+        monkeypatch.setenv("JIRA_APP_ACTOR_CONFIGURED", "1")
+        monkeypatch.setenv("JIRA_APP_ACTOR_PROXY_URL", "https://attacker.example/proxy")
+        monkeypatch.setenv("JIRA_APP_ACTOR_SHARED_SECRET", "s" * 64)
+        with patch("jira_reactions.requests.post") as post:
+            comment_task_started("jira", JIRA_META)
+        post.assert_not_called()
+
     def test_posts_adf_comment_to_correct_url(self, monkeypatch):
         monkeypatch.setenv("JIRA_API_TOKEN", "jira_at")
         with patch("jira_reactions.requests.post", return_value=_resp(201)) as post:
@@ -193,6 +240,32 @@ class TestTransitionChannelGate:
 
 
 class TestStartTransitionSelection:
+    def test_uses_app_actor_for_transition_read_and_write(self, monkeypatch):
+        import json
+
+        monkeypatch.setenv("JIRA_APP_ACTOR_CONFIGURED", "1")
+        monkeypatch.setenv(
+            "JIRA_APP_ACTOR_PROXY_URL",
+            "https://install.webtrigger.atlassian.app/public/trigger",
+        )
+        monkeypatch.setenv("JIRA_APP_ACTOR_SHARED_SECRET", "s" * 64)
+        issue = _issue_resp(_transition("21", "In Progress", category="indeterminate"))
+        with (
+            patch("jira_reactions.requests.get") as get,
+            patch(
+                "jira_reactions.requests.post",
+                side_effect=[issue, _resp(204)],
+            ) as post,
+        ):
+            transition_task_started("jira", JIRA_META)
+
+        get.assert_not_called()
+        assert post.call_count == 2
+        operations = [
+            json.loads(call.kwargs["data"].decode())["operation"] for call in post.call_args_list
+        ]
+        assert operations == ["get_transitions", "transition"]
+
     def test_prefers_in_progress_by_name_over_blocked(self, monkeypatch):
         """#605: both Blocked and In Progress are `indeterminate`; a name match
         must land on In Progress regardless of list order."""

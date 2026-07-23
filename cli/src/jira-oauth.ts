@@ -100,6 +100,16 @@ export interface StoredJiraOauthToken {
   readonly updated_at: string;
   /** Cognito sub of the admin who ran `bgagent jira setup`. Audit only. */
   readonly installed_by_platform_user_id: string;
+  /** Forge v2 web-trigger URL used for outbound app-auth writes. */
+  readonly app_actor_proxy_url?: string;
+  /** HMAC secret shared with the Forge app's web-trigger handler. */
+  readonly app_actor_shared_secret?: string;
+  /** Jira app account id verified during `bgagent jira app-setup`. */
+  readonly app_actor_account_id?: string;
+  /** Jira app display name verified during `bgagent jira app-setup`. */
+  readonly app_actor_display_name?: string;
+  /** ISO-8601 timestamp of the latest successful app-actor setup. */
+  readonly app_actor_configured_at?: string;
   /**
    * Per-tenant Jira webhook signing secret.
    *

@@ -67,9 +67,11 @@ def _reset_shared_circuit_breaker_state():
     yield
     _reset_circuit_breakers()
 
+
 class TestGenerateUlid:
     def test_length_is_26(self):
         assert len(_generate_ulid()) == 26
+
 
 # ❌ Bad — no isolation, test order dependency
 def test_a():

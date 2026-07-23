@@ -331,13 +331,14 @@ def resolve_linear_api_token(channel_metadata: dict[str, str] | None = None) -> 
 
 
 def resolve_jira_oauth_token(channel_metadata: dict[str, str] | None = None) -> str:
-    """Resolve the Jira Cloud OAuth access token from Secrets Manager.
+    """Resolve Jira outbound credentials from Secrets Manager.
 
     The orchestrator stamps ``jira_oauth_secret_arn`` into the task
-    record's ``channel_metadata`` at task-creation time. We fetch the
-    per-tenant secret, parse the token JSON, and cache the access_token in
-    ``JIRA_API_TOKEN`` so the agent-side Jira REST calls
-    (``jira_reactions``) can authorize.
+    record's ``channel_metadata`` at task-creation time. A tenant configured
+    with a Forge app actor gets ``JIRA_APP_ACTOR_*`` environment variables;
+    older tenants retain ``JIRA_API_TOKEN`` as an explicit migration fallback.
+    ``jira_reactions`` always prefers the app actor and never falls back to
+    OAuth when an app configuration is present but broken.
 
     **The agent never refreshes the token.** Unlike Linear, Atlassian
     *rotates the refresh_token on every use* — a successful refresh
@@ -359,20 +360,28 @@ def resolve_jira_oauth_token(channel_metadata: dict[str, str] | None = None) -> 
     session, so in practice the agent reads a freshly-written token with a
     full lifetime ahead of it.
 
-    For local development, a pre-set ``JIRA_API_TOKEN`` env var
+    For local development, a pre-set ``JIRA_API_TOKEN`` without a secret ARN
     short-circuits the lookup so the agent can run outside the runtime.
 
     This function is only called when ``channel_source == 'jira'``.
     """
-    cached = os.environ.get("JIRA_API_TOKEN", "")
-    if cached:
-        return cached
-
     secret_arn = ""
     if channel_metadata:
         secret_arn = channel_metadata.get("jira_oauth_secret_arn", "")
     if not secret_arn:
         secret_arn = os.environ.get("JIRA_OAUTH_SECRET_ARN", "")
+    cached = os.environ.get("JIRA_API_TOKEN", "")
+    if cached and not secret_arn and channel_metadata is None:
+        return cached
+
+    # AgentCore can reuse a warm process. Clear the prior task's tenant
+    # credentials before resolving a metadata-bound task so a missing ARN or
+    # failed SM read cannot reuse another tenant's token or proxy secret.
+    if channel_metadata is not None or secret_arn:
+        os.environ.pop("JIRA_API_TOKEN", None)
+        os.environ.pop("JIRA_APP_ACTOR_CONFIGURED", None)
+        os.environ.pop("JIRA_APP_ACTOR_PROXY_URL", None)
+        os.environ.pop("JIRA_APP_ACTOR_SHARED_SECRET", None)
     if not secret_arn:
         return ""
 
@@ -389,7 +398,7 @@ def resolve_jira_oauth_token(channel_metadata: dict[str, str] | None = None) -> 
         from botocore.exceptions import BotoCoreError, ClientError
     except ImportError as e:
         log("WARN", f"resolve_jira_oauth_token: boto3 unavailable ({e}); skipping")
-        return ""
+        return ""  # nosemgrep: py-silent-success-masking -- Jira feedback is advisory
 
     sm = boto3.client("secretsmanager", region_name=region)
 
@@ -403,7 +412,7 @@ def resolve_jira_oauth_token(channel_metadata: dict[str, str] | None = None) -> 
                 f"resolve_jira_oauth_token: secret '{secret_arn}' is not valid JSON "
                 f"({type(e).__name__}: {e}); tenant requires re-onboarding",
             )
-            return None
+            return None  # nosemgrep: py-silent-success-masking -- bad secret disables writes
 
     def _is_expiring(expires_at_iso: str, threshold_seconds: int = 60) -> bool:
         try:
@@ -425,19 +434,45 @@ def resolve_jira_oauth_token(channel_metadata: dict[str, str] | None = None) -> 
         is_hard_failure = code in ("AccessDeniedException", "ResourceNotFoundException")
         severity = "ERROR" if is_hard_failure else "WARN"
         log(severity, f"resolve_jira_oauth_token failed: {type(e).__name__}: {e}")
-        return ""
+        return ""  # nosemgrep: py-silent-success-masking -- feedback cannot fail the task
     if token_obj is None:
         return ""
 
+    app_actor_fields = (
+        "app_actor_proxy_url",
+        "app_actor_shared_secret",
+        "app_actor_account_id",
+        "app_actor_display_name",
+        "app_actor_configured_at",
+    )
+    raw_app_proxy_url = token_obj.get("app_actor_proxy_url", "")
+    raw_app_shared_secret = token_obj.get("app_actor_shared_secret", "")
+    app_proxy_url = raw_app_proxy_url if isinstance(raw_app_proxy_url, str) else ""
+    app_shared_secret = raw_app_shared_secret if isinstance(raw_app_shared_secret, str) else ""
+    if any(field in token_obj for field in app_actor_fields):
+        # The marker makes partial/corrupt app setup fail closed in
+        # jira_reactions. Do not silently post as the OAuth authorizing user.
+        os.environ["JIRA_APP_ACTOR_CONFIGURED"] = "1"
+        if app_proxy_url:
+            os.environ["JIRA_APP_ACTOR_PROXY_URL"] = app_proxy_url
+        if app_shared_secret:
+            os.environ["JIRA_APP_ACTOR_SHARED_SECRET"] = app_shared_secret
+
     # Fail closed if the stored token is expiring — the agent cannot refresh
     # without burning Atlassian's rotating refresh_token (see docstring). The
-    # Lambda path owns refresh; advisory Jira comments simply no-op here.
+    # Lambda path owns refresh. A configured Forge app actor remains usable
+    # because its signed proxy credential is independent of 3LO expiry.
     if _is_expiring(token_obj.get("expires_at", "")):
+        suffix = (
+            " Forge app-actor writes remain enabled."
+            if os.environ.get("JIRA_APP_ACTOR_CONFIGURED") == "1"
+            else " Jira OAuth fallback writes will be skipped for this task."
+        )
         log(
             "WARN",
             "resolve_jira_oauth_token: stored token is expiring and the agent does not "
             "refresh (Atlassian rotates refresh_tokens; agent lacks PutSecretValue). "
-            "Failing closed — Jira comments will be skipped for this task.",
+            f"Failing closed for OAuth.{suffix}",
         )
         return ""
 

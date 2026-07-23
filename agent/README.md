@@ -125,6 +125,9 @@ The `run.sh` script overrides the container's default CMD to run `python /app/sr
 | `DRY_RUN` | No | | Set to `1` to validate config and print the prompt without running the agent |
 | `ANTHROPIC_DEFAULT_HAIKU_MODEL` | No | `anthropic.claude-haiku-4-5-20251001-v1:0` | Bedrock model ID for the pre-flight safety check (see below) |
 | `NUDGES_TABLE_NAME` | No | | **Phase 2.** DynamoDB table for mid-task user nudges (`<user_nudge>` XML blocks injected between turns). If unset, the agent runs without nudge support — `nudge_reader.read_pending()` returns `[]` and logs a WARN once. Set automatically by the CDK stack on both AgentCore runtimes. |
+| `JIRA_APP_ACTOR_PROXY_URL` | No | | Resolved per-task from the Jira tenant secret. Forge v2 web-trigger URL used for app-authored Jira comments and transitions. |
+| `JIRA_APP_ACTOR_SHARED_SECRET` | No | | Resolved per-task from the Jira tenant secret. HMAC key for the Forge proxy; redacted from agent diagnostics. |
+| `JIRA_API_TOKEN` | No | | Legacy per-task Jira 3LO token. Used for outbound writes only when no app actor is configured. |
 
 **Bedrock model access (main model):** Configuring `ANTHROPIC_MODEL` and IAM credentials is not enough. Your AWS account must be able to **invoke** that model in Amazon Bedrock: follow [Request access to models](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) (Marketplace permissions on first use, Anthropic first-time use where required, valid payment method for Marketplace-backed models). Use an inference profile ID such as `us.anthropic.claude-sonnet-4-6` when Bedrock requires it. If the CLI stops with a message that the model is not available on your Bedrock deployment, fix model access in the console or switch `ANTHROPIC_MODEL` to an entitled profile, then retry.
 

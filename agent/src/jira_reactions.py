@@ -17,17 +17,16 @@ deterministic fan-out plane (``cdk/src/handlers/fanout-task-events.ts``
 when this agent crashes before completing. This module only owns the start
 comment.
 
-Why a direct REST call instead of MCP: Atlassian's Remote MCP
+Why a signed app proxy instead of MCP: Atlassian's Remote MCP
 (``mcp.atlassian.com``) requires an interactive, browser-based OAuth 2.1
 authorization flow with dynamic client registration — it does NOT accept the
 stored Jira REST OAuth token as a ``Bearer`` header, and a headless background
 agent cannot complete the interactive handshake. The MCP path therefore fails
-to connect in the runtime (``claude mcp list`` → "Failed to connect"). The
-Jira *REST* API, by contrast, accepts the same stored OAuth access token (it
-carries ``write:jira-work``), so we post comments via
-``POST /rest/api/3/issue/{key}/comment`` on the cross-region
-``api.atlassian.com/ex/jira/{cloudId}`` base. This is the "Plan B REST shim"
-the ``channel_mcp`` module's comments anticipated.
+to connect in the runtime (``claude mcp list`` → "Failed to connect").
+Configured tenants call a narrow HMAC-authenticated Forge web trigger, which
+uses ``api.asApp().requestJira`` so Jira attributes writes to the app account.
+Tenants without Forge configuration retain the user-delegated OAuth REST path
+as an explicit migration fallback.
 
 Gating: every function is a no-op unless ``channel_source == 'jira'`` and the
 issue key + cloud id are present in ``channel_metadata``. All network / auth
@@ -40,11 +39,15 @@ See: ``agent/src/channel_mcp.py`` for the (non-functional) MCP gate, and
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
 import os
 import threading
+import time
 from http import HTTPStatus
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import requests
 
@@ -54,6 +57,8 @@ from shell import log
 #: call to the tenant; ``JIRA_API_TOKEN`` (populated by
 #: ``config.resolve_jira_oauth_token``) authorizes it.
 JIRA_API_BASE = "https://api.atlassian.com/ex/jira"
+FORGE_WEBTRIGGER_SUFFIX = ".webtrigger.atlassian.app"
+APP_ACTOR_MIN_SECRET_LENGTH = 32
 
 #: Request timeout — comments are fire-and-forget status UX; never block the
 #: task pipeline for more than a couple of seconds.
@@ -98,8 +103,8 @@ def _note_auth_status(status_code: int) -> None:
             log(
                 "ERROR",
                 "jira_reactions: auth circuit OPEN after "
-                f"{failures} consecutive {status_code}s — Jira token likely "
-                "revoked/expired without a working refresh. Suppressing further "
+                f"{failures} consecutive {status_code}s — Jira outbound credential "
+                "or app permission is invalid. Suppressing further "
                 "Jira calls for this container.",
             )
         else:
@@ -142,6 +147,93 @@ def _adf(text: str) -> dict[str, Any]:
     }
 
 
+def _app_actor_intended() -> bool:
+    """True once app setup has written any Forge app-actor field."""
+    return os.environ.get("JIRA_APP_ACTOR_CONFIGURED") == "1" or bool(
+        os.environ.get("JIRA_APP_ACTOR_PROXY_URL") or os.environ.get("JIRA_APP_ACTOR_SHARED_SECRET")
+    )
+
+
+def _app_actor_credentials() -> tuple[str, str] | None:
+    """Return validated Forge proxy credentials, failing closed when malformed."""
+    proxy_url = os.environ.get("JIRA_APP_ACTOR_PROXY_URL", "")
+    shared_secret = os.environ.get("JIRA_APP_ACTOR_SHARED_SECRET", "")
+    try:
+        parsed = urlparse(proxy_url)
+        valid_url = (
+            parsed.scheme == "https"
+            and bool(parsed.hostname)
+            and parsed.hostname.endswith(FORGE_WEBTRIGGER_SUFFIX)
+            and parsed.path.startswith("/public/")
+            and not parsed.username
+            and not parsed.password
+            and not parsed.query
+            and not parsed.fragment
+        )
+    except ValueError:
+        valid_url = False
+    if not valid_url or len(shared_secret) < APP_ACTOR_MIN_SECRET_LENGTH:
+        log(
+            "ERROR",
+            "jira_reactions: configured Forge app actor is incomplete or invalid; "
+            "refusing OAuth fallback",
+        )
+        return None
+    return proxy_url, shared_secret
+
+
+def _app_actor_request(
+    cloud_id: str,
+    operation: str,
+    *,
+    issue_key: str | None = None,
+    body: dict[str, Any] | None = None,
+    transition_id: str | None = None,
+) -> requests.Response | None:
+    """Call the signed, operation-allowlisted Forge app proxy."""
+    credentials = _app_actor_credentials()
+    if not credentials:
+        return None
+    proxy_url, shared_secret = credentials
+    payload: dict[str, Any] = {
+        "version": 1,
+        "operation": operation,
+        "cloud_id": cloud_id,
+    }
+    if issue_key is not None:
+        payload["issue_key"] = issue_key
+    if body is not None:
+        payload["body"] = body
+    if transition_id is not None:
+        payload["transition_id"] = transition_id
+
+    raw_body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+    timestamp = str(int(time.time()))
+    signature = hmac.new(
+        shared_secret.encode(),
+        f"{timestamp}.{raw_body}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    try:
+        return requests.post(
+            proxy_url,
+            data=raw_body.encode(),
+            headers={
+                "Content-Type": "application/json",
+                "X-Bgagent-Timestamp": timestamp,
+                "X-Bgagent-Signature": f"sha256={signature}",
+            },
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        )
+    except requests.RequestException as e:
+        log(
+            "WARN",
+            f"jira_reactions: Forge app proxy request failed ({type(e).__name__}): {e}",
+        )
+        # nosemgrep: py-silent-success-masking -- Jira writes are advisory on network blips
+        return None
+
+
 def _post_comment(cloud_id: str, issue_key: str, text: str) -> bool:
     """POST a comment to the issue. Return True on success, False on any failure.
 
@@ -154,34 +246,40 @@ def _post_comment(cloud_id: str, issue_key: str, text: str) -> bool:
         log("DEBUG", "jira_reactions: auth circuit still open; short-circuiting call")
         return False
 
-    token = os.environ.get("JIRA_API_TOKEN", "")
-    if not token:
-        log("WARN", "jira_reactions: JIRA_API_TOKEN not set; skipping comment")
-        return False
-
-    # URL-encode both path segments. cloud_id and issue_key originate from the
-    # verified webhook payload (stamped into channel_metadata by the
-    # processor), but encoding them keeps an unexpected value from injecting
-    # extra path segments into the gateway URL. `safe=""` so even "/" encodes.
-    url = (
-        f"{JIRA_API_BASE}/{quote(cloud_id, safe='')}"
-        f"/rest/api/3/issue/{quote(issue_key, safe='')}/comment"
-    )
-    try:
-        resp = requests.post(
-            url,
-            json={"body": _adf(text)},
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            },
-            timeout=REQUEST_TIMEOUT_SECONDS,
+    if _app_actor_intended():
+        resp = _app_actor_request(
+            cloud_id,
+            "comment",
+            issue_key=issue_key,
+            body=_adf(text),
         )
-    except requests.RequestException as e:
-        log("WARN", f"jira_reactions: request failed ({type(e).__name__}): {e}")
-        # nosemgrep: py-silent-success-masking -- Jira comments are best-effort on network blips
-        return False
+        if resp is None:
+            return False
+    else:
+        token = os.environ.get("JIRA_API_TOKEN", "")
+        if not token:
+            log("WARN", "jira_reactions: JIRA_API_TOKEN not set; skipping comment")
+            return False
+        log("WARN", "jira_reactions: app actor not configured; using OAuth fallback")
+        url = (
+            f"{JIRA_API_BASE}/{quote(cloud_id, safe='')}"
+            f"/rest/api/3/issue/{quote(issue_key, safe='')}/comment"
+        )
+        try:
+            resp = requests.post(
+                url,
+                json={"body": _adf(text)},
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+                timeout=REQUEST_TIMEOUT_SECONDS,
+            )
+        except requests.RequestException as e:
+            log("WARN", f"jira_reactions: request failed ({type(e).__name__}): {e}")
+            # nosemgrep: py-silent-success-masking -- Jira comments are best-effort on network blips
+            return False
 
     if resp.status_code in (401, 403):
         _note_auth_status(resp.status_code)
@@ -285,23 +383,28 @@ def _get_issue_transitions(
     returns one when the OAuth user lacks the *Transition Issues* permission —
     and callers treat it as "nothing to do", not an error.
     """
-    url = (
-        f"{JIRA_API_BASE}/{quote(cloud_id, safe='')}"
-        f"/rest/api/3/issue/{quote(issue_key, safe='')}?fields=status&expand=transitions"
-    )
-    try:
-        resp = requests.get(
-            url,
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Accept": "application/json",
-            },
-            timeout=REQUEST_TIMEOUT_SECONDS,
+    if _app_actor_intended():
+        resp = _app_actor_request(cloud_id, "get_transitions", issue_key=issue_key)
+        if resp is None:
+            return None
+    else:
+        url = (
+            f"{JIRA_API_BASE}/{quote(cloud_id, safe='')}"
+            f"/rest/api/3/issue/{quote(issue_key, safe='')}?fields=status&expand=transitions"
         )
-    except requests.RequestException as e:
-        log("WARN", f"jira_reactions: issue GET failed ({type(e).__name__}): {e}")
-        # nosemgrep: py-silent-success-masking -- Jira transitions are best-effort on network blips
-        return None
+        try:
+            resp = requests.get(
+                url,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/json",
+                },
+                timeout=REQUEST_TIMEOUT_SECONDS,
+            )
+        except requests.RequestException as e:
+            log("WARN", f"jira_reactions: issue GET failed ({type(e).__name__}): {e}")
+            # nosemgrep: py-silent-success-masking -- advisory Jira transition read
+            return None
 
     if resp.status_code in (HTTPStatus.UNAUTHORIZED, HTTPStatus.FORBIDDEN):
         _note_auth_status(resp.status_code)
@@ -403,25 +506,35 @@ def _select_transition(
 
 def _post_transition(cloud_id: str, issue_key: str, token: str, transition_id: str) -> bool:
     """POST a transition. Return True on success (204), False on any failure."""
-    url = (
-        f"{JIRA_API_BASE}/{quote(cloud_id, safe='')}"
-        f"/rest/api/3/issue/{quote(issue_key, safe='')}/transitions"
-    )
-    try:
-        resp = requests.post(
-            url,
-            json={"transition": {"id": transition_id}},
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            },
-            timeout=REQUEST_TIMEOUT_SECONDS,
+    if _app_actor_intended():
+        resp = _app_actor_request(
+            cloud_id,
+            "transition",
+            issue_key=issue_key,
+            transition_id=transition_id,
         )
-    except requests.RequestException as e:
-        log("WARN", f"jira_reactions: transition POST failed ({type(e).__name__}): {e}")
-        # nosemgrep: py-silent-success-masking -- Jira transitions are best-effort on network blips
-        return False
+        if resp is None:
+            return False
+    else:
+        url = (
+            f"{JIRA_API_BASE}/{quote(cloud_id, safe='')}"
+            f"/rest/api/3/issue/{quote(issue_key, safe='')}/transitions"
+        )
+        try:
+            resp = requests.post(
+                url,
+                json={"transition": {"id": transition_id}},
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+                timeout=REQUEST_TIMEOUT_SECONDS,
+            )
+        except requests.RequestException as e:
+            log("WARN", f"jira_reactions: transition POST failed ({type(e).__name__}): {e}")
+            # nosemgrep: py-silent-success-masking -- advisory Jira transition write
+            return False
 
     if resp.status_code in (HTTPStatus.UNAUTHORIZED, HTTPStatus.FORBIDDEN):
         _note_auth_status(resp.status_code)
@@ -464,9 +577,11 @@ def _transition(
         return
 
     token = os.environ.get("JIRA_API_TOKEN", "")
-    if not token:
+    if not _app_actor_intended() and not token:
         log("WARN", "jira_reactions: JIRA_API_TOKEN not set; skipping transition")
         return
+    if not _app_actor_intended():
+        log("WARN", "jira_reactions: app actor not configured; using OAuth fallback")
 
     result = _get_issue_transitions(cloud_id, issue_key, token)
     if result is None:
