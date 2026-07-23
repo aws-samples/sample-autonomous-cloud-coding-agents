@@ -1448,13 +1448,26 @@ def run_task(
             if pr_url:
                 progress.write_agent_milestone("pr_created", pr_url)
                 # Move the Jira card In Progress → In Review now that a PR is
-                # open (issue #572). Only fires when a PR was actually opened —
-                # failed / no-PR tasks leave the card where humans can see the
-                # failure comment. No-op for non-Jira tasks; best-effort.
-                transition_pr_opened(
-                    config.channel_source,
-                    config.channel_metadata,
-                )
+                # open (issue #572) — but ONLY when the build passed. ensure_pr
+                # deliberately opens a PR even on a FAILED build (so the human
+                # sees the broken diff), so gating on pr_url alone moved the card
+                # to In Review on a red build, telling the board the work is ready
+                # for review when it isn't (review blocker #9a). Gate on build_ok
+                # to mirror the Linear twin, which only transitions on success
+                # (react_task_finished: `if transition_state and success`). A
+                # build-failed PR leaves the card In Progress with the failure
+                # comment. No-op for non-Jira tasks; best-effort.
+                if build_passed:
+                    transition_pr_opened(
+                        config.channel_source,
+                        config.channel_metadata,
+                    )
+                else:
+                    log(
+                        "TASK",
+                        "Jira card NOT moved to In Review — PR opened with a FAILED build "
+                        "(build_ok=False); leaving it In Progress with the failure comment (#9a).",
+                    )
 
             # Memory write — capture task episode and repo learnings
             memory_written = False

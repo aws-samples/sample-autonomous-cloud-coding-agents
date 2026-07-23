@@ -58,6 +58,7 @@ import {
   GetCommand,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
+import { refreshPanelAndSettle } from './orchestration-reconciler';
 import { createTaskCore } from './shared/create-task-core';
 import { logger } from './shared/logger';
 import { readConcurrencyBudget, releaseReadyChildren } from './shared/orchestration-release';
@@ -123,13 +124,58 @@ async function reconcileOrchestration(orchestrationId: string): Promise<number> 
   const snap = await loadOrchestration(ddb, ORCHESTRATION_TABLE, orchestrationId);
   if (!snap) return 0;
 
-  // Skip orchestrations already fully terminal — nothing to recover.
-  const allTerminal = snap.children.every((c) => TERMINAL_CHILD.has(c.child_status));
-  if (allTerminal) return 0;
-
   const now = new Date().toISOString();
 
-  // 1. Recover LOST TERMINAL events: a ``released`` child whose task has
+  // Already fully terminal: no children to release/recover — BUT the parent may
+  // never have been settled (review blocker #8: the last terminal event was lost,
+  // so the DDB rows are all terminal yet the Linear parent is stuck 🔄 In Progress
+  // forever). Attempt the idempotent settle before returning, instead of the old
+  // bare skip that guaranteed the epic never closed on the lossy path.
+  const allTerminal = snap.children.every((c) => TERMINAL_CHILD.has(c.child_status));
+  if (allTerminal) {
+    try {
+      await refreshPanelAndSettle(orchestrationId, snap.children, snap.meta, now);
+    } catch (err) {
+      logger.warn('Sweep settle (already-terminal epic) failed (will retry next sweep)', {
+        orchestration_id: orchestrationId, error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    return 0;
+  }
+
+  // 1a. Recover a child STUCK in the transient ``releasing`` state (review #3
+  //     flip-then-create): a releaser won the blocked|ready→releasing claim but
+  //     crashed before createTaskCore (or before its rollback). No task exists,
+  //     so reset it to ``ready`` — step 2 re-releases it under a fresh claim.
+  //     Guard on still being ``releasing`` so we don't race a live finalize.
+  for (const child of snap.children) {
+    if (child.child_status !== 'releasing') continue;
+    try {
+      await ddb.send(new UpdateCommand({
+        TableName: ORCHESTRATION_TABLE,
+        Key: { orchestration_id: orchestrationId, sub_issue_id: child.sub_issue_id },
+        UpdateExpression: 'SET child_status = :ready, updated_at = :now',
+        ConditionExpression: 'child_status = :releasing',
+        ExpressionAttributeValues: { ':ready': 'ready', ':releasing': 'releasing', ':now': now },
+      }));
+      logger.info('Recovered orchestration child stuck in releasing → ready (crashed mid-release)', {
+        orchestration_id: orchestrationId, sub_issue_id: child.sub_issue_id,
+      });
+    } catch (err) {
+      // ConditionalCheckFailed = the row moved off 'releasing' (a live finalize
+      // won) — fine, nothing to recover. Anything else: log and let the next
+      // sweep retry.
+      if ((err as { name?: string })?.name !== 'ConditionalCheckFailedException') {
+        logger.warn('Failed to recover releasing child (will retry next sweep)', {
+          orchestration_id: orchestrationId,
+          sub_issue_id: child.sub_issue_id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  }
+
+  // 1b. Recover LOST TERMINAL events: a ``released`` child whose task has
   //    already reached terminal but whose row never advanced. Advance the
   //    row to succeeded/failed so step 2 can gate dependents correctly.
   for (const child of snap.children) {
@@ -160,7 +206,11 @@ async function reconcileOrchestration(orchestrationId: string): Promise<number> 
         return s === 'failed' || s === 'skipped';
       });
       if (deadDep) {
-        await advanceChildStatus(orchestrationId, c.sub_issue_id, 'skipped', now);
+        // review #6: only skip from blocked/ready. A concurrent recovery could
+        // have re-released this child (blocked → releasing/released) between our
+        // snapshot and this write; the source-state guard makes that write a
+        // no-op instead of clobbering a running child into terminal 'skipped'.
+        await advanceChildStatus(orchestrationId, c.sub_issue_id, 'skipped', now, ['blocked', 'ready']);
         statusOf.set(c.sub_issue_id, 'skipped');
         changed = true;
       }
@@ -180,12 +230,41 @@ async function reconcileOrchestration(orchestrationId: string): Promise<number> 
       const depsReady = c.depends_on.every((d) => statusOf.get(d) === 'succeeded');
       if (!depsReady) return false;
       if (s === 'blocked') return true;
-      if (s === 'ready' && !c.child_task_id) return true; // throttle-deferred
+      // `ready` (id-agnostic, review #1): a ready child left un-released by the
+      // #331 throttle OR reset-to-ready by an epic retry (which KEEPS its prior
+      // child_task_id for the salt, review #2). The old `!child_task_id` gate
+      // stranded retried children forever. Re-releasing is safe: the salt spawns
+      // a fresh task and the flip-then-create claim (review #3) is the race guard.
+      if (s === 'ready') return true;
       return false;
     })
     .map((c) => ({ ...c, child_status: 'ready' as const }));
 
-  if (releasableRows.length === 0) return 0;
+  if (releasableRows.length === 0) {
+    // review blocker #8: nothing left to release. If EVERY child is now terminal
+    // but the parent was never settled — because the last child's terminal stream
+    // event was lost (the exact failure this sweep exists to recover) — the epic
+    // is 'done' in DynamoDB yet stuck showing 🔄 In Progress in Linear forever.
+    // The panel/rollup/settle side-effects lived ONLY on the (lossy) live-event
+    // path. Call the shared settle here so the sweep closes the loop: post the
+    // rollup + transition the parent. refreshPanelAndSettle is idempotent (body
+    // edit is a no-op if unchanged; the parent-state mirror is claimed once), so
+    // racing the live reconciler is safe.
+    const freshAllTerminal = fresh.children.every((c) => TERMINAL_CHILD.has(c.child_status));
+    if (freshAllTerminal) {
+      try {
+        await refreshPanelAndSettle(orchestrationId, fresh.children, fresh.meta, now);
+        logger.warn('Stranded orchestration settled by sweep — parent was never settled (lost terminal event)', {
+          orchestration_id: orchestrationId, parent_linear_issue_id: fresh.meta.parent_linear_issue_id,
+        });
+      } catch (err) {
+        logger.warn('Sweep settle failed (will retry next sweep)', {
+          orchestration_id: orchestrationId, error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    return 0;
+  }
 
   // #331: throttle the sweep's releases to the free budget too.
   const budget = USER_CONCURRENCY_TABLE
@@ -209,20 +288,41 @@ async function reconcileOrchestration(orchestrationId: string): Promise<number> 
   return released;
 }
 
-/** Conditionally advance a child row's status (no-op if already there). */
+/**
+ * Conditionally advance a child row's status (no-op if already there).
+ *
+ * ``fromStates`` (review blocker #6): when provided, the write additionally
+ * asserts the CURRENT status is one of them — so a transition can't clobber a
+ * child that has since moved to a state outside the allowed source set. The skip
+ * cascade passes ``['blocked','ready']`` so a live ``released``/``releasing``
+ * child (a recovery re-released it while this sweep raced) is NEVER stamped the
+ * terminal ``skipped`` — which would let the epic claim its once-only rollup
+ * while that child's work is still running. Recovery advances (released →
+ * succeeded/failed) pass no ``fromStates`` (any non-target source is fine).
+ */
 async function advanceChildStatus(
   orchestrationId: string,
   subIssueId: string,
   status: string,
   now: string,
+  fromStates?: readonly string[],
 ): Promise<void> {
+  const values: Record<string, unknown> = { ':s': status, ':now': now };
+  let condition = 'child_status <> :s';
+  if (fromStates && fromStates.length > 0) {
+    const names = fromStates.map((st, i) => {
+      values[`:from${i}`] = st;
+      return `:from${i}`;
+    });
+    condition = `child_status <> :s AND child_status IN (${names.join(', ')})`;
+  }
   try {
     await ddb.send(new UpdateCommand({
       TableName: ORCHESTRATION_TABLE,
       Key: { orchestration_id: orchestrationId, sub_issue_id: subIssueId },
       UpdateExpression: 'SET child_status = :s, updated_at = :now',
-      ConditionExpression: 'child_status <> :s',
-      ExpressionAttributeValues: { ':s': status, ':now': now },
+      ConditionExpression: condition,
+      ExpressionAttributeValues: values,
     }));
   } catch (err) {
     if ((err as { name?: string })?.name === 'ConditionalCheckFailedException') return;

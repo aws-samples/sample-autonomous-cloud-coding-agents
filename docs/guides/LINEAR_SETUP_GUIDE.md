@@ -90,12 +90,14 @@ Paste the secret at the prompt. ABCA stores it on the workspace's per-workspace 
 
 ```bash
 bgagent linear list-projects --slug <slug>     # find the project UUID
-bgagent linear onboard-project <project-uuid> --repo owner/repo --label abca
+# Add --decompose-allowed if you want the bgagent:decompose / bgagent:auto
+# planning flow on this project (it is OFF by default).
+bgagent linear onboard-project <project-uuid> --repo owner/repo --label abca --decompose-allowed
 ```
 
 Default trigger label is `bgagent`; pass `--label <name>` to override.
 
-Optional flags on `onboard-project`: `--team-id` (Linear team UUID, debug only), `--region`, `--stack-name`.
+Optional flags on `onboard-project`: `--decompose-allowed` (enable the `bgagent:decompose` / `bgagent:auto` Mode-B planning flow — **off by default**, so without it those labels silently run as a single task), `--team-id` (Linear team UUID, debug only), `--region`, `--stack-name`.
 
 ### 7. Test
 

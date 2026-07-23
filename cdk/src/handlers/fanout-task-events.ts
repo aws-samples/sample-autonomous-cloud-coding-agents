@@ -184,6 +184,11 @@ export const CHANNEL_DEFAULTS: Record<NotificationChannel, ReadonlySet<string>> 
   linear: new Set<string>([
     ...TERMINAL_EVENT_TYPES,
     'pr_created',
+    // review should-fix: include task_timed_out so a Linear standalone iteration
+    // that TIMES OUT still settles (its 👀→✅/❌ + terminal reply come through the
+    // fanout plane). Without it a timed-out iteration's threaded reply matured to
+    // 🔄 and never resolved. Matches the Jira/Slack defaults, which already have it.
+    'task_timed_out',
   ]),
   // Jira posts a single deterministic final-status comment on terminal
   // events — the Jira analogue of the Linear default above (issue #573).

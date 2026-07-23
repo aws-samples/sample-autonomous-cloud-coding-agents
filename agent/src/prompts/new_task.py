@@ -85,7 +85,12 @@ made no changes, do NOT open a PR.)
    - Any patterns or conventions you discovered about this repo
    - Suggestions for future tasks on this repo
 
-   Run:
+   Run this EXACTLY — the `--base` value is chosen for you (for a stacked \
+sub-issue it is the predecessor's branch so the PR shows only your delta; for \
+a normal task it is the repo default). Do NOT substitute a different base such \
+as `main`/`master` even if this branch was cut from another branch — targeting \
+the wrong base makes the PR show the whole branch divergence instead of your \
+change:
    ```
    gh pr create --repo {repo_url} --head {branch_name} --base {default_branch} --title "<type>(<module>): <description>" --body "<body>"
    ```

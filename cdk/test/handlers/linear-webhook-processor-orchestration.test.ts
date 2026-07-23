@@ -243,8 +243,10 @@ describe('linear-webhook-processor — #247 orchestration routing', () => {
     // parent start signal mirrored — 👀 reaction + In Progress — via upsertEpicPanel.
     expect(upsertStatusCommentMock).toHaveBeenCalled();
     expect(swapIssueReactionMock).toHaveBeenCalledWith(expect.anything(), expect.any(String), 'eyes');
+    // The 5th arg (allowSameTypeRegression, #9b) is passed by the shared rollup
+    // re-open path; harmless on this forward Backlog→In Progress mirror.
     expect(transitionIssueStateMock).toHaveBeenCalledWith(
-      expect.anything(), expect.any(String), 'started', ['In Progress'],
+      expect.anything(), expect.any(String), 'started', ['In Progress'], true,
     );
   });
 
@@ -498,17 +500,27 @@ describe('linear-webhook-processor — #247 A6 comment trigger', () => {
         return { Items: opts.standalone ? [opts.standalone] : [] }; // resolveTaskByLinearIssue
       }
       if (cmd._type === 'Query') return { Items: [meta, child] }; // loadOrchestration
+      // Comment-trigger authorization: lookupPlatformUser Gets the user-mapping
+      // row keyed on linear_identity. Return a mapped commenter so the auth gate
+      // passes (the un-mapped case is covered by its own dedicated test).
+      if (cmd._type === 'Get' && (cmd.input.Key as { linear_identity?: string })?.linear_identity) {
+        return { Item: { platform_user_id: 'commenter-user', status: 'active' } };
+      }
       if (cmd._type === 'Get') return { Item: opts.prUrl ? { pr_url: opts.prUrl } : {} };
       return {};
     });
   }
 
   /** Mock for a PLAIN (non-orchestration) issue: no parent, no orchestration snapshot, only the GSI hit. */
-  function mockStandaloneOnly(standalone: { task_id: string; user_id?: string; repo?: string; pr_url?: string; pr_number?: number } | null): void {
+  function mockStandaloneOnly(standalone: { task_id: string; user_id?: string; repo?: string; pr_url?: string; pr_number?: number; status?: string } | null): void {
     fetchIssueParentIdMock.mockResolvedValue(null); // no parent ⇒ not a sub-issue
     ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
       if (cmd._type === 'Query' && cmd.input.IndexName === 'LinearIssueIndex') {
         return { Items: standalone ? [standalone] : [] };
+      }
+      // Comment-trigger authorization: the commenter resolves to a mapped user.
+      if (cmd._type === 'Get' && (cmd.input.Key as { linear_identity?: string })?.linear_identity) {
+        return { Item: { platform_user_id: 'commenter-user', status: 'active' } };
       }
       return {};
     });
@@ -610,6 +622,23 @@ describe('linear-webhook-processor — #247 A6 comment trigger', () => {
     expect(createTaskCoreMock).not.toHaveBeenCalled();
   });
 
+  test('review AUTH: an UNMAPPED commenter cannot drive a dispatch (❓ + reply, no task)', async () => {
+    // Even with a fully actionable iteration target, a commenter with NO linked
+    // platform user must not be able to start a code-pushing run billed to the
+    // requester. The mapping Get returns nothing → the gate blocks before dispatch.
+    fetchIssueParentIdMock.mockResolvedValue(null);
+    ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
+      if (cmd._type === 'Query' && cmd.input.IndexName === 'LinearIssueIndex') {
+        return { Items: [{ task_id: 'task-solo', user_id: 'u-solo', repo: 'o/r', pr_number: 99 }] };
+      }
+      // No user-mapping row for the commenter (linear_identity Get → empty).
+      return {};
+    });
+    await handler(eventWith(comment()));
+    expect(createTaskCoreMock).not.toHaveBeenCalled(); // blocked by auth
+    expect(reactToCommentMock).toHaveBeenCalledWith(expect.anything(), 'comment-1', 'question');
+  });
+
   test('bare @bgagent (no text) → falls back to a generic iteration instruction', async () => {
     mockOrchWithChild({ subIssueId: 'sub-issue-1', childTaskId: 'task-sub-1', prUrl: 'https://github.com/o/r/pull/7' });
     await handler(eventWith(comment({ data: { id: 'c3', body: '@bgagent', issueId: 'sub-issue-1' } })));
@@ -664,6 +693,23 @@ describe('linear-webhook-processor — #247 A6 comment trigger', () => {
       expect(ctx.idempotencyKey).toContain('newwork_');
       // 👀 ack on the comment.
       expect(reactToCommentMock).toHaveBeenCalledWith(expect.anything(), 'comment-1', 'eyes');
+    });
+
+    // review #5a (regression from #614): a follow-up comment while the task is
+    // still RUNNING (PR-less because it hasn't opened its PR yet) must NOT spawn
+    // a second parallel task — prNumber===null is not enough to mean "finished".
+    test('PR-less task still RUNNING → does NOT dispatch a parallel task, replies instead', async () => {
+      mockStandaloneOnly({ task_id: 'task-solo', user_id: 'u-solo', repo: 'o/r', status: 'RUNNING' });
+      await handler(eventWith(comment()));
+      expect(createTaskCoreMock).not.toHaveBeenCalled(); // no double-dispatch
+      expect(reactToCommentMock).toHaveBeenCalledWith(expect.anything(), 'comment-1', 'eyes');
+    });
+
+    test('PR-less task in a TERMINAL state (COMPLETED) → new work IS dispatched', async () => {
+      mockStandaloneOnly({ task_id: 'task-solo', user_id: 'u-solo', repo: 'o/r', status: 'COMPLETED' });
+      await handler(eventWith(comment()));
+      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+      expect(createTaskCoreMock.mock.calls[0][0].workflow_ref).toBe('coding/new-task-v1');
     });
 
     test('PR-less task + BARE @bgagent (no instruction) → no task, but a threaded reply (not silent)', async () => {
@@ -752,7 +798,9 @@ describe('linear-webhook-processor — #247 A6 comment trigger', () => {
         if (cmd._type === 'Query' && cmd.input.IndexName === 'LinearIssueIndex') return { Items: [] };
         if (cmd._type === 'Query') return { Items: [meta, footer, news] }; // loadOrchestration (parent's own)
         if (cmd._type === 'Get') {
-          const key = cmd.input.Key as { task_id?: string; sub_issue_id?: string };
+          const key = cmd.input.Key as { task_id?: string; sub_issue_id?: string; linear_identity?: string };
+          // Comment-trigger authorization: mapped commenter (auth gate passes).
+          if (key.linear_identity) return { Item: { platform_user_id: 'commenter-user', status: 'active' } };
           // Mode B getPendingPlan Get is keyed on the #pending-plan SK — no plan
           // on this epic, so return no item (matches prod; a verdict-shaped
           // comment like "ship it" then falls through to the A6 no-match path).

@@ -881,6 +881,129 @@ class TestCancelSkipsPostHooks:
     @patch("pipeline.discover_project_config")
     @patch("repo.setup_repo")
     @patch("pipeline.task_span")
+    def test_jira_card_not_moved_to_in_review_on_build_failure(
+        self,
+        mock_task_span,
+        mock_setup_repo,
+        _mock_discover,
+        _mock_build_prompt,
+        mock_run_agent,
+        monkeypatch,
+    ):
+        """review blocker #9a: ensure_pr opens a PR even on a FAILED build (so the
+        human sees the broken diff), so the Jira In Progress → In Review transition
+        must gate on build_passed — not merely on pr_url — or the board lies that
+        the work is ready for review. Mirrors the Linear success-only twin."""
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        mock_setup_repo.return_value = RepoSetup(
+            repo_dir="/workspace/repo",
+            branch="bgagent/test/branch",
+            build_before=True,
+        )
+
+        async def fake_run_agent(_prompt, _system_prompt, _config, cwd=None, trajectory=None):
+            return AgentResult(status="success", turns=2, cost_usd=0.01, num_turns=2)
+
+        mock_run_agent.side_effect = fake_run_agent
+
+        mock_span = MagicMock()
+        mock_span.__enter__ = MagicMock(return_value=mock_span)
+        mock_span.__exit__ = MagicMock(return_value=False)
+        mock_task_span.return_value = mock_span
+
+        mock_transition = MagicMock()
+        with (
+            patch("pipeline.ensure_committed", return_value=False),
+            # FAILED build — ensure_pr still opens the PR below.
+            patch("pipeline.verify_build", return_value=VerifyOutcome(passed=False)),
+            patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
+            patch("pipeline.ensure_pr", return_value="https://github.com/o/r/pull/9"),
+            patch("pipeline.transition_pr_opened", mock_transition),
+            patch("pipeline.get_disk_usage", return_value=0),
+            patch("pipeline.print_metrics"),
+            patch("pipeline.task_state") as mock_task_state_mod,
+        ):
+            mock_task_state_mod.get_task = MagicMock(return_value={"status": "RUNNING"})
+            mock_task_state_mod.TaskFetchError = Exception  # type: ignore[attr-defined]
+            from pipeline import run_task
+
+            run_task(
+                repo_url="o/r",
+                task_description="x",
+                github_token="ghp_test",
+                aws_region="us-east-1",
+                task_id="t-jira-failbuild",
+                channel_source="jira",
+                channel_metadata={"jira_issue_key": "ABC-1"},
+            )
+        # PR opened, but the Jira card was NOT advanced to In Review on the red build.
+        mock_transition.assert_not_called()
+
+    @patch("runner.run_agent")
+    @patch("pipeline.build_system_prompt")
+    @patch("pipeline.discover_project_config")
+    @patch("repo.setup_repo")
+    @patch("pipeline.task_span")
+    def test_jira_card_moved_to_in_review_on_build_success(
+        self,
+        mock_task_span,
+        mock_setup_repo,
+        _mock_discover,
+        _mock_build_prompt,
+        mock_run_agent,
+        monkeypatch,
+    ):
+        """The positive twin: a PASSING build DOES move the Jira card to In Review."""
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        mock_setup_repo.return_value = RepoSetup(
+            repo_dir="/workspace/repo",
+            branch="bgagent/test/branch",
+            build_before=True,
+        )
+
+        async def fake_run_agent(_prompt, _system_prompt, _config, cwd=None, trajectory=None):
+            return AgentResult(status="success", turns=2, cost_usd=0.01, num_turns=2)
+
+        mock_run_agent.side_effect = fake_run_agent
+
+        mock_span = MagicMock()
+        mock_span.__enter__ = MagicMock(return_value=mock_span)
+        mock_span.__exit__ = MagicMock(return_value=False)
+        mock_task_span.return_value = mock_span
+
+        mock_transition = MagicMock()
+        with (
+            patch("pipeline.ensure_committed", return_value=False),
+            patch("pipeline.verify_build", return_value=VerifyOutcome(passed=True)),
+            patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
+            patch("pipeline.ensure_pr", return_value="https://github.com/o/r/pull/9"),
+            patch("pipeline.transition_pr_opened", mock_transition),
+            patch("pipeline.get_disk_usage", return_value=0),
+            patch("pipeline.print_metrics"),
+            patch("pipeline.task_state") as mock_task_state_mod,
+        ):
+            mock_task_state_mod.get_task = MagicMock(return_value={"status": "RUNNING"})
+            mock_task_state_mod.TaskFetchError = Exception  # type: ignore[attr-defined]
+            from pipeline import run_task
+
+            run_task(
+                repo_url="o/r",
+                task_description="x",
+                github_token="ghp_test",
+                aws_region="us-east-1",
+                task_id="t-jira-okbuild",
+                channel_source="jira",
+                channel_metadata={"jira_issue_key": "ABC-1"},
+            )
+        mock_transition.assert_called_once()
+
+    @patch("runner.run_agent")
+    @patch("pipeline.build_system_prompt")
+    @patch("pipeline.discover_project_config")
+    @patch("repo.setup_repo")
+    @patch("pipeline.task_span")
     def test_post_hook_workflow_reload_failure_still_opens_pr(
         self,
         mock_task_span,

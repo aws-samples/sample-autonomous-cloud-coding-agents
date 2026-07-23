@@ -172,4 +172,43 @@ describe('fetchSubIssueGraph — error shapes', () => {
     const result = await fetchSubIssueGraph('tok', 'PARENT', { fetchImpl });
     expect(result.kind).toBe('error');
   });
+
+  // review blocker #7: over-size epics must FAIL LOUD, not silently truncate.
+  test('children truncated (hasNextPage) → error, not a silently-cut graph', async () => {
+    const fetchImpl = mockFetch({
+      data: {
+        issue: {
+          id: 'PARENT',
+          children: {
+            pageInfo: { hasNextPage: true }, // Linear says there are more children
+            nodes: [{ id: 'A' }, { id: 'B' }],
+          },
+        },
+      },
+    });
+    const result = await fetchSubIssueGraph('tok', 'PARENT', { fetchImpl });
+    expect(result.kind).toBe('error');
+    if (result.kind === 'error') expect(result.message).toMatch(/more than 100 sub-issues/i);
+  });
+
+  test("a child's blockers truncated (hasNextPage) → error (edges would be incomplete)", async () => {
+    const fetchImpl = mockFetch({
+      data: {
+        issue: {
+          id: 'PARENT',
+          children: {
+            pageInfo: { hasNextPage: false },
+            nodes: [{
+              id: 'A',
+              identifier: 'ENG-1',
+              inverseRelations: { pageInfo: { hasNextPage: true }, nodes: [] },
+            }],
+          },
+        },
+      },
+    });
+    const result = await fetchSubIssueGraph('tok', 'PARENT', { fetchImpl });
+    expect(result.kind).toBe('error');
+    if (result.kind === 'error') expect(result.message).toMatch(/blocking relations/i);
+  });
 });

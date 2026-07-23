@@ -265,6 +265,11 @@ describe('linear-webhook-processor handler', () => {
     expect(reqBody.workflow_ref).toBe('coding/new-task-v1');
     expect(ctx.userId).toBe('cognito-user-1');
     expect(ctx.channelSource).toBe('linear');
+    // review #5b: the label-trigger dispatch must pass a deterministic
+    // idempotencyKey (keyed on issue id + webhook timestamp) so the processor's
+    // own async-invoke retry replays instead of creating a duplicate task/PR.
+    expect(ctx.idempotencyKey).toBeDefined();
+    expect(ctx.idempotencyKey).toMatch(/^linear-label-issue-1/);
     expect(ctx.channelMetadata).toMatchObject({
       linear_issue_id: 'issue-1',
       linear_issue_identifier: 'ABC-42',

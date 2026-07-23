@@ -121,6 +121,7 @@ import { claimCommentAck, clearRollupClaim, deriveOrchestrationId, loadOrchestra
 import type { Attachment, PassedAttachmentRecord } from './shared/types';
 import { MAX_ATTACHMENTS_PER_TASK, MAX_TASK_DESCRIPTION_LENGTH } from './shared/validation';
 import { CODING_WORKFLOW_ID } from './shared/workflows';
+import { TERMINAL_STATUSES, type TaskStatusType } from '../constructs/task-status';
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
@@ -1450,6 +1451,18 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   }
 
   const requestId = crypto.randomUUID();
+  // review #5b: the processor is a bare async (Event) Lambda invoke — a throw
+  // AFTER createTaskCore returned 201 makes Lambda re-run the whole handler on
+  // the same delivery (default 2 async retries), duplicating the coding task +
+  // PR. The receiver's DEDUP_TABLE only guards Linear REDELIVERY, not the
+  // processor's own retry. Pass a deterministic idempotency key so a retried
+  // delivery replays (200) instead of re-creating. Keyed on the Linear
+  // webhookTimestamp (stable across a delivery's retries) + issue id — a genuine
+  // later re-label is a new delivery with a new timestamp, so it is NOT blocked.
+  // Sanitized to createTaskCore's charset /^[A-Za-z0-9_-]{1,128}$/.
+  const labelTriggerKey = `linear-label-${issue.id}-${(payload as LinearIssueEvent).webhookTimestamp ?? requestId}`
+    .replace(/[^A-Za-z0-9_-]/g, '')
+    .slice(0, MAX_IDEMPOTENCY_KEY_LENGTH);
   const result = await createTaskCore(
     {
       repo,
@@ -1467,6 +1480,9 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       channelMetadata,
       taskId,
       ...(preScreenedAttachments.length > 0 && { preScreenedAttachments }),
+      // dup-dispatch blocker #5: a stable idempotency key (issue id + webhook
+      // timestamp) so a Linear webhook redelivery can't mint a second task.
+      idempotencyKey: labelTriggerKey,
     },
     requestId,
   );
@@ -2035,6 +2051,35 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
   // is the root; otherwise the comment IS the root. The 👀 still goes on the
   // actual comment the human wrote (reactions work at any thread depth).
   const replyTargetId = payload.data.parentId ?? commentId;
+
+  // AUTHORIZATION (review MEDIUM): the issue→task path gates on lookupPlatformUser
+  // (a Linear actor with no linked ABCA user can't create tasks). The COMMENT
+  // path did NOT — so ANY workspace member or guest who can post @bgagent could
+  // approve/reject plans, drive plan commands, and START code-pushing agent runs,
+  // all attributed to and BILLED against the original requester. Resolve the
+  // commenter to a platform user BEFORE any verdict/command/dispatch. Unmapped →
+  // ❓ + a one-line reply, then stop. (The bot's own comments never carry the
+  // mention token, so they don't reach here; and an app-actor commenter is
+  // likewise unmapped, which is correct — the app can't authorize itself.)
+  const commenterId = payload.actor?.id;
+  const commenterPlatformUserId = commenterId
+    ? await lookupPlatformUser(workspaceId, commenterId)
+    : null;
+  if (!commenterPlatformUserId) {
+    logger.warn('A6 comment: commenter has no linked platform user — refusing to act on the trigger', {
+      linear_workspace_id: workspaceId, linear_user_id: commenterId, linear_issue_id: commentedIssueId,
+    });
+    const feedbackCtx = { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE };
+    await reactToComment(feedbackCtx, commentId, EMOJI_NEEDS_INPUT);
+    try {
+      await upsertThreadedReply(
+        feedbackCtx, commentedIssueId, replyTargetId,
+        'I can only act on `@bgagent` requests from a linked ABCA user. Link your Linear '
+          + 'account first (ask your ABCA admin / run `bgagent linear link`), then re-comment.',
+      );
+    } catch { /* best-effort reply */ }
+    return;
+  }
 
   // #299 Mode B: a comment on a parent that has a PENDING plan (proposed but not
   // yet executed). Checked BEFORE A6 routing because NO orchestration is seeded
@@ -3244,7 +3289,7 @@ async function handleStandaloneCommentTrigger(args: {
  */
 async function maybeStartStandaloneNewWork(args: {
   issueId: string;
-  task: { task_id: string; repo?: string; user_id?: string };
+  task: { task_id: string; repo?: string; user_id?: string; status?: string };
   workspaceId: string;
   commentId: string;
   /** Raw @bgagent comment body — carries any newly-attached uploads.linear.app links. */
@@ -3259,6 +3304,35 @@ async function maybeStartStandaloneNewWork(args: {
   // Can't act without a repo to work in or a user to attribute the task to —
   // let the caller no-op-log. (These are the only genuinely unactionable cases.)
   if (!task.repo || !task.user_id) return false;
+
+  // review #5a (regression from #614): only start new work when the resolved
+  // task is TERMINAL. prNumber===null is TRUE both for a finished PR-less task
+  // AND for one still RUNNING that hasn't opened its PR yet — so without this
+  // gate a follow-up @bgagent comment on an in-flight task spawns a SECOND,
+  // context-free parallel task. If the task is still running, ACK + tell the
+  // user we're already on it (handled: return true, no dispatch). An ABSENT
+  // status is an old/unknown row — allow (preserves pre-#614 behavior for those).
+  if (task.status !== undefined && !TERMINAL_STATUSES.includes(task.status as TaskStatusType)) {
+    await reactToComment({ linearWorkspaceId: workspaceId, registryTableName }, commentId, EMOJI_STARTED);
+    try {
+      await upsertThreadedReply(
+        { linearWorkspaceId: workspaceId, registryTableName },
+        issueId,
+        replyTargetId,
+        "I'm still working on the current task for this issue — I'll pick up follow-up "
+          + 'requests once it finishes. If you meant to change what I\'m doing, cancel the '
+          + 'running task first, then re-comment.',
+      );
+    } catch (err) {
+      logger.warn('A6 comment (standalone): in-flight-task reply failed (non-fatal)', {
+        linear_issue_id: issueId, error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    logger.info('A6 comment (standalone): task still in-flight — not dispatching parallel new work (review #5a)', {
+      linear_issue_id: issueId, task_id: task.task_id, task_status: task.status,
+    });
+    return true;
+  }
 
   const instruction = trigger.instruction.trim();
   const feedbackCtx = { linearWorkspaceId: workspaceId, registryTableName };

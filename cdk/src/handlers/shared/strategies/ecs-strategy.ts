@@ -254,6 +254,15 @@ export class EcsComputeStrategy implements ComputeStrategy {
       cluster: ECS_CLUSTER_ARN,
       taskDefinition,
       launchType: 'FARGATE',
+      // review #5c: ECS RunTask idempotency. Without a clientToken, a client-side
+      // timeout on a RunTask that ACTUALLY launched (the SDK send() threw after
+      // AWS accepted it) makes the session-start auto-retry fire a SECOND RunTask
+      // with the same TASK_ID env — two Fargate containers cloning/committing/PRing
+      // in parallel, the first untrackable. clientToken makes AWS itself dedup an
+      // identical RunTask within its window: the retry returns the SAME task
+      // instead of launching another. taskId is a ULID (26 chars, well under the
+      // 64-char clientToken limit) and unique per task — the natural token.
+      clientToken: taskId,
       networkConfiguration: {
         awsvpcConfiguration: {
           subnets,

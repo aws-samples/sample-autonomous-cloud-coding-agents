@@ -208,6 +208,11 @@ const EXPLICIT_REJECT_PHRASES = [
  */
 const SOFT_NEGATION_PHRASES = [
   'no', 'nope', 'nah', "don't", 'do not', 'dont', '-1',
+  // review #4(a): 'not' was MISSING, so "not sure" / "not ok" / "not approved"
+  // fell through to APPROVE (they contain approve words). As a soft negation it
+  // now routes to ambiguous (nudge) or, with a change instruction, revise —
+  // never a silent approval against the reviewer's "not".
+  'not',
 ] as const;
 /**
  * Change-instruction signals that mark a soft-negation comment as a REVISE (re-plan
@@ -275,8 +280,11 @@ function hasChangeInstruction(text: string): boolean {
  *    guess-and-destroy — the processor nudges the reviewer to pick.
  *
  * ``reject``/``ambiguous`` precede ``approve`` so a negation that also contains an
- * affirmative word ("don't approve") isn't read as approval. Emoji verdicts
- * (👍/👎) are honoured regardless of length.
+ * affirmative word ("don't approve", "not approved") isn't read as approval. A
+ * reject EMOJI discards only when it LEADS the comment or appears in a short
+ * verdict (review #4(b) — not merely buried in prose). An approve word paired
+ * with a contrastive/change qualifier ("yes, but smaller") routes to revise, not
+ * approve (review #4(c)). An approve emoji (👍) is honoured regardless of length.
  */
 export function parsePlanVerdict(instruction: string): PlanVerdict {
   // Normalize: drop markdown emphasis/backticks, lowercase, collapse whitespace.
@@ -289,8 +297,18 @@ export function parsePlanVerdict(instruction: string): PlanVerdict {
 
   // ── DISCARD: explicit destructive intent only ────────────────────────────
   // A discard is irreversible (the plan is gone), so it requires an EXPLICIT kill
-  // word — never a bare soft negation. Emoji (👎🛑❌) count at any length.
-  if (REJECT_EMOJI.some((e) => instruction.includes(e))) return 'reject';
+  // word — never a bare soft negation.
+  //
+  // review #4(b): a reject EMOJI now only discards when it is the VERDICT, not
+  // merely present. The old ``instruction.includes(❌)`` fired on a long comment
+  // that happened to contain ❌ anywhere ("this isn't ❌ a blocker, looks fine")
+  // → irreversibly deleting the plan. Require the reject emoji to lead the comment
+  // (first non-space char) OR appear in a SHORT (≤6-word) verdict — the same
+  // discipline the phrase branches already use.
+  const trimmed = instruction.trim();
+  const rejectEmojiIsVerdict = REJECT_EMOJI.some((e) => trimmed.startsWith(e))
+    || (short && REJECT_EMOJI.some((e) => instruction.includes(e)));
+  if (rejectEmojiIsVerdict) return 'reject';
   if (short && EXPLICIT_REJECT_PHRASES.includes(firstWord as (typeof EXPLICIT_REJECT_PHRASES)[number])) return 'reject';
   if (short && EXPLICIT_REJECT_PHRASES.some((p) => hasPhrase(text, p))) return 'reject';
 
@@ -315,9 +333,23 @@ export function parsePlanVerdict(instruction: string): PlanVerdict {
   }
 
   // ── APPROVE: clear go-ahead, short comment only ──────────────────────────
+  // review #4(c): an approve word paired with a substantive change instruction
+  // ("yes, but smaller", "ok but split the API layer") is NOT a clean go-ahead —
+  // approving would start spending against a plan the reviewer wants changed.
+  // Route it to the revise loop (``none``) instead. A pure approve emoji (👍) has
+  // no qualifier so it stays a straight approve.
   if (APPROVE_EMOJI.some((e) => instruction.includes(e))) return 'approve';
-  if (short && APPROVE_PHRASES.includes(firstWord as (typeof APPROVE_PHRASES)[number])) return 'approve';
-  if (short && APPROVE_PHRASES.some((p) => hasPhrase(text, p))) return 'approve';
+  const approveLed =
+    (short && APPROVE_PHRASES.includes(firstWord as (typeof APPROVE_PHRASES)[number]))
+    || (short && APPROVE_PHRASES.some((p) => hasPhrase(text, p)));
+  if (approveLed) {
+    // A contrastive qualifier ("yes, BUT smaller"; "ok, HOWEVER split it") or an
+    // explicit change instruction means the reviewer is NOT cleanly approving the
+    // plan as-is — route to revise rather than spend on it. A bare approve
+    // ("yes", "lgtm", "approve") has neither → straight approve.
+    const hasQualifier = /(^|[^a-z0-9])(but|however|though|although|except)([^a-z0-9]|$)/i.test(text);
+    return (hasQualifier || hasChangeInstruction(text)) ? 'none' : 'approve';
+  }
 
   // Anything else (incl. a long non-negation edit request) → revise loop.
   return 'none';

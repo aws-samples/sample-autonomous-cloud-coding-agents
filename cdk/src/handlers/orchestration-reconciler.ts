@@ -499,16 +499,29 @@ async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
     // them to released conditionally); skip them here to avoid a
     // double-write race.
     if (plan.toRelease.includes(update.sub_issue_id)) continue;
+    // review #6: a `skipped` transition must only apply from a non-live source
+    // (blocked/ready). Without this, a skip cascade racing a recovery re-release
+    // could stamp a `released`/`releasing`/running child terminal-`skipped`,
+    // letting the epic claim its once-only rollup while work is still in flight.
+    // Other resets (failed→ready/blocked) keep the plain not-already-there guard.
+    const skipGuard = update.child_status === 'skipped';
+    const values: Record<string, unknown> = { ':s': update.child_status, ':now': now };
+    let condition = 'child_status <> :s';
+    if (skipGuard) {
+      values[':blocked'] = 'blocked';
+      values[':ready'] = 'ready';
+      condition = 'child_status IN (:blocked, :ready)';
+    }
     try {
       await ddb.send(new UpdateCommand({
         TableName: ORCHESTRATION_TABLE,
         Key: { orchestration_id: orchestrationId, sub_issue_id: update.sub_issue_id },
         UpdateExpression: 'SET child_status = :s, updated_at = :now',
-        ConditionExpression: 'child_status <> :s',
-        ExpressionAttributeValues: { ':s': update.child_status, ':now': now },
+        ConditionExpression: condition,
+        ExpressionAttributeValues: values,
       }));
     } catch (err) {
-      if (isConditionalCheckFailed(err)) continue; // already in target state
+      if (isConditionalCheckFailed(err)) continue; // already in target / not a skippable source
       throw err;
     }
   }
@@ -591,13 +604,15 @@ async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
     .filter((c) =>
       // newly-unblocked: all predecessors now succeeded
       (c.child_status === 'blocked' && c.depends_on.every((d) => succeeded.has(d)))
-      // OR throttle-deferred: a prior pass (#331) left this child `ready` but
-      // un-started (no child_task_id) because the concurrency budget was full.
-      // Re-pick it here so ANY sibling completion drains the backlog as slots
-      // free, instead of it waiting up to ~10min for the #303 sweep. Roots have
-      // no predecessors so depends_on.every(...) is vacuously true. Safe against
-      // double-release: releaseReadyChildren's flip is conditional (ready→released).
-      || (c.child_status === 'ready' && !c.child_task_id && c.depends_on.every((d) => succeeded.has(d))))
+      // OR still `ready` and un-released: either throttle-deferred (#331, a prior
+      // pass left it ready when the concurrency budget was full) OR reset-to-ready
+      // by an epic retry (review #2 — it KEEPS its prior child_task_id so the
+      // idempotency salt spawns a fresh task). We no longer gate on !child_task_id:
+      // the old gate stranded retried children forever (review #1), and the
+      // flip-then-create claim (ready→releasing, review #3) is now the race guard —
+      // only one releaser wins, so re-picking a ready-with-id child is safe. Roots
+      // have no predecessors so depends_on.every(...) is vacuously true.
+      || (c.child_status === 'ready' && c.depends_on.every((d) => succeeded.has(d))))
     .map((c) => ({ ...c, child_status: 'ready' as const }));
 
   if (releasableRows.length > 0) {
@@ -651,7 +666,7 @@ async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
  * edit is idempotent (same body = no-op), so it always runs; the parent-STATE
  * mirror is claimed once via ``claimRollup`` on the first all-terminal caller.
  */
-async function refreshPanelAndSettle(
+export async function refreshPanelAndSettle(
   orchestrationId: string,
   children: readonly OrchestrationChildRow[],
   meta: { linear_workspace_id: string; parent_linear_issue_id: string; status_comment_id?: string; release_context: { channel_source?: string } },

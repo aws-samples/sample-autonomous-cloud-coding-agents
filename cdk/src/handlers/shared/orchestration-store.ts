@@ -52,6 +52,10 @@ import type { AttachmentRecord } from './types';
 export type ChildStatus =
   | 'ready' // no predecessors / all predecessors succeeded — releasable
   | 'blocked' // waiting on predecessors
+  | 'releasing' // TRANSIENT (flip-then-create, review #3): claimed for release —
+  // the winner is between the atomic blocked|ready→releasing claim and the
+  // createTaskCore that follows. Never terminal; a crash mid-release leaves the
+  // row here and the sweep/rollback recovers it back to ready.
   | 'released' // child task created
   | 'succeeded'
   | 'failed'

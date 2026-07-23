@@ -149,8 +149,34 @@ describe('parsePlanVerdict', () => {
   });
 
   test('a verdict-first short comment still wins even with trailing words', () => {
-    expect(parsePlanVerdict('approve but watch the schema migration')).toBe('approve');
+    // A clean affirmation with a plain elaboration (no contrastive/change) approves.
     expect(parsePlanVerdict('yes, this is the right breakdown')).toBe('approve');
+    expect(parsePlanVerdict('lgtm ship it')).toBe('approve');
+  });
+
+  test('review #4(c): approve + a contrastive/change qualifier → revise, not approve', () => {
+    // "yes, but smaller" / "ok but split the API" are NOT clean go-aheads —
+    // approving would spend against a plan the reviewer wants changed. Route to
+    // the revise loop (none) instead of silently starting the run.
+    expect(parsePlanVerdict('yes, but smaller')).toBe('none');
+    expect(parsePlanVerdict('ok but split the API layer')).toBe('none');
+    expect(parsePlanVerdict('approve but watch the schema migration')).toBe('none');
+  });
+
+  test('review #4(a): "not <approve-word>" is a soft negation, never a silent approve', () => {
+    expect(parsePlanVerdict('not sure')).toBe('ambiguous');
+    expect(parsePlanVerdict('not ok')).toBe('ambiguous');
+    expect(parsePlanVerdict('not approved')).toBe('ambiguous');
+    // …and "not, make it 2 tasks" carries a change instruction → revise.
+    expect(parsePlanVerdict('not like this, make it 2 tasks')).toBe('none');
+  });
+
+  test('review #4(b): a reject emoji buried in a long non-verdict comment does NOT discard', () => {
+    // The ❌ is incidental, not the verdict — must not irreversibly delete the plan.
+    expect(parsePlanVerdict('this part is fine, the ❌ marks in the diagram are just placeholders and can stay for now')).toBe('none');
+    // …but a leading reject emoji still discards.
+    expect(parsePlanVerdict('❌ wrong breakdown')).toBe('reject');
+    expect(parsePlanVerdict('👎')).toBe('reject');
   });
 
   test('empty / unrelated → none', () => {
