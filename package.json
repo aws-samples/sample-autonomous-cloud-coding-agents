@@ -29,7 +29,7 @@
     "esbuild": "^0.28.1",
     "fast-xml-parser": "^5.7.0",
     "js-yaml": "^4.2.0",
-    "postcss": "^8.5.10",
+    "postcss": "^8.5.18",
     "uuid": "^14.0.0",
     "vite": "^8.0.13",
     "yaml": "^2.8.3"
