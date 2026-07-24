@@ -124,6 +124,72 @@ class TestSetupRepoHappyPath:
         assert "head-sha-after-setup" not in fake.labels()
 
 
+class TestDiamondBaseBranchF1:
+    """#247 F1 (DE-stress 2026-07-24): a diamond child (base_branch + merge_branches)
+    is handed the server's 'main' literal as its base, which is WRONG on a fork
+    whose real default isn't main. repo.py must resolve the real default and use
+    it for BOTH the checkout base and the PR base. A linear child (base_branch, no
+    merge_branches) must be left untouched."""
+
+    def test_diamond_resolves_real_default_over_server_main_literal(self, monkeypatch):
+        fake = _fake_run_cmd()
+        _patch_common(monkeypatch, fake)
+        # Fork's real default is linear-vercel, but the server passed 'main'.
+        monkeypatch.setattr(repo, "detect_default_branch", lambda url, d: "linear-vercel")
+
+        setup = repo.setup_repo(
+            _config(
+                base_branch="main",
+                merge_branches=["bgagent/task-x/feat-a", "bgagent/task-y/feat-b"],
+            )
+        )
+
+        # Checkout base was rewritten to the detected default, not 'main'.
+        fetch_cmd = fake.cmd_for("fetch-base-branch")
+        assert fetch_cmd is not None
+        assert fetch_cmd[-1] == "linear-vercel"
+        create_cmd = fake.cmd_for("create-branch-from-base")
+        assert create_cmd is not None
+        assert create_cmd[-1] == "origin/linear-vercel"
+        # PR base (setup.default_branch) follows — so the diamond PR targets the
+        # real default, not stale main (the whole point of F1).
+        assert setup.default_branch == "linear-vercel"
+        # The predecessor branches are still merged in (diamond sees all preds).
+        assert "merge-predecessor" in " ".join(fake.labels()) or any(
+            "merge" in lbl for lbl in fake.labels()
+        )
+
+    def test_diamond_no_op_when_server_base_already_matches_detected_default(self, monkeypatch):
+        fake = _fake_run_cmd()
+        _patch_common(monkeypatch, fake)
+        # Server 'main' already IS the real default (upstream/main case) → no rewrite.
+        monkeypatch.setattr(repo, "detect_default_branch", lambda url, d: "main")
+
+        setup = repo.setup_repo(
+            _config(base_branch="main", merge_branches=["bgagent/task-x/feat-a"])
+        )
+        assert fake.cmd_for("fetch-base-branch")[-1] == "main"
+        assert setup.default_branch == "main"
+
+    def test_linear_child_base_branch_is_left_untouched(self, monkeypatch):
+        # A LINEAR child (single predecessor → base_branch set, NO merge_branches)
+        # stacks on its predecessor's branch; that base must NOT be rewritten to
+        # the repo default (it's intentionally the predecessor branch).
+        fake = _fake_run_cmd()
+        _patch_common(monkeypatch, fake)
+        # If detect_default_branch were (wrongly) consulted, it'd return this — the
+        # test proves it is NOT used for a linear child.
+        monkeypatch.setattr(repo, "detect_default_branch", lambda url, d: "linear-vercel")
+
+        setup = repo.setup_repo(
+            _config(base_branch="bgagent/task-pred/feat-pred", merge_branches=[])
+        )
+        assert fake.cmd_for("fetch-base-branch")[-1] == "bgagent/task-pred/feat-pred"
+        assert fake.cmd_for("create-branch-from-base")[-1] == "origin/bgagent/task-pred/feat-pred"
+        # PR base is the predecessor branch (the stack target), unchanged.
+        assert setup.default_branch == "bgagent/task-pred/feat-pred"
+
+
 class TestReadOnlyBaselineSkip:
     """#299 ECS_RIGHTSIZED_PLANNING: a read_only workflow (coding/decompose-v1)
     never edits code, runs the post-agent gate, or opens a PR, so the pre-agent

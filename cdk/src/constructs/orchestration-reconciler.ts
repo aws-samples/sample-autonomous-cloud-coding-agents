@@ -146,6 +146,13 @@ export class OrchestrationReconciler extends Construct {
       bisectBatchOnError: true,
       onFailure: new SqsDlq(this.dlq),
       filters: terminalFilters,
+      // DE-F6 (2026-07-24): partial-batch reporting. Without this, the handler
+      // returning void meant ANY thrown record failed the WHOLE batch — a single
+      // poison/throttled record re-drove all its siblings (re-reconciling
+      // healthy children) until it aged out. With reportBatchItemFailures the
+      // handler returns only the failed record's sequence number, so just that
+      // record retries + bisects toward the DLQ while its siblings commit.
+      reportBatchItemFailures: true,
     }));
 
     NagSuppressions.addResourceSuppressions(this.fn, [

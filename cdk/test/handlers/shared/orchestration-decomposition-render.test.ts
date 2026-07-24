@@ -38,6 +38,7 @@ import {
   renderRevisionCapNote,
   renderRevisionOverCapNote,
   renderRevisionFailedNote,
+  renderSingleTaskApprovedReference,
   renderSingleTaskNote,
   renderUnderspecifiedDecomposeNote,
   renderWrongMentionNudge,
@@ -330,6 +331,26 @@ describe('renderApprovedPlanReference (#299 plan-cleanup)', () => {
     const ref = renderApprovedPlanReference(CHAIN);
     // "API" depends on #1 (Schema) → the "after #1" note carries into the reference.
     expect(ref).toMatch(/after #1/);
+  });
+});
+
+describe('renderSingleTaskApprovedReference (PM-P1-1 — single-task approval record)', () => {
+  test('freezes to a durable "Approved" reference, bot-prefixed, no stale action footer', () => {
+    const ref = renderSingleTaskApprovedReference('one cohesive change');
+    expect(ref.startsWith(PLAN_PROPOSAL_PREFIX)).toBe(true);
+    // Bot-prefixed so the self-trigger guard skips it (won't re-fire the webhook).
+    expect(isBotAuthoredComment(ref)).toBe(true);
+    expect(ref).toMatch(/Approved/);
+    expect(ref).toContain('one cohesive change');
+    // The stale approve/reject prompt is GONE (the task is running now).
+    expect(ref).not.toMatch(/@bgagent approve/i);
+    expect(ref).not.toMatch(/@bgagent reject/i);
+  });
+
+  test('handles an empty reasoning without a dangling "()"', () => {
+    const ref = renderSingleTaskApprovedReference('');
+    expect(ref).toMatch(/Approved/);
+    expect(ref).not.toContain('()');
   });
 });
 

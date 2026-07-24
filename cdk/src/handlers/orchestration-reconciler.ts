@@ -46,7 +46,7 @@ import {
   QueryCommand,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
-import type { DynamoDBRecord, DynamoDBStreamEvent } from 'aws-lambda';
+import type { DynamoDBBatchResponse, DynamoDBRecord, DynamoDBStreamEvent } from 'aws-lambda';
 import type { ScreeningConfig } from './shared/attachment-screening';
 import { createTaskCore } from './shared/create-task-core';
 import { renderFailureReply, renderPanelFailureReason } from './shared/failure-reply';
@@ -73,7 +73,7 @@ import {
   type ReconcileChild,
   type TerminalOutcome,
 } from './shared/orchestration-reconcile';
-import { readConcurrencyBudget, releaseReadyChildren } from './shared/orchestration-release';
+import { readConcurrencyBudget, releaseReadyChildren, type ReleaseChildReadyResult } from './shared/orchestration-release';
 import { planDirectRestack, type RestackStep } from './shared/orchestration-restack';
 import { cascadeNodeLabel, upsertEpicPanel } from './shared/orchestration-rollup';
 import {
@@ -349,15 +349,49 @@ async function resolveChildPrUrls(
  * Best-effort: a read miss just yields no sub-line (never throws out of the
  * reconcile). Returns ``sub_issue_id → reason``.
  */
+/**
+ * F9: patch a just-released view with any children that FAILED terminally
+ * during the release (a deterministic create failure — guardrail/validation).
+ * ``failClaimTerminal`` already wrote ``child_status='failed'`` + ``failure_reason``
+ * to the store; this mirrors that onto the in-memory rows so the settle running
+ * immediately after the release sees the failure (there's no later stream event
+ * for a child that never became a task). Pure; only touches terminally-failed
+ * ids, leaving every other row untouched.
+ */
+function applyTerminalFailures(
+  children: readonly OrchestrationChildRow[],
+  results: readonly ReleaseChildReadyResult[],
+): readonly OrchestrationChildRow[] {
+  const failed = new Map<string, string>();
+  for (const r of results) {
+    if (r.kind === 'create_failed_terminal') failed.set(r.subIssueId, r.failureReason);
+  }
+  if (failed.size === 0) return children;
+  return children.map((c) =>
+    failed.has(c.sub_issue_id)
+      ? { ...c, child_status: 'failed' as const, failure_reason: failed.get(c.sub_issue_id)! }
+      : c,
+  );
+}
+
 async function resolveChildFailureReasons(
   children: readonly OrchestrationChildRow[],
 ): Promise<Record<string, string>> {
+  // F9: a child that failed WITHOUT ever getting a task (deterministic create
+  // failure — guardrail/validation) carries its reason on the row's
+  // ``failure_reason`` instead of a task record. Seed the map with those first
+  // so the panel ❌ has a "why + how to fix" line even though there's no task.
+  const out: Record<string, string> = {};
+  for (const c of children) {
+    if (c.child_status === 'failed' && !c.child_task_id && c.failure_reason) {
+      out[c.sub_issue_id] = c.failure_reason;
+    }
+  }
   const failed = children.filter((c) => c.child_status === 'failed' && c.child_task_id);
-  if (failed.length === 0) return {};
+  if (failed.length === 0) return out;
   const taskToSub = new Map(failed.map((c) => [c.child_task_id!, c.sub_issue_id]));
   const isIntegration = new Map(failed.map((c) => [c.sub_issue_id, isIntegrationNode(c.sub_issue_id)]));
   const keys = [...taskToSub.keys()].map((task_id) => ({ task_id }));
-  const out: Record<string, string> = {};
   try {
     for (let i = 0; i < keys.length; i += 100) {
       const chunk = keys.slice(i, i + 100);
@@ -596,7 +630,9 @@ async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
   //    predecessors succeeded and releases D; the conditional
   //    ready→released flip in releaseChild dedups if both happen to see it.
   const fresh = await loadOrchestration(ddb, ORCHESTRATION_TABLE, orchestrationId);
-  const freshChildren = fresh?.children ?? snapshot.children;
+  // F9: reassignable so a terminal create-failure can be patched into the view
+  // before the settle below (see applyTerminalFailures).
+  let freshChildren = fresh?.children ?? snapshot.children;
   const succeeded = new Set(
     freshChildren.filter((c) => c.child_status === 'succeeded').map((c) => c.sub_issue_id),
   );
@@ -643,9 +679,16 @@ async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
       orchestration_id: orchestrationId,
       trigger_sub_issue_id: subIssueId,
       released: results.filter((r) => r.kind === 'released').length,
+      terminally_failed: results.filter((r) => r.kind === 'create_failed_terminal').length,
       requested: releasableRows.length,
       ...(budget !== undefined && { concurrency_budget: budget }),
     });
+    // F9: a child that failed DETERMINISTICALLY (guardrail/validation) was just
+    // marked terminally 'failed' in the store, but our in-memory freshChildren
+    // still shows it releasing/ready — and no later stream event will re-drive
+    // this reconciler for a child that never became a task. Patch the local view
+    // so the settle below sees the failure and can reach all-terminal + post ❌.
+    freshChildren = applyTerminalFailures(freshChildren, results);
   }
 
   // Refresh the panel + settle the parent state against the fresh view.
@@ -1908,34 +1951,58 @@ async function seedDecomposedGraph(
   });
 }
 
-export async function handler(event: DynamoDBStreamEvent): Promise<void> {
+export async function handler(event: DynamoDBStreamEvent): Promise<DynamoDBBatchResponse> {
   let processed = 0;
+  // DE-F6 (2026-07-24): per-record isolation. Each record is processed in its
+  // own try/catch; a thrown record is reported as a batch item failure (by its
+  // stream sequence number) so ONLY it retries + bisects toward the DLQ, instead
+  // of failing the whole batch and re-driving its healthy siblings. Records
+  // stream in order per shard, so we stop reporting after the first failure is
+  // NOT required — DynamoDB retries from the earliest reported failure — but we
+  // report every failing record's id for clarity; the ESM retries from the
+  // lowest sequence number among them.
+  const batchItemFailures: { itemIdentifier: string }[] = [];
   for (const record of event.Records) {
-    // #299 agent-native planning: a terminal coding/decompose-v1 PLANNING task
-    // isn't an orchestration child (it has no orchestration_id — it CREATES the
-    // graph). Detect + handle it BEFORE parseTerminalTaskRecord, which would
-    // return null on it (no orchestration_id) and drop it silently.
-    const decomposeEvt = parseDecomposePlanRecord(record);
-    if (decomposeEvt) {
-      await reconcileDecomposePlan(decomposeEvt);
+    const seq = record.dynamodb?.SequenceNumber;
+    try {
+      // #299 agent-native planning: a terminal coding/decompose-v1 PLANNING task
+      // isn't an orchestration child (it has no orchestration_id — it CREATES the
+      // graph). Detect + handle it BEFORE parseTerminalTaskRecord, which would
+      // return null on it (no orchestration_id) and drop it silently.
+      const decomposeEvt = parseDecomposePlanRecord(record);
+      if (decomposeEvt) {
+        await reconcileDecomposePlan(decomposeEvt);
+        processed += 1;
+        continue;
+      }
+      const evt = parseTerminalTaskRecord(record);
+      if (!evt) continue;
+      // A6 cascade: an iteration/restack task on a node X (NOT a child-row task)
+      // re-stacks X's direct dependents. Routed here, not through child gating.
+      if (evt.cascadeSubIssueId) {
+        await cascadeRestack(evt);
+      } else {
+        await reconcileTerminalChild(evt);
+      }
       processed += 1;
-      continue;
+    } catch (err) {
+      logger.error('Orchestration reconciler record failed — reporting for isolated retry', {
+        sequence_number: seq,
+        event_name: record.eventName,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      // Without a sequence number we can't report the item individually; rethrow
+      // so the batch fails rather than silently dropping a real error.
+      if (!seq) throw err;
+      batchItemFailures.push({ itemIdentifier: seq });
     }
-    const evt = parseTerminalTaskRecord(record);
-    if (!evt) continue;
-    // A6 cascade: an iteration/restack task on a node X (NOT a child-row task)
-    // re-stacks X's direct dependents. Routed here, not through child gating.
-    if (evt.cascadeSubIssueId) {
-      await cascadeRestack(evt);
-    } else {
-      await reconcileTerminalChild(evt);
-    }
-    processed += 1;
   }
   logger.info('Orchestration reconciler batch processed', {
     records: event.Records.length,
     reconciled: processed,
+    failed: batchItemFailures.length,
   });
+  return { batchItemFailures };
 }
 
 function isConditionalCheckFailed(err: unknown): boolean {

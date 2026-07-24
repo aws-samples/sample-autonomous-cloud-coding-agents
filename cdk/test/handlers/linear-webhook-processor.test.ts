@@ -201,6 +201,34 @@ describe('linear-webhook-processor handler', () => {
     expect(createTaskCoreMock).not.toHaveBeenCalled();
   });
 
+  test('DEM-30 (PM-P1-2): a plain ABCA label on an UNMAPPED project NUDGES (was silent), no task', async () => {
+    // The exact DEM-30 case: a just-added base trigger label (`abca`) on an issue
+    // whose project has no mapping. Before, labelFilter defaulted to `bgagent`, so
+    // `abca` failed shouldTrigger and the event fell through SILENTLY — the user
+    // applied an ABCA label and heard nothing. Now it posts an onboarding nudge.
+    ddbSend.mockResolvedValueOnce({ Item: undefined }); // project not mapped
+    const payload = issue();
+    (payload.data as Record<string, unknown>).labels = [{ id: 'lbl-abca', name: 'abca' }];
+    await handler(eventWith(payload));
+    expect(createTaskCoreMock).not.toHaveBeenCalled();
+    expect(reportIssueFailureMock).toHaveBeenCalledTimes(1);
+    const [, issueId, message] = reportIssueFailureMock.mock.calls[0];
+    expect(issueId).toBe('issue-1');
+    expect(String(message)).toMatch(/isn't onboarded|onboard/i);
+  });
+
+  test('DEM-30: an UNRELATED team\'s own label on an unmapped project stays SILENT (no nudge spam)', async () => {
+    // The nudge must NOT fire on labels that don't look like ABCA triggers — a
+    // workspace webhook fires workspace-wide, so nudging every unrelated team's
+    // labelled issue is exactly the spam the trigger gate guards against.
+    ddbSend.mockResolvedValueOnce({ Item: undefined });
+    const payload = issue();
+    (payload.data as Record<string, unknown>).labels = [{ id: 'l-x', name: 'needs-design' }];
+    await handler(eventWith(payload));
+    expect(createTaskCoreMock).not.toHaveBeenCalled();
+    expect(reportIssueFailureMock).not.toHaveBeenCalled();
+  });
+
   test('skips when project mapping is removed', async () => {
     ddbSend.mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'removed' } });
     await handler(eventWith(issue()));

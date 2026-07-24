@@ -336,6 +336,10 @@ describe('applyDecompositionResult — #299 agent-native entry (pre-parsed plan,
     expect(put.pendingKind).toBe('single');
     expect(put.singleTaskDescription).toBe('ABC-1: do the thing\n\nfull body');
     expect(put.nodes).toEqual([]);
+    // PM-P1-1 (2026-07-24): the single-task proposal comment id MUST be persisted
+    // so the approve path can FREEZE it into an "Approved plan" reference instead
+    // of sweeping the whole approval record. (effects mock's postComment → 'comment-1'.)
+    expect(put.proposalCommentId).toBe('comment-1');
   });
 
   test('#299 F-single-gate: :auto decline still auto-runs (opted out of approval)', async () => {

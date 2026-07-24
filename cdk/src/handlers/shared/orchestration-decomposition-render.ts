@@ -467,6 +467,22 @@ export function renderSingleTaskProposal(reasoning: string): string {
 }
 
 /**
+ * PM-P1-1 (2026-07-24): freeze the SINGLE-task proposal comment when it is
+ * APPROVED into a durable "Approved" reference — the single-task analogue of
+ * {@link renderApprovedPlanReference}. Before this, the single-task approve path
+ * swept the whole planning thread with nothing frozen, so Linear kept NO record
+ * of what was proposed/approved (a reviewer couldn't audit the authorized scope
+ * against the PR). Keeps exactly ONE durable line, dropping the now-stale
+ * approve/reject footer. Still ``🗂️``-prefixed so the self-trigger guard skips it.
+ */
+export function renderSingleTaskApprovedReference(reasoning: string): string {
+  return (
+    `${PLAN_PROPOSAL_PREFIX} **Approved** — running as a single task`
+    + `${reasoning ? ` (${reasoning})` : ''}.\n\n_Progress is on the issue below._`
+  );
+}
+
+/**
  * Render the note posted when the planner returned an UNUSABLE plan (couldn't be
  * parsed into a valid breakdown) and we fall back to running the issue as ONE
  * task so the work still happens. Distinct from {@link renderSingleTaskNote}: we

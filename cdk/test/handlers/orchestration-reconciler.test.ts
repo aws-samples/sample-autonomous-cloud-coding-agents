@@ -118,6 +118,8 @@ function taskRecord(fields: {
   trigger_comment_issue_id?: string;
   // #247 UX.5: raw agent error_message (drives the failure-reply detail).
   error_message?: string;
+  // DE-F6: stream sequence number (itemIdentifier for partial-batch reporting).
+  sequenceNumber?: string;
 }): DynamoDBRecord {
   const img: Record<string, unknown> = {};
   if (fields.task_id) img.task_id = { S: fields.task_id };
@@ -142,7 +144,10 @@ function taskRecord(fields: {
   if (Object.keys(cm).length > 0) img.channel_metadata = { M: cm };
   return {
     eventName: fields.eventName ?? 'MODIFY',
-    dynamodb: { NewImage: img as never },
+    dynamodb: {
+      NewImage: img as never,
+      ...(fields.sequenceNumber !== undefined && { SequenceNumber: fields.sequenceNumber }),
+    },
   } as DynamoDBRecord;
 }
 
@@ -753,6 +758,43 @@ describe('orchestration-reconciler handler', () => {
     expect(body).toContain('CloudWatch for task `task-int`');
     // Never leaks raw build output (untrusted repo content).
     expect(body).not.toContain('build_ok');
+  });
+
+  // DE-F6 (2026-07-24): partial-batch failure reporting. A record whose
+  // processing throws must be reported by its sequence number (so only IT
+  // retries), not throw out of the handler (which fails + re-drives the whole
+  // batch, re-reconciling healthy siblings).
+  test('F6: a record that throws is reported in batchItemFailures, not rethrown; a healthy sibling still commits', async () => {
+    // Make every DDB read throw so processing the FIRST record errors. The
+    // second record (no sequence number) is processed after — with the throwing
+    // mock it also errors, but has no seq, so it would rethrow; give BOTH a seq.
+    ddbSend.mockRejectedValue(new Error('DDB throttled'));
+    const rec1 = taskRecord({ task_id: 'TA', status: 'COMPLETED', orchestration_id: 'orch_1', sequenceNumber: 'seq-1' });
+    const rec2 = taskRecord({ task_id: 'TB', status: 'COMPLETED', orchestration_id: 'orch_2', sequenceNumber: 'seq-2' });
+
+    const res = (await handler({ Records: [rec1, rec2] } as never)) as { batchItemFailures: { itemIdentifier: string }[] };
+    // Both failed → both reported; the handler did NOT throw.
+    expect(res.batchItemFailures.map((f) => f.itemIdentifier).sort()).toEqual(['seq-1', 'seq-2']);
+  });
+
+  test('F6: a happy batch returns an empty batchItemFailures (nothing retried)', async () => {
+    mockOrchestration({
+      subIssueId: 'A',
+      children: [
+        { sub_issue_id: 'A', child_status: 'released' },
+        { sub_issue_id: 'B', depends_on: ['A'], child_status: 'blocked' },
+      ],
+    });
+    const res = (await handler({
+      Records: [taskRecord({ task_id: 'TA', status: 'COMPLETED', orchestration_id: 'orch_1', sequenceNumber: 'seq-1' })],
+    } as never)) as { batchItemFailures: { itemIdentifier: string }[] };
+    expect(res.batchItemFailures).toEqual([]);
+  });
+
+  test('F6: a throwing record with NO sequence number rethrows (cannot isolate — fail the batch, never silently drop)', async () => {
+    ddbSend.mockRejectedValue(new Error('DDB throttled'));
+    const rec = taskRecord({ task_id: 'TA', status: 'COMPLETED', orchestration_id: 'orch_1' }); // no sequenceNumber
+    await expect(handler({ Records: [rec] } as never)).rejects.toThrow('DDB throttled');
   });
 });
 

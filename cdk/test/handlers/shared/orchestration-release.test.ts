@@ -395,6 +395,71 @@ describe('releaseChild — idempotency + failure', () => {
     expect(rollback.input.ExpressionAttributeValues![':ready']).toBe('ready');
   });
 
+  // F9 (DE-stress 2026-07-24): a DETERMINISTIC 4xx create failure (guardrail /
+  // validation) must NOT roll back to 'ready' (which loops forever every sweep,
+  // an infinite silent strand) — it must terminally FAIL the child so the epic
+  // settles finished-with-failures.
+  test('F9: guardrail 400 → create_failed_terminal, claim flipped to failed (NOT ready) + reason', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    const createTaskCore = jest.fn().mockResolvedValue({
+      statusCode: 400,
+      body: '{"error":{"message":"Task description was blocked by content policy."}}',
+    });
+    const result = await releaseChild({
+      ddb: ddb as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow(),
+      platformUserId: 'user-1',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+    expect(result.kind).toBe('create_failed_terminal');
+    if (result.kind === 'create_failed_terminal') {
+      expect(result.statusCode).toBe(400);
+      // user-facing, actionable reason (guardrail is the one the user can fix)
+      expect(result.failureReason.toLowerCase()).toContain('content policy');
+    }
+    // claim (call 0) + terminal-fail (call 1): flips to 'failed', not 'ready'
+    expect(ddb.send).toHaveBeenCalledTimes(2);
+    const fail = ddb.send.mock.calls[1][0] as UpdateCommand;
+    expect(fail.input.ConditionExpression).toBe('child_status = :releasing');
+    expect(fail.input.ExpressionAttributeValues![':failed']).toBe('failed');
+    expect(fail.input.ExpressionAttributeValues![':ready']).toBeUndefined();
+    expect(fail.input.ExpressionAttributeValues![':reason']).toContain('content policy');
+  });
+
+  test('F9: a validation 422 is also terminal (deterministic — fails identically forever)', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    const createTaskCore = jest.fn().mockResolvedValue({ statusCode: 422, body: '{"error":{"message":"bad input"}}' });
+    const result = await releaseChild({
+      ddb: ddb as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow(),
+      platformUserId: 'user-1',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+    expect(result.kind).toBe('create_failed_terminal');
+  });
+
+  test('F9: a 429 throttle / 404 un-onboarded stays TRANSIENT (rolls back to ready — operationally fixable)', async () => {
+    for (const statusCode of [429, 404, 408]) {
+      const ddb = { send: jest.fn().mockResolvedValue({}) };
+      const createTaskCore = jest.fn().mockResolvedValue({ statusCode, body: '{"error":{"message":"try later"}}' });
+      const result = await releaseChild({
+        ddb: ddb as never,
+        tableName: 'OrchestrationTable',
+        row: makeRow(),
+        platformUserId: 'user-1',
+        createTaskCore: createTaskCore as never,
+        now: NOW,
+      });
+      expect(result.kind).toBe('create_failed');
+      const rollback = ddb.send.mock.calls[1][0] as UpdateCommand;
+      expect(rollback.input.ExpressionAttributeValues![':ready']).toBe('ready');
+    }
+  });
+
   test('review #3: a racing releaser loses the claim (blocked|ready→releasing) and does NOT create a task', async () => {
     // The core exactly-once guarantee: if the atomic claim fails
     // (ConditionalCheckFailed — another releaser already claimed the row),

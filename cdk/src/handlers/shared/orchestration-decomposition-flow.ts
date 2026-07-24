@@ -223,11 +223,17 @@ export async function applyDecompositionResult(
     // out of approval). Requires the parent's task_description to persist for the
     // approve to run; without it (older caller) fall back to the old auto-run.
     if (!autoRun && singleTaskDescription) {
-      await effects.postComment(parentIssueId, renderSingleTaskProposal(planned.reasoning));
+      // PM-P1-1 (2026-07-24): capture the proposal comment id so the SINGLE-task
+      // approve path can freeze it into a durable "Approved plan" reference
+      // (matching the graph path) instead of sweeping the whole approval record.
+      const singleProposalCommentId = await effects.postComment(
+        parentIssueId, renderSingleTaskProposal(planned.reasoning),
+      );
       const persisted = await effects.putPendingPlan({
         nodes: [],
         pendingKind: 'single',
         singleTaskDescription,
+        ...(singleProposalCommentId !== null && { proposalCommentId: singleProposalCommentId }),
         ...(revisionRound !== undefined && { revisionRound }),
       });
       if (!persisted) {

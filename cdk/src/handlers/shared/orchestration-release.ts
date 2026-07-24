@@ -155,8 +155,62 @@ export interface ReleaseChildParams {
 export type ReleaseChildResult =
   | { readonly kind: 'released'; readonly taskId: string }
   | { readonly kind: 'create_failed'; readonly statusCode: number; readonly body: string }
+  // F9 (DE-stress 2026-07-24): the create failed DETERMINISTICALLY (a 4xx that
+  // will fail identically on every retry — e.g. a guardrail/content-policy block
+  // or a validation error), so the child was marked terminally ``failed`` rather
+  // than rolled back to ``ready``. Distinct from ``create_failed`` (transient,
+  // stays ``ready`` for the next sweep) so the caller settles the epic
+  // finished-with-failures instead of re-attempting a doomed create forever.
+  | { readonly kind: 'create_failed_terminal'; readonly statusCode: number; readonly body: string; readonly failureReason: string }
   | { readonly kind: 'already_released' }
   | { readonly kind: 'error'; readonly message: string };
+
+/**
+ * A {@link ReleaseChildResult} tagged with the child it came from, returned by
+ * {@link releaseReadyChildren} so a caller can correlate a result back to a row
+ * (F9: patch a terminally-failed child into the in-memory view before settling).
+ */
+export type ReleaseChildReadyResult = ReleaseChildResult & { readonly subIssueId: string };
+
+/** HTTP statuses that are TRANSIENT even though they're 4xx — a later sweep can
+ *  succeed, so they roll back to 'ready' rather than terminally failing (F9). */
+const HTTP_REQUEST_TIMEOUT = 408;
+const HTTP_TOO_MANY_REQUESTS = 429;
+const HTTP_FORBIDDEN = 403; // access not yet granted — operationally fixable
+const HTTP_NOT_FOUND = 404; // repo not yet onboarded — operationally fixable
+const HTTP_CLIENT_ERROR_MIN = 400;
+const HTTP_SERVER_ERROR_MIN = 500;
+const TRANSIENT_4XX = new Set([HTTP_REQUEST_TIMEOUT, HTTP_TOO_MANY_REQUESTS, HTTP_FORBIDDEN, HTTP_NOT_FOUND]);
+
+/**
+ * F9: is a create-task HTTP status DETERMINISTIC (retrying it will fail the same
+ * way) vs TRANSIENT (a later retry could succeed)? A guardrail/content-policy
+ * block, a validation error, or a malformed request are 4xx that never change on
+ * replay — re-attempting every sweep is an infinite silent strand. Throttle
+ * (429) / timeout (408) ARE worth retrying, and 404/403 (un-onboarded repo /
+ * access) are treated as transient too: they can be fixed operationally
+ * (onboard the repo, grant access) without re-labelling, so a later sweep should
+ * pick them up rather than terminally failing the child.
+ */
+function isDeterministicCreateFailure(statusCode: number): boolean {
+  if (TRANSIENT_4XX.has(statusCode)) return false;
+  return statusCode >= HTTP_CLIENT_ERROR_MIN && statusCode < HTTP_SERVER_ERROR_MIN;
+}
+
+/**
+ * F9: a short, user-facing reason for a deterministic create failure, shown as
+ * the child's panel ❌ sub-line (the child never got a task, so there's no
+ * error_message to read). Recognises the guardrail/content-policy block — the
+ * one deterministic 4xx a user can actually fix by rewording — and gives a
+ * generic-but-honest line for other validation 4xx.
+ */
+function deterministicFailureReason(statusCode: number, body: string): string {
+  const lower = (body || '').toLowerCase();
+  if (lower.includes('content policy') || lower.includes('guardrail')) {
+    return 'Blocked by content policy — reword this sub-issue and re-apply the label to retry.';
+  }
+  return `Could not start (validation error, HTTP ${statusCode}) — edit this sub-issue and re-apply the label to retry.`;
+}
 
 /** Build the child task description from the sub-issue's identifier/title. */
 function buildChildDescription(row: OrchestrationChildRow): string {
@@ -391,9 +445,22 @@ export async function releaseChild(params: ReleaseChildParams): Promise<ReleaseC
       response_body: result.body,
       idempotency_key: idempotencyKey,
     });
-    // Claim won but the create failed (e.g. transient 5xx, un-onboarded repo) —
-    // roll the claim back to 'ready' so the next reconcile/sweep retries it,
-    // rather than stranding the child in 'releasing'.
+    // F9 (DE-stress 2026-07-24): split deterministic from transient failures.
+    // A deterministic 4xx (guardrail/content-policy block, validation error)
+    // fails identically on every retry — rolling back to 'ready' strands the
+    // child in an infinite silent re-attempt loop (10-min sweep forever, no
+    // terminal state, no ❌, epic stuck 👀). Mark it terminally 'failed' so the
+    // reconcile settles the epic finished-with-failures and the child gets a ❌
+    // + a reason (posted by the caller's terminal path). Only TRANSIENT failures
+    // (5xx / throttle / un-onboarded-repo) roll back to 'ready' for a later retry.
+    if (isDeterministicCreateFailure(result.statusCode)) {
+      const failureReason = deterministicFailureReason(result.statusCode, result.body);
+      await failClaimTerminal(ddb, tableName, row, now, failureReason);
+      return { kind: 'create_failed_terminal', statusCode: result.statusCode, body: result.body, failureReason };
+    }
+    // Claim won but the create failed transiently (5xx, throttle, un-onboarded
+    // repo) — roll the claim back to 'ready' so the next reconcile/sweep retries
+    // it, rather than stranding the child in 'releasing'.
     await rollbackClaim(ddb, tableName, row, now);
     return { kind: 'create_failed', statusCode: result.statusCode, body: result.body };
   }
@@ -495,7 +562,7 @@ export async function releaseReadyChildren(
    * (seed, extend, forward cascade, recovery) omits it → back-compat key.
    */
   retry = false,
-): Promise<readonly ReleaseChildResult[]> {
+): Promise<readonly ReleaseChildReadyResult[]> {
   const all = allChildren ?? rows;
   const branchOf = new Map(
     all.filter((c) => c.child_branch_name).map((c) => [c.sub_issue_id, c.child_branch_name as string]),
@@ -515,7 +582,7 @@ export async function releaseReadyChildren(
       budget: maxToRelease,
     });
   }
-  const results: ReleaseChildResult[] = [];
+  const results: ReleaseChildReadyResult[] = [];
   for (const row of releasable) {
     // Derive the base from this child's predecessors' persisted branches.
     const selection = selectBaseBranch({
@@ -525,7 +592,7 @@ export async function releaseReadyChildren(
       })),
       defaultBranch,
     });
-    results.push(await releaseChild({
+    const childResult = await releaseChild({
       ddb,
       tableName,
       row,
@@ -555,7 +622,12 @@ export async function releaseReadyChildren(
       createTaskCore,
       now,
       retry,
-    }));
+    });
+    // Correlate the result to its child so callers can patch their in-memory
+    // view (F9: a terminally-failed child must be reflected in the settle that
+    // runs right after this release, since no later stream event will re-drive
+    // the reconciler for a child that never became a task).
+    results.push({ ...childResult, subIssueId: row.sub_issue_id });
   }
   return results;
 }
@@ -602,6 +674,49 @@ async function rollbackClaim(
   } catch (err) {
     if (isConditionalCheckFailed(err)) return; // already moved on — fine
     logger.warn('Failed to roll back orchestration child claim (sweep will recover)', {
+      orchestration_id: row.orchestration_id,
+      sub_issue_id: row.sub_issue_id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/**
+ * F9: flip a claimed ('releasing') child to terminal 'failed' after a
+ * DETERMINISTIC create failure (guardrail/validation) so it does NOT re-attempt
+ * forever. Mirrors {@link rollbackClaim} but targets 'failed' instead of 'ready'
+ * — the reconcile/sweep then settles the epic finished-with-failures and posts
+ * the child's ❌. Conditional on still being 'releasing' (don't clobber a
+ * concurrent cancel/skip). Best-effort: a failed write is swept by the
+ * stranded-orchestration reconciler (which will see a 'releasing' row aged out).
+ */
+async function failClaimTerminal(
+  ddb: DynamoDBDocumentClient,
+  tableName: string,
+  row: OrchestrationChildRow,
+  now: string,
+  failureReason: string,
+): Promise<void> {
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: tableName,
+      Key: { orchestration_id: row.orchestration_id, sub_issue_id: row.sub_issue_id },
+      UpdateExpression: 'SET child_status = :failed, failure_reason = :reason, updated_at = :now',
+      ConditionExpression: 'child_status = :releasing',
+      ExpressionAttributeValues: {
+        ':failed': 'failed',
+        ':reason': failureReason,
+        ':releasing': 'releasing',
+        ':now': now,
+      },
+    }));
+    logger.warn('Orchestration child marked terminally failed (deterministic create failure)', {
+      orchestration_id: row.orchestration_id,
+      sub_issue_id: row.sub_issue_id,
+    });
+  } catch (err) {
+    if (isConditionalCheckFailed(err)) return; // already moved on — fine
+    logger.warn('Failed to mark orchestration child terminally failed (sweep will recover)', {
       orchestration_id: row.orchestration_id,
       sub_issue_id: row.sub_issue_id,
       error: err instanceof Error ? err.message : String(err),

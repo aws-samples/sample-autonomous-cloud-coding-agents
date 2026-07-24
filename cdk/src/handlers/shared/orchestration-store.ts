@@ -104,6 +104,16 @@ export interface OrchestrationChildRow {
    * absent when the sub-issue has no own attachments (the common case).
    */
   readonly pre_screened_attachments?: readonly AttachmentRecord[];
+  /**
+   * F9 (DE-stress 2026-07-24): a terminal failure reason recorded when the
+   * child could NOT be turned into a task at all (a deterministic create
+   * failure — guardrail/content-policy block, validation error) so it never
+   * got a ``child_task_id``. The panel's failure-reason resolver falls back to
+   * this string when there's no task to read an ``error_message`` from, so the
+   * child's ❌ carries a "why + how to fix" line instead of a bare ❌. Absent
+   * for the normal case (a released child's reason comes from its task record).
+   */
+  readonly failure_reason?: string;
   readonly created_at: string;
   readonly updated_at: string;
   /** TTL epoch (seconds) for eventual cleanup. */

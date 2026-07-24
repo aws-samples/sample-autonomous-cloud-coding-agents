@@ -63,7 +63,6 @@ import {
 } from './shared/orchestration-decomposition-flow';
 import {
   DEFAULT_LABEL_FILTER as MODE_DEFAULT_LABEL_FILTER,
-  hasDecomposeSuffixLabel,
   hasHelpLabel,
   looksMultiPart,
   parseDecompositionMode,
@@ -90,6 +89,7 @@ import {
   renderReviseNoChangeNote,
   renderReviseUnclearNote,
   renderSingleTaskCancelled,
+  renderSingleTaskApprovedReference,
   renderWrongMentionNudge,
 } from './shared/orchestration-decomposition-render';
 import {
@@ -732,22 +732,21 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   // Moving the label check first means an unlabeled issue is a true no-op:
   // no comment, no reaction, no task creation, no DDB writes.
   if (!shouldTrigger(payload, labelFilter)) {
-    // F-noproject: a decompose/auto SUFFIX label on an issue with NO project won't
-    // match the (bgagent-default) trigger variants, so it fell through here
-    // silently — the user applied an ABCA label and heard nothing. Speak up ONLY
-    // for a just-added decompose/auto suffix on a project-less issue: the suffix
-    // is ABCA-specific + deliberate (unlike the bare base label whose workspace-
-    // wide firing caused the original comment spam this gate guards against), and
-    // ``labelJustPresent`` + no-project keep it a one-shot, not per-edit spam.
-    if (
-      !projectId
-      && hasDecomposeSuffixLabel((issue.labels ?? []).map((l) => l?.name))
-      && labelJustPresent(payload, (name) => {
-        const n = (name ?? '').toLowerCase();
-        return n.endsWith(':decompose') || n.endsWith(':auto');
-      })
-    ) {
-      logger.info('Linear decompose-suffix on a project-less issue — nudging (was a silent drop)', {
+    // F-noproject / DEM-30 (PM-P1-2, 2026-07-24): a just-added label that looks
+    // like an ABCA trigger (the base ``abca``/``bgagent`` or any
+    // ``:decompose``/``:auto``/``:help`` suffix) fell through here SILENTLY when
+    // the project wasn't mapped — because an unmapped project has no configured
+    // ``label_filter``, so it defaults to ``bgagent`` and a plain ``abca`` label
+    // never matches ``shouldTrigger``. The user applied an ABCA label and heard
+    // nothing (live-caught: DEM-30, plain ``abca`` on an unmapped project). Speak
+    // up ONLY for a JUST-ADDED recognized-ABCA label on a project-less OR
+    // unmapped-project issue — ``labelJustPresent`` keeps it a one-shot (never
+    // per-edit / redelivery), and the recognized-grammar check keeps it from
+    // firing on an unrelated team's own labels (the workspace-wide spam this gate
+    // guards against). This is a UX NUDGE, not a trigger — no task is created.
+    const abcaLabelJustAdded = labelJustPresent(payload, looksLikeAbcaTriggerLabel);
+    if (abcaLabelJustAdded && !projectId) {
+      logger.info('Linear ABCA label on a project-less issue — nudging (was a silent drop)', {
         issue_id: issue.id,
       });
       await safeReportIssueFailure(
@@ -755,6 +754,20 @@ export async function handler(event: ProcessorEvent): Promise<void> {
         payload.organizationId,
         "❌ This Linear issue isn't in a project — ABCA needs a Linear project to route the task to a repo. "
         + 'Move the issue into an onboarded project, then re-apply the label.',
+      );
+      return;
+    }
+    if (abcaLabelJustAdded && projectId && !mappingItem) {
+      logger.info('Linear ABCA label on an unmapped project — nudging (was a silent drop, DEM-30)', {
+        issue_id: issue.id,
+        linear_project_id: projectId,
+      });
+      await safeReportIssueFailure(
+        issue.id,
+        payload.organizationId,
+        "❌ This Linear project isn't onboarded to ABCA, so I can't route this to a repo. An admin can "
+        + 'onboard it with `bgagent linear onboard-project <project-uuid> --repo <owner>/<repo> --label '
+        + '<trigger>`, then re-apply the label.',
       );
       return;
     }
@@ -1685,13 +1698,22 @@ async function maybeRetryTerminalEpic(
 
   // Claim-once for THIS retry round so a webhook redelivery doesn't re-reset +
   // re-release + re-note. Keyed on the epic + the current terminal-child
-  // fingerprint (the failed/skipped ids), so a genuine LATER retry (after the
-  // children fail again) is a distinct claim and proceeds, but a redelivery of
-  // the same re-label — where the fingerprint is unchanged — no-ops. Without
-  // this, two deliveries each post a retry note (the duplicate the user saw).
+  // fingerprint, so a genuine LATER retry is a distinct claim and proceeds, but
+  // a redelivery of the same re-label no-ops. Without this, two deliveries each
+  // post a retry note (the duplicate the user saw).
+  //
+  // F3 (DE-stress 2026-07-24): the fingerprint MUST include each failed/skipped
+  // child's current ``child_task_id`` (not just its sub_issue_id). A retry
+  // spawns a NEW task per failed child (the ABCA-659 idempotency salt), so if
+  // that retry FAILS THE SAME WAY, the failed SET is identical — a sub_issue_id-
+  // only fingerprint produces the SAME claim key, and the still-valid 24h claim
+  // silently drops the genuine second retry (live-caught: E4/ABCA-909, a real
+  // 3rd re-label ~15min later was skipped as a "redelivery"). The task ids
+  // change every retry cycle, so keying on them makes each real retry a fresh
+  // claim while a true webhook redelivery (same ids) still collides + no-ops.
   const retryFingerprint = snapshot.children
     .filter((c) => c.child_status === 'failed' || c.child_status === 'skipped')
-    .map((c) => c.sub_issue_id)
+    .map((c) => `${c.sub_issue_id}:${c.child_task_id ?? 'none'}`)
     .sort()
     .join(',');
   const retryClaimKey = `retry:${hashRetryFingerprint(retryFingerprint)}`;
@@ -2694,10 +2716,25 @@ async function handleSingleTaskVerdict(args: {
       buildCreateTaskFailureMessage(result.statusCode, result.body));
     return;
   }
-  // #299 plan-cleanup: the single coding task is dispatched and the agent posts
-  // its own 🤖 progress from here — sweep the transient planning notes (started
-  // ack + single-task proposal) so the thread isn't cluttered by the plan phase.
-  await sweepDecompositionNotes(feedbackCtx, commentedIssueId);
+  // PM-P1-1 (2026-07-24): FREEZE the single-task proposal into a durable
+  // "Approved" reference BEFORE sweeping, so Linear keeps a record of what was
+  // proposed + approved (a reviewer can audit the authorized scope against the
+  // PR) — matching the graph-approve path. Only when we tracked the proposal
+  // comment id (older single-task plans have none → sweep-only, as before).
+  // #299 plan-cleanup: then sweep the transient planning notes (started ack +
+  // any 👋 nudges) so the thread isn't cluttered by the plan phase — passing
+  // the frozen comment id so the sweep KEEPS it.
+  if (taken.proposal_comment_id) {
+    await upsertStatusComment(
+      feedbackCtx,
+      commentedIssueId,
+      renderSingleTaskApprovedReference(''),
+      taken.proposal_comment_id,
+    );
+    await sweepDecompositionNotes(feedbackCtx, commentedIssueId, taken.proposal_comment_id);
+  } else {
+    await sweepDecompositionNotes(feedbackCtx, commentedIssueId);
+  }
   logger.info('Mode B single-task verdict: approved — single task dispatched', { issue_id: commentedIssueId });
 }
 
@@ -3599,6 +3636,25 @@ function shouldTrigger(payload: LinearIssueEvent, labelFilter: string): boolean 
   // which mode it is.
   const variants = new Set(triggerLabelVariants(labelFilter));
   return labelJustPresent(payload, (name) => !!name && variants.has(name.toLowerCase()));
+}
+
+/**
+ * DEM-30 (PM-P1-2): does a label name LOOK like an ABCA trigger, independent of
+ * the project's configured ``label_filter``? Used ONLY for the unmapped/
+ * project-less NUDGE (not for dispatch) — when a project isn't onboarded there's
+ * no configured filter to compare against (it defaults to ``bgagent``), so a
+ * user's plain ``abca`` label would otherwise fall silent. Recognises the two
+ * base names ABCA ships with (``abca``/``bgagent``) plus any of the deliberate
+ * ``:decompose``/``:auto``/``:help`` suffixes on either base. Deliberately narrow
+ * (a specific grammar, not "any label") so it can't fire on an unrelated team's
+ * own labels — the workspace-wide spam the trigger gate guards against.
+ */
+function looksLikeAbcaTriggerLabel(name: string | undefined | null): boolean {
+  const n = (name ?? '').trim().toLowerCase();
+  if (!n) return false;
+  const KNOWN_BASES = ['abca', 'bgagent'];
+  if (KNOWN_BASES.includes(n)) return true;
+  return KNOWN_BASES.some((b) => n === `${b}:decompose` || n === `${b}:auto` || n === `${b}:help`);
 }
 
 /**

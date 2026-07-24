@@ -274,6 +274,21 @@ def setup_repo(config: TaskConfig, progress: Any = None) -> RepoSetup:
 
     # Branch setup
     head_sha_before = ""
+    # #247 F1 (DE-stress 2026-07-24): for a DIAMOND child (2+ predecessors →
+    # base_branch set AND merge_branches non-empty), the server passes the repo
+    # DEFAULT branch as base_branch, but the orchestrator hardcodes the literal
+    # 'main' there (reconciler releaseReadyChildren defaultBranch='main'; there's
+    # no RepoConfig.default_branch server-side). On a fork whose real default is
+    # NOT main (e.g. linear-vercel), branching a diamond off 'main' makes its PR
+    # target main and show the whole default↔main divergence (~119k lines) — the
+    # exact wrong-base class 71a09b13 fixed for roots/linear children but
+    # explicitly DEFERRED for diamonds. Resolve the REAL default here (same
+    # detect_default_branch the root path already uses reliably) and use it for
+    # BOTH the checkout base and the PR base (setup.default_branch below), so the
+    # diamond stacks on the real default and its 1-file delta is reviewable.
+    # Only a diamond overrides; a LINEAR child's base_branch is its predecessor
+    # branch (correct — the PR stacks on it) and must be left untouched.
+    resolved_diamond_base: str | None = None
     if config.is_pr_workflow and config.branch_name:
         log("SETUP", f"Checking out existing PR branch: {branch}")
         fetch_result = run_cmd_with_backoff(
@@ -313,20 +328,37 @@ def setup_repo(config: TaskConfig, progress: Any = None) -> RepoSetup:
             _merge_predecessor_branch(repo_dir, pred_branch, notes)
     elif config.base_branch:
         # #247 A4: stacked child. Branch from the predecessor's branch
-        # (linear) or from main (diamond) so the child sees predecessor
-        # code without waiting for a human merge. fetch the base first —
-        # it is an unmerged sibling branch that the fresh clone may not
+        # (linear) or from the repo default (diamond) so the child sees
+        # predecessor code without waiting for a human merge. fetch the base
+        # first — it is an unmerged sibling branch that the fresh clone may not
         # have locally.
-        log("SETUP", f"Creating branch {branch} from base {config.base_branch}")
+        base_branch = config.base_branch
+        # #247 F1: a diamond (merge_branches set) has base_branch = the server's
+        # 'main' literal, which is wrong for a non-main-default fork. Resolve the
+        # real default and rewrite base_branch to it BEFORE the fetch/checkout so
+        # the diamond stacks on the true default (and setup.default_branch, the PR
+        # base, follows it below). A linear child (no merge_branches) keeps its
+        # predecessor base untouched.
+        if config.merge_branches:
+            detected = detect_default_branch(config.repo_url, repo_dir)
+            if detected != base_branch:
+                log(
+                    "SETUP",
+                    f"Diamond base: server passed '{base_branch}', using detected "
+                    f"repo default '{detected}' instead (F1 wrong-base guard)",
+                )
+                base_branch = detected
+            resolved_diamond_base = base_branch
+        log("SETUP", f"Creating branch {branch} from base {base_branch}")
         fetch_res = run_cmd(
-            ["git", "fetch", "origin", config.base_branch],
+            ["git", "fetch", "origin", base_branch],
             label="fetch-base-branch",
             cwd=repo_dir,
             check=False,
         )
         if fetch_res.returncode == 0:
             run_cmd(
-                ["git", "checkout", "-b", branch, f"origin/{config.base_branch}"],
+                ["git", "checkout", "-b", branch, f"origin/{base_branch}"],
                 label="create-branch-from-base",
                 cwd=repo_dir,
             )
@@ -336,9 +368,7 @@ def setup_repo(config: TaskConfig, progress: Any = None) -> RepoSetup:
             # back to a normal branch off the current HEAD so the child
             # still runs rather than failing setup; the predecessor's code
             # is likely in the default branch by now anyway.
-            notes.append(
-                f"base branch '{config.base_branch}' not fetchable; branched off default instead"
-            )
+            notes.append(f"base branch '{base_branch}' not fetchable; branched off default instead")
             log("SETUP", f"Base branch not found; creating {branch} off HEAD")
             run_cmd(["git", "checkout", "-b", branch], label="create-branch", cwd=repo_dir)
 
@@ -564,9 +594,16 @@ def setup_repo(config: TaskConfig, progress: Any = None) -> RepoSetup:
     # Detect default branch (used as the PR base + the commit-diff range).
     # - PR tasks: base_branch from the orchestrator (the PR's real base).
     # - #247 A4 stacked children: base_branch is the predecessor's branch
-    #   (linear) or main (diamond) — the child's PR targets it.
+    #   (linear) — the child's PR targets it.
+    # - #247 F1 diamond children: base_branch was the server's 'main' literal;
+    #   we resolved the REAL repo default above (resolved_diamond_base) so the
+    #   PR targets it, not stale main.
     # - Otherwise: detect the repo default (main/master).
-    default_branch = config.base_branch or detect_default_branch(config.repo_url, repo_dir)
+    default_branch = (
+        resolved_diamond_base
+        or config.base_branch
+        or detect_default_branch(config.repo_url, repo_dir)
+    )
 
     # Install prepare-commit-msg hook for code attribution
     _install_commit_hook(repo_dir)
