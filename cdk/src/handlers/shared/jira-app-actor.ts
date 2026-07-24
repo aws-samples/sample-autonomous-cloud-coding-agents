@@ -19,10 +19,25 @@
 
 import * as crypto from 'crypto';
 import { logger } from './logger';
+import sharedConstants from '../../../../contracts/constants.json';
 
 const REQUEST_TIMEOUT_MS = 5000;
-const FORGE_WEBTRIGGER_SUFFIX = '.webtrigger.atlassian.app';
-export const JIRA_APP_ACTOR_MIN_SECRET_LENGTH = 32;
+const FORGE_WEBTRIGGER_SUFFIX = sharedConstants.jira_app_actor.forge_webtrigger_suffix;
+export const JIRA_APP_ACTOR_MIN_SECRET_LENGTH = sharedConstants.jira_app_actor.min_secret_length;
+const PROXY_ERROR_CODES = new Set([
+  'cloud_id_required',
+  'invalid_comment_request',
+  'invalid_issue_key',
+  'invalid_json',
+  'invalid_payload',
+  'invalid_signature',
+  'invalid_transition_request',
+  'jira_request_failed',
+  'method_not_allowed',
+  'payload_too_large',
+  'proxy_not_configured',
+  'unsupported_operation',
+]);
 
 export interface JiraAppActorConfig {
   readonly proxyUrl: string;
@@ -40,7 +55,23 @@ export interface JiraAppActorRequest {
 
 export type JiraAppActorResult =
   | { readonly ok: true; readonly status: number; readonly body: string }
-  | { readonly ok: false; readonly status?: number; readonly retryable: boolean };
+  | {
+    readonly ok: false;
+    readonly status?: number;
+    readonly retryable: boolean;
+    readonly errorCode?: string;
+  };
+
+function proxyErrorCode(body: string): string | undefined {
+  try {
+    const value = JSON.parse(body) as unknown;
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+    const error = (value as { error?: unknown }).error;
+    return typeof error === 'string' && PROXY_ERROR_CODES.has(error) ? error : undefined;
+  } catch {
+    return undefined; // nosemgrep: ts-silent-success-masking -- invalid proxy bodies have no code
+  }
+}
 
 export function validateJiraAppActorProxyUrl(value: string): string | null {
   try {
@@ -81,6 +112,7 @@ export async function requestJiraAppActor(
   const proxyUrl = validateJiraAppActorProxyUrl(config.proxyUrl);
   if (!proxyUrl || config.sharedSecret.length < JIRA_APP_ACTOR_MIN_SECRET_LENGTH) {
     logger.error('Jira app-actor configuration is invalid; refusing OAuth fallback', {
+      error_id: 'JIRA_APP_ACTOR_CONFIG_INVALID',
       proxy_url_valid: Boolean(proxyUrl),
       shared_secret_valid: config.sharedSecret.length >= JIRA_APP_ACTOR_MIN_SECRET_LENGTH,
     });
@@ -106,17 +138,29 @@ export async function requestJiraAppActor(
     if (result.ok) {
       return { ok: true, status: result.status, body: responseBody };
     }
-    const retryable = result.status === 429 || result.status >= 500;
-    logger.warn('Jira app-actor proxy returned non-2xx', {
+    const errorCode = proxyErrorCode(responseBody);
+    const retryable = errorCode !== 'proxy_not_configured'
+      && (result.status === 429 || result.status >= 500);
+    const details = {
+      error_id: retryable
+        ? 'JIRA_APP_ACTOR_PROXY_TRANSIENT'
+        : 'JIRA_APP_ACTOR_PROXY_REJECTED',
       status: result.status,
       retryable,
       operation: request.operation,
       jira_cloud_id: request.cloud_id,
       issue_key: request.issue_key,
-    });
-    return { ok: false, status: result.status, retryable };
+      proxy_error_code: errorCode,
+    };
+    if (retryable) {
+      logger.warn('Jira app-actor proxy returned retryable non-2xx', details);
+    } else {
+      logger.error('Jira app-actor proxy rejected request', details);
+    }
+    return { ok: false, status: result.status, retryable, errorCode };
   } catch (err) {
     logger.warn('Jira app-actor proxy request failed', {
+      error_id: 'JIRA_APP_ACTOR_PROXY_NETWORK',
       operation: request.operation,
       jira_cloud_id: request.cloud_id,
       issue_key: request.issue_key,

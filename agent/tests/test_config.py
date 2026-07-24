@@ -9,6 +9,7 @@ import pytest
 from config import (
     PR_WORKFLOW_IDS,
     build_config,
+    clear_jira_task_credentials,
     resolve_jira_oauth_token,
     resolve_linear_api_token,
 )
@@ -549,6 +550,25 @@ class TestResolveJiraOauthToken:
             assert resolve_jira_oauth_token() == ""
             mock_boto.assert_not_called()
 
+    def test_clear_jira_task_credentials_removes_oauth_and_app_actor_values(
+        self,
+        monkeypatch,
+    ):
+        for name in (
+            "JIRA_API_TOKEN",
+            "JIRA_APP_ACTOR_CONFIGURED",
+            "JIRA_APP_ACTOR_PROXY_URL",
+            "JIRA_APP_ACTOR_SHARED_SECRET",
+        ):
+            monkeypatch.setenv(name, "stale")
+
+        clear_jira_task_credentials()
+
+        assert "JIRA_API_TOKEN" not in os.environ
+        assert "JIRA_APP_ACTOR_CONFIGURED" not in os.environ
+        assert "JIRA_APP_ACTOR_PROXY_URL" not in os.environ
+        assert "JIRA_APP_ACTOR_SHARED_SECRET" not in os.environ
+
     def test_metadata_bound_task_clears_stale_app_actor_when_secret_arn_missing(
         self,
         monkeypatch,
@@ -692,6 +712,21 @@ class TestResolveJiraOauthToken:
         )
         with patch("boto3.client", return_value=mock_sm):
             assert resolve_jira_oauth_token({"jira_oauth_secret_arn": "arn:test"}) == ""
+
+    @pytest.mark.parametrize("payload", [[], 5, "scalar", True])
+    def test_returns_empty_on_valid_non_object_secret_json(self, monkeypatch, payload):
+        """Valid JSON scalars/lists must not escape as AttributeError."""
+        import json
+
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        mock_sm = MagicMock()
+        mock_sm.get_secret_value.return_value = {"SecretString": json.dumps(payload)}
+
+        with patch("boto3.client", return_value=mock_sm):
+            assert resolve_jira_oauth_token({"jira_oauth_secret_arn": "arn:non-object"}) == ""
+
+        assert "JIRA_API_TOKEN" not in os.environ
+        assert "JIRA_APP_ACTOR_CONFIGURED" not in os.environ
 
     def test_falls_back_to_env_var_when_channel_metadata_omits_arn(self, monkeypatch):
         """JIRA_OAUTH_SECRET_ARN env var is the back-compat fallback."""

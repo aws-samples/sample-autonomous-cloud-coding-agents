@@ -20,6 +20,10 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import {
+  FORGE_WEBTRIGGER_SUFFIX,
+  JIRA_APP_ACTOR_MIN_SECRET_LENGTH,
+} from '../src/jira-app-actor';
+import {
   APPROVAL_TIMEOUT_S_DEFAULT,
   APPROVAL_TIMEOUT_S_MAX,
   APPROVAL_TIMEOUT_S_MIN,
@@ -48,6 +52,7 @@ describe('CLI constants parity with contracts/constants.json', () => {
   ) as {
     approval_timeout_s: { min: number; max: number; default: number };
     max_budget_usd: { min: number; max: number };
+    jira_app_actor: { min_secret_length: number; forge_webtrigger_suffix: string };
   };
 
   test('approval_timeout_s bounds match the contract', () => {
@@ -59,5 +64,14 @@ describe('CLI constants parity with contracts/constants.json', () => {
   test('max_budget_usd bounds match the contract', () => {
     expect(MAX_BUDGET_USD_MIN).toBe(contracts.max_budget_usd.min);
     expect(MAX_BUDGET_USD_MAX).toBe(contracts.max_budget_usd.max);
+  });
+
+  test('Jira app-actor constraints match the contract', () => {
+    expect(JIRA_APP_ACTOR_MIN_SECRET_LENGTH).toBe(
+      contracts.jira_app_actor.min_secret_length,
+    );
+    expect(FORGE_WEBTRIGGER_SUFFIX).toBe(
+      contracts.jira_app_actor.forge_webtrigger_suffix,
+    );
   });
 });

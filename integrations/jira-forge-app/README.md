@@ -57,6 +57,15 @@ clock window and allows only identity, comment, read-transition, and transition
 operations. Jira calls use `api.asApp()`, so their actor is the installed
 `bgagent` app rather than the 3LO setup user.
 
+The handler rejects bodies larger than 256 KiB before computing the HMAC. The
+timestamp freshness check has no nonce store, so an intercepted signed request
+could be replayed within the five-minute window; TLS, the installation-specific
+URL, and the narrow operation allowlist bound that residual risk. The signed
+`cloud_id` is request metadata, not the tenant trust boundary: the Forge
+installation URL selects the Jira site, and `bgagent jira app-setup` proves that
+site by comparing the app identity probe with the registered tenant before it
+saves the URL.
+
 Verify the installation with:
 
 ```bash

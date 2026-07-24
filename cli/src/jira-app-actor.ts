@@ -21,7 +21,7 @@ import * as crypto from 'crypto';
 import { CliError } from './errors';
 
 const REQUEST_TIMEOUT_MS = 5000;
-const FORGE_WEBTRIGGER_SUFFIX = '.webtrigger.atlassian.app';
+export const FORGE_WEBTRIGGER_SUFFIX = '.webtrigger.atlassian.app';
 export const JIRA_APP_ACTOR_MIN_SECRET_LENGTH = 32;
 
 export interface JiraAppActorIdentity {

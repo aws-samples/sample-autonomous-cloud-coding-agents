@@ -43,6 +43,10 @@ function jiraResponse(status, body) {
 
 function event(payload, overrides = {}) {
   const body = JSON.stringify(payload);
+  return rawEvent(body, overrides);
+}
+
+function rawEvent(body, overrides = {}) {
   const timestamp = String(NOW);
   return {
     method: 'POST',
@@ -103,6 +107,42 @@ test('rejects invalid and stale signatures before Jira is called', async () => {
   assert.equal(calls, 0);
 });
 
+test('rejects missing, malformed, unsafe, and correctly-shaped wrong signatures', async () => {
+  let calls = 0;
+  const invoke = handler(async () => {
+    calls += 1;
+    return jiraResponse(200, '{}');
+  });
+  const payload = { version: 1, operation: 'identity', cloud_id: 'cloud-1' };
+
+  const cases = [
+    { headers: {} },
+    {
+      headers: {
+        'X-Bgagent-Timestamp': ['not-a-number'],
+        'X-Bgagent-Signature': [`sha256=${'0'.repeat(64)}`],
+      },
+    },
+    {
+      headers: {
+        'X-Bgagent-Timestamp': ['9007199254740992'],
+        'X-Bgagent-Signature': [`sha256=${'0'.repeat(64)}`],
+      },
+    },
+    {
+      headers: {
+        'X-Bgagent-Timestamp': [String(NOW)],
+        'X-Bgagent-Signature': [`sha256=${'0'.repeat(64)}`],
+      },
+    },
+  ];
+
+  for (const overrides of cases) {
+    assert.equal((await invoke(event(payload, overrides))).statusCode, 401);
+  }
+  assert.equal(calls, 0);
+});
+
 test('allows only the explicit operation set', async () => {
   const invoke = handler(async () => jiraResponse(200, '{}'));
   const result = await invoke(event({
@@ -112,6 +152,94 @@ test('allows only the explicit operation set', async () => {
   }));
   assert.equal(result.statusCode, 400);
   assert.match(result.body, /unsupported_operation/);
+});
+
+test('rejects traversal issue keys and missing comment bodies', async () => {
+  let calls = 0;
+  const invoke = handler(async () => {
+    calls += 1;
+    return jiraResponse(200, '{}');
+  });
+  const traversal = await invoke(event({
+    version: 1,
+    operation: 'comment',
+    cloud_id: 'cloud-1',
+    issue_key: '../../evil-1',
+    body: { type: 'doc' },
+  }));
+  const missingBody = await invoke(event({
+    version: 1,
+    operation: 'comment',
+    cloud_id: 'cloud-1',
+    issue_key: 'ENG-42',
+  }));
+
+  assert.equal(traversal.statusCode, 400);
+  assert.match(traversal.body, /invalid_comment_request/);
+  assert.equal(missingBody.statusCode, 400);
+  assert.match(missingBody.body, /invalid_comment_request/);
+  assert.equal(calls, 0);
+});
+
+test('rejects oversized bodies before signature verification', async () => {
+  let calls = 0;
+  const invoke = handler(async () => {
+    calls += 1;
+    return jiraResponse(200, '{}');
+  });
+  const result = await invoke({
+    method: 'POST',
+    body: 'x'.repeat((256 * 1024) + 1),
+    headers: {},
+  });
+
+  assert.equal(result.statusCode, 413);
+  assert.match(result.body, /payload_too_large/);
+  assert.equal(calls, 0);
+});
+
+test('returns explicit status codes for missing config and Jira request failures', async () => {
+  const notConfigured = createProxyHandler({
+    requestJira: async () => jiraResponse(200, '{}'),
+    route,
+    secretProvider: () => 'short',
+    nowProvider: () => NOW,
+  });
+  const configResult = await notConfigured(event({
+    version: 1,
+    operation: 'identity',
+    cloud_id: 'cloud-1',
+  }));
+  assert.equal(configResult.statusCode, 503);
+  assert.match(configResult.body, /proxy_not_configured/);
+
+  const failed = handler(async () => {
+    throw new Error('Jira unavailable');
+  });
+  const jiraResult = await failed(event({
+    version: 1,
+    operation: 'identity',
+    cloud_id: 'cloud-1',
+  }));
+  assert.equal(jiraResult.statusCode, 502);
+  assert.match(jiraResult.body, /jira_request_failed/);
+});
+
+test('rejects unsupported methods and malformed JSON without calling Jira', async () => {
+  let calls = 0;
+  const invoke = handler(async () => {
+    calls += 1;
+    return jiraResponse(200, '{}');
+  });
+  const wrongMethod = event(
+    { version: 1, operation: 'identity', cloud_id: 'cloud-1' },
+    { method: 'GET' },
+  );
+  const malformed = rawEvent('{');
+
+  assert.equal((await invoke(wrongMethod)).statusCode, 405);
+  assert.equal((await invoke(malformed)).statusCode, 400);
+  assert.equal(calls, 0);
 });
 
 test('returns the app identity used by api.asApp', async () => {

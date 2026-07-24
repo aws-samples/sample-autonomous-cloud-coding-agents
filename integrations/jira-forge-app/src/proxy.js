@@ -22,6 +22,7 @@ import crypto from 'node:crypto';
 
 const MAX_BODY_BYTES = 256 * 1024;
 const MAX_CLOCK_SKEW_SECONDS = 5 * 60;
+const APP_ACTOR_MIN_SECRET_LENGTH = 32;
 const ISSUE_KEY_RE = /^[A-Za-z][A-Za-z0-9_]*-\d+$/;
 const TRANSITION_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 
@@ -48,7 +49,7 @@ export function computeSignature(secret, timestamp, body) {
 }
 
 function authenticRequest(event, secret, nowSeconds) {
-  if (!secret || secret.length < 32) return false;
+  if (!secret || secret.length < APP_ACTOR_MIN_SECRET_LENGTH) return false;
   const timestamp = headerValue(event.headers, 'x-bgagent-timestamp');
   const supplied = headerValue(event.headers, 'x-bgagent-signature');
   if (!timestamp || !supplied || !/^\d+$/.test(timestamp)) return false;
@@ -68,9 +69,6 @@ function authenticRequest(event, secret, nowSeconds) {
 function parsePayload(event) {
   if (event.method !== 'POST') return { error: response(405, { error: 'method_not_allowed' }) };
   const body = event.body ?? '';
-  if (Buffer.byteLength(body, 'utf8') > MAX_BODY_BYTES) {
-    return { error: response(413, { error: 'payload_too_large' }) };
-  }
   try {
     const value = JSON.parse(body);
     if (!value || typeof value !== 'object' || value.version !== 1) {
@@ -111,9 +109,15 @@ export function createProxyHandler({
 }) {
   return async function proxyHandler(event) {
     const secret = secretProvider();
-    if (!secret || secret.length < 32) {
-      console.error('BGAGENT_PROXY_SECRET is missing or shorter than 32 characters');
+    if (!secret || secret.length < APP_ACTOR_MIN_SECRET_LENGTH) {
+      console.error(
+        `BGAGENT_PROXY_SECRET is missing or shorter than ${APP_ACTOR_MIN_SECRET_LENGTH} characters`,
+      );
       return response(503, { error: 'proxy_not_configured' });
+    }
+    const rawBody = event.body ?? '';
+    if (Buffer.byteLength(rawBody, 'utf8') > MAX_BODY_BYTES) {
+      return response(413, { error: 'payload_too_large' });
     }
     if (!authenticRequest(event, secret, nowProvider())) {
       return response(401, { error: 'invalid_signature' });
@@ -139,7 +143,12 @@ export function createProxyHandler({
           return identityResponse(identityResult, serverInfoResult);
         }
         case 'comment':
-          if (!ISSUE_KEY_RE.test(payload.issue_key ?? '') || !payload.body) {
+          if (
+            !ISSUE_KEY_RE.test(payload.issue_key ?? '')
+            || !payload.body
+            || typeof payload.body !== 'object'
+            || Array.isArray(payload.body)
+          ) {
             return response(400, { error: 'invalid_comment_request' });
           }
           return jiraResponse(await requestJira(

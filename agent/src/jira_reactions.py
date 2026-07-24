@@ -51,14 +51,16 @@ from urllib.parse import quote, urlparse
 
 import requests
 
+from shared_constants import SHARED_CONSTANTS
 from shell import log
 
 #: Atlassian cross-region REST base. The ``{cloudId}`` segment scopes the
 #: call to the tenant; ``JIRA_API_TOKEN`` (populated by
 #: ``config.resolve_jira_oauth_token``) authorizes it.
 JIRA_API_BASE = "https://api.atlassian.com/ex/jira"
-FORGE_WEBTRIGGER_SUFFIX = ".webtrigger.atlassian.app"
-APP_ACTOR_MIN_SECRET_LENGTH = 32
+_JIRA_APP_ACTOR_CONSTANTS = SHARED_CONSTANTS["jira_app_actor"]
+FORGE_WEBTRIGGER_SUFFIX = str(_JIRA_APP_ACTOR_CONSTANTS["forge_webtrigger_suffix"])
+APP_ACTOR_MIN_SECRET_LENGTH = int(_JIRA_APP_ACTOR_CONSTANTS["min_secret_length"])
 
 #: Request timeout — comments are fire-and-forget status UX; never block the
 #: task pipeline for more than a couple of seconds.
@@ -72,6 +74,22 @@ _AUTH_FAILURE_THRESHOLD = 3
 _consecutive_auth_failures: int = 0
 _auth_circuit_open: bool = False
 _auth_state_lock = threading.Lock()
+_PROXY_ERROR_CODES = frozenset(
+    {
+        "cloud_id_required",
+        "invalid_comment_request",
+        "invalid_issue_key",
+        "invalid_json",
+        "invalid_payload",
+        "invalid_signature",
+        "invalid_transition_request",
+        "jira_request_failed",
+        "method_not_allowed",
+        "payload_too_large",
+        "proxy_not_configured",
+        "unsupported_operation",
+    }
+)
 
 
 def _circuit_open() -> bool:
@@ -104,7 +122,8 @@ def _note_auth_status(status_code: int) -> None:
                 "ERROR",
                 "jira_reactions: auth circuit OPEN after "
                 f"{failures} consecutive {status_code}s — Jira outbound credential "
-                "or app permission is invalid. Suppressing further "
+                "or app permission is invalid. For Forge app writes, verify "
+                "BGAGENT_PROXY_SECRET matches JIRA_APP_ACTOR_SHARED_SECRET. Suppressing further "
                 "Jira calls for this container.",
             )
         else:
@@ -215,7 +234,7 @@ def _app_actor_request(
         hashlib.sha256,
     ).hexdigest()
     try:
-        return requests.post(
+        response = requests.post(
             proxy_url,
             data=raw_body.encode(),
             headers={
@@ -225,6 +244,25 @@ def _app_actor_request(
             },
             timeout=REQUEST_TIMEOUT_SECONDS,
         )
+        if not HTTPStatus.OK <= response.status_code < HTTPStatus.MULTIPLE_CHOICES:
+            proxy_error = _proxy_error_code(response.text)
+            non_retryable = (
+                response.status_code < HTTPStatus.INTERNAL_SERVER_ERROR
+                or proxy_error == "proxy_not_configured"
+            )
+            level = "ERROR" if non_retryable else "WARN"
+            error_id = (
+                "JIRA_APP_ACTOR_PROXY_REJECTED"
+                if non_retryable
+                else "JIRA_APP_ACTOR_PROXY_TRANSIENT"
+            )
+            log(
+                level,
+                f"jira_reactions: Forge app proxy returned HTTP {response.status_code} "
+                f"error_id={error_id} operation={operation} "
+                f"proxy_error={proxy_error or 'unclassified'}",
+            )
+        return response
     except requests.RequestException as e:
         log(
             "WARN",
@@ -232,6 +270,18 @@ def _app_actor_request(
         )
         # nosemgrep: py-silent-success-masking -- Jira writes are advisory on network blips
         return None
+
+
+def _proxy_error_code(raw_body: str) -> str | None:
+    """Return a known proxy error code without logging arbitrary response text."""
+    try:
+        payload = json.loads(raw_body)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    value = payload.get("error")
+    return value if isinstance(value, str) and value in _PROXY_ERROR_CODES else None
 
 
 def _post_comment(cloud_id: str, issue_key: str, text: str) -> bool:

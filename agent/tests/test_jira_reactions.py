@@ -138,6 +138,24 @@ class TestStartComment:
             comment_task_started("jira", JIRA_META)
         post.assert_not_called()
 
+    def test_logs_bounded_proxy_error_code_for_permanent_failure(self, monkeypatch, capfd):
+        monkeypatch.setenv("JIRA_APP_ACTOR_CONFIGURED", "1")
+        monkeypatch.setenv(
+            "JIRA_APP_ACTOR_PROXY_URL",
+            "https://install.webtrigger.atlassian.app/public/trigger",
+        )
+        monkeypatch.setenv("JIRA_APP_ACTOR_SHARED_SECRET", "s" * 64)
+        with patch(
+            "jira_reactions.requests.post",
+            return_value=_resp(401, '{"error":"invalid_signature","detail":"do-not-log"}'),
+        ):
+            comment_task_started("jira", JIRA_META)
+
+        output = capfd.readouterr().out
+        assert "error_id=JIRA_APP_ACTOR_PROXY_REJECTED" in output
+        assert "proxy_error=invalid_signature" in output
+        assert "do-not-log" not in output
+
     def test_posts_adf_comment_to_correct_url(self, monkeypatch):
         monkeypatch.setenv("JIRA_API_TOKEN", "jira_at")
         with patch("jira_reactions.requests.post", return_value=_resp(201)) as post:
@@ -211,6 +229,23 @@ class TestAuthCircuitBreaker:
             comment_task_started("jira", JIRA_META)  # 401, count back to 1
             assert post.call_count == 4
             assert jira_reactions._auth_circuit_open is False
+
+    def test_open_message_calls_out_forge_secret_drift(self, monkeypatch, capfd):
+        monkeypatch.setenv("JIRA_APP_ACTOR_CONFIGURED", "1")
+        monkeypatch.setenv(
+            "JIRA_APP_ACTOR_PROXY_URL",
+            "https://install.webtrigger.atlassian.app/public/trigger",
+        )
+        monkeypatch.setenv("JIRA_APP_ACTOR_SHARED_SECRET", "s" * 64)
+        with patch(
+            "jira_reactions.requests.post",
+            return_value=_resp(401, '{"error":"invalid_signature"}'),
+        ):
+            for _ in range(jira_reactions._AUTH_FAILURE_THRESHOLD):
+                comment_task_started("jira", JIRA_META)
+
+        output = capfd.readouterr().out
+        assert "BGAGENT_PROXY_SECRET matches JIRA_APP_ACTOR_SHARED_SECRET" in output
 
 
 class TestTransitionChannelGate:

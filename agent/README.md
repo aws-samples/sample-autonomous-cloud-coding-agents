@@ -129,6 +129,10 @@ The `run.sh` script overrides the container's default CMD to run `python /app/sr
 | `JIRA_APP_ACTOR_SHARED_SECRET` | No | | Resolved per-task from the Jira tenant secret. HMAC key for the Forge proxy; redacted from agent diagnostics. |
 | `JIRA_API_TOKEN` | No | | Legacy per-task Jira 3LO token. Used for outbound writes only when no app actor is configured. |
 
+`run_task` removes all Jira credential variables before every invocation,
+including non-Jira tasks, so a warm AgentCore process cannot expose one
+tenant's OAuth or Forge credential to the next task.
+
 **Bedrock model access (main model):** Configuring `ANTHROPIC_MODEL` and IAM credentials is not enough. Your AWS account must be able to **invoke** that model in Amazon Bedrock: follow [Request access to models](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) (Marketplace permissions on first use, Anthropic first-time use where required, valid payment method for Marketplace-backed models). Use an inference profile ID such as `us.anthropic.claude-sonnet-4-6` when Bedrock requires it. If the CLI stops with a message that the model is not available on your Bedrock deployment, fix model access in the console or switch `ANTHROPIC_MODEL` to an entitled profile, then retry.
 
 **Pre-flight check model**: Claude Code runs a quick safety verification using a small Haiku model before executing each tool command. On Bedrock, the default Haiku model ID may not be enabled in your account, causing the check to time out with *"Pre-flight check is taking longer than expected"* warnings. The agent sets `ANTHROPIC_DEFAULT_HAIKU_MODEL` to a known-available Bedrock Haiku model ID to avoid this. If you see pre-flight timeout warnings, verify that this model is enabled in your Bedrock model access settings.

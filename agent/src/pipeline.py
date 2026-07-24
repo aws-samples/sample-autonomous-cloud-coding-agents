@@ -18,6 +18,7 @@ from channel_mcp import configure_channel_mcp
 from config import (
     AGENT_WORKSPACE,
     build_config,
+    clear_jira_task_credentials,
     get_config,
     resolve_jira_oauth_token,
     resolve_linear_api_token,
@@ -639,6 +640,11 @@ def run_task(
     from opentelemetry.trace import StatusCode
 
     from repo import setup_repo
+
+    # AgentCore can reuse this process for another task. Scrub every Jira
+    # credential before config or repository code runs, including for non-Jira
+    # tasks, so a prior tenant's long-lived Forge secret cannot cross tasks.
+    clear_jira_task_credentials()
 
     # Build config
     config = build_config(

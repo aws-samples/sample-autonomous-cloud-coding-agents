@@ -19,9 +19,11 @@ the contract. This is the neutral location both runtimes read.
 
 | Caller | Path | Phase |
 |---|---|---|
-| `agent/src/policy.py` | `/app/contracts/constants.json` | import-time |
-| `cdk/src/handlers/shared/types.ts` | `../../../../contracts/constants.json` | synth-time `import` |
+| `agent/src/shared_constants.py` | `/app/contracts/constants.json` | import-time |
+| `agent/src/policy.py`, `agent/src/jira_reactions.py` | `SHARED_CONSTANTS` | import-time |
+| `cdk/src/handlers/shared/types.ts`, `jira-app-actor.ts` | `../../../../contracts/constants.json` | synth-time `import` |
 | `cdk/src/constructs/blueprint.ts` | re-exports from `types.ts` | synth-time |
+| `cli/test/constants-parity.test.ts` | package-safe literal parity | test-time |
 
 The agent reads at runtime via `Path(__file__) / "../../contracts/..."`
 in dev / `/app/contracts/...` in the deployed image (the Dockerfile
@@ -45,6 +47,10 @@ JSON at TypeScript compile time via `resolveJsonModule`.
   "max_budget_usd": {
     "min": 0.01,
     "max": 100
+  },
+  "jira_app_actor": {
+    "min_secret_length": 32,
+    "forge_webtrigger_suffix": ".webtrigger.atlassian.app"
   }
 }
 ```
@@ -71,6 +77,16 @@ JSON at TypeScript compile time via `resolveJsonModule`.
   `bgagent submit --max-budget` (#258).
 - **`max_budget_usd.max`** — ceiling for `max_budget_usd` ($100). Same
   two consumers as `min`.
+- **`jira_app_actor.min_secret_length`** — minimum HMAC shared-secret length
+  accepted by the agent, CDK, and CLI Jira app-actor clients.
+- **`jira_app_actor.forge_webtrigger_suffix`** — hostname suffix required by
+  app-actor proxy URL validation to prevent operator-supplied SSRF targets.
+
+The published CLI package contains only `lib/`, so it cannot load the repository
+contract at runtime. It mirrors these values as literals and
+`cli/test/constants-parity.test.ts` makes drift a CI failure. The standalone
+Forge app is deployed outside the workspaces; it keeps a named copy of the
+minimum length in `proxy.js`.
 
 ## Adding new constants
 

@@ -330,6 +330,20 @@ def resolve_linear_api_token(channel_metadata: dict[str, str] | None = None) -> 
     return access
 
 
+_JIRA_TASK_CREDENTIAL_ENV_VARS = (
+    "JIRA_API_TOKEN",
+    "JIRA_APP_ACTOR_CONFIGURED",
+    "JIRA_APP_ACTOR_PROXY_URL",
+    "JIRA_APP_ACTOR_SHARED_SECRET",
+)
+
+
+def clear_jira_task_credentials() -> None:
+    """Remove Jira credentials left by an earlier task in this process."""
+    for name in _JIRA_TASK_CREDENTIAL_ENV_VARS:
+        os.environ.pop(name, None)
+
+
 def resolve_jira_oauth_token(channel_metadata: dict[str, str] | None = None) -> str:
     """Resolve Jira outbound credentials from Secrets Manager.
 
@@ -360,9 +374,6 @@ def resolve_jira_oauth_token(channel_metadata: dict[str, str] | None = None) -> 
     session, so in practice the agent reads a freshly-written token with a
     full lifetime ahead of it.
 
-    For local development, a pre-set ``JIRA_API_TOKEN`` without a secret ARN
-    short-circuits the lookup so the agent can run outside the runtime.
-
     This function is only called when ``channel_source == 'jira'``.
     """
     secret_arn = ""
@@ -378,10 +389,7 @@ def resolve_jira_oauth_token(channel_metadata: dict[str, str] | None = None) -> 
     # credentials before resolving a metadata-bound task so a missing ARN or
     # failed SM read cannot reuse another tenant's token or proxy secret.
     if channel_metadata is not None or secret_arn:
-        os.environ.pop("JIRA_API_TOKEN", None)
-        os.environ.pop("JIRA_APP_ACTOR_CONFIGURED", None)
-        os.environ.pop("JIRA_APP_ACTOR_PROXY_URL", None)
-        os.environ.pop("JIRA_APP_ACTOR_SHARED_SECRET", None)
+        clear_jira_task_credentials()
     if not secret_arn:
         return ""
 
@@ -436,6 +444,13 @@ def resolve_jira_oauth_token(channel_metadata: dict[str, str] | None = None) -> 
         log(severity, f"resolve_jira_oauth_token failed: {type(e).__name__}: {e}")
         return ""  # nosemgrep: py-silent-success-masking -- feedback cannot fail the task
     if token_obj is None:
+        return ""
+    if not isinstance(token_obj, dict):
+        log(
+            "ERROR",
+            f"resolve_jira_oauth_token: secret '{secret_arn}' contains non-object JSON; "
+            "tenant requires re-onboarding",
+        )
         return ""
 
     app_actor_fields = (

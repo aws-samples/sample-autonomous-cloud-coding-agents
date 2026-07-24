@@ -406,7 +406,7 @@ Expected, not a broken install. The stored access token lives ~1 hour and is onl
 - Verify the registry row's `oauth_secret_arn` matches and `status = 'active'`.
 - Confirm `outbound_identity = app` and `app_actor_display_name = bgagent` on the registry row.
 - Check the tenant secret for `app_actor_proxy_url`, `app_actor_shared_secret`, and `app_actor_configured_at` without printing the secret value.
-- Check the agent logs for `jira_reactions: comment_task_started`. A proxy `401` means Forge and ABCA have different `BGAGENT_PROXY_SECRET` values or the signed request is stale. A Jira `403` means the app lacks a required scope or project permission.
+- Check the agent logs for `jira_reactions: comment_task_started`. `proxy_error=invalid_signature` means Forge and ABCA have different `BGAGENT_PROXY_SECRET` values or the signed request is stale. `proxy_error=proxy_not_configured` means the production Forge variable is missing/short or was set after the last deploy. A Jira `403` without a proxy error code means the app lacks a required scope or project permission.
 - Re-run `bgagent jira app-setup <cloud-id> --proxy-url <url> --region "$REGION" --stack-name "$STACK_NAME"` after rotating the Forge secret or recreating the web-trigger URL. The identity probe catches a wrong secret, dead URL, wrong actor type, wrong Jira tenant, and missing app access before saving.
 - If no app-actor fields exist, ABCA logs that it is using the OAuth migration fallback. A fallback `401`/`403` usually means the 3LO token was revoked; re-run `bgagent jira setup`.
 
