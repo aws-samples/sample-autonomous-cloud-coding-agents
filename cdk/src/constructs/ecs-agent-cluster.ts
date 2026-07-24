@@ -42,6 +42,13 @@ export interface EcsAgentClusterProps {
   readonly memoryId?: string;
 
   /**
+   * Optional Fargate task sizing overrides. Any unset field uses the generous
+   * default; a consumer with a lighter repo should shrink the build task to cut
+   * cost. See {@link EcsTaskSizing}.
+   */
+  readonly taskSizing?: EcsTaskSizing;
+
+  /**
    * S3 bucket holding per-task ECS payloads (#502). The orchestrator writes the
    * payload (incl. the large hydrated_context, which can't fit in the 8 KB
    * RunTask containerOverrides limit) here and passes only an
@@ -102,34 +109,52 @@ export interface EcsAgentClusterProps {
 const HTTPS_PORT = 443;
 
 /**
- * Fargate task sizes (vCPU units / MiB). The empirical sizing history that
- * justifies these lives on the two ``makeTaskDef`` call sites below.
- *  - BUILD: 16 vCPU / 64 GB — headroom for ABCA's parallel ``mise run build`` storm.
- *  - PLANNING (#299): 2 vCPU / 8 GB — read-only clone+plan, no build.
+ * Default Fargate task sizes (vCPU units / MiB / GiB). These defaults are
+ * deliberately generous because they're tuned for a worst case: a large
+ * TypeScript + Python monorepo whose full build runs many jobs in parallel and
+ * peaks near the Fargate memory ceiling. Most repos are lighter and will want
+ * less — Fargate bills per requested vCPU-second and RAM-second — so both task
+ * sizes are overridable via {@link EcsAgentClusterProps.taskSizing} rather than
+ * fixed to one workload.
+ *
+ *  - BUILD task: 16 vCPU / 120 GB / 100 GiB disk. Sized for a full,
+ *    CI-parity build. 120 GB is the maximum Fargate allows at 16 vCPU; a build
+ *    task runs in its own isolated microVM, so a single memory-heavy build can
+ *    only be helped by more per-task RAM or by running fewer build steps in
+ *    parallel — not by capping how many tasks run at once. The 100 GiB root
+ *    filesystem (Fargate defaults to 20 GiB) leaves headroom for the clone plus
+ *    dependency/build caches; without it, concurrent builds can run the disk out
+ *    of space and surface as a spurious build failure.
+ *  - PLANNING task: 2 vCPU / 8 GB / default disk. For read-only workflows that
+ *    clone and read the repo to produce a plan but never build.
  */
-const BUILD_TASK_CPU = 16384;
-// 120 GB — the MAX Fargate allows at 16 vCPU (32–120 GB in 8 GB steps). Raised
-// from 64 GB after ABCA-662: dogfooding ABCA-on-ABCA, the full parallel
-// ``mise run build`` peak still OOM-killed (exit 137) at 64 GB. Each build task
-// is memory-ISOLATED (its own Fargate microVM), so concurrency caps don't help a
-// single over-64 GB build — only more per-task RAM (this) or less build
-// parallelism (serialize the DAG / cap jest --maxWorkers) does. 120 GB is the
-// clean experiment: if the build still OOMs here, we're at the platform ceiling
-// and the parallelism cap is the only remaining lever.
-const BUILD_TASK_MEMORY_MIB = 122880;
-const PLANNING_TASK_CPU = 2048;
-const PLANNING_TASK_MEMORY_MIB = 8192;
+const DEFAULT_BUILD_TASK_CPU = 16384;
+const DEFAULT_BUILD_TASK_MEMORY_MIB = 122880;
+const DEFAULT_BUILD_TASK_EPHEMERAL_STORAGE_GIB = 100;
+const DEFAULT_PLANNING_TASK_CPU = 2048;
+const DEFAULT_PLANNING_TASK_MEMORY_MIB = 8192;
 
-// Fargate defaults to only 20 GiB of ephemeral (root-fs) storage. A heavy build
-// task clones the repo, then fills disk with uv + yarn/node_modules caches,
-// build outputs, cdk.out/synth assets, and Docker layers — and the cluster runs
-// several tasks at once (a fan-out epic releases its children in parallel).
-// Live-caught on ABCA-659's retry: 3 concurrent ABCA-on-ABCA runs each blew past
-// 20 GiB → ``ENOSPC: no space left on device`` mid-build, which then surfaced as
-// a bogus ``build_passed=false`` (a disk-full, not broken code). Raise the BUILD
-// def to 100 GiB (Fargate allows 21–200 in 1 GiB steps) for ample headroom; the
-// PLANNING def only clones + reads so it keeps the 20 GiB default.
-const BUILD_TASK_EPHEMERAL_STORAGE_GIB = 100;
+/**
+ * Per-task Fargate sizing overrides. Every field is optional; anything left
+ * unset uses the default above. A consumer with a lighter repo should shrink the
+ * build task (for example 4 vCPU / 16 GB) to cut cost; a heavy monorepo can keep
+ * or raise it up to the Fargate ceiling of 16 vCPU / 120 GB. Values are passed
+ * straight to the Fargate task definition, so they must be a valid Fargate
+ * cpu/memory combination (see the AWS Fargate docs) — an invalid pair fails at
+ * synth/deploy, not silently.
+ */
+export interface EcsTaskSizing {
+  /** Build task vCPU units (1024 = 1 vCPU). Defaults to 16384 (16 vCPU). */
+  readonly buildTaskCpu?: number;
+  /** Build task memory in MiB. Defaults to 122880 (120 GB). */
+  readonly buildTaskMemoryMiB?: number;
+  /** Build task root-filesystem storage in GiB (21–200). Defaults to 100. */
+  readonly buildTaskEphemeralStorageGiB?: number;
+  /** Planning (read-only) task vCPU units. Defaults to 2048 (2 vCPU). */
+  readonly planningTaskCpu?: number;
+  /** Planning task memory in MiB. Defaults to 8192 (8 GB). */
+  readonly planningTaskMemoryMiB?: number;
+}
 
 export class EcsAgentCluster extends Construct {
   public readonly cluster: ecs.Cluster;
@@ -254,24 +279,17 @@ export class EcsAgentCluster extends Construct {
       return def;
     };
 
-    // BUILD task def — sized for heavy CI-parity builds (e.g. ABCA's own
-    // ~2800-test `mise run build` + cdk synth). Sizing history (all live-caught
-    // dogfooding ABCA-on-ABCA, 2026-06-29):
-    //   - 4 GB / 2 vCPU  → OOM-killed even the AgentCore microVM.
-    //   - 32 GB / 8 vCPU → ran ~50 min then OOM-killed (exit 137) at the cap;
-    //     peak working set ~31.6 GB when the root build fans out 4 heavy jobs
-    //     in PARALLEL (agent:quality ‖ cdk:build ‖ cli:build ‖ docs:build),
-    //     each spawning its own worker fleet (jest maxWorkers, pytest, esbuild
-    //     Lambda bundling). 32 GB had no headroom for that concurrent peak.
-    //   - 64 GB / 16 vCPU → still OOM-killed (exit 137) on ABCA-662's baseline
-    //     build: the parallel storm's peak exceeded 64 GB too. The false
-    //     "build_before=broken" that followed is fixed in repo.py, but the build
-    //     itself genuinely needs more RAM.
-    //   - 120 GB / 16 vCPU (current) → the MAX Fargate admits at 16 vCPU (32–120
-    //     GB in 8 GB steps). If a build OOMs even here, the fix is to cut the
-    //     build's peak parallelism (serialize the mise DAG / cap jest workers),
-    //     not more RAM — there is none. Paired with BUILD_VERIFY_TIMEOUT_S=3600.
-    this.taskDefinition = makeTaskDef('TaskDef', BUILD_TASK_CPU, BUILD_TASK_MEMORY_MIB, {
+    // Resolve task sizing: each field falls back to its default when the
+    // consumer didn't override it. See DEFAULT_BUILD_TASK_* above for why the
+    // build default is large, and EcsTaskSizing for how to shrink it.
+    const sizing = props.taskSizing ?? {};
+    const buildCpu = sizing.buildTaskCpu ?? DEFAULT_BUILD_TASK_CPU;
+    const buildMemory = sizing.buildTaskMemoryMiB ?? DEFAULT_BUILD_TASK_MEMORY_MIB;
+    const buildDisk = sizing.buildTaskEphemeralStorageGiB ?? DEFAULT_BUILD_TASK_EPHEMERAL_STORAGE_GIB;
+    const planningCpu = sizing.planningTaskCpu ?? DEFAULT_PLANNING_TASK_CPU;
+    const planningMemory = sizing.planningTaskMemoryMiB ?? DEFAULT_PLANNING_TASK_MEMORY_MIB;
+
+    this.taskDefinition = makeTaskDef('TaskDef', buildCpu, buildMemory, {
       // Heavy CI-parity builds legitimately run longer than the 1800s default.
       BUILD_VERIFY_TIMEOUT_S: '3600',
       // Pin the ABCA cdk-test jest fleet to an ABSOLUTE worker count on ECS.
@@ -322,7 +340,7 @@ export class EcsAgentCluster extends Construct {
       // Propagates to both the platform push (post_hooks.py) and the agent's own
       // git-tool pushes via shell.py::_clean_env (blacklist — passes SKIP through).
       SKIP: 'monorepo-tests-pre-push',
-    }, BUILD_TASK_EPHEMERAL_STORAGE_GIB);
+    }, buildDisk);
 
     // PLANNING task def (#299 ECS_RIGHTSIZED_PLANNING) — for read-only workflows
     // (coding/decompose-v1) that clone + read + emit a plan artifact but NEVER
@@ -332,7 +350,7 @@ export class EcsAgentCluster extends Construct {
     // BUILD_VERIFY_TIMEOUT_S (a read-only planner runs no build verify). If 8 GB
     // proves tight on a very large clone, 16 GB / 4 vCPU is the next step — size up
     // on Container-Insights evidence, mirroring the build def's empirical history.
-    this.planningTaskDefinition = makeTaskDef('PlanningTaskDef', PLANNING_TASK_CPU, PLANNING_TASK_MEMORY_MIB, {});
+    this.planningTaskDefinition = makeTaskDef('PlanningTaskDef', planningCpu, planningMemory, {});
 
     // DynamoDB: when a SessionRole (#209) is wired, tenant-data access lives on
     // that tag-scoped role and the task role only needs to assume it. Without

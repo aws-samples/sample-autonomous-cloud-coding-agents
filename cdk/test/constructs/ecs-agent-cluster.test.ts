@@ -30,7 +30,18 @@ import { AgentMemory } from '../../src/constructs/agent-memory';
 import { AgentSessionRole } from '../../src/constructs/agent-session-role';
 import { EcsAgentCluster } from '../../src/constructs/ecs-agent-cluster';
 
-function createStack(overrides?: { memoryId?: string; bedrockModels?: string[]; withMemory?: boolean }): { stack: Stack; template: Template } {
+function createStack(overrides?: {
+  memoryId?: string;
+  bedrockModels?: string[];
+  withMemory?: boolean;
+  taskSizing?: {
+    buildTaskCpu?: number;
+    buildTaskMemoryMiB?: number;
+    buildTaskEphemeralStorageGiB?: number;
+    planningTaskCpu?: number;
+    planningTaskMemoryMiB?: number;
+  };
+}): { stack: Stack; template: Template } {
   const app = new App({
     context: overrides?.bedrockModels ? { bedrockModels: overrides.bedrockModels } : undefined,
   });
@@ -68,6 +79,7 @@ function createStack(overrides?: { memoryId?: string; bedrockModels?: string[]; 
     githubTokenSecret,
     memoryId: overrides?.memoryId,
     agentMemory,
+    ...(overrides?.taskSizing && { taskSizing: overrides.taskSizing }),
   });
 
   const template = Template.fromStack(stack);
@@ -135,6 +147,33 @@ describe('EcsAgentCluster construct', () => {
         OperatingSystemFamily: 'LINUX',
       },
     });
+  });
+
+  // The default task sizes are generous (tuned for a large monorepo build). A
+  // consumer with a lighter repo can override them per substrate to cut Fargate
+  // cost, so the sizing is configuration, not a fixed value.
+  test('taskSizing prop overrides the build def size; fields left unset keep the default', () => {
+    const { template } = createStack({
+      taskSizing: {
+        buildTaskCpu: 4096, // 4 vCPU
+        buildTaskMemoryMiB: 16384, // 16 GB
+        buildTaskEphemeralStorageGiB: 40,
+        // planning sizes intentionally omitted -> they should stay at their defaults
+      },
+    });
+    // The override changes the existing build task def in place — it does not
+    // add a third one. There should still be exactly two: build + planning.
+    template.resourceCountIs('AWS::ECS::TaskDefinition', 2);
+    // The build task def reflects the overridden sizes.
+    template.hasResourceProperties('AWS::ECS::TaskDefinition', {
+      Cpu: '4096',
+      Memory: '16384',
+      EphemeralStorage: { SizeInGiB: 40 },
+    });
+    // The planning task def is unchanged: omitted fields fall back to the default.
+    const planning = Object.values(template.findResources('AWS::ECS::TaskDefinition'))
+      .find(d => d.Properties.Cpu === '2048' && d.Properties.Memory === '8192');
+    expect(planning).toBeDefined();
   });
 
   test('both task defs share ONE task role and ONE execution role (parity by construction — the ABCA-488/#502 lesson)', () => {
