@@ -168,16 +168,16 @@ export async function transitionTask(
   }));
 }
 
-/** Correlation envelope stamped on orchestrator-plane task events (#245). */
+/** Correlation envelope stamped on orchestrator-plane task events. */
 export interface EventCorrelation {
   readonly user_id?: string;
-  /** `owner/repo`, or absent for repo-less workflows (#248 Phase 3). Matches
-   *  the source `TaskRecord.repo` (`string | undefined`). */
+  /** `owner/repo`, or absent for repo-less workflows (those with no target
+   *  repository). Matches the source `TaskRecord.repo` (`string | undefined`). */
   readonly repo?: string;
 }
 
 /**
- * Build the correlation envelope (#245) for a task from its identity fields:
+ * Build the correlation envelope for a task from its identity fields:
  * a `log` child stamping `{task_id, user_id, repo}` on every line, and the
  * matching `correlation` for `emitTaskEvent`. Single source so the log context
  * and the event envelope can't drift. `repo` is omitted (not null/empty) for
@@ -199,8 +199,8 @@ export function envelopeFor(
  * @param eventType - the event type string.
  * @param metadata - optional event metadata.
  * @param correlation - optional `{ user_id, repo }` stamped as top-level fields
- *   so the event stream joins to orchestrator logs by the correlation envelope
- *   (#245). `repo` is omitted when null/absent (repo-less workflows).
+ *   so the event stream joins to orchestrator logs by the correlation envelope.
+ *   `repo` is omitted when null/absent (repo-less workflows).
  */
 export async function emitTaskEvent(
   taskId: string,
@@ -234,12 +234,13 @@ const MAX_POLL_INTERVAL_MS = 300_000;
  * @returns the merged blueprint config.
  */
 export async function loadBlueprintConfig(task: TaskRecord): Promise<BlueprintConfig> {
-  // Correlation envelope (#245) on this shared function's logs too, matching the
+  // Correlation envelope on this shared function's logs too, matching the
   // orchestrate handler's child logger. `repo` omitted for repo-less workflows.
   const { log } = envelopeFor(task);
 
-  // Repo-less workflows (#248 Phase 3) have no per-repo Blueprint — use platform
-  // defaults directly rather than a RepoTable lookup on a missing repo.
+  // Repo-less workflows (those with no target repository) have no per-repo
+  // Blueprint — use platform defaults directly rather than a RepoTable lookup
+  // on a missing repo.
   const repoConfig = task.repo ? await loadRepoConfig(task.repo) : null;
 
   if (repoConfig) {
@@ -268,6 +269,17 @@ export async function loadBlueprintConfig(task: TaskRecord): Promise<BlueprintCo
     }
   }
 
+  // Compute substrate is a per-repo property (``compute_type``, default
+  // ``agentcore``). It applies to ALL workflows on the repo — including a
+  // read-only decompose/planning or pr-review task, because that task CLONES and
+  // READS the same repository the coding agent does, so its context/memory
+  // footprint is the same: a repo big enough to need the context-gated 64GB ECS
+  // tier for building is also big enough to OOM the fixed AgentCore microVM just
+  // reading it. So planning must run on the same substrate as the agent — do NOT
+  // special-case read-only workflows to agentcore. (An ecs-configured repo on a
+  // stack that hasn't wired the ECS substrate fails at session start; that's a
+  // stack-config gap surfaced by the honest "couldn't plan, nothing run — re-apply
+  // or run as single" note, not something to paper over by mis-routing compute.)
   return {
     compute_type: repoConfig?.compute_type ?? 'agentcore',
     runtime_arn: repoConfig?.runtime_arn ?? RUNTIME_ARN,
@@ -277,6 +289,8 @@ export async function loadBlueprintConfig(task: TaskRecord): Promise<BlueprintCo
     system_prompt_overrides: repoConfig?.system_prompt_overrides,
     github_token_secret_arn: repoConfig?.github_token_secret_arn ?? process.env.GITHUB_TOKEN_SECRET_ARN,
     poll_interval_ms: pollIntervalMs,
+    build_command: repoConfig?.build_command,
+    lint_command: repoConfig?.lint_command,
     cedar_policies: repoConfig?.cedar_policies,
     approval_gate_cap: repoConfig?.approval_gate_cap,
   };
@@ -335,9 +349,9 @@ function resolveAttachmentPayloads(
 }
 
 /**
- * Cedar HITL Chunk 7b: structural guard on the TaskRecord's persisted
- * ``approval_gate_cap`` before we thread it into the agent payload. The
- * submit path bounds-checks the blueprint value before writing it
+ * Structural guard on the TaskRecord's persisted ``approval_gate_cap`` (the
+ * human-in-the-loop approval limit) before we thread it into the agent payload.
+ * The submit path bounds-checks the blueprint value before writing it
  * (``create-task-core.ts``), so under a clean flow this guard is
  * tautologically satisfied. It exists to catch hand-edited DDB rows /
  * schema drift — a corrupted value would otherwise crash the agent's
@@ -430,8 +444,8 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
   // max_budget_usd uses 2-tier override (no platform default — absent means unlimited).
   const effectiveBudget = task.max_budget_usd ?? blueprintConfig?.max_budget_usd;
 
-  // Chunk 7b: warn if a persisted approval_gate_cap is present but not
-  // a valid integer in [APPROVAL_GATE_CAP_MIN, APPROVAL_GATE_CAP_MAX].
+  // Warn if a persisted approval_gate_cap is present but not a valid integer
+  // in [APPROVAL_GATE_CAP_MIN, APPROVAL_GATE_CAP_MAX].
   // The payload block below silently omits invalid values (rather than
   // crashing container start on PolicyEngine.__init__), but the only
   // way to reach this branch is schema drift or a hand-edited DDB row,
@@ -528,10 +542,10 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     task_id: task.task_id,
     // user_id is required by the agent ONLY when ``trace`` is true —
     // the agent writes the trajectory to
-    // ``traces/<user_id>/<task_id>.jsonl.gz`` (design §10.1) and the
-    // handler's per-caller-prefix guard relies on the agent landing
-    // under the submitter's prefix. Threaded unconditionally so
-    // scripts that inspect the payload can always see it; costs one
+    // ``traces/<user_id>/<task_id>.jsonl.gz`` and the handler's
+    // per-caller-prefix guard relies on the agent landing under the
+    // submitter's prefix. Threaded unconditionally so scripts that
+    // inspect the payload can always see it; costs one
     // Cognito-sub-sized string in the JSON.
     user_id: task.user_id,
     branch_name: hydratedContext.resolved_branch_name ?? task.branch_name,
@@ -539,6 +553,15 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     resolved_workflow: task.resolved_workflow ?? { id: 'coding/new-task-v1', version: '1.0.0' },
     ...(task.pr_number !== undefined && { pr_number: task.pr_number }),
     ...(hydratedContext.resolved_base_branch && { base_branch: hydratedContext.resolved_base_branch }),
+    // Orchestration children carry their stacked base branch + (diamond
+    // dependency case) predecessor branches to merge in, via channel_metadata.
+    // The PR-task ``resolved_base_branch`` path above wins if both are set
+    // (a task is never both a PR-iteration and an orchestration child).
+    ...(!hydratedContext.resolved_base_branch
+      && task.channel_metadata?.orchestration_base_branch
+      && { base_branch: task.channel_metadata.orchestration_base_branch }),
+    ...(task.channel_metadata?.orchestration_merge_branches
+      && { merge_branches: parseMergeBranches(task.channel_metadata.orchestration_merge_branches) }),
     ...(task.task_description && { prompt: task.task_description }),
     max_turns: task.max_turns ?? blueprintConfig?.max_turns ?? DEFAULT_MAX_TURNS,
     ...(effectiveBudget !== undefined && { max_budget_usd: effectiveBudget }),
@@ -548,37 +571,42 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     ...(task.trace === true && { trace: true }),
     ...(blueprintConfig?.model_id && { model_id: blueprintConfig.model_id }),
     ...(blueprintConfig?.system_prompt_overrides && { system_prompt_overrides: blueprintConfig.system_prompt_overrides }),
+    // Per-repo build/lint verification commands. Absent → agent defaults
+    // to ``mise run build`` / ``mise run lint``. Set for non-mise repos so
+    // build-regression gating actually runs the repo's real command.
+    ...(blueprintConfig?.build_command && { build_command: blueprintConfig.build_command }),
+    ...(blueprintConfig?.lint_command && { lint_command: blueprintConfig.lint_command }),
     ...(blueprintConfig?.cedar_policies && blueprintConfig.cedar_policies.length > 0 && { cedar_policies: blueprintConfig.cedar_policies }),
-    // Cedar HITL: the agent's PreToolUse hook uses this to compute
-    // the maxLifetime ceiling on per-gate approval timeouts (§6.5).
+    // The agent's PreToolUse hook uses this to compute the maxLifetime
+    // ceiling on per-gate human-in-the-loop approval timeouts.
     // Stamped at HYDRATING → RUNNING transition time so the clock
     // only starts when the container is alive. Format is ISO 8601
     // UTC to match the rest of the TaskRecord timestamp fields.
     task_started_at: new Date().toISOString(),
-    // Cedar HITL pre-approval data (§7.3). Threaded so the agent's
+    // Human-in-the-loop pre-approval data. Threaded so the agent's
     // PolicyEngine can seed ApprovalAllowlist + set
     // task_default_timeout_s without a second DDB round-trip.
     ...(task.approval_timeout_s !== undefined && { approval_timeout_s: task.approval_timeout_s }),
     ...(task.initial_approvals && task.initial_approvals.length > 0 && { initial_approvals: task.initial_approvals }),
-    // Cedar HITL Chunk 7 (§13.6): seed the engine's per-task gate
-    // counter from the TaskTable-persisted value so a container
-    // restart mid-task resumes the cumulative gate budget instead of
-    // resetting to 0. Only forwarded when non-zero so the agent's
-    // default (0) path remains unchanged for fresh tasks; the
-    // TaskRecord is already loaded above, so no extra DDB read.
+    // Seed the engine's per-task approval-gate counter from the
+    // TaskTable-persisted value so a container restart mid-task resumes
+    // the cumulative gate budget instead of resetting to 0. Only
+    // forwarded when non-zero so the agent's default (0) path remains
+    // unchanged for fresh tasks; the TaskRecord is already loaded above,
+    // so no extra DDB read.
     ...(typeof task.approval_gate_count === 'number' && task.approval_gate_count > 0 && {
       initial_approval_gate_count: task.approval_gate_count,
     }),
-    // Cedar HITL Chunk 7b (§4 step 5, decision #13): thread the
-    // TaskRecord-persisted cap so the agent's PolicyEngine adopts the
-    // blueprint-configured value (or the platform default of 50 frozen
-    // at submit-time) instead of its compile-time fallback. Legacy task
-    // records predating Chunk 7b omit the field — the agent then falls
-    // back to its own default of 50. Extra guards past ``typeof``
-    // because a hand-edited DDB row could carry NaN, Infinity, a float,
-    // or an out-of-bounds value — all would crash PolicyEngine.__init__
-    // downstream; omitting here keeps the container starting cleanly
-    // with the engine default and leaves an operator-visible warning.
+    // Thread the TaskRecord-persisted approval-gate cap so the agent's
+    // PolicyEngine adopts the blueprint-configured value (or the platform
+    // default of 50 frozen at submit-time) instead of its compile-time
+    // fallback. Older task records that predate this field omit it — the
+    // agent then falls back to its own default of 50. Extra guards past
+    // ``typeof`` because a hand-edited DDB row could carry NaN, Infinity,
+    // a float, or an out-of-bounds value — all would crash
+    // PolicyEngine.__init__ downstream; omitting here keeps the container
+    // starting cleanly with the engine default and leaves an
+    // operator-visible warning.
     ...(isValidApprovalGateCap(task.approval_gate_cap)
       && { approval_gate_cap: task.approval_gate_cap }),
     prompt_version: promptVersion,
@@ -688,8 +716,8 @@ export async function finalizeTask(
 ): Promise<void> {
   const task = await loadTask(taskId);
   const currentStatus = task.status;
-  // Correlation envelope (#245) on this function's own log lines too, not just
-  // the events it emits — admission→terminal logs must join by {user_id, repo}.
+  // Correlation envelope on this function's own log lines too, not just the
+  // events it emits — admission→terminal logs must join by {user_id, repo}.
   const { log, correlation } = envelopeFor(task);
 
   // Lost session: RUNNING but agent heartbeats stopped (crash/OOM) — fail fast
@@ -774,7 +802,7 @@ export async function finalizeTask(
           logger,
         );
         // Memory actorId: repo for coding tasks, user:{user_id} for repo-less
-        // workflows (#248 Phase 3, ADR-014 addendum 2026-06-08).
+        // workflows (those with no target repository).
         const actorNamespace = task.repo ?? `user:${task.user_id}`;
         const written = await writeMinimalEpisode(
           MEMORY_ID,
@@ -804,9 +832,9 @@ export async function finalizeTask(
 
   // If still RUNNING / FINALIZING / AWAITING_APPROVAL after the poll
   // window closes, transition to TIMED_OUT. AWAITING_APPROVAL uses the
-  // same transition — the stranded-approval reconciler (Chunk 5,
-  // §13.6) is a secondary safety net with a longer timeout for tasks
-  // the orchestrator already lost track of.
+  // same transition — the stranded-approval reconciler is a secondary
+  // safety net with a longer timeout for tasks the orchestrator already
+  // lost track of.
   if (
     currentStatus === TaskStatus.RUNNING
     || currentStatus === TaskStatus.FINALIZING
@@ -866,7 +894,7 @@ export async function finalizeTask(
  * @param userId - the user who owns the task.
  * @param releaseConcurrency - whether to decrement the concurrency counter.
  * @param repo - optional target repo (`owner/repo`) for the correlation
- *   envelope (#245); omit for repo-less workflows.
+ *   envelope; omit for repo-less workflows.
  */
 export async function failTask(
   taskId: string,
@@ -924,4 +952,27 @@ async function decrementConcurrency(userId: string): Promise<void> {
       logger.warn('Failed to decrement concurrency counter', { user_id: userId, error: err instanceof Error ? err.message : String(err) });
     }
   }
+}
+
+/**
+ * Parse the JSON-encoded predecessor merge-branch list that the
+ * orchestration release path stashes in
+ * ``channel_metadata.orchestration_merge_branches`` (the diamond-dependency
+ * case, where a child depends on more than one predecessor). Best-effort: a
+ * malformed value yields an empty list rather than failing the orchestration —
+ * the child still branches off its base, it just won't have the predecessor
+ * code merged in (surfaced as a normal build failure if it actually needed it,
+ * never a silent crash here).
+ */
+function parseMergeBranches(raw: string): string[] {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (Array.isArray(parsed) && parsed.every((b) => typeof b === 'string')) {
+      return parsed as string[];
+    }
+  } catch {
+    // fall through
+  }
+  logger.warn('Ignoring malformed orchestration_merge_branches', { raw });
+  return [];
 }

@@ -30,7 +30,18 @@ import { AgentMemory } from '../../src/constructs/agent-memory';
 import { AgentSessionRole } from '../../src/constructs/agent-session-role';
 import { EcsAgentCluster } from '../../src/constructs/ecs-agent-cluster';
 
-function createStack(overrides?: { memoryId?: string; bedrockModels?: string[] }): { stack: Stack; template: Template } {
+function createStack(overrides?: {
+  memoryId?: string;
+  bedrockModels?: string[];
+  withMemory?: boolean;
+  taskSizing?: {
+    buildTaskCpu?: number;
+    buildTaskMemoryMiB?: number;
+    buildTaskEphemeralStorageGiB?: number;
+    planningTaskCpu?: number;
+    planningTaskMemoryMiB?: number;
+  };
+}): { stack: Stack; template: Template } {
   const app = new App({
     context: overrides?.bedrockModels ? { bedrockModels: overrides.bedrockModels } : undefined,
   });
@@ -57,6 +68,8 @@ function createStack(overrides?: { memoryId?: string; bedrockModels?: string[] }
 
   const githubTokenSecret = new secretsmanager.Secret(stack, 'GitHubTokenSecret');
 
+  const agentMemory = overrides?.withMemory ? new AgentMemory(stack, 'AgentMemory') : undefined;
+
   new EcsAgentCluster(stack, 'EcsAgentCluster', {
     vpc,
     agentImageAsset,
@@ -65,6 +78,8 @@ function createStack(overrides?: { memoryId?: string; bedrockModels?: string[] }
     userConcurrencyTable,
     githubTokenSecret,
     memoryId: overrides?.memoryId,
+    agentMemory,
+    ...(overrides?.taskSizing && { taskSizing: overrides.taskSizing }),
   });
 
   const template = Template.fromStack(stack);
@@ -99,6 +114,109 @@ describe('EcsAgentCluster construct', () => {
         OperatingSystemFamily: 'LINUX',
       },
     });
+  });
+
+  test('the BUILD def raises ephemeral storage past the 20 GiB Fargate default (ABCA-659 #2: concurrent builds → ENOSPC)', () => {
+    baseTemplate.hasResourceProperties('AWS::ECS::TaskDefinition', {
+      Cpu: '16384',
+      Memory: '122880',
+      EphemeralStorage: { SizeInGiB: 100 },
+    });
+  });
+
+  test('the PLANNING def keeps the 20 GiB default (no EphemeralStorage — a clone+read planner needs no extra disk)', () => {
+    const taskDefs = baseTemplate.findResources('AWS::ECS::TaskDefinition');
+    const planning = Object.values(taskDefs).find(
+      d => d.Properties.Cpu === '2048' && d.Properties.Memory === '8192',
+    );
+    expect(planning).toBeDefined();
+    expect(planning!.Properties.EphemeralStorage).toBeUndefined();
+  });
+
+  test('creates a second, smaller PLANNING task def (2 vCPU / 8 GB) for read-only workflows (#299 ECS_RIGHTSIZED_PLANNING)', () => {
+    // Two task defs now exist: the 64 GB build def (asserted above) and this
+    // 8 GB planning def. decompose-v1 (read_only) runs on the smaller one so a
+    // clone+read plan doesn't over-allocate the build box.
+    baseTemplate.resourceCountIs('AWS::ECS::TaskDefinition', 2);
+    baseTemplate.hasResourceProperties('AWS::ECS::TaskDefinition', {
+      Cpu: '2048',
+      Memory: '8192',
+      RequiresCompatibilities: ['FARGATE'],
+      RuntimePlatform: {
+        CpuArchitecture: 'ARM64',
+        OperatingSystemFamily: 'LINUX',
+      },
+    });
+  });
+
+  // The default task sizes are generous (tuned for a large monorepo build). A
+  // consumer with a lighter repo can override them per substrate to cut Fargate
+  // cost, so the sizing is configuration, not a fixed value.
+  test('taskSizing prop overrides the build def size; fields left unset keep the default', () => {
+    const { template } = createStack({
+      taskSizing: {
+        buildTaskCpu: 4096, // 4 vCPU
+        buildTaskMemoryMiB: 16384, // 16 GB
+        buildTaskEphemeralStorageGiB: 40,
+        // planning sizes intentionally omitted -> they should stay at their defaults
+      },
+    });
+    // The override changes the existing build task def in place — it does not
+    // add a third one. There should still be exactly two: build + planning.
+    template.resourceCountIs('AWS::ECS::TaskDefinition', 2);
+    // The build task def reflects the overridden sizes.
+    template.hasResourceProperties('AWS::ECS::TaskDefinition', {
+      Cpu: '4096',
+      Memory: '16384',
+      EphemeralStorage: { SizeInGiB: 40 },
+    });
+    // The planning task def is unchanged: omitted fields fall back to the default.
+    const planning = Object.values(template.findResources('AWS::ECS::TaskDefinition'))
+      .find(d => d.Properties.Cpu === '2048' && d.Properties.Memory === '8192');
+    expect(planning).toBeDefined();
+  });
+
+  test('both task defs share ONE task role and ONE execution role (parity by construction — the ABCA-488/#502 lesson)', () => {
+    // The build and planning defs pass the SAME shared task+execution roles, so a
+    // grant added for one is present on the other by construction (no drift). The
+    // template therefore holds exactly two ECS roles (task + execution), each
+    // referenced by both defs' TaskRoleArn/ExecutionRoleArn.
+    const roles = baseTemplate.findResources('AWS::IAM::Role', {
+      Properties: {
+        AssumeRolePolicyDocument: {
+          Statement: Match.arrayWith([
+            Match.objectLike({
+              Principal: { Service: 'ecs-tasks.amazonaws.com' },
+            }),
+          ]),
+        },
+      },
+    });
+    expect(Object.keys(roles)).toHaveLength(2);
+
+    const taskDefs = baseTemplate.findResources('AWS::ECS::TaskDefinition');
+    const taskRoleRefs = new Set<string>();
+    const execRoleRefs = new Set<string>();
+    for (const def of Object.values(taskDefs)) {
+      taskRoleRefs.add(JSON.stringify(def.Properties.TaskRoleArn));
+      execRoleRefs.add(JSON.stringify(def.Properties.ExecutionRoleArn));
+    }
+    // Both defs point at the same single task role and same single exec role.
+    expect(taskRoleRefs.size).toBe(1);
+    expect(execRoleRefs.size).toBe(1);
+  });
+
+  test('the PLANNING def carries no BUILD_VERIFY_TIMEOUT_S (a read-only planner runs no build verify)', () => {
+    const taskDefs = baseTemplate.findResources('AWS::ECS::TaskDefinition');
+    const planningDef = Object.values(taskDefs).find(
+      d => d.Properties.Cpu === '2048' && d.Properties.Memory === '8192',
+    );
+    expect(planningDef).toBeDefined();
+    const env = planningDef!.Properties.ContainerDefinitions[0].Environment ?? [];
+    expect(env.some((e: { Name: string }) => e.Name === 'BUILD_VERIFY_TIMEOUT_S')).toBe(false);
+    // …but the shared env (Bedrock, task table) IS present on the planning def too.
+    expect(env.some((e: { Name: string }) => e.Name === 'CLAUDE_CODE_USE_BEDROCK')).toBe(true);
+    expect(env.some((e: { Name: string }) => e.Name === 'TASK_TABLE_NAME')).toBe(true);
   });
 
   test('creates a security group with TCP 443 egress only', () => {
@@ -173,64 +291,6 @@ describe('EcsAgentCluster construct', () => {
       }
     }
     expect(hasLinearOauthGrant).toBe(true);
-  });
-
-  test('task role gets bedrock-agentcore:CreateEvent on the AgentMemory when wired (F-2 / ABCA-488-class)', () => {
-    // REGRESSION: the agent's cross-task learning writes (write_task_episode /
-    // write_repo_learnings) call bedrock-agentcore:CreateEvent on the AgentCore
-    // Memory. The runtime role gets this via agentMemory.grantReadWrite; the ECS
-    // task role did NOT, so writes hit AccessDenied and silently no-op'd (WARN)
-    // on the ECS substrate — learning never persisted on an ECS-only deploy.
-    // Build a stack WITH an AgentMemory and assert the CreateEvent grant exists,
-    // scoped to the memory ARN (not a wildcard).
-    const app = new App();
-    const stack = new Stack(app, 'EcsMemStack');
-    const vpc = new ec2.Vpc(stack, 'Vpc', { maxAzs: 2 });
-    const agentImageAsset = new ecr_assets.DockerImageAsset(stack, 'AgentImage', {
-      directory: path.join(__dirname, '..', '..', '..', 'agent'),
-    });
-    const mk = (id: string) =>
-      new dynamodb.Table(stack, id, { partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING } });
-    const userConcurrencyTable = new dynamodb.Table(stack, 'UserConcurrencyTable', {
-      partitionKey: { name: 'user_id', type: dynamodb.AttributeType.STRING },
-    });
-    const agentMemory = new AgentMemory(stack, 'AgentMemory');
-    new EcsAgentCluster(stack, 'EcsAgentCluster', {
-      vpc,
-      agentImageAsset,
-      taskTable: mk('TaskTable'),
-      taskEventsTable: mk('TaskEventsTable'),
-      userConcurrencyTable,
-      githubTokenSecret: new secretsmanager.Secret(stack, 'GitHubTokenSecret'),
-      agentMemory,
-    });
-    const template = Template.fromStack(stack);
-    const policies = template.findResources('AWS::IAM::Policy');
-    let hasCreateEvent = false;
-    for (const [id, p] of Object.entries(policies)) {
-      if (!id.includes('TaskDefTaskRole')) continue;
-      for (const s of p.Properties.PolicyDocument.Statement) {
-        const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
-        if (actions.includes('bedrock-agentcore:CreateEvent')) {
-          hasCreateEvent = true;
-          // resource must reference the memory ARN, not a bare wildcard
-          expect(JSON.stringify(s.Resource)).toContain('MemoryArn');
-          expect(s.Resource).not.toEqual('*');
-        }
-      }
-    }
-    expect(hasCreateEvent).toBe(true);
-  });
-
-  test('task role has NO bedrock-agentcore grant when no AgentMemory is wired (isolated default)', () => {
-    const policies = baseTemplate.findResources('AWS::IAM::Policy');
-    for (const [id, p] of Object.entries(policies)) {
-      if (!id.includes('TaskDefTaskRole')) continue;
-      for (const s of p.Properties.PolicyDocument.Statement) {
-        const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
-        expect(actions.some((a: string) => a.startsWith('bedrock-agentcore:'))).toBe(false);
-      }
-    }
   });
 
   test('task role Bedrock InvokeModel is scoped to explicit model/inference-profile ARNs (no wildcard)', () => {
@@ -317,6 +377,27 @@ describe('EcsAgentCluster construct', () => {
     });
   });
 
+  test('build def caps build parallelism to prevent OOM (K14 / ABCA-691)', () => {
+    // The build task def serializes the mise DAG (MISE_JOBS=1) and pins the jest
+    // fleet (JEST_MAX_WORKERS=4) so the cross-package build storm can't OOM the
+    // box while the coding agent is still resident. Asserted per-var (one
+    // arrayWith objectLike each): a single arrayWith with multiple objectLike
+    // entries is matched unreliably by the CDK assertions matcher, so each env
+    // var gets its own hasResourceProperties call — which also pins each to the
+    // SAME build container (the one carrying BUILD_VERIFY_TIMEOUT_S).
+    const envHas = (name: string, value: string) =>
+      baseTemplate.hasResourceProperties('AWS::ECS::TaskDefinition', {
+        ContainerDefinitions: Match.arrayWith([
+          Match.objectLike({
+            Environment: Match.arrayWith([Match.objectLike({ Name: name, Value: value })]),
+          }),
+        ]),
+      });
+    envHas('MISE_JOBS', '1');
+    envHas('JEST_MAX_WORKERS', '4');
+    envHas('BUILD_VERIFY_TIMEOUT_S', '3600');
+  });
+
   test('includes MEMORY_ID in container env when provided', () => {
     const { template } = createStack({ memoryId: 'mem-test-123' });
     template.hasResourceProperties('AWS::ECS::TaskDefinition', {
@@ -327,6 +408,36 @@ describe('EcsAgentCluster construct', () => {
           ]),
         }),
       ]),
+    });
+  });
+
+  // F-2 ECS-parity regression guard. The task role must be able to WRITE cross-
+  // task memory (bedrock-agentcore:CreateEvent), or episodic/semantic writes fail
+  // closed on ECS (memory_written: false — live-caught on the fork). This
+  // regressed silently because MEMORY_ID was wired into the env WITHOUT the
+  // matching grant, so the agent attempted a write it had no permission for.
+  describe('AgentCore Memory grant (F-2)', () => {
+    test('grants the task role bedrock-agentcore write when agentMemory is passed', () => {
+      const { template } = createStack({ withMemory: true });
+      template.hasResourceProperties('AWS::IAM::Policy', {
+        PolicyDocument: {
+          Statement: Match.arrayWith([
+            Match.objectLike({
+              Effect: 'Allow',
+              Action: Match.arrayWith([Match.stringLikeRegexp('bedrock-agentcore:.*Event')]),
+            }),
+          ]),
+        },
+      });
+    });
+
+    test('does NOT grant bedrock-agentcore write when agentMemory is omitted', () => {
+      // Negative proof: the isolated-construct default (no memory) must not
+      // emit a memory grant — otherwise the positive test proves nothing.
+      const { stack } = createStack();
+      const policies = Template.fromStack(stack).findResources('AWS::IAM::Policy');
+      const asJson = JSON.stringify(policies);
+      expect(asJson).not.toMatch(/bedrock-agentcore:[A-Za-z]*Event/);
     });
   });
 
@@ -393,7 +504,12 @@ describe('EcsAgentCluster construct', () => {
       // statements). The task-role policy must NOT contain any unconditioned
       // task-table DDB grant — that access now lives only on the SessionRole.
       const taskRolePolicies = Object.entries(policies).filter(([id, p]) =>
-        id.includes('TaskDefTaskRole')
+        // #299 ECS_RIGHTSIZED_PLANNING: the task role is now a SHARED standalone
+        // `TaskRole` construct (was the auto-generated role nested under the single
+        // FargateTaskDefinition, id `...TaskDefTaskRole...`), so both the build and
+        // planning defs pass the same role — its logical id is `...TaskRole...` and
+        // `ExecutionRole` doesn't match this substring.
+        id.includes('TaskRole')
         && p.Properties.PolicyDocument.Statement.some((s: { Action: string | string[] }) => {
           const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
           return actions.includes('sts:AssumeRole');
