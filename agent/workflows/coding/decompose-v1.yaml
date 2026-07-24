@@ -1,0 +1,59 @@
+# #299 Mode B agent-native planning (replaces the webhook Lambda's blind
+# two-call Bedrock planner). Clone the repo, plan a decomposition with FULL
+# repository context, and deliver the plan JSON as an artifact — no code
+# changes, no PR. The platform reads the artifact and seeds Linear sub-issues
+# from it (idempotent write-back → Mode A), preserving the :decompose approval
+# gate. Structurally a `pr-review`-shaped read-only clone task, but its terminal
+# outcome is an ARTIFACT (the plan) rather than a PR (mirrors web-research).
+#
+# Root-causes ABCA-490 (30s Lambda ceiling killed the planner mid-call) and
+# ABCA-492 (planner was blind to the repo): planning now runs on the tunable
+# agent substrate inside a real clone, with turns instead of a single 30s call.
+id: coding/decompose-v1
+version: 1.0.0
+domain: coding
+description: >-
+  Plan how to decompose an issue into dependency-ordered sub-issues, using full
+  repository context. Deliverable is a decomposition-plan artifact; never
+  mutates the repo and never opens a PR — the platform seeds the sub-issues.
+guidance: >-
+  Platform-issued by the Linear webhook on a `:decompose` / `:auto` label. Not a
+  user-facing workflow_ref.
+requires_repo: true
+read_only: true
+prompt:
+  template: registry://prompt/coding-decompose-workflow
+  placeholders:
+    - repo_url
+    - task_id
+    - workspace
+    - branch_name
+    - default_branch
+    - max_turns
+    - setup_notes
+    - memory_context
+hydration:
+  sources: [issue, memory, task_description]
+agent_config:
+  tier: read-only
+  # No Write/Edit — read-only tier may not grant mutating tools (validator rule
+  # 6). The deliverable is the agent's synthesised plan JSON, not a code change.
+  allowed_tools: [Bash, Read, Glob, Grep, WebFetch]
+  cedar_policy_modules: [builtin/hard_deny]
+repo_config:
+  provider: github
+  discover: true
+required_inputs:
+  one_of: [issue_number, task_description]
+steps:
+  - { kind: clone_repo,       name: setup }
+  - { kind: hydrate_context,  name: context }
+  - { kind: run_agent,        name: plan }
+  - { kind: deliver_artifact, name: deliver, target: s3 }
+terminal_outcomes:
+  primary: artifact
+limits:
+  max_turns: 60
+promotion_gate:
+  requires: [tests:agent/decompose]
+status: production

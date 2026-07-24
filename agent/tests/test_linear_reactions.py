@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -520,3 +521,136 @@ class TestAuthCircuitBreaker:
             for _ in range(3):
                 linear_reactions._graphql("query Q { x }", {})
         assert linear_reactions._auth_circuit_open is True
+
+
+class TestTransitionIssueState:
+    """PM-3: a writeable single task moves the issue Backlog → In Progress →
+    In Review, forward-only. Mocks ``_graphql`` directly so we assert on the
+    decision logic, not the wire format (covered elsewhere)."""
+
+    _STATES: ClassVar[list[dict]] = [
+        {"id": "s-backlog", "name": "Backlog", "type": "backlog", "position": 0},
+        {"id": "s-todo", "name": "Todo", "type": "unstarted", "position": 1},
+        {"id": "s-prog", "name": "In Progress", "type": "started", "position": 2},
+        {"id": "s-review", "name": "In Review", "type": "started", "position": 1002},
+        {"id": "s-done", "name": "Done", "type": "completed", "position": 3},
+    ]
+
+    def _issue(self, current_state: dict) -> dict:
+        return {"issue": {"state": current_state, "team": {"states": {"nodes": self._STATES}}}}
+
+    def _cur(self, name: str) -> dict:
+        return next(s for s in self._STATES if s["name"] == name)
+
+    def test_backlog_to_in_progress_moves_forward(self):
+        set_calls = []
+
+        def fake_graphql(query, variables):
+            if "IssueStates" in query:
+                return self._issue(self._cur("Backlog"))
+            set_calls.append(variables)
+            return {"issueUpdate": {"success": True}}
+
+        with patch("linear_reactions._graphql", side_effect=fake_graphql):
+            linear_reactions._transition_issue_state("issue-1", "started", ["In Progress"])
+        assert len(set_calls) == 1
+        assert set_calls[0]["stateId"] == "s-prog"  # preferred name wins
+
+    def test_in_progress_to_in_review_on_finish(self):
+        set_calls = []
+
+        def fake_graphql(query, variables):
+            if "IssueStates" in query:
+                return self._issue(self._cur("In Progress"))
+            set_calls.append(variables)
+            return {"issueUpdate": {"success": True}}
+
+        with patch("linear_reactions._graphql", side_effect=fake_graphql):
+            linear_reactions._transition_issue_state("issue-1", "started", ["In Review"])
+        assert set_calls[0]["stateId"] == "s-review"
+
+    def test_never_demotes_a_completed_issue(self):
+        """A human already marked it Done — a start transition must NOT reopen it."""
+        set_calls = []
+
+        def fake_graphql(query, variables):
+            if "IssueStates" in query:
+                return self._issue(self._cur("Done"))
+            set_calls.append(variables)
+            return {"issueUpdate": {"success": True}}
+
+        with patch("linear_reactions._graphql", side_effect=fake_graphql):
+            linear_reactions._transition_issue_state("issue-1", "started", ["In Progress"])
+        assert set_calls == []  # backward move (completed → started) skipped
+
+    def test_no_op_when_already_in_target_state(self):
+        set_calls = []
+
+        def fake_graphql(query, variables):
+            if "IssueStates" in query:
+                return self._issue(self._cur("In Progress"))
+            set_calls.append(variables)
+            return {"issueUpdate": {"success": True}}
+
+        with patch("linear_reactions._graphql", side_effect=fake_graphql):
+            linear_reactions._transition_issue_state("issue-1", "started", ["In Progress"])
+        assert set_calls == []
+
+    def test_gate_off_means_started_does_not_transition(self, monkeypatch):
+        """react_task_started with transition_state=False posts 👀 but never
+        touches issue state (the read_only/planning path)."""
+        monkeypatch.setenv("LINEAR_API_TOKEN", "lin_api_test")
+        with (
+            patch("linear_reactions._transition_issue_state") as trans,
+            patch("linear_reactions.requests.post", side_effect=_clean_start_calls("r-x")),
+        ):
+            react_task_started("linear", {"linear_issue_id": "issue-1"}, transition_state=False)
+            _join_sweep_thread()
+        trans.assert_not_called()
+
+    def test_gate_on_transitions_started_to_in_progress(self, monkeypatch):
+        monkeypatch.setenv("LINEAR_API_TOKEN", "lin_api_test")
+        with (
+            patch("linear_reactions._transition_issue_state") as trans,
+            patch("linear_reactions.requests.post", side_effect=_clean_start_calls("r-x")),
+        ):
+            react_task_started("linear", {"linear_issue_id": "issue-1"}, transition_state=True)
+            _join_sweep_thread()
+        trans.assert_called_once_with("issue-1", "started", ["In Progress"])
+
+    def test_finish_success_transitions_to_in_review_when_gated(self, monkeypatch):
+        monkeypatch.setenv("LINEAR_API_TOKEN", "lin_api_test")
+        with (
+            patch("linear_reactions._transition_issue_state") as trans,
+            patch(
+                "linear_reactions.requests.post",
+                side_effect=[_ok_delete_response(), _ok_response("r-term")],
+            ),
+        ):
+            react_task_finished(
+                "linear",
+                {"linear_issue_id": "issue-1"},
+                success=True,
+                started_reaction_id="r-eyes",
+                transition_state=True,
+            )
+        trans.assert_called_once_with("issue-1", "started", ["In Review"])
+
+    def test_finish_failure_does_not_transition(self, monkeypatch):
+        """A failed run leaves the state (In Progress) — the ❌ conveys it."""
+        monkeypatch.setenv("LINEAR_API_TOKEN", "lin_api_test")
+        with (
+            patch("linear_reactions._transition_issue_state") as trans,
+            patch(
+                "linear_reactions.requests.post",
+                side_effect=[_ok_delete_response(), _ok_response("r-term")],
+            ),
+        ):
+            react_task_finished(
+                "linear",
+                {"linear_issue_id": "issue-1"},
+                success=False,
+                started_reaction_id="r-eyes",
+                transition_state=True,
+            )
+        trans.assert_not_called()

@@ -31,14 +31,14 @@ def log(prefix: str, text: str):
 def log_error_cw(message: str, *, task_id: str | None = None) -> None:
     """Emit an ERROR line to stdout AND the APPLICATION_LOGS CloudWatch group.
 
-    Chunk 10 observability gap: ``log("ERROR", ...)`` writes to container
-    stdout, which AgentCore routes to
+    Observability gap: ``log("ERROR", ...)`` writes to container stdout,
+    which AgentCore routes to
     ``/aws/bedrock-agentcore/runtimes/<runtime>-DEFAULT`` rather than
     the APPLICATION_LOGS group that ``TaskDashboard`` LogQueryWidgets
     and ``bgagent status`` read. Agent-fatal errors were therefore
     invisible in the two places operators normally look — discovered
-    during E2E 2026-05-11 T2.2 when a ``missing built-in hard-deny
-    policies`` crash surfaced only as a cryptic "unknown" on the CLI.
+    in testing when a ``missing built-in hard-deny policies`` crash
+    surfaced only as a cryptic "unknown" on the CLI.
 
     This helper mirrors the ERROR line to APPLICATION_LOGS via a
     fire-and-forget daemon thread (so it cannot block the failing
@@ -209,7 +209,8 @@ def _surface_failure_lines(stdout: str) -> list[str]:
     tail — a parallel task DAG interleaves output so the red line is often in the
     middle) followed by a trailing-context tail. Deduped, order-preserving,
     capped. This is the fix for build-gate failures that a plain tail couldn't
-    explain (ABCA-662: the tail was a passing package's coverage table)."""
+    explain (the tail was often a passing package's coverage table, not the
+    error)."""
     lines = stdout.strip().splitlines()
     matched: list[str] = []
     for ln in lines:
@@ -237,46 +238,126 @@ def _surface_failure_lines(stdout: str) -> list[str]:
     return out or tail
 
 
+def _run_cmd_streaming(
+    cmd: list[str], label: str, cwd: str | None, timeout: int
+) -> subprocess.CompletedProcess:
+    """Run *cmd* streaming BOTH pipes live to the log while capturing them.
+
+    The buffered ``subprocess.run(capture_output=True)`` path holds the ENTIRE
+    output in memory and never writes it to container stdout — so awslogs (→
+    CloudWatch) never sees the raw stream, and the only record is whatever the
+    caller's post-hoc summary chooses to emit. For a heavy, long, opaque command
+    (``mise run build``: 4 parallel packages, 3000+ tests, ~30 min) that meant a
+    build failure was diagnosable ONLY if the summary happened to capture the
+    right lines — a failing sub-task's error would be buffered away and never
+    shipped, making such failures very hard to investigate.
+
+    Streaming fixes that at the source: every line is written to the log (→
+    CloudWatch verbatim, redacted) AS IT HAPPENS, so the full build log always
+    exists — no curated slice, no guessing which lines matter, plus live progress
+    instead of a silent multi-minute gap. Two drain threads (one per pipe) avoid
+    the classic single-thread PIPE deadlock and keep stdout/stderr SEPARATE so the
+    returned ``CompletedProcess`` matches ``subprocess.run``'s contract exactly
+    (callers still read ``.stdout`` / ``.stderr`` / ``.returncode`` unchanged).
+    """
+    proc = subprocess.Popen(
+        cmd,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,  # line-buffered so each line streams promptly
+        env=_clean_env(),
+    )
+    out_lines: list[str] = []
+    err_lines: list[str] = []
+
+    def _drain(pipe, buf: list[str]) -> None:
+        # log() redacts each line; the buffer keeps the raw text for the caller
+        # (the failure classifier redacts again before it re-emits anything).
+        try:
+            for line in pipe:
+                line = line.rstrip("\n")
+                buf.append(line)
+                log("CMD", f"  {line}")
+        finally:
+            pipe.close()
+
+    t_out = threading.Thread(target=_drain, args=(proc.stdout, out_lines), daemon=True)
+    t_err = threading.Thread(target=_drain, args=(proc.stderr, err_lines), daemon=True)
+    t_out.start()
+    t_err.start()
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        # Let the drain threads finish flushing the pipes the kill closes, so
+        # nothing is lost, then re-raise for the caller's timeout handling.
+        t_out.join(timeout=10)
+        t_err.join(timeout=10)
+        raise
+    t_out.join(timeout=10)
+    t_err.join(timeout=10)
+    return subprocess.CompletedProcess(
+        cmd, proc.returncode or 0, "\n".join(out_lines), "\n".join(err_lines)
+    )
+
+
 def run_cmd(
     cmd: list[str],
     label: str,
     cwd: str | None = None,
     timeout: int = 600,
     check: bool = True,
+    stream: bool = False,
 ) -> subprocess.CompletedProcess:
-    """Run a command with logging."""
+    """Run a command with logging.
+
+    ``stream=True`` tees the command's output to the log line-by-line as it runs
+    (so the FULL output reaches CloudWatch verbatim + gives live progress) —
+    used for the long/opaque build & lint verify commands where a buffered,
+    post-hoc summary hid the real failure. Default (buffered) is unchanged for
+    the many short commands (git/gh/mise-install) where a curated summary is
+    plenty and streaming would just add noise.
+    """
     log("CMD", redact_secrets(f"{label}: {' '.join(cmd)}"))
-    result = subprocess.run(
-        cmd,
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        env=_clean_env(),
-    )
+    if stream:
+        result = _run_cmd_streaming(cmd, label, cwd, timeout)
+    else:
+        result = subprocess.run(
+            cmd,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=_clean_env(),
+        )
     if result.returncode != 0:
         log("CMD", f"{label}: FAILED (exit {result.returncode})")
-        if result.stderr:
-            for line in result.stderr.strip().splitlines()[:20]:
-                log("CMD", f"  {line}")
-        # ALSO surface stdout on failure. Build/test tooling (jest, tsc, the mise
-        # task DAG) writes the ACTUAL failing-task error to STDOUT, not stderr —
-        # stderr often carries only the runner's plan echo. Logging stderr alone
-        # made build-gate failures undebuggable: a red ``mise run build`` showed
-        # every task STARTING but never WHICH one failed or why (ABCA-662).
-        #
-        # A plain tail is NOT enough for a PARALLEL task DAG: `mise run build`
-        # runs 4 packages concurrently and interleaves their output, so the
-        # failing task's error scrolls into the MIDDLE while the tail captures
-        # whatever finished LAST (e.g. a passing package's coverage table) —
-        # ABCA-662 follow-up: the tail showed a coverage table, not the red task.
-        # So FIRST scan the whole output for failure-signature lines and surface
-        # those (this is what names the failing sub-task), THEN a larger tail for
-        # trailing context. Redact — repo build output is untrusted.
-        if result.stdout:
-            surfaced = _surface_failure_lines(result.stdout)
-            for line in surfaced:
-                log("CMD", f"  {redact_secrets(line)}")
+        # When streaming, the FULL output already reached the log live — don't
+        # re-dump it. Just point at the surfaced failure lines for a quick jump.
+        if stream:
+            surfaced = _surface_failure_lines(result.stdout or "")
+            if surfaced:
+                log("CMD", f"{label}: failing lines (full output streamed above):")
+                for line in surfaced:
+                    log("CMD", f"  {redact_secrets(line)}")
+        else:
+            if result.stderr:
+                for line in result.stderr.strip().splitlines()[:20]:
+                    log("CMD", f"  {line}")
+            # ALSO surface stdout on failure. Build/test tooling (jest, tsc, the
+            # mise task DAG) writes the ACTUAL failing-task error to STDOUT, not
+            # stderr. A plain tail is NOT enough for a PARALLEL task DAG (the
+            # failing line scrolls into the MIDDLE while the tail is a passing
+            # package's coverage table), so scan the whole output for
+            # failure-signature lines FIRST, then a tail for context. Redact —
+            # repo build output is untrusted. (Buffered path only; the streaming
+            # path above already emitted everything verbatim.)
+            if result.stdout:
+                surfaced = _surface_failure_lines(result.stdout)
+                for line in surfaced:
+                    log("CMD", f"  {redact_secrets(line)}")
         if check:
             stderr_snippet = redact_secrets(result.stderr.strip()[:500]) if result.stderr else ""
             raise RuntimeError(f"{label} failed (exit {result.returncode}): {stderr_snippet}")
@@ -288,7 +369,7 @@ def run_cmd(
 # Signatures a transient (retryable) dependency/registry failure leaves in a
 # command's stderr — network blips, DNS hiccups, registry 5xx / rate limits.
 # NOT a permanent auth/not-found error: those are re-run-won't-help and would
-# just waste backoff time. Deliberately conservative (#251 dependency_unreachable).
+# just waste backoff time. Deliberately conservative.
 _TRANSIENT_CMD_SIGNATURES: tuple[str, ...] = (
     "could not resolve host",
     "temporary failure in name resolution",
@@ -321,7 +402,7 @@ def is_transient_cmd_failure(stderr: str) -> bool:
 
 # DNS name-resolution failures that NAME a host — a firewalled / non-existent
 # endpoint whose name cannot be resolved. Retrying never helps, so backoff bails
-# immediately (#251 review). Deliberately NARROWER than hooks.detect_egress_denial:
+# immediately. Deliberately NARROWER than hooks.detect_egress_denial:
 # a TCP-connect failure ("Failed to connect to <host> ... Connection timed out")
 # to an ALLOWLISTED host is genuinely transient and must stay retryable — so
 # ``Failed to connect``/``Connection refused`` are excluded here. A persistent
@@ -336,7 +417,7 @@ _UNRESOLVABLE_HOST_RE = re.compile(
 
 
 def _names_unresolvable_host(stderr: str) -> bool:
-    """True when *stderr* is a DNS name-resolution failure naming a host (#251).
+    """True when *stderr* is a DNS name-resolution failure naming a host.
 
     Such a host cannot be reached no matter how often we retry (non-existent or
     firewalled at DNS), so backoff bails immediately rather than burn its budget
@@ -357,7 +438,7 @@ def run_cmd_with_backoff(
     on_retry=None,
     sleep=time.sleep,
 ) -> subprocess.CompletedProcess:
-    """Run ``cmd`` with bounded retries on *transient* failures (#251, Phase 2).
+    """Run ``cmd`` with bounded retries on *transient* failures.
 
     Retries up to ``max_attempts`` times with exponential backoff
     (``base_delay_s * 2**(attempt-1)``) ONLY when the failure looks transient
@@ -385,9 +466,9 @@ def run_cmd_with_backoff(
             return result
         stderr = result.stderr or ""
         # A named-host failure is a firewalled/non-existent endpoint — retrying
-        # never helps and would emit misleading dependency_unreachable events
-        # (#251 review). Bail immediately so _fail_setup_command reclassifies it
-        # to the non-retryable egress_denied remedy.
+        # never helps and would emit misleading dependency_unreachable events.
+        # Bail immediately so _fail_setup_command reclassifies it to the
+        # non-retryable egress_denied remedy.
         exhausted = attempt >= max_attempts
         if exhausted or not is_transient_cmd_failure(stderr) or _names_unresolvable_host(stderr):
             break

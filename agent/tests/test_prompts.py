@@ -31,16 +31,55 @@ class TestChannelPromptAddendum:
     def test_api_channel_returns_empty(self):
         assert _channel_prompt_addendum(_config(channel_source="api")) == ""
 
-    def test_linear_channel_includes_linear_tools(self):
+    def test_linear_addendum_is_deterministic_no_mcp(self):
+        # ADR-016: Linear is fully deterministic. The agent has no Linear tools,
+        # so the addendum must NOT reference any mcp__linear-server__* tool and
+        # must tell the agent context is pre-hydrated + status is automatic.
         addendum = _channel_prompt_addendum(
             _config(
                 channel_source="linear",
-                channel_metadata={"linear_issue_identifier": "ABC-42"},
+                channel_metadata={
+                    "linear_issue_id": "issue-uuid-1",
+                    "linear_issue_identifier": "ABC-42",
+                },
             )
         )
-        assert "Linear issue progress updates" in addendum
-        assert "mcp__linear-server__save_comment" in addendum
         assert "ABC-42" in addendum
+        assert "mcp__linear-server" not in addendum
+        # Inbound context is pre-hydrated; outbound status is platform-managed.
+        assert "already" in addendum.lower()
+        assert "Do NOT post Linear comments" in addendum
+
+    def test_linear_addendum_same_regardless_of_workflow(self):
+        # There is no longer per-workflow MCP choreography — new-task, iteration,
+        # and decompose all get the same deterministic "platform manages Linear"
+        # guidance, and none of them mention MCP tools.
+        base_meta = {"linear_issue_id": "issue-uuid-1", "linear_issue_identifier": "ABC-42"}
+        for wf in (None, "coding/pr-iteration-v1", "coding/decompose-v1", "coding/new-task-v1"):
+            overrides: dict[str, Any] = {"channel_source": "linear", "channel_metadata": base_meta}
+            if wf is not None:
+                overrides["resolved_workflow"] = {"id": wf, "version": "1.0.0"}
+            addendum = _channel_prompt_addendum(_config(**overrides))
+            assert "mcp__linear-server" not in addendum
+            assert "🤖 Starting on this issue" not in addendum
+            assert "Linear context discovery" not in addendum
+
+    def test_linear_integration_node_gets_no_addendum(self):
+        # #247 UX.16: the synthetic orchestration integration node is a Linear
+        # task but has NO real sub-issue — channel_metadata omits
+        # linear_issue_id. No issue id → no addendum (the parent panel is the
+        # surface).
+        addendum = _channel_prompt_addendum(
+            _config(
+                channel_source="linear",
+                channel_metadata={
+                    "orchestration_id": "orch_abc",
+                    "orchestration_sub_issue_id": "orch_abc__integration",
+                    "parent_linear_issue_id": "parent-uuid",
+                },
+            )
+        )
+        assert addendum == ""
 
     def test_jira_channel_gets_no_addendum(self):
         # Jira comments are posted out-of-band by jira_reactions (REST shim);
@@ -63,6 +102,17 @@ class TestGetSystemPrompt:
         assert "{branch_name}" in prompt
         assert "{workflow}" not in prompt
 
+    def test_new_task_has_clarify_before_spend_branch(self):
+        # Clarify-before-spend (UX #4): the new_task workflow must tell the agent
+        # to ASK via the request_clarification tool instead of guessing on a
+        # genuinely vague request, and to not build unrequested scope.
+        prompt = get_system_prompt("coding/new-task-v1")
+        assert "request_clarification" in prompt  # the deterministic tool signal
+        assert "{needs_input_marker}" in prompt  # marker fallback, substituted at build time
+        assert "clarifying question" in prompt or "clarification" in prompt
+        # Scope discipline (the typo->button case).
+        assert "weren't requested" in prompt or "not requested" in prompt
+
     def test_pr_iteration_returns_prompt_with_update_pr(self):
         prompt = get_system_prompt("coding/pr-iteration-v1")
         assert "Post a summary comment on the PR" in prompt
@@ -74,6 +124,16 @@ class TestGetSystemPrompt:
         assert "{branch_name}" in prompt
         assert "{workflow}" not in prompt
 
+    def test_pr_iteration_distinguishes_question_from_change(self):
+        # A6/#299: a question-only comment ("where is the login page?") must be
+        # answered without forcing a code change, or the platform reports a
+        # false "✅ Updated". The prompt must carry the triage.
+        prompt = get_system_prompt("coding/pr-iteration-v1")
+        assert "QUESTION" in prompt
+        assert "CHANGE REQUEST" in prompt
+        # It must explicitly forbid inventing a commit to justify "doing something".
+        assert "empty or cosmetic commit" in prompt or "Do NOT invent a code change" in prompt
+
     def test_pr_review_returns_prompt_with_review_workflow(self):
         prompt = get_system_prompt("coding/pr-review-v1")
         assert "READ-ONLY" in prompt
@@ -84,8 +144,27 @@ class TestGetSystemPrompt:
         assert "Write and Edit are not available" in prompt
         assert "{workflow}" not in prompt
 
+    def test_restack_returns_prompt_with_remerge_workflow(self):
+        prompt = get_system_prompt("coding/restack-v1")
+        assert "RE-STACKING" in prompt
+        assert "predecessor" in prompt
+        assert (
+            "do NOT add features" in prompt
+            or "NOT new feature work" in prompt
+            or "not new feature" in prompt.lower()
+        )
+        assert "{branch_name}" in prompt  # pushes to the SAME existing branch
+        assert "{pr_number}" in prompt
+        assert "{repo_url}" in prompt
+        assert "{workflow}" not in prompt
+
     def test_all_workflows_contain_shared_base_sections(self):
-        for workflow_id in ("coding/new-task-v1", "coding/pr-iteration-v1", "coding/pr-review-v1"):
+        for workflow_id in (
+            "coding/new-task-v1",
+            "coding/pr-iteration-v1",
+            "coding/pr-review-v1",
+            "coding/restack-v1",
+        ):
             prompt = get_system_prompt(workflow_id)
             assert "## Environment" in prompt, f"Missing Environment in {workflow_id}"
             has_rules = "## Rules" in prompt or "## Rules override" in prompt
@@ -272,3 +351,122 @@ class TestCrossLanguageHashParity:
         for v in vectors:
             actual = hashlib.sha256(v["input"].encode("utf-8")).hexdigest()
             assert actual == v["sha256"], f"Hash mismatch for: {v['note']}"
+
+
+class TestDecomposePriorRepoDigest:
+    """#299 plan-mode T2 — the warm-digest injection into the decompose prompt."""
+
+    def _setup(self, head_sha: str = "a1b2c3d4e5f6a7b8"):
+        from models import RepoSetup
+
+        return RepoSetup(repo_dir="/w/repo", branch="feat/x", head_sha_before=head_sha)
+
+    def _decompose_config(self, channel_metadata=None) -> TaskConfig:
+        return _config(
+            task_id="t-1",
+            resolved_workflow={"id": "coding/decompose-v1", "version": "1.0.0"},
+            channel_source="linear",
+            channel_metadata=channel_metadata or {},
+        )
+
+    def test_round0_no_prior_digest_leaves_placeholder_empty(self):
+        from prompt_builder import build_system_prompt
+
+        prompt = build_system_prompt(self._decompose_config(), self._setup(), None, "")
+        # The placeholder is always substituted (never leaks a literal {token}).
+        assert "{prior_repo_digest}" not in prompt
+        assert "{repo_head_sha}" not in prompt
+        # Round 0: no "prior exploration" block.
+        assert "Prior exploration of this repository" not in prompt
+
+    def test_revise_injects_prior_digest_and_current_sha_echo(self):
+        from prompt_builder import build_system_prompt
+
+        cfg = self._decompose_config(
+            {
+                "decompose_repo_digest": "modules: api/, ui/; tests in test/",
+                "decompose_repo_digest_sha": "a1b2c3d4e5f6a7b8",
+            }
+        )
+        prompt = build_system_prompt(cfg, self._setup("a1b2c3d4e5f6a7b8"), None, "")
+        assert "Prior exploration of this repository" in prompt
+        assert "modules: api/, ui/; tests in test/" in prompt
+        # Same sha → the "current state" freshness note, not the drift warning.
+        assert "current state" in prompt
+        assert "has changed since this digest" not in prompt
+        # The sha is echoed for the agent to copy into repo_digest_sha.
+        assert "a1b2c3d4e5f6a7b8" in prompt
+
+    def test_drift_note_when_repo_moved(self):
+        from prompt_builder import build_system_prompt
+
+        cfg = self._decompose_config(
+            {
+                "decompose_repo_digest": "modules: api/, ui/",
+                "decompose_repo_digest_sha": "0000000aaaaaaaaa",  # prior sha
+            }
+        )
+        # Repo now at a DIFFERENT sha → the agent is warned to re-verify.
+        prompt = build_system_prompt(cfg, self._setup("ffffffff11111111"), None, "")
+        assert "has changed since this digest" in prompt
+        assert "re-verify" in prompt
+
+
+class TestDecomposeRevisionDirective:
+    """#299 BLOCKER-1 — the revise-in-place directive injected on a REVISION round.
+
+    Without it the decompose prompt reads as "plan from scratch" and the agent
+    silently reverts edits the reviewer already accepted; with it the agent is
+    told to EDIT the current plan (apply only the requested change, keep the rest)
+    and report the diff in ``change_summary``.
+    """
+
+    def _setup(self, head_sha: str = "a1b2c3d4e5f6a7b8"):
+        from models import RepoSetup
+
+        return RepoSetup(repo_dir="/w/repo", branch="feat/x", head_sha_before=head_sha)
+
+    def _decompose_config(self, channel_metadata=None) -> TaskConfig:
+        return _config(
+            task_id="t-1",
+            resolved_workflow={"id": "coding/decompose-v1", "version": "1.0.0"},
+            channel_source="linear",
+            channel_metadata=channel_metadata or {},
+        )
+
+    def test_round0_no_revision_directive(self):
+        from prompt_builder import build_system_prompt
+
+        prompt = build_system_prompt(self._decompose_config(), self._setup(), None, "")
+        # The placeholder is always substituted (never leaks a literal {token}).
+        assert "{revision_directive}" not in prompt
+        # Round 0: no "this is a REVISION" framing.
+        assert "This is a REVISION" not in prompt
+
+    def test_revision_round_injects_edit_in_place_directive(self):
+        from prompt_builder import build_system_prompt
+
+        cfg = self._decompose_config({"decompose_revision_round": "1"})
+        prompt = build_system_prompt(cfg, self._setup(), None, "")
+        assert "This is a REVISION" in prompt
+        # It tells the agent to preserve untouched sub-issues and not re-derive.
+        assert "keep every other sub-issue" in prompt
+        assert "do NOT silently undo edits" in prompt.replace("\n", " ")
+
+    def test_zero_or_garbage_revision_round_is_treated_as_round0(self):
+        from prompt_builder import build_system_prompt
+
+        for raw in ("0", "", "not-a-number"):
+            cfg = self._decompose_config({"decompose_revision_round": raw})
+            prompt = build_system_prompt(cfg, self._setup(), None, "")
+            assert "This is a REVISION" not in prompt, f"round={raw!r} should be round-0"
+
+    def test_change_summary_field_retired_from_plan_shape(self):
+        from prompt_builder import build_system_prompt
+
+        # #299 BLOCKER-1 round 2: the agent-authored change_summary was RETIRED
+        # (it fabricated a justification for a re-added dropped node). The "what
+        # changed" line is now computed by the platform from the before→after diff,
+        # so the emit-step JSON shape must NOT ask for change_summary anymore.
+        prompt = build_system_prompt(self._decompose_config(), self._setup(), None, "")
+        assert '"change_summary"' not in prompt

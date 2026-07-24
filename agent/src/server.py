@@ -34,7 +34,7 @@ from pipeline import run_task
 # doesn't forward container stdout to APPLICATION_LOGS, so a broken writer
 # is invisible except for this metric. Single counter = single alarm
 # surface — the trade-off is that the alarm can't distinguish which writer
-# is broken (see Chunk 7c review notes). Defined BEFORE any function that
+# is broken. Defined BEFORE any function that
 # references it (including ``_debug_cw`` / ``_warn_cw``) so the ordering is
 # import-time safe: a daemon thread spawned from a write-blocking function
 # can never race with module-level globals still being assigned.
@@ -50,12 +50,7 @@ _MIN_REDACTABLE_SECRET_LEN = 12
 def _redact_cached_credentials(text: str) -> str:
     """Remove cached env secrets from debug text before stdout / CloudWatch."""
     out = text
-    for env_key in (
-        "GITHUB_TOKEN",
-        "LINEAR_API_TOKEN",
-        "JIRA_API_TOKEN",
-        "JIRA_APP_ACTOR_SHARED_SECRET",
-    ):
+    for env_key in ("GITHUB_TOKEN", "LINEAR_API_TOKEN", "JIRA_API_TOKEN"):
         secret = os.environ.get(env_key) or ""
         if len(secret) >= _MIN_REDACTABLE_SECRET_LEN:
             out = out.replace(secret, f"<{env_key}_REDACTED>")
@@ -125,8 +120,8 @@ def _debug_cw_exc(
 def _warn_cw(msg: str, *, task_id: str | None = None) -> None:
     """Emit a server-level warning to stdout AND CloudWatch.
 
-    Chunk 7c — AgentCore doesn't forward container stdout to
-    APPLICATION_LOGS (see the ``_debug_cw`` comment block above), so
+    AgentCore doesn't forward container stdout to APPLICATION_LOGS (see
+    the ``_debug_cw`` comment block above), so
     warning ``print`` calls about malformed invocation payloads are
     effectively invisible in production. Route them through the same
     daemon-thread CloudWatch writer used by ``_debug_cw`` (writing to
@@ -308,8 +303,8 @@ def _extract_workload_access_token(request: Request) -> str:
     """Read AgentCore's workload access token off the inbound request.
 
     AgentCore Runtime delivers the token on `/invocations` requests under
-    one of two header spellings (both observed 2026-05-18 on a single
-    request via diagnostic logging in us-east-1):
+    one of two header spellings (both observed on a single request via
+    diagnostic logging):
       1. ``WorkloadAccessToken`` — the SDK's documented header in
          ``bedrock_agentcore.runtime.models::ACCESS_TOKEN_HEADER``.
       2. ``x-amzn-bedrock-agentcore-runtime-workload-accesstoken`` —
@@ -390,11 +385,15 @@ def _run_task_background(
     session_id: str = "",
     hydrated_context: dict | None = None,
     system_prompt_overrides: str = "",
+    build_command: str = "",
+    lint_command: str = "",
     prompt_version: str = "",
     memory_id: str = "",
     resolved_workflow: dict | None = None,
     branch_name: str = "",
     pr_number: str = "",
+    base_branch: str | None = None,
+    merge_branches: list[str] | None = None,
     cedar_policies: list[str] | None = None,
     approval_timeout_s: int | None = None,
     initial_approvals: list[str] | None = None,
@@ -434,8 +433,8 @@ def _run_task_background(
         except (ImportError, AttributeError) as e:
             _warn_cw(
                 f"bedrock_agentcore workload-token bridge unavailable "
-                f"({type(e).__name__}: {e}); Linear MCP will resolve via "
-                "Secrets Manager fallback",
+                f"({type(e).__name__}: {e}); the Linear reactions token will "
+                "resolve via Secrets Manager fallback",
                 task_id=task_id,
             )
 
@@ -459,7 +458,7 @@ def _run_task_background(
     try:
         # Propagate the correlation envelope into this thread's OTEL context
         # so spans are correlated with the AgentCore session and the platform
-        # identity in CloudWatch (#245). Runs whenever any field is present —
+        # identity in CloudWatch. Runs whenever any field is present —
         # session_id may be empty while user_id/repo are known.
         if session_id or user_id or repo_url:
             propagate_correlation_context(session_id, user_id=user_id, repo=repo_url or None)
@@ -476,11 +475,15 @@ def _run_task_background(
             task_id=task_id,
             hydrated_context=hydrated_context,
             system_prompt_overrides=system_prompt_overrides,
+            build_command=build_command,
+            lint_command=lint_command,
             prompt_version=prompt_version,
             memory_id=memory_id,
             resolved_workflow=resolved_workflow,
             branch_name=branch_name,
             pr_number=pr_number,
+            base_branch=base_branch,
+            merge_branches=merge_branches,
             cedar_policies=cedar_policies,
             approval_timeout_s=approval_timeout_s,
             initial_approvals=initial_approvals,
@@ -525,7 +528,10 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
         inp.get("model_id") or inp.get("anthropic_model") or os.environ.get("ANTHROPIC_MODEL", "")
     )
     system_prompt_overrides = inp.get("system_prompt_overrides", "")
-    max_turns = int(inp.get("max_turns", 0)) or int(os.environ.get("MAX_TURNS", "100"))
+    # #1: per-repo build/lint verification commands. Empty → agent defaults to mise.
+    build_command = inp.get("build_command", "")
+    lint_command = inp.get("lint_command", "")
+    max_turns = int(inp.get("max_turns", 0)) or int(os.environ.get("MAX_TURNS", "200"))
     max_budget_usd = float(inp.get("max_budget_usd", 0)) or None
     aws_region = inp.get("aws_region") or os.environ.get("AWS_REGION", "")
     task_id = inp.get("task_id", "")
@@ -535,15 +541,21 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
     resolved_workflow = inp.get("resolved_workflow")
     branch_name = inp.get("branch_name", "")
     pr_number = str(inp.get("pr_number", ""))
+    # Stacked-child base branch + (diamond) predecessor branches to merge in.
+    # The orchestrator sets these from the orchestration row; absent for
+    # ordinary tasks (agent branches off main as today).
+    base_branch = inp.get("base_branch") or None
+    merge_branches_raw = inp.get("merge_branches") or []
+    merge_branches = [b for b in merge_branches_raw if isinstance(b, str)]
     cedar_policies = inp.get("cedar_policies") or []
-    # Cedar HITL (§7.3) — per-task approval defaults + seeded allowlist.
-    # Both are forwarded verbatim to the pipeline; the engine
+    # Cedar human-in-the-loop approvals — per-task approval defaults + seeded
+    # allowlist. Both are forwarded verbatim to the pipeline; the engine
     # validates shape at construction time and raises on bad input.
     approval_timeout_s = inp.get("approval_timeout_s")
     initial_approvals = inp.get("initial_approvals") or []
-    # Chunk 7: TaskTable-persisted ``approval_gate_count`` threaded by
-    # the orchestrator so a container restart (§13.6) resumes the
-    # cumulative gate budget instead of resetting to 0. Non-int payloads
+    # TaskTable-persisted ``approval_gate_count`` threaded by the orchestrator
+    # so a container restart resumes the cumulative gate budget instead of
+    # resetting to 0. Non-int payloads
     # coerce to 0 to keep the invocation path fail-open on a malformed
     # field; the downstream PolicyEngine rejects negatives loudly.
     raw_gate_count = inp.get("initial_approval_gate_count", 0)
@@ -557,9 +569,9 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
             task_id=inp.get("task_id"),
         )
         initial_approval_gate_count = 0
-    # Chunk 7b (§4 step 5, decision #13): per-task cap resolved by the
-    # submit path and persisted on the TaskRecord. Threaded so a
-    # blueprint-configured cap (or the default-50 frozen at submit) wins
+    # Per-task cap resolved by the submit path and persisted on the
+    # TaskRecord. Threaded so a blueprint-configured cap (or the
+    # default-50 frozen at submit) wins
     # over the PolicyEngine's compile-time fallback on restarts. A
     # malformed payload coerces to ``None`` so the engine can still
     # construct; its own bounds check would reject anything out-of-range.
@@ -579,18 +591,17 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
     channel_source = inp.get("channel_source", "") or ""
     channel_metadata = inp.get("channel_metadata") or {}
     attachments = inp.get("attachments") or []
-    # ``trace`` is strictly opt-in (design §10.1). Accept only real
-    # booleans from the orchestrator — a string "false" would otherwise
-    # flip the flag on.
+    # ``trace`` is strictly opt-in. Accept only real booleans from the
+    # orchestrator — a string "false" would otherwise flip the flag on.
     trace = inp.get("trace") is True
     # Platform user_id (Cognito ``sub``). Only consumed when ``trace``
     # is true (see ``TaskConfig.user_id``). String check defends against
     # a non-string payload — the agent writes this into an S3 key, so a
     # surprise ``None`` or int would blow up later at upload time.
     # When coercion fires, WARN loudly: a silent empty string combined
-    # with ``trace=True`` would make Stage 4's upload path skip the S3
-    # write with zero observability, and a user-reported "my trace
-    # vanished" investigation would find nothing.
+    # with ``trace=True`` would make the upload path skip the S3 write
+    # with zero observability, and a user-reported "my trace vanished"
+    # investigation would find nothing.
     raw_user_id = inp.get("user_id", "")
     if isinstance(raw_user_id, str):
         user_id = raw_user_id
@@ -605,9 +616,9 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
 
     session_id = request.headers.get("x-amzn-bedrock-agentcore-runtime-session-id", "")
 
-    # Cedar HITL: stamp TASK_STARTED_AT so the PreToolUse hook's
-    # ``_remaining_maxlifetime_s`` (agent/src/hooks.py §6.5) has the
-    # real per-task clock to compute the maxLifetime ceiling. Without
+    # Stamp TASK_STARTED_AT so the PreToolUse hook's
+    # ``_remaining_maxlifetime_s`` (agent/src/hooks.py) has the real
+    # per-task clock to compute the maxLifetime ceiling. Without
     # this the hook's ceiling computation silently falls back to
     # "unknown, don't clip" (fail-open) and the user may be asked for
     # approval on a gate whose window will expire before they can
@@ -636,11 +647,15 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
         "session_id": session_id,
         "hydrated_context": hydrated_context,
         "system_prompt_overrides": system_prompt_overrides,
+        "build_command": build_command,
+        "lint_command": lint_command,
         "prompt_version": prompt_version,
         "memory_id": memory_id,
         "resolved_workflow": resolved_workflow,
         "branch_name": branch_name,
         "pr_number": pr_number,
+        "base_branch": base_branch,
+        "merge_branches": merge_branches,
         "cedar_policies": cedar_policies,
         "approval_timeout_s": approval_timeout_s,
         "initial_approvals": initial_approvals,
@@ -659,10 +674,11 @@ def _validate_required_params(params: dict) -> list[str]:
     """Check the minimum viable param set for the pipeline.
 
     Returns the list of missing field names (empty list = valid). A repo-bound
-    workflow requires ``repo_url``; a repo-less workflow (``requires_repo:false``,
-    #248 Phase 3) does not. All non-PR workflows need either an ``issue_number``
+    workflow requires ``repo_url``; a repo-less workflow (``requires_repo:false``)
+    does not. All non-PR workflows need either an ``issue_number``
     or ``task_description``; PR workflows (``coding/pr-iteration-v1`` /
-    ``coding/pr-review-v1``) additionally require ``pr_number``.
+    ``coding/pr-review-v1`` / ``coding/restack-v1``) require ``pr_number``
+    instead and carry no description.
     """
     missing: list[str] = []
     workflow_id = (params.get("resolved_workflow") or {}).get("id", "coding/new-task-v1")
@@ -687,7 +703,7 @@ def _validate_required_params(params: dict) -> list[str]:
     if requires_repo and not params.get("repo_url"):
         missing.append("repo_url")
 
-    if workflow_id in ("coding/pr-iteration-v1", "coding/pr-review-v1"):
+    if workflow_id in ("coding/pr-iteration-v1", "coding/pr-review-v1", "coding/restack-v1"):
         if not params.get("pr_number"):
             missing.append("pr_number")
     else:

@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from models import AgentResult, RepoSetup, TaskConfig
 from pipeline import _chain_prior_agent_error, _resolve_overall_task_status
+from post_hooks import VerifyOutcome
 
 # Minimal Linear channel metadata for the early-ACK ordering tests.
 _LINEAR_META = {"issue_id": "ABCA-1", "workspace_id": "ws-1"}
@@ -56,8 +57,8 @@ class TestCedarPoliciesInjection:
 
         with (
             patch("pipeline.ensure_committed", return_value=False),
-            patch("pipeline.verify_build", return_value=True),
-            patch("pipeline.verify_lint", return_value=True),
+            patch("pipeline.verify_build", return_value=VerifyOutcome(passed=True)),
+            patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
             patch(
                 "pipeline.ensure_pr",
                 return_value="https://github.com/org/repo/pull/1",
@@ -124,8 +125,8 @@ class TestCedarPoliciesInjection:
 
         with (
             patch("pipeline.ensure_committed", return_value=False),
-            patch("pipeline.verify_build", return_value=True),
-            patch("pipeline.verify_lint", return_value=True),
+            patch("pipeline.verify_build", return_value=VerifyOutcome(passed=True)),
+            patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
             patch(
                 "pipeline.ensure_pr",
                 return_value="https://github.com/org/repo/pull/1",
@@ -194,8 +195,8 @@ class TestCedarPoliciesInjection:
 
         with (
             patch("pipeline.ensure_committed", return_value=False),
-            patch("pipeline.verify_build", return_value=True),
-            patch("pipeline.verify_lint", return_value=True),
+            patch("pipeline.verify_build", return_value=VerifyOutcome(passed=True)),
+            patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
             patch(
                 "pipeline.ensure_pr",
                 return_value="https://github.com/org/repo/pull/1",
@@ -532,8 +533,8 @@ class TestRepoLessPipeline:
 
         with (
             patch("pipeline.ensure_committed", return_value=False),
-            patch("pipeline.verify_build", return_value=True),
-            patch("pipeline.verify_lint", return_value=True),
+            patch("pipeline.verify_build", return_value=VerifyOutcome(passed=True)),
+            patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
             patch("pipeline.ensure_pr", return_value="https://github.com/org/repo/pull/1"),
             patch("pipeline.get_disk_usage", return_value=0),
             patch("pipeline.print_metrics"),
@@ -554,6 +555,76 @@ class TestRepoLessPipeline:
         mock_setup_repo.assert_called_once()
         assert result["status"] == "success"
         assert result["pr_url"] == "https://github.com/org/repo/pull/1"
+
+    @patch("runner.run_agent")
+    @patch("pipeline.build_system_prompt")
+    @patch("pipeline.discover_project_config")
+    @patch("repo.setup_repo")
+    @patch("pipeline.task_span")
+    @patch("pipeline.task_state")
+    def test_decompose_workflow_delivers_plan_artifact_and_skips_pr(
+        self,
+        _mock_task_state,
+        mock_task_span,
+        mock_setup_repo,
+        _mock_discover,
+        _mock_build_prompt,
+        mock_run_agent,
+        monkeypatch,
+    ):
+        # #299 agent-native decompose: coding/decompose-v1 is REPO-FUL (clones for
+        # context) but its terminal outcome is an ARTIFACT (the plan JSON), not a
+        # PR. It must take the repo-bound path (clone), then deliver the plan as an
+        # artifact and SKIP the build/PR post-hooks entirely.
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        mock_setup_repo.return_value = RepoSetup(
+            repo_dir="/workspace/repo",
+            branch="bgagent/test/branch",
+            build_before=True,
+        )
+        plan_json = '{"decompose": true, "reasoning": "two features", "sub_issues": []}'
+
+        async def fake_run_agent(_prompt, _system_prompt, config, cwd=None, trajectory=None):
+            return AgentResult(
+                status="success", turns=3, cost_usd=0.05, num_turns=3, result_text=plan_json
+            )
+
+        mock_run_agent.side_effect = fake_run_agent
+        mock_task_span.return_value = self._mock_span()
+
+        with (
+            patch(
+                "pipeline._deliver_plan_artifact",
+                return_value="s3://artifacts-bkt/artifacts/decompose-1/result.md",
+            ) as mock_deliver,
+            patch("pipeline.ensure_pr") as mock_ensure_pr,
+            patch("pipeline.verify_build") as mock_verify_build,
+            patch("pipeline.ensure_committed") as mock_ensure_committed,
+            patch("pipeline.get_disk_usage", return_value=0),
+            patch("pipeline.print_metrics"),
+            patch("pipeline._maybe_upload_trace", return_value=None),
+        ):
+            from pipeline import run_task
+
+            result = run_task(
+                repo_url="owner/repo",
+                task_description="Add auth + billing + admin",
+                github_token="ghp_test",
+                aws_region="us-east-1",
+                task_id="decompose-1",
+                resolved_workflow={"id": "coding/decompose-v1", "version": "1.0.0"},
+            )
+
+        # Repo-bound path ran (clone), plan delivered as artifact, PR/build skipped.
+        mock_setup_repo.assert_called_once()
+        mock_deliver.assert_called_once()
+        mock_ensure_pr.assert_not_called()
+        mock_verify_build.assert_not_called()
+        mock_ensure_committed.assert_not_called()
+        assert result["status"] == "success"
+        assert result["pr_url"] is None
+        assert result["artifact_uri"] == "s3://artifacts-bkt/artifacts/decompose-1/result.md"
 
 
 class TestChainPriorAgentError:
@@ -604,6 +675,28 @@ class TestResolveOverallTaskStatus:
         assert err is not None
         assert "agent_status='success'" in err
         assert "build_ok=False" in err
+
+    def test_success_with_build_TIMED_OUT_marks_timeout_distinctly(self):
+        # User 2026-06-29: a build that exceeded the time limit must read as a
+        # TIMEOUT, not a generic build failure. The error_message carries
+        # ``build_ok=timeout`` so the platform's failure copy says "timed out".
+        ar = AgentResult(status="success")
+        status, err = _resolve_overall_task_status(
+            ar, build_ok=False, pr_url="https://pr", build_timed_out=True
+        )
+        assert status == "error"
+        assert err is not None
+        assert "build_ok=timeout" in err
+        assert "build_ok=False" not in err  # not the generic-failure marker
+
+    def test_build_failed_but_not_timeout_keeps_false_marker(self):
+        ar = AgentResult(status="success")
+        _, err = _resolve_overall_task_status(
+            ar, build_ok=False, pr_url="https://pr", build_timed_out=False
+        )
+        assert err is not None
+        assert "build_ok=False" in err
+        assert "timeout" not in err
 
     def test_unknown_always_error_even_with_pr_and_build(self):
         """agent_status=unknown must always fail — never infer success from PR/build."""
@@ -760,8 +853,8 @@ class TestCancelSkipsPostHooks:
 
         with (
             patch("pipeline.ensure_committed", return_value=False),
-            patch("pipeline.verify_build", return_value=True),
-            patch("pipeline.verify_lint", return_value=True),
+            patch("pipeline.verify_build", return_value=VerifyOutcome(passed=True)),
+            patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
             patch("pipeline.ensure_pr", mock_ensure_pr),
             patch("pipeline.get_disk_usage", return_value=0),
             patch("pipeline.print_metrics"),
@@ -782,6 +875,129 @@ class TestCancelSkipsPostHooks:
             )
 
         mock_ensure_pr.assert_called_once()
+
+    @patch("runner.run_agent")
+    @patch("pipeline.build_system_prompt")
+    @patch("pipeline.discover_project_config")
+    @patch("repo.setup_repo")
+    @patch("pipeline.task_span")
+    def test_jira_card_not_moved_to_in_review_on_build_failure(
+        self,
+        mock_task_span,
+        mock_setup_repo,
+        _mock_discover,
+        _mock_build_prompt,
+        mock_run_agent,
+        monkeypatch,
+    ):
+        """review blocker #9a: ensure_pr opens a PR even on a FAILED build (so the
+        human sees the broken diff), so the Jira In Progress → In Review transition
+        must gate on build_passed — not merely on pr_url — or the board lies that
+        the work is ready for review. Mirrors the Linear success-only twin."""
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        mock_setup_repo.return_value = RepoSetup(
+            repo_dir="/workspace/repo",
+            branch="bgagent/test/branch",
+            build_before=True,
+        )
+
+        async def fake_run_agent(_prompt, _system_prompt, _config, cwd=None, trajectory=None):
+            return AgentResult(status="success", turns=2, cost_usd=0.01, num_turns=2)
+
+        mock_run_agent.side_effect = fake_run_agent
+
+        mock_span = MagicMock()
+        mock_span.__enter__ = MagicMock(return_value=mock_span)
+        mock_span.__exit__ = MagicMock(return_value=False)
+        mock_task_span.return_value = mock_span
+
+        mock_transition = MagicMock()
+        with (
+            patch("pipeline.ensure_committed", return_value=False),
+            # FAILED build — ensure_pr still opens the PR below.
+            patch("pipeline.verify_build", return_value=VerifyOutcome(passed=False)),
+            patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
+            patch("pipeline.ensure_pr", return_value="https://github.com/o/r/pull/9"),
+            patch("pipeline.transition_pr_opened", mock_transition),
+            patch("pipeline.get_disk_usage", return_value=0),
+            patch("pipeline.print_metrics"),
+            patch("pipeline.task_state") as mock_task_state_mod,
+        ):
+            mock_task_state_mod.get_task = MagicMock(return_value={"status": "RUNNING"})
+            mock_task_state_mod.TaskFetchError = Exception  # type: ignore[attr-defined]
+            from pipeline import run_task
+
+            run_task(
+                repo_url="o/r",
+                task_description="x",
+                github_token="ghp_test",
+                aws_region="us-east-1",
+                task_id="t-jira-failbuild",
+                channel_source="jira",
+                channel_metadata={"jira_issue_key": "ABC-1"},
+            )
+        # PR opened, but the Jira card was NOT advanced to In Review on the red build.
+        mock_transition.assert_not_called()
+
+    @patch("runner.run_agent")
+    @patch("pipeline.build_system_prompt")
+    @patch("pipeline.discover_project_config")
+    @patch("repo.setup_repo")
+    @patch("pipeline.task_span")
+    def test_jira_card_moved_to_in_review_on_build_success(
+        self,
+        mock_task_span,
+        mock_setup_repo,
+        _mock_discover,
+        _mock_build_prompt,
+        mock_run_agent,
+        monkeypatch,
+    ):
+        """The positive twin: a PASSING build DOES move the Jira card to In Review."""
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        mock_setup_repo.return_value = RepoSetup(
+            repo_dir="/workspace/repo",
+            branch="bgagent/test/branch",
+            build_before=True,
+        )
+
+        async def fake_run_agent(_prompt, _system_prompt, _config, cwd=None, trajectory=None):
+            return AgentResult(status="success", turns=2, cost_usd=0.01, num_turns=2)
+
+        mock_run_agent.side_effect = fake_run_agent
+
+        mock_span = MagicMock()
+        mock_span.__enter__ = MagicMock(return_value=mock_span)
+        mock_span.__exit__ = MagicMock(return_value=False)
+        mock_task_span.return_value = mock_span
+
+        mock_transition = MagicMock()
+        with (
+            patch("pipeline.ensure_committed", return_value=False),
+            patch("pipeline.verify_build", return_value=VerifyOutcome(passed=True)),
+            patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
+            patch("pipeline.ensure_pr", return_value="https://github.com/o/r/pull/9"),
+            patch("pipeline.transition_pr_opened", mock_transition),
+            patch("pipeline.get_disk_usage", return_value=0),
+            patch("pipeline.print_metrics"),
+            patch("pipeline.task_state") as mock_task_state_mod,
+        ):
+            mock_task_state_mod.get_task = MagicMock(return_value={"status": "RUNNING"})
+            mock_task_state_mod.TaskFetchError = Exception  # type: ignore[attr-defined]
+            from pipeline import run_task
+
+            run_task(
+                repo_url="o/r",
+                task_description="x",
+                github_token="ghp_test",
+                aws_region="us-east-1",
+                task_id="t-jira-okbuild",
+                channel_source="jira",
+                channel_metadata={"jira_issue_key": "ABC-1"},
+            )
+        mock_transition.assert_called_once()
 
     @patch("runner.run_agent")
     @patch("pipeline.build_system_prompt")
@@ -837,8 +1053,8 @@ class TestCancelSkipsPostHooks:
 
         with (
             patch("pipeline.ensure_committed", return_value=False),
-            patch("pipeline.verify_build", return_value=True),
-            patch("pipeline.verify_lint", return_value=True),
+            patch("pipeline.verify_build", return_value=VerifyOutcome(passed=True)),
+            patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
             patch("pipeline.ensure_pr", mock_ensure_pr),
             patch("pipeline.get_disk_usage", return_value=0),
             patch("pipeline.print_metrics"),
@@ -921,8 +1137,8 @@ class TestTraceThreading:
 
         with (
             patch("pipeline.ensure_committed", return_value=False),
-            patch("pipeline.verify_build", return_value=True),
-            patch("pipeline.verify_lint", return_value=True),
+            patch("pipeline.verify_build", return_value=VerifyOutcome(passed=True)),
+            patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
             patch(
                 "pipeline.ensure_pr",
                 return_value="https://github.com/org/repo/pull/1",
@@ -989,8 +1205,8 @@ class TestTraceThreading:
 
         with (
             patch("pipeline.ensure_committed", return_value=False),
-            patch("pipeline.verify_build", return_value=True),
-            patch("pipeline.verify_lint", return_value=True),
+            patch("pipeline.verify_build", return_value=VerifyOutcome(passed=True)),
+            patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
             patch(
                 "pipeline.ensure_pr",
                 return_value="https://github.com/org/repo/pull/1",
@@ -1056,8 +1272,8 @@ class TestTraceThreading:
 
         with (
             patch("pipeline.ensure_committed", return_value=False),
-            patch("pipeline.verify_build", return_value=True),
-            patch("pipeline.verify_lint", return_value=True),
+            patch("pipeline.verify_build", return_value=VerifyOutcome(passed=True)),
+            patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
             patch(
                 "pipeline.ensure_pr",
                 return_value="https://github.com/org/repo/pull/1",
@@ -1124,8 +1340,8 @@ class TestTraceThreading:
 
         with (
             patch("pipeline.ensure_committed", return_value=False),
-            patch("pipeline.verify_build", return_value=True),
-            patch("pipeline.verify_lint", return_value=True),
+            patch("pipeline.verify_build", return_value=VerifyOutcome(passed=True)),
+            patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
             patch(
                 "pipeline.ensure_pr",
                 return_value="https://github.com/org/repo/pull/1",
@@ -1197,8 +1413,8 @@ class TestTraceS3Upload:
 
         with (
             patch("pipeline.ensure_committed", return_value=False),
-            patch("pipeline.verify_build", return_value=True),
-            patch("pipeline.verify_lint", return_value=True),
+            patch("pipeline.verify_build", return_value=VerifyOutcome(passed=True)),
+            patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
             patch("pipeline.ensure_pr", return_value=None),
             patch("pipeline.get_disk_usage", return_value=0),
             patch("pipeline.print_metrics"),
@@ -1267,8 +1483,8 @@ class TestTraceS3Upload:
 
         with (
             patch("pipeline.ensure_committed", return_value=False),
-            patch("pipeline.verify_build", return_value=True),
-            patch("pipeline.verify_lint", return_value=True),
+            patch("pipeline.verify_build", return_value=VerifyOutcome(passed=True)),
+            patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
             patch("pipeline.ensure_pr", return_value=None),
             patch("pipeline.get_disk_usage", return_value=0),
             patch("pipeline.print_metrics"),
@@ -1338,8 +1554,8 @@ class TestTraceS3Upload:
 
         with (
             patch("pipeline.ensure_committed", return_value=False),
-            patch("pipeline.verify_build", return_value=True),
-            patch("pipeline.verify_lint", return_value=True),
+            patch("pipeline.verify_build", return_value=VerifyOutcome(passed=True)),
+            patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
             patch("pipeline.ensure_pr", return_value=None),
             patch("pipeline.get_disk_usage", return_value=0),
             patch("pipeline.print_metrics"),
@@ -1403,9 +1619,13 @@ class TestTraceS3Upload:
 
         with (
             patch("pipeline.ensure_committed", return_value=False),
-            patch("pipeline.verify_build", return_value=True),
-            patch("pipeline.verify_lint", return_value=True),
-            patch("pipeline.ensure_pr", return_value=None),
+            patch("pipeline.verify_build", return_value=VerifyOutcome(passed=True)),
+            patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
+            # A DELIVERED task (a PR was opened) — this test is about trace-upload
+            # fail-open, not the ABCA-815 no-deliverable gate. Returning a PR keeps
+            # the delivery gate out of the picture so the assertion isolates the
+            # trace behavior (a real no-PR task is covered in TestDeliveryGate).
+            patch("pipeline.ensure_pr", return_value="https://github.com/owner/repo/pull/1"),
             patch("pipeline.get_disk_usage", return_value=0),
             patch("pipeline.print_metrics"),
         ):
@@ -1730,7 +1950,7 @@ class TestTraceCrashPath:
         with (
             patch("pipeline.ensure_committed", return_value=False),
             patch("pipeline.verify_build", side_effect=RuntimeError("build verify boom")),
-            patch("pipeline.verify_lint", return_value=True),
+            patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
             patch("pipeline.ensure_pr", return_value=None),
             patch("pipeline.get_disk_usage", return_value=0),
             patch("pipeline.print_metrics"),
@@ -1808,7 +2028,7 @@ class TestTraceCrashPath:
         with (
             patch("pipeline.ensure_committed", return_value=False),
             patch("pipeline.verify_build", side_effect=ValueError("original pipeline error")),
-            patch("pipeline.verify_lint", return_value=True),
+            patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
             patch("pipeline.ensure_pr", return_value=None),
             patch("pipeline.get_disk_usage", return_value=0),
             patch("pipeline.print_metrics"),
@@ -1830,34 +2050,6 @@ class TestTraceCrashPath:
 
         # Terminal still written despite the upload failure.
         mock_task_state.write_terminal.assert_called()
-
-
-class TestJiraCredentialIsolation:
-    @pytest.mark.parametrize("channel_source", ["", "linear", "jira"])
-    def test_run_task_scrubs_prior_jira_credentials_before_building_config(
-        self,
-        monkeypatch,
-        channel_source,
-    ):
-        """A warm Jira task cannot expose credentials to the next task."""
-        credential_names = (
-            "JIRA_API_TOKEN",
-            "JIRA_APP_ACTOR_CONFIGURED",
-            "JIRA_APP_ACTOR_PROXY_URL",
-            "JIRA_APP_ACTOR_SHARED_SECRET",
-        )
-        for name in credential_names:
-            monkeypatch.setenv(name, "tenant-x-secret")
-
-        def stop_after_scrub(**_kwargs):
-            assert all(name not in os.environ for name in credential_names)
-            raise RuntimeError("stop after credential scrub")
-
-        with patch("pipeline.build_config", side_effect=stop_after_scrub):
-            from pipeline import run_task
-
-            with pytest.raises(RuntimeError, match="stop after credential scrub"):
-                run_task(channel_source=channel_source)
 
 
 class TestEarlyAckOrdering:
@@ -1919,8 +2111,8 @@ class TestEarlyAckOrdering:
             patch("pipeline.transition_task_started") as m_transition,
             patch("pipeline.configure_channel_mcp"),
             patch("pipeline.ensure_committed", return_value=False),
-            patch("pipeline.verify_build", return_value=True),
-            patch("pipeline.verify_lint", return_value=True),
+            patch("pipeline.verify_build", return_value=VerifyOutcome(passed=True)),
+            patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
             patch("pipeline.ensure_pr", return_value="https://github.com/o/r/pull/1"),
             patch("pipeline.get_disk_usage", return_value=0),
             patch("pipeline.print_metrics"),

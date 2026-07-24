@@ -8,6 +8,7 @@ import pytest
 cedarpy = pytest.importorskip("cedarpy")
 
 from hooks import (
+    _is_self_reclone,
     _reset_blocker_reason_for_tests,
     _stuck_guard_between_turns_hook,
     build_hook_matchers,
@@ -192,6 +193,122 @@ class TestPreToolUseHook:
             "tool input is not an object"
             in (result["hookSpecificOutput"]["permissionDecisionReason"])
         )
+
+
+class TestSelfRecloneGuard:
+    """ABCA-815 layer 1: block a Bash re-clone of the task's OWN repo (the agent
+    sometimes cloned into a sibling dir and stranded its work off the tracked
+    branch). Scoped to the task repo — dependency/fixture clones must pass."""
+
+    def test_matches_gh_repo_clone_bare_slug(self):
+        assert _is_self_reclone("cd /workspace && gh repo clone owner/repo", "owner/repo")
+
+    def test_matches_git_clone_https_url(self):
+        assert _is_self_reclone("git clone https://github.com/owner/repo.git /tmp/x", "owner/repo")
+
+    def test_matches_git_clone_scp_form(self):
+        assert _is_self_reclone("git clone git@github.com:owner/repo.git", "owner/repo")
+
+    def test_matches_git_dash_c_clone(self):
+        assert _is_self_reclone("git -C /workspace clone owner/repo", "owner/repo")
+
+    def test_case_insensitive_and_dotgit_config(self):
+        # config.repo_url may carry a trailing .git or mixed case.
+        assert _is_self_reclone("gh repo clone Owner/Repo", "owner/repo.git")
+
+    def test_ignores_clone_of_a_different_repo(self):
+        # A dependency/fixture clone is legitimate and must NOT be blocked.
+        assert not _is_self_reclone("git clone https://github.com/other/dep.git", "owner/repo")
+
+    def test_ignores_non_clone_git_command(self):
+        assert not _is_self_reclone("git status && git commit -am wip", "owner/repo")
+
+    def test_ignores_mention_of_repo_without_clone_verb(self):
+        # Naming the repo in a non-clone command (e.g. a gh pr create) is fine.
+        assert not _is_self_reclone("gh pr create --repo owner/repo --title x", "owner/repo")
+
+    def test_no_repo_url_is_noop(self):
+        assert not _is_self_reclone("gh repo clone owner/repo", "")
+
+    def test_ignores_clone_phrase_inside_pr_body(self):
+        # ABCA-856 false positive: the clone command quoted inside a --body value
+        # is PROSE, not an executed clone. Must NOT be blocked.
+        cmd = (
+            'gh pr create --repo owner/repo --base main --title "add marker" '
+            '--body "I deliberately did NOT run gh repo clone owner/repo; I worked in place."'
+        )
+        assert not _is_self_reclone(cmd, "owner/repo")
+
+    def test_ignores_clone_phrase_in_body_file_and_commit_message(self):
+        assert not _is_self_reclone(
+            "gh pr create --repo owner/repo --body-file /tmp/b.md", "owner/repo"
+        )
+        assert not _is_self_reclone(
+            'git commit -m "note: do not gh repo clone owner/repo again"', "owner/repo"
+        )
+
+    def test_still_blocks_clone_before_a_body_arg(self):
+        # A REAL clone chained before a body-carrying command must still be caught
+        # (the free-text truncation only drops what's AFTER the first body arg).
+        cmd = 'gh repo clone owner/repo && gh pr create --repo owner/repo --body "x"'
+        assert _is_self_reclone(cmd, "owner/repo")
+
+    def test_requires_command_position_not_substring(self):
+        # The verb must be in command position (start / after a separator), not an
+        # arbitrary substring like a path or flag value.
+        assert _is_self_reclone("echo hi; gh repo clone owner/repo", "owner/repo")
+        assert not _is_self_reclone("ls /tmp/gh-repo-clone-notes/owner/repo", "owner/repo")
+
+    def test_hook_denies_self_reclone_with_redirect(self):
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+        hook_input = {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "cd /workspace && gh repo clone owner/repo"},
+            "tool_use_id": "test-reclone",
+            "session_id": "sess-1",
+            "transcript_path": "/tmp/t",
+            "cwd": "/workspace",
+        }
+        result = _run(
+            pre_tool_use_hook(hook_input, "test-reclone", {}, engine=engine, repo_url="owner/repo")
+        )
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        assert "already cloned" in reason.lower()
+        assert "work in place" in reason.lower()
+
+    def test_hook_allows_dependency_clone(self):
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+        hook_input = {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "git clone https://github.com/other/dep.git vendor/dep"},
+            "tool_use_id": "test-dep",
+            "session_id": "sess-1",
+            "transcript_path": "/tmp/t",
+            "cwd": "/workspace",
+        }
+        result = _run(
+            pre_tool_use_hook(hook_input, "test-dep", {}, engine=engine, repo_url="owner/repo")
+        )
+        # Not blocked by the reclone guard — falls through to Cedar (which permits).
+        assert result["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+    def test_hook_without_repo_url_does_not_block(self):
+        # Legacy call shape (no repo_url threaded) must not crash or over-block.
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+        hook_input = {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "gh repo clone owner/repo"},
+            "tool_use_id": "test-legacy",
+            "session_id": "sess-1",
+            "transcript_path": "/tmp/t",
+            "cwd": "/workspace",
+        }
+        result = _run(pre_tool_use_hook(hook_input, "test-legacy", {}, engine=engine))
+        assert result["hookSpecificOutput"]["permissionDecision"] == "allow"
 
 
 class TestTruncate:
