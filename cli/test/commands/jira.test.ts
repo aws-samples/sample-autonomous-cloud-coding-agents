@@ -1125,6 +1125,9 @@ describe('renderJiraAppTemplate', () => {
     expect(out).toContain('bgagent — ABCA');
     expect(out).toContain('read:jira-work, write:jira-work, read:jira-user');
     expect(out).toContain('Dedicated outbound app identity (Forge)');
+    expect(out).toContain('forge-cli-api-token');
+    expect(out).toContain('--environment production');
+    expect(out).toContain('--stack-name <stack-name>');
     expect(out).toContain('api.asApp().requestJira');
   });
 

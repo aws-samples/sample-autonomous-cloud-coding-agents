@@ -126,14 +126,22 @@ export function renderJiraAppTemplate(opts: JiraAppTemplateOptions = {}): string
     '',
     'Dedicated outbound app identity (Forge):',
     '  1. Open integrations/jira-forge-app in this repository.',
-    '  2. Run `npm install`, then `forge register bgagent`.',
-    '  3. Set a 32+ character shared secret in Forge:',
+    '  2. Create a scoped token at https://go.atlassian.com/forge-cli-api-token,',
+    '     run `forge login` in an interactive terminal, then:',
+    '       npm ci',
+    '       forge register bgagent --accept-terms',
+    '     The first registration may prompt you to create a Developer Space.',
+    '     Do not commit the operator-owned app.id written to manifest.yml.',
+    '  3. Set a 32+ character secret in the Forge production environment:',
     '       BGAGENT_PROXY_SECRET="$(openssl rand -hex 32)"',
-    '       forge variables set --encrypt BGAGENT_PROXY_SECRET "$BGAGENT_PROXY_SECRET"',
-    '  4. Run `forge deploy`, `forge install`, then `forge webtrigger create`.',
-    '     Select the bgagent-outbound trigger and copy its v2 URL.',
+    '       forge variables set --encrypt BGAGENT_PROXY_SECRET \\',
+    '         "$BGAGENT_PROXY_SECRET" --environment production',
+    '  4. Deploy and install the production app, then create the URL for the',
+    '     bgagent-outbound trigger. See docs/guides/JIRA_SETUP_GUIDE.md for',
+    '     the exact forge deploy/install/webtrigger commands.',
     '  5. Register the same secret and URL with ABCA:',
-    '       bgagent jira app-setup <cloud-id> --proxy-url <forge-v2-url>',
+    '       bgagent jira app-setup <cloud-id> --proxy-url <forge-v2-url> \\',
+    '         --region <region> --stack-name <stack-name>',
     '     Paste BGAGENT_PROXY_SECRET into the hidden prompt.',
     '',
     'The OAuth app remains required for inbound reads and user lookup. Forge',
@@ -773,11 +781,20 @@ export function makeJiraCommand(): Command {
         console.log();
         console.log('Next steps:');
         console.log('  1. Install the Forge app identity, then register its v2 web-trigger URL:');
-        console.log(`       bgagent jira app-setup ${cloudId} --proxy-url <forge-v2-url>`);
+        console.log(
+          `       bgagent jira app-setup ${cloudId} --proxy-url <forge-v2-url> `
+          + `--region ${region} --stack-name ${stackName}`,
+        );
         console.log('  2. Map a Jira project to a GitHub repo:');
-        console.log(`       bgagent jira map ${cloudId} <PROJECT-KEY> --repo owner/repo`);
+        console.log(
+          `       bgagent jira map ${cloudId} <PROJECT-KEY> --repo owner/repo `
+          + `--region ${region} --stack-name ${stackName}`,
+        );
         console.log('  3. Link your Jira account so triggered tasks attribute to your platform user:');
-        console.log(`       bgagent jira invite-user ${cloudId} <account-id-or-email>`);
+        console.log(
+          `       bgagent jira invite-user ${cloudId} <account-id-or-email> `
+          + `--region ${region} --stack-name ${stackName}`,
+        );
         console.log('       bgagent jira link <code>');
         console.log(`  4. Add the trigger label '${DEFAULT_LABEL_FILTER}' to a Jira issue in a mapped project.`);
       }),

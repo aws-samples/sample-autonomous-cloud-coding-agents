@@ -13,8 +13,17 @@ Set up the ABCA Jira Cloud integration so that adding a label to a Jira issue tr
 - A Jira Cloud site where you have **admin** access (to create the OAuth app, install the Forge app, and create the webhook)
 - The `bgagent` CLI installed and logged in (`bgagent configure` + `bgagent login`)
 - Node.js 22 and the [Atlassian Forge CLI](https://developer.atlassian.com/platform/forge/getting-started/#install-the-forge-cli) for the dedicated outbound app identity
+- An Atlassian [Forge CLI scoped token](https://go.atlassian.com/forge-cli-api-token). This is separate from the Jira OAuth token created below.
+- AWS operator credentials that can read the target stack outputs and update its Jira registry and per-tenant secret
 
 > **Jira Cloud only.** Jira Server / Data Center are out of scope. The integration uses Jira REST v3 and Atlassian Cloud webhooks.
+
+The examples use explicit stack and region variables because Jira admin commands default to `backgroundagent-dev`. Set these once so a custom deployment is not configured accidentally:
+
+```bash
+REGION=us-east-1
+STACK_NAME=backgroundagent-dev
+```
 
 ## How it works
 
@@ -117,7 +126,9 @@ Click **Save**, then open **Settings** and copy the **Client ID** and **Client S
 ### 2. Authorize the app on the tenant
 
 ```bash
-bgagent jira setup
+bgagent jira setup \
+  --region "$REGION" \
+  --stack-name "$STACK_NAME"
 ```
 
 This runs the OAuth 3LO dance:
@@ -138,59 +149,95 @@ This runs the OAuth 3LO dance:
 - **Events** — *Issue: created*, *Issue: updated*, and *Comment: created*
 - **Secret** — a strong random value, e.g. `openssl rand -hex 32`
 
-Paste that same secret value back at the `Webhook signing secret:` prompt. ABCA stores it on the per-tenant OAuth bundle (and mirrors it stack-wide), and the receiver looks it up to verify `X-Hub-Signature` on each delivery.
+Paste that same secret value back at the `Webhook signing secret:` prompt. ABCA stores it on the per-tenant OAuth bundle and seeds the stack-wide single-tenant fallback only when it is still unset. The receiver looks up the tenant value to verify `X-Hub-Signature` on each delivery.
 
 ### 4. Install the dedicated outbound app
 
 The repository includes a narrow Forge app under `integrations/jira-forge-app`. Its web trigger accepts only four signed operations: identity probe, comment, read transitions, and perform transition. It does not expose a general Jira REST proxy.
 
+Run the login in an interactive terminal. Forge asks for your Atlassian email and the Forge CLI scoped token from the prerequisites; the Jira 3LO access token is not a Forge CLI credential. On the first registration, Forge also asks you to create or select a **Developer Space**.
+
 ```bash
 cd integrations/jira-forge-app
-npm install
+npm ci
 forge login
-forge register bgagent
+forge register bgagent --accept-terms
 ```
 
-`forge register bgagent` replaces the placeholder `app.id` in `manifest.yml` with an app ID owned by your Atlassian developer account.
+`forge register bgagent` replaces the placeholder `app.id` in `manifest.yml` with an app ID owned by your Atlassian Developer Space. That ID is not a secret, but it is operator-specific: keep it in the deployment checkout for future Forge commands and do not commit it to the sample repository or a contribution branch. If you restore the placeholder to keep a worktree clean, record the existing app ID and put it back before a future deploy; do not register a second app.
 
-Generate a shared secret, then store it in Forge:
+Generate a shared secret and store it in the Forge **production** environment:
 
 ```bash
 BGAGENT_PROXY_SECRET="$(openssl rand -hex 32)"
-forge variables set --encrypt BGAGENT_PROXY_SECRET "$BGAGENT_PROXY_SECRET"
+forge variables set --encrypt BGAGENT_PROXY_SECRET "$BGAGENT_PROXY_SECRET" \
+  --environment production
 ```
 
-The value is held in the current shell without being written to shell history. Keep that terminal open for the final `bgagent` command; never commit or print the value.
+The value is held in the current shell without being written to shell history. Keep that terminal open for the final `bgagent` command; never commit or print the value. Forge variables apply only after a deployment, so set or rotate the variable **before** `forge deploy`.
 
-Deploy and install the app on the Jira site:
+Deploy and install the same production environment on the Jira site, then create the URL for the allowlisted `bgagent-outbound` trigger:
 
 ```bash
-forge deploy
-forge install --product jira --site <your-site>.atlassian.net
-forge webtrigger create
+forge deploy --environment production
+forge install \
+  --product Jira \
+  --site <your-site>.atlassian.net \
+  --environment production \
+  --confirm-scopes
+forge webtrigger create \
+  --functionKey bgagent-outbound \
+  --product Jira \
+  --site <your-site>.atlassian.net \
+  --environment production
 ```
 
-Select the installation and the `bgagent-outbound` trigger. Forge prints a v2 installation URL shaped like:
+Forge prints a v2 installation URL shaped like:
 
 ```text
 https://<installation-id>.webtrigger.atlassian.app/public/<trigger-id>
 ```
 
-Register that URL and the same shared secret with ABCA:
+The URL is installation- and environment-specific. Register it and the same shared secret with the intended ABCA stack:
 
 ```bash
 bgagent jira app-setup <cloud-id> \
-  --proxy-url https://<installation-id>.webtrigger.atlassian.app/public/<trigger-id>
+  --proxy-url https://<installation-id>.webtrigger.atlassian.app/public/<trigger-id> \
+  --region "$REGION" \
+  --stack-name "$STACK_NAME"
 ```
 
 Paste `BGAGENT_PROXY_SECRET` into the hidden prompt. The CLI sends an HMAC-signed identity probe and refuses to save unless Jira reports `accountType=app` and `/rest/api/3/serverInfo` identifies the selected tenant. It stores the proxy URL and secret on `bgagent-jira-oauth-<cloudId>` and non-secret identity metadata in `JiraWorkspaceRegistryTable`. Run `unset BGAGENT_PROXY_SECRET` after setup. The `--shared-secret` option is available for non-interactive automation, but exposes the value to local process inspection while the command runs.
 
 The Forge app scopes authorize API families, but Jira project permissions still apply. Ensure the installed app has **Browse Projects**, **Add Comments**, and **Transition Issues** access in each mapped project.
 
+Confirm the installation and ABCA registration before triggering a task:
+
+```bash
+forge install list --environment production
+
+JIRA_REGISTRY_TABLE=$(aws cloudformation describe-stacks \
+  --stack-name "$STACK_NAME" \
+  --region "$REGION" \
+  --query 'Stacks[0].Outputs[?OutputKey==`JiraWorkspaceRegistryTableName`].OutputValue' \
+  --output text)
+
+aws dynamodb get-item \
+  --region "$REGION" \
+  --table-name "$JIRA_REGISTRY_TABLE" \
+  --key '{"jira_cloud_id":{"S":"<cloud-id>"}}' \
+  --projection-expression 'jira_cloud_id,outbound_identity,app_actor_display_name,app_actor_configured_at'
+```
+
+The Forge installation should be `Up-to-date`. The registry row should contain `outbound_identity = app` and `app_actor_display_name = bgagent`. Do not print the tenant secret to verify it; `app-setup` has already proved that the URL and HMAC secret work together.
+
 ### 5. Map a project to a repository
 
 ```bash
-bgagent jira map <cloud-id> <PROJECT-KEY> --repo owner/repo
+bgagent jira map <cloud-id> <PROJECT-KEY> \
+  --repo owner/repo \
+  --region "$REGION" \
+  --stack-name "$STACK_NAME"
 ```
 
 - `<cloud-id>` — the tenant UUID. `setup`'s final **Next steps** block prints this exact `map` command with the cloudId pre-filled — paste it and swap in your project key and repo. If that terminal output is gone, recover the cloudId from `https://<your-site>.atlassian.net/_edge/tenant_info` (returns it as JSON) or from the workspace-registry table — it is *not* shown anywhere in the Jira UI
@@ -209,7 +256,9 @@ So tasks triggered from Jira attribute to your platform user (concurrency caps, 
 #### Admin: generate the invite
 
 ```bash
-bgagent jira invite-user <cloud-id> <account-id-or-email>
+bgagent jira invite-user <cloud-id> <account-id-or-email> \
+  --region "$REGION" \
+  --stack-name "$STACK_NAME"
 ```
 
 The command resolves the Jira user through the tenant OAuth token, writes a `pending#<code>` row with a 24-hour TTL, and prints the `bgagent jira link <code>` command to send to the teammate. It requires admin IAM for the stack tables/secrets and a logged-in `bgagent` CLI session for the `invited_by_platform_user_id` audit field.
@@ -234,6 +283,8 @@ Add the trigger label (`bgagent` by default) to a Jira issue in a mapped project
 After the PR exists, add a Jira comment such as `@bgagent update the README too`. ABCA should acknowledge the request on the issue and update the existing PR.
 
 The progress comment author and transition actor should be the `bgagent` app. The task owner shown by `bgagent list`, audit records, concurrency accounting, and cost attribution should remain the linked human who triggered the Jira event.
+
+Comments created before `app-setup` remain attributed to the 3LO setup user; only new outbound writes use the Forge app. A successful end-to-end test therefore produces a new start or terminal comment whose Jira author is `bgagent` with `accountType=app`.
 
 ## Migrating an existing Jira tenant
 
@@ -360,8 +411,35 @@ Expected, not a broken install. The stored access token lives ~1 hour and is onl
 - Confirm `outbound_identity = app` and `app_actor_display_name = bgagent` on the registry row.
 - Check the tenant secret for `app_actor_proxy_url`, `app_actor_shared_secret`, and `app_actor_configured_at` without printing the secret value.
 - Check the agent logs for `jira_reactions: comment_task_started`. A proxy `401` means Forge and ABCA have different `BGAGENT_PROXY_SECRET` values or the signed request is stale. A Jira `403` means the app lacks a required scope or project permission.
-- Re-run `bgagent jira app-setup <cloud-id> --proxy-url <url>` after rotating the Forge secret or recreating the web-trigger URL. The identity probe catches a wrong secret, dead URL, wrong actor type, wrong Jira tenant, and missing app access before saving.
+- Re-run `bgagent jira app-setup <cloud-id> --proxy-url <url> --region "$REGION" --stack-name "$STACK_NAME"` after rotating the Forge secret or recreating the web-trigger URL. The identity probe catches a wrong secret, dead URL, wrong actor type, wrong Jira tenant, and missing app access before saving.
 - If no app-actor fields exist, ABCA logs that it is using the OAuth migration fallback. A fallback `401`/`403` usually means the 3LO token was revoked; re-run `bgagent jira setup`.
+
+### Forge login or registration fails
+
+- **`Prompts can not be meaningfully rendered in non-TTY environments`** — run `forge login` in an interactive terminal, not a non-interactive CI/shell-command runner.
+- **Token rejected** — create a Forge CLI scoped token at <https://go.atlassian.com/forge-cli-api-token>. Do not use the Jira OAuth access token, OAuth client secret, or account password.
+- **Not a member of a Developer Space** — let the first `forge register` prompt create one, or ask an existing Developer Space admin to add your Atlassian account.
+- **Wrong app or a second app was registered** — restore the original operator-owned `app.id` in `manifest.yml` and redeploy. Do not run `forge register` again for routine deployments.
+
+### Rotate the Forge proxy secret
+
+Keep Forge and ABCA on the same value:
+
+```bash
+BGAGENT_PROXY_SECRET="$(openssl rand -hex 32)"
+forge variables set --encrypt BGAGENT_PROXY_SECRET "$BGAGENT_PROXY_SECRET" \
+  --environment production
+forge deploy --environment production
+
+bgagent jira app-setup <cloud-id> \
+  --proxy-url <existing-forge-v2-url> \
+  --region "$REGION" \
+  --stack-name "$STACK_NAME"
+
+unset BGAGENT_PROXY_SECRET
+```
+
+Paste the new value at the hidden prompt. Until both sides are updated, signed writes fail closed and do not fall back to the human 3LO identity.
 
 ### Jira card doesn't move across the board
 
@@ -406,4 +484,13 @@ aws dynamodb update-item \
 
 Then delete the webhook from **Jira → Settings → System → Webhooks** and remove the OAuth app from the Atlassian developer console.
 
-Also run `forge uninstall` from `integrations/jira-forge-app` for the tenant, then remove or revoke the Forge app in the Atlassian developer console. Deleting the tenant secret removes both OAuth and app-actor proxy configuration.
+Also uninstall the Forge production app, then remove or revoke it in the Atlassian developer console:
+
+```bash
+forge uninstall \
+  --product Jira \
+  --site <your-site>.atlassian.net \
+  --environment production
+```
+
+The local manifest must contain the registered app ID when running Forge lifecycle commands. Deleting the tenant secret removes both OAuth and app-actor proxy configuration.
