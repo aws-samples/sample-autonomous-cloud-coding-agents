@@ -165,6 +165,41 @@ export function buildIterationInstruction(trigger: CommentTrigger): string {
 }
 
 /**
+ * PM-P0-1 (2026-07-24): does an ``@bgagent`` comment read as a RETRY request —
+ * "re-run the work that failed" — rather than a change instruction? The failure
+ * panel tells the user "reply here to try again", so a bare ``@bgagent retry`` /
+ * "try again" / "re-run" must route to the epic-retry machinery (reset + re-run
+ * the failed/skipped children), NOT to the disambiguation/iteration path (which
+ * dead-ended or looped — the exact PM-P0-1 defect).
+ *
+ * Conservative, mirroring {@link parsePlanVerdict}'s discipline: only fires when
+ * the instruction is a SHORT (≤{@link MAX_VERDICT_WORDS}-word) comment led by (or
+ * consisting of) a retry phrase — so "retry the footer but change the color and …"
+ * (a substantive edit that happens to start with "retry") is NOT swallowed as a
+ * bare retry; it falls through to the normal iterate/revise path. An empty
+ * instruction (bare ``@bgagent``) is NOT a retry — that stays "address the latest
+ * review" per {@link buildIterationInstruction}.
+ */
+const RETRY_PHRASES = [
+  'retry', 'retries', 'try again', 'rerun', 're-run', 're run', 'run again', 'run it again',
+] as const;
+export function parseRetryIntent(instruction: string): boolean {
+  const text = instruction.replace(/[*_`>]/g, ' ').trim().toLowerCase().replace(/\s+/g, ' ');
+  if (!text) return false;
+  if (text.split(' ').length > MAX_VERDICT_WORDS) return false;
+  const firstWord = text.split(/[\s.,!?—–-]+/)[0];
+  if (firstWord === 'retry' || firstWord === 'rerun') return true;
+  return RETRY_PHRASES.some((p) => hasPhrase(text, p));
+}
+
+/** The command words ABCA recognises in an ``@bgagent`` comment on an epic.
+ *  Today there is exactly one — ``retry``. Surfaced in the epic
+ *  disambiguation/fallback reply so the user always sees what they CAN type
+ *  (rather than us trying to guess a typo). Extend this together with
+ *  {@link RETRY_PHRASES} when a new command is added. */
+export const KNOWN_EPIC_COMMANDS = ['retry'] as const;
+
+/**
  * #299 Mode B — the verdict of an ``@bgagent`` comment on a pending decomposition
  * plan. ``none`` means the comment is an ordinary change instruction (routes to
  * the revise loop). ``ambiguous`` means an unqualified negation ("no", "no

@@ -439,6 +439,24 @@ describe('renderEpicPanel (#247 UX — the single maturing panel)', () => {
       .toContain('⚠️ **ABCA orchestration finished with failures**');
   });
 
+  // PM-P0-1 (2026-07-24): a SETTLED-with-failures panel tells the user how to
+  // retry — both equivalent ways — so `retry` is discoverable + consistent with
+  // re-labelling. Not shown while in-flight or on a clean complete.
+  test('settled-with-failures panel shows the retry hint (both ways: comment + re-label)', () => {
+    const body = renderEpicPanel({ inProgress: false, rows: [row('a', 'succeeded'), row('b', 'failed')] });
+    expect(body).toContain('To retry:');
+    expect(body).toContain('`@bgagent retry`');
+    expect(body).toContain('re-apply'); // the equivalent re-label path
+  });
+
+  test('no retry hint on a clean complete, or while still in progress', () => {
+    expect(renderEpicPanel({ inProgress: false, rows: [row('a', 'succeeded')] }))
+      .not.toContain('To retry:');
+    // in-flight, even with a not-yet-terminal failed sibling shown: no hint until settled.
+    expect(renderEpicPanel({ inProgress: true, rows: [row('a', 'released'), row('b', 'failed')] }))
+      .not.toContain('To retry:');
+  });
+
   test('PR link shown ONLY when a PR exists (first run mid-flight has none)', () => {
     const body = renderEpicPanel({
       inProgress: true,

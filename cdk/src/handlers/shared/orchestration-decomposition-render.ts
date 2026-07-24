@@ -381,6 +381,8 @@ export function renderLabelHelp(base: string): string {
     // `@abca` when only `@bgagent` fires. Match the real, working mention token.
     '- Once I\'m working, you can reply to my comments with **`@bgagent <what you want>`** to ask a '
       + 'question or request a change.',
+    '- If some sub-issues fail, reply **`@bgagent retry`** on the epic (or remove and re-apply the '
+      + `\`${base}\` label) — either way re-runs only the failed/skipped work; the succeeded parts are kept.`,
     '- Not sure which to use? Use `' + base + ':decompose` for anything with more than one part — '
       + 'you\'ll see the plan and cost before I spend anything.',
     '',

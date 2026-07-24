@@ -309,6 +309,17 @@ export function renderEpicPanel(params: EpicPanelParams): string {
       return line;
     });
 
+  // PM-P0-1 (2026-07-24): a SETTLED epic that finished with failures tells the
+  // user exactly how to retry — the two EQUIVALENT ways, so `retry` is
+  // discoverable and reads consistently with re-labelling. Only when the epic is
+  // terminal (not inProgress) AND something failed/skipped (nothing to retry
+  // otherwise). One line so the panel stays scannable.
+  const retryHint = (!inProgress && anyBad)
+    ? ['', '↻ **To retry:** reply `@bgagent retry` on this epic, or remove and re-apply '
+      + 'the `abca` label — either way re-runs only the failed/skipped sub-issues '
+      + '(succeeded ones are kept).']
+    : [];
+
   const callout = combinedPrUrl
     ? ['', `🔗 **Combined PR (all sub-issues merged):** [${combinedPrUrl}](${combinedPrUrl})`]
     : [];
@@ -336,7 +347,7 @@ export function renderEpicPanel(params: EpicPanelParams): string {
     }
   }
 
-  return [heading, '', ...lines, ...callout, ...shot, '', PANEL_FOOTER].join('\n');
+  return [heading, '', ...lines, ...callout, ...retryHint, ...shot, '', PANEL_FOOTER].join('\n');
 }
 
 /**

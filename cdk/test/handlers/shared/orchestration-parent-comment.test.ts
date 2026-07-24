@@ -151,6 +151,28 @@ describe('renderParentDisambiguationReply', () => {
     expect(body).toContain('ABCA-305');
     expect(body).toContain('ABCA-306');
   });
+
+  // PM-P0-1 (2026-07-24): when the epic has failures, EVERY can't-act reply
+  // surfaces the `retry` command — so an unrecognised comment always shows what
+  // the user CAN type (no intent-guessing). Consistent with re-labelling.
+  test('hasFailures=true appends a Commands footer surfacing `@bgagent retry` + the re-label equivalent', () => {
+    const body = renderParentDisambiguationReply('none', NODES, null, false, true);
+    expect(body).toContain('Commands:');
+    expect(body).toContain('`@bgagent retry`');
+    expect(body).toContain('re-apply'); // names the equivalent re-label path
+  });
+
+  test('hasFailures=false omits the Commands footer (nothing to retry)', () => {
+    const body = renderParentDisambiguationReply('none', NODES, null, false, false);
+    expect(body).not.toContain('Commands:');
+    expect(body).not.toContain('@bgagent retry');
+  });
+
+  test('the retry footer also rides on the new-work path when there are failures', () => {
+    const body = renderParentDisambiguationReply('none', NODES, null, true, true);
+    expect(body).toContain('create a new sub-issue');
+    expect(body).toContain('`@bgagent retry`');
+  });
 });
 
 describe('#247 UX-2: suggestClosestNode scores descriptions (not just titles)', () => {

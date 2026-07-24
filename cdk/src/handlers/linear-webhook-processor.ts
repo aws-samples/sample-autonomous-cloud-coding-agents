@@ -55,7 +55,14 @@ import { resolveLinearOauthToken } from './shared/linear-oauth-resolver';
 import { fetchIssueParentId, type SubIssueNode } from './shared/linear-subissue-fetch';
 import { resolveTaskByLinearIssue, prNumberFromTask } from './shared/linear-task-by-issue';
 import { logger } from './shared/logger';
-import { buildIterationInstruction, detectNearMissMention, parseCommentTrigger, parsePlanVerdict, type CommentTrigger } from './shared/orchestration-comment-trigger';
+import {
+  buildIterationInstruction,
+  detectNearMissMention,
+  parseCommentTrigger,
+  parsePlanVerdict,
+  parseRetryIntent,
+  type CommentTrigger,
+} from './shared/orchestration-comment-trigger';
 import { applyPlanCaps, readProjectCaps } from './shared/orchestration-decomposition-caps';
 import {
   runPlanVerdict,
@@ -1650,15 +1657,30 @@ function buildDecompositionEffects(
  * is naturally convergent — a redelivery finds the nodes already reset to
  * ready/blocked/released (computeEpicRetryPlan sees 0 failed/skipped) and no-ops.
  */
+/**
+ * Outcome of a terminal-epic retry attempt, so a comment-driven caller
+ * (PM-P0-1) can react appropriately: ack 👀→🔄 on ``retried``, or reply honestly
+ * on the no-op cases instead of the misleading disambiguation reply.
+ */
+type RetryOutcome = 'retried' | 'nothing_to_retry' | 'all_succeeded' | 'still_running' | 'no_orchestration';
+
 async function maybeRetryTerminalEpic(
   orchestrationId: string,
   parentIssueId: string,
   workspaceId: string,
   decompositionDecision: { mode: string },
-): Promise<void> {
-  if (!ORCHESTRATION_TABLE) return;
+  /**
+   * PM-P0-1: when a COMMENT (not a re-label) drives the retry, the caller owns
+   * the user-facing acknowledgement (👀→🔄 on the comment + its own reply), so
+   * suppress the label-path advisory notes ("running the existing graph" /
+   * already-complete) — they'd double up with the comment reply. The retry
+   * mechanics (reset + re-release) are identical.
+   */
+  opts: { readonly suppressAdvisoryNotes?: boolean } = {},
+): Promise<RetryOutcome> {
+  if (!ORCHESTRATION_TABLE) return 'no_orchestration';
   const snapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, orchestrationId);
-  if (!snapshot) return;
+  if (!snapshot) return 'no_orchestration';
   const now = new Date().toISOString();
   const plan = computeEpicRetryPlan(
     snapshot.children.map((c) => ({
@@ -1674,7 +1696,12 @@ async function maybeRetryTerminalEpic(
 
   // Nothing failed/skipped → nothing to retry.
   if (plan.statusUpdates.length === 0) {
-    if (!ctx) return;
+    const allSucceeded = plan.succeededCount > 0 && plan.succeededCount === snapshot.children.length;
+    const outcome: RetryOutcome = allSucceeded ? 'all_succeeded' : 'still_running';
+    // PM-P0-1: a comment-driven caller posts its own honest reply — skip the
+    // label-path advisory notes so they don't double up.
+    if (opts.suppressAdvisoryNotes) return outcome;
+    if (!ctx) return outcome;
     // Post these advisory notes at most once per re-trigger window (a webhook
     // redelivery of the SAME label event must not repost). Distinct claim key
     // from the retry itself. Crucially this also stops a redelivery that arrives
@@ -1684,8 +1711,8 @@ async function maybeRetryTerminalEpic(
       ddb, ORCHESTRATION_TABLE, orchestrationId, 'retrigger-note',
       now, Math.floor(Date.now() / 1000) + ACK_CLAIM_TTL_SECONDS,
     );
-    if (!won) return;
-    if (plan.succeededCount > 0 && plan.succeededCount === snapshot.children.length) {
+    if (!won) return outcome;
+    if (allSucceeded) {
       // Every child succeeded — the epic is genuinely done.
       await upsertStatusComment(ctx, parentIssueId, renderEpicAlreadyCompleteNote());
     } else {
@@ -1693,7 +1720,7 @@ async function maybeRetryTerminalEpic(
       // re-apply; keep the existing already-decomposed copy.
       await maybePostAlreadyDecomposedNote(decompositionDecision, false, parentIssueId, workspaceId);
     }
-    return;
+    return outcome;
   }
 
   // Claim-once for THIS retry round so a webhook redelivery doesn't re-reset +
@@ -1725,7 +1752,10 @@ async function maybeRetryTerminalEpic(
     logger.info('ABCA-659 epic retry: redelivery of the same retry — skipping (already handled)', {
       orchestration_id: orchestrationId,
     });
-    return;
+    // A redelivery of an already-processed retry: from the caller's view the
+    // retry IS in flight (the first delivery reset + released it), so report
+    // 'retried' — the comment path's 👀→🔄 ack is correct + idempotent.
+    return 'retried';
   }
 
   logger.info('ABCA-659 epic retry: resetting failed/skipped children', {
@@ -1826,6 +1856,7 @@ async function maybeRetryTerminalEpic(
       });
     }
   }
+  return 'retried';
 }
 
 /** Hex chars of the retry-fingerprint hash kept for the claim key — enough to avoid
@@ -2301,6 +2332,38 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
       trigger,
       resolved,
       registryTableName: WORKSPACE_REGISTRY_TABLE,
+    });
+    return;
+  }
+
+  // PM-P0-1 (2026-07-24): a RETRY request on a sub-issue that belongs to an
+  // orchestration means the same thing as a retry on the epic — "re-run the
+  // failed/skipped work" — so route it to the epic-retry machinery for
+  // CONSISTENCY (a child that failed before opening a PR can't be "iterated";
+  // and retry must behave identically whether typed on the epic or a child).
+  // Only a bare-ish retry phrase; "retry but also change X" stays an iteration.
+  if (parseRetryIntent(trigger.instruction)) {
+    const feedbackCtx = { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE };
+    await reactToComment(feedbackCtx, commentId, EMOJI_STARTED);
+    const outcome = await maybeRetryTerminalEpic(
+      orchestrationId!, snapshot.meta.parent_linear_issue_id, workspaceId,
+      { mode: 'mode_a' }, { suppressAdvisoryNotes: true },
+    );
+    if (outcome === 'retried') {
+      // Keep 👀 (work in flight); the epic panel shows 🔄. Point the reply at the
+      // epic so the user knows retry is epic-scoped.
+      logger.info('A6 comment (child of orchestration): retry intent → epic retry', {
+        orchestration_id: orchestrationId, sub_issue_id: commentedIssueId,
+      });
+      return;
+    }
+    const replyBody = outcome === 'all_succeeded'
+      ? '👋 Everything in this epic already succeeded — there\'s nothing to retry.'
+      : '👋 This epic is still running — nothing has failed yet, so there\'s nothing to retry.';
+    await replyToComment(feedbackCtx, commentedIssueId, replyTargetId, replyBody);
+    await swapCommentReaction(feedbackCtx, commentId, EMOJI_NEEDS_INPUT);
+    logger.info('A6 comment (child of orchestration): retry intent but nothing to retry', {
+      orchestration_id: orchestrationId, outcome,
     });
     return;
   }
@@ -2944,10 +3007,53 @@ async function handleParentEpicCommentTrigger(args: {
   // ACK immediately — a parent comment is never silently dropped again.
   await reactToComment(feedbackCtx, commentId, EMOJI_STARTED);
 
+  // PM-P0-1 (2026-07-24): a RETRY request on the epic ("@bgagent retry", "try
+  // again") — the failure panel literally says "reply here to try again" — must
+  // route to the epic-retry machinery (reset + re-run the failed/skipped
+  // children), NOT to node disambiguation (which dead-ended/looped: the exact
+  // PM-P0-1 defect). Only a bare-ish retry phrase triggers this; "retry the
+  // footer but change X" is a substantive edit and falls through to iterate.
+  if (parseRetryIntent(trigger.instruction)) {
+    const outcome = await maybeRetryTerminalEpic(
+      orchestrationId, snapshot.meta.parent_linear_issue_id, workspaceId,
+      { mode: 'mode_a' }, { suppressAdvisoryNotes: true },
+    );
+    if (outcome === 'retried') {
+      // Work is back in flight — KEEP the 👀 we put on receipt (there's no
+      // distinct "in progress" reaction; 👀 = being worked). The retry note +
+      // repositioned live panel (posted by maybeRetryTerminalEpic) show the 🔄
+      // status. No reply needed — the panel is the source of truth.
+      logger.info('A6 comment (parent epic): retry intent → epic retry re-run', {
+        orchestration_id: orchestrationId, comment_id: commentId,
+      });
+      return;
+    }
+    // Nothing to retry (all succeeded / still running) — reply honestly rather
+    // than resetting nothing, and swap 👀→❓ (this was a question, not work).
+    const replyBody = outcome === 'all_succeeded'
+      ? '👋 Everything in this epic already succeeded — there\'s nothing to retry. '
+        + '(To change something, name the sub-issue: `@bgagent ABCA-123: <what to change>`.)'
+      : '👋 This epic is still running — nothing has failed yet, so there\'s nothing to retry. '
+        + 'I\'ll update the panel as the sub-issues land.';
+    await replyToComment(feedbackCtx, snapshot.meta.parent_linear_issue_id, replyTargetId, replyBody);
+    await swapCommentReaction(feedbackCtx, commentId, EMOJI_NEEDS_INPUT);
+    logger.info('A6 comment (parent epic): retry intent but nothing to retry', {
+      orchestration_id: orchestrationId, outcome,
+    });
+    return;
+  }
+
   // Only STARTED children with a task are iterable candidates; match against all
   // real nodes for the disambiguation list, but iterate only a started one.
   const match = parseParentNodeReference(trigger.instruction, snapshot.children);
   const target = match.reason === null ? match.matches[0] : null;
+
+  // PM-P0-1: when the epic has failed/skipped children, every "can't act on this"
+  // reply surfaces the `retry` command — so an unrecognised comment always shows
+  // what the user CAN do (no intent-guessing needed).
+  const epicHasFailures = snapshot.children.some(
+    (c) => c.child_status === 'failed' || c.child_status === 'skipped',
+  );
 
   if (!target || !target.child_task_id) {
     // No confident single match (or matched a not-yet-started node) → ask.
@@ -2957,7 +3063,7 @@ async function handleParentEpicCommentTrigger(args: {
     // lead with the create-a-sub-issue path rather than the generic "couldn't
     // tell". A close suggestion takes precedence (more likely a vague edit).
     const newWork = reason === 'none' && !suggestion && looksLikeNewWork(trigger.instruction);
-    const body = renderParentDisambiguationReply(reason, snapshot.children, suggestion, newWork);
+    const body = renderParentDisambiguationReply(reason, snapshot.children, suggestion, newWork, epicHasFailures);
     await replyToComment(feedbackCtx, snapshot.meta.parent_linear_issue_id, replyTargetId, body);
     // #247 UX-1: this is a QUESTION, not work-in-progress. Swap the 👀 we put
     // on receipt to ❓ so the comment doesn't look like it's still being worked.
@@ -2970,13 +3076,24 @@ async function handleParentEpicCommentTrigger(args: {
 
   const prNumber = await resolveChildPrNumber(target.child_task_id);
   if (prNumber === null) {
-    const body = renderParentDisambiguationReply('none', snapshot.children, target);
+    // PM-P0-1: matched a node but it has no PR to iterate. If that node FAILED,
+    // the user named it to fix it — there's nothing to iterate (no PR), so point
+    // them straight at retry instead of the generic disambiguation (the loop the
+    // PM hit: naming a failed child got "couldn't tell / no PR" with no way out).
+    const targetRow = snapshot.children.find((c) => c.sub_issue_id === target.sub_issue_id);
+    const body = targetRow?.child_status === 'failed'
+      ? `👋 **${target.linear_identifier ?? target.sub_issue_id}** failed before opening a PR, so there's `
+        + 'nothing to iterate on yet. Reply `@bgagent retry` on this epic to re-run the failed work '
+        + '(or remove and re-apply the `abca` label) — then comment again once it has a PR.'
+      : renderParentDisambiguationReply('none', snapshot.children, target, false, epicHasFailures);
     await replyToComment(feedbackCtx, snapshot.meta.parent_linear_issue_id, replyTargetId, body);
     // #247 UX-1: matched a node but it has no PR yet — also a "wait / clarify"
     // state, not active work; swap 👀 → ❓.
     await swapCommentReaction(feedbackCtx, commentId, EMOJI_NEEDS_INPUT);
     logger.info('A6 comment (parent epic): matched sub-issue has no PR yet — asked', {
-      orchestration_id: orchestrationId, sub_issue_id: target.sub_issue_id,
+      orchestration_id: orchestrationId,
+      sub_issue_id: target.sub_issue_id,
+      child_status: targetRow?.child_status,
     });
     return;
   }

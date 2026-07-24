@@ -900,5 +900,92 @@ describe('linear-webhook-processor — #247 A6 comment trigger', () => {
       expect(createTaskCoreMock).toHaveBeenCalledTimes(1); // one iteration, not two
       expect(reactToCommentMock).toHaveBeenCalledTimes(1);
     });
+
+    // PM-P0-1 (2026-07-24): "@bgagent retry" on a FAILED epic must run the
+    // epic-retry machinery (reset + re-release the failed child), NOT the
+    // disambiguation reply (the loop the PM hit). One failed + one succeeded
+    // child: retry re-runs ONLY the failed one, and the succeeded one is kept.
+    function mockFailedEpic(parentIssueId: string): void {
+      const meta = {
+        sub_issue_id: '#meta',
+        orchestration_id: 'orch_f',
+        parent_linear_issue_id: parentIssueId,
+        linear_workspace_id: 'WS',
+        repo: 'o/r',
+        child_count: 2,
+        platform_user_id: 'release-user',
+        release_context: { platform_user_id: 'release-user' },
+      };
+      const ok = {
+        orchestration_id: 'orch_f',
+        sub_issue_id: 'sub-ok',
+        depends_on: [],
+        child_status: 'succeeded',
+        repo: 'o/r',
+        parent_linear_issue_id: parentIssueId,
+        linear_workspace_id: 'WS',
+        linear_identifier: 'ABCA-1',
+        title: 'Step A',
+        child_task_id: 'task-ok',
+      };
+      const bad = {
+        orchestration_id: 'orch_f',
+        sub_issue_id: 'sub-bad',
+        depends_on: [],
+        child_status: 'failed',
+        repo: 'o/r',
+        parent_linear_issue_id: parentIssueId,
+        linear_workspace_id: 'WS',
+        linear_identifier: 'ABCA-2',
+        title: 'Step B',
+        child_task_id: 'task-bad-1',
+      };
+      const claimedAcks = new Set<string>();
+      ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
+        if (cmd._type === 'Update') {
+          const sk = (cmd.input.Key as { sub_issue_id?: string })?.sub_issue_id ?? '';
+          // ack + retry claim rows: first wins, redelivery ConditionalCheckFailed.
+          if (sk.startsWith('ack#') || sk.startsWith('retry:') || sk === '#rollup-claim') {
+            if (claimedAcks.has(sk)) {
+              throw Object.assign(new Error('claim exists'), { name: 'ConditionalCheckFailedException' });
+            }
+            claimedAcks.add(sk);
+          }
+          return {};
+        }
+        if (cmd._type === 'Query' && cmd.input.IndexName === 'LinearIssueIndex') return { Items: [] };
+        if (cmd._type === 'Query') return { Items: [meta, ok, bad] };
+        if (cmd._type === 'Get') {
+          const key = cmd.input.Key as { task_id?: string; linear_identity?: string };
+          if (key.linear_identity) return { Item: { platform_user_id: 'commenter-user', status: 'active' } };
+          return { Item: {} };
+        }
+        return {};
+      });
+    }
+
+    test('PM-P0-1: "@bgagent retry" on a failed epic re-runs the failed child (NOT disambiguation)', async () => {
+      mockFailedEpic('PARENT-EPIC');
+      await handler(eventWith(parentComment('@bgagent retry', 'pc-retry')));
+      // Acked with 👀 (work in flight) — kept, NOT swapped to ❓ (that was the
+      // dead-end path). No disambiguation reply.
+      expect(reactToCommentMock).toHaveBeenCalledWith(expect.anything(), 'pc-retry', 'eyes');
+      expect(replyToCommentMock).not.toHaveBeenCalled();
+      // The failed child was re-released: createTaskCore called for it, with the
+      // ABCA-659 salt (its prior failed task id) so a NEW task spawns.
+      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+      const [, ctx] = createTaskCoreMock.mock.calls[0];
+      expect(ctx.idempotencyKey).toContain('task-bad-1'); // salted with the dead task
+    });
+
+    test('PM-P0-1: "@bgagent retry" on an all-succeeded epic replies "nothing to retry", no task', async () => {
+      mockParentEpic('PARENT-EPIC'); // both children succeeded
+      await handler(eventWith(parentComment('@bgagent retry', 'pc-retry-2')));
+      expect(createTaskCoreMock).not.toHaveBeenCalled();
+      expect(replyToCommentMock).toHaveBeenCalledTimes(1);
+      const [, , , replyBody] = replyToCommentMock.mock.calls[0];
+      expect(String(replyBody).toLowerCase()).toContain('nothing to retry');
+      expect(swapCommentReactionMock).toHaveBeenCalledWith(expect.anything(), 'pc-retry-2', 'question');
+    });
   });
 });

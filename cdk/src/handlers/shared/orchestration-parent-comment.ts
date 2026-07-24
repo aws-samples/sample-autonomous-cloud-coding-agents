@@ -34,6 +34,7 @@
  * the Linear/DDB work (resolve PR, spawn the iteration task, ack).
  */
 
+import { KNOWN_EPIC_COMMANDS } from './orchestration-comment-trigger';
 import { isIntegrationNode } from './orchestration-integration-node';
 
 /** Minimal view of a sub-issue row this matcher needs. */
@@ -230,8 +231,29 @@ export function renderParentDisambiguationReply(
   nodes: readonly ParentCommentNode[],
   suggestion?: ParentCommentNode | null,
   newWork = false,
+  /**
+   * PM-P0-1 (2026-07-24): whether the epic currently has failed/skipped children.
+   * When true, the reply surfaces the ``retry`` command prominently — so a user
+   * who typed something we couldn't act on (a typo, a vague ask, anything) is
+   * ALWAYS shown what they CAN type, rather than us trying to guess their intent.
+   * The command list is truthful (from {@link KNOWN_EPIC_COMMANDS}) so it stays
+   * correct as commands are added.
+   */
+  hasFailures = false,
 ): string {
   const real = nodes.filter((n) => !isIntegrationNode(n.sub_issue_id));
+  // The "what you can type here" footer — always present so an unrecognised
+  // comment is never a dead-end. `retry` is only meaningful when something
+  // failed, so it's listed only then (with the equivalent re-label path, so the
+  // two ways to retry read consistently).
+  const commandsFooter = hasFailures
+    ? [
+      '',
+      `**Commands:** ${KNOWN_EPIC_COMMANDS.map((c) => `\`@bgagent ${c}\``).join(', ')} `
+        + 're-runs the failed/skipped sub-issues (same as removing and re-applying the '
+        + '`abca` label; succeeded ones are kept).',
+    ]
+    : [];
 
   // #247 UX-2: new-work path leads with the create-a-sub-issue ask (the comment
   // is adding something, not changing an existing sub-issue), then lists the
@@ -249,6 +271,7 @@ export function renderParentDisambiguationReply(
       'The current sub-issues are:',
       '',
       ...real.map((n) => `- ${nodeLabel(n)}`),
+      ...commandsFooter,
     ].join('\n');
   }
 
@@ -271,6 +294,7 @@ export function renderParentDisambiguationReply(
     '',
     "If it's **new work** (not a change to one of these), create a new sub-issue " +
       'under this epic and add the `abca` label — I\'ll fold it into the orchestration.',
+    ...commandsFooter,
   );
   return out.join('\n');
 }

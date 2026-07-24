@@ -21,7 +21,9 @@ import {
   buildIterationInstruction,
   detectNearMissMention,
   isBotAuthoredComment,
+  KNOWN_EPIC_COMMANDS,
   parseCommentTrigger,
+  parseRetryIntent,
 } from '../../../src/handlers/shared/orchestration-comment-trigger';
 
 describe('parseCommentTrigger', () => {
@@ -172,5 +174,36 @@ describe('detectNearMissMention (#299 BLOCKER-2 — @abca black hole)', () => {
     expect(detectNearMissMention('👋 I answer to `@bgagent` — I don\'t pick up other @-names')).toBe(false);
     // A plan comment embeds a literal "@bgagent approve" example — still not a near-miss.
     expect(detectNearMissMention('🗂️ Proposed breakdown … reply `@bgagent approve`')).toBe(false);
+  });
+});
+
+describe('parseRetryIntent (PM-P0-1 — retry command)', () => {
+  test('bare retry phrases → true', () => {
+    for (const s of ['retry', 'Retry', 're-run', 'rerun', 'try again', 'run again', 'run it again', 'retry please']) {
+      expect(parseRetryIntent(s)).toBe(true);
+    }
+  });
+
+  test('a retry word leading a SUBSTANTIVE edit is NOT a bare retry (routes to iterate/revise)', () => {
+    // "retry the footer but change the color and spacing too" is an edit request,
+    // not a bare retry — must fall through so it isn't swallowed by the retry path.
+    expect(parseRetryIntent('retry the footer but change the color and spacing and margins')).toBe(false);
+  });
+
+  test('empty / non-retry instructions → false', () => {
+    expect(parseRetryIntent('')).toBe(false);
+    expect(parseRetryIntent('looks good, ship it')).toBe(false);
+    expect(parseRetryIntent('change the header color')).toBe(false);
+    // A bare @bgagent (empty instruction) is "address latest review", never a retry.
+    expect(parseRetryIntent('   ')).toBe(false);
+  });
+
+  test('markdown emphasis around the word is tolerated', () => {
+    expect(parseRetryIntent('`retry`')).toBe(true);
+    expect(parseRetryIntent('**retry**')).toBe(true);
+  });
+
+  test('KNOWN_EPIC_COMMANDS lists retry (kept in sync with the parser + panel copy)', () => {
+    expect(KNOWN_EPIC_COMMANDS).toContain('retry');
   });
 });
