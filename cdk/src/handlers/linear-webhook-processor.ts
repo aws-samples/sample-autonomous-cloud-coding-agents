@@ -69,8 +69,11 @@ import {
   type DecompositionEffects,
 } from './shared/orchestration-decomposition-flow';
 import {
+  AUTO_SUFFIX,
+  DECOMPOSE_SUFFIX,
   DEFAULT_LABEL_FILTER as MODE_DEFAULT_LABEL_FILTER,
   hasHelpLabel,
+  HELP_SUFFIX,
   looksMultiPart,
   parseDecompositionMode,
   triggerLabelVariants,
@@ -747,35 +750,34 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     // never matches ``shouldTrigger``. The user applied an ABCA label and heard
     // nothing (live-caught: DEM-30, plain ``abca`` on an unmapped project). Speak
     // up ONLY for a JUST-ADDED recognized-ABCA label on a project-less OR
-    // unmapped-project issue — ``labelJustPresent`` keeps it a one-shot (never
-    // per-edit / redelivery), and the recognized-grammar check keeps it from
+    // unmapped-project issue, and the recognized-grammar check keeps it from
     // firing on an unrelated team's own labels (the workspace-wide spam this gate
     // guards against). This is a UX NUDGE, not a trigger — no task is created.
     const abcaLabelJustAdded = labelJustPresent(payload, looksLikeAbcaTriggerLabel);
-    if (abcaLabelJustAdded && !projectId) {
-      logger.info('Linear ABCA label on a project-less issue — nudging (was a silent drop)', {
-        issue_id: issue.id,
-      });
-      await safeReportIssueFailure(
-        issue.id,
-        payload.organizationId,
-        "❌ This Linear issue isn't in a project — ABCA needs a Linear project to route the task to a repo. "
-        + 'Move the issue into an onboarded project, then re-apply the label.',
-      );
-      return;
-    }
-    if (abcaLabelJustAdded && projectId && !mappingItem) {
-      logger.info('Linear ABCA label on an unmapped project — nudging (was a silent drop, DEM-30)', {
-        issue_id: issue.id,
-        linear_project_id: projectId,
-      });
-      await safeReportIssueFailure(
-        issue.id,
-        payload.organizationId,
-        "❌ This Linear project isn't onboarded to ABCA, so I can't route this to a repo. An admin can "
-        + 'onboard it with `bgagent linear onboard-project <project-uuid> --repo <owner>/<repo> --label '
-        + '<trigger>`, then re-apply the label.',
-      );
+    if (abcaLabelJustAdded && (!projectId || !mappingItem)) {
+      // Claim-once so a webhook redelivery doesn't re-nudge (finding #4:
+      // ``labelJustPresent`` only limits to "just added", not "once per issue" —
+      // a redelivery carries the identical ``updatedFrom.labelIds`` and would
+      // re-post). Keyed on the issue id; gated on the orchestration table (the
+      // same guard the :help nudge uses). No table → best-effort single post.
+      const nudgeClaimed = ORCHESTRATION_TABLE
+        ? await claimCommentAck(
+          ddb, ORCHESTRATION_TABLE, deriveOrchestrationId(issue.id), `noproject-nudge#${issue.id}`,
+          new Date().toISOString(), Math.floor(Date.now() / 1000) + ACK_CLAIM_TTL_SECONDS,
+        )
+        : true;
+      if (nudgeClaimed) {
+        const nudge = !projectId
+          ? "❌ This Linear issue isn't in a project — ABCA needs a Linear project to route the task to a "
+            + 'repo. Move the issue into an onboarded project, then re-apply the label.'
+          : "❌ This Linear project isn't onboarded to ABCA, so I can't route this to a repo. An admin can "
+            + 'onboard it with `bgagent linear onboard-project <project-uuid> --repo <owner>/<repo> --label '
+            + '<trigger>`, then re-apply the label.';
+        logger.info('Linear ABCA label on a project-less/unmapped issue — nudging (was a silent drop, DEM-30)', {
+          issue_id: issue.id, has_project: Boolean(projectId),
+        });
+        await safeReportIssueFailure(issue.id, payload.organizationId, nudge);
+      }
       return;
     }
     logger.info('Linear webhook does not match trigger criteria — skipping silently', {
@@ -1637,6 +1639,10 @@ function buildDecompositionEffects(
   };
 }
 
+/** Outcome of {@link maybeRetryTerminalEpic} — lets a comment-driven caller
+ *  (PM-P0-1) distinguish a real retry from the "nothing to retry" cases. */
+type RetryOutcome = 'retried' | 'all_succeeded' | 'still_running' | 'no_orchestration';
+
 /**
  * ABCA-659 — retry an already-terminal epic on a pure re-trigger (re-label with
  * no new sub-issues). The seed/extend paths never re-run terminal children, so a
@@ -1656,13 +1662,10 @@ function buildDecompositionEffects(
  * Best-effort throughout; never throws out of the webhook. Idempotency: the retry
  * is naturally convergent — a redelivery finds the nodes already reset to
  * ready/blocked/released (computeEpicRetryPlan sees 0 failed/skipped) and no-ops.
+ *
+ * Returns a {@link RetryOutcome} so a comment-driven caller (PM-P0-1) can react:
+ * keep 👀 on ``retried``, else reply honestly instead of resetting nothing.
  */
-/**
- * Outcome of a terminal-epic retry attempt, so a comment-driven caller
- * (PM-P0-1) can react appropriately: ack 👀→🔄 on ``retried``, or reply honestly
- * on the no-op cases instead of the misleading disambiguation reply.
- */
-type RetryOutcome = 'retried' | 'nothing_to_retry' | 'all_succeeded' | 'still_running' | 'no_orchestration';
 
 async function maybeRetryTerminalEpic(
   orchestrationId: string,
@@ -1676,7 +1679,17 @@ async function maybeRetryTerminalEpic(
    * already-complete) — they'd double up with the comment reply. The retry
    * mechanics (reset + re-release) are identical.
    */
-  opts: { readonly suppressAdvisoryNotes?: boolean } = {},
+  opts: {
+    readonly suppressAdvisoryNotes?: boolean;
+    /**
+     * PM-P0-1 idempotency: when a COMMENT drives the retry, pass its comment id.
+     * It's the natural once-key — unique per genuine user action, identical
+     * across a webhook redelivery — so it dedups the comment path reliably even
+     * for the F9 case where a failed child has NO task_id (the fingerprint below
+     * can't disambiguate those). Absent → the label path's failed-set fingerprint.
+     */
+    readonly retryClaimKey?: string;
+  } = {},
 ): Promise<RetryOutcome> {
   if (!ORCHESTRATION_TABLE) return 'no_orchestration';
   const snapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, orchestrationId);
@@ -1729,21 +1742,28 @@ async function maybeRetryTerminalEpic(
   // a redelivery of the same re-label no-ops. Without this, two deliveries each
   // post a retry note (the duplicate the user saw).
   //
-  // F3 (DE-stress 2026-07-24): the fingerprint MUST include each failed/skipped
-  // child's current ``child_task_id`` (not just its sub_issue_id). A retry
-  // spawns a NEW task per failed child (the ABCA-659 idempotency salt), so if
-  // that retry FAILS THE SAME WAY, the failed SET is identical — a sub_issue_id-
-  // only fingerprint produces the SAME claim key, and the still-valid 24h claim
-  // silently drops the genuine second retry (live-caught: E4/ABCA-909, a real
-  // 3rd re-label ~15min later was skipped as a "redelivery"). The task ids
-  // change every retry cycle, so keying on them makes each real retry a fresh
-  // claim while a true webhook redelivery (same ids) still collides + no-ops.
+  // Claim key for THIS retry round. A COMMENT-driven retry (PM-P0-1) passes the
+  // comment id — the natural once-key (unique per user action, stable across
+  // redelivery) — which is reliable even when a failed child has no task_id.
+  //
+  // The LABEL path (re-apply the trigger) has no such id, so it fingerprints the
+  // current failed/skipped set. F3 (DE-stress 2026-07-24): the fingerprint must
+  // include each child's ``child_task_id`` (not just sub_issue_id) — a retry
+  // spawns a NEW task per failed child (ABCA-659 salt), so a same-way re-failure
+  // has an identical SET and a sub_issue_id-only key silently drops the genuine
+  // 2nd re-label (live-caught E4/ABCA-909). Also fold in ``updated_at`` so a
+  // child that failed with NO task_id (the F9 deterministic-create case) still
+  // gets a distinct key each round — its row is re-touched on every reset, so
+  // ``sub:none:<updated_at>`` differs across rounds while a true redelivery
+  // (same timestamps) still collides + no-ops.
   const retryFingerprint = snapshot.children
     .filter((c) => c.child_status === 'failed' || c.child_status === 'skipped')
-    .map((c) => `${c.sub_issue_id}:${c.child_task_id ?? 'none'}`)
+    .map((c) => `${c.sub_issue_id}:${c.child_task_id ?? 'none'}:${c.updated_at}`)
     .sort()
     .join(',');
-  const retryClaimKey = `retry:${hashRetryFingerprint(retryFingerprint)}`;
+  const retryClaimKey = opts.retryClaimKey
+    ? `retry-cmt:${opts.retryClaimKey}`
+    : `retry:${hashRetryFingerprint(retryFingerprint)}`;
   const retryClaimWon = await claimCommentAck(
     ddb, ORCHESTRATION_TABLE, orchestrationId, retryClaimKey,
     now, Math.floor(Date.now() / 1000) + ACK_CLAIM_TTL_SECONDS,
@@ -1857,6 +1877,54 @@ async function maybeRetryTerminalEpic(
     }
   }
   return 'retried';
+}
+
+/**
+ * PM-P0-1: handle a ``@bgagent retry`` comment on an epic OR one of its children
+ * — shared by both comment paths so they behave IDENTICALLY (the whole point of
+ * the fix). The caller has already claimed + 👀-acked the comment; this runs the
+ * ABCA-659 retry machinery and, on the no-op cases, replies honestly and swaps
+ * 👀→❓. On ``retried`` it leaves the 👀 (work in flight; the epic panel shows the
+ * 🔄). Returns nothing — the caller returns immediately after.
+ *
+ * @param replyIssueId  the issue to post the "nothing to retry" reply on (the
+ *                      epic for a parent comment; the commented child otherwise).
+ */
+async function handleEpicRetryIntent(args: {
+  orchestrationId: string;
+  parentIssueId: string;
+  workspaceId: string;
+  commentId: string;
+  replyIssueId: string;
+  replyTargetId: string;
+  feedbackCtx: { linearWorkspaceId: string; registryTableName: string };
+}): Promise<void> {
+  const { orchestrationId, parentIssueId, workspaceId, commentId, replyIssueId, replyTargetId, feedbackCtx } = args;
+  const outcome = await maybeRetryTerminalEpic(
+    orchestrationId, parentIssueId, workspaceId, { mode: 'mode_a' },
+    // Dedup on the COMMENT id — reliable even for an F9 no-task-id failed child,
+    // and it covers the "nothing to retry" reply too (finding #4: a redelivery
+    // must not re-post the reply / re-swap the reaction).
+    { suppressAdvisoryNotes: true, retryClaimKey: commentId },
+  );
+  if (outcome === 'retried') {
+    // Keep 👀 (work in flight); maybeRetryTerminalEpic posted the retry note +
+    // repositioned the live panel, which shows the 🔄. No reply needed.
+    logger.info('A6 comment: retry intent → epic retry re-run', {
+      orchestration_id: orchestrationId, comment_id: commentId,
+    });
+    return;
+  }
+  // Nothing to retry (all succeeded / still running / no orchestration) — reply
+  // honestly rather than resetting nothing, and swap 👀→❓ (a question, not work).
+  const replyBody = outcome === 'all_succeeded'
+    ? '👋 Everything in this epic already succeeded — there\'s nothing to retry. '
+      + '(To change something, name the sub-issue: `@bgagent ABCA-123: <what to change>`.)'
+    : '👋 This epic is still running — nothing has failed yet, so there\'s nothing to retry. '
+      + 'I\'ll update the panel as the sub-issues land.';
+  await replyToComment(feedbackCtx, replyIssueId, replyTargetId, replyBody);
+  await swapCommentReaction(feedbackCtx, commentId, EMOJI_NEEDS_INPUT);
+  logger.info('A6 comment: retry intent but nothing to retry', { orchestration_id: orchestrationId, outcome });
 }
 
 /** Hex chars of the retry-fingerprint hash kept for the claim key — enough to avoid
@@ -2338,32 +2406,21 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
 
   // PM-P0-1 (2026-07-24): a RETRY request on a sub-issue that belongs to an
   // orchestration means the same thing as a retry on the epic — "re-run the
-  // failed/skipped work" — so route it to the epic-retry machinery for
-  // CONSISTENCY (a child that failed before opening a PR can't be "iterated";
-  // and retry must behave identically whether typed on the epic or a child).
-  // Only a bare-ish retry phrase; "retry but also change X" stays an iteration.
+  // failed/skipped work" — so route it to the SAME epic-retry helper the parent
+  // path uses (a child that failed before opening a PR can't be "iterated"; and
+  // retry must behave identically whether typed on the epic or a child). Only a
+  // bare-ish retry phrase; "retry but also change X" stays an iteration.
   if (parseRetryIntent(trigger.instruction)) {
     const feedbackCtx = { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE };
     await reactToComment(feedbackCtx, commentId, EMOJI_STARTED);
-    const outcome = await maybeRetryTerminalEpic(
-      orchestrationId!, snapshot.meta.parent_linear_issue_id, workspaceId,
-      { mode: 'mode_a' }, { suppressAdvisoryNotes: true },
-    );
-    if (outcome === 'retried') {
-      // Keep 👀 (work in flight); the epic panel shows 🔄. Point the reply at the
-      // epic so the user knows retry is epic-scoped.
-      logger.info('A6 comment (child of orchestration): retry intent → epic retry', {
-        orchestration_id: orchestrationId, sub_issue_id: commentedIssueId,
-      });
-      return;
-    }
-    const replyBody = outcome === 'all_succeeded'
-      ? '👋 Everything in this epic already succeeded — there\'s nothing to retry.'
-      : '👋 This epic is still running — nothing has failed yet, so there\'s nothing to retry.';
-    await replyToComment(feedbackCtx, commentedIssueId, replyTargetId, replyBody);
-    await swapCommentReaction(feedbackCtx, commentId, EMOJI_NEEDS_INPUT);
-    logger.info('A6 comment (child of orchestration): retry intent but nothing to retry', {
-      orchestration_id: orchestrationId, outcome,
+    await handleEpicRetryIntent({
+      orchestrationId: orchestrationId!,
+      parentIssueId: snapshot.meta.parent_linear_issue_id,
+      workspaceId,
+      commentId,
+      replyIssueId: commentedIssueId, // reply on the child the user commented on
+      replyTargetId,
+      feedbackCtx,
     });
     return;
   }
@@ -2791,7 +2848,9 @@ async function handleSingleTaskVerdict(args: {
     await upsertStatusComment(
       feedbackCtx,
       commentedIssueId,
-      renderSingleTaskApprovedReference(''),
+      // Echo the approved scope (the description the reviewer OK'd) so the frozen
+      // record is auditable against the resulting PR.
+      renderSingleTaskApprovedReference(taken.single_task_description ?? ''),
       taken.proposal_comment_id,
     );
     await sweepDecompositionNotes(feedbackCtx, commentedIssueId, taken.proposal_comment_id);
@@ -3011,34 +3070,18 @@ async function handleParentEpicCommentTrigger(args: {
   // again") — the failure panel literally says "reply here to try again" — must
   // route to the epic-retry machinery (reset + re-run the failed/skipped
   // children), NOT to node disambiguation (which dead-ended/looped: the exact
-  // PM-P0-1 defect). Only a bare-ish retry phrase triggers this; "retry the
-  // footer but change X" is a substantive edit and falls through to iterate.
+  // PM-P0-1 defect). Same helper as the child path so both behave identically.
+  // Only a bare-ish retry phrase; "retry the footer but change X" is a
+  // substantive edit and falls through to iterate.
   if (parseRetryIntent(trigger.instruction)) {
-    const outcome = await maybeRetryTerminalEpic(
-      orchestrationId, snapshot.meta.parent_linear_issue_id, workspaceId,
-      { mode: 'mode_a' }, { suppressAdvisoryNotes: true },
-    );
-    if (outcome === 'retried') {
-      // Work is back in flight — KEEP the 👀 we put on receipt (there's no
-      // distinct "in progress" reaction; 👀 = being worked). The retry note +
-      // repositioned live panel (posted by maybeRetryTerminalEpic) show the 🔄
-      // status. No reply needed — the panel is the source of truth.
-      logger.info('A6 comment (parent epic): retry intent → epic retry re-run', {
-        orchestration_id: orchestrationId, comment_id: commentId,
-      });
-      return;
-    }
-    // Nothing to retry (all succeeded / still running) — reply honestly rather
-    // than resetting nothing, and swap 👀→❓ (this was a question, not work).
-    const replyBody = outcome === 'all_succeeded'
-      ? '👋 Everything in this epic already succeeded — there\'s nothing to retry. '
-        + '(To change something, name the sub-issue: `@bgagent ABCA-123: <what to change>`.)'
-      : '👋 This epic is still running — nothing has failed yet, so there\'s nothing to retry. '
-        + 'I\'ll update the panel as the sub-issues land.';
-    await replyToComment(feedbackCtx, snapshot.meta.parent_linear_issue_id, replyTargetId, replyBody);
-    await swapCommentReaction(feedbackCtx, commentId, EMOJI_NEEDS_INPUT);
-    logger.info('A6 comment (parent epic): retry intent but nothing to retry', {
-      orchestration_id: orchestrationId, outcome,
+    await handleEpicRetryIntent({
+      orchestrationId,
+      parentIssueId: snapshot.meta.parent_linear_issue_id,
+      workspaceId,
+      commentId,
+      replyIssueId: snapshot.meta.parent_linear_issue_id, // reply on the epic
+      replyTargetId,
+      feedbackCtx,
     });
     return;
   }
@@ -3756,22 +3799,29 @@ function shouldTrigger(payload: LinearIssueEvent, labelFilter: string): boolean 
 }
 
 /**
- * DEM-30 (PM-P1-2): does a label name LOOK like an ABCA trigger, independent of
- * the project's configured ``label_filter``? Used ONLY for the unmapped/
- * project-less NUDGE (not for dispatch) — when a project isn't onboarded there's
- * no configured filter to compare against (it defaults to ``bgagent``), so a
- * user's plain ``abca`` label would otherwise fall silent. Recognises the two
- * base names ABCA ships with (``abca``/``bgagent``) plus any of the deliberate
- * ``:decompose``/``:auto``/``:help`` suffixes on either base. Deliberately narrow
- * (a specific grammar, not "any label") so it can't fire on an unrelated team's
- * own labels — the workspace-wide spam the trigger gate guards against.
+ * DEM-30 (PM-P1-2): the base names to recognise for the unmapped/project-less
+ * NUDGE. This is the ONE place we can't derive the filter from config — an
+ * un-onboarded project has no mapping row, so there's no configured
+ * ``label_filter`` to compare against (it defaults to ``bgagent``). ``bgagent``
+ * is the platform default; ``abca`` is included because it's the base this
+ * install ships with and the exact DEM-30 case was a plain ``abca`` label. This
+ * is a deliberate, documented heuristic for a NUDGE only (never dispatch), not a
+ * general pattern-match — kept narrow so it can't fire on an unrelated team's
+ * labels. If a third base is ever configured, add it here.
+ */
+const NUDGE_KNOWN_BASES = ['abca', 'bgagent'] as const;
+
+/**
+ * Does a label name LOOK like an ABCA trigger, for the unmapped-project NUDGE
+ * only? Recognises a {@link NUDGE_KNOWN_BASES} base, or that base with any of the
+ * real suffix variants ({@link DECOMPOSE_SUFFIX}/{@link AUTO_SUFFIX}/{@link
+ * HELP_SUFFIX} — derived, not hardcoded, so it can't drift from the mode parser).
  */
 function looksLikeAbcaTriggerLabel(name: string | undefined | null): boolean {
   const n = (name ?? '').trim().toLowerCase();
   if (!n) return false;
-  const KNOWN_BASES = ['abca', 'bgagent'];
-  if (KNOWN_BASES.includes(n)) return true;
-  return KNOWN_BASES.some((b) => n === `${b}:decompose` || n === `${b}:auto` || n === `${b}:help`);
+  const suffixes = [DECOMPOSE_SUFFIX, AUTO_SUFFIX, HELP_SUFFIX];
+  return NUDGE_KNOWN_BASES.some((b) => n === b || suffixes.some((s) => n === `${b}:${s}`));
 }
 
 /**

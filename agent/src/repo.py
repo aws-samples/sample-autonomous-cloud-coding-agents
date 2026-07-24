@@ -333,12 +333,9 @@ def setup_repo(config: TaskConfig, progress: Any = None) -> RepoSetup:
         # first — it is an unmerged sibling branch that the fresh clone may not
         # have locally.
         base_branch = config.base_branch
-        # #247 F1: a diamond (merge_branches set) has base_branch = the server's
-        # 'main' literal, which is wrong for a non-main-default fork. Resolve the
-        # real default and rewrite base_branch to it BEFORE the fetch/checkout so
-        # the diamond stacks on the true default (and setup.default_branch, the PR
-        # base, follows it below). A linear child (no merge_branches) keeps its
-        # predecessor base untouched.
+        # #247 F1: a diamond rewrites the server's 'main' literal to the real
+        # default before fetch/checkout (see the block comment above); a linear
+        # child (no merge_branches) keeps its predecessor base untouched.
         if config.merge_branches:
             detected = detect_default_branch(config.repo_url, repo_dir)
             if detected != base_branch:

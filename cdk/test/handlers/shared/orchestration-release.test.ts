@@ -428,9 +428,14 @@ describe('releaseChild — idempotency + failure', () => {
     expect(fail.input.ExpressionAttributeValues![':reason']).toContain('content policy');
   });
 
-  test('F9: a validation 422 is also terminal (deterministic — fails identically forever)', async () => {
+  // Against the codes createTaskCore ACTUALLY returns: 400 (validation/guardrail)
+  // + 422 (repo-not-onboarded) are terminal; 409 (dup) + 5xx are transient.
+  test('F9: 422 REPO_NOT_ONBOARDED is TERMINAL with an "onboard it" reason (sweep can\'t bound it)', async () => {
     const ddb = { send: jest.fn().mockResolvedValue({}) };
-    const createTaskCore = jest.fn().mockResolvedValue({ statusCode: 422, body: '{"error":{"message":"bad input"}}' });
+    const createTaskCore = jest.fn().mockResolvedValue({
+      statusCode: 422,
+      body: '{"error":{"code":"REPO_NOT_ONBOARDED","message":"not onboarded"}}',
+    });
     const result = await releaseChild({
       ddb: ddb as never,
       tableName: 'OrchestrationTable',
@@ -440,12 +445,15 @@ describe('releaseChild — idempotency + failure', () => {
       now: NOW,
     });
     expect(result.kind).toBe('create_failed_terminal');
+    if (result.kind === 'create_failed_terminal') expect(result.failureReason).toMatch(/onboard/i);
+    const fail = ddb.send.mock.calls[1][0] as UpdateCommand;
+    expect(fail.input.ExpressionAttributeValues![':failed']).toBe('failed');
   });
 
-  test('F9: a 429 throttle / 404 un-onboarded stays TRANSIENT (rolls back to ready — operationally fixable)', async () => {
-    for (const statusCode of [429, 404, 408]) {
+  test('F9: 5xx (server) + 409 (duplicate replay) are TRANSIENT — roll back to ready', async () => {
+    for (const statusCode of [503, 500, 409]) {
       const ddb = { send: jest.fn().mockResolvedValue({}) };
-      const createTaskCore = jest.fn().mockResolvedValue({ statusCode, body: '{"error":{"message":"try later"}}' });
+      const createTaskCore = jest.fn().mockResolvedValue({ statusCode, body: '{"error":{"message":"later"}}' });
       const result = await releaseChild({
         ddb: ddb as never,
         tableName: 'OrchestrationTable',

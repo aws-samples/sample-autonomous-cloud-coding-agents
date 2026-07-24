@@ -172,44 +172,60 @@ export type ReleaseChildResult =
  */
 export type ReleaseChildReadyResult = ReleaseChildResult & { readonly subIssueId: string };
 
-/** HTTP statuses that are TRANSIENT even though they're 4xx — a later sweep can
- *  succeed, so they roll back to 'ready' rather than terminally failing (F9). */
-const HTTP_REQUEST_TIMEOUT = 408;
-const HTTP_TOO_MANY_REQUESTS = 429;
-const HTTP_FORBIDDEN = 403; // access not yet granted — operationally fixable
-const HTTP_NOT_FOUND = 404; // repo not yet onboarded — operationally fixable
+// The status codes createTaskCore ACTUALLY returns on a non-success (verified
+// against create-task-core.ts, not assumed from HTTP-code lore): 400
+// VALIDATION_ERROR (incl. the guardrail block), 409 DUPLICATE_TASK (idempotent
+// replay), 422 REPO_NOT_ONBOARDED, 500/503 server/service errors. There is no
+// 403/404/408/429 path here.
+const HTTP_CONFLICT = 409; // idempotent replay — a task already exists for this key
 const HTTP_CLIENT_ERROR_MIN = 400;
 const HTTP_SERVER_ERROR_MIN = 500;
-const TRANSIENT_4XX = new Set([HTTP_REQUEST_TIMEOUT, HTTP_TOO_MANY_REQUESTS, HTTP_FORBIDDEN, HTTP_NOT_FOUND]);
 
 /**
- * F9: is a create-task HTTP status DETERMINISTIC (retrying it will fail the same
- * way) vs TRANSIENT (a later retry could succeed)? A guardrail/content-policy
- * block, a validation error, or a malformed request are 4xx that never change on
- * replay — re-attempting every sweep is an infinite silent strand. Throttle
- * (429) / timeout (408) ARE worth retrying, and 404/403 (un-onboarded repo /
- * access) are treated as transient too: they can be fixed operationally
- * (onboard the repo, grant access) without re-labelling, so a later sweep should
- * pick them up rather than terminally failing the child.
+ * F9: is a create-task failure DETERMINISTIC (won't succeed on a bare retry — it
+ * needs someone to change something first) vs TRANSIENT (a later sweep could
+ * succeed on its own)? This decides terminal-fail (settle the epic) vs
+ * rollback-to-``ready`` (let the #303 sweep retry). Getting it wrong in the
+ * rollback direction is an INFINITE silent strand: the stranded-orchestration
+ * sweep re-releases a ``ready`` child forever and never terminally-fails it.
+ *
+ * Against the codes createTaskCore actually emits:
+ *  - 400 (validation / guardrail block) and 422 (repo not onboarded) →
+ *    DETERMINISTIC. Neither self-heals; the user must edit/reword the sub-issue
+ *    or onboard the repo, THEN re-run via ``@bgagent retry``. Rolling back would
+ *    loop the sweep forever.
+ *  - 409 (duplicate/idempotent replay) → NOT a real failure: a task already
+ *    exists for this key, so treat like a transient (roll back; a re-release
+ *    idempotent-replays to 200 and finalizes). Never terminal.
+ *  - 5xx (server/service) → TRANSIENT; a later sweep can succeed on its own.
  */
 function isDeterministicCreateFailure(statusCode: number): boolean {
-  if (TRANSIENT_4XX.has(statusCode)) return false;
+  if (statusCode === HTTP_CONFLICT) return false;
   return statusCode >= HTTP_CLIENT_ERROR_MIN && statusCode < HTTP_SERVER_ERROR_MIN;
 }
+
+const HTTP_UNPROCESSABLE = 422; // REPO_NOT_ONBOARDED
 
 /**
  * F9: a short, user-facing reason for a deterministic create failure, shown as
  * the child's panel ❌ sub-line (the child never got a task, so there's no
- * error_message to read). Recognises the guardrail/content-policy block — the
- * one deterministic 4xx a user can actually fix by rewording — and gives a
- * generic-but-honest line for other validation 4xx.
+ * error_message to read). Keys on the STATUS CODE first (reliable + owned by
+ * this layer) so the message can't silently degrade when an upstream reword
+ * changes the body prose; the body substring is only a refinement to name the
+ * guardrail case specifically (a 400 is either a guardrail block or a plain
+ * validation error, and the code alone doesn't tell them apart). Every reason
+ * ends with the same next step — fix the cause, then ``@bgagent retry``.
  */
 function deterministicFailureReason(statusCode: number, body: string): string {
-  const lower = (body || '').toLowerCase();
-  if (lower.includes('content policy') || lower.includes('guardrail')) {
-    return 'Blocked by content policy — reword this sub-issue and re-apply the label to retry.';
+  const retry = 'then reply `@bgagent retry` on the epic to re-run.';
+  if (statusCode === HTTP_UNPROCESSABLE) {
+    return `Couldn't start — this repo isn't onboarded to ABCA. Onboard it, ${retry}`;
   }
-  return `Could not start (validation error, HTTP ${statusCode}) — edit this sub-issue and re-apply the label to retry.`;
+  // 400: distinguish a guardrail/content-policy block (rewordable) from other validation.
+  if (/content policy|guardrail/i.test(body || '')) {
+    return `Blocked by content policy — reword this sub-issue, ${retry}`;
+  }
+  return `Couldn't start (validation error) — edit this sub-issue, ${retry}`;
 }
 
 /** Build the child task description from the sub-issue's identifier/title. */

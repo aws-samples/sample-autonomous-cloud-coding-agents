@@ -83,6 +83,7 @@ import {
   deriveOrchestrationId,
   loadOrchestration,
   setStatusCommentId,
+  type ChildStatus,
   type OrchestrationChildRow,
   type OrchestrationReleaseContext,
 } from './shared/orchestration-store';
@@ -350,28 +351,76 @@ async function resolveChildPrUrls(
  * reconcile). Returns ``sub_issue_id → reason``.
  */
 /**
- * F9: patch a just-released view with any children that FAILED terminally
- * during the release (a deterministic create failure — guardrail/validation).
- * ``failClaimTerminal`` already wrote ``child_status='failed'`` + ``failure_reason``
- * to the store; this mirrors that onto the in-memory rows so the settle running
- * immediately after the release sees the failure (there's no later stream event
- * for a child that never became a task). Pure; only touches terminally-failed
- * ids, leaving every other row untouched.
+ * F9: reconcile any children that FAILED terminally during the release (a
+ * deterministic create failure — guardrail/validation). ``failClaimTerminal``
+ * already wrote ``child_status='failed'`` + ``failure_reason`` for the failed
+ * node itself, but a mid-graph failure must ALSO transitively skip its
+ * dependents — exactly like a task-level failure does — or those dependents stay
+ * ``blocked`` forever and the epic never reaches all-terminal (it would hang at a
+ * different node instead of looping). Reuse {@link computeReconcilePlan} (the
+ * same BFS-over-reverse-deps the normal terminal path uses) to derive + PERSIST
+ * the skips, then return the view patched with both the failure and the skips so
+ * the settle running immediately after this sees the full terminal picture
+ * (there's no later stream event for a child that never became a task).
+ *
+ * Idempotent: the skip write is guarded on ``child_status IN (blocked, ready)``
+ * (won't clobber a released/running sibling), matching ``reconcileTerminalChild``.
  */
-function applyTerminalFailures(
+async function applyTerminalFailures(
+  orchestrationId: string,
   children: readonly OrchestrationChildRow[],
   results: readonly ReleaseChildReadyResult[],
-): readonly OrchestrationChildRow[] {
-  const failed = new Map<string, string>();
+  now: string,
+): Promise<readonly OrchestrationChildRow[]> {
+  if (!ORCHESTRATION_TABLE) return children;
+  const failedReasons = new Map<string, string>();
   for (const r of results) {
-    if (r.kind === 'create_failed_terminal') failed.set(r.subIssueId, r.failureReason);
+    if (r.kind === 'create_failed_terminal') failedReasons.set(r.subIssueId, r.failureReason);
   }
-  if (failed.size === 0) return children;
-  return children.map((c) =>
-    failed.has(c.sub_issue_id)
-      ? { ...c, child_status: 'failed' as const, failure_reason: failed.get(c.sub_issue_id)! }
-      : c,
-  );
+  if (failedReasons.size === 0) return children;
+
+  // Derive the transitive skips for each terminally-failed node using the SAME
+  // planner the task-failure path uses, so a guardrail failure and a task
+  // failure skip dependents identically. Accumulate into one status map (a
+  // diamond where two failed roots feed a shared leaf skips it once).
+  const statusById = new Map<string, ChildStatus>(children.map((c) => [c.sub_issue_id, c.child_status]));
+  for (const failedId of failedReasons.keys()) {
+    const plan = computeReconcilePlan(
+      { sub_issue_id: failedId, status: 'FAILED' },
+      children.map((c) => ({ ...c, child_status: statusById.get(c.sub_issue_id) ?? c.child_status })),
+    );
+    for (const u of plan.statusUpdates) statusById.set(u.sub_issue_id, u.child_status);
+  }
+
+  // Persist ONLY the skips here — the failed nodes themselves were already
+  // written by failClaimTerminal (with their failure_reason). Skip writes are
+  // guarded so they never stamp a live sibling terminal.
+  for (const [subIssueId, status] of statusById) {
+    if (status !== 'skipped' || children.find((c) => c.sub_issue_id === subIssueId)?.child_status === 'skipped') {
+      continue;
+    }
+    try {
+      await ddb.send(new UpdateCommand({
+        TableName: ORCHESTRATION_TABLE,
+        Key: { orchestration_id: orchestrationId, sub_issue_id: subIssueId },
+        UpdateExpression: 'SET child_status = :s, updated_at = :now',
+        ConditionExpression: 'child_status IN (:blocked, :ready)',
+        ExpressionAttributeValues: { ':s': 'skipped', ':blocked': 'blocked', ':ready': 'ready', ':now': now },
+      }));
+    } catch (err) {
+      if (isConditionalCheckFailed(err)) continue; // already moved on — fine
+      throw err;
+    }
+  }
+
+  // Return the view with the failure(s) + skips applied so the settle sees all-terminal.
+  return children.map((c) => {
+    if (failedReasons.has(c.sub_issue_id)) {
+      return { ...c, child_status: 'failed' as const, failure_reason: failedReasons.get(c.sub_issue_id)! };
+    }
+    const s = statusById.get(c.sub_issue_id);
+    return s === 'skipped' && c.child_status !== 'skipped' ? { ...c, child_status: 'skipped' as const } : c;
+  });
 }
 
 async function resolveChildFailureReasons(
@@ -686,9 +735,10 @@ async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
     // F9: a child that failed DETERMINISTICALLY (guardrail/validation) was just
     // marked terminally 'failed' in the store, but our in-memory freshChildren
     // still shows it releasing/ready — and no later stream event will re-drive
-    // this reconciler for a child that never became a task. Patch the local view
-    // so the settle below sees the failure and can reach all-terminal + post ❌.
-    freshChildren = applyTerminalFailures(freshChildren, results);
+    // this reconciler for a child that never became a task. Persist the
+    // transitive skips of its dependents + patch the local view so the settle
+    // below sees the full terminal picture and can reach all-terminal + post ❌.
+    freshChildren = await applyTerminalFailures(orchestrationId, freshChildren, results, now);
   }
 
   // Refresh the panel + settle the parent state against the fresh view.
@@ -1953,14 +2003,9 @@ async function seedDecomposedGraph(
 
 export async function handler(event: DynamoDBStreamEvent): Promise<DynamoDBBatchResponse> {
   let processed = 0;
-  // DE-F6 (2026-07-24): per-record isolation. Each record is processed in its
-  // own try/catch; a thrown record is reported as a batch item failure (by its
-  // stream sequence number) so ONLY it retries + bisects toward the DLQ, instead
-  // of failing the whole batch and re-driving its healthy siblings. Records
-  // stream in order per shard, so we stop reporting after the first failure is
-  // NOT required — DynamoDB retries from the earliest reported failure — but we
-  // report every failing record's id for clarity; the ESM retries from the
-  // lowest sequence number among them.
+  // DE-F6 (2026-07-24): per-record isolation. A thrown record is reported as a
+  // batch item failure (by its stream sequence number) so ONLY it retries,
+  // instead of failing the whole batch and re-driving its healthy siblings.
   const batchItemFailures: { itemIdentifier: string }[] = [];
   for (const record of event.Records) {
     const seq = record.dynamodb?.SequenceNumber;

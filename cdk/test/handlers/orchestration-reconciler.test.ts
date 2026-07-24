@@ -522,6 +522,52 @@ describe('orchestration-reconciler handler', () => {
     expect(createTaskCoreMock).not.toHaveBeenCalled();
   });
 
+  // F9 (DE-stress 2026-07-24): a child that fails DETERMINISTICALLY at release
+  // (guardrail 400) must not only terminally-fail itself but ALSO transitively
+  // skip its dependents — else a mid-graph guardrail failure hangs the epic at
+  // the blocked dependent instead of looping. This is the transitive-skip
+  // correctness gap the self-review caught (the leaf-only patch wasn't enough).
+  test('F9: A succeeds → B released but its create is guardrail-blocked (400) → B failed + dependent C skipped', async () => {
+    // Graph: A (done) → B (about to release, will be guardrail-blocked) → C.
+    mockOrchestration({
+      subIssueId: 'A',
+      children: [
+        { sub_issue_id: 'A', child_status: 'succeeded' },
+        { sub_issue_id: 'B', depends_on: ['A'], child_status: 'blocked' },
+        { sub_issue_id: 'C', depends_on: ['B'], child_status: 'blocked' },
+      ],
+    });
+    // B's task creation is deterministically blocked (guardrail); every other
+    // create (there is none here) would 201. releaseReadyChildren releases B →
+    // createTaskCore(B) → 400 → create_failed_terminal.
+    createTaskCoreMock.mockReset().mockResolvedValue({
+      statusCode: 400,
+      body: '{"error":{"message":"Task description was blocked by content policy."}}',
+    });
+
+    await handler({ Records: [taskRecord({ task_id: 'TA', status: 'COMPLETED', orchestration_id: 'orch_1' })] } as never);
+
+    // The reconciler tried to release B (one createTaskCore for the ready node).
+    expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+    // B was written terminally 'failed' (failClaimTerminal) AND C was written
+    // 'skipped' (transitive skip) — both via conditional Updates on the store.
+    const updates = ddbSend.mock.calls
+      .map((c) => c[0] as { _type: string; input: Record<string, unknown> })
+      .filter((c) => c._type === 'Update');
+    const wrote = (sk: string, status: string) => updates.some((u) =>
+      (u.input.Key as { sub_issue_id?: string }).sub_issue_id === sk
+      && (u.input.ExpressionAttributeValues as Record<string, unknown>)[':s'] === status
+      || (sk === 'B' && (u.input.Key as { sub_issue_id?: string }).sub_issue_id === 'B'
+        && (u.input.ExpressionAttributeValues as Record<string, unknown>)[':failed'] === 'failed'));
+    // B → failed (failClaimTerminal uses :failed), C → skipped (:s).
+    expect(updates.some((u) =>
+      (u.input.Key as { sub_issue_id?: string }).sub_issue_id === 'B'
+      && (u.input.ExpressionAttributeValues as Record<string, unknown>)[':failed'] === 'failed')).toBe(true);
+    expect(wrote('C', 'skipped')).toBe(true);
+    // The epic settled (panel posted) — not left hanging on a blocked C.
+    expect(upsertStatusCommentMock).toHaveBeenCalled();
+  });
+
   test('COMPLETED with build_passed=false → treated as failure, B not released', async () => {
     mockOrchestration({
       subIssueId: 'A',

@@ -468,19 +468,30 @@ export function renderSingleTaskProposal(reasoning: string): string {
   );
 }
 
+/** A single-task approved reference longer than this many chars is truncated so
+ *  the frozen record stays one scannable block (the full scope is in the PR). */
+const APPROVED_SCOPE_MAX_CHARS = 280;
+
 /**
  * PM-P1-1 (2026-07-24): freeze the SINGLE-task proposal comment when it is
  * APPROVED into a durable "Approved" reference — the single-task analogue of
  * {@link renderApprovedPlanReference}. Before this, the single-task approve path
  * swept the whole planning thread with nothing frozen, so Linear kept NO record
  * of what was proposed/approved (a reviewer couldn't audit the authorized scope
- * against the PR). Keeps exactly ONE durable line, dropping the now-stale
- * approve/reject footer. Still ``🗂️``-prefixed so the self-trigger guard skips it.
+ * against the PR). Echoes the APPROVED SCOPE (the task description the reviewer
+ * OK'd) so the frozen record is actually auditable — trimmed to one block, since
+ * the full text is on the PR. Empty scope → just the "Approved" line. Still
+ * ``🗂️``-prefixed so the self-trigger guard skips it.
  */
-export function renderSingleTaskApprovedReference(reasoning: string): string {
+export function renderSingleTaskApprovedReference(approvedScope: string): string {
+  const scope = approvedScope.trim();
+  const shown = scope.length > APPROVED_SCOPE_MAX_CHARS
+    ? `${scope.slice(0, APPROVED_SCOPE_MAX_CHARS).trimEnd()}…`
+    : scope;
+  const scopeBlock = shown ? `\n\n> ${shown.replace(/\n+/g, ' ')}` : '';
   return (
-    `${PLAN_PROPOSAL_PREFIX} **Approved** — running as a single task`
-    + `${reasoning ? ` (${reasoning})` : ''}.\n\n_Progress is on the issue below._`
+    `${PLAN_PROPOSAL_PREFIX} **Approved** — running as a single task.${scopeBlock}`
+    + '\n\n_Progress is on the issue below._'
   );
 }
 

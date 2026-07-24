@@ -335,22 +335,33 @@ describe('renderApprovedPlanReference (#299 plan-cleanup)', () => {
 });
 
 describe('renderSingleTaskApprovedReference (PM-P1-1 — single-task approval record)', () => {
-  test('freezes to a durable "Approved" reference, bot-prefixed, no stale action footer', () => {
-    const ref = renderSingleTaskApprovedReference('one cohesive change');
+  test('freezes to a durable "Approved" reference that ECHOES the approved scope, bot-prefixed, no stale footer', () => {
+    const ref = renderSingleTaskApprovedReference('Add a /health endpoint returning 200');
     expect(ref.startsWith(PLAN_PROPOSAL_PREFIX)).toBe(true);
     // Bot-prefixed so the self-trigger guard skips it (won't re-fire the webhook).
     expect(isBotAuthoredComment(ref)).toBe(true);
     expect(ref).toMatch(/Approved/);
-    expect(ref).toContain('one cohesive change');
+    // The auditable scope is echoed (the whole point — a reviewer can check the PR against it).
+    expect(ref).toContain('Add a /health endpoint returning 200');
     // The stale approve/reject prompt is GONE (the task is running now).
     expect(ref).not.toMatch(/@bgagent approve/i);
     expect(ref).not.toMatch(/@bgagent reject/i);
   });
 
-  test('handles an empty reasoning without a dangling "()"', () => {
+  test('empty scope → just the "Approved" line, no dangling quote block', () => {
     const ref = renderSingleTaskApprovedReference('');
     expect(ref).toMatch(/Approved/);
+    expect(ref).not.toContain('>'); // no empty markdown quote
     expect(ref).not.toContain('()');
+  });
+
+  test('a very long scope is truncated to one block (full text lives on the PR)', () => {
+    const long = 'x'.repeat(500);
+    const ref = renderSingleTaskApprovedReference(long);
+    expect(ref).toContain('…'); // truncated
+    expect(ref.length).toBeLessThan(long.length); // not the whole 500 chars
+    // Newlines in the scope are collapsed so the quote stays one block.
+    expect(renderSingleTaskApprovedReference('line one\nline two')).toContain('line one line two');
   });
 });
 

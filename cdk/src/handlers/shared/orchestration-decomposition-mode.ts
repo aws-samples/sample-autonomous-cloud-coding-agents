@@ -171,27 +171,6 @@ export function hasHelpLabel(
 }
 
 /**
- * True when a label of the shape ``<anything>:decompose`` or ``<anything>:auto``
- * is present — a decompose SUFFIX regardless of the base filter. Used only to
- * decide whether a project-less (unmapped) issue should get the "move it into a
- * project" nudge (F-noproject): the base trigger label defaults to ``bgagent``
- * when there's no project mapping, so an ``abca:decompose`` on an unmapped issue
- * wouldn't match {@link triggerLabelVariants} and was silently dropped. Matching
- * the SUFFIX (not a bare base label) is spam-safe: the original workspace-wide
- * comment spam came from the bare base label firing on every edit; a
- * ``:decompose``/``:auto`` suffix is ABCA-specific and deliberate, so speaking up
- * on it can't re-introduce that spam. Case-insensitive.
- */
-export function hasDecomposeSuffixLabel(
-  labelNames: readonly (string | undefined | null)[],
-): boolean {
-  return labelNames.some((n) => {
-    const name = norm(n);
-    return name.endsWith(`:${DECOMPOSE_SUFFIX}`) || name.endsWith(`:${AUTO_SUFFIX}`);
-  });
-}
-
-/**
  * Cheap, pre-spend heuristic: does a plain (non-``:decompose``) issue LOOK like
  * it has several independent parts? Used only to post a one-time hint suggesting
  * ``:decompose`` (customer-caught: a plain ``bgagent`` label on a multi-part

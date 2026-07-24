@@ -362,6 +362,41 @@ describe('linear-webhook-processor — #247 orchestration routing', () => {
     expect(createTaskCoreMock).not.toHaveBeenCalled();
   });
 
+  // DEM-30 (PM-P1-2) + finding #4: the unmapped-project nudge must be claim-once
+  // (a webhook redelivery carries the same labelIds, so labelJustPresent alone
+  // re-fires). This file sets ORCHESTRATION_TABLE_NAME, so the claim path runs.
+  test('DEM-30: unmapped-project nudge is claim-once — a redelivery posts EXACTLY ONE nudge', async () => {
+    const claimed = new Set<string>();
+    resolveLinearOauthTokenMock.mockResolvedValue({ accessToken: 't', oauthSecretArn: 'a', workspaceSlug: 'w' });
+    ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
+      const key = cmd.input?.Key as { sub_issue_id?: string; linear_project_id?: string } | undefined;
+      if (key?.linear_project_id) return { Item: undefined }; // project not mapped
+      if (cmd._type === 'Update' && key?.sub_issue_id?.includes('noproject-nudge#')) {
+        if (claimed.has(key.sub_issue_id)) {
+          throw Object.assign(new Error('claim'), { name: 'ConditionalCheckFailedException' });
+        }
+        claimed.add(key.sub_issue_id);
+      }
+      return {};
+    });
+    const abcaIssue = () => issue({
+      data: {
+        id: 'issue-1',
+        identifier: 'ABC-1',
+        title: 'x',
+        description: '',
+        projectId: 'project-1',
+        teamId: 't',
+        labels: [{ id: 'l-abca', name: 'abca' }],
+      },
+    });
+    await handler(eventWith(abcaIssue()));
+    await handler(eventWith(abcaIssue())); // redelivery
+    await handler(eventWith(abcaIssue())); // redelivery
+    expect(createTaskCoreMock).not.toHaveBeenCalled();
+    expect(reportIssueFailureMock).toHaveBeenCalledTimes(1); // ONE nudge, not three
+  });
+
   // Customer-caught label discoverability (#2/#3): the :help explainer and the
   // multi-part hint. Tested at the handler seam (real webhook → real routing),
   // per [[feedback_test_mock_layer]].
@@ -555,6 +590,72 @@ describe('linear-webhook-processor — #247 A6 comment trigger', () => {
     // #247 UX.3: the triggering comment id is threaded so the reconciler can
     // reply ✅/❌ beneath it when the iteration lands.
     expect(ctx.channelMetadata.trigger_comment_id).toBe('comment-1');
+  });
+
+  // PM-P0-1 (2026-07-24): "@bgagent retry" on a CHILD of a failed orchestration
+  // routes to the SAME epic-retry machinery as on the parent (consistency), NOT
+  // to iteration of that child's PR. Proves the shared handleEpicRetryIntent path
+  // works from the child entry point (the copy the smell-review flagged as untested).
+  test('PM-P0-1: "@bgagent retry" on a sub-issue re-runs the epic\'s failed child (not iteration)', async () => {
+    const meta = {
+      sub_issue_id: '#meta',
+      orchestration_id: 'orch_x',
+      parent_linear_issue_id: 'PARENT',
+      linear_workspace_id: 'WS',
+      repo: 'o/r',
+      child_count: 2,
+      platform_user_id: 'release-user',
+      release_context: { platform_user_id: 'release-user' },
+    };
+    // The commented child succeeded; a SIBLING failed → retry has work to do.
+    const okChild = {
+      orchestration_id: 'orch_x',
+      sub_issue_id: 'sub-issue-1',
+      depends_on: [],
+      child_status: 'succeeded',
+      repo: 'o/r',
+      parent_linear_issue_id: 'PARENT',
+      linear_workspace_id: 'WS',
+      child_task_id: 'task-sub-1',
+    };
+    const badSibling = {
+      orchestration_id: 'orch_x',
+      sub_issue_id: 'sub-bad',
+      depends_on: [],
+      child_status: 'failed',
+      repo: 'o/r',
+      parent_linear_issue_id: 'PARENT',
+      linear_workspace_id: 'WS',
+      child_task_id: 'task-bad-1',
+    };
+    const claimed = new Set<string>();
+    ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
+      if (cmd._type === 'Query' && cmd.input.IndexName === 'LinearIssueIndex') return { Items: [] };
+      if (cmd._type === 'Query') return { Items: [meta, okChild, badSibling] };
+      if (cmd._type === 'Update') {
+        const sk = (cmd.input.Key as { sub_issue_id?: string })?.sub_issue_id ?? '';
+        if (sk.startsWith('ack#') || sk.startsWith('retry:') || sk === '#rollup-claim') {
+          if (claimed.has(sk)) throw Object.assign(new Error('claim'), { name: 'ConditionalCheckFailedException' });
+          claimed.add(sk);
+        }
+        return {};
+      }
+      if (cmd._type === 'Get' && (cmd.input.Key as { linear_identity?: string })?.linear_identity) {
+        return { Item: { platform_user_id: 'commenter-user', status: 'active' } };
+      }
+      return {};
+    });
+
+    await handler(eventWith(comment({ data: { id: 'c-retry', body: '@bgagent retry', issueId: 'sub-issue-1' } })));
+
+    // Re-ran the failed sibling (salted key), did NOT open a pr-iteration on the child.
+    expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+    const [body, ctx] = createTaskCoreMock.mock.calls[0];
+    expect(body.workflow_ref).not.toBe('coding/pr-iteration-v1');
+    expect(ctx.idempotencyKey).toContain('task-bad-1'); // ABCA-659 salt → new task for the failed child
+    // 👀 kept (work in flight), no "nothing to retry" reply.
+    expect(reactToCommentMock).toHaveBeenCalledWith(expect.anything(), 'c-retry', 'eyes');
+    expect(replyToCommentMock).not.toHaveBeenCalled();
   });
 
   test('@bgagent on a started sub-issue → instant 👀 ack on the TRIGGERING comment (#247 UX.3)', async () => {
