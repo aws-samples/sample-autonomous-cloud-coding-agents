@@ -484,6 +484,30 @@ describe('AgentStack', () => {
     template.resourceCountIs('AWS::BedrockAgentCore::Memory', 1);
   });
 
+  test('the orchestration reconciler can reach BOTH surfaces\' credentials registries', () => {
+    // It picks the feedback surface from each orchestration's own recorded
+    // channel, so a registry it can't read means that surface's orchestrations
+    // silently lose their panel + reactions.
+    const fns = template.findResources('AWS::Lambda::Function');
+    const reconciler = Object.entries(fns).find(([id]) => id.startsWith('OrchestrationReconciler'));
+    expect(reconciler).toBeDefined();
+    const vars = (reconciler![1] as { Properties?: { Environment?: { Variables?: Record<string, unknown> } } })
+      .Properties?.Environment?.Variables ?? {};
+    expect(vars.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME).toBeDefined();
+    expect(vars.JIRA_WORKSPACE_REGISTRY_TABLE_NAME).toBeDefined();
+  });
+
+  test('the stranded-orchestration sweep gets the registry its panel refresh needs', () => {
+    // It shares refreshPanelAndSettle with the live reconciler; without a
+    // registry that feedback no-ops and a recovered epic's panel stays stale.
+    const fns = template.findResources('AWS::Lambda::Function');
+    const sweep = Object.entries(fns).find(([id]) => id.startsWith('StrandedOrchestrationReconciler'));
+    expect(sweep).toBeDefined();
+    const vars = (sweep![1] as { Properties?: { Environment?: { Variables?: Record<string, unknown> } } })
+      .Properties?.Environment?.Variables ?? {};
+    expect(vars.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME).toBeDefined();
+  });
+
   test('creates a log group for model invocation logs', () => {
     template.hasResourceProperties('AWS::Logs::LogGroup', {
       LogGroupName: '/aws/bedrock/model-invocation-logs/TestAgentStack',

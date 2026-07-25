@@ -439,6 +439,8 @@ describe('reconcileDecomposePlan — idempotency (live-caught: ABCA-498 3 duplic
 function mockOrchestration(opts: {
   subIssueId: string;
   children: Array<{ sub_issue_id: string; depends_on?: string[]; child_status: string }>;
+  /** Extra meta-row attributes, e.g. the recorded ``channel_source``. */
+  meta?: Record<string, unknown>;
 }): void {
   // Stateful, query-type-aware mock (robust to the reconciler's read
   // pattern: GSI lookup + possibly-repeated loadOrchestration + status
@@ -453,6 +455,7 @@ function mockOrchestration(opts: {
     repo: 'o/r',
     child_count: opts.children.length,
     platform_user_id: 'user-1',
+    ...opts.meta,
   };
   const rows: Record<string, Record<string, unknown>> = {};
   for (const c of opts.children) {
@@ -887,7 +890,7 @@ function mockCascade(children: Array<{
   child_task_id?: string;
   child_branch_name?: string;
   linear_identifier?: string;
-}>): void {
+}>, metaOverrides: Record<string, unknown> = {}): void {
   const meta = {
     sub_issue_id: '#meta',
     orchestration_id: 'orch_1',
@@ -898,6 +901,7 @@ function mockCascade(children: Array<{
     platform_user_id: 'user-1',
     // A panel comment exists → the cascade EDITS it (UX.2), rather than posting fresh.
     status_comment_id: 'panel-cmt-1',
+    ...metaOverrides,
   };
   const rows = children.map((c) => ({
     orchestration_id: 'orch_1',
@@ -925,6 +929,57 @@ function mockCascade(children: Array<{
     return {};
   });
 }
+
+describe('feedback surface is chosen from the orchestration row, not assumed', () => {
+  // The reconciler is event-driven: it acts on an orchestration it LOADED, so the
+  // surface is a property of that row. Picking the wrong one would address a
+  // different tenant's API entirely.
+  beforeEach(() => {
+    ddbSend.mockReset();
+    createTaskCoreMock.mockReset().mockResolvedValue({ statusCode: 201, body: '{}' });
+    upsertStatusCommentMock.mockReset().mockResolvedValue('panel-cmt-1');
+    swapIssueReactionMock.mockReset().mockResolvedValue(true);
+    transitionIssueStateMock.mockReset().mockResolvedValue(true);
+  });
+
+  const completed = () => ({
+    Records: [taskRecord({ task_id: 'TA', status: 'COMPLETED', orchestration_id: 'orch_1' })],
+  }) as never;
+
+  test('a row recording the Linear channel drives the Linear surface', async () => {
+    mockOrchestration({
+      subIssueId: 'A',
+      children: [{ sub_issue_id: 'A', child_status: 'released' }],
+      meta: { channel_source: 'linear' },
+    });
+    await handler(completed());
+    expect(upsertStatusCommentMock).toHaveBeenCalled();
+  });
+
+  test('a row with NO recorded channel still drives Linear (rows seeded before the field existed)', async () => {
+    mockOrchestration({
+      subIssueId: 'A',
+      children: [{ sub_issue_id: 'A', child_status: 'released' }],
+    }); // no channel_source at all
+    await handler(completed());
+    expect(upsertStatusCommentMock).toHaveBeenCalled();
+  });
+
+  test('a row whose surface has no configured registry skips feedback instead of posting to Linear', async () => {
+    // The Jira tenant registry is unset in this handler's env, so a Jira-sourced
+    // orchestration has no adapter. It must stay silent — NOT fall through and
+    // address the Linear workspace, which is a different tenant's data.
+    mockOrchestration({
+      subIssueId: 'A',
+      children: [{ sub_issue_id: 'A', child_status: 'released' }],
+      meta: { channel_source: 'jira' },
+    });
+    await handler(completed());
+    expect(upsertStatusCommentMock).not.toHaveBeenCalled();
+    expect(swapIssueReactionMock).not.toHaveBeenCalled();
+    expect(transitionIssueStateMock).not.toHaveBeenCalled();
+  });
+});
 
 describe('orchestration-reconciler handler — A6 cascade', () => {
   beforeEach(() => {

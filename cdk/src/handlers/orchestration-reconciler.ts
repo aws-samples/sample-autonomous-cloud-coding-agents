@@ -56,8 +56,8 @@ import { probeLinearIssueContext } from './shared/linear-issue-context-probe';
 import { resolveLinearOauthToken } from './shared/linear-oauth-resolver';
 import type { SubIssueNode } from './shared/linear-subissue-fetch';
 import { logger } from './shared/logger';
-import type { IssueRef } from './shared/orchestration-channel';
-import { makeLinearChannel } from './shared/orchestration-channel-linear';
+import type { Channel, IssueRef } from './shared/orchestration-channel';
+import { channelForSource, type ChannelRegistryTables } from './shared/orchestration-channel-factory';
 import { applyDecompositionResult } from './shared/orchestration-decomposition-flow';
 import { parseDecomposerResponse } from './shared/orchestration-decomposition-planner';
 import { renderApprovedPlanReference, renderDecomposeUnavailableNote, renderRevisionToSingleNote } from './shared/orchestration-decomposition-render';
@@ -99,16 +99,32 @@ const TASK_TABLE = process.env.TASK_TABLE_NAME!;
 // A5: registry table for the parent rollup comment's per-workspace OAuth
 // token. Unset → rollup is skipped (gating still works).
 const WORKSPACE_REGISTRY_TABLE = process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME;
+/** Jira's tenant-credentials registry. Unset until the stack wires it, which is
+ *  why a Jira-sourced orchestration resolves to no adapter (and skips feedback)
+ *  rather than failing every call. */
+const JIRA_REGISTRY_TABLE = process.env.JIRA_WORKSPACE_REGISTRY_TABLE_NAME;
+
+/** Credentials registry per surface, for picking an adapter from a stored row.
+ *  A surface left unset here simply has no adapter available in this handler. */
+const CHANNEL_REGISTRY_TABLES: ChannelRegistryTables = {
+  linear: WORKSPACE_REGISTRY_TABLE,
+  jira: JIRA_REGISTRY_TABLE,
+};
 
 /**
- * The surface adapter all issue feedback goes through. The reconciler drives
- * panels, reactions, states and replies without naming a surface; only this one
- * line picks which surface answers. Orchestrations are seeded from Linear today,
- * so that's the adapter built here — another surface swaps this for its own
- * adapter (or a lookup keyed on the orchestration's channel) and the reconcile
- * logic below is untouched.
+ * The surface adapter all issue feedback goes through, chosen from the
+ * orchestration's OWN recorded channel rather than assumed. This handler is
+ * event-driven: it acts on an orchestration it loaded, so the surface is a
+ * property of that row, not of the trigger that woke us. Returns undefined when
+ * the row's surface has no adapter or no configured registry — the caller then
+ * skips feedback instead of addressing the wrong surface.
  */
-const channelFor = (registryTable: string) => makeLinearChannel(registryTable);
+const channelForMeta = (meta: { release_context?: { channel_source?: string } }): Channel | undefined =>
+  channelForSource(meta.release_context?.channel_source, CHANNEL_REGISTRY_TABLES);
+
+/** Adapter for a surface named directly (a decompose event carries its own
+ *  channel rather than a loaded orchestration row). */
+const channelFor = (source: string | undefined) => channelForSource(source, CHANNEL_REGISTRY_TABLES);
 
 /** Build the neutral issue reference the channel operates on. */
 const issueRef = (issueId: string, workspaceId: string): IssueRef => ({
@@ -641,8 +657,9 @@ async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
   //     failure reason on the panel convey "it failed"; a reply re-runs it (the
   //     retry re-drives the state not-started → running). Skip the integration
   //     node (synthetic id, no real issue). Best-effort; never throws.
-  if (WORKSPACE_REGISTRY_TABLE && !plan.terminalSucceeded && !isIntegrationNode(subIssueId)) {
-    const channel = channelFor(WORKSPACE_REGISTRY_TABLE);
+  const settleChannel = channelForMeta(snapshot.meta);
+  if (settleChannel && !plan.terminalSucceeded && !isIntegrationNode(subIssueId)) {
+    const channel = settleChannel;
     const childRef = issueRef(subIssueId, snapshot.meta.linear_workspace_id);
     try {
       const reverted = (await channel.revertState?.(childRef)) ?? false;
@@ -769,17 +786,24 @@ async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
  * "🔄 N/M" with a stale updating row (live-caught under the UX.6 stress test —
  * a re-stack of a no-dependents node returned early and never refreshed).
  *
- * Best-effort; only when the workspace registry is configured. The panel BODY
- * edit is idempotent (same body = no-op), so it always runs; the parent-STATE
- * mirror is claimed once via ``claimRollup`` on the first all-terminal caller.
+ * Best-effort; only when the orchestration's surface has a usable adapter. The
+ * panel BODY edit is idempotent (same body = no-op), so it always runs; the
+ * parent-STATE mirror is claimed once via ``claimRollup`` on the first
+ * all-terminal caller.
  */
 export async function refreshPanelAndSettle(
   orchestrationId: string,
   children: readonly OrchestrationChildRow[],
-  meta: { linear_workspace_id: string; parent_linear_issue_id: string; status_comment_id?: string },
+  meta: {
+    linear_workspace_id: string;
+    parent_linear_issue_id: string;
+    status_comment_id?: string;
+    release_context?: { channel_source?: string };
+  },
   now: string,
 ): Promise<void> {
-  if (!WORKSPACE_REGISTRY_TABLE) return;
+  const channel = channelForMeta(meta);
+  if (!channel) return;
 
   // Completion check: every child terminal (succeeded/failed/skipped —
   // released is NOT terminal).
@@ -821,7 +845,7 @@ export async function refreshPanelAndSettle(
   const won = !allTerminal || await claimRollup(ddb, ORCHESTRATION_TABLE, orchestrationId, now);
 
   const newId = await upsertEpicPanel({
-    channel: channelFor(WORKSPACE_REGISTRY_TABLE),
+    channel,
     parent: issueRef(meta.parent_linear_issue_id, meta.linear_workspace_id),
     ...(meta.status_comment_id !== undefined && { statusCommentId: meta.status_comment_id }),
     children,
@@ -931,7 +955,7 @@ async function cascadeRestack(evt: TerminalTaskEvent): Promise<void> {
   // reason "…'s change"; live-caught under the UX.6 stress test).
   const changedLabel = cascadeNodeLabel(changedSubIssueId, changedRow?.linear_identifier, changedRow?.title);
 
-  const cascadeChannel = WORKSPACE_REGISTRY_TABLE ? channelFor(WORKSPACE_REGISTRY_TABLE) : undefined;
+  const cascadeChannel = channelForMeta(meta);
 
   const updatingIds: string[] = [];
   for (const step of steps) {
@@ -1117,15 +1141,16 @@ async function replyToIterationComment(
   changedSubIssueId: string,
   succeeded: boolean,
 ): Promise<void> {
-  if (!WORKSPACE_REGISTRY_TABLE) return;
   const commentId = evt.triggerCommentId!;
 
   // Resolve the workspace for the reply. The iteration task carries it in
   // channel_metadata; rather than re-read the record, load the orchestration
-  // meta (already cached-cheap) for the workspace id.
+  // meta (already cached-cheap) for the workspace id — and the surface to
+  // answer on, which is the orchestration's own, not an assumed one.
   const snapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, evt.orchestrationId!);
   if (!snapshot) return;
-  const channel = channelFor(WORKSPACE_REGISTRY_TABLE);
+  const channel = channelForMeta(snapshot.meta);
+  if (!channel) return;
   const workspaceId = snapshot.meta.linear_workspace_id;
 
   // Claim the one reply for this iteration task.
@@ -1567,7 +1592,13 @@ async function reconcileDecomposePlan(evt: DecomposePlanEvent): Promise<void> {
     return;
   }
 
-  const channel = channelFor(registryTable);
+  // A decompose-planning task has no seeded orchestration yet, so there's no
+  // stored row to read the surface from — but only the Linear trigger dispatches
+  // planning today, so Linear is the surface by provenance, not by assumption.
+  // (When another surface can dispatch planning, the event should carry its
+  // channel and this becomes a lookup like the loaded-row paths above.)
+  const channel = channelFor('linear');
+  if (!channel) return;
   // Forward an optional existingCommentId so the flow can EDIT the plan comment
   // in place on a revision (vs. posting a fresh one).
   const postComment = async (issueId: string, body: string, existingCommentId?: string): Promise<string | null> => {
@@ -1926,13 +1957,11 @@ async function seedDecomposedGraph(
         logger.warn('Decompose seed: parent attachment could not be screened — NOT seeding children (fail-closed)', {
           parent_issue_id: evt.parentIssueId, error: err.message,
         });
-        if (WORKSPACE_REGISTRY_TABLE) {
-          await channelFor(WORKSPACE_REGISTRY_TABLE).upsertComment(
-            issueRef(evt.parentIssueId, evt.workspaceId),
-            `❌ ABCA couldn't safely process an attachment on this issue: ${err.message} ` +
-            'Fix or remove the attachment and re-apply the trigger label to decompose it.',
-          );
-        }
+        await channelFor('linear')?.upsertComment(
+          issueRef(evt.parentIssueId, evt.workspaceId),
+          `❌ ABCA couldn't safely process an attachment on this issue: ${err.message} ` +
+          'Fix or remove the attachment and re-apply the trigger label to decompose it.',
+        );
         return;
       }
       throw err; // unexpected — let the handler's error path deal with it
@@ -1972,8 +2001,10 @@ async function seedDecomposedGraph(
       createTaskCore, new Date().toISOString(), snapshot.children, 'main', budget,
     );
   }
-  if (WORKSPACE_REGISTRY_TABLE) {
-    const channel = channelFor(WORKSPACE_REGISTRY_TABLE);
+  // The rows were just seeded with channel_source 'linear' above, so that's the
+  // surface to post the panel on.
+  const channel = channelFor('linear');
+  if (channel) {
     const parent = issueRef(evt.parentIssueId, evt.workspaceId);
     try {
       const fresh = await loadOrchestration(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId);

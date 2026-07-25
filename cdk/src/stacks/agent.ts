@@ -1001,6 +1001,16 @@ export class AgentStack extends Stack {
         }),
       ],
     }));
+    // The sweep shares the live reconciler's panel refresh + parent settle
+    // (refreshPanelAndSettle), which needs a credentials registry to resolve an
+    // outbound token — without it that feedback silently no-ops and a recovered
+    // epic's panel stays stale. It already had the matching secret grant above,
+    // just not the table, so the feedback half of the sweep never ran.
+    linearIntegration.workspaceRegistryTable.grantReadData(strandedOrchestrationReconciler.fn);
+    strandedOrchestrationReconciler.fn.addEnvironment(
+      'LINEAR_WORKSPACE_REGISTRY_TABLE_NAME',
+      linearIntegration.workspaceRegistryTable.tableName,
+    );
     // #331: the sweep is the drain path for throttle-deferred children, so it
     // throttles to the same free budget the live reconciler does.
     userConcurrencyTable.table.grantReadData(strandedOrchestrationReconciler.fn);
@@ -1165,6 +1175,29 @@ export class AgentStack extends Stack {
       jiraIntegration.workspaceRegistryTable.tableName,
     );
     orchestrator.fn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['secretsmanager:GetSecretValue', 'secretsmanager:PutSecretValue'],
+      resources: [
+        Stack.of(this).formatArn({
+          service: 'secretsmanager',
+          resource: 'secret',
+          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+          resourceName: 'bgagent-jira-oauth-*',
+        }),
+      ],
+    }));
+
+    // The reconciler picks the feedback surface from each orchestration's own
+    // recorded channel, so give it the Jira tenant registry too — otherwise a
+    // Jira-sourced orchestration would resolve to no adapter and silently skip
+    // its panel/reactions. Read + Put for the same reason as the orchestrator
+    // above (resolving an expiring token refreshes it in place). Harmless while
+    // only Linear seeds orchestrations; required the moment one can be Jira's.
+    jiraIntegration.workspaceRegistryTable.grantReadData(orchestrationReconciler.fn);
+    orchestrationReconciler.fn.addEnvironment(
+      'JIRA_WORKSPACE_REGISTRY_TABLE_NAME',
+      jiraIntegration.workspaceRegistryTable.tableName,
+    );
+    orchestrationReconciler.fn.addToRolePolicy(new iam.PolicyStatement({
       actions: ['secretsmanager:GetSecretValue', 'secretsmanager:PutSecretValue'],
       resources: [
         Stack.of(this).formatArn({
