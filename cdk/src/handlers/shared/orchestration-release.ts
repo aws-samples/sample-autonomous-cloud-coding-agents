@@ -273,24 +273,37 @@ export async function releaseChild(params: ReleaseChildParams): Promise<ReleaseC
   const { ddb, tableName, row, platformUserId, baseBranch, createTaskCore, now } = params;
   const channelSource = params.channelSource ?? DEFAULT_ORCHESTRATION_CHANNEL;
 
+  // Surface-NEUTRAL keys: every released child carries these whatever seeded it.
+  // The reconciler maps a terminal task back to its row via the orchestration
+  // pair, so it must not depend on any one surface's metadata.
   const channelMetadata: Record<string, string> = {
-    linear_workspace_id: row.linear_workspace_id,
     orchestration_id: row.orchestration_id,
-    // The reconciler maps the terminal task back via this (real or synthetic) id.
     orchestration_sub_issue_id: row.sub_issue_id,
-    parent_linear_issue_id: row.parent_linear_issue_id,
   };
-  // #16: only set linear_issue_id (the agent's reaction/comment target) for a
-  // REAL Linear sub-issue. A synthetic integration node has no Linear issue —
-  // passing its id would make the agent's reactionCreate 4xx. Omitting it lets
-  // the agent skip reactions cleanly.
-  if (!isIntegrationNode(row.sub_issue_id)) {
-    channelMetadata.linear_issue_id = row.sub_issue_id;
+
+  // Surface-SPECIFIC keys, only for the surface that actually seeded this
+  // orchestration. Stamping them unconditionally would hand a non-Linear child a
+  // set of Linear ids naming rows in a workspace it has nothing to do with —
+  // harmless only because every consumer happens to check ``channel_source``
+  // first, which is a coincidence to rely on rather than a contract.
+  if (channelSource === 'linear') {
+    channelMetadata.linear_workspace_id = row.linear_workspace_id;
+    // Provenance only — nothing reads this back today, but it's been on every
+    // released child since the executor shipped, so it stays rather than being
+    // quietly dropped as part of a naming change.
+    channelMetadata.parent_linear_issue_id = row.parent_linear_issue_id;
+    // Only set linear_issue_id (the agent's reaction/comment target) for a REAL
+    // sub-issue. A synthetic integration node has no issue behind it — passing
+    // its id would make the agent's reaction call 4xx. Omitting it lets the
+    // agent skip reactions cleanly.
+    if (!isIntegrationNode(row.sub_issue_id)) {
+      channelMetadata.linear_issue_id = row.sub_issue_id;
+    }
+    if (row.linear_identifier) channelMetadata.linear_issue_identifier = row.linear_identifier;
+    if (params.linearProjectId) channelMetadata.linear_project_id = params.linearProjectId;
+    if (params.linearOauthSecretArn) channelMetadata.linear_oauth_secret_arn = params.linearOauthSecretArn;
+    if (params.linearWorkspaceSlug) channelMetadata.linear_workspace_slug = params.linearWorkspaceSlug;
   }
-  if (row.linear_identifier) channelMetadata.linear_issue_identifier = row.linear_identifier;
-  if (params.linearProjectId) channelMetadata.linear_project_id = params.linearProjectId;
-  if (params.linearOauthSecretArn) channelMetadata.linear_oauth_secret_arn = params.linearOauthSecretArn;
-  if (params.linearWorkspaceSlug) channelMetadata.linear_workspace_slug = params.linearWorkspaceSlug;
   // #247 A4: stacked base branch + (diamond) predecessor merge-list. The
   // orchestrator reads these to set the agent payload's base_branch +
   // merge_branches. Absent for roots (agent branches off main as today).

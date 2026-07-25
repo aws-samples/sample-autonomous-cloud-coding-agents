@@ -1023,7 +1023,6 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     const discovery = await discoverOrchestration({
       ddb,
       tableName: ORCHESTRATION_TABLE,
-      accessToken: resolvedAccessToken,
       parentLinearIssueId: issue.id,
       linearWorkspaceId: workspaceId,
       repo,
@@ -2032,8 +2031,6 @@ async function seedAndReleaseFromGraph(args: {
   const discovery = await discoverOrchestration({
     ddb,
     tableName: ORCHESTRATION_TABLE,
-    // accessToken unused — graphSource is supplied — but the param is required.
-    accessToken: '',
     parentLinearIssueId: parentIssueId,
     linearWorkspaceId: workspaceId,
     repo,

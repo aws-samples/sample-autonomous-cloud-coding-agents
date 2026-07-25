@@ -296,6 +296,66 @@ describe('releaseChild — happy path', () => {
     expect(createTaskCore.mock.calls[0][1].channelSource).toBe('webhook');
   });
 
+  test('a non-Linear child carries the neutral orchestration keys and NO Linear ids', async () => {
+    // The released child must not be handed ids naming rows in a workspace it has
+    // nothing to do with. The orchestration pair is what the reconciler maps
+    // back on, so that stays regardless of surface.
+    const createTaskCore = created('T-neutral');
+    await releaseChild({
+      ddb: { send: jest.fn().mockResolvedValue({}) } as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow({ linear_identifier: 'ENG-1' }),
+      platformUserId: 'user-1',
+      channelSource: 'webhook',
+      linearProjectId: 'proj-1',
+      linearOauthSecretArn: 'arn:secret',
+      linearWorkspaceSlug: 'acme',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+    const cm = createTaskCore.mock.calls[0][1].channelMetadata as Record<string, string>;
+    expect(cm.orchestration_id).toBeDefined();
+    expect(cm.orchestration_sub_issue_id).toBeDefined();
+    for (const key of [
+      'linear_workspace_id',
+      'linear_issue_id',
+      'linear_issue_identifier',
+      'linear_project_id',
+      'linear_oauth_secret_arn',
+      'linear_workspace_slug',
+      'parent_linear_issue_id',
+    ]) {
+      expect(cm[key]).toBeUndefined();
+    }
+  });
+
+  test('a Linear child still carries every Linear key it did before', async () => {
+    // The gate must not quietly drop metadata the agent + orchestrator read.
+    const createTaskCore = created('T-linear');
+    await releaseChild({
+      ddb: { send: jest.fn().mockResolvedValue({}) } as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow({ linear_identifier: 'ENG-1' }),
+      platformUserId: 'user-1',
+      channelSource: 'linear',
+      linearProjectId: 'proj-1',
+      linearOauthSecretArn: 'arn:secret',
+      linearWorkspaceSlug: 'acme',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+    const cm = createTaskCore.mock.calls[0][1].channelMetadata as Record<string, string>;
+    expect(cm).toMatchObject({
+      linear_workspace_id: 'WS',
+      linear_issue_identifier: 'ENG-1',
+      linear_project_id: 'proj-1',
+      linear_oauth_secret_arn: 'arn:secret',
+      linear_workspace_slug: 'acme',
+    });
+    expect(cm.linear_issue_id).toBeDefined();
+    expect(cm.parent_linear_issue_id).toBeDefined();
+  });
+
   test('threads Linear OAuth metadata when provided', async () => {
     const ddb = { send: jest.fn().mockResolvedValue({}) };
     const createTaskCore = created('T-1');

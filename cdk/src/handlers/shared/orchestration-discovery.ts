@@ -44,25 +44,15 @@
  */
 
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
-import type { FetchSubIssueGraphOptions } from './linear-subissue-fetch';
 import { logger } from './logger';
 import { validateDag } from './orchestration-dag';
-import {
-  linearGraphSource,
-  type OrchestrationGraphSource,
-} from './orchestration-graph-source';
+import { type OrchestrationGraphSource } from './orchestration-graph-source';
 import { withIntegrationNode } from './orchestration-integration-node';
 import { deriveOrchestrationId, extendOrchestration, seedOrchestration, type OrchestrationReleaseContext } from './orchestration-store';
 
 export interface DiscoverOrchestrationParams {
   readonly ddb: DynamoDBDocumentClient;
   readonly tableName: string;
-  /**
-   * Resolved per-workspace OAuth access token (from resolveLinearOauthToken).
-   * Used to build the default Linear graph source when ``graphSource`` is
-   * not supplied. Ignored when ``graphSource`` is given.
-   */
-  readonly accessToken: string;
   readonly parentLinearIssueId: string;
   readonly linearWorkspaceId: string;
   readonly repo: string;
@@ -72,17 +62,16 @@ export interface DiscoverOrchestrationParams {
   readonly ttl?: number;
   /** Release context stamped on the meta row for the reconciler. */
   readonly releaseContext: OrchestrationReleaseContext;
-  /** Test seam for the (default) Linear fetch. Ignored when ``graphSource`` is set. */
-  readonly fetchOptions?: FetchSubIssueGraphOptions;
   /**
-   * #247/#299 trigger-agnostic seam. The producer of the orchestration DAG.
-   * When omitted, defaults to {@link linearGraphSource} over
-   * ``accessToken`` + ``parentLinearIssueId`` (Mode A behaviour). A
-   * declarative caller (CLI/API) or #299 Mode B planner passes its own
-   * source so the SAME validate→seed→reconcile→rollup pipeline runs over a
-   * graph produced any way.
+   * The producer of the orchestration DAG — REQUIRED, so the caller always
+   * states where the graph comes from. It used to be optional and fell back to
+   * reading Linear, which meant a caller on any other surface silently made a
+   * Linear API call for a graph that was never there. Pass a native source for a
+   * surface with its own dependency model, or ``declarativeGraphSource`` when the
+   * nodes are already in hand (a CLI/API request, or a planner's output). The
+   * validate→seed→reconcile→rollup pipeline downstream is identical either way.
    */
-  readonly graphSource?: OrchestrationGraphSource;
+  readonly graphSource: OrchestrationGraphSource;
 }
 
 export type DiscoverOrchestrationResult =
@@ -115,14 +104,13 @@ export type DiscoverOrchestrationResult =
 export async function discoverOrchestration(
   params: DiscoverOrchestrationParams,
 ): Promise<DiscoverOrchestrationResult> {
-  const { ddb, tableName, accessToken, parentLinearIssueId, linearWorkspaceId, repo, now, ttl, releaseContext, fetchOptions, graphSource } = params;
+  const { ddb, tableName, parentLinearIssueId, linearWorkspaceId, repo, now, ttl, releaseContext, graphSource } = params;
 
   // ── 1. Produce the orchestration graph ───────────────────────────
-  // Default to the Linear native source (Mode A); a declarative / planner
-  // caller (#299) supplies its own graphSource. The downstream pipeline is
-  // identical regardless of where the graph came from.
-  const source = graphSource ?? linearGraphSource(accessToken, parentLinearIssueId, fetchOptions);
-  const fetched = await source();
+  // The caller states the source; this composer never reaches for a surface of
+  // its own. The downstream pipeline is identical regardless of where the graph
+  // came from.
+  const fetched = await graphSource();
   if (fetched.kind === 'error') {
     return { kind: 'error', message: fetched.message };
   }
