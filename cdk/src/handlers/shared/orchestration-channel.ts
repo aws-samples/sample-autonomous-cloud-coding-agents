@@ -76,10 +76,43 @@ export interface CommentRef {
  *  the surface's own reaction (emoji, etc.). */
 export type Reaction = 'started' | 'succeeded' | 'failed' | 'needs_input';
 
-/** Workflow-state intent the engine expresses; the adapter maps it to the
- *  surface's actual states. ``started`` ≈ In Progress, ``completed`` ≈ In Review /
- *  Done — the adapter picks the concrete state. */
-export type StateIntent = 'started' | 'completed';
+/**
+ * Workflow-state intent the engine expresses; the adapter maps it to the
+ * surface's actual states. Three intents rather than two because the engine
+ * genuinely distinguishes "work is running" from "work is done, awaiting human
+ * review" — on some surfaces (Linear included) both are the same underlying
+ * state *category*, so collapsing them would make the engine unable to say
+ * which one it meant:
+ *  - ``started``   ≈ In Progress — a child was released and is running.
+ *  - ``in_review`` ≈ In Review — work finished, a human still has to merge it.
+ *  - ``completed`` ≈ Done — the surface's terminal state.
+ */
+export type StateIntent = 'started' | 'in_review' | 'completed';
+
+/** Options for {@link Channel.transitionState}. */
+export interface TransitionOptions {
+  /**
+   * Allow a move that the adapter would otherwise refuse as backward *within
+   * the same state category* — the deliberate re-open, when a settled epic
+   * gains a new or re-run child and must go from "awaiting review" back to
+   * "running". Without this the move is silently dropped as a regression.
+   * Demotion across categories (something already terminal, e.g. a human
+   * marked it done) stays blocked regardless.
+   */
+  readonly allowRegression?: boolean;
+}
+
+/** Options for {@link Channel.upsertThreadedReply}. */
+export interface ThreadedReplyOptions {
+  /**
+   * Carry over a preview/deploy link that a SEPARATE async writer may already
+   * have appended to this reply. Two writers converge on one comment (the
+   * orchestration settle and the preview-capture callback), and whichever
+   * lands second would otherwise clobber the other's text. When set, the
+   * adapter reads the current body and preserves that segment.
+   */
+  readonly preservePreview?: boolean;
+}
 
 /** A node in the sub-issue graph, as the adapter surfaces it to the engine. */
 export interface ChannelSubIssueNode {
@@ -116,13 +149,86 @@ export interface Channel {
 
   // --- optional per-surface capabilities (engine no-ops if absent) ---
 
-  /** Set a reaction on a comment, replacing any prior bot reaction. Optional —
-   *  a surface without reactions omits this. */
-  reactToComment?(comment: CommentRef, issue: IssueRef, reaction: Reaction): Promise<void>;
+  /**
+   * ADD a reaction to a comment, leaving any existing reaction in place. This is
+   * the instant "I saw your request" ack, set the moment a comment arrives —
+   * before any work exists to report on, so there is nothing to replace yet.
+   *
+   * Deliberately distinct from {@link replaceCommentReaction}: adding is not the
+   * same as replacing, and conflating them would either strip a marker the ack
+   * path never meant to touch, or leave two contradictory markers on a settled
+   * comment. Returns true if the reaction landed.
+   */
+  reactToComment?(comment: CommentRef, issue: IssueRef, reaction: Reaction): Promise<boolean>;
 
-  /** Move the issue to a workflow state. Optional — a surface without a
-   *  transition API omits this. */
-  transitionState?(issue: IssueRef, intent: StateIntent): Promise<void>;
+  /**
+   * Make ``reaction`` the SOLE bot reaction on a comment, clearing the bot's own
+   * prior markers first — used when work settles, so the comment shows one
+   * outcome rather than an accumulated pile ("saw it" + "done" at once).
+   * A human's reactions are never touched. Idempotent: re-running converges on
+   * the same single marker. Returns true if the target marker is present after.
+   */
+  replaceCommentReaction?(comment: CommentRef, issue: IssueRef, reaction: Reaction): Promise<boolean>;
+
+  /**
+   * Make ``reaction`` the sole bot reaction on the ISSUE itself (not a comment) —
+   * the at-a-glance status marker on a parent epic or a child, which matures
+   * across separate invocations. Same replace-only-our-own-markers contract as
+   * {@link replaceCommentReaction}. Returns true if the marker is present after.
+   */
+  replaceIssueReaction?(issue: IssueRef, reaction: Reaction): Promise<boolean>;
+
+  /**
+   * Move the issue to a workflow state. Optional — a surface without a
+   * transition API omits this. Adapters must refuse to move an issue BACKWARD
+   * (something a human or automation already advanced stays advanced), except
+   * where ``options.allowRegression`` opts into a same-category re-open.
+   * Returns true only on a confirmed transition (false when skipped as
+   * already-there or backward).
+   */
+  transitionState?(issue: IssueRef, intent: StateIntent, options?: TransitionOptions): Promise<boolean>;
+
+  /**
+   * Move the issue BACK to a not-started state. The one sanctioned backward
+   * move: work the engine had marked as running has stopped without succeeding
+   * (a plan now awaits a human's approval, or a child failed), so leaving it
+   * "in progress" would misreport a run that isn't happening. Adapters must
+   * guard this to only demote an issue still in the state the engine itself
+   * set, never one a human has since advanced or pulled back. Returns true only
+   * on a confirmed move.
+   */
+  revertState?(issue: IssueRef): Promise<boolean>;
+
+  /**
+   * Post a threaded reply beneath an existing comment. Unlike editing, a reply
+   * notifies and reads as a conversation turn under the original request.
+   * Returns a ref to the new reply, or null on failure.
+   */
+  postThreadedReply?(issue: IssueRef, parent: CommentRef, body: string): Promise<CommentRef | null>;
+
+  /**
+   * The MATURING threaded reply: edit ``existing`` in place when given, else
+   * create a reply under ``parent``. One reply that matures through its
+   * lifecycle, instead of a new comment per transition. Returns the (new or
+   * existing) ref, or null on failure.
+   */
+  upsertThreadedReply?(
+    issue: IssueRef,
+    parent: CommentRef,
+    body: string,
+    existing?: CommentRef,
+    options?: ThreadedReplyOptions,
+  ): Promise<CommentRef | null>;
+
+  /**
+   * Delete the engine's own transient planning notes from an issue thread,
+   * keeping ``keep`` if given. Interim notes are posted fire-and-forget from
+   * many places, so once a plan settles the thread needs collapsing to just the
+   * outcome. Adapters must scope deletion to the bot's own notes — never a
+   * human's comment, and never the durable status panel. Returns how many were
+   * removed.
+   */
+  sweepNotes?(issue: IssueRef, keep?: CommentRef): Promise<number>;
 
   // --- graph (surface-specific derivation, uniform result) ---
 

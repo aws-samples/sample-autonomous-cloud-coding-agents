@@ -592,6 +592,25 @@ describe('linear-webhook-processor — #247 A6 comment trigger', () => {
     expect(ctx.channelMetadata.trigger_comment_id).toBe('comment-1');
   });
 
+  test('the "on it" ack replies on the commented issue, threaded under that comment', async () => {
+    // The ack is a THREADED reply: it must name the issue the comment lives on
+    // AND the comment to thread under. Reversing the two makes the surface
+    // reject the reply, so the user sees the 👀 and then silence.
+    mockOrchWithChild({ subIssueId: 'sub-issue-1', childTaskId: 'task-sub-1', prUrl: 'https://github.com/o/r/pull/42' });
+    await handler(eventWith(comment()));
+
+    expect(upsertThreadedReplyMock).toHaveBeenCalledTimes(1);
+    const [ctx, issueId, parentCommentId, body, existingReplyId] = upsertThreadedReplyMock.mock.calls[0];
+    expect(ctx).toEqual({ linearWorkspaceId: 'org-1', registryTableName: 'LinearWorkspaceRegistry' });
+    expect(issueId).toBe('sub-issue-1');
+    expect(parentCommentId).toBe('comment-1');
+    expect(body).toContain('👀');
+    expect(existingReplyId).toBeUndefined(); // a fresh ack, nothing to edit yet
+    // Its id rides on the task so later events mature THIS reply, not a new one.
+    const [, taskCtx] = createTaskCoreMock.mock.calls[0];
+    expect(taskCtx.channelMetadata.iteration_reply_comment_id).toBe('reply-1');
+  });
+
   // PM-P0-1 (2026-07-24): "@bgagent retry" on a CHILD of a failed orchestration
   // routes to the SAME epic-retry machinery as on the parent (consistency), NOT
   // to iteration of that child's PR. Proves the shared handleEpicRetryIntent path

@@ -1,3 +1,7 @@
+---
+title: Surface agnostic orchestration
+---
+
 # Surface-agnostic sub-issue orchestration
 
 **Status:** the Channel interface, its Linear + Jira adapters, and the engine rewiring

@@ -31,18 +31,6 @@ import { cleanupPreScreenedAttachments, downloadScreenAndStoreLinearAttachments,
 import {
   deleteComment,
   fetchRecentComments,
-  postIssueComment,
-  reactToComment,
-  replyToComment,
-  reportIssueFailure,
-  sweepDecompositionNotes,
-  swapCommentReaction,
-  transitionIssueState,
-  upsertStatusComment,
-  upsertThreadedReply,
-  EMOJI_STARTED,
-  EMOJI_SUCCESS,
-  EMOJI_NEEDS_INPUT,
   type RenderedComment,
 } from './shared/linear-feedback';
 import {
@@ -55,6 +43,8 @@ import { resolveLinearOauthToken } from './shared/linear-oauth-resolver';
 import { fetchIssueParentId, type SubIssueNode } from './shared/linear-subissue-fetch';
 import { resolveTaskByLinearIssue, prNumberFromTask } from './shared/linear-task-by-issue';
 import { logger } from './shared/logger';
+import { type Channel, type IssueRef } from './shared/orchestration-channel';
+import { makeLinearChannel } from './shared/orchestration-channel-linear';
 import {
   buildIterationInstruction,
   detectNearMissMention,
@@ -183,6 +173,18 @@ const MAX_IDEMPOTENCY_KEY_LENGTH = 128;
  * slack so a delayed redelivery still dedups; the row self-expires after.
  */
 const ACK_CLAIM_TTL_SECONDS = 86_400;
+
+/**
+ * Feedback (comments / reactions / state) goes through the surface-agnostic
+ * {@link Channel} rather than calling a surface's helpers directly, so the
+ * orchestration logic in this handler stays free of surface details. This entry
+ * point is Linear-specific by definition (it processes Linear webhooks), so it
+ * builds the Linear channel; the ops it invokes are the neutral ones.
+ */
+const channelFor = (registryTable: string): Channel => makeLinearChannel(registryTable);
+/** Address an issue on the channel: its surface id + the credentials key
+ *  (for Linear, the workspace/organization id the token registry is keyed by). */
+const issueRef = (issueId: string, workspaceId: string): IssueRef => ({ issueId, credentialsRef: workspaceId });
 
 /**
  * First-run "starting" courtesy comment (ADR-016 P4.5). The 🤖 prefix matches
@@ -553,12 +555,14 @@ async function postIterationAck(
   replyTargetId: string,
 ): Promise<string | null> {
   try {
-    return await upsertThreadedReply(
-      { linearWorkspaceId: workspaceId, registryTableName },
-      issueId,
-      replyTargetId,
+    const ref = await channelFor(registryTableName).upsertThreadedReply?.(
+      issueRef(issueId, workspaceId),
+      { commentId: replyTargetId },
       renderMaturingReply({ state: 'on_it' }),
     );
+    // An empty id means the surface posted but can't address the reply later —
+    // report "no reply to mature" rather than stamping a blank id on the task.
+    return ref?.commentId || null;
   } catch (err) {
     logger.warn('Iteration ack reply failed (non-fatal)', {
       issue_id: issueId, error: err instanceof Error ? err.message : String(err),
@@ -585,9 +589,8 @@ async function safeReportIssueFailure(
     return;
   }
   try {
-    await reportIssueFailure(
-      { linearWorkspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE },
-      issueId,
+    await channelFor(WORKSPACE_REGISTRY_TABLE).reportFailure(
+      issueRef(issueId, linearWorkspaceId),
       message,
     );
   } catch (err) {
@@ -1114,24 +1117,23 @@ export async function handler(event: ProcessorEvent): Promise<void> {
         released_roots: releasedRoots,
         already_existed: discovery.alreadyExisted,
       });
-      // #247 UX.2: post the initial epic panel + mirror the parent start
-      // signal (👀 reaction + In Progress) in one upsertEpicPanel call. The
-      // reconciler edits this same panel on every later event and advances the
-      // parent to In Review on completion. Only on the first seed — a replay
+      // Post the initial epic panel + mirror the parent start signal (👀
+      // reaction + a running state) in one upsertEpicPanel call. The reconciler
+      // edits this same panel on every later event and advances the parent to
+      // awaiting-review on completion. Only on the first seed — a replay
       // (alreadyExisted) routes to the 'extended' branch instead. Best-effort;
       // gated on the registry table like every other feedback.
       if (WORKSPACE_REGISTRY_TABLE && !discovery.alreadyExisted) {
-        const parentCtx = { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE };
-        // #247 UX.2: post the initial maturing panel (in-progress) and mirror
-        // the parent start signal (👀 + In Progress) in one call. Re-load
-        // post-release so roots show 'running'. Stamp the comment id so the
-        // reconciler edits this same panel on every later event. Best-effort.
+        // Post the initial maturing panel (in-progress) and mirror the parent
+        // start signal in one call. Re-load post-release so roots show
+        // 'running'. Stamp the comment id so the reconciler edits this same
+        // panel on every later event. Best-effort.
         try {
           const postReleaseSnapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId);
           if (postReleaseSnapshot) {
             const commentId = await upsertEpicPanel({
-              ctx: parentCtx,
-              parentLinearIssueId: issue.id,
+              channel: channelFor(WORKSPACE_REGISTRY_TABLE),
+              parent: issueRef(issue.id, workspaceId),
               children: postReleaseSnapshot.children,
               inProgress: true,
               mirrorParentState: true,
@@ -1228,19 +1230,19 @@ export async function handler(event: ProcessorEvent): Promise<void> {
         added: discovery.addedSubIssueIds.length,
         released_now: releasedAdded,
       });
-      // #247 UX.2: no standalone '➕ Added' comment — the new row appearing in
-      // the maturing panel IS the signal (the user just added the sub-issue in
-      // Linear, so they don't need a ping). Refresh the panel so it shows the
-      // new row(s) + reverts the header to in-progress. Re-load post-release so
-      // a just-released added node shows 'running'. Best-effort.
+      // No standalone '➕ Added' comment — the new row appearing in the maturing
+      // panel IS the signal (the user just added the sub-issue themselves, so
+      // they don't need a ping). Refresh the panel so it shows the new row(s) +
+      // reverts the header to in-progress. Re-load post-release so a
+      // just-released added node shows 'running'. Best-effort.
       if (WORKSPACE_REGISTRY_TABLE && snapshot) {
         try {
           const fresh = await loadOrchestration(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId);
           const children = fresh?.children ?? snapshot.children;
           const meta = (fresh ?? snapshot).meta;
           const newId = await upsertEpicPanel({
-            ctx: { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE },
-            parentLinearIssueId: issue.id,
+            channel: channelFor(WORKSPACE_REGISTRY_TABLE),
+            parent: issueRef(issue.id, workspaceId),
             ...(meta.status_comment_id !== undefined && { statusCommentId: meta.status_comment_id }),
             children,
             inProgress: true, // the extend re-opened the epic
@@ -1381,21 +1383,22 @@ export async function handler(event: ProcessorEvent): Promise<void> {
             new Date().toISOString(), Math.floor(Date.now() / 1000) + ACK_CLAIM_TTL_SECONDS,
           );
           if (won) {
-            const decomposeCtx = { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE };
-            await upsertStatusComment(
-              decomposeCtx,
-              issue.id,
+            const channel = channelFor(WORKSPACE_REGISTRY_TABLE);
+            const parent = issueRef(issue.id, workspaceId);
+            await channel.upsertComment(
+              parent,
               renderDecomposeStartedNote(decompositionDecision.mode === 'auto'),
             );
-            // CONFUSING-4 (state vs thread disagree): the decompose planning task
-            // is a read_only agent that deliberately does NOT touch Linear state
-            // (Bug C's minimal prompt), so the issue used to stay in Backlog through
-            // planning + approval — the board looked untouched while the bot worked,
-            // and the help text says to watch comments (the WRONG place on the board).
-            // Move it to a visible "started" state here so the board reflects reality,
-            // mirroring the plain-abca path (which the agent transitions at runtime).
-            // Idempotent + backward-safe inside transitionIssueState; best-effort.
-            await transitionIssueState(decomposeCtx, issue.id, 'started', ['In Progress']);
+            // Without this the board and the thread disagree: the planning task is
+            // a read-only agent that deliberately does NOT touch issue state, so
+            // the issue used to sit in its backlog state through planning +
+            // approval — the board looked untouched while the bot worked, and the
+            // help text points the reader at comments (the wrong place on the
+            // board). Move it to a visible running state here so the board
+            // reflects reality, mirroring the single-task path (which the agent
+            // transitions at runtime). Idempotent + backward-safe inside the
+            // transition; best-effort.
+            await channel.transitionState?.(parent, 'started');
           }
         } catch (err) {
           logger.warn('Failed to post decompose upfront ack (non-fatal)', {
@@ -1547,9 +1550,8 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   // cold-starts. The terminal ✅/⚠️/❌ + PR link is posted by the fan-out plane.
   if (WORKSPACE_REGISTRY_TABLE) {
     try {
-      await postIssueComment(
-        { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE },
-        issue.id,
+      await channelFor(WORKSPACE_REGISTRY_TABLE).postComment(
+        issueRef(issue.id, workspaceId),
         LINEAR_START_COMMENT,
       );
     } catch (err) {
@@ -1578,9 +1580,8 @@ export async function handler(event: ProcessorEvent): Promise<void> {
         new Date().toISOString(), Math.floor(Date.now() / 1000) + ACK_CLAIM_TTL_SECONDS,
       );
       if (won) {
-        await upsertStatusComment(
-          { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE },
-          issue.id,
+        await channelFor(WORKSPACE_REGISTRY_TABLE).upsertComment(
+          issueRef(issue.id, workspaceId),
           renderMultiPartHint(labelFilter.trim().toLowerCase() || MODE_DEFAULT_LABEL_FILTER),
         );
       }
@@ -1613,11 +1614,16 @@ function buildDecompositionEffects(
   _channelMetadata: Record<string, string>,
   accessToken: string,
 ): DecompositionEffects {
-  const feedbackCtx = { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE! };
   return {
     graphql: linearGraphqlFn(accessToken),
-    postComment: async (issueId, body) =>
-      WORKSPACE_REGISTRY_TABLE ? upsertStatusComment(feedbackCtx, issueId, body) : null,
+    postComment: async (issueId, body) => {
+      if (!WORKSPACE_REGISTRY_TABLE) return null;
+      const ref = await channelFor(WORKSPACE_REGISTRY_TABLE)
+        .upsertComment(issueRef(issueId, workspaceId), body);
+      // Report no id when the surface can't hand one back — a blank id would be
+      // persisted and later addressed as if it were a real comment.
+      return ref?.commentId || null;
+    },
     putPendingPlan: async ({ nodes, proposalCommentId }) => putPendingPlanRow({
       ddb,
       tableName: ORCHESTRATION_TABLE!,
@@ -1703,9 +1709,8 @@ async function maybeRetryTerminalEpic(
     })),
   );
 
-  const ctx = WORKSPACE_REGISTRY_TABLE
-    ? { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE }
-    : undefined;
+  const channel = WORKSPACE_REGISTRY_TABLE ? channelFor(WORKSPACE_REGISTRY_TABLE) : undefined;
+  const parentRef = issueRef(parentIssueId, workspaceId);
 
   // Nothing failed/skipped → nothing to retry.
   if (plan.statusUpdates.length === 0) {
@@ -1714,7 +1719,7 @@ async function maybeRetryTerminalEpic(
     // PM-P0-1: a comment-driven caller posts its own honest reply — skip the
     // label-path advisory notes so they don't double up.
     if (opts.suppressAdvisoryNotes) return outcome;
-    if (!ctx) return outcome;
+    if (!channel) return outcome;
     // Post these advisory notes at most once per re-trigger window (a webhook
     // redelivery of the SAME label event must not repost). Distinct claim key
     // from the retry itself. Crucially this also stops a redelivery that arrives
@@ -1727,7 +1732,7 @@ async function maybeRetryTerminalEpic(
     if (!won) return outcome;
     if (allSucceeded) {
       // Every child succeeded — the epic is genuinely done.
-      await upsertStatusComment(ctx, parentIssueId, renderEpicAlreadyCompleteNote());
+      await channel.upsertComment(parentRef, renderEpicAlreadyCompleteNote());
     } else {
       // Still running (nodes released/running, none terminal-failed) — benign
       // re-apply; keep the existing already-decomposed copy.
@@ -1846,9 +1851,9 @@ async function maybeRetryTerminalEpic(
   //    re-post it fresh so the live status sits right under the note. The new
   //    comment id replaces status_comment_id, so the reconciler keeps editing the
   //    same (now-repositioned) panel in place on every later event.
-  if (ctx) {
-    await upsertStatusComment(
-      ctx, parentIssueId,
+  if (channel && WORKSPACE_REGISTRY_TABLE) {
+    await channel.upsertComment(
+      parentRef,
       renderEpicRetryNote({ failed: plan.failedCount, skipped: plan.skippedCount, succeeded: plan.succeededCount }),
     );
     try {
@@ -1856,13 +1861,18 @@ async function maybeRetryTerminalEpic(
       const meta = (refreshed ?? fresh ?? snapshot).meta;
       const children = (refreshed ?? fresh ?? snapshot).children;
       // Delete the stale panel comment (best-effort) so we don't leave two panels.
+      // Repositioning a comment by delete-and-repost is a thread-shape detail of
+      // this surface, so it stays a direct call rather than a channel operation.
       if (meta.status_comment_id) {
-        await deleteComment(ctx, meta.status_comment_id);
+        await deleteComment(
+          { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE },
+          meta.status_comment_id,
+        );
       }
       // Post the panel FRESH (no statusCommentId → new comment, below the note).
       const newPanelId = await upsertEpicPanel({
-        ctx,
-        parentLinearIssueId: parentIssueId,
+        channel,
+        parent: parentRef,
         children,
         inProgress: true,
         mirrorParentState: true,
@@ -1871,7 +1881,7 @@ async function maybeRetryTerminalEpic(
         await setStatusCommentId(ddb, ORCHESTRATION_TABLE, orchestrationId, newPanelId);
       }
     } catch (err) {
-      logger.warn('ABCA-659 epic retry: panel reposition failed (non-fatal)', {
+      logger.warn('Epic retry: panel reposition failed (non-fatal)', {
         orchestration_id: orchestrationId, error: err instanceof Error ? err.message : String(err),
       });
     }
@@ -1897,9 +1907,9 @@ async function handleEpicRetryIntent(args: {
   commentId: string;
   replyIssueId: string;
   replyTargetId: string;
-  feedbackCtx: { linearWorkspaceId: string; registryTableName: string };
+  channel: Channel;
 }): Promise<void> {
-  const { orchestrationId, parentIssueId, workspaceId, commentId, replyIssueId, replyTargetId, feedbackCtx } = args;
+  const { orchestrationId, parentIssueId, workspaceId, commentId, replyIssueId, replyTargetId, channel } = args;
   const outcome = await maybeRetryTerminalEpic(
     orchestrationId, parentIssueId, workspaceId, { mode: 'mode_a' },
     // Dedup on the COMMENT id — reliable even for an F9 no-task-id failed child,
@@ -1922,8 +1932,9 @@ async function handleEpicRetryIntent(args: {
       + '(To change something, name the sub-issue: `@bgagent ABCA-123: <what to change>`.)'
     : '👋 This epic is still running — nothing has failed yet, so there\'s nothing to retry. '
       + 'I\'ll update the panel as the sub-issues land.';
-  await replyToComment(feedbackCtx, replyIssueId, replyTargetId, replyBody);
-  await swapCommentReaction(feedbackCtx, commentId, EMOJI_NEEDS_INPUT);
+  const replyRef = issueRef(replyIssueId, workspaceId);
+  await channel.postThreadedReply?.(replyRef, { commentId: replyTargetId }, replyBody);
+  await channel.replaceCommentReaction?.({ commentId }, replyRef, 'needs_input');
   logger.info('A6 comment: retry intent but nothing to retry', { orchestration_id: orchestrationId, outcome });
 }
 
@@ -1967,7 +1978,8 @@ async function cleanupPlanThread(args: {
 }): Promise<void> {
   if (!WORKSPACE_REGISTRY_TABLE) return;
   const { issueId, workspaceId, proposalCommentId, outcome } = args;
-  const ctx = { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE };
+  const channel = channelFor(WORKSPACE_REGISTRY_TABLE);
+  const target = issueRef(issueId, workspaceId);
   try {
     // 1. Freeze the plan reference in place (only if we tracked its id).
     if (proposalCommentId) {
@@ -1977,10 +1989,10 @@ async function cleanupPlanThread(args: {
           outcome.revisionRound !== undefined ? { revisionRound: outcome.revisionRound } : {},
         )
         : renderDiscardedPlanReference();
-      await upsertStatusComment(ctx, issueId, frozenBody, proposalCommentId);
+      await channel.upsertComment(target, frozenBody, { commentId: proposalCommentId });
     }
     // 2. Sweep the transient notes, keeping the frozen reference.
-    await sweepDecompositionNotes(ctx, issueId, proposalCommentId);
+    await channel.sweepNotes?.(target, proposalCommentId ? { commentId: proposalCommentId } : undefined);
   } catch (err) {
     logger.warn('Plan-thread cleanup failed (non-fatal)', {
       issue_id: issueId,
@@ -2057,8 +2069,8 @@ async function seedAndReleaseFromGraph(args: {
       const postRelease = await loadOrchestration(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId);
       if (postRelease) {
         const commentId = await upsertEpicPanel({
-          ctx: { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE },
-          parentLinearIssueId: parentIssueId,
+          channel: channelFor(WORKSPACE_REGISTRY_TABLE),
+          parent: issueRef(parentIssueId, workspaceId),
           children: postRelease.children,
           inProgress: true,
           mirrorParentState: true,
@@ -2102,7 +2114,8 @@ async function handleNearMissMention(payload: LinearCommentEvent): Promise<void>
     return;
   }
 
-  const feedbackCtx = { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE };
+  const channel = channelFor(WORKSPACE_REGISTRY_TABLE);
+  const commented = issueRef(commentedIssueId, workspaceId);
   const won = await claimCommentAck(
     ddb, ORCHESTRATION_TABLE, deriveOrchestrationId(commentedIssueId), `wrong-mention:${commentId}`,
     new Date().toISOString(), Math.floor(Date.now() / 1000) + ACK_CLAIM_TTL_SECONDS,
@@ -2115,9 +2128,9 @@ async function handleNearMissMention(payload: LinearCommentEvent): Promise<void>
   // ❓ on the reviewer's comment + a one-line "I answer to @bgagent" reply, so a
   // wrong-handle mention is visibly acknowledged instead of vanishing. The reply
   // is 👋-prefixed (self-trigger guard skips it), so it can't loop.
-  await reactToComment(feedbackCtx, commentId, EMOJI_NEEDS_INPUT);
+  await channel.reactToComment?.({ commentId }, commented, 'needs_input');
   const replyTargetId = payload.data?.parentId ?? commentId;
-  await replyToComment(feedbackCtx, commentedIssueId, replyTargetId, renderWrongMentionNudge());
+  await channel.postThreadedReply?.(commented, { commentId: replyTargetId }, renderWrongMentionNudge());
   logger.info('Near-miss mention: nudged reviewer to @bgagent', { issue_id: commentedIssueId, comment_id: commentId });
 }
 
@@ -2190,11 +2203,12 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
     logger.warn('A6 comment: commenter has no linked platform user — refusing to act on the trigger', {
       linear_workspace_id: workspaceId, linear_user_id: commenterId, linear_issue_id: commentedIssueId,
     });
-    const feedbackCtx = { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE };
-    await reactToComment(feedbackCtx, commentId, EMOJI_NEEDS_INPUT);
+    const channel = channelFor(WORKSPACE_REGISTRY_TABLE);
+    const commented = issueRef(commentedIssueId, workspaceId);
+    await channel.reactToComment?.({ commentId }, commented, 'needs_input');
     try {
-      await upsertThreadedReply(
-        feedbackCtx, commentedIssueId, replyTargetId,
+      await channel.upsertThreadedReply?.(
+        commented, { commentId: replyTargetId },
         'I can only act on `@bgagent` requests from a linked ABCA user. Link your Linear '
           + 'account first (ask your ABCA admin / run `bgagent linear link`), then re-comment.',
       );
@@ -2249,7 +2263,8 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
       logger.info('Mode B verdict: redelivery already handled this comment — skipping', { comment_id: commentId });
       return;
     }
-    await reactToComment({ linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE }, commentId, EMOJI_STARTED);
+    await channelFor(WORKSPACE_REGISTRY_TABLE)
+      .reactToComment?.({ commentId }, issueRef(commentedIssueId, workspaceId), 'started');
     // Rebuild the release context's OAuth metadata from the resolved token so
     // the released children can post back to Linear (the pending plan stores
     // only ids, not the secret arn — which rotates).
@@ -2342,9 +2357,8 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
         new Date().toISOString(), Math.floor(Date.now() / 1000) + ACK_CLAIM_TTL_SECONDS,
       );
       if (won) {
-        await upsertStatusComment(
-          { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE },
-          commentedIssueId,
+        await channelFor(WORKSPACE_REGISTRY_TABLE).upsertComment(
+          issueRef(commentedIssueId, workspaceId),
           renderPendingPlanNudge(),
         );
       }
@@ -2411,8 +2425,8 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
   // retry must behave identically whether typed on the epic or a child). Only a
   // bare-ish retry phrase; "retry but also change X" stays an iteration.
   if (parseRetryIntent(trigger.instruction)) {
-    const feedbackCtx = { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE };
-    await reactToComment(feedbackCtx, commentId, EMOJI_STARTED);
+    const channel = channelFor(WORKSPACE_REGISTRY_TABLE);
+    await channel.reactToComment?.({ commentId }, issueRef(commentedIssueId, workspaceId), 'started');
     await handleEpicRetryIntent({
       orchestrationId: orchestrationId!,
       parentIssueId: snapshot.meta.parent_linear_issue_id,
@@ -2420,7 +2434,7 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
       commentId,
       replyIssueId: commentedIssueId, // reply on the child the user commented on
       replyTargetId,
-      feedbackCtx,
+      channel,
     });
     return;
   }
@@ -2459,7 +2473,8 @@ async function handlePlanRevision(args: {
 }): Promise<void> {
   if (!ORCHESTRATION_TABLE || !WORKSPACE_REGISTRY_TABLE) return;
   const { pending, feedback, commentId, commentedIssueId, workspaceId, resolved } = args;
-  const feedbackCtx = { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE };
+  const channel = channelFor(WORKSPACE_REGISTRY_TABLE);
+  const target = issueRef(commentedIssueId, workspaceId);
 
   // Claim-once on the feedback comment so a webhook redelivery doesn't dispatch
   // the (costly) re-plan twice. Keyed on the comment id, same as the verdict path.
@@ -2476,7 +2491,7 @@ async function handlePlanRevision(args: {
   if (priorRound >= MAX_DECOMPOSE_REVISIONS) {
     // Cap reached — stop re-planning (each round is a full clone+plan run). The
     // current plan is still pending and approvable; tell the reviewer their options.
-    await upsertStatusComment(feedbackCtx, commentedIssueId, renderRevisionCapNote(MAX_DECOMPOSE_REVISIONS));
+    await channel.upsertComment(target, renderRevisionCapNote(MAX_DECOMPOSE_REVISIONS));
     logger.info('Mode B revise: revision cap reached', { issue_id: commentedIssueId, prior_round: priorRound });
     return;
   }
@@ -2490,10 +2505,10 @@ async function handlePlanRevision(args: {
     if (mapping.Item) caps = readProjectCaps(mapping.Item);
   }
 
-  // #299 F-revise-in-place: 👀 on the reviewer's FEEDBACK comment is the "on it"
-  // ack. The deterministic path settles it 👀→✅ inline the moment the plan updates;
-  // the escalation path leaves it 👀 and the reconciler settles it (as before).
-  await reactToComment(feedbackCtx, commentId, EMOJI_STARTED);
+  // 👀 on the reviewer's FEEDBACK comment is the "on it" ack. The deterministic
+  // path settles it 👀→✅ inline the moment the plan updates; the escalation path
+  // leaves it 👀 and the reconciler settles it.
+  await channel.reactToComment?.({ commentId }, target, 'started');
 
   // #299 BLOCKER-1 (revise amnesia + fabricated "What changed"): FIRST try to
   // interpret the instruction as EDITS to the CURRENT plan and apply them
@@ -2518,8 +2533,8 @@ async function handlePlanRevision(args: {
       // The interpreter proposed an edit that doesn't hold against the plan (bad
       // ref, cycle). Don't escalate to a 2-min clone for a bad edit — surface the
       // reason, leave the plan approvable, settle the ack to ❓ (needs input).
-      await swapCommentReaction(feedbackCtx, commentId, EMOJI_NEEDS_INPUT);
-      await upsertStatusComment(feedbackCtx, commentedIssueId, renderReviseUnclearNote(applied.message));
+      await channel.replaceCommentReaction?.({ commentId }, target, 'needs_input');
+      await channel.upsertComment(target, renderReviseUnclearNote(applied.message));
       logger.info('Mode B revise (deterministic): edit invalid — plan untouched', {
         issue_id: commentedIssueId, message: applied.message,
       });
@@ -2528,8 +2543,8 @@ async function handlePlanRevision(args: {
     if (applied.kind === 'collapses') {
       // The edits leave <2 sub-issues — a revision-to-single. Don't auto-run (the
       // reviewer is mid-planning); hand them the decision, same as the agent path.
-      await swapCommentReaction(feedbackCtx, commentId, EMOJI_SUCCESS);
-      await upsertStatusComment(feedbackCtx, commentedIssueId, renderRevisionToSingleNote());
+      await channel.replaceCommentReaction?.({ commentId }, target, 'succeeded');
+      await channel.upsertComment(target, renderRevisionToSingleNote());
       logger.info('Mode B revise (deterministic): collapses to single unit — awaiting decision', {
         issue_id: commentedIssueId,
       });
@@ -2544,8 +2559,8 @@ async function handlePlanRevision(args: {
       caps,
     );
     if (capResult.kind === 'rejected') {
-      await swapCommentReaction(feedbackCtx, commentId, EMOJI_NEEDS_INPUT);
-      await upsertStatusComment(feedbackCtx, commentedIssueId, renderRevisionOverCapNote(capResult.summary));
+      await channel.replaceCommentReaction?.({ commentId }, target, 'needs_input');
+      await channel.upsertComment(target, renderRevisionOverCapNote(capResult.summary));
       logger.info('Mode B revise (deterministic): over cap — plan untouched', {
         issue_id: commentedIssueId, reason: capResult.reason,
       });
@@ -2557,8 +2572,8 @@ async function handlePlanRevision(args: {
     const diff = diffPlans(pending.nodes, applied.nodes);
     if (diff.unchanged) {
       // The edit resolved to a no-op — say so plainly, don't fake an "Updated".
-      await swapCommentReaction(feedbackCtx, commentId, EMOJI_SUCCESS);
-      await upsertStatusComment(feedbackCtx, commentedIssueId, renderReviseNoChangeNote());
+      await channel.replaceCommentReaction?.({ commentId }, target, 'succeeded');
+      await channel.upsertComment(target, renderReviseNoChangeNote());
       logger.info('Mode B revise (deterministic): no-op edit — plan unchanged', { issue_id: commentedIssueId });
       return;
     }
@@ -2569,15 +2584,14 @@ async function handlePlanRevision(args: {
       nodes: applied.nodes,
       changeSummary: renderPlanDiff(diff),
     };
-    // Edit the ONE plan comment in place (F-revise-in-place), keeping the "Updated
-    // breakdown" header + the computed "What changed" line.
-    const renderedId = await upsertStatusComment(
-      feedbackCtx,
-      commentedIssueId,
+    // Edit the ONE plan comment in place, keeping the "Updated breakdown" header
+    // + the computed "What changed" line.
+    const rendered = await channel.upsertComment(
+      target,
       renderPlanProposal(revisedPlan, { autoRun: false, revisionRound: nextRound }),
-      pending.proposal_comment_id,
+      pending.proposal_comment_id ? { commentId: pending.proposal_comment_id } : undefined,
     );
-    const carriedCommentId = renderedId ?? pending.proposal_comment_id;
+    const carriedCommentId = rendered?.commentId || pending.proposal_comment_id;
     // Persist the edited nodes as the new pending plan (replace — a revision must
     // overwrite). Bump revision_round; carry the digest + sha forward unchanged
     // (a plan edit doesn't change the repo). Preserves the same idempotency the
@@ -2600,7 +2614,7 @@ async function handlePlanRevision(args: {
     });
     // Settle the reviewer's feedback comment 👀→✅ inline (the deterministic path
     // completes synchronously — no reconciler round to do it).
-    await swapCommentReaction(feedbackCtx, commentId, EMOJI_SUCCESS);
+    await channel.replaceCommentReaction?.({ commentId }, target, 'succeeded');
     logger.info('Mode B revise applied deterministically (no clone, no re-derive)', {
       issue_id: commentedIssueId,
       round: nextRound,
@@ -2615,8 +2629,8 @@ async function handlePlanRevision(args: {
   if (interpretation.kind === 'unclear') {
     // Not an actionable edit (a question / too vague). Nudge with the interpreter's
     // clarifying ask; leave the plan approvable. Settle the ack to ❓ (needs input).
-    await swapCommentReaction(feedbackCtx, commentId, EMOJI_NEEDS_INPUT);
-    await upsertStatusComment(feedbackCtx, commentedIssueId, renderReviseUnclearNote(interpretation.message));
+    await channel.replaceCommentReaction?.({ commentId }, target, 'needs_input');
+    await channel.upsertComment(target, renderReviseUnclearNote(interpretation.message));
     logger.info('Mode B revise: instruction not an actionable edit — nudged', { issue_id: commentedIssueId });
     return;
   }
@@ -2625,23 +2639,23 @@ async function handlePlanRevision(args: {
   // Even here it REVISES the current plan (the agent gets the prior plan + digest
   // as the base), never regenerates from the issue.
   //
-  // PM-BLOCKER (persona stress test): the escalation runs a 2-10 min repo-cloning
-  // re-plan, but this path used to post an ack ONLY on needs_repo and was SILENT on
-  // the interpret-error branch, and NEVER flipped the issue state. So a perfectly
-  // valid revise looked dropped for 10+ min — no ack, no board movement — while the
-  // initial :decompose posts an "On it" comment AND flips to In Progress (PM-6/#157).
-  // Fix: ALWAYS post the "taking a closer look" ack (both branches) AND flip the
-  // issue to In Progress here, mirroring the initial-decompose path, so the revise
-  // is as visible as the first plan. The 👀 on the feedback comment stays for the
-  // reconciler to settle 👀→✅ when the revised plan lands.
+  // The escalation runs a 2-10 min repo-cloning re-plan, but this path used to post
+  // an ack ONLY on needs_repo and was SILENT on the interpret-error branch, and
+  // NEVER flipped the issue state. So a perfectly valid revise looked dropped for
+  // 10+ min — no ack, no board movement — while the initial decompose posts an "On
+  // it" comment AND flips to a running state. Fix: ALWAYS post the "taking a closer
+  // look" ack (both branches) AND flip the issue to running here, mirroring the
+  // initial-decompose path, so the revise is as visible as the first plan. The 👀 on
+  // the feedback comment stays for the reconciler to settle 👀→✅ when the revised
+  // plan lands.
   const escalateReason = interpretation.kind === 'needs_repo' ? interpretation.reason : '';
-  await upsertStatusComment(feedbackCtx, commentedIssueId, renderReviseEscalatedNote(escalateReason));
-  // Flip to a visible "started" state for the duration of the re-plan (idempotent +
-  // forward-only inside transitionIssueState; best-effort — never block the re-plan).
+  await channel.upsertComment(target, renderReviseEscalatedNote(escalateReason));
+  // Flip to a visible running state for the duration of the re-plan (idempotent +
+  // forward-only inside the transition; best-effort — never block the re-plan).
   try {
-    await transitionIssueState(feedbackCtx, commentedIssueId, 'started', ['In Progress']);
+    await channel.transitionState?.(target, 'started');
   } catch (err) {
-    logger.warn('Mode B revise: failed to flip issue to In Progress (non-fatal)', {
+    logger.warn('Mode B revise: failed to flip issue to a running state (non-fatal)', {
       issue_id: commentedIssueId, error: err instanceof Error ? err.message : String(err),
     });
   }
@@ -2706,8 +2720,8 @@ async function handlePlanRevision(args: {
     probeIssue: true,
   });
   if (!reviseHydrated.ok) {
-    await swapCommentReaction(feedbackCtx, commentId, EMOJI_NEEDS_INPUT);
-    await upsertStatusComment(feedbackCtx, commentedIssueId, `❌ ${reviseHydrated.message}`);
+    await channel.replaceCommentReaction?.({ commentId }, target, 'needs_input');
+    await channel.upsertComment(target, `❌ ${reviseHydrated.message}`);
     return;
   }
 
@@ -2735,8 +2749,8 @@ async function handlePlanRevision(args: {
     // ❓ here (the request needs the reviewer's attention, not "done") and post the
     // honest failure note. The current plan is untouched + still approvable; NO raw
     // "blocked by content policy" string (reads as if the user erred).
-    await swapCommentReaction(feedbackCtx, commentId, EMOJI_NEEDS_INPUT);
-    await upsertStatusComment(feedbackCtx, commentedIssueId, renderRevisionFailedNote());
+    await channel.replaceCommentReaction?.({ commentId }, target, 'needs_input');
+    await channel.upsertComment(target, renderRevisionFailedNote());
     return;
   }
   logger.info('Mode B revise: re-plan task dispatched', {
@@ -2762,7 +2776,8 @@ async function handleSingleTaskVerdict(args: {
 }): Promise<void> {
   if (!ORCHESTRATION_TABLE || !WORKSPACE_REGISTRY_TABLE) return;
   const { pending, verdict, commentedIssueId, workspaceId, projectId, resolved } = args;
-  const feedbackCtx = { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE };
+  const channel = channelFor(WORKSPACE_REGISTRY_TABLE);
+  const target = issueRef(commentedIssueId, workspaceId);
 
   // Consume the pending plan either way (approve runs it, reject discards it).
   // The atomic delete also guards a racing second verdict (only one wins).
@@ -2773,13 +2788,13 @@ async function handleSingleTaskVerdict(args: {
   }
 
   if (verdict === 'reject') {
-    // #299 plan-cleanup: sweep the transient planning notes (decompose-started
-    // ack + single-task proposal), THEN post the durable "cancelled" record so it
-    // survives the sweep (posted fresh after → the sweep's list didn't see it).
-    // A single-task plan tracks no proposal comment id, so there's nothing to
-    // freeze — the swept-clean thread + this one line is the whole record.
-    await sweepDecompositionNotes(feedbackCtx, commentedIssueId);
-    await upsertStatusComment(feedbackCtx, commentedIssueId, renderSingleTaskCancelled());
+    // Sweep the transient planning notes (decompose-started ack + single-task
+    // proposal), THEN post the durable "cancelled" record so it survives the sweep
+    // (posted fresh after → the sweep's list didn't see it). A single-task plan
+    // tracks no proposal comment id, so there's nothing to freeze — the
+    // swept-clean thread + this one line is the whole record.
+    await channel.sweepNotes?.(target);
+    await channel.upsertComment(target, renderSingleTaskCancelled());
     logger.info('Mode B single-task verdict: rejected', { issue_id: commentedIssueId });
     return;
   }
@@ -2836,26 +2851,25 @@ async function handleSingleTaskVerdict(args: {
       buildCreateTaskFailureMessage(result.statusCode, result.body));
     return;
   }
-  // PM-P1-1 (2026-07-24): FREEZE the single-task proposal into a durable
-  // "Approved" reference BEFORE sweeping, so Linear keeps a record of what was
-  // proposed + approved (a reviewer can audit the authorized scope against the
-  // PR) — matching the graph-approve path. Only when we tracked the proposal
-  // comment id (older single-task plans have none → sweep-only, as before).
-  // #299 plan-cleanup: then sweep the transient planning notes (started ack +
-  // any 👋 nudges) so the thread isn't cluttered by the plan phase — passing
-  // the frozen comment id so the sweep KEEPS it.
+  // FREEZE the single-task proposal into a durable "Approved" reference BEFORE
+  // sweeping, so the thread keeps a record of what was proposed + approved (a
+  // reviewer can audit the authorized scope against the PR) — matching the
+  // graph-approve path. Only when we tracked the proposal comment id (older
+  // single-task plans have none → sweep-only, as before). Then sweep the
+  // transient planning notes (started ack + any 👋 nudges) so the thread isn't
+  // cluttered by the plan phase — passing the frozen comment id so the sweep
+  // KEEPS it.
   if (taken.proposal_comment_id) {
-    await upsertStatusComment(
-      feedbackCtx,
-      commentedIssueId,
+    await channel.upsertComment(
+      target,
       // Echo the approved scope (the description the reviewer OK'd) so the frozen
       // record is auditable against the resulting PR.
       renderSingleTaskApprovedReference(taken.single_task_description ?? ''),
-      taken.proposal_comment_id,
+      { commentId: taken.proposal_comment_id },
     );
-    await sweepDecompositionNotes(feedbackCtx, commentedIssueId, taken.proposal_comment_id);
+    await channel.sweepNotes?.(target, { commentId: taken.proposal_comment_id });
   } else {
-    await sweepDecompositionNotes(feedbackCtx, commentedIssueId);
+    await channel.sweepNotes?.(target);
   }
   logger.info('Mode B single-task verdict: approved — single task dispatched', { issue_id: commentedIssueId });
 }
@@ -2884,7 +2898,8 @@ async function handlePlanCommand(args: {
 }): Promise<void> {
   if (!ORCHESTRATION_TABLE || !WORKSPACE_REGISTRY_TABLE) return;
   const { pending, command, commentId, commentedIssueId, workspaceId } = args;
-  const feedbackCtx = { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE };
+  const channel = channelFor(WORKSPACE_REGISTRY_TABLE);
+  const target = issueRef(commentedIssueId, workspaceId);
 
   // Claim-once so a webhook redelivery doesn't apply the edit twice (a second
   // "drop 3" on the already-edited plan would drop a DIFFERENT node).
@@ -2897,14 +2912,14 @@ async function handlePlanCommand(args: {
     return;
   }
 
-  await reactToComment(feedbackCtx, commentId, EMOJI_STARTED);
+  await channel.reactToComment?.({ commentId }, target, 'started');
 
   const result = applyPlanCommand(pending.nodes, command);
   if (result.kind === 'error') {
-    // F-command-ack-stuck: settle the 👀 to ❓ — the command needs the reviewer's
-    // attention (bad index etc.), it didn't silently succeed.
-    await swapCommentReaction(feedbackCtx, commentId, EMOJI_NEEDS_INPUT);
-    await upsertStatusComment(feedbackCtx, commentedIssueId, renderPlanCommandError(result.message));
+    // Settle the 👀 to ❓ — the command needs the reviewer's attention (bad index
+    // etc.), it didn't silently succeed.
+    await channel.replaceCommentReaction?.({ commentId }, target, 'needs_input');
+    await channel.upsertComment(target, renderPlanCommandError(result.message));
     logger.info('Mode B command: invalid — posted error, plan untouched', {
       issue_id: commentedIssueId, command: command.kind,
     });
@@ -2914,9 +2929,9 @@ async function handlePlanCommand(args: {
     // The edit would leave <2 sub-issues — nothing to orchestrate. Don't silently
     // apply it; tell the reviewer their options (approve to run as one task, or
     // give different feedback). The current plan stays pending + approvable.
-    // F-command-ack-stuck: settle 👀→❓ (awaiting the reviewer's decision).
-    await swapCommentReaction(feedbackCtx, commentId, EMOJI_NEEDS_INPUT);
-    await upsertStatusComment(feedbackCtx, commentedIssueId, renderCommandCollapseNote());
+    // Settle 👀→❓ (awaiting the reviewer's decision).
+    await channel.replaceCommentReaction?.({ commentId }, target, 'needs_input');
+    await channel.upsertComment(target, renderCommandCollapseNote());
     logger.info('Mode B command: would collapse to single task — plan untouched', {
       issue_id: commentedIssueId, command: command.kind, remaining: result.remaining,
     });
@@ -2936,24 +2951,22 @@ async function handlePlanCommand(args: {
     nodes: result.nodes,
     ...(!commandDiff.unchanged && { changeSummary: renderPlanDiff(commandDiff) }),
   };
-  // #299 plan-mode T5: EDIT the existing proposal comment in place rather than
-  // posting a fresh one. A reviewer firing several structural commands in a row
-  // ("drop 3", then "merge 1 2", …) is watching the plan mature — a stack of N
-  // full re-rendered proposals is noise, and Linear's chat.update-style edit is
-  // the async channel's closest thing to the plan firming up live. The 👀 on
-  // each command comment is the per-edit ack; the single plan comment is the
-  // source of truth. Falls back to a fresh comment when no prior id was captured
-  // (best-effort — upsertStatusComment returns null on a failed edit, and we then
-  // don't clobber the stored id).
-  const renderedId = await upsertStatusComment(
-    feedbackCtx,
-    commentedIssueId,
+  // EDIT the existing proposal comment in place rather than posting a fresh one. A
+  // reviewer firing several structural commands in a row ("drop 3", then "merge 1
+  // 2", …) is watching the plan mature — a stack of N full re-rendered proposals is
+  // noise, and an in-place edit is the async surface's closest thing to the plan
+  // firming up live. The 👀 on each command comment is the per-edit ack; the single
+  // plan comment is the source of truth. Falls back to a fresh comment when no
+  // prior id was captured (best-effort — the upsert reports no id on a failed
+  // edit, and we then don't clobber the stored id).
+  const rendered = await channel.upsertComment(
+    target,
     renderPlanProposal(editedPlan, {
       autoRun: false,
       ...(pending.revision_round !== undefined && pending.revision_round > 0
         && { revisionRound: pending.revision_round }),
     }),
-    pending.proposal_comment_id,
+    pending.proposal_comment_id ? { commentId: pending.proposal_comment_id } : undefined,
   );
 
   // Persist the edited node list (unconditional upsert — the claim-once above
@@ -2961,7 +2974,7 @@ async function handlePlanCommand(args: {
   // re-plan round, so it must not consume the revise budget. Carry the proposal
   // comment id forward (the freshly-created one if we had none, else the edited
   // one) so the NEXT command edits the same comment in place.
-  const carriedCommentId = renderedId ?? pending.proposal_comment_id;
+  const carriedCommentId = rendered?.commentId || pending.proposal_comment_id;
   await replacePendingPlanRow({
     ddb,
     tableName: ORCHESTRATION_TABLE,
@@ -2981,17 +2994,17 @@ async function handlePlanCommand(args: {
     ttlEpochSeconds: Math.floor(Date.now() / 1000) + PENDING_PLAN_TTL_SECONDS,
   });
 
-  // F-command-ack-stuck: settle the 👀 on the command comment to ✅ — the edit
-  // applied + the plan comment updated in place, so the reviewer can tell it
-  // finished (the 👀 previously never swapped → read as stuck). Synchronous, no
-  // reconciler round-trip.
-  await swapCommentReaction(feedbackCtx, commentId, EMOJI_SUCCESS);
+  // Settle the 👀 on the command comment to ✅ — the edit applied + the plan
+  // comment updated in place, so the reviewer can tell it finished (the 👀
+  // previously never swapped → read as stuck). Synchronous, no reconciler
+  // round-trip.
+  await channel.replaceCommentReaction?.({ commentId }, target, 'succeeded');
 
   logger.info('Mode B command applied — plan edited deterministically (no agent)', {
     issue_id: commentedIssueId,
     command: command.kind,
     node_count: result.nodes.length,
-    edited_in_place: pending.proposal_comment_id !== undefined && renderedId === pending.proposal_comment_id,
+    edited_in_place: pending.proposal_comment_id !== undefined && rendered?.commentId === pending.proposal_comment_id,
   });
 }
 
@@ -3041,7 +3054,8 @@ async function handleParentEpicCommentTrigger(args: {
   registryTableName: string;
 }): Promise<void> {
   const { orchestrationId, snapshot, workspaceId, commentId, commentBody, replyTargetId, trigger, resolved, registryTableName } = args;
-  const feedbackCtx = { linearWorkspaceId: workspaceId, registryTableName };
+  const channel = channelFor(registryTableName);
+  const parentRef = issueRef(snapshot.meta.parent_linear_issue_id, workspaceId);
 
   // #247 UX.20: claim-once BEFORE any side-effect. Linear redelivers a comment
   // webhook when the handler exceeds its ~5s ack window (this path does several
@@ -3064,7 +3078,7 @@ async function handleParentEpicCommentTrigger(args: {
   }
 
   // ACK immediately — a parent comment is never silently dropped again.
-  await reactToComment(feedbackCtx, commentId, EMOJI_STARTED);
+  await channel.reactToComment?.({ commentId }, parentRef, 'started');
 
   // PM-P0-1 (2026-07-24): a RETRY request on the epic ("@bgagent retry", "try
   // again") — the failure panel literally says "reply here to try again" — must
@@ -3081,7 +3095,7 @@ async function handleParentEpicCommentTrigger(args: {
       commentId,
       replyIssueId: snapshot.meta.parent_linear_issue_id, // reply on the epic
       replyTargetId,
-      feedbackCtx,
+      channel,
     });
     return;
   }
@@ -3107,10 +3121,10 @@ async function handleParentEpicCommentTrigger(args: {
     // tell". A close suggestion takes precedence (more likely a vague edit).
     const newWork = reason === 'none' && !suggestion && looksLikeNewWork(trigger.instruction);
     const body = renderParentDisambiguationReply(reason, snapshot.children, suggestion, newWork, epicHasFailures);
-    await replyToComment(feedbackCtx, snapshot.meta.parent_linear_issue_id, replyTargetId, body);
-    // #247 UX-1: this is a QUESTION, not work-in-progress. Swap the 👀 we put
-    // on receipt to ❓ so the comment doesn't look like it's still being worked.
-    await swapCommentReaction(feedbackCtx, commentId, EMOJI_NEEDS_INPUT);
+    await channel.postThreadedReply?.(parentRef, { commentId: replyTargetId }, body);
+    // This is a QUESTION, not work-in-progress. Replace the 👀 we put on receipt
+    // with ❓ so the comment doesn't look like it's still being worked.
+    await channel.replaceCommentReaction?.({ commentId }, parentRef, 'needs_input');
     logger.info('A6 comment (parent epic): no single iterable sub-issue matched — asked', {
       orchestration_id: orchestrationId, reason, match_count: match.matches.length,
     });
@@ -3129,10 +3143,10 @@ async function handleParentEpicCommentTrigger(args: {
         + 'nothing to iterate on yet. Reply `@bgagent retry` on this epic to re-run the failed work '
         + '(or remove and re-apply the `abca` label) — then comment again once it has a PR.'
       : renderParentDisambiguationReply('none', snapshot.children, target, false, epicHasFailures);
-    await replyToComment(feedbackCtx, snapshot.meta.parent_linear_issue_id, replyTargetId, body);
-    // #247 UX-1: matched a node but it has no PR yet — also a "wait / clarify"
-    // state, not active work; swap 👀 → ❓.
-    await swapCommentReaction(feedbackCtx, commentId, EMOJI_NEEDS_INPUT);
+    await channel.postThreadedReply?.(parentRef, { commentId: replyTargetId }, body);
+    // Matched a node but it has no PR yet — also a "wait / clarify" state, not
+    // active work; 👀 → ❓.
+    await channel.replaceCommentReaction?.({ commentId }, parentRef, 'needs_input');
     logger.info('A6 comment (parent epic): matched sub-issue has no PR yet — asked', {
       orchestration_id: orchestrationId,
       sub_issue_id: target.sub_issue_id,
@@ -3219,11 +3233,13 @@ async function iterateOrchestrationChild(args: {
   // be a linked platform user; the orchestration already ran under this id).
   const platformUserId = snapshot.meta.release_context.platform_user_id;
 
-  // #247 UX.3: ACK the request the instant we commit to acting on it. 👀 on the
-  // TRIGGERING comment is the zero-clutter "on it" signal. The parent-epic path
-  // already acked, so it passes skipAck.
+  // ACK the request the instant we commit to acting on it. 👀 on the TRIGGERING
+  // comment is the zero-clutter "on it" signal. The parent-epic path already
+  // acked, so it passes skipAck.
+  const channel = channelFor(registryTableName);
+  const commentedRef = issueRef(triggerCommentIssueId, workspaceId);
   if (!args.skipAck) {
-    await reactToComment({ linearWorkspaceId: workspaceId, registryTableName }, commentId, EMOJI_STARTED);
+    await channel.reactToComment?.({ commentId }, commentedRef, 'started');
   }
 
   // Iteration-UX: post the immediate "👀 On it" threaded reply (kills the
@@ -3276,7 +3292,7 @@ async function iterateOrchestrationChild(args: {
     probeIssue: false,
   });
   if (!iterHydrated.ok) {
-    await replyToComment({ linearWorkspaceId: workspaceId, registryTableName }, triggerCommentIssueId, replyTargetId, `❌ ${iterHydrated.message}`);
+    await channel.postThreadedReply?.(commentedRef, { commentId: replyTargetId }, `❌ ${iterHydrated.message}`);
     return;
   }
 
@@ -3391,10 +3407,11 @@ async function handleStandaloneCommentTrigger(args: {
   }
 
   // ACK the instant we commit (same as the orchestration path).
-  const feedbackCtx = { linearWorkspaceId: workspaceId, registryTableName };
-  await reactToComment(feedbackCtx, commentId, EMOJI_STARTED);
-  // Iteration-UX: immediate "👀 On it" threaded reply + persist its id so the
-  // fanout dispatcher matures THIS reply instead of posting new comments.
+  const channel = channelFor(registryTableName);
+  const target = issueRef(issueId, workspaceId);
+  await channel.reactToComment?.({ commentId }, target, 'started');
+  // Immediate "👀 On it" threaded reply + persist its id so the fanout dispatcher
+  // matures THIS reply instead of posting new comments.
   const iterationReplyId = await postIterationAck(workspaceId, registryTableName, issueId, replyTargetId);
 
   const idempotencyKey = `iterate_${issueId}_${commentId}`.replace(/[^A-Za-z0-9_-]/g, '').slice(0, MAX_IDEMPOTENCY_KEY_LENGTH);
@@ -3425,7 +3442,7 @@ async function handleStandaloneCommentTrigger(args: {
     probeIssue: false,
   });
   if (!iterHydrated.ok) {
-    await replyToComment(feedbackCtx, issueId, replyTargetId, `❌ ${iterHydrated.message}`);
+    await channel.postThreadedReply?.(target, { commentId: replyTargetId }, `❌ ${iterHydrated.message}`);
     return;
   }
 
@@ -3497,6 +3514,8 @@ async function maybeStartStandaloneNewWork(args: {
   registryTableName: string;
 }): Promise<boolean> {
   const { issueId, task, workspaceId, commentId, commentBody, replyTargetId, trigger, resolved, registryTableName } = args;
+  const channel = channelFor(registryTableName);
+  const target = issueRef(issueId, workspaceId);
 
   // Can't act without a repo to work in or a user to attribute the task to —
   // let the caller no-op-log. (These are the only genuinely unactionable cases.)
@@ -3510,12 +3529,11 @@ async function maybeStartStandaloneNewWork(args: {
   // user we're already on it (handled: return true, no dispatch). An ABSENT
   // status is an old/unknown row — allow (preserves pre-#614 behavior for those).
   if (task.status !== undefined && !TERMINAL_STATUSES.includes(task.status as TaskStatusType)) {
-    await reactToComment({ linearWorkspaceId: workspaceId, registryTableName }, commentId, EMOJI_STARTED);
+    await channel.reactToComment?.({ commentId }, target, 'started');
     try {
-      await upsertThreadedReply(
-        { linearWorkspaceId: workspaceId, registryTableName },
-        issueId,
-        replyTargetId,
+      await channel.upsertThreadedReply?.(
+        target,
+        { commentId: replyTargetId },
         "I'm still working on the current task for this issue — I'll pick up follow-up "
           + 'requests once it finishes. If you meant to change what I\'m doing, cancel the '
           + 'running task first, then re-comment.',
@@ -3532,19 +3550,17 @@ async function maybeStartStandaloneNewWork(args: {
   }
 
   const instruction = trigger.instruction.trim();
-  const feedbackCtx = { linearWorkspaceId: workspaceId, registryTableName };
 
   // A bare ``@bgagent`` with no text has nothing to start. Unlike iteration
   // (where an empty instruction means "address the latest review"), there is no
   // PR to fall back on here — so acknowledge briefly rather than dispatch a
   // vague task or stay silent. Handled (return true) so we don't no-op-log.
   if (!instruction) {
-    await reactToComment(feedbackCtx, commentId, EMOJI_STARTED);
+    await channel.reactToComment?.({ commentId }, target, 'started');
     try {
-      await upsertThreadedReply(
-        feedbackCtx,
-        issueId,
-        replyTargetId,
+      await channel.upsertThreadedReply?.(
+        target,
+        { commentId: replyTargetId },
         'This task already finished and has no open PR to iterate on. Reply with what '
           + "you'd like me to do (e.g. `@bgagent add a note to the README`) and I'll start it.",
       );
@@ -3561,7 +3577,7 @@ async function maybeStartStandaloneNewWork(args: {
 
   // ACK immediately (👀 reaction + threaded "On it"), same as the iteration and
   // clarify-resume paths.
-  await reactToComment(feedbackCtx, commentId, EMOJI_STARTED);
+  await channel.reactToComment?.({ commentId }, target, 'started');
   const iterationReplyId = await postIterationAck(workspaceId, registryTableName, issueId, replyTargetId);
 
   // Idempotency: key on (issue, comment) so a webhook redelivery of the SAME
@@ -3595,7 +3611,7 @@ async function maybeStartStandaloneNewWork(args: {
     probeIssue: true,
   });
   if (!newHydrated.ok) {
-    await replyToComment(feedbackCtx, issueId, replyTargetId, `❌ ${newHydrated.message}`);
+    await channel.postThreadedReply?.(target, { commentId: replyTargetId }, `❌ ${newHydrated.message}`);
     return true;
   }
 
@@ -3687,8 +3703,9 @@ async function maybeResumeClarifyHold(args: {
 
   // ACK immediately (👀 reaction + threaded "On it") — same feedback as an
   // iteration, so the reviewer sees the answer was received.
-  const feedbackCtx = { linearWorkspaceId: workspaceId, registryTableName };
-  await reactToComment(feedbackCtx, commentId, EMOJI_STARTED);
+  const channel = channelFor(registryTableName);
+  const target = issueRef(issueId, workspaceId);
+  await channel.reactToComment?.({ commentId }, target, 'started');
   const iterationReplyId = await postIterationAck(workspaceId, registryTableName, issueId, replyTargetId);
 
   const resumeDescription = buildClarifyResumeDescription(
@@ -3722,7 +3739,7 @@ async function maybeResumeClarifyHold(args: {
     probeIssue: true,
   });
   if (!resumeHydrated.ok) {
-    await replyToComment(feedbackCtx, issueId, replyTargetId, `❌ ${resumeHydrated.message}`);
+    await channel.postThreadedReply?.(target, { commentId: replyTargetId }, `❌ ${resumeHydrated.message}`);
     return true;
   }
 
@@ -3900,9 +3917,8 @@ async function handleHelpLabel(args: {
     logger.info('Linear :help label — explainer already posted for this issue (redelivery)', { issue_id: issue.id });
     return;
   }
-  await upsertStatusComment(
-    { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE },
-    issue.id,
+  await channelFor(WORKSPACE_REGISTRY_TABLE).upsertComment(
+    issueRef(issue.id, workspaceId),
     renderLabelHelp(base),
   );
   logger.info('Linear :help label — posted label explainer', { issue_id: issue.id });
@@ -3926,9 +3942,8 @@ async function maybePostAlreadyDecomposedNote(
   if (decision.mode !== 'decompose' && decision.mode !== 'auto') return;
   if (!WORKSPACE_REGISTRY_TABLE) return;
   try {
-    await upsertStatusComment(
-      { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE },
-      issueId,
+    await channelFor(WORKSPACE_REGISTRY_TABLE).upsertComment(
+      issueRef(issueId, workspaceId),
       renderAlreadyDecomposedNote(),
     );
     logger.info('Linear decompose suffix on an already-decomposed issue — posted note', { issue_id: issueId });

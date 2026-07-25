@@ -307,8 +307,9 @@ describe('single-task verdict path (F-single-gate) through the real handler', ()
     expect(ctx.channelMetadata.linear_issue_id).toBe('parent-1');
     // Consumed the pending plan (a Delete fired).
     expect(ddbSend.mock.calls.some((c) => c[0]?._type === 'Delete')).toBe(true);
-    // #299 plan-cleanup: the transient planning notes are swept once the task runs.
-    expect(sweepDecompositionNotesMock).toHaveBeenCalledWith(expect.anything(), 'parent-1');
+    // The transient planning notes are swept once the task runs. No proposal
+    // comment was tracked on this plan, so there's no comment to keep.
+    expect(sweepDecompositionNotesMock).toHaveBeenCalledWith(expect.anything(), 'parent-1', undefined);
   });
 
   test('reject on a single pending plan → discards, runs nothing', async () => {
@@ -317,8 +318,8 @@ describe('single-task verdict path (F-single-gate) through the real handler', ()
     expect(ddbSend.mock.calls.some((c) => c[0]?._type === 'Delete')).toBe(true);
     const note = upsertStatusCommentMock.mock.calls.map((c) => c[2]).join(' ');
     expect(note).toMatch(/cancelled/i);
-    // #299 plan-cleanup: sweep fires BEFORE the durable "cancelled" note is posted,
-    // so the note (posted fresh, after) survives.
-    expect(sweepDecompositionNotesMock).toHaveBeenCalledWith(expect.anything(), 'parent-1');
+    // Sweep fires BEFORE the durable "cancelled" note is posted, so the note
+    // (posted fresh, after) survives. Nothing to keep on a discarded plan.
+    expect(sweepDecompositionNotesMock).toHaveBeenCalledWith(expect.anything(), 'parent-1', undefined);
   });
 });

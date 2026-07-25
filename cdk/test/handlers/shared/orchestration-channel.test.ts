@@ -22,8 +22,14 @@
 const linearPostIssueComment = jest.fn();
 const linearUpsertStatusComment = jest.fn();
 const linearReportIssueFailure = jest.fn();
+const linearAddCommentReaction = jest.fn();
 const linearSwapCommentReaction = jest.fn();
+const linearSwapIssueReaction = jest.fn();
 const linearTransitionIssueState = jest.fn();
+const linearRevertIssueToNotStarted = jest.fn();
+const linearReplyToComment = jest.fn();
+const linearUpsertThreadedReply = jest.fn();
+const linearSweepDecompositionNotes = jest.fn();
 jest.mock('../../../src/handlers/shared/linear-feedback', () => ({
   EMOJI_STARTED: 'eyes',
   EMOJI_SUCCESS: 'white_check_mark',
@@ -32,8 +38,14 @@ jest.mock('../../../src/handlers/shared/linear-feedback', () => ({
   postIssueComment: (...a: unknown[]) => linearPostIssueComment(...a),
   upsertStatusComment: (...a: unknown[]) => linearUpsertStatusComment(...a),
   reportIssueFailure: (...a: unknown[]) => linearReportIssueFailure(...a),
+  reactToComment: (...a: unknown[]) => linearAddCommentReaction(...a),
   swapCommentReaction: (...a: unknown[]) => linearSwapCommentReaction(...a),
+  swapIssueReaction: (...a: unknown[]) => linearSwapIssueReaction(...a),
   transitionIssueState: (...a: unknown[]) => linearTransitionIssueState(...a),
+  revertIssueToNotStarted: (...a: unknown[]) => linearRevertIssueToNotStarted(...a),
+  replyToComment: (...a: unknown[]) => linearReplyToComment(...a),
+  upsertThreadedReply: (...a: unknown[]) => linearUpsertThreadedReply(...a),
+  sweepDecompositionNotes: (...a: unknown[]) => linearSweepDecompositionNotes(...a),
 }));
 
 const resolveLinearOauthToken = jest.fn();
@@ -84,16 +96,106 @@ describe('Linear channel adapter', () => {
     expect(linearUpsertStatusComment.mock.calls[0][3]).toBe('cmt-7'); // existing id passed through
   });
 
-  test('reactToComment maps the neutral Reaction to the Linear emoji', async () => {
-    await ch.reactToComment!({ commentId: 'c1' }, linearIssue, 'succeeded');
-    expect(linearSwapCommentReaction.mock.calls[0][2]).toBe('white_check_mark');
-    await ch.reactToComment!({ commentId: 'c1' }, linearIssue, 'needs_input');
-    expect(linearSwapCommentReaction.mock.calls[1][2]).toBe('question');
+  test('reactToComment ADDS a reaction without clearing existing ones', async () => {
+    // The receipt ack must not disturb other markers, so it maps to the
+    // add-only helper — never the swap helper, which deletes prior markers.
+    await ch.reactToComment!({ commentId: 'c1' }, linearIssue, 'started');
+    expect(linearAddCommentReaction.mock.calls[0][2]).toBe('eyes');
+    expect(linearSwapCommentReaction).not.toHaveBeenCalled();
   });
 
-  test('transitionState maps intent to the Linear target type', async () => {
+  test('replaceCommentReaction clears prior markers via the swap helper', async () => {
+    await ch.replaceCommentReaction!({ commentId: 'c1' }, linearIssue, 'succeeded');
+    expect(linearSwapCommentReaction.mock.calls[0][1]).toBe('c1');
+    expect(linearSwapCommentReaction.mock.calls[0][2]).toBe('white_check_mark');
+    expect(linearAddCommentReaction).not.toHaveBeenCalled();
+  });
+
+  test('replaceIssueReaction targets the ISSUE, not a comment', async () => {
+    await ch.replaceIssueReaction!(linearIssue, 'failed');
+    expect(linearSwapIssueReaction.mock.calls[0][1]).toBe('lin-issue-1');
+    expect(linearSwapIssueReaction.mock.calls[0][2]).toBe('x');
+    expect(linearSwapCommentReaction).not.toHaveBeenCalled();
+  });
+
+  test('transitionState distinguishes running from awaiting-review by state name', async () => {
+    // Linear types both as `started`, so the preferred NAME is what separates
+    // them; dropping it would collapse the two intents into one move.
+    await ch.transitionState!(linearIssue, 'started');
+    expect(linearTransitionIssueState.mock.calls[0][2]).toBe('started');
+    expect(linearTransitionIssueState.mock.calls[0][3]).toEqual(['In Progress']);
+
+    await ch.transitionState!(linearIssue, 'in_review');
+    expect(linearTransitionIssueState.mock.calls[1][2]).toBe('started');
+    expect(linearTransitionIssueState.mock.calls[1][3]).toEqual(['In Review']);
+
     await ch.transitionState!(linearIssue, 'completed');
-    expect(linearTransitionIssueState.mock.calls[0][2]).toBe('completed');
+    expect(linearTransitionIssueState.mock.calls[2][2]).toBe('completed');
+  });
+
+  test('transitionState only permits a same-category re-open when asked', async () => {
+    await ch.transitionState!(linearIssue, 'started');
+    expect(linearTransitionIssueState.mock.calls[0][4]).toBe(false);
+    await ch.transitionState!(linearIssue, 'started', { allowRegression: true });
+    expect(linearTransitionIssueState.mock.calls[1][4]).toBe(true);
+  });
+
+  test('revertState routes to the guarded backward move', async () => {
+    linearRevertIssueToNotStarted.mockResolvedValue(true);
+    expect(await ch.revertState!(linearIssue)).toBe(true);
+    expect(linearRevertIssueToNotStarted.mock.calls[0][1]).toBe('lin-issue-1');
+  });
+
+  test('postThreadedReply carries both the issue and the parent comment', async () => {
+    // Linear rejects a reply that names only the parent comment, so the issue
+    // id must travel with it.
+    linearReplyToComment.mockResolvedValue('reply-1');
+    const res = await ch.postThreadedReply!(linearIssue, { commentId: 'parent-1' }, 'done');
+    expect(res).toEqual({ commentId: 'reply-1' });
+    const [, issueId, parentId, body] = linearReplyToComment.mock.calls[0];
+    expect(issueId).toBe('lin-issue-1');
+    expect(parentId).toBe('parent-1');
+    expect(body).toBe('done');
+  });
+
+  test('postThreadedReply returns null when the reply fails', async () => {
+    linearReplyToComment.mockResolvedValue(null);
+    expect(await ch.postThreadedReply!(linearIssue, { commentId: 'p' }, 'x')).toBeNull();
+  });
+
+  test('upsertThreadedReply edits the existing reply and preserves a preview link on request', async () => {
+    linearUpsertThreadedReply.mockResolvedValue('reply-9');
+    const res = await ch.upsertThreadedReply!(
+      linearIssue, { commentId: 'parent-1' }, 'settled', { commentId: 'reply-9' },
+      { preservePreview: true },
+    );
+    expect(res).toEqual({ commentId: 'reply-9' });
+    const [, issueId, parentId, body, existingId, options] = linearUpsertThreadedReply.mock.calls[0];
+    expect(issueId).toBe('lin-issue-1');
+    expect(parentId).toBe('parent-1');
+    expect(body).toBe('settled');
+    expect(existingId).toBe('reply-9');
+    expect(options).toEqual({ preservePreview: true });
+  });
+
+  test('upsertThreadedReply defaults to not preserving a preview link', async () => {
+    linearUpsertThreadedReply.mockResolvedValue('reply-2');
+    await ch.upsertThreadedReply!(linearIssue, { commentId: 'p' }, 'body');
+    expect(linearUpsertThreadedReply.mock.calls[0][4]).toBeUndefined();
+    expect(linearUpsertThreadedReply.mock.calls[0][5]).toEqual({ preservePreview: false });
+  });
+
+  test('sweepNotes passes the comment to keep through and returns the deleted count', async () => {
+    linearSweepDecompositionNotes.mockResolvedValue(3);
+    expect(await ch.sweepNotes!(linearIssue, { commentId: 'keep-1' })).toBe(3);
+    expect(linearSweepDecompositionNotes.mock.calls[0][1]).toBe('lin-issue-1');
+    expect(linearSweepDecompositionNotes.mock.calls[0][2]).toBe('keep-1');
+  });
+
+  test('sweepNotes with nothing to keep passes no keep id', async () => {
+    linearSweepDecompositionNotes.mockResolvedValue(0);
+    expect(await ch.sweepNotes!(linearIssue)).toBe(0);
+    expect(linearSweepDecompositionNotes.mock.calls[0][2]).toBeUndefined();
   });
 
   test('fetchChildGraph maps blocks-derived depends_on to the neutral node shape', async () => {
@@ -142,11 +244,29 @@ describe('Jira channel adapter (capability-limited surface)', () => {
     );
   });
 
-  test('OMITS the optional capabilities Jira lacks (reactions / state / graph) — the engine no-ops them', () => {
+  test('OMITS every optional capability Jira lacks — the engine no-ops them', () => {
     // Check presence via the key, not the bound method, so the engine's
     // `if (channel.reactToComment)` capability guard is what's exercised.
-    expect('reactToComment' in ch).toBe(false);
-    expect('transitionState' in ch).toBe(false);
-    expect('fetchChildGraph' in ch).toBe(false);
+    for (const capability of [
+      'reactToComment',
+      'replaceCommentReaction',
+      'replaceIssueReaction',
+      'transitionState',
+      'revertState',
+      'postThreadedReply',
+      'upsertThreadedReply',
+      'sweepNotes',
+      'fetchChildGraph',
+    ]) {
+      expect(capability in ch).toBe(false);
+    }
+  });
+
+  test('still satisfies the required feedback contract every surface must support', () => {
+    // The point of the capability split: omitting the optional ops must not make
+    // Jira an incomplete Channel.
+    expect(typeof ch.postComment).toBe('function');
+    expect(typeof ch.upsertComment).toBe('function');
+    expect(typeof ch.reportFailure).toBe('function');
   });
 });

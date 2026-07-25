@@ -17,21 +17,10 @@
  *  SOFTWARE.
  */
 
-const postIssueCommentMock = jest.fn();
-const transitionIssueStateMock = jest.fn();
-const swapIssueReactionMock = jest.fn();
-const upsertStatusCommentMock = jest.fn();
-jest.mock('../../../src/handlers/shared/linear-feedback', () => ({
-  postIssueComment: (...args: unknown[]) => postIssueCommentMock(...args),
-  transitionIssueState: (...args: unknown[]) => transitionIssueStateMock(...args),
-  swapIssueReaction: (...args: unknown[]) => swapIssueReactionMock(...args),
-  upsertStatusComment: (...args: unknown[]) => upsertStatusCommentMock(...args),
-  EMOJI_SUCCESS: 'white_check_mark',
-  EMOJI_FAILURE: 'x',
-}));
 const loggerMock = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
 jest.mock('../../../src/handlers/shared/logger', () => ({ logger: loggerMock }));
 
+import type { IssueRef } from '../../../src/handlers/shared/orchestration-channel';
 import { ORCH_LOG } from '../../../src/handlers/shared/orchestration-log-events';
 import {
   renderRollupComment,
@@ -42,10 +31,34 @@ import {
   cascadeNodeLabel,
   rollupKindFromChildren,
   postRollup,
+  upsertEpicPanel,
   type RollupChildView,
   type EpicPanelRow,
 } from '../../../src/handlers/shared/orchestration-rollup';
 import type { OrchestrationChildRow } from '../../../src/handlers/shared/orchestration-store';
+
+/**
+ * A stand-in surface adapter. The rollup is exercised through the Channel it
+ * actually calls, so these tests assert the neutral operations (and the
+ * capability guards) rather than any one surface's API.
+ */
+type FakeChannel = ReturnType<typeof makeFakeChannel>;
+
+function makeFakeChannel() {
+  return {
+    kind: 'linear' as const,
+    postComment: jest.fn<Promise<{ commentId: string } | null>, unknown[]>()
+      .mockResolvedValue({ commentId: '' }),
+    upsertComment: jest.fn<Promise<{ commentId: string } | null>, unknown[]>()
+      .mockResolvedValue({ commentId: 'cmt-1' }),
+    reportFailure: jest.fn<Promise<void>, unknown[]>().mockResolvedValue(undefined),
+    transitionState: jest.fn<Promise<boolean>, unknown[]>().mockResolvedValue(true),
+    replaceIssueReaction: jest.fn<Promise<boolean>, unknown[]>().mockResolvedValue(true),
+  };
+}
+
+const parent: IssueRef = { issueId: 'PARENT', credentialsRef: 'WS' };
+let channel: FakeChannel;
 
 const view = (sub: string, status: string, ident?: string, title?: string, pr_url?: string): RollupChildView => ({
   sub_issue_id: sub,
@@ -203,84 +216,161 @@ const row = (sub: string, status: string): OrchestrationChildRow => ({
   updated_at: 'now',
 });
 
+describe('upsertEpicPanel — the maturing panel + parent-state mirror', () => {
+  beforeEach(() => {
+    channel = makeFakeChannel();
+    loggerMock.info.mockReset();
+    loggerMock.warn.mockReset();
+  });
+
+  test('edits the existing panel comment in place when given its id', async () => {
+    const id = await upsertEpicPanel({
+      channel, parent, statusCommentId: 'panel-1', children: [row('a', 'running')],
+    });
+    expect(id).toBe('cmt-1');
+    const [, , existing] = channel.upsertComment.mock.calls[0];
+    expect(existing).toEqual({ commentId: 'panel-1' });
+  });
+
+  test('a surface that returns no usable comment id reports no panel id', async () => {
+    // A blank id must not be persisted — the next edit would address a comment
+    // that doesn't exist. "No id" is the honest answer.
+    channel.upsertComment.mockResolvedValue({ commentId: '' });
+    expect(await upsertEpicPanel({ channel, parent, children: [row('a', 'running')] })).toBeNull();
+  });
+
+  test('in progress → re-opens the parent to running (regression allowed) + 👀', async () => {
+    // A settled epic sits in awaiting-review; re-opening moves backward WITHIN
+    // the same state category, which the adapter refuses unless asked. Without
+    // the opt-in the re-open is silently dropped and the epic reads finished
+    // while children are running.
+    await upsertEpicPanel({
+      channel, parent, children: [row('a', 'running')], inProgress: true, mirrorParentState: true,
+    });
+    expect(channel.transitionState).toHaveBeenCalledWith(parent, 'started', { allowRegression: true });
+    expect(channel.replaceIssueReaction).toHaveBeenCalledWith(parent, 'started');
+  });
+
+  test('all succeeded → advances to awaiting-review + ✅', async () => {
+    await upsertEpicPanel({
+      channel, parent, children: [row('a', 'succeeded')], inProgress: false, mirrorParentState: true,
+    });
+    expect(channel.transitionState).toHaveBeenCalledWith(parent, 'in_review');
+    expect(channel.replaceIssueReaction).toHaveBeenCalledWith(parent, 'succeeded');
+  });
+
+  test('finished with failures → leaves the state, marks ❌', async () => {
+    await upsertEpicPanel({
+      channel,
+      parent,
+      children: [row('a', 'succeeded'), row('b', 'failed')],
+      inProgress: false,
+      mirrorParentState: true,
+    });
+    expect(channel.transitionState).not.toHaveBeenCalled();
+    expect(channel.replaceIssueReaction).toHaveBeenCalledWith(parent, 'failed');
+  });
+
+  test('mirrorParentState: false edits the panel only — no state or reaction', async () => {
+    await upsertEpicPanel({
+      channel, parent, children: [row('a', 'succeeded')], inProgress: false, mirrorParentState: false,
+    });
+    expect(channel.upsertComment).toHaveBeenCalled();
+    expect(channel.transitionState).not.toHaveBeenCalled();
+    expect(channel.replaceIssueReaction).not.toHaveBeenCalled();
+  });
+
+  test('a surface without reactions or transitions still gets its panel', async () => {
+    const commentOnly = makeFakeChannel();
+    delete (commentOnly as Partial<FakeChannel>).transitionState;
+    delete (commentOnly as Partial<FakeChannel>).replaceIssueReaction;
+    const id = await upsertEpicPanel({
+      channel: commentOnly, parent, children: [row('a', 'succeeded')], mirrorParentState: true,
+    });
+    expect(id).toBe('cmt-1');
+  });
+
+  test('a panel-comment failure is swallowed and reported as no id', async () => {
+    channel.upsertComment.mockRejectedValue(new Error('surface hiccup'));
+    expect(await upsertEpicPanel({ channel, parent, children: [row('a', 'running')] })).toBeNull();
+    expect(loggerMock.warn).toHaveBeenCalled();
+  });
+
+  test('a mirror failure does not lose the panel id already obtained', async () => {
+    channel.transitionState.mockRejectedValue(new Error('states query timed out'));
+    const id = await upsertEpicPanel({
+      channel, parent, children: [row('a', 'succeeded')], inProgress: false, mirrorParentState: true,
+    });
+    expect(id).toBe('cmt-1');
+  });
+});
+
 describe('postRollup', () => {
   beforeEach(() => {
-    postIssueCommentMock.mockReset();
-    transitionIssueStateMock.mockReset().mockResolvedValue(true);
-    swapIssueReactionMock.mockReset().mockResolvedValue(true);
-    upsertStatusCommentMock.mockReset().mockResolvedValue('cmt-1');
+    channel = makeFakeChannel();
     loggerMock.info.mockReset();
     loggerMock.warn.mockReset();
   });
 
   test('success → posts comment + logs orch.rollup.posted', async () => {
-    postIssueCommentMock.mockResolvedValue({ ok: true });
     const ok = await postRollup({
-      ctx: { linearWorkspaceId: 'WS', registryTableName: 'REG' },
+      channel,
+      parent,
       orchestrationId: 'orch_1',
-      parentLinearIssueId: 'PARENT',
       kind: 'complete',
       children: [row('a', 'succeeded')],
     });
     expect(ok).toBe(true);
-    expect(postIssueCommentMock).toHaveBeenCalledTimes(1);
+    expect(channel.postComment).toHaveBeenCalledTimes(1);
     // The stable log event automated tests grep for.
     const posted = loggerMock.info.mock.calls.find((c) => c[1]?.event === ORCH_LOG.rollupPosted);
     expect(posted).toBeDefined();
-    expect(posted![1]).toMatchObject({ orchestration_id: 'orch_1', parent_linear_issue_id: 'PARENT', rollup_kind: 'complete' });
+    expect(posted![1]).toMatchObject({ orchestration_id: 'orch_1', parent_issue_id: 'PARENT', rollup_kind: 'complete' });
   });
 
-  test('complete → advances parent to In Review + ✅ reaction (mirrors children)', async () => {
-    postIssueCommentMock.mockResolvedValue({ ok: true });
+  test('complete → advances parent to awaiting-review + ✅ reaction (mirrors children)', async () => {
     await postRollup({
-      ctx: { linearWorkspaceId: 'WS', registryTableName: 'REG' },
+      channel,
+      parent,
       orchestrationId: 'orch_1',
-      parentLinearIssueId: 'PARENT',
       kind: 'complete',
       children: [row('a', 'succeeded')],
     });
-    expect(transitionIssueStateMock).toHaveBeenCalledWith(
-      { linearWorkspaceId: 'WS', registryTableName: 'REG' }, 'PARENT', 'started', ['In Review'],
-    );
-    expect(swapIssueReactionMock).toHaveBeenCalledWith(
-      { linearWorkspaceId: 'WS', registryTableName: 'REG' }, 'PARENT', 'white_check_mark',
-    );
+    expect(channel.transitionState).toHaveBeenCalledWith(parent, 'in_review');
+    expect(channel.replaceIssueReaction).toHaveBeenCalledWith(parent, 'succeeded');
   });
 
   test('partial_failure → does NOT advance state, swaps to ❌ reaction', async () => {
-    postIssueCommentMock.mockResolvedValue({ ok: true });
     await postRollup({
-      ctx: { linearWorkspaceId: 'WS', registryTableName: 'REG' },
+      channel,
+      parent,
       orchestrationId: 'orch_1',
-      parentLinearIssueId: 'PARENT',
       kind: 'partial_failure',
       children: [row('a', 'failed')],
     });
-    expect(transitionIssueStateMock).not.toHaveBeenCalled();
-    expect(swapIssueReactionMock).toHaveBeenCalledWith(
-      { linearWorkspaceId: 'WS', registryTableName: 'REG' }, 'PARENT', 'x',
-    );
+    expect(channel.transitionState).not.toHaveBeenCalled();
+    expect(channel.replaceIssueReaction).toHaveBeenCalledWith(parent, 'failed');
   });
 
   test('comment fails → does NOT transition state or react (state mirrors only on posted rollup)', async () => {
-    postIssueCommentMock.mockResolvedValue({ ok: false, retryable: false });
+    channel.postComment.mockResolvedValue(null);
     await postRollup({
-      ctx: { linearWorkspaceId: 'WS', registryTableName: 'REG' },
+      channel,
+      parent,
       orchestrationId: 'orch_1',
-      parentLinearIssueId: 'PARENT',
       kind: 'complete',
       children: [row('a', 'succeeded')],
     });
-    expect(transitionIssueStateMock).not.toHaveBeenCalled();
-    expect(swapIssueReactionMock).not.toHaveBeenCalled();
+    expect(channel.transitionState).not.toHaveBeenCalled();
+    expect(channel.replaceIssueReaction).not.toHaveBeenCalled();
   });
 
   test('post returns false → logs orch.rollup.failed, returns false', async () => {
-    postIssueCommentMock.mockResolvedValue({ ok: false, retryable: false });
+    channel.postComment.mockResolvedValue(null);
     const ok = await postRollup({
-      ctx: { linearWorkspaceId: 'WS', registryTableName: 'REG' },
+      channel,
+      parent,
       orchestrationId: 'orch_1',
-      parentLinearIssueId: 'PARENT',
       kind: 'partial_failure',
       children: [row('a', 'failed')],
     });
@@ -288,59 +378,43 @@ describe('postRollup', () => {
     expect(loggerMock.warn.mock.calls.some((c) => c[1]?.event === ORCH_LOG.rollupFailed)).toBe(true);
   });
 
-  test('non-linear channelSource → no Linear post/transition/reaction, returns false (#247 seam)', async () => {
+  test('a surface without reactions or transitions still posts the rollup', async () => {
+    // The capability guards must skip the mirror rather than throw, so a
+    // comment-only surface gets the rollup comment and nothing else.
+    const commentOnly = makeFakeChannel();
+    delete (commentOnly as Partial<FakeChannel>).transitionState;
+    delete (commentOnly as Partial<FakeChannel>).replaceIssueReaction;
     const ok = await postRollup({
-      ctx: { linearWorkspaceId: 'WS', registryTableName: 'REG' },
+      channel: commentOnly,
+      parent,
       orchestrationId: 'orch_1',
-      parentLinearIssueId: 'PARENT',
       kind: 'complete',
       children: [row('a', 'succeeded')],
-      channelSource: 'slack',
-    });
-    expect(ok).toBe(false);
-    expect(postIssueCommentMock).not.toHaveBeenCalled();
-    expect(transitionIssueStateMock).not.toHaveBeenCalled();
-    expect(swapIssueReactionMock).not.toHaveBeenCalled();
-  });
-
-  test('explicit linear channelSource behaves like the default', async () => {
-    postIssueCommentMock.mockResolvedValue({ ok: true });
-    const ok = await postRollup({
-      ctx: { linearWorkspaceId: 'WS', registryTableName: 'REG' },
-      orchestrationId: 'orch_1',
-      parentLinearIssueId: 'PARENT',
-      kind: 'complete',
-      children: [row('a', 'succeeded')],
-      channelSource: 'linear',
     });
     expect(ok).toBe(true);
-    expect(postIssueCommentMock).toHaveBeenCalledTimes(1);
+    expect(commentOnly.postComment).toHaveBeenCalledTimes(1);
   });
 
-  test('with statusCommentId → EDITS the live block in place (no fresh comment) (#3)', async () => {
-    upsertStatusCommentMock.mockResolvedValue('cmt-1');
+  test('with statusCommentId → EDITS the live block in place (no fresh comment)', async () => {
     const ok = await postRollup({
-      ctx: { linearWorkspaceId: 'WS', registryTableName: 'REG' },
+      channel,
+      parent,
       orchestrationId: 'orch_1',
-      parentLinearIssueId: 'PARENT',
       kind: 'complete',
       children: [row('a', 'succeeded')],
       statusCommentId: 'cmt-1',
     });
     expect(ok).toBe(true);
     // Edited the existing comment; did NOT post a fresh one.
-    expect(upsertStatusCommentMock).toHaveBeenCalledWith(
-      { linearWorkspaceId: 'WS', registryTableName: 'REG' }, 'PARENT', expect.any(String), 'cmt-1',
-    );
-    expect(postIssueCommentMock).not.toHaveBeenCalled();
+    expect(channel.upsertComment).toHaveBeenCalledWith(parent, expect.any(String), { commentId: 'cmt-1' });
+    expect(channel.postComment).not.toHaveBeenCalled();
   });
 
-  test('threads prUrls → rendered comment links child PRs + combined PR (#323)', async () => {
-    postIssueCommentMock.mockResolvedValue({ ok: true });
+  test('threads prUrls → rendered comment links child PRs + combined PR', async () => {
     await postRollup({
-      ctx: { linearWorkspaceId: 'WS', registryTableName: 'REG' },
+      channel,
+      parent,
       orchestrationId: 'orch_1',
-      parentLinearIssueId: 'PARENT',
       kind: 'complete',
       children: [row('a', 'succeeded'), row('orch_1__integration', 'succeeded')],
       prUrls: {
@@ -348,31 +422,30 @@ describe('postRollup', () => {
         orch_1__integration: 'https://github.com/o/r/pull/9',
       },
     });
-    const body = postIssueCommentMock.mock.calls[0][2] as string;
+    const body = channel.postComment.mock.calls[0][1] as string;
     expect(body).toContain('[PR](https://github.com/o/r/pull/3)');
     expect(body).toContain('🔗 **Combined PR (all sub-issues merged):**');
     expect(body).toContain('https://github.com/o/r/pull/9');
   });
 
-  test('without statusCommentId → posts a fresh comment (back-compat)', async () => {
-    postIssueCommentMock.mockResolvedValue({ ok: true });
+  test('without statusCommentId → posts a fresh comment', async () => {
     await postRollup({
-      ctx: { linearWorkspaceId: 'WS', registryTableName: 'REG' },
+      channel,
+      parent,
       orchestrationId: 'orch_1',
-      parentLinearIssueId: 'PARENT',
       kind: 'complete',
       children: [row('a', 'succeeded')],
     });
-    expect(postIssueCommentMock).toHaveBeenCalledTimes(1);
-    expect(upsertStatusCommentMock).not.toHaveBeenCalled();
+    expect(channel.postComment).toHaveBeenCalledTimes(1);
+    expect(channel.upsertComment).not.toHaveBeenCalled();
   });
 
   test('post throws → swallowed, logs orch.rollup.failed, returns false', async () => {
-    postIssueCommentMock.mockRejectedValue(new Error('linear down'));
+    channel.postComment.mockRejectedValue(new Error('surface down'));
     const ok = await postRollup({
-      ctx: { linearWorkspaceId: 'WS', registryTableName: 'REG' },
+      channel,
+      parent,
       orchestrationId: 'orch_1',
-      parentLinearIssueId: 'PARENT',
       kind: 'complete',
       children: [row('a', 'succeeded')],
     });

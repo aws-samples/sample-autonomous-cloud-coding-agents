@@ -35,10 +35,16 @@ import {
   EMOJI_STARTED,
   EMOJI_SUCCESS,
   postIssueComment,
+  reactToComment as addCommentReaction,
+  replyToComment,
   reportIssueFailure,
+  revertIssueToNotStarted,
   swapCommentReaction,
+  swapIssueReaction,
+  sweepDecompositionNotes,
   transitionIssueState,
   upsertStatusComment,
+  upsertThreadedReply as upsertLinearThreadedReply,
   type LinearFeedbackContext,
 } from './linear-feedback';
 import { resolveLinearOauthToken } from './linear-oauth-resolver';
@@ -61,10 +67,21 @@ const REACTION_EMOJI: Record<Reaction, string> = {
   needs_input: EMOJI_NEEDS_INPUT,
 };
 
-/** Map the engine's state intent to the Linear transition target type. */
-const STATE_TARGET: Record<StateIntent, 'started' | 'completed'> = {
-  started: 'started',
-  completed: 'completed',
+/**
+ * Map the engine's state intent onto how Linear is asked for that state: the
+ * semantic state TYPE plus the state NAMES to prefer within it.
+ *
+ * The name preference is load-bearing, not decoration. Linear models both "In
+ * Progress" and "In Review" as type ``started``, so type alone cannot say which
+ * one the engine meant — without the name the transition would resolve to
+ * whichever the team happens to order first and the two intents would collapse
+ * into the same move. Teams that lack the preferred name still resolve to a
+ * sensible state of the right type.
+ */
+const STATE_TARGET: Record<StateIntent, { type: 'started' | 'completed'; prefer: readonly string[] }> = {
+  started: { type: 'started', prefer: ['In Progress'] },
+  in_review: { type: 'started', prefer: ['In Review'] },
+  completed: { type: 'completed', prefer: [] },
 };
 
 /**
@@ -99,11 +116,52 @@ export function makeLinearChannel(registryTableName: string): Channel {
     },
 
     async reactToComment(comment, issue, reaction) {
-      await swapCommentReaction(ctxFor(issue), comment.commentId, REACTION_EMOJI[reaction]);
+      // ADD-only (no delete of prior markers) — the instant receipt ack.
+      return addCommentReaction(ctxFor(issue), comment.commentId, REACTION_EMOJI[reaction]);
     },
 
-    async transitionState(issue, intent) {
-      await transitionIssueState(ctxFor(issue), issue.issueId, STATE_TARGET[intent]);
+    async replaceCommentReaction(comment, issue, reaction) {
+      return swapCommentReaction(ctxFor(issue), comment.commentId, REACTION_EMOJI[reaction]);
+    },
+
+    async replaceIssueReaction(issue, reaction) {
+      return swapIssueReaction(ctxFor(issue), issue.issueId, REACTION_EMOJI[reaction]);
+    },
+
+    async transitionState(issue, intent, options) {
+      const target = STATE_TARGET[intent];
+      return transitionIssueState(
+        ctxFor(issue),
+        issue.issueId,
+        target.type,
+        target.prefer,
+        options?.allowRegression ?? false,
+      );
+    },
+
+    async revertState(issue) {
+      return revertIssueToNotStarted(ctxFor(issue), issue.issueId);
+    },
+
+    async postThreadedReply(issue, parent, body) {
+      const id = await replyToComment(ctxFor(issue), issue.issueId, parent.commentId, body);
+      return id ? { commentId: id } : null;
+    },
+
+    async upsertThreadedReply(issue, parent, body, existing, options) {
+      const id = await upsertLinearThreadedReply(
+        ctxFor(issue),
+        issue.issueId,
+        parent.commentId,
+        body,
+        existing?.commentId,
+        { preservePreview: options?.preservePreview ?? false },
+      );
+      return id ? { commentId: id } : null;
+    },
+
+    async sweepNotes(issue, keep) {
+      return sweepDecompositionNotes(ctxFor(issue), issue.issueId, keep?.commentId);
     },
 
     async fetchChildGraph(parent): Promise<readonly ChannelSubIssueNode[]> {

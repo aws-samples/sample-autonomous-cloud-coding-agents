@@ -118,6 +118,8 @@ function taskRecord(fields: {
   trigger_comment_issue_id?: string;
   // #247 UX.5: raw agent error_message (drives the failure-reply detail).
   error_message?: string;
+  // Whether the agent actually edited code; false marks a question/answer run.
+  code_changed?: boolean;
   // DE-F6: stream sequence number (itemIdentifier for partial-batch reporting).
   sequenceNumber?: string;
 }): DynamoDBRecord {
@@ -125,6 +127,7 @@ function taskRecord(fields: {
   if (fields.task_id) img.task_id = { S: fields.task_id };
   if (fields.status) img.status = { S: fields.status };
   if (fields.build_passed !== undefined) img.build_passed = { BOOL: fields.build_passed };
+  if (fields.code_changed !== undefined) img.code_changed = { BOOL: fields.code_changed };
   if (fields.error_message) img.error_message = { S: fields.error_message };
   // PRODUCTION SHAPE: createTaskCore persists orchestration_id INSIDE the
   // nested channel_metadata MAP, not as a top-level attribute. The stream
@@ -1214,7 +1217,36 @@ describe('orchestration-reconciler handler — A6 iteration ack reply (#247 UX.3
     // #247 UX.21: the trigger comment's 👀 swaps to ✅, and the sub-issue
     // advances to In Review (platform-owned settle, not agent-flapped).
     expect(swapCommentReactionMock).toHaveBeenCalledWith(expect.anything(), 'human-cmt-1', 'white_check_mark');
-    expect(transitionIssueStateMock).toHaveBeenCalledWith(expect.anything(), 'A', 'started', ['In Review']);
+    // The channel passes the same-category-regression flag explicitly; a plain
+    // advance never allows one.
+    expect(transitionIssueStateMock).toHaveBeenCalledWith(expect.anything(), 'A', 'started', ['In Review'], false);
+  });
+
+  test('a no-change iteration (a question) settles 💬 and leaves the sub-issue state alone', async () => {
+    // An answer is neither a success-edit nor a failure. ✅ would imply "PR
+    // updated, merge-worthy" and advancing the sub-issue would claim work landed
+    // — nothing changed, so the comment gets ❓ and the state is untouched.
+    mockCascade([
+      { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A', linear_identifier: 'ENG-1' },
+    ]);
+    await handler({
+      Records: [taskRecord({
+        task_id: 'iter-task-1',
+        status: 'COMPLETED',
+        orchestration_id: 'orch_1',
+        orchestration_sub_issue_id: 'A',
+        orchestration_iteration: true,
+        trigger_comment_id: 'human-cmt-1',
+        code_changed: false, // the agent answered without editing anything
+      })],
+    } as never);
+
+    expect(swapCommentReactionMock).toHaveBeenCalledWith(expect.anything(), 'human-cmt-1', 'question');
+    // The SUB-ISSUE is not advanced. (The parent epic still settles on its own,
+    // since every child is terminal — that's the panel mirror, not this answer.)
+    expect(transitionIssueStateMock).not.toHaveBeenCalledWith(
+      expect.anything(), 'A', expect.anything(), expect.anything(), expect.anything(),
+    );
   });
 
   test('#247 UX.19: a PARENT-routed iteration replies on the PARENT issue, not the sub-issue', async () => {

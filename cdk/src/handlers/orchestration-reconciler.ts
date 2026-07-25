@@ -52,11 +52,12 @@ import { createTaskCore } from './shared/create-task-core';
 import { renderFailureReply, renderPanelFailureReason } from './shared/failure-reply';
 import { isNoChangeIteration, renderMaturingReply } from './shared/iteration-reply';
 import { downloadScreenAndStoreLinearAttachments, isLinearUploadsUrl, LinearAttachmentError } from './shared/linear-attachments';
-import { EMOJI_FAILURE, EMOJI_NEEDS_INPUT, EMOJI_SUCCESS, type LinearFeedbackContext, revertIssueToNotStarted, sweepDecompositionNotes, swapCommentReaction, swapIssueReaction, transitionIssueState, upsertStatusComment, upsertThreadedReply } from './shared/linear-feedback';
 import { probeLinearIssueContext } from './shared/linear-issue-context-probe';
 import { resolveLinearOauthToken } from './shared/linear-oauth-resolver';
 import type { SubIssueNode } from './shared/linear-subissue-fetch';
 import { logger } from './shared/logger';
+import type { IssueRef } from './shared/orchestration-channel';
+import { makeLinearChannel } from './shared/orchestration-channel-linear';
 import { applyDecompositionResult } from './shared/orchestration-decomposition-flow';
 import { parseDecomposerResponse } from './shared/orchestration-decomposition-planner';
 import { renderApprovedPlanReference, renderDecomposeUnavailableNote, renderRevisionToSingleNote } from './shared/orchestration-decomposition-render';
@@ -88,7 +89,6 @@ import {
   type OrchestrationReleaseContext,
 } from './shared/orchestration-store';
 import { encodeMarkdownUrl } from './shared/screenshot-url';
-import type { ChannelSource } from './shared/types';
 import { OrchestrationTable } from '../constructs/orchestration-table';
 import { TaskStatus, type TaskStatusType } from '../constructs/task-status';
 import { TaskTable } from '../constructs/task-table';
@@ -99,6 +99,22 @@ const TASK_TABLE = process.env.TASK_TABLE_NAME!;
 // A5: registry table for the parent rollup comment's per-workspace OAuth
 // token. Unset → rollup is skipped (gating still works).
 const WORKSPACE_REGISTRY_TABLE = process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME;
+
+/**
+ * The surface adapter all issue feedback goes through. The reconciler drives
+ * panels, reactions, states and replies without naming a surface; only this one
+ * line picks which surface answers. Orchestrations are seeded from Linear today,
+ * so that's the adapter built here — another surface swaps this for its own
+ * adapter (or a lookup keyed on the orchestration's channel) and the reconcile
+ * logic below is untouched.
+ */
+const channelFor = (registryTable: string) => makeLinearChannel(registryTable);
+
+/** Build the neutral issue reference the channel operates on. */
+const issueRef = (issueId: string, workspaceId: string): IssueRef => ({
+  issueId,
+  credentialsRef: workspaceId,
+});
 // createTaskCore rejects idempotency keys longer than this; synthesized keys
 // slice to fit the validated /^[A-Za-z0-9_-]{1,128}$/ pattern.
 const MAX_IDEMPOTENCY_KEY_LENGTH = 128;
@@ -609,43 +625,41 @@ async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
     }
   }
 
-  // 1b. ABCA-659 — reconcile a FAILED child's OWN Linear state. The agent moves
-  //     a writeable child to "In Review" only on AGENT success; but the platform
-  //     build gate is independent — a child can finish COMPLETED-with-build_passed
-  //     =false (PR opened, build red), and a child that succeeded on an EARLIER
-  //     run (→ "In Review") then fails a RETRY leaves the "In Review" behind (the
-  //     agent's failure path leaves state as-is; transitions never move backward).
-  //     Either way the graph says `failed` while Linear still reads "In Review"
-  //     with a PR link — the exact inconsistency the user hit. The reconciler
-  //     holds the authoritative verdict, so when a terminal child did NOT succeed
-  //     we pull its issue back out of any bot-set "In Review"/"In Progress" state.
-  //     `revertIssueToNotStarted` is tightly guarded (only demotes an issue still
-  //     in a bot-set `started` state — never a human-advanced Done/Canceled or a
-  //     human-pulled-back one) and idempotent on replay. The ❌ reaction + K1
+  // 1b. Reconcile a FAILED child's OWN issue state on the surface. The agent
+  //     moves a writeable child to awaiting-review only on AGENT success; but the
+  //     platform build gate is independent — a child can finish COMPLETED with
+  //     build_passed=false (PR opened, build red), and a child that succeeded on
+  //     an EARLIER run (→ awaiting-review) then fails a RETRY leaves that state
+  //     behind (the agent's failure path leaves state as-is; transitions never
+  //     move backward). Either way the graph says `failed` while the issue still
+  //     reads awaiting-review with a PR link — a visible contradiction. The
+  //     reconciler holds the authoritative verdict, so when a terminal child did
+  //     NOT succeed we pull its issue back out of any bot-set running state.
+  //     `revertState` is tightly guarded per surface (only demotes an issue still
+  //     in a bot-set running state — never a human-advanced done/canceled or a
+  //     human-pulled-back one) and idempotent on replay. The ❌ reaction + the
   //     failure reason on the panel convey "it failed"; a reply re-runs it (the
-  //     retry re-drives the state Backlog → In Progress). Skip the integration
-  //     node (synthetic id, no real Linear issue). Best-effort; never throws.
+  //     retry re-drives the state not-started → running). Skip the integration
+  //     node (synthetic id, no real issue). Best-effort; never throws.
   if (WORKSPACE_REGISTRY_TABLE && !plan.terminalSucceeded && !isIntegrationNode(subIssueId)) {
-    const feedbackCtx: LinearFeedbackContext = {
-      linearWorkspaceId: snapshot.meta.linear_workspace_id,
-      registryTableName: WORKSPACE_REGISTRY_TABLE,
-    };
+    const channel = channelFor(WORKSPACE_REGISTRY_TABLE);
+    const childRef = issueRef(subIssueId, snapshot.meta.linear_workspace_id);
     try {
-      const reverted = await revertIssueToNotStarted(feedbackCtx, subIssueId);
+      const reverted = (await channel.revertState?.(childRef)) ?? false;
       // Also settle the child's ISSUE reaction to ❌. The agent reacts ✅ on its
       // OWN verdict (agent-success + regression-only build gate — a build that was
       // already red before the agent isn't counted as the agent's regression, so
       // it posts ✅ and "Task completed"). The orchestration gate is stricter
       // (build_passed===false ⇒ failed, absolute), so a child can legitimately end
       // agent-✅ but graph-failed — leaving a ✅ reaction that contradicts the
-      // failed node (live-caught on ABCA-659: PR opened, agent ✅, build red).
-      // swapIssueReaction deletes only the bot's own status emojis (✅/👀/❓) and
-      // adds ❌ — a human's reaction is never touched, and it's idempotent on
-      // replay. This makes the reaction agree with the reverted state + the panel's
-      // ❌ row. (The stale "✅ Task completed" fanout COMMENT is left as history —
-      // Linear can't edit another actor's comment; the reaction + state + panel are
-      // the authoritative signals, and a reply re-runs the child.)
-      const reactionSwapped = await swapIssueReaction(feedbackCtx, subIssueId, EMOJI_FAILURE);
+      // failed node (live-caught: PR opened, agent ✅, build red).
+      // Replacing the reaction clears only the bot's own status markers and adds
+      // ❌ — a human's reaction is never touched, and it's idempotent on replay.
+      // This makes the reaction agree with the reverted state + the panel's ❌
+      // row. (The stale "✅ Task completed" comment is left as history — the
+      // surface won't let us edit another actor's comment; the reaction + state +
+      // panel are the authoritative signals, and a reply re-runs the child.)
+      const reactionSwapped = (await channel.replaceIssueReaction?.(childRef, 'failed')) ?? false;
       if (reverted || reactionSwapped) {
         logger.info('Reconciler settled a failed child to match the graph (state + reaction)', {
           orchestration_id: orchestrationId,
@@ -762,7 +776,7 @@ async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
 export async function refreshPanelAndSettle(
   orchestrationId: string,
   children: readonly OrchestrationChildRow[],
-  meta: { linear_workspace_id: string; parent_linear_issue_id: string; status_comment_id?: string; release_context: { channel_source?: string } },
+  meta: { linear_workspace_id: string; parent_linear_issue_id: string; status_comment_id?: string },
   now: string,
 ): Promise<void> {
   if (!WORKSPACE_REGISTRY_TABLE) return;
@@ -807,8 +821,8 @@ export async function refreshPanelAndSettle(
   const won = !allTerminal || await claimRollup(ddb, ORCHESTRATION_TABLE, orchestrationId, now);
 
   const newId = await upsertEpicPanel({
-    ctx: { linearWorkspaceId: meta.linear_workspace_id, registryTableName: WORKSPACE_REGISTRY_TABLE },
-    parentLinearIssueId: meta.parent_linear_issue_id,
+    channel: channelFor(WORKSPACE_REGISTRY_TABLE),
+    parent: issueRef(meta.parent_linear_issue_id, meta.linear_workspace_id),
     ...(meta.status_comment_id !== undefined && { statusCommentId: meta.status_comment_id }),
     children,
     prUrls,
@@ -818,9 +832,6 @@ export async function refreshPanelAndSettle(
     ...(combinedScreenshot?.previewUrl !== undefined && { combinedPreviewUrl: combinedScreenshot.previewUrl }),
     inProgress: !allTerminal,
     mirrorParentState: allTerminal ? won : false,
-    ...(meta.release_context.channel_source !== undefined && {
-      channelSource: meta.release_context.channel_source as ChannelSource,
-    }),
   });
   // Persist a freshly-created panel comment id so later edits reuse it.
   if (newId && !meta.status_comment_id) {
@@ -920,9 +931,7 @@ async function cascadeRestack(evt: TerminalTaskEvent): Promise<void> {
   // reason "…'s change"; live-caught under the UX.6 stress test).
   const changedLabel = cascadeNodeLabel(changedSubIssueId, changedRow?.linear_identifier, changedRow?.title);
 
-  const feedbackCtx = WORKSPACE_REGISTRY_TABLE
-    ? { linearWorkspaceId: meta.linear_workspace_id, registryTableName: WORKSPACE_REGISTRY_TABLE }
-    : undefined;
+  const cascadeChannel = WORKSPACE_REGISTRY_TABLE ? channelFor(WORKSPACE_REGISTRY_TABLE) : undefined;
 
   const updatingIds: string[] = [];
   for (const step of steps) {
@@ -941,11 +950,11 @@ async function cascadeRestack(evt: TerminalTaskEvent): Promise<void> {
   // 'updating' rows settle back to ✅ when their restack tasks complete — those
   // completions route to cascadeRestack (NOT reconcileTerminalChild) and clear
   // the row via refreshPanelAndSettle (the no-dependents path), per UX.15.
-  if (feedbackCtx && updatingIds.length > 0) {
+  if (cascadeChannel && updatingIds.length > 0) {
     // A cascade re-opened an epic that may have ALREADY completed (a comment on
     // a finished epic). Release the once-only rollup claim so the parent state
-    // can re-settle (👀→✅) when the re-stacks finish — else claimRollup stays
-    // failed forever and the reaction never re-mirrors (#247 UX.15 stress-caught).
+    // can re-settle (👀→✅) when the re-stacks finish — else the claim stays
+    // taken forever and the parent reaction never re-mirrors.
     await clearRollupClaim(ddb, ORCHESTRATION_TABLE, orchestrationId, now);
     const reason = evt.cascadeIsIteration
       ? `per ${changedLabel}'s comment`
@@ -963,8 +972,8 @@ async function cascadeRestack(evt: TerminalTaskEvent): Promise<void> {
     const prUrls = await resolveChildPrUrls(panelChildren);
     const integration = panelChildren.find((c) => isIntegrationNode(c.sub_issue_id));
     await upsertEpicPanel({
-      ctx: feedbackCtx,
-      parentLinearIssueId: meta.parent_linear_issue_id,
+      channel: cascadeChannel,
+      parent: issueRef(meta.parent_linear_issue_id, meta.linear_workspace_id),
       ...(meta.status_comment_id !== undefined && { statusCommentId: meta.status_comment_id }),
       children: panelChildren,
       prUrls,
@@ -972,8 +981,6 @@ async function cascadeRestack(evt: TerminalTaskEvent): Promise<void> {
       ...(integration && prUrls[integration.sub_issue_id] !== undefined
         && { combinedPrUrl: prUrls[integration.sub_issue_id] }),
       inProgress: true, // a cascade re-opened the epic
-      ...(meta.release_context.channel_source !== undefined
-        && { channelSource: meta.release_context.channel_source as ChannelSource }),
     });
   }
 }
@@ -1118,10 +1125,8 @@ async function replyToIterationComment(
   // meta (already cached-cheap) for the workspace id.
   const snapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, evt.orchestrationId!);
   if (!snapshot) return;
-  const ctx = {
-    linearWorkspaceId: snapshot.meta.linear_workspace_id,
-    registryTableName: WORKSPACE_REGISTRY_TABLE,
-  };
+  const channel = channelFor(WORKSPACE_REGISTRY_TABLE);
+  const workspaceId = snapshot.meta.linear_workspace_id;
 
   // Claim the one reply for this iteration task.
   let won = false;
@@ -1175,39 +1180,46 @@ async function replyToIterationComment(
       ...(evt.errorMessage !== undefined && { errorMessage: evt.errorMessage }),
       taskId: evt.taskId,
     });
-  // The reply's issueId MUST be the issue the trigger comment lives on —
-  // Linear rejects a threaded reply whose parentId belongs to a different
-  // issue. For a comment left on the PARENT epic (UX.18 routing) that's the
-  // parent issue, NOT changedSubIssueId. Fall back to the sub-issue id for
-  // tasks created before UX.19 (no triggerCommentIssueId persisted).
+  // The reply must be addressed to the issue the trigger comment lives on — a
+  // surface can reject a threaded reply whose parent comment belongs to a
+  // different issue. For a comment left on the PARENT epic that's the parent
+  // issue, NOT changedSubIssueId. Fall back to the sub-issue id for tasks
+  // created before the trigger issue was persisted.
   const replyIssueId = evt.triggerCommentIssueId ?? changedSubIssueId;
-  // iteration-UX: EDIT the maturing reply posted at trigger time; fall back to a
-  // fresh threaded reply for pre-fix tasks that captured no reply id.
+  // EDIT the maturing reply posted at trigger time; fall back to a fresh
+  // threaded reply for older tasks that captured no reply id.
   // preservePreview: converge with the screenshot webhook's async `[preview]`
-  // append so this terminal re-render doesn't clobber it (ABCA-434 race).
-  await upsertThreadedReply(ctx, replyIssueId, commentId, body, evt.iterationReplyId, { preservePreview: true });
+  // append so this terminal re-render doesn't clobber it.
+  await channel.upsertThreadedReply?.(
+    issueRef(replyIssueId, workspaceId),
+    { commentId },
+    body,
+    evt.iterationReplyId ? { commentId: evt.iterationReplyId } : undefined,
+    { preservePreview: true },
+  );
 
-  // #247 UX.21: settle the comment + sub-issue so all three views agree (panel
-  // row, sub-issue state, comment reaction) — the platform owns this, not the
-  // agent (whose prompt-driven state-setting flapped In Progress/In Review).
-  //   - swap the TRIGGER comment's 👀 → ✅ (success) / ❌ (failure), so the
+  // Settle the comment + sub-issue so all three views agree (panel row,
+  // sub-issue state, comment reaction) — the platform owns this, not the agent
+  // (whose prompt-driven state-setting flapped between running and in-review).
+  //   - replace the TRIGGER comment's 👀 with ✅ (success) / ❌ (failure), so the
   //     comment itself reads done at a glance, not just the threaded reply.
-  //   - on success, advance the SUB-ISSUE to In Review (its PR is updated &
-  //     open, awaiting human merge — same convention the epic uses). On
+  //   - on success, advance the SUB-ISSUE to awaiting-review (its PR is updated
+  //     & open, awaiting human merge — same convention the epic uses). On
   //     failure, leave the state (the ❌ + reply convey it). Never demote.
   // Best-effort + idempotent (the ack_replied_at claim above already gates this
-  // to once per iteration; swapCommentReaction/transition re-converge anyway).
-  // A6/#299: a no-change iteration (a question) is neither a success-edit nor a
-  // failure — it's an answer. Don't stamp ✅ (implies "PR updated, merge-worthy")
-  // and don't advance the sub-issue to In Review (nothing changed). Use 💬 and
-  // leave the state untouched. A real edit keeps the ✅ + In Review convention.
+  // to once per iteration; the reaction replace + transition re-converge anyway).
+  // A no-change iteration (a question) is neither a success-edit nor a failure —
+  // it's an answer. Don't stamp ✅ (implies "PR updated, merge-worthy") and don't
+  // advance the sub-issue (nothing changed). Use 💬 and leave the state
+  // untouched. A real edit keeps the ✅ + awaiting-review convention.
   const noChange = succeeded && isNoChangeIteration(evt.codeChanged);
-  await swapCommentReaction(
-    ctx, commentId,
-    noChange ? EMOJI_NEEDS_INPUT : (succeeded ? EMOJI_SUCCESS : EMOJI_FAILURE),
+  await channel.replaceCommentReaction?.(
+    { commentId },
+    issueRef(replyIssueId, workspaceId),
+    noChange ? 'needs_input' : (succeeded ? 'succeeded' : 'failed'),
   );
   if (succeeded && !noChange) {
-    await transitionIssueState(ctx, changedSubIssueId, 'started', ['In Review']);
+    await channel.transitionState?.(issueRef(changedSubIssueId, workspaceId), 'in_review');
   }
 }
 
@@ -1555,13 +1567,18 @@ async function reconcileDecomposePlan(evt: DecomposePlanEvent): Promise<void> {
     return;
   }
 
-  const feedbackCtx: LinearFeedbackContext = {
-    linearWorkspaceId: evt.workspaceId, registryTableName: registryTable,
+  const channel = channelFor(registryTable);
+  // Forward an optional existingCommentId so the flow can EDIT the plan comment
+  // in place on a revision (vs. posting a fresh one).
+  const postComment = async (issueId: string, body: string, existingCommentId?: string): Promise<string | null> => {
+    const ref = await channel.upsertComment(
+      issueRef(issueId, evt.workspaceId), body,
+      existingCommentId ? { commentId: existingCommentId } : undefined,
+    );
+    // Report no id when the surface can't hand one back — a blank id would be
+    // persisted and later addressed as if it were a real comment.
+    return ref?.commentId || null;
   };
-  // #299 F-revise-in-place: forward an optional existingCommentId so the flow can
-  // EDIT the plan comment in place on a revision (vs. posting a fresh one).
-  const postComment = async (issueId: string, body: string, existingCommentId?: string): Promise<string | null> =>
-    upsertStatusComment(feedbackCtx, issueId, body, existingCommentId);
 
   // Planning RUN did not complete (session failed to start — e.g. a compute
   // substrate error — cancelled, etc.). Post the honest "couldn't plan, nothing
@@ -1673,17 +1690,21 @@ async function reconcileDecomposePlan(evt: DecomposePlanEvent): Promise<void> {
     },
   });
 
-  // #299 F-revise-in-place: the revised plan has now matured (edited in place, or a
-  // collapse/over-cap note posted), so settle the reviewer's FEEDBACK comment
-  // 👀 → ✅ — that's how they can tell the re-plan finished (the 👀 the webhook put
-  // on it at dispatch previously never settled → read as stuck). The ONE plan
-  // comment updated in place; their feedback comment now shows ✅. Best-effort —
-  // never throws out of the reconcile. Only on a revision that carried the id.
+  // The revised plan has now matured (edited in place, or a collapse/over-cap
+  // note posted), so settle the reviewer's FEEDBACK comment 👀 → ✅ — that's how
+  // they can tell the re-plan finished (the 👀 put on it at dispatch previously
+  // never settled → read as stuck). The ONE plan comment updated in place; their
+  // feedback comment now shows ✅. Best-effort — never throws out of the
+  // reconcile. Only on a revision that carried the id.
   if (evt.revisingFeedbackCommentId) {
     try {
-      await swapCommentReaction(feedbackCtx, evt.revisingFeedbackCommentId, EMOJI_SUCCESS);
+      await channel.replaceCommentReaction?.(
+        { commentId: evt.revisingFeedbackCommentId },
+        issueRef(evt.parentIssueId, evt.workspaceId),
+        'succeeded',
+      );
     } catch (err) {
-      logger.warn('F-revise-in-place: failed to settle feedback comment 👀→✅ (non-fatal)', {
+      logger.warn('Failed to settle plan-feedback comment 👀→✅ (non-fatal)', {
         parent_issue_id: evt.parentIssueId, error: err instanceof Error ? err.message : String(err),
       });
     }
@@ -1782,28 +1803,27 @@ async function reconcileDecomposePlan(evt: DecomposePlanEvent): Promise<void> {
   // (redelivery) → nothing more; a comment was already posted.
   logger.info('Decompose plan reconciled', { parent_issue_id: evt.parentIssueId, result: result.kind, reason: result.reason });
 
-  // #299 F-decompose-inprogress: the :decompose plan is now POSTED and AWAITING the
-  // reviewer's approve — nothing is running. The issue was moved to In Progress so
-  // the board showed the ~1-2 min planning was happening (round 0: the webhook's
-  // dispatch flip; a revise that ESCALATES to this reconciler: the webhook's
-  // handlePlanRevision escalation flip — the PM-stress visibility fix); now that
-  // it's just a pending plan, In Progress would mislead ("looks like work started
-  // while it's awaiting your go"). Revert it to a not-started state (Todo/Backlog)
-  // whenever the plan is HANDLED (awaiting approval / single-task proposal /
-  // over-cap) — NOT 'seed' (:auto → real work is starting, stay In Progress).
+  // The plan is now POSTED and AWAITING the reviewer's approve — nothing is
+  // running. The issue was moved to a running state so the board showed the
+  // ~1-2 min planning was happening (round 0: the webhook's dispatch flip; a
+  // revise that ESCALATES to this reconciler: the webhook's escalation flip);
+  // now that it's just a pending plan, a running state would mislead ("looks
+  // like work started while it's awaiting your go"). Revert it to a not-started
+  // state whenever the plan is HANDLED (awaiting approval / single-task proposal
+  // / over-cap) — NOT 'seed' (auto-apply → real work is starting, stay running).
   //
   // This fires for BOTH round-0 AND escalated-revise rounds: only the ESCALATED
   // revise reaches this reconciler (the deterministic interpret→apply revise settles
   // inline in the webhook with no agent task, so it never flips state and never
-  // arrives here), and that path DID flip to In Progress, so it needs the symmetric
+  // arrives here), and that path DID flip to running, so it needs the symmetric
   // revert. No board flicker — one flip up at dispatch, one flip down here.
-  // approve → the seed path moves it back to In Progress. Guarded + best-effort
-  // inside revertIssueToNotStarted (only demotes an issue still in OUR In Progress).
+  // approve → the seed path moves it back to running. The revert is guarded +
+  // best-effort per-surface (only demotes an issue still in the state we set).
   if (result.kind === 'handled') {
     try {
-      await revertIssueToNotStarted(feedbackCtx, evt.parentIssueId);
+      await channel.revertState?.(issueRef(evt.parentIssueId, evt.workspaceId));
     } catch (err) {
-      logger.warn('F-decompose-inprogress: failed to revert issue to not-started (non-fatal)', {
+      logger.warn('Failed to revert issue to not-started after a pending plan (non-fatal)', {
         parent_issue_id: evt.parentIssueId, error: err instanceof Error ? err.message : String(err),
       });
     }
@@ -1907,9 +1927,8 @@ async function seedDecomposedGraph(
           parent_issue_id: evt.parentIssueId, error: err.message,
         });
         if (WORKSPACE_REGISTRY_TABLE) {
-          await upsertStatusComment(
-            { linearWorkspaceId: evt.workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE },
-            evt.parentIssueId,
+          await channelFor(WORKSPACE_REGISTRY_TABLE).upsertComment(
+            issueRef(evt.parentIssueId, evt.workspaceId),
             `❌ ABCA couldn't safely process an attachment on this issue: ${err.message} ` +
             'Fix or remove the attachment and re-apply the trigger label to decompose it.',
           );
@@ -1954,12 +1973,14 @@ async function seedDecomposedGraph(
     );
   }
   if (WORKSPACE_REGISTRY_TABLE) {
+    const channel = channelFor(WORKSPACE_REGISTRY_TABLE);
+    const parent = issueRef(evt.parentIssueId, evt.workspaceId);
     try {
       const fresh = await loadOrchestration(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId);
       if (fresh) {
         const commentId = await upsertEpicPanel({
-          ctx: { linearWorkspaceId: evt.workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE },
-          parentLinearIssueId: evt.parentIssueId,
+          channel,
+          parent,
           children: fresh.children,
           inProgress: true,
           mirrorParentState: true,
@@ -1971,24 +1992,26 @@ async function seedDecomposedGraph(
         parent_issue_id: evt.parentIssueId, error: err instanceof Error ? err.message : String(err),
       });
     }
-    // #299 plan-cleanup: freeze the :auto proposal comment into a static "Approved
-    // plan" reference + sweep the started ack, so the thread converges on the SAME
+    // Freeze the auto-applied proposal comment into a static "Approved plan"
+    // reference + sweep the started ack, so the thread converges on the SAME
     // shape as the approve path (frozen reference + live panel). Best-effort;
     // cleanup failure is cosmetic. Only when we have the proposal id to freeze.
     if (cleanup) {
-      const ctx = { linearWorkspaceId: evt.workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE };
       try {
         if (cleanup.proposalCommentId) {
-          await upsertStatusComment(
-            ctx, evt.parentIssueId,
+          await channel.upsertComment(
+            parent,
             renderApprovedPlanReference(
               { shouldDecompose: true, reasoning: '', nodes: cleanup.planNodes },
               evt.revisionRound !== undefined ? { revisionRound: evt.revisionRound } : {},
             ),
-            cleanup.proposalCommentId,
+            { commentId: cleanup.proposalCommentId },
           );
         }
-        await sweepDecompositionNotes(ctx, evt.parentIssueId, cleanup.proposalCommentId);
+        await channel.sweepNotes?.(
+          parent,
+          cleanup.proposalCommentId ? { commentId: cleanup.proposalCommentId } : undefined,
+        );
       } catch (err) {
         logger.warn('Decompose :auto seed: plan-thread cleanup failed (non-fatal)', {
           parent_issue_id: evt.parentIssueId, error: err instanceof Error ? err.message : String(err),

@@ -77,7 +77,14 @@ export function makeJiraChannel(registryTableName: string): Channel {
       await reportIssueFailure(ctxFor(issue), issue.issueId, message);
     },
 
-    // reactToComment, transitionState, fetchChildGraph intentionally omitted —
-    // Jira's feedback surface is comment-only today. The engine no-ops these.
+    // Every optional capability is intentionally omitted — Jira's wired feedback
+    // surface is comment-only today: no reaction API (reactToComment,
+    // replaceCommentReaction, replaceIssueReaction), no workflow transition
+    // (transitionState, revertState), no threaded-reply helper
+    // (postThreadedReply, upsertThreadedReply), no note sweep (sweepNotes), and
+    // the sub-issue DAG isn't derived from Jira (fetchChildGraph). The engine
+    // checks for each method and skips it, so the same orchestration core drives
+    // Jira without Jira-specific branching. Implementing one here is additive:
+    // no engine change is needed to pick it up.
   };
 }

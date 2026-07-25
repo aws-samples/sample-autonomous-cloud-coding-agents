@@ -28,21 +28,12 @@
  * never fail the reconcile — gating is the source of truth).
  */
 
-import {
-  EMOJI_FAILURE,
-  EMOJI_SUCCESS,
-  type LinearFeedbackContext,
-  postIssueComment,
-  swapIssueReaction,
-  transitionIssueState,
-  upsertStatusComment,
-} from './linear-feedback';
 import { logger } from './logger';
+import type { Channel, IssueRef } from './orchestration-channel';
 import { isIntegrationNode } from './orchestration-integration-node';
 import { ORCH_LOG } from './orchestration-log-events';
 import type { OrchestrationChildRow } from './orchestration-store';
 import { encodeMarkdownUrl } from './screenshot-url';
-import type { ChannelSource } from './types';
 
 /** Which rollup we're posting — drives the heading + emoji. */
 export type RollupKind = 'complete' | 'partial_failure' | 'cancelled';
@@ -385,8 +376,10 @@ export function buildPanelRows(
 }
 
 export interface UpsertEpicPanelParams {
-  readonly ctx: LinearFeedbackContext;
-  readonly parentLinearIssueId: string;
+  /** The surface adapter to drive. Optional capabilities it omits are skipped. */
+  readonly channel: Channel;
+  /** The parent epic, on whichever surface triggered the orchestration. */
+  readonly parent: IssueRef;
   /** Existing panel comment id (status_comment_id). When absent, a fresh comment is posted + the id returned. */
   readonly statusCommentId?: string;
   readonly children: readonly OrchestrationChildRow[];
@@ -413,38 +406,30 @@ export interface UpsertEpicPanelParams {
   readonly inProgress?: boolean;
   /**
    * When true AND the epic is settled, mirror the outcome on the PARENT issue:
-   * advance state In Review (complete) / leave (failures) + swap reaction to
-   * ✅/❌. When in progress, revert: state → In Progress + reaction → 👀. Only
-   * for the Linear channel. Default true.
+   * advance state to awaiting-review (clean) / leave it (failures) + swap the
+   * reaction to ✅/❌. When in progress, revert: state → running + reaction → 👀.
+   * Skipped on surfaces without reaction/transition support. Default true.
    */
   readonly mirrorParentState?: boolean;
-  /** Trigger channel; non-'linear' makes this a logged no-op (other planes unwired). */
-  readonly channelSource?: ChannelSource;
 }
 
 /**
  * Render + upsert the single maturing epic panel, and (optionally) mirror the
- * outcome on the parent issue's state + reaction (#247 UX.2). The ONE place
- * the parent panel is written — replaces the old renderStatusBlock-edit +
- * postRollup + standalone notes. Returns the panel comment id (new or existing),
- * or null on a non-linear channel / failure.
+ * outcome on the parent issue's state + reaction. The ONE place the parent panel
+ * is written. Returns the panel comment id (new or existing), or null on failure.
  *
  * - Edits ``statusCommentId`` in place when given; else posts a fresh comment.
  * - Header/rows via {@link renderEpicPanel}; ``inProgress`` derived if omitted.
- * - On settle (not in progress): advance parent state→In Review (clean) + ✅;
- *   on failures, leave state + ❌. On in-progress (a revision re-opened it):
- *   revert state→In Progress + reaction→👀. Sequential calls (each fans out
- *   into multiple Linear reads) to avoid self-throttling the 5s timeout.
- * Best-effort: a Linear hiccup never throws out of the reconcile.
+ * - On settle (not in progress): advance parent state → awaiting review (clean)
+ *   + ✅; on failures, leave the state and let ❌ convey it. On in-progress (a
+ *   revision re-opened it): back to running + 👀.
+ * - Sequential, not concurrent: each mirror step fans out into several surface
+ *   reads, and firing them together self-throttled the request budget so a
+ *   transition silently no-op'd and left the epic stuck.
+ * Best-effort: a surface hiccup never throws out of the reconcile.
  */
 export async function upsertEpicPanel(params: UpsertEpicPanelParams): Promise<string | null> {
-  const channelSource = params.channelSource ?? 'linear';
-  if (channelSource !== 'linear') {
-    logger.info('Epic panel skipped — channel has no wired plane', {
-      parent_linear_issue_id: params.parentLinearIssueId, channel_source: channelSource,
-    });
-    return null;
-  }
+  const { channel, parent } = params;
   const rows = buildPanelRows(params.children, params.prUrls ?? {}, params.updating ?? {}, params.failureReasons ?? {});
   const terminal = (s: string) => s === 'succeeded' || s === 'failed' || s === 'skipped';
   const inProgress = params.inProgress
@@ -459,44 +444,46 @@ export async function upsertEpicPanel(params: UpsertEpicPanelParams): Promise<st
 
   let commentId: string | null;
   try {
-    if (params.statusCommentId) {
-      commentId = await upsertStatusComment(params.ctx, params.parentLinearIssueId, body, params.statusCommentId);
-    } else {
-      // Post a fresh comment and capture its id (upsertStatusComment with no id creates + returns it).
-      commentId = await upsertStatusComment(params.ctx, params.parentLinearIssueId, body);
-    }
+    const ref = await channel.upsertComment(
+      parent,
+      body,
+      params.statusCommentId ? { commentId: params.statusCommentId } : undefined,
+    );
+    // A surface that can't hand back a real comment id reports an empty one.
+    // Treat that as "no panel id" rather than persisting a blank id the next
+    // edit would try (and fail) to address.
+    commentId = ref?.commentId || null;
   } catch (err) {
     logger.warn('Epic panel upsert threw (non-fatal)', {
-      parent_linear_issue_id: params.parentLinearIssueId,
+      parent_issue_id: parent.issueId,
       error: err instanceof Error ? err.message : String(err),
     });
     return null;
   }
 
-  // Mirror parent state + reaction. Sequential (each fans out into several
-  // Linear graphql reads; firing together self-throttles the 5s timeout).
+  // Mirror parent state + reaction, sequentially (see the note above).
   if (params.mirrorParentState !== false) {
     const anyBad = rows.some((r) => r.child_status === 'failed' || r.child_status === 'skipped');
     try {
       if (inProgress) {
-        // Re-opened (or running): back to In Progress + 👀. Pass
-        // allowSameTypeRegression (#9b) — a settled epic is In Review (started),
-        // and In Progress is ALSO started but at a lower position, so the default
-        // backward-move guard silently blocked this deliberate re-open. Cross-type
-        // demotion (a human moved it to Done) is still blocked by the guard.
-        await transitionIssueState(params.ctx, params.parentLinearIssueId, 'started', ['In Progress'], true);
-        await swapIssueReaction(params.ctx, params.parentLinearIssueId, 'eyes');
+        // Re-opened (or running): back to running + 👀. This is a deliberate
+        // move backward within the same state category — a settled epic sits in
+        // "awaiting review", and re-opening it must be allowed explicitly or the
+        // adapter's backward-move guard drops it silently. A parent a human
+        // already marked done stays done; that guard still applies.
+        await channel.transitionState?.(parent, 'started', { allowRegression: true });
+        await channel.replaceIssueReaction?.(parent, 'started');
       } else if (!anyBad) {
-        // Clean completion: work done, awaiting human merge → In Review + ✅.
-        await transitionIssueState(params.ctx, params.parentLinearIssueId, 'started', ['In Review']);
-        await swapIssueReaction(params.ctx, params.parentLinearIssueId, EMOJI_SUCCESS);
+        // Clean completion: work done, awaiting human merge → in review + ✅.
+        await channel.transitionState?.(parent, 'in_review');
+        await channel.replaceIssueReaction?.(parent, 'succeeded');
       } else {
-        // Finished with failures: leave state; ❌ reaction conveys it.
-        await swapIssueReaction(params.ctx, params.parentLinearIssueId, EMOJI_FAILURE);
+        // Finished with failures: leave the state; the ❌ reaction conveys it.
+        await channel.replaceIssueReaction?.(parent, 'failed');
       }
     } catch (err) {
       logger.warn('Epic panel parent-state mirror failed (non-fatal)', {
-        parent_linear_issue_id: params.parentLinearIssueId,
+        parent_issue_id: parent.issueId,
         error: err instanceof Error ? err.message : String(err),
       });
     }
@@ -505,20 +492,13 @@ export async function upsertEpicPanel(params: UpsertEpicPanelParams): Promise<st
 }
 
 export interface PostRollupParams {
-  readonly ctx: LinearFeedbackContext;
+  /** The surface adapter to drive. Optional capabilities it omits are skipped. */
+  readonly channel: Channel;
   readonly orchestrationId: string;
-  readonly parentLinearIssueId: string;
+  /** The parent epic, on whichever surface triggered the orchestration. */
+  readonly parent: IssueRef;
   readonly kind: RollupKind;
   readonly children: readonly OrchestrationChildRow[];
-  /**
-   * The orchestration's trigger channel. Defaults to ``'linear'`` — the only
-   * wired rollup plane today. #247 trigger-agnostic seam: a future
-   * GitHub/Slack/Jira trigger dispatches its own parent-rollup here (open a
-   * tracking comment / update an epic) instead of the Linear comment +
-   * state-transition + reaction below. An unrecognised channel is a logged
-   * no-op so a mis-seeded orchestration never throws out of the reconciler.
-   */
-  readonly channelSource?: ChannelSource;
   /**
    * #247 #3: the live status-block comment id stamped at seed. When set, the
    * final rollup EDITS that comment in place (one comment for the whole run,
@@ -542,22 +522,7 @@ export interface PostRollupParams {
  * on ``orch.rollup.posted`` / ``orch.rollup.failed``.
  */
 export async function postRollup(params: PostRollupParams): Promise<boolean> {
-  const { ctx, orchestrationId, parentLinearIssueId, kind, children, statusCommentId } = params;
-  const channelSource = params.channelSource ?? 'linear';
-
-  // #247 trigger-agnostic dispatch. Only the Linear plane is wired today;
-  // other channels are an explicit logged no-op (the DAG executor +
-  // gating already ran channel-agnostically — only the parent feedback is
-  // channel-specific). A new trigger adds its branch here.
-  if (channelSource !== 'linear') {
-    logger.info('Parent rollup skipped — channel has no wired rollup plane', {
-      event: ORCH_LOG.rollupFailed,
-      orchestration_id: orchestrationId,
-      channel_source: channelSource,
-      rollup_kind: kind,
-    });
-    return false;
-  }
+  const { channel, parent, orchestrationId, kind, children, statusCommentId } = params;
   const prUrls = params.prUrls ?? {};
   const body = renderRollupComment(
     kind,
@@ -573,19 +538,18 @@ export async function postRollup(params: PostRollupParams): Promise<boolean> {
 
   let ok = false;
   try {
-    // #247 #3: edit the live status block into the final rollup when we have
-    // its id (one comment for the whole run); else post a fresh comment.
+    // Edit the live status block into the final rollup when we have its id (one
+    // comment for the whole run); else post a fresh comment.
     if (statusCommentId) {
-      ok = (await upsertStatusComment(ctx, parentLinearIssueId, body, statusCommentId)) !== null;
+      ok = (await channel.upsertComment(parent, body, { commentId: statusCommentId })) !== null;
     } else {
-      // postIssueComment now returns a LinearPostResult (upstream #311/#332).
-      ok = (await postIssueComment(ctx, parentLinearIssueId, body)).ok;
+      ok = (await channel.postComment(parent, body)) !== null;
     }
   } catch (err) {
     logger.warn('Parent rollup comment threw (non-fatal)', {
       event: ORCH_LOG.rollupFailed,
       orchestration_id: orchestrationId,
-      parent_linear_issue_id: parentLinearIssueId,
+      parent_issue_id: parent.issueId,
       rollup_kind: kind,
       error: err instanceof Error ? err.message : String(err),
     });
@@ -596,34 +560,33 @@ export async function postRollup(params: PostRollupParams): Promise<boolean> {
     logger.info('Parent rollup comment posted', {
       event: ORCH_LOG.rollupPosted,
       orchestration_id: orchestrationId,
-      parent_linear_issue_id: parentLinearIssueId,
+      parent_issue_id: parent.issueId,
       rollup_kind: kind,
       child_count: children.length,
     });
 
-    // Mirror the child sub-issues' status signal on the PARENT epic:
-    // - state: on a clean 'complete', advance to In Review (work done, child
-    //   PRs awaiting human merge — NOT Done, since nothing is merged). On a
-    //   partial_failure / cancelled rollup, leave the state in place (the
+    // Mirror the children's status signal on the PARENT epic:
+    // - state: on a clean 'complete', advance to awaiting-review (work done,
+    //   child PRs awaiting a human merge — NOT done, since nothing is merged).
+    //   On a partial-failure / cancelled rollup, leave the state in place (the
     //   comment + ❌ reaction already convey the outcome).
-    // - reaction: SWAP the seed 👀 for ✅ (complete) / ❌ (otherwise) so the
+    // - reaction: replace the seed 👀 with ✅ (complete) / ❌ (otherwise) so the
     //   parent shows exactly ONE marker at a time, like the children.
-    // Run SEQUENTIALLY, not concurrently: the state transition (a team-states
-    // query) and the reaction swap (reactions query + deletes + create) each
-    // fan out into multiple Linear calls. Firing them together — on top of
-    // the rollup comment edit just above — self-throttled the 5s-timeout
-    // graphql reads, so the states query aborted and the transition silently
-    // no-op'd (parent stuck In Progress). Serialising keeps each read under
-    // its own budget. Both best-effort; a hiccup never suppresses the rollup.
+    // Run SEQUENTIALLY, not concurrently: the state transition and the reaction
+    // replace each fan out into multiple surface calls. Firing them together —
+    // on top of the comment edit just above — self-throttled the request budget,
+    // so the states read aborted and the transition silently no-op'd, leaving
+    // the parent stuck. Serialising keeps each read under its own budget. Both
+    // best-effort; a hiccup never suppresses the rollup.
     if (kind === 'complete') {
-      await transitionIssueState(ctx, parentLinearIssueId, 'started', ['In Review']);
+      await channel.transitionState?.(parent, 'in_review');
     }
-    await swapIssueReaction(ctx, parentLinearIssueId, kind === 'complete' ? EMOJI_SUCCESS : EMOJI_FAILURE);
+    await channel.replaceIssueReaction?.(parent, kind === 'complete' ? 'succeeded' : 'failed');
   } else {
     logger.warn('Parent rollup comment post returned false', {
       event: ORCH_LOG.rollupFailed,
       orchestration_id: orchestrationId,
-      parent_linear_issue_id: parentLinearIssueId,
+      parent_issue_id: parent.issueId,
       rollup_kind: kind,
     });
   }

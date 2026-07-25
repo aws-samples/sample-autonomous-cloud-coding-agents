@@ -37,8 +37,8 @@
 
 import { DynamoDBClient, QueryCommand } from '@aws-sdk/client-dynamodb';
 import { planHeartbeat, type HeartbeatTaskView } from './shared/iteration-heartbeat';
-import { upsertThreadedReply } from './shared/linear-feedback';
 import { logger } from './shared/logger';
+import { makeLinearChannel } from './shared/orchestration-channel-linear';
 
 const ddb = new DynamoDBClient({});
 const TASK_TABLE = process.env.TASK_TABLE_NAME!;
@@ -128,15 +128,18 @@ export async function handler(): Promise<void> {
     edited_cap: MAX_EDITS_PER_SWEEP,
   });
 
+  // The reply edit goes through the surface-agnostic channel; only the surface
+  // this sweep reads from (a Linear iteration reply) picks the adapter.
+  const channel = makeLinearChannel(WORKSPACE_REGISTRY_TABLE);
+
   let edited = 0;
   for (const plan of plans.slice(0, MAX_EDITS_PER_SWEEP)) {
     try {
-      await upsertThreadedReply(
-        { linearWorkspaceId: plan.linearWorkspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE },
-        plan.issueId,
-        plan.parentCommentId,
+      await channel.upsertThreadedReply?.(
+        { issueId: plan.issueId, credentialsRef: plan.linearWorkspaceId },
+        { commentId: plan.parentCommentId },
         plan.body,
-        plan.replyId,
+        { commentId: plan.replyId },
         // Keep any already-landed deploy-preview block (a heartbeat must never
         // clobber the screenshot the webhook may have appended).
         { preservePreview: true },
