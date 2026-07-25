@@ -345,6 +345,91 @@ describe('claimCommentAck — exactly-once per comment (#247 UX.20 redelivery de
   });
 });
 
+describe('renamed row attributes stay readable across the rename', () => {
+  // Rows already in the table outlive the deploy that renames an attribute, so an
+  // epic mid-flight when the rename ships must still load and settle. These pin
+  // BOTH spellings, and the fact that a row carrying only the legacy names loads
+  // is the actual back-compat guarantee.
+  const child = (extra: Record<string, unknown>) => ({
+    orchestration_id: 'orch_1', sub_issue_id: 'uuid-A', depends_on: [], child_status: 'succeeded', ...extra,
+  });
+
+  test('a row written BEFORE the rename (legacy names only) still loads', async () => {
+    const ddb = {
+      send: jest.fn().mockResolvedValueOnce({
+        Items: [
+          {
+            orchestration_id: 'orch_1',
+            sub_issue_id: '#meta',
+            repo: 'o/r',
+            platform_user_id: 'u1',
+            child_count: 1,
+            parent_linear_issue_id: 'P-old',
+            linear_workspace_id: 'WS-old',
+          },
+          child({ parent_linear_issue_id: 'P-old', linear_workspace_id: 'WS-old', linear_identifier: 'ENG-1' }),
+        ],
+      }),
+    };
+    const snap = await loadOrchestration(ddb as never, TABLE, 'orch_1');
+    expect(snap!.meta.parent_issue_ref).toBe('P-old');
+    expect(snap!.meta.credentials_ref).toBe('WS-old');
+    expect(snap!.children[0].parent_issue_ref).toBe('P-old');
+    expect(snap!.children[0].credentials_ref).toBe('WS-old');
+    expect(snap!.children[0].display_id).toBe('ENG-1');
+  });
+
+  test('a row written AFTER the rename (neutral names only) loads too', async () => {
+    const ddb = {
+      send: jest.fn().mockResolvedValueOnce({
+        Items: [
+          {
+            orchestration_id: 'orch_1',
+            sub_issue_id: '#meta',
+            repo: 'o/r',
+            platform_user_id: 'u1',
+            child_count: 1,
+            parent_issue_ref: 'P-new',
+            credentials_ref: 'WS-new',
+          },
+          child({ parent_issue_ref: 'P-new', credentials_ref: 'WS-new', display_id: 'ENG-2' }),
+        ],
+      }),
+    };
+    const snap = await loadOrchestration(ddb as never, TABLE, 'orch_1');
+    expect(snap!.meta.parent_issue_ref).toBe('P-new');
+    expect(snap!.meta.credentials_ref).toBe('WS-new');
+    expect(snap!.children[0].parent_issue_ref).toBe('P-new');
+    expect(snap!.children[0].credentials_ref).toBe('WS-new');
+    expect(snap!.children[0].display_id).toBe('ENG-2');
+  });
+
+  test('the neutral name wins when a row carries both', async () => {
+    const ddb = {
+      send: jest.fn().mockResolvedValueOnce({
+        Items: [
+          {
+            orchestration_id: 'orch_1',
+            sub_issue_id: '#meta',
+            repo: 'o/r',
+            platform_user_id: 'u1',
+            child_count: 1,
+            parent_issue_ref: 'P-new',
+            parent_linear_issue_id: 'P-old',
+            credentials_ref: 'WS-new',
+            linear_workspace_id: 'WS-old',
+          },
+          child({ parent_issue_ref: 'P-new', parent_linear_issue_id: 'P-old' }),
+        ],
+      }),
+    };
+    const snap = await loadOrchestration(ddb as never, TABLE, 'orch_1');
+    expect(snap!.meta.parent_issue_ref).toBe('P-new');
+    expect(snap!.meta.credentials_ref).toBe('WS-new');
+    expect(snap!.children[0].parent_issue_ref).toBe('P-new');
+  });
+});
+
 describe('loadOrchestration — marker rows are not children (#247 UX.20)', () => {
   test('excludes ack#<commentId> marker rows from children (only real sub-issues count)', async () => {
     const ddb = {

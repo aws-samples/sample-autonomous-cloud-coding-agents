@@ -36,12 +36,12 @@ function makeRow(overrides: Partial<OrchestrationChildRow> = {}): OrchestrationC
   return {
     orchestration_id: 'orch_abc',
     sub_issue_id: 'SUB-1',
-    parent_linear_issue_id: 'PARENT',
-    linear_workspace_id: 'WS',
+    parent_issue_ref: 'PARENT',
+    credentials_ref: 'WS',
     repo: 'owner/repo',
     depends_on: [],
     child_status: 'ready',
-    linear_identifier: 'ENG-1',
+    display_id: 'ENG-1',
     title: 'Build the thing',
     created_at: NOW,
     updated_at: NOW,
@@ -304,7 +304,7 @@ describe('releaseChild — happy path', () => {
     await releaseChild({
       ddb: { send: jest.fn().mockResolvedValue({}) } as never,
       tableName: 'OrchestrationTable',
-      row: makeRow({ linear_identifier: 'ENG-1' }),
+      row: makeRow({ display_id: 'ENG-1' }),
       platformUserId: 'user-1',
       channelSource: 'webhook',
       linearProjectId: 'proj-1',
@@ -335,7 +335,7 @@ describe('releaseChild — happy path', () => {
     await releaseChild({
       ddb: { send: jest.fn().mockResolvedValue({}) } as never,
       tableName: 'OrchestrationTable',
-      row: makeRow({ linear_identifier: 'ENG-1' }),
+      row: makeRow({ display_id: 'ENG-1' }),
       platformUserId: 'user-1',
       channelSource: 'linear',
       linearProjectId: 'proj-1',
@@ -571,7 +571,7 @@ describe('releaseChild — idempotency + failure', () => {
     await releaseChild({
       ddb: ddb as never,
       tableName: 'OrchestrationTable',
-      row: makeRow({ title: undefined, linear_identifier: undefined }),
+      row: makeRow({ title: undefined, display_id: undefined }),
       platformUserId: 'user-1',
       createTaskCore: createTaskCore as never,
       now: NOW,

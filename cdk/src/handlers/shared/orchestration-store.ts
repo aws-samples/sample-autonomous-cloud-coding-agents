@@ -65,8 +65,11 @@ export type ChildStatus =
 export interface OrchestrationChildRow {
   readonly orchestration_id: string;
   readonly sub_issue_id: string;
-  readonly parent_linear_issue_id: string;
-  readonly linear_workspace_id: string;
+  /** The epic this child belongs to, as the surface identifies it. */
+  readonly parent_issue_ref: string;
+  /** Opaque credentials handle for the surface (a workspace/tenant id that keys
+   *  a token registry). The engine never interprets it. */
+  readonly credentials_ref: string;
   readonly repo: string;
   readonly depends_on: readonly string[];
   readonly child_status: ChildStatus;
@@ -84,8 +87,8 @@ export interface OrchestrationChildRow {
    * until released.
    */
   readonly child_branch_name?: string;
-  /** Linear human identifier, when known (e.g. ``ENG-42``). */
-  readonly linear_identifier?: string;
+  /** Human-facing id for display, when the surface has one (e.g. ``ENG-42``). */
+  readonly display_id?: string;
   /** Sub-issue title, used to build the child task description. */
   readonly title?: string;
   /**
@@ -118,6 +121,31 @@ export interface OrchestrationChildRow {
   readonly updated_at: string;
   /** TTL epoch (seconds) for eventual cleanup. */
   readonly ttl?: number;
+}
+
+/**
+ * Marshal one persisted item into a child row, reading the renamed attributes
+ * through {@link readRenamed} so a row written before the rename still loads.
+ *
+ * This is deliberately EXPLICIT rather than a cast. The previous
+ * ``item as unknown as OrchestrationChildRow`` made the compiler report success
+ * while the underlying attribute names were whatever the writer happened to use —
+ * so renaming a field on the interface would have silently yielded ``undefined``
+ * for every existing row, with nothing in the type system or a new-shaped test
+ * fixture to catch it.
+ *
+ * Attributes that were never renamed are passed through as-is.
+ */
+function toChildRow(item: Record<string, unknown>): OrchestrationChildRow {
+  const parentIssueId = readRenamed(item, 'parent_issue_ref', 'parent_linear_issue_id') ?? '';
+  const credentialsRef = readRenamed(item, 'credentials_ref', 'linear_workspace_id') ?? '';
+  const displayId = readRenamed(item, 'display_id', 'linear_identifier');
+  return {
+    ...(item as unknown as OrchestrationChildRow),
+    parent_issue_ref: parentIssueId,
+    credentials_ref: credentialsRef,
+    ...(displayId !== undefined && { display_id: displayId }),
+  };
 }
 
 /**
@@ -194,6 +222,37 @@ export function deriveOrchestrationId(parentLinearIssueId: string): string {
 }
 
 /**
+ * Read a persisted attribute that has been RENAMED, tolerating both spellings.
+ *
+ * Rows already in the table carry the old attribute name, and they outlive the
+ * deploy that renames it — an epic mid-flight when the rename ships must still
+ * settle. So every read prefers the new name and falls back to the legacy one,
+ * and writes emit BOTH for a transition period (see ``dualWrite``) so a rollback
+ * to the previous code also keeps working.
+ *
+ * Returns undefined when neither is present, so a caller can distinguish
+ * "absent" from "empty string".
+ */
+function readRenamed(item: Record<string, unknown>, current: string, legacy: string): string | undefined {
+  const value = item[current] ?? item[legacy];
+  return value === undefined || value === null ? undefined : String(value);
+}
+
+/**
+ * Emit a renamed attribute under BOTH names on write. Costs a duplicated small
+ * string per row and buys a reversible deploy: code running either spelling can
+ * read a row written by the other. Drop the legacy half only once no deployed
+ * code reads it and no in-flight rows predate the rename.
+ */
+function dualWrite<C extends string, L extends string>(
+  current: C,
+  legacy: L,
+  value: string,
+): Record<C | L, string> {
+  return { [current]: value, [legacy]: value } as Record<C | L, string>;
+}
+
+/**
  * Parse the meta row's ``pre_screened_attachments_json`` back into records.
  * Best-effort: a malformed/absent value yields ``[]`` (children just run without
  * the parent attachments rather than the whole epic failing to release).
@@ -249,12 +308,13 @@ export async function seedOrchestration(
   const childRows: OrchestrationChildRow[] = children.map((c) => ({
     orchestration_id: orchestrationId,
     sub_issue_id: c.id,
-    parent_linear_issue_id: parentLinearIssueId,
-    linear_workspace_id: linearWorkspaceId,
+    // Renamed attributes are written under both spellings — see dualWrite.
+    ...dualWrite('parent_issue_ref', 'parent_linear_issue_id', parentLinearIssueId),
+    ...dualWrite('credentials_ref', 'linear_workspace_id', linearWorkspaceId),
     repo,
     depends_on: c.depends_on,
     child_status: c.depends_on.length === 0 ? 'ready' : 'blocked',
-    ...(c.identifier !== undefined && { linear_identifier: c.identifier }),
+    ...(c.identifier !== undefined && dualWrite('display_id', 'linear_identifier', c.identifier)),
     ...(c.title !== undefined && { title: c.title }),
     ...(c.description !== undefined && c.description !== '' && { description: c.description }),
     created_at: now,
@@ -265,8 +325,8 @@ export async function seedOrchestration(
   const metaRow = {
     orchestration_id: orchestrationId,
     sub_issue_id: PARENT_META_SK,
-    parent_linear_issue_id: parentLinearIssueId,
-    linear_workspace_id: linearWorkspaceId,
+    ...dualWrite('parent_issue_ref', 'parent_linear_issue_id', parentLinearIssueId),
+    ...dualWrite('credentials_ref', 'linear_workspace_id', linearWorkspaceId),
     repo,
     child_count: children.length,
     // Release context for the reconciler (downstream releases run off the
@@ -429,12 +489,12 @@ export async function extendOrchestration(params: {
     return {
       orchestration_id: orchestrationId,
       sub_issue_id: n.id,
-      parent_linear_issue_id: parentLinearIssueId,
-      linear_workspace_id: linearWorkspaceId,
+      ...dualWrite('parent_issue_ref', 'parent_linear_issue_id', parentLinearIssueId),
+      ...dualWrite('credentials_ref', 'linear_workspace_id', linearWorkspaceId),
       repo,
       depends_on,
       child_status: allDepsSucceeded ? 'ready' : 'blocked',
-      ...(n.identifier !== undefined && { linear_identifier: n.identifier }),
+      ...(n.identifier !== undefined && dualWrite('display_id', 'linear_identifier', n.identifier)),
       ...(n.title !== undefined && { title: n.title }),
       ...(n.description !== undefined && n.description !== '' && { description: n.description }),
       created_at: now,
@@ -609,8 +669,8 @@ export const ORCHESTRATION_META_SK = PARENT_META_SK;
 /** Parsed parent-meta row, including the reconciler's release context. */
 export interface OrchestrationMeta {
   readonly orchestration_id: string;
-  readonly parent_linear_issue_id: string;
-  readonly linear_workspace_id: string;
+  readonly parent_issue_ref: string;
+  readonly credentials_ref: string;
   readonly repo: string;
   readonly child_count: number;
   readonly release_context: OrchestrationReleaseContext;
@@ -688,18 +748,19 @@ export async function loadOrchestration(
 
   const children = items
     // Exclude the meta row AND non-child marker rows (e.g. ``ack#<commentId>``
-    // dedup markers, #247 UX.20) — only real sub-issue rows are children.
-    // A real child SK is a Linear issue UUID or the ``…__integration`` synthetic
-    // id; markers use a ``<kind>#`` prefix that no real SK has.
+    // dedup markers) — only real sub-issue rows are children. A real child SK is
+    // an issue id or the ``…__integration`` synthetic id; markers use a
+    // ``<kind>#`` prefix that no real SK has.
     .filter((i) => i.sub_issue_id !== PARENT_META_SK && !String(i.sub_issue_id).includes('#'))
-    .map((i) => i as unknown as OrchestrationChildRow);
+    .map(toChildRow);
 
   const preScreened = parsePreScreenedAttachments(metaItem.pre_screened_attachments_json, orchestrationId);
 
   const meta: OrchestrationMeta = {
     orchestration_id: orchestrationId,
-    parent_linear_issue_id: metaItem.parent_linear_issue_id as string,
-    linear_workspace_id: metaItem.linear_workspace_id as string,
+    // Renamed attributes — read either spelling so a pre-rename epic still settles.
+    parent_issue_ref: readRenamed(metaItem, 'parent_issue_ref', 'parent_linear_issue_id') ?? '',
+    credentials_ref: readRenamed(metaItem, 'credentials_ref', 'linear_workspace_id') ?? '',
     repo: metaItem.repo as string,
     child_count: (metaItem.child_count as number) ?? children.length,
     release_context: {

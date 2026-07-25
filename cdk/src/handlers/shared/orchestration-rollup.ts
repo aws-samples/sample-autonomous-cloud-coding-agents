@@ -40,7 +40,7 @@ export type RollupKind = 'complete' | 'partial_failure' | 'cancelled';
 
 export interface RollupChildView {
   readonly sub_issue_id: string;
-  readonly linear_identifier?: string;
+  readonly display_id?: string;
   readonly title?: string;
   readonly child_status: string;
   readonly child_task_id?: string;
@@ -89,11 +89,11 @@ export function renderRollupComment(
         : '⚠️ **ABCA orchestration finished with failures**';
 
   const lines = [...children]
-    .sort((a, b) => (a.linear_identifier ?? a.sub_issue_id).localeCompare(b.linear_identifier ?? b.sub_issue_id))
+    .sort((a, b) => (a.display_id ?? a.sub_issue_id).localeCompare(b.display_id ?? b.sub_issue_id))
     .map((c) => {
       const icon = STATUS_ICON[c.child_status] ?? '•';
-      const label = c.linear_identifier
-        ? (c.title ? `${c.linear_identifier}: ${c.title}` : c.linear_identifier)
+      const label = c.display_id
+        ? (c.title ? `${c.display_id}: ${c.title}` : c.display_id)
         : (c.title ?? c.sub_issue_id);
       // #323: append the child's PR link when one was opened, so the parent
       // rollup is a single place to reach every sub-issue's PR.
@@ -135,11 +135,11 @@ export function renderStatusBlock(children: readonly RollupChildView[]): string 
   const heading = `🔄 **ABCA orchestration** · ${done}/${children.length} complete`;
 
   const lines = [...children]
-    .sort((a, b) => (a.linear_identifier ?? a.sub_issue_id).localeCompare(b.linear_identifier ?? b.sub_issue_id))
+    .sort((a, b) => (a.display_id ?? a.sub_issue_id).localeCompare(b.display_id ?? b.sub_issue_id))
     .map((c) => {
       const icon = STATUS_ICON[c.child_status] ?? '•';
-      const label = c.linear_identifier
-        ? (c.title ? `${c.linear_identifier}: ${c.title}` : c.linear_identifier)
+      const label = c.display_id
+        ? (c.title ? `${c.display_id}: ${c.title}` : c.display_id)
         : (c.title ?? c.sub_issue_id);
       // Human-friendly status words for the in-flight view. 'releasing' (the
       // transient flip-then-create claim, review #3) reads as running like
@@ -166,7 +166,7 @@ export function renderStatusBlock(children: readonly RollupChildView[]): string 
 /** Per-sub-issue view for the maturing panel — adds the 'updating' context the rollup/block can't express. */
 export interface EpicPanelRow {
   readonly sub_issue_id: string;
-  readonly linear_identifier?: string;
+  readonly display_id?: string;
   readonly title?: string;
   /** Persisted orchestration status: blocked | ready | released | succeeded | failed | skipped. */
   readonly child_status: string;
@@ -243,7 +243,7 @@ export function cascadeNodeLabel(
 /** Friendly label for a row — Linear identifier + title, or 'Integration — combined result' for the synthetic node. */
 function panelLabel(row: EpicPanelRow): string {
   if (isIntegrationNode(row.sub_issue_id)) return 'Integration — combined result';
-  if (row.linear_identifier) return row.title ? `${row.linear_identifier}: ${row.title}` : row.linear_identifier;
+  if (row.display_id) return row.title ? `${row.display_id}: ${row.title}` : row.display_id;
   return row.title ?? row.sub_issue_id;
 }
 
@@ -275,7 +275,7 @@ export function renderEpicPanel(params: EpicPanelParams): string {
   }
 
   const lines = [...rows]
-    .sort((a, b) => (a.linear_identifier ?? a.sub_issue_id).localeCompare(b.linear_identifier ?? b.sub_issue_id))
+    .sort((a, b) => (a.display_id ?? a.sub_issue_id).localeCompare(b.display_id ?? b.sub_issue_id))
     .map((r) => {
       const label = panelLabel(r);
       const pr = r.pr_url ? ` — [PR](${r.pr_url})` : '';
@@ -366,7 +366,7 @@ export function buildPanelRows(
 ): EpicPanelRow[] {
   return children.map((c) => ({
     sub_issue_id: c.sub_issue_id,
-    ...(c.linear_identifier !== undefined && { linear_identifier: c.linear_identifier }),
+    ...(c.display_id !== undefined && { display_id: c.display_id }),
     ...(c.title !== undefined && { title: c.title }),
     child_status: c.child_status,
     ...(prUrls[c.sub_issue_id] !== undefined && { pr_url: prUrls[c.sub_issue_id] }),
@@ -528,7 +528,7 @@ export async function postRollup(params: PostRollupParams): Promise<boolean> {
     kind,
     children.map((c) => ({
       sub_issue_id: c.sub_issue_id,
-      ...(c.linear_identifier !== undefined && { linear_identifier: c.linear_identifier }),
+      ...(c.display_id !== undefined && { display_id: c.display_id }),
       ...(c.title !== undefined && { title: c.title }),
       child_status: c.child_status,
       ...(c.child_task_id !== undefined && { child_task_id: c.child_task_id }),

@@ -255,7 +255,7 @@ async function reconcileOrchestration(orchestrationId: string): Promise<number> 
       try {
         await refreshPanelAndSettle(orchestrationId, fresh.children, fresh.meta, now);
         logger.warn('Stranded orchestration settled by sweep — parent was never settled (lost terminal event)', {
-          orchestration_id: orchestrationId, parent_linear_issue_id: fresh.meta.parent_linear_issue_id,
+          orchestration_id: orchestrationId, parent_linear_issue_id: fresh.meta.parent_issue_ref,
         });
       } catch (err) {
         logger.warn('Sweep settle failed (will retry next sweep)', {

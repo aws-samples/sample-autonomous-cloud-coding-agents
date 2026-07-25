@@ -247,12 +247,12 @@ function buildChildDescription(row: OrchestrationChildRow): string {
     ].join('\n');
   }
   const parts: string[] = [];
-  if (row.linear_identifier && row.title) {
-    parts.push(`${row.linear_identifier}: ${row.title}`);
+  if (row.display_id && row.title) {
+    parts.push(`${row.display_id}: ${row.title}`);
   } else if (row.title) {
     parts.push(row.title);
-  } else if (row.linear_identifier) {
-    parts.push(row.linear_identifier);
+  } else if (row.display_id) {
+    parts.push(row.display_id);
   }
   // PM-4: include the planner's scope below the title when it adds detail. The
   // reviewer approved a plan that may name a concrete deliverable (a filename, a
@@ -287,11 +287,11 @@ export async function releaseChild(params: ReleaseChildParams): Promise<ReleaseC
   // harmless only because every consumer happens to check ``channel_source``
   // first, which is a coincidence to rely on rather than a contract.
   if (channelSource === 'linear') {
-    channelMetadata.linear_workspace_id = row.linear_workspace_id;
+    channelMetadata.linear_workspace_id = row.credentials_ref;
     // Provenance only — nothing reads this back today, but it's been on every
     // released child since the executor shipped, so it stays rather than being
     // quietly dropped as part of a naming change.
-    channelMetadata.parent_linear_issue_id = row.parent_linear_issue_id;
+    channelMetadata.parent_linear_issue_id = row.parent_issue_ref;
     // Only set linear_issue_id (the agent's reaction/comment target) for a REAL
     // sub-issue. A synthetic integration node has no issue behind it — passing
     // its id would make the agent's reaction call 4xx. Omitting it lets the
@@ -299,7 +299,7 @@ export async function releaseChild(params: ReleaseChildParams): Promise<ReleaseC
     if (!isIntegrationNode(row.sub_issue_id)) {
       channelMetadata.linear_issue_id = row.sub_issue_id;
     }
-    if (row.linear_identifier) channelMetadata.linear_issue_identifier = row.linear_identifier;
+    if (row.display_id) channelMetadata.linear_issue_identifier = row.display_id;
     if (params.linearProjectId) channelMetadata.linear_project_id = params.linearProjectId;
     if (params.linearOauthSecretArn) channelMetadata.linear_oauth_secret_arn = params.linearOauthSecretArn;
     if (params.linearWorkspaceSlug) channelMetadata.linear_workspace_slug = params.linearWorkspaceSlug;

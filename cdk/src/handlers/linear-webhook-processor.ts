@@ -2375,7 +2375,7 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
   // PR, so it fell to the standalone GSI path → miss → ignored.)
   const ownOrchestrationId = deriveOrchestrationId(commentedIssueId);
   const parentSnapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, ownOrchestrationId);
-  if (parentSnapshot && parentSnapshot.meta.parent_linear_issue_id === commentedIssueId) {
+  if (parentSnapshot && parentSnapshot.meta.parent_issue_ref === commentedIssueId) {
     await handleParentEpicCommentTrigger({
       orchestrationId: ownOrchestrationId,
       snapshot: parentSnapshot,
@@ -2426,7 +2426,7 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
     await channel.reactToComment?.({ commentId }, issueRef(commentedIssueId, workspaceId), 'started');
     await handleEpicRetryIntent({
       orchestrationId: orchestrationId!,
-      parentIssueId: snapshot.meta.parent_linear_issue_id,
+      parentIssueId: snapshot.meta.parent_issue_ref,
       workspaceId,
       commentId,
       replyIssueId: commentedIssueId, // reply on the child the user commented on
@@ -3052,7 +3052,7 @@ async function handleParentEpicCommentTrigger(args: {
 }): Promise<void> {
   const { orchestrationId, snapshot, workspaceId, commentId, commentBody, replyTargetId, trigger, resolved, registryTableName } = args;
   const channel = channelFor(registryTableName);
-  const parentRef = issueRef(snapshot.meta.parent_linear_issue_id, workspaceId);
+  const parentRef = issueRef(snapshot.meta.parent_issue_ref, workspaceId);
 
   // #247 UX.20: claim-once BEFORE any side-effect. Linear redelivers a comment
   // webhook when the handler exceeds its ~5s ack window (this path does several
@@ -3087,10 +3087,10 @@ async function handleParentEpicCommentTrigger(args: {
   if (parseRetryIntent(trigger.instruction)) {
     await handleEpicRetryIntent({
       orchestrationId,
-      parentIssueId: snapshot.meta.parent_linear_issue_id,
+      parentIssueId: snapshot.meta.parent_issue_ref,
       workspaceId,
       commentId,
-      replyIssueId: snapshot.meta.parent_linear_issue_id, // reply on the epic
+      replyIssueId: snapshot.meta.parent_issue_ref, // reply on the epic
       replyTargetId,
       channel,
     });
@@ -3171,7 +3171,7 @@ async function handleParentEpicCommentTrigger(args: {
     registryTableName,
     // #247 UX.19: the trigger comment lives on the PARENT epic, not the
     // sub-issue — the reconciler must reply with the parent issue id.
-    triggerCommentIssueId: snapshot.meta.parent_linear_issue_id,
+    triggerCommentIssueId: snapshot.meta.parent_issue_ref,
     // Already acked on the parent comment above.
     skipAck: true,
     prNumber,

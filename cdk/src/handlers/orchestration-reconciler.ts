@@ -660,7 +660,7 @@ async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
   const settleChannel = channelForMeta(snapshot.meta);
   if (settleChannel && !plan.terminalSucceeded && !isIntegrationNode(subIssueId)) {
     const channel = settleChannel;
-    const childRef = issueRef(subIssueId, snapshot.meta.linear_workspace_id);
+    const childRef = issueRef(subIssueId, snapshot.meta.credentials_ref);
     try {
       const reverted = (await channel.revertState?.(childRef)) ?? false;
       // Also settle the child's ISSUE reaction to ❌. The agent reacts ✅ on its
@@ -795,8 +795,8 @@ export async function refreshPanelAndSettle(
   orchestrationId: string,
   children: readonly OrchestrationChildRow[],
   meta: {
-    linear_workspace_id: string;
-    parent_linear_issue_id: string;
+    credentials_ref: string;
+    parent_issue_ref: string;
     status_comment_id?: string;
     release_context?: { channel_source?: string };
   },
@@ -832,7 +832,7 @@ export async function refreshPanelAndSettle(
     logger.info('Orchestration complete', {
       event: ORCH_LOG.orchestrationComplete,
       orchestration_id: orchestrationId,
-      parent_linear_issue_id: meta.parent_linear_issue_id,
+      parent_linear_issue_id: meta.parent_issue_ref,
       succeeded: children.filter((c) => c.child_status === 'succeeded').length,
       failed: children.filter((c) => c.child_status === 'failed').length,
       skipped: children.filter((c) => c.child_status === 'skipped').length,
@@ -846,7 +846,7 @@ export async function refreshPanelAndSettle(
 
   const newId = await upsertEpicPanel({
     channel,
-    parent: issueRef(meta.parent_linear_issue_id, meta.linear_workspace_id),
+    parent: issueRef(meta.parent_issue_ref, meta.credentials_ref),
     ...(meta.status_comment_id !== undefined && { statusCommentId: meta.status_comment_id }),
     children,
     prUrls,
@@ -953,7 +953,7 @@ async function cascadeRestack(evt: TerminalTaskEvent): Promise<void> {
   // Friendly short name — for the integration node this is "the integration",
   // NOT its raw synthetic title (which read clumsily in the possessive cascade
   // reason "…'s change"; live-caught under the UX.6 stress test).
-  const changedLabel = cascadeNodeLabel(changedSubIssueId, changedRow?.linear_identifier, changedRow?.title);
+  const changedLabel = cascadeNodeLabel(changedSubIssueId, changedRow?.display_id, changedRow?.title);
 
   const cascadeChannel = channelForMeta(meta);
 
@@ -997,7 +997,7 @@ async function cascadeRestack(evt: TerminalTaskEvent): Promise<void> {
     const integration = panelChildren.find((c) => isIntegrationNode(c.sub_issue_id));
     await upsertEpicPanel({
       channel: cascadeChannel,
-      parent: issueRef(meta.parent_linear_issue_id, meta.linear_workspace_id),
+      parent: issueRef(meta.parent_issue_ref, meta.credentials_ref),
       ...(meta.status_comment_id !== undefined && { statusCommentId: meta.status_comment_id }),
       children: panelChildren,
       prUrls,
@@ -1151,7 +1151,7 @@ async function replyToIterationComment(
   if (!snapshot) return;
   const channel = channelForMeta(snapshot.meta);
   if (!channel) return;
-  const workspaceId = snapshot.meta.linear_workspace_id;
+  const workspaceId = snapshot.meta.credentials_ref;
 
   // Claim the one reply for this iteration task.
   let won = false;

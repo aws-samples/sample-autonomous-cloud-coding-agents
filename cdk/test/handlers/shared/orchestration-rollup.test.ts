@@ -63,7 +63,7 @@ let channel: FakeChannel;
 const view = (sub: string, status: string, ident?: string, title?: string, pr_url?: string): RollupChildView => ({
   sub_issue_id: sub,
   child_status: status,
-  ...(ident && { linear_identifier: ident }),
+  ...(ident && { display_id: ident }),
   ...(title && { title }),
   ...(pr_url && { pr_url }),
 });
@@ -494,9 +494,9 @@ describe('renderEpicPanel (#247 UX — the single maturing panel)', () => {
     const body = renderEpicPanel({
       inProgress: true,
       rows: [
-        row('a', 'succeeded', { linear_identifier: 'ENG-1', title: 'A' }),
-        row('b', 'released', { linear_identifier: 'ENG-2', title: 'B' }),
-        row('c', 'blocked', { linear_identifier: 'ENG-3', title: 'C' }),
+        row('a', 'succeeded', { display_id: 'ENG-1', title: 'A' }),
+        row('b', 'released', { display_id: 'ENG-2', title: 'B' }),
+        row('c', 'blocked', { display_id: 'ENG-3', title: 'C' }),
       ],
     });
     expect(body).toContain('🔄 **ABCA orchestration** · 1/3 complete');
@@ -534,8 +534,8 @@ describe('renderEpicPanel (#247 UX — the single maturing panel)', () => {
     const body = renderEpicPanel({
       inProgress: true,
       rows: [
-        row('a', 'released', { linear_identifier: 'ENG-1', title: 'A' }), // running, no PR yet
-        row('b', 'succeeded', { linear_identifier: 'ENG-2', title: 'B', pr_url: 'https://github.com/o/r/pull/9' }),
+        row('a', 'released', { display_id: 'ENG-1', title: 'A' }), // running, no PR yet
+        row('b', 'succeeded', { display_id: 'ENG-2', title: 'B', pr_url: 'https://github.com/o/r/pull/9' }),
       ],
     });
     expect(body).toContain('🔄 ENG-1: A — running\n'); // no — [PR] suffix
@@ -548,7 +548,7 @@ describe('renderEpicPanel (#247 UX — the single maturing panel)', () => {
       inProgress: true,
       rows: [
         row('a', 'succeeded', {
-          linear_identifier: 'ENG-1',
+          display_id: 'ENG-1',
           title: 'UI',
           pr_url: 'https://github.com/o/r/pull/7',
           updatingReason: 'per ENG-2\'s "button doesnt work"',
@@ -575,7 +575,7 @@ describe('renderEpicPanel (#247 UX — the single maturing panel)', () => {
     const body = renderEpicPanel({
       inProgress: false,
       rows: [
-        row('a', 'succeeded', { linear_identifier: 'ENG-1' }),
+        row('a', 'succeeded', { display_id: 'ENG-1' }),
         row('orch_x__integration', 'succeeded', { pr_url: 'https://github.com/o/r/pull/9' }),
       ],
       combinedPrUrl: 'https://github.com/o/r/pull/9',
@@ -590,7 +590,7 @@ describe('renderEpicPanel (#247 UX — the single maturing panel)', () => {
     const body = renderEpicPanel({
       inProgress: false,
       rows: [
-        row('a', 'succeeded', { linear_identifier: 'ENG-1' }),
+        row('a', 'succeeded', { display_id: 'ENG-1' }),
         row('orch_x__integration', 'failed', { failureReason: reason }),
       ],
     });
@@ -610,7 +610,7 @@ describe('renderEpicPanel (#247 UX — the single maturing panel)', () => {
   });
 
   test('K1: a failed row with NO reason resolved still renders cleanly (no dangling ↳)', () => {
-    const body = renderEpicPanel({ inProgress: false, rows: [row('a', 'failed', { linear_identifier: 'ENG-1' })] });
+    const body = renderEpicPanel({ inProgress: false, rows: [row('a', 'failed', { display_id: 'ENG-1' })] });
     expect(body).toContain('❌ ENG-1 — failed');
     expect(body).not.toContain('↳');
   });
@@ -666,8 +666,8 @@ describe('renderEpicPanel (#247 UX — the single maturing panel)', () => {
     const body = renderEpicPanel({
       inProgress: true,
       rows: [
-        row('z', 'released', { linear_identifier: 'ENG-9' }),
-        row('a', 'released', { linear_identifier: 'ENG-1' }),
+        row('z', 'released', { display_id: 'ENG-9' }),
+        row('a', 'released', { display_id: 'ENG-1' }),
       ],
     });
     expect(body.indexOf('ENG-1')).toBeLessThan(body.indexOf('ENG-9'));
