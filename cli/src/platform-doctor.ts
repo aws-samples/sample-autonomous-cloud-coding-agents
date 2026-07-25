@@ -24,6 +24,7 @@ import {
   DescribeUserPoolCommand,
 } from '@aws-sdk/client-cognito-identity-provider';
 import { isGithubTokenConfigured } from './github-token';
+import { checkLinearWorkspaceAuth, type LinearProbe } from './linear-auth-health';
 import { PLATFORM_REPO_DEFAULTS } from './repo-display';
 import { countActiveRepos } from './repo-lookup';
 import { getStackOutput } from './stack-outputs';
@@ -51,6 +52,8 @@ export interface DoctorCheckResult {
 export interface RunPlatformDoctorOptions {
   readonly region: string;
   readonly stackName: string;
+  /** Injectable Linear auth probe (tests supply a fake; production uses the default). */
+  readonly linearProbe?: LinearProbe;
 }
 
 /** Smoke-check deployed platform readiness (operator AWS credentials). */
@@ -64,12 +67,14 @@ export async function runPlatformDoctor(
     appClientId,
     githubTokenSecretArn,
     repoTableName,
+    linearRegistryTableName,
   ] = await Promise.all([
     getStackOutput(region, stackName, 'ApiUrl'),
     getStackOutput(region, stackName, 'UserPoolId'),
     getStackOutput(region, stackName, 'AppClientId'),
     getStackOutput(region, stackName, 'GitHubTokenSecretArn'),
     getStackOutput(region, stackName, 'RepoTableName'),
+    getStackOutput(region, stackName, 'LinearWorkspaceRegistryTableName'),
   ]);
 
   const checks: DoctorCheckResult[] = [];
@@ -79,6 +84,7 @@ export async function runPlatformDoctor(
   checks.push(await checkGithubToken(region, githubTokenSecretArn));
   checks.push(await checkActiveRepos(region, repoTableName));
   checks.push(await checkBedrockModel(region, DEFAULT_BEDROCK_MODEL_ID));
+  checks.push(await checkLinearAuth(region, linearRegistryTableName, options.linearProbe));
 
   return checks;
 }
@@ -228,6 +234,70 @@ async function checkBedrockModel(region: string, modelId: string): Promise<Docto
       label,
       status,
       detail: `${message} Enable model access in the Bedrock console if tasks fail at invoke time.`,
+    };
+  }
+}
+
+/**
+ * Linear workspaces whose OAuth authorization has died. This is the one failure
+ * mode that is otherwise INVISIBLE: the webhook processor can't resolve a token,
+ * drops the event, and the user sees their label do nothing at all. A revoked
+ * authorization is a total outage for that workspace, so it fails the check; an
+ * expired-but-refreshable token is normal and self-healing, so it doesn't.
+ */
+async function checkLinearAuth(
+  region: string,
+  registryTableName: string | null,
+  probe?: LinearProbe,
+): Promise<DoctorCheckResult> {
+  const id = 'linear_workspace_auth';
+  const label = 'Linear workspace authorizations live';
+  if (!registryTableName) {
+    // Linear is optional — a stack with no Linear integration is not broken.
+    return { id, label, status: 'pass', detail: 'No Linear workspace registry on this stack (integration not deployed).' };
+  }
+
+  try {
+    const health = await checkLinearWorkspaceAuth({
+      region,
+      registryTableName,
+      ...(probe && { probe }),
+    });
+    if (health.length === 0) {
+      return { id, label, status: 'pass', detail: 'No Linear workspaces onboarded yet.' };
+    }
+
+    const revoked = health.filter((w) => w.state === 'revoked');
+    const unknown = health.filter((w) => w.state === 'unknown');
+    const summary = health
+      .map((w) => `${w.workspaceSlug}=${w.state}`)
+      .join(', ');
+
+    if (revoked.length > 0) {
+      const remedies = revoked.map((w) => `  ${w.workspaceSlug}: ${w.detail}`).join('\n');
+      return {
+        id,
+        label,
+        status: 'fail',
+        detail: `${revoked.length} of ${health.length} workspace(s) have a REVOKED authorization — their `
+          + `Linear events are being dropped silently.\n${remedies}\n  (${summary})`,
+      };
+    }
+    if (unknown.length > 0) {
+      return {
+        id,
+        label,
+        status: 'warn',
+        detail: `Could not assess ${unknown.length} of ${health.length} workspace(s): ${summary}`,
+      };
+    }
+    return { id, label, status: 'pass', detail: `${health.length} workspace(s) authorized: ${summary}` };
+  } catch (err) {
+    return {
+      id,
+      label,
+      status: 'warn',
+      detail: `Could not read the Linear workspace registry: ${err instanceof Error ? err.message : String(err)}`,
     };
   }
 }

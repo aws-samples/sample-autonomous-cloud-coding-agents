@@ -23,7 +23,7 @@ import {
   PutSecretValueCommand,
   SecretsManagerClient,
 } from '@aws-sdk/client-secrets-manager';
-import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { logger } from './logger';
 
 /**
@@ -101,6 +101,13 @@ export interface ResolverOptions {
   readonly dynamoDbClient?: DynamoDBDocumentClient;
   /** Override fetch for token-endpoint refresh in tests. */
   readonly fetchImpl?: typeof fetch;
+  /**
+   * Called once the authorization is known dead (the refresh token was rejected
+   * and no concurrent caller had rotated it). Injected rather than written
+   * inline so this module keeps doing one job — resolving a token — and callers
+   * with registry write access opt in. Must not throw; the caller wraps it.
+   */
+  readonly onAuthorizationRevoked?: (linearWorkspaceId: string) => Promise<void>;
 }
 
 interface CacheEntry<T> {
@@ -188,7 +195,16 @@ export async function resolveLinearOauthToken(
 
   // ─── Step 3: Refresh if expiring ─────────────────────────────────
   if (isTokenExpiring(token.expires_at)) {
-    const refreshed = await refreshLinearToken(token, sm, row.oauth_secret_arn, options);
+    // Default the revoked-marker to a registry write, so every caller records a
+    // dead authorization without having to remember to opt in — the whole point
+    // is that the failure stops being invisible. A caller can override (or pass
+    // a no-op) if it lacks registry write access.
+    const withMarker: ResolverOptions = {
+      ...options,
+      onAuthorizationRevoked: options.onAuthorizationRevoked
+        ?? ((workspaceId) => markWorkspaceRevoked(ddb, registryTableName, workspaceId)),
+    };
+    const refreshed = await refreshLinearToken(token, sm, row.oauth_secret_arn, withMarker);
     if (!refreshed) {
       // Refresh failed — return null so the caller can fall back to
       // best-effort behaviour. Cache is already invalidated.
@@ -222,6 +238,57 @@ export async function resolveLinearOauthToken(
  * task). Mixing the two contracts in one function silently fails open;
  * splitting them keeps each call site honest.
  */
+/**
+ * Mark a workspace's registry row as ``revoked``, so the dead authorization is
+ * discoverable instead of living only in a log line. The resolver already
+ * refuses a non-active row, so this also stops the pointless
+ * refresh-then-fail work on every subsequent event.
+ *
+ * NOT YET EFFECTIVE IN PRODUCTION: every Lambda that resolves a token currently
+ * has READ-ONLY access to the registry table, so this write fails AccessDenied
+ * and is swallowed (deliberately — recording the diagnosis must never break token
+ * resolution). Granting the write is deferred; until then the operator-facing
+ * signal is the ``expired_untested`` state from `bgagent platform doctor`, which
+ * cannot distinguish a dead authorization from an idle one. Tracked in the
+ * backlog under the Linear auth-revocation item.
+ *
+ * Conditional on the row still being ``active``: a concurrent caller may have
+ * already marked it, and an operator who has since re-authorized must not be
+ * clobbered back to revoked by a late straggler.
+ */
+export async function markWorkspaceRevoked(
+  ddb: DynamoDBDocumentClient,
+  tableName: string,
+  linearWorkspaceId: string,
+  now: string = new Date().toISOString(),
+): Promise<void> {
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: tableName,
+      Key: { linear_workspace_id: linearWorkspaceId },
+      UpdateExpression: 'SET #s = :revoked, revoked_at = :now, revoked_reason = :reason',
+      ConditionExpression: '#s = :active',
+      ExpressionAttributeNames: { '#s': 'status' },
+      ExpressionAttributeValues: {
+        ':revoked': 'revoked',
+        ':active': 'active',
+        ':now': now,
+        ':reason': 'refresh_token_rejected',
+      },
+    }));
+    logger.warn('Marked Linear workspace as revoked — re-authorization required', {
+      linear_workspace_id: linearWorkspaceId,
+    });
+  } catch (err) {
+    if ((err as { name?: string })?.name === 'ConditionalCheckFailedException') {
+      // Already marked (or re-authorized since) — nothing to do.
+      return;
+    }
+    throw err;
+  }
+  registryCache.delete(linearWorkspaceId);
+}
+
 export async function getRegistryRowStrict(
   ddb: DynamoDBDocumentClient,
   tableName: string,
@@ -439,6 +506,24 @@ async function refreshLinearToken(
       secret_arn: secretArn,
       workspace_id: current.workspace_id,
     });
+    // RECORD the verdict, don't just log it. This is the only moment the
+    // platform knows the authorization is dead: from here on every event for
+    // this workspace is dropped, and without a durable marker the sole evidence
+    // is this log line — so an operator sees their trigger label do nothing and
+    // has no way to find out why (live-caught 2026-07-25, silent for over an
+    // hour). Marking the registry row makes `bgagent platform doctor` able to
+    // report it and name the remedy. Best-effort: a failed write must not turn a
+    // feedback outage into a thrown handler.
+    if (options.onAuthorizationRevoked) {
+      try {
+        await options.onAuthorizationRevoked(current.workspace_id);
+      } catch (err) {
+        logger.warn('Could not mark the Linear workspace as revoked (non-fatal)', {
+          workspace_id: current.workspace_id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
     invalidateLinearOauthCache(current.workspace_id, secretArn);
     return null;
   }

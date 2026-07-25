@@ -356,6 +356,78 @@ describe('resolveLinearOauthToken', () => {
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
+  test('a permanently-rejected refresh RECORDS the revocation on the registry row', async () => {
+    // The failure this guards: when the authorization dies, every event for the
+    // workspace is dropped and the ONLY evidence was a log line, so an operator
+    // saw their trigger label do nothing with no way to find out why. Marking
+    // the row is what makes `bgagent platform doctor` able to say so.
+    const expiringSoon = new Date(Date.now() + 10 * 1000).toISOString();
+    const stale = makeStoredToken({ refresh_token: 'rt-dead', expires_at: expiringSoon });
+
+    const smSend = jest.fn().mockImplementation((command: { constructor: { name: string } }) => {
+      if (command.constructor.name === 'GetSecretValueCommand') {
+        return { SecretString: JSON.stringify(stale) };
+      }
+      return {};
+    });
+    const ddbSend = jest.fn().mockImplementation((command: { constructor: { name: string } }) => {
+      if (command.constructor.name === 'UpdateCommand') return {};
+      return { Item: { workspace_slug: 'acme', oauth_secret_arn: 'arn:secret:acme', status: 'active' } };
+    });
+    const fetchImpl = jest.fn().mockResolvedValueOnce({
+      ok: false, status: 400, json: async () => ({ error: 'invalid_grant' }),
+    });
+
+    type Opts = NonNullable<Parameters<typeof resolveLinearOauthToken>[2]>;
+    const result = await resolveLinearOauthToken('ws-uuid-revoke', REGISTRY_TABLE, {
+      dynamoDbClient: { send: ddbSend } as unknown as Opts['dynamoDbClient'],
+      secretsManagerClient: { send: smSend } as unknown as Opts['secretsManagerClient'],
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    expect(result).toBeNull();
+
+    const update = ddbSend.mock.calls
+      .map((c) => c[0] as { constructor: { name: string }; input?: Record<string, unknown> })
+      .find((c) => c.constructor.name === 'UpdateCommand');
+    expect(update).toBeDefined();
+    const input = update!.input as {
+      ExpressionAttributeValues: Record<string, string>;
+      ConditionExpression: string;
+    };
+    expect(input.ExpressionAttributeValues[':revoked']).toBe('revoked');
+    expect(input.ExpressionAttributeValues[':reason']).toBe('refresh_token_rejected');
+    // Conditional on still being active, so a late straggler can't clobber a
+    // workspace an operator has already re-authorized.
+    expect(input.ConditionExpression).toContain(':active');
+  });
+
+  test('a marker write failure does NOT break token resolution', async () => {
+    // Recording the diagnosis is strictly a bonus; if the registry write fails
+    // the caller must still get its clean null rather than a thrown handler.
+    const expiringSoon = new Date(Date.now() + 10 * 1000).toISOString();
+    const stale = makeStoredToken({ refresh_token: 'rt-dead2', expires_at: expiringSoon });
+    const smSend = jest.fn().mockImplementation((command: { constructor: { name: string } }) => {
+      if (command.constructor.name === 'GetSecretValueCommand') {
+        return { SecretString: JSON.stringify(stale) };
+      }
+      return {};
+    });
+    const ddbSend = jest.fn().mockImplementation((command: { constructor: { name: string } }) => {
+      if (command.constructor.name === 'UpdateCommand') throw new Error('AccessDenied');
+      return { Item: { workspace_slug: 'acme', oauth_secret_arn: 'arn:secret:acme', status: 'active' } };
+    });
+    const fetchImpl = jest.fn().mockResolvedValueOnce({
+      ok: false, status: 400, json: async () => ({ error: 'invalid_grant' }),
+    });
+
+    type Opts = NonNullable<Parameters<typeof resolveLinearOauthToken>[2]>;
+    await expect(resolveLinearOauthToken('ws-uuid-revoke-2', REGISTRY_TABLE, {
+      dynamoDbClient: { send: ddbSend } as unknown as Opts['dynamoDbClient'],
+      secretsManagerClient: { send: smSend } as unknown as Opts['secretsManagerClient'],
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    })).resolves.toBeNull();
+  });
+
   test('cache invalidation on network failure: next call re-reads SM instead of looping on stale token', async () => {
     const expiringSoon = new Date(Date.now() + 10 * 1000).toISOString();
     const stale = makeStoredToken({ expires_at: expiringSoon });
