@@ -457,6 +457,7 @@ export function makeLinearCommand(): Command {
       .option('--client-secret <secret>', 'Linear OAuth app Client Secret (else prompted; prefer interactive)')
       .option('--no-browser', 'Print the authorization URL instead of opening a browser (for SSH/headless)')
       .option('--no-actor-app', 'Drop actor=app from the OAuth flow (diagnostic: isolates whether agent-install is blocking)')
+      .option('--no-force-consent', 'Omit prompt=consent (diagnostic: restores the pre-fix behaviour that dead-ends on an already-installed app)')
       .action(async (slug: string, opts) => {
         if (!SLUG_RE.test(slug)) {
           throw new CliError(
@@ -535,6 +536,11 @@ export function makeLinearCommand(): Command {
           state,
           codeChallenge: pkce.codeChallenge,
           actorApp: useActorApp,
+          // Always force the consent screen. A FRESH install shows it anyway, so
+          // this only changes the already-installed case — which without it
+          // dead-ends on "already installed" and returns no code, making a
+          // revoked-but-installed workspace unrecoverable by this command.
+          forceConsent: opts.forceConsent !== false,
         });
         if (!useActorApp) {
           console.log('  ⚠ --no-actor-app: dropping actor=app for diagnosis. Token will not be agent-scoped.');
@@ -862,6 +868,7 @@ export function makeLinearCommand(): Command {
       .option('--stack-name <name>', 'CloudFormation stack name', 'backgroundagent-dev')
       .option('--no-browser', 'Print the authorization URL instead of opening a browser (for SSH/headless)')
       .option('--no-actor-app', 'Drop actor=app from the OAuth flow (diagnostic)')
+      .option('--no-force-consent', 'Omit prompt=consent (diagnostic)')
       .action(async (slug: string, opts) => {
         if (!SLUG_RE.test(slug)) {
           throw new CliError(
@@ -959,6 +966,11 @@ export function makeLinearCommand(): Command {
           state,
           codeChallenge: pkce.codeChallenge,
           actorApp: useActorApp,
+          // Always force the consent screen. A FRESH install shows it anyway, so
+          // this only changes the already-installed case — which without it
+          // dead-ends on "already installed" and returns no code, making a
+          // revoked-but-installed workspace unrecoverable by this command.
+          forceConsent: opts.forceConsent !== false,
         });
         if (!useActorApp) {
           console.log('  ⚠ --no-actor-app: dropping actor=app for diagnosis. Token will not be agent-scoped.');

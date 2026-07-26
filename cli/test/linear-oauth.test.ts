@@ -106,6 +106,46 @@ describe('buildAuthorizationUrl', () => {
     const parsed = new URL(url);
     expect(parsed.searchParams.has('actor')).toBe(false);
   });
+
+  test('forceConsent adds prompt=consent so an already-installed app can RE-authorize', () => {
+    // Without this, Linear short-circuits an installed app with "already
+    // installed" and returns no authorization code — so `linear setup`, the
+    // documented remedy for a revoked authorization, could not actually recover
+    // one (live-caught 2026-07-25).
+    const url = buildAuthorizationUrl({
+      clientId: 'cid',
+      redirectUri: 'https://localhost:8443/oauth/callback',
+      state: 'state-uuid',
+      codeChallenge: 'challenge',
+      forceConsent: true,
+    });
+    expect(new URL(url).searchParams.get('prompt')).toBe('consent');
+  });
+
+  test('prompt is omitted unless asked, so the param set stays minimal by default', () => {
+    const url = buildAuthorizationUrl({
+      clientId: 'cid',
+      redirectUri: 'https://localhost:8443/oauth/callback',
+      state: 'state-uuid',
+      codeChallenge: 'challenge',
+    });
+    expect(new URL(url).searchParams.has('prompt')).toBe(false);
+  });
+
+  test('forceConsent composes with actor=app — the combination the install path needs', () => {
+    // The failing case is specifically an actor=app re-install, so both params
+    // must survive together.
+    const parsed = new URL(buildAuthorizationUrl({
+      clientId: 'cid',
+      redirectUri: 'https://localhost:8443/oauth/callback',
+      state: 'state-uuid',
+      codeChallenge: 'challenge',
+      actorApp: true,
+      forceConsent: true,
+    }));
+    expect(parsed.searchParams.get('actor')).toBe('app');
+    expect(parsed.searchParams.get('prompt')).toBe('consent');
+  });
 });
 
 describe('isAccessTokenExpiring', () => {

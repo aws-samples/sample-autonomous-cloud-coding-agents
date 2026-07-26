@@ -159,6 +159,14 @@ export function generatePkce(): { codeVerifier: string; codeChallenge: string } 
 /**
  * Build the Linear authorization URL the CLI opens in the browser.
  * `actorApp: true` adds `actor=app` (the Agent install variant).
+ *
+ * ``forceConsent`` adds ``prompt=consent``, which Linear documents as showing
+ * the consent screen "every time, even if all scopes were previously granted".
+ * That is what makes RE-authorization possible: without it, an app already
+ * installed in the workspace short-circuits with "already installed" and never
+ * returns an authorization code — so the one command meant to recover a revoked
+ * authorization could not recover it (live-caught 2026-07-25, where a workspace's
+ * grant was revoked while the app install stayed active).
  */
 export function buildAuthorizationUrl(opts: {
   clientId: string;
@@ -167,6 +175,7 @@ export function buildAuthorizationUrl(opts: {
   codeChallenge: string;
   scopes?: readonly string[];
   actorApp?: boolean;
+  forceConsent?: boolean;
 }): string {
   const params = new URLSearchParams({
     client_id: opts.clientId,
@@ -182,6 +191,9 @@ export function buildAuthorizationUrl(opts: {
   });
   if (opts.actorApp ?? true) {
     params.set('actor', 'app');
+  }
+  if (opts.forceConsent) {
+    params.set('prompt', 'consent');
   }
   return `${LINEAR_AUTHORIZE_ENDPOINT}?${params.toString()}`;
 }
