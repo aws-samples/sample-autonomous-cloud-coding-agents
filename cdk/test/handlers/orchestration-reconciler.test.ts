@@ -1406,6 +1406,51 @@ describe('orchestration-reconciler handler — A6 iteration ack reply (#247 UX.3
     expect(upsertThreadedReplyMock).toHaveBeenCalledTimes(1);
   });
 
+  test('a FAILED reply releases the claim and does not settle the comment or the sub-issue', async () => {
+    // Two separate hazards if the claim is kept: no redelivery can retry the
+    // reply, and the progress + heartbeat writers treat the claim as "an outcome
+    // landed" and stand down — so the reply stalls on its last progress text.
+    // Settling the comment to ✅ on top of that would be worse still: the reaction
+    // would say done while the reply says working, which is the exact
+    // contradiction this maturing-reply design removes.
+    mockCascade([
+      { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A', linear_identifier: 'ENG-1' },
+    ]);
+    upsertThreadedReplyMock.mockReset().mockResolvedValue(null);
+
+    await handler(iterEventWithComment('COMPLETED'));
+
+    const acks = ddbSend.mock.calls
+      .map((c) => c[0] as { _type?: string; input?: { UpdateExpression?: string; ExpressionAttributeValues?: Record<string, unknown> } })
+      .filter((cmd) => cmd?._type === 'Update' && /ack_replied_at/.test(cmd.input?.UpdateExpression ?? ''));
+    expect(acks.map((a) => a.input?.UpdateExpression)).toEqual([
+      'SET ack_replied_at = :now',
+      'REMOVE ack_replied_at',
+    ]);
+    // Released conditionally on this run's own stamp, so a concurrent delivery
+    // that has already claimed and replied keeps its claim.
+    expect(acks[1].input?.ExpressionAttributeValues).toEqual({
+      ':ours': acks[0].input?.ExpressionAttributeValues?.[':now'],
+    });
+    expect(swapCommentReactionMock).not.toHaveBeenCalled();
+    expect(transitionIssueStateMock).not.toHaveBeenCalledWith(
+      expect.anything(), 'A', 'started', ['In Review'], false,
+    );
+  });
+
+  test('a SUCCESSFUL reply keeps the claim, so the once-only guarantee survives the fix', async () => {
+    mockCascade([
+      { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A', linear_identifier: 'ENG-1' },
+    ]);
+    await handler(iterEventWithComment('COMPLETED'));
+
+    const released = ddbSend.mock.calls
+      .map((c) => c[0] as { _type?: string; input?: { UpdateExpression?: string } })
+      .filter((cmd) => cmd?._type === 'Update' && /REMOVE ack_replied_at/.test(cmd.input?.UpdateExpression ?? ''));
+    expect(released).toHaveLength(0);
+    expect(swapCommentReactionMock).toHaveBeenCalled();
+  });
+
   test('a restack (no trigger_comment_id) → no ack reply', async () => {
     mockCascade([
       { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A', linear_identifier: 'ENG-1' },

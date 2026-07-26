@@ -1920,6 +1920,42 @@ describe('fanout-task-events: Linear dispatcher (issue #239)', () => {
       expect(mockUpsertThreadedReply).not.toHaveBeenCalled();
     });
 
+    test('a terminal reply that FAILS releases its claim so a redelivery can retry', async () => {
+      // Claiming the reply and then failing to write it used to be terminal in
+      // both directions: no redelivery could retry (the claim was taken), and the
+      // progress + heartbeat writers read that same claim as "an outcome landed"
+      // and stood down too — so the reply stayed on its last progress text and the
+      // human's request read as unanswered forever.
+      mockGet(STANDALONE);
+      mockUpsertThreadedReply.mockReset().mockResolvedValue(null);
+
+      await handler({ Records: [mkEvent('task_completed', 't-lin')] });
+
+      const updates = mockDdbSend.mock.calls
+        .map((c) => c[0] as { _type?: string; input?: { UpdateExpression?: string; ExpressionAttributeValues?: Record<string, unknown> } })
+        .filter((cmd) => cmd?._type === 'Update' && /ack_replied_at/.test(cmd.input?.UpdateExpression ?? ''));
+      // Claimed, then gave the claim back.
+      expect(updates.map((u) => u.input?.UpdateExpression)).toEqual([
+        'SET ack_replied_at = :now',
+        'REMOVE ack_replied_at',
+      ]);
+      // The release is conditional on the stamp this run wrote, so it cannot strip
+      // a claim another delivery has since taken and already replied under.
+      expect(updates[1].input?.ExpressionAttributeValues).toEqual({
+        ':ours': updates[0].input?.ExpressionAttributeValues?.[':now'],
+      });
+    });
+
+    test('a SUCCESSFUL reply keeps its claim — the once-only guarantee still holds', async () => {
+      mockGet(STANDALONE);
+      await handler({ Records: [mkEvent('task_completed', 't-lin')] });
+
+      const removes = mockDdbSend.mock.calls
+        .map((c) => c[0] as { _type?: string; input?: { UpdateExpression?: string } })
+        .filter((cmd) => cmd?._type === 'Update' && /REMOVE ack_replied_at/.test(cmd.input?.UpdateExpression ?? ''));
+      expect(removes).toHaveLength(0);
+    });
+
     test('idempotent: a redelivered terminal event that loses the ack claim does not double-reply', async () => {
       // Get returns the record; the ack-claim Update throws ConditionalCheckFailed.
       mockDdbSend.mockReset().mockImplementation((cmd: { _type?: string; input?: { UpdateExpression?: string } }) => {

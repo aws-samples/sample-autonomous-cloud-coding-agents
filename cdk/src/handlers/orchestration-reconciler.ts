@@ -51,6 +51,7 @@ import type { ScreeningConfig } from './shared/attachment-screening';
 import { createTaskCore } from './shared/create-task-core';
 import { renderFailureReply, renderPanelFailureReason } from './shared/failure-reply';
 import { isNoChangeIteration, renderMaturingReply } from './shared/iteration-reply';
+import { claimTerminalReply, releaseReplyClaim } from './shared/iteration-reply-claim';
 import { downloadScreenAndStoreLinearAttachments, isLinearUploadsUrl, LinearAttachmentError } from './shared/linear-attachments';
 import { probeLinearIssueContext } from './shared/linear-issue-context-probe';
 import { resolveLinearOauthToken } from './shared/linear-oauth-resolver';
@@ -1154,26 +1155,8 @@ async function replyToIterationComment(
   const workspaceId = snapshot.meta.credentials_ref;
 
   // Claim the one reply for this iteration task.
-  let won = false;
-  try {
-    await ddb.send(new UpdateCommand({
-      TableName: TASK_TABLE,
-      Key: { task_id: evt.taskId },
-      UpdateExpression: 'SET ack_replied_at = :now',
-      ConditionExpression: 'attribute_not_exists(ack_replied_at)',
-      ExpressionAttributeValues: { ':now': new Date().toISOString() },
-    }));
-    won = true;
-  } catch (err) {
-    if ((err as { name?: string })?.name !== 'ConditionalCheckFailedException') {
-      logger.warn('UX.3 ack: claim write failed (skipping reply)', {
-        task_id: evt.taskId,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-    return; // lost the claim (replay) or errored → don't double-reply
-  }
-  if (!won) return;
+  const claim = await claimTerminalReply(ddb, TASK_TABLE, evt.taskId, new Date().toISOString());
+  if (!claim.won) return; // lost the claim (replay) or errored → don't double-reply
 
   // iteration-UX: mature the settle reply (👀→✅/💬) with cost + running total,
   // editing the trigger-time reply when its id was captured. A failure keeps the
@@ -1215,13 +1198,30 @@ async function replyToIterationComment(
   // threaded reply for older tasks that captured no reply id.
   // preservePreview: converge with the screenshot webhook's async `[preview]`
   // append so this terminal re-render doesn't clobber it.
-  await channel.upsertThreadedReply?.(
+  const reply = await channel.upsertThreadedReply?.(
     issueRef(replyIssueId, workspaceId),
     { commentId },
     body,
     evt.iterationReplyId ? { commentId: evt.iterationReplyId } : undefined,
     { preservePreview: true },
   );
+  // A surface that cannot mature a reply at all (the capability is optional)
+  // legitimately returns undefined; only an attempted-and-failed reply — null —
+  // means the outcome went unsaid.
+  if (reply === null) {
+    // Holding a claim over a reply that never landed makes the failure permanent:
+    // no redelivery may retry it, and the progress + heartbeat writers read the
+    // claim as "an outcome has landed" and stand down too, so the reply stays on
+    // its last progress text. Release, and settle nothing else — a ✅ reaction
+    // beside a reply still saying "On it" is the contradiction this design exists
+    // to remove.
+    await releaseReplyClaim(ddb, TASK_TABLE, evt.taskId, claim.stamp);
+    logger.warn('UX.3 ack: reply failed — claim released so a redelivery can retry', {
+      task_id: evt.taskId,
+      linear_issue_id: replyIssueId,
+    });
+    return;
+  }
 
   // Settle the comment + sub-issue so all three views agree (panel row,
   // sub-issue state, comment reaction) — the platform owns this, not the agent

@@ -50,6 +50,7 @@ import { classifyError } from './shared/error-classifier';
 import { renderFailureReply } from './shared/failure-reply';
 import { renderCommentBody, upsertTaskComment } from './shared/github-comment';
 import { renderMaturingReply } from './shared/iteration-reply';
+import { claimTerminalReply, releaseReplyClaim, terminalReplyClaimed } from './shared/iteration-reply-claim';
 import {
   buildAdfDocument,
   postIssueCommentAdf,
@@ -477,37 +478,13 @@ async function loadTaskForComment(taskId: string): Promise<TaskRecord | null> {
 }
 
 /**
- * Has a terminal settle already claimed this task's maturing reply?
- *
- * Read strongly-consistent and LATE, because the whole point is to observe a
- * write another Lambda may have made moments ago: ``ack_replied_at`` is stamped
- * (conditionally, so exactly one writer wins) by whichever path owns the terminal
- * reply — the reconciler for an orchestration iteration, ``replyToStandaloneTrigger``
- * for a standalone one. An eventually-consistent read is precisely how a stale
- * milestone slips past.
- *
- * Fails OPEN (returns false) on a read error: a missed progress edit is a cosmetic
- * loss, whereas suppressing progress on a task that never settled would leave the
- * reply frozen at "On it".
+ * Has a terminal settle already claimed this task's maturing reply? Thin wrapper
+ * binding this handler's client + table to the shared claim protocol.
  */
 async function terminalReplyAlreadyClaimed(taskId: string): Promise<boolean> {
   const tableName = process.env.TASK_TABLE_NAME;
   if (!tableName) return false;
-  try {
-    const res = await ddb.send(new GetCommand({
-      TableName: tableName,
-      Key: { task_id: taskId },
-      ProjectionExpression: 'ack_replied_at',
-      ConsistentRead: true,
-    }));
-    return Boolean((res.Item as { ack_replied_at?: string } | undefined)?.ack_replied_at);
-  } catch (err) {
-    logger.warn('[fanout/linear] could not check whether the reply already settled', {
-      task_id: taskId,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return false;
-  }
+  return terminalReplyClaimed(ddb, tableName, taskId);
 }
 
 /**
@@ -1433,23 +1410,8 @@ async function replyToStandaloneTrigger(
   if (!tableName) return;
 
   // Claim the single reply for this task (dedup redelivered terminal events).
-  try {
-    await ddb.send(new UpdateCommand({
-      TableName: tableName,
-      Key: { task_id: task.task_id },
-      UpdateExpression: 'SET ack_replied_at = :now',
-      ConditionExpression: 'attribute_not_exists(ack_replied_at)',
-      ExpressionAttributeValues: { ':now': event.timestamp },
-    }));
-  } catch (err) {
-    if ((err as { name?: string })?.name !== 'ConditionalCheckFailedException') {
-      logger.warn('[fanout/linear] UX.3 ack claim failed — skipping reply', {
-        task_id: task.task_id,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-    return; // lost the claim (replay) or errored → don't double-reply
-  }
+  const claim = await claimTerminalReply(ddb, tableName, task.task_id, event.timestamp);
+  if (!claim.won) return; // lost the claim (replay) or errored → don't double-reply
 
   // A clean success = completed AND the build/tests passed. A completed task
   // whose build is red is NOT a clean ack — it gets the failure reply
@@ -1518,7 +1480,24 @@ async function replyToStandaloneTrigger(
   // preservePreview: this terminal-settle and the screenshot webhook's preview
   // append race on this one reply (live-caught ABCA-434). Carry an already-landed
   // `[preview]` link onto the freshly-rendered terminal body so they converge.
-  await upsertThreadedReply(replyCtx, issueId, triggerCommentId, body, existingReplyId, { preservePreview: true });
+  const replyId = await upsertThreadedReply(
+    replyCtx, issueId, triggerCommentId, body, existingReplyId, { preservePreview: true },
+  );
+  if (!replyId) {
+    // The claim must not outlive a reply that never landed: holding it would stop
+    // both a redelivery from retrying AND the progress writers from touching the
+    // reply again (they read the claim as "an outcome has landed"), leaving the
+    // human's request looking unanswered forever. Give it back and let this
+    // record be retried. Return before the reaction swap so the comment does not
+    // read ✅ next to a reply that still says "On it".
+    await releaseReplyClaim(ddb, tableName, task.task_id, claim.stamp);
+    logger.warn('[fanout/linear] terminal reply edit failed — claim released for retry', {
+      event: 'fanout.linear.terminal_reply_failed',
+      task_id: task.task_id,
+      issue_id: issueId,
+    });
+    return;
+  }
 
   // Swap the TRIGGER comment's 👀 → ✅ / 💬 / ❌ so the human's comment reads
   // "done" at a glance, not just the threaded reply. The orchestration path does
