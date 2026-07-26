@@ -1,12 +1,28 @@
 # Surface-agnostic sub-issue orchestration
 
-**Status:** the Channel interface, its Linear + Jira + Slack adapters, and the engine
-rewiring onto it are implemented, with adapters selected from a registry (a new surface
-registers itself; no core edit). The channel-neutral ROW SHAPE (below) is not — the store still
-carries `linear_*` field names. **Goal:** make the sub-issue orchestration engine work
-across issue-tracking surfaces (Linear today; Jira next — a Jira comment-back path
-already exists) behind one **Channel adapter interface**, so the generic engine has
-no surface knowledge and each surface's specifics live in its own adapter.
+**Status:** the Channel interface, its Linear + Jira + Slack adapters, the engine rewiring
+onto it, and the channel-neutral row shape are all implemented. Adapters are selected from a
+registry keyed on the row's stored `channel_source`. **Goal:** make the sub-issue
+orchestration engine work across issue-tracking surfaces (Linear today; Jira next — a Jira
+comment-back path already exists) behind one **Channel adapter interface**, so the generic
+engine has no surface knowledge and each surface's specifics live in its own adapter.
+
+**Scope of the "no core edit" claim** — worth stating precisely, because the loose version
+of it is not true. Adding a surface needs no change to the *engine*: nothing in discovery,
+release, reconcile, or rollup names a surface, and an adapter can be registered from its own
+module via `registerChannelFactory`. Three things outside the engine still need editing, and
+none is hidden:
+
+1. **Registry-table wiring per handler.** Each handler declares which surfaces' credentials
+   registries it can reach (`CHANNEL_REGISTRY_TABLES` in the reconciler), plus the CDK env +
+   IAM grant behind it. That is a deployment decision — which tenants' secrets a Lambda may
+   read — so it is deliberately explicit rather than inferred.
+2. **`ChannelSource` is still a closed union** in `types.ts`, because task records and the
+   CLI share it and several `switch`es rely on its exhaustiveness. The *registry* is open —
+   `channelForSource` takes a plain string — so a surface registered downstream resolves an
+   adapter; it just cannot yet be written into a task record's `channel_source`.
+3. **A seeding path.** See the last section: the feedback axis is agnostic, the seeding axis
+   is not.
 
 ## Principle
 
@@ -57,7 +73,7 @@ interface Channel {
   transitionState?(issue, intent, {allowRegression})  // running / awaiting-review / done
   revertState?(issue)                               // the one sanctioned backward move
   postThreadedReply?(issue, parent, body)
-  upsertThreadedReply?(issue, parent, body, existing?, {preservePreview})
+  upsertThreadedReply?(issue, parent, body, existing?, {preservePreview, skipIfSettled, repairIfOverwritten})
   sweepNotes?(issue, keep?)                         // collapse transient planning notes
 
   // --- graph (surface-specific derivation, uniform result) ---
@@ -136,12 +152,14 @@ because seeding is still Linear-only end to end:
   them sit on Linear paths (the Linear webhook processor and the reconciler).
 - The Jira webhook processor has no orchestration/sub-issue path at all — it uses the
   single-issue comment-back only.
-- Nothing selects an adapter from a stored `channel_source`; the entry points build the
-  Linear channel directly, which is correct for a Linear webhook but means a Jira epic
-  has no way in.
+- Adapter selection from a stored `channel_source` now EXISTS (the registry), so the
+  event-driven paths follow the row rather than assuming Linear. Surface-specific entry
+  points — a Linear webhook processor only ever handles Linear — still build their adapter
+  directly, which is correct for them.
 
-Reaching a Jira epic therefore also needs: a Jira graph source (or a declarative one),
-a Jira seeding/trigger path, and `channel_source → adapter` selection in the reconciler.
+Reaching a Jira epic therefore still needs: a Jira graph source (or a declarative one), a
+Jira seeding/trigger path, and the Jira credentials registry wired into the handlers that
+would act on it (point 1 above).
 
 ## Divergence from linear-vercel + verification
 

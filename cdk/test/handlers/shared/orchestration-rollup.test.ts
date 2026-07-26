@@ -32,6 +32,7 @@ const loggerMock = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
 jest.mock('../../../src/handlers/shared/logger', () => ({ logger: loggerMock }));
 
 import type { IssueRef } from '../../../src/handlers/shared/orchestration-channel';
+import { channelForSource, registerChannelFactory } from '../../../src/handlers/shared/orchestration-channel-factory';
 import { makeSlackChannel, slackThreadRef } from '../../../src/handlers/shared/orchestration-channel-slack';
 import { ORCH_LOG } from '../../../src/handlers/shared/orchestration-log-events';
 import {
@@ -319,6 +320,50 @@ describe('upsertEpicPanel — the maturing panel + parent-state mirror', () => {
       ...slackFetchTsMock.mock.calls.map((c) => c[1]),
     ];
     expect(methods.every((m) => typeof m === 'string' && m.startsWith('chat.') || String(m).startsWith('reactions.'))).toBe(true);
+  });
+
+  test('a DOWNSTREAM surface the core never imports drives the panel end to end', async () => {
+    // The extensibility claim, exercised rather than asserted about: this surface
+    // exists only in this test, is resolved through the same registry lookup the
+    // reconciler uses, and reaches the engine with no edit to the interface, the
+    // lookup, or the rollup. Slack proves the interface fits a non-tracker, but it
+    // ships in-tree — so it cannot show that nothing in the core has to know.
+    const posted: Array<{ issue: string; body: string }> = [];
+    const unregister = registerChannelFactory('acme-tracker', (registryTable) => ({
+      kind: 'acme-tracker',
+      postComment: async () => null,
+      upsertComment: async (issue, body) => {
+        // The per-surface credentials table reached the adapter, so a panel is
+        // addressed with this tenant's credentials and not another surface's.
+        expect(registryTable).toBe('AcmeRegistry');
+        posted.push({ issue: issue.issueId, body });
+        return { commentId: 'acme-panel-1' };
+      },
+      reportFailure: async () => undefined,
+      // Reactions supported; workflow state deliberately NOT — a third capability
+      // shape, different from both Linear (all of it) and Slack (none of it).
+      replaceIssueReaction: async () => true,
+    }));
+    try {
+      const channelFromRegistry = channelForSource('acme-tracker', { 'acme-tracker': 'AcmeRegistry' });
+      expect(channelFromRegistry).toBeDefined();
+
+      const id = await upsertEpicPanel({
+        channel: channelFromRegistry!,
+        parent: { issueId: 'acme-epic-1', credentialsRef: 'acme-tenant-1' },
+        children: [row('a', 'succeeded')],
+        inProgress: false,
+        mirrorParentState: true, // asks for a transition this surface cannot do
+      });
+
+      expect(id).toBe('acme-panel-1');
+      expect(posted).toHaveLength(1);
+      expect(posted[0].issue).toBe('acme-epic-1');
+      // The panel body is the engine's own rendering — the surface supplied none of it.
+      expect(posted[0].body).toContain('ABCA orchestration complete');
+    } finally {
+      unregister();
+    }
   });
 
   test('a surface without reactions or transitions still gets its panel', async () => {

@@ -31,7 +31,18 @@
  * every consumer would have to merge a core change to support one more surface —
  * the thing the extensibility tenet exists to prevent. Instead each adapter
  * declares how to build itself, and a surface can be registered from outside this
- * module entirely.
+ * module entirely via {@link registerChannelFactory}.
+ *
+ * What that does and does NOT buy, stated plainly so the claim isn't read too
+ * broadly: a downstream surface needs no change to the engine or to this lookup,
+ * and resolves an adapter here from any string. It still needs its credentials
+ * registry named in each handler that will act on it (see
+ * {@link ChannelRegistryTables}) — a deployment decision about which tenants'
+ * secrets a Lambda may read, so deliberately explicit — and ``ChannelSource`` in
+ * ``types.ts`` remains a closed union shared with task records and the CLI, so a
+ * downstream surface can drive feedback before it can be written into a task
+ * record. The in-tree adapters are imported here only to seed the common cases;
+ * nothing about the mechanism requires it.
  *
  * A surface whose credentials registry isn't configured for the caller, or which
  * has no registered adapter, yields ``undefined``: the caller skips feedback for
