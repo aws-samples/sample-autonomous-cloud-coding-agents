@@ -710,6 +710,122 @@ describe('linear-feedback', () => {
     });
   });
 
+  describe('upsertThreadedReply repairIfOverwritten (the outcome defends itself)', () => {
+    const REPLY_ID = 'reply-cmt-9';
+    const BLOCK = '[![preview](https://cdn/screenshots/x.png)](https://app.vercel.app)';
+    const OUTCOME = '✅ Updated — [PR #5](u). _$0.2 · 35s_';
+
+    test('restores the outcome when a racing progress edit overwrote it', async () => {
+      // Why the progress writer's own body check is not enough: it reads, then
+      // writes, and a settle landing in between is still overwritten. Linear's
+      // comment update takes only an id and a body — no version to condition on —
+      // so the interleaving cannot be prevented, only detected and undone by the
+      // writer that knows which body matters.
+      fetchMock
+        .mockResolvedValueOnce(jsonResponse({ data: { commentUpdate: { success: true } } })) // settle write
+        .mockResolvedValueOnce(jsonResponse({ data: { comment: { body: '🔄 Working — updating PR #5…' } } }))
+        .mockResolvedValueOnce(jsonResponse({ data: { commentUpdate: { success: true } } })); // repair
+
+      const id = await upsertThreadedReply(
+        CTX, ISSUE_ID, 'parent-1', OUTCOME, REPLY_ID, { repairIfOverwritten: true },
+      );
+
+      expect(id).toBe(REPLY_ID);
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      expect(JSON.parse(fetchMock.mock.calls[2][1].body).variables.body).toBe(OUTCOME);
+    });
+
+    test('the repair carries over a preview appended during the race', async () => {
+      // The screenshot webhook is a third writer of this reply; restoring the
+      // outcome must not drop a thumbnail that landed while the race resolved.
+      fetchMock
+        .mockResolvedValueOnce(jsonResponse({ data: { commentUpdate: { success: true } } }))
+        .mockResolvedValueOnce(jsonResponse({ data: { comment: { body: `🔄 Working…\n\n${BLOCK}` } } }))
+        .mockResolvedValueOnce(jsonResponse({ data: { commentUpdate: { success: true } } }));
+
+      await upsertThreadedReply(
+        CTX, ISSUE_ID, 'parent-1', OUTCOME, REPLY_ID, { repairIfOverwritten: true },
+      );
+
+      expect(JSON.parse(fetchMock.mock.calls[2][1].body).variables.body).toBe(`${OUTCOME}\n\n${BLOCK}`);
+    });
+
+    test('no repair when the outcome is still there (one extra read, no write)', async () => {
+      fetchMock
+        .mockResolvedValueOnce(jsonResponse({ data: { commentUpdate: { success: true } } }))
+        .mockResolvedValueOnce(jsonResponse({ data: { comment: { body: OUTCOME } } }));
+
+      const id = await upsertThreadedReply(
+        CTX, ISSUE_ID, 'parent-1', OUTCOME, REPLY_ID, { repairIfOverwritten: true },
+      );
+
+      expect(id).toBe(REPLY_ID);
+      expect(fetchMock).toHaveBeenCalledTimes(2); // write + verify read, no second write
+    });
+
+    test('a DIFFERENT terminal body is left alone — never fight a later outcome', async () => {
+      // A failure reply superseding a success, or a second iteration's settle, is
+      // newer and correct. Re-asserting our own would undo real information.
+      fetchMock
+        .mockResolvedValueOnce(jsonResponse({ data: { commentUpdate: { success: true } } }))
+        .mockResolvedValueOnce(jsonResponse({ data: { comment: { body: '❌ The build failed.' } } }));
+
+      await upsertThreadedReply(
+        CTX, ISSUE_ID, 'parent-1', OUTCOME, REPLY_ID, { repairIfOverwritten: true },
+      );
+
+      expect(fetchMock).toHaveBeenCalledTimes(2); // no repair write
+    });
+
+    test('an unreadable body is left alone rather than guessed at', async () => {
+      fetchMock
+        .mockResolvedValueOnce(jsonResponse({ data: { commentUpdate: { success: true } } }))
+        .mockResolvedValueOnce(jsonResponse({ errors: [{ message: 'boom' }] }));
+
+      const id = await upsertThreadedReply(
+        CTX, ISSUE_ID, 'parent-1', OUTCOME, REPLY_ID, { repairIfOverwritten: true },
+      );
+
+      // The settle itself succeeded, so report success; the verify is advisory.
+      expect(id).toBe(REPLY_ID);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    test('a PROGRESS body is never defended — only outcomes are worth the round trip', async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse({ data: { commentUpdate: { success: true } } }));
+
+      await upsertThreadedReply(
+        CTX, ISSUE_ID, 'parent-1', '🔄 Working…', REPLY_ID, { repairIfOverwritten: true },
+      );
+
+      expect(fetchMock).toHaveBeenCalledTimes(1); // no verify read at all
+    });
+
+    test('a failed settle is reported as failed and never repaired', async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse({ errors: [{ message: 'bad id' }] }));
+
+      const id = await upsertThreadedReply(
+        CTX, ISSUE_ID, 'parent-1', OUTCOME, REPLY_ID, { repairIfOverwritten: true },
+      );
+
+      expect(id).toBeNull();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    test('a repair that itself fails does not fail the settle', async () => {
+      fetchMock
+        .mockResolvedValueOnce(jsonResponse({ data: { commentUpdate: { success: true } } }))
+        .mockResolvedValueOnce(jsonResponse({ data: { comment: { body: '🔄 Working…' } } }))
+        .mockResolvedValueOnce(jsonResponse({}, 500));
+
+      const id = await upsertThreadedReply(
+        CTX, ISSUE_ID, 'parent-1', OUTCOME, REPLY_ID, { repairIfOverwritten: true },
+      );
+
+      expect(id).toBe(REPLY_ID);
+    });
+  });
+
   describe('sweepDecompositionNotes (#299 plan-cleanup)', () => {
     // A representative plan-phase thread: the frozen plan reference (KEEP), the
     // transient decompose notes (🗂️/👋 → DELETE), the live epic panel (🔄 → a

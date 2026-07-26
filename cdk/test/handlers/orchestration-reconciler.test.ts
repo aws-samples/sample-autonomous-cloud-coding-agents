@@ -1406,6 +1406,21 @@ describe('orchestration-reconciler handler — A6 iteration ack reply (#247 UX.3
     expect(upsertThreadedReplyMock).toHaveBeenCalledTimes(1);
   });
 
+  test('the terminal settle asks the surface to restore the outcome if it gets overwritten', async () => {
+    // The progress writers avoid clobbering by reading the body first, but that is
+    // a read then a separate write, and the surface offers no conditional update
+    // to close the gap — so the writer holding the outcome verifies afterwards.
+    mockCascade([
+      { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A', linear_identifier: 'ENG-1' },
+    ]);
+    await handler(iterEventWithComment('COMPLETED'));
+
+    const options = upsertThreadedReplyMock.mock.calls[0][5] as Record<string, unknown>;
+    expect(options).toMatchObject({ preservePreview: true, repairIfOverwritten: true });
+    // A terminal render must never yield to progress; only the reverse.
+    expect(options.skipIfSettled).toBeFalsy();
+  });
+
   test('a FAILED reply releases the claim and does not settle the comment or the sub-issue', async () => {
     // Two separate hazards if the claim is kept: no redelivery can retry the
     // reply, and the progress + heartbeat writers treat the claim as "an outcome

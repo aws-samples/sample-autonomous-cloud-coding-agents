@@ -1481,7 +1481,11 @@ async function replyToStandaloneTrigger(
   // append race on this one reply (live-caught ABCA-434). Carry an already-landed
   // `[preview]` link onto the freshly-rendered terminal body so they converge.
   const replyId = await upsertThreadedReply(
-    replyCtx, issueId, triggerCommentId, body, existingReplyId, { preservePreview: true },
+    replyCtx, issueId, triggerCommentId, body, existingReplyId,
+    // repairIfOverwritten: a progress milestone delivered at the same moment can
+    // land on top of this outcome, and the surface has no conditional update to
+    // prevent it — so re-assert the outcome if that happened.
+    { preservePreview: true, repairIfOverwritten: true },
   );
   if (!replyId) {
     // The claim must not outlive a reply that never landed: holding it would stop

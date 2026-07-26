@@ -158,6 +158,7 @@ export function makeLinearChannel(registryTableName: string): Channel {
         {
           preservePreview: options?.preservePreview ?? false,
           skipIfSettled: options?.skipIfSettled ?? false,
+          repairIfOverwritten: options?.repairIfOverwritten ?? false,
         },
       );
       return id ? { commentId: id } : null;

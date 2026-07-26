@@ -642,7 +642,7 @@ export async function upsertThreadedReply(
   parentCommentId: string,
   body: string,
   existingReplyId?: string,
-  options?: { preservePreview?: boolean; skipIfSettled?: boolean },
+  options?: { preservePreview?: boolean; skipIfSettled?: boolean; repairIfOverwritten?: boolean },
 ): Promise<string | null> {
   const token = await resolveToken(ctx);
   if (!token) return null;
@@ -661,6 +661,14 @@ export async function upsertThreadedReply(
     // task-record marker is stamped slightly BEFORE the render it announces, so
     // checking the body is what closes that window. Yield rather than clobber:
     // losing a progress edit is cosmetic, losing the outcome is not.
+    //
+    // This check is a read followed by a separate write, so it NARROWS the window
+    // rather than closing it: a settle landing in between is still overwritten.
+    // Linear's comment update takes only an id and a body — there is no version
+    // or etag to make the write conditional on what was read (verified against
+    // the live schema) — so no amount of care here makes it atomic. The terminal
+    // writer therefore verifies its own body afterwards; see
+    // ``repairIfOverwritten`` below, which is what actually recovers the outcome.
     if (options?.skipIfSettled && isTerminalMaturingReply(current)) {
       logger.info('Skipping a progress edit — the reply already shows a terminal outcome', {
         comment_id: existingReplyId,
@@ -676,7 +684,11 @@ export async function upsertThreadedReply(
       finalBody = preservePreviewSuffix(body, current);
     }
     const ok = (await graphqlRequest(token, COMMENT_UPDATE_MUTATION, { id: existingReplyId, body: finalBody })).ok;
-    return ok ? existingReplyId : null;
+    if (!ok) return null;
+    if (options?.repairIfOverwritten) {
+      await repairOverwrittenOutcome(token, existingReplyId, finalBody);
+    }
+    return existingReplyId;
   }
 
   const data = await graphqlData(token, COMMENT_REPLY_RETURNING_ID_MUTATION, {
@@ -684,6 +696,54 @@ export async function upsertThreadedReply(
   });
   const created = data?.commentCreate as { success?: boolean; comment?: { id?: string } } | undefined;
   return created?.success && created.comment?.id ? created.comment.id : null;
+}
+
+/**
+ * After writing an OUTCOME, check it is still there, and put it back if a
+ * concurrently-delivered progress edit landed on top of it.
+ *
+ * Why this exists rather than a conditional write: the progress writers avoid
+ * clobbering by reading the body and refusing when it already shows an outcome,
+ * but read-then-write is not atomic and Linear's comment update accepts only an
+ * id and a body — there is no version or etag to condition on (verified against
+ * the live schema), so the interleaving cannot be prevented at the surface. It
+ * can, however, be detected and undone by the writer that knows which body
+ * matters, and only the outcome is worth that extra round trip.
+ *
+ * Deliberately narrow. It re-asserts only when the body has regressed to a
+ * NON-terminal render, so it never fights a later legitimate outcome (a failure
+ * reply superseding a success, or a second iteration's settle) and never touches
+ * an unrecognised body a human may have edited. One repair attempt, no loop: if
+ * it loses again the next progress edit will itself observe the terminal body and
+ * yield. Best-effort throughout — a failed repair is logged, never thrown.
+ */
+async function repairOverwrittenOutcome(
+  accessToken: string,
+  commentId: string,
+  outcomeBody: string,
+): Promise<void> {
+  if (!isTerminalMaturingReply(outcomeBody)) return; // only outcomes are worth defending
+  const data = await graphqlData(accessToken, COMMENT_BODY_QUERY, { commentId });
+  const current = (data?.comment as { body?: string } | undefined)?.body;
+  // Unreadable → leave it alone: acting on an unknown body could overwrite
+  // something newer, and the reply most likely still holds the outcome.
+  if (typeof current !== 'string') return;
+  if (current === outcomeBody || isTerminalMaturingReply(current)) return;
+
+  logger.warn('A progress edit overwrote a settled reply — restoring the outcome', {
+    event: 'iteration_reply.outcome_restored',
+    comment_id: commentId,
+  });
+  // Re-assert the outcome, carrying over any preview the screenshot webhook may
+  // have appended in the meantime so the repair doesn't drop it.
+  const restored = preservePreviewSuffix(outcomeBody, current);
+  const ok = (await graphqlRequest(accessToken, COMMENT_UPDATE_MUTATION, { id: commentId, body: restored })).ok;
+  if (!ok) {
+    logger.warn('Could not restore the overwritten outcome — the reply may read as in-progress', {
+      event: 'iteration_reply.outcome_restore_failed',
+      comment_id: commentId,
+    });
+  }
 }
 
 /**

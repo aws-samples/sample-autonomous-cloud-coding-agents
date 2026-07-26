@@ -95,7 +95,9 @@ describe('iteration heartbeat sweep', () => {
     // heartbeat must carry it over rather than overwrite it — AND, as the least
     // important writer of the three, it must yield entirely once the reply has
     // settled rather than re-render "working" over an outcome.
-    expect(options).toEqual({ preservePreview: true, skipIfSettled: true });
+    // A liveness tick is progress, never an outcome, so it never asks for the
+    // terminal writer's restore-if-overwritten behaviour.
+    expect(options).toEqual({ preservePreview: true, skipIfSettled: true, repairIfOverwritten: false });
   });
 
   test('a task with no reply to mature is skipped, not edited', async () => {

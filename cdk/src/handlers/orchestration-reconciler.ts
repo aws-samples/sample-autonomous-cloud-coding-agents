@@ -1203,7 +1203,10 @@ async function replyToIterationComment(
     { commentId },
     body,
     evt.iterationReplyId ? { commentId: evt.iterationReplyId } : undefined,
-    { preservePreview: true },
+    // repairIfOverwritten: a progress render delivered at the same moment can land
+    // on top of this outcome, and the surface has no conditional update to prevent
+    // it — so re-assert the outcome if that happened.
+    { preservePreview: true, repairIfOverwritten: true },
   );
   // A surface that cannot mature a reply at all (the capability is optional)
   // legitimately returns undefined; only an attempted-and-failed reply — null —

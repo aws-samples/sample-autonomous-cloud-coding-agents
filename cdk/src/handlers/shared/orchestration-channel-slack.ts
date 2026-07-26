@@ -226,6 +226,14 @@ export function makeSlackChannel(secretPrefix: string = SLACK_SECRET_PREFIX): Ch
       return ts ? { commentId: ts } : null;
     },
 
+    // The convergence options (preview preservation, settle checks, outcome
+    // repair) are deliberately not implemented here: each needs a read of the
+    // current message text, and this adapter posts and edits without reading
+    // back. Ignoring them is what the interface specifies for a surface that
+    // can't, and it costs nothing today because no multi-writer maturing reply
+    // runs on Slack — the orchestration engine's late-progress race is between
+    // Lambdas that write to the issue surface. Anything wiring a maturing reply
+    // onto Slack needs to honour them first, via `conversations.replies`.
     async upsertThreadedReply(issue, parent, body, existing) {
       const ctx = await contextFor(issue);
       if (!ctx) return null;

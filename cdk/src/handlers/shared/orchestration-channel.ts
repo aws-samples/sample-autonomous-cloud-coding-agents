@@ -126,6 +126,17 @@ export interface ThreadedReplyOptions {
    * A surface that cannot read a body back simply ignores this.
    */
   readonly skipIfSettled?: boolean;
+  /**
+   * Set on a TERMINAL render to check the outcome survived, and restore it if a
+   * concurrently-delivered progress render landed on top.
+   *
+   * The counterpart to {@link skipIfSettled}, and needed because that check is a
+   * read followed by a separate write: it narrows the window without closing it.
+   * A surface offering no conditional/versioned update (Linear does not) cannot
+   * close it at all, so the writer that holds the body worth keeping verifies
+   * afterwards instead. Adapters without a body read simply ignore this.
+   */
+  readonly repairIfOverwritten?: boolean;
 }
 
 /** A node in the sub-issue graph, as the adapter surfaces it to the engine. */

@@ -121,13 +121,18 @@ jest.mock('../../src/handlers/shared/linear-feedback', () => ({
     parentCommentId: string,
     body: string,
   ) => mockReplyToComment(ctx, issueId, parentCommentId, body),
+  // Forwards the OPTIONS argument too: the convergence flags (preview
+  // preservation, settle checks, outcome repair) are the whole contract between
+  // the three writers of this one reply, so a mock that dropped them could not
+  // observe whether the dispatcher asked for the right behaviour.
   upsertThreadedReply: (
     ctx: { linearWorkspaceId: string; registryTableName: string },
     issueId: string,
     parentCommentId: string,
     body: string,
     existingReplyId?: string,
-  ) => mockUpsertThreadedReply(ctx, issueId, parentCommentId, body, existingReplyId),
+    options?: Record<string, unknown>,
+  ) => mockUpsertThreadedReply(ctx, issueId, parentCommentId, body, existingReplyId, options),
 }));
 
 // Jira dispatcher posts via `postIssueCommentAdf` in `jira-feedback.ts`
@@ -1918,6 +1923,15 @@ describe('fanout-task-events: Linear dispatcher (issue #239)', () => {
       mockGet(TASK_RECORD_LINEAR); // no trigger_comment_id
       await handler({ Records: [mkEvent('task_completed', 't-lin')] });
       expect(mockUpsertThreadedReply).not.toHaveBeenCalled();
+    });
+
+    test('the terminal settle asks the surface to restore the outcome if it gets overwritten', async () => {
+      mockGet(STANDALONE);
+      await handler({ Records: [mkEvent('task_completed', 't-lin')] });
+
+      const options = mockUpsertThreadedReply.mock.calls[0][5] as Record<string, unknown>;
+      expect(options).toMatchObject({ preservePreview: true, repairIfOverwritten: true });
+      expect(options.skipIfSettled).toBeFalsy();
     });
 
     test('a terminal reply that FAILS releases its claim so a redelivery can retry', async () => {
