@@ -49,9 +49,15 @@
  * never gate the orchestration itself (mirrors the existing per-surface helpers).
  */
 
-/** Which surface an adapter talks to. For logging/metrics only — the engine
- *  never branches on it. */
-export type ChannelKind = 'linear' | 'jira';
+/**
+ * Which surface an adapter talks to — for logging and metrics only. The engine
+ * never branches on it, which is why this is an open string rather than a union
+ * of the surfaces that happen to exist today: a closed union here would mean
+ * adding a surface requires editing this file, i.e. every consumer merging a
+ * core change to support one more tracker. Adapters live outside this module and
+ * name themselves.
+ */
+export type ChannelKind = string;
 
 /**
  * A reference to an issue on some surface, plus the opaque credentials handle

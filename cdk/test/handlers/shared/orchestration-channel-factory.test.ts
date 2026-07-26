@@ -28,7 +28,12 @@ jest.mock('../../../src/handlers/shared/linear-feedback', () => ({
 }));
 jest.mock('../../../src/handlers/shared/jira-feedback', () => ({}));
 
-import { channelForSource } from '../../../src/handlers/shared/orchestration-channel-factory';
+import { type Channel } from '../../../src/handlers/shared/orchestration-channel';
+import {
+  channelForSource,
+  registerChannelFactory,
+  registeredChannelSources,
+} from '../../../src/handlers/shared/orchestration-channel-factory';
 
 const BOTH = { linear: 'LinearRegistry', jira: 'JiraRegistry' };
 
@@ -59,6 +64,43 @@ describe('channelForSource', () => {
     for (const source of ['api', 'webhook', 'slack', 'unknown-future-surface']) {
       expect(channelForSource(source, BOTH)).toBeUndefined();
     }
+  });
+
+  test('a NEW surface can be added without editing this module or the interface', () => {
+    // The extensibility tenet: adopting ABCA for another tracker must not require
+    // patching the core. A closed union/switch would force every consumer to merge
+    // an upstream change for one more surface, so this asserts the registry is
+    // genuinely open — a surface registers itself and the lookup finds it.
+    const built: string[] = [];
+    const unregister = registerChannelFactory('acme-tracker', (table) => {
+      built.push(table);
+      return { kind: 'acme-tracker', postComment: jest.fn(), upsertComment: jest.fn(), reportFailure: jest.fn() } as unknown as Channel;
+    });
+    try {
+      const ch = channelForSource('acme-tracker', { 'acme-tracker': 'AcmeRegistry' });
+      expect(ch?.kind).toBe('acme-tracker');
+      // The factory got its own credentials table, not another surface's.
+      expect(built).toEqual(['AcmeRegistry']);
+      expect(registeredChannelSources()).toContain('acme-tracker');
+    } finally {
+      unregister();
+    }
+  });
+
+  test('unregistering restores the prior state, so surfaces do not leak between callers', () => {
+    const unregister = registerChannelFactory('temp-surface', () => ({ kind: 'temp-surface' } as unknown as Channel));
+    unregister();
+    expect(registeredChannelSources()).not.toContain('temp-surface');
+    expect(channelForSource('temp-surface', { 'temp-surface': 'T' })).toBeUndefined();
+  });
+
+  test('replacing a registered surface is reversible', () => {
+    // A test (or a downstream override) may swap an adapter; restoring must put
+    // the original back rather than deleting the entry.
+    const unregister = registerChannelFactory('linear', () => ({ kind: 'stub-linear' } as unknown as Channel));
+    expect(channelForSource('linear', BOTH)?.kind).toBe('stub-linear');
+    unregister();
+    expect(channelForSource('linear', BOTH)?.kind).toBe('linear');
   });
 
   test('the returned adapter carries the registry it was given', async () => {
