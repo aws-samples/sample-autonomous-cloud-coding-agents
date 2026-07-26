@@ -140,9 +140,15 @@ export async function handler(): Promise<void> {
         { commentId: plan.parentCommentId },
         plan.body,
         { commentId: plan.replyId },
-        // Keep any already-landed deploy-preview block (a heartbeat must never
-        // clobber the screenshot the webhook may have appended).
-        { preservePreview: true },
+        {
+          // Keep any already-landed deploy-preview block (a heartbeat must never
+          // clobber the screenshot the webhook may have appended).
+          preservePreview: true,
+          // A liveness tick is the LEAST important writer of this reply: if the
+          // task has already settled, saying "working" again would un-settle it
+          // in the reader's eyes.
+          skipIfSettled: true,
+        },
       );
       edited += 1;
     } catch (err) {

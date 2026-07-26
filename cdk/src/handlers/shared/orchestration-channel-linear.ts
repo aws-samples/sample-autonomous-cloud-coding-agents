@@ -155,7 +155,10 @@ export function makeLinearChannel(registryTableName: string): Channel {
         parent.commentId,
         body,
         existing?.commentId,
-        { preservePreview: options?.preservePreview ?? false },
+        {
+          preservePreview: options?.preservePreview ?? false,
+          skipIfSettled: options?.skipIfSettled ?? false,
+        },
       );
       return id ? { commentId: id } : null;
     },

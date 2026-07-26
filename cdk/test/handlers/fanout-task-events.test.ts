@@ -1636,6 +1636,31 @@ describe('fanout-task-events: Linear dispatcher (issue #239)', () => {
     expect(mockPostIssueComment).not.toHaveBeenCalled();
   });
 
+  test('a pr_created milestone delivered AFTER the settle does NOT overwrite the outcome', async () => {
+    // The live failure (2026-07-25): this handler runs off the TaskEvents stream,
+    // so a progress milestone can arrive after the task went terminal. It then
+    // rendered "🔄 Working" over "✅ Updated", leaving the reply contradicting
+    // both the trigger comment's ✅ reaction and reality. ack_replied_at is
+    // stamped by whichever path owns the terminal reply, so it marks "settled".
+    mockGet({
+      ...TASK_RECORD_LINEAR,
+      pr_number: 13,
+      ack_replied_at: '2026-07-25T01:14:04.301Z',
+      channel_metadata: {
+        ...TASK_RECORD_LINEAR.channel_metadata,
+        trigger_comment_id: 'trigger-c1',
+        iteration_reply_comment_id: 'reply-c1',
+      },
+    });
+
+    const event: DynamoDBStreamEvent = { Records: [mkMilestone('pr_created', 't-lin')] };
+    await handler(event);
+
+    // The stale progress edit is refused outright.
+    expect(mockUpsertThreadedReply).not.toHaveBeenCalled();
+    expect(mockPostIssueComment).not.toHaveBeenCalled();
+  });
+
   test('Linear-origin task missing channel_metadata.linear_issue_id — skip with warning', async () => {
     // Defensive: a properly-admitted Linear task should always have
     // these fields, but if it doesn't we'd rather log + skip than

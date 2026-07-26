@@ -305,6 +305,35 @@ export function preservePreviewSuffix(newBody: string, currentBody: string | nul
   return `${newBody}\n\n${block}`;
 }
 
+/**
+ * Lead markers of a TERMINAL maturing-reply render — the states that mean "this
+ * iteration is finished": ✅ updated, 💬 answered, ❌ failed. Progress states
+ * (👀 on_it, 🔄 working) are deliberately absent.
+ *
+ * Kept beside {@link renderMaturingReply} so the two stay in step: if a terminal
+ * state's lead marker changes there, it must change here.
+ */
+const TERMINAL_REPLY_MARKERS: readonly string[] = ['✅', '💬', '❌'];
+
+/**
+ * Does this reply body already show a terminal outcome?
+ *
+ * Used to stop a LATE progress edit from overwriting a settled reply. Two writers
+ * edit the same comment — the terminal settle and the (stream-driven, so possibly
+ * delayed) progress milestone — and the body is the ground truth about which has
+ * landed, unlike a task-record marker, which is written slightly before the render
+ * it announces. Checking the body therefore closes the window between the two.
+ *
+ * Conservative by construction: only a known terminal lead marker counts, so an
+ * unrecognised body is treated as NOT settled and progress still renders (a
+ * missed progress edit is cosmetic; a reply frozen at "On it" is not).
+ */
+export function isTerminalMaturingReply(body: string | null | undefined): boolean {
+  if (typeof body !== 'string') return false;
+  const lead = body.trimStart();
+  return TERMINAL_REPLY_MARKERS.some((marker) => lead.startsWith(marker));
+}
+
 function truncate(s: string, max: number): string {
   return s.length <= max ? s : `${s.slice(0, max - 1)}…`;
 }

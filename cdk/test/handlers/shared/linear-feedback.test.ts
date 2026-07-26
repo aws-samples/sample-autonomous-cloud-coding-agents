@@ -652,6 +652,56 @@ describe('linear-feedback', () => {
       expect(updateBody.variables.body).toBe(`${newBody}\n\n${BLOCK}`);
     });
 
+    test('skipIfSettled REFUSES a progress edit over an already-settled reply', async () => {
+      // The live failure this fixes: a stream-delivered "working" milestone landed
+      // AFTER the terminal settle and overwrote "✅ Updated", so the reply
+      // contradicted both the trigger comment's ✅ reaction and reality.
+      fetchMock.mockResolvedValueOnce(jsonResponse({ data: { comment: { body: '✅ Updated — [PR #5](u).' } } }));
+      const id = await upsertThreadedReply(
+        CTX, ISSUE_ID, 'parent-1', '🔄 Working — updating PR #5…', REPLY_ID, { skipIfSettled: true },
+      );
+      // Reports the reply id (the caller's intent is satisfied — it IS up to date)
+      // but performs NO update mutation.
+      expect(id).toBe(REPLY_ID);
+      expect(fetchMock).toHaveBeenCalledTimes(1); // the body read only
+    });
+
+    test('skipIfSettled still allows a progress edit while the reply is un-settled', async () => {
+      // The common case: the reply is at "On it" and this is the first progress
+      // tick. Suppressing here would freeze the reply and re-create the black box.
+      fetchMock
+        .mockResolvedValueOnce(jsonResponse({ data: { comment: { body: '👀 On it — reading the PR…' } } }))
+        .mockResolvedValueOnce(jsonResponse({ data: { commentUpdate: { success: true } } }));
+      const progress = '🔄 Working — updating PR #5…';
+      const id = await upsertThreadedReply(
+        CTX, ISSUE_ID, 'parent-1', progress, REPLY_ID, { skipIfSettled: true },
+      );
+      expect(id).toBe(REPLY_ID);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(JSON.parse(fetchMock.mock.calls[1][1].body).variables.body).toBe(progress);
+    });
+
+    test('a TERMINAL edit never sets skipIfSettled, so an outcome can always overwrite progress', async () => {
+      // Direction matters: progress yields to an outcome, never the reverse.
+      fetchMock.mockResolvedValueOnce(jsonResponse({ data: { commentUpdate: { success: true } } }));
+      const id = await upsertThreadedReply(CTX, ISSUE_ID, 'parent-1', '✅ Updated.', REPLY_ID);
+      expect(id).toBe(REPLY_ID);
+      expect(fetchMock).toHaveBeenCalledTimes(1); // straight update, no read
+    });
+
+    test('both options together read the body ONCE', async () => {
+      // The terminal settle asks for preview preservation; a progress edit asks
+      // for the settle check. Neither should double-read.
+      fetchMock
+        .mockResolvedValueOnce(jsonResponse({ data: { comment: { body: `👀 On it…\n\n${BLOCK}` } } }))
+        .mockResolvedValueOnce(jsonResponse({ data: { commentUpdate: { success: true } } }));
+      await upsertThreadedReply(
+        CTX, ISSUE_ID, 'parent-1', '🔄 Working…', REPLY_ID,
+        { preservePreview: true, skipIfSettled: true },
+      );
+      expect(fetchMock).toHaveBeenCalledTimes(2); // one read + one update
+    });
+
     test('without preservePreview the edit does NOT read the body (single update)', async () => {
       fetchMock.mockResolvedValueOnce(jsonResponse({ data: { commentUpdate: { success: true } } }));
       const id = await upsertThreadedReply(CTX, ISSUE_ID, 'parent-1', '✅ Updated.', REPLY_ID);

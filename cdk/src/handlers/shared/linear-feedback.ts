@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { preservePreviewSuffix } from './iteration-reply';
+import { isTerminalMaturingReply, preservePreviewSuffix } from './iteration-reply';
 import { resolveLinearOauthToken } from './linear-oauth-resolver';
 import { logger } from './logger';
 import { isBotAuthoredComment } from './orchestration-comment-trigger';
@@ -642,21 +642,37 @@ export async function upsertThreadedReply(
   parentCommentId: string,
   body: string,
   existingReplyId?: string,
-  options?: { preservePreview?: boolean },
+  options?: { preservePreview?: boolean; skipIfSettled?: boolean },
 ): Promise<string | null> {
   const token = await resolveToken(ctx);
   if (!token) return null;
 
   if (existingReplyId) {
     let finalBody = body;
+    // Both options below need the CURRENT body, so read it once.
+    let current: string | undefined;
+    if (options?.preservePreview || options?.skipIfSettled) {
+      const data = await graphqlData(token, COMMENT_BODY_QUERY, { commentId: existingReplyId });
+      current = (data?.comment as { body?: string } | undefined)?.body;
+    }
+    // A PROGRESS edit must never overwrite an outcome. The terminal settle and the
+    // (stream-driven, so possibly delayed) progress milestone edit the same
+    // comment, and the body is the ground truth about which has landed — a
+    // task-record marker is stamped slightly BEFORE the render it announces, so
+    // checking the body is what closes that window. Yield rather than clobber:
+    // losing a progress edit is cosmetic, losing the outcome is not.
+    if (options?.skipIfSettled && isTerminalMaturingReply(current)) {
+      logger.info('Skipping a progress edit — the reply already shows a terminal outcome', {
+        comment_id: existingReplyId,
+      });
+      return existingReplyId;
+    }
     // iteration-UX convergence: the deploy-preview link is appended by a
     // SEPARATE async path (the screenshot webhook). A terminal-settle re-render
     // here would clobber a preview that already landed (live-caught ABCA-434).
-    // When asked, read the current body and carry an existing `[preview]`
-    // segment onto the new body so the two writers converge regardless of order.
+    // When asked, carry an existing `[preview]` segment onto the new body so the
+    // two writers converge regardless of order.
     if (options?.preservePreview) {
-      const data = await graphqlData(token, COMMENT_BODY_QUERY, { commentId: existingReplyId });
-      const current = (data?.comment as { body?: string } | undefined)?.body;
       finalBody = preservePreviewSuffix(body, current);
     }
     const ok = (await graphqlRequest(token, COMMENT_UPDATE_MUTATION, { id: existingReplyId, body: finalBody })).ok;

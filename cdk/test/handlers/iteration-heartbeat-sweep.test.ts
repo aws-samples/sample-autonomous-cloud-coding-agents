@@ -92,8 +92,10 @@ describe('iteration heartbeat sweep', () => {
     expect(existingReplyId).toBe('reply-1');
     expect(body).toContain('🔄 Working');
     // A separate writer appends the deploy preview to this same reply, so the
-    // heartbeat must carry it over rather than overwrite it.
-    expect(options).toEqual({ preservePreview: true });
+    // heartbeat must carry it over rather than overwrite it — AND, as the least
+    // important writer of the three, it must yield entirely once the reply has
+    // settled rather than re-render "working" over an outcome.
+    expect(options).toEqual({ preservePreview: true, skipIfSettled: true });
   });
 
   test('a task with no reply to mature is skipped, not edited', async () => {

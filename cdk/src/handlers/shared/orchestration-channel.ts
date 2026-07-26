@@ -118,6 +118,14 @@ export interface ThreadedReplyOptions {
    * adapter reads the current body and preserves that segment.
    */
   readonly preservePreview?: boolean;
+  /**
+   * Set on a PROGRESS render to yield to an outcome that has already landed.
+   * Progress and terminal states are written by independent paths, and the
+   * progress one can be delivered late — overwriting a settled reply with
+   * "working" would contradict both the outcome and the surface's own markers.
+   * A surface that cannot read a body back simply ignores this.
+   */
+  readonly skipIfSettled?: boolean;
 }
 
 /** A node in the sub-issue graph, as the adapter surfaces it to the engine. */

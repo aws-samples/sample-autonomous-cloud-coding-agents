@@ -477,6 +477,40 @@ async function loadTaskForComment(taskId: string): Promise<TaskRecord | null> {
 }
 
 /**
+ * Has a terminal settle already claimed this task's maturing reply?
+ *
+ * Read strongly-consistent and LATE, because the whole point is to observe a
+ * write another Lambda may have made moments ago: ``ack_replied_at`` is stamped
+ * (conditionally, so exactly one writer wins) by whichever path owns the terminal
+ * reply — the reconciler for an orchestration iteration, ``replyToStandaloneTrigger``
+ * for a standalone one. An eventually-consistent read is precisely how a stale
+ * milestone slips past.
+ *
+ * Fails OPEN (returns false) on a read error: a missed progress edit is a cosmetic
+ * loss, whereas suppressing progress on a task that never settled would leave the
+ * reply frozen at "On it".
+ */
+async function terminalReplyAlreadyClaimed(taskId: string): Promise<boolean> {
+  const tableName = process.env.TASK_TABLE_NAME;
+  if (!tableName) return false;
+  try {
+    const res = await ddb.send(new GetCommand({
+      TableName: tableName,
+      Key: { task_id: taskId },
+      ProjectionExpression: 'ack_replied_at',
+      ConsistentRead: true,
+    }));
+    return Boolean((res.Item as { ack_replied_at?: string } | undefined)?.ack_replied_at);
+  } catch (err) {
+    logger.warn('[fanout/linear] could not check whether the reply already settled', {
+      task_id: taskId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return false;
+  }
+}
+
+/**
  * iteration-UX: strongly-consistent re-read of just the two screenshot fields,
  * taken late (right before the terminal-settle renders) so it reflects the
  * screenshot the deploy webhook persisted AFTER the early task load. ConsistentRead
@@ -1184,6 +1218,22 @@ async function dispatchToLinear(event: FanOutEvent): Promise<void> {
   //     (or a sibling channel's infra-rejection re-run) doesn't duplicate it.
   if (event.event_type === 'agent_milestone') {
     if (isIteration && iterationReplyId && triggerCommentId) {
+      // Do NOT overwrite a reply that has already settled. This handler runs off
+      // the TaskEvents stream, so a milestone can be DELIVERED after the task
+      // went terminal — and then this progress text ("Working…") lands on top of
+      // the terminal "✅ Updated", leaving the reply contradicting both the
+      // trigger comment's ✅ reaction and reality (live-caught 2026-07-25:
+      // settle at 01:14:04, this edit at 01:14:05, stale milestone dispatched at
+      // 01:14:06). The terminal writer stamps ``ack_replied_at`` before it
+      // renders, so that marker is the ordering signal; a progress edit is
+      // strictly less important than the outcome, so it yields.
+      if (await terminalReplyAlreadyClaimed(task.task_id)) {
+        logger.info('[fanout/linear] skipping a progress edit — the reply already settled', {
+          event: 'fanout.linear.progress_after_settle',
+          task_id: task.task_id,
+        });
+        return;
+      }
       await upsertThreadedReply(
         { linearWorkspaceId: workspaceId, registryTableName },
         issueId,
@@ -1193,6 +1243,10 @@ async function dispatchToLinear(event: FanOutEvent): Promise<void> {
           ...(typeof task.pr_number === 'number' && { prNumber: task.pr_number }),
         }),
         iterationReplyId,
+        // Second layer: the record check above can't see a settle that stamped
+        // its marker but hasn't rendered yet (several reads separate the two), so
+        // also refuse at the surface if the body already shows an outcome.
+        { skipIfSettled: true },
       );
       return;
     }

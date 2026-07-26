@@ -19,6 +19,7 @@
 
 import {
   isNoChangeIteration,
+  isTerminalMaturingReply,
   preservePreviewSuffix,
   renderIterationSuccessReply,
   renderMaturingReply,
@@ -208,6 +209,50 @@ describe('isNoChangeIteration', () => {
     expect(isNoChangeIteration(false)).toBe(true);
     expect(isNoChangeIteration(true)).toBe(false);
     expect(isNoChangeIteration(undefined)).toBe(false);
+  });
+});
+
+describe('isTerminalMaturingReply — stop a late progress edit clobbering an outcome', () => {
+  // Two independent writers edit one reply: the terminal settle, and the
+  // stream-driven progress milestone. The milestone can be delivered AFTER the
+  // settle (live-caught 2026-07-25: settle 01:14:04, stale milestone 01:14:06),
+  // and the body is the ground truth about which has landed.
+  test('every TERMINAL render is recognised as settled', () => {
+    for (const state of ['updated', 'answered', 'failed'] as const) {
+      const body = renderMaturingReply({
+        state,
+        prNumber: 42,
+        ...(state === 'answered' ? { answerText: 'no change needed' } : {}),
+      });
+      expect(isTerminalMaturingReply(body)).toBe(true);
+    }
+  });
+
+  test('PROGRESS renders are NOT settled, so progress still flows', () => {
+    // If these came back true, a reply would freeze at "On it" forever.
+    for (const state of ['on_it', 'working'] as const) {
+      expect(isTerminalMaturingReply(renderMaturingReply({ state, prNumber: 42 }))).toBe(false);
+    }
+  });
+
+  test('a settled body with a preview block appended is still settled', () => {
+    // The screenshot webhook appends to the terminal body; that must not make it
+    // look un-settled.
+    const settled = renderMaturingReply({ state: 'updated', prNumber: 7 });
+    expect(isTerminalMaturingReply(`${settled}\n\n[![preview](p.png)](https://d)`)).toBe(true);
+  });
+
+  test('an unknown or absent body is treated as NOT settled (fail open)', () => {
+    // Conservative on purpose: a missed progress edit is cosmetic, a reply stuck
+    // at "On it" is a black box.
+    expect(isTerminalMaturingReply(undefined)).toBe(false);
+    expect(isTerminalMaturingReply(null)).toBe(false);
+    expect(isTerminalMaturingReply('')).toBe(false);
+    expect(isTerminalMaturingReply('some other bot comment')).toBe(false);
+  });
+
+  test('leading whitespace does not hide a terminal marker', () => {
+    expect(isTerminalMaturingReply('  \n✅ Updated — PR #1.')).toBe(true);
   });
 });
 
