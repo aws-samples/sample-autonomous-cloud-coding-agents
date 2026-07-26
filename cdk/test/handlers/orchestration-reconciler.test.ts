@@ -1421,13 +1421,12 @@ describe('orchestration-reconciler handler — A6 iteration ack reply (#247 UX.3
     expect(options.skipIfSettled).toBeFalsy();
   });
 
-  test('a FAILED reply releases the claim and does not settle the comment or the sub-issue', async () => {
-    // Two separate hazards if the claim is kept: no redelivery can retry the
-    // reply, and the progress + heartbeat writers treat the claim as "an outcome
-    // landed" and stand down — so the reply stalls on its last progress text.
-    // Settling the comment to ✅ on top of that would be worse still: the reaction
-    // would say done while the reply says working, which is the exact
-    // contradiction this maturing-reply design removes.
+  test('a FAILED reply hands the claim back and defers the settle while attempts remain', async () => {
+    // Two hazards if the claim is kept: no redelivery can retry the reply, and the
+    // progress + heartbeat writers treat the claim as "an outcome landed" and stand
+    // down — so the reply stalls on its last progress text. Settling the comment to
+    // ✅ on top of that would be worse still: the reaction would say done while the
+    // reply says working.
     mockCascade([
       { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A', linear_identifier: 'ENG-1' },
     ]);
@@ -1438,19 +1437,46 @@ describe('orchestration-reconciler handler — A6 iteration ack reply (#247 UX.3
     const acks = ddbSend.mock.calls
       .map((c) => c[0] as { _type?: string; input?: { UpdateExpression?: string; ExpressionAttributeValues?: Record<string, unknown> } })
       .filter((cmd) => cmd?._type === 'Update' && /ack_replied_at/.test(cmd.input?.UpdateExpression ?? ''));
-    expect(acks.map((a) => a.input?.UpdateExpression)).toEqual([
-      'SET ack_replied_at = :now',
-      'REMOVE ack_replied_at',
-    ]);
-    // Released conditionally on this run's own stamp, so a concurrent delivery
-    // that has already claimed and replied keeps its claim.
-    expect(acks[1].input?.ExpressionAttributeValues).toEqual({
-      ':ours': acks[0].input?.ExpressionAttributeValues?.[':now'],
-    });
+    expect(acks[0].input?.UpdateExpression).toBe('SET ack_replied_at = :now');
+    expect(acks[1].input?.UpdateExpression).toContain('REMOVE ack_replied_at');
+    // Released conditionally on this run's own stamp, so a concurrent delivery that
+    // has already claimed and replied keeps its claim.
+    expect(acks[1].input?.ExpressionAttributeValues?.[':ours'])
+      .toBe(acks[0].input?.ExpressionAttributeValues?.[':now']);
     expect(swapCommentReactionMock).not.toHaveBeenCalled();
     expect(transitionIssueStateMock).not.toHaveBeenCalledWith(
       expect.anything(), 'A', 'started', ['In Review'], false,
     );
+  });
+
+  test('once the retry budget is spent it settles the REACTION anyway, rather than leaving 👀', async () => {
+    // Live-caught: with a reply that could never succeed the release re-woke this
+    // handler (it writes to the task record, whose stream feeds it) ~900 times, and
+    // the trigger comment sat on 👀 with no reply at all. A permanent "still
+    // working" is worse than an outcome carried by the marker alone.
+    mockCascade([
+      { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A', linear_identifier: 'ENG-1' },
+    ]);
+    upsertThreadedReplyMock.mockReset().mockResolvedValue(null);
+    const base = ddbSend.getMockImplementation()!;
+    ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
+      const expr = String(cmd.input?.UpdateExpression ?? '');
+      if (cmd._type === 'Update' && expr.includes('REMOVE ack_replied_at')) {
+        const err = new Error('conditional');
+        (err as { name?: string }).name = 'ConditionalCheckFailedException';
+        throw err;
+      }
+      // The budget re-read that distinguishes "spent" from "not ours".
+      if (cmd._type === 'Get' && cmd.input?.ProjectionExpression === 'ack_reply_attempts') {
+        return { Item: { ack_reply_attempts: 3 } };
+      }
+      return base(cmd);
+    });
+
+    await handler(iterEventWithComment('COMPLETED'));
+
+    // The outcome still reaches the human, as a reaction.
+    expect(swapCommentReactionMock).toHaveBeenCalledWith(expect.anything(), 'human-cmt-1', 'white_check_mark');
   });
 
   test('a SUCCESSFUL reply keeps the claim, so the once-only guarantee survives the fix', async () => {

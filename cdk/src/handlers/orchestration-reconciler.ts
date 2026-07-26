@@ -1215,15 +1215,28 @@ async function replyToIterationComment(
     // Holding a claim over a reply that never landed makes the failure permanent:
     // no redelivery may retry it, and the progress + heartbeat writers read the
     // claim as "an outcome has landed" and stand down too, so the reply stays on
-    // its last progress text. Release, and settle nothing else — a ✅ reaction
-    // beside a reply still saying "On it" is the contradiction this design exists
-    // to remove.
-    await releaseReplyClaim(ddb, TASK_TABLE, evt.taskId, claim.stamp);
-    logger.warn('UX.3 ack: reply failed — claim released so a redelivery can retry', {
+    // its last progress text. So hand the claim back — but only while attempts
+    // remain.
+    const release = await releaseReplyClaim(ddb, TASK_TABLE, evt.taskId, claim.stamp);
+    if (release !== 'exhausted') {
+      // A retry is still coming (or another delivery owns the reply). Settle
+      // nothing yet: a ✅ reaction beside a reply still saying "On it" is the
+      // contradiction this design exists to remove.
+      logger.warn('UX.3 ack: reply failed — deferring the settle to another attempt', {
+        task_id: evt.taskId,
+        linear_issue_id: replyIssueId,
+        release,
+      });
+      return;
+    }
+    // No attempt is coming. Fall through WITHOUT a reply so the reaction on the
+    // trigger comment still moves off 👀: a reply that will never arrive is
+    // strictly worse than an outcome shown only as a marker, because 👀 forever
+    // reads as "still working" — the black box this whole design removes.
+    logger.error('UX.3 ack: giving up on the reply — settling via the reaction alone', {
       task_id: evt.taskId,
       linear_issue_id: replyIssueId,
     });
-    return;
   }
 
   // Settle the comment + sub-issue so all three views agree (panel row,

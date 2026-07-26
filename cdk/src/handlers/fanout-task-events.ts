@@ -1491,16 +1491,29 @@ async function replyToStandaloneTrigger(
     // The claim must not outlive a reply that never landed: holding it would stop
     // both a redelivery from retrying AND the progress writers from touching the
     // reply again (they read the claim as "an outcome has landed"), leaving the
-    // human's request looking unanswered forever. Give it back and let this
-    // record be retried. Return before the reaction swap so the comment does not
-    // read ✅ next to a reply that still says "On it".
-    await releaseReplyClaim(ddb, tableName, task.task_id, claim.stamp);
-    logger.warn('[fanout/linear] terminal reply edit failed — claim released for retry', {
-      event: 'fanout.linear.terminal_reply_failed',
+    // human's request looking unanswered forever. Hand it back — but only while
+    // attempts remain, since each release re-wakes this handler via the task
+    // record's own stream.
+    const release = await releaseReplyClaim(ddb, tableName, task.task_id, claim.stamp);
+    if (release !== 'exhausted') {
+      // A retry is still coming. Return before the reaction swap so the comment
+      // does not read ✅ next to a reply that still says "On it".
+      logger.warn('[fanout/linear] terminal reply edit failed — deferring to another attempt', {
+        event: 'fanout.linear.terminal_reply_failed',
+        task_id: task.task_id,
+        issue_id: issueId,
+        release,
+      });
+      return;
+    }
+    // No attempt is coming, so fall through and let the reaction carry the
+    // outcome: 👀 left forever reads as "still working", which is worse than an
+    // outcome shown only as a marker.
+    logger.error('[fanout/linear] giving up on the terminal reply — settling via the reaction alone', {
+      event: 'fanout.linear.terminal_reply_abandoned',
       task_id: task.task_id,
       issue_id: issueId,
     });
-    return;
   }
 
   // Swap the TRIGGER comment's 👀 → ✅ / 💬 / ❌ so the human's comment reads

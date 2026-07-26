@@ -25,6 +25,7 @@
 
 import {
   claimTerminalReply,
+  MAX_REPLY_ATTEMPTS,
   releaseReplyClaim,
   terminalReplyClaimed,
 } from '../../src/handlers/shared/iteration-reply-claim';
@@ -102,47 +103,86 @@ describe('claimTerminalReply', () => {
 });
 
 describe('releaseReplyClaim', () => {
-  test('removes the claim only while it is still the one this caller made', async () => {
-    await releaseReplyClaim(ddb, TABLE, TASK, STAMP);
+  test('frees the claim and counts the attempt in ONE write', async () => {
+    send.mockResolvedValueOnce({ Attributes: { ack_reply_attempts: 1 } });
 
-    expect(inputOf(0)).toMatchObject({
-      UpdateExpression: 'REMOVE ack_replied_at',
-      // A blind REMOVE would, when this release is delayed past another
-      // delivery's successful claim-and-reply, strip that writer's claim and let
-      // a third delivery reply again — one lost reply becoming a duplicated one.
-      ConditionExpression: 'ack_replied_at = :ours',
-      ExpressionAttributeValues: { ':ours': STAMP },
-    });
+    expect(await releaseReplyClaim(ddb, TABLE, TASK, STAMP)).toBe('released');
+
+    const input = inputOf(0);
+    expect(input.UpdateExpression).toContain('REMOVE ack_replied_at');
+    // Counting in the same write is what keeps the budget honest: a separate
+    // increment could be lost between the two and restore the unbounded spin.
+    expect(input.UpdateExpression).toContain('ack_reply_attempts');
+    // A blind REMOVE would, when this release is delayed past another delivery's
+    // successful claim-and-reply, strip that writer's claim and let a third
+    // delivery reply again — one lost reply becoming a duplicated one.
+    expect(input.ConditionExpression).toContain('ack_replied_at = :ours');
+    // And the budget is enforced by the condition, not by a later read.
+    expect(input.ConditionExpression).toContain('ack_reply_attempts < :max');
+    expect((input.ExpressionAttributeValues as Record<string, unknown>)[':max']).toBe(MAX_REPLY_ATTEMPTS);
   });
 
-  test('a claim that is no longer ours is left alone, and reported as not stuck', async () => {
-    send.mockRejectedValueOnce(conditionalFailure());
+  test('a spent budget reports EXHAUSTED, so the caller settles instead of waiting', async () => {
+    // The live failure this bound prevents: releasing the claim writes to the task
+    // record, and the reconciler consumes that record's stream — so a release
+    // re-wakes the handler that performed it. With a reply that can never succeed
+    // (its comment was deleted) that spun ~900 times in six minutes.
+    send
+      .mockRejectedValueOnce(conditionalFailure())
+      .mockResolvedValueOnce({ Item: { ack_reply_attempts: MAX_REPLY_ATTEMPTS } });
 
-    await releaseReplyClaim(ddb, TABLE, TASK, STAMP);
-
-    expect(warnFields()).toMatchObject({ claim_no_longer_ours: true });
+    expect(await releaseReplyClaim(ddb, TABLE, TASK, STAMP)).toBe('exhausted');
   });
 
-  test('a release that fails for any other reason is reported as a stuck claim', async () => {
+  test('a claim that is no longer OURS is distinguished from a spent budget', async () => {
+    // Both surface as a failed condition but need opposite handling: another
+    // delivery owning the reply means nothing is stuck, so the caller must NOT
+    // settle over it.
+    send
+      .mockRejectedValueOnce(conditionalFailure())
+      .mockResolvedValueOnce({ Item: { ack_reply_attempts: 1 } });
+
+    expect(await releaseReplyClaim(ddb, TABLE, TASK, STAMP)).toBe('not_ours');
+  });
+
+  test('the budget check reads strongly-consistent — the increment is seconds old', async () => {
+    send
+      .mockRejectedValueOnce(conditionalFailure())
+      .mockResolvedValueOnce({ Item: { ack_reply_attempts: 1 } });
+
+    await releaseReplyClaim(ddb, TABLE, TASK, STAMP);
+    expect(inputOf(1)).toMatchObject({ ProjectionExpression: 'ack_reply_attempts', ConsistentRead: true });
+  });
+
+  test('an unreadable budget counts as exhausted rather than looping', async () => {
+    send
+      .mockRejectedValueOnce(conditionalFailure())
+      .mockRejectedValueOnce(new Error('throttled'));
+
+    expect(await releaseReplyClaim(ddb, TABLE, TASK, STAMP)).toBe('exhausted');
+  });
+
+  test('an infra failure reports exhausted — the claim is still held', async () => {
+    // AccessDenied or a throttle leaves the claim in place, so promising a retry
+    // would leave the request looking unanswered indefinitely.
     send.mockRejectedValueOnce(new Error('AccessDeniedException'));
 
-    await releaseReplyClaim(ddb, TABLE, TASK, STAMP);
-
-    expect(warnFields()).toMatchObject({
-      event: 'iteration_reply.claim_release_failed',
-      claim_no_longer_ours: false,
-    });
-    expect(warnFields().error).toContain('AccessDenied');
+    expect(await releaseReplyClaim(ddb, TABLE, TASK, STAMP)).toBe('exhausted');
+    expect(warnFields()).toMatchObject({ event: 'iteration_reply.claim_release_failed' });
   });
 
-  test('a successful release is announced, so a retry is traceable in the logs', async () => {
+  test('a successful release is announced with the attempt number', async () => {
+    send.mockResolvedValueOnce({ Attributes: { ack_reply_attempts: 2 } });
     await releaseReplyClaim(ddb, TABLE, TASK, STAMP);
-    expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('Released'), { task_id: TASK });
+    expect(infoSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Released'),
+      expect.objectContaining({ task_id: TASK, attempt: 2, max_attempts: MAX_REPLY_ATTEMPTS }),
+    );
   });
 
   test('never throws — the caller is on a best-effort feedback path', async () => {
     send.mockRejectedValueOnce(new Error('boom'));
-    await expect(releaseReplyClaim(ddb, TABLE, TASK, STAMP)).resolves.toBeUndefined();
+    await expect(releaseReplyClaim(ddb, TABLE, TASK, STAMP)).resolves.toBe('exhausted');
   });
 });
 

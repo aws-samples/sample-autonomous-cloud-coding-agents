@@ -1934,9 +1934,9 @@ describe('fanout-task-events: Linear dispatcher (issue #239)', () => {
       expect(options.skipIfSettled).toBeFalsy();
     });
 
-    test('a terminal reply that FAILS releases its claim so a redelivery can retry', async () => {
-      // Claiming the reply and then failing to write it used to be terminal in
-      // both directions: no redelivery could retry (the claim was taken), and the
+    test('a terminal reply that FAILS hands its claim back so a redelivery can retry', async () => {
+      // Claiming the reply and then failing to write it used to be terminal in both
+      // directions: no redelivery could retry (the claim was taken), and the
       // progress + heartbeat writers read that same claim as "an outcome landed"
       // and stood down too — so the reply stayed on its last progress text and the
       // human's request read as unanswered forever.
@@ -1948,16 +1948,12 @@ describe('fanout-task-events: Linear dispatcher (issue #239)', () => {
       const updates = mockDdbSend.mock.calls
         .map((c) => c[0] as { _type?: string; input?: { UpdateExpression?: string; ExpressionAttributeValues?: Record<string, unknown> } })
         .filter((cmd) => cmd?._type === 'Update' && /ack_replied_at/.test(cmd.input?.UpdateExpression ?? ''));
-      // Claimed, then gave the claim back.
-      expect(updates.map((u) => u.input?.UpdateExpression)).toEqual([
-        'SET ack_replied_at = :now',
-        'REMOVE ack_replied_at',
-      ]);
+      expect(updates[0].input?.UpdateExpression).toBe('SET ack_replied_at = :now');
+      expect(updates[1].input?.UpdateExpression).toContain('REMOVE ack_replied_at');
       // The release is conditional on the stamp this run wrote, so it cannot strip
       // a claim another delivery has since taken and already replied under.
-      expect(updates[1].input?.ExpressionAttributeValues).toEqual({
-        ':ours': updates[0].input?.ExpressionAttributeValues?.[':now'],
-      });
+      expect(updates[1].input?.ExpressionAttributeValues?.[':ours'])
+        .toBe(updates[0].input?.ExpressionAttributeValues?.[':now']);
     });
 
     test('a SUCCESSFUL reply keeps its claim — the once-only guarantee still holds', async () => {
