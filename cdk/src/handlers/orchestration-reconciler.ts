@@ -1979,8 +1979,8 @@ async function seedDecomposedGraph(
   const discovery = await discoverOrchestration({
     ddb,
     tableName: ORCHESTRATION_TABLE,
-    parentLinearIssueId: evt.parentIssueId,
-    linearWorkspaceId: evt.workspaceId,
+    parentIssueRef: evt.parentIssueId,
+    credentialsRef: evt.workspaceId,
     repo: evt.repo,
     now: new Date().toISOString(),
     releaseContext,

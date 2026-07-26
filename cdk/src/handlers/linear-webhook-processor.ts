@@ -1023,8 +1023,8 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     const discovery = await discoverOrchestration({
       ddb,
       tableName: ORCHESTRATION_TABLE,
-      parentLinearIssueId: issue.id,
-      linearWorkspaceId: workspaceId,
+      parentIssueRef: issue.id,
+      credentialsRef: workspaceId,
       repo,
       now: new Date().toISOString(),
       releaseContext,
@@ -2031,8 +2031,8 @@ async function seedAndReleaseFromGraph(args: {
   const discovery = await discoverOrchestration({
     ddb,
     tableName: ORCHESTRATION_TABLE,
-    parentLinearIssueId: parentIssueId,
-    linearWorkspaceId: workspaceId,
+    parentIssueRef: parentIssueId,
+    credentialsRef: workspaceId,
     repo,
     now: new Date().toISOString(),
     releaseContext,

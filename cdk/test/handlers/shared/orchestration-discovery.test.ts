@@ -60,8 +60,8 @@ function emptyFetch(): typeof fetch {
 const base = {
   tableName: 'OrchestrationTable',
   accessToken: 'tok',
-  parentLinearIssueId: 'PARENT',
-  linearWorkspaceId: 'WS',
+  parentIssueRef: 'PARENT',
+  credentialsRef: 'WS',
   repo: 'o/r',
   now: '2026-06-09T12:00:00.000Z',
   releaseContext: { platform_user_id: 'platform-user-1' },
@@ -71,7 +71,7 @@ describe('discoverOrchestration', () => {
   test('no sub-issues → single_task', async () => {
     const ddb = { send: jest.fn() };
     const result = await discoverOrchestration({
-      ...base, ddb: ddb as never, graphSource: linearGraphSource(base.accessToken, base.parentLinearIssueId, { fetchImpl: emptyFetch() }),
+      ...base, ddb: ddb as never, graphSource: linearGraphSource(base.accessToken, base.parentIssueRef, { fetchImpl: emptyFetch() }),
     });
     expect(result.kind).toBe('single_task');
     expect(ddb.send).not.toHaveBeenCalled(); // never touches the table
@@ -82,7 +82,7 @@ describe('discoverOrchestration', () => {
     const result = await discoverOrchestration({
       ...base,
       ddb: ddb as never,
-      graphSource: linearGraphSource(base.accessToken, base.parentLinearIssueId, { fetchImpl: mockFetch([{ id: 'A' }, { id: 'B', blockedBy: ['A'] }]) }),
+      graphSource: linearGraphSource(base.accessToken, base.parentIssueRef, { fetchImpl: mockFetch([{ id: 'A' }, { id: 'B', blockedBy: ['A'] }]) }),
     });
     expect(result.kind).toBe('seeded');
     if (result.kind === 'seeded') {
@@ -97,7 +97,7 @@ describe('discoverOrchestration', () => {
     const result = await discoverOrchestration({
       ...base,
       ddb: ddb as never,
-      graphSource: linearGraphSource(base.accessToken, base.parentLinearIssueId, { fetchImpl: mockFetch([{ id: 'A', blockedBy: ['B'] }, { id: 'B', blockedBy: ['A'] }]) }),
+      graphSource: linearGraphSource(base.accessToken, base.parentIssueRef, { fetchImpl: mockFetch([{ id: 'A', blockedBy: ['B'] }, { id: 'B', blockedBy: ['A'] }]) }),
     });
     expect(result.kind).toBe('rejected');
     if (result.kind === 'rejected') {
@@ -110,7 +110,7 @@ describe('discoverOrchestration', () => {
   test('Linear fetch error → error (does NOT fall back to single_task)', async () => {
     const ddb = { send: jest.fn() };
     const result = await discoverOrchestration({
-      ...base, ddb: ddb as never, graphSource: linearGraphSource(base.accessToken, base.parentLinearIssueId, { fetchImpl: errorFetch() }),
+      ...base, ddb: ddb as never, graphSource: linearGraphSource(base.accessToken, base.parentIssueRef, { fetchImpl: errorFetch() }),
     });
     expect(result.kind).toBe('error');
     expect(ddb.send).not.toHaveBeenCalled();
@@ -121,7 +121,7 @@ describe('discoverOrchestration', () => {
     const result = await discoverOrchestration({
       ...base,
       ddb: ddb as never,
-      graphSource: linearGraphSource(base.accessToken, base.parentLinearIssueId, { fetchImpl: mockFetch([{ id: 'A' }]) }),
+      graphSource: linearGraphSource(base.accessToken, base.parentIssueRef, { fetchImpl: mockFetch([{ id: 'A' }]) }),
     });
     expect(result.kind).toBe('error');
   });
@@ -148,7 +148,7 @@ describe('discoverOrchestration', () => {
     const result = await discoverOrchestration({
       ...base,
       ddb: ddb as never,
-      graphSource: linearGraphSource(base.accessToken, base.parentLinearIssueId, { fetchImpl: mockFetch([{ id: 'A' }, { id: 'B', blockedBy: ['A'] }]) }),
+      graphSource: linearGraphSource(base.accessToken, base.parentIssueRef, { fetchImpl: mockFetch([{ id: 'A' }, { id: 'B', blockedBy: ['A'] }]) }),
     });
     expect(result.kind).toBe('extended');
     if (result.kind === 'extended') expect(result.addedSubIssueIds).toEqual([]);
@@ -172,7 +172,7 @@ describe('discoverOrchestration', () => {
     const result = await discoverOrchestration({
       ...base,
       ddb: ddb as never,
-      graphSource: linearGraphSource(base.accessToken, base.parentLinearIssueId, { fetchImpl: mockFetch([{ id: 'A' }, { id: 'B', blockedBy: ['A'] }, { id: 'C', blockedBy: ['B'] }]) }),
+      graphSource: linearGraphSource(base.accessToken, base.parentIssueRef, { fetchImpl: mockFetch([{ id: 'A' }, { id: 'B', blockedBy: ['A'] }, { id: 'C', blockedBy: ['B'] }]) }),
     });
     expect(result.kind).toBe('extended');
     if (result.kind === 'extended') {
@@ -236,7 +236,7 @@ describe('discoverOrchestration', () => {
         ...base,
         ddb: ddb as never,
         // two leaves B, C both depending on A
-        graphSource: linearGraphSource(base.accessToken, base.parentLinearIssueId, { fetchImpl: mockFetch([{ id: 'A' }, { id: 'B', blockedBy: ['A'] }, { id: 'C', blockedBy: ['A'] }]) }),
+        graphSource: linearGraphSource(base.accessToken, base.parentIssueRef, { fetchImpl: mockFetch([{ id: 'A' }, { id: 'B', blockedBy: ['A'] }, { id: 'C', blockedBy: ['A'] }]) }),
       });
       expect(result.kind).toBe('seeded');
       if (result.kind === 'seeded') {
@@ -256,7 +256,7 @@ describe('discoverOrchestration', () => {
       const result = await discoverOrchestration({
         ...base,
         ddb: ddb as never,
-        graphSource: linearGraphSource(base.accessToken, base.parentLinearIssueId, { fetchImpl: mockFetch([{ id: 'A' }, { id: 'B', blockedBy: ['A'] }]) }),
+        graphSource: linearGraphSource(base.accessToken, base.parentIssueRef, { fetchImpl: mockFetch([{ id: 'A' }, { id: 'B', blockedBy: ['A'] }]) }),
       });
       expect(result.kind).toBe('seeded');
       if (result.kind === 'seeded') expect(result.childCount).toBe(2); // no synthetic node

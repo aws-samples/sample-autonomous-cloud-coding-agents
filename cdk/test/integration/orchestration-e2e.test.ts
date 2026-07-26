@@ -215,8 +215,8 @@ describe('#304 orchestration integration — real createTaskCore', () => {
     const seed = await seedOrchestration({
       ddb,
       tableName: ORCH,
-      parentLinearIssueId: 'PARENT-ISSUE',
-      linearWorkspaceId: 'WS',
+      parentIssueRef: 'PARENT-ISSUE',
+      credentialsRef: 'WS',
       repo: 'owner/repo',
       children,
       now: NOW,
@@ -268,8 +268,8 @@ describe('#304 orchestration integration — real createTaskCore', () => {
     const seed = await seedOrchestration({
       ddb,
       tableName: ORCH,
-      parentLinearIssueId: 'P2',
-      linearWorkspaceId: 'WS',
+      parentIssueRef: 'P2',
+      credentialsRef: 'WS',
       repo: 'owner/repo',
       children,
       now: NOW,
@@ -297,8 +297,8 @@ describe('#304 orchestration integration — real createTaskCore', () => {
     const seed = await seedOrchestration({
       ddb,
       tableName: ORCH,
-      parentLinearIssueId: parent,
-      linearWorkspaceId: 'WS',
+      parentIssueRef: parent,
+      credentialsRef: 'WS',
       repo: 'owner/repo',
       children,
       now: NOW,
@@ -331,8 +331,8 @@ describe('#304 orchestration integration — real createTaskCore', () => {
     const seed2 = await seedOrchestration({
       ddb,
       tableName: ORCH,
-      parentLinearIssueId: 'REPLAY-PARENT',
-      linearWorkspaceId: 'WS',
+      parentIssueRef: 'REPLAY-PARENT',
+      credentialsRef: 'WS',
       repo: 'owner/repo',
       children,
       now: NOW,

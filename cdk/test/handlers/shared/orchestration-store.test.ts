@@ -77,8 +77,8 @@ describe('seedOrchestration — first write', () => {
     const result = await seedOrchestration({
       ddb: ddb as never,
       tableName: TABLE,
-      parentLinearIssueId: 'PARENT',
-      linearWorkspaceId: 'WS',
+      parentIssueRef: 'PARENT',
+      credentialsRef: 'WS',
       repo: 'o/r',
       children: [child('A'), child('B', ['A'])],
       now: NOW,
@@ -106,8 +106,8 @@ describe('seedOrchestration — first write', () => {
     await seedOrchestration({
       ddb: ddb as never,
       tableName: TABLE,
-      parentLinearIssueId: 'PARENT',
-      linearWorkspaceId: 'WS',
+      parentIssueRef: 'PARENT',
+      credentialsRef: 'WS',
       repo: 'o/r',
       children: [child('A'), child('B', ['A'])],
       now: NOW,
@@ -128,8 +128,8 @@ describe('seedOrchestration — first write', () => {
     await seedOrchestration({
       ddb: ddb as never,
       tableName: TABLE,
-      parentLinearIssueId: 'PARENT',
-      linearWorkspaceId: 'WS',
+      parentIssueRef: 'PARENT',
+      credentialsRef: 'WS',
       repo: 'o/r',
       children: [child('A', [], { identifier: 'ENG-1', title: 'Do thing' })],
       now: NOW,
@@ -149,8 +149,8 @@ describe('seedOrchestration — first write', () => {
     await seedOrchestration({
       ddb: ddb as never,
       tableName: TABLE,
-      parentLinearIssueId: 'PARENT',
-      linearWorkspaceId: 'WS',
+      parentIssueRef: 'PARENT',
+      credentialsRef: 'WS',
       repo: 'o/r',
       children: [
         child('A', [], { title: 'Dashboard', description: 'Create `dashboard.html` at the root.' }),
@@ -177,8 +177,8 @@ describe('seedOrchestration — first write', () => {
     const result = await seedOrchestration({
       ddb: ddb as never,
       tableName: TABLE,
-      parentLinearIssueId: 'PARENT',
-      linearWorkspaceId: 'WS',
+      parentIssueRef: 'PARENT',
+      credentialsRef: 'WS',
       repo: 'o/r',
       children,
       now: NOW,
@@ -197,8 +197,8 @@ describe('seedOrchestration — first write', () => {
     await seedOrchestration({
       ddb: ddb as never,
       tableName: TABLE,
-      parentLinearIssueId: 'PARENT',
-      linearWorkspaceId: 'WS',
+      parentIssueRef: 'PARENT',
+      credentialsRef: 'WS',
       repo: 'o/r',
       children: [child('A')],
       now: NOW,
@@ -217,8 +217,8 @@ describe('seedOrchestration — first write', () => {
     await seedOrchestration({
       ddb: ddb as never,
       tableName: TABLE,
-      parentLinearIssueId: 'PARENT',
-      linearWorkspaceId: 'WS',
+      parentIssueRef: 'PARENT',
+      credentialsRef: 'WS',
       repo: 'o/r',
       children: [child('A')],
       now: NOW,
@@ -237,8 +237,8 @@ describe('seedOrchestration — first write', () => {
     await seedOrchestration({
       ddb: ddb as never,
       tableName: TABLE,
-      parentLinearIssueId: 'PARENT',
-      linearWorkspaceId: 'WS',
+      parentIssueRef: 'PARENT',
+      credentialsRef: 'WS',
       repo: 'o/r',
       children: [child('A')],
       now: NOW,
@@ -259,8 +259,8 @@ describe('seedOrchestration — idempotent replay', () => {
     const result = await seedOrchestration({
       ddb: ddb as never,
       tableName: TABLE,
-      parentLinearIssueId: 'PARENT',
-      linearWorkspaceId: 'WS',
+      parentIssueRef: 'PARENT',
+      credentialsRef: 'WS',
       repo: 'o/r',
       children: [child('A'), child('B', ['A'])],
       now: NOW,
@@ -466,8 +466,8 @@ describe('loadOrchestration — marker rows are not children (#247 UX.20)', () =
     await seedOrchestration({
       ddb: seedDdb as never,
       tableName: TABLE,
-      parentLinearIssueId: 'P',
-      linearWorkspaceId: 'WS',
+      parentIssueRef: 'P',
+      credentialsRef: 'WS',
       repo: 'o/r',
       children: [child('A')],
       now: NOW,
@@ -601,8 +601,8 @@ describe('extendOrchestration — add nodes to an already-seeded epic', () => {
   function extendParams(graph: SubIssueNode[]) {
     return {
       tableName: TABLE,
-      parentLinearIssueId: PARENT,
-      linearWorkspaceId: 'WS',
+      parentIssueRef: PARENT,
+      credentialsRef: 'WS',
       repo: 'o/r',
       graph,
       now: NOW,

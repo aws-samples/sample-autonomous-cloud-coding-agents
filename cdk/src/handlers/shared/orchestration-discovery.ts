@@ -53,8 +53,8 @@ import { deriveOrchestrationId, extendOrchestration, seedOrchestration, type Orc
 export interface DiscoverOrchestrationParams {
   readonly ddb: DynamoDBDocumentClient;
   readonly tableName: string;
-  readonly parentLinearIssueId: string;
-  readonly linearWorkspaceId: string;
+  readonly parentIssueRef: string;
+  readonly credentialsRef: string;
   readonly repo: string;
   /** ISO timestamp injected for testability. */
   readonly now: string;
@@ -75,7 +75,7 @@ export interface DiscoverOrchestrationParams {
 }
 
 export type DiscoverOrchestrationResult =
-  | { readonly kind: 'single_task'; readonly parentLinearIssueId: string }
+  | { readonly kind: 'single_task'; readonly parentIssueRef: string }
   | {
     readonly kind: 'seeded';
     readonly orchestrationId: string;
@@ -104,7 +104,7 @@ export type DiscoverOrchestrationResult =
 export async function discoverOrchestration(
   params: DiscoverOrchestrationParams,
 ): Promise<DiscoverOrchestrationResult> {
-  const { ddb, tableName, parentLinearIssueId, linearWorkspaceId, repo, now, ttl, releaseContext, graphSource } = params;
+  const { ddb, tableName, parentIssueRef, credentialsRef, repo, now, ttl, releaseContext, graphSource } = params;
 
   // ── 1. Produce the orchestration graph ───────────────────────────
   // The caller states the source; this composer never reaches for a surface of
@@ -116,16 +116,16 @@ export async function discoverOrchestration(
   }
   if (fetched.kind === 'no_children') {
     logger.info('No orchestration graph — falling back to single task', {
-      parent_linear_issue_id: parentLinearIssueId,
+      parent_issue_ref: parentIssueRef,
     });
-    return { kind: 'single_task', parentLinearIssueId };
+    return { kind: 'single_task', parentIssueRef };
   }
 
   // ── 2. Validate the DAG (cycle / dangling / duplicate rejection) ─
   const validation = validateDag(fetched.children);
   if (!validation.ok) {
     logger.warn('Orchestration DAG rejected', {
-      parent_linear_issue_id: parentLinearIssueId,
+      parent_issue_ref: parentIssueRef,
       reason: validation.reason,
       offending_ids: validation.offendingIds,
     });
@@ -138,7 +138,7 @@ export async function discoverOrchestration(
   // fan-in, reusing A4's merge). No-op for linear chains / explicit
   // diamonds (≤1 leaf). The orchestration id is derived deterministically
   // from the parent issue, so we can name the synthetic node before seeding.
-  const orchestrationId = deriveOrchestrationId(parentLinearIssueId);
+  const orchestrationId = deriveOrchestrationId(parentIssueRef);
   const augmented = withIntegrationNode(fetched.children, orchestrationId);
   let childrenToSeed = augmented.nodes;
   if (augmented.added) {
@@ -149,13 +149,13 @@ export async function discoverOrchestration(
     const reValidation = validateDag(childrenToSeed);
     if (!reValidation.ok) {
       logger.error('Integration node produced an invalid DAG — seeding without it', {
-        parent_linear_issue_id: parentLinearIssueId,
+        parent_issue_ref: parentIssueRef,
         reason: reValidation.reason,
       });
       childrenToSeed = fetched.children;
     } else {
       logger.info('Orchestration fan-out detected — added integration node', {
-        parent_linear_issue_id: parentLinearIssueId,
+        parent_issue_ref: parentIssueRef,
         orchestration_id: orchestrationId,
         // the synthetic node is last; its predecessors are the leaves it merges
         leaf_count: childrenToSeed[childrenToSeed.length - 1].depends_on.length,
@@ -169,8 +169,8 @@ export async function discoverOrchestration(
     seedResult = await seedOrchestration({
       ddb,
       tableName,
-      parentLinearIssueId,
-      linearWorkspaceId,
+      parentIssueRef,
+      credentialsRef,
       repo,
       children: childrenToSeed,
       now,
@@ -179,7 +179,7 @@ export async function discoverOrchestration(
     });
   } catch (err) {
     logger.error('Failed to persist orchestration graph', {
-      parent_linear_issue_id: parentLinearIssueId,
+      parent_issue_ref: parentIssueRef,
       error: err instanceof Error ? err.message : String(err),
     });
     return { kind: 'error', message: 'Could not persist the orchestration graph. Please re-apply the trigger.' };
@@ -196,8 +196,8 @@ export async function discoverOrchestration(
       extendResult = await extendOrchestration({
         ddb,
         tableName,
-        parentLinearIssueId,
-        linearWorkspaceId,
+        parentIssueRef,
+        credentialsRef,
         repo,
         graph: childrenToSeed,
         now,
@@ -205,7 +205,7 @@ export async function discoverOrchestration(
       });
     } catch (err) {
       logger.error('Failed to extend orchestration graph', {
-        parent_linear_issue_id: parentLinearIssueId,
+        parent_issue_ref: parentIssueRef,
         error: err instanceof Error ? err.message : String(err),
       });
       return { kind: 'error', message: 'Could not extend the orchestration graph. Please re-apply the trigger.' };

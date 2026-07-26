@@ -187,8 +187,8 @@ export interface OrchestrationReleaseContext {
 export interface SeedOrchestrationParams {
   readonly ddb: DynamoDBDocumentClient;
   readonly tableName: string;
-  readonly parentLinearIssueId: string;
-  readonly linearWorkspaceId: string;
+  readonly parentIssueRef: string;
+  readonly credentialsRef: string;
   readonly repo: string;
   readonly children: readonly SubIssueNode[];
   /** ISO timestamp for created_at/updated_at (injected for testability). */
@@ -216,8 +216,8 @@ export interface SeedOrchestrationResult {
  *  avoid collisions across a workspace's epics). */
 const ORCH_ID_HASH_HEX_LENGTH = 32;
 
-export function deriveOrchestrationId(parentLinearIssueId: string): string {
-  const hash = crypto.createHash('sha256').update(parentLinearIssueId).digest('hex').slice(0, ORCH_ID_HASH_HEX_LENGTH);
+export function deriveOrchestrationId(parentIssueRef: string): string {
+  const hash = crypto.createHash('sha256').update(parentIssueRef).digest('hex').slice(0, ORCH_ID_HASH_HEX_LENGTH);
   return `orch_${hash}`;
 }
 
@@ -289,8 +289,8 @@ const PARENT_META_SK = '#meta';
 export async function seedOrchestration(
   params: SeedOrchestrationParams,
 ): Promise<SeedOrchestrationResult> {
-  const { ddb, tableName, parentLinearIssueId, linearWorkspaceId, repo, children, now, ttl, releaseContext } = params;
-  const orchestrationId = deriveOrchestrationId(parentLinearIssueId);
+  const { ddb, tableName, parentIssueRef, credentialsRef, repo, children, now, ttl, releaseContext } = params;
+  const orchestrationId = deriveOrchestrationId(parentIssueRef);
 
   // Idempotency gate: a prior run for this parent already seeded rows.
   const existing = await ddb.send(new GetCommand({
@@ -300,7 +300,7 @@ export async function seedOrchestration(
   if (existing.Item) {
     logger.info('Orchestration already seeded — skipping (idempotent replay)', {
       orchestration_id: orchestrationId,
-      parent_linear_issue_id: parentLinearIssueId,
+      parent_issue_ref: parentIssueRef,
     });
     return { orchestrationId, rowsWritten: 0, alreadyExisted: true };
   }
@@ -309,8 +309,8 @@ export async function seedOrchestration(
     orchestration_id: orchestrationId,
     sub_issue_id: c.id,
     // Renamed attributes are written under both spellings — see dualWrite.
-    ...dualWrite('parent_issue_ref', 'parent_linear_issue_id', parentLinearIssueId),
-    ...dualWrite('credentials_ref', 'linear_workspace_id', linearWorkspaceId),
+    ...dualWrite('parent_issue_ref', 'parent_linear_issue_id', parentIssueRef),
+    ...dualWrite('credentials_ref', 'linear_workspace_id', credentialsRef),
     repo,
     depends_on: c.depends_on,
     child_status: c.depends_on.length === 0 ? 'ready' : 'blocked',
@@ -325,8 +325,8 @@ export async function seedOrchestration(
   const metaRow = {
     orchestration_id: orchestrationId,
     sub_issue_id: PARENT_META_SK,
-    ...dualWrite('parent_issue_ref', 'parent_linear_issue_id', parentLinearIssueId),
-    ...dualWrite('credentials_ref', 'linear_workspace_id', linearWorkspaceId),
+    ...dualWrite('parent_issue_ref', 'parent_linear_issue_id', parentIssueRef),
+    ...dualWrite('credentials_ref', 'linear_workspace_id', credentialsRef),
     repo,
     child_count: children.length,
     // Release context for the reconciler (downstream releases run off the
@@ -376,7 +376,7 @@ export async function seedOrchestration(
 
   logger.info('Orchestration seeded', {
     orchestration_id: orchestrationId,
-    parent_linear_issue_id: parentLinearIssueId,
+    parent_issue_ref: parentIssueRef,
     child_count: children.length,
     rows_written: rowsWritten,
   });
@@ -424,15 +424,15 @@ export interface ExtendOrchestrationResult {
 export async function extendOrchestration(params: {
   readonly ddb: DynamoDBDocumentClient;
   readonly tableName: string;
-  readonly parentLinearIssueId: string;
-  readonly linearWorkspaceId: string;
+  readonly parentIssueRef: string;
+  readonly credentialsRef: string;
   readonly repo: string;
   readonly graph: readonly SubIssueNode[];
   readonly now: string;
   readonly ttl?: number;
 }): Promise<ExtendOrchestrationResult> {
-  const { ddb, tableName, parentLinearIssueId, linearWorkspaceId, repo, graph, now, ttl } = params;
-  const orchestrationId = deriveOrchestrationId(parentLinearIssueId);
+  const { ddb, tableName, parentIssueRef, credentialsRef, repo, graph, now, ttl } = params;
+  const orchestrationId = deriveOrchestrationId(parentIssueRef);
 
   const snapshot = await loadOrchestration(ddb, tableName, orchestrationId);
   if (!snapshot) {
@@ -489,8 +489,8 @@ export async function extendOrchestration(params: {
     return {
       orchestration_id: orchestrationId,
       sub_issue_id: n.id,
-      ...dualWrite('parent_issue_ref', 'parent_linear_issue_id', parentLinearIssueId),
-      ...dualWrite('credentials_ref', 'linear_workspace_id', linearWorkspaceId),
+      ...dualWrite('parent_issue_ref', 'parent_linear_issue_id', parentIssueRef),
+      ...dualWrite('credentials_ref', 'linear_workspace_id', credentialsRef),
       repo,
       depends_on,
       child_status: allDepsSucceeded ? 'ready' : 'blocked',
@@ -525,7 +525,7 @@ export async function extendOrchestration(params: {
 
   logger.info('Orchestration extended', {
     orchestration_id: orchestrationId,
-    parent_linear_issue_id: parentLinearIssueId,
+    parent_issue_ref: parentIssueRef,
     added: newRows.length,
     releasable: releasable.size,
     added_ids: newRows.map((r) => r.sub_issue_id),
