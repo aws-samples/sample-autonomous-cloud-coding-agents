@@ -798,15 +798,27 @@ export async function swapIssueReaction(
 
   // Delete our stale markers (any bgagent emoji that isn't the target).
   let targetPresent = false;
+  let staleLeft = 0;
   for (const r of reactions) {
     if (r.emoji === emoji) { targetPresent = true; continue; }
     if (BGAGENT_EMOJIS.has(r.emoji)) {
-      await graphqlRequest(token, REACTION_DELETE_MUTATION, { id: r.id });
+      if (!(await graphqlRequest(token, REACTION_DELETE_MUTATION, { id: r.id })).ok) staleLeft += 1;
     }
   }
 
-  if (targetPresent) return true; // already the only marker after the deletes above
-  return (await graphqlRequest(token, REACTION_CREATE_MUTATION, { issueId, emoji })).ok;
+  // A marker we could not remove means the issue still shows two of our own
+  // reactions at once, which is the contradictory state this swap exists to
+  // prevent — so don't report the promised single marker.
+  if (staleLeft > 0) {
+    logger.warn('Could not remove a stale status marker from the issue', {
+      event: 'linear_feedback.issue_reaction_swap_incomplete',
+      issue_id: issueId,
+      stale_count: staleLeft,
+    });
+  }
+  if (targetPresent) return staleLeft === 0; // already present; the deletes decide
+  const added = (await graphqlRequest(token, REACTION_CREATE_MUTATION, { issueId, emoji })).ok;
+  return added && staleLeft === 0;
 }
 
 /**
@@ -819,7 +831,8 @@ export async function swapIssueReaction(
  * bgagent marker except the target, adds the target if absent. Only bgagent
  * emojis (👀/✅/❌) are removed — a human's reaction is never touched.
  * Idempotent (a reconciler redelivery re-converges to the same single marker).
- * Best-effort; returns true if the target marker is present afterwards.
+ * Best-effort; returns true only when the target is present AND no stale marker
+ * of ours was left behind — two markers at once is the state this prevents.
  */
 export async function swapCommentReaction(
   ctx: LinearFeedbackContext,
@@ -833,15 +846,26 @@ export async function swapCommentReaction(
   const reactions = ((data?.comment as { reactions?: Array<{ id: string; emoji: string }> } | undefined)?.reactions) ?? [];
 
   let targetPresent = false;
+  let staleLeft = 0;
   for (const r of reactions) {
     if (r.emoji === emoji) { targetPresent = true; continue; }
     if (BGAGENT_EMOJIS.has(r.emoji)) {
-      await graphqlRequest(token, REACTION_DELETE_MUTATION, { id: r.id });
+      if (!(await graphqlRequest(token, REACTION_DELETE_MUTATION, { id: r.id })).ok) staleLeft += 1;
     }
   }
 
-  if (targetPresent) return true;
-  return (await graphqlRequest(token, REACTION_CREATE_ON_COMMENT_MUTATION, { commentId, emoji })).ok;
+  // Same all-or-nothing result as the issue swap: a leftover marker leaves the
+  // comment showing "saw it" beside "done", so it is not a success.
+  if (staleLeft > 0) {
+    logger.warn('Could not remove a stale status marker from the comment', {
+      event: 'linear_feedback.comment_reaction_swap_incomplete',
+      comment_id: commentId,
+      stale_count: staleLeft,
+    });
+  }
+  if (targetPresent) return staleLeft === 0;
+  const added = (await graphqlRequest(token, REACTION_CREATE_ON_COMMENT_MUTATION, { commentId, emoji })).ok;
+  return added && staleLeft === 0;
 }
 
 /**

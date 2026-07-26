@@ -339,6 +339,29 @@ describe('linear-feedback', () => {
       expect(fetchMock).toHaveBeenCalledTimes(2); // query + create, no deletes
     });
 
+    test('a delete that FAILS is reported as failure, even though the target was added', async () => {
+      // Returning only the add's result would claim the promised single marker
+      // while the issue still shows 👀 beside ✅ — the contradictory state this
+      // swap exists to prevent, and what a caller checks the result to rule out.
+      fetchMock
+        .mockResolvedValueOnce(reactionsResp([{ id: 'r-eyes', emoji: 'eyes' }]))
+        .mockResolvedValueOnce(jsonResponse({ errors: [{ message: 'nope' }] })) // delete 👀 fails
+        .mockResolvedValueOnce(jsonResponse({ data: { reactionCreate: { success: true } } }));
+      expect(await swapIssueReaction(CTX, ISSUE_ID, 'white_check_mark')).toBe(false);
+      // The target is still attempted — one correct marker beats only a stale one.
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+    });
+
+    test('target already present but a stale marker survives → failure', async () => {
+      fetchMock
+        .mockResolvedValueOnce(reactionsResp([
+          { id: 'r-eyes', emoji: 'eyes' },
+          { id: 'r-check', emoji: 'white_check_mark' },
+        ]))
+        .mockResolvedValueOnce(jsonResponse({ errors: [{ message: 'nope' }] }));
+      expect(await swapIssueReaction(CTX, ISSUE_ID, 'white_check_mark')).toBe(false);
+    });
+
     test('no token → false, no fetch', async () => {
       resolveLinearOauthTokenMock.mockResolvedValueOnce(null);
       expect(await swapIssueReaction(CTX, ISSUE_ID, 'eyes')).toBe(false);
@@ -376,6 +399,16 @@ describe('linear-feedback', () => {
       const ok = await swapCommentReaction(CTX, 'comment-77', 'white_check_mark');
       expect(ok).toBe(true);
       expect(fetchMock).toHaveBeenCalledTimes(2); // query + delete 👀; ✅ already present
+    });
+
+    test('a delete that FAILS on the comment is reported as failure too', async () => {
+      // Both swaps implement one interface method, so they must report the same
+      // all-or-nothing result; a caller cannot branch per surface.
+      fetchMock
+        .mockResolvedValueOnce(commentReactionsResp([{ id: 'r-eyes', emoji: 'eyes' }]))
+        .mockResolvedValueOnce(jsonResponse({ errors: [{ message: 'nope' }] }))
+        .mockResolvedValueOnce(jsonResponse({ data: { reactionCreate: { success: true } } }));
+      expect(await swapCommentReaction(CTX, 'comment-77', 'white_check_mark')).toBe(false);
     });
 
     test('never deletes a human reaction on the comment', async () => {

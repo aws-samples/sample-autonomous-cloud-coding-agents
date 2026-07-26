@@ -175,16 +175,17 @@ describe('Linear channel adapter', () => {
     expect(parentId).toBe('parent-1');
     expect(body).toBe('settled');
     expect(existingId).toBe('reply-9');
-    // The adapter forwards BOTH convergence flags explicitly, so a surface never
-    // has to guess a default.
-    expect(options).toEqual({ preservePreview: true, skipIfSettled: false });
+    // The adapter forwards EVERY convergence flag explicitly, so the surface
+    // helper never has to guess a default.
+    expect(options).toEqual({ preservePreview: true, skipIfSettled: false, repairIfOverwritten: false });
   });
 
   test('upsertThreadedReply defaults to not preserving a preview link', async () => {
     linearUpsertThreadedReply.mockResolvedValue('reply-2');
     await ch.upsertThreadedReply!(linearIssue, { commentId: 'p' }, 'body');
     expect(linearUpsertThreadedReply.mock.calls[0][4]).toBeUndefined();
-    expect(linearUpsertThreadedReply.mock.calls[0][5]).toEqual({ preservePreview: false, skipIfSettled: false });
+    expect(linearUpsertThreadedReply.mock.calls[0][5])
+      .toEqual({ preservePreview: false, skipIfSettled: false, repairIfOverwritten: false });
   });
 
   test('sweepNotes passes the comment to keep through and returns the deleted count', async () => {

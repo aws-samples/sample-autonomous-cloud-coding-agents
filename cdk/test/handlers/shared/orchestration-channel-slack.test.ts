@@ -126,6 +126,37 @@ describe('Slack channel adapter — the capability-gated surface', () => {
     expect((adds[0][2] as { name: string }).name).toBe('white_check_mark');
   });
 
+  test('a swap that succeeds fully reports success', async () => {
+    expect(await ch.replaceCommentReaction!({ commentId: '1700000000.009' }, thread, 'succeeded')).toBe(true);
+  });
+
+  test('reports FAILURE when a stale marker could not be removed', async () => {
+    // Returning the add's result alone would claim the promised end state — one
+    // marker — while the message still shows "saw it" beside "done". That
+    // contradiction is what a caller checks this result to rule out.
+    slackFetchMock.mockImplementation((_token: string, method: string, body: { name: string }) =>
+      Promise.resolve(!(method === 'reactions.remove' && body.name === 'eyes')));
+
+    expect(await ch.replaceCommentReaction!({ commentId: '1700000000.009' }, thread, 'succeeded')).toBe(false);
+    // The target is still attempted — a partial improvement beats leaving only
+    // the stale marker.
+    expect(slackFetchMock.mock.calls.filter((c) => c[1] === 'reactions.add')).toHaveLength(1);
+  });
+
+  test('reports FAILURE when the target could not be added', async () => {
+    slackFetchMock.mockImplementation((_token: string, method: string) =>
+      Promise.resolve(method !== 'reactions.add'));
+
+    expect(await ch.replaceCommentReaction!({ commentId: '1700000000.009' }, thread, 'succeeded')).toBe(false);
+  });
+
+  test('the issue-level swap reports the same all-or-nothing result', async () => {
+    slackFetchMock.mockImplementation((_token: string, method: string, body: { name: string }) =>
+      Promise.resolve(!(method === 'reactions.remove' && body.name === 'eyes')));
+
+    expect(await ch.replaceIssueReaction!(thread, 'failed')).toBe(false);
+  });
+
   test('replaceIssueReaction marks the THREAD ROOT — the nearest thing to an issue', async () => {
     await ch.replaceIssueReaction!(thread, 'failed');
     const adds = slackFetchMock.mock.calls.filter((c) => c[1] === 'reactions.add');

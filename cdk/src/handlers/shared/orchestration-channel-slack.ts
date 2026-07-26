@@ -185,19 +185,34 @@ export function makeSlackChannel(secretPrefix: string = SLACK_SECRET_PREFIX): Ch
       // `no_reaction` error on a marker that isn't there is benign and treated
       // as success by slackFetch.
       const target = REACTION_EMOJI[reaction];
+      const stale: string[] = [];
       for (const emoji of OWN_EMOJI) {
         if (emoji === target) continue;
-        await slackFetch(ctx.token, 'reactions.remove', {
+        const removed = await slackFetch(ctx.token, 'reactions.remove', {
           channel: ctx.channel,
           timestamp: comment.commentId,
           name: emoji,
         });
+        if (!removed) stale.push(emoji);
       }
-      return slackFetch(ctx.token, 'reactions.add', {
+      const added = await slackFetch(ctx.token, 'reactions.add', {
         channel: ctx.channel,
         timestamp: comment.commentId,
         name: target,
       });
+      if (stale.length > 0) {
+        // Reporting the add alone would claim the promised end state — ONE marker
+        // — while the message still carries a contradictory one ("saw it" beside
+        // "done"), and the contradiction is precisely what a caller checks this
+        // result to rule out.
+        logger.warn('Slack channel: a stale status marker could not be removed', {
+          event: 'slack_channel.reaction_replace_incomplete',
+          message_ts: comment.commentId,
+          target,
+          stale,
+        });
+      }
+      return added && stale.length === 0;
     },
 
     async replaceIssueReaction(issue, reaction) {

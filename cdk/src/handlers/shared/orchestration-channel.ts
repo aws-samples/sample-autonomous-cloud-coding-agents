@@ -191,15 +191,21 @@ export interface Channel {
    * prior markers first — used when work settles, so the comment shows one
    * outcome rather than an accumulated pile ("saw it" + "done" at once).
    * A human's reactions are never touched. Idempotent: re-running converges on
-   * the same single marker. Returns true if the target marker is present after.
+   * the same single marker.
+   *
+   * Returns true only when that end state was actually reached: the target is
+   * present AND no prior bot marker was left behind. Reporting the add alone
+   * would claim success while the surface still shows two contradictory markers —
+   * and a caller checking this result is checking for exactly that contradiction,
+   * since it is what makes a settled item look unsettled.
    */
   replaceCommentReaction?(comment: CommentRef, issue: IssueRef, reaction: Reaction): Promise<boolean>;
 
   /**
    * Make ``reaction`` the sole bot reaction on the ISSUE itself (not a comment) —
    * the at-a-glance status marker on a parent epic or a child, which matures
-   * across separate invocations. Same replace-only-our-own-markers contract as
-   * {@link replaceCommentReaction}. Returns true if the marker is present after.
+   * across separate invocations. Same replace-only-our-own-markers contract and
+   * same all-or-nothing result as {@link replaceCommentReaction}.
    */
   replaceIssueReaction?(issue: IssueRef, reaction: Reaction): Promise<boolean>;
 
