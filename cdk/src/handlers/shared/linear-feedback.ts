@@ -775,6 +775,27 @@ export async function appendOnceToComment(
 }
 
 /**
+ * Delete one of our own status markers, retrying ONCE on a transient failure.
+ *
+ * A marker we fail to remove is not cosmetic: it leaves two of our reactions on
+ * the same item ("saw it" beside "done"), no caller inspects the swap's result,
+ * and nothing else ever revisits it — so the contradiction is permanent. That is
+ * exactly what happened live: a 5s request timeout aborted one delete and the
+ * pair stayed. One retry costs a single call and covers the blip; anything
+ * terminal (auth, a marker another writer already removed) is not retried,
+ * because re-sending cannot change the answer.
+ *
+ * Returns true when the marker is gone.
+ */
+async function deleteOwnMarker(accessToken: string, reactionId: string): Promise<boolean> {
+  const first = await graphqlRequest(accessToken, REACTION_DELETE_MUTATION, { id: reactionId });
+  if (first.ok) return true;
+  if (!first.retryable) return false;
+  logger.info('Retrying a status-marker removal after a transient failure', { reaction_id: reactionId });
+  return (await graphqlRequest(accessToken, REACTION_DELETE_MUTATION, { id: reactionId })).ok;
+}
+
+/**
  * Swap the PARENT epic's bgagent status marker so only ONE is shown at a
  * time (👀 → ✅/❌), mirroring the children's reaction behaviour. The
  * children capture the reaction id in-process and delete it; the parent's
@@ -802,7 +823,7 @@ export async function swapIssueReaction(
   for (const r of reactions) {
     if (r.emoji === emoji) { targetPresent = true; continue; }
     if (BGAGENT_EMOJIS.has(r.emoji)) {
-      if (!(await graphqlRequest(token, REACTION_DELETE_MUTATION, { id: r.id })).ok) staleLeft += 1;
+      if (!(await deleteOwnMarker(token, r.id))) staleLeft += 1;
     }
   }
 
@@ -850,7 +871,7 @@ export async function swapCommentReaction(
   for (const r of reactions) {
     if (r.emoji === emoji) { targetPresent = true; continue; }
     if (BGAGENT_EMOJIS.has(r.emoji)) {
-      if (!(await graphqlRequest(token, REACTION_DELETE_MUTATION, { id: r.id })).ok) staleLeft += 1;
+      if (!(await deleteOwnMarker(token, r.id))) staleLeft += 1;
     }
   }
 

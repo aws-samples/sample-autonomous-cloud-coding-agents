@@ -339,6 +339,39 @@ describe('linear-feedback', () => {
       expect(fetchMock).toHaveBeenCalledTimes(2); // query + create, no deletes
     });
 
+    test('a TRANSIENT delete failure is retried once, and then succeeds', async () => {
+      // Live-caught: a 5s request timeout aborted the 👀 removal, so the comment
+      // kept 👀 beside ❓. No caller inspects this result and nothing revisits the
+      // item, so that contradiction was permanent — one retry covers the blip.
+      fetchMock
+        .mockResolvedValueOnce(reactionsResp([{ id: 'r-eyes', emoji: 'eyes' }]))
+        .mockResolvedValueOnce(jsonResponse({}, 503)) // delete: transient
+        .mockResolvedValueOnce(jsonResponse({ data: { reactionDelete: { success: true } } })) // retry wins
+        .mockResolvedValueOnce(jsonResponse({ data: { reactionCreate: { success: true } } }));
+      expect(await swapIssueReaction(CTX, ISSUE_ID, 'white_check_mark')).toBe(true);
+      const deletes = fetchMock.mock.calls.filter((c) => JSON.parse(c[1].body).query.includes('reactionDelete'));
+      expect(deletes).toHaveLength(2); // the failed attempt plus one retry
+    });
+
+    test('a TERMINAL delete failure is NOT retried — a resend cannot change the answer', async () => {
+      fetchMock
+        .mockResolvedValueOnce(reactionsResp([{ id: 'r-eyes', emoji: 'eyes' }]))
+        .mockResolvedValueOnce(jsonResponse({ errors: [{ message: 'not found' }] })) // terminal
+        .mockResolvedValueOnce(jsonResponse({ data: { reactionCreate: { success: true } } }));
+      expect(await swapIssueReaction(CTX, ISSUE_ID, 'white_check_mark')).toBe(false);
+      const deletes = fetchMock.mock.calls.filter((c) => JSON.parse(c[1].body).query.includes('reactionDelete'));
+      expect(deletes).toHaveLength(1);
+    });
+
+    test('a retry that ALSO fails still reports failure', async () => {
+      fetchMock
+        .mockResolvedValueOnce(reactionsResp([{ id: 'r-eyes', emoji: 'eyes' }]))
+        .mockResolvedValueOnce(jsonResponse({}, 503))
+        .mockResolvedValueOnce(jsonResponse({}, 503))
+        .mockResolvedValueOnce(jsonResponse({ data: { reactionCreate: { success: true } } }));
+      expect(await swapIssueReaction(CTX, ISSUE_ID, 'white_check_mark')).toBe(false);
+    });
+
     test('a delete that FAILS is reported as failure, even though the target was added', async () => {
       // Returning only the add's result would claim the promised single marker
       // while the issue still shows 👀 beside ✅ — the contradictory state this
@@ -399,6 +432,17 @@ describe('linear-feedback', () => {
       const ok = await swapCommentReaction(CTX, 'comment-77', 'white_check_mark');
       expect(ok).toBe(true);
       expect(fetchMock).toHaveBeenCalledTimes(2); // query + delete 👀; ✅ already present
+    });
+
+    test('the COMMENT swap retries a transient removal too (the live incident)', async () => {
+      // The live failure was on a comment: 👀 + ❓ both left on a disambiguation
+      // reply, because the removal timed out and nothing ever tried again.
+      fetchMock
+        .mockResolvedValueOnce(commentReactionsResp([{ id: 'r-eyes', emoji: 'eyes' }]))
+        .mockResolvedValueOnce(jsonResponse({}, 503))
+        .mockResolvedValueOnce(jsonResponse({ data: { reactionDelete: { success: true } } }))
+        .mockResolvedValueOnce(jsonResponse({ data: { reactionCreate: { success: true } } }));
+      expect(await swapCommentReaction(CTX, 'comment-77', 'question')).toBe(true);
     });
 
     test('a delete that FAILS on the comment is reported as failure too', async () => {
