@@ -19,6 +19,7 @@
 
 import {
   type ParentCommentNode,
+  nodeDisplayId,
   parseParentNodeReference,
   renderParentDisambiguationReply,
   suggestClosestNode,
@@ -55,6 +56,38 @@ describe('parseParentNodeReference (#247 UX.18 — parent comment → sub-issue)
   test('identifier is case-insensitive', () => {
     const r = parseParentNodeReference('abca-305: bump the year', NODES);
     expect(r.matches[0].linear_identifier).toBe('ABCA-305');
+  });
+
+  test('a node written under the NEUTRAL id name routes identically', () => {
+    // Rows persisted before and after the id was renamed coexist with no
+    // backfill, so reading only one name would silently drop name-the-node
+    // routing for half of them — the commenter types ABCA-307 and gets the
+    // "which sub-issue?" reply instead of their change.
+    const neutral: ParentCommentNode[] = [
+      { sub_issue_id: 'uuid-307', display_id: 'ABCA-307', title: 'Add a hero image', child_task_id: 't4' },
+    ];
+    const r = parseParentNodeReference('ABCA-307: make it wider', neutral);
+    expect(r.reason).toBeNull();
+    expect(r.matches).toHaveLength(1);
+    expect(nodeDisplayId(r.matches[0])).toBe('ABCA-307');
+  });
+
+  test('a MIXED epic disambiguates across both namings', () => {
+    // The realistic shape mid-migration: one epic extended after the rename has
+    // rows of both kinds, and ambiguity must be judged over all of them.
+    const mixed: ParentCommentNode[] = [
+      { sub_issue_id: 'a', linear_identifier: 'ABCA-1', title: 'Add a pricing banner' },
+      { sub_issue_id: 'b', display_id: 'ABCA-2', title: 'Add a newsletter block' },
+    ];
+    expect(nodeDisplayId(parseParentNodeReference('ABCA-2: reword it', mixed).matches[0])).toBe('ABCA-2');
+    expect(nodeDisplayId(parseParentNodeReference('ABCA-1: reword it', mixed).matches[0])).toBe('ABCA-1');
+  });
+
+  test('the neutral name wins when a row carries both', () => {
+    const both: ParentCommentNode[] = [
+      { sub_issue_id: 'a', display_id: 'ABCA-9', linear_identifier: 'ABCA-9', title: 'A node' },
+    ];
+    expect(nodeDisplayId(both[0])).toBe('ABCA-9');
   });
 
   test('no node referenced → reason "none"', () => {

@@ -820,6 +820,9 @@ export async function findOrchestrationChildByBranch(
     ExpressionAttributeValues: { ':b': branchName },
     Limit: 1,
   }));
-  const item = res.Items?.[0] as OrchestrationChildRow | undefined;
-  return item ?? null;
+  const item = res.Items?.[0];
+  // Marshalled, not cast: a raw cast would type-check while leaving the renamed
+  // attributes unread, so a row written under either naming would come back with
+  // empty parent/credentials refs.
+  return item ? toChildRow(item) : null;
 }

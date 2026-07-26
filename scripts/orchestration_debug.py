@@ -24,6 +24,16 @@ def s(item, key, default=""):
     return item.get(key, {}).get("S", default)
 
 
+def renamed(item, current, legacy, default=""):
+    """Read an attribute that has both a neutral and an older name.
+
+    Rows written before and after the rename coexist indefinitely (there is no
+    backfill), so a debug view that reads only one name shows blanks for half the
+    rows — which reads as missing data rather than a naming difference.
+    """
+    return s(item, current) or s(item, legacy, default)
+
+
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "rows"
     data = json.load(sys.stdin)
@@ -35,7 +45,8 @@ def main():
             return
         for m in items:
             n = m.get("child_count", {}).get("N", "?")
-            print(f"  {s(m, 'orchestration_id')}  issue={s(m, 'parent_linear_issue_id')}  repo={s(m, 'repo')}  children={n}")
+            issue = renamed(m, "parent_issue_ref", "parent_linear_issue_id")
+            print(f"  {s(m, 'orchestration_id')}  issue={issue}  repo={s(m, 'repo')}  children={n}")
         print("\nInspect one with: scripts/orchestration-debug.sh <orchestration_id>")
         return
 
@@ -55,14 +66,15 @@ def main():
         # sensitive and follows any ``s(m, …)`` read into a print — a false
         # positive (this dev-only debug helper logs only ids + a yes/no flag).
         has_oauth = "yes" if "linear_oauth_secret_arn" in m else "no"
-        print(f"  PARENT  issue={s(m, 'parent_linear_issue_id')}  repo={s(m, 'repo')}  children={n}")
+        issue = renamed(m, "parent_issue_ref", "parent_linear_issue_id")
+        print(f"  PARENT  issue={issue}  repo={s(m, 'repo')}  children={n}")
         print(f"          release_ctx: user={s(m, 'platform_user_id')}  oauth={has_oauth}")
 
-    for k in sorted(kids, key=lambda i: s(i, "linear_identifier")):
+    for k in sorted(kids, key=lambda i: renamed(i, "display_id", "linear_identifier")):
         st = s(k, "child_status")
         deps = [x.get("S", "") for x in k.get("depends_on", {}).get("L", [])]
         tid = s(k, "child_task_id") or "-"
-        label = s(k, "linear_identifier") or s(k, "sub_issue_id")[:8]
+        label = renamed(k, "display_id", "linear_identifier") or s(k, "sub_issue_id")[:8]
         print(f"  {label:10} {STAT.get(st, st):11} deps={deps or '[]'}  task={tid}")
 
 

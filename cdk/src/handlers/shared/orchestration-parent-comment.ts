@@ -40,6 +40,15 @@ import { isIntegrationNode } from './orchestration-integration-node';
 /** Minimal view of a sub-issue row this matcher needs. */
 export interface ParentCommentNode {
   readonly sub_issue_id: string;
+  /**
+   * The human-facing id a commenter would type (``ENG-42``). Read through
+   * {@link nodeDisplayId} rather than directly: persisted rows carry it under
+   * either this neutral name or the older surface-specific one depending on when
+   * they were written, and reading only one of the two silently loses
+   * name-the-node routing for the rows that use the other.
+   */
+  readonly display_id?: string;
+  /** Legacy name for {@link display_id}, still present on rows written earlier. */
   readonly linear_identifier?: string;
   readonly title?: string;
   /**
@@ -111,9 +120,10 @@ export function parseParentNodeReference(
   const tokens = new Set(text.split(' '));
 
   // 1) Identifier match wins outright.
-  const byIdentifier = nodes.filter(
-    (n) => n.linear_identifier && tokens.has(n.linear_identifier.toLowerCase()),
-  );
+  const byIdentifier = nodes.filter((n) => {
+    const id = nodeDisplayId(n);
+    return id !== undefined && tokens.has(id.toLowerCase());
+  });
   if (byIdentifier.length === 1) return { matches: byIdentifier, reason: null };
   if (byIdentifier.length > 1) return { matches: byIdentifier, reason: 'ambiguous' };
 
@@ -205,8 +215,19 @@ export function looksLikeNewWork(instruction: string): boolean {
   return false;
 }
 
+/**
+ * The node's human-facing id under either the neutral or the legacy attribute
+ * name. Rows persisted before and after the rename coexist indefinitely (there
+ * is no backfill), so every read of this id has to accept both — the neutral name
+ * wins where a row carries both.
+ */
+export function nodeDisplayId(n: ParentCommentNode): string | undefined {
+  return n.display_id ?? n.linear_identifier;
+}
+
 function nodeLabel(n: ParentCommentNode): string {
-  if (n.linear_identifier) return n.title ? `${n.linear_identifier} — ${n.title}` : n.linear_identifier;
+  const id = nodeDisplayId(n);
+  if (id) return n.title ? `${id} — ${n.title}` : id;
   return n.title ?? n.sub_issue_id;
 }
 
@@ -282,7 +303,7 @@ export function renderParentDisambiguationReply(
   if (suggestion) {
     out.push(
       `Did you mean **${nodeLabel(suggestion)}**? If so, reply ` +
-        `\`@bgagent ${suggestion.linear_identifier ?? 'that one'}: <what to change>\`.`,
+        `\`@bgagent ${nodeDisplayId(suggestion) ?? 'that one'}: <what to change>\`.`,
       '',
     );
   }

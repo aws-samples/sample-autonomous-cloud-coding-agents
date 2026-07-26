@@ -548,13 +548,41 @@ describe('findOrchestrationChildByBranch (#305 A6)', () => {
       ddb as never, TABLE, 'ChildBranchIndex', 'bgagent/01T/abca-1-x',
     );
 
-    expect(result).toEqual(row);
+    // Marshalled, so the neutral refs are always present (empty when the row
+    // carried neither naming, as this minimal fixture does).
+    expect(result).toEqual({ ...row, parent_issue_ref: '', credentials_ref: '' });
     const cmd = ddb.send.mock.calls[0][0] as QueryCommand;
     expect(cmd).toBeInstanceOf(QueryCommand);
     expect(cmd.input.IndexName).toBe('ChildBranchIndex');
     expect(cmd.input.KeyConditionExpression).toBe('child_branch_name = :b');
     expect(cmd.input.ExpressionAttributeValues).toEqual({ ':b': 'bgagent/01T/abca-1-x' });
     expect(cmd.input.Limit).toBe(1);
+  });
+
+  test('marshals the row, so a pre-rename row still yields its parent + credentials refs', async () => {
+    // A raw cast type-checked while leaving the renamed attributes unread, which
+    // would hand the caller a row with empty refs rather than failing visibly.
+    const ddb = makeDdb();
+    ddb.send.mockResolvedValueOnce({
+      Items: [{
+        orchestration_id: 'orch_1',
+        sub_issue_id: 'SUB-A',
+        child_branch_name: 'bgagent/01T/abca-1-x',
+        parent_linear_issue_id: 'parent-uuid-1',
+        linear_workspace_id: 'ws-uuid-1',
+        linear_identifier: 'ABCA-1',
+      }],
+    });
+
+    const result = await findOrchestrationChildByBranch(
+      ddb as never, TABLE, 'ChildBranchIndex', 'bgagent/01T/abca-1-x',
+    );
+
+    expect(result).toMatchObject({
+      parent_issue_ref: 'parent-uuid-1',
+      credentials_ref: 'ws-uuid-1',
+      display_id: 'ABCA-1',
+    });
   });
 
   test('returns null when no released child owns the branch (non-orchestration PR)', async () => {
