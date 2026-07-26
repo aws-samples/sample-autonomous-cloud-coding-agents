@@ -758,6 +758,18 @@ export interface OrchestrationMeta {
    * comment for the final rollup.
    */
   readonly status_comment_id?: string;
+  /**
+   * The ``@bgagent retry`` comment that re-ran this epic, if one did.
+   *
+   * Recorded so the epic's next settle can move that comment's marker off the
+   * receipt 👀 to the actual outcome. The retry path acks the comment and then
+   * hands off to the reconciler, which is driven by task events and so has no
+   * other way to learn which comment asked for the run — which left the one view
+   * the user is watching stuck on "looking at it" indefinitely (observed live
+   * 2026-07-26). Cleared once settled, so a later settle can't re-swap a marker on
+   * an old comment.
+   */
+  readonly retry_comment_id?: string;
 }
 
 /**
@@ -777,6 +789,32 @@ export async function setStatusCommentId(
     Key: { orchestration_id: orchestrationId, sub_issue_id: PARENT_META_SK },
     UpdateExpression: 'SET status_comment_id = :cid',
     ExpressionAttributeValues: { ':cid': commentId },
+  }));
+}
+
+/**
+ * Record (or clear) the ``@bgagent retry`` comment awaiting an outcome marker.
+ *
+ * Pass a comment id when a retry starts; pass undefined once its marker has been
+ * settled, so the next settle of the same epic doesn't re-swap a stale comment.
+ * Best-effort like the panel-id write: failing to record it costs a marker
+ * update, never the retry itself.
+ */
+export async function setRetryCommentId(
+  ddb: DynamoDBDocumentClient,
+  tableName: string,
+  orchestrationId: string,
+  commentId: string | undefined,
+): Promise<void> {
+  await ddb.send(new UpdateCommand({
+    TableName: tableName,
+    Key: { orchestration_id: orchestrationId, sub_issue_id: PARENT_META_SK },
+    ...(commentId === undefined
+      ? { UpdateExpression: 'REMOVE retry_comment_id' }
+      : {
+        UpdateExpression: 'SET retry_comment_id = :cid',
+        ExpressionAttributeValues: { ':cid': commentId },
+      }),
   }));
 }
 
@@ -855,6 +893,9 @@ export async function loadOrchestration(
       }),
       ...(preScreened.length > 0 && { pre_screened_attachments: preScreened }),
     },
+    ...(metaItem.retry_comment_id !== undefined && {
+      retry_comment_id: metaItem.retry_comment_id as string,
+    }),
     ...(metaItem.status_comment_id !== undefined && {
       status_comment_id: metaItem.status_comment_id as string,
     }),

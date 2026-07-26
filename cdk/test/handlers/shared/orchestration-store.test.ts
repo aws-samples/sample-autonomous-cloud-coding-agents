@@ -21,6 +21,7 @@ import { GetCommand, BatchWriteCommand, UpdateCommand, QueryCommand } from '@aws
 import type { SubIssueNode } from '../../../src/handlers/shared/linear-subissue-fetch';
 import {
   seedOrchestration,
+  setRetryCommentId,
   extendOrchestration,
   deriveOrchestrationId,
   OrchestrationIdCollisionError,
@@ -666,6 +667,51 @@ describe('loadOrchestration — marker rows are not children (#247 UX.20)', () =
     expect((secondCall.input as { ExclusiveStartKey?: unknown }).ExclusiveStartKey).toEqual({
       orchestration_id: 'orch_1', sub_issue_id: 'uuid-A',
     });
+  });
+});
+
+describe('setRetryCommentId — remember the retry comment awaiting an outcome', () => {
+  test('records the comment id on the meta row', async () => {
+    const ddb = makeDdb();
+    ddb.send.mockResolvedValueOnce({});
+
+    await setRetryCommentId(ddb as never, TABLE, 'orch_1', 'retry-cmt-1');
+
+    const cmd = ddb.send.mock.calls[0][0] as { input: Record<string, unknown> };
+    expect(cmd.input.Key).toEqual({ orchestration_id: 'orch_1', sub_issue_id: '#meta' });
+    expect(cmd.input.UpdateExpression).toBe('SET retry_comment_id = :cid');
+    expect(cmd.input.ExpressionAttributeValues).toEqual({ ':cid': 'retry-cmt-1' });
+  });
+
+  test('clearing REMOVEs it, so a later settle cannot re-answer an answered comment', async () => {
+    const ddb = makeDdb();
+    ddb.send.mockResolvedValueOnce({});
+
+    await setRetryCommentId(ddb as never, TABLE, 'orch_1', undefined);
+
+    const cmd = ddb.send.mock.calls[0][0] as { input: Record<string, unknown> };
+    expect(cmd.input.UpdateExpression).toBe('REMOVE retry_comment_id');
+    // No stray value binding on a REMOVE — DynamoDB rejects unused ones.
+    expect(cmd.input.ExpressionAttributeValues).toBeUndefined();
+  });
+
+  test('loadOrchestration surfaces it on the meta snapshot', async () => {
+    const ddb = makeDdb();
+    ddb.send.mockResolvedValueOnce({
+      Items: [{
+        orchestration_id: 'orch_1',
+        sub_issue_id: '#meta',
+        parent_issue_ref: 'PARENT',
+        credentials_ref: 'WS',
+        repo: 'o/r',
+        child_count: 1,
+        platform_user_id: 'u1',
+        retry_comment_id: 'retry-cmt-1',
+      }],
+    });
+
+    const snap = await loadOrchestration(ddb as never, TABLE, 'orch_1');
+    expect(snap?.meta.retry_comment_id).toBe('retry-cmt-1');
   });
 });
 

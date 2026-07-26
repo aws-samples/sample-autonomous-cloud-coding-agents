@@ -1130,6 +1130,114 @@ describe('orchestration-reconciler handler — A6 cascade', () => {
     expect(transitionIssueStateMock).toHaveBeenCalled(); // parent settled
   });
 
+  test('a recorded retry comment is settled to ✅ when the re-run epic ends clean', async () => {
+    // The gap this closes: the retry path can only ack the comment (👀) — it
+    // returns the moment the work is dispatched — so nothing ever told the user
+    // whether their retry worked. Live-observed: the comment sat on 👀 with no
+    // reply while the panel showed the finished epic right above it.
+    upsertStatusCommentMock.mockReset().mockResolvedValue('panel-cmt-1');
+    transitionIssueStateMock.mockReset().mockResolvedValue(true);
+    mockCascade([
+      { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A', linear_identifier: 'ENG-1' },
+      { sub_issue_id: 'B', depends_on: ['A'], child_status: 'succeeded', child_task_id: 'task-B', child_branch_name: 'branch-B', linear_identifier: 'ENG-2' },
+    ], { retry_comment_id: 'retry-cmt-1' });
+
+    await handler({
+      Records: [taskRecord({
+        task_id: 'restack-B',
+        status: 'COMPLETED',
+        orchestration_id: 'orch_1',
+        orchestration_sub_issue_id: 'B',
+        restack_predecessor_sub_issue_id: 'A',
+      })],
+    } as never);
+
+    // The marker moves off 👀 — it is the whole answer, since the retry path posts
+    // no maturing reply.
+    expect(swapCommentReactionMock).toHaveBeenCalledWith(expect.anything(), 'retry-cmt-1', 'white_check_mark');
+    // And the record is cleared, so a later settle can't re-swap an answered comment.
+    const cleared = ddbSend.mock.calls
+      .map((c) => c[0] as { _type?: string; input?: { UpdateExpression?: string } })
+      .filter((cmd) => cmd?._type === 'Update' && /REMOVE retry_comment_id/.test(cmd.input?.UpdateExpression ?? ''));
+    expect(cleared).toHaveLength(1);
+  });
+
+  test('a retry that ends with failures settles the comment to ❌, matching the panel header', async () => {
+    upsertStatusCommentMock.mockReset().mockResolvedValue('panel-cmt-1');
+    mockCascade([
+      { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A', linear_identifier: 'ENG-1' },
+      { sub_issue_id: 'B', depends_on: ['A'], child_status: 'failed', child_task_id: 'task-B', child_branch_name: 'branch-B', linear_identifier: 'ENG-2' },
+    ], { retry_comment_id: 'retry-cmt-1' });
+
+    await handler({
+      Records: [taskRecord({
+        task_id: 'restack-B',
+        status: 'COMPLETED',
+        orchestration_id: 'orch_1',
+        orchestration_sub_issue_id: 'B',
+        restack_predecessor_sub_issue_id: 'A',
+      })],
+    } as never);
+
+    expect(swapCommentReactionMock).toHaveBeenCalledWith(expect.anything(), 'retry-cmt-1', 'x');
+  });
+
+  test('an epic still in flight does NOT settle the retry comment yet', async () => {
+    // Premature settling would tell the user "done" while children are still
+    // running. The cascade source here is a LEAF (nothing depends on it), which is
+    // the shape that routes through the settle path — a source WITH dependents
+    // refreshes the panel from the cascade branch instead and never reaches it, so
+    // that fixture would pass this assertion without exercising anything.
+    upsertStatusCommentMock.mockReset().mockResolvedValue('panel-cmt-1');
+    mockCascade([
+      { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A', linear_identifier: 'ENG-1' },
+      // B: the leaf whose restack just completed. C is still running, so the epic
+      // as a whole is NOT terminal.
+      { sub_issue_id: 'B', depends_on: ['A'], child_status: 'succeeded', child_task_id: 'task-B', child_branch_name: 'branch-B', linear_identifier: 'ENG-2' },
+      { sub_issue_id: 'C', child_status: 'released', child_task_id: 'task-C', child_branch_name: 'branch-C', linear_identifier: 'ENG-3' },
+    ], { retry_comment_id: 'retry-cmt-1' });
+
+    await handler({
+      Records: [taskRecord({
+        task_id: 'restack-B',
+        status: 'COMPLETED',
+        orchestration_id: 'orch_1',
+        orchestration_sub_issue_id: 'B',
+        restack_predecessor_sub_issue_id: 'A',
+      })],
+    } as never);
+
+    // The settle path DID run — the panel shows the in-flight header (🔄 · n/m),
+    // not a settled one — so it reached the gate and declined, rather than this
+    // test never reaching the code.
+    expect(upsertStatusCommentMock).toHaveBeenCalled();
+    expect(upsertStatusCommentMock.mock.calls.at(-1)![2] as string).toMatch(/^🔄/);
+    expect(swapCommentReactionMock).not.toHaveBeenCalledWith(expect.anything(), 'retry-cmt-1', expect.anything());
+  });
+
+  test('an epic with NO recorded retry comment settles nothing extra', async () => {
+    upsertStatusCommentMock.mockReset().mockResolvedValue('panel-cmt-1');
+    mockCascade([
+      { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A', linear_identifier: 'ENG-1' },
+      { sub_issue_id: 'B', depends_on: ['A'], child_status: 'succeeded', child_task_id: 'task-B', child_branch_name: 'branch-B', linear_identifier: 'ENG-2' },
+    ]);
+
+    await handler({
+      Records: [taskRecord({
+        task_id: 'restack-B',
+        status: 'COMPLETED',
+        orchestration_id: 'orch_1',
+        orchestration_sub_issue_id: 'B',
+        restack_predecessor_sub_issue_id: 'A',
+      })],
+    } as never);
+
+    const cleared = ddbSend.mock.calls
+      .map((c) => c[0] as { _type?: string; input?: { UpdateExpression?: string } })
+      .filter((cmd) => cmd?._type === 'Update' && /retry_comment_id/.test(cmd.input?.UpdateExpression ?? ''));
+    expect(cleared).toHaveLength(0);
+  });
+
   test('a cascade source does NOT run normal child gating (no GSI sub-issue lookup)', async () => {
     mockCascade([
       { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A' },

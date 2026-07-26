@@ -118,7 +118,7 @@ import { bedrockInvokeRevise, interpretRevise, type InvokeReviseFn } from './sha
 import { computeEpicRetryPlan } from './shared/orchestration-reconcile';
 import { readConcurrencyBudget, releaseReadyChildren } from './shared/orchestration-release';
 import { upsertEpicPanel } from './shared/orchestration-rollup';
-import { claimCommentAck, clearRollupClaim, deriveOrchestrationId, loadOrchestration, setChildOwnAttachments, setStatusCommentId, type OrchestrationReleaseContext } from './shared/orchestration-store';
+import { claimCommentAck, clearRollupClaim, deriveOrchestrationId, loadOrchestration, setChildOwnAttachments, setRetryCommentId, setStatusCommentId, type OrchestrationReleaseContext } from './shared/orchestration-store';
 import type { Attachment, PassedAttachmentRecord } from './shared/types';
 import { MAX_ATTACHMENTS_PER_TASK, MAX_TASK_DESCRIPTION_LENGTH } from './shared/validation';
 import { CODING_WORKFLOW_ID } from './shared/workflows';
@@ -1918,8 +1918,25 @@ async function handleEpicRetryIntent(args: {
     { suppressAdvisoryNotes: true, retryClaimKey: commentId },
   );
   if (outcome === 'retried') {
-    // Keep 👀 (work in flight); maybeRetryTerminalEpic posted the retry note +
-    // repositioned the live panel, which shows the 🔄. No reply needed.
+    // Keep 👀 for now — the work really is in flight, and the live panel shows the
+    // 🔄. But record the comment so the epic's next settle moves that 👀 to the
+    // outcome: this handler is done the moment the retry is dispatched, and the
+    // reconciler that observes the result has no other way to know which comment
+    // asked for it, so without this the comment the user is watching stays on 👀
+    // forever even after the epic finishes (observed live 2026-07-26).
+    try {
+      // maybeRetryTerminalEpic already returned 'no_orchestration' when the table
+      // is unset, so reaching 'retried' means it is configured.
+      await setRetryCommentId(ddb, ORCHESTRATION_TABLE!, orchestrationId, commentId);
+    } catch (err) {
+      // Non-fatal: the retry itself is already running, and the panel still
+      // reports the outcome. Only the comment's marker is lost.
+      logger.warn('Could not record the retry comment for settling (non-fatal)', {
+        orchestration_id: orchestrationId,
+        comment_id: commentId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
     logger.info('A6 comment: retry intent → epic retry re-run', {
       orchestration_id: orchestrationId, comment_id: commentId,
     });

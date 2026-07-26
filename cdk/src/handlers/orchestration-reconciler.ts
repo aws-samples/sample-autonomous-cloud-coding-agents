@@ -84,6 +84,7 @@ import {
   clearRollupClaim,
   deriveOrchestrationId,
   loadOrchestration,
+  setRetryCommentId,
   setStatusCommentId,
   type ChildStatus,
   type OrchestrationChildRow,
@@ -799,6 +800,7 @@ export async function refreshPanelAndSettle(
     credentials_ref: string;
     parent_issue_ref: string;
     status_comment_id?: string;
+    retry_comment_id?: string;
     release_context?: { channel_source?: string };
   },
   now: string,
@@ -867,6 +869,58 @@ export async function refreshPanelAndSettle(
         orchestration_id: orchestrationId, error: err instanceof Error ? err.message : String(err),
       });
     }
+  }
+
+  // Settle the `@bgagent retry` comment that asked for this run, if one did.
+  // The retry path can only ack it (👀) — it finishes the moment the work is
+  // dispatched — so the comment the user is watching has no outcome unless this
+  // settle gives it one. Gated on ``won`` so it happens once per settle, the same
+  // way the parent-state mirror is.
+  if (allTerminal && won && meta.retry_comment_id) {
+    await settleRetryComment(orchestrationId, meta.retry_comment_id, children, channel, meta);
+  }
+}
+
+/**
+ * Move a retry comment's marker from the receipt 👀 to the run's outcome.
+ *
+ * Mirrors what an iteration's settle does for its trigger comment: the marker is
+ * the whole answer here, because the retry path posts no maturing reply. ✅ when
+ * everything ended up succeeding, ❌ when anything is still failed or skipped —
+ * matching the panel header the user reads directly above it.
+ *
+ * The record is cleared FIRST. If the marker swap were to succeed and the clear
+ * then fail, a later settle of the same epic would re-swap a marker on a comment
+ * that has already been answered; clearing first means a failure leaves the marker
+ * un-updated instead, which is the same state as before this ran and is visibly
+ * wrong rather than silently stale. Best-effort throughout: this is feedback.
+ */
+async function settleRetryComment(
+  orchestrationId: string,
+  retryCommentId: string,
+  children: readonly OrchestrationChildRow[],
+  channel: Channel,
+  meta: { credentials_ref: string; parent_issue_ref: string },
+): Promise<void> {
+  const anyBad = children.some((c) => c.child_status === 'failed' || c.child_status === 'skipped');
+  try {
+    await setRetryCommentId(ddb, ORCHESTRATION_TABLE, orchestrationId, undefined);
+    await channel.replaceCommentReaction?.(
+      { commentId: retryCommentId },
+      issueRef(meta.parent_issue_ref, meta.credentials_ref),
+      anyBad ? 'failed' : 'succeeded',
+    );
+    logger.info('Settled the retry comment to match the epic outcome', {
+      orchestration_id: orchestrationId,
+      comment_id: retryCommentId,
+      outcome: anyBad ? 'failed' : 'succeeded',
+    });
+  } catch (err) {
+    logger.warn('Could not settle the retry comment (non-fatal)', {
+      orchestration_id: orchestrationId,
+      comment_id: retryCommentId,
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 }
 

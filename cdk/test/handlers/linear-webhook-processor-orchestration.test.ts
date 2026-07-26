@@ -675,6 +675,15 @@ describe('linear-webhook-processor — #247 A6 comment trigger', () => {
     // 👀 kept (work in flight), no "nothing to retry" reply.
     expect(reactToCommentMock).toHaveBeenCalledWith(expect.anything(), 'c-retry', 'eyes');
     expect(replyToCommentMock).not.toHaveBeenCalled();
+    // ...but the comment is RECORDED, so the epic's settle can move that 👀 to the
+    // outcome. This handler returns as soon as the work is dispatched, and the
+    // reconciler that sees the result has no other way to learn which comment asked
+    // for it — without this the comment stays on 👀 forever (live-observed).
+    const recorded = ddbSend.mock.calls
+      .map((c) => c[0] as { _type?: string; input?: { UpdateExpression?: string; ExpressionAttributeValues?: Record<string, unknown> } })
+      .filter((cmd) => cmd?._type === 'Update' && /SET retry_comment_id/.test(cmd.input?.UpdateExpression ?? ''));
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0].input?.ExpressionAttributeValues?.[':cid']).toBe('c-retry');
   });
 
   test('@bgagent on a started sub-issue → instant 👀 ack on the TRIGGERING comment (#247 UX.3)', async () => {
