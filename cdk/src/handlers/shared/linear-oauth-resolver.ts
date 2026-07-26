@@ -64,6 +64,13 @@ export interface RegistryRow {
   readonly workspace_slug: string;
   readonly oauth_secret_arn: string;
   readonly status: RegistryRowStatus;
+  /**
+   * When the CURRENT authorization was installed. Rewritten by every
+   * (re-)authorization, which is what makes it usable as an installation
+   * identity: a diagnosis about one grant must not be applied to its successor.
+   * Optional — rows written before it was recorded have none.
+   */
+  readonly installed_at?: string;
 }
 
 export interface StoredOauthToken {
@@ -202,7 +209,9 @@ export async function resolveLinearOauthToken(
     const withMarker: ResolverOptions = {
       ...options,
       onAuthorizationRevoked: options.onAuthorizationRevoked
-        ?? ((workspaceId) => markWorkspaceRevoked(ddb, registryTableName, workspaceId)),
+        // Pass the installation this resolve is acting on, so a verdict reached
+        // about THIS grant can't be applied to a successor installed meanwhile.
+        ?? ((workspaceId) => markWorkspaceRevoked(ddb, registryTableName, workspaceId, row.installed_at)),
     };
     const refreshed = await refreshLinearToken(token, sm, row.oauth_secret_arn, withMarker);
     if (!refreshed) {
@@ -248,18 +257,29 @@ export async function resolveLinearOauthToken(
  * has READ-ONLY access to the registry table, so this write fails AccessDenied
  * and is swallowed (deliberately — recording the diagnosis must never break token
  * resolution). Granting the write is deferred; until then the operator-facing
- * signal is the ``expired_untested`` state from `bgagent platform doctor`, which
- * cannot distinguish a dead authorization from an idle one. Tracked in the
- * backlog under the Linear auth-revocation item.
+ * signal is the indeterminate state from `bgagent platform doctor`, which reports
+ * that the workspace could not be confirmed rather than claiming it is fine.
+ * Tracked in the backlog under the Linear auth-revocation item.
  *
- * Conditional on the row still being ``active``: a concurrent caller may have
- * already marked it, and an operator who has since re-authorized must not be
- * clobbered back to revoked by a late straggler.
+ * Scoped to the installation it actually diagnosed. ``status = active`` alone is
+ * not enough: a re-authorization writes ``active`` again, so a straggler holding
+ * the OLD token — a queued event, a retry, another Lambda mid-flight — would find
+ * the condition satisfied and revoke the working grant the operator had just
+ * installed, taking the workspace down again with a stale verdict. Conditioning
+ * on ``installed_at`` (rewritten by every re-authorization) makes the write apply
+ * only while the row still describes the same installation. ``expectedInstalledAt``
+ * is passed by the caller rather than re-read here, because a re-read would race
+ * the same way.
+ *
+ * When the caller has no ``installed_at`` to name (a row written before it was
+ * recorded), the write falls back to requiring the attribute to still be absent —
+ * so a re-authorization, which adds it, likewise takes the row out of scope.
  */
 export async function markWorkspaceRevoked(
   ddb: DynamoDBDocumentClient,
   tableName: string,
   linearWorkspaceId: string,
+  expectedInstalledAt?: string,
   now: string = new Date().toISOString(),
 ): Promise<void> {
   try {
@@ -267,13 +287,16 @@ export async function markWorkspaceRevoked(
       TableName: tableName,
       Key: { linear_workspace_id: linearWorkspaceId },
       UpdateExpression: 'SET #s = :revoked, revoked_at = :now, revoked_reason = :reason',
-      ConditionExpression: '#s = :active',
+      ConditionExpression: expectedInstalledAt === undefined
+        ? '#s = :active AND attribute_not_exists(installed_at)'
+        : '#s = :active AND installed_at = :installed',
       ExpressionAttributeNames: { '#s': 'status' },
       ExpressionAttributeValues: {
         ':revoked': 'revoked',
         ':active': 'active',
         ':now': now,
         ':reason': 'refresh_token_rejected',
+        ...(expectedInstalledAt !== undefined && { ':installed': expectedInstalledAt }),
       },
     }));
     logger.warn('Marked Linear workspace as revoked — re-authorization required', {
@@ -281,7 +304,11 @@ export async function markWorkspaceRevoked(
     });
   } catch (err) {
     if ((err as { name?: string })?.name === 'ConditionalCheckFailedException') {
-      // Already marked (or re-authorized since) — nothing to do.
+      // Already marked, or re-authorized since this diagnosis was made — either
+      // way the verdict no longer describes the row, so leave it alone.
+      logger.info('Skipped the revoked marker — the registry row is no longer the installation diagnosed', {
+        linear_workspace_id: linearWorkspaceId,
+      });
       return;
     }
     throw err;
@@ -367,6 +394,7 @@ function parseRegistryRow(rawItem: unknown, linearWorkspaceId: string): Registry
     workspace_slug: item.workspace_slug,
     oauth_secret_arn: item.oauth_secret_arn,
     status,
+    ...(typeof item.installed_at === 'string' && { installed_at: item.installed_at }),
   };
   registryCache.set(linearWorkspaceId, { value: row, expiresAt: Date.now() + REGISTRY_CACHE_TTL_MS });
   return row;
