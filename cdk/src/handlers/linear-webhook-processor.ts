@@ -116,9 +116,9 @@ import { applyPlanCommand, parsePlanCommand, type PlanCommand } from './shared/o
 import { applyPlanEdits, diffPlans, renderPlanDiff } from './shared/orchestration-plan-revise';
 import { bedrockInvokeRevise, interpretRevise, type InvokeReviseFn } from './shared/orchestration-plan-revise-interpret';
 import { computeEpicRetryPlan } from './shared/orchestration-reconcile';
-import { readConcurrencyBudget, releaseReadyChildren } from './shared/orchestration-release';
+import { applyTerminalCreateFailures, readConcurrencyBudget, releaseReadyChildren } from './shared/orchestration-release';
 import { upsertEpicPanel } from './shared/orchestration-rollup';
-import { claimCommentAck, clearRollupClaim, deriveOrchestrationId, loadOrchestration, setChildOwnAttachments, setRetryCommentId, setStatusCommentId, type OrchestrationReleaseContext } from './shared/orchestration-store';
+import { claimCommentAck, clearRollupClaim, deriveOrchestrationId, loadOrchestration, setChildOwnAttachments, setRetryCommentId, setStatusCommentId, type OrchestrationChildRow, type OrchestrationReleaseContext } from './shared/orchestration-store';
 import type { Attachment, PassedAttachmentRecord } from './shared/types';
 import { MAX_ATTACHMENTS_PER_TASK, MAX_TASK_DESCRIPTION_LENGTH } from './shared/validation';
 import { CODING_WORKFLOW_ID } from './shared/workflows';
@@ -186,6 +186,24 @@ const channelFor = (registryTable: string): Channel => makeLinearChannel(registr
 /** Address an issue on the channel: its surface id + the credentials key
  *  (for Linear, the workspace/organization id the token registry is keyed by). */
 const issueRef = (issueId: string, workspaceId: string): IssueRef => ({ issueId, credentialsRef: workspaceId });
+
+/**
+ * Panel ``failureReasons`` for children that failed BEFORE becoming a task, so a
+ * guardrail rejection at seed time shows "why + how to fix" on its row rather than a
+ * bare ❌. The normal path reads the reason off the task record; these children have
+ * no task, so the reason persisted on the row is the only source.
+ *
+ * Returns a spreadable object — empty when there is nothing to report.
+ */
+function seedFailureReasons(
+  children: readonly OrchestrationChildRow[],
+): { failureReasons?: Record<string, string> } {
+  const reasons: Record<string, string> = {};
+  for (const c of children) {
+    if (c.child_status === 'failed' && c.failure_reason) reasons[c.sub_issue_id] = c.failure_reason;
+  }
+  return Object.keys(reasons).length > 0 ? { failureReasons: reasons } : {};
+}
 
 /**
  * First-run "starting" courtesy comment (ADR-016 P4.5). The 🤖 prefix matches
@@ -1082,6 +1100,9 @@ export async function handler(event: ProcessorEvent): Promise<void> {
         }
       }
       let releasedRoots = 0;
+      // Set when a root failed terminally at release time: the epic may already be
+      // settled, so the panel below must render the outcome rather than 'in progress'.
+      let seedHadTerminalFailure = false;
       if (snapshot) {
         // #331: throttle the root release to the user's free concurrency
         // budget. A wide-root epic (many independent sub-issues, no shared
@@ -1108,6 +1129,19 @@ export async function handler(event: ProcessorEvent): Promise<void> {
           budget,
         );
         releasedRoots = results.filter((r) => r.kind === 'released').length;
+        // A root rejected DETERMINISTICALLY (guardrail, validation) never becomes a
+        // task, so no task event will ever wake the reconciler for it — and the
+        // reconciler is what normally skips a failed node's dependents and settles
+        // the epic. Without this the panel sits at "🔄 N/M" with a 👀 on a finished
+        // epic until the 10-minute stranded sweep notices (live-caught 2026-07-26).
+        // Persist the skips here so the panel posted just below already shows the
+        // settled picture.
+        const patched = await applyTerminalCreateFailures(
+          ddb, ORCHESTRATION_TABLE, discovery.orchestrationId, snapshot.children, results, new Date().toISOString(),
+        );
+        // Identity, not deep-compare: the helper returns the SAME array when nothing
+        // failed terminally, and a fresh one when it patched anything.
+        seedHadTerminalFailure = patched !== snapshot.children;
       }
       logger.info('Linear orchestration seeded — root children released', {
         issue_id: issue.id,
@@ -1131,11 +1165,19 @@ export async function handler(event: ProcessorEvent): Promise<void> {
         try {
           const postReleaseSnapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId);
           if (postReleaseSnapshot) {
+            // When a root failed terminally the epic may ALREADY be finished, so
+            // render the settled panel (❌ rows + the retry hint) instead of
+            // claiming it's in progress. Read from the freshly-loaded rows, which
+            // include the skips just persisted.
+            const settled = seedHadTerminalFailure && postReleaseSnapshot.children.every(
+              (c) => c.child_status === 'succeeded' || c.child_status === 'failed' || c.child_status === 'skipped',
+            );
             const commentId = await upsertEpicPanel({
               channel: channelFor(WORKSPACE_REGISTRY_TABLE),
               parent: issueRef(issue.id, workspaceId),
               children: postReleaseSnapshot.children,
-              inProgress: true,
+              ...seedFailureReasons(postReleaseSnapshot.children),
+              inProgress: !settled,
               mirrorParentState: true,
             });
             if (commentId) {

@@ -283,6 +283,83 @@ describe('linear-webhook-processor — #247 orchestration routing', () => {
     expect(stampUpdate?.ExpressionAttributeValues?.[':cid']).toBe('cmt-status-1');
   });
 
+  test('a root REJECTED at seed time settles the epic now, not 10 minutes later', async () => {
+    // Live-caught 2026-07-26: a guardrail-blocked root never becomes a task, so no
+    // task event ever wakes the reconciler — and the reconciler is what skips a
+    // failed node's dependents and settles the epic. The panel sat at "🔄 1/2" with
+    // a 👀 on an epic that was already finished, until the 10-minute stranded sweep
+    // swept it up.
+    resolveLinearOauthTokenMock.mockResolvedValue({ accessToken: 'tok', oauthSecretArn: 'arn', workspaceSlug: 'acme' });
+    discoverOrchestrationMock.mockResolvedValueOnce({
+      kind: 'seeded', orchestrationId: 'orch_gr', childCount: 2, rootSubIssueIds: ['A'], alreadyExisted: false,
+    });
+    // The guardrail rejects the root: a DETERMINISTIC 400, so it is terminally
+    // failed rather than rolled back to ready.
+    createTaskCoreMock.mockReset().mockResolvedValue({
+      statusCode: 400,
+      body: '{"error":{"message":"Task description was blocked by content policy."}}',
+    });
+
+    const meta = { sub_issue_id: '#meta', orchestration_id: 'orch_gr', parent_issue_ref: 'issue-1', credentials_ref: 'org-1', repo: 'owner/repo', child_count: 2, platform_user_id: 'u1' };
+    const rowA = { sub_issue_id: 'A', orchestration_id: 'orch_gr', parent_issue_ref: 'issue-1', credentials_ref: 'org-1', repo: 'owner/repo', depends_on: [], child_status: 'ready', display_id: 'ABCA-1', title: 'Blocked root' };
+    const rowB = { sub_issue_id: 'B', orchestration_id: 'orch_gr', parent_issue_ref: 'issue-1', credentials_ref: 'org-1', repo: 'owner/repo', depends_on: ['A'], child_status: 'blocked', display_id: 'ABCA-2', title: 'Dependent' };
+    // The post-release re-read shows the settled picture the fix just persisted.
+    // Model the store, rather than counting calls: the handler loads the graph, the
+    // release + skip writes mutate it, and the post-release re-read must show those
+    // mutations — exactly what the fix depends on.
+    const store: Record<string, Record<string, unknown>> = {
+      '#meta': { ...meta }, 'A': { ...rowA }, 'B': { ...rowB },
+    };
+    let gets = 0;
+    ddbSend.mockReset();
+    ddbSend.mockImplementation(async (cmd: { _type?: string; input?: Record<string, unknown> }) => {
+      if (cmd?._type === 'Get') {
+        gets += 1;
+        // 1st: the project-mapping row; 2nd: the linked-user row.
+        if (gets === 1) return { Item: { status: 'active', repo: 'owner/repo', label_filter: 'bgagent' } };
+        if (gets === 2) return { Item: { platform_user_id: 'u1' } };
+        return {};
+      }
+      if (cmd?._type === 'Query') return { Items: Object.values(store) };
+      if (cmd?._type === 'Update') {
+        const sk = (cmd.input?.Key as { sub_issue_id?: string })?.sub_issue_id;
+        const vals = (cmd.input?.ExpressionAttributeValues ?? {}) as Record<string, unknown>;
+        if (sk && store[sk]) {
+          // Apply the value the UpdateExpression actually SETs, not whichever
+          // binding happens to be present — a conditional write binds its expected
+          // status too, so keying on presence applied the guard as the new value.
+          const expr = String(cmd.input?.UpdateExpression ?? '');
+          for (const [bind, value] of Object.entries(vals)) {
+            if (expr.includes(`child_status = ${bind}`)) store[sk].child_status = value;
+            if (expr.includes(`failure_reason = ${bind}`)) store[sk].failure_reason = value;
+          }
+        }
+        return {};
+      }
+      return {};
+    });
+
+    await handler(eventWith(issue()));
+
+    // The dependent's skip is PERSISTED at seed time — that is what makes the epic
+    // reach all-terminal without waiting for a sweep.
+    const skipWrite = ddbSend.mock.calls
+      .map((c) => c[0]?.input)
+      .find((i) => i?.ExpressionAttributeValues?.[':s'] === 'skipped');
+    expect(skipWrite).toBeDefined();
+    expect((skipWrite!.Key as { sub_issue_id: string }).sub_issue_id).toBe('B');
+
+    // ...and the panel renders the SETTLED outcome, not "in progress".
+    expect(upsertStatusCommentMock).toHaveBeenCalledTimes(1);
+    const [, , body] = upsertStatusCommentMock.mock.calls[0];
+    expect(body).toContain('finished with failures');
+    expect(body).not.toMatch(/^🔄/);
+    // The row carries the actionable reason, since there is no task to read it from.
+    expect(body).toContain('reword this sub-issue');
+    // And the settled-with-failures panel offers the retry route.
+    expect(body).toContain('@bgagent retry');
+  });
+
   test('seeded on idempotent replay → no duplicate start signal on parent', async () => {
     happyPreamble();
     discoverOrchestrationMock.mockResolvedValueOnce({

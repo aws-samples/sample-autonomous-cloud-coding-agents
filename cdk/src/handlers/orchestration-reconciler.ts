@@ -75,7 +75,7 @@ import {
   type ReconcileChild,
   type TerminalOutcome,
 } from './shared/orchestration-reconcile';
-import { readConcurrencyBudget, releaseReadyChildren, type ReleaseChildReadyResult } from './shared/orchestration-release';
+import { applyTerminalCreateFailures, readConcurrencyBudget, releaseReadyChildren } from './shared/orchestration-release';
 import { planDirectRestack, type RestackStep } from './shared/orchestration-restack';
 import { cascadeNodeLabel, upsertEpicPanel } from './shared/orchestration-rollup';
 import {
@@ -86,7 +86,6 @@ import {
   loadOrchestration,
   setRetryCommentId,
   setStatusCommentId,
-  type ChildStatus,
   type OrchestrationChildRow,
   type OrchestrationReleaseContext,
 } from './shared/orchestration-store';
@@ -384,79 +383,6 @@ async function resolveChildPrUrls(
  * Best-effort: a read miss just yields no sub-line (never throws out of the
  * reconcile). Returns ``sub_issue_id → reason``.
  */
-/**
- * F9: reconcile any children that FAILED terminally during the release (a
- * deterministic create failure — guardrail/validation). ``failClaimTerminal``
- * already wrote ``child_status='failed'`` + ``failure_reason`` for the failed
- * node itself, but a mid-graph failure must ALSO transitively skip its
- * dependents — exactly like a task-level failure does — or those dependents stay
- * ``blocked`` forever and the epic never reaches all-terminal (it would hang at a
- * different node instead of looping). Reuse {@link computeReconcilePlan} (the
- * same BFS-over-reverse-deps the normal terminal path uses) to derive + PERSIST
- * the skips, then return the view patched with both the failure and the skips so
- * the settle running immediately after this sees the full terminal picture
- * (there's no later stream event for a child that never became a task).
- *
- * Idempotent: the skip write is guarded on ``child_status IN (blocked, ready)``
- * (won't clobber a released/running sibling), matching ``reconcileTerminalChild``.
- */
-async function applyTerminalFailures(
-  orchestrationId: string,
-  children: readonly OrchestrationChildRow[],
-  results: readonly ReleaseChildReadyResult[],
-  now: string,
-): Promise<readonly OrchestrationChildRow[]> {
-  if (!ORCHESTRATION_TABLE) return children;
-  const failedReasons = new Map<string, string>();
-  for (const r of results) {
-    if (r.kind === 'create_failed_terminal') failedReasons.set(r.subIssueId, r.failureReason);
-  }
-  if (failedReasons.size === 0) return children;
-
-  // Derive the transitive skips for each terminally-failed node using the SAME
-  // planner the task-failure path uses, so a guardrail failure and a task
-  // failure skip dependents identically. Accumulate into one status map (a
-  // diamond where two failed roots feed a shared leaf skips it once).
-  const statusById = new Map<string, ChildStatus>(children.map((c) => [c.sub_issue_id, c.child_status]));
-  for (const failedId of failedReasons.keys()) {
-    const plan = computeReconcilePlan(
-      { sub_issue_id: failedId, status: 'FAILED' },
-      children.map((c) => ({ ...c, child_status: statusById.get(c.sub_issue_id) ?? c.child_status })),
-    );
-    for (const u of plan.statusUpdates) statusById.set(u.sub_issue_id, u.child_status);
-  }
-
-  // Persist ONLY the skips here — the failed nodes themselves were already
-  // written by failClaimTerminal (with their failure_reason). Skip writes are
-  // guarded so they never stamp a live sibling terminal.
-  for (const [subIssueId, status] of statusById) {
-    if (status !== 'skipped' || children.find((c) => c.sub_issue_id === subIssueId)?.child_status === 'skipped') {
-      continue;
-    }
-    try {
-      await ddb.send(new UpdateCommand({
-        TableName: ORCHESTRATION_TABLE,
-        Key: { orchestration_id: orchestrationId, sub_issue_id: subIssueId },
-        UpdateExpression: 'SET child_status = :s, updated_at = :now',
-        ConditionExpression: 'child_status IN (:blocked, :ready)',
-        ExpressionAttributeValues: { ':s': 'skipped', ':blocked': 'blocked', ':ready': 'ready', ':now': now },
-      }));
-    } catch (err) {
-      if (isConditionalCheckFailed(err)) continue; // already moved on — fine
-      throw err;
-    }
-  }
-
-  // Return the view with the failure(s) + skips applied so the settle sees all-terminal.
-  return children.map((c) => {
-    if (failedReasons.has(c.sub_issue_id)) {
-      return { ...c, child_status: 'failed' as const, failure_reason: failedReasons.get(c.sub_issue_id)! };
-    }
-    const s = statusById.get(c.sub_issue_id);
-    return s === 'skipped' && c.child_status !== 'skipped' ? { ...c, child_status: 'skipped' as const } : c;
-  });
-}
-
 async function resolveChildFailureReasons(
   children: readonly OrchestrationChildRow[],
 ): Promise<Record<string, string>> {
@@ -713,7 +639,7 @@ async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
   //    ready→released flip in releaseChild dedups if both happen to see it.
   const fresh = await loadOrchestration(ddb, ORCHESTRATION_TABLE, orchestrationId);
   // F9: reassignable so a terminal create-failure can be patched into the view
-  // before the settle below (see applyTerminalFailures).
+  // before the settle below (see applyTerminalCreateFailures).
   let freshChildren = fresh?.children ?? snapshot.children;
   const succeeded = new Set(
     freshChildren.filter((c) => c.child_status === 'succeeded').map((c) => c.sub_issue_id),
@@ -771,7 +697,9 @@ async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
     // this reconciler for a child that never became a task. Persist the
     // transitive skips of its dependents + patch the local view so the settle
     // below sees the full terminal picture and can reach all-terminal + post ❌.
-    freshChildren = await applyTerminalFailures(orchestrationId, freshChildren, results, now);
+    freshChildren = await applyTerminalCreateFailures(
+      ddb, ORCHESTRATION_TABLE, orchestrationId, freshChildren, results, now,
+    );
   }
 
   // Refresh the panel + settle the parent state against the fresh view.

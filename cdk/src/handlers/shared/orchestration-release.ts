@@ -50,7 +50,9 @@ import type { createTaskCore as CreateTaskCoreFn } from './create-task-core';
 import { logger } from './logger';
 import { selectBaseBranch } from './orchestration-base-branch';
 import { isIntegrationNode } from './orchestration-integration-node';
+import { computeReconcilePlan } from './orchestration-reconcile';
 import type {
+  ChildStatus,
   OrchestrationChildRow,
   OrchestrationReleaseContext,
 } from './orchestration-store';
@@ -760,4 +762,85 @@ function isConditionalCheckFailed(err: unknown): boolean {
     && 'name' in err
     && (err as { name?: string }).name === 'ConditionalCheckFailedException'
   );
+}
+
+/**
+ * Persist the transitive skips caused by a child that failed DETERMINISTICALLY at
+ * release time, and return the child view patched with the failure + skips.
+ *
+ * A guardrail/validation rejection means the child never became a task, so no task
+ * event will ever wake the reconciler for it. ``releaseReadyChildren`` already
+ * wrote ``child_status='failed'`` + ``failure_reason`` for the node itself, but a
+ * mid-graph failure must ALSO transitively skip its dependents — exactly as a
+ * task-level failure does — or those dependents stay ``blocked`` forever and the
+ * epic never reaches all-terminal.
+ *
+ * Both release call sites need this, which is why it lives here rather than in one
+ * handler: the reconciler releases children as predecessors succeed, and the
+ * SEED path releases the roots. A guardrail rejection on a root at seed time used
+ * to leave the epic at "🔄 N/M" with no settle until the 10-minute stranded sweep
+ * swept it up, because only the reconciler had this step (live-caught 2026-07-26).
+ *
+ * Reuses {@link computeReconcilePlan} — the same BFS over reverse dependencies the
+ * task-failure path uses — so a guardrail failure and a task failure skip
+ * dependents identically.
+ *
+ * Idempotent: each skip write is guarded on ``child_status IN (blocked, ready)``,
+ * so it never stamps a released/running sibling terminal.
+ *
+ * Returns ``children`` untouched when nothing failed terminally, so callers can
+ * apply it unconditionally.
+ */
+export async function applyTerminalCreateFailures(
+  ddb: DynamoDBDocumentClient,
+  tableName: string,
+  orchestrationId: string,
+  children: readonly OrchestrationChildRow[],
+  results: readonly ReleaseChildReadyResult[],
+  now: string,
+): Promise<readonly OrchestrationChildRow[]> {
+  const failedReasons = new Map<string, string>();
+  for (const r of results) {
+    if (r.kind === 'create_failed_terminal') failedReasons.set(r.subIssueId, r.failureReason);
+  }
+  if (failedReasons.size === 0) return children;
+
+  // Accumulate into one status map so a diamond whose two failed roots feed a
+  // shared leaf skips that leaf once.
+  const statusById = new Map<string, ChildStatus>(children.map((c) => [c.sub_issue_id, c.child_status]));
+  for (const failedId of failedReasons.keys()) {
+    const plan = computeReconcilePlan(
+      { sub_issue_id: failedId, status: 'FAILED' },
+      children.map((c) => ({ ...c, child_status: statusById.get(c.sub_issue_id) ?? c.child_status })),
+    );
+    for (const u of plan.statusUpdates) statusById.set(u.sub_issue_id, u.child_status);
+  }
+
+  // Persist ONLY the skips — the failed nodes themselves were already written
+  // (with their failure_reason) by the release path.
+  for (const [subIssueId, status] of statusById) {
+    if (status !== 'skipped' || children.find((c) => c.sub_issue_id === subIssueId)?.child_status === 'skipped') {
+      continue;
+    }
+    try {
+      await ddb.send(new UpdateCommand({
+        TableName: tableName,
+        Key: { orchestration_id: orchestrationId, sub_issue_id: subIssueId },
+        UpdateExpression: 'SET child_status = :s, updated_at = :now',
+        ConditionExpression: 'child_status IN (:blocked, :ready)',
+        ExpressionAttributeValues: { ':s': 'skipped', ':blocked': 'blocked', ':ready': 'ready', ':now': now },
+      }));
+    } catch (err) {
+      if (isConditionalCheckFailed(err)) continue; // already moved on — fine
+      throw err;
+    }
+  }
+
+  return children.map((c) => {
+    if (failedReasons.has(c.sub_issue_id)) {
+      return { ...c, child_status: 'failed' as const, failure_reason: failedReasons.get(c.sub_issue_id)! };
+    }
+    const s = statusById.get(c.sub_issue_id);
+    return s === 'skipped' && c.child_status !== 'skipped' ? { ...c, child_status: 'skipped' as const } : c;
+  });
 }

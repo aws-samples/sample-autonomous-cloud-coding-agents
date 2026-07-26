@@ -19,6 +19,7 @@
 
 import { UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import {
+  applyTerminalCreateFailures,
   readConcurrencyBudget,
   releaseChild,
   releaseReadyChildren,
@@ -813,5 +814,100 @@ describe('releaseChild — parent attachments inherited by children (finding #1)
     const ids = ctx.preScreenedAttachments.map((r: { attachment_id: string }) => r.attachment_id);
     expect(ids.filter((i: string) => i.startsWith('own'))).toHaveLength(8);
     expect(ids.filter((i: string) => i.startsWith('par'))).toHaveLength(2);
+  });
+});
+
+describe('applyTerminalCreateFailures — a child that never became a task', () => {
+  const ORCH = 'orch_1';
+  /** A child row, minimal but with the fields the planner reads. */
+  const row = (id: string, status: string, deps: string[] = []): OrchestrationChildRow => ({
+    orchestration_id: ORCH,
+    sub_issue_id: id,
+    parent_issue_ref: 'PARENT',
+    credentials_ref: 'WS',
+    repo: 'o/r',
+    depends_on: deps,
+    child_status: status as OrchestrationChildRow['child_status'],
+    created_at: NOW,
+    updated_at: NOW,
+  });
+
+  test('skips the failed root\'s dependents and reports them as terminal', async () => {
+    // Why this exists at all: a guardrail rejection means no task, so no task event
+    // will ever wake the reconciler for this node. Nothing else would skip B or let
+    // the epic reach all-terminal — the panel would sit at "🔄 n/m" until a sweep.
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    const children = [row('A', 'releasing'), row('B', 'blocked', ['A'])];
+
+    const out = await applyTerminalCreateFailures(
+      ddb as never, 'OrchestrationTable', ORCH, children,
+      [{ kind: 'create_failed_terminal', subIssueId: 'A', statusCode: 400, failureReason: 'Blocked by content policy' }] as never,
+      NOW,
+    );
+
+    expect(out.find((c) => c.sub_issue_id === 'A')).toMatchObject({
+      child_status: 'failed', failure_reason: 'Blocked by content policy',
+    });
+    expect(out.find((c) => c.sub_issue_id === 'B')?.child_status).toBe('skipped');
+    // The skip is PERSISTED, not just patched in memory.
+    const writes = ddb.send.mock.calls.map((c) => c[0] as UpdateCommand)
+      .filter((cmd) => (cmd.input.ExpressionAttributeValues as Record<string, unknown>)?.[':s'] === 'skipped');
+    expect(writes).toHaveLength(1);
+    expect((writes[0].input.Key as { sub_issue_id: string }).sub_issue_id).toBe('B');
+  });
+
+  test('a skip write can never stamp a LIVE sibling terminal', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    await applyTerminalCreateFailures(
+      ddb as never, 'OrchestrationTable', ORCH,
+      [row('A', 'releasing'), row('B', 'blocked', ['A'])],
+      [{ kind: 'create_failed_terminal', subIssueId: 'A', statusCode: 400, failureReason: 'r' }] as never,
+      NOW,
+    );
+    const cmd = ddb.send.mock.calls[0][0] as UpdateCommand;
+    // Guarded on a non-live source, so a skip racing a re-release cannot mark a
+    // released/running child terminal and let the epic claim its rollup early.
+    expect(cmd.input.ConditionExpression).toBe('child_status IN (:blocked, :ready)');
+  });
+
+  test('returns the SAME array when nothing failed terminally (callers key on identity)', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    const children = [row('A', 'released')];
+
+    const out = await applyTerminalCreateFailures(
+      ddb as never, 'OrchestrationTable', ORCH, children,
+      [{ kind: 'released', subIssueId: 'A' }] as never, NOW,
+    );
+
+    expect(out).toBe(children); // identity: the seed path uses this to detect "nothing to settle"
+    expect(ddb.send).not.toHaveBeenCalled();
+  });
+
+  test('a diamond whose two failed roots share a leaf skips that leaf once', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    const out = await applyTerminalCreateFailures(
+      ddb as never, 'OrchestrationTable', ORCH,
+      [row('A', 'releasing'), row('B', 'releasing'), row('C', 'blocked', ['A', 'B'])],
+      [
+        { kind: 'create_failed_terminal', subIssueId: 'A', statusCode: 400, failureReason: 'r' },
+        { kind: 'create_failed_terminal', subIssueId: 'B', statusCode: 400, failureReason: 'r' },
+      ] as never,
+      NOW,
+    );
+    expect(out.find((c) => c.sub_issue_id === 'C')?.child_status).toBe('skipped');
+    const skipWrites = ddb.send.mock.calls.map((c) => c[0] as UpdateCommand)
+      .filter((cmd) => (cmd.input.ExpressionAttributeValues as Record<string, unknown>)?.[':s'] === 'skipped');
+    expect(skipWrites).toHaveLength(1);
+  });
+
+  test('an already-skipped dependent is not re-written', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    await applyTerminalCreateFailures(
+      ddb as never, 'OrchestrationTable', ORCH,
+      [row('A', 'releasing'), row('B', 'skipped', ['A'])],
+      [{ kind: 'create_failed_terminal', subIssueId: 'A', statusCode: 400, failureReason: 'r' }] as never,
+      NOW,
+    );
+    expect(ddb.send).not.toHaveBeenCalled();
   });
 });
