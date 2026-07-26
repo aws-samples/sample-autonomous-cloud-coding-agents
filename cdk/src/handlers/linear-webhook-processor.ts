@@ -106,6 +106,7 @@ import { discoverOrchestration } from './shared/orchestration-discovery';
 import { declarativeGraphSource, linearGraphSource } from './shared/orchestration-graph-source';
 import { isIntegrationNode } from './shared/orchestration-integration-node';
 import {
+  nodeDisplayId,
   parseParentNodeReference,
   renderParentDisambiguationReply,
   suggestClosestNode,
@@ -3136,7 +3137,7 @@ async function handleParentEpicCommentTrigger(args: {
     // PM hit: naming a failed child got "couldn't tell / no PR" with no way out).
     const targetRow = snapshot.children.find((c) => c.sub_issue_id === target.sub_issue_id);
     const body = targetRow?.child_status === 'failed'
-      ? `👋 **${target.linear_identifier ?? target.sub_issue_id}** failed before opening a PR, so there's `
+      ? `👋 **${nodeDisplayId(target) ?? target.sub_issue_id}** failed before opening a PR, so there's `
         + 'nothing to iterate on yet. Reply `@bgagent retry` on this epic to re-run the failed work '
         + '(or remove and re-apply the `abca` label) — then comment again once it has a PR.'
       : renderParentDisambiguationReply('none', snapshot.children, target, false, epicHasFailures);

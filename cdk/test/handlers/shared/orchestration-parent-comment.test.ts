@@ -72,6 +72,17 @@ describe('parseParentNodeReference (#247 UX.18 — parent comment → sub-issue)
     expect(nodeDisplayId(r.matches[0])).toBe('ABCA-307');
   });
 
+  test('nodeDisplayId is what USER-FACING text must use, under either naming', () => {
+    // Not only routing: the disambiguation and no-PR replies print this id back to
+    // the human. A legacy-only read there shows a raw UUID instead of ABCA-957 on
+    // any row written after the rename — caught live, on a real epic.
+    expect(nodeDisplayId({ sub_issue_id: 'u1', display_id: 'ABCA-957' })).toBe('ABCA-957');
+    expect(nodeDisplayId({ sub_issue_id: 'u1', linear_identifier: 'ABCA-957' })).toBe('ABCA-957');
+    // No id recorded at all → undefined, so the caller can fall back to the raw id
+    // deliberately rather than printing "undefined".
+    expect(nodeDisplayId({ sub_issue_id: 'u1' })).toBeUndefined();
+  });
+
   test('a MIXED epic disambiguates across both namings', () => {
     // The realistic shape mid-migration: one epic extended after the rename has
     // rows of both kinds, and ambiguity must be judged over all of them.
