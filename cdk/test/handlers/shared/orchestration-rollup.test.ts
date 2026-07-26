@@ -598,14 +598,21 @@ describe('renderEpicPanel (#247 UX — the single maturing panel)', () => {
       .toContain('⚠️ **ABCA orchestration finished with failures**');
   });
 
-  // PM-P0-1 (2026-07-24): a SETTLED-with-failures panel tells the user how to
-  // retry — both equivalent ways — so `retry` is discoverable + consistent with
-  // re-labelling. Not shown while in-flight or on a clean complete.
-  test('settled-with-failures panel shows the retry hint (both ways: comment + re-label)', () => {
+  // A SETTLED-with-failures panel tells the user how to retry. Not shown while
+  // in-flight or on a clean complete.
+  test('the retry hint leads with the comment and offers the label only as a fallback', () => {
+    // Presenting the two as equivalent was wrong: re-applying the label is a
+    // gesture with four possible meanings (add sub-issues / retry / still running /
+    // already complete) resolved from graph state, so on an epic that gained a
+    // sub-issue AND has a failure it does strictly more than a retry.
     const body = renderEpicPanel({ inProgress: false, rows: [row('a', 'succeeded'), row('b', 'failed')] });
     expect(body).toContain('To retry:');
     expect(body).toContain('`@bgagent retry`');
-    expect(body).toContain('re-apply'); // the equivalent re-label path
+    // The label is still discoverable — just not billed as the same thing.
+    expect(body).toContain('re-applying the `abca` label');
+    expect(body).not.toContain('either way');
+    // The comment must be named before the label, so the reliable route reads first.
+    expect(body.indexOf('`@bgagent retry`')).toBeLessThan(body.indexOf('re-applying'));
   });
 
   test('no retry hint on a clean complete, or while still in progress', () => {

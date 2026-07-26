@@ -300,15 +300,22 @@ export function renderEpicPanel(params: EpicPanelParams): string {
       return line;
     });
 
-  // PM-P0-1 (2026-07-24): a SETTLED epic that finished with failures tells the
-  // user exactly how to retry — the two EQUIVALENT ways, so `retry` is
-  // discoverable and reads consistently with re-labelling. Only when the epic is
-  // terminal (not inProgress) AND something failed/skipped (nothing to retry
-  // otherwise). One line so the panel stays scannable.
+  // A SETTLED epic that finished with failures tells the user how to retry. Names
+  // ONE way, deliberately: re-applying the label is a different gesture that only
+  // happens to retry in this one state — the same label re-apply also means "add
+  // the sub-issues I just created", "nothing to do, still running", or "already
+  // complete", inferred from the graph rather than from what the user meant. So an
+  // epic with both a new sub-issue and a failure does two things on a re-label and
+  // one on a retry, which is why the previous "either way" wording was wrong.
+  // Commenting is also the more reliable of the two: a label change only triggers
+  // when the webhook reports the label set as having changed, whereas a comment is
+  // an unambiguous event. The label is offered as a fallback, not an equal.
+  // Only when the epic is terminal (not inProgress) AND something failed/skipped
+  // (nothing to retry otherwise). One line so the panel stays scannable.
   const retryHint = (!inProgress && anyBad)
-    ? ['', '↻ **To retry:** reply `@bgagent retry` on this epic, or remove and re-apply '
-      + 'the `abca` label — either way re-runs only the failed/skipped sub-issues '
-      + '(succeeded ones are kept).']
+    ? ['', '↻ **To retry:** reply `@bgagent retry` on this epic — it re-runs only the '
+      + 'failed/skipped sub-issues and keeps the ones that succeeded. '
+      + '(No reply? Removing and re-applying the `abca` label also retries.)']
     : [];
 
   const callout = combinedPrUrl
