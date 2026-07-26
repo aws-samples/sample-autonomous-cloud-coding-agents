@@ -206,16 +206,29 @@ export interface SeedOrchestrationResult {
   readonly alreadyExisted: boolean;
 }
 
-/**
- * Deterministically derive the ``orchestration_id`` from the parent
- * Linear issue id. Same parent → same id, which is what makes webhook
- * replay idempotent. Prefixed + hashed so the id is opaque and
- * fixed-length regardless of the Linear id format.
- */
 /** Hex chars of the sha256 kept for the orchestration id (128 bits — ample to
- *  avoid collisions across a workspace's epics). */
+ *  avoid accidental collisions between distinct parent refs). */
 const ORCH_ID_HASH_HEX_LENGTH = 32;
 
+/**
+ * Deterministically derive the ``orchestration_id`` from the parent issue ref.
+ * Same parent → same id, which is what makes webhook replay idempotent. Prefixed
+ * + hashed so the id is opaque and fixed-length regardless of the ref format.
+ *
+ * NOT tenant-scoped: the ref alone is hashed, with no credentials/workspace
+ * component. That is safe for the refs in use today (Linear issue ids are
+ * workspace-unique UUIDs, so two tenants cannot produce the same one), but it is
+ * a property of those refs rather than of this function — a surface keying on a
+ * per-project ref like ``PROJ-42`` would have two tenants land on one id.
+ *
+ * Deliberately left as-is rather than mixing the tenant in: this id is a
+ * persisted partition key, so changing the derivation would orphan every
+ * in-flight epic's rows (the reconciler would re-derive a different id and find
+ * nothing, stranding the epic silently — the exact failure mode this codebase
+ * has been fixing). Instead the seed path REFUSES a collision it detects, so a
+ * surface with non-unique refs fails loudly at onboarding rather than letting two
+ * tenants share one graph. See {@link seedOrchestration}.
+ */
 export function deriveOrchestrationId(parentIssueRef: string): string {
   const hash = crypto.createHash('sha256').update(parentIssueRef).digest('hex').slice(0, ORCH_ID_HASH_HEX_LENGTH);
   return `orch_${hash}`;
@@ -278,6 +291,41 @@ const DDB_BATCH_WRITE_MAX_ITEMS = 25;
 const PARENT_META_SK = '#meta';
 
 /**
+ * An existing orchestration's id is held by a DIFFERENT parent issue or tenant.
+ *
+ * Its own class so the caller can tell it from a transient persistence failure:
+ * a write that failed is worth retrying, whereas a collision will recur on every
+ * attempt and needs the ref scheme changed, so telling the user to re-trigger
+ * would send them round a loop that cannot succeed.
+ */
+export class OrchestrationIdCollisionError extends Error {
+  constructor(public readonly orchestrationId: string) {
+    super(`Orchestration id ${orchestrationId} is already held by a different parent issue or tenant`);
+    this.name = 'OrchestrationIdCollisionError';
+  }
+}
+
+/**
+ * Who an existing orchestration belongs to, read from its meta row under either
+ * the neutral or the legacy attribute names. Used to tell a genuine replay from
+ * an id collision.
+ *
+ * A row missing these (written by code that predates them) reads as undefined,
+ * which deliberately does NOT trip the collision check — refusing to reconcile a
+ * legacy in-flight epic would be a worse failure than the collision this guards
+ * against, which cannot occur for the refs in use today.
+ */
+function toMetaOwner(item: Record<string, unknown>): {
+  parentIssueRef: string | undefined;
+  credentialsRef: string | undefined;
+} {
+  return {
+    parentIssueRef: readRenamed(item, 'parent_issue_ref', 'parent_linear_issue_id'),
+    credentialsRef: readRenamed(item, 'credentials_ref', 'linear_workspace_id'),
+  };
+}
+
+/**
  * Seed ``OrchestrationTable`` with one row per sub-issue plus a parent
  * meta row. Idempotent: if the parent meta row already exists (replay),
  * returns ``alreadyExisted: true`` and writes nothing.
@@ -285,6 +333,9 @@ const PARENT_META_SK = '#meta';
  * Initial ``child_status``: ``ready`` when ``depends_on`` is empty
  * (a root — the reconciler releases these immediately), else
  * ``blocked``.
+ *
+ * Refuses to adopt an existing orchestration that belongs to a DIFFERENT tenant
+ * (see {@link deriveOrchestrationId} for why the id itself isn't tenant-scoped).
  */
 export async function seedOrchestration(
   params: SeedOrchestrationParams,
@@ -298,6 +349,31 @@ export async function seedOrchestration(
     Key: { orchestration_id: orchestrationId, sub_issue_id: PARENT_META_SK },
   }));
   if (existing.Item) {
+    // The id is derived from the parent ref alone, so two tenants whose refs
+    // collide would derive the SAME id — and this replay gate would hand the
+    // second one the first one's graph: their epic would show the other tenant's
+    // children, and releases would run against the other tenant's repo under the
+    // other tenant's credentials. Cannot happen with the workspace-unique UUIDs
+    // in use today, but it must not degrade quietly if a surface with per-project
+    // refs is onboarded, so compare the identity the meta row already records.
+    const owner = toMetaOwner(existing.Item);
+    // Only a row that RECORDS a conflicting owner is a collision. An absent value
+    // (a row written before these attributes existed) is unknown, not different —
+    // treating it as a collision would refuse to reconcile a legacy in-flight
+    // epic, a worse and far likelier failure than the one being guarded against.
+    const collides = (owner.credentialsRef !== undefined && owner.credentialsRef !== credentialsRef)
+      || (owner.parentIssueRef !== undefined && owner.parentIssueRef !== parentIssueRef);
+    if (collides) {
+      logger.error('Orchestration id collision across tenants — refusing to seed', {
+        orchestration_id: orchestrationId,
+        parent_issue_ref: parentIssueRef,
+        existing_parent_issue_ref: owner.parentIssueRef,
+        // Ids, never credentials themselves.
+        credentials_ref: credentialsRef,
+        existing_credentials_ref: owner.credentialsRef,
+      });
+      throw new OrchestrationIdCollisionError(orchestrationId);
+    }
     logger.info('Orchestration already seeded — skipping (idempotent replay)', {
       orchestration_id: orchestrationId,
       parent_issue_ref: parentIssueRef,

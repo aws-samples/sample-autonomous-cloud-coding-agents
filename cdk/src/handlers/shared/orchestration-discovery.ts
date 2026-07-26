@@ -48,7 +48,7 @@ import { logger } from './logger';
 import { validateDag } from './orchestration-dag';
 import { type OrchestrationGraphSource } from './orchestration-graph-source';
 import { withIntegrationNode } from './orchestration-integration-node';
-import { deriveOrchestrationId, extendOrchestration, seedOrchestration, type OrchestrationReleaseContext } from './orchestration-store';
+import { deriveOrchestrationId, extendOrchestration, OrchestrationIdCollisionError, seedOrchestration, type OrchestrationReleaseContext } from './orchestration-store';
 
 export interface DiscoverOrchestrationParams {
   readonly ddb: DynamoDBDocumentClient;
@@ -182,6 +182,16 @@ export async function discoverOrchestration(
       parent_issue_ref: parentIssueRef,
       error: err instanceof Error ? err.message : String(err),
     });
+    // A collision will recur on every attempt, so don't invite a re-trigger the
+    // way a transient write failure does — that would loop the user through
+    // something that cannot succeed until the ref scheme changes.
+    if (err instanceof OrchestrationIdCollisionError) {
+      return {
+        kind: 'error',
+        message: 'This issue maps to an orchestration that already belongs to a different issue or workspace, '
+          + 'so I stopped rather than acting on the wrong graph. This needs an operator to look at it.',
+      };
+    }
     return { kind: 'error', message: 'Could not persist the orchestration graph. Please re-apply the trigger.' };
   }
 

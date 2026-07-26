@@ -23,6 +23,7 @@ import {
   seedOrchestration,
   extendOrchestration,
   deriveOrchestrationId,
+  OrchestrationIdCollisionError,
   claimRollup,
   clearRollupClaim,
   claimCommentAck,
@@ -272,6 +273,136 @@ describe('seedOrchestration — idempotent replay', () => {
     // Only the Get fired — no BatchWrite.
     expect(ddb.send).toHaveBeenCalledTimes(1);
     expect(ddb.send.mock.calls[0][0]).toBeInstanceOf(GetCommand);
+  });
+
+  test('a row that records the SAME owner is a replay, not a collision', async () => {
+    const ddb = makeDdb();
+    ddb.send.mockResolvedValueOnce({
+      Item: {
+        orchestration_id: 'x',
+        sub_issue_id: '#meta',
+        parent_issue_ref: 'PARENT',
+        credentials_ref: 'WS',
+      },
+    });
+
+    const result = await seedOrchestration({
+      ddb: ddb as never,
+      tableName: TABLE,
+      parentIssueRef: 'PARENT',
+      credentialsRef: 'WS',
+      repo: 'o/r',
+      children: [child('A')],
+      now: NOW,
+      releaseContext: RC,
+    });
+
+    expect(result.alreadyExisted).toBe(true);
+  });
+
+  test('recognises the owner under the LEGACY attribute names too', async () => {
+    // A row written before the neutral names existed still records who owns it.
+    // Reading only the new names would see "no owner recorded" and wave a genuine
+    // cross-tenant collision through, so this fixture is a legacy row whose owner
+    // DIFFERS — the case that distinguishes reading both names from reading one.
+    const ddb = makeDdb();
+    ddb.send.mockResolvedValueOnce({
+      Item: {
+        orchestration_id: 'x',
+        sub_issue_id: '#meta',
+        parent_linear_issue_id: 'PARENT',
+        linear_workspace_id: 'OTHER-TENANT',
+      },
+    });
+
+    await expect(seedOrchestration({
+      ddb: ddb as never,
+      tableName: TABLE,
+      parentIssueRef: 'PARENT',
+      credentialsRef: 'WS',
+      repo: 'o/r',
+      children: [child('A')],
+      now: NOW,
+      releaseContext: RC,
+    })).rejects.toThrow(OrchestrationIdCollisionError);
+  });
+
+  test('a legacy row with MATCHING legacy owner fields still replays', async () => {
+    const ddb = makeDdb();
+    ddb.send.mockResolvedValueOnce({
+      Item: {
+        orchestration_id: 'x',
+        sub_issue_id: '#meta',
+        parent_linear_issue_id: 'PARENT',
+        linear_workspace_id: 'WS',
+      },
+    });
+
+    const result = await seedOrchestration({
+      ddb: ddb as never,
+      tableName: TABLE,
+      parentIssueRef: 'PARENT',
+      credentialsRef: 'WS',
+      repo: 'o/r',
+      children: [child('A')],
+      now: NOW,
+      releaseContext: RC,
+    });
+
+    expect(result.alreadyExisted).toBe(true);
+  });
+
+  test('REFUSES to adopt an orchestration owned by a different tenant', async () => {
+    // The id is derived from the parent ref alone, so a surface whose refs are
+    // only project-unique would let two tenants derive the same id — and the
+    // replay gate would hand the second one the first one's children, releasing
+    // work against the other tenant's repo under the other tenant's credentials.
+    const ddb = makeDdb();
+    ddb.send.mockResolvedValueOnce({
+      Item: {
+        orchestration_id: 'x',
+        sub_issue_id: '#meta',
+        parent_issue_ref: 'PARENT',
+        credentials_ref: 'OTHER-TENANT',
+      },
+    });
+
+    await expect(seedOrchestration({
+      ddb: ddb as never,
+      tableName: TABLE,
+      parentIssueRef: 'PARENT',
+      credentialsRef: 'WS',
+      repo: 'o/r',
+      children: [child('A')],
+      now: NOW,
+      releaseContext: RC,
+    })).rejects.toThrow(OrchestrationIdCollisionError);
+
+    // Nothing written — refusing must not half-seed.
+    expect(ddb.send).toHaveBeenCalledTimes(1);
+  });
+
+  test('REFUSES when the id is held by a different parent issue', async () => {
+    const ddb = makeDdb();
+    ddb.send.mockResolvedValueOnce({
+      Item: {
+        orchestration_id: 'x',
+        sub_issue_id: '#meta',
+        parent_issue_ref: 'SOME-OTHER-EPIC',
+        credentials_ref: 'WS',
+      },
+    });
+
+    await expect(seedOrchestration({
+      ddb: ddb as never,
+      tableName: TABLE,
+      parentIssueRef: 'PARENT',
+      credentialsRef: 'WS',
+      repo: 'o/r',
+      children: [child('A')],
+      now: NOW,
+      releaseContext: RC,
+    })).rejects.toThrow(OrchestrationIdCollisionError);
   });
 });
 

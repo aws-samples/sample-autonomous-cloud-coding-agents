@@ -126,6 +126,31 @@ describe('discoverOrchestration', () => {
     expect(result.kind).toBe('error');
   });
 
+  test('an id collision reports a DIFFERENT message than a transient write failure', async () => {
+    // A collision recurs on every attempt, so the reply must not invite a
+    // re-trigger the way a failed write does — that would loop the user through
+    // something that cannot succeed.
+    const ddb = {
+      send: jest.fn().mockResolvedValueOnce({
+        Item: {
+          sub_issue_id: '#meta',
+          parent_issue_ref: 'A-DIFFERENT-EPIC',
+          credentials_ref: 'ANOTHER-TENANT',
+        },
+      }),
+    };
+    const result = await discoverOrchestration({
+      ...base,
+      ddb: ddb as never,
+      graphSource: linearGraphSource(base.accessToken, base.parentIssueRef, { fetchImpl: mockFetch([{ id: 'A' }]) }),
+    });
+
+    expect(result.kind).toBe('error');
+    const message = (result as { message: string }).message;
+    expect(message).toMatch(/different issue or workspace/i);
+    expect(message).not.toMatch(/re-apply the trigger/i);
+  });
+
   test('re-trigger of an existing epic with the SAME graph → extended, no new nodes', async () => {
     // seedOrchestration's GetCommand sees the meta row (already seeded) →
     // alreadyExisted, so discovery routes to extendOrchestration. extend's own
