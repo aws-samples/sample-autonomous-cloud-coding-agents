@@ -41,9 +41,14 @@
  * revocation using the locally-known expiry.
  */
 
-import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
+import {
+  GetSecretValueCommand,
+  PutSecretValueCommand,
+  SecretsManagerClient,
+} from '@aws-sdk/client-secrets-manager';
 import { ScanCommand } from '@aws-sdk/lib-dynamodb';
 import { documentClient } from './dynamo-clients';
+import { verifyLinearRefreshAndPersist } from './linear-oauth';
 
 /** Linear's GraphQL endpoint — a cheap authenticated probe target. */
 const LINEAR_GRAPHQL_ENDPOINT = 'https://api.linear.app/graphql';
@@ -56,14 +61,18 @@ export type LinearAuthState =
   /** Access token accepted — the workspace is fully working. */
   | 'active'
   /**
-   * Access token rejected and already expired, with a refresh token stored. This
-   * check does NOT prove the refresh will succeed — verifying that would consume
-   * the one-shot refresh token and rotate it, breaking the thing being
-   * diagnosed. So this is "probably fine, refreshes on next event", and the
-   * authoritative answer comes from the platform recording ``revoked`` on the
-   * registry row when a refresh actually fails.
+   * INDETERMINATE, and deliberately never reported as healthy. The access token
+   * is rejected and expired and a refresh token is stored — which is BOTH the
+   * normal idle-workspace shape AND the exact shape of a workspace whose refresh
+   * token has been revoked (live-caught 2026-07-25: the access token had expired
+   * ~48 minutes earlier and the refresh token was dead, and this check reported
+   * it as fine).
+   *
+   * The shallow probe cannot separate those two, so it must not pretend to. Pass
+   * ``verifyRefresh`` to resolve it definitively — see
+   * {@link CheckLinearAuthOptions.verifyRefresh}.
    */
-  | 'expired_untested'
+  | 'expired_indeterminate'
   /**
    * Access token rejected while NOT expired, or no refresh token stored. The
    * authorization itself is gone (revoked upstream, app uninstalled) — events
@@ -105,6 +114,30 @@ interface StoredToken {
 
 /** Probe outcome, kept separate from the verdict so the mapping is testable. */
 export type ProbeResult = 'accepted' | 'rejected' | 'error';
+
+/**
+ * Outcome of ATTEMPTING the refresh — the only way to settle
+ * ``expired_indeterminate``.
+ *
+ * ``refreshed`` means the grant is alive AND the rotated token was persisted.
+ * That persistence is not optional: Linear rotates the refresh token on every
+ * use, so a verifier that refreshes without saving the result destroys the
+ * workspace's token chain — which is exactly how an ad-hoc probe stranded a
+ * healthy workspace on 2026-07-25. A verifier that cannot persist must not
+ * refresh at all.
+ */
+export type RefreshVerifyResult = 'refreshed' | 'rejected' | 'error';
+
+/**
+ * Attempt the refresh for one workspace and persist the rotation. Injected
+ * rather than implemented here so this module keeps doing one job (reporting),
+ * the destructive-if-done-wrong half is written once beside the other OAuth
+ * write paths, and tests can supply a fake.
+ */
+export type LinearRefreshVerifier = (workspace: {
+  readonly workspaceId: string;
+  readonly oauthSecretArn: string;
+}) => Promise<RefreshVerifyResult>;
 
 /** Ask the surface whether an access token is still accepted. Injectable so
  *  tests don't reach the network. */
@@ -153,7 +186,7 @@ export function classifyAuthState(
   if (probe === 'error') return 'unknown';
   // Rejected. An expired token with a refresh token in hand is the normal
   // idle-workspace case and heals itself on the next resolve.
-  if (isExpired(token.expiresAt, now) && token.hasRefreshToken) return 'expired_untested';
+  if (isExpired(token.expiresAt, now) && token.hasRefreshToken) return 'expired_indeterminate';
   return 'revoked';
 }
 
@@ -162,6 +195,13 @@ export interface CheckLinearAuthOptions {
   readonly registryTableName: string;
   /** Injectable for tests. */
   readonly probe?: LinearProbe;
+  /**
+   * Supply this to RESOLVE ``expired_indeterminate`` instead of reporting it.
+   * Omitted by default because it performs a real token rotation: correct and
+   * non-destructive (it persists the new token, exactly as the platform's own
+   * refresh does), but a state-changing action an operator should opt into.
+   */
+  readonly verifyRefresh?: LinearRefreshVerifier;
   readonly now?: Date;
 }
 
@@ -178,8 +218,22 @@ export async function checkLinearWorkspaceAuth(
   const now = options.now ?? new Date();
 
   const ddb = documentClient(region);
-  const scanned = await ddb.send(new ScanCommand({ TableName: registryTableName }));
-  const rows = (scanned.Items ?? []) as RegistryRow[];
+  // Paginate. A single Scan page stops at DynamoDB's 1MB limit, so a registry
+  // large enough to span pages would silently omit workspaces — and an omitted
+  // REVOKED workspace is the one case that must never be missed, because the
+  // report would then read as clean. Any read failure propagates to the caller,
+  // which reports it as a warn rather than a pass (a partial scan is not a
+  // clean bill of health).
+  const rows: RegistryRow[] = [];
+  let exclusiveStartKey: Record<string, unknown> | undefined;
+  do {
+    const page = await ddb.send(new ScanCommand({
+      TableName: registryTableName,
+      ...(exclusiveStartKey && { ExclusiveStartKey: exclusiveStartKey }),
+    }));
+    rows.push(...((page.Items ?? []) as RegistryRow[]));
+    exclusiveStartKey = page.LastEvaluatedKey;
+  } while (exclusiveStartKey);
 
   const sm = new SecretsManagerClient({ region });
   const out: LinearWorkspaceAuthHealth[] = [];
@@ -243,11 +297,28 @@ export async function checkLinearWorkspaceAuth(
       continue;
     }
 
-    const state = classifyAuthState(
+    let state = classifyAuthState(
       await probe(stored.access_token),
       { hasRefreshToken: Boolean(stored.refresh_token), expiresAt: stored.expires_at },
       now,
     );
+
+    // Resolve the one state the shallow probe cannot decide. Only attempted when
+    // the operator opted in, and only for that state — never for a workspace
+    // already known active or revoked, so a healthy grant is never rotated just
+    // to produce a report.
+    if (state === 'expired_indeterminate' && options.verifyRefresh) {
+      const verified = await options.verifyRefresh({
+        workspaceId,
+        oauthSecretArn: row.oauth_secret_arn,
+      });
+      // A verifier error leaves the state indeterminate rather than guessing: it
+      // must not turn a transient network failure into a "revoked" verdict that
+      // sends an operator to re-authorize a working workspace.
+      if (verified === 'refreshed') state = 'active';
+      else if (verified === 'rejected') state = 'revoked';
+    }
+
     out.push({
       workspaceId,
       workspaceSlug: stored.workspace_slug ?? slug,
@@ -264,10 +335,11 @@ function describeState(state: LinearAuthState, expiresAt?: string, revokedAt?: s
   switch (state) {
     case 'active':
       return `Authorization is live (access token valid until ${expiresAt ?? 'unknown'}).`;
-    case 'expired_untested':
-      return 'Access token has expired. The platform should refresh it on the next event — but whether '
-        + 'the stored refresh token is still valid cannot be checked without consuming it. If Linear '
-        + 'events are being ignored, this is the first thing to re-authorize.';
+    case 'expired_indeterminate':
+      return 'INDETERMINATE — the access token has expired. This is what a healthy idle workspace looks '
+        + 'like AND what a revoked one looks like; the two are indistinguishable without attempting the '
+        + 'refresh. Re-run with `--verify-refresh` for a definitive answer (it performs the same refresh '
+        + 'the platform would, and persists the rotated token).';
     case 'revoked':
       return `Authorization was REVOKED${revokedAt ? ` at ${revokedAt}` : ''} — the platform cannot post `
         + 'to this workspace and is dropping its events. Re-authorize with `bgagent linear setup` '
@@ -278,4 +350,23 @@ function describeState(state: LinearAuthState, expiresAt?: string, revokedAt?: s
     default:
       return 'Could not determine authorization state.';
   }
+}
+
+/**
+ * The production {@link LinearRefreshVerifier}: binds Secrets Manager to
+ * {@link verifyLinearRefreshAndPersist}, which owns the refresh-and-save
+ * sequencing (and the rule that a rotation which wasn't persisted is reported as
+ * an error, never as health).
+ */
+export function makeLinearRefreshVerifier(region: string): LinearRefreshVerifier {
+  const sm = new SecretsManagerClient({ region });
+  return async ({ oauthSecretArn }) => verifyLinearRefreshAndPersist({
+    readSecret: async () => {
+      const res = await sm.send(new GetSecretValueCommand({ SecretId: oauthSecretArn }));
+      return res.SecretString;
+    },
+    writeSecret: async (secretString) => {
+      await sm.send(new PutSecretValueCommand({ SecretId: oauthSecretArn, SecretString: secretString }));
+    },
+  });
 }

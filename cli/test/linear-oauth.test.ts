@@ -31,6 +31,7 @@ import {
   readExistingWebhookSecret,
   refreshAccessToken,
   resolveWebhookSecretAction,
+  verifyLinearRefreshAndPersist,
 } from '../src/linear-oauth';
 
 describe('linearOauthSecretName', () => {
@@ -321,6 +322,121 @@ describe('refreshAccessToken', () => {
       clientSecret: 'csec',
       fetchImpl: fetchImpl as unknown as typeof fetch,
     })).rejects.toThrow(CliError);
+  });
+});
+
+describe('verifyLinearRefreshAndPersist', () => {
+  // This is the only code that can settle "is this workspace's authorization
+  // actually alive?", and it does so DESTRUCTIVELY: Linear rotates the refresh
+  // token on every use, so an attempt that isn't persisted spends the stored
+  // token and strands the workspace. Both halves are pinned here.
+
+  const STORED = JSON.stringify({
+    access_token: 'lin_old',
+    refresh_token: 'lin_refresh_old',
+    client_id: 'cid',
+    client_secret: 'csec',
+    expires_at: '2026-07-25T12:00:00.000Z',
+    workspace_slug: 'acme',
+  });
+
+  const refreshOk = () => jest.fn().mockResolvedValueOnce(mockResponse(200, {
+    access_token: 'lin_new',
+    token_type: 'Bearer',
+    expires_in: 86400,
+    refresh_token: 'lin_refresh_rotated',
+    scope: 'read write',
+  }));
+
+  test('a live grant is refreshed AND the rotated token is persisted', async () => {
+    const writeSecret = jest.fn().mockResolvedValue(undefined);
+    const result = await verifyLinearRefreshAndPersist({
+      readSecret: async () => STORED,
+      writeSecret,
+      fetchImpl: refreshOk() as unknown as typeof fetch,
+      now: new Date('2026-07-26T10:00:00.000Z'),
+    });
+
+    expect(result).toBe('refreshed');
+    const saved = JSON.parse(writeSecret.mock.calls[0][0]);
+    // The rotated refresh token is what makes the NEXT refresh possible; saving
+    // the old one back would work once and then fail forever.
+    expect(saved.refresh_token).toBe('lin_refresh_rotated');
+    expect(saved.access_token).toBe('lin_new');
+    expect(saved.expires_at).toBe('2026-07-27T10:00:00.000Z');
+    // Fields it does not own are carried through untouched — the webhook secret
+    // and client credentials live in this same bundle.
+    expect(saved.client_secret).toBe('csec');
+    expect(saved.workspace_slug).toBe('acme');
+  });
+
+  test('a rotation that could not be saved reports error, never health', async () => {
+    // The token has already been spent at this point, so a green tick here would
+    // hide a workspace this very check just broke.
+    const result = await verifyLinearRefreshAndPersist({
+      readSecret: async () => STORED,
+      writeSecret: async () => { throw new Error('AccessDeniedException on PutSecretValue'); },
+      fetchImpl: refreshOk() as unknown as typeof fetch,
+    });
+    expect(result).toBe('error');
+  });
+
+  test("only Linear's invalid_grant is read as revoked", async () => {
+    const fetchImpl = jest.fn().mockResolvedValueOnce(mockResponse(400, {
+      error: 'invalid_grant', error_description: 'refresh token was revoked',
+    }));
+    const result = await verifyLinearRefreshAndPersist({
+      readSecret: async () => STORED,
+      writeSecret: async () => { throw new Error('must not be called'); },
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    expect(result).toBe('rejected');
+  });
+
+  test('a 5xx or network failure is error — NOT revoked', async () => {
+    // Reporting revoked here would send an operator to re-authorize a perfectly
+    // healthy workspace because Linear had a bad minute.
+    for (const failing of [
+      jest.fn().mockResolvedValueOnce(mockResponse(503, { error: 'service_unavailable' })),
+      jest.fn().mockRejectedValueOnce(new Error('ECONNRESET')),
+    ]) {
+      const result = await verifyLinearRefreshAndPersist({
+        readSecret: async () => STORED,
+        writeSecret: async () => { throw new Error('must not be called'); },
+        fetchImpl: failing as unknown as typeof fetch,
+      });
+      expect(result).toBe('error');
+    }
+  });
+
+  test('a bundle with no refresh token is rejected without any network call', async () => {
+    // Nothing can renew this grant, which is a genuine dead end rather than an
+    // inconclusive probe.
+    const fetchImpl = jest.fn();
+    const result = await verifyLinearRefreshAndPersist({
+      readSecret: async () => JSON.stringify({ access_token: 'lin_old', client_id: 'cid', client_secret: 'csec' }),
+      writeSecret: async () => { throw new Error('must not be called'); },
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    expect(result).toBe('rejected');
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  test('an unreadable or malformed secret is error, and nothing is spent', async () => {
+    const fetchImpl = jest.fn();
+    for (const readSecret of [
+      async () => { throw new Error('AccessDenied'); },
+      async () => undefined,
+      async () => 'not json',
+    ]) {
+      const result = await verifyLinearRefreshAndPersist({
+        readSecret: readSecret as () => Promise<string | undefined>,
+        writeSecret: async () => { throw new Error('must not be called'); },
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      });
+      expect(result).toBe('error');
+    }
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 });
 

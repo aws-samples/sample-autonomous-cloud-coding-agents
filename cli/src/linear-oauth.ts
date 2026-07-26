@@ -390,3 +390,77 @@ export async function readExistingWebhookSecret(
     ? bundle.webhook_signing_secret
     : undefined;
 }
+
+/**
+ * Attempt a workspace's refresh and PERSIST the rotated token — the only way to
+ * settle "is this expired token's grant still alive?" definitively.
+ *
+ * Persistence is the whole safety property, not a convenience. Linear rotates the
+ * refresh token on every use, so a caller that refreshes and discards the result
+ * has silently consumed the workspace's only key: the stored token is now the
+ * spent one, and the workspace is stranded exactly as if it had been revoked.
+ * (That is not hypothetical — an ad-hoc probe did it to a healthy workspace on
+ * 2026-07-25 and it had to be repaired by hand.) So this function refreshes and
+ * writes in one step, and reports `error` rather than a verdict if the write
+ * fails, because a rotation that happened but wasn't saved is the dangerous case
+ * and must not be reported as health.
+ *
+ * `readSecret` / `writeSecret` are injected so this stays testable without
+ * Secrets Manager and so the caller owns client construction.
+ */
+export async function verifyLinearRefreshAndPersist(args: {
+  readSecret: () => Promise<string | undefined>;
+  writeSecret: (secretString: string) => Promise<void>;
+  fetchImpl?: typeof fetch;
+  now?: Date;
+}): Promise<'refreshed' | 'rejected' | 'error'> {
+  let stored: StoredLinearOauthToken;
+  try {
+    const raw = await args.readSecret();
+    if (!raw) return 'error';
+    stored = JSON.parse(raw) as StoredLinearOauthToken;
+  } catch {
+    return 'error';
+  }
+  if (!stored.refresh_token || !stored.client_id || !stored.client_secret) {
+    // Nothing to attempt: without these the grant cannot be renewed by anyone,
+    // which is a real dead end rather than an inconclusive probe.
+    return 'rejected';
+  }
+
+  let refreshed;
+  try {
+    refreshed = await refreshAccessToken({
+      refreshToken: stored.refresh_token,
+      clientId: stored.client_id,
+      clientSecret: stored.client_secret,
+      ...(args.fetchImpl && { fetchImpl: args.fetchImpl }),
+    });
+  } catch (err) {
+    // Only Linear's own `invalid_grant` proves the grant is dead. A network
+    // blip, a 5xx, or a malformed body must NOT be reported as revoked — that
+    // would send an operator to re-authorize a working workspace.
+    const message = err instanceof Error ? err.message : String(err);
+    return message.includes('invalid_grant') ? 'rejected' : 'error';
+  }
+
+  const now = args.now ?? new Date();
+  const next: StoredLinearOauthToken = {
+    ...stored,
+    access_token: refreshed.access_token,
+    // Persist the ROTATED refresh token; re-using the old one always fails.
+    refresh_token: refreshed.refresh_token ?? stored.refresh_token,
+    expires_at: computeExpiresAt(refreshed.expires_in, now),
+    scope: refreshed.scope,
+    updated_at: now.toISOString(),
+  };
+  try {
+    await args.writeSecret(JSON.stringify(next));
+  } catch {
+    // The rotation HAPPENED but wasn't saved, so the stored token is now spent.
+    // Report `error`, never `refreshed`: the operator must see that this needs
+    // attention rather than a green tick over a workspace we just stranded.
+    return 'error';
+  }
+  return 'refreshed';
+}

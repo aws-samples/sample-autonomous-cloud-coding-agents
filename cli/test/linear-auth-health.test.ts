@@ -17,7 +17,23 @@
  *  SOFTWARE.
  */
 
-import { classifyAuthState, isExpired } from '../src/linear-auth-health';
+const ddbSend = jest.fn();
+jest.mock('../src/dynamo-clients', () => ({
+  documentClient: () => ({ send: (...a: unknown[]) => ddbSend(...a) }),
+}));
+
+const smSend = jest.fn();
+jest.mock('@aws-sdk/client-secrets-manager', () => ({
+  SecretsManagerClient: jest.fn(() => ({ send: (...a: unknown[]) => smSend(...a) })),
+  GetSecretValueCommand: jest.fn((input: unknown) => ({ _type: 'GetSecret', input })),
+  PutSecretValueCommand: jest.fn((input: unknown) => ({ _type: 'PutSecret', input })),
+}));
+
+jest.mock('@aws-sdk/lib-dynamodb', () => ({
+  ScanCommand: jest.fn((input: unknown) => ({ _type: 'Scan', input })),
+}));
+
+import { checkLinearWorkspaceAuth, classifyAuthState, isExpired } from '../src/linear-auth-health';
 
 const NOW = new Date('2026-07-25T13:00:00.000Z');
 const FUTURE = '2026-07-25T14:00:00.000Z';
@@ -45,12 +61,13 @@ describe('classifyAuthState — expired vs revoked is the point of this check', 
     expect(classifyAuthState('accepted', { hasRefreshToken: true, expiresAt: FUTURE }, NOW)).toBe('active');
   });
 
-  test('rejected + already expired + a refresh token = probably-refreshing, not asserted an outage', () => {
-    // The common idle-workspace case: nothing has driven a refresh, so the
-    // access token aged out. The next event refreshes it. Reporting this as a
-    // failure would cry wolf on every quiet workspace.
+  test('rejected + already expired + a refresh token = INDETERMINATE, never healthy', () => {
+    // This shape is genuinely ambiguous: it is what a quiet-but-healthy workspace
+    // looks like AND what a revoked one looks like. The classifier must refuse to
+    // guess — failing every idle workspace would train operators to ignore the
+    // check, and passing them hides a real outage.
     expect(classifyAuthState('rejected', { hasRefreshToken: true, expiresAt: PAST }, NOW))
-      .toBe('expired_untested');
+      .toBe('expired_indeterminate');
   });
 
   test('rejected while NOT expired = the authorization itself is gone', () => {
@@ -74,14 +91,126 @@ describe('classifyAuthState — expired vs revoked is the point of this check', 
     expect(classifyAuthState('error', { hasRefreshToken: false, expiresAt: PAST }, NOW)).toBe('unknown');
   });
 
-  test('the live 2026-07-25 incident classifies as revoked', () => {
-    // Real shape from the maguireb workspace: refresh token present and only
-    // ~25h old, access token expired 48 minutes earlier, and the surface
-    // rejected BOTH. Expiry alone would have said "refreshable" — what makes it
-    // revoked is that the refresh was rejected too, which the caller models by
-    // probing after a failed refresh. Here we pin the no-refresh-token variant,
-    // the state the resolver lands in once it has given up on the chain.
-    expect(classifyAuthState('rejected', { hasRefreshToken: false, expiresAt: '2026-07-25T12:12:48.012Z' }, NOW))
-      .toBe('revoked');
+  test('the live 2026-07-25 incident is INDETERMINATE from the shallow probe alone', () => {
+    // The REAL shape, not a convenient variant: the maguireb workspace had a
+    // refresh token present and only ~25h old, and an access token that had
+    // expired ~48 minutes earlier. Linear rejected both, but the shallow probe
+    // only sees the access token, so it CANNOT tell this from a healthy idle
+    // workspace. Pinning it as `revoked` here (by passing hasRefreshToken:false)
+    // is what let the real bug hide: the check reported that workspace as needing
+    // no action while every one of its events was being dropped. The honest
+    // classification is indeterminate — and `verifyRefresh` is what settles it.
+    const liveIncident = { hasRefreshToken: true, expiresAt: '2026-07-25T12:12:48.012Z' };
+    expect(classifyAuthState('rejected', liveIncident, NOW)).toBe('expired_indeterminate');
+    // And critically: indeterminate must NOT be treated as healthy by the caller.
+    expect(classifyAuthState('rejected', liveIncident, NOW)).not.toBe('active');
+  });
+});
+
+describe('checkLinearWorkspaceAuth — the real function, end to end', () => {
+  /** The live-incident secret: refresh token present, access token long expired. */
+  const INDETERMINATE_SECRET = JSON.stringify({
+    access_token: 'lin_dead',
+    refresh_token: 'rt-present',
+    expires_at: '2026-07-25T12:12:48.012Z',
+    workspace_slug: 'maguireb',
+    client_id: 'cid',
+    client_secret: 'sec',
+  });
+
+  const row = (extra: Record<string, unknown> = {}) => ({
+    linear_workspace_id: 'ws-1',
+    workspace_slug: 'maguireb',
+    oauth_secret_arn: 'arn:secret:maguireb',
+    status: 'active',
+    ...extra,
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    smSend.mockResolvedValue({ SecretString: INDETERMINATE_SECRET });
+  });
+
+  test('WITHOUT a verifier the live-incident workspace is indeterminate, not active', async () => {
+    ddbSend.mockResolvedValue({ Items: [row()] });
+    const health = await checkLinearWorkspaceAuth({
+      region: 'us-east-1',
+      registryTableName: 'Reg',
+      probe: async () => 'rejected',
+    });
+    expect(health).toHaveLength(1);
+    expect(health[0].state).toBe('expired_indeterminate');
+    expect(health[0].detail).toMatch(/INDETERMINATE/);
+  });
+
+  test('WITH a verifier that rejects, the same workspace is reported REVOKED', async () => {
+    // This is the bug the review caught: previously this workspace read as
+    // "no action needed" while every one of its events was being dropped.
+    ddbSend.mockResolvedValue({ Items: [row()] });
+    const health = await checkLinearWorkspaceAuth({
+      region: 'us-east-1',
+      registryTableName: 'Reg',
+      probe: async () => 'rejected',
+      verifyRefresh: async () => 'rejected',
+    });
+    expect(health[0].state).toBe('revoked');
+    expect(health[0].detail).toMatch(/REVOKED/);
+  });
+
+  test('WITH a verifier that refreshes, it is reported active', async () => {
+    ddbSend.mockResolvedValue({ Items: [row()] });
+    const health = await checkLinearWorkspaceAuth({
+      region: 'us-east-1',
+      registryTableName: 'Reg',
+      probe: async () => 'rejected',
+      verifyRefresh: async () => 'refreshed',
+    });
+    expect(health[0].state).toBe('active');
+  });
+
+  test('a verifier ERROR leaves it indeterminate — never a revoked verdict', async () => {
+    ddbSend.mockResolvedValue({ Items: [row()] });
+    const health = await checkLinearWorkspaceAuth({
+      region: 'us-east-1',
+      registryTableName: 'Reg',
+      probe: async () => 'rejected',
+      verifyRefresh: async () => 'error',
+    });
+    expect(health[0].state).toBe('expired_indeterminate');
+  });
+
+  test('the verifier is NOT invoked for a workspace already known healthy', async () => {
+    // Rotating a live workspace's token merely to produce a report would be a
+    // side-effect nobody asked for.
+    ddbSend.mockResolvedValue({ Items: [row()] });
+    const verify = jest.fn<Promise<'refreshed'>, unknown[]>().mockResolvedValue('refreshed');
+    const health = await checkLinearWorkspaceAuth({
+      region: 'us-east-1',
+      registryTableName: 'Reg',
+      probe: async () => 'accepted',
+      verifyRefresh: verify as never,
+    });
+    expect(health[0].state).toBe('active');
+    expect(verify).not.toHaveBeenCalled();
+  });
+
+  test('the registry scan is PAGINATED — a revoked workspace on page 2 is still reported', async () => {
+    // Past DynamoDB's 1MB page a single Scan silently truncates, and an omitted
+    // revoked workspace would make the whole report read as clean.
+    ddbSend
+      .mockResolvedValueOnce({ Items: [row({ linear_workspace_id: 'ws-page1' })], LastEvaluatedKey: { k: 'next' } })
+      .mockResolvedValueOnce({ Items: [row({ linear_workspace_id: 'ws-page2', status: 'revoked' })] });
+    const health = await checkLinearWorkspaceAuth({
+      region: 'us-east-1',
+      registryTableName: 'Reg',
+      probe: async () => 'accepted',
+    });
+    // Asserted on the workspace id, not the slug: for a live workspace the slug
+    // is taken from the stored secret, so it would not distinguish the two rows.
+    expect(health.map((w) => w.workspaceId)).toEqual(['ws-page1', 'ws-page2']);
+    expect(health[1].state).toBe('revoked');
+    // The second Scan must carry the continuation key.
+    expect((ddbSend.mock.calls[1][0] as { input: Record<string, unknown> }).input.ExclusiveStartKey)
+      .toEqual({ k: 'next' });
   });
 });
