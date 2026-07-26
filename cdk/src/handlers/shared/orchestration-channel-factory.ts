@@ -46,6 +46,7 @@ import { logger } from './logger';
 import { type Channel } from './orchestration-channel';
 import { makeJiraChannel } from './orchestration-channel-jira';
 import { makeLinearChannel } from './orchestration-channel-linear';
+import { makeSlackChannel } from './orchestration-channel-slack';
 
 /**
  * Per-surface credentials-registry table names, keyed by channel source. An
@@ -81,6 +82,10 @@ export const LEGACY_DEFAULT_CHANNEL_SOURCE = 'linear';
 const registry = new Map<string, ChannelFactory>([
   ['linear', makeLinearChannel],
   ['jira', makeJiraChannel],
+  // Slack is a chat surface, not a tracker: it omits the workflow-state ops
+  // entirely, which is what proves the engine's capability guards work against a
+  // genuinely different shape of surface rather than only in principle.
+  ['slack', makeSlackChannel],
 ]);
 
 /**

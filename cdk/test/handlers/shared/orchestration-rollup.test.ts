@@ -17,10 +17,22 @@
  *  SOFTWARE.
  */
 
+const slackFetchMock = jest.fn();
+const slackFetchTsMock = jest.fn();
+jest.mock('../../../src/handlers/shared/slack-api', () => ({
+  slackFetch: (...a: unknown[]) => slackFetchMock(...a),
+  slackFetchTs: (...a: unknown[]) => slackFetchTsMock(...a),
+}));
+jest.mock('../../../src/handlers/shared/slack-verify', () => ({
+  SLACK_SECRET_PREFIX: 'bgagent/slack/',
+  getSlackSecret: async () => 'xoxb-token',
+}));
+
 const loggerMock = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
 jest.mock('../../../src/handlers/shared/logger', () => ({ logger: loggerMock }));
 
 import type { IssueRef } from '../../../src/handlers/shared/orchestration-channel';
+import { makeSlackChannel, slackThreadRef } from '../../../src/handlers/shared/orchestration-channel-slack';
 import { ORCH_LOG } from '../../../src/handlers/shared/orchestration-log-events';
 import {
   renderRollupComment,
@@ -218,6 +230,8 @@ const row = (sub: string, status: string): OrchestrationChildRow => ({
 
 describe('upsertEpicPanel — the maturing panel + parent-state mirror', () => {
   beforeEach(() => {
+    slackFetchMock.mockReset().mockResolvedValue(true);
+    slackFetchTsMock.mockReset().mockResolvedValue('1700000000.002');
     channel = makeFakeChannel();
     loggerMock.info.mockReset();
     loggerMock.warn.mockReset();
@@ -278,6 +292,33 @@ describe('upsertEpicPanel — the maturing panel + parent-state mirror', () => {
     expect(channel.upsertComment).toHaveBeenCalled();
     expect(channel.transitionState).not.toHaveBeenCalled();
     expect(channel.replaceIssueReaction).not.toHaveBeenCalled();
+  });
+
+  test('the REAL Slack adapter drives the epic panel, with its omitted ops skipped', async () => {
+    // The engine claim under test: an unmodified rollup drives a genuinely
+    // different surface. Slack omits transitionState/revertState (no workflow
+    // state), so the capability guards must skip them and still deliver the
+    // panel — proving the abstraction on a real adapter, not a fake.
+    const slack = makeSlackChannel();
+    const id = await upsertEpicPanel({
+      channel: slack,
+      parent: { issueId: slackThreadRef('C1', '1700000000.001'), credentialsRef: 'T1' },
+      children: [row('a', 'succeeded')],
+      inProgress: false,
+      mirrorParentState: true, // asks for a state mirror Slack cannot do
+    });
+    // The panel landed...
+    expect(id).toBe('1700000000.002');
+    expect(slackFetchTsMock).toHaveBeenCalled();
+    // ...the ✅ marker went on the thread root...
+    const adds = slackFetchMock.mock.calls.filter((c) => c[1] === 'reactions.add');
+    expect((adds[0][2] as { name: string }).name).toBe('white_check_mark');
+    // ...and NOTHING attempted a state transition (there is no such Slack method).
+    const methods = [
+      ...slackFetchMock.mock.calls.map((c) => c[1]),
+      ...slackFetchTsMock.mock.calls.map((c) => c[1]),
+    ];
+    expect(methods.every((m) => typeof m === 'string' && m.startsWith('chat.') || String(m).startsWith('reactions.'))).toBe(true);
   });
 
   test('a surface without reactions or transitions still gets its panel', async () => {

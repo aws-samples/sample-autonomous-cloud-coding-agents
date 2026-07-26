@@ -1,7 +1,8 @@
 # Surface-agnostic sub-issue orchestration
 
-**Status:** the Channel interface, its Linear + Jira adapters, and the engine rewiring
-onto it are implemented. The channel-neutral ROW SHAPE (below) is not — the store still
+**Status:** the Channel interface, its Linear + Jira + Slack adapters, and the engine
+rewiring onto it are implemented, with adapters selected from a registry (a new surface
+registers itself; no core edit). The channel-neutral ROW SHAPE (below) is not — the store still
 carries `linear_*` field names. **Goal:** make the sub-issue orchestration engine work
 across issue-tracking surfaces (Linear today; Jira next — a Jira comment-back path
 already exists) behind one **Channel adapter interface**, so the generic engine has
@@ -30,21 +31,19 @@ forks) and reduces the current Linear/Jira duplication (both already expose para
   `sweepDecompositionNotes`, `fetchSubIssueGraph`) from `orchestration-rollup.ts`,
   `orchestration-reconciler.ts`, `linear-webhook-processor.ts`, and
   `iteration-heartbeat-sweep.ts`. All of those now go through a `Channel`.
-- **Still coupled** — `orchestration-store.ts` (~60 refs) + `orchestration-release.ts`
-  (~33) carry surface-specific row FIELDS: `linear_issue_id`, `linear_workspace_id`,
-  `linear_project_id`, `linear_oauth_secret_arn`, `linear_workspace_slug`,
-  `linear_identifier`. Generalizing those is the separate slice below.
+- **Fixed** — the orchestration row FIELDS are now channel-neutral with dual-read
+  back-compat (see the row-shape section below).
 - **Still coupled** — `fetchIssueParentId` on the Linear-webhook entry path; that entry
   point is Linear-specific by definition, so it was left in place.
 
 ## The Channel adapter interface
 
 A `Channel` captures everything the engine needs from a surface. The engine holds a
-`Channel` and never names Linear/Jira. As built (`orchestration-channel.ts`):
+`Channel` and never names a concrete surface. As built (`orchestration-channel.ts`):
 
 ```
 interface Channel {
-  readonly kind: 'linear' | 'jira';                 // for logging/metrics only
+  readonly kind: ChannelKind;   // open string, logging/metrics only — never branched on
 
   // --- feedback: REQUIRED (unifies the duplicated linear-/jira-feedback) ---
   postComment(issue, body): Promise<CommentRef | null>;
@@ -91,16 +90,42 @@ surface" the design allows):**
 - **Auth** — `oauth_secret_arn` / workspace slug become an opaque `credentials_ref`
   the adapter resolves; the engine never touches surface auth.
 
-## Channel-neutral row shape (NOT yet implemented)
+## Channel-neutral row shape (IMPLEMENTED)
 
-Generalize the orchestration rows:
-`linear_issue_id → issue_ref`, `linear_workspace_id → workspace_ref`,
-`linear_project_id → project_ref`, `linear_oauth_secret_arn → credentials_ref`,
-`linear_workspace_slug → (folded into credentials_ref/adapter)`,
-`linear_identifier → display_id`. Add `channel_kind` so the reconciler picks the adapter.
+The orchestration rows now use neutral names: `parent_linear_issue_id → parent_issue_ref`,
+`linear_workspace_id → credentials_ref`, `linear_identifier → display_id`.
 
-**Back-compat:** existing rows have `linear_*`; the store must read both (old `linear_*`
-OR new neutral names) so in-flight orchestrations from before the migration still settle.
+**Back-compat is real, not aspirational:** reads prefer the new attribute and fall back to
+the legacy one, and writes emit BOTH names, so a rollback to the previous code can still
+read a row written by the new code. Verified against the live table's 133 pre-rename rows.
+
+Deliberately NOT renamed, because they are genuinely surface-specific rather than opaque:
+the `channel_metadata` keys handed to the agent (a cross-language contract the Python agent
+reads), the `linearOauthSecretArn`/`WorkspaceSlug`/`ProjectId` release params, and the
+Linear workspace-registry table the CLI writes.
+
+## Proof the abstraction holds: the Slack adapter
+
+Linear alone could not demonstrate surface-agnosticism — one implementation plus a
+comment-only stub is consistent with an interface shaped around that one surface. Slack
+is the counter-example that tests it, because it is a chat product rather than a tracker:
+
+- **A thread is the issue.** `IssueRef.issueId` is `<channel>:<thread_ts>`; a message
+  `ts` is the `CommentRef`, and `chat.update` is what lets one panel mature in place.
+- **It OMITS `transitionState` / `revertState`** — Slack has no workflow state. They are
+  absent rather than stubbed to a silent success, because returning `true` would tell the
+  engine the platform mirrored a state it never moved. `sweepNotes` and `fetchChildGraph`
+  are omitted too (bulk message deletion needs its own product decision; there is no
+  dependency model to read a DAG from).
+- **The engine drives it unmodified.** A rollup test runs the real Slack adapter through
+  `upsertEpicPanel` with `mirrorParentState: true` — asking for a state mirror Slack
+  cannot perform — and asserts the panel still lands, the ✅ marker goes on the thread
+  root, and nothing attempts a transition.
+
+Slack's `replaceCommentReaction` also shows why the add-vs-replace split is per-surface
+rather than cosmetic: Slack has no atomic swap, so the adapter removes its OWN markers
+(scoped to the emoji it may have set, so a human's reaction survives) and then adds the
+target.
 
 ## What the feedback rewiring does NOT make surface-agnostic
 
