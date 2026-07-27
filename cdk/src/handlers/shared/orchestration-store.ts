@@ -856,7 +856,16 @@ export async function loadOrchestration(
 
   const metaItem = items.find((i) => i.sub_issue_id === PARENT_META_SK);
   if (!metaItem) {
-    logger.warn('Orchestration rows present but meta row missing', { orchestration_id: orchestrationId });
+    // A non-epic issue accumulates dedup MARKER rows (``ack#…``) under the same
+    // derived id without ever being seeded, so "rows but no meta" is the normal
+    // shape there, not a broken orchestration — a plain `@bgagent` on any
+    // never-decomposed issue reaches this. Only warn when a REAL child row is
+    // present, which is the genuinely inconsistent case; otherwise this cried wolf
+    // on a healthy path and taught readers to ignore the log.
+    const hasRealChild = items.some((i) => !String(i.sub_issue_id).includes('#'));
+    const detail = { orchestration_id: orchestrationId, row_count: items.length };
+    if (hasRealChild) logger.warn('Orchestration child rows present but the meta row is missing', detail);
+    else logger.info('No orchestration for this issue — only dedup markers exist', detail);
     return null;
   }
 

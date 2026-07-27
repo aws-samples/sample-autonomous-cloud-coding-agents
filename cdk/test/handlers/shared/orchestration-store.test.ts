@@ -670,6 +670,44 @@ describe('loadOrchestration — marker rows are not children (#247 UX.20)', () =
   });
 });
 
+describe('loadOrchestration — "rows but no meta" is only alarming with a real child', () => {
+  const loggerMock = jest.requireMock('../../../src/handlers/shared/logger').logger as {
+    info: jest.Mock; warn: jest.Mock; error: jest.Mock;
+  };
+  beforeEach(() => { loggerMock.info.mockClear(); loggerMock.warn.mockClear(); });
+
+  // A never-decomposed issue still accumulates dedup MARKER rows (`ack#…`) under the
+  // same derived id, so this state is NORMAL for it — a plain `@bgagent` on any such
+  // issue reaches it. Warning there cried wolf on a healthy path.
+  test('marker rows only → info, not warn', async () => {
+    const ddb = makeDdb();
+    ddb.send.mockResolvedValueOnce({
+      Items: [{ orchestration_id: 'orch_1', sub_issue_id: 'ack#help', acked_at: NOW }],
+    });
+
+    expect(await loadOrchestration(ddb as never, TABLE, 'orch_1')).toBeNull();
+    expect(loggerMock.info).toHaveBeenCalledWith(
+      expect.stringContaining('only dedup markers'), expect.anything(),
+    );
+    expect(loggerMock.warn).not.toHaveBeenCalled();
+  });
+
+  test('a REAL child row with no meta is the genuinely inconsistent case → warn', async () => {
+    const ddb = makeDdb();
+    ddb.send.mockResolvedValueOnce({
+      Items: [
+        { orchestration_id: 'orch_1', sub_issue_id: 'ack#help', acked_at: NOW },
+        { orchestration_id: 'orch_1', sub_issue_id: 'uuid-A', child_status: 'ready', depends_on: [] },
+      ],
+    });
+
+    expect(await loadOrchestration(ddb as never, TABLE, 'orch_1')).toBeNull();
+    expect(loggerMock.warn).toHaveBeenCalledWith(
+      expect.stringContaining('meta row is missing'), expect.anything(),
+    );
+  });
+});
+
 describe('setRetryCommentId — remember the retry comment awaiting an outcome', () => {
   test('records the comment id on the meta row', async () => {
     const ddb = makeDdb();
