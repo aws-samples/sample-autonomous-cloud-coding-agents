@@ -136,6 +136,29 @@ const DESCRIPTORS: Record<string, WorkflowDescriptor> = {
     readOnly: true,
     requiredInputs: { allOf: ['pr_number'] },
   },
+  // Re-stack: re-merge a changed predecessor branch into an existing stacked
+  // child PR. Writeable, repo-bound, and operates on an existing PR
+  // (``pr_number``). Platform-issued by the restack path, not user-facing.
+  'coding/restack-v1': {
+    id: 'coding/restack-v1',
+    version: '1.0.0',
+    requiresRepo: true,
+    readOnly: false,
+    requiredInputs: { allOf: ['pr_number'] },
+  },
+  // Decomposition planning: clone the repo, decide whether the request splits,
+  // and draft the breakdown with full repo context, emitting the plan as the
+  // task's artifact. The platform seeds sub-issues from that plan (an idempotent
+  // write-back), after which the run proceeds like any human-authored graph.
+  // Repo-bound but read-only — it opens no PR, it only reads in order to plan.
+  // Platform-issued when a decompose/auto trigger label is applied.
+  'coding/decompose-v1': {
+    id: 'coding/decompose-v1',
+    version: '1.0.0',
+    requiresRepo: true,
+    readOnly: true,
+    requiredInputs: { oneOf: ['issue_number', 'task_description'] },
+  },
   'default/agent-v1': {
     id: 'default/agent-v1',
     version: '1.0.0',

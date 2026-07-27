@@ -343,7 +343,7 @@ def test_validate_required_params_pr_workflows_require_pr_number():
     )
     assert missing == []
 
-    # #305 A6: restack is a PR workflow — pr_number suffices, NO description
+    # Restack (#305) is a PR workflow — pr_number suffices, NO description
     # required (regression: it previously fell into the non-PR branch and
     # 400'd on missing issue_number_or_task_description).
     missing = server._validate_required_params(
@@ -649,7 +649,7 @@ class TestExtractTrace:
 
 
 class TestExtractUserId:
-    """K2 Stage 3: ``user_id`` is the platform Cognito ``sub`` threaded
+    """``user_id`` is the platform Cognito ``sub`` threaded
     from the orchestrator. The agent uses it to construct the trace S3
     key ``traces/<user_id>/<task_id>.jsonl.gz``. A non-string value
     must be coerced to empty so a surprise ``None`` / int doesn't flow
@@ -840,8 +840,8 @@ class TestInvocationParamContract:
     The ONLY thing keeping these in sync is that every dict key is a valid
     parameter name of ``_run_task_background`` (and vice-versa for required
     fields). A mismatch is invisible until runtime and crashes EVERY task
-    with a ``NameError`` / ``TypeError`` — exactly the #247 A4 regression
-    where ``base_branch`` was passed to ``run_task`` but never extracted
+    with a ``NameError`` / ``TypeError`` — exactly the stacked-child regression
+    (#247) where ``base_branch`` was passed to ``run_task`` but never extracted
     into the params dict. These tests lock that contract structurally so
     the next field added on one side but not the other fails in CI.
     """
@@ -876,8 +876,8 @@ class TestInvocationParamContract:
         # Should not raise.
         sig.bind(**params)
 
-    def test_a4_base_branch_and_merge_branches_extracted_and_accepted(self):
-        # The specific A4 fields whose omission caused the regression.
+    def test_base_branch_and_merge_branches_extracted_and_accepted(self):
+        # The specific stacked-child fields whose omission caused the regression.
         import inspect
 
         params = server._extract_invocation_params(
@@ -890,7 +890,7 @@ class TestInvocationParamContract:
         bg = set(inspect.signature(server._run_task_background).parameters)
         assert {"base_branch", "merge_branches"} <= bg
 
-    def test_a4_fields_default_safely_when_absent(self):
+    def test_stacking_fields_default_safely_when_absent(self):
         params = server._extract_invocation_params(self._payload(), self._fake_req())
         assert params["base_branch"] is None
         assert params["merge_branches"] == []

@@ -298,7 +298,7 @@ def _channel_prompt_addendum(config: TaskConfig) -> str:
     """
     if config.channel_source != "linear":
         return ""
-    # #247 UX.16: a synthetic orchestration integration node has NO real Linear
+    # A synthetic orchestration integration node (#247) has NO real Linear
     # sub-issue — `linear_issue_id` is intentionally omitted from its
     # channel_metadata (see orchestration-release.ts). Without a target issue
     # there is nothing issue-specific to say; the parent panel is the surface.

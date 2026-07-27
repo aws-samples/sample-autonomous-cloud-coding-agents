@@ -272,8 +272,27 @@ _CLONE_CMD_RE = re.compile(
 
 # Arguments after which the rest of the command is free-form TEXT (a PR/issue/
 # commit body or title), where a mention of "gh repo clone" is prose, not a
-# command. We stop scanning for the clone verb at the first of these so a body
-# quoting the clone command can't trip the guard.
+# command. Used to ignore text that merely QUOTES a clone command.
+#
+# NOTE ``-b`` is deliberately here (``gh pr create -b`` is ``--body``) AND is
+# ``git clone``'s own ``--branch`` short form. So this list can only be applied
+# to the text FOLLOWING a clone verb, never to the text preceding it: truncating
+# the command at the first match before looking for the verb let
+# ``git clone -b main <own repo>`` through entirely, because the truncation cut
+# the command off ahead of the verb it was meant to find.
+# Shell separators that start a fresh command. Splitting on these means a
+# free-text argument can only swallow the rest of ITS OWN segment, so a clone
+# chained after an unrelated ``-m`` is still seen.
+_SHELL_SEPARATOR_RE = re.compile(r"(?:&&|\|\||[;&|\n])")
+
+# The clone verb WITHOUT the leading-separator anchor, for matching inside a
+# segment that has already been split on separators (so the verb is at the
+# segment start rather than after one).
+_CLONE_VERB_RE = re.compile(
+    r"^\s*(?:gh\s+repo\s+clone|git\s+(?:-C\s+\S+\s+)?clone)\b",
+    re.IGNORECASE,
+)
+
 _FREE_TEXT_ARG_RE = re.compile(
     r"(?:^|\s)(?:-m|--message|--body|--body-file|-b|--title|-t|-F|--field|--raw-field)\b",
     re.IGNORECASE,
@@ -307,21 +326,33 @@ def _is_self_reclone(command: str, repo_url: str) -> bool:
         only a re-clone of the TASK repo threatens the workspace invariant."""
     if not command or not repo_url:
         return False
-    # Only consider the segment BEFORE any free-text argument — a --body/-m value
-    # that quotes the clone command is prose, not an executed clone.
-    m = _FREE_TEXT_ARG_RE.search(command)
-    scan = command[: m.start()] if m else command
-    if not _CLONE_CMD_RE.search(scan):
-        return False
+    # Check each shell segment on its own. A free-text argument only swallows the
+    # REST OF ITS OWN segment, so `git commit -m wip && gh repo clone <own repo>`
+    # must still be caught: the `-m` belongs to the commit, not to the clone.
+    #
+    # Within a segment, find the clone verb FIRST and only then ask whether it
+    # sits inside free text. Truncating at the first free-text flag *before*
+    # searching is what let `git clone -b main <own repo>` through: `-b` is both
+    # gh's `--body` and git clone's `--branch`, so the cut landed ahead of the
+    # very verb it was meant to find.
     variants = _repo_slug_variants(repo_url)
     if not variants:
         return False
-    # Normalize the command's URL punctuation to the bare slug space: drop the
-    # scheme/host and the scp-style ``git@host:`` prefix so ``.../owner/repo.git``
-    # and ``git@github.com:owner/repo`` both reduce to a substring carrying
-    # ``owner/repo``. Search the SAME pre-free-text segment.
-    haystack = scan.lower().replace("git@github.com:", "github.com/")
-    return any(v in haystack for v in variants)
+    for segment in _SHELL_SEPARATOR_RE.split(command):
+        clone = _CLONE_CMD_RE.search(segment) or _CLONE_VERB_RE.search(segment)
+        if clone is None:
+            continue
+        free_text = _FREE_TEXT_ARG_RE.search(segment)
+        if free_text is not None and free_text.start() < clone.start():
+            # The verb appears inside a --body/-m/--title value: prose, not a run.
+            continue
+        # The repo of a real clone always follows its verb. Normalize the URL
+        # punctuation to the bare slug space so `.../owner/repo.git` and
+        # `git@github.com:owner/repo` both reduce to text carrying `owner/repo`.
+        haystack = segment[clone.start() :].lower().replace("git@github.com:", "github.com/")
+        if any(v in haystack for v in variants):
+            return True
+    return False
 
 
 async def pre_tool_use_hook(

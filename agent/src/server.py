@@ -308,8 +308,8 @@ def _extract_workload_access_token(request: Request) -> str:
     """Read AgentCore's workload access token off the inbound request.
 
     AgentCore Runtime delivers the token on `/invocations` requests under
-    one of two header spellings (both observed 2026-05-18 on a single
-    request via diagnostic logging in us-east-1):
+    one of two header spellings (both observed on a single request via
+    diagnostic logging):
       1. ``WorkloadAccessToken`` — the SDK's documented header in
          ``bedrock_agentcore.runtime.models::ACCESS_TOKEN_HEADER``.
       2. ``x-amzn-bedrock-agentcore-runtime-workload-accesstoken`` —
@@ -546,7 +546,7 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
     resolved_workflow = inp.get("resolved_workflow")
     branch_name = inp.get("branch_name", "")
     pr_number = str(inp.get("pr_number", ""))
-    # #247 A4: stacked-child base branch + (diamond) predecessor branches
+    # Stacked-child base branch + (diamond) predecessor branches
     # to merge in. The orchestrator sets these from the orchestration row;
     # absent for ordinary tasks (agent branches off main as today).
     base_branch = inp.get("base_branch") or None

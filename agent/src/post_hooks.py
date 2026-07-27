@@ -378,7 +378,7 @@ def reconcile_agent_branch(repo_dir: str, branch: str) -> bool:
         "POST",
         f"Agent left the platform branch: HEAD is on '{head_branch}', expected "
         f"'{branch}'. Reconciling the platform branch to the agent's commits so "
-        "the work is delivered on the tracked branch (ABCA-815).",
+        "the work is delivered on the tracked branch.",
     )
     try:
         # Re-point the platform branch at the agent's HEAD (force: the platform

@@ -33,7 +33,7 @@ def _patch_common(monkeypatch, fake: FakeRunCmd):
     # _install_commit_hook touches the filesystem; stub it out (it's its own
     # best-effort path and not under test here).
     monkeypatch.setattr(repo, "_install_commit_hook", lambda repo_dir: None)
-    # ABCA-815: the clone is faked here, so the real workspace never gets a
+    # The clone is faked here, so the real workspace never gets a
     # `.git`. Stub the pre-clean + git-root backstop (tested directly in
     # TestCloneWorkspaceGuards) so the hermetic clone tests don't trip the
     # assertion on a non-existent/empty workspace path.
@@ -124,8 +124,8 @@ class TestSetupRepoHappyPath:
         assert "head-sha-after-setup" not in fake.labels()
 
 
-class TestDiamondBaseBranchF1:
-    """#247 F1 (DE-stress 2026-07-24): a diamond child (base_branch + merge_branches)
+class TestDiamondBaseBranch:
+    """A diamond child (base_branch + merge_branches)
     is handed the server's 'main' literal as its base, which is WRONG on a fork
     whose real default isn't main. repo.py must resolve the real default and use
     it for BOTH the checkout base and the PR base. A linear child (base_branch, no
@@ -236,11 +236,11 @@ class TestReadOnlyBaselineSkip:
 
 
 class TestBaselineBuildTimeout:
-    """ABCA-659 Bug B: the pre-agent baseline build/lint must run with the SAME
-    generous wall-clock ceiling as the post-agent gate (BUILD_VERIFY_TIMEOUT_S,
-    30min) — NOT run_cmd's 600s default — and a TIMEOUT must be GUARDED so a
+    """The pre-agent baseline build/lint must run with the SAME generous
+    wall-clock ceiling as the post-agent gate (BUILD_VERIFY_TIMEOUT_S, 30min)
+    — NOT run_cmd's 600s default — and a TIMEOUT must be GUARDED so a
     slow-but-valid CI-parity build no longer raises out of setup_repo and crashes
-    the whole task before the agent ever runs (the 661/662 symptom: no PR, issue
+    the whole task before the agent ever runs (the observed symptom: no PR, issue
     stuck in Backlog, indistinguishable from a real failure)."""
 
     class _RecordingFake:
@@ -279,7 +279,7 @@ class TestBaselineBuildTimeout:
         monkeypatch.setattr(repo, "run_cmd", fake)
         monkeypatch.setattr(repo, "run_cmd_with_backoff", fake)
         monkeypatch.setattr(repo, "_install_commit_hook", lambda repo_dir: None)
-        # ABCA-815: the clone is faked here, so the real workspace never gets a
+        # The clone is faked here, so the real workspace never gets a
         # `.git`. Stub the pre-clean + git-root backstop (tested directly in
         # TestCloneWorkspaceGuards) so the hermetic clone tests don't trip the
         # assertion on a non-existent/empty workspace path.
@@ -301,7 +301,7 @@ class TestBaselineBuildTimeout:
         monkeypatch.setattr(repo, "run_cmd", fake)
         monkeypatch.setattr(repo, "run_cmd_with_backoff", fake)
         monkeypatch.setattr(repo, "_install_commit_hook", lambda repo_dir: None)
-        # ABCA-815: the clone is faked here, so the real workspace never gets a
+        # The clone is faked here, so the real workspace never gets a
         # `.git`. Stub the pre-clean + git-root backstop (tested directly in
         # TestCloneWorkspaceGuards) so the hermetic clone tests don't trip the
         # assertion on a non-existent/empty workspace path.
@@ -320,7 +320,7 @@ class TestBaselineBuildTimeout:
         monkeypatch.setattr(repo, "run_cmd", fake)
         monkeypatch.setattr(repo, "run_cmd_with_backoff", fake)
         monkeypatch.setattr(repo, "_install_commit_hook", lambda repo_dir: None)
-        # ABCA-815: the clone is faked here, so the real workspace never gets a
+        # The clone is faked here, so the real workspace never gets a
         # `.git`. Stub the pre-clean + git-root backstop (tested directly in
         # TestCloneWorkspaceGuards) so the hermetic clone tests don't trip the
         # assertion on a non-existent/empty workspace path.
@@ -335,7 +335,7 @@ class TestBaselineBuildTimeout:
         assert any("Initial lint" in n and "did not finish within" in n for n in setup.notes)
 
     def test_baseline_build_OOM_kill_is_not_a_regression(self, monkeypatch):
-        # ABCA-662 root cause: the pre-agent baseline build was OOM-KILLED (exit
+        # Root cause of an observed false ✅: the baseline build was OOM-KILLED (exit
         # 137) because several heavy CI-parity builds shared one ECS box. Exit 137
         # is an ENVIRONMENT fault, NOT broken code — so build_before must be True
         # (no usable baseline, no known regression), NOT False ("already broken").
@@ -346,7 +346,7 @@ class TestBaselineBuildTimeout:
         monkeypatch.setattr(repo, "run_cmd", fake)
         monkeypatch.setattr(repo, "run_cmd_with_backoff", fake)
         monkeypatch.setattr(repo, "_install_commit_hook", lambda repo_dir: None)
-        # ABCA-815: the clone is faked here, so the real workspace never gets a
+        # The clone is faked here, so the real workspace never gets a
         # `.git`. Stub the pre-clean + git-root backstop (tested directly in
         # TestCloneWorkspaceGuards) so the hermetic clone tests don't trip the
         # assertion on a non-existent/empty workspace path.
@@ -369,7 +369,7 @@ class TestBaselineBuildTimeout:
         monkeypatch.setattr(repo, "run_cmd", fake)
         monkeypatch.setattr(repo, "run_cmd_with_backoff", fake)
         monkeypatch.setattr(repo, "_install_commit_hook", lambda repo_dir: None)
-        # ABCA-815: the clone is faked here, so the real workspace never gets a
+        # The clone is faked here, so the real workspace never gets a
         # `.git`. Stub the pre-clean + git-root backstop (tested directly in
         # TestCloneWorkspaceGuards) so the hermetic clone tests don't trip the
         # assertion on a non-existent/empty workspace path.
@@ -384,7 +384,7 @@ class TestBaselineBuildTimeout:
 
 
 class TestFindMiseConfigs:
-    """ABCA-662 follow-up: `mise trust <repo_dir>` trusts only the ROOT config;
+    """`mise trust <repo_dir>` trusts only the ROOT config;
     a monorepo's per-package `mise.toml` roots must ALSO be trusted or
     `mise run build` fanning into `//cdk:*` etc. dies at the trust gate."""
 
@@ -482,7 +482,7 @@ class TestPlatformBranchNameVerbatim:
     when present, for EVERY workflow — never re-deriving its own slug. A
     re-derived slug diverges from the platform's (shell.py slugify strips
     dots / truncates at 40; gateway.ts uses dashes / truncates at 50), which
-    silently breaks #247 A4 stacking: a stacked child fetches the
+    silently breaks stacked-PR chaining (#247): a stacked child fetches the
     predecessor's platform-named branch, the agent pushed a differently-named
     one, the fetch 404s, and the child falls back to main (#14)."""
 
@@ -549,7 +549,7 @@ class TestSetupRepoDependencyUnreachable:
         report/raise path fires, while run_cmd (non-clone commands) stays faked."""
         monkeypatch.setattr(repo, "run_cmd", fake)
         monkeypatch.setattr(repo, "_install_commit_hook", lambda repo_dir: None)
-        # ABCA-815: the clone is faked here, so the real workspace never gets a
+        # The clone is faked here, so the real workspace never gets a
         # `.git`. Stub the pre-clean + git-root backstop (tested directly in
         # TestCloneWorkspaceGuards) so the hermetic clone tests don't trip the
         # assertion on a non-existent/empty workspace path.
@@ -592,7 +592,7 @@ class TestSetupRepoDependencyUnreachable:
         monkeypatch.setattr("shell.run_cmd", fake_run_cmd)
         monkeypatch.setattr(repo, "run_cmd", fake_run_cmd)
         monkeypatch.setattr(repo, "_install_commit_hook", lambda repo_dir: None)
-        # ABCA-815: the clone is faked here, so the real workspace never gets a
+        # The clone is faked here, so the real workspace never gets a
         # `.git`. Stub the pre-clean + git-root backstop (tested directly in
         # TestCloneWorkspaceGuards) so the hermetic clone tests don't trip the
         # assertion on a non-existent/empty workspace path.
@@ -719,7 +719,7 @@ class TestSetupRepoDependencyUnreachable:
         fake = _fake_run_cmd()
         monkeypatch.setattr(repo, "run_cmd", fake)
         monkeypatch.setattr(repo, "_install_commit_hook", lambda repo_dir: None)
-        # ABCA-815: the clone is faked here, so the real workspace never gets a
+        # The clone is faked here, so the real workspace never gets a
         # `.git`. Stub the pre-clean + git-root backstop (tested directly in
         # TestCloneWorkspaceGuards) so the hermetic clone tests don't trip the
         # assertion on a non-existent/empty workspace path.
@@ -771,7 +771,7 @@ class TestSetupRepoDependencyUnreachable:
 
 
 class TestCloneWorkspaceGuards:
-    """ABCA-815: the clone-time slate-clean + git-root backstop that stop a
+    """The clone-time slate-clean + git-root backstop that stop a
     stacked child from silently editing a NESTED working tree the pipeline's
     git ops never see (which reported a false COMPLETED with the work lost)."""
 

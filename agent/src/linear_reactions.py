@@ -86,7 +86,8 @@ _VIEWER_QUERY = """
 query Viewer { viewer { id } }
 """.strip()
 
-#: PM-3: fetch the issue's current state + its team's full workflow-state list,
+#: Workflow-state mirroring: fetch the issue's current state + its team's full
+#: workflow-state list,
 #: so we can pick the right target state (by type, with a name preference) and
 #: never move the issue BACKWARD along the lifecycle.
 _ISSUE_STATES_QUERY = """
@@ -98,7 +99,7 @@ query IssueStates($id: String!) {
 }
 """.strip()
 
-#: PM-3: set an issue's workflow state by id.
+#: Set an issue's workflow state by id.
 _SET_STATE_MUTATION = """
 mutation SetIssueState($id: String!, $stateId: String!) {
   issueUpdate(id: $id, input: { stateId: $stateId }) { success }
@@ -254,7 +255,7 @@ def _get_viewer_id() -> str | None:
 
 
 def _transition_issue_state(issue_id: str, target_type: str, preferred_names: list[str]) -> None:
-    """PM-3: move the issue to a workflow state of ``target_type``, forward-only.
+    """Move the issue to a workflow state of ``target_type``, forward-only.
 
     A plain single task (a direct ``abca`` label, or an ``:auto``/``:decompose``
     the planner declined to a single unit) previously left the issue in Backlog
@@ -447,7 +448,8 @@ def react_task_started(
         name="linear-reactions-sweep",
     ).start()
 
-    # PM-3: a writeable single task moves the issue Backlog → In Progress, so it
+    # Workflow-state transition: a writeable single task moves the issue
+    # Backlog → In Progress, so it
     # doesn't sit in Backlog for the whole run. Off for read-only/planning tasks
     # (decompose-v1, pr-review) — the orchestration panel owns the parent state.
     if transition_state:
@@ -478,7 +480,8 @@ def react_task_finished(
         _CREATE_MUTATION,
         {"issueId": issue_id, "emoji": EMOJI_SUCCESS if success else EMOJI_FAILURE},
     )
-    # PM-3: on a clean finish, a writeable single task moves the issue to
+    # Workflow-state transition: on a clean finish, a writeable single task
+    # moves the issue to
     # In Review (work done, awaiting human merge) — the same target the
     # orchestration panel uses on clean completion. On failure, leave the
     # state as-is (In Progress); the ❌ reaction conveys the outcome, and the

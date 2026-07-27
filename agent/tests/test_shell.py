@@ -191,7 +191,7 @@ class TestRunCmdWithBackoff:
 class TestRunCmdFailureLogging:
     """A failing command must surface its ACTUAL error. Build/test tooling (jest,
     tsc, the mise task DAG) writes the failing-task error to STDOUT, not stderr —
-    so logging stderr alone made build-gate failures undebuggable (ABCA-662: a red
+    so logging stderr alone made build-gate failures undebuggable (a red
     ``mise run build`` showed every task starting but never WHICH one failed)."""
 
     def _completed(self, rc, stdout="", stderr=""):
@@ -231,7 +231,7 @@ class TestRunCmdFailureLogging:
         assert "line 0" not in blob  # earliest lines dropped
 
     def test_failure_line_in_the_MIDDLE_is_surfaced(self):
-        # ABCA-662 root cause of the tooling gap: a PARALLEL mise DAG interleaves
+        # Root cause of the tooling gap: a PARALLEL mise DAG interleaves
         # output, so the failing task's line is in the MIDDLE while the tail is a
         # passing package's coverage table. The failing line MUST be surfaced.
         mid = "[//cdk:test] FAIL test/handlers/foo.test.ts — expected 1 got 2"
@@ -269,7 +269,7 @@ class TestRunCmdFailureLogging:
         assert "ok 19" in blob
 
     def test_marker_line_with_noise_term_is_filtered_by_allowlist(self):
-        # N3: the LOAD-BEARING allowlist case. A line that hits a real marker
+        # The LOAD-BEARING allowlist case. A line that hits a real marker
         # (`error:`) AND a noise term (`0 errors`) must be filtered OUT of the
         # surfaced set. Placed in the MIDDLE (before the tail window) so it is
         # only reachable via the marker scan — if _FAILURE_LINE_NOISE were
@@ -287,7 +287,7 @@ class TestRunCmdFailureLogging:
         assert "0 errors after autofix retry" not in blob  # noisy marker filtered by allowlist
 
     def test_surfaced_failure_lines_are_capped_and_truncation_marked(self):
-        # N4: a genuinely huge red run (more than _MAX_SURFACED_FAILURE_LINES
+        # A genuinely huge red run (more than _MAX_SURFACED_FAILURE_LINES
         # marker lines) must be capped, with an explicit truncation breadcrumb —
         # so it can't flood CloudWatch. Exercises the cap branch the other tests
         # never reach.
@@ -324,7 +324,7 @@ class TestRunCmdStreaming:
     """stream=True tees the command's output to the log LINE-BY-LINE as it runs
     (so the full log reaches CloudWatch verbatim) AND returns a CompletedProcess
     matching subprocess.run's contract. Uses real `sh -c` — exercises the actual
-    Popen + drain-thread path (the buffered summary hid build failures — ABCA-662)."""
+    Popen + drain-thread path (the buffered summary hid build failures)."""
 
     def _run(self, argv, check=False):
         logs = []

@@ -1,4 +1,4 @@
-"""Fixture-free regression guard for the ECS test-hang scrub (#615 / #616 B1).
+"""Fixture-free regression guard for the ECS test-hang scrub (#615 / #616).
 
 This module deliberately has NO local autouse fixture. It exists to prove that
 conftest's ``_clean_env`` autouse fixture strips ``AGENT_SESSION_ROLE_ARN`` from
@@ -8,7 +8,7 @@ the environment before each test — the exact line the #615 fix adds to
 Why a separate module: ``test_aws_session.py`` has its OWN autouse ``_reset``
 fixture that does ``monkeypatch.delenv(SESSION_ROLE_ARN_ENV)``, so a guard placed
 there passes even if the conftest scrub is deleted (it asserts what the local
-fixture guarantees, not what the fix does — #616 review B1). Here, only conftest's
+fixture guarantees, not what the fix does). Here, only conftest's
 ``_clean_env`` is in play.
 
 Why set the var at MODULE IMPORT time (not in the test body): pytest autouse

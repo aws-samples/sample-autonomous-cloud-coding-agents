@@ -524,7 +524,8 @@ class TestAuthCircuitBreaker:
 
 
 class TestTransitionIssueState:
-    """PM-3: a writeable single task moves the issue Backlog → In Progress →
+    """Workflow-state transition: a writeable single task moves the issue
+    Backlog → In Progress →
     In Review, forward-only. Mocks ``_graphql`` directly so we assert on the
     decision logic, not the wire format (covered elsewhere)."""
 

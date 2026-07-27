@@ -268,8 +268,9 @@ class TestEnsurePrCreate:
 
 
 class TestReconcileAgentBranch:
-    """ABCA-815 root cause: reconcile the platform branch when the agent
-    committed on its OWN branch instead of the pre-checked-out platform branch.
+    """A leading cause of lost deliverables: reconcile the platform branch when
+    the agent committed on its OWN branch instead of the pre-checked-out
+    platform branch.
 
     Real git (tmp_path) — this is pure git plumbing, so a real repo gives far
     higher confidence than faking subprocess. The two seams (subprocess.run for
@@ -307,7 +308,7 @@ class TestReconcileAgentBranch:
         platform = "bgagent/task-1/fix"
         # Platform creates its (empty) branch, as setup_repo does.
         self._git(repo, "checkout", "-qb", platform)
-        # Agent goes rogue: its own branch + a commit (the live ABCA-815 case).
+        # Agent goes rogue: its own branch + a commit (the case observed in practice).
         self._git(repo, "checkout", "-qb", "agent-own-branch")
         (tmp_path / "repo" / "f.txt").write_text("base\nagent change\n")
         self._git(repo, "commit", "-qam", "agent work")
@@ -355,8 +356,8 @@ class TestReconcileAgentBranch:
 class TestReconcilePrBase:
     """The agent picks its own PR --base; ensure_pr corrects it deterministically
     to setup.default_branch (the orchestrator's base for a stacked child / the
-    detected repo default for a root). Live-caught on the #247 chain: a stacked
-    child + a root both opened against a wrong 'main'."""
+    detected repo default for a root). Observed in practice on an orchestrated
+    chain (#247): a stacked child + a root both opened against a wrong 'main'."""
 
     def test_retargets_when_base_mismatches(self, monkeypatch):
         # Existing PR is based on 'main' but the stacked child's real base is

@@ -677,7 +677,7 @@ class TestResolveOverallTaskStatus:
         assert "build_ok=False" in err
 
     def test_success_with_build_TIMED_OUT_marks_timeout_distinctly(self):
-        # User 2026-06-29: a build that exceeded the time limit must read as a
+        # A build that exceeded the time limit must read as a
         # TIMEOUT, not a generic build failure. The error_message carries
         # ``build_ok=timeout`` so the platform's failure copy says "timed out".
         ar = AgentResult(status="success")
@@ -1085,7 +1085,7 @@ class TestCancelSkipsPostHooks:
 
 
 # ---------------------------------------------------------------------------
-# Chunk K1 — trace threading into TaskConfig (design §10.1)
+# Trace threading into TaskConfig (design §10.1)
 # ---------------------------------------------------------------------------
 
 
@@ -1365,7 +1365,7 @@ class TestTraceThreading:
 
 
 class TestTraceS3Upload:
-    """K2 Stage 4 — pipeline triggers the S3 trace upload only when
+    """Pipeline triggers the S3 trace upload only when
     ``trace=True`` AND ``user_id`` is non-empty; threads the resulting
     ``trace_s3_uri`` into ``task_state.write_terminal`` so the
     TaskRecord update is atomic with terminal-status."""
@@ -1622,7 +1622,7 @@ class TestTraceS3Upload:
             patch("pipeline.verify_build", return_value=VerifyOutcome(passed=True)),
             patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
             # A DELIVERED task (a PR was opened) — this test is about trace-upload
-            # fail-open, not the ABCA-815 no-deliverable gate. Returning a PR keeps
+            # fail-open, not the no-deliverable delivery gate. Returning a PR keeps
             # the delivery gate out of the picture so the assertion isolates the
             # trace behavior (a real no-PR task is covered in TestDeliveryGate).
             patch("pipeline.ensure_pr", return_value="https://github.com/owner/repo/pull/1"),

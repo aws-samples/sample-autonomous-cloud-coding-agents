@@ -282,11 +282,11 @@ class TestTaskConfig:
         assert config.is_pr_workflow is False
         assert config.cedar_policies == []
         assert config.issue is None
-        # #247 A4: defaults for stacked-child fields.
+        # Defaults for stacked-child fields (#247).
         assert config.base_branch is None
         assert config.merge_branches == []
 
-    def test_a4_stacked_child_fields(self):
+    def test_stacked_child_base_branch_fields(self):
         # Diamond child: base off main + predecessor branches to merge in.
         config = TaskConfig(
             repo_url="owner/repo",

@@ -19,7 +19,7 @@ DEFAULT_WORKFLOW_ID = "coding/new-task-v1"
 REPO_LESS_DEFAULT_WORKFLOW_ID = "default/agent-v1"
 # First-party workflow ids that operate on an existing pull request — they
 # check out the existing PR branch instead of creating a fresh one. restack-v1
-# (#305 A6) re-merges a changed predecessor into an existing stacked-child PR.
+# (#305) re-merges a changed predecessor into an existing stacked-child PR.
 PR_WORKFLOW_IDS = frozenset(("coding/pr-iteration-v1", "coding/pr-review-v1", "coding/restack-v1"))
 # Clarify-before-spend (customer UX #4): the exact marker a coding/new-task agent
 # puts on the FIRST line of its final message when a request is too ambiguous to

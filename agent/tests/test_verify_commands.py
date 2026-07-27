@@ -56,10 +56,10 @@ class TestResolveVerifyArgv:
         assert resolve_verify_argv("npm run build", "") == ["npm", "run", "build"]
 
     def test_env_assignment_prefix_wraps_in_shell(self):
-        # ABCA-662 follow-up: a leading VAR=value env-prefix is shell syntax. Exec'd
+        # A leading VAR=value env-prefix is shell syntax. Exec'd
         # directly, shlex-split makes the FIRST token the "program" (VAR=value) →
         # FileNotFoundError, crashing the task before the build runs. Must route
-        # through bash -lc so the assignment takes effect. (Live-caught: a
+        # through bash -lc so the assignment takes effect. (Observed in practice: a
         # lint_command of `MISE_EXPERIMENTAL=1 mise //cdk:eslint` crashed at exit 1.)
         assert resolve_verify_argv("MISE_EXPERIMENTAL=1 mise //cdk:eslint", "") == [
             "bash",
@@ -125,7 +125,7 @@ class TestVerifyBuildHonorsCommand:
         assert outcome.timed_out is False  # ran-and-failed, not a timeout
 
     def test_timeout_is_not_passed_AND_flagged_timed_out(self, monkeypatch):
-        # The key distinction (user 2026-06-29): a timeout must read as "timed
+        # The key distinction: a timeout must read as "timed
         # out", not a generic build failure. passed=False (a build that never
         # finished isn't green) but timed_out=True so the reason differs.
         def boom(argv, **kw):
@@ -137,7 +137,7 @@ class TestVerifyBuildHonorsCommand:
         assert outcome.timed_out is True
 
     def test_exit_127_is_INERT_not_a_build_failure(self, monkeypatch):
-        # K8: command-not-found (e.g. yarn missing) means the gate couldn't run —
+        # Command-not-found (e.g. yarn missing) means the gate couldn't run —
         # a CONFIG problem, not the agent's code. Must flag inert, not a failure,
         # so the platform doesn't emit a false "build failed".
         monkeypatch.setattr(
@@ -172,7 +172,7 @@ class TestVerifyBuildHonorsCommand:
         assert outcome.inert is False
 
     def test_ENOSPC_is_INFRA_failure_not_a_build_failure(self, monkeypatch):
-        # ABCA-659 #2: disk-full mid-build means the build couldn't COMPLETE on
+        # Disk-full mid-build means the build couldn't COMPLETE on
         # this host — an infra fault, not broken code. Must flag infra_failed
         # (not a plain failure, not inert) so the platform reports "retry / needs
         # capacity", not "build/tests failed".
@@ -198,7 +198,7 @@ class TestVerifyBuildHonorsCommand:
         assert outcome.infra_failed is True
 
     def test_bare_sigkill_137_no_stderr_signature_is_INFRA_not_inert(self, monkeypatch):
-        # ABCA-691 live regression: the container/cgroup OOM-killer delivers
+        # Regression observed in practice: the container/cgroup OOM-killer delivers
         # SIGKILL and writes "Killed process …" to the KERNEL log, not the build
         # process's own stderr — so an OOM'd `mise run build` exits 137 with NO
         # "killed"/"out of memory" string captured. Such a 137 was mislabeled

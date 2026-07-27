@@ -196,7 +196,8 @@ class TestPreToolUseHook:
 
 
 class TestSelfRecloneGuard:
-    """ABCA-815 layer 1: block a Bash re-clone of the task's OWN repo (the agent
+    """Lost-deliverable defense, layer 1: block a Bash re-clone of the task's
+    OWN repo (the agent
     sometimes cloned into a sibling dir and stranded its work off the tracked
     branch). Scoped to the task repo — dependency/fixture clones must pass."""
 
@@ -231,7 +232,7 @@ class TestSelfRecloneGuard:
         assert not _is_self_reclone("gh repo clone owner/repo", "")
 
     def test_ignores_clone_phrase_inside_pr_body(self):
-        # ABCA-856 false positive: the clone command quoted inside a --body value
+        # Observed false positive: the clone command quoted inside a --body value
         # is PROSE, not an executed clone. Must NOT be blocked.
         cmd = (
             'gh pr create --repo owner/repo --base main --title "add marker" '
@@ -252,6 +253,40 @@ class TestSelfRecloneGuard:
         # (the free-text truncation only drops what's AFTER the first body arg).
         cmd = 'gh repo clone owner/repo && gh pr create --repo owner/repo --body "x"'
         assert _is_self_reclone(cmd, "owner/repo")
+
+    def test_blocks_clone_using_the_branch_short_flag(self):
+        # ``-b`` is git clone's own ``--branch`` short form AND gh's ``--body``.
+        # The guard used to cut the command at the first free-text flag BEFORE
+        # looking for the clone verb, so this ordinary command slipped through
+        # entirely — reopening the stranded-work failure the guard exists to stop.
+        assert _is_self_reclone(
+            "git clone -b main https://github.com/owner/repo /w/repo", "owner/repo"
+        )
+        assert _is_self_reclone("gh repo clone -b main owner/repo", "owner/repo")
+        assert _is_self_reclone(
+            "git clone -b feature/x git@github.com:owner/repo.git /w/repo", "owner/repo"
+        )
+        assert _is_self_reclone(
+            "cd /tmp && git clone -b main --depth 1 https://github.com/owner/repo x",
+            "owner/repo",
+        )
+
+    def test_blocks_clone_chained_after_an_unrelated_message_flag(self):
+        # The ``-m`` belongs to the commit, not to the clone that follows it. A
+        # free-text argument must only swallow the rest of ITS OWN shell segment.
+        assert _is_self_reclone(
+            "git commit -m wip && gh repo clone owner/repo /w/repo", "owner/repo"
+        )
+
+    def test_still_ignores_prose_after_a_body_flag_in_the_same_segment(self):
+        # The counterpart: within one segment, a verb appearing after the body
+        # value opens is prose. These must stay allowed.
+        assert not _is_self_reclone(
+            'gh pr create --body "do not run gh repo clone owner/repo"', "owner/repo"
+        )
+        assert not _is_self_reclone(
+            "gh issue comment -m 'see gh repo clone owner/repo for context'", "owner/repo"
+        )
 
     def test_requires_command_position_not_substring(self):
         # The verb must be in command position (start / after a separator), not an
@@ -1820,7 +1855,7 @@ class TestRemainingMaxlifetime:
 
 
 class TestStuckGuardHookIntegration:
-    """K7: PostToolUse feeds the guard; the between-turns hook steers (advisory)."""
+    """PostToolUse feeds the guard; the between-turns hook steers (advisory)."""
 
     def _oom(self):
         return "[//cdk:test] FAILED (exit 134)\nJavaScript heap out of memory"
@@ -1842,7 +1877,7 @@ class TestStuckGuardHookIntegration:
         assert guard.evaluate().kind == "steer"
 
     def test_between_turns_hook_latches_stuck_summary_from_the_guard(self):
-        # #599 N2: pin the PRODUCTION write path for the _LAST_STUCK_SUMMARY latch
+        # Pin the PRODUCTION write path for the _LAST_STUCK_SUMMARY latch
         # (hooks.py:1464-1465). The enrichment tests monkeypatch the getter, so
         # without this test deleting those two lines would leave the latch
         # permanently None and every test would still pass. Drive the real hook

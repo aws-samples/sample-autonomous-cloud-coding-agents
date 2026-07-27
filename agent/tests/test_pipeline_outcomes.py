@@ -60,7 +60,7 @@ class TestResolveOverallTaskStatus:
         assert err is None
 
     def test_infra_failed_build_forces_error_even_when_gate_would_pass(self):
-        # ABCA-659 #2: the build was killed by ENOSPC/OOM (build_infra_failed).
+        # The build was killed by ENOSPC/OOM (build_infra_failed).
         # Even if the regression-only gate would pass (build_ok=True — e.g. the
         # pre-agent baseline was ALSO infra-killed, so "already red → not a
         # regression"), we must NOT report a false ✅ on unverified code. Forces
@@ -162,8 +162,9 @@ class TestResolveOverallTaskStatus:
 
 
 class TestDeliveryGate:
-    """ABCA-815: a create-strategy new-work task that reported success but
-    shipped NOTHING (no PR AND no commit) must be failed loudly, not COMPLETED.
+    """A create-strategy new-work task that reported success but shipped
+    NOTHING (no PR AND no commit) must be failed loudly, not COMPLETED —
+    otherwise the platform reports success for work that was lost.
 
     Common args factory keeps each case to just the axis under test."""
 
@@ -193,7 +194,7 @@ class TestDeliveryGate:
         )
 
     def test_success_no_pr_no_commit_becomes_lost(self):
-        # The ABCA-815 case: agent-success, create strategy, nothing shipped.
+        # The lost-deliverable case: agent-success, create strategy, nothing shipped.
         overall, err = self._gate()
         assert overall == "error"
         assert err is not None
@@ -314,7 +315,7 @@ class TestComputeTurnsCompleted:
 
 
 class TestMaxTurnsStuckEnrichment:
-    """N3 wiring seam (#600): _resolve_overall_task_status enriches a max_turns
+    """Wiring seam (#600): _resolve_overall_task_status enriches a max_turns
     reason with the stuck-guard summary (hooks.last_stuck_summary). Previously
     tested only at its two pure endpoints; this drives the append itself."""
 

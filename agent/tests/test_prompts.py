@@ -65,7 +65,7 @@ class TestChannelPromptAddendum:
             assert "Linear context discovery" not in addendum
 
     def test_linear_integration_node_gets_no_addendum(self):
-        # #247 UX.16: the synthetic orchestration integration node is a Linear
+        # The synthetic orchestration integration node (#247) is a Linear
         # task but has NO real sub-issue — channel_metadata omits
         # linear_issue_id. No issue id → no addendum (the parent panel is the
         # surface).
@@ -125,7 +125,7 @@ class TestGetSystemPrompt:
         assert "{workflow}" not in prompt
 
     def test_pr_iteration_distinguishes_question_from_change(self):
-        # A6/#299: a question-only comment ("where is the login page?") must be
+        # A question-only comment ("where is the login page?") must be
         # answered without forcing a code change, or the platform reports a
         # false "✅ Updated". The prompt must carry the triage.
         prompt = get_system_prompt("coding/pr-iteration-v1")
