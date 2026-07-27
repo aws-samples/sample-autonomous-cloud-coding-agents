@@ -17,8 +17,6 @@
  *  SOFTWARE.
  */
 
-import * as fs from 'fs';
-import * as path from 'path';
 import { App } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import { AgentStack } from '../../src/stacks/agent';
@@ -528,28 +526,25 @@ describe('AgentStack', () => {
     expect(all).not.toMatch(/"Arn"\]\}\s*,\s*"\/\*"/);
   });
 
-  test('the log-delivery pin shim requires explicit opt-in, not the default stack name', () => {
-    // The shim overrides CFN logical ids AND account-unique resource Names with
-    // values captured from one specific pre-existing stack, so it is only ever
-    // correct for the account that already owns those resources. It used to key
-    // off stackName — and the DEFAULT stack name (see main.ts) is itself a key in
-    // its table, so every operator who deployed without a stackName override
-    // silently inherited another account's hardcoded ids.
-    //
-    // Asserted on the source rather than by synthesizing a differently-named
-    // stack: constructing one under a non-matching id trips an unrelated cdk-nag
-    // suppression-path check first, which would mask this.
-    const src = fs.readFileSync(
-      path.resolve(__dirname, '../../src/stacks/agent.ts'), 'utf8',
-    );
-    const shim = src.slice(src.indexOf('function maybePinChurnedLogResources'));
-    const body = shim.slice(0, shim.indexOf('\n}'));
-
-    // Opt-in is read from context and, absent, the shim returns before pinning.
-    expect(body).toContain("tryGetContext('pinnedLogDeliveryStack')");
-    expect(body).toMatch(/targetStackName === undefined\)\s*return/);
-    // It must NOT fall back to the running stack's own name.
-    expect(body).not.toMatch(/tryGetContext\('pinnedLogDeliveryStack'\)[^;]*\?\?\s*stack\.stackName/);
+  test('no per-stack log-delivery id overrides survive in the stack', () => {
+    // A migration shim once re-pinned the AgentCore log-delivery resources of one
+    // pre-existing stack to hardcoded logical ids and account-unique Names, keyed
+    // off stackName — and the DEFAULT stack name matched its table, so every
+    // operator silently inherited another account's ids. The alpha naming scheme
+    // has since moved on (the generated names no longer collide with the old
+    // ones), so the shim was deleted rather than made opt-in. This guards against
+    // it — or anything like it — coming back: no synthesized log-delivery resource
+    // may carry a name from that hardcoded era.
+    const sources = {
+      ...template.findResources('AWS::Logs::DeliverySource'),
+      ...template.findResources('AWS::Logs::DeliveryDestination'),
+    };
+    expect(Object.keys(sources).length).toBeGreaterThan(0);
+    expect(Object.keys(sources).join(' ')).not.toMatch(/RuntimeCDKSource|RuntimeCdkLogGroup/);
+    const names = Object.values(sources)
+      .map((r) => JSON.stringify((r as { Properties?: { Name?: unknown } }).Properties?.Name ?? ''));
+    expect(names.join(' ')).not.toContain('cdk-applicationlogs-source-');
+    expect(names.join(' ')).not.toContain('cdk-cwl-Dest');
   });
 
   test('the fan-out consumer can reach BOTH surfaces\' credentials registries', () => {
