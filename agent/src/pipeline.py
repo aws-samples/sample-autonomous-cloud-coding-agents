@@ -833,6 +833,7 @@ def run_task(
     trace: bool = False,
     user_id: str = "",
     attachments: list[dict] | None = None,
+    resolved_assets: list[dict] | None = None,
 ) -> dict:
     """Run the full agent pipeline and return a serialized result dict.
 
@@ -886,6 +887,11 @@ def run_task(
     # Inject Cedar policies into config for the PolicyEngine in runner.py
     if cedar_policies:
         config.cedar_policies = cedar_policies
+
+    # Registry assets (#246) resolved by the orchestrator — applied by the
+    # per-kind loaders below (mcp_server → .mcp.json in PR 2).
+    if resolved_assets:
+        config.resolved_assets = resolved_assets
 
     # Export session-tag values so tenant-data boto3 clients (DDB/S3) assume
     # the per-task SessionRole with {user_id, repo, task_id} tags. No-op when
@@ -1146,6 +1152,13 @@ def run_task(
             # bypassPermissions. Runs for every channel (defense-in-depth); never
             # matches Jira's own entry.
             strip_linear_mcp_servers(setup.repo_dir)
+
+            # Registry assets (#246): merge resolved mcp_server configs into
+            # .mcp.json alongside the channel MCP entry, before the project scan.
+            if config.resolved_assets:
+                from registry.loader import apply_resolved_assets
+
+                apply_resolved_assets(setup.repo_dir, config.resolved_assets)
 
             # Download attachments from S3 (version-pinned, integrity-verified)
             prepared_attachments: list = []

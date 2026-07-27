@@ -26,6 +26,9 @@ import { logger, type Logger } from './logger';
 import { writeMinimalEpisode } from './memory';
 import { coerceNumericOrNull } from './numeric';
 import { computePromptVersion } from './prompt-version';
+import { makeRegistryClient } from './registry/factory';
+import { parseRef } from './registry/ref';
+import { RegistryResolutionError, type ResolvedAsset } from './registry/types';
 import { loadRepoConfig, type BlueprintConfig, type ComputeType } from './repo-config';
 import { resolveUrlAttachments } from './resolve-url-attachments';
 import { APPROVAL_GATE_CAP_MAX, APPROVAL_GATE_CAP_MIN, type AgentAttachmentPayload, type AttachmentRecord, type TaskRecord } from './types';
@@ -502,7 +505,47 @@ export async function loadBlueprintConfig(task: TaskRecord): Promise<BlueprintCo
     lint_command: repoConfig?.lint_command,
     cedar_policies: repoConfig?.cedar_policies,
     approval_gate_cap: repoConfig?.approval_gate_cap,
+    mcp_servers: repoConfig?.mcp_servers,
+    cedar_policy_modules: repoConfig?.cedar_policy_modules,
+    skills: repoConfig?.skills,
   };
+}
+
+/**
+ * Resolve the Blueprint's ``registry://`` asset refs (#246) to a bundle the
+ * agent can load. Fail-closed: any unresolved ref throws, which the orchestrator
+ * turns into a FAILED task rather than running with a missing/substituted asset.
+ *
+ * Resolution runs here (not at create-task) so only this one Lambda carries the
+ * AgentCore SDK + IAM, mirroring how ``cedar_policies`` already flows from
+ * RepoConfig into the payload.
+ */
+export async function resolveRegistryAssets(
+  blueprintConfig: BlueprintConfig | undefined,
+  log: Logger,
+): Promise<ResolvedAsset[]> {
+  const refs = [
+    ...(blueprintConfig?.mcp_servers ?? []),
+    ...(blueprintConfig?.cedar_policy_modules ?? []),
+    ...(blueprintConfig?.skills ?? []),
+  ];
+  if (refs.length === 0) return [];
+
+  const client = makeRegistryClient();
+  const resolved: ResolvedAsset[] = [];
+  for (const ref of refs) {
+    const parsed = parseRef(ref);
+    if (!parsed.ok) {
+      throw new RegistryResolutionError(parsed.reason, ref, parsed.message);
+    }
+    const asset = await client.resolve(parsed.ref);
+    if (asset.warnings.length > 0) {
+      log.warn('Registry asset resolved with warnings', { ref, warnings: asset.warnings });
+    }
+    resolved.push(asset);
+  }
+  log.info('Resolved registry assets', { count: resolved.length });
+  return resolved;
 }
 
 /**
@@ -746,6 +789,35 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     ? resolveAttachmentPayloads(resolvedAttachments, Number(process.env.USER_PROMPT_TOKEN_BUDGET ?? '100000'))
     : [];
 
+  // Resolve registry assets (#246). Fail-closed: an unresolved ref throws here
+  // and the orchestrator transitions the task to FAILED. The audit triple is
+  // stamped on the TaskRecord; the runtime bundle rides in the payload.
+  const resolvedAssets = await resolveRegistryAssets(blueprintConfig, log);
+  if (resolvedAssets.length > 0) {
+    await ddb.send(new UpdateCommand({
+      TableName: TABLE_NAME,
+      Key: { task_id: task.task_id },
+      UpdateExpression: 'SET #ra = :ra, #ua = :now',
+      ExpressionAttributeNames: { '#ra': 'resolved_assets', '#ua': 'updated_at' },
+      ExpressionAttributeValues: {
+        ':ra': resolvedAssets.map((a) => ({ kind: a.kind, id: `${a.namespace}/${a.name}`, version: a.version })),
+        ':now': new Date().toISOString(),
+      },
+    }));
+  }
+
+  // Registry cedar_policy_module assets (#246, PR 3) reach the agent through the
+  // SAME cedar_policies payload field as inline blueprint policies, so they are
+  // byte-identical from the PolicyEngine's view (the cedar-parity contract holds
+  // by construction). Inline blueprint policies come first, then resolved modules.
+  const cedarText = [
+    ...(blueprintConfig?.cedar_policies ?? []),
+    ...resolvedAssets
+      .filter((a) => a.kind === 'cedar_policy_module')
+      .map((a) => (a.runtime as { cedar_text?: string }).cedar_text)
+      .filter((t): t is string => typeof t === 'string' && t.length > 0),
+  ];
+
   const payload: Record<string, unknown> = {
     repo_url: task.repo,
     task_id: task.task_id,
@@ -785,7 +857,18 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     // build-regression gating actually runs the repo's real command.
     ...(blueprintConfig?.build_command && { build_command: blueprintConfig.build_command }),
     ...(blueprintConfig?.lint_command && { lint_command: blueprintConfig.lint_command }),
-    ...(blueprintConfig?.cedar_policies && blueprintConfig.cedar_policies.length > 0 && { cedar_policies: blueprintConfig.cedar_policies }),
+    // cedarText is inline blueprint policies ++ resolved registry
+    // cedar_policy_module text (#246), so it supersedes the raw
+    // blueprintConfig.cedar_policies — byte-identical to inline when no
+    // registry cedar is pinned.
+    ...(cedarText.length > 0 && { cedar_policies: cedarText }),
+    // Registry (#246): the resolved runtime bundle the agent's loaders apply
+    // (MCP servers merged into .mcp.json; cedar/skills applied downstream).
+    ...(resolvedAssets.length > 0 && {
+      resolved_assets: resolvedAssets.map((a) => ({
+        kind: a.kind, namespace: a.namespace, name: a.name, version: a.version, runtime: a.runtime,
+      })),
+    }),
     // The agent's PreToolUse hook uses this to compute the maxLifetime
     // ceiling on per-gate human-in-the-loop approval timeouts.
     // Stamped at HYDRATING → RUNNING transition time so the clock
