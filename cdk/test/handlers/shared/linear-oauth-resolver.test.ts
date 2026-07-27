@@ -357,11 +357,16 @@ describe('resolveLinearOauthToken', () => {
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
-  test('a permanently-rejected refresh RECORDS the revocation on the registry row', async () => {
+  test('a permanently-rejected refresh records the revocation when a recorder is SUPPLIED', async () => {
     // The failure this guards: when the authorization dies, every event for the
     // workspace is dropped and the ONLY evidence was a log line, so an operator
     // saw their trigger label do nothing with no way to find out why. Marking
     // the row is what makes `bgagent platform doctor` able to say so.
+    //
+    // The recorder is OPT-IN: every Lambda that resolves a token holds read-only
+    // registry access, so defaulting it on meant the write failed AccessDenied
+    // and was swallowed on every revoked refresh — inert while reading as
+    // working. This passes it explicitly, the way a caller with the grant would.
     const expiringSoon = new Date(Date.now() + 10 * 1000).toISOString();
     const stale = makeStoredToken({ refresh_token: 'rt-dead', expires_at: expiringSoon });
 
@@ -380,10 +385,14 @@ describe('resolveLinearOauthToken', () => {
     });
 
     type Opts = NonNullable<Parameters<typeof resolveLinearOauthToken>[2]>;
+    const ddbClient = { send: ddbSend } as unknown as Opts['dynamoDbClient'];
     const result = await resolveLinearOauthToken('ws-uuid-revoke', REGISTRY_TABLE, {
-      dynamoDbClient: { send: ddbSend } as unknown as Opts['dynamoDbClient'],
+      dynamoDbClient: ddbClient,
       secretsManagerClient: { send: smSend } as unknown as Opts['secretsManagerClient'],
       fetchImpl: fetchImpl as unknown as typeof fetch,
+      onAuthorizationRevoked: (workspaceId) => markWorkspaceRevoked(
+        ddbClient as never, REGISTRY_TABLE, workspaceId,
+      ),
     });
     expect(result).toBeNull();
 
@@ -532,11 +541,12 @@ describe('markWorkspaceRevoked — the verdict must not outlive the grant it jud
       .rejects.toThrow('AccessDenied');
   });
 
-  test("the resolver's DEFAULT marker carries the installation from the row it read", async () => {
-    // The value must come from the read that drove this refresh attempt. Re-reading
-    // it inside the marker would race a concurrent re-authorization exactly as the
-    // status-only condition did, so this asserts the wiring, not just that some
-    // marker fired.
+  test('the resolver writes NOTHING to the registry when no recorder is supplied', async () => {
+    // Guards the inert-but-looks-working state: the resolver used to default the
+    // marker on, so on every revoked refresh it issued a registry write that the
+    // caller's read-only role rejected, and the AccessDenied was swallowed. No
+    // stack in the arc grants registry write, so the correct behaviour with no
+    // recorder is to not attempt the write at all.
     const stored = makeStoredToken({ expires_at: new Date(Date.now() + 60 * 1000).toISOString() });
     const clients = makeFakeClients({
       registryItem: {
@@ -553,10 +563,45 @@ describe('markWorkspaceRevoked — the verdict must not outlive the grant it jud
       json: async () => ({ error: 'invalid_grant', error_description: 'refresh token revoked' }),
     });
 
-    // No onAuthorizationRevoked override: the built-in registry write runs.
+    // No onAuthorizationRevoked supplied → no registry write is attempted.
     await resolveLinearOauthToken(WS, REGISTRY_TABLE, {
       ...clients,
       fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    const updates = clients.ddbSend.mock.calls
+      .map((c) => c[0] as { constructor: { name: string }; input?: Record<string, unknown> })
+      .filter((cmd) => cmd.constructor.name === 'UpdateCommand');
+    expect(updates).toHaveLength(0);
+  });
+
+  test('a SUPPLIED recorder carries the installation from the row the resolver read', async () => {
+    // The value must come from the read that drove this refresh attempt. Re-reading
+    // it inside the recorder would race a concurrent re-authorization exactly as
+    // the status-only condition did, so this asserts the wiring, not just that
+    // some marker fired.
+    const stored = makeStoredToken({ expires_at: new Date(Date.now() + 60 * 1000).toISOString() });
+    const clients = makeFakeClients({
+      registryItem: {
+        workspace_slug: 'acme',
+        oauth_secret_arn: 'arn:secret:acme',
+        status: 'active',
+        installed_at: INSTALLED,
+      } as never,
+      storedToken: stored,
+    });
+    const fetchImpl = jest.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      json: async () => ({ error: 'invalid_grant', error_description: 'refresh token revoked' }),
+    });
+
+    await resolveLinearOauthToken(WS, REGISTRY_TABLE, {
+      ...clients,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      onAuthorizationRevoked: (workspaceId) => markWorkspaceRevoked(
+        clients.dynamoDbClient as never, REGISTRY_TABLE, workspaceId, INSTALLED,
+      ),
     });
 
     const updates = clients.ddbSend.mock.calls

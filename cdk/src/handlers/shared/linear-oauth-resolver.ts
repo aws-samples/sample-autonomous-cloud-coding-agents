@@ -202,18 +202,18 @@ export async function resolveLinearOauthToken(
 
   // ─── Step 3: Refresh if expiring ─────────────────────────────────
   if (isTokenExpiring(token.expires_at)) {
-    // Default the revoked-marker to a registry write, so every caller records a
-    // dead authorization without having to remember to opt in — the whole point
-    // is that the failure stops being invisible. A caller can override (or pass
-    // a no-op) if it lacks registry write access.
-    const withMarker: ResolverOptions = {
-      ...options,
-      onAuthorizationRevoked: options.onAuthorizationRevoked
-        // Pass the installation this resolve is acting on, so a verdict reached
-        // about THIS grant can't be applied to a successor installed meanwhile.
-        ?? ((workspaceId) => markWorkspaceRevoked(ddb, registryTableName, workspaceId, row.installed_at)),
-    };
-    const refreshed = await refreshLinearToken(token, sm, row.oauth_secret_arn, withMarker);
+    // The revoked-marker is OPT-IN, not defaulted.
+    //
+    // Every Lambda that resolves a token holds READ-ONLY access to the registry
+    // table, and no stack grants it write. Defaulting the marker on therefore
+    // meant the write ran and failed AccessDenied on every revoked refresh, and
+    // the failure was swallowed — so the feature read as working while being
+    // permanently inert, which is worse than being visibly absent.
+    //
+    // A caller that genuinely holds registry write (or supplies its own recorder)
+    // passes ``onAuthorizationRevoked`` explicitly. When the grant lands, flip the
+    // default here in the same change — not before.
+    const refreshed = await refreshLinearToken(token, sm, row.oauth_secret_arn, options);
     if (!refreshed) {
       // Refresh failed — return null so the caller can fall back to
       // best-effort behaviour. Cache is already invalidated.

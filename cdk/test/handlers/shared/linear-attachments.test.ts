@@ -152,6 +152,34 @@ describe('downloadScreenAndStoreLinearAttachments', () => {
     expect(init.headers.Authorization).toBe('Bearer lin_oauth_at');
   });
 
+  test('two uploads whose names differ only by . vs - are BOTH kept', async () => {
+    // The id collapsed '.', '-' and '/' to the same char, so design.v1.png and
+    // design-v1.png produced an identical id — and both de-dupe sites resolve a
+    // collision by DISCARDING the second file. A user who attached both silently
+    // got one, with nothing logged. Distinct paths must stay distinct.
+    (global.fetch as jest.Mock).mockImplementation(() => Promise.resolve(bytesResponse(PNG_BYTES)));
+    const records = await downloadScreenAndStoreLinearAttachments(
+      desc('https://uploads.linear.app/u/p/design.v1.png', 'https://uploads.linear.app/u/p/design-v1.png'),
+      10,
+      storageCtx(),
+    );
+    expect(records).toHaveLength(2);
+    expect(new Set(records.map((r) => r.attachment_id)).size).toBe(2);
+  });
+
+  test('a large bracket-heavy description scans in bounded time, not quadratic', async () => {
+    // Making the leading '!' optional stopped the engine anchoring on a literal
+    // '!', so an unbounded label quantifier retried from every '[' — 50 KB of
+    // unmatched brackets took ~940 ms and ~150 KB blew the webhook timeout. No
+    // crafting needed; a big pasted table does it.
+    const hostile = '['.repeat(60_000);
+    const started = Date.now();
+    const records = await downloadScreenAndStoreLinearAttachments(hostile, 10, storageCtx());
+    const elapsedMs = Date.now() - started;
+    expect(records).toEqual([]);
+    expect(elapsedMs).toBeLessThan(1_000);
+  });
+
   test('ignores non-uploads.linear.app images (public CDN images go via the URL path)', async () => {
     const records = await downloadScreenAndStoreLinearAttachments(
       desc('https://cdn.example.com/pic.png'), 10, storageCtx(),

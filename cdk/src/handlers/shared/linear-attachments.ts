@@ -52,6 +52,7 @@
  * Tests: cdk/test/handlers/shared/linear-attachments.test.ts
  */
 
+import { createHash } from 'crypto';
 import * as dns from 'dns/promises';
 import * as net from 'net';
 import { PutObjectCommand, DeleteObjectsCommand, type S3Client } from '@aws-sdk/client-s3';
@@ -79,6 +80,9 @@ const SCAN_HARD_CAP = 100;
 /** Max length of the derived, path-safe attachment id (S3 key segment). */
 const MAX_ATTACHMENT_ID_LENGTH = 128;
 
+/** Chars of pathname digest appended to an upload id to keep distinct paths distinct. */
+const UPLOAD_ID_DIGEST_CHARS = 10;
+
 /* eslint-disable @typescript-eslint/no-magic-numbers -- file-format magic-byte signatures */
 /** Magic-byte signatures used to sniff a body when the content-type is generic. */
 const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47] as const;
@@ -101,7 +105,20 @@ const PDF_MAGIC = [0x25, 0x50, 0x44, 0x46, 0x2d] as const; // %PDF-
  * silently dropped it). The `<`/`>` are optional and excluded from the captured
  * URL, and `>` is excluded from the URL body so the closing bracket can't leak in.
  */
-const MARKDOWN_LINK_OR_IMAGE_PATTERN = /!?\[([^\]]*)\]\(<?(https:\/\/[^)>]+)>?\)/g;
+//
+// The label quantifier is BOUNDED (``{0,MAX}``) rather than open-ended. Making the
+// leading ``!`` optional means the engine can no longer anchor each attempt on a
+// literal ``!`` — it retries the label scan from every ``[`` — so an unbounded
+// ``[^\]]*`` is quadratic in the description length. Measured on a description of
+// unmatched ``[``: 4 KB ≈ 7 ms, 12 KB ≈ 56 ms, 50 KB ≈ 940 ms, and ~150 KB blows
+// the webhook processor's timeout. No crafting is needed — a large pasted table
+// does it. A bound caps the work per start position; a real markdown label is far
+// shorter than the limit, so nothing legitimate stops matching.
+const MARKDOWN_LABEL_MAX_CHARS = 300;
+const MARKDOWN_LINK_OR_IMAGE_PATTERN = new RegExp(
+  `!?\\[([^\\]]{0,${MARKDOWN_LABEL_MAX_CHARS}})\\]\\(<?(https://[^)>]+)>?\\)`,
+  'g',
+);
 
 /**
  * Thrown when a Linear attachment that was SELECTED for inclusion cannot be
@@ -224,8 +241,20 @@ function deriveUploadIdentity(url: string, index: number): { id: string; filenam
     pathname = url;
   }
   // Stable id: the path with unsafe chars collapsed to '-' (query dropped so a
-  // re-signed URL for the same object maps to the same id). Bounded length.
-  const id = (pathname.replace(/[^A-Za-z0-9_-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '') || `upload-${index}`).slice(0, MAX_ATTACHMENT_ID_LENGTH);
+  // re-signed URL for the same object maps to the same id), plus a short digest
+  // of the FULL pathname.
+  //
+  // The digest is load-bearing, not decoration. Collapsing every unsafe char to
+  // '-' and then squashing runs maps '.', '-' and '/' onto the same character, so
+  // ``design.v1.png`` and ``design-v1.png`` produced an identical id — and both
+  // de-dupe sites resolve a collision by DISCARDING the second file. A user who
+  // attached both got one, silently, with nothing logged and no warning. The
+  // digest restores injectivity for practical purposes while keeping the readable
+  // stem for logs.
+  const slug = pathname.replace(/[^A-Za-z0-9_-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+  const digest = createHash('sha256').update(pathname).digest('hex').slice(0, UPLOAD_ID_DIGEST_CHARS);
+  const stem = (slug || `upload-${index}`).slice(0, MAX_ATTACHMENT_ID_LENGTH - UPLOAD_ID_DIGEST_CHARS - 1);
+  const id = `${stem}-${digest}`;
   const sanitized = lastSegment.replace(/[^a-zA-Z0-9._-]/g, '_');
   // No .png default: a link-form upload may be a PDF/log. A generic fallback name
   // keeps the extension out of the type decision (content-type/magic-bytes win).
