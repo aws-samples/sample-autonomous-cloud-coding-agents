@@ -37,6 +37,8 @@ Click **Save**, then copy the **Client ID** and **Client Secret** from the app's
 
 > **Adding a second workspace?** You only need a new OAuth app if you want per-workspace isolation. Otherwise, edit your existing app and toggle **Public: ON** so it can be authorized from any workspace. Trade-off: shared apps revoke together; per-workspace apps don't.
 
+> **⚠️ Do NOT enable Linear "agent" / app-notification events on the OAuth app.** ABCA is a **comment-based** integration: it posts a maturing threaded reply and reacts 👀→✅ on ordinary Linear comments. If the OAuth app is configured as a Linear **agent** (agent-session / app-notification events turned on), Linear renders an `@mention` of the app as its **interactive agent-activity surface** instead of a normal comment thread — which breaks the reply/reaction UX (mentions appear "interactive" and the agent's comment thread doesn't behave like a comment). ABCA does not consume agent-session events; the webhook receiver ignores them and logs a WARN naming the workspace. **Leave agent/app events OFF and rely on the Issues + Comments webhook events (step 4).** If comments start behaving "interactively" instead of as threads, this toggle is the cause.
+
 ### 3. Authorize the app on the workspace
 
 For your first workspace:
@@ -65,6 +67,11 @@ bgagent linear webhook-info
 
 This prints the URL and values to paste into Linear. Open `https://linear.app/<slug>/settings/api/webhooks` and create the webhook with those values.
 
+Under **Resource types**, enable both **Issues** and **Comments**:
+
+- **Issues** — label-triggered tasks and parent/sub-issue epic orchestration.
+- **Comments** — the `@bgagent` re-iteration trigger: a reviewer comments `@bgagent <change>` on a sub-issue and ABCA updates that sub-issue's PR, then re-stacks its dependents. Without the Comments subscription this trigger silently never fires.
+
 Then open the webhook detail page and copy the **signing secret** (`lin_wh_…`).
 
 ### 5. Tell ABCA the signing secret
@@ -83,12 +90,14 @@ Paste the secret at the prompt. ABCA stores it on the workspace's per-workspace 
 
 ```bash
 bgagent linear list-projects --slug <slug>     # find the project UUID
-bgagent linear onboard-project <project-uuid> --repo owner/repo --label abca
+# Add --decompose-allowed if you want the bgagent:decompose / bgagent:auto
+# planning flow on this project (it is OFF by default).
+bgagent linear onboard-project <project-uuid> --repo owner/repo --label abca --decompose-allowed
 ```
 
 Default trigger label is `bgagent`; pass `--label <name>` to override.
 
-Optional flags on `onboard-project`: `--team-id` (Linear team UUID, debug only), `--region`, `--stack-name`.
+Optional flags on `onboard-project`: `--decompose-allowed` (enable the `bgagent:decompose` / `bgagent:auto` auto-decomposition planning flow — **off by default**, so without it those labels silently run as a single task), `--team-id` (Linear team UUID, debug only), `--region`, `--stack-name`.
 
 ### 7. Test
 
@@ -148,11 +157,77 @@ The fallback path keeps existing single-workspace deployments working without re
 
 **Trust model.** The `organizationId` in the body is attacker-controlled, but it only **selects** which secret to verify against; an attacker still needs the matching signing secret to forge a valid signature. Cross-workspace impersonation is prevented by the no-fallback-on-mismatch rule.
 
+## Attachments and documents
+
+Beyond the issue title and description, Linear stores additional context the agent may need:
+
+- **Paperclip attachments** (PDFs, logs, spec files attached to an issue)
+- **Inline images** embedded in the description or a comment (`![alt](https://…)`)
+- **Project documents** (Linear's wiki-style docs attached to a project)
+- **Recent human comments** on the issue (clarifications, spec detail)
+
+All of this is **pre-hydrated by the platform** and handed to the agent as task context at task-creation time. The agent has **no Linear tools** and fetches nothing from Linear at runtime — it works from the snapshot it was given. Concretely:
+
+- Before a task is dispatched, the platform fetches the issue title + description, the recent human comments, the reporter's uploaded files (both inline images and paperclip attachments), and the content of any project wiki documents. This hydration runs on **every** trigger path — the initial labeled-issue path, the parent/sub-issue orchestration paths, and the `@bgagent` comment paths — so the agent always starts from a complete snapshot regardless of how the task began.
+- Every fetched attachment is screened through **Bedrock Guardrails** before it enters the agent's context, exactly like a file uploaded through the CLI.
+- **Supported attachment types** are images (PNG / JPEG) and text-family files (PDF, plain text, CSV, Markdown, JSON, log). Unsupported types (`.docx`, `.zip`, and similar) are **rejected** — the reporter gets a comment asking them to remove or convert the unsupported files and re-trigger the task.
+
+No additional setup is required — this happens automatically once the workspace and project are onboarded (steps above).
+
 ## Usage
 
 - **Trigger a task**: apply the trigger label to an issue in a mapped Linear project. The issue title + description becomes the task description.
 - **Check status**: from the Linear issue (progress comments) or `bgagent list` / `bgagent status <task-id>`.
 - **Cancel**: `bgagent cancel <task-id>`. Removing the Linear label does not cancel a running task.
+
+## Trigger labels
+
+The base trigger label (default `bgagent`, or whatever you passed to `--label` at onboarding) has three variants. All examples below assume the default `bgagent`; substitute your workspace's label if you overrode it.
+
+| Label | What it does | Use it when |
+|-------|--------------|-------------|
+| `bgagent` | **Do it.** Reads the issue, makes the change, opens a PR. If the issue already has sub-issues, it runs those in dependency order instead (see [orchestration](#parentsub-issue-orchestration)). | The issue is a single, well-defined piece of work. |
+| `bgagent:decompose` | **Plan it first.** Breaks a larger issue into a set of smaller sub-issues, posts the plan as a comment, and **waits for your approval** before creating or running anything. | The issue has several parts and you want to review the breakdown (and its worst-case cost) before spending. |
+| `bgagent:auto` | **Plan it and start immediately** — same breakdown as `:decompose`, but no approval step. | You trust ABCA to split the work and want it to just go. |
+| `bgagent:help` | **Explain the labels.** Posts a one-time comment describing what each label does, then creates no task. Remove it afterward. | You're new to ABCA on this issue and want a reminder of the options. |
+
+> **Create these labels in Linear and give each a one-line description.** ABCA matches labels by name, so you create them yourself (Linear → Settings → Labels, or inline on any issue). Add a short description to each — Linear shows it on hover in the label picker, which is the only discoverability a first-time teammate gets. Suggested descriptions: **`bgagent`** — "Hand this issue to ABCA — makes the change and opens a PR"; **`bgagent:decompose`** — "ABCA proposes a plan first and waits for your approval"; **`bgagent:auto`** — "ABCA plans and starts immediately, no approval"; **`bgagent:help`** — "ABCA explains what its labels do". Grouping them under a shared label prefix/group also keeps them together and away from unrelated labels in the picker.
+
+Notes:
+
+- **The approval conversation is interactive.** After a `:decompose` plan is posted, reply `@bgagent approve` to run it, `@bgagent reject` to discard it, or just tell it what to change in plain language — e.g. `@bgagent make it 2 tasks instead of 3` — and it re-plans and posts an updated breakdown. Repeat until you're happy, then approve.
+- **A plain `bgagent` label on a multi-part issue still runs as one task.** If the description looks like it has several parts, ABCA posts a one-line hint suggesting `:decompose` — but it does **not** block the single-task run it already started. If you wanted a plan, add `:decompose` instead.
+- **`:decompose` / `:auto` on an issue that already has sub-issues** is a no-op suffix — there's nothing to decompose, so ABCA just runs the sub-issue graph you already declared.
+- **Once ABCA is working**, reply to its comments with `@bgagent <what you want>` to ask a question or request a change.
+- **Per-project caps** (max sub-issues, max total budget) are set at onboarding and apply to `:decompose` / `:auto`; an over-cap plan is rejected with an explanatory comment.
+
+## Parent/sub-issue orchestration
+
+If you apply the trigger label to a **parent issue that has sub-issues**, ABCA orchestrates the whole epic instead of creating one task:
+
+1. **Discovery** — it reads the sub-issues and their `blocked by` / `blocking` relations, builds a dependency graph (DAG), and rejects cycles with a terminal comment on the parent.
+2. **Dependency-ordered execution** — root sub-issues (no blockers) start immediately; a blocked sub-issue does not start until **all** its blockers reach terminal-success (a sub-issue that completes but fails its build does **not** release its dependents). Independent sub-issues run in parallel.
+3. **Stacked PRs** — a sub-issue with a single predecessor branches from that predecessor's branch (so it sees its code before merge); a sub-issue with multiple predecessors branches from the default branch and merges all predecessor branches in. Review/merge the resulting stack bottom-up.
+4. **Rollup** — when every sub-issue reaches a terminal state, ABCA posts an aggregate **rollup comment on the parent** (succeeded / failed / skipped counts + per-child status). Each sub-issue also gets its own final-status comment.
+5. **Failure handling** — if a sub-issue fails (or is cancelled), its transitive dependents are **skipped** (never started); independent siblings still finish. The parent rollup reflects the partial outcome.
+
+### Adding a sub-issue to a running (or finished) epic
+
+The graph is read **at trigger time**, so a sub-issue created after the epic started is *not* picked up automatically. To fold it in:
+
+1. Create the new sub-issue under the same parent, with its `blocked by` edges to any sub-issues it depends on.
+2. **Re-apply the trigger label to the parent** (remove it and add it again, or add it if it was removed).
+
+ABCA diffs the current Linear graph against what it already has, adds only the genuinely-new node(s), and releases any that are immediately runnable (their predecessors already succeeded); the rest wait their turn. Re-applying the label with no new sub-issues is a safe no-op.
+
+> **Why it isn't automatic:** re-applying the label is the explicit "execute this" signal — the same consent model as the initial trigger — so newly-drafted sub-issues don't start running the instant you create them. Automatic pickup on sub-issue creation is a possible future enhancement.
+
+Notes and current limitations:
+
+- The parent issue itself spawns **no task** — a human-authored sub-issue graph is treated as consent to execute.
+- **No "cancel the whole epic" button yet.** Cancelling an individual sub-issue's task (`bgagent cancel <task-id>`) stops it and skips its dependents, but there is no single command to cancel a whole in-flight orchestration. Tracked as a follow-up.
+- A scheduled backstop (every ~10 min) recovers sub-issues whose terminal events were lost during a transient outage, so a stalled orchestration self-heals rather than hanging.
+- Multi-predecessor ("diamond") sub-issues merge their predecessors' branches at start time; if a predecessor is later edited in review, re-integration of the dependent is a tracked follow-up.
 
 ## Troubleshooting
 
@@ -179,13 +254,28 @@ aws secretsmanager get-secret-value --secret-id bgagent-linear-oauth-<slug> --qu
 
 If the failing event's `organizationId` doesn't match any registered workspace and the stack-wide secret also doesn't match, you have a webhook configured in a Linear workspace you haven't onboarded — either onboard it via `add-workspace` or remove the webhook in Linear.
 
+### Comments render as "interactive agent activity" instead of a comment thread
+
+Symptom: when you `@mention` the bot in Linear it shows up as an interactive agent widget rather than a normal comment, and the agent's replies/reactions don't behave like a comment thread. Cause: the Linear **OAuth app is configured as an agent** — agent-session / app-notification events are enabled on it. ABCA is a comment-based integration and does not use Linear's agent model; agent mode makes Linear render mentions as agent activity, which breaks the comment-thread UX.
+
+Fix: in the Linear OAuth app settings, **turn OFF the agent / app-notification event subscriptions**. Keep only the workspace **webhook** with **Issues** and **Comments** resource types (step 4). No redeploy needed — it's a Linear-side app setting.
+
+To confirm ABCA is seeing agent-mode traffic from a workspace, grep the receiver logs:
+
+```bash
+aws logs filter-log-events --log-group-name /aws/lambda/<stack>-LinearIntegrationWebhookFn... \
+  --filter-pattern "agent-mode"
+```
+
+A `WARN … Ignoring Linear agent-mode webhook …` line (with `linear_workspace_id`) means that workspace's app has agent events on — advise disabling them.
+
 ### "Invalid redirect_uri parameter for the application" during step 3
 
-Linear's misleading error for `actor=app` flows where the OAuth app config is incomplete. In your Linear app settings:
+Linear's misleading error for `actor=app` flows where the OAuth app config is incomplete (it reports `Invalid redirect_uri` regardless of which required field is actually missing). In your Linear app settings, confirm:
 
-- **GitHub username** must end with `[bot]` (e.g. `bgagent[bot]`)
-- **Webhooks** toggle must be ON
-- The Callback URL must be on a **single line** (line-wrapped URLs become two malformed entries Linear silently rejects)
+- **GitHub username** is filled in (Linear's inline help describes the field and the `[bot]` suffix) — a blank value triggers this error.
+- **Webhooks** toggle is ON.
+- The Callback URL is on a **single line** (line-wrapped URLs become two malformed entries Linear silently rejects).
 
 Re-run `bgagent linear setup` after fixing.
 
@@ -193,7 +283,7 @@ Re-run `bgagent linear setup` after fixing.
 
 - Verify the per-workspace OAuth secret exists: `aws secretsmanager describe-secret --secret-id bgagent-linear-oauth-<slug>`.
 - Verify the registry row's `oauth_secret_arn` matches that secret and `status = 'active'`.
-- Check the agent container logs for `Linear MCP configured at …`. Absence means `channel_source` wasn't set on the task or the workspace lookup failed.
+- Check the webhook-processor Lambda logs for the pre-hydration / attachment-screening step (comments, attachments, and project docs are fetched here before the task is dispatched). A failure to resolve the workspace token or screen an attachment shows up in these logs, not in the agent container.
 - Check for `WARN linear_reactions: HTTP 401 from Linear` — usually means the refresh token was revoked Linear-side. Re-run `bgagent linear setup <slug>`.
 - Check for `resolve_linear_api_token: invalid_grant` — Linear permanently rejected the refresh token. Re-run `bgagent linear setup <slug>` to issue a new one.
 

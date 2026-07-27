@@ -24,7 +24,7 @@ import { Node } from 'constructs';
  * runtime may invoke. Both grant sites — the AgentCore runtime in
  * `stacks/agent.ts` and the ECS task role in `constructs/ecs-agent-cluster.ts`
  * — derive their `grantInvoke` / IAM ARNs from this one list, so the two
- * backends can never drift (they were previously two hand-synced arrays; #433).
+ * backends can never drift (they were previously two hand-synced arrays).
  *
  * Scoping is intentionally per-model (explicit foundation-model +
  * cross-Region inference-profile ARNs), NOT a `Resource: '*'` wildcard — that

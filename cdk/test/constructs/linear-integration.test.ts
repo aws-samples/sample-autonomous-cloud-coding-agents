@@ -22,6 +22,7 @@ import { Template, Match } from 'aws-cdk-lib/assertions';
 import * as apigw from 'aws-cdk-lib/aws-apigateway';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
+import * as s3 from 'aws-cdk-lib/aws-s3';
 import { LinearIntegration } from '../../src/constructs/linear-integration';
 
 describe('LinearIntegration construct', () => {
@@ -113,10 +114,151 @@ describe('LinearIntegration construct', () => {
     });
   });
 
+  test('webhook processor Lambda timeout is generous (>=120s) for its synchronous work', () => {
+    // The processor does real synchronous work per event — attachment screening,
+    // orchestration graph seed + root release, per-workspace OAuth resolve. The
+    // Lambda timeout is kept generous (WEBHOOK_PROCESSOR_TIMEOUT_SECONDS=120) so a
+    // burst never gets killed mid-call. (Historically this also had to cover an
+    // inline ~50s Bedrock decomposition call; that planning moved out to the
+    // coding/decompose-v1 agent, but the generous ceiling stays
+    // for the remaining synchronous work.) Identify the processor by its unique
+    // env var and assert its Timeout is at least 120s.
+    const fns = template.findResources('AWS::Lambda::Function');
+    const processors = Object.values(fns).filter(
+      (fn) => fn.Properties?.Environment?.Variables?.LINEAR_PROJECT_MAPPING_TABLE_NAME !== undefined,
+    );
+    expect(processors).toHaveLength(1);
+    expect(processors[0].Properties.Timeout).toBeGreaterThanOrEqual(120);
+  });
+
   test('webhook dedup table has TTL attribute for 60s expiry', () => {
     template.hasResourceProperties('AWS::DynamoDB::Table', {
       KeySchema: [{ AttributeName: 'dedup_key', KeyType: 'HASH' }],
       TimeToLiveSpecification: { AttributeName: 'ttl', Enabled: true },
+    });
+  });
+});
+
+describe('LinearIntegration construct — seed-time root release throttle', () => {
+  // When orchestrationTable + userConcurrencyTable are both provided, the
+  // webhook processor env carries the concurrency table + cap so it throttles
+  // the seed-time ROOT release (a failed root is unrecoverable by the sweep).
+  function buildWith(opts: { withConcurrency: boolean }): Template {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack');
+    const api = new apigw.RestApi(stack, 'TestApi');
+    const userPool = new cognito.UserPool(stack, 'TestUserPool');
+    const taskTable = new dynamodb.Table(stack, 'TaskTable', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+    });
+    const taskEventsTable = new dynamodb.Table(stack, 'TaskEventsTable', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'event_id', type: dynamodb.AttributeType.STRING },
+    });
+    const orchestrationTable = new dynamodb.Table(stack, 'OrchTable', {
+      partitionKey: { name: 'orchestration_id', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'sub_issue_id', type: dynamodb.AttributeType.STRING },
+    });
+    const userConcurrencyTable = opts.withConcurrency
+      ? new dynamodb.Table(stack, 'ConcTable', {
+        partitionKey: { name: 'user_id', type: dynamodb.AttributeType.STRING },
+      })
+      : undefined;
+    new LinearIntegration(stack, 'LinearIntegration', {
+      api,
+      userPool,
+      taskTable,
+      taskEventsTable,
+      orchestrationTable,
+      ...(userConcurrencyTable && { userConcurrencyTable, maxConcurrentTasksPerUser: 7 }),
+    });
+    return Template.fromStack(stack);
+  }
+
+  test('wires USER_CONCURRENCY_TABLE_NAME + cap when the concurrency table is provided', () => {
+    const t = buildWith({ withConcurrency: true });
+    t.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: {
+        Variables: Match.objectLike({
+          ORCHESTRATION_TABLE_NAME: Match.anyValue(),
+          USER_CONCURRENCY_TABLE_NAME: Match.anyValue(),
+          MAX_CONCURRENT_TASKS_PER_USER: '7',
+        }),
+      },
+    });
+  });
+
+  test('does NOT set USER_CONCURRENCY_TABLE_NAME when the table is omitted (back-compat)', () => {
+    const t = buildWith({ withConcurrency: false });
+    // The processor still has ORCHESTRATION_TABLE_NAME but no concurrency var.
+    const fns = t.findResources('AWS::Lambda::Function', {
+      Properties: {
+        Environment: { Variables: Match.objectLike({ USER_CONCURRENCY_TABLE_NAME: Match.anyValue() }) },
+      },
+    });
+    expect(Object.keys(fns)).toHaveLength(0);
+  });
+});
+
+describe('LinearIntegration construct — attachmentsBucket wiring', () => {
+  // Regression-guard: webhook processor needs ATTACHMENTS_BUCKET_NAME and S3
+  // Put/Delete on the bucket so `extractImageUrlAttachments` can reach the
+  // bucket via createTaskCore. Without this, Linear-triggered tasks with
+  // markdown image attachments fail with 503 ("Attachment storage is not
+  // configured.").
+  let template: Template;
+
+  beforeAll(() => {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack');
+
+    const api = new apigw.RestApi(stack, 'TestApi');
+    const userPool = new cognito.UserPool(stack, 'TestUserPool');
+    const taskTable = new dynamodb.Table(stack, 'TaskTable', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+    });
+    const taskEventsTable = new dynamodb.Table(stack, 'TaskEventsTable', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'event_id', type: dynamodb.AttributeType.STRING },
+    });
+    const attachmentsBucket = new s3.Bucket(stack, 'AttachmentsBucket');
+
+    new LinearIntegration(stack, 'LinearIntegration', {
+      api,
+      userPool,
+      taskTable,
+      taskEventsTable,
+      attachmentsBucket,
+    });
+
+    template = Template.fromStack(stack);
+  });
+
+  test('processor env includes ATTACHMENTS_BUCKET_NAME when bucket provided', () => {
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: {
+        Variables: Match.objectLike({
+          ATTACHMENTS_BUCKET_NAME: Match.anyValue(),
+          LINEAR_PROJECT_MAPPING_TABLE_NAME: Match.anyValue(),
+        }),
+      },
+    });
+  });
+
+  test('processor role can PutObject and DeleteObject on the attachments bucket', () => {
+    template.hasResourceProperties('AWS::IAM::Policy', {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Action: Match.arrayWith(['s3:PutObject']),
+            Effect: 'Allow',
+          }),
+          Match.objectLike({
+            Action: 's3:DeleteObject*',
+            Effect: 'Allow',
+          }),
+        ]),
+      },
     });
   });
 });
