@@ -164,18 +164,3 @@ because seeding is still Linear-only end to end:
 Reaching a Jira epic therefore still needs: a Jira graph source (or a declarative one), a
 Jira seeding/trigger path, and the Jira credentials registry wired into the handlers that
 would act on it (point 1 above).
-
-## Divergence from linear-vercel + verification
-
-This IMPROVES beyond lv (lv is Linear-coupled), so the carved code no longer matches lv
-byte-for-byte — the `union == lv` safety net does not apply to refactored files.
-Replacement proof: **deploy to dev and live-verify.** Linear is the reachable surface
-today (see above), so the Linear epic path is what proves the shared engine end-to-end;
-the Jira side is proven by its adapter's unit tests plus the existing comment-back path
-until Jira seeding exists.
-
-## Rollout within the carve
-
-The engine + adapter land together (they're mutually dependent). The Linear adapter is
-the first implementation (behavior parity with today); the Jira adapter unifies the
-existing Jira comment-back onto the same interface. Kept as focused, fast-merging PRs.

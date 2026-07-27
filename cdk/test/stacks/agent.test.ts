@@ -17,6 +17,8 @@
  *  SOFTWARE.
  */
 
+import * as fs from 'fs';
+import * as path from 'path';
 import { App } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import { AgentStack } from '../../src/stacks/agent';
@@ -495,6 +497,83 @@ describe('AgentStack', () => {
       .Properties?.Environment?.Variables ?? {};
     expect(vars.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME).toBeDefined();
     expect(vars.JIRA_WORKSPACE_REGISTRY_TABLE_NAME).toBeDefined();
+  });
+
+  test('the orchestration reconciler can read task artifacts but NOT user traces', () => {
+    // The trace/artifacts bucket holds two disjoint key spaces: artifacts/<task_id>/
+    // (a task's declared output, which platform components consume) and
+    // traces/<user_id>/ (a full agent trajectory including tool input and output,
+    // authorized per-user by the presign handler). The reconciler reads the plan
+    // artifact off a URI taken from the task record, so a bucket-wide object grant
+    // would let a bad or tampered URI reach another user's trajectory.
+    const policies = template.findResources('AWS::IAM::Policy');
+    const reconciler = Object.entries(policies).filter(([id]) => id.startsWith('OrchestrationReconciler'));
+    expect(reconciler.length).toBeGreaterThan(0);
+
+    const objectResources: string[] = [];
+    for (const [, policy] of reconciler) {
+      const doc = (policy as { Properties: { PolicyDocument: { Statement: Array<Record<string, unknown>> } } })
+        .Properties.PolicyDocument.Statement;
+      for (const stmt of doc) {
+        const actions = JSON.stringify(stmt.Action ?? '');
+        if (!actions.includes('s3:GetObject')) continue;
+        objectResources.push(JSON.stringify(stmt.Resource ?? ''));
+      }
+    }
+    expect(objectResources.length).toBeGreaterThan(0);
+    const all = objectResources.join(' ');
+    // Scoped to the artifacts prefix…
+    expect(all).toContain('/artifacts/*');
+    // …and never to the bucket root, which would cover traces/ too.
+    expect(all).not.toMatch(/"Arn"\]\}\s*,\s*"\/\*"/);
+  });
+
+  test('the log-delivery pin shim requires explicit opt-in, not the default stack name', () => {
+    // The shim overrides CFN logical ids AND account-unique resource Names with
+    // values captured from one specific pre-existing stack, so it is only ever
+    // correct for the account that already owns those resources. It used to key
+    // off stackName — and the DEFAULT stack name (see main.ts) is itself a key in
+    // its table, so every operator who deployed without a stackName override
+    // silently inherited another account's hardcoded ids.
+    //
+    // Asserted on the source rather than by synthesizing a differently-named
+    // stack: constructing one under a non-matching id trips an unrelated cdk-nag
+    // suppression-path check first, which would mask this.
+    const src = fs.readFileSync(
+      path.resolve(__dirname, '../../src/stacks/agent.ts'), 'utf8',
+    );
+    const shim = src.slice(src.indexOf('function maybePinChurnedLogResources'));
+    const body = shim.slice(0, shim.indexOf('\n}'));
+
+    // Opt-in is read from context and, absent, the shim returns before pinning.
+    expect(body).toContain("tryGetContext('pinnedLogDeliveryStack')");
+    expect(body).toMatch(/targetStackName === undefined\)\s*return/);
+    // It must NOT fall back to the running stack's own name.
+    expect(body).not.toMatch(/tryGetContext\('pinnedLogDeliveryStack'\)[^;]*\?\?\s*stack\.stackName/);
+  });
+
+  test('the fan-out consumer can reach BOTH surfaces\' credentials registries', () => {
+    // Its Jira and Linear props are OPTIONAL on the construct, so dropping one
+    // from the stack wiring disables that surface's final-status comment with no
+    // synth error and no test failure elsewhere — a silent capability loss. Pin
+    // both env vars so the omission fails here instead.
+    const fns = template.findResources('AWS::Lambda::Function');
+    const fanout = Object.entries(fns).find(([id]) => id.startsWith('FanOutConsumer'));
+    expect(fanout).toBeDefined();
+    const vars = (fanout![1] as { Properties?: { Environment?: { Variables?: Record<string, unknown> } } })
+      .Properties?.Environment?.Variables ?? {};
+    expect(vars.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME).toBeDefined();
+    expect(vars.JIRA_WORKSPACE_REGISTRY_TABLE_NAME).toBeDefined();
+  });
+
+  test('the fan-out consumer is granted read on BOTH surfaces\' OAuth secret prefixes', () => {
+    // The registry table alone is not enough to post a comment — the dispatcher
+    // also needs the per-workspace OAuth secret. Assert both ARN patterns appear
+    // in the synthesized policies so neither grant can be dropped silently.
+    const policies = template.findResources('AWS::IAM::Policy');
+    const asJson = JSON.stringify(Object.values(policies));
+    expect(asJson).toContain('bgagent-linear-oauth-*');
+    expect(asJson).toContain('bgagent-jira-oauth-*');
   });
 
   test('the stranded-orchestration sweep gets the registry its panel refresh needs', () => {

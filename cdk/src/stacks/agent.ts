@@ -61,7 +61,7 @@ import { TaskEventsTable } from '../constructs/task-events-table';
 import { TaskNudgesTable } from '../constructs/task-nudges-table';
 import { TaskOrchestrator } from '../constructs/task-orchestrator';
 import { TaskTable } from '../constructs/task-table';
-import { TraceArtifactsBucket } from '../constructs/trace-artifacts-bucket';
+import { ARTIFACT_OBJECT_KEY_PREFIX, TraceArtifactsBucket } from '../constructs/trace-artifacts-bucket';
 import { UserConcurrencyTable } from '../constructs/user-concurrency-table';
 import { WebhookTable } from '../constructs/webhook-table';
 
@@ -963,10 +963,20 @@ export class AgentStack extends Stack {
     // Agent-native planning: a terminal ``coding/decompose-v1`` task lands
     // here (it's a TaskTable stream record like any other), and the reconciler
     // reads the plan artifact the agent uploaded to ``artifacts/<task_id>/`` to
-    // seed / propose the sub-issue graph. Grant READ on that bucket + surface
-    // its name (the same bucket the agent's deliver_artifact wrote to — see
-    // ARTIFACTS_BUCKET_NAME on the runtime env above).
-    traceArtifactsBucket.bucket.grantRead(orchestrationReconciler.fn);
+    // seed / propose the sub-issue graph. Surface the bucket name (the same
+    // bucket the agent's deliver_artifact wrote to — see ARTIFACTS_BUCKET_NAME
+    // on the runtime env above).
+    //
+    // Scope the grant to the ARTIFACTS prefix, not the whole bucket. The bucket
+    // also holds ``traces/<user_id>/`` — full agent trajectories including tool
+    // input and output, which are authorized per-user by the presign handler.
+    // The reconciler has no business reading those, and it takes the artifact
+    // URI off the task record, so a bucket-wide grant would make a bad or
+    // tampered URI able to reach another user's trajectory.
+    traceArtifactsBucket.bucket.grantRead(
+      orchestrationReconciler.fn,
+      `${ARTIFACT_OBJECT_KEY_PREFIX}*`,
+    );
     orchestrationReconciler.fn.addEnvironment(
       'ARTIFACTS_BUCKET_NAME',
       traceArtifactsBucket.bucket.bucketName,
@@ -1276,6 +1286,20 @@ export class AgentStack extends Stack {
         resourceName: 'bgagent-linear-oauth-*',
         arnFormat: ArnFormat.COLON_RESOURCE_NAME,
       }),
+      // Jira dispatcher posts a deterministic final-status comment with
+      // cost/turns/duration on Jira-origin terminal tasks. Same scope
+      // `bgagent-jira-oauth-*` as the orchestrator and Jira webhook
+      // processor — Lambdas in this stack share the rotated-token write
+      // path. Both props are optional on the construct, so omitting them
+      // silently disables Jira final-status comments rather than failing
+      // synth: keep them wired.
+      jiraWorkspaceRegistryTable: jiraIntegration.workspaceRegistryTable,
+      jiraOauthSecretArnPattern: Stack.of(this).formatArn({
+        service: 'secretsmanager',
+        resource: 'secret',
+        resourceName: 'bgagent-jira-oauth-*',
+        arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+      }),
     });
 
     // --- GitHub deployment-status → screenshot pipeline ---
@@ -1461,9 +1485,10 @@ interface PinnedLogResource {
 
 /**
  * Per-stack pin tables for the agentcore-alpha log-delivery churn.
- * Keyed by ``stackName``. ONLY the listed stack is migrated; every other stack
- * (fresh deploys, CI, new envs) is absent here → synth is pristine. A stack can
- * also be supplied at deploy time via context (see {@link maybePinChurnedLogResources}).
+ * Keyed by ``stackName``, but only consulted when a deploy explicitly opts in
+ * with `-c pinnedLogDeliveryStack=<name>` (see
+ * {@link maybePinChurnedLogResources}). Note the entry below uses the DEFAULT
+ * stack name, so opt-in is what keeps a fresh deploy pristine — not the key.
  *
  * ``backgroundagent-dev`` was deployed before an alpha bump churned its
  * DeliverySource/Destination/Delivery logical ids + account-unique Names; these
@@ -1509,22 +1534,29 @@ const PINNED_LOG_DELIVERY_BY_STACK: Record<string, readonly PinnedLogResource[]>
  * log-delivery resources of ONE already-deployed stack to the logical ids +
  * Names CFN already has, so a stack deployed before an alpha bump updates them
  * in place instead of hitting ``AWS::Logs::DeliverySource AlreadyExists`` on
- * create-before-delete. NO-OP unless the running ``stackName`` is listed in
- * {@link PINNED_LOG_DELIVERY_BY_STACK} OR named via context
+ * create-before-delete. NO-OP unless the deploy opts in by naming the stack via
+ * context and that name is listed in
+ * {@link PINNED_LOG_DELIVERY_BY_STACK}, i.e. context
  * (`-c pinnedLogDeliveryStack=<name>`, which selects which table entry applies)
  * — so fresh stacks, CI, and other accounts synth the current alpha's natural
  * ids untouched. Once the affected stack is migrated, delete this helper + its
  * table entry.
  */
 function maybePinChurnedLogResources(stack: Stack, runtime: agentcore.Runtime): void {
-  // A deploy can override WHICH stack name to treat as the pinned one (e.g. a
-  // renamed env that inherited the churned resources); defaults to the running
-  // stack's own name, so the table is matched by stackName out of the box.
-  const targetStackName = (stack.node.tryGetContext('pinnedLogDeliveryStack') as string | undefined)
-    ?? stack.stackName;
+  // Opt-in ONLY, via `-c pinnedLogDeliveryStack=<name>`.
+  //
+  // This deliberately does NOT fall back to the running stack's own name. The
+  // default stack name (see ``main.ts``) is itself a key in the table below, so
+  // matching on stackName meant every operator who deployed without a
+  // `-c stackName=…` override silently inherited one specific pre-existing
+  // stack's hardcoded logical ids AND its account-unique resource Names. A pin
+  // is only ever correct for the one account that already owns those resources,
+  // so it has to be asked for explicitly.
+  const targetStackName = stack.node.tryGetContext('pinnedLogDeliveryStack') as string | undefined;
+  if (targetStackName === undefined) return; // no opt-in → pristine synth
   if (targetStackName !== stack.stackName) return; // context names a different stack → don't touch this one
   const pins = PINNED_LOG_DELIVERY_BY_STACK[stack.stackName];
-  if (!pins) return; // not a pre-existing churned stack → pristine synth
+  if (!pins) return; // opted in but no table entry → nothing to pin
 
   for (const pin of pins) {
     const res = runtime.node.tryFindChild(pin.childId) as CfnResource | undefined;

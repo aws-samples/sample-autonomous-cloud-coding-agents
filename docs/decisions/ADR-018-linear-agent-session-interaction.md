@@ -72,7 +72,7 @@ mapping cleanly onto what we already built:
 ### Preview-API spike
 
 A time-boxed, no-infra spike validated the API surface against the deployed
-**app-actor** token (`bgagent`, workspace `maguireb`) — read-only schema
+**app-actor** token (the `bgagent` app in a real workspace) — read-only schema
 probes + mutation input validation, no migration code:
 
 - **API reachable by our token.** Introspection confirms `agentActivityCreate`,

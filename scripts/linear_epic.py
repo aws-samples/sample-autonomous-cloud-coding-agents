@@ -9,14 +9,20 @@
 # fire the orchestration. Also inspects + tears down test epics. Kept as a
 # real .py file so the GraphQL payloads don't fight shell quoting.
 #
-# Auth: reads the Linear PAT from $LINEAR_PAT or /tmp/linear_pat (never
-# echoed). All workspace ids are ABCA-demo defaults but overridable by flag.
+# Auth: reads the Linear PAT from $LINEAR_PAT (never echoed).
+#
+# Workspace targeting has no defaults — a team id is required, because the ids
+# are specific to your own Linear workspace. Supply each either by flag or by
+# environment variable:
+#   --team    / $LINEAR_TEAM_ID        (required)
+#   --project / $LINEAR_PROJECT_ID     (optional; omit to create outside a project)
+#   --label   / $LINEAR_TRIGGER_LABEL  (optional; defaults to the platform's `bgagent`)
 #
 # Usage:
-#   linear_epic.py create-epic   --spec <spec.json>            # build + wire a DAG (no trigger)
-#   linear_epic.py trigger       --issue <uuid|identifier>      # add trigger label → orchestrate
-#   linear_epic.py inspect       --issue <uuid|identifier>      # parent + children + deps + state
-#   linear_epic.py teardown      --issue <uuid|identifier>      # archive parent + all children
+#   linear_epic.py create-epic --spec <spec.json> --team <uuid> [--project <uuid>]
+#   linear_epic.py trigger  --issue <uuid|identifier> --team <uuid> [--label <name>]
+#   linear_epic.py inspect  --issue <uuid|identifier>
+#   linear_epic.py teardown --issue <uuid|identifier>
 #
 # A DAG spec is JSON: {"title": "...", "nodes": [{"key":"A","title":"...",
 #   "description":"...","depends_on":["B",...]}, ...]}. Node "key" is a local
@@ -30,21 +36,46 @@ import urllib.request
 import urllib.error
 
 LINEAR_URL = "https://api.linear.app/graphql"
-TEAM_ID = "8ab50246-938f-4b85-aff8-3df416787075"        # ABCA
-PROJECT_ID = "f369205b-2c33-4b1b-ac5f-52c640c3243e"     # abca-demo → isadeks/vercel-abca-linear
-TRIGGER_LABEL = "abca"
+
+# The platform's default trigger label. A project can rename it via the
+# project-mapping row's ``label_filter``, so pass --label if yours differs.
+DEFAULT_TRIGGER_LABEL = "bgagent"
+
+
+def require_team(args):
+    """Team id from --team or $LINEAR_TEAM_ID. Required: it is workspace-specific."""
+    team = getattr(args, "team", None) or os.environ.get("LINEAR_TEAM_ID")
+    if not team:
+        sys.exit(
+            "A Linear team id is required: pass --team <uuid> or set $LINEAR_TEAM_ID. "
+            "Find it in Linear under Settings > Teams, or via the API."
+        )
+    return team
+
+
+def optional_project(args):
+    """Project id from --project or $LINEAR_PROJECT_ID; None → create outside a project."""
+    return getattr(args, "project", None) or os.environ.get("LINEAR_PROJECT_ID") or None
+
+
+def trigger_label(args):
+    """Trigger label from --label or $LINEAR_TRIGGER_LABEL, else the platform default."""
+    return (
+        getattr(args, "label", None)
+        or os.environ.get("LINEAR_TRIGGER_LABEL")
+        or DEFAULT_TRIGGER_LABEL
+    )
 
 
 def pat():
+    """Linear personal access token from $LINEAR_PAT (never echoed).
+
+    Read only from the environment: an earlier version also fell back to a
+    world-readable path under /tmp, which is not somewhere a credential should
+    live. Export it for the command instead, e.g. from your own secret store."""
     p = os.environ.get("LINEAR_PAT")
     if not p:
-        try:
-            with open("/tmp/linear_pat") as f:
-                p = f.read().strip()
-        except OSError:
-            pass
-    if not p:
-        sys.exit("No Linear PAT in $LINEAR_PAT or /tmp/linear_pat")
+        sys.exit("No Linear PAT: export $LINEAR_PAT (a Linear personal API key).")
     return p
 
 
@@ -64,10 +95,10 @@ def gql(query, variables=None):
     return out["data"]
 
 
-def label_id(name):
+def label_id(name, team_id):
     d = gql(
         'query($t:String!){ team(id:$t){ labels(first:50){ nodes{ id name } } } }',
-        {"t": TEAM_ID},
+        {"t": team_id},
     )
     for n in d["team"]["labels"]["nodes"]:
         if n["name"] == name:
@@ -83,13 +114,14 @@ def resolve_issue_id(ref):
     return ref
 
 
-def create_issue(title, description, parent_id=None):
+def create_issue(title, description, team_id, project_id=None, parent_id=None):
     inp = {
-        "teamId": TEAM_ID,
-        "projectId": PROJECT_ID,
+        "teamId": team_id,
         "title": title,
         "description": description,
     }
+    if project_id:
+        inp["projectId"] = project_id
     if parent_id:
         inp["parentId"] = parent_id
     d = gql(
@@ -116,15 +148,19 @@ def add_label(issue_id, lbl_id):
 
 
 def cmd_create_epic(args):
+    team_id = require_team(args)
+    project_id = optional_project(args)
     spec = json.load(open(args.spec))
     parent_id, parent_ident = create_issue(
         spec["title"], spec.get("description", "Orchestration stress-test epic."),
+        team_id, project_id,
     )
     print(f"PARENT {parent_ident} {parent_id}  {spec['title']}")
     key_to_id = {}
     for node in spec["nodes"]:
         cid, cident = create_issue(
-            node["title"], node.get("description", ""), parent_id=parent_id,
+            node["title"], node.get("description", ""),
+            team_id, project_id, parent_id=parent_id,
         )
         key_to_id[node["key"]] = cid
         print(f"  CHILD {cident} {cid}  key={node['key']}  {node['title']}")
@@ -133,15 +169,20 @@ def cmd_create_epic(args):
         for dep in node.get("depends_on", []):
             create_blocks(key_to_id[dep], key_to_id[node["key"]])
             print(f"  EDGE  {dep} blocks {node['key']}")
-    print(f"\nReady. Trigger with: scripts/linear_epic.py trigger --issue {parent_ident}")
+    print(
+        f"\nReady. Trigger with: scripts/linear_epic.py trigger "
+        f"--issue {parent_ident} --team {team_id}"
+    )
     print(json.dumps({"parent_id": parent_id, "parent_identifier": parent_ident,
                       "children": key_to_id}))
 
 
 def cmd_trigger(args):
+    team_id = require_team(args)
+    label = trigger_label(args)
     iid = resolve_issue_id(args.issue)
-    add_label(iid, label_id(TRIGGER_LABEL))
-    print(f"Trigger label {TRIGGER_LABEL!r} applied to {args.issue} → orchestration firing.")
+    add_label(iid, label_id(label, team_id))
+    print(f"Trigger label {label!r} applied to {args.issue} → orchestration firing.")
 
 
 def cmd_inspect(args):
@@ -179,8 +220,16 @@ def cmd_teardown(args):
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
-    p = sub.add_parser("create-epic"); p.add_argument("--spec", required=True); p.set_defaults(fn=cmd_create_epic)
-    p = sub.add_parser("trigger"); p.add_argument("--issue", required=True); p.set_defaults(fn=cmd_trigger)
+    p = sub.add_parser("create-epic")
+    p.add_argument("--spec", required=True)
+    p.add_argument("--team", help="Linear team id (or $LINEAR_TEAM_ID)")
+    p.add_argument("--project", help="Linear project id (or $LINEAR_PROJECT_ID); optional")
+    p.set_defaults(fn=cmd_create_epic)
+    p = sub.add_parser("trigger")
+    p.add_argument("--issue", required=True)
+    p.add_argument("--team", help="Linear team id (or $LINEAR_TEAM_ID)")
+    p.add_argument("--label", help=f"trigger label (or $LINEAR_TRIGGER_LABEL); default {DEFAULT_TRIGGER_LABEL!r}")
+    p.set_defaults(fn=cmd_trigger)
     p = sub.add_parser("inspect"); p.add_argument("--issue", required=True); p.set_defaults(fn=cmd_inspect)
     p = sub.add_parser("teardown"); p.add_argument("--issue", required=True); p.set_defaults(fn=cmd_teardown)
     args = ap.parse_args()
