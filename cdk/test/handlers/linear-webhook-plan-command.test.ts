@@ -312,6 +312,31 @@ describe('single-task verdict path (F-single-gate) through the real handler', ()
     expect(sweepDecompositionNotesMock).toHaveBeenCalledWith(expect.anything(), 'parent-1', undefined);
   });
 
+  test('the approve comment ends on the OUTCOME marker, not the receipt 👀', async () => {
+    // Live-caught 2026-07-27: the reviewer's `@bgagent approve` kept 👀 forever
+    // while the issue itself moved to In Review with a PR — so the one comment they
+    // were watching read as "still thinking about it". Unlike a retry (work still
+    // in flight, outcome only exists later) a verdict is fully resolved by the time
+    // this returns, so the marker can settle immediately.
+    await handler(commentEvent('@bgagent approve'));
+    expect(reactToCommentMock).toHaveBeenCalledWith(expect.anything(), 'cmd-comment-1', 'eyes');
+    expect(swapCommentReactionMock).toHaveBeenCalledWith(expect.anything(), 'cmd-comment-1', 'white_check_mark');
+  });
+
+  test('a REJECT settles to ❓ — the plan was discarded, nothing succeeded', async () => {
+    await handler(commentEvent('@bgagent reject'));
+    expect(swapCommentReactionMock).toHaveBeenCalledWith(expect.anything(), 'cmd-comment-1', 'question');
+  });
+
+  test('the marker still settles when the verdict handling THROWS', async () => {
+    // The marker is settled in a finally: a failure mid-verdict must not leave the
+    // comment on 👀, because the plan row has already been consumed by then — no
+    // redelivery will come back to finish the job.
+    createTaskCoreMock.mockRejectedValueOnce(new Error('admission exploded'));
+    await expect(handler(commentEvent('@bgagent approve'))).rejects.toThrow('admission exploded');
+    expect(swapCommentReactionMock).toHaveBeenCalledWith(expect.anything(), 'cmd-comment-1', 'white_check_mark');
+  });
+
   test('reject on a single pending plan → discards, runs nothing', async () => {
     await handler(commentEvent('@bgagent reject'));
     expect(createTaskCoreMock).not.toHaveBeenCalled();

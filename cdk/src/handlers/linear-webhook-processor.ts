@@ -2322,66 +2322,93 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
     }
     await channelFor(WORKSPACE_REGISTRY_TABLE)
       .reactToComment?.({ commentId }, issueRef(commentedIssueId, workspaceId), 'started');
-    // Rebuild the release context's OAuth metadata from the resolved token so
-    // the released children can post back to Linear (the pending plan stores
-    // only ids, not the secret arn — which rotates).
-    const verdictChannelMetadata: Record<string, string> = {
-      linear_oauth_secret_arn: resolved.oauthSecretArn,
-      linear_workspace_slug: resolved.workspaceSlug,
+    // Whatever the verdict turns out to be, this comment must not be left on the
+    // receipt 👀. Unlike a retry — where the work is still in flight and the
+    // outcome only exists later — a verdict is fully resolved by the time these
+    // paths return: approve has dispatched (or reported why it couldn't) and
+    // reject has discarded. Leaving 👀 made the comment the reviewer is watching
+    // read as "still thinking about it" forever, while the issue itself had
+    // already moved on (live-caught 2026-07-27). Settled in a finally so an early
+    // return or a throw inside the verdict handling can't skip it.
+    const verdictComment = { commentId };
+    const verdictTarget = issueRef(commentedIssueId, workspaceId);
+    const settleVerdictMarker = async (): Promise<void> => {
+      try {
+        await channelFor(WORKSPACE_REGISTRY_TABLE)
+          .replaceCommentReaction?.(verdictComment, verdictTarget, verdict === 'reject' ? 'needs_input' : 'succeeded');
+      } catch (err) {
+        // Best-effort: the plan has already been acted on, so a marker failure
+        // must not turn a completed verdict into an error.
+        logger.warn('Could not settle the plan-verdict comment marker (non-fatal)', {
+          comment_id: commentId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
     };
-    const verdictProjectId = pending.linear_project_id ?? '';
+    try {
+      // Rebuild the release context's OAuth metadata from the resolved token so
+      // the released children can post back to Linear (the pending plan stores
+      // only ids, not the secret arn — which rotates).
+      const verdictChannelMetadata: Record<string, string> = {
+        linear_oauth_secret_arn: resolved.oauthSecretArn,
+        linear_workspace_slug: resolved.workspaceSlug,
+      };
+      const verdictProjectId = pending.linear_project_id ?? '';
 
-    // #299 single-task gate (F-single-gate): the pending plan is a SINGLE task
-    // (a ``:decompose`` that declined to split), not a graph. Approve → run ONE
-    // coding task (no write-back, no orchestration); reject → discard. Handled
-    // here rather than runPlanVerdict (which is graph-only: consume→writeBack→seed).
-    if (pending.pending_kind === 'single') {
-      await handleSingleTaskVerdict({
-        pending, verdict, commentedIssueId, workspaceId, projectId: verdictProjectId, resolved,
-      });
-      return;
-    }
+      // #299 single-task gate (F-single-gate): the pending plan is a SINGLE task
+      // (a ``:decompose`` that declined to split), not a graph. Approve → run ONE
+      // coding task (no write-back, no orchestration); reject → discard. Handled
+      // here rather than runPlanVerdict (which is graph-only: consume→writeBack→seed).
+      if (pending.pending_kind === 'single') {
+        await handleSingleTaskVerdict({
+          pending, verdict, commentedIssueId, workspaceId, projectId: verdictProjectId, resolved,
+        });
+        return;
+      }
 
-    const effects = buildDecompositionEffects(
-      commentedIssueId, workspaceId, pending.repo, pending.platform_user_id,
-      verdictProjectId, verdictChannelMetadata, resolved.accessToken,
-    );
-    // Capture the plan shape BEFORE runPlanVerdict consumes the pending row —
-    // the frozen reference re-lists the AGREED breakdown (pending.nodes), and the
-    // footnote needs the revision round.
-    const settledNodes = pending.nodes;
-    const settledRound = pending.revision_round;
-    const settledProposalCommentId = pending.proposal_comment_id;
-    const flow = await runPlanVerdict({ parentIssueId: commentedIssueId, verdict, effects });
-    if (flow.kind === 'seed') {
-      await seedAndReleaseFromGraph({
-        parentIssueId: commentedIssueId,
-        workspaceId,
-        repo: pending.repo,
-        projectId: verdictProjectId,
-        platformUserId: pending.platform_user_id,
-        channelMetadata: verdictChannelMetadata,
-        children: flow.children,
-      });
-      // #299 plan-cleanup: the panel is now live — freeze the plan comment into a
-      // reference + sweep the transient notes so the thread matches Mode A.
-      await cleanupPlanThread({
-        issueId: commentedIssueId,
-        workspaceId,
-        ...(settledProposalCommentId !== undefined && { proposalCommentId: settledProposalCommentId }),
-        outcome: { kind: 'approved', nodes: settledNodes, ...(settledRound !== undefined && { revisionRound: settledRound }) },
-      });
-    } else if (verdict === 'reject' && flow.kind === 'handled') {
-      // Rejected → discard: freeze the plan comment to a one-line "discarded"
-      // record + sweep the notes (incl. runPlanVerdict's own "Plan discarded" ack).
-      await cleanupPlanThread({
-        issueId: commentedIssueId,
-        workspaceId,
-        ...(settledProposalCommentId !== undefined && { proposalCommentId: settledProposalCommentId }),
-        outcome: { kind: 'rejected' },
-      });
+      const effects = buildDecompositionEffects(
+        commentedIssueId, workspaceId, pending.repo, pending.platform_user_id,
+        verdictProjectId, verdictChannelMetadata, resolved.accessToken,
+      );
+      // Capture the plan shape BEFORE runPlanVerdict consumes the pending row —
+      // the frozen reference re-lists the AGREED breakdown (pending.nodes), and the
+      // footnote needs the revision round.
+      const settledNodes = pending.nodes;
+      const settledRound = pending.revision_round;
+      const settledProposalCommentId = pending.proposal_comment_id;
+      const flow = await runPlanVerdict({ parentIssueId: commentedIssueId, verdict, effects });
+      if (flow.kind === 'seed') {
+        await seedAndReleaseFromGraph({
+          parentIssueId: commentedIssueId,
+          workspaceId,
+          repo: pending.repo,
+          projectId: verdictProjectId,
+          platformUserId: pending.platform_user_id,
+          channelMetadata: verdictChannelMetadata,
+          children: flow.children,
+        });
+        // #299 plan-cleanup: the panel is now live — freeze the plan comment into a
+        // reference + sweep the transient notes so the thread matches Mode A.
+        await cleanupPlanThread({
+          issueId: commentedIssueId,
+          workspaceId,
+          ...(settledProposalCommentId !== undefined && { proposalCommentId: settledProposalCommentId }),
+          outcome: { kind: 'approved', nodes: settledNodes, ...(settledRound !== undefined && { revisionRound: settledRound }) },
+        });
+      } else if (verdict === 'reject' && flow.kind === 'handled') {
+        // Rejected → discard: freeze the plan comment to a one-line "discarded"
+        // record + sweep the notes (incl. runPlanVerdict's own "Plan discarded" ack).
+        await cleanupPlanThread({
+          issueId: commentedIssueId,
+          workspaceId,
+          ...(settledProposalCommentId !== undefined && { proposalCommentId: settledProposalCommentId }),
+          outcome: { kind: 'rejected' },
+        });
+      }
+      logger.info('Mode B verdict handled', { issue_id: commentedIssueId, verdict, kind: flow.kind });
+    } finally {
+      await settleVerdictMarker();
     }
-    logger.info('Mode B verdict handled', { issue_id: commentedIssueId, verdict, kind: flow.kind });
     return;
   }
   if (pending && verdict === 'none' && trigger.instruction.trim().length > 0) {
