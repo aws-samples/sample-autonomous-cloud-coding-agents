@@ -30,6 +30,73 @@ export type ResolvedWorkflow = {
   readonly version: string;
 };
 
+/**
+ * A resolved registry-asset pin stamped on the TaskRecord for audit (#246).
+ * Mirrors ``cdk/src/handlers/shared/types.ts::ResolvedAssetTriple``.
+ */
+export type ResolvedAssetTriple = {
+  readonly kind: string;
+  readonly id: string;
+  readonly version: string;
+};
+
+// --- Agent asset registry (#246) API wire types ------------------------------
+// Mirrors ``cdk/src/handlers/shared/types.ts`` per the CLI types-sync contract.
+
+/** `POST /registry/records` request body. */
+export type RegistryPublishRequest = {
+  readonly kind: string;
+  readonly namespace: string;
+  readonly name: string;
+  /** semver string, immutable once written. */
+  readonly asset_version: string;
+  /** discovery descriptor body (server.json / SKILL.md / arbitrary JSON). */
+  readonly discovery: Record<string, unknown>;
+  /** ABCA runtime payload (connection config / cedar text / prompt fragment). */
+  readonly runtime: Record<string, unknown>;
+  /** force CUSTOM (verbatim) storage instead of a native descriptor. */
+  readonly custom?: boolean;
+  /** dev convenience: drive create→submit→approve so the record resolves. */
+  readonly auto_approve?: boolean;
+};
+
+/** One version row in a `show` response. */
+export type RegistryVersionSummary = {
+  readonly version: string;
+  readonly status: string;
+  readonly created_at: string | null;
+  readonly publisher: string | null;
+};
+
+/** A record envelope returned by publish / show. */
+export type RegistryRecordResponse = {
+  readonly kind: string;
+  readonly namespace: string;
+  readonly name: string;
+  readonly version: string;
+  readonly status: string;
+  readonly storage_mode: string;
+};
+
+/** `GET /registry/resolve?ref=…` response. */
+export type RegistryResolveResponse = {
+  readonly kind: string;
+  readonly namespace: string;
+  readonly name: string;
+  readonly version: string;
+  readonly runtime: Record<string, unknown>;
+  readonly warnings: readonly string[];
+};
+
+/** One asset row in a `list` response. */
+export type RegistryListEntry = {
+  readonly kind: string;
+  readonly namespace: string;
+  readonly name: string;
+  readonly latest_version: string | null;
+  readonly status: string;
+};
+
 /** Shared across all attachment interfaces. Add new types here (e.g., 'audio'). */
 export type AttachmentType = 'image' | 'file' | 'url';
 
@@ -90,6 +157,8 @@ export interface TaskDetail {
   readonly repo: string | null;
   readonly issue_number: number | null;
   readonly resolved_workflow: ResolvedWorkflow | null;
+  /** Registry assets resolved for this task (#246); null when none pinned. */
+  readonly resolved_assets: ResolvedAssetTriple[] | null;
   readonly pr_number: number | null;
   readonly task_description: string | null;
   readonly branch_name: string;
@@ -231,6 +300,8 @@ export interface TaskSummary {
   readonly repo: string | null;
   readonly issue_number: number | null;
   readonly resolved_workflow: ResolvedWorkflow | null;
+  /** Registry assets resolved for this task (#246); null when none pinned. */
+  readonly resolved_assets: ResolvedAssetTriple[] | null;
   readonly pr_number: number | null;
   readonly task_description: string | null;
   readonly branch_name: string;

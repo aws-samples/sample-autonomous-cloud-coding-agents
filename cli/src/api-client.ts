@@ -42,6 +42,11 @@ import {
   LinearLinkResponse,
   NudgeRequest,
   NudgeResponse,
+  RegistryListEntry,
+  RegistryPublishRequest,
+  RegistryRecordResponse,
+  RegistryResolveResponse,
+  RegistryVersionSummary,
   SlackLinkResponse,
   PaginatedResponse,
   ReplayBundle,
@@ -508,6 +513,51 @@ export class ApiClient {
     const body: Record<string, unknown> = { code };
     if (opts.dryRun) body.dry_run = true;
     const res = await this.request<SuccessResponse<JiraLinkResponse>>('POST', '/jira/link', body);
+    return res.data;
+  }
+
+  // --- Agent asset registry (#246) ---
+
+  /** POST /registry/records — publish an asset record. */
+  async registryPublish(req: RegistryPublishRequest): Promise<RegistryRecordResponse> {
+    const res = await this.request<SuccessResponse<RegistryRecordResponse>>('POST', '/registry/records', req);
+    return res.data;
+  }
+
+  /** GET /registry/resolve?ref=… — resolve a pinned ref to a single asset. */
+  async registryResolve(ref: string): Promise<RegistryResolveResponse> {
+    const res = await this.request<SuccessResponse<RegistryResolveResponse>>(
+      'GET',
+      `/registry/resolve?ref=${encodeURIComponent(ref)}`,
+    );
+    return res.data;
+  }
+
+  /** GET /registry/records — list assets (optionally filtered). */
+  async registryList(opts?: { kind?: string; namespace?: string }): Promise<RegistryListEntry[]> {
+    const params = new URLSearchParams();
+    if (opts?.kind) params.set('kind', opts.kind);
+    if (opts?.namespace) params.set('namespace', opts.namespace);
+    const qs = params.toString();
+    const res = await this.request<SuccessResponse<{ assets: RegistryListEntry[] }>>(
+      'GET',
+      `/registry/records${qs ? `?${qs}` : ''}`,
+    );
+    return res.data.assets;
+  }
+
+  /** GET /registry/records/{kind}/{namespace}/{name} — show all versions. */
+  async registryShow(
+    kind: string,
+    namespace: string,
+    name: string,
+  ): Promise<{ kind: string; namespace: string; name: string; versions: RegistryVersionSummary[] }> {
+    const res = await this.request<
+      SuccessResponse<{ kind: string; namespace: string; name: string; versions: RegistryVersionSummary[] }>
+    >(
+      'GET',
+      `/registry/records/${encodeURIComponent(kind)}/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}`,
+    );
     return res.data;
   }
 }
