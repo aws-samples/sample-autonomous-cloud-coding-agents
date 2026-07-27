@@ -130,28 +130,6 @@ const DESCRIPTORS: Record<string, WorkflowDescriptor> = {
     readOnly: true,
     requiredInputs: { allOf: ['pr_number'] },
   },
-  // A6 re-stack (#305): re-merge a changed predecessor into an existing
-  // stacked-child PR. Writeable, repo-bound, operates on an existing PR
-  // (pr_number). Platform-issued (the restack processor), not user-facing.
-  'coding/restack-v1': {
-    id: 'coding/restack-v1',
-    version: '1.0.0',
-    requiresRepo: true,
-    readOnly: false,
-    requiredInputs: { allOf: ['pr_number'] },
-  },
-  // #299 Mode B agent-native planning: clone the repo, decide + draft a
-  // decomposition plan with full repo context, emit it as the artifact. The
-  // platform seeds sub-issues from the plan (idempotent write-back → Mode A).
-  // Repo-bound; does not open a PR (readOnly to the repo — it only reads to
-  // plan). Platform-issued by the Linear webhook on a :decompose/:auto label.
-  'coding/decompose-v1': {
-    id: 'coding/decompose-v1',
-    version: '1.0.0',
-    requiresRepo: true,
-    readOnly: true,
-    requiredInputs: { oneOf: ['issue_number', 'task_description'] },
-  },
   'default/agent-v1': {
     id: 'default/agent-v1',
     version: '1.0.0',
