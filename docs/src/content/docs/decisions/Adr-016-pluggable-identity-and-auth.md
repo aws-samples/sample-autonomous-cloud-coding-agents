@@ -19,7 +19,7 @@ ABCA propagates *who* as data but not as an enforceable credential. Issue [#245]
 
    - `resolve_github_token()` (`agent/src/config.py`): one shared PAT for all repos and users. No per-user or per-repo scoping.
    - `resolve_linear_api_token()` (`agent/src/config.py`) + `cdk/src/handlers/shared/linear-oauth-resolver.ts`: per-workspace OAuth token. Manual refresh inside 60s of expiry, one-shot rotation-race handling.
-   - the Jira resolver added in PR [#302](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/pull/302) (`cdk/src/handlers/shared/jira-oauth-resolver.ts`): the same per-tenant 3LO + Secrets Manager pattern, a second instance.
+   - the Jira resolver added in PR [#302](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/pull/302) and extended by issue [#642](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/642): one per-tenant Secrets Manager bundle holds 3LO for reads/human lookup plus the signed Forge app-actor proxy for writes.
 
    A second provider arriving through the same `resolve_<integration>_token()` shape is live evidence the seam already exists; it just is not named or unified.
 

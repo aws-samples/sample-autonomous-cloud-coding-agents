@@ -11,7 +11,7 @@ There are six ways to interact with the platform. You can use them independently
 3. **Webhook** - External systems (CI pipelines, GitHub Actions) can create tasks via HMAC-authenticated HTTP requests. Best for automated workflows where tasks should be triggered by events (e.g., a new issue is labeled, a PR needs review). No Cognito credentials needed; uses a shared secret per integration.
 4. **Slack** - Submit tasks by @mentioning the bot and receive threaded progress notifications with reaction-based status. See the [Slack setup guide](./SLACK_SETUP_GUIDE.md).
 5. **Linear** - Apply a label to a Linear issue to trigger a task; the agent posts progress comments back on the issue via Linear's MCP server. See the [Linear setup guide](./LINEAR_SETUP_GUIDE.md).
-6. **Jira** - Add a label to a Jira Cloud issue to trigger a task; the agent posts progress comments back on the issue via the Jira REST v3 API. See the [Jira setup guide](./JIRA_SETUP_GUIDE.md).
+6. **Jira** - Add a label to a Jira Cloud issue to trigger a task; a dedicated Forge `bgagent` app posts comments and transitions through Jira REST v3 while the triggering human remains the task owner. See the [Jira setup guide](./JIRA_SETUP_GUIDE.md).
 
 For example, a team might use the **CLI** for ad-hoc tasks, **webhooks** to auto-trigger `coding/pr-review-v1` on every new PR via GitHub Actions, **Slack** for quick team-wide requests, **Linear** or **Jira** for tickets that already live in the PM tool, and the **REST API** to build a dashboard that tracks task status across repositories.
 
@@ -24,9 +24,9 @@ There are four lifecycle roles. They are often the same person early on, but the
 | Role | What they do | Frequency |
 |------|--------------|-----------|
 | **Stack admin** | `cdk deploy` the stack; rotates platform-level secrets; runs `bgagent admin invite-user` to onboard teammates | Once + occasional |
-| **Linear / Slack workspace admin** | Runs `bgagent linear setup` (or `bgagent slack setup`) once per workspace to install the OAuth app | One-time per workspace |
+| **Integration admin** | Installs Linear/Slack OAuth apps or the Jira 3LO + Forge apps once per workspace/site | One-time per workspace/site |
 | **Repo onboarder** | Runs `bgagent linear onboard-project` (or registers a Blueprint via CDK) to wire a repo into the platform | As needed; any authenticated user |
-| **Teammate** | Runs `bgagent configure` once + `bgagent submit` / Linear-label / Slack mention from then on | Daily user |
+| **Teammate** | Runs `bgagent configure` once + `bgagent submit` / Linear or Jira label / Slack mention from then on | Daily user |
 
 If you're a teammate joining an existing deployment, jump to [Joining an existing deployment](#joining-an-existing-deployment) below.
 
@@ -121,7 +121,7 @@ Three steps:
 
 You're in. `bgagent submit`, `bgagent list`, `bgagent status` work against the shared stack. Tasks you submit are attributed to your Cognito user; concurrency caps and budgets are scoped to you.
 
-**You do not run** `bgagent linear setup`, `bgagent jira setup`, or `bgagent slack setup` — those are workspace-level operations performed once by the stack/workspace admin. If you want Linear- or Jira-triggered tasks to be attributed to *you* (not auto-dropped), the admin needs to map your Linear identity or Jira account to your Cognito user; ask them about [Linear user linking](./LINEAR_SETUP_GUIDE.md#inviting-teammates) or [Jira user linking](./JIRA_SETUP_GUIDE.md#5-link-your-jira-identity).
+**You do not run** `bgagent linear setup`, `bgagent jira setup`, `bgagent jira app-setup`, or `bgagent slack setup` — those are workspace-level operations performed once by the stack/workspace admin. If you want Linear- or Jira-triggered tasks to be attributed to *you* (not auto-dropped), the admin needs to map your Linear identity or Jira account to your Cognito user; ask them about [Linear user linking](./LINEAR_SETUP_GUIDE.md#inviting-teammates) or [Jira user linking](./JIRA_SETUP_GUIDE.md#6-link-your-jira-identity).
 
 If something looks broken (commands fail with `Not configured` or `401 Unauthorized`), re-paste the bundle and re-run `bgagent login`. The bundle holds no secrets — your password (separate) is the credential.
 

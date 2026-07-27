@@ -57,8 +57,13 @@ export interface JiraWorkspaceRegistryTableProps {
  *   `https://api.atlassian.com/ex/jira/<cloudId>` gateway base instead)
  * - oauth_secret_arn — full ARN of the per-tenant Secrets Manager secret
  *   (`bgagent-jira-oauth-<cloudId>`) holding the OAuth bundle (access/refresh
- *   tokens, client credentials, and the webhook signing secret). Created by
- *   `bgagent jira setup`, not by CDK.
+ *   tokens, client credentials, webhook signing secret, and optional Forge
+ *   app-actor proxy configuration). Created by `bgagent jira setup` and
+ *   extended by `bgagent jira app-setup`, not by CDK.
+ * - outbound_identity — `app` after the Forge identity probe succeeds.
+ * - app_actor_account_id / app_actor_display_name / app_actor_configured_at —
+ *   non-secret audit metadata for the verified Jira app account. The proxy
+ *   URL and HMAC secret remain in Secrets Manager.
  * - installed_by_platform_user_id — Cognito sub of the admin who ran
  *   `bgagent jira setup` (audit only; runtime callers do not need this)
  * - installed_at, updated_at — ISO timestamps
@@ -67,9 +72,9 @@ export interface JiraWorkspaceRegistryTableProps {
  * The webhook receiver, processor, and orchestrator look up `oauth_secret_arn`
  * here from the inbound webhook's `cloudId`, then fetch (and, on the Lambda
  * paths, refresh) the tenant's OAuth/signing secret from Secrets Manager —
- * see `jira-oauth-resolver.ts`. Token sharing is intentional: one
- * bgagent[bot] identity per tenant, used for all members' triggered tasks
- * (parity with the Linear adapter).
+ * see `jira-oauth-resolver.ts`. Inbound OAuth remains user-delegated. Outbound
+ * writes prefer one Forge app identity per tenant; installs without it retain
+ * OAuth as an explicit migration fallback.
  */
 export class JiraWorkspaceRegistryTable extends Construct {
   /**

@@ -79,6 +79,15 @@ class TestFailSafe:
         assert is_scoped() is False
 
 
+# NOTE: the conftest-scrub regression guard for AGENT_SESSION_ROLE_ARN lives in
+# tests/test_conftest_env_scrub.py — deliberately in its OWN module with NO local
+# autouse fixture. This file's `_reset` fixture (above) itself does
+# `monkeypatch.delenv(SESSION_ROLE_ARN_ENV)`, which would MASK whether conftest's
+# `_clean_env` performs the scrub — a guard placed here passes even if the
+# conftest line is deleted (#616 review B1). Only a fixture-free module truly
+# guards the fix.
+
+
 # ---------------------------------------------------------------------------
 # Scoped: SessionRole ARN set → refreshable assumed-role session
 # ---------------------------------------------------------------------------

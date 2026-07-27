@@ -24,6 +24,11 @@ import {
   SecretsManagerClient,
 } from '@aws-sdk/client-secrets-manager';
 import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
+import {
+  JIRA_APP_ACTOR_MIN_SECRET_LENGTH,
+  type JiraAppActorConfig,
+  validateJiraAppActorProxyUrl,
+} from './jira-app-actor';
 import { logger } from './logger';
 
 /**
@@ -75,6 +80,16 @@ export interface StoredOauthToken {
   readonly installed_at: string;
   readonly updated_at: string;
   readonly installed_by_platform_user_id: string;
+  /** Forge web-trigger URL used for outbound writes as the Jira app actor. */
+  readonly app_actor_proxy_url?: string;
+  /** HMAC secret shared with the Forge web trigger. */
+  readonly app_actor_shared_secret?: string;
+  /** Jira account id returned by the app actor identity probe. */
+  readonly app_actor_account_id?: string;
+  /** Jira display name returned by the app actor identity probe. */
+  readonly app_actor_display_name?: string;
+  /** ISO-8601 timestamp of the latest successful app actor setup. */
+  readonly app_actor_configured_at?: string;
   /** Per-tenant Jira webhook signing secret.
    *
    *  Atlassian's "Generic webhooks" support a per-webhook secret that signs
@@ -143,6 +158,104 @@ export interface ResolvedJiraToken {
   readonly scope: string;
   readonly siteUrl: string;
   readonly oauthSecretArn: string;
+}
+
+export type ResolvedJiraOutboundAuth =
+  | {
+    readonly kind: 'app';
+    readonly appActor: JiraAppActorConfig;
+    readonly siteUrl: string;
+    readonly oauthSecretArn: string;
+  }
+  | ({
+    readonly kind: 'oauth';
+  } & ResolvedJiraToken);
+
+const JIRA_APP_ACTOR_FIELDS: ReadonlyArray<keyof StoredOauthToken> = [
+  'app_actor_proxy_url',
+  'app_actor_shared_secret',
+  'app_actor_account_id',
+  'app_actor_display_name',
+  'app_actor_configured_at',
+];
+
+/**
+ * Resolve the identity used for Jira writes.
+ *
+ * A complete Forge app-actor configuration always wins. Once any app-actor
+ * field is present, an incomplete/invalid configuration fails closed instead
+ * of falling back to 3LO and silently attributing the write to the setup user.
+ * Tenants with no app-actor fields retain the user-delegated OAuth behavior as
+ * an explicit migration fallback.
+ */
+export async function resolveJiraOutboundAuth(
+  cloudId: string,
+  registryTableName: string,
+  options: ResolverOptions = {},
+): Promise<ResolvedJiraOutboundAuth | null> {
+  const region = options.region ?? process.env.AWS_REGION ?? 'us-east-1';
+  const ddb = options.dynamoDbClient ?? DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
+  const sm = options.secretsManagerClient ?? new SecretsManagerClient({ region });
+
+  const row = await getRegistryRow(ddb, registryTableName, cloudId);
+  if (!row || row.status !== 'active') {
+    logger.warn('Jira outbound identity unavailable: tenant is missing or inactive', {
+      jira_cloud_id: cloudId,
+      status: row?.status,
+    });
+    return null;
+  }
+
+  const token = await getOauthSecret(sm, row.oauth_secret_arn);
+  if (!token) return null;
+
+  const hasAppActorIntent = JIRA_APP_ACTOR_FIELDS.some(
+    (field) => Object.prototype.hasOwnProperty.call(token, field),
+  );
+  if (hasAppActorIntent) {
+    const proxyUrl = typeof token.app_actor_proxy_url === 'string'
+      ? validateJiraAppActorProxyUrl(token.app_actor_proxy_url)
+      : null;
+    if (
+      !proxyUrl
+      || typeof token.app_actor_shared_secret !== 'string'
+      || token.app_actor_shared_secret.length < JIRA_APP_ACTOR_MIN_SECRET_LENGTH
+    ) {
+      logger.error('Jira app-actor configuration is incomplete or invalid; refusing OAuth fallback', {
+        jira_cloud_id: cloudId,
+        proxy_url_valid: Boolean(proxyUrl),
+        shared_secret_present: typeof token.app_actor_shared_secret === 'string'
+          && token.app_actor_shared_secret.length > 0,
+      });
+      return null;
+    }
+    return {
+      kind: 'app',
+      appActor: {
+        proxyUrl,
+        sharedSecret: token.app_actor_shared_secret,
+      },
+      siteUrl: row.site_url,
+      oauthSecretArn: row.oauth_secret_arn,
+    };
+  }
+
+  logger.warn('Jira app actor is not configured; using user-delegated OAuth fallback', {
+    jira_cloud_id: cloudId,
+    oauth_secret_arn: row.oauth_secret_arn,
+  });
+  if (!isTokenExpiring(token.expires_at)) {
+    tokenCache.set(row.oauth_secret_arn, {
+      value: token,
+      expiresAt: Date.now() + SECRET_CACHE_TTL_MS,
+    });
+  }
+  const oauth = await resolveJiraOauthToken(cloudId, registryTableName, {
+    ...options,
+    secretsManagerClient: sm,
+    dynamoDbClient: ddb,
+  });
+  return oauth ? { kind: 'oauth', ...oauth } : null;
 }
 
 /**
