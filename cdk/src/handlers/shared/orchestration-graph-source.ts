@@ -37,7 +37,7 @@
  *     caller SUPPLIES the DAG. {@link declarativeGraphSource} takes a
  *     ready-made node list. This is the slot for:
  *       - CLI / API: a request body carrying tasks + ``depends_on`` edges.
- *       - Auto-decomposition: a planner agent turns ONE plain request into
+ *       - A planner agent turning ONE plain request into
  *         a phased DAG and hands the nodes here — reusing the ENTIRE
  *         executor instead of reimplementing gating/stacking/rollup.
  *
@@ -89,7 +89,7 @@ export function linearGraphSource(
 
 /**
  * Tier 2 — declarative graph. The caller already has the node list (a
- * CLI/API request, or a planner's decomposition output). An empty
+ * CLI/API request, or a planner's output). An empty
  * list means "no graph" → single task. Never errors (the nodes are
  * in-memory); DAG validity (cycles/dangling/dupes) is still enforced
  * downstream by ``validateDag`` in the discovery composer.

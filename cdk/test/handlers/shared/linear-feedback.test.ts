@@ -37,7 +37,7 @@ import {
   replyToComment,
   reportIssueFailure,
   revertIssueToNotStarted,
-  sweepDecompositionNotes,
+  sweepTransientNotes,
   swapCommentReaction,
   swapIssueReaction,
   transitionIssueState,
@@ -907,9 +907,9 @@ describe('linear-feedback', () => {
     });
   });
 
-  describe('sweepDecompositionNotes — tidy the planning chatter once a plan is approved', () => {
+  describe('sweepTransientNotes — tidy the planning chatter once a plan is approved', () => {
     // A representative plan-phase thread: the frozen plan reference (KEEP), the
-    // transient decompose notes (🗂️/👋 → DELETE), the live epic panel (🔄 → a
+    // transient notes (🗂️/👋 → DELETE), the live epic panel (🔄 → a
     // different prefix, KEEP), and a human comment (no bot prefix, KEEP).
     const THREAD = {
       data: {
@@ -931,7 +931,7 @@ describe('linear-feedback', () => {
       fetchMock
         .mockResolvedValueOnce(jsonResponse(THREAD)) // the comments list
         .mockResolvedValue(jsonResponse({ data: { commentDelete: { success: true } } }));
-      const deleted = await sweepDecompositionNotes(CTX, ISSUE_ID, 'plan-ref');
+      const deleted = await sweepTransientNotes(CTX, ISSUE_ID, 'plan-ref');
       // started-ack + nudge deleted; plan-ref (kept), panel (🔄), human (no prefix) survive.
       expect(deleted).toBe(2);
       const deletedIds = fetchMock.mock.calls
@@ -947,21 +947,21 @@ describe('linear-feedback', () => {
       fetchMock
         .mockResolvedValueOnce(jsonResponse(THREAD))
         .mockResolvedValue(jsonResponse({ data: { commentDelete: { success: true } } }));
-      const deleted = await sweepDecompositionNotes(CTX, ISSUE_ID);
+      const deleted = await sweepTransientNotes(CTX, ISSUE_ID);
       // plan-ref + started-ack + nudge (all 🗂️/👋); panel + human still spared.
       expect(deleted).toBe(3);
     });
 
     test('no token → no fetch, sweeps nothing', async () => {
       resolveLinearOauthTokenMock.mockResolvedValueOnce(null);
-      const deleted = await sweepDecompositionNotes(CTX, ISSUE_ID, 'plan-ref');
+      const deleted = await sweepTransientNotes(CTX, ISSUE_ID, 'plan-ref');
       expect(deleted).toBe(0);
       expect(fetchMock).not.toHaveBeenCalled();
     });
 
     test('a failed comments-list is a clean no-op (best-effort, never throws)', async () => {
       fetchMock.mockResolvedValueOnce(jsonResponse({ errors: [{ message: 'boom' }] }, 200));
-      const deleted = await sweepDecompositionNotes(CTX, ISSUE_ID, 'plan-ref');
+      const deleted = await sweepTransientNotes(CTX, ISSUE_ID, 'plan-ref');
       expect(deleted).toBe(0);
       expect(fetchMock).toHaveBeenCalledTimes(1); // only the (failed) list; no deletes
     });
@@ -972,7 +972,7 @@ describe('linear-feedback', () => {
           data: { issue: { comments: { nodes: [{ id: 'ws', body: '\n  🗂️ over-cap note' }] } } },
         }))
         .mockResolvedValue(jsonResponse({ data: { commentDelete: { success: true } } }));
-      const deleted = await sweepDecompositionNotes(CTX, ISSUE_ID, 'plan-ref');
+      const deleted = await sweepTransientNotes(CTX, ISSUE_ID, 'plan-ref');
       expect(deleted).toBe(1);
     });
   });

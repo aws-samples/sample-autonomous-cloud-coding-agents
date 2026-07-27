@@ -89,7 +89,7 @@ mutation DeleteComment($id: String!) {
 
 /**
  * List an issue's TOP-LEVEL comments (id + body). Used to tidy the thread once a
- * proposed decomposition plan is approved or rejected: we can't
+ * pending proposal is settled: we can't
  * track every fire-and-forget note id (they're posted from ~15 sites), so we
  * fetch the thread once and delete the bot's own ``🗂️``/``👋`` notes by prefix,
  * keeping the frozen plan reference + the (differently-prefixed) live panel.
@@ -442,24 +442,22 @@ export async function deleteComment(
 }
 
 /**
- * Bot-comment prefixes that mark a TRANSIENT note from the plan-proposal phase,
- * where the platform decomposes a plain issue into a sub-issue graph for a human
- * to approve (the "on it" ack, revise/escalate acks, planner-error, over-cap,
- * already-decomposed, nudge, wrong-handle). These are the ``🗂️``/``👋`` comments
- * the plan cleanup sweeps once the plan is approved or rejected.
- * Deliberately does NOT include the live epic panel
- * (``🔄``/``⚠️``/``✅``) or the agent's own progress (``🤖``) — those aren't ours
- * to delete here, and the panel is the thing we're KEEPING. Mirrors the
- * self-trigger guard's ``BOT_COMMENT_PREFIXES`` but scoped to the decompose notes.
+ * Bot-comment prefixes that mark a TRANSIENT note — an interim ack, an error note,
+ * a nudge, a wrong-handle correction. These are the ``🗂️``/``👋`` comments a
+ * thread cleanup sweeps once the thing they were about is settled.
+ *
+ * Deliberately does NOT include the live epic panel (``🔄``/``⚠️``/``✅``) or the
+ * agent's own progress (``🤖``) — those aren't ours to delete here, and the panel
+ * is the thing we're KEEPING. Mirrors the self-trigger guard's
+ * ``BOT_COMMENT_PREFIXES`` but scoped to transient notes.
  */
-const DECOMPOSE_NOTE_PREFIXES: readonly string[] = ['🗂️', '👋'];
+const TRANSIENT_NOTE_PREFIXES: readonly string[] = ['🗂️', '👋'];
 
 /**
- * Sweep the bot's transient decomposition notes off an
- * issue once the plan is approved/rejected, leaving just the frozen plan
- * reference + the live epic panel. Fetches the thread once, then deletes every
- * top-level comment that (a) starts with a decompose-note prefix and (b) is NOT
- * ``keepCommentId`` (the frozen plan reference we just wrote). Best-effort and
+ * Sweep the bot's transient notes off an issue once the thing they were about is
+ * settled, leaving any frozen reference + the live epic panel. Fetches the thread
+ * once, then deletes every top-level comment that (a) starts with a transient-note
+ * prefix and (b) is NOT ``keepCommentId`` (a reference to keep). Best-effort and
  * total: a failed list returns 0 (nothing swept — a lingering note is a
  * cosmetic nit, never a breakage), and each delete is independent so one
  * failure doesn't abort the rest. Returns the count deleted (for logging/tests).
@@ -469,7 +467,7 @@ const DECOMPOSE_NOTE_PREFIXES: readonly string[] = ['🗂️', '👋'];
  * covered automatically — while the panel (different prefix) and human comments
  * (no bot prefix) are provably untouched.
  */
-export async function sweepDecompositionNotes(
+export async function sweepTransientNotes(
   ctx: LinearFeedbackContext,
   issueId: string,
   keepCommentId?: string,
@@ -484,12 +482,12 @@ export async function sweepDecompositionNotes(
     const id = node?.id;
     const body = (node?.body ?? '').trimStart();
     if (!id || id === keepCommentId) continue;
-    if (!DECOMPOSE_NOTE_PREFIXES.some((p) => body.startsWith(p))) continue;
+    if (!TRANSIENT_NOTE_PREFIXES.some((p) => body.startsWith(p))) continue;
     const ok = (await graphqlRequest(token, COMMENT_DELETE_MUTATION, { id })).ok;
     if (ok) deleted += 1;
   }
   if (deleted > 0) {
-    logger.info('Swept transient decomposition notes at plan settle', {
+    logger.info('Swept transient notes', {
       issue_id: issueId, deleted, kept_reference: keepCommentId ?? null,
     });
   }
@@ -1034,7 +1032,7 @@ export async function transitionIssueState(
 
 /**
  * Move an issue BACKWARD to a not-started state
- * (``unstarted`` "Todo", else ``backlog``), used when a ``:decompose`` planning
+ * (``unstarted`` "Todo", else ``backlog``), used when a planning
  * run finishes and the issue is now awaiting the reviewer's approve. The webhook
  * moved it to In Progress at dispatch (so the board showed the ~1-2 min planning
  * WAS happening — {@link transitionIssueState}); once the plan is posted and

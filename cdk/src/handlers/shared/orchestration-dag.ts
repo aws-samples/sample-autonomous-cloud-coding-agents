@@ -24,7 +24,7 @@
  * layering the reconciler uses to release children in dependency order.
  *
  * Kept deliberately free of Linear/AWS types so it is trivially unit-
- * testable and reusable by the auto-decomposition planner, which
+ * testable and reusable by a planner, which
  * validates its own generated graph with the same cycle check before
  * writing sub-issues back to the tracker.
  */

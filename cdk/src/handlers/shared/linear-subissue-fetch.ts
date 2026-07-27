@@ -101,7 +101,7 @@ export interface SubIssueNode extends DagNode {
   /** Sub-issue title for the task description. */
   readonly title?: string;
   /**
-   * Sub-issue scope/description. The decompose planner writes a rich
+   * Sub-issue scope/description. A planner writes a rich
    * per-piece scope — often naming a concrete deliverable (a file, a route) —
    * and that scope is what the reviewer approves. It must reach the coding
    * agent so it builds what the plan promised (e.g. the exact filename), not a

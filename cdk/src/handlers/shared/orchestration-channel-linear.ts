@@ -41,7 +41,7 @@ import {
   revertIssueToNotStarted,
   swapCommentReaction,
   swapIssueReaction,
-  sweepDecompositionNotes,
+  sweepTransientNotes,
   transitionIssueState,
   upsertStatusComment,
   upsertThreadedReply as upsertLinearThreadedReply,
@@ -165,7 +165,7 @@ export function makeLinearChannel(registryTableName: string): Channel {
     },
 
     async sweepNotes(issue, keep) {
-      return sweepDecompositionNotes(ctxFor(issue), issue.issueId, keep?.commentId);
+      return sweepTransientNotes(ctxFor(issue), issue.issueId, keep?.commentId);
     },
 
     async fetchChildGraph(parent): Promise<readonly ChannelSubIssueNode[]> {

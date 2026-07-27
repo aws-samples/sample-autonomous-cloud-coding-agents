@@ -93,7 +93,7 @@ const BOT_COMMENT_PREFIXES = [
   '🤖', // agent progress ("🤖 Starting…")
   '🖼️', // preview screenshot comment
   '🔗', // "PR opened" / combined-PR
-  '🗂️', // plan proposal / decomposition notes (embed literal "@bgagent approve")
+  '🗂️', // transient platform notes (may embed a literal "@bgagent …" instruction)
   '💬', // maturing-reply "answered" state (a no-change/question iteration)
   '👀', // instant "on it" ack reply (posted at trigger time)
 ] as const;
@@ -119,7 +119,7 @@ export function isBotAuthoredComment(body: string): boolean {
  * near-misses qualify. Matching is done by {@link detectNearMissMention}.
  */
 const NEAR_MISS_MENTION_PATTERNS: readonly RegExp[] = [
-  // @abca (+ optional :suffix like @abca:decompose) — the label-name confusion.
+  // @abca (+ optional :suffix) — the label-name confusion.
   /@abca\b/i,
   // @bgagent immediately followed by a word char — a boundary-miss that
   // parseCommentTrigger's `@bgagent(?![\w.])` deliberately does NOT trigger
@@ -201,7 +201,7 @@ export function parseRetryIntent(instruction: string): boolean {
 export const KNOWN_EPIC_COMMANDS = ['retry'] as const;
 
 /**
- * The verdict of an ``@bgagent`` comment on a pending decomposition
+ * The verdict of an ``@bgagent`` comment on a pending
  * plan — the proposed sub-issue breakdown of a plain issue, awaiting a
  * reviewer's go-ahead before any work starts.
  * ``none`` means the comment is an ordinary change instruction (routes to

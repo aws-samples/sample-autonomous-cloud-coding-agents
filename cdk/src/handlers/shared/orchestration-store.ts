@@ -92,7 +92,7 @@ export interface OrchestrationChildRow {
   readonly title?: string;
   /**
    * Sub-issue scope/description. When the graph came from the planner
-   * decomposing a plain issue, this is its rich per-piece scope — persisted at
+   * a planner produced the piece, this is its rich per-piece scope — persisted at
    * seed so the coding agent's task_description carries what the reviewer
    * approved (e.g. a promised filename), not the title alone. Absent when the
    * graph was read from sub-issues a human already wrote, since that path
@@ -859,7 +859,7 @@ export async function loadOrchestration(
     // A non-epic issue accumulates dedup MARKER rows (``ack#…``) under the same
     // derived id without ever being seeded, so "rows but no meta" is the normal
     // shape there, not a broken orchestration — a plain `@bgagent` on any
-    // never-decomposed issue reaches this. Only warn when a REAL child row is
+    // plain issue reaches this. Only warn when a REAL child row is
     // present, which is the genuinely inconsistent case; otherwise this cried wolf
     // on a healthy path and taught readers to ignore the log.
     const hasRealChild = items.some((i) => !String(i.sub_issue_id).includes('#'));

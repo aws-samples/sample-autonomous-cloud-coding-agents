@@ -133,7 +133,7 @@ describe('detectNearMissMention — a wrong-handle mention gets a nudge, not sil
     expect(detectNearMissMention('@abca approve')).toBe(true);
     expect(detectNearMissMention('hey @abca can you make it 2 tasks')).toBe(true);
     // …even with a :suffix the reviewer copied from the label.
-    expect(detectNearMissMention('@abca:decompose please')).toBe(true);
+    expect(detectNearMissMention('@abca:auto please')).toBe(true);
   });
 
   test('a boundary-miss @bgagent handle is a near-miss (parseCommentTrigger deliberately skips it)', () => {

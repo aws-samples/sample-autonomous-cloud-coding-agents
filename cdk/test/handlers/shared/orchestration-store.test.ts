@@ -408,8 +408,6 @@ describe('seedOrchestration — idempotent replay', () => {
 });
 
 describe('claimRollup — exactly-once parent rollup', () => {
-  function makeDdb(): MockDdb { return { send: jest.fn() }; }
-
   test('first claim wins (conditional write succeeds) → true', async () => {
     const ddb = makeDdb();
     ddb.send.mockResolvedValueOnce({});
@@ -482,7 +480,9 @@ describe('renamed row attributes stay readable across the rename', () => {
   // epic mid-flight when the rename ships must still load and settle. These pin
   // BOTH spellings, and the fact that a row carrying only the legacy names loads
   // is the actual back-compat guarantee.
-  const child = (extra: Record<string, unknown>) => ({
+  // Named for what it builds — a persisted ROW — to keep it distinct from the
+  // file-level `child`, which builds a SubIssueNode (an input, not a row).
+  const childRow = (extra: Record<string, unknown>) => ({
     orchestration_id: 'orch_1', sub_issue_id: 'uuid-A', depends_on: [], child_status: 'succeeded', ...extra,
   });
 
@@ -499,7 +499,7 @@ describe('renamed row attributes stay readable across the rename', () => {
             parent_linear_issue_id: 'P-old',
             linear_workspace_id: 'WS-old',
           },
-          child({ parent_linear_issue_id: 'P-old', linear_workspace_id: 'WS-old', linear_identifier: 'ENG-1' }),
+          childRow({ parent_linear_issue_id: 'P-old', linear_workspace_id: 'WS-old', linear_identifier: 'ENG-1' }),
         ],
       }),
     };
@@ -524,7 +524,7 @@ describe('renamed row attributes stay readable across the rename', () => {
             parent_issue_ref: 'P-new',
             credentials_ref: 'WS-new',
           },
-          child({ parent_issue_ref: 'P-new', credentials_ref: 'WS-new', display_id: 'ENG-2' }),
+          childRow({ parent_issue_ref: 'P-new', credentials_ref: 'WS-new', display_id: 'ENG-2' }),
         ],
       }),
     };
@@ -551,7 +551,7 @@ describe('renamed row attributes stay readable across the rename', () => {
             credentials_ref: 'WS-new',
             linear_workspace_id: 'WS-old',
           },
-          child({ parent_issue_ref: 'P-new', parent_linear_issue_id: 'P-old' }),
+          childRow({ parent_issue_ref: 'P-new', parent_linear_issue_id: 'P-old' }),
         ],
       }),
     };
@@ -676,7 +676,7 @@ describe('loadOrchestration — "rows but no meta" is only alarming with a real 
   };
   beforeEach(() => { loggerMock.info.mockClear(); loggerMock.warn.mockClear(); });
 
-  // A never-decomposed issue still accumulates dedup MARKER rows (`ack#…`) under the
+  // A plain issue still accumulates dedup MARKER rows (`ack#…`) under the
   // same derived id, so this state is NORMAL for it — a plain `@bgagent` on any such
   // issue reaches it. Warning there cried wolf on a healthy path.
   test('marker rows only → info, not warn', async () => {

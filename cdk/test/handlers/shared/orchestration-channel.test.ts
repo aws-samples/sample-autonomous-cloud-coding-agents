@@ -29,7 +29,7 @@ const linearTransitionIssueState = jest.fn();
 const linearRevertIssueToNotStarted = jest.fn();
 const linearReplyToComment = jest.fn();
 const linearUpsertThreadedReply = jest.fn();
-const linearSweepDecompositionNotes = jest.fn();
+const linearSweepTransientNotes = jest.fn();
 jest.mock('../../../src/handlers/shared/linear-feedback', () => ({
   EMOJI_STARTED: 'eyes',
   EMOJI_SUCCESS: 'white_check_mark',
@@ -45,7 +45,7 @@ jest.mock('../../../src/handlers/shared/linear-feedback', () => ({
   revertIssueToNotStarted: (...a: unknown[]) => linearRevertIssueToNotStarted(...a),
   replyToComment: (...a: unknown[]) => linearReplyToComment(...a),
   upsertThreadedReply: (...a: unknown[]) => linearUpsertThreadedReply(...a),
-  sweepDecompositionNotes: (...a: unknown[]) => linearSweepDecompositionNotes(...a),
+  sweepTransientNotes: (...a: unknown[]) => linearSweepTransientNotes(...a),
 }));
 
 const resolveLinearOauthToken = jest.fn();
@@ -189,16 +189,16 @@ describe('Linear channel adapter', () => {
   });
 
   test('sweepNotes passes the comment to keep through and returns the deleted count', async () => {
-    linearSweepDecompositionNotes.mockResolvedValue(3);
+    linearSweepTransientNotes.mockResolvedValue(3);
     expect(await ch.sweepNotes!(linearIssue, { commentId: 'keep-1' })).toBe(3);
-    expect(linearSweepDecompositionNotes.mock.calls[0][1]).toBe('lin-issue-1');
-    expect(linearSweepDecompositionNotes.mock.calls[0][2]).toBe('keep-1');
+    expect(linearSweepTransientNotes.mock.calls[0][1]).toBe('lin-issue-1');
+    expect(linearSweepTransientNotes.mock.calls[0][2]).toBe('keep-1');
   });
 
   test('sweepNotes with nothing to keep passes no keep id', async () => {
-    linearSweepDecompositionNotes.mockResolvedValue(0);
+    linearSweepTransientNotes.mockResolvedValue(0);
     expect(await ch.sweepNotes!(linearIssue)).toBe(0);
-    expect(linearSweepDecompositionNotes.mock.calls[0][2]).toBeUndefined();
+    expect(linearSweepTransientNotes.mock.calls[0][2]).toBeUndefined();
   });
 
   test('fetchChildGraph maps blocks-derived depends_on to the neutral node shape', async () => {
