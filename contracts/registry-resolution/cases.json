@@ -90,6 +90,11 @@
       "name": "caret-zero-minor",
       "ref": "registry://mcp_server/acme/pdf-tools@^0.2.0",
       "expected": { "ok": true, "kind": "mcp_server", "namespace": "acme", "name": "pdf-tools", "op": "caret", "major": 0, "minor": 2, "patch": 0, "prerelease": null }
+    },
+    {
+      "name": "trailing-newline-rejected",
+      "ref": "registry://mcp_server/acme/pdf-tools@1.0.0\n",
+      "expected": { "ok": false, "reason": "INVALID_REGISTRY_REF" }
     }
   ]
 }

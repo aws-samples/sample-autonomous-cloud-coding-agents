@@ -15,7 +15,9 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from registry.ref import ParsedConstraint
 
-_SEMVER = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z.-]+))?$")
+# ``\Z`` not ``$`` — see registry/ref.py: ``$`` matches before a trailing
+# newline in Python, diverging from the JS mirror (resolver.ts).
+_SEMVER = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z.-]+))?\Z")
 
 
 @dataclass(frozen=True)

@@ -27,13 +27,16 @@ REGISTRY_KINDS = ("mcp_server", "cedar_policy_module", "skill")
 RESERVED_KINDS = ("plugin", "subagent", "prompt_fragment", "capability")
 
 # Structural split — scheme + 3 path segments + the (mandatory) constraint.
+# ``\Z`` (absolute end of string), not ``$``: Python's ``$`` also matches just
+# before a trailing newline, so ``$`` would accept ``…@1.0.0\n`` that the JS
+# mirror (ref.ts, no ``m`` flag) rejects — a byte-for-byte parity break.
 _REF_SHAPE = re.compile(
-    r"^registry://([a-z][a-z0-9_]*)/([a-z][a-z0-9-]*)/([a-z0-9][a-z0-9._-]*)@(.+)$"
+    r"^registry://([a-z][a-z0-9_]*)/([a-z][a-z0-9-]*)/([a-z0-9][a-z0-9._-]*)@(.+)\Z"
 )
 # exact / caret / tilde over MAJOR.MINOR.PATCH with an optional prerelease.
 # Rejects ``*``, ``latest``, ``>=``, ``<=``, x-ranges, and bare prerelease modifiers.
 _CONSTRAINT = re.compile(
-    r"^([\^~]?)(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z.-]+))?$"
+    r"^([\^~]?)(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z.-]+))?\Z"
 )
 _OP_BY_PREFIX = {"": "exact", "^": "caret", "~": "tilde"}
 
