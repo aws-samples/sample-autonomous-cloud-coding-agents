@@ -111,7 +111,7 @@ export default defineConfig({
         {
           label: 'Decisions',
           collapsed: true,
-          items: [{ autogenerate: { directory: 'decisions' } }],
+          autogenerate: { directory: 'decisions' },
         },
       ],
     }),
