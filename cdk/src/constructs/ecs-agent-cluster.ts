@@ -125,11 +125,25 @@ const HTTPS_PORT = 443;
  *    dependency/build caches; without it, concurrent builds can run the disk out
  *    of space and surface as a spurious build failure.
  *  - PLANNING task: 2 vCPU / 8 GB / default disk. For read-only workflows that
- *    clone and read the repo to produce a plan but never build.
+ *    clone and read the repo to produce a plan but never build. "Read-only"
+ *    describes the WORKFLOW's behaviour, not a reduced IAM role: both task defs
+ *    are built by one factory and deliberately share a single task role and
+ *    execution role, because splitting them is how a grant silently lands on one
+ *    def and not the other. Do not read the name as a privilege boundary.
  */
-const DEFAULT_BUILD_TASK_CPU = 16384;
-const DEFAULT_BUILD_TASK_MEMORY_MIB = 122880;
-const DEFAULT_BUILD_TASK_EPHEMERAL_STORAGE_GIB = 100;
+// A MODEST default: 4 vCPU / 16 GB, and Fargate's own 20 GiB disk.
+//
+// Deliberately not the Fargate ceiling. A default is what an adopter who changes
+// nothing gets, and at 16 vCPU / 120 GB that is roughly 5x the per-build cost of
+// this size in us-east-1 on-demand. Under-provisioning surfaces as a slow or
+// OOM-ing build, which is diagnosable and fixable with one prop; over-provisioning
+// surfaces as a bill, which is not. A large TypeScript + Python monorepo genuinely
+// needs more — raise it through {@link EcsTaskSizing}, up to Fargate's 16 vCPU /
+// 120 GB maximum, and raise ephemeral storage with it if concurrent builds run the
+// disk out of space.
+const DEFAULT_BUILD_TASK_CPU = 4096;
+const DEFAULT_BUILD_TASK_MEMORY_MIB = 16384;
+const DEFAULT_BUILD_TASK_EPHEMERAL_STORAGE_GIB = 21;
 const DEFAULT_PLANNING_TASK_CPU = 2048;
 const DEFAULT_PLANNING_TASK_MEMORY_MIB = 8192;
 
@@ -153,6 +167,19 @@ export interface EcsTaskSizing {
   readonly planningTaskCpu?: number;
   /** Planning task memory in MiB. Defaults to 8192 (8 GB). */
   readonly planningTaskMemoryMiB?: number;
+  /**
+   * Extra environment variables for the BUILD task's container, merged over the
+   * defaults (a key given here wins).
+   *
+   * The platform sets a few build-tool variables that are only meaningful for the
+   * toolchain a given repo actually uses — a verify timeout, and parallelism caps
+   * for a mise/jest-shaped build. Those values were measured against one
+   * monorepo, so they are this deployment's opinion rather than a universal
+   * default: a repo that uses none of those tools ignores them, and a repo that
+   * uses mise with plenty of memory will want the serialisation cap raised. Set
+   * them here rather than editing the construct.
+   */
+  readonly extraBuildEnvironment?: Record<string, string>;
 }
 
 export class EcsAgentCluster extends Construct {
@@ -338,6 +365,10 @@ export class EcsAgentCluster extends Construct {
       // Propagates to both the platform push (post_hooks.py) and the agent's own
       // git-tool pushes via shell.py::_clean_env (blacklist — passes SKIP through).
       SKIP: 'monorepo-tests-pre-push',
+      // Caller overrides win: the values above are tuned for one monorepo's
+      // toolchain, so a deployment with a different build shape replaces them
+      // through `taskSizing.extraBuildEnvironment` rather than editing this file.
+      ...(sizing.extraBuildEnvironment ?? {}),
     }, buildDisk);
 
     // PLANNING task def — for read-only workflows that clone + read + emit a plan

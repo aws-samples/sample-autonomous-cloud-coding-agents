@@ -40,6 +40,7 @@ function createStack(overrides?: {
     buildTaskEphemeralStorageGiB?: number;
     planningTaskCpu?: number;
     planningTaskMemoryMiB?: number;
+    extraBuildEnvironment?: Record<string, string>;
   };
 }): { stack: Stack; template: Template } {
   const app = new App({
@@ -104,10 +105,14 @@ describe('EcsAgentCluster construct', () => {
     });
   });
 
-  test('creates a Fargate task definition with 16 vCPU and 120 GB (ABCA-662: full parallel mise build OOM\'d at 64 GB → max Fargate RAM)', () => {
+  test('the BUILD def defaults to a MODEST size, not the Fargate maximum', () => {
+    // A default is what an adopter who changes nothing pays for. At the Fargate
+    // ceiling (16 vCPU / 120 GB) that is roughly 5x the per-build cost of this
+    // size. Under-provisioning is a slow or OOM-ing build — diagnosable, and one
+    // prop away from fixed; over-provisioning is a silent bill.
     baseTemplate.hasResourceProperties('AWS::ECS::TaskDefinition', {
-      Cpu: '16384',
-      Memory: '122880',
+      Cpu: '4096',
+      Memory: '16384',
       RequiresCompatibilities: ['FARGATE'],
       RuntimePlatform: {
         CpuArchitecture: 'ARM64',
@@ -116,12 +121,42 @@ describe('EcsAgentCluster construct', () => {
     });
   });
 
-  test('the BUILD def raises ephemeral storage past the 20 GiB Fargate default (ABCA-659 #2: concurrent builds → ENOSPC)', () => {
-    baseTemplate.hasResourceProperties('AWS::ECS::TaskDefinition', {
+  test('a heavy monorepo can raise the build task to the Fargate ceiling', () => {
+    // The size that a large TypeScript + Python monorepo actually needs, reached
+    // through the prop rather than by being everyone's default.
+    createStack({
+      taskSizing: {
+        buildTaskCpu: 16384,
+        buildTaskMemoryMiB: 122880,
+        buildTaskEphemeralStorageGiB: 100,
+      },
+    }).template.hasResourceProperties('AWS::ECS::TaskDefinition', {
       Cpu: '16384',
       Memory: '122880',
       EphemeralStorage: { SizeInGiB: 100 },
     });
+  });
+
+  test('build-tool env vars are overridable, so tuned values are not everyone\'s default', () => {
+    // The platform sets a verify timeout and parallelism caps measured against one
+    // monorepo's toolchain. A deployment with a different build shape replaces them
+    // through the prop instead of editing the construct.
+    const template = createStack({
+      taskSizing: { extraBuildEnvironment: { MISE_JOBS: '8', JEST_MAX_WORKERS: '50%' } },
+    }).template;
+    const taskDefs = template.findResources('AWS::ECS::TaskDefinition');
+    const build = Object.values(taskDefs).find(
+      (d) => (d as { Properties: { Cpu: string } }).Properties.Cpu === '4096',
+    );
+    expect(build).toBeDefined();
+    const env = ((build as {
+      Properties: { ContainerDefinitions: Array<{ Environment?: Array<{ Name: string; Value: string }> }> };
+    }).Properties.ContainerDefinitions[0].Environment ?? []);
+    const byName = Object.fromEntries(env.map((e) => [e.Name, e.Value]));
+    expect(byName.MISE_JOBS).toBe('8');
+    expect(byName.JEST_MAX_WORKERS).toBe('50%');
+    // A key the caller did NOT override keeps the platform value.
+    expect(byName.BUILD_VERIFY_TIMEOUT_S).toBe('3600');
   });
 
   test('the PLANNING def keeps the 20 GiB default (no EphemeralStorage — a clone+read planner needs no extra disk)', () => {
