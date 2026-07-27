@@ -407,6 +407,22 @@ describe('classifyError', () => {
       expect(result!.title).toBe('Task timed out');
       expect(result!.retryable).toBe(false);
     });
+
+    test('classifies a build/verify command TIMEOUT distinctly from a crash (ABCA-667 live-caught)', () => {
+      // The fork's full `mise run build` exceeded the 600s cap → Python
+      // TimeoutExpired. Before this pattern it fell to "Unexpected error"; now it
+      // reads as a build-time-out (user-actionable: retry / raise the cap), not a
+      // mysterious crash.
+      const result = classifyError(
+        "TimeoutExpired: Command '['bash', '-lc', 'mise run install && MISE_EXPERIMENTAL=1 mise run build']' timed out after 600 seconds",
+      );
+      expect(result!.category).toBe(ErrorCategory.TIMEOUT);
+      expect(result!.title).toMatch(/didn't finish in time|timed out/i);
+      // A timeout is user-actionable (retry / raise the cap), not a hard failure.
+      expect(result!.retryable).toBe(true);
+      // Must NOT fall through to the generic Unexpected error.
+      expect(result!.title).not.toMatch(/Unexpected error/i);
+    });
   });
 
   // --- Environmental blockers (#251) ---

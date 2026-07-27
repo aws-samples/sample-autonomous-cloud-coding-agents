@@ -17,12 +17,17 @@
  *  SOFTWARE.
  */
 
-import { resolveJiraOauthToken } from './jira-oauth-resolver';
+import { requestJiraAppActor } from './jira-app-actor';
+import {
+  resolveJiraOutboundAuth,
+  type ResolvedJiraOutboundAuth,
+} from './jira-oauth-resolver';
 import { logger } from './logger';
 
 /**
- * Lambda-side helper for posting comments onto Jira Cloud issues via the
- * Atlassian REST v3 API. Used by the webhook processor to give users
+ * Lambda-side helper for posting comments onto Jira Cloud issues through the
+ * configured Forge app actor or the legacy OAuth fallback. Used by the
+ * webhook processor to give users
  * feedback on pre-container failures (guardrail block, concurrency cap,
  * unmapped project, etc.) — paths where the agent never starts and the
  * agent-side Jira MCP cannot run.
@@ -205,8 +210,7 @@ async function postComment(
 /**
  * Tenant-scoped feedback context. Resolved once per task by the caller
  * (webhook processor / orchestrator) and threaded through to the
- * post-comment helper, so the OAuth resolver runs once per task instead
- * of once per Jira API call.
+ * post-comment helper, so outbound identity resolution runs once per task.
  */
 export interface JiraFeedbackContext {
   /** Atlassian tenant identifier (`cloudId`) — registry key. */
@@ -215,25 +219,19 @@ export interface JiraFeedbackContext {
   readonly registryTableName: string;
 }
 
-async function resolveTenantToken(
+async function resolveTenantAuth(
   ctx: JiraFeedbackContext,
   forceRefresh = false,
-): Promise<{ accessToken: string } | null> {
+): Promise<ResolvedJiraOutboundAuth | null> {
   try {
-    const resolved = await resolveJiraOauthToken(ctx.cloudId, ctx.registryTableName, { forceRefresh });
-    if (!resolved) return null;
-    return { accessToken: resolved.accessToken };
+    return await resolveJiraOutboundAuth(ctx.cloudId, ctx.registryTableName, { forceRefresh });
   } catch (err) {
-    // `force_refresh` discriminates the initial resolve from the post-401
-    // retry resolve: a failure here on the retry is an infra error (DDB/SM),
-    // distinct from "refresh-token revoked", and triage needs to tell them
-    // apart.
-    logger.warn('Jira feedback could not resolve OAuth token', {
+    logger.warn('Jira feedback could not resolve outbound identity', {
       jira_cloud_id: ctx.cloudId,
       force_refresh: forceRefresh,
       error: err instanceof Error ? err.message : String(err),
     });
-    return null;
+    return null; // nosemgrep: ts-silent-success-masking -- Jira feedback is advisory and cannot block task execution
   }
 }
 
@@ -286,13 +284,21 @@ async function postCommentWithResult(
   issueIdOrKey: string,
   body: Record<string, unknown>,
 ): Promise<JiraPostResult> {
-  const resolved = await resolveTenantToken(ctx);
-  // Token resolution collapses every failure cause (registry miss, revoked
-  // workspace, unreadable secret, transient DDB/SM throttle) into null. As
-  // with linear-feedback, there is no signal left to tell a throttle from an
-  // unregistered workspace, so we classify it terminal — the dispatcher's
-  // marker-gated retry would not resolve a genuinely-missing credential.
+  const resolved = await resolveTenantAuth(ctx);
   if (!resolved) return { ok: false, retryable: false };
+
+  if (resolved.kind === 'app') {
+    const appResult = await requestJiraAppActor(resolved.appActor, {
+      version: 1,
+      operation: 'comment',
+      cloud_id: ctx.cloudId,
+      issue_key: issueIdOrKey,
+      body,
+    });
+    return appResult.ok
+      ? { ok: true }
+      : { ok: false, retryable: appResult.retryable };
+  }
 
   const outcome = await postComment(resolved.accessToken, ctx.cloudId, issueIdOrKey, body);
   if (outcome.kind === 'ok') return { ok: true };
@@ -305,8 +311,20 @@ async function postCommentWithResult(
     jira_cloud_id: ctx.cloudId,
     issue_id_or_key: issueIdOrKey,
   });
-  const refreshed = await resolveTenantToken(ctx, true);
+  const refreshed = await resolveTenantAuth(ctx, true);
   if (!refreshed) return { ok: false, retryable: false };
+  if (refreshed.kind === 'app') {
+    const appResult = await requestJiraAppActor(refreshed.appActor, {
+      version: 1,
+      operation: 'comment',
+      cloud_id: ctx.cloudId,
+      issue_key: issueIdOrKey,
+      body,
+    });
+    return appResult.ok
+      ? { ok: true }
+      : { ok: false, retryable: appResult.retryable };
+  }
   // If the refresh handed back the same access token, the retry can only
   // reproduce the 401 — skip the redundant network call.
   if (refreshed.accessToken === resolved.accessToken) {

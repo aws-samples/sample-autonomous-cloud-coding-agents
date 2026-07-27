@@ -79,6 +79,15 @@ class TestFailSafe:
         assert is_scoped() is False
 
 
+# NOTE: the conftest-scrub regression guard for AGENT_SESSION_ROLE_ARN lives in
+# tests/test_conftest_env_scrub.py — deliberately in its OWN module with NO local
+# autouse fixture. This file's `_reset` fixture (above) itself does
+# `monkeypatch.delenv(SESSION_ROLE_ARN_ENV)`, which would MASK whether conftest's
+# `_clean_env` performs the scrub — a guard placed here passes even if the
+# conftest line is deleted (#616 review B1). Only a fixture-free module truly
+# guards the fix.
+
+
 # ---------------------------------------------------------------------------
 # Scoped: SessionRole ARN set → refreshable assumed-role session
 # ---------------------------------------------------------------------------
@@ -131,7 +140,15 @@ class TestScopedSession:
             return MagicMock(name="scoped")
 
         def _worker() -> None:
-            start.wait()
+            # Bounded barrier wait. A bare Barrier(20).wait() blocks FOREVER if
+            # even one of the 20 threads never arrives (e.g. a worker reaped under
+            # container memory pressure, or thread creation throttled) — every
+            # survivor then hangs here and the main thread hangs in join() below,
+            # stalling the whole `mise run build` until the 3600s ceiling. This is
+            # the ECS-only flaky hang chased across ABCA-684/686/688 (pytest-timeout
+            # only fixed the SYMPTOM; this Barrier is the ROOT cause). A timeout
+            # makes the barrier raise BrokenBarrierError so the test fails fast.
+            start.wait(timeout=30)
             session = get_session()
             with lock:
                 results.append(session)
@@ -140,8 +157,11 @@ class TestScopedSession:
             threads = [threading.Thread(target=_worker) for _ in range(20)]
             for t in threads:
                 t.start()
+            # Bounded joins for the same reason — a worker that died before
+            # appending must not hang the suite; a leftover live thread trips the
+            # assertion below (results != 20) rather than blocking indefinitely.
             for t in threads:
-                t.join()
+                t.join(timeout=60)
 
         mk_build.assert_called_once()
         assert len(results) == 20

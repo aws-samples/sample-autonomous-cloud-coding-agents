@@ -27,6 +27,14 @@ process.env.ECS_TASK_DEFINITION_ARN = TASK_DEF_ARN;
 process.env.ECS_SUBNETS = 'subnet-aaa,subnet-bbb';
 process.env.ECS_SECURITY_GROUP = 'sg-12345';
 process.env.ECS_CONTAINER_NAME = 'AgentContainer';
+// The top-of-file import's inline-fallback / no-op tests assume these OPTIONAL
+// vars are ABSENT at load time. They are unset in a dev shell but the real ECS
+// agent container HAS ECS_PAYLOAD_BUCKET set (#502) — so leaving this to ambient
+// env made the build pass locally yet FAIL on ECS ("works local, dies on ECS").
+// The #502 / #299 describe blocks below set these via isolateModules; delete them
+// here so the top-of-file import is hermetic regardless of the runner's env.
+delete process.env.ECS_PAYLOAD_BUCKET;
+delete process.env.ECS_PLANNING_TASK_DEFINITION_ARN;
 
 const mockSend = jest.fn();
 jest.mock('@aws-sdk/client-ecs', () => ({
@@ -423,6 +431,13 @@ describe('EcsComputeStrategy with ECS_PAYLOAD_BUCKET (S3-pointer path, #502)', (
     expect(src).toContain('AGENT_PAYLOAD_S3_URI');
     expect(src).toContain('get_object');
     expect(src).toContain('AGENT_PAYLOAD');
+    // ABCA-487: the boot command maps the WHOLE payload via
+    // run_task_from_payload (not a hand-listed kwarg subset that dropped
+    // channel_source/channel_metadata → no Linear reactions on ECS). Assert we
+    // call the mapper and no longer hand-pick the old prompt/model_id kwargs.
+    expect(src).toContain('run_task_from_payload(p)');
+    expect(src).not.toContain('task_description=p.get');
+    expect(src).not.toContain('channel_source'); // never hand-listed; the mapper forwards it
   });
 
   test('deleteEcsPayload deletes the task payload object', async () => {

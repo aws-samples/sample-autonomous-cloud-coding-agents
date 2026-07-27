@@ -24,6 +24,10 @@ import { S3Client } from '@aws-sdk/client-s3';
 import { DynamoDBDocumentClient, GetCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
 import { ulid } from 'ulid';
 import type { ScreeningConfig } from './shared/attachment-screening';
+import {
+  buildIterationInstruction,
+  parseCommentTrigger,
+} from './shared/comment-trigger';
 import { createTaskCore } from './shared/create-task-core';
 import { extractDescriptionMarkdown } from './shared/jira-adf';
 import {
@@ -35,6 +39,11 @@ import {
 } from './shared/jira-attachments';
 import { reportIssueFailure } from './shared/jira-feedback';
 import { resolveJiraOauthToken } from './shared/jira-oauth-resolver';
+import {
+  prNumberFromTask,
+  resolveTaskByJiraIssue,
+  type JiraIssueTask,
+} from './shared/jira-task-by-issue';
 import { logger } from './shared/logger';
 import type { Attachment, PassedAttachmentRecord } from './shared/types';
 import { MAX_TASK_DESCRIPTION_LENGTH } from './shared/validation';
@@ -44,6 +53,7 @@ const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
 const PROJECT_MAPPING_TABLE = process.env.JIRA_PROJECT_MAPPING_TABLE_NAME!;
 const USER_MAPPING_TABLE = process.env.JIRA_USER_MAPPING_TABLE_NAME!;
+const TASK_TABLE = process.env.TASK_TABLE_NAME!;
 const WORKSPACE_REGISTRY_TABLE = process.env.JIRA_WORKSPACE_REGISTRY_TABLE_NAME;
 const DEFAULT_LABEL_FILTER = 'bgagent';
 
@@ -156,7 +166,7 @@ async function resolveSoleTenantCloudId(): Promise<string | undefined> {
  * Undocumented fields are tolerated.
  */
 interface JiraIssueEvent {
-  readonly webhookEvent: 'jira:issue_created' | 'jira:issue_updated' | string;
+  readonly webhookEvent: 'jira:issue_created' | 'jira:issue_updated' | 'comment_created' | string;
   readonly timestamp?: number;
   readonly cloudId?: string;
   readonly user?: {
@@ -188,6 +198,15 @@ interface JiraIssueEvent {
       readonly fromString?: string | null;
       readonly toString?: string | null;
     }>;
+  };
+  readonly comment?: {
+    readonly id?: string;
+    readonly body?: unknown;
+    readonly author?: {
+      readonly accountId?: string;
+      readonly accountType?: string;
+      readonly displayName?: string;
+    };
   };
 }
 
@@ -236,11 +255,12 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     return;
   }
 
-  if (
-    payload.webhookEvent !== 'jira:issue_created' &&
-    payload.webhookEvent !== 'jira:issue_updated'
-  ) {
-    logger.info('Jira processor skipping non-issue event', { webhookEvent: payload.webhookEvent });
+  const isIssueEvent =
+    payload.webhookEvent === 'jira:issue_created'
+    || payload.webhookEvent === 'jira:issue_updated';
+  const isCommentEvent = payload.webhookEvent === 'comment_created';
+  if (!isIssueEvent && !isCommentEvent) {
+    logger.info('Jira processor skipping unsupported event', { webhookEvent: payload.webhookEvent });
     return;
   }
 
@@ -274,6 +294,18 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   } else {
     cloudId = payload.cloudId ?? (await resolveSoleTenantCloudId());
   }
+
+  if (isCommentEvent) {
+    if (!cloudId) {
+      logger.warn('Jira comment webhook missing cloudId and no sole active tenant', {
+        issue_key: issue.key,
+      });
+      return;
+    }
+    await handleCommentTrigger(payload, issue, cloudId);
+    return;
+  }
+
   const projectKey = issue.fields?.project?.key;
   if (!projectKey) {
     logger.info('Jira issue has no project.key — skipping (cannot route to a repo)', {
@@ -545,6 +577,211 @@ export async function handler(event: ProcessorEvent): Promise<void> {
 }
 
 /**
+ * Handle `comment_created` independently of the label-trigger path.
+ *
+ * The prior task is the routing source of truth: comments do not require the
+ * trigger label to still be present or the Jira project mapping to remain
+ * active. This preserves reviewer follow-ups after the original run.
+ */
+async function handleCommentTrigger(
+  payload: JiraIssueEvent,
+  issue: NonNullable<JiraIssueEvent['issue']>,
+  cloudId: string,
+): Promise<void> {
+  const comment = payload.comment;
+  if (!comment?.id) {
+    logger.warn('Jira comment payload missing comment.id', { issue_key: issue.key });
+    return;
+  }
+
+  // Native app users are never human reviewers. ABCA's own 3LO comments are
+  // attributed to the authorizing Atlassian user, so parseCommentTrigger also
+  // rejects ABCA's stable rendered prefixes to prevent self-trigger loops.
+  if (comment.author?.accountType?.toLowerCase() === 'app') {
+    logger.info('Ignoring Jira app-authored comment', {
+      issue_key: issue.key,
+      comment_id: comment.id,
+    });
+    return;
+  }
+
+  const commentBody = extractDescriptionMarkdown(comment.body);
+  const trigger = parseCommentTrigger(commentBody);
+  if (!trigger.triggered) {
+    logger.info('Jira comment has no @bgagent trigger', {
+      issue_key: issue.key,
+      comment_id: comment.id,
+    });
+    return;
+  }
+
+  const priorTask = await resolveTaskByJiraIssue(
+    ddb,
+    TASK_TABLE,
+    cloudId,
+    issue.key,
+  );
+  const prNumber = priorTask ? prNumberFromTask(priorTask) : null;
+  if (!priorTask || prNumber === null) {
+    await safeReportIssueFailure(
+      issue.key,
+      cloudId,
+      "❌ I couldn't find an ABCA pull request for this Jira issue. Run the issue with the configured ABCA trigger label first, then retry this comment.",
+    );
+    return;
+  }
+  if (!priorTask.repo) {
+    await safeReportIssueFailure(
+      issue.key,
+      cloudId,
+      "❌ I found the earlier ABCA task, but it has no repository recorded, so I can't update its pull request.",
+    );
+    return;
+  }
+
+  const linkedCommentAuthor = comment.author?.accountId
+    ? await lookupPlatformUser(cloudId, comment.author.accountId)
+    : null;
+  const platformUserId = linkedCommentAuthor ?? priorTask.user_id;
+  if (!platformUserId) {
+    await safeReportIssueFailure(
+      issue.key,
+      cloudId,
+      '❌ I found the pull request, but neither the comment author nor the original task has a linked ABCA user.',
+    );
+    return;
+  }
+
+  if (!WORKSPACE_REGISTRY_TABLE) {
+    logger.warn('Cannot run Jira comment iteration: workspace registry is not configured', {
+      issue_key: issue.key,
+      comment_id: comment.id,
+    });
+    return;
+  }
+  const resolved = await resolveJiraOauthToken(cloudId, WORKSPACE_REGISTRY_TABLE);
+  if (!resolved) {
+    logger.warn('Cannot run Jira comment iteration: tenant OAuth is unavailable', {
+      jira_cloud_id: cloudId,
+      issue_key: issue.key,
+      comment_id: comment.id,
+    });
+    return;
+  }
+
+  const channelMetadata = buildIterationChannelMetadata(
+    priorTask,
+    issue,
+    cloudId,
+    comment.id,
+    resolved.oauthSecretArn,
+    resolved.siteUrl,
+  );
+  const idempotencyKey = buildCommentIdempotencyKey(cloudId, issue.key, comment.id);
+  const requestId = crypto.randomUUID();
+  const result = await createTaskCore(
+    {
+      repo: priorTask.repo,
+      workflow_ref: 'coding/pr-iteration-v1',
+      pr_number: prNumber,
+      task_description: buildIterationInstruction(trigger),
+    },
+    {
+      userId: platformUserId,
+      channelSource: 'jira',
+      channelMetadata,
+      idempotencyKey,
+    },
+    requestId,
+  );
+
+  if (result.statusCode === 200) {
+    logger.info('Jira comment iteration was an idempotent replay', {
+      issue_key: issue.key,
+      comment_id: comment.id,
+      prior_task_id: priorTask.task_id,
+    });
+    return;
+  }
+
+  if (result.statusCode !== 201) {
+    logger.warn('Jira comment iteration task creation returned non-201', {
+      status: result.statusCode,
+      body: result.body,
+      issue_key: issue.key,
+      comment_id: comment.id,
+    });
+    await safeReportIssueFailure(
+      issue.key,
+      cloudId,
+      buildCreateTaskFailureMessage(
+        result.statusCode,
+        result.body,
+        'Please add a new `@bgagent` comment in a few minutes.',
+      ),
+    );
+    return;
+  }
+
+  await safeReportIssueFailure(
+    issue.key,
+    cloudId,
+    `👀 ABCA accepted this follow-up and is updating PR #${prNumber}.`,
+  );
+  logger.info('Jira comment-triggered PR iteration task created', {
+    issue_key: issue.key,
+    comment_id: comment.id,
+    prior_task_id: priorTask.task_id,
+    repo: priorTask.repo,
+    pr_number: prNumber,
+    attributed_to_linked_comment_author: Boolean(linkedCommentAuthor),
+    request_id: requestId,
+  });
+}
+
+function buildIterationChannelMetadata(
+  priorTask: JiraIssueTask,
+  issue: NonNullable<JiraIssueEvent['issue']>,
+  cloudId: string,
+  commentId: string,
+  oauthSecretArn: string,
+  siteUrl: string,
+): Record<string, string> {
+  const previous = priorTask.channel_metadata ?? {};
+  const metadata: Record<string, string> = {
+    jira_cloud_id: cloudId,
+    jira_issue_id: issue.id,
+    jira_issue_key: issue.key,
+    jira_oauth_secret_arn: oauthSecretArn,
+    jira_site_url: siteUrl,
+    jira_trigger_comment_id: commentId,
+    jira_prior_task_id: priorTask.task_id,
+  };
+
+  const projectKey = issue.fields?.project?.key ?? previous.jira_project_key;
+  if (projectKey) metadata.jira_project_key = projectKey;
+  if (previous.jira_status_on_start) {
+    metadata.jira_status_on_start = previous.jira_status_on_start;
+  }
+  if (previous.jira_status_on_pr) {
+    metadata.jira_status_on_pr = previous.jira_status_on_pr;
+  }
+  return metadata;
+}
+
+function buildCommentIdempotencyKey(
+  cloudId: string,
+  issueKey: string,
+  commentId: string,
+): string {
+  const digest = crypto
+    .createHash('sha256')
+    .update(`${cloudId}\0${issueKey}\0${commentId}`)
+    .digest('hex');
+  return `jira-iterate-${digest}`;
+}
+
+/**
  * Decide whether a Jira issue event should trigger a task.
  *
  * Two trigger paths:
@@ -598,7 +835,11 @@ function tokenizeLabelString(value: string | null | undefined): string[] {
  * Translate a `createTaskCore` non-201 response into a user-facing Jira
  * comment. Mirrors the Linear-side helper.
  */
-function buildCreateTaskFailureMessage(statusCode: number, rawBody: string): string {
+function buildCreateTaskFailureMessage(
+  statusCode: number,
+  rawBody: string,
+  retryHint = 'Please re-apply the trigger label in a few minutes.',
+): string {
   let detail = '';
   try {
     if (rawBody) {
@@ -616,7 +857,7 @@ function buildCreateTaskFailureMessage(statusCode: number, rawBody: string): str
     return `❌ ABCA couldn't accept this task: ${detail}`;
   }
   if (statusCode === 503) {
-    return `❌ ABCA is temporarily unavailable (status ${statusCode}). Please re-apply the trigger label in a few minutes.`;
+    return `❌ ABCA is temporarily unavailable (status ${statusCode}). ${retryHint}`;
   }
   if (detail) {
     return `❌ ABCA couldn't create this task (status ${statusCode}): ${detail}`;

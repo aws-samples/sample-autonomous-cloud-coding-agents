@@ -6,6 +6,7 @@ from unittest.mock import patch
 from shell import (
     is_transient_cmd_failure,
     redact_secrets,
+    run_cmd,
     run_cmd_with_backoff,
     slugify,
     truncate,
@@ -185,3 +186,135 @@ class TestRunCmdWithBackoff:
         with patch("shell.run_cmd", side_effect=lambda *a, **k: seq.pop(0)):
             run_cmd_with_backoff(["git", "clone"], "clone", base_delay_s=2.0, sleep=delays.append)
         assert delays == [2.0, 4.0]  # 2 * 2**0, 2 * 2**1
+
+
+class TestRunCmdFailureLogging:
+    """A failing command must surface its ACTUAL error. Build/test tooling (jest,
+    tsc, the mise task DAG) writes the failing-task error to STDOUT, not stderr —
+    so logging stderr alone made build-gate failures undebuggable (ABCA-662: a red
+    ``mise run build`` showed every task starting but never WHICH one failed)."""
+
+    def _completed(self, rc, stdout="", stderr=""):
+        return SimpleNamespace(returncode=rc, stdout=stdout, stderr=stderr)
+
+    def _run_capturing_logs(self, proc):
+        logs = []
+        with (
+            patch("shell.subprocess.run", return_value=proc),
+            patch("shell.log", side_effect=lambda prefix, text: logs.append((prefix, text))),
+        ):
+            run_cmd(["mise", "run", "build"], "verify-build-post", check=False)
+        return logs
+
+    def test_stdout_is_logged_on_failure(self):
+        # The failing task's error lives in stdout — it MUST reach the log.
+        proc = self._completed(
+            1,
+            stdout="[//cdk:test] FAIL test/foo.test.ts\n  expected 1 got 2\n[//cdk:test] exit 1",
+            stderr="",
+        )
+        logs = self._run_capturing_logs(proc)
+        blob = "\n".join(text for _, text in logs)
+        assert "FAIL test/foo.test.ts" in blob
+        assert "expected 1 got 2" in blob
+
+    def test_no_markers_falls_back_to_tail(self):
+        # Unknown tool output with no failure signature → fall back to the tail.
+        proc = self._completed(
+            1,
+            stdout="\n".join(f"line {i}" for i in range(50)),
+            stderr="",
+        )
+        logs = self._run_capturing_logs(proc)
+        blob = "\n".join(text for _, text in logs)
+        assert "line 49" in blob  # last line present (tail)
+        assert "line 0" not in blob  # earliest lines dropped
+
+    def test_failure_line_in_the_MIDDLE_is_surfaced(self):
+        # ABCA-662 root cause of the tooling gap: a PARALLEL mise DAG interleaves
+        # output, so the failing task's line is in the MIDDLE while the tail is a
+        # passing package's coverage table. The failing line MUST be surfaced.
+        mid = "[//cdk:test] FAIL test/handlers/foo.test.ts — expected 1 got 2"
+        stdout = (
+            "\n".join(f"[//cdk:test] passing line {i}" for i in range(30))
+            + f"\n{mid}\n"
+            + "\n".join(f"[//agent:test] coverage {i} | 100 | 100" for i in range(30))
+        )
+        proc = self._completed(1, stdout=stdout, stderr="")
+        logs = self._run_capturing_logs(proc)
+        blob = "\n".join(text for _, text in logs)
+        assert "FAIL test/handlers/foo.test.ts" in blob  # the mid-DAG red is surfaced
+        assert "coverage 29" in blob  # tail context still present
+
+    def test_coverage_threshold_failure_is_surfaced(self):
+        # jest prints a coverage table then exits 1 with "does not meet threshold"
+        # — no ✕/FAIL line. That threshold line must be surfaced.
+        stdout = (
+            "\n".join(f"file{i}.ts | 100 | 100 | 100 | 100" for i in range(40))
+            + '\nJest: "global" coverage threshold for branches (82%) not met: 79%'
+        )
+        proc = self._completed(1, stdout=stdout, stderr="")
+        logs = self._run_capturing_logs(proc)
+        blob = "\n".join(text for _, text in logs)
+        assert "coverage threshold for branches" in blob
+
+    def test_benign_zero_errors_line_not_surfaced_as_failure(self):
+        # "0 errors" / "no error" must NOT be pulled in as a failure marker.
+        stdout = "eslint: 0 errors, 0 warnings\n" + "\n".join(f"ok {i}" for i in range(20))
+        proc = self._completed(1, stdout=stdout, stderr="")
+        logs = self._run_capturing_logs(proc)
+        # It falls back to tail (no real failure markers); the "0 errors" line is
+        # not falsely elevated as THE failure.
+        blob = "\n".join(text for _, text in logs)
+        assert "ok 19" in blob
+
+    def test_marker_line_with_noise_term_is_filtered_by_allowlist(self):
+        # N3: the LOAD-BEARING allowlist case. A line that hits a real marker
+        # (`error:`) AND a noise term (`0 errors`) must be filtered OUT of the
+        # surfaced set. Placed in the MIDDLE (before the tail window) so it is
+        # only reachable via the marker scan — if _FAILURE_LINE_NOISE were
+        # deleted, this line WOULD be surfaced and the assertion would fail.
+        # A genuine failure line follows so the scan still produces a match set.
+        noisy = "error: eslint produced 0 errors after autofix retry"  # marker + noise
+        real = "[//cdk:test] FAIL test/handlers/bar.test.ts — boom"
+        # 30 trailing passing lines push both lines above out of the tail window,
+        # so `noisy` is only reachable via the marker scan (where the allowlist runs).
+        stdout = f"{noisy}\n{real}\n" + "\n".join(f"[//agent:test] passing {i}" for i in range(30))
+        proc = self._completed(1, stdout=stdout, stderr="")
+        logs = self._run_capturing_logs(proc)
+        blob = "\n".join(text for _, text in logs)
+        assert "FAIL test/handlers/bar.test.ts" in blob  # real failure surfaced
+        assert "0 errors after autofix retry" not in blob  # noisy marker filtered by allowlist
+
+    def test_surfaced_failure_lines_are_capped_and_truncation_marked(self):
+        # N4: a genuinely huge red run (more than _MAX_SURFACED_FAILURE_LINES
+        # marker lines) must be capped, with an explicit truncation breadcrumb —
+        # so it can't flood CloudWatch. Exercises the cap branch the other tests
+        # never reach.
+        from shell import _MAX_SURFACED_FAILURE_LINES
+
+        n = _MAX_SURFACED_FAILURE_LINES + 10
+        stdout = "\n".join(f"FAIL test/case_{i}.test.ts — assertion {i}" for i in range(n))
+        proc = self._completed(1, stdout=stdout, stderr="")
+        logs = self._run_capturing_logs(proc)
+        blob = "\n".join(text for _, text in logs)
+        # The marker-scan hit the cap and emitted the truncation breadcrumb.
+        assert "… (more failure lines truncated)" in blob
+        # The breadcrumb appears within the surfaced set BEFORE the tail divider —
+        # i.e. the matched-line scan was capped, not the whole output dumped.
+        head = blob.split("--- (trailing output) ---")[0]
+        head_cases = sum(1 for i in range(n) if f"case_{i}.test.ts" in head)
+        assert head_cases <= _MAX_SURFACED_FAILURE_LINES
+
+    def test_stdout_is_redacted(self):
+        proc = self._completed(1, stdout="error: pushing with ghp_supersecrettoken123", stderr="")
+        logs = self._run_capturing_logs(proc)
+        blob = "\n".join(text for _, text in logs)
+        assert "ghp_supersecrettoken123" not in blob
+
+    def test_success_does_not_dump_stdout(self):
+        # On success we don't spam stdout — only the OK line.
+        proc = self._completed(0, stdout="lots of build output", stderr="")
+        logs = self._run_capturing_logs(proc)
+        blob = "\n".join(text for _, text in logs)
+        assert "lots of build output" not in blob

@@ -4,7 +4,7 @@ ARG GH_VERSION=2.93.0
 FROM --platform=$TARGETPLATFORM jdxcode/mise:latest AS mise
 
 # Build gh with a patched Go toolchain; upstream packages can lag Go CVE fixes.
-FROM --platform=$TARGETPLATFORM golang:1.26.3-bookworm AS gh-builder
+FROM --platform=$TARGETPLATFORM golang:1.26.4-bookworm AS gh-builder
 ARG GH_VERSION
 RUN GOPROXY=direct GOBIN=/out go install "github.com/cli/cli/v2/cmd/gh@v${GH_VERSION}"
 
@@ -44,6 +44,15 @@ RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
 
+# Enable Corepack so ``yarn`` / ``pnpm`` resolve out of the box. Many target
+# repos (including ABCA itself) drive installs with ``yarn install`` via their
+# build command; without this, ``yarn`` is "command not found" (exit 127) and
+# the build-verification GATE runs inert — a green build is reported for a repo
+# we never actually built (live-caught 2026-06-29 dogfooding ABCA-on-ABCA: the
+# agent had to hand-build a ``~/bin/yarn`` shim every run). Corepack ships with
+# Node 24; ``enable`` installs the yarn/pnpm shims onto PATH.
+RUN corepack enable && corepack prepare yarn@stable --activate || corepack enable
+
 # Install Claude Code CLI (the Python SDK requires this binary)
 # Then update known vulnerable transitive packages where fixed versions exist.
 # Pinned 2.1.191 to match the CLI bundled by claude-agent-sdk 0.2.110 (see
@@ -52,10 +61,19 @@ RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && \
 # returned creds are cached until 5 min before the JSON's `Expiration`, so an
 # 8 h task re-assumes the 1 h-capped SessionRole before expiry. Older builds
 # only refreshed hourly on a timer, racing the role-chaining cap.
+# claude-code@2.1.x ships an error-shim at bin/claude.exe that its postinstall
+# (install.cjs) replaces with the platform-native ELF binary. That postinstall
+# can silently fall back (leaving the shim in place) — the shim then dies at
+# runtime with "Exec format error: 'claude'" even though the native binary is
+# present as an optional dep, just never wired up. Re-run install.cjs explicitly
+# after the install so the native binary is placed at build time, and hard-verify
+# it exec's (``claude --version`` fails the build if the shim is still on PATH).
 RUN npm install -g npm@latest && \
     npm install -g @anthropic-ai/claude-code@2.1.191 && \
     CLAUDE_NPM_ROOT="$(npm root -g)/@anthropic-ai/claude-code" && \
-    npm --prefix "${CLAUDE_NPM_ROOT}" update tar minimatch glob cross-spawn picomatch
+    npm --prefix "${CLAUDE_NPM_ROOT}" update tar minimatch glob cross-spawn picomatch && \
+    node "${CLAUDE_NPM_ROOT}/install.cjs" && \
+    claude --version
 
 # Install uv (fast Python package manager) — pinned for reproducibility
 COPY --from=ghcr.io/astral-sh/uv:0.11.14 /uv /usr/local/bin/uv

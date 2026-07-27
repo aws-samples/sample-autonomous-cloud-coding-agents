@@ -684,6 +684,16 @@ export async function createTaskCore(
     ...(context.idempotencyKey && { idempotency_key: context.idempotencyKey }),
     channel_source: context.channelSource,
     channel_metadata: context.channelMetadata,
+    // DynamoDB GSIs cannot key on nested map values. Hoist the tenant-scoped
+    // Jira issue identity so JiraIssueIndex can resolve comment triggers back
+    // to the newest PR-producing task.
+    ...(context.channelSource === 'jira'
+      && context.channelMetadata.jira_cloud_id
+      && context.channelMetadata.jira_issue_key
+      && {
+        jira_issue_identity:
+          `${context.channelMetadata.jira_cloud_id}#${context.channelMetadata.jira_issue_key}`,
+      }),
     ...(attachmentRecords.length > 0 && { attachments: attachmentRecords }),
     status_created_at: `${initialStatus}#${now}`,
     created_at: now,

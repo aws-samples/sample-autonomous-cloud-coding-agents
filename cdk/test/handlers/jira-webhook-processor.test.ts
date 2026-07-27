@@ -40,6 +40,15 @@ jest.mock('../../src/handlers/shared/jira-oauth-resolver', () => ({
   resolveJiraOauthToken: (...args: unknown[]) => resolveJiraOauthTokenMock(...args),
 }));
 
+const resolveTaskByJiraIssueMock = jest.fn();
+jest.mock('../../src/handlers/shared/jira-task-by-issue', () => {
+  const actual = jest.requireActual('../../src/handlers/shared/jira-task-by-issue');
+  return {
+    ...actual,
+    resolveTaskByJiraIssue: (...args: unknown[]) => resolveTaskByJiraIssueMock(...args),
+  };
+});
+
 // The processor screens the folded comment section via the Bedrock Guardrail
 // (fail-open on intervention). Mock the client so it passes by default; the
 // comment-block-dropped test overrides it to GUARDRAIL_INTERVENED.
@@ -68,6 +77,7 @@ jest.mock('../../src/handlers/shared/jira-attachments', () => {
 process.env.JIRA_PROJECT_MAPPING_TABLE_NAME = 'JiraProjects';
 process.env.JIRA_USER_MAPPING_TABLE_NAME = 'JiraUsers';
 process.env.JIRA_WORKSPACE_REGISTRY_TABLE_NAME = 'JiraWorkspaceRegistry';
+process.env.TASK_TABLE_NAME = 'Tasks';
 // Attachment enrichment needs a bucket + guardrail configured (#577); with
 // these set the processor initializes S3/Bedrock clients (cheap, no network at
 // construction) and screens attachments through the mocked helper.
@@ -111,6 +121,39 @@ function issue(overrides: Record<string, unknown> = {}): Record<string, unknown>
   };
 }
 
+function comment(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    webhookEvent: 'comment_created',
+    timestamp: 1784079623761,
+    cloudId: 'cloud-1',
+    user: { accountId: 'reviewer-1', displayName: 'Reviewer' },
+    issue: {
+      id: '10001',
+      key: 'ENG-42',
+      fields: { project: { id: 'p1', key: 'ENG' } },
+    },
+    comment: {
+      id: 'comment-1',
+      author: {
+        accountId: 'reviewer-1',
+        accountType: 'atlassian',
+        displayName: 'Reviewer',
+      },
+      body: {
+        type: 'doc',
+        version: 1,
+        content: [
+          {
+            type: 'paragraph',
+            content: [{ type: 'text', text: '@bgagent update the README too' }],
+          },
+        ],
+      },
+    },
+    ...overrides,
+  };
+}
+
 describe('jira-webhook-processor handler', () => {
   beforeEach(() => {
     ddbSend.mockReset();
@@ -126,6 +169,8 @@ describe('jira-webhook-processor handler', () => {
       siteUrl: 'https://acme.atlassian.net',
       oauthSecretArn: 'arn:aws:secretsmanager:us-east-1:123:secret:bgagent-jira-oauth-cloud-1',
     });
+    resolveTaskByJiraIssueMock.mockReset();
+    resolveTaskByJiraIssueMock.mockResolvedValue(null);
     // Default (#577): no comments, no attachments. Per-case tests override.
     fetchRecentHumanCommentsMock.mockReset();
     fetchRecentHumanCommentsMock.mockResolvedValue([]);
@@ -146,9 +191,269 @@ describe('jira-webhook-processor handler', () => {
     expect(createTaskCoreMock).not.toHaveBeenCalled();
   });
 
-  test('skips non-issue webhookEvent', async () => {
-    await handler(eventWith({ webhookEvent: 'comment_created', issue: { id: 'x', key: 'X-1' } }));
+  test('skips unsupported webhookEvent', async () => {
+    await handler(eventWith({ webhookEvent: 'comment_updated', issue: { id: 'x', key: 'X-1' } }));
     expect(createTaskCoreMock).not.toHaveBeenCalled();
+  });
+
+  describe('comment-triggered PR iteration', () => {
+    const priorTask = {
+      task_id: 'prior-task',
+      user_id: 'original-owner',
+      repo: 'org/repo',
+      pr_number: 42,
+      status: 'COMPLETED',
+      channel_metadata: {
+        jira_cloud_id: 'cloud-1',
+        jira_project_key: 'ENG',
+        jira_issue_id: '10001',
+        jira_issue_key: 'ENG-42',
+        jira_status_on_start: 'Doing',
+        jira_status_on_pr: 'Code Review',
+      },
+    };
+
+    test('ADF @bgagent comment creates a PR iteration for the linked comment author', async () => {
+      resolveTaskByJiraIssueMock.mockResolvedValueOnce(priorTask);
+      ddbSend.mockResolvedValueOnce({
+        Item: { platform_user_id: 'linked-reviewer', status: 'active' },
+      });
+      createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: '{}' });
+
+      await handler(eventWith(comment()));
+
+      expect(resolveTaskByJiraIssueMock).toHaveBeenCalledWith(
+        expect.anything(),
+        'Tasks',
+        'cloud-1',
+        'ENG-42',
+      );
+      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+      const [request, context] = createTaskCoreMock.mock.calls[0];
+      expect(request).toEqual({
+        repo: 'org/repo',
+        workflow_ref: 'coding/pr-iteration-v1',
+        pr_number: 42,
+        task_description: 'update the README too',
+      });
+      expect(context.userId).toBe('linked-reviewer');
+      expect(context.channelSource).toBe('jira');
+      expect(context.idempotencyKey).toMatch(/^jira-iterate-[a-f0-9]{64}$/);
+      expect(context.channelMetadata).toMatchObject({
+        jira_cloud_id: 'cloud-1',
+        jira_project_key: 'ENG',
+        jira_issue_id: '10001',
+        jira_issue_key: 'ENG-42',
+        jira_status_on_start: 'Doing',
+        jira_status_on_pr: 'Code Review',
+        jira_trigger_comment_id: 'comment-1',
+        jira_prior_task_id: 'prior-task',
+        jira_oauth_secret_arn:
+          'arn:aws:secretsmanager:us-east-1:123:secret:bgagent-jira-oauth-cloud-1',
+      });
+      expect(reportIssueFailureMock).toHaveBeenCalledWith(
+        expect.anything(),
+        'ENG-42',
+        '👀 ABCA accepted this follow-up and is updating PR #42.',
+      );
+      // Comment triggers route from the prior task, not the current project
+      // mapping or label state. The only DDB Get is author attribution.
+      expect(ddbSend.mock.calls).toHaveLength(1);
+      expect(ddbSend.mock.calls[0][0].input.Key)
+        .toEqual({ jira_identity: 'cloud-1#reviewer-1' });
+    });
+
+    test('ADF mention node creates a PR iteration', async () => {
+      resolveTaskByJiraIssueMock.mockResolvedValueOnce(priorTask);
+      ddbSend.mockResolvedValueOnce({ Item: undefined });
+      createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: '{}' });
+      const payload = comment();
+      (payload.comment as Record<string, unknown>).body = {
+        type: 'doc',
+        version: 1,
+        content: [{
+          type: 'paragraph',
+          content: [
+            {
+              type: 'mention',
+              attrs: { id: 'bgagent-account', text: '@bgagent' },
+            },
+            { type: 'text', text: ' handle the null case' },
+          ],
+        }],
+      };
+
+      await handler(eventWith(payload));
+
+      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+      expect(createTaskCoreMock.mock.calls[0][0].task_description)
+        .toBe('handle the null case');
+    });
+
+    test('preserves ADF hard breaks in a multiline instruction', async () => {
+      resolveTaskByJiraIssueMock.mockResolvedValueOnce(priorTask);
+      ddbSend.mockResolvedValueOnce({ Item: undefined });
+      createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: '{}' });
+      const payload = comment();
+      (payload.comment as Record<string, unknown>).body = {
+        type: 'doc',
+        version: 1,
+        content: [{
+          type: 'paragraph',
+          content: [
+            { type: 'text', text: '@bgagent please:' },
+            { type: 'hardBreak' },
+            { type: 'text', text: '- update docs' },
+            { type: 'hardBreak' },
+            { type: 'text', text: '- add a test' },
+          ],
+        }],
+      };
+
+      await handler(eventWith(payload));
+
+      expect(createTaskCoreMock.mock.calls[0][0].task_description)
+        .toBe('please:\n- update docs\n- add a test');
+    });
+
+    test('plain-text comment falls back to the original task owner when author is unlinked', async () => {
+      resolveTaskByJiraIssueMock.mockResolvedValueOnce({
+        ...priorTask,
+        pr_number: undefined,
+        pr_url: 'https://github.com/org/repo/pull/73',
+      });
+      ddbSend.mockResolvedValueOnce({ Item: undefined });
+      createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: '{}' });
+      const payload = comment();
+      (payload.comment as Record<string, unknown>).body = '@bgagent rename the flag';
+
+      await handler(eventWith(payload));
+
+      const [request, context] = createTaskCoreMock.mock.calls[0];
+      expect(request.pr_number).toBe(73);
+      expect(request.task_description).toBe('rename the flag');
+      expect(context.userId).toBe('original-owner');
+    });
+
+    test('bare mention uses the latest-review fallback instruction', async () => {
+      resolveTaskByJiraIssueMock.mockResolvedValueOnce(priorTask);
+      ddbSend.mockResolvedValueOnce({ Item: undefined });
+      createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: '{}' });
+      const payload = comment();
+      (payload.comment as Record<string, unknown>).body = '@bgagent';
+
+      await handler(eventWith(payload));
+
+      const [request] = createTaskCoreMock.mock.calls[0];
+      expect(request.task_description)
+        .toBe('Address the latest review feedback on this pull request.');
+    });
+
+    test('comment without @bgagent is a no-op', async () => {
+      const payload = comment();
+      (payload.comment as Record<string, unknown>).body = 'Looks good to me';
+
+      await handler(eventWith(payload));
+
+      expect(resolveTaskByJiraIssueMock).not.toHaveBeenCalled();
+      expect(createTaskCoreMock).not.toHaveBeenCalled();
+      expect(reportIssueFailureMock).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      {
+        author: { accountId: 'app-1', accountType: 'app' },
+        body: '@bgagent update the README',
+      },
+      {
+        author: { accountId: 'reviewer-1', accountType: 'atlassian' },
+        body: '🤖 ABCA picked up this issue. Example: @bgagent update the README',
+      },
+    ])('app/self comment is ignored: %o', async ({ author, body }) => {
+      const payload = comment();
+      (payload.comment as Record<string, unknown>).author = author;
+      (payload.comment as Record<string, unknown>).body = body;
+
+      await handler(eventWith(payload));
+
+      expect(resolveTaskByJiraIssueMock).not.toHaveBeenCalled();
+      expect(createTaskCoreMock).not.toHaveBeenCalled();
+    });
+
+    test('posts clear feedback when no prior PR-producing task exists', async () => {
+      await handler(eventWith(comment()));
+
+      expect(createTaskCoreMock).not.toHaveBeenCalled();
+      expect(reportIssueFailureMock).toHaveBeenCalledTimes(1);
+      expect(reportIssueFailureMock.mock.calls[0][2]).toContain(
+        "couldn't find an ABCA pull request",
+      );
+    });
+
+    test('propagates task lookup failures for asynchronous retry', async () => {
+      resolveTaskByJiraIssueMock.mockRejectedValueOnce(new Error('DynamoDB unavailable'));
+
+      await expect(handler(eventWith(comment()))).rejects.toThrow('DynamoDB unavailable');
+
+      expect(createTaskCoreMock).not.toHaveBeenCalled();
+      expect(reportIssueFailureMock).not.toHaveBeenCalled();
+    });
+
+    test('unattributable prior task posts feedback instead of creating a task', async () => {
+      resolveTaskByJiraIssueMock.mockResolvedValueOnce({
+        ...priorTask,
+        user_id: undefined,
+      });
+      ddbSend.mockResolvedValueOnce({ Item: undefined });
+
+      await handler(eventWith(comment()));
+
+      expect(createTaskCoreMock).not.toHaveBeenCalled();
+      expect(reportIssueFailureMock.mock.calls[0][2]).toContain('linked ABCA user');
+    });
+
+    test('idempotent replay creates no duplicate task acknowledgement', async () => {
+      resolveTaskByJiraIssueMock.mockResolvedValueOnce(priorTask);
+      ddbSend.mockResolvedValueOnce({ Item: undefined });
+      createTaskCoreMock.mockResolvedValueOnce({ statusCode: 200, body: '{}' });
+
+      await handler(eventWith(comment()));
+
+      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+      expect(reportIssueFailureMock).not.toHaveBeenCalled();
+    });
+
+    test('task admission failure is reported instead of acknowledged', async () => {
+      resolveTaskByJiraIssueMock.mockResolvedValueOnce(priorTask);
+      ddbSend.mockResolvedValueOnce({ Item: undefined });
+      createTaskCoreMock.mockResolvedValueOnce({
+        statusCode: 400,
+        body: JSON.stringify({
+          error: { message: 'Task description was blocked by content policy.' },
+        }),
+      });
+
+      await handler(eventWith(comment()));
+
+      expect(reportIssueFailureMock).toHaveBeenCalledTimes(1);
+      expect(reportIssueFailureMock.mock.calls[0][2]).toContain(
+        'blocked by content policy',
+      );
+      expect(reportIssueFailureMock.mock.calls[0][2]).not.toContain('accepted this follow-up');
+    });
+
+    test('transient admission failure tells the reviewer to post a new comment', async () => {
+      resolveTaskByJiraIssueMock.mockResolvedValueOnce(priorTask);
+      ddbSend.mockResolvedValueOnce({ Item: undefined });
+      createTaskCoreMock.mockResolvedValueOnce({ statusCode: 503, body: '{}' });
+
+      await handler(eventWith(comment()));
+
+      const message = reportIssueFailureMock.mock.calls[0][2] as string;
+      expect(message).toContain('temporarily unavailable');
+      expect(message).toContain('add a new `@bgagent` comment');
+      expect(message).not.toContain('re-apply the trigger label');
+    });
   });
 
   test('skips when issue.id or issue.key is missing', async () => {

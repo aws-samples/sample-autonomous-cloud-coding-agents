@@ -434,6 +434,32 @@ const PATTERNS: readonly ErrorPattern[] = [
 
   // --- Timeout ---
   {
+    // An ``agent/`` subprocess (``run_cmd``) hit its wall-clock cap and Python
+    // raised an uncaught ``TimeoutExpired … timed out after N seconds``, which
+    // otherwise surfaces as a bare "Unexpected error". This is NOT a code
+    // failure — the command didn't fail, it ran too long — so name it precisely
+    // and point at "slow, retry", not the diff. NOTE: this matches only
+    // UNCAUGHT ``run_cmd`` timeouts (clone/setup/etc.); the post-agent build/lint
+    // VERIFY path catches ``TimeoutExpired`` itself and returns a plain build
+    // failure, so it does not reach here. The remedy is deliberately generic
+    // ("retry / it may be slow") rather than naming a specific env knob — on
+    // ``main`` the verify timeout is not operator-tunable, so promising a lever
+    // here would misdirect (the tunable ``BUILD_VERIFY_TIMEOUT_S`` + larger ECS
+    // build compute live on the ECS-substrate track, not this branch).
+    pattern: /TimeoutExpired.*timed out after \d+(?:\.\d+)? ?s(econds)?|Command .*build.* timed out/i,
+    classification: {
+      category: ErrorCategory.TIMEOUT,
+      title: 'Build/tests didn\'t finish in time (timed out)',
+      description: 'The configured build/verify command was still running when it hit the time limit and was stopped — it did not fail, it ran too long.',
+      remedy: 'This is usually a slow build, not broken code — retry, since a one-off may just have been slow. If a repo\'s build is legitimately long, its build environment likely needs more time or capacity; contact your ABCA admin.',
+      retryable: true,
+      // Intentionally USER (no auto-retry): re-running an unchanged slow build
+      // just times out again, so this must NOT be TRANSIENT — a human decides
+      // whether to retry or right-size the build. Do not "fix" this to TRANSIENT.
+      errorClass: ErrorClass.USER,
+    },
+  },
+  {
     pattern: /poll timeout exceeded/i,
     classification: {
       category: ErrorCategory.TIMEOUT,

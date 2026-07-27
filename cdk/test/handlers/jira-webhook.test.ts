@@ -107,6 +107,20 @@ function issueCreatePayload(overrides: Record<string, unknown> = {}): string {
   });
 }
 
+function commentCreatePayload(overrides: Record<string, unknown> = {}): string {
+  return JSON.stringify({
+    webhookEvent: 'comment_created',
+    timestamp: Date.now(),
+    issue: {
+      id: '10001',
+      key: 'ENG-42',
+      fields: { project: { id: 'p1', key: 'ENG' } },
+    },
+    comment: { id: 'comment-1' },
+    ...overrides,
+  });
+}
+
 describe('jira-webhook handler', () => {
   beforeEach(() => {
     ddbSend.mockReset();
@@ -134,14 +148,56 @@ describe('jira-webhook handler', () => {
     expect(lambdaSend).not.toHaveBeenCalled();
   });
 
-  test('ignores non-Issue webhookEvent types with 200', async () => {
+  test('ignores unsupported webhookEvent types with 200', async () => {
     const body = JSON.stringify({
-      webhookEvent: 'comment_created',
+      webhookEvent: 'comment_updated',
       timestamp: Date.now(),
       comment: { id: 'c-1' },
     });
     const result = await handler(makeEvent(body, sign(body)));
     expect(result.statusCode).toBe(200);
+    expect(ddbSend).not.toHaveBeenCalled();
+    expect(lambdaSend).not.toHaveBeenCalled();
+  });
+
+  test('verified comment_created event dedups by comment id and invokes processor', async () => {
+    const body = commentCreatePayload();
+    ddbSend.mockResolvedValueOnce({});
+    lambdaSend.mockResolvedValueOnce({});
+
+    const result = await handler(makeEvent(body, sign(body)));
+
+    expect(result.statusCode).toBe(200);
+    const putCall = ddbSend.mock.calls.find(([cmd]) => cmd._type === 'Put');
+    expect(putCall![0].input.Item.dedup_key)
+      .toBe('ENG-42#comment_created#comment-1');
+    const invokeCall = lambdaSend.mock.calls[0][0];
+    const decoded = JSON.parse(new TextDecoder().decode(invokeCall.input.Payload));
+    expect(decoded.raw_body).toBe(body);
+  });
+
+  test('distinct comments do not collapse even when their timestamps match', async () => {
+    const timestamp = Date.now();
+    const body1 = commentCreatePayload({ timestamp, comment: { id: 'comment-1' } });
+    const body2 = commentCreatePayload({ timestamp, comment: { id: 'comment-2' } });
+    ddbSend.mockResolvedValue({});
+    lambdaSend.mockResolvedValue({});
+
+    await handler(makeEvent(body1, sign(body1)));
+    await handler(makeEvent(body2, sign(body2)));
+
+    const putCalls = ddbSend.mock.calls.filter(([cmd]) => cmd._type === 'Put');
+    expect(putCalls.map(([cmd]) => cmd.input.Item.dedup_key)).toEqual([
+      'ENG-42#comment_created#comment-1',
+      'ENG-42#comment_created#comment-2',
+    ]);
+  });
+
+  test('400s when a verified comment_created event has no comment.id', async () => {
+    const body = commentCreatePayload({ comment: {} });
+    const result = await handler(makeEvent(body, sign(body)));
+
+    expect(result.statusCode).toBe(400);
     expect(ddbSend).not.toHaveBeenCalled();
     expect(lambdaSend).not.toHaveBeenCalled();
   });

@@ -37,9 +37,18 @@ These policies are not created or attached manually. The repository generates th
 
 ```bash
 # Regenerate artifacts (policies JSON + template YAML) and bootstrap.
-# Default ComputeTypes is "agentcore"; pass ECS via context to also include Compute-ECS:
+# ComputeTypes defaults to "agentcore".
 MISE_EXPERIMENTAL=1 mise //cdk:bootstrap
-MISE_EXPERIMENTAL=1 mise //cdk:bootstrap -- --context ComputeTypes=agentcore,ecs
+
+# To ALSO enable the ECS compute backend (attach IaCRole-ABCA-Compute-ECS), set the
+# ComputeTypes CFN *parameter*. `cdk bootstrap` cannot pass template parameters — it
+# has no --parameters flag, and --context sets CDK construct context, not a CFN
+# parameter — so bootstrap first (above), then update the parameter on CDKToolkit:
+aws cloudformation update-stack --stack-name CDKToolkit --use-previous-template \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --parameters ParameterKey=ComputeTypes,ParameterValue=agentcore\,ecs
+# verify it took:
+aws cloudformation describe-stacks --stack-name CDKToolkit --query 'Stacks[0].Parameters'
 ```
 
 Under the hood, `mise //cdk:bootstrap` runs `npx cdk bootstrap --template bootstrap/bootstrap-template.yaml` (see `cdk/mise.toml`). The generated template defines five inline `AWS::IAM::ManagedPolicy` resources that **replace** the default `AdministratorAccess` on the CloudFormation execution role; the `IaCRole-ABCA-Compute-ECS` policy is conditional on the `ComputeTypes` parameter including `ecs`. The policy sources are `cdk/src/bootstrap/policies/{infrastructure,application,observability,compute-agentcore,compute-ecs}.ts`, compiled to `cdk/bootstrap/policies/*.json` by `cdk/scripts/generate-bootstrap-artifacts.ts`.
@@ -707,7 +716,7 @@ Bedrock AgentCore runtime/memory operations — a single statement granting `bed
 
 ### IaCRole-ABCA-Compute-ECS
 
-When the ECS Fargate compute backend is enabled (bootstrap with `--context ComputeTypes=agentcore,ecs`), the generated template conditionally attaches this policy to the CloudFormation execution role. It is a standalone managed policy, not an addition to `IaCRole-ABCA-Application`.
+When the ECS Fargate compute backend is enabled (set the `ComputeTypes` CFN parameter to `agentcore,ecs` on the `CDKToolkit` stack — see the bootstrap snippet near the top of this doc), the generated template conditionally attaches this policy to the CloudFormation execution role. It is a standalone managed policy, not an addition to `IaCRole-ABCA-Application`.
 
 ```json
 {

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import os
 import sys
 import time
@@ -17,6 +18,7 @@ from channel_mcp import configure_channel_mcp
 from config import (
     AGENT_WORKSPACE,
     build_config,
+    clear_jira_task_credentials,
     get_config,
     resolve_jira_oauth_token,
     resolve_linear_api_token,
@@ -639,6 +641,11 @@ def run_task(
 
     from repo import setup_repo
 
+    # AgentCore can reuse this process for another task. Scrub every Jira
+    # credential before config or repository code runs, including for non-Jira
+    # tasks, so a prior tenant's long-lived Forge secret cannot cross tasks.
+    clear_jira_task_credentials()
+
     # Build config
     config = build_config(
         repo_url=repo_url,
@@ -841,7 +848,56 @@ def run_task(
             if prompt_version:
                 os.environ["PROMPT_VERSION"] = prompt_version
 
-            # Setup repo (deterministic pre-hooks)
+            # ── Early ACK ────────────────────────────────────────────────────
+            # Acknowledge the task is picked up BEFORE the (potentially long)
+            # pre-agent baseline build in setup_repo(). On a large repo that
+            # baseline is minutes (up to the build-verify ceiling); posting the
+            # 👀 only *after* it left the issue looking dead for the whole phase
+            # (no reaction, comment, or state change). None of these calls needs
+            # the cloned repo — they act on the channel issue via its API token +
+            # issue id from channel metadata — so they belong before the build.
+            #
+            # Resolve the per-channel access token from Secrets Manager first
+            # (react_task_started/comment_task_started read the env var it sets).
+            # configure_channel_mcp DOES need setup.repo_dir, so it stays below.
+            if config.channel_source == "linear":
+                resolve_linear_api_token(config.channel_metadata)
+            elif config.channel_source == "jira":
+                resolve_jira_oauth_token(config.channel_metadata)
+
+            # 👀 on the Linear issue — acknowledges the task is picked up.
+            # No-op for non-Linear tasks. Best-effort; failures are logged
+            # but do not block the pipeline. Capture the reaction id so we
+            # can delete it at terminal status (👀 → ✅/❌).
+            linear_eyes_reaction_id = react_task_started(
+                config.channel_source,
+                config.channel_metadata,
+            )
+
+            # "Starting" comment on the Jira issue through the Forge app actor
+            # (or legacy OAuth fallback). No-op for non-Jira tasks.
+            # Best-effort; failures are logged, never block.
+            comment_task_started(
+                config.channel_source,
+                config.channel_metadata,
+            )
+
+            # Move the Jira card To Do → In Progress so the board reflects that
+            # work has started (issue #572). No-op for non-Jira tasks. Part of
+            # the early ACK (before setup_repo) so the board reflects "started"
+            # during the baseline build, not only after it. Best-effort; failures
+            # are logged and never block the pipeline.
+            transition_task_started(
+                config.channel_source,
+                config.channel_metadata,
+            )
+
+            # Setup repo (deterministic pre-hooks). A failure/timeout/OOM in the
+            # pre-agent baseline build raises here; it needs no local handler —
+            # the outer ``except Exception`` at the bottom of this ``try`` writes
+            # the task FAILED, swaps the 👀 (posted above) to ❌, and posts the
+            # failure comment. Posting the 👀 earlier is what makes the outer
+            # handler's ❌-swap actually visible for setup failures.
             with task_span("task.repo_setup") as setup_span:
                 setup = setup_repo(config, progress=progress)
                 setup_span.set_attribute("build.before", setup.build_before)
@@ -854,40 +910,10 @@ def run_task(
 
             # Channel-specific MCP wiring. Must happen before
             # discover_project_config so the scan picks up the file we just
-            # wrote. Resolve the per-channel access token from Secrets
-            # Manager *before* writing .mcp.json so the child SDK process
-            # inherits the env var that the MCP server entry references
-            # (${LINEAR_API_TOKEN} / ${JIRA_API_TOKEN}).
-            if config.channel_source == "linear":
-                resolve_linear_api_token(config.channel_metadata)
-            elif config.channel_source == "jira":
-                resolve_jira_oauth_token(config.channel_metadata)
+            # wrote — and after the clone, since it writes .mcp.json into the
+            # repo dir. (Token resolution + the 👀/start ACK moved earlier so
+            # the user gets immediate feedback; see the Early ACK block above.)
             configure_channel_mcp(setup.repo_dir, config.channel_source)
-
-            # 👀 on the Linear issue — acknowledges the task is picked up.
-            # No-op for non-Linear tasks. Best-effort; failures are logged
-            # but do not block the pipeline. Capture the reaction id so we
-            # can delete it at terminal status (👀 → ✅/❌).
-            linear_eyes_reaction_id = react_task_started(
-                config.channel_source,
-                config.channel_metadata,
-            )
-
-            # "Starting" comment on the Jira issue (REST shim — the Atlassian
-            # Remote MCP can't be used from a headless agent). No-op for
-            # non-Jira tasks. Best-effort; failures are logged, never block.
-            comment_task_started(
-                config.channel_source,
-                config.channel_metadata,
-            )
-
-            # Move the Jira card To Do → In Progress so the board reflects that
-            # work has started (issue #572). No-op for non-Jira tasks.
-            # Best-effort; failures are logged and never block the pipeline.
-            transition_task_started(
-                config.channel_source,
-                config.channel_metadata,
-            )
 
             # Download attachments from S3 (version-pinned, integrity-verified)
             prepared_attachments: list = []
@@ -1285,6 +1311,129 @@ def run_task(
             # so posting here would double-comment. (Contrast the Linear ❌
             # reaction above, which the fan-out plane does not replicate.)
             raise
+
+
+#: Orchestrator payload keys that map to a differently-named ``run_task`` kwarg.
+#: The orchestrator emits ``prompt``/``model_id``; ``run_task`` calls them
+#: ``task_description``/``anthropic_model``. Everything else is a 1:1 name match.
+_PAYLOAD_KEY_ALIASES = {
+    "prompt": "task_description",
+    "model_id": "anthropic_model",
+}
+
+#: ``run_task`` kwargs that must be coerced to ``str`` — the orchestrator may
+#: emit them as numbers (issue_number, pr_number) and ``run_task`` types them as
+#: strings. ``max_turns`` is coerced to int. Absent keys are left to the
+#: ``run_task`` defaults.
+_PAYLOAD_STR_KEYS = frozenset({"issue_number", "pr_number"})
+
+#: Parameter names ``run_task`` accepts — computed once at import from the REAL
+#: signature (not inside the function, so patching ``run_task`` in tests can't
+#: shadow it). Any payload key not in this set is ignored, never passed through.
+_RUN_TASK_PARAMS = frozenset(inspect.signature(run_task).parameters)
+
+#: Orchestrator payload keys we KNOW about that ``run_task`` does not (yet)
+#: accept as a parameter. Dropping one of these is expected today (e.g.
+#: ``base_branch`` is consumed via ``hydrated_context``, not a run_task kwarg;
+#: ``github_token_secret_arn`` is resolved before this call), but a key that
+#: shows up here AND is silently dropped is exactly the "wired one side of an
+#: orchestrator→agent field, forgot the other" no-op that ABCA-487 was — so we
+#: WARN when we drop one, making a future contract gap visible instead of silent.
+#: Keys not in this set (genuinely foreign) are dropped quietly as before.
+_KNOWN_ORCHESTRATOR_KEYS = frozenset(
+    {
+        "build_command",
+        # ``lint_command``'s sibling: neither is a run_task param today (the build/
+        # lint commands are consumed via repo config, not passed through here), but
+        # listing both makes a future "wired build_command, forgot lint_command"
+        # contract gap WARN instead of drop silently (N4).
+        "lint_command",
+        "merge_branches",
+        "base_branch",
+        # NB: ``github_token_secret_arn`` is deliberately NOT listed (N3). It is
+        # ALWAYS in the payload and ALWAYS dropped here (resolved via the
+        # ``GITHUB_TOKEN_SECRET_ARN`` env in build_config, never a run_task
+        # param), so listing it would fire the known-key WARN on 100% of ECS
+        # boots — pure noise that dilutes the channel meant to surface genuine
+        # future "wired one side, forgot the other" gaps. It falls through as a
+        # quiet foreign-key drop instead.
+        # AgentCore's server.py exports task_started_at as TASK_STARTED_AT, which
+        # hooks._remaining_maxlifetime_s() uses to clip the Cedar HITL approval-gate
+        # maxLifetime. The ECS boot path bypasses server.py and does not (yet) set
+        # that env, so this key is dropped here — a silent AgentCore↔ECS HITL
+        # divergence (fail-open: the clip returns None, gate uses the task default).
+        # Listing it makes the drop WARN so the parity gap is visible until the ECS
+        # strategy sets TASK_STARTED_AT in containerEnv (tracked as a follow-up).
+        "task_started_at",
+    }
+)
+
+
+def run_task_from_payload(payload: dict) -> dict:
+    """Invoke :func:`run_task` from a full orchestrator payload dict.
+
+    The ECS compute path (``ecs-strategy.ts``) hands the agent the *entire*
+    orchestrator payload (via the #502 S3 pointer). Previously the ECS boot
+    command hand-listed a subset of ``run_task`` kwargs and silently dropped the
+    rest — most visibly ``channel_source``/``channel_metadata`` (no Linear/Jira
+    reactions or channel MCP on ECS — ABCA-487), plus ``build_command``,
+    ``cedar_policies``, ``base_branch``/``merge_branches``, ``attachments``, etc.
+
+    This maps the payload to ``run_task``'s real signature so no field can be
+    silently dropped again: rename the aliased keys, filter to parameters
+    ``run_task`` actually accepts (unknown keys are ignored, not passed as
+    ``**kwargs`` which ``run_task`` doesn't accept), and coerce the str/int
+    fields the orchestrator may emit as numbers. ``aws_region`` falls back to the
+    ``AWS_REGION`` env var when the payload omits it (the boot command used to
+    supply this explicitly).
+
+    Single source of truth + unit-testable, replacing the untestable inline
+    Python string that already drifted once.
+    """
+    kwargs: dict = {}
+    for key, value in (payload or {}).items():
+        target = _PAYLOAD_KEY_ALIASES.get(key, key)
+        if target not in _RUN_TASK_PARAMS:
+            # Not a run_task parameter — ignore. A KNOWN orchestrator key being
+            # dropped is expected today but worth a breadcrumb: if run_task ever
+            # grows a matching param, this WARN is where a "forgot to wire it
+            # through" no-op surfaces (N4 / ABCA-487 class). Foreign keys are
+            # dropped quietly.
+            if key in _KNOWN_ORCHESTRATOR_KEYS and value is not None:
+                log(
+                    "WARN",
+                    f"run_task_from_payload: dropping known orchestrator key '{key}' "
+                    f"(not a run_task parameter) — consumed elsewhere or not yet wired",
+                )
+            continue
+        if value is None:
+            continue  # let run_task's default apply
+        if target in _PAYLOAD_STR_KEYS:
+            value = str(value)
+        elif target == "max_turns":
+            # Defensive: a malformed max_turns must not crash the whole boot —
+            # drop it and let run_task's default apply (with a breadcrumb) rather
+            # than raise. Unlike the str keys above, this is the one field with a
+            # non-str coercion, so it also guards the surprising int() cases the
+            # orchestrator never emits but a hand-edited payload might: a bool
+            # (``int(True) == 1``) and a non-integral float (``int(3.9) == 3``)
+            # would both silently become a bogus turn count (N4).
+            if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+                log("WARN", f"run_task_from_payload: ignoring non-integer max_turns {value!r}")
+                continue
+            try:
+                coerced = int(value)
+            except (TypeError, ValueError):
+                log("WARN", f"run_task_from_payload: ignoring non-integer max_turns {value!r}")
+                continue
+            if isinstance(value, float) and coerced != value:
+                log("WARN", f"run_task_from_payload: ignoring non-integral max_turns {value!r}")
+                continue
+            value = coerced
+        kwargs[target] = value
+
+    kwargs.setdefault("aws_region", os.environ.get("AWS_REGION", ""))
+    return run_task(**kwargs)
 
 
 def main():

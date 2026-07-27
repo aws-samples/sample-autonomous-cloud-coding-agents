@@ -115,11 +115,10 @@ export interface JiraIntegrationProps {
 /**
  * CDK construct that adds Jira Cloud integration to the ABCA platform.
  *
- * Inbound-only adapter: Jira → webhook → task creation. Outbound progress
- * updates happen agent-side via the Jira REST v3 API (see
- * agent/src/jira_reactions.py; ADR-015 explains why outbound is REST and not
- * the Atlassian Remote MCP), so there is NO DynamoDB Streams consumer and NO
- * outbound-notify Lambda here. Mirrors the Linear adapter shape.
+ * This construct owns Jira → webhook → task creation. Outbound progress uses
+ * the Forge app actor (or the OAuth migration fallback) through
+ * agent/src/jira_reactions.py and the shared fan-out consumer; those writers
+ * are wired outside this inbound construct. See ADR-015.
  *
  * Creates:
  * - JiraProjectMappingTable (`{cloudId}#{projectKey}` → GitHub repo)
@@ -148,7 +147,7 @@ export class JiraIntegration extends Construct {
    */
   public readonly workspaceRegistryTable: dynamodb.Table;
 
-  /** Webhook dedup table — `{issueKey}#{webhookEvent}#{timestamp}` keys with 8h TTL. */
+  /** Webhook dedup table — issue timestamps or stable comment IDs, with an 8h TTL. */
   public readonly webhookDedupTable: dynamodb.Table;
 
   /** Jira webhook signing secret (placeholder — populated by `bgagent jira setup`). */
@@ -168,7 +167,8 @@ export class JiraIntegration extends Construct {
     this.workspaceRegistryTable = workspaceRegistry.table;
 
     // Dedup table: Jira webhook retries collapse to a single processor invoke
-    // within the 8h TTL window. Keyed on `{issueKey}#{webhookEvent}#{timestamp}`.
+    // within the 8h TTL window. Issue events use the event timestamp; comment
+    // events use the stable Jira comment ID.
     this.webhookDedupTable = new dynamodb.Table(this, 'WebhookDedupTable', {
       partitionKey: { name: 'dedup_key', type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
