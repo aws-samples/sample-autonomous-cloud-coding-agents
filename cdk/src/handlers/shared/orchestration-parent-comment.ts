@@ -270,9 +270,11 @@ export function renderParentDisambiguationReply(
   const commandsFooter = hasFailures
     ? [
       '',
+      // Does NOT bill the label re-apply as the same thing: re-applying resolves to
+      // one of four outcomes from graph state (add sub-issues / retry / still
+      // running / already complete), so it is only equivalent in this one state.
       `**Commands:** ${KNOWN_EPIC_COMMANDS.map((c) => `\`@bgagent ${c}\``).join(', ')} `
-        + 're-runs the failed/skipped sub-issues (same as removing and re-applying the '
-        + '`abca` label; succeeded ones are kept).',
+        + 're-runs the failed/skipped sub-issues and keeps the ones that succeeded.',
     ]
     : [];
 
@@ -308,8 +310,12 @@ export function renderParentDisambiguationReply(
     );
   }
   out.push(
-    'Otherwise, comment on the specific sub-issue, or name it here — e.g. ' +
-      '`@bgagent ABCA-123: <what to change>`. The sub-issues are:',
+    // "Otherwise" only makes sense against the "Did you mean …?" sentence above, and
+    // that sentence is conditional — with no suggestion the reply opened with a
+    // contrast to nothing.
+    (suggestion ? 'Otherwise, comment' : 'Comment')
+      + ' on the specific sub-issue, or name it here — e.g. '
+      + '`@bgagent ABCA-123: <what to change>`. The sub-issues are:',
     '',
     ...real.map((n) => `- ${nodeLabel(n)}`),
     '',

@@ -223,7 +223,11 @@ export function renderWrongMentionNudge(): string {
  * #5 — the plan has 3 …"). Bot-prefixed so the self-trigger guard skips it.
  */
 export function renderPlanCommandError(detail: string): string {
-  return `${PLAN_PROPOSAL_PREFIX} ${detail} The plan above is unchanged — `
+  // ``detail`` is a fragment (often the raw command the user typed, e.g. "drop 9"),
+  // so it needs punctuation of its own. Interpolating it bare produced
+  // "🗂️ drop 9 The plan above is unchanged", which reads as one broken sentence.
+  const reason = /[.!?]$/.test(detail.trim()) ? detail.trim() : `${detail.trim()}.`;
+  return `${PLAN_PROPOSAL_PREFIX} I couldn't apply that: ${reason} The plan above is unchanged — `
     + 'try again with a number from the list, `@bgagent approve` to run it, or tell me what to change.';
 }
 
@@ -277,7 +281,13 @@ export function renderRevisionFailedNote(): string {
  * current plan is untouched + approvable. Bot-prefixed so the self-trigger guard skips it.
  */
 export function renderReviseUnclearNote(detail: string): string {
-  const ask = detail.trim() || 'which sub-issue would you like to change, and how?';
+  // Same fragment hazard as renderPlanCommandError: without terminating punctuation
+  // the question ran straight into the next sentence ("…and how? The breakdown" was
+  // fine, but any detail lacking a "?" or "." read as one run-on line).
+  const asked = detail.trim();
+  const ask = asked
+    ? (/[.!?]$/.test(asked) ? asked : `${asked}.`)
+    : 'Which sub-issue would you like to change, and how?';
   return `${PLAN_PROPOSAL_PREFIX} ${ask} The breakdown above is unchanged — `
     + 'tell me the change (e.g. "drop the careers page", "merge the first two") or reply '
     + '`@bgagent approve` to run it as-is.';

@@ -27,6 +27,8 @@ import {
   renderDecomposeStartedNote,
   renderDecomposeUnavailableNote,
   renderDiscardedPlanReference,
+  renderPlanCommandError,
+  renderReviseUnclearNote,
   renderEpicAlreadyCompleteNote,
   renderEpicRetryNote,
   renderLabelHelp,
@@ -527,5 +529,35 @@ describe('renderLabelHelp / renderMultiPartHint (label discoverability)', () => 
     expect(md).toContain('`bgagent:decompose`'); // the suggested alternative
     expect(md).toMatch(/plan to approve/i);
     expect(isBotAuthoredComment(md)).toBe(true);
+  });
+});
+
+describe('a spliced-in fragment reads as a sentence, not a run-on', () => {
+  // Both of these interpolate a FRAGMENT — often the raw text the user typed — right
+  // after the bot prefix. Without punctuation of its own the result read as one
+  // broken sentence ("🗂️ drop 9 The plan above is unchanged"), which looks like the
+  // bot mangled its own message.
+  test('a command error introduces the reason and terminates it', () => {
+    const body = renderPlanCommandError('drop 9');
+    expect(body).toContain("I couldn't apply that: drop 9.");
+    expect(body).not.toContain('drop 9 The plan');
+  });
+
+  test('a reason that already ends in punctuation is not double-punctuated', () => {
+    expect(renderPlanCommandError('there is no #9.')).toContain('there is no #9. The plan');
+    expect(renderPlanCommandError('what did you mean?')).toContain('what did you mean? The plan');
+  });
+
+  test('an unclear-revision ask terminates before the next sentence', () => {
+    const body = renderReviseUnclearNote('which one, the banner or the table');
+    expect(body).toContain('which one, the banner or the table. The breakdown above');
+  });
+
+  test('an EMPTY detail falls back to a capitalised question, not a bare fragment', () => {
+    const body = renderReviseUnclearNote('   ');
+    expect(body).toContain('Which sub-issue would you like to change, and how?');
+    // Sentence-cased: it directly follows the emoji prefix, so a lower-case start
+    // read as a mid-sentence continuation.
+    expect(body).not.toContain('which sub-issue would you like');
   });
 });

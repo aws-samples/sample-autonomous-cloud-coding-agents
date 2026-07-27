@@ -180,6 +180,28 @@ describe('renderParentDisambiguationReply', () => {
     expect(body).toContain('@bgagent ABCA-305:');
   });
 
+  test('"Otherwise" appears ONLY when there is something to contrast with', () => {
+    // The word only makes sense against the "Did you mean …?" sentence, and that
+    // sentence is conditional — with no suggestion the reply opened by contrasting
+    // with nothing ("👋 I couldn't tell … Otherwise, comment on…").
+    const withSuggestion = renderParentDisambiguationReply('none', NODES, NODES[0]);
+    expect(withSuggestion).toContain('Otherwise, comment on the specific sub-issue');
+
+    const without = renderParentDisambiguationReply('none', NODES);
+    expect(without).toContain('Comment on the specific sub-issue');
+    expect(without).not.toContain('Otherwise');
+  });
+
+  test('the commands footer does NOT bill a label re-apply as the same as retry', () => {
+    // Re-applying the label resolves to one of four outcomes from graph state
+    // (add sub-issues / retry / still running / already complete), so it is only
+    // equivalent in this one state — claiming equivalence taught the wrong model.
+    const body = renderParentDisambiguationReply('none', NODES, null, false, true);
+    expect(body).toContain('`@bgagent retry`');
+    expect(body).toContain('keeps the ones that succeeded');
+    expect(body).not.toContain('same as removing');
+  });
+
   test('ambiguous vs none give different lead copy', () => {
     expect(renderParentDisambiguationReply('ambiguous', NODES)).toContain('more than one');
     expect(renderParentDisambiguationReply('none', NODES)).toContain("couldn't tell");
@@ -199,11 +221,13 @@ describe('renderParentDisambiguationReply', () => {
   // PM-P0-1 (2026-07-24): when the epic has failures, EVERY can't-act reply
   // surfaces the `retry` command — so an unrecognised comment always shows what
   // the user CAN type (no intent-guessing). Consistent with re-labelling.
-  test('hasFailures=true appends a Commands footer surfacing `@bgagent retry` + the re-label equivalent', () => {
+  test('hasFailures=true appends a Commands footer surfacing `@bgagent retry`', () => {
     const body = renderParentDisambiguationReply('none', NODES, null, false, true);
     expect(body).toContain('Commands:');
     expect(body).toContain('`@bgagent retry`');
-    expect(body).toContain('re-apply'); // names the equivalent re-label path
+    // Deliberately does NOT name a label re-apply as the equivalent — see the
+    // dedicated test below for why that framing was wrong.
+    expect(body).toContain('keeps the ones that succeeded');
   });
 
   test('hasFailures=false omits the Commands footer (nothing to retry)', () => {
