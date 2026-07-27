@@ -248,14 +248,42 @@ const PDF_MAX_PAGES = 50;
 const PDF_MAX_TEXT_BYTES = 1024 * 1024; // 1 MB extracted text cap
 const PDF_EXTRACT_TIMEOUT_MS = 15_000;
 
-async function extractPdfText(content: Buffer, filename: string): Promise<string> {
-  // Dynamic import — pdf-parse is only used for PDF attachments.
+/**
+ * pdf-parse v2 is built on pdfjs, which references browser DOM globals
+ * (`DOMMatrix`/`ImageData`/`Path2D`) that don't exist in the Node Lambda runtime.
+ * For TEXT extraction (our only use) these are never actually invoked — pdfjs only
+ * touches them on its optional canvas RENDER path. But if they're merely *undefined*,
+ * pdfjs tries to load the native `@napi-rs/canvas` binding to supply them, which
+ * fails on Lambda (the cross-platform native binary isn't bundled) and cascades to
+ * `DOMMatrix is not defined` → PDF screening unavailable (observed in practice).
+ *
+ * Defining them as inert no-op stubs makes pdfjs skip the native-canvas load path
+ * entirely and extract text headless — no native binary, host-independent. Verified:
+ * `getText` returns the full text with canvas absent + these three stubs present.
+ * Idempotent + non-clobbering (only fills genuinely-missing globals).
+ */
+function ensurePdfDomGlobals(): void {
+  const g = globalThis as Record<string, unknown>;
+  if (typeof g.DOMMatrix === 'undefined') g.DOMMatrix = class { /* inert stub — text extraction never calls it */ };
+  if (typeof g.ImageData === 'undefined') g.ImageData = class { /* inert stub */ };
+  if (typeof g.Path2D === 'undefined') g.Path2D = class { /* inert stub */ };
+}
 
-  let pdfParseFn: (data: Buffer, options?: { max?: number }) => Promise<{ text: string }>;
+async function extractPdfText(content: Buffer, filename: string): Promise<string> {
+  // pdf-parse v2 (^2.4.5) exposes a `PDFParse` CLASS — `new PDFParse({ data }).getText()` —
+  // NOT the v1 callable default export. Three things made this fail before:
+  // (1) the code called the v1 `pdfParseFn(buf)` shape (undefined on v2); (2) the
+  // webhook processors esbuild-bundled pdf-parse instead of shipping it via `nodeModules`,
+  // mangling its pdfjs/native deps; and (3) pdfjs tried to load the native
+  // `@napi-rs/canvas` binding for its DOM globals — absent on Lambda — instead of just
+  // extracting text. `ensurePdfDomGlobals` fixes (3); the bundling change fixes (2).
+  ensurePdfDomGlobals();
+  let PDFParse;
   try {
-    // pdf-parse uses a default export; handle both CJS and ESM module shapes.
-    const mod = await import(/* webpackIgnore: true */ 'pdf-parse');
-    pdfParseFn = (mod as any).default ?? mod;
+    // Destructure the class from the dynamic import and let TS infer its type from
+    // the value — a cross-mode `typeof import('pdf-parse').PDFParse` annotation trips
+    // the ESM-vs-CJS dual-`.d.ts` hazard under moduleResolution:nodenext.
+    ({ PDFParse } = await import(/* webpackIgnore: true */ 'pdf-parse'));
   } catch (importErr) {
     logger.error('pdf-parse module could not be imported — PDF screening unavailable', {
       error: importErr instanceof Error ? importErr.message : String(importErr),
@@ -268,22 +296,66 @@ async function extractPdfText(content: Buffer, filename: string): Promise<string
   }
 
   let timeoutId: ReturnType<typeof setTimeout>;
+  // A TypedArray is preferred (pdf-parse transfers ownership to its worker, lowering
+  // main-thread memory). Slice to the exact PDF bytes so a pooled Buffer's backing
+  // ArrayBuffer isn't handed over wholesale.
+  const parser = new PDFParse({ data: new Uint8Array(content.buffer, content.byteOffset, content.byteLength) });
   try {
     const timeoutPromise = new Promise<never>((_, reject) => {
       timeoutId = setTimeout(() => reject(new Error('PDF extraction timed out')), PDF_EXTRACT_TIMEOUT_MS);
     });
 
+    // `first: N` parses only pages 1..N (the v2 page-cap knob). We cap pages +
+    // extracted-text bytes to bound cost/DoS — BUT the caller stores the WHOLE PDF
+    // and feeds it to the agent, so screening only a prefix while delivering the
+    // rest is a bypass (review #1 HIGH: injection on page 51 of a 51-page PDF).
+    // Fail CLOSED when the document exceeds what we can screen: reject rather than
+    // deliver unscreened pages. `result.total` is the PDF's full page count.
     const result = await Promise.race([
-      pdfParseFn(content, { max: PDF_MAX_PAGES }),
+      parser.getText({ first: PDF_MAX_PAGES }),
       timeoutPromise,
     ]);
 
-    let text: string = result.text ?? '';
+    const totalPages = typeof result.total === 'number' ? result.total : undefined;
+    if (totalPages !== undefined && totalPages > PDF_MAX_PAGES) {
+      throw new AttachmentScreeningError(
+        `PDF "${filename}" has ${totalPages} pages, over the ${PDF_MAX_PAGES}-page limit ABCA can fully ` +
+        'screen. Split it or attach only the relevant pages so the whole document can be checked.',
+      );
+    }
+    const text: string = result.text ?? '';
     if (Buffer.byteLength(text, 'utf-8') > PDF_MAX_TEXT_BYTES) {
-      text = text.slice(0, PDF_MAX_TEXT_BYTES);
+      // The screened pages produced more text than we screen — we'd be delivering
+      // bytes we didn't fully check. Fail closed rather than truncate-and-pass.
+      throw new AttachmentScreeningError(
+        `PDF "${filename}" contains more text than ABCA can fully screen (over ${PDF_MAX_TEXT_BYTES} bytes). ` +
+        'Attach a smaller document so its full contents can be checked.',
+      );
     }
     return text;
   } catch (err) {
+    // Our own over-limit / no-text rejections are already user-facing — don't
+    // re-wrap them as "corrupt PDF".
+    if (err instanceof AttachmentScreeningError) throw err;
+    // A DEPLOYMENT bug and a genuinely-bad PDF both land here, and they look
+    // nothing alike to an operator. pdf-parse mangled by esbuild (a Lambda that
+    // reaches this path but lacks `nodeModules: ['pdf-parse']`) throws with a
+    // pdfjs/DOM signature — `DOMMatrix is not defined`, `Cannot find native
+    // binding`, `@napi-rs/canvas`. Detect that and log a LOUD, actionable
+    // diagnostic (with the fix) so it's not misread as "user's PDF is corrupt" —
+    // that misdiagnosis has cost a full debug loop before. The user-facing
+    // message stays generic.
+    const msg = err instanceof Error ? err.message : String(err);
+    const looksLikeBundlingBug = /DOMMatrix|ImageData|Path2D|napi-rs\/canvas|Cannot find native binding|pdfjs/i.test(msg);
+    if (looksLikeBundlingBug) {
+      logger.error(
+        'PDF extraction hit a pdfjs/native-binding error — this is almost certainly a BUNDLING bug, ' +
+        'not a bad PDF: the Lambda screens PDFs but was esbuild-bundled without `nodeModules: [\'pdf-parse\']`. ' +
+        'Add the attachment-screening bundling carve-out to this function\'s construct (see the ' +
+        '//:check:pdf-parse-bundling guard).',
+        { error: msg, filename, metric_type: 'pdf_parse_bundling_error' },
+      );
+    }
     throw new AttachmentScreeningError(
       `PDF "${filename}" could not be processed. It may be corrupt or use unsupported features. ` +
       'Try exporting to a simpler PDF format.',
@@ -291,6 +363,8 @@ async function extractPdfText(content: Buffer, filename: string): Promise<string
     );
   } finally {
     clearTimeout(timeoutId!);
+    // Release the pdfjs worker/document (v2 holds native + worker handles).
+    await parser.destroy().catch(() => { /* best-effort teardown */ });
   }
 }
 

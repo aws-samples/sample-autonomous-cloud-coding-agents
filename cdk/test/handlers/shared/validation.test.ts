@@ -35,6 +35,9 @@ import {
   parseBody,
   parseLimit,
   parseStatusFilter,
+  EXTENSION_TO_MIME,
+  MIME_TO_EXTENSION,
+  SUPPORTED_ATTACHMENT_EXTENSIONS_LABEL,
   validateAttachments,
   validateMagicBytes,
   validateMaxBudgetUsd,
@@ -699,27 +702,33 @@ describe('validateMagicBytes', () => {
     expect(validateMagicBytes(binary, 'text/plain')).toBe(false);
   });
 
-  test('rejects a text type whose bytes are not decodable UTF-8', () => {
-    // 0xC3 starts a 2-byte sequence but 0x28 is not a valid continuation byte, and
-    // 0xFF never appears in UTF-8 at all. Neither carries a NUL, so the null-byte
-    // scan below would pass them — only the decode catches this.
-    expect(validateMagicBytes(Buffer.from([0x48, 0xC3, 0x28]), 'text/plain')).toBe(false);
-    expect(validateMagicBytes(Buffer.from([0xFF, 0xFE, 0x41]), 'application/json')).toBe(false);
+  test('rejects INVALID UTF-8 masquerading as text (finding #3)', () => {
+    // A lone 0xFF / 0x80 continuation byte is not valid UTF-8 — the old null-only
+    // check let these through; the real decoder now rejects them.
+    expect(validateMagicBytes(Buffer.from([0xff, 0xfe, 0x80, 0x81]), 'text/plain')).toBe(false);
+    expect(validateMagicBytes(Buffer.from([0xc3, 0x28]), 'application/json')).toBe(false); // invalid 2-byte seq
+  });
+
+  test('accepts valid multi-byte UTF-8 text (emoji / accents)', () => {
+    expect(validateMagicBytes(Buffer.from('café — 日本語 ✅', 'utf-8'), 'text/markdown')).toBe(true);
+  });
+
+  test('does not false-reject a multi-byte char that straddles the old 8 KB cutoff', () => {
+    // 8191 ASCII bytes + a 3-byte char crossing what used to be the 8192-byte
+    // cutoff. Decoding the whole buffer sees the complete character, so it must
+    // pass; a prefix-only decode would have cut it in half and rejected it.
+    const buf = Buffer.concat([Buffer.alloc(8191, 0x61), Buffer.from('本', 'utf-8')]);
+    expect(validateMagicBytes(buf, 'text/plain')).toBe(true);
   });
 
   test('a long ASCII preamble does not launder trailing binary', () => {
-    // The check used to look at only the first 8 KB, so a benign preamble longer
+    // The check once looked at only the first 8 KB, so a benign preamble longer
     // than that let arbitrary bytes through behind it. Validate the whole buffer.
     const payload = Buffer.concat([
       Buffer.from('A'.repeat(9000)),
       Buffer.from([0xC3, 0x28]),
     ]);
     expect(validateMagicBytes(payload, 'text/plain')).toBe(false);
-  });
-
-  test('accepts multi-byte UTF-8 text (not just ASCII)', () => {
-    // The decode must not reject legitimate non-ASCII text.
-    expect(validateMagicBytes(Buffer.from('héllo — 世界 🎉', 'utf8'), 'text/plain')).toBe(true);
   });
 
   test('rejects mismatched signatures', () => {
@@ -810,5 +819,38 @@ describe('createAttachmentRecord', () => {
     });
     expect(record.attachment_id).toBe('att-4');
     expect(record.token_estimate).toBeUndefined();
+  });
+});
+
+describe('attachment type maps (derived, single source of truth)', () => {
+  test('EXTENSION_TO_MIME is the reverse of the allowlist + covers the .jpeg alias', () => {
+    expect(EXTENSION_TO_MIME.pdf).toBe('application/pdf');
+    expect(EXTENSION_TO_MIME.png).toBe('image/png');
+    expect(EXTENSION_TO_MIME.jpg).toBe('image/jpeg');
+    expect(EXTENSION_TO_MIME.jpeg).toBe('image/jpeg'); // alias
+    expect(EXTENSION_TO_MIME.log).toBe('text/x-log');
+    // Unsupported extensions resolve to nothing.
+    expect(EXTENSION_TO_MIME.docx).toBeUndefined();
+    expect(EXTENSION_TO_MIME.zip).toBeUndefined();
+  });
+
+  test('SUPPORTED_ATTACHMENT_EXTENSIONS_LABEL is a human list derived from the allowlist (incl. JPEG alias)', () => {
+    const label = SUPPORTED_ATTACHMENT_EXTENSIONS_LABEL;
+    // JPEG alias is listed (design nit): a user with a .jpeg file sees it's supported.
+    for (const ext of ['PNG', 'JPG', 'JPEG', 'TXT', 'CSV', 'MD', 'JSON', 'PDF', 'LOG']) {
+      expect(label).toContain(ext);
+    }
+    // Derived + upper-cased, comma-separated, no unsupported types leak in.
+    expect(label).not.toMatch(/docx|zip/i);
+  });
+
+  test('every MIME in MIME_TO_EXTENSION is actually allowed by isAllowedMimeType (design concern)', () => {
+    // Guards against the allowlist + the extension map drifting: the rejection
+    // message (derived from the map) must never advertise a type that
+    // isAllowedMimeType still rejects.
+    for (const mime of Object.keys(MIME_TO_EXTENSION)) {
+      const kind = mime.startsWith('image/') ? 'image' : 'file';
+      expect(isAllowedMimeType(mime, kind)).toBe(true);
+    }
   });
 });

@@ -1,0 +1,466 @@
+/**
+ *  MIT No Attribution
+ *
+ *  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ *
+ *  Permission is hereby granted, free of charge, to any person obtaining a copy of
+ *  the Software without restriction, including without limitation the rights to
+ *  use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+ *  the Software, and to permit persons to whom the Software is furnished to do so.
+ *
+ *  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ *  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ *  SOFTWARE.
+ */
+
+const screenImageMock = jest.fn();
+const screenTextFileMock = jest.fn();
+jest.mock('../../../src/handlers/shared/attachment-screening', () => {
+  const actual = jest.requireActual('../../../src/handlers/shared/attachment-screening');
+  return {
+    ...actual,
+    screenImage: (...args: unknown[]) => screenImageMock(...args),
+    screenTextFile: (...args: unknown[]) => screenTextFileMock(...args),
+  };
+});
+
+// dns.lookup is used for the SSRF guard — resolve to a public IP by default.
+const dnsLookupMock = jest.fn();
+jest.mock('dns/promises', () => ({
+  lookup: (...args: unknown[]) => dnsLookupMock(...args),
+}));
+
+import { AttachmentScreeningError, type ScreeningConfig } from '../../../src/handlers/shared/attachment-screening';
+import {
+  downloadScreenAndStoreLinearAttachments,
+  isLinearUploadsUrl,
+  LinearAttachmentError,
+} from '../../../src/handlers/shared/linear-attachments';
+import { MAX_ATTACHMENT_SIZE_BYTES } from '../../../src/handlers/shared/validation';
+
+const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00]);
+const JPEG_BYTES = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]);
+const PDF_BYTES = Buffer.from('%PDF-1.7\n1 0 obj\n<<>>\nendobj\n');
+const TEXT_BYTES = Buffer.from('log line one\nlog line two\n');
+
+const putSendMock = jest.fn();
+const s3Client = { send: putSendMock } as unknown as import('@aws-sdk/client-s3').S3Client;
+
+const screeningConfig: ScreeningConfig = {
+  guardrailId: 'gr-1',
+  guardrailVersion: '1',
+  bedrockClient: {} as never,
+};
+
+function storageCtx() {
+  return {
+    s3Client,
+    bucketName: 'attachments-bucket',
+    screeningConfig,
+    userId: 'user-1',
+    taskId: 'task-1',
+    accessToken: 'lin_oauth_at',
+    linearWorkspaceId: 'ws-1',
+  };
+}
+
+const UPLOAD_URL = 'https://uploads.linear.app/aaaa-1111/bbbb-2222/screenshot.png?signature=abc';
+function desc(...urls: string[]): string {
+  return `Some issue text\n\n${urls.map((u, i) => `![img${i}](${u})`).join('\n')}\n\nmore text`;
+}
+/** Description with plain-link (file) markdown `[label](url)` rather than image `![]()`. */
+function fileDesc(...urls: string[]): string {
+  return `Some issue text\n\n${urls.map((u, i) => `[file${i}](${u})`).join('\n')}\n\nmore text`;
+}
+/** Description with an explicit markdown link label (the original filename). */
+function labeledDesc(label: string, url: string): string {
+  return `Some issue text\n\n[${label}](${url})\n\nmore text`;
+}
+
+/** A fetch Response-like object whose body streams the given buffer once. */
+function bytesResponse(buf: Buffer, status = 200, contentType = 'image/png'): Response {
+  let sent = false;
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers: { get: (h: string) => (h.toLowerCase() === 'content-type' ? contentType : null) },
+    body: {
+      getReader() {
+        return {
+          read() {
+            if (sent) return Promise.resolve({ done: true, value: undefined });
+            sent = true;
+            return Promise.resolve({ done: false, value: new Uint8Array(buf) });
+          },
+          cancel() { return Promise.resolve(); },
+        };
+      },
+    },
+  } as unknown as Response;
+}
+
+beforeEach(() => {
+  screenImageMock.mockReset();
+  screenImageMock.mockImplementation((content: Buffer) => Promise.resolve({
+    content,
+    checksum: 'sha256:abc',
+    screening: { status: 'passed', screened_at: '2026-07-22T00:00:00Z' },
+  }));
+  screenTextFileMock.mockReset();
+  screenTextFileMock.mockImplementation((content: Buffer) => Promise.resolve({
+    content,
+    checksum: 'sha256:def',
+    screening: { status: 'passed', screened_at: '2026-07-22T00:00:00Z' },
+  }));
+  putSendMock.mockReset();
+  putSendMock.mockResolvedValue({ VersionId: 'v1' });
+  dnsLookupMock.mockReset();
+  dnsLookupMock.mockResolvedValue([{ address: '203.0.113.7', family: 4 }]);
+  (global.fetch as unknown) = jest.fn();
+});
+
+afterEach(() => {
+  jest.restoreAllMocks();
+});
+
+describe('isLinearUploadsUrl', () => {
+  test('matches uploads.linear.app and subdomains, rejects others', () => {
+    expect(isLinearUploadsUrl('https://uploads.linear.app/x/y/z.png')).toBe(true);
+    expect(isLinearUploadsUrl('https://eu.uploads.linear.app/x/y/z.png')).toBe(true);
+    expect(isLinearUploadsUrl('https://cdn.example.com/z.png')).toBe(false);
+    expect(isLinearUploadsUrl('not a url')).toBe(false);
+  });
+});
+
+describe('downloadScreenAndStoreLinearAttachments', () => {
+  test('happy path: fetches uploads.linear.app image with the OAuth bearer, screens, uploads, returns a passed record', async () => {
+    (global.fetch as jest.Mock).mockResolvedValueOnce(bytesResponse(PNG_BYTES));
+    const records = await downloadScreenAndStoreLinearAttachments(desc(UPLOAD_URL), 10, storageCtx());
+
+    expect(records).toHaveLength(1);
+    expect(records[0].type).toBe('image');
+    expect(records[0].content_type).toBe('image/png');
+    expect(records[0].screening.status).toBe('passed');
+    expect(screenImageMock).toHaveBeenCalled();
+    expect(putSendMock).toHaveBeenCalledTimes(1);
+    // Bearer header carried the workspace token.
+    const init = (global.fetch as jest.Mock).mock.calls[0][1] as { headers: Record<string, string> };
+    expect(init.headers.Authorization).toBe('Bearer lin_oauth_at');
+  });
+
+  test('ignores non-uploads.linear.app images (public CDN images go via the URL path)', async () => {
+    const records = await downloadScreenAndStoreLinearAttachments(
+      desc('https://cdn.example.com/pic.png'), 10, storageCtx(),
+    );
+    expect(records).toHaveLength(0);
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test('no-op when description is empty or has no uploads', async () => {
+    expect(await downloadScreenAndStoreLinearAttachments(undefined, 10, storageCtx())).toEqual([]);
+    expect(await downloadScreenAndStoreLinearAttachments('plain text', 10, storageCtx())).toEqual([]);
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test('overflow past remainingSlots throws (loud, not a silent truncation) — finding #2', async () => {
+    (global.fetch as jest.Mock).mockImplementation(() => Promise.resolve(bytesResponse(PNG_BYTES)));
+    const urls = Array.from({ length: 5 }, (_, i) => `https://uploads.linear.app/u/${i}/p${i}.png`);
+    // 5 uploads but only 2 slots free → reject the task rather than drop 3 silently.
+    await expect(
+      downloadScreenAndStoreLinearAttachments(desc(...urls), 2, storageCtx()),
+    ).rejects.toThrow(/over the limit of 2|Remove some attachments/i);
+    // Nothing stored — rejected before the download loop.
+    expect(putSendMock).not.toHaveBeenCalled();
+  });
+
+  test('exactly filling the slot budget is fine (no overflow error)', async () => {
+    (global.fetch as jest.Mock).mockImplementation(() => Promise.resolve(bytesResponse(PNG_BYTES)));
+    const urls = Array.from({ length: 2 }, (_, i) => `https://uploads.linear.app/u/${i}/p${i}.png`);
+    const records = await downloadScreenAndStoreLinearAttachments(desc(...urls), 2, storageCtx());
+    expect(records).toHaveLength(2);
+  });
+
+  test('de-dupes the same upload referenced twice', async () => {
+    (global.fetch as jest.Mock).mockImplementation(() => Promise.resolve(bytesResponse(PNG_BYTES)));
+    const records = await downloadScreenAndStoreLinearAttachments(desc(UPLOAD_URL, UPLOAD_URL), 10, storageCtx());
+    expect(records).toHaveLength(1);
+  });
+
+  test('zero remainingSlots WITH a Linear upload present → REJECTS (no silent drop, finding #6)', async () => {
+    // Regression: this used to silently return [] (the spec was dropped while the
+    // task ran). Now a Linear upload with no free slots fails loud.
+    await expect(
+      downloadScreenAndStoreLinearAttachments(desc(UPLOAD_URL), 0, storageCtx()),
+    ).rejects.toThrow(/already used up|limit/i);
+    expect(global.fetch).not.toHaveBeenCalled(); // rejected before fetching
+  });
+
+  test('zero remainingSlots with NO uploads → clean no-op', async () => {
+    const records = await downloadScreenAndStoreLinearAttachments('plain text, no uploads', 0, storageCtx());
+    expect(records).toEqual([]);
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test('401 on download → LinearAttachmentError (signed URL stale; fail-closed, no refresh loop)', async () => {
+    (global.fetch as jest.Mock).mockResolvedValueOnce(bytesResponse(Buffer.alloc(0), 401));
+    await expect(
+      downloadScreenAndStoreLinearAttachments(desc(UPLOAD_URL), 10, storageCtx()),
+    ).rejects.toBeInstanceOf(LinearAttachmentError);
+    expect((global.fetch as jest.Mock)).toHaveBeenCalledTimes(1); // no retry loop for a stale signed URL
+  });
+
+  test('zero-byte body → LinearAttachmentError (fail-closed)', async () => {
+    (global.fetch as jest.Mock).mockResolvedValueOnce(bytesResponse(Buffer.alloc(0)));
+    await expect(
+      downloadScreenAndStoreLinearAttachments(desc(UPLOAD_URL), 10, storageCtx()),
+    ).rejects.toBeInstanceOf(LinearAttachmentError);
+    expect(putSendMock).not.toHaveBeenCalled();
+  });
+
+  test('magic-byte mismatch → LinearAttachmentError (fail-closed)', async () => {
+    // content-type says png but bytes are junk
+    (global.fetch as jest.Mock).mockResolvedValueOnce(bytesResponse(Buffer.from([0x00, 0x01, 0x02]), 200, 'image/png'));
+    await expect(
+      downloadScreenAndStoreLinearAttachments(desc(UPLOAD_URL), 10, storageCtx()),
+    ).rejects.toBeInstanceOf(LinearAttachmentError);
+    expect(screenImageMock).not.toHaveBeenCalled();
+  });
+
+  test('fetches a PDF file link, screens it as text, returns a file record', async () => {
+    (global.fetch as jest.Mock).mockResolvedValueOnce(bytesResponse(PDF_BYTES, 200, 'application/pdf'));
+    const records = await downloadScreenAndStoreLinearAttachments(
+      fileDesc('https://uploads.linear.app/u/p/design.pdf'), 10, storageCtx(),
+    );
+    expect(records).toHaveLength(1);
+    expect(records[0].type).toBe('file');
+    expect(records[0].content_type).toBe('application/pdf');
+    expect(records[0].token_estimate).toBeUndefined(); // files don't carry a vision-token estimate
+    expect(screenTextFileMock).toHaveBeenCalled();
+    expect(screenImageMock).not.toHaveBeenCalled();
+    expect(putSendMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('matches the angle-bracket autolink URL form Linear normalizes links into', async () => {
+    // Linear round-trips `[f](https://…)` into `[f](<https://…>)`. The un-bracketed
+    // pattern dropped it silently (observed in practice) — the attachment
+    // never reached S3 and the task ran without it.
+    (global.fetch as jest.Mock).mockResolvedValueOnce(bytesResponse(PDF_BYTES, 200, 'application/pdf'));
+    const autolinkDesc = 'See [design.pdf](<https://uploads.linear.app/u/p/design.pdf>) attached.';
+    const records = await downloadScreenAndStoreLinearAttachments(autolinkDesc, 10, storageCtx());
+    expect(records).toHaveLength(1);
+    expect(records[0].type).toBe('file');
+    expect(records[0].content_type).toBe('application/pdf');
+    // The captured URL must NOT include the trailing '>' (the fetch must hit the real URL).
+    const fetchedUrl = (global.fetch as jest.Mock).mock.calls[0][0] as string;
+    expect(fetchedUrl).toBe('https://uploads.linear.app/u/p/design.pdf');
+  });
+
+  test('types a generic octet-stream response by the .log extension in its markdown label', async () => {
+    // The extension comes from the markdown LABEL (the original filename), since
+    // the uploads.linear.app URL path is a UUID with no extension.
+    (global.fetch as jest.Mock).mockResolvedValueOnce(bytesResponse(TEXT_BYTES, 200, 'application/octet-stream'));
+    const records = await downloadScreenAndStoreLinearAttachments(
+      labeledDesc('output.log', 'https://uploads.linear.app/u/l/9c8b-uuid'), 10, storageCtx(),
+    );
+    expect(records).toHaveLength(1);
+    expect(records[0].type).toBe('file');
+    expect(records[0].content_type).toBe('text/x-log');
+    expect(screenTextFileMock).toHaveBeenCalled();
+  });
+
+  test('REJECTS an unsupported type fail-closed, naming the FRIENDLY filename + supported types', async () => {
+    (global.fetch as jest.Mock).mockResolvedValueOnce(
+      bytesResponse(Buffer.from([0x50, 0x4b, 0x03, 0x04]), 200, 'application/zip'),
+    );
+    // The URL path is a UUID; the friendly name comes from the markdown label.
+    await expect(
+      downloadScreenAndStoreLinearAttachments(
+        labeledDesc('spec.docx', 'https://uploads.linear.app/u/z/9a8b7c6d-uuid'), 10, storageCtx(),
+      ),
+    ).rejects.toThrow(/Attachment 'spec\.docx' is not a supported file type.*PDF/i);
+    // Never screened or stored — rejected before that.
+    expect(screenImageMock).not.toHaveBeenCalled();
+    expect(screenTextFileMock).not.toHaveBeenCalled();
+    expect(putSendMock).not.toHaveBeenCalled();
+  });
+
+  test('surfaces the friendly filename (markdown label) in a screening-block error, not the UUID', async () => {
+    (global.fetch as jest.Mock).mockResolvedValueOnce(bytesResponse(PDF_BYTES, 200, 'application/pdf'));
+    screenTextFileMock.mockRejectedValueOnce(new AttachmentScreeningError('blocked: prompt attack'));
+    await expect(
+      downloadScreenAndStoreLinearAttachments(
+        labeledDesc('design.pdf', 'https://uploads.linear.app/u/p/deadbeef-uuid'), 10, storageCtx(),
+      ),
+    ).rejects.toThrow(/Attachment 'design\.pdf' was blocked by content screening/);
+  });
+
+  test('falls back to the path-safe filename when the markdown label is empty', async () => {
+    (global.fetch as jest.Mock).mockResolvedValueOnce(
+      bytesResponse(Buffer.from([0x50, 0x4b, 0x03, 0x04]), 200, 'application/zip'),
+    );
+    // Empty label `[]( … )` → displayName falls back to the derived filename (no crash, still rejects).
+    await expect(
+      downloadScreenAndStoreLinearAttachments(
+        labeledDesc('', 'https://uploads.linear.app/u/z/bundle-uuid'), 10, storageCtx(),
+      ),
+    ).rejects.toThrow(/not a supported file type/i);
+  });
+
+  test('a .txt-LABELED binary payload is REJECTED, not stored as text (finding #3)', async () => {
+    // Attacker labels a binary octet-stream `[diagram.txt]`. The label must NOT
+    // promote it to text/plain past the UTF-8 gate — bytes with invalid UTF-8 /
+    // nulls fail validateMagicBytes, so it's rejected as unsupported.
+    const binary = Buffer.from([0xff, 0xfe, 0x00, 0x01, 0x80, 0x81]); // invalid UTF-8 + null
+    (global.fetch as jest.Mock).mockResolvedValueOnce(bytesResponse(binary, 200, 'application/octet-stream'));
+    await expect(
+      downloadScreenAndStoreLinearAttachments(
+        labeledDesc('diagram.txt', 'https://uploads.linear.app/u/x/evil-uuid'), 10, storageCtx(),
+      ),
+    ).rejects.toThrow(/not a supported file type|does not match its declared type/i);
+    expect(screenTextFileMock).not.toHaveBeenCalled();
+    expect(putSendMock).not.toHaveBeenCalled();
+  });
+
+  test('a .pdf-LABELED non-PDF is NOT promoted to application/pdf by the label (finding #3)', async () => {
+    // Only magic bytes can vouch for a binary type. A `[x.pdf]` label over
+    // non-PDF octet-stream bytes must not be treated as a PDF.
+    (global.fetch as jest.Mock).mockResolvedValueOnce(
+      bytesResponse(Buffer.from([0x00, 0x01, 0x02, 0x03]), 200, 'application/octet-stream'),
+    );
+    await expect(
+      downloadScreenAndStoreLinearAttachments(
+        labeledDesc('notreally.pdf', 'https://uploads.linear.app/u/x/fake-uuid'), 10, storageCtx(),
+      ),
+    ).rejects.toThrow(/not a supported file type/i);
+  });
+
+  test('hydrates a native paperclip attachment (uploads.linear.app) — finding #1', async () => {
+    (global.fetch as jest.Mock).mockResolvedValueOnce(bytesResponse(PDF_BYTES, 200, 'application/pdf'));
+    // No description link; the file arrives via the paperclip list (4th arg).
+    const records = await downloadScreenAndStoreLinearAttachments(
+      'Implement the attached spec.', 10, storageCtx(),
+      [{ title: 'spec.pdf', url: 'https://uploads.linear.app/u/pc/paperclip-uuid' }],
+    );
+    expect(records).toHaveLength(1);
+    expect(records[0].type).toBe('file');
+    expect(records[0].content_type).toBe('application/pdf');
+    expect(screenTextFileMock).toHaveBeenCalled();
+  });
+
+  test('ignores an external-link paperclip (not uploads.linear.app)', async () => {
+    const records = await downloadScreenAndStoreLinearAttachments(
+      'See the design.', 10, storageCtx(),
+      [{ title: 'Figma', url: 'https://figma.com/file/abc' }],
+    );
+    expect(records).toHaveLength(0);
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test('de-dupes a file that is BOTH a paperclip and a description link', async () => {
+    (global.fetch as jest.Mock).mockImplementation(() => Promise.resolve(bytesResponse(PDF_BYTES, 200, 'application/pdf')));
+    const url = 'https://uploads.linear.app/u/dup/same-uuid';
+    const records = await downloadScreenAndStoreLinearAttachments(
+      labeledDesc('spec.pdf', url), 10, storageCtx(),
+      [{ title: 'spec.pdf', url }],
+    );
+    expect(records).toHaveLength(1); // fetched once, not twice
+  });
+
+  test('sniffs JPEG when content-type is generic but bytes are a JPEG', async () => {
+    (global.fetch as jest.Mock).mockResolvedValueOnce(bytesResponse(JPEG_BYTES, 200, 'application/octet-stream'));
+    const records = await downloadScreenAndStoreLinearAttachments(
+      desc('https://uploads.linear.app/u/j/photo.jpg'), 10, storageCtx(),
+    );
+    expect(records).toHaveLength(1);
+    expect(records[0].content_type).toBe('image/jpeg');
+  });
+
+  test('a PDF served as text/plain is typed as PDF by magic bytes, NOT screened as raw text (finding #2)', async () => {
+    // Magic bytes are authoritative: %PDF- wins over a text/plain content-type,
+    // so it goes through PDF extraction (screenTextFile w/ application/pdf), never
+    // content.toString(utf-8) on binary bytes.
+    (global.fetch as jest.Mock).mockResolvedValueOnce(bytesResponse(PDF_BYTES, 200, 'text/plain'));
+    const records = await downloadScreenAndStoreLinearAttachments(
+      labeledDesc('sneaky.txt', 'https://uploads.linear.app/u/p/sneaky-uuid'), 10, storageCtx(),
+    );
+    expect(records).toHaveLength(1);
+    expect(records[0].content_type).toBe('application/pdf'); // typed by bytes, not the text/plain header
+    expect(screenTextFileMock).toHaveBeenCalledWith(expect.anything(), 'application/pdf', expect.anything(), expect.anything());
+  });
+
+  test('SSRF: an IPv4-mapped IPv6 metadata address (::ffff:169.254.169.254) is rejected (finding #8)', async () => {
+    dnsLookupMock.mockResolvedValueOnce([{ address: '::ffff:169.254.169.254', family: 6 }]);
+    await expect(
+      downloadScreenAndStoreLinearAttachments(desc(UPLOAD_URL), 10, storageCtx()),
+    ).rejects.toBeInstanceOf(LinearAttachmentError);
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test('SSRF: an fe80::/10 link-local address beyond the fe80 prefix (fea9::1) is rejected (finding #8)', async () => {
+    dnsLookupMock.mockResolvedValueOnce([{ address: 'fea9::1', family: 6 }]);
+    await expect(
+      downloadScreenAndStoreLinearAttachments(desc(UPLOAD_URL), 10, storageCtx()),
+    ).rejects.toBeInstanceOf(LinearAttachmentError);
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test('screening block → LinearAttachmentError (fail-closed)', async () => {
+    (global.fetch as jest.Mock).mockResolvedValueOnce(bytesResponse(PNG_BYTES));
+    screenImageMock.mockRejectedValueOnce(new AttachmentScreeningError('blocked: prompt attack'));
+    await expect(
+      downloadScreenAndStoreLinearAttachments(desc(UPLOAD_URL), 10, storageCtx()),
+    ).rejects.toBeInstanceOf(LinearAttachmentError);
+    expect(putSendMock).not.toHaveBeenCalled();
+  });
+
+  test('screening returns blocked status → LinearAttachmentError', async () => {
+    (global.fetch as jest.Mock).mockResolvedValueOnce(bytesResponse(PNG_BYTES));
+    screenImageMock.mockResolvedValueOnce({
+      content: PNG_BYTES,
+      checksum: 'sha256:abc',
+      screening: { status: 'blocked', categories: ['VIOLENCE'], screened_at: '2026-07-22T00:00:00Z' },
+    });
+    await expect(
+      downloadScreenAndStoreLinearAttachments(desc(UPLOAD_URL), 10, storageCtx()),
+    ).rejects.toBeInstanceOf(LinearAttachmentError);
+  });
+
+  test('SSRF: host resolving to a private IP → LinearAttachmentError, no fetch', async () => {
+    dnsLookupMock.mockResolvedValueOnce([{ address: '10.0.0.5', family: 4 }]);
+    await expect(
+      downloadScreenAndStoreLinearAttachments(desc(UPLOAD_URL), 10, storageCtx()),
+    ).rejects.toBeInstanceOf(LinearAttachmentError);
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test('body exceeding size limit while streaming → LinearAttachmentError', async () => {
+    // Stream a body larger than the cap in one chunk.
+    const tooBig = Buffer.concat([PNG_BYTES, Buffer.alloc(MAX_ATTACHMENT_SIZE_BYTES + 1)]);
+    (global.fetch as jest.Mock).mockResolvedValueOnce(bytesResponse(tooBig));
+    await expect(
+      downloadScreenAndStoreLinearAttachments(desc(UPLOAD_URL), 10, storageCtx()),
+    ).rejects.toBeInstanceOf(LinearAttachmentError);
+  });
+
+  test('deletes already-uploaded objects when a later attachment fails (no orphans)', async () => {
+    const deleteSendMock = putSendMock; // same client.send
+    (global.fetch as jest.Mock)
+      .mockResolvedValueOnce(bytesResponse(PNG_BYTES)) // #1 ok
+      .mockResolvedValueOnce(bytesResponse(Buffer.alloc(0), 401)); // #2 auth-fail → throw
+    await expect(
+      downloadScreenAndStoreLinearAttachments(
+        desc('https://uploads.linear.app/u/1/a.png', 'https://uploads.linear.app/u/2/b.png'),
+        10, storageCtx(),
+      ),
+    ).rejects.toBeInstanceOf(LinearAttachmentError);
+    // A DeleteObjectsCommand was sent to clean up the one uploaded object.
+    const sentDeletes = deleteSendMock.mock.calls.filter(
+      (c) => c[0]?.constructor?.name === 'DeleteObjectsCommand',
+    );
+    expect(sentDeletes.length).toBeGreaterThanOrEqual(1);
+  });
+});
