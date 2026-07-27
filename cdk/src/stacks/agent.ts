@@ -176,6 +176,23 @@ export class AgentStack extends Stack {
 
     const blueprints = [agentPluginsBlueprint];
 
+    // Optional per-repo blueprint pinning registry assets (#246), opt-in via
+    // context/env so it does not hardcode a specific fork for other contributors.
+    // Set ``forkBlueprintRepo`` (e.g. ``--context forkBlueprintRepo=owner/repo``)
+    // to onboard a repo with the AWS Knowledge MCP asset pinned.
+    const forkBlueprintRepo = process.env.FORK_BLUEPRINT_REPO ?? this.node.tryGetContext('forkBlueprintRepo');
+    if (forkBlueprintRepo) {
+      blueprints.push(new Blueprint(this, 'ForkBlueprint', {
+        repo: forkBlueprintRepo,
+        repoTable: repoTable.table,
+        assets: {
+          mcpServers: ['registry://mcp_server/acme/aws-knowledge@^1.0.0'],
+          cedarPolicyModules: ['registry://cedar_policy_module/acme/guard@^1.0.0'],
+          skills: ['registry://skill/acme/readme-helper@^1.0.0'],
+        },
+      }));
+    }
+
     // The AwsCustomResource singleton Lambda used by Blueprint constructs
     NagSuppressions.addResourceSuppressionsByPath(this, [
       `${this.stackName}/AWS679f53fac002430cb0da5b7982bd2287/ServiceRole/Resource`,
@@ -693,6 +710,7 @@ export class AgentStack extends Stack {
       guardrailId: inputGuardrail.guardrailId,
       guardrailVersion: inputGuardrail.guardrailVersion,
       attachmentsBucket: attachmentsBucket.bucket,
+      agentRegistryId: agentRegistry.registryId,
       // K12: route ``compute_type: 'ecs'`` repos to the Fargate cluster above —
       // only when the cluster was synthesized (deploy --context compute_type=ecs).
       ...(ecsCluster && {

@@ -406,6 +406,7 @@ def _run_task_background(
     user_id: str = "",
     workload_access_token: str = "",
     attachments: list[dict] | None = None,
+    resolved_assets: list[dict] | None = None,
 ) -> None:
     """Run the agent task in a background thread."""
     global _background_pipeline_failed
@@ -491,6 +492,7 @@ def _run_task_background(
             trace=trace,
             user_id=user_id,
             attachments=attachments,
+            resolved_assets=resolved_assets,
         )
         _background_pipeline_failed = False
     except Exception as e:
@@ -536,6 +538,9 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
     branch_name = inp.get("branch_name", "")
     pr_number = str(inp.get("pr_number", ""))
     cedar_policies = inp.get("cedar_policies") or []
+    # Registry assets (#246) resolved by the orchestrator; forwarded verbatim to
+    # the pipeline, which applies the per-kind loaders (mcp_server → .mcp.json).
+    resolved_assets = inp.get("resolved_assets") or []
     # Cedar HITL (§7.3) — per-task approval defaults + seeded allowlist.
     # Both are forwarded verbatim to the pipeline; the engine
     # validates shape at construction time and raises on bad input.
@@ -642,6 +647,7 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
         "branch_name": branch_name,
         "pr_number": pr_number,
         "cedar_policies": cedar_policies,
+        "resolved_assets": resolved_assets,
         "approval_timeout_s": approval_timeout_s,
         "initial_approvals": initial_approvals,
         "initial_approval_gate_count": initial_approval_gate_count,
