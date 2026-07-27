@@ -108,7 +108,8 @@ export function parsePlanCommand(instruction: string): PlanCommand | null {
   // SIZE: "<verb> #2 (to) L" / "make 3 small" / "size 2 large". Requires a size
   // token AND exactly one index. Checked before drop/merge so "make 3 small"
   // isn't mistaken for anything else. ("make it 2 tasks" has NO size token → not
-  // a size command → falls through to revise, preserving T1's revise routing.)
+  // a size command → falls through to the revise path, which is what should
+  // handle a phrase like that.)
   if (SIZE_VERBS.includes(firstWord)) {
     const idxs = extractIndices(text);
     // Find a size token anywhere in the words.

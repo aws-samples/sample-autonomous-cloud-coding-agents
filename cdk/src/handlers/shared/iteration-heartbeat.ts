@@ -66,16 +66,25 @@ export interface HeartbeatTaskView {
    * Whether this task carries the orchestration-iteration marker. NOT used for
    * eligibility — both orchestration AND standalone @bgagent iterations have a
    * maturing reply, and a STANDALONE iteration deliberately omits this marker
-   * (linear-webhook-processor.ts ~1317). Eligibility keys on the reply fields
-   * below, so standalone iterations are covered too. Kept on
-   * the view for logging/diagnostics only.
+   * (see where the webhook processor dispatches a standalone comment iteration).
+   * Eligibility keys on the reply fields below, so standalone iterations are
+   * covered too. Kept on the view for logging/diagnostics only.
    */
   readonly isIteration?: boolean;
   /** PR number, when known (makes the working line name the PR). */
   readonly prNumber?: number | null;
   /** PR url, when known (clickable PR reference). */
   readonly prUrl?: string | null;
-  /** Latest agent progress note (sanitized milestone detail), when available. */
+  /**
+   * Latest agent progress note (sanitized milestone detail).
+   *
+   * RESERVED — nothing populates this yet. The sweep's ``toView`` does not set it
+   * and there is no persisted progress-note attribute to read, so in production
+   * the heartbeat currently shows elapsed time only. Kept because the render path
+   * is written and tested; wiring it needs an agent-side progress write, which
+   * belongs with that work rather than here. Do not document it as a shipped
+   * capability until a producer exists.
+   */
   readonly latestProgressNote?: string;
 }
 

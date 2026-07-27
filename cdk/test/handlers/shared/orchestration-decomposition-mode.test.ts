@@ -194,6 +194,23 @@ describe('looksMultiPart (pre-spend hint heuristic — conservative)', () => {
     expect(looksMultiPart(desc)).toBe(true);
   });
 
+  test('conjunctions score with NATURAL punctuation, not only when spaces are missing', () => {
+    // The alternatives had a trailing word-boundary, which requires a word
+    // character to follow — so a correctly-punctuated "…, plus, …" or "a; b; c"
+    // scored ZERO while the unnatural no-space variants scored. The two
+    // punctuation alternatives were dead weight for real prose.
+    // Both variants are padded past the length floor so only the conjunction
+    // count differs between them.
+    const tail = ' Each part ships on its own branch so review stays small.';
+    const spaced = `Build the login form, plus, a signup page, plus, a password reset flow.${tail}`;
+    const unspaced = `Build the login form, plus,a signup page, plus,a password reset flow.${tail}`;
+    expect(looksMultiPart(spaced)).toBe(looksMultiPart(unspaced));
+    expect(looksMultiPart(spaced)).toBe(true);
+
+    const semis = 'Ship the profile page; then the settings tab; then the audit log view for admins.';
+    expect(looksMultiPart(semis)).toBe(true);
+  });
+
   test('a single cohesive ask → NOT multi-part (no false positive)', () => {
     expect(looksMultiPart('Fix the off-by-one bug in the pagination helper so the last page renders.')).toBe(false);
   });

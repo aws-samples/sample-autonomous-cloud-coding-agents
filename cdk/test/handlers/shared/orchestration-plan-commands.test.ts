@@ -56,7 +56,7 @@ describe('parsePlanCommand', () => {
   });
 
   test('NOT a command → null (falls through to the semantic revise loop)', () => {
-    // The T1 revise phrase must NOT be captured as a command (no size token).
+    // A prose revise phrase must NOT be captured as a command (it has no size token).
     expect(parsePlanCommand('make it 2 tasks')).toBeNull();
     expect(parsePlanCommand('no, just 2 tasks')).toBeNull();
     expect(parsePlanCommand('split the API into read and write')).toBeNull();

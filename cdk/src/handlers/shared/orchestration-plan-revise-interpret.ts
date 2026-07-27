@@ -43,8 +43,15 @@
  * Guardrail note: this is a CLASSIFICATION prompt over OUR OWN structured data
  * (the plan we generated + our digest + a short instruction), invoked directly via
  * InvokeModel — it does NOT flow through the task-creation guardrail that screens
- * ``task_description`` for PROMPT_ATTACK (the bfc57c5 trap). The reviewer's
- * instruction is embedded as clearly-delimited quoted data, not as commands to obey.
+ * ``task_description`` for PROMPT_ATTACK. That gap is deliberate but narrow, and
+ * the reason it is safe is structural rather than incidental: the reviewer's
+ * instruction is embedded as clearly-delimited quoted DATA inside a prompt whose
+ * only job is to classify it into a fixed set of plan edits, never as commands to
+ * obey. The model's output is validated against that fixed edit vocabulary before
+ * anything is applied, so a jailbreak in the instruction cannot widen what the
+ * caller does — the worst case is an edit the reviewer did not ask for, which the
+ * computed before/after diff surfaces to them. Do NOT reuse this prompt shape for
+ * anything whose output is executed rather than matched against a closed set.
  */
 
 import { logger } from './logger';

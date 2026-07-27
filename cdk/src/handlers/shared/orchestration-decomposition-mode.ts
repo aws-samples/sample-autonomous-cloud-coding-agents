@@ -197,6 +197,12 @@ export function looksMultiPart(description: string | undefined | null): boolean 
   const listItems = lines.filter((l) => /^\s*(\d+[.)]|[-*•])\s+\S/.test(l)).length;
   if (listItems >= MULTI_PART_MIN_LIST_ITEMS) return true;
   // Or several additive conjunctions across the prose (independent asks).
-  const conjunctions = (text.match(/\b(and also|as well as|in addition|plus,|;)\b/gi) ?? []).length;
+  // Word alternatives need word boundaries; the punctuation ones must not have a
+  // TRAILING one. A ``\b`` after ``plus,`` or ``;`` requires a word character to
+  // follow, which inverts the intent for exactly the correctly-punctuated
+  // phrasings this is meant to catch: "the form, plus, a signup page" scored 0
+  // while "plus,a signup page" scored 1, and "do a; b; c" scored 0 while
+  // "do a;b;c" scored 2.
+  const conjunctions = (text.match(/\b(?:and also|as well as|in addition)\b|(?:plus,|;)/gi) ?? []).length;
   return conjunctions >= MULTI_PART_MIN_CONJUNCTIONS;
 }
