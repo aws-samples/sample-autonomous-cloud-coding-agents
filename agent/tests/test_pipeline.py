@@ -2052,6 +2052,34 @@ class TestTraceCrashPath:
         mock_task_state.write_terminal.assert_called()
 
 
+class TestJiraCredentialIsolation:
+    @pytest.mark.parametrize("channel_source", ["", "linear", "jira"])
+    def test_run_task_scrubs_prior_jira_credentials_before_building_config(
+        self,
+        monkeypatch,
+        channel_source,
+    ):
+        """A warm Jira task cannot expose credentials to the next task."""
+        credential_names = (
+            "JIRA_API_TOKEN",
+            "JIRA_APP_ACTOR_CONFIGURED",
+            "JIRA_APP_ACTOR_PROXY_URL",
+            "JIRA_APP_ACTOR_SHARED_SECRET",
+        )
+        for name in credential_names:
+            monkeypatch.setenv(name, "tenant-x-secret")
+
+        def stop_after_scrub(**_kwargs):
+            assert all(name not in os.environ for name in credential_names)
+            raise RuntimeError("stop after credential scrub")
+
+        with patch("pipeline.build_config", side_effect=stop_after_scrub):
+            from pipeline import run_task
+
+            with pytest.raises(RuntimeError, match="stop after credential scrub"):
+                run_task(channel_source=channel_source)
+
+
 class TestEarlyAckOrdering:
     """#616 review N4 — the early-ACK reorder must hold under future edits.
 

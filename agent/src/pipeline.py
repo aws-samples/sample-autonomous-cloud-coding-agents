@@ -20,6 +20,7 @@ from config import (
     AGENT_WORKSPACE,
     NEEDS_INPUT_MARKER,
     build_config,
+    clear_jira_task_credentials,
     get_config,
     resolve_jira_oauth_token,
     resolve_linear_api_token,
@@ -111,9 +112,9 @@ def _maybe_upload_trace(
     both the happy path (post-hooks complete) and the crash path
     (top-level ``except``) so a crashing task still produces a
     debuggable artifact — which is exactly when ``--trace`` is most
-    useful.
+    useful (K2 review Finding #1).
 
-    Gates:
+    Gates (K2 Stage 3 review Finding #1):
       - ``config.trace`` must be true.
       - ``config.user_id`` must be non-empty, else we would write to
         ``traces//<task_id>.jsonl.gz`` — an unreachable key that no
@@ -173,7 +174,7 @@ def _deliver_plan_artifact(
     prompt: str,
     agent_result,
 ) -> str | None:
-    """Deliver a decompose-planning agent's plan as the task artifact.
+    """Deliver a decompose-planning agent's plan as the task artifact (#299).
 
     ``coding/decompose-v1`` is a repo-ful workflow whose primary terminal outcome
     is an ARTIFACT (the decomposition plan), not a PR. It clones the repo for full
@@ -217,12 +218,12 @@ def _execute_agent_step(
 ):
     """Run the agentic step through the workflow step runner.
 
-    The workflow runner is the sole path: the single ``run_agent`` step is
-    dispatched through ``workflow.run_workflow`` — exercising the real handler
-    registry, step milestones, and result threading — while clone, context
-    assembly, and post-hooks stay inline (moving the full step list onto the
-    runner is a follow-up). The workflow is loaded from the resolved
-    ``{id, version}`` pinned at the create-task boundary.
+    Post-cutover (#248 task 8), the workflow runner is the sole path: the single
+    ``run_agent`` step is dispatched through ``workflow.run_workflow`` —
+    exercising the real handler registry, step milestones, and result threading —
+    while clone, context assembly, and post-hooks stay inline (moving the full
+    step list onto the runner is a follow-up). The workflow is loaded from the
+    resolved ``{id, version}`` pinned at the create-task boundary.
 
     Returns the ``AgentResult`` so the surrounding pipeline (cancel short-circuit,
     post-hooks, result assembly) is unchanged.
@@ -278,7 +279,7 @@ def _run_repoless_task(
     memory_id: str,
     system_prompt_overrides: str,
 ) -> dict:
-    """Run a repo-less workflow (knowledge work, no repo) and return the result dict.
+    """Run a repo-less workflow (#248 Phase 3) and return the result dict.
 
     No clone / build / PR: the workflow runner drives the full repo-less step
     list (``hydrate_context`` → ``run_agent`` → ``deliver_artifact``) inside the
@@ -308,7 +309,7 @@ def _run_repoless_task(
     # Drive the full repo-less step list: hydrate_context → run_agent →
     # deliver_artifact. The deliverer uploads the agent's result text to
     # artifacts/{task_id}/ (and/or surfaces it as a comment), so the declared
-    # terminal outcome is actually produced.
+    # terminal outcome is actually produced (#248 Phase 3).
     with task_span("task.agent_execution"):
         wf_result = run_workflow(wf, ctx)
 
@@ -348,7 +349,7 @@ def _run_repoless_task(
     # Either way the task produced nothing the user can retrieve, so it is a loud
     # FAILED rather than a silent "succeeded with no deliverable". Arm 2 closes
     # the gap where a deliverer that returns without raising (but also without an
-    # S3 key) would otherwise pass the gate.
+    # S3 key) would otherwise pass the gate (code-review MEDIUM #1).
     artifact_uri = ctx.artifacts.get("artifact_uri")
     primary_outcome = wf.terminal_outcomes.primary
     if overall_status == "success" and not wf_result.succeeded:
@@ -371,8 +372,8 @@ def _run_repoless_task(
 
     trace_s3_uri = _maybe_upload_trace(config, trajectory, progress)
 
-    # Episodic memory for a repo-less task is keyed on user:{user_id} — the same
-    # namespace the orchestrator fallback + hydration read.
+    # Episodic memory for a repo-less task is keyed on user:{user_id} (ADR-014
+    # addendum) — the same namespace the orchestrator fallback + hydration read.
     # Fail-open: a memory write failure must not fail the task.
     memory_written = False
     effective_memory_id = memory_id or os.environ.get("MEMORY_ID", "")
@@ -437,17 +438,18 @@ def _apply_post_hook_gates(
     build_before: bool,
     lint_before: bool,
 ) -> bool:
-    """Resolve the coding lane's post-hook verify gates against the workflow.
+    """Resolve the coding lane's post-hook verify gates against the workflow (#301).
 
-    The inline post-hook path CONSULTS each declared ``verify_build`` /
-    ``verify_lint`` step's ``gate`` through the runner's ``gate_status`` — the
-    single place gate semantics live — rather than routing the post-hooks through
-    the runner's step handlers. Routing through the runner would also change
-    failure-path side effects (a gating ``verify_build`` with ``on_failure: fail``
-    stops the runner *before* ``ensure_pr``, stranding committed work with no PR),
-    which is a broader half-migrated-runner unification left for later. Here the
-    inline ordering (verify → ensure_pr always runs) is preserved; only the task
-    verdict honors the declared gate.
+    Decision (issue #301 acceptance criteria): the inline post-hook path
+    CONSULTS each declared ``verify_build`` / ``verify_lint`` step's ``gate``
+    through the runner's ``gate_status`` — the single place gate semantics live —
+    rather than routing the post-hooks through the runner's step handlers.
+    Routing through the runner would also change failure-path side effects (a
+    gating ``verify_build`` with ``on_failure: fail`` stops the runner *before*
+    ``ensure_pr``, stranding committed work with no PR), which is the broader
+    half-migrated-runner unification the issue defers. Here the inline ordering
+    (verify → ensure_pr always runs) is preserved; only the task verdict honors
+    the declared gate.
 
     Per-step semantics:
 
@@ -508,7 +510,7 @@ def _apply_post_hook_gates(
 def _starts_with_needs_input_marker(result_text: str | None) -> bool:
     """True when the agent's final message opens with the clarify-and-hold marker.
 
-    Clarify-before-spend: the new_task workflow tells the agent to put
+    Clarify-before-spend (UX #4): the new_task workflow tells the agent to put
     :data:`NEEDS_INPUT_MARKER` on the FIRST line of its final message when it
     needs to ask instead of guess. We match the FIRST non-empty line only (a
     marker buried mid-answer is not a hold signal — it prevents a stray mention
@@ -552,24 +554,23 @@ def _resolve_overall_task_status(
 
     ``build_infra_failed`` marks a build KILLED by an environment fault (out of
     disk / OOM) — we could not VERIFY the code on this host. This forces an error
-    verdict EVEN IF the regression-only gate would otherwise pass. Without it, a
-    build that was ALSO infra-killed BEFORE the agent ran looks "already red → not
-    a regression", which would wrongly report ✅ success on code we never actually
-    verified. The ``build_ok=infra`` marker makes the platform surface a retryable
+    verdict EVEN IF the regression-only gate would otherwise pass (a build that
+    was also infra-killed BEFORE the agent looks "already red → not a regression",
+    which would wrongly report ✅ success on unverified code — the ABCA-659 false
+    ✅). The ``build_ok=infra`` marker makes the platform surface a retryable
     infrastructure fault, not "build/tests failed" or a bogus success.
     """
     agent_status = agent_result.status
     err = agent_result.error
 
-    # A max_turns cap is a CORRECT classification, but on its own it doesn't say
-    # WHETHER the task genuinely needed the turns or SPUN on a failing operation
-    # until it ran out (e.g. a task that thrashes on a failing `git push` from
-    # invalid credentials, retries every which way, and hits the cap). When the
-    # stuck-guard's trailing window was failure-dominated, append its one-line
-    # summary so the reason distinguishes "ran long" from "looped on an error" —
-    # the classifier still buckets it as max_turns, but a human sees the real
-    # cause. Only enriches the max_turns reason; a task that used its turns
-    # productively adds nothing.
+    # ABCA-662: a max_turns cap is a CORRECT classification, but on its own it
+    # doesn't say WHETHER the task genuinely needed the turns or SPUN on a failing
+    # operation until it ran out (662 thrashed on a failing `git push` → invalid
+    # credentials, retried every which way, and capped). When the stuck-guard's
+    # trailing window was failure-dominated, append its one-line summary so the
+    # reason distinguishes "ran long" from "looped on an error" — the classifier
+    # still buckets it as max_turns, but a human sees the real cause. Only enriches
+    # the max_turns reason; a task that used its turns productively adds nothing.
     if err and "error_max_turns" in err:
         from hooks import last_stuck_summary
 
@@ -587,11 +588,12 @@ def _resolve_overall_task_status(
     if agent_status in ("success", "end_turn") and build_ok:
         return "success", err
 
-    # A hook may have detected an environmental blocker mid-run (egress denial,
-    # policy fail-closed) that the SDK surfaced only as a generic failure or as a
-    # missing ResultMessage. Promote the canonical ``BLOCKED[<kind>]: …`` reason
-    # so the platform's error classifier attaches a precise remedy. Import locally
-    # to avoid a module-load cycle (hooks imports pipeline-adjacent modules).
+    # #251 carry-path: a hook may have detected an environmental blocker mid-run
+    # (egress denial, policy fail-closed) that the SDK surfaced only as a generic
+    # failure or as a missing ResultMessage. Promote the canonical
+    # ``BLOCKED[<kind>]: …`` reason so the CDK classifier attaches a precise
+    # remedy. Import locally to avoid a module-load cycle (hooks imports
+    # pipeline-adjacent modules).
     from hooks import last_blocker_reason
 
     blocker = last_blocker_reason()
@@ -616,7 +618,7 @@ def _resolve_overall_task_status(
         return "error", merged
 
     if not err:
-        # A latched blocker (e.g. egress denied, naming a host) is the more
+        # #251: a latched blocker (e.g. egress_denied naming a host) is the more
         # specific, authoritative terminal reason — prefer it over the generic
         # build-gate copy so the classifier attaches the precise remedy.
         if blocker:
@@ -634,13 +636,13 @@ def _branch_has_new_commits(repo_dir: str, default_branch: str) -> bool:
 
     The same ``origin/<default_branch>..HEAD`` diff ``ensure_pr`` consults to
     decide whether there is anything to open a PR from (see
-    ``post_hooks._ensure_pr``). Used by the delivery gate to tell "a commit
-    landed but the PR failed to open" (recoverable) from "no commit ever reached
-    the branch — the work was lost". For a stacked child ``default_branch`` IS
-    its predecessor branch (``config.base_branch``), so this asks the right
-    question: did this child add anything on top of its base? Best-effort — a git
-    failure returns ``False`` (assume nothing landed, the conservative read for a
-    gate whose job is to catch a lost deliverable)."""
+    ``post_hooks._ensure_pr``). Used by the ABCA-815 delivery gate to tell
+    "a commit landed but the PR failed to open" (recoverable) from "no commit
+    ever reached the branch — the work was lost". For a #247 A4 stacked child
+    ``default_branch`` IS its predecessor branch (``config.base_branch``), so
+    this asks the right question: did this child add anything on top of its
+    base? Best-effort — a git failure returns ``False`` (assume nothing landed,
+    the conservative read for a gate whose job is to catch a lost deliverable)."""
     try:
         res = subprocess.run(
             ["git", "log", f"origin/{default_branch}..HEAD", "--oneline"],
@@ -666,10 +668,10 @@ def _apply_delivery_gate(
     pr_url: str | None,
     commit_landed: bool,
 ) -> tuple[str, str | None]:
-    """Fail a new-work coding task that reported success but shipped nothing
-    (no PR AND no commit on its branch) — the deliverable was lost.
+    """ABCA-815: fail a new-work coding task that reported success but shipped
+    nothing (no PR AND no commit on its branch) — the deliverable was lost.
 
-    Observed cause: a stacked child edited its files in a NESTED working tree
+    Live cause: a #247 A4 stacked child edited its files in a NESTED working tree
     (persistent-storage residue left the clone one level deep inside repo_dir),
     so every pipeline git op ran against the outer clean tree —
     ``ensure_committed`` saw nothing, ``ensure_pr`` found no commits and skipped —
@@ -724,8 +726,8 @@ def _compute_turns_completed(
 ) -> int | None:
     """Clamp ``turns_completed`` to ``max_turns`` when the SDK hit the limit.
 
-    The Claude Agent SDK reports ``num_turns = max_turns + 1`` on
-    ``error_max_turns`` because the aborted attempt is counted.  Clamping
+    Rev-5 DATA-1 — the Claude Agent SDK reports ``num_turns = max_turns + 1``
+    on ``error_max_turns`` because the aborted attempt is counted.  Clamping
     at the final write keeps ``turns_completed`` truthful ("how many turns
     actually executed") while ``turns_attempted`` keeps the raw SDK value
     for debugging.
@@ -837,6 +839,11 @@ def run_task(
 
     from repo import setup_repo
 
+    # AgentCore can reuse this process for another task. Scrub every Jira
+    # credential before config or repository code runs, including for non-Jira
+    # tasks, so a prior tenant's long-lived Forge secret cannot cross tasks.
+    clear_jira_task_credentials()
+
     # Build config
     config = build_config(
         repo_url=repo_url,
@@ -899,8 +906,8 @@ def run_task(
             "repo.url": config.repo_url,
             "issue.number": config.issue_number,
             "agent.model": config.anthropic_model,
-            # Correlation envelope: user.id joins agent spans to orchestrator
-            # logs by the platform identity, not just task/repo.
+            # Correlation envelope (#245): user.id joins agent spans to
+            # orchestrator logs by the platform identity, not just task/repo.
             **({"user.id": config.user_id} if config.user_id else {}),
         },
     ) as root_span:
@@ -911,26 +918,27 @@ def run_task(
         progress = _ProgressWriter(
             config.task_id, trace=trace, user_id=config.user_id, repo=config.repo_url
         )
-        # Clear any blocker latched by a prior task. The agent container is
-        # one-task-per-process today, but the FastAPI server thread-pool can in
-        # principle dispatch a second run_task in the same process — reset here so
-        # a stale BLOCKED[...] reason can never leak into this task's terminal
-        # error_message (the latch is a scalar, not task_id-keyed).
+        # #251: clear any blocker latched by a prior task. The agent container
+        # is one-task-per-process today, but the FastAPI server thread-pool can
+        # in principle dispatch a second run_task in the same process — reset
+        # here so a stale BLOCKED[...] reason can never leak into this task's
+        # terminal error_message (the latch is a scalar, not task_id-keyed).
         from hooks import reset_blocker_reason, reset_stuck_summary
 
         reset_blocker_reason()
-        # Same per-task reset for the stuck-guard recent-failure latch, so a prior
-        # task's observation can't leak into this task's max_turns copy.
+        # ABCA-662: same per-task reset for the stuck-guard recent-failure latch,
+        # so a prior task's observation can't leak into this task's max_turns copy.
         reset_stuck_summary()
-        # --trace accumulator: when the task opted into trace,
-        # ``_TrajectoryWriter`` keeps an in-memory copy of each event so the
-        # pipeline can gzip+upload the full trajectory to S3 on terminal. Owned by
-        # the pipeline rather than the runner so the accumulator outlives
-        # ``run_agent``'s scope.
+        # --trace accumulator (design §10.1): when the task opted into
+        # trace, ``_TrajectoryWriter`` keeps an in-memory copy of each
+        # event so the pipeline can gzip+upload the full trajectory to
+        # S3 on terminal. Owned by the pipeline rather than the runner
+        # so the accumulator outlives ``run_agent``'s scope.
         trajectory = _TrajectoryWriter(config.task_id, accumulate=trace)
-        # Surface accumulator truncation to the user via a ``trace_truncated``
-        # milestone on TaskEventsTable (visible in ``bgagent watch``). Fire-once
-        # by design: the downloaded artifact's header reports the final drop count.
+        # K2 review Finding #3 — surface accumulator truncation to the
+        # user via a ``trace_truncated`` milestone on TaskEventsTable
+        # (visible in ``bgagent watch``). Fire-once by design: the
+        # downloaded artifact's header reports the final drop count.
         if trace:
 
             def _on_trace_truncated(max_bytes: int, first_dropped: int) -> None:
@@ -995,20 +1003,20 @@ def run_task(
 
                     prompt = assemble_prompt(config)
 
-            # Repo-less path: a knowledge workflow has no repo to clone, build, or
-            # PR. Drive its steps (hydrate_context → run_agent → deliver_artifact)
-            # through the workflow runner and assemble the terminal result,
-            # skipping the repo-coupled segment below entirely.
+            # Repo-less path (#248 Phase 3): a knowledge workflow has no repo to
+            # clone, build, or PR. Drive its steps (hydrate_context → run_agent →
+            # deliver_artifact) through the workflow runner and assemble the
+            # terminal result, skipping the repo-coupled segment below entirely.
             #
             # ``requires_repo: false`` means repo-OPTIONAL, not repo-forbidden:
-            # task creation admits and persists a repo for such a workflow, and
-            # the orchestrator then assembles a repo-bound prompt (issue/PR fetch).
-            # Keying the repo-less branch on ``requires_repo`` ALONE would make the
-            # agent skip the clone while the prompt promised a repo — the two
-            # halves disagree. So take the repo-less path only when no repo was
-            # actually supplied; when a repo IS present it is hydrated as context
-            # exactly like a coding task (clone → build → PR), honoring the
-            # repo-bound prompt the orchestrator built.
+            # create-task-core admits and persists a repo for such a workflow,
+            # and the orchestrator then assembles a repo-bound prompt (issue/PR
+            # fetch). Keying the repo-less branch on ``requires_repo`` ALONE made
+            # the agent skip the clone while the prompt promised a repo — the two
+            # halves disagreed (PR review #296 finding #3). So take the repo-less
+            # path only when no repo was actually supplied; when a repo IS present
+            # it is hydrated as context exactly like a coding task (clone → build →
+            # PR), honoring the repo-bound prompt the orchestrator built.
             if not config.requires_repo and not config.repo_url:
                 return _run_repoless_task(
                     config=config,
@@ -1028,7 +1036,7 @@ def run_task(
             # by Claude Code and the safety-net commit in post_hooks) WITHOUT
             # writing to any on-disk config. `--global` would clobber the real
             # ~/.gitconfig — harmless in the ephemeral container, but destructive
-            # when this pipeline runs on a developer workstation.
+            # when this pipeline runs on a developer workstation (#622).
             os.environ["GIT_AUTHOR_NAME"] = "bgagent"
             os.environ["GIT_AUTHOR_EMAIL"] = "bgagent@noreply.github.com"
             os.environ["GIT_COMMITTER_NAME"] = "bgagent"
@@ -1042,15 +1050,15 @@ def run_task(
             if prompt_version:
                 os.environ["PROMPT_VERSION"] = prompt_version
 
-            # ── Early ACK ────────────────────────────────────────────────────
+            # ── Early ACK (ABCA-707) ─────────────────────────────────────────
             # Acknowledge the task is picked up BEFORE the (potentially long)
             # pre-agent baseline build in setup_repo(). On a large repo that
             # baseline is minutes (up to the build-verify ceiling); posting the
-            # 👀 only *after* it would leave the issue looking dead for the whole
-            # phase (no reaction, comment, or state change for tens of minutes).
-            # None of these calls needs the cloned repo — they act on the channel
-            # issue via its API token + issue id from channel metadata — so they
-            # belong before the clone/build.
+            # 👀 only *after* it left the issue looking dead for the whole phase
+            # (the ABCA-707 symptom: no reaction, comment, or state change for
+            # 30+ min). None of these calls needs the cloned repo — they act on
+            # the channel issue via its API token + issue id from channel
+            # metadata — so they belong before the clone/build.
             #
             # Resolve the per-channel access token from Secrets Manager first
             # (react_task_started/comment_task_started read the env var it sets).
@@ -1064,11 +1072,11 @@ def run_task(
             # No-op for non-Linear tasks. Best-effort; failures are logged
             # but do not block the pipeline. Capture the reaction id so we
             # can delete it at terminal status (👀 → ✅/❌).
-            # A writeable coding task (new-task / pr-iteration) also moves the
-            # Linear issue Backlog → In Progress so it doesn't sit in Backlog for
-            # the whole run. read_only tasks (decompose-v1 planning, pr-review)
-            # never transition — the orchestration panel owns the parent's state,
-            # and a planning run shouldn't advance the issue.
+            # PM-3: a writeable coding task (new-task / pr-iteration) also moves
+            # the Linear issue Backlog → In Progress so it doesn't sit in Backlog
+            # for the whole run. read_only tasks (decompose-v1 planning,
+            # pr-review) never transition — the orchestration panel owns the
+            # parent's state, and a planning run shouldn't advance the issue.
             linear_transition_state = not config.read_only
             linear_eyes_reaction_id = react_task_started(
                 config.channel_source,
@@ -1076,19 +1084,20 @@ def run_task(
                 transition_state=linear_transition_state,
             )
 
-            # "Starting" comment on the Jira issue (REST shim — the Atlassian
-            # Remote MCP can't be used from a headless agent). No-op for
-            # non-Jira tasks. Best-effort; failures are logged, never block.
+            # "Starting" comment on the Jira issue through the Forge app actor
+            # (or legacy OAuth fallback). No-op for non-Jira tasks.
+            # Best-effort; failures are logged, never block.
             comment_task_started(
                 config.channel_source,
                 config.channel_metadata,
             )
 
             # Move the Jira card To Do → In Progress so the board reflects that
-            # work has started. No-op for non-Jira tasks. Best-effort; failures
-            # are logged and never block the pipeline. Part of the Early-ACK block
-            # (moved before setup_repo with the 👀 and start comment) so board
-            # state updates immediately, not after the multi-minute baseline build.
+            # work has started (issue #572). No-op for non-Jira tasks.
+            # Best-effort; failures are logged and never block the pipeline.
+            # Part of the Early-ACK block (moved before setup_repo with the 👀
+            # and start comment) so board state updates immediately, not after
+            # the multi-minute baseline build.
             transition_task_started(
                 config.channel_source,
                 config.channel_metadata,
@@ -1099,9 +1108,9 @@ def run_task(
             # the outer ``except Exception`` at the bottom of this ``try`` writes
             # the task FAILED, swaps the 👀 (posted above) to ❌, and posts the
             # failure comment. Before the Early-ACK move the 👀 didn't exist yet
-            # at this point, so a setup failure left the issue silently stuck (no
-            # visible signal); posting the 👀 earlier is what makes the outer
-            # handler's ❌-swap actually visible for setup failures.
+            # at this point, so a setup failure left the issue silently stuck
+            # (the ABCA-707 symptom); posting the 👀 earlier is what makes the
+            # outer handler's ❌-swap actually visible for setup failures.
             with task_span("task.repo_setup") as setup_span:
                 setup = setup_repo(config, progress=progress)
                 setup_span.set_attribute("build.before", setup.build_before)
@@ -1231,8 +1240,8 @@ def run_task(
                     "task_cancelled_acknowledged",
                     "Post-hooks skipped; terminal state already CANCELLED.",
                 )
-                # Best-effort trace upload + conditional self-heal on the
-                # cancel path. ``write_terminal``'s
+                # L4 item 1c: best-effort trace upload + conditional
+                # self-heal on the cancel path. ``write_terminal``'s
                 # ConditionExpression rejects CANCELLED, so we cannot
                 # persist ``trace_s3_uri`` atomically with the terminal
                 # write — use ``write_trace_uri_conditional`` instead,
@@ -1267,7 +1276,7 @@ def run_task(
 
             # Resolve the post-hook gating inputs: read_only, the ensure_pr
             # strategy (create / push_resolve / resolve), and the verify steps'
-            # declared gates the workflow declares.
+            # declared gates (#301) the workflow declares.
             #
             # ``read_only`` comes from ``config`` — build_config already computed
             # it (with its own fail-soft fallback) and it drove Cedar during the
@@ -1279,7 +1288,7 @@ def run_task(
             # has already mutated / committed the tree, so a load failure here
             # must NOT strand the work as FAILED with no PR — it falls back to
             # the default "create" strategy + legacy regression-only gating and
-            # still opens the PR.
+            # still opens the PR (PR review #296 finding #5).
             from workflow import WorkflowValidationError, load_workflow
 
             workflow_read_only = config.read_only
@@ -1300,11 +1309,11 @@ def run_task(
                 )
                 ensure_pr_strategy = "create"
 
-            # Agent-native decompose: a REPO-FUL workflow whose primary terminal
-            # outcome is an ARTIFACT (coding/decompose-v1) clones the repo for
-            # context but produces a plan, not a PR. Skip the build/PR post-hooks;
-            # deliver the agent's result text (the plan JSON) as the artifact so
-            # the platform can read it and seed the sub-issues.
+            # #299 agent-native decompose: a REPO-FUL workflow whose primary
+            # terminal outcome is an ARTIFACT (coding/decompose-v1) clones the
+            # repo for context but produces a plan, not a PR. Skip the build/PR
+            # post-hooks; deliver the agent's result text (the plan JSON) as the
+            # artifact so the platform can read it and seed the sub-issues.
             #
             # BOTH conditions matter: a repo-LESS artifact workflow
             # (default/agent-v1, web-research) never reaches this repo-bound
@@ -1319,7 +1328,7 @@ def run_task(
             )
             artifact_uri: str | None = None  # set by the decompose (artifact) branch below
 
-            # Clarify-before-spend: a writeable, PR-producing task
+            # Clarify-before-spend (UX #4): a writeable, PR-producing task
             # (new_task) whose agent judged the request too ambiguous to
             # implement emits NEEDS_INPUT_MARKER on the first line of its final
             # message. Treat that as a HOLD: no build, no commit, no PR — the
@@ -1367,14 +1376,15 @@ def run_task(
                     )
                     post_span.set_attribute("artifact.uri", artifact_uri or "")
                 else:
-                    # If the agent switched off the platform branch (it sometimes
-                    # runs `git checkout -b <own-branch>` and commits/opens its PR
-                    # there), re-point the platform branch at the agent's HEAD so
-                    # the safety-net commit, build verify, PR, and push below all
-                    # run on the branch the platform tracks. No-op on the healthy
-                    # case (agent stayed on the platform branch). Skip for
-                    # read-only (no commit/PR to deliver). The delivery gate stays
-                    # as the backstop if reconcile can't recover the work.
+                    # ABCA-815 root cause: if the agent switched off the platform
+                    # branch (it sometimes runs `git checkout -b <own-branch>` and
+                    # commits/opens its PR there — live-caught on backgroundagent-dev),
+                    # re-point the platform branch at the agent's HEAD so the
+                    # safety-net commit, build verify, PR, and push below all run on
+                    # the branch the platform tracks. No-op on the healthy case
+                    # (agent stayed on the platform branch). Skip for read-only
+                    # (no commit/PR to deliver). The delivery gate stays as the
+                    # backstop if reconcile can't recover the work.
                     if not workflow_read_only:
                         reconcile_agent_branch(setup.repo_dir, setup.branch)
                     # Safety net: commit any uncommitted tracked changes (skip read-only tasks)
@@ -1391,23 +1401,21 @@ def run_task(
                     # a different problem than a broken build). Threaded into the task
                     # error_message below so the platform's failure copy reflects it.
                     build_timed_out = build_outcome.timed_out
-                    # The build was KILLED by an environment fault (out of disk /
-                    # OOM) — we could NOT verify the code. Unlike inert, do NOT
-                    # treat this as passing: an infra-killed build gives no
-                    # verdict, and if the pre-agent baseline was ALSO infra-killed
-                    # the regression-only gate would wrongly conclude "already red
-                    # → not a regression → success" (a false pass). Threaded into
-                    # the verdict + error_message (build_ok=infra) so the platform
-                    # reports a retryable infra fault, not "build failed" and not a
-                    # bogus success.
+                    # ABCA-659 #2: the build was KILLED by an environment fault (out
+                    # of disk / OOM) — we could NOT verify the code. Unlike inert, do
+                    # NOT treat this as passing: an infra-killed build gives no
+                    # verdict, and if the pre-agent baseline was ALSO infra-killed the
+                    # regression-only gate would wrongly conclude "already red → not a
+                    # regression → success" (the false ✅). Threaded into the verdict
+                    # + error_message (build_ok=infra) so the platform reports a
+                    # retryable infra fault, not "build failed" and not a bogus ✅.
                     build_infra_failed = build_outcome.infra_failed
-                    # An INERT build gate (exit 127 / no-such-task — the command
-                    # couldn't run, e.g. yarn missing) verified NOTHING. Treat it
-                    # like the lint-inert path: do NOT gate on it (it's a config
-                    # problem, not the agent's code), and treat build as passing
-                    # for the gate so we don't emit a false "build failed". The
-                    # honest signal is carried in error_message (build_ok=inert)
-                    # for the platform copy.
+                    # K8: an INERT build gate (exit 127 / no-such-task — the command
+                    # couldn't run, e.g. yarn missing) verified NOTHING. Treat it like
+                    # the lint-inert path: do NOT gate on it (it's a config problem,
+                    # not the agent's code), and treat build as passing for the gate
+                    # so we don't emit a false "build failed". The honest signal is
+                    # carried in error_message (build_ok=inert) for the platform copy.
                     build_inert = build_outcome.inert
                     if build_inert:
                         log(
@@ -1416,13 +1424,13 @@ def run_task(
                             "— not gating on it; surfacing as inert, not a failure",
                         )
                         build_passed = True
-                    # When lint is INERT for this repo (no runnable lint task and
+                    # #72: when lint is INERT for this repo (no runnable lint task and
                     # no configured lint_command — see repo.py setup), running the
                     # default `mise run lint` would just fail "no such task" and
-                    # record a misleading lint_passed=False. Skip the post-agent
-                    # lint run entirely in that case and treat lint as passing (it
-                    # never gates the verdict regardless; this keeps the persisted
-                    # signal honest rather than a false red).
+                    # record a misleading lint_passed=False. Skip the post-agent lint
+                    # run entirely in that case and treat lint as passing (it never
+                    # gates the verdict regardless; this keeps the persisted signal
+                    # honest rather than a false red).
                     if getattr(setup, "lint_gate_inert", False):
                         log(
                             "POST",
@@ -1446,15 +1454,15 @@ def run_task(
             if pr_url:
                 progress.write_agent_milestone("pr_created", pr_url)
                 # Move the Jira card In Progress → In Review now that a PR is
-                # open — but ONLY when the build passed. ensure_pr deliberately
-                # opens a PR even on a FAILED build (so the human sees the broken
-                # diff), so gating on pr_url alone would move the card to In Review
-                # on a red build, telling the board the work is ready for review
-                # when it isn't. Gate on build_ok to mirror the Linear twin, which
-                # only transitions on success (react_task_finished:
-                # `if transition_state and success`). A build-failed PR leaves the
-                # card In Progress with the failure comment. No-op for non-Jira
-                # tasks; best-effort.
+                # open (issue #572) — but ONLY when the build passed. ensure_pr
+                # deliberately opens a PR even on a FAILED build (so the human
+                # sees the broken diff), so gating on pr_url alone moved the card
+                # to In Review on a red build, telling the board the work is ready
+                # for review when it isn't (review blocker #9a). Gate on build_ok
+                # to mirror the Linear twin, which only transitions on success
+                # (react_task_finished: `if transition_state and success`). A
+                # build-failed PR leaves the card In Progress with the failure
+                # comment. No-op for non-Jira tasks; best-effort.
                 if build_passed:
                     transition_pr_opened(
                         config.channel_source,
@@ -1488,7 +1496,7 @@ def run_task(
             # Overall status: do not infer success from PR/build when the SDK never
             # emitted ResultMessage (agent_status=unknown) — that masks protocol gaps.
             # Gating honors each verify step's declared ``gate`` via the runner's
-            # gate_status; an undeclared verify_lint never gates (legacy).
+            # gate_status (#301); an undeclared verify_lint never gates (legacy).
             agent_status = agent_result.status
             build_ok = _apply_post_hook_gates(
                 _workflow,
@@ -1507,12 +1515,12 @@ def run_task(
                 build_timed_out=build_timed_out,
                 build_infra_failed=build_infra_failed,
             )
-            # Delivery gate: a create-strategy new-work task that reported success
-            # but opened no PR AND landed no commit shipped nothing — fail it
-            # loudly (retryable) instead of a false COMPLETED that would poison a
-            # stacked dependency graph. The branch-diff is only run when the gate
-            # is actually in play (success + no pr_url) so a normal PR-producing
-            # run pays nothing. See :func:`_apply_delivery_gate`.
+            # ABCA-815 delivery gate: a create-strategy new-work task that
+            # reported success but opened no PR AND landed no commit shipped
+            # nothing — fail it loudly (retryable) instead of a false COMPLETED
+            # that would poison a #247 stacked DAG. The branch-diff is only run
+            # when the gate is actually in play (success + no pr_url) so a normal
+            # PR-producing run pays nothing. See :func:`_apply_delivery_gate`.
             gate_in_play = (
                 overall_status == "success"
                 and not pr_url
@@ -1557,7 +1565,7 @@ def run_task(
             )
 
             # NOTE: the terminal status comment on the Jira issue is NOT posted
-            # here. The deterministic fan-out plane
+            # here. Since issue #573 the deterministic fan-out plane
             # (``cdk/src/handlers/fanout-task-events.ts`` ``dispatchToJira``)
             # owns the Jira final-status comment — it carries cost/turns/
             # duration and, crucially, fires even if this agent crashes before
@@ -1565,7 +1573,7 @@ def run_task(
             # double-comment. The agent still posts the *start* comment
             # (``comment_task_started`` above) for in-flight progress.
 
-            # --trace trajectory S3 upload. Runs AFTER
+            # --trace trajectory S3 upload (design §10.1). Runs AFTER
             # post-hooks but BEFORE ``write_terminal`` so the resulting
             # ``trace_s3_uri`` can be persisted atomically with the
             # terminal-status transition. Fail-open: an S3 error does
@@ -1575,9 +1583,9 @@ def run_task(
             # still produces a usable debug artifact.
             trace_s3_uri = _maybe_upload_trace(config, trajectory, progress)
 
-            # Did this PR-iteration actually advance the branch HEAD? Compare the
-            # final HEAD to the sha captured at checkout. Unchanged ⇒ a
-            # question-only iteration (no commit) ⇒ the settle reply reports
+            # A6/#299: did this PR-iteration actually advance the branch HEAD?
+            # Compare the final HEAD to the sha captured at checkout. Unchanged
+            # ⇒ a question-only iteration (no commit) ⇒ the settle reply reports
             # "answered / no change" instead of a false "✅ Updated". Only
             # meaningful for a PR workflow with a baseline sha; otherwise None
             # (the change-made / back-compat side). Best-effort — a rev-parse
@@ -1643,9 +1651,9 @@ def run_task(
                 cache_read_input_tokens=usage.cache_read_input_tokens if usage else None,
                 cache_creation_input_tokens=usage.cache_creation_input_tokens if usage else None,
                 trace_s3_uri=trace_s3_uri,
-                # A decompose (artifact) workflow carries the plan artifact URI
-                # here so the platform can read the plan and seed sub-issues; None
-                # for a normal PR workflow.
+                # #299: a decompose (artifact) workflow carries the plan artifact
+                # URI here so the platform can read the plan and seed sub-issues;
+                # None for a normal PR workflow.
                 artifact_uri=artifact_uri,
                 code_changed=code_changed,
                 # Only carry the answer text on a no-change iteration (where it
@@ -1697,12 +1705,13 @@ def run_task(
             # Ensure the task is marked FAILED in DynamoDB even if the pipeline
             # crashes before reaching the normal terminal-state write.
             #
-            # Crash-path trace upload. The trajectory accumulator is exactly the
-            # artifact the user enabled ``--trace`` to capture the failure with;
-            # dropping it on the crash path is a silent regression against the
-            # design intent. Fully wrapped in its own try/except so a trace upload
-            # failure cannot mask or replace the real exception (we re-raise ``e``
-            # at the end).
+            # K2 review Finding #1 — crash-path trace upload. The
+            # trajectory accumulator is exactly the artifact the user
+            # enabled ``--trace`` to capture the failure with; dropping
+            # it on the crash path is a silent regression against the
+            # design intent. Fully wrapped in its own try/except so a
+            # trace upload failure cannot mask or replace the real
+            # exception (we re-raise ``e`` at the end).
             crash_trace_s3_uri: str | None = None
             try:
                 crash_trace_s3_uri = _maybe_upload_trace(config, trajectory, progress)
@@ -1722,7 +1731,7 @@ def run_task(
                 trace_s3_uri=crash_trace_s3_uri,
                 # Still inside `with task_span()`, so the id is live — capture it
                 # here too or FAILED tasks (the primary post-mortem case for the
-                # replay bundle) persist otel_trace_id: null.
+                # replay bundle, #515) persist otel_trace_id: null.
                 otel_trace_id=current_otel_trace_id(),
             )
             task_state.write_terminal(config.task_id, "FAILED", crash_result.model_dump())
@@ -1738,10 +1747,10 @@ def run_task(
                 started_reaction_id=linear_eyes_reaction_id,
             )
             # NOTE: no Jira failure comment here — the fan-out plane's
-            # ``dispatchToJira`` owns the Jira terminal comment and fires on the
-            # platform side even when this crash path runs, so posting here would
-            # double-comment. (Contrast the Linear ❌ reaction above, which the
-            # fan-out plane does not replicate.)
+            # ``dispatchToJira`` (issue #573) owns the Jira terminal comment
+            # and fires on the platform side even when this crash path runs,
+            # so posting here would double-comment. (Contrast the Linear ❌
+            # reaction above, which the fan-out plane does not replicate.)
             raise
 
 
@@ -1767,17 +1776,18 @@ _RUN_TASK_PARAMS = frozenset(inspect.signature(run_task).parameters)
 #: Orchestrator payload keys we KNOW about that ``run_task`` does not (yet)
 #: accept as a parameter. Dropping one of these is expected today, but a key that
 #: shows up here AND is silently dropped is exactly the "wired one side of an
-#: orchestrator→agent field, forgot the other" no-op we want to catch — so we
+#: orchestrator→agent field, forgot the other" no-op that ABCA-487 was — so we
 #: WARN when we drop one, making a future contract gap visible instead of silent.
 #: Keys not in this set (genuinely foreign) are dropped quietly as before.
 #:
-#: NB: ``run_task`` DOES accept ``build_command``, ``lint_command``,
-#: ``base_branch`` and ``merge_branches`` (see its signature), so those are
-#: forwarded — NOT dropped — and must NOT be listed here (they would never hit
-#: the drop path). ``github_token_secret_arn`` is deliberately omitted too: it is
-#: ALWAYS present and ALWAYS resolved via the ``GITHUB_TOKEN_SECRET_ARN`` env in
-#: build_config, so listing it would fire the WARN on 100% of ECS boots — pure
-#: noise. It falls through as a quiet foreign-key drop instead.
+#: NB (merge note): on this branch ``run_task`` DOES accept ``build_command``,
+#: ``lint_command``, ``base_branch`` and ``merge_branches`` (see its signature),
+#: so those are forwarded — NOT dropped — and must NOT be listed here (they would
+#: never hit the drop path). ``github_token_secret_arn`` is deliberately omitted
+#: too (N3): it is ALWAYS present and ALWAYS resolved via the
+#: ``GITHUB_TOKEN_SECRET_ARN`` env in build_config, so listing it would fire the
+#: WARN on 100% of ECS boots — pure noise. It falls through as a quiet
+#: foreign-key drop instead.
 _KNOWN_ORCHESTRATOR_KEYS = frozenset(
     {
         # AgentCore's server.py exports task_started_at as TASK_STARTED_AT, which
@@ -1796,12 +1806,11 @@ def run_task_from_payload(payload: dict) -> dict:
     """Invoke :func:`run_task` from a full orchestrator payload dict.
 
     The ECS compute path (``ecs-strategy.ts``) hands the agent the *entire*
-    orchestrator payload (via an S3 pointer, since the payload can exceed the
-    inline size limit). Previously the ECS boot command hand-listed a subset of
-    ``run_task`` kwargs and silently dropped the rest — most visibly
-    ``channel_source``/``channel_metadata`` (so ECS runs got no Linear/Jira
-    reactions or channel MCP), plus ``build_command``, ``cedar_policies``,
-    ``base_branch``/``merge_branches``, ``attachments``, etc.
+    orchestrator payload (via the #502 S3 pointer). Previously the ECS boot
+    command hand-listed a subset of ``run_task`` kwargs and silently dropped the
+    rest — most visibly ``channel_source``/``channel_metadata`` (no Linear/Jira
+    reactions or channel MCP on ECS — ABCA-487), plus ``build_command``,
+    ``cedar_policies``, ``base_branch``/``merge_branches``, ``attachments``, etc.
 
     This maps the payload to ``run_task``'s real signature so no field can be
     silently dropped again: rename the aliased keys, filter to parameters
@@ -1821,7 +1830,8 @@ def run_task_from_payload(payload: dict) -> dict:
             # Not a run_task parameter — ignore. A KNOWN orchestrator key being
             # dropped is expected today but worth a breadcrumb: if run_task ever
             # grows a matching param, this WARN is where a "forgot to wire it
-            # through" no-op surfaces. Foreign keys are dropped quietly.
+            # through" no-op surfaces (N4 / ABCA-487 class). Foreign keys are
+            # dropped quietly.
             if key in _KNOWN_ORCHESTRATOR_KEYS and value is not None:
                 log(
                     "WARN",
@@ -1840,7 +1850,7 @@ def run_task_from_payload(payload: dict) -> dict:
             # non-str coercion, so it also guards the surprising int() cases the
             # orchestrator never emits but a hand-edited payload might: a bool
             # (``int(True) == 1``) and a non-integral float (``int(3.9) == 3``)
-            # would both silently become a bogus turn count.
+            # would both silently become a bogus turn count (N4).
             if isinstance(value, bool) or not isinstance(value, (int, float, str)):
                 log("WARN", f"run_task_from_payload: ignoring non-integer max_turns {value!r}")
                 continue

@@ -30,8 +30,8 @@ def build_system_prompt(
     system_prompt = system_prompt.replace("{branch_name}", setup.branch)
     system_prompt = system_prompt.replace("{default_branch}", setup.default_branch)
     system_prompt = system_prompt.replace("{max_turns}", str(config.max_turns))
-    # Clarify-before-spend: the new_task workflow references this marker in its
-    # "ask instead of guess" branch. Harmless no-op for prompts that don't
+    # Clarify-before-spend (UX #4): the new_task workflow references this marker
+    # in its "ask instead of guess" branch. Harmless no-op for prompts that don't
     # contain the placeholder.
     system_prompt = system_prompt.replace("{needs_input_marker}", NEEDS_INPUT_MARKER)
     setup_notes = (
@@ -41,41 +41,42 @@ def build_system_prompt(
     )
     system_prompt = system_prompt.replace("{setup_notes}", setup_notes)
 
-    # A revise-round decompose task carries the PRIOR run's repo_digest in
-    # channel_metadata (a NON-guardrail-screened channel — task_description is
-    # screened, this isn't). Inject it so the agent starts from the cached
-    # structural understanding instead of re-deriving it. Cache-key discipline:
-    # the prior run recorded the sha it cloned to (decompose_repo_digest_sha); if
-    # the repo has since moved, the agent is told the digest may be stale for
-    # changed areas and to re-verify there (drift handling is agent-side — the
-    # platform has no GitHub token to pre-check, by least-privilege design).
-    # Harmless no-op for a prompt without the placeholder or a first-round task
-    # with no prior digest.
+    # #299 plan-mode T2 (warm digest): a revise-round decompose task carries the
+    # PRIOR run's repo_digest in channel_metadata (a NON-guardrail-screened
+    # channel — task_description is screened, this isn't; see create-task-core).
+    # Inject it so the agent starts from the cached structural understanding
+    # instead of re-deriving it. Cache-key discipline: the prior run recorded the
+    # sha it cloned to (decompose_repo_digest_sha); if the repo has since moved,
+    # the agent is told the digest may be stale for changed areas and to re-verify
+    # there (drift handling, agent-side — the platform has no GitHub token to
+    # pre-check, by P5 least-privilege design). Harmless no-op for a prompt
+    # without the placeholder or a round-0 task with no prior digest.
     system_prompt = system_prompt.replace(
         "{prior_repo_digest}",
         _render_prior_repo_digest(config, setup),
     )
-    # On a REVISION round the task carries the CURRENT breakdown (in the
-    # guardrail-screened task_description, as "Earlier proposed breakdown") plus
-    # the reviewer's requested change. Without explicit framing the decompose
-    # prompt reads as "plan this issue from scratch", so the agent re-derives from
-    # the issue text and silently reverts edits the reviewer had already accepted
-    # (a dropped node reappears, a reworded title snaps back). This directive —
-    # injected ONLY on a revision — reframes the task as EDIT-the-current-plan:
-    # apply only the requested change, keep everything else verbatim. It lives in
-    # the trusted system prompt (NOT the screened task_description, which can't
-    # carry imperatives without tripping the prompt-injection filter). Empty on
-    # the first round. NOTE: only the ESCALATION path reaches this agent now —
-    # most revises are applied deterministically in the webhook (interpret → edit
-    # the stored plan in code, no clone, no re-derive).
+    # #299 BLOCKER-1 (revise-forgets-edits): on a REVISION round the task carries
+    # the CURRENT breakdown (in the guardrail-screened task_description, as
+    # "Earlier proposed breakdown") plus the reviewer's requested change. Without
+    # explicit framing the decompose prompt reads as "plan this issue from
+    # scratch", so the agent re-derives from the issue text and silently reverts
+    # edits the reviewer had already accepted (a dropped node reappears, a reworded
+    # title snaps back). This directive — injected ONLY on a revision — reframes
+    # the task as EDIT-the-current-plan: apply only the requested change, keep
+    # everything else verbatim. It lives in the trusted system prompt (NOT the
+    # screened task_description, which can't carry imperatives without tripping
+    # PROMPT_ATTACK — Bug #1a). Empty on round 0. NOTE: only the ESCALATION path
+    # reaches this agent now — most revises are applied deterministically in the
+    # webhook (interpret → edit the stored plan in code, no clone, no re-derive).
     system_prompt = system_prompt.replace(
         "{revision_directive}",
         _render_revision_directive(config),
     )
-    # The sha the repo was cloned to, echoed into the plan JSON's
-    # ``repo_digest_sha`` so a later revise run can drift-check the cached digest.
-    # Empty when unknown (best-effort — the platform's sha-shape guard then just
-    # treats the digest as un-versioned). Harmless no-op without the placeholder.
+    # #299 plan-mode T2: the sha the repo was cloned to, echoed into the plan
+    # JSON's ``repo_digest_sha`` so a later revise run can drift-check the cached
+    # digest. Empty when unknown (best-effort — the platform's sha-shape guard
+    # then just treats the digest as un-versioned). Harmless no-op without the
+    # placeholder.
     system_prompt = system_prompt.replace("{repo_head_sha}", setup.head_sha_before or "")
 
     # Inject memory context from orchestrator hydration
@@ -125,7 +126,7 @@ def build_repoless_system_prompt(
     hydrated_context: HydratedContext | None,
     overrides: str,
 ) -> str:
-    """Assemble the system prompt for a repo-less workflow.
+    """Assemble the system prompt for a repo-less workflow (#248 Phase 3).
 
     The repo-bound :func:`build_system_prompt` requires a ``RepoSetup`` (branch,
     default_branch, setup notes); a repo-less task has none. This builds the
@@ -154,8 +155,8 @@ def build_repoless_system_prompt(
 
 
 def _render_prior_repo_digest(config: TaskConfig, setup: RepoSetup) -> str:
-    """Render the cached prior repo digest into the decompose prompt, or empty
-    string when there is none (first-round plan / non-decompose).
+    """#299 plan-mode T2 — render the cached prior repo digest into the decompose
+    prompt, or empty string when there is none (round-0 plan / non-decompose).
 
     A revise-round ``coding/decompose-v1`` task carries the previous run's
     ``repo_digest`` + the sha it was built at in ``channel_metadata`` (keys
@@ -169,14 +170,14 @@ def _render_prior_repo_digest(config: TaskConfig, setup: RepoSetup) -> str:
     Drift: the prior run recorded the sha it cloned to. If the repo has since moved
     (``head_sha_before`` differs), the digest may be stale for changed areas, so we
     say so and tell the agent to re-verify there. The platform can't pre-check the
-    sha (no GitHub token, by least-privilege), so this agent-side compare IS the
+    sha (no GitHub token — P5 least-privilege), so this agent-side compare IS the
     drift handling. A blank prior sha (older task) is treated as "unknown → trust
     but re-verify if anything looks off".
     """
     cm = config.channel_metadata or {}
     digest = (cm.get("decompose_repo_digest") or "").strip()
     if not digest:
-        return ""  # first round or no cached digest → the agent explores fresh
+        return ""  # round-0 or no cached digest → the agent explores fresh
     prior_sha = (cm.get("decompose_repo_digest_sha") or "").strip()
     current_sha = (setup.head_sha_before or "").strip()
     if prior_sha and current_sha and prior_sha != current_sha:
@@ -203,22 +204,22 @@ def _render_prior_repo_digest(config: TaskConfig, setup: RepoSetup) -> str:
 
 
 def _render_revision_directive(config: TaskConfig) -> str:
-    """Render the revise-in-place directive for a REVISION round, or empty string
-    for a first-time plan.
+    """#299 BLOCKER-1 — render the revise-in-place directive for a REVISION round,
+    or empty string for a first-time plan.
 
     A revise-round ``coding/decompose-v1`` task carries the CURRENT breakdown in
     its (guardrail-screened) task_description as reference data, plus the
     reviewer's requested change. Without explicit framing the decompose prompt
     reads as "plan this issue from scratch" and the agent re-derives the whole
     breakdown, silently reverting edits the reviewer had already accepted (dropped
-    nodes reappear, reworded titles snap back).
+    nodes reappear, reworded titles snap back — the customer-caught BLOCKER 1).
 
     This directive reframes the task as an EDIT of the current plan: start FROM it,
     apply ONLY the requested change, keep every other sub-issue verbatim. It must
     live in the trusted system prompt — the screened task_description can't carry
     imperatives ("start from this plan and change only X") without tripping the
-    prompt-injection filter. Gated on ``decompose_revision_round`` (set by the
-    webhook only on a revise dispatch); a blank/zero/absent value → first round →
+    PROMPT_ATTACK filter (Bug #1a). Gated on ``decompose_revision_round`` (set by
+    the webhook only on a revise dispatch); a blank/zero/absent value → round 0 →
     empty (no-op).
 
     NOTE: most revises never reach this agent — the webhook interprets the change
@@ -290,15 +291,17 @@ def _channel_prompt_addendum(config: TaskConfig) -> str:
 
     Jira-origin tasks intentionally get NO addendum: Atlassian's Remote MCP
     requires an interactive OAuth flow a headless agent can't complete, so the
-    MCP tools never load. Jira progress comments are posted out-of-band by
-    ``jira_reactions`` (a REST shim wired into the pipeline), not by the agent.
+    MCP tools never load. Instructing the agent to use them just wastes turns.
+    Jira progress comments are posted out-of-band by ``jira_reactions`` through
+    the configured Forge app actor (or the legacy OAuth migration fallback),
+    not by the coding agent.
     """
     if config.channel_source != "linear":
         return ""
-    # A synthetic orchestration integration node has NO real Linear sub-issue —
-    # `linear_issue_id` is intentionally omitted from its channel_metadata (see
-    # orchestration-release.ts). Without a target issue there is nothing
-    # issue-specific to say; the parent panel is the surface.
+    # #247 UX.16: a synthetic orchestration integration node has NO real Linear
+    # sub-issue — `linear_issue_id` is intentionally omitted from its
+    # channel_metadata (see orchestration-release.ts). Without a target issue
+    # there is nothing issue-specific to say; the parent panel is the surface.
     if not config.channel_metadata.get("linear_issue_id"):
         return ""
     issue_identifier = config.channel_metadata.get("linear_issue_identifier") or ""

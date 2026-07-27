@@ -5,28 +5,28 @@ Jira analogue of ``linear_reactions`` (Linear uses emoji reactions; Jira's
 REST API has no lightweight reaction primitive, so comments are the right
 tool).
 
-It also moves the originating issue across its board as the task progresses:
-To Do → In Progress on start, → In Review on PR, via the Jira transitions API.
-Like comments, transitions are best-effort — logged and swallowed on any
-failure, sharing the same auth circuit breaker — so the Jira board never gates
-the task. See the "Workflow transitions" section below.
+It also moves the originating issue across its board as the task progresses
+(issue #572): To Do → In Progress on start, → In Review on PR, via the Jira
+transitions API. Like comments, transitions are best-effort — logged and
+swallowed on any failure, sharing the same auth circuit breaker — so the Jira
+board never gates the task. See the "Workflow transitions" section below.
 
-The *terminal* status comment is NOT posted from here: the deterministic
-fan-out plane (``cdk/src/handlers/fanout-task-events.ts`` ``dispatchToJira``)
-owns it, so it carries cost/turns/duration and fires even when this agent
-crashes before completing. This module only owns the start comment.
+The *terminal* status comment is NOT posted from here: since issue #573 the
+deterministic fan-out plane (``cdk/src/handlers/fanout-task-events.ts``
+``dispatchToJira``) owns it, so it carries cost/turns/duration and fires even
+when this agent crashes before completing. This module only owns the start
+comment.
 
-Why a direct REST call instead of MCP: Atlassian's Remote MCP
+Why a signed app proxy instead of MCP: Atlassian's Remote MCP
 (``mcp.atlassian.com``) requires an interactive, browser-based OAuth 2.1
 authorization flow with dynamic client registration — it does NOT accept the
 stored Jira REST OAuth token as a ``Bearer`` header, and a headless background
 agent cannot complete the interactive handshake. The MCP path therefore fails
-to connect in the runtime (``claude mcp list`` → "Failed to connect"). The
-Jira *REST* API, by contrast, accepts the same stored OAuth access token (it
-carries ``write:jira-work``), so we post comments via
-``POST /rest/api/3/issue/{key}/comment`` on the cross-region
-``api.atlassian.com/ex/jira/{cloudId}`` base. This is the "Plan B REST shim"
-the ``channel_mcp`` module's comments anticipated.
+to connect in the runtime (``claude mcp list`` → "Failed to connect").
+Configured tenants call a narrow HMAC-authenticated Forge web trigger, which
+uses ``api.asApp().requestJira`` so Jira attributes writes to the app account.
+Tenants without Forge configuration retain the user-delegated OAuth REST path
+as an explicit migration fallback.
 
 Gating: every function is a no-op unless ``channel_source == 'jira'`` and the
 issue key + cloud id are present in ``channel_metadata``. All network / auth
@@ -39,20 +39,28 @@ See: ``agent/src/channel_mcp.py`` for the (non-functional) MCP gate, and
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
 import os
 import threading
+import time
 from http import HTTPStatus
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import requests
 
+from shared_constants import SHARED_CONSTANTS
 from shell import log
 
 #: Atlassian cross-region REST base. The ``{cloudId}`` segment scopes the
 #: call to the tenant; ``JIRA_API_TOKEN`` (populated by
 #: ``config.resolve_jira_oauth_token``) authorizes it.
 JIRA_API_BASE = "https://api.atlassian.com/ex/jira"
+_JIRA_APP_ACTOR_CONSTANTS = SHARED_CONSTANTS["jira_app_actor"]
+FORGE_WEBTRIGGER_SUFFIX = str(_JIRA_APP_ACTOR_CONSTANTS["forge_webtrigger_suffix"])
+APP_ACTOR_MIN_SECRET_LENGTH = int(_JIRA_APP_ACTOR_CONSTANTS["min_secret_length"])
 
 #: Request timeout — comments are fire-and-forget status UX; never block the
 #: task pipeline for more than a couple of seconds.
@@ -66,6 +74,22 @@ _AUTH_FAILURE_THRESHOLD = 3
 _consecutive_auth_failures: int = 0
 _auth_circuit_open: bool = False
 _auth_state_lock = threading.Lock()
+_PROXY_ERROR_CODES = frozenset(
+    {
+        "cloud_id_required",
+        "invalid_comment_request",
+        "invalid_issue_key",
+        "invalid_json",
+        "invalid_payload",
+        "invalid_signature",
+        "invalid_transition_request",
+        "jira_request_failed",
+        "method_not_allowed",
+        "payload_too_large",
+        "proxy_not_configured",
+        "unsupported_operation",
+    }
+)
 
 
 def _circuit_open() -> bool:
@@ -97,8 +121,9 @@ def _note_auth_status(status_code: int) -> None:
             log(
                 "ERROR",
                 "jira_reactions: auth circuit OPEN after "
-                f"{failures} consecutive {status_code}s — Jira token likely "
-                "revoked/expired without a working refresh. Suppressing further "
+                f"{failures} consecutive {status_code}s — Jira outbound credential "
+                "or app permission is invalid. For Forge app writes, verify "
+                "BGAGENT_PROXY_SECRET matches JIRA_APP_ACTOR_SHARED_SECRET. Suppressing further "
                 "Jira calls for this container.",
             )
         else:
@@ -141,6 +166,124 @@ def _adf(text: str) -> dict[str, Any]:
     }
 
 
+def _app_actor_intended() -> bool:
+    """True once app setup has written any Forge app-actor field."""
+    return os.environ.get("JIRA_APP_ACTOR_CONFIGURED") == "1" or bool(
+        os.environ.get("JIRA_APP_ACTOR_PROXY_URL") or os.environ.get("JIRA_APP_ACTOR_SHARED_SECRET")
+    )
+
+
+def _app_actor_credentials() -> tuple[str, str] | None:
+    """Return validated Forge proxy credentials, failing closed when malformed."""
+    proxy_url = os.environ.get("JIRA_APP_ACTOR_PROXY_URL", "")
+    shared_secret = os.environ.get("JIRA_APP_ACTOR_SHARED_SECRET", "")
+    try:
+        parsed = urlparse(proxy_url)
+        valid_url = (
+            parsed.scheme == "https"
+            and bool(parsed.hostname)
+            and parsed.hostname.endswith(FORGE_WEBTRIGGER_SUFFIX)
+            and parsed.path.startswith("/public/")
+            and not parsed.username
+            and not parsed.password
+            and not parsed.query
+            and not parsed.fragment
+        )
+    except ValueError:
+        valid_url = False
+    if not valid_url or len(shared_secret) < APP_ACTOR_MIN_SECRET_LENGTH:
+        log(
+            "ERROR",
+            "jira_reactions: configured Forge app actor is incomplete or invalid; "
+            "refusing OAuth fallback",
+        )
+        return None
+    return proxy_url, shared_secret
+
+
+def _app_actor_request(
+    cloud_id: str,
+    operation: str,
+    *,
+    issue_key: str | None = None,
+    body: dict[str, Any] | None = None,
+    transition_id: str | None = None,
+) -> requests.Response | None:
+    """Call the signed, operation-allowlisted Forge app proxy."""
+    credentials = _app_actor_credentials()
+    if not credentials:
+        return None
+    proxy_url, shared_secret = credentials
+    payload: dict[str, Any] = {
+        "version": 1,
+        "operation": operation,
+        "cloud_id": cloud_id,
+    }
+    if issue_key is not None:
+        payload["issue_key"] = issue_key
+    if body is not None:
+        payload["body"] = body
+    if transition_id is not None:
+        payload["transition_id"] = transition_id
+
+    raw_body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+    timestamp = str(int(time.time()))
+    signature = hmac.new(
+        shared_secret.encode(),
+        f"{timestamp}.{raw_body}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    try:
+        response = requests.post(
+            proxy_url,
+            data=raw_body.encode(),
+            headers={
+                "Content-Type": "application/json",
+                "X-Bgagent-Timestamp": timestamp,
+                "X-Bgagent-Signature": f"sha256={signature}",
+            },
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        )
+        if not HTTPStatus.OK <= response.status_code < HTTPStatus.MULTIPLE_CHOICES:
+            proxy_error = _proxy_error_code(response.text)
+            non_retryable = (
+                response.status_code < HTTPStatus.INTERNAL_SERVER_ERROR
+                or proxy_error == "proxy_not_configured"
+            )
+            level = "ERROR" if non_retryable else "WARN"
+            error_id = (
+                "JIRA_APP_ACTOR_PROXY_REJECTED"
+                if non_retryable
+                else "JIRA_APP_ACTOR_PROXY_TRANSIENT"
+            )
+            log(
+                level,
+                f"jira_reactions: Forge app proxy returned HTTP {response.status_code} "
+                f"error_id={error_id} operation={operation} "
+                f"proxy_error={proxy_error or 'unclassified'}",
+            )
+        return response
+    except requests.RequestException as e:
+        log(
+            "WARN",
+            f"jira_reactions: Forge app proxy request failed ({type(e).__name__}): {e}",
+        )
+        # nosemgrep: py-silent-success-masking -- Jira writes are advisory on network blips
+        return None
+
+
+def _proxy_error_code(raw_body: str) -> str | None:
+    """Return a known proxy error code without logging arbitrary response text."""
+    try:
+        payload = json.loads(raw_body)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    value = payload.get("error")
+    return value if isinstance(value, str) and value in _PROXY_ERROR_CODES else None
+
+
 def _post_comment(cloud_id: str, issue_key: str, text: str) -> bool:
     """POST a comment to the issue. Return True on success, False on any failure.
 
@@ -153,34 +296,40 @@ def _post_comment(cloud_id: str, issue_key: str, text: str) -> bool:
         log("DEBUG", "jira_reactions: auth circuit still open; short-circuiting call")
         return False
 
-    token = os.environ.get("JIRA_API_TOKEN", "")
-    if not token:
-        log("WARN", "jira_reactions: JIRA_API_TOKEN not set; skipping comment")
-        return False
-
-    # URL-encode both path segments. cloud_id and issue_key originate from the
-    # verified webhook payload (stamped into channel_metadata by the
-    # processor), but encoding them keeps an unexpected value from injecting
-    # extra path segments into the gateway URL. `safe=""` so even "/" encodes.
-    url = (
-        f"{JIRA_API_BASE}/{quote(cloud_id, safe='')}"
-        f"/rest/api/3/issue/{quote(issue_key, safe='')}/comment"
-    )
-    try:
-        resp = requests.post(
-            url,
-            json={"body": _adf(text)},
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            },
-            timeout=REQUEST_TIMEOUT_SECONDS,
+    if _app_actor_intended():
+        resp = _app_actor_request(
+            cloud_id,
+            "comment",
+            issue_key=issue_key,
+            body=_adf(text),
         )
-    except requests.RequestException as e:
-        log("WARN", f"jira_reactions: request failed ({type(e).__name__}): {e}")
-        # nosemgrep: py-silent-success-masking -- Jira comments are best-effort on network blips
-        return False
+        if resp is None:
+            return False
+    else:
+        token = os.environ.get("JIRA_API_TOKEN", "")
+        if not token:
+            log("WARN", "jira_reactions: JIRA_API_TOKEN not set; skipping comment")
+            return False
+        log("WARN", "jira_reactions: app actor not configured; using OAuth fallback")
+        url = (
+            f"{JIRA_API_BASE}/{quote(cloud_id, safe='')}"
+            f"/rest/api/3/issue/{quote(issue_key, safe='')}/comment"
+        )
+        try:
+            resp = requests.post(
+                url,
+                json={"body": _adf(text)},
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+                timeout=REQUEST_TIMEOUT_SECONDS,
+            )
+        except requests.RequestException as e:
+            log("WARN", f"jira_reactions: request failed ({type(e).__name__}): {e}")
+            # nosemgrep: py-silent-success-masking -- Jira comments are best-effort on network blips
+            return False
 
     if resp.status_code in (401, 403):
         _note_auth_status(resp.status_code)
@@ -213,16 +362,16 @@ def comment_task_started(
     log("TASK", f"jira_reactions: comment_task_started issue={issue_key} ok={ok}")
 
 
-# NOTE: there is deliberately no ``comment_task_finished`` here. The
-# deterministic fan-out plane (``cdk/src/handlers/fanout-task-events.ts``
-# ``dispatchToJira``) owns the Jira terminal comment — it carries
-# cost/turns/duration and, crucially, fires even when the agent crashes before
-# completing (max-turns, OOM). The agent only posts the *start* comment
-# (``comment_task_started`` above); posting a terminal comment here too would
-# double-comment on the issue.
+# NOTE: there is deliberately no ``comment_task_finished`` here. Since issue
+# #573 the deterministic fan-out plane
+# (``cdk/src/handlers/fanout-task-events.ts`` ``dispatchToJira``) owns the Jira
+# terminal comment — it carries cost/turns/duration and, crucially, fires even
+# when the agent crashes before completing (max-turns, OOM). The agent only
+# posts the *start* comment (``comment_task_started`` above); posting a terminal
+# comment here too would double-comment on the issue.
 
 
-# ── Workflow transitions ────────────────────────────────────────────────────────
+# ── Workflow transitions (issue #572) ──────────────────────────────────────────
 #
 # Move the originating Jira card across its board as the task progresses so the
 # board reflects reality: To Do → In Progress on start, → In Review on PR. Jira
@@ -248,14 +397,14 @@ _CATEGORY_RANK = {"new": 0, "indeterminate": 1, "done": 2}
 #: Preferred destination *name* for the start transition (matched
 #: case-insensitively before the category fallback). Both ``In Progress`` and
 #: ``Blocked`` share the ``indeterminate`` category, so a name match is what
-#: keeps a category-only heuristic from landing on ``Blocked``.
+#: keeps a category-only heuristic from landing on ``Blocked`` (#605).
 _START_STATUS_NAME = "in progress"
 
 #: Preferred destination names for the PR-opened transition, tried in order.
 #: Mirrors Linear's "In Review → In Progress" fallback while also matching
 #: common review-column names, so a "Code Review" column isn't silently skipped
 #: and a stock board (no review status) still advances to / stays at In Progress
-#: rather than no-opping. Ends with In Progress as the safe fallback.
+#: rather than no-opping (#605). Ends with In Progress as the safe fallback.
 _REVIEW_STATUS_NAMES = (
     "in review",
     "code review",
@@ -267,7 +416,7 @@ _REVIEW_STATUS_NAMES = (
 
 #: Destination names the category fallback must never auto-pick. ``Blocked``
 #: shares the ``indeterminate`` category with ``In Progress``; a bare
-#: first-indeterminate heuristic could land there, which is never what
+#: first-indeterminate heuristic could land there (#605), which is never what
 #: "move to In Progress" means. A configured override can still target it.
 _CATEGORY_FALLBACK_DENY = ("blocked",)
 
@@ -278,29 +427,34 @@ def _get_issue_transitions(
     """GET the issue's current status + the transitions valid from it.
 
     Fetches ``?fields=status&expand=transitions`` so a single call yields both
-    the current ``status`` (to skip moving a card backward) and the
+    the current ``status`` (to skip moving a card backward, #605) and the
     ``transitions`` list. Returns ``(current_status, transitions)`` on success,
     or ``None`` on any failure. An empty transitions list is normal — Jira
     returns one when the OAuth user lacks the *Transition Issues* permission —
     and callers treat it as "nothing to do", not an error.
     """
-    url = (
-        f"{JIRA_API_BASE}/{quote(cloud_id, safe='')}"
-        f"/rest/api/3/issue/{quote(issue_key, safe='')}?fields=status&expand=transitions"
-    )
-    try:
-        resp = requests.get(
-            url,
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Accept": "application/json",
-            },
-            timeout=REQUEST_TIMEOUT_SECONDS,
+    if _app_actor_intended():
+        resp = _app_actor_request(cloud_id, "get_transitions", issue_key=issue_key)
+        if resp is None:
+            return None
+    else:
+        url = (
+            f"{JIRA_API_BASE}/{quote(cloud_id, safe='')}"
+            f"/rest/api/3/issue/{quote(issue_key, safe='')}?fields=status&expand=transitions"
         )
-    except requests.RequestException as e:
-        log("WARN", f"jira_reactions: issue GET failed ({type(e).__name__}): {e}")
-        # nosemgrep: py-silent-success-masking -- Jira transitions are best-effort on network blips
-        return None
+        try:
+            resp = requests.get(
+                url,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/json",
+                },
+                timeout=REQUEST_TIMEOUT_SECONDS,
+            )
+        except requests.RequestException as e:
+            log("WARN", f"jira_reactions: issue GET failed ({type(e).__name__}): {e}")
+            # nosemgrep: py-silent-success-masking -- advisory Jira transition read
+            return None
 
     if resp.status_code in (HTTPStatus.UNAUTHORIZED, HTTPStatus.FORBIDDEN):
         _note_auth_status(resp.status_code)
@@ -319,7 +473,7 @@ def _get_issue_transitions(
     # A well-formed response is a JSON object. Guard against valid-but-unexpected
     # JSON (``null``, a bare list, a scalar) — ``.get`` would raise
     # AttributeError, which is NOT best-effort: it propagates out of the pipeline
-    # hook and flips the task to FAILED.
+    # hook and flips the task to FAILED (#605).
     if not isinstance(payload, dict):
         log("WARN", "jira_reactions: issue GET returned non-object JSON — skipping")
         return None
@@ -402,25 +556,35 @@ def _select_transition(
 
 def _post_transition(cloud_id: str, issue_key: str, token: str, transition_id: str) -> bool:
     """POST a transition. Return True on success (204), False on any failure."""
-    url = (
-        f"{JIRA_API_BASE}/{quote(cloud_id, safe='')}"
-        f"/rest/api/3/issue/{quote(issue_key, safe='')}/transitions"
-    )
-    try:
-        resp = requests.post(
-            url,
-            json={"transition": {"id": transition_id}},
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            },
-            timeout=REQUEST_TIMEOUT_SECONDS,
+    if _app_actor_intended():
+        resp = _app_actor_request(
+            cloud_id,
+            "transition",
+            issue_key=issue_key,
+            transition_id=transition_id,
         )
-    except requests.RequestException as e:
-        log("WARN", f"jira_reactions: transition POST failed ({type(e).__name__}): {e}")
-        # nosemgrep: py-silent-success-masking -- Jira transitions are best-effort on network blips
-        return False
+        if resp is None:
+            return False
+    else:
+        url = (
+            f"{JIRA_API_BASE}/{quote(cloud_id, safe='')}"
+            f"/rest/api/3/issue/{quote(issue_key, safe='')}/transitions"
+        )
+        try:
+            resp = requests.post(
+                url,
+                json={"transition": {"id": transition_id}},
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+                timeout=REQUEST_TIMEOUT_SECONDS,
+            )
+        except requests.RequestException as e:
+            log("WARN", f"jira_reactions: transition POST failed ({type(e).__name__}): {e}")
+            # nosemgrep: py-silent-success-masking -- advisory Jira transition write
+            return False
 
     if resp.status_code in (HTTPStatus.UNAUTHORIZED, HTTPStatus.FORBIDDEN):
         _note_auth_status(resp.status_code)
@@ -463,9 +627,11 @@ def _transition(
         return
 
     token = os.environ.get("JIRA_API_TOKEN", "")
-    if not token:
+    if not _app_actor_intended() and not token:
         log("WARN", "jira_reactions: JIRA_API_TOKEN not set; skipping transition")
         return
+    if not _app_actor_intended():
+        log("WARN", "jira_reactions: app actor not configured; using OAuth fallback")
 
     result = _get_issue_transitions(cloud_id, issue_key, token)
     if result is None:
@@ -554,7 +720,7 @@ def transition_pr_opened(
     Resolution: ``jira_status_on_pr`` override → a destination named
     ``In Review`` (or a common review-column synonym) → any
     ``indeterminate``-category destination (Linear's In Review→In Progress
-    fallback, so a stock board isn't silently skipped). Skips only if the
+    fallback, so a stock board isn't silently skipped, #605). Skips only if the
     issue is already Done. Best-effort; no-op for non-Jira tasks.
     """
     override = (channel_metadata or {}).get("jira_status_on_pr")
