@@ -34,6 +34,7 @@ jest.mock('../../../src/handlers/shared/logger', () => ({ logger: loggerMock }))
 import type { IssueRef } from '../../../src/handlers/shared/orchestration-channel';
 import { channelForSource, registerChannelFactory } from '../../../src/handlers/shared/orchestration-channel-factory';
 import { makeSlackChannel, slackThreadRef } from '../../../src/handlers/shared/orchestration-channel-slack';
+import { DEFAULT_LABEL_FILTER } from '../../../src/handlers/shared/orchestration-decomposition-mode';
 import { ORCH_LOG } from '../../../src/handlers/shared/orchestration-log-events';
 import {
   renderRollupComment,
@@ -572,7 +573,9 @@ describe('cascadeNodeLabel — the short name used inside a cascade reason', () 
 });
 
 describe('renderEpicPanel — the single maturing panel', () => {
-  const row = (sub: string, status: string, opts: Partial<EpicPanelRow> = {}): EpicPanelRow => ({
+  // Named for its shape: an EpicPanelRow (what the panel renders), distinct from
+  // the file-level `row`, which builds an OrchestrationChildRow (what is stored).
+  const panelRow = (sub: string, status: string, opts: Partial<EpicPanelRow> = {}): EpicPanelRow => ({
     sub_issue_id: sub, child_status: status, ...opts,
   });
 
@@ -580,9 +583,9 @@ describe('renderEpicPanel — the single maturing panel', () => {
     const body = renderEpicPanel({
       inProgress: true,
       rows: [
-        row('a', 'succeeded', { display_id: 'ENG-1', title: 'A' }),
-        row('b', 'released', { display_id: 'ENG-2', title: 'B' }),
-        row('c', 'blocked', { display_id: 'ENG-3', title: 'C' }),
+        panelRow('a', 'succeeded', { display_id: 'ENG-1', title: 'A' }),
+        panelRow('b', 'released', { display_id: 'ENG-2', title: 'B' }),
+        panelRow('c', 'blocked', { display_id: 'ENG-3', title: 'C' }),
       ],
     });
     expect(body).toContain('🔄 **ABCA orchestration** · 1/3 complete');
@@ -592,9 +595,9 @@ describe('renderEpicPanel — the single maturing panel', () => {
   });
 
   test('all settled + ok → complete header; failures → ⚠️', () => {
-    expect(renderEpicPanel({ inProgress: false, rows: [row('a', 'succeeded')] }))
+    expect(renderEpicPanel({ inProgress: false, rows: [panelRow('a', 'succeeded')] }))
       .toContain('✅ **ABCA orchestration complete**');
-    expect(renderEpicPanel({ inProgress: false, rows: [row('a', 'succeeded'), row('b', 'failed')] }))
+    expect(renderEpicPanel({ inProgress: false, rows: [panelRow('a', 'succeeded'), panelRow('b', 'failed')] }))
       .toContain('⚠️ **ABCA orchestration finished with failures**');
   });
 
@@ -605,21 +608,42 @@ describe('renderEpicPanel — the single maturing panel', () => {
     // gesture with four possible meanings (add sub-issues / retry / still running /
     // already complete) resolved from graph state, so on an epic that gained a
     // sub-issue AND has a failure it does strictly more than a retry.
-    const body = renderEpicPanel({ inProgress: false, rows: [row('a', 'succeeded'), row('b', 'failed')] });
+    const body = renderEpicPanel({ inProgress: false, rows: [panelRow('a', 'succeeded'), panelRow('b', 'failed')] });
     expect(body).toContain('To retry:');
     expect(body).toContain('`@bgagent retry`');
-    // The label is still discoverable — just not billed as the same thing.
-    expect(body).toContain('re-applying the `abca` label');
+    // The label is still discoverable — just not billed as the same thing. It
+    // must be the label that actually TRIGGERS: this assertion previously pinned
+    // a hardcoded project-specific label, so the hint told users to re-apply
+    // something the webhook does not filter on and nothing happened.
+    expect(body).toContain('re-applying the `bgagent` label');
     expect(body).not.toContain('either way');
     // The comment must be named before the label, so the reliable route reads first.
     expect(body.indexOf('`@bgagent retry`')).toBeLessThan(body.indexOf('re-applying'));
   });
 
+  test('the retry hint names the project\'s own trigger label, not a hardcoded one', () => {
+    // The trigger label is per-project configurable, so a hint that hardcodes one
+    // is wrong for every project that renamed it — the user follows the
+    // instruction and nothing fires.
+    const body = renderEpicPanel({
+      inProgress: false,
+      rows: [panelRow('a', 'succeeded'), panelRow('b', 'failed')],
+      labelFilter: 'ship',
+    });
+    expect(body).toContain('re-applying the `ship` label');
+    expect(body).not.toContain('`bgagent` label');
+  });
+
+  test('the retry hint falls back to the platform default label when none is supplied', () => {
+    const body = renderEpicPanel({ inProgress: false, rows: [panelRow('a', 'succeeded'), panelRow('b', 'failed')] });
+    expect(body).toContain(`re-applying the \`${DEFAULT_LABEL_FILTER}\` label`);
+  });
+
   test('no retry hint on a clean complete, or while still in progress', () => {
-    expect(renderEpicPanel({ inProgress: false, rows: [row('a', 'succeeded')] }))
+    expect(renderEpicPanel({ inProgress: false, rows: [panelRow('a', 'succeeded')] }))
       .not.toContain('To retry:');
     // in-flight, even with a not-yet-terminal failed sibling shown: no hint until settled.
-    expect(renderEpicPanel({ inProgress: true, rows: [row('a', 'released'), row('b', 'failed')] }))
+    expect(renderEpicPanel({ inProgress: true, rows: [panelRow('a', 'released'), panelRow('b', 'failed')] }))
       .not.toContain('To retry:');
   });
 
@@ -627,8 +651,8 @@ describe('renderEpicPanel — the single maturing panel', () => {
     const body = renderEpicPanel({
       inProgress: true,
       rows: [
-        row('a', 'released', { display_id: 'ENG-1', title: 'A' }), // running, no PR yet
-        row('b', 'succeeded', { display_id: 'ENG-2', title: 'B', pr_url: 'https://github.com/o/r/pull/9' }),
+        panelRow('a', 'released', { display_id: 'ENG-1', title: 'A' }), // running, no PR yet
+        panelRow('b', 'succeeded', { display_id: 'ENG-2', title: 'B', pr_url: 'https://github.com/o/r/pull/9' }),
       ],
     });
     expect(body).toContain('🔄 ENG-1: A — running\n'); // no — [PR] suffix
@@ -640,7 +664,7 @@ describe('renderEpicPanel — the single maturing panel', () => {
     const body = renderEpicPanel({
       inProgress: true,
       rows: [
-        row('a', 'succeeded', {
+        panelRow('a', 'succeeded', {
           display_id: 'ENG-1',
           title: 'UI',
           pr_url: 'https://github.com/o/r/pull/7',
@@ -657,8 +681,8 @@ describe('renderEpicPanel — the single maturing panel', () => {
     const body = renderEpicPanel({
       inProgress: true,
       rows: [
-        row('a', 'succeeded', { updatingReason: 'to include ENG-3\'s change' }),
-        row('b', 'succeeded'),
+        panelRow('a', 'succeeded', { updatingReason: 'to include ENG-3\'s change' }),
+        panelRow('b', 'succeeded'),
       ],
     });
     expect(body).toContain('· 1/2 complete'); // only b counts as done
@@ -668,8 +692,8 @@ describe('renderEpicPanel — the single maturing panel', () => {
     const body = renderEpicPanel({
       inProgress: false,
       rows: [
-        row('a', 'succeeded', { display_id: 'ENG-1' }),
-        row('orch_x__integration', 'succeeded', { pr_url: 'https://github.com/o/r/pull/9' }),
+        panelRow('a', 'succeeded', { display_id: 'ENG-1' }),
+        panelRow('orch_x__integration', 'succeeded', { pr_url: 'https://github.com/o/r/pull/9' }),
       ],
       combinedPrUrl: 'https://github.com/o/r/pull/9',
     });
@@ -683,8 +707,8 @@ describe('renderEpicPanel — the single maturing panel', () => {
     const body = renderEpicPanel({
       inProgress: false,
       rows: [
-        row('a', 'succeeded', { display_id: 'ENG-1' }),
-        row('orch_x__integration', 'failed', { failureReason: reason }),
+        panelRow('a', 'succeeded', { display_id: 'ENG-1' }),
+        panelRow('orch_x__integration', 'failed', { failureReason: reason }),
       ],
     });
     // The integration row + its sub-line on the very next line (indented ↳).
@@ -693,17 +717,17 @@ describe('renderEpicPanel — the single maturing panel', () => {
 
   test('the sub-line is ONLY rendered for failed rows (not succeeded/skipped/running)', () => {
     const reason = 'should not appear';
-    const succeeded = renderEpicPanel({ inProgress: false, rows: [row('a', 'succeeded', { failureReason: reason })] });
+    const succeeded = renderEpicPanel({ inProgress: false, rows: [panelRow('a', 'succeeded', { failureReason: reason })] });
     expect(succeeded).not.toContain('↳');
     expect(succeeded).not.toContain(reason);
     // A skipped row (predecessor failed) gets no sub-line either — only the
     // node that actually failed carries the diagnostic.
-    const skipped = renderEpicPanel({ inProgress: false, rows: [row('a', 'skipped', { failureReason: reason })] });
+    const skipped = renderEpicPanel({ inProgress: false, rows: [panelRow('a', 'skipped', { failureReason: reason })] });
     expect(skipped).not.toContain('↳');
   });
 
   test('a failed row with NO reason resolved still renders cleanly (no dangling ↳)', () => {
-    const body = renderEpicPanel({ inProgress: false, rows: [row('a', 'failed', { display_id: 'ENG-1' })] });
+    const body = renderEpicPanel({ inProgress: false, rows: [panelRow('a', 'failed', { display_id: 'ENG-1' })] });
     expect(body).toContain('❌ ENG-1 — failed');
     expect(body).not.toContain('↳');
   });
@@ -711,7 +735,7 @@ describe('renderEpicPanel — the single maturing panel', () => {
   test('embeds the combined preview screenshot when present', () => {
     const body = renderEpicPanel({
       inProgress: false,
-      rows: [row('a', 'succeeded')],
+      rows: [panelRow('a', 'succeeded')],
       combinedScreenshotUrl: 'https://cdn/x.png',
     });
     expect(body).toContain('🖼️ **Combined preview**');
@@ -721,7 +745,7 @@ describe('renderEpicPanel — the single maturing panel', () => {
   test('makes the combined preview a clickable deep-link when the preview URL is known', () => {
     const body = renderEpicPanel({
       inProgress: false,
-      rows: [row('a', 'succeeded')],
+      rows: [panelRow('a', 'succeeded')],
       combinedScreenshotUrl: 'https://cdn/x.png',
       combinedPreviewUrl: 'https://my-app-abc123.vercel.app',
     });
@@ -735,7 +759,7 @@ describe('renderEpicPanel — the single maturing panel', () => {
   test('percent-encodes parens in the preview URL so it cannot break out of the markdown link', () => {
     const body = renderEpicPanel({
       inProgress: false,
-      rows: [row('a', 'succeeded')],
+      rows: [panelRow('a', 'succeeded')],
       combinedScreenshotUrl: 'https://cdn/x.png',
       combinedPreviewUrl: 'https://preview.vercel.app/x)](https://evil/a.png)',
     });
@@ -747,7 +771,7 @@ describe('renderEpicPanel — the single maturing panel', () => {
   test('falls back to a plain embedded image when no preview URL is known', () => {
     const body = renderEpicPanel({
       inProgress: false,
-      rows: [row('a', 'succeeded')],
+      rows: [panelRow('a', 'succeeded')],
       combinedScreenshotUrl: 'https://cdn/x.png',
     });
     expect(body).toContain('![combined preview](https://cdn/x.png)');
@@ -759,8 +783,8 @@ describe('renderEpicPanel — the single maturing panel', () => {
     const body = renderEpicPanel({
       inProgress: true,
       rows: [
-        row('z', 'released', { display_id: 'ENG-9' }),
-        row('a', 'released', { display_id: 'ENG-1' }),
+        panelRow('z', 'released', { display_id: 'ENG-9' }),
+        panelRow('a', 'released', { display_id: 'ENG-1' }),
       ],
     });
     expect(body.indexOf('ENG-1')).toBeLessThan(body.indexOf('ENG-9'));

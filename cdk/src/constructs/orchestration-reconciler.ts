@@ -42,9 +42,6 @@ export interface OrchestrationReconcilerProps {
   /** OrchestrationTable — the reconciler reads the DAG + writes child statuses. */
   readonly orchestrationTable: dynamodb.ITable;
 
-  /** TaskTable (for createTaskCore writes when releasing children). */
-  readonly taskTableForWrites?: dynamodb.ITable;
-
   /** Orchestrator function ARN — releaseChild → createTaskCore invokes it. */
   readonly orchestratorFunctionArn?: string;
 

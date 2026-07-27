@@ -30,6 +30,7 @@
 
 import { logger } from './logger';
 import type { Channel, IssueRef } from './orchestration-channel';
+import { DEFAULT_LABEL_FILTER } from './orchestration-decomposition-mode';
 import { isIntegrationNode } from './orchestration-integration-node';
 import { ORCH_LOG } from './orchestration-log-events';
 import type { OrchestrationChildRow } from './orchestration-store';
@@ -209,6 +210,13 @@ export interface EpicPanelParams {
    * ``combinedScreenshotUrl`` is also set.
    */
   readonly combinedPreviewUrl?: string;
+  /**
+   * The project's resolved trigger label, for the retry hint's fallback line.
+   * The label is per-project configurable, so this must NOT be hardcoded: a hint
+   * naming a label the webhook does not filter on sends the user to do something
+   * that silently does nothing. Absent → the platform default.
+   */
+  readonly labelFilter?: string;
 }
 
 const PANEL_FOOTER = '_One live panel — updates in place as the epic progresses; no comment stream._';
@@ -260,6 +268,7 @@ function panelLabel(row: EpicPanelRow): string {
  */
 export function renderEpicPanel(params: EpicPanelParams): string {
   const { rows, inProgress, combinedPrUrl, combinedScreenshotUrl, combinedPreviewUrl } = params;
+  const triggerLabel = params.labelFilter?.trim() || DEFAULT_LABEL_FILTER;
   const terminal = (s: string) => s === 'succeeded' || s === 'failed' || s === 'skipped';
   // "done" counts settled rows that are NOT mid-update (an updating row is back in flight).
   const done = rows.filter((r) => terminal(r.child_status) && !r.updatingReason).length;
@@ -315,7 +324,7 @@ export function renderEpicPanel(params: EpicPanelParams): string {
   const retryHint = (!inProgress && anyBad)
     ? ['', '↻ **To retry:** reply `@bgagent retry` on this epic — it re-runs only the '
       + 'failed/skipped sub-issues and keeps the ones that succeeded. '
-      + '(No reply? Removing and re-applying the `abca` label also retries.)']
+      + `(No reply? Removing and re-applying the \`${triggerLabel}\` label also retries.)`]
     : [];
 
   const callout = combinedPrUrl
@@ -418,6 +427,13 @@ export interface UpsertEpicPanelParams {
    * Skipped on surfaces without reaction/transition support. Default true.
    */
   readonly mirrorParentState?: boolean;
+  /**
+   * The project's resolved trigger label, forwarded to {@link renderEpicPanel}
+   * for the retry hint. Absent → the platform default. Pass the project
+   * mapping's ``label_filter`` when the caller has it, so the hint never names a
+   * label that project renamed.
+   */
+  readonly labelFilter?: string;
 }
 
 /**
@@ -447,6 +463,7 @@ export async function upsertEpicPanel(params: UpsertEpicPanelParams): Promise<st
     ...(params.combinedPrUrl !== undefined && { combinedPrUrl: params.combinedPrUrl }),
     ...(params.combinedScreenshotUrl !== undefined && { combinedScreenshotUrl: params.combinedScreenshotUrl }),
     ...(params.combinedPreviewUrl !== undefined && { combinedPreviewUrl: params.combinedPreviewUrl }),
+    ...(params.labelFilter !== undefined && { labelFilter: params.labelFilter }),
   });
 
   let commentId: string | null;
