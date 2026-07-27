@@ -17,6 +17,7 @@
     "@aws-cdk/aws-bedrock-alpha": "2.260.0-alpha.0",
     "@aws-crypto/sha256-js": "^5.2.0",
     "@aws-sdk/client-bedrock-agentcore": "^3.1078.0",
+    "@aws-sdk/client-bedrock-agentcore-control": "^3.1078.0",
     "@aws-sdk/client-bedrock-runtime": "^3.1078.0",
     "@aws-sdk/client-dynamodb": "^3.1078.0",
     "@aws-sdk/client-ecs": "^3.1078.0",

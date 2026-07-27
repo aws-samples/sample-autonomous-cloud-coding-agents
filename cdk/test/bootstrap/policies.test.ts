@@ -113,6 +113,7 @@ describe('IaCRole-ABCA-Application', () => {
       'EventBridge',
       'SQS',
       'SNS',
+      'StepFunctions',
       'CloudFront',
       'SecretsManager',
       'SecretsManagerAccountLevel',
@@ -147,6 +148,7 @@ describe('IaCRole-ABCA-Application', () => {
         'secretsmanager',
         'sns',
         'sqs',
+        'states',
         'wafv2',
       ]),
     );

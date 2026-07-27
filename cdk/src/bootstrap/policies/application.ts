@@ -152,6 +152,11 @@ export function applicationPolicy(): iam.PolicyDocument {
           'cognito-idp:DeleteUserPoolClient',
           'cognito-idp:DescribeUserPoolClient',
           'cognito-idp:UpdateUserPoolClient',
+          // User pool groups for registry publish/approve gating (#246).
+          'cognito-idp:CreateGroup',
+          'cognito-idp:DeleteGroup',
+          'cognito-idp:GetGroup',
+          'cognito-idp:UpdateGroup',
           'cognito-idp:TagResource',
           'cognito-idp:UntagResource',
           'cognito-idp:ListTagsForResource',
@@ -231,6 +236,23 @@ export function applicationPolicy(): iam.PolicyDocument {
           'sns:ListTagsForResource',
         ],
         resources: ['arn:aws:sns:*:*:backgroundagent-dev-*'],
+      }),
+
+      new iam.PolicyStatement({
+        // The CDK Provider framework (AgentCore registry provisioning, #246)
+        // creates a Step Functions state machine as its async completion waiter.
+        sid: 'StepFunctions',
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'states:CreateStateMachine',
+          'states:DeleteStateMachine',
+          'states:DescribeStateMachine',
+          'states:UpdateStateMachine',
+          'states:TagResource',
+          'states:UntagResource',
+          'states:ListTagsForResource',
+        ],
+        resources: ['arn:aws:states:*:*:stateMachine:backgroundagent-dev-*'],
       }),
 
       new iam.PolicyStatement({
