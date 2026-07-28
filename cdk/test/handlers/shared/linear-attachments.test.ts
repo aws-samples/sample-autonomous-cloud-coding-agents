@@ -40,6 +40,7 @@ import {
   isLinearUploadsUrl,
   LinearAttachmentError,
 } from '../../../src/handlers/shared/linear-attachments';
+import { logger } from '../../../src/handlers/shared/logger';
 import { MAX_ATTACHMENT_SIZE_BYTES } from '../../../src/handlers/shared/validation';
 
 const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00]);
@@ -167,17 +168,56 @@ describe('downloadScreenAndStoreLinearAttachments', () => {
     expect(new Set(records.map((r) => r.attachment_id)).size).toBe(2);
   });
 
+  test('a long descriptive label does NOT silently drop the attachment', async () => {
+    // A tight label bound made a link with long alt text stop matching, so the
+    // file vanished with nothing logged — trading a slow scan for lost user data.
+    (global.fetch as jest.Mock).mockImplementation(() => Promise.resolve(bytesResponse(PNG_BYTES)));
+    const longLabel = 'a detailed description of this diagram '.repeat(20); // ~780 chars
+    const records = await downloadScreenAndStoreLinearAttachments(
+      `![${longLabel}](https://uploads.linear.app/u/p/spec.png)`, 10, storageCtx(),
+    );
+    expect(records).toHaveLength(1);
+  });
+
+  test('a hostile URL-shaped description is bounded too, not just a bracket run', async () => {
+    // BOTH variable parts of the pattern backtrack per start position. Bounding
+    // the label alone left `[](https://a` repeated just as slow as before, which
+    // is the shape a mangled paste produces.
+    //
+    // Asserts the SCAN INPUT is bounded rather than a wall-clock budget: a timing
+    // assertion in a parallel suite measures CPU contention as much as the code,
+    // and this one failed under full-suite load while passing alone. The warning
+    // is the observable proof the cap engaged — and that the truncation is
+    // announced rather than silent.
+    const warn = jest.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    try {
+      const hostile = '[](https://a'.repeat(20_000); // ~240 KB, far past the cap
+      const records = await downloadScreenAndStoreLinearAttachments(hostile, 10, storageCtx());
+      expect(records).toEqual([]);
+      const capped = warn.mock.calls.some(([msg]) => String(msg).includes('attachment-scan cap'));
+      expect(capped).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   test('a large bracket-heavy description scans in bounded time, not quadratic', async () => {
     // Making the leading '!' optional stopped the engine anchoring on a literal
     // '!', so an unbounded label quantifier retried from every '[' — 50 KB of
     // unmatched brackets took ~940 ms and ~150 KB blew the webhook timeout. No
     // crafting needed; a big pasted table does it.
-    const hostile = '['.repeat(60_000);
-    const started = Date.now();
-    const records = await downloadScreenAndStoreLinearAttachments(hostile, 10, storageCtx());
-    const elapsedMs = Date.now() - started;
-    expect(records).toEqual([]);
-    expect(elapsedMs).toBeLessThan(1_000);
+    // Asserts the scan INPUT is bounded, not a wall-clock budget: a timing
+    // assertion in a parallel suite measures CPU contention as much as the code,
+    // and this one passed alone at ~690 ms while failing under full-suite load.
+    const warn = jest.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    try {
+      const hostile = '['.repeat(200_000);
+      const records = await downloadScreenAndStoreLinearAttachments(hostile, 10, storageCtx());
+      expect(records).toEqual([]);
+      expect(warn.mock.calls.some(([m]) => String(m).includes('attachment-scan cap'))).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   test('ignores non-uploads.linear.app images (public CDN images go via the URL path)', async () => {

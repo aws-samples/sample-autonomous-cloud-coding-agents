@@ -114,7 +114,33 @@ const PDF_MAGIC = [0x25, 0x50, 0x44, 0x46, 0x2d] as const; // %PDF-
 // the webhook processor's timeout. No crafting is needed — a large pasted table
 // does it. A bound caps the work per start position; a real markdown label is far
 // shorter than the limit, so nothing legitimate stops matching.
-const MARKDOWN_LABEL_MAX_CHARS = 300;
+// A GENEROUS label bound. This is not what stops the pathological case (see
+// SCAN_MAX_DESCRIPTION_CHARS below) — it only keeps a single start position from
+// scanning arbitrarily far. It must sit well above any real markdown label,
+// because a label longer than the bound makes the whole link stop matching and
+// the attachment is then silently MISSED. A tight bound traded a slow scan for
+// lost user data, which is the worse failure: 300 dropped a 350-char descriptive
+// alt text with nothing logged.
+const MARKDOWN_LABEL_MAX_CHARS = 4096;
+
+/**
+ * Hard cap on the description length we scan for attachment links.
+ *
+ * This is the real bound on the work. Making the leading ``!`` optional stopped
+ * the engine anchoring each attempt on a literal ``!``, and BOTH variable parts
+ * of the pattern then backtrack per start position — the label AND the URL. So
+ * bounding the label alone does not help: measured on `[](https://a` repeated,
+ * a 100 KB description takes ~820 ms with or without a label bound, and larger
+ * inputs exceed the webhook processor's timeout. No crafting is needed; a
+ * mangled paste does it.
+ *
+ * A length cap fixes it for every hostile shape at once and is honest about the
+ * trade: a description longer than this has its tail unscanned, which we LOG
+ * rather than pass over in silence. Linear descriptions are prose written by
+ * humans; 64 KB is far past any real one, and the attachment count is separately
+ * capped by {@link SCAN_HARD_CAP}.
+ */
+const SCAN_MAX_DESCRIPTION_CHARS = 65_536;
 const MARKDOWN_LINK_OR_IMAGE_PATTERN = new RegExp(
   `!?\\[([^\\]]{0,${MARKDOWN_LABEL_MAX_CHARS}})\\]\\(<?(https://[^)>]+)>?\\)`,
   'g',
@@ -279,12 +305,22 @@ function extensionOf(filename: string): string {
  */
 function collectLinearUploads(description: string | undefined): SelectedUpload[] {
   if (!description) return [];
+  // Bound the scan input, not just the pattern. Truncation is announced: an
+  // unscanned tail could hide an attachment, and a silent miss is worse than a
+  // slow scan.
+  let scanned = description;
+  if (scanned.length > SCAN_MAX_DESCRIPTION_CHARS) {
+    logger.warn('Issue description longer than the attachment-scan cap — tail not scanned', {
+      description_chars: scanned.length, scan_cap: SCAN_MAX_DESCRIPTION_CHARS,
+    });
+    scanned = scanned.slice(0, SCAN_MAX_DESCRIPTION_CHARS);
+  }
   const selected: SelectedUpload[] = [];
   const seenIds = new Set<string>();
   let index = 0;
   let match: RegExpExecArray | null;
   MARKDOWN_LINK_OR_IMAGE_PATTERN.lastIndex = 0;
-  while ((match = MARKDOWN_LINK_OR_IMAGE_PATTERN.exec(description)) !== null) {
+  while ((match = MARKDOWN_LINK_OR_IMAGE_PATTERN.exec(scanned)) !== null) {
     if (selected.length >= SCAN_HARD_CAP) break;
     const label = (match[1] ?? '').trim();
     const url = match[2];
