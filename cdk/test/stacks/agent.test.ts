@@ -568,10 +568,17 @@ describe('AgentStack', () => {
 
   test('the fan-out consumer is granted read on BOTH surfaces\' OAuth secret prefixes', () => {
     // The registry table alone is not enough to post a comment — the dispatcher
-    // also needs the per-workspace OAuth secret. Assert both ARN patterns appear
-    // in the synthesized policies so neither grant can be dropped silently.
+    // also needs the per-workspace OAuth secret.
+    //
+    // Scoped to the FanOutConsumer's OWN policy, deliberately. Grepping every
+    // synthesized policy for these ARN patterns passes even when the fan-out's
+    // grant is dropped, because the orchestrator and the webhook processors hold
+    // the same prefixes — the assertion then proves nothing about this consumer.
     const policies = template.findResources('AWS::IAM::Policy');
-    const asJson = JSON.stringify(Object.values(policies));
+    const fanoutPolicies = Object.entries(policies)
+      .filter(([logicalId]) => logicalId.startsWith('FanOutConsumer'));
+    expect(fanoutPolicies.length).toBeGreaterThan(0);
+    const asJson = JSON.stringify(fanoutPolicies.map(([, p]) => p));
     expect(asJson).toContain('bgagent-linear-oauth-*');
     expect(asJson).toContain('bgagent-jira-oauth-*');
   });
