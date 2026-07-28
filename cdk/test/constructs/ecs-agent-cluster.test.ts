@@ -176,6 +176,20 @@ describe('EcsAgentCluster construct', () => {
     });
   });
 
+  test('the BUILD def keeps real DISK margin, unlike CPU and memory', () => {
+    // Measured, not guessed. A full parallel build of a large TypeScript + Python
+    // monorepo peaked at ~3.1 GB of memory (~5x headroom at 16 GB, because
+    // MISE_JOBS=1 serialises the packages) but ~14.7 GiB of DISK. At Fargate's
+    // 21 GiB floor that is only ~1.4x, and running out of space surfaces as a
+    // spurious build failure rather than an obvious resource error — so disk is
+    // deliberately sized less aggressively than CPU and memory. Ephemeral storage
+    // is also a small fraction of the per-task cost, so this keeps the cost win.
+    baseTemplate.hasResourceProperties('AWS::ECS::TaskDefinition', {
+      Cpu: '4096',
+      EphemeralStorage: { SizeInGiB: 50 },
+    });
+  });
+
   test('a heavy monorepo can raise the build task to the Fargate ceiling', () => {
     // The size that a large TypeScript + Python monorepo actually needs, reached
     // through the prop rather than by being everyone's default.

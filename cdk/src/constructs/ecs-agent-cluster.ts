@@ -114,15 +114,25 @@ const HTTPS_PORT = 443;
  * sizes are overridable via {@link EcsAgentClusterProps.taskSizing}, reachable at
  * deploy time through context (see {@link resolveEcsTaskSizing}).
  *
- *  - BUILD task: 4 vCPU / 16 GB / 21 GiB disk (21 is Fargate's floor once you
- *    set ephemeral storage at all; its implicit default is 20). Enough for a
- *    typical repo's build. A large TypeScript + Python monorepo whose full build
- *    runs many jobs in parallel needs considerably more — up to Fargate's ceiling
- *    of 16 vCPU / 120 GB, with 100 GiB of disk so concurrent builds do not run it
- *    out of space and surface as a spurious failure. Raise it deliberately:
- *    a build task runs in its own isolated microVM, so a memory-heavy build is
- *    helped only by more per-task RAM or fewer parallel build steps, never by
- *    capping how many tasks run at once.
+ *  - BUILD task: 4 vCPU / 16 GB / 50 GiB disk.
+ *
+ *    CPU and memory are modest on measured evidence: a full parallel build of a
+ *    large TypeScript + Python monorepo (agent + CDK + CLI + docs) peaked at
+ *    ~3.1 GB of the 16 GB, because ``MISE_JOBS=1`` serialises the packages so peak
+ *    is max-single-package rather than sum-of-all. Nearly 5x headroom.
+ *
+ *    Disk is the tighter constraint and is sized less aggressively for that
+ *    reason: the same build peaked at ~14.7 GiB, so Fargate's 21 GiB floor leaves
+ *    only ~1.4x — a heavier dependency cache or a second build sharing the task
+ *    would run it out of space and surface as a spurious build failure. 50 GiB
+ *    restores real margin, and ephemeral storage is a small fraction of the
+ *    per-task cost next to vCPU and RAM.
+ *
+ *    A repo that genuinely needs more can go to Fargate's ceiling of
+ *    16 vCPU / 120 GB (and up to 200 GiB of disk) through {@link EcsTaskSizing}.
+ *    Note a memory-heavy build is helped only by more per-task RAM or fewer
+ *    parallel build steps — a build task runs in its own isolated microVM, so
+ *    capping how many tasks run at once does not help.
  *  - PLANNING task: 2 vCPU / 8 GB / default disk. For read-only workflows that
  *    clone and read the repo to produce a plan but never build. "Read-only"
  *    describes the WORKFLOW's behaviour, not a reduced IAM role: both task defs
@@ -142,7 +152,7 @@ const HTTPS_PORT = 443;
 // disk out of space.
 const DEFAULT_BUILD_TASK_CPU = 4096;
 const DEFAULT_BUILD_TASK_MEMORY_MIB = 16384;
-const DEFAULT_BUILD_TASK_EPHEMERAL_STORAGE_GIB = 21;
+const DEFAULT_BUILD_TASK_EPHEMERAL_STORAGE_GIB = 50;
 const DEFAULT_PLANNING_TASK_CPU = 2048;
 const DEFAULT_PLANNING_TASK_MEMORY_MIB = 8192;
 
@@ -160,7 +170,7 @@ export interface EcsTaskSizing {
   readonly buildTaskCpu?: number;
   /** Build task memory in MiB. Defaults to 16384 (16 GB). */
   readonly buildTaskMemoryMiB?: number;
-  /** Build task root-filesystem storage in GiB (21–200). Defaults to 21. */
+  /** Build task root-filesystem storage in GiB (21–200). Defaults to 50. */
   readonly buildTaskEphemeralStorageGiB?: number;
   /** Planning (read-only) task vCPU units. Defaults to 2048 (2 vCPU). */
   readonly planningTaskCpu?: number;
