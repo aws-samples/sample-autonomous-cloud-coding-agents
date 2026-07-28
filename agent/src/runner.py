@@ -341,16 +341,14 @@ _FULL_TOOL_SURFACE = ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch
 # read-only workflow.
 _WRITE_TOOLS = frozenset(("Write", "Edit"))
 # Clarify-before-spend (UX #4): workflows that do NOT get the request_clarification
-# tool. pr-iteration already has its own answer-only path; decompose emits a plan
-# artifact (its "ask for more detail" is `decompose:false` with reasoning); web/
-# default artifact tasks don't open PRs. Only the plain PR-producing new_task path
-# benefits from an ask-instead-of-guess signal.
+# tool. pr-iteration already has its own answer-only path; web/default artifact
+# tasks don't open PRs. Only the plain PR-producing new_task path benefits from an
+# ask-instead-of-guess signal.
 _NO_CLARIFICATION_WORKFLOW_IDS = frozenset(
     (
         "coding/pr-iteration-v1",
         "coding/pr-review-v1",
         "coding/restack-v1",
-        "coding/decompose-v1",
         "default/agent-v1",
         "web/research-v1",
     )
@@ -521,7 +519,7 @@ async def run_agent(
     # tool for writeable PR-producing workflows (new_task). It lets the agent STOP
     # and ask a question instead of guessing on a vague request; the runner
     # captures the call below. Gated OFF for read-only workflows (pr-review) and
-    # artifact planners (decompose) — they have their own terminal shapes and
+    # artifact planners — they have their own terminal shapes and
     # shouldn't grow an ask-instead path. Best-effort: a null server (SDK missing)
     # just means the tool isn't offered.
     mcp_servers: dict[str, Any] = {}

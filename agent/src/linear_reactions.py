@@ -257,9 +257,8 @@ def _get_viewer_id() -> str | None:
 def _transition_issue_state(issue_id: str, target_type: str, preferred_names: list[str]) -> None:
     """Move the issue to a workflow state of ``target_type``, forward-only.
 
-    A plain single task (a direct ``abca`` label, or an ``:auto``/``:decompose``
-    the planner declined to a single unit) previously left the issue in Backlog
-    for its whole run — only orchestration parents got a state change (via the
+    A plain single task (a direct ``abca`` label) previously left the issue in
+    Backlog for its whole run — only orchestration parents got a state change (via the
     epic panel). This is the missing single-task equivalent: on start move to
     'started' (preferring "In Progress"), on clean finish to 'started' (preferring
     "In Review") — the same targets the orchestration panel uses.
@@ -451,7 +450,7 @@ def react_task_started(
     # Workflow-state transition: a writeable single task moves the issue
     # Backlog → In Progress, so it
     # doesn't sit in Backlog for the whole run. Off for read-only/planning tasks
-    # (decompose-v1, pr-review) — the orchestration panel owns the parent state.
+    # (pr-review) — the orchestration panel owns the parent state.
     if transition_state:
         _transition_issue_state(issue_id, "started", ["In Progress"])
 

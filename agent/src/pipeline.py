@@ -174,16 +174,15 @@ def _deliver_plan_artifact(
     prompt: str,
     agent_result,
 ) -> str | None:
-    """Deliver a decompose-planning agent's plan as the task artifact (#299).
+    """Deliver a repo-ful artifact workflow's result as the task artifact.
 
-    ``coding/decompose-v1`` is a repo-ful workflow whose primary terminal outcome
-    is an ARTIFACT (the decomposition plan), not a PR. It clones the repo for full
-    planning context but produces no code change — so the build/PR post-hooks do
-    not apply. This uploads the agent's final result text (the plan JSON) via the
-    SAME ``deliver_artifact`` uploader web-research uses (``artifacts/{task_id}/``),
-    returning the ``s3://`` URI. Raises on delivery failure — delivery is the
-    terminal side effect, so a failure must surface as a FAILED task (caught by
-    the pipeline's outer handler), not a silent "planned nothing".
+    Such a workflow is one whose primary terminal outcome is an ARTIFACT — a
+    document — rather than a PR. It clones the repo for context but produces no code
+    change, so the build/PR post-hooks do not apply. This uploads the agent's final
+    result text via the SAME ``deliver_artifact`` uploader web-research uses
+    (``artifacts/{task_id}/``), returning the ``s3://`` URI. Raises on delivery
+    failure — delivery is the terminal side effect, so a failure must surface as a
+    FAILED task (caught by the pipeline's outer handler), not a silent success.
     """
     from workflow import StepContext
     from workflow.deliverers import deliver as deliver_artifact
@@ -201,7 +200,7 @@ def _deliver_plan_artifact(
     deliver_ctx.agent_result = agent_result
     result = deliver_artifact("s3", deliver_ctx)
     artifact_uri = result.artifact_uri
-    log("POST", f"decompose plan delivered as artifact: {artifact_uri}")
+    log("POST", f"artifact delivered: {artifact_uri}")
     if artifact_uri:
         progress.write_agent_milestone("artifact_delivered", artifact_uri)
     return artifact_uri
@@ -686,7 +685,7 @@ def _apply_delivery_gate(
 
     Mirrors the repo-LESS artifact gate (``run_task`` arm 2): a sanctioned no-op
     is EXPECTED to ship nothing, so this fires ONLY for create-strategy new work —
-      * read-only (pr_review) / artifact (decompose) ship no PR by design;
+      * read-only (pr_review) / artifact workflows ship no PR by design;
       * push_resolve / resolve (pr_iteration) legitimately add no NEW PR, and a
         question-only iteration is handled via the ``code_changed=False``
         "answered" path — none MUST open a PR;
@@ -1080,7 +1079,7 @@ def run_task(
             # Workflow-state transition: a writeable coding task (new-task /
             # pr-iteration) also moves
             # the Linear issue Backlog → In Progress so it doesn't sit in Backlog
-            # for the whole run. read_only tasks (decompose-v1 planning,
+            # for the whole run. read_only tasks (planning,
             # pr-review) never transition — the orchestration panel owns the
             # parent's state, and a planning run shouldn't advance the issue.
             linear_transition_state = not config.read_only
@@ -1315,11 +1314,16 @@ def run_task(
                 )
                 ensure_pr_strategy = "create"
 
-            # #299 agent-native decompose: a REPO-FUL workflow whose primary
-            # terminal outcome is an ARTIFACT (coding/decompose-v1) clones the
-            # repo for context but produces a plan, not a PR. Skip the build/PR
-            # post-hooks; deliver the agent's result text (the plan JSON) as the
-            # artifact so the platform can read it and seed the sub-issues.
+            # A REPO-FUL workflow whose primary terminal outcome is an ARTIFACT
+            # clones the repo for context but produces a document, not a PR. Skip
+            # the build/PR post-hooks and deliver the agent's result text as the
+            # artifact.
+            #
+            # No workflow currently shipped takes this branch — the repo-ful
+            # artifact workflows live downstream — but the generic capability stays
+            # because it is declared by the workflow contract
+            # (terminal_outcomes.primary + requires_repo), not by a workflow id, and
+            # the alternative is silently opening a PR for a document task.
             #
             # BOTH conditions matter: a repo-LESS artifact workflow
             # (default/agent-v1, web-research) never reaches this repo-bound
@@ -1332,7 +1336,7 @@ def run_task(
                 and getattr(_workflow.terminal_outcomes, "primary", None) == "artifact"
                 and getattr(_workflow, "requires_repo", False)
             )
-            artifact_uri: str | None = None  # set by the decompose (artifact) branch below
+            artifact_uri: str | None = None  # set by the artifact branch below
 
             # Clarify-before-spend (UX #4): a writeable, PR-producing task
             # (new_task) whose agent judged the request too ambiguous to
@@ -1340,7 +1344,7 @@ def run_task(
             # message. Treat that as a HOLD: no build, no commit, no PR — the
             # deliverable is the clarifying question, surfaced by the platform as
             # "needs input" rather than a finished task, so we don't charge for a
-            # guess. Scoped OFF for artifact workflows (decompose emits JSON, not a
+            # guess. Scoped OFF for artifact workflows (they emit a document, not a
             # question) and PR workflows (pr_iteration already has its own
             # answer-only path). Fail-safe: if the marker is somehow present on a
             # read-only task we still just hold (nothing to lose).
@@ -1658,7 +1662,7 @@ def run_task(
                 cache_read_input_tokens=usage.cache_read_input_tokens if usage else None,
                 cache_creation_input_tokens=usage.cache_creation_input_tokens if usage else None,
                 trace_s3_uri=trace_s3_uri,
-                # #299: a decompose (artifact) workflow carries the plan artifact
+                # An artifact workflow carries its artifact
                 # URI here so the platform can read the plan and seed sub-issues;
                 # None for a normal PR workflow.
                 artifact_uri=artifact_uri,

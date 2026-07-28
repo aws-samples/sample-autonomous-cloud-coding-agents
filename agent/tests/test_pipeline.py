@@ -562,7 +562,7 @@ class TestRepoLessPipeline:
     @patch("repo.setup_repo")
     @patch("pipeline.task_span")
     @patch("pipeline.task_state")
-    def test_decompose_workflow_delivers_plan_artifact_and_skips_pr(
+    def test_repoful_artifact_workflow_delivers_artifact_and_skips_pr(
         self,
         _mock_task_state,
         mock_task_span,
@@ -572,10 +572,15 @@ class TestRepoLessPipeline:
         mock_run_agent,
         monkeypatch,
     ):
-        # #299 agent-native decompose: coding/decompose-v1 is REPO-FUL (clones for
-        # context) but its terminal outcome is an ARTIFACT (the plan JSON), not a
-        # PR. It must take the repo-bound path (clone), then deliver the plan as an
-        # artifact and SKIP the build/PR post-hooks entirely.
+        # A REPO-FUL artifact workflow clones for context but its terminal outcome
+        # is a DOCUMENT, not a PR. It must take the repo-bound path (clone), then
+        # deliver the result as an artifact and SKIP the build/PR post-hooks.
+        #
+        # No such workflow ships today, so this uses a synthetic one: the branch is
+        # selected by the workflow CONTRACT (terminal_outcomes.primary == artifact
+        # AND requires_repo), not by a workflow id, and without a test the branch
+        # could be deleted or inverted silently. Getting it wrong means opening an
+        # empty PR for a document task, or running a build that was never wanted.
         monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
         monkeypatch.setenv("AWS_REGION", "us-east-1")
         mock_setup_repo.return_value = RepoSetup(
@@ -583,20 +588,37 @@ class TestRepoLessPipeline:
             branch="bgagent/test/branch",
             build_before=True,
         )
-        plan_json = '{"decompose": true, "reasoning": "two features", "sub_issues": []}'
+        artifact_text = '{"summary": "two features", "items": []}'
 
         async def fake_run_agent(_prompt, _system_prompt, config, cwd=None, trajectory=None):
             return AgentResult(
-                status="success", turns=3, cost_usd=0.05, num_turns=3, result_text=plan_json
+                status="success", turns=3, cost_usd=0.05, num_turns=3, result_text=artifact_text
             )
 
         mock_run_agent.side_effect = fake_run_agent
         mock_task_span.return_value = self._mock_span()
 
+        # Synthesize the workflow by copying the real coding workflow and flipping
+        # ONLY the two fields that select this branch, so the test cannot drift from
+        # the production contract the way a hand-built stub would.
+        from workflow import load_workflow as real_load_workflow
+
+        base_wf = real_load_workflow("coding/new-task-v1")
+        artifact_wf = base_wf.model_copy(
+            update={
+                "id": "synthetic/artifact-repoful-v1",
+                "requires_repo": True,
+                "terminal_outcomes": base_wf.terminal_outcomes.model_copy(
+                    update={"primary": "artifact"}
+                ),
+            }
+        )
+
         with (
+            patch("workflow.load_workflow", return_value=artifact_wf),
             patch(
                 "pipeline._deliver_plan_artifact",
-                return_value="s3://artifacts-bkt/artifacts/decompose-1/result.md",
+                return_value="s3://artifacts-bkt/artifacts/artifact-1/result.md",
             ) as mock_deliver,
             patch("pipeline.ensure_pr") as mock_ensure_pr,
             patch("pipeline.verify_build") as mock_verify_build,
@@ -612,8 +634,8 @@ class TestRepoLessPipeline:
                 task_description="Add auth + billing + admin",
                 github_token="ghp_test",
                 aws_region="us-east-1",
-                task_id="decompose-1",
-                resolved_workflow={"id": "coding/decompose-v1", "version": "1.0.0"},
+                task_id="artifact-1",
+                resolved_workflow={"id": "synthetic/artifact-repoful-v1", "version": "1.0.0"},
             )
 
         # Repo-bound path ran (clone), plan delivered as artifact, PR/build skipped.
@@ -624,7 +646,7 @@ class TestRepoLessPipeline:
         mock_ensure_committed.assert_not_called()
         assert result["status"] == "success"
         assert result["pr_url"] is None
-        assert result["artifact_uri"] == "s3://artifacts-bkt/artifacts/decompose-1/result.md"
+        assert result["artifact_uri"] == "s3://artifacts-bkt/artifacts/artifact-1/result.md"
 
 
 class TestChainPriorAgentError:

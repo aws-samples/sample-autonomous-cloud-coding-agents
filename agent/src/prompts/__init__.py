@@ -9,7 +9,6 @@ prompt registry (see WORKFLOWS.md). The lookup is keyed by workflow id;
 from shell import log
 
 from .base import BASE_PROMPT
-from .decompose import DECOMPOSE_WORKFLOW
 from .default_agent import DEFAULT_AGENT_PROMPT
 from .new_task import NEW_TASK_WORKFLOW
 from .pr_iteration import PR_ITERATION_WORKFLOW
@@ -31,11 +30,6 @@ _PROMPTS = {
     # Re-stack: re-merge a changed predecessor branch into an existing
     # stacked-child branch. Pushes to the existing PR; not new work.
     "coding/restack-v1": BASE_PROMPT.replace("{workflow}", RESTACK_WORKFLOW),
-    # Agent-native decomposition planning: clone the repo, decide whether to
-    # split the issue, draft a decomposition plan, and emit it as the artifact.
-    # Repo-ful (uses BASE_PROMPT's clone env) but opens no PR — the platform
-    # seeds sub-issues from the plan.
-    "coding/decompose-v1": BASE_PROMPT.replace("{workflow}", DECOMPOSE_WORKFLOW),
     # Repo-less knowledge workflow — no git/branch/PR placeholders.
     "default/agent-v1": DEFAULT_AGENT_PROMPT,
     # Repo-less reference knowledge workflow — a research-specialized prompt so it

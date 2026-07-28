@@ -422,7 +422,7 @@ def setup_repo(config: TaskConfig, progress: Any = None) -> RepoSetup:
         resolve_verify_argv,
     )
 
-    # A read_only workflow (coding/decompose-v1) clones, reads/greps to plan, and
+    # A read_only workflow clones, reads/greps, and
     # emits an artifact — it NEVER edits code, runs the post-agent build/lint
     # gate, or opens a PR. Running the full pre-agent `mise run build` + lint
     # baseline for it is pure waste: on a big repo that baseline is the
@@ -600,7 +600,7 @@ def setup_repo(config: TaskConfig, progress: Any = None) -> RepoSetup:
     _install_commit_hook(repo_dir)
 
     # Ensure the cloned HEAD sha is captured for NON-PR workflows too (the PR
-    # branch above already set it). The coding/decompose-v1 planner echoes this
+    # branch above already set it). A read-only planner echoes this
     # into its plan's ``repo_digest_sha`` so a later revise run can tell if the
     # repo moved since the digest was built. Best-effort: a read failure leaves it
     # '' (the platform's sha-shape guard then just treats the digest as

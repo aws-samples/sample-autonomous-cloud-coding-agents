@@ -97,10 +97,10 @@ class TestSetupRepoHappyPath:
         assert setup.default_branch == "develop"
 
     def test_non_pr_task_captures_head_sha_for_digest(self, monkeypatch):
-        # #299 plan-mode T2: a NON-PR workflow (e.g. coding/decompose-v1) must also
+        # A NON-PR workflow (e.g. coding/pr-review-v1) must also
         # capture the cloned HEAD sha (via the post-setup rev-parse) so the planner
         # can echo it into repo_digest_sha. The PR path captures its own sha; this
-        # covers the else/default clone path that decompose uses.
+        # covers the else/default clone path such a workflow uses.
         fake = _fake_run_cmd(stdouts={"head-sha-after-setup": "deadbeefcafe1234\n"})
         _patch_common(monkeypatch, fake)
         monkeypatch.setattr(repo, "detect_default_branch", lambda url, d: "main")
@@ -191,7 +191,7 @@ class TestDiamondBaseBranch:
 
 
 class TestReadOnlyBaselineSkip:
-    """#299 ECS_RIGHTSIZED_PLANNING: a read_only workflow (coding/decompose-v1)
+    """ECS rightsized planning: a read_only workflow (coding/pr-review-v1)
     never edits code, runs the post-agent gate, or opens a PR, so the pre-agent
     build + lint baseline is pure waste — and on a big repo the full CI-parity
     `mise run build` won't fit the 8 GB read-only planning task def (it would

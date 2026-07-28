@@ -220,7 +220,7 @@ class TestDeliveryGate:
         assert err is None
 
     def test_artifact_workflow_success_no_pr_stays_success(self):
-        # decompose delivers an artifact_uri, not a PR.
+        # An artifact workflow delivers an artifact_uri, not a PR.
         overall, err = self._gate(artifact_workflow=True)
         assert overall == "success"
         assert err is None
