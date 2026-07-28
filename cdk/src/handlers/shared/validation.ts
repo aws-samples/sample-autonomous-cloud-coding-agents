@@ -391,9 +391,16 @@ export function validateMagicBytes(data: Buffer, contentType: string): boolean {
  *  - There the answer is an admission decision with nothing downstream to catch
  *    a mistake, so it must hold for every byte.
  *
- * Keep it this way: making this function strict would reject attachments that
- * validation would have accepted (it would return `null` instead of the correct
- * type), turning a detection miss into a spurious rejection.
+ * That re-check is what makes this safe, so it is load-bearing rather than
+ * incidental: `validateAttachments` deliberately runs `validateMagicBytes` on
+ * every inline attachment, DETECTED types included. It used to run only on
+ * declared ones, which left this path's 8 KB guess as the final word and let
+ * ~8 KB of ASCII followed by binary through as `text/plain`. Do not narrow that
+ * call site back to declared types only.
+ *
+ * Keep this function itself lenient: making it strict would reject attachments
+ * validation would have accepted (returning `null` instead of the correct type),
+ * turning a detection miss into a spurious rejection.
  */
 export function detectMimeTypeFromMagicBytes(data: Buffer): string | null {
   for (const sig of MAGIC_BYTES) {
@@ -616,8 +623,14 @@ export function validateAttachments(
       return { valid: false, error: `attachments[${i}]: content_type is required for presigned uploads` };
     }
 
-    // Magic bytes check against declared content_type (for inline data with declared type)
-    if (decoded && att.content_type) {
+    // Magic-bytes check for ALL inline data, whether the type was DECLARED or
+    // DETECTED. Gating this on `att.content_type` left the detected path
+    // unvalidated, which is the weaker of the two: `detectMimeTypeFromMagicBytes`
+    // only scans an 8 KB prefix for NULs, so ~8 KB of clean ASCII followed by
+    // binary was guessed `text/plain` and admitted with no whole-buffer check —
+    // exactly the laundering `validateMagicBytes` was hardened to stop. A
+    // detected type is a GUESS and needs verifying more than a declared one does.
+    if (decoded) {
       if (!validateMagicBytes(decoded, resolvedContentType)) {
         return { valid: false, error: `attachments[${i}]: content does not match declared type` };
       }

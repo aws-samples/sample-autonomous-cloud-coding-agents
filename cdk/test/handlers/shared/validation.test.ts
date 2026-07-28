@@ -470,6 +470,31 @@ describe('validateAttachments', () => {
   const jsonContent = Buffer.from('{"key": "value"}');
   const jsonBase64 = jsonContent.toString('base64');
 
+  test('full-buffer-validates an inline attachment whose type was DETECTED, not declared', () => {
+    // The magic-bytes check used to be gated on a DECLARED content_type, leaving
+    // the detected path unchecked — the weaker of the two, since a detected type is
+    // only a guess from an 8 KB prefix scan. So ~8 KB of clean ASCII followed by
+    // binary was guessed `text/plain` and admitted, laundering non-text bytes past
+    // the very check that was hardened to catch them.
+    const launder = Buffer.concat([
+      Buffer.from('A'.repeat(8192)),
+      Buffer.from([0x00, 0xFF, 0xFE, 0x00]),
+    ]);
+    const result = validateAttachments([{ type: 'file', data: launder.toString('base64') }]);
+    expect(result.valid).toBe(false);
+    if (!result.valid) expect(result.error).toContain('does not match declared type');
+  });
+
+  test('still admits inline content whose DETECTED type is genuinely correct', () => {
+    // The guard above must not cost the detection path its purpose: a real PNG and
+    // real JSON with no declared content_type still resolve and pass. Otherwise the
+    // fix trades a laundering hole for spurious rejections of valid uploads.
+    const detectedPng = validateAttachments([{ type: 'image', data: pngBase64 }]);
+    expect(detectedPng.valid).toBe(true);
+    const detectedJson = validateAttachments([{ type: 'file', data: jsonBase64 }]);
+    expect(detectedJson.valid).toBe(true);
+  });
+
   test('returns valid with empty parsed array for undefined input', () => {
     const result = validateAttachments(undefined);
     expect(result.valid).toBe(true);
