@@ -378,6 +378,22 @@ export function validateMagicBytes(data: Buffer, contentType: string): boolean {
 
 /**
  * Detect MIME type from magic bytes (for inline attachments without content_type).
+ *
+ * This is a DETECTION HEURISTIC, not a validation gate, and it deliberately
+ * keeps the cheap 8 KB prefix scan that {@link validateMagicBytes} no longer
+ * uses. The two differ on purpose:
+ *
+ *  - Here the answer is only a GUESS at what the caller probably sent, used to
+ *    fill in a missing `content_type`. Guessing `text/plain` grants nothing:
+ *    whatever this returns is handed straight to `isAllowedMimeType` and then
+ *    to `validateMagicBytes`, which re-checks the WHOLE buffer. A wrong guess
+ *    is caught one call later, so scanning more bytes here buys no safety.
+ *  - There the answer is an admission decision with nothing downstream to catch
+ *    a mistake, so it must hold for every byte.
+ *
+ * Keep it this way: making this function strict would reject attachments that
+ * validation would have accepted (it would return `null` instead of the correct
+ * type), turning a detection miss into a spurious rejection.
  */
 export function detectMimeTypeFromMagicBytes(data: Buffer): string | null {
   for (const sig of MAGIC_BYTES) {

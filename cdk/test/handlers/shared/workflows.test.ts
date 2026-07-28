@@ -302,4 +302,20 @@ describe('disallowedWorkflowModel (WORKFLOWS.md rule 13)', () => {
     expect(WORKFLOW_MODEL_ALLOWLIST).toContain('anthropic.claude-sonnet-4-6');
     expect(WORKFLOW_MODEL_ALLOWLIST).toContain('us.anthropic.claude-sonnet-4-6');
   });
+
+  test('every bare allow-listed id is paired with its us- inference-profile form', () => {
+    // An id admitted in only one of the two forms is a latent rejection: the
+    // workflow YAML may legitimately pin either, and admission compares the
+    // literal string. Pairing them is the invariant, so assert it for every
+    // entry rather than spot-checking one model.
+    const bare = WORKFLOW_MODEL_ALLOWLIST.filter(id => !id.startsWith('us.'));
+    expect(bare.length).toBeGreaterThan(0);
+    const missing = bare.filter(id => !WORKFLOW_MODEL_ALLOWLIST.includes(`us.${id}`));
+    expect(missing).toEqual([]);
+    // ...and no us- entry is orphaned (its bare form must be admitted too).
+    const orphaned = WORKFLOW_MODEL_ALLOWLIST
+      .filter(id => id.startsWith('us.'))
+      .filter(id => !WORKFLOW_MODEL_ALLOWLIST.includes(id.slice('us.'.length)));
+    expect(orphaned).toEqual([]);
+  });
 });
