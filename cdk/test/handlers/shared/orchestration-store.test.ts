@@ -253,6 +253,56 @@ describe('seedOrchestration — first write', () => {
   });
 });
 
+describe("seedOrchestration — the project's trigger label round-trips", () => {
+  test('a supplied trigger_label is persisted on the meta row and read back', async () => {
+    // The epic panel's retry hint must name the label that actually FIRES, and
+    // that label is per-project configurable. Seed time is the only point where
+    // the project mapping is in hand — the reconciler works from this row and has
+    // no project id to look one up with — so if it is not persisted here the panel
+    // can only ever show the platform default, which is wrong for any project that
+    // renamed its label.
+    const ddb = makeDdb();
+    ddb.send.mockResolvedValueOnce({ Item: undefined }).mockResolvedValueOnce({});
+
+    await seedOrchestration({
+      ddb: ddb as never,
+      tableName: TABLE,
+      parentIssueRef: 'PARENT',
+      credentialsRef: 'WS',
+      repo: 'o/r',
+      children: [child('A')],
+      now: NOW,
+      releaseContext: { ...RC, trigger_label: 'ship' },
+    });
+
+    const batch = ddb.send.mock.calls[1][0];
+    const puts = batch.input.RequestItems[TABLE] as Array<{ PutRequest: { Item: Record<string, unknown> } }>;
+    const meta = puts.map((p) => p.PutRequest.Item).find((i) => i.sub_issue_id === '#meta');
+    expect(meta).toBeDefined();
+    expect(meta!.trigger_label).toBe('ship');
+  });
+
+  test('an absent trigger_label writes no attribute (older rows load fine)', async () => {
+    const ddb = makeDdb();
+    ddb.send.mockResolvedValueOnce({ Item: undefined }).mockResolvedValueOnce({});
+    await seedOrchestration({
+      ddb: ddb as never,
+      tableName: TABLE,
+      parentIssueRef: 'PARENT',
+      credentialsRef: 'WS',
+      repo: 'o/r',
+      children: [child('A')],
+      now: NOW,
+      releaseContext: RC,
+    });
+    const batch = ddb.send.mock.calls[1][0];
+    const puts = batch.input.RequestItems[TABLE] as Array<{ PutRequest: { Item: Record<string, unknown> } }>;
+    const meta = puts.map((p) => p.PutRequest.Item).find((i) => i.sub_issue_id === '#meta');
+    expect(meta).toBeDefined();
+    expect('trigger_label' in meta!).toBe(false);
+  });
+});
+
 describe('seedOrchestration — idempotent replay', () => {
   test('skips writing when a meta row already exists', async () => {
     const ddb = makeDdb();
@@ -559,6 +609,70 @@ describe('renamed row attributes stay readable across the rename', () => {
     expect(snap!.meta.parent_issue_ref).toBe('P-new');
     expect(snap!.meta.credentials_ref).toBe('WS-new');
     expect(snap!.children[0].parent_issue_ref).toBe('P-new');
+  });
+});
+
+describe("loadOrchestration — the project's trigger label is hydrated", () => {
+  test('a persisted trigger_label reaches release_context so the panel can name it', async () => {
+    // Persisting it is only half the job: if the load path drops the attribute the
+    // panel still falls back to the platform default and the retry hint still names
+    // a label that may not fire.
+    const ddb = {
+      send: jest.fn().mockResolvedValue({
+        Items: [
+          {
+            orchestration_id: 'orch_1',
+            sub_issue_id: '#meta',
+            repo: 'o/r',
+            platform_user_id: 'u1',
+            child_count: 1,
+            parent_issue_ref: 'P',
+            credentials_ref: 'WS',
+            trigger_label: 'ship',
+          },
+          {
+            orchestration_id: 'orch_1',
+            sub_issue_id: 'uuid-A',
+            depends_on: [],
+            child_status: 'succeeded',
+            parent_issue_ref: 'P',
+            credentials_ref: 'WS',
+            repo: 'o/r',
+          },
+        ],
+      }),
+    };
+    const snap = await loadOrchestration(ddb as never, TABLE, 'orch_1');
+    expect(snap!.meta.release_context.trigger_label).toBe('ship');
+  });
+
+  test('an absent trigger_label leaves release_context without one (older rows)', async () => {
+    const ddb = {
+      send: jest.fn().mockResolvedValue({
+        Items: [
+          {
+            orchestration_id: 'orch_1',
+            sub_issue_id: '#meta',
+            repo: 'o/r',
+            platform_user_id: 'u1',
+            child_count: 1,
+            parent_issue_ref: 'P',
+            credentials_ref: 'WS',
+          },
+          {
+            orchestration_id: 'orch_1',
+            sub_issue_id: 'uuid-A',
+            depends_on: [],
+            child_status: 'succeeded',
+            parent_issue_ref: 'P',
+            credentials_ref: 'WS',
+            repo: 'o/r',
+          },
+        ],
+      }),
+    };
+    const snap = await loadOrchestration(ddb as never, TABLE, 'orch_1');
+    expect(snap!.meta.release_context.trigger_label).toBeUndefined();
   });
 });
 

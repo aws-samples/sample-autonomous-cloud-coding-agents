@@ -175,6 +175,17 @@ export interface OrchestrationReleaseContext {
   readonly linear_workspace_slug?: string;
   readonly linear_project_id?: string;
   /**
+   * The project's resolved trigger label (the project mapping's ``label_filter``).
+   * Persisted at SEED time because that is the only point where the mapping is in
+   * hand — the reconciler works from this row and has no project id to look one
+   * up with. Used for the epic panel's retry hint, which must name the label that
+   * actually fires: it is per-project configurable, so a hardcoded or defaulted
+   * one sends the user to re-apply something the webhook does not filter on.
+   * Absent on rows seeded before this field existed → the panel falls back to the
+   * platform default.
+   */
+  readonly trigger_label?: string;
+  /**
    * Parent-issue attachments, screened + stored ONCE at seed time, so every
    * child inherits them: the parent's attached spec must reach the agents that
    * write the code, not only the planner that never sees the repo. These are `passed`
@@ -420,6 +431,9 @@ export async function seedOrchestration(
     }),
     ...(releaseContext.linear_project_id !== undefined && {
       linear_project_id: releaseContext.linear_project_id,
+    }),
+    ...(releaseContext.trigger_label !== undefined && {
+      trigger_label: releaseContext.trigger_label,
     }),
     // Parent attachments, inherited by every child — stored as a JSON string so the nested
     // AttachmentRecord[] round-trips cleanly through the Document client without
@@ -901,6 +915,9 @@ export async function loadOrchestration(
       }),
       ...(metaItem.linear_project_id !== undefined && {
         linear_project_id: metaItem.linear_project_id as string,
+      }),
+      ...(metaItem.trigger_label !== undefined && {
+        trigger_label: metaItem.trigger_label as string,
       }),
       ...(preScreened.length > 0 && { pre_screened_attachments: preScreened }),
     },

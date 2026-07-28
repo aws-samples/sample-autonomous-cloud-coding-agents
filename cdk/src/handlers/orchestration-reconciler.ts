@@ -729,7 +729,7 @@ export async function refreshPanelAndSettle(
     parent_issue_ref: string;
     status_comment_id?: string;
     retry_comment_id?: string;
-    release_context?: { channel_source?: string };
+    release_context?: { channel_source?: string; trigger_label?: string };
   },
   now: string,
 ): Promise<void> {
@@ -787,6 +787,8 @@ export async function refreshPanelAndSettle(
     ...(combinedScreenshot?.previewUrl !== undefined && { combinedPreviewUrl: combinedScreenshot.previewUrl }),
     inProgress: !allTerminal,
     mirrorParentState: allTerminal ? won : false,
+    ...(meta.release_context?.trigger_label !== undefined
+      && { labelFilter: meta.release_context.trigger_label }),
   });
   // Persist a freshly-created panel comment id so later edits reuse it.
   if (newId && !meta.status_comment_id) {
