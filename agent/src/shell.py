@@ -238,6 +238,36 @@ def _surface_failure_lines(stdout: str) -> list[str]:
     return out or tail
 
 
+# A process killed by a signal surfaces on ``Popen.returncode`` as the NEGATIVE
+# signal number (SIGKILL -> -9), whereas a shell reports the same death as
+# ``128 + signal`` (-> 137). Downstream classification keys on the shell
+# convention, so normalize here — the one place the distinction is still visible
+# — rather than teaching every consumer both encodings.
+#
+# This matters for diagnosis, not tidiness: the container/cgroup OOM-killer writes
+# its "Killed process" line to the KERNEL log, not the build's stderr, so an OOM'd
+# build often has NO stderr signature and the exit status is the only evidence.
+# Left raw, a directly-exec'd ``mise run build`` OOM-killed at -9 misses the 137
+# check and is reported as a GENUINE build failure — telling the user their code is
+# broken when the box merely ran out of memory.
+_SIGNAL_EXIT_BASE = 128
+
+
+def _exit_status(returncode: int | None) -> int:
+    """Normalize a ``Popen`` return code to the shell's ``128 + signal`` form.
+
+    ``None`` means the process was not yet reaped, which cannot happen after
+    ``wait()``. Map it to a non-zero failure rather than ``0``: treating an unknown
+    outcome as success is the one unsafe answer, since it would let a build that
+    was never verified report as passing.
+    """
+    if returncode is None:
+        return -1
+    if returncode < 0:
+        return _SIGNAL_EXIT_BASE - returncode
+    return returncode
+
+
 def _run_cmd_streaming(
     cmd: list[str], label: str, cwd: str | None, timeout: int
 ) -> subprocess.CompletedProcess:
@@ -299,7 +329,7 @@ def _run_cmd_streaming(
     t_out.join(timeout=10)
     t_err.join(timeout=10)
     return subprocess.CompletedProcess(
-        cmd, proc.returncode or 0, "\n".join(out_lines), "\n".join(err_lines)
+        cmd, _exit_status(proc.returncode), "\n".join(out_lines), "\n".join(err_lines)
     )
 
 

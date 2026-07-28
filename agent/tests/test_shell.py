@@ -368,3 +368,33 @@ class TestRunCmdStreaming:
 
         with pytest.raises(RuntimeError):
             self._run(["sh", "-c", "exit 3"], check=True)
+
+    def test_stream_normalizes_a_signal_kill_to_the_shell_convention(self):
+        # A signal death arrives from Popen as a NEGATIVE signal number, but the
+        # OOM classifier keys on the shell's 128+signal form. Without normalizing,
+        # an OOM-killed build reports as a genuine build failure — "your code is
+        # broken" when the box ran out of memory.
+        from post_hooks import is_infra_failure
+
+        # 137 = 128 + SIGKILL(9). `kill -9 $$` makes the shell kill itself, so the
+        # child really dies by signal rather than exiting with a code.
+        result, _ = self._run(["sh", "-c", "kill -9 $$"])
+        assert result.returncode == 137, "SIGKILL must surface as 137, not -9"
+        # The point of the normalization: the classifier now sees infra, not a
+        # genuine red build, with no stderr signature to help it.
+        assert is_infra_failure(result.returncode, "") is True
+
+    def test_stream_maps_an_unreaped_process_to_failure_not_success(self):
+        # `returncode is None` cannot happen after wait(), but if it ever did,
+        # mapping it to 0 would let an unverified build report as passing. The one
+        # unsafe answer, so it is pinned.
+        from shell import _exit_status
+
+        assert _exit_status(None) != 0
+        assert _exit_status(None) == -1
+        # Ordinary exits pass through untouched.
+        assert _exit_status(0) == 0
+        assert _exit_status(1) == 1
+        assert _exit_status(137) == 137
+        # SIGTERM (-15) also normalizes.
+        assert _exit_status(-15) == 143
