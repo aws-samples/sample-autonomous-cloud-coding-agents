@@ -55,15 +55,9 @@ export interface LinearProjectMappingTableProps {
  * - label_filter — Linear issue label that triggers a task (default `bgagent`)
  * - status — 'active' | 'removed'
  * - onboarded_at, updated_at — ISO timestamps
- * - decompose_allowed — #299 Mode B: enable `bgagent:decompose`/`bgagent:auto`
- *   auto-decomposition for this project (absent → false/off)
- * - max_sub_issues — #299: cap on an auto-decomposed plan's sub-issue count
- *   (absent → default 8)
- * - max_parent_budget_usd — #299: cap on a plan's worst-case cost
- *   (Σ child budgets, USD; absent → unbounded)
  *
- * The table is schemaless apart from the partition key; the #299 fields are
- * additive and read with defaults, so pre-#299 rows need no migration.
+ * The table is schemaless apart from the partition key, so added fields are
+ * additive and read with defaults — an existing row needs no migration.
  */
 export class LinearProjectMappingTable extends Construct {
   /**
