@@ -283,15 +283,17 @@ _CLONE_CMD_RE = re.compile(
 # Shell separators that start a fresh command. Splitting on these means a
 # free-text argument can only swallow the rest of ITS OWN segment, so a clone
 # chained after an unrelated ``-m`` is still seen.
-_SHELL_SEPARATOR_RE = re.compile(r"(?:&&|\|\||[;&|\n])")
+#
+# A bare newline is deliberately NOT a separator here. A multi-line ``--body`` /
+# ``-m`` value is the normal way an agent writes a PR or commit body, and its
+# quoted text routinely contains a clone command as documentation. Splitting on
+# ``\n`` put that quoted line in its own segment with no preceding free-text
+# flag, so the guard blocked a legitimate ``gh pr create`` — the exact
+# false-positive the free-text list exists to prevent.
+# A backslash at end-of-line continues the SAME command onto the next line.
+_LINE_CONTINUATION_RE = re.compile(r"\\[ \t]*\r?\n[ \t]*")
 
-# The clone verb WITHOUT the leading-separator anchor, for matching inside a
-# segment that has already been split on separators (so the verb is at the
-# segment start rather than after one).
-_CLONE_VERB_RE = re.compile(
-    r"^\s*(?:gh\s+repo\s+clone|git\s+(?:-C\s+\S+\s+)?clone)\b",
-    re.IGNORECASE,
-)
+_SHELL_SEPARATOR_RE = re.compile(r"(?:&&|\|\||[;&|])")
 
 _FREE_TEXT_ARG_RE = re.compile(
     r"(?:^|\s)(?:-m|--message|--body|--body-file|-b|--title|-t|-F|--field|--raw-field)\b",
@@ -338,8 +340,13 @@ def _is_self_reclone(command: str, repo_url: str) -> bool:
     variants = _repo_slug_variants(repo_url)
     if not variants:
         return False
-    for segment in _SHELL_SEPARATOR_RE.split(command):
-        clone = _CLONE_CMD_RE.search(segment) or _CLONE_VERB_RE.search(segment)
+    # Join backslash-continuations first: ``git clone \`` + newline + url is ONE
+    # command, and leaving the break in place separated the verb from the repo so
+    # the slug was never found in the verb's segment — a wrapped self re-clone
+    # walked straight through.
+    normalized = _LINE_CONTINUATION_RE.sub(" ", command)
+    for segment in _SHELL_SEPARATOR_RE.split(normalized):
+        clone = _CLONE_CMD_RE.search(segment)
         if clone is None:
             continue
         free_text = _FREE_TEXT_ARG_RE.search(segment)

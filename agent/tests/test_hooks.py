@@ -288,6 +288,42 @@ class TestSelfRecloneGuard:
             "gh issue comment -m 'see gh repo clone owner/repo for context'", "owner/repo"
         )
 
+    def test_blocks_a_clone_wrapped_across_lines_with_a_backslash(self):
+        """A trailing backslash continues the SAME command onto the next line.
+
+        Splitting on a bare newline separated the verb from the repo, so the slug
+        was never found in the verb's segment and a wrapped self re-clone walked
+        through — including the ``-b`` form this guard was hardened to catch."""
+        assert _is_self_reclone(
+            "git clone \\\n  https://github.com/owner/repo /w/repo", "owner/repo"
+        )
+        assert _is_self_reclone(
+            "git clone -b main \\\n  https://github.com/owner/repo /w/repo", "owner/repo"
+        )
+        assert _is_self_reclone(
+            "git clone --depth 1 \\\n  https://github.com/owner/repo x", "owner/repo"
+        )
+        # The continuation can split the VERB itself, not just its arguments —
+        # this is the case that needs the joining, since no amount of segment
+        # handling reunites ``git`` with ``clone`` across the break.
+        assert _is_self_reclone("git \\\n  clone https://github.com/owner/repo x", "owner/repo")
+
+    def test_ignores_a_clone_quoted_inside_a_MULTI_LINE_body(self):
+        """A multi-line --body/-m value is the normal way an agent writes a PR body.
+
+        Its quoted text routinely documents a clone command. Treating a bare
+        newline as a command separator put that line in its own segment with no
+        preceding free-text flag, so a legitimate ``gh pr create`` was denied."""
+        body = "## Setup\ngit clone https://github.com/owner/repo\ncd repo\nmise run setup"
+        assert not _is_self_reclone(
+            f'gh pr create --title "docs: onboarding" --body "{body}"',
+            "owner/repo",
+        )
+        assert not _is_self_reclone(
+            'git commit -m "steps:\n  git clone https://github.com/owner/repo"',
+            "owner/repo",
+        )
+
     def test_requires_command_position_not_substring(self):
         # The verb must be in command position (start / after a separator), not an
         # arbitrary substring like a path or flag value.
