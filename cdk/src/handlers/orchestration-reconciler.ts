@@ -1435,6 +1435,15 @@ interface DecomposePlanEvent {
   readonly mode: 'decompose' | 'auto';
   readonly maxSubIssues: number;
   readonly decomposeAllowed: boolean;
+  /**
+   * The label that triggered this decomposition, as resolved from the project
+   * mapping (``label_filter``, default ``bgagent``). Carried through so the
+   * retry hint on the epic panel names the label the operator actually
+   * configured — telling someone to "re-apply `bgagent`" when their project
+   * triggers on something else is a dead end. Absent for a task stamped by an
+   * older webhook, in which case the renderer falls back to the default.
+   */
+  readonly triggerLabel?: string;
   readonly maxParentBudgetUsd?: number;
   readonly artifactUri?: string;
   /**
@@ -1502,6 +1511,9 @@ export function parseDecomposePlanRecord(record: DynamoDBRecord): DecomposePlanE
   const revisionRound = revisionRoundStr !== undefined && Number.isFinite(Number(revisionRoundStr))
     ? Number(revisionRoundStr) : undefined;
   const revisingFeedbackCommentId = cm?.decompose_revising_feedback_comment_id?.S;
+  // Blank/whitespace is treated as absent so the renderer's default applies,
+  // rather than rendering an empty label in the retry hint.
+  const triggerLabel = cm?.decompose_trigger_label?.S?.trim() || undefined;
 
   return {
     taskId,
@@ -1519,6 +1531,7 @@ export function parseDecomposePlanRecord(record: DynamoDBRecord): DecomposePlanE
     ...(taskDescription !== undefined && { taskDescription }),
     ...(revisionRound !== undefined && { revisionRound }),
     ...(revisingFeedbackCommentId !== undefined && { revisingFeedbackCommentId }),
+    ...(triggerLabel !== undefined && { triggerLabel }),
   };
 }
 
@@ -1976,6 +1989,10 @@ async function seedDecomposedGraph(
     linear_oauth_secret_arn: oauthSecretArn,
     linear_workspace_slug: workspaceSlug,
     linear_project_id: evt.projectId,
+    // Persisted on the meta row so the panel's retry hint can name the project's
+    // own trigger label. Without this the store/hydrate/render path exists but
+    // every epic renders the default, regardless of configuration.
+    ...(evt.triggerLabel !== undefined && { trigger_label: evt.triggerLabel }),
     ...(preScreenedAttachments.length > 0 && { pre_screened_attachments: preScreenedAttachments }),
   };
   const discovery = await discoverOrchestration({

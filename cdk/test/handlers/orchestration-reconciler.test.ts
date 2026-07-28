@@ -204,6 +204,7 @@ function decomposeRecord(fields: {
   task_description?: string;
   revision_round?: string;
   revising_feedback_comment_id?: string;
+  trigger_label?: string;
   eventName?: 'INSERT' | 'MODIFY' | 'REMOVE';
 }): DynamoDBRecord {
   const img: Record<string, unknown> = {};
@@ -224,6 +225,7 @@ function decomposeRecord(fields: {
   if (fields.max_parent_budget_usd) cm.decompose_caps_max_parent_budget_usd = { S: fields.max_parent_budget_usd };
   if (fields.revision_round) cm.decompose_revision_round = { S: fields.revision_round };
   if (fields.revising_feedback_comment_id) cm.decompose_revising_feedback_comment_id = { S: fields.revising_feedback_comment_id };
+  if (fields.trigger_label !== undefined) cm.decompose_trigger_label = { S: fields.trigger_label };
   img.channel_metadata = { M: cm };
   return {
     eventName: fields.eventName ?? 'MODIFY',
@@ -258,6 +260,30 @@ describe('parseDecomposePlanRecord', () => {
       artifactUri: 's3://bucket/artifacts/P1/result.md',
       taskDescription: 'ENG-1: do it',
     });
+  });
+
+  test('carries the project trigger label so the retry hint can name it', () => {
+    // The store/hydrate/render path for trigger_label existed but nothing ever
+    // supplied a value, so every epic's retry hint rendered the default label
+    // regardless of what the project was configured to trigger on. Telling an
+    // operator to re-apply `bgagent` when their project uses `agent` is a dead end.
+    const evt = parseDecomposePlanRecord(decomposeRecord({
+      task_id: 'P9', status: 'COMPLETED', mode: 'decompose', trigger_label: 'ship-it',
+    }));
+    expect(evt?.triggerLabel).toBe('ship-it');
+  });
+
+  test('omits a blank trigger label so the renderer default applies', () => {
+    // An empty string would render an empty label in the hint; absent is correct,
+    // and matches a task stamped by a webhook that predates the field.
+    const blank = parseDecomposePlanRecord(decomposeRecord({
+      task_id: 'P10', status: 'COMPLETED', mode: 'decompose', trigger_label: '   ',
+    }));
+    expect(blank?.triggerLabel).toBeUndefined();
+    const unstamped = parseDecomposePlanRecord(decomposeRecord({
+      task_id: 'P11', status: 'COMPLETED', mode: 'decompose',
+    }));
+    expect(unstamped?.triggerLabel).toBeUndefined();
   });
 
   test('captures :auto mode and defaults caps (max_sub_issues → 8) when unstamped', () => {
