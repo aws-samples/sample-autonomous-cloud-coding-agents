@@ -40,7 +40,7 @@ import { Blueprint } from '../constructs/blueprint';
 import { CedarWasmLayer } from '../constructs/cedar-wasm-layer';
 import { ConcurrencyReconciler } from '../constructs/concurrency-reconciler';
 import { DnsFirewall } from '../constructs/dns-firewall';
-import { EcsAgentCluster } from '../constructs/ecs-agent-cluster';
+import { EcsAgentCluster, resolveEcsTaskSizing } from '../constructs/ecs-agent-cluster';
 import { EcsPayloadBucket } from '../constructs/ecs-payload-bucket';
 import { FanOutConsumer } from '../constructs/fanout-consumer';
 import { GitHubScreenshotIntegration } from '../constructs/github-screenshot-integration';
@@ -610,8 +610,18 @@ export class AgentStack extends Stack {
         },
       ]);
     }
+    // ECS build-task sizing, from deploy context. The construct's defaults are
+    // deliberately modest so an adopter who changes nothing does not pay for the
+    // Fargate ceiling — but a large monorepo genuinely needs more, so the knobs
+    // have to be reachable WITHOUT editing the construct. Same shape as
+    // ``compute_type`` above:
+    //   cdk deploy -c compute_type=ecs -c ecsBuildTaskCpu=16384 \
+    //     -c ecsBuildTaskMemoryMiB=122880 -c ecsBuildTaskEphemeralStorageGiB=100
+    //   cdk deploy -c ecsExtraBuildEnv='{"MISE_JOBS":"8"}'
+    const ecsTaskSizing = resolveEcsTaskSizing(this.node);
     const ecsCluster = computeType === 'ecs'
       ? new EcsAgentCluster(this, 'EcsAgentCluster', {
+        ...(ecsTaskSizing !== undefined && { taskSizing: ecsTaskSizing }),
         vpc: agentVpc.vpc,
         agentImageAsset: new ecr_assets.DockerImageAsset(this, 'AgentImage', {
           directory: repoRoot,

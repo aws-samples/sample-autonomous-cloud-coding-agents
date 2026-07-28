@@ -534,4 +534,35 @@ describe('AgentStack with the ECS substrate gate (--context compute_type=ecs)', 
   test('outputs ComputeSubstrate=ecs so the CLI allows compute_type=ecs onboarding', () => {
     template.hasOutput('ComputeSubstrate', { Value: 'ecs' });
   });
+
+  test('build-task sizing is reachable from deploy context, not only from the construct', () => {
+    // The construct's default is deliberately modest so an adopter who changes
+    // nothing does not pay for the Fargate ceiling. That is only defensible if a
+    // heavy monorepo can RAISE it without editing the construct — and `taskSizing`
+    // had no caller at all, so the ceiling was unreachable by any supported route.
+    // This asserts the whole path: context -> resolver -> construct -> template.
+    const app = new App({
+      context: {
+        compute_type: 'ecs',
+        ecsBuildTaskCpu: '16384',
+        ecsBuildTaskMemoryMiB: '122880',
+        ecsBuildTaskEphemeralStorageGiB: '100',
+      },
+    });
+    const sized = Template.fromStack(new AgentStack(app, 'SizedEcsStack', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    }));
+    sized.hasResourceProperties('AWS::ECS::TaskDefinition', {
+      Cpu: '16384',
+      Memory: '122880',
+      EphemeralStorage: { SizeInGiB: 100 },
+    });
+  });
+
+  test('the DEFAULT ECS build task stays modest', () => {
+    template.hasResourceProperties('AWS::ECS::TaskDefinition', {
+      Cpu: '4096',
+      Memory: '16384',
+    });
+  });
 });

@@ -28,7 +28,7 @@ import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { AgentMemory } from '../../src/constructs/agent-memory';
 import { AgentSessionRole } from '../../src/constructs/agent-session-role';
-import { EcsAgentCluster } from '../../src/constructs/ecs-agent-cluster';
+import { EcsAgentCluster, resolveEcsTaskSizing } from '../../src/constructs/ecs-agent-cluster';
 
 function createStack(overrides?: {
   memoryId?: string;
@@ -86,6 +86,61 @@ function createStack(overrides?: {
   const template = Template.fromStack(stack);
   return { stack, template };
 }
+
+describe('resolveEcsTaskSizing — the sizing knobs must be reachable at deploy time', () => {
+  const nodeWith = (context: Record<string, unknown>) => new Stack(new App({ context }), 'S').node;
+
+  test('returns undefined when nothing is set, so construct defaults apply', () => {
+    expect(resolveEcsTaskSizing(nodeWith({}))).toBeUndefined();
+  });
+
+  test('a heavy monorepo can reach the Fargate ceiling from context alone', () => {
+    // The whole point of the modest default: raising it must NOT require editing
+    // the construct. Before this was wired, taskSizing had no caller and the
+    // ceiling was unreachable by any supported route.
+    expect(resolveEcsTaskSizing(nodeWith({
+      ecsBuildTaskCpu: '16384',
+      ecsBuildTaskMemoryMiB: '122880',
+      ecsBuildTaskEphemeralStorageGiB: '100',
+    }))).toEqual({
+      buildTaskCpu: 16384,
+      buildTaskMemoryMiB: 122880,
+      buildTaskEphemeralStorageGiB: 100,
+    });
+  });
+
+  test('a malformed number throws at synth rather than silently defaulting', () => {
+    // "I set the flag and the build still OOM'd" is a worse afternoon than a
+    // failed synth.
+    expect(() => resolveEcsTaskSizing(nodeWith({ ecsBuildTaskCpu: 'lots' })))
+      .toThrow(/must be a positive integer/);
+    expect(() => resolveEcsTaskSizing(nodeWith({ ecsBuildTaskMemoryMiB: '-1' })))
+      .toThrow(/must be a positive integer/);
+  });
+
+  test('build-tool env overrides come through as JSON', () => {
+    expect(resolveEcsTaskSizing(nodeWith({ ecsExtraBuildEnv: '{"MISE_JOBS":"8"}' })))
+      .toEqual({ extraBuildEnvironment: { MISE_JOBS: '8' } });
+  });
+
+  test('a RESERVED platform env key is REJECTED, not merged', () => {
+    // extraBuildEnvironment spreads over the whole base container env, so without
+    // this guard a build-tool override could unset platform wiring. The sharp one
+    // is AGENT_SESSION_ROLE_ARN: absent, the agent falls back to ambient
+    // credentials and per-tenant scoping is silently off.
+    expect(() => resolveEcsTaskSizing(nodeWith({
+      ecsExtraBuildEnv: '{"AGENT_SESSION_ROLE_ARN":""}',
+    }))).toThrow(/cannot set 'AGENT_SESSION_ROLE_ARN'/);
+    expect(() => resolveEcsTaskSizing(nodeWith({
+      ecsExtraBuildEnv: '{"TASK_TABLE_NAME":"attacker-table"}',
+    }))).toThrow(/platform wiring/);
+  });
+
+  test('a non-string env value is rejected', () => {
+    expect(() => resolveEcsTaskSizing(nodeWith({ ecsExtraBuildEnv: '{"MISE_JOBS":8}' })))
+      .toThrow(/must be a string/);
+  });
+});
 
 describe('EcsAgentCluster construct', () => {
   let baseTemplate: Template;

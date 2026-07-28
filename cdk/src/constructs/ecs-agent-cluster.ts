@@ -27,7 +27,7 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { NagSuppressions } from 'cdk-nag';
-import { Construct } from 'constructs';
+import { Construct, type Node } from 'constructs';
 import { AgentMemory } from './agent-memory';
 import { AgentSessionRole } from './agent-session-role';
 import { resolveBedrockModelIds } from './bedrock-models';
@@ -109,21 +109,20 @@ const HTTPS_PORT = 443;
 
 /**
  * Default Fargate task sizes (vCPU units / MiB / GiB). These defaults are
- * deliberately generous because they're tuned for a worst case: a large
- * TypeScript + Python monorepo whose full build runs many jobs in parallel and
- * peaks near the Fargate memory ceiling. Most repos are lighter and will want
- * less — Fargate bills per requested vCPU-second and RAM-second — so both task
- * sizes are overridable via {@link EcsAgentClusterProps.taskSizing} rather than
- * fixed to one workload.
+ * deliberately MODEST, because a default is what an adopter who changes nothing
+ * pays for and Fargate bills per requested vCPU-second and RAM-second. Both task
+ * sizes are overridable via {@link EcsAgentClusterProps.taskSizing}, reachable at
+ * deploy time through context (see {@link resolveEcsTaskSizing}).
  *
- *  - BUILD task: 16 vCPU / 120 GB / 100 GiB disk. Sized for a full,
- *    CI-parity build. 120 GB is the maximum Fargate allows at 16 vCPU; a build
- *    task runs in its own isolated microVM, so a single memory-heavy build can
- *    only be helped by more per-task RAM or by running fewer build steps in
- *    parallel — not by capping how many tasks run at once. The 100 GiB root
- *    filesystem (Fargate defaults to 20 GiB) leaves headroom for the clone plus
- *    dependency/build caches; without it, concurrent builds can run the disk out
- *    of space and surface as a spurious build failure.
+ *  - BUILD task: 4 vCPU / 16 GB / 21 GiB disk (21 is Fargate's floor once you
+ *    set ephemeral storage at all; its implicit default is 20). Enough for a
+ *    typical repo's build. A large TypeScript + Python monorepo whose full build
+ *    runs many jobs in parallel needs considerably more — up to Fargate's ceiling
+ *    of 16 vCPU / 120 GB, with 100 GiB of disk so concurrent builds do not run it
+ *    out of space and surface as a spurious failure. Raise it deliberately:
+ *    a build task runs in its own isolated microVM, so a memory-heavy build is
+ *    helped only by more per-task RAM or fewer parallel build steps, never by
+ *    capping how many tasks run at once.
  *  - PLANNING task: 2 vCPU / 8 GB / default disk. For read-only workflows that
  *    clone and read the repo to produce a plan but never build. "Read-only"
  *    describes the WORKFLOW's behaviour, not a reduced IAM role: both task defs
@@ -157,11 +156,11 @@ const DEFAULT_PLANNING_TASK_MEMORY_MIB = 8192;
  * synth/deploy, not silently.
  */
 export interface EcsTaskSizing {
-  /** Build task vCPU units (1024 = 1 vCPU). Defaults to 16384 (16 vCPU). */
+  /** Build task vCPU units (1024 = 1 vCPU). Defaults to 4096 (4 vCPU). */
   readonly buildTaskCpu?: number;
-  /** Build task memory in MiB. Defaults to 122880 (120 GB). */
+  /** Build task memory in MiB. Defaults to 16384 (16 GB). */
   readonly buildTaskMemoryMiB?: number;
-  /** Build task root-filesystem storage in GiB (21–200). Defaults to 100. */
+  /** Build task root-filesystem storage in GiB (21–200). Defaults to 21. */
   readonly buildTaskEphemeralStorageGiB?: number;
   /** Planning (read-only) task vCPU units. Defaults to 2048 (2 vCPU). */
   readonly planningTaskCpu?: number;
@@ -180,6 +179,88 @@ export interface EcsTaskSizing {
    * them here rather than editing the construct.
    */
   readonly extraBuildEnvironment?: Record<string, string>;
+}
+
+/**
+ * Read {@link EcsTaskSizing} out of deploy context, so the sizing and build-tool
+ * knobs are reachable without editing this file. Returns undefined when nothing
+ * is set, so the construct's own defaults apply untouched.
+ *
+ * Numeric keys are parsed strictly: a malformed value throws at synth rather
+ * than silently falling back to the default, because "I set the flag and the
+ * build still OOM'd" is a much worse afternoon than a failed synth.
+ *
+ * Reserved platform env keys are REJECTED rather than merged. The container's
+ * base environment carries load-bearing wiring — table names, the artifacts
+ * bucket, and ``AGENT_SESSION_ROLE_ARN``, whose absence turns tenant scoping off
+ * without failing the task. A caller reaching for a build-tool override must not
+ * be able to unset those by a typo.
+ */
+/**
+ * Container env keys the platform owns. A build-tool override must not be able to
+ * reach these: they carry table names, bucket names and the agent-session role.
+ * ``AGENT_SESSION_ROLE_ARN`` is the sharp one — when it is absent the agent falls
+ * back to ambient credentials and per-tenant scoping is silently OFF, which the
+ * agent's own session module calls its most dangerous failure mode. A typo in an
+ * override key should fail synth, not disable an isolation control.
+ */
+const RESERVED_BUILD_ENV_KEYS = new Set([
+  'TASK_TABLE_NAME',
+  'TASK_EVENTS_TABLE_NAME',
+  'USER_CONCURRENCY_TABLE_NAME',
+  'LOG_GROUP_NAME',
+  'GITHUB_TOKEN_SECRET_ARN',
+  'MEMORY_ID',
+  'ECS_PAYLOAD_BUCKET',
+  'ARTIFACTS_BUCKET_NAME',
+  'AGENT_SESSION_ROLE_ARN',
+  'CLAUDE_CODE_USE_BEDROCK',
+  'AWS_REGION',
+]);
+
+export function resolveEcsTaskSizing(node: Node): EcsTaskSizing | undefined {
+  const num = (key: string): number | undefined => {
+    const raw = node.tryGetContext(key);
+    if (raw === undefined || raw === null || raw === '') return undefined;
+    const parsed = typeof raw === 'number' ? raw : Number(raw);
+    if (!Number.isInteger(parsed) || parsed <= 0) {
+      throw new Error(`Context '${key}' must be a positive integer; got ${JSON.stringify(raw)}.`);
+    }
+    return parsed;
+  };
+
+  const rawEnv = node.tryGetContext('ecsExtraBuildEnv');
+  let extra: Record<string, string> | undefined;
+  if (rawEnv !== undefined && rawEnv !== null && rawEnv !== '') {
+    const parsed = typeof rawEnv === 'string' ? JSON.parse(rawEnv) : rawEnv;
+    if (typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error("Context 'ecsExtraBuildEnv' must be a JSON object of string values.");
+    }
+    for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof v !== 'string') {
+        throw new Error(`Context 'ecsExtraBuildEnv' value for '${k}' must be a string.`);
+      }
+      if (RESERVED_BUILD_ENV_KEYS.has(k)) {
+        throw new Error(
+          `Context 'ecsExtraBuildEnv' cannot set '${k}' — it is platform wiring, not a build-tool `
+          + 'knob. Overriding it can break the task or silently disable tenant scoping.',
+        );
+      }
+    }
+    extra = parsed as Record<string, string>;
+  }
+
+  const sizing: EcsTaskSizing = {
+    ...(num('ecsBuildTaskCpu') !== undefined && { buildTaskCpu: num('ecsBuildTaskCpu') }),
+    ...(num('ecsBuildTaskMemoryMiB') !== undefined && { buildTaskMemoryMiB: num('ecsBuildTaskMemoryMiB') }),
+    ...(num('ecsBuildTaskEphemeralStorageGiB') !== undefined && {
+      buildTaskEphemeralStorageGiB: num('ecsBuildTaskEphemeralStorageGiB'),
+    }),
+    ...(num('ecsPlanningTaskCpu') !== undefined && { planningTaskCpu: num('ecsPlanningTaskCpu') }),
+    ...(num('ecsPlanningTaskMemoryMiB') !== undefined && { planningTaskMemoryMiB: num('ecsPlanningTaskMemoryMiB') }),
+    ...(extra !== undefined && { extraBuildEnvironment: extra }),
+  };
+  return Object.keys(sizing).length > 0 ? sizing : undefined;
 }
 
 export class EcsAgentCluster extends Construct {
