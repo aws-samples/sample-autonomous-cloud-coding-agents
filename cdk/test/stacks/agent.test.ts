@@ -535,6 +535,29 @@ describe('AgentStack with the ECS substrate gate (--context compute_type=ecs)', 
     template.hasOutput('ComputeSubstrate', { Value: 'ecs' });
   });
 
+  test('the orchestrator gets the PLANNING task-def ARN, not just the build one', () => {
+    // Without this env var the ECS strategy's `readOnly &&
+    // ECS_PLANNING_TASK_DEFINITION_ARN` guard is always falsy, so the planning
+    // def would be synthesized, billed for, and never receive a workflow — the
+    // feature inert while looking present in the template.
+    //
+    // This has to be asserted at the STACK level. The strategy's own unit tests
+    // set the env var by hand to exercise the routing branch, so they pass
+    // whether or not anything in the stack actually supplies it; only synth can
+    // tell us the wiring exists. Both ARNs are asserted together because the bug
+    // this pins is one being present without the other.
+    const envs = Object.values(
+      template.findResources('AWS::Lambda::Function'),
+    ).map(fn => fn.Properties?.Environment?.Variables ?? {});
+    const orchestrator = envs.filter(e => 'ECS_TASK_DEFINITION_ARN' in e);
+    expect(orchestrator).toHaveLength(1);
+    expect(orchestrator[0]).toHaveProperty('ECS_PLANNING_TASK_DEFINITION_ARN');
+    // ...and the two must be DIFFERENT task defs, or read-only workflows are
+    // silently running on the build box anyway.
+    expect(orchestrator[0].ECS_PLANNING_TASK_DEFINITION_ARN)
+      .not.toEqual(orchestrator[0].ECS_TASK_DEFINITION_ARN);
+  });
+
   test('build-task sizing is reachable from deploy context, not only from the construct', () => {
     // The construct's default is deliberately modest so an adopter who changes
     // nothing does not pay for the Fargate ceiling. That is only defensible if a

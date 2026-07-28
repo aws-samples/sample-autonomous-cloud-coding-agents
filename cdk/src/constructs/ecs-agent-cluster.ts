@@ -275,8 +275,9 @@ export function resolveEcsTaskSizing(node: Node): EcsTaskSizing | undefined {
 
 export class EcsAgentCluster extends Construct {
   public readonly cluster: ecs.Cluster;
-  /** The 64 GB / 16 vCPU BUILD task def — for coding workflows that run a full
-   *  CI-parity build. Selected by the orchestrator for non-read-only workflows. */
+  /** The BUILD task def (default 4 vCPU / 16 GB, raisable to the Fargate ceiling
+   *  of 16 vCPU / 120 GB via {@link EcsTaskSizing}) — for coding workflows that
+   *  run a full CI-parity build. Selected for non-read-only workflows. */
   public readonly taskDefinition: ecs.FargateTaskDefinition;
   /**
    * The smaller read-only PLANNING task def (8 GB / 2 vCPU) — for any read-only

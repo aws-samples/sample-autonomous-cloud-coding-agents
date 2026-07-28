@@ -273,7 +273,7 @@ export async function loadBlueprintConfig(task: TaskRecord): Promise<BlueprintCo
   // ``agentcore``). It applies to ALL workflows on the repo — including a
   // read-only decompose/planning or pr-review task, because that task CLONES and
   // READS the same repository the coding agent does, so its context/memory
-  // footprint is the same: a repo big enough to need the context-gated 64GB ECS
+  // footprint is the same: a repo big enough to need the context-gated ECS
   // tier for building is also big enough to OOM the fixed AgentCore microVM just
   // reading it. So planning must run on the same substrate as the agent — do NOT
   // special-case read-only workflows to agentcore. (An ecs-configured repo on a

@@ -157,6 +157,21 @@ export interface TaskOrchestratorProps {
     readonly containerName: string;
     readonly taskRoleArn: string;
     readonly executionRoleArn: string;
+    /**
+     * The smaller read-only PLANNING task def (see
+     * docs/design/ECS_RIGHTSIZED_PLANNING.md). The ECS strategy selects it for
+     * read-only workflows so planning doesn't run on the larger build box.
+     *
+     * Required, like its siblings, so the all-or-nothing constraint stays visible
+     * at the type level: the strategy reads this ARN from an env var, and an
+     * ecsConfig that omitted it would compile but leave the planning def defined
+     * and permanently unreachable.
+     *
+     * Needs no extra IAM — it shares the build def's task and execution roles,
+     * and the `ecs:RunTask` grant below is scoped by `ecs:cluster` rather than by
+     * task-definition ARN, so it already covers every def in the cluster.
+     */
+    readonly planningTaskDefinitionArn: string;
   };
 
   /**
@@ -272,6 +287,11 @@ export class TaskOrchestrator extends Construct {
           ECS_SUBNETS: props.ecsConfig.subnets,
           ECS_SECURITY_GROUP: props.ecsConfig.securityGroup,
           ECS_CONTAINER_NAME: props.ecsConfig.containerName,
+          // Read-only workflows route here instead of the build def. Without this
+          // var the strategy's `readOnly && ECS_PLANNING_TASK_DEFINITION_ARN`
+          // guard is always falsy, so the planning def would be synthesized and
+          // never used.
+          ECS_PLANNING_TASK_DEFINITION_ARN: props.ecsConfig.planningTaskDefinitionArn,
         }),
         // #502: bucket the orchestrator writes the ECS payload to (and deletes
         // from at finalize); the ECS strategy reads this to build the S3 URI.

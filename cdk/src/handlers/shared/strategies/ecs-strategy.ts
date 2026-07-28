@@ -22,6 +22,7 @@ import { S3Client, PutObjectCommand, DeleteObjectCommand } from '@aws-sdk/client
 import type { ComputeStrategy, SessionHandle, SessionStatus } from '../compute-strategy';
 import { logger } from '../logger';
 import type { BlueprintConfig } from '../repo-config';
+import { DEFAULT_MAX_TURNS } from '../validation';
 
 let sharedClient: ECSClient | undefined;
 function getClient(): ECSClient {
@@ -206,7 +207,11 @@ export class EcsComputeStrategy implements ComputeStrategy {
       { name: 'REPO_URL', value: String(payload.repo_url ?? '') },
       ...(payload.prompt ? [{ name: 'TASK_DESCRIPTION', value: String(payload.prompt) }] : []),
       ...(payload.issue_number ? [{ name: 'ISSUE_NUMBER', value: String(payload.issue_number) }] : []),
-      { name: 'MAX_TURNS', value: String(payload.max_turns ?? 200) },
+      // Single source of truth with the hydrate path in `orchestrator.ts`, which
+      // resolves the same default via `DEFAULT_MAX_TURNS`. A literal here would
+      // silently disagree with it whenever the payload omits `max_turns`, and a
+      // turn ceiling that depends on which code path filled it in is a bug.
+      { name: 'MAX_TURNS', value: String(payload.max_turns ?? DEFAULT_MAX_TURNS) },
       ...(payload.max_budget_usd !== undefined ? [{ name: 'MAX_BUDGET_USD', value: String(payload.max_budget_usd) }] : []),
       ...(blueprintConfig.model_id ? [{ name: 'ANTHROPIC_MODEL', value: blueprintConfig.model_id }] : []),
       ...(blueprintConfig.system_prompt_overrides ? [{ name: 'SYSTEM_PROMPT_OVERRIDES', value: blueprintConfig.system_prompt_overrides }] : []),
