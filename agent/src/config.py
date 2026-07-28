@@ -674,7 +674,7 @@ def get_config() -> TaskConfig:
             issue_number=os.environ.get("ISSUE_NUMBER", ""),
             github_token=os.environ.get("GITHUB_TOKEN", ""),
             anthropic_model=os.environ.get("ANTHROPIC_MODEL", ""),
-            max_turns=int(os.environ.get("MAX_TURNS", "200")),
+            max_turns=int(os.environ.get("MAX_TURNS", "100")),
             max_budget_usd=float(os.environ.get("MAX_BUDGET_USD", "0")) or None,
             aws_region=os.environ.get("AWS_REGION", ""),
             dry_run=os.environ.get("DRY_RUN", "").lower() in ("1", "true", "yes"),

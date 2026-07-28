@@ -73,16 +73,18 @@ jest.mock('../../src/handlers/shared/linear-oauth-resolver', () => ({
 // empty probe so these non-attachment plan-command tests take the normal path —
 // otherwise the real probe's in-test fetch failure would (correctly) reject the
 // approve as attachment-unreadable and never call createTaskCore.
+const HEALTHY_PROBE = {
+  attachmentTitles: [],
+  attachments: [],
+  projectName: null,
+  projectHasDocuments: false,
+  projectDocuments: [],
+  ok: true,
+  projectDocumentCount: 0,
+};
+const probeLinearIssueContextMock = jest.fn().mockResolvedValue(HEALTHY_PROBE);
 jest.mock('../../src/handlers/shared/linear-issue-context-probe', () => ({
-  probeLinearIssueContext: jest.fn().mockResolvedValue({
-    attachmentTitles: [],
-    attachments: [],
-    projectName: null,
-    projectHasDocuments: false,
-    projectDocuments: [],
-    ok: true,
-    projectDocumentCount: 0,
-  }),
+  probeLinearIssueContext: (...args: unknown[]) => probeLinearIssueContextMock(...args),
   renderIssueContextHint: jest.fn(() => ''),
 }));
 
@@ -282,6 +284,8 @@ describe('single-task verdict path through the real handler', () => {
     reactToCommentMock.mockReset().mockResolvedValue(undefined);
     upsertStatusCommentMock.mockReset().mockResolvedValue('c-1');
     sweepDecompositionNotesMock.mockReset().mockResolvedValue(0);
+    swapCommentReactionMock.mockReset().mockResolvedValue(undefined);
+    probeLinearIssueContextMock.mockReset().mockResolvedValue(HEALTHY_PROBE);
     resolveLinearOauthTokenMock.mockReset().mockResolvedValue({
       accessToken: 'lin_at',
       workspaceSlug: 'acme',
@@ -321,6 +325,45 @@ describe('single-task verdict path through the real handler', () => {
     await handler(commentEvent('@bgagent approve'));
     expect(reactToCommentMock).toHaveBeenCalledWith(expect.anything(), 'cmd-comment-1', 'eyes');
     expect(swapCommentReactionMock).toHaveBeenCalledWith(expect.anything(), 'cmd-comment-1', 'white_check_mark');
+  });
+
+  test('a FAILED approve does not stamp ✅ over its own ❌ message', async () => {
+    // The marker used to be chosen from the requested verdict, so every non-reject
+    // verdict settled to ✅ — including the bail paths that had just posted a ❌.
+    // The user saw a failure message and a success tick on the same comment, and
+    // the tick is the durable signal. Attachment screening failing is one such path.
+    probeLinearIssueContextMock.mockResolvedValue({ ...HEALTHY_PROBE, ok: false });
+    await handler(commentEvent('@bgagent approve'));
+    // Nothing was dispatched — this really is a failure, not a quiet success.
+    expect(createTaskCoreMock).not.toHaveBeenCalled();
+    // The marker must NOT claim success.
+    const marks = swapCommentReactionMock.mock.calls.map((c) => c[2]);
+    expect(marks).not.toContain('white_check_mark');
+    expect(marks).toContain('question');
+  });
+
+  test('a non-201 task creation does not stamp ✅ either', async () => {
+    // Same defect, the other bail path: createTaskCore refuses (e.g. concurrency
+    // limit), a failure message is posted, and the verdict marker still read ✅.
+    createTaskCoreMock.mockResolvedValue({ statusCode: 429, body: '{"message":"too many"}' });
+    await handler(commentEvent('@bgagent approve'));
+    const marks = swapCommentReactionMock.mock.calls.map((c) => c[2]);
+    expect(marks).not.toContain('white_check_mark');
+    expect(marks).toContain('question');
+  });
+
+  test('a raced/expired plan leaves the marker alone rather than re-stamping it', async () => {
+    // Nothing was done: another verdict already consumed the plan and settled that
+    // comment. Re-marking it would overwrite a settled outcome with this run's guess.
+    ddbSend.mockImplementation((cmd: { _type?: string }) => {
+      if (cmd._type === 'Get') return Promise.resolve({ Item: singlePendingItem() });
+      if (cmd._type === 'Update') return Promise.resolve({});
+      if (cmd._type === 'Delete') return Promise.resolve({}); // no Attributes → lost the race
+      return Promise.resolve({});
+    });
+    await handler(commentEvent('@bgagent approve'));
+    expect(createTaskCoreMock).not.toHaveBeenCalled();
+    expect(swapCommentReactionMock).not.toHaveBeenCalled();
   });
 
   test('a REJECT settles to ❓ — the plan was discarded, nothing succeeded', async () => {

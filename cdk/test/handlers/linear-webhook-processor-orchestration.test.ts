@@ -805,11 +805,51 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
     expect(fetchIssueParentIdMock).not.toHaveBeenCalled();
   });
 
-  test('@bgagent on an issue with no parent AND no ABCA task → clean no-op (not an ABCA issue)', async () => {
+  test('@bgagent on an issue with no linked task → TELLS the user, does not drop it', async () => {
+    // Reaching this path requires an explicit @bgagent mention, so the user is
+    // waiting on an answer. This used to log at info and return, which is
+    // indistinguishable from being ignored.
+    //
+    // It is not a rare edge either: the issue→task link comes from a sparse GSI on
+    // an attribute only written going forward, with no back-fill, so on the deploy
+    // that first enables this path EVERY issue already in flight lands here.
     mockStandaloneOnly(null); // no parent, GSI miss
     await handler(eventWith(comment()));
     expect(createTaskCoreMock).not.toHaveBeenCalled();
-    expect(reactToCommentMock).not.toHaveBeenCalled(); // no premature ack
+    // No premature 👀 — we never committed to doing work.
+    expect(reactToCommentMock).not.toHaveBeenCalled();
+    // But the user IS told, and pointed at the way forward.
+    const posted = upsertStatusCommentMock.mock.calls.map((c) => String(c[2])).join('\n');
+    expect(posted).toMatch(/don't have a task linked to this issue/i);
+    expect(posted).toMatch(/re-apply this project's trigger label/i);
+    // ...and the comment settles to ❓, not ✅ — nothing succeeded.
+    expect(swapCommentReactionMock).toHaveBeenCalledWith(expect.anything(), 'comment-1', 'question');
+  });
+
+  test('a FAILED issue→task lookup is not reported to the user as "not an ABCA issue"', async () => {
+    // A Query failure and a genuine miss are different facts. Collapsing them told
+    // the user their issue is not ours, which is a guess dressed as a conclusion —
+    // and it hides a real fault (throttling, a missing GSI) behind a silent no-op.
+    fetchIssueParentIdMock.mockResolvedValue(null);
+    ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
+      // ONLY the GSI query fails — everything else (the redelivery claim, the
+      // commenter authorization) must still work, or the nudge would be skipped
+      // for an unrelated reason and the test would pass vacuously.
+      if (cmd._type === 'Query' && cmd.input.IndexName === 'LinearIssueIndex') {
+        throw new Error('ProvisionedThroughputExceededException');
+      }
+      if (cmd._type === 'Get' && (cmd.input.Key as { linear_identity?: string })?.linear_identity) {
+        return { Item: { platform_user_id: 'commenter-user', status: 'active' } };
+      }
+      return {};
+    });
+    await handler(eventWith(comment()));
+    expect(createTaskCoreMock).not.toHaveBeenCalled();
+    const posted = upsertStatusCommentMock.mock.calls.map((c) => String(c[2])).join('\n');
+    expect(posted).toMatch(/couldn't look up/i);
+    expect(posted).toMatch(/transient fault on my side/i);
+    // Must NOT claim the issue isn't ours — we do not know that.
+    expect(posted).not.toMatch(/don't have a task linked/i);
   });
 
   test('@bgagent on a sub-issue whose parent is not an orchestration AND no ABCA task → no task', async () => {

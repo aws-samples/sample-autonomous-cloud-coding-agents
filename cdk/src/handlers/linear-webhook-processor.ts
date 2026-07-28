@@ -41,7 +41,7 @@ import {
 } from './shared/linear-issue-context-probe';
 import { resolveLinearOauthToken } from './shared/linear-oauth-resolver';
 import { fetchIssueParentId, type SubIssueNode } from './shared/linear-subissue-fetch';
-import { resolveTaskByLinearIssue, prNumberFromTask } from './shared/linear-task-by-issue';
+import { lookupTaskByLinearIssue, prNumberFromTask } from './shared/linear-task-by-issue';
 import { logger } from './shared/logger';
 import { type Channel, type IssueRef } from './shared/orchestration-channel';
 import { makeLinearChannel } from './shared/orchestration-channel-linear';
@@ -91,6 +91,8 @@ import {
   renderSingleTaskCancelled,
   renderSingleTaskApprovedReference,
   renderWrongMentionNudge,
+  renderNoLinkedTaskNudge,
+  renderTaskLookupFailedNudge,
 } from './shared/orchestration-decomposition-render';
 import {
   consumePendingPlan as consumePendingPlanRow,
@@ -1329,6 +1331,11 @@ export async function handler(event: ProcessorEvent): Promise<void> {
         decompose_parent_issue_id: issue.id,
         decompose_caps_max_sub_issues: String(decompositionCaps.max_sub_issues),
         decompose_caps_allowed: String(decompositionCaps.decompose_allowed),
+        // The label that actually triggered this run, so the epic panel's retry
+        // hint can name it. Without this the reconciler has nothing to persist and
+        // every epic tells the operator to re-apply the DEFAULT label, which is a
+        // dead end on a project configured to trigger on anything else.
+        decompose_trigger_label: labelFilter,
         ...(decompositionCaps.max_parent_budget_usd !== undefined && {
           decompose_caps_max_parent_budget_usd: String(decompositionCaps.max_parent_budget_usd),
         }),
@@ -2334,10 +2341,17 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
     // return or a throw inside the verdict handling can't skip it.
     const verdictComment = { commentId };
     const verdictTarget = issueRef(commentedIssueId, workspaceId);
+    // Marker state derived from what ACTUALLY happened, not from the verdict that
+    // was asked for. Keying it on `verdict` alone stamped ✅ on paths that had just
+    // posted a ❌ failure message, and the tick is the durable signal a user reads.
+    // 'skip' leaves the marker untouched: nothing was done (raced/expired plan), so
+    // whatever settled it first should stand.
+    let verdictOutcome: 'succeeded' | 'needs_input' | 'skip' = verdict === 'reject' ? 'needs_input' : 'succeeded';
     const settleVerdictMarker = async (): Promise<void> => {
+      if (verdictOutcome === 'skip') return;
       try {
         await channelFor(WORKSPACE_REGISTRY_TABLE)
-          .replaceCommentReaction?.(verdictComment, verdictTarget, verdict === 'reject' ? 'needs_input' : 'succeeded');
+          .replaceCommentReaction?.(verdictComment, verdictTarget, verdictOutcome);
       } catch (err) {
         // Best-effort: the plan has already been acted on, so a marker failure
         // must not turn a completed verdict into an error.
@@ -2362,9 +2376,14 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
       // coding task (no write-back, no orchestration); reject → discard. Handled
       // here rather than runPlanVerdict (which is graph-only: consume→writeBack→seed).
       if (pending.pending_kind === 'single') {
-        await handleSingleTaskVerdict({
+        const singleOutcome = await handleSingleTaskVerdict({
           pending, verdict, commentedIssueId, workspaceId, projectId: verdictProjectId, resolved,
         });
+        // A failed single-task verdict already told the user why, in a ❌ comment.
+        // Mark it needs_input so the reaction agrees with that message and the
+        // thread reads as actionable rather than done.
+        if (singleOutcome === 'failed') verdictOutcome = 'needs_input';
+        else if (singleOutcome === 'skipped') verdictOutcome = 'skip';
         return;
       }
 
@@ -2853,6 +2872,19 @@ async function handlePlanRevision(args: {
  * graph verdict path (``runPlanVerdict`` → writeBack → seed). The claim-once +
  * 👀 already fired in the caller. Never throws.
  */
+/**
+ * What became of a single-task verdict, so the caller can settle the trigger
+ * comment's marker from the OUTCOME rather than from the requested verdict.
+ *
+ * ``settled`` means the verdict reached a definite end the user can see: the task
+ * was dispatched, or the plan was deliberately discarded. ``failed`` means a
+ * failure message was already posted, so the marker must NOT claim success — a ❌
+ * message under a ✅ tick is contradictory, and the tick is the durable signal.
+ * ``skipped`` means nothing happened at all (a raced or expired plan), where
+ * re-marking someone else's settled comment would be wrong.
+ */
+type SingleTaskVerdictOutcome = 'settled' | 'failed' | 'skipped';
+
 async function handleSingleTaskVerdict(args: {
   pending: PendingPlan;
   verdict: 'approve' | 'reject';
@@ -2860,8 +2892,8 @@ async function handleSingleTaskVerdict(args: {
   workspaceId: string;
   projectId: string;
   resolved: { accessToken: string; oauthSecretArn: string; workspaceSlug: string };
-}): Promise<void> {
-  if (!ORCHESTRATION_TABLE || !WORKSPACE_REGISTRY_TABLE) return;
+}): Promise<SingleTaskVerdictOutcome> {
+  if (!ORCHESTRATION_TABLE || !WORKSPACE_REGISTRY_TABLE) return 'skipped';
   const { pending, verdict, commentedIssueId, workspaceId, projectId, resolved } = args;
   const channel = channelFor(WORKSPACE_REGISTRY_TABLE);
   const target = issueRef(commentedIssueId, workspaceId);
@@ -2871,7 +2903,7 @@ async function handleSingleTaskVerdict(args: {
   const taken = await consumePendingPlanRow(ddb, ORCHESTRATION_TABLE, commentedIssueId);
   if (!taken) {
     logger.info('Single-task verdict: no pending plan (raced/expired) — skipping', { issue_id: commentedIssueId });
-    return;
+    return 'skipped';
   }
 
   if (verdict === 'reject') {
@@ -2883,7 +2915,7 @@ async function handleSingleTaskVerdict(args: {
     await channel.sweepNotes?.(target);
     await channel.upsertComment(target, renderSingleTaskCancelled());
     logger.info('Single-task verdict: rejected', { issue_id: commentedIssueId });
-    return;
+    return 'settled';
   }
 
   // ADR-016: the approved single task is a coding run that opens a PR — give it
@@ -2902,7 +2934,7 @@ async function handleSingleTaskVerdict(args: {
   });
   if (!singleHydrated.ok) {
     await safeReportIssueFailure(commentedIssueId, workspaceId, `❌ ${singleHydrated.message}`);
-    return;
+    return 'failed';
   }
 
   // approve → spawn ONE coding task, exactly like the reconciler's auto-run
@@ -2936,7 +2968,7 @@ async function handleSingleTaskVerdict(args: {
     await cleanupPreScreenedForComment(singleHydrated.records);
     await safeReportIssueFailure(commentedIssueId, workspaceId,
       buildCreateTaskFailureMessage(result.statusCode, result.body));
-    return;
+    return 'failed';
   }
   // FREEZE the single-task proposal into a durable "Approved" reference BEFORE
   // sweeping, so the thread keeps a record of what was proposed + approved (a
@@ -2959,6 +2991,7 @@ async function handleSingleTaskVerdict(args: {
     await channel.sweepNotes?.(target);
   }
   logger.info('Single-task verdict: approved — single task dispatched', { issue_id: commentedIssueId });
+  return 'settled';
 }
 
 /**
@@ -3440,6 +3473,47 @@ async function iterateOrchestrationChild(args: {
  * owns the ✅/❌ reply. A clean no-op when the issue was never run by ABCA
  * (GSI miss) or its task opened no PR.
  */
+/**
+ * Post a one-line nudge on an issue we could not act on, and settle the trigger
+ * comment's reaction so the thread does not sit on 👀 forever.
+ *
+ * Claims the comment first, so a webhook redelivery (Linear retries) does not post
+ * the same nudge twice — the same guard the near-miss path uses.
+ */
+async function postStandaloneNudge(args: {
+  issueId: string;
+  workspaceId: string;
+  commentId: string;
+  registryTableName: string;
+  nudge: string;
+}): Promise<void> {
+  const { issueId, workspaceId, commentId, registryTableName, nudge } = args;
+  if (!ORCHESTRATION_TABLE) return;
+  const won = await claimCommentAck(
+    ddb, ORCHESTRATION_TABLE, deriveOrchestrationId(issueId), `no-task:${commentId}`,
+    new Date().toISOString(), Math.floor(Date.now() / 1000) + ACK_CLAIM_TTL_SECONDS,
+  );
+  if (!won) {
+    logger.info('Standalone nudge: redelivery already handled — skipping', { comment_id: commentId });
+    return;
+  }
+  const channel = channelFor(registryTableName);
+  const target = issueRef(issueId, workspaceId);
+  try {
+    await channel.upsertComment(target, nudge);
+    // ❓ not ✅: nothing succeeded, and the user may need to act.
+    await channel.replaceCommentReaction?.({ commentId }, target, 'needs_input');
+  } catch (err) {
+    // Best-effort telling-the-user; a posting failure must not turn an ignorable
+    // comment into a handler error (and it is already logged by the caller).
+    logger.warn('Could not post the standalone nudge (non-fatal)', {
+      linear_issue_id: issueId,
+      comment_id: commentId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
 async function handleStandaloneCommentTrigger(args: {
   subIssueId: string;
   workspaceId: string;
@@ -3454,11 +3528,28 @@ async function handleStandaloneCommentTrigger(args: {
 }): Promise<void> {
   const { subIssueId: issueId, workspaceId, commentId, commentBody, replyTargetId, trigger, resolved, registryTableName } = args;
 
-  const task = await resolveTaskByLinearIssue(ddb, process.env.TASK_TABLE_NAME!, issueId);
-  if (!task) {
-    logger.info('Comment trigger (standalone): issue has no ABCA task — ignoring', { linear_issue_id: issueId });
+  // Reaching here means someone explicitly mentioned @bgagent (parseCommentTrigger
+  // gates the whole path), so silence is never the right answer — they addressed
+  // the bot and are waiting. Distinguish "no task" from "the lookup broke": the
+  // first is a real answer, the second is us not knowing, and reporting the second
+  // as the first is a guess presented as a fact.
+  const lookup = await lookupTaskByLinearIssue(ddb, process.env.TASK_TABLE_NAME!, issueId);
+  if (lookup.kind !== 'found') {
+    // The issue→task link comes from a sparse GSI on an attribute that is only
+    // written going forward, with no back-fill, so on the deploy that first enables
+    // this path every in-flight issue lands here. Tell the user and point at the
+    // way forward (re-label for a fresh run) instead of logging at info and moving
+    // on, which is indistinguishable from being ignored.
+    const nudge = lookup.kind === 'error'
+      ? renderTaskLookupFailedNudge()
+      : renderNoLinkedTaskNudge();
+    await postStandaloneNudge({ issueId, workspaceId, commentId, registryTableName, nudge });
+    logger.info('Comment trigger (standalone): no linked task — told the user', {
+      linear_issue_id: issueId, lookup: lookup.kind,
+    });
     return;
   }
+  const task = lookup.task;
   const prNumber = prNumberFromTask(task);
   if (prNumber === null || !task.repo) {
     // Clarify-resume: a task with no PR MIGHT be a clarify-HOLD (a

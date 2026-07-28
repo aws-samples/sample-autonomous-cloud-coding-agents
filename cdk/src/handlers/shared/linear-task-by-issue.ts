@@ -36,21 +36,41 @@ export interface LinearIssueTask {
 }
 
 /**
+ * Outcome of an issue → newest-task lookup. Deliberately three-valued rather
+ * than ``task | null``: "no task" and "the lookup broke" demand different
+ * behaviour, and collapsing them is how an addressed ``@bgagent`` comment gets
+ * dropped in silence.
+ *
+ *  - ``found`` — the issue has an ABCA task; iterate on it.
+ *  - ``none`` — the issue genuinely has no task, or its task predates the
+ *    ``linear_issue_id`` hoist and so is invisible to this sparse GSI. Cannot be
+ *    distinguished from each other here, which matters: after this feature is
+ *    first deployed, EVERY task created by the previously-running code lands in
+ *    this bucket, since nothing back-fills the attribute.
+ *  - ``error`` — the Query failed. Nothing can be concluded about the issue, so
+ *    treating it as "not ours" would be a guess presented as a fact.
+ */
+export type LinearIssueTaskLookup =
+  | { readonly kind: 'found'; readonly task: LinearIssueTask }
+  | { readonly kind: 'none' }
+  | { readonly kind: 'error'; readonly message: string };
+
+/**
  * Resolve a Linear issue UUID → its NEWEST ABCA task via the sparse
  * ``LinearIssueIndex`` GSI. The GSI is keyed
  * ``(linear_issue_id, created_at)``; we query descending and take the first
  * row, so a re-labelled / re-run issue resolves to its latest task (the one
- * holding the live PR). Returns null when no task exists for the issue (the
- * issue was never run by ABCA, or its task predates the GSI back-fill) or on
- * any error — the caller treats null as "not an ABCA-owned issue, ignore".
+ * holding the live PR).
  *
- * Best-effort: never throws.
+ * Best-effort: never throws. Reports a miss and a failure distinctly so the
+ * caller can tell the user something rather than ignoring them — see
+ * {@link LinearIssueTaskLookup}.
  */
-export async function resolveTaskByLinearIssue(
+export async function lookupTaskByLinearIssue(
   ddb: DynamoDBDocumentClient,
   taskTableName: string,
   linearIssueId: string,
-): Promise<LinearIssueTask | null> {
+): Promise<LinearIssueTaskLookup> {
   try {
     const res = await ddb.send(new QueryCommand({
       TableName: taskTableName,
@@ -61,22 +81,41 @@ export async function resolveTaskByLinearIssue(
       Limit: 1,
     }));
     const item = res.Items?.[0];
-    if (!item) return null;
+    if (!item) return { kind: 'none' };
     return {
-      task_id: item.task_id as string,
-      ...(item.user_id !== undefined && { user_id: item.user_id as string }),
-      ...(item.repo !== undefined && { repo: item.repo as string }),
-      ...(item.pr_url !== undefined && { pr_url: item.pr_url as string }),
-      ...(item.pr_number !== undefined && { pr_number: item.pr_number as number }),
-      ...(item.status !== undefined && { status: item.status as string }),
+      kind: 'found',
+      task: {
+        task_id: item.task_id as string,
+        ...(item.user_id !== undefined && { user_id: item.user_id as string }),
+        ...(item.repo !== undefined && { repo: item.repo as string }),
+        ...(item.pr_url !== undefined && { pr_url: item.pr_url as string }),
+        ...(item.pr_number !== undefined && { pr_number: item.pr_number as number }),
+        ...(item.status !== undefined && { status: item.status as string }),
+      },
     };
   } catch (err) {
-    logger.warn('LinearIssueIndex query failed — treating issue as non-ABCA', {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.warn('LinearIssueIndex query failed — cannot tell whether this issue has a task', {
       linear_issue_id: linearIssueId,
-      error: err instanceof Error ? err.message : String(err),
+      error: message,
     });
-    return null;
+    return { kind: 'error', message };
   }
+}
+
+/**
+ * Back-compatible wrapper: the task, or null for both a miss and a failure.
+ *
+ * Prefer {@link lookupTaskByLinearIssue} on any path that replies to a user, so a
+ * lookup failure isn't reported to them as "this isn't an ABCA issue".
+ */
+export async function resolveTaskByLinearIssue(
+  ddb: DynamoDBDocumentClient,
+  taskTableName: string,
+  linearIssueId: string,
+): Promise<LinearIssueTask | null> {
+  const res = await lookupTaskByLinearIssue(ddb, taskTableName, linearIssueId);
+  return res.kind === 'found' ? res.task : null;
 }
 
 /**

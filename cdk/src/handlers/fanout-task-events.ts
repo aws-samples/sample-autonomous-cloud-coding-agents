@@ -39,7 +39,7 @@
  */
 
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, GetCommand, QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import type {
   DynamoDBBatchItemFailure,
   DynamoDBBatchResponse,
@@ -50,6 +50,7 @@ import { clearTokenCache, resolveGitHubToken } from './shared/context-hydration'
 import { classifyError } from './shared/error-classifier';
 import { renderFailureReply } from './shared/failure-reply';
 import { renderCommentBody, upsertTaskComment } from './shared/github-comment';
+import { sumIterationCostForIssue as sumIterationCostForIssueShared } from './shared/iteration-cost';
 import { renderMaturingReply } from './shared/iteration-reply';
 import { claimTerminalReply, releaseReplyClaim, terminalReplyClaimed } from './shared/iteration-reply-claim';
 import {
@@ -1528,48 +1529,24 @@ async function replyToStandaloneTrigger(
 }
 
 /**
- * Iteration-UX: sum ``cost_usd`` across ALL Linear-iteration tasks on one issue
- * (the running total shown on the reply). The LinearIssueIndex GSI lists every
- * task_id for the issue (its projection deliberately does NOT include cost_usd —
- * a GSI projection can't be changed in place, see task-table.ts), so we GetItem
- * each task's cost from the base table. Iteration counts per issue are small, so
- * the per-task reads are bounded. ``current``'s own cost is added explicitly in
- * case the index hasn't caught up (deduped by task_id). Best-effort: on any read
- * failure returns just this task's cost (never throws).
+ * Running-total cost for the reply, delegating to the shared implementation so the
+ * reconciler and this dispatcher cannot report different numbers for the same
+ * issue. (They previously had separate copies, which had already drifted on how a
+ * string ``cost_usd`` was handled.)
  */
 async function sumIterationCostForIssue(issueId: string, current: TaskRecord): Promise<number | null> {
   const tableName = process.env.TASK_TABLE_NAME;
   const currentCost = coerceNumericOrNull(current.cost_usd, { field: 'cost_usd', task_id: current.task_id }, logger) ?? 0;
   if (!tableName || !issueId) return currentCost || null;
-  try {
-    const listed = await ddb.send(new QueryCommand({
-      TableName: tableName,
-      IndexName: 'LinearIssueIndex',
-      KeyConditionExpression: 'linear_issue_id = :iid',
-      ProjectionExpression: 'task_id',
-      ExpressionAttributeValues: { ':iid': issueId },
-    }));
-    const taskIds = ((listed.Items ?? []) as { task_id?: string }[])
-      .map((i) => i.task_id)
-      .filter((t): t is string => typeof t === 'string');
-    let total = 0;
-    let sawCurrent = false;
-    for (const taskId of taskIds) {
-      if (taskId === current.task_id) { sawCurrent = true; total += currentCost; continue; }
-      const got = await ddb.send(new GetCommand({
-        TableName: tableName, Key: { task_id: taskId }, ProjectionExpression: 'cost_usd',
-      }));
-      const c = coerceNumericOrNull(got.Item?.cost_usd, { field: 'cost_usd', task_id: taskId }, logger);
-      if (typeof c === 'number') total += c;
-    }
-    if (!sawCurrent) total += currentCost; // index lag — add this task explicitly
-    return total > 0 ? total : null;
-  } catch (err) {
-    logger.warn('[fanout/linear] running-total cost query failed — using this task only', {
-      task_id: current.task_id, error: err instanceof Error ? err.message : String(err),
-    });
-    return currentCost || null;
-  }
+  const { total } = await sumIterationCostForIssueShared({
+    ddb,
+    taskTableName: tableName,
+    linearIssueId: issueId,
+    thisTaskId: current.task_id,
+    thisCost: currentCost,
+    logLabel: 'fanout/linear',
+  });
+  return total;
 }
 
 /**
