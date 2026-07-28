@@ -252,8 +252,9 @@ export interface IterationReplyInput {
 
 /**
  * Render the reply for a SUCCESSFUL (completed + build-passing) iteration.
- * (Failures are rendered by the existing ``renderFailureReply`` — this is only
- * the success branch, which is where the false-"✅ Updated" lived.)
+ * (Failures are rendered by a separate failure-reply renderer that arrives with
+ * the activation slice — this is only the success branch, which is where the
+ * false-"✅ Updated" lived.)
  */
 export function renderIterationSuccessReply(input: IterationReplyInput): string {
   const noChange = input.codeChanged === false;

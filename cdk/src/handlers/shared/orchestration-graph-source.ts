@@ -46,8 +46,9 @@
  *     (tier 1). No adapter needed here.
  *
  * A source is a zero-arg async thunk so the caller binds whatever inputs
- * it needs (token + issue id for Linear; a node list for declarative)
- * before handing ``discoverOrchestration`` a uniform interface.
+ * it needs (token + issue id for Linear; a node list for declarative) before
+ * handing the discovery step a uniform interface — the consumer that resolves a
+ * graph from one of these sources lands with the orchestration compute plane.
  */
 
 import { fetchSubIssueGraph, type FetchSubIssueGraphOptions, type SubIssueNode } from './linear-subissue-fetch';

@@ -76,7 +76,9 @@ export function computeLeaves(nodes: readonly SubIssueNode[]): readonly string[]
  * all leaves) when there is more than one leaf.
  *
  * ``orchestrationId`` namespaces the synthetic node's id so it is unique +
- * recognizable (``<orchestrationId>#integration``). The node carries no
+ * recognizable (``<orchestrationId>__integration`` — see
+ * {@link INTEGRATION_NODE_SUFFIX} for why the separator is ``_`` and not ``#``).
+ * The node carries no
  * ``identifier`` (there is no Linear issue) and a fixed ``title`` so the
  * status block / rollup render "Integration …" gracefully.
  */

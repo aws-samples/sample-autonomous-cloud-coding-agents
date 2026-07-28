@@ -832,8 +832,10 @@ export interface OrchestrationSnapshot {
  * Paginates: a DynamoDB Query returns at most one 1MB page, so a large epic
  * (many children + accumulated ``ack#`` marker rows) would otherwise silently
  * truncate — dropping children from the completion check / panel and stranding
- * the epic. Follows ``LastEvaluatedKey`` to read all rows (mirrors
- * ``findOrchestrationIds``'s Scan pagination).
+ * the epic. Follows ``LastEvaluatedKey`` to read all rows. Every paginated read
+ * of this table must do the same: a single page is a silent partial answer here,
+ * not an error, so the truncation shows up as a wrong decision rather than a
+ * failure.
  */
 export async function loadOrchestration(
   ddb: DynamoDBDocumentClient,
