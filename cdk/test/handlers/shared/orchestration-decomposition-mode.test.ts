@@ -206,9 +206,24 @@ describe('looksMultiPart (pre-spend hint heuristic — conservative)', () => {
     const unspaced = `Build the login form, plus,a signup page, plus,a password reset flow.${tail}`;
     expect(looksMultiPart(spaced)).toBe(looksMultiPart(unspaced));
     expect(looksMultiPart(spaced)).toBe(true);
+  });
 
-    const semis = 'Ship the profile page; then the settings tab; then the audit log view for admins.';
-    expect(looksMultiPart(semis)).toBe(true);
+  test('a code snippet or stack trace does NOT flip a single-task issue to multi-part', () => {
+    // A bare `;` alternative matched EVERY semicolon, and an issue written for a
+    // coding agent routinely contains code. Two semicolons anywhere nagged the
+    // user to decompose a plain bug report — a false positive in the direction
+    // that costs the user attention, which is the one to avoid.
+    const withCode = [
+      'The timestamp renders wrong on the dashboard. The offending code is:',
+      '  const d = new Date(ts);',
+      '  return d.toISOString();',
+      'It should use the local timezone instead of UTC.',
+    ].join('\n');
+    expect(looksMultiPart(withCode)).toBe(false);
+
+    const withTrace = 'Login fails intermittently with: TypeError at auth.ts:41; caused by '
+      + 'session.get(); please make the retry path handle a null session properly.';
+    expect(looksMultiPart(withTrace)).toBe(false);
   });
 
   test('a single cohesive ask → NOT multi-part (no false positive)', () => {

@@ -197,12 +197,19 @@ export function looksMultiPart(description: string | undefined | null): boolean 
   const listItems = lines.filter((l) => /^\s*(\d+[.)]|[-*•])\s+\S/.test(l)).length;
   if (listItems >= MULTI_PART_MIN_LIST_ITEMS) return true;
   // Or several additive conjunctions across the prose (independent asks).
-  // Word alternatives need word boundaries; the punctuation ones must not have a
-  // TRAILING one. A ``\b`` after ``plus,`` or ``;`` requires a word character to
-  // follow, which inverts the intent for exactly the correctly-punctuated
-  // phrasings this is meant to catch: "the form, plus, a signup page" scored 0
-  // while "plus,a signup page" scored 1, and "do a; b; c" scored 0 while
-  // "do a;b;c" scored 2.
-  const conjunctions = (text.match(/\b(?:and also|as well as|in addition)\b|(?:plus,|;)/gi) ?? []).length;
+  // Word alternatives keep their word boundaries. ``plus,`` must NOT have a
+  // trailing one — a ``\b`` after a comma requires a word character next, which
+  // inverted the intent for the correctly-punctuated phrasing this is meant to
+  // catch ("the form, plus, a signup page" scored 0 while "plus,a signup page"
+  // scored 1).
+  //
+  // A bare ``;`` is deliberately NOT an alternative. Without a trailing boundary
+  // it matches EVERY semicolon, and an issue description written for a coding
+  // agent routinely contains a code snippet, a stack trace or CSS — two
+  // semicolons anywhere flipped a plain single-task bug report to "multi-part"
+  // and nagged the user about decomposing it. With the boundary it only matched
+  // unnatural no-space input, so it never earned its place in either form. The
+  // word alternatives carry the intent without the blast radius.
+  const conjunctions = (text.match(/\b(?:and also|as well as|in addition)\b|plus,/gi) ?? []).length;
   return conjunctions >= MULTI_PART_MIN_CONJUNCTIONS;
 }
