@@ -608,14 +608,13 @@ export interface LinearLinkResponse {
  * `status` is `revoked` for the default soft-removal (registry row kept with
  * `status=revoked` for audit) or `purged` when the row was deleted outright
  * (`--purge`). `secret_deleted` is false when the per-workspace OAuth secret
- * was already absent (idempotent). `mappings_removed` counts project mappings
- * torn down (0 when `--keep-mappings` was passed). */
+ * was already absent (idempotent). Project→repo mappings are not touched (they
+ * carry no workspace id and are removed by project id). */
 export interface LinearRemoveWorkspaceResponse {
   readonly workspace_slug: string;
   readonly linear_workspace_id: string;
   readonly status: 'revoked' | 'purged';
   readonly secret_deleted: boolean;
-  readonly mappings_removed: number;
 }
 
 /** Jira link response from POST /v1/jira/link.

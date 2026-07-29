@@ -1942,20 +1942,23 @@ export function makeLinearCommand(): Command {
       .description('Deregister a Linear workspace: revoke the registry row + delete its OAuth secret')
       .argument('<slug>', 'Linear workspace urlKey (e.g. "acme" from linear.app/acme/...)')
       .option('--purge', 'Delete the registry row entirely instead of keeping it with status=revoked (no audit trail)')
-      .option('--keep-mappings', 'Leave this workspace\'s Linear project→repo mappings in place')
       .option('--yes', 'Skip the slug-confirmation prompt (for scripted use)')
       .action(async (slug: string, opts) => {
-        // Undoes `bgagent linear setup` / `add-workspace`. All the
-        // destructive work (registry revoke, Secrets Manager delete,
-        // mapping cleanup) happens server-side behind a DELETE call so
-        // DDB / Secrets Manager grants stay on the API role, not on every
-        // CLI user's IAM identity. This mirrors `link`, which also delegates
-        // its writes to the backend rather than touching AWS directly.
+        // Undoes `bgagent linear setup` / `add-workspace`. The destructive
+        // work (registry revoke, Secrets Manager delete) happens server-side
+        // behind a DELETE call so DDB / Secrets Manager grants stay on the
+        // API role, not on every CLI user's IAM identity. This mirrors
+        // `link`, which also delegates its writes to the backend rather than
+        // touching AWS directly.
         //
         // By default this is a SOFT removal: the registry row is flipped to
         // status=revoked (preserving the audit trail) and the OAuth resolver
         // fail-closes on any non-active status, so the workspace can no
         // longer resolve a token or route webhooks the instant this returns.
+        //
+        // Project→repo mappings are NOT touched: mapping rows carry no
+        // workspace id, so they can't be attributed to a workspace. Remove
+        // a mapping by project id (see LINEAR_SETUP_GUIDE).
         if (!SLUG_RE.test(slug)) {
           throw new CliError(
             `Invalid workspace slug '${slug}'. Must be 4-50 chars matching [a-zA-Z0-9_-]. `
@@ -1964,7 +1967,6 @@ export function makeLinearCommand(): Command {
         }
 
         const purge = Boolean(opts.purge);
-        const keepMappings = Boolean(opts.keepMappings);
 
         // Slug-confirmation prompt (skipped by --yes). Typing the slug is a
         // deliberate speed-bump before an irreversible teardown — the same
@@ -1975,9 +1977,7 @@ export function makeLinearCommand(): Command {
             ? '  • DELETE the registry row entirely (no audit trail)'
             : '  • Mark the registry row status=revoked (preserves audit trail)');
           console.log(`  • Delete the Secrets Manager secret '${linearOauthSecretName(slug)}'`);
-          console.log(keepMappings
-            ? '  • Leave this workspace\'s project mappings in place'
-            : '  • Delete this workspace\'s Linear project mappings');
+          console.log('  • Leave project→repo mappings in place (remove those by project id)');
           console.log();
           const confirm = (await promptLine('Type the workspace slug to confirm')).trim();
           if (confirm !== slug) {
@@ -1987,7 +1987,7 @@ export function makeLinearCommand(): Command {
         }
 
         const client = new ApiClient();
-        const result = await client.linearRemoveWorkspace(slug, { purge, keepMappings });
+        const result = await client.linearRemoveWorkspace(slug, { purge });
 
         console.log();
         console.log(`✅ Workspace '${result.workspace_slug}' removed (${result.status}).`);
@@ -1997,9 +1997,7 @@ export function makeLinearCommand(): Command {
         console.log(result.secret_deleted
           ? '  ✓ OAuth secret deleted'
           : '  • OAuth secret was already absent (nothing to delete)');
-        if (!keepMappings) {
-          console.log(`  ✓ ${result.mappings_removed} project mapping(s) removed`);
-        }
+        console.log('  • Project→repo mappings left in place — remove by project id if needed');
       }),
   );
 

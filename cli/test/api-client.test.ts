@@ -172,7 +172,6 @@ describe('ApiClient', () => {
           linear_workspace_id: 'ws-1',
           status: 'revoked',
           secret_deleted: true,
-          mappings_removed: 0,
         },
       }),
     };
@@ -186,12 +185,11 @@ describe('ApiClient', () => {
       );
     });
 
-    test('maps --purge / --keep-mappings to snake_case query params (matches handler reads)', async () => {
+    test('maps --purge to the snake_case query param (matches handler reads)', async () => {
       mockFetch.mockResolvedValue(okBody);
-      await client.linearRemoveWorkspace('acme', { purge: true, keepMappings: true });
+      await client.linearRemoveWorkspace('acme', { purge: true });
       const url = mockFetch.mock.calls[0][0] as string;
       expect(url).toContain('purge=true');
-      expect(url).toContain('keep_mappings=true');
     });
 
     test('URL-encodes the slug', async () => {

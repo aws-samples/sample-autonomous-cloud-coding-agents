@@ -56,13 +56,12 @@ describe('linear remove-workspace command', () => {
       linear_workspace_id: 'ws-uuid-1',
       status: 'revoked',
       secret_deleted: true,
-      mappings_removed: 0,
     });
 
     await runRemove(['acme', '--yes']);
 
     expect(mockRemove).toHaveBeenCalledTimes(1);
-    expect(mockRemove).toHaveBeenCalledWith('acme', { purge: false, keepMappings: false });
+    expect(mockRemove).toHaveBeenCalledWith('acme', { purge: false });
     const out = logSpy.mock.calls.map((c) => String(c[0])).join('\n');
     expect(out).toContain('revoked');
   });
@@ -73,26 +72,11 @@ describe('linear remove-workspace command', () => {
       linear_workspace_id: 'ws-uuid-1',
       status: 'purged',
       secret_deleted: true,
-      mappings_removed: 0,
     });
 
     await runRemove(['acme', '--yes', '--purge']);
 
-    expect(mockRemove).toHaveBeenCalledWith('acme', { purge: true, keepMappings: false });
-  });
-
-  test('--keep-mappings forwards keepMappings=true to the API', async () => {
-    mockRemove.mockResolvedValue({
-      workspace_slug: 'acme',
-      linear_workspace_id: 'ws-uuid-1',
-      status: 'revoked',
-      secret_deleted: true,
-      mappings_removed: 0,
-    });
-
-    await runRemove(['acme', '--yes', '--keep-mappings']);
-
-    expect(mockRemove).toHaveBeenCalledWith('acme', { purge: false, keepMappings: true });
+    expect(mockRemove).toHaveBeenCalledWith('acme', { purge: true });
   });
 
   test('rejects an invalid slug without hitting the API', async () => {
@@ -105,18 +89,20 @@ describe('linear remove-workspace command', () => {
     await expect(runRemove(['ghost', '--yes'])).rejects.toThrow('Workspace not found.');
   });
 
-  test('reports mapping removals in the success output', async () => {
+  test('does not claim any project-mapping cleanup in the success output', async () => {
+    // Mapping cleanup was dropped (rows carry no workspace id); the command
+    // must not report a mapping count or a checkmark implying it ran.
     mockRemove.mockResolvedValue({
       workspace_slug: 'acme',
       linear_workspace_id: 'ws-uuid-1',
       status: 'revoked',
       secret_deleted: true,
-      mappings_removed: 4,
     });
 
     await runRemove(['acme', '--yes']);
     const out = logSpy.mock.calls.map((c) => String(c[0])).join('\n');
-    expect(out).toContain('4');
+    expect(out).not.toContain('mapping(s) removed');
+    expect(out).toContain('mappings left in place');
   });
 
   test('reports when the OAuth secret was already absent (secret_deleted: false)', async () => {
@@ -125,7 +111,6 @@ describe('linear remove-workspace command', () => {
       linear_workspace_id: 'ws-uuid-1',
       status: 'revoked',
       secret_deleted: false,
-      mappings_removed: 0,
     });
 
     await runRemove(['acme', '--yes']);
@@ -167,12 +152,11 @@ describe('linear remove-workspace command', () => {
       linear_workspace_id: 'ws-uuid-1',
       status: 'revoked',
       secret_deleted: true,
-      mappings_removed: 0,
     });
     const rlSpy = mockPromptLine('acme');
     try {
       await runRemove(['acme']);
-      expect(mockRemove).toHaveBeenCalledWith('acme', { purge: false, keepMappings: false });
+      expect(mockRemove).toHaveBeenCalledWith('acme', { purge: false });
     } finally {
       rlSpy.mockRestore();
     }

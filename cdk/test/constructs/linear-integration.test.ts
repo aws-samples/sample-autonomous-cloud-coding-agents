@@ -76,35 +76,101 @@ describe('LinearIntegration construct', () => {
     template.hasResourceProperties('AWS::ApiGateway::Resource', { PathPart: '{slug}' });
   });
 
-  test('DELETE /linear/workspaces/{slug} is Cognito-authorized', () => {
-    template.hasResourceProperties('AWS::ApiGateway::Method', {
-      HttpMethod: 'DELETE',
-      AuthorizationType: 'COGNITO_USER_POOLS',
+  test('DELETE /linear/workspaces/{slug} is Cognito-authorized (pinned to the {slug} resource)', () => {
+    // Pin the method to the {slug} resource so "any authorized DELETE
+    // anywhere" cannot satisfy this — the DELETE must be on the
+    // workspace-by-slug path specifically.
+    const slugResources = template.findResources('AWS::ApiGateway::Resource', {
+      Properties: { PathPart: '{slug}' },
     });
+    const slugLogicalIds = Object.keys(slugResources);
+    expect(slugLogicalIds).toHaveLength(1);
+    const slugId = slugLogicalIds[0];
+
+    const deleteMethods = template.findResources('AWS::ApiGateway::Method', {
+      Properties: { HttpMethod: 'DELETE' },
+    });
+    const onSlug = Object.values(deleteMethods).filter(
+      (m) => (m.Properties as { ResourceId?: { Ref?: string } }).ResourceId?.Ref === slugId,
+    );
+    expect(onSlug).toHaveLength(1);
+    expect((onSlug[0].Properties as { AuthorizationType?: string }).AuthorizationType).toBe('COGNITO_USER_POOLS');
   });
 
-  test('remove-workspace handler env wires registry + project mapping tables', () => {
-    template.hasResourceProperties('AWS::Lambda::Function', {
-      Environment: {
-        Variables: Match.objectLike({
-          LINEAR_WORKSPACE_REGISTRY_TABLE_NAME: Match.anyValue(),
-          LINEAR_PROJECT_MAPPING_TABLE_NAME: Match.anyValue(),
-        }),
-      },
+  // Locate the RemoveWorkspaceFn unambiguously: it is the ONLY Lambda whose
+  // role carries a `secretsmanager:DeleteSecret` grant (the webhook Lambdas
+  // hold Get/Put only). We resolve the role from that policy, then find the
+  // function bound to it. This pins the remaining remove-workspace
+  // assertions to the right function without relying on a synth-hashed
+  // Code asset or a fragile env-var-shape heuristic.
+  function findRemoveWorkspaceFn(): { logicalId: string; role: string } {
+    const policies = template.findResources('AWS::IAM::Policy');
+    const deletePolicies = Object.values(policies).filter((p) => {
+      const doc = (p.Properties as { PolicyDocument: { Statement: Array<{ Action?: unknown }> } })
+        .PolicyDocument;
+      return doc.Statement.some((s) => {
+        const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+        return actions.includes('secretsmanager:DeleteSecret');
+      });
     });
+    expect(deletePolicies).toHaveLength(1);
+    const roleRefs = ((deletePolicies[0].Properties as { Roles?: Array<{ Ref?: string }> }).Roles ?? [])
+      .map((r) => r.Ref);
+    expect(roleRefs).toHaveLength(1);
+    const role = roleRefs[0]!;
+
+    const fns = template.findResources('AWS::Lambda::Function');
+    const matches = Object.entries(fns).filter(
+      ([, fn]) => (fn.Properties as { Role?: { 'Fn::GetAtt'?: [string, string] } })
+        .Role?.['Fn::GetAtt']?.[0] === role,
+    );
+    expect(matches).toHaveLength(1);
+    return { logicalId: matches[0][0], role };
+  }
+
+  test('remove-workspace handler wires ONLY the workspace registry (no project mapping table)', () => {
+    // B2: the mapping-cleanup path was dropped, so the remove-workspace
+    // function must NOT carry the project-mapping table env var (that was
+    // the dead grant + no-op cleanup the reviewer flagged).
+    const { logicalId } = findRemoveWorkspaceFn();
+    const fn = template.findResources('AWS::Lambda::Function')[logicalId];
+    const vars = (fn.Properties as { Environment: { Variables: Record<string, unknown> } })
+      .Environment.Variables;
+    expect(vars).toHaveProperty('LINEAR_WORKSPACE_REGISTRY_TABLE_NAME');
+    expect(vars).not.toHaveProperty('LINEAR_PROJECT_MAPPING_TABLE_NAME');
   });
 
-  test('remove-workspace role can delete the per-workspace OAuth secret prefix', () => {
-    template.hasResourceProperties('AWS::IAM::Policy', {
-      PolicyDocument: {
-        Statement: Match.arrayWith([
-          Match.objectLike({
-            Action: 'secretsmanager:DeleteSecret',
-            Effect: 'Allow',
-          }),
-        ]),
-      },
+  test('remove-workspace role can delete ONLY the bgagent-linear-oauth-* secret prefix (scope pinned to the role)', () => {
+    // Bind the DeleteSecret grant to the remove-workspace role AND pin the
+    // resource ARN to the bgagent-linear-oauth-* prefix, so a future
+    // widening of that wildcard (or attaching DeleteSecret to another role)
+    // fails this test.
+    const { role } = findRemoveWorkspaceFn();
+    const policies = template.findResources('AWS::IAM::Policy');
+    const deletePolicies = Object.values(policies).filter((p) => {
+      const doc = (p.Properties as { PolicyDocument: { Statement: Array<{ Action?: unknown }> } })
+        .PolicyDocument;
+      return doc.Statement.some((s) => {
+        const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+        return actions.includes('secretsmanager:DeleteSecret');
+      });
     });
+    expect(deletePolicies).toHaveLength(1);
+
+    const policy = deletePolicies[0];
+    // The policy is attached to the remove-workspace role only.
+    const roleRefs = ((policy.Properties as { Roles?: Array<{ Ref?: string }> }).Roles ?? [])
+      .map((r) => r.Ref);
+    expect(roleRefs).toContain(role);
+
+    // The DeleteSecret statement's resource ends with the documented prefix.
+    const stmt = (policy.Properties as {
+      PolicyDocument: { Statement: Array<{ Action?: unknown; Resource?: unknown }> };
+    }).PolicyDocument.Statement.find((s) => {
+      const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+      return actions.includes('secretsmanager:DeleteSecret');
+    })!;
+    expect(JSON.stringify(stmt.Resource)).toContain('bgagent-linear-oauth-*');
   });
 
   test('creates one Secrets Manager secret (webhook signing) — OAuth tokens are CLI-created at runtime', () => {

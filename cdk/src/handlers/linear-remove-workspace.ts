@@ -30,7 +30,6 @@ const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const sm = new SecretsManagerClient({});
 
 const WORKSPACE_REGISTRY_TABLE = process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME!;
-const PROJECT_MAPPING_TABLE = process.env.LINEAR_PROJECT_MAPPING_TABLE_NAME!;
 
 /** Same slug shape the CLI enforces (`SLUG_RE` in cli/src/commands/linear.ts). */
 const SLUG_RE = /^[a-zA-Z0-9_-]{4,50}$/;
@@ -49,15 +48,20 @@ const SLUG_RE = /^[a-zA-Z0-9_-]{4,50}$/;
  *      longer resolve a token and its inbound webhooks stop routing).
  *   2. Delete the per-workspace `bgagent-linear-oauth-<slug>` secret so no
  *      credential lingers.
- *   3. Delete project mappings that carry this workspace's id (best effort).
  *
- * Query flags:
- *   - `purge=true`         — delete the registry row outright (no audit row).
- *   - `keep_mappings=true` — leave `LinearProjectMappingTable` rows alone.
+ * Query flag:
+ *   - `purge=true` — delete the registry row outright (no audit row).
  *
  * Idempotent on the secret: if the secret is already gone we report
  * `secret_deleted: false` and still complete the revoke, so a retried or
  * partially-completed removal converges cleanly.
+ *
+ * Project mappings are NOT touched here: `LinearProjectMappingTable` rows
+ * carry no workspace identifier (the `onboard-project` writer records only
+ * `linear_project_id`), so they cannot be attributed to a workspace. Removing
+ * a mapping is a by-project-id operation (see LINEAR_SETUP_GUIDE). A follow-up
+ * will record `linear_workspace_id` at onboard time to enable workspace-scoped
+ * cleanup.
  */
 export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
   const requestId = ulid();
@@ -65,7 +69,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
   // and the phase that failed — the difference between "which secret
   // leaked?" being answerable from one log line vs. a manual hunt.
   let slug = '';
-  let phase: 'lookup' | 'registry_write' | 'secret_delete' | 'mapping_cleanup' = 'lookup';
+  let phase: 'lookup' | 'registry_write' | 'secret_delete' = 'lookup';
 
   try {
     const userId = extractUserId(event);
@@ -84,7 +88,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     const purge = event.queryStringParameters?.purge === 'true';
-    const keepMappings = event.queryStringParameters?.keep_mappings === 'true';
 
     // ─── Locate the registry row by slug ─────────────────────────────
     // The registry table is keyed on `linear_workspace_id`, so a slug
@@ -92,14 +95,30 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     // removal targets — an already-revoked (or unknown) slug returns 404
     // so the endpoint is not a revoke-oracle and we never re-run the
     // destructive path on a row that's already been torn down.
-    const scan = await ddb.send(new ScanCommand({
-      TableName: WORKSPACE_REGISTRY_TABLE,
-      FilterExpression: 'workspace_slug = :slug AND #status = :active',
-      ExpressionAttributeNames: { '#status': 'status' },
-      ExpressionAttributeValues: { ':slug': slug, ':active': 'active' },
-      Limit: 1,
-    }));
-    const row = scan.Items?.[0];
+    //
+    // No `Limit`: DynamoDB applies a FilterExpression *after* evaluating
+    // items, so `Limit: N` bounds items examined, not items matched — a
+    // filtered `Limit: 1` scan can return `[]` + a LastEvaluatedKey while
+    // the target sits one page deeper (the normal shared-stack state once
+    // the registry holds more than one row). We paginate to completion
+    // instead, matching the small-table convention already used for this
+    // registry in `jira-webhook-processor.ts` and `shared/linear-issue-lookup.ts`.
+    // The registry holds one row per onboarded workspace and stays small
+    // (tens of rows at most); if it ever grows large, add a GSI on
+    // `workspace_slug` and Query it.
+    let row: Record<string, unknown> | undefined;
+    let scanKey: Record<string, unknown> | undefined;
+    do {
+      const page = await ddb.send(new ScanCommand({
+        TableName: WORKSPACE_REGISTRY_TABLE,
+        FilterExpression: 'workspace_slug = :slug AND #status = :active',
+        ExpressionAttributeNames: { '#status': 'status' },
+        ExpressionAttributeValues: { ':slug': slug, ':active': 'active' },
+        ExclusiveStartKey: scanKey,
+      }));
+      row = page.Items?.[0];
+      scanKey = page.LastEvaluatedKey as Record<string, unknown> | undefined;
+    } while (!row && scanKey);
     if (!row) {
       // Collapse "no such row" and "already revoked" into one 404 — the
       // caller learns nothing about existence, and there's nothing left
@@ -128,25 +147,23 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     // error log to find and hand-purge it.
     phase = 'registry_write';
 
-    // ─── Registry: revoke (soft) or purge (hard) ─────────────────────
-    // Revoke-first is deliberate: the OAuth resolver fail-closes on any
-    // non-active status, so the workspace stops resolving tokens and
-    // routing webhooks the instant this write lands, even before the
-    // secret is deleted.
-    if (purge) {
-      await ddb.send(new DeleteCommand({
-        TableName: WORKSPACE_REGISTRY_TABLE,
-        Key: { linear_workspace_id: linearWorkspaceId },
-      }));
-    } else {
-      await ddb.send(new UpdateCommand({
-        TableName: WORKSPACE_REGISTRY_TABLE,
-        Key: { linear_workspace_id: linearWorkspaceId },
-        UpdateExpression: 'SET #status = :revoked, revoked_at = :now, revoked_by_platform_user_id = :uid, updated_at = :now',
-        ExpressionAttributeNames: { '#status': 'status' },
-        ExpressionAttributeValues: { ':revoked': 'revoked', ':now': now, ':uid': userId },
-      }));
-    }
+    // ─── Registry: revoke first (fail-closed), always ────────────────
+    // Even on `--purge` we flip the row to `status='revoked'` BEFORE
+    // deleting the secret, rather than deleting the row outright. This is
+    // deliberate: the OAuth resolver fail-closes on any non-active status,
+    // so the workspace stops resolving tokens and routing webhooks the
+    // instant this write lands. It also keeps the row present through the
+    // secret-delete step, so a failure there can persist a durable
+    // orphaned-secret marker on the row (see `markSecretDeletionFailed`).
+    // The hard `--purge` delete of the row happens only AFTER the secret
+    // is confirmed gone.
+    await ddb.send(new UpdateCommand({
+      TableName: WORKSPACE_REGISTRY_TABLE,
+      Key: { linear_workspace_id: linearWorkspaceId },
+      UpdateExpression: 'SET #status = :revoked, revoked_at = :now, revoked_by_platform_user_id = :uid, updated_at = :now',
+      ExpressionAttributeNames: { '#status': 'status' },
+      ExpressionAttributeValues: { ':revoked': 'revoked', ':now': now, ':uid': userId },
+    }));
 
     // ─── Secrets Manager: delete the per-workspace OAuth secret ───────
     // Idempotent: a ResourceNotFoundException means the secret was already
@@ -167,14 +184,15 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const name = (err as { name?: string }).name;
         if (name !== 'ResourceNotFoundException') {
           // A real SM failure (e.g. AccessDenied, throttle). The registry
-          // row is already revoked (fail-closed holds), but the live OAuth
-          // secret is still present. A naive retry re-runs the
-          // status='active' scan, finds nothing, and returns 404 — so it
-          // would NEVER re-attempt this delete. Persist a durable marker
-          // on the row (best-effort) so the leaked secret is discoverable
-          // and the operator can hand-purge it, then surface a distinct,
-          // actionable error instead of an opaque 500. Do NOT swallow.
-          await markSecretDeletionFailed(linearWorkspaceId, oauthSecretArn, name, purge)
+          // row is already revoked (fail-closed holds) AND still present
+          // (the `--purge` delete has not run yet), so we persist a durable
+          // marker on the row (best-effort) so the leaked secret is
+          // discoverable and the operator can hand-purge it, then surface a
+          // distinct, actionable error instead of an opaque 500. We do NOT
+          // proceed to the `--purge` row delete — deleting the row here
+          // would strip the only durable record of the orphaned secret. Do
+          // NOT swallow.
+          await markSecretDeletionFailed(linearWorkspaceId, oauthSecretArn, name)
             .catch((markErr) => logger.error('Failed to persist secret-deletion-failed marker', {
               request_id: requestId,
               linear_workspace_id: linearWorkspaceId,
@@ -203,16 +221,16 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       }
     }
 
-    // ─── Project mappings (optional) ─────────────────────────────────
-    // The mapping table is keyed on `linear_project_id` and only rows that
-    // carry a `linear_workspace_id` can be attributed to this workspace.
-    // Rows onboarded before that field existed cannot be safely matched to
-    // a slug, so they are intentionally left alone (see PR notes) — the
-    // operator can remove them by project id if needed.
-    phase = 'mapping_cleanup';
-    let mappingsRemoved = 0;
-    if (!keepMappings) {
-      mappingsRemoved = await deleteWorkspaceProjectMappings(linearWorkspaceId, requestId);
+    // ─── Registry: purge (hard delete) ───────────────────────────────
+    // Only on `--purge`, and only now that the secret is confirmed gone —
+    // so we never delete the audit/marker row while a live secret could
+    // still be orphaned.
+    if (purge) {
+      phase = 'registry_write';
+      await ddb.send(new DeleteCommand({
+        TableName: WORKSPACE_REGISTRY_TABLE,
+        Key: { linear_workspace_id: linearWorkspaceId },
+      }));
     }
 
     logger.info('Linear workspace removed', {
@@ -221,7 +239,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       linear_workspace_id: linearWorkspaceId,
       mode: purge ? 'purged' : 'revoked',
       secret_deleted: secretDeleted,
-      mappings_removed: mappingsRemoved,
     });
 
     return successResponse(200, {
@@ -229,7 +246,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       linear_workspace_id: linearWorkspaceId,
       status: purge ? 'purged' : 'revoked',
       secret_deleted: secretDeleted,
-      mappings_removed: mappingsRemoved,
     }, requestId);
   } catch (err) {
     // Include the workspace slug + failing phase so on-call can locate an
@@ -246,20 +262,18 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
 /**
  * Best-effort durable marker written to the registry row when the OAuth
- * secret delete fails after the row was already revoked. Makes the
- * orphaned-secret condition discoverable (the row is still readable even
- * after `--purge` fails at the secret step, because the delete happens
- * after the row write). Never throws to the caller — the caller already
+ * secret delete fails after the row was already revoked. The registry row is
+ * always still present at this point — the revoke is an `UpdateCommand` and
+ * the `--purge` row delete runs only after the secret is confirmed gone — so
+ * the marker survives on every flag combination and makes the orphaned-secret
+ * condition discoverable. Never throws to the caller — the caller already
  * logs + returns an actionable error.
  */
 async function markSecretDeletionFailed(
   linearWorkspaceId: string,
   oauthSecretArn: string,
   errorName: string | undefined,
-  purged: boolean,
 ): Promise<void> {
-  // If the row was purged there is nothing to annotate; skip.
-  if (purged) return;
   await ddb.send(new UpdateCommand({
     TableName: WORKSPACE_REGISTRY_TABLE,
     Key: { linear_workspace_id: linearWorkspaceId },
@@ -271,46 +285,4 @@ async function markSecretDeletionFailed(
       ':arn': oauthSecretArn,
     },
   }));
-}
-
-/**
- * Delete every `LinearProjectMappingTable` row attributable to the given
- * workspace. Attribution is by the `linear_workspace_id` field on the row;
- * rows without it are skipped (cannot be safely matched to a workspace).
- * Returns the number of rows deleted.
- *
- * Logs per-page progress so a partial teardown (a delete failing on a
- * later page) is reconstructable from the request id — the already-deleted
- * pages are gone, and because the registry row is already revoked a retry
- * 404s at the scan, so recovery is `--keep-mappings` + manual cleanup.
- */
-async function deleteWorkspaceProjectMappings(
-  linearWorkspaceId: string,
-  requestId: string,
-): Promise<number> {
-  let removed = 0;
-  let lastKey: Record<string, unknown> | undefined;
-  do {
-    const scan = await ddb.send(new ScanCommand({
-      TableName: PROJECT_MAPPING_TABLE,
-      FilterExpression: 'linear_workspace_id = :ws',
-      ExpressionAttributeValues: { ':ws': linearWorkspaceId },
-      ExclusiveStartKey: lastKey,
-    }));
-    for (const item of scan.Items ?? []) {
-      await ddb.send(new DeleteCommand({
-        TableName: PROJECT_MAPPING_TABLE,
-        Key: { linear_project_id: item.linear_project_id as string },
-      }));
-      removed += 1;
-    }
-    lastKey = scan.LastEvaluatedKey as Record<string, unknown> | undefined;
-    logger.info('Linear project-mapping cleanup page', {
-      request_id: requestId,
-      linear_workspace_id: linearWorkspaceId,
-      removed_so_far: removed,
-      has_more: Boolean(lastKey),
-    });
-  } while (lastKey);
-  return removed;
 }
