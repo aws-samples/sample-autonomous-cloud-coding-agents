@@ -189,7 +189,6 @@ spike issues were created + deleted; no migration code written.
 - Any implementation. This is a direction + go/no-go record only.
 - Changes to the orchestration engine, OAuth/token storage (done, ADR-016
   governs pluggable identity), or the Slack/Jira channels.
-- The auto-decomposition planner — orthogonal.
 
 ## References
 

@@ -90,14 +90,12 @@ Paste the secret at the prompt. ABCA stores it on the workspace's per-workspace 
 
 ```bash
 bgagent linear list-projects --slug <slug>     # find the project UUID
-# Add --decompose-allowed if you want the bgagent:decompose / bgagent:auto
-# planning flow on this project (it is OFF by default).
-bgagent linear onboard-project <project-uuid> --repo owner/repo --label abca --decompose-allowed
+bgagent linear onboard-project <project-uuid> --repo owner/repo --label abca
 ```
 
 Default trigger label is `bgagent`; pass `--label <name>` to override.
 
-Optional flags on `onboard-project`: `--decompose-allowed` (enable the `bgagent:decompose` / `bgagent:auto` auto-decomposition planning flow — **off by default**, so without it those labels silently run as a single task), `--team-id` (Linear team UUID, debug only), `--region`, `--stack-name`.
+Optional flags on `onboard-project`: `--team-id` (Linear team UUID, debug only), `--region`, `--stack-name`.
 
 ### 7. Test
 
@@ -182,24 +180,19 @@ No additional setup is required — this happens automatically once the workspac
 
 ## Trigger labels
 
-The base trigger label (default `bgagent`, or whatever you passed to `--label` at onboarding) has three variants. All examples below assume the default `bgagent`; substitute your workspace's label if you overrode it.
+The base trigger label (default `bgagent`, or whatever you passed to `--label` at onboarding) has one variant. All examples below assume the default `bgagent`; substitute your workspace's label if you overrode it.
 
 | Label | What it does | Use it when |
 |-------|--------------|-------------|
-| `bgagent` | **Do it.** Reads the issue, makes the change, opens a PR. If the issue already has sub-issues, it runs those in dependency order instead (see [orchestration](#parentsub-issue-orchestration)). | The issue is a single, well-defined piece of work. |
-| `bgagent:decompose` | **Plan it first.** Breaks a larger issue into a set of smaller sub-issues, posts the plan as a comment, and **waits for your approval** before creating or running anything. | The issue has several parts and you want to review the breakdown (and its worst-case cost) before spending. |
-| `bgagent:auto` | **Plan it and start immediately** — same breakdown as `:decompose`, but no approval step. | You trust ABCA to split the work and want it to just go. |
+| `bgagent` | **Do it.** Reads the issue, makes the change, opens a PR. If the issue already has sub-issues, it runs those in dependency order instead (see [orchestration](#parentsub-issue-orchestration)). | The issue is a single, well-defined piece of work, or a parent whose sub-issues you have already written. |
 | `bgagent:help` | **Explain the labels.** Posts a one-time comment describing what each label does, then creates no task. Remove it afterward. | You're new to ABCA on this issue and want a reminder of the options. |
 
-> **Create these labels in Linear and give each a one-line description.** ABCA matches labels by name, so you create them yourself (Linear → Settings → Labels, or inline on any issue). Add a short description to each — Linear shows it on hover in the label picker, which is the only discoverability a first-time teammate gets. Suggested descriptions: **`bgagent`** — "Hand this issue to ABCA — makes the change and opens a PR"; **`bgagent:decompose`** — "ABCA proposes a plan first and waits for your approval"; **`bgagent:auto`** — "ABCA plans and starts immediately, no approval"; **`bgagent:help`** — "ABCA explains what its labels do". Grouping them under a shared label prefix/group also keeps them together and away from unrelated labels in the picker.
+> **Create these labels in Linear and give each a one-line description.** ABCA matches labels by name, so you create them yourself (Linear → Settings → Labels, or inline on any issue). Add a short description to each — Linear shows it on hover in the label picker, which is the only discoverability a first-time teammate gets. Suggested descriptions: **`bgagent`** — "Hand this issue to ABCA — makes the change and opens a PR"; **`bgagent:help`** — "ABCA explains what its labels do". Grouping them under a shared label prefix/group also keeps them together and away from unrelated labels in the picker.
 
 Notes:
 
-- **The approval conversation is interactive.** After a `:decompose` plan is posted, reply `@bgagent approve` to run it, `@bgagent reject` to discard it, or just tell it what to change in plain language — e.g. `@bgagent make it 2 tasks instead of 3` — and it re-plans and posts an updated breakdown. Repeat until you're happy, then approve.
-- **A plain `bgagent` label on a multi-part issue still runs as one task.** If the description looks like it has several parts, ABCA posts a one-line hint suggesting `:decompose` — but it does **not** block the single-task run it already started. If you wanted a plan, add `:decompose` instead.
-- **`:decompose` / `:auto` on an issue that already has sub-issues** is a no-op suffix — there's nothing to decompose, so ABCA just runs the sub-issue graph you already declared.
+- **You decide the breakdown.** ABCA runs the graph you declare — it does not split an issue for you. For work with several parts, create the sub-issues yourself (and the `Blocks`/`Blocked by` links between them), then label the parent; see [orchestration](#parentsub-issue-orchestration). A plain label on a multi-part issue runs it as ONE task.
 - **Once ABCA is working**, reply to its comments with `@bgagent <what you want>` to ask a question or request a change.
-- **Per-project caps** (max sub-issues, max total budget) are set at onboarding and apply to `:decompose` / `:auto`; an over-cap plan is rejected with an explanatory comment.
 
 ## Parent/sub-issue orchestration
 

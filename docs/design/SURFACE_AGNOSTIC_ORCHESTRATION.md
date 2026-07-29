@@ -44,7 +44,7 @@ forks) and reduces the current Linear/Jira duplication (both already expose para
   (`upsertStatusComment`, `swapIssueReaction`/`swapCommentReaction`,
   `transitionIssueState`, `revertIssueToNotStarted`, `postIssueComment`,
   `reportIssueFailure`, `reactToComment`, `replyToComment`, `upsertThreadedReply`,
-  `sweepDecompositionNotes`, `fetchSubIssueGraph`) from `orchestration-rollup.ts`,
+  `sweepTransientNotes`, `fetchSubIssueGraph`) from `orchestration-rollup.ts`,
   `orchestration-reconciler.ts`, `linear-webhook-processor.ts`, and
   `iteration-heartbeat-sweep.ts`. All of those now go through a `Channel`.
 - **Fixed** — the orchestration row FIELDS are now channel-neutral with dual-read

@@ -3,31 +3,32 @@
 > **Status:** IMPLEMENTED. Built as designed below: a second 8 GB / 2 vCPU planning
 > Fargate task def in `EcsAgentCluster`, selected by `workflowIsReadOnly` in the ECS compute
 > strategy. Full CDK build green (2999 tests). Deployed to a dev stack with `--context compute_type=ecs`
-> and verified end-to-end on an ECS-substrate project (a `:decompose` runs on the planning def; a
-> normal coding task still runs on the 64 GB build def).
-> Prompted by a `:decompose` on an ECS-substrate project failing at session-start because that
-> stack had no ECS substrate provisioned — and, more fundamentally, by the question "does *planning*
-> need the 64 GB build box?" The sections below describe the shipped design; a few `.ts:NNN` line
+> and verified end-to-end on an ECS-substrate project (a read-only workflow runs on the planning
+> def; a normal coding task still runs on the build def).
+> Prompted by a read-only task on an ECS-substrate project failing at session-start because that
+> stack had no ECS substrate provisioned — and, more fundamentally, by the question "does a
+> clone-and-read task need the build box?" The sections below describe the shipped design; a few `.ts:NNN` line
 > anchors are from the design snapshot and may have drifted.
 
 ## 1. Problem
 
 An ECS-configured repo (`compute_type: ecs`) runs **every** task on the one Fargate task
-definition in `EcsAgentCluster` — **64 GB / 16 vCPU** (`ecs-agent-cluster.ts:149`). That size exists
-for a specific reason (sizing history in the same file): ABCA's own parallel `mise run build`
-(agent:quality ‖ cdk:build ‖ cli:build ‖ docs:build, each fanning out worker fleets) peaks ~31.6 GB
-and OOM-killed a 32 GB task, so the build tier needs 64 GB headroom.
+definition in `EcsAgentCluster` — the BUILD tier. Its size is measured, not guessed: a fully
+parallel `mise run build` of this repo (agent:quality ‖ cdk:build ‖ cli:build ‖ docs:build, each
+fanning out worker fleets) peaks ~31.6 GB and OOM-killed a 32 GB task. The build tier serialises
+with `MISE_JOBS=1`, which brings the measured peak down to ~3.1 GB, so the shipped default is
+4 vCPU / 16 GB — roughly 5x headroom over what it actually uses.
 
-But **`coding/decompose-v1` is `read_only: true`** — it clones, reads/greps to explore, and emits a
-plan artifact. **It never builds.** Running it on the 64 GB build box is a large over-allocation for
-a clone-and-read workload (and, on a stack that hasn't provisioned ECS at all, it just fails at
+But a read-only workflow such as **`coding/pr-review-v1`** clones and reads/greps to reach a
+conclusion. **It never builds.** Running it on the build box is a large over-allocation for a
+clone-and-read workload (and, on a stack that hasn't provisioned ECS at all, it just fails at
 session-start).
 
 The current code has an explicit decision against the naive fix (`orchestrator.ts:242–252`): *"do
-NOT special-case read-only workflows to agentcore … a repo big enough to need the 64 GB ECS tier for
+NOT special-case read-only workflows to agentcore … a repo big enough to need the ECS build tier for
 building is also big enough to OOM the fixed AgentCore microVM just reading it."* That reasoning is
-about **not routing planning to the wrong substrate FAMILY** (ECS repo → AgentCore). It does **not**
-say planning needs the *same size* as building. This proposal threads that needle: **same family
+about **not routing a read-only task to the wrong substrate FAMILY** (ECS repo → AgentCore). It
+does **not** say reading needs the *same size* as building. This proposal threads that needle: **same family
 (ECS repo → ECS planning, so the OOM concern is respected), right-sized (a smaller task def, since
 planning doesn't build).**
 
@@ -74,34 +75,34 @@ workflows.
 - **Substrate family routing is unchanged** — an ECS repo still plans on ECS (honors
   `orchestrator.ts:242`); an AgentCore repo still plans on AgentCore. This is purely "which ECS task
   def," not "which substrate."
-- **AgentCore repos are untouched** — the AgentCore project the plan-mode work was verified on
+- **AgentCore repos are untouched** — the AgentCore project this was verified on
   doesn't go near this.
-- **No plan-mode logic changes.** The decompose/revise/command/digest behavior is substrate-agnostic;
+- **No workflow logic changes.** Read-only behaviour is substrate-agnostic;
   this only affects the box an ECS-repo planning task runs on.
 
-## 4. Why it's a separate workstream (not the plan-mode stack)
+## 4. Why it's a separate workstream
 - It edits `ecs-agent-cluster.ts`, `agent.ts`, `task-orchestrator.ts`, `ecs-strategy.ts` — all owned
   by the ECS-substrate workstream, which carries the context-gated `compute_type=ecs` deploy.
 - It resolves a tension in `orchestrator.ts:242` that that workstream authored — so that workstream
   should own the change + the sizing call.
 - Verifying it requires a `--context compute_type=ecs` deploy (provisions the Fargate substrate).
   The dev stack is currently `ComputeSubstrate: agentcore` (no ECS resources), so this is a net-new
-  infra deploy — appropriately that workstream's call, not a plan-mode side effect.
+  infra deploy — appropriately that workstream's call, not a side effect of this one.
 
 ## 5. Verification (done)
 1. Deployed with `--context compute_type=ecs` (provisions both task defs). ✅
-2. `:decompose` on the ECS-substrate fork project → planning task ran on the **8 GB planning def**
+2. A read-only workflow on the ECS-substrate project → the task ran on the **8 GB planning def**
    (confirmed via the ECS task's `taskDefinitionArn`), emitted a plan, proposal posted. No OOM. ✅
-3. A normal coding task on the same repo → ran on the **64 GB build def** (build def still selected
+3. A normal coding task on the same repo → ran on the **build def** (build def still selected
    for non-read-only workflows). ✅
 4. Shared container helper (`makeTaskDef` + one `baseEnvironment`) keeps env/grants identical across
    both defs, so the two stay at parity (Linear OAuth reaction fires, artifact delivers, payload
    fetches). Enforced by construction and asserted in `ecs-agent-cluster.test.ts`. ✅
-5. AgentCore regression: `:decompose` on an AgentCore repo still plans on the microVM,
+5. AgentCore regression: a read-only workflow on an AgentCore repo still runs on the microVM,
    unaffected by the `readOnly` flag (AgentCore ignores it). ✅
 
 ## 6. Open sizing question (starting point: 8 GB)
-8 GB / 2 vCPU is the initial size. If a very large ECS-onboarded repo makes a decompose-v1
+8 GB / 2 vCPU is the initial size. If a very large ECS-onboarded repo makes a read-only
 clone + read approach the cap, size up in 8 GB steps on Container Insights `MemoryUtilized` evidence
-(the same empirical method the 64 GB build def was arrived at) — bump the `PlanningTaskDef` cpu/mem
+(the same empirical method the build def was arrived at) — bump the `PlanningTaskDef` cpu/mem
 in `ecs-agent-cluster.ts`. No code path change is needed to grow it.
