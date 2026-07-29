@@ -108,6 +108,32 @@ test('rejects a keyword embedded in a longer word (refixes)', () => {
   assert.equal(validateCommitMessage('feat: x\n\nrefixes #5').ok, false);
 });
 
+test('exempts a merge commit (auto-generated subject, no issue ref)', () => {
+  // `git merge origin/main` — which CONTRIBUTING tells contributors to run —
+  // produces this subject with no issue link and must not be blocked.
+  const r = validateCommitMessage(
+    "Merge remote-tracking branch 'origin/main' into feat/186-adr003-hooks\n",
+  );
+  assert.equal(r.ok, true);
+});
+
+test('exempts a revert commit', () => {
+  const r = validateCommitMessage('Revert "feat: something"\n\nThis reverts commit abc123.');
+  assert.equal(r.ok, true);
+});
+
+test('exempts fixup!/squash!/amend! commits', () => {
+  for (const prefix of ['fixup! feat: x', 'squash! fix: y', 'amend! chore: z']) {
+    assert.equal(validateCommitMessage(prefix).ok, true, `expected "${prefix}" to be exempt`);
+  }
+});
+
+test('does NOT exempt a normal commit whose body merely mentions "merge"', () => {
+  // Exemption keys off the SUBJECT line only, not incidental "merge" in prose.
+  const r = validateCommitMessage('feat: teach the merge helper a trick\n\nno reference here');
+  assert.equal(r.ok, false);
+});
+
 test('handles CRLF line endings (comment stripped, body ref survives)', () => {
   // Real COMMIT_EDITMSG files may carry \r\n (Windows / core.autocrlf).
   assert.equal(validateCommitMessage('feat: x\r\n\r\nCloses #7\r\n').ok, true);

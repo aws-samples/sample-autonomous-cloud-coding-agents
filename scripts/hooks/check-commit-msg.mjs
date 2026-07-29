@@ -29,6 +29,13 @@
  * commit to an issue on GitHub. A bare `#N` mention with no keyword does NOT
  * satisfy the gate — the reference must be intentional, not incidental prose.
  *
+ * Exempt commits (git-generated, not authored contribution work): merge
+ * commits (`Merge ...`), reverts (`Revert ...`), and fixup!/squash! commits.
+ * These carry auto-generated subjects with no issue link; requiring one would
+ * make a routine `git merge origin/main` — which the contribution guide tells
+ * contributors to run — impossible. This mirrors the default ignore set of
+ * conventional commit-msg linters (commitlint et al.).
+ *
  * Wiring: a `commit-msg`-type local hook in `.pre-commit-config.yaml`. prek /
  * pre-commit invoke commit-msg hooks with the path to the commit message file
  * (`.git/COMMIT_EDITMSG`) as the sole positional argument.
@@ -44,6 +51,11 @@ import { fileURLToPath } from 'node:url';
 // Reference forms accepted after the keyword: `#N`, `GH-N`, or `owner/repo#N`.
 const ISSUE_REF =
   /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|refs?)\b\s+(?:[\w.-]+\/[\w.-]+)?(?:#|gh-)\d+/i;
+
+// Git-generated / non-authored commits whose subject lines are auto-produced
+// and carry no issue link. Matched on the first non-comment line only.
+const EXEMPT_SUBJECT =
+  /^(?:Merge\b|Revert\b|fixup!|squash!|amend!)/i;
 
 /**
  * Strip git comment lines (those beginning with `#`), which git removes before
@@ -64,6 +76,12 @@ function stripComments(message) {
  */
 export function validateCommitMessage(message) {
   const body = stripComments(message ?? '');
+  // Exempt git-generated commits (merge / revert / fixup / squash / amend),
+  // keyed off the first non-blank content line (the subject).
+  const subject = body.split('\n').find((line) => line.trim() !== '') ?? '';
+  if (EXEMPT_SUBJECT.test(subject.trim())) {
+    return { ok: true };
+  }
   if (ISSUE_REF.test(body)) {
     return { ok: true };
   }
