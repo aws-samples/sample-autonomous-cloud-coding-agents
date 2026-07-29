@@ -108,6 +108,12 @@ export interface MaturingReplyInput {
   /** Cumulative cost across ALL iterations on this PR/issue (incl. this one). */
   readonly runningTotalUsd?: number | null;
   /**
+   * True when {@link runningTotalUsd} is known to be INCOMPLETE — the row cap was
+   * hit or a read failed partway. Renders as "at least $X" so a short figure is
+   * not presented as the settled total.
+   */
+  readonly runningTotalPartial?: boolean;
+  /**
    * Captured deploy-preview screenshot PNG (our CloudFront URL). Embedded as a
    * clickable image thumbnail in the reply when present, NOT a standalone comment.
    */
@@ -230,7 +236,11 @@ function terminalMetaLine(input: MaturingReplyInput): string {
   const d = dur(input.durationS);
   if (d) parts.push(d);
   const t = usd(input.runningTotalUsd);
-  if (t) parts.push(`total this PR: ${t}`);
+  // Say "at least" when the sum is known to be short. The total is assembled from
+  // a paginated query plus a per-task read, either of which can be capped or fail,
+  // and a figure that is quietly lower than the truth is worse than an obviously
+  // approximate one — someone reconciling spend would have no reason to doubt it.
+  if (t) parts.push(`total this PR: ${input.runningTotalPartial ? `at least ${t}` : t}`);
   return parts.length ? `_${parts.join(' · ')}_` : '';
 }
 

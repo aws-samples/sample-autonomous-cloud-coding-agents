@@ -1419,7 +1419,8 @@ async function replyToStandaloneTrigger(
   // Iteration-UX: cumulative cost across ALL iteration tasks on this PR/issue
   // (incl. this one), so the reply shows a running total over many rounds.
   const issueIdForCost = task.channel_metadata?.linear_issue_id ?? issueId;
-  const runningTotalUsd = await sumIterationCostForIssue(issueIdForCost, task);
+  const { total: runningTotalUsd, partial: runningTotalPartial } =
+    await sumIterationCostForIssue(issueIdForCost, task);
   const thisCost = coerceNumericOrNull(
     task.cost_usd, { field: 'cost_usd', task_id: task.task_id, event_id: event.event_id }, logger,
   );
@@ -1460,6 +1461,7 @@ async function replyToStandaloneTrigger(
       costUsd: thisCost,
       durationS,
       runningTotalUsd,
+      runningTotalPartial,
       // Only fold the preview thumbnail in on a real edit (a question didn't
       // change the UI). The screenshot links to the live deploy when known.
       ...(state === 'updated' && screenshotUrl ? { screenshotUrl } : {}),
@@ -1525,11 +1527,16 @@ async function replyToStandaloneTrigger(
  * issue. (They previously had separate copies, which had already drifted on how a
  * string ``cost_usd`` was handled.)
  */
-async function sumIterationCostForIssue(issueId: string, current: TaskRecord): Promise<number | null> {
+async function sumIterationCostForIssue(
+  issueId: string,
+  current: TaskRecord,
+): Promise<{ total: number | null; partial: boolean }> {
   const tableName = process.env.TASK_TABLE_NAME;
   const currentCost = coerceNumericOrNull(current.cost_usd, { field: 'cost_usd', task_id: current.task_id }, logger) ?? 0;
-  if (!tableName || !issueId) return currentCost || null;
-  const { total } = await sumIterationCostForIssueShared({
+  // No table or no issue means only this task's own cost is knowable. That is not
+  // a partial SUM — there was nothing else to add — so it is reported as complete.
+  if (!tableName || !issueId) return { total: currentCost || null, partial: false };
+  return sumIterationCostForIssueShared({
     ddb,
     taskTableName: tableName,
     linearIssueId: issueId,
@@ -1537,7 +1544,6 @@ async function sumIterationCostForIssue(issueId: string, current: TaskRecord): P
     thisCost: currentCost,
     logLabel: 'fanout/linear',
   });
-  return total;
 }
 
 /**

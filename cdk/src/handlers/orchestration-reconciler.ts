@@ -1130,14 +1130,14 @@ async function replyToIterationComment(
   // standard failure reply (which a human can reply to, to retry).
   const prNumber = await resolvePrNumber(evt.taskId);
   const prUrl = await resolvePrUrl(evt.taskId);
-  const runningTotalUsd = (await sumIterationCostForIssue({
+  const { total: runningTotalUsd, partial: runningTotalPartial } = await sumIterationCostForIssue({
     ddb,
     taskTableName: TASK_TABLE,
     linearIssueId: changedSubIssueId,
     thisTaskId: evt.taskId,
     ...(evt.costUsd !== undefined && { thisCost: evt.costUsd }),
     logLabel: 'reconciler',
-  })).total;
+  });
   // Strongly-consistent re-read of this iteration's screenshot so
   // the settle renders the preview thumbnail itself (race-free against the
   // screenshot webhook's append), matching the fanout/standalone path. Only an
@@ -1152,7 +1152,7 @@ async function replyToIterationComment(
       ...(evt.answerText !== undefined && { answerText: evt.answerText }),
       ...(evt.costUsd !== undefined && { costUsd: evt.costUsd }),
       ...(evt.durationS !== undefined && { durationS: evt.durationS }),
-      ...(runningTotalUsd !== null && { runningTotalUsd }),
+      ...(runningTotalUsd !== null && { runningTotalUsd, runningTotalPartial }),
       ...(shot.screenshotUrl ? { screenshotUrl: shot.screenshotUrl } : {}),
       ...(shot.screenshotUrl && shot.deployUrl ? { deployUrl: encodeMarkdownUrl(shot.deployUrl) } : {}),
     })

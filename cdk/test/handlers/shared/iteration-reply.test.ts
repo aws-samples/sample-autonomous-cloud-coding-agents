@@ -104,6 +104,25 @@ describe('renderMaturingReply — the edit-in-place states', () => {
     expect(r).toContain('[![preview](https://cdn/x.png)](https://app.vercel.app)');
   });
 
+  test('a KNOWN-INCOMPLETE running total renders as "at least", not as the settled figure', () => {
+    // The sum comes from a paginated query plus a per-task read, either of which can
+    // be capped or fail. When it is short, saying so is the whole point: a number
+    // quietly lower than the truth is worse than an obviously approximate one,
+    // because nobody reconciling spend would think to doubt it.
+    const r = renderMaturingReply({
+      state: 'updated', prNumber: 293, costUsd: 0.79, runningTotalUsd: 2.04, runningTotalPartial: true,
+    });
+    expect(r).toContain('total this PR: at least $2.04');
+  });
+
+  test('a complete running total is NOT hedged', () => {
+    const r = renderMaturingReply({
+      state: 'updated', prNumber: 293, costUsd: 0.79, runningTotalUsd: 2.04,
+    });
+    expect(r).toContain('total this PR: $2.04');
+    expect(r).not.toContain('at least');
+  });
+
   test('updated with screenshot but NO deploy url → plain embedded image (no link target)', () => {
     const r = renderMaturingReply({ state: 'updated', prNumber: 7, screenshotUrl: 'https://cdn/y.png' });
     expect(r).toContain('![preview](https://cdn/y.png)');
