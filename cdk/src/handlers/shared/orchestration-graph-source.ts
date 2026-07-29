@@ -35,11 +35,10 @@
  *
  *  2. DECLARATIVE graph — the trigger has no native sub-issues, so the
  *     caller SUPPLIES the DAG. {@link declarativeGraphSource} takes a
- *     ready-made node list. This is the slot for:
- *       - CLI / API: a request body carrying tasks + ``depends_on`` edges.
- *       - A planner agent turning ONE plain request into
- *         a phased DAG and hands the nodes here — reusing the ENTIRE
- *         executor instead of reimplementing gating/stacking/rollup.
+ *     ready-made node list. This is the slot for a CLI / API request body
+ *     carrying tasks + ``depends_on`` edges, or for any future producer that
+ *     computes a graph: it reuses the ENTIRE executor rather than
+ *     reimplementing gating, stacking and rollup.
  *
  *  3. DELEGATE / single — a structureless trigger (e.g. a plain Slack
  *     message) either stays single-task or references a native epic by id
@@ -89,11 +88,11 @@ export function linearGraphSource(
 }
 
 /**
- * Tier 2 — declarative graph. The caller already has the node list (a
- * CLI/API request, or a planner's output). An empty
- * list means "no graph" → single task. Never errors (the nodes are
- * in-memory); DAG validity (cycles/dangling/dupes) is still enforced
- * downstream by ``validateDag`` in the discovery composer.
+ * Tier 2 — declarative graph. The caller already has the node list (e.g. a
+ * CLI/API request that carries its own edges). An empty list means "no graph" →
+ * single task. Never errors (the nodes are in-memory); DAG validity
+ * (cycles/dangling/dupes) is still enforced downstream by ``validateDag`` in the
+ * discovery composer.
  */
 export function declarativeGraphSource(children: readonly SubIssueNode[]): OrchestrationGraphSource {
   return async () => {

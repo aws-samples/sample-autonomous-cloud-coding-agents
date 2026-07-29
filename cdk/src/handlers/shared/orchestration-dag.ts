@@ -24,9 +24,8 @@
  * layering the reconciler uses to release children in dependency order.
  *
  * Kept deliberately free of Linear/AWS types so it is trivially unit-
- * testable and reusable by a planner, which
- * validates its own generated graph with the same cycle check before
- * writing sub-issues back to the tracker.
+ * testable, and so any future producer of a graph can validate its own nodes
+ * with the same cycle check before they are written back to the tracker.
  */
 
 /** A single node in the dependency graph (one Linear sub-issue). */

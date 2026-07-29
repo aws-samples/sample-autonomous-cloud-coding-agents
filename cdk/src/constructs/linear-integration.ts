@@ -37,16 +37,16 @@ import { LinearWorkspaceRegistryTable } from './linear-workspace-registry-table'
 const DEFAULT_TASK_RETENTION_DAYS = 90;
 
 /**
- * Webhook-processor Lambda timeout (seconds). The auto-decomposition
- * planner makes up to two Bedrock ``InvokeModel`` calls, and the
- * stage-2 decomposer on a large issue can take ~50s (measured: 3055 output
- * tokens ≈ 49s). At the old 30s ceiling the Lambda was killed mid-call — a
- * silent hang + async-retry storm with no user-facing comment. Raised to 120s so
- * a legitimate large decomposition completes; the planner's own per-call budget
- * (PLANNER_INVOKE_TIMEOUT_MS = 75s) is set below this so a genuinely-stuck call
- * still throws into the graceful single-task fallback INSIDE this ceiling. Safe:
- * the receiver returns 200 and async-invokes this processor (InvocationType
- * 'Event'), so nothing waits synchronously on it.
+ * Webhook-processor Lambda timeout (seconds). One event drives a chain of real
+ * synchronous work: resolve the workspace OAuth token, probe the issue, fetch +
+ * screen + store every attachment (each a network round-trip plus a guardrail
+ * call), seed the sub-issue graph, and release the root children — each release
+ * being its own task admission. At the old 30s ceiling an issue with several
+ * attachments or a wide root layer was killed mid-call, which surfaces as a
+ * silent hang plus an async-retry storm and no user-facing comment. 120s leaves
+ * room for the worst realistic case. Safe: the receiver returns 200 and
+ * async-invokes this processor (InvocationType 'Event'), so nothing waits
+ * synchronously on it.
  */
 const WEBHOOK_PROCESSOR_TIMEOUT_SECONDS = 120;
 
@@ -326,35 +326,11 @@ export class LinearIntegration extends Construct {
         ],
       }));
     }
-    // The DETERMINISTIC revise path (interpret a plan-edit
-    // instruction → structured edits, applied to the current plan in code) makes
-    // ONE short bedrock:InvokeModel call to the interpret model. Scoped to the
-    // single sonnet foundation-model + its cross-region inference-profile ARN
-    // (parity with the ecs-agent-cluster + agent.ts grants), NOT the '*' the
-    // retired inline PLANNER once held — the planner itself stays in the
-    // ``coding/decompose-v1`` agent. Only the tiny "which edit did they mean"
-    // classification runs inline here (full-plan generation never does).
-    for (const arn of [
-      Stack.of(this).formatArn({
-        service: 'bedrock',
-        region: '*',
-        account: '',
-        resource: 'foundation-model',
-        resourceName: 'anthropic.claude-sonnet-4-6',
-        arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
-      }),
-      Stack.of(this).formatArn({
-        service: 'bedrock',
-        resource: 'inference-profile',
-        resourceName: 'us.anthropic.claude-sonnet-4-6',
-        arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
-      }),
-    ]) {
-      webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
-        actions: ['bedrock:InvokeModel'],
-        resources: [arn],
-      }));
-    }
+    // No bedrock:InvokeModel grant: this processor never calls a model directly.
+    // Its only Bedrock use is ApplyGuardrail above, to screen third-party text and
+    // attachment bytes before they reach an agent. All model inference happens
+    // inside the agent runtime, under the agent's own role.
+    //
     // Issue descriptions can carry markdown `![alt](https://…)` images, which
     // `extractImageUrlAttachments` (linear-webhook-processor.ts) turns into
     // URL attachments. `createTaskCore` then uploads the screened bytes to

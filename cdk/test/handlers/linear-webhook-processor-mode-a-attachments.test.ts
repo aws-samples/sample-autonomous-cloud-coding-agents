@@ -20,13 +20,12 @@
 /**
  * A parent issue that carries uploads.linear.app attachments (description links
  * AND/OR native paperclips) and has PRE-EXISTING sub-issues seeds its
- * orchestration graph HERE in the webhook processor — NOT through the
- * reconciler's seedDecomposedGraph (which handles auto-decomposed plans).
- * So the parent's attachments must be hydrated at THIS seam and stamped on the
- * meta row (releaseContext.pre_screened_attachments) so every child inherits
- * them. Auto-decomposition and single-task are covered elsewhere; this file
- * isolates the pre-existing-sub-issue seed seam, which was previously blind to
- * the parent's attachments.
+ * orchestration graph HERE in the webhook processor. So the parent's attachments
+ * must be hydrated at THIS seam and stamped on the meta row
+ * (releaseContext.pre_screened_attachments) so every child inherits them. The
+ * single-task path is covered elsewhere; this file isolates the
+ * pre-existing-sub-issue seed seam, which was previously blind to the parent's
+ * attachments.
  *
  * Separate file (not the sibling orchestration-routing test) because the
  * attachment screening clients are constructed at MODULE-EVAL time from

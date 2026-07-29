@@ -35,15 +35,14 @@ export const TRACE_ARTIFACT_TTL_DAYS = 7;
 export const TRACE_OBJECT_KEY_PREFIX = 'traces/';
 
 /**
- * Key prefix for task ARTIFACTS — ``artifacts/<task_id>/<name>`` — the other,
- * disjoint key space in this bucket. Deliberately separate from
- * {@link TRACE_OBJECT_KEY_PREFIX}: a trace is a full agent trajectory including
- * tool input/output and is readable only by the user who produced it, whereas an
- * artifact is a task's declared output that platform components consume. Grant
- * on this prefix, never on the whole bucket, so an artifact reader cannot reach
- * another user's trajectory.
+ * This bucket holds a SECOND, disjoint key space the agent writes to:
+ * ``artifacts/<task_id>/<name>``, a task's declared output. There is deliberately
+ * no exported constant for it, because nothing on the platform side reads an
+ * artifact today. Any component that starts to MUST be granted on that prefix
+ * alone and never on the bucket, or it could reach ``traces/<user_id>/`` — a full
+ * agent trajectory including tool input and output, readable only by the user who
+ * produced it.
  */
-export const ARTIFACT_OBJECT_KEY_PREFIX = 'artifacts/';
 
 /**
  * Properties for TraceArtifactsBucket construct.

@@ -26,8 +26,9 @@ import * as path from 'path';
  * whose handler transitively reaches `attachment-screening.extractPdfText` MUST
  * ship pdf-parse unbundled via `nodeModules: ['pdf-parse']`, or every PDF
  * attachment fails at runtime ("could not be processed") while passing every
- * unit test — a deploy-only bug that has bitten twice (the initial no-MCP
- * webhook path, then the decompose-seed path on the reconciler).
+ * unit test — a deploy-only bug that has bitten twice, on two different
+ * handlers, which is why the invariant is enforced structurally below rather
+ * than left to whoever adds the next one.
  *
  * This test makes that invariant STRUCTURAL: it walks the handler import graph
  * to find every entry point that reaches `attachment-screening`, maps each to

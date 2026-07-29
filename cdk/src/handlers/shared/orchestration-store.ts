@@ -91,12 +91,10 @@ export interface OrchestrationChildRow {
   /** Sub-issue title, used to build the child task description. */
   readonly title?: string;
   /**
-   * Sub-issue scope/description. When the graph came from the planner
-   * a planner produced the piece, this is its rich per-piece scope — persisted at
-   * seed so the coding agent's task_description carries what the reviewer
-   * approved (e.g. a promised filename), not the title alone. Absent when the
-   * graph was read from sub-issues a human already wrote, since that path
-   * fetches titles only.
+   * Sub-issue scope/description, when the graph source supplied one. Persisted at
+   * seed so the coding agent's task_description carries the per-piece scope (e.g.
+   * a promised filename), not the title alone. Absent when the graph was read
+   * from sub-issues a human already wrote, since that path fetches titles only.
    */
   readonly description?: string;
   /**

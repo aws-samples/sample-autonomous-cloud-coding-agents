@@ -39,8 +39,16 @@ import {
   type LinearProbeAttachment,
   type LinearProbeDocument,
 } from './shared/linear-issue-context-probe';
+import {
+  renderEpicAlreadyCompleteNote,
+  renderEpicRetryNote,
+  renderLabelHelp,
+  renderNoLinkedTaskNudge,
+  renderTaskLookupFailedNudge,
+  renderWrongMentionNudge,
+} from './shared/linear-notes';
 import { resolveLinearOauthToken } from './shared/linear-oauth-resolver';
-import { fetchIssueParentId, type SubIssueNode } from './shared/linear-subissue-fetch';
+import { fetchIssueParentId } from './shared/linear-subissue-fetch';
 import { lookupTaskByLinearIssue, prNumberFromTask } from './shared/linear-task-by-issue';
 import { logger } from './shared/logger';
 import { type Channel, type IssueRef } from './shared/orchestration-channel';
@@ -49,63 +57,11 @@ import {
   buildIterationInstruction,
   detectNearMissMention,
   parseCommentTrigger,
-  parsePlanVerdict,
   parseRetryIntent,
   type CommentTrigger,
 } from './shared/orchestration-comment-trigger';
-import { applyPlanCaps, readProjectCaps } from './shared/orchestration-decomposition-caps';
-import {
-  runPlanVerdict,
-  type DecompositionEffects,
-} from './shared/orchestration-decomposition-flow';
-import {
-  AUTO_SUFFIX,
-  DECOMPOSE_SUFFIX,
-  DEFAULT_LABEL_FILTER as MODE_DEFAULT_LABEL_FILTER,
-  hasHelpLabel,
-  HELP_SUFFIX,
-  looksMultiPart,
-  parseDecompositionMode,
-  triggerLabelVariants,
-} from './shared/orchestration-decomposition-mode';
-import {
-  renderAlreadyDecomposedNote,
-  renderApprovedPlanReference,
-  renderCommandCollapseNote,
-  renderDecomposeStartedNote,
-  renderDiscardedPlanReference,
-  renderEpicAlreadyCompleteNote,
-  renderEpicRetryNote,
-  renderLabelHelp,
-  renderMultiPartHint,
-  renderPendingPlanNudge,
-  renderPlanCommandError,
-  renderPlanProposal,
-  renderRevisionCapNote,
-  renderRevisionFailedNote,
-  renderRevisionOverCapNote,
-  renderRevisionToSingleNote,
-  renderReviseEscalatedNote,
-  renderReviseNoChangeNote,
-  renderReviseUnclearNote,
-  renderSingleTaskCancelled,
-  renderSingleTaskApprovedReference,
-  renderWrongMentionNudge,
-  renderNoLinkedTaskNudge,
-  renderTaskLookupFailedNudge,
-} from './shared/orchestration-decomposition-render';
-import {
-  consumePendingPlan as consumePendingPlanRow,
-  discardPendingPlan as discardPendingPlanRow,
-  getPendingPlan,
-  type PendingPlan,
-  putPendingPlan as putPendingPlanRow,
-  replacePendingPlan as replacePendingPlanRow,
-} from './shared/orchestration-decomposition-store';
-import { DEFAULT_MAX_SUB_ISSUES, type DecompositionPlan, type PlannedSubIssue } from './shared/orchestration-decomposition-types';
-import { linearGraphqlFn } from './shared/orchestration-decomposition-writeback';
 import { discoverOrchestration } from './shared/orchestration-discovery';
-import { declarativeGraphSource, linearGraphSource } from './shared/orchestration-graph-source';
+import { linearGraphSource } from './shared/orchestration-graph-source';
 import { isIntegrationNode } from './shared/orchestration-integration-node';
 import {
   nodeDisplayId,
@@ -114,13 +70,11 @@ import {
   suggestClosestNode,
   looksLikeNewWork,
 } from './shared/orchestration-parent-comment';
-import { applyPlanCommand, parsePlanCommand, type PlanCommand } from './shared/orchestration-plan-commands';
-import { applyPlanEdits, diffPlans, renderPlanDiff } from './shared/orchestration-plan-revise';
-import { bedrockInvokeRevise, interpretRevise, type InvokeReviseFn } from './shared/orchestration-plan-revise-interpret';
 import { computeEpicRetryPlan } from './shared/orchestration-reconcile';
 import { applyTerminalCreateFailures, readConcurrencyBudget, releaseReadyChildren } from './shared/orchestration-release';
 import { upsertEpicPanel } from './shared/orchestration-rollup';
 import { claimCommentAck, clearRollupClaim, deriveOrchestrationId, loadOrchestration, setChildOwnAttachments, setRetryCommentId, setStatusCommentId, type OrchestrationChildRow, type OrchestrationReleaseContext } from './shared/orchestration-store';
+import { DEFAULT_LABEL_FILTER, hasHelpLabel, HELP_SUFFIX } from './shared/trigger-label';
 import type { Attachment, PassedAttachmentRecord } from './shared/types';
 import { MAX_ATTACHMENTS_PER_TASK, MAX_TASK_DESCRIPTION_LENGTH } from './shared/validation';
 import { CODING_WORKFLOW_ID } from './shared/workflows';
@@ -135,7 +89,6 @@ const WORKSPACE_REGISTRY_TABLE = process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAM
 // orchestration stack is deployed — while unset, the parent/sub-issue path is
 // fully dormant and the handler behaves exactly as one-issue → one-task.
 const ORCHESTRATION_TABLE = process.env.ORCHESTRATION_TABLE_NAME;
-const DEFAULT_LABEL_FILTER = 'bgagent';
 // Throttle the seed-time root release to the user's free concurrency
 // budget. Unset → release all roots (back-compat; admission still gates).
 const USER_CONCURRENCY_TABLE = process.env.USER_CONCURRENCY_TABLE_NAME;
@@ -154,19 +107,6 @@ const attachmentsScreeningConfig: ScreeningConfig | undefined =
   attachmentsBedrockClient && GUARDRAIL_ID && GUARDRAIL_VERSION
     ? { bedrockClient: attachmentsBedrockClient, guardrailId: GUARDRAIL_ID, guardrailVersion: GUARDRAIL_VERSION }
     : undefined;
-// Decomposition: TTL (seconds) for a persisted pending plan awaiting approval. A
-// week is ample for a human to approve; the row self-expires after.
-const PENDING_PLAN_TTL_SECONDS = 604_800;
-// Plan-revise loop: hard cap on re-plan rounds per pending plan. Each revision
-// is a full clone+plan agent run (~$0.20 / ~2min), so an endless "no, again"
-// loop is real spend. At the cap we stop re-planning and tell the reviewer to
-// approve the current plan, reject, or edit the issue + re-label to start over.
-const MAX_DECOMPOSE_REVISIONS = 3;
-// The model transport for the deterministic revise INTERPRET step
-// (current plan + digest + instruction → structured edits). Lazily binds a Bedrock
-// client on first use (cold-start cost only paid on the revise path). Module-level
-// so it's reused across warm invocations.
-const reviseInvoke: InvokeReviseFn = bedrockInvokeRevise();
 // createTaskCore rejects idempotency keys longer than this; synthesized keys
 // are sliced to fit the validated /^[A-Za-z0-9_-]{1,128}$/ pattern.
 const MAX_IDEMPOTENCY_KEY_LENGTH = 128;
@@ -246,9 +186,9 @@ interface HydrateAttachmentsParams {
  * `uploadsText` (description or comment body) plus any native paperclips,
  * returning `passed` records for `preScreenedAttachments`. Shared by EVERY
  * Linear task-dispatch path — the initial single-task path, the epic seed from a
- * human-authored graph, the decompose/revise/approve paths, and the `@bgagent`
- * comment paths — so the agent (which has no Linear MCP) always receives the
- * files a human pointed it at, wherever they were attached.
+ * human-authored graph, and the `@bgagent` comment paths — so the agent (which
+ * has no Linear MCP) always receives the files a human pointed it at, wherever
+ * they were attached.
  *
  * Fail-closed: returns `{ok:false, message}` when uploads ARE present but can't
  * be screened (screening unconfigured, or a fetch/screen failure) — the caller
@@ -767,7 +707,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   // no comment, no reaction, no task creation, no DDB writes.
   if (!shouldTrigger(payload, labelFilter)) {
     // A just-added label that looks like an ABCA trigger (the base
-    // ``abca``/``bgagent`` or any ``:decompose``/``:auto``/``:help`` suffix) fell
+    // ``abca``/``bgagent``, or that base with the ``:help`` suffix) fell
     // through here SILENTLY when the project wasn't mapped — because an unmapped
     // project has no configured ``label_filter``, so it defaults to ``bgagent``
     // and a plain ``abca`` label never matches ``shouldTrigger``. Observed in
@@ -844,19 +784,6 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     return;
   }
   const repo = mappingItem.repo as string;
-
-  // Classify the trigger label. ``:decompose``/``:auto`` on an UNDECOMPOSED
-  // issue runs the planner; otherwise this is the unchanged human-authored-graph
-  // / single-task path. ``hasSubIssues`` is determined authoritatively by
-  // discoverOrchestration below (seeded/extended ⇒ it had a graph), so here we
-  // only need the suffix intent — pass hasSubIssues=false and let discovery's
-  // result decide. The caps come from the same mapping row.
-  const decompositionDecision = parseDecompositionMode(
-    (issue.labels ?? []).map((l) => l?.name),
-    /* hasSubIssues (refined by discovery) */ false,
-    labelFilter,
-  );
-  const decompositionCaps = readProjectCaps(mappingItem);
 
   // Resolve the actor → platform user. Fall back to creator if the actor is missing
   // (e.g. automation that set the label). If neither resolves, we cannot attribute
@@ -974,9 +901,8 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   //   - transient Linear error → terminal comment; do NOT silently
   //     degrade to a single task (that would drop the epic structure).
   if (ORCHESTRATION_TABLE && resolvedAccessToken) {
-    // A parent with pre-existing sub-issues seeds HERE, not through the
-    // reconciler's decomposition path — so hydrate the parent's attachments
-    // and stamp them on the meta row (releaseContext) so every child inherits them.
+    // Hydrate the parent's attachments and stamp them on the meta row
+    // (releaseContext) so every child inherits them.
     //
     // Fetch the sub-issue graph ONCE up front so we can (a) only hydrate the
     // parent's attachments to the `epic-<id>` key when children ACTUALLY exist
@@ -1038,6 +964,15 @@ export async function handler(event: ProcessorEvent): Promise<void> {
         linear_workspace_slug: channelMetadata.linear_workspace_slug,
       }),
       linear_project_id: projectId,
+      // The label this project actually triggers on, persisted at seed time
+      // because this is the only point where the project mapping is in hand — the
+      // reconciler works from the meta row and has no project id to look one up
+      // with. The epic panel's retry hint names it, and telling an operator to
+      // re-apply the default when their project triggers on something else sends
+      // them to a label that starts nothing. Normalised through the same
+      // expression the trigger gate matches on, so the hint can never name a label
+      // the webhook would not accept.
+      trigger_label: (labelFilter || DEFAULT_LABEL_FILTER).trim().toLowerCase(),
       ...(epicAttachments.length > 0 && { pre_screened_attachments: epicAttachments }),
     };
 
@@ -1070,14 +1005,6 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       return;
     }
     if (discovery.kind === 'seeded') {
-      // If a ``:decompose``/``:auto`` suffix was applied to an issue that ALREADY
-      // has sub-issues, the suffix is a no-op — there's nothing to decompose, so
-      // we just run the existing graph. Surface that so the user's stated
-      // decompose intent isn't silently ignored (the note renderer existed but was
-      // never posted). Reaching 'seeded' means a graph was present, so a
-      // decompose/auto decision here was suffix-suppressed. Only on
-      // the FIRST seed (not replays) + best-effort, like the panel below.
-      await maybePostAlreadyDecomposedNote(decompositionDecision, discovery.alreadyExisted, issue.id, workspaceId);
       let snapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId);
       // Child-OWN attachments: a human-authored sub-issue can carry a file
       // attached to IT specifically (a mockup for just that piece), distinct from
@@ -1211,7 +1138,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
         // instead of the old misleading "running the existing sub-issue graph"
         // note that re-ran nothing. A still-running or all-succeeded epic has
         // nothing to retry and reports honestly.
-        await maybeRetryTerminalEpic(discovery.orchestrationId, issue.id, workspaceId, decompositionDecision);
+        await maybeRetryTerminalEpic(discovery.orchestrationId, issue.id, workspaceId);
         logger.info('Linear orchestration re-trigger — no new sub-issues to add', {
           issue_id: issue.id, orchestration_id: discovery.orchestrationId,
         });
@@ -1304,161 +1231,8 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       }
       return;
     }
-    // discovery.kind === 'single_task' → the issue had no sub-issues.
-    //
-    // If it carried a ``:decompose``/``:auto`` label, run the planner now. On
-    // 'seed' we hand the planner's (now real-Linear-id) graph to the SAME
-    // discovery+release path as a human-authored graph — one source of truth. On
-    // 'handled'/'noop' a comment was posted (awaiting approval, rejected,
-    // over-cap, write-back error) and we must NOT also create a task. On
-    // 'single_task' the planner declined → fall through to the single task.
-    if (
-      resolvedAccessToken
-      && (decompositionDecision.mode === 'decompose' || decompositionDecision.mode === 'auto')
-    ) {
-      // Agent-native planning: dispatch a coding/decompose-v1 AGENT TASK instead
-      // of the old inline two-call Bedrock planner. The agent clones the repo and
-      // plans with FULL context on the tunable substrate — which root-fixes both
-      // the 30s Lambda ceiling the inline planner kept exceeding and its blindness
-      // to the repo — emitting the plan JSON as an artifact. The reconciler's
-      // terminal branch reads that artifact and seeds the sub-issues (caps +
-      // approval gate preserved there).
-      // The decompose mode + caps + parent context ride in channel_metadata so
-      // the terminal handler can act without re-deriving them.
-      const planMeta: Record<string, string> = {
-        ...channelMetadata,
-        decompose_mode: decompositionDecision.mode, // 'decompose' | 'auto'
-        decompose_parent_issue_id: issue.id,
-        decompose_caps_max_sub_issues: String(decompositionCaps.max_sub_issues),
-        decompose_caps_allowed: String(decompositionCaps.decompose_allowed),
-        // The label that actually triggered this run, so the epic panel's retry
-        // hint can name it. Without this the reconciler has nothing to persist and
-        // every epic tells the operator to re-apply the DEFAULT label, which is a
-        // dead end on a project configured to trigger on anything else.
-        decompose_trigger_label: labelFilter,
-        ...(decompositionCaps.max_parent_budget_usd !== undefined && {
-          decompose_caps_max_parent_budget_usd: String(decompositionCaps.max_parent_budget_usd),
-        }),
-      };
-      // Dedup guard: a rapid label off/on toggle — or a webhook
-      // redelivery — re-enters this branch and would dispatch a SECOND (third…)
-      // decompose-v1 planning task for the same issue, since nothing here consults
-      // the pending-plan/active-task state (getPendingPlan is only on the comment
-      // path). Claim once per issue+mode over the redelivery window; a lost claim
-      // means a planning run for this issue+mode is already in flight, so skip.
-      // (A genuine re-decompose after the plan is consumed/expired is rare and is
-      // caught downstream by the pending-plan + already-decomposed guards.)
-      const planClaimTtl = Math.floor(Date.now() / 1000) + ACK_CLAIM_TTL_SECONDS;
-      const planClaimWon = await claimCommentAck(
-        ddb, ORCHESTRATION_TABLE, deriveOrchestrationId(issue.id),
-        `decompose-dispatch:${decompositionDecision.mode}`, new Date().toISOString(), planClaimTtl,
-      );
-      if (!planClaimWon) {
-        logger.info('Decompose: a planning task for this issue+mode is already in flight — skipping duplicate dispatch', {
-          issue_id: issue.id, mode: decompositionDecision.mode,
-        });
-        return;
-      }
-      const planReqId = crypto.randomUUID();
-      // Fail-CLOSED on a probe error. probedAttachments came from the
-      // entry probe; if that failed (ok:false) we can't see native paperclips, so
-      // don't dispatch the planner blind to a spec it can't retrieve (no Linear
-      // MCP). The description-embedded uploads check below still holds regardless.
-      if (!probeOk) {
-        await safeReportIssueFailure(
-          issue.id, workspaceId,
-          "❌ ABCA couldn't read this issue's attachments from Linear (the API errored or timed out). "
-          + 'Re-apply the trigger label to retry rather than plan a decomposition on a possibly-missing spec.',
-        );
-        return;
-      }
-      const planHasAttachments = Boolean(issue.description?.includes('uploads.linear.app'))
-        || probedAttachments.some((a) => isLinearUploadsUrl(a.url));
-      // ADR-016: hand the planner the ACTUAL attachment bytes, not just a "there
-      // are attachments" flag — a spec PDF / mockup is exactly what a good
-      // decomposition needs to see. Mint the plan taskId up front so the S3 keys
-      // match. Children get their own copy at seed time (the reconciler's
-      // hydrateParentAttachmentsForSeed), so this is the planner's view only.
-      // Fail-closed: an unscreenable attachment rejects the decompose.
-      const planTaskId = ulid();
-      const planHydrated = await hydrateLinearIssueAttachments(
-        issue, workspaceId, platformUserId, resolvedAccessToken,
-        planTaskId, MAX_ATTACHMENTS_PER_TASK, probedAttachments,
-      );
-      if (!planHydrated.ok) {
-        await safeReportIssueFailure(issue.id, workspaceId, `❌ ${planHydrated.message}`);
-        return;
-      }
-      const planResult = await createTaskCore(
-        {
-          repo,
-          workflow_ref: 'coding/decompose-v1',
-          task_description: buildDecompositionTaskDescription(issue, planHasAttachments),
-        },
-        {
-          userId: platformUserId,
-          channelSource: 'linear',
-          channelMetadata: planMeta,
-          taskId: planTaskId,
-          ...(planHydrated.records.length > 0 && { preScreenedAttachments: planHydrated.records }),
-        },
-        planReqId,
-      );
-      if (planResult.statusCode !== 201) {
-        logger.warn('Decompose-planning task creation returned non-201', {
-          status: planResult.statusCode, issue_id: issue.id,
-        });
-        if (attachmentsS3Client && ATTACHMENTS_BUCKET) {
-          await cleanupPreScreenedForComment(planHydrated.records);
-        }
-        await safeReportIssueFailure(
-          issue.id, workspaceId,
-          buildCreateTaskFailureMessage(planResult.statusCode, planResult.body),
-        );
-        return;
-      }
-      logger.info('Decompose-planning task dispatched (agent-native)', {
-        issue_id: issue.id, mode: decompositionDecision.mode, request_id: planReqId,
-      });
-      // Upfront ack. Planning clones the repo + reasons over full context
-      // (30-120s). Without this the issue stays silent until the finished plan
-      // lands — a slow plan read as "nothing happened". Post an immediate note
-      // (idempotent via claimCommentAck so a redelivery doesn't repeat it, and
-      // ordered before the reconciler's plan comment). Best-effort — never
-      // blocks the planning run that already started.
-      if (WORKSPACE_REGISTRY_TABLE && ORCHESTRATION_TABLE) {
-        try {
-          const won = await claimCommentAck(
-            ddb, ORCHESTRATION_TABLE, deriveOrchestrationId(issue.id), 'decompose-ack',
-            new Date().toISOString(), Math.floor(Date.now() / 1000) + ACK_CLAIM_TTL_SECONDS,
-          );
-          if (won) {
-            const channel = channelFor(WORKSPACE_REGISTRY_TABLE);
-            const parent = issueRef(issue.id, workspaceId);
-            await channel.upsertComment(
-              parent,
-              renderDecomposeStartedNote(decompositionDecision.mode === 'auto'),
-            );
-            // Without this the board and the thread disagree: the planning task is
-            // a read-only agent that deliberately does NOT touch issue state, so
-            // the issue used to sit in its backlog state through planning +
-            // approval — the board looked untouched while the bot worked, and the
-            // help text points the reader at comments (the wrong place on the
-            // board). Move it to a visible running state here so the board
-            // reflects reality, mirroring the single-task path (which the agent
-            // transitions at runtime). Idempotent + backward-safe inside the
-            // transition; best-effort.
-            await channel.transitionState?.(parent, 'started');
-          }
-        } catch (err) {
-          logger.warn('Failed to post decompose upfront ack (non-fatal)', {
-            issue_id: issue.id, error: err instanceof Error ? err.message : String(err),
-          });
-        }
-      }
-      // The planning agent runs; the reconciler seeds on its terminal event.
-      return;
-    }
+    // discovery.kind === 'single_task' → the issue had no sub-issues, so fall
+    // through to the single-task path below.
   }
 
   // ADR-016 pre-hydration: fetch recent HUMAN comments and fold them into the
@@ -1592,7 +1366,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   // Lambda tier. This used to be the agent's own `mcp__linear-server__save_comment`
   // call — with the Linear MCP removed (Linear is fully deterministic), the
   // platform owns the comment. Only the single-task first-run path posts it:
-  // orchestration/decompose seeds and comment-iterations returned earlier (their
+  // orchestration seeds and comment-iterations returned earlier (their
   // panel / maturing reply already narrate start). Best-effort — never gates the
   // run that already started. The 👀 reaction + In Progress transition still
   // happen agent-side (linear_reactions.react_task_started); this is the human-
@@ -1610,89 +1384,6 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       });
     }
   }
-
-  // Multi-part hint (customer-caught): a PLAIN ``bgagent`` label on an issue
-  // that looks like several separate parts still runs as ONE task — but the
-  // reviewer never saw a plan. Post a one-time, non-blocking nudge that
-  // ``:decompose`` would show a plan first. Only for the bare-label single-task
-  // path (not decompose/auto/mode_a), only when the description looks multi-part,
-  // and idempotent so a redelivery doesn't repeat it. Best-effort — never blocks
-  // the run that already started.
-  if (
-    decompositionDecision.mode === 'single'
-    && WORKSPACE_REGISTRY_TABLE
-    && ORCHESTRATION_TABLE
-    && looksMultiPart(issue.description)
-  ) {
-    try {
-      const won = await claimCommentAck(
-        ddb, ORCHESTRATION_TABLE, deriveOrchestrationId(issue.id), 'multipart-hint',
-        new Date().toISOString(), Math.floor(Date.now() / 1000) + ACK_CLAIM_TTL_SECONDS,
-      );
-      if (won) {
-        await channelFor(WORKSPACE_REGISTRY_TABLE).upsertComment(
-          issueRef(issue.id, workspaceId),
-          renderMultiPartHint(labelFilter.trim().toLowerCase() || MODE_DEFAULT_LABEL_FILTER),
-        );
-      }
-    } catch (err) {
-      logger.warn('Failed to post multi-part hint (non-fatal)', {
-        issue_id: issue.id, error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-}
-
-/**
- * Build the {@link DecompositionEffects} the ``@bgagent
- * approve``/``reject`` verdict flow ({@link runPlanVerdict}) needs, binding the
- * injected boundaries to this request's real helpers (the Linear GraphQL
- * transport for write-back, the feedback comment poster, the pending-plan store).
- * Kept as a factory so the flow stays free of module-global wiring and is
- * unit-testable in isolation.
- *
- * Agent-native planning: the model-invoke boundary was removed — planning
- * now runs in the ``coding/decompose-v1`` agent and the reconciler seeds from its
- * artifact. This factory serves only the verdict path (which never plans).
- */
-function buildDecompositionEffects(
-  parentIssueId: string,
-  workspaceId: string,
-  repo: string,
-  platformUserId: string,
-  projectId: string,
-  _channelMetadata: Record<string, string>,
-  accessToken: string,
-): DecompositionEffects {
-  return {
-    graphql: linearGraphqlFn(accessToken),
-    postComment: async (issueId, body) => {
-      if (!WORKSPACE_REGISTRY_TABLE) return null;
-      const ref = await channelFor(WORKSPACE_REGISTRY_TABLE)
-        .upsertComment(issueRef(issueId, workspaceId), body);
-      // Report no id when the surface can't hand one back — a blank id would be
-      // persisted and later addressed as if it were a real comment.
-      return ref?.commentId || null;
-    },
-    putPendingPlan: async ({ nodes, proposalCommentId }) => putPendingPlanRow({
-      ddb,
-      tableName: ORCHESTRATION_TABLE!,
-      parentLinearIssueId: parentIssueId,
-      linearWorkspaceId: workspaceId,
-      repo,
-      ...(projectId && { linearProjectId: projectId }),
-      nodes,
-      platformUserId,
-      ...(proposalCommentId !== undefined && { proposalCommentId }),
-      now: new Date().toISOString(),
-      ttlEpochSeconds: Math.floor(Date.now() / 1000) + PENDING_PLAN_TTL_SECONDS,
-    }),
-    consumePendingPlan: async () => {
-      const taken = await consumePendingPlanRow(ddb, ORCHESTRATION_TABLE!, parentIssueId);
-      return taken ? { nodes: taken.nodes } : null;
-    },
-    discardPendingPlan: async () => { await discardPendingPlanRow(ddb, ORCHESTRATION_TABLE!, parentIssueId); },
-  };
 }
 
 /** Outcome of {@link maybeRetryTerminalEpic} — lets a comment-driven caller
@@ -1713,7 +1404,8 @@ type RetryOutcome = 'retried' | 'all_succeeded' | 'still_running' | 'no_orchestr
  *    rollup claim so the panel re-settles) and post {@link renderEpicRetryNote}.
  *  - every child succeeded → post {@link renderEpicAlreadyCompleteNote} (nothing to run).
  *  - the epic is still RUNNING (a child released/running, none failed/skipped) →
- *    fall back to the existing already-decomposed note (benign re-apply).
+ *    stay quiet; the live panel already shows the work in flight, so a re-apply
+ *    needs no note of its own.
  *
  * Best-effort throughout; never throws out of the webhook. Idempotency: the retry
  * is naturally convergent — a redelivery finds the nodes already reset to
@@ -1722,18 +1414,15 @@ type RetryOutcome = 'retried' | 'all_succeeded' | 'still_running' | 'no_orchestr
  * Returns a {@link RetryOutcome} so a comment-driven caller can react: keep 👀
  * on ``retried``, else reply honestly instead of resetting nothing.
  */
-
 async function maybeRetryTerminalEpic(
   orchestrationId: string,
   parentIssueId: string,
   workspaceId: string,
-  decompositionDecision: { mode: string },
   /**
    * When a COMMENT (not a re-label) drives the retry, the caller owns
    * the user-facing acknowledgement (👀→🔄 on the comment + its own reply), so
-   * suppress the label-path advisory notes ("running the existing graph" /
-   * already-complete) — they'd double up with the comment reply. The retry
-   * mechanics (reset + re-release) are identical.
+   * suppress the label-path advisory note (already-complete) — it'd double up
+   * with the comment reply. The retry mechanics (reset + re-release) are identical.
    */
   opts: {
     readonly suppressAdvisoryNotes?: boolean;
@@ -1767,27 +1456,24 @@ async function maybeRetryTerminalEpic(
     const allSucceeded = plan.succeededCount > 0 && plan.succeededCount === snapshot.children.length;
     const outcome: RetryOutcome = allSucceeded ? 'all_succeeded' : 'still_running';
     // A comment-driven caller posts its own honest reply — skip the
-    // label-path advisory notes so they don't double up.
+    // label-path advisory note so they don't double up.
     if (opts.suppressAdvisoryNotes) return outcome;
+    // Still running (nodes released/running, none terminal-failed) — the live
+    // panel already says so, so a re-apply gets no note of its own.
+    if (!allSucceeded) return outcome;
     if (!channel) return outcome;
-    // Post these advisory notes at most once per re-trigger window (a webhook
+    // Post the advisory note at most once per re-trigger window (a webhook
     // redelivery of the SAME label event must not repost). Distinct claim key
     // from the retry itself. Crucially this also stops a redelivery that arrives
     // AFTER a successful retry (children now released/running, none failed) from
-    // re-posting the misleading "running the existing graph" note.
+    // re-posting a stale "already finished" note.
     const won = await claimCommentAck(
       ddb, ORCHESTRATION_TABLE, orchestrationId, 'retrigger-note',
       now, Math.floor(Date.now() / 1000) + ACK_CLAIM_TTL_SECONDS,
     );
     if (!won) return outcome;
-    if (allSucceeded) {
-      // Every child succeeded — the epic is genuinely done.
-      await channel.upsertComment(parentRef, renderEpicAlreadyCompleteNote());
-    } else {
-      // Still running (nodes released/running, none terminal-failed) — benign
-      // re-apply; keep the existing already-decomposed copy.
-      await maybePostAlreadyDecomposedNote(decompositionDecision, false, parentIssueId, workspaceId);
-    }
+    // Every child succeeded — the epic is genuinely done.
+    await channel.upsertComment(parentRef, renderEpicAlreadyCompleteNote());
     return outcome;
   }
 
@@ -1962,7 +1648,7 @@ async function handleEpicRetryIntent(args: {
 }): Promise<void> {
   const { orchestrationId, parentIssueId, workspaceId, commentId, replyIssueId, replyTargetId, channel } = args;
   const outcome = await maybeRetryTerminalEpic(
-    orchestrationId, parentIssueId, workspaceId, { mode: 'mode_a' },
+    orchestrationId, parentIssueId, workspaceId,
     // Dedup on the COMMENT id — reliable even for a failed child with no task_id,
     // and it covers the "nothing to retry" reply too (a redelivery must not
     // re-post the reply / re-swap the reaction).
@@ -2013,145 +1699,6 @@ const RETRY_FINGERPRINT_HASH_LEN = 16;
 /** Stable short hash of the retry fingerprint for the claim key (crypto, not Math.random). */
 function hashRetryFingerprint(fingerprint: string): string {
   return crypto.createHash('sha256').update(fingerprint).digest('hex').slice(0, RETRY_FINGERPRINT_HASH_LEN);
-}
-
-/**
- * Plan cleanup — once a plan is settled (approved → seeded, or rejected →
- * discarded), converge the thread on the SAME shape as a human-authored
- * sub-issue graph: ONE frozen plan-reference comment + (on approve) the live
- * epic panel, with all the transient decomposition notes swept away. Linear has
- * no comment fold (verified in practice), so we don't keep a bulky history —
- * the reference carries a compact "· refined over N rounds" footnote instead.
- *
- * Two moves, both best-effort (a cleanup failure is cosmetic, never blocks the
- * approve/reject that already happened):
- *  1. FREEZE the plan-proposal comment in place — edit it to the static
- *     {@link renderApprovedPlanReference} (approve) or {@link
- *     renderDiscardedPlanReference} (reject), dropping the now-stale action
- *     footer. On approve, requires the plan ``nodes`` (from the consumed pending
- *     row) to re-list the agreed breakdown; ``revisionRound`` drives the
- *     footnote. If there's no tracked proposal comment id (older plan), skip the
- *     freeze — the sweep still tidies the notes.
- *  2. SWEEP every other bot ``🗂️``/``👋`` note off the issue, keeping the frozen
- *     reference (and the differently-prefixed live panel, which the sweep can't
- *     match).
- */
-async function cleanupPlanThread(args: {
-  issueId: string;
-  workspaceId: string;
-  proposalCommentId?: string;
-  outcome:
-    | { readonly kind: 'approved'; readonly nodes: readonly PlannedSubIssue[]; readonly revisionRound?: number }
-    | { readonly kind: 'rejected' };
-}): Promise<void> {
-  if (!WORKSPACE_REGISTRY_TABLE) return;
-  const { issueId, workspaceId, proposalCommentId, outcome } = args;
-  const channel = channelFor(WORKSPACE_REGISTRY_TABLE);
-  const target = issueRef(issueId, workspaceId);
-  try {
-    // 1. Freeze the plan reference in place (only if we tracked its id).
-    if (proposalCommentId) {
-      const frozenBody = outcome.kind === 'approved'
-        ? renderApprovedPlanReference(
-          { shouldDecompose: true, reasoning: '', nodes: outcome.nodes },
-          outcome.revisionRound !== undefined ? { revisionRound: outcome.revisionRound } : {},
-        )
-        : renderDiscardedPlanReference();
-      await channel.upsertComment(target, frozenBody, { commentId: proposalCommentId });
-    }
-    // 2. Sweep the transient notes, keeping the frozen reference.
-    await channel.sweepNotes?.(target, proposalCommentId ? { commentId: proposalCommentId } : undefined);
-  } catch (err) {
-    logger.warn('Plan-thread cleanup failed (non-fatal)', {
-      issue_id: issueId,
-      outcome: outcome.kind,
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
-}
-
-/**
- * Seed the orchestration executor from a planner-produced graph (real Linear
- * sub-issue ids) and release roots. Reuses the SAME discovery → release → panel
- * path as a human-authored graph by passing a ``declarativeGraphSource`` rather than
- * re-reading Linear (the issues were just created; declarative avoids the
- * eventual-consistency race). On the seed result it releases roots + posts the
- * maturing panel exactly like the native-graph path.
- */
-async function seedAndReleaseFromGraph(args: {
-  parentIssueId: string;
-  workspaceId: string;
-  repo: string;
-  projectId: string;
-  platformUserId: string;
-  channelMetadata: Record<string, string>;
-  children: readonly SubIssueNode[];
-}): Promise<void> {
-  if (!ORCHESTRATION_TABLE) return;
-  const { parentIssueId, workspaceId, repo, projectId, platformUserId, channelMetadata, children } = args;
-  const releaseContext: OrchestrationReleaseContext = {
-    platform_user_id: platformUserId,
-    channel_source: 'linear',
-    ...(channelMetadata.linear_oauth_secret_arn && { linear_oauth_secret_arn: channelMetadata.linear_oauth_secret_arn }),
-    ...(channelMetadata.linear_workspace_slug && { linear_workspace_slug: channelMetadata.linear_workspace_slug }),
-    linear_project_id: projectId,
-  };
-
-  const discovery = await discoverOrchestration({
-    ddb,
-    tableName: ORCHESTRATION_TABLE,
-    parentIssueRef: parentIssueId,
-    credentialsRef: workspaceId,
-    repo,
-    now: new Date().toISOString(),
-    releaseContext,
-    graphSource: declarativeGraphSource(children),
-  });
-
-  if (discovery.kind !== 'seeded') {
-    // 'rejected'/'error' shouldn't happen (we just built a valid DAG), but a
-    // replay can return 'extended'/'single_task'; in all cases the reconciler
-    // (or a prior pass) owns the children. Log + return without double-acting.
-    logger.info('Planner seed: discovery returned non-seeded', { parent_issue_id: parentIssueId, kind: discovery.kind });
-    if (discovery.kind === 'rejected' || discovery.kind === 'error') {
-      await safeReportIssueFailure(parentIssueId, workspaceId, `❌ ${discovery.message}`);
-    }
-    return;
-  }
-
-  const snapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId);
-  if (snapshot) {
-    const budget = USER_CONCURRENCY_TABLE
-      ? await readConcurrencyBudget(ddb, USER_CONCURRENCY_TABLE, snapshot.meta.release_context.platform_user_id, MAX_CONCURRENT)
-      : undefined;
-    await releaseReadyChildren(
-      ddb, ORCHESTRATION_TABLE, snapshot.children, snapshot.meta.release_context,
-      createTaskCore, new Date().toISOString(), snapshot.children, 'main', budget,
-    );
-  }
-  // Post the maturing panel (same as the native-graph seed path).
-  if (WORKSPACE_REGISTRY_TABLE) {
-    try {
-      const postRelease = await loadOrchestration(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId);
-      if (postRelease) {
-        const commentId = await upsertEpicPanel({
-          channel: channelFor(WORKSPACE_REGISTRY_TABLE),
-          parent: issueRef(parentIssueId, workspaceId),
-          children: postRelease.children,
-          inProgress: true,
-          mirrorParentState: true,
-        });
-        if (commentId) await setStatusCommentId(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId, commentId);
-      }
-    } catch (err) {
-      logger.warn('Planner seed: failed to post panel (non-fatal)', {
-        parent_issue_id: parentIssueId, error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-  logger.info('Orchestration seeded from planner graph', {
-    parent_issue_id: parentIssueId, orchestration_id: discovery.orchestrationId, child_count: discovery.childCount,
-  });
 }
 
 /**
@@ -2255,9 +1802,9 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
   // AUTHORIZATION: the issue→task path gates on lookupPlatformUser
   // (a Linear actor with no linked ABCA user can't create tasks). The COMMENT
   // path did NOT — so ANY workspace member or guest who can post @bgagent could
-  // approve/reject plans, drive plan commands, and START code-pushing agent runs,
-  // all attributed to and BILLED against the original requester. Resolve the
-  // commenter to a platform user BEFORE any verdict/command/dispatch. Unmapped →
+  // retry an epic and START code-pushing agent runs, all attributed to and
+  // BILLED against the original requester. Resolve the commenter to a platform
+  // user BEFORE any dispatch. Unmapped →
   // ❓ + a one-line reply, then stop. (The bot's own comments never carry the
   // mention token, so they don't reach here; and an app-actor commenter is
   // likewise unmapped, which is correct — the app can't authorize itself.)
@@ -2281,199 +1828,6 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
     } catch { /* best-effort reply */ }
     return;
   }
-
-  // A comment on a parent that has a PENDING plan (proposed but not yet
-  // executed). Checked BEFORE iteration routing because NO orchestration is seeded
-  // yet — the parent has only a pending-plan row, so loadOrchestration misses it.
-  // Sub-cases on a pending plan (see parsePlanVerdict for the classification):
-  //   - approve / reject  → runPlanVerdict (seed or DISCARD — reject is the one
-  //     irreversible action, so it requires EXPLICIT intent: reject/discard/cancel/
-  //     abort/👎, never a bare "no").
-  //   - ambiguous (a soft negation with no change instruction: "no", "no thanks",
-  //     "don't approve", "no, looks wrong") → NUDGE the reviewer to pick, never
-  //     guess-and-destroy.
-  //   - none WITH text → REVISE: re-plan from the feedback (the realistic "deny" —
-  //     a reviewer rejects because they want changes, incl. "no, make it 3 tasks";
-  //     we keep the conversation going instead of dead-ending at discard).
-  //   - none, bare @bgagent (no text) → nudge.
-  // With NO pending plan, none of this applies → fall through to the iteration paths
-  // (so "approve" on a normal sub-issue isn't hijacked).
-  const verdict = parsePlanVerdict(trigger.instruction);
-  const pending = await getPendingPlan(ddb, ORCHESTRATION_TABLE, commentedIssueId);
-
-  // A STRUCTURAL command ("drop 3", "merge 1 and 2", "make #2 small") on a
-  // pending plan is applied DETERMINISTICALLY here — no clone, no agent, instant
-  // + free — instead of spending a ~2-min re-plan round. Checked
-  // BEFORE the verdict/revise routing: a recognized command is a definite edit
-  // intent (approve/reject aren't command verbs, so they don't collide; a bare
-  // "no" isn't a command → still routes to nudge). Anything not a recognized
-  // command falls through to the semantic revise loop below.
-  if (pending) {
-    const command = parsePlanCommand(trigger.instruction);
-    if (command) {
-      await handlePlanCommand({
-        pending, command, commentId, commentedIssueId, workspaceId, resolved,
-      });
-      return;
-    }
-  }
-
-  if (pending && (verdict === 'approve' || verdict === 'reject')) {
-    // Claim-once on this comment so a webhook redelivery doesn't double-seed
-    // (the consume is also atomic, but this skips the duplicate 👀/work).
-    const ttl = Math.floor(Date.now() / 1000) + ACK_CLAIM_TTL_SECONDS;
-    const won = await claimCommentAck(
-      ddb, ORCHESTRATION_TABLE, deriveOrchestrationId(commentedIssueId), commentId, new Date().toISOString(), ttl,
-    );
-    if (!won) {
-      logger.info('Plan verdict: redelivery already handled this comment — skipping', { comment_id: commentId });
-      return;
-    }
-    await channelFor(WORKSPACE_REGISTRY_TABLE)
-      .reactToComment?.({ commentId }, issueRef(commentedIssueId, workspaceId), 'started');
-    // Whatever the verdict turns out to be, this comment must not be left on the
-    // receipt 👀. Unlike a retry — where the work is still in flight and the
-    // outcome only exists later — a verdict is fully resolved by the time these
-    // paths return: approve has dispatched (or reported why it couldn't) and
-    // reject has discarded. Leaving 👀 made the comment the reviewer is watching
-    // read as "still thinking about it" forever, while the issue itself had
-    // already moved on (observed in practice). Settled in a finally so an early
-    // return or a throw inside the verdict handling can't skip it.
-    const verdictComment = { commentId };
-    const verdictTarget = issueRef(commentedIssueId, workspaceId);
-    // Marker state derived from what ACTUALLY happened, not from the verdict that
-    // was asked for. Keying it on `verdict` alone stamped ✅ on paths that had just
-    // posted a ❌ failure message, and the tick is the durable signal a user reads.
-    // 'skip' leaves the marker untouched: nothing was done (raced/expired plan), so
-    // whatever settled it first should stand.
-    let verdictOutcome: 'succeeded' | 'needs_input' | 'skip' = verdict === 'reject' ? 'needs_input' : 'succeeded';
-    const settleVerdictMarker = async (): Promise<void> => {
-      if (verdictOutcome === 'skip') return;
-      try {
-        await channelFor(WORKSPACE_REGISTRY_TABLE)
-          .replaceCommentReaction?.(verdictComment, verdictTarget, verdictOutcome);
-      } catch (err) {
-        // Best-effort: the plan has already been acted on, so a marker failure
-        // must not turn a completed verdict into an error.
-        logger.warn('Could not settle the plan-verdict comment marker (non-fatal)', {
-          comment_id: commentId,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-    };
-    try {
-      // Rebuild the release context's OAuth metadata from the resolved token so
-      // the released children can post back to Linear (the pending plan stores
-      // only ids, not the secret arn — which rotates).
-      const verdictChannelMetadata: Record<string, string> = {
-        linear_oauth_secret_arn: resolved.oauthSecretArn,
-        linear_workspace_slug: resolved.workspaceSlug,
-      };
-      const verdictProjectId = pending.linear_project_id ?? '';
-
-      // Single-task gate: the pending plan is a SINGLE task
-      // (a ``:decompose`` that declined to split), not a graph. Approve → run ONE
-      // coding task (no write-back, no orchestration); reject → discard. Handled
-      // here rather than runPlanVerdict (which is graph-only: consume→writeBack→seed).
-      if (pending.pending_kind === 'single') {
-        const singleOutcome = await handleSingleTaskVerdict({
-          pending, verdict, commentedIssueId, workspaceId, projectId: verdictProjectId, resolved,
-        });
-        // A failed single-task verdict already told the user why, in a ❌ comment.
-        // Mark it needs_input so the reaction agrees with that message and the
-        // thread reads as actionable rather than done.
-        if (singleOutcome === 'failed') verdictOutcome = 'needs_input';
-        else if (singleOutcome === 'skipped') verdictOutcome = 'skip';
-        return;
-      }
-
-      const effects = buildDecompositionEffects(
-        commentedIssueId, workspaceId, pending.repo, pending.platform_user_id,
-        verdictProjectId, verdictChannelMetadata, resolved.accessToken,
-      );
-      // Capture the plan shape BEFORE runPlanVerdict consumes the pending row —
-      // the frozen reference re-lists the AGREED breakdown (pending.nodes), and the
-      // footnote needs the revision round.
-      const settledNodes = pending.nodes;
-      const settledRound = pending.revision_round;
-      const settledProposalCommentId = pending.proposal_comment_id;
-      const flow = await runPlanVerdict({ parentIssueId: commentedIssueId, verdict, effects });
-      if (flow.kind === 'seed') {
-        await seedAndReleaseFromGraph({
-          parentIssueId: commentedIssueId,
-          workspaceId,
-          repo: pending.repo,
-          projectId: verdictProjectId,
-          platformUserId: pending.platform_user_id,
-          channelMetadata: verdictChannelMetadata,
-          children: flow.children,
-        });
-        // Plan cleanup: the panel is now live — freeze the plan comment into a
-        // reference + sweep the transient notes so the thread matches a seeded epic.
-        await cleanupPlanThread({
-          issueId: commentedIssueId,
-          workspaceId,
-          ...(settledProposalCommentId !== undefined && { proposalCommentId: settledProposalCommentId }),
-          outcome: { kind: 'approved', nodes: settledNodes, ...(settledRound !== undefined && { revisionRound: settledRound }) },
-        });
-      } else if (verdict === 'reject' && flow.kind === 'handled') {
-        // Rejected → discard: freeze the plan comment to a one-line "discarded"
-        // record + sweep the notes (incl. runPlanVerdict's own "Plan discarded" ack).
-        await cleanupPlanThread({
-          issueId: commentedIssueId,
-          workspaceId,
-          ...(settledProposalCommentId !== undefined && { proposalCommentId: settledProposalCommentId }),
-          outcome: { kind: 'rejected' },
-        });
-      }
-      logger.info('Plan verdict handled', { issue_id: commentedIssueId, verdict, kind: flow.kind });
-    } finally {
-      await settleVerdictMarker();
-    }
-    return;
-  }
-  if (pending && verdict === 'none' && trigger.instruction.trim().length > 0) {
-    // REVISE: the reviewer wants changes to the proposed plan. Re-plan with a
-    // fresh decompose-v1 agent task that sees the original issue + the prior
-    // proposed plan + this feedback, then the reconciler REPLACES the pending
-    // plan and posts a revised proposal. Interactive, Claude-Code-style.
-    await handlePlanRevision({
-      pending,
-      feedback: trigger.instruction.trim(),
-      commentId,
-      commentedIssueId,
-      workspaceId,
-      resolved,
-    });
-    return;
-  }
-  if (pending && (verdict === 'ambiguous' || (verdict === 'none' && trigger.instruction.trim().length === 0))) {
-    // NUDGE, never guess-and-destroy. Two cases land here:
-    //   - bare @bgagent (no text) — previously a silent drop.
-    //   - an AMBIGUOUS soft negation ("no", "no thanks", "don't approve", "no,
-    //     looks wrong") — a bare "no" could mean discard OR "change it", so we do
-    //     NOT treat it as a reject (that would destroy the plan on the most
-    //     ambiguous input). We ask the reviewer to pick.
-    // Post the one-line nudge (approve / reject / change). Claim-once so a webhook
-    // redelivery doesn't repost. Best-effort; gated on the registry table.
-    if (WORKSPACE_REGISTRY_TABLE) {
-      const won = await claimCommentAck(
-        ddb, ORCHESTRATION_TABLE, deriveOrchestrationId(commentedIssueId), commentId,
-        new Date().toISOString(), Math.floor(Date.now() / 1000) + ACK_CLAIM_TTL_SECONDS,
-      );
-      if (won) {
-        await channelFor(WORKSPACE_REGISTRY_TABLE).upsertComment(
-          issueRef(commentedIssueId, workspaceId),
-          renderPendingPlanNudge(),
-        );
-      }
-    }
-    logger.info('Ambiguous/bare @bgagent on a pending plan — posted nudge', {
-      issue_id: commentedIssueId, verdict,
-    });
-    return;
-  }
-  // No pending plan → fall through to the iteration paths.
 
   // Is the commented issue itself a PARENT epic? deriveOrchestrationId
   // is a pure hash of the issue id, so the parent's own id maps to ITS
@@ -2556,600 +1910,6 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
     resolved,
     registryTableName: WORKSPACE_REGISTRY_TABLE,
   });
-}
-
-/**
- * Plan-revise loop — the reviewer left feedback on a pending plan ("split X",
- * "drop Y", "make these sequential"). Re-plan: dispatch a fresh
- * ``coding/decompose-v1`` agent task that sees the ORIGINAL issue + the prior
- * proposed plan + this feedback, then the reconciler REPLACES the pending plan
- * and posts a revised proposal (round N). This is the realistic "deny" — a
- * reject-with-changes conversation, not a dead-end discard. Capped at
- * {@link MAX_DECOMPOSE_REVISIONS} rounds (each is a real clone+plan run). Never
- * throws — a failure posts a note and leaves the current plan approvable.
- */
-async function handlePlanRevision(args: {
-  pending: PendingPlan;
-  feedback: string;
-  commentId: string;
-  commentedIssueId: string;
-  workspaceId: string;
-  resolved: { accessToken: string; oauthSecretArn: string; workspaceSlug: string };
-}): Promise<void> {
-  if (!ORCHESTRATION_TABLE || !WORKSPACE_REGISTRY_TABLE) return;
-  const { pending, feedback, commentId, commentedIssueId, workspaceId, resolved } = args;
-  const channel = channelFor(WORKSPACE_REGISTRY_TABLE);
-  const target = issueRef(commentedIssueId, workspaceId);
-
-  // Claim-once on the feedback comment so a webhook redelivery doesn't dispatch
-  // the (costly) re-plan twice. Keyed on the comment id, same as the verdict path.
-  const won = await claimCommentAck(
-    ddb, ORCHESTRATION_TABLE, deriveOrchestrationId(commentedIssueId), commentId,
-    new Date().toISOString(), Math.floor(Date.now() / 1000) + ACK_CLAIM_TTL_SECONDS,
-  );
-  if (!won) {
-    logger.info('Plan revise: redelivery already handled this feedback — skipping', { comment_id: commentId });
-    return;
-  }
-
-  const priorRound = pending.revision_round ?? 0;
-  if (priorRound >= MAX_DECOMPOSE_REVISIONS) {
-    // Cap reached — stop re-planning (each round is a full clone+plan run). The
-    // current plan is still pending and approvable; tell the reviewer their options.
-    await channel.upsertComment(target, renderRevisionCapNote(MAX_DECOMPOSE_REVISIONS));
-    logger.info('Plan revise: revision cap reached', { issue_id: commentedIssueId, prior_round: priorRound });
-    return;
-  }
-
-  // Re-read the project caps (the pending row doesn't store them; they gate the
-  // revised plan the same as the original).
-  const projectId = pending.linear_project_id ?? '';
-  let caps = { decompose_allowed: true, max_sub_issues: DEFAULT_MAX_SUB_ISSUES } as ReturnType<typeof readProjectCaps>;
-  if (projectId) {
-    const mapping = await ddb.send(new GetCommand({ TableName: PROJECT_MAPPING_TABLE, Key: { linear_project_id: projectId } }));
-    if (mapping.Item) caps = readProjectCaps(mapping.Item);
-  }
-
-  // 👀 on the reviewer's FEEDBACK comment is the "on it" ack. The deterministic
-  // path settles it 👀→✅ inline the moment the plan updates; the escalation path
-  // leaves it 👀 and the reconciler settles it.
-  await channel.reactToComment?.({ commentId }, target, 'started');
-
-  // Fixes revise amnesia + a fabricated "What changed" line: FIRST try to
-  // interpret the instruction as EDITS to the CURRENT plan and apply them
-  // deterministically — no clone, no re-derive. Reproduced in practice on a
-  // round-2 revise (drop Careers → merge FAQ+Privacy → Careers reappeared): the
-  // old path re-planned from the ISSUE (which still lists Careers) so dropped
-  // nodes came
-  // back, and the model-authored "What changed" then invented a justification.
-  // Editing the stored plan in code means untouched nodes survive verbatim and
-  // edits STACK; the "What changed" line is a computed old→new diff that can't lie.
-  // Only a genuinely repo-dependent change (needs_repo) or an interpret failure
-  // escalates to the repo-cloning agent revise below.
-  const interpretation = await interpretRevise({
-    nodes: pending.nodes,
-    instruction: feedback,
-    ...(pending.repo_digest !== undefined && { repoDigest: pending.repo_digest }),
-    invoke: reviseInvoke,
-  });
-
-  if (interpretation.kind === 'edits') {
-    const applied = applyPlanEdits(pending.nodes, interpretation.edits);
-    if (applied.kind === 'error') {
-      // The interpreter proposed an edit that doesn't hold against the plan (bad
-      // ref, cycle). Don't escalate to a 2-min clone for a bad edit — surface the
-      // reason, leave the plan approvable, settle the ack to ❓ (needs input).
-      await channel.replaceCommentReaction?.({ commentId }, target, 'needs_input');
-      await channel.upsertComment(target, renderReviseUnclearNote(applied.message));
-      logger.info('Plan revise (deterministic): edit invalid — plan untouched', {
-        issue_id: commentedIssueId, message: applied.message,
-      });
-      return;
-    }
-    if (applied.kind === 'collapses') {
-      // The edits leave <2 sub-issues — a revision-to-single. Don't auto-run (the
-      // reviewer is mid-planning); hand them the decision, same as the agent path.
-      await channel.replaceCommentReaction?.({ commentId }, target, 'succeeded');
-      await channel.upsertComment(target, renderRevisionToSingleNote());
-      logger.info('Plan revise (deterministic): collapses to single unit — awaiting decision', {
-        issue_id: commentedIssueId,
-      });
-      return;
-    }
-
-    // Caps still gate a revised plan (a merge can't exceed the cap, but an add
-    // can). Over-cap → keep the current plan, tell the reviewer (revision-aware
-    // note — no "re-label" dead-end), settle the ack.
-    const capResult = applyPlanCaps(
-      { shouldDecompose: true, reasoning: '', nodes: applied.nodes },
-      caps,
-    );
-    if (capResult.kind === 'rejected') {
-      await channel.replaceCommentReaction?.({ commentId }, target, 'needs_input');
-      await channel.upsertComment(target, renderRevisionOverCapNote(capResult.summary));
-      logger.info('Plan revise (deterministic): over cap — plan untouched', {
-        issue_id: commentedIssueId, reason: capResult.reason,
-      });
-      return;
-    }
-
-    // Compute the honest before→after diff (NEVER model self-report) and render it
-    // as the "What changed" line via renderPlanProposal's changeSummary slot.
-    const diff = diffPlans(pending.nodes, applied.nodes);
-    if (diff.unchanged) {
-      // The edit resolved to a no-op — say so plainly, don't fake an "Updated".
-      await channel.replaceCommentReaction?.({ commentId }, target, 'succeeded');
-      await channel.upsertComment(target, renderReviseNoChangeNote());
-      logger.info('Plan revise (deterministic): no-op edit — plan unchanged', { issue_id: commentedIssueId });
-      return;
-    }
-    const nextRound = priorRound + 1;
-    const revisedPlan: DecompositionPlan = {
-      shouldDecompose: true,
-      reasoning: '',
-      nodes: applied.nodes,
-      changeSummary: renderPlanDiff(diff),
-    };
-    // Edit the ONE plan comment in place, keeping the "Updated breakdown" header
-    // + the computed "What changed" line.
-    const rendered = await channel.upsertComment(
-      target,
-      renderPlanProposal(revisedPlan, { autoRun: false, revisionRound: nextRound }),
-      pending.proposal_comment_id ? { commentId: pending.proposal_comment_id } : undefined,
-    );
-    const carriedCommentId = rendered?.commentId || pending.proposal_comment_id;
-    // Persist the edited nodes as the new pending plan (replace — a revision must
-    // overwrite). Bump revision_round; carry the digest + sha forward unchanged
-    // (a plan edit doesn't change the repo). Preserves the same idempotency the
-    // structural-command path uses.
-    await replacePendingPlanRow({
-      ddb,
-      tableName: ORCHESTRATION_TABLE,
-      parentLinearIssueId: commentedIssueId,
-      linearWorkspaceId: workspaceId,
-      repo: pending.repo,
-      ...(pending.linear_project_id !== undefined && { linearProjectId: pending.linear_project_id }),
-      nodes: applied.nodes,
-      platformUserId: pending.platform_user_id,
-      ...(carriedCommentId !== undefined && { proposalCommentId: carriedCommentId }),
-      revisionRound: nextRound,
-      ...(pending.repo_digest !== undefined && { repoDigest: pending.repo_digest }),
-      ...(pending.repo_digest_sha !== undefined && { repoDigestSha: pending.repo_digest_sha }),
-      now: new Date().toISOString(),
-      ttlEpochSeconds: Math.floor(Date.now() / 1000) + PENDING_PLAN_TTL_SECONDS,
-    });
-    // Settle the reviewer's feedback comment 👀→✅ inline (the deterministic path
-    // completes synchronously — no reconciler round to do it).
-    await channel.replaceCommentReaction?.({ commentId }, target, 'succeeded');
-    logger.info('Plan revise applied deterministically (no clone, no re-derive)', {
-      issue_id: commentedIssueId,
-      round: nextRound,
-      node_count: applied.nodes.length,
-      removed: diff.removed.length,
-      added: diff.added.length,
-      modified: diff.modified.length,
-    });
-    return;
-  }
-
-  if (interpretation.kind === 'unclear') {
-    // Not an actionable edit (a question / too vague). Nudge with the interpreter's
-    // clarifying ask; leave the plan approvable. Settle the ack to ❓ (needs input).
-    await channel.replaceCommentReaction?.({ commentId }, target, 'needs_input');
-    await channel.upsertComment(target, renderReviseUnclearNote(interpretation.message));
-    logger.info('Plan revise: instruction not an actionable edit — nudged', { issue_id: commentedIssueId });
-    return;
-  }
-
-  // needs_repo OR interpret error → ESCALATE to the repo-cloning agent revise.
-  // Even here it REVISES the current plan (the agent gets the prior plan + digest
-  // as the base), never regenerates from the issue.
-  //
-  // The escalation runs a 2-10 min repo-cloning re-plan, but this path used to post
-  // an ack ONLY on needs_repo and was SILENT on the interpret-error branch, and
-  // NEVER flipped the issue state. So a perfectly valid revise looked dropped for
-  // 10+ min — no ack, no board movement — while the initial decompose posts an "On
-  // it" comment AND flips to a running state. Fix: ALWAYS post the "taking a closer
-  // look" ack (both branches) AND flip the issue to running here, mirroring the
-  // initial-decompose path, so the revise is as visible as the first plan. The 👀 on
-  // the feedback comment stays for the reconciler to settle 👀→✅ when the revised
-  // plan lands.
-  const escalateReason = interpretation.kind === 'needs_repo' ? interpretation.reason : '';
-  await channel.upsertComment(target, renderReviseEscalatedNote(escalateReason));
-  // Flip to a visible running state for the duration of the re-plan (idempotent +
-  // forward-only inside the transition; best-effort — never block the re-plan).
-  try {
-    await channel.transitionState?.(target, 'started');
-  } catch (err) {
-    logger.warn('Plan revise: failed to flip issue to a running state (non-fatal)', {
-      issue_id: commentedIssueId, error: err instanceof Error ? err.message : String(err),
-    });
-  }
-  if (interpretation.kind === 'needs_repo') {
-    logger.info('Plan revise: escalating to repo-cloning agent (needs_repo)', {
-      issue_id: commentedIssueId, reason: interpretation.reason,
-    });
-  } else {
-    logger.info('Plan revise: interpret unavailable — escalating to repo-cloning agent', {
-      issue_id: commentedIssueId, detail: interpretation.message,
-    });
-  }
-
-  // Fetch the issue's real title+body so the revision description leads with the
-  // SAME plain-issue text the round-0 description used (which passes the guardrail),
-  // then appends the prior plan + feedback as reference data. Best-effort — an
-  // empty issue text still yields a valid data-shaped description.
-  const issueText = await fetchIssueText(resolved.accessToken, commentedIssueId);
-
-  const planMeta: Record<string, string> = {
-    linear_issue_id: commentedIssueId,
-    linear_workspace_id: workspaceId,
-    linear_project_id: projectId,
-    linear_oauth_secret_arn: resolved.oauthSecretArn,
-    linear_workspace_slug: resolved.workspaceSlug,
-    // Approval-gated re-plan: a revision always goes back through the proposal
-    // gate (never auto-seeds), so the mode is 'decompose' regardless of the label.
-    decompose_mode: 'decompose',
-    decompose_parent_issue_id: commentedIssueId,
-    decompose_revision_round: String(priorRound + 1),
-    // The feedback comment to settle 👀→✅ when the revised
-    // plan lands (rides on the task → back on the terminal record → reconciler).
-    decompose_revising_feedback_comment_id: commentId,
-    decompose_caps_max_sub_issues: String(caps.max_sub_issues),
-    decompose_caps_allowed: String(caps.decompose_allowed),
-    ...(caps.max_parent_budget_usd !== undefined && {
-      decompose_caps_max_parent_budget_usd: String(caps.max_parent_budget_usd),
-    }),
-    // Warm digest: carry the PRIOR run's repo digest + its sha into this revise
-    // task via channel_metadata — a NON-guardrail-screened channel
-    // (task_description IS screened; a large structural blob there would trip
-    // the PROMPT_ATTACK filter). The agent reads decompose_repo_digest from
-    // channel_metadata and starts from that understanding instead of re-exploring;
-    // the sha lets it drift-check. Absent on plans from older agents (no digest).
-    ...(pending.repo_digest !== undefined && { decompose_repo_digest: pending.repo_digest }),
-    ...(pending.repo_digest_sha !== undefined && { decompose_repo_digest_sha: pending.repo_digest_sha }),
-  };
-
-  // ADR-016: the re-planning agent clones the repo + reads the issue, so give it
-  // the issue's attachments too (a spec PDF the reviewer wants the revised plan to
-  // honor). The material lives on the ISSUE, not this feedback comment, so probe
-  // the issue (no comment body). Fail-closed: an unscreenable file settles the
-  // 👀→❓ and leaves the current plan approvable rather than re-planning blind.
-  const reviseTaskId = ulid();
-  const reviseHydrated = await hydrateCommentAttachments({
-    issueId: commentedIssueId,
-    commentBody: undefined,
-    workspaceId,
-    platformUserId: pending.platform_user_id,
-    accessToken: resolved.accessToken,
-    taskId: reviseTaskId,
-    probeIssue: true,
-  });
-  if (!reviseHydrated.ok) {
-    await channel.replaceCommentReaction?.({ commentId }, target, 'needs_input');
-    await channel.upsertComment(target, `❌ ${reviseHydrated.message}`);
-    return;
-  }
-
-  const planResult = await createTaskCore(
-    {
-      repo: pending.repo,
-      workflow_ref: 'coding/decompose-v1',
-      task_description: buildRevisionTaskDescription(issueText, pending, feedback),
-    },
-    {
-      userId: pending.platform_user_id,
-      channelSource: 'linear',
-      channelMetadata: planMeta,
-      taskId: reviseTaskId,
-      ...(reviseHydrated.records.length > 0 && { preScreenedAttachments: reviseHydrated.records }),
-    },
-    crypto.randomUUID(),
-  );
-  if (planResult.statusCode !== 201) {
-    logger.warn('Plan revise: re-plan task creation returned non-201', {
-      status: planResult.statusCode, issue_id: commentedIssueId, body: planResult.body,
-    });
-    await cleanupPreScreenedForComment(reviseHydrated.records);
-    // Dispatch failed → the reconciler never runs to settle the 👀, so swap it to
-    // ❓ here (the request needs the reviewer's attention, not "done") and post the
-    // honest failure note. The current plan is untouched + still approvable; NO raw
-    // "blocked by content policy" string (reads as if the user erred).
-    await channel.replaceCommentReaction?.({ commentId }, target, 'needs_input');
-    await channel.upsertComment(target, renderRevisionFailedNote());
-    return;
-  }
-  logger.info('Plan revise: re-plan task dispatched', {
-    issue_id: commentedIssueId, round: priorRound + 1, attachments: reviseHydrated.records.length,
-  });
-}
-
-/**
- * Single-task gate — the ``@bgagent approve``/``reject``
- * verdict on a SINGLE-task pending plan (a ``:decompose`` that declined to
- * split). Approve → run the parent issue as ONE coding task (no write-back, no
- * orchestration — this is NOT a graph); reject → discard. Distinct from the
- * graph verdict path (``runPlanVerdict`` → writeBack → seed). The claim-once +
- * 👀 already fired in the caller. Never throws.
- */
-/**
- * What became of a single-task verdict, so the caller can settle the trigger
- * comment's marker from the OUTCOME rather than from the requested verdict.
- *
- * ``settled`` means the verdict reached a definite end the user can see: the task
- * was dispatched, or the plan was deliberately discarded. ``failed`` means a
- * failure message was already posted, so the marker must NOT claim success — a ❌
- * message under a ✅ tick is contradictory, and the tick is the durable signal.
- * ``skipped`` means nothing happened at all (a raced or expired plan), where
- * re-marking someone else's settled comment would be wrong.
- */
-type SingleTaskVerdictOutcome = 'settled' | 'failed' | 'skipped';
-
-async function handleSingleTaskVerdict(args: {
-  pending: PendingPlan;
-  verdict: 'approve' | 'reject';
-  commentedIssueId: string;
-  workspaceId: string;
-  projectId: string;
-  resolved: { accessToken: string; oauthSecretArn: string; workspaceSlug: string };
-}): Promise<SingleTaskVerdictOutcome> {
-  if (!ORCHESTRATION_TABLE || !WORKSPACE_REGISTRY_TABLE) return 'skipped';
-  const { pending, verdict, commentedIssueId, workspaceId, projectId, resolved } = args;
-  const channel = channelFor(WORKSPACE_REGISTRY_TABLE);
-  const target = issueRef(commentedIssueId, workspaceId);
-
-  // Consume the pending plan either way (approve runs it, reject discards it).
-  // The atomic delete also guards a racing second verdict (only one wins).
-  const taken = await consumePendingPlanRow(ddb, ORCHESTRATION_TABLE, commentedIssueId);
-  if (!taken) {
-    logger.info('Single-task verdict: no pending plan (raced/expired) — skipping', { issue_id: commentedIssueId });
-    return 'skipped';
-  }
-
-  if (verdict === 'reject') {
-    // Sweep the transient planning notes (decompose-started ack + single-task
-    // proposal), THEN post the durable "cancelled" record so it survives the sweep
-    // (posted fresh after → the sweep's list didn't see it). A single-task plan
-    // tracks no proposal comment id, so there's nothing to freeze — the
-    // swept-clean thread + this one line is the whole record.
-    await channel.sweepNotes?.(target);
-    await channel.upsertComment(target, renderSingleTaskCancelled());
-    logger.info('Single-task verdict: rejected', { issue_id: commentedIssueId });
-    return 'settled';
-  }
-
-  // ADR-016: the approved single task is a coding run that opens a PR — give it
-  // the issue's attachments (a spec PDF / mockup the plan was built around). The
-  // material lives on the ISSUE, so probe it (no comment body). Fail-closed: an
-  // unscreenable file surfaces a failure rather than running the task blind.
-  const singleTaskId = ulid();
-  const singleHydrated = await hydrateCommentAttachments({
-    issueId: commentedIssueId,
-    commentBody: undefined,
-    workspaceId,
-    platformUserId: pending.platform_user_id,
-    accessToken: resolved.accessToken,
-    taskId: singleTaskId,
-    probeIssue: true,
-  });
-  if (!singleHydrated.ok) {
-    await safeReportIssueFailure(commentedIssueId, workspaceId, `❌ ${singleHydrated.message}`);
-    return 'failed';
-  }
-
-  // approve → spawn ONE coding task, exactly like the reconciler's auto-run
-  // single-task path (:auto), with the normal Linear channel_metadata so the
-  // fanout dispatcher posts the completion + the agent posts its PR-opened
-  // comment. The description was persisted on the pending plan at propose time.
-  const result = await createTaskCore(
-    {
-      repo: pending.repo,
-      task_description: taken.single_task_description ?? `Implement ${commentedIssueId}`,
-    },
-    {
-      userId: pending.platform_user_id,
-      channelSource: 'linear',
-      taskId: singleTaskId,
-      channelMetadata: {
-        linear_issue_id: commentedIssueId,
-        linear_workspace_id: workspaceId,
-        ...(projectId && { linear_project_id: projectId }),
-        linear_oauth_secret_arn: resolved.oauthSecretArn,
-        linear_workspace_slug: resolved.workspaceSlug,
-      },
-      ...(singleHydrated.records.length > 0 && { preScreenedAttachments: singleHydrated.records }),
-    },
-    `decompose-single-approve-${deriveOrchestrationId(commentedIssueId)}`.slice(0, MAX_IDEMPOTENCY_KEY_LENGTH),
-  );
-  if (result.statusCode !== 201) {
-    logger.warn('Single-task verdict: task creation returned non-201', {
-      status: result.statusCode, issue_id: commentedIssueId,
-    });
-    await cleanupPreScreenedForComment(singleHydrated.records);
-    await safeReportIssueFailure(commentedIssueId, workspaceId,
-      buildCreateTaskFailureMessage(result.statusCode, result.body));
-    return 'failed';
-  }
-  // FREEZE the single-task proposal into a durable "Approved" reference BEFORE
-  // sweeping, so the thread keeps a record of what was proposed + approved (a
-  // reviewer can audit the authorized scope against the PR) — matching the
-  // graph-approve path. Only when we tracked the proposal comment id (older
-  // single-task plans have none → sweep-only, as before). Then sweep the
-  // transient planning notes (started ack + any 👋 nudges) so the thread isn't
-  // cluttered by the plan phase — passing the frozen comment id so the sweep
-  // KEEPS it.
-  if (taken.proposal_comment_id) {
-    await channel.upsertComment(
-      target,
-      // Echo the approved scope (the description the reviewer OK'd) so the frozen
-      // record is auditable against the resulting PR.
-      renderSingleTaskApprovedReference(taken.single_task_description ?? ''),
-      { commentId: taken.proposal_comment_id },
-    );
-    await channel.sweepNotes?.(target, { commentId: taken.proposal_comment_id });
-  } else {
-    await channel.sweepNotes?.(target);
-  }
-  logger.info('Single-task verdict: approved — single task dispatched', { issue_id: commentedIssueId });
-  return 'settled';
-}
-
-/**
- * Apply a STRUCTURAL command ("drop 3", "merge 1 and 2",
- * "make #2 small") to a pending plan DETERMINISTICALLY: mutate the node list,
- * re-index the positional ``depends_on`` edges, REPLACE the pending-plan row, and
- * re-render the proposal — no clone, no agent, instant + free. This is the bulk
- * of what a reviewer's revisions actually are (structural, not semantic), so it
- * skips the ~2-min agent re-plan the {@link handlePlanRevision} path spends.
- *
- * Idempotent: claim-once on the comment id (a webhook redelivery is a no-op).
- * Preserves ``revision_round`` (a structural edit isn't an agent round — it
- * doesn't consume the re-plan budget). On an edit that collapses the plan to <2
- * sub-issues, or an out-of-range index, posts a note and leaves the plan
- * UNTOUCHED (approvable) — never silently destroys or mis-edits. Never throws.
- */
-async function handlePlanCommand(args: {
-  pending: PendingPlan;
-  command: PlanCommand;
-  commentId: string;
-  commentedIssueId: string;
-  workspaceId: string;
-  resolved: { oauthSecretArn: string; workspaceSlug: string };
-}): Promise<void> {
-  if (!ORCHESTRATION_TABLE || !WORKSPACE_REGISTRY_TABLE) return;
-  const { pending, command, commentId, commentedIssueId, workspaceId } = args;
-  const channel = channelFor(WORKSPACE_REGISTRY_TABLE);
-  const target = issueRef(commentedIssueId, workspaceId);
-
-  // Claim-once so a webhook redelivery doesn't apply the edit twice (a second
-  // "drop 3" on the already-edited plan would drop a DIFFERENT node).
-  const won = await claimCommentAck(
-    ddb, ORCHESTRATION_TABLE, deriveOrchestrationId(commentedIssueId), commentId,
-    new Date().toISOString(), Math.floor(Date.now() / 1000) + ACK_CLAIM_TTL_SECONDS,
-  );
-  if (!won) {
-    logger.info('Plan command: redelivery already handled this comment — skipping', { comment_id: commentId });
-    return;
-  }
-
-  await channel.reactToComment?.({ commentId }, target, 'started');
-
-  const result = applyPlanCommand(pending.nodes, command);
-  if (result.kind === 'error') {
-    // Settle the 👀 to ❓ — the command needs the reviewer's attention (bad index
-    // etc.), it didn't silently succeed.
-    await channel.replaceCommentReaction?.({ commentId }, target, 'needs_input');
-    await channel.upsertComment(target, renderPlanCommandError(result.message));
-    logger.info('Plan command: invalid — posted error, plan untouched', {
-      issue_id: commentedIssueId, command: command.kind,
-    });
-    return;
-  }
-  if (result.kind === 'collapses') {
-    // The edit would leave <2 sub-issues — nothing to orchestrate. Don't silently
-    // apply it; tell the reviewer their options (approve to run as one task, or
-    // give different feedback). The current plan stays pending + approvable.
-    // Settle 👀→❓ (awaiting the reviewer's decision).
-    await channel.replaceCommentReaction?.({ commentId }, target, 'needs_input');
-    await channel.upsertComment(target, renderCommandCollapseNote());
-    logger.info('Plan command: would collapse to single task — plan untouched', {
-      issue_id: commentedIssueId, command: command.kind, remaining: result.remaining,
-    });
-    return;
-  }
-
-  // Re-render the proposal from the edited nodes. Reuse renderPlanProposal so the
-  // layout matches every other proposal (numbered list, deps, summary, footer);
-  // keep the "Updated breakdown" header when this plan had already been revised.
-  // Lead with the computed before→after diff (same honest "What changed" line the
-  // semantic revise path uses — never model-authored), so a command edit is as
-  // legible as a semantic one.
-  const commandDiff = diffPlans(pending.nodes, result.nodes);
-  const editedPlan: DecompositionPlan = {
-    shouldDecompose: true,
-    reasoning: '',
-    nodes: result.nodes,
-    ...(!commandDiff.unchanged && { changeSummary: renderPlanDiff(commandDiff) }),
-  };
-  // EDIT the existing proposal comment in place rather than posting a fresh one. A
-  // reviewer firing several structural commands in a row ("drop 3", then "merge 1
-  // 2", …) is watching the plan mature — a stack of N full re-rendered proposals is
-  // noise, and an in-place edit is the async surface's closest thing to the plan
-  // firming up live. The 👀 on each command comment is the per-edit ack; the single
-  // plan comment is the source of truth. Falls back to a fresh comment when no
-  // prior id was captured (best-effort — the upsert reports no id on a failed
-  // edit, and we then don't clobber the stored id).
-  const rendered = await channel.upsertComment(
-    target,
-    renderPlanProposal(editedPlan, {
-      autoRun: false,
-      ...(pending.revision_round !== undefined && pending.revision_round > 0
-        && { revisionRound: pending.revision_round }),
-    }),
-    pending.proposal_comment_id ? { commentId: pending.proposal_comment_id } : undefined,
-  );
-
-  // Persist the edited node list (unconditional upsert — the claim-once above
-  // gates redelivery). Preserve revision_round: a structural edit is not an agent
-  // re-plan round, so it must not consume the revise budget. Carry the proposal
-  // comment id forward (the freshly-created one if we had none, else the edited
-  // one) so the NEXT command edits the same comment in place.
-  const carriedCommentId = rendered?.commentId || pending.proposal_comment_id;
-  await replacePendingPlanRow({
-    ddb,
-    tableName: ORCHESTRATION_TABLE,
-    parentLinearIssueId: commentedIssueId,
-    linearWorkspaceId: workspaceId,
-    repo: pending.repo,
-    ...(pending.linear_project_id !== undefined && { linearProjectId: pending.linear_project_id }),
-    nodes: result.nodes,
-    platformUserId: pending.platform_user_id,
-    ...(carriedCommentId !== undefined && { proposalCommentId: carriedCommentId }),
-    ...(pending.revision_round !== undefined && { revisionRound: pending.revision_round }),
-    // A structural command doesn't change the repo — carry the
-    // cached digest + sha forward so a later semantic revise still reuses it.
-    ...(pending.repo_digest !== undefined && { repoDigest: pending.repo_digest }),
-    ...(pending.repo_digest_sha !== undefined && { repoDigestSha: pending.repo_digest_sha }),
-    now: new Date().toISOString(),
-    ttlEpochSeconds: Math.floor(Date.now() / 1000) + PENDING_PLAN_TTL_SECONDS,
-  });
-
-  // Settle the 👀 on the command comment to ✅ — the edit applied + the plan
-  // comment updated in place, so the reviewer can tell it finished (the 👀
-  // previously never swapped → read as stuck). Synchronous, no reconciler
-  // round-trip.
-  await channel.replaceCommentReaction?.({ commentId }, target, 'succeeded');
-
-  logger.info('Plan command applied — plan edited deterministically (no agent)', {
-    issue_id: commentedIssueId,
-    command: command.kind,
-    node_count: result.nodes.length,
-    edited_in_place: pending.proposal_comment_id !== undefined && rendered?.commentId === pending.proposal_comment_id,
-  });
-}
-
-/**
- * Fetch a Linear issue's title + description for the revision task description.
- * Best-effort: returns a minimal fallback on any failure (the revision still
- * runs — the prior plan + feedback carry the intent, and the agent re-clones).
- */
-async function fetchIssueText(accessToken: string, issueId: string): Promise<string> {
-  try {
-    const data = await linearGraphqlFn(accessToken)(
-      'query IssueText($id: String!) { issue(id: $id) { identifier title description } }',
-      { id: issueId },
-    );
-    const issue = data?.issue as { identifier?: string; title?: string; description?: string } | undefined;
-    if (!issue) return 'Revise the decomposition plan for this Linear issue.';
-    const head = issue.identifier && issue.title ? `${issue.identifier}: ${issue.title}` : (issue.title ?? '');
-    const body = issue.description?.trim() ? `\n\n${issue.description.trim()}` : '';
-    return `${head}${body}`.trim() || 'Revise the decomposition plan for this Linear issue.';
-  } catch (err) {
-    logger.warn('Plan revise: could not fetch issue text (using fallback)', {
-      issue_id: issueId, error: err instanceof Error ? err.message : String(err),
-    });
-    return 'Revise the decomposition plan for this Linear issue.';
-  }
 }
 
 /**
@@ -3985,12 +2745,8 @@ async function resolveChildPrNumber(taskId: string): Promise<number | null> {
  * - Everything else → no-op
  */
 function shouldTrigger(payload: LinearIssueEvent, labelFilter: string): boolean {
-  // The trigger fires on the base label OR a decompose suffix
-  // (``bgagent:decompose`` / ``bgagent:auto``). Match against ALL variants so a
-  // suffix-only issue still triggers; ``parseDecompositionMode`` later decides
-  // which mode it is.
-  const variants = new Set(triggerLabelVariants(labelFilter));
-  return labelJustPresent(payload, (name) => !!name && variants.has(name.toLowerCase()));
+  const base = (labelFilter || DEFAULT_LABEL_FILTER).trim().toLowerCase();
+  return labelJustPresent(payload, (name) => !!name && name.trim().toLowerCase() === base);
 }
 
 /**
@@ -4009,15 +2765,14 @@ const NUDGE_KNOWN_BASES = ['abca', 'bgagent'] as const;
 
 /**
  * Does a label name LOOK like an ABCA trigger, for the unmapped-project NUDGE
- * only? Recognises a {@link NUDGE_KNOWN_BASES} base, or that base with any of the
- * real suffix variants ({@link DECOMPOSE_SUFFIX}/{@link AUTO_SUFFIX}/{@link
- * HELP_SUFFIX} — derived, not hardcoded, so it can't drift from the mode parser).
+ * only? Recognises a {@link NUDGE_KNOWN_BASES} base on its own, or that base
+ * carrying the ``:help`` suffix — taken from {@link HELP_SUFFIX} rather than
+ * spelled out here, so it can't drift from the label the help gate matches.
  */
 function looksLikeAbcaTriggerLabel(name: string | undefined | null): boolean {
   const n = (name ?? '').trim().toLowerCase();
   if (!n) return false;
-  const suffixes = [DECOMPOSE_SUFFIX, AUTO_SUFFIX, HELP_SUFFIX];
-  return NUDGE_KNOWN_BASES.some((b) => n === b || suffixes.some((s) => n === `${b}:${s}`));
+  return NUDGE_KNOWN_BASES.some((b) => n === b || n === `${b}:${HELP_SUFFIX}`);
 }
 
 /**
@@ -4027,8 +2782,8 @@ function looksLikeAbcaTriggerLabel(name: string | undefined | null): boolean {
  * variant — it must never dispatch a task).
  */
 function shouldTriggerHelp(payload: LinearIssueEvent, labelFilter: string): boolean {
-  const base = (labelFilter || MODE_DEFAULT_LABEL_FILTER).trim().toLowerCase();
-  const help = `${base}:${'help'}`;
+  const base = (labelFilter || DEFAULT_LABEL_FILTER).trim().toLowerCase();
+  const help = `${base}:${HELP_SUFFIX}`;
   return labelJustPresent(payload, (name) => !!name && name.toLowerCase() === help);
 }
 
@@ -4079,7 +2834,7 @@ async function handleHelpLabel(args: {
   mappingItem: Record<string, unknown> | undefined;
 }): Promise<void> {
   const { issue, workspaceId, labelFilter, mappingItem } = args;
-  const base = (labelFilter || MODE_DEFAULT_LABEL_FILTER).trim().toLowerCase();
+  const base = (labelFilter || DEFAULT_LABEL_FILTER).trim().toLowerCase();
   if (!WORKSPACE_REGISTRY_TABLE || !ORCHESTRATION_TABLE || !mappingItem || !workspaceId) {
     logger.info('Linear :help label — cannot post explainer (not onboarded / no token table)', {
       issue_id: issue.id, has_mapping: Boolean(mappingItem),
@@ -4101,36 +2856,6 @@ async function handleHelpLabel(args: {
     renderLabelHelp(base),
   );
   logger.info('Linear :help label — posted label explainer', { issue_id: issue.id });
-}
-
-/**
- * Post the "already has sub-issues — running the existing graph" note when a
- * ``:decompose``/``:auto`` suffix was applied to an issue that turned out to
- * already have a sub-issue graph. Called from the seeded /
- * extended branches — reaching them means a graph existed, so the suffix was a
- * no-op. Only fires for a decompose/auto decision (a bare ``bgagent`` re-trigger
- * stays quiet); best-effort, gated on the registry table.
- */
-async function maybePostAlreadyDecomposedNote(
-  decision: { mode: string },
-  suppressPost: boolean,
-  issueId: string,
-  workspaceId: string,
-): Promise<void> {
-  if (suppressPost) return; // e.g. idempotent seed replay — don't repost
-  if (decision.mode !== 'decompose' && decision.mode !== 'auto') return;
-  if (!WORKSPACE_REGISTRY_TABLE) return;
-  try {
-    await channelFor(WORKSPACE_REGISTRY_TABLE).upsertComment(
-      issueRef(issueId, workspaceId),
-      renderAlreadyDecomposedNote(),
-    );
-    logger.info('Linear decompose suffix on an already-decomposed issue — posted note', { issue_id: issueId });
-  } catch (err) {
-    logger.warn('Failed to post already-decomposed note (non-fatal)', {
-      issue_id: issueId, error: err instanceof Error ? err.message : String(err),
-    });
-  }
 }
 
 /**
@@ -4169,77 +2894,6 @@ function buildCreateTaskFailureMessage(statusCode: number, rawBody: string): str
     return `❌ ABCA couldn't create this task (status ${statusCode}): ${detail}`;
   }
   return `❌ ABCA couldn't create this task (status ${statusCode}). Check the ABCA admin logs for details.`;
-}
-
-/**
- * Agent-native planning: the task description handed to a
- * ``coding/decompose-v1`` planning agent — the issue's own title + description.
- * The agent's prompt (decompose.py) tells it to clone the repo, plan, and emit
- * the plan JSON as its artifact; no context hint, since it gathers context from
- * the clone itself (the whole point of moving planning into the agent).
- */
-function buildDecompositionTaskDescription(
-  issue: LinearIssueEvent['data'],
-  hasAttachments: boolean = false,
-): string {
-  const parts: string[] = [];
-  if (issue.identifier && issue.title) {
-    parts.push(`${issue.identifier}: ${issue.title}`);
-  } else if (issue.title) {
-    parts.push(issue.title);
-  }
-  if (issue.description && issue.description.trim()) {
-    parts.push('');
-    parts.push(issue.description.trim());
-  }
-  // The issue's file attachments ARE hydrated onto the decompose planning
-  // task — the planner receives them like a coding task, so it can read
-  // a spec/mockup when carving the plan. Point it at them so it uses them rather
-  // than planning title-only. The implementing sub-tasks each also inherit them.
-  if (hasAttachments) {
-    parts.push('');
-    parts.push(
-      '_Note: this issue\'s file attachments are included with this task — ' +
-      'read them when planning the decomposition, and where a specific sub-task ' +
-      'will need an attached file, say so in that sub-task (the implementing ' +
-      'task inherits the file too)._',
-    );
-  }
-  return parts.join('\n') || 'Plan a decomposition for this Linear issue.';
-}
-
-/**
- * Plan-revise loop: the task description for a RE-PLAN. Gives the agent the
- * prior proposed breakdown + the reviewer's feedback so it revises rather than
- * starting cold. The agent still clones the repo for full context (the original
- * issue wording is already in the task description — there is no Linear MCP to
- * re-read it); the key new signal is "here's what you proposed, here's what the
- * human wants changed." Depends_on is index-based within the plan, so render as such.
- */
-function buildRevisionTaskDescription(issueText: string, pending: PendingPlan, feedback: string): string {
-  const priorPlan = pending.nodes.map((n, i) => {
-    const deps = n.depends_on.length > 0 ? ` (depends on: ${n.depends_on.map((d) => `#${d + 1}`).join(', ')})` : '';
-    return `  ${i + 1}. [${n.size}] ${n.title}${deps}\n     ${n.description}`;
-  }).join('\n');
-  // IMPORTANT: this string is screened by the input guardrail's PROMPT_ATTACK
-  // filter before the task runs. The FIRST revision-loop cut wrote it as
-  // second-person imperatives ("You previously proposed… REVISE the plan… emit
-  // the plan JSON as your final message") — instruction-shaped text that the
-  // classifier reads as prompt-injection and blocks 100% (customer-caught: an
-  // innocent "make it 2 tasks" surfaced a scary "blocked by content policy").
-  // So frame this as neutral DATA the planner reads, NOT commands: the real
-  // issue text first (identical shape to the round-0 description, which passes),
-  // then the prior plan + requested changes as labelled reference material. The
-  // decompose-v1 workflow prompt already tells the agent to plan and emit JSON.
-  return [
-    issueText.trim(),
-    '',
-    '--- Earlier proposed breakdown (for reference) ---',
-    priorPlan || '(none — the earlier assessment did not split this issue)',
-    '',
-    '--- Requested changes from the reviewer ---',
-    feedback.trim(),
-  ].join('\n');
 }
 
 function buildTaskDescription(

@@ -61,7 +61,7 @@ import { TaskEventsTable } from '../constructs/task-events-table';
 import { TaskNudgesTable } from '../constructs/task-nudges-table';
 import { TaskOrchestrator } from '../constructs/task-orchestrator';
 import { TaskTable } from '../constructs/task-table';
-import { ARTIFACT_OBJECT_KEY_PREFIX, TraceArtifactsBucket } from '../constructs/trace-artifacts-bucket';
+import { TraceArtifactsBucket } from '../constructs/trace-artifacts-bucket';
 import { UserConcurrencyTable } from '../constructs/user-concurrency-table';
 import { WebhookTable } from '../constructs/webhook-table';
 
@@ -960,28 +960,6 @@ export class AgentStack extends Stack {
         }),
       ],
     }));
-    // Agent-native planning: a terminal ``coding/decompose-v1`` task lands
-    // here (it's a TaskTable stream record like any other), and the reconciler
-    // reads the plan artifact the agent uploaded to ``artifacts/<task_id>/`` to
-    // seed / propose the sub-issue graph. Surface the bucket name (the same
-    // bucket the agent's deliver_artifact wrote to — see ARTIFACTS_BUCKET_NAME
-    // on the runtime env above).
-    //
-    // Scope the grant to the ARTIFACTS prefix, not the whole bucket. The bucket
-    // also holds ``traces/<user_id>/`` — full agent trajectories including tool
-    // input and output, which are authorized per-user by the presign handler.
-    // The reconciler has no business reading those, and it takes the artifact
-    // URI off the task record, so a bucket-wide grant would make a bad or
-    // tampered URI able to reach another user's trajectory.
-    traceArtifactsBucket.bucket.grantRead(
-      orchestrationReconciler.fn,
-      `${ARTIFACT_OBJECT_KEY_PREFIX}*`,
-    );
-    orchestrationReconciler.fn.addEnvironment(
-      'ARTIFACTS_BUCKET_NAME',
-      traceArtifactsBucket.bucket.bucketName,
-    );
-
     // Scheduled backstop that recovers orchestrations whose terminal
     // events were lost while the live reconciler was unavailable. Runs the
     // same createTaskCore release path, so it needs the identical grants

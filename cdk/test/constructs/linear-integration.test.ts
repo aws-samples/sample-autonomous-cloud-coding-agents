@@ -117,12 +117,10 @@ describe('LinearIntegration construct', () => {
   test('webhook processor Lambda timeout is generous (>=120s) for its synchronous work', () => {
     // The processor does real synchronous work per event — attachment screening,
     // orchestration graph seed + root release, per-workspace OAuth resolve. The
-    // Lambda timeout is kept generous (WEBHOOK_PROCESSOR_TIMEOUT_SECONDS=120) so a
-    // burst never gets killed mid-call. (Historically this also had to cover an
-    // inline ~50s Bedrock decomposition call; that planning moved out to the
-    // coding/decompose-v1 agent, but the generous ceiling stays
-    // for the remaining synchronous work.) Identify the processor by its unique
-    // env var and assert its Timeout is at least 120s.
+    // Lambda timeout is kept generous (WEBHOOK_PROCESSOR_TIMEOUT_SECONDS=120) so an
+    // issue with several attachments or a wide root layer never gets killed
+    // mid-call, which surfaces as a silent hang rather than an error. Identify the
+    // processor by its unique env var and assert its Timeout is at least 120s.
     const fns = template.findResources('AWS::Lambda::Function');
     const processors = Object.values(fns).filter(
       (fn) => fn.Properties?.Environment?.Variables?.LINEAR_PROJECT_MAPPING_TABLE_NAME !== undefined,

@@ -177,14 +177,15 @@ describe('linear-webhook-processor handler', () => {
     expect(createTaskCoreMock).not.toHaveBeenCalled();
   });
 
-  test('F-noproject: a :decompose-suffix label on a project-less issue NUDGES (was silent), no task', async () => {
-    // The base-label case reaches the not-in-project message via shouldTrigger;
-    // the point of F-noproject is that a :decompose SUFFIX (which defaults-labelled
-    // shouldTrigger would MISS) now also gets it. reportIssueFailure(ctx, issueId, message).
+  test('a SUFFIXED ABCA label on a project-less issue NUDGES (was silent), no task', async () => {
+    // The base-label case reaches the not-in-project message via shouldTrigger; the
+    // point here is that a SUFFIXED label — which shouldTrigger deliberately misses,
+    // because the suffix is not a trigger — still gets the nudge rather than
+    // vanishing. reportIssueFailure(ctx, issueId, message).
     const payload = issue();
     const data = { ...(payload.data as Record<string, unknown>) };
     delete data.projectId;
-    data.labels = [{ id: 'lbl-dec', name: 'abca:decompose' }];
+    data.labels = [{ id: 'lbl-help', name: 'abca:help' }];
     payload.data = data;
     await handler(eventWith(payload));
     expect(createTaskCoreMock).not.toHaveBeenCalled();

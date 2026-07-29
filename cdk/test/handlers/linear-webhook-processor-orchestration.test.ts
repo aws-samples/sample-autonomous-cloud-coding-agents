@@ -378,6 +378,143 @@ describe('linear-webhook-processor — orchestration routing', () => {
     expect(transitionIssueStateMock).not.toHaveBeenCalled();
   });
 
+  test('the seed records the project trigger label, so the retry hint can name it', async () => {
+    // The panel's retry hint tells an operator which label to re-apply. That label
+    // is per-project configurable, and the seed is the only point where the project
+    // mapping is in hand — the reconciler reads the meta row and has no project id
+    // to look one up with. Without this the hint renders the platform default,
+    // which on a project that triggers on anything else is a dead end.
+    ddbSend
+      .mockResolvedValueOnce({ Item: { status: 'active', repo: 'owner/repo', label_filter: 'Ship-It' } })
+      .mockResolvedValueOnce({ Item: { platform_user_id: 'platform-user-1' } });
+    resolveLinearOauthTokenMock.mockResolvedValue({
+      accessToken: 'access-tok', oauthSecretArn: 'arn:secret', workspaceSlug: 'acme',
+    });
+    discoverOrchestrationMock.mockResolvedValueOnce({
+      kind: 'seeded', orchestrationId: 'orch_abc', childCount: 1, rootSubIssueIds: ['A'], alreadyExisted: true,
+    });
+    const labelled = issue();
+    (labelled.data as Record<string, unknown>).labels = [{ id: 'lbl-ship', name: 'Ship-It' }];
+
+    await handler(eventWith(labelled));
+
+    const { releaseContext } = discoverOrchestrationMock.mock.calls[0][0] as {
+      releaseContext: { trigger_label?: string };
+    };
+    // Normalised the same way the trigger gate matches, so the hint names a label
+    // that actually fires rather than the casing someone happened to type.
+    expect(releaseContext.trigger_label).toBe('ship-it');
+  });
+
+  test('a project with no configured label records the default, never a blank', async () => {
+    // A blank would render an empty label in the retry hint — worse than the
+    // default, which at least names the label the gate actually falls back to.
+    ddbSend
+      .mockResolvedValueOnce({ Item: { status: 'active', repo: 'owner/repo' } }) // no label_filter
+      .mockResolvedValueOnce({ Item: { platform_user_id: 'platform-user-1' } });
+    resolveLinearOauthTokenMock.mockResolvedValue({
+      accessToken: 'access-tok', oauthSecretArn: 'arn:secret', workspaceSlug: 'acme',
+    });
+    discoverOrchestrationMock.mockResolvedValueOnce({
+      kind: 'seeded', orchestrationId: 'orch_abc', childCount: 1, rootSubIssueIds: ['A'], alreadyExisted: true,
+    });
+
+    await handler(eventWith(issue()));
+
+    const { releaseContext } = discoverOrchestrationMock.mock.calls[0][0] as {
+      releaseContext: { trigger_label?: string };
+    };
+    expect(releaseContext.trigger_label).toBe('bgagent');
+  });
+
+  // Re-applying the trigger label on an epic that already has a graph and no new
+  // sub-issues means "re-run what didn't finish". Three shapes, and the note posted
+  // has to match which one it is — the earlier copy claimed it was "running the
+  // existing sub-issue graph" on all three while re-running nothing on two of them.
+  describe('re-labelling an epic with no new sub-issues', () => {
+    /** Wire the ddb calls the extend-with-no-new-nodes retry path makes. */
+    function wireEpic(children: Array<Record<string, unknown>>): void {
+      const meta = {
+        sub_issue_id: '#meta',
+        orchestration_id: 'orch_abc',
+        parent_linear_issue_id: 'issue-1',
+        linear_workspace_id: 'org-1',
+        repo: 'owner/repo',
+        child_count: children.length,
+        platform_user_id: 'platform-user-1',
+      };
+      ddbSend.mockImplementation(async (cmd: { _type: string; input?: Record<string, unknown> }) => {
+        if (cmd._type === 'Get') {
+          const key = (cmd.input?.Key ?? {}) as { linear_project_id?: string; linear_identity?: string };
+          if (key.linear_project_id) return { Item: { status: 'active', repo: 'owner/repo', label_filter: 'bgagent' } };
+          if (key.linear_identity) return { Item: { platform_user_id: 'platform-user-1' } };
+          return {};
+        }
+        if (cmd._type === 'Query') return { Items: [meta, ...children] };
+        return {};
+      });
+      resolveLinearOauthTokenMock.mockResolvedValue({
+        accessToken: 'access-tok', oauthSecretArn: 'arn:secret', workspaceSlug: 'acme',
+      });
+      discoverOrchestrationMock.mockResolvedValueOnce({
+        kind: 'extended',
+        orchestrationId: 'orch_abc',
+        addedSubIssueIds: [],
+        releasableSubIssueIds: [],
+      });
+    }
+
+    const child = (id: string, status: string): Record<string, unknown> => ({
+      sub_issue_id: id,
+      orchestration_id: 'orch_abc',
+      parent_linear_issue_id: 'issue-1',
+      linear_workspace_id: 'org-1',
+      repo: 'owner/repo',
+      depends_on: [],
+      child_status: status,
+      updated_at: '2026-07-01T00:00:00.000Z',
+    });
+
+    test('a failed child is actually re-run, and the note names what is being re-run', async () => {
+      wireEpic([child('A', 'failed'), child('B', 'succeeded')]);
+
+      await handler(eventWith(issue()));
+
+      // The failed child really is dispatched again — the point of the retry.
+      expect(createTaskCoreMock).toHaveBeenCalled();
+      const posted = upsertStatusCommentMock.mock.calls.map((c) => String(c[2])).join('\n');
+      expect(posted).toMatch(/Re-running the parts of this epic that didn't finish/i);
+      expect(posted).toContain('1 failed');
+      // And it says the succeeded work is left alone, so nobody fears a redo.
+      expect(posted).toMatch(/1 that already succeeded is left as-is/);
+    });
+
+    test('an all-succeeded epic says so plainly and re-runs nothing', async () => {
+      wireEpic([child('A', 'succeeded'), child('B', 'succeeded')]);
+
+      await handler(eventWith(issue()));
+
+      expect(createTaskCoreMock).not.toHaveBeenCalled();
+      const posted = upsertStatusCommentMock.mock.calls.map((c) => String(c[2])).join('\n');
+      expect(posted).toMatch(/already finished/i);
+      expect(posted).toMatch(/nothing to re-run/i);
+    });
+
+    test('a still-running epic posts NOTHING — the live panel already says so', async () => {
+      // Nothing has failed, so there is nothing to re-run, but the epic is also not
+      // finished. Claiming either would be wrong, and a note saying "still running"
+      // only repeats what the panel above it already shows.
+      wireEpic([child('A', 'running'), child('B', 'blocked')]);
+
+      await handler(eventWith(issue()));
+
+      expect(createTaskCoreMock).not.toHaveBeenCalled();
+      const posted = upsertStatusCommentMock.mock.calls.map((c) => String(c[2])).join('\n');
+      expect(posted).not.toMatch(/already finished/i);
+      expect(posted).not.toMatch(/Re-running/i);
+    });
+  });
+
   test('no sub-issues → single_task falls through to normal task creation', async () => {
     happyPreamble();
     // No graph → the handler must NOT hydrate epic attachments; it
@@ -474,10 +611,10 @@ describe('linear-webhook-processor — orchestration routing', () => {
     expect(reportIssueFailureMock).toHaveBeenCalledTimes(1); // ONE nudge, not three
   });
 
-  // Label discoverability: the :help explainer and the multi-part hint. Tested
-  // at the handler seam (real webhook → real routing) rather than against a
-  // mocked helper, so the tests pin the behaviour a user actually sees.
-  describe(':help label + multi-part hint', () => {
+  // Label discoverability: the :help explainer. Tested at the handler seam (real
+  // webhook → real routing) rather than against a mocked helper, so the tests pin
+  // the behaviour a user actually sees.
+  describe(':help label', () => {
     function helpIssue(): Record<string, unknown> {
       return issue({
         data: {
@@ -507,7 +644,7 @@ describe('linear-webhook-processor — orchestration routing', () => {
       expect(upsertStatusCommentMock).toHaveBeenCalledTimes(1);
       const [, issueId, body] = upsertStatusCommentMock.mock.calls[0];
       expect(issueId).toBe('issue-1');
-      expect(String(body)).toContain('`bgagent:decompose`');
+      expect(String(body)).toContain('`bgagent`');
       expect(String(body)).toMatch(/how to use abca/i);
     });
 
@@ -521,48 +658,6 @@ describe('linear-webhook-processor — orchestration routing', () => {
 
       expect(upsertStatusCommentMock).not.toHaveBeenCalled();
       expect(createTaskCoreMock).not.toHaveBeenCalled();
-    });
-
-    test('plain label on a MULTI-PART issue → runs single task AND posts the :decompose hint', async () => {
-      happyPreamble();
-      discoverOrchestrationMock.mockResolvedValueOnce({ kind: 'single_task', parentLinearIssueId: 'issue-1' });
-      createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: JSON.stringify({ data: { task_id: 'T1' } }) });
-      // The hint's claim-once Update (after task creation) wins.
-      ddbSend.mockResolvedValueOnce({});
-
-      const multiPart = issue({
-        data: {
-          id: 'issue-1',
-          identifier: 'ABC-42',
-          title: 'Account area',
-          description: 'Add an account area with a few parts:\n1. profile page\n2. theme toggle\n3. notifications list',
-          projectId: 'project-1',
-          teamId: 'team-1',
-          labels: [{ id: 'lbl-bg', name: 'bgagent' }],
-        },
-      });
-      await handler(eventWith(multiPart));
-
-      // The single task still ran (we never block the user's chosen path)...
-      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
-      // ...and a hint suggesting :decompose was posted.
-      const hintPosted = upsertStatusCommentMock.mock.calls.some(
-        (c) => typeof c[2] === 'string' && (c[2] as string).includes('`bgagent:decompose`'));
-      expect(hintPosted).toBe(true);
-    });
-
-    test('plain label on a SINGLE cohesive issue → single task, NO hint', async () => {
-      happyPreamble();
-      discoverOrchestrationMock.mockResolvedValueOnce({ kind: 'single_task', parentLinearIssueId: 'issue-1' });
-      createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: JSON.stringify({ data: { task_id: 'T1' } }) });
-
-      // Default issue() description is short/cohesive → looksMultiPart === false.
-      await handler(eventWith(issue()));
-
-      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
-      const hintPosted = upsertStatusCommentMock.mock.calls.some(
-        (c) => typeof c[2] === 'string' && (c[2] as string).includes(':decompose'));
-      expect(hintPosted).toBe(false);
     });
   });
 });
@@ -1047,11 +1142,6 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
           const key = cmd.input.Key as { task_id?: string; sub_issue_id?: string; linear_identity?: string };
           // Comment-trigger authorization: mapped commenter (auth gate passes).
           if (key.linear_identity) return { Item: { platform_user_id: 'commenter-user', status: 'active' } };
-          // The pending-plan Get (auto-decomposition approval) is keyed on the
-          // #pending-plan SK — no plan on this epic, so return no item (matches
-          // production; a verdict-shaped comment like "ship it" then falls
-          // through to the comment-trigger no-match path).
-          if (key.sub_issue_id === '#pending-plan') return {};
           const tid = key.task_id;
           const pr = tid === 'task-footer' ? 193 : tid === 'task-news' ? 192 : null;
           return { Item: pr ? { pr_number: pr } : {} };
