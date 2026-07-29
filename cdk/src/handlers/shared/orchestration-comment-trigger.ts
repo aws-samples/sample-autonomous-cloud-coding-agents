@@ -163,6 +163,50 @@ export function buildIterationInstruction(trigger: CommentTrigger): string {
 }
 
 /**
+ * The instruction for an iteration on the COMBINED PR of an integration node.
+ *
+ * A defect that only appears once siblings are merged cannot be found the way a
+ * single-child defect can, and the default iteration prompt actively misleads here:
+ * an agent told "the dates are wrong" on a branch that builds and whose tests pass
+ * will do the locally-sensible thing and adjust presentation. That is what happened
+ * — the reported symptom was a contract mismatch between the API and UI children,
+ * and the agent changed how the error was displayed.
+ *
+ * So the prompt states plainly what does NOT count as evidence. A clean merge and
+ * green isolated tests are exactly what the broken epic already had; treating them
+ * as proof is the failure mode, not an oversight. The agent is asked to reproduce
+ * the behaviour against the combined code first, read both sides of every boundary
+ * it touches, and leave behind a test that crosses that boundary — the artefact
+ * that would have caught it and that no per-child test suite can express.
+ */
+export function buildIntegrationIterationInstruction(trigger: CommentTrigger): string {
+  const reported = trigger.instruction || 'The combined result does not work end to end.';
+  return [
+    'This is the COMBINED branch of an epic: it already contains every sibling',
+    "sub-issue's merged work. The reported problem is one that only appears once they",
+    'are combined, so it will not be visible in any single sub-issue\'s PR.',
+    '',
+    `Reported: ${reported}`,
+    '',
+    'Work in this order:',
+    '1. REPRODUCE it against this combined code before changing anything. If you',
+    '   cannot reproduce it, say so and stop — do not guess at a fix.',
+    '2. Read BOTH sides of every boundary the symptom crosses — the caller and the',
+    '   callee, the request builder and the handler, the emitter and the consumer.',
+    '   The likely cause is two siblings that each made a reasonable choice and',
+    '   disagreed: a differing name, route, field, id, casing, or date format.',
+    '3. Fix the MISMATCH at its source. Do not adjust an error message, a fallback,',
+    '   or presentation so the symptom stops showing.',
+    '4. Add or run a test that exercises the path ACROSS the boundary, so this',
+    '   cannot regress. A test living wholly inside one side cannot catch it.',
+    '',
+    'A clean merge and passing per-component tests are NOT evidence that this is',
+    'fixed — the broken version already had both. State in your PR description what',
+    'you reproduced, what the mismatch was, and which test now covers it.',
+  ].join('\n');
+}
+
+/**
  * A comment of at most this many words reads as a bare COMMAND rather than an
  * instruction that happens to contain a command word. Anything longer is
  * substantive and belongs on the iteration path.

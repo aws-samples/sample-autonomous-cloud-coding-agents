@@ -1150,6 +1150,63 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
       });
     }
 
+    /**
+     * Like {@link mockParentEpic} but the graph also has the synthetic integration
+     * node — the fan-out shape, where the combined PR is the only place a
+     * cross-sibling defect can be reproduced.
+     */
+    function mockParentEpicWithIntegration(parentIssueId: string): void {
+      const base = {
+        orchestration_id: 'orch_x',
+        depends_on: [] as string[],
+        child_status: 'succeeded',
+        repo: 'o/r',
+        parent_linear_issue_id: parentIssueId,
+        linear_workspace_id: 'WS',
+      };
+      const meta = {
+        orchestration_id: 'orch_x',
+        sub_issue_id: '#meta',
+        parent_linear_issue_id: parentIssueId,
+        linear_workspace_id: 'WS',
+        repo: 'o/r',
+        child_count: 3,
+        platform_user_id: 'u1',
+        status_comment_id: 'panel-1',
+      };
+      const api = { ...base, sub_issue_id: 'sub-api', linear_identifier: 'ABCA-305', title: 'Add the booking API', child_task_id: 'task-api' };
+      const ui = { ...base, sub_issue_id: 'sub-ui', linear_identifier: 'ABCA-306', title: 'Add the booking form', child_task_id: 'task-ui' };
+      const integration = {
+        ...base,
+        sub_issue_id: 'orch_x__integration',
+        depends_on: ['sub-api', 'sub-ui'],
+        title: 'Integration — combine sub-issue results',
+        child_task_id: 'task-int',
+      };
+      const claimedAcks = new Set<string>();
+      ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
+        if (cmd._type === 'Update') {
+          const sk = (cmd.input.Key as { sub_issue_id?: string })?.sub_issue_id ?? '';
+          if (sk.startsWith('ack#')) {
+            if (claimedAcks.has(sk)) {
+              throw Object.assign(new Error('claim exists'), { name: 'ConditionalCheckFailedException' });
+            }
+            claimedAcks.add(sk);
+          }
+          return {};
+        }
+        if (cmd._type === 'Query' && cmd.input.IndexName === 'LinearIssueIndex') return { Items: [] };
+        if (cmd._type === 'Query') return { Items: [meta, api, ui, integration] };
+        if (cmd._type === 'Get') {
+          const key = cmd.input.Key as { task_id?: string; linear_identity?: string };
+          if (key.linear_identity) return { Item: { platform_user_id: 'commenter-user', status: 'active' } };
+          const pr = key.task_id === 'task-api' ? 557 : key.task_id === 'task-ui' ? 558 : key.task_id === 'task-int' ? 560 : null;
+          return { Item: pr ? { pr_number: pr } : {} };
+        }
+        return {};
+      });
+    }
+
     /** A comment ON the parent epic (issueId === the parent id). */
     function parentComment(body: string, id = 'pc-1'): Record<string, unknown> {
       return {
@@ -1160,6 +1217,79 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
         data: { id, body, issueId: 'PARENT-EPIC' },
       };
     }
+
+    test('@bgagent integration: … iterates the COMBINED PR, not a child PR', async () => {
+      // The incident: an API child and a UI child disagreed on a contract, the
+      // symptom only appeared once merged, and the reviewer's comment on the epic
+      // was routed to the UI child — whose PR does not even contain the backend
+      // code being described. The agent then changed how the error was displayed.
+      //
+      // Naming the integration node explicitly must reach the combined PR, which is
+      // the only place both sides of the boundary exist.
+      mockParentEpicWithIntegration('PARENT-EPIC');
+      await handler(eventWith(parentComment('@bgagent integration: the dates come back empty for Kyoto')));
+
+      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+      const [body, ctx] = createTaskCoreMock.mock.calls[0];
+      expect(body.workflow_ref).toBe('coding/pr-iteration-v1');
+      // 560 = the integration node's PR. 557/558 are the child PRs it must NOT pick.
+      expect(body.pr_number).toBe(560);
+      expect(ctx.channelMetadata.orchestration_sub_issue_id).toBe('orch_x__integration');
+      // The prompt must tell the agent this is the combined branch and that a clean
+      // merge is not evidence — otherwise it does the locally-sensible thing.
+      expect(body.task_description).toContain('COMBINED branch');
+      expect(body.task_description).toContain('REPRODUCE');
+      expect(body.task_description).toContain('are NOT evidence');
+    });
+
+    test('"combined" reaches the integration PR too — the word the panel shows', async () => {
+      mockParentEpicWithIntegration('PARENT-EPIC');
+      await handler(eventWith(parentComment('@bgagent the combined result 404s on submit')));
+      expect(createTaskCoreMock.mock.calls[0][0].pr_number).toBe(560);
+    });
+
+    test('Linear feedback uses the PARENT issue id, never the synthetic node id', async () => {
+      // The integration node has no Linear issue — its id is a derived string. Any
+      // reaction or comment addressed to it fails, so both the reply target and the
+      // agent's own issue id must be the epic.
+      mockParentEpicWithIntegration('PARENT-EPIC');
+      await handler(eventWith(parentComment('@bgagent integration: dates are empty')));
+      const ctx = createTaskCoreMock.mock.calls[0][1];
+      expect(ctx.channelMetadata.trigger_comment_issue_id).toBe('PARENT-EPIC');
+      expect(ctx.channelMetadata.linear_issue_id).toBe('PARENT-EPIC');
+      expect(ctx.channelMetadata.linear_issue_id).not.toContain('__integration');
+      expect(reactToCommentMock).toHaveBeenCalledWith(expect.anything(), 'pc-1', 'eyes');
+    });
+
+    test('a redelivered integration comment creates ONE iteration, not two', async () => {
+      // Linear retries webhooks. The ack claim is the guard; without it a retry
+      // spawns a second iteration on the same combined PR, and two agents push to
+      // one branch.
+      mockParentEpicWithIntegration('PARENT-EPIC');
+      const evt = eventWith(parentComment('@bgagent integration: dates are empty', 'pc-dup'));
+      await handler(evt);
+      await handler(evt);
+      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+    });
+
+    test('the disambiguation reply offers integration ONLY when the node exists', async () => {
+      // With an integration node: an ambiguous comment still asks (never auto-routes
+      // to the combined branch — a misrouted change there is the costliest to
+      // unpick) but the reply now tells the user how to target it.
+      mockParentEpicWithIntegration('PARENT-EPIC');
+      await handler(eventWith(parentComment('@bgagent please fix the thing')));
+      expect(createTaskCoreMock).not.toHaveBeenCalled();
+      const withInt = String(replyToCommentMock.mock.calls[0][3]);
+      expect(withInt).toContain('@bgagent integration: <request>');
+
+      // Without one (a chain epic), it must not be offered — the final child IS the
+      // combined result, so there is nothing separate to target.
+      jest.clearAllMocks();
+      mockParentEpic('PARENT-EPIC');
+      await handler(eventWith(parentComment('@bgagent please fix the thing', 'pc-2')));
+      const noInt = String(replyToCommentMock.mock.calls[0][3]);
+      expect(noInt).not.toMatch(/integration/i);
+    });
 
     test('a natural-language target on the epic ("for the footer ...") → iterates that sub-issue\'s PR', async () => {
       mockParentEpic('PARENT-EPIC');

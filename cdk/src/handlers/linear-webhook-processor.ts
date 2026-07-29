@@ -54,6 +54,7 @@ import { logger } from './shared/logger';
 import { type Channel, type IssueRef } from './shared/orchestration-channel';
 import { makeLinearChannel } from './shared/orchestration-channel-linear';
 import {
+  buildIntegrationIterationInstruction,
   buildIterationInstruction,
   detectNearMissMention,
   parseCommentTrigger,
@@ -973,6 +974,16 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       // expression the trigger gate matches on, so the hint can never name a label
       // the webhook would not accept.
       trigger_label: (labelFilter || DEFAULT_LABEL_FILTER).trim().toLowerCase(),
+      // The epic's own words, captured here because this is the only point where
+      // the issue body is in hand — the reconciler releases children from the
+      // stored row and has no token to re-fetch it. Every child then gets the same
+      // text, so PARALLEL siblings share one statement of names and shapes instead
+      // of each inventing its own at a boundary they both touch. Truncated at the
+      // store's single write site, not here.
+      parent_context: {
+        ...(issue.title && { title: issue.title }),
+        ...(issue.description && { description: issue.description }),
+      },
       ...(epicAttachments.length > 0 && { pre_screened_attachments: epicAttachments }),
     };
 
@@ -2148,8 +2159,12 @@ async function iterateOrchestrationChild(args: {
     linear_workspace_id: workspaceId,
     linear_oauth_secret_arn: resolved.oauthSecretArn,
     linear_workspace_slug: resolved.workspaceSlug,
-    // The agent addresses the real sub-issue (reactions/comments).
-    linear_issue_id: subIssueId,
+    // The agent addresses a REAL Linear issue for its reactions/comments. The
+    // synthetic integration node has no Linear issue — its id is a derived string
+    // (`<orchestrationId>__integration`), and handing that to the agent makes it
+    // call Linear with an id that cannot resolve. Fall back to the issue the
+    // trigger comment lives on, which for a routed parent comment is the epic.
+    linear_issue_id: isIntegrationNode(subIssueId) ? triggerCommentIssueId : subIssueId,
     // Iteration-UX: the maturing reply to EDIT (not re-create) on later events.
     ...(iterationReplyId && { iteration_reply_comment_id: iterationReplyId }),
   };
@@ -2182,7 +2197,13 @@ async function iterateOrchestrationChild(args: {
         repo: child.repo,
         workflow_ref: 'coding/pr-iteration-v1',
         pr_number: prNumber,
-        task_description: buildIterationInstruction(trigger),
+        // An iteration on the COMBINED PR gets a prompt that tells the agent to
+        // reproduce across the merged siblings and fix the mismatch at its source.
+        // The default prompt is actively wrong there: on a branch that builds and
+        // whose tests pass, "X is wrong" reads as a presentation bug.
+        task_description: isIntegrationNode(subIssueId)
+          ? buildIntegrationIterationInstruction(trigger)
+          : buildIterationInstruction(trigger),
       },
       {
         userId: platformUserId,
