@@ -24,6 +24,7 @@ import {
   renderParentDisambiguationReply,
   suggestClosestNode,
   looksLikeNewWork,
+  INTEGRATION_KEYWORD,
 } from '../../../src/handlers/shared/orchestration-parent-comment';
 
 const NODES: ParentCommentNode[] = [
@@ -139,6 +140,27 @@ describe('parseParentNodeReference — routing a parent-epic comment to one sub-
     expect(r2.matches.some((m) => m.sub_issue_id === 'orch_x__integration')).toBe(false);
   });
 
+  test('"combined" targets the integration node too — it is what the panel calls it', () => {
+    // The panel says "Integration — combined result", "Combined PR", "Combined
+    // preview". A user reaches for the word they were shown, so both must work or
+    // the vocabulary we display is not the vocabulary we accept.
+    const r = parseParentNodeReference('the combined result is broken', NODES);
+    expect(r.reason).toBeNull();
+    expect(r.matches).toHaveLength(1);
+    expect(r.matches[0].sub_issue_id).toBe('orch_x__integration');
+  });
+
+  test('the keyword the reply ADVERTISES is the keyword the parser ACCEPTS', () => {
+    // Guards the drift that makes a helpful reply into a dead end: the
+    // disambiguation text tells the user to type `@bgagent integration: …`, and
+    // this asserts that exact word still routes. Both read the same constant, so
+    // this fails if either side is edited alone.
+    const advertised = renderParentDisambiguationReply('none', NODES);
+    expect(advertised).toContain(`@bgagent ${INTEGRATION_KEYWORD}:`);
+    const routed = parseParentNodeReference(`${INTEGRATION_KEYWORD} the dates are wrong`, NODES);
+    expect(routed.matches[0]?.sub_issue_id).toBe('orch_x__integration');
+  });
+
   test('empty / whitespace instruction → none', () => {
     expect(parseParentNodeReference('', NODES).reason).toBe('none');
     expect(parseParentNodeReference('   ', NODES).reason).toBe('none');
@@ -164,14 +186,36 @@ describe('suggestClosestNode', () => {
 });
 
 describe('renderParentDisambiguationReply', () => {
-  test('lists the REAL sub-issues (not the integration node) + how to target one + new-work path', () => {
+  test('lists the real sub-issues + how to target one + the new-work path', () => {
     const body = renderParentDisambiguationReply('none', NODES);
     expect(body).toContain('ABCA-305 — Add a site-wide footer');
     expect(body).toContain('ABCA-306 — Add a newsletter signup section');
-    expect(body).not.toContain('Integration — combine'); // synthetic node hidden
     expect(body).toContain('@bgagent ENG-123:'); // the how-to hint
     expect(body.toLowerCase()).toContain('new work'); // the create-a-sub-issue path
     expect(body).toContain('`abca` label');
+  });
+
+  test('offers the integration node as an EXPLICIT target, with the exact phrasing', () => {
+    // The combined PR is the only place an integration defect can be reproduced —
+    // a symptom that only appears once the siblings are merged is invisible in any
+    // one child's PR. This reply used to hide the integration node entirely, so a
+    // reviewer had no way to ask for a fix there and their comment landed on
+    // whichever child looked closest; the backend code they were describing was
+    // not even present in it.
+    //
+    // The phrasing is asserted verbatim because it is an instruction the user is
+    // expected to copy. If it drifts from what the parser accepts, the reply tells
+    // people to type something that does nothing.
+    const body = renderParentDisambiguationReply('none', NODES);
+    expect(body).toContain('- Integration — combined result; target with `@bgagent integration: <request>`');
+  });
+
+  test('does NOT mention integration when the epic has no integration node', () => {
+    // A 0–1 leaf graph has none: the final child IS the combined result, so there
+    // is nothing separate to target and offering it would be a dead end.
+    const realOnly = NODES.filter((n) => !n.sub_issue_id.endsWith('__integration'));
+    const body = renderParentDisambiguationReply('none', realOnly);
+    expect(body).not.toMatch(/integration/i);
   });
 
   test('surfaces a "did you mean" suggestion when provided', () => {

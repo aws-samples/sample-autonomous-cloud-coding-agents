@@ -60,6 +60,86 @@ describe('releaseChild — idempotency key is accepted by the REAL validator', (
   // was rejected with a 400 and the child silently never started. Mocked
   // createTaskCore tests didn't catch it; this asserts the generated key
   // against the actual validator with production-shaped ids.
+  test('PARALLEL children each receive the parent\'s shared contract, verbatim', async () => {
+    // The incident this prevents: an epic fanned out an API child and a UI child at
+    // the same time. Each saw only its own sub-issue text, so each chose its own
+    // names — `kyoto` with `checkIn`/`checkOut` on one side, `wander-kyoto` with
+    // `startDate`/`endDate` on the other. Both passed their own tests, the branches
+    // merged without conflict, and the deployed flow was broken. Neither child was
+    // wrong in isolation; the agreement only ever existed in the parent.
+    //
+    // So the assertion is not "context is attached somewhere" but "BOTH siblings got
+    // the SAME contract text" — the property whose absence caused the divergence.
+    const parentContext = {
+      title: 'Booking flow for Kyoto trips',
+      description: 'Slug is `kyoto`. Dates are `checkIn`/`checkOut` (ISO-8601).',
+    };
+    const descriptions: string[] = [];
+    for (const [id, title] of [['api', 'Add the booking API'], ['ui', 'Add the booking form']]) {
+      const createTaskCore = created(`T-${id}`);
+      await releaseChild({
+        ddb: { send: jest.fn().mockResolvedValue({}) } as never,
+        tableName: 'OrchestrationTable',
+        row: makeRow({ sub_issue_id: id, title }),
+        platformUserId: 'user-1',
+        createTaskCore: createTaskCore as never,
+        parentContext,
+        now: NOW,
+      });
+      descriptions.push(createTaskCore.mock.calls[0][0].task_description as string);
+    }
+
+    for (const d of descriptions) {
+      // Delimited and labelled, so the agent can tell the epic-wide agreement from
+      // its own task rather than reading one run-on prompt.
+      expect(d).toContain('--- SHARED ORCHESTRATION CONTEXT (the parent epic) ---');
+      expect(d).toContain('--- END SHARED ORCHESTRATION CONTEXT ---');
+      // The contract itself — the exact strings that diverged in the incident.
+      expect(d).toContain('Slug is `kyoto`');
+      expect(d).toContain('`checkIn`/`checkOut`');
+      // Told that siblings share it, which is what makes it binding rather than FYI.
+      expect(d).toMatch(/IN PARALLEL/);
+    }
+    // And each still carries its OWN task below the shared block.
+    expect(descriptions[0]).toContain('Add the booking API');
+    expect(descriptions[1]).toContain('Add the booking form');
+  });
+
+  test('an epic with no context does not pad the child prompt with an empty heading', async () => {
+    // Rows seeded before parent_context existed, and bare parents, must behave
+    // exactly as before rather than gaining a hollow "SHARED CONTEXT" section.
+    const createTaskCore = created('T-1');
+    await releaseChild({
+      ddb: { send: jest.fn().mockResolvedValue({}) } as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow({}),
+      platformUserId: 'user-1',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+    expect(createTaskCore.mock.calls[0][0].task_description).not.toContain('SHARED ORCHESTRATION CONTEXT');
+  });
+
+  test('the integration child ALSO gets the shared contract — it verifies the boundary', async () => {
+    // The integration node is where a cross-boundary defect actually shows up, so
+    // it needs the contract most: without it the merge agent cannot tell a genuine
+    // mismatch from two equally-plausible conventions.
+    const createTaskCore = created('T-int');
+    await releaseChild({
+      ddb: { send: jest.fn().mockResolvedValue({}) } as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow({ sub_issue_id: 'orch_abc__integration', depends_on: ['api', 'ui'] }),
+      platformUserId: 'user-1',
+      createTaskCore: createTaskCore as never,
+      parentContext: { title: 'Booking flow', description: 'Slug is `kyoto`.' },
+      now: NOW,
+    });
+    const d = createTaskCore.mock.calls[0][0].task_description as string;
+    expect(d).toContain('SHARED ORCHESTRATION CONTEXT');
+    expect(d).toContain('Slug is `kyoto`');
+    expect(d).toContain('Integrate the completed sub-issue branches');
+  });
+
   test('pins the coding workflow — a child must never fall back to the repo-less default', async () => {
     // Every other channel pins CODING_WORKFLOW_ID at its own call site, because a
     // repo-bound task with no workflow_ref resolves to the repo-OPTIONAL

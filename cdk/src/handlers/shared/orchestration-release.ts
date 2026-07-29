@@ -134,6 +134,20 @@ export interface ReleaseChildParams {
    * back its own inline uploads, of which children have none).
    */
   readonly preScreenedAttachments?: readonly AttachmentRecord[];
+  /**
+   * The parent epic's title/body, inherited by every child so PARALLEL siblings
+   * work from one shared statement of names and shapes.
+   *
+   * Without it each child sees only its own sub-issue text and invents its own
+   * contract. That is not hypothetical: an API child and a UI child of the same
+   * epic shipped `kyoto`/`checkIn` against `wander-kyoto`/`startDate`, each passed
+   * its own tests, merged without conflict, and produced a broken flow. The
+   * agreement existed only in the parent, which neither could see.
+   */
+  readonly parentContext?: {
+    readonly title?: string;
+    readonly description?: string;
+  };
   /** ISO timestamp (injected for testability). */
   readonly now: string;
   /**
@@ -234,13 +248,51 @@ function deterministicFailureReason(statusCode: number, body: string): string {
 }
 
 /** Build the child task description from the sub-issue's identifier/title. */
-function buildChildDescription(row: OrchestrationChildRow): string {
+/**
+ * The shared-context block prepended to every child's task description.
+ *
+ * Delimited and explicitly labelled so the agent can tell the epic-wide agreement
+ * from its OWN task, and told plainly that siblings are working in parallel from
+ * this same text — which is the part that makes it act on it rather than treat it
+ * as background. Names and shapes stated here are to be used verbatim rather than
+ * re-invented, because a sibling has already been told the same thing.
+ *
+ * Empty when the epic has no context (an older row, or a bare parent) so a child
+ * prompt is never padded with an empty heading.
+ */
+function parentContextBlock(
+  parentContext?: { readonly title?: string; readonly description?: string },
+): string[] {
+  const title = parentContext?.title?.trim();
+  const description = parentContext?.description?.trim();
+  if (!title && !description) return [];
+  return [
+    '--- SHARED ORCHESTRATION CONTEXT (the parent epic) ---',
+    'This epic is being built by several sub-issues, some of them IN PARALLEL, and',
+    'every one of them was given the text below. Any name, route, field, or shape it',
+    'specifies is a shared contract: use it exactly, and do not invent an alternative',
+    'that only your own sub-issue would agree with. If it is silent on something you',
+    'need at a boundary another sub-issue also touches, pick the most obvious reading',
+    'of this text rather than a new convention, and say so in your PR description.',
+    '',
+    ...(title ? [`Epic: ${title}`, ''] : []),
+    ...(description ? [description, ''] : []),
+    '--- END SHARED ORCHESTRATION CONTEXT ---',
+    '',
+  ];
+}
+
+function buildChildDescription(
+  row: OrchestrationChildRow,
+  parentContext?: { readonly title?: string; readonly description?: string },
+): string {
   // The synthetic integration node has no real sub-issue / feature
   // work — its job is to merge all leaf branches (already merged into its
   // branch by repo.py's predecessor-merge) into one combined result. Give
   // the agent a merge-focused instruction rather than a feature prompt.
   if (isIntegrationNode(row.sub_issue_id)) {
     return [
+      ...parentContextBlock(parentContext),
       'Integrate the completed sub-issue branches into one combined result.',
       '',
       "All predecessor sub-issue branches have already been merged into this task's",
@@ -251,7 +303,10 @@ function buildChildDescription(row: OrchestrationChildRow): string {
       '- Open a PR with the combined result so the epic has a single reviewable artifact.',
     ].join('\n');
   }
-  const parts: string[] = [];
+  const block = parentContextBlock(parentContext);
+  // ONE part: the caller joins parts with a blank line, which would double-space
+  // every line inside the block and break the delimiters' visual grouping.
+  const parts: string[] = block.length > 0 ? [block.join('\n').trimEnd()] : [];
   if (row.display_id && row.title) {
     parts.push(`${row.display_id}: ${row.title}`);
   } else if (row.title) {
@@ -432,7 +487,7 @@ export async function releaseChild(params: ReleaseChildParams): Promise<ReleaseC
     result = await createTaskCore(
       {
         repo: row.repo,
-        task_description: buildChildDescription(row),
+        task_description: buildChildDescription(row, params.parentContext),
         // Pin the disciplined coding workflow, as every other channel does at its
         // own call site. Without it a repo-bound child falls back to the
         // repo-OPTIONAL default/agent-v1, whose setup skips the stacked-base and
@@ -662,6 +717,12 @@ export async function releaseReadyChildren(
       // Every child inherits the parent's screened attachments.
       ...(releaseContext.pre_screened_attachments !== undefined && {
         preScreenedAttachments: releaseContext.pre_screened_attachments,
+      }),
+      // …and the epic's own words, so siblings released in the SAME batch (the
+      // parallel case) are working from one shared contract rather than each
+      // inferring its own from its sub-issue title.
+      ...(releaseContext.parent_context !== undefined && {
+        parentContext: releaseContext.parent_context,
       }),
       // Root → 'main' base, no merges (omit so today's off-main behavior
       // is unchanged). Linear → predecessor branch. Diamond → main + merges.

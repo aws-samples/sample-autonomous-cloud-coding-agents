@@ -111,6 +111,20 @@ const TITLE_NOISE = new Set([
  *
  * Returns ``reason: null`` only when exactly one node matched.
  */
+/**
+ * The word that explicitly targets the synthetic integration node from a parent
+ * comment. ``combined`` is accepted as a synonym because that is what the panel
+ * calls it ("Integration — combined result", "Combined PR", "Combined preview"),
+ * and a user will reasonably reach for the word they were shown.
+ *
+ * Shared by the parser and the disambiguation reply so the phrasing we ADVERTISE
+ * cannot drift from the phrasing we ACCEPT — the failure mode being a reply that
+ * tells someone to type a word the parser ignores.
+ */
+export const INTEGRATION_KEYWORD = 'integration';
+/** Accepted synonym of {@link INTEGRATION_KEYWORD}. */
+export const INTEGRATION_KEYWORD_ALT = 'combined';
+
 export function parseParentNodeReference(
   instruction: string,
   nodes: readonly ParentCommentNode[],
@@ -129,10 +143,17 @@ export function parseParentNodeReference(
 
   // 2) Significant-title-keyword match.
   const byKeyword = nodes.filter((n) => {
+    if (isIntegrationNode(n.sub_issue_id)) {
+      // The keyword IS the match for the synthetic node, not merely a permission
+      // to then match its title. It previously worked the other way round, so
+      // `integration` routed only because that word happens to appear in the
+      // node's title while `combined` — the word the panel actually shows, in
+      // "combined result" / "Combined PR" / "Combined preview" — matched nothing
+      // and fell through to a "which sub-issue?" reply. The node has no Linear
+      // identifier to fall back on, so the keyword is the only handle a user has.
+      return tokens.has(INTEGRATION_KEYWORD) || tokens.has(INTEGRATION_KEYWORD_ALT);
+    }
     if (!n.title) return false;
-    const explicitIntegration = isIntegrationNode(n.sub_issue_id)
-      && (tokens.has('integration') || tokens.has('combined'));
-    if (isIntegrationNode(n.sub_issue_id) && !explicitIntegration) return false;
     const significant = normalize(n.title)
       .split(' ')
       .filter((w) => w.length > 2 && !TITLE_NOISE.has(w));
@@ -225,6 +246,24 @@ export function nodeDisplayId(n: ParentCommentNode): string | undefined {
   return n.display_id ?? n.linear_identifier;
 }
 
+/**
+ * The integration node's line for the disambiguation reply, or [] when the epic
+ * has no integration node (a 0–1 leaf graph — the final child IS the combined
+ * result, so there is nothing separate to target).
+ *
+ * Listed but never auto-selected. A vague parent comment must not be routed to
+ * the combined PR on a guess: the integration branch holds every sibling's work,
+ * so a misrouted change there is the most expensive kind to unpick. Targeting it
+ * stays explicit, which is why the line spells out the exact phrasing.
+ */
+function integrationHint(nodes: readonly ParentCommentNode[]): string[] {
+  const node = nodes.find((n) => isIntegrationNode(n.sub_issue_id));
+  if (!node) return [];
+  return [
+    `- Integration — combined result; target with \`@bgagent ${INTEGRATION_KEYWORD}: <request>\``,
+  ];
+}
+
 function nodeLabel(n: ParentCommentNode): string {
   const id = nodeDisplayId(n);
   if (id) return n.title ? `${id} — ${n.title}` : id;
@@ -294,6 +333,7 @@ export function renderParentDisambiguationReply(
       'The current sub-issues are:',
       '',
       ...real.map((n) => `- ${nodeLabel(n)}`),
+      ...integrationHint(nodes),
       ...commandsFooter,
     ].join('\n');
   }
@@ -318,6 +358,7 @@ export function renderParentDisambiguationReply(
       + '`@bgagent ENG-123: <what to change>`. The sub-issues are:',
     '',
     ...real.map((n) => `- ${nodeLabel(n)}`),
+    ...integrationHint(nodes),
     '',
     "If it's **new work** (not a change to one of these), create a new sub-issue " +
       'under this epic and add the `abca` label — I\'ll fold it into the orchestration.',
