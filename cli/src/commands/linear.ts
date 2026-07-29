@@ -113,12 +113,18 @@ export function renderLinearAppTemplate(opts: LinearAppTemplateOptions = {}): st
     '',
     'Click Save, copy the Client ID and Client Secret, then return here.',
     '',
-    'Why these specific fields:',
-    '  • GitHub username with [bot] suffix gates the actor=app agent flow.',
-    '    Without it, Linear surfaces a misleading "Invalid redirect_uri" error.',
+    'Non-obvious gotchas (Linear explains the fields themselves inline):',
+    '  • GitHub username is REQUIRED for actor=app — leaving it blank surfaces a',
+    '    misleading "Invalid redirect_uri" error, not a "missing username" one.',
     '  • Webhooks toggle must be ON for the same reason; the URL value is unused',
     '    by the OAuth dance and can be a placeholder.',
     '  • Wildcard callback URLs are not accepted by Linear; list each URL fully.',
+    '  • Do NOT enable Linear "agent" / app-notification events on this app. ABCA',
+    '    is a COMMENT-based integration (it replies + reacts on ordinary comments).',
+    '    With agent events on, Linear renders an @mention of the app as its',
+    '    interactive agent-activity surface instead of a comment thread, which',
+    '    breaks the reply/reaction UX. Leave agent/app events OFF; the trigger comes',
+    '    from the workspace webhook (Issues + Comments), configured separately next.',
     bar,
   ].join('\n');
 }
@@ -373,7 +379,9 @@ export function makeLinearCommand(): Command {
         console.log('In Linear → Settings → API → Webhooks → + New webhook, paste:');
         console.log();
         console.log(`  URL:             ${webhookUrl}`);
-        console.log('  Resource types:  Issues');
+        console.log('  Resource types:  Issues, Comments');
+        console.log('                   (Issues = label-triggered tasks + epic orchestration;');
+        console.log('                    Comments = @bgagent re-iteration on a sub-issue PR)');
         console.log('  Team:            (whichever team owns the projects you map)');
         console.log();
         console.log('Save, then open the webhook detail page and copy the signing secret');
@@ -446,6 +454,7 @@ export function makeLinearCommand(): Command {
       .option('--client-secret <secret>', 'Linear OAuth app Client Secret (else prompted; prefer interactive)')
       .option('--no-browser', 'Print the authorization URL instead of opening a browser (for SSH/headless)')
       .option('--no-actor-app', 'Drop actor=app from the OAuth flow (diagnostic: isolates whether agent-install is blocking)')
+      .option('--no-force-consent', 'Omit prompt=consent (diagnostic: restores the pre-fix behaviour that dead-ends on an already-installed app)')
       .action(async (slug: string, opts) => {
         if (!SLUG_RE.test(slug)) {
           throw new CliError(
@@ -524,6 +533,11 @@ export function makeLinearCommand(): Command {
           state,
           codeChallenge: pkce.codeChallenge,
           actorApp: useActorApp,
+          // Always force the consent screen. A FRESH install shows it anyway, so
+          // this only changes the already-installed case — which without it
+          // dead-ends on "already installed" and returns no code, making a
+          // revoked-but-installed workspace unrecoverable by this command.
+          forceConsent: opts.forceConsent !== false,
         });
         if (!useActorApp) {
           console.log('  ⚠ --no-actor-app: dropping actor=app for diagnosis. Token will not be agent-scoped.');
@@ -610,13 +624,14 @@ export function makeLinearCommand(): Command {
         // first) — that silently breaks signature verification (401 "Invalid
         // signature") for every workspace after the first in a multi-workspace
         // deployment. Rotation stays the job of `update-webhook-secret`.
-        // Fail CLOSED (#612 review B1): read this workspace's existing signing
-        // secret before the overwrite. Only ResourceNotFoundException is a clean
-        // first-install; any other SM error (AccessDenied, KMSAccessDenied,
+        // Fail CLOSED: read this workspace's existing signing secret before the
+        // overwrite. Only ResourceNotFoundException is a clean first-install;
+        // any other Secrets Manager error (AccessDenied, KMSAccessDenied,
         // Throttling, network) — or a corrupt bundle — must surface, NOT default
         // to undefined (which would mirror the stack-wide secret over a working
-        // per-workspace one → the #611 401 clobber, silently, behind a green
-        // "Setup complete"). Extracted to readExistingWebhookSecret + unit-tested.
+        // per-workspace one, producing a silent 401 on every webhook delivery
+        // behind a green "Setup complete"). Extracted to
+        // readExistingWebhookSecret + unit-tested.
         let existingWebhookSecret: string | undefined;
         try {
           existingWebhookSecret = await readExistingWebhookSecret(
@@ -653,8 +668,8 @@ export function makeLinearCommand(): Command {
           installed_at: now,
           updated_at: now,
           installed_by_platform_user_id: cognitoSub,
-          // Fold the preserved secret into the INITIAL bundle (#612 review N2):
-          // the OAuth-secret write below then lands the correct bundle in ONE
+          // Fold the preserved secret into the INITIAL bundle so that
+          // the OAuth-secret write below lands the correct bundle in ONE
           // PutSecretValue, and the preserve path skips the later re-write. This
           // also closes a narrow window — if any fallible step between the two
           // writes threw, the bundle was left persisted WITHOUT the secret (401
@@ -676,8 +691,8 @@ export function makeLinearCommand(): Command {
         const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
 
         // Best-effort: fetch team keys so the screenshot processor can
-        // prefix-route Linear issue lookups (e.g. ABCA-42 → workspace
-        // owning ABCA) instead of scanning every active workspace.
+        // prefix-route Linear issue lookups (e.g. ENG-42 → the workspace
+        // owning the ENG team) instead of scanning every active workspace.
         const teamKeys = await queryLinearTeamKeys(`Bearer ${tokenResponse.access_token}`);
         await ddb.send(new PutCommand({
           TableName: workspaceRegistryTable!,
@@ -728,9 +743,10 @@ export function makeLinearCommand(): Command {
         //   • preserve      — this workspace ALREADY has its own `lin_wh_`
         //                     secret (a re-run). Keep it; do NOT overwrite from
         //                     the stack-wide fallback, which is a DIFFERENT
-        //                     workspace's secret once >1 is installed. This is
-        //                     the #611 clobber fix — the stack-wide value is NOT
-        //                     necessarily this workspace's.
+        //                     workspace's secret once >1 is installed. The
+        //                     stack-wide value is NOT necessarily this
+        //                     workspace's, so overwriting from it breaks
+        //                     signature verification for this workspace.
         //   • mirror-stackwide — no per-workspace secret yet but stack-wide is
         //                     set: mirror it (correct for the first/only
         //                     workspace; warn for an additional one).
@@ -851,6 +867,7 @@ export function makeLinearCommand(): Command {
       .option('--stack-name <name>', 'CloudFormation stack name', 'backgroundagent-dev')
       .option('--no-browser', 'Print the authorization URL instead of opening a browser (for SSH/headless)')
       .option('--no-actor-app', 'Drop actor=app from the OAuth flow (diagnostic)')
+      .option('--no-force-consent', 'Omit prompt=consent (diagnostic)')
       .action(async (slug: string, opts) => {
         if (!SLUG_RE.test(slug)) {
           throw new CliError(
@@ -948,6 +965,11 @@ export function makeLinearCommand(): Command {
           state,
           codeChallenge: pkce.codeChallenge,
           actorApp: useActorApp,
+          // Always force the consent screen. A FRESH install shows it anyway, so
+          // this only changes the already-installed case — which without it
+          // dead-ends on "already installed" and returns no code, making a
+          // revoked-but-installed workspace unrecoverable by this command.
+          forceConsent: opts.forceConsent !== false,
         });
         if (!useActorApp) {
           console.log('  ⚠ --no-actor-app: dropping actor=app for diagnosis. Token will not be agent-scoped.');

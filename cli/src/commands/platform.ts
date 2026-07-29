@@ -19,6 +19,7 @@
 
 import { Command } from 'commander';
 import { CliError } from '../errors';
+import { makeLinearRefreshVerifier } from '../linear-auth-health';
 import { DEFAULT_STACK_NAME, resolveOperatorContext } from '../operator-context';
 import { doctorChecksPassed, runPlatformDoctor } from '../platform-doctor';
 import { listStackOutputs } from '../stack-outputs';
@@ -90,9 +91,19 @@ export function makePlatformCommand(): Command {
       .option('--region <region>', 'AWS region (defaults to configured region or AWS_REGION)')
       .option('--stack-name <name>', 'CloudFormation stack name', DEFAULT_STACK_NAME)
       .option('--output <format>', 'Output format: text or json', 'text')
+      .option(
+        '--verify-refresh',
+        'Settle any INDETERMINATE Linear workspace by attempting its token refresh. '
+        + 'Rotates and re-saves that workspace\'s token (what the platform does on every event), '
+        + 'so it is safe but state-changing — hence opt-in.',
+      )
       .action(async (opts) => {
         const { region, stackName } = resolveOperatorContext(opts);
-        const results = await runPlatformDoctor({ region, stackName });
+        const results = await runPlatformDoctor({
+          region,
+          stackName,
+          ...(opts.verifyRefresh && { linearVerifyRefresh: makeLinearRefreshVerifier(region) }),
+        });
         const passed = doctorChecksPassed(results);
 
         if (opts.output === 'json') {
