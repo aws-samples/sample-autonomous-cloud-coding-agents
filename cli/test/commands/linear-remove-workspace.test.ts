@@ -118,4 +118,63 @@ describe('linear remove-workspace command', () => {
     const out = logSpy.mock.calls.map((c) => String(c[0])).join('\n');
     expect(out).toContain('4');
   });
+
+  test('reports when the OAuth secret was already absent (secret_deleted: false)', async () => {
+    mockRemove.mockResolvedValue({
+      workspace_slug: 'acme',
+      linear_workspace_id: 'ws-uuid-1',
+      status: 'revoked',
+      secret_deleted: false,
+      mappings_removed: 0,
+    });
+
+    await runRemove(['acme', '--yes']);
+    const out = logSpy.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(out).toContain('already absent');
+  });
+
+  // ─── Confirmation prompt (the destructive-command safety rail) ──────────
+  // Without --yes the command reads a slug via promptLine and must abort on
+  // mismatch. Under Jest, promptLine takes the non-TTY readline branch.
+  function mockPromptLine(returned: string) {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const readline = require('readline') as typeof import('readline');
+    const rlMock = {
+      once: (event: string, cb: (line: string) => void) => {
+        if (event === 'line') cb(returned);
+      },
+      close: jest.fn(),
+    };
+    return jest.spyOn(readline, 'createInterface')
+      .mockReturnValue(rlMock as unknown as ReturnType<typeof readline.createInterface>);
+  }
+
+  test('aborts without calling the API when the typed confirmation does not match the slug', async () => {
+    const rlSpy = mockPromptLine('wrong-slug');
+    try {
+      await runRemove(['acme']);
+      expect(mockRemove).not.toHaveBeenCalled();
+      const out = logSpy.mock.calls.map((c) => String(c[0])).join('\n');
+      expect(out).toContain('Aborted');
+    } finally {
+      rlSpy.mockRestore();
+    }
+  });
+
+  test('proceeds when the typed confirmation matches the slug', async () => {
+    mockRemove.mockResolvedValue({
+      workspace_slug: 'acme',
+      linear_workspace_id: 'ws-uuid-1',
+      status: 'revoked',
+      secret_deleted: true,
+      mappings_removed: 0,
+    });
+    const rlSpy = mockPromptLine('acme');
+    try {
+      await runRemove(['acme']);
+      expect(mockRemove).toHaveBeenCalledWith('acme', { purge: false, keepMappings: false });
+    } finally {
+      rlSpy.mockRestore();
+    }
+  });
 });
