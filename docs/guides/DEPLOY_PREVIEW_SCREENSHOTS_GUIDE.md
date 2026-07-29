@@ -181,10 +181,10 @@ The receiver Lambda async-invokes the processor (`InvocationType: Event`) and re
 
 **Important:** the processor handler is best-effort by design — it catches its own per-step operational failures (bad token, AgentCore/S3/comment-post errors) and returns success, so those show up as tagged log events (see the section above), **not** as Lambda `Errors`. Both alarms below fire only on faults that *escape* the handler: an init-time crash (missing env at cold start, bundling defect), an unhandled throw in an unguarded path, or the 120s hard timeout. For a swallowed operational failure (e.g. a revoked S3/AgentCore permission), watch the processor **logs**, not these alarms.
 
-- **`WebhookProcessorErrorAlarm`** — fires on the processor's Lambda `Errors` metric (`>= 1` error in a 5-minute period, sustained for 2 evaluation periods). Early signal: an invocation is faulting *now*.
+- **`WebhookProcessorErrorAlarm`** — fires on the processor's Lambda `Errors` metric: **any** 5-minute period with `>= 1` error alarms (evaluation range 2 periods, 1 datapoint to alarm). Early signal: an invocation is faulting *now*.
 - **`WebhookProcessorDlqDepthAlarm`** — fires when such a failed invocation has survived Lambda's built-in async retries and landed on the DLQ (construct id `WebhookProcessorDlq`; 14-day retention, SSL-enforced). Backstop: a payload is now parked undelivered. (The queue also gets SSE via SQS's service-side default; the construct doesn't set an explicit `encryption`.)
 
-The two catch the same failure class, but the `Errors` alarm trips one evaluation window sooner (before retries exhaust onto the DLQ). Find and inspect the DLQ — the construct sets no explicit queue name, so its physical name is CloudFormation-generated and *contains* the `WebhookProcessorDlq` construct id:
+The two catch the same failure class, but the `Errors` alarm fires no later than — and, when the retry ladder straddles a period boundary, one window before — the DLQ-depth alarm (the `Errors` metric is stamped at invocation time, before retries exhaust onto the DLQ). Find and inspect the DLQ — the construct sets no explicit queue name, so its physical name is CloudFormation-generated and *contains* the `WebhookProcessorDlq` construct id:
 
 ```bash
 # Find the DLQ URL (physical name contains the construct id)

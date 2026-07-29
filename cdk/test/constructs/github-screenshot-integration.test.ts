@@ -113,7 +113,15 @@ describe('GitHubScreenshotIntegration construct', () => {
       Statistic: 'Sum',
       Period: 300,
       Threshold: 1,
+      // >= 1, not > 1. Relies on a CDK default otherwise, and
+      // GreaterThanThreshold would silently require TWO errors to fire.
+      ComparisonOperator: 'GreaterThanOrEqualToThreshold',
       EvaluationPeriods: 2,
+      // 1-of-2, not 2-of-2. Unset, DatapointsToAlarm defaults to
+      // EvaluationPeriods, and a single-event crash would never alarm
+      // (its Errors datapoints land in one period; NOT_BREACHING fills
+      // the neighbour). Pinned so that regression is caught here.
+      DatapointsToAlarm: 1,
       TreatMissingData: 'notBreaching',
       Dimensions: Match.arrayWith([
         Match.objectLike({

@@ -44,7 +44,10 @@ const DLQ_ALARM_PERIOD_MINUTES = 5;
 /** Processor Lambda-Errors alarm metric period (minutes). */
 const ERROR_ALARM_PERIOD_MINUTES = 5;
 
-/** Processor Lambda-Errors alarm sustained evaluation periods. */
+/** Processor Lambda-Errors alarm evaluation range (periods). Paired with
+ *  `datapointsToAlarm: 1` below, this is 1-of-2, NOT 2-of-2: any single
+ *  breaching period alarms. Do not remove `datapointsToAlarm` — CloudWatch
+ *  would default it back to this value and a one-off crash would never fire. */
 const ERROR_ALARM_EVALUATION_PERIODS = 2;
 
 /** Async screenshot-processor Lambda memory (MB). */
@@ -264,19 +267,25 @@ export class GitHubScreenshotIntegration extends Construct {
     // therefore fires on the faults that ESCAPE the handler: an init-time
     // crash (missing env at cold start, bundling defect), an unhandled
     // throw in an unguarded path, or the 120s hard timeout. That is the
-    // same failure class the DLQ eventually catches, but the Errors metric
-    // trips one evaluation window sooner — before Lambda's async-retry
-    // ladder has landed a message on the DLQ. threshold 1 / 2 eval periods
-    // matches the AC; the metricErrors + 2-eval-period shape follows
-    // ``task-orchestrator.ts`` OrchestratorErrorAlarm (which uses
-    // threshold 3 — we use 1 because any escaped error here is
-    // significant).
+    // same failure class the DLQ eventually catches, but before Lambda's async-retry
+    // ladder has landed a message on the DLQ. The Errors metric is stamped
+    // at invocation time, so this alarm fires no later than — and, when the
+    // retry ladder straddles a period boundary, one window before — the
+    // DLQ-depth alarm. threshold 1 / 1-of-2 eval periods matches the AC;
+    // the metricErrors shape follows ``task-orchestrator.ts``
+    // OrchestratorErrorAlarm (which uses threshold 3 — we use 1 because any
+    // escaped error here is significant).
     this.processorErrorAlarm = new cloudwatch.Alarm(this, 'WebhookProcessorErrorAlarm', {
       metric: this.webhookProcessorFn.metricErrors({
         period: Duration.minutes(ERROR_ALARM_PERIOD_MINUTES),
       }),
       threshold: 1,
       evaluationPeriods: ERROR_ALARM_EVALUATION_PERIODS,
+      // Fire on the FIRST breaching datapoint. Unset, this defaults to
+      // evaluationPeriods (2 consecutive), which for a sparse invocation
+      // metric means a single-event crash never alarms: its retries land
+      // in one period and NOT_BREACHING fills the neighbour.
+      datapointsToAlarm: 1,
       alarmDescription:
         'Screenshot webhook processor Lambda errors breached threshold — deploy-preview screenshots are failing (check IAM, AgentCore Browser quota, and dependency health)',
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
