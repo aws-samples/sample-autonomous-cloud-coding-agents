@@ -296,10 +296,17 @@ async function extractPdfText(content: Buffer, filename: string): Promise<string
   }
 
   let timeoutId: ReturnType<typeof setTimeout>;
-  // A TypedArray is preferred (pdf-parse transfers ownership to its worker, lowering
-  // main-thread memory). Slice to the exact PDF bytes so a pooled Buffer's backing
-  // ArrayBuffer isn't handed over wholesale.
-  const parser = new PDFParse({ data: new Uint8Array(content.buffer, content.byteOffset, content.byteLength) });
+  // Hand pdf-parse a COPY, not a view. It transfers ownership of whatever it is
+  // given to its worker, which DETACHES the underlying ArrayBuffer — and a
+  // `new Uint8Array(content.buffer, …)` view shares that buffer with the caller's
+  // Buffer. The caller stores the original bytes in S3 after screening returns, so
+  // sharing meant the upload read a detached buffer and threw "Cannot perform
+  // Construct on a detached ArrayBuffer". Fail-closed screening then rejected the
+  // task: every PDF attachment was refused with "could not be stored".
+  //
+  // The copy costs one extra allocation of an already size-capped payload, which is
+  // the right trade against silently breaking every PDF upload.
+  const parser = new PDFParse({ data: Uint8Array.from(content) });
   try {
     const timeoutPromise = new Promise<never>((_, reject) => {
       timeoutId = setTimeout(() => reject(new Error('PDF extraction timed out')), PDF_EXTRACT_TIMEOUT_MS);

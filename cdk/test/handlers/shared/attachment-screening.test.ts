@@ -412,6 +412,33 @@ describe('screenTextFile', () => {
     expect(pdfDestroyMock).toHaveBeenCalledTimes(1); // worker released
   });
 
+  test('does not hand pdf-parse a view onto the CALLER\'s buffer', async () => {
+    // pdf-parse transfers ownership of whatever it is given to its worker, which
+    // DETACHES the underlying ArrayBuffer. A `new Uint8Array(content.buffer, …)`
+    // view shares that buffer with the caller's Buffer — and the caller uploads
+    // those same bytes to S3 AFTER screening returns. Sharing meant the upload read
+    // a detached buffer and threw "Cannot perform Construct on a detached
+    // ArrayBuffer"; fail-closed screening then rejected the task, so every PDF
+    // attachment was refused with "could not be stored". Observed in production.
+    //
+    // So this asserts the OWNERSHIP boundary: what pdf-parse receives must not share
+    // a backing store with what the caller keeps.
+    const { PDFParse } = jest.requireMock('pdf-parse') as { PDFParse: jest.Mock };
+    PDFParse.mockClear();
+    pdfGetTextMock.mockResolvedValueOnce({ text: 'Design spec', total: 1, pages: [] });
+    const content = Buffer.from('%PDF-1.4 real pdf bytes here');
+    await screenTextFile(content, 'application/pdf', 'design.pdf', {
+      bedrockClient: mockBedrockPass(),
+      guardrailId: 'test-guardrail',
+      guardrailVersion: '1',
+    });
+    const passed = (PDFParse.mock.calls[0][0] as { data: Uint8Array }).data;
+    // Same bytes…
+    expect(Buffer.from(passed).toString()).toBe(content.toString());
+    // …different backing store, so a transfer cannot detach the caller's copy.
+    expect(passed.buffer).not.toBe(content.buffer);
+  });
+
   test('throws for PDF with no extractable text', async () => {
     pdfGetTextMock.mockResolvedValueOnce({ text: '', total: 1, pages: [] });
     const config = {
