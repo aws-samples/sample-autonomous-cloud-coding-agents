@@ -102,6 +102,11 @@ export async function sumIterationCostForIssue(args: {
       }
       startKey = listed.LastEvaluatedKey as Record<string, unknown> | undefined;
       if (ids.length >= MAX_COST_TASKS_PER_ISSUE) {
+        // Trim to the cap, don't just stop paginating. The cap has to bound the
+        // GetItem fan-out below, and one Query page can hold far more than the cap
+        // (the projection is task_id alone, so ~1 MB is a great many rows) — so
+        // breaking out without trimming would still fan out over the whole page.
+        ids.length = MAX_COST_TASKS_PER_ISSUE;
         // Say so rather than trimming in silence: a capped sum is not the total.
         logger.warn('Iteration cost sum hit the per-issue row cap — reporting a PARTIAL total', {
           linear_issue_id: linearIssueId, cap: MAX_COST_TASKS_PER_ISSUE, ...(logLabel && { source: logLabel }),

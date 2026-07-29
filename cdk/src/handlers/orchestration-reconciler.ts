@@ -74,7 +74,7 @@ import {
 } from './shared/orchestration-store';
 import { encodeMarkdownUrl } from './shared/screenshot-url';
 import { OrchestrationTable } from '../constructs/orchestration-table';
-import { TaskStatus, type TaskStatusType } from '../constructs/task-status';
+import { TaskStatus, TERMINAL_STATUSES, type TaskStatusType } from '../constructs/task-status';
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const ORCHESTRATION_TABLE = process.env.ORCHESTRATION_TABLE_NAME!;
@@ -118,13 +118,16 @@ const MAX_IDEMPOTENCY_KEY_LENGTH = 128;
 // table → no throttle (release-all, back-compat; admission still gates).
 const USER_CONCURRENCY_TABLE = process.env.USER_CONCURRENCY_TABLE_NAME;
 const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT_TASKS_PER_USER ?? '10');
-/** Terminal task statuses that the reconciler reacts to. */
-const TERMINAL: ReadonlySet<TaskStatusType> = new Set<TaskStatusType>([
-  TaskStatus.COMPLETED,
-  TaskStatus.FAILED,
-  TaskStatus.CANCELLED,
-  TaskStatus.TIMED_OUT,
-]);
+/**
+ * Terminal task statuses that the reconciler reacts to.
+ *
+ * DERIVED from the same constant the stream's ``FilterCriteria`` is built from,
+ * not restated. The two must agree: the filter decides which records reach this
+ * handler, and this set decides which of them it acts on. A second literal list
+ * would let them drift silently — a status added to one but not the other either
+ * never arrives or arrives and is dropped, and both look like nothing happened.
+ */
+const TERMINAL: ReadonlySet<TaskStatusType> = new Set<TaskStatusType>(TERMINAL_STATUSES);
 
 /** A terminal task event extracted from a TaskTable stream record. */
 interface TerminalTaskEvent {

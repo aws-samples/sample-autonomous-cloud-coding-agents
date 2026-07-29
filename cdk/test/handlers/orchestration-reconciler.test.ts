@@ -80,6 +80,7 @@ process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME = 'WorkspaceRegistry';
 process.env.ARTIFACTS_BUCKET_NAME = 'ArtifactsBucket';
 
 import { handler, parseTerminalTaskRecord } from '../../src/handlers/orchestration-reconciler';
+import { TERMINAL_STATUSES } from '../../src/constructs/task-status';
 
 /** Build a TaskTable stream MODIFY record. */
 function taskRecord(fields: {
@@ -165,6 +166,29 @@ describe('parseTerminalTaskRecord', () => {
     // is not part of a graph must fall through rather than be mis-gated as a child
     // and released against a graph it has nothing to do with.
     expect(parseTerminalTaskRecord(plainTerminalRecord({ task_id: 'P1', status: 'COMPLETED' }))).toBeNull();
+  });
+
+  // Drift guard. The stream's FilterCriteria is built from TERMINAL_STATUSES, and
+  // this handler decides independently which arriving records it acts on. If the
+  // two ever disagree, a status either never reaches the handler or reaches it and
+  // is dropped — and both look exactly like nothing happening. Driving EVERY
+  // terminal status through the parser fails on drift in either direction: a
+  // status added to the filter but not honoured here, or dropped here while the
+  // filter still admits it.
+  test.each(TERMINAL_STATUSES)('acts on %s — every status the stream filter admits', (status) => {
+    const evt = parseTerminalTaskRecord(taskRecord({
+      task_id: 'T1', status, orchestration_id: 'orch_1',
+    }));
+    expect(evt).not.toBeNull();
+    expect(evt?.status).toBe(status);
+  });
+
+  test('a non-terminal status is NOT acted on, so the guard above cannot pass by accepting everything', () => {
+    for (const status of ['RUNNING', 'PENDING', 'AWAITING_APPROVAL']) {
+      expect(parseTerminalTaskRecord(taskRecord({
+        task_id: 'T1', status, orchestration_id: 'orch_1',
+      }))).toBeNull();
+    }
   });
 });
 
