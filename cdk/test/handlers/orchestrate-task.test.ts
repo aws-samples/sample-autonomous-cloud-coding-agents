@@ -756,7 +756,7 @@ describe('loadBlueprintConfig', () => {
   });
 
   // Compute substrate is a per-repo property that applies to ALL workflows: a
-  // read-only decompose/review task clones + reads the SAME repo, so it needs the
+  // read-only review task clones + reads the SAME repo, so it needs the
   // SAME compute (a repo big enough to need the 64GB ECS tier to build also OOMs
   // the AgentCore microVM just reading it). So an ecs repo's ecs compute_type
   // flows through regardless of the workflow's read-only-ness.
@@ -768,9 +768,9 @@ describe('loadBlueprintConfig', () => {
     compute_type: 'ecs' as const,
   };
 
-  test('a read-only workflow (coding/decompose-v1) on an ecs repo INHERITS ecs (same repo, same footprint)', async () => {
+  test('a read-only workflow (coding/pr-review-v1) on an ecs repo INHERITS ecs (same repo, same footprint)', async () => {
     mockLoadRepoConfig.mockResolvedValueOnce(ecsRepoConfig);
-    const planTask = { ...baseTask, resolved_workflow: { id: 'coding/decompose-v1', version: '1.0.0' } };
+    const planTask = { ...baseTask, resolved_workflow: { id: 'coding/pr-review-v1', version: '1.0.0' } };
     const config = await loadBlueprintConfig(planTask as any);
     expect(config.compute_type).toBe('ecs');
   });

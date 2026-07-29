@@ -239,7 +239,7 @@ describe('EcsAgentCluster construct', () => {
 
   test('creates a second, smaller PLANNING task def (2 vCPU / 8 GB) for read-only workflows (#299 ECS_RIGHTSIZED_PLANNING)', () => {
     // Two task defs now exist: the 64 GB build def (asserted above) and this
-    // 8 GB planning def. decompose-v1 (read_only) runs on the smaller one so a
+    // 8 GB planning def. A read_only workflow runs on the smaller one so a
     // clone+read plan doesn't over-allocate the build box.
     baseTemplate.resourceCountIs('AWS::ECS::TaskDefinition', 2);
     baseTemplate.hasResourceProperties('AWS::ECS::TaskDefinition', {
@@ -778,7 +778,7 @@ describe('EcsAgentCluster artifacts bucket (#299 ECS-parity)', () => {
   });
 
   test('does NOT grant the task role write on the artifacts bucket (the scoped SessionRole owns delivery)', () => {
-    // #596 review B1: coding/decompose-v1 delivers via the assumed SessionRole
+    // An artifact workflow delivers via the assumed SessionRole
     // (scoped to artifacts/${task_id}/*), exactly like the AgentCore runtime —
     // whose task role likewise has no direct artifacts grant. A whole-bucket
     // grantReadWrite here would over-privilege the untrusted-code role and break

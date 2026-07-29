@@ -271,7 +271,7 @@ export async function loadBlueprintConfig(task: TaskRecord): Promise<BlueprintCo
 
   // Compute substrate is a per-repo property (``compute_type``, default
   // ``agentcore``). It applies to ALL workflows on the repo — including a
-  // read-only decompose/planning or pr-review task, because that task CLONES and
+  // read-only pr-review task, because that task CLONES and
   // READS the same repository the coding agent does, so its context/memory
   // footprint is the same: a repo big enough to need the context-gated ECS
   // tier for building is also big enough to OOM the fixed AgentCore microVM just

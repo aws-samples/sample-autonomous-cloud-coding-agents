@@ -61,7 +61,7 @@ export interface EcsAgentClusterProps {
   readonly payloadBucket?: s3.IBucket;
 
   /**
-   * Artifacts bucket for repo-bound artifact workflows (a planning/decompose
+   * Artifacts bucket for repo-bound artifact workflows (a planning
    * workflow emits its plan JSON here via ``deliver_artifact``). The AgentCore
    * runtime gets ``ARTIFACTS_BUCKET_NAME`` in its env; the ECS task needs the
    * SAME env (but NO bucket grant) or an artifact workflow fails at delivery with
@@ -357,7 +357,7 @@ export class EcsAgentCluster extends Construct {
       // can be fetched. (The orchestrator sets the URI per-task via container
       // override; this is set here for parity with the runtime env.)
       ...(props.payloadBucket && { ECS_PAYLOAD_BUCKET: props.payloadBucket.bucketName }),
-      // Artifact workflows (e.g. decompose/planning) deliver their plan JSON to
+      // Artifact workflows (planning/analysis) deliver their document to
       // this bucket. The AgentCore runtime has ARTIFACTS_BUCKET_NAME; the ECS task
       // needs it too or deliver_artifact raises "ARTIFACTS_BUCKET_NAME is not
       // configured".
@@ -498,7 +498,7 @@ export class EcsAgentCluster extends Construct {
       props.payloadBucket.grantRead(taskRole);
     }
 
-    // Artifact workflows (e.g. decompose/planning) deliver their plan to the
+    // Artifact workflows (planning/analysis) deliver their document to the
     // artifacts bucket via deliver_artifact — but the write goes through the
     // assumed SessionRole (deliverers.py -> tenant_client), scoped to
     // artifacts/${task_id}/*, exactly like the AgentCore runtime (whose task

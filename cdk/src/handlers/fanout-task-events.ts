@@ -961,7 +961,7 @@ export function renderLinearFinalStatusComment(args: {
   // on ⚠️, on the assumption that "on ✅ the agent's own step-2 'PR opened' comment
   // reliably carries the link, so duplicating it is noise." That assumption FAILS
   // when the agent skips its PR-opened comment — live-caught on ABCA-584, where a
-  // decompose→single task opened PR #395 (pr_url on the record) but posted no
+  // A task opened a PR (pr_url on the record) but posted no
   // PR-opened comment, so the ✅ completion comment omitted it and the link was
   // LOST entirely. The completion comment is the terminal, platform-owned surface;
   // rendering pr_url here guarantees the link is never lost, and a duplicate with
@@ -1172,7 +1172,7 @@ async function dispatchToLinear(event: FanOutEvent): Promise<void> {
  *
  * The PR URL is rendered on the ✅ success path too — not just the ⚠️ path —
  * because the agent's own "PR opened" comment is not guaranteed to have fired
- * (a decompose→single task, or an agent that skipped that step), so the
+ * (an agent that skipped that step), so the
  * platform comment must always carry the link or it can be lost entirely
  * (ABCA-584). The same fix lands for Linear in #601.
  *
