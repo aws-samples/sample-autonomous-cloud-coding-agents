@@ -4,96 +4,156 @@ The `build` workflow (`.github/workflows/build.yml`) is the gating CI check on e
 
 ## How the time is spent
 
-Profiling a representative `merge_group` run on the default **4-core, 15Gi** runner showed the job is dominated by a single mise task. The `build` step is the overwhelming majority of the job, and inside it `//cdk:test` is the long pole — everything else (agent quality, CDK compile/synth/eslint, CLI, docs, drift checks) finishes in roughly the first 90 seconds and then sits idle while the CDK Jest suite runs alone.
+Profiling `merge_group` runs on the default **4-core, 15Gi** runner shows the `build` step dominated by a single mise task: `//cdk:test` is the long pole. Once both type-check-removal (#1, below) and Lambda-bundling-disable (#371) landed, the picture is much tighter than the original profile suggested.
 
-| Task (inside `mise run build`) | Original wall time | Share of build step |
+Per-task **end offsets** inside the `build` step of run [`30412723686`](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/actions/runs/30412723686) (4-core `merge_group`, 2026-07-28):
+
+| Task (inside `mise run build`) | Ends at | Notes |
 |---|---|---|
-| `//cdk:test` | ~649s | ~91% |
-| `//cli:test` | ~105s | (overlaps) |
-| `//cdk:synth:quiet` | ~96s | (overlaps) |
-| `//cdk:eslint` | ~78s | (overlaps) |
-| `//cdk:compile` | ~58s | (overlaps) |
-| `//docs:build` | ~50s | (overlaps) |
-| `//agent:quality`, `//cli:*`, drift checks | <60s each | (overlaps) |
+| `//cdk:test` | +171s | long pole; ~125s of run alone |
+| `//cdk:synth:quiet` | +142s | 98.5s task; starts after `//cdk:compile` finishes at +43.5s |
+| `//cdk:eslint` | +83s | overlaps |
+| `//agent:test` | +74s | overlaps |
+| `//cdk:compile` | +43.5s | gates synth |
 
-The mise parallel DAG already overlaps every task it can; the bottleneck is that one task is far longer than the sum of the rest, so the DAG has nothing left to schedule against it.
+The mise parallel DAG already overlaps every task it can. The original "everything else finishes in the first ~90s then sits idle for ~200s" framing has expired: `//cdk:synth:quiet` (98.5s) now runs **nearly co-terminal** with `//cdk:test`, finishing at +142s versus the suite's +171s. The genuine idle window against the long pole is roughly **29s**, not ~200s.
+
+**Consequence for sharding (#2):** because synth ends at +142s, even a *perfect* shard of `//cdk:test` cannot pull the build below ~142s. **`//cdk:synth:quiet` is the next binding constraint** once the suite is parallelized, and any sharding plan must name and account for it rather than treating `//cdk:test` as the sole floor.
 
 ## Why `//cdk:test` was so expensive
 
-The Jest transform (`ts-jest`) type-checked every file at test time. But `//cdk:compile` (`tsc --build`) already performs the authoritative type-check in the same build DAG, so type-checking was paid for twice. The fix was to make the test transform **transpile-only** (`isolatedModules`), leaving `//cdk:compile` as the sole type-check gate.
+The Jest transform (`ts-jest`) type-checked every file at test time. The fix was to make the test transform **transpile-only** (`isolatedModules`).
+
+**Scope of the "paid for twice" claim (a tradeoff, not a free lunch).** `//cdk:compile` runs `tsc --build tsconfig.json`, and `cdk/tsconfig.json` sets `"include": ["src/**/*.ts"]` — so its authoritative type-check covers `src/` only; **test files sit outside that program**. Before this change, `ts-jest` type-checked the tests via `tsconfig.jest.json` (which extends `tsconfig.dev.json`, and *that* config does include `test/**/*.ts`). So the net effect is asymmetric:
+
+- **`src/`**: type-checked **twice → once** (the genuine redundancy this change removes).
+- **`test/`**: type-checked **once → zero** by `tsc`. This is a real coverage reduction, not just deduplication — do **not** read "`//cdk:compile` is the sole type-check gate" as meaning it type-checks the tests.
+
+The reduction is partly backstopped: `cdk/eslint.config.mjs` runs type-aware rules over `test/**/*.ts` with `project: './tsconfig.dev.json'`, so some classes of type error still surface in `//cdk:eslint` — but that is **narrower** than full `tsc` diagnostics. **Follow-up lever (deferred):** if test-file type coverage proves worth restoring, add a cheap `tsc --noEmit -p tsconfig.dev.json` gate; it type-checks `test/**` without re-emitting `src/` and stays off the `//cdk:test` critical path.
 
 > **Key insight:** the speedup comes from *not type-checking twice*, not from any particular transform engine. A transpile-only `ts-jest` and a Rust-based transform (`@swc/jest`) land at essentially the same wall time. The engine choice is therefore decided by *risk*, not speed — and `isolatedModules` keeps `require()` in source order, avoiding the ES-spec import-hoisting behaviour that would otherwise break tests relying on `const` / `process.env` set before the module-under-test is imported.
 
 ## Recommendations — status and sequence
 
-| # | Recommendation | Status | Effect |
+Two landed changes cut the suite, and the ledger credits each its own delta rather than lumping them together. Figures below are dated because they drift: an early `~710s → ~346s` read was accurate on **2026-06-16**, but PR [#371](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/pull/371) (`perf(test): disable Lambda bundling in CDK unit-test synths`, merged 2026-06-17) cut it again, so any single "post-#1" number is stale.
+
+| # | Recommendation | Status | Effect (with source) |
 |---|---|---|---|
-| 1 | Skip the redundant jest type-check (transpile-only transform) | ✅ Done | build step ~710s → ~346s (−51%); `//cdk:test` ~649s → ~298s |
-| 2 | Shard the CDK suite across a job matrix (`jest --shard=N/M`) | Open | ~298s → ~170s wall (4-way, incl. per-job overhead — see table below); stacks on top of #1 |
+| 1 | Skip the redundant jest type-check (transpile-only transform) — [#359](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/359) | ✅ Done | build step ~710s → ~346s; `//cdk:test` ~649s → ~298s (measured 2026-06-16) |
+| 1b | Disable Lambda bundling in CDK unit-test synths (~15× per synth) — [#371](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/pull/371) | ✅ Done | further cut on top of #1; combined result is the current baseline below |
+| 2 | Shard the CDK suite across a job matrix (`jest --shard=N/M`) | **Deferred** | see [item #2 design](#item-2--sharding-the-cdk-suite-design-deferred); on current numbers **net-neutral-to-slower** — deferred, not recommended-now |
 | 3 | Gate `collectCoverage` to `merge_group` only (skip on PR push) | Open | trims instrumentation on the high-frequency PR event |
 | 4 | Bump the default runner (4-core → 8/16-core; label path already exists) | Open | direct win for jest workers + parallel synth |
 | 5 | Path-filtered builds so docs/CLI/agent-only PRs skip `//cdk:test` | Open | biggest win for the long tail of non-CDK PRs |
+| 6 | Fix CI cache hit-rate (`node_modules` / agent venv / jest transform cache) | Open | **new** — caches miss on *every* `merge_group` run today (see Implementer notes); likely the cheapest win of all |
+
+### Current baseline (post #1 + #1b)
+
+Measured on 4-core `merge_group` runs, 2026-07-28/29:
+
+| Run | `Build completed in` | `//cdk:test` |
+|---|---|---|
+| [`30412723686`](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/actions/runs/30412723686) | 171s | `Time: 125.08 s` (136 suites) |
+| [`30409171662`](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/actions/runs/30409171662) | 186s | — |
+| [`30400147506`](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/actions/runs/30400147506) | 148s | — |
+
+So the working figures are **build ~148–186s** and **`//cdk:test` ~125s** — not the ~346s / ~298s an unsplit "post-#1" ledger would imply.
 
 ### Suggested sequencing
 
-1. **#2 (shard)** — attacks the now-dominant ~298s long pole directly. Biggest remaining bang.
-2. **#5 (path filters)** — orthogonal; removes the whole tax from docs/CLI/agent-only PRs.
-3. **#4 (bigger runner)** — cheap, immediate experiment, but a recurring per-run cost; good to A/B against #2.
+Re-ranked against the current baseline (`//cdk:test` ~125s, per-job overhead 120–220s). At these numbers a 4-way shard lands *at or above* the whole build (see the [shard math](#mechanism)), so sharding is demoted:
+
+1. **#6 (cache hit-rate)** — caches miss on every `merge_group` run today; restoring hits shaves the 120–220s job-setup tax off *every* build with no matrix complexity. Likely the cheapest, broadest win.
+2. **#4 (bigger runner)** — one line; jest workers and synth are both CPU-bound, so more cores helps the two remaining constraints (`//cdk:test`, `//cdk:synth:quiet`) at once. Recurring per-run cost, so A/B it.
+3. **#5 (path filters)** — orthogonal; removes the whole CDK tax from docs/CLI/agent-only PRs.
 4. **#3 (PR-only coverage)** — smallest win; fold in opportunistically.
+5. **#2 (shard)** — **deferred.** On current numbers it does not beat the whole build (overhead dominates a ~125s suite). Revisit only if `//cdk:test` grows past **~250s** (roughly 2× today), at which point a 4-way slice (~62s + overhead) can plausibly clear the build's other constraints. Keep the design (below) so it is ready to re-cost when that trigger fires.
 
 ## Implementer notes
 
 These constraints are easy to miss and expensive to get wrong:
 
-- **The cost shape shifted after #1.** `//cdk:test` was ~91% of the build step; at ~298s it is now ~86% of a ~346s step — still the long pole, but half the absolute size. The DAG cannot overlap it, so the next gain must come from parallelizing the suite (#2) or not running it when irrelevant (#5).
+- **The cost shape shifted after #1 + #1b, and the long pole no longer stands alone.** On the current baseline `//cdk:test` (~125s) still finishes last (+171s in run `30412723686`), but `//cdk:synth:quiet` finishes only ~29s earlier (+142s). So parallelizing the suite (#2) faces a hard floor at synth's ~142s finish — **synth is the next binding constraint**, and any suite-level win below that is unreachable without also attacking synth or the job-setup tax.
+
+- **Caches miss on *every* `merge_group` run today (finding → #6).** All three sampled runs logged `node_modules=miss, venv=miss, jest=miss`: run `30412723686`, run `30409171662`, run `30400147506`. That is why job-setup wall time (job start → `build` step start) is **120–220s**, not the ~90–100s an install-only estimate assumes. Fixing cache hit-rate is almost certainly cheaper than sharding and helps every build, not just CDK-heavy ones — prioritize it (see sequencing).
+
+- **`fixed_overhead` must be measured from job start, not from install.** The per-job overhead a shard pays is not just checkout + install + cache-restore; a real shard job also pays `Set up job`, `Free Disk Space`, tool setup, artifact upload, and post-job cache saves. Measured job-start → `build`-step-start: run `30412723686` **220s** (`Install completed in 56s`), run `30409171662` **122s** (`Install completed in 57s`), run `30400147506` **220s** (`Install completed in 81s`). Use **120–220s**, not ~95s, when costing any fan-out.
 
 - **The `build` check is *required* and must report on `merge_group`.** Marking it required without it running on the `merge_group` event would deadlock the merge queue (the check would never report). This shapes #2 and #5:
-  - **#2 (shard):** the *required* check must **aggregate** shard results. Either keep one `build` job that runs shards internally, or add a gate job that `needs:` all shards and is the one marked required. Do **not** mark individual shard jobs required. Watch that per-shard fixed overhead (checkout, install, cache restore) does not erode the win; measure wall-clock, not sum-of-shards.
+  - **#2 (shard):** the *required* check must **aggregate** shard results. Either keep one `build` job that runs shards internally, or add a gate job that `needs:` all shards and is the one marked required. Do **not** mark individual shard jobs required. Watch that per-shard fixed overhead (120–220s, above) does not erode the win; measure wall-clock, not sum-of-shards.
   - **#5 (path filter):** you cannot simply skip the `build` job for docs-only PRs (the required check would never report). Keep the job and make the *expensive steps* conditional (e.g. `dorny/paths-filter` gating `//cdk:test`), emitting success when CDK paths are untouched. Annotate what was skipped so a skipped suite is not mistaken for a covered one.
 
 - **Coverage thresholds are the merge gate (#3).** Thresholds live in `cdk/package.json` / `cli/package.json` and the agent pytest `fail_under`, kept in sync via `contracts/coverage-thresholds.json` and the `check:coverage-thresholds-sync` drift check. If `collectCoverage` is skipped on `pull_request`, thresholds must still be enforced on `merge_group` so nothing merges under-covered.
 
 - **Runner sizing is one line (#4).** `build.yml` already resolves the runner from `vars.DEFAULT_RUNNER_LABEL` and PR labels (`self-hosted`, `ubuntu-latest-4-cores`). Jest workers scale with cores (`maxWorkers` defaults to cores−1) and synth is CPU-bound, so more cores helps both — weighed against the recurring per-run cost.
 
-## Item #2 — sharding the CDK suite (design)
+## Item #2 — sharding the CDK suite (design, DEFERRED)
 
-This is the next lever and the focus of active work under [#363](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/363). Because `//cdk:test` (~298s after item #1) is the long pole that the mise DAG cannot overlap, the only way to cut it further is to run the suite across multiple workers in parallel and aggregate the results.
+> **Status: deferred, not recommended on current numbers.** With `//cdk:test` at ~125s and per-job overhead at 120–220s, sharding does **not** beat the current whole build — see the recomputed math below. The design is retained so it can be re-costed quickly if the suite grows (trigger: `//cdk:test` > ~250s). Backing issue: [#363](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/363).
 
 ### Mechanism
 
-Jest 30 supports `--shard=<index>/<total>`, which deterministically partitions the test files into `total` groups and runs only group `index`. Running N shards as N parallel CI jobs turns a single ~298s task into N jobs of roughly `298/N + fixed_overhead` seconds, where `fixed_overhead` is the per-job checkout + install + cache-restore (~90–100s today).
+Jest 30 supports `--shard=<index>/<total>`, which deterministically partitions the test files into `total` groups and runs only group `index`. Running N shards as N parallel CI jobs turns a single suite into N jobs of roughly `slice/N + fixed_overhead` seconds, where `fixed_overhead` is the **full per-job wall time from job start to the `build` step starting** — checkout, `Set up job`, `Free Disk Space`, tool setup, install, cache restore, plus post-job artifact upload and cache saves. Measured today that is **120–220s**, not the ~90–100s an install-only estimate assumes (see Implementer notes for the per-run figures).
 
-| Shards | Ideal test slice | + fixed overhead (~95s) | Approx. wall |
+Recomputing the doc's own `slice + fixed_overhead` formula with **measured** inputs (`//cdk:test` ~125s, overhead 120–220s):
+
+| Shards | Ideal test slice | + fixed overhead (120–220s) | Approx. shard wall |
 |---|---|---|---|
-| 1 (today) | 298s | n/a | ~298s |
-| 2 | ~149s | ~95s | ~245s |
-| 4 | ~75s | ~95s | ~170s |
-| 6 | ~50s | ~95s | ~145s |
+| 1 (today) | ~125s | n/a | whole build **148–186s** |
+| 2 | ~63s | 120–220s | ~183–283s |
+| 4 | ~31s | 120–220s | ~151–251s |
 
-> **Insight — overhead dominates past ~4 shards.** With well over a hundred test suites, the test slice shrinks linearly but the ~95s fixed per-job overhead does not. Beyond ~4 shards the overhead is the majority of each job's wall time, so returns diminish fast. **4-way is the recommended starting point**; measure before going higher, and invest in cache hit-rate (node_modules, agent venv, jest transform cache) before adding shards.
+> **Insight — the overhead swamps a ~125s suite.** A 4-way shard job lands **at or above** the current *entire* build (148–186s), and that is before the aggregate job's own overhead, the extra runner-minutes, and the coverage-merge complexity. So on today's numbers sharding is **net-neutral-to-slower**. It only becomes attractive once the suite is large enough that `slice/N` dominates the fixed overhead — hence the **~250s trigger** in the sequencing section. Until then, invest in cache hit-rate (#6) and runner size (#4) first, both of which help without any of sharding's fan-out cost.
 
 ### Required-check wiring (the part that's easy to get wrong)
 
-`build` is a **required** status check and must report on the `merge_group` event (see the comment block atop `build.yml` and #327). A naive matrix (`shard: [1,2,3,4]`) creates **four separate check runs** — `build (1)`, `build (2)`, … — none of which is the single `build` context that branch protection requires. Marking all four required is fragile (renaming/recount changes contexts); marking none required defeats the gate.
+`build` is a **required** status check and must report on the `merge_group` event (see the comment block atop `build.yml` and #327). This is a **required-context change, not a workflow-only change** — get the check-run *name* wrong and the merge queue deadlocks even if the YAML is otherwise correct.
+
+**The required context in this repo is `build (agentcore)`, not `build`.** `build.yml` already carries `strategy: matrix: compute_type: [agentcore]` on the `build` job, and a single-value matrix *still* emits a parenthesized suffix. Confirmed on PR [#672](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/pull/672) (`gh pr view 672 --json statusCheckRollup`) and in ruleset `14980587`:
+
+```json
+[{"context":"build (agentcore)"},{"context":"Secrets, deps, and workflow scan"}]
+```
+
+Two corrections to the naive plan follow from this:
+
+1. **Matrix suffixes list every dimension in declaration order.** Adding a `shard` dimension to the existing `compute_type` matrix yields `build (agentcore, 1)`, `build (agentcore, 2)`, … — **`build (1)` never appears.** Marking those per-shard runs required is fragile (recount changes contexts); marking none required defeats the gate.
+2. **An aggregate job named plain `build` emits check `build`, which does NOT match the required `build (agentcore)` context.** The required check would then never report and the merge queue deadlocks — the exact failure mode #327 and the comment block atop `build.yml` warn about.
+
+So the aggregate job must **either** retain the `compute_type` matrix (keeping the emitted name `build (agentcore)`) **or** be paired with a coordinated ruleset update (`14980587`) to whatever new context name it emits. Do not ship the shard workflow without also planning the required-context change.
 
 The robust pattern is **fan-out + aggregate gate**:
 
 ```
-build-shard (matrix: shard ∈ [1..N])   # parallel; NOT individually required
+build-shard (matrix: compute_type × shard)   # e.g. build (agentcore, 1..N); NOT individually required
         │
         ▼
-build (needs: build-shard)             # single required context; succeeds
-                                       # only if every shard succeeded
+build (agentcore)  (needs: build-shard)      # single required context; always runs,
+                                             # fails if any shard failed
 ```
 
 - The matrix job (`build-shard`) runs `jest --shard=${{ matrix.shard }}/N` and uploads its `cdk.out` / coverage artifacts.
-- A single aggregate job named **`build`** `needs: [build-shard]` and fails if any shard failed (`if: ${{ contains(needs.*.result, 'failure') }}`). **This** job is the required context — one stable name regardless of shard count.
+- The aggregate job keeps the `compute_type: [agentcore]` matrix so it emits the required **`build (agentcore)`** context (one stable name regardless of shard count). Its gate must use GitHub's documented pattern: **`if: ${{ always() }}` on the job, with the pass/fail decision moved into a step.** `contains()` is **not** one of GitHub's four status-check functions (`success()`, `always()`, `cancelled()`, `failure()`), so a bare `if: ${{ contains(needs.*.result, 'failure') }}` silently becomes `success() && contains(needs.*.result, 'failure')` — a contradiction that **never runs on either outcome**, admitting failing shards once it is the required context:
+
+  ```yaml
+  build:
+    needs: [build-shard]
+    strategy:
+      matrix:
+        compute_type: [agentcore]   # keeps the required "build (agentcore)" name
+    if: ${{ always() }}             # job must always run so it always reports
+    steps:
+      - name: Gate on shard results
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+        run: exit 1
+  ```
+
 - Coverage must be **merged across shards** before the threshold gate runs (each shard only sees its slice). Collect per-shard `coverage-final.json`, merge (e.g. `nyc merge` / `istanbul-merge`), then enforce `coverageThreshold` once on the merged report — otherwise every shard fails its own threshold.
 - The **self-mutation check** (drift detection) should run once in the aggregate job (or a dedicated single job), not per-shard, to avoid N redundant `git diff` runs and racy artifact uploads.
 
 ### Open design questions for the implementer
 
-- **Synth + non-test tasks:** `//cdk:synth:quiet`, `//cli:*`, `//docs:build`, `//agent:quality` are not sharded and finish in the first ~90s. Decide whether they run in the aggregate job, a separate job, or shard 1 only — keep them off the critical path.
+- **Synth + non-test tasks:** `//cli:*`, `//docs:build`, `//agent:quality` finish early (~74–83s) and are easy to keep off the critical path. **`//cdk:synth:quiet` is different** — at +142s it is the *next binding constraint* (see [How the time is spent](#how-the-time-is-spent)), so wherever it runs (aggregate job, a dedicated job, or shard 1) it, not the sharded suite, sets the new floor. Decide its placement deliberately and measure against ~142s, not the suite.
 - **Artifact strategy:** the deploy pipeline consumes `cdk-agentcore-out`. Sharding test execution should not change synth output; ensure exactly one job still produces the deploy artifact.
 - **Shard balance:** `--shard` partitions by file count, not by runtime. A few heavy suites (full `App` + cdk-nag synth) can skew one shard. If imbalance is material, consider ordering/grouping heavy suites or a runtime-aware splitter; measure first.
 
