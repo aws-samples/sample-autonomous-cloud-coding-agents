@@ -52,7 +52,7 @@ import { claimTerminalReply, releaseReplyClaim } from './shared/iteration-reply-
 import { logger } from './shared/logger';
 import type { Channel, IssueRef } from './shared/orchestration-channel';
 import { channelForSource, type ChannelRegistryTables } from './shared/orchestration-channel-factory';
-import { isIntegrationNode } from './shared/orchestration-integration-node';
+import { computeLeaves, isIntegrationNode } from './shared/orchestration-integration-node';
 import { ORCH_LOG } from './shared/orchestration-log-events';
 import {
   computeReconcilePlan,
@@ -381,6 +381,25 @@ async function resolveChildFailureReasons(
 }
 
 /**
+ * The single leaf of a graph that has exactly one, or undefined when the graph
+ * has several leaves (an integration node covers that case) or none.
+ *
+ * Reuses {@link computeLeaves} rather than re-deriving "has no successor" here,
+ * so the panel's idea of the final node cannot drift from the seeder's.
+ */
+function soleLeafChild(
+  children: readonly OrchestrationChildRow[],
+): OrchestrationChildRow | undefined {
+  const leaves = computeLeaves(children.map((c) => ({
+    id: c.sub_issue_id,
+    depends_on: [...c.depends_on],
+    title: c.sub_issue_id,
+  })));
+  if (leaves.length !== 1) return undefined;
+  return children.find((c) => c.sub_issue_id === leaves[0]);
+}
+
+/**
  * Read the integration node's deploy-preview screenshot URL from its
  * TaskRecord (persisted by the screenshot pipeline) so the parent panel can
  * embed the combined preview. Best-effort — null when the node has no task,
@@ -701,12 +720,22 @@ export async function refreshPanelAndSettle(
   const failureReasons = anyFailed ? await resolveChildFailureReasons(children) : {};
   const integration = children.find((c) => isIntegrationNode(c.sub_issue_id));
   const combinedPrUrl = integration ? prUrls[integration.sub_issue_id] : undefined;
-  // Embed the integration node's combined deploy preview in
-  // the panel when the epic is complete. Only read it on the all-terminal
-  // settle (the integration node has deployed by then); skip the extra Get on
-  // every in-flight edit.
-  const combinedScreenshot = (allTerminal && integration)
-    ? await resolveCombinedScreenshotUrl(integration.child_task_id)
+  // The node whose deploy preview represents the WHOLE epic.
+  //
+  // With several leaves that is the synthetic integration node, which exists to
+  // merge them. With ONE leaf there is no integration node — by then everything
+  // has already converged on that final node, so a synthetic one would re-run
+  // work it had just done and its "combined" preview would duplicate the leaf's
+  // own. The final node IS the combined result.
+  //
+  // Either way the panel should carry a preview: a reviewer reads the parent, and
+  // "no integration node" is not a reason to show them nothing when a finished
+  // node holds exactly the artifact they want.
+  const previewNode = integration ?? soleLeafChild(children);
+  // Only read on the all-terminal settle (the node has deployed by then); skip
+  // the extra Get on every in-flight panel edit.
+  const combinedScreenshot = (allTerminal && previewNode)
+    ? await resolveCombinedScreenshotUrl(previewNode.child_task_id)
     : null;
 
   if (allTerminal) {

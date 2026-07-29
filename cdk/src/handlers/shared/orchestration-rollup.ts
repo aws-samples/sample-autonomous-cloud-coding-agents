@@ -337,20 +337,25 @@ export function renderEpicPanel(params: EpicPanelParams): string {
   // webhook) — percent-encode its parens so a crafted path can't break out of
   // the markdown link. The CloudFront screenshot URL is our own key (no
   // parens) so it's interpolated as-is.
+  //
+  // "Combined" only when an integration node merged several leaves. On a chain the
+  // preview comes from the final node, and calling that "combined" would tell the
+  // reviewer several branches were merged when none were.
+  const previewLabel = combinedPrUrl ? 'Combined preview' : 'Preview';
   let shot: string[] = [];
   if (combinedScreenshotUrl) {
     if (combinedPreviewUrl) {
       const safePreview = encodeMarkdownUrl(combinedPreviewUrl);
       shot = [
         '',
-        '🖼️ **Combined preview**',
+        `🖼️ **${previewLabel}**`,
         '',
-        `[![combined preview](${combinedScreenshotUrl})](${safePreview})`,
+        `[![${previewLabel.toLowerCase()}](${combinedScreenshotUrl})](${safePreview})`,
         '',
-        `[Open the combined preview](${safePreview})`,
+        `[Open the ${previewLabel.toLowerCase()}](${safePreview})`,
       ];
     } else {
-      shot = ['', '🖼️ **Combined preview**', '', `![combined preview](${combinedScreenshotUrl})`];
+      shot = ['', `🖼️ **${previewLabel}**`, '', `![${previewLabel.toLowerCase()}](${combinedScreenshotUrl})`];
     }
   }
 

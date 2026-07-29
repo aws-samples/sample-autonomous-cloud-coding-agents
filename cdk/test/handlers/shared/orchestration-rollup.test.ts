@@ -732,14 +732,35 @@ describe('renderEpicPanel — the single maturing panel', () => {
     expect(body).not.toContain('↳');
   });
 
-  test('embeds the combined preview screenshot when present', () => {
+  test('embeds the preview screenshot when present', () => {
+    // No combinedPrUrl → no integration node merged anything, so this is the
+    // final node's own preview and must NOT be labelled "combined".
     const body = renderEpicPanel({
       inProgress: false,
       rows: [panelRow('a', 'succeeded')],
       combinedScreenshotUrl: 'https://cdn/x.png',
     });
-    expect(body).toContain('🖼️ **Combined preview**');
-    expect(body).toContain('![combined preview](https://cdn/x.png)');
+    expect(body).toContain('🖼️ **Preview**');
+    expect(body).toContain('![preview](https://cdn/x.png)');
+  });
+
+  test('labels it "Combined preview" only when an integration node merged the leaves', () => {
+    // The combined PR callout is the signal that several leaves were merged.
+    // Calling a chain's final-node preview "combined" would tell a reviewer
+    // branches were merged when none were.
+    const combined = renderEpicPanel({
+      inProgress: false,
+      rows: [panelRow('a', 'succeeded')],
+      combinedPrUrl: 'https://github.com/o/r/pull/99',
+      combinedScreenshotUrl: 'https://cdn/x.png',
+    });
+    expect(combined).toContain('🖼️ **Combined preview**');
+    const chain = renderEpicPanel({
+      inProgress: false,
+      rows: [panelRow('a', 'succeeded')],
+      combinedScreenshotUrl: 'https://cdn/x.png',
+    });
+    expect(chain).not.toContain('Combined preview');
   });
 
   test('makes the combined preview a clickable deep-link when the preview URL is known', () => {
@@ -749,11 +770,11 @@ describe('renderEpicPanel — the single maturing panel', () => {
       combinedScreenshotUrl: 'https://cdn/x.png',
       combinedPreviewUrl: 'https://my-app-abc123.vercel.app',
     });
-    expect(body).toContain('🖼️ **Combined preview**');
-    // Linked image: the embedded screenshot opens the running combined site.
-    expect(body).toContain('[![combined preview](https://cdn/x.png)](https://my-app-abc123.vercel.app)');
+    expect(body).toContain('🖼️ **Preview**');
+    // Linked image: the embedded screenshot opens the running site.
+    expect(body).toContain('[![preview](https://cdn/x.png)](https://my-app-abc123.vercel.app)');
     // Plain "open it" link too, for clients that don't render linked images.
-    expect(body).toContain('[Open the combined preview](https://my-app-abc123.vercel.app)');
+    expect(body).toContain('[Open the preview](https://my-app-abc123.vercel.app)');
   });
 
   test('percent-encodes parens in the preview URL so it cannot break out of the markdown link', () => {
@@ -774,9 +795,9 @@ describe('renderEpicPanel — the single maturing panel', () => {
       rows: [panelRow('a', 'succeeded')],
       combinedScreenshotUrl: 'https://cdn/x.png',
     });
-    expect(body).toContain('![combined preview](https://cdn/x.png)');
-    expect(body).not.toContain('[![combined preview]'); // not a linked image
-    expect(body).not.toContain('Open the combined preview');
+    expect(body).toContain('![preview](https://cdn/x.png)');
+    expect(body).not.toContain('[![preview]'); // not a linked image
+    expect(body).not.toContain('Open the preview');
   });
 
   test('rows are sorted by identifier for a stable edited body', () => {

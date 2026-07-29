@@ -1367,3 +1367,74 @@ describe('orchestration-reconciler handler — the iteration ack reply', () => {
     expect(upsertThreadedReplyMock).not.toHaveBeenCalled();
   });
 });
+
+describe('the panel preview on a CHAIN (no integration node)', () => {
+  test('reads the preview off the final node instead of showing none', async () => {
+    // A chain has ONE leaf, so no integration node is seeded — by then everything
+    // has converged on the last child, and a synthetic node would re-run what that
+    // child just did. But the reviewer reads the PARENT panel, so "no integration
+    // node" must not mean "no preview": the final node holds exactly the artifact
+    // they want. Previously the panel showed nothing at all on a chain.
+    upsertStatusCommentMock.mockReset().mockResolvedValue('panel-1');
+    transitionIssueStateMock.mockReset().mockResolvedValue(true);
+    swapIssueReactionMock.mockReset().mockResolvedValue(true);
+    const meta = {
+      sub_issue_id: '#meta',
+      orchestration_id: 'orch_1',
+      parent_linear_issue_id: 'PARENT',
+      linear_workspace_id: 'WS',
+      repo: 'o/r',
+      child_count: 2,
+      platform_user_id: 'u1',
+      status_comment_id: 'panel-1',
+    };
+    const base = { orchestration_id: 'orch_1', repo: 'o/r', parent_linear_issue_id: 'PARENT', linear_workspace_id: 'WS' };
+    // A → B: B is the sole leaf and the one that just completed.
+    const rows = [
+      { ...base, sub_issue_id: 'A', depends_on: [], child_status: 'succeeded', child_task_id: 'task-A', linear_identifier: 'ENG-1' },
+      { ...base, sub_issue_id: 'B', depends_on: ['A'], child_status: 'succeeded', child_task_id: 'task-B', linear_identifier: 'ENG-2' },
+    ];
+    ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
+      if (cmd._type === 'Query' && cmd.input.IndexName === 'ChildTaskIndex') return { Items: [{ ...rows[1] }] };
+      if (cmd._type === 'Query') return { Items: [meta, ...rows] };
+      if (cmd._type === 'BatchGet') {
+        const keys = cmd.input.RequestItems as Record<string, { Keys: Array<{ task_id: string }> }>;
+        const tbl = Object.keys(keys)[0];
+        return { Responses: { [tbl]: keys[tbl].Keys.map((k) => ({ task_id: k.task_id, pr_url: `https://github.com/o/r/pull/${k.task_id.length}` })) } };
+      }
+      if (cmd._type === 'Get') {
+        const tid = (cmd.input.Key as { task_id: string }).task_id;
+        // Only the FINAL node carries a screenshot; the first child's is stale.
+        return {
+          Item: tid === 'task-B'
+            ? { screenshot_url: 'https://cdn.example/final.png', screenshot_preview_url: 'https://final.vercel.app' }
+            : { screenshot_url: 'https://cdn.example/WRONG-first-child.png' },
+        };
+      }
+      return {};
+    });
+
+    await handler({
+      Records: [{
+        eventName: 'MODIFY',
+        dynamodb: {
+          NewImage: {
+            task_id: { S: 'task-B' },
+            status: { S: 'COMPLETED' },
+            orchestration_id: { S: 'orch_1' },
+            build_passed: { BOOL: true },
+          } as never,
+        },
+      }],
+    } as never);
+
+    const panel = upsertStatusCommentMock.mock.calls.map((c) => String(c[2])).join('\n');
+    expect(panel).toContain('https://cdn.example/final.png');
+    expect(panel).not.toContain('WRONG-first-child');
+    // Clickable deep-link to the running site, not just a static PNG.
+    expect(panel).toContain('https://final.vercel.app');
+    // NOT presented as a combined result — nothing was merged on a chain.
+    expect(panel).toContain('🖼️ **Preview**');
+    expect(panel).not.toContain('Combined preview');
+  });
+});
