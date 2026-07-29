@@ -17,8 +17,9 @@
  *  SOFTWARE.
  */
 
-import { App } from 'aws-cdk-lib';
+import { App, AspectPriority, Aspects } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
+import { buildAppId, SolutionUaAspect } from '../../src/constructs/solution-ua-aspect';
 import { AgentStack } from '../../src/stacks/agent';
 
 describe('AgentStack', () => {
@@ -530,5 +531,57 @@ describe('AgentStack with the ECS substrate gate (--context compute_type=ecs)', 
 
   test('outputs ComputeSubstrate=ecs so the CLI allows compute_type=ecs onboarding', () => {
     template.hasOutput('ComputeSubstrate', { Value: 'ecs' });
+  });
+});
+
+describe('AgentStack solution attribution (#319): AWS_SDK_UA_APP_ID via stack-level aspect', () => {
+  let template: Template;
+
+  beforeAll(() => {
+    const app = new App();
+    const stack = new AgentStack(app, 'UaAgentStack', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    });
+    // Mirror main.ts: the SolutionUaAspect is applied at the stack scope, not
+    // inside AgentStack. It must reach every Lambda in the tree — including the
+    // ones nested several construct levels deep (integrations, orchestrator),
+    // not just functions declared directly under the stack.
+    Aspects.of(stack).add(new SolutionUaAspect(buildAppId('UaAgentStack')), {
+      priority: AspectPriority.MUTATING,
+    });
+    template = Template.fromStack(stack);
+  });
+
+  test('every solution Lambda carries AWS_SDK_UA_APP_ID (traverses nested scope)', () => {
+    const functions = template.findResources('AWS::Lambda::Function');
+    // CDK synthesizes its own custom-resource provider Lambdas (S3
+    // auto-delete, VPC default-SG restriction). Those are framework-owned
+    // CfnResource-backed handlers, not `lambda.Function` constructs, so the
+    // aspect's `instanceof lambda.Function` guard does not visit them. They
+    // fire only at deploy time and are not part of the runtime solution
+    // traffic; every ABCA-authored Lambda IS covered.
+    const solutionFnIds = Object.keys(functions).filter(
+      (id) => !/CustomResourceProviderHandler/.test(id),
+    );
+    // Sanity: this stack has many solution Lambdas across nested constructs.
+    expect(solutionFnIds.length).toBeGreaterThan(10);
+    for (const fnId of solutionFnIds) {
+      const envVars = functions[fnId].Properties.Environment?.Variables ?? {};
+      expect(envVars.AWS_SDK_UA_APP_ID).toBe('uksb-wt64nei4u6#UaAgentStack');
+    }
+  });
+
+  test('nested integration Lambdas (Jira/Slack/Linear) inherit the app-id', () => {
+    // The trap: these functions live inside integration constructs several
+    // scopes below the stack. The env-var still resolves the canonical `#`
+    // form (not the mangled `-` variant).
+    const functions = template.findResources('AWS::Lambda::Function');
+    const nested = Object.entries(functions).filter(([id]) =>
+      /Jira|Slack|Linear/.test(id),
+    );
+    expect(nested.length).toBeGreaterThan(0);
+    for (const [, fn] of nested) {
+      expect(fn.Properties.Environment?.Variables?.AWS_SDK_UA_APP_ID).toBe('uksb-wt64nei4u6#UaAgentStack');
+    }
   });
 });

@@ -33,13 +33,30 @@ const APP_ID_MAX_LEN = 50;
 const UA_TOKEN_UNSAFE = /[^A-Za-z0-9!$%&'*+\-.^_`|~]/g;
 
 /**
+ * Sanitize an app-id value while preserving the `#` solution separator.
+ *
+ * The app-id value charset (`UA_VALUE_ESCAPE_REGEX` in the SDK) includes `#`,
+ * which is the canonical `uksb-wt64nei4u6#{stack}` separator. Sanitizing the
+ * whole string with `UA_TOKEN_UNSAFE` (which excludes `#`) would mangle that
+ * separator to `-`, so we split on `#`, sanitize each segment independently,
+ * and rejoin — preserving `#` boundaries while stripping any other unsafe char.
+ */
+function sanitizeAppId(value: string): string {
+  return value
+    .split('#')
+    .map((segment) => segment.replace(UA_TOKEN_UNSAFE, '-'))
+    .join('#');
+}
+
+/**
  * Build the `AWS_SDK_UA_APP_ID` value for a deployment.
  *
  * `uksb-wt64nei4u6#{stackName}` — the SDK reads this env var natively and
  * renders `app/uksb-wt64nei4u6#{stackName}` on every request, so no client
  * code is involved. CloudFormation stack names are `[A-Za-z0-9-]` (already a
  * subset of the app-id charset), but a non-CFN override value is sanitized
- * defensively. Clipped to the documented 50-char value cap.
+ * defensively. Both branches preserve `#` as the solution separator (only
+ * other unsafe chars become `-`), then clip to the documented 50-char cap.
  *
  * Returns `undefined` for an explicit empty override — the caller then omits
  * the env var entirely, which is the customer opt-out (no `app/` segment).
@@ -47,7 +64,7 @@ const UA_TOKEN_UNSAFE = /[^A-Za-z0-9!$%&'*+\-.^_`|~]/g;
 export function buildAppId(stackName: string, override?: string): string | undefined {
   if (override !== undefined) {
     const trimmed = override.trim();
-    return trimmed === '' ? undefined : trimmed.replace(UA_TOKEN_UNSAFE, '-').slice(0, APP_ID_MAX_LEN);
+    return trimmed === '' ? undefined : sanitizeAppId(trimmed).slice(0, APP_ID_MAX_LEN);
   }
   const value = `${SOLUTION_ID}#${stackName.replace(UA_TOKEN_UNSAFE, '-')}`;
   return value.slice(0, APP_ID_MAX_LEN);

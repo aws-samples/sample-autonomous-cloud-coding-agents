@@ -104,7 +104,7 @@ const TABLE_NAME = process.env.TASK_TABLE_NAME!;
 const EVENTS_TABLE_NAME = process.env.TASK_EVENTS_TABLE_NAME!;
 const TASK_RETENTION_DAYS = Number(process.env.TASK_RETENTION_DAYS ?? '90');
 const ATTACHMENTS_BUCKET = process.env.ATTACHMENTS_BUCKET_NAME;
-const s3Client = ATTACHMENTS_BUCKET ? new S3Client({}) : undefined;
+const s3Client = ATTACHMENTS_BUCKET ? new S3Client({ ...abcaUserAgent() }) : undefined;
 
 /** Human-readable description of a workflow's required-input contract (for 400s). */
 function describeRequiredInputs(requiredInputs: { allOf?: readonly string[]; oneOf?: readonly string[] }): string {

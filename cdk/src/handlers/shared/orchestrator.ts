@@ -508,7 +508,7 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
       task.task_id,
       task.user_id,
       {
-        s3Client: new S3Client({}),
+        s3Client: new S3Client({ ...abcaUserAgent() }),
         bucketName: ATTACHMENTS_BUCKET_NAME,
         screeningConfig,
         githubToken,

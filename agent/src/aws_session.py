@@ -261,14 +261,30 @@ def is_scoped() -> bool:
 def _merge_ua_config(kwargs: dict[str, Any]) -> dict[str, Any]:
     """Return ``kwargs`` with the static md/ UA merged into any ``config``.
 
-    Preserves a caller-supplied ``botocore.config.Config`` by merging rather
-    than overwriting; supplies one carrying just the UA otherwise. (#319)
+    Preserves a caller-supplied ``botocore.config.Config``. Non-colliding keys
+    (``read_timeout`` etc.) survive via ``Config.merge``. ``user_agent_extra``
+    is the one key that *does* collide: botocore's ``merge`` gives precedence to
+    the argument, so a naive merge would silently drop the caller's extra. We
+    therefore *concatenate* both extras (caller first, then ours) so neither is
+    lost — matching the scoped-session path, which keeps both segments. (#319)
     """
+    from botocore.config import Config
+
     import ua
 
     ua_config = ua.client_config()
     existing = kwargs.get("config")
-    kwargs["config"] = existing.merge(ua_config) if existing is not None else ua_config
+    if existing is None:
+        kwargs["config"] = ua_config
+        return kwargs
+
+    caller_extra = getattr(existing, "user_agent_extra", None)
+    if caller_extra:
+        # merge() would let ua_config's user_agent_extra win outright; instead
+        # keep both by combining them into one extra before merging.
+        combined = f"{caller_extra} {ua.static_user_agent_extra()}"
+        ua_config = Config(user_agent_extra=combined)
+    kwargs["config"] = existing.merge(ua_config)
     return kwargs
 
 

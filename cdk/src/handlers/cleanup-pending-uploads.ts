@@ -47,7 +47,7 @@ import { logger } from './shared/logger';
 import { abcaUserAgent } from './shared/ua';
 
 const ddb = new DynamoDBClient({ ...abcaUserAgent() });
-const s3 = new S3Client({});
+const s3 = new S3Client({ ...abcaUserAgent() });
 
 const TASK_TABLE = process.env.TASK_TABLE_NAME!;
 const EVENTS_TABLE = process.env.TASK_EVENTS_TABLE_NAME!;

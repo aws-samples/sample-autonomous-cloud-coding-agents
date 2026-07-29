@@ -350,11 +350,32 @@ class TestSolutionUserAgent:
         monkeypatch.setenv("AWS_REGION", "us-east-1")
         from aws_session import platform_client
 
+        # A caller that sets BOTH a non-colliding key (read_timeout) and the
+        # colliding key (user_agent_extra). botocore's Config.merge gives
+        # precedence to the argument, so a naive merge would drop 'caller/1.0';
+        # _merge_ua_config concatenates instead so both segments survive.
+        with patch("boto3.client", return_value=MagicMock()) as mk:
+            platform_client("logs", config=Config(read_timeout=7, user_agent_extra="caller/1.0"))
+
+        cfg = mk.call_args.kwargs["config"]
+        # Non-colliding caller key survives.
+        assert cfg.read_timeout == 7
+        # Both the caller's UA extra and our md/ segment survive the merge.
+        assert "caller/1.0" in cfg.user_agent_extra
+        assert "md/uksb-wt64nei4u6#agent" in cfg.user_agent_extra
+
+    def test_caller_config_without_ua_extra_gets_md_segment(self, monkeypatch):
+        from botocore.config import Config
+
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        from aws_session import platform_client
+
+        # No colliding user_agent_extra: non-colliding key survives and our md/
+        # segment is applied.
         with patch("boto3.client", return_value=MagicMock()) as mk:
             platform_client("logs", config=Config(read_timeout=7))
 
         cfg = mk.call_args.kwargs["config"]
-        # Both the caller's setting and our UA survive the merge.
         assert cfg.read_timeout == 7
         assert cfg.user_agent_extra == "md/uksb-wt64nei4u6#agent"
 

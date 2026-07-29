@@ -31,7 +31,7 @@ import type { TaskRecord } from './shared/types';
 import { abcaUserAgent } from './shared/ua';
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ ...abcaUserAgent() }));
-const s3 = new S3Client({});
+const s3 = new S3Client({ ...abcaUserAgent() });
 const TABLE_NAME = process.env.TASK_TABLE_NAME!;
 const TRACE_BUCKET_NAME = process.env.TRACE_ARTIFACTS_BUCKET_NAME!;
 

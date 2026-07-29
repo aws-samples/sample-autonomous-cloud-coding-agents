@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { App, Aspects, Tags } from 'aws-cdk-lib';
+import { App, AspectPriority, Aspects, Tags } from 'aws-cdk-lib';
 import { AwsSolutionsChecks } from 'cdk-nag';
 import { buildAppId, SolutionUaAspect } from './constructs/solution-ua-aspect';
 import { AgentStack } from './stacks/agent';
@@ -48,7 +48,11 @@ const stack = new AgentStack(
 // Aspect covers current and future functions structurally. Override via
 // `-c sdkUaAppId=...`; `-c sdkUaAppId=''` opts out (no app/ segment anywhere).
 const sdkUaAppIdOverride = app.node.tryGetContext('sdkUaAppId') as string | undefined;
-Aspects.of(stack).add(new SolutionUaAspect(buildAppId(stackName, sdkUaAppIdOverride)));
+// MUTATING priority so the env var is set before cdk-nag (priority 500)
+// inspects the synthesized functions — matches the agent stack's aspects.
+Aspects.of(stack).add(new SolutionUaAspect(buildAppId(stackName, sdkUaAppIdOverride)), {
+  priority: AspectPriority.MUTATING,
+});
 
 const computeType = app.node.tryGetContext('compute_type') ?? 'agentcore';
 

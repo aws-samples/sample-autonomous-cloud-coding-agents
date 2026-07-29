@@ -27,6 +27,7 @@ import { isGithubTokenConfigured } from './github-token';
 import { PLATFORM_REPO_DEFAULTS } from './repo-display';
 import { countActiveRepos } from './repo-lookup';
 import { getStackOutput } from './stack-outputs';
+import { abcaUserAgent } from './ua';
 
 /**
  * Default foundation model checked when no onboarded repo specifies model_id.
@@ -132,7 +133,7 @@ async function checkCognitoConfig(
     };
   }
 
-  const cognito = new CognitoIdentityProviderClient({ region });
+  const cognito = new CognitoIdentityProviderClient({ region, ...abcaUserAgent() });
   try {
     await cognito.send(new DescribeUserPoolCommand({ UserPoolId: userPoolId }));
     await cognito.send(new DescribeUserPoolClientCommand({
@@ -211,7 +212,7 @@ async function checkActiveRepos(
 async function checkBedrockModel(region: string, modelId: string): Promise<DoctorCheckResult> {
   const id = 'bedrock_model';
   const label = `Bedrock model catalog (${modelId})`;
-  const bedrock = new BedrockClient({ region });
+  const bedrock = new BedrockClient({ region, ...abcaUserAgent() });
   try {
     await bedrock.send(new GetFoundationModelCommand({ modelIdentifier: modelId }));
     return {

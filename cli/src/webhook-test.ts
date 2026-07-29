@@ -21,6 +21,7 @@ import * as crypto from 'crypto';
 import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import { ApiError, CliError } from './errors';
 import type { CreateTaskRequest, CreateTaskResponse, SuccessResponse } from './types';
+import { abcaUserAgent } from './ua';
 
 export const WEBHOOK_SECRET_PREFIX = 'bgagent/webhook/';
 
@@ -43,7 +44,7 @@ export function signWebhookBody(secret: string, body: string): string {
 
 /** Fetch webhook HMAC secret from Secrets Manager (operator credentials). */
 export async function fetchWebhookSecret(region: string, webhookId: string): Promise<string> {
-  const sm = new SecretsManagerClient({ region });
+  const sm = new SecretsManagerClient({ region, ...abcaUserAgent() });
   let result;
   try {
     result = await sm.send(new GetSecretValueCommand({

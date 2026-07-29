@@ -39,7 +39,7 @@ import { abcaUserAgent } from './shared/ua';
 import { computeTtlEpoch } from './shared/validation';
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ ...abcaUserAgent() }));
-const s3Client = new S3Client({});
+const s3Client = new S3Client({ ...abcaUserAgent() });
 const lambdaClient = process.env.ORCHESTRATOR_FUNCTION_ARN ? new LambdaClient({ ...abcaUserAgent() }) : undefined;
 
 const TABLE_NAME = process.env.TASK_TABLE_NAME!;

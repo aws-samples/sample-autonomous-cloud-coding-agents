@@ -44,6 +44,29 @@ describe('buildAppId', () => {
     expect(buildAppId('stack', 'has/slash')).toBe('has-slash');
   });
 
+  test('override preserves the # solution separator (no re-mangling)', () => {
+    // Regression: sanitizing the whole override with UA_TOKEN_UNSAFE mangled
+    // `#`->`-`, reintroducing the `app-uksb-wt64nei4u6-{stack}` form this
+    // design exists to avoid. `#` must survive as the segment boundary.
+    expect(buildAppId('stack', 'uksb-wt64nei4u6#my-stack')).toBe('uksb-wt64nei4u6#my-stack');
+  });
+
+  test('override sanitizes unsafe chars per #-delimited segment', () => {
+    // Multi-`#`: every `#` is preserved; only other unsafe chars become `-`.
+    expect(buildAppId('stack', 'uksb-wt64nei4u6#my#stack')).toBe('uksb-wt64nei4u6#my#stack');
+    // `#` + slash mix: slashes within a segment sanitize, `#` stays.
+    expect(buildAppId('stack', 'uksb-wt64nei4u6#a/b')).toBe('uksb-wt64nei4u6#a-b');
+    expect(buildAppId('stack', 'a/b#c/d')).toBe('a-b#c-d');
+  });
+
+  test('over-length override clips while preserving an earlier #', () => {
+    const appId = buildAppId('stack', `uksb-wt64nei4u6#${'x'.repeat(80)}`);
+    expect(appId).toBeDefined();
+    expect(appId!.length).toBe(50);
+    expect(appId!.startsWith('uksb-wt64nei4u6#xxxx')).toBe(true);
+    expect(appId).toContain('#');
+  });
+
   test('empty-string override opts out (undefined)', () => {
     expect(buildAppId('stack', '')).toBeUndefined();
     expect(buildAppId('stack', '   ')).toBeUndefined();

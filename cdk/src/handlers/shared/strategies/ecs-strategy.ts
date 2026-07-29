@@ -35,7 +35,7 @@ function getClient(): ECSClient {
 let sharedS3Client: S3Client | undefined;
 function getS3Client(): S3Client {
   if (!sharedS3Client) {
-    sharedS3Client = new S3Client({});
+    sharedS3Client = new S3Client({ ...abcaUserAgent() });
   }
   return sharedS3Client;
 }
