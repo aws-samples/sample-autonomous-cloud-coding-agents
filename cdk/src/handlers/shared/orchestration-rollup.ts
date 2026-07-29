@@ -30,11 +30,11 @@
 
 import { logger } from './logger';
 import type { Channel, IssueRef } from './orchestration-channel';
-import { DEFAULT_LABEL_FILTER } from './orchestration-decomposition-mode';
 import { isIntegrationNode } from './orchestration-integration-node';
 import { ORCH_LOG } from './orchestration-log-events';
 import type { OrchestrationChildRow } from './orchestration-store';
 import { encodeMarkdownUrl } from './screenshot-url';
+import { DEFAULT_LABEL_FILTER } from './trigger-label';
 
 /** Which rollup we're posting — drives the heading + emoji. */
 export type RollupKind = 'complete' | 'partial_failure' | 'cancelled';

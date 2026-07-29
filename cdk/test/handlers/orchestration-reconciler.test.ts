@@ -30,7 +30,6 @@ jest.mock('@aws-sdk/lib-dynamodb', () => ({
   PutCommand: jest.fn((input: unknown) => ({ _type: 'Put', input })),
 }));
 
-// Agent-native decompose: the reconciler reads the plan artifact from S3.
 const s3SendMock = jest.fn();
 jest.mock('@aws-sdk/client-s3', () => ({
   S3Client: jest.fn(() => ({ send: s3SendMock })),
@@ -73,33 +72,14 @@ jest.mock('../../src/handlers/shared/logger', () => ({
   logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
 }));
 
-// The decompose seed path probes the parent for attachments, and fails CLOSED
-// (throws) when the probe errors (ok:false). Mock a healthy empty probe
-// (ok:true, no attachments) so these non-attachment reconciler tests take the
-// normal path — otherwise the real probe's in-test fetch failure would
-// (correctly) reject every decompose as attachment-unreadable.
-jest.mock('../../src/handlers/shared/linear-issue-context-probe', () => ({
-  probeLinearIssueContext: jest.fn().mockResolvedValue({
-    attachmentTitles: [],
-    attachments: [],
-    projectName: null,
-    projectHasDocuments: false,
-    projectDocuments: [],
-    ok: true,
-    projectDocumentCount: 0,
-  }),
-  renderIssueContextHint: jest.fn(() => ''),
-}));
-
 process.env.ORCHESTRATION_TABLE_NAME = 'OrchestrationTable';
 process.env.TASK_TABLE_NAME = 'TaskTable';
 // Cascade surfacing: the cascade posts Linear comments only when the
 // workspace registry is configured. Set it so the surfacing path is exercised.
 process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME = 'WorkspaceRegistry';
-// Agent-native decompose: the reconciler reads the plan artifact from here.
 process.env.ARTIFACTS_BUCKET_NAME = 'ArtifactsBucket';
 
-import { handler, parseDecomposePlanRecord, parseTerminalTaskRecord } from '../../src/handlers/orchestration-reconciler';
+import { handler, parseTerminalTaskRecord } from '../../src/handlers/orchestration-reconciler';
 
 /** Build a TaskTable stream MODIFY record. */
 function taskRecord(fields: {
@@ -180,286 +160,29 @@ describe('parseTerminalTaskRecord', () => {
     expect(parseTerminalTaskRecord({ eventName: 'MODIFY', dynamodb: {} } as DynamoDBRecord)).toBeNull();
   });
 
-  test('skips a coding/decompose-v1 planning task (it has no orchestration_id — routed elsewhere)', () => {
-    // The decompose planning task is NOT an orchestration child; it must fall
-    // through parseTerminalTaskRecord (no orchestration_id) so the dedicated
-    // decompose branch handles it. Guards against it being mis-gated as a child.
-    expect(parseTerminalTaskRecord(decomposeRecord({ task_id: 'P1', status: 'COMPLETED', mode: 'decompose' }))).toBeNull();
+  test('skips a terminal task carrying no orchestration_id (not an orchestration child)', () => {
+    // The gate is the presence of orchestration_id, not the workflow: a task that
+    // is not part of a graph must fall through rather than be mis-gated as a child
+    // and released against a graph it has nothing to do with.
+    expect(parseTerminalTaskRecord(plainTerminalRecord({ task_id: 'P1', status: 'COMPLETED' }))).toBeNull();
   });
 });
 
-/** Build a terminal ``coding/decompose-v1`` planning-task stream record. */
-function decomposeRecord(fields: {
-  task_id?: string;
-  status?: string;
-  workflow_id?: string;
-  mode?: 'decompose' | 'auto' | string;
-  parent_issue_id?: string;
-  workspace_id?: string;
-  project_id?: string;
-  max_sub_issues?: string;
-  decompose_allowed?: string;
-  max_parent_budget_usd?: string;
-  artifact_uri?: string;
-  task_description?: string;
-  revision_round?: string;
-  revising_feedback_comment_id?: string;
-  trigger_label?: string;
-  eventName?: 'INSERT' | 'MODIFY' | 'REMOVE';
-}): DynamoDBRecord {
-  const img: Record<string, unknown> = {};
-  if (fields.task_id) img.task_id = { S: fields.task_id };
-  if (fields.status) img.status = { S: fields.status };
-  img.resolved_workflow = { M: { id: { S: fields.workflow_id ?? 'coding/decompose-v1' }, version: { S: '1.0.0' } } };
-  img.user_id = { S: 'user-1' };
-  img.repo = { S: 'o/r' };
-  if (fields.artifact_uri) img.artifact_uri = { S: fields.artifact_uri };
-  if (fields.task_description) img.task_description = { S: fields.task_description };
-  const cm: Record<string, unknown> = {};
-  cm.linear_workspace_id = { S: fields.workspace_id ?? 'WS' };
-  cm.linear_project_id = { S: fields.project_id ?? 'PROJ' };
-  cm.decompose_parent_issue_id = { S: fields.parent_issue_id ?? 'PARENT' };
-  if (fields.mode) cm.decompose_mode = { S: fields.mode };
-  if (fields.max_sub_issues) cm.decompose_caps_max_sub_issues = { S: fields.max_sub_issues };
-  if (fields.decompose_allowed) cm.decompose_caps_allowed = { S: fields.decompose_allowed };
-  if (fields.max_parent_budget_usd) cm.decompose_caps_max_parent_budget_usd = { S: fields.max_parent_budget_usd };
-  if (fields.revision_round) cm.decompose_revision_round = { S: fields.revision_round };
-  if (fields.revising_feedback_comment_id) cm.decompose_revising_feedback_comment_id = { S: fields.revising_feedback_comment_id };
-  if (fields.trigger_label !== undefined) cm.decompose_trigger_label = { S: fields.trigger_label };
-  img.channel_metadata = { M: cm };
+/** Build a terminal task stream record that carries NO orchestration_id. */
+function plainTerminalRecord(fields: { task_id?: string; status?: string }): DynamoDBRecord {
   return {
-    eventName: fields.eventName ?? 'MODIFY',
-    dynamodb: { NewImage: img as never },
+    eventName: 'MODIFY',
+    dynamodb: {
+      NewImage: {
+        task_id: { S: fields.task_id ?? 'T1' },
+        status: { S: fields.status ?? 'COMPLETED' },
+        resolved_workflow: { M: { id: { S: 'coding/new-task-v1' }, version: { S: '1.0.0' } } },
+        user_id: { S: 'user-1' },
+        repo: { S: 'o/r' },
+      } as never,
+    },
   } as DynamoDBRecord;
 }
-
-describe('parseDecomposePlanRecord', () => {
-  test('extracts a terminal decompose-planning task with mode + caps + artifact', () => {
-    const evt = parseDecomposePlanRecord(decomposeRecord({
-      task_id: 'P1',
-      status: 'COMPLETED',
-      mode: 'decompose',
-      max_sub_issues: '5',
-      decompose_allowed: 'true',
-      max_parent_budget_usd: '20',
-      artifact_uri: 's3://bucket/artifacts/P1/result.md',
-      task_description: 'ENG-1: do it',
-    }));
-    expect(evt).toEqual({
-      taskId: 'P1',
-      status: 'COMPLETED',
-      parentIssueId: 'PARENT',
-      workspaceId: 'WS',
-      repo: 'o/r',
-      projectId: 'PROJ',
-      platformUserId: 'user-1',
-      mode: 'decompose',
-      maxSubIssues: 5,
-      decomposeAllowed: true,
-      maxParentBudgetUsd: 20,
-      artifactUri: 's3://bucket/artifacts/P1/result.md',
-      taskDescription: 'ENG-1: do it',
-    });
-  });
-
-  test('carries the project trigger label so the retry hint can name it', () => {
-    // The store/hydrate/render path for trigger_label existed but nothing ever
-    // supplied a value, so every epic's retry hint rendered the default label
-    // regardless of what the project was configured to trigger on. Telling an
-    // operator to re-apply `bgagent` when their project uses `agent` is a dead end.
-    const evt = parseDecomposePlanRecord(decomposeRecord({
-      task_id: 'P9', status: 'COMPLETED', mode: 'decompose', trigger_label: 'ship-it',
-    }));
-    expect(evt?.triggerLabel).toBe('ship-it');
-  });
-
-  test('omits a blank trigger label so the renderer default applies', () => {
-    // An empty string would render an empty label in the hint; absent is correct,
-    // and matches a task stamped by a webhook that predates the field.
-    const blank = parseDecomposePlanRecord(decomposeRecord({
-      task_id: 'P10', status: 'COMPLETED', mode: 'decompose', trigger_label: '   ',
-    }));
-    expect(blank?.triggerLabel).toBeUndefined();
-    const unstamped = parseDecomposePlanRecord(decomposeRecord({
-      task_id: 'P11', status: 'COMPLETED', mode: 'decompose',
-    }));
-    expect(unstamped?.triggerLabel).toBeUndefined();
-  });
-
-  test('captures :auto mode and defaults caps (max_sub_issues → 8) when unstamped', () => {
-    const evt = parseDecomposePlanRecord(decomposeRecord({ task_id: 'P2', status: 'COMPLETED', mode: 'auto' }));
-    expect(evt?.mode).toBe('auto');
-    expect(evt?.maxSubIssues).toBe(8);
-    expect(evt?.decomposeAllowed).toBe(true);
-    expect(evt?.maxParentBudgetUsd).toBeUndefined();
-  });
-
-  test('returns the event on a FAILED planning task (the handler posts the error note)', () => {
-    const evt = parseDecomposePlanRecord(decomposeRecord({ task_id: 'P3', status: 'FAILED', mode: 'decompose' }));
-    expect(evt?.status).toBe('FAILED');
-  });
-
-  test('null for a non-decompose workflow (a normal coding task)', () => {
-    expect(parseDecomposePlanRecord(decomposeRecord({ task_id: 'P4', status: 'COMPLETED', mode: 'decompose', workflow_id: 'coding/new-task-v1' }))).toBeNull();
-  });
-
-  test('null for a non-terminal status', () => {
-    expect(parseDecomposePlanRecord(decomposeRecord({ task_id: 'P5', status: 'RUNNING', mode: 'decompose' }))).toBeNull();
-  });
-
-  test('extracts revisionRound + revisingFeedbackCommentId on a revised plan', () => {
-    const evt = parseDecomposePlanRecord(decomposeRecord({
-      task_id: 'P6',
-      status: 'COMPLETED',
-      mode: 'decompose',
-      revision_round: '1',
-      revising_feedback_comment_id: 'feedback-cmt-1',
-    }));
-    expect(evt?.revisionRound).toBe(1);
-    expect(evt?.revisingFeedbackCommentId).toBe('feedback-cmt-1');
-  });
-
-  test('revisingFeedbackCommentId is absent on round 0 (the first plan)', () => {
-    const evt = parseDecomposePlanRecord(decomposeRecord({ task_id: 'P7', status: 'COMPLETED', mode: 'decompose' }));
-    expect(evt?.revisingFeedbackCommentId).toBeUndefined();
-  });
-
-  test('null when the decompose_mode is missing/invalid (not a decompose-planning task)', () => {
-    expect(parseDecomposePlanRecord(decomposeRecord({ task_id: 'P6', status: 'COMPLETED', mode: 'bogus' }))).toBeNull();
-  });
-});
-
-describe('reconcileDecomposePlan — idempotency (a redelivered plan must not post duplicate proposals)', () => {
-  // The TaskTable stream is at-least-once AND the agent writes the terminal row
-  // several times (status, then artifact_uri, then cost/duration), so the same
-  // terminal decompose event re-delivers. Without a claim, each delivery re-runs
-  // the handler and posts a fresh :decompose proposal. Assert the claim gates the
-  // whole handler: proposal posted exactly ONCE across two identical deliveries.
-  const PLAN_JSON = JSON.stringify({
-    decompose: true,
-    reasoning: 'two separable slices',
-    sub_issues: [
-      { title: 'A', description: 'a', size: 'S', depends_on: [] },
-      { title: 'B', description: 'b', size: 'M', depends_on: [0] },
-    ],
-  });
-
-  beforeEach(() => {
-    ddbSend.mockReset();
-    s3SendMock.mockReset();
-    upsertStatusCommentMock.mockReset();
-    resolveLinearOauthTokenMock.mockReset();
-    revertIssueToNotStartedMock.mockReset().mockResolvedValue(true);
-    // The plan artifact S3 read returns the agent's plan JSON.
-    s3SendMock.mockImplementation(async () => ({
-      Body: { transformToString: async () => PLAN_JSON },
-    }));
-    upsertStatusCommentMock.mockResolvedValue('proposal-comment-1');
-    resolveLinearOauthTokenMock.mockResolvedValue({
-      accessToken: 't', oauthSecretArn: 'arn:secret', workspaceSlug: 'ws',
-    });
-  });
-
-  test(':decompose proposal is posted exactly once across a redelivered terminal event', async () => {
-    // ddb: the ack-claim (Update w/ attribute_not_exists) wins ONCE; a redelivery
-    // hits ConditionalCheckFailedException. putPendingPlan (Put) succeeds. No
-    // reads reached on the losing delivery.
-    let ackClaims = 0;
-    ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
-      if (cmd._type === 'Update' && String(cmd.input.ConditionExpression ?? '').includes('attribute_not_exists')) {
-        ackClaims += 1;
-        if (ackClaims > 1) {
-          const err = new Error('conditional'); (err as { name?: string }).name = 'ConditionalCheckFailedException'; throw err;
-        }
-        return {};
-      }
-      if (cmd._type === 'Put') return {}; // putPendingPlan create-once
-      return {};
-    });
-
-    const rec = decomposeRecord({
-      task_id: 'PLAN-1',
-      status: 'COMPLETED',
-      mode: 'decompose',
-      artifact_uri: 's3://ArtifactsBucket/artifacts/PLAN-1/result.md',
-      max_sub_issues: '6',
-    });
-    // Two identical terminal deliveries of the SAME task (the bug repro).
-    await handler({ Records: [rec] } as never);
-    await handler({ Records: [rec] } as never);
-
-    // Proposal comment posted exactly once (the fix). Before the claim it was 2.
-    const proposals = upsertStatusCommentMock.mock.calls.filter(
-      (c) => typeof c[2] === 'string' && (c[2] as string).includes('Proposed breakdown'),
-    );
-    expect(proposals).toHaveLength(1);
-    // The losing redelivery never reached the S3 plan fetch.
-    expect(s3SendMock).toHaveBeenCalledTimes(1);
-    // A round-0 plan awaiting approval reverts the issue from In Progress (set
-    // by the webhook at dispatch) back to a not-started state — In Progress
-    // would mislead as "working" while it's just pending.
-    expect(revertIssueToNotStartedMock).toHaveBeenCalledWith(expect.anything(), 'PARENT');
-  });
-
-  test('an ESCALATED REVISION round also reverts In Progress once the revised plan is handled', async () => {
-    // The webhook's escalated-revise path flips the issue to In Progress (so the
-    // board shows something happening) — so the reconciler must revert it when the
-    // revised plan lands, not just on round 0. Only the escalated revise reaches
-    // this handler (the deterministic revise settles inline), so reverting on a
-    // revision round is correct and doesn't flicker the board.
-    ddbSend.mockImplementation(async () => ({})); // replacePendingPlan upsert + ack claim
-    await handler({
-      Records: [decomposeRecord({
-        task_id: 'PLAN-REV-1',
-        status: 'COMPLETED',
-        mode: 'decompose',
-        artifact_uri: 's3://ArtifactsBucket/artifacts/PLAN-REV-1/result.md',
-        max_sub_issues: '6',
-        revision_round: '1',
-        revising_feedback_comment_id: 'feedback-1',
-      })],
-    } as never);
-
-    // The revised plan is HANDLED (awaiting approval) → revert to not-started.
-    expect(revertIssueToNotStartedMock).toHaveBeenCalledWith(expect.anything(), 'PARENT');
-  });
-
-  test('an :auto single-task dispatch carries the full Linear OAuth metadata', async () => {
-    // Root cause of an observed ~9.5-min "zero output" :auto run: the
-    // single-task createTaskCore was missing linear_oauth_secret_arn /
-    // linear_workspace_slug, so the agent couldn't authenticate to Linear and
-    // never posted "🤖 Starting" / transitioned state / reacted. Assert the
-    // dispatched task now carries the freshly-resolved OAuth metadata.
-    createTaskCoreMock.mockReset().mockResolvedValue({ statusCode: 201, body: '{}' });
-    // A single-node plan collapses to single_task; :auto trusts the decline + runs.
-    s3SendMock.mockImplementation(async () => ({
-      Body: {
-        transformToString: async () => JSON.stringify({
-          decompose: false,
-          reasoning: 'one cohesive change',
-          sub_issues: [{ title: 'Only', description: 'x', size: 'S', depends_on: [] }],
-        }),
-      },
-    }));
-    ddbSend.mockImplementation(async () => ({}));
-
-    await handler({
-      Records: [decomposeRecord({
-        task_id: 'PLAN-AUTO-1',
-        status: 'COMPLETED',
-        mode: 'auto',
-        artifact_uri: 's3://ArtifactsBucket/artifacts/PLAN-AUTO-1/result.md',
-        max_sub_issues: '6',
-      })],
-    } as never);
-
-    expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
-    const ctx = createTaskCoreMock.mock.calls[0][1];
-    expect(ctx.channelMetadata.linear_oauth_secret_arn).toBe('arn:secret');
-    expect(ctx.channelMetadata.linear_workspace_slug).toBe('ws');
-    expect(ctx.channelSource).toBe('linear');
-  });
-});
 
 /** Mock the GSI lookup + loadOrchestration Query for a child set. */
 function mockOrchestration(opts: {

@@ -34,7 +34,6 @@ jest.mock('../../../src/handlers/shared/logger', () => ({ logger: loggerMock }))
 import type { IssueRef } from '../../../src/handlers/shared/orchestration-channel';
 import { channelForSource, registerChannelFactory } from '../../../src/handlers/shared/orchestration-channel-factory';
 import { makeSlackChannel, slackThreadRef } from '../../../src/handlers/shared/orchestration-channel-slack';
-import { DEFAULT_LABEL_FILTER } from '../../../src/handlers/shared/orchestration-decomposition-mode';
 import { ORCH_LOG } from '../../../src/handlers/shared/orchestration-log-events';
 import {
   renderRollupComment,
@@ -50,6 +49,7 @@ import {
   type EpicPanelRow,
 } from '../../../src/handlers/shared/orchestration-rollup';
 import type { OrchestrationChildRow } from '../../../src/handlers/shared/orchestration-store';
+import { DEFAULT_LABEL_FILTER } from '../../../src/handlers/shared/trigger-label';
 
 /**
  * A stand-in surface adapter. The rollup is exercised through the Channel it
