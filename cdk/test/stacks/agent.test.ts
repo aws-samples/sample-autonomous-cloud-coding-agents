@@ -523,12 +523,69 @@ describe('AgentStack with the ECS substrate gate (--context compute_type=ecs)', 
     template = Template.fromStack(stack);
   });
 
-  test('provisions an ECS cluster + Fargate task definition', () => {
+  test('provisions an ECS cluster + both Fargate task definitions (build + planning)', () => {
     template.resourceCountIs('AWS::ECS::Cluster', 1);
-    template.resourceCountIs('AWS::ECS::TaskDefinition', 1);
+    // Two task defs: the large build def and the smaller read-only planning def
+    // (read-only workflows run on the planning def so a clone-and-read task
+    // doesn't allocate the full build task's CPU/memory).
+    template.resourceCountIs('AWS::ECS::TaskDefinition', 2);
   });
 
   test('outputs ComputeSubstrate=ecs so the CLI allows compute_type=ecs onboarding', () => {
     template.hasOutput('ComputeSubstrate', { Value: 'ecs' });
+  });
+
+  test('the orchestrator gets the PLANNING task-def ARN, not just the build one', () => {
+    // Without this env var the ECS strategy's `readOnly &&
+    // ECS_PLANNING_TASK_DEFINITION_ARN` guard is always falsy, so the planning
+    // def would be synthesized, billed for, and never receive a workflow — the
+    // feature inert while looking present in the template.
+    //
+    // This has to be asserted at the STACK level. The strategy's own unit tests
+    // set the env var by hand to exercise the routing branch, so they pass
+    // whether or not anything in the stack actually supplies it; only synth can
+    // tell us the wiring exists. Both ARNs are asserted together because the bug
+    // this pins is one being present without the other.
+    const envs = Object.values(
+      template.findResources('AWS::Lambda::Function'),
+    ).map(fn => fn.Properties?.Environment?.Variables ?? {});
+    const orchestrator = envs.filter(e => 'ECS_TASK_DEFINITION_ARN' in e);
+    expect(orchestrator).toHaveLength(1);
+    expect(orchestrator[0]).toHaveProperty('ECS_PLANNING_TASK_DEFINITION_ARN');
+    // ...and the two must be DIFFERENT task defs, or read-only workflows are
+    // silently running on the build box anyway.
+    expect(orchestrator[0].ECS_PLANNING_TASK_DEFINITION_ARN)
+      .not.toEqual(orchestrator[0].ECS_TASK_DEFINITION_ARN);
+  });
+
+  test('build-task sizing is reachable from deploy context, not only from the construct', () => {
+    // The construct's default is deliberately modest so an adopter who changes
+    // nothing does not pay for the Fargate ceiling. That is only defensible if a
+    // heavy monorepo can RAISE it without editing the construct — and `taskSizing`
+    // had no caller at all, so the ceiling was unreachable by any supported route.
+    // This asserts the whole path: context -> resolver -> construct -> template.
+    const app = new App({
+      context: {
+        compute_type: 'ecs',
+        ecsBuildTaskCpu: '16384',
+        ecsBuildTaskMemoryMiB: '122880',
+        ecsBuildTaskEphemeralStorageGiB: '100',
+      },
+    });
+    const sized = Template.fromStack(new AgentStack(app, 'SizedEcsStack', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    }));
+    sized.hasResourceProperties('AWS::ECS::TaskDefinition', {
+      Cpu: '16384',
+      Memory: '122880',
+      EphemeralStorage: { SizeInGiB: 100 },
+    });
+  });
+
+  test('the DEFAULT ECS build task stays modest', () => {
+    template.hasResourceProperties('AWS::ECS::TaskDefinition', {
+      Cpu: '4096',
+      Memory: '16384',
+    });
   });
 });

@@ -1451,7 +1451,7 @@ describe('fanout-task-events: Linear dispatcher (issue #239)', () => {
     // F-prlink (ABCA-584): the PR URL IS rendered on the ✅ success path. The old
     // behavior omitted it, assuming the agent's own step-2 "PR opened" comment
     // always carries it — but that comment can silently not fire (live-caught: a
-    // decompose→single task opened a PR but posted no PR-opened comment, so the
+    // A task opened a PR but posted no PR-opened comment, so the
     // link was lost entirely). The terminal completion comment is the
     // platform-owned surface, so it must carry the link; a duplicate is far
     // cheaper than a missing PR.

@@ -40,7 +40,7 @@ import { Blueprint } from '../constructs/blueprint';
 import { CedarWasmLayer } from '../constructs/cedar-wasm-layer';
 import { ConcurrencyReconciler } from '../constructs/concurrency-reconciler';
 import { DnsFirewall } from '../constructs/dns-firewall';
-import { EcsAgentCluster } from '../constructs/ecs-agent-cluster';
+import { EcsAgentCluster, resolveEcsTaskSizing } from '../constructs/ecs-agent-cluster';
 import { EcsPayloadBucket } from '../constructs/ecs-payload-bucket';
 import { FanOutConsumer } from '../constructs/fanout-consumer';
 import { GitHubScreenshotIntegration } from '../constructs/github-screenshot-integration';
@@ -588,7 +588,8 @@ export class AgentStack extends Stack {
     // K12 (2026-06-29): AgentCore's fixed microVM envelope OOM-kills heavy
     // CI-parity builds (ABCA's own ~2800-test `mise run build`). ECS Fargate
     // gives a bigger, tunable task (see EcsAgentCluster for the exact vCPU/memory
-    // sizing + its OOM history — 64 GB was itself OOM-killed, so it runs larger)
+    // sizing and the measurements behind it — a 32 GB task was OOM-killed by a
+    // fully parallel build, which is why the build tier serialises with MISE_JOBS=1)
     // for repos that set ``compute_type: 'ecs'``. GATED on the ``compute_type`` deploy context
     // (default 'agentcore') — ECS resources only synthesize when you deploy with
     // ``--context compute_type=ecs``, so the default synth (and the
@@ -610,8 +611,18 @@ export class AgentStack extends Stack {
         },
       ]);
     }
+    // ECS build-task sizing, from deploy context. The construct's defaults are
+    // deliberately modest so an adopter who changes nothing does not pay for the
+    // Fargate ceiling — but a large monorepo genuinely needs more, so the knobs
+    // have to be reachable WITHOUT editing the construct. Same shape as
+    // ``compute_type`` above:
+    //   cdk deploy -c compute_type=ecs -c ecsBuildTaskCpu=16384 \
+    //     -c ecsBuildTaskMemoryMiB=122880 -c ecsBuildTaskEphemeralStorageGiB=100
+    //   cdk deploy -c ecsExtraBuildEnv='{"MISE_JOBS":"8"}'
+    const ecsTaskSizing = resolveEcsTaskSizing(this.node);
     const ecsCluster = computeType === 'ecs'
       ? new EcsAgentCluster(this, 'EcsAgentCluster', {
+        ...(ecsTaskSizing !== undefined && { taskSizing: ecsTaskSizing }),
         vpc: agentVpc.vpc,
         agentImageAsset: new ecr_assets.DockerImageAsset(this, 'AgentImage', {
           directory: repoRoot,
@@ -630,10 +641,10 @@ export class AgentStack extends Stack {
         // #502: read-only grant so the container can fetch its payload from S3.
         payloadBucket: ecsPayloadBucket!.bucket,
         // #299 ECS-parity: the same bucket the runtime uses for ARTIFACTS_BUCKET_NAME —
-        // coding/decompose-v1 delivers its plan artifact here. Wires the
+        // A repo-bound artifact workflow delivers here. Wires the
         // ARTIFACTS_BUCKET_NAME env only; delivery writes go through the per-task
         // SessionRole (no direct task-role grant — see construct). Without the
-        // env, an ecs-repo :decompose fails at delivery.
+        // env, an ecs-repo artifact task fails at delivery.
         artifactsBucket: traceArtifactsBucket.bucket,
         // Per-session IAM scoping (#209): the ECS task role assumes the same
         // SessionRole as the AgentCore runtime for tenant-data access. The
@@ -673,6 +684,7 @@ export class AgentStack extends Stack {
         ecsConfig: {
           clusterArn: ecsCluster.cluster.clusterArn,
           taskDefinitionArn: ecsCluster.taskDefinition.taskDefinitionArn,
+          planningTaskDefinitionArn: ecsCluster.planningTaskDefinition.taskDefinitionArn,
           subnets: agentVpc.vpc.selectSubnets({ subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS }).subnetIds.join(','),
           securityGroup: ecsCluster.securityGroup.securityGroupId,
           containerName: ecsCluster.containerName,
