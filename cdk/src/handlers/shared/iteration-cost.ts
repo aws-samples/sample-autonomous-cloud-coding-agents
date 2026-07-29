@@ -31,7 +31,7 @@ import { TaskTable } from '../../constructs/task-table';
  * does bite, {@link sumIterationCostForIssue} says so rather than quietly
  * reporting a smaller number as if it were the total.
  */
-export const MAX_COST_TASKS_PER_ISSUE = 500;
+const MAX_COST_TASKS_PER_ISSUE = 500;
 
 /** Outcome of a running-total cost sum. */
 export interface IterationCostTotal {

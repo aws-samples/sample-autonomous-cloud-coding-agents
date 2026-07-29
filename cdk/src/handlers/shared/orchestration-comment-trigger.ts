@@ -31,9 +31,6 @@
  * sub-issue → orchestration → PR, spawn the task).
  */
 
-/** The mention token that turns a Linear comment into an agent instruction. */
-export const MENTION_TOKEN = '@bgagent';
-
 export interface CommentTrigger {
   /** True when the comment is an explicit instruction for the agent. */
   readonly triggered: boolean;
