@@ -55,9 +55,10 @@ const WEBHOOK_PROCESSOR_TIMEOUT_SECONDS = 120;
 /** Webhook-processor Lambda memory (MB). */
 const WEBHOOK_PROCESSOR_MEMORY_MB = 512;
 
-/** Remove-workspace Lambda timeout (seconds). Higher than the other
- *  request handlers because a paginated project-mapping cleanup can issue
- *  several DDB round-trips for a workspace with many mappings. */
+/** Remove-workspace Lambda timeout (seconds). 30s (vs. the 3s Lambda
+ *  default the link/webhook request handlers use) because a paginated
+ *  project-mapping cleanup can issue several DDB round-trips for a
+ *  workspace with many mappings. */
 const REMOVE_WORKSPACE_TIMEOUT_SECONDS = 30;
 
 /**
