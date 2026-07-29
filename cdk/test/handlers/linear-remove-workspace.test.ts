@@ -256,18 +256,20 @@ describe('linear-remove-workspace handler', () => {
   });
 
   test('registry scan follows LastEvaluatedKey across pages (no Limit)', async () => {
-    // Directly asserts the handler paginates: the double emits one row per
-    // page (via a Limit) only if Limit is set; with no Limit it returns all
-    // rows on page one. Emulate a multi-page registry by forcing paging
-    // regardless of Limit so a single-shot scan would miss the target.
+    // Directly asserts the handler paginates. We hand-roll the Scan double
+    // (rather than reuse routeDdb) so we can split the registry across two
+    // pages: page one is empty but carries a continuation key, and the target
+    // sits on page two. A handler that reads only `Items[0]` on the first
+    // page and ignores LastEvaluatedKey 404s here.
     let scans = 0;
     ddbSend.mockReset();
     ddbSend.mockImplementation((cmd: { _type: string; input: Record<string, unknown> }) => {
       if (cmd._type === 'Scan' && cmd.input.TableName === 'LinearRegistry') {
         scans += 1;
         if (scans === 1) {
-          // Page 1: a non-matching row + a continuation key. A handler that
-          // reads only `Items[0]` and ignores LastEvaluatedKey 404s here.
+          // Page 1: empty (no matching row) + a continuation key. An empty
+          // page plus a LastEvaluatedKey is exactly the shape that catches a
+          // non-paginating handler.
           return Promise.resolve({ Items: [], LastEvaluatedKey: { _idx: 1 } });
         }
         // Page 2: the target.

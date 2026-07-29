@@ -97,35 +97,36 @@ describe('LinearIntegration construct', () => {
     expect((onSlug[0].Properties as { AuthorizationType?: string }).AuthorizationType).toBe('COGNITO_USER_POOLS');
   });
 
-  // Locate the RemoveWorkspaceFn unambiguously: it is the ONLY Lambda whose
-  // role carries a `secretsmanager:DeleteSecret` grant (the webhook Lambdas
-  // hold Get/Put only). We resolve the role from that policy, then find the
-  // function bound to it. This pins the remaining remove-workspace
-  // assertions to the right function without relying on a synth-hashed
-  // Code asset or a fragile env-var-shape heuristic.
+  // Locate the RemoveWorkspaceFn INDEPENDENTLY of any IAM policy: it is the
+  // ONLY Lambda whose environment is registry-only — it carries
+  // `LINEAR_WORKSPACE_REGISTRY_TABLE_NAME` but none of the sibling markers
+  // (`LINEAR_PROJECT_MAPPING_TABLE_NAME` on the processor,
+  // `LINEAR_WEBHOOK_SECRET_ARN` on the webhook receiver,
+  // `LINEAR_USER_MAPPING_TABLE_NAME` on the link handler). We then read the
+  // role off the FUNCTION resource itself (`Role: Fn::GetAtt[<roleId>]`), so
+  // the derived `role` is bound to the function's own identity — NOT read out
+  // of the DeleteSecret policy. This lets the secret-prefix test assert the
+  // grant lands on THIS role and genuinely fail if a future edit attaches the
+  // DeleteSecret grant to the wrong role.
   function findRemoveWorkspaceFn(): { logicalId: string; role: string } {
-    const policies = template.findResources('AWS::IAM::Policy');
-    const deletePolicies = Object.values(policies).filter((p) => {
-      const doc = (p.Properties as { PolicyDocument: { Statement: Array<{ Action?: unknown }> } })
-        .PolicyDocument;
-      return doc.Statement.some((s) => {
-        const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
-        return actions.includes('secretsmanager:DeleteSecret');
-      });
-    });
-    expect(deletePolicies).toHaveLength(1);
-    const roleRefs = ((deletePolicies[0].Properties as { Roles?: Array<{ Ref?: string }> }).Roles ?? [])
-      .map((r) => r.Ref);
-    expect(roleRefs).toHaveLength(1);
-    const role = roleRefs[0]!;
-
     const fns = template.findResources('AWS::Lambda::Function');
-    const matches = Object.entries(fns).filter(
-      ([, fn]) => (fn.Properties as { Role?: { 'Fn::GetAtt'?: [string, string] } })
-        .Role?.['Fn::GetAtt']?.[0] === role,
-    );
+    const matches = Object.entries(fns).filter(([, fn]) => {
+      const vars =
+        (fn.Properties as { Environment?: { Variables?: Record<string, unknown> } })
+          .Environment?.Variables ?? {};
+      return (
+        'LINEAR_WORKSPACE_REGISTRY_TABLE_NAME' in vars &&
+        !('LINEAR_PROJECT_MAPPING_TABLE_NAME' in vars) &&
+        !('LINEAR_WEBHOOK_SECRET_ARN' in vars) &&
+        !('LINEAR_USER_MAPPING_TABLE_NAME' in vars)
+      );
+    });
     expect(matches).toHaveLength(1);
-    return { logicalId: matches[0][0], role };
+    const [logicalId, fn] = matches[0];
+    const role = (fn.Properties as { Role?: { 'Fn::GetAtt'?: [string, string] } })
+      .Role?.['Fn::GetAtt']?.[0];
+    expect(role).toBeDefined();
+    return { logicalId, role: role! };
   }
 
   test('remove-workspace handler wires ONLY the workspace registry (no project mapping table)', () => {
