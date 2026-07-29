@@ -267,12 +267,16 @@ function writeCredentialsFile(
   // Invites issue a temporary password the teammate rotates on first login;
   // password-reset issues a permanent one. Label it so the recipient knows.
   const passwordLabel = kind === 'invite' ? 'temp password:' : 'password:';
+  // Pad every label to the widest one (`temp password:` = 14) so the value
+  // column lines up regardless of which labels are present — the aligned block
+  // the USER_GUIDE advertises.
+  const LABEL_WIDTH = 'temp password:'.length;
   const lines = [
-    `email:    ${email}`,
-    `${passwordLabel} ${password}`,
+    `${'email:'.padEnd(LABEL_WIDTH)} ${email}`,
+    `${passwordLabel.padEnd(LABEL_WIDTH)} ${password}`,
   ];
   if (bundle) {
-    lines.push(`bundle:   ${bundle}`, '');
+    lines.push(`${'bundle:'.padEnd(LABEL_WIDTH)} ${bundle}`, '');
     lines.push('Run:');
     lines.push(`  bgagent configure --from-bundle ${bundle}`);
     lines.push(`  bgagent login --username ${email}`);

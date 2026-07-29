@@ -35,10 +35,18 @@ export function makeLoginCommand(): Command {
       // Cognito challenges with NEW_PASSWORD_REQUIRED. Pass an interactive
       // prompt so the user can set a permanent password inline; `login`
       // answers the challenge and persists the resulting tokens.
-      await login(opts.username, password, () => {
+      //
+      // Gate the prompt on *real* interactivity. Passing it unconditionally
+      // makes the guard in `login` unreachable, so a first-login account driven
+      // non-interactively (`--password` on a pipe / CI) would block forever on
+      // the readline prompt with no terminal to answer it. When stdin is not a
+      // TTY or `--password` was supplied, hand `login` no prompt so it raises
+      // the clear "log in interactively" error instead of hanging.
+      const interactive = Boolean(process.stdin.isTTY) && !opts.password;
+      await login(opts.username, password, interactive ? () => {
         console.log('This account requires a new password on first login.');
         return promptNewPasswordWithConfirmation();
-      });
+      } : undefined);
       console.log('Login successful. Credentials saved.');
     });
 }
@@ -90,13 +98,21 @@ function promptPassword(): Promise<string> {
 
       process.stdin.on('data', onData);
     } else {
-      // Non-TTY (piped input): read a single line
+      // Non-TTY (piped input): read a single line. Resolve *before* closing —
+      // `rl.close()` emits `'close'` synchronously, so the close-reject would
+      // otherwise win the race and reject with "No password provided." even
+      // when a line was read. `resolved` also stops the close handler firing
+      // when the stream ends normally after a successful read.
+      let resolved = false;
       rl.once('line', (line) => {
-        rl.close();
+        resolved = true;
         resolve(line);
+        rl.close();
       });
       rl.once('close', () => {
-        reject(new Error('No password provided.'));
+        if (!resolved) {
+          reject(new Error('No password provided.'));
+        }
       });
     }
   });

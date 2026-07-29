@@ -154,16 +154,10 @@ export async function adminSetPermanentPassword(
 }
 
 /**
- * Create a Cognito user with a *temporary* password (#238).
- *
- * ``adminCreateUser`` sets ``TemporaryPassword``, which lands the user in
- * ``FORCE_CHANGE_PASSWORD`` state. We deliberately do **not** promote it to a
- * permanent password: on their first ``bgagent login`` Cognito returns the
- * ``NEW_PASSWORD_REQUIRED`` challenge and the CLI prompts the teammate to set a
- * password only they know — so the admin-generated string (which lives in
- * terminal scrollback / a Slack message) stops being a valid credential once
- * they log in. An admin who needs a login-ready permanent password (no
- * first-login prompt) can still use ``bgagent admin reset-password``.
+ * Invite a user with a *temporary* password (#238): the FORCE_CHANGE_PASSWORD
+ * state it leaves them in forces a first-login rotation, so the admin-generated
+ * string stops being a valid credential once the teammate sets their own. Kept
+ * as a named seam over ``adminCreateUser`` for the command layer and tests.
  */
 export async function adminInviteUser(
   ctx: CognitoAdminContext,

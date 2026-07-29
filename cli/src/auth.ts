@@ -72,14 +72,33 @@ export async function login(
   debug(`Cognito region: ${config.region}, client_id: ${config.client_id}, user_pool_id: ${config.user_pool_id}`);
   const client = makeClient(CognitoIdentityProviderClient, { region: config.region });
 
-  const result = await client.send(new InitiateAuthCommand({
-    AuthFlow: AuthFlowType.USER_PASSWORD_AUTH,
-    ClientId: config.client_id,
-    AuthParameters: {
-      USERNAME: username,
-      PASSWORD: password,
-    },
-  }));
+  let result;
+  try {
+    result = await client.send(new InitiateAuthCommand({
+      AuthFlow: AuthFlowType.USER_PASSWORD_AUTH,
+      ClientId: config.client_id,
+      AuthParameters: {
+        USERNAME: username,
+        PASSWORD: password,
+      },
+    }));
+  } catch (err) {
+    // Invited users sit in FORCE_CHANGE_PASSWORD under Cognito's default 7-day
+    // TemporaryPasswordValidityDays. Once that window lapses the temp password
+    // is dead and Cognito answers with a bare NotAuthorizedException — the same
+    // error a genuinely wrong password produces, with nothing to say the temp
+    // one merely expired. Point the teammate at the fix (a fresh invite) rather
+    // than letting them retype a password that can never work again. We do not
+    // include the attempted password or any secret in the message.
+    if (err instanceof Error && err.name === 'NotAuthorizedException') {
+      throw new CliError(
+        'Login failed: incorrect password, or your temporary password expired. '
+        + 'Temporary passwords lapse after a few days — ask your admin to re-run '
+        + '`bgagent admin invite-user` for a fresh one.',
+      );
+    }
+    throw err;
+  }
 
   if (result.ChallengeName === ChallengeNameType.NEW_PASSWORD_REQUIRED) {
     const auth = await respondToNewPasswordChallenge(

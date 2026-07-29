@@ -106,6 +106,27 @@ describe('auth', () => {
       mockSend.mockResolvedValue({ AuthenticationResult: null });
       await expect(login('user@example.com', 'pass')).rejects.toThrow('Unexpected authentication response');
     });
+
+    test('maps NotAuthorizedException to an expired-temp-password hint (no secret leaked)', async () => {
+      // Invited users lapse into a dead temp password after Cognito's default
+      // 7-day window; Cognito answers with a bare NotAuthorizedException. The
+      // CLI should point at a fresh invite, not let the user retype a doomed
+      // password — and must not echo the attempted password.
+      mockSend.mockRejectedValue(
+        Object.assign(new Error('Incorrect username or password.'), { name: 'NotAuthorizedException' }),
+      );
+      const err = (await login('user@example.com', 'ExpiredTemp1!').catch((e: Error) => e)) as Error;
+      expect(err.message).toMatch(/temporary password expired/);
+      expect(err.message).toContain('bgagent admin invite-user');
+      expect(err.message).not.toContain('ExpiredTemp1!');
+    });
+
+    test('rethrows non-auth InitiateAuth errors unchanged', async () => {
+      mockSend.mockRejectedValue(
+        Object.assign(new Error('getaddrinfo ENOTFOUND cognito-idp'), { name: 'TypeError' }),
+      );
+      await expect(login('user@example.com', 'pass')).rejects.toThrow('getaddrinfo ENOTFOUND');
+    });
   });
 
   describe('login — NEW_PASSWORD_REQUIRED first-login challenge', () => {

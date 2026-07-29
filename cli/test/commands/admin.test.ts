@@ -17,9 +17,25 @@
  *  SOFTWARE.
  */
 
-import { decodeBundle, encodeBundle, generateTempPassword } from '../../src/commands/admin';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import { decodeBundle, encodeBundle, generateTempPassword, makeAdminCommand } from '../../src/commands/admin';
 import { CliError } from '../../src/errors';
 import { CliConfig } from '../../src/types';
+
+// Mock the Cognito admin layer so `invite-user` resolves a fixed context and
+// performs no AWS calls — the assertion is on the local credentials file the
+// command writes, not on Cognito.
+jest.mock('../../src/cognito-admin', () => ({
+  ...jest.requireActual('../../src/cognito-admin'),
+  resolveCognitoAdminContext: jest.fn().mockResolvedValue({
+    region: 'us-east-1',
+    userPoolId: 'us-east-1_abc',
+    configureBundle: null,
+  }),
+  adminInviteUser: jest.fn().mockResolvedValue(undefined),
+}));
 
 describe('admin bundle helpers', () => {
   const sampleConfig: CliConfig = {
@@ -104,5 +120,50 @@ describe('generateTempPassword', () => {
     }
     // Allow at most one collision in 20 draws (effectively 0 with crypto rand).
     expect(seen.size).toBeGreaterThanOrEqual(19);
+  });
+});
+
+describe('admin invite-user credentials file', () => {
+  let tmpDir: string;
+  let consoleSpy: jest.SpiedFunction<typeof console.log>;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bgagent-invite-test-'));
+    process.env.BGAGENT_CONFIG_DIR = tmpDir;
+    consoleSpy = jest.spyOn(console, 'log').mockImplementation();
+  });
+
+  afterEach(() => {
+    delete process.env.BGAGENT_CONFIG_DIR;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    consoleSpy.mockRestore();
+  });
+
+  test('writes an aligned block with the temp-password label and first-login note', async () => {
+    const admin = makeAdminCommand();
+    await admin.parseAsync([
+      'node', 'admin',
+      'invite-user', 'teammate@example.com',
+      '--password', 'K9$mPq2nL!vXf3Hb',
+    ]);
+
+    const invitePath = path.join(tmpDir, 'invites', 'teammate@example.com.txt');
+    const body = fs.readFileSync(invitePath, 'utf-8');
+    const lines = body.split('\n');
+
+    // The label is "temp password:" (not "password:") for invites.
+    const emailLine = lines.find((l) => l.startsWith('email:'))!;
+    const pwdLine = lines.find((l) => l.startsWith('temp password:'))!;
+    expect(pwdLine).toContain('K9$mPq2nL!vXf3Hb');
+    expect(lines.some((l) => l.startsWith('password:'))).toBe(false);
+
+    // All labels pad to the widest ("temp password:" = 14), so the value column
+    // lines up: every value begins at offset 15 (label width + one space).
+    const VALUE_COLUMN = 'temp password:'.length + 1;
+    expect(emailLine.indexOf('teammate@example.com')).toBe(VALUE_COLUMN);
+    expect(pwdLine.indexOf('K9$mPq2nL!vXf3Hb')).toBe(VALUE_COLUMN);
+
+    // The trailing first-login guidance the docs promise.
+    expect(body).toContain('On first login you will be prompted to set a permanent password.');
   });
 });
