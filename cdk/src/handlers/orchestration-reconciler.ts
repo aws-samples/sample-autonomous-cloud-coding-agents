@@ -47,6 +47,7 @@ import {
 import type { DynamoDBBatchResponse, DynamoDBRecord, DynamoDBStreamEvent } from 'aws-lambda';
 import { createTaskCore } from './shared/create-task-core';
 import { renderFailureReply, renderPanelFailureReason } from './shared/failure-reply';
+import { sumIterationCostForIssue } from './shared/iteration-cost';
 import { isNoChangeIteration, renderMaturingReply } from './shared/iteration-reply';
 import { claimTerminalReply, releaseReplyClaim } from './shared/iteration-reply-claim';
 import { logger } from './shared/logger';
@@ -73,8 +74,7 @@ import {
 } from './shared/orchestration-store';
 import { encodeMarkdownUrl } from './shared/screenshot-url';
 import { OrchestrationTable } from '../constructs/orchestration-table';
-import { TaskStatus, type TaskStatusType } from '../constructs/task-status';
-import { TaskTable } from '../constructs/task-table';
+import { TaskStatus, TERMINAL_STATUSES, type TaskStatusType } from '../constructs/task-status';
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const ORCHESTRATION_TABLE = process.env.ORCHESTRATION_TABLE_NAME!;
@@ -118,13 +118,16 @@ const MAX_IDEMPOTENCY_KEY_LENGTH = 128;
 // table → no throttle (release-all, back-compat; admission still gates).
 const USER_CONCURRENCY_TABLE = process.env.USER_CONCURRENCY_TABLE_NAME;
 const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT_TASKS_PER_USER ?? '10');
-/** Terminal task statuses that the reconciler reacts to. */
-const TERMINAL: ReadonlySet<TaskStatusType> = new Set<TaskStatusType>([
-  TaskStatus.COMPLETED,
-  TaskStatus.FAILED,
-  TaskStatus.CANCELLED,
-  TaskStatus.TIMED_OUT,
-]);
+/**
+ * Terminal task statuses that the reconciler reacts to.
+ *
+ * DERIVED from the same constant the stream's ``FilterCriteria`` is built from,
+ * not restated. The two must agree: the filter decides which records reach this
+ * handler, and this set decides which of them it acts on. A second literal list
+ * would let them drift silently — a status added to one but not the other either
+ * never arrives or arrives and is dropped, and both look like nothing happened.
+ */
+const TERMINAL: ReadonlySet<TaskStatusType> = new Set<TaskStatusType>(TERMINAL_STATUSES);
 
 /** A terminal task event extracted from a TaskTable stream record. */
 interface TerminalTaskEvent {
@@ -1127,7 +1130,14 @@ async function replyToIterationComment(
   // standard failure reply (which a human can reply to, to retry).
   const prNumber = await resolvePrNumber(evt.taskId);
   const prUrl = await resolvePrUrl(evt.taskId);
-  const runningTotalUsd = await sumIterationCostForIssue(changedSubIssueId, evt.taskId, evt.costUsd);
+  const runningTotalUsd = (await sumIterationCostForIssue({
+    ddb,
+    taskTableName: TASK_TABLE,
+    linearIssueId: changedSubIssueId,
+    thisTaskId: evt.taskId,
+    ...(evt.costUsd !== undefined && { thisCost: evt.costUsd }),
+    logLabel: 'reconciler',
+  })).total;
   // Strongly-consistent re-read of this iteration's screenshot so
   // the settle renders the preview thumbnail itself (race-free against the
   // screenshot webhook's append), matching the fanout/standalone path. Only an
@@ -1225,53 +1235,6 @@ async function replyToIterationComment(
   );
   if (succeeded && !noChange) {
     await channel.transitionState?.(issueRef(changedSubIssueId, workspaceId), 'in_review');
-  }
-}
-
-/**
- * Sum ``cost_usd`` across all iteration tasks on a sub-issue (the
- * running total shown on the settle reply). Queries the LinearIssueIndex by the
- * sub-issue's linear_issue_id; ``thisCost`` is added explicitly in case the
- * terminal task's projection hasn't propagated yet (deduped by task_id). Best-
- * effort: returns this task's cost on any read failure, null when nothing known.
- */
-async function sumIterationCostForIssue(
-  subIssueId: string,
-  thisTaskId: string,
-  thisCost?: number,
-): Promise<number | null> {
-  const base = typeof thisCost === 'number' && Number.isFinite(thisCost) ? thisCost : 0;
-  const parseCost = (v: unknown): number =>
-    typeof v === 'number' ? v : (typeof v === 'string' ? Number(v) : NaN);
-  try {
-    // The GSI lists task_ids for the issue but does NOT project cost_usd (a GSI
-    // projection can't be changed in place — see task-table.ts), so GetItem each
-    // task's cost. Iteration counts per issue are small → bounded reads.
-    const listed = await ddb.send(new QueryCommand({
-      TableName: TASK_TABLE,
-      IndexName: TaskTable.LINEAR_ISSUE_INDEX,
-      KeyConditionExpression: 'linear_issue_id = :iid',
-      ProjectionExpression: 'task_id',
-      ExpressionAttributeValues: { ':iid': subIssueId },
-    }));
-    let total = 0;
-    let sawThis = false;
-    for (const item of (listed.Items ?? []) as Array<{ task_id?: string }>) {
-      if (!item.task_id) continue;
-      if (item.task_id === thisTaskId) { sawThis = true; total += base; continue; }
-      const got = await ddb.send(new GetCommand({
-        TableName: TASK_TABLE, Key: { task_id: item.task_id }, ProjectionExpression: 'cost_usd',
-      }));
-      const c = parseCost(got.Item?.cost_usd);
-      if (Number.isFinite(c)) total += c;
-    }
-    if (!sawThis) total += base;
-    return total > 0 ? total : null;
-  } catch (err) {
-    logger.warn('Iteration running-total cost query failed — using this task only', {
-      task_id: thisTaskId, error: err instanceof Error ? err.message : String(err),
-    });
-    return base > 0 ? base : null;
   }
 }
 
