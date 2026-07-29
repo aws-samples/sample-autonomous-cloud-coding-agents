@@ -21,6 +21,10 @@
       "entry": ["astro.config.mjs", "src/content.config.ts", "src/components/**/*.astro"],
       "project": ["src/**/*.{astro,ts,tsx}"],
       "ignoreDependencies": ["@astrojs/check", "markdown-link-check", "remark-gfm", "@pagefind/default-ui", "jest"]
+    },
+    "integrations/jira-forge-app": {
+      "entry": ["src/index.js!", "test/**/*.test.js"],
+      "project": ["src/**/*.js!", "test/**/*.js"]
     }
   }
 }

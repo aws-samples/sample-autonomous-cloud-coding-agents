@@ -49,7 +49,7 @@ const baselinePath = join(repoRoot, 'knip-baseline.json');
 // array-of-arrays (one inner array per duplicate group), so its `.length`
 // counts groups, which is the unit we ratchet on.
 //
-// This is the complete set of countable keys for the installed knip (6.20.0,
+// This is the complete set of countable keys for the installed knip (6.23.0,
 // pinned exactly). There is no `nsExports`/`nsTypes`/`classMembers` in this
 // schema — namespace/enum members surface as `namespaceMembers`/`enumMembers`.
 // If knip is bumped, re-derive this list from its JSON (the countIssues guard
