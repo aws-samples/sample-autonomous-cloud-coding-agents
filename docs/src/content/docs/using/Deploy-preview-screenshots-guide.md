@@ -179,6 +179,35 @@ Then tail the function's CloudWatch log group. Common silent skips:
 - `skipped_no_url` — the `success` status didn't include `environment_url`. Some providers post URL-less success events; the next push usually carries the URL.
 - `No open PR found for SHA after retries` — the deploy provider built and reported faster than the agent could `gh pr create` (race window > 35s). Rare; redeliver the webhook from GitHub's UI to retry.
 
+### No screenshots at all: check the processor alarms and DLQ
+
+The receiver Lambda async-invokes the processor (`InvocationType: Event`) and returns `200` to GitHub as soon as that invoke is accepted, so a *processor*-side fault never propagates back — GitHub sees success and never redelivers. (Only a failure to even enqueue the invoke returns `500`.) Two operator-visible signals catch a hard processor fault that would otherwise stop screenshots silently.
+
+**Important:** the processor handler is best-effort by design — it catches its own per-step operational failures (bad token, AgentCore/S3/comment-post errors) and returns success, so those show up as tagged log events (see the section above), **not** as Lambda `Errors`. Both alarms below fire only on faults that *escape* the handler: an init-time crash (missing env at cold start, bundling defect), an unhandled throw in an unguarded path, or the 120s hard timeout. For a swallowed operational failure (e.g. a revoked S3/AgentCore permission), watch the processor **logs**, not these alarms.
+
+- **`WebhookProcessorErrorAlarm`** — fires on the processor's Lambda `Errors` metric (`>= 1` error in a 5-minute period, sustained for 2 evaluation periods). Early signal: an invocation is faulting *now*.
+- **`WebhookProcessorDlqDepthAlarm`** — fires when such a failed invocation has survived Lambda's built-in async retries and landed on the DLQ (construct id `WebhookProcessorDlq`; 14-day retention, SSL-enforced). Backstop: a payload is now parked undelivered. (The queue also gets SSE via SQS's service-side default; the construct doesn't set an explicit `encryption`.)
+
+The two catch the same failure class, but the `Errors` alarm trips one evaluation window sooner (before retries exhaust onto the DLQ). Find and inspect the DLQ — the construct sets no explicit queue name, so its physical name is CloudFormation-generated and *contains* the `WebhookProcessorDlq` construct id:
+
+```bash
+# Find the DLQ URL (physical name contains the construct id)
+aws sqs list-queues --region us-east-1 \
+  --query "QueueUrls[?contains(@, 'WebhookProcessorDlq')]" --output text
+
+# How many failed invocations are parked?
+aws sqs get-queue-attributes --region us-east-1 \
+  --queue-url <DLQ_URL> \
+  --attribute-names ApproximateNumberOfMessages
+
+# Peek at a parked event (the original async-invoke payload + Lambda error context)
+aws sqs receive-message --region us-east-1 \
+  --queue-url <DLQ_URL> --max-number-of-messages 1 \
+  --visibility-timeout 0
+```
+
+The message body is the original async-invoke event; the `RequestContext`/error attributes show why Lambda gave up. Fix the root cause (re-check the processor's IAM grants, AgentCore Browser quota, and the GitHub/Linear token secrets). The event source is GitHub, not the DLQ, so recovery is to **redeliver the webhook from GitHub's UI** (a Lambda async-invoke DLQ has no automatic re-invoke path — the parked messages are event copies for diagnosis). Purge the queue (`aws sqs purge-queue`) once the alarm has cleared and you no longer need the payloads.
+
 ### Screenshot lands on GitHub PR but not on Linear
 
 The GitHub-side post is the primary path; Linear is opt-in and best-effort. Skipping the Linear post is normal if you don't have Linear configured. If you do, look for the processor log line `Linear identifier did not resolve to an issue` — usually means:

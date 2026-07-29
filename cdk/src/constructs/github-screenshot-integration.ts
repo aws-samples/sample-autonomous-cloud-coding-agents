@@ -41,6 +41,12 @@ const PROCESSOR_DLQ_RETENTION_DAYS = 14;
 /** DLQ-depth alarm metric period (minutes). */
 const DLQ_ALARM_PERIOD_MINUTES = 5;
 
+/** Processor Lambda-Errors alarm metric period (minutes). */
+const ERROR_ALARM_PERIOD_MINUTES = 5;
+
+/** Processor Lambda-Errors alarm sustained evaluation periods. */
+const ERROR_ALARM_EVALUATION_PERIODS = 2;
+
 /** Async screenshot-processor Lambda memory (MB). */
 const PROCESSOR_MEMORY_MB = 512;
 
@@ -137,6 +143,18 @@ export class GitHubScreenshotIntegration extends Construct {
    *  mirrors ``FanOutConsumer.dlqDepthAlarm``: without it the queue is
    *  "for operator inspection" that no operator is ever told to make. */
   public readonly processorDlqDepthAlarm: cloudwatch.Alarm;
+
+  /** Fires when the processor Lambda's ``Errors`` metric breaches. The
+   *  handler swallows its per-step operational failures (log + return),
+   *  so this metric ticks only on faults that ESCAPE the handler —
+   *  init-time crashes (missing env at cold start, bundling defect),
+   *  unhandled throws in an unguarded path, or the 120s hard timeout.
+   *  For that population it fires one evaluation window sooner than the
+   *  DLQ-depth alarm (which waits for Lambda's async-retry ladder to land
+   *  a message). Follows the ``metricErrors`` + 2-eval-period shape of
+   *  ``task-orchestrator.ts`` OrchestratorErrorAlarm (with threshold 1,
+   *  since any escaped error here is significant). */
+  public readonly processorErrorAlarm: cloudwatch.Alarm;
 
   constructor(scope: Construct, id: string, props: GitHubScreenshotIntegrationProps) {
     super(scope, id);
@@ -235,6 +253,32 @@ export class GitHubScreenshotIntegration extends Construct {
       evaluationPeriods: 1,
       alarmDescription:
         'Screenshot webhook processor DLQ has failed async invocations — the screenshot pipeline is crashing before handling events',
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
+    // Alarm on the processor's Errors metric (#284 AC). Complementary to
+    // the DLQ-depth alarm above, not redundant. The handler is best-effort
+    // by design — it catches its per-step operational failures (bad token,
+    // AgentCore/S3/comment-post errors) and returns success, so those
+    // surface as tagged log events, NOT as Lambda Errors. This alarm
+    // therefore fires on the faults that ESCAPE the handler: an init-time
+    // crash (missing env at cold start, bundling defect), an unhandled
+    // throw in an unguarded path, or the 120s hard timeout. That is the
+    // same failure class the DLQ eventually catches, but the Errors metric
+    // trips one evaluation window sooner — before Lambda's async-retry
+    // ladder has landed a message on the DLQ. threshold 1 / 2 eval periods
+    // matches the AC; the metricErrors + 2-eval-period shape follows
+    // ``task-orchestrator.ts`` OrchestratorErrorAlarm (which uses
+    // threshold 3 — we use 1 because any escaped error here is
+    // significant).
+    this.processorErrorAlarm = new cloudwatch.Alarm(this, 'WebhookProcessorErrorAlarm', {
+      metric: this.webhookProcessorFn.metricErrors({
+        period: Duration.minutes(ERROR_ALARM_PERIOD_MINUTES),
+      }),
+      threshold: 1,
+      evaluationPeriods: ERROR_ALARM_EVALUATION_PERIODS,
+      alarmDescription:
+        'Screenshot webhook processor Lambda errors breached threshold — deploy-preview screenshots are failing (check IAM, AgentCore Browser quota, and dependency health)',
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
 
