@@ -91,3 +91,26 @@ test('accepts owner/repo#N cross-repo references', () => {
   const r = validateCommitMessage('fix: x\n\nFixes aws-samples/sample#3');
   assert.equal(r.ok, true);
 });
+
+test('accepts the GH-N reference form', () => {
+  // Documented accepted form (source comment): `#N`, `GH-N`, or `owner/repo#N`.
+  const r = validateCommitMessage('fix: x\n\nFixes GH-42');
+  assert.equal(r.ok, true);
+});
+
+test('rejects keyword with no separator (Closes#5)', () => {
+  // The `\s+` between keyword and reference is deliberate — no space, no match.
+  assert.equal(validateCommitMessage('feat: x\n\nCloses#5').ok, false);
+});
+
+test('rejects a keyword embedded in a longer word (refixes)', () => {
+  // Word boundary (\b) prevents matching a keyword inside another token.
+  assert.equal(validateCommitMessage('feat: x\n\nrefixes #5').ok, false);
+});
+
+test('handles CRLF line endings (comment stripped, body ref survives)', () => {
+  // Real COMMIT_EDITMSG files may carry \r\n (Windows / core.autocrlf).
+  assert.equal(validateCommitMessage('feat: x\r\n\r\nCloses #7\r\n').ok, true);
+  // A ref that appears ONLY in a CRLF comment line must not count.
+  assert.equal(validateCommitMessage('feat: x\r\n\r\n# Closes #7\r\n').ok, false);
+});
