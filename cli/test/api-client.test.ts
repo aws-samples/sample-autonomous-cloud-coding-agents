@@ -163,6 +163,44 @@ describe('ApiClient', () => {
     });
   });
 
+  describe('linearRemoveWorkspace', () => {
+    const okBody = {
+      ok: true,
+      json: async () => ({
+        data: {
+          workspace_slug: 'acme',
+          linear_workspace_id: 'ws-1',
+          status: 'revoked',
+          secret_deleted: true,
+          mappings_removed: 0,
+        },
+      }),
+    };
+
+    test('sends DELETE to /linear/workspaces/{slug} with no query string by default', async () => {
+      mockFetch.mockResolvedValue(okBody);
+      await client.linearRemoveWorkspace('acme');
+      expect(mockFetch).toHaveBeenCalledWith(
+        'https://api.example.com/linear/workspaces/acme',
+        expect.objectContaining({ method: 'DELETE' }),
+      );
+    });
+
+    test('maps --purge / --keep-mappings to snake_case query params (matches handler reads)', async () => {
+      mockFetch.mockResolvedValue(okBody);
+      await client.linearRemoveWorkspace('acme', { purge: true, keepMappings: true });
+      const url = mockFetch.mock.calls[0][0] as string;
+      expect(url).toContain('purge=true');
+      expect(url).toContain('keep_mappings=true');
+    });
+
+    test('URL-encodes the slug', async () => {
+      mockFetch.mockResolvedValue(okBody);
+      await client.linearRemoveWorkspace('a b');
+      expect(mockFetch.mock.calls[0][0]).toContain('/linear/workspaces/a%20b');
+    });
+  });
+
   describe('getTaskEvents', () => {
     test('sends GET to events endpoint', async () => {
       const response = { data: [], pagination: { next_token: null, has_more: false } };

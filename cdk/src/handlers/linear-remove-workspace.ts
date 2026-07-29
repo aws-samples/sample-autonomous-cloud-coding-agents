@@ -61,6 +61,11 @@ const SLUG_RE = /^[a-zA-Z0-9_-]{4,50}$/;
  */
 export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
   const requestId = ulid();
+  // Outer-scope breadcrumbs so the top-level catch can name the workspace
+  // and the phase that failed — the difference between "which secret
+  // leaked?" being answerable from one log line vs. a manual hunt.
+  let slug = '';
+  let phase: 'lookup' | 'registry_write' | 'secret_delete' | 'mapping_cleanup' = 'lookup';
 
   try {
     const userId = extractUserId(event);
@@ -68,7 +73,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return errorResponse(401, ErrorCode.UNAUTHORIZED, 'Authentication required.', requestId);
     }
 
-    const slug = (event.pathParameters?.slug ?? '').trim();
+    slug = (event.pathParameters?.slug ?? '').trim();
     if (!SLUG_RE.test(slug)) {
       return errorResponse(
         400,
@@ -116,7 +121,18 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     const oauthSecretArn = row.oauth_secret_arn as string | undefined;
     const now = new Date().toISOString();
 
+    // Track which teardown phase we're in so a mid-stream failure logs
+    // *where* it broke — critical because the registry row is revoked
+    // first (fail-closed), so a later failure can leave a live OAuth
+    // secret orphaned. On-call needs the phase + workspace id from the
+    // error log to find and hand-purge it.
+    phase = 'registry_write';
+
     // ─── Registry: revoke (soft) or purge (hard) ─────────────────────
+    // Revoke-first is deliberate: the OAuth resolver fail-closes on any
+    // non-active status, so the workspace stops resolving tokens and
+    // routing webhooks the instant this write lands, even before the
+    // secret is deleted.
     if (purge) {
       await ddb.send(new DeleteCommand({
         TableName: WORKSPACE_REGISTRY_TABLE,
@@ -135,6 +151,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     // ─── Secrets Manager: delete the per-workspace OAuth secret ───────
     // Idempotent: a ResourceNotFoundException means the secret was already
     // removed by a prior (partial) run — that's success, not an error.
+    phase = 'secret_delete';
     let secretDeleted = false;
     if (oauthSecretArn) {
       try {
@@ -149,8 +166,35 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       } catch (err) {
         const name = (err as { name?: string }).name;
         if (name !== 'ResourceNotFoundException') {
-          // Any other SM error is a real failure — don't mask it.
-          throw err;
+          // A real SM failure (e.g. AccessDenied, throttle). The registry
+          // row is already revoked (fail-closed holds), but the live OAuth
+          // secret is still present. A naive retry re-runs the
+          // status='active' scan, finds nothing, and returns 404 — so it
+          // would NEVER re-attempt this delete. Persist a durable marker
+          // on the row (best-effort) so the leaked secret is discoverable
+          // and the operator can hand-purge it, then surface a distinct,
+          // actionable error instead of an opaque 500. Do NOT swallow.
+          await markSecretDeletionFailed(linearWorkspaceId, oauthSecretArn, name, purge)
+            .catch((markErr) => logger.error('Failed to persist secret-deletion-failed marker', {
+              request_id: requestId,
+              linear_workspace_id: linearWorkspaceId,
+              error: markErr instanceof Error ? markErr.message : String(markErr),
+            }));
+          logger.error('Linear OAuth secret delete failed — workspace revoked but secret must be manually purged', {
+            request_id: requestId,
+            workspace_slug: slug,
+            linear_workspace_id: linearWorkspaceId,
+            oauth_secret_arn: oauthSecretArn,
+            error_name: name,
+          });
+          return errorResponse(
+            500,
+            ErrorCode.SECRET_DELETE_FAILED,
+            `Workspace '${slug}' was revoked but its OAuth secret could not be deleted. `
+            + 'The workspace is disabled (fail-closed), but an operator must manually delete '
+            + `the Secrets Manager secret. Request ID ${requestId}.`,
+            requestId,
+          );
         }
         logger.info('Linear OAuth secret already absent — treating removal as idempotent', {
           request_id: requestId,
@@ -165,9 +209,10 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     // Rows onboarded before that field existed cannot be safely matched to
     // a slug, so they are intentionally left alone (see PR notes) — the
     // operator can remove them by project id if needed.
+    phase = 'mapping_cleanup';
     let mappingsRemoved = 0;
     if (!keepMappings) {
-      mappingsRemoved = await deleteWorkspaceProjectMappings(linearWorkspaceId);
+      mappingsRemoved = await deleteWorkspaceProjectMappings(linearWorkspaceId, requestId);
     }
 
     logger.info('Linear workspace removed', {
@@ -187,12 +232,45 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       mappings_removed: mappingsRemoved,
     }, requestId);
   } catch (err) {
+    // Include the workspace slug + failing phase so on-call can locate an
+    // orphaned secret / half-cleaned mapping table from the error log.
     logger.error('Linear remove-workspace handler failed', {
       error: err instanceof Error ? err.message : String(err),
       request_id: requestId,
+      workspace_slug: slug,
+      phase,
     });
     return errorResponse(500, ErrorCode.INTERNAL_ERROR, 'Internal server error.', requestId);
   }
+}
+
+/**
+ * Best-effort durable marker written to the registry row when the OAuth
+ * secret delete fails after the row was already revoked. Makes the
+ * orphaned-secret condition discoverable (the row is still readable even
+ * after `--purge` fails at the secret step, because the delete happens
+ * after the row write). Never throws to the caller — the caller already
+ * logs + returns an actionable error.
+ */
+async function markSecretDeletionFailed(
+  linearWorkspaceId: string,
+  oauthSecretArn: string,
+  errorName: string | undefined,
+  purged: boolean,
+): Promise<void> {
+  // If the row was purged there is nothing to annotate; skip.
+  if (purged) return;
+  await ddb.send(new UpdateCommand({
+    TableName: WORKSPACE_REGISTRY_TABLE,
+    Key: { linear_workspace_id: linearWorkspaceId },
+    UpdateExpression:
+      'SET secret_deletion_failed = :t, secret_deletion_error = :e, orphaned_oauth_secret_arn = :arn',
+    ExpressionAttributeValues: {
+      ':t': true,
+      ':e': errorName ?? 'unknown',
+      ':arn': oauthSecretArn,
+    },
+  }));
 }
 
 /**
@@ -200,8 +278,16 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
  * workspace. Attribution is by the `linear_workspace_id` field on the row;
  * rows without it are skipped (cannot be safely matched to a workspace).
  * Returns the number of rows deleted.
+ *
+ * Logs per-page progress so a partial teardown (a delete failing on a
+ * later page) is reconstructable from the request id — the already-deleted
+ * pages are gone, and because the registry row is already revoked a retry
+ * 404s at the scan, so recovery is `--keep-mappings` + manual cleanup.
  */
-async function deleteWorkspaceProjectMappings(linearWorkspaceId: string): Promise<number> {
+async function deleteWorkspaceProjectMappings(
+  linearWorkspaceId: string,
+  requestId: string,
+): Promise<number> {
   let removed = 0;
   let lastKey: Record<string, unknown> | undefined;
   do {
@@ -219,6 +305,12 @@ async function deleteWorkspaceProjectMappings(linearWorkspaceId: string): Promis
       removed += 1;
     }
     lastKey = scan.LastEvaluatedKey as Record<string, unknown> | undefined;
+    logger.info('Linear project-mapping cleanup page', {
+      request_id: requestId,
+      linear_workspace_id: linearWorkspaceId,
+      removed_so_far: removed,
+      has_more: Boolean(lastKey),
+    });
   } while (lastKey);
   return removed;
 }
