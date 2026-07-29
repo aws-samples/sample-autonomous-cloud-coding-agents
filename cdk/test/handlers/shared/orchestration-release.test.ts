@@ -98,11 +98,43 @@ describe('releaseChild — idempotency key is accepted by the REAL validator', (
       expect(d).toContain('Slug is `kyoto`');
       expect(d).toContain('`checkIn`/`checkOut`');
       // Told that siblings share it, which is what makes it binding rather than FYI.
-      expect(d).toMatch(/IN PARALLEL/);
+      expect(d).toMatch(/in parallel/i);
     }
     // And each still carries its OWN task below the shared block.
     expect(descriptions[0]).toContain('Add the booking API');
     expect(descriptions[1]).toContain('Add the booking form');
+  });
+
+  test('the shared-context preamble stays DESCRIPTIVE, so the guardrail admits the child', async () => {
+    // The task description is screened by a Bedrock guardrail at admission. An
+    // instruction-shaped preamble ("use it exactly", "do not invent an alternative")
+    // stacks with the epic's own imperatives and trips PROMPT_ATTACK at MEDIUM
+    // confidence — the child then fails with "blocked by content policy" before it
+    // ever runs. Live-reproduced against the deployed guardrail: the imperative
+    // wording blocked, this wording passed, with identical epic text after it.
+    //
+    // So this asserts the VOICE, which is the property that keeps children
+    // admittable. The constraint is still conveyed — by stating what the siblings
+    // are already working to, rather than commanding this one.
+    const createTaskCore = created('T-1');
+    await releaseChild({
+      ddb: { send: jest.fn().mockResolvedValue({}) } as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow({}),
+      platformUserId: 'user-1',
+      createTaskCore: createTaskCore as never,
+      parentContext: { title: 'Epic', description: 'Key is `quickNote`.' },
+      now: NOW,
+    });
+    const d = createTaskCore.mock.calls[0][0].task_description as string;
+    const preamble = d.slice(0, d.indexOf('Epic:'));
+    // Second-person commands are what the filter keys on.
+    expect(preamble).not.toMatch(/\buse it exactly\b/i);
+    expect(preamble).not.toMatch(/\bdo not invent\b/i);
+    expect(preamble).not.toMatch(/\byou must\b/i);
+    // …and the constraint is still there, stated descriptively.
+    expect(preamble).toMatch(/in parallel/i);
+    expect(preamble).toMatch(/shared with/i);
   });
 
   test('an epic with no context does not pad the child prompt with an empty heading', async () => {
