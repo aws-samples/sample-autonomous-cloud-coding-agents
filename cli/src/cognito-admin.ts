@@ -28,7 +28,7 @@ import {
 } from '@aws-sdk/client-cognito-identity-provider';
 import { tryLoadConfig } from './config';
 import { CliError } from './errors';
-import { DEFAULT_STACK_NAME, resolveOperatorContext } from './operator-context';
+import { resolveOperatorContext } from './operator-context';
 import { getStackOutput, resolveConfigureBundleFromStack } from './stack-outputs';
 import { CliConfig } from './types';
 import { makeClient } from './ua';
@@ -153,28 +153,25 @@ export async function adminSetPermanentPassword(
   }));
 }
 
-/** Create user + set permanent password; surfaces half-failure diagnostics. */
+/**
+ * Create a Cognito user with a *temporary* password (#238).
+ *
+ * ``adminCreateUser`` sets ``TemporaryPassword``, which lands the user in
+ * ``FORCE_CHANGE_PASSWORD`` state. We deliberately do **not** promote it to a
+ * permanent password: on their first ``bgagent login`` Cognito returns the
+ * ``NEW_PASSWORD_REQUIRED`` challenge and the CLI prompts the teammate to set a
+ * password only they know — so the admin-generated string (which lives in
+ * terminal scrollback / a Slack message) stops being a valid credential once
+ * they log in. An admin who needs a login-ready permanent password (no
+ * first-login prompt) can still use ``bgagent admin reset-password``.
+ */
 export async function adminInviteUser(
   ctx: CognitoAdminContext,
   email: string,
-  password: string,
+  temporaryPassword: string,
 ): Promise<void> {
   const client = cognitoClient(ctx.region);
-  await adminCreateUser(client, ctx.userPoolId, email, password);
-  try {
-    await adminSetPermanentPassword(client, ctx.userPoolId, email, password);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    const errorName = err instanceof Error ? err.name : 'Error';
-    throw new CliError(
-      `User ${email} was created but the password could not be set `
-      + `(${errorName}: ${message}). The user is now stuck in FORCE_CHANGE_PASSWORD `
-      + 'state and cannot log in. Either:\n'
-      + `  1. Delete and re-run: bgagent admin delete-user ${email} --stack-name ${DEFAULT_STACK_NAME}\n`
-      + '  2. Or reset the password: bgagent admin reset-password '
-      + `${email} --stack-name ${DEFAULT_STACK_NAME}`,
-    );
-  }
+  await adminCreateUser(client, ctx.userPoolId, email, temporaryPassword);
 }
 
 export async function adminDeleteUser(

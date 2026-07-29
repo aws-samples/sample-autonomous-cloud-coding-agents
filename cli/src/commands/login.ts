@@ -21,6 +21,7 @@ import * as readline from 'readline';
 import { Command } from 'commander';
 import { login } from '../auth';
 import { debug } from '../debug';
+import { promptNewPasswordWithConfirmation } from './change-password';
 
 export function makeLoginCommand(): Command {
   return new Command('login')
@@ -30,7 +31,14 @@ export function makeLoginCommand(): Command {
     .action(async (opts) => {
       debug(`Logging in as: ${opts.username}`);
       const password = opts.password || await promptPassword();
-      await login(opts.username, password);
+      // First-login rotation: invites now issue a *temporary* password, so
+      // Cognito challenges with NEW_PASSWORD_REQUIRED. Pass an interactive
+      // prompt so the user can set a permanent password inline; `login`
+      // answers the challenge and persists the resulting tokens.
+      await login(opts.username, password, () => {
+        console.log('This account requires a new password on first login.');
+        return promptNewPasswordWithConfirmation();
+      });
       console.log('Login successful. Credentials saved.');
     });
 }

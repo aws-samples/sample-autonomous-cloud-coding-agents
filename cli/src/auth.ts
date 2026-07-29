@@ -19,8 +19,11 @@
 
 import {
   AuthFlowType,
+  ChallengeNameType,
+  ChangePasswordCommand,
   CognitoIdentityProviderClient,
   InitiateAuthCommand,
+  RespondToAuthChallengeCommand,
 } from '@aws-sdk/client-cognito-identity-provider';
 import { loadConfig, loadCredentials, saveCredentials } from './config';
 import { debug } from './debug';
@@ -42,8 +45,29 @@ const TOKEN_REFRESH_BUFFER_MS = TOKEN_REFRESH_BUFFER_MINUTES * 60 * 1000;
  */
 let inFlightRefresh: Promise<void> | null = null;
 
-/** Authenticate with username/password and cache tokens. */
-export async function login(username: string, password: string): Promise<void> {
+/**
+ * Prompt callback invoked when Cognito returns the ``NEW_PASSWORD_REQUIRED``
+ * challenge on first login. Returning the new password lets ``login`` respond
+ * to the challenge without pulling TTY/readline concerns into the auth layer.
+ * The command layer supplies the interactive implementation.
+ */
+export type NewPasswordPrompt = () => Promise<string>;
+
+/**
+ * Authenticate with username/password and cache tokens.
+ *
+ * First-login rotation: admins invite users with a *temporary* password, so
+ * the initial ``InitiateAuth`` returns a ``NEW_PASSWORD_REQUIRED`` challenge
+ * instead of tokens. When ``promptNewPassword`` is supplied, we prompt for a
+ * replacement, answer the challenge via ``RespondToAuthChallenge``, and persist
+ * the resulting tokens. Without a prompt (e.g. ``--password`` passed
+ * non-interactively) we surface a clear error rather than hanging.
+ */
+export async function login(
+  username: string,
+  password: string,
+  promptNewPassword?: NewPasswordPrompt,
+): Promise<void> {
   const config = loadConfig();
   debug(`Cognito region: ${config.region}, client_id: ${config.client_id}, user_pool_id: ${config.user_pool_id}`);
   const client = makeClient(CognitoIdentityProviderClient, { region: config.region });
@@ -57,11 +81,77 @@ export async function login(username: string, password: string): Promise<void> {
     },
   }));
 
-  const auth = result.AuthenticationResult;
+  if (result.ChallengeName === ChallengeNameType.NEW_PASSWORD_REQUIRED) {
+    const auth = await respondToNewPasswordChallenge(
+      client,
+      config.client_id,
+      username,
+      result.Session,
+      promptNewPassword,
+    );
+    persistAuthResult(auth);
+    return;
+  }
+
+  persistAuthResult(result.AuthenticationResult);
+}
+
+/**
+ * Answer the first-login ``NEW_PASSWORD_REQUIRED`` challenge: prompt for a new
+ * password (via the caller-supplied prompt) and exchange it for tokens.
+ * ``ChallengeResponses`` carries the same ``USERNAME`` Cognito challenged plus
+ * the ``NEW_PASSWORD``; the ``Session`` echoes the value from ``InitiateAuth``.
+ */
+async function respondToNewPasswordChallenge(
+  client: CognitoIdentityProviderClient,
+  clientId: string,
+  username: string,
+  session: string | undefined,
+  promptNewPassword?: NewPasswordPrompt,
+): Promise<AuthResult> {
+  if (!promptNewPassword) {
+    throw new CliError(
+      'This account requires a new password on first login. '
+      + 'Run `bgagent login --username <email>` interactively (omit --password) '
+      + 'so the CLI can prompt you to set one.',
+    );
+  }
+
+  const newPassword = await promptNewPassword();
+  try {
+    const challengeResult = await client.send(new RespondToAuthChallengeCommand({
+      ClientId: clientId,
+      ChallengeName: ChallengeNameType.NEW_PASSWORD_REQUIRED,
+      Session: session,
+      ChallengeResponses: {
+        USERNAME: username,
+        NEW_PASSWORD: newPassword,
+      },
+    }));
+    return challengeResult.AuthenticationResult;
+  } catch (err) {
+    // Cognito rejects a policy-violating new password with
+    // InvalidPasswordException; surface the server's guidance verbatim rather
+    // than leaking a raw SDK stack.
+    if (err instanceof Error && err.name === 'InvalidPasswordException') {
+      throw new CliError(`New password rejected: ${err.message}`);
+    }
+    throw err;
+  }
+}
+
+/** Shared shape of the tokens both ``InitiateAuth`` and challenge responses return. */
+type AuthResult = {
+  IdToken?: string;
+  RefreshToken?: string;
+  ExpiresIn?: number;
+} | undefined;
+
+/** Validate and persist a Cognito auth result to the credentials cache. */
+function persistAuthResult(auth: AuthResult): void {
   if (!auth?.IdToken || !auth.RefreshToken || !auth.ExpiresIn) {
     throw new CliError('Unexpected authentication response from Cognito.');
   }
-
   const expiry = new Date(Date.now() + auth.ExpiresIn * 1000).toISOString();
   saveCredentials({
     id_token: auth.IdToken,
@@ -158,4 +248,117 @@ async function refreshToken(creds: Credentials): Promise<void> {
     const detail = err instanceof Error ? err.message : String(err);
     throw new CliError(`Token refresh failed (${detail}). Retry, or run \`bgagent login\` if it persists.`);
   }
+}
+
+/**
+ * Rotate the current user's Cognito password.
+ *
+ * ``ChangePassword`` requires a Cognito **access token**, which the CLI does
+ * not persist (only the ID + refresh tokens the REST authorizer needs). Rather
+ * than widen the on-disk credential surface, we re-authenticate with the
+ * supplied *current* password to mint a short-lived access token in memory.
+ * That re-auth doubles as verification of the current password: a wrong one
+ * fails here with a clear "current password is incorrect" message before any
+ * change is attempted. Cognito enforces the password policy on the new value
+ * server-side; a policy violation surfaces as ``InvalidPasswordException``.
+ *
+ * Requires an existing ``bgagent login`` session — the username is read from
+ * the cached ID token so the user does not re-type their email.
+ */
+export async function changePassword(
+  currentPassword: string,
+  newPassword: string,
+): Promise<void> {
+  const config = loadConfig();
+  const username = usernameFromSession();
+  const client = new CognitoIdentityProviderClient({ region: config.region });
+
+  const accessToken = await accessTokenFor(client, config.client_id, username, currentPassword);
+
+  try {
+    await client.send(new ChangePasswordCommand({
+      AccessToken: accessToken,
+      PreviousPassword: currentPassword,
+      ProposedPassword: newPassword,
+    }));
+  } catch (err) {
+    if (err instanceof Error && err.name === 'InvalidPasswordException') {
+      // Cognito's message already states which policy rule failed.
+      throw new CliError(`New password rejected: ${err.message}`);
+    }
+    if (err instanceof Error && err.name === 'LimitExceededException') {
+      throw new CliError('Too many password-change attempts. Wait a few minutes and try again.');
+    }
+    throw err;
+  }
+}
+
+/**
+ * Read the signed-in user's Cognito username from the cached ID token.
+ *
+ * Requires a ``bgagent login`` session. The username lives in the ``email``
+ * claim (the pool's sign-in alias); older tokens may only carry
+ * ``cognito:username``. Never logs the token or its claims.
+ */
+function usernameFromSession(): string {
+  const creds = loadCredentials();
+  if (!creds) {
+    throw new CliError('Not authenticated. Run `bgagent login` first.');
+  }
+  const JWT_SEGMENTS = 3; // header.payload.signature
+  const parts = creds.id_token.split('.');
+  if (parts.length !== JWT_SEGMENTS) {
+    throw new CliError('Credentials file is corrupt. Run `bgagent login` to re-authenticate.');
+  }
+  let payload: { 'email'?: string; 'cognito:username'?: string };
+  try {
+    payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf-8'));
+  } catch {
+    throw new CliError('Credentials file is corrupt. Run `bgagent login` to re-authenticate.');
+  }
+  const username = payload.email ?? payload['cognito:username'];
+  if (!username) {
+    throw new CliError('Could not read your account identity. Run `bgagent login` to re-authenticate.');
+  }
+  return username;
+}
+
+/**
+ * Re-authenticate to obtain a fresh, in-memory access token for
+ * ``ChangePassword``. A wrong current password fails here with
+ * ``NotAuthorizedException`` — surfaced as an actionable message.
+ */
+async function accessTokenFor(
+  client: CognitoIdentityProviderClient,
+  clientId: string,
+  username: string,
+  currentPassword: string,
+): Promise<string> {
+  let result;
+  try {
+    result = await client.send(new InitiateAuthCommand({
+      AuthFlow: AuthFlowType.USER_PASSWORD_AUTH,
+      ClientId: clientId,
+      AuthParameters: {
+        USERNAME: username,
+        PASSWORD: currentPassword,
+      },
+    }));
+  } catch (err) {
+    if (err instanceof Error && err.name === 'NotAuthorizedException') {
+      throw new CliError('Current password is incorrect.');
+    }
+    throw err;
+  }
+
+  const accessToken = result.AuthenticationResult?.AccessToken;
+  if (!accessToken) {
+    // A challenge (e.g. NEW_PASSWORD_REQUIRED) or an unexpected shape — the
+    // account is not in a state where a self-service change applies.
+    throw new CliError(
+      'Could not verify your current password. If this is your first login, '
+      + 'run `bgagent login` to set a permanent password instead.',
+    );
+  }
+  return accessToken;
 }

@@ -92,17 +92,17 @@ Three steps:
 
    ```
    ✓ Created Cognito user your-email@example.com
-   ✓ Set permanent password (no first-login change required)
+   ✓ Set temporary password (teammate is prompted to set a permanent one on first login)
 
    Share with the new teammate:
    ────────────────────────────────────────────────────────────────
-     email:    your-email@example.com
-     password: K9$mPq2nL!vXf3Hb
-     bundle:   eyJhcGlfdXJsIjoiaHR0cHM6Ly9hYmMxMjM…
+     email:         your-email@example.com
+     temp password: K9$mPq2nL!vXf3Hb
+     bundle:        eyJhcGlfdXJsIjoiaHR0cHM6Ly9hYmMxMjM…
    ────────────────────────────────────────────────────────────────
    ```
 
-   The `bundle` is a base64 blob carrying the four config fields (API URL, region, user pool ID, app client ID) so you don't have to type them as separate flags.
+   The `bundle` is a base64 blob carrying the four config fields (API URL, region, user pool ID, app client ID) so you don't have to type them as separate flags. The **temp password is a one-time credential** — you'll replace it on first login (below), after which the admin-shared string is no longer valid.
 
 2. **Configure your CLI from the bundle:**
 
@@ -110,16 +110,20 @@ Three steps:
    bgagent configure --from-bundle <paste the base64 string>
    ```
 
-3. **Log in with the temp password:**
+3. **Log in and set your permanent password:**
 
    ```bash
    bgagent login --username your-email@example.com
-   # paste the temp password
+   # paste the temp password when prompted for "Password:"
+   # then, because this is your first login, you'll be prompted to set a
+   # new (permanent) password and confirm it
    ```
 
-   The CLI caches your tokens in `~/.bgagent/credentials.json` and auto-refreshes them.
+   On first login Cognito requires you to rotate the admin-generated temp password. The CLI prompts `New password:` + `Confirm new password:`, sets it, and caches your tokens in `~/.bgagent/credentials.json` (auto-refreshed thereafter). Subsequent logins just use your permanent password. Do this interactively — omit `--password` so the CLI can prompt you.
 
 You're in. `bgagent submit`, `bgagent list`, `bgagent status` work against the shared stack. Tasks you submit are attributed to your Cognito user; concurrency caps and budgets are scoped to you.
+
+Want to rotate your password later? Run `bgagent change-password` (prompts for your current password, then the new one twice). Cognito enforces the pool's password policy — minimum 12 characters with an upper, lower, digit, and symbol.
 
 **You do not run** `bgagent linear setup`, `bgagent jira setup`, `bgagent jira app-setup`, or `bgagent slack setup` — those are workspace-level operations performed once by the stack/workspace admin. If you want Linear- or Jira-triggered tasks to be attributed to *you* (not auto-dropped), the admin needs to map your Linear identity or Jira account to your Cognito user; ask them about [Linear user linking](./LINEAR_SETUP_GUIDE.md#inviting-teammates) or [Jira user linking](./JIRA_SETUP_GUIDE.md#6-link-your-jira-identity).
 
@@ -149,20 +153,20 @@ APP_CLIENT_ID=$(aws cloudformation describe-stacks --stack-name backgroundagent-
 bgagent admin invite-user teammate@example.com
 ```
 
-This wraps Cognito `admin-create-user` + `admin-set-user-password` with the right defaults (email-verified, password set as permanent so the teammate doesn't hit a password-change flow on first login, suppress-email so SES isn't required) and prints a shareable config bundle plus an auto-generated strong temp password. Send the bundle + password to the teammate; they paste them into `bgagent configure --from-bundle <bundle>` + `bgagent login --username <email>` and they're in.
+This wraps Cognito `admin-create-user` with the right defaults (email-verified so the account is usable immediately, suppress-email so SES isn't required) and prints a shareable config bundle plus an auto-generated strong **temporary** password. Send the bundle + temp password to the teammate; they paste them into `bgagent configure --from-bundle <bundle>` + `bgagent login --username <email>`, and on that first login Cognito prompts them to set a permanent password only they know. That first-login rotation means the credential you shared over Slack/email stops being valid once they're in — the admin-generated string is transient by design.
 
-The CLI command requires the running shell to have AWS credentials with `cognito-idp:AdminCreateUser` and `cognito-idp:AdminSetUserPassword` on the configured user pool — i.e. you're acting as the stack admin, not as a Cognito-authenticated end-user.
+The CLI command requires the running shell to have AWS credentials with `cognito-idp:AdminCreateUser` on the configured user pool — i.e. you're acting as the stack admin, not as a Cognito-authenticated end-user. (No `AdminSetUserPassword` is issued for invites; the teammate rotates their own password on first login. `bgagent admin reset-password` still uses `AdminSetUserPassword` to set a permanent password when an admin must recover an account.)
 
 **Pool constraints** (enforced server-side; the CLI handles them, but useful to know if you ever need to bypass it with raw AWS CLI):
 
 - **Username MUST be an email address.** The pool is configured with email as the sign-in alias.
 - **Password policy**: minimum 12 characters, with at least one uppercase, lowercase, digit, and symbol.
-- **`email_verified=true` attribute is required**, otherwise the account stays in `FORCE_CHANGE_PASSWORD` state and `initiate-auth` fails with `User is not confirmed`.
+- **`email_verified=true` attribute is required.** An invited user sits in `FORCE_CHANGE_PASSWORD` state by design (they rotate the temp password on first login); with `email_verified` set, `initiate-auth` returns the `NEW_PASSWORD_REQUIRED` challenge and login proceeds through it. Without it, `initiate-auth` fails with `User is not confirmed`.
 - **`--message-action SUPPRESS`** stops Cognito from trying to email the temp password — required unless you've set up SES verified identities.
 
 #### Raw AWS CLI fallback
 
-If you can't run `bgagent admin invite-user` (e.g., you're scripting this from CI without the CLI installed), the underlying calls are:
+If you can't run `bgagent admin invite-user` (e.g., you're scripting this from CI without the CLI installed), the underlying call is:
 
 ```bash
 aws cognito-idp admin-create-user \
@@ -172,16 +176,20 @@ aws cognito-idp admin-create-user \
   --user-attributes Name=email,Value=user@example.com Name=email_verified,Value=true \
   --temporary-password 'TempPass123!@' \
   --message-action SUPPRESS
-
-aws cognito-idp admin-set-user-password \
-  --region "$REGION" \
-  --user-pool-id $USER_POOL_ID \
-  --username user@example.com \
-  --password 'YourPerm@nent1Pass!' \
-  --permanent
 ```
 
-The first command creates the user with a temporary password and pre-verifies the email. The second sets a permanent password so the teammate does not have to go through a password change flow on first login. After running these, hand the teammate the four config fields manually (or build the bundle: `echo '{"api_url":"…","region":"…","user_pool_id":"…","client_id":"…"}' | base64`).
+This creates the user with a **temporary** password (state `FORCE_CHANGE_PASSWORD`) and pre-verifies the email — matching what `bgagent admin invite-user` does. The teammate rotates the temp password on their first `bgagent login`. Hand them the temp password plus the four config fields manually (or build the bundle: `echo '{"api_url":"…","region":"…","user_pool_id":"…","client_id":"…"}' | base64`).
+
+> If you deliberately want a login-ready **permanent** password with no first-login prompt (e.g. a service account), add a second call — but for human teammates prefer the rotate-on-first-login default above:
+>
+> ```bash
+> aws cognito-idp admin-set-user-password \
+>   --region "$REGION" \
+>   --user-pool-id $USER_POOL_ID \
+>   --username user@example.com \
+>   --password 'YourPerm@nent1Pass!' \
+>   --permanent
+> ```
 
 ### Obtain a JWT token
 

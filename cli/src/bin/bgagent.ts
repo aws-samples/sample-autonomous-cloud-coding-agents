@@ -24,6 +24,7 @@ import { makeAdminCommand } from '../commands/admin';
 import { makeApiKeyCommand } from '../commands/api-key';
 import { makeApproveCommand } from '../commands/approve';
 import { makeCancelCommand } from '../commands/cancel';
+import { makeChangePasswordCommand } from '../commands/change-password';
 import { makeConfigureCommand } from '../commands/configure';
 import { makeDenyCommand } from '../commands/deny';
 import { makeEventsCommand } from '../commands/events';
@@ -67,6 +68,7 @@ program
 
 program.addCommand(makeConfigureCommand());
 program.addCommand(makeLoginCommand());
+program.addCommand(makeChangePasswordCommand());
 program.addCommand(makeSubmitCommand());
 program.addCommand(makeListCommand());
 program.addCommand(makeStatusCommand());

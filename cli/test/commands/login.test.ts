@@ -26,8 +26,11 @@ import { saveConfig } from '../../src/config';
 const mockSend = jest.fn();
 jest.mock('@aws-sdk/client-cognito-identity-provider', () => ({
   CognitoIdentityProviderClient: jest.fn().mockImplementation(() => ({ send: mockSend })),
-  InitiateAuthCommand: jest.fn().mockImplementation((params) => params),
+  InitiateAuthCommand: jest.fn().mockImplementation((params) => ({ __command: 'InitiateAuth', ...params })),
+  RespondToAuthChallengeCommand: jest.fn().mockImplementation((params) => ({ __command: 'RespondToAuthChallenge', ...params })),
+  ChangePasswordCommand: jest.fn().mockImplementation((params) => ({ __command: 'ChangePassword', ...params })),
   AuthFlowType: { USER_PASSWORD_AUTH: 'USER_PASSWORD_AUTH', REFRESH_TOKEN_AUTH: 'REFRESH_TOKEN_AUTH' },
+  ChallengeNameType: { NEW_PASSWORD_REQUIRED: 'NEW_PASSWORD_REQUIRED' },
 }));
 
 describe('login command', () => {
