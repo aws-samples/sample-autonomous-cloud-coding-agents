@@ -4,15 +4,15 @@
   REQUIRE_APPROVAL). The REQUIRE_APPROVAL path writes a pending approval
   row + transitions the task to AWAITING_APPROVAL atomically, polls for a
   human decision, then resumes / denies per the user's input. See
-  ``docs/design/CEDAR_HITL_GATES.md`` §6.5.
+  ``docs/design/CEDAR_HITL_GATES.md``.
 - PostToolUse: output scanner for secrets/PII.
 - Stop: between-turns hook dispatcher. Cancel → nudge → denial injection
-  in that order (cancel-wins semantics, finding #2). Each producer
-  appends synthetic user-message strings that get reinjected via the
-  SDK's ``decision: "block"`` mechanism.
+  in that order (cancel-wins semantics). Each producer appends synthetic
+  user-message strings that get reinjected via the SDK's
+  ``decision: "block"`` mechanism.
 
-A module-level registry ``between_turns_hooks`` lets phases (Phase 2
-nudges, Phase 3 denial injections) append additional synthetic-message
+A module-level registry ``between_turns_hooks`` lets other producers
+(nudges, denial injections) append additional synthetic-message
 producers without touching the Stop hook callback itself.
 """
 
@@ -41,31 +41,31 @@ if TYPE_CHECKING:
     from telemetry import _TrajectoryWriter
 
 # ---------------------------------------------------------------------------
-# Chunk 3 constants (§6.5 pseudocode)
+# Approval-gate constants
 # ---------------------------------------------------------------------------
 
-FLOOR_30S: int = FLOOR_TIMEOUT_S  # §6 decision #6: sourced from contracts/constants.json
-CLEANUP_MARGIN_120S: int = 120  # §6.5 lifetime-margin reserve for cleanup
-# Poll cadence per §3 decision #3 and IMPL-12: 2s for the first 30s, 5s
-# thereafter. Exact counts vary with ``timeout_s``; these pin the
-# user-observable "fast for a bit, then slack off" behavior.
+FLOOR_30S: int = FLOOR_TIMEOUT_S  # minimum approval window; sourced from contracts/constants.json
+CLEANUP_MARGIN_120S: int = 120  # lifetime-margin reserve for cleanup
+# Poll cadence: 2s for the first 30s, 5s thereafter. Exact counts vary with
+# ``timeout_s``; these pin the user-observable "fast for a bit, then slack off"
+# behavior.
 POLL_FAST_INTERVAL_S: float = 2.0
 POLL_FAST_DURATION_S: float = 30.0
 POLL_SLOW_INTERVAL_S: float = 5.0
-POLL_DEGRADED_FAILS: int = 3  # emit approval_poll_degraded at this count (§13.2)
-POLL_MAX_CONSECUTIVE_FAILS: int = 10  # treat as TIMED_OUT at this count (§13.2)
-TOOL_INPUT_PREVIEW_MAX: int = 256  # §6.5: strip-ANSI, truncate
+POLL_DEGRADED_FAILS: int = 3  # emit approval_poll_degraded at this many consecutive failures
+POLL_MAX_CONSECUTIVE_FAILS: int = 10  # treat as TIMED_OUT at this many consecutive failures
+TOOL_INPUT_PREVIEW_MAX: int = 256  # cap for the strip-ANSI, truncated input preview
 ELLIPSIS_LEN: int = 3  # chars reserved for the "..." truncation marker
 
 # ANSI CSI / OSC escape sequence stripper for ``tool_input_preview`` +
-# ``permissionDecisionReason`` fields (§12.7). Re-derives the pattern from
-# the canonical definition; kept local to avoid adding a cross-module
-# dependency for one regex.
+# ``permissionDecisionReason`` fields, so persisted/logged reasons can't carry
+# terminal-escape injection. Kept local to avoid a cross-module dependency for
+# one regex.
 _ANSI_ESCAPE_RE = re.compile(r"\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1B]*(?:\x07|\x1B\\)|[@-Z\\-_])")
 
 
 def _strip_ansi(text: str) -> str:
-    """Remove ANSI CSI / OSC sequences to prevent terminal injection (§12.7)."""
+    """Remove ANSI CSI / OSC sequences to prevent terminal injection."""
     return _ANSI_ESCAPE_RE.sub("", text)
 
 
@@ -101,7 +101,7 @@ def _tool_input_preview(tool_input: Any, max_len: int = TOOL_INPUT_PREVIEW_MAX) 
 
 
 # ---------------------------------------------------------------------------
-# Egress-denial detection (#251, Phase 1)
+# Egress-denial detection
 # ---------------------------------------------------------------------------
 #
 # Best-effort, heuristic scan of a tool's output for the signatures a blocked
@@ -133,15 +133,15 @@ _EGRESS_DENIAL_PATTERNS: tuple[re.Pattern[str], ...] = (
 )
 
 
-# #251 carry-path: the most recent agent-detected blocker, as a canonical
-# ``BLOCKED[<kind>]: …`` reason string (see ``format_blocker_reason``). Blockers
-# are detected mid-turn in the hooks (egress in PostToolUse, fail-closed in
-# PreToolUse) but the terminal ``error_message`` is assembled later in the
-# pipeline. This latch bridges the two: the pipeline promotes it into
-# ``TaskResult.error`` ONLY when the task errored without a more specific
-# reason, so the CDK classifier surfaces a precise remedy. Process-lifetime
-# (== one task) like ``_INJECTED_NUDGES``; last-writer-wins is fine — the most
-# recent blocker is the most relevant to a terminal failure.
+# The most recent agent-detected blocker, as a canonical ``BLOCKED[<kind>]: …``
+# reason string (see ``format_blocker_reason``). Blockers are detected mid-turn
+# in the hooks (egress in PostToolUse, fail-closed in PreToolUse) but the
+# terminal ``error_message`` is assembled later in the pipeline. This latch
+# bridges the two: the pipeline promotes it into ``TaskResult.error`` ONLY when
+# the task errored without a more specific reason, so the error classifier
+# surfaces a precise remedy. Process-lifetime (== one task) like
+# ``_INJECTED_NUDGES``; last-writer-wins is fine — the most recent blocker is
+# the most relevant to a terminal failure.
 _LAST_BLOCKER_REASON: str | None = None
 
 
@@ -154,7 +154,7 @@ def _record_blocker_reason(kind: str, detail: str, resource: str | None = None) 
 
 
 def last_blocker_reason() -> str | None:
-    """Return the latched canonical blocker reason for terminal promotion (#251)."""
+    """Return the latched canonical blocker reason for terminal promotion."""
     return _LAST_BLOCKER_REASON
 
 
@@ -173,8 +173,8 @@ def reset_blocker_reason() -> None:
 _reset_blocker_reason_for_tests = reset_blocker_reason
 
 
-# ABCA-662: latch of the stuck-guard's "why it's spinning" summary, refreshed by
-# the between-turns hook. Read by the pipeline's terminal path so a max_turns
+# Latch of the stuck-guard's "why it's spinning" summary, refreshed by the
+# between-turns hook. Read by the pipeline's terminal path so a max_turns
 # failure can say WHY it capped ("Exceeded max turns — spinning on failing tool
 # calls: git push → invalid credentials") vs. a task that genuinely used its
 # turns. Process-lifetime (one task), last-writer-wins (the most recent window
@@ -195,7 +195,7 @@ def reset_stuck_summary() -> None:
 
 
 def detect_egress_denial(text: str) -> tuple[bool, str | None]:
-    """Scan tool output for an egress-denial signature (#251).
+    """Scan tool output for an egress-denial signature.
 
     Returns ``(detected, host_or_None)``: ``(True, host)`` on the first matching
     signature (``host`` populated when a pattern captured one so the emitted
@@ -222,7 +222,7 @@ def _deny_response(reason: str) -> dict:
 
     Guaranteed surface: ``permissionDecisionReason`` is ANSI-stripped and
     truncated to 500 chars so it can never carry terminal-escape injection
-    or overflow a log line (§6.5, §12.7).
+    or overflow a log line.
     """
     return {
         "hookSpecificOutput": {
@@ -244,6 +244,124 @@ def _allow_response(reason: str = "permitted") -> dict:
     }
 
 
+# Workspace-integrity guard. The repo is ALREADY cloned and checked out at the
+# agent's cwd (``repo_dir``); the platform tracks that dir for
+# commit/branch/PR/push. In practice the agent sometimes ran its OWN
+# ``gh repo clone``/``git clone`` of the SAME repo into a sibling dir
+# (``/workspace/<repo-name>``) and did all its work there, leaving repo_dir empty
+# → the platform saw no commits (delivery gate: ``deliverable=lost``) and, for a
+# stacked child, the successor had no branch to stack on. The industry norm is a
+# filesystem sandbox that makes a divergent clone impossible; lacking that (raw
+# Bash + bypassPermissions + open GitHub egress), a harness-enforced deny of the
+# re-clone is the closest robust analog — and Claude Code hook denies fire even
+# under bypassPermissions and survive prompt-injection. We match ONLY a re-clone
+# of the TASK's OWN repo (not legitimate dependency/submodule clones), keyed off
+# the ``owner/repo`` slug in any of the URL forms gh/git accept.
+#
+# The clone verb must appear as an actual COMMAND — at the start of the string or
+# right after a shell separator (``&&``, ``||``, ``|``, ``;``, newline, ``(``) —
+# NOT as text buried inside a quoted argument. Without that anchoring, a
+# ``gh pr create --body "…do not run gh repo clone…"`` was wrongly blocked because
+# the phrase appeared inside the PR body. Anchoring to command position (and, in
+# ``_is_self_reclone``, truncating at the first argument that carries free text)
+# removes that false positive while still catching every real re-clone.
+_CLONE_CMD_RE = re.compile(
+    r"(?:^|[;&|\n(]|&&|\|\|)\s*(?:gh\s+repo\s+clone|git\s+(?:-C\s+\S+\s+)?clone)\b",
+    re.IGNORECASE,
+)
+
+# Arguments after which the rest of the command is free-form TEXT (a PR/issue/
+# commit body or title), where a mention of "gh repo clone" is prose, not a
+# command. Used to ignore text that merely QUOTES a clone command.
+#
+# NOTE ``-b`` is deliberately here (``gh pr create -b`` is ``--body``) AND is
+# ``git clone``'s own ``--branch`` short form. So this list can only be applied
+# to the text FOLLOWING a clone verb, never to the text preceding it: truncating
+# the command at the first match before looking for the verb let
+# ``git clone -b main <own repo>`` through entirely, because the truncation cut
+# the command off ahead of the verb it was meant to find.
+# Shell separators that start a fresh command. Splitting on these means a
+# free-text argument can only swallow the rest of ITS OWN segment, so a clone
+# chained after an unrelated ``-m`` is still seen.
+#
+# A bare newline is deliberately NOT a separator here. A multi-line ``--body`` /
+# ``-m`` value is the normal way an agent writes a PR or commit body, and its
+# quoted text routinely contains a clone command as documentation. Splitting on
+# ``\n`` put that quoted line in its own segment with no preceding free-text
+# flag, so the guard blocked a legitimate ``gh pr create`` — the exact
+# false-positive the free-text list exists to prevent.
+# A backslash at end-of-line continues the SAME command onto the next line.
+_LINE_CONTINUATION_RE = re.compile(r"\\[ \t]*\r?\n[ \t]*")
+
+_SHELL_SEPARATOR_RE = re.compile(r"(?:&&|\|\||[;&|])")
+
+_FREE_TEXT_ARG_RE = re.compile(
+    r"(?:^|\s)(?:-m|--message|--body|--body-file|-b|--title|-t|-F|--field|--raw-field)\b",
+    re.IGNORECASE,
+)
+
+
+def _repo_slug_variants(repo_url: str) -> list[str]:
+    """Return the ``owner/repo`` slug forms a clone command could name.
+
+    ``config.repo_url`` is the canonical ``owner/repo``. A clone command may
+    reference it as ``owner/repo``, ``https://github.com/owner/repo(.git)``, or
+    ``git@github.com:owner/repo(.git)`` — all normalize to the same slug, so we
+    just need the bare ``owner/repo`` (with and without ``.git``) to substring-
+    match against the command text after normalization."""
+    slug = (repo_url or "").strip().removesuffix(".git").strip("/").lower()
+    if not slug:
+        return []
+    return [slug, f"{slug}.git"]
+
+
+def _is_self_reclone(command: str, repo_url: str) -> bool:
+    """True when *command* clones the task's OWN repo (any URL form).
+
+    Deliberately narrow on two axes so legitimate commands pass:
+      * the clone verb must be in COMMAND position (start / after a shell
+        separator), not inside a quoted argument — see ``_CLONE_CMD_RE``; and
+      * the scan stops at the first free-text argument (``--body``/``-m``/…), so a
+        PR/commit body that merely QUOTES "gh repo clone" is not treated as a
+        clone; and
+      * a clone of a DIFFERENT repo (dependency, fixture, example) is allowed —
+        only a re-clone of the TASK repo threatens the workspace invariant."""
+    if not command or not repo_url:
+        return False
+    # Check each shell segment on its own. A free-text argument only swallows the
+    # REST OF ITS OWN segment, so `git commit -m wip && gh repo clone <own repo>`
+    # must still be caught: the `-m` belongs to the commit, not to the clone.
+    #
+    # Within a segment, find the clone verb FIRST and only then ask whether it
+    # sits inside free text. Truncating at the first free-text flag *before*
+    # searching is what let `git clone -b main <own repo>` through: `-b` is both
+    # gh's `--body` and git clone's `--branch`, so the cut landed ahead of the
+    # very verb it was meant to find.
+    variants = _repo_slug_variants(repo_url)
+    if not variants:
+        return False
+    # Join backslash-continuations first: ``git clone \`` + newline + url is ONE
+    # command, and leaving the break in place separated the verb from the repo so
+    # the slug was never found in the verb's segment — a wrapped self re-clone
+    # walked straight through.
+    normalized = _LINE_CONTINUATION_RE.sub(" ", command)
+    for segment in _SHELL_SEPARATOR_RE.split(normalized):
+        clone = _CLONE_CMD_RE.search(segment)
+        if clone is None:
+            continue
+        free_text = _FREE_TEXT_ARG_RE.search(segment)
+        if free_text is not None and free_text.start() < clone.start():
+            # The verb appears inside a --body/-m/--title value: prose, not a run.
+            continue
+        # The repo of a real clone always follows its verb. Normalize the URL
+        # punctuation to the bare slug space so `.../owner/repo.git` and
+        # `git@github.com:owner/repo` both reduce to text carrying `owner/repo`.
+        haystack = segment[clone.start() :].lower().replace("git@github.com:", "github.com/")
+        if any(v in haystack for v in variants):
+            return True
+    return False
+
+
 async def pre_tool_use_hook(
     hook_input: Any,
     tool_use_id: str | None,
@@ -255,27 +373,27 @@ async def pre_tool_use_hook(
     user_id: str | None = None,
     progress: Any = None,
     task_state_module: Any = None,
+    repo_url: str | None = None,
 ) -> dict:
-    """PreToolUse hook: three-outcome Cedar policy enforcement (§6.5).
+    """PreToolUse hook: three-outcome Cedar policy enforcement.
 
     Returns a dict with hookSpecificOutput containing:
     - permissionDecision: "allow" or "deny"
     - permissionDecisionReason: explanation string
 
-    The REQUIRE_APPROVAL path (Chunk 3, §6.5) pauses here: writes a
-    pending approval row + transitions the task to AWAITING_APPROVAL
-    atomically, polls for a human decision with 2s→5s backoff, then
-    returns allow / deny based on the decision. On TIMED_OUT a
-    ConditionCheckFailed from the best-effort status write triggers the
-    IMPL-24 re-read — if the user's decision landed between our poll
-    and write, we honor it instead of falsely denying.
+    The REQUIRE_APPROVAL path pauses here: writes a pending approval row
+    + transitions the task to AWAITING_APPROVAL atomically, polls for a
+    human decision with 2s→5s backoff, then returns allow / deny based on
+    the decision. On TIMED_OUT a ConditionCheckFailed from the best-effort
+    status write triggers a re-read — if the user's decision landed between
+    our poll and write, we honor it instead of falsely denying.
 
-    ``task_id`` / ``user_id`` / ``progress`` are optional to preserve
-    the Phase 1 test call shape. Without them the REQUIRE_APPROVAL path
-    falls through to fail-closed DENY (state-write infrastructure is
-    missing), so legacy callers still see coherent behaviour.
-    ``task_state_module`` is a test seam for injecting a mocked
-    ``task_state`` namespace; production callers rely on the default.
+    ``task_id`` / ``user_id`` / ``progress`` are optional to preserve the
+    older test call shape. Without them the REQUIRE_APPROVAL path falls
+    through to fail-closed DENY (state-write infrastructure is missing), so
+    legacy callers still see coherent behaviour. ``task_state_module`` is a
+    test seam for injecting a mocked ``task_state`` namespace; production
+    callers rely on the default.
     """
     ts_module = task_state_module if task_state_module is not None else task_state
 
@@ -303,13 +421,34 @@ async def pre_tool_use_hook(
         log("WARN", f"PreToolUse hook received non-dict tool_input — denying {tool_name}")
         return _deny_response("tool input is not an object")
 
+    # Block a Bash re-clone of the task's OWN repo before Cedar eval. The repo is
+    # already checked out at the agent's cwd; a self-reclone into a sibling dir
+    # strands the work off the platform-tracked branch (the delivery gate then
+    # fails it as ``deliverable=lost``). Deny it here with a redirect so the agent
+    # works in place instead. Scoped to the task repo only (dependency/fixture
+    # clones pass). Fires even under bypassPermissions.
+    if tool_name == "Bash" and repo_url:
+        command = tool_input.get("command", "")
+        if isinstance(command, str) and _is_self_reclone(command, repo_url):
+            reason = (
+                f"The repository '{repo_url}' is ALREADY cloned and checked out in "
+                "your working directory — do NOT clone it again or work in another "
+                "directory. Your commits must land in the current working directory "
+                "so the platform can open the pull request on the correct branch. "
+                "Remove the clone command and work in place (edit, commit, and push "
+                "from where you already are)."
+            )
+            log("POLICY", f"DENIED self-reclone of {repo_url}: {command[:160]}")
+            if trajectory:
+                trajectory.write_policy_decision("Bash", False, "self_reclone_blocked", 0)
+            return _deny_response(reason)
+
     decision = engine.evaluate_tool_use(tool_name, tool_input)
 
     # Telemetry: ALLOW "permitted" is the quiet happy path; everything else
     # is worth a trajectory event. Treat REQUIRE_APPROVAL as "not allowed"
-    # for the legacy ``allowed=False`` field so the Phase 2 trajectory
-    # schema stays coherent — the specific outcome is already on the
-    # ``reason`` string.
+    # for the legacy ``allowed=False`` field so the trajectory schema stays
+    # coherent — the specific outcome is already on the ``reason`` string.
     if trajectory and decision.reason != "permitted":
         trajectory.write_policy_decision(
             tool_name, decision.allowed, decision.reason, decision.duration_ms
@@ -319,27 +458,26 @@ async def pre_tool_use_hook(
         return _allow_response(decision.reason or "permitted")
 
     if decision.outcome == Outcome.DENY:
-        # IMPL-23: when the DENY arrived from the recent-decision cache
-        # (evaluate_tool_use Step 2.5), emit a ``policy_decision``
-        # milestone with ``decision_source="recent_decision_cache"`` to
-        # TaskEventsTable so cache-driven denies are visible in the live
-        # stream + 90d audit record (§12.8). No new approval row is
-        # written and the gate counter is NOT bumped — the original
-        # gate already accounted for the decision.
+        # When the DENY arrived from the recent-decision cache, emit a
+        # ``policy_decision`` milestone with
+        # ``decision_source="recent_decision_cache"`` to TaskEventsTable so
+        # cache-driven denies are visible in the live stream + retained audit
+        # record. No new approval row is written and the gate counter is NOT
+        # bumped — the original gate already accounted for the decision.
         if progress is not None and decision.cache_hit_metadata is not None:
             _try_progress(
                 progress,
                 "write_policy_decision_cached",
                 **decision.cache_hit_metadata,
             )
-        # #251 (decision E): a fail-closed deny means the Cedar engine errored
-        # or was unavailable — an ENVIRONMENTAL fault (misconfiguration), NOT
-        # an intentional hard-deny. Emit a ``policy_fail_closed`` blocker event
-        # so it renders distinctly and carries a remediation hint. We branch on
-        # the structured ``decision.fail_closed`` flag, never a reason-string
-        # prefix. Intentional hard-denies / cache-denies (fail_closed=False)
-        # never emit. Emitted strictly BEFORE the deny; the deny itself is
-        # unchanged, so this adds observability without altering the outcome.
+        # A fail-closed deny means the Cedar engine errored or was unavailable —
+        # an ENVIRONMENTAL fault (misconfiguration), NOT an intentional hard-deny.
+        # Emit a ``policy_fail_closed`` blocker event so it renders distinctly and
+        # carries a remediation hint. We branch on the structured
+        # ``decision.fail_closed`` flag, never a reason-string prefix. Intentional
+        # hard-denies / cache-denies (fail_closed=False) never emit. Emitted
+        # strictly BEFORE the deny; the deny itself is unchanged, so this adds
+        # observability without altering the outcome.
         if getattr(decision, "fail_closed", False):
             _record_blocker_reason("policy_fail_closed", decision.reason)
             if progress is not None:
@@ -359,7 +497,7 @@ async def pre_tool_use_hook(
         log("POLICY", f"DENIED: {tool_name} — {decision.reason}")
         return _deny_response(decision.reason)
 
-    # -- REQUIRE_APPROVAL path (§6.5) ---------------------------------------
+    # -- REQUIRE_APPROVAL path ----------------------------------------------
     return await _handle_require_approval(
         decision=decision,
         tool_name=tool_name,
@@ -385,19 +523,18 @@ async def _handle_require_approval(
 ) -> dict:
     """REQUIRE_APPROVAL branch of ``pre_tool_use_hook``.
 
-    Split out of the main hook for readability — the control-flow in
-    §6.5 is long enough that inlining it obscures the top-level three-way
-    branch.
+    Split out of the main hook for readability — the control flow is long
+    enough that inlining it obscures the top-level three-way branch.
     """
-    # Missing task infrastructure → fail closed with a clear reason. This
-    # lines up with §13.15: every exceptional branch ends in DENY.
+    # Missing task infrastructure → fail closed with a clear reason. Every
+    # exceptional branch here ends in DENY.
     if not task_id:
         log("WARN", "REQUIRE_APPROVAL hit without task_id — fail-closed deny")
         return _deny_response("approval system unavailable (no task_id)")
 
     request_id = _generate_ulid()
 
-    # Step 1 — per-task cap. §12.9: cap exceeded fails closed and the
+    # Step 1 — per-task cap. Cap exceeded fails closed, and the
     # cap_exceeded milestone carries the configured cap so dashboards
     # reflect the blueprint override.
     if engine.approval_gate_count >= engine.approval_gate_cap:
@@ -425,9 +562,9 @@ async def _handle_require_approval(
             )
         return _deny_response(f"approval-gate rate limit exceeded ({APPROVAL_RATE_LIMIT}/min)")
 
-    # Step 3 — effective timeout with floor/ceiling math (§6.5). Emit
+    # Step 3 — effective timeout with floor/ceiling math. Emit
     # ``approval_timeout_capped`` when the caller's ask is clipped so the
-    # user can see why (IMPL-26).
+    # user can see why.
     remaining_lifetime = _remaining_maxlifetime_s()
     effective_timeout, clip_reason, requested_timeout = _compute_effective_timeout(
         decision_timeout_s=decision.timeout_s,
@@ -446,9 +583,9 @@ async def _handle_require_approval(
                 list(decision.matching_rule_ids) if clip_reason == "rule_annotation" else None
             ),
         )
-    # IMPL-26: once per task, surface the "gates will have small windows
-    # from here on" ceiling-shrinking milestone when the remaining
-    # lifetime is approaching the 2x-task-default threshold.
+    # Once per task, surface the "gates will have small windows from here
+    # on" ceiling-shrinking milestone when the remaining lifetime is
+    # approaching the 2x-task-default threshold.
     if (
         remaining_lifetime is not None
         and remaining_lifetime - CLEANUP_MARGIN_120S < 2 * engine.task_default_timeout_s
@@ -464,15 +601,15 @@ async def _handle_require_approval(
             task_default_timeout_s=engine.task_default_timeout_s,
         )
 
-    # Step 4 — insufficient lifetime remaining for a valid approval
-    # (§13.7). Below the floor we DENY immediately without writing the
-    # approval row; no point waking the user to a guaranteed-dead gate.
+    # Step 4 — insufficient lifetime remaining for a valid approval.
+    # Below the floor we DENY immediately without writing the approval
+    # row; no point waking the user to a guaranteed-dead gate.
     if remaining_lifetime is not None and remaining_lifetime - CLEANUP_MARGIN_120S < FLOOR_30S:
         return _deny_response(
             f"insufficient maxLifetime remaining ({remaining_lifetime}s) for approval"
         )
 
-    # Step 5 — build the approval row per §10.1 schema.
+    # Step 5 — build the approval row.
     tool_input_sha256 = _sha256_tool_input_for_row(tool_input)
     row = {
         "task_id": task_id,
@@ -499,14 +636,13 @@ async def _handle_require_approval(
     engine.increment_approval_gate_count()
     engine.record_approval_gate_timestamp()
 
-    # Chunk 7 (§13.6): best-effort atomic increment of the persisted
-    # ``approval_gate_count`` on TaskTable. The session counter
-    # enforces the cap within THIS container; the persisted counter
-    # exists so a restarted container re-seeds from a non-zero value
-    # instead of re-exposing the user to another ``approval_gate_cap``
-    # worth of gates. Failure is best-effort per §13.6 — "counter is
-    # a safety bound, not a correctness bound" — so we keep going on
-    # error and accept the (bounded) restart-retry amplification.
+    # Best-effort atomic increment of the persisted ``approval_gate_count``
+    # on TaskTable. The session counter enforces the cap within THIS
+    # container; the persisted counter exists so a restarted container
+    # re-seeds from a non-zero value instead of re-exposing the user to
+    # another ``approval_gate_cap`` worth of gates. Failure is best-effort —
+    # the counter is a safety bound, not a correctness bound — so we keep
+    # going on error and accept the (bounded) restart-retry amplification.
     if task_id:
         await asyncio.to_thread(ts.increment_approval_gate_count_in_ddb, task_id)
 
@@ -569,9 +705,8 @@ async def _handle_require_approval(
         ts=ts,
     )
 
-    # Step 10 — IMPL-24 VM-throttle + late-approval race. Best-effort
-    # flip to TIMED_OUT; if ConditionCheckFailed, the user beat us — read
-    # and honor.
+    # Step 10 — VM-throttle + late-approval race. Best-effort flip to
+    # TIMED_OUT; if ConditionCheckFailed, the user beat us — read and honor.
     if outcome["status"] == "TIMED_OUT":
         try:
             wrote = await asyncio.to_thread(
@@ -583,14 +718,14 @@ async def _handle_require_approval(
             )
         except Exception as exc:
             log("WARN", f"approval TIMED_OUT write raised: {type(exc).__name__}: {exc}")
-            # Fall into the IMPL-24 re-read path. A transient DDB write
-            # error MUST NOT bypass the late-approval check — the user's
-            # APPROVED decision may already be on the row, and skipping
-            # the re-read would falsely deny their tool call. Setting
-            # ``wrote = False`` triggers the ConsistentRead below; if
-            # the row still says PENDING the re-read is a no-op and we
-            # keep the TIMED_OUT outcome. If it says APPROVED/DENIED,
-            # ``_reconcile_late_decision`` honors the user's choice.
+            # Fall into the re-read path. A transient DDB write error MUST
+            # NOT bypass the late-approval check — the user's APPROVED
+            # decision may already be on the row, and skipping the re-read
+            # would falsely deny their tool call. Setting ``wrote = False``
+            # triggers the ConsistentRead below; if the row still says
+            # PENDING the re-read is a no-op and we keep the TIMED_OUT
+            # outcome. If it says APPROVED/DENIED, ``_reconcile_late_decision``
+            # honors the user's choice.
             wrote = False
         if not wrote:
             # User's decision beat our timer; re-read with ConsistentRead.
@@ -649,7 +784,7 @@ async def _handle_require_approval(
                 request_id=request_id,
                 scope=scope,
                 decided_at=outcome.get("decided_at"),
-                # Chunk 8a: propagate the row's ``created_at`` so the
+                # Propagate the row's ``created_at`` so the
                 # ApprovalMetricsPublisher can compute decision latency.
                 created_at=row.get("created_at"),
             )
@@ -657,12 +792,12 @@ async def _handle_require_approval(
 
     # DENIED or TIMED_OUT — cache + queue injection.
     cache_decision = "DENIED" if status == "DENIED" else "TIMED_OUT"
-    # IMPL-23: thread the user's ``decided_at`` into the cache entry so
-    # subsequent cache-hit events surface the ORIGINAL decision timestamp,
-    # not the wall-clock time the cache was populated (which is ~the same
-    # but technically wrong). ``decided_at`` for TIMED_OUT is the
-    # agent-side clock moment the timeout fired; for DENIED it's the
-    # user's deny timestamp from the Lambda audit row.
+    # Thread the user's ``decided_at`` into the cache entry so subsequent
+    # cache-hit events surface the ORIGINAL decision timestamp, not the
+    # wall-clock time the cache was populated (which is ~the same but
+    # technically wrong). ``decided_at`` for TIMED_OUT is the agent-side
+    # clock moment the timeout fired; for DENIED it's the user's deny
+    # timestamp from the Lambda audit row.
     engine.recent_decisions.record(
         tool_name,
         tool_input_sha256,
@@ -671,12 +806,11 @@ async def _handle_require_approval(
         original_decision_ts=outcome.get("decided_at"),
     )
 
-    # Rule-level cache (§12.8 extension): on DENIED, record an entry
-    # per matching_rule_id so semantic retries — same rule, different
-    # input — get fast-denied without a new approval round-trip. Only
-    # populate on DENIED because TIMED_OUT is ambiguous (user was
-    # away, not actively refusing); TIMED_OUT cache entries stay
-    # input-hash-scoped.
+    # Rule-level cache: on DENIED, record an entry per matching_rule_id
+    # so semantic retries — same rule, different input — get fast-denied
+    # without a new approval round-trip. Only populate on DENIED because
+    # TIMED_OUT is ambiguous (user was away, not actively refusing);
+    # TIMED_OUT cache entries stay input-hash-scoped.
     if status == "DENIED":
         for rule_id in decision.matching_rule_ids:
             engine.recent_decisions.record_rule_decision(
@@ -700,7 +834,7 @@ async def _handle_require_approval(
                 request_id=request_id,
                 reason=outcome.get("reason", ""),
                 decided_at=outcome.get("decided_at"),
-                # Chunk 8a: propagate the row's ``created_at`` so the
+                # Propagate the row's ``created_at`` so the
                 # ApprovalMetricsPublisher can compute decision latency.
                 created_at=row.get("created_at"),
             )
@@ -710,24 +844,24 @@ async def _handle_require_approval(
             "write_approval_timed_out",
             request_id=request_id,
             timeout_s=effective_timeout,
-            # Chunk 8a: propagate the row's ``created_at`` +
-            # ``matching_rule_ids`` + the post-clip effective timeout
-            # so the ApprovalMetricsPublisher can emit the decision
-            # latency + the ``ApprovalTimeoutBreakdown`` histogram
-            # with a normalized ``rule_id`` dimension.
+            # Propagate the row's ``created_at`` + ``matching_rule_ids`` +
+            # the post-clip effective timeout so the
+            # ApprovalMetricsPublisher can emit the decision latency + the
+            # ``ApprovalTimeoutBreakdown`` histogram with a normalized
+            # ``rule_id`` dimension.
             created_at=row.get("created_at"),
             effective_timeout_s=effective_timeout,
             matching_rule_ids=list(decision.matching_rule_ids),
         )
 
-    # Guaranteed surface (§6.5): truncated reason even when denial
-    # injection is pre-empted by a concurrent cancel. Wrap the user's
-    # reason in authoritative stop-language — E2E Phase 4 observed
-    # the agent treating bare "User denied" as "try a different
-    # approach" and burning through max_turns retrying the same rule
-    # with trivial variations. The explicit AUTHORITATIVE-prefixed
-    # wording, combined with the rule-level recent-deny cache (§12.8),
-    # makes retries fail fast with clear feedback.
+    # Guaranteed surface: truncated reason even when denial injection is
+    # pre-empted by a concurrent cancel. Wrap the user's reason in
+    # authoritative stop-language — end-to-end testing showed the agent
+    # treating a bare "User denied" as "try a different approach" and
+    # burning through max_turns retrying the same rule with trivial
+    # variations. The explicit AUTHORITATIVE-prefixed wording, combined
+    # with the rule-level recent-deny cache, makes retries fail fast with
+    # clear feedback.
     raw_reason = outcome.get("reason") or f"User {status.lower() if status else 'denied'}"
     if status == "DENIED":
         rule_hint = (
@@ -754,12 +888,12 @@ def _reconcile_late_decision(
     progress: Any,
     request_id: str,
 ) -> dict:
-    """IMPL-24: rebuild outcome from a re-read row after a TIMED_OUT race.
+    """Rebuild outcome from a re-read row after a TIMED_OUT race.
 
     - ``row["status"] == "APPROVED"`` → rebuild as APPROVED (allow flow).
     - ``row["status"] == "DENIED"`` → rebuild as DENIED (deny flow).
     - Anything else (row gone, still PENDING) → fall through with the
-      original TIMED_OUT (§13.12 fail-closed branch).
+      original TIMED_OUT (the fail-closed branch).
 
     Emits ``approval_late_win`` for APPROVED or DENIED races so operator
     telemetry can count them.
@@ -810,10 +944,10 @@ async def _poll_for_decision(
     """Poll the approval row until terminal or timeout.
 
     Cadence: ``POLL_FAST_INTERVAL_S`` for ``POLL_FAST_DURATION_S``, then
-    ``POLL_SLOW_INTERVAL_S`` (IMPL-12). Each iteration uses
-    ConsistentRead; after ``POLL_DEGRADED_FAILS`` consecutive failures we
-    emit ``approval_poll_degraded``; at ``POLL_MAX_CONSECUTIVE_FAILS`` we
-    fall through as TIMED_OUT with a distinct reason (§13.2).
+    ``POLL_SLOW_INTERVAL_S``. Each iteration uses ConsistentRead; after
+    ``POLL_DEGRADED_FAILS`` consecutive failures we emit
+    ``approval_poll_degraded``; at ``POLL_MAX_CONSECUTIVE_FAILS`` we
+    fall through as TIMED_OUT with a distinct reason.
 
     Returns an outcome dict mirroring the approval row's terminal fields.
     """
@@ -890,7 +1024,7 @@ def _compute_effective_timeout(
     task_default_timeout_s: int,
     remaining_lifetime_s: int | None,
 ) -> tuple[int, str | None, int]:
-    """Compute the effective timeout per §6.5.
+    """Compute the effective approval timeout.
 
     ``min(rule-annotation timeout, task default, remaining lifetime -
     cleanup margin)``, floored at FLOOR_30S. The engine's
@@ -947,8 +1081,8 @@ def _remaining_maxlifetime_s() -> int | None:
     (ISO 8601, optional). Returns ``None`` if the start timestamp is
     unavailable; the hook treats this as "unknown, don't clip" so the
     gate still fires with the task default (fail-open on the optional
-    signal rather than pre-DENY when unknown). A future Chunk wires
-    these from the task launch path; for now they are optional hints.
+    signal rather than pre-DENY when unknown). These are wired from the
+    task launch path when available; otherwise they are optional hints.
     """
     try:
         max_lifetime = int(os.environ.get("AGENTCORE_MAX_LIFETIME_S", "28800"))
@@ -983,7 +1117,8 @@ def _sha256_tool_input_for_row(tool_input: Any) -> str:
     Re-derives hashing here (rather than importing ``policy._sha256_tool_input``)
     so the hook's failure-mode is independent of the engine's internals and
     to keep import graphs shallow. The engine's own cache uses the same
-    algorithm; §6.5 row + ``RecentDecisionCache`` need the same key shape.
+    algorithm; the approval row and ``RecentDecisionCache`` need the same
+    key shape.
     """
     import hashlib
 
@@ -1001,7 +1136,7 @@ def _iso_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
-# S10: per-method consecutive-failure counters for ``_try_progress``.
+# Per-method consecutive-failure counters for ``_try_progress``.
 # Progress writes are best-effort, but a hard infrastructure failure
 # (DDB throttle, IAM regression, missing table) would otherwise be
 # masked as a stream of WARN lines with no escalation. After
@@ -1020,12 +1155,12 @@ def _try_progress(progress: Any, method_name: str, /, **kwargs: Any) -> None:
 
     Progress is best-effort observability; a throttled DDB write must not
     break the approval flow. ``_emit_nudge_milestone`` uses a similar
-    pattern for the Phase 2 nudges.
+    pattern for nudges.
 
-    S10 escalation: repeated consecutive failures of the same
-    ``method_name`` are tracked per-process and escalated to ERROR
-    after ``_TRY_PROGRESS_ESCALATE_AFTER`` so a silent live-stream
-    outage becomes operator-visible.
+    Escalation: repeated consecutive failures of the same ``method_name``
+    are tracked per-process and escalated to ERROR after
+    ``_TRY_PROGRESS_ESCALATE_AFTER`` so a silent live-stream outage
+    becomes operator-visible.
     """
     if getattr(progress, "_disabled", False) is True:
         log("WARN", f"progress {method_name!r} skipped: circuit breaker open")
@@ -1060,8 +1195,8 @@ async def post_tool_use_hook(
     hook_context: Any,
     *,
     trajectory: _TrajectoryWriter | None = None,
-    progress: Any = None,
     stuck_guard: StuckGuard | None = None,
+    progress: Any = None,
 ) -> dict:
     """PostToolUse hook: screen tool output for secrets/PII.
 
@@ -1070,14 +1205,14 @@ async def post_tool_use_hook(
     redacted version (steered enforcement — content is sanitized, not
     blocked).
 
-    ``progress`` is optional (preserves the Phase 1 test call shape). When
+    ``progress`` is optional (preserves the older test call shape). When
     present, an egress-denial signature in the tool output emits an
-    ``egress_denied`` blocker event (#251) — best-effort observability,
-    never alters the screening decision.
+    ``egress_denied`` blocker event — best-effort observability, never
+    alters the screening decision.
 
-    K7: when a ``stuck_guard`` is supplied, every tool result is recorded so a
-    between-turns hook can detect a repeating failing command (the ABCA-483
-    spin loop) and steer / bail. Recording is best-effort and never alters the
+    When a ``stuck_guard`` is supplied, every tool result is recorded so a
+    between-turns hook can detect a repeating failing command (a spin
+    loop) and steer / bail. Recording is best-effort and never alters the
     screening outcome.
     """
     _PASS_THROUGH: dict = {"hookSpecificOutput": {"hookEventName": "PostToolUse"}}
@@ -1104,7 +1239,7 @@ async def post_tool_use_hook(
     if not isinstance(tool_response, str):
         tool_response = str(tool_response)
 
-    # #251: best-effort egress-denial detection. A blocked outbound connection
+    # Best-effort egress-denial detection. A blocked outbound connection
     # (non-allowlisted host hitting the DNS Firewall, refused connection, name
     # resolution failure) surfaces in the tool's stderr here. Emit an
     # ``egress_denied`` blocker naming the host to allowlist. Observability
@@ -1141,7 +1276,7 @@ async def post_tool_use_hook(
                 resource=host,
             )
 
-    # K7: feed the stuck-guard (best-effort — a tracking error must never block
+    # Feed the stuck-guard (best-effort — a tracking error must never block
     # the screening path that follows).
     if stuck_guard is not None:
         try:
@@ -1176,7 +1311,7 @@ async def post_tool_use_hook(
 
 
 # ---------------------------------------------------------------------------
-# Between-turns hook registry (Phase 2 nudges, extensible for Phase 3)
+# Between-turns hook registry (nudges, extensible for more producers)
 # ---------------------------------------------------------------------------
 
 # A hook takes a context dict (currently ``{"task_id": str}``) and returns a
@@ -1255,10 +1390,10 @@ def _nudge_between_turns_hook(ctx: dict) -> list[str]:
     ``mark_consumed`` repeatedly fails.
 
     Emits a ``nudge_acknowledged`` ``agent_milestone`` event **before**
-    returning the injected user-message list (combined-turn ack, see
-    ``INTERACTIVE_AGENTS.md`` §AD-5) so the durable event stream records
-    the ack in the same turn the nudge is consumed.  Emission is
-    best-effort: if the progress writer's circuit breaker has tripped
+    returning the injected user-message list (combined-turn ack) so the
+    durable event stream records the ack in the same turn the nudge is
+    consumed.  Emission is best-effort: if the progress writer's circuit
+    breaker has tripped
     (repeated DDB write failures) or no ``progress`` ref is stamped on
     ``ctx``, the ack is logged but skipped and the injection still
     proceeds — better to steer the agent than block on a flaky event
@@ -1273,8 +1408,8 @@ def _nudge_between_turns_hook(ctx: dict) -> list[str]:
     # break in :func:`stop_hook` which short-circuits the dispatcher as soon as
     # any earlier hook sets ``_cancel_requested``.  That assumes
     # ``_cancel_between_turns_hook`` runs BEFORE this hook — true for the
-    # module-level ``between_turns_hooks`` registry today (line 340), but a
-    # future reorder (or a test that rebinds the list without preserving
+    # module-level ``between_turns_hooks`` registry today, but a future
+    # reorder (or a test that rebinds the list without preserving
     # order) would silently reintroduce the bug: ``read_pending`` +
     # ``mark_consumed`` would flip the DDB rows to consumed and stamp
     # ``_INJECTED_NUDGES`` for a dying agent that will never see the text.
@@ -1331,7 +1466,7 @@ def _nudge_between_turns_hook(ctx: dict) -> list[str]:
     details = f"{count} nudge(s) acknowledged (ids=…{ids}): {first_msg}" + (
         "…" if count > 1 or len(first_msg) == _NUDGE_PREVIEW_LEN else ""
     )
-    # AD-5: emit the ack BEFORE returning the injection list.
+    # Emit the ack BEFORE returning the injection list.
     _emit_nudge_milestone(ctx, "nudge_acknowledged", details)
 
     return [formatted] if formatted else []
@@ -1341,16 +1476,15 @@ def _denial_between_turns_hook(ctx: dict) -> list[str]:
     """Drain queued denial injections into ``<user_denial>`` XML blocks.
 
     Registered AFTER ``_cancel_between_turns_hook`` and
-    ``_nudge_between_turns_hook`` (cancel-wins semantics, finding #2).
-    If cancel flagged this turn we early-return — denial injection is
-    explicitly best-effort on cancelled tasks, and the guaranteed
-    surface is the ``permissionDecisionReason`` that
-    ``pre_tool_use_hook`` already returned on the deny response
-    (§6.5 line 922).
+    ``_nudge_between_turns_hook`` (cancel-wins semantics). If cancel
+    flagged this turn we early-return — denial injection is explicitly
+    best-effort on cancelled tasks, and the guaranteed surface is the
+    ``permissionDecisionReason`` that ``pre_tool_use_hook`` already
+    returned on the deny response.
 
     ``ctx["engine"]`` is expected when the pipeline wires the approval
-    engine through; absent it this hook is a no-op (Phase 1 call sites
-    that don't thread an engine ref through still work).
+    engine through; absent it this hook is a no-op (call sites that don't
+    thread an engine ref through still work).
     """
     if ctx.get("_cancel_requested"):
         return []
@@ -1385,8 +1519,8 @@ def _denial_between_turns_hook(ctx: dict) -> list[str]:
     log("POLICY", f"Injecting {count} denial(s) for task {ctx.get('task_id', '')}")
     # Emit a single ``user_denial_injected`` milestone per Stop seam so
     # the durable event stream records the ack. Mirrors
-    # ``nudge_acknowledged`` (§AD-5); this is an additive milestone not
-    # in the §11.1 enumerated list, so keep the name distinct from the
+    # ``nudge_acknowledged``; this is an additive milestone not in the
+    # enumerated milestone list, so keep the name distinct from the
     # enumerated ``approval_*`` prefix.
     _emit_nudge_milestone(
         ctx,
@@ -1432,7 +1566,7 @@ def _cancel_between_turns_hook(ctx: dict) -> list[str]:
 
 
 def _stuck_guard_between_turns_hook(ctx: dict) -> list[str]:
-    """K7: nudge the agent when it repeats the SAME failing command (ABCA-483).
+    """Nudge the agent when it repeats the SAME failing command.
 
     Reads the per-task :class:`StuckGuard` stamped on ``ctx`` (by
     :func:`stop_hook`). When the same command has failed with identical output
@@ -1457,10 +1591,10 @@ def _stuck_guard_between_turns_hook(ctx: dict) -> list[str]:
         return []
     try:
         action = guard.evaluate()
-        # ABCA-662: refresh the "why it's spinning" latch every turn. When the
-        # trailing window is failure-dominated this returns a one-liner; otherwise
-        # None (which clears the latch — a task that recovered isn't "stuck"). Read
-        # by the terminal path so a later max_turns cap explains itself.
+        # Refresh the "why it's spinning" latch every turn. When the trailing
+        # window is failure-dominated this returns a one-liner; otherwise None
+        # (which clears the latch — a task that recovered isn't "stuck"). Read by
+        # the terminal path so a later max_turns cap explains itself.
         global _LAST_STUCK_SUMMARY
         _LAST_STUCK_SUMMARY = guard.recent_failure_summary()
     except Exception as exc:
@@ -1481,19 +1615,19 @@ def _stuck_guard_between_turns_hook(ctx: dict) -> list[str]:
 # dispatcher breaks out of the loop as soon as ``_cancel_requested`` is set,
 # and :func:`_nudge_between_turns_hook` early-returns when the flag is already
 # present — belt-and-braces in case a future ``append`` reorders this list.
-# Phase 3 (approval gates) should ``append`` additional hooks AFTER the
+# Additional producers (e.g. approval gates) should ``append`` hooks AFTER the
 # nudge reader to preserve cancel-wins semantics.
 between_turns_hooks: list[BetweenTurnsHook] = [
     _cancel_between_turns_hook,
-    # K7 stuck-guard (advisory): injects a one-time "stop retrying X" nudge when
+    # Stuck-guard (advisory): injects a one-time "stop retrying X" nudge when
     # the same command keeps failing identically. Runs after cancel (never steer
     # a dying agent); order vs nudge/denial is cosmetic since it never bails.
     _stuck_guard_between_turns_hook,
     _nudge_between_turns_hook,
-    # Chunk 3 (finding #2): denial injection runs LAST so both cancel and
-    # nudge short-circuits pre-empt it. The hook explicitly re-checks
-    # ``_cancel_requested`` so re-ordering doesn't silently break cancel
-    # semantics (belt-and-braces, matching ``_nudge_between_turns_hook``).
+    # Denial injection runs LAST so both cancel and nudge short-circuits
+    # pre-empt it. The hook explicitly re-checks ``_cancel_requested`` so
+    # re-ordering doesn't silently break cancel semantics (belt-and-braces,
+    # matching ``_nudge_between_turns_hook``).
     _denial_between_turns_hook,
 ]
 
@@ -1523,7 +1657,8 @@ async def stop_hook(
     so hooks can emit their own milestone / progress events without holding
     a module-global reference to it. ``engine`` is threaded through for
     ``_denial_between_turns_hook`` which needs to drain queued denials;
-    absent it the denial hook is a no-op (Phase 1 / Phase 2 call paths).
+    absent it the denial hook is a no-op (call paths that don't wire an
+    engine through).
     """
     ctx = {
         "task_id": task_id,
@@ -1541,7 +1676,7 @@ async def stop_hook(
     # returned ``continue_=False`` below.  Breaking out of the loop as soon
     # as any hook sets ``_cancel_requested`` guarantees subsequent hooks
     # (notably the nudge reader) never run, so DDB state is never mutated
-    # for work the agent will never do.  The registry at line 340 keeps
+    # for work the agent will never do.  The registry keeps
     # ``_cancel_between_turns_hook`` first so this break fires before the
     # nudge hook gets a chance.  ``_nudge_between_turns_hook`` also carries
     # an internal cancel-check as belt-and-braces in case a future refactor
@@ -1588,6 +1723,7 @@ def build_hook_matchers(
     task_id: str = "",
     progress: Any = None,
     user_id: str = "",
+    repo_url: str = "",
 ) -> dict:
     """Build hook matchers dict for ClaudeAgentOptions.
 
@@ -1600,7 +1736,7 @@ def build_hook_matchers(
     ``progress`` is forwarded to both the PreToolUse hook (approval gate
     milestones) and the Stop hook (nudge/denial acks). ``user_id`` is
     written onto the approval row so ownership checks on the REST side
-    can enforce §12.2 (user can only approve their own gates).
+    can enforce that a user can only approve their own gates.
     """
     from claude_agent_sdk.types import (
         HookContext,
@@ -1611,7 +1747,7 @@ def build_hook_matchers(
         SyncHookJSONOutput,
     )
 
-    # K7: one stuck-guard per task (== per build_hook_matchers call). The
+    # One stuck-guard per task (== per build_hook_matchers call). The
     # PostToolUse closure feeds it every tool result; the Stop closure reads it
     # between turns to steer / bail on a repeating failing command.
     _stuck_guard = StuckGuard()
@@ -1638,6 +1774,7 @@ def build_hook_matchers(
                 task_id=task_id or None,
                 user_id=user_id or None,
                 progress=progress,
+                repo_url=repo_url or None,
             )
         except Exception as exc:
             log(

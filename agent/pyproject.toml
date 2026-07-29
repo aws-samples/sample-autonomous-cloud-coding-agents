@@ -131,6 +131,16 @@ ignore = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+# Non-TTY output ergonomics. In a captured/piped context (the ECS build gate, CI,
+# an agent's Bash tool) pytest's default is a wall of featureless progress dots
+# with the "N passed" summary easy to lose in a tail — live-caught on ABCA-691,
+# where an agent burned ~6 turns re-running the full suite with different flags
+# because it couldn't confirm the result from the dots. ``count`` renders progress
+# as an explicit "N/M passed" so a captured log always shows how far it got and how
+# many passed; ``-ra`` appends a short summary of every non-passing outcome (with
+# reasons) at the end. Both are display-only — they never change test results.
+addopts = "-ra"
+console_output_style = "count"
 # pytest-timeout: hard wall-clock cap PER TEST. A unit test that blocks (an
 # unmocked network/subprocess/Bedrock call with no timeout of its own) otherwise
 # hangs the whole `mise run build` until the 3600s build-verify ceiling kills it,
@@ -143,6 +153,17 @@ pythonpath = ["src"]
 # but the build kept hanging ~55 min until the 3600s ceiling). signal is the real fix.
 timeout = 120
 timeout_method = "signal"
+# faulthandler backstop for hangs signal-timeout CANNOT interrupt. SIGALRM only
+# fires in the MAIN thread during a test's call phase, so a hang in a WORKER
+# thread (a deadlocked Barrier/join), a fixture, or a C-level socket read the
+# main thread never returns from is invisible to it — exactly the ECS-only stall
+# chased across ABCA-684/686/688 and again on the warm-cache run (53 min of
+# silence, signal never fired). This arms faulthandler's dedicated C watchdog
+# thread (immune to the GIL and blocked syscalls) to dump EVERY thread's Python
+# stack after 300s in a test, so the next hang self-reports the exact file:line
+# instead of stalling blind to the 3600s build ceiling. A session-level
+# hard-exit watchdog for hangs OUTSIDE any test lives in tests/conftest.py.
+faulthandler_timeout = 300
 
 [tool.coverage.run]
 branch = true
