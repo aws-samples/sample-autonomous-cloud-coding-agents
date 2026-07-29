@@ -724,7 +724,7 @@ export class AgentStack extends Stack {
           clusterArn: ecsCluster.cluster.clusterArn,
           taskDefinitionArn: ecsCluster.taskDefinition.taskDefinitionArn,
           // See docs/design/ECS_RIGHTSIZED_PLANNING.md: the smaller read-only planning
-          // def, so a decompose-v1 task doesn't over-allocate the larger build box.
+          // def, so a read-only task doesn't over-allocate the larger build box.
           planningTaskDefinitionArn: ecsCluster.planningTaskDefinition.taskDefinitionArn,
           subnets: agentVpc.vpc.selectSubnets({ subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS }).subnetIds.join(','),
           securityGroup: ecsCluster.securityGroup.securityGroupId,
@@ -938,14 +938,6 @@ export class AgentStack extends Stack {
         }),
       ],
     }));
-    // The reconciler hydrates the parent issue's attachments at
-    // decompose-seed time (fetch → screen → store) so every child inherits them.
-    // Needs write (grantPut) + cleanup (grantDelete) on the attachments bucket +
-    // its name in env — same grants the Linear webhook processor has. (Guardrail
-    // ApplyGuardrail + the linear-oauth secret prefix are already granted above.)
-    attachmentsBucket.bucket.grantPut(orchestrationReconciler.fn);
-    attachmentsBucket.bucket.grantDelete(orchestrationReconciler.fn);
-    orchestrationReconciler.fn.addEnvironment('ATTACHMENTS_BUCKET_NAME', attachmentsBucket.bucket.bucketName);
     // Released child tasks attributed to linear workspaces need the
     // per-workspace OAuth secret prefix readable (createTaskCore stashes
     // the ARN; agent reads it). Same prefix grant as the webhook processor.

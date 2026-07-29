@@ -499,33 +499,34 @@ describe('AgentStack', () => {
     expect(vars.JIRA_WORKSPACE_REGISTRY_TABLE_NAME).toBeDefined();
   });
 
-  test('the orchestration reconciler can read task artifacts but NOT user traces', () => {
-    // The trace/artifacts bucket holds two disjoint key spaces: artifacts/<task_id>/
-    // (a task's declared output, which platform components consume) and
-    // traces/<user_id>/ (a full agent trajectory including tool input and output,
-    // authorized per-user by the presign handler). The reconciler reads the plan
-    // artifact off a URI taken from the task record, so a bucket-wide object grant
-    // would let a bad or tampered URI reach another user's trajectory.
+  test('the orchestration reconciler cannot read S3 objects at all', () => {
+    // The trace/artifacts bucket holds full agent trajectories under
+    // traces/<user_id>/ — tool input and output, authorized per-user by the presign
+    // handler. The reconciler works entirely from task records and the orchestration
+    // table, so it needs no object read anywhere; asserting the absence keeps a
+    // component that handles no user identity out of that blast radius, and makes a
+    // future grant a deliberate, visible choice.
+    //
+    // Absence rather than a scoped grant is the stronger claim, and the safer one:
+    // S3 does not normalize keys, so `artifacts/../traces/u/x` is a literal key that
+    // an `artifacts/*` resource matches by string prefix.
     const policies = template.findResources('AWS::IAM::Policy');
     const reconciler = Object.entries(policies).filter(([id]) => id.startsWith('OrchestrationReconciler'));
+    // The reconciler DOES have policies (table + invoke + guardrail grants), so an
+    // empty set here would mean the id filter broke, not that the grant is gone.
     expect(reconciler.length).toBeGreaterThan(0);
 
-    const objectResources: string[] = [];
+    const objectStatements: string[] = [];
     for (const [, policy] of reconciler) {
       const doc = (policy as { Properties: { PolicyDocument: { Statement: Array<Record<string, unknown>> } } })
         .Properties.PolicyDocument.Statement;
       for (const stmt of doc) {
         const actions = JSON.stringify(stmt.Action ?? '');
-        if (!actions.includes('s3:GetObject')) continue;
-        objectResources.push(JSON.stringify(stmt.Resource ?? ''));
+        if (!/s3:(Get|Put|Delete)Object/.test(actions)) continue;
+        objectStatements.push(JSON.stringify(stmt));
       }
     }
-    expect(objectResources.length).toBeGreaterThan(0);
-    const all = objectResources.join(' ');
-    // Scoped to the artifacts prefix…
-    expect(all).toContain('/artifacts/*');
-    // …and never to the bucket root, which would cover traces/ too.
-    expect(all).not.toMatch(/"Arn"\]\}\s*,\s*"\/\*"/);
+    expect(objectStatements).toEqual([]);
   });
 
   test('the log-delivery pin shim requires explicit opt-in, not the default stack name', () => {
@@ -654,7 +655,7 @@ describe('AgentStack with the ECS substrate gate (--context compute_type=ecs)', 
   test('provisions an ECS cluster + both Fargate task definitions (build + planning)', () => {
     template.resourceCountIs('AWS::ECS::Cluster', 1);
     // Two task defs — the 64 GB build def and the 8 GB read-only planning def
-    // (decompose-v1 runs on the smaller one). See
+    // (a read-only workflow runs on the smaller one). See
     // docs/design/ECS_RIGHTSIZED_PLANNING.md.
     template.resourceCountIs('AWS::ECS::TaskDefinition', 2);
   });
