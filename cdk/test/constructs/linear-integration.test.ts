@@ -64,14 +64,47 @@ describe('LinearIntegration construct', () => {
     });
   });
 
-  test('creates three Lambda functions (webhook, processor, link)', () => {
-    template.resourceCountIs('AWS::Lambda::Function', 3);
+  test('creates four Lambda functions (webhook, processor, link, remove-workspace)', () => {
+    template.resourceCountIs('AWS::Lambda::Function', 4);
   });
 
   test('creates API Gateway resources under /linear', () => {
     template.hasResourceProperties('AWS::ApiGateway::Resource', { PathPart: 'linear' });
     template.hasResourceProperties('AWS::ApiGateway::Resource', { PathPart: 'webhook' });
     template.hasResourceProperties('AWS::ApiGateway::Resource', { PathPart: 'link' });
+    template.hasResourceProperties('AWS::ApiGateway::Resource', { PathPart: 'workspaces' });
+    template.hasResourceProperties('AWS::ApiGateway::Resource', { PathPart: '{slug}' });
+  });
+
+  test('DELETE /linear/workspaces/{slug} is Cognito-authorized', () => {
+    template.hasResourceProperties('AWS::ApiGateway::Method', {
+      HttpMethod: 'DELETE',
+      AuthorizationType: 'COGNITO_USER_POOLS',
+    });
+  });
+
+  test('remove-workspace handler env wires registry + project mapping tables', () => {
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: {
+        Variables: Match.objectLike({
+          LINEAR_WORKSPACE_REGISTRY_TABLE_NAME: Match.anyValue(),
+          LINEAR_PROJECT_MAPPING_TABLE_NAME: Match.anyValue(),
+        }),
+      },
+    });
+  });
+
+  test('remove-workspace role can delete the per-workspace OAuth secret prefix', () => {
+    template.hasResourceProperties('AWS::IAM::Policy', {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Action: 'secretsmanager:DeleteSecret',
+            Effect: 'Allow',
+          }),
+        ]),
+      },
+    });
   });
 
   test('creates one Secrets Manager secret (webhook signing) — OAuth tokens are CLI-created at runtime', () => {
