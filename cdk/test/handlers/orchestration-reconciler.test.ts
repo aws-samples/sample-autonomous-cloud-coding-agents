@@ -79,8 +79,8 @@ process.env.TASK_TABLE_NAME = 'TaskTable';
 process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME = 'WorkspaceRegistry';
 process.env.ARTIFACTS_BUCKET_NAME = 'ArtifactsBucket';
 
-import { handler, parseTerminalTaskRecord } from '../../src/handlers/orchestration-reconciler';
 import { TERMINAL_STATUSES } from '../../src/constructs/task-status';
+import { handler, parseTerminalTaskRecord } from '../../src/handlers/orchestration-reconciler';
 
 /** Build a TaskTable stream MODIFY record. */
 function taskRecord(fields: {
