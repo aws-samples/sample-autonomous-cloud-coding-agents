@@ -346,6 +346,8 @@ aws dynamodb update-item \
 
 ### Manual fallback
 
+If `remove-workspace` returns the `SECRET_DELETE_FAILED` error code, the workspace is already revoked (fail-closed, so it no longer resolves tokens or routes webhooks), but its OAuth secret was orphaned. The handler records this durably on the registry row: `secret_deletion_failed = true`, `secret_deletion_error` (the failing error name), and `orphaned_oauth_secret_arn` (the exact secret ARN to purge). When you see that marker — or the error code — run the `delete-secret` step below against `orphaned_oauth_secret_arn` to finish teardown.
+
 If the CLI is unavailable, you can revoke a workspace directly (equivalent to the default `remove-workspace` flow):
 
 ```bash

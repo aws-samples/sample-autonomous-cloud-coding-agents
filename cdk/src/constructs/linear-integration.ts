@@ -57,8 +57,9 @@ const WEBHOOK_PROCESSOR_MEMORY_MB = 512;
 
 /** Remove-workspace Lambda timeout (seconds). 10s matches the sibling
  *  link/webhook request handlers — the teardown is a bounded sequence
- *  (registry revoke → secret delete → optional row purge) with no
- *  unbounded pagination. */
+ *  (registry lookup → registry revoke → secret delete → optional row purge).
+ *  The lookup scan is the only paginating phase, and it is bounded by the
+ *  registry's documented tens-of-rows scale, so 10s is comfortable. */
 const REMOVE_WORKSPACE_TIMEOUT_SECONDS = 10;
 
 /**
