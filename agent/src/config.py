@@ -101,13 +101,17 @@ def resolve_linear_api_token(channel_metadata: dict[str, str] | None = None) -> 
         import json
         from datetime import datetime, timedelta
 
+        # boto3 is imported here (not just via platform_client, which imports it
+        # lazily at call time) so a missing SDK still degrades gracefully — skip
+        # Linear MCP — instead of raising an uncaught ImportError. (#319)
+        import boto3  # noqa: F401  -- availability probe for the graceful skip below
         from botocore.exceptions import BotoCoreError, ClientError
+
+        from aws_session import platform_client
     except ImportError as e:
         log("WARN", f"resolve_linear_api_token: boto3 unavailable ({e}); skipping")
         # nosemgrep: py-silent-success-masking -- optional Linear MCP; boto3 unavailable
         return ""
-
-    from aws_session import platform_client
 
     sm = platform_client("secretsmanager", region_name=region)
 
