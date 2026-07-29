@@ -503,17 +503,16 @@ export class ApiClient {
 
   /** DELETE /linear/workspaces/{slug} — deregister a Linear workspace.
    *
-   * Server-side: revokes the registry row (or deletes it with `purge`),
-   * deletes the per-workspace OAuth secret, and (unless `keepMappings`)
-   * removes that workspace's project mappings. Admin-only, enforced by the
-   * handler against the recorded installer identity. */
+   * Server-side: revokes the registry row (or deletes it with `purge`) and
+   * deletes the per-workspace OAuth secret. Admin-only, enforced by the
+   * handler against the recorded installer identity. Project→repo mappings
+   * are not touched (they carry no workspace id — remove by project id). */
   async linearRemoveWorkspace(
     slug: string,
-    opts: { purge?: boolean; keepMappings?: boolean } = {},
+    opts: { purge?: boolean } = {},
   ): Promise<LinearRemoveWorkspaceResponse> {
     const params = new URLSearchParams();
     if (opts.purge) params.set('purge', 'true');
-    if (opts.keepMappings) params.set('keep_mappings', 'true');
     const qs = params.toString();
     const path = `/linear/workspaces/${encodeURIComponent(slug)}${qs ? `?${qs}` : ''}`;
     const res = await this.request<SuccessResponse<LinearRemoveWorkspaceResponse>>('DELETE', path);

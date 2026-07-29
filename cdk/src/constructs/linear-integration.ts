@@ -54,11 +54,11 @@ const WEBHOOK_PROCESSOR_TIMEOUT_SECONDS = 120;
 /** Webhook-processor Lambda memory (MB). */
 const WEBHOOK_PROCESSOR_MEMORY_MB = 512;
 
-/** Remove-workspace Lambda timeout (seconds). 30s (vs. the 3s Lambda
- *  default the link/webhook request handlers use) because a paginated
- *  project-mapping cleanup can issue several DDB round-trips for a
- *  workspace with many mappings. */
-const REMOVE_WORKSPACE_TIMEOUT_SECONDS = 30;
+/** Remove-workspace Lambda timeout (seconds). 10s matches the sibling
+ *  link/webhook request handlers — the teardown is a bounded sequence
+ *  (registry revoke → secret delete → optional row purge) with no
+ *  unbounded pagination. */
+const REMOVE_WORKSPACE_TIMEOUT_SECONDS = 10;
 
 /**
  * Properties for LinearIntegration construct.
@@ -409,10 +409,12 @@ export class LinearIntegration extends Construct {
 
     // --- Workspace removal (Cognito-authenticated, admin-only) ---
     // Backs `bgagent linear remove-workspace <slug>`: revokes/purges the
-    // registry row, deletes the per-workspace OAuth secret, and (optionally)
-    // tears down that workspace's project mappings. Keeping the DDB + Secrets
-    // Manager grants on this Lambda's role — not on every CLI user — is the
-    // whole point of routing removal through the API (see issue #306).
+    // registry row and deletes the per-workspace OAuth secret. Keeping the
+    // DDB + Secrets Manager grants on this Lambda's role — not on every CLI
+    // user — is the whole point of routing removal through the API (see
+    // issue #306). Project mappings are intentionally NOT touched: mapping
+    // rows carry no workspace id, so they cannot be attributed to a
+    // workspace (removal is by project id).
     const removeWorkspaceFn = new lambda.NodejsFunction(this, 'RemoveWorkspaceFn', {
       entry: path.join(handlersDir, 'linear-remove-workspace.ts'),
       handler: 'handler',
@@ -421,12 +423,10 @@ export class LinearIntegration extends Construct {
       timeout: Duration.seconds(REMOVE_WORKSPACE_TIMEOUT_SECONDS),
       environment: {
         LINEAR_WORKSPACE_REGISTRY_TABLE_NAME: this.workspaceRegistryTable.tableName,
-        LINEAR_PROJECT_MAPPING_TABLE_NAME: this.projectMappingTable.tableName,
       },
       bundling: commonBundling,
     });
     this.workspaceRegistryTable.grantReadWriteData(removeWorkspaceFn);
-    this.projectMappingTable.grantReadWriteData(removeWorkspaceFn);
     // Delete the per-workspace OAuth secret created by the CLI at setup time
     // (`bgagent-linear-oauth-<slug>`). The concrete name isn't known at synth
     // time (operators add workspaces by slug at runtime), so scope to the

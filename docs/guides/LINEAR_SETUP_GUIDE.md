@@ -298,23 +298,21 @@ This runs server-side (through an authenticated `DELETE /v1/linear/workspaces/{s
 
 - Marks the registry row `status=revoked` (preserves the audit trail). The OAuth resolver fail-closes on any non-`active` status, so the workspace stops resolving tokens and routing webhooks the instant the command returns.
 - Deletes the per-workspace `bgagent-linear-oauth-<slug>` secret from Secrets Manager.
-- Deletes this workspace's Linear project→repo mappings.
 
 Only the workspace **admin** — the platform user who ran `setup` / `add-workspace` for the slug — may remove it. You are prompted to re-type the slug before anything is torn down.
 
 Flags:
 
-- `--purge` — delete the registry row entirely instead of keeping it with `status=revoked` (drops the audit trail).
-- `--keep-mappings` — leave the `LinearProjectMappingTable` rows in place.
+- `--purge` — delete the registry row entirely instead of keeping it with `status=revoked` (drops the audit trail). The row is still revoked first (fail-closed) and is only hard-deleted after the OAuth secret is confirmed gone.
 - `--yes` — skip the slug-confirmation prompt (for scripted use).
 
-> **Project-mapping cleanup caveat:** mappings are matched to a workspace by a `linear_workspace_id` field on the row. Mappings created before that field was recorded are left untouched — deactivate those by project id (see below).
+> **Project→repo mappings are not removed by this command.** Mapping rows carry no workspace identifier, so they cannot be attributed to a workspace. Remove a workspace's mappings by project id (see below).
 
 Then delete the Linear webhook from [Linear Settings → API](https://linear.app/settings/api) and uninstall the OAuth app from [Workspace Settings → Integrations](https://linear.app/settings/integrations) on the Linear side.
 
 ### Deactivating a single project mapping
 
-To remove one project→repo mapping without touching the workspace:
+To remove one project→repo mapping (the only supported way to tear a mapping down):
 
 ```bash
 aws dynamodb update-item \
