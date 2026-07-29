@@ -58,6 +58,7 @@ import type {
 } from './orchestration-store';
 import type { AttachmentRecord, ChannelSource } from './types';
 import { MAX_ATTACHMENTS_PER_TASK } from './validation';
+import { CODING_WORKFLOW_ID } from './workflows';
 
 /**
  * The trigger channel an orchestration runs under. Defaults to ``'linear'``
@@ -432,6 +433,17 @@ export async function releaseChild(params: ReleaseChildParams): Promise<ReleaseC
       {
         repo: row.repo,
         task_description: buildChildDescription(row),
+        // Pin the disciplined coding workflow, as every other channel does at its
+        // own call site. Without it a repo-bound child falls back to the
+        // repo-OPTIONAL default/agent-v1, whose setup skips the stacked-base and
+        // predecessor-merge path entirely.
+        //
+        // A chain survives that by luck — its child needs no merge, so the agent
+        // works from the base it was given. A DIAMOND does not: the integration
+        // node was handed two predecessor branches to merge, got a clean default
+        // branch instead, and the agent hand-wrote an approximation of one arm.
+        // The result looked plausible and silently dropped the other arm's work.
+        workflow_ref: CODING_WORKFLOW_ID,
       },
       {
         userId: platformUserId,

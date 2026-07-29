@@ -60,6 +60,50 @@ describe('releaseChild — idempotency key is accepted by the REAL validator', (
   // was rejected with a 400 and the child silently never started. Mocked
   // createTaskCore tests didn't catch it; this asserts the generated key
   // against the actual validator with production-shaped ids.
+  test('pins the coding workflow — a child must never fall back to the repo-less default', async () => {
+    // Every other channel pins CODING_WORKFLOW_ID at its own call site, because a
+    // repo-bound task with no workflow_ref resolves to the repo-OPTIONAL
+    // default/agent-v1, whose setup skips the stacked-base and predecessor-merge
+    // path entirely.
+    //
+    // A chain hides that: its child needs no merge, so the agent works from the
+    // base it was handed and the result looks right. A DIAMOND does not — the
+    // integration node is handed predecessor branches to merge, gets a clean
+    // default branch instead, and the agent writes a plausible approximation of
+    // one arm while silently dropping the other's work. Observed in production
+    // before this pin existed.
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    const createTaskCore = created('T-1');
+    await releaseChild({
+      ddb: ddb as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow({}),
+      platformUserId: 'user-1',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+    // The REQUEST body (calls[0][0]), not the context — the workflow is part of
+    // what is being submitted, and nothing here asserted it before.
+    const body = createTaskCore.mock.calls[0][0];
+    expect(body.workflow_ref).toBe('coding/new-task-v1');
+  });
+
+  test('an INTEGRATION node also pins the coding workflow — it is the case that breaks', async () => {
+    // The integration node is the one child that MUST merge (two predecessor
+    // branches), so it is the one that fails hardest on the wrong workflow.
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    const createTaskCore = created('T-int');
+    await releaseChild({
+      ddb: ddb as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow({ sub_issue_id: 'orch_abc__integration', depends_on: ['SUB-1', 'SUB-2'] }),
+      platformUserId: 'user-1',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+    expect(createTaskCore.mock.calls[0][0].workflow_ref).toBe('coding/new-task-v1');
+  });
+
   test('generated key passes isValidIdempotencyKey for real-world ids', async () => {
     const ddb = { send: jest.fn().mockResolvedValue({}) };
     const createTaskCore = created('T-1');
