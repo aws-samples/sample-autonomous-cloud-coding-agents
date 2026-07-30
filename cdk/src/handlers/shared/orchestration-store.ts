@@ -175,6 +175,37 @@ export interface OrchestrationReleaseContext {
   readonly linear_workspace_slug?: string;
   readonly linear_project_id?: string;
   /**
+   * The project's resolved trigger label (the project mapping's ``label_filter``).
+   * Persisted at SEED time because that is the only point where the mapping is in
+   * hand — the reconciler works from this row and has no project id to look one
+   * up with. Used for the epic panel's retry hint, which must name the label that
+   * actually fires: it is per-project configurable, so a hardcoded or defaulted
+   * one sends the user to re-apply something the webhook does not filter on.
+   * Absent on rows seeded before this field existed → the panel falls back to the
+   * platform default.
+   */
+  readonly trigger_label?: string;
+  /**
+   * The parent epic's own title and body, captured at seed time and given to
+   * EVERY child as shared context.
+   *
+   * This is the fix for a real incident: an epic fanned out an API child and a UI
+   * child in parallel, each saw only its own sub-issue text, and each invented its
+   * own contract — one used `kyoto` with `checkIn`/`checkOut`, the other
+   * `wander-kyoto` with `startDate`/`endDate`. Both passed their own tests, the
+   * integration merged without conflict, and the deployed flow was broken. Nothing
+   * was wrong with either child in isolation; the shared agreement only ever
+   * existed in the parent, which neither of them could see.
+   *
+   * Seed time is the only place this is in hand — the reconciler works from the
+   * stored row and has no token to re-fetch the issue. Absent on rows seeded
+   * before this field existed, in which case children behave exactly as before.
+   */
+  readonly parent_context?: {
+    readonly title?: string;
+    readonly description?: string;
+  };
+  /**
    * Parent-issue attachments, screened + stored ONCE at seed time, so every
    * child inherits them: the parent's attached spec must reach the agents that
    * write the code, not only the planner that never sees the repo. These are `passed`
@@ -183,6 +214,28 @@ export interface OrchestrationReleaseContext {
    * The PARENT owns the objects' lifecycle — children never delete them.
    */
   readonly pre_screened_attachments?: readonly AttachmentRecord[];
+}
+
+/**
+ * Per-field cap on the parent context copied onto the meta row.
+ *
+ * A bound is required for two independent reasons, and the smaller of the two
+ * wins: a DynamoDB item is capped at 400 KB total (this row also holds the
+ * release context and attachment JSON), and the text is prepended to EVERY
+ * child's task description, which is guardrail-screened and counts against the
+ * agent's prompt budget. 4000 characters is ample for an epic's shared contract
+ * while leaving both limits comfortable.
+ *
+ * Truncation is visible rather than silent: a reader of the child prompt sees
+ * that the text was cut, instead of quietly working from half a spec.
+ */
+export const PARENT_CONTEXT_MAX_CHARS = 4000;
+
+/** Cap one parent-context field, marking the cut so it is never mistaken for the whole. */
+function clampParentContext(text: string): string {
+  const trimmed = text.trim();
+  if (trimmed.length <= PARENT_CONTEXT_MAX_CHARS) return trimmed;
+  return `${trimmed.slice(0, PARENT_CONTEXT_MAX_CHARS)}\n… [truncated]`;
 }
 
 export interface SeedOrchestrationParams {
@@ -420,6 +473,19 @@ export async function seedOrchestration(
     }),
     ...(releaseContext.linear_project_id !== undefined && {
       linear_project_id: releaseContext.linear_project_id,
+    }),
+    ...(releaseContext.trigger_label !== undefined && {
+      trigger_label: releaseContext.trigger_label,
+    }),
+    // The epic's own title/body, inherited by every child so parallel siblings
+    // share one source of truth for names and shapes. Stored FLAT (not nested)
+    // and TRUNCATED here, at the single write site, so no reader has to remember
+    // to bound it — see PARENT_CONTEXT_MAX_CHARS for why a bound is required.
+    ...(releaseContext.parent_context?.title !== undefined && {
+      parent_context_title: clampParentContext(releaseContext.parent_context.title),
+    }),
+    ...(releaseContext.parent_context?.description !== undefined && {
+      parent_context_description: clampParentContext(releaseContext.parent_context.description),
     }),
     // Parent attachments, inherited by every child — stored as a JSON string so the nested
     // AttachmentRecord[] round-trips cleanly through the Document client without
@@ -901,6 +967,20 @@ export async function loadOrchestration(
       }),
       ...(metaItem.linear_project_id !== undefined && {
         linear_project_id: metaItem.linear_project_id as string,
+      }),
+      ...(metaItem.trigger_label !== undefined && {
+        trigger_label: metaItem.trigger_label as string,
+      }),
+      ...((metaItem.parent_context_title !== undefined
+        || metaItem.parent_context_description !== undefined) && {
+        parent_context: {
+          ...(metaItem.parent_context_title !== undefined && {
+            title: metaItem.parent_context_title as string,
+          }),
+          ...(metaItem.parent_context_description !== undefined && {
+            description: metaItem.parent_context_description as string,
+          }),
+        },
       }),
       ...(preScreened.length > 0 && { pre_screened_attachments: preScreened }),
     },
