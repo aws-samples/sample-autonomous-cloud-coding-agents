@@ -20,6 +20,7 @@
 import { BedrockAgentCoreClient, StopRuntimeSessionCommand } from '@aws-sdk/client-bedrock-agentcore';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { ECSClient, StopTaskCommand } from '@aws-sdk/client-ecs';
+import { LambdaMicrovmsClient, TerminateMicrovmCommand } from '@aws-sdk/client-lambda-microvms';
 import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
@@ -33,6 +34,7 @@ import { computeTtlEpoch } from './shared/validation';
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const agentCoreClient = new BedrockAgentCoreClient({});
 const ecsClient = new ECSClient({});
+const microvmClient = new LambdaMicrovmsClient({});
 const TABLE_NAME = process.env.TASK_TABLE_NAME!;
 const EVENTS_TABLE_NAME = process.env.TASK_EVENTS_TABLE_NAME!;
 const TASK_RETENTION_DAYS = Number(process.env.TASK_RETENTION_DAYS ?? '90');
@@ -142,6 +144,42 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
             request_id: requestId,
             has_cluster: !!clusterArn,
             has_task: !!taskArn,
+          });
+        }
+      } else if (computeType === 'lambda-microvm') {
+        // ADR-021: `terminate-microvm` is the ACTIVE cleanup path — a cancelled
+        // MicroVM must not be left to the 8-hour `maximumDurationInSeconds` cap
+        // (with `idlePolicy` omitted there is no tighter substrate bound), both
+        // for cost and because running/suspended VMs count against the account
+        // memory quota that gates admission of new tasks.
+        //
+        // This branch MUST come before the `agentRuntimeArn` branch below.
+        // `agentRuntimeArn` falls back to the stack-level RUNTIME_ARN env var,
+        // which task-api.ts sets whenever AgentCore stop-session is wired — so in
+        // a mixed agentcore+lambda-microvm deployment a MicroVM task would
+        // otherwise fall into the AgentCore branch and call StopRuntimeSession
+        // against an unrelated runtime ARN, silently leaving the MicroVM running.
+        const microvmId = record.compute_metadata?.microvmId;
+        if (microvmId) {
+          try {
+            await microvmClient.send(new TerminateMicrovmCommand({
+              microvmIdentifier: microvmId,
+            }));
+            logger.info('TerminateMicrovm invoked after cancel', { task_id: taskId, microvm_id: microvmId, request_id: requestId });
+          } catch (stopErr) {
+            // Best-effort, matching the ECS/AgentCore branches: the CANCELLED
+            // transition already committed and must stand.
+            logger.warn('TerminateMicrovm failed after cancel (MicroVM may already be gone)', {
+              task_id: taskId,
+              microvm_id: microvmId,
+              request_id: requestId,
+              error: stopErr instanceof Error ? stopErr.message : String(stopErr),
+            });
+          }
+        } else {
+          logger.warn('MicroVM cancel skipped: missing microvmId in compute_metadata', {
+            task_id: taskId,
+            request_id: requestId,
           });
         }
       } else if (agentRuntimeArn) {

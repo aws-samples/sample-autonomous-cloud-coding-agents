@@ -25,6 +25,7 @@ import * as stackOutputs from '../../src/stack-outputs';
 
 const cognitoSend = jest.fn();
 const bedrockSend = jest.fn();
+const microvmSend = jest.fn();
 
 jest.mock('@aws-sdk/client-cognito-identity-provider', () => {
   const actual = jest.requireActual('@aws-sdk/client-cognito-identity-provider');
@@ -42,6 +43,14 @@ jest.mock('@aws-sdk/client-bedrock', () => {
   };
 });
 
+jest.mock('@aws-sdk/client-lambda-microvms', () => {
+  const actual = jest.requireActual('@aws-sdk/client-lambda-microvms');
+  return {
+    ...actual,
+    LambdaMicrovmsClient: jest.fn(() => ({ send: microvmSend })),
+  };
+});
+
 jest.mock('../../src/github-token', () => {
   const actual = jest.requireActual('../../src/github-token');
   return {
@@ -54,13 +63,13 @@ jest.mock('../../src/repo-lookup', () => {
   const actual = jest.requireActual('../../src/repo-lookup');
   return {
     ...actual,
-    countActiveRepos: jest.fn(),
+    listRepoConfigs: jest.fn(),
   };
 });
 
 const getStackOutputSpy = jest.spyOn(stackOutputs, 'getStackOutput');
 const isGithubTokenConfiguredMock = githubToken.isGithubTokenConfigured as jest.Mock;
-const countActiveReposMock = repoLookup.countActiveRepos as jest.Mock;
+const listRepoConfigsMock = repoLookup.listRepoConfigs as jest.Mock;
 const originalFetch = global.fetch;
 
 function mockStackOutputs(): void {
@@ -80,9 +89,10 @@ describe('runPlatformDoctor', () => {
   beforeEach(() => {
     getStackOutputSpy.mockReset();
     isGithubTokenConfiguredMock.mockReset();
-    countActiveReposMock.mockReset();
+    listRepoConfigsMock.mockReset();
     cognitoSend.mockReset().mockResolvedValue({});
     bedrockSend.mockReset().mockResolvedValue({});
+    microvmSend.mockReset().mockResolvedValue({ images: [] });
     global.fetch = jest.fn().mockResolvedValue({ status: 401, ok: false });
   });
 
@@ -93,7 +103,10 @@ describe('runPlatformDoctor', () => {
   test('returns pass when all checks succeed', async () => {
     mockStackOutputs();
     isGithubTokenConfiguredMock.mockResolvedValue(true);
-    countActiveReposMock.mockResolvedValue(2);
+    listRepoConfigsMock.mockResolvedValue([
+      { repo: 'acme/a', status: 'active' },
+      { repo: 'acme/b', status: 'active' },
+    ]);
 
     const results = await runPlatformDoctor({ region: 'us-east-1', stackName: 'dev' });
     expect(doctorChecksPassed(results)).toBe(true);
@@ -107,7 +120,7 @@ describe('runPlatformDoctor', () => {
   test('fails when github token is not configured', async () => {
     mockStackOutputs();
     isGithubTokenConfiguredMock.mockResolvedValue(false);
-    countActiveReposMock.mockResolvedValue(1);
+    listRepoConfigsMock.mockResolvedValue([{ repo: 'acme/a', status: 'active' }]);
 
     const results = await runPlatformDoctor({ region: 'us-east-1', stackName: 'dev' });
     expect(doctorChecksPassed(results)).toBe(false);
@@ -117,11 +130,75 @@ describe('runPlatformDoctor', () => {
   test('warns when API returns an unexpected status code', async () => {
     mockStackOutputs();
     isGithubTokenConfiguredMock.mockResolvedValue(true);
-    countActiveReposMock.mockResolvedValue(1);
+    listRepoConfigsMock.mockResolvedValue([{ repo: 'acme/a', status: 'active' }]);
     (global.fetch as jest.Mock).mockResolvedValue({ status: 500, ok: false });
 
     const results = await runPlatformDoctor({ region: 'us-east-1', stackName: 'dev' });
     expect(results.find((r) => r.id === 'api_reachable')?.status).toBe('warn');
+    expect(doctorChecksPassed(results)).toBe(true);
+  });
+
+  test('probes Lambda MicroVMs only when an active blueprint uses it', async () => {
+    mockStackOutputs();
+    isGithubTokenConfiguredMock.mockResolvedValue(true);
+    listRepoConfigsMock.mockResolvedValue([
+      { repo: 'acme/a', status: 'active', compute_type: 'lambda-microvm' },
+      { repo: 'acme/removed', status: 'removed', compute_type: 'lambda-microvm' },
+    ]);
+
+    const results = await runPlatformDoctor({ region: 'us-east-1', stackName: 'dev' });
+
+    expect(results.find((r) => r.id === 'lambda_microvm_availability')?.status).toBe('pass');
+    expect(microvmSend).toHaveBeenCalledTimes(1);
+  });
+
+  test('omits Lambda MicroVM check when no active blueprint uses it', async () => {
+    mockStackOutputs();
+    isGithubTokenConfiguredMock.mockResolvedValue(true);
+    listRepoConfigsMock.mockResolvedValue([
+      { repo: 'acme/a', status: 'active', compute_type: 'agentcore' },
+      { repo: 'acme/removed', status: 'removed', compute_type: 'lambda-microvm' },
+    ]);
+
+    const results = await runPlatformDoctor({ region: 'us-east-1', stackName: 'dev' });
+
+    expect(results.some((r) => r.id === 'lambda_microvm_availability')).toBe(false);
+    expect(microvmSend).not.toHaveBeenCalled();
+  });
+
+  test('reports Lambda MicroVM probe failure with remedy', async () => {
+    mockStackOutputs();
+    isGithubTokenConfiguredMock.mockResolvedValue(true);
+    listRepoConfigsMock.mockResolvedValue([
+      { repo: 'acme/a', status: 'active', compute_type: 'lambda-microvm' },
+    ]);
+    microvmSend.mockRejectedValue(new Error('endpoint not found'));
+
+    const results = await runPlatformDoctor({ region: 'eu-central-1', stackName: 'dev' });
+    const check = results.find((r) => r.id === 'lambda_microvm_availability');
+
+    expect(check?.status).toBe('fail');
+    expect(check?.detail).toContain('Launch regions: us-east-1');
+    expect(check?.detail).toContain('--compute-type agentcore');
+  });
+
+  test('warns when IAM prevents the Lambda MicroVM availability check', async () => {
+    mockStackOutputs();
+    isGithubTokenConfiguredMock.mockResolvedValue(true);
+    listRepoConfigsMock.mockResolvedValue([
+      { repo: 'acme/a', status: 'active', compute_type: 'lambda-microvm' },
+    ]);
+    microvmSend.mockRejectedValue(Object.assign(
+      new Error('User is not authorized to perform lambda-microvms:ListManagedMicrovmImages'),
+      { name: 'AccessDeniedException' },
+    ));
+
+    const results = await runPlatformDoctor({ region: 'us-east-1', stackName: 'dev' });
+    const check = results.find((r) => r.id === 'lambda_microvm_availability');
+
+    expect(check?.status).toBe('warn');
+    expect(check?.detail).toContain('Cannot verify Lambda MicroVM availability');
+    expect(check?.detail).toContain('lambda-microvms List* actions');
     expect(doctorChecksPassed(results)).toBe(true);
   });
 });

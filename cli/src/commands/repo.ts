@@ -152,7 +152,7 @@ export function makeRepoCommand(): Command {
       .argument('<owner/repo>', 'Repository identifier')
       .option('--region <region>', 'AWS region (defaults to configured region or AWS_REGION)')
       .option('--stack-name <name>', 'CloudFormation stack name', DEFAULT_STACK_NAME)
-      .option('--compute-type <type>', 'Compute substrate: agentcore or ecs')
+      .option('--compute-type <type>', 'Compute substrate: agentcore, ecs, or lambda-microvm')
       .option('--runtime-arn <arn>', 'Override AgentCore runtime ARN (agentcore only)')
       .option('--model <model-id>', 'Foundation model ID override')
       .option('--token-secret-arn <arn>', 'Per-repo GitHub token Secrets Manager ARN')
@@ -161,8 +161,11 @@ export function makeRepoCommand(): Command {
       .option('--output <format>', 'Output format: text or json', 'text')
       .action(async (repoId: string, opts) => {
         assertRepoFormat(repoId);
-        if (opts.computeType && opts.computeType !== 'agentcore' && opts.computeType !== 'ecs') {
-          throw new CliError("--compute-type must be 'agentcore' or 'ecs'.");
+        if (opts.computeType
+          && opts.computeType !== 'agentcore'
+          && opts.computeType !== 'ecs'
+          && opts.computeType !== 'lambda-microvm') {
+          throw new CliError("--compute-type must be 'agentcore', 'ecs', or 'lambda-microvm'.");
         }
 
         const { region, stackName } = resolveOperatorContext(opts);

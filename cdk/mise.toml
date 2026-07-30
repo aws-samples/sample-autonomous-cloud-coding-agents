@@ -47,7 +47,7 @@ run = "npx cdk deploy"
 # parameter directly on the CDKToolkit stack:
 #   aws cloudformation update-stack --stack-name CDKToolkit --use-previous-template \
 #     --capabilities CAPABILITY_NAMED_IAM \
-#     --parameters ParameterKey=ComputeTypes,ParameterValue=agentcore\,ecs
+#     --parameters ParameterKey=ComputeTypes,ParameterValue=agentcore\,ecs\,lambda-microvm
 #   # verify: aws cloudformation describe-stacks --stack-name CDKToolkit --query 'Stacks[0].Parameters'
 [tasks.bootstrap]
 description = "Bootstrap CDK with least-privilege policies (ComputeTypes=agentcore; for ECS set the ComputeTypes CFN param on CDKToolkit — see comment above the task)"

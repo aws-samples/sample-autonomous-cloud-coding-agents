@@ -24,7 +24,7 @@ import {
 import { PLATFORM_REPO_DEFAULTS } from './repo-display';
 import { listRepoConfigs, RepoConfigRow } from './repo-lookup';
 
-export interface BlueprintRuntimeBinding {
+interface BlueprintRuntimeBinding {
   readonly repo: string;
   readonly status: RepoConfigRow['status'];
   readonly compute_type: string;
@@ -44,7 +44,7 @@ interface RuntimeProbeBase {
  * carries the GetAgentRuntime response, an `'error'` probe carries only the
  * failure message.
  */
-export type RuntimeProbeResult =
+type RuntimeProbeResult =
   | (RuntimeProbeBase & {
     readonly probe_status: 'ok';
     readonly agent_runtime_id?: string;
@@ -58,8 +58,14 @@ export type RuntimeProbeResult =
     readonly error: string;
   });
 
-export interface EcsSubstrateSummary {
+interface EcsSubstrateSummary {
   readonly compute_type: 'ecs';
+  readonly used_by_repos: readonly string[];
+  readonly note: string;
+}
+
+interface LambdaMicrovmSubstrateSummary {
+  readonly compute_type: 'lambda-microvm';
   readonly used_by_repos: readonly string[];
   readonly note: string;
 }
@@ -69,6 +75,7 @@ export interface RuntimeStatusReport {
   readonly blueprints: readonly BlueprintRuntimeBinding[];
   readonly agentcore_runtimes: readonly RuntimeProbeResult[];
   readonly ecs_substrates: readonly EcsSubstrateSummary[];
+  readonly lambda_microvm_substrates: readonly LambdaMicrovmSubstrateSummary[];
 }
 
 /** Parse ``agentRuntimeId`` (and optional version) from an AgentCore runtime ARN. */
@@ -90,7 +97,9 @@ function bindingForRepo(
 ): BlueprintRuntimeBinding {
   const computeType = config.compute_type ?? PLATFORM_REPO_DEFAULTS.compute_type;
   const hasBlueprintRuntime = config.runtime_arn !== undefined;
-  const runtimeArn = hasBlueprintRuntime ? config.runtime_arn : platformRuntimeArn ?? undefined;
+  const runtimeArn = computeType === 'agentcore'
+    ? hasBlueprintRuntime ? config.runtime_arn : platformRuntimeArn ?? undefined
+    : undefined;
 
   return {
     repo: config.repo,
@@ -154,11 +163,16 @@ export async function buildRuntimeStatusReport(
 
   const agentcoreMap = new Map<string, string[]>();
   const ecsRepos: string[] = [];
+  const lambdaMicrovmRepos: string[] = [];
 
   for (const binding of blueprints) {
     if (binding.status !== 'active') continue;
     if (binding.compute_type === 'ecs') {
       ecsRepos.push(binding.repo);
+      continue;
+    }
+    if (binding.compute_type === 'lambda-microvm') {
+      lambdaMicrovmRepos.push(binding.repo);
       continue;
     }
     if (binding.runtime_arn) {
@@ -182,10 +196,20 @@ export async function buildRuntimeStatusReport(
     }]
     : [];
 
+  const lambda_microvm_substrates: LambdaMicrovmSubstrateSummary[] = lambdaMicrovmRepos.length > 0
+    ? [{
+      compute_type: 'lambda-microvm',
+      used_by_repos: lambdaMicrovmRepos,
+      note: 'Lambda MicroVM sessions use platform-managed images and per-session MicroVMs. '
+        + 'Per-blueprint runtime_arn overrides do not apply to Lambda MicroVM compute.',
+    }]
+    : [];
+
   return {
     platform_default_runtime_arn: platformRuntimeArn,
     blueprints,
     agentcore_runtimes,
     ecs_substrates,
+    lambda_microvm_substrates,
   };
 }

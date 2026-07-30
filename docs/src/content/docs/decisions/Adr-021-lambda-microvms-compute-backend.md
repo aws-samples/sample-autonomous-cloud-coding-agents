@@ -51,11 +51,27 @@ Adopt **AWS Lambda MicroVMs as a third, opt-in `ComputeStrategy` backend** named
 
 ### 1. Strategy shape: extend the interface with mandatory suspend/resume
 
-`ComputeType` widens to `'agentcore' | 'ecs' | 'lambda-microvm'` (mirrored in `cli/src/types.ts` and the CLI's inline unions). `SessionHandle` gains a `{ strategyType: 'lambda-microvm', microvmId, endpoint }` variant — `microvmId` because every lifecycle API (`suspend-microvm`, `resume-microvm`, `terminate-microvm`, and `create-microvm-auth-token` — the latter not called in P1–P3, see sub-decision 3) takes only the MicroVM identifier, and `endpoint` because it is per-session (minted by `RunMicrovm`) and required for any orchestrator→agent HTTP interaction. The image ARN is deliberately **not** in the handle: like the ECS task definition ARN, it is deployment-time configuration consumed by `startSession` (from construct-injected environment) and recorded in the session-start log entry for diagnostics, not per-session lifecycle state.
+`ComputeType` widens to `'agentcore' | 'ecs' | 'lambda-microvm'` (mirrored in `cli/src/types.ts` and the CLI's inline unions). `SessionHandle` gains a `{ strategyType: 'lambda-microvm', microvmId, endpoint }` variant — `microvmId` because every lifecycle API (`suspend-microvm`, `resume-microvm`, `terminate-microvm`, `get-microvm`, and `create-microvm-auth-token` — the latter not called in P1–P3, see sub-decision 3) takes only the MicroVM identifier, and `endpoint` because it is per-session (minted by `RunMicrovm`) and required for any orchestrator→agent HTTP interaction. Note the naming seam: the handle field is `microvmId` (matching `RunMicrovmResponse.microvmId`), while the request key on every lifecycle command is `microvmIdentifier` — the strategy is the only place that translates between the two. The image ARN is deliberately **not** in the handle: like the ECS task definition ARN, it is deployment-time configuration consumed by `startSession` (from construct-injected environment) and recorded in the session-start log entry for diagnostics, not per-session lifecycle state.
 
 The `ComputeStrategy` interface gains **mandatory** `suspendSession(handle)` / `resumeSession(handle)` methods returning a typed result (`{ supported: false } | { supported: true }`-shaped, exact type at implementation time); the widening lands in P3 (see sub-decision 5), in one commit across all three strategies. Mandatory-with-explicit-stub is the codebase idiom, not optional methods: no behavioral interface in the codebase has an optional method, `AgentCoreComputeStrategy.pollSession` is already a mandatory explicit stub rather than an optional member, and the exhaustive-`never` switch culture means a fourth backend must make a compile-checked decision about its suspend semantics instead of silently falling through a `strategy.suspendSession?.()` feature-detection. The agentcore and ecs strategies return `unsupported` (not a silent success — a suspend that silently no-ops would let the orchestrator believe compute billing stopped when it did not); the orchestrator gates its suspend policy on the typed response, consistent with how `pollTaskStatus` already branches explicitly on `computeType`.
 
-**Poll semantics — the strategy reports, the orchestrator interprets.** `pollSession(handle)` receives only the session handle and cannot see task state, so the health rules must live where the DynamoDB status lives. `SessionStatus` gains a `'suspended'` variant; the strategy maps `GetMicrovm` state mechanically (`RUNNING` → `running`, `SUSPENDED` → `suspended`, `TERMINATED` → `completed`) and the **orchestrator** cross-references against the task row — the same division of labor `finalPollState` already uses for ECS (substrate stopped + non-terminal DynamoDB status → failed) and `pollTaskStatus` uses for agentcore heartbeats: substrate `suspended` + task `AWAITING_APPROVAL` is healthy (orchestrator-intended suspend); `suspended` with any other task status is an anomaly to surface, not fail-fast; substrate terminal + non-terminal task status → classify failed.
+**Poll semantics — the strategy reports, the orchestrator interprets.** `pollSession(handle)` receives only the session handle and cannot see task state, so the health rules must live where the DynamoDB status lives. `SessionStatus` gains a `'suspended'` variant; the strategy maps `GetMicrovm` state mechanically and the **orchestrator** cross-references against the task row — the same division of labor `finalPollState` already uses for ECS (substrate stopped + non-terminal DynamoDB status → failed) and `pollTaskStatus` uses for agentcore heartbeats: substrate `suspended` + task `AWAITING_APPROVAL` is healthy (orchestrator-intended suspend); `suspended` with any other task status is an anomaly to surface, not fail-fast; substrate terminal + non-terminal task status → classify failed.
+
+The service's `MicrovmState` enum has **six** members, not three, so the mapping is stated exhaustively (one line of rationale each, mirrored in the strategy's doc comment):
+
+| `MicrovmState` | `SessionStatus` | Why |
+|---|---|---|
+| `PENDING` | `running` | Still booting; the same way ECS's `PENDING`/`PROVISIONING` map to `running`. |
+| `RUNNING` | `running` | — |
+| `SUSPENDING` | `suspended` | Already on its way to frozen; reporting `running` would tell the orchestrator compute is still progressing when it is not. Both suspend states land on a report the orchestrator treats as benign-or-anomalous depending on task status, never as failure. |
+| `SUSPENDED` | `suspended` | — |
+| `TERMINATING` | `completed` | Terminal-bound and carries no exit code, so "the substrate is gone" is all the strategy can honestly say. |
+| `TERMINATED` | `completed` | Success vs failure is the orchestrator's call — it cross-references the DynamoDB status. |
+| *unrecognized* | `running` | A future service enum addition must never fail a healthy task; the strategy warns and keeps polling. |
+
+**`GetMicrovm` `ResourceNotFoundException` → `completed`.** This deliberately diverges from `ecs-strategy`, where `DescribeTasks` returning no task maps to `failed`. ECS keeps stopped tasks describable for roughly an hour, so a missing task there really is anomalous; a terminated MicroVM is reaped from the control plane **by design**, so `failed` would fail every task that finished cleanly. The divergence is safe because it does not weaken detection: the orchestrator still fails the task when a terminal report lands while the DynamoDB status is non-terminal, so a genuine mid-run disappearance is caught — it simply receives the substrate-failure classification instead of a misleading poll error. Because that cross-check acts on a status read earlier in the same poll cycle, the orchestrator **re-reads the task row before failing** (the normal shutdown order is "agent writes terminal status → agent exits → VM terminates", which a stale read would otherwise turn into a spurious failure); ECS buys the same protection with a five-consecutive-poll patience counter instead.
+
+Neither the mapping nor the NotFound rule is a health decision: both are mechanical restatements of substrate state, which is what keeps the "strategy reports, orchestrator interprets" split intact.
 
 Normative requirements (EARS, per [ADR-020](/sample-autonomous-cloud-coding-agents/architecture/adr-020-ears-requirements-syntax)):
 
@@ -64,8 +80,10 @@ Normative requirements (EARS, per [ADR-020](/sample-autonomous-cloud-coding-agen
 - When `startSession` returns, the orchestrator shall persist the MicroVM handle (`microvmId`, `endpoint`) in the task row's `compute_metadata` (the field `cancel-task.ts` already reads ECS handles from).
 - The strategy shall omit `idlePolicy` on every `RunMicrovm` call, in every phase.
 - The orchestrator shall be the sole initiator of suspension, via `suspendSession`.
-- When `pollSession` observes MicroVM state `SUSPENDED`, the strategy shall report `suspended` without interpreting task state.
-- If the strategy reports a terminal substrate state while the task's DynamoDB status is non-terminal, then the orchestrator shall classify the task as failed with a substrate-failure remedy.
+- When `pollSession` observes MicroVM state `SUSPENDED` or `SUSPENDING`, the strategy shall report `suspended` without interpreting task state.
+- When `pollSession` observes a MicroVM state it does not recognize, the strategy shall report `running`.
+- If `GetMicrovm` reports that the MicroVM does not exist, then the strategy shall report `completed`.
+- If the strategy reports a terminal substrate state while the task's DynamoDB status is non-terminal, then the orchestrator shall re-read the task row and, if it is still non-terminal, classify the task as failed with a substrate-failure remedy.
 - If the strategy reports `suspended` while the task's DynamoDB status is not `AWAITING_APPROVAL`, then the orchestrator shall surface an anomaly event and shall not fail-fast the task.
 - If `suspendSession` or `resumeSession` is invoked on a strategy that does not support suspension, then the strategy shall return an explicit unsupported result.
 - When the agent process reaches a terminal state, the agent shall exit.
@@ -101,18 +119,32 @@ Normative requirements (EARS):
 
 ### 3. Packaging: same agent image source, new build path
 
-The existing agent container (`agent/` Dockerfile, already ARM64) is repackaged as a zip + Dockerfile artifact in S3 and built into a versioned `MicrovmImage` via `CreateMicrovmImage` (with `/ready` and `/validate` build hooks for snapshot quality). The agent runs its existing FastAPI server (`agent/src/server.py`) — the MicroVM path uses the HTTP entrypoint like AgentCore, not ECS's batch bypass — plus the four runtime lifecycle hooks on a sidecar port. Runtime hooks are fast-notification only (1–60 s): `/run` validates the payload and starts the pipeline **asynchronously**, mirroring how the agent loop already runs in a background thread behind `/ping` on AgentCore.
+The existing agent container (`agent/` Dockerfile, already ARM64) is repackaged as a zip + Dockerfile artifact in S3 and built into a versioned `MicrovmImage` via `CreateMicrovmImage`. The agent runs its existing FastAPI server (`agent/src/server.py`) — the MicroVM path uses the HTTP entrypoint like AgentCore, not ECS's batch bypass — plus the four runtime lifecycle hooks (`/run`, `/suspend`, `/resume`, `/terminate`) on a sidecar port, and the `/ready` + `/validate` build hooks for snapshot quality. Runtime hooks are fast-notification only (1–60 s): `/run` validates the payload and starts the pipeline **asynchronously**, mirroring how the agent loop already runs in a background thread behind `/ping` on AgentCore.
+
+**Hook phasing — P1 provisions the packaging plane, P2 makes it runnable.** Serving the hooks is agent-side work, so the hooks land in a different phase from the infrastructure that declares them:
+
+| Hook | Declared by | Served by the agent | Notes |
+|---|---|---|---|
+| `/run` | P1 (construct sets `hooks.microvmHooks.run`) | **P2** | The payload-delivery channel; declared in P1 so the image shape and IAM are reviewed once, but nothing answers it until P2. |
+| `/ready`, `/validate` | **P2** | **P2** | Build-time snapshot-quality hooks. Deliberately NOT declared in P1: a `/validate` endpoint that 404s fails every image build. |
+| `/suspend`, `/resume`, `/terminate` | **P3** (suspend/resume), P2 (`/terminate`) | P3 / P2 | Declaring a runtime hook the agent does not serve fails the corresponding lifecycle transition, so each is declared only in the phase that implements it. P1 termination is the orchestrator's `TerminateMicrovm`, which needs no in-guest cooperation. |
+
+Consequence to state plainly: **a P1-built MicroVM image is not runnable end to end.** P1 delivers the strategy, the construct, the roles/buckets/connector, the image resource, and the packaging script — an image built from a P1 deployment boots the existing FastAPI server but does not answer `/run`, so a `lambda-microvm` task started against it will not progress. P2 ("smoke parity") is the phase that makes clone → change → PR work on this backend. The construct and the packaging script both surface this at synth/run time so an operator cannot mistake a provisioned substrate for a working one.
 
 **Payload delivery** reuses the ECS strategy's S3-pointer pattern, adapted to `runHookPayload` (≤ 16 KB): small payloads inline; larger ones uploaded by the strategy to a platform payload bucket (the ECS payload bucket pattern in `ecs-agent-cluster.ts`: orchestrator write access, compute-role read-only scoped to the bucket, lifecycle expiry on objects) with only the S3 URI in `runHookPayload` — the MicroVM **execution role** holds the read grant, exactly as the ECS task role does today.
 
 **No orchestrator→agent HTTP path exists in P1–P3**: payload arrives through the `/run` hook, all agent work is outbound, and therefore **no JWE auth tokens are minted at all** — token minting (and its ≤ 60 min TTL refresh problem) is deferred until a real consumer exists (e.g. operator shell access, [#391](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/391)). The `endpoint` stays in the `SessionHandle` because it is genuinely per-session state that becomes load-bearing the day such a consumer appears. **Constraint accepted:** 32 GB RAM / 32 GB disk (disk quota to be confirmed against current service quotas when COMPUTE.md is updated) means repos that motivated the 120 GB ECS sizing stay on `ecs`; MicroVMs target the default-sized workload with suspend economics, not the heavy-build niche.
 
-- The image build shall not embed secrets, tokens, or per-task identity in the snapshot.
-- The agent shall resolve credentials at `/run` time.
-- When the `/run` hook receives the task payload, the agent shall validate it, start the pipeline asynchronously, and return HTTP 200 within the hook budget.
-- The agent shall not execute the clone→verify→PR pipeline on the hook path.
-- If the task payload exceeds the 16 KB `runHookPayload` limit, then the strategy shall upload the payload to the platform payload bucket and pass only its S3 URI in `runHookPayload`.
-- The MicroVM execution role shall hold read-only access to the payload bucket, scoped to that bucket.
+Normative requirements (EARS). The requirements that constrain what the *strategy* and the *image build* do are P1; the ones that require the *agent* to serve a hook are P2, per the phasing table above:
+
+- (P1) The image build shall not embed secrets, tokens, or per-task identity in the snapshot.
+- (P1) If the task payload exceeds the 16 KB `runHookPayload` limit, then the strategy shall upload the payload to the platform payload bucket and pass only its S3 URI in `runHookPayload`.
+- (P1) The MicroVM execution role shall hold read-only access to the payload bucket, scoped to that bucket.
+- (P1) Where a deployment configures a MicroVM image before the agent serves the runtime hooks, the platform shall warn that the image is not yet runnable end to end.
+- (P2) The agent shall resolve credentials at `/run` time.
+- (P2) When the `/run` hook receives the task payload, the agent shall validate it, start the pipeline asynchronously, and return HTTP 200 within the hook budget.
+- (P2) The agent shall not execute the clone→verify→PR pipeline on the hook path.
+- (P2) Where the image declares the `/ready` and `/validate` build hooks, the agent shall serve them.
 
 ### 4. Infra and IAM: conditional resources behind bootstrap `ComputeTypes`
 
@@ -158,8 +190,8 @@ Lambda MicroVMs launched in 5 regions (us-east-1/2, us-west-2, eu-west-1, ap-nor
 
 ### 5. Rollout: phased, default unchanged
 
-- **P1 — strategy + infra:** `LambdaMicrovmComputeStrategy` (start/poll/stop), CDK construct, bootstrap policy, types sync, unit + CDK assertion tests. No suspend yet.
-- **P2 — smoke parity:** agent completes clone → change → PR on the backend with progress visible to `bgagent watch`; failure classification entries in `error-classifier.ts`; **AgentCore Memory parity** (IAM grant + `MEMORY_ID` delivery, following the `EcsAgentCluster` pattern — Memory is a standalone service already consumed cross-substrate, and omitting the grant silently no-ops cross-session learning).
+- **P1 — strategy + infra:** `LambdaMicrovmComputeStrategy` (start/poll/stop), CDK construct, bootstrap policy, types sync, unit + CDK assertion tests. No suspend yet, and **no runnable image yet** — the construct declares the `/run` hook but the agent does not serve it until P2 (sub-decision 3's phasing table).
+- **P2 — smoke parity:** the agent serves the runtime and build hooks (`/run`, `/terminate`, `/ready`, `/validate`), making a MicroVM image runnable end to end; agent completes clone → change → PR on the backend with progress visible to `bgagent watch`; failure classification entries in `error-classifier.ts`; **AgentCore Memory parity** (IAM grant + `MEMORY_ID` delivery, following the `EcsAgentCluster` pattern — Memory is a standalone service already consumed cross-substrate, and omitting the grant silently no-ops cross-session learning).
 - **P3 — suspend/resume:** the interface widening from sub-decision 1 (mandatory methods, all three strategies in one commit), HITL-wait suspend policy, inline resume in the approve/deny Lambda with orchestrator-poll reconciliation (sub-decision 2), timeout-under-freeze wall-clock handling; coordinate with [#491](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/491)'s unified liveness model and update Cedar decision #7's rationale note.
 - **Out of scope:** replacing AgentCore as default; classic Lambda functions as a runtime; GPU; the Runtime-coupled workload-access-token injection path (delivery mechanism exists only on AgentCore Runtime; MicroVMs adopt the ECS env-var posture until [#249](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/249)/ADR-016 redesign the seam). Gateway integration is orthogonal: ADR-019/[#641](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/641) is substrate-portable by design and applies to this backend when it lands.
 

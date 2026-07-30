@@ -20,6 +20,7 @@
 import { App, Stack } from 'aws-cdk-lib';
 import { Template, Match } from 'aws-cdk-lib/assertions';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
+import * as s3 from 'aws-cdk-lib/aws-s3';
 import { TaskOrchestrator } from '../../src/constructs/task-orchestrator';
 
 interface StackOverrides {
@@ -520,5 +521,196 @@ describe('TaskOrchestrator construct', () => {
         }
       }
     });
+  });
+});
+
+describe('TaskOrchestrator with the Lambda MicroVMs backend (ADR-021)', () => {
+  const IMAGE_ARN = 'arn:aws:lambda:us-east-1:123456789012:microvm-image:abca-agent';
+  /** What the construct derives from the bare image name `abca-agent`. */
+  const NAME_DERIVED_IMAGE_ARN = 'arn:aws:lambda:us-east-1:123456789012:microvm-image:abca-agent';
+  const EXECUTION_ROLE_ARN = 'arn:aws:iam::123456789012:role/MicrovmExecutionRole';
+  const CONNECTOR_ARN = 'arn:aws:lambda:us-east-1:123456789012:network-connector:nc-123';
+
+  /**
+   * Build a stack with `microvmConfig` wired. Separate from `createStack` above
+   * because the payload bucket has to be a real construct (the prop takes an
+   * `s3.IBucket` so the grant can be rendered), which the shared helper's
+   * override shape does not model.
+   */
+  function createMicrovmStack(config?: {
+    imageIdentifier?: string;
+    imageArn?: string;
+    imageVersion?: string;
+    ingressConnectorArns?: string[];
+  }): { template: Template } {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    });
+    const mkTable = (id: string, sortKey?: string) => new dynamodb.Table(stack, id, {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+      ...(sortKey ? { sortKey: { name: sortKey, type: dynamodb.AttributeType.STRING } } : {}),
+    });
+
+    new TaskOrchestrator(stack, 'TaskOrchestrator', {
+      taskTable: mkTable('TaskTable'),
+      taskEventsTable: mkTable('TaskEventsTable', 'event_id'),
+      userConcurrencyTable: new dynamodb.Table(stack, 'UserConcurrencyTable', {
+        partitionKey: { name: 'user_id', type: dynamodb.AttributeType.STRING },
+      }),
+      runtimeArn: 'arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/test-runtime',
+      microvmConfig: {
+        imageIdentifier: config?.imageIdentifier ?? IMAGE_ARN,
+        imageArn: config?.imageArn ?? IMAGE_ARN,
+        imageVersion: config?.imageVersion,
+        executionRoleArn: EXECUTION_ROLE_ARN,
+        egressConnectorArns: [CONNECTOR_ARN],
+        ingressConnectorArns: config?.ingressConnectorArns,
+        payloadBucket: new s3.Bucket(stack, 'MicrovmPayloadBucket'),
+      },
+    });
+
+    return { template: Template.fromStack(stack) };
+  }
+
+  function orchestratorEnv(template: Template): Record<string, unknown> {
+    const [, fn] = Object.entries(template.findResources('AWS::Lambda::Function'))
+      .find(([id]) => id.includes('OrchestratorFn'))!;
+    return fn.Properties.Environment.Variables as Record<string, unknown>;
+  }
+
+  function microvmStatements(template: Template): Array<{
+    Sid?: string;
+    Action: string | string[];
+    Resource: unknown;
+    Condition?: unknown;
+  }> {
+    return Object.values(template.findResources('AWS::IAM::Policy'))
+      .flatMap(p => p.Properties.PolicyDocument.Statement)
+      .filter((s: { Sid?: string }) => (s.Sid ?? '').startsWith('Microvm'));
+  }
+
+  // Three distinct configurations, synthesized once each in beforeAll per
+  // cdk/AGENTS.md: the default wiring, the same wiring with an image version +
+  // ingress connectors pinned, and a name-derived (not operator-supplied) image
+  // ARN. `noMicrovmTemplate` is the negative control.
+  let template: Template;
+  let pinnedTemplate: Template;
+  let nameDerivedTemplate: Template;
+  let noMicrovmTemplate: Template;
+
+  beforeAll(() => {
+    template = createMicrovmStack().template;
+    pinnedTemplate = createMicrovmStack({
+      imageVersion: '4',
+      ingressConnectorArns: ['arn:aws:lambda:us-east-1:aws:network-connector:x', 'arn:y'],
+    }).template;
+    // What LambdaMicrovmCompute passes when the operator gave a bare image NAME:
+    // the exact ARN it derived, never a wildcard.
+    nameDerivedTemplate = createMicrovmStack({
+      imageIdentifier: 'abca-agent',
+      imageArn: NAME_DERIVED_IMAGE_ARN,
+    }).template;
+    noMicrovmTemplate = createStack().template;
+  });
+
+  test('injects the required MICROVM_* env vars verbatim (the strategy contract)', () => {
+    const env = orchestratorEnv(template);
+    expect(env.MICROVM_IMAGE_IDENTIFIER).toBe(IMAGE_ARN);
+    expect(env.MICROVM_EXECUTION_ROLE_ARN).toBe(EXECUTION_ROLE_ARN);
+    expect(env.MICROVM_EGRESS_CONNECTOR_ARNS).toBe(CONNECTOR_ARN);
+    expect(env.MICROVM_PAYLOAD_BUCKET).toBeDefined();
+  });
+
+  test('omits the optional env vars when not configured', () => {
+    const env = orchestratorEnv(template);
+    // Absent (not empty-string) so the strategy's "no ingress connectors" branch
+    // omits the field on RunMicrovm entirely.
+    expect(env.MICROVM_IMAGE_VERSION).toBeUndefined();
+    expect(env.MICROVM_INGRESS_CONNECTOR_ARNS).toBeUndefined();
+  });
+
+  test('pins the image version and ingress connectors when supplied', () => {
+    const env = orchestratorEnv(pinnedTemplate);
+    expect(env.MICROVM_IMAGE_VERSION).toBe('4');
+    expect(env.MICROVM_INGRESS_CONNECTOR_ARNS).toBe('arn:aws:lambda:us-east-1:aws:network-connector:x,arn:y');
+  });
+
+  test('grants exactly the four P1 lifecycle actions and nothing more', () => {
+    const actions = microvmStatements(template)
+      .flatMap(s => Array.isArray(s.Action) ? s.Action : [s.Action])
+      .filter(a => a.startsWith('lambda:'));
+    expect(actions.sort()).toEqual([
+      'lambda:GetMicrovm',
+      'lambda:PassNetworkConnector',
+      'lambda:RunMicrovm',
+      'lambda:TerminateMicrovm',
+    ]);
+  });
+
+  test('scopes the lifecycle statement to the one platform image ARN', () => {
+    const lifecycle = microvmStatements(template).find(s => s.Sid === 'MicrovmLifecycle')!;
+    // Exact ARN plus the `<arn>:*` version-suffix hedge — both pinned to this
+    // image's name, so neither can match another image.
+    expect(lifecycle.Resource).toEqual([IMAGE_ARN, `${IMAGE_ARN}:*`]);
+  });
+
+  test('a name-derived image ARN is scoped to that exact name, never a wildcard', () => {
+    // An out-of-band image referenced by bare NAME is a valid RunMicrovm
+    // identifier but not an IAM resource. LambdaMicrovmCompute resolves it to the
+    // exact `microvmImage` ARN, so ADR-021's "scoped to platform-created images"
+    // holds here too — the account/Region-wide `microvm-image:*` widening this
+    // test previously accepted is a compliance violation, not a fallback.
+    const lifecycle = microvmStatements(nameDerivedTemplate).find(s => s.Sid === 'MicrovmLifecycle')!;
+    expect(lifecycle.Resource).toEqual([
+      NAME_DERIVED_IMAGE_ARN,
+      `${NAME_DERIVED_IMAGE_ARN}:*`,
+    ]);
+    expect(JSON.stringify(lifecycle.Resource)).not.toContain('microvm-image:*');
+    expect(JSON.stringify(lifecycle.Resource)).toContain('microvm-image:abca-agent');
+  });
+
+  test('PassNetworkConnector must be Resource:* (the action has no resource type)', () => {
+    const pass = microvmStatements(template).find(s => s.Sid === 'MicrovmPassNetworkConnector')!;
+    expect(pass.Resource).toBe('*');
+  });
+
+  test('passes the execution role to lambda.amazonaws.com only', () => {
+    const passRole = microvmStatements(template).find(s => s.Sid === 'MicrovmPassExecutionRole')!;
+    expect(passRole.Action).toBe('iam:PassRole');
+    expect(passRole.Resource).toBe(EXECUTION_ROLE_ARN);
+    expect(passRole.Condition).toEqual({
+      StringEquals: { 'iam:PassedToService': 'lambda.amazonaws.com' },
+    });
+  });
+
+  test('grants NO suspend/resume (P3) and NO auth-token minting (never)', () => {
+    const actions = new Set(
+      Object.values(template.findResources('AWS::IAM::Policy'))
+        .flatMap(p => p.Properties.PolicyDocument.Statement as Array<{ Action: string | string[] }>)
+        .flatMap(s => Array.isArray(s.Action) ? s.Action : [s.Action]),
+    );
+    expect(actions.has('lambda:SuspendMicrovm')).toBe(false);
+    expect(actions.has('lambda:ResumeMicrovm')).toBe(false);
+    expect(actions.has('lambda:CreateMicrovmAuthToken')).toBe(false);
+    expect(actions.has('lambda:CreateMicrovmShellAuthToken')).toBe(false);
+  });
+
+  test('gets write on the payload bucket but NOT delete (lifecycle rule is the reaper)', () => {
+    const payloadStatements = Object.values(template.findResources('AWS::IAM::Policy'))
+      .flatMap(p => p.Properties.PolicyDocument.Statement as Array<{
+        Action: string | string[];
+        Resource: unknown;
+      }>)
+      .filter(s => JSON.stringify(s.Resource).includes('MicrovmPayloadBucket'));
+
+    const actions = payloadStatements.flatMap(s => Array.isArray(s.Action) ? s.Action : [s.Action]);
+    expect(actions).toContain('s3:PutObject');
+    expect(actions).not.toContain('s3:DeleteObject');
+  });
+
+  test('adds no MicroVM statements when microvmConfig is omitted', () => {
+    expect(microvmStatements(noMicrovmTemplate)).toEqual([]);
+    expect(orchestratorEnv(noMicrovmTemplate).MICROVM_IMAGE_IDENTIFIER).toBeUndefined();
   });
 });

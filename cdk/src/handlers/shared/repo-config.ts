@@ -25,7 +25,7 @@ import { logger } from './logger';
  * Per-repository configuration written by the Blueprint CDK construct
  * and read at runtime by the task API gate and the orchestrator.
  */
-export type ComputeType = 'agentcore' | 'ecs';
+export type ComputeType = 'agentcore' | 'ecs' | 'lambda-microvm';
 
 export interface RepoConfig {
   readonly repo: string;
