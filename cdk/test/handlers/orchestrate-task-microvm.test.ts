@@ -250,6 +250,21 @@ describe('orchestrate-task for a lambda-microvm task', () => {
     expect(args.substrate).toEqual({ status: 'suspended' });
   });
 
+  test('returns a failed poll state when reconciliation fails the task', async () => {
+    runMicrovmOk();
+    mockPollTaskStatus.mockResolvedValue({ attempts: 3, lastStatus: TaskStatus.RUNNING });
+    mockMicrovmSend.mockResolvedValueOnce({ microvmId: MICROVM_ID, state: 'TERMINATED' });
+    mockReconcile.mockResolvedValue({ taskFailed: true });
+
+    await handler({ task_id: 'TASK001' }, fakeContext().ctx as never);
+
+    expect(mockFinalizeTask).toHaveBeenCalledWith(
+      'TASK001',
+      { attempts: 3, lastStatus: TaskStatus.FAILED },
+      'user-1',
+    );
+  });
+
   test('skips the substrate cross-check once the DDB status is terminal', async () => {
     runMicrovmOk();
     mockPollTaskStatus.mockResolvedValue({ attempts: 1, lastStatus: TaskStatus.COMPLETED });

@@ -19,6 +19,7 @@
 
 import { App } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
+import * as lambdaMicrovmCompute from '../../src/constructs/lambda-microvm-compute';
 import { AgentStack } from '../../src/stacks/agent';
 
 describe('AgentStack', () => {
@@ -792,5 +793,36 @@ describe('AgentStack with the MicroVM gate on but no image configured (first dep
     const keys = fns.flatMap(fn =>
       Object.keys((fn.Properties.Environment?.Variables ?? {}) as Record<string, unknown>));
     expect(keys.filter(k => k.startsWith('MICROVM_'))).toEqual([]);
+  });
+});
+
+describe('AgentStack MicroVM image ARN invariant', () => {
+  let synthError: unknown;
+
+  beforeAll(() => {
+    // Force the stack-side gate true while the real construct remains in its
+    // no-image bootstrap state. This is the only way to exercise the Lazy's
+    // defensive invariant without changing production behavior.
+    const configuredSpy = jest.spyOn(lambdaMicrovmCompute, 'isLambdaMicrovmImageConfigured')
+      .mockReturnValue(true);
+    try {
+      const app = new App({ context: { compute_type: 'lambda-microvm' } });
+      const stack = new AgentStack(app, 'TestAgentStackMicrovmInvariant', {
+        env: { account: '123456789012', region: 'us-east-1' },
+      });
+      Template.fromStack(stack);
+    } catch (err) {
+      synthError = err;
+    } finally {
+      configuredSpy.mockRestore();
+    }
+  });
+
+  test('fails synth if a configured deployment has no image ARN', () => {
+    expect(synthError).toEqual(expect.objectContaining({
+      message: expect.stringContaining(
+        'MicroVM image ARN was accessed before LambdaMicrovmCompute was created',
+      ),
+    }));
   });
 });

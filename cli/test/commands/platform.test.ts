@@ -138,6 +138,52 @@ describe('runPlatformDoctor', () => {
     expect(doctorChecksPassed(results)).toBe(true);
   });
 
+  test('fails the active-repo check when the repo table output is missing', async () => {
+    mockStackOutputs();
+    getStackOutputSpy.mockImplementation(async (_region, _stack, key) =>
+      key === 'RepoTableName' ? null : ({
+        ApiUrl: 'https://api.example/v1/',
+        UserPoolId: 'us-east-1_pool',
+        AppClientId: 'client123',
+        GitHubTokenSecretArn: 'arn:token',
+      }[key] ?? null));
+    isGithubTokenConfiguredMock.mockResolvedValue(true);
+
+    const results = await runPlatformDoctor({ region: 'us-east-1', stackName: 'dev' });
+
+    expect(results.find((r) => r.id === 'active_repos')).toEqual(expect.objectContaining({
+      status: 'fail',
+      detail: 'Stack output RepoTableName is missing.',
+    }));
+    expect(listRepoConfigsMock).not.toHaveBeenCalled();
+  });
+
+  test('fails the active-repo check when the repo table has no active rows', async () => {
+    mockStackOutputs();
+    isGithubTokenConfiguredMock.mockResolvedValue(true);
+    listRepoConfigsMock.mockResolvedValue([{ repo: 'acme/removed', status: 'removed' }]);
+
+    const results = await runPlatformDoctor({ region: 'us-east-1', stackName: 'dev' });
+
+    expect(results.find((r) => r.id === 'active_repos')).toEqual(expect.objectContaining({
+      status: 'fail',
+      detail: 'No active repos in RepoTable. Register a Blueprint and redeploy.',
+    }));
+  });
+
+  test('reports a non-Error repo lookup failure', async () => {
+    mockStackOutputs();
+    isGithubTokenConfiguredMock.mockResolvedValue(true);
+    listRepoConfigsMock.mockRejectedValue('DynamoDB unavailable');
+
+    const results = await runPlatformDoctor({ region: 'us-east-1', stackName: 'dev' });
+
+    expect(results.find((r) => r.id === 'active_repos')).toEqual(expect.objectContaining({
+      status: 'fail',
+      detail: 'DynamoDB unavailable',
+    }));
+  });
+
   test('probes Lambda MicroVMs only when an active blueprint uses it', async () => {
     mockStackOutputs();
     isGithubTokenConfiguredMock.mockResolvedValue(true);
@@ -200,6 +246,21 @@ describe('runPlatformDoctor', () => {
     expect(check?.detail).toContain('Cannot verify Lambda MicroVM availability');
     expect(check?.detail).toContain('lambda-microvms List* actions');
     expect(doctorChecksPassed(results)).toBe(true);
+  });
+
+  test('formats a non-Error Lambda MicroVM probe failure', async () => {
+    mockStackOutputs();
+    isGithubTokenConfiguredMock.mockResolvedValue(true);
+    listRepoConfigsMock.mockResolvedValue([
+      { repo: 'acme/a', status: 'active', compute_type: 'lambda-microvm' },
+    ]);
+    microvmSend.mockRejectedValue('service unavailable');
+
+    const results = await runPlatformDoctor({ region: 'us-east-1', stackName: 'dev' });
+    const check = results.find((r) => r.id === 'lambda_microvm_availability');
+
+    expect(check?.status).toBe('fail');
+    expect(check?.detail).toContain('service unavailable');
   });
 });
 
