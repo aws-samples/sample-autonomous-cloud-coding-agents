@@ -262,11 +262,11 @@ fi
 IMAGE_NAME="${IMAGE_NAME:-${STACK_NAME}-abca-agent}"
 
 echo "==> Creating MicroVM image '${IMAGE_NAME}'"
-# Flags mirror the CfnMicrovmImage properties in lambda-microvm-compute.ts so an
-# out-of-band image is interchangeable with a CDK-managed one. Notably: arm64
-# (the agent is Graviton on every backend), the platform egress connector (so
-# build-time network egress is subject to the same DNS Firewall rules), and the
-# `/run` hook on port 8080 — the only lifecycle hook P1 configures.
+# Flags use the Lambda MicroVMs service API shape (which differs from the
+# CloudFormation shape used by CfnMicrovmImage). Notably: ARM_64, the platform
+# egress connector (so build-time network egress is subject to the same DNS
+# Firewall rules), and ENABLED for the service's fixed `/run` hook on port 8080
+# — the only lifecycle hook P1 configures.
 aws lambda-microvms create-microvm-image \
   --name "${IMAGE_NAME}" \
   --description "ABCA agent snapshot for ${STACK_NAME} (ADR-021, out-of-band build)" \
@@ -274,11 +274,11 @@ aws lambda-microvms create-microvm-image \
   --base-image-version "${BASE_IMAGE_VERSION}" \
   --build-role-arn "${BUILD_ROLE_ARN}" \
   --code-artifact "{\"uri\":\"s3://${ARTIFACT_BUCKET}/${ARTIFACT_KEY}\"}" \
-  --cpu-configurations '[{"architecture":"arm64"}]' \
+  --cpu-configurations '[{"architecture":"ARM_64"}]' \
   --resources '[{"minimumMemoryInMiB":32768}]' \
   --egress-network-connectors "${EGRESS_CONNECTORS}" \
   --logging "{\"cloudWatch\":{\"logGroup\":\"${LOG_GROUP}\"}}" \
-  --hooks '{"port":8080,"microvmHooks":{"run":"/run","runTimeoutInSeconds":60}}' \
+  --hooks '{"port":8080,"microvmHooks":{"run":"ENABLED","runTimeoutInSeconds":60}}' \
   --tags "abca:compute-backend=lambda-microvm"
 
 cat <<EOF
