@@ -19,7 +19,7 @@
   },
   "devDependencies": {
     "@astrojs/check": "^0.9.9",
-    "knip": "6.23.0"
+    "knip": "6.29.0"
   },
   "resolutions": {
     "@astrojs/markdown-remark": "7.2.0",
