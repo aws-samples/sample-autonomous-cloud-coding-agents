@@ -4,7 +4,7 @@ title: Adr 020 ears requirements syntax
 
 # ADR-020: EARS syntax for normative requirements
 
-**Status:** proposed
+**Status:** accepted
 **Date:** 2026-07-28
 
 ## Context

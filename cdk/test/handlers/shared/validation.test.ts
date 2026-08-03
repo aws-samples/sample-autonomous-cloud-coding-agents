@@ -702,15 +702,16 @@ describe('validateMagicBytes', () => {
     expect(validateMagicBytes(binary, 'text/plain')).toBe(false);
   });
 
-  test('rejects INVALID UTF-8 masquerading as text (finding #3)', () => {
-    // A lone 0xFF / 0x80 continuation byte is not valid UTF-8 — the old null-only
-    // check let these through; the real decoder now rejects them.
+  test('rejects a text type whose bytes are not decodable UTF-8', () => {
+    // 0xC3 starts a 2-byte sequence but 0x28 is not a valid continuation byte, and
+    // 0xFF never appears in UTF-8 at all. Neither carries a NUL, so the null-byte
+    // scan below would pass them — only the decode catches this.
+    expect(validateMagicBytes(Buffer.from([0x48, 0xC3, 0x28]), 'text/plain')).toBe(false);
+    expect(validateMagicBytes(Buffer.from([0xFF, 0xFE, 0x41]), 'application/json')).toBe(false);
+    // A lone continuation byte is equally undecodable, and 0xC3 0x28 must fail for
+    // a non-text-prefixed type too, not only for text/plain.
     expect(validateMagicBytes(Buffer.from([0xff, 0xfe, 0x80, 0x81]), 'text/plain')).toBe(false);
-    expect(validateMagicBytes(Buffer.from([0xc3, 0x28]), 'application/json')).toBe(false); // invalid 2-byte seq
-  });
-
-  test('accepts valid multi-byte UTF-8 text (emoji / accents)', () => {
-    expect(validateMagicBytes(Buffer.from('café — 日本語 ✅', 'utf-8'), 'text/markdown')).toBe(true);
+    expect(validateMagicBytes(Buffer.from([0xc3, 0x28]), 'application/json')).toBe(false);
   });
 
   test('does not false-reject a multi-byte char that straddles the old 8 KB cutoff', () => {
@@ -722,7 +723,7 @@ describe('validateMagicBytes', () => {
   });
 
   test('a long ASCII preamble does not launder trailing binary', () => {
-    // The check once looked at only the first 8 KB, so a benign preamble longer
+    // The check used to look at only the first 8 KB, so a benign preamble longer
     // than that let arbitrary bytes through behind it. Validate the whole buffer.
     const payload = Buffer.concat([
       Buffer.from('A'.repeat(9000)),
@@ -730,6 +731,14 @@ describe('validateMagicBytes', () => {
     ]);
     expect(validateMagicBytes(payload, 'text/plain')).toBe(false);
   });
+
+  test('accepts multi-byte UTF-8 text (not just ASCII)', () => {
+    // The decode must not reject legitimate non-ASCII text, in either a text/* or
+    // an application/json content type.
+    expect(validateMagicBytes(Buffer.from('héllo — 世界 🎉', 'utf8'), 'text/plain')).toBe(true);
+    expect(validateMagicBytes(Buffer.from('café — 日本語 ✅', 'utf-8'), 'text/markdown')).toBe(true);
+  });
+
 
   test('rejects mismatched signatures', () => {
     const jpeg = Buffer.from([0xFF, 0xD8, 0xFF, 0xE0]);
