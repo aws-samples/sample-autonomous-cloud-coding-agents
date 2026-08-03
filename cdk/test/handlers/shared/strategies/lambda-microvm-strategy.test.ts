@@ -17,11 +17,16 @@
  *  SOFTWARE.
  */
 
-const IMAGE_IDENTIFIER = 'arn:aws:lambda:us-east-1:123456789012:microvm-image/abca-agent';
+// The image identifier MUST be a full ARN — RunMicrovm rejects a bare name
+// ("Malformed ARN - doesn't start with 'arn:'"), and the live run observed the
+// colon form (`microvm-image:<name>`), which is what the construct derives.
+const IMAGE_IDENTIFIER = 'arn:aws:lambda:us-east-1:123456789012:microvm-image:abca-agent';
 const IMAGE_VERSION = '7';
 const EXECUTION_ROLE_ARN = 'arn:aws:iam::123456789012:role/AbcaMicrovmExecution';
 const EGRESS_CONNECTOR_ARN = 'arn:aws:lambda:us-east-1:123456789012:network-connector/egress-1';
 const INGRESS_CONNECTOR_ARN = 'arn:aws:lambda:us-east-1:123456789012:network-connector/ingress-1';
+const NO_INGRESS_CONNECTOR_ARN =
+  'arn:aws:lambda:us-east-1:aws:network-connector:aws-network-connector:NO_INGRESS';
 const PAYLOAD_BUCKET = 'test-microvm-payload-bucket';
 const MICROVM_ID = 'mvm-0123456789abcdef';
 const ENDPOINT = 'https://mvm-0123456789abcdef.microvm.lambda.us-east-1.amazonaws.com';
@@ -30,13 +35,15 @@ const ENDPOINT = 'https://mvm-0123456789abcdef.microvm.lambda.us-east-1.amazonaw
 // module-level constants (same pattern as ecs-strategy). The top-of-file import
 // is the FULLY-CONFIGURED substrate; the missing-config describe block below
 // re-imports under jest.isolateModules with vars deleted, and the ingress block
-// re-imports with the OPTIONAL ingress var set. Ingress is deliberately absent
-// here so the default (no-ingress) assertions are hermetic.
+// re-imports with a REAL ingress connector configured. Ingress is deliberately
+// absent here so the default (explicit NO_INGRESS fallback) assertions are
+// hermetic; AWS_REGION is set because that fallback derives the ARN from it.
 process.env.MICROVM_IMAGE_IDENTIFIER = IMAGE_IDENTIFIER;
 process.env.MICROVM_IMAGE_VERSION = IMAGE_VERSION;
 process.env.MICROVM_EXECUTION_ROLE_ARN = EXECUTION_ROLE_ARN;
 process.env.MICROVM_EGRESS_CONNECTOR_ARNS = EGRESS_CONNECTOR_ARN;
 process.env.MICROVM_PAYLOAD_BUCKET = PAYLOAD_BUCKET;
+process.env.AWS_REGION = 'us-east-1';
 delete process.env.MICROVM_INGRESS_CONNECTOR_ARNS;
 
 const mockSend = jest.fn();
@@ -75,6 +82,7 @@ import {
   MICROVM_ERROR_MARKER,
   MICROVM_MAX_DURATION_SECONDS,
   MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES,
+  microvmNoIngressConnectorArnForRegion,
   microvmPayloadKey,
 } from '../../../../src/handlers/shared/strategies/lambda-microvm-strategy';
 
@@ -82,7 +90,7 @@ const BLUEPRINT: BlueprintConfig = { compute_type: 'lambda-microvm', runtime_arn
 
 /**
  * Build a payload whose serialized `{"agent_payload": …}` envelope is EXACTLY
- * `targetBytes` long, so the 16 KB boundary can be probed on both sides. Asserts
+ * `targetBytes` long, so the 4 KB boundary can be probed on both sides. Asserts
  * its own arithmetic — if the envelope shape ever changes, this fails loudly
  * rather than silently testing the wrong boundary.
  */
@@ -110,6 +118,54 @@ const makeHandle = () => ({
   microvmId: MICROVM_ID,
   endpoint: ENDPOINT,
 });
+
+/**
+ * Run `body` with only the given Region env vars set, restoring both afterwards.
+ *
+ * `noIngressConnectorArn()` reads the Region at CALL time (not import time), so
+ * the NO_INGRESS fallback tests need no module reload — just a scoped env.
+ */
+function withRegion(env: { AWS_REGION?: string; AWS_DEFAULT_REGION?: string }, body: () => void): void {
+  const saved = {
+    AWS_REGION: process.env.AWS_REGION,
+    AWS_DEFAULT_REGION: process.env.AWS_DEFAULT_REGION,
+  };
+  try {
+    for (const key of ['AWS_REGION', 'AWS_DEFAULT_REGION'] as const) {
+      if (env[key] === undefined) delete process.env[key];
+      else process.env[key] = env[key];
+    }
+    body();
+  } finally {
+    for (const key of ['AWS_REGION', 'AWS_DEFAULT_REGION'] as const) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+  }
+}
+
+/** {@link withRegion} for an async body. */
+async function withRegionAsync(
+  env: { AWS_REGION?: string; AWS_DEFAULT_REGION?: string },
+  body: () => Promise<void>,
+): Promise<void> {
+  const saved = {
+    AWS_REGION: process.env.AWS_REGION,
+    AWS_DEFAULT_REGION: process.env.AWS_DEFAULT_REGION,
+  };
+  try {
+    for (const key of ['AWS_REGION', 'AWS_DEFAULT_REGION'] as const) {
+      if (env[key] === undefined) delete process.env[key];
+      else process.env[key] = env[key];
+    }
+    await body();
+  } finally {
+    for (const key of ['AWS_REGION', 'AWS_DEFAULT_REGION'] as const) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+  }
+}
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -179,7 +235,7 @@ describe('LambdaMicrovmComputeStrategy', () => {
       expect('idlePolicy' in input).toBe(false);
     });
 
-    test('passes NO ingress connectors by default (no orchestrator to agent path in P1)', async () => {
+    test('passes the explicit NO_INGRESS connector when no ingress is configured', async () => {
       runMicrovmOk();
 
       await new LambdaMicrovmComputeStrategy().startSession({
@@ -190,7 +246,74 @@ describe('LambdaMicrovmComputeStrategy', () => {
       });
 
       const input = mockSend.mock.calls[0][0].input;
-      expect('ingressNetworkConnectors' in input).toBe(false);
+      // NOT omitted: a RunMicrovm call with no ingressNetworkConnectors comes
+      // back with the AWS-managed PUBLIC HTTP_INGRESS connector attached and a
+      // public *.lambda-microvm.<region>.on.aws endpoint (live-observed). "No
+      // inbound" is a control we have to request.
+      expect('ingressNetworkConnectors' in input).toBe(true);
+      expect(input.ingressNetworkConnectors).toEqual([NO_INGRESS_CONNECTOR_ARN]);
+      expect(JSON.stringify(input)).not.toContain('HTTP_INGRESS');
+      expect(JSON.stringify(input)).not.toContain('SHELL_INGRESS');
+    });
+
+    test('derives the NO_INGRESS fallback ARN from the running Region', () => {
+      // Region-derived rather than hardcoded so the fallback is right in all five
+      // supported Regions; partition follows the Region prefix for aws-cn/-gov.
+      expect(microvmNoIngressConnectorArnForRegion()).toBe(NO_INGRESS_CONNECTOR_ARN);
+    });
+
+    test.each([
+      ['us-east-1', 'aws'],
+      ['ap-northeast-1', 'aws'],
+      ['cn-north-1', 'aws-cn'],
+      ['us-gov-west-1', 'aws-us-gov'],
+    ])('the NO_INGRESS fallback uses the right partition in %s', (region, partition) => {
+      // A wrong partition would make the connector ARN unresolvable and the
+      // launch would fail — which is safer than a public endpoint, but still a
+      // hard outage in aws-cn / aws-us-gov if we ever ship there. The Region is
+      // read at CALL time (not import time), so no module reload is needed.
+      withRegion({ AWS_REGION: region }, () => {
+        expect(microvmNoIngressConnectorArnForRegion()).toBe(
+          `arn:${partition}:lambda:${region}:aws:network-connector:aws-network-connector:NO_INGRESS`,
+        );
+      });
+    });
+
+    test('the NO_INGRESS fallback reads AWS_DEFAULT_REGION when AWS_REGION is unset', () => {
+      withRegion({ AWS_DEFAULT_REGION: 'eu-west-1' }, () => {
+        expect(microvmNoIngressConnectorArnForRegion())
+          .toContain(':lambda:eu-west-1:aws:network-connector:');
+      });
+    });
+
+    test('the NO_INGRESS fallback never splices `undefined` into the ARN', () => {
+      // Neither var set is impossible in Lambda (the runtime always injects
+      // AWS_REGION), but a Region-less ARN must still be a well-formed string the
+      // service can reject cleanly rather than `arn:aws:lambda:undefined:...`.
+      withRegion({}, () => {
+        expect(microvmNoIngressConnectorArnForRegion()).not.toContain('undefined');
+      });
+    });
+
+    test('the fallback reaches the RunMicrovm INPUT, per-Region, not just the helper', async () => {
+      // Outcome-level assertion for the fallback path: what matters is the ARN the
+      // service actually receives. Asserting only the helper would let a wiring
+      // regression (field omitted, wrong variable) pass while every agent MicroVM
+      // silently got the service-default PUBLIC endpoint.
+      runMicrovmOk();
+
+      await withRegionAsync({ AWS_REGION: 'eu-west-1' }, async () => {
+        await new LambdaMicrovmComputeStrategy().startSession({
+          taskId: 'TASK001',
+          userId: 'cognito-test',
+          payload: { repo_url: 'org/repo' },
+          blueprintConfig: BLUEPRINT,
+        });
+      });
+
+      expect(mockSend.mock.calls[0][0].input.ingressNetworkConnectors).toEqual([
+        'arn:aws:lambda:eu-west-1:aws:network-connector:aws-network-connector:NO_INGRESS',
+      ]);
     });
 
     test('inlines a small payload in runHookPayload and never touches S3', async () => {
@@ -234,43 +357,43 @@ describe('LambdaMicrovmComputeStrategy', () => {
       const envelope = JSON.parse(runHookPayload);
       expect(envelope.agent_payload_s3_uri).toBe(`s3://${PAYLOAD_BUCKET}/TASK001/payload.json`);
       expect(envelope.agent_payload).toBeUndefined();
-      // The whole point: the hook body must sit far under the 16 KB cap.
+      // The whole point: the hook body must sit far under the 4 KB cap.
       expect(Buffer.byteLength(runHookPayload, 'utf8')).toBeLessThan(MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES);
     });
 
-    test('the inline/S3 branch point IS the 16KB service cap, with no headroom', () => {
+    test('the inline/S3 branch point IS the 4096-byte service cap, with no headroom', () => {
+      // Live-measured, NOT read off the SDK docs (which say 16,384): the service
+      // rejects 4097 with "Member must have length less than or equal to 4096".
       // Unlike ECS (whose 8192-byte cap is shared with env vars + command, so it
-      // needs a margin), runHookPayload is the entire counted string — ADR-021
-      // says upload only when the payload EXCEEDS 16 KB, so shipping a 13 KB
-      // payload to S3 would violate the requirement.
-      expect(MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES).toBe(16_384);
+      // needs a margin), runHookPayload is the entire counted string.
+      expect(MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES).toBe(4_096);
     });
 
-    test('a payload whose envelope is EXACTLY 16384 bytes stays inline', async () => {
+    test('a payload whose envelope is EXACTLY 4096 bytes stays inline', async () => {
       runMicrovmOk();
 
       await new LambdaMicrovmComputeStrategy().startSession({
         taskId: 'TASK001',
         userId: 'cognito-test',
-        payload: payloadWithEnvelopeBytes(16_384),
+        payload: payloadWithEnvelopeBytes(4_096),
         blueprintConfig: BLUEPRINT,
       });
 
-      // Boundary is `<=`: 16384 is at the cap, not over it.
+      // Boundary is `<=`: 4096 passed the service's length validation live.
       expect(mockS3Send).not.toHaveBeenCalled();
       const runHookPayload = mockSend.mock.calls[0][0].input.runHookPayload;
-      expect(Buffer.byteLength(runHookPayload, 'utf8')).toBe(16_384);
+      expect(Buffer.byteLength(runHookPayload, 'utf8')).toBe(4_096);
       expect(JSON.parse(runHookPayload).agent_payload).toBeDefined();
     });
 
-    test('a payload whose envelope is 16385 bytes — one over — goes to S3', async () => {
+    test('a payload whose envelope is 4097 bytes — one over — goes to S3', async () => {
       mockS3Send.mockResolvedValueOnce({});
       runMicrovmOk();
 
       await new LambdaMicrovmComputeStrategy().startSession({
         taskId: 'TASK001',
         userId: 'cognito-test',
-        payload: payloadWithEnvelopeBytes(16_385),
+        payload: payloadWithEnvelopeBytes(4_097),
         blueprintConfig: BLUEPRINT,
       });
 
@@ -280,11 +403,12 @@ describe('LambdaMicrovmComputeStrategy', () => {
       expect(envelope.agent_payload).toBeUndefined();
     });
 
-    test('a mid-sized payload the old 12KB threshold would have offloaded stays inline', async () => {
+    test('a mid-sized envelope the SDK-documented 16KB cap would have inlined goes to S3', async () => {
+      mockS3Send.mockResolvedValueOnce({});
       runMicrovmOk();
 
-      // Regression guard for the compliance fix: 13 KB is under the 16 KB cap, so
-      // it must NOT incur an S3 round-trip.
+      // Regression guard for the live-verification fix: anything from 4,097 to
+      // 16,384 bytes used to be inlined and would be REJECTED by the service.
       await new LambdaMicrovmComputeStrategy().startSession({
         taskId: 'TASK001',
         userId: 'cognito-test',
@@ -292,17 +416,21 @@ describe('LambdaMicrovmComputeStrategy', () => {
         blueprintConfig: BLUEPRINT,
       });
 
-      expect(mockS3Send).not.toHaveBeenCalled();
-      expect(JSON.parse(mockSend.mock.calls[0][0].input.runHookPayload).agent_payload).toBeDefined();
+      expect(mockS3Send).toHaveBeenCalledTimes(1);
+      const envelope = JSON.parse(mockSend.mock.calls[0][0].input.runHookPayload);
+      expect(envelope.agent_payload_s3_uri).toBeDefined();
+      expect(envelope.agent_payload).toBeUndefined();
     });
 
     test('measures the serialized envelope in BYTES, so a multi-byte payload still goes to S3', async () => {
       mockS3Send.mockResolvedValueOnce({});
       runMicrovmOk();
 
-      // 7000 chars of 3-byte UTF-8 → ~21 KB of bytes but only 7 KB of chars.
-      // Measuring String.length would have wrongly inlined this.
-      const payload = { repo_url: 'org/repo', prompt: '\u4f60'.repeat(7_000) };
+      // 3-byte UTF-8 characters: 2000 chars is ~6 KB of bytes but only 2 KB of
+      // chars, so measuring String.length would have wrongly inlined this.
+      const payload = { prompt: '\u4f60'.repeat(2_000) };
+      expect(JSON.stringify({ agent_payload: payload }).length)
+        .toBeLessThan(MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES);
       await new LambdaMicrovmComputeStrategy().startSession({
         taskId: 'TASK001',
         userId: 'cognito-test',
@@ -338,6 +466,76 @@ describe('LambdaMicrovmComputeStrategy', () => {
           blueprintConfig: BLUEPRINT,
         }),
       ).rejects.toThrow('RunMicrovm returned an incomplete response');
+    });
+
+    test('MARKS the incomplete-response throw so the classifier can see the backend', async () => {
+      // Unmarked, this landed in error-classifier's generic `Session start failed`
+      // bucket, whose remedy is "Check AgentCore Runtime or ECS cluster health" —
+      // the wrong substrate entirely.
+      mockSend.mockResolvedValueOnce({ endpoint: ENDPOINT, state: 'PENDING' });
+
+      await expect(
+        new LambdaMicrovmComputeStrategy().startSession({
+          taskId: 'TASK001',
+          userId: 'cognito-test',
+          payload: { repo_url: 'org/repo' },
+          blueprintConfig: BLUEPRINT,
+        }),
+      ).rejects.toThrow(
+        `${MICROVM_ERROR_MARKER} RunMicrovm failed: RunMicrovm returned an incomplete response`,
+      );
+    });
+
+    test('REAPS the MicroVM when the response carries an id but no endpoint', async () => {
+      // The one orphan window the orchestrator cannot cover: startSession never
+      // returns a handle, so nothing downstream knows the id. A MicroVM is already
+      // running and nothing self-terminates on this substrate.
+      mockSend
+        .mockResolvedValueOnce({ microvmId: MICROVM_ID, state: 'RUNNING' })
+        .mockResolvedValueOnce({});
+
+      await expect(
+        new LambdaMicrovmComputeStrategy().startSession({
+          taskId: 'TASK001',
+          userId: 'cognito-test',
+          payload: { repo_url: 'org/repo' },
+          blueprintConfig: BLUEPRINT,
+        }),
+      ).rejects.toThrow(`${MICROVM_ERROR_MARKER} RunMicrovm failed`);
+
+      const terminate = mockSend.mock.calls.find(c => c[0]._type === 'TerminateMicrovm');
+      expect(terminate).toBeDefined();
+      expect(terminate![0].input).toEqual({ microvmIdentifier: MICROVM_ID });
+    });
+
+    test('a failing reap does not mask the incomplete-response error', async () => {
+      mockSend
+        .mockResolvedValueOnce({ microvmId: MICROVM_ID, state: 'RUNNING' })
+        .mockRejectedValueOnce(new Error('terminate blew up'));
+
+      await expect(
+        new LambdaMicrovmComputeStrategy().startSession({
+          taskId: 'TASK001',
+          userId: 'cognito-test',
+          payload: { repo_url: 'org/repo' },
+          blueprintConfig: BLUEPRINT,
+        }),
+      ).rejects.toThrow('RunMicrovm returned an incomplete response');
+    });
+
+    test('does NOT attempt a reap when there is no id to reap', async () => {
+      mockSend.mockResolvedValueOnce({ endpoint: ENDPOINT, state: 'PENDING' });
+
+      await expect(
+        new LambdaMicrovmComputeStrategy().startSession({
+          taskId: 'TASK001',
+          userId: 'cognito-test',
+          payload: { repo_url: 'org/repo' },
+          blueprintConfig: BLUEPRINT,
+        }),
+      ).rejects.toThrow();
+
+      expect(mockSend.mock.calls.filter(c => c[0]._type === 'TerminateMicrovm')).toHaveLength(0);
     });
 
     test('microvmPayloadKey matches the ECS payload key shape', () => {
@@ -629,10 +827,88 @@ describe('LambdaMicrovmComputeStrategy with ingress connectors configured', () =
       blueprintConfig: BLUEPRINT,
     });
 
-    // Comma-separated, whitespace-trimmed — same parsing as ECS_SUBNETS.
+    // Comma-separated, whitespace-trimmed — same parsing as ECS_SUBNETS. A
+    // configured value WINS over the NO_INGRESS default (that is how #391
+    // operator shell access lands without a strategy change).
     expect(mockSend.mock.calls[0][0].input.ingressNetworkConnectors).toEqual([
       INGRESS_CONNECTOR_ARN,
       `${INGRESS_CONNECTOR_ARN}-b`,
     ]);
+  });
+
+  test('a BLANK env var still yields NO_INGRESS, never an omitted field', async () => {
+    let Strategy!: typeof LambdaMicrovmComputeStrategy;
+    jest.isolateModules(() => {
+      process.env.MICROVM_INGRESS_CONNECTOR_ARNS = '  ,  ';
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      Strategy = require('../../../../src/handlers/shared/strategies/lambda-microvm-strategy').LambdaMicrovmComputeStrategy;
+    });
+    delete process.env.MICROVM_INGRESS_CONNECTOR_ARNS;
+
+    runMicrovmOk();
+    await new Strategy().startSession({
+      taskId: 'TASK001',
+      userId: 'cognito-test',
+      payload: { repo_url: 'org/repo' },
+      blueprintConfig: BLUEPRINT,
+    });
+
+    // A blank/misconfigured value must not fall back to the service default,
+    // which is a PUBLIC endpoint on every agent MicroVM.
+    expect(mockSend.mock.calls[0][0].input.ingressNetworkConnectors)
+      .toEqual([NO_INGRESS_CONNECTOR_ARN]);
+  });
+});
+
+describe('LambdaMicrovmComputeStrategy image-identifier validation', () => {
+  function loadStrategyWithIdentifier(identifier: string): typeof LambdaMicrovmComputeStrategy {
+    let Strategy!: typeof LambdaMicrovmComputeStrategy;
+    const saved = process.env.MICROVM_IMAGE_IDENTIFIER;
+    jest.isolateModules(() => {
+      process.env.MICROVM_IMAGE_IDENTIFIER = identifier;
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      Strategy = require('../../../../src/handlers/shared/strategies/lambda-microvm-strategy').LambdaMicrovmComputeStrategy;
+    });
+    if (saved !== undefined) process.env.MICROVM_IMAGE_IDENTIFIER = saved;
+    return Strategy;
+  }
+
+  test.each([
+    ['abca-agent'],
+    ['backgroundagent-dev-abca-agent'],
+    ['microvm-image:abca-agent'],
+  ])('rejects the bare identifier %s BEFORE any AWS call', async (identifier) => {
+    const Strategy = loadStrategyWithIdentifier(identifier);
+
+    const start = new Strategy().startSession({
+      taskId: 'TASK001',
+      userId: 'cognito-test',
+      // Oversized on purpose: the guard must fire before the payload upload, or a
+      // misconfiguration leaves orphan objects in the payload bucket.
+      payload: payloadWithEnvelopeBytes(20_000),
+      blueprintConfig: BLUEPRINT,
+    });
+
+    await expect(start).rejects.toThrow(/must be a full MicroVM image ARN/);
+    // Names the service's own error text so an operator can match the two up.
+    await expect(start).rejects.toThrow(/Malformed ARN/);
+    // ...and the remedy.
+    await expect(start).rejects.toThrow(/--context compute_type=lambda-microvm/);
+    expect(mockSend).not.toHaveBeenCalled();
+    expect(mockS3Send).not.toHaveBeenCalled();
+  });
+
+  test('accepts a full image ARN', async () => {
+    const Strategy = loadStrategyWithIdentifier(IMAGE_IDENTIFIER);
+    runMicrovmOk();
+
+    await new Strategy().startSession({
+      taskId: 'TASK001',
+      userId: 'cognito-test',
+      payload: { repo_url: 'org/repo' },
+      blueprintConfig: BLUEPRINT,
+    });
+
+    expect(mockSend.mock.calls[0][0].input.imageIdentifier).toBe(IMAGE_IDENTIFIER);
   });
 });

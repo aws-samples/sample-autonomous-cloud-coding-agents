@@ -557,9 +557,11 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
     template = Template.fromStack(stack);
   });
 
-  test('provisions the MicroVM image + egress network connector', () => {
+  test('provisions the MicroVM image + BOTH egress network connectors', () => {
     template.resourceCountIs('AWS::Lambda::MicrovmImage', 1);
-    template.resourceCountIs('AWS::Lambda::NetworkConnector', 1);
+    // Runtime (443) + build-time (443 + 80, for apt-get) — see ADR-021's
+    // build-time-egress security-table row.
+    template.resourceCountIs('AWS::Lambda::NetworkConnector', 2);
   });
 
   test('does NOT provision the ECS substrate (the gates are mutually exclusive)', () => {
@@ -578,13 +580,22 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
       'MicrovmBuildRoleArn',
       'MicrovmExecutionRoleArn',
       'MicrovmEgressConnectorArns',
+      // The script passes THIS one to create-microvm-image: the runtime
+      // connector is 443-only and the Dockerfile's apt-get needs port 80.
+      'MicrovmBuildEgressConnectorArns',
       'MicrovmLogGroupName',
     ]) {
       template.hasOutput(output, {});
     }
   });
 
-  test('injects the four required MICROVM_* env vars the strategy reads', () => {
+  test('the build and runtime egress connector outputs are DIFFERENT connectors', () => {
+    const outputs = template.toJSON().Outputs as Record<string, { Value: unknown }>;
+    expect(JSON.stringify(outputs.MicrovmEgressConnectorArns.Value))
+      .not.toEqual(JSON.stringify(outputs.MicrovmBuildEgressConnectorArns.Value));
+  });
+
+  test('injects the MICROVM_* env vars the strategy reads, including explicit NO_INGRESS', () => {
     const fns = template.findResources('AWS::Lambda::Function');
     const [, orchestrator] = Object.entries(fns)
       .find(([id]) => id.includes('TaskOrchestratorOrchestratorFn'))!;
@@ -594,12 +605,28 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
       'MICROVM_EGRESS_CONNECTOR_ARNS',
       'MICROVM_EXECUTION_ROLE_ARN',
       'MICROVM_IMAGE_IDENTIFIER',
+      'MICROVM_INGRESS_CONNECTOR_ARNS',
       'MICROVM_PAYLOAD_BUCKET',
     ]);
-    // Image version is deliberately unpinned, and no ingress connectors exist
-    // in P1–P3 (nothing dials into the MicroVM, no JWE tokens are minted).
+    // Image version is deliberately unpinned.
     expect(env.MICROVM_IMAGE_VERSION).toBeUndefined();
-    expect(env.MICROVM_INGRESS_CONNECTOR_ARNS).toBeUndefined();
+    // Ingress is NOT empty and NOT omitted: RunMicrovm attaches a PUBLIC
+    // HTTP_INGRESS connector (with a public endpoint) when the field is absent,
+    // so "no inbound" is an explicit control on every launch.
+    expect(JSON.stringify(env.MICROVM_INGRESS_CONNECTOR_ARNS)).toContain('NO_INGRESS');
+    expect(JSON.stringify(env.MICROVM_INGRESS_CONNECTOR_ARNS)).not.toContain('HTTP_INGRESS');
+  });
+
+  test('MICROVM_IMAGE_IDENTIFIER is the image ARN, not a bare name', () => {
+    // RunMicrovm rejects a bare name ("Malformed ARN - doesn't start with
+    // 'arn:'"), so the identifier the orchestrator receives must be the same ARN
+    // the lifecycle IAM grant is scoped to.
+    const fns = template.findResources('AWS::Lambda::Function');
+    const [, orchestrator] = Object.entries(fns)
+      .find(([id]) => id.includes('TaskOrchestratorOrchestratorFn'))!;
+    const env = orchestrator.Properties.Environment.Variables as Record<string, unknown>;
+    expect(JSON.stringify(env.MICROVM_IMAGE_IDENTIFIER))
+      .toMatch(/"Fn::GetAtt":\["LambdaMicrovmComputeImage[^"]*","ImageArn"\]/);
   });
 
   test('grants the orchestrator exactly the P1 lifecycle actions, image-scoped', () => {
@@ -772,10 +799,13 @@ describe('AgentStack with the MicroVM gate on but no image configured (first dep
     template = Template.fromStack(stack);
   });
 
-  test('provisions the substrate (buckets, roles, connector) but no image', () => {
-    template.resourceCountIs('AWS::Lambda::NetworkConnector', 1);
+  test('provisions the substrate (buckets, roles, both connectors) but no image', () => {
+    template.resourceCountIs('AWS::Lambda::NetworkConnector', 2);
     template.resourceCountIs('AWS::Lambda::MicrovmImage', 0);
     template.hasOutput('MicrovmArtifactBucketName', {});
+    // The build-time connector output is what the packaging script reads next, so
+    // it must exist in exactly this pre-image state.
+    template.hasOutput('MicrovmBuildEgressConnectorArns', {});
   });
 
   test('grants no MicroVM IAM actions at all — nothing to run or cancel yet', () => {

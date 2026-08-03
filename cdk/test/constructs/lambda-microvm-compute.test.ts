@@ -25,15 +25,19 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import { AgentSessionRole } from '../../src/constructs/agent-session-role';
 import {
+  DEFAULT_MINIMUM_MEMORY_MIB,
   LambdaMicrovmCompute,
   MICROVM_ARTIFACT_OBJECT_KEY,
   MICROVM_BACKEND_TAG_KEY,
   MICROVM_BACKEND_TAG_VALUE,
   MICROVM_LOG_GROUP_PREFIX,
+  MICROVM_NO_INGRESS_CONNECTOR_RESOURCE,
   MICROVM_PAYLOAD_TTL_DAYS,
   MICROVM_REGION_OVERRIDE_CONTEXT,
+  MICROVM_SUPPORTED_MEMORY_MIB,
   assertLambdaMicrovmRegionSupported,
   isLambdaMicrovmImageConfigured,
+  microvmNoIngressConnectorArn,
 } from '../../src/constructs/lambda-microvm-compute';
 import { LAMBDA_MICROVM_SUPPORTED_REGIONS } from '../../src/handlers/shared/microvm-regions';
 
@@ -47,6 +51,7 @@ interface BuildOptions {
   readonly externalImageVersion?: string;
   readonly withSessionRole?: boolean;
   readonly regionAgnostic?: boolean;
+  readonly minimumMemoryInMiB?: number;
 }
 
 interface Built {
@@ -105,6 +110,7 @@ function instantiate(options: BuildOptions = {}): Omit<Built, 'template'> {
     }),
     externalImageIdentifier: options.externalImageIdentifier,
     externalImageVersion: options.externalImageVersion,
+    minimumMemoryInMiB: options.minimumMemoryInMiB,
   });
 
   return { stack, construct };
@@ -142,24 +148,43 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     });
   });
 
-  test('builds an ARM64 image sized at the 32 GB service ceiling', () => {
+  test('builds an ARM64 image at the largest ACCEPTED BASELINE (8 GiB)', () => {
+    // 32768 was rejected live: "The requested memory size of 32768 MiB is not
+    // supported by base MicroVM image …al2023-1. Supported memory sizes in MiB
+    // are: [512, 1024, 2048, 4096, 8192]." Note this configures the BASELINE —
+    // the service scales vertically to a 32 GiB / 16 vCPU peak on its own, which
+    // is why nothing here asks for the peak.
     template.hasResourceProperties('AWS::Lambda::MicrovmImage', {
       CpuConfigurations: [{ Architecture: 'arm64' }],
-      Resources: [{ MinimumMemoryInMiB: 32768 }],
+      Resources: [{ MinimumMemoryInMiB: 8192 }],
     });
+    expect(DEFAULT_MINIMUM_MEMORY_MIB).toBe(8192);
+    expect(MICROVM_SUPPORTED_MEMORY_MIB).toEqual([512, 1024, 2048, 4096, 8192]);
+    expect(Math.max(...MICROVM_SUPPORTED_MEMORY_MIB)).toBe(DEFAULT_MINIMUM_MEMORY_MIB);
   });
 
-  test('configures ONLY the /run hook — suspend/resume/terminate are P3', () => {
+  test('configures /ready + /run and NOTHING else (the rest fail their transition)', () => {
     const images = template.findResources('AWS::Lambda::MicrovmImage');
     const hooks = Object.values(images)[0]!.Properties.Hooks;
     expect(hooks.Port).toBe(8080);
-    expect(hooks.MicrovmHooks).toEqual({ Run: '/run', RunTimeoutInSeconds: 60 });
+    // Paths are the routes `agent/src/server.py` actually serves (the API model
+    // has no path field at all, so a made-up path would be a silent lie).
+    expect(hooks.MicrovmHooks).toEqual({
+      Run: '/aws/lambda-microvms/runtime/v1/run',
+      RunTimeoutInSeconds: 60,
+    });
+    // /ready is MANDATORY: create-microvm-image refuses ANY lifecycle hook
+    // without it, so "declare /run in P1, serve it in P2" was unreachable.
+    expect(hooks.MicrovmImageHooks).toEqual({
+      Ready: '/aws/lambda-microvms/runtime/v1/ready',
+      ReadyTimeoutInSeconds: 60,
+    });
     // A hook the service calls but the agent does not serve fails the lifecycle
-    // transition, so P1 must not advertise hooks it has not implemented.
+    // transition (or every build), so nothing else may be advertised.
     expect(hooks.MicrovmHooks.Suspend).toBeUndefined();
     expect(hooks.MicrovmHooks.Resume).toBeUndefined();
     expect(hooks.MicrovmHooks.Terminate).toBeUndefined();
-    expect(hooks.MicrovmImageHooks).toBeUndefined();
+    expect(hooks.MicrovmImageHooks.Validate).toBeUndefined();
   });
 
   test('bakes NO environment variables into the snapshot (ADR-021: no secrets in the image)', () => {
@@ -168,12 +193,16 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     });
   });
 
-  test('routes image build-time egress through the platform VPC connector', () => {
+  test('routes image build-time egress through the BUILD connector, not the runtime one', () => {
+    // The runtime connector is 443-only, and `agent/Dockerfile` runs `apt-get`
+    // over HTTP/80 — pointing the build at it fails every snapshot build.
     template.hasResourceProperties('AWS::Lambda::MicrovmImage', {
       EgressNetworkConnectors: [
-        { 'Fn::GetAtt': [Match.stringLikeRegexp('LambdaMicrovmComputeEgressConnector'), 'Arn'] },
+        { 'Fn::GetAtt': [Match.stringLikeRegexp('LambdaMicrovmComputeBuildEgressConnector'), 'Arn'] },
       ],
     });
+    expect(built.construct.buildEgressConnectorArns)
+      .not.toEqual(built.construct.egressConnectorArns);
   });
 
   test('exposes the image ARN as both the identifier and the IAM grant scope', () => {
@@ -184,9 +213,16 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     expect(built.construct.imageVersion).toBeUndefined();
   });
 
-  test('creates an egress-only network connector on the private subnets', () => {
-    template.resourceCountIs('AWS::Lambda::NetworkConnector', 1);
+  test('creates TWO egress connectors on the private subnets, both with an operator role', () => {
+    template.resourceCountIs('AWS::Lambda::NetworkConnector', 2);
+
+    // Runtime connector.
     template.hasResourceProperties('AWS::Lambda::NetworkConnector', {
+      // REQUIRED for VPC_EGRESS despite the generated L1 typing it optional:
+      // "NetworkConnectorOperatorRole is required for VPC_EGRESS connector type".
+      OperatorRole: {
+        'Fn::GetAtt': [Match.stringLikeRegexp('LambdaMicrovmComputeConnectorOperatorRole'), 'Arn'],
+      },
       Configuration: {
         VpcEgressConfiguration: {
           // The only value the service accepts today.
@@ -199,15 +235,105 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
         },
       },
     });
+
+    // Build connector — same shape, different security group.
+    template.hasResourceProperties('AWS::Lambda::NetworkConnector', {
+      OperatorRole: {
+        'Fn::GetAtt': [Match.stringLikeRegexp('LambdaMicrovmComputeConnectorOperatorRole'), 'Arn'],
+      },
+      Configuration: {
+        VpcEgressConfiguration: {
+          SecurityGroupIds: [
+            { 'Fn::GetAtt': [Match.stringLikeRegexp('LambdaMicrovmComputeMicrovmBuildSG'), 'GroupId'] },
+          ],
+        },
+      },
+    });
+
+    // ONE operator role shared by both — a second identical role would double
+    // the IAM surface with no isolation gain.
+    const operatorRoles = Object.keys(template.findResources('AWS::IAM::Role'))
+      .filter(id => id.includes('LambdaMicrovmComputeConnectorOperatorRole'));
+    expect(operatorRoles).toHaveLength(1);
   });
 
-  test('security group allows TCP 443 egress only', () => {
+  test('operator role trusts lambda.amazonaws.com and can manage ENIs', () => {
+    const [, role] = Object.entries(template.findResources('AWS::IAM::Role'))
+      .find(([id]) => id.includes('LambdaMicrovmComputeConnectorOperatorRole'))!;
+
+    // Same confused-deputy posture as the build/execution roles.
+    const statements = role.Properties.AssumeRolePolicyDocument.Statement;
+    expect(statements).toHaveLength(1);
+    expect(statements[0].Action).toBe('sts:AssumeRole');
+    expect(statements[0].Principal).toEqual({ Service: 'lambda.amazonaws.com' });
+    expect(statements[0].Condition).toEqual({
+      StringEquals: { 'aws:SourceAccount': '123456789012' },
+    });
+
+    // The AWS-managed policy for exactly this job...
+    expect(JSON.stringify(role.Properties.ManagedPolicyArns))
+      .toContain('service-role/AWSLambdaVPCAccessExecutionRole');
+
+    // ...plus the ENI/tag/private-IP actions the probe run showed it needs.
+    const policies = Object.entries(template.findResources('AWS::IAM::Policy'))
+      .filter(([id]) => id.includes('LambdaMicrovmComputeConnectorOperatorRole'));
+    const actions = policies
+      .flatMap(([, p]) => p.Properties.PolicyDocument.Statement as Array<{ Action: string | string[] }>)
+      .flatMap(s => Array.isArray(s.Action) ? s.Action : [s.Action]);
+    for (const action of [
+      'ec2:CreateNetworkInterface',
+      'ec2:DeleteNetworkInterface',
+      'ec2:DescribeNetworkInterfaces',
+      'ec2:DescribeSubnets',
+      'ec2:DescribeVpcs',
+      'ec2:DescribeSecurityGroups',
+      'ec2:AssignPrivateIpAddresses',
+      'ec2:UnassignPrivateIpAddresses',
+      'ec2:CreateTags',
+    ]) {
+      expect(actions).toContain(action);
+    }
+    // It manages ENIs, nothing else — no data-plane reach.
+    const rendered = JSON.stringify(policies);
+    expect(rendered).not.toContain('s3:');
+    expect(rendered).not.toContain('dynamodb:');
+    expect(rendered).not.toContain('lambda:');
+  });
+
+  test('runtime security group allows TCP 443 egress only', () => {
     template.hasResourceProperties('AWS::EC2::SecurityGroup', {
       GroupDescription: 'Lambda MicroVMs agent sessions - egress TCP 443 only',
       SecurityGroupEgress: [
         Match.objectLike({ IpProtocol: 'tcp', FromPort: 443, ToPort: 443, CidrIp: '0.0.0.0/0' }),
       ],
     });
+  });
+
+  test('BUILD security group additionally allows TCP 80 (apt-get), and only there', () => {
+    template.hasResourceProperties('AWS::EC2::SecurityGroup', {
+      GroupDescription: 'Lambda MicroVMs image BUILD - egress TCP 443 + 80 (apt-get)',
+      SecurityGroupEgress: [
+        Match.objectLike({ IpProtocol: 'tcp', FromPort: 443, ToPort: 443, CidrIp: '0.0.0.0/0' }),
+        Match.objectLike({ IpProtocol: 'tcp', FromPort: 80, ToPort: 80, CidrIp: '0.0.0.0/0' }),
+      ],
+    });
+
+    // The point of two groups: port 80 must NOT leak into the runtime posture.
+    const [, runtimeSg] = Object.entries(template.findResources('AWS::EC2::SecurityGroup'))
+      .find(([id]) => id.includes('LambdaMicrovmComputeMicrovmSG'))!;
+    expect(runtimeSg.Properties.SecurityGroupEgress).toHaveLength(1);
+    expect(JSON.stringify(runtimeSg.Properties.SecurityGroupEgress)).not.toContain('"FromPort":80');
+  });
+
+  test('exposes the explicit NO_INGRESS connector for RunMicrovm', () => {
+    // Load-bearing: RunMicrovm attaches a PUBLIC HTTP_INGRESS connector when the
+    // field is omitted, so "no inbound" must be requested, not assumed.
+    expect(built.construct.ingressConnectorArns).toHaveLength(1);
+    expect(built.construct.ingressConnectorArns[0])
+      .toMatch(/^arn:.+:lambda:us-east-1:aws:network-connector:aws-network-connector:NO_INGRESS$/);
+    expect(MICROVM_NO_INGRESS_CONNECTOR_RESOURCE).toBe('aws-network-connector:NO_INGRESS');
+    // Service-owned, not account-owned — the account segment is the literal `aws`.
+    expect(built.construct.ingressConnectorArns[0]).not.toContain('123456789012');
   });
 
   test('creates a retention-managed log group under the service log namespace', () => {
@@ -357,26 +483,33 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     expect(JSON.stringify(template.toJSON())).not.toContain('CreateMicrovmAuthToken');
   });
 
-  test('warns that a P1 image is not runnable end to end (hook phasing)', () => {
-    // ADR-021 sub-decision 3: P1 DECLARES /run, the agent SERVES it in P2. A
-    // provisioned substrate plus a buildable image is indistinguishable from a
-    // working backend until a task silently stalls, so the warning is emitted on
-    // every deploy that configures an image.
+  test('warns that a P1 image has no smoke-parity guarantee (hook phasing)', () => {
+    // ADR-021 sub-decision 3, as corrected by the live P1 run: P1 declares AND
+    // serves /ready + /run, so the image is creatable, launchable and
+    // payload-deliverable — which makes it look even more like a working backend
+    // than before, while nothing has exercised clone → change → PR on it.
     const warnings = built.construct.node.metadata.filter(m => m.type === 'aws:cdk:warning');
     const message = warnings.map(w => String(w.data)).join('\n');
     expect(JSON.stringify(built.construct.node.metadata))
-      .toContain('abca:microvm-image-p1-not-runnable');
-    expect(message).toContain('/run');
+      .toContain('abca:microvm-image-p1-smoke-unverified');
+    // The superseded id must be gone, not merely reworded — operators grep for it.
+    expect(JSON.stringify(built.construct.node.metadata))
+      .not.toContain('abca:microvm-image-p1-not-runnable');
+    expect(message).toContain('smoke');
     expect(message).toContain('P2');
+    // It must state what IS true now, or it reads as the old (wrong) claim.
+    expect(message).toContain('/run');
+    expect(message).toContain('/ready');
   });
 
   test('declares no hook the agent does not serve yet', () => {
     const images = template.findResources('AWS::Lambda::MicrovmImage');
     const rendered = JSON.stringify(Object.values(images)[0]!.Properties.Hooks);
-    for (const hook of ['Suspend', 'Resume', 'Terminate', 'Ready', 'Validate']) {
+    for (const hook of ['Suspend', 'Resume', 'Terminate', 'Validate']) {
       expect(rendered).not.toContain(hook);
     }
-    expect(rendered).toContain('"Run":"/run"');
+    expect(rendered).toContain('"Run":"/aws/lambda-microvms/runtime/v1/run"');
+    expect(rendered).toContain('"Ready":"/aws/lambda-microvms/runtime/v1/ready"');
   });
 
   test('tags every MicroVM resource with the backend cost-allocation tag', () => {
@@ -428,33 +561,37 @@ describe('LambdaMicrovmCompute — image built out of band', () => {
 
   test('uses the supplied identifier and synthesizes no image resource', () => {
     byArn.template.resourceCountIs('AWS::Lambda::MicrovmImage', 0);
-    // The buckets/roles/connector still exist — the substrate is provisioned.
-    byArn.template.resourceCountIs('AWS::Lambda::NetworkConnector', 1);
+    // The buckets/roles/connectors still exist — the substrate is provisioned.
+    byArn.template.resourceCountIs('AWS::Lambda::NetworkConnector', 2);
     expect(byArn.construct.imageIdentifier).toBe(EXTERNAL_IMAGE_ARN);
     expect(byArn.construct.imageVersion).toBe('7');
     expect(byArn.construct.imageArn).toBe(EXTERNAL_IMAGE_ARN);
   });
 
-  test('resolves a bare image NAME to its exact IAM resource ARN', () => {
-    expect(byName.construct.imageIdentifier).toBe('my-agent');
-    // Load-bearing for ADR-021's "scoped to platform-created images": a bare
-    // name is not an IAM resource, but the `microvmImage` ARN shape is fully
-    // derivable from it, so the grant stays pinned to THIS image instead of
-    // widening to an account/Region-wide `microvm-image:*`.
+  test('resolves a bare image NAME to its exact ARN and uses THAT as the identifier', () => {
+    // Load-bearing twice over:
+    //  - IAM: a bare name is not an IAM resource, but the `microvmImage` ARN
+    //    shape is fully derivable from it, so the grant stays pinned to THIS
+    //    image instead of widening to `microvm-image:*`.
+    //  - RunMicrovm: it rejects a bare name outright ("Malformed ARN - doesn't
+    //    start with 'arn:'"), so the ORCHESTRATOR must receive the ARN too. The
+    //    construct therefore publishes one value for both jobs.
     // The partition stays the Aws.PARTITION pseudo-parameter (unresolved until
     // deploy) so the same code is correct in aws-cn / aws-us-gov — hence the
     // suffix assertion rather than a literal `arn:aws:` comparison.
     expect(byName.construct.imageArn)
       .toMatch(/^arn:.+:lambda:us-east-1:123456789012:microvm-image:my-agent$/);
     expect(byName.construct.imageArn).not.toContain('microvm-image:*');
+    expect(byName.construct.imageIdentifier).toBe(byName.construct.imageArn);
+    expect(byName.construct.imageIdentifier).not.toBe('my-agent');
   });
 
-  test('warns that a P1 image is not runnable, out-of-band path included', () => {
+  test('warns about the missing smoke guarantee, out-of-band path included', () => {
     // The warning is keyed on "an image is configured", not on which of the two
-    // image states produced it — an out-of-band build is just as un-runnable.
+    // image states produced it — an out-of-band build is just as unverified.
     for (const fixture of [byArn, byName]) {
       expect(JSON.stringify(fixture.construct.node.metadata))
-        .toContain('abca:microvm-image-p1-not-runnable');
+        .toContain('abca:microvm-image-p1-smoke-unverified');
     }
   });
 
@@ -475,7 +612,7 @@ describe('LambdaMicrovmCompute — first deploy, no image configured', () => {
 
   test('provisions the substrate but no image, and reports no identifier', () => {
     built.template.resourceCountIs('AWS::Lambda::MicrovmImage', 0);
-    built.template.resourceCountIs('AWS::Lambda::NetworkConnector', 1);
+    built.template.resourceCountIs('AWS::Lambda::NetworkConnector', 2);
     expect(built.construct.imageIdentifier).toBeUndefined();
   });
 
@@ -490,10 +627,75 @@ describe('LambdaMicrovmCompute — first deploy, no image configured', () => {
     expect(message).toContain('microvm_image_identifier');
     expect(JSON.stringify(built.construct.node.metadata))
       .toContain('abca:microvm-image-not-provisioned');
-    // ...and NOT the "configured but not runnable" warning — there is no image
-    // to be un-runnable, and stacking both would blur two different remedies.
+    // ...and NOT the "configured but unverified" warning — there is no image to
+    // be unverified, and stacking both would blur two different remedies.
     expect(JSON.stringify(built.construct.node.metadata))
-      .not.toContain('abca:microvm-image-p1-not-runnable');
+      .not.toContain('abca:microvm-image-p1-smoke-unverified');
+  });
+});
+
+describe('LambdaMicrovmCompute — memory sizing', () => {
+  // TEST-CONVENTION EXEMPTION (cdk/AGENTS.md "synth once in beforeAll"): the
+  // rejection cases assert the CONSTRUCTOR throws, so there is no template to
+  // cache; they use `instantiate()`, which never calls Template.fromStack().
+  let at512: Built;
+
+  beforeAll(() => {
+    at512 = build({ withImage: true, minimumMemoryInMiB: 512 });
+  });
+
+  test.each(MICROVM_SUPPORTED_MEMORY_MIB)('accepts the supported size %i MiB', (mib) => {
+    expect(() => instantiate({ withImage: true, minimumMemoryInMiB: mib })).not.toThrow();
+  });
+
+  test('an explicitly supported size reaches the image resource verbatim', () => {
+    at512.template.hasResourceProperties('AWS::Lambda::MicrovmImage', {
+      Resources: [{ MinimumMemoryInMiB: 512 }],
+    });
+    expect(at512.construct.minimumMemoryInMiB).toBe(512);
+  });
+
+  test('rejects the old 32768 default at SYNTH, naming the accepted baselines', () => {
+    // The service rejects it minutes into a build; failing at synth is the whole
+    // point of validating here.
+    let error: Error | undefined;
+    try {
+      instantiate({ withImage: true, minimumMemoryInMiB: 32768 });
+    } catch (err) {
+      error = err as Error;
+    }
+    expect(error).toBeDefined();
+    expect(error!.message).toContain('32768');
+    expect(error!.message).toContain('512, 1024, 2048, 4096, 8192');
+    // The message must say BASELINE, or an operator reads the rejection as "this
+    // backend caps at 8 GiB" and moves a repo to ECS it did not need to.
+    expect(error!.message).toContain('BASELINE');
+    expect(error!.message).toContain('32 GiB');
+    // ...and points at the backend that DOES have the SUSTAINED capacity.
+    expect(error!.message).toContain('compute_type=ecs');
+  });
+
+  test.each([0, 256, 6144, 16384, 8193])('rejects the unsupported baseline %i MiB', (mib) => {
+    expect(() => instantiate({ withImage: true, minimumMemoryInMiB: mib }))
+      .toThrow(/is not a BASELINE memory size AWS Lambda MicroVMs accepts/);
+  });
+});
+
+describe('microvmNoIngressConnectorArn — explicit no-inbound control', () => {
+  test('builds the service-owned NO_INGRESS ARN for the stack Region', () => {
+    // Shape taken verbatim from the HTTP_INGRESS ARN the service attached on a
+    // launch that passed NO ingress connectors, with the name swapped. The
+    // partition stays the Aws.PARTITION pseudo-parameter so the same code is
+    // correct in aws-cn / aws-us-gov.
+    const stack = new Stack(new App(), 'S', { env: { account: '123456789012', region: 'eu-west-1' } });
+    expect(microvmNoIngressConnectorArn(stack))
+      .toMatch(/^arn:.+:lambda:eu-west-1:aws:network-connector:aws-network-connector:NO_INGRESS$/);
+  });
+
+  test('never names the deployment account (these connectors are AWS-owned)', () => {
+    const stack = new Stack(new App(), 'S', { env: { account: '999999999999', region: 'us-west-2' } });
+    expect(microvmNoIngressConnectorArn(stack)).not.toContain('999999999999');
+    expect(microvmNoIngressConnectorArn(stack)).toContain(':aws:network-connector:');
   });
 });
 

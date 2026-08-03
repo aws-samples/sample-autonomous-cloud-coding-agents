@@ -164,8 +164,12 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
   // Returns the full SessionHandle (serializable) so ECS polling can use it in step 5.
   const sessionHandle = await context.step('start-session', async () => {
     let autoRetried = false;
+    // Hoisted out of the `try` so the catch can reap a MicroVM that STARTED but
+    // whose handle never made it into DynamoDB — see the catch block.
+    let strategy: ReturnType<typeof resolveComputeStrategy> | undefined;
+    let startedHandle: Awaited<ReturnType<typeof startSessionWithRetry>>['handle'] | undefined;
     try {
-      const strategy = resolveComputeStrategy(blueprintConfig);
+      strategy = resolveComputeStrategy(blueprintConfig);
       const startInput = {
         taskId,
         userId: task.user_id,
@@ -189,6 +193,7 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
         },
       );
       autoRetried = retried;
+      startedHandle = handle;
 
       // Build compute metadata for the task record so cancel-task can stop the
       // right backend (and, for lambda-microvm, so the P3 approve/deny Lambdas
@@ -214,6 +219,42 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
 
       return handle;
     } catch (err) {
+      // ORPHAN REAP (ADR-021). `RunMicrovm` may have already succeeded and left a
+      // MicroVM RUNNING — the throw could have come from `buildComputeMetadata`,
+      // the `transitionTask` write, or the `session_started` emit. Nothing
+      // self-terminates on this substrate (live-verified: a MicroVM with no
+      // working hook reached RUNNING in 12 s and stayed RUNNING with no
+      // stateReason), and the handle only ever existed in this Lambda's memory —
+      // once we throw, no poll and no finalize step will ever see it. So the VM
+      // would bill until `maximumDurationInSeconds` (8 h) expired while also
+      // holding account memory quota that gates admission for everyone else.
+      //
+      // Best-effort in the strongest sense: `stopSession` is internally
+      // non-throwing for this backend, and the extra try/catch guarantees that
+      // even a surprise (a non-microvm strategy, a synchronous throw) cannot
+      // replace the ORIGINAL failure — which is the one the user needs to see.
+      //
+      // Scoped to `lambda-microvm` deliberately. ECS and AgentCore have the same
+      // structural window, but generalising here would issue `StopTask` /
+      // `StopRuntimeSession` calls the ORCHESTRATOR role may not be granted (those
+      // grants live on the cancel Lambda), turning a clean failure into a clean
+      // failure plus a misleading AccessDenied. Widening it is a follow-up that
+      // needs the IAM change reviewed alongside.
+      if (startedHandle?.strategyType === 'lambda-microvm' && strategy) {
+        try {
+          log.warn('Session start failed after the MicroVM was created — terminating the orphan', {
+            microvm_id: startedHandle.microvmId,
+            original_error: err instanceof Error ? err.message : String(err),
+          });
+          await strategy.stopSession(startedHandle);
+        } catch (reapErr) {
+          log.error('Failed to terminate the orphaned MicroVM — it may bill until its 8h cap', {
+            microvm_id: startedHandle.microvmId,
+            error: reapErr instanceof Error ? reapErr.message : String(reapErr),
+          });
+        }
+      }
+
       // Carry the auto-retry fact into error_message: the `[auto-retried]` suffix
       // is persisted verbatim (the classifier ignores it — it does not affect
       // classification). It is a breadcrumb for a FORTHCOMING failure renderer to
@@ -260,6 +301,9 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
       const ddbState = await pollTaskStatus(taskId, state, blueprintConfig.compute_type);
       let consecutiveEcsPollFailures = 0;
       let consecutiveEcsCompletedPolls = 0;
+      // Carried forward by default: an unrelated poll (or a MicroVM poll that
+      // threw) must not silently re-arm the once-per-episode anomaly event.
+      let microvmSuspendAnomalyReported = state.microvmSuspendAnomalyReported ?? false;
 
       // ECS compute-level crash detection: if DDB is not terminal, check ECS task status
       if (
@@ -323,7 +367,7 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
       ) {
         try {
           const substrateStatus = await microvmStrategy.pollSession(sessionHandle);
-          const { taskFailed } = await reconcileMicrovmSubstrateState({
+          const { taskFailed, suspendAnomalyReported } = await reconcileMicrovmSubstrateState({
             taskId,
             ddbStatus: ddbState.lastStatus,
             substrate: substrateStatus,
@@ -332,7 +376,12 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
             correlation,
             log,
             repo: task.repo,
+            // Threaded so `microvm_suspend_anomaly` is emitted once per anomaly
+            // EPISODE rather than on every ~30 s poll; a non-anomalous observation
+            // re-arms it (see reconcileMicrovmSubstrateState).
+            suspendAnomalyReported: microvmSuspendAnomalyReported,
           });
+          microvmSuspendAnomalyReported = suspendAnomalyReported;
           if (taskFailed) {
             return { attempts: ddbState.attempts, lastStatus: TaskStatus.FAILED };
           }
@@ -349,7 +398,7 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
         }
       }
 
-      return { ...ddbState, consecutiveEcsPollFailures, consecutiveEcsCompletedPolls };
+      return { ...ddbState, consecutiveEcsPollFailures, consecutiveEcsCompletedPolls, microvmSuspendAnomalyReported };
     },
     {
       initialState: { attempts: 0 },

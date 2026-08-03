@@ -72,7 +72,7 @@ function primeReread(rereadStatus: string): void {
 
 const CORRELATION = { user_id: 'user-1', repo: 'org/repo' };
 
-function reconcile(substrate: SessionStatus, ddbStatus: string) {
+function reconcile(substrate: SessionStatus, ddbStatus: string, suspendAnomalyReported?: boolean) {
   return reconcileMicrovmSubstrateState({
     taskId: 'TASK001',
     ddbStatus: ddbStatus as never,
@@ -82,6 +82,7 @@ function reconcile(substrate: SessionStatus, ddbStatus: string) {
     correlation: CORRELATION,
     log: mockLogger,
     repo: 'org/repo',
+    ...(suspendAnomalyReported !== undefined && { suspendAnomalyReported }),
   });
 }
 
@@ -162,7 +163,9 @@ describe('reconcileMicrovmSubstrateState', () => {
     test('is a no-op: no DDB reads, no events, task not failed', async () => {
       const result = await reconcile({ status: 'running' }, TaskStatus.RUNNING);
 
-      expect(result).toEqual({ taskFailed: false });
+      // `suspendAnomalyReported: false` RE-ARMS the once-per-episode event: a VM
+      // that resumed and is later suspended again earns a fresh anomaly event.
+      expect(result).toEqual({ taskFailed: false, suspendAnomalyReported: false });
       expect(mockDdbSend).not.toHaveBeenCalled();
     });
   });
@@ -172,8 +175,10 @@ describe('reconcileMicrovmSubstrateState', () => {
       const result = await reconcile({ status: 'suspended' }, TaskStatus.AWAITING_APPROVAL);
 
       // The orchestrator-intended suspend during an approval wait is the whole
-      // economic point of the backend: it must be silent.
-      expect(result).toEqual({ taskFailed: false });
+      // economic point of the backend: it must be silent — and it re-arms the
+      // anomaly event, because leaving AWAITING_APPROVAL while still suspended
+      // would be a new, genuinely reportable episode.
+      expect(result).toEqual({ taskFailed: false, suspendAnomalyReported: false });
       expect(mockDdbSend).not.toHaveBeenCalled();
       expect(mockLogger.warn).not.toHaveBeenCalled();
     });
@@ -181,7 +186,7 @@ describe('reconcileMicrovmSubstrateState', () => {
     test('writes an anomaly event and does NOT fail the task when the status is RUNNING', async () => {
       const result = await reconcile({ status: 'suspended' }, TaskStatus.RUNNING);
 
-      expect(result).toEqual({ taskFailed: false });
+      expect(result).toEqual({ taskFailed: false, suspendAnomalyReported: true });
 
       const puts = commandsOfType('Put');
       expect(puts).toHaveLength(1);
@@ -211,11 +216,85 @@ describe('reconcileMicrovmSubstrateState', () => {
     ])('treats suspended + %s as an anomaly rather than a failure', async (status) => {
       const result = await reconcile({ status: 'suspended' }, status);
 
-      expect(result).toEqual({ taskFailed: false });
+      expect(result).toEqual({ taskFailed: false, suspendAnomalyReported: true });
       expect(commandsOfType('Put')[0].input.Item).toMatchObject({
         event_type: 'microvm_suspend_anomaly',
         metadata: { task_status: status },
       });
+    });
+
+    test('emits the anomaly event ONCE across repeated polls of the same episode', async () => {
+      // The poll runs every ~30 s for up to 8.5 h; without the flag an
+      // out-of-band suspend would write ~960 identical TaskEvents, burying the
+      // first informative one. The caller threads the returned flag back in.
+      let reported: boolean | undefined;
+      for (let poll = 0; poll < 5; poll += 1) {
+        const result = await reconcile({ status: 'suspended' }, TaskStatus.RUNNING, reported);
+        reported = result.suspendAnomalyReported;
+        // The no-fail-fast behaviour is unchanged on EVERY poll — that is the
+        // property the suppression must not break.
+        expect(result.taskFailed).toBe(false);
+        expect(result.suspendAnomalyReported).toBe(true);
+      }
+
+      expect(commandsOfType('Put')).toHaveLength(1);
+      expect((commandsOfType('Put')[0].input.Item as Record<string, unknown>).event_type)
+        .toBe('microvm_suspend_anomaly');
+      // The WARN log is deliberately NOT suppressed: per-poll evidence is what a
+      // timeline investigation needs, and CloudWatch is not a user-facing surface.
+      expect(mockLogger.warn).toHaveBeenCalledTimes(5);
+    });
+
+    test('the repeat-suppressed polls record that the event was already reported', async () => {
+      await reconcile({ status: 'suspended' }, TaskStatus.RUNNING, true);
+
+      expect(commandsOfType('Put')).toHaveLength(0);
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('suspended while the task is not awaiting approval'),
+        expect.objectContaining({ anomaly_already_reported: true }),
+      );
+    });
+
+    test('RE-ARMS after the VM resumes, so a second episode emits again', async () => {
+      // Recovery genuinely re-arms (documented decision): a flapping suspend loop
+      // is the pathology an operator most needs to see, and latching forever
+      // would hide it after the first occurrence.
+      const first = await reconcile({ status: 'suspended' }, TaskStatus.RUNNING, false);
+      expect(first.suspendAnomalyReported).toBe(true);
+
+      const recovered = await reconcile({ status: 'running' }, TaskStatus.RUNNING, first.suspendAnomalyReported);
+      expect(recovered.suspendAnomalyReported).toBe(false);
+
+      const second = await reconcile({ status: 'suspended' }, TaskStatus.RUNNING, recovered.suspendAnomalyReported);
+      expect(second.suspendAnomalyReported).toBe(true);
+
+      // Two episodes → two events.
+      expect(commandsOfType('Put')).toHaveLength(2);
+    });
+
+    test('RE-ARMS when the task enters AWAITING_APPROVAL, so a later out-of-band suspend reports', async () => {
+      const first = await reconcile({ status: 'suspended' }, TaskStatus.RUNNING, false);
+      expect(first.suspendAnomalyReported).toBe(true);
+
+      // The gate opened: this suspend is now the intended one.
+      const intended = await reconcile(
+        { status: 'suspended' }, TaskStatus.AWAITING_APPROVAL, first.suspendAnomalyReported);
+      expect(intended.suspendAnomalyReported).toBe(false);
+      expect(commandsOfType('Put')).toHaveLength(1);
+
+      // The gate closed but the VM is still suspended — a new anomaly.
+      const third = await reconcile(
+        { status: 'suspended' }, TaskStatus.RUNNING, intended.suspendAnomalyReported);
+      expect(third.suspendAnomalyReported).toBe(true);
+      expect(commandsOfType('Put')).toHaveLength(2);
+    });
+
+    test('defaults to NOT-yet-reported when the caller omits the flag', async () => {
+      // Back-compat for any caller (and the first poll of every task) that has no
+      // prior state: the event must fire, not be suppressed by an undefined flag.
+      const result = await reconcile({ status: 'suspended' }, TaskStatus.RUNNING);
+      expect(result.suspendAnomalyReported).toBe(true);
+      expect(commandsOfType('Put')).toHaveLength(1);
     });
   });
 
@@ -225,7 +304,7 @@ describe('reconcileMicrovmSubstrateState', () => {
 
       const result = await reconcile({ status: 'completed' }, TaskStatus.RUNNING);
 
-      expect(result).toEqual({ taskFailed: true });
+      expect(result).toEqual({ taskFailed: true, suspendAnomalyReported: false });
 
       // Re-read before acting (guards the "agent wrote terminal, VM torn down"
       // race), then the FAILED transition.
@@ -255,7 +334,7 @@ describe('reconcileMicrovmSubstrateState', () => {
 
       // Normal shutdown ordering: agent writes COMPLETED, exits, VM terminates.
       // Without the re-read this would have failed a successful task.
-      expect(result).toEqual({ taskFailed: false });
+      expect(result).toEqual({ taskFailed: false, suspendAnomalyReported: false });
       expect(commandsOfType('Update')).toHaveLength(0);
       expect(commandsOfType('Put')).toHaveLength(0);
     });
@@ -270,7 +349,7 @@ describe('reconcileMicrovmSubstrateState', () => {
 
       const result = await reconcile({ status: 'completed' }, TaskStatus.RUNNING);
 
-      expect(result).toEqual({ taskFailed: false });
+      expect(result).toEqual({ taskFailed: false, suspendAnomalyReported: false });
       expect(commandsOfType('Update')).toHaveLength(0);
     });
 
@@ -279,7 +358,7 @@ describe('reconcileMicrovmSubstrateState', () => {
 
       const result = await reconcile({ status: 'failed', error: 'host fault' }, TaskStatus.RUNNING);
 
-      expect(result).toEqual({ taskFailed: true });
+      expect(result).toEqual({ taskFailed: true, suspendAnomalyReported: false });
       const values = commandsOfType('Update')[0].input.ExpressionAttributeValues as Record<string, unknown>;
       expect(values[':attr_error_message']).toBe(
         'MicroVM substrate terminated before the agent wrote a terminal status: host fault',
@@ -291,7 +370,7 @@ describe('reconcileMicrovmSubstrateState', () => {
 
       const result = await reconcile({ status: 'completed' }, TaskStatus.AWAITING_APPROVAL);
 
-      expect(result).toEqual({ taskFailed: true });
+      expect(result).toEqual({ taskFailed: true, suspendAnomalyReported: false });
       const values = commandsOfType('Update')[0].input.ExpressionAttributeValues as Record<string, unknown>;
       expect(values[':fromStatus']).toBe(TaskStatus.AWAITING_APPROVAL);
       expect(values[':toStatus']).toBe(TaskStatus.FAILED);

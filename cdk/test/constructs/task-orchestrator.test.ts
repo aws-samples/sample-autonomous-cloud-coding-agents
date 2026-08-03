@@ -530,6 +530,9 @@ describe('TaskOrchestrator with the Lambda MicroVMs backend (ADR-021)', () => {
   const NAME_DERIVED_IMAGE_ARN = 'arn:aws:lambda:us-east-1:123456789012:microvm-image:abca-agent';
   const EXECUTION_ROLE_ARN = 'arn:aws:iam::123456789012:role/MicrovmExecutionRole';
   const CONNECTOR_ARN = 'arn:aws:lambda:us-east-1:123456789012:network-connector:nc-123';
+  // What LambdaMicrovmCompute always supplies: the Lambda-managed NO_INGRESS
+  // connector. Service-owned, hence the literal `aws` account segment.
+  const NO_INGRESS_ARN = 'arn:aws:lambda:us-east-1:aws:network-connector:aws-network-connector:NO_INGRESS';
 
   /**
    * Build a stack with `microvmConfig` wired. Separate from `createStack` above
@@ -565,7 +568,9 @@ describe('TaskOrchestrator with the Lambda MicroVMs backend (ADR-021)', () => {
         imageVersion: config?.imageVersion,
         executionRoleArn: EXECUTION_ROLE_ARN,
         egressConnectorArns: [CONNECTOR_ARN],
-        ingressConnectorArns: config?.ingressConnectorArns,
+        // REQUIRED prop — mirrors what LambdaMicrovmCompute passes on every
+        // deploy. There is no "unset" case to fixture, by design.
+        ingressConnectorArns: config?.ingressConnectorArns ?? [NO_INGRESS_ARN],
         payloadBucket: new s3.Bucket(stack, 'MicrovmPayloadBucket'),
       },
     });
@@ -619,21 +624,49 @@ describe('TaskOrchestrator with the Lambda MicroVMs backend (ADR-021)', () => {
     expect(env.MICROVM_IMAGE_IDENTIFIER).toBe(IMAGE_ARN);
     expect(env.MICROVM_EXECUTION_ROLE_ARN).toBe(EXECUTION_ROLE_ARN);
     expect(env.MICROVM_EGRESS_CONNECTOR_ARNS).toBe(CONNECTOR_ARN);
+    expect(env.MICROVM_INGRESS_CONNECTOR_ARNS).toBe(NO_INGRESS_ARN);
     expect(env.MICROVM_PAYLOAD_BUCKET).toBeDefined();
   });
 
-  test('omits the optional env vars when not configured', () => {
+  test('ALWAYS injects the ingress var, carrying the NO_INGRESS control', () => {
+    // OUTCOME assertion, not an omission assertion. This var used to be injected
+    // only when non-empty, and the test asserted it was `undefined` — which is
+    // precisely the shape of test that passes while the service silently picks
+    // something wider: `RunMicrovm` attaches a PUBLIC HTTP_INGRESS connector (and
+    // a public *.lambda-microvm.<region>.on.aws endpoint) when the request omits
+    // the field. So "no inbound" has to be a value we can SEE in the template.
     const env = orchestratorEnv(template);
-    // Absent (not empty-string) so the strategy's "no ingress connectors" branch
-    // omits the field on RunMicrovm entirely.
-    expect(env.MICROVM_IMAGE_VERSION).toBeUndefined();
-    expect(env.MICROVM_INGRESS_CONNECTOR_ARNS).toBeUndefined();
+    expect(Object.keys(env)).toContain('MICROVM_INGRESS_CONNECTOR_ARNS');
+    expect(env.MICROVM_INGRESS_CONNECTOR_ARNS).toBe(NO_INGRESS_ARN);
+    expect(env.MICROVM_INGRESS_CONNECTOR_ARNS).toContain('NO_INGRESS');
+    expect(env.MICROVM_INGRESS_CONNECTOR_ARNS).not.toContain('HTTP_INGRESS');
+    // Not an empty string either — the strategy would then fall back rather than
+    // pass what the deployment configured.
+    expect(env.MICROVM_INGRESS_CONNECTOR_ARNS).not.toBe('');
   });
 
-  test('pins the image version and ingress connectors when supplied', () => {
+  test('the ingress var belongs to the all-or-nothing block, not the optional one', () => {
+    // Exactly one MICROVM_* var is genuinely optional (`imageVersion`, whose
+    // absent state means "resolve the latest ACTIVE version"). Everything else,
+    // ingress included, is present whenever microvmConfig is.
+    const env = orchestratorEnv(template);
+    expect(Object.keys(env).filter((k) => k.startsWith('MICROVM_')).sort()).toEqual([
+      'MICROVM_EGRESS_CONNECTOR_ARNS',
+      'MICROVM_EXECUTION_ROLE_ARN',
+      'MICROVM_IMAGE_IDENTIFIER',
+      'MICROVM_INGRESS_CONNECTOR_ARNS',
+      'MICROVM_PAYLOAD_BUCKET',
+    ]);
+    expect(env.MICROVM_IMAGE_VERSION).toBeUndefined();
+  });
+
+  test('pins the image version, and real ingress connectors WIN over NO_INGRESS', () => {
+    // How #391 (operator shell access) lands without a strategy change: the
+    // construct supplies different connectors and they are joined verbatim.
     const env = orchestratorEnv(pinnedTemplate);
     expect(env.MICROVM_IMAGE_VERSION).toBe('4');
     expect(env.MICROVM_INGRESS_CONNECTOR_ARNS).toBe('arn:aws:lambda:us-east-1:aws:network-connector:x,arn:y');
+    expect(env.MICROVM_INGRESS_CONNECTOR_ARNS).not.toContain('NO_INGRESS');
   });
 
   test('grants exactly the four P1 lifecycle actions and nothing more', () => {

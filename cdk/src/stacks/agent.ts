@@ -770,6 +770,12 @@ export class AgentStack extends Stack {
         value: lambdaMicrovm.egressConnectorArns.join(','),
         description: 'Lambda network connector ARNs routing MicroVM egress through the platform VPC',
       });
+      new CfnOutput(this, 'MicrovmBuildEgressConnectorArns', {
+        value: lambdaMicrovm.buildEgressConnectorArns.join(','),
+        description: 'Lambda network connector ARNs for the IMAGE BUILD path (TCP 443 + 80 — '
+          + 'agent/Dockerfile runs apt-get over HTTP; pass these to '
+          + '`create-microvm-image --egress-network-connectors`, NOT the runtime connectors)',
+      });
       new CfnOutput(this, 'MicrovmLogGroupName', {
         value: lambdaMicrovm.logGroup.logGroupName,
         description: 'CloudWatch log group for MicroVM build- and run-time logs',
@@ -819,8 +825,11 @@ export class AgentStack extends Stack {
           imageVersion: lambdaMicrovm.imageVersion,
           executionRoleArn: lambdaMicrovm.executionRole.roleArn,
           egressConnectorArns: lambdaMicrovm.egressConnectorArns,
-          // No ingress connectors in P1–P3: nothing dials into the MicroVM and
-          // no JWE auth tokens are minted (ADR-021 sub-decision 3).
+          // Explicit NO_INGRESS, not an omission: RunMicrovm attaches a PUBLIC
+          // HTTP_INGRESS connector (and mints a public endpoint) when the field is
+          // absent, so ADR-021's "no inbound exposure" posture is a control the
+          // construct has to pass on every launch. Still no JWE tokens minted.
+          ingressConnectorArns: lambdaMicrovm.ingressConnectorArns,
           payloadBucket: lambdaMicrovm.payloadBucket,
         },
       }),

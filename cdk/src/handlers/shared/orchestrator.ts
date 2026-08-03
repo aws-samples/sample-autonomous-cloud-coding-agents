@@ -59,6 +59,18 @@ export interface PollState {
   readonly consecutiveEcsPollFailures?: number;
   /** Consecutive polls where ECS reports completed but DDB is not terminal — escalated after 5. */
   readonly consecutiveEcsCompletedPolls?: number;
+  /**
+   * True once `microvm_suspend_anomaly` has been emitted for the CURRENT anomaly
+   * episode, so the event fires once per episode instead of on every ~30 s poll
+   * (an 8-hour suspended task would otherwise write ~960 identical events).
+   *
+   * Re-armed (set back to false) by any non-anomalous observation — see
+   * {@link reconcileMicrovmSubstrateState}. Kept as a plain boolean rather than a
+   * counter/timestamp on purpose: P3's suspend policy will reshape this area
+   * anyway, and one flag is the smallest thing that fixes the duplication without
+   * pre-committing to a shape that work will have to undo.
+   */
+  readonly microvmSuspendAnomalyReported?: boolean;
 }
 
 /** After RUNNING this long, we expect `agent_heartbeat_at` from the agent (if ever set). */
@@ -269,6 +281,17 @@ export interface MicrovmReconcileResult {
    * anomalous-but-not-fatal observation.
    */
   readonly taskFailed: boolean;
+
+  /**
+   * Value the caller must carry into the next poll cycle's
+   * ``PollState.microvmSuspendAnomalyReported``.
+   *
+   * True while a suspend anomaly is being (or has been) reported; false whenever
+   * the anomaly condition is absent, which RE-ARMS the event for a genuinely new
+   * episode. Returned rather than mutated so the durable poll's state stays a
+   * plain serializable value.
+   */
+  readonly suspendAnomalyReported: boolean;
 }
 
 /**
@@ -289,6 +312,27 @@ export interface MicrovmReconcileResult {
  *   - substrate terminal + non-terminal task status → FAIL the task with the
  *     substrate-failure reason (``error-classifier`` has the matching entry).
  *
+ * ## The anomaly event fires ONCE PER EPISODE, not once per poll
+ *
+ * The anomaly branch is reached on every poll while the condition holds, so a
+ * task suspended out of band for hours would write one identical TaskEvent every
+ * ~30 s (~960 of them across the 8 h poll window) — noise that buries the first,
+ * informative one and inflates TaskEvents. ``suspendAnomalyReported`` (threaded
+ * through {@link PollState}) suppresses the repeats while leaving the
+ * do-not-fail-fast behaviour untouched: the function still returns
+ * ``taskFailed: false`` on every one of those polls.
+ *
+ * **Recovery re-arms it.** Any observation that is NOT an anomaly — the VM
+ * resumed (``running``), or the task moved into ``AWAITING_APPROVAL`` so the
+ * suspend is now intended — resets the flag to false. A second, later episode is
+ * new information (something suspended this VM twice), so it earns its own event.
+ * The alternative (latch forever) would silently hide a flapping suspend loop,
+ * which is exactly the pathology an operator most needs to see.
+ *
+ * The WARN log is emitted on every poll regardless. Logs are cheap, per-poll
+ * evidence is what a timeline investigation needs, and CloudWatch is not a
+ * user-facing surface the way TaskEvents is.
+ *
  * The terminal branch RE-READS the task row before failing. The DynamoDB status
  * handed in was read earlier in the same poll cycle, and the ordinary happy path
  * is "agent writes terminal status, agent exits, VM terminates" — so a stale read
@@ -306,6 +350,7 @@ export interface MicrovmReconcileResult {
  * @param correlation - the #245 envelope for emitted events.
  * @param log - the caller's child logger (already carries task/user/repo).
  * @param repo - optional target repo for the correlation envelope.
+ * @param suspendAnomalyReported - the previous cycle's flag; see the section above.
  */
 export async function reconcileMicrovmSubstrateState(args: {
   taskId: string;
@@ -316,18 +361,25 @@ export async function reconcileMicrovmSubstrateState(args: {
   correlation: EventCorrelation;
   log: Logger;
   repo?: string;
+  suspendAnomalyReported?: boolean;
 }): Promise<MicrovmReconcileResult> {
-  const { taskId, ddbStatus, substrate, microvmId, userId, correlation, log, repo } = args;
+  const {
+    taskId, ddbStatus, substrate, microvmId, userId, correlation, log, repo,
+    suspendAnomalyReported = false,
+  } = args;
 
   if (substrate.status === 'running') {
-    return { taskFailed: false };
+    // Healthy — and it also ENDS any anomaly episode, so the next one reports.
+    return { taskFailed: false, suspendAnomalyReported: false };
   }
 
   if (substrate.status === 'suspended') {
     if (ddbStatus === TaskStatus.AWAITING_APPROVAL) {
       // Orchestrator-intended suspend during an approval wait — the whole point
-      // of this backend. Nothing to report.
-      return { taskFailed: false };
+      // of this backend. Nothing to report, and the anomaly is re-armed: if the
+      // task later leaves AWAITING_APPROVAL while still suspended, that is a new
+      // and genuinely reportable episode.
+      return { taskFailed: false, suspendAnomalyReported: false };
     }
     // Suspended outside an approval wait. Nothing in ABCA suspends a MicroVM
     // except the orchestrator's (P3) approval-wait policy, so this means either
@@ -337,13 +389,16 @@ export async function reconcileMicrovmSubstrateState(args: {
     log.warn('MicroVM is suspended while the task is not awaiting approval', {
       microvm_id: microvmId,
       task_status: ddbStatus,
+      anomaly_already_reported: suspendAnomalyReported,
     });
-    await emitTaskEvent(taskId, 'microvm_suspend_anomaly', {
-      microvm_id: microvmId,
-      task_status: ddbStatus,
-      reason: 'suspended_outside_approval_wait',
-    }, correlation);
-    return { taskFailed: false };
+    if (!suspendAnomalyReported) {
+      await emitTaskEvent(taskId, 'microvm_suspend_anomaly', {
+        microvm_id: microvmId,
+        task_status: ddbStatus,
+        reason: 'suspended_outside_approval_wait',
+      }, correlation);
+    }
+    return { taskFailed: false, suspendAnomalyReported: true };
   }
 
   // Terminal substrate report (`completed` or `failed`). `pollSession` reports
@@ -359,7 +414,9 @@ export async function reconcileMicrovmSubstrateState(args: {
       microvm_id: microvmId,
       task_status: reread.status,
     });
-    return { taskFailed: false };
+    // Terminal either way, so the flag no longer matters; carried through
+    // unchanged rather than reset so the value never lies about what happened.
+    return { taskFailed: false, suspendAnomalyReported };
   }
 
   log.error('MicroVM reached a terminal state before the agent wrote a terminal status', {
@@ -377,7 +434,7 @@ export async function reconcileMicrovmSubstrateState(args: {
     false,
     repo,
   );
-  return { taskFailed: true };
+  return { taskFailed: true, suspendAnomalyReported };
 }
 
 /**

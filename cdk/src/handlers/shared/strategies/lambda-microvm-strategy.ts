@@ -45,10 +45,34 @@ function getS3Client(): S3Client {
   return sharedS3Client;
 }
 
+/**
+ * Fully-qualified MicroVM image **ARN** passed as `imageIdentifier` on every
+ * `RunMicrovm`.
+ *
+ * MUST be an ARN, never a bare image name: `RunMicrovm` rejects a name outright
+ * (live 2026-07-31 — `ValidationException: Malformed ARN - doesn't start with
+ * 'arn:'`), as does `list-microvm-image-builds`. `LambdaMicrovmCompute` already
+ * derives the exact `…:microvm-image:<name>` ARN for the lifecycle IAM scope and
+ * injects THAT value here, so the two can never disagree; {@link assertImageArn}
+ * fails fast if a hand-edited deployment breaks the contract.
+ */
 const MICROVM_IMAGE_IDENTIFIER = process.env.MICROVM_IMAGE_IDENTIFIER;
 const MICROVM_IMAGE_VERSION = process.env.MICROVM_IMAGE_VERSION;
 const MICROVM_EXECUTION_ROLE_ARN = process.env.MICROVM_EXECUTION_ROLE_ARN;
 const MICROVM_EGRESS_CONNECTOR_ARNS = process.env.MICROVM_EGRESS_CONNECTOR_ARNS;
+/**
+ * Ingress connectors to pass on every `RunMicrovm`. Injected by
+ * `LambdaMicrovmCompute` as exactly the Lambda-managed `NO_INGRESS` connector in
+ * P1–P3; a deployment that genuinely needs ingress (#391 operator shell access)
+ * can widen it without a strategy change.
+ *
+ * **Always present in a CDK-deployed stack.** `TaskOrchestrator.microvmConfig`
+ * requires `ingressConnectorArns` and injects this var unconditionally alongside
+ * the other four, so the fallback below is DEAD CODE on any stack this repo
+ * deploys — kept only as defense in depth for a hand-edited Lambda environment,
+ * because the failure mode it guards (a PUBLIC endpoint on every agent MicroVM)
+ * is too severe to leave to the type system alone.
+ */
 const MICROVM_INGRESS_CONNECTOR_ARNS = process.env.MICROVM_INGRESS_CONNECTOR_ARNS;
 const MICROVM_PAYLOAD_BUCKET = process.env.MICROVM_PAYLOAD_BUCKET;
 
@@ -68,8 +92,20 @@ const MICROVM_PAYLOAD_BUCKET = process.env.MICROVM_PAYLOAD_BUCKET;
 export const MICROVM_MAX_DURATION_SECONDS = 28_800;
 
 /**
- * Hard service cap on ``runHookPayload`` (bytes). The SDK documents
- * ``RunMicrovmRequest.runHookPayload`` as "Maximum: 16,384 bytes".
+ * Hard service cap on ``runHookPayload`` (bytes), measured live rather than read
+ * off the SDK docs.
+ *
+ * The SDK's ``RunMicrovmRequest.runHookPayload`` documents "Maximum: 16,384
+ * bytes"; the service enforces **4 096** (2026-07-31, us-east-1):
+ *
+ * ```
+ * ValidationException: 1 validation error detected: Value at 'runHookPayload'
+ * failed to satisfy constraint: Member must have length less than or equal to 4096
+ * ```
+ *
+ * Probed exactly: 4 096 bytes passes length validation, 4 097 is rejected. The
+ * old 16 384 threshold would have inlined every envelope between 4 097 and
+ * 16 384 bytes and had the service reject all of them.
  *
  * This is the EXACT branch point for the inline/S3-pointer decision, with no
  * safety margin — deliberately unlike ``ecs-strategy``, which keeps its inline
@@ -77,11 +113,14 @@ export const MICROVM_MAX_DURATION_SECONDS = 28_800;
  * counts the *whole* ``containerOverrides`` blob (env vars, command, and payload
  * share one budget), so the strategy cannot know how much of the 8 192 the
  * payload actually gets. ``runHookPayload`` is a single standalone string, so
- * the counted size is exactly what we measure and the boundary is computable:
- * ADR-021's requirement is "if the task payload EXCEEDS the 16 KB limit, upload",
- * and shipping a 13 KB payload to S3 would violate it.
+ * the counted size is exactly what we measure and the boundary is computable.
+ *
+ * Consequence worth stating plainly: at 4 KB the **S3-pointer path is the
+ * dominant one**. A hydrated task payload (prompt + issue thread + repo context)
+ * essentially always exceeds 4 KB, so the inline branch is the exception (tiny
+ * repo-less prompts), not the common case.
  */
-const RUN_HOOK_PAYLOAD_LIMIT_BYTES = 16_384;
+const RUN_HOOK_PAYLOAD_LIMIT_BYTES = 4_096;
 
 /**
  * Stable marker prefixed onto every error this strategy lets escape, via
@@ -135,6 +174,64 @@ function parseArnList(raw: string | undefined): string[] {
 }
 
 /**
+ * Resource-name half of the Lambda-managed **`NO_INGRESS`** connector ARN.
+ *
+ * Kept in lockstep with `MICROVM_NO_INGRESS_CONNECTOR_RESOURCE` in
+ * `constructs/lambda-microvm-compute.ts` — the construct is the normal source of
+ * this ARN (via `MICROVM_INGRESS_CONNECTOR_ARNS`); this copy exists only for the
+ * fallback below, which must not depend on a construct the Lambda bundle does
+ * not include.
+ */
+const NO_INGRESS_CONNECTOR_RESOURCE = 'aws-network-connector:NO_INGRESS';
+
+/**
+ * ARN of the Lambda-managed `NO_INGRESS` connector for the running Region.
+ *
+ * **Dead code in a CDK-deployed stack** — `TaskOrchestrator` requires
+ * `ingressConnectorArns` and always injects
+ * `MICROVM_INGRESS_CONNECTOR_ARNS`, so `configuredIngress` is never empty there.
+ * This exists for the one path the type system cannot reach: a Lambda
+ * environment edited outside CDK. Kept rather than deleted because the failure
+ * mode of *omitting* `ingressNetworkConnectors` is a PUBLIC endpoint on every
+ * agent MicroVM — the service attaches `HTTP_INGRESS` by default (live
+ * 2026-07-31) — and a silent public endpoint is worse than a few dead lines.
+ * Deriving the ARN needs only the Region: partition follows from the Region
+ * prefix, and the account segment is the literal `aws` because these connectors
+ * are service-owned.
+ */
+function noIngressConnectorArn(): string {
+  const region = process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? '';
+  const partition = region.startsWith('cn-')
+    ? 'aws-cn'
+    : region.startsWith('us-gov-')
+      ? 'aws-us-gov'
+      : 'aws';
+  return `arn:${partition}:lambda:${region}:aws:network-connector:${NO_INGRESS_CONNECTOR_RESOURCE}`;
+}
+
+/**
+ * Fail fast when `MICROVM_IMAGE_IDENTIFIER` is not an ARN.
+ *
+ * The service's own error (`ValidationException: Malformed ARN - doesn't start
+ * with 'arn:'`) names neither the env var nor the remedy, and it arrives after
+ * the payload has already been written to S3. Checking here keeps the diagnosis
+ * one hop from the cause.
+ */
+function assertImageArn(identifier: string): void {
+  if (identifier.startsWith('arn:')) {
+    return;
+  }
+  throw new Error(
+    `MICROVM_IMAGE_IDENTIFIER must be a full MicroVM image ARN, got ${JSON.stringify(identifier)}. `
+    + 'RunMicrovm rejects bare image names ("Malformed ARN - doesn\'t start with \'arn:\'"). '
+    + 'LambdaMicrovmCompute injects the exact arn:<partition>:lambda:<region>:<account>:'
+    + 'microvm-image:<name> ARN it also scopes the lifecycle IAM grant to, so this indicates the '
+    + 'orchestrator function\'s environment was edited outside CDK — redeploy the stack with '
+    + '`--context compute_type=lambda-microvm` (plus the image context flags) to restore it.',
+  );
+}
+
+/**
  * AWS Lambda MicroVMs compute backend (ADR-021).
  *
  * A serverless Firecracker sandbox per session: snapshot-based launch, native
@@ -179,13 +276,16 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
 
     const { taskId, payload } = input;
 
+    // An identifier that is not an ARN cannot launch anything — check before the
+    // payload upload so a misconfiguration never leaves an orphan S3 object.
+    assertImageArn(MICROVM_IMAGE_IDENTIFIER);
+
     // Payload delivery (ADR-021 sub-decision 3): the `/run` lifecycle hook
-    // receives `runHookPayload` as its request body, capped at 16 KB. The
-    // hydrated_context routinely blows that, so mirror the ECS S3-pointer
-    // pattern (#502): small payloads ride inline, large ones are uploaded to the
-    // platform payload bucket and only the S3 URI travels in the hook body. The
-    // MicroVM EXECUTION role holds the read grant, exactly as the ECS task role
-    // does today.
+    // receives `runHookPayload` as its request body, capped at 4 KB by the
+    // service. The hydrated_context essentially always blows that, so the
+    // S3-pointer path (mirroring ECS #502) is the DOMINANT one here and the
+    // inline branch is the exception. The MicroVM EXECUTION role holds the read
+    // grant, exactly as the ECS task role does today.
     //
     // Two keys, deliberately mirroring the ECS container env contract
     // (AGENT_PAYLOAD / AGENT_PAYLOAD_S3_URI) so the agent's `/run` hook has one
@@ -194,14 +294,14 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
     //   { "agent_payload_s3_uri": "s3://..." }  — pointer
     const inlineEnvelope = JSON.stringify({ agent_payload: payload });
     // Measure the SERIALIZED envelope, not the bare payload: the envelope is
-    // what the service counts against the 16 KB cap. Byte length (not
+    // what the service counts against the 4 KB cap. Byte length (not
     // String.length) because a multi-byte prompt/diff makes chars an undercount.
     const inlineBytes = Buffer.byteLength(inlineEnvelope, 'utf8');
 
     let runHookPayload: string;
     let payloadS3Uri: string | undefined;
-    // EXACT boundary: `<= limit` inlines, `> limit` uploads. ADR-021 says upload
-    // only when the payload EXCEEDS 16 KB, so 16 384 bytes must still go inline.
+    // EXACT boundary: `<= limit` inlines, `> limit` uploads. The service accepts
+    // 4 096 bytes and rejects 4 097 (measured), so 4 096 must still go inline.
     if (inlineBytes <= RUN_HOOK_PAYLOAD_LIMIT_BYTES) {
       runHookPayload = inlineEnvelope;
     } else {
@@ -230,7 +330,20 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
       });
     }
 
-    const ingressNetworkConnectors = parseArnList(MICROVM_INGRESS_CONNECTOR_ARNS);
+    // Explicit ingress control (F7, live 2026-07-31): `RunMicrovm` does NOT
+    // default to "no ingress" — omitting the field attaches the AWS-managed
+    // PUBLIC `HTTP_INGRESS` connector and mints a public
+    // `*.lambda-microvm.<region>.on.aws` endpoint. So the field is ALWAYS sent.
+    //
+    // The env var is unconditional in every CDK-deployed stack (its prop is
+    // required), so in practice this always takes the `configuredIngress` branch
+    // and carries the construct's `NO_INGRESS` ARN — or real connectors once #391
+    // widens it. The fallback is unreachable there by construction; see
+    // `noIngressConnectorArn`.
+    const configuredIngress = parseArnList(MICROVM_INGRESS_CONNECTOR_ARNS);
+    const ingressNetworkConnectors = configuredIngress.length > 0
+      ? configuredIngress
+      : [noIngressConnectorArn()];
 
     const command = new RunMicrovmCommand({
       imageIdentifier: MICROVM_IMAGE_IDENTIFIER,
@@ -240,11 +353,9 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
       // DNS Firewall / security-group / flow-log stack applies unchanged
       // (ADR-021 sub-decision 4).
       egressNetworkConnectors: parseArnList(MICROVM_EGRESS_CONNECTOR_ARNS),
-      // NO ingress beyond the service defaults: nothing in P1–P3 dials into the
-      // MicroVM (no JWE tokens are minted at all), so SHELL_INGRESS and friends
-      // stay off. The env var exists so a deployment CAN pass connectors without
-      // a code change; absent ⇒ the field is omitted entirely.
-      ...(ingressNetworkConnectors.length > 0 && { ingressNetworkConnectors }),
+      // Never omitted — see the comment above. `NO_INGRESS` is the suppression
+      // mechanism, not an empty list.
+      ingressNetworkConnectors,
       runHookPayload,
       maximumDurationInSeconds: MICROVM_MAX_DURATION_SECONDS,
       // `idlePolicy` is OMITTED — never passed, in any phase (ADR-021
@@ -279,9 +390,25 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
 
     const { microvmId, endpoint } = result;
     if (!microvmId || !endpoint) {
-      throw new Error(
-        `RunMicrovm returned an incomplete response (microvmId=${microvmId ?? 'missing'}, `
-        + `endpoint=${endpoint ? 'present' : 'missing'}, state=${result.state ?? 'unknown'})`,
+      // A malformed response means a MicroVM may ALREADY BE RUNNING (and billing)
+      // that no caller will ever receive a handle for — nothing self-terminates on
+      // this substrate. Reap it here, best-effort, before failing: this is the one
+      // orphan window the orchestrator's own catch cannot cover, because
+      // `startSession` never returned a handle to it.
+      if (microvmId) {
+        await this.terminateBestEffort(microvmId, 'incomplete RunMicrovm response');
+      }
+      // Wrapped like every other escaping error so `error-classifier` can see the
+      // MicroVM marker: without it this lands in the generic `Session start
+      // failed` bucket with "Check AgentCore Runtime or ECS cluster health" —
+      // advice that names the wrong substrate entirely. `RunMicrovm` is the
+      // operation because that is the call whose response is malformed.
+      throw wrapMicrovmError(
+        'RunMicrovm',
+        new Error(
+          `RunMicrovm returned an incomplete response (microvmId=${microvmId ?? 'missing'}, `
+          + `endpoint=${endpoint ? 'present' : 'missing'}, state=${result.state ?? 'unknown'})`,
+        ),
       );
     }
 
@@ -329,11 +456,16 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
    *     because the VM is already on its way to frozen; reporting ``running``
    *     would tell the orchestrator compute is still progressing when it is not.
    *     Both map to a state the orchestrator treats as benign-or-anomalous
-   *     depending on the task status, never as a failure.
+   *     depending on the task status, never as a failure. (``SUSPENDING`` was
+   *     never observable live — suspend reaches ``SUSPENDED`` in under a second
+   *     — so nothing may WAIT for it; it is mapped for completeness only.)
    *   - ``TERMINATING`` / ``TERMINATED`` → ``completed``. Both are terminal or
    *     terminal-bound and carry no exit code, so "the substrate is gone" is all
    *     the strategy can honestly say; whether that is success or failure is the
-   *     orchestrator's call (it cross-references the DynamoDB status).
+   *     orchestrator's call (it cross-references the DynamoDB status). This is
+   *     the load-bearing terminal signal: a terminated MicroVM stays observable
+   *     as ``TERMINATED`` for at least ~10 minutes (live-measured), so a poller
+   *     that waited for NotFound would spin on a finished VM.
    *   - anything else (an unrecognized future state) → ``running``, so a service
    *     enum addition can never fail a healthy task.
    */
@@ -355,12 +487,21 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
       // ``failed``. This deliberately DIVERGES from ecs-strategy's
       // "DescribeTasks returned no task ⇒ failed": ECS keeps stopped tasks
       // describable for ~1 h, so a missing task there really is anomalous,
-      // whereas a terminated MicroVM is reaped from the control plane by design
-      // and would otherwise fail every task that finished cleanly. The
-      // orchestrator still fails the task when this terminal report lands while
-      // the DynamoDB status is non-terminal, so a genuine mid-run disappearance
-      // is not swallowed — it just gets the substrate-failure classification
-      // instead of a misleading poll error.
+      // whereas a MicroVM is eventually reaped from the control plane by design
+      // and would otherwise fail every task that finished cleanly.
+      //
+      // NOTE (live 2026-07-31): this is a LATE signal, not the near-term one. A
+      // terminated MicroVM reported ``TERMINATED`` at +3 s and was STILL
+      // ``TERMINATED`` ~10 minutes later; ``ResourceNotFoundException`` was never
+      // observed in that window. The mapping is still correct — and load-bearing
+      // for a VM reaped after a long gap — but the branch that actually fires in
+      // practice is ``TERMINATED → completed`` in the switch below. Neither may
+      // be removed in favour of the other.
+      //
+      // The orchestrator still fails the task when this terminal report lands
+      // while the DynamoDB status is non-terminal, so a genuine mid-run
+      // disappearance is not swallowed — it just gets the substrate-failure
+      // classification instead of a misleading poll error.
       if (err instanceof Error && err.name === 'ResourceNotFoundException') {
         logger.info('MicroVM not found on poll — treating as terminal', {
           microvm_id: microvmId,
@@ -398,19 +539,39 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
    *
    * ADR-021: termination is the active cleanup path — it must not rely on
    * ``maximumDurationInSeconds`` expiring, which would keep paying for an
-   * 8-hour reservation after the task is done.
+   * 8-hour reservation after the task is done. Live verification made that
+   * mandatory rather than belt-and-braces: a hook-less MicroVM reached
+   * ``RUNNING`` in 12 s and stayed ``RUNNING`` indefinitely with no
+   * ``stateReason`` — nothing self-terminates, so nothing cleans up if the
+   * orchestrator does not.
    */
   async stopSession(handle: SessionHandle): Promise<void> {
     if (handle.strategyType !== 'lambda-microvm') {
       throw new Error('stopSession called with non-lambda-microvm handle');
     }
-    const { microvmId } = handle;
+    await this.terminateBestEffort(handle.microvmId, 'session stop');
+  }
 
+  /**
+   * `TerminateMicrovm` that never throws, with the log LEVEL carrying the
+   * diagnosis.
+   *
+   * The single implementation behind BOTH {@link stopSession} and the
+   * incomplete-response orphan reap in {@link startSession}, so every terminate
+   * ABCA issues has identical error semantics — a second, subtly-different
+   * best-effort copy is exactly how one of them ends up throwing and masking the
+   * failure it was cleaning up after.
+   *
+   * @param microvmId - the MicroVM to terminate.
+   * @param reason - why we are terminating, for the log line (the orphan-reap and
+   *   the ordinary finalize path are worth telling apart in CloudWatch).
+   */
+  private async terminateBestEffort(microvmId: string, reason: string): Promise<void> {
     try {
       await getClient().send(new TerminateMicrovmCommand({
         microvmIdentifier: microvmId,
       }));
-      logger.info('Lambda MicroVM terminated', { microvm_id: microvmId });
+      logger.info('Lambda MicroVM terminated', { microvm_id: microvmId, reason });
     } catch (err) {
       const errName = err instanceof Error ? err.name : undefined;
       if (errName === 'ResourceNotFoundException' || errName === 'ConflictException') {
@@ -420,6 +581,7 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
         // routine here, and warning on it would train operators to ignore warns.
         logger.info('MicroVM already terminated or terminating', {
           microvm_id: microvmId,
+          reason,
           error_type: errName,
         });
       } else if (errName === 'ThrottlingException' || errName === 'AccessDeniedException') {
@@ -427,12 +589,14 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
         // probably STILL RUNNING and billing — escalate.
         logger.error('Failed to terminate MicroVM', {
           microvm_id: microvmId,
+          reason,
           error_type: errName,
           error: err instanceof Error ? err.message : String(err),
         });
       } else {
         logger.warn('Failed to terminate MicroVM (best-effort)', {
           microvm_id: microvmId,
+          reason,
           error: err instanceof Error ? err.message : String(err),
         });
       }
@@ -446,3 +610,9 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
  * inline/S3-pointer branch point — there is no separate threshold.
  */
 export const MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES = RUN_HOOK_PAYLOAD_LIMIT_BYTES;
+
+/**
+ * Re-exported for tests: the `NO_INGRESS` fallback the strategy substitutes when
+ * `MICROVM_INGRESS_CONNECTOR_ARNS` is missing (see {@link noIngressConnectorArn}).
+ */
+export const microvmNoIngressConnectorArnForRegion = noIngressConnectorArn;

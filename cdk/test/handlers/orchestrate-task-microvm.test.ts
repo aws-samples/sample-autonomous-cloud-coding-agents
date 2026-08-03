@@ -112,6 +112,7 @@ process.env.TASK_RETENTION_DAYS = '90';
 
 import { TaskStatus } from '../../src/constructs/task-status';
 import { handler } from '../../src/handlers/orchestrate-task';
+import { LambdaMicrovmComputeStrategy } from '../../src/handlers/shared/strategies/lambda-microvm-strategy';
 
 /**
  * Minimal stand-in for the durable-execution context: `step` runs its body
@@ -286,5 +287,134 @@ describe('orchestrate-task for a lambda-microvm task', () => {
 
     expect(mockReconcile).not.toHaveBeenCalled();
     expect(commandsOfType('TerminateMicrovm')).toHaveLength(1);
+  });
+
+  test('threads suspendAnomalyReported into the reconcile call so the event fires once', async () => {
+    runMicrovmOk();
+    mockPollTaskStatus.mockResolvedValue({ attempts: 1, lastStatus: TaskStatus.RUNNING });
+    mockMicrovmSend.mockResolvedValueOnce({ microvmId: MICROVM_ID, state: 'SUSPENDED' });
+    mockReconcile.mockResolvedValue({ taskFailed: false, suspendAnomalyReported: true });
+
+    await handler({ task_id: 'TASK001' }, fakeContext().ctx as never);
+
+    // First poll of the task: nothing reported yet.
+    expect(mockReconcile.mock.calls[0][0].suspendAnomalyReported).toBe(false);
+    // ...and the reconciler's answer is carried into the state the next poll reads.
+    expect(mockFinalizeTask).toHaveBeenCalledWith(
+      'TASK001',
+      expect.objectContaining({ microvmSuspendAnomalyReported: true }),
+      'user-1',
+    );
+  });
+
+  test('a MicroVM poll failure carries the anomaly flag forward rather than re-arming it', async () => {
+    // A GetMicrovm hiccup is not evidence that the anomaly ended, so it must not
+    // silently re-arm the event and produce a duplicate on the next cycle.
+    runMicrovmOk();
+    mockPollTaskStatus.mockResolvedValue({ attempts: 1, lastStatus: TaskStatus.RUNNING });
+    mockMicrovmSend.mockRejectedValueOnce(new Error('transient'));
+
+    const { ctx } = fakeContext();
+    // Seed the poll state as if a previous cycle had already reported.
+    const seededCtx = {
+      ...ctx,
+      waitForCondition: async (
+        _name: string,
+        fn: (state: Record<string, unknown>) => Promise<unknown>,
+      ) => fn({ attempts: 1, microvmSuspendAnomalyReported: true }),
+    };
+
+    await handler({ task_id: 'TASK001' }, seededCtx as never);
+
+    expect(mockFinalizeTask).toHaveBeenCalledWith(
+      'TASK001',
+      expect.objectContaining({ microvmSuspendAnomalyReported: true }),
+      'user-1',
+    );
+  });
+
+  describe('orphan reap when session start fails AFTER RunMicrovm succeeded', () => {
+    test('terminates the MicroVM from the in-memory handle when the persist write fails', async () => {
+      // The MicroVM is already RUNNING and billing, and its id exists ONLY in this
+      // Lambda's memory — no poll or finalize step will ever see it. Nothing
+      // self-terminates on this substrate, so without the reap it bills for the
+      // full 8 h cap while holding admission-gating memory quota.
+      runMicrovmOk();
+      mockTransitionTask.mockRejectedValueOnce(new Error('ConditionalCheckFailedException'));
+
+      await expect(handler({ task_id: 'TASK001' }, fakeContext().ctx as never))
+        .rejects.toThrow('ConditionalCheckFailedException');
+
+      const terminates = commandsOfType('TerminateMicrovm');
+      expect(terminates).toHaveLength(1);
+      expect(terminates[0].input).toEqual({ microvmIdentifier: MICROVM_ID });
+    });
+
+    test('still fails the task with the ORIGINAL error — the reap never masks it', async () => {
+      runMicrovmOk();
+      mockTransitionTask.mockRejectedValueOnce(new Error('persist exploded'));
+
+      await expect(handler({ task_id: 'TASK001' }, fakeContext().ctx as never))
+        .rejects.toThrow('persist exploded');
+
+      expect(mockFailTask).toHaveBeenCalledTimes(1);
+      const [, fromStatus, reason] = mockFailTask.mock.calls[0];
+      expect(fromStatus).toBe(TaskStatus.HYDRATING);
+      expect(reason).toContain('Session start failed');
+      expect(reason).toContain('persist exploded');
+    });
+
+    test('a failing TerminateMicrovm does not replace the original error', async () => {
+      runMicrovmOk();
+      mockTransitionTask.mockRejectedValueOnce(new Error('persist exploded'));
+      const reapErr = new Error('terminate denied');
+      reapErr.name = 'AccessDeniedException';
+      mockMicrovmSend.mockRejectedValueOnce(reapErr);
+
+      // stopSession is internally best-effort (it logs AccessDenied at error level
+      // and returns), so the reap is a no-op here — the user must still see why
+      // session start actually failed.
+      await expect(handler({ task_id: 'TASK001' }, fakeContext().ctx as never))
+        .rejects.toThrow('persist exploded');
+    });
+
+    test('even a stopSession that BREAKS its no-throw contract cannot mask the original error', async () => {
+      // Defense in depth for the handler's inner try/catch: `stopSession` is
+      // contractually non-throwing for this backend, but "contractually" is not
+      // "structurally". If it ever regresses, the reap must still not become the
+      // error the user is shown — the session-start failure is the actionable one.
+      runMicrovmOk();
+      mockTransitionTask.mockRejectedValueOnce(new Error('persist exploded'));
+      const stopSpy = jest.spyOn(LambdaMicrovmComputeStrategy.prototype, 'stopSession')
+        .mockRejectedValueOnce(new Error('stopSession itself threw'));
+
+      try {
+        await expect(handler({ task_id: 'TASK001' }, fakeContext().ctx as never))
+          .rejects.toThrow('persist exploded');
+      } finally {
+        stopSpy.mockRestore();
+      }
+    });
+
+    test('does NOT terminate when RunMicrovm itself failed (there is nothing to reap)', async () => {
+      const err = new Error('Rate exceeded');
+      err.name = 'ThrottlingException';
+      mockMicrovmSend.mockRejectedValueOnce(err);
+
+      await expect(handler({ task_id: 'TASK001' }, fakeContext().ctx as never)).rejects.toThrow();
+
+      expect(commandsOfType('TerminateMicrovm')).toHaveLength(0);
+    });
+
+    test('does not reap on a healthy start (no spurious terminate before the task runs)', async () => {
+      runMicrovmOk();
+      mockPollTaskStatus.mockResolvedValue({ attempts: 1, lastStatus: TaskStatus.RUNNING });
+      mockMicrovmSend.mockResolvedValueOnce({ microvmId: MICROVM_ID, state: 'RUNNING' });
+
+      await handler({ task_id: 'TASK001' }, fakeContext().ctx as never);
+
+      // Exactly ONE terminate — the finalize one, not an extra reap.
+      expect(commandsOfType('TerminateMicrovm')).toHaveLength(1);
+    });
   });
 });

@@ -185,16 +185,29 @@ export interface TaskOrchestratorProps {
    * `executionRoleArn`, `egressConnectorArns` and `payloadBucket` are ALL
    * present, so the type makes a partial configuration unrepresentable instead
    * of deferring the failure to the first task on the backend.
+   *
+   * `ingressConnectorArns` is required for a different reason — it is a security
+   * control whose absence has a *wider* meaning than "off" (see the field). Only
+   * `imageVersion` is genuinely optional, and its absent state ("let the service
+   * resolve the latest ACTIVE version") is a real, intended configuration.
    */
   readonly microvmConfig?: {
-    /** Image name or ARN passed as `imageIdentifier` on every `RunMicrovm`. */
+    /**
+     * Image **ARN** passed as `imageIdentifier` on every `RunMicrovm`.
+     *
+     * Must be an ARN, not a bare name: `RunMicrovm` rejects names
+     * (`Malformed ARN - doesn't start with 'arn:'`). `LambdaMicrovmCompute`
+     * resolves a name to its exact ARN, so in practice this is the same value as
+     * {@link imageArn} — both fields are kept because they answer different
+     * questions (request field vs IAM resource) and could legitimately diverge
+     * if the service ever accepts a version-qualified identifier.
+     */
     readonly imageIdentifier: string;
     /**
      * The image's IAM resource ARN, used to scope every MicroVM lifecycle grant
      * to that one platform-created image (ADR-021).
      *
-     * REQUIRED, and separate from {@link imageIdentifier} because that field may
-     * hold a bare image NAME (valid for `RunMicrovm`, not a valid IAM resource).
+     * REQUIRED, and separate from {@link imageIdentifier} for the reason above.
      * Required rather than optional on purpose: an optional field here would
      * silently re-introduce an account-wide `microvm-image:*` fallback, and no
      * caller needs one — the `microvmImage` ARN shape is fully derivable from an
@@ -212,15 +225,26 @@ export interface TaskOrchestratorProps {
     /** Egress network connectors; comma-joined into the env var. */
     readonly egressConnectorArns: string[];
     /**
-     * Ingress network connectors. Empty in P1–P3: nothing dials into the
-     * MicroVM (no JWE tokens are minted at all), so no ingress is configured.
-     * The plumbing exists so #391 operator shell access can add one without a
+     * Ingress network connectors. **Required** — and required for a security
+     * reason, not a stylistic one.
+     *
+     * `RunMicrovm` attaches a PUBLIC `HTTP_INGRESS` connector (and mints a public
+     * `*.lambda-microvm.<region>.on.aws` endpoint) when the request omits the
+     * field, so "nothing dials into the MicroVM" is an ACTIVE control that has to
+     * be passed on every launch. An optional field here would let a caller
+     * express "no ingress configured" and silently get the widest possible
+     * posture — which is exactly the class of bug the omitted-field rule in
+     * ADR-021's source-hierarchy note warns about.
+     *
+     * In P1–P3 `LambdaMicrovmCompute` always supplies the Lambda-managed
+     * `NO_INGRESS` connector; #391 operator shell access can widen it without a
      * strategy change.
      */
-    readonly ingressConnectorArns?: string[];
+    readonly ingressConnectorArns: string[];
     /**
-     * Bucket for `/run` payloads that exceed the 16 KB `runHookPayload` cap.
-     * The orchestrator gets **write only** — unlike the ECS payload bucket
+     * Bucket for `/run` payloads that exceed the 4 KB `runHookPayload` cap —
+     * i.e. nearly all of them, since a hydrated payload is bigger than that.
+     * The orchestrator gets **write only**: unlike the ECS payload bucket
      * there is no finalize-time delete on this backend (the bucket's lifecycle
      * rule is the reaper), so `grantDelete` would be an unused permission.
      */
@@ -335,14 +359,17 @@ export class TaskOrchestrator extends Construct {
           MICROVM_IMAGE_IDENTIFIER: props.microvmConfig.imageIdentifier,
           MICROVM_EXECUTION_ROLE_ARN: props.microvmConfig.executionRoleArn,
           MICROVM_EGRESS_CONNECTOR_ARNS: props.microvmConfig.egressConnectorArns.join(','),
+          // ALWAYS injected, never conditional — part of the same all-or-nothing
+          // block as the four above. The value is a control (`NO_INGRESS`), not a
+          // configuration nicety: `RunMicrovm` attaches a PUBLIC HTTP_INGRESS
+          // connector when the field is absent from the request, so a deployment
+          // that omitted this var would hand every agent MicroVM a public
+          // endpoint. Making the prop required is what lets this be
+          // unconditional; there is no "no ingress configured" state to express.
+          MICROVM_INGRESS_CONNECTOR_ARNS: props.microvmConfig.ingressConnectorArns.join(','),
           MICROVM_PAYLOAD_BUCKET: props.microvmConfig.payloadBucket.bucketName,
           ...(props.microvmConfig.imageVersion && {
             MICROVM_IMAGE_VERSION: props.microvmConfig.imageVersion,
-          }),
-          // Omitted entirely when empty: the strategy treats an absent/blank
-          // value as "no ingress connectors" and omits the field on RunMicrovm.
-          ...((props.microvmConfig.ingressConnectorArns?.length ?? 0) > 0 && {
-            MICROVM_INGRESS_CONNECTOR_ARNS: props.microvmConfig.ingressConnectorArns!.join(','),
           }),
         }),
         ...(props.attachmentsBucket && { ATTACHMENTS_BUCKET_NAME: props.attachmentsBucket.bucketName }),

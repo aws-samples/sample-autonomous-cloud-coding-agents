@@ -18,6 +18,7 @@
  */
 
 import { Command } from 'commander';
+import { assertComputeSubstrateDeployed } from '../compute-substrate';
 import { CliError } from '../errors';
 import { DEFAULT_STACK_NAME, redactSecretArn, resolveOperatorContext } from '../operator-context';
 import {
@@ -180,21 +181,27 @@ export function makeRepoCommand(): Command {
             `Stack '${stackName}' is missing output 'RepoTableName'. Re-deploy the CDK stack.`,
           );
         }
-        // Refuse to onboard a repo as compute_type=ecs when the deployed stack did
-        // NOT provision the ECS substrate — otherwise every task on this repo fails
-        // at session start with "ECS compute strategy requires ECS_CLUSTER_ARN…".
-        // Catch it here, at config time, with a fixable message. ComputeSubstrate is
-        // null on stacks predating this output; treat that as "unknown" and only
-        // hard-block on an explicit non-ecs value, so onboarding still works against
-        // an older deploy (the runtime error remains the backstop there).
-        if (opts.computeType === 'ecs' && computeSubstrate && computeSubstrate !== 'ecs') {
-          throw new CliError(
-            `Stack '${stackName}' was deployed without the ECS substrate (ComputeSubstrate=${computeSubstrate}), `
-            + 'so a repo onboarded as --compute-type ecs would fail at task start. Redeploy the stack with '
-            + '`--context compute_type=ecs` first (adds the Fargate substrate alongside AgentCore), then re-run this — '
-            + 'or onboard with --compute-type agentcore.',
-          );
-        }
+        // Refuse to onboard a repo onto a compute backend the deployed stack did
+        // NOT provision — otherwise every task on this repo fails at session
+        // start ("ECS compute strategy requires ECS_CLUSTER_ARN…" for ecs, or the
+        // MicroVM strategy's "deployed without the Lambda MicroVMs substrate" for
+        // lambda-microvm). Catch it here, at config time, with a fixable message.
+        //
+        // ORDERING — this runs BEFORE `onboardRepo`, and that is deliberate:
+        // `onboardRepo` performs the live `ListManagedMicrovmImages` regional
+        // availability probe for lambda-microvm. The substrate gate is both
+        // CHEAPER (it reuses the `ComputeSubstrate` output already fetched in the
+        // Promise.all above — zero extra API calls, no extra IAM) and MORE
+        // SPECIFIC (a stack with no MicroVM substrate cannot run the backend even
+        // in a Region that supports it, whereas the reverse cannot happen: the
+        // synth-time Region gate means a stack carrying the MicroVM substrate is
+        // already in a supported Region). Reporting "this stack has no MicroVM
+        // substrate" beats reporting "MicroVMs are unavailable in this Region"
+        // when both are true — the first names the actual fix.
+        //
+        // See `assertComputeSubstrateDeployed` for the ComputeSubstrate output's
+        // exact semantics (single-valued today, list-tolerant by construction).
+        assertComputeSubstrateDeployed({ stackName, computeType: opts.computeType, computeSubstrate });
 
         const config = await onboardRepo(region, tableName, repoId, {
           computeType: opts.computeType,
