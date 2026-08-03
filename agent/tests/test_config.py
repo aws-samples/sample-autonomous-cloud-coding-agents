@@ -508,7 +508,7 @@ class TestResolveLinearApiTokenRefreshPaths:
         monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
 
     def test_corrupted_secret_json_returns_empty_with_error_log(self, monkeypatch):
-        """B3: corrupted SM payload → empty string return, no traceback."""
+        """A corrupted SM payload → empty string return, no traceback."""
         monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
         monkeypatch.setenv("AWS_REGION", "us-east-1")
 

@@ -70,3 +70,45 @@ export async function slackFetch(
     return false;
   }
 }
+
+/**
+ * POST to a Slack Web API method and return the message timestamp it produced.
+ *
+ * Distinct from {@link slackFetch} because a boolean is enough for fire-and-forget
+ * reactions but NOT for a message the caller must edit later: Slack addresses a
+ * message by its ``ts``, so a status panel that matures in place has to capture
+ * the one it created. Returns null on any failure (same best-effort contract).
+ */
+export async function slackFetchTs(
+  botToken: string,
+  method: string,
+  body: Record<string, unknown>,
+): Promise<string | null> {
+  try {
+    const response = await fetch(`https://slack.com/api/${method}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Authorization': `Bearer ${botToken}`,
+      },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) {
+      logger.warn('Slack API returned non-2xx', { method, status: response.status });
+      return null;
+    }
+    const result = await response.json() as { ok: boolean; error?: string; ts?: string };
+    if (!result.ok) {
+      logger.warn('Slack API returned error', { method, error: result.error });
+      return null;
+    }
+    // chat.update echoes the ts it edited; chat.postMessage returns the new one.
+    return result.ts ?? null;
+  } catch (err) {
+    logger.warn('Slack API fetch threw', {
+      method,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}

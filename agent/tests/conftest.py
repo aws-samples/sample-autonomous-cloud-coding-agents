@@ -14,7 +14,7 @@ from models import TaskConfig
 # in the MAIN thread during a test's *call* phase, so a deadlock in a WORKER
 # thread, a fixture, collection, or a C-level socket read the main thread never
 # returns from stalls the whole `mise run build` silently — up to the platform's
-# 3600s build-verify ceiling (the ECS-only stall on ABCA-684/686/688, and the
+# 3600s build-verify ceiling (the ECS-only stall we chased for weeks, and the
 # scoped-session S3 hang the _clean_env reset below guards against: 40+ min of
 # dead air, container never reaped).
 #
@@ -35,7 +35,7 @@ from models import TaskConfig
 #
 # ``pytest_sessionfinish`` cancels the timer on a clean finish (below), so a
 # legitimately slow-but-passing run that lands near 600s — e.g. still in teardown
-# / coverage write — is NOT hard-exited into a bewildering red (#616 review N2).
+# / coverage write — is NOT hard-exited into a bewildering red.
 # ``os._exit`` skips atexit + buffer flush, so it must only fire on a TRUE hang.
 _HANG_REAP_DEADLINE_S = 600
 
@@ -59,7 +59,7 @@ _hang_watchdog.start()
 
 
 def pytest_sessionfinish(session, exitstatus):
-    """Cancel the hang watchdog on a clean session finish (#616 review N2).
+    """Cancel the hang watchdog on a clean session finish.
 
     Without this, a legitimately slow-but-passing suite that finishes just after
     the 600s deadline (e.g. during teardown / coverage write) would be hard-exited

@@ -1,0 +1,53 @@
+# A6 re-stack (#305): re-merge a CHANGED predecessor branch into an existing
+# stacked-child PR so the child is no longer stale. Like pr-iteration it
+# operates on an existing PR branch (push_resolve — no new PR), but it also
+# receives the updated predecessor branch(es) as merge_branches, which repo.py
+# merges into the working tree before the agent runs. The agent reconciles
+# conflicts, verifies the build, and pushes the same branch.
+#
+# Triggered by the platform (the A6 re-stack handler off a pull_request
+# webhook), not by a user. Writeable; Cedar principal "new_task" (the
+# id→legacy map has no restack entry, so it falls to new_task — a writeable
+# coding identity, correct here).
+id: coding/restack-v1
+version: 1.0.0
+domain: coding
+description: Re-merge a changed predecessor branch into an existing stacked-child PR (#305 A6).
+requires_repo: true
+read_only: false
+prompt:
+  template: registry://prompt/coding-restack-workflow
+  placeholders:
+    - repo_url
+    - task_id
+    - workspace
+    - branch_name
+    - default_branch
+    - max_turns
+    - setup_notes
+    - memory_context
+    - pr_number
+hydration:
+  sources: [pull_request, memory, task_description]
+agent_config:
+  tier: standard
+  allowed_tools: [Bash, Read, Write, Edit, Glob, Grep, WebFetch]
+  cedar_policy_modules: [builtin/hard_deny, builtin/soft_deny]
+repo_config:
+  provider: github
+  discover: true
+required_inputs:
+  all_of: [pr_number]
+steps:
+  - { kind: clone_repo,      name: setup }
+  - { kind: hydrate_context, name: context }
+  - { kind: run_agent,       name: restack }
+  - { kind: verify_build,    name: build, gate: regression_only }
+  - { kind: ensure_pr,       name: resolve_pr, strategy: push_resolve }
+terminal_outcomes:
+  primary: pr_url
+limits:
+  max_turns: 100
+promotion_gate:
+  requires: [tests:agent/restack]
+status: production

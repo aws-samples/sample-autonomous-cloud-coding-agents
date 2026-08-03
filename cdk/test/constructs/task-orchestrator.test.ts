@@ -36,6 +36,7 @@ interface StackOverrides {
   ecsConfig?: {
     clusterArn: string;
     taskDefinitionArn: string;
+    planningTaskDefinitionArn: string;
     subnets: string;
     securityGroup: string;
     containerName: string;
@@ -107,6 +108,7 @@ describe('TaskOrchestrator construct', () => {
     ecsConfig: {
       clusterArn: 'arn:aws:ecs:us-east-1:123456789012:cluster/agent-cluster',
       taskDefinitionArn: 'arn:aws:ecs:us-east-1:123456789012:task-definition/agent:1',
+      planningTaskDefinitionArn: 'arn:aws:ecs:us-east-1:123456789012:task-definition/agent-planning:1',
       subnets: 'subnet-aaa,subnet-bbb',
       securityGroup: 'sg-12345',
       containerName: 'AgentContainer',
@@ -448,6 +450,9 @@ describe('TaskOrchestrator construct', () => {
           Variables: Match.objectLike({
             ECS_CLUSTER_ARN: 'arn:aws:ecs:us-east-1:123456789012:cluster/agent-cluster',
             ECS_TASK_DEFINITION_ARN: 'arn:aws:ecs:us-east-1:123456789012:task-definition/agent:1',
+            // Read-only workflows run on the smaller planning task definition.
+            // See docs/design/ECS_RIGHTSIZED_PLANNING.md.
+            ECS_PLANNING_TASK_DEFINITION_ARN: 'arn:aws:ecs:us-east-1:123456789012:task-definition/agent-planning:1',
             ECS_SUBNETS: 'subnet-aaa,subnet-bbb',
             ECS_SECURITY_GROUP: 'sg-12345',
             ECS_CONTAINER_NAME: 'AgentContainer',

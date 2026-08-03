@@ -38,6 +38,7 @@ jest.mock('@aws-sdk/lib-dynamodb', () => ({
   DynamoDBDocumentClient: { from: jest.fn(() => ({ send: mockDdbSend })) },
   GetCommand: jest.fn((input: unknown) => ({ _type: 'Get', input })),
   UpdateCommand: jest.fn((input: unknown) => ({ _type: 'Update', input })),
+  QueryCommand: jest.fn((input: unknown) => ({ _type: 'Query', input })),
 }));
 
 const mockUpsertTaskComment: jest.Mock = jest.fn();
@@ -70,8 +71,8 @@ jest.mock('../../src/handlers/shared/context-hydration', () => ({
   clearTokenCache: () => mockClearTokenCache(),
 }));
 
-// Issue #64: SlackNotifyFn migrated onto FanOutConsumer as a dispatcher.
-// The dispatcher calls into ``slack-notify.ts::dispatchSlackEvent``; we
+// The Slack notifier runs as a FanOutConsumer dispatcher rather than its own
+// stream consumer. The dispatcher calls into ``slack-notify.ts::dispatchSlackEvent``; we
 // mock that here so the fanout tests focus on routing invariants and
 // leave the per-dispatcher Slack behaviour to ``slack-notify.test.ts``.
 // Exposing the mock + the tagged ``SlackApiError`` class lets routing
@@ -94,21 +95,48 @@ jest.mock('../../src/handlers/slack-notify', () => {
 });
 
 // Linear dispatcher posts via the existing `postIssueComment` helper
-// in `linear-feedback.ts` (#239). Mock it here so dispatcher tests
+// in `linear-feedback.ts`. Mock it here so dispatcher tests
 // observe the call shape without exercising the real OAuth-resolver
 // + GraphQL path. Default ``{ ok: true }`` so a test that forgets to
-// script the mock still drives the happy path.
+// script the mock still drives the happy path (postIssueComment returns
+// a LinearPostResult, not a bare boolean).
 const mockPostIssueComment: jest.Mock = jest.fn().mockResolvedValue({ ok: true });
+// Standalone comment-triggered iterations get a threaded reply to
+// the human's @bgagent comment, on top of the metrics comment. replyToComment
+// returns the new reply's comment-id string (or null), NOT a LinearPostResult.
+const mockReplyToComment: jest.Mock = jest.fn().mockResolvedValue('reply-id');
+// The standalone iteration MATURES a threaded reply (edit in
+// place) via upsertThreadedReply(ctx, issueId, parentCommentId, body, existingId?)
+// rather than posting a fresh replyToComment.
+const mockUpsertThreadedReply: jest.Mock = jest.fn().mockResolvedValue('reply-id');
 jest.mock('../../src/handlers/shared/linear-feedback', () => ({
   postIssueComment: (
     ctx: { linearWorkspaceId: string; registryTableName: string },
     issueId: string,
     body: string,
   ) => mockPostIssueComment(ctx, issueId, body),
+  replyToComment: (
+    ctx: { linearWorkspaceId: string; registryTableName: string },
+    issueId: string,
+    parentCommentId: string,
+    body: string,
+  ) => mockReplyToComment(ctx, issueId, parentCommentId, body),
+  // Forwards the OPTIONS argument too: the convergence flags (preview
+  // preservation, settle checks, outcome repair) are the whole contract between
+  // the three writers of this one reply, so a mock that dropped them could not
+  // observe whether the dispatcher asked for the right behaviour.
+  upsertThreadedReply: (
+    ctx: { linearWorkspaceId: string; registryTableName: string },
+    issueId: string,
+    parentCommentId: string,
+    body: string,
+    existingReplyId?: string,
+    options?: Record<string, unknown>,
+  ) => mockUpsertThreadedReply(ctx, issueId, parentCommentId, body, existingReplyId, options),
 }));
 
-// Jira dispatcher posts via `postIssueCommentAdf` in `jira-feedback.ts`
-// (#573). Mock it + `buildAdfDocument` so dispatcher tests observe the call
+// Jira dispatcher posts via `postIssueCommentAdf` in `jira-feedback.ts`.
+// Mock it + `buildAdfDocument` so dispatcher tests observe the call
 // shape without exercising the real OAuth-resolver + REST path. The
 // `buildAdfDocument` stub returns the paragraph runs verbatim under `_adf`
 // so tests can flatten them back to text (see `adfText`) instead of walking
@@ -175,6 +203,19 @@ function mkEvent(type: string, taskId = 't-1'): DynamoDBRecord {
   });
 }
 
+/** An ``agent_milestone`` event carrying ``metadata.milestone`` — the real
+ *  shape the agent emits for pr_created (progress_writer.write_agent_milestone),
+ *  which ``effectiveEventType`` unwraps for routing. */
+function mkMilestone(milestone: string, taskId = 't-1'): DynamoDBRecord {
+  return mkRecord('INSERT', {
+    task_id: { S: taskId },
+    event_id: { S: `01ABC${milestone}` },
+    event_type: { S: 'agent_milestone' },
+    timestamp: { S: '2026-04-22T04:00:00Z' },
+    metadata: { M: { milestone: { S: milestone } } },
+  });
+}
+
 describe('fanout-task-events: parseStreamRecord', () => {
   test('parses a well-formed INSERT into FanOutEvent', () => {
     const rec = mkEvent('task_completed', 't-parse-1');
@@ -207,7 +248,7 @@ describe('fanout-task-events: shouldFanOut filter (union of per-channel defaults
     timestamp: '2026-04-22T04:00:00Z',
   });
 
-  // Rev-6 design §6.2 + issue #64: the Slack dispatcher is the only
+  // Per the fan-out design §6.2, the Slack dispatcher is the only
   // channel that consumes ``task_created`` / ``session_started`` /
   // ``task_timed_out`` — it gates further on ``channel_source ===
   // 'slack'`` so the extra lifecycle signals never reach API / webhook
@@ -218,9 +259,9 @@ describe('fanout-task-events: shouldFanOut filter (union of per-channel defaults
     'task_completed',
     'task_cancelled',
     'task_stranded',
-    'task_timed_out', // Slack lifecycle (issue #64)
-    'task_created', // Slack lifecycle (issue #64)
-    'session_started', // Slack lifecycle (issue #64)
+    'task_timed_out', // Slack lifecycle
+    'task_created', // Slack lifecycle
+    'session_started', // Slack lifecycle
     'agent_error',
     'pr_created',
     'approval_requested', // Cedar HITL
@@ -275,7 +316,7 @@ describe('fanout-task-events: per-channel filter contract (design §6.2)', () =>
     expect(f.has('pr_created')).toBe(false);
   });
 
-  test('every Slack-default event the dispatcher actually renders today is in NOTIFIABLE_EVENTS (issue #64 review Cat 7 drift guard)', () => {
+  test('every Slack-default event the dispatcher actually renders today is in NOTIFIABLE_EVENTS (drift guard)', () => {
     // The router subscribes Slack to events the dispatcher must
     // render. ``approval_requested``, ``approval_stranded``, and
     // ``status_response`` are forward-compat (no Slack-side renderer
@@ -327,17 +368,21 @@ describe('fanout-task-events: per-channel filter contract (design §6.2)', () =>
     ]);
   });
 
-  test('Linear subscribes to terminal events only (post-once final-status comment)', () => {
+  test('Linear subscribes to pr_created + terminal events + task_timed_out (ADR-016 P4.5 courtesy comment + post-once final-status)', () => {
+    // review should-fix: task_timed_out added so a Linear standalone iteration
+    // that times out still settles (matches Jira/Slack, which already had it).
     const f = CHANNEL_DEFAULTS.linear;
     expect([...f].sort()).toEqual([
+      'pr_created',
       'task_cancelled',
       'task_completed',
       'task_failed',
       'task_stranded',
+      'task_timed_out',
     ]);
   });
 
-  test('Jira subscribes to terminal events + task_timed_out (post-once final-status comment, #573)', () => {
+  test('Jira subscribes to terminal events + task_timed_out (post-once final-status comment)', () => {
     // Jira's post-once final-status comment. Mirrors Linear but also
     // includes ``task_timed_out`` (a distinct terminal event the
     // orchestrator now emits; Linear's default predates it).
@@ -433,7 +478,7 @@ describe('fanout-task-events: routeEvent (per-channel dispatch)', () => {
   });
 
   test('task_completed routes to all five channels (slack, github, linear, jira, email)', async () => {
-    // Linear joined the dispatcher list in #239 and Jira in #573:
+    // Linear and Jira are both on the dispatcher list:
     // terminal-events fan out to a deterministic platform-side comment
     // for Linear-/Jira-origin tasks. Each dispatcher short-circuits on
     // its own ``channel_source`` gate so non-matching tasks see no
@@ -449,8 +494,8 @@ describe('fanout-task-events: routeEvent (per-channel dispatch)', () => {
     // Regression guard against accidentally folding cancelled+stranded
     // into Email via a shared TERMINAL spread — design says Email is
     // minimal (task_completed, task_failed, approval_required only).
-    // Linear joined the terminal-event default in #239 and Jira in #573
-    // alongside the existing Slack + GitHub.
+    // Linear and Jira are on the terminal-event default alongside
+    // Slack + GitHub.
     const outcome = await routeEvent(mk('task_cancelled'));
     expect([...outcome.dispatched].sort()).toEqual(['github', 'jira', 'linear', 'slack']);
   });
@@ -460,12 +505,12 @@ describe('fanout-task-events: routeEvent (per-channel dispatch)', () => {
     expect([...outcome.dispatched].sort()).toEqual(['github', 'jira', 'linear', 'slack']);
   });
 
-  test('task_timed_out routes to Slack + Jira (Linear default predates it)', async () => {
-    // ``task_timed_out`` is a distinct terminal event the orchestrator
-    // emits. Slack and Email-... actually email does NOT include it; the
-    // Jira default (added in #573) does, Linear's (#239) does not.
+  test('task_timed_out routes to Slack + Jira + Linear (all three now subscribe)', async () => {
+    // ``task_timed_out`` is a distinct terminal event the orchestrator emits.
+    // Slack + Jira always had it; Linear does too, so a timed-out standalone
+    // iteration settles. Email excludes it.
     const outcome = await routeEvent(mk('task_timed_out'));
-    expect([...outcome.dispatched].sort()).toEqual(['jira', 'slack']);
+    expect([...outcome.dispatched].sort()).toEqual(['jira', 'linear', 'slack']);
   });
 
   test('agent_error routes only to Slack', async () => {
@@ -473,9 +518,9 @@ describe('fanout-task-events: routeEvent (per-channel dispatch)', () => {
     expect(outcome.dispatched).toEqual(['slack']);
   });
 
-  test('pr_created routes to GitHub only (not Slack — task_completed already carries View PR)', async () => {
+  test('pr_created routes to GitHub + Linear (ADR-016 P4.5 courtesy comment), not Slack', async () => {
     const outcome = await routeEvent(mk('pr_created'));
-    expect(outcome.dispatched).toEqual(['github']);
+    expect([...outcome.dispatched].sort()).toEqual(['github', 'linear']);
     expect(outcome.dispatched).not.toContain('slack');
   });
 
@@ -539,7 +584,7 @@ describe('fanout-task-events: channel isolation', () => {
 
       // (2) Telemetry truthfulness: Slack must NOT be in ``dispatched``
       // because its dispatcher rejected. Email + GitHub + Linear + Jira
-      // are. Linear (#239) and Jira (#573) joined the terminal-event
+      // are. Linear and Jira are on the terminal-event
       // dispatcher list; for non-Linear/non-Jira tasks (this test omits
       // channel_source — those dispatchers short-circuit early but still
       // resolve cleanly so they count as dispatched).
@@ -547,8 +592,7 @@ describe('fanout-task-events: channel isolation', () => {
       expect(outcome.dispatched).not.toContain('slack');
 
       // (3) Slack landed in ``infraRejections`` so the handler will
-      // flag this record for partial-batch retry — the BLOCKER that
-      // motivated the post-issue-#64 review fix. Without this signal,
+      // flag this record for partial-batch retry. Without this signal,
       // a transient Slack-side DDB throttle would be a permanent drop.
       expect(outcome.infraRejections).toEqual(['slack']);
 
@@ -629,7 +673,7 @@ describe('fanout-task-events: handler', () => {
     };
     // Must not throw; the log-only dispatchers just call logger.info.
     // Handler returns a ``DynamoDBBatchResponse`` so ``reportBatchItemFailures``
-    // semantics are honored end-to-end (finding #1). Empty ``batchItemFailures``
+    // semantics are honored end-to-end. Empty ``batchItemFailures``
     // means every record succeeded from the event-source-mapping's perspective.
     await expect(handler(event)).resolves.toEqual({ batchItemFailures: [] });
   });
@@ -704,7 +748,7 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
     mockResolveGitHubToken.mockReset().mockResolvedValue('ghp_fake');
     mockClearTokenCache.mockReset();
     // Linear dispatcher's postIssueComment runs in parallel with the
-    // GitHub dispatcher under the new fan-out wiring (#239). Stub it as
+    // GitHub dispatcher under the fan-out wiring. Stub it as
     // a no-op for these GitHub-focused tests so a non-Linear-channel
     // task short-circuits inside the dispatcher (channel_source ===
     // 'api' / 'github'). Pre-existing tests don't assert on it.
@@ -739,7 +783,7 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
     expect(upsertArg).not.toHaveProperty('existingEtag');
     // UpdateCommand fired with the new id (no etag persistence). Find it
     // by command type rather than index — Linear's dispatcher ALSO
-    // calls GetCommand against the same shared mock (#239), so the
+    // calls GetCommand against the same shared mock, so the
     // call sequence is no longer a deterministic [Get, Update].
     const updateCall = mockDdbSend.mock.calls.find(
       ([cmd]) => (cmd as { _type?: string })._type === 'Update',
@@ -822,10 +866,9 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
     expect(mockUpsertTaskComment).not.toHaveBeenCalled();
   });
 
-  test('upsertTaskComment rejection escalates to partial-batch retry (post-issue-#64-review)', async () => {
-    // Pre-fix: this test asserted ``batchItemFailures: []`` because
-    // the router swallowed any dispatcher rejection. That hid
-    // transient GitHub 5xxs as permanent drops. After the fix, an
+  test('upsertTaskComment rejection escalates to partial-batch retry', async () => {
+    // An earlier router swallowed any dispatcher rejection, which hid
+    // transient GitHub 5xxs as permanent drops. Now an
     // upsertTaskComment rejection lands in ``infraRejections`` and
     // the handler escalates the record for partial-batch retry —
     // matching the legacy ``SlackNotifyFn`` semantic where infra
@@ -897,7 +940,7 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
     await handler(event);
 
     // Find the UpdateCommand by command type (Linear dispatcher's
-    // GetCommand sits between GitHub's Get and Update post-#239).
+    // GetCommand sits between GitHub's Get and Update).
     const updateCall = mockDdbSend.mock.calls.find(
       ([cmd]) => (cmd as { _type?: string })._type === 'Update',
     );
@@ -948,8 +991,8 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
       );
       expect(updateCalls).toHaveLength(0);
 
-      // Post-issue-#64-review Cat 3 fix: GitHub 4xx (excluding 401 +
-      // 404 which have dedicated handling) is now treated as a
+      // GitHub 4xx (excluding 401 +
+      // 404 which have dedicated handling) is treated as a
       // **channel-terminal** error. The dispatcher swallows it via a
       // dedicated ``fanout.github.api_error`` warn, NOT a generic
       // ``fanout.dispatcher.rejected``. This keeps Lambda from
@@ -974,10 +1017,10 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
   });
 
   test.each([403, 429])(
-    'HTTP %s from GitHub escalates to partial-batch retry (rate-limit carve-out, PR #79 review #1)',
+    'HTTP %s from GitHub escalates to partial-batch retry (rate-limit carve-out)',
     async (httpStatus) => {
       // 403 ("API rate limit exceeded") and 429 ("Too Many Requests")
-      // are 4xx but transient. The original migration's blanket 4xx
+      // are 4xx but transient. A blanket 4xx
       // swallow would permanently drop entire reconciliation waves
       // under sustained rate-limiting. The carve-out re-classifies
       // them as infra rejections so the record retries until the
@@ -1021,7 +1064,7 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
   });
 
   test('loadRepoConfig throwing a transient error falls back to the platform default token', async () => {
-    // SFH-S2: DDB throttling must not black-hole GitHub comments;
+    // DDB throttling must not black-hole GitHub comments;
     // the dispatcher falls back to the platform default ARN so
     // one flaky invocation doesn't silence the whole fleet.
     mockLoadRepoConfig.mockRejectedValueOnce(
@@ -1040,7 +1083,7 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
   });
 
   test('resolveGitHubToken throwing causes the dispatcher to skip without calling upsertTaskComment', async () => {
-    // SFH-S1 adjacent: when Secrets Manager fails, we must NOT
+    // When Secrets Manager fails, we must NOT
     // attempt to write a comment with an undefined token.
     mockDdbSend.mockResolvedValueOnce({ Item: TASK_RECORD_BASE });
     mockResolveGitHubToken.mockRejectedValueOnce(new Error('secrets manager down'));
@@ -1056,7 +1099,7 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
     // Update. Subsequent events for this task will also skip, so
     // no duplicate-comment risk. Must NOT alarm operators.
     //
-    // Linear dispatcher also calls Get against the same mock (#239);
+    // Linear dispatcher also calls Get against the same mock;
     // dispatch on command type so its Get returns the same Item but
     // the GitHub UpdateCommand specifically rejects.
     mockDdbSend.mockReset().mockImplementation((cmd: { _type?: string }) => {
@@ -1078,7 +1121,7 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
   });
 
   test('saveCommentState non-conditional failure (DDB throttling) logs at ERROR with error_id', async () => {
-    // SFH-B2: non-ConditionalCheckFailed failures leave the task
+    // Non-ConditionalCheckFailed failures leave the task
     // without a comment_id, so the next event will duplicate. This
     // is a real persistence bug that must alarm distinctly.
     const errorSpy = jest.fn();
@@ -1112,7 +1155,7 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
   });
 
   test('401 from GitHub clears the token cache and retries once with a fresh token', async () => {
-    // SFH-S1: token rotation recovery. The first upsert rejects with
+    // Token rotation recovery. The first upsert rejects with
     // 401, the dispatcher evicts the cache, re-fetches, and retries.
     // We import the (mocked) class fresh so ``instanceof`` in the
     // handler matches the instance the test throws.
@@ -1158,16 +1201,14 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
     expect(mockResolveGitHubToken).toHaveBeenCalledWith('arn:repo-specific');
   });
 
-  // ---- Scenario 7-extended regression (post-K2 deploy validation) ----
+  // ---- Number-coercion regression (found in deploy validation) ----
 
   test('TaskRecord with string-typed cost_usd/duration_s renders without throwing (DDB Number coercion)', async () => {
     // Regression: the DynamoDB Document-client returns Number
     // attributes as strings. ``renderCommentBody`` calls
     // ``costUsd.toFixed(4)`` which throws TypeError on a string,
     // causing every terminal event on a pr_iteration task to be
-    // rejected by the dispatcher (observed in Scenario 7-extended
-    // deploy validation, task ``01KQSPFXQMYQR0CNGCF56XB9ZM``). The
-    // fan-out boundary must coerce.
+    // rejected by the dispatcher. The fan-out boundary must coerce.
     mockDdbSend
       .mockResolvedValueOnce({
         Item: {
@@ -1258,10 +1299,10 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Issue #64 — Slack dispatcher integration (SlackNotifyFn migration)
+// Slack dispatcher integration
 // ---------------------------------------------------------------------------
 
-describe('fanout-task-events: Slack dispatcher (issue #64 migration)', () => {
+describe('fanout-task-events: Slack dispatcher', () => {
   // Confirm the Slack dispatcher is wired into the router and receives
   // the parsed FanOutEvent (not a raw DynamoDB stream record). Detailed
   // per-behaviour coverage (dedup, thread management, reactions, session
@@ -1290,8 +1331,8 @@ describe('fanout-task-events: Slack dispatcher (issue #64 migration)', () => {
     expect(ddbClient).toBeDefined();
   });
 
-  test('task_created fans out (Slack lifecycle event re-added for issue #64)', async () => {
-    // Before #64, ``task_created`` was intentionally dropped at the
+  test('task_created fans out (Slack lifecycle event)', async () => {
+    // ``task_created`` used to be dropped at the
     // filter layer to keep integrations quiet by default. The Slack
     // dispatcher now gates further on ``channel_source === 'slack'``,
     // so re-admitting it at the filter is safe.
@@ -1318,14 +1359,13 @@ describe('fanout-task-events: Slack dispatcher (issue #64 migration)', () => {
   });
 
   test('Slack dispatcher infra rejection escalates record to partial-batch retry', async () => {
-    // Post-issue-#64-review BLOCKER fix: an infra error inside the
+    // An infra error inside the
     // Slack dispatcher (DDB throttling on the task GetItem, Secrets
     // Manager 5xx, transient Slack API timeout) must NOT be silently
-    // dropped. The handler routes the rejection through the new
+    // dropped. The handler routes the rejection through the
     // ``infraRejections`` channel and pushes the record into
-    // ``batchItemFailures`` so Lambda retries it. Without this, the
-    // migration would lose the legacy ``SlackNotifyFn`` retry
-    // semantic.
+    // ``batchItemFailures`` so Lambda retries it — the retry semantic a
+    // dedicated Slack stream consumer used to provide.
     mockDispatchSlackEvent.mockReset().mockRejectedValueOnce(
       new Error('slack side ddb throttled'),
     );
@@ -1355,7 +1395,7 @@ describe('fanout-task-events: Slack dispatcher (issue #64 migration)', () => {
     await expect(handler(event)).resolves.toEqual({ batchItemFailures: [] });
   });
 
-  test('SlackApiError matched by name even when instanceof fails (PR #79 review #7)', async () => {
+  test('SlackApiError matched by name even when instanceof fails', async () => {
     // Defense-in-depth: if a bundler ever duplicates the slack-notify
     // module, two distinct SlackApiError classes coexist and
     // ``instanceof`` against one fails for instances of the other.
@@ -1379,10 +1419,10 @@ describe('fanout-task-events: Slack dispatcher (issue #64 migration)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Linear dispatcher (#239)
+// Linear dispatcher
 // ---------------------------------------------------------------------------
 
-describe('fanout-task-events: Linear dispatcher (issue #239)', () => {
+describe('fanout-task-events: Linear dispatcher', () => {
   const TASK_RECORD_LINEAR = {
     task_id: 't-lin',
     user_id: 'u-1',
@@ -1407,6 +1447,8 @@ describe('fanout-task-events: Linear dispatcher (issue #239)', () => {
   beforeEach(() => {
     mockDdbSend.mockReset().mockResolvedValue({ Item: undefined });
     mockPostIssueComment.mockReset().mockResolvedValue({ ok: true });
+    mockReplyToComment.mockReset().mockResolvedValue('reply-id');
+    mockUpsertThreadedReply.mockReset().mockResolvedValue('reply-id');
     // Slack/GitHub mocks aren't asserted here but leaving them
     // un-reset would let prior-test rejections bleed in.
     mockDispatchSlackEvent.mockReset().mockResolvedValue(undefined);
@@ -1448,10 +1490,10 @@ describe('fanout-task-events: Linear dispatcher (issue #239)', () => {
     expect(body).toContain('$0.55');
     expect(body).toContain('27 / 100');
     expect(body).toContain('3m 41s');
-    // F-prlink (ABCA-584): the PR URL IS rendered on the ✅ success path. The old
+    // The PR URL IS rendered on the ✅ success path. The old
     // behavior omitted it, assuming the agent's own step-2 "PR opened" comment
-    // always carries it — but that comment can silently not fire (live-caught: a
-    // decompose→single task opened a PR but posted no PR-opened comment, so the
+    // always carries it — but that comment can silently not fire (observed: a
+    // task opened a PR but posted no PR-opened comment, so the
     // link was lost entirely). The terminal completion comment is the
     // platform-owned surface, so it must carry the link; a duplicate is far
     // cheaper than a missing PR.
@@ -1475,9 +1517,9 @@ describe('fanout-task-events: Linear dispatcher (issue #239)', () => {
     expect(body).not.toContain('Shipped a PR');
   });
 
-  test('error_max_turns + pr_url renders ⚠️ "shipped a PR but stopped early" frame (ABCA-91 case)', async () => {
-    // The motivating real-world case from #239: ABCA-91 hit max_turns
-    // on turn 101 but successfully opened PR #35 before the cap fired.
+  test('error_max_turns + pr_url renders ⚠️ "shipped a PR but stopped early" frame', async () => {
+    // The motivating real-world case: a task hit its max-turns cap
+    // on turn 101 but had successfully opened a PR before the cap fired.
     // The Linear comment should frame this as ⚠️ shipped-but-stopped,
     // not ❌ failed — the work landed and the requester needs to see
     // the PR link.
@@ -1516,6 +1558,109 @@ describe('fanout-task-events: Linear dispatcher (issue #239)', () => {
     expect(mockPostIssueComment).not.toHaveBeenCalled();
   });
 
+  // ─── ADR-016 P4.5: first-run "PR opened" courtesy comment on pr_created ─────
+
+  test('pr_created posts a "🔗 Opened PR" comment for a first-run task', async () => {
+    mockGet({ ...TASK_RECORD_LINEAR, pr_number: 13 });
+
+    const event: DynamoDBStreamEvent = { Records: [mkMilestone('pr_created', 't-lin')] };
+    await handler(event);
+
+    expect(mockPostIssueComment).toHaveBeenCalledTimes(1);
+    const [, issueId, body] = mockPostIssueComment.mock.calls[0];
+    expect(issueId).toBe('issue-uuid-42');
+    expect(body).toContain('🔗');
+    expect(body).toContain('PR #13');
+    expect(body).toContain('https://github.com/owner/repo/pull/13');
+  });
+
+  test('pr_created without a PR url yet posts nothing (nothing to link)', async () => {
+    mockGet({ ...TASK_RECORD_LINEAR, pr_url: undefined });
+
+    const event: DynamoDBStreamEvent = { Records: [mkMilestone('pr_created', 't-lin')] };
+    await handler(event);
+
+    expect(mockPostIssueComment).not.toHaveBeenCalled();
+  });
+
+  test('pr_created is post-once — already-posted marker skips the comment', async () => {
+    mockGet({ ...TASK_RECORD_LINEAR, pr_number: 13, linear_pr_comment_event_id: 'prior-event' });
+
+    const event: DynamoDBStreamEvent = { Records: [mkMilestone('pr_created', 't-lin')] };
+    await handler(event);
+
+    expect(mockPostIssueComment).not.toHaveBeenCalled();
+  });
+
+  test('pr_created RETRYABLE failure escalates to partial-batch retry, no marker persisted', async () => {
+    mockGet({ ...TASK_RECORD_LINEAR, pr_number: 13 });
+    mockPostIssueComment.mockReset().mockResolvedValue({ ok: false, retryable: true });
+
+    const event: DynamoDBStreamEvent = { Records: [mkMilestone('pr_created', 't-lin')] };
+    const result = await handler(event);
+
+    // Transient failure → record enters batchItemFailures so Lambda retries.
+    expect(result.batchItemFailures).toHaveLength(1);
+    expect(result.batchItemFailures[0].itemIdentifier).toBe(event.Records[0].eventID);
+    // Marker NOT persisted — the retry will re-post.
+    const updateCalls = mockDdbSend.mock.calls.filter((c) => (c[0] as { _type?: string })._type === 'Update');
+    expect(updateCalls).toHaveLength(0);
+  });
+
+  test('pr_created TERMINAL failure stays log-only (no retry, no marker)', async () => {
+    mockGet({ ...TASK_RECORD_LINEAR, pr_number: 13 });
+    mockPostIssueComment.mockReset().mockResolvedValue({ ok: false, retryable: false });
+
+    const event: DynamoDBStreamEvent = { Records: [mkMilestone('pr_created', 't-lin')] };
+    const result = await handler(event);
+
+    // Non-retryable (auth/bad-id) → don't burn retries; record is not flagged.
+    expect(result.batchItemFailures).toHaveLength(0);
+  });
+
+  test('pr_created on an iteration matures the threaded reply instead of posting a top-level comment', async () => {
+    mockGet({
+      ...TASK_RECORD_LINEAR,
+      pr_number: 13,
+      channel_metadata: {
+        ...TASK_RECORD_LINEAR.channel_metadata,
+        trigger_comment_id: 'trigger-c1',
+        iteration_reply_comment_id: 'reply-c1',
+      },
+    });
+
+    const event: DynamoDBStreamEvent = { Records: [mkMilestone('pr_created', 't-lin')] };
+    await handler(event);
+
+    expect(mockUpsertThreadedReply).toHaveBeenCalledTimes(1);
+    expect(mockPostIssueComment).not.toHaveBeenCalled();
+  });
+
+  test('a pr_created milestone delivered AFTER the settle does NOT overwrite the outcome', async () => {
+    // This handler runs off the TaskEvents stream,
+    // so a progress milestone can arrive after the task went terminal. It then
+    // rendered "🔄 Working" over "✅ Updated", leaving the reply contradicting
+    // both the trigger comment's ✅ reaction and reality. ack_replied_at is
+    // stamped by whichever path owns the terminal reply, so it marks "settled".
+    mockGet({
+      ...TASK_RECORD_LINEAR,
+      pr_number: 13,
+      ack_replied_at: '2026-07-25T01:14:04.301Z',
+      channel_metadata: {
+        ...TASK_RECORD_LINEAR.channel_metadata,
+        trigger_comment_id: 'trigger-c1',
+        iteration_reply_comment_id: 'reply-c1',
+      },
+    });
+
+    const event: DynamoDBStreamEvent = { Records: [mkMilestone('pr_created', 't-lin')] };
+    await handler(event);
+
+    // The stale progress edit is refused outright.
+    expect(mockUpsertThreadedReply).not.toHaveBeenCalled();
+    expect(mockPostIssueComment).not.toHaveBeenCalled();
+  });
+
   test('Linear-origin task missing channel_metadata.linear_issue_id — skip with warning', async () => {
     // Defensive: a properly-admitted Linear task should always have
     // these fields, but if it doesn't we'd rather log + skip than
@@ -1548,7 +1693,7 @@ describe('fanout-task-events: Linear dispatcher (issue #239)', () => {
 
   test('retryable post failure (network, 5xx, 429) escalates to batchItemFailures', async () => {
     // A transient Linear blip must NOT permanently drop the final-status
-    // comment — for the agent-crash case (#239) it is the user's only
+    // comment — for the agent-crash case it is the user's only
     // completion signal. The dispatcher throws, routeEvent records an
     // infra rejection, and the record lands in batchItemFailures so
     // Lambda retries. The retry is idempotent: no marker was persisted.
@@ -1637,8 +1782,8 @@ describe('fanout-task-events: Linear dispatcher (issue #239)', () => {
     // Linear integration but somehow ends up with the dispatcher in the
     // map, the missing env var must short-circuit cleanly. WARN +
     // error_id so the operator sees an alarmable signal — the Linear
-    // comment is the *only* completion signal for the agent-crash case
-    // (#239), so silent drops are exactly what this dispatcher exists
+    // comment is the *only* completion signal for the agent-crash case,
+    // so silent drops are exactly what this dispatcher exists
     // to prevent.
     const original = process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME;
     delete process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME;
@@ -1684,6 +1829,153 @@ describe('fanout-task-events: Linear dispatcher (issue #239)', () => {
     // for max-turns errors is "Exceeded max turns" (see error-classifier.ts).
     expect(body).toContain('Exceeded max turns');
   });
+
+  // A STANDALONE comment-triggered iteration (trigger_comment_id but
+  // no orchestration_iteration) gets a threaded ✅/❌ reply to the human's
+  // comment, on top of the metrics comment. Idempotent via the ack claim.
+  describe('standalone iteration threaded reply', () => {
+    const STANDALONE = {
+      ...TASK_RECORD_LINEAR,
+      channel_metadata: {
+        linear_issue_id: 'issue-uuid-42',
+        linear_workspace_id: 'org-uuid-acme',
+        trigger_comment_id: 'human-cmt-7',
+      },
+      pr_url: 'https://github.com/owner/repo/pull/13',
+    };
+
+    test('task_completed → ✅ MATURED threaded reply (not a fresh comment, no top-level metrics comment)', async () => {
+      mockGet(STANDALONE);
+      await handler({ Records: [mkEvent('task_completed', 't-lin')] });
+
+      // The reply MATURES via upsertThreadedReply, NOT replyToComment.
+      expect(mockUpsertThreadedReply).toHaveBeenCalledTimes(1);
+      // Signature: upsertThreadedReply(ctx, issueId, parentCommentId, body, existingId?).
+      const [, issueId, parentCommentId, body] = mockUpsertThreadedReply.mock.calls[0];
+      expect(issueId).toBe('issue-uuid-42'); // the issue the comment lives on
+      expect(parentCommentId).toBe('human-cmt-7');
+      // PR ref is a clickable markdown link (pr_url present in STANDALONE).
+      expect(body).toMatch(/^✅ Updated — \[PR #13\]\(https:\/\/github\.com\/owner\/repo\/pull\/13\)\./);
+      // The separate top-level "Task completed" metrics comment is
+      // SUPPRESSED for iterations (its cost folds into the reply) — that's the
+      // clutter we removed.
+      expect(mockPostIssueComment).not.toHaveBeenCalled();
+    });
+
+    test('task_failed (agent crash) → ❌ reply with classified reason + CloudWatch task id', async () => {
+      mockGet({ ...STANDALONE, error_message: 'agent_status="error_max_turns"' });
+      await handler({ Records: [mkEvent('task_failed', 't-lin')] });
+      const [, , , body] = mockUpsertThreadedReply.mock.calls[0];
+      expect(body).toMatch(/^❌/);
+      expect(body).toMatch(/Exceeded max turns/i); // classified
+      expect(body).toMatch(/CloudWatch for task `t-lin`/);
+      // retryable agent/timeout → plain reply-to-retry next step (retryGuidance).
+      expect(body).toMatch(/reply here with any extra guidance/i);
+    });
+
+    test('task_completed but build_passed=false → ❌ build/test reply pointing at the CloudWatch build log', async () => {
+      mockGet({ ...STANDALONE, build_passed: false, error_message: undefined });
+      await handler({ Records: [mkEvent('task_completed', 't-lin')] });
+      const [, , , body] = mockUpsertThreadedReply.mock.calls[0];
+      expect(body).toMatch(/build\/tests didn't pass/i);
+      // The agent ran the build inside its own sandbox → its log is in CloudWatch,
+      // not the PR's GitHub checks (the repo may have no CI).
+      expect(body).toMatch(/build log in CloudWatch for task `t-lin`/);
+      expect(body).not.toMatch(/PR's checks/i);
+    });
+
+    test('renders the clickable preview thumbnail from a LATE consistent re-read', async () => {
+      // The early task load has NO screenshot (the deploy lands later). The
+      // terminal-settle does a strongly-consistent re-read right before rendering
+      // and picks up the screenshot the webhook persisted onto THIS iteration
+      // task — so the thumbnail renders without depending on the racy comment edit.
+      const PNG = 'https://cdn.example/screenshots/iter.png';
+      const DEPLOY = 'https://app.vercel.app';
+      mockDdbSend.mockReset().mockImplementation((cmd: { _type?: string; input?: { ConsistentRead?: boolean } }) => {
+        if (cmd?._type === 'Get' && cmd.input?.ConsistentRead) {
+          // the late re-read: screenshot has landed durably by now
+          return Promise.resolve({ Item: { screenshot_url: PNG, screenshot_preview_url: DEPLOY } });
+        }
+        if (cmd?._type === 'Get') return Promise.resolve({ Item: STANDALONE }); // early load: no screenshot
+        return Promise.resolve({});
+      });
+      await handler({ Records: [mkEvent('task_completed', 't-lin')] });
+      const [, , , body] = mockUpsertThreadedReply.mock.calls[0];
+      // Clickable thumbnail: screenshot PNG embedded, linking to the deploy.
+      expect(body).toContain(`[![preview](${PNG})](${DEPLOY})`);
+    });
+
+    test('an ORCHESTRATION iteration (orchestration_iteration=true) is NOT replied here (reconciler owns it)', async () => {
+      mockGet({
+        ...STANDALONE,
+        channel_metadata: { ...STANDALONE.channel_metadata, orchestration_iteration: 'true' },
+      });
+      await handler({ Records: [mkEvent('task_completed', 't-lin')] });
+      expect(mockUpsertThreadedReply).not.toHaveBeenCalled();
+    });
+
+    test('a plain Linear task WITHOUT trigger_comment_id gets no threaded reply', async () => {
+      mockGet(TASK_RECORD_LINEAR); // no trigger_comment_id
+      await handler({ Records: [mkEvent('task_completed', 't-lin')] });
+      expect(mockUpsertThreadedReply).not.toHaveBeenCalled();
+    });
+
+    test('the terminal settle asks the surface to restore the outcome if it gets overwritten', async () => {
+      mockGet(STANDALONE);
+      await handler({ Records: [mkEvent('task_completed', 't-lin')] });
+
+      const options = mockUpsertThreadedReply.mock.calls[0][5] as Record<string, unknown>;
+      expect(options).toMatchObject({ preservePreview: true, repairIfOverwritten: true });
+      expect(options.skipIfSettled).toBeFalsy();
+    });
+
+    test('a terminal reply that FAILS hands its claim back so a redelivery can retry', async () => {
+      // Claiming the reply and then failing to write it used to be terminal in both
+      // directions: no redelivery could retry (the claim was taken), and the
+      // progress + heartbeat writers read that same claim as "an outcome landed"
+      // and stood down too — so the reply stayed on its last progress text and the
+      // human's request read as unanswered forever.
+      mockGet(STANDALONE);
+      mockUpsertThreadedReply.mockReset().mockResolvedValue(null);
+
+      await handler({ Records: [mkEvent('task_completed', 't-lin')] });
+
+      const updates = mockDdbSend.mock.calls
+        .map((c) => c[0] as { _type?: string; input?: { UpdateExpression?: string; ExpressionAttributeValues?: Record<string, unknown> } })
+        .filter((cmd) => cmd?._type === 'Update' && /ack_replied_at/.test(cmd.input?.UpdateExpression ?? ''));
+      expect(updates[0].input?.UpdateExpression).toBe('SET ack_replied_at = :now');
+      expect(updates[1].input?.UpdateExpression).toContain('REMOVE ack_replied_at');
+      // The release is conditional on the stamp this run wrote, so it cannot strip
+      // a claim another delivery has since taken and already replied under.
+      expect(updates[1].input?.ExpressionAttributeValues?.[':ours'])
+        .toBe(updates[0].input?.ExpressionAttributeValues?.[':now']);
+    });
+
+    test('a SUCCESSFUL reply keeps its claim — the once-only guarantee still holds', async () => {
+      mockGet(STANDALONE);
+      await handler({ Records: [mkEvent('task_completed', 't-lin')] });
+
+      const removes = mockDdbSend.mock.calls
+        .map((c) => c[0] as { _type?: string; input?: { UpdateExpression?: string } })
+        .filter((cmd) => cmd?._type === 'Update' && /REMOVE ack_replied_at/.test(cmd.input?.UpdateExpression ?? ''));
+      expect(removes).toHaveLength(0);
+    });
+
+    test('idempotent: a redelivered terminal event that loses the ack claim does not double-reply', async () => {
+      // Get returns the record; the ack-claim Update throws ConditionalCheckFailed.
+      mockDdbSend.mockReset().mockImplementation((cmd: { _type?: string; input?: { UpdateExpression?: string } }) => {
+        if (cmd?._type === 'Get') return Promise.resolve({ Item: STANDALONE });
+        if (cmd?._type === 'Update' && cmd.input?.UpdateExpression?.includes('ack_replied_at')) {
+          const err = new Error('conditional');
+          (err as { name?: string }).name = 'ConditionalCheckFailedException';
+          return Promise.reject(err);
+        }
+        return Promise.resolve({});
+      });
+      await handler({ Records: [mkEvent('task_completed', 't-lin')] });
+      expect(mockUpsertThreadedReply).not.toHaveBeenCalled();
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1695,7 +1987,7 @@ describe('renderLinearFinalStatusComment', () => {
   // the full handler stack. These tests call the exported renderer
   // directly to cover edge cases the integration fixtures don't:
   // null-metric fallbacks, formatDuration boundaries (`<60s`,
-  // exact-minute), and the title-on-⚠️ rendering for the ABCA-91 case.
+  // exact-minute), and the title-on-⚠️ rendering for the shipped-but-stopped case.
 
   test('all metrics null → renders em-dash placeholders', () => {
     // The crash-before-metrics case: the agent died so early that no
@@ -1731,7 +2023,7 @@ describe('renderLinearFinalStatusComment', () => {
     expect(body).not.toContain('27 /');
   });
 
-  test('✅ task_completed with prUrl null → NO PR line (ABCA-584 guard)', () => {
+  test('✅ task_completed with prUrl null → NO PR line', () => {
     // Relaxing the render guard to `if (args.prUrl)` makes "✅ completed +
     // prUrl null → no PR: line" a LIVE branch (it was previously structurally
     // guaranteed by the old ⚠️-only condition). Pin its absence so a future
@@ -1794,7 +2086,7 @@ describe('renderLinearFinalStatusComment', () => {
     expect(body).toContain('duration: 3m 41s');
   });
 
-  test('⚠️ frame renders the classifier title (ABCA-91 contextual reason)', () => {
+  test('⚠️ frame renders the classifier title alongside the shipped-but-stopped line', () => {
     // The most useful context for the warning frame is *why* the agent
     // stopped early. Render the classifier title alongside "Shipped a
     // PR but stopped early" so the requester sees both outcomes.
@@ -1846,13 +2138,56 @@ describe('renderLinearFinalStatusComment', () => {
     expect(body).toContain('cancelled');
     expect(body).not.toMatch(/cancelled:\s/);
   });
+
+  describe('clarify-before-spend — needsInput hold', () => {
+    test('renders the question as 💬, not a ✅/❌, with no cost/turns subtitle', () => {
+      const body = renderLinearFinalStatusComment({
+        eventType: 'task_completed',
+        prUrl: null,
+        costUsd: 0.02,
+        turns: 2,
+        maxTurns: 100,
+        durationS: 15,
+        taskId: 't-hold',
+        errorTitle: null,
+        needsInput: true,
+        answerText: 'Which part feels slow — initial load, filtering, or chart rendering? And a target (e.g. under 1s)?',
+      });
+      expect(body).toContain('💬');
+      expect(body).not.toContain('✅');
+      expect(body).not.toContain('❌');
+      // The question is surfaced verbatim.
+      expect(body).toContain('Which part feels slow');
+      // No metrics subtitle (it reads like a person asking, not a task report).
+      expect(body).not.toContain('cost:');
+      // Invites a reply so the conversation continues.
+      expect(body).toMatch(/reply/i);
+    });
+
+    test('falls back to a generic ask when answerText is empty', () => {
+      const body = renderLinearFinalStatusComment({
+        eventType: 'task_completed',
+        prUrl: null,
+        costUsd: null,
+        turns: null,
+        maxTurns: null,
+        durationS: null,
+        taskId: 't-hold2',
+        errorTitle: null,
+        needsInput: true,
+        answerText: '',
+      });
+      expect(body).toContain('💬');
+      expect(body).toMatch(/more detail/i);
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
-// Jira dispatcher (issue #573) — mirrors the Linear dispatcher suite above
+// Jira dispatcher — mirrors the Linear dispatcher suite above
 // ---------------------------------------------------------------------------
 
-describe('fanout-task-events: Jira dispatcher (issue #573)', () => {
+describe('fanout-task-events: Jira dispatcher', () => {
   const TASK_RECORD_JIRA = {
     task_id: 't-jira',
     user_id: 'u-1',
@@ -1912,7 +2247,7 @@ describe('fanout-task-events: Jira dispatcher (issue #573)', () => {
     expect(text).toContain('3m 41s');
     // Unlike Linear, the PR URL IS rendered on the ✅ success path — the
     // agent-side terminal comment (which carried it) was demoted to this
-    // dispatcher, so this is Jira's only surviving PR-link surface (#573).
+    // dispatcher, so this is Jira's only surviving PR-link surface.
     expect(text).toContain('https://github.com/owner/repo/pull/13');
     expect(text).toContain('t-jira');
   });
@@ -2110,7 +2445,7 @@ describe('renderJiraFinalStatusComment', () => {
     expect(text).toContain('cost: — • turns: — • duration: —');
   });
 
-  test('✅ success path renders the PR link (agent step-2 comment not guaranteed — ABCA-584)', () => {
+  test('✅ success path renders the PR link (the agent\'s own PR-opened comment is not guaranteed)', () => {
     const paragraphs = renderJiraFinalStatusComment({
       eventType: 'task_completed',
       prUrl: 'https://github.com/o/r/pull/7',
@@ -2127,8 +2462,8 @@ describe('renderJiraFinalStatusComment', () => {
     // The header run is bold (ADF strong mark) — the serializer maps this.
     expect(paragraphs[0][0]).toEqual({ text: '✅ Task completed', strong: true });
     // The URL run carries an href so buildAdfDocument emits a clickable
-    // link mark — a bare URL in ADF text is NOT auto-linked (issue #573
-    // follow-up). Find the run whose text is the URL and assert its href.
+    // link mark — a bare URL in ADF text is NOT auto-linked.
+    // Find the run whose text is the URL and assert its href.
     const urlRun = paragraphs.flat().find((r) => r.text === 'https://github.com/o/r/pull/7');
     expect(urlRun).toEqual({ text: 'https://github.com/o/r/pull/7', href: 'https://github.com/o/r/pull/7' });
   });
@@ -2164,7 +2499,7 @@ describe('renderJiraFinalStatusComment', () => {
     expect(text).toContain('Hit max-turns cap');
     expect(text).toContain('PR: https://github.com/owner/repo/pull/35');
     // Bold scope mirrors Linear: the reason is bold, the trailing advice is
-    // a separate un-bolded run (review comment #4).
+    // a separate un-bolded run.
     expect(paragraphs[0][0]).toEqual({
       text: '⚠️ Shipped a PR but stopped early — Hit max-turns cap',
       strong: true,
@@ -2175,7 +2510,7 @@ describe('renderJiraFinalStatusComment', () => {
   test('❌ task_timed_out humanizes the subtype — "Task timed out", not "timed_out"', () => {
     // Jira is the only channel routing task_timed_out through this renderer,
     // so the multi-word subtype is a case the copied-from-Linear code never
-    // exercised (review comment #2).
+    // exercised.
     const paragraphs = renderJiraFinalStatusComment({
       eventType: 'task_timed_out',
       prUrl: null,
@@ -2322,9 +2657,12 @@ describe('fanout-task-events: agent_milestone routing (effective event type)', (
     expect(shouldFanOut(colliding)).toBe(false);
   });
 
-  test('routeEvent dispatches agent_milestone(pr_created) to GitHub only (Slack opted out to avoid duplicate View PR)', async () => {
+  test('routeEvent dispatches agent_milestone(pr_created) to GitHub + Linear (ADR-016 P4.5), not Slack', async () => {
+    // Slack stays opted out (task_completed carries View PR); Linear joined
+    // for the first-run "🔗 PR opened" courtesy comment.
     const outcome = await routeEvent(makeMilestone('pr_created'));
-    expect(outcome.dispatched).toEqual(['github']);
+    expect([...outcome.dispatched].sort()).toEqual(['github', 'linear']);
+    expect(outcome.dispatched).not.toContain('slack');
   });
 
   test('routeEvent drops agent_milestone(agent_turn-like) that no channel subscribes to', async () => {
@@ -2402,15 +2740,15 @@ function mkEventWithId(type: string, eventID: string, taskId = 't-fail'): Dynamo
   } as unknown as DynamoDBRecord;
 }
 
-describe('fanout-task-events: partial-batch response (findings #1 + #5)', () => {
-  // Finding #1: the construct sets ``reportBatchItemFailures: true`` on
-  // the event-source-mapping, but the handler used to return ``void``.
-  // That combination makes Lambda retry the WHOLE batch on any
-  // unhandled throw — replaying every sibling event and defeating the
-  // per-task ordering guarantee promised upstream by
+describe('fanout-task-events: partial-batch response', () => {
+  // The construct sets ``reportBatchItemFailures: true`` on
+  // the event-source-mapping, so the handler must return a batch response
+  // rather than ``void``. Returning ``void`` makes Lambda retry the WHOLE
+  // batch on any unhandled throw — replaying every sibling event and
+  // defeating the per-task ordering guarantee promised upstream by
   // ``ParallelizationFactor: 1``.
   //
-  // Finding #5: the architecturally reachable poison-pill path is a
+  // The architecturally reachable poison-pill path is a
   // throw that bypasses ``routeEvent``'s ``Promise.allSettled``. The
   // isolation works today for async rejections (``resolveTokenSecretArn``
   // → ``AccessDeniedException`` is caught), but a future refactor that
@@ -2432,10 +2770,9 @@ describe('fanout-task-events: partial-batch response (findings #1 + #5)', () => 
   });
 
   test('AccessDeniedException from resolveTokenSecretArn lands in infraRejections and flags the record for retry', async () => {
-    // Pre-issue-#64-review: this test asserted ``batchItemFailures: []``
-    // because ``Promise.allSettled`` swallowed the rejection — that
-    // pinned a real BLOCKER (transient infra errors silently dropped).
-    // After the fix, the dispatcher's rejection lands in
+    // An earlier version swallowed this rejection inside
+    // ``Promise.allSettled``, which silently dropped transient infra
+    // errors. Now the dispatcher's rejection lands in
     // ``infraRejections`` and the handler escalates it to the partial-
     // batch retry path. AccessDenied is technically a hard configuration
     // failure (not transient), but treating it as retryable is correct
@@ -2488,14 +2825,14 @@ describe('fanout-task-events: partial-batch response (findings #1 + #5)', () => 
     }
   });
 
-  test('unhandled throw OUTSIDE routeEvent flags the record as a batch item failure (finding #1 defense)', async () => {
+  test('unhandled throw OUTSIDE routeEvent flags the record as a batch item failure', async () => {
     // Defense-in-depth proof: when SOMETHING in the record-processing
     // loop throws past ``routeEvent``'s containment (simulated here by
     // making ``logger.warn`` throw on the rate-limit path — the
     // closest real non-``routeEvent`` code path), the handler's
     // per-record try/catch must push the record's ``eventID`` into
-    // ``batchItemFailures`` so Lambda retries ONLY that record. Pre-fix
-    // the handler returned void and Lambda would retry the ENTIRE
+    // ``batchItemFailures`` so Lambda retries ONLY that record. A handler
+    // that returned void would make Lambda retry the ENTIRE
     // batch, replaying every sibling event and defeating per-task
     // ordering.
     const loggerModule = await import('../../src/handlers/shared/logger');
@@ -2558,7 +2895,7 @@ describe('fanout-task-events: partial-batch response (findings #1 + #5)', () => 
       },
     );
     try {
-      // Send 21 events for 't-chatty' (trips the cap on #21 → throws)
+      // Send 21 events for 't-chatty' (trips the cap on the 21st → throws)
       // preceded by ONE event for 't-ok' (dispatches cleanly).
       const records: DynamoDBRecord[] = [];
       records.push(mkEventWithId('task_completed', 'evt-ok', 't-ok'));

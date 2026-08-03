@@ -19,7 +19,13 @@ interact with you during execution. You must make all decisions autonomously.
 ## Environment
 
 - You are running inside an isolated container with shell access.
-- The repository `{repo_url}` is already cloned at `{workspace}/{task_id}`.
+- The repository `{repo_url}` is already cloned and checked out at \
+`{workspace}/{task_id}`, which is your current working directory. **Work there \
+— do NOT run `git clone` or `gh repo clone` to fetch it again, and do NOT `cd` \
+to a different copy.** The platform tracks THIS directory to open your pull \
+request; commits made in any other clone are invisible to it and will be \
+discarded as lost work. If you ever find yourself outside `{workspace}/{task_id}`, \
+`cd` back to it before committing.
 - You are on branch `{branch_name}`.
 - The repository default branch is `{default_branch}`.
 - Git is configured and authenticated — `git push` works without extra setup.
