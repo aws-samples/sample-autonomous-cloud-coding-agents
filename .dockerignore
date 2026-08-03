@@ -49,6 +49,15 @@ coverage/
 **/coverage/
 .pytest_cache/
 **/.pytest_cache/
+# Coverage data FILES, not just the directories above. pytest-cov writes
+# per-process temp files (``.coverage.<host>.<pid>.<random>``) and deletes them as
+# it combines. The agent test suite and the CDK suite run in parallel, and the CDK
+# suite fingerprints this tree for the agent image asset — so a file that vanishes
+# mid-walk fails the build with ENOENT on a path nothing will ever read again.
+.coverage
+.coverage.*
+**/.coverage
+**/.coverage.*
 
 # IDE / OS
 .idea/
