@@ -20,11 +20,11 @@ description = "Test fixture signing secret in Slack verification unit test (not 
 stopwords = ["test-signing-secret-abc123"]
 
 [[allowlists]]
-# Test idempotency-key fixture in orchestration-release.test.ts (not a real
-# credential). Suppressed by stopword rather than a .gitleaksignore commit-SHA
-# fingerprint: the finding lives in history and SHA fingerprints break whenever
-# history is rewritten (rebases / dep-bump merges), which is exactly how #530's
-# baseline regressed. A stopword is SHA-independent. See #537 (regression of #530).
+# Test idempotency-key fixture in orchestration tests (not a real credential).
+# Suppressed by stopword rather than a .gitleaksignore commit-SHA fingerprint:
+# the finding lives in history and SHA fingerprints break whenever history is
+# rewritten (rebases / dep-bump merges), which is exactly how #530's baseline
+# regressed. A stopword is SHA-independent. See #537 (regression of #530).
 description = "Test idempotency-key fixture 'orch_abc_SUB-1' (not a real credential)."
 stopwords = ["orch_abc_SUB-1"]
 

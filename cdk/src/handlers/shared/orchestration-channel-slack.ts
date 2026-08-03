@@ -270,6 +270,3 @@ export function makeSlackChannel(secretPrefix: string = SLACK_SECRET_PREFIX): Ch
   } satisfies Channel as Channel;
 }
 
-/** Re-exported so a caller can name the reaction set without importing Slack
- *  internals — used by the adapter's own tests. */
-export const SLACK_OWN_REACTION_EMOJI = OWN_EMOJI;

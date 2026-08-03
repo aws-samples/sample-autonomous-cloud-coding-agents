@@ -79,8 +79,8 @@ mutation UpdateComment($id: String!, $body: String!) {
 }
 `.trim();
 
-/** Delete a comment — used to clear the transient "on it" ack once the revised
- *  plan it was acknowledging has been written into the thread. */
+/** Delete a comment — used to clear a transient note once the thing it was about
+ *  is settled, and to reposition the epic panel by delete-and-repost. */
 const COMMENT_DELETE_MUTATION = `
 mutation DeleteComment($id: String!) {
   commentDelete(id: $id) { success }
@@ -88,13 +88,12 @@ mutation DeleteComment($id: String!) {
 `.trim();
 
 /**
- * List an issue's TOP-LEVEL comments (id + body). Used to tidy the thread once a
- * pending proposal is settled: we can't
- * track every fire-and-forget note id (they're posted from ~15 sites), so we
- * fetch the thread once and delete the bot's own ``🗂️``/``👋`` notes by prefix,
- * keeping the frozen plan reference + the (differently-prefixed) live panel.
- * ``first: 100`` comfortably covers a plan phase (a few notes + revise rounds);
- * pagination is unnecessary for the transient-note volume this sweeps.
+ * List an issue's TOP-LEVEL comments (id + body). Used to tidy a thread once the
+ * thing its notes were about is settled: we can't track every fire-and-forget
+ * note id, so we fetch the thread once and delete the bot's own ``🗂️``/``👋``
+ * notes by prefix, keeping any comment the caller names plus the
+ * (differently-prefixed) live panel. ``first: 100`` comfortably covers the note
+ * volume one issue accumulates; pagination is unnecessary for it.
  */
 const ISSUE_COMMENTS_QUERY = `
 query IssueComments($issueId: String!) {
@@ -462,10 +461,10 @@ const TRANSIENT_NOTE_PREFIXES: readonly string[] = ['🗂️', '👋'];
  * cosmetic nit, never a breakage), and each delete is independent so one
  * failure doesn't abort the rest. Returns the count deleted (for logging/tests).
  *
- * Prefix-scoping is the robustness win: interim notes are posted from ~15
- * fire-and-forget sites whose ids we don't track, and future note types are
- * covered automatically — while the panel (different prefix) and human comments
- * (no bot prefix) are provably untouched.
+ * Prefix-scoping is the robustness win: interim notes are posted fire-and-forget
+ * from sites whose ids we don't track, and future note types are covered
+ * automatically — while the panel (different prefix) and human comments (no bot
+ * prefix) are provably untouched.
  */
 export async function sweepTransientNotes(
   ctx: LinearFeedbackContext,
@@ -487,7 +486,7 @@ export async function sweepTransientNotes(
     if (ok) deleted += 1;
   }
   if (deleted > 0) {
-    logger.info('Swept transient notes', {
+    logger.info('Swept transient notes off the issue thread', {
       issue_id: issueId, deleted, kept_reference: keepCommentId ?? null,
     });
   }

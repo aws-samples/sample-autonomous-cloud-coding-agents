@@ -17,6 +17,8 @@
  *  SOFTWARE.
  */
 
+import * as fs from 'fs';
+import * as path from 'path';
 import { App } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import { AgentStack } from '../../src/stacks/agent';
@@ -36,17 +38,20 @@ describe('AgentStack', () => {
     expect(template).toBeDefined();
   });
 
-  test('creates exactly 18 DynamoDB tables', () => {
+  test('creates exactly 21 DynamoDB tables', () => {
     // task, task-events, repo, user-concurrency, webhook, task-nudges,
     // task-approvals (Cedar HITL V2),
-    // api-key (platform API keys for headless webhook management, #376),
+    // api-key (platform API keys for headless webhook management),
     // slack-installation, slack-user-mapping,
+    // slack-channel-mapping (channel → default-repo onboarding),
     // linear-project-mapping, linear-user-mapping, linear-webhook-dedup,
     // linear-workspace-registry (added in Phase 2.0b for OAuth bookkeeping),
+    // github-webhook-dedup (added by GitHubScreenshotIntegration),
     // jira-project-mapping, jira-user-mapping, jira-workspace-registry,
-    // jira-webhook-dedup (added for the Jira Cloud integration),
-    // github-webhook-dedup (added by GitHubScreenshotIntegration on main)
-    template.resourceCountIs('AWS::DynamoDB::Table', 19);
+    // jira-webhook-dedup (added for the Jira Cloud integration on main),
+    // orchestration (parent/sub-issue DAG state).
+    // = 16 shared/base + 4 Jira + 1 orchestration = 21.
+    template.resourceCountIs('AWS::DynamoDB::Table', 21);
   });
 
   test('creates TaskApprovalsTable with user_id-status-index GSI', () => {
@@ -250,7 +255,7 @@ describe('AgentStack', () => {
     expect(serialized).toMatch(/"Fn::GetAtt":\["Runtime[0-9A-F]+","AgentRuntimeArn"\]/);
   });
 
-  test('runtime is granted the default Bedrock model set (#433)', () => {
+  test('runtime is granted the default Bedrock model set', () => {
     // Default (no bedrockModels context): the runtime execution role must hold
     // bedrock:InvokeModel on the three default foundation models + their US
     // inference profiles, scoped (never Resource: '*').
@@ -261,8 +266,8 @@ describe('AgentStack', () => {
     expect(serialized).toContain('anthropic.claude-haiku-4-5-20251001-v1:0');
   });
 
-  test('bedrockModels context override propagates to the runtime execution role (#433)', () => {
-    // The other half of #433's acceptance criteria (the ECS side is covered in
+  test('bedrockModels context override propagates to the runtime execution role', () => {
+    // The runtime-role half of the override contract (the ECS side is covered in
     // ecs-agent-cluster.test.ts): a context override must replace the runtime's
     // granted models too — overridden model present, defaults absent, still scoped.
     const app = new App({ context: { bedrockModels: ['anthropic.claude-opus-4-8'] } });
@@ -271,10 +276,25 @@ describe('AgentStack', () => {
     });
     const overridden = Template.fromStack(stack);
 
-    // Collect every bedrock:InvokeModel statement's Resource across IAM policies.
+    // Collect every bedrock:InvokeModel statement's Resource across the IAM
+    // policies the ``bedrockModels`` override GOVERNS: the runtime execution role
+    // and the per-task session role (the coding agent's task-model grants). The
+    // override replaces the model set for the WORKLOAD; these are its surfaces.
+    //
+    // Deliberately EXCLUDES the Linear webhook processor's policy: the
+    // deterministic-revise interpreter (linear-integration.ts) makes one tiny
+    // "which plan-edit did they mean?" classification call pinned to a FIXED
+    // model (DEFAULT_REVISE_MODEL_ID = sonnet), by design independent of the
+    // per-task ``bedrockModels`` override — you don't want a cheap classification
+    // running on whatever heavyweight coding model an operator selected. That
+    // grant is scoped to its single fixed model (asserted in the linear
+    // integration tests), so it's not a wildcard/drift risk; it just isn't part
+    // of the override contract this test checks.
+    const OVERRIDE_GOVERNED_POLICY_PREFIXES = ['RuntimeExecutionRole', 'AgentSessionRole'];
     const policies = overridden.findResources('AWS::IAM::Policy');
     const bedrockResources: unknown[] = [];
-    for (const p of Object.values(policies)) {
+    for (const [logicalId, p] of Object.entries(policies)) {
+      if (!OVERRIDE_GOVERNED_POLICY_PREFIXES.some((prefix) => logicalId.startsWith(prefix))) continue;
       for (const s of (p.Properties?.PolicyDocument?.Statement ?? []) as Array<{ Action?: string | string[]; Resource?: unknown }>) {
         const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
         if (actions.some((a) => typeof a === 'string' && a.startsWith('bedrock:InvokeModel'))) {
@@ -391,7 +411,7 @@ describe('AgentStack', () => {
   });
 
   test('model invocation logging does NOT send an empty largeDataDeliveryS3Config', () => {
-    // Regression guard (#215): sending largeDataDeliveryS3Config with an empty
+    // Regression guard: sending largeDataDeliveryS3Config with an empty
     // bucketName fails client-side validation ("valid min length: 3"), and with
     // a catch-all ignoreErrorCodesMatching that failure silently leaves logging
     // DISABLED — so Bedrock records no requestMetadata. The field is optional;
@@ -466,6 +486,115 @@ describe('AgentStack', () => {
     template.resourceCountIs('AWS::BedrockAgentCore::Memory', 1);
   });
 
+  test('the orchestration reconciler can reach BOTH surfaces\' credentials registries', () => {
+    // It picks the feedback surface from each orchestration's own recorded
+    // channel, so a registry it can't read means that surface's orchestrations
+    // silently lose their panel + reactions.
+    const fns = template.findResources('AWS::Lambda::Function');
+    const reconciler = Object.entries(fns).find(([id]) => id.startsWith('OrchestrationReconciler'));
+    expect(reconciler).toBeDefined();
+    const vars = (reconciler![1] as { Properties?: { Environment?: { Variables?: Record<string, unknown> } } })
+      .Properties?.Environment?.Variables ?? {};
+    expect(vars.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME).toBeDefined();
+    expect(vars.JIRA_WORKSPACE_REGISTRY_TABLE_NAME).toBeDefined();
+  });
+
+  test('the orchestration reconciler cannot read S3 objects at all', () => {
+    // The trace/artifacts bucket holds full agent trajectories under
+    // traces/<user_id>/ — tool input and output, authorized per-user by the presign
+    // handler. The reconciler works entirely from task records and the orchestration
+    // table, so it needs no object read anywhere; asserting the absence keeps a
+    // component that handles no user identity out of that blast radius, and makes a
+    // future grant a deliberate, visible choice.
+    //
+    // Absence rather than a scoped grant is the stronger claim, and the safer one:
+    // S3 does not normalize keys, so `artifacts/../traces/u/x` is a literal key that
+    // an `artifacts/*` resource matches by string prefix.
+    const policies = template.findResources('AWS::IAM::Policy');
+    const reconciler = Object.entries(policies).filter(([id]) => id.startsWith('OrchestrationReconciler'));
+    // The reconciler DOES have policies (table + invoke + guardrail grants), so an
+    // empty set here would mean the id filter broke, not that the grant is gone.
+    expect(reconciler.length).toBeGreaterThan(0);
+
+    const objectStatements: string[] = [];
+    for (const [, policy] of reconciler) {
+      const doc = (policy as { Properties: { PolicyDocument: { Statement: Array<Record<string, unknown>> } } })
+        .Properties.PolicyDocument.Statement;
+      for (const stmt of doc) {
+        const actions = JSON.stringify(stmt.Action ?? '');
+        if (!/s3:(Get|Put|Delete)Object/.test(actions)) continue;
+        objectStatements.push(JSON.stringify(stmt));
+      }
+    }
+    expect(objectStatements).toEqual([]);
+  });
+
+  test('the log-delivery pin shim requires explicit opt-in, not the default stack name', () => {
+    // The shim overrides CFN logical ids AND account-unique resource Names with
+    // values captured from one specific pre-existing stack, so it is only ever
+    // correct for the account that already owns those resources. It used to key
+    // off stackName — and the DEFAULT stack name (see main.ts) is itself a key in
+    // its table, so every operator who deployed without a stackName override
+    // silently inherited another account's hardcoded ids.
+    //
+    // Asserted on the source rather than by synthesizing a differently-named
+    // stack: constructing one under a non-matching id trips an unrelated cdk-nag
+    // suppression-path check first, which would mask this.
+    const src = fs.readFileSync(
+      path.resolve(__dirname, '../../src/stacks/agent.ts'), 'utf8',
+    );
+    const shim = src.slice(src.indexOf('function maybePinChurnedLogResources'));
+    const body = shim.slice(0, shim.indexOf('\n}'));
+
+    // Opt-in is read from context and, absent, the shim returns before pinning.
+    expect(body).toContain("tryGetContext('pinnedLogDeliveryStack')");
+    expect(body).toMatch(/targetStackName === undefined\)\s*return/);
+    // It must NOT fall back to the running stack's own name.
+    expect(body).not.toMatch(/tryGetContext\('pinnedLogDeliveryStack'\)[^;]*\?\?\s*stack\.stackName/);
+  });
+
+  test('the fan-out consumer can reach BOTH surfaces\' credentials registries', () => {
+    // Its Jira and Linear props are OPTIONAL on the construct, so dropping one
+    // from the stack wiring disables that surface's final-status comment with no
+    // synth error and no test failure elsewhere — a silent capability loss. Pin
+    // both env vars so the omission fails here instead.
+    const fns = template.findResources('AWS::Lambda::Function');
+    const fanout = Object.entries(fns).find(([id]) => id.startsWith('FanOutConsumer'));
+    expect(fanout).toBeDefined();
+    const vars = (fanout![1] as { Properties?: { Environment?: { Variables?: Record<string, unknown> } } })
+      .Properties?.Environment?.Variables ?? {};
+    expect(vars.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME).toBeDefined();
+    expect(vars.JIRA_WORKSPACE_REGISTRY_TABLE_NAME).toBeDefined();
+  });
+
+  test('the fan-out consumer is granted read on BOTH surfaces\' OAuth secret prefixes', () => {
+    // The registry table alone is not enough to post a comment — the dispatcher
+    // also needs the per-workspace OAuth secret.
+    //
+    // Scoped to the FanOutConsumer's OWN policy, deliberately. Grepping every
+    // synthesized policy for these ARN patterns passes even when the fan-out's
+    // grant is dropped, because the orchestrator and the webhook processors hold
+    // the same prefixes — the assertion then proves nothing about this consumer.
+    const policies = template.findResources('AWS::IAM::Policy');
+    const fanoutPolicies = Object.entries(policies)
+      .filter(([logicalId]) => logicalId.startsWith('FanOutConsumer'));
+    expect(fanoutPolicies.length).toBeGreaterThan(0);
+    const asJson = JSON.stringify(fanoutPolicies.map(([, p]) => p));
+    expect(asJson).toContain('bgagent-linear-oauth-*');
+    expect(asJson).toContain('bgagent-jira-oauth-*');
+  });
+
+  test('the stranded-orchestration sweep gets the registry its panel refresh needs', () => {
+    // It shares refreshPanelAndSettle with the live reconciler; without a
+    // registry that feedback no-ops and a recovered epic's panel stays stale.
+    const fns = template.findResources('AWS::Lambda::Function');
+    const sweep = Object.entries(fns).find(([id]) => id.startsWith('StrandedOrchestrationReconciler'));
+    expect(sweep).toBeDefined();
+    const vars = (sweep![1] as { Properties?: { Environment?: { Variables?: Record<string, unknown> } } })
+      .Properties?.Environment?.Variables ?? {};
+    expect(vars.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME).toBeDefined();
+  });
+
   test('creates a log group for model invocation logs', () => {
     template.hasResourceProperties('AWS::Logs::LogGroup', {
       LogGroupName: '/aws/bedrock/model-invocation-logs/TestAgentStack',
@@ -525,9 +654,9 @@ describe('AgentStack with the ECS substrate gate (--context compute_type=ecs)', 
 
   test('provisions an ECS cluster + both Fargate task definitions (build + planning)', () => {
     template.resourceCountIs('AWS::ECS::Cluster', 1);
-    // Two task defs: the large build def and the smaller read-only planning def
-    // (read-only workflows run on the planning def so a clone-and-read task
-    // doesn't allocate the full build task's CPU/memory).
+    // Two task defs — the 64 GB build def and the 8 GB read-only planning def
+    // (a read-only workflow runs on the smaller one). See
+    // docs/design/ECS_RIGHTSIZED_PLANNING.md.
     template.resourceCountIs('AWS::ECS::TaskDefinition', 2);
   });
 

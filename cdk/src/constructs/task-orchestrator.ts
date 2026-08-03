@@ -175,7 +175,7 @@ export interface TaskOrchestratorProps {
   };
 
   /**
-   * S3 bucket for per-task ECS payloads (#502). When provided (alongside
+   * S3 bucket for per-task ECS payloads. When provided (alongside
    * ``ecsConfig``), the orchestrator writes the payload here and passes only an
    * ``AGENT_PAYLOAD_S3_URI`` pointer in the RunTask override (the full payload
    * exceeds the 8 KB containerOverrides limit), then deletes the object in the
@@ -293,7 +293,7 @@ export class TaskOrchestrator extends Construct {
           // never used.
           ECS_PLANNING_TASK_DEFINITION_ARN: props.ecsConfig.planningTaskDefinitionArn,
         }),
-        // #502: bucket the orchestrator writes the ECS payload to (and deletes
+        // Bucket the orchestrator writes the ECS payload to (and deletes
         // from at finalize); the ECS strategy reads this to build the S3 URI.
         ...(props.ecsPayloadBucket && { ECS_PAYLOAD_BUCKET: props.ecsPayloadBucket.bucketName }),
         ...(props.attachmentsBucket && { ATTACHMENTS_BUCKET_NAME: props.attachmentsBucket.bucketName }),
@@ -314,7 +314,7 @@ export class TaskOrchestrator extends Construct {
       props.attachmentsBucket.grantReadWrite(this.fn);
     }
 
-    // #502: ECS payload bucket — the orchestrator writes the payload before
+    // ECS payload bucket — the orchestrator writes the payload before
     // RunTask and deletes it at finalize. Write + delete only (it never reads
     // its own payload back; the ECS container is the reader, with its own
     // read-only grant from EcsAgentCluster).
