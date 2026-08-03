@@ -739,7 +739,6 @@ describe('validateMagicBytes', () => {
     expect(validateMagicBytes(Buffer.from('café — 日本語 ✅', 'utf-8'), 'text/markdown')).toBe(true);
   });
 
-
   test('rejects mismatched signatures', () => {
     const jpeg = Buffer.from([0xFF, 0xD8, 0xFF, 0xE0]);
     expect(validateMagicBytes(jpeg, 'image/png')).toBe(false);
