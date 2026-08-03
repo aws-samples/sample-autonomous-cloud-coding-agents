@@ -403,30 +403,12 @@ export class AgentStack extends Stack {
 
     runtimeArnHolder = runtime.agentRuntimeArn;
 
-    // --- AgentCore log-delivery: keep the logical ids STABLE across library
-    //     renames, so updating an existing stack never has to be opted into ---
-    //
-    // The AgentCore Runtime auto-creates AWS::Logs::DeliverySource + Delivery +
-    // DeliveryDestination per loggingConfig, naming them from the construct path
-    // the library happens to use. When that path changes — as it did between
-    // library versions here — the CFN logical ids change with it, and CFN treats
-    // renamed resources as new ones: it CREATES before it DELETES.
-    //
-    // A DeliverySource is unique per (resource ARN, log type) for the whole
-    // account, and the runtime ARN does not change across the rename. So the new
-    // source collides with the live one that is still there, CloudWatch Logs
-    // rejects it with ``AlreadyExists``, and the whole stack rolls back. Note
-    // what this means: renaming the resources cannot avoid the collision, because
-    // the conflict is on the ARN they point at, not on their own names. Only
-    // keeping the logical id stable avoids it, since that is what makes CFN
-    // update in place rather than create a second source for the same runtime.
-    //
-    // Hence: pinned ALWAYS, for every stack, with no context flag. A flag would
-    // mean the safe path is the one you have to know to ask for, and the failure
-    // it prevents is a mid-update rollback that says nothing about the flag's
-    // existence. A fresh stack is unaffected either way — it has no live sources
-    // to collide with, and these ids are as valid for it as the library's own.
-    pinLogDeliveryLogicalIds(runtime);
+    // Log delivery is left entirely to the AgentCore Runtime, which creates and
+    // names the DeliverySource / Delivery / DeliveryDestination trio itself. We
+    // deliberately do not override those logical ids: see the note in the design
+    // docs, but in short, pinning them to values recorded from one account's live
+    // stack made the template describe that account rather than the code, and broke
+    // every other account on update.
 
     // --- Session storage (preview) ---
     // The L2 construct does not yet expose filesystemConfigurations; use the
@@ -1441,106 +1423,3 @@ export class AgentStack extends Stack {
   }
 }
 
-/**
- * A churned log-delivery resource to re-pin: the construct child id under the
- * Runtime, the logical id CFN already has deployed, and (for the account-unique
- * Source/Destination kinds) the deployed ``Name``. ``liveName`` is omitted for
- * Delivery links, which have no Name.
- */
-interface PinnedLogResource {
-  readonly childId: string;
-  readonly liveLogicalId: string;
-  readonly liveName?: string;
-}
-
-/**
- * Log-delivery logical ids to keep stable, keyed by stack name. Consulted on
- * every synth — see {@link pinLogDeliveryLogicalIds} for why there is no flag.
- *
- * Each entry records what CloudFormation already has for a stack deployed before
- * the library renamed these resources. Read from `aws cloudformation
- * list-stack-resources` against the live stack, so the ids are observed, not
- * constructed — the hash in each one is not reproducible from the construct path
- * alone, which is precisely why they have to be written down.
- *
- * An entry stays until its stack is gone. Removing one while the stack still
- * exists re-introduces the rename and the failed update that comes with it.
- */
-const PINNED_LOG_DELIVERY_BY_STACK: Record<string, readonly PinnedLogResource[]> = {
-  'backgroundagent-dev': [
-    {
-      childId: 'ApplicationLogsDeliverySource',
-      liveLogicalId: 'RuntimeCDKSourceAPPLICATIONLOGSbackgroundagentdevRuntimeBC0AE9ED96A02E02',
-      liveName: 'cdk-applicationlogs-source-backgroundagentdevRuntimeBC0AE9ED',
-    },
-    {
-      childId: 'UsageLogsDeliverySource',
-      liveLogicalId: 'RuntimeCDKSourceUSAGELOGSbackgroundagentdevRuntimeBC0AE9ED544FBB22',
-      liveName: 'cdk-usagelogs-source-backgroundagentdevRuntimeBC0AE9ED',
-    },
-    {
-      childId: 'ApplicationLogsDest',
-      liveLogicalId: 'RuntimeCdkLogGroupApplicationLogsDeliverybackgroundagentdevRuntimeBC0AE9EDbackgroundagentdevRuntimeApplicationLogGroup454A95E8DestapplicationlogsE09F77DC',
-      liveName: 'cdk-cwl-Destapplication-logs-dest-backgrounp454A95E829BF8A27',
-    },
-    {
-      childId: 'UsageLogsDest',
-      liveLogicalId: 'RuntimeCdkLogGroupUsageLogsDeliverybackgroundagentdevRuntimeBC0AE9EDbackgroundagentdevRuntimeUsageLogGroup7FA1FA67Destusagelogs9AB608D0',
-      liveName: 'cdk-cwl-Destusage-logs-dest-backgroundagroup7FA1FA67A8A16CEE',
-    },
-    // Delivery links: logical-id pin only (no Name — unique per source/dest pair).
-    {
-      childId: 'ApplicationLogsDelivery',
-      liveLogicalId: 'RuntimeCdkLogGroupApplicationLogsDeliverybackgroundagentdevRuntimeBC0AE9EDbackgroundagentdevRuntimeApplicationLogGroup454A95E8Delivery92FE492C',
-    },
-    {
-      childId: 'UsageLogsDelivery',
-      liveLogicalId: 'RuntimeCdkLogGroupUsageLogsDeliverybackgroundagentdevRuntimeBC0AE9EDbackgroundagentdevRuntimeUsageLogGroup7FA1FA67Delivery40F023D7',
-    },
-  ],
-};
-
-/**
- * Pin the auto-created log-delivery resources to stable logical ids, ALWAYS.
- *
- * These resources are created for us by the AgentCore Runtime and named after
- * whatever construct path the library uses internally, so a library-side rename
- * silently renames them — and a renamed resource is, to CloudFormation, a new
- * one to create before the old is deleted. That is fatal here: a DeliverySource
- * is unique per (resource ARN, log type) account-wide, the runtime ARN is
- * unchanged by a rename, so the create collides with the live source and the
- * update rolls the whole stack back. Owning the ids ourselves decouples us from
- * the library's internal naming.
- *
- * Applied unconditionally rather than behind a flag. Three cases, all safe:
- *
- *  - An existing stack in the account that owns these resources: the ids match
- *    what CloudFormation already recorded, so it updates them in place. This is
- *    the case that was broken.
- *  - A fresh stack or account: nothing owns these names yet, so they create
- *    normally. The ids are ours rather than the library's, which is the point;
- *    the values themselves carry no meaning beyond being stable.
- *  - Any other name: the ids embed the stack name, so each stack gets its own.
- *
- * The values were read off a stack deployed before the rename. Do not "tidy"
- * them — they are a record of what CloudFormation already has, and editing one
- * re-breaks exactly the update path this exists to protect.
- */
-function pinLogDeliveryLogicalIds(runtime: agentcore.Runtime): void {
-  const stack = Stack.of(runtime);
-  const pins = PINNED_LOG_DELIVERY_BY_STACK[stack.stackName];
-  // Only the stack these ids were recorded from can use them: they embed that
-  // stack's name. Any other stack keeps the library's own naming, which is
-  // correct for it — it has no pre-rename resources to line up with.
-  if (!pins) return;
-
-  for (const pin of pins) {
-    const res = runtime.node.tryFindChild(pin.childId) as CfnResource | undefined;
-    // A future library rename moves the child, so the pin stops matching. Skip
-    // rather than throw: the stack still deploys, and the next update that hits
-    // the collision is the signal to re-record the ids from the live stack.
-    if (!res) continue;
-    res.overrideLogicalId(pin.liveLogicalId);
-    if (pin.liveName !== undefined) res.addPropertyOverride('Name', pin.liveName);
-  }
-}
