@@ -403,30 +403,30 @@ export class AgentStack extends Stack {
 
     runtimeArnHolder = runtime.agentRuntimeArn;
 
-    // --- AgentCore log-delivery: OPT-IN migration shim for ONE pre-existing
-    //     stack whose logical IDs churned under an agentcore-alpha bump ---
+    // --- AgentCore log-delivery: keep the logical ids STABLE across library
+    //     renames, so updating an existing stack never has to be opted into ---
     //
-    // Background: the agentcore-alpha Runtime auto-creates AWS::Logs::
-    // DeliverySource + Delivery + DeliveryDestination per loggingConfig. An
-    // alpha construct-path rename CHURNED both the CFN logical IDs and the
-    // account-scoped DeliverySource/DeliveryDestination ``Name`` of an
-    // ALREADY-DEPLOYED stack. Because those Names are account-unique, CFN's
-    // create-before-delete on the new ids collides with the live ones →
-    // ``AlreadyExists`` → whole-stack rollback. The fix is to re-pin the
-    // churned resources to the values CFN already has so it updates them in
-    // place instead of recreating.
+    // The AgentCore Runtime auto-creates AWS::Logs::DeliverySource + Delivery +
+    // DeliveryDestination per loggingConfig, naming them from the construct path
+    // the library happens to use. When that path changes — as it did between
+    // library versions here — the CFN logical ids change with it, and CFN treats
+    // renamed resources as new ones: it CREATES before it DELETES.
     //
-    // CRITICAL: this is needed ONLY by a stack that was deployed BEFORE the
-    // alpha bump. A fresh stack (a new env, CI, this PR on a clean account)
-    // has NO pre-existing resources to collide with and MUST synth the
-    // current alpha's natural ids — so the shim is OFF by default and is
-    // enabled per-stack via context:
-    //   cdk deploy -c pinnedLogDeliveryStack=<stackName>
-    // (or the `pinnedLogDelivery` map in cdk.json). When the running stack
-    // doesn't match, NONE of the overrides apply and synth is pristine.
-    // Once the affected stack has been migrated + a clean redeploy confirmed,
-    // this shim and its context entry can be deleted outright.
-    maybePinChurnedLogResources(this, runtime);
+    // A DeliverySource is unique per (resource ARN, log type) for the whole
+    // account, and the runtime ARN does not change across the rename. So the new
+    // source collides with the live one that is still there, CloudWatch Logs
+    // rejects it with ``AlreadyExists``, and the whole stack rolls back. Note
+    // what this means: renaming the resources cannot avoid the collision, because
+    // the conflict is on the ARN they point at, not on their own names. Only
+    // keeping the logical id stable avoids it, since that is what makes CFN
+    // update in place rather than create a second source for the same runtime.
+    //
+    // Hence: pinned ALWAYS, for every stack, with no context flag. A flag would
+    // mean the safe path is the one you have to know to ask for, and the failure
+    // it prevents is a mid-update rollback that says nothing about the flag's
+    // existence. A fresh stack is unaffected either way — it has no live sources
+    // to collide with, and these ids are as valid for it as the library's own.
+    pinLogDeliveryLogicalIds(runtime);
 
     // --- Session storage (preview) ---
     // The L2 construct does not yet expose filesystemConfigurations; use the
@@ -1454,16 +1454,17 @@ interface PinnedLogResource {
 }
 
 /**
- * Per-stack pin tables for the agentcore-alpha log-delivery churn.
- * Keyed by ``stackName``, but only consulted when a deploy explicitly opts in
- * with `-c pinnedLogDeliveryStack=<name>` (see
- * {@link maybePinChurnedLogResources}). Note the entry below uses the DEFAULT
- * stack name, so opt-in is what keeps a fresh deploy pristine — not the key.
+ * Log-delivery logical ids to keep stable, keyed by stack name. Consulted on
+ * every synth — see {@link pinLogDeliveryLogicalIds} for why there is no flag.
  *
- * ``backgroundagent-dev`` was deployed before an alpha bump churned its
- * DeliverySource/Destination/Delivery logical ids + account-unique Names; these
- * values come from `aws cloudformation list-stack-resources` on that live stack.
- * Delete this entry once that stack is migrated + a clean redeploy is confirmed.
+ * Each entry records what CloudFormation already has for a stack deployed before
+ * the library renamed these resources. Read from `aws cloudformation
+ * list-stack-resources` against the live stack, so the ids are observed, not
+ * constructed — the hash in each one is not reproducible from the construct path
+ * alone, which is precisely why they have to be written down.
+ *
+ * An entry stays until its stack is gone. Removing one while the stack still
+ * exists re-introduces the rename and the failed update that comes with it.
  */
 const PINNED_LOG_DELIVERY_BY_STACK: Record<string, readonly PinnedLogResource[]> = {
   'backgroundagent-dev': [
@@ -1500,37 +1501,45 @@ const PINNED_LOG_DELIVERY_BY_STACK: Record<string, readonly PinnedLogResource[]>
 };
 
 /**
- * OPT-IN migration shim: re-pin the agentcore-alpha-churned
- * log-delivery resources of ONE already-deployed stack to the logical ids +
- * Names CFN already has, so a stack deployed before an alpha bump updates them
- * in place instead of hitting ``AWS::Logs::DeliverySource AlreadyExists`` on
- * create-before-delete. NO-OP unless the deploy opts in by naming the stack via
- * context and that name is listed in
- * {@link PINNED_LOG_DELIVERY_BY_STACK}, i.e. context
- * (`-c pinnedLogDeliveryStack=<name>`, which selects which table entry applies)
- * — so fresh stacks, CI, and other accounts synth the current alpha's natural
- * ids untouched. Once the affected stack is migrated, delete this helper + its
- * table entry.
+ * Pin the auto-created log-delivery resources to stable logical ids, ALWAYS.
+ *
+ * These resources are created for us by the AgentCore Runtime and named after
+ * whatever construct path the library uses internally, so a library-side rename
+ * silently renames them — and a renamed resource is, to CloudFormation, a new
+ * one to create before the old is deleted. That is fatal here: a DeliverySource
+ * is unique per (resource ARN, log type) account-wide, the runtime ARN is
+ * unchanged by a rename, so the create collides with the live source and the
+ * update rolls the whole stack back. Owning the ids ourselves decouples us from
+ * the library's internal naming.
+ *
+ * Applied unconditionally rather than behind a flag. Three cases, all safe:
+ *
+ *  - An existing stack in the account that owns these resources: the ids match
+ *    what CloudFormation already recorded, so it updates them in place. This is
+ *    the case that was broken.
+ *  - A fresh stack or account: nothing owns these names yet, so they create
+ *    normally. The ids are ours rather than the library's, which is the point;
+ *    the values themselves carry no meaning beyond being stable.
+ *  - Any other name: the ids embed the stack name, so each stack gets its own.
+ *
+ * The values were read off a stack deployed before the rename. Do not "tidy"
+ * them — they are a record of what CloudFormation already has, and editing one
+ * re-breaks exactly the update path this exists to protect.
  */
-function maybePinChurnedLogResources(stack: Stack, runtime: agentcore.Runtime): void {
-  // Opt-in ONLY, via `-c pinnedLogDeliveryStack=<name>`.
-  //
-  // This deliberately does NOT fall back to the running stack's own name. The
-  // default stack name (see ``main.ts``) is itself a key in the table below, so
-  // matching on stackName meant every operator who deployed without a
-  // `-c stackName=…` override silently inherited one specific pre-existing
-  // stack's hardcoded logical ids AND its account-unique resource Names. A pin
-  // is only ever correct for the one account that already owns those resources,
-  // so it has to be asked for explicitly.
-  const targetStackName = stack.node.tryGetContext('pinnedLogDeliveryStack') as string | undefined;
-  if (targetStackName === undefined) return; // no opt-in → pristine synth
-  if (targetStackName !== stack.stackName) return; // context names a different stack → don't touch this one
+function pinLogDeliveryLogicalIds(runtime: agentcore.Runtime): void {
+  const stack = Stack.of(runtime);
   const pins = PINNED_LOG_DELIVERY_BY_STACK[stack.stackName];
-  if (!pins) return; // opted in but no table entry → nothing to pin
+  // Only the stack these ids were recorded from can use them: they embed that
+  // stack's name. Any other stack keeps the library's own naming, which is
+  // correct for it — it has no pre-rename resources to line up with.
+  if (!pins) return;
 
   for (const pin of pins) {
     const res = runtime.node.tryFindChild(pin.childId) as CfnResource | undefined;
-    if (!res) continue; // a future alpha rename → silently skip (re-derive then)
+    // A future library rename moves the child, so the pin stops matching. Skip
+    // rather than throw: the stack still deploys, and the next update that hits
+    // the collision is the signal to re-record the ids from the live stack.
+    if (!res) continue;
     res.overrideLogicalId(pin.liveLogicalId);
     if (pin.liveName !== undefined) res.addPropertyOverride('Name', pin.liveName);
   }
