@@ -565,12 +565,25 @@ describe('jira-webhook-processor handler', () => {
     ddbSend.mockResolvedValueOnce({ Item: undefined });
     await handler(eventWith(issue()));
     expect(createTaskCoreMock).not.toHaveBeenCalled();
+    expect(reportIssueFailureMock).not.toHaveBeenCalled();
   });
 
   test('skips when project mapping is removed', async () => {
     ddbSend.mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'removed' } });
     await handler(eventWith(issue()));
     expect(createTaskCoreMock).not.toHaveBeenCalled();
+    expect(reportIssueFailureMock).not.toHaveBeenCalled();
+  });
+
+  test('keeps an ordinary event in an unmapped project completely silent', async () => {
+    ddbSend.mockResolvedValueOnce({ Item: undefined });
+    const payload = issue();
+    (payload.issue as { fields: Record<string, unknown> }).fields.labels = ['other'];
+
+    await handler(eventWith(payload));
+
+    expect(createTaskCoreMock).not.toHaveBeenCalled();
+    expect(reportIssueFailureMock).not.toHaveBeenCalled();
   });
 
   test('skips when trigger label is absent on create', async () => {
@@ -781,47 +794,32 @@ describe('jira-webhook-processor handler', () => {
   });
 
   describe('user-visible feedback on silent-failure paths', () => {
-    test('posts comment when issue has no project.key', async () => {
+    test('keeps an issue with no project.key silent because onboarding cannot be established', async () => {
       const payload = issue();
       delete (payload.issue as { fields: { project: Record<string, unknown> } }).fields.project.key;
 
       await handler(eventWith(payload));
 
-      expect(reportIssueFailureMock).toHaveBeenCalledTimes(1);
-      const [ctx, issueIdOrKey, message] = reportIssueFailureMock.mock.calls[0];
-      expect(ctx).toEqual({
-        cloudId: 'cloud-1',
-        registryTableName: process.env.JIRA_WORKSPACE_REGISTRY_TABLE_NAME,
-      });
-      expect(issueIdOrKey).toBe('ENG-42');
-      expect(message).toContain("isn't in a project");
+      expect(reportIssueFailureMock).not.toHaveBeenCalled();
     });
 
-    test('posts feedback when project is not onboarded', async () => {
+    test('keeps a trigger-labeled issue in an unmapped project silent', async () => {
       ddbSend.mockResolvedValueOnce({ Item: undefined });
 
       await handler(eventWith(issue()));
 
-      expect(reportIssueFailureMock).toHaveBeenCalledTimes(1);
-      const [, issueKey, message] = reportIssueFailureMock.mock.calls[0];
-      expect(issueKey).toBe('ENG-42');
-      expect(message).toContain("isn't onboarded");
-      // The suggested command must be the real one (`map`) with the required
-      // cloud-id + project-key positionals, not the non-existent
-      // `onboard-project`.
-      expect(message).toContain('bgagent jira map cloud-1 ENG --repo');
-      expect(message).not.toContain('onboard-project');
+      expect(reportIssueFailureMock).not.toHaveBeenCalled();
     });
 
-    test('posts feedback when project mapping is removed', async () => {
+    test('keeps a trigger-labeled issue with a removed mapping silent', async () => {
       ddbSend.mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'removed' } });
 
       await handler(eventWith(issue()));
 
-      expect(reportIssueFailureMock).toHaveBeenCalledTimes(1);
+      expect(reportIssueFailureMock).not.toHaveBeenCalled();
     });
 
-    test('posts feedback when accountId has no linked platform user', async () => {
+    test('posts actionable feedback for the selected Jira actor in an onboarded project', async () => {
       ddbSend
         .mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'active' } })
         .mockResolvedValueOnce({ Item: undefined });
@@ -831,7 +829,8 @@ describe('jira-webhook-processor handler', () => {
       expect(reportIssueFailureMock).toHaveBeenCalledTimes(1);
       const [, , message] = reportIssueFailureMock.mock.calls[0];
       expect(message).toContain("isn't linked to a platform user");
-      expect(message).toContain('bgagent jira link');
+      expect(message).toContain('accountId: `acc-1`');
+      expect(message).toContain('bgagent jira invite-user cloud-1 acc-1');
     });
 
     test('surfaces guardrail block message on createTaskCore 400', async () => {
@@ -905,19 +904,21 @@ describe('jira-webhook-processor handler', () => {
       reportIssueFailureMock.mockImplementationOnce(() => {
         throw new Error('synthetic synchronous throw');
       });
-      const payload = issue();
-      delete (payload.issue as { fields: { project: Record<string, unknown> } }).fields.project.key;
+      ddbSend
+        .mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'active' } })
+        .mockResolvedValueOnce({ Item: undefined });
 
-      await expect(handler(eventWith(payload))).resolves.toBeUndefined();
+      await expect(handler(eventWith(issue()))).resolves.toBeUndefined();
       expect(reportIssueFailureMock).toHaveBeenCalledTimes(1);
     });
 
     test('safeReportIssueFailure: async rejection from reportIssueFailure does not propagate', async () => {
       reportIssueFailureMock.mockRejectedValueOnce(new Error('async failure'));
-      const payload = issue();
-      delete (payload.issue as { fields: { project: Record<string, unknown> } }).fields.project.key;
+      ddbSend
+        .mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'active' } })
+        .mockResolvedValueOnce({ Item: undefined });
 
-      await expect(handler(eventWith(payload))).resolves.toBeUndefined();
+      await expect(handler(eventWith(issue()))).resolves.toBeUndefined();
       expect(reportIssueFailureMock).toHaveBeenCalledTimes(1);
     });
   });

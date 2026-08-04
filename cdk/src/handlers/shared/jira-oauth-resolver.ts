@@ -78,10 +78,10 @@ export interface StoredOauthToken {
   /** Per-tenant Jira webhook signing secret.
    *
    *  Atlassian's "Generic webhooks" support a per-webhook secret that signs
-   *  events with `X-Hub-Signature: sha256=<hex>`. Webhook subscriptions are
-   *  tenant-scoped, so a single stack-wide signing secret cannot verify
-   *  events from multiple tenants. The webhook receiver looks this up by
-   *  `cloudId` at verify time.
+   *  events with `X-Hub-Signature: sha256=<hex>`. The receiver uses this copy
+   *  when the payload carries cloudId. Jira admin-console payloads omit
+   *  cloudId, so the sole active tenant also synchronizes its value to the
+   *  stack-wide verifier.
    *
    *  Optional for back-compat: tokens written before per-tenant signing
    *  was wired up won't have it, and the receiver falls back to the

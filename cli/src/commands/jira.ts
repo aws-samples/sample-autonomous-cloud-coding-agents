@@ -28,7 +28,12 @@ import {
   ResourceExistsException,
   SecretsManagerClient,
 } from '@aws-sdk/client-secrets-manager';
-import { DynamoDBDocumentClient, GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
+import {
+  DynamoDBDocumentClient,
+  GetCommand,
+  PutCommand,
+  ScanCommand,
+} from '@aws-sdk/lib-dynamodb';
 import { Command } from 'commander';
 import { ApiClient } from '../api-client';
 import { loadConfig, loadCredentials } from '../config';
@@ -188,78 +193,93 @@ export async function upsertOauthSecret(
   }
 }
 
-/**
- * Marker key embedded in the CDK-generated stack-wide webhook-secret
- * placeholder. A secret whose JSON carries this key has never been
- * configured by an operator, so `setup` is free to seed the real value.
- *
- * MUST stay in sync with `JIRA_WEBHOOK_SECRET_PLACEHOLDER_KEY` in
- * `cdk/src/constructs/jira-integration.ts`. See #368.
- */
-export const JIRA_WEBHOOK_SECRET_PLACEHOLDER_KEY = 'abca_jira_webhook_placeholder';
-
-/**
- * Check whether the JiraWebhookSecret already holds a real, operator-set
- * signing secret (vs the CDK-generated placeholder). Used to decide whether
- * to seed the stack-wide secret on a `setup` run.
- *
- * Atlassian's generic-webhook signing secrets are operator-chosen — they have
- * no fixed prefix like Linear's `lin_wh_`, so we cannot positively recognize a
- * *real* value by shape. Instead we recognize the *placeholder*: the CDK
- * construct seeds an explicit JSON object carrying
- * `JIRA_WEBHOOK_SECRET_PLACEHOLDER_KEY`. Anything that is not that placeholder
- * is treated as an operator value.
- *
- * NOTE (#368 migration): stacks deployed before the explicit-placeholder fix
- * seeded a *bare random string* placeholder, which is indistinguishable from
- * an operator value and so is (conservatively) reported as configured. Such
- * installs must redeploy the CDK stack — which regenerates the secret with the
- * JSON placeholder — before `setup` will seed it.
- */
-export async function isWebhookSecretConfigured(
-  client: SecretsManagerClient,
-  secretArn: string,
-): Promise<boolean> {
-  try {
-    const result = await client.send(new GetSecretValueCommand({ SecretId: secretArn }));
-    const value = result.SecretString;
-    if (typeof value !== 'string' || value.length === 0) return false;
-    return !isWebhookSecretPlaceholder(value);
-  } catch (err) {
-    const errorName = (err as { name?: string }).name;
-    if (errorName === 'ResourceNotFoundException') {
-      return false;
+async function listActiveJiraTenantIds(
+  ddb: DynamoDBDocumentClient,
+  tableName: string,
+): Promise<string[]> {
+  const ids = new Set<string>();
+  let lastKey: Record<string, unknown> | undefined;
+  do {
+    const page = await ddb.send(new ScanCommand({
+      TableName: tableName,
+      ProjectionExpression: 'jira_cloud_id, #s',
+      FilterExpression: '#s = :active',
+      ExpressionAttributeNames: { '#s': 'status' },
+      ExpressionAttributeValues: { ':active': 'active' },
+      ExclusiveStartKey: lastKey,
+      ConsistentRead: true,
+    }));
+    for (const item of page.Items ?? []) {
+      if (typeof item.jira_cloud_id === 'string' && item.jira_cloud_id) {
+        ids.add(item.jira_cloud_id);
+      }
     }
-    const message = err instanceof Error ? err.message : String(err);
-    throw new CliError(
-      `Failed to read Jira webhook secret '${secretArn}': ${errorName ?? 'Error'}: ${message}. `
-      + 'Likely IAM permission gap — confirm your CLI principal has '
-      + '`secretsmanager:GetSecretValue` on this ARN.',
+    lastKey = page.LastEvaluatedKey;
+  } while (lastKey);
+  return [...ids];
+}
+
+function multiTenantWebhookError(cloudIds: readonly string[]): CliError {
+  if (cloudIds.length === 0) {
+    return new CliError(
+      'Could not confirm a sole active Jira tenant in the workspace registry. '
+      + 'Re-run `bgagent jira setup` before configuring or rotating this webhook.',
     );
   }
+  return new CliError(
+    'Jira admin-console webhooks omit cloudId, so one webhook URL cannot select among '
+    + `multiple tenant secrets (active tenants: ${cloudIds.join(', ')}). `
+    + 'This setup supports exactly one active Jira tenant. Remove or revoke the other '
+    + 'tenant before configuring or rotating this webhook.',
+  );
 }
 
 /**
- * True when `value` is the CDK-generated placeholder — a JSON object carrying
- * the {@link JIRA_WEBHOOK_SECRET_PLACEHOLDER_KEY} marker. A non-JSON value, or
- * JSON without the marker, is an operator-set secret.
+ * Persist one signing secret to both locations required by Jira
+ * admin-console webhooks. These payloads omit cloudId, so the receiver uses
+ * the stack-wide verifier; the per-tenant copy is retained for payloads that
+ * do carry cloudId.
  */
-function isWebhookSecretPlaceholder(value: string): boolean {
-  const trimmed = value.trim();
-  // Fast reject: real Atlassian signing secrets are bare strings.
-  if (!trimmed.startsWith('{')) return false;
+export async function synchronizeJiraWebhookSecrets(
+  sm: SecretsManagerClient,
+  oauthSecretArn: string,
+  stackWideSecretArn: string,
+  stored: StoredJiraOauthToken,
+  webhookSigningSecret: string,
+): Promise<StoredJiraOauthToken> {
+  const merged: StoredJiraOauthToken = {
+    ...stored,
+    webhook_signing_secret: webhookSigningSecret,
+    updated_at: new Date().toISOString(),
+  };
+  const originalSecretString = JSON.stringify(stored);
+
+  await sm.send(new PutSecretValueCommand({
+    SecretId: oauthSecretArn,
+    SecretString: JSON.stringify(merged),
+  }));
   try {
-    const parsed: unknown = JSON.parse(trimmed);
-    return (
-      typeof parsed === 'object'
-      && parsed !== null
-      && JIRA_WEBHOOK_SECRET_PLACEHOLDER_KEY in (parsed as Record<string, unknown>)
-    );
-  } catch {
-    // Starts with `{` but isn't valid JSON — not our placeholder. Treat as a
-    // (malformed) operator value rather than silently re-seeding over it.
-    return false; // nosemgrep: ts-silent-success-masking -- unparseable secret is conservatively treated as operator-set (not the placeholder), so setup never overwrites it
+    await sm.send(new PutSecretValueCommand({
+      SecretId: stackWideSecretArn,
+      SecretString: webhookSigningSecret,
+    }));
+  } catch (err) {
+    try {
+      await sm.send(new PutSecretValueCommand({
+        SecretId: oauthSecretArn,
+        SecretString: originalSecretString,
+      }));
+    } catch (rollbackErr) {
+      throw new CliError(
+        'Failed to update the stack-wide Jira webhook secret and failed to restore the tenant bundle: '
+        + `${err instanceof Error ? err.message : String(err)}; rollback: `
+        + `${rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)}. `
+        + 'Manually synchronize both Secrets Manager values before re-enabling the Jira webhook.',
+      );
+    }
+    throw err;
   }
+  return merged;
 }
 
 interface JiraUserSearchResult {
@@ -616,6 +636,17 @@ export function makeJiraCommand(): Command {
         console.log(`  cloud_id: ${cloudId}`);
         console.log(`  site_url: ${siteUrl}`);
 
+        // Jira Settings → System → Webhooks payloads omit cloudId, so the
+        // receiver must use one stack-wide verifier. Refuse a second active
+        // tenant before writing its OAuth or registry state rather than
+        // presenting an apparently complete but unverifiable setup.
+        const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
+        const activeTenantIds = await listActiveJiraTenantIds(ddb, workspaceRegistryTable!);
+        const otherActiveTenantIds = activeTenantIds.filter((id) => id !== cloudId);
+        if (otherActiveTenantIds.length > 0) {
+          throw multiTenantWebhookError([...otherActiveTenantIds, cloudId]);
+        }
+
         // ─── Step 4: Persist token to per-tenant Secrets Manager ─────────
         process.stdout.write('  → Storing OAuth token...');
         const sm = new SecretsManagerClient({ region });
@@ -638,7 +669,6 @@ export function makeJiraCommand(): Command {
         console.log(` ✓ (${secretName})`);
 
         // ─── Step 5: Persist registry row ────────────────────────────────
-        const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
         await ddb.send(new PutCommand({
           TableName: workspaceRegistryTable!,
           Item: {
@@ -653,20 +683,12 @@ export function makeJiraCommand(): Command {
         }));
         console.log('  ✓ Recorded tenant in registry');
 
-        // ─── Step 6: Webhook signing secret (per-tenant primary) ─────────
+        // ─── Step 6: Webhook signing secret ──────────────────────────────
         //
         // Atlassian doesn't auto-generate webhook signing secrets — they're
-        // operator-chosen at webhook-create time in the Jira admin UI, and
-        // each tenant's webhook is configured independently with its OWN
-        // secret. So we always prompt for THIS tenant's secret and store it
-        // on the per-tenant OAuth bundle — the primary verification path.
-        //
-        // We deliberately do NOT copy an existing stack-wide secret into a
-        // new tenant's bundle (the old behavior): that would make tenant A's
-        // secret verify per-tenant for tenant B, and a holder of the
-        // stack-wide secret could then forge per-tenant-signed events for any
-        // tenant. The stack-wide secret is only seeded once, from the FIRST
-        // tenant's secret, as the single-tenant back-compat fallback.
+        // operator-chosen in the Jira admin UI. Those webhook payloads omit
+        // cloudId, so the sole active tenant's value must be kept in both its
+        // OAuth bundle and the stack-wide verifier.
         const apiBaseUrl = config.api_url.replace(/\/+$/, '');
         console.log();
         console.log('  Webhook signing secret needed for THIS tenant.');
@@ -675,33 +697,19 @@ export function makeJiraCommand(): Command {
         console.log('    Events:        Issue: created, Issue: updated, Comment: created');
         console.log('    Secret:        choose a strong random value (e.g. `openssl rand -hex 32`)');
         console.log();
-        const webhookSigningSecret = await promptSecret('Webhook signing secret: ');
+        const webhookSigningSecret = (await promptSecret('Webhook signing secret: ')).trim();
         if (!webhookSigningSecret) {
           throw new CliError('Webhook signing secret is required.');
         }
 
-        const merged: StoredJiraOauthToken = {
-          ...stored,
-          webhook_signing_secret: webhookSigningSecret,
-          updated_at: new Date().toISOString(),
-        };
-        await upsertOauthSecret(sm, secretName, merged, cloudId);
-        console.log('  ✓ Stored signing secret on the per-tenant OAuth bundle');
-
-        // Seed the stack-wide fallback only if it has never been set, so a
-        // single-tenant install (no per-tenant routing) still verifies. Once
-        // a second tenant onboards, its secret is per-tenant only — the
-        // stack-wide secret stays pinned to the first tenant.
-        const stackWideAlreadyConfigured = await isWebhookSecretConfigured(sm, webhookSecretArn!);
-        if (stackWideAlreadyConfigured) {
-          console.log('  ✓ Stack-wide fallback already configured (leaving as-is)');
-        } else {
-          await sm.send(new PutSecretValueCommand({
-            SecretId: webhookSecretArn!,
-            SecretString: webhookSigningSecret,
-          }));
-          console.log('  ✓ Seeded stack-wide fallback for single-tenant back-compat');
-        }
+        await synchronizeJiraWebhookSecrets(
+          sm,
+          oauthSecretArn,
+          webhookSecretArn!,
+          stored,
+          webhookSigningSecret,
+        );
+        console.log('  ✓ Synchronized tenant and stack-wide signing secrets');
 
         // ─── Done ─────────────────────────────────────────────────────────
         console.log();
@@ -714,6 +722,77 @@ export function makeJiraCommand(): Command {
         console.log(`       bgagent jira invite-user ${cloudId} <account-id-or-email>`);
         console.log('       bgagent jira link <code>');
         console.log(`  3. Add the trigger label '${DEFAULT_LABEL_FILTER}' to a Jira issue in a mapped project.`);
+      }),
+  );
+
+  // ─── update-webhook-secret ────────────────────────────────────────────────
+  jira.addCommand(
+    new Command('update-webhook-secret')
+      .description('Rotate the Jira admin-console webhook signing secret (single active tenant)')
+      .argument('<cloud-id>', 'Atlassian tenant cloudId (UUID)')
+      .option('--region <region>', 'AWS region (defaults to configured region)')
+      .option('--stack-name <name>', 'CloudFormation stack name', 'backgroundagent-dev')
+      .action(async (cloudId: string, opts) => {
+        const config = loadConfig();
+        const region = opts.region || config.region;
+        const stackName = opts.stackName;
+        const [workspaceRegistryTable, webhookSecretArn] = await Promise.all([
+          getStackOutput(region, stackName, 'JiraWorkspaceRegistryTableName'),
+          getStackOutput(region, stackName, 'JiraWebhookSecretArn'),
+        ]);
+        const missing: string[] = [];
+        if (!workspaceRegistryTable) missing.push('JiraWorkspaceRegistryTableName');
+        if (!webhookSecretArn) missing.push('JiraWebhookSecretArn');
+        if (missing.length > 0) {
+          throw new CliError(
+            `Stack '${stackName}' is missing outputs ${missing.join(', ')}. `
+            + 'Re-deploy with the JiraIntegration CDK changes (mise //cdk:deploy).',
+          );
+        }
+
+        const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
+        const registry = await ddb.send(new GetCommand({
+          TableName: workspaceRegistryTable!,
+          Key: { jira_cloud_id: cloudId },
+        }));
+        const registryRow = registry.Item;
+        if (!registryRow || registryRow.status !== 'active') {
+          throw new CliError(
+            `Jira tenant '${cloudId}' is not in the registry (or status != 'active'). `
+            + 'Run `bgagent jira setup` for that tenant first.',
+          );
+        }
+        const oauthSecretArn = registryRow.oauth_secret_arn as string | undefined;
+        if (!oauthSecretArn) {
+          throw new CliError(
+            `Jira tenant '${cloudId}' registry row is missing oauth_secret_arn. `
+            + 'Re-run `bgagent jira setup`.',
+          );
+        }
+
+        const activeTenantIds = await listActiveJiraTenantIds(ddb, workspaceRegistryTable!);
+        if (activeTenantIds.length !== 1 || activeTenantIds[0] !== cloudId) {
+          throw multiTenantWebhookError(activeTenantIds);
+        }
+
+        const webhookSigningSecret = (await promptSecret('New webhook signing secret: ')).trim();
+        if (!webhookSigningSecret) {
+          throw new CliError('Webhook signing secret is required.');
+        }
+
+        const sm = new SecretsManagerClient({ region });
+        const oauthSecret = await sm.send(new GetSecretValueCommand({ SecretId: oauthSecretArn }));
+        const stored = parseStoredJiraOauthToken(oauthSecret.SecretString, oauthSecretArn);
+        await synchronizeJiraWebhookSecrets(
+          sm,
+          oauthSecretArn,
+          webhookSecretArn!,
+          stored,
+          webhookSigningSecret,
+        );
+
+        console.log(`✓ Updated Jira webhook signing secret for tenant '${cloudId}'.`);
+        console.log('  Tenant OAuth bundle and stack-wide verifier are synchronized.');
       }),
   );
 

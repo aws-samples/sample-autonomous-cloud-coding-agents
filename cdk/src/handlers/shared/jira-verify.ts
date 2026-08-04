@@ -192,8 +192,9 @@ export async function verifyJiraRequest(
  * - `'revoked'` — registry row exists but status is not `active`.
  *   Reject; do NOT fall back.
  * - `'no-per-tenant-secret'` — no registry row, OR the stored secret
- *   has no `webhook_signing_secret`. Caller should fall back to the
- *   stack-wide secret for back-compat with single-tenant installs.
+ *   has no `webhook_signing_secret`. Caller should use the stack-wide
+ *   verifier. This is also the normal path for admin-console payloads, which
+ *   omit cloudId before tenant selection is possible.
  *
  * Strict lookups (throw on infra errors) are used so a transient DDB or
  * SM error doesn't silently downgrade a per-tenant-secured tenant to

@@ -136,6 +136,16 @@ This runs the OAuth 3LO dance:
 
 Paste that same secret value back at the `Webhook signing secret:` prompt. ABCA stores it on the per-tenant OAuth bundle (and mirrors it stack-wide), and the receiver looks it up to verify `X-Hub-Signature` on each delivery.
 
+> **One active tenant for Jira admin-console webhooks.** Webhooks created under **Settings → System → Webhooks** do not include `cloudId` in their payload, so the receiver cannot select among multiple tenant secrets. `jira setup` therefore refuses to configure a second active Jira tenant through this flow. For the sole active tenant it always synchronizes the tenant bundle and stack-wide verifier, including on setup reruns.
+
+When recreating the webhook or rotating its secret later, update the secret in Jira and then run:
+
+```bash
+bgagent jira update-webhook-secret <cloud-id>
+```
+
+The command prompts for the new value and updates both required Secrets Manager values without repeating OAuth. Keep the Jira webhook disabled until the command succeeds.
+
 ### 4. Map a project to a repository
 
 ```bash
@@ -187,7 +197,7 @@ After the PR exists, add a Jira comment such as `@bgagent update the README too`
 Atlassian signs each delivery with HMAC-SHA256 over the **raw request body**, delivered as `X-Hub-Signature: sha256=<hex>`. The receiver:
 
 1. Computes `HMAC-SHA256(rawBody, secret)` and compares it constant-time against the header value (tolerating a pasted value with or without the `sha256=` prefix).
-2. Prefers the **per-tenant** signing secret stored on `bgagent-jira-oauth-<cloudId>`; falls back to the stack-wide `JiraWebhookSecret` for installs that predate per-tenant storage.
+2. Uses the per-tenant signing secret when the payload carries `cloudId`. Admin-console payloads omit it, so they use the synchronized stack-wide `JiraWebhookSecret` and bind to the sole active tenant.
 3. Rejects with 401 on mismatch.
 
 The body must be verified as the *raw unparsed bytes* — never parsed-and-restringified JSON, which would change the byte sequence and break the HMAC.
@@ -198,6 +208,7 @@ The body must be verified as the *raw unparsed bytes* — never parsed-and-restr
 - **`jira:issue_updated`** — triggers only if the label was **newly added** in this update. Jira reports label changes in `changelog.items[]` (`field: "labels"`, with `fromString` / `toString`), *not* by re-sending the full label list. The processor diffs the changelog rather than inspecting `issue.fields.labels`, so re-saving an issue that already has the label does not re-trigger.
 - **`comment_created`** — triggers only when the new comment contains a token-bounded `@bgagent` mention and the issue has a prior ABCA pull request.
 - All other event types get a silent `200`.
+- Issues outside active project mappings are always silent, even if they use the same label. Site-wide Jira activity must not cause ABCA comments in projects that were never onboarded.
 
 ## Comment-triggered PR iteration
 
@@ -276,12 +287,23 @@ The receiver dedupes issue events on `{issueKey}#{webhookEvent}#{timestamp}` and
 
 ### Webhook signature verification fails repeatedly (401)
 
-The signing secret stored for this tenant doesn't match what Jira is sending. Most often the value pasted at the `Webhook signing secret:` prompt differs from the one entered in Jira's webhook config (or the webhook secret was rotated in Jira). Re-run `bgagent jira setup` for the tenant and re-enter matching values. To inspect what's stored:
+The signing secret stored for this tenant doesn't match what Jira is sending. Most often the value entered in Jira differs from ABCA's copy, or the webhook was recreated with a new secret. Run `bgagent jira update-webhook-secret <cloud-id>` and enter the exact value configured in Jira. This synchronizes both locations required by admin-console webhooks. To inspect what's stored:
 
 ```bash
 aws secretsmanager get-secret-value \
   --secret-id bgagent-jira-oauth-<cloudId> \
   --query SecretString --output text | jq .webhook_signing_secret
+```
+
+### Linking succeeds but a trigger says the Jira user is unlinked
+
+Jira attributes a trigger to the account in the webhook's `user.accountId`. That may differ from the issue reporter, creator, or the OAuth account ABCA uses to post comments. The name shown above an ABCA comment is therefore not proof that the same account triggered the event.
+
+Check the webhook-processor warning for `jira_account_id`, `jira_account_source`, and `jira_identity_lookup_key`. The failure comment on an onboarded, explicitly triggered issue also prints the selected account ID. Invite and link that exact account:
+
+```bash
+bgagent jira invite-user <cloud-id> <jira-account-id-from-the-log>
+bgagent jira link <generated-code>
 ```
 
 ### `setup` hangs at "Waiting for browser callback…"
