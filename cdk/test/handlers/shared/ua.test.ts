@@ -62,6 +62,25 @@ describe('abcaUserAgent', () => {
   });
 });
 
+// Per-surface lock-in for #319 review item 2: tasks 4/5 wired the Jira/api-key
+// handlers through the factory, so the `webhook`/`api` labels now land in a real
+// `md/` segment. These assert the exact emitted pair per surface.
+describe('component label lands in the md/ segment', () => {
+  afterEach(() => {
+    delete process.env.ABCA_COMPONENT;
+  });
+
+  it('emits md/…#webhook when ABCA_COMPONENT=webhook', () => {
+    process.env.ABCA_COMPONENT = 'webhook';
+    expect(abcaUserAgent().customUserAgent).toEqual([['md/uksb-wt64nei4u6', 'webhook']]);
+  });
+
+  it('falls back to api when unset', () => {
+    delete process.env.ABCA_COMPONENT;
+    expect(abcaUserAgent().customUserAgent).toEqual([['md/uksb-wt64nei4u6', 'api']]);
+  });
+});
+
 describe('wire-capture: emitted User-Agent header', () => {
   /**
    * Drive a real DynamoDBClient through its full middleware stack with a stub
