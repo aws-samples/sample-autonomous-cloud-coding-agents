@@ -448,6 +448,7 @@ describe('jira update-webhook-secret action', () => {
     await runUpdate();
 
     expect(ddbSend.mock.calls[0][0]).toBeInstanceOf(GetCommand);
+    expect((ddbSend.mock.calls[0][0] as GetCommand).input.ConsistentRead).toBe(true);
     expect(ddbSend.mock.calls[1][0]).toBeInstanceOf(ScanCommand);
     expect(smSend.mock.calls[0][0]).toBeInstanceOf(GetSecretValueCommand);
 
@@ -674,6 +675,7 @@ describe('jira invite-user action', () => {
     expect(getCmd.input).toMatchObject({
       TableName: 'JiraRegistryTable',
       Key: { jira_cloud_id: 'cloud-123' },
+      ConsistentRead: true,
     });
 
     const searchUrl = new URL(String(fetchMock.mock.calls[0][0]));
@@ -1039,6 +1041,112 @@ describe('jira setup action', () => {
     ).rejects.toThrow(/missing outputs .*JiraWorkspaceRegistryTableName.*JiraWebhookSecretArn/s);
   });
 
+  test('completes OAuth setup and synchronizes tenant plus stack-wide webhook secrets', async () => {
+    cfnSend.mockResolvedValue({
+      Stacks: [{
+        Outputs: [
+          { OutputKey: 'JiraWorkspaceRegistryTableName', OutputValue: 'RegTable' },
+          { OutputKey: 'JiraWebhookSecretArn', OutputValue: 'arn:webhook' },
+        ],
+      }],
+    });
+    loadConfigSpy.mockReturnValue({
+      region: 'us-west-2',
+      api_url: 'https://api.example.test/v1/',
+    } as ReturnType<typeof config.loadConfig>);
+    const credsSpy = jest.spyOn(config, 'loadCredentials').mockReturnValue({
+      id_token: fakeIdToken('cognito-sub-123'),
+    } as ReturnType<typeof config.loadCredentials>);
+    const logSpy = jest.spyOn(console, 'log').mockImplementation();
+    const writeSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const fetchSpy = jest.spyOn(global, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        access_token: 'new-access-token',
+        refresh_token: 'new-refresh-token',
+        token_type: 'Bearer',
+        expires_in: 3600,
+        scope: 'read:jira-work write:jira-work read:jira-user',
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify([{
+        id: 'cloud-123',
+        name: 'Acme',
+        url: 'https://acme.atlassian.net',
+        scopes: ['read:jira-work'],
+      }]), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+
+    let completeOauth!: (value: {
+      kind: 'direct-oauth';
+      code: string;
+      state: string;
+    }) => void;
+    awaitOauthCallbackMock.mockReturnValueOnce(new Promise((resolve) => {
+      completeOauth = resolve;
+    }));
+    execFileMock.mockImplementationOnce(
+      (_command: string, args: string[], callback: (err: Error | null) => void) => {
+        const state = new URL(args[0]).searchParams.get('state');
+        completeOauth({ kind: 'direct-oauth', code: 'auth-code', state: state! });
+        callback(null);
+      },
+    );
+    promptSecretMock.mockResolvedValueOnce('new-signing-secret');
+    ddbSend.mockImplementation((command: unknown) => {
+      if (command instanceof ScanCommand) {
+        return Promise.resolve({
+          Items: [{ jira_cloud_id: 'cloud-123', status: 'active' }],
+        });
+      }
+      return Promise.resolve({});
+    });
+    smSend
+      .mockResolvedValueOnce({ ARN: 'arn:jira-oauth' })
+      .mockResolvedValueOnce({
+        SecretString: JSON.stringify(sampleToken({
+          access_token: 'new-access-token',
+          refresh_token: 'new-refresh-token',
+          cloud_id: 'cloud-123',
+        })),
+      })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({});
+
+    try {
+      const program = makeJiraCommand();
+      await program.parseAsync([
+        'node',
+        'bgagent',
+        'setup',
+        '--client-id',
+        'client-id',
+        '--client-secret',
+        'client-secret',
+      ]);
+
+      expect(ddbSend.mock.calls[0][0]).toBeInstanceOf(ScanCommand);
+      expect(ddbSend.mock.calls[1][0]).toBeInstanceOf(UpdateCommand);
+      expect(smSend.mock.calls[0][0]).toBeInstanceOf(CreateSecretCommand);
+      expect(smSend.mock.calls[1][0]).toBeInstanceOf(GetSecretValueCommand);
+
+      const tenantWrite = smSend.mock.calls[2][0] as PutSecretValueCommand;
+      expect(tenantWrite.input.SecretId).toBe('arn:jira-oauth');
+      expect(JSON.parse(tenantWrite.input.SecretString as string)).toMatchObject({
+        access_token: 'new-access-token',
+        refresh_token: 'new-refresh-token',
+        webhook_signing_secret: 'new-signing-secret',
+      });
+      const stackWideWrite = smSend.mock.calls[3][0] as PutSecretValueCommand;
+      expect(stackWideWrite.input).toEqual({
+        SecretId: 'arn:webhook',
+        SecretString: 'new-signing-secret',
+      });
+    } finally {
+      credsSpy.mockRestore();
+      logSpy.mockRestore();
+      writeSpy.mockRestore();
+      fetchSpy.mockRestore();
+    }
+  });
+
   test('aborts on OAuth state mismatch after generating PKCE/state (covers randomState)', async () => {
     cfnSend.mockResolvedValue({
       Stacks: [{
@@ -1212,6 +1320,10 @@ describe('jira app-setup action', () => {
       cloudId: 'cloud-123',
       siteUrl: 'https://acme.atlassian.net',
     });
+    const registryGet = ddbSend.mock.calls
+      .map((call) => call[0])
+      .find((command) => command instanceof GetCommand) as GetCommand;
+    expect(registryGet.input.ConsistentRead).toBe(true);
     const put = smSend.mock.calls
       .map((call) => call[0])
       .find((command) => command instanceof PutSecretValueCommand) as PutSecretValueCommand;

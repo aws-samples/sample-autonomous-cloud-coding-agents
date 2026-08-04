@@ -842,6 +842,7 @@ export function makeJiraCommand(): Command {
         const registry = await ddb.send(new GetCommand({
           TableName: registryTableName,
           Key: { jira_cloud_id: cloudId },
+          ConsistentRead: true,
         }));
         const row = registry.Item;
         if (!row || row.status !== 'active' || typeof row.oauth_secret_arn !== 'string') {
@@ -966,6 +967,7 @@ export function makeJiraCommand(): Command {
         const registry = await ddb.send(new GetCommand({
           TableName: workspaceRegistryTable!,
           Key: { jira_cloud_id: cloudId },
+          ConsistentRead: true,
         }));
         const registryRow = registry.Item;
         if (!registryRow || registryRow.status !== 'active') {
@@ -1047,6 +1049,7 @@ export function makeJiraCommand(): Command {
         const registry = await ddb.send(new GetCommand({
           TableName: workspaceRegistryTable!,
           Key: { jira_cloud_id: cloudId },
+          ConsistentRead: true,
         }));
         const registryRow = registry.Item;
         if (!registryRow || registryRow.status !== 'active') {
