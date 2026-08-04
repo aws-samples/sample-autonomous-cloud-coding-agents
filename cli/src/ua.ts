@@ -41,6 +41,9 @@
  * Solution id, wire format, and sanitization rules must stay identical.
  */
 
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+
 /** AWS solution-attribution id for ABCA. Per-surface literal by design. */
 export const SOLUTION_ID = 'uksb-wt64nei4u6';
 
@@ -79,4 +82,22 @@ export function applyDefaultAppId(): void {
  */
 export function abcaUserAgent(): { customUserAgent: [string, string][] } {
   return { customUserAgent: [[`md/${SOLUTION_ID}`, sanitizeUaValue(COMPONENT)]] };
+}
+
+/**
+ * The single attributed way to construct an AWS SDK v3 client. Spreads the
+ * static `md/` segment ({@link abcaUserAgent}) into the client config so
+ * omission is impossible at the call site. Caller-supplied opts (region,
+ * timeouts) are preserved.
+ */
+export function makeClient<C>(
+  Ctor: new (cfg: any) => C,
+  cfg: Record<string, unknown> = {},
+): C {
+  return new Ctor({ ...cfg, ...abcaUserAgent() });
+}
+
+/** Attributed `DynamoDBDocumentClient` — the wrapper form, in one call. */
+export function makeDocClient(cfg: Record<string, unknown> = {}): DynamoDBDocumentClient {
+  return DynamoDBDocumentClient.from(makeClient(DynamoDBClient, cfg));
 }

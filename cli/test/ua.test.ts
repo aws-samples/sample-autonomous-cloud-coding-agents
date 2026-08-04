@@ -17,8 +17,9 @@
  *  SOFTWARE.
  */
 
+import { CloudFormationClient } from '@aws-sdk/client-cloudformation';
 import { CognitoIdentityProviderClient, ListUsersCommand } from '@aws-sdk/client-cognito-identity-provider';
-import { abcaUserAgent, applyDefaultAppId, APP_ID_ENV, sanitizeUaValue, SOLUTION_ID } from '../src/ua';
+import { abcaUserAgent, applyDefaultAppId, APP_ID_ENV, makeClient, makeDocClient, sanitizeUaValue, SOLUTION_ID } from '../src/ua';
 
 describe('sanitizeUaValue', () => {
   test.each([
@@ -109,5 +110,15 @@ describe('wire-capture: emitted User-Agent header', () => {
     const ua = await captureUserAgent('');
     expect(ua).not.toContain('app/uksb-wt64nei4u6');
     expect(ua).toContain('md/uksb-wt64nei4u6#cli');
+  });
+});
+
+describe('makeClient (cli)', () => {
+  it('spreads md/ UA into client config', () => {
+    const c = makeClient(CloudFormationClient, { region: 'us-east-1' });
+    expect((c.config as any).customUserAgent).toEqual(abcaUserAgent().customUserAgent);
+  });
+  it('makeDocClient is attributed', () => {
+    expect(() => makeDocClient({ region: 'us-east-1' })).not.toThrow();
   });
 });
