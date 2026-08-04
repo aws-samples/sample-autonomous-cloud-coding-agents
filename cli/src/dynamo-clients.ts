@@ -19,14 +19,14 @@
 
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
-import { abcaUserAgent } from './ua';
+import { makeClient, makeDocClient } from './ua';
 
 /** A region-scoped DynamoDB document client (marshalls native JS values). */
 export function documentClient(region: string): DynamoDBDocumentClient {
-  return DynamoDBDocumentClient.from(new DynamoDBClient({ region, ...abcaUserAgent() }));
+  return makeDocClient({ region });
 }
 
 /** A region-scoped low-level DynamoDB client (raw AttributeValue maps). */
 export function lowLevelClient(region: string): DynamoDBClient {
-  return new DynamoDBClient({ region, ...abcaUserAgent() });
+  return makeClient(DynamoDBClient, { region });
 }

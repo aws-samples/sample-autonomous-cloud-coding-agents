@@ -31,7 +31,7 @@ import { CliError } from './errors';
 import { DEFAULT_STACK_NAME, resolveOperatorContext } from './operator-context';
 import { getStackOutput, resolveConfigureBundleFromStack } from './stack-outputs';
 import { CliConfig } from './types';
-import { abcaUserAgent } from './ua';
+import { makeClient } from './ua';
 
 export interface CognitoAdminContext {
   readonly region: string;
@@ -96,7 +96,7 @@ async function resolveConfigureBundle(
 }
 
 export function cognitoClient(region: string): CognitoIdentityProviderClient {
-  return new CognitoIdentityProviderClient({ region, ...abcaUserAgent() });
+  return makeClient(CognitoIdentityProviderClient, { region });
 }
 
 /** Permissive email-shape check — Cognito does the real validation. */

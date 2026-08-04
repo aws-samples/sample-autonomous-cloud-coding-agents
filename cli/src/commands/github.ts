@@ -33,7 +33,7 @@ import {
 import { DEFAULT_STACK_NAME } from '../operator-context';
 import { promptSecret } from '../prompt-secret';
 import { getStackOutput } from '../stack-outputs';
-import { abcaUserAgent } from '../ua';
+import { makeClient } from '../ua';
 
 /** Width of the `═` banner rules printed around webhook-info output. */
 const BANNER_WIDTH = 72;
@@ -124,7 +124,7 @@ export function makeGithubCommand(): Command {
           );
         }
 
-        const sm = new SecretsManagerClient({ region, ...abcaUserAgent() });
+        const sm = makeClient(SecretsManagerClient, { region });
 
         // Show whether a secret is already configured so the operator
         // doesn't accidentally rotate it without realising. Linear's

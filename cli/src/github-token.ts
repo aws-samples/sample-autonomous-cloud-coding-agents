@@ -25,7 +25,7 @@ import {
 import { CliError } from './errors';
 import { loadActiveRepoConfig } from './repo-lookup';
 import { getStackOutput } from './stack-outputs';
-import { abcaUserAgent } from './ua';
+import { makeClient } from './ua';
 
 export type GithubTokenSecretSource = 'explicit' | 'blueprint' | 'platform';
 
@@ -106,7 +106,7 @@ export async function isGithubTokenConfigured(
   region: string,
   secretArn: string,
 ): Promise<boolean> {
-  const sm = new SecretsManagerClient({ region, ...abcaUserAgent() });
+  const sm = makeClient(SecretsManagerClient, { region });
   try {
     const cur = await sm.send(new GetSecretValueCommand({ SecretId: secretArn }));
     if (!cur.SecretString || cur.SecretString.length === 0) {
@@ -131,7 +131,7 @@ export async function putGithubToken(
   secretArn: string,
   token: string,
 ): Promise<void> {
-  const sm = new SecretsManagerClient({ region, ...abcaUserAgent() });
+  const sm = makeClient(SecretsManagerClient, { region });
   await sm.send(new PutSecretValueCommand({
     SecretId: secretArn,
     SecretString: token,

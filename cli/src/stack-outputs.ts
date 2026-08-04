@@ -20,7 +20,7 @@
 import { CloudFormationClient, DescribeStacksCommand } from '@aws-sdk/client-cloudformation';
 import { CliError } from './errors';
 import { CliConfig } from './types';
-import { abcaUserAgent } from './ua';
+import { makeClient } from './ua';
 
 export interface StackOutputEntry {
   readonly key: string;
@@ -40,7 +40,7 @@ export function resolveOperatorRegion(opts: { region?: string }, configuredRegio
 }
 
 async function describeStack(region: string, stackName: string) {
-  const cf = new CloudFormationClient({ region, ...abcaUserAgent() });
+  const cf = makeClient(CloudFormationClient, { region });
   try {
     const result = await cf.send(new DescribeStacksCommand({ StackName: stackName }));
     const stack = result.Stacks?.[0];
