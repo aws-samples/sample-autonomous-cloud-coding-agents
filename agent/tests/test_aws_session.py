@@ -379,6 +379,21 @@ class TestSolutionUserAgent:
         assert cfg.read_timeout == 7
         assert cfg.user_agent_extra == "md/uksb-wt64nei4u6#agent"
 
+    def test_merge_ua_config_preserves_other_caller_config_keys(self):
+        from botocore.config import Config
+
+        import aws_session
+
+        # The collision branch must merge the combined UA onto the caller's OWN
+        # Config so every other caller key survives — a fresh Config would drop
+        # connect_timeout (and any other key the caller carried). (#319)
+        caller = Config(read_timeout=7, connect_timeout=3, user_agent_extra="caller/1.0")
+        merged = aws_session._merge_ua_config({"config": caller})["config"]
+        assert merged.read_timeout == 7
+        assert merged.connect_timeout == 3  # <-- dropped today
+        assert "caller/1.0" in merged.user_agent_extra
+        assert "md/uksb-wt64nei4u6#agent" in merged.user_agent_extra
+
     def test_scoped_session_sets_session_level_extra(self, monkeypatch):
         monkeypatch.setenv("AWS_REGION", "us-east-1")
         monkeypatch.setenv(SESSION_ROLE_ARN_ENV, "arn:aws:iam::111122223333:role/abca-session")
