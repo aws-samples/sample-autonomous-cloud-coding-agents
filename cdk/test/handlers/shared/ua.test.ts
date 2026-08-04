@@ -18,7 +18,9 @@
  */
 
 import { DynamoDBClient, ListTablesCommand } from '@aws-sdk/client-dynamodb';
-import { abcaUserAgent, sanitizeUaValue } from '../../../src/handlers/shared/ua';
+import { S3Client } from '@aws-sdk/client-s3';
+import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { abcaUserAgent, makeClient, makeDocClient, sanitizeUaValue } from '../../../src/handlers/shared/ua';
 
 // `abcaUserAgent` / `componentLabel` read process.env at call time, so a plain
 // import suffices — no module reload needed. The wire-capture cases likewise
@@ -118,5 +120,23 @@ describe('wire-capture: emitted User-Agent header', () => {
     const ua = await captureUserAgent('');
     expect(ua).not.toContain('app/uksb-wt64nei4u6');
     expect(ua).toContain('md/uksb-wt64nei4u6#api');
+  });
+});
+
+describe('makeClient', () => {
+  it('spreads the md/ user-agent into the constructed client config', async () => {
+    const c = makeClient(S3Client, { region: 'us-east-1' });
+    const cfg = c.config;
+    expect(await cfg.region()).toBe('us-east-1'); // caller opt preserved
+    expect((cfg as any).customUserAgent).toEqual(abcaUserAgent().customUserAgent);
+  });
+
+  it('defaults cfg to {} when omitted', () => {
+    expect(() => makeClient(S3Client)).not.toThrow();
+  });
+
+  it('makeDocClient returns an attributed DynamoDBDocumentClient', () => {
+    const doc = makeDocClient({ region: 'us-east-1' });
+    expect(doc).toBeInstanceOf(DynamoDBDocumentClient);
   });
 });
