@@ -24,7 +24,7 @@ import { Node } from 'constructs';
  * runtime may invoke. Both grant sites — the AgentCore runtime in
  * `stacks/agent.ts` and the ECS task role in `constructs/ecs-agent-cluster.ts`
  * — derive their `grantInvoke` / IAM ARNs from this one list, so the two
- * backends can never drift (they were previously two hand-synced arrays; #433).
+ * backends can never drift (they were previously two hand-synced arrays).
  *
  * Scoping is intentionally per-model (explicit foundation-model +
  * cross-Region inference-profile ARNs), NOT a `Resource: '*'` wildcard — that
@@ -34,6 +34,13 @@ import { Node } from 'constructs';
 export const DEFAULT_BEDROCK_MODEL_IDS: readonly string[] = [
   'anthropic.claude-sonnet-4-6',
   'anthropic.claude-opus-4-20250514-v1:0',
+  // Claude Opus 4.8 — the agent's fallback model when a repo pins none
+  // (``agent/src/config.py``). REQUIRED in this grant list or the agent's
+  // InvokeModel gets AccessDenied at turn 0: both the AgentCore runtime and the
+  // ECS task role scope Bedrock to these IDs via resolveBedrockModelIds. Keep
+  // this entry and that default in the same change — a fallback the role cannot
+  // invoke fails every task on the stack, not just an edge case.
+  'anthropic.claude-opus-4-8',
   'anthropic.claude-haiku-4-5-20251001-v1:0',
 ];
 

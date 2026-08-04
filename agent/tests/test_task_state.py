@@ -252,7 +252,7 @@ class TestWriteTerminalMaintainsStatusCreatedAt:
 
 
 class TestWriteTerminalTraceS3Uri:
-    """K2 Stage 4 — ``write_terminal`` persists ``trace_s3_uri`` from
+    """``write_terminal`` persists ``trace_s3_uri`` from
     the result dict so the ``get-trace-url`` handler (which reads the
     field off the TaskRecord) sees a consistent view the moment the
     task reaches terminal."""
@@ -411,13 +411,13 @@ class TestWriteTerminalReplayFields:
         monkeypatch,
         capfd,
     ):
-        """K2 final review SIG-1: when ``write_terminal``'s precondition
+        """When ``write_terminal``'s precondition
         fails (typically: concurrent cancel) and a ``trace_s3_uri`` was
         already uploaded, the orphaned S3 object needs a dedicated log
         line — otherwise the generic ``skipped: precondition not met``
         message hides silently-lost trace URIs.
 
-        L4 extension: after the orphan log prints, the self-heal
+        Extension: after the orphan log prints, the self-heal
         ``write_trace_uri_conditional`` fires; when the second
         UpdateItem succeeds, the self-heal log also prints."""
         from botocore.exceptions import ClientError

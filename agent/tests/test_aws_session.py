@@ -84,7 +84,7 @@ class TestFailSafe:
 # autouse fixture. This file's `_reset` fixture (above) itself does
 # `monkeypatch.delenv(SESSION_ROLE_ARN_ENV)`, which would MASK whether conftest's
 # `_clean_env` performs the scrub — a guard placed here passes even if the
-# conftest line is deleted (#616 review B1). Only a fixture-free module truly
+# conftest line is deleted. Only a fixture-free module truly
 # guards the fix.
 
 
@@ -145,7 +145,7 @@ class TestScopedSession:
             # container memory pressure, or thread creation throttled) — every
             # survivor then hangs here and the main thread hangs in join() below,
             # stalling the whole `mise run build` until the 3600s ceiling. This is
-            # the ECS-only flaky hang chased across ABCA-684/686/688 (pytest-timeout
+            # the ECS-only flaky hang we chased for weeks (pytest-timeout
             # only fixed the SYMPTOM; this Barrier is the ROOT cause). A timeout
             # makes the barrier raise BrokenBarrierError so the test fails fast.
             start.wait(timeout=30)

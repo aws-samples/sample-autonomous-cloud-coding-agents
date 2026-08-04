@@ -26,7 +26,7 @@ import { abcaUserAgent } from './ua';
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ ...abcaUserAgent() }));
 
 /**
- * Linear issue identifier shape, e.g. `ABCA-42`. Linear identifiers are
+ * Linear issue identifier shape, e.g. `ENG-42`. Linear identifiers are
  * `<TEAM_KEY>-<NUMBER>` where the key is uppercase letters and digits is
  * a positive integer. We bound the team key length [1,10] and number
  * length [1,8] to avoid pathological inputs.
@@ -34,11 +34,11 @@ const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ ...abcaUserAgent() 
 const LINEAR_IDENTIFIER_RE = /\b([A-Z][A-Z0-9]{0,9})-(\d{1,8})\b/g;
 
 /**
- * Pull the first Linear issue identifier (e.g. `ABCA-42`) found in
+ * Pull the first Linear issue identifier (e.g. `ENG-42`) found in
  * the given text. PR titles and bodies typically include this either
  * because the agent's task_description carries the identifier, or
  * because Linear's own GitHub integration auto-injects an
- * `ABCA-42 <linear-url>` reference.
+ * `ENG-42 <linear-url>` reference.
  *
  * Returns the first match in document order. If multiple distinct
  * identifiers are present we still return the first — multi-issue PRs
@@ -51,6 +51,35 @@ export function extractLinearIdentifier(text: string | null | undefined): string
   // back-to-back calls behave correctly.
   LINEAR_IDENTIFIER_RE.lastIndex = 0;
   return match ? `${match[1]}-${match[2]}` : null;
+}
+
+/**
+ * Pull the Linear identifier out of an ABCA-generated git branch name.
+ *
+ * This is the *authoritative* identifier source for the screenshot
+ * router, and it must be tried before PR title/body. ABCA derives every
+ * task branch as `bgagent/{taskId}/{slug}` where the slug is
+ * `slugify("ENG-151: <title>")` — so the identifier is ALWAYS the
+ * leading slug segment (see `generateBranchName` / `slugify` in
+ * `gateway.ts`, and the `${identifier}: ${title}` description built in
+ * `linear-webhook-processor.ts` / `orchestration-release.ts`).
+ *
+ * Why branch-first matters: in a stacked sub-issue
+ * orchestration, an agent's PR *body* commonly narrates the predecessor
+ * issue ("cherry-picked from ENG-151 … Closes ENG-152") before the
+ * issue the PR actually closes. `extractLinearIdentifier` returns the
+ * first match in document order, so body-first routing misattributes the
+ * screenshot to the predecessor. The branch name has no such ambiguity —
+ * it encodes exactly one issue, the PR's own.
+ *
+ * The slug is lowercased by `slugify`, so we upper-case before matching
+ * (the identifier regex anchors on `[A-Z]`). The ULID `taskId` segment
+ * contains no `-`, so it can never produce a false `<KEY>-<n>` match
+ * ahead of the real identifier.
+ */
+export function extractLinearIdentifierFromBranch(branchName: string | null | undefined): string | null {
+  if (!branchName) return null;
+  return extractLinearIdentifier(branchName.toUpperCase());
 }
 
 /**
@@ -74,19 +103,19 @@ query IssueByIdentifier($identifier: String!) {
 `.trim();
 
 /**
- * Look up a Linear issue by identifier (e.g. `ABCA-42`).
+ * Look up a Linear issue by identifier (e.g. `ENG-42`).
  *
  * Routing strategy:
  * 1. Scan active workspaces (one round-trip — typical stacks have 1–2).
- * 2. If any row's `team_keys` contains the identifier's team key (`ABCA`),
+ * 2. If any row's `team_keys` contains the identifier's team key (`ENG`),
  *    query that workspace directly and return on hit.
  * 3. Otherwise fall back to iterating every active workspace until one
- *    returns a match. This handles legacy rows missing `team_keys` (the
- *    column was added in #96 and back-fills only on next `setup` /
- *    `add-workspace` re-run) and the rare case where a team was added in
- *    Linear after the workspace was registered.
+ *    returns a match. This handles rows written before `team_keys` existed
+ *    (it back-fills only on the next `setup` / `add-workspace` re-run) and
+ *    the rare case where a team was added in Linear after the workspace was
+ *    registered.
  *
- * @param identifier `ABCA-42`-style Linear issue identifier
+ * @param identifier `ENG-42`-style Linear issue identifier
  * @param registryTableName name of LinearWorkspaceRegistryTable
  * @returns issue location, or null if no workspace contains the issue
  */
@@ -123,7 +152,7 @@ export async function findLinearIssueByIdentifier(
     return null;
   }
 
-  // Identifier prefix is the part before the first dash (`ABCA-42` → `ABCA`).
+  // Identifier prefix is the part before the first dash (`ENG-42` → `ENG`).
   // Compare uppercase since Linear team keys are upper-case but inbound text
   // (PR titles, branch names) is mixed-case.
   const teamKey = identifier.split('-', 1)[0]?.toUpperCase();

@@ -163,19 +163,49 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return jsonResponse(401, { error: 'Stale webhook timestamp' });
     }
 
-    // Only Issue events flow through to task creation. Every other type is
-    // acknowledged silently so Linear stops retrying.
-    if (payload.type !== 'Issue') {
-      logger.info('Ignoring non-Issue Linear webhook', { type: payload.type, action: payload.action });
+    // Issue events drive task creation; Comment events drive the comment
+    // trigger (an @bgagent mention on a sub-issue re-iterates its PR).
+    // Every other type is acknowledged silently so Linear stops retrying.
+    if (payload.type !== 'Issue' && payload.type !== 'Comment') {
+      // Agent-session / app-notification events are the fingerprint of an
+      // OAuth app configured as a Linear *agent* (agent-activity events turned
+      // on). ABCA is a plain-comment integration — it never consumes these,
+      // AND when they're enabled Linear renders an @mention of the app as its
+      // interactive agent-activity surface instead of a normal comment thread,
+      // which breaks the maturing-reply/reaction UX. Surface this at WARN (not
+      // a silent INFO ignore) so an operator can see "this workspace's app is
+      // in agent mode" and advise disabling agent/app events (keep only Issue
+      // + Comment webhook events). See docs/guides for the correct config.
+      const AGENT_MODE_TYPES = ['AppUserNotification', 'AgentSession', 'AgentSessionEvent', 'AgentActivity'];
+      if (payload.type !== undefined && AGENT_MODE_TYPES.includes(payload.type)) {
+        logger.warn(
+          'Ignoring Linear agent-mode webhook — the OAuth app appears configured as a Linear agent '
+          + '(agent/app events enabled). ABCA uses plain comment threads; agent mode makes @mentions render '
+          + 'as interactive agent activity instead of comments. Disable agent/app events on the Linear app '
+          + '(keep only Issue + Comment webhook events).',
+          { type: payload.type, action: payload.action, linear_workspace_id: payload.organizationId },
+        );
+        return jsonResponse(200, { ok: true });
+      }
+      logger.info('Ignoring non-Issue/Comment Linear webhook', { type: payload.type, action: payload.action });
       return jsonResponse(200, { ok: true });
     }
 
-    const issueId = payload.data?.id;
+    // data.id is the issue id (Issue events) or the comment id (Comment events).
+    const dataId = payload.data?.id;
     const action = payload.action ?? 'unknown';
-    if (!issueId) {
-      logger.warn('Linear Issue webhook missing data.id', { action });
-      return jsonResponse(400, { error: 'Missing issue id' });
+    if (!dataId) {
+      logger.warn('Linear webhook missing data.id', { type: payload.type, action });
+      return jsonResponse(400, { error: 'Missing data id' });
     }
+    // Comment events: only forward creates (an edited/removed comment must not
+    // re-fire the agent). Issue events keep their existing create/update gate
+    // downstream in the processor.
+    if (payload.type === 'Comment' && action !== 'create') {
+      logger.info('Ignoring non-create Comment webhook', { action });
+      return jsonResponse(200, { ok: true });
+    }
+    const issueId = dataId;
 
     // Dedup via conditional PutItem.
     //

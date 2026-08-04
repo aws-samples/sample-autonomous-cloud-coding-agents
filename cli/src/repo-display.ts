@@ -35,9 +35,18 @@ export interface PlatformStackContext {
  */
 export const PLATFORM_REPO_DEFAULTS = {
   compute_type: 'agentcore',
-  /** Documented stack default; runtime may use the cross-region inference profile ID. */
-  model_id: 'us.anthropic.claude-sonnet-4-6',
-  max_turns: 100,
+  /**
+   * The model a repo gets when it pins none — the cross-region inference profile
+   * the runtime actually invokes (see the agent's ``ANTHROPIC_MODEL`` fallback and
+   * the Bedrock grant list it must appear in).
+   *
+   * Keep these three in step. This is not only what ``repo show`` prints:
+   * ``platform doctor`` derives the model it probes for ACCESS from this value, so
+   * if it names a different model than the runtime invokes, doctor can report a
+   * healthy stack while every task fails at turn 0 with AccessDenied.
+   */
+  model_id: 'us.anthropic.claude-opus-4-8',
+  max_turns: 200,
   poll_interval_ms: 30_000,
   approval_gate_cap: 50,
 } as const;

@@ -1,4 +1,4 @@
-"""The agent-side workflow step runner (#248).
+"""The agent-side workflow step runner.
 
 Per `ADR-014 <../../../docs/decisions/ADR-014-workflow-driven-tasks.md>`_ the
 runner lives *in the container* and interprets ``workflow.steps`` — it drives
@@ -388,8 +388,8 @@ def _handle_clone_repo(step: Step, ctx: StepContext) -> StepOutcome:
 
     reused = ctx.setup is not None
     if not reused:
-        # Thread progress so bounded-retry blocker events (#251, dependency_
-        # unreachable / egress_denied during clone/fetch backoff) reach the live
+        # Thread progress so bounded-retry blocker events (e.g. dependency
+        # unreachable / egress denied during clone/fetch backoff) reach the live
         # stream — matching the inline pipeline path. Terminal reason still
         # propagates via the raised exception even when progress is None.
         ctx.setup = setup_repo(ctx.config, progress=ctx.progress)
@@ -414,7 +414,7 @@ def _handle_hydrate_context(step: Step, ctx: StepContext) -> StepOutcome:
       the workflow path produces the same system prompt as ``pipeline.run_task``
       (repo_url/branch/workspace/max_turns/setup_notes/memory_context + overrides
       + channel guidance). Without this the agent loop would run with an empty
-      system prompt (code-review finding). Requires a prior ``clone_repo`` for
+      system prompt. Requires a prior ``clone_repo`` for
       the ``RepoSetup``; when absent (repo-less workflows) the system prompt is
       left to the caller, since ``build_system_prompt`` is repo-shaped today.
     """
@@ -493,11 +493,10 @@ def gate_status(
     """Map a verify result + the step's ``gate`` to a step status.
 
     Single place the verify-gate semantics live, shared by ``verify_build`` and
-    ``verify_lint`` (the two were near-identical twins that drifted on the
-    ``read_only`` rule — see the code-review finding). Since #301 it is also the
-    implementation behind the coding lane's inline post-hook gating
-    (``pipeline._apply_post_hook_gates``), so both lanes honor a step's
-    declared ``gate`` through this one function:
+    ``verify_lint`` (the two were near-identical twins that had drifted on the
+    ``read_only`` rule). It is also the implementation behind the coding lane's
+    inline post-hook gating (``pipeline._apply_post_hook_gates``), so both lanes
+    honor a step's declared ``gate`` through this one function:
 
     - ``informational`` (or a ``read_only`` workflow) — never gates.
     - ``strict`` — any failure gates.
@@ -519,11 +518,12 @@ def gate_status(
 
 
 def _handle_verify_build(step: Step, ctx: StepContext) -> StepOutcome:
-    """Run ``mise run build``. Gating vs informational is the step's ``gate``."""
+    """Run the repo's build command (default ``mise run build``); gating is the step's ``gate``."""
     from post_hooks import verify_build
 
     repo_dir = ctx.setup.repo_dir if ctx.setup else ""
-    passed = verify_build(repo_dir)
+    outcome = verify_build(repo_dir, ctx.config.build_command)
+    passed = outcome.passed
     # was_passing_before defaults True (assume green-before, so a post-agent
     # failure IS a regression) — the same conservative default pipeline.py uses.
     was_passing_before = ctx.setup.build_before if ctx.setup else True
@@ -533,21 +533,28 @@ def _handle_verify_build(step: Step, ctx: StepContext) -> StepOutcome:
         read_only=ctx.workflow.read_only,
         was_passing_before=was_passing_before,
     )
+    # Distinguish a timeout from a genuine red build in the step error too.
+    fail_reason = (
+        "post-agent build timed out"
+        if outcome.timed_out
+        else "post-agent build failed (regression)"
+    )
     return StepOutcome(
         kind=step.kind,
         name=_step_key(step),
         status=status,
-        error=None if status == "succeeded" else "post-agent build failed (regression)",
+        error=None if status == "succeeded" else fail_reason,
         data={"build_passed": passed},
     )
 
 
 def _handle_verify_lint(step: Step, ctx: StepContext) -> StepOutcome:
-    """Run ``mise run lint`` (typically an advisory ``on_failure: continue`` gate)."""
+    """Run the repo's lint command (default ``mise run lint``; usually an advisory gate)."""
     from post_hooks import verify_lint
 
     repo_dir = ctx.setup.repo_dir if ctx.setup else ""
-    passed = verify_lint(repo_dir)
+    outcome = verify_lint(repo_dir, ctx.config.lint_command)
+    passed = outcome.passed
     was_passing_before = ctx.setup.lint_before if ctx.setup else True
     status = gate_status(
         passed=passed,
@@ -555,11 +562,14 @@ def _handle_verify_lint(step: Step, ctx: StepContext) -> StepOutcome:
         read_only=ctx.workflow.read_only,
         was_passing_before=was_passing_before,
     )
+    fail_reason = (
+        "post-agent lint timed out" if outcome.timed_out else "post-agent lint failed (regression)"
+    )
     return StepOutcome(
         kind=step.kind,
         name=_step_key(step),
         status=status,
-        error=None if status == "succeeded" else "post-agent lint failed (regression)",
+        error=None if status == "succeeded" else fail_reason,
         data={"lint_passed": passed},
     )
 
@@ -568,10 +578,9 @@ def _handle_ensure_pr(step: Step, ctx: StepContext) -> StepOutcome:
     """Create / push+resolve / resolve a PR per the step's ``strategy``.
 
     The provider-neutral intent dispatches through the existing GitHub
-    realization. ``ensure_pr`` now takes the strategy explicitly (``create`` |
-    ``push_resolve`` | ``resolve``) instead of self-inspecting the removed
-    ``task_type`` (#248 task 8), so the workflow's declared strategy drives the
-    behavior.
+    realization. ``ensure_pr`` takes the strategy explicitly (``create`` |
+    ``push_resolve`` | ``resolve``) instead of inferring it from the now-removed
+    ``task_type``, so the workflow's declared strategy drives the behavior.
     """
     from post_hooks import ensure_pr
 
@@ -606,9 +615,9 @@ def _handle_post_review(step: Step, ctx: StepContext) -> StepOutcome:
 
     No first-party workflow declares a ``post_review`` step — ``coding/pr-review-v1``
     resolves its PR via ``ensure_pr(strategy: resolve)`` instead. The handler is
-    registered so the handler-coverage check (validator rule 8) stays honest and
-    fails loudly rather than silently no-opping; it is implemented when a workflow
-    that posts a GitHub Reviews-API review (vs an issue comment) ships.
+    registered so the validator's handler-coverage check stays honest and fails
+    loudly rather than silently no-opping; it is implemented when a workflow that
+    posts a GitHub Reviews-API review (vs an issue comment) ships.
     """
     raise NotImplementedError(
         "post_review has no shipped workflow yet — coding/pr-review-v1 uses "
@@ -617,7 +626,7 @@ def _handle_post_review(step: Step, ctx: StepContext) -> StepOutcome:
 
 
 def _handle_deliver_artifact(step: Step, ctx: StepContext) -> StepOutcome:
-    """Deliver a produced artifact (repo-less knowledge work, #248 Phase 3).
+    """Deliver a produced artifact (repo-less knowledge work).
 
     Routes through the named deliverer (``step.target`` → ``workflow.deliverers``):
     an ``s3``-producing target uploads the agent's result text to

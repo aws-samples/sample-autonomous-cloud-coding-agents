@@ -57,8 +57,11 @@ export interface TaskTableProps {
  * - UserStatusIndex (PK: user_id, SK: status_created_at) — "my tasks" queries
  * - StatusIndex (PK: status, SK: created_at) — queue processing, monitoring
  * - IdempotencyIndex (PK: idempotency_key) — sparse index for dedup
+ * - LinearIssueIndex (PK: linear_issue_id, SK: created_at) — sparse; resolve a
+ *   Linear issue back to its newest ABCA task + PR (the standalone
+ *   comment trigger)
  * - JiraIssueIndex (PK: jira_issue_identity, SK: created_at) — sparse index
- *   for resolving a Jira issue to its newest PR-producing task
+ *   for resolving a Jira issue to its newest PR-producing task (#640)
  */
 export class TaskTable extends Construct {
   /**
@@ -78,6 +81,16 @@ export class TaskTable extends Construct {
    * PK: idempotency_key. Sparse index — only items with the key are projected.
    */
   public static readonly IDEMPOTENCY_INDEX = 'IdempotencyIndex';
+
+  /**
+   * GSI name for resolving a Linear issue → its newest ABCA task + PR.
+   * PK: linear_issue_id, SK: created_at (newest task wins). Sparse —
+   * only Linear-origin tasks (which write the top-level ``linear_issue_id``
+   * attribute) are projected; GitHub/Slack/API tasks are absent. Powers the
+   * standalone ``@bgagent`` comment trigger on a plain (non-orchestration)
+   * issue, where no orchestration row records the issue→PR link.
+   */
+  public static readonly LINEAR_ISSUE_INDEX = 'LinearIssueIndex';
 
   /**
    * GSI for resolving a tenant-scoped Jira issue to its newest ABCA task.
@@ -104,6 +117,17 @@ export class TaskTable extends Construct {
       pointInTimeRecoverySpecification: {
         pointInTimeRecoveryEnabled: props.pointInTimeRecovery ?? true,
       },
+      // NEW_IMAGE stream feeds the orchestration reconciler
+      // (`OrchestrationReconciler`), which reacts to child tasks reaching
+      // terminal status to release dependency-unblocked children. This is
+      // the table's FIRST and only stream consumer — deliberately on
+      // TaskTable rather than TaskEventsTable, whose stream is already at
+      // its 2-consumer limit (FanOutConsumer + ApprovalMetricsPublisher;
+      // see TaskEventsTable). NEW_IMAGE suffices — the reconciler reads
+      // status/build_passed/orchestration_id off the new record image.
+      // Enabling a stream on an existing table is an in-place CFN update
+      // (no table replacement).
+      stream: dynamodb.StreamViewType.NEW_IMAGE,
       removalPolicy: props.removalPolicy ?? RemovalPolicy.DESTROY,
     });
 
@@ -130,9 +154,28 @@ export class TaskTable extends Construct {
       projectionType: dynamodb.ProjectionType.KEYS_ONLY,
     });
 
-    // Sparse: only Jira-origin tasks with issue metadata carry the top-level
-    // jira_issue_identity attribute. Keep the projection limited to fields the
-    // comment-trigger resolver needs.
+    // GSI: Linear issue → newest ABCA task + PR (sparse — only Linear-origin
+    // tasks carry the top-level linear_issue_id), for the standalone comment
+    // trigger. INCLUDE-projects just the fields the trigger reads, so
+    // the index stays lean (no full-item copy on every task write).
+    this.table.addGlobalSecondaryIndex({
+      indexName: TaskTable.LINEAR_ISSUE_INDEX,
+      partitionKey: { name: 'linear_issue_id', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'created_at', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.INCLUDE,
+      // NOTE: a GSI's projection CANNOT be changed in place — DynamoDB rejects it
+      // ("Cannot update GSI's properties other than Provisioned Throughput…";
+      // observed when deploying the iteration reply). So the iteration reply's
+      // running-total query does a per-task GetItem for cost_usd rather than
+      // widening this projection. Keep this list as-is unless you create a NEW
+      // index with a different name.
+      nonKeyAttributes: ['pr_url', 'pr_number', 'status', 'repo', 'user_id', 'channel_metadata'],
+    });
+
+    // GSI: Jira issue → newest PR-producing task (#640 comment-triggered PR
+    // iteration). Sparse: only Jira-origin tasks with issue metadata carry the
+    // top-level jira_issue_identity attribute. Same lean INCLUDE projection as
+    // the Linear index above — just the fields the comment-trigger resolver reads.
     this.table.addGlobalSecondaryIndex({
       indexName: TaskTable.JIRA_ISSUE_INDEX,
       partitionKey: { name: 'jira_issue_identity', type: dynamodb.AttributeType.STRING },
