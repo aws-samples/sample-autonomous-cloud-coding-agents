@@ -106,6 +106,10 @@ run = "yarn knip"
 description = "Dead-code ratchet (#282): fail only if knip's issue count rises above knip-baseline.json. Advisory in CI for now; flips to blocking once the baseline is driven to zero."
 run = "node scripts/check-deadcode-ratchet.mjs"
 
+[tasks."check:transitive-pin-sync"]
+description = "Transitive-pin sync guard (#712): fail if a package pinned in root `resolutions` resolves below that floor in integrations/jira-forge-app's npm lockfile — the standalone project root `resolutions` can't reach."
+run = "node scripts/check-transitive-pin-sync.mjs"
+
 [tasks."drift-prevention"]
 description = "Run checks to prevent drift in contracts between packages and documentation links"
 run = [
@@ -113,6 +117,7 @@ run = [
   { task = "check:constants-sync" },
   { task = "check:types-sync" },
   { task = "check:coverage-thresholds-sync" },
+  { task = "check:transitive-pin-sync" },
   { task = "//docs:link-check" },
 ]
 
