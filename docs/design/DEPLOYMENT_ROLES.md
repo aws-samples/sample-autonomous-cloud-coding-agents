@@ -115,6 +115,7 @@ CloudFormation stack operations, IAM roles/policies, VPC networking, and Route 5
       ],
       "Resource": [
         "arn:aws:cloudformation:*:*:stack/backgroundagent-dev/*",
+        "arn:aws:cloudformation:*:*:stack/backgroundagent-dev-*",
         "arn:aws:cloudformation:*:*:stack/CDKToolkit/*"
       ]
     },
@@ -170,6 +171,7 @@ CloudFormation stack operations, IAM roles/policies, VPC networking, and Route 5
             "bedrock.amazonaws.com",
             "bedrock-agentcore.amazonaws.com",
             "events.amazonaws.com",
+            "states.amazonaws.com",
             "vpc-flow-logs.amazonaws.com"
           ]
         }
@@ -391,6 +393,10 @@ DynamoDB tables, Lambda functions, API Gateway, Cognito, WAFv2, EventBridge, SQS
         "cognito-idp:DeleteUserPoolClient",
         "cognito-idp:DescribeUserPoolClient",
         "cognito-idp:UpdateUserPoolClient",
+        "cognito-idp:CreateGroup",
+        "cognito-idp:DeleteGroup",
+        "cognito-idp:GetGroup",
+        "cognito-idp:UpdateGroup",
         "cognito-idp:TagResource",
         "cognito-idp:UntagResource",
         "cognito-idp:ListTagsForResource",
@@ -448,6 +454,20 @@ DynamoDB tables, Lambda functions, API Gateway, Cognito, WAFv2, EventBridge, SQS
         "sqs:ListQueueTags"
       ],
       "Resource": "arn:aws:sqs:*:*:backgroundagent-dev-*"
+    },
+    {
+      "Sid": "StepFunctions",
+      "Effect": "Allow",
+      "Action": [
+        "states:CreateStateMachine",
+        "states:DeleteStateMachine",
+        "states:DescribeStateMachine",
+        "states:UpdateStateMachine",
+        "states:TagResource",
+        "states:UntagResource",
+        "states:ListTagsForResource"
+      ],
+      "Resource": "arn:aws:states:*:*:stateMachine:backgroundagent-dev-*"
     },
     {
       "Sid": "CloudFront",

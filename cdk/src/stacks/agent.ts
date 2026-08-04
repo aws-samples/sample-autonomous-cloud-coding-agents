@@ -50,6 +50,7 @@ import { LinearIntegration } from '../constructs/linear-integration';
 import { OrchestrationReconciler } from '../constructs/orchestration-reconciler';
 import { OrchestrationTable } from '../constructs/orchestration-table';
 import { PendingUploadCleanup } from '../constructs/pending-upload-cleanup';
+import { AgentRegistryStack } from '../constructs/registry';
 import { RepoTable } from '../constructs/repo-table';
 import { SlackIntegration } from '../constructs/slack-integration';
 import { StrandedOrchestrationReconciler } from '../constructs/stranded-orchestration-reconciler';
@@ -114,6 +115,20 @@ export class AgentStack extends Stack {
     const webhookTable = new WebhookTable(this, 'WebhookTable');
     const apiKeyTable = new ApiKeyTable(this, 'ApiKeyTable');
     const repoTable = new RepoTable(this, 'RepoTable');
+
+    // AgentCore-backed asset registry (#246). Provisioned via a custom resource
+    // because CreateRegistry is async and has no CDK L2 during preview.
+    // GA-throwaway — swap for the native construct at GA. Registry names allow
+    // only alphanumerics + underscores, so sanitize the stack name.
+    //
+    // Isolated in a NestedStack: the registry + its Provider framework add ~20
+    // resources; nesting keeps the root stack under CloudFormation's hard
+    // 500-resource limit. registryId/registryArn cross the boundary via CDK's
+    // automatic cross-stack export/import.
+    const agentRegistry = new AgentRegistryStack(this, 'AgentRegistryStack', {
+      registryName: `abca_${this.stackName.replace(/[^a-zA-Z0-9]/g, '_')}`,
+      description: 'ABCA agent asset registry (#246)',
+    });
 
     // Cedar-wasm Lambda layer (§15.2 task 10). Instantiated here so the
     // asset is in the synthed template; Chunk 5 handlers (Approve,
@@ -307,6 +322,7 @@ export class AgentStack extends Stack {
       traceArtifactsBucket: traceArtifactsBucket.bucket,
       attachmentsBucket: attachmentsBucket.bucket,
       userConcurrencyTable: userConcurrencyTable.table,
+      agentRegistryId: agentRegistry.registryId,
     });
 
     // --- AgentCore Runtime (IAM-authed orchestrator path) ---
@@ -608,6 +624,16 @@ export class AgentStack extends Stack {
     new CfnOutput(this, 'GitHubTokenSecretArn', {
       value: githubTokenSecret.secretArn,
       description: 'ARN of the Secrets Manager secret for the GitHub token',
+    });
+
+    new CfnOutput(this, 'AgentRegistryId', {
+      value: agentRegistry.registryId,
+      description: 'ID of the AgentCore-backed agent asset registry (#246)',
+    });
+
+    new CfnOutput(this, 'AgentRegistryArn', {
+      value: agentRegistry.registryArn,
+      description: 'ARN of the AgentCore-backed agent asset registry (#246)',
     });
 
     new CfnOutput(this, 'TraceArtifactsBucketName', {

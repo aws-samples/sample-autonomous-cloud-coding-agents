@@ -200,6 +200,13 @@ export interface TaskApiProps {
    * Required when attachmentsBucket is provided.
    */
   readonly userConcurrencyTable?: dynamodb.ITable;
+
+  /**
+   * AgentCore registry id backing the agent asset registry (#246). When set,
+   * the registry publish/resolve/list/show routes are wired and the handlers
+   * receive it via `AGENT_REGISTRY_ID`.
+   */
+  readonly agentRegistryId?: string;
 }
 
 /**
@@ -1296,6 +1303,94 @@ export class TaskApi extends Construct {
       allFunctions.push(createWebhookFn, listWebhooksFn, deleteWebhookFn, webhookAuthorizerFn, webhookCreateTaskFn);
     }
 
+    // --- Agent asset registry endpoints (#246, only when a registry is wired) ---
+    if (props.agentRegistryId) {
+      // Two Cognito groups gate writes (REGISTRY.md §10): publishers submit,
+      // approvers drive records to APPROVED. Resolve/list/show are open to any
+      // authenticated caller.
+      new cognito.CfnUserPoolGroup(this, 'RegistryPublisherGroup', {
+        userPoolId: this.userPool.userPoolId,
+        groupName: 'RegistryPublisher',
+        description: 'May publish agent asset registry records (#246).',
+      });
+      new cognito.CfnUserPoolGroup(this, 'RegistryApproverGroup', {
+        userPoolId: this.userPool.userPoolId,
+        groupName: 'RegistryApprover',
+        description: 'May approve/reject/deprecate registry records and auto-approve on publish (#246).',
+      });
+
+      const registryEnv = { ...commonEnv, AGENT_REGISTRY_ID: props.agentRegistryId };
+      // The AgentCore control-plane SDK is preview and NOT in the Lambda runtime,
+      // so bundle it (do not externalize) — mirrors the provisioning handler.
+      const registryBundling: lambda.BundlingOptions = {
+        externalModules: (commonBundling.externalModules ?? []).filter(
+          (m) => m !== '@aws-sdk/client-bedrock-agentcore-control',
+        ),
+      };
+      const registryFn = (fnId: string, entry: string): lambda.NodejsFunction =>
+        new lambda.NodejsFunction(this, fnId, {
+          entry: path.join(handlersDir, entry),
+          handler: 'handler',
+          runtime: Runtime.NODEJS_24_X,
+          architecture: Architecture.ARM_64,
+          environment: registryEnv,
+          bundling: registryBundling,
+          timeout: Duration.seconds(API_HANDLER_TIMEOUT_SECONDS),
+        });
+
+      const registryPublishFn = registryFn('RegistryPublishFn', 'registry-publish.ts');
+      const registryResolveFn = registryFn('RegistryResolveFn', 'registry-resolve.ts');
+      const registryListFn = registryFn('RegistryListFn', 'registry-list.ts');
+      const registryShowFn = registryFn('RegistryShowFn', 'registry-show.ts');
+      const registryFns = [registryPublishFn, registryResolveFn, registryListFn, registryShowFn];
+
+      // Control-plane + data-plane actions, scoped to this account's registries.
+      const registryArn = Stack.of(this).formatArn({
+        service: 'bedrock-agentcore',
+        resource: 'registry',
+        resourceName: '*',
+        arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
+      });
+      const recordArn = Stack.of(this).formatArn({
+        service: 'bedrock-agentcore',
+        resource: 'registry',
+        resourceName: '*/record/*',
+        arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
+      });
+      const readActions = [
+        'bedrock-agentcore:GetRegistryRecord',
+        'bedrock-agentcore:ListRegistryRecords',
+      ];
+      const writeActions = [
+        'bedrock-agentcore:CreateRegistryRecord',
+        'bedrock-agentcore:SubmitRegistryRecordForApproval',
+        'bedrock-agentcore:UpdateRegistryRecordStatus',
+      ];
+      registryPublishFn.addToRolePolicy(
+        new iam.PolicyStatement({ actions: [...readActions, ...writeActions], resources: [registryArn, recordArn] }),
+      );
+      for (const fn of [registryResolveFn, registryListFn, registryShowFn]) {
+        fn.addToRolePolicy(new iam.PolicyStatement({ actions: readActions, resources: [registryArn, recordArn] }));
+      }
+
+      // --- Routes: /registry ---
+      const registry = this.api.root.addResource('registry');
+      const records = registry.addResource('records');
+      records.addMethod('POST', new apigw.LambdaIntegration(registryPublishFn), cognitoAuthOptions);
+      records.addMethod('GET', new apigw.LambdaIntegration(registryListFn), cognitoAuthOptions);
+
+      const resolve = registry.addResource('resolve');
+      resolve.addMethod('GET', new apigw.LambdaIntegration(registryResolveFn), cognitoAuthOptions);
+
+      // show: /registry/records/{kind}/{namespace}/{name}
+      const byKind = records.addResource('{kind}');
+      const byNamespace = byKind.addResource('{namespace}');
+      const byName = byNamespace.addResource('{name}');
+      byName.addMethod('GET', new apigw.LambdaIntegration(registryShowFn), cognitoAuthOptions);
+
+      allFunctions.push(...registryFns);
+    }
+
     // --- cdk-nag suppressions for CDK-generated IAM policies ---
     for (const fn of allFunctions) {
       NagSuppressions.addResourceSuppressions(fn, [
@@ -1305,7 +1400,7 @@ export class TaskApi extends Construct {
         },
         {
           id: 'AwsSolutions-IAM5',
-          reason: 'DynamoDB index/* wildcards generated by CDK grantReadWriteData/grantReadData for GSI access',
+          reason: 'DynamoDB index/* wildcards generated by CDK grantReadWriteData/grantReadData for GSI access; bedrock-agentcore registry/* + registry/*/record/* wildcards because record ids are server-assigned and unknown at synth (#246)',
         },
       ], true);
     }

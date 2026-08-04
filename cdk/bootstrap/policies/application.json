@@ -111,6 +111,10 @@
         "cognito-idp:DeleteUserPoolClient",
         "cognito-idp:DescribeUserPoolClient",
         "cognito-idp:UpdateUserPoolClient",
+        "cognito-idp:CreateGroup",
+        "cognito-idp:DeleteGroup",
+        "cognito-idp:GetGroup",
+        "cognito-idp:UpdateGroup",
         "cognito-idp:TagResource",
         "cognito-idp:UntagResource",
         "cognito-idp:ListTagsForResource",
@@ -170,6 +174,20 @@
       "Effect": "Allow",
       "Resource": "arn:aws:sqs:*:*:backgroundagent-dev-*",
       "Sid": "SQS"
+    },
+    {
+      "Action": [
+        "states:CreateStateMachine",
+        "states:DeleteStateMachine",
+        "states:DescribeStateMachine",
+        "states:UpdateStateMachine",
+        "states:TagResource",
+        "states:UntagResource",
+        "states:ListTagsForResource"
+      ],
+      "Effect": "Allow",
+      "Resource": "arn:aws:states:*:*:stateMachine:backgroundagent-dev-*",
+      "Sid": "StepFunctions"
     },
     {
       "Action": [

@@ -17,24 +17,21 @@
  *  SOFTWARE.
  */
 
-import { createHash } from 'node:crypto';
+// Single place handlers obtain a `RegistryClient`. Keeping the concrete adapter
+// choice here (not in each handler) means the substrate swap touches one file.
 
-import { allPolicies } from './policies';
+import { AgentCoreRegistryClient } from './agentcore-client';
+import type { RegistryClient } from './client';
 
-/** Semantic version of the bootstrap policy bundle. */
-export const BOOTSTRAP_VERSION = '1.3.0';
+/** Cognito group names that gate publish / approval (#246, REGISTRY.md §10). */
+export const REGISTRY_PUBLISHER_GROUP = 'RegistryPublisher';
+export const REGISTRY_APPROVER_GROUP = 'RegistryApprover';
 
-/**
- * Computes a SHA-256 hash over all bootstrap policies.
- * The hash is deterministic: policies are serialized with sorted keys
- * so that object property ordering does not affect the digest.
- */
-export function computeBootstrapHash(): string {
-  const policies = allPolicies();
-  const normalized = policies.map((p) => {
-    const json = p.toJSON();
-    return JSON.stringify(json, Object.keys(json).sort());
-  });
-  const payload = JSON.stringify(normalized);
-  return createHash('sha256').update(payload).digest('hex');
+/** Build the registry client from the handler's environment. */
+export function makeRegistryClient(): RegistryClient {
+  const registryId = process.env.AGENT_REGISTRY_ID;
+  if (!registryId) {
+    throw new Error('AGENT_REGISTRY_ID env var is not set');
+  }
+  return new AgentCoreRegistryClient({ registryId });
 }
