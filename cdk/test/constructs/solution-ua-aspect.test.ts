@@ -67,6 +67,13 @@ describe('buildAppId', () => {
     expect(appId).toContain('#');
   });
 
+  it('does not emit a trailing # when the 50-char clip lands on a separator', () => {
+    const first = 'a'.repeat(49);
+    const out = buildAppId('stack', `${first}#tail`); // clip at 50 lands right after '#'
+    expect(out!.endsWith('#')).toBe(false);
+    expect(out!.length).toBeLessThanOrEqual(50);
+  });
+
   test('empty-string override opts out (undefined)', () => {
     expect(buildAppId('stack', '')).toBeUndefined();
     expect(buildAppId('stack', '   ')).toBeUndefined();

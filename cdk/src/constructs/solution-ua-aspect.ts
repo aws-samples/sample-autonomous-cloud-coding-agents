@@ -49,6 +49,17 @@ function sanitizeAppId(value: string): string {
 }
 
 /**
+ * Clip an app-id value to the documented cap, then drop a `#` left dangling at
+ * the tail by the clip. Internal `#` separators are untouched — only a trailing
+ * one (produced when the 50-char boundary lands right after a separator) is
+ * stripped, so the SDK never renders a cosmetic `app/…#`.
+ */
+function clipAppId(value: string): string {
+  const clipped = value.slice(0, APP_ID_MAX_LEN);
+  return clipped.endsWith('#') ? clipped.slice(0, -1) : clipped;
+}
+
+/**
  * Build the `AWS_SDK_UA_APP_ID` value for a deployment.
  *
  * `uksb-wt64nei4u6#{stackName}` — the SDK reads this env var natively and
@@ -64,10 +75,10 @@ function sanitizeAppId(value: string): string {
 export function buildAppId(stackName: string, override?: string): string | undefined {
   if (override !== undefined) {
     const trimmed = override.trim();
-    return trimmed === '' ? undefined : sanitizeAppId(trimmed).slice(0, APP_ID_MAX_LEN);
+    return trimmed === '' ? undefined : clipAppId(sanitizeAppId(trimmed));
   }
   const value = `${SOLUTION_ID}#${stackName.replace(UA_TOKEN_UNSAFE, '-')}`;
-  return value.slice(0, APP_ID_MAX_LEN);
+  return clipAppId(value);
 }
 
 /**
