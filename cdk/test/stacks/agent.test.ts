@@ -769,23 +769,38 @@ describe('AgentStack solution attribution (#319): AWS_SDK_UA_APP_ID via stack-le
     template = Template.fromStack(stack);
   });
 
+  // CDK synthesizes its own framework-owned Lambdas that are NOT part of the
+  // ABCA solution surface: the S3 auto-delete and VPC default-SG-restriction
+  // custom-resource provider handlers (CfnResource-backed, so the aspect's
+  // `instanceof lambda.Function` guard cannot visit them), plus the
+  // `AWS679f53fac002430cb0da5b7982bd2287…` `cr.AwsCustomResource` singleton
+  // (which CDK happens to give the env var today, but whose attribution we do
+  // not want to depend on across CDK upgrades). Every framework-owned id is
+  // enumerated explicitly so the coverage assertion below cannot silently
+  // stop covering an ABCA Lambda by relabelling it as "framework".
+  const FRAMEWORK_LAMBDA_ID =
+    /^(CustomResourceProviderHandler|CustomS3AutoDeleteObjects|CustomVpcRestrictDefaultSG|AWS679f53fac002430cb0da5b7982bd2287)/;
+
   test('every solution Lambda carries AWS_SDK_UA_APP_ID (traverses nested scope)', () => {
     const functions = template.findResources('AWS::Lambda::Function');
-    // CDK synthesizes its own custom-resource provider Lambdas (S3
-    // auto-delete, VPC default-SG restriction). Those are framework-owned
-    // CfnResource-backed handlers, not `lambda.Function` constructs, so the
-    // aspect's `instanceof lambda.Function` guard does not visit them. They
-    // fire only at deploy time and are not part of the runtime solution
-    // traffic; every ABCA-authored Lambda IS covered.
-    const solutionFnIds = Object.keys(functions).filter(
-      (id) => !/CustomResourceProviderHandler/.test(id),
+    const abcaLambdas = Object.entries(functions).filter(
+      ([id]) => !FRAMEWORK_LAMBDA_ID.test(id),
     );
-    // Sanity: this stack has many solution Lambdas across nested constructs.
-    expect(solutionFnIds.length).toBeGreaterThan(10);
-    for (const fnId of solutionFnIds) {
-      const envVars = functions[fnId].Properties.Environment?.Variables ?? {};
-      expect(envVars.AWS_SDK_UA_APP_ID).toBe('uksb-wt64nei4u6#UaAgentStack');
-    }
+    // exact count — update when adding/removing a Lambda construct (#319).
+    // A loose `toBeGreaterThan` let a whole integration construct disappear
+    // unnoticed; the exact count fails if a Lambda is dropped OR if a new one
+    // is added without being attributed below.
+    expect(abcaLambdas.length).toBe(45);
+    // Every ABCA-authored Lambda must carry the canonical `#` app-id. Collect
+    // any offenders so a failure names the exact logical id(s) that are naked.
+    const unattributed = abcaLambdas
+      .filter(
+        ([, fn]) =>
+          fn.Properties?.Environment?.Variables?.AWS_SDK_UA_APP_ID !==
+          'uksb-wt64nei4u6#UaAgentStack',
+      )
+      .map(([id]) => id);
+    expect(unattributed).toEqual([]);
   });
 
   test('nested integration Lambdas (Jira/Slack/Linear) inherit the app-id', () => {
