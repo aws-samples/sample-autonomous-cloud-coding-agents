@@ -4,7 +4,7 @@ The old implementation blanket-substituted ``[redacted]`` on every value
 under ``_METRICS_REDACT_KEYS`` (just ``error``). That swallowed
 legitimate structural-error strings like ``missing built-in hard-deny
 policies: /app/policies/hard_deny.cedar`` whose diagnostic value is
-high and secret-risk is zero — see E2E 2026-05-11 T2.2.
+high and secret-risk is zero (observed during end-to-end testing).
 
 The new implementation routes ``error`` values through
 ``output_scanner.scan_tool_output`` and only substitutes

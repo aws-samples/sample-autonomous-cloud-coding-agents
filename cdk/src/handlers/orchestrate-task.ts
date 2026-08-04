@@ -70,10 +70,10 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
     return loadTask(taskId);
   });
 
-  // Correlation envelope (#245): stamp {task_id, user_id, repo} on every
-  // lifecycle log line so admission→terminal transitions join to TaskEvents
-  // and the agent trace without hand-adding fields per call. `repo` is
-  // undefined for repo-less workflows (#248 Phase 3).
+  // Correlation envelope: stamp {task_id, user_id, repo} on every lifecycle log
+  // line so admission→terminal transitions join to TaskEvents and the agent
+  // trace without hand-adding fields per call. `repo` is undefined for repo-less
+  // workflows (those with no target repository).
   const { log, correlation } = envelopeFor(task);
 
   // Step 1b: Load blueprint config (per-repo overrides)
@@ -188,13 +188,16 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
         userId: task.user_id,
         payload,
         blueprintConfig,
+        // A read-only workflow (e.g. planning that only clones and reads the
+        // repo) runs on the smaller ECS planning task def. Ignored by AgentCore.
+        readOnly: workflowIsReadOnly(task.resolved_workflow?.id ?? 'coding/new-task-v1'),
       };
       // Transient-error AUTO-RETRY (once), extracted to startSessionWithRetry so
-      // the four branches are unit-tested (#599 B2). The retry-event emit is
-      // best-effort and guarded there (#599 B1): a TaskEvents PutItem fault can't
-      // abort or mis-attribute the retry. The correlation envelope is threaded so
-      // the session_start_retry event carries the same trace context as
-      // session_started below (#245).
+      // its branches are unit-tested. The retry-event emit is best-effort and
+      // guarded there: a TaskEvents PutItem fault can't abort or mis-attribute
+      // the retry. The correlation envelope is threaded so the
+      // session_start_retry event carries the same trace context as
+      // session_started below.
       const { handle, autoRetried: retried } = await startSessionWithRetry(
         strategy,
         startInput,
@@ -232,16 +235,14 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
       return handle;
     } catch (err) {
       // Carry the auto-retry fact into error_message: the `[auto-retried]` suffix
-      // is persisted verbatim (the classifier ignores it — it does not affect
-      // classification). It is a breadcrumb for a FORTHCOMING failure renderer to
-      // detect and surface "I already tried again" to the channel — no consumer
-      // renders it yet on this branch (retryGuidance() in error-classifier.ts is
-      // the intended copy source; it ships ahead of its consumer).
+      // is persisted verbatim (the error classifier ignores it — it does not
+      // affect classification). It is a breadcrumb for a failure renderer to
+      // detect and surface "I already tried again" to the channel.
       //
-      // Stamp on BOTH paths a retry ran (#599 N1): branch 3 sets `autoRetried`
-      // above then a LATER step throws; branch 4 (transient-then-transient) throws
-      // FROM startSessionWithRetry before `autoRetried` is assigned, so the local
-      // is still false — read the fact off the thrown error via isAutoRetried().
+      // Stamp on BOTH paths where a retry ran: one path sets `autoRetried` above
+      // then a LATER step throws; the transient-then-transient path throws FROM
+      // startSessionWithRetry before `autoRetried` is assigned, so the local is
+      // still false — read the fact off the thrown error via isAutoRetried().
       // Without this, a double-transient failure was told "reply to retry" instead
       // of "I already retried" — the exact confusion the marker exists to prevent.
       const retriedNote = (autoRetried || isAutoRetried(err)) ? ' [auto-retried]' : '';
@@ -349,11 +350,11 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
   // Step 6: Finalize — update terminal status, emit events, release concurrency
   await context.step('finalize', async () => {
     await finalizeTask(taskId, finalPollState, task.user_id);
-    // #502: the task is terminal — the container has long since read its
-    // payload, so delete the ephemeral S3 payload object now. Best-effort
-    // (deleteEcsPayload swallows errors) and a no-op for AgentCore tasks /
-    // deployments without a payload bucket; the bucket's 1-day lifecycle rule
-    // is the backstop if this delete or the whole step never runs.
+    // The task is terminal — the container has long since read its payload, so
+    // delete the ephemeral S3 payload object now. Best-effort (deleteEcsPayload
+    // swallows errors) and a no-op for AgentCore tasks / deployments without a
+    // payload bucket; the bucket's 1-day lifecycle rule is the backstop if this
+    // delete or the whole step never runs.
     if (blueprintConfig.compute_type === 'ecs') {
       await deleteEcsPayload(taskId);
     }

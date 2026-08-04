@@ -157,7 +157,7 @@ describe('classifyError', () => {
       expect(result!.retryable).toBe(true);
     });
 
-    test('classifies claude Exec-format / broken-shim as a transient image issue (ABCA-659, not "Unexpected error")', () => {
+    test('classifies claude Exec-format / broken-shim as a transient image issue, not "Unexpected error"', () => {
       // The raw run_agent failure the broken agent image produced.
       const result = classifyError(
         "Workflow run_agent step failed: OSError: [Errno 8] Exec format error: 'claude'",
@@ -244,6 +244,54 @@ describe('classifyError', () => {
       expect(result!.retryable).toBe(false);
     });
 
+    test('build_ok=infra is a retryable COMPUTE fault, not "did not succeed"/build-failed', () => {
+      // A build killed by ENOSPC/OOM never verified the code — must read as a
+      // transient infra fault (retry / more capacity), NOT the generic
+      // agent-did-not-succeed or a bogus build failure. Ordered before the
+      // agent_status catch-all so it wins.
+      const result = classifyError(
+        "Task did not succeed (agent_status='success', build_ok=infra)",
+      );
+      expect(result!.category).toBe(ErrorCategory.COMPUTE);
+      expect(result!.title).toMatch(/ran out of resources/i);
+      expect(result!.retryable).toBe(true);
+      expect(result!.errorClass).toBe(ErrorClass.TRANSIENT);
+      expect(result!.remedy).toMatch(/try again|capacity|admin/i);
+    });
+
+    test('deliverable=lost is a retryable AGENT fault (work not saved), not the generic did-not-succeed', () => {
+      // A new-work task reported agent-success but no commit reached the branch
+      // and no PR opened — the agent's changes were LOST (nested-clone workspace
+      // fault). Must read as retryable/transient with "not saved" copy, NOT the
+      // non-retryable "Agent task did not succeed". Ordered before the
+      // agent_status catch-all so it wins.
+      const result = classifyError(
+        'Task did not succeed (agent_status=success, deliverable=lost): the coding '
+        + 'task reported success but no commit reached the branch and no PR was opened '
+        + "— the agent's changes did not land in the task's repository.",
+      );
+      expect(result!.category).toBe(ErrorCategory.AGENT);
+      expect(result!.title).toMatch(/not saved/i);
+      expect(result!.retryable).toBe(true);
+      expect(result!.errorClass).toBe(ErrorClass.TRANSIENT);
+      expect(result!.remedy).toMatch(/try again/i);
+    });
+
+    test('deliverable=no_pr says the work is SAFE on the branch (the pull request just did not open)', () => {
+      // A commit DID land but the PR never opened — recoverable, and the copy
+      // must reassure the change is not gone. Distinct from deliverable=lost.
+      const result = classifyError(
+        'Task did not succeed (agent_status=success, deliverable=no_pr): a commit '
+        + 'reached the branch but no PR was opened — the change is on the branch but '
+        + 'was not delivered.',
+      );
+      expect(result!.category).toBe(ErrorCategory.AGENT);
+      expect(result!.title).toMatch(/pull request did not open/i);
+      expect(result!.retryable).toBe(true);
+      expect(result!.errorClass).toBe(ErrorClass.TRANSIENT);
+      expect(result!.description).toMatch(/safe on the branch/i);
+    });
+
     test('classifies error_max_turns as TIMEOUT with specific title (ordered before generic catch-all)', () => {
       // Regression guard: pre-fix, the agent's specific
       // ``agent_status='error_max_turns'`` signal was swallowed by the
@@ -258,14 +306,15 @@ describe('classifyError', () => {
       expect(result!.remedy).toMatch(/--max-turns/);
     });
 
-    test('ABCA-662: max_turns with an observed repeated failure stays "Exceeded max turns" and makes NO causal claim', () => {
+    test('max_turns with an observed repeated failure stays "Exceeded max turns" and makes NO causal claim', () => {
       // When the agent capped out with the last several calls being the same
       // repeated failure, the pipeline appends a NEUTRAL observation ("last tool
       // calls repeated: …"). The classification must NOT re-title the failure as
       // "retrying a failing step" or assert more turns wouldn't help — the window
       // (last few calls) can't tell a hard blocker from a long task that hit a
-      // recoverable snag late (662: siblings pushed fine → transient). It stays the
-      // plain max_turns bucket; the observed detail rides along in the message.
+      // recoverable snag late (observed: sibling tasks pushed fine, so the same
+      // repeated push failure was transient after all). It stays the plain
+      // max_turns bucket; the observed detail rides along in the message.
       const result = classifyError(
         "Agent session error (subtype='error_max_turns') — last tool calls repeated: "
         + '`git push --force-with-lease` — remote: invalid credentials fatal: exit 128',
@@ -299,12 +348,13 @@ describe('classifyError', () => {
       expect(result!.retryable).toBe(true);
     });
 
-    test('classifies the runner.py "Agent session error (subtype=...)" wrapper, not just agent_status= (K5, live-caught ABCA-483)', () => {
+    test('classifies the runner.py "Agent session error (subtype=...)" wrapper, not just agent_status=', () => {
       // runner.py:515 emits ``Agent session error (subtype='error_max_turns')``
-      // — a DIFFERENT wrapper from pipeline.py's ``agent_status=``. Pre-K5 this
-      // fell through to UNKNOWN → "Unexpected error" even though the task hit the
-      // 100-turn cap (live: a 1-line README task burned 101 turns, reply said
-      // "Unexpected error"). The pattern must match the subtype= wrapper too.
+      // — a DIFFERENT wrapper from pipeline.py's ``agent_status=``. Matching only
+      // the ``agent_status=`` form let this fall through to UNKNOWN → "Unexpected
+      // error" even though the task hit the 100-turn cap (observed: a 1-line
+      // README task burned 101 turns and the reply said "Unexpected error").
+      // The pattern must match the subtype= wrapper too.
       const turns = classifyError("Agent session error (subtype='error_max_turns')");
       expect(turns!.title).toBe('Exceeded max turns');
       expect(turns!.category).toBe(ErrorCategory.TIMEOUT);
@@ -408,8 +458,8 @@ describe('classifyError', () => {
       expect(result!.retryable).toBe(false);
     });
 
-    test('classifies a build/verify command TIMEOUT distinctly from a crash (ABCA-667 live-caught)', () => {
-      // The fork's full `mise run build` exceeded the 600s cap → Python
+    test('classifies a build/verify command TIMEOUT distinctly from a crash', () => {
+      // A repo's full `mise run build` exceeded the 600s cap → Python
       // TimeoutExpired. Before this pattern it fell to "Unexpected error"; now it
       // reads as a build-time-out (user-actionable: retry / raise the cap), not a
       // mysterious crash.
@@ -420,12 +470,13 @@ describe('classifyError', () => {
       expect(result!.title).toMatch(/didn't finish in time|timed out/i);
       // A timeout is user-actionable (retry / raise the cap), not a hard failure.
       expect(result!.retryable).toBe(true);
+      expect(result!.errorClass).toBe(ErrorClass.USER);
       // Must NOT fall through to the generic Unexpected error.
       expect(result!.title).not.toMatch(/Unexpected error/i);
     });
   });
 
-  // --- Environmental blockers (#251) ---
+  // --- Environmental blockers ---
 
   describe('blocker errors (canonical BLOCKED[<kind>] prefix)', () => {
     test('classifies missing_secret and extracts the secret name', () => {
@@ -471,7 +522,7 @@ describe('classifyError', () => {
       expect(result!.remedy).toContain('scopes');
     });
 
-    test('auth_failure with a Secrets Manager ARN gives IAM remedy, not PAT scopes (#251 review)', () => {
+    test('auth_failure with a Secrets Manager ARN gives IAM remedy, not PAT scopes', () => {
       const arn = 'arn:aws:secretsmanager:us-east-1:123456789012:secret:gh-token-abc';
       const result = classifyError(`BLOCKED[auth_failure]: the required GitHub token secret could not be read (resource: ${arn})`);
       expect(result!.category).toBe(ErrorCategory.BLOCKED);
@@ -616,10 +667,10 @@ describe('classifyError', () => {
       expect(g).toMatch(/edit the request/i);
     });
 
-    // #599 N3: pin the two USER fall-through branches so the #247 failure-renderer
-    // contract can't rot silently. Built as explicit classifications (the exact
-    // category/errorClass/retryable each branch keys on) rather than relying on a
-    // sample string that might reclassify later.
+    // Pin the two USER fall-through branches so the orchestration
+    // failure-renderer contract can't rot silently. Built as explicit
+    // classifications (the exact category/errorClass/retryable each branch keys
+    // on) rather than relying on a sample string that might reclassify later.
     test('retryGuidance: retryable USER (non-guardrail) → "reply here with any extra guidance"', () => {
       const cls: ErrorClassification = {
         category: ErrorCategory.AGENT,
@@ -757,7 +808,7 @@ describe('classifyError', () => {
       expect(detail.turns_completed).toBeNull();
     });
 
-    // Compile-time regression for Finding #10 — ``ChannelSource`` is a
+    // Compile-time regression guard — ``ChannelSource`` is a
     // literal union, not ``string``. The ``satisfies`` assertions below
     // exercise the valid members; the ``@ts-expect-error`` comments pin
     // the narrowing — if someone widens ``ChannelSource`` to ``string``

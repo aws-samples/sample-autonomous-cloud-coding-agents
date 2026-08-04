@@ -323,6 +323,15 @@ export class TaskApi extends Construct {
           // attachments up to 3 MB, presigned upload metadata). Excludes
           // SizeRestrictions_BODY only; all other CRS rules apply. Payload
           // size is bounded by API GW (10 MB) and validateAttachments().
+          //
+          // NOTE (known limitation, tracked as backlog): CrossSiteScripting_BODY here BLOCKS a
+          // Linear/Jira webhook whose issue body contains HTML markup
+          // (``<head>``, ``<meta>``, ``<div>``) at the WAF edge with a 403
+          // before the Lambda runs — the task silently never starts and the
+          // sender gets an opaque 403. XSS protection is intentionally kept ON
+          // for now (a real defense-in-depth layer); the false-positive is
+          // tracked as a backlog item to fix deliberately (e.g. a considered
+          // per-route exclusion + operator alarm) rather than weaken WAF here.
           name: 'AWSManagedRulesCommonRuleSet-TaskPaths',
           priority: 1,
           overrideAction: { none: {} },
@@ -634,7 +643,7 @@ export class TaskApi extends Construct {
       bundling: commonBundling,
     });
 
-    // Operator replay bundle (#515): aggregates TaskRecord + chronological
+    // Operator replay bundle: aggregates TaskRecord + chronological
     // TaskEvents. Reads both tables; commonEnv already carries both table names.
     // Heaviest read path — GetItem + a multi-page Query loop (up to
     // MAX_REPLAY_EVENTS / ~5 pages) + full-bundle serialization — so it gets the
@@ -790,7 +799,7 @@ export class TaskApi extends Construct {
     const events = taskById.addResource('events');
     events.addMethod('GET', new apigw.LambdaIntegration(getTaskEventsFn), cognitoAuthOptions);
 
-    // Operator replay bundle (#515): GET /tasks/{task_id}/replay. Same Cognito
+    // Operator replay bundle: GET /tasks/{task_id}/replay. Same Cognito
     // owner-scoped auth as GET /tasks/{task_id} (cognitoAuthOptions).
     const replay = taskById.addResource('replay');
     replay.addMethod('GET', new apigw.LambdaIntegration(getTaskReplayFn), cognitoAuthOptions);
@@ -1043,8 +1052,8 @@ export class TaskApi extends Construct {
     //
     // Default: webhook management routes stay Cognito-only. When an API key
     // table is wired, a unified REQUEST authorizer replaces Cognito on those
-    // routes so they accept EITHER a Cognito JWT OR a `webhooks:manage` API key
-    // (issue #376). Key *creation* stays Cognito-gated.
+    // routes so they accept EITHER a Cognito JWT OR a `webhooks:manage` API
+    // key. Key *creation* stays Cognito-gated.
     let webhookMgmtAuthOptions: apigw.MethodOptions = cognitoAuthOptions;
 
     if (props.apiKeyTable) {
@@ -1277,12 +1286,12 @@ export class TaskApi extends Construct {
 
       // When the unified authorizer is in use these methods are CUSTOM, not
       // Cognito — suppress COG4 (the authorizer still enforces a Cognito JWT
-      // or a scoped API key; issue #376).
+      // or a scoped API key).
       if (props.apiKeyTable) {
         NagSuppressions.addResourceSuppressions([createWebhookMethod, listWebhooksMethod, deleteWebhookMethod], [
           {
             id: 'AwsSolutions-COG4',
-            reason: 'Webhook management uses a unified REQUEST authorizer accepting a Cognito JWT or a scoped platform API key — by design for headless automation (issue #376)',
+            reason: 'Webhook management uses a unified REQUEST authorizer accepting a Cognito JWT or a scoped platform API key — by design for headless automation',
           },
         ]);
       }

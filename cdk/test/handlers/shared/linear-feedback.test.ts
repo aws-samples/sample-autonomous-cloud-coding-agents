@@ -28,9 +28,21 @@ const fetchMock = jest.fn();
 
 import {
   addIssueReaction,
+  appendOnceToComment,
   type LinearFeedbackContext,
+  deleteComment,
+  fetchRecentComments,
   postIssueComment,
+  reactToComment,
+  replyToComment,
   reportIssueFailure,
+  revertIssueToNotStarted,
+  sweepTransientNotes,
+  swapCommentReaction,
+  swapIssueReaction,
+  transitionIssueState,
+  upsertStatusComment,
+  upsertThreadedReply,
 } from '../../../src/handlers/shared/linear-feedback';
 
 const CTX: LinearFeedbackContext = {
@@ -71,7 +83,7 @@ describe('linear-feedback', () => {
       expect(url).toBe('https://api.linear.app/graphql');
       expect(init.method).toBe('POST');
       expect(init.headers).toMatchObject({
-        // OAuth tokens use Bearer prefix per Phase 2.0b-O2.
+        // OAuth access tokens are sent with the Bearer prefix.
         'Authorization': `Bearer ${TOKEN}`,
         'Content-Type': 'application/json',
       });
@@ -158,6 +170,91 @@ describe('linear-feedback', () => {
     });
   });
 
+  describe('reactToComment — instant "on it" acknowledgement on the comment itself', () => {
+    test('reacts on the COMMENT (commentId), defaulting to 👀 (eyes)', async () => {
+      fetchMock.mockResolvedValue(jsonResponse({ data: { reactionCreate: { success: true } } }));
+
+      const ok = await reactToComment(CTX, 'comment-77');
+
+      expect(ok).toBe(true);
+      const init = fetchMock.mock.calls[0][1];
+      const body = JSON.parse(init.body as string) as { query: string; variables: { commentId: string; emoji: string } };
+      expect(body.query).toContain('reactionCreate');
+      // The variable is commentId — NOT issueId (reacts on the comment, not the issue).
+      expect(body.variables.commentId).toBe('comment-77');
+      expect(body.variables.emoji).toBe('eyes');
+    });
+
+    test('honours an explicit emoji argument', async () => {
+      fetchMock.mockResolvedValue(jsonResponse({ data: { reactionCreate: { success: true } } }));
+      await reactToComment(CTX, 'comment-77', 'white_check_mark');
+      const init = fetchMock.mock.calls[0][1];
+      const body = JSON.parse(init.body as string) as { variables: { emoji: string } };
+      expect(body.variables.emoji).toBe('white_check_mark');
+    });
+
+    test('returns false when the token cannot be resolved (no fetch)', async () => {
+      resolveLinearOauthTokenMock.mockResolvedValueOnce(null);
+      const ok = await reactToComment(CTX, 'comment-77');
+      expect(ok).toBe(false);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    test('returns false on network failure (swallowed)', async () => {
+      fetchMock.mockRejectedValueOnce(new Error('ECONNRESET'));
+      const ok = await reactToComment(CTX, 'comment-77');
+      expect(ok).toBe(false);
+    });
+  });
+
+  describe('replyToComment — threaded reply that notifies the commenter', () => {
+    test('POSTs commentCreate with BOTH issueId and parentId, returns the new reply id', async () => {
+      fetchMock.mockResolvedValue(jsonResponse({ data: { commentCreate: { success: true, comment: { id: 'reply-99' } } } }));
+
+      const replyId = await replyToComment(CTX, ISSUE_ID, 'comment-77', '✅ Updated — PR #178');
+
+      expect(replyId).toBe('reply-99');
+      const init = fetchMock.mock.calls[0][1];
+      const body = JSON.parse(init.body as string) as { query: string; variables: { issueId: string; parentId: string; body: string } };
+      expect(body.query).toContain('commentCreate');
+      // CONTRACT (verified against the live Linear API): commentCreate REQUIRES
+      // issueId even for a threaded reply — parentId alone fails argument
+      // validation. Pin BOTH so the missing-issueId regression can't return.
+      expect(body.variables.issueId).toBe(ISSUE_ID);
+      expect(body.variables.parentId).toBe('comment-77');
+      expect(body.variables.body).toBe('✅ Updated — PR #178');
+    });
+
+    test('the mutation declares issueId as a required argument (regression guard)', async () => {
+      fetchMock.mockResolvedValue(jsonResponse({ data: { commentCreate: { success: true, comment: { id: 'r' } } } }));
+      await replyToComment(CTX, ISSUE_ID, 'comment-77', 'body');
+      const init = fetchMock.mock.calls[0][1];
+      const query = (JSON.parse(init.body as string) as { query: string }).query;
+      // The GraphQL op must pass issueId INTO commentCreate's input — not just
+      // accept it as a variable. Catches a half-fix that drops it from input.
+      expect(query).toMatch(/commentCreate\(\s*input:\s*\{[^}]*issueId:\s*\$issueId/);
+    });
+
+    test('returns null when commentCreate did not succeed', async () => {
+      fetchMock.mockResolvedValue(jsonResponse({ data: { commentCreate: { success: false } } }));
+      const replyId = await replyToComment(CTX, ISSUE_ID, 'comment-77', 'body');
+      expect(replyId).toBeNull();
+    });
+
+    test('returns null on GraphQL errors (no throw)', async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse({ errors: [{ message: 'parent not found' }] }));
+      const replyId = await replyToComment(CTX, ISSUE_ID, 'comment-77', 'body');
+      expect(replyId).toBeNull();
+    });
+
+    test('returns null when the token cannot be resolved (no fetch)', async () => {
+      resolveLinearOauthTokenMock.mockResolvedValueOnce(null);
+      const replyId = await replyToComment(CTX, ISSUE_ID, 'comment-77', 'body');
+      expect(replyId).toBeNull();
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+  });
+
   describe('reportIssueFailure', () => {
     test('posts comment + ❌ in parallel via Promise.allSettled', async () => {
       await reportIssueFailure(CTX, ISSUE_ID, '❌ failed');
@@ -184,6 +281,774 @@ describe('linear-feedback', () => {
       fetchMock.mockRejectedValue(new Error('ECONNRESET'));
 
       await expect(reportIssueFailure(CTX, ISSUE_ID, 'msg')).resolves.toBeUndefined();
+    });
+  });
+
+  describe('swapIssueReaction — exactly one status marker on the issue at a time', () => {
+    const reactionsResp = (rs: Array<{ id: string; emoji: string }>) =>
+      jsonResponse({ data: { issue: { reactions: rs } } });
+
+    test('👀 present → deletes it and adds the target (✅)', async () => {
+      fetchMock
+        .mockResolvedValueOnce(reactionsResp([{ id: 'r-eyes', emoji: 'eyes' }])) // query
+        .mockResolvedValueOnce(jsonResponse({ data: { reactionDelete: { success: true } } })) // delete 👀
+        .mockResolvedValueOnce(jsonResponse({ data: { reactionCreate: { success: true } } })); // add ✅
+      const ok = await swapIssueReaction(CTX, ISSUE_ID, 'white_check_mark');
+      expect(ok).toBe(true);
+      const deleteVars = JSON.parse(fetchMock.mock.calls[1][1].body).variables;
+      expect(deleteVars).toEqual({ id: 'r-eyes' });
+      const createVars = JSON.parse(fetchMock.mock.calls[2][1].body).variables;
+      expect(createVars).toEqual({ issueId: ISSUE_ID, emoji: 'white_check_mark' });
+    });
+
+    test('target already present → deletes other bgagent markers, does NOT re-create', async () => {
+      fetchMock
+        .mockResolvedValueOnce(reactionsResp([
+          { id: 'r-eyes', emoji: 'eyes' },
+          { id: 'r-check', emoji: 'white_check_mark' },
+        ]))
+        .mockResolvedValueOnce(jsonResponse({ data: { reactionDelete: { success: true } } })); // delete 👀 only
+      const ok = await swapIssueReaction(CTX, ISSUE_ID, 'white_check_mark');
+      expect(ok).toBe(true);
+      // 1 query + 1 delete (the 👀); no create (✅ already there).
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(JSON.parse(fetchMock.mock.calls[1][1].body).variables).toEqual({ id: 'r-eyes' });
+    });
+
+    test('never deletes a human (non-bgagent) reaction', async () => {
+      fetchMock
+        .mockResolvedValueOnce(reactionsResp([
+          { id: 'r-eyes', emoji: 'eyes' },
+          { id: 'r-tada', emoji: 'tada' }, // human reaction — must survive
+        ]))
+        .mockResolvedValueOnce(jsonResponse({ data: { reactionDelete: { success: true } } })) // delete 👀
+        .mockResolvedValueOnce(jsonResponse({ data: { reactionCreate: { success: true } } })); // add ✅
+      await swapIssueReaction(CTX, ISSUE_ID, 'white_check_mark');
+      const deletedIds = fetchMock.mock.calls
+        .filter((c) => JSON.parse(c[1].body).query.includes('reactionDelete'))
+        .map((c) => JSON.parse(c[1].body).variables.id);
+      expect(deletedIds).toEqual(['r-eyes']); // only the bgagent marker, never r-tada
+    });
+
+    test('no existing markers → just adds the target', async () => {
+      fetchMock
+        .mockResolvedValueOnce(reactionsResp([]))
+        .mockResolvedValueOnce(jsonResponse({ data: { reactionCreate: { success: true } } }));
+      const ok = await swapIssueReaction(CTX, ISSUE_ID, 'eyes');
+      expect(ok).toBe(true);
+      expect(fetchMock).toHaveBeenCalledTimes(2); // query + create, no deletes
+    });
+
+    test('a TRANSIENT delete failure is retried once, and then succeeds', async () => {
+      // Observed in practice: a 5s request timeout aborted the 👀 removal, so the
+      // comment kept 👀 beside ❓. No caller inspects this result and nothing
+      // revisits the item, so that contradiction was permanent — one retry
+      // covers the blip.
+      fetchMock
+        .mockResolvedValueOnce(reactionsResp([{ id: 'r-eyes', emoji: 'eyes' }]))
+        .mockResolvedValueOnce(jsonResponse({}, 503)) // delete: transient
+        .mockResolvedValueOnce(jsonResponse({ data: { reactionDelete: { success: true } } })) // retry wins
+        .mockResolvedValueOnce(jsonResponse({ data: { reactionCreate: { success: true } } }));
+      expect(await swapIssueReaction(CTX, ISSUE_ID, 'white_check_mark')).toBe(true);
+      const deletes = fetchMock.mock.calls.filter((c) => JSON.parse(c[1].body).query.includes('reactionDelete'));
+      expect(deletes).toHaveLength(2); // the failed attempt plus one retry
+    });
+
+    test('a TERMINAL delete failure is NOT retried — a resend cannot change the answer', async () => {
+      fetchMock
+        .mockResolvedValueOnce(reactionsResp([{ id: 'r-eyes', emoji: 'eyes' }]))
+        .mockResolvedValueOnce(jsonResponse({ errors: [{ message: 'not found' }] })) // terminal
+        .mockResolvedValueOnce(jsonResponse({ data: { reactionCreate: { success: true } } }));
+      expect(await swapIssueReaction(CTX, ISSUE_ID, 'white_check_mark')).toBe(false);
+      const deletes = fetchMock.mock.calls.filter((c) => JSON.parse(c[1].body).query.includes('reactionDelete'));
+      expect(deletes).toHaveLength(1);
+    });
+
+    test('a retry that ALSO fails still reports failure', async () => {
+      fetchMock
+        .mockResolvedValueOnce(reactionsResp([{ id: 'r-eyes', emoji: 'eyes' }]))
+        .mockResolvedValueOnce(jsonResponse({}, 503))
+        .mockResolvedValueOnce(jsonResponse({}, 503))
+        .mockResolvedValueOnce(jsonResponse({ data: { reactionCreate: { success: true } } }));
+      expect(await swapIssueReaction(CTX, ISSUE_ID, 'white_check_mark')).toBe(false);
+    });
+
+    test('a delete that FAILS is reported as failure, even though the target was added', async () => {
+      // Returning only the add's result would claim the promised single marker
+      // while the issue still shows 👀 beside ✅ — the contradictory state this
+      // swap exists to prevent, and what a caller checks the result to rule out.
+      fetchMock
+        .mockResolvedValueOnce(reactionsResp([{ id: 'r-eyes', emoji: 'eyes' }]))
+        .mockResolvedValueOnce(jsonResponse({ errors: [{ message: 'nope' }] })) // delete 👀 fails
+        .mockResolvedValueOnce(jsonResponse({ data: { reactionCreate: { success: true } } }));
+      expect(await swapIssueReaction(CTX, ISSUE_ID, 'white_check_mark')).toBe(false);
+      // The target is still attempted — one correct marker beats only a stale one.
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+    });
+
+    test('target already present but a stale marker survives → failure', async () => {
+      fetchMock
+        .mockResolvedValueOnce(reactionsResp([
+          { id: 'r-eyes', emoji: 'eyes' },
+          { id: 'r-check', emoji: 'white_check_mark' },
+        ]))
+        .mockResolvedValueOnce(jsonResponse({ errors: [{ message: 'nope' }] }));
+      expect(await swapIssueReaction(CTX, ISSUE_ID, 'white_check_mark')).toBe(false);
+    });
+
+    test('no token → false, no fetch', async () => {
+      resolveLinearOauthTokenMock.mockResolvedValueOnce(null);
+      expect(await swapIssueReaction(CTX, ISSUE_ID, 'eyes')).toBe(false);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('swapCommentReaction — settle the trigger comment 👀→✅/❌', () => {
+    const commentReactionsResp = (rs: Array<{ id: string; emoji: string }>) =>
+      jsonResponse({ data: { comment: { reactions: rs } } });
+
+    test('👀 on the comment → deletes it and adds ✅ (on the COMMENT, not the issue)', async () => {
+      fetchMock
+        .mockResolvedValueOnce(commentReactionsResp([{ id: 'r-eyes', emoji: 'eyes' }]))
+        .mockResolvedValueOnce(jsonResponse({ data: { reactionDelete: { success: true } } }))
+        .mockResolvedValueOnce(jsonResponse({ data: { reactionCreate: { success: true } } }));
+      const ok = await swapCommentReaction(CTX, 'comment-77', 'white_check_mark');
+      expect(ok).toBe(true);
+      // query targets the COMMENT
+      expect(JSON.parse(fetchMock.mock.calls[0][1].body).variables).toEqual({ commentId: 'comment-77' });
+      // delete the stale 👀
+      expect(JSON.parse(fetchMock.mock.calls[1][1].body).variables).toEqual({ id: 'r-eyes' });
+      // create the ✅ via reactionCreate(commentId)
+      const createVars = JSON.parse(fetchMock.mock.calls[2][1].body).variables;
+      expect(createVars).toEqual({ commentId: 'comment-77', emoji: 'white_check_mark' });
+    });
+
+    test('target already present → no re-create (idempotent under redelivery)', async () => {
+      fetchMock
+        .mockResolvedValueOnce(commentReactionsResp([
+          { id: 'r-eyes', emoji: 'eyes' },
+          { id: 'r-check', emoji: 'white_check_mark' },
+        ]))
+        .mockResolvedValueOnce(jsonResponse({ data: { reactionDelete: { success: true } } }));
+      const ok = await swapCommentReaction(CTX, 'comment-77', 'white_check_mark');
+      expect(ok).toBe(true);
+      expect(fetchMock).toHaveBeenCalledTimes(2); // query + delete 👀; ✅ already present
+    });
+
+    test('the COMMENT swap retries a transient removal too', async () => {
+      // The failure this covers was seen on a comment: 👀 + ❓ both left on a
+      // disambiguation reply, because the removal timed out and nothing ever
+      // tried again.
+      fetchMock
+        .mockResolvedValueOnce(commentReactionsResp([{ id: 'r-eyes', emoji: 'eyes' }]))
+        .mockResolvedValueOnce(jsonResponse({}, 503))
+        .mockResolvedValueOnce(jsonResponse({ data: { reactionDelete: { success: true } } }))
+        .mockResolvedValueOnce(jsonResponse({ data: { reactionCreate: { success: true } } }));
+      expect(await swapCommentReaction(CTX, 'comment-77', 'question')).toBe(true);
+    });
+
+    test('a delete that FAILS on the comment is reported as failure too', async () => {
+      // Both swaps implement one interface method, so they must report the same
+      // all-or-nothing result; a caller cannot branch per surface.
+      fetchMock
+        .mockResolvedValueOnce(commentReactionsResp([{ id: 'r-eyes', emoji: 'eyes' }]))
+        .mockResolvedValueOnce(jsonResponse({ errors: [{ message: 'nope' }] }))
+        .mockResolvedValueOnce(jsonResponse({ data: { reactionCreate: { success: true } } }));
+      expect(await swapCommentReaction(CTX, 'comment-77', 'white_check_mark')).toBe(false);
+    });
+
+    test('never deletes a human reaction on the comment', async () => {
+      fetchMock
+        .mockResolvedValueOnce(commentReactionsResp([
+          { id: 'r-eyes', emoji: 'eyes' },
+          { id: 'r-heart', emoji: 'heart' }, // human — must survive
+        ]))
+        .mockResolvedValueOnce(jsonResponse({ data: { reactionDelete: { success: true } } }))
+        .mockResolvedValueOnce(jsonResponse({ data: { reactionCreate: { success: true } } }));
+      await swapCommentReaction(CTX, 'comment-77', 'x');
+      const deletedIds = fetchMock.mock.calls
+        .filter((c) => JSON.parse(c[1].body).query.includes('reactionDelete'))
+        .map((c) => JSON.parse(c[1].body).variables.id);
+      expect(deletedIds).toEqual(['r-eyes']); // never r-heart
+    });
+
+    test('no token → false, no fetch', async () => {
+      resolveLinearOauthTokenMock.mockResolvedValueOnce(null);
+      expect(await swapCommentReaction(CTX, 'comment-77', 'eyes')).toBe(false);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('upsertStatusComment — one live status comment edited in place', () => {
+    test('no existing id → creates a comment and returns the new id', async () => {
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse({ data: { commentCreate: { success: true, comment: { id: 'cmt-new' } } } }),
+      );
+      const id = await upsertStatusComment(CTX, ISSUE_ID, 'body');
+      expect(id).toBe('cmt-new');
+      // create mutation carries issueId + body
+      const vars = JSON.parse(fetchMock.mock.calls[0][1].body).variables;
+      expect(vars).toEqual({ issueId: ISSUE_ID, body: 'body' });
+    });
+
+    test('existing id → edits in place and returns the same id', async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse({ data: { commentUpdate: { success: true } } }));
+      const id = await upsertStatusComment(CTX, ISSUE_ID, 'new body', 'cmt-existing');
+      expect(id).toBe('cmt-existing');
+      const vars = JSON.parse(fetchMock.mock.calls[0][1].body).variables;
+      expect(vars).toEqual({ id: 'cmt-existing', body: 'new body' });
+    });
+
+    test('create reporting success:false → null', async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse({ data: { commentCreate: { success: false } } }));
+      expect(await upsertStatusComment(CTX, ISSUE_ID, 'body')).toBeNull();
+    });
+
+    test('update GraphQL failure → null (does not fabricate the id)', async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse({ errors: [{ message: 'not found' }] }));
+      expect(await upsertStatusComment(CTX, ISSUE_ID, 'body', 'cmt-x')).toBeNull();
+    });
+
+    test('no token → null, no fetch', async () => {
+      resolveLinearOauthTokenMock.mockResolvedValueOnce(null);
+      expect(await upsertStatusComment(CTX, ISSUE_ID, 'body')).toBeNull();
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('deleteComment — remove a transient acknowledgement comment', () => {
+    test('success → true, sends commentDelete with the id', async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse({ data: { commentDelete: { success: true } } }));
+      expect(await deleteComment(CTX, 'cmt-ack')).toBe(true);
+      const vars = JSON.parse(fetchMock.mock.calls[0][1].body).variables;
+      expect(vars).toEqual({ id: 'cmt-ack' });
+    });
+
+    test('GraphQL error → false (best-effort, never throws)', async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse({ errors: [{ message: 'not found' }] }));
+      expect(await deleteComment(CTX, 'cmt-ack')).toBe(false);
+    });
+
+    test('no token → false, no fetch', async () => {
+      resolveLinearOauthTokenMock.mockResolvedValueOnce(null);
+      expect(await deleteComment(CTX, 'cmt-ack')).toBe(false);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('transitionIssueState', () => {
+    // Mirrors a typical Linear team's workflow states (by type + position).
+    const TEAM_STATES = [
+      { id: 's-backlog', type: 'backlog', name: 'Backlog', position: 0 },
+      { id: 's-todo', type: 'unstarted', name: 'Todo', position: 1 },
+      { id: 's-inprogress', type: 'started', name: 'In Progress', position: 2 },
+      { id: 's-inreview', type: 'started', name: 'In Review', position: 1002 },
+      { id: 's-done', type: 'completed', name: 'Done', position: 3 },
+    ];
+    const statesResp = (current: { id: string; type: string; name: string; position: number }) =>
+      jsonResponse({ data: { issue: { state: current, team: { states: { nodes: TEAM_STATES } } } } });
+    const cur = (id: string) => TEAM_STATES.find((s) => s.id === id)!;
+
+    test('Backlog → In Progress: picks the named started state, issues issueUpdate', async () => {
+      fetchMock
+        .mockResolvedValueOnce(statesResp(cur('s-backlog'))) // team-states query
+        .mockResolvedValueOnce(jsonResponse({ data: { issueUpdate: { success: true } } }));
+      const ok = await transitionIssueState(CTX, ISSUE_ID, 'started', ['In Progress']);
+      expect(ok).toBe(true);
+      // second call is the mutation with the resolved stateId
+      const mutationVars = JSON.parse(fetchMock.mock.calls[1][1].body).variables;
+      expect(mutationVars).toEqual({ issueId: ISSUE_ID, stateId: 's-inprogress' });
+    });
+
+    test('In Progress → In Review: name preference wins over position among started states', async () => {
+      fetchMock
+        .mockResolvedValueOnce(statesResp(cur('s-inprogress')))
+        .mockResolvedValueOnce(jsonResponse({ data: { issueUpdate: { success: true } } }));
+      const ok = await transitionIssueState(CTX, ISSUE_ID, 'started', ['In Review']);
+      expect(ok).toBe(true);
+      expect(JSON.parse(fetchMock.mock.calls[1][1].body).variables.stateId).toBe('s-inreview');
+    });
+
+    test('already in target state → no mutation, returns false', async () => {
+      fetchMock.mockResolvedValueOnce(statesResp(cur('s-inreview')));
+      const ok = await transitionIssueState(CTX, ISSUE_ID, 'started', ['In Review']);
+      expect(ok).toBe(false);
+      expect(fetchMock).toHaveBeenCalledTimes(1); // only the query, no mutation
+    });
+
+    test('never moves backward: Done (completed) is not demoted to In Review', async () => {
+      fetchMock.mockResolvedValueOnce(statesResp(cur('s-done')));
+      const ok = await transitionIssueState(CTX, ISSUE_ID, 'started', ['In Review']);
+      expect(ok).toBe(false);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    // The parent rollup's re-open (In Review → In Progress — BOTH of type
+    // 'started') was silently blocked by the same-type position tiebreak, so
+    // both directions of that tiebreak are pinned below.
+    test('same-type regression In Review → In Progress is BLOCKED by default', async () => {
+      fetchMock.mockResolvedValueOnce(statesResp(cur('s-inreview')));
+      const ok = await transitionIssueState(CTX, ISSUE_ID, 'started', ['In Progress']);
+      expect(ok).toBe(false); // In Progress (pos 2) < In Review (pos 1002) → backward
+      expect(fetchMock).toHaveBeenCalledTimes(1); // no mutation
+    });
+
+    test('same-type regression In Review → In Progress SUCCEEDS with allowSameTypeRegression (rollup re-open)', async () => {
+      fetchMock
+        .mockResolvedValueOnce(statesResp(cur('s-inreview')))
+        .mockResolvedValueOnce(jsonResponse({ data: { issueUpdate: { success: true } } }));
+      const ok = await transitionIssueState(CTX, ISSUE_ID, 'started', ['In Progress'], true);
+      expect(ok).toBe(true);
+      expect(JSON.parse(fetchMock.mock.calls[1][1].body).variables.stateId).toBe('s-inprogress');
+    });
+
+    test('allowSameTypeRegression does NOT permit a cross-type demotion (Done → In Progress still blocked)', async () => {
+      fetchMock.mockResolvedValueOnce(statesResp(cur('s-done')));
+      const ok = await transitionIssueState(CTX, ISSUE_ID, 'started', ['In Progress'], true);
+      expect(ok).toBe(false); // completed → started is cross-type; still refused
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    test('returns false when token cannot be resolved', async () => {
+      resolveLinearOauthTokenMock.mockResolvedValueOnce(null);
+      const ok = await transitionIssueState(CTX, ISSUE_ID, 'started', ['In Review']);
+      expect(ok).toBe(false);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    test('returns false when the team has no state of the target type', async () => {
+      const noCompleted = TEAM_STATES.filter((s) => s.type !== 'completed');
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse({ data: { issue: { state: cur('s-inprogress'), team: { states: { nodes: noCompleted } } } } }),
+      );
+      const ok = await transitionIssueState(CTX, ISSUE_ID, 'completed');
+      expect(ok).toBe(false);
+    });
+  });
+
+  describe('revertIssueToNotStarted — undo our own In Progress when work did not start', () => {
+    const TEAM_STATES = [
+      { id: 's-backlog', type: 'backlog', name: 'Backlog', position: 0 },
+      { id: 's-todo', type: 'unstarted', name: 'Todo', position: 1 },
+      { id: 's-inprogress', type: 'started', name: 'In Progress', position: 2 },
+      { id: 's-done', type: 'completed', name: 'Done', position: 3 },
+    ];
+    const statesResp = (current: { id: string; type: string; name: string; position: number }) =>
+      jsonResponse({ data: { issue: { state: current, team: { states: { nodes: TEAM_STATES } } } } });
+    const cur = (id: string) => TEAM_STATES.find((s) => s.id === id)!;
+
+    test('In Progress → Todo: our In-Progress reverts to the unstarted state', async () => {
+      fetchMock
+        .mockResolvedValueOnce(statesResp(cur('s-inprogress')))
+        .mockResolvedValueOnce(jsonResponse({ data: { issueUpdate: { success: true } } }));
+      const ok = await revertIssueToNotStarted(CTX, ISSUE_ID);
+      expect(ok).toBe(true);
+      expect(JSON.parse(fetchMock.mock.calls[1][1].body).variables.stateId).toBe('s-todo');
+    });
+
+    test('falls back to Backlog when the team has no unstarted state', async () => {
+      const noUnstarted = TEAM_STATES.filter((s) => s.type !== 'unstarted');
+      fetchMock
+        .mockResolvedValueOnce(
+          jsonResponse({ data: { issue: { state: cur('s-inprogress'), team: { states: { nodes: noUnstarted } } } } }),
+        )
+        .mockResolvedValueOnce(jsonResponse({ data: { issueUpdate: { success: true } } }));
+      const ok = await revertIssueToNotStarted(CTX, ISSUE_ID);
+      expect(ok).toBe(true);
+      expect(JSON.parse(fetchMock.mock.calls[1][1].body).variables.stateId).toBe('s-backlog');
+    });
+
+    test('does NOT demote a human-completed issue (only reverts a started state)', async () => {
+      fetchMock.mockResolvedValueOnce(statesResp(cur('s-done')));
+      const ok = await revertIssueToNotStarted(CTX, ISSUE_ID);
+      expect(ok).toBe(false);
+      expect(fetchMock).toHaveBeenCalledTimes(1); // query only, no mutation
+    });
+
+    test('no-op when the issue is already in a not-started (backlog) state', async () => {
+      fetchMock.mockResolvedValueOnce(statesResp(cur('s-backlog')));
+      const ok = await revertIssueToNotStarted(CTX, ISSUE_ID);
+      expect(ok).toBe(false);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('appendOnceToComment — add the preview link to a reply at most once', () => {
+    const COMMENT_ID = 'reply-cmt-1';
+
+    test('reads the body and appends the line when the marker is absent', async () => {
+      // 1st fetch = read body; 2nd = commentUpdate.
+      fetchMock
+        .mockResolvedValueOnce(jsonResponse({ data: { comment: { body: '✅ Updated — [PR #5](u). _$0.1_' } } }))
+        .mockResolvedValueOnce(jsonResponse({ data: { commentUpdate: { success: true } } }));
+      const ok = await appendOnceToComment(CTX, COMMENT_ID, ' · [preview](https://cdn/x.png)', '[preview]');
+      expect(ok).toBe(true);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      // The update carries the original body + the appended line.
+      const updateBody = JSON.parse(fetchMock.mock.calls[1][1].body);
+      expect(updateBody.variables.body).toBe('✅ Updated — [PR #5](u). _$0.1_\n · [preview](https://cdn/x.png)');
+      expect(updateBody.variables.id).toBe(COMMENT_ID);
+    });
+
+    test('idempotent: marker already present → no update (webhook redelivery)', async () => {
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse({ data: { comment: { body: '✅ Updated — [PR #5](u). · [preview](https://cdn/x.png)' } } }),
+      );
+      const ok = await appendOnceToComment(CTX, COMMENT_ID, ' · [preview](https://cdn/y.png)', '[preview]');
+      expect(ok).toBe(false);
+      expect(fetchMock).toHaveBeenCalledTimes(1); // read only, NO update
+    });
+
+    test('missing comment body → no update, returns false', async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse({ data: { comment: null } }));
+      const ok = await appendOnceToComment(CTX, COMMENT_ID, ' · [preview](u)', '[preview]');
+      expect(ok).toBe(false);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    test('no token → no fetch', async () => {
+      resolveLinearOauthTokenMock.mockResolvedValueOnce(null);
+      const ok = await appendOnceToComment(CTX, COMMENT_ID, ' · [preview](u)', '[preview]');
+      expect(ok).toBe(false);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('upsertThreadedReply preservePreview — converge concurrent writers of one reply', () => {
+    const REPLY_ID = 'reply-cmt-9';
+    const BLOCK = '[![preview](https://cdn/screenshots/x.png)](https://app.vercel.app)';
+
+    test('terminal edit carries an already-landed preview thumbnail from the current body', async () => {
+      // The screenshot webhook appended the clickable thumbnail block first; this
+      // terminal re-render reads the current body and re-attaches it, so the
+      // two writers converge instead of one dropping the other's content.
+      fetchMock
+        .mockResolvedValueOnce(jsonResponse({ data: { comment: { body: `✅ Updated.\n\n${BLOCK}` } } }))
+        .mockResolvedValueOnce(jsonResponse({ data: { commentUpdate: { success: true } } }));
+      const newBody = '✅ Updated — [PR #5](u). _$0.2 · 35s_';
+      const id = await upsertThreadedReply(CTX, ISSUE_ID, 'parent-1', newBody, REPLY_ID, { preservePreview: true });
+      expect(id).toBe(REPLY_ID);
+      expect(fetchMock).toHaveBeenCalledTimes(2); // read body, then update
+      const updateBody = JSON.parse(fetchMock.mock.calls[1][1].body);
+      expect(updateBody.variables.body).toBe(`${newBody}\n\n${BLOCK}`);
+    });
+
+    test('skipIfSettled REFUSES a progress edit over an already-settled reply', async () => {
+      // The failure this fixes: a stream-delivered "working" milestone landed
+      // AFTER the terminal settle and overwrote "✅ Updated", so the reply
+      // contradicted both the trigger comment's ✅ reaction and reality.
+      fetchMock.mockResolvedValueOnce(jsonResponse({ data: { comment: { body: '✅ Updated — [PR #5](u).' } } }));
+      const id = await upsertThreadedReply(
+        CTX, ISSUE_ID, 'parent-1', '🔄 Working — updating PR #5…', REPLY_ID, { skipIfSettled: true },
+      );
+      // Reports the reply id (the caller's intent is satisfied — it IS up to date)
+      // but performs NO update mutation.
+      expect(id).toBe(REPLY_ID);
+      expect(fetchMock).toHaveBeenCalledTimes(1); // the body read only
+    });
+
+    test('skipIfSettled still allows a progress edit while the reply is un-settled', async () => {
+      // The common case: the reply is at "On it" and this is the first progress
+      // tick. Suppressing here would freeze the reply and re-create the black box.
+      fetchMock
+        .mockResolvedValueOnce(jsonResponse({ data: { comment: { body: '👀 On it — reading the PR…' } } }))
+        .mockResolvedValueOnce(jsonResponse({ data: { commentUpdate: { success: true } } }));
+      const progress = '🔄 Working — updating PR #5…';
+      const id = await upsertThreadedReply(
+        CTX, ISSUE_ID, 'parent-1', progress, REPLY_ID, { skipIfSettled: true },
+      );
+      expect(id).toBe(REPLY_ID);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(JSON.parse(fetchMock.mock.calls[1][1].body).variables.body).toBe(progress);
+    });
+
+    test('a TERMINAL edit never sets skipIfSettled, so an outcome can always overwrite progress', async () => {
+      // Direction matters: progress yields to an outcome, never the reverse.
+      fetchMock.mockResolvedValueOnce(jsonResponse({ data: { commentUpdate: { success: true } } }));
+      const id = await upsertThreadedReply(CTX, ISSUE_ID, 'parent-1', '✅ Updated.', REPLY_ID);
+      expect(id).toBe(REPLY_ID);
+      expect(fetchMock).toHaveBeenCalledTimes(1); // straight update, no read
+    });
+
+    test('both options together read the body ONCE', async () => {
+      // The terminal settle asks for preview preservation; a progress edit asks
+      // for the settle check. Neither should double-read.
+      fetchMock
+        .mockResolvedValueOnce(jsonResponse({ data: { comment: { body: `👀 On it…\n\n${BLOCK}` } } }))
+        .mockResolvedValueOnce(jsonResponse({ data: { commentUpdate: { success: true } } }));
+      await upsertThreadedReply(
+        CTX, ISSUE_ID, 'parent-1', '🔄 Working…', REPLY_ID,
+        { preservePreview: true, skipIfSettled: true },
+      );
+      expect(fetchMock).toHaveBeenCalledTimes(2); // one read + one update
+    });
+
+    test('without preservePreview the edit does NOT read the body (single update)', async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse({ data: { commentUpdate: { success: true } } }));
+      const id = await upsertThreadedReply(CTX, ISSUE_ID, 'parent-1', '✅ Updated.', REPLY_ID);
+      expect(id).toBe(REPLY_ID);
+      expect(fetchMock).toHaveBeenCalledTimes(1); // straight update, no read
+    });
+  });
+
+  describe('upsertThreadedReply repairIfOverwritten (the outcome defends itself)', () => {
+    const REPLY_ID = 'reply-cmt-9';
+    const BLOCK = '[![preview](https://cdn/screenshots/x.png)](https://app.vercel.app)';
+    const OUTCOME = '✅ Updated — [PR #5](u). _$0.2 · 35s_';
+
+    test('restores the outcome when a racing progress edit overwrote it', async () => {
+      // Why the progress writer's own body check is not enough: it reads, then
+      // writes, and a settle landing in between is still overwritten. Linear's
+      // comment update takes only an id and a body — no version to condition on —
+      // so the interleaving cannot be prevented, only detected and undone by the
+      // writer that knows which body matters.
+      fetchMock
+        .mockResolvedValueOnce(jsonResponse({ data: { commentUpdate: { success: true } } })) // settle write
+        .mockResolvedValueOnce(jsonResponse({ data: { comment: { body: '🔄 Working — updating PR #5…' } } }))
+        .mockResolvedValueOnce(jsonResponse({ data: { commentUpdate: { success: true } } })); // repair
+
+      const id = await upsertThreadedReply(
+        CTX, ISSUE_ID, 'parent-1', OUTCOME, REPLY_ID, { repairIfOverwritten: true },
+      );
+
+      expect(id).toBe(REPLY_ID);
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      expect(JSON.parse(fetchMock.mock.calls[2][1].body).variables.body).toBe(OUTCOME);
+    });
+
+    test('the repair carries over a preview appended during the race', async () => {
+      // The screenshot webhook is a third writer of this reply; restoring the
+      // outcome must not drop a thumbnail that landed while the race resolved.
+      fetchMock
+        .mockResolvedValueOnce(jsonResponse({ data: { commentUpdate: { success: true } } }))
+        .mockResolvedValueOnce(jsonResponse({ data: { comment: { body: `🔄 Working…\n\n${BLOCK}` } } }))
+        .mockResolvedValueOnce(jsonResponse({ data: { commentUpdate: { success: true } } }));
+
+      await upsertThreadedReply(
+        CTX, ISSUE_ID, 'parent-1', OUTCOME, REPLY_ID, { repairIfOverwritten: true },
+      );
+
+      expect(JSON.parse(fetchMock.mock.calls[2][1].body).variables.body).toBe(`${OUTCOME}\n\n${BLOCK}`);
+    });
+
+    test('no repair when the outcome is still there (one extra read, no write)', async () => {
+      fetchMock
+        .mockResolvedValueOnce(jsonResponse({ data: { commentUpdate: { success: true } } }))
+        .mockResolvedValueOnce(jsonResponse({ data: { comment: { body: OUTCOME } } }));
+
+      const id = await upsertThreadedReply(
+        CTX, ISSUE_ID, 'parent-1', OUTCOME, REPLY_ID, { repairIfOverwritten: true },
+      );
+
+      expect(id).toBe(REPLY_ID);
+      expect(fetchMock).toHaveBeenCalledTimes(2); // write + verify read, no second write
+    });
+
+    test('a DIFFERENT terminal body is left alone — never fight a later outcome', async () => {
+      // A failure reply superseding a success, or a second iteration's settle, is
+      // newer and correct. Re-asserting our own would undo real information.
+      fetchMock
+        .mockResolvedValueOnce(jsonResponse({ data: { commentUpdate: { success: true } } }))
+        .mockResolvedValueOnce(jsonResponse({ data: { comment: { body: '❌ The build failed.' } } }));
+
+      await upsertThreadedReply(
+        CTX, ISSUE_ID, 'parent-1', OUTCOME, REPLY_ID, { repairIfOverwritten: true },
+      );
+
+      expect(fetchMock).toHaveBeenCalledTimes(2); // no repair write
+    });
+
+    test('an unreadable body is left alone rather than guessed at', async () => {
+      fetchMock
+        .mockResolvedValueOnce(jsonResponse({ data: { commentUpdate: { success: true } } }))
+        .mockResolvedValueOnce(jsonResponse({ errors: [{ message: 'boom' }] }));
+
+      const id = await upsertThreadedReply(
+        CTX, ISSUE_ID, 'parent-1', OUTCOME, REPLY_ID, { repairIfOverwritten: true },
+      );
+
+      // The settle itself succeeded, so report success; the verify is advisory.
+      expect(id).toBe(REPLY_ID);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    test('a PROGRESS body is never defended — only outcomes are worth the round trip', async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse({ data: { commentUpdate: { success: true } } }));
+
+      await upsertThreadedReply(
+        CTX, ISSUE_ID, 'parent-1', '🔄 Working…', REPLY_ID, { repairIfOverwritten: true },
+      );
+
+      expect(fetchMock).toHaveBeenCalledTimes(1); // no verify read at all
+    });
+
+    test('a failed settle is reported as failed and never repaired', async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse({ errors: [{ message: 'bad id' }] }));
+
+      const id = await upsertThreadedReply(
+        CTX, ISSUE_ID, 'parent-1', OUTCOME, REPLY_ID, { repairIfOverwritten: true },
+      );
+
+      expect(id).toBeNull();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    test('a repair that itself fails does not fail the settle', async () => {
+      fetchMock
+        .mockResolvedValueOnce(jsonResponse({ data: { commentUpdate: { success: true } } }))
+        .mockResolvedValueOnce(jsonResponse({ data: { comment: { body: '🔄 Working…' } } }))
+        .mockResolvedValueOnce(jsonResponse({}, 500));
+
+      const id = await upsertThreadedReply(
+        CTX, ISSUE_ID, 'parent-1', OUTCOME, REPLY_ID, { repairIfOverwritten: true },
+      );
+
+      expect(id).toBe(REPLY_ID);
+    });
+  });
+
+  describe('sweepTransientNotes — tidy the planning chatter once a plan is approved', () => {
+    // A representative plan-phase thread: the frozen plan reference (KEEP), the
+    // transient notes (🗂️/👋 → DELETE), the live epic panel (🔄 → a
+    // different prefix, KEEP), and a human comment (no bot prefix, KEEP).
+    const THREAD = {
+      data: {
+        issue: {
+          comments: {
+            nodes: [
+              { id: 'plan-ref', body: '🗂️ **Approved plan** — 2 sub-issues' },
+              { id: 'started-ack', body: '🗂️ On it — working out how to break this up…' },
+              { id: 'nudge', body: '👋 I answer to `@bgagent`…' },
+              { id: 'panel', body: '🔄 **ABCA orchestration** · 0/2 complete' },
+              { id: 'human', body: 'looks good, ship it' },
+            ],
+          },
+        },
+      },
+    };
+
+    test('deletes the transient 🗂️/👋 notes, keeps the frozen reference + panel + human comment', async () => {
+      fetchMock
+        .mockResolvedValueOnce(jsonResponse(THREAD)) // the comments list
+        .mockResolvedValue(jsonResponse({ data: { commentDelete: { success: true } } }));
+      const deleted = await sweepTransientNotes(CTX, ISSUE_ID, 'plan-ref');
+      // started-ack + nudge deleted; plan-ref (kept), panel (🔄), human (no prefix) survive.
+      expect(deleted).toBe(2);
+      const deletedIds = fetchMock.mock.calls
+        .slice(1)
+        .map((c) => JSON.parse(c[1].body).variables.id);
+      expect(deletedIds.sort()).toEqual(['nudge', 'started-ack']);
+      expect(deletedIds).not.toContain('plan-ref');
+      expect(deletedIds).not.toContain('panel');
+      expect(deletedIds).not.toContain('human');
+    });
+
+    test('with no keepCommentId, sweeps ALL bot notes incl. the untracked reference (nothing to preserve)', async () => {
+      fetchMock
+        .mockResolvedValueOnce(jsonResponse(THREAD))
+        .mockResolvedValue(jsonResponse({ data: { commentDelete: { success: true } } }));
+      const deleted = await sweepTransientNotes(CTX, ISSUE_ID);
+      // plan-ref + started-ack + nudge (all 🗂️/👋); panel + human still spared.
+      expect(deleted).toBe(3);
+    });
+
+    test('no token → no fetch, sweeps nothing', async () => {
+      resolveLinearOauthTokenMock.mockResolvedValueOnce(null);
+      const deleted = await sweepTransientNotes(CTX, ISSUE_ID, 'plan-ref');
+      expect(deleted).toBe(0);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    test('a failed comments-list is a clean no-op (best-effort, never throws)', async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse({ errors: [{ message: 'boom' }] }, 200));
+      const deleted = await sweepTransientNotes(CTX, ISSUE_ID, 'plan-ref');
+      expect(deleted).toBe(0);
+      expect(fetchMock).toHaveBeenCalledTimes(1); // only the (failed) list; no deletes
+    });
+
+    test('a leading-whitespace bot note is still matched (trimStart)', async () => {
+      fetchMock
+        .mockResolvedValueOnce(jsonResponse({
+          data: { issue: { comments: { nodes: [{ id: 'ws', body: '\n  🗂️ over-cap note' }] } } },
+        }))
+        .mockResolvedValue(jsonResponse({ data: { commentDelete: { success: true } } }));
+      const deleted = await sweepTransientNotes(CTX, ISSUE_ID, 'plan-ref');
+      expect(deleted).toBe(1);
+    });
+  });
+
+  describe('fetchRecentComments — pre-hydrate the human discussion for the agent', () => {
+    function commentsResponse(nodes: unknown[]): Response {
+      return jsonResponse({ data: { issue: { comments: { nodes } } } });
+    }
+
+    test('returns human comments oldest-first, rendered with author + timestamp', async () => {
+      fetchMock.mockResolvedValueOnce(commentsResponse([
+        { id: 'c2', body: 'second', createdAt: '2026-07-20T10:00:00Z', user: { displayName: 'Bob' } },
+        { id: 'c1', body: 'first', createdAt: '2026-07-19T09:00:00Z', user: { displayName: 'Alice' } },
+      ]));
+      const result = await fetchRecentComments(CTX, ISSUE_ID);
+      expect(result).toEqual([
+        { author: 'Alice', createdAt: '2026-07-19T09:00:00Z', markdown: 'first' },
+        { author: 'Bob', createdAt: '2026-07-20T10:00:00Z', markdown: 'second' },
+      ]);
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body as string) as { query: string; variables: Record<string, string> };
+      expect(body.query).toContain('botActor');
+      expect(body.variables).toEqual({ issueId: ISSUE_ID });
+    });
+
+    test('drops app/integration comments (botActor present, or no user)', async () => {
+      fetchMock.mockResolvedValueOnce(commentsResponse([
+        { id: 'h', body: 'human turn', createdAt: '2026-07-19T09:00:00Z', user: { displayName: 'Alice' } },
+        { id: 'b', body: 'bot progress', createdAt: '2026-07-19T09:05:00Z', botActor: { id: 'app-1' } },
+        { id: 'n', body: 'no author', createdAt: '2026-07-19T09:06:00Z', user: null },
+      ]));
+      const result = await fetchRecentComments(CTX, ISSUE_ID);
+      expect(result).toHaveLength(1);
+      expect(result[0].markdown).toBe('human turn');
+    });
+
+    test('drops bot-prefixed bodies even if attributed to a user (belt + suspenders)', async () => {
+      fetchMock.mockResolvedValueOnce(commentsResponse([
+        { id: 'p', body: '🤖 Starting…', createdAt: '2026-07-19T09:00:00Z', user: { displayName: 'Someone' } },
+        { id: 'h', body: 'real question', createdAt: '2026-07-19T09:01:00Z', user: { displayName: 'Alice' } },
+      ]));
+      const result = await fetchRecentComments(CTX, ISSUE_ID);
+      expect(result.map((c) => c.markdown)).toEqual(['real question']);
+    });
+
+    test('keeps only the most recent maxComments', async () => {
+      const nodes = Array.from({ length: 5 }, (_, i) => ({
+        id: `c${i}`,
+        body: `comment ${i}`,
+        createdAt: `2026-07-2${i}T00:00:00Z`,
+        user: { displayName: 'Alice' },
+      }));
+      fetchMock.mockResolvedValueOnce(commentsResponse(nodes));
+      const capped = await fetchRecentComments(CTX, ISSUE_ID, 2);
+      expect(capped.map((c) => c.markdown)).toEqual(['comment 3', 'comment 4']);
+    });
+
+    test('fail-open: no token → [] (never throws)', async () => {
+      resolveLinearOauthTokenMock.mockResolvedValueOnce(null);
+      const result = await fetchRecentComments(CTX, ISSUE_ID);
+      expect(result).toEqual([]);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    test('fail-open: GraphQL error → [] (never throws)', async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse({ errors: [{ message: 'boom' }] }));
+      const result = await fetchRecentComments(CTX, ISSUE_ID);
+      expect(result).toEqual([]);
+    });
+
+    test('skips comments with empty/whitespace bodies', async () => {
+      fetchMock.mockResolvedValueOnce(commentsResponse([
+        { id: 'e', body: '   ', createdAt: '2026-07-19T09:00:00Z', user: { displayName: 'Alice' } },
+        { id: 'h', body: 'kept', createdAt: '2026-07-19T09:01:00Z', user: { displayName: 'Bob' } },
+      ]));
+      const result = await fetchRecentComments(CTX, ISSUE_ID);
+      expect(result.map((c) => c.markdown)).toEqual(['kept']);
     });
   });
 });

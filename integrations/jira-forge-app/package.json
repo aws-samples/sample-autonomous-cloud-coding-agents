@@ -8,5 +8,8 @@
   },
   "dependencies": {
     "@forge/api": "8.0.2"
+  },
+  "overrides": {
+    "brace-expansion": "^5.0.9"
   }
 }
