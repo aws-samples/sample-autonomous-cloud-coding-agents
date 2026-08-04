@@ -176,6 +176,40 @@ describe('get-task handler', () => {
     expect(body.data.queued_at).toBe('2025-03-15T10:30:05Z');
   });
 
+  test('same-millisecond tie breaks on task_id so co-queued tasks get distinct positions (#331/#441)', async () => {
+    // The #331 fan-out burst queues sibling children in the same instant,
+    // so several rows share `created_at`. The FIFO tiebreak
+    // (`item.task_id < record.task_id`) is the ONLY thing that keeps their
+    // positions distinct; without it both would report the same rank.
+    // TASK_RECORD.task_id is 'task-1' at created_at 2025-03-15T10:30:00Z.
+    mockSend.mockReset();
+    mockSend
+      .mockResolvedValueOnce({
+        Item: {
+          ...TASK_RECORD,
+          status: 'QUEUED',
+          status_created_at: 'QUEUED#2025-03-15T10:30:05Z',
+          queued_at: '2025-03-15T10:30:05Z',
+        },
+      })
+      // All three share the target's created_at; only task_id disambiguates.
+      // 'task-0' < 'task-1' → ahead; 'task-2' > 'task-1' → behind.
+      .mockResolvedValueOnce({
+        Items: [
+          { task_id: 'task-0', created_at: '2025-03-15T10:30:00Z' },
+          { task_id: 'task-1', created_at: '2025-03-15T10:30:00Z' },
+          { task_id: 'task-2', created_at: '2025-03-15T10:30:00Z' },
+        ],
+      });
+
+    const result = await handler(makeEvent());
+    expect(result.statusCode).toBe(200);
+    const body = JSON.parse(result.body);
+    // Exactly one same-instant sibling ranks ahead — not zero (tiebreak
+    // dropped) nor two (tiebreak ignored, both siblings counted).
+    expect(body.data.queue_position).toBe(2); // 1 ahead (task-0) + 1
+  });
+
   test('QUEUED task queue-position lookup fails open to null on GSI error', async () => {
     mockSend.mockReset();
     mockSend
