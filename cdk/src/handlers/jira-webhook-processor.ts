@@ -311,11 +311,6 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     logger.info('Jira issue has no project.key — skipping (cannot route to a repo)', {
       issue_key: issue.key,
     });
-    await safeReportIssueFailure(
-      issue.key,
-      cloudId,
-      "❌ This Jira issue isn't in a project — ABCA needs a Jira project to route the task to a repo. Move the issue into a project and re-apply the trigger label.",
-    );
     return;
   }
 
@@ -337,15 +332,13 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     Key: { jira_project_identity: projectIdentity },
   }));
   if (!mapping.Item || mapping.Item.status !== 'active') {
-    logger.info('Jira project is not onboarded or is removed — skipping', {
+    // Jira admin-console webhooks fire site-wide. An unmapped project has not
+    // opted into ABCA, so it must remain a true no-op even if somebody happens
+    // to use the same label there.
+    logger.info('Jira project is not onboarded or is removed — skipping silently', {
       jira_project_identity: projectIdentity,
       issue_key: issue.key,
     });
-    await safeReportIssueFailure(
-      issue.key,
-      cloudId,
-      `❌ This Jira project isn't onboarded to ABCA. An admin can onboard it with \`bgagent jira map ${cloudId} ${projectKey} --repo <owner>/<repo>\` (add \`--label <trigger>\` to change the trigger label).`,
-    );
     return;
   }
   const repo = mapping.Item.repo as string;
@@ -362,13 +355,24 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     return;
   }
 
-  const accountId = payload.user?.accountId
-    ?? issue.fields?.reporter?.accountId
-    ?? issue.fields?.creator?.accountId;
+  const actorAccountId = payload.user?.accountId;
+  const reporterAccountId = issue.fields?.reporter?.accountId;
+  const creatorAccountId = issue.fields?.creator?.accountId;
+  const accountId = actorAccountId ?? reporterAccountId ?? creatorAccountId;
+  const accountSource = actorAccountId
+    ? 'webhook_user'
+    : reporterAccountId
+      ? 'issue_reporter'
+      : creatorAccountId
+        ? 'issue_creator'
+        : undefined;
   if (!accountId) {
     logger.warn('Jira webhook missing user.accountId — cannot attribute task', {
       issue_key: issue.key,
       jira_cloud_id: cloudId,
+      jira_actor_account_id: actorAccountId,
+      jira_reporter_account_id: reporterAccountId,
+      jira_creator_account_id: creatorAccountId,
     });
     await safeReportIssueFailure(
       issue.key,
@@ -383,12 +387,19 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     logger.warn('Jira account has no linked platform user — skipping task creation', {
       jira_cloud_id: cloudId,
       jira_account_id: accountId,
+      jira_account_source: accountSource,
+      jira_actor_display_name: payload.user?.displayName,
+      jira_actor_account_id: actorAccountId,
+      jira_reporter_account_id: reporterAccountId,
+      jira_creator_account_id: creatorAccountId,
+      jira_identity_lookup_key: `${cloudId}#${accountId}`,
       issue_key: issue.key,
     });
     await safeReportIssueFailure(
       issue.key,
       cloudId,
-      "❌ This Jira user isn't linked to a platform user. Run `bgagent jira link <code>` from a Cognito-authenticated CLI session to complete linking.",
+      `❌ The Jira user for this trigger isn't linked to a platform user (accountId: \`${accountId}\`). `
+      + `Ask an admin to run \`bgagent jira invite-user ${cloudId} ${accountId}\`, then redeem the generated link code.`,
     );
     return;
   }

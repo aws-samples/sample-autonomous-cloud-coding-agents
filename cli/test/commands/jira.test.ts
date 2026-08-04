@@ -23,14 +23,18 @@ import {
   PutSecretValueCommand,
   ResourceExistsException,
 } from '@aws-sdk/client-secrets-manager';
-import { GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import {
+  GetCommand,
+  PutCommand,
+  ScanCommand,
+  UpdateCommand,
+} from '@aws-sdk/lib-dynamodb';
 import { ApiClient } from '../../src/api-client';
 import {
-  isWebhookSecretConfigured,
-  JIRA_WEBHOOK_SECRET_PLACEHOLDER_KEY,
   makeJiraCommand,
   openBrowser,
   renderJiraAppTemplate,
+  synchronizeJiraWebhookSecrets,
   upsertOauthSecret,
 } from '../../src/commands/jira';
 import * as config from '../../src/config';
@@ -134,6 +138,7 @@ describe('makeJiraCommand', () => {
       'app-setup',
       'app-template',
       'setup',
+      'update-webhook-secret',
       'invite-user',
       'link',
       'map',
@@ -383,6 +388,204 @@ describe('jira link action', () => {
       rlSpy.mockRestore();
       stdinSpy.mockRestore();
     }
+  });
+});
+
+describe('jira update-webhook-secret action', () => {
+  let loadConfigSpy: jest.SpiedFunction<typeof config.loadConfig>;
+  let logSpy: jest.SpiedFunction<typeof console.log>;
+
+  beforeEach(() => {
+    ddbSend.mockReset();
+    smSend.mockReset();
+    promptSecretMock.mockReset().mockResolvedValue('new-signing-secret');
+    cfnSend.mockReset().mockResolvedValue({
+      Stacks: [{
+        Outputs: [
+          { OutputKey: 'JiraWorkspaceRegistryTableName', OutputValue: 'JiraRegistryTable' },
+          { OutputKey: 'JiraWebhookSecretArn', OutputValue: 'arn:stack-wide' },
+        ],
+      }],
+    });
+    loadConfigSpy = jest.spyOn(config, 'loadConfig').mockReturnValue({
+      region: 'us-west-2',
+    } as ReturnType<typeof config.loadConfig>);
+    logSpy = jest.spyOn(console, 'log').mockImplementation();
+  });
+
+  afterEach(() => {
+    loadConfigSpy.mockRestore();
+    logSpy.mockRestore();
+  });
+
+  async function runUpdate(cloudId = 'cloud-123'): Promise<void> {
+    const program = makeJiraCommand();
+    await program.parseAsync(['node', 'bgagent', 'update-webhook-secret', cloudId]);
+  }
+
+  test('preserves OAuth fields and synchronizes tenant plus stack-wide secrets', async () => {
+    ddbSend
+      .mockResolvedValueOnce({
+        Item: {
+          jira_cloud_id: 'cloud-123',
+          oauth_secret_arn: 'arn:jira-oauth',
+          status: 'active',
+        },
+      })
+      .mockResolvedValueOnce({
+        Items: [{ jira_cloud_id: 'cloud-123', status: 'active' }],
+      });
+    smSend
+      .mockResolvedValueOnce({
+        SecretString: JSON.stringify(sampleToken({
+          cloud_id: 'cloud-123',
+          webhook_signing_secret: 'old-signing-secret',
+        })),
+      })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({});
+
+    await runUpdate();
+
+    expect(ddbSend.mock.calls[0][0]).toBeInstanceOf(GetCommand);
+    expect(ddbSend.mock.calls[1][0]).toBeInstanceOf(ScanCommand);
+    expect(smSend.mock.calls[0][0]).toBeInstanceOf(GetSecretValueCommand);
+
+    const tenantWrite = smSend.mock.calls[1][0] as PutSecretValueCommand;
+    expect(tenantWrite.input.SecretId).toBe('arn:jira-oauth');
+    expect(JSON.parse(tenantWrite.input.SecretString as string)).toMatchObject({
+      access_token: 'access-xyz',
+      refresh_token: 'refresh-xyz',
+      client_secret: 'client-secret',
+      webhook_signing_secret: 'new-signing-secret',
+    });
+
+    const globalWrite = smSend.mock.calls[2][0] as PutSecretValueCommand;
+    expect(globalWrite.input).toEqual({
+      SecretId: 'arn:stack-wide',
+      SecretString: 'new-signing-secret',
+    });
+  });
+
+  test('refuses rotation when more than one Jira tenant is active', async () => {
+    ddbSend
+      .mockResolvedValueOnce({
+        Item: {
+          jira_cloud_id: 'cloud-123',
+          oauth_secret_arn: 'arn:jira-oauth',
+          status: 'active',
+        },
+      })
+      .mockResolvedValueOnce({
+        Items: [
+          { jira_cloud_id: 'cloud-123', status: 'active' },
+          { jira_cloud_id: 'cloud-456', status: 'active' },
+        ],
+      });
+
+    await expect(runUpdate()).rejects.toThrow(/multiple tenant secrets/);
+
+    expect(promptSecretMock).not.toHaveBeenCalled();
+    expect(smSend).not.toHaveBeenCalled();
+  });
+
+  test('refuses rotation when the active-tenant scan is empty', async () => {
+    ddbSend
+      .mockResolvedValueOnce({
+        Item: {
+          jira_cloud_id: 'cloud-123',
+          oauth_secret_arn: 'arn:jira-oauth',
+          status: 'active',
+        },
+      })
+      .mockResolvedValueOnce({ Items: [] });
+
+    await expect(runUpdate()).rejects.toThrow(/Could not confirm a sole active Jira tenant/);
+
+    expect(promptSecretMock).not.toHaveBeenCalled();
+    expect(smSend).not.toHaveBeenCalled();
+  });
+
+  test('paginates the active-tenant scan before rotating', async () => {
+    ddbSend
+      .mockResolvedValueOnce({
+        Item: {
+          jira_cloud_id: 'cloud-123',
+          oauth_secret_arn: 'arn:jira-oauth',
+          status: 'active',
+        },
+      })
+      .mockResolvedValueOnce({
+        LastEvaluatedKey: { jira_cloud_id: 'cursor' },
+      })
+      .mockResolvedValueOnce({
+        Items: [{ jira_cloud_id: 'cloud-123', status: 'active' }],
+      });
+    smSend
+      .mockResolvedValueOnce({
+        SecretString: JSON.stringify(sampleToken({ cloud_id: 'cloud-123' })),
+      })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({});
+
+    await runUpdate();
+
+    expect(ddbSend).toHaveBeenCalledTimes(3);
+    const secondScan = ddbSend.mock.calls[2][0] as ScanCommand;
+    expect(secondScan.input.ExclusiveStartKey).toEqual({ jira_cloud_id: 'cursor' });
+  });
+
+  test('refuses rotation for an inactive or unknown tenant', async () => {
+    ddbSend.mockResolvedValueOnce({
+      Item: { jira_cloud_id: 'cloud-123', status: 'revoked' },
+    });
+
+    await expect(runUpdate()).rejects.toThrow(/not in the registry/);
+
+    expect(ddbSend).toHaveBeenCalledTimes(1);
+    expect(smSend).not.toHaveBeenCalled();
+  });
+
+  test('reports all missing stack outputs before accessing Jira state', async () => {
+    cfnSend.mockResolvedValue({ Stacks: [{ Outputs: [] }] });
+
+    await expect(runUpdate()).rejects.toThrow(
+      /JiraWorkspaceRegistryTableName, JiraWebhookSecretArn/,
+    );
+
+    expect(ddbSend).not.toHaveBeenCalled();
+    expect(smSend).not.toHaveBeenCalled();
+  });
+
+  test('refuses rotation when the registry row has no OAuth secret ARN', async () => {
+    ddbSend.mockResolvedValueOnce({
+      Item: { jira_cloud_id: 'cloud-123', status: 'active' },
+    });
+
+    await expect(runUpdate()).rejects.toThrow(/missing oauth_secret_arn/);
+
+    expect(ddbSend).toHaveBeenCalledTimes(1);
+    expect(promptSecretMock).not.toHaveBeenCalled();
+    expect(smSend).not.toHaveBeenCalled();
+  });
+
+  test('refuses a blank replacement signing secret', async () => {
+    ddbSend
+      .mockResolvedValueOnce({
+        Item: {
+          jira_cloud_id: 'cloud-123',
+          oauth_secret_arn: 'arn:jira-oauth',
+          status: 'active',
+        },
+      })
+      .mockResolvedValueOnce({
+        Items: [{ jira_cloud_id: 'cloud-123', status: 'active' }],
+      });
+    promptSecretMock.mockResolvedValueOnce('   ');
+
+    await expect(runUpdate()).rejects.toThrow(/Webhook signing secret is required/);
+
+    expect(smSend).not.toHaveBeenCalled();
   });
 });
 
@@ -1226,76 +1429,80 @@ describe('upsertOauthSecret', () => {
   });
 });
 
-describe('isWebhookSecretConfigured', () => {
+describe('synchronizeJiraWebhookSecrets', () => {
   const mockSend = jest.fn();
-  const mockClient = { send: mockSend } as unknown as Parameters<typeof isWebhookSecretConfigured>[0];
+  const mockClient = { send: mockSend } as unknown as Parameters<
+    typeof synchronizeJiraWebhookSecrets
+  >[0];
 
   beforeEach(() => {
     mockSend.mockReset();
   });
 
-  test('returns false for the CDK-generated JSON placeholder (the #368 case)', async () => {
-    // Mirrors what the JiraIntegration construct seeds via generateSecretString:
-    // a JSON object carrying the explicit placeholder marker key.
-    const placeholder = JSON.stringify({
-      [JIRA_WEBHOOK_SECRET_PLACEHOLDER_KEY]: true,
-      value: 'abcdEFGH1234random',
+  test('preserves Forge app actor fields while rotating both signing-secret copies', async () => {
+    const stored = sampleToken({
+      webhook_signing_secret: 'old-secret',
+      app_actor_proxy_url: 'https://install.webtrigger.atlassian.app/public/trigger',
+      app_actor_shared_secret: 's'.repeat(64),
+      app_actor_account_id: 'app-account-1',
+      app_actor_display_name: 'bgagent',
+      app_actor_configured_at: '2026-07-23T00:00:00.000Z',
     });
-    mockSend.mockResolvedValueOnce({ SecretString: placeholder });
-    expect(await isWebhookSecretConfigured(mockClient, 'arn:secret')).toBe(false);
+    mockSend.mockResolvedValueOnce({}).mockResolvedValueOnce({});
+
+    const updated = await synchronizeJiraWebhookSecrets(
+      mockClient,
+      'arn:tenant',
+      'arn:global',
+      stored,
+      'new-secret',
+    );
+
+    expect(updated).toMatchObject({
+      webhook_signing_secret: 'new-secret',
+      app_actor_proxy_url: stored.app_actor_proxy_url,
+      app_actor_shared_secret: stored.app_actor_shared_secret,
+      app_actor_account_id: stored.app_actor_account_id,
+      app_actor_display_name: stored.app_actor_display_name,
+      app_actor_configured_at: stored.app_actor_configured_at,
+    });
+    const tenantWrite = mockSend.mock.calls[0][0] as PutSecretValueCommand;
+    expect(JSON.parse(tenantWrite.input.SecretString as string)).toMatchObject(updated);
   });
 
-  test('returns true for an operator-set bare-string secret', async () => {
-    // Atlassian signing secrets are operator-chosen bare strings, no fixed prefix.
-    mockSend.mockResolvedValueOnce({ SecretString: 'operator-chosen-signing-secret' });
-    expect(await isWebhookSecretConfigured(mockClient, 'arn:secret')).toBe(true);
+  test('rolls the tenant bundle back when the stack-wide write fails', async () => {
+    const stored = sampleToken({ webhook_signing_secret: 'old-secret' });
+    mockSend
+      .mockResolvedValueOnce({})
+      .mockRejectedValueOnce(new Error('stack-wide write failed'))
+      .mockResolvedValueOnce({});
+
+    await expect(synchronizeJiraWebhookSecrets(
+      mockClient,
+      'arn:tenant',
+      'arn:global',
+      stored,
+      'new-secret',
+    )).rejects.toThrow(/stack-wide write failed/);
+
+    expect(mockSend).toHaveBeenCalledTimes(3);
+    const rollback = mockSend.mock.calls[2][0] as PutSecretValueCommand;
+    expect(rollback.input.SecretId).toBe('arn:tenant');
+    expect(JSON.parse(rollback.input.SecretString as string)).toEqual(stored);
   });
 
-  test('returns true for the legacy bare-string CDK placeholder (pre-#368, indistinguishable from real)', async () => {
-    // Stacks deployed before the explicit-placeholder fix seeded a bare random
-    // string. It is conservatively reported as configured — such installs must
-    // redeploy the stack (regenerating the JSON placeholder) before setup seeds.
-    mockSend.mockResolvedValueOnce({ SecretString: 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef' });
-    expect(await isWebhookSecretConfigured(mockClient, 'arn:secret')).toBe(true);
-  });
+  test('reports both failures when updating global and restoring the tenant both fail', async () => {
+    mockSend
+      .mockResolvedValueOnce({})
+      .mockRejectedValueOnce(new Error('global failed'))
+      .mockRejectedValueOnce(new Error('rollback failed'));
 
-  test('returns true for an operator value that happens to start with "{" but is not the placeholder', async () => {
-    mockSend.mockResolvedValueOnce({ SecretString: '{not really json' });
-    expect(await isWebhookSecretConfigured(mockClient, 'arn:secret')).toBe(true);
-  });
-
-  test('returns true for JSON that lacks the placeholder marker key', async () => {
-    mockSend.mockResolvedValueOnce({ SecretString: '{"value":"abcd"}' });
-    expect(await isWebhookSecretConfigured(mockClient, 'arn:secret')).toBe(true);
-  });
-
-  test('returns false on ResourceNotFoundException (secret not created yet)', async () => {
-    const err = new Error('Secrets Manager cannot find the specified secret.');
-    err.name = 'ResourceNotFoundException';
-    mockSend.mockRejectedValueOnce(err);
-    expect(await isWebhookSecretConfigured(mockClient, 'arn:secret')).toBe(false);
-  });
-
-  test('throws on AccessDenied so operators see the IAM gap instead of a confusing re-prompt', async () => {
-    const err = new Error('User is not authorized to perform: secretsmanager:GetSecretValue');
-    err.name = 'AccessDeniedException';
-    mockSend.mockRejectedValueOnce(err);
-    await expect(isWebhookSecretConfigured(mockClient, 'arn:secret')).rejects.toThrow(/IAM permission gap/);
-  });
-
-  test('returns false when SecretString is missing', async () => {
-    mockSend.mockResolvedValueOnce({});
-    expect(await isWebhookSecretConfigured(mockClient, 'arn:secret')).toBe(false);
-  });
-
-  test('returns false when SecretString is empty', async () => {
-    mockSend.mockResolvedValueOnce({ SecretString: '' });
-    expect(await isWebhookSecretConfigured(mockClient, 'arn:secret')).toBe(false);
-  });
-
-  test('wraps a non-Error rejection with the IAM-gap guidance', async () => {
-    // A thrown non-Error value exercises the `?? \'Error\'` / String(err) branches.
-    mockSend.mockRejectedValueOnce('boom');
-    await expect(isWebhookSecretConfigured(mockClient, 'arn:secret')).rejects.toThrow(/IAM permission gap/);
+    await expect(synchronizeJiraWebhookSecrets(
+      mockClient,
+      'arn:tenant',
+      'arn:global',
+      sampleToken(),
+      'new-secret',
+    )).rejects.toThrow(/global failed; rollback: rollback failed/);
   });
 });
