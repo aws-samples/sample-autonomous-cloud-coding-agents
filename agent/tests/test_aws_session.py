@@ -394,6 +394,28 @@ class TestSolutionUserAgent:
         assert "caller/1.0" in merged.user_agent_extra
         assert "md/uksb-wt64nei4u6#agent" in merged.user_agent_extra
 
+    def test_collision_branch_preserves_ua_config_own_keys(self):
+        from botocore.config import Config
+
+        import aws_session
+
+        # Symmetry with the no-collision branch: the collision branch must keep
+        # every key ua.client_config() carries, not just user_agent_extra. If it
+        # rebuilds a fresh Config(user_agent_extra=...), any OTHER key the helper
+        # grows (here read_timeout=99) is silently dropped. A colliding caller
+        # user_agent_extra forces the collision branch. (#319 review)
+        ua_config = Config(user_agent_extra="md/uksb-wt64nei4u6#agent", read_timeout=99)
+        caller = Config(user_agent_extra="caller/1.0", connect_timeout=3)
+        with patch("ua.client_config", return_value=ua_config):
+            merged = aws_session._merge_ua_config({"config": caller})["config"]
+        # Our-side key from ua_config survives (dropped by the fresh-Config form).
+        assert merged.read_timeout == 99
+        # Caller's own key survives.
+        assert merged.connect_timeout == 3
+        # Both UA extras survive the collision.
+        assert "caller/1.0" in merged.user_agent_extra
+        assert "md/uksb-wt64nei4u6#agent" in merged.user_agent_extra
+
     def test_scoped_session_sets_session_level_extra(self, monkeypatch):
         monkeypatch.setenv("AWS_REGION", "us-east-1")
         monkeypatch.setenv(SESSION_ROLE_ARN_ENV, "arn:aws:iam::111122223333:role/abca-session")

@@ -281,13 +281,14 @@ def _merge_ua_config(kwargs: dict[str, Any]) -> dict[str, Any]:
     caller_extra = getattr(existing, "user_agent_extra", None)
     if caller_extra:
         # merge() would let our user_agent_extra win outright; instead keep both
-        # by combining them into one extra. Merge that combined-UA Config onto
-        # the caller's OWN Config so every other caller key (connect_timeout,
-        # retries, ...) survives — Config.merge lets the argument win only on the
-        # keys it actually sets, which here is just user_agent_extra. (#319)
+        # by combining them into one extra. Overlay that combined UA onto
+        # ua_config (Config.merge lets the argument win only on the keys it
+        # sets — here just user_agent_extra), so every OTHER key ua_config
+        # carries survives. Falling through to the shared existing.merge below
+        # then preserves every caller key too, keeping this branch consistent
+        # with the no-collision path. (#319 review)
         combined = f"{caller_extra} {ua.static_user_agent_extra()}"
-        kwargs["config"] = existing.merge(Config(user_agent_extra=combined))
-        return kwargs
+        ua_config = ua_config.merge(Config(user_agent_extra=combined))
     kwargs["config"] = existing.merge(ua_config)
     return kwargs
 
