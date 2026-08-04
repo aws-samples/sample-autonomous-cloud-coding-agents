@@ -1263,6 +1263,16 @@ export class AgentStack extends Stack {
         resourceName: 'bgagent-linear-oauth-*',
         arnFormat: ArnFormat.COLON_RESOURCE_NAME,
       }),
+      // Jira dispatcher posts the terminal status comment for Jira-origin
+      // tasks. Both props are optional on the construct, so omitting them
+      // silently disables the Jira dispatcher.
+      jiraWorkspaceRegistryTable: jiraIntegration.workspaceRegistryTable,
+      jiraOauthSecretArnPattern: Stack.of(this).formatArn({
+        service: 'secretsmanager',
+        resource: 'secret',
+        resourceName: 'bgagent-jira-oauth-*',
+        arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+      }),
     });
 
     // --- GitHub deployment-status → screenshot pipeline ---

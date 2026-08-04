@@ -497,6 +497,28 @@ describe('AgentStack', () => {
     expect(vars.JIRA_WORKSPACE_REGISTRY_TABLE_NAME).toBeDefined();
   });
 
+  test('the fan-out consumer can reach BOTH surfaces\' credentials registries', () => {
+    // These props are optional on FanOutConsumer, so dropping either one from
+    // the stack silently disables that surface's terminal-status comments.
+    const fns = template.findResources('AWS::Lambda::Function');
+    const fanout = Object.entries(fns).find(([id]) => id.startsWith('FanOutConsumer'));
+    expect(fanout).toBeDefined();
+    const vars = (fanout![1] as { Properties?: { Environment?: { Variables?: Record<string, unknown> } } })
+      .Properties?.Environment?.Variables ?? {};
+    expect(vars.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME).toBeDefined();
+    expect(vars.JIRA_WORKSPACE_REGISTRY_TABLE_NAME).toBeDefined();
+  });
+
+  test('the fan-out consumer is granted read on BOTH surfaces\' OAuth secret prefixes', () => {
+    const policies = template.findResources('AWS::IAM::Policy');
+    const fanoutPolicies = Object.entries(policies)
+      .filter(([id]) => id.startsWith('FanOutConsumer'))
+      .map(([, policy]) => policy);
+    const asJson = JSON.stringify(fanoutPolicies);
+    expect(asJson).toContain('bgagent-linear-oauth-*');
+    expect(asJson).toContain('bgagent-jira-oauth-*');
+  });
+
   test('the stranded-orchestration sweep gets the registry its panel refresh needs', () => {
     // It shares refreshPanelAndSettle with the live reconciler; without a
     // registry that feedback no-ops and a recovered epic's panel stays stale.
