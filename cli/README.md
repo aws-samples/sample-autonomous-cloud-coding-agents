@@ -302,15 +302,24 @@ With no flags, writes to the platform default `GitHubTokenSecretArn` stack outpu
 
 Configure the preview-deploy screenshot pipeline webhook. See [Deploy preview screenshots guide](../docs/guides/DEPLOY_PREVIEW_SCREENSHOTS_GUIDE.md).
 
-### `bgagent jira setup` / `map` / `invite-user` / `link`
+### `bgagent jira app-template` / `setup` / `update-webhook-secret` / `map` / `invite-user` / `link`
 
-Manage the Jira Cloud integration. `setup` authorizes a tenant via OAuth (3LO) and stores the token in Secrets Manager; `map` routes a Jira project to a GitHub repo; the two-step `invite-user` → `link` handshake links a teammate's Jira identity to their platform user. See the [Jira setup guide](../docs/guides/JIRA_SETUP_GUIDE.md) for the full walkthrough.
+Manage the Jira Cloud integration. `setup` authorizes a tenant via OAuth (3LO) and stores the token in Secrets Manager. `update-webhook-secret` rotates the admin-console webhook secret in both required Secrets Manager locations without repeating OAuth. `map` routes a Jira project to a GitHub repo; the two-step `invite-user` → `link` handshake links a teammate's Jira identity to their platform user. See the [Jira setup guide](../docs/guides/JIRA_SETUP_GUIDE.md) for the full walkthrough.
 
 ```
+bgagent jira app-template
+
 bgagent jira setup \
   --stack-name backgroundagent-dev
 
-bgagent jira map <cloud-id> <PROJECT-KEY> --repo owner/repo
+bgagent jira update-webhook-secret <cloud-id> \
+  --region <region> \
+  --stack-name <stack-name>
+
+bgagent jira map <cloud-id> <PROJECT-KEY> \
+  --repo owner/repo \
+  --region <region> \
+  --stack-name <stack-name>
 
 bgagent jira invite-user <cloud-id> <account-id-or-email> \
   --region <region>            AWS region (defaults to configured region) \

@@ -121,6 +121,7 @@ describe('resolveJiraOauthToken', () => {
 
     const result = await resolveJiraOauthToken('cloud-uuid-1', REGISTRY_TABLE, clients);
 
+    expect(clients.ddbSend.mock.calls[0][0].input.ConsistentRead).toBe(true);
     expect(result).toEqual({
       accessToken: 'jira_oauth_happy',
       scope: stored.scope,
@@ -694,6 +695,7 @@ describe('getRegistryRow / parseRegistryRow', () => {
     const send = jest.fn().mockResolvedValue({ Item: undefined });
     const row = await getRegistryRow(asDdb(send), REGISTRY_TABLE, 'cloud-x');
     expect(row).toBeNull();
+    expect(send.mock.calls[0][0].input.ConsistentRead).toBe(true);
   });
 
   test('returns null and logs when DDB throws (non-strict swallows error)', async () => {
@@ -727,6 +729,7 @@ describe('getRegistryRow / parseRegistryRow', () => {
     await expect(getRegistryRowStrict(asDdb(send), REGISTRY_TABLE, 'cloud-x')).rejects.toThrow(
       'DDB throttle',
     );
+    expect(send.mock.calls[0][0].input.ConsistentRead).toBe(true);
   });
 });
 

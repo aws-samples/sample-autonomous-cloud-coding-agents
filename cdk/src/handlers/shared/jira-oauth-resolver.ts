@@ -242,6 +242,7 @@ export async function getRegistryRowStrict(
   const result = await ddb.send(new GetCommand({
     TableName: tableName,
     Key: { jira_cloud_id: cloudId },
+    ConsistentRead: true,
   }));
   return parseRegistryRow(result.Item, cloudId);
 }
@@ -259,6 +260,7 @@ export async function getRegistryRow(
     result = await ddb.send(new GetCommand({
       TableName: tableName,
       Key: { jira_cloud_id: cloudId },
+      ConsistentRead: true,
     }));
   } catch (err) {
     logger.error('Failed to fetch Jira workspace registry row', {
