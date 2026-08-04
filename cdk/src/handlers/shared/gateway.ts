@@ -21,14 +21,23 @@ import type { APIGatewayProxyEvent } from 'aws-lambda';
 
 /**
  * Extract the authenticated user_id from the API Gateway event.
- * The Cognito authorizer places claims in event.requestContext.authorizer.claims.
+ *
+ * Two authorizer shapes place the identity in different spots:
+ * - The native Cognito authorizer sets `authorizer.claims.sub`.
+ * - A custom REQUEST authorizer (webhook / API-key) sets `authorizer.userId`
+ *   as a top-level context value.
+ *
+ * Both resolve to the same IdP-namespaced platform user ID, so a handler behind
+ * either authorizer reads identity through this one call.
  * @param event - the API Gateway proxy event.
- * @returns the Cognito `sub` claim (platform user ID), or null if missing.
+ * @returns the platform user ID, or null if missing.
  */
 export function extractUserId(event: APIGatewayProxyEvent): string | null {
-  const claims = event.requestContext.authorizer?.claims;
-  if (!claims || typeof claims.sub !== 'string') return null;
-  return claims.sub;
+  const authorizer = event.requestContext.authorizer;
+  if (!authorizer) return null;
+  if (typeof authorizer.claims?.sub === 'string') return authorizer.claims.sub;
+  if (typeof authorizer.userId === 'string') return authorizer.userId;
+  return null;
 }
 
 /**

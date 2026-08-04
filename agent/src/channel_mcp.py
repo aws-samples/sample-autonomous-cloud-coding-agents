@@ -65,11 +65,9 @@ def _linear_server_entry() -> dict[str, Any]:
 #: and will NOT accept the stored REST OAuth token as a Bearer header, so it
 #: fails to connect in the runtime (``claude mcp list`` → "Failed to connect").
 #:
-#: The LIVE outbound path is the REST shim in ``agent/src/jira_reactions.py``
-#: (the "Plan B" that became Plan A), which posts comments via the Jira REST
-#: v3 API using the same stored OAuth token. See ADR-015 and
-#: ``agent/src/prompt_builder.py``. If Atlassian ever ships a token-compatible
-#: MCP, this entry can be promoted and the REST shim retired.
+#: The LIVE outbound path is ``agent/src/jira_reactions.py``. It uses the
+#: signed Forge app proxy when configured and retains direct REST + OAuth only
+#: as a migration fallback. See ADR-015 and ``agent/src/prompt_builder.py``.
 JIRA_MCP_URL = "https://mcp.atlassian.com/v1/sse"
 
 #: Key name inside ``mcpServers``. Tools surface as ``mcp__jira-server__*``
@@ -178,10 +176,11 @@ def configure_channel_mcp(repo_dir: str, channel_source: str) -> bool:
         # The Jira MCP entry is a non-functional placeholder (see JIRA_MCP_URL
         # docstring + ADR-015). Log it in-band so a "Failed to connect" line in
         # the agent logs isn't mistaken for the cause of a missing comment —
-        # the live outbound path is the REST shim in jira_reactions.py.
+        # the live outbound path is the Forge/app-auth aware jira_reactions.py.
         log(
             "TASK",
             "jira MCP entry is a placeholder and is EXPECTED to fail to connect; "
-            "outbound Jira comments use the REST shim (jira_reactions.py), not MCP",
+            "outbound Jira writes use jira_reactions.py (Forge app actor when configured), "
+            "not MCP",
         )
     return True

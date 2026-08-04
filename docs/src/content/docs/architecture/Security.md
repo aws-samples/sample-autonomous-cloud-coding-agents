@@ -31,14 +31,15 @@ The agent runs with full permissions inside the sandbox but cannot escape it. Th
 
 ## Authentication and authorization
 
-Two authentication mechanisms protect the platform, matching the two input channels:
+Three authentication mechanisms protect the platform, matching its input channels:
 
 | Channel | Mechanism | Details |
 |---------|-----------|---------|
 | CLI / REST API | Amazon Cognito JWT | Users authenticate and receive tokens. The input gateway verifies every request. |
 | Webhooks | HMAC-SHA256 | Per-integration shared secrets stored in Secrets Manager. Secrets are shown once at creation and scheduled for deletion with a 7-day recovery window on revocation. |
+| Webhook management (headless) | Platform API key | Long-lived, scoped keys for CI / automation to manage webhooks without a Cognito user. The webhook management routes accept **either** a Cognito JWT **or** a `webhooks:manage` API key via one unified Lambda authorizer. Keys are `bgak_<key_id>_<secret>`; only the SHA-256 hash of the secret is stored (in DynamoDB, so the authorizer can look it up by `key_id` on every request), and the raw key is shown once at creation. Minting a key still requires an interactive Cognito user. |
 
-**Authorization** is user-scoped: any authenticated user can submit tasks, but users can only view and cancel their own tasks (`user_id` enforcement). Webhook management enforces ownership with 404 (not 403) to avoid leaking webhook existence.
+**Authorization** is user-scoped: any authenticated user can submit tasks, but users can only view and cancel their own tasks (`user_id` enforcement). Both webhook and API key management enforce ownership with 404 (not 403) to avoid leaking resource existence. A platform API key inherits its creator's `user_id`, so a webhook created via a key is attributed to that owner exactly as an interactive session would be. Key scopes gate which routes a key may call (Phase 1: `webhooks:manage`); reserved scopes (`tasks:read`, `tasks:cancel`) are validated but not yet wired to any route.
 
 **Agent credentials** - GitHub access currently uses a PAT stored in Secrets Manager. The orchestrator reads the secret at hydration time and passes it to the agent runtime. The model never receives the token in its context. Planned: replace the shared PAT with a GitHub App via AgentCore Identity Token Vault, providing per-task, repo-scoped, short-lived tokens (see [GitHub issues](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues), the [ADR-016](/sample-autonomous-cloud-coding-agents/architecture/adr-016-pluggable-identity-and-auth) two-seam design, and the [IDENTITY_AND_AUTH.md](/sample-autonomous-cloud-coding-agents/architecture/identity-and-auth) worked examples).
 

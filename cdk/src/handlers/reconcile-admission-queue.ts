@@ -91,8 +91,27 @@ export interface PickupSummary {
   expired: number;
   skipped_no_capacity: number;
   skipped_race: number;
+  /**
+   * Orchestrator re-invoke failures after a successful QUEUED -> SUBMITTED
+   * flip. Counted separately from benign cancel races (`skipped_race`) so a
+   * systemic invoke outage (bad ARN / throttle / perms) — which strands every
+   * picked-up task — trips the `level='error'` escalation instead of hiding at
+   * INFO. Recovery is still handled by the stranded-task reconciler; this
+   * counter exists purely for visibility.
+   */
+  invoke_failed: number;
   errors: number;
 }
+
+/**
+ * Outcome of a single QUEUED -> SUBMITTED pickup attempt.
+ * - `picked_up`: flip succeeded and the orchestrator was re-invoked.
+ * - `race`: the conditional flip lost to a concurrent transition (user
+ *   cancel / another pickup instance) — benign.
+ * - `invoke_failed`: the flip succeeded but the orchestrator re-invoke
+ *   failed; the task is now a stranded SUBMITTED row for the reconciler.
+ */
+type PickupOutcome = 'picked_up' | 'race' | 'invoke_failed';
 
 /**
  * Query ALL QUEUED tasks in global FIFO order (StatusIndex GSI: PK
@@ -169,10 +188,12 @@ async function emitEvent(taskId: string, eventType: string, metadata: Record<str
 
 /**
  * Flip one task QUEUED -> SUBMITTED and re-invoke the orchestrator.
- * Returns false when the conditional flip lost to a concurrent
- * transition (user cancel / another pickup instance).
+ * Returns `'race'` when the conditional flip lost to a concurrent
+ * transition (user cancel / another pickup instance), `'invoke_failed'`
+ * when the flip succeeded but the orchestrator re-invoke failed, and
+ * `'picked_up'` on success.
  */
-async function pickUpTask(task: QueuedTask): Promise<boolean> {
+async function pickUpTask(task: QueuedTask): Promise<PickupOutcome> {
   const now = new Date().toISOString();
   try {
     await ddb.send(new UpdateItemCommand({
@@ -191,7 +212,7 @@ async function pickUpTask(task: QueuedTask): Promise<boolean> {
   } catch (err: unknown) {
     if (err && typeof err === 'object' && 'name' in err && err.name === 'ConditionalCheckFailedException') {
       logger.info('Queued task transitioned concurrently before pickup — skipping', { task_id: task.task_id });
-      return false;
+      return 'race';
     }
     throw err;
   }
@@ -221,7 +242,7 @@ async function pickUpTask(task: QueuedTask): Promise<boolean> {
       task_id: task.task_id,
       error: invokeErr instanceof Error ? invokeErr.message : String(invokeErr),
     });
-    return false;
+    return 'invoke_failed';
   }
 
   logger.info('Queued task picked up', {
@@ -229,7 +250,7 @@ async function pickUpTask(task: QueuedTask): Promise<boolean> {
     user_id: task.user_id,
     queued_for_s: task.age_seconds,
   });
-  return true;
+  return 'picked_up';
 }
 
 /**
@@ -288,6 +309,7 @@ export async function handler(): Promise<PickupSummary> {
     expired: 0,
     skipped_no_capacity: 0,
     skipped_race: 0,
+    invoke_failed: 0,
     errors: 0,
   };
 
@@ -362,10 +384,19 @@ export async function handler(): Promise<PickupSummary> {
     // over-pick simply re-queues.
     for (const task of live.slice(0, available)) {
       try {
-        if (await pickUpTask(task)) {
-          summary.picked_up++;
-        } else {
-          summary.skipped_race++;
+        switch (await pickUpTask(task)) {
+          case 'picked_up':
+            summary.picked_up++;
+            break;
+          case 'invoke_failed':
+            // Flip succeeded but the re-invoke did not — the task is a
+            // stranded SUBMITTED row. Count it distinctly so a systemic
+            // invoke outage pages instead of masquerading as cancel races.
+            summary.invoke_failed++;
+            break;
+          case 'race':
+            summary.skipped_race++;
+            break;
         }
       } catch (err) {
         summary.errors++;
@@ -378,7 +409,14 @@ export async function handler(): Promise<PickupSummary> {
     summary.skipped_no_capacity += Math.max(0, live.length - available);
   }
 
-  const level = summary.errors > 0 && summary.picked_up === 0 && summary.queued_seen > 0 ? 'error' : 'info';
+  // Escalate to ERROR when the cycle made no forward progress despite a
+  // non-empty queue AND something went wrong — either raw exceptions
+  // (`errors`) or orchestrator re-invoke failures (`invoke_failed`). The
+  // latter is the systemic-outage signal the counter was added for: a bad
+  // ARN / throttle / perms failure strands every pickup, leaving
+  // picked_up === 0 with invoke_failed > 0.
+  const failed = summary.errors + summary.invoke_failed;
+  const level = failed > 0 && summary.picked_up === 0 && summary.queued_seen > 0 ? 'error' : 'info';
   logger[level]('Admission-queue pickup finished', { ...summary });
   return summary;
 }

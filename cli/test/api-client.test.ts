@@ -18,12 +18,15 @@
  */
 
 import { ApiClient } from '../src/api-client';
+import { getAuthToken } from '../src/auth';
 import { ApiError } from '../src/errors';
 
 // Mock auth
 jest.mock('../src/auth', () => ({
   getAuthToken: jest.fn().mockResolvedValue('mock-token'),
 }));
+
+const mockGetAuthToken = getAuthToken as jest.Mock;
 
 // Mock config
 jest.mock('../src/config', () => ({
@@ -577,6 +580,46 @@ describe('ApiClient', () => {
         expect(err).toBeInstanceOf(ApiError);
         expect((err as ApiError).statusCode).toBe(502);
       }
+    });
+  });
+
+  describe('authentication mode', () => {
+    const okResponse = { ok: true, json: async () => ({ data: {} }) };
+
+    afterEach(() => {
+      delete process.env.BGAGENT_API_KEY;
+    });
+
+    test('default mode sends the Cognito Authorization header, no X-API-Key', async () => {
+      mockFetch.mockResolvedValue(okResponse);
+      await new ApiClient().listWebhooks();
+      const headers = mockFetch.mock.calls[0][1].headers;
+      expect(headers.Authorization).toBe('mock-token');
+      expect(headers['X-API-Key']).toBeUndefined();
+    });
+
+    test('constructor apiKey sends X-API-Key and skips Cognito', async () => {
+      mockFetch.mockResolvedValue(okResponse);
+      mockGetAuthToken.mockClear();
+      await new ApiClient({ apiKey: 'bgak_k_s' }).listWebhooks();
+      const headers = mockFetch.mock.calls[0][1].headers;
+      expect(headers['X-API-Key']).toBe('bgak_k_s');
+      expect(headers.Authorization).toBeUndefined();
+      expect(mockGetAuthToken).not.toHaveBeenCalled();
+    });
+
+    test('BGAGENT_API_KEY env is used when no explicit key is passed', async () => {
+      process.env.BGAGENT_API_KEY = 'bgak_env_key';
+      mockFetch.mockResolvedValue(okResponse);
+      await new ApiClient().listWebhooks();
+      expect(mockFetch.mock.calls[0][1].headers['X-API-Key']).toBe('bgak_env_key');
+    });
+
+    test('explicit apiKey overrides the environment variable', async () => {
+      process.env.BGAGENT_API_KEY = 'bgak_env_key';
+      mockFetch.mockResolvedValue(okResponse);
+      await new ApiClient({ apiKey: 'bgak_explicit' }).listWebhooks();
+      expect(mockFetch.mock.calls[0][1].headers['X-API-Key']).toBe('bgak_explicit');
     });
   });
 });

@@ -12,5 +12,9 @@
   "max_budget_usd": {
     "min": 0.01,
     "max": 100
+  },
+  "jira_app_actor": {
+    "min_secret_length": 32,
+    "forge_webtrigger_suffix": ".webtrigger.atlassian.app"
   }
 }

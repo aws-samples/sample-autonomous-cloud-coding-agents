@@ -90,6 +90,10 @@ run = "node --experimental-strip-types scripts/check-constants-sync.ts"
 description = "Drift check: contracts/coverage-thresholds.json ↔ cdk/cli jest coverageThreshold and agent pytest fail_under"
 run = "node --experimental-strip-types scripts/check-coverage-thresholds-sync.ts"
 
+[tasks."test:jira-forge-app"]
+description = "Test the standalone Jira Forge app-actor proxy"
+run = "npm test --prefix integrations/jira-forge-app"
+
 [tasks."sync:abca-commands"]
 description = "Generate commands stubs from .abca/commands for multiple AI assistants"
 run = "node scripts/sync-abca-commands.mjs"
@@ -153,7 +157,7 @@ run = [
 [tasks."security:deps"]
 description = "Audit dependencies for known vulnerabilities (osv-scanner)"
 # Yarn workspaces use the repo-root lockfile only; do not scan stale cli/docs yarn.lock copies.
-run = "osv-scanner scan --lockfile agent/uv.lock --lockfile yarn.lock"
+run = "osv-scanner scan --lockfile agent/uv.lock --lockfile yarn.lock --lockfile integrations/jira-forge-app/package-lock.json"
 
 [tasks."security:grype"]
 description = "Run Grype on source files; generated/vendor dirs are excluded because lockfile, Retire, and image scans cover dependencies and runtime artifacts"
@@ -233,6 +237,7 @@ depends = [
   "//cdk:build",
   "//cli:build",
   "//docs:build",
+  ":test:jira-forge-app",
   ":drift-prevention"
 ]
 

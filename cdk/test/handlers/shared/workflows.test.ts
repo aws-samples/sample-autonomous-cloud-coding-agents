@@ -150,6 +150,30 @@ describe('CDK descriptors stay in sync with agent/workflows/**', () => {
     return out;
   })();
 
+  // The reverse direction. The check above walks YAML → descriptor, so a
+  // descriptor with no workflow file is invisible to it. That orphan is worse
+  // than a missing descriptor: DESCRIPTORS is the live admission table, so a
+  // submitted ref resolves, the caller gets a 201, and the agent then dies when
+  // load_workflow can't find the file — an accepted task that cannot run.
+  test('every CDK descriptor has a shipped workflow file (no orphan admissions)', () => {
+    const shippedIds = new Set(yamlFiles.map((file) => {
+      const doc = yaml.load(fs.readFileSync(file, 'utf8')) as Record<string, unknown>;
+      return doc.id as string;
+    }));
+    // DESCRIPTORS is intentionally not exported (it is internal to the resolver),
+    // so read the ids off the source the same way this file already cross-checks
+    // the agent's own constants.
+    const workflowsTs = fs.readFileSync(
+      path.resolve(__dirname, '../../../src/handlers/shared/workflows.ts'), 'utf8',
+    );
+    const table = workflowsTs.slice(workflowsTs.indexOf('const DESCRIPTORS'));
+    const declaredIds = [...table.matchAll(/^\s{4}id: '([^']+)',$/gm)].map((m) => m[1]);
+    expect(declaredIds.length).toBeGreaterThan(0);
+
+    const orphans = declaredIds.filter((id) => !shippedIds.has(id));
+    expect(orphans).toEqual([]);
+  });
+
   test('every shipped workflow file has a matching CDK descriptor', () => {
     expect(yamlFiles.length).toBeGreaterThan(0);
     for (const file of yamlFiles) {
@@ -277,5 +301,21 @@ describe('disallowedWorkflowModel (WORKFLOWS.md rule 13)', () => {
   test('the allow-list covers both bare and us-prefixed inference-profile ids', () => {
     expect(WORKFLOW_MODEL_ALLOWLIST).toContain('anthropic.claude-sonnet-4-6');
     expect(WORKFLOW_MODEL_ALLOWLIST).toContain('us.anthropic.claude-sonnet-4-6');
+  });
+
+  test('every bare allow-listed id is paired with its us- inference-profile form', () => {
+    // An id admitted in only one of the two forms is a latent rejection: the
+    // workflow YAML may legitimately pin either, and admission compares the
+    // literal string. Pairing them is the invariant, so assert it for every
+    // entry rather than spot-checking one model.
+    const bare = WORKFLOW_MODEL_ALLOWLIST.filter(id => !id.startsWith('us.'));
+    expect(bare.length).toBeGreaterThan(0);
+    const missing = bare.filter(id => !WORKFLOW_MODEL_ALLOWLIST.includes(`us.${id}`));
+    expect(missing).toEqual([]);
+    // ...and no us- entry is orphaned (its bare form must be admitted too).
+    const orphaned = WORKFLOW_MODEL_ALLOWLIST
+      .filter(id => id.startsWith('us.'))
+      .filter(id => !WORKFLOW_MODEL_ALLOWLIST.includes(id.slice('us.'.length)));
+    expect(orphaned).toEqual([]);
   });
 });

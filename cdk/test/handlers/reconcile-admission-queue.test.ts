@@ -265,10 +265,48 @@ describe('reconcile-admission-queue — races and failures', () => {
 
     const summary = await handler();
     expect(summary.picked_up).toBe(0);
+    // Invoke failure is its own counter, NOT a benign cancel race.
+    expect(summary.invoke_failed).toBe(1);
+    expect(summary.skipped_race).toBe(0);
     // Only the QUEUED -> SUBMITTED flip — no compensating write back to QUEUED.
     const updates = sentDdbCommands('UpdateItem');
     expect(updates).toHaveLength(1);
     expect(updates[0].input.ExpressionAttributeValues[':submitted']).toEqual({ S: 'SUBMITTED' });
+  });
+
+  test('a systemic invoke outage stranding every pickup escalates to ERROR', async () => {
+    // Spy on the real logger singleton the handler imports (same instance).
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { logger } = require('../../src/handlers/shared/logger') as {
+      logger: { error: (m: string, d?: Record<string, unknown>) => void };
+    };
+    const errorSpy = jest.spyOn(logger, 'error');
+    mockDdbSend.mockImplementation((cmd: SentCommand) => {
+      if (cmd._type === 'Query') {
+        return Promise.resolve({
+          Items: [
+            queuedRow({ task_id: 'T1', user_id: 'u1', created_at: isoAge(120) }),
+            queuedRow({ task_id: 'T2', user_id: 'u1', created_at: isoAge(60) }),
+          ],
+        });
+      }
+      if (cmd._type === 'GetItem') {
+        return Promise.resolve({ Item: { active_count: { N: '0' } } });
+      }
+      return Promise.resolve({});
+    });
+    // Bad ARN / throttle / perms — every re-invoke fails.
+    mockLambdaSend.mockRejectedValue(new Error('AccessDeniedException'));
+
+    const summary = await handler();
+    expect(summary.picked_up).toBe(0);
+    expect(summary.invoke_failed).toBe(2);
+    expect(summary.errors).toBe(0); // no raw exceptions — the flips all succeeded
+
+    // The final "pickup finished" line escalated to ERROR so a real outage pages.
+    const finished = errorSpy.mock.calls.find(c => c[0] === 'Admission-queue pickup finished');
+    expect(finished).toBeDefined();
+    errorSpy.mockRestore();
   });
 
   test('per-user concurrency read failure skips that user but not others', async () => {

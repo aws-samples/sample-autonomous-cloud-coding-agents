@@ -18,6 +18,7 @@ from channel_mcp import configure_channel_mcp
 from config import (
     AGENT_WORKSPACE,
     build_config,
+    clear_jira_task_credentials,
     get_config,
     resolve_jira_oauth_token,
     resolve_linear_api_token,
@@ -640,6 +641,11 @@ def run_task(
 
     from repo import setup_repo
 
+    # AgentCore can reuse this process for another task. Scrub every Jira
+    # credential before config or repository code runs, including for non-Jira
+    # tasks, so a prior tenant's long-lived Forge secret cannot cross tasks.
+    clear_jira_task_credentials()
+
     # Build config
     config = build_config(
         repo_url=repo_url,
@@ -842,7 +848,56 @@ def run_task(
             if prompt_version:
                 os.environ["PROMPT_VERSION"] = prompt_version
 
-            # Setup repo (deterministic pre-hooks)
+            # ── Early ACK ────────────────────────────────────────────────────
+            # Acknowledge the task is picked up BEFORE the (potentially long)
+            # pre-agent baseline build in setup_repo(). On a large repo that
+            # baseline is minutes (up to the build-verify ceiling); posting the
+            # 👀 only *after* it left the issue looking dead for the whole phase
+            # (no reaction, comment, or state change). None of these calls needs
+            # the cloned repo — they act on the channel issue via its API token +
+            # issue id from channel metadata — so they belong before the build.
+            #
+            # Resolve the per-channel access token from Secrets Manager first
+            # (react_task_started/comment_task_started read the env var it sets).
+            # configure_channel_mcp DOES need setup.repo_dir, so it stays below.
+            if config.channel_source == "linear":
+                resolve_linear_api_token(config.channel_metadata)
+            elif config.channel_source == "jira":
+                resolve_jira_oauth_token(config.channel_metadata)
+
+            # 👀 on the Linear issue — acknowledges the task is picked up.
+            # No-op for non-Linear tasks. Best-effort; failures are logged
+            # but do not block the pipeline. Capture the reaction id so we
+            # can delete it at terminal status (👀 → ✅/❌).
+            linear_eyes_reaction_id = react_task_started(
+                config.channel_source,
+                config.channel_metadata,
+            )
+
+            # "Starting" comment on the Jira issue through the Forge app actor
+            # (or legacy OAuth fallback). No-op for non-Jira tasks.
+            # Best-effort; failures are logged, never block.
+            comment_task_started(
+                config.channel_source,
+                config.channel_metadata,
+            )
+
+            # Move the Jira card To Do → In Progress so the board reflects that
+            # work has started (issue #572). No-op for non-Jira tasks. Part of
+            # the early ACK (before setup_repo) so the board reflects "started"
+            # during the baseline build, not only after it. Best-effort; failures
+            # are logged and never block the pipeline.
+            transition_task_started(
+                config.channel_source,
+                config.channel_metadata,
+            )
+
+            # Setup repo (deterministic pre-hooks). A failure/timeout/OOM in the
+            # pre-agent baseline build raises here; it needs no local handler —
+            # the outer ``except Exception`` at the bottom of this ``try`` writes
+            # the task FAILED, swaps the 👀 (posted above) to ❌, and posts the
+            # failure comment. Posting the 👀 earlier is what makes the outer
+            # handler's ❌-swap actually visible for setup failures.
             with task_span("task.repo_setup") as setup_span:
                 setup = setup_repo(config, progress=progress)
                 setup_span.set_attribute("build.before", setup.build_before)
@@ -855,40 +910,10 @@ def run_task(
 
             # Channel-specific MCP wiring. Must happen before
             # discover_project_config so the scan picks up the file we just
-            # wrote. Resolve the per-channel access token from Secrets
-            # Manager *before* writing .mcp.json so the child SDK process
-            # inherits the env var that the MCP server entry references
-            # (${LINEAR_API_TOKEN} / ${JIRA_API_TOKEN}).
-            if config.channel_source == "linear":
-                resolve_linear_api_token(config.channel_metadata)
-            elif config.channel_source == "jira":
-                resolve_jira_oauth_token(config.channel_metadata)
+            # wrote — and after the clone, since it writes .mcp.json into the
+            # repo dir. (Token resolution + the 👀/start ACK moved earlier so
+            # the user gets immediate feedback; see the Early ACK block above.)
             configure_channel_mcp(setup.repo_dir, config.channel_source)
-
-            # 👀 on the Linear issue — acknowledges the task is picked up.
-            # No-op for non-Linear tasks. Best-effort; failures are logged
-            # but do not block the pipeline. Capture the reaction id so we
-            # can delete it at terminal status (👀 → ✅/❌).
-            linear_eyes_reaction_id = react_task_started(
-                config.channel_source,
-                config.channel_metadata,
-            )
-
-            # "Starting" comment on the Jira issue (REST shim — the Atlassian
-            # Remote MCP can't be used from a headless agent). No-op for
-            # non-Jira tasks. Best-effort; failures are logged, never block.
-            comment_task_started(
-                config.channel_source,
-                config.channel_metadata,
-            )
-
-            # Move the Jira card To Do → In Progress so the board reflects that
-            # work has started (issue #572). No-op for non-Jira tasks.
-            # Best-effort; failures are logged and never block the pipeline.
-            transition_task_started(
-                config.channel_source,
-                config.channel_metadata,
-            )
 
             # Download attachments from S3 (version-pinned, integrity-verified)
             prepared_attachments: list = []

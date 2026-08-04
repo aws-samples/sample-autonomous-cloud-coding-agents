@@ -86,6 +86,14 @@ export const WORKFLOW_MODEL_ALLOWLIST: readonly string[] = [
   'us.anthropic.claude-sonnet-4-6',
   'anthropic.claude-opus-4-20250514-v1:0',
   'us.anthropic.claude-opus-4-20250514-v1:0',
+  // Claude Opus 4.8. Admitting an id here does NOT grant permission to invoke
+  // it — this list and the IAM grant in `bedrock-models.ts` are independent, and
+  // a model must be on BOTH to be usable. A workflow pinning an allow-listed but
+  // un-granted id passes admission and then fails at turn 0 with AccessDenied,
+  // so keep the two in step: when adding an id here, add it there (or to the
+  // `bedrockModels` context) in the same change.
+  'anthropic.claude-opus-4-8',
+  'us.anthropic.claude-opus-4-8',
   'anthropic.claude-haiku-4-5-20251001-v1:0',
   'us.anthropic.claude-haiku-4-5-20251001-v1:0',
 ];
