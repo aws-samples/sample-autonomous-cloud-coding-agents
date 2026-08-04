@@ -17,9 +17,9 @@
  *  SOFTWARE.
  */
 
-import { ConditionalCheckFailedException, DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
-import { DeleteCommand, DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
+import { DeleteCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import {
   type GitHubDeploymentStatusPayload,
@@ -27,10 +27,10 @@ import {
 } from './shared/github-deployment-status';
 import { verifyGitHubRequest } from './shared/github-webhook-verify';
 import { logger } from './shared/logger';
-import { abcaUserAgent } from './shared/ua';
+import { makeClient, makeDocClient } from './shared/ua';
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ ...abcaUserAgent() }));
-const lambdaClient = new LambdaClient({ ...abcaUserAgent() });
+const ddb = makeDocClient();
+const lambdaClient = makeClient(LambdaClient);
 
 const WEBHOOK_SECRET_ARN = process.env.GITHUB_WEBHOOK_SECRET_ARN!;
 const DEDUP_TABLE_NAME = process.env.GITHUB_WEBHOOK_DEDUP_TABLE_NAME!;

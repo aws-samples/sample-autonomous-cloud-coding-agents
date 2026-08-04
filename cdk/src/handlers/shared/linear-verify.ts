@@ -18,16 +18,14 @@
  */
 
 import * as crypto from 'crypto';
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
-import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { isUsableHmacSecret } from './hmac-secret';
 import { getOauthSecretStrict, getRegistryRowStrict } from './linear-oauth-resolver';
 import { logger } from './logger';
-import { abcaUserAgent } from './ua';
+import { makeClient, makeDocClient } from './ua';
 
-const sm = new SecretsManagerClient({ ...abcaUserAgent() });
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ ...abcaUserAgent() }));
+const sm = makeClient(SecretsManagerClient);
+const ddb = makeDocClient();
 
 // In-memory secret cache with 5-minute TTL (same pattern as slack-verify.ts).
 const secretCache = new Map<string, { secret: string; expiresAt: number }>();

@@ -17,20 +17,19 @@
  *  SOFTWARE.
  */
 
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
 import { DeleteSecretCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
-import { DynamoDBDocumentClient, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { logger } from './shared/logger';
 import { slackFetch } from './shared/slack-api';
 import { getSlackSecret, SLACK_SECRET_PREFIX, verifySlackRequest } from './shared/slack-verify';
-import { abcaUserAgent } from './shared/ua';
+import { makeClient, makeDocClient } from './shared/ua';
 import type { MentionEvent, SlackFileRef } from './slack-command-processor';
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ ...abcaUserAgent() }));
-const sm = new SecretsManagerClient({ ...abcaUserAgent() });
-const lambdaClient = new LambdaClient({ ...abcaUserAgent() });
+const ddb = makeDocClient();
+const sm = makeClient(SecretsManagerClient);
+const lambdaClient = makeClient(LambdaClient);
 
 const TABLE_NAME = process.env.SLACK_INSTALLATION_TABLE_NAME!;
 const SIGNING_SECRET_ARN = process.env.SLACK_SIGNING_SECRET_ARN!;

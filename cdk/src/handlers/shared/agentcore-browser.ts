@@ -28,7 +28,7 @@ import { HttpRequest } from '@smithy/protocol-http';
 import { SignatureV4 } from '@smithy/signature-v4';
 import WebSocket, { type RawData } from 'ws';
 import { logger } from './logger';
-import { abcaUserAgent } from './ua';
+import { makeClient } from './ua';
 
 const REGION = process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? 'us-east-1';
 
@@ -98,7 +98,7 @@ interface CdpMessage {
  */
 export async function captureScreenshot(url: string, opts: { timeoutMs?: number } = {}): Promise<Uint8Array> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const client = new BedrockAgentCoreClient({ region: REGION, ...abcaUserAgent() });
+  const client = makeClient(BedrockAgentCoreClient, { region: REGION });
 
   const startResp = await client.send(new StartBrowserSessionCommand({
     browserIdentifier: AWS_BROWSER_IDENTIFIER,

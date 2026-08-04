@@ -19,9 +19,8 @@
 
 import * as crypto from 'crypto';
 import { BedrockRuntimeClient, ApplyGuardrailCommand } from '@aws-sdk/client-bedrock-runtime';
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { S3Client } from '@aws-sdk/client-s3';
-import { DynamoDBDocumentClient, GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { ulid } from 'ulid';
 import type { ScreeningConfig } from './shared/attachment-screening';
 import { buildClarifyResumeDescription, isClarifyHold } from './shared/clarify-resume';
@@ -77,12 +76,12 @@ import { upsertEpicPanel } from './shared/orchestration-rollup';
 import { claimCommentAck, clearRollupClaim, deriveOrchestrationId, loadOrchestration, setChildOwnAttachments, setRetryCommentId, setStatusCommentId, type OrchestrationChildRow, type OrchestrationReleaseContext } from './shared/orchestration-store';
 import { DEFAULT_LABEL_FILTER, hasHelpLabel, HELP_SUFFIX } from './shared/trigger-label';
 import type { Attachment, PassedAttachmentRecord } from './shared/types';
-import { abcaUserAgent } from './shared/ua';
+import { makeClient, makeDocClient } from './shared/ua';
 import { MAX_ATTACHMENTS_PER_TASK, MAX_TASK_DESCRIPTION_LENGTH } from './shared/validation';
 import { CODING_WORKFLOW_ID } from './shared/workflows';
 import { TERMINAL_STATUSES, type TaskStatusType } from '../constructs/task-status';
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ ...abcaUserAgent() }));
+const ddb = makeDocClient();
 
 const PROJECT_MAPPING_TABLE = process.env.LINEAR_PROJECT_MAPPING_TABLE_NAME!;
 const USER_MAPPING_TABLE = process.env.LINEAR_USER_MAPPING_TABLE_NAME!;
@@ -103,8 +102,8 @@ const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT_TASKS_PER_USER ?? '10')
 const ATTACHMENTS_BUCKET = process.env.ATTACHMENTS_BUCKET_NAME;
 const GUARDRAIL_ID = process.env.GUARDRAIL_ID;
 const GUARDRAIL_VERSION = process.env.GUARDRAIL_VERSION;
-const attachmentsS3Client = ATTACHMENTS_BUCKET ? new S3Client({}) : undefined;
-const attachmentsBedrockClient = GUARDRAIL_ID && GUARDRAIL_VERSION ? new BedrockRuntimeClient({}) : undefined;
+const attachmentsS3Client = ATTACHMENTS_BUCKET ? makeClient(S3Client) : undefined;
+const attachmentsBedrockClient = GUARDRAIL_ID && GUARDRAIL_VERSION ? makeClient(BedrockRuntimeClient) : undefined;
 const attachmentsScreeningConfig: ScreeningConfig | undefined =
   attachmentsBedrockClient && GUARDRAIL_ID && GUARDRAIL_VERSION
     ? { bedrockClient: attachmentsBedrockClient, guardrailId: GUARDRAIL_ID, guardrailVersion: GUARDRAIL_VERSION }

@@ -21,10 +21,9 @@
 // attachments, and transitions the task from PENDING_UPLOADS to SUBMITTED.
 // Tests: cdk/test/handlers/confirm-uploads.test.ts
 
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
 import { DeleteObjectsCommand, GetObjectCommand, HeadObjectCommand, S3Client } from '@aws-sdk/client-s3';
-import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult, Context } from 'aws-lambda';
 import { ulid } from 'ulid';
 import { ATTACHMENT_OBJECT_KEY_PREFIX } from '../constructs/attachments-bucket';
@@ -35,12 +34,12 @@ import { estimateImageTokensFromBuffer } from './shared/image-tokens';
 import { logger } from './shared/logger';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
 import { type AttachmentRecord, createAttachmentRecord, type TaskRecord, toTaskDetail } from './shared/types';
-import { abcaUserAgent } from './shared/ua';
+import { makeClient, makeDocClient } from './shared/ua';
 import { computeTtlEpoch, MAX_TOTAL_ATTACHMENT_SIZE_BYTES } from './shared/validation';
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ ...abcaUserAgent() }));
-const s3Client = new S3Client({ ...abcaUserAgent() });
-const lambdaClient = process.env.ORCHESTRATOR_FUNCTION_ARN ? new LambdaClient({ ...abcaUserAgent() }) : undefined;
+const ddb = makeDocClient();
+const s3Client = makeClient(S3Client);
+const lambdaClient = process.env.ORCHESTRATOR_FUNCTION_ARN ? makeClient(LambdaClient) : undefined;
 
 const TABLE_NAME = process.env.TASK_TABLE_NAME!;
 const EVENTS_TABLE_NAME = process.env.TASK_EVENTS_TABLE_NAME!;
@@ -722,7 +721,7 @@ async function buildScreeningConfig(): Promise<ScreeningConfig | undefined> {
   if (!process.env.GUARDRAIL_ID || !process.env.GUARDRAIL_VERSION) return undefined;
   if (!_bedrockClient) {
     const { BedrockRuntimeClient } = await import('@aws-sdk/client-bedrock-runtime');
-    _bedrockClient = new BedrockRuntimeClient({ ...abcaUserAgent() });
+    _bedrockClient = makeClient(BedrockRuntimeClient);
   }
   return {
     guardrailId: process.env.GUARDRAIL_ID,

@@ -17,8 +17,8 @@
  *  SOFTWARE.
  */
 
-import { DynamoDBClient, TransactionCanceledException } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, PutCommand, TransactWriteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { TransactionCanceledException } from '@aws-sdk/client-dynamodb';
+import { PutCommand, TransactWriteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
 import { scanDenyReason } from './shared/deny-reason-scanner';
@@ -27,9 +27,9 @@ import { logger } from './shared/logger';
 import { formatMinuteBucket, RATE_LIMIT_ROW_TTL_SECONDS } from './shared/rate-limit';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
 import { DENY_REASON_MAX_LENGTH, type DenyRequest, type DenyResponse } from './shared/types';
-import { abcaUserAgent } from './shared/ua';
+import { makeDocClient } from './shared/ua';
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ ...abcaUserAgent() }));
+const ddb = makeDocClient();
 const TASK_TABLE_NAME = process.env.TASK_TABLE_NAME;
 const TASK_APPROVALS_TABLE_NAME = process.env.TASK_APPROVALS_TABLE_NAME;
 const EVENTS_TABLE_NAME = process.env.TASK_EVENTS_TABLE_NAME;

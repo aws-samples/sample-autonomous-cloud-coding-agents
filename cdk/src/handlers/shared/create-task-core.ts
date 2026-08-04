@@ -22,10 +22,9 @@
 // Tests: cdk/test/handlers/shared/create-task-core.test.ts, cdk/test/handlers/create-task.test.ts
 
 import { BedrockRuntimeClient, ApplyGuardrailCommand } from '@aws-sdk/client-bedrock-runtime';
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
 import { PutObjectCommand, DeleteObjectsCommand, S3Client } from '@aws-sdk/client-s3';
-import { DynamoDBDocumentClient, PutCommand, QueryCommand, GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { PutCommand, QueryCommand, GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { createPresignedPost } from '@aws-sdk/s3-presigned-post';
 import type { APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
@@ -53,7 +52,7 @@ import {
   type TaskRecord,
   toTaskDetail,
 } from './types';
-import { abcaUserAgent } from './ua';
+import { makeClient, makeDocClient } from './ua';
 import { computeTtlEpoch, hasTaskSpec, isValidIdempotencyKey, isValidRepo, isValidTaskDescriptionLength, MAX_ATTACHMENT_SIZE_BYTES, MAX_TASK_DESCRIPTION_LENGTH, MAX_TOTAL_ATTACHMENT_SIZE_BYTES, validateAttachments, validateMaxBudgetUsd, validateMaxTurns, validatePrNumber } from './validation';
 import { disallowedWorkflowModel, getWorkflowDescriptor, isValidWorkflowRef, resolveWorkflowRef, resolveWorkflowRefError } from './workflows';
 import { ATTACHMENT_OBJECT_KEY_PREFIX } from '../../constructs/attachments-bucket';
@@ -91,10 +90,10 @@ export interface TaskCreationContext {
   readonly preScreenedAttachments?: readonly AttachmentRecord[];
 }
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ ...abcaUserAgent() }));
-const lambdaClient = process.env.ORCHESTRATOR_FUNCTION_ARN ? new LambdaClient({ ...abcaUserAgent() }) : undefined;
+const ddb = makeDocClient();
+const lambdaClient = process.env.ORCHESTRATOR_FUNCTION_ARN ? makeClient(LambdaClient) : undefined;
 const bedrockClient = (process.env.GUARDRAIL_ID && process.env.GUARDRAIL_VERSION)
-  ? new BedrockRuntimeClient({ ...abcaUserAgent() }) : undefined;
+  ? makeClient(BedrockRuntimeClient) : undefined;
 if (process.env.GUARDRAIL_ID && !process.env.GUARDRAIL_VERSION) {
   logger.error('GUARDRAIL_ID is set but GUARDRAIL_VERSION is missing — guardrail screening disabled', {
     metric_type: 'guardrail_misconfiguration',
@@ -104,7 +103,7 @@ const TABLE_NAME = process.env.TASK_TABLE_NAME!;
 const EVENTS_TABLE_NAME = process.env.TASK_EVENTS_TABLE_NAME!;
 const TASK_RETENTION_DAYS = Number(process.env.TASK_RETENTION_DAYS ?? '90');
 const ATTACHMENTS_BUCKET = process.env.ATTACHMENTS_BUCKET_NAME;
-const s3Client = ATTACHMENTS_BUCKET ? new S3Client({ ...abcaUserAgent() }) : undefined;
+const s3Client = ATTACHMENTS_BUCKET ? makeClient(S3Client) : undefined;
 
 /** Human-readable description of a workflow's required-input contract (for 400s). */
 function describeRequiredInputs(requiredInputs: { allOf?: readonly string[]; oneOf?: readonly string[] }): string {

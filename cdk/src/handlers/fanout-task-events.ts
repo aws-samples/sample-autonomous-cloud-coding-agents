@@ -38,8 +38,7 @@
  * wiring lands.
  */
 
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import type {
   DynamoDBBatchItemFailure,
   DynamoDBBatchResponse,
@@ -65,7 +64,7 @@ import { coerceNumericOrNull } from './shared/numeric';
 import { loadRepoConfig } from './shared/repo-config';
 import { encodeMarkdownUrl } from './shared/screenshot-url';
 import type { ChannelConfig, TaskNotificationsConfig, TaskRecord } from './shared/types';
-import { abcaUserAgent } from './shared/ua';
+import { makeDocClient } from './shared/ua';
 import { dispatchSlackEvent, SlackApiError } from './slack-notify';
 import { TaskStatus } from '../constructs/task-status';
 
@@ -405,7 +404,7 @@ export function shouldFanOut(event: FanOutEvent, overrides?: TaskNotificationsCo
  * internally (the Slack API rejecting a message — e.g.
  * ``channel_not_found`` — is not recoverable by a Lambda retry).
  */
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ ...abcaUserAgent() }));
+const ddb = makeDocClient();
 
 /**
  * Slack dispatcher — hands the event to the in-module

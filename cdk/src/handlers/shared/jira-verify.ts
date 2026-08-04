@@ -18,15 +18,14 @@
  */
 
 import * as crypto from 'crypto';
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
-import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { isUsableHmacSecret } from './hmac-secret';
 import { getOauthSecretStrict, getRegistryRowStrict } from './jira-oauth-resolver';
 import { logger } from './logger';
+import { makeClient, makeDocClient } from './ua';
 
-const sm = new SecretsManagerClient({});
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const sm = makeClient(SecretsManagerClient);
+const ddb = makeDocClient();
 
 /** Prefix for Jira-related secrets in Secrets Manager. */
 export const JIRA_SECRET_PREFIX = 'bgagent/jira/';

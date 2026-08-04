@@ -17,8 +17,7 @@
  *  SOFTWARE.
  */
 
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
 import { TERMINAL_STATUSES } from '../constructs/task-status';
@@ -28,9 +27,9 @@ import { logger } from './shared/logger';
 import { formatMinuteBucket } from './shared/rate-limit';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
 import { NUDGE_MAX_MESSAGE_LENGTH, type NudgeRecord, type NudgeRequest, type TaskRecord } from './shared/types';
-import { abcaUserAgent } from './shared/ua';
+import { makeDocClient } from './shared/ua';
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ ...abcaUserAgent() }));
+const ddb = makeDocClient();
 const TASK_TABLE_NAME = process.env.TASK_TABLE_NAME;
 const NUDGES_TABLE_NAME = process.env.NUDGES_TABLE_NAME;
 if (!TASK_TABLE_NAME || !NUDGES_TABLE_NAME) {

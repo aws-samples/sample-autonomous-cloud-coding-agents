@@ -17,13 +17,12 @@
  *  SOFTWARE.
  */
 
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, ScanCommand } from '@aws-sdk/lib-dynamodb';
+import { ScanCommand } from '@aws-sdk/lib-dynamodb';
 import { resolveLinearOauthToken } from './linear-oauth-resolver';
 import { logger } from './logger';
-import { abcaUserAgent } from './ua';
+import { makeDocClient } from './ua';
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ ...abcaUserAgent() }));
+const ddb = makeDocClient();
 
 /**
  * Linear issue identifier shape, e.g. `ENG-42`. Linear identifiers are

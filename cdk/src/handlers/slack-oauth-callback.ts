@@ -17,16 +17,15 @@
  *  SOFTWARE.
  */
 
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { CreateSecretCommand, RestoreSecretCommand, SecretsManagerClient, UpdateSecretCommand, ResourceNotFoundException, InvalidRequestException } from '@aws-sdk/client-secrets-manager';
-import { DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
+import { PutCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { logger } from './shared/logger';
 import { getSlackSecret, SLACK_SECRET_PREFIX } from './shared/slack-verify';
-import { abcaUserAgent } from './shared/ua';
+import { makeClient, makeDocClient } from './shared/ua';
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ ...abcaUserAgent() }));
-const sm = new SecretsManagerClient({ ...abcaUserAgent() });
+const ddb = makeDocClient();
+const sm = makeClient(SecretsManagerClient);
 
 const TABLE_NAME = process.env.SLACK_INSTALLATION_TABLE_NAME!;
 const CLIENT_ID_SECRET_ARN = process.env.SLACK_CLIENT_ID_SECRET_ARN!;
