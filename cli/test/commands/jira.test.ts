@@ -1025,6 +1025,11 @@ describe('jira setup action', () => {
   let loadConfigSpy: jest.SpiedFunction<typeof config.loadConfig>;
 
   beforeEach(() => {
+    ddbSend.mockReset();
+    smSend.mockReset();
+    promptSecretMock.mockReset();
+    awaitOauthCallbackMock.mockReset();
+    execFileMock.mockReset();
     cfnSend.mockReset();
     loadConfigSpy = jest.spyOn(config, 'loadConfig').mockReturnValue({ region: 'us-west-2' } as ReturnType<typeof config.loadConfig>);
   });
@@ -1041,7 +1046,10 @@ describe('jira setup action', () => {
     ).rejects.toThrow(/missing outputs .*JiraWorkspaceRegistryTableName.*JiraWebhookSecretArn/s);
   });
 
-  test('completes OAuth setup and synchronizes tenant plus stack-wide webhook secrets', async () => {
+  test.each([
+    ['a first install', []],
+    ['a same-tenant setup rerun', [{ jira_cloud_id: 'cloud-123', status: 'active' }]],
+  ])('completes OAuth setup and synchronizes webhook secrets for %s', async (_case, activeTenants) => {
     cfnSend.mockResolvedValue({
       Stacks: [{
         Outputs: [
@@ -1093,7 +1101,7 @@ describe('jira setup action', () => {
     ddbSend.mockImplementation((command: unknown) => {
       if (command instanceof ScanCommand) {
         return Promise.resolve({
-          Items: [{ jira_cloud_id: 'cloud-123', status: 'active' }],
+          Items: activeTenants,
         });
       }
       return Promise.resolve({});
@@ -1139,6 +1147,81 @@ describe('jira setup action', () => {
         SecretId: 'arn:webhook',
         SecretString: 'new-signing-secret',
       });
+    } finally {
+      credsSpy.mockRestore();
+      logSpy.mockRestore();
+      writeSpy.mockRestore();
+      fetchSpy.mockRestore();
+    }
+  });
+
+  test('refuses a second active tenant before writing OAuth or registry state', async () => {
+    cfnSend.mockResolvedValue({
+      Stacks: [{
+        Outputs: [
+          { OutputKey: 'JiraWorkspaceRegistryTableName', OutputValue: 'RegTable' },
+          { OutputKey: 'JiraWebhookSecretArn', OutputValue: 'arn:webhook' },
+        ],
+      }],
+    });
+    const credsSpy = jest.spyOn(config, 'loadCredentials').mockReturnValue({
+      id_token: fakeIdToken('cognito-sub-123'),
+    } as ReturnType<typeof config.loadCredentials>);
+    const logSpy = jest.spyOn(console, 'log').mockImplementation();
+    const writeSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const fetchSpy = jest.spyOn(global, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        access_token: 'new-access-token',
+        refresh_token: 'new-refresh-token',
+        token_type: 'Bearer',
+        expires_in: 3600,
+        scope: 'read:jira-work write:jira-work read:jira-user',
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify([{
+        id: 'cloud-123',
+        name: 'Acme',
+        url: 'https://acme.atlassian.net',
+        scopes: ['read:jira-work'],
+      }]), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+
+    let completeOauth!: (value: {
+      kind: 'direct-oauth';
+      code: string;
+      state: string;
+    }) => void;
+    awaitOauthCallbackMock.mockReturnValueOnce(new Promise((resolve) => {
+      completeOauth = resolve;
+    }));
+    execFileMock.mockImplementationOnce(
+      (_command: string, args: string[], callback: (err: Error | null) => void) => {
+        const state = new URL(args[0]).searchParams.get('state');
+        completeOauth({ kind: 'direct-oauth', code: 'auth-code', state: state! });
+        callback(null);
+      },
+    );
+    ddbSend.mockResolvedValueOnce({
+      Items: [{ jira_cloud_id: 'cloud-456', status: 'active' }],
+    });
+
+    try {
+      const program = makeJiraCommand();
+      await expect(program.parseAsync([
+        'node',
+        'bgagent',
+        'setup',
+        '--client-id',
+        'client-id',
+        '--client-secret',
+        'client-secret',
+      ])).rejects.toThrow(/multiple tenant secrets/);
+
+      expect(ddbSend).toHaveBeenCalledTimes(1);
+      expect(ddbSend.mock.calls[0][0]).toBeInstanceOf(ScanCommand);
+      expect(
+        ddbSend.mock.calls.some(([command]) => command instanceof UpdateCommand),
+      ).toBe(false);
+      expect(smSend).not.toHaveBeenCalled();
+      expect(promptSecretMock).not.toHaveBeenCalled();
     } finally {
       credsSpy.mockRestore();
       logSpy.mockRestore();
@@ -1595,7 +1678,12 @@ describe('synchronizeJiraWebhookSecrets', () => {
       'arn:global',
       stored,
       'new-secret',
-    )).rejects.toThrow(/stack-wide write failed/);
+    )).rejects.toMatchObject({
+      name: 'CliError',
+      message: expect.stringMatching(
+        /restored the tenant bundle.*Both secrets remain consistent.*safely retried/s,
+      ),
+    });
 
     expect(mockSend).toHaveBeenCalledTimes(3);
     const rollback = mockSend.mock.calls[2][0] as PutSecretValueCommand;

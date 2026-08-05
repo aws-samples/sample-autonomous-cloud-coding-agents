@@ -671,10 +671,15 @@ describe('jira-webhook-processor handler', () => {
     expect(createTaskCoreMock).not.toHaveBeenCalled();
   });
 
-  test('skips when accountId has no linked platform user', async () => {
+  test.each([
+    ['missing', undefined],
+    ['pending', { platform_user_id: 'cognito-user-1', status: 'pending' }],
+    ['revoked', { platform_user_id: 'cognito-user-1', status: 'revoked' }],
+    ['active but missing platform_user_id', { platform_user_id: '', status: 'active' }],
+  ])('skips when the user mapping is %s', async (_case, userMapping) => {
     ddbSend
       .mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'active' } })
-      .mockResolvedValueOnce({ Item: undefined });
+      .mockResolvedValueOnce({ Item: userMapping });
     await handler(eventWith(issue()));
     expect(createTaskCoreMock).not.toHaveBeenCalled();
   });

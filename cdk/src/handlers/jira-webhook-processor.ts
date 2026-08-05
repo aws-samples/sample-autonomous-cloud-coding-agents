@@ -388,7 +388,6 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       jira_cloud_id: cloudId,
       jira_account_id: accountId,
       jira_account_source: accountSource,
-      jira_actor_display_name: payload.user?.displayName,
       jira_actor_account_id: actorAccountId,
       jira_reporter_account_id: reporterAccountId,
       jira_creator_account_id: creatorAccountId,

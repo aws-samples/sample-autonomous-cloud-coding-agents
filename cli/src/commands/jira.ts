@@ -294,6 +294,9 @@ function multiTenantWebhookError(cloudIds: readonly string[]): CliError {
  * admin-console webhooks. These payloads omit cloudId, so the receiver uses
  * the stack-wide verifier; the per-tenant copy is retained for payloads that
  * do carry cloudId.
+ *
+ * The writes are not atomic. If the process exits between them, re-run the
+ * command to converge both copies.
  */
 export async function synchronizeJiraWebhookSecrets(
   sm: SecretsManagerClient,
@@ -332,7 +335,11 @@ export async function synchronizeJiraWebhookSecrets(
         + 'Manually synchronize both Secrets Manager values before re-enabling the Jira webhook.',
       );
     }
-    throw err;
+    throw new CliError(
+      'Failed to update the stack-wide Jira webhook secret, but restored the tenant bundle '
+      + `to its previous value: ${err instanceof Error ? err.message : String(err)}. `
+      + 'Both secrets remain consistent at the previous value; rotation can be safely retried.',
+    );
   }
   return merged;
 }

@@ -150,7 +150,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
         });
         return jsonResponse(401, { error: 'Invalid signature' });
       } else if (result === 'revoked') {
-        logger.warn('Jira webhook from revoked tenant — rejecting without stack-wide fallback', {
+        logger.warn('Jira webhook from revoked tenant — rejecting without stack-wide verification', {
           jira_cloud_id: payload.cloudId,
         });
         return jsonResponse(401, { error: 'Tenant not active' });

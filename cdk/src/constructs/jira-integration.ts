@@ -185,14 +185,14 @@ export class JiraIntegration extends Construct {
     // omit cloudId, so a single-tenant install verifies them against this
     // stack-wide copy of the tenant's signing secret.
     //
-    // The explicit JSON placeholder can never accidentally match a valid
-    // operator HMAC secret. Setup replaces it before the webhook is enabled.
+    // The generated JSON is a non-operational initial value. Setup
+    // unconditionally replaces the complete value before the webhook is enabled.
     this.webhookSecret = new secretsmanager.Secret(this, 'WebhookSecret', {
       description: 'Jira webhook signing secret — populate via `bgagent jira setup`',
       removalPolicy,
       generateSecretString: {
-        // Yields `{"abca_jira_webhook_placeholder":true,"value":"<random>"}`:
-        // a JSON object (starts with `{`) with an explicit marker key.
+        // Yields `{"abca_jira_webhook_placeholder":true,"value":"<random>"}`.
+        // No runtime code interprets the marker key.
         secretStringTemplate: JSON.stringify({ [JIRA_WEBHOOK_SECRET_PLACEHOLDER_KEY]: true }),
         generateStringKey: 'value',
       },

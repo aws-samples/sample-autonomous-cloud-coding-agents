@@ -157,6 +157,8 @@ bgagent jira update-webhook-secret <cloud-id>
 
 The command prompts for the new value and updates both required Secrets Manager values without repeating OAuth. Keep the Jira webhook disabled until the command succeeds.
 
+The operator role running this command needs `cloudformation:DescribeStacks`; `dynamodb:GetItem` and `dynamodb:Scan` on `JiraWorkspaceRegistryTable`; `secretsmanager:GetSecretValue` and `secretsmanager:PutSecretValue` on the tenant's `bgagent-jira-oauth-<cloudId>` secret; and `secretsmanager:PutSecretValue` on the stack-wide ARN from `JiraWebhookSecretArn`.
+
 ### 4. Install the dedicated outbound app
 
 The repository includes a narrow Forge app under `integrations/jira-forge-app`. Its web trigger accepts only four signed operations: identity probe, comment, read transitions, and perform transition. It does not expose a general Jira REST proxy.
@@ -314,7 +316,7 @@ The body must be verified as the *raw unparsed bytes* — never parsed-and-restr
 - **`jira:issue_updated`** — triggers only if the label was **newly added** in this update. Jira reports label changes in `changelog.items[]` (`field: "labels"`, with `fromString` / `toString`), *not* by re-sending the full label list. The processor diffs the changelog rather than inspecting `issue.fields.labels`, so re-saving an issue that already has the label does not re-trigger.
 - **`comment_created`** — triggers only when the new comment contains a token-bounded `@bgagent` mention and the issue has a prior ABCA pull request.
 - All other event types get a silent `200`.
-- Issues outside active project mappings are always silent, even if they use the same label. Site-wide Jira activity must not cause ABCA comments in projects that were never onboarded.
+- Issues outside active project mappings are always silent, even if they use the same label. This includes explicit `@bgagent` follow-ups after a project mapping is removed: offboarding ends all ABCA interaction for that project. Site-wide Jira activity must not cause ABCA comments in projects that were never onboarded or are no longer connected.
 
 ## Comment-triggered PR iteration
 

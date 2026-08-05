@@ -58,15 +58,13 @@ describe('JiraIntegration construct', () => {
     });
   });
 
-  // #368: the webhook secret MUST seed an explicit JSON placeholder so the CLI
-  // can distinguish "never configured" from an operator-set value. A bare
-  // generated string (CDK's default with no GenerateSecretString) caused
-  // `bgagent jira setup` to skip seeding, leaving every admin-UI webhook
-  // delivery to fail HMAC verification with 401.
-  test('webhook secret seeds a JSON placeholder carrying the explicit marker key (#368)', () => {
+  // A structured initial value avoids seeding a bare signing-key-shaped
+  // secret. Setup unconditionally replaces the complete value; no runtime
+  // code interprets the marker key.
+  test('webhook secret seeds a non-signing JSON placeholder', () => {
     template.hasResourceProperties('AWS::SecretsManager::Secret', {
       GenerateSecretString: Match.objectLike({
-        // secretStringTemplate is the JSON object carrying the marker key.
+        // secretStringTemplate pins the non-operational initial JSON shape.
         SecretStringTemplate: Match.stringLikeRegexp('abca_jira_webhook_placeholder'),
         GenerateStringKey: 'value',
       }),

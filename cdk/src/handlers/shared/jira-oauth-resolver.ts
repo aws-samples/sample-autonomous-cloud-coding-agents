@@ -99,8 +99,8 @@ export interface StoredOauthToken {
    *  stack-wide verifier.
    *
    *  Optional for back-compat: tokens written before per-tenant signing
-   *  was wired up won't have it, and the receiver falls back to the
-   *  stack-wide `JIRA_WEBHOOK_SECRET_ARN` for those installs. */
+   *  was wired up won't have it, so the receiver uses the stack-wide
+   *  `JIRA_WEBHOOK_SECRET_ARN` verifier for those installs. */
   readonly webhook_signing_secret?: string;
 }
 
@@ -341,8 +341,8 @@ export async function resolveJiraOauthToken(
  * Strict variant of {@link getRegistryRow}: throws on infra error
  * (DDB throttle, network) instead of returning null. Use this from the
  * webhook signature-verification path where a `null` return would let
- * a transient throttle silently downgrade per-tenant verification to
- * the stack-wide fallback secret.
+ * a transient throttle silently bypass per-tenant verification by using
+ * the stack-wide verifier.
  */
 export async function getRegistryRowStrict(
   ddb: DynamoDBDocumentClient,
