@@ -186,6 +186,25 @@ The strict grammar is implemented by `parseRef` (TS) and `parse_ref` (Python), k
 - **Construct tests**: `registry.test.ts` (Provider wiring + IAM).
 - **E2E (PR 2)**: publish an MCP server → reference from a Blueprint → run a task → assert the agent payload carries the bundle and the `TaskRecord` has `resolved_assets`.
 
+### 12.1 Reproducing the E2E — the `forkBlueprintRepo` demo hook
+
+The stack ships an **opt-in** deploy hook that onboards one repo with all three MVP asset kinds pinned, so the end-to-end path can be exercised without hand-authoring a Blueprint. It is off by default (no fork is hardcoded for other contributors). Enable it by pointing it at a repo you control:
+
+```bash
+# via CDK context…
+cdk deploy --context forkBlueprintRepo=owner/repo
+# …or via env var
+FORK_BLUEPRINT_REPO=owner/repo cdk deploy
+```
+
+When set, the stack adds a `Blueprint` for `owner/repo` pinning
+`registry://mcp_server/acme/aws-knowledge@^1.0.0`,
+`registry://cedar_policy_module/acme/guard@^1.0.0`, and
+`registry://skill/acme/readme-helper@^1.0.0`. Those `acme/*` records must be
+published to the registry first (they are illustrative, not seeded) — otherwise
+task admission fails closed on the unresolved pins. Leave the flag unset for a
+normal deploy.
+
 ## 13. Accepted risk
 
 Preview API: AgentCore Registry hard-migrates namespaces at GA (~2026-08-06) with breaking API-schema changes. The `RegistryClient` port confines the rework to one adapter file per language; experimental project + no prod data ⇒ acceptable. Swap the provisioning custom resource for native CDK constructs when they ship at GA.

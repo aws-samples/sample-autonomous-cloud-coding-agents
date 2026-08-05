@@ -258,9 +258,9 @@ export class Blueprint extends Construct {
     this.node.addValidation(new RepoFormatValidation(props.repo));
     this.node.addValidation(new DomainFormatValidation(this.egressAllowlist));
     this.node.addValidation(new ApprovalGateCapValidation(this.approvalGateCap));
-    this.node.addValidation(new RegistryRefValidation('assets.mcpServers', this.mcpServerRefs));
-    this.node.addValidation(new RegistryRefValidation('assets.cedarPolicyModules', this.cedarPolicyModuleRefs));
-    this.node.addValidation(new RegistryRefValidation('assets.skills', this.skillRefs));
+    this.node.addValidation(new RegistryRefValidation('assets.mcpServers', this.mcpServerRefs, 'mcp_server'));
+    this.node.addValidation(new RegistryRefValidation('assets.cedarPolicyModules', this.cedarPolicyModuleRefs, 'cedar_policy_module'));
+    this.node.addValidation(new RegistryRefValidation('assets.skills', this.skillRefs, 'skill'));
 
     const now = new Date().toISOString();
 
@@ -335,11 +335,12 @@ export class Blueprint extends Construct {
         parameters: {
           TableName: props.repoTable.tableName,
           Key: { repo: { S: props.repo } },
-          UpdateExpression: `SET #status = :active, #updated = :now${this.buildUpdateFields(props)}`,
+          UpdateExpression: `SET #status = :active, #updated = :now${this.buildUpdateFields(props)}${this.buildRemoveClause()}`,
           ExpressionAttributeNames: {
             '#status': 'status',
             '#updated': 'updated_at',
             ...this.buildExpressionNames(props),
+            ...this.buildRemoveNames(),
           },
           ExpressionAttributeValues: {
             ':active': { S: 'active' },
@@ -438,6 +439,29 @@ export class Blueprint extends Construct {
     if (this.skillRefs.length > 0) values[':skills'] = { L: this.skillRefs.map(r => ({ S: r })) };
     return values;
   }
+
+  /** Registry asset fields that are now empty must be REMOVEd on update, not
+   *  just omitted from SET — otherwise a redeploy that cleared the last
+   *  mcp_server/cedar_policy_module/skill leaves the stale DDB refs active and
+   *  operators can't detach a pinned asset through the Blueprint API (#246). */
+  private emptyAssetFields(): string[] {
+    const empty: string[] = [];
+    if (this.mcpServerRefs.length === 0) empty.push('mcp_servers');
+    if (this.cedarPolicyModuleRefs.length === 0) empty.push('cedar_policy_modules');
+    if (this.skillRefs.length === 0) empty.push('skills');
+    return empty;
+  }
+
+  private buildRemoveClause(): string {
+    const empty = this.emptyAssetFields();
+    return empty.length > 0 ? ` REMOVE ${empty.map(f => `#${f}`).join(', ')}` : '';
+  }
+
+  private buildRemoveNames(): Record<string, string> {
+    const names: Record<string, string> = {};
+    for (const f of this.emptyAssetFields()) names[`#${f}`] = f;
+    return names;
+  }
 }
 
 /**
@@ -502,9 +526,20 @@ class ApprovalGateCapValidation implements IValidation {
  * Registry (#246) — validates each ``registry://`` asset ref against the strict
  * grammar at synth, so a floating or malformed pin cannot deploy and then fail
  * every task at resolve time. Uses the same ``parseRef`` the resolver enforces.
+ *
+ * Also enforces that the ref's kind matches the field it was pinned under
+ * (``expectedKind``). Each typed Blueprint field stores into a distinct DDB
+ * column, and the orchestrator dispatches by the ref's embedded kind — so a
+ * ``skill`` ref placed under ``assets.mcpServers`` would otherwise deploy and
+ * then silently activate skill behavior from an "MCP" column. Reject the
+ * mismatch at synth instead.
  */
 class RegistryRefValidation implements IValidation {
-  constructor(private readonly field: string, private readonly refs: readonly string[]) {}
+  constructor(
+    private readonly field: string,
+    private readonly refs: readonly string[],
+    private readonly expectedKind: string,
+  ) {}
 
   public validate(): string[] {
     const errors: string[] = [];
@@ -512,6 +547,13 @@ class RegistryRefValidation implements IValidation {
       const result = parseRef(ref);
       if (!result.ok) {
         errors.push(`Invalid ${this.field} ref '${ref}': ${result.reason} — ${result.message}`);
+        continue;
+      }
+      if (result.ref.kind !== this.expectedKind) {
+        errors.push(
+          `Wrong kind for ${this.field} ref '${ref}': expected a '${this.expectedKind}' ref `
+          + `but got '${result.ref.kind}'.`,
+        );
       }
     }
     return errors;

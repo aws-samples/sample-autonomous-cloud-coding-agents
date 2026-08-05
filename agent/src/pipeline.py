@@ -1155,10 +1155,28 @@ def run_task(
 
             # Registry assets (#246): merge resolved mcp_server configs into
             # .mcp.json alongside the channel MCP entry, before the project scan.
+            # Fail-closed (#246 Option C): apply_resolved_assets raises
+            # RegistryAssetLoadError on an infrastructure failure (missing
+            # repo_dir / .mcp.json write error) — we let it propagate so the task
+            # fails rather than running with a pinned-but-absent asset while the
+            # audit record claims it was loaded. Degraded-but-safe cases (empty
+            # runtime) are warn+skip inside the loader.
             if config.resolved_assets:
                 from registry.loader import apply_resolved_assets
 
-                apply_resolved_assets(setup.repo_dir, config.resolved_assets)
+                loaded_mcp_keys = apply_resolved_assets(setup.repo_dir, config.resolved_assets)
+                log("TASK", f"Registry: applied {len(loaded_mcp_keys)} mcp_server asset(s)")
+                # ADR-016 ENFORCEMENT (re-apply after the merge): the registry
+                # merge writes servers into .mcp.json AFTER the strip above, so a
+                # registry-published Linear server would otherwise slip back in and
+                # run under bypassPermissions. Re-strip so the enforcement covers
+                # registry-sourced entries too, not just repo-committed ones.
+                if strip_linear_mcp_servers(setup.repo_dir):
+                    log(
+                        "WARN",
+                        "Registry: stripped a Linear MCP server introduced by a resolved "
+                        "asset (ADR-016 — the agent must have no Linear tools)",
+                    )
 
             # Download attachments from S3 (version-pinned, integrity-verified)
             prepared_attachments: list = []

@@ -800,22 +800,58 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
       UpdateExpression: 'SET #ra = :ra, #ua = :now',
       ExpressionAttributeNames: { '#ra': 'resolved_assets', '#ua': 'updated_at' },
       ExpressionAttributeValues: {
-        ':ra': resolvedAssets.map((a) => ({ kind: a.kind, id: `${a.namespace}/${a.name}`, version: a.version })),
+        // Persist warnings (e.g. ["DEPRECATED"]) alongside the audit triple so a
+        // user inspecting the task record can see a deprecated asset ran — ADR-022
+        // sub-decision 4 promises this, and a Lambda log alone isn't durable (#246).
+        ':ra': resolvedAssets.map((a) => ({
+          kind: a.kind,
+          id: `${a.namespace}/${a.name}`,
+          version: a.version,
+          ...(a.warnings.length > 0 && { warnings: [...a.warnings] }),
+        })),
         ':now': new Date().toISOString(),
       },
     }));
+
+    // Emit a durable TaskEvent per warned asset (deprecation is the main case),
+    // so the warning surfaces in the task's event stream, not just Lambda logs.
+    for (const a of resolvedAssets) {
+      if (a.warnings.length > 0) {
+        await emitTaskEvent(task.task_id, 'registry_asset_warning', {
+          kind: a.kind,
+          id: `${a.namespace}/${a.name}`,
+          version: a.version,
+          warnings: [...a.warnings],
+        }, correlation);
+      }
+    }
   }
 
   // Registry cedar_policy_module assets (#246, PR 3) reach the agent through the
   // SAME cedar_policies payload field as inline blueprint policies, so they are
   // byte-identical from the PolicyEngine's view (the cedar-parity contract holds
   // by construction). Inline blueprint policies come first, then resolved modules.
+  //
+  // Fail-closed: a pinned module whose cedar_text is empty/whitespace must fail
+  // the task, not be silently dropped — a dropped policy is usually a *deny* rule,
+  // so silently omitting it would WIDEN what the agent may do while the audit
+  // record still claims the module was applied (#246 review).
+  const resolvedCedar = resolvedAssets
+    .filter((a) => a.kind === 'cedar_policy_module')
+    .map((a) => {
+      const text = (a.runtime as { cedar_text?: string }).cedar_text;
+      if (typeof text !== 'string' || text.trim().length === 0) {
+        throw new RegistryResolutionError(
+          'REMOVED',
+          `registry://cedar_policy_module/${a.namespace}/${a.name}@${a.version}`,
+          `resolved cedar_policy_module ${a.namespace}/${a.name}@${a.version} has empty cedar_text`,
+        );
+      }
+      return text;
+    });
   const cedarText = [
     ...(blueprintConfig?.cedar_policies ?? []),
-    ...resolvedAssets
-      .filter((a) => a.kind === 'cedar_policy_module')
-      .map((a) => (a.runtime as { cedar_text?: string }).cedar_text)
-      .filter((t): t is string => typeof t === 'string' && t.length > 0),
+    ...resolvedCedar,
   ];
 
   const payload: Record<string, unknown> = {
