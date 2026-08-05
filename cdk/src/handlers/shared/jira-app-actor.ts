@@ -27,6 +27,7 @@ export const JIRA_APP_ACTOR_MIN_SECRET_LENGTH = sharedConstants.jira_app_actor.m
 const PROXY_ERROR_CODES = new Set([
   'cloud_id_required',
   'invalid_comment_request',
+  'invalid_update_comment_request',
   'invalid_issue_key',
   'invalid_json',
   'invalid_payload',
@@ -46,9 +47,10 @@ export interface JiraAppActorConfig {
 
 export interface JiraAppActorRequest {
   readonly version: 1;
-  readonly operation: 'comment' | 'get_transitions' | 'transition' | 'identity';
+  readonly operation: 'comment' | 'update_comment' | 'get_transitions' | 'transition' | 'identity';
   readonly cloud_id: string;
   readonly issue_key?: string;
+  readonly comment_id?: string;
   readonly body?: Record<string, unknown>;
   readonly transition_id?: string;
 }
