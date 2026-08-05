@@ -72,4 +72,16 @@ describe('JiraIntegration construct', () => {
       }),
     });
   });
+
+  test('every Lambda carries ABCA_COMPONENT=webhook via ComponentUaAspect (#319)', () => {
+    // The Jira integration was the one integration missing ComponentUaAspect,
+    // so its Lambdas fell back to the `api` label. Match slack/linear/github.
+    const functions = template.findResources('AWS::Lambda::Function');
+    const fnIds = Object.keys(functions);
+    expect(fnIds.length).toBeGreaterThan(0);
+    for (const fnId of fnIds) {
+      const envVars = functions[fnId].Properties.Environment?.Variables ?? {};
+      expect(envVars).toHaveProperty('ABCA_COMPONENT', 'webhook');
+    }
+  });
 });

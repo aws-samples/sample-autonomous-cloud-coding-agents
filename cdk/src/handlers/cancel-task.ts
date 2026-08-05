@@ -18,10 +18,9 @@
  */
 
 import { BedrockAgentCoreClient, StopRuntimeSessionCommand } from '@aws-sdk/client-bedrock-agentcore';
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { ECSClient, StopTaskCommand } from '@aws-sdk/client-ecs';
 import { LambdaMicrovmsClient, TerminateMicrovmCommand } from '@aws-sdk/client-lambda-microvms';
-import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
 import { TaskStatus, TERMINAL_STATUSES } from '../constructs/task-status';
@@ -29,12 +28,13 @@ import { extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
 import type { TaskRecord } from './shared/types';
+import { makeClient, makeDocClient } from './shared/ua';
 import { computeTtlEpoch } from './shared/validation';
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
-const agentCoreClient = new BedrockAgentCoreClient({});
-const ecsClient = new ECSClient({});
-const microvmClient = new LambdaMicrovmsClient({});
+const ddb = makeDocClient();
+const agentCoreClient = makeClient(BedrockAgentCoreClient);
+const ecsClient = makeClient(ECSClient);
+const microvmClient = makeClient(LambdaMicrovmsClient);
 const TABLE_NAME = process.env.TASK_TABLE_NAME!;
 const EVENTS_TABLE_NAME = process.env.TASK_EVENTS_TABLE_NAME!;
 const TASK_RETENTION_DAYS = Number(process.env.TASK_RETENTION_DAYS ?? '90');

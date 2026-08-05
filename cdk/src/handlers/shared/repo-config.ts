@@ -17,9 +17,9 @@
  *  SOFTWARE.
  */
 
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand } from '@aws-sdk/lib-dynamodb';
 import { logger } from './logger';
+import { makeDocClient } from './ua';
 
 /**
  * Per-repository configuration written by the Blueprint CDK construct
@@ -90,7 +90,7 @@ export interface BlueprintConfig {
   readonly approval_gate_cap?: number;
 }
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const ddb = makeDocClient();
 
 /**
  * Combined result of a single RepoTable GetItem used by the submit

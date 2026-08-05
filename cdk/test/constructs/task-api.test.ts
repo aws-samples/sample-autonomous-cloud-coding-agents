@@ -74,6 +74,37 @@ function createStackWithWebhooks(overrides?: Partial<TaskApiProps>): { stack: St
   return { stack, template };
 }
 
+// Full surface: webhookTable AND apiKeyTable both provided (all tables in the
+// same app/stack — CDK forbids cross-app resource references).
+function createStackWithWebhooksAndApiKeys(): { stack: Stack; template: Template } {
+  const app = new App();
+  const stack = new Stack(app, 'TestStack');
+
+  const taskTable = new dynamodb.Table(stack, 'TaskTable', {
+    partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+  });
+  const taskEventsTable = new dynamodb.Table(stack, 'TaskEventsTable', {
+    partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'event_id', type: dynamodb.AttributeType.STRING },
+  });
+  const webhookTable = new dynamodb.Table(stack, 'WebhookTable', {
+    partitionKey: { name: 'webhook_id', type: dynamodb.AttributeType.STRING },
+  });
+  const apiKeyTable = new dynamodb.Table(stack, 'ApiKeyTable', {
+    partitionKey: { name: 'key_id', type: dynamodb.AttributeType.STRING },
+  });
+
+  new TaskApi(stack, 'TaskApi', {
+    taskTable,
+    taskEventsTable,
+    webhookTable,
+    apiKeyTable,
+  });
+
+  const template = Template.fromStack(stack);
+  return { stack, template };
+}
+
 describe('TaskApi construct', () => {
   let baseTemplate: Template;
   let webhookTemplate: Template;
@@ -157,6 +188,50 @@ describe('TaskApi construct', () => {
       expect(envVars).toHaveProperty('TASK_TABLE_NAME');
       expect(envVars).toHaveProperty('TASK_EVENTS_TABLE_NAME');
       expect(envVars).toHaveProperty('TASK_RETENTION_DAYS', '90');
+    }
+  });
+
+  test('REST API Lambdas carry the ABCA_COMPONENT=api solution-attribution label (#319)', () => {
+    const functions = baseTemplate.findResources('AWS::Lambda::Function');
+    const fnIds = Object.keys(functions);
+    expect(fnIds.length).toBeGreaterThan(0);
+    for (const fnId of fnIds) {
+      const envVars = functions[fnId].Properties.Environment?.Variables ?? {};
+      expect(envVars).toHaveProperty('ABCA_COMPONENT', 'api');
+    }
+  });
+
+  test('webhook + api-key Lambdas carry the correct ABCA_COMPONENT label (#319)', () => {
+    // Exercise the full surface: both webhookTable AND apiKeyTable set, so the
+    // webhook ingest Lambdas (including WebhookCreateTaskFn, which inherits the
+    // createTask env) are labeled `webhook`, and the API-key management Lambdas
+    // are labeled `api`. The base-template test above never sees these, so it
+    // passed vacuously for the webhook/api-key surfaces.
+    const { template } = createStackWithWebhooksAndApiKeys();
+    const functions = template.findResources('AWS::Lambda::Function');
+
+    // WebhookCreateTaskFn is the trap: same env as createTask (which is `api`),
+    // but it is a webhook surface and must be relabeled `webhook`.
+    const webhookCreate = Object.entries(functions).find(([id]) => id.includes('WebhookCreateTaskFn'));
+    expect(webhookCreate).toBeDefined();
+    expect(webhookCreate![1].Properties.Environment?.Variables?.ABCA_COMPONENT).toBe('webhook');
+
+    // API-key management Lambdas (Create/List/Delete + authorizer) are `api`.
+    const apiKeyFns = Object.entries(functions).filter(([id]) =>
+      id.includes('ApiKey') || id.includes('CreateApiKey') || id.includes('ListApiKeys') || id.includes('DeleteApiKey'),
+    );
+    expect(apiKeyFns.length).toBeGreaterThan(0);
+    for (const [, fn] of apiKeyFns) {
+      expect(fn.Properties.Environment?.Variables?.ABCA_COMPONENT).toBe('api');
+    }
+
+    // Webhook management Lambdas (Create/List/Delete/Authorizer) are `webhook`.
+    const webhookMgmtFns = Object.entries(functions).filter(([id]) =>
+      (id.includes('CreateWebhook') || id.includes('ListWebhooks') || id.includes('DeleteWebhook') || id.includes('WebhookAuthorizer')),
+    );
+    expect(webhookMgmtFns.length).toBeGreaterThan(0);
+    for (const [, fn] of webhookMgmtFns) {
+      expect(fn.Properties.Environment?.Variables?.ABCA_COMPONENT).toBe('webhook');
     }
   });
 

@@ -31,6 +31,7 @@ import { Construct, type Node } from 'constructs';
 import { AgentMemory } from './agent-memory';
 import { AgentSessionRole } from './agent-session-role';
 import { resolveBedrockModelIds } from './bedrock-models';
+import { buildAppId } from './solution-ua-aspect';
 
 export interface EcsAgentClusterProps {
   readonly vpc: ec2.IVpc;
@@ -341,6 +342,16 @@ export class EcsAgentCluster extends Construct {
       ],
     });
 
+    // Outbound SDK solution attribution (#319): botocore reads
+    // AWS_SDK_UA_APP_ID natively → `app/uksb-wt64nei4u6#{stack}`. The
+    // Lambda-only stack aspect can't reach this container, so set it here on
+    // the shared base env so BOTH task defs (build + planning) carry it.
+    // `-c sdkUaAppId=''` opts out (buildAppId → undefined → omitted).
+    const sdkUaAppId = buildAppId(
+      Stack.of(this).stackName,
+      this.node.tryGetContext('sdkUaAppId') as string | undefined,
+    );
+
     // The container spec shared by both task defs — image, logging, env are
     // IDENTICAL; only the enclosing task def's cpu/mem differ. BUILD_VERIFY_TIMEOUT_S
     // is a build-tier concern (a read-only planner never runs the post-agent build
@@ -367,6 +378,9 @@ export class EcsAgentCluster extends Construct {
       ...(props.agentSessionRole && {
         AGENT_SESSION_ROLE_ARN: props.agentSessionRole.role.roleArn,
       }),
+      // #319 outbound SDK solution attribution — set on the shared base so both
+      // task defs emit `app/uksb-wt64nei4u6#{stack}`.
+      ...(sdkUaAppId ? { AWS_SDK_UA_APP_ID: sdkUaAppId } : {}),
     };
     const image = ecs.ContainerImage.fromDockerImageAsset(props.agentImageAsset);
     const makeTaskDef = (

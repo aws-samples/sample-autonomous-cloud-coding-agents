@@ -51,9 +51,7 @@
  * safe.
  */
 
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
-  DynamoDBDocumentClient,
   ScanCommand,
   GetCommand,
   UpdateCommand,
@@ -67,9 +65,10 @@ import {
   ORCHESTRATION_META_SK,
   type OrchestrationChildRow,
 } from './shared/orchestration-store';
+import { makeDocClient } from './shared/ua';
 import { TaskStatus, type TaskStatusType } from '../constructs/task-status';
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const ddb = makeDocClient();
 const ORCHESTRATION_TABLE = process.env.ORCHESTRATION_TABLE_NAME!;
 const TASK_TABLE = process.env.TASK_TABLE_NAME!;
 // Throttle the sweep's releases to the user's free concurrency budget

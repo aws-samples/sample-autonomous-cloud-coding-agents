@@ -22,6 +22,7 @@ import {
   ListManagedMicrovmImagesCommand,
 } from '@aws-sdk/client-lambda-microvms';
 import { CliError } from './errors';
+import { makeClient } from './ua';
 
 /** Informational copy; keep in sync with cdk/src/handlers/shared/microvm-regions.ts. */
 const LAMBDA_MICROVM_LAUNCH_REGIONS: readonly string[] = [
@@ -46,7 +47,7 @@ export const LAMBDA_MICROVM_REMEDY =
 export async function probeLambdaMicrovmAvailability(
   region: string,
   clientFactory: LambdaMicrovmProbeClientFactory =
-    (clientRegion) => new LambdaMicrovmsClient({ region: clientRegion }),
+    (clientRegion) => makeClient(LambdaMicrovmsClient, { region: clientRegion }),
 ): Promise<void> {
   const client = clientFactory(region);
   await client.send(new ListManagedMicrovmImagesCommand({}));

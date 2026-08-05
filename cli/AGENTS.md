@@ -83,3 +83,4 @@ test('renders snapshot from combined payload', async () => {
 
 - **API type drift** — Update both `cli/src/types.ts` and `cdk/src/handlers/shared/types.ts` in the same PR. See [cdk/AGENTS.md](../cdk/AGENTS.md).
 - **Exit code leaks** — Command tests must reset `process.exitCode` or Jest exits non-zero despite green assertions.
+- **Un-attributed AWS SDK client (#319)** — build clients via `makeClient(Ctor, cfg)` / `makeDocClient(cfg)` from `src/ua.ts`; a naked `new XxxClient({})` silently drops solution attribution.

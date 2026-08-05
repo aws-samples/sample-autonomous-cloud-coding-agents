@@ -54,10 +54,10 @@ def resolve_github_token() -> str:
         return cached
     secret_arn = os.environ.get("GITHUB_TOKEN_SECRET_ARN")
     if secret_arn:
-        import boto3
+        from aws_session import platform_client
 
         region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
-        client = boto3.client("secretsmanager", region_name=region)
+        client = platform_client("secretsmanager", region_name=region)
         resp = client.get_secret_value(SecretId=secret_arn)
         token = resp["SecretString"]
         # Cache in env so downstream tools (git, gh CLI) work unchanged
@@ -114,14 +114,19 @@ def resolve_linear_api_token(channel_metadata: dict[str, str] | None = None) -> 
         import json
         from datetime import datetime, timedelta
 
-        import boto3
+        # boto3 is imported here (not just via platform_client, which imports it
+        # lazily at call time) so a missing SDK still degrades gracefully — skip
+        # Linear MCP — instead of raising an uncaught ImportError. (#319)
+        import boto3  # noqa: F401  -- availability probe for the graceful skip below
         from botocore.exceptions import BotoCoreError, ClientError
+
+        from aws_session import platform_client
     except ImportError as e:
         log("WARN", f"resolve_linear_api_token: boto3 unavailable ({e}); skipping")
         # nosemgrep: py-silent-success-masking -- optional Linear reactions token; boto3 unavailable
         return ""
 
-    sm = boto3.client("secretsmanager", region_name=region)
+    sm = platform_client("secretsmanager", region_name=region)
 
     def _fetch_token() -> dict | None:
         """Fetch + parse the per-workspace OAuth secret.
@@ -415,13 +420,18 @@ def resolve_jira_oauth_token(channel_metadata: dict[str, str] | None = None) -> 
         import json
         from datetime import datetime
 
-        import boto3
+        # boto3 is imported here (not just via platform_client, which imports it
+        # lazily at call time) so a missing SDK still degrades gracefully — skip
+        # Jira feedback — instead of raising an uncaught ImportError. (#319)
+        import boto3  # noqa: F401  -- availability probe for the graceful skip below
         from botocore.exceptions import BotoCoreError, ClientError
+
+        from aws_session import platform_client
     except ImportError as e:
         log("WARN", f"resolve_jira_oauth_token: boto3 unavailable ({e}); skipping")
         return ""  # nosemgrep: py-silent-success-masking -- Jira feedback is advisory
 
-    sm = boto3.client("secretsmanager", region_name=region)
+    sm = platform_client("secretsmanager", region_name=region)
 
     def _fetch_token() -> dict | None:
         resp = sm.get_secret_value(SecretId=secret_arn)

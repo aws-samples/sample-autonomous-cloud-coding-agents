@@ -269,4 +269,3 @@ export function makeSlackChannel(secretPrefix: string = SLACK_SECRET_PREFIX): Ch
     // fetchChildGraph: omitted — no dependency model; graphs arrive declaratively.
   } satisfies Channel as Channel;
 }
-

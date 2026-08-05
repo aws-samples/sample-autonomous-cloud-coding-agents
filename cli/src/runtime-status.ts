@@ -23,6 +23,7 @@ import {
 } from '@aws-sdk/client-bedrock-agentcore-control';
 import { PLATFORM_REPO_DEFAULTS } from './repo-display';
 import { listRepoConfigs, RepoConfigRow } from './repo-lookup';
+import { makeClient } from './ua';
 
 interface BlueprintRuntimeBinding {
   readonly repo: string;
@@ -117,7 +118,7 @@ async function probeAgentCoreRuntime(
 ): Promise<RuntimeProbeResult> {
   try {
     const { agentRuntimeId, agentRuntimeVersion } = parseAgentRuntimeArn(runtimeArn);
-    const client = new BedrockAgentCoreControlClient({ region });
+    const client = makeClient(BedrockAgentCoreControlClient, { region });
     const response = await client.send(new GetAgentRuntimeCommand({
       agentRuntimeId,
       agentRuntimeVersion,

@@ -17,9 +17,9 @@
  *  SOFTWARE.
  */
 
-import { ConditionalCheckFailedException, DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
-import { DeleteCommand, DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
+import { DeleteCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import {
   isWebhookTimestampFresh,
@@ -27,9 +27,10 @@ import {
   verifyLinearRequestForWorkspace,
 } from './shared/linear-verify';
 import { logger } from './shared/logger';
+import { makeClient, makeDocClient } from './shared/ua';
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
-const lambdaClient = new LambdaClient({});
+const ddb = makeDocClient();
+const lambdaClient = makeClient(LambdaClient);
 
 const WEBHOOK_SECRET_ARN = process.env.LINEAR_WEBHOOK_SECRET_ARN!;
 const DEDUP_TABLE_NAME = process.env.LINEAR_WEBHOOK_DEDUP_TABLE_NAME!;

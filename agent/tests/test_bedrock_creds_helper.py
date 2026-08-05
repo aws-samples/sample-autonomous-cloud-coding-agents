@@ -74,6 +74,52 @@ def test_resolve_assumes_role_with_session_tags(attr_file):
     }
 
 
+def test_resolve_obtains_sts_client_via_platform_client(attr_file):
+    """The STS client is built through aws_session.platform_client (carrying the
+    md/ solution User-Agent), not a naked boto3.client. (#319)"""
+    tags = build_session_tags("u1", "owner/repo", "task123")
+    helper.write_attribution_file("arn:aws:iam::1:role/SR", tags, attr_file)
+
+    expiry = datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)
+    sts = MagicMock()
+    sts.assume_role.return_value = {
+        "Credentials": {
+            "AccessKeyId": "AK",
+            "SecretAccessKey": "SK",
+            "SessionToken": "TK",
+            "Expiration": expiry,
+        }
+    }
+    with patch("aws_session.platform_client", return_value=sts) as pc:
+        creds = helper.resolve_credentials()
+    pc.assert_called_with("sts", region_name=os.environ.get("AWS_REGION"))
+    assert creds["AccessKeyId"] == "AK"
+
+
+def test_resolve_fails_open_when_boto3_imports_unavailable(attr_file, capsys):
+    """If the in-function boto3/platform_client import fails, the helper degrades
+    to ambient creds rather than raising — the graceful (fail-open) guard holds."""
+    import builtins
+
+    helper.write_attribution_file(
+        "arn:aws:iam::1:role/SR", build_session_tags("u", "r", "t"), attr_file
+    )
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "boto3" or name == "aws_session":
+            raise ImportError(f"simulated missing {name}")
+        return real_import(name, *args, **kwargs)
+
+    with (
+        patch("builtins.__import__", side_effect=fake_import),
+        patch("botocore.session.get_session", return_value=_ambient()),
+    ):
+        creds = helper.resolve_credentials()
+    assert creds["AccessKeyId"] == "AMB"
+    assert "boto3 unavailable" in capsys.readouterr().err
+
+
 def test_resolve_fails_open_when_no_attribution_file(attr_file):
     # File never written → fall back to ambient creds, never raise.
     frozen = SimpleNamespace(access_key="AMB", secret_key="S", token="T")

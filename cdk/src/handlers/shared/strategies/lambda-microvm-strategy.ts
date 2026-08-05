@@ -28,11 +28,12 @@ import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import type { ComputeStrategy, SessionHandle, SessionStatus } from '../compute-strategy';
 import { logger } from '../logger';
 import type { BlueprintConfig } from '../repo-config';
+import { makeClient } from '../ua';
 
 let sharedClient: LambdaMicrovmsClient | undefined;
 function getClient(): LambdaMicrovmsClient {
   if (!sharedClient) {
-    sharedClient = new LambdaMicrovmsClient({});
+    sharedClient = makeClient(LambdaMicrovmsClient);
   }
   return sharedClient;
 }
@@ -40,7 +41,7 @@ function getClient(): LambdaMicrovmsClient {
 let sharedS3Client: S3Client | undefined;
 function getS3Client(): S3Client {
   if (!sharedS3Client) {
-    sharedS3Client = new S3Client({});
+    sharedS3Client = makeClient(S3Client);
   }
   return sharedS3Client;
 }
