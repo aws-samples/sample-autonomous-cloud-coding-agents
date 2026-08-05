@@ -290,7 +290,7 @@ export async function changePassword(
 ): Promise<void> {
   const config = loadConfig();
   const username = usernameFromSession();
-  const client = new CognitoIdentityProviderClient({ region: config.region });
+  const client = makeClient(CognitoIdentityProviderClient, { region: config.region });
 
   const accessToken = await accessTokenFor(client, config.client_id, username, currentPassword);
 
