@@ -500,6 +500,24 @@ describe('AgentStack', () => {
     expect(vars.JIRA_WORKSPACE_REGISTRY_TABLE_NAME).toBeDefined();
   });
 
+  test('the iteration heartbeat can reach BOTH surfaces and refresh Jira OAuth', () => {
+    const fns = template.findResources('AWS::Lambda::Function');
+    const heartbeat = Object.entries(fns).find(([id]) => id.startsWith('IterationHeartbeat'));
+    expect(heartbeat).toBeDefined();
+    const vars = (heartbeat![1] as { Properties?: { Environment?: { Variables?: Record<string, unknown> } } })
+      .Properties?.Environment?.Variables ?? {};
+    expect(vars.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME).toBeDefined();
+    expect(vars.JIRA_WORKSPACE_REGISTRY_TABLE_NAME).toBeDefined();
+
+    const policies = template.findResources('AWS::IAM::Policy');
+    const heartbeatPolicies = Object.entries(policies)
+      .filter(([logicalId]) => logicalId.startsWith('IterationHeartbeat'));
+    const asJson = JSON.stringify(heartbeatPolicies.map(([, policy]) => policy));
+    expect(asJson).toContain('bgagent-jira-oauth-*');
+    expect(asJson).toContain('secretsmanager:GetSecretValue');
+    expect(asJson).toContain('secretsmanager:PutSecretValue');
+  });
+
   test('the orchestration reconciler cannot read S3 objects at all', () => {
     // The trace/artifacts bucket holds full agent trajectories under
     // traces/<user_id>/ — tool input and output, authorized per-user by the presign
