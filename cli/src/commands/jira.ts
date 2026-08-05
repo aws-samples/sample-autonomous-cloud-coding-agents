@@ -28,6 +28,7 @@ import {
   SecretsManagerClient,
 } from '@aws-sdk/client-secrets-manager';
 import {
+  DynamoDBDocumentClient,
   GetCommand,
   PutCommand,
   ScanCommand,
@@ -694,7 +695,7 @@ export function makeJiraCommand(): Command {
         // receiver must use one stack-wide verifier. Refuse a second active
         // tenant before writing its OAuth or registry state rather than
         // presenting an apparently complete but unverifiable setup.
-        const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
+        const ddb = makeDocClient({ region });
         const activeTenantIds = await listActiveJiraTenantIds(ddb, workspaceRegistryTable!);
         const otherActiveTenantIds = activeTenantIds.filter((id) => id !== cloudId);
         if (otherActiveTenantIds.length > 0) {
@@ -723,7 +724,6 @@ export function makeJiraCommand(): Command {
         console.log(` ✓ (${secretName})`);
 
         // ─── Step 5: Persist registry row ────────────────────────────────
-        const ddb = makeDocClient({ region });
         // Update instead of replacing the row so re-running OAuth setup keeps
         // app-actor audit metadata written by `jira app-setup`.
         await ddb.send(new UpdateCommand({
@@ -963,7 +963,7 @@ export function makeJiraCommand(): Command {
           );
         }
 
-        const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
+        const ddb = makeDocClient({ region });
         const registry = await ddb.send(new GetCommand({
           TableName: workspaceRegistryTable!,
           Key: { jira_cloud_id: cloudId },
@@ -994,7 +994,7 @@ export function makeJiraCommand(): Command {
           throw new CliError('Webhook signing secret is required.');
         }
 
-        const sm = new SecretsManagerClient({ region });
+        const sm = makeClient(SecretsManagerClient, { region });
         const oauthSecret = await sm.send(new GetSecretValueCommand({ SecretId: oauthSecretArn }));
         const stored = parseStoredJiraOauthToken(oauthSecret.SecretString, oauthSecretArn);
         await synchronizeJiraWebhookSecrets(
