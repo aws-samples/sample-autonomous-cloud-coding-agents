@@ -228,7 +228,9 @@ All executable subtasks must belong to active Jira project mappings that resolve
 
 The parent receives orchestration progress and the terminal rollup. Parallel leaves converge through an internal integration task so the orchestration produces one combined pull request; that internal task does not address a nonexistent Jira issue. An `@bgagent` comment on a real child updates that child's pull request and restacks dependent pull requests through the shared orchestration reconciler.
 
-In this version the authored graph is frozen at the first successful seed. Re-applying the trigger label to an already-seeded parent is an idempotent no-op; it does not rerun completed children or add newly created subtasks.
+To extend an existing orchestration, add Jira subtasks and re-apply the trigger label. ABCA appends only genuinely new issue keys: existing tasks, branches, statuses, and dependencies are preserved. A new child starts immediately when all of its declared predecessors have already succeeded; otherwise it remains blocked for the reconciler. A new child with no explicit blocker stacks on the existing epic tip rather than bare `main`.
+
+Re-applying the label without adding a child is an idempotent no-op. Changes only to blocker links between existing children are also ignored; dependency edits do not rewrite work that may already be running or complete. Extending a terminal orchestration reopens the parent progress panel and settles it again when the added work finishes.
 
 ## Issue context: attachments and comments
 
