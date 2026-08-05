@@ -142,6 +142,7 @@ jest.mock('../../src/handlers/shared/linear-feedback', () => ({
 // so tests can flatten them back to text (see `adfText`) instead of walking
 // real ADF nodes. Default ``{ ok: true }`` drives the happy path.
 const mockPostIssueCommentAdf: jest.Mock = jest.fn().mockResolvedValue({ ok: true });
+const mockUpdateIssueCommentAdf: jest.Mock = jest.fn().mockResolvedValue({ ok: true });
 const mockBuildAdfDocument: jest.Mock = jest.fn(
   (paragraphs: ReadonlyArray<ReadonlyArray<{ text: string }>>) => ({ _adf: paragraphs }),
 );
@@ -151,6 +152,12 @@ jest.mock('../../src/handlers/shared/jira-feedback', () => ({
     issueKey: string,
     body: unknown,
   ) => mockPostIssueCommentAdf(ctx, issueKey, body),
+  updateIssueCommentAdf: (
+    ctx: { cloudId: string; registryTableName: string },
+    issueKey: string,
+    commentId: string,
+    body: unknown,
+  ) => mockUpdateIssueCommentAdf(ctx, issueKey, commentId, body),
   buildAdfDocument: (paragraphs: ReadonlyArray<ReadonlyArray<{ text: string }>>) =>
     mockBuildAdfDocument(paragraphs),
 }));
@@ -2217,6 +2224,7 @@ describe('fanout-task-events: Jira dispatcher (issue #573)', () => {
   beforeEach(() => {
     mockDdbSend.mockReset().mockResolvedValue({ Item: undefined });
     mockPostIssueCommentAdf.mockReset().mockResolvedValue({ ok: true });
+    mockUpdateIssueCommentAdf.mockReset().mockResolvedValue({ ok: true });
     mockBuildAdfDocument.mockClear();
     // Keep the sibling dispatchers quiet so they don't reject the batch.
     mockDispatchSlackEvent.mockReset().mockResolvedValue(undefined);
@@ -2300,6 +2308,144 @@ describe('fanout-task-events: Jira dispatcher (issue #573)', () => {
     expect(mockPostIssueCommentAdf).toHaveBeenCalledTimes(1);
     const [, , body] = mockPostIssueCommentAdf.mock.calls[0];
     expect(adfText(body)).toContain('❌');
+  });
+
+  test('standalone iteration matures its stored comment instead of posting a new one', async () => {
+    mockGet({
+      ...TASK_RECORD_JIRA,
+      channel_metadata: {
+        ...TASK_RECORD_JIRA.channel_metadata,
+        trigger_comment_id: 'human-comment-1',
+        trigger_comment_issue_id: 'KAN-42',
+        iteration_reply_comment_id: 'status-comment-1',
+      },
+    });
+
+    await handler({ Records: [mkEvent('task_completed', 't-jira')] });
+
+    expect(mockUpdateIssueCommentAdf).toHaveBeenCalledTimes(1);
+    const [ctx, issueKey, commentId, body] = mockUpdateIssueCommentAdf.mock.calls[0];
+    expect(ctx).toEqual({
+      cloudId: 'cloud-uuid-acme',
+      registryTableName: 'JiraWorkspaceRegistry',
+    });
+    expect(issueKey).toBe('KAN-42');
+    expect(commentId).toBe('status-comment-1');
+    expect(adfText(body)).toContain('cost: $0.55 • turns: 27 / 100 • duration: 3m 41s');
+    expect(adfText(body)).toContain('task t-jira');
+    expect(mockPostIssueCommentAdf).not.toHaveBeenCalled();
+  });
+
+  test('orchestrated iteration leaves terminal maturation to the reconciler', async () => {
+    mockGet({
+      ...TASK_RECORD_JIRA,
+      channel_metadata: {
+        ...TASK_RECORD_JIRA.channel_metadata,
+        trigger_comment_id: 'human-comment-1',
+        iteration_reply_comment_id: 'status-comment-1',
+        orchestration_iteration: 'true',
+      },
+    });
+
+    await handler({ Records: [mkEvent('task_completed', 't-jira')] });
+
+    expect(mockUpdateIssueCommentAdf).not.toHaveBeenCalled();
+    expect(mockPostIssueCommentAdf).not.toHaveBeenCalled();
+  });
+
+  test('redelivered standalone iteration loses the terminal claim and does not edit twice', async () => {
+    const task = {
+      ...TASK_RECORD_JIRA,
+      channel_metadata: {
+        ...TASK_RECORD_JIRA.channel_metadata,
+        trigger_comment_id: 'human-comment-1',
+        iteration_reply_comment_id: 'status-comment-1',
+      },
+    };
+    mockDdbSend.mockReset().mockImplementation((cmd: { _type?: string }) => {
+      if (cmd?._type === 'Get') return Promise.resolve({ Item: task });
+      if (cmd?._type === 'Update') {
+        return Promise.reject(Object.assign(new Error('claimed'), {
+          name: 'ConditionalCheckFailedException',
+        }));
+      }
+      return Promise.resolve({});
+    });
+
+    await handler({ Records: [mkEvent('task_completed', 't-jira')] });
+
+    expect(mockUpdateIssueCommentAdf).not.toHaveBeenCalled();
+  });
+
+  test('failed standalone iteration update releases its terminal claim', async () => {
+    const task = {
+      ...TASK_RECORD_JIRA,
+      channel_metadata: {
+        ...TASK_RECORD_JIRA.channel_metadata,
+        trigger_comment_id: 'human-comment-1',
+        iteration_reply_comment_id: 'status-comment-1',
+      },
+    };
+    mockGet(task);
+    mockUpdateIssueCommentAdf.mockResolvedValue({
+      ok: false,
+      retryable: false,
+    });
+
+    const result = await handler({
+      Records: [mkEvent('task_completed', 't-jira')],
+    });
+
+    expect(result).toEqual({ batchItemFailures: [] });
+    const claims = mockDdbSend.mock.calls
+      .map(([command]) => command as {
+        _type?: string;
+        input?: {
+          UpdateExpression?: string;
+          ExpressionAttributeValues?: Record<string, unknown>;
+        };
+      })
+      .filter(command =>
+        command._type === 'Update'
+        && /ack_replied_at/.test(command.input?.UpdateExpression ?? ''),
+      );
+    expect(claims[0].input?.UpdateExpression).toBe('SET ack_replied_at = :now');
+    expect(claims[1].input?.UpdateExpression).toContain('REMOVE ack_replied_at');
+    expect(claims[1].input?.ExpressionAttributeValues?.[':ours'])
+      .toBe(claims[0].input?.ExpressionAttributeValues?.[':now']);
+  });
+
+  test('transient standalone iteration update failure releases the claim and retries the record', async () => {
+    const task = {
+      ...TASK_RECORD_JIRA,
+      channel_metadata: {
+        ...TASK_RECORD_JIRA.channel_metadata,
+        trigger_comment_id: 'human-comment-1',
+        iteration_reply_comment_id: 'status-comment-1',
+      },
+    };
+    mockGet(task);
+    mockUpdateIssueCommentAdf.mockResolvedValue({
+      ok: false,
+      retryable: true,
+    });
+    const record = mkEvent('task_completed', 't-jira');
+
+    const result = await handler({ Records: [record] });
+
+    expect(result.batchItemFailures).toEqual([
+      { itemIdentifier: record.eventID },
+    ]);
+    const releases = mockDdbSend.mock.calls
+      .map(([command]) => command as {
+        _type?: string;
+        input?: { UpdateExpression?: string };
+      })
+      .filter(command =>
+        command._type === 'Update'
+        && /REMOVE ack_replied_at/.test(command.input?.UpdateExpression ?? ''),
+      );
+    expect(releases).toHaveLength(1);
   });
 
   test('non-Jira task short-circuits — postIssueCommentAdf never called', async () => {

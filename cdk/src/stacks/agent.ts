@@ -1075,12 +1075,13 @@ export class AgentStack extends Stack {
       ],
     }));
 
-    // K6: mid-run liveness heartbeat. A scheduled sweep edits the maturing
-    // Linear reply of RUNNING comment-triggered iterations to show elapsed time
+    // Mid-run liveness heartbeat. A scheduled sweep edits the maturing
+    // Linear/Jira comment of RUNNING comment-triggered iterations to show elapsed time
     // ("🔄 Working … _8m elapsed_") so a long run isn't a silent black box
-    // (live-caught ABCA-483). Needs the workspace registry + per-workspace
-    // linear-oauth secret read to resolve the outbound token (same as the
-    // reconciler's reply path). Read-only on the TaskTable.
+    // (observed in practice: a run went 22 minutes with no visible output).
+    // Needs each surface registry and scoped OAuth-secret access to resolve
+    // outbound credentials (same as the reconciler's reply path). Read-only on
+    // the TaskTable.
     const iterationHeartbeat = new IterationHeartbeat(this, 'IterationHeartbeat', {
       taskTable: taskTable.table,
     });
@@ -1138,6 +1139,26 @@ export class AgentStack extends Stack {
       // task-admission time (#577). Same bucket the orchestrator hydrates from.
       attachmentsBucket: attachmentsBucket.bucket,
     });
+
+    // Add Jira to the channel-neutral heartbeat sweep. Token resolution can
+    // refresh an expiring OAuth bundle, so this trusted Lambda needs scoped
+    // Get+Put on the per-tenant secret prefix as well as registry-table read.
+    jiraIntegration.workspaceRegistryTable.grantReadData(iterationHeartbeat.fn);
+    iterationHeartbeat.fn.addEnvironment(
+      'JIRA_WORKSPACE_REGISTRY_TABLE_NAME',
+      jiraIntegration.workspaceRegistryTable.tableName,
+    );
+    iterationHeartbeat.fn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['secretsmanager:GetSecretValue', 'secretsmanager:PutSecretValue'],
+      resources: [
+        Stack.of(this).formatArn({
+          service: 'secretsmanager',
+          resource: 'secret',
+          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+          resourceName: 'bgagent-jira-oauth-*',
+        }),
+      ],
+    }));
 
     // Agent runtime reads the per-tenant Jira OAuth token directly from
     // Secrets Manager. The CLI (`bgagent jira setup`) creates

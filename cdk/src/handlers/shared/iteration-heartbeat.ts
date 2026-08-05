@@ -52,10 +52,12 @@ export interface HeartbeatTaskView {
   readonly status: string;
   /** ISO timestamp the task was created (drives elapsed). */
   readonly createdAt?: string;
-  /** Trigger channel — only 'linear' is wired for the reply edit. */
+  /** Trigger channel. Linear and Jira support maturing iteration comments. */
   readonly channelSource?: string;
   /** Linear workspace id (for the per-workspace OAuth token). */
   readonly linearWorkspaceId?: string;
+  /** Jira cloud id (for the per-tenant OAuth token). */
+  readonly jiraCloudId?: string;
   /** The maturing reply comment id stamped at trigger time. */
   readonly iterationReplyCommentId?: string;
   /** The human comment that triggered the iteration (reply parent). */
@@ -82,9 +84,11 @@ export interface HeartbeatTaskView {
 /** What the sweep should do for one task. */
 export interface HeartbeatPlan {
   readonly taskId: string;
-  readonly linearWorkspaceId: string;
+  readonly channelSource: 'linear' | 'jira';
+  readonly credentialsRef: string;
   readonly issueId: string;
-  readonly parentCommentId: string;
+  /** Linear thread root. Jira's maturing comment is top-level. */
+  readonly parentCommentId?: string;
   readonly replyId: string;
   readonly body: string;
   readonly elapsedS: number;
@@ -99,12 +103,13 @@ function parseIso(ts: string | undefined): number | null {
 
 /**
  * Decide whether to heartbeat ONE task, and render the new reply body. Returns
- * null when the task is not eligible (not a RUNNING linear iteration with a
+ * null when the task is not eligible (not a RUNNING Linear/Jira iteration with a
  * reply to edit, or not yet past the elapsed floor). Pure — ``nowMs`` injected.
  */
 export function planHeartbeat(task: HeartbeatTaskView, nowMs: number): HeartbeatPlan | null {
   if (task.status !== 'RUNNING') return null;
-  if ((task.channelSource ?? 'linear') !== 'linear') return null;
+  const channelSource = task.channelSource ?? 'linear';
+  if (channelSource !== 'linear' && channelSource !== 'jira') return null;
 
   // Eligibility = "this task has a maturing Linear reply to keep alive". That's
   // exactly the set of comment-triggered iterations — BOTH orchestration and
@@ -112,8 +117,20 @@ export function planHeartbeat(task: HeartbeatTaskView, nowMs: number): Heartbeat
   // but still has the reply; the ABCA-483 black-box case was standalone). So we
   // key on the reply-routing fields, NOT ``isIteration``. A first-run / non-PR
   // task has no ``iteration_reply_comment_id`` and is correctly skipped.
-  const { linearWorkspaceId, iterationReplyCommentId, triggerCommentId, triggerCommentIssueId } = task;
-  if (!linearWorkspaceId || !iterationReplyCommentId || !triggerCommentId || !triggerCommentIssueId) {
+  const {
+    linearWorkspaceId,
+    jiraCloudId,
+    iterationReplyCommentId,
+    triggerCommentId,
+    triggerCommentIssueId,
+  } = task;
+  const credentialsRef = channelSource === 'jira' ? jiraCloudId : linearWorkspaceId;
+  if (
+    !credentialsRef
+    || !iterationReplyCommentId
+    || !triggerCommentIssueId
+    || (channelSource === 'linear' && !triggerCommentId)
+  ) {
     return null;
   }
 
@@ -132,9 +149,10 @@ export function planHeartbeat(task: HeartbeatTaskView, nowMs: number): Heartbeat
 
   return {
     taskId: task.taskId,
-    linearWorkspaceId,
+    channelSource,
+    credentialsRef,
     issueId: triggerCommentIssueId,
-    parentCommentId: triggerCommentId,
+    ...(triggerCommentId && { parentCommentId: triggerCommentId }),
     replyId: iterationReplyCommentId,
     body,
     elapsedS,

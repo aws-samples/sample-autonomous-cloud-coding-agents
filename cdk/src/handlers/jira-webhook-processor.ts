@@ -34,6 +34,7 @@ import {
   parseCommentTrigger,
 } from './shared/comment-trigger';
 import { createTaskCore } from './shared/create-task-core';
+import { renderMaturingReply } from './shared/iteration-reply';
 import { extractDescriptionMarkdown } from './shared/jira-adf';
 import {
   cleanupPreScreenedAttachments,
@@ -970,6 +971,7 @@ async function handleCommentTrigger(
   );
   const idempotencyKey = buildCommentIdempotencyKey(cloudId, issue.key, comment.id);
   const requestId = crypto.randomUUID();
+  const taskId = ulid();
   const result = await createTaskCore(
     {
       repo: priorTask.repo,
@@ -982,6 +984,7 @@ async function handleCommentTrigger(
       channelSource: 'jira',
       channelMetadata,
       idempotencyKey,
+      taskId,
     },
     requestId,
   );
@@ -1014,12 +1017,29 @@ async function handleCommentTrigger(
     return;
   }
 
-  await safeReportIssueFailure(
-    issue.key,
-    cloudId,
-    `👀 ABCA accepted this follow-up and is updating PR #${prNumber}.`,
-  );
+  try {
+    const reply = await makeJiraChannel(WORKSPACE_REGISTRY_TABLE).postComment(
+      { issueId: issue.key, credentialsRef: cloudId },
+      renderMaturingReply({ state: 'on_it' }),
+    );
+    if (reply?.commentId) {
+      await ddb.send(new UpdateCommand({
+        TableName: TASK_TABLE,
+        Key: { task_id: taskId },
+        UpdateExpression: 'SET channel_metadata.iteration_reply_comment_id = :comment_id',
+        ConditionExpression: 'attribute_exists(task_id)',
+        ExpressionAttributeValues: { ':comment_id': reply.commentId },
+      }));
+    }
+  } catch (err) {
+    logger.warn('Jira iteration acknowledgement failed (non-fatal)', {
+      task_id: taskId,
+      issue_key: issue.key,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
   logger.info('Jira comment-triggered PR iteration task created', {
+    task_id: taskId,
     issue_key: issue.key,
     comment_id: comment.id,
     prior_task_id: priorTask.task_id,
@@ -1194,6 +1214,8 @@ function buildIterationChannelMetadata(
     jira_site_url: siteUrl,
     jira_trigger_comment_id: commentId,
     jira_prior_task_id: priorTask.task_id,
+    trigger_comment_id: commentId,
+    trigger_comment_issue_id: issue.key,
   };
 
   const projectKey = issue.fields?.project?.key ?? previous.jira_project_key;
@@ -1208,8 +1230,6 @@ function buildIterationChannelMetadata(
     metadata.orchestration_id = previous.orchestration_id;
     metadata.orchestration_sub_issue_id = previous.orchestration_sub_issue_id;
     metadata.orchestration_iteration = 'true';
-    metadata.trigger_comment_id = commentId;
-    metadata.trigger_comment_issue_id = issue.key;
   }
   return metadata;
 }
