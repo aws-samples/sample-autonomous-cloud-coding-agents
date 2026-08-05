@@ -18,7 +18,7 @@
  */
 
 import * as path from 'path';
-import { ArnFormat, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
+import { ArnFormat, Aspects, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import * as apigw from 'aws-cdk-lib/aws-apigateway';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
@@ -32,6 +32,7 @@ import { Construct } from 'constructs';
 import { JiraProjectMappingTable } from './jira-project-mapping-table';
 import { JiraUserMappingTable } from './jira-user-mapping-table';
 import { JiraWorkspaceRegistryTable } from './jira-workspace-registry-table';
+import { ComponentUaAspect } from './solution-ua-aspect';
 
 /** Default task-record retention used for TTL computation (days). */
 const DEFAULT_TASK_RETENTION_DAYS = 90;
@@ -149,6 +150,13 @@ export class JiraIntegration extends Construct {
 
   constructor(scope: Construct, id: string, props: JiraIntegrationProps) {
     super(scope, id);
+
+    // Solution-attribution component label (#319): every Lambda in this Jira
+    // integration is part of the webhook ingest surface. One aspect labels
+    // them all (and any future function added here) without per-function env
+    // edits; the universal `app/` segment is set by the stack-level aspect.
+    // Matches slack/linear/github-screenshot integrations.
+    Aspects.of(this).add(new ComponentUaAspect('webhook'));
 
     const removalPolicy = props.removalPolicy ?? RemovalPolicy.DESTROY;
 

@@ -22,14 +22,14 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as readline from 'readline';
 import { CloudFormationClient, DescribeStacksCommand } from '@aws-sdk/client-cloudformation';
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { PutSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
-import { DynamoDBDocumentClient, PutCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
+import { PutCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
 import { Command } from 'commander';
 import { ApiClient } from '../api-client';
 import { loadConfig } from '../config';
 import { formatJson } from '../format';
 import { promptSecret } from '../prompt-secret';
+import { makeClient, makeDocClient } from '../ua';
 
 export function makeSlackCommand(): Command {
   const slack = new Command('slack')
@@ -192,7 +192,7 @@ export function makeSlackCommand(): Command {
         const teamId = await resolveSlackTeamId(region, installationTable, opts.teamId);
 
         const now = new Date().toISOString();
-        const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
+        const ddb = makeDocClient({ region });
         await ddb.send(new PutCommand({
           TableName: tableName,
           Item: {
@@ -234,7 +234,7 @@ export async function resolveSlackTeamId(
     process.exit(1);
   }
 
-  const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
+  const ddb = makeDocClient({ region });
   const result = await ddb.send(new ScanCommand({
     TableName: installationTable,
     FilterExpression: '#s = :active',
@@ -311,7 +311,7 @@ async function promptAndStoreCredentials(region: string, arns: SecretArns): Prom
 
     // Store in Secrets Manager.
     console.log('');
-    const sm = new SecretsManagerClient({ region });
+    const sm = makeClient(SecretsManagerClient, { region });
 
     const secrets = [
       { id: arns.signingSecretArn, value: signingSecret, label: 'signing secret' },
@@ -389,7 +389,7 @@ function findRepoRoot(): string {
 
 async function getStackOutput(region: string, stackName: string, outputKey: string): Promise<string | null> {
   try {
-    const cfn = new CloudFormationClient({ region });
+    const cfn = makeClient(CloudFormationClient, { region });
     const result = await cfn.send(new DescribeStacksCommand({ StackName: stackName }));
     const outputs = result.Stacks?.[0]?.Outputs ?? [];
     const output = outputs.find((o) => o.OutputKey === outputKey);

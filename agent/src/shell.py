@@ -75,10 +75,10 @@ def _log_error_cw_blocking(log_group: str, task_id: str | None, stamped: str) ->
     fire on the absence of the expected stream, not on this helper).
     """
     try:
-        import boto3
+        from aws_session import platform_client
 
         region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
-        client = boto3.client("logs", region_name=region)
+        client = platform_client("logs", region_name=region)
         stream = f"agent_error/{task_id or 'unknown'}"
         with contextlib.suppress(client.exceptions.ResourceAlreadyExistsException):
             client.create_log_stream(logGroupName=log_group, logStreamName=stream)

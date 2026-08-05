@@ -524,6 +524,10 @@ export class TaskApi extends Construct {
       TASK_TABLE_NAME: props.taskTable.tableName,
       TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
       TASK_RETENTION_DAYS: String(props.taskRetentionDays ?? DEFAULT_TASK_RETENTION_DAYS),
+      // Solution-attribution component label (#319): the `md/` segment for the
+      // REST API surface. The universal `app/` segment (AWS_SDK_UA_APP_ID) is
+      // set separately by the stack-level SolutionUaAspect.
+      ABCA_COMPONENT: 'api',
     };
     // The Node.js Lambda runtime ships an AWS SDK, but its pinned version
     // lags current. `@aws-sdk/client-bedrock-agentcore` in particular has
@@ -1046,6 +1050,10 @@ export class TaskApi extends Construct {
       const apiKeyEnv: Record<string, string> = {
         API_KEY_TABLE_NAME: props.apiKeyTable.tableName,
         API_KEY_RETENTION_DAYS: String(props.apiKeyRetentionDays ?? DEFAULT_WEBHOOK_RETENTION_DAYS),
+        // Solution-attribution component label (#319): API-key management is
+        // part of the REST API surface. apiKeyEnv does NOT spread commonEnv, so
+        // set it explicitly here rather than relying on the `api` default fallback.
+        ABCA_COMPONENT: 'api',
       };
 
       // --- Unified authorizer: Cognito JWT OR platform API key ---
@@ -1059,6 +1067,8 @@ export class TaskApi extends Construct {
           API_KEY_REQUIRED_SCOPE: 'webhooks:manage',
           USER_POOL_ID: this.userPool.userPoolId,
           APP_CLIENT_ID: this.appClient.userPoolClientId,
+          // #319: REST API surface (see apiKeyEnv above).
+          ABCA_COMPONENT: 'api',
         },
         bundling: commonBundling,
       });
@@ -1128,6 +1138,9 @@ export class TaskApi extends Construct {
       const webhookEnv: Record<string, string> = {
         WEBHOOK_TABLE_NAME: props.webhookTable.tableName,
         WEBHOOK_RETENTION_DAYS: String(props.webhookRetentionDays ?? DEFAULT_WEBHOOK_RETENTION_DAYS),
+        // Solution-attribution component label (#319): webhook ingest surface.
+        // (webhookEnv does NOT spread commonEnv, so set it explicitly here.)
+        ABCA_COMPONENT: 'webhook',
       };
 
       // --- Webhook management Lambdas (Cognito-authenticated) ---
@@ -1169,12 +1182,16 @@ export class TaskApi extends Construct {
       });
 
       // --- Webhook task creation Lambda ---
+      // Same env as createTask, but this is the webhook ingest surface, so
+      // relabel the #319 solution-attribution component to `webhook` (matches
+      // the sibling webhook Lambdas above; createTaskEnv inherits `api`).
+      const webhookCreateTaskEnv: Record<string, string> = { ...createTaskEnv, ABCA_COMPONENT: 'webhook' };
       const webhookCreateTaskFn = new lambda.NodejsFunction(this, 'WebhookCreateTaskFn', {
         entry: path.join(handlersDir, 'webhook-create-task.ts'),
         handler: 'handler',
         runtime: Runtime.NODEJS_24_X,
         architecture: Architecture.ARM_64,
-        environment: createTaskEnv,
+        environment: webhookCreateTaskEnv,
         bundling: attachmentScreeningBundling,
         memorySize: HEAVY_ATTACHMENT_HANDLER_MEMORY_MB,
         timeout: Duration.seconds(API_HANDLER_TIMEOUT_SECONDS),

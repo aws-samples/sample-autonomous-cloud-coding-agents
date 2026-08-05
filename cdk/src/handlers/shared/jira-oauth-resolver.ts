@@ -17,7 +17,6 @@
  *  SOFTWARE.
  */
 
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
   GetSecretValueCommand,
   PutSecretValueCommand,
@@ -30,6 +29,7 @@ import {
   validateJiraAppActorProxyUrl,
 } from './jira-app-actor';
 import { logger } from './logger';
+import { makeClient, makeDocClient } from './ua';
 
 /**
  * Lambda-side resolver for the per-tenant Jira Cloud OAuth token written
@@ -194,8 +194,8 @@ export async function resolveJiraOutboundAuth(
   options: ResolverOptions = {},
 ): Promise<ResolvedJiraOutboundAuth | null> {
   const region = options.region ?? process.env.AWS_REGION ?? 'us-east-1';
-  const ddb = options.dynamoDbClient ?? DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
-  const sm = options.secretsManagerClient ?? new SecretsManagerClient({ region });
+  const ddb = options.dynamoDbClient ?? makeDocClient({ region });
+  const sm = options.secretsManagerClient ?? makeClient(SecretsManagerClient, { region });
 
   const row = await getRegistryRow(ddb, registryTableName, cloudId);
   if (!row || row.status !== 'active') {
@@ -276,8 +276,8 @@ export async function resolveJiraOauthToken(
   options: ResolverOptions = {},
 ): Promise<ResolvedJiraToken | null> {
   const region = options.region ?? process.env.AWS_REGION ?? 'us-east-1';
-  const ddb = options.dynamoDbClient ?? DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
-  const sm = options.secretsManagerClient ?? new SecretsManagerClient({ region });
+  const ddb = options.dynamoDbClient ?? makeDocClient({ region });
+  const sm = options.secretsManagerClient ?? makeClient(SecretsManagerClient, { region });
   const forceRefresh = options.forceRefresh ?? false;
 
   // ─── Step 1: Registry row ────────────────────────────────────────

@@ -20,7 +20,6 @@
 import { execFile } from 'child_process';
 import * as readline from 'readline';
 import { CloudFormationClient, DescribeStacksCommand } from '@aws-sdk/client-cloudformation';
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
   CreateSecretCommand,
   GetSecretValueCommand,
@@ -49,6 +48,7 @@ import {
 } from '../linear-oauth';
 import { awaitOauthCallback, CALLBACK_URL } from '../oauth-callback-server';
 import { promptSecret } from '../prompt-secret';
+import { makeClient, makeDocClient } from '../ua';
 
 /** Default label that triggers an ABCA task when applied to a Linear issue. */
 const DEFAULT_LABEL_FILTER = 'bgagent';
@@ -615,7 +615,7 @@ export function makeLinearCommand(): Command {
 
         // ─── Step 4: Persist token to per-workspace Secrets Manager ───
         process.stdout.write('  → Storing OAuth token...');
-        const sm = new SecretsManagerClient({ region });
+        const sm = makeClient(SecretsManagerClient, { region });
         const now = new Date().toISOString();
         // Preserve any EXISTING per-workspace webhook signing secret before the
         // OAuth overwrite below. Re-running `setup` on an already-installed
@@ -688,7 +688,7 @@ export function makeLinearCommand(): Command {
         console.log(` ✓ (${secretName})`);
 
         // ─── Step 5: Persist registry + user-mapping rows ─────────────
-        const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
+        const ddb = makeDocClient({ region });
 
         // Best-effort: fetch team keys so the screenshot processor can
         // prefix-route Linear issue lookups (e.g. ENG-42 → the workspace
@@ -917,8 +917,8 @@ export function makeLinearCommand(): Command {
           );
         }
 
-        const sm = new SecretsManagerClient({ region });
-        const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
+        const sm = makeClient(SecretsManagerClient, { region });
+        const ddb = makeDocClient({ region });
 
         // ─── Linear OAuth app credentials ──────────────────────────────
         // Always prompt — never accept secrets via flags (shell history
@@ -1192,7 +1192,7 @@ export function makeLinearCommand(): Command {
         const config = loadConfig();
         const region = opts.region || config.region;
 
-        const sm = new SecretsManagerClient({ region });
+        const sm = makeClient(SecretsManagerClient, { region });
         const secretName = linearOauthSecretName(slug);
 
         // ─── Read existing bundle ───────────────────────────────────
@@ -1311,8 +1311,8 @@ export function makeLinearCommand(): Command {
         const callerCognitoSub = extractCognitoSub();
 
         // ─── Resolve workspace + OAuth secret arn ──────────────────────
-        const sm = new SecretsManagerClient({ region });
-        const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
+        const sm = makeClient(SecretsManagerClient, { region });
+        const ddb = makeDocClient({ region });
         const registryScan = await ddb.send(new ScanCommand({
           TableName: workspaceRegistryTable!,
           FilterExpression: 'workspace_slug = :slug AND #status = :active',
@@ -1435,7 +1435,7 @@ export function makeLinearCommand(): Command {
         }
 
         const now = new Date().toISOString();
-        const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
+        const ddb = makeDocClient({ region });
         await ddb.send(new PutCommand({
           TableName: tableName,
           Item: {
@@ -1466,7 +1466,7 @@ export function makeLinearCommand(): Command {
       .action(async (opts) => {
         const config = loadConfig();
         const region = opts.region || config.region;
-        const sm = new SecretsManagerClient({ region });
+        const sm = makeClient(SecretsManagerClient, { region });
 
         // Resolve the set of workspace slugs to query. Either an
         // explicit `--slug` (one workspace) or every Linear workspace
@@ -1917,7 +1917,7 @@ export async function autoLinkTokenOwner(args: {
     return;
   }
 
-  const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: args.region }));
+  const ddb = makeDocClient({ region: args.region });
   await ddb.send(new PutCommand({
     TableName: args.userMappingTable,
     Item: {
@@ -1956,7 +1956,7 @@ function extractCognitoSub(): string {
 
 async function getStackOutput(region: string, stackName: string, outputKey: string): Promise<string | null> {
   try {
-    const cfn = new CloudFormationClient({ region });
+    const cfn = makeClient(CloudFormationClient, { region });
     const result = await cfn.send(new DescribeStacksCommand({ StackName: stackName }));
     const outputs = result.Stacks?.[0]?.Outputs ?? [];
     const output = outputs.find((o) => o.OutputKey === outputKey);
