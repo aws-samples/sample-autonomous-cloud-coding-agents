@@ -40,12 +40,17 @@ describe('JiraIntegration construct', () => {
       partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'event_id', type: dynamodb.AttributeType.STRING },
     });
+    const orchestrationTable = new dynamodb.Table(stack, 'OrchestrationTable', {
+      partitionKey: { name: 'orchestration_id', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'sub_issue_id', type: dynamodb.AttributeType.STRING },
+    });
 
     new JiraIntegration(stack, 'JiraIntegration', {
       api,
       userPool,
       taskTable,
       taskEventsTable,
+      orchestrationTable,
     });
 
     template = Template.fromStack(stack);
@@ -83,5 +88,15 @@ describe('JiraIntegration construct', () => {
       const envVars = functions[fnId].Properties.Environment?.Variables ?? {};
       expect(envVars).toHaveProperty('ABCA_COMPONENT', 'webhook');
     }
+  });
+
+  test('wires the shared orchestration table into the webhook processor', () => {
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: {
+        Variables: Match.objectLike({
+          ORCHESTRATION_TABLE_NAME: Match.anyValue(),
+        }),
+      },
+    });
   });
 });

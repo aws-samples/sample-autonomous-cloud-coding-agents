@@ -38,12 +38,28 @@ import {
 } from './shared/jira-attachments';
 import { reportIssueFailure } from './shared/jira-feedback';
 import { resolveJiraOauthToken } from './shared/jira-oauth-resolver';
+import type { JiraSubIssueNode } from './shared/jira-subissue-fetch';
 import {
   prNumberFromTask,
   resolveTaskByJiraIssue,
   type JiraIssueTask,
 } from './shared/jira-task-by-issue';
+import type { SubIssueNode } from './shared/linear-subissue-fetch';
 import { logger } from './shared/logger';
+import { makeJiraChannel } from './shared/orchestration-channel-jira';
+import { discoverOrchestration } from './shared/orchestration-discovery';
+import { jiraGraphSource } from './shared/orchestration-graph-source';
+import {
+  applyTerminalCreateFailures,
+  releaseReadyChildren,
+} from './shared/orchestration-release';
+import { upsertEpicPanel } from './shared/orchestration-rollup';
+import {
+  deriveOrchestrationId,
+  loadOrchestration,
+  setStatusCommentId,
+  type OrchestrationReleaseContext,
+} from './shared/orchestration-store';
 import type { Attachment, PassedAttachmentRecord } from './shared/types';
 import { makeClient, makeDocClient } from './shared/ua';
 import { MAX_TASK_DESCRIPTION_LENGTH } from './shared/validation';
@@ -55,6 +71,7 @@ const PROJECT_MAPPING_TABLE = process.env.JIRA_PROJECT_MAPPING_TABLE_NAME!;
 const USER_MAPPING_TABLE = process.env.JIRA_USER_MAPPING_TABLE_NAME!;
 const TASK_TABLE = process.env.TASK_TABLE_NAME!;
 const WORKSPACE_REGISTRY_TABLE = process.env.JIRA_WORKSPACE_REGISTRY_TABLE_NAME;
+const ORCHESTRATION_TABLE = process.env.ORCHESTRATION_TABLE_NAME;
 const DEFAULT_LABEL_FILTER = 'bgagent';
 
 /** Max length of the idempotency key (matches validation's IDEMPOTENCY_KEY_PATTERN). */
@@ -422,6 +439,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   // tenants that only verified via the stack-wide fallback (workspace
   // unknown to the registry) — we'd burn agent quota with no resolvable
   // Jira OAuth token for the outbound REST progress comments.
+  let resolvedJira: Awaited<ReturnType<typeof resolveJiraOauthToken>> = null;
   if (WORKSPACE_REGISTRY_TABLE) {
     const resolved = await resolveJiraOauthToken(cloudId, WORKSPACE_REGISTRY_TABLE);
     if (!resolved) {
@@ -431,8 +449,58 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       });
       return;
     }
+    resolvedJira = resolved;
     channelMetadata.jira_oauth_secret_arn = resolved.oauthSecretArn;
     channelMetadata.jira_site_url = resolved.siteUrl;
+  }
+
+  let orchestrationChildren: readonly SubIssueNode[] | undefined;
+  if (ORCHESTRATION_TABLE && resolvedJira) {
+    // Layer #574 deliberately freezes an orchestration after its first seed.
+    // Additive re-discovery is introduced by #578; until then, a re-trigger is
+    // an idempotent no-op and must not create a parent task.
+    const existing = await loadOrchestration(
+      ddb,
+      ORCHESTRATION_TABLE,
+      deriveOrchestrationId(issue.key),
+    );
+    if (existing) {
+      logger.info('Jira orchestration already exists — skipping re-trigger', {
+        issue_key: issue.key,
+        orchestration_id: existing.meta.orchestration_id,
+      });
+      return;
+    }
+
+    const graphResult = await jiraGraphSource(
+      resolvedJira.accessToken,
+      cloudId,
+      issue.key,
+    )();
+    if (graphResult.kind === 'error') {
+      await safeReportIssueFailure(
+        issue.key,
+        cloudId,
+        `❌ ABCA couldn't read this issue's Jira subtasks: ${graphResult.message}`,
+      );
+      return;
+    }
+    if (graphResult.kind === 'ok') {
+      const routed = await routeJiraOrchestrationChildren({
+        cloudId,
+        parentProjectKey: projectKey,
+        parentMapping: mapping.Item,
+        parentRepo: repo,
+        children: graphResult.children as readonly JiraSubIssueNode[],
+        oauthSecretArn: resolvedJira.oauthSecretArn,
+        siteUrl: resolvedJira.siteUrl,
+      });
+      if (!routed.ok) {
+        await safeReportIssueFailure(issue.key, cloudId, `❌ ${routed.message}`);
+        return;
+      }
+      orchestrationChildren = routed.children;
+    }
   }
 
   // Embedded HTTPS image URLs from the description (unchanged, #577 preserves).
@@ -506,6 +574,115 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   }
 
   const taskDescription = buildTaskDescription(issue, descriptionMarkdown, comments);
+
+  if (ORCHESTRATION_TABLE && orchestrationChildren) {
+    const releaseContext: OrchestrationReleaseContext = {
+      platform_user_id: platformUserId,
+      channel_source: 'jira',
+      trigger_label: (labelFilter || DEFAULT_LABEL_FILTER).trim().toLowerCase(),
+      parent_context: {
+        ...(issue.fields?.summary && { title: issue.fields.summary }),
+        ...(descriptionMarkdown && { description: descriptionMarkdown }),
+      },
+      ...(preScreenedAttachments.length > 0 && {
+        pre_screened_attachments: preScreenedAttachments,
+      }),
+    };
+    const discovery = await discoverOrchestration({
+      ddb,
+      tableName: ORCHESTRATION_TABLE,
+      parentIssueRef: issue.key,
+      credentialsRef: cloudId,
+      repo,
+      now: new Date().toISOString(),
+      releaseContext,
+      graphSource: async () => ({ kind: 'ok', children: orchestrationChildren }),
+    });
+
+    if (discovery.kind === 'rejected' || discovery.kind === 'error') {
+      if (preScreenedAttachments.length > 0 && s3Client && ATTACHMENTS_BUCKET) {
+        await cleanupPreScreenedAttachments(s3Client, ATTACHMENTS_BUCKET, preScreenedAttachments);
+      }
+      await safeReportIssueFailure(
+        issue.key,
+        cloudId,
+        `❌ ABCA couldn't create this Jira orchestration: ${discovery.message}`,
+      );
+      return;
+    }
+
+    // A concurrent replay can win between the preflight read and the seed
+    // condition. Do not create a parent task or retain duplicate attachments.
+    if (discovery.kind === 'extended'
+      || (discovery.kind === 'seeded' && discovery.alreadyExisted)) {
+      if (preScreenedAttachments.length > 0 && s3Client && ATTACHMENTS_BUCKET) {
+        await cleanupPreScreenedAttachments(s3Client, ATTACHMENTS_BUCKET, preScreenedAttachments);
+      }
+      return;
+    }
+
+    if (discovery.kind === 'seeded') {
+      const snapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId);
+      if (snapshot) {
+        const now = new Date().toISOString();
+        const results = await releaseReadyChildren(
+          ddb,
+          ORCHESTRATION_TABLE,
+          snapshot.children,
+          snapshot.meta.release_context,
+          createTaskCore,
+          now,
+          snapshot.children,
+        );
+        await applyTerminalCreateFailures(
+          ddb,
+          ORCHESTRATION_TABLE,
+          discovery.orchestrationId,
+          snapshot.children,
+          results,
+          now,
+        );
+
+        if (WORKSPACE_REGISTRY_TABLE) {
+          try {
+            const fresh = await loadOrchestration(
+              ddb,
+              ORCHESTRATION_TABLE,
+              discovery.orchestrationId,
+            );
+            if (fresh) {
+              const commentId = await upsertEpicPanel({
+                channel: makeJiraChannel(WORKSPACE_REGISTRY_TABLE),
+                parent: { issueId: issue.key, credentialsRef: cloudId },
+                children: fresh.children,
+                labelFilter,
+              });
+              if (commentId) {
+                await setStatusCommentId(
+                  ddb,
+                  ORCHESTRATION_TABLE,
+                  discovery.orchestrationId,
+                  commentId,
+                );
+              }
+            }
+          } catch (err) {
+            logger.warn('Failed to post Jira orchestration panel at seed (non-fatal)', {
+              issue_key: issue.key,
+              orchestration_id: discovery.orchestrationId,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
+      }
+      logger.info('Jira orchestration seeded — parent task suppressed', {
+        issue_key: issue.key,
+        orchestration_id: discovery.orchestrationId,
+        child_count: discovery.childCount,
+      });
+      return;
+    }
+  }
 
   const requestId = crypto.randomUUID();
   const result = await createTaskCore(
@@ -766,7 +943,83 @@ function buildIterationChannelMetadata(
   if (previous.jira_status_on_pr) {
     metadata.jira_status_on_pr = previous.jira_status_on_pr;
   }
+  if (previous.orchestration_id && previous.orchestration_sub_issue_id) {
+    metadata.orchestration_id = previous.orchestration_id;
+    metadata.orchestration_sub_issue_id = previous.orchestration_sub_issue_id;
+    metadata.orchestration_iteration = 'true';
+    metadata.trigger_comment_id = commentId;
+    metadata.trigger_comment_issue_id = issue.key;
+  }
   return metadata;
+}
+
+type ProjectMapping = Readonly<Record<string, unknown>>;
+
+async function routeJiraOrchestrationChildren(params: {
+  readonly cloudId: string;
+  readonly parentProjectKey: string;
+  readonly parentMapping: ProjectMapping;
+  readonly parentRepo: string;
+  readonly children: readonly JiraSubIssueNode[];
+  readonly oauthSecretArn: string;
+  readonly siteUrl: string;
+}): Promise<
+  | { readonly ok: true; readonly children: readonly SubIssueNode[] }
+  | { readonly ok: false; readonly message: string }
+> {
+  const mappings = new Map<string, ProjectMapping>([
+    [params.parentProjectKey, params.parentMapping],
+  ]);
+  for (const projectKey of new Set(params.children.map((child) => child.project_key))) {
+    if (mappings.has(projectKey)) continue;
+    const result = await ddb.send(new GetCommand({
+      TableName: PROJECT_MAPPING_TABLE,
+      Key: { jira_project_identity: `${params.cloudId}#${projectKey}` },
+    }));
+    if (result.Item) mappings.set(projectKey, result.Item);
+  }
+
+  for (const child of params.children) {
+    const childMapping = mappings.get(child.project_key);
+    if (!childMapping || childMapping.status !== 'active' || typeof childMapping.repo !== 'string') {
+      return {
+        ok: false,
+        message: `${child.identifier ?? child.id} belongs to Jira project ${child.project_key}, `
+          + 'which is not actively mapped to an ABCA repository. Map that project and re-apply the trigger label.',
+      };
+    }
+    if (childMapping.repo !== params.parentRepo) {
+      return {
+        ok: false,
+        message: `${child.identifier ?? child.id} maps to ${childMapping.repo}, but the parent maps to `
+          + `${params.parentRepo}. All executable Jira subtasks must map to the same repository.`,
+      };
+    }
+  }
+
+  return {
+    ok: true,
+    children: params.children.map((child) => {
+      const childMapping = mappings.get(child.project_key)!;
+      return {
+        ...child,
+        channel_metadata: {
+          jira_cloud_id: params.cloudId,
+          jira_project_key: child.project_key,
+          jira_issue_id: child.issue_id,
+          jira_issue_key: child.identifier ?? child.id,
+          jira_oauth_secret_arn: params.oauthSecretArn,
+          jira_site_url: params.siteUrl,
+          ...(typeof childMapping.status_on_start === 'string' && {
+            jira_status_on_start: childMapping.status_on_start,
+          }),
+          ...(typeof childMapping.status_on_pr === 'string' && {
+            jira_status_on_pr: childMapping.status_on_pr,
+          }),
+        },
+      };
+    }),
+  };
 }
 
 function buildCommentIdempotencyKey(

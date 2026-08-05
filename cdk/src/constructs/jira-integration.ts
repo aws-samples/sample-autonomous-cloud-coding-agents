@@ -86,6 +86,9 @@ export interface JiraIntegrationProps {
   /** The DynamoDB task events table. */
   readonly taskEventsTable: dynamodb.ITable;
 
+  /** Shared orchestration DAG table. Omit to retain one-issue/one-task mode. */
+  readonly orchestrationTable?: dynamodb.ITable;
+
   /** The DynamoDB repo config table (optional — for repo onboarding checks). */
   readonly repoTable?: dynamodb.ITable;
 
@@ -244,6 +247,9 @@ export class JiraIntegration extends Construct {
     if (props.attachmentsBucket) {
       createTaskEnv.ATTACHMENTS_BUCKET_NAME = props.attachmentsBucket.bucketName;
     }
+    if (props.orchestrationTable) {
+      createTaskEnv.ORCHESTRATION_TABLE_NAME = props.orchestrationTable.tableName;
+    }
 
     // --- Cognito Authorizer (for /jira/link) ---
     const cognitoAuthorizer = new apigw.CognitoUserPoolsAuthorizer(this, 'JiraCognitoAuthorizer', {
@@ -298,6 +304,9 @@ export class JiraIntegration extends Construct {
     }));
     props.taskTable.grantReadWriteData(webhookProcessorFn);
     props.taskEventsTable.grantReadWriteData(webhookProcessorFn);
+    if (props.orchestrationTable) {
+      props.orchestrationTable.grantReadWriteData(webhookProcessorFn);
+    }
     if (props.repoTable) {
       props.repoTable.grantReadData(webhookProcessorFn);
     }
