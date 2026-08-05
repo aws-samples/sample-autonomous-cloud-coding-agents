@@ -1015,6 +1015,36 @@ describe('extendOrchestration — add nodes to an already-seeded epic', () => {
     expect(written.child_status).toBe('ready');
   });
 
+  test('persists adapter metadata on a newly-added node', async () => {
+    const ddb = makeDdb();
+    ddb.send
+      .mockResolvedValueOnce(existing([{ id: 'A', status: 'succeeded' }]))
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({});
+
+    await extendOrchestration({
+      ddb: ddb as never,
+      ...extendParams([
+        child('A'),
+        child('B', ['A'], {
+          channel_metadata: {
+            jira_cloud_id: 'cloud-1',
+            jira_issue_key: 'ENG-2',
+          },
+        }),
+      ]),
+    });
+
+    const bw = ddb.send.mock.calls.find((call) => call[0] instanceof BatchWriteCommand)![0];
+    const written = (bw.input.RequestItems[TABLE] as Array<{
+      PutRequest: { Item: Record<string, unknown> };
+    }>)[0].PutRequest.Item;
+    expect(written.channel_metadata).toEqual({
+      jira_cloud_id: 'cloud-1',
+      jira_issue_key: 'ENG-2',
+    });
+  });
+
   test('adds a NEW node whose predecessor is NOT yet done → blocked, not releasable', async () => {
     const ddb = makeDdb();
     ddb.send
