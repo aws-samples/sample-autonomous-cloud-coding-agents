@@ -36,10 +36,8 @@
  * terminal event neither double-releases nor regresses state.
  */
 
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
   BatchGetCommand,
-  DynamoDBDocumentClient,
   GetCommand,
   QueryCommand,
   UpdateCommand,
@@ -73,10 +71,11 @@ import {
   type OrchestrationChildRow,
 } from './shared/orchestration-store';
 import { encodeMarkdownUrl } from './shared/screenshot-url';
+import { makeDocClient } from './shared/ua';
 import { OrchestrationTable } from '../constructs/orchestration-table';
 import { TaskStatus, TERMINAL_STATUSES, type TaskStatusType } from '../constructs/task-status';
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const ddb = makeDocClient();
 const ORCHESTRATION_TABLE = process.env.ORCHESTRATION_TABLE_NAME!;
 const TASK_TABLE = process.env.TASK_TABLE_NAME!;
 // Registry table for the parent rollup comment's per-workspace OAuth

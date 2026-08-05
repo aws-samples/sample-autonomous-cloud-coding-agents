@@ -78,6 +78,8 @@ export class ConcurrencyReconciler extends Construct {
       timeout: Duration.minutes(RECONCILER_TIMEOUT_MINUTES),
       memorySize: RECONCILER_MEMORY_MB,
       environment: {
+        // Solution-attribution component label (#319): orchestration plane.
+        ABCA_COMPONENT: 'orchestr',
         TASK_TABLE_NAME: props.taskTable.tableName,
         USER_CONCURRENCY_TABLE_NAME: props.userConcurrencyTable.tableName,
       },

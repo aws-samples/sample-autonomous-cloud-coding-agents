@@ -49,6 +49,7 @@ import {
 import { ScanCommand } from '@aws-sdk/lib-dynamodb';
 import { documentClient } from './dynamo-clients';
 import { verifyLinearRefreshAndPersist } from './linear-oauth';
+import { makeClient } from './ua';
 
 /** Linear's GraphQL endpoint — a cheap authenticated probe target. */
 const LINEAR_GRAPHQL_ENDPOINT = 'https://api.linear.app/graphql';
@@ -235,7 +236,7 @@ export async function checkLinearWorkspaceAuth(
     exclusiveStartKey = page.LastEvaluatedKey;
   } while (exclusiveStartKey);
 
-  const sm = new SecretsManagerClient({ region });
+  const sm = makeClient(SecretsManagerClient, { region });
   const out: LinearWorkspaceAuthHealth[] = [];
 
   for (const row of rows) {
@@ -359,7 +360,7 @@ function describeState(state: LinearAuthState, expiresAt?: string, revokedAt?: s
  * an error, never as health).
  */
 export function makeLinearRefreshVerifier(region: string): LinearRefreshVerifier {
-  const sm = new SecretsManagerClient({ region });
+  const sm = makeClient(SecretsManagerClient, { region });
   return async ({ oauthSecretArn }) => verifyLinearRefreshAndPersist({
     readSecret: async () => {
       const res = await sm.send(new GetSecretValueCommand({ SecretId: oauthSecretArn }));

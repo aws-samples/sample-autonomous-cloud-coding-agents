@@ -39,8 +39,9 @@ import { DynamoDBClient, QueryCommand } from '@aws-sdk/client-dynamodb';
 import { planHeartbeat, type HeartbeatTaskView } from './shared/iteration-heartbeat';
 import { logger } from './shared/logger';
 import { makeLinearChannel } from './shared/orchestration-channel-linear';
+import { makeClient } from './shared/ua';
 
-const ddb = new DynamoDBClient({});
+const ddb = makeClient(DynamoDBClient);
 const TASK_TABLE = process.env.TASK_TABLE_NAME!;
 const STATUS_INDEX = process.env.TASK_STATUS_INDEX_NAME ?? 'StatusIndex';
 const WORKSPACE_REGISTRY_TABLE = process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME;

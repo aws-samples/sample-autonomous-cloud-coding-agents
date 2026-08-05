@@ -17,17 +17,17 @@
  *  SOFTWARE.
  */
 
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, QueryCommand } from '@aws-sdk/lib-dynamodb';
+import { QueryCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
 import { extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
 import { ErrorCode, errorResponse, paginatedResponse } from './shared/response';
 import { type WebhookRecord, toWebhookDetail } from './shared/types';
+import { makeDocClient } from './shared/ua';
 import { decodePaginationToken, encodePaginationToken, parseLimit } from './shared/validation';
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const ddb = makeDocClient();
 const TABLE_NAME = process.env.WEBHOOK_TABLE_NAME!;
 
 /** Default page size when the caller omits ``?limit=``. */

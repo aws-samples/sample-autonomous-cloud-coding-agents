@@ -17,13 +17,13 @@
  *  SOFTWARE.
  */
 
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayRequestAuthorizerEvent, APIGatewayAuthorizerResult } from 'aws-lambda';
 import { logger } from './shared/logger';
 import type { WebhookRecord } from './shared/types';
+import { makeDocClient } from './shared/ua';
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const ddb = makeDocClient();
 const TABLE_NAME = process.env.WEBHOOK_TABLE_NAME!;
 
 function generatePolicy(

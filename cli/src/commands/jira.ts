@@ -20,7 +20,6 @@
 import { execFile } from 'child_process';
 import * as readline from 'readline';
 import { CloudFormationClient, DescribeStacksCommand } from '@aws-sdk/client-cloudformation';
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
   CreateSecretCommand,
   GetSecretValueCommand,
@@ -29,7 +28,6 @@ import {
   SecretsManagerClient,
 } from '@aws-sdk/client-secrets-manager';
 import {
-  DynamoDBDocumentClient,
   GetCommand,
   PutCommand,
   UpdateCommand,
@@ -59,6 +57,7 @@ import {
 } from '../jira-oauth';
 import { awaitOauthCallback, CALLBACK_URL } from '../oauth-callback-server';
 import { promptSecret } from '../prompt-secret';
+import { makeClient, makeDocClient } from '../ua';
 
 /** Default label that triggers an ABCA task when applied to a Jira issue. */
 const DEFAULT_LABEL_FILTER = 'bgagent';
@@ -481,7 +480,7 @@ function extractCognitoSub(): string {
 
 async function getStackOutput(region: string, stackName: string, outputKey: string): Promise<string | null> {
   try {
-    const cfn = new CloudFormationClient({ region });
+    const cfn = makeClient(CloudFormationClient, { region });
     const result = await cfn.send(new DescribeStacksCommand({ StackName: stackName }));
     const outputs = result.Stacks?.[0]?.Outputs ?? [];
     const output = outputs.find((o) => o.OutputKey === outputKey);
@@ -677,7 +676,7 @@ export function makeJiraCommand(): Command {
 
         // ─── Step 4: Persist token to per-tenant Secrets Manager ─────────
         process.stdout.write('  → Storing OAuth token...');
-        const sm = new SecretsManagerClient({ region });
+        const sm = makeClient(SecretsManagerClient, { region });
         const now = new Date().toISOString();
         const stored: StoredJiraOauthToken = {
           access_token: tokenResponse.access_token,
@@ -697,7 +696,7 @@ export function makeJiraCommand(): Command {
         console.log(` ✓ (${secretName})`);
 
         // ─── Step 5: Persist registry row ────────────────────────────────
-        const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
+        const ddb = makeDocClient({ region });
         // Update instead of replacing the row so re-running OAuth setup keeps
         // app-actor audit metadata written by `jira app-setup`.
         await ddb.send(new UpdateCommand({
@@ -824,7 +823,7 @@ export function makeJiraCommand(): Command {
           );
         }
 
-        const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
+        const ddb = makeDocClient({ region });
         const registry = await ddb.send(new GetCommand({
           TableName: registryTableName,
           Key: { jira_cloud_id: cloudId },
@@ -845,7 +844,7 @@ export function makeJiraCommand(): Command {
         }
         const proxyUrl = validateJiraAppActorProxyUrl(opts.proxyUrl);
 
-        const sm = new SecretsManagerClient({ region });
+        const sm = makeClient(SecretsManagerClient, { region });
         const secretResult = await sm.send(new GetSecretValueCommand({
           SecretId: row.oauth_secret_arn as string,
         }));
@@ -956,8 +955,8 @@ export function makeJiraCommand(): Command {
         }
         const callerCognitoSub = extractCognitoSub();
 
-        const sm = new SecretsManagerClient({ region });
-        const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
+        const sm = makeClient(SecretsManagerClient, { region });
+        const ddb = makeDocClient({ region });
 
         const registry = await ddb.send(new GetCommand({
           TableName: workspaceRegistryTable!,
@@ -1162,7 +1161,7 @@ export function makeJiraCommand(): Command {
         const statusOnPr = opts.statusOnPr?.trim() || undefined;
 
         const now = new Date().toISOString();
-        const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
+        const ddb = makeDocClient({ region });
         await ddb.send(new PutCommand({
           TableName: tableName,
           Item: {

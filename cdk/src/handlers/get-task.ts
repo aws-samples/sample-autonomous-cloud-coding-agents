@@ -17,8 +17,7 @@
  *  SOFTWARE.
  */
 
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, GetCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
 import { TaskStatus } from '../constructs/task-status';
@@ -26,8 +25,9 @@ import { extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
 import { type TaskRecord, toTaskDetail } from './shared/types';
+import { makeDocClient } from './shared/ua';
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const ddb = makeDocClient();
 const TABLE_NAME = process.env.TASK_TABLE_NAME!;
 
 /** Must match the orchestrator's per-user admission cap for a sane ETA. */
