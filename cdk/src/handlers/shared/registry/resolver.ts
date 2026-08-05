@@ -39,10 +39,18 @@ const SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z.-]+))?$
 export function parseVersion(raw: string): SemVer | null {
   const m = SEMVER.exec(raw);
   if (!m) return null;
+  const major = Number(m[1]);
+  const minor = Number(m[2]);
+  const patch = Number(m[3]);
+  // Match parseConstraint: reject components `Number()` would round past
+  // MAX_SAFE_INTEGER, so a candidate version compares identically in TS and Py.
+  if (!Number.isSafeInteger(major) || !Number.isSafeInteger(minor) || !Number.isSafeInteger(patch)) {
+    return null;
+  }
   return {
-    major: Number(m[1]),
-    minor: Number(m[2]),
-    patch: Number(m[3]),
+    major,
+    minor,
+    patch,
     prerelease: m[4] ? m[4].split('.') : [],
     raw,
   };

@@ -90,6 +90,16 @@ export type RegistryVersionSummary = {
   readonly publisher: string | null;
 };
 
+/** `GET /registry/records/{kind}/{namespace}/{name}` response — one asset's
+ *  versions. Named (rather than inlined on the handler + client) so it rides the
+ *  CDK↔CLI types-sync guard like the other registry envelopes. */
+export type RegistryShowResponse = {
+  readonly kind: string;
+  readonly namespace: string;
+  readonly name: string;
+  readonly versions: readonly RegistryVersionSummary[];
+};
+
 /** A record envelope returned by publish / show. */
 export type RegistryRecordResponse = {
   readonly kind: string;

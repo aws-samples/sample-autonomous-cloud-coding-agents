@@ -46,7 +46,7 @@ import {
   RegistryPublishRequest,
   RegistryRecordResponse,
   RegistryResolveResponse,
-  RegistryVersionSummary,
+  RegistryShowResponse,
   SlackLinkResponse,
   PaginatedResponse,
   ReplayBundle,
@@ -551,10 +551,8 @@ export class ApiClient {
     kind: string,
     namespace: string,
     name: string,
-  ): Promise<{ kind: string; namespace: string; name: string; versions: RegistryVersionSummary[] }> {
-    const res = await this.request<
-      SuccessResponse<{ kind: string; namespace: string; name: string; versions: RegistryVersionSummary[] }>
-    >(
+  ): Promise<RegistryShowResponse> {
+    const res = await this.request<SuccessResponse<RegistryShowResponse>>(
       'GET',
       `/registry/records/${encodeURIComponent(kind)}/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}`,
     );

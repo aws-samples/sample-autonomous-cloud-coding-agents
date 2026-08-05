@@ -24,7 +24,7 @@ import { logger } from './shared/logger';
 import { makeRegistryClient } from './shared/registry/factory';
 import { compareVersions, parseVersion } from './shared/registry/resolver';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
-import type { RegistryVersionSummary } from './shared/types';
+import type { RegistryShowResponse, RegistryVersionSummary } from './shared/types';
 
 /**
  * GET /v1/registry/records/{kind}/{namespace}/{name} — show every version of
@@ -65,7 +65,8 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
         return compareVersions(bv, av); // highest first
       });
 
-    return successResponse(200, { kind, namespace, name, versions }, requestId);
+    const response: RegistryShowResponse = { kind, namespace, name, versions };
+    return successResponse(200, response, requestId);
   } catch (err) {
     logger.error('registry show failed', { requestId, error: String(err) });
     return errorResponse(500, ErrorCode.INTERNAL_ERROR, 'Failed to show asset.', requestId);

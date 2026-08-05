@@ -1427,17 +1427,21 @@ export class TaskApi extends Construct {
       const registryShowFn = registryFn('RegistryShowFn', 'registry-show.ts');
       const registryFns = [registryPublishFn, registryResolveFn, registryListFn, registryShowFn];
 
-      // Control-plane + data-plane actions, scoped to this account's registries.
+      // Control-plane + data-plane actions, scoped to THIS registry (not every
+      // registry in the account). The registry id is known at synth time
+      // (props.agentRegistryId), unlike create-time provisioning where it isn't —
+      // so there's no reason to widen to `registry/*`. Records get server-assigned
+      // ids, so the record ARN keeps a `/record/*` wildcard under this registry.
       const registryArn = Stack.of(this).formatArn({
         service: 'bedrock-agentcore',
         resource: 'registry',
-        resourceName: '*',
+        resourceName: props.agentRegistryId,
         arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
       });
       const recordArn = Stack.of(this).formatArn({
         service: 'bedrock-agentcore',
         resource: 'registry',
-        resourceName: '*/record/*',
+        resourceName: `${props.agentRegistryId}/record/*`,
         arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
       });
       const readActions = [

@@ -149,6 +149,56 @@ describe('registry-publish handler', () => {
     expect(res.statusCode).toBe(409);
     expect(JSON.parse(res.body).error.code).toBe('REGISTRY_VERSION_EXISTS');
   });
+
+  // Per-kind runtime contract (#246 review): runtime was previously only checked
+  // as `typeof object`, so arrays / empty / wrong-kind payloads published a 201
+  // and later resolved into a loader that silently skipped them.
+  describe('per-kind runtime validation (400, publish never called)', () => {
+    const publishAs = async (body: Record<string, unknown>): Promise<number> => {
+      const res = await publishHandler(makeEvent({
+        requestContext: { ...makeEvent().requestContext, authorizer: withGroups(['RegistryPublisher']) },
+        body: JSON.stringify(body),
+      }));
+      return res.statusCode;
+    };
+
+    test('rejects an array runtime', async () => {
+      expect(await publishAs({ ...validPublishBody, runtime: [] })).toBe(400);
+      expect(mockClient.publish).not.toHaveBeenCalled();
+    });
+
+    test('rejects an empty mcp_server runtime', async () => {
+      expect(await publishAs({ ...validPublishBody, runtime: {} })).toBe(400);
+    });
+
+    test('rejects mcp_server http without a url', async () => {
+      expect(await publishAs({ ...validPublishBody, runtime: { transport: 'http' } })).toBe(400);
+    });
+
+    test('rejects mcp_server with a bad transport', async () => {
+      expect(await publishAs({ ...validPublishBody, runtime: { transport: 'grpc', url: 'https://x' } })).toBe(400);
+    });
+
+    test('rejects a cedar_policy_module without cedar_text', async () => {
+      expect(await publishAs({
+        ...validPublishBody, kind: 'cedar_policy_module', runtime: { prompt_fragment: 'x' },
+      })).toBe(400);
+    });
+
+    test('rejects a skill without prompt_fragment', async () => {
+      expect(await publishAs({
+        ...validPublishBody, kind: 'skill', runtime: { transport: 'http', url: 'https://x' },
+      })).toBe(400);
+    });
+
+    test('accepts a well-formed stdio mcp_server (command, no url)', async () => {
+      mockClient.publish.mockResolvedValue({
+        kind: 'mcp_server', namespace: 'acme', name: 'pdf-tools', version: '1.0.0',
+        status: 'PENDING_APPROVAL', storageMode: 'native', discovery: {}, runtime: {} as never,
+      });
+      expect(await publishAs({ ...validPublishBody, runtime: { transport: 'stdio', command: 'run-me' } })).toBe(201);
+    });
+  });
 });
 
 describe('registry-resolve handler', () => {
@@ -184,6 +234,52 @@ describe('registry-resolve handler', () => {
     const res = await resolveHandler(ev('registry://mcp_server/acme/pdf-tools@^9.0.0'));
     expect(res.statusCode).toBe(422);
     expect(JSON.parse(res.body).error.message).toContain('NO_MATCHING_VERSION');
+  });
+
+  test('redacts secret header values but keeps header keys (#246 secret-leak fix)', async () => {
+    mockClient.resolve.mockResolvedValue({
+      kind: 'mcp_server',
+      namespace: 'acme',
+      name: 'pdf-tools',
+      version: '1.4.1',
+      runtime: {
+        transport: 'http',
+        url: 'https://x',
+        headers: { Authorization: 'Bearer registry-secret', 'X-Api-Key': 'topsecret' },
+      } as never,
+      warnings: [],
+    });
+    const res = await resolveHandler(ev('registry://mcp_server/acme/pdf-tools@^1.4.1'));
+    expect(res.statusCode).toBe(200);
+    const { runtime } = JSON.parse(res.body).data;
+    // Header keys survive (discovery signal); values are masked.
+    expect(runtime.headers).toEqual({ Authorization: '***', 'X-Api-Key': '***' });
+    expect(JSON.stringify(res.body)).not.toContain('registry-secret');
+    expect(JSON.stringify(res.body)).not.toContain('topsecret');
+    // Non-secret fields are untouched.
+    expect(runtime.url).toBe('https://x');
+  });
+
+  test('redacts stdio command and args (secrets are routinely passed as CLI args)', async () => {
+    mockClient.resolve.mockResolvedValue({
+      kind: 'mcp_server',
+      namespace: 'acme',
+      name: 'pdf-tools',
+      version: '1.4.1',
+      runtime: {
+        transport: 'stdio',
+        command: 'run-secret-server',
+        args: ['--api-key=topsecret', '--verbose'],
+      } as never,
+      warnings: [],
+    });
+    const res = await resolveHandler(ev('registry://mcp_server/acme/pdf-tools@^1.4.1'));
+    expect(res.statusCode).toBe(200);
+    const { runtime } = JSON.parse(res.body).data;
+    expect(runtime.command).toBe('***');
+    expect(runtime.args).toEqual(['***', '***']);
+    expect(JSON.stringify(res.body)).not.toContain('topsecret');
+    expect(JSON.stringify(res.body)).not.toContain('run-secret-server');
   });
 });
 

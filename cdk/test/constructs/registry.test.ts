@@ -90,6 +90,7 @@ describe('AgentRegistry construct', () => {
           Match.objectLike({
             Action: Match.arrayWith([
               'bedrock-agentcore:GetRegistry',
+              'bedrock-agentcore:UpdateRegistry',
               'bedrock-agentcore:DeleteRegistry',
               'bedrock-agentcore:ListRegistryRecords',
               'bedrock-agentcore:DeleteRegistryRecord',

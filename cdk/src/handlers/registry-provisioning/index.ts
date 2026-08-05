@@ -24,10 +24,12 @@
 //
 // GA-THROWAWAY: swap this for the native AgentCore CDK L1/L2 construct once it
 // ships (~2026-08-06). The `RegistryClient` seam keeps that swap confined.
+import { createHash } from 'node:crypto';
 import {
   BedrockAgentCoreControlClient,
   CreateRegistryCommand,
   GetRegistryCommand,
+  UpdateRegistryCommand,
   DeleteRegistryCommand,
   ListRegistryRecordsCommand,
   DeleteRegistryRecordCommand,
@@ -41,7 +43,12 @@ import { logger } from '../shared/logger';
 interface OnEventRequest {
   readonly RequestType: 'Create' | 'Update' | 'Delete';
   readonly PhysicalResourceId?: string;
+  /** CloudFormation request id — stable per logical CFN operation, so it makes a
+   *  good idempotency token for the async CreateRegistry (Provider handlers are
+   *  delivered at-least-once). Always present in Provider-framework events. */
+  readonly RequestId?: string;
   readonly ResourceProperties: { readonly RegistryName: string; readonly Description?: string };
+  readonly OldResourceProperties?: { readonly RegistryName?: string; readonly Description?: string };
 }
 interface OnEventResponse {
   readonly PhysicalResourceId?: string;
@@ -62,23 +69,57 @@ function registryIdFromArn(arn: string): string {
   return arn.includes('/') ? arn.split('/').pop()! : arn;
 }
 
+/** A deterministic, charset-safe idempotency token for CreateRegistry. Derived
+ *  from the stable CFN RequestId (falls back to the registry name if absent) so
+ *  an at-least-once retry of the same logical create is a substrate no-op rather
+ *  than a duplicate registry. */
+function createTokenFrom(requestId: string | undefined, registryName: string): string {
+  return createHash('sha256').update(`${requestId ?? ''}:${registryName}`).digest('hex').slice(0, 64);
+}
+
 export async function onEvent(event: OnEventRequest): Promise<OnEventResponse> {
   logger.info('registry-provisioning onEvent', { requestType: event.RequestType });
   switch (event.RequestType) {
     case 'Create': {
       const { RegistryName, Description } = event.ResourceProperties;
+      // Idempotency: Provider handlers are delivered at-least-once, so a lost
+      // response after a successful CreateRegistry would, on retry, create a
+      // *second* registry and strand the stack. A clientToken derived from the
+      // stable CFN RequestId makes the retry a no-op on the substrate side.
       const res = await client.send(
-        new CreateRegistryCommand({ name: RegistryName, description: Description }),
+        new CreateRegistryCommand({
+          name: RegistryName,
+          description: Description,
+          clientToken: createTokenFrom(event.RequestId, RegistryName),
+        }),
       );
       const registryId = registryIdFromArn(res.registryArn!);
       // PhysicalResourceId drives isComplete + delete; carry the id there.
       return { PhysicalResourceId: registryId, Data: { RegistryId: registryId, RegistryArn: res.registryArn! } };
     }
     case 'Update': {
-      // The registry name is immutable in this design; a name change would force
-      // replacement (new PhysicalResourceId) via CreateRegistry on the new value.
-      // Nothing to mutate in place, so echo the existing id back.
-      return { PhysicalResourceId: event.PhysicalResourceId };
+      // Apply the desired state instead of silently reporting success. Both
+      // exposed props are mutable in place via UpdateRegistry (the registry id
+      // is stable across a rename), so no replacement is needed — the physical
+      // id is unchanged. Previously this branch sent no SDK command, so a
+      // changed RegistryName/Description left CloudFormation reporting success
+      // while the managed registry kept its old values.
+      const registryId = event.PhysicalResourceId!;
+      const { RegistryName, Description } = event.ResourceProperties;
+      const old = event.OldResourceProperties ?? {};
+      const nameChanged = RegistryName !== old.RegistryName;
+      const descChanged = Description !== old.Description;
+      if (nameChanged || descChanged) {
+        await client.send(
+          new UpdateRegistryCommand({
+            registryId,
+            ...(nameChanged && { name: RegistryName }),
+            // The description update is a wrapper: an absent optionalValue clears it.
+            ...(descChanged && { description: { optionalValue: Description } }),
+          }),
+        );
+      }
+      return { PhysicalResourceId: registryId };
     }
     case 'Delete': {
       const registryId = event.PhysicalResourceId!;

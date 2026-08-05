@@ -28,7 +28,7 @@ import {
   makeRegistryClient,
 } from './shared/registry/factory';
 import { REGISTRY_KINDS, RESERVED_KINDS, parseConstraint } from './shared/registry/ref';
-import type { PublishInput, RuntimePayload } from './shared/registry/types';
+import { RegistryPublishIncompleteError, type PublishInput, type RuntimePayload } from './shared/registry/types';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
 import type { RegistryPublishRequest, RegistryRecordResponse } from './shared/types';
 
@@ -73,6 +73,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       version: body.asset_version,
       discovery: body.discovery,
       runtime: body.runtime as unknown as RuntimePayload,
+      publisher: userId,
       custom: body.custom,
       autoApprove: body.auto_approve,
     };
@@ -92,6 +93,15 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
   } catch (err) {
     if (err instanceof ConflictException) {
       return errorResponse(409, ErrorCode.REGISTRY_VERSION_EXISTS, 'A record with these coordinates already exists.', requestId);
+    }
+    if (err instanceof RegistryPublishIncompleteError) {
+      logger.error('registry publish incomplete', { requestId, recordId: err.recordId, error: String(err.cause) });
+      return errorResponse(
+        502,
+        ErrorCode.REGISTRY_PUBLISH_INCOMPLETE,
+        `${err.message} (record id: ${err.recordId})`,
+        requestId,
+      );
     }
     logger.error('registry publish failed', { requestId, error: String(err) });
     return errorResponse(500, ErrorCode.INTERNAL_ERROR, 'Failed to publish record.', requestId);
@@ -121,14 +131,66 @@ function validate(body: RegistryPublishRequest): string | null {
   if (!body.name || !NAME_RE.test(body.name)) {
     return 'name must match [a-z0-9][a-z0-9._-]*.';
   }
-  if (!body.asset_version || !parseConstraint(body.asset_version) || parseConstraint(body.asset_version)!.op !== 'exact') {
+  const constraint = body.asset_version ? parseConstraint(body.asset_version) : null;
+  if (!constraint || constraint.op !== 'exact') {
     return 'asset_version must be an exact semver (MAJOR.MINOR.PATCH[-prerelease]).';
   }
-  if (!body.discovery || typeof body.discovery !== 'object') {
-    return 'discovery must be an object.';
+  if (!isPlainObject(body.discovery)) {
+    return 'discovery must be a JSON object.';
   }
-  if (!body.runtime || typeof body.runtime !== 'object') {
-    return 'runtime must be an object.';
+  if (!isPlainObject(body.runtime)) {
+    return 'runtime must be a JSON object.';
   }
-  return null;
+  return validateRuntime(body.kind, body.runtime);
+}
+
+/** True only for a non-null, non-array object — rejects arrays, which `typeof`
+ *  reports as 'object' and which no runtime payload should ever be. */
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+/**
+ * Enforce the discriminated runtime contract per kind (#246 review). Previously
+ * `runtime` was only checked as `typeof object`, so arrays, `{}`, and wrong-kind
+ * payloads published a 201 that later resolved into a loader that silently
+ * skipped it — while the task audit still claimed the pin was used. Reject those
+ * at publish so a published record's runtime is always loadable.
+ */
+function validateRuntime(kind: string, runtime: Record<string, unknown>): string | null {
+  switch (kind) {
+    case 'mcp_server': {
+      const transport = runtime.transport;
+      if (transport !== 'http' && transport !== 'sse' && transport !== 'stdio') {
+        return "mcp_server runtime.transport must be one of 'http', 'sse', 'stdio'.";
+      }
+      if (transport === 'stdio') {
+        if (typeof runtime.command !== 'string' || !runtime.command) {
+          return "mcp_server runtime.command (non-empty string) is required for transport 'stdio'.";
+        }
+      } else if (typeof runtime.url !== 'string' || !runtime.url) {
+        return `mcp_server runtime.url (non-empty string) is required for transport '${transport}'.`;
+      }
+      if (runtime.headers !== undefined && !isPlainObject(runtime.headers)) {
+        return 'mcp_server runtime.headers, when present, must be a JSON object.';
+      }
+      return null;
+    }
+    case 'cedar_policy_module':
+      if (typeof runtime.cedar_text !== 'string' || !runtime.cedar_text.trim()) {
+        return 'cedar_policy_module runtime.cedar_text (non-empty string) is required.';
+      }
+      return null;
+    case 'skill':
+      if (typeof runtime.prompt_fragment !== 'string' || !runtime.prompt_fragment.trim()) {
+        return 'skill runtime.prompt_fragment (non-empty string) is required.';
+      }
+      if (runtime.tool_hints !== undefined && !Array.isArray(runtime.tool_hints)) {
+        return 'skill runtime.tool_hints, when present, must be an array.';
+      }
+      return null;
+    default:
+      // Unknown kinds are already rejected above; defensive fallthrough.
+      return `no runtime contract defined for kind '${kind}'.`;
+  }
 }

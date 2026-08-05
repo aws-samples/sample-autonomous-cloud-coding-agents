@@ -8,6 +8,7 @@ the port, so a substrate swap is confined here. Mirrors the read half of
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 from typing import TYPE_CHECKING, Any
@@ -27,7 +28,9 @@ _RUNTIME_META_KEY = "dev.abca.runtime"
 # Frontmatter key carrying the runtime payload (JSON) in a native AGENT_SKILLS
 # SKILL.md — mirrors SKILL_RUNTIME_FM_KEY in registry/agentcore-client.ts.
 _SKILL_RUNTIME_FM_KEY = "x-abca-runtime"
-_SKILL_RUNTIME_RE = re.compile(rf"^{_SKILL_RUNTIME_FM_KEY}:\s*'(.+)'\s*$", re.MULTILINE)
+# Capture the whole frontmatter value; the runtime is base64-encoded JSON (new
+# form) or, for records published before the base64 switch, single-quoted JSON.
+_SKILL_RUNTIME_RE = re.compile(rf"^{_SKILL_RUNTIME_FM_KEY}:\s*(.+?)\s*$", re.MULTILINE)
 _RESOLVABLE_STATUSES = ("APPROVED", "DEPRECATED")
 
 
@@ -69,7 +72,13 @@ class AgentCoreRegistryClient:
                 descriptors.get("agentSkills", {}).get("skillMd", {}).get("inlineContent", "")
             )
             m = _SKILL_RUNTIME_RE.search(skill_md)
-            return json.loads(m.group(1)) if m else {}
+            if not m:
+                return {}
+            raw_value = m.group(1)
+            # Legacy form: '<json>' (single-quoted). New form: bare base64.
+            if raw_value.startswith("'") and raw_value.endswith("'"):
+                return json.loads(raw_value[1:-1])
+            return json.loads(base64.b64decode(raw_value).decode("utf-8"))
         # MCP: JSON server.json with the runtime in a `_meta` block.
         inline = descriptors.get("mcp", {}).get("server", {}).get("inlineContent") or "{}"
         body = json.loads(inline)
@@ -133,12 +142,32 @@ class AgentCoreRegistryClient:
                 f"satisfies {ref.constraint.raw}",
             )
         winner = by_version[winning]
+        # Fail closed: a resolvable record whose runtime payload is empty or
+        # unreadable must NOT resolve to {} — that would let a task load nothing
+        # while the audit claims the pin was honored (REGISTRY.md §8). A corrupt
+        # _meta/CUSTOM body or an out-of-band write can produce this.
+        try:
+            runtime = self._extract_runtime(winner)
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise RegistryResolutionError(
+                "REMOVED",
+                ref_str,
+                f"resolved {ref.kind}/{ref.namespace}/{ref.name}@{winning} "
+                f"has an unreadable runtime payload: {exc}",
+            ) from exc
+        if not isinstance(runtime, dict) or not runtime:
+            raise RegistryResolutionError(
+                "REMOVED",
+                ref_str,
+                f"resolved {ref.kind}/{ref.namespace}/{ref.name}@{winning} "
+                f"has no loadable runtime payload",
+            )
         warnings = ["DEPRECATED"] if winner.get("status") == "DEPRECATED" else []
         return ResolvedAsset(
             kind=ref.kind,
             namespace=ref.namespace,
             name=ref.name,
             version=winning,
-            runtime=self._extract_runtime(winner),
+            runtime=runtime,
             warnings=warnings,
         )

@@ -26,7 +26,7 @@ import {
 } from '@aws-sdk/client-bedrock-agentcore-control';
 import { AgentCoreRegistryClient } from '../../../src/handlers/shared/registry/agentcore-client';
 import { parseRef } from '../../../src/handlers/shared/registry/ref';
-import { RegistryResolutionError } from '../../../src/handlers/shared/registry/types';
+import { RegistryPublishIncompleteError, RegistryResolutionError } from '../../../src/handlers/shared/registry/types';
 
 const RUNTIME_META_KEY = 'dev.abca.runtime';
 
@@ -36,6 +36,14 @@ class FakeClient {
   private records = new Map<string, Record<string, unknown>>();
   private seq = 0;
   public sent: string[] = [];
+  /** Status a CREATING record settles into on the first Get. `'CREATING'`
+   *  simulates a record that never settles (poll-budget timeout). */
+  public settleStatus = 'DRAFT';
+  /** Optional statusReason surfaced alongside a *_FAILED settle. */
+  public settleReason?: string;
+  /** When true, SubmitRegistryRecordForApproval throws — simulates a post-create
+   *  failure that strands a DRAFT record. */
+  public failSubmit = false;
 
   seed(record: Record<string, unknown>): string {
     const id = `rec-${++this.seq}`;
@@ -76,8 +84,13 @@ class FakeClient {
     if (cmd instanceof GetRegistryRecordCommand) {
       const id = (cmd.input as { recordId: string }).recordId;
       const rec = this.records.get(id);
-      // Simulate async settle: first Get after create flips CREATING → DRAFT.
-      if (rec && rec.status === 'CREATING') rec.status = 'DRAFT';
+      // Simulate async settle: first Get after create flips CREATING → the
+      // configured settle status (DRAFT by default; CREATE_FAILED or a stuck
+      // CREATING for the failure/timeout tests).
+      if (rec && rec.status === 'CREATING' && this.settleStatus !== 'CREATING') {
+        rec.status = this.settleStatus;
+        if (this.settleReason) rec.statusReason = this.settleReason;
+      }
       return rec ?? {};
     }
     if (cmd instanceof ListRegistryRecordsCommand) {
@@ -85,6 +98,7 @@ class FakeClient {
     }
     if (cmd instanceof SubmitRegistryRecordForApprovalCommand) {
       this.sent.push('submit');
+      if (this.failSubmit) throw new Error('submit rejected by substrate');
       const id = (cmd.input as { recordId: string }).recordId;
       const rec = this.records.get(id);
       if (rec) rec.status = 'PENDING_APPROVAL';
@@ -167,6 +181,30 @@ describe('AgentCoreRegistryClient', () => {
     expect(record.runtime).toEqual(runtime);
   });
 
+  test('publish (native skill) round-trips a prompt_fragment containing an apostrophe', async () => {
+    const fake = new FakeClient();
+    const client = makeClient(fake);
+    // The exact case that broke single-quoted YAML frontmatter (#246 review):
+    // js-yaml rejected `x-abca-runtime: '{"prompt_fragment":"Don't…"}'`.
+    const runtime = { prompt_fragment: "Don't skip tests; it's required.", tool_hints: ["Don't"] };
+    const record = await client.publish({
+      kind: 'skill',
+      namespace: 'acme',
+      name: 'strict-tester',
+      version: '1.0.0',
+      discovery: { description: 'Insists on tests' },
+      runtime,
+      autoApprove: true,
+    });
+    expect(record.runtime).toEqual(runtime);
+    // The stored frontmatter value must be base64 (no raw apostrophe/JSON), so
+    // the SKILL.md stays valid YAML for native descriptor validation.
+    const skillMd = (record.discovery as { skillMd: string }).skillMd;
+    const line = skillMd.split('\n').find((l) => l.startsWith('x-abca-runtime:'))!;
+    expect(line).not.toContain("'");
+    expect(line).not.toContain('prompt_fragment'); // it's encoded, not raw JSON
+  });
+
   test('publish rejects a duplicate (kind,namespace,name,version)', async () => {
     const fake = new FakeClient();
     const client = makeClient(fake);
@@ -181,6 +219,115 @@ describe('AgentCoreRegistryClient', () => {
     };
     await client.publish(input);
     await expect(client.publish(input)).rejects.toThrow();
+  });
+
+  test('publish stamps + round-trips the publisher across MCP, skill, and CUSTOM', async () => {
+    const cases = [
+      { kind: 'mcp_server', runtime: { transport: 'http' as const, url: 'https://x' }, discovery: { name: 'acme/a', description: 'd', version: '1.0.0' } },
+      { kind: 'skill', runtime: { prompt_fragment: 'note' }, discovery: { description: 'd' } },
+      { kind: 'cedar_policy_module', runtime: { cedar_text: 'permit(principal, action, resource);' }, discovery: { summary: 's' } },
+    ];
+    for (const c of cases) {
+      const client = makeClient(new FakeClient());
+      const record = await client.publish({
+        kind: c.kind,
+        namespace: 'acme',
+        name: 'thing',
+        version: '1.0.0',
+        discovery: c.discovery,
+        runtime: c.runtime as never,
+        publisher: 'cognito-sub-123',
+        autoApprove: true,
+      });
+      expect(record.publisher).toBe('cognito-sub-123');
+    }
+  });
+
+  test('publish without autoApprove still submits, landing in PENDING_APPROVAL (not DRAFT)', async () => {
+    const fake = new FakeClient();
+    const client = makeClient(fake);
+    const record = await client.publish({
+      kind: 'mcp_server',
+      namespace: 'acme',
+      name: 'pdf-tools',
+      version: '1.0.0',
+      discovery: { name: 'acme/pdf-tools', description: 'd', version: '1.0.0' },
+      runtime: { transport: 'http' as const, url: 'https://x' },
+      // autoApprove omitted → must still reach PENDING_APPROVAL, never approve.
+    });
+    expect(fake.sent).toEqual(['create', 'submit']);
+    expect(record.status).toBe('PENDING_APPROVAL');
+  });
+
+  test('publish throws (not 201) when the record settles into CREATE_FAILED', async () => {
+    const fake = new FakeClient();
+    fake.settleStatus = 'CREATE_FAILED';
+    fake.settleReason = 'descriptor rejected by substrate';
+    const client = makeClient(fake);
+    // The record was created before waitPastCreating saw CREATE_FAILED, so the
+    // failure surfaces as a RegistryPublishIncompleteError carrying the orphan's
+    // recordId; the underlying CREATE_FAILED reason rides on `cause`.
+    const err = await client.publish({
+      kind: 'mcp_server',
+      namespace: 'acme',
+      name: 'pdf-tools',
+      version: '1.0.0',
+      discovery: { name: 'acme/pdf-tools', description: 'd', version: '1.0.0' },
+      runtime: { transport: 'http' as const, url: 'https://x' },
+    }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RegistryPublishIncompleteError);
+    expect((err as RegistryPublishIncompleteError).recordId).toBeTruthy();
+    expect(String((err as RegistryPublishIncompleteError).cause)).toMatch(/CREATE_FAILED.*descriptor rejected/);
+    // Never advanced past create — no submit/approve on a failed record.
+    expect(fake.sent).toEqual(['create']);
+  });
+
+  test('publish wraps a post-create submit failure in RegistryPublishIncompleteError', async () => {
+    const fake = new FakeClient();
+    fake.failSubmit = true;
+    const client = makeClient(fake);
+    const err = await client.publish({
+      kind: 'mcp_server',
+      namespace: 'acme',
+      name: 'pdf-tools',
+      version: '1.0.0',
+      discovery: { name: 'acme/pdf-tools', description: 'd', version: '1.0.0' },
+      runtime: { transport: 'http' as const, url: 'https://x' },
+    }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RegistryPublishIncompleteError);
+    // The orphan's id is surfaced so an operator can find + delete/approve it.
+    expect((err as RegistryPublishIncompleteError).recordId).toBeTruthy();
+    // Create + submit were attempted; submit failed before approve.
+    expect(fake.sent).toEqual(['create', 'submit']);
+  });
+
+  test('publish throws when the record never leaves CREATING (poll budget exhausted)', async () => {
+    jest.useFakeTimers();
+    try {
+      const fake = new FakeClient();
+      fake.settleStatus = 'CREATING'; // never settles
+      const client = makeClient(fake);
+      const p = client.publish({
+        kind: 'mcp_server',
+        namespace: 'acme',
+        name: 'pdf-tools',
+        version: '1.0.0',
+        discovery: { name: 'acme/pdf-tools', description: 'd', version: '1.0.0' },
+        runtime: { transport: 'http' as const, url: 'https://x' },
+      });
+      // A timeout after create also strands a record, so it surfaces as
+      // RegistryPublishIncompleteError with the underlying reason on `cause`.
+      const assertion = expect(p).rejects.toBeInstanceOf(RegistryPublishIncompleteError);
+      const causeAssertion = p.catch((e: unknown) => {
+        expect(String((e as RegistryPublishIncompleteError).cause)).toMatch(/did not leave CREATING/);
+      });
+      await jest.runAllTimersAsync();
+      await assertion;
+      await causeAssertion;
+      expect(fake.sent).toEqual(['create']);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   test('resolve picks the highest APPROVED version matching the constraint', async () => {
@@ -241,5 +388,42 @@ describe('AgentCoreRegistryClient', () => {
       reason: 'NO_MATCHING_VERSION',
     });
     await expect(client.resolve(parsed.ref)).rejects.toBeInstanceOf(RegistryResolutionError);
+  });
+
+  test('resolve fails closed (REMOVED) when an APPROVED record has an empty runtime', async () => {
+    const fake = new FakeClient();
+    const client = makeClient(fake);
+    // APPROVED, but the server.json carries no `_meta` runtime block at all —
+    // extractPayload would yield an empty runtime. Fail closed instead of
+    // resolving to {} (REGISTRY.md §8).
+    fake.seed({
+      name: 'mcp_server/acme/pdf-tools',
+      descriptorType: 'MCP',
+      descriptors: { mcp: { server: { inlineContent: JSON.stringify({ name: 'acme/pdf-tools', version: '1.4.1' }) } } },
+      recordVersion: '1.4.1',
+      status: 'APPROVED',
+    });
+    const parsed = parseRef('registry://mcp_server/acme/pdf-tools@1.4.1');
+    if (!parsed.ok) throw new Error('fixture ref should parse');
+    await expect(client.resolve(parsed.ref)).rejects.toMatchObject({ reason: 'REMOVED' });
+    await expect(client.resolve(parsed.ref)).rejects.toBeInstanceOf(RegistryResolutionError);
+  });
+
+  test('publish (native MCP) preserves a caller-supplied discovery._meta alongside ABCA keys', async () => {
+    const fake = new FakeClient();
+    const client = makeClient(fake);
+    const runtime = { transport: 'http', url: 'https://x' };
+    const record = await client.publish({
+      kind: 'mcp_server',
+      namespace: 'acme',
+      name: 'pdf-tools',
+      version: '1.0.0',
+      discovery: { name: 'acme/pdf-tools', version: '1.0.0', _meta: { 'io.example.custom': { keep: true } } },
+      runtime,
+      autoApprove: true,
+    });
+    const meta = (record.discovery as Record<string, unknown>)._meta as Record<string, unknown>;
+    // ABCA runtime rides under its key AND the caller's own _meta key survives.
+    expect(meta).toMatchObject({ [RUNTIME_META_KEY]: runtime, 'io.example.custom': { keep: true } });
   });
 });

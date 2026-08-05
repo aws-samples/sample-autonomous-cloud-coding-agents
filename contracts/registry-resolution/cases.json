@@ -95,6 +95,11 @@
       "name": "trailing-newline-rejected",
       "ref": "registry://mcp_server/acme/pdf-tools@1.0.0\n",
       "expected": { "ok": false, "reason": "INVALID_REGISTRY_REF" }
+    },
+    {
+      "name": "component-beyond-max-safe-integer-rejected",
+      "ref": "registry://mcp_server/acme/pdf-tools@9007199254740993.0.0",
+      "expected": { "ok": false, "reason": "INVALID_CONSTRAINT" }
     }
   ]
 }

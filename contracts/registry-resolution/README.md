@@ -1,12 +1,25 @@
 # registry:// grammar parity fixtures (#246)
 
-Golden `(ref) → verdict` vectors shared by the two `registry://` reference
-parsers:
+Golden vectors shared by the two `registry://` implementations. There are two
+corpora, each run by a dual TS/Python runner:
+
+**1. Grammar** — `cases.json`, golden `(ref) → verdict`:
 
 - **Agent (Python):** [`agent/tests/test_registry_resolution_corpus.py`](../../agent/tests/test_registry_resolution_corpus.py)
   runs each `ref` through `registry.ref.parse_ref`.
 - **CDK (TypeScript):** [`cdk/test/handlers/shared/registry-resolution-parity.test.ts`](../../cdk/test/handlers/shared/registry-resolution-parity.test.ts)
   runs the same refs through `parseRef`.
+
+**2. Resolution ranking** — `resolution-cases.json`, golden `(candidates, constraint) → winner`:
+
+- **Agent (Python):** [`agent/tests/test_registry_resolution_ranking_corpus.py`](../../agent/tests/test_registry_resolution_ranking_corpus.py)
+  runs each case through `registry.resolver.select_highest`.
+- **CDK (TypeScript):** [`cdk/test/handlers/shared/registry-resolution-ranking-parity.test.ts`](../../cdk/test/handlers/shared/registry-resolution-ranking-parity.test.ts)
+  runs the same cases through `selectHighest`.
+
+Ranking runs in both languages (TS handler for the API, Python for the
+orchestrator's direct port), so caret/tilde/prerelease semantics must stay in
+lockstep — this second corpus is how we catch a ranking drift before deploy.
 
 Both parsers implement the identical grammar in different languages; this corpus
 is how we catch drift before deploy — the same mechanism

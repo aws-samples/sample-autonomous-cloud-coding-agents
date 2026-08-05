@@ -84,11 +84,20 @@ const OP_BY_PREFIX: Record<string, ConstraintOp> = { '': 'exact', '^': 'caret', 
 export function parseConstraint(raw: string): ParsedConstraint | null {
   const m = CONSTRAINT.exec(raw);
   if (!m) return null;
+  const major = Number(m[2]);
+  const minor = Number(m[3]);
+  const patch = Number(m[4]);
+  // Reject components beyond MAX_SAFE_INTEGER: `Number()` rounds them, so TS
+  // would silently compare a different value than Python's arbitrary-precision
+  // int — a cross-language parity break in version selection (#246 review).
+  if (!Number.isSafeInteger(major) || !Number.isSafeInteger(minor) || !Number.isSafeInteger(patch)) {
+    return null;
+  }
   return {
     op: OP_BY_PREFIX[m[1]],
-    major: Number(m[2]),
-    minor: Number(m[3]),
-    patch: Number(m[4]),
+    major,
+    minor,
+    patch,
     prerelease: m[5],
     raw,
   };

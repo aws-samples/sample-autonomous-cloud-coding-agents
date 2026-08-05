@@ -45,6 +45,15 @@ export type StorageMode = 'native' | 'custom';
  *  MCP `server.json` `_meta` block (spike-verified to survive validation). */
 export const RUNTIME_META_KEY = 'dev.abca.runtime';
 
+/** Companion `_meta` key carrying the authenticated publisher (Cognito sub) so
+ *  the record's origin is reconstructable — CloudTrail only sees the shared
+ *  Lambda role. Written once at publish; immutable with the rest of the record. */
+export const PUBLISHER_META_KEY = 'dev.abca.publisher';
+
+/** Frontmatter key carrying the publisher inside a native AGENT_SKILLS SKILL.md
+ *  (skills can't hold a `_meta` block). */
+export const PUBLISHER_FM_KEY = 'x-abca-publisher';
+
 // --- Per-kind runtime payloads -------------------------------------------------
 // The loadable body each kind carries, independent of discovery metadata.
 
@@ -126,6 +135,25 @@ export class RegistryResolutionError extends Error {
   }
 }
 
+/**
+ * Raised when `publish` succeeds at CreateRegistryRecord but a later step
+ * (submit/approve/re-read) fails, leaving a partial record on the substrate.
+ * Carries the `recordId` so the operator can find and approve or delete the
+ * orphan — a bare 500 hid that a record was stranded, and because immutability
+ * rejects re-publishing the same version, a retry would otherwise 409 forever
+ * with no resolvable record (#246 review).
+ */
+export class RegistryPublishIncompleteError extends Error {
+  constructor(
+    readonly recordId: string,
+    message: string,
+    readonly cause?: unknown,
+  ) {
+    super(message);
+    this.name = 'RegistryPublishIncompleteError';
+  }
+}
+
 // --- Port input types ----------------------------------------------------------
 
 export interface PublishInput {
@@ -135,6 +163,9 @@ export interface PublishInput {
   readonly version: string;
   readonly discovery: Readonly<Record<string, unknown>>;
   readonly runtime: RuntimePayload;
+  /** Authenticated publisher (Cognito sub) — stamped immutably on the record for
+   *  audit. Optional only so non-HTTP callers/tests can omit it. */
+  readonly publisher?: string;
   /** Force CUSTOM storage (verbatim) instead of a native descriptor. */
   readonly custom?: boolean;
   /** Dev convenience: drive create → submit → approve so the record resolves. */

@@ -40,6 +40,11 @@ _CONSTRAINT = re.compile(
 )
 _OP_BY_PREFIX = {"": "exact", "^": "caret", "~": "tilde"}
 
+# JS ``Number.MAX_SAFE_INTEGER`` (2**53 - 1). Python int is arbitrary-precision,
+# but the TS parser rounds components above this, so both sides must reject them
+# to agree on version selection (#246 parity — see registry/ref.ts).
+_MAX_SAFE_INT = 9007199254740991
+
 
 class RefError(ValueError):
     """Raised when a ``registry://`` ref is malformed.
@@ -78,11 +83,14 @@ def parse_constraint(raw: str) -> ParsedConstraint | None:
     if not m:
         return None
     prefix, major, minor, patch, prerelease = m.groups()
+    major_i, minor_i, patch_i = int(major), int(minor), int(patch)
+    if max(major_i, minor_i, patch_i) > _MAX_SAFE_INT:
+        return None
     return ParsedConstraint(
         op=_OP_BY_PREFIX[prefix],
-        major=int(major),
-        minor=int(minor),
-        patch=int(patch),
+        major=major_i,
+        minor=minor_i,
+        patch=patch_i,
         prerelease=prerelease,
         raw=raw,
     )

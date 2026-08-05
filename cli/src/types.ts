@@ -68,6 +68,15 @@ export type RegistryVersionSummary = {
   readonly publisher: string | null;
 };
 
+/** `GET /registry/records/{kind}/{namespace}/{name}` response — one asset's
+ *  versions. Mirrors cdk/src/handlers/shared/types.ts (types-sync contract). */
+export type RegistryShowResponse = {
+  readonly kind: string;
+  readonly namespace: string;
+  readonly name: string;
+  readonly versions: readonly RegistryVersionSummary[];
+};
+
 /** A record envelope returned by publish / show. */
 export type RegistryRecordResponse = {
   readonly kind: string;

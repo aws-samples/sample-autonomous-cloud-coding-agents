@@ -19,6 +19,10 @@ if TYPE_CHECKING:
 # newline in Python, diverging from the JS mirror (resolver.ts).
 _SEMVER = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z.-]+))?\Z")
 
+# JS ``Number.MAX_SAFE_INTEGER`` (2**53 - 1); mirrors registry/ref.py._MAX_SAFE_INT.
+# Kept local rather than imported to avoid a runtime import cycle with ref.py.
+_MAX_SAFE_INT = 9007199254740991
+
 
 @dataclass(frozen=True)
 class SemVer:
@@ -34,10 +38,15 @@ def parse_version(raw: str) -> SemVer | None:
     if not m:
         return None
     major, minor, patch, pre = m.groups()
+    major_i, minor_i, patch_i = int(major), int(minor), int(patch)
+    # Match ref.parse_constraint / resolver.ts: reject components the TS parser
+    # would round past MAX_SAFE_INTEGER so a candidate version ranks identically.
+    if max(major_i, minor_i, patch_i) > _MAX_SAFE_INT:
+        return None
     return SemVer(
-        major=int(major),
-        minor=int(minor),
-        patch=int(patch),
+        major=major_i,
+        minor=minor_i,
+        patch=patch_i,
         prerelease=tuple(pre.split(".")) if pre else (),
         raw=raw,
     )

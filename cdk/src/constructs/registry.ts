@@ -107,6 +107,7 @@ export class AgentRegistry extends Construct {
     const registryPolicy = new iam.PolicyStatement({
       actions: [
         'bedrock-agentcore:GetRegistry',
+        'bedrock-agentcore:UpdateRegistry',
         'bedrock-agentcore:DeleteRegistry',
         'bedrock-agentcore:ListRegistryRecords',
         'bedrock-agentcore:DeleteRegistryRecord',

@@ -41,11 +41,15 @@ import {
   ConflictException,
   ResourceNotFoundException,
 } from '@aws-sdk/client-bedrock-agentcore-control';
+import { logger } from '../logger';
 import type { RegistryClient } from './client';
 import type { ParsedRef } from './ref';
 import { selectHighest } from './resolver';
 import {
+  PUBLISHER_FM_KEY,
+  PUBLISHER_META_KEY,
   RUNTIME_META_KEY,
+  RegistryPublishIncompleteError,
   RegistryResolutionError,
   type ListFilter,
   type PublishInput,
@@ -59,6 +63,18 @@ import {
 const NAME_SEP = '/';
 const RECORD_CREATE_POLL_MS = 2000;
 const RECORD_CREATE_MAX_POLLS = 30;
+
+/** True when a runtime payload is a non-empty object — the fail-closed gate that
+ *  keeps `resolve` from returning a record whose runtime is missing/`{}` (which
+ *  would let a task load nothing while the audit claims the pin was honored). */
+function isNonEmptyRuntime(runtime: unknown): boolean {
+  return (
+    typeof runtime === 'object' &&
+    runtime !== null &&
+    !Array.isArray(runtime) &&
+    Object.keys(runtime as Record<string, unknown>).length > 0
+  );
+}
 
 /** Kinds that map onto a native AgentCore descriptor type. */
 const NATIVE_DESCRIPTOR_BY_KIND: Record<string, 'MCP' | 'AGENT_SKILLS'> = {
@@ -93,29 +109,54 @@ function buildSkillMd(input: {
   version: string;
   discovery: Readonly<Record<string, unknown>>;
   runtime: unknown;
+  publisher?: string;
 }): string {
   const description = String(
     input.discovery.description ?? input.discovery.summary ?? `${input.namespace}/${input.name} skill`,
   ).slice(0, 100);
-  const runtimeJson = JSON.stringify(input.runtime);
-  return [
+  // Base64-encode the runtime JSON. Emitting raw JSON in a single-quoted YAML
+  // scalar breaks the moment the payload contains a `'` (e.g. prompt_fragment
+  // "Don't skip tests") — js-yaml rejects the frontmatter and native AgentCore
+  // descriptor validation fails, even though the ABCA API accepted it (#246
+  // review). Base64 is quote/newline/apostrophe-safe and needs no YAML escaping.
+  const runtimeB64 = Buffer.from(JSON.stringify(input.runtime), 'utf-8').toString('base64');
+  const lines = [
     '---',
     `name: ${skillNameSlug(input.namespace, input.name)}`,
     `description: ${description}`,
     `version: ${input.version}`,
-    `${SKILL_RUNTIME_FM_KEY}: '${runtimeJson}'`,
+    `${SKILL_RUNTIME_FM_KEY}: ${runtimeB64}`,
+  ];
+  if (input.publisher) lines.push(`${PUBLISHER_FM_KEY}: ${input.publisher}`);
+  lines.push(
     '---',
     `# ${input.namespace}/${input.name}`,
     '',
     String(input.discovery.body ?? 'ABCA registry skill.'),
-  ].join('\n');
+  );
+  return lines.join('\n');
+}
+
+/** Recover the publisher (Cognito sub) from a SKILL.md frontmatter line. */
+function parseSkillPublisher(skillMd: string): string | undefined {
+  const m = skillMd.match(new RegExp(`^${PUBLISHER_FM_KEY}:\\s*(.+?)\\s*$`, 'm'));
+  return m ? m[1] : undefined;
 }
 
 /** Recover the ABCA runtime payload from a SKILL.md's `x-abca-runtime`
- *  frontmatter line. Mirrors ``agent/src/registry/agentcore_client.py``. */
+ *  frontmatter line (base64-encoded JSON). Mirrors
+ *  ``agent/src/registry/agentcore_client.py``. Also accepts the legacy
+ *  single-quoted-JSON form so records published before the base64 switch still
+ *  resolve. */
 function parseSkillRuntime(skillMd: string): unknown {
-  const m = skillMd.match(new RegExp(`^${SKILL_RUNTIME_FM_KEY}:\\s*'(.+)'\\s*$`, 'm'));
-  return m ? JSON.parse(m[1]) : {};
+  const line = skillMd.match(new RegExp(`^${SKILL_RUNTIME_FM_KEY}:\\s*(.+?)\\s*$`, 'm'));
+  if (!line) return {};
+  const raw = line[1];
+  // Legacy form: '<json>' (single-quoted). New form: bare base64.
+  if (raw.startsWith("'") && raw.endsWith("'")) {
+    return JSON.parse(raw.slice(1, -1));
+  }
+  return JSON.parse(Buffer.from(raw, 'base64').toString('utf-8'));
 }
 
 export interface AgentCoreRegistryClientOptions {
@@ -165,44 +206,60 @@ export class AgentCoreRegistryClient implements RegistryClient {
       ? { custom: { inlineContent: JSON.stringify(this.customBody(input)) } }
       : this.nativeDescriptors(input);
 
-    let recordId: string;
+    const res = await this.client.send(
+      new CreateRegistryRecordCommand({
+        registryId: this.registryId,
+        name,
+        descriptorType: useCustom ? 'CUSTOM' : NATIVE_DESCRIPTOR_BY_KIND[input.kind],
+        descriptors,
+        recordVersion: input.version,
+      }),
+    );
+    const recordId = this.idFromArn(res.recordArn!);
+
+    // The record now exists on the substrate. Any failure past this point leaves
+    // a partial (DRAFT/PENDING_APPROVAL) record that immutability will block a
+    // clean retry of — so surface the recordId in a typed error rather than a
+    // bare 500, and log it, so an operator can approve or delete the orphan.
     try {
-      const res = await this.client.send(
-        new CreateRegistryRecordCommand({
-          registryId: this.registryId,
-          name,
-          descriptorType: useCustom ? 'CUSTOM' : NATIVE_DESCRIPTOR_BY_KIND[input.kind],
-          descriptors,
-          recordVersion: input.version,
-        }),
-      );
-      recordId = this.idFromArn(res.recordArn!);
-    } catch (err) {
-      if (err instanceof ConflictException) throw err;
-      throw err;
-    }
+      // CreateRegistryRecord is async — wait until it leaves CREATING.
+      await this.waitPastCreating(recordId);
 
-    // CreateRegistryRecord is async — wait until it leaves CREATING.
-    await this.waitPastCreating(recordId);
-
-    if (input.autoApprove) {
-      // DRAFT -> PENDING_APPROVAL -> APPROVED (submit is a mandatory waypoint).
+      // Always submit for approval so a normal publish lands in PENDING_APPROVAL —
+      // otherwise the record sits in DRAFT, which no ABCA surface can resolve or
+      // promote (there is no standalone submit endpoint). Only the final APPROVED
+      // transition is gated on autoApprove.
       await this.client.send(
         new SubmitRegistryRecordForApprovalCommand({ registryId: this.registryId, recordId }),
       );
-      await this.client.send(
-        new UpdateRegistryRecordStatusCommand({
-          registryId: this.registryId,
-          recordId,
-          status: 'APPROVED',
-          statusReason: 'auto-approved on publish',
-        }),
+      if (input.autoApprove) {
+        await this.client.send(
+          new UpdateRegistryRecordStatusCommand({
+            registryId: this.registryId,
+            recordId,
+            status: 'APPROVED',
+            statusReason: 'auto-approved on publish',
+          }),
+        );
+      }
+
+      const record = await this.getRecordById(recordId);
+      if (!record) throw new Error(`published record ${recordId} not readable after write`);
+      return record;
+    } catch (err) {
+      logger.error('registry publish incomplete — partial record stranded', {
+        recordId,
+        name,
+        version: input.version,
+        error: String(err),
+      });
+      throw new RegistryPublishIncompleteError(
+        recordId,
+        `record ${name}@${input.version} was created (id ${recordId}) but could not be `
+          + 'driven to a resolvable state; approve or delete it before retrying',
+        err,
       );
     }
-
-    const record = await this.getRecordById(recordId);
-    if (!record) throw new Error(`published record ${recordId} not readable after write`);
-    return record;
   }
 
   // --- get / list -------------------------------------------------------------
@@ -220,6 +277,10 @@ export class AgentCoreRegistryClient implements RegistryClient {
   }
 
   async listRecords(filter?: ListFilter): Promise<readonly RegistryRecord[]> {
+    // TODO(GA): O(n) — List + one GetRegistryRecord per summary, and every read
+    // path (resolve/show/getRecord) funnels through here. Fine at MVP catalog
+    // sizes; revisit when the native AgentCore construct lands (server-side
+    // filter / batch get) so large catalogs don't pay a per-record round trip.
     const out: RegistryRecord[] = [];
     let nextToken: string | undefined;
     do {
@@ -267,6 +328,18 @@ export class AgentCoreRegistryClient implements RegistryClient {
       );
     }
     const winner = candidates.find((r) => r.version === winningVersion)!;
+    // Fail closed: an otherwise-resolvable record whose runtime payload is
+    // empty/unreadable must NOT resolve to `{}` — that would let a task run with
+    // a missing/substituted asset while the audit claims the pin was honored
+    // (REGISTRY.md §8). A record can reach this state via an out-of-band write or
+    // a corrupt `_meta`/CUSTOM body that slipped past publish validation.
+    if (!isNonEmptyRuntime(winner.runtime)) {
+      throw new RegistryResolutionError(
+        'REMOVED',
+        refStr,
+        `resolved ${winner.kind}/${winner.namespace}/${winner.name}@${winner.version} has no loadable runtime payload`,
+      );
+    }
     const warnings = winner.status === 'DEPRECATED' ? ['DEPRECATED'] : [];
     return {
       kind: winner.kind,
@@ -284,19 +357,43 @@ export class AgentCoreRegistryClient implements RegistryClient {
     return arn.includes('/') ? arn.split('/').pop()! : arn;
   }
 
+  /**
+   * Poll a freshly-created record until it settles into a usable state.
+   *
+   * CreateRegistryRecord is async, so we must confirm the substrate actually
+   * accepted the record before treating publish as successful. Prior behavior
+   * returned on *any* non-`CREATING` status (so `CREATE_FAILED` looked like
+   * success), treated a not-found as success (it's transient right after
+   * create), and treated poll-budget exhaustion as success — any of which let
+   * the handler return 201 for a record that never became usable (#246 review).
+   *
+   * Now: not-found and `CREATING` are transient (keep polling); any `*_FAILED`
+   * status throws with the substrate's statusReason; reaching a usable state
+   * (`DRAFT`/`PENDING_APPROVAL`/`APPROVED`) returns; exhausting the budget throws.
+   */
   private async waitPastCreating(recordId: string): Promise<void> {
     for (let i = 0; i < RECORD_CREATE_MAX_POLLS; i++) {
       try {
         const rec = await this.client.send(
           new GetRegistryRecordCommand({ registryId: this.registryId, recordId }),
         );
-        if (!String(rec.status).includes('CREATING')) return;
+        const status = String(rec.status ?? '');
+        if (status.endsWith('_FAILED')) {
+          throw new Error(
+            `record ${recordId} entered ${status}${rec.statusReason ? `: ${rec.statusReason}` : ''}`,
+          );
+        }
+        if (status && status !== 'CREATING') return; // DRAFT / PENDING_APPROVAL / APPROVED
       } catch (err) {
-        if (err instanceof ResourceNotFoundException) return;
-        throw err;
+        // Transient right after CreateRegistryRecord — the record may not be
+        // readable yet. Keep polling rather than declaring success.
+        if (!(err instanceof ResourceNotFoundException)) throw err;
       }
       await sleep(RECORD_CREATE_POLL_MS);
     }
+    throw new Error(
+      `record ${recordId} did not leave CREATING within ${RECORD_CREATE_MAX_POLLS} polls`,
+    );
   }
 
   private async getRecordById(recordId: string): Promise<RegistryRecord | null> {
@@ -310,7 +407,7 @@ export class AgentCoreRegistryClient implements RegistryClient {
       throw err;
     }
     const decoded = this.decodeName(raw.name ?? '');
-    const { runtime, storageMode, discovery } = this.extractPayload(raw);
+    const { runtime, storageMode, discovery, publisher } = this.extractPayload(raw);
     return {
       kind: decoded.kind,
       namespace: decoded.namespace,
@@ -320,6 +417,7 @@ export class AgentCoreRegistryClient implements RegistryClient {
       storageMode,
       discovery,
       runtime,
+      publisher,
       createdAt: raw.createdAt ? raw.createdAt.toISOString() : undefined,
     };
   }
@@ -333,13 +431,19 @@ export class AgentCoreRegistryClient implements RegistryClient {
       mcp?: { server?: { inlineContent?: string } };
       agentSkills?: { skillMd?: { inlineContent?: string } };
     };
-  }): { runtime: RuntimePayload; storageMode: StorageMode; discovery: Record<string, unknown> } {
+  }): {
+    runtime: RuntimePayload;
+    storageMode: StorageMode;
+    discovery: Record<string, unknown>;
+    publisher?: string;
+  } {
     if (raw.descriptorType === 'CUSTOM') {
       const body = JSON.parse(raw.descriptors?.custom?.inlineContent ?? '{}');
       return {
         runtime: body.runtime as RuntimePayload,
         storageMode: 'custom',
         discovery: (body.discovery ?? {}) as Record<string, unknown>,
+        publisher: typeof body.publisher === 'string' ? body.publisher : undefined,
       };
     }
     if (raw.descriptorType === 'AGENT_SKILLS') {
@@ -350,16 +454,19 @@ export class AgentCoreRegistryClient implements RegistryClient {
         runtime: parseSkillRuntime(skillMd) as RuntimePayload,
         storageMode: 'native',
         discovery: { skillMd },
+        publisher: parseSkillPublisher(skillMd),
       };
     }
     // MCP: JSON server.json with the runtime in a `_meta` block.
     const inline = raw.descriptors?.mcp?.server?.inlineContent ?? '{}';
     const body = JSON.parse(inline);
     const meta = body._meta?.[RUNTIME_META_KEY];
+    const publisher = body._meta?.[PUBLISHER_META_KEY];
     return {
       runtime: meta as RuntimePayload,
       storageMode: 'native',
       discovery: body as Record<string, unknown>,
+      publisher: typeof publisher === 'string' ? publisher : undefined,
     };
   }
 
@@ -368,6 +475,7 @@ export class AgentCoreRegistryClient implements RegistryClient {
       abca_kind: input.kind,
       discovery: input.discovery,
       runtime: input.runtime,
+      ...(input.publisher && { publisher: input.publisher }),
     };
   }
 
@@ -376,8 +484,19 @@ export class AgentCoreRegistryClient implements RegistryClient {
     agentSkills?: { skillMd: { inlineContent: string } };
   } {
     if (NATIVE_DESCRIPTOR_BY_KIND[input.kind] === 'MCP') {
-      // MCP: embed the runtime in a `_meta` block on the validated server.json.
-      const withMeta = { ...input.discovery, _meta: { [RUNTIME_META_KEY]: input.runtime } };
+      // MCP: embed the runtime + publisher in a `_meta` block on the validated
+      // server.json. A valid server.json may legitimately carry its own `_meta`
+      // (the MCP spec reserves it for arbitrary metadata), so merge our ABCA keys
+      // into the caller's block rather than replacing it — clobbering it would
+      // silently drop the publisher's metadata, and a future reorder could drop
+      // our runtime on read (extractPayload reads `_meta[RUNTIME_META_KEY]`).
+      const callerMeta =
+        input.discovery._meta && typeof input.discovery._meta === 'object' && !Array.isArray(input.discovery._meta)
+          ? (input.discovery._meta as Record<string, unknown>)
+          : {};
+      const meta: Record<string, unknown> = { ...callerMeta, [RUNTIME_META_KEY]: input.runtime };
+      if (input.publisher) meta[PUBLISHER_META_KEY] = input.publisher;
+      const withMeta = { ...input.discovery, _meta: meta };
       return { mcp: { server: { inlineContent: JSON.stringify(withMeta) } } };
     }
     // AGENT_SKILLS: the validator requires Markdown frontmatter (not JSON), so
@@ -388,6 +507,7 @@ export class AgentCoreRegistryClient implements RegistryClient {
       version: input.version,
       discovery: input.discovery,
       runtime: input.runtime,
+      publisher: input.publisher,
     });
     return { agentSkills: { skillMd: { inlineContent: skillMd } } };
   }
