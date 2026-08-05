@@ -21,10 +21,9 @@
 // attachments, and transitions the task from PENDING_UPLOADS to SUBMITTED.
 // Tests: cdk/test/handlers/confirm-uploads.test.ts
 
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
 import { DeleteObjectsCommand, GetObjectCommand, HeadObjectCommand, S3Client } from '@aws-sdk/client-s3';
-import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult, Context } from 'aws-lambda';
 import { ulid } from 'ulid';
 import { ATTACHMENT_OBJECT_KEY_PREFIX } from '../constructs/attachments-bucket';
@@ -35,11 +34,12 @@ import { estimateImageTokensFromBuffer } from './shared/image-tokens';
 import { logger } from './shared/logger';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
 import { type AttachmentRecord, createAttachmentRecord, type TaskRecord, toTaskDetail } from './shared/types';
-import { computeTtlEpoch } from './shared/validation';
+import { makeClient, makeDocClient } from './shared/ua';
+import { computeTtlEpoch, MAX_TOTAL_ATTACHMENT_SIZE_BYTES } from './shared/validation';
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
-const s3Client = new S3Client({});
-const lambdaClient = process.env.ORCHESTRATOR_FUNCTION_ARN ? new LambdaClient({}) : undefined;
+const ddb = makeDocClient();
+const s3Client = makeClient(S3Client);
+const lambdaClient = process.env.ORCHESTRATOR_FUNCTION_ARN ? makeClient(LambdaClient) : undefined;
 
 const TABLE_NAME = process.env.TASK_TABLE_NAME!;
 const EVENTS_TABLE_NAME = process.env.TASK_EVENTS_TABLE_NAME!;
@@ -275,6 +275,30 @@ export async function handler(event: APIGatewayProxyEvent, context: Context): Pr
       const screened = screenedAttachments.find(s => s.attachment_id === existing.attachment_id);
       return screened ?? existing;
     });
+
+    // 8b. Aggregate-size ceiling ACROSS the fully-resolved set.
+    // At create-task time the presigned uploads were still `pending` with no known
+    // size, so create-task-core's total-size check couldn't count them — a client
+    // could presign N×10 MB files that individually pass but jointly blow the
+    // task-wide cap. Now that every upload is confirmed + screened its real
+    // size_bytes is known, so re-sum here and fail-closed before SUBMITTED.
+    const totalBytes = finalAttachments.reduce((sum, a) => sum + (a.size_bytes ?? 0), 0);
+    if (totalBytes > MAX_TOTAL_ATTACHMENT_SIZE_BYTES) {
+      logger.warn('Confirmed attachments exceed the task-wide size limit (fail-closed)', {
+        task_id: taskId,
+        total_bytes: totalBytes,
+        limit_bytes: MAX_TOTAL_ATTACHMENT_SIZE_BYTES,
+        attachment_count: finalAttachments.length,
+        request_id: requestId,
+        metric_type: 'attachment_total_size_exceeded',
+      });
+      await cleanupAllAttachments(task, taskId);
+      return errorResponse(
+        400, ErrorCode.VALIDATION_ERROR,
+        `Combined attachment size exceeds the ${MAX_TOTAL_ATTACHMENT_SIZE_BYTES}-byte task limit.`,
+        requestId,
+      );
+    }
 
     // 9. Transition to SUBMITTED
     return await transitionToSubmitted(task, finalAttachments, requestId);
@@ -697,7 +721,7 @@ async function buildScreeningConfig(): Promise<ScreeningConfig | undefined> {
   if (!process.env.GUARDRAIL_ID || !process.env.GUARDRAIL_VERSION) return undefined;
   if (!_bedrockClient) {
     const { BedrockRuntimeClient } = await import('@aws-sdk/client-bedrock-runtime');
-    _bedrockClient = new BedrockRuntimeClient({});
+    _bedrockClient = makeClient(BedrockRuntimeClient);
   }
   return {
     guardrailId: process.env.GUARDRAIL_ID,

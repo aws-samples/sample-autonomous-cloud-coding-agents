@@ -19,7 +19,7 @@
 
 const resolveJiraOauthTokenMock = jest.fn();
 jest.mock('../../../src/handlers/shared/jira-oauth-resolver', () => ({
-  resolveJiraOauthToken: (...args: unknown[]) => resolveJiraOauthTokenMock(...args),
+  resolveJiraOutboundAuth: (...args: unknown[]) => resolveJiraOauthTokenMock(...args),
 }));
 
 import {
@@ -39,6 +39,7 @@ function mockResponse(status: number): Response {
     ok: status >= 200 && status < 300,
     status,
     json: async () => ({}),
+    text: async () => '',
   } as unknown as Response;
 }
 
@@ -61,6 +62,54 @@ afterEach(() => {
 });
 
 describe('jira-feedback: postIssueComment', () => {
+  test('uses the configured Forge app actor with an HMAC-signed request', async () => {
+    resolveJiraOauthTokenMock.mockResolvedValueOnce({
+      kind: 'app',
+      appActor: {
+        proxyUrl: 'https://install.webtrigger.atlassian.app/public/trigger-id',
+        sharedSecret: 's'.repeat(64),
+      },
+      siteUrl: 'https://acme.atlassian.net',
+      oauthSecretArn: 'arn:secret:acme',
+    });
+    const fetchMock = jest.fn().mockResolvedValue(mockResponse(201));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const ok = await postIssueComment(CTX, 'ENG-42', 'hello');
+
+    expect(ok).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://install.webtrigger.atlassian.app/public/trigger-id');
+    const headers = init.headers as Record<string, string>;
+    expect(headers.Authorization).toBeUndefined();
+    expect(headers['X-Bgagent-Signature']).toMatch(/^sha256=[a-f0-9]{64}$/);
+    expect(headers['X-Bgagent-Timestamp']).toMatch(/^\d+$/);
+    expect(JSON.parse(init.body as string)).toMatchObject({
+      version: 1,
+      operation: 'comment',
+      cloud_id: 'cloud-uuid-1',
+      issue_key: 'ENG-42',
+    });
+  });
+
+  test('does not fall back to OAuth when a configured app actor rejects the request', async () => {
+    resolveJiraOauthTokenMock.mockResolvedValueOnce({
+      kind: 'app',
+      appActor: {
+        proxyUrl: 'https://install.webtrigger.atlassian.app/public/trigger-id',
+        sharedSecret: 's'.repeat(64),
+      },
+      siteUrl: 'https://acme.atlassian.net',
+      oauthSecretArn: 'arn:secret:acme',
+    });
+    global.fetch = jest.fn().mockResolvedValue(mockResponse(403)) as unknown as typeof fetch;
+
+    await expect(postIssueComment(CTX, 'ENG-42', 'hello')).resolves.toBe(false);
+    expect(resolveJiraOauthTokenMock).toHaveBeenCalledTimes(1);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
   test('posts to the api.atlassian.com gateway base scoped by cloudId — NOT the site host', async () => {
     const fetchMock = jest.fn().mockResolvedValue(mockResponse(201));
     global.fetch = fetchMock as unknown as typeof fetch;

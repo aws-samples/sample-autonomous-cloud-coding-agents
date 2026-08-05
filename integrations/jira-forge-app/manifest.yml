@@ -1,0 +1,22 @@
+modules:
+  webtrigger:
+    - key: bgagent-outbound
+      function: outbound-proxy
+      urlFormat: v2
+      response:
+        type: dynamic
+  function:
+    - key: outbound-proxy
+      handler: index.handler
+
+app:
+  # `forge register` replaces this placeholder with the operator-owned app id.
+  id: ari:cloud:ecosystem::app/00000000-0000-4000-8000-000000000000
+  runtime:
+    name: nodejs22.x
+
+permissions:
+  scopes:
+    - read:jira-work
+    - write:jira-work
+    - read:jira-user

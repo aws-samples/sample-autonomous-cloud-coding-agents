@@ -29,7 +29,7 @@ export const ErrorCategory = {
   GUARDRAIL: 'guardrail',
   CONFIG: 'config',
   TIMEOUT: 'timeout',
-  // Environmental blocker (#251): agent could not progress for a missing
+  // Environmental blocker: agent could not progress for a missing
   // secret, egress denial, unreachable dependency, or fail-closed policy
   // engine error. Distinct from AUTH/CONFIG so operators can spot the
   // typed, self-diagnosed faults the platform names precisely.
@@ -175,10 +175,10 @@ const PATTERNS: readonly ErrorPattern[] = [
   // --- Compute ---
   {
     // A task dispatched against a task-def revision that was deregistered by a
-    // deploy (ABCA-660/663). Transient + self-clearing on retry; the family-based
-    // RunTask fix prevents it going forward, but keep a precise classification so
-    // any historical/edge occurrence reads as "temporary, just retry", not a
-    // scary compute-health alarm.
+    // concurrent deploy. Transient + self-clearing on retry; dispatching against
+    // the task-definition FAMILY (rather than a pinned revision) prevents it going
+    // forward, but keep a precise classification so any historical/edge occurrence
+    // reads as "temporary, just retry", not a scary compute-health alarm.
     pattern: /TaskDefinition is inactive/i,
     classification: {
       category: ErrorCategory.COMPUTE,
@@ -260,8 +260,8 @@ const PATTERNS: readonly ErrorPattern[] = [
     // refused the binary (`OSError: [Errno 8] Exec format error: 'claude'`) or
     // the claude-code shim reports its platform-native binary was never placed
     // ("claude native binary not installed" — its postinstall silently fell
-    // back at image-build time). Live-caught on ABCA-659's retry: all 3 ECS runs
-    // died at the run_agent step this way on a freshly rebuilt image, while the
+    // back at image-build time). Observed in practice: three consecutive ECS runs
+    // all died at the run_agent step this way on a freshly rebuilt image, while the
     // native binary was present but unwired. This is an IMAGE/infra fault, NOT a
     // problem with the user's request — a fresh attempt usually lands on a host
     // that materializes the image cleanly; a persistent one is a bad build an
@@ -303,7 +303,7 @@ const PATTERNS: readonly ErrorPattern[] = [
   //     ``agent/src/runner.py:515`` (the terminal-error path).
   // Keying on only ``agent_status=`` missed the ``subtype=`` wrapper, so a
   // real max-turns failure fell through to UNKNOWN → "Unexpected error"
-  // (live-caught on ABCA-483: a task hit the 100-turn cap but the reply
+  // (observed in practice: a task hit the 100-turn cap but the reply
   // said "Unexpected error"). Match either ``agent_status=``/``subtype=``.
   {
     // A max-turns cap is a correct, self-explanatory classification. When the
@@ -343,6 +343,57 @@ const PATTERNS: readonly ErrorPattern[] = [
       title: 'Agent errored during execution',
       description: 'The agent raised an uncaught error mid-turn. The Claude Agent SDK reported the task as failed before a clean terminal.',
       remedy: 'Retry the task. If persistent, check the agent container logs and the PR branch for partial state.',
+      retryable: true,
+      errorClass: ErrorClass.TRANSIENT,
+    },
+  },
+  {
+    // The build gate was KILLED by an environment fault (out of
+    // disk / OOM) — the code was never verified. The agent tags the verdict
+    // ``build_ok=infra`` so this reads as a retryable INFRA fault, not "your
+    // build failed" and not a bogus ✅ (a build also killed before the agent
+    // would otherwise look "already red → not a regression → success"). Matched
+    // before the generic ``Task did not succeed.*agent_status=`` catch-all.
+    pattern: /Task did not succeed.*build_ok=infra/i,
+    classification: {
+      category: ErrorCategory.COMPUTE,
+      title: 'Build couldn\'t finish — the build machine ran out of resources',
+      description: 'The build/verify step was stopped because the build environment ran out of disk or memory, so your changes were never actually verified — this is an infrastructure limit, not a problem with your code.',
+      remedy: 'Reply here to try again — a fresh run usually clears a transient resource crunch (e.g. several builds sharing a box at once). If it keeps happening on this repo, its build needs more capacity: contact your ABCA admin to raise the build task\'s disk/memory.',
+      retryable: true,
+      errorClass: ErrorClass.TRANSIENT,
+    },
+  },
+  {
+    // A new-work coding task reported agent-success but no commit
+    // reached the branch and no PR was opened — the agent's changes were LOST
+    // (observed cause: a stacked child edited a nested working tree that was never
+    // the branch's tree, so nothing committed). This is an environment/infra
+    // fault, not the user's code, and a fresh run usually lands the work — so
+    // it reads as retryable, NOT the non-retryable "your task didn't succeed".
+    // Ordered before the generic ``agent_status=`` catch-all so it wins.
+    pattern: /deliverable=lost/i,
+    classification: {
+      category: ErrorCategory.AGENT,
+      title: 'The change was not saved',
+      description: 'The agent finished, but none of its changes were committed to the branch and no pull request was opened — the work did not land in the repository. This is usually a transient workspace fault (e.g. the clone ended up in an unexpected directory), not a problem with your request.',
+      remedy: 'Reply here to try again — a fresh run normally saves the work correctly. If it keeps happening on this repo, share the task ID with your ABCA admin to check the agent workspace setup.',
+      retryable: true,
+      errorClass: ErrorClass.TRANSIENT,
+    },
+  },
+  {
+    // The sibling of the work-lost case: a commit DID land on the branch but
+    // the PR never opened (e.g. ``gh pr create`` failed after the push). The
+    // code is safe on the branch; the only missing step is opening the PR — so
+    // a retry (or an operator opening it by hand) recovers it. Distinct copy
+    // from the work-lost case so the reader knows the change is NOT gone.
+    pattern: /deliverable=no_pr/i,
+    classification: {
+      category: ErrorCategory.AGENT,
+      title: 'Change saved, but the pull request did not open',
+      description: 'The agent committed its changes to the branch, but the pull request could not be created (the push succeeded; opening the PR did not). Your work is safe on the branch.',
+      remedy: 'Reply here to try again — it will find the existing commit and open the PR. If it persists, an admin can open a PR from the task branch manually, or check the GitHub token\'s Pull requests (Read and write) scope.',
       retryable: true,
       errorClass: ErrorClass.TRANSIENT,
     },
@@ -473,8 +524,8 @@ const PATTERNS: readonly ErrorPattern[] = [
 ];
 
 /**
- * Canonical blocker-reason contract (#251, decision D). Matches
- * ``BLOCKED[<kind>]`` and, separately, the optional `` (resource: <resource>)``
+ * Canonical blocker-reason contract. Matches ``BLOCKED[<kind>]`` and,
+ * separately, the optional `` (resource: <resource>)``
  * segment ``format_blocker_reason`` appends. This is the SINGLE source of truth
  * on the CDK side and must stay in lockstep with ``format_blocker_reason`` in
  * ``agent/src/progress_writer.py`` and the taxonomy table in
@@ -500,8 +551,8 @@ export type BlockerKind =
   | 'unknown_environmental';
 
 /**
- * Build the canonical terminal-reason string for an orchestration-side blocker
- * (#251, decision D) — the TypeScript twin of ``format_blocker_reason`` in
+ * Build the canonical terminal-reason string for an orchestration-side blocker —
+ * the TypeScript twin of ``format_blocker_reason`` in
  * ``agent/src/progress_writer.py``. Produces ``BLOCKED[<kind>]: <detail>`` with
  * `` (resource: <resource>)`` appended when ``resource`` is set, so the same
  * ``classifyError`` regex that handles agent-carried reasons also classifies
@@ -566,7 +617,7 @@ function blockerClassification(kind: string, resource: string | undefined): Erro
     case 'auth_failure': {
       // A Secrets Manager ARN resource means the secret exists but couldn't be
       // read (AccessDenied / throttling) — the fix is IAM on the task role or
-      // blueprint wiring, NOT PAT scopes (#251 review). A non-ARN resource is a
+      // blueprint wiring, NOT PAT scopes. A non-ARN resource is a
       // runtime credential rejection where scope/validity is the right advice.
       const isSecretArn = res?.startsWith('arn:aws:secretsmanager:') ?? false;
       return {
@@ -617,7 +668,7 @@ export function classifyError(errorMessage: string | undefined | null): ErrorCla
     return null;
   }
 
-  // Environmental blockers (#251) carry a canonical ``BLOCKED[<kind>]`` prefix
+  // Environmental blockers carry a canonical ``BLOCKED[<kind>]`` prefix
   // and an extractable resource — check them first so the remedy can name the
   // exact secret / host rather than falling through to a generic pattern.
   const kindMatch = BLOCKED_KIND.exec(errorMessage);

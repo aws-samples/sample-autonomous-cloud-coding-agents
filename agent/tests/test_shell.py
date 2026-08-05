@@ -191,7 +191,7 @@ class TestRunCmdWithBackoff:
 class TestRunCmdFailureLogging:
     """A failing command must surface its ACTUAL error. Build/test tooling (jest,
     tsc, the mise task DAG) writes the failing-task error to STDOUT, not stderr —
-    so logging stderr alone made build-gate failures undebuggable (ABCA-662: a red
+    so logging stderr alone made build-gate failures undebuggable (a red
     ``mise run build`` showed every task starting but never WHICH one failed)."""
 
     def _completed(self, rc, stdout="", stderr=""):
@@ -231,7 +231,7 @@ class TestRunCmdFailureLogging:
         assert "line 0" not in blob  # earliest lines dropped
 
     def test_failure_line_in_the_MIDDLE_is_surfaced(self):
-        # ABCA-662 root cause of the tooling gap: a PARALLEL mise DAG interleaves
+        # Root cause of the tooling gap: a PARALLEL mise DAG interleaves
         # output, so the failing task's line is in the MIDDLE while the tail is a
         # passing package's coverage table. The failing line MUST be surfaced.
         mid = "[//cdk:test] FAIL test/handlers/foo.test.ts — expected 1 got 2"
@@ -269,7 +269,7 @@ class TestRunCmdFailureLogging:
         assert "ok 19" in blob
 
     def test_marker_line_with_noise_term_is_filtered_by_allowlist(self):
-        # N3: the LOAD-BEARING allowlist case. A line that hits a real marker
+        # The LOAD-BEARING allowlist case. A line that hits a real marker
         # (`error:`) AND a noise term (`0 errors`) must be filtered OUT of the
         # surfaced set. Placed in the MIDDLE (before the tail window) so it is
         # only reachable via the marker scan — if _FAILURE_LINE_NOISE were
@@ -287,7 +287,7 @@ class TestRunCmdFailureLogging:
         assert "0 errors after autofix retry" not in blob  # noisy marker filtered by allowlist
 
     def test_surfaced_failure_lines_are_capped_and_truncation_marked(self):
-        # N4: a genuinely huge red run (more than _MAX_SURFACED_FAILURE_LINES
+        # A genuinely huge red run (more than _MAX_SURFACED_FAILURE_LINES
         # marker lines) must be capped, with an explicit truncation breadcrumb —
         # so it can't flood CloudWatch. Exercises the cap branch the other tests
         # never reach.
@@ -318,3 +318,83 @@ class TestRunCmdFailureLogging:
         logs = self._run_capturing_logs(proc)
         blob = "\n".join(text for _, text in logs)
         assert "lots of build output" not in blob
+
+
+class TestRunCmdStreaming:
+    """stream=True tees the command's output to the log LINE-BY-LINE as it runs
+    (so the full log reaches CloudWatch verbatim) AND returns a CompletedProcess
+    matching subprocess.run's contract. Uses real `sh -c` — exercises the actual
+    Popen + drain-thread path (the buffered summary hid build failures)."""
+
+    def _run(self, argv, check=False):
+        logs = []
+        with patch("shell.log", side_effect=lambda prefix, text: logs.append((prefix, text))):
+            result = run_cmd(argv, "verify-build-post", check=check, stream=True)
+        blob = "\n".join(text for _, text in logs)
+        return result, blob
+
+    def test_streams_stdout_lines_live_and_returns_captured(self):
+        result, blob = self._run(["sh", "-c", "echo out-line-A; echo out-line-B"])
+        assert result.returncode == 0
+        # every line reached the log (verbatim, live)
+        assert "out-line-A" in blob and "out-line-B" in blob
+        # and the CompletedProcess still carries stdout for callers
+        assert "out-line-A" in result.stdout and "out-line-B" in result.stdout
+
+    def test_keeps_stdout_and_stderr_separate(self):
+        result, _ = self._run(["sh", "-c", "echo to-out; echo to-err 1>&2"])
+        assert "to-out" in result.stdout
+        assert "to-err" in result.stderr
+        assert "to-err" not in result.stdout  # streams not merged
+
+    def test_nonzero_exit_surfaces_failing_line(self):
+        # A mid-stream failure line is streamed AND flagged in the failing-lines
+        # pointer — the whole reason streaming exists.
+        result, blob = self._run(["sh", "-c", "echo passing; echo 'FAIL test/x.test.ts'; exit 1"])
+        assert result.returncode == 1
+        assert "FAIL test/x.test.ts" in blob
+        assert "failing lines" in blob  # the streamed-path pointer
+
+    def test_stream_redacts_secrets_in_live_output(self):
+        # Redaction happens inside the real log(); assert redact_secrets covers the
+        # streamed line (the test patches log(), so check the redactor directly on
+        # what the drain thread hands it — that's the line that reaches CloudWatch).
+        from shell import redact_secrets
+
+        assert "ghp_streamedsecretABC123" not in redact_secrets("  token=ghp_streamedsecretABC123")
+
+    def test_stream_raises_on_check_true_failure(self):
+        import pytest
+
+        with pytest.raises(RuntimeError):
+            self._run(["sh", "-c", "exit 3"], check=True)
+
+    def test_stream_normalizes_a_signal_kill_to_the_shell_convention(self):
+        # A signal death arrives from Popen as a NEGATIVE signal number, but the
+        # OOM classifier keys on the shell's 128+signal form. Without normalizing,
+        # an OOM-killed build reports as a genuine build failure — "your code is
+        # broken" when the box ran out of memory.
+        from post_hooks import is_infra_failure
+
+        # 137 = 128 + SIGKILL(9). `kill -9 $$` makes the shell kill itself, so the
+        # child really dies by signal rather than exiting with a code.
+        result, _ = self._run(["sh", "-c", "kill -9 $$"])
+        assert result.returncode == 137, "SIGKILL must surface as 137, not -9"
+        # The point of the normalization: the classifier now sees infra, not a
+        # genuine red build, with no stderr signature to help it.
+        assert is_infra_failure(result.returncode, "") is True
+
+    def test_stream_maps_an_unreaped_process_to_failure_not_success(self):
+        # `returncode is None` cannot happen after wait(), but if it ever did,
+        # mapping it to 0 would let an unverified build report as passing. The one
+        # unsafe answer, so it is pinned.
+        from shell import _exit_status
+
+        assert _exit_status(None) != 0
+        assert _exit_status(None) == -1
+        # Ordinary exits pass through untouched.
+        assert _exit_status(0) == 0
+        assert _exit_status(1) == 1
+        assert _exit_status(137) == 137
+        # SIGTERM (-15) also normalizes.
+        assert _exit_status(-15) == 143

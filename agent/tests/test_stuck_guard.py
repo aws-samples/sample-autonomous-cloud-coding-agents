@@ -1,4 +1,4 @@
-"""Tests for the stuck/runaway guard (K7, live-caught ABCA-483)."""
+"""Tests for the stuck/runaway guard."""
 
 from __future__ import annotations
 
@@ -120,7 +120,7 @@ class TestStuckGuardLifecycle:
         assert g.evaluate().kind == "none"
 
     def test_iterating_agent_same_command_DIFFERENT_failures_never_steers(self):
-        # K10 false-positive guard: the agent re-runs the SAME test command as
+        # False-positive guard: the agent re-runs the SAME test command as
         # it fixes failures one by one — each run fails on a DIFFERENT test.
         # That's progress, not a loop. The streak resets on each new output, so
         # it never even reaches the (advisory) steer threshold.
@@ -171,7 +171,7 @@ _PUSH_FAILS = [
 
 
 class TestWindowSpin:
-    """ABCA-662: the loop-of-VARIATIONS the per-signature streak can't see — the
+    """The loop-of-VARIATIONS the per-signature streak can't see — the
     agent tries a different command each turn toward the same failing goal (a git
     push that keeps failing on 'invalid credentials'). No single signature reaches
     STEER_THRESHOLD, but the trailing window is failure-dominated."""
@@ -226,7 +226,7 @@ class TestWindowSpin:
         assert g.recent_failure_summary() is None
 
     def test_window_steers_at_exactly_the_threshold(self):
-        # N4 boundary: exactly WINDOW_FAIL_THRESHOLD (5) same-fingerprint failures
+        # Boundary: exactly WINDOW_FAIL_THRESHOLD (5) same-fingerprint failures
         # in a FULL window of WINDOW (6) — the `>=` edge where an off-by-one would
         # hide. One OK dilutes the window to 5/6 fails, still == the threshold.
         assert WINDOW == 6 and WINDOW_FAIL_THRESHOLD == 5  # pin the constants
@@ -240,7 +240,7 @@ class TestWindowSpin:
         assert g.recent_failure_summary() is not None
 
     def test_no_steer_when_window_not_yet_full(self):
-        # N4 boundary: WINDOW_FAIL_THRESHOLD failures but the window has fewer than
+        # Boundary: WINDOW_FAIL_THRESHOLD failures but the window has fewer than
         # WINDOW entries — _dominant_window_failure requires a FULL window, so 5
         # identical failures in a length-5 history must NOT steer yet.
         g = StuckGuard()

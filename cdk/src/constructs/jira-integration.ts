@@ -18,7 +18,7 @@
  */
 
 import * as path from 'path';
-import { ArnFormat, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
+import { ArnFormat, Aspects, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import * as apigw from 'aws-cdk-lib/aws-apigateway';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
@@ -32,6 +32,7 @@ import { Construct } from 'constructs';
 import { JiraProjectMappingTable } from './jira-project-mapping-table';
 import { JiraUserMappingTable } from './jira-user-mapping-table';
 import { JiraWorkspaceRegistryTable } from './jira-workspace-registry-table';
+import { ComponentUaAspect } from './solution-ua-aspect';
 
 /** Default task-record retention used for TTL computation (days). */
 const DEFAULT_TASK_RETENTION_DAYS = 90;
@@ -115,11 +116,10 @@ export interface JiraIntegrationProps {
 /**
  * CDK construct that adds Jira Cloud integration to the ABCA platform.
  *
- * Inbound-only adapter: Jira → webhook → task creation. Outbound progress
- * updates happen agent-side via the Jira REST v3 API (see
- * agent/src/jira_reactions.py; ADR-015 explains why outbound is REST and not
- * the Atlassian Remote MCP), so there is NO DynamoDB Streams consumer and NO
- * outbound-notify Lambda here. Mirrors the Linear adapter shape.
+ * This construct owns Jira → webhook → task creation. Outbound progress uses
+ * the Forge app actor (or the OAuth migration fallback) through
+ * agent/src/jira_reactions.py and the shared fan-out consumer; those writers
+ * are wired outside this inbound construct. See ADR-015.
  *
  * Creates:
  * - JiraProjectMappingTable (`{cloudId}#{projectKey}` → GitHub repo)
@@ -156,6 +156,13 @@ export class JiraIntegration extends Construct {
 
   constructor(scope: Construct, id: string, props: JiraIntegrationProps) {
     super(scope, id);
+
+    // Solution-attribution component label (#319): every Lambda in this Jira
+    // integration is part of the webhook ingest surface. One aspect labels
+    // them all (and any future function added here) without per-function env
+    // edits; the universal `app/` segment is set by the stack-level aspect.
+    // Matches slack/linear/github-screenshot integrations.
+    Aspects.of(this).add(new ComponentUaAspect('webhook'));
 
     const removalPolicy = props.removalPolicy ?? RemovalPolicy.DESTROY;
 
@@ -208,6 +215,15 @@ export class JiraIntegration extends Construct {
     const commonBundling: lambda.BundlingOptions = {
       externalModules: ['@aws-sdk/*'],
     };
+    // pdf-parse (v2, pdfjs-based) can't be esbuild-bundled — its pdfjs/native
+    // (@napi-rs/canvas) deps break at import (`DOMMatrix is not defined`,
+    // Ship it unbundled via `nodeModules` so it resolves natively at
+    // runtime. Mirrors TaskApi's attachment-screening bundling. Jira's #619
+    // attachment path screens PDFs, so its webhook processor needs the carve-out.
+    const attachmentScreeningBundling: lambda.BundlingOptions = {
+      ...commonBundling,
+      nodeModules: ['pdf-parse'],
+    };
 
     // --- Task creation environment (matches LinearIntegration / SlackIntegration pattern) ---
     const createTaskEnv: Record<string, string> = {
@@ -259,7 +275,8 @@ export class JiraIntegration extends Construct {
         JIRA_USER_MAPPING_TABLE_NAME: this.userMappingTable.tableName,
         JIRA_WORKSPACE_REGISTRY_TABLE_NAME: this.workspaceRegistryTable.tableName,
       },
-      bundling: commonBundling,
+      // Uses the PDF attachment-screening path (#619) — pdf-parse must stay unbundled.
+      bundling: attachmentScreeningBundling,
     });
     this.projectMappingTable.grantReadData(webhookProcessorFn);
     this.userMappingTable.grantReadData(webhookProcessorFn);

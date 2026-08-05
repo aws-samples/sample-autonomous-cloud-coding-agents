@@ -66,6 +66,7 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from shared_constants import SHARED_CONSTANTS
 from shell import log
 
 if TYPE_CHECKING:
@@ -78,31 +79,7 @@ if TYPE_CHECKING:
 WARN_TIMEOUT_S: int = 120  # IMPL-25: sub-120s emits WARN on blueprint load
 
 
-def _load_shared_constants() -> dict:
-    """Read ``contracts/constants.json`` (S9 — see ``contracts/constants.md``).
-
-    Two candidate paths cover both the deployed image
-    (``/app/contracts/constants.json`` — Dockerfile copies ``contracts/``
-    to ``/app/contracts``) and the local repo layout
-    (``<repo>/contracts/constants.json`` — for tests + dev). Fail-fast on
-    missing: a missing contract should crash import, not silently fall
-    back to literals that would re-introduce the drift the contract is
-    designed to prevent.
-    """
-    here = Path(__file__).resolve()
-    candidates = [
-        here.parent.parent / "contracts" / "constants.json",  # /app/contracts/
-        here.parent.parent.parent / "contracts" / "constants.json",  # <repo>/contracts/
-    ]
-    for path in candidates:
-        if path.is_file():
-            return json.loads(path.read_text())
-    raise FileNotFoundError(
-        "contracts/constants.json not found; checked: " + ", ".join(str(p) for p in candidates),
-    )
-
-
-_SHARED_CONSTANTS = _load_shared_constants()
+_SHARED_CONSTANTS = SHARED_CONSTANTS
 _AGC = _SHARED_CONSTANTS["approval_gate_cap"]
 DEFAULT_APPROVAL_GATE_CAP: int = int(_AGC["default"])  # decision #13 default
 APPROVAL_GATE_CAP_MIN: int = int(_AGC["min"])

@@ -50,7 +50,12 @@ _MIN_REDACTABLE_SECRET_LEN = 12
 def _redact_cached_credentials(text: str) -> str:
     """Remove cached env secrets from debug text before stdout / CloudWatch."""
     out = text
-    for env_key in ("GITHUB_TOKEN", "LINEAR_API_TOKEN", "JIRA_API_TOKEN"):
+    for env_key in (
+        "GITHUB_TOKEN",
+        "LINEAR_API_TOKEN",
+        "JIRA_API_TOKEN",
+        "JIRA_APP_ACTOR_SHARED_SECRET",
+    ):
         secret = os.environ.get(env_key) or ""
         if len(secret) >= _MIN_REDACTABLE_SECRET_LEN:
             out = out.replace(secret, f"<{env_key}_REDACTED>")
@@ -166,10 +171,10 @@ def _warn_cw_write_blocking(log_group: str, task_id: str | None, stamped: str) -
     covers both writers.
     """
     try:
-        import boto3
+        from aws_session import platform_client
 
         region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
-        client = boto3.client("logs", region_name=region)
+        client = platform_client("logs", region_name=region)
 
         stream = f"server_warn/{task_id or 'server'}"
         with _ctx_for_debug.suppress(client.exceptions.ResourceAlreadyExistsException):
@@ -193,10 +198,10 @@ def _warn_cw_write_blocking(log_group: str, task_id: str | None, stamped: str) -
 def _debug_cw_write_blocking(log_group: str, task_id: str | None, stamped: str) -> None:
     """Blocking CloudWatch write — only called from a background thread."""
     try:
-        import boto3
+        from aws_session import platform_client
 
         region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
-        client = boto3.client("logs", region_name=region)
+        client = platform_client("logs", region_name=region)
 
         stream = f"server_debug/{task_id or 'server'}"
         with _ctx_for_debug.suppress(client.exceptions.ResourceAlreadyExistsException):
@@ -303,8 +308,8 @@ def _extract_workload_access_token(request: Request) -> str:
     """Read AgentCore's workload access token off the inbound request.
 
     AgentCore Runtime delivers the token on `/invocations` requests under
-    one of two header spellings (both observed 2026-05-18 on a single
-    request via diagnostic logging in us-east-1):
+    one of two header spellings (both observed on a single request via
+    diagnostic logging):
       1. ``WorkloadAccessToken`` — the SDK's documented header in
          ``bedrock_agentcore.runtime.models::ACCESS_TOKEN_HEADER``.
       2. ``x-amzn-bedrock-agentcore-runtime-workload-accesstoken`` —
@@ -385,11 +390,15 @@ def _run_task_background(
     session_id: str = "",
     hydrated_context: dict | None = None,
     system_prompt_overrides: str = "",
+    build_command: str = "",
+    lint_command: str = "",
     prompt_version: str = "",
     memory_id: str = "",
     resolved_workflow: dict | None = None,
     branch_name: str = "",
     pr_number: str = "",
+    base_branch: str | None = None,
+    merge_branches: list[str] | None = None,
     cedar_policies: list[str] | None = None,
     approval_timeout_s: int | None = None,
     initial_approvals: list[str] | None = None,
@@ -429,8 +438,8 @@ def _run_task_background(
         except (ImportError, AttributeError) as e:
             _warn_cw(
                 f"bedrock_agentcore workload-token bridge unavailable "
-                f"({type(e).__name__}: {e}); Linear MCP will resolve via "
-                "Secrets Manager fallback",
+                f"({type(e).__name__}: {e}); the Linear reactions token will "
+                "resolve via Secrets Manager fallback",
                 task_id=task_id,
             )
 
@@ -471,11 +480,15 @@ def _run_task_background(
             task_id=task_id,
             hydrated_context=hydrated_context,
             system_prompt_overrides=system_prompt_overrides,
+            build_command=build_command,
+            lint_command=lint_command,
             prompt_version=prompt_version,
             memory_id=memory_id,
             resolved_workflow=resolved_workflow,
             branch_name=branch_name,
             pr_number=pr_number,
+            base_branch=base_branch,
+            merge_branches=merge_branches,
             cedar_policies=cedar_policies,
             approval_timeout_s=approval_timeout_s,
             initial_approvals=initial_approvals,
@@ -520,6 +533,9 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
         inp.get("model_id") or inp.get("anthropic_model") or os.environ.get("ANTHROPIC_MODEL", "")
     )
     system_prompt_overrides = inp.get("system_prompt_overrides", "")
+    # #1: per-repo build/lint verification commands. Empty → agent defaults to mise.
+    build_command = inp.get("build_command", "")
+    lint_command = inp.get("lint_command", "")
     max_turns = int(inp.get("max_turns", 0)) or int(os.environ.get("MAX_TURNS", "100"))
     max_budget_usd = float(inp.get("max_budget_usd", 0)) or None
     aws_region = inp.get("aws_region") or os.environ.get("AWS_REGION", "")
@@ -530,6 +546,12 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
     resolved_workflow = inp.get("resolved_workflow")
     branch_name = inp.get("branch_name", "")
     pr_number = str(inp.get("pr_number", ""))
+    # Stacked-child base branch + (diamond) predecessor branches
+    # to merge in. The orchestrator sets these from the orchestration row;
+    # absent for ordinary tasks (agent branches off main as today).
+    base_branch = inp.get("base_branch") or None
+    merge_branches_raw = inp.get("merge_branches") or []
+    merge_branches = [b for b in merge_branches_raw if isinstance(b, str)]
     cedar_policies = inp.get("cedar_policies") or []
     # Cedar HITL (§7.3) — per-task approval defaults + seeded allowlist.
     # Both are forwarded verbatim to the pipeline; the engine
@@ -631,11 +653,15 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
         "session_id": session_id,
         "hydrated_context": hydrated_context,
         "system_prompt_overrides": system_prompt_overrides,
+        "build_command": build_command,
+        "lint_command": lint_command,
         "prompt_version": prompt_version,
         "memory_id": memory_id,
         "resolved_workflow": resolved_workflow,
         "branch_name": branch_name,
         "pr_number": pr_number,
+        "base_branch": base_branch,
+        "merge_branches": merge_branches,
         "cedar_policies": cedar_policies,
         "approval_timeout_s": approval_timeout_s,
         "initial_approvals": initial_approvals,
@@ -657,7 +683,8 @@ def _validate_required_params(params: dict) -> list[str]:
     workflow requires ``repo_url``; a repo-less workflow (``requires_repo:false``,
     #248 Phase 3) does not. All non-PR workflows need either an ``issue_number``
     or ``task_description``; PR workflows (``coding/pr-iteration-v1`` /
-    ``coding/pr-review-v1``) additionally require ``pr_number``.
+    ``coding/pr-review-v1`` / ``coding/restack-v1``) require ``pr_number``
+    instead and carry no description.
     """
     missing: list[str] = []
     workflow_id = (params.get("resolved_workflow") or {}).get("id", "coding/new-task-v1")
@@ -682,7 +709,7 @@ def _validate_required_params(params: dict) -> list[str]:
     if requires_repo and not params.get("repo_url"):
         missing.append("repo_url")
 
-    if workflow_id in ("coding/pr-iteration-v1", "coding/pr-review-v1"):
+    if workflow_id in ("coding/pr-iteration-v1", "coding/pr-review-v1", "coding/restack-v1"):
         if not params.get("pr_number"):
             missing.append("pr_number")
     else:
