@@ -133,11 +133,15 @@ export function buildAdfDocument(paragraphs: ReadonlyArray<AdfParagraph>): Recor
  * (network error, request timeout, HTTP 5xx/429) — where a Lambda retry
  * may genuinely succeed — from terminal ones (bad issue id, revoked
  * credential, malformed request) where it cannot. The best-effort
- * boolean-returning {@link postIssueComment} collapses this to
- * ``ok``/``!ok``; the fan-out dispatcher branches on ``retryable`` to
- * decide whether to escalate to the partial-batch retry path (#573).
+ * {@link postIssueComment} returns the created comment ID or null; the fan-out
+ * dispatcher uses this classified result to decide whether to escalate to the
+ * partial-batch retry path (#573).
  */
 export type JiraPostResult =
+  | { readonly ok: true; readonly commentId: string }
+  | { readonly ok: false; readonly retryable: boolean };
+
+export type JiraUpdateResult =
   | { readonly ok: true }
   | { readonly ok: false; readonly retryable: boolean };
 
@@ -148,29 +152,31 @@ export type JiraPostResult =
  * classified caller ({@link postCommentWithResult}) can tell a transient
  * 5xx/429/network blip from a terminal 4xx.
  */
-type PostOutcome =
-  | { readonly kind: 'ok' }
+type WriteOutcome =
+  | { readonly kind: 'ok'; readonly responseBody: string }
   | { readonly kind: 'auth' }
   | { readonly kind: 'error'; readonly retryable: boolean };
 
-async function postComment(
+async function writeComment(
   accessToken: string,
   cloudId: string,
   issueIdOrKey: string,
   body: Record<string, unknown>,
-): Promise<PostOutcome> {
+  commentId?: string,
+): Promise<WriteOutcome> {
   // The 3LO token (audience=api.atlassian.com) is only valid against the
   // gateway base scoped by cloudId — see JIRA_API_BASE. Posting to the raw
   // site host (`*.atlassian.net`) would 401. Both path segments are
   // URL-encoded for defense-in-depth: cloudId is registry-sourced (a stored
   // tenant UUID), but encoding it keeps a malformed/compromised row from
   // injecting extra path segments into the gateway URL.
-  const url = `${JIRA_API_BASE}/${encodeURIComponent(cloudId)}/rest/api/3/issue/${encodeURIComponent(issueIdOrKey)}/comment`;
+  const commentPath = commentId ? `/comment/${encodeURIComponent(commentId)}` : '/comment';
+  const url = `${JIRA_API_BASE}/${encodeURIComponent(cloudId)}/rest/api/3/issue/${encodeURIComponent(issueIdOrKey)}${commentPath}`;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
     const resp = await fetch(url, {
-      method: 'POST',
+      method: commentId ? 'PUT' : 'POST',
       headers: {
         'Authorization': `Bearer ${accessToken}`,
         'Content-Type': 'application/json',
@@ -179,7 +185,8 @@ async function postComment(
       body: JSON.stringify({ body }),
       signal: controller.signal,
     });
-    if (resp.ok) return { kind: 'ok' };
+    const responseBody = await resp.text();
+    if (resp.ok) return { kind: 'ok', responseBody };
     // 401/403 are recoverable via a forced refresh: the stored access token
     // may be dead despite a not-yet-reached `expires_at` (server-side
     // revocation, scope re-issue, or a value cached past its out-of-band
@@ -255,9 +262,9 @@ export async function postIssueComment(
   ctx: JiraFeedbackContext,
   issueIdOrKey: string,
   body: string,
-): Promise<boolean> {
+): Promise<string | null> {
   const result = await postCommentWithResult(ctx, issueIdOrKey, toAdfDocument(body));
-  return result.ok;
+  return result.ok ? result.commentId : null;
 }
 
 /**
@@ -295,13 +302,16 @@ async function postCommentWithResult(
       issue_key: issueIdOrKey,
       body,
     });
-    return appResult.ok
-      ? { ok: true }
-      : { ok: false, retryable: appResult.retryable };
+    return createdCommentResult(appResult);
   }
 
-  const outcome = await postComment(resolved.accessToken, ctx.cloudId, issueIdOrKey, body);
-  if (outcome.kind === 'ok') return { ok: true };
+  const outcome = await writeComment(resolved.accessToken, ctx.cloudId, issueIdOrKey, body);
+  if (outcome.kind === 'ok') {
+    return createdCommentResult({
+      ok: true,
+      body: outcome.responseBody,
+    });
+  }
   if (outcome.kind === 'error') return { ok: false, retryable: outcome.retryable };
 
   // outcome.kind === 'auth': the stored access token was rejected. Force a
@@ -321,9 +331,7 @@ async function postCommentWithResult(
       issue_key: issueIdOrKey,
       body,
     });
-    return appResult.ok
-      ? { ok: true }
-      : { ok: false, retryable: appResult.retryable };
+    return createdCommentResult(appResult);
   }
   // If the refresh handed back the same access token, the retry can only
   // reproduce the 401 — skip the redundant network call.
@@ -334,12 +342,130 @@ async function postCommentWithResult(
     });
     return { ok: false, retryable: false };
   }
-  const retryOutcome = await postComment(refreshed.accessToken, ctx.cloudId, issueIdOrKey, body);
-  if (retryOutcome.kind === 'ok') return { ok: true };
+  const retryOutcome = await writeComment(refreshed.accessToken, ctx.cloudId, issueIdOrKey, body);
+  if (retryOutcome.kind === 'ok') {
+    return createdCommentResult({
+      ok: true,
+      body: retryOutcome.responseBody,
+    });
+  }
   // A second auth rejection means the credential is genuinely unusable —
   // terminal. A transient error on the retry stays retryable so the
   // dispatcher can escalate for a Lambda retry.
   if (retryOutcome.kind === 'error') return { ok: false, retryable: retryOutcome.retryable };
+  return { ok: false, retryable: false };
+}
+
+function createdCommentResult(
+  result: { readonly ok: true; readonly body: string }
+    | { readonly ok: false; readonly retryable: boolean },
+): JiraPostResult {
+  if (!result.ok) return { ok: false, retryable: result.retryable };
+  try {
+    const value = JSON.parse(result.body) as { id?: unknown };
+    const commentId = typeof value.id === 'string'
+      ? value.id
+      : (typeof value.id === 'number' ? String(value.id) : '');
+    if (commentId) return { ok: true, commentId };
+  } catch {
+    // Handled by the common missing-id warning below.
+  }
+  logger.warn('Jira comment create succeeded without a usable comment id');
+  return { ok: false, retryable: false };
+}
+
+/**
+ * Update an existing Jira comment in place. Returns true on success and false
+ * on any failure. Like comment creation, this is advisory and never throws.
+ */
+export async function updateIssueComment(
+  ctx: JiraFeedbackContext,
+  issueIdOrKey: string,
+  commentId: string,
+  body: string,
+): Promise<boolean> {
+  const result = await updateIssueCommentAdf(
+    ctx,
+    issueIdOrKey,
+    commentId,
+    toAdfDocument(body),
+  );
+  return result.ok;
+}
+
+/** Update an existing Jira comment with a pre-built ADF document. */
+export async function updateIssueCommentAdf(
+  ctx: JiraFeedbackContext,
+  issueIdOrKey: string,
+  commentId: string,
+  body: Record<string, unknown>,
+): Promise<JiraUpdateResult> {
+  const resolved = await resolveTenantAuth(ctx);
+  if (!resolved) return { ok: false, retryable: false };
+
+  if (resolved.kind === 'app') {
+    const appResult = await requestJiraAppActor(resolved.appActor, {
+      version: 1,
+      operation: 'update_comment',
+      cloud_id: ctx.cloudId,
+      issue_key: issueIdOrKey,
+      comment_id: commentId,
+      body,
+    });
+    return appResult.ok
+      ? { ok: true }
+      : { ok: false, retryable: appResult.retryable };
+  }
+
+  const outcome = await writeComment(
+    resolved.accessToken,
+    ctx.cloudId,
+    issueIdOrKey,
+    body,
+    commentId,
+  );
+  if (outcome.kind === 'ok') return { ok: true };
+  if (outcome.kind === 'error') return { ok: false, retryable: outcome.retryable };
+
+  logger.info('Jira feedback got auth rejection — forcing token refresh and retrying once', {
+    jira_cloud_id: ctx.cloudId,
+    issue_id_or_key: issueIdOrKey,
+    comment_id: commentId,
+  });
+  const refreshed = await resolveTenantAuth(ctx, true);
+  if (!refreshed) return { ok: false, retryable: false };
+  if (refreshed.kind === 'app') {
+    const appResult = await requestJiraAppActor(refreshed.appActor, {
+      version: 1,
+      operation: 'update_comment',
+      cloud_id: ctx.cloudId,
+      issue_key: issueIdOrKey,
+      comment_id: commentId,
+      body,
+    });
+    return appResult.ok
+      ? { ok: true }
+      : { ok: false, retryable: appResult.retryable };
+  }
+  if (refreshed.accessToken === resolved.accessToken) {
+    logger.warn('Jira feedback refresh returned an unchanged token — not retrying', {
+      jira_cloud_id: ctx.cloudId,
+      issue_id_or_key: issueIdOrKey,
+      comment_id: commentId,
+    });
+    return { ok: false, retryable: false };
+  }
+  const retryOutcome = await writeComment(
+    refreshed.accessToken,
+    ctx.cloudId,
+    issueIdOrKey,
+    body,
+    commentId,
+  );
+  if (retryOutcome.kind === 'ok') return { ok: true };
+  if (retryOutcome.kind === 'error') {
+    return { ok: false, retryable: retryOutcome.retryable };
+  }
   return { ok: false, retryable: false };
 }
 

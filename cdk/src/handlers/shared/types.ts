@@ -229,13 +229,11 @@ export interface TaskRecord {
    */
   readonly linear_pr_comment_event_id?: string;
   /**
-   * Event ID of the terminal event whose Jira final-status comment was
-   * successfully posted (fan-out plane). Jira has no comment edit API,
-   * so the dispatcher is post-once: this marker makes the post
-   * idempotent across partial-batch Lambda retries (a sibling channel's
-   * infra rejection re-runs every dispatcher for the record). The Jira
-   * analogue of ``linear_final_comment_event_id``. Absent until the
-   * first successful post.
+   * Event ID of the terminal event whose ordinary Jira final-status comment
+   * was successfully posted (fan-out plane). This marker makes that create
+   * idempotent across partial-batch Lambda retries. Comment-triggered
+   * iterations edit their stored status comment instead and do not use this
+   * marker. Absent until the first successful ordinary-task post.
    */
   readonly jira_final_comment_event_id?: string;
   readonly attachments?: AttachmentRecord[];

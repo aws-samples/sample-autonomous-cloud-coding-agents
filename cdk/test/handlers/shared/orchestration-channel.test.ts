@@ -60,9 +60,11 @@ jest.mock('../../../src/handlers/shared/linear-subissue-fetch', () => ({
 
 const jiraPostIssueComment = jest.fn();
 const jiraReportIssueFailure = jest.fn();
+const jiraUpdateIssueComment = jest.fn();
 jest.mock('../../../src/handlers/shared/jira-feedback', () => ({
   postIssueComment: (...a: unknown[]) => jiraPostIssueComment(...a),
   reportIssueFailure: (...a: unknown[]) => jiraReportIssueFailure(...a),
+  updateIssueComment: (...a: unknown[]) => jiraUpdateIssueComment(...a),
 }));
 
 import { type IssueRef } from '../../../src/handlers/shared/orchestration-channel';
@@ -231,13 +233,36 @@ describe('Jira channel adapter (capability-limited surface)', () => {
   test('kind is jira', () => expect(ch.kind).toBe('jira'));
 
   test('postComment builds the JiraFeedbackContext (cloudId) from the issue', async () => {
-    jiraPostIssueComment.mockResolvedValue(true);
+    jiraPostIssueComment.mockResolvedValue('cmt-42');
     const res = await ch.postComment(jiraIssue, 'hello');
-    expect(res).not.toBeNull();
+    expect(res).toEqual({ commentId: 'cmt-42' });
     const [ctx, id, body] = jiraPostIssueComment.mock.calls[0];
     expect(ctx).toEqual({ cloudId: 'cloud-1', registryTableName: 'JiraRegistry' });
     expect(id).toBe('ABC-1');
     expect(body).toBe('hello');
+  });
+
+  test('upsertComment edits an existing Jira comment instead of posting another', async () => {
+    jiraUpdateIssueComment.mockResolvedValue(true);
+
+    const res = await ch.upsertComment(jiraIssue, 'working', { commentId: 'cmt-42' });
+
+    expect(res).toEqual({ commentId: 'cmt-42' });
+    expect(jiraUpdateIssueComment).toHaveBeenCalledWith(
+      { cloudId: 'cloud-1', registryTableName: 'JiraRegistry' },
+      'ABC-1',
+      'cmt-42',
+      'working',
+    );
+    expect(jiraPostIssueComment).not.toHaveBeenCalled();
+  });
+
+  test('upsertComment creates when there is no existing Jira comment', async () => {
+    jiraPostIssueComment.mockResolvedValue('cmt-new');
+    await expect(ch.upsertComment(jiraIssue, 'on it')).resolves.toEqual({
+      commentId: 'cmt-new',
+    });
+    expect(jiraUpdateIssueComment).not.toHaveBeenCalled();
   });
 
   test('reportFailure routes to the Jira failure helper', async () => {

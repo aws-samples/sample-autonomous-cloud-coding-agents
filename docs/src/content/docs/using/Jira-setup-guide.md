@@ -60,11 +60,17 @@ runner picks task with channel_source="jira"
 Outbound terminal status (Platform → Jira) — Forge app actor, deterministic:
 
 ```
-task reaches a terminal event (completed / failed / cancelled /
+ordinary task reaches a terminal event (completed / failed / cancelled /
   stranded / timed out) → TaskEventsTable DynamoDB Stream → fan-out
   Lambda's dispatchToJira resolves the same Forge proxy and posts ONE
   app-authored final-status comment with cost, turns, duration, task id,
   and the PR link
+
+@bgagent iteration is admitted → JiraWebhookProcessor posts ONE
+  app-authored status comment and stores its comment id
+  → heartbeat edits that comment with elapsed time while the task runs
+  → fan-out (standalone) or reconciler (orchestrated child) edits that
+  same comment with the terminal outcome and metrics
 ```
 
 Outbound board transitions (Agent → Jira) — Forge app actor:
@@ -79,17 +85,19 @@ the originating issue as it works — the same signal Linear-origin tasks alread
 give. See [Board transitions](#board-transitions) below for the resolution order
 and the permission it requires.
 
-The **start** comment is posted by the agent. The **terminal** comment is
-posted by the platform's fan-out plane, not the agent — so it always includes
-cost / turns / duration and fires even when the agent crashes before
-completing (max-turns, OOM). The final comment frames three outcomes:
+For an ordinary task, the **start** comment is posted by the agent and the
+**terminal** comment is posted by the platform's fan-out plane. For an
+`@bgagent` iteration, the processor immediately posts one status comment; the
+heartbeat and terminal owner edit that same comment in place. Terminal feedback
+therefore includes cost / turns / duration even when the agent crashes before
+completing (max-turns, OOM). The final state frames three outcomes:
 
 - ✅ **Task completed** — with the PR link when one was opened.
 - ⚠️ **Shipped a PR but stopped early** — the PR link plus the reason it
   stopped (e.g. "Hit max-turns cap"), so you can review and decide.
 - ❌ **Task failed / cancelled / timed out** — with a short classifier reason.
 
-Comments are advisory and best-effort: network/auth failures are logged and swallowed (the agent path has an auth circuit-breaker; the platform path classifies transient failures as retryable and retries the record), never gating the task itself. Jira has no comment-edit API, so the terminal comment is posted exactly once (a per-task marker guards against duplicate posts on stream retries).
+Comments are advisory and best-effort: network/auth failures are logged and swallowed (the agent path has an auth circuit-breaker; the platform path classifies transient failures as retryable and retries the record), never gating the task itself. Ordinary terminal comments use a per-task post-once marker. Iteration terminal writers use a per-task claim before updating the stored comment ID, and the heartbeat checks that claim before writing, so retries do not duplicate the comment or regress a terminal outcome back to running.
 
 **Identity selection rule.** A complete Forge app configuration always wins for every outbound path. If that configured proxy, signature, permission, or Jira API call fails, ABCA logs the failure and skips the advisory write; it does **not** retry as the 3LO user. Tenants with no Forge configuration retain the old 3LO writer as an explicit migration fallback, with a warning.
 
@@ -101,7 +109,7 @@ Comments are advisory and best-effort: network/auth failures are logged and swal
 > actor through `api.asApp().requestJira(...)`. See
 > [ADR-015](/sample-autonomous-cloud-coding-agents/architecture/adr-015-jira-integration).
 
-Inbound admission (webhook → task) is Jira-specific and has no DynamoDB Streams consumer of its own. The **terminal** status comment, however, is delivered by the shared fan-out plane's DynamoDB Streams consumer (`dispatchToJira`) — the same platform-side surface that posts Linear final-status comments — so it behaves identically to Linear for terminal outcomes.
+Inbound admission (webhook → task) is Jira-specific and has no DynamoDB Streams consumer of its own. Ordinary **terminal** status comments are delivered by the shared fan-out plane's DynamoDB Streams consumer (`dispatchToJira`). For comment-triggered iterations, fan-out matures standalone status comments while the orchestration reconciler matures child-iteration comments before restacking dependents.
 
 ## Setup walkthrough
 
@@ -153,7 +161,7 @@ Paste that same secret value back at the `Webhook signing secret:` prompt. ABCA 
 
 ### 4. Install the dedicated outbound app
 
-The repository includes a narrow Forge app under `integrations/jira-forge-app`. Its web trigger accepts only four signed operations: identity probe, comment, read transitions, and perform transition. It does not expose a general Jira REST proxy.
+The repository includes a narrow Forge app under `integrations/jira-forge-app`. Its web trigger accepts only five signed operations: identity probe, create comment, update comment, read transitions, and perform transition. It does not expose a general Jira REST proxy.
 
 Run the login in an interactive terminal. Forge asks for your Atlassian email and the Forge CLI scoped token from the prerequisites; the Jira 3LO access token is not a Forge CLI credential. On the first registration, Forge also asks you to create or select a **Developer Space**.
 
@@ -280,7 +288,7 @@ The teammate needs their own ABCA account first (Cognito user + configured CLI).
 
 Add the trigger label (`bgagent` by default) to a Jira issue in a mapped project. The agent should start within ~30 seconds, comment on the issue as it works, and post a PR link when ready. The issue **summary** plus the **description** (converted from Atlassian Document Format to markdown), the issue's **recent comments**, and any supported **file attachments** become the task context — see [Issue context: attachments and comments](#issue-context-attachments-and-comments).
 
-After the PR exists, add a Jira comment such as `@bgagent update the README too`. ABCA should acknowledge the request on the issue and update the existing PR.
+After the PR exists, add a Jira comment such as `@bgagent update the README too`. ABCA should create one acknowledgement status comment, update it with elapsed time during a long run, update the existing PR, and finally replace the same comment with the terminal outcome and metrics.
 
 The progress comment author and transition actor should be the `bgagent` app. The task owner shown by `bgagent list`, audit records, concurrency accounting, and cost attribution should remain the linked human who triggered the Jira event.
 
@@ -317,7 +325,9 @@ ABCA resolves the Jira tenant and issue key to the newest prior task that actual
 
 When the comment author has linked their Jira and ABCA accounts, the iteration is attributed to that user. Otherwise, ABCA falls back to the original task owner so a useful reviewer request is not dropped. Comments without the mention, app-authored comments, and ABCA's own generated status comments are no-ops.
 
-The acknowledgement is immediate after task admission. The existing platform fan-out path posts the terminal outcome and cost comment when the iteration finishes. Comment redelivery is idempotent: the webhook receiver deduplicates by Jira comment ID, and task creation uses a deterministic idempotency key as a second guard.
+The acknowledgement is immediate after task admission and its Jira comment ID is stored on the iteration task. Eligible long-running iterations edit that comment with elapsed time; they do not add heartbeat comments. When the iteration finishes, fan-out owns the terminal edit for a standalone iteration and the orchestration reconciler owns it for a child iteration so dependent restacking remains ordered. Both replace the same comment with the outcome, cost, turns, duration, task ID, and PR link when available.
+
+Comment redelivery is idempotent: the webhook receiver deduplicates by Jira comment ID, task creation uses a deterministic idempotency key as a second guard, and terminal writers claim the stored status comment before editing it. A heartbeat checks the terminal claim immediately before its cosmetic edit, preventing an overlapping sweep from replacing a completed outcome with a running message.
 
 ## Authored subtask orchestration
 

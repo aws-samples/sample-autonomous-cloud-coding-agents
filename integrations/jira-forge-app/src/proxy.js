@@ -24,6 +24,7 @@ const MAX_BODY_BYTES = 256 * 1024;
 const MAX_CLOCK_SKEW_SECONDS = 5 * 60;
 const APP_ACTOR_MIN_SECRET_LENGTH = 32;
 const ISSUE_KEY_RE = /^[A-Za-z][A-Za-z0-9_]*-\d+$/;
+const COMMENT_ID_RE = /^\d+$/;
 const TRANSITION_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 
 function response(statusCode, body = '') {
@@ -155,6 +156,27 @@ export function createProxyHandler({
             route`/rest/api/3/issue/${payload.issue_key}/comment`,
             {
               method: 'POST',
+              headers: {
+                Accept: 'application/json',
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({ body: payload.body }),
+            },
+          ));
+        case 'update_comment':
+          if (
+            !ISSUE_KEY_RE.test(payload.issue_key ?? '')
+            || !COMMENT_ID_RE.test(payload.comment_id ?? '')
+            || !payload.body
+            || typeof payload.body !== 'object'
+            || Array.isArray(payload.body)
+          ) {
+            return response(400, { error: 'invalid_update_comment_request' });
+          }
+          return jiraResponse(await requestJira(
+            route`/rest/api/3/issue/${payload.issue_key}/comment/${payload.comment_id}`,
+            {
+              method: 'PUT',
               headers: {
                 Accept: 'application/json',
                 'Content-Type': 'application/json',
