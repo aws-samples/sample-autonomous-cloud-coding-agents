@@ -528,13 +528,122 @@ describe('jira-webhook-processor orchestration adapter', () => {
     );
   });
 
-  test('makes an existing Jira orchestration re-trigger inert in the first layer', async () => {
+  test('treats an existing orchestration with no new node IDs as a no-op', async () => {
     loadOrchestrationMock.mockReset();
     loadOrchestrationMock.mockResolvedValueOnce(snapshot);
+    discoverOrchestrationMock.mockResolvedValueOnce({
+      kind: 'extended',
+      orchestrationId: 'orch-ENG-1',
+      addedSubIssueIds: [],
+      releasableSubIssueIds: [],
+    });
 
     await handler(event());
 
-    expect(jiraGraphSourceMock).not.toHaveBeenCalled();
+    expect(jiraGraphSourceMock).toHaveBeenCalledTimes(1);
+    expect(discoverOrchestrationMock).toHaveBeenCalledTimes(1);
+    expect(releaseReadyChildrenMock).not.toHaveBeenCalled();
+    expect(upsertEpicPanelMock).not.toHaveBeenCalled();
+    expect(createTaskCoreMock).not.toHaveBeenCalled();
+  });
+
+  test('releases only a newly-added root and reopens the existing panel', async () => {
+    const extendedSnapshot = {
+      ...snapshot,
+      meta: { ...snapshot.meta, child_count: 2, status_comment_id: 'panel-1' },
+      children: [
+        { ...snapshot.children[0], child_status: 'succeeded' },
+        {
+          ...snapshot.children[0],
+          sub_issue_id: 'ENG-3',
+          child_status: 'ready',
+        },
+      ],
+    };
+    jiraGraphSourceMock.mockReturnValueOnce(jest.fn().mockResolvedValue({
+      kind: 'ok',
+      children: [child(), child('ENG-3')],
+    }));
+    discoverOrchestrationMock.mockResolvedValueOnce({
+      kind: 'extended',
+      orchestrationId: 'orch-ENG-1',
+      addedSubIssueIds: ['ENG-3'],
+      releasableSubIssueIds: ['ENG-3'],
+    });
+    loadOrchestrationMock.mockReset();
+    loadOrchestrationMock
+      .mockResolvedValueOnce(snapshot)
+      .mockResolvedValueOnce(extendedSnapshot)
+      .mockResolvedValueOnce(extendedSnapshot);
+
+    await handler(event());
+
+    expect(releaseReadyChildrenMock).toHaveBeenCalledTimes(1);
+    expect(releaseReadyChildrenMock.mock.calls[0][2]).toEqual([
+      expect.objectContaining({ sub_issue_id: 'ENG-3', child_status: 'ready' }),
+    ]);
+    expect(releaseReadyChildrenMock.mock.calls[0][6]).toBe(extendedSnapshot.children);
+    expect(upsertEpicPanelMock).toHaveBeenCalledWith(expect.objectContaining({
+      statusCommentId: 'panel-1',
+      inProgress: true,
+      children: extendedSnapshot.children,
+    }));
+    expect(setStatusCommentIdMock).not.toHaveBeenCalled();
+  });
+
+  test('leaves a newly-added blocked child for the reconciler but refreshes the panel', async () => {
+    const extendedSnapshot = {
+      ...snapshot,
+      meta: { ...snapshot.meta, child_count: 2 },
+      children: [
+        snapshot.children[0],
+        {
+          ...snapshot.children[0],
+          sub_issue_id: 'ENG-3',
+          depends_on: ['ENG-2'],
+          child_status: 'blocked',
+        },
+      ],
+    };
+    jiraGraphSourceMock.mockReturnValueOnce(jest.fn().mockResolvedValue({
+      kind: 'ok',
+      children: [child(), { ...child('ENG-3'), depends_on: ['ENG-2'] }],
+    }));
+    discoverOrchestrationMock.mockResolvedValueOnce({
+      kind: 'extended',
+      orchestrationId: 'orch-ENG-1',
+      addedSubIssueIds: ['ENG-3'],
+      releasableSubIssueIds: [],
+    });
+    loadOrchestrationMock.mockReset();
+    loadOrchestrationMock
+      .mockResolvedValueOnce(snapshot)
+      .mockResolvedValueOnce(extendedSnapshot)
+      .mockResolvedValueOnce(extendedSnapshot);
+    upsertEpicPanelMock.mockResolvedValueOnce('new-panel');
+
+    await handler(event());
+
+    expect(releaseReadyChildrenMock).not.toHaveBeenCalled();
+    expect(upsertEpicPanelMock).toHaveBeenCalledWith(expect.objectContaining({
+      inProgress: true,
+      children: extendedSnapshot.children,
+    }));
+    expect(setStatusCommentIdMock).toHaveBeenCalledWith(
+      expect.anything(),
+      'Orchestrations',
+      'orch-ENG-1',
+      'new-panel',
+    );
+  });
+
+  test('does not create a parent task when an existing graph currently returns no children', async () => {
+    loadOrchestrationMock.mockReset();
+    loadOrchestrationMock.mockResolvedValueOnce(snapshot);
+    jiraGraphSourceMock.mockReturnValueOnce(jest.fn().mockResolvedValue({ kind: 'no_children' }));
+
+    await handler(event());
+
     expect(discoverOrchestrationMock).not.toHaveBeenCalled();
     expect(createTaskCoreMock).not.toHaveBeenCalled();
   });
