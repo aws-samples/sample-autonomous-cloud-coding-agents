@@ -121,4 +121,14 @@ describe('makeClient (cli)', () => {
   it('makeDocClient is attributed', () => {
     expect(() => makeDocClient({ region: 'us-east-1' })).not.toThrow();
   });
+  it('composes a caller-supplied customUserAgent instead of clobbering it', () => {
+    const c = makeClient(CloudFormationClient, {
+      region: 'us-east-1',
+      customUserAgent: [['caller/1.0', 'x']],
+    });
+    expect((c.config as any).customUserAgent).toEqual([
+      ['caller/1.0', 'x'],
+      ...abcaUserAgent().customUserAgent,
+    ]);
+  });
 });

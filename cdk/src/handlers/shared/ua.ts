@@ -101,16 +101,21 @@ export function abcaUserAgent(): { customUserAgent: [string, string][] } {
 }
 
 /**
- * The single attributed way to construct an AWS SDK v3 client. Spreads the
+ * The single attributed way to construct an AWS SDK v3 client. Composes the
  * static `md/` segment ({@link abcaUserAgent}) into the client config so
  * omission is impossible at the call site. Caller-supplied opts (region,
- * timeouts) are preserved.
+ * timeouts) are preserved — and a caller who supplies their own
+ * `customUserAgent` pairs keeps them, with the ABCA `md/` pair appended rather
+ * than overwritten (the SDK renders all pairs). No call site sets
+ * `customUserAgent` today, so the merge is latent hardening; it keeps the
+ * factory composable instead of clobbering. (#319)
  */
 export function makeClient<C>(
   Ctor: new (cfg: any) => C,
   cfg: Record<string, unknown> = {},
 ): C {
-  return new Ctor({ ...cfg, ...abcaUserAgent() });
+  const callerUa = (cfg.customUserAgent as [string, string][] | undefined) ?? [];
+  return new Ctor({ ...cfg, customUserAgent: [...callerUa, ...abcaUserAgent().customUserAgent] });
 }
 
 /** Attributed `DynamoDBDocumentClient` — the wrapper form, in one call. */
