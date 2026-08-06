@@ -17,8 +17,12 @@
  *  SOFTWARE.
  */
 
-import { App } from 'aws-cdk-lib';
+import * as fs from 'fs';
+import * as path from 'path';
+import { App, AspectPriority, Aspects } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
+import * as lambdaMicrovmCompute from '../../src/constructs/lambda-microvm-compute';
+import { buildAppId, SolutionUaAspect } from '../../src/constructs/solution-ua-aspect';
 import { AgentStack } from '../../src/stacks/agent';
 
 describe('AgentStack', () => {
@@ -36,17 +40,20 @@ describe('AgentStack', () => {
     expect(template).toBeDefined();
   });
 
-  test('creates exactly 18 DynamoDB tables', () => {
+  test('creates exactly 21 DynamoDB tables', () => {
     // task, task-events, repo, user-concurrency, webhook, task-nudges,
     // task-approvals (Cedar HITL V2),
-    // api-key (platform API keys for headless webhook management, #376),
+    // api-key (platform API keys for headless webhook management),
     // slack-installation, slack-user-mapping,
+    // slack-channel-mapping (channel → default-repo onboarding),
     // linear-project-mapping, linear-user-mapping, linear-webhook-dedup,
     // linear-workspace-registry (added in Phase 2.0b for OAuth bookkeeping),
+    // github-webhook-dedup (added by GitHubScreenshotIntegration),
     // jira-project-mapping, jira-user-mapping, jira-workspace-registry,
-    // jira-webhook-dedup (added for the Jira Cloud integration),
-    // github-webhook-dedup (added by GitHubScreenshotIntegration on main)
-    template.resourceCountIs('AWS::DynamoDB::Table', 19);
+    // jira-webhook-dedup (added for the Jira Cloud integration on main),
+    // orchestration (parent/sub-issue DAG state).
+    // = 16 shared/base + 4 Jira + 1 orchestration = 21.
+    template.resourceCountIs('AWS::DynamoDB::Table', 21);
   });
 
   test('creates TaskApprovalsTable with user_id-status-index GSI', () => {
@@ -250,7 +257,7 @@ describe('AgentStack', () => {
     expect(serialized).toMatch(/"Fn::GetAtt":\["Runtime[0-9A-F]+","AgentRuntimeArn"\]/);
   });
 
-  test('runtime is granted the default Bedrock model set (#433)', () => {
+  test('runtime is granted the default Bedrock model set', () => {
     // Default (no bedrockModels context): the runtime execution role must hold
     // bedrock:InvokeModel on the three default foundation models + their US
     // inference profiles, scoped (never Resource: '*').
@@ -261,8 +268,8 @@ describe('AgentStack', () => {
     expect(serialized).toContain('anthropic.claude-haiku-4-5-20251001-v1:0');
   });
 
-  test('bedrockModels context override propagates to the runtime execution role (#433)', () => {
-    // The other half of #433's acceptance criteria (the ECS side is covered in
+  test('bedrockModels context override propagates to the runtime execution role', () => {
+    // The runtime-role half of the override contract (the ECS side is covered in
     // ecs-agent-cluster.test.ts): a context override must replace the runtime's
     // granted models too — overridden model present, defaults absent, still scoped.
     const app = new App({ context: { bedrockModels: ['anthropic.claude-opus-4-8'] } });
@@ -271,10 +278,25 @@ describe('AgentStack', () => {
     });
     const overridden = Template.fromStack(stack);
 
-    // Collect every bedrock:InvokeModel statement's Resource across IAM policies.
+    // Collect every bedrock:InvokeModel statement's Resource across the IAM
+    // policies the ``bedrockModels`` override GOVERNS: the runtime execution role
+    // and the per-task session role (the coding agent's task-model grants). The
+    // override replaces the model set for the WORKLOAD; these are its surfaces.
+    //
+    // Deliberately EXCLUDES the Linear webhook processor's policy: the
+    // deterministic-revise interpreter (linear-integration.ts) makes one tiny
+    // "which plan-edit did they mean?" classification call pinned to a FIXED
+    // model (DEFAULT_REVISE_MODEL_ID = sonnet), by design independent of the
+    // per-task ``bedrockModels`` override — you don't want a cheap classification
+    // running on whatever heavyweight coding model an operator selected. That
+    // grant is scoped to its single fixed model (asserted in the linear
+    // integration tests), so it's not a wildcard/drift risk; it just isn't part
+    // of the override contract this test checks.
+    const OVERRIDE_GOVERNED_POLICY_PREFIXES = ['RuntimeExecutionRole', 'AgentSessionRole'];
     const policies = overridden.findResources('AWS::IAM::Policy');
     const bedrockResources: unknown[] = [];
-    for (const p of Object.values(policies)) {
+    for (const [logicalId, p] of Object.entries(policies)) {
+      if (!OVERRIDE_GOVERNED_POLICY_PREFIXES.some((prefix) => logicalId.startsWith(prefix))) continue;
       for (const s of (p.Properties?.PolicyDocument?.Statement ?? []) as Array<{ Action?: string | string[]; Resource?: unknown }>) {
         const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
         if (actions.some((a) => typeof a === 'string' && a.startsWith('bedrock:InvokeModel'))) {
@@ -391,7 +413,7 @@ describe('AgentStack', () => {
   });
 
   test('model invocation logging does NOT send an empty largeDataDeliveryS3Config', () => {
-    // Regression guard (#215): sending largeDataDeliveryS3Config with an empty
+    // Regression guard: sending largeDataDeliveryS3Config with an empty
     // bucketName fails client-side validation ("valid min length: 3"), and with
     // a catch-all ignoreErrorCodesMatching that failure silently leaves logging
     // DISABLED — so Bedrock records no requestMetadata. The field is optional;
@@ -466,6 +488,146 @@ describe('AgentStack', () => {
     template.resourceCountIs('AWS::BedrockAgentCore::Memory', 1);
   });
 
+  test('the orchestration reconciler can reach BOTH surfaces\' credentials registries', () => {
+    // It picks the feedback surface from each orchestration's own recorded
+    // channel, so a registry it can't read means that surface's orchestrations
+    // silently lose their panel + reactions.
+    const fns = template.findResources('AWS::Lambda::Function');
+    const reconciler = Object.entries(fns).find(([id]) => id.startsWith('OrchestrationReconciler'));
+    expect(reconciler).toBeDefined();
+    const vars = (reconciler![1] as { Properties?: { Environment?: { Variables?: Record<string, unknown> } } })
+      .Properties?.Environment?.Variables ?? {};
+    expect(vars.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME).toBeDefined();
+    expect(vars.JIRA_WORKSPACE_REGISTRY_TABLE_NAME).toBeDefined();
+  });
+
+  test('the orchestration reconciler cannot read S3 objects at all', () => {
+    // The trace/artifacts bucket holds full agent trajectories under
+    // traces/<user_id>/ — tool input and output, authorized per-user by the presign
+    // handler. The reconciler works entirely from task records and the orchestration
+    // table, so it needs no object read anywhere; asserting the absence keeps a
+    // component that handles no user identity out of that blast radius, and makes a
+    // future grant a deliberate, visible choice.
+    //
+    // Absence rather than a scoped grant is the stronger claim, and the safer one:
+    // S3 does not normalize keys, so `artifacts/../traces/u/x` is a literal key that
+    // an `artifacts/*` resource matches by string prefix.
+    const policies = template.findResources('AWS::IAM::Policy');
+    const reconciler = Object.entries(policies).filter(([id]) => id.startsWith('OrchestrationReconciler'));
+    // The reconciler DOES have policies (table + invoke + guardrail grants), so an
+    // empty set here would mean the id filter broke, not that the grant is gone.
+    expect(reconciler.length).toBeGreaterThan(0);
+
+    const objectStatements: string[] = [];
+    for (const [, policy] of reconciler) {
+      const doc = (policy as { Properties: { PolicyDocument: { Statement: Array<Record<string, unknown>> } } })
+        .Properties.PolicyDocument.Statement;
+      for (const stmt of doc) {
+        const actions = JSON.stringify(stmt.Action ?? '');
+        if (!/s3:(Get|Put|Delete)Object/.test(actions)) continue;
+        objectStatements.push(JSON.stringify(stmt));
+      }
+    }
+    expect(objectStatements).toEqual([]);
+  });
+
+  test('log-delivery logical ids are pinned with NO opt-in, so an existing stack updates in place', () => {
+    // A DeliverySource is unique per (resource ARN, log type) for the whole
+    // account, and the runtime ARN survives a library-side rename of these
+    // auto-created resources. So a renamed source is a SECOND source for the same
+    // runtime: CloudFormation creates before deleting, CloudWatch Logs rejects it
+    // as already existing, and the update rolls the whole stack back.
+    //
+    // The ids must therefore be pinned unconditionally. Behind a flag, the safe
+    // path is the one an operator has to already know about, and the failure that
+    // teaches them is a mid-update rollback whose message never mentions it.
+    //
+    // Asserted on the source, not by synthesizing a second stack: constructing
+    // one under a different construct id trips an unrelated cdk-nag
+    // suppression-path check first, which masks whatever this is checking.
+    const src = fs.readFileSync(
+      path.resolve(__dirname, '../../src/stacks/agent.ts'), 'utf8',
+    );
+    const fn = src.slice(src.indexOf('function pinLogDeliveryLogicalIds'));
+    const body = fn.slice(0, fn.indexOf('\n}'));
+
+    // Keyed off the stack's OWN name — no context, no opt-in.
+    expect(body).toContain('PINNED_LOG_DELIVERY_BY_STACK[stack.stackName]');
+    expect(body).not.toContain('tryGetContext');
+    // Nothing anywhere may reintroduce a gate.
+    expect(src).not.toContain('pinnedLogDeliveryStack');
+
+    // The ids it pins are the ones CloudFormation already holds for that stack.
+    // Hard-coded here on purpose: if someone "tidies" a value in the table, this
+    // fails instead of the next production update rolling back.
+    expect(src).toContain('RuntimeCDKSourceAPPLICATIONLOGSbackgroundagentdevRuntimeBC0AE9ED96A02E02');
+    expect(src).toContain('RuntimeCDKSourceUSAGELOGSbackgroundagentdevRuntimeBC0AE9ED544FBB22');
+  });
+
+  test('a stack with no recorded ids keeps the library\'s own log-delivery naming', () => {
+    // The pinned ids embed a stack name, so they are only correct for that stack.
+    // Another stack has no pre-rename resources to line up with and must not
+    // inherit them — otherwise two stacks in one account would claim the same
+    // account-unique DeliverySource Name. The table lookup is what enforces this,
+    // so assert it returns nothing for an unknown name rather than falling back.
+    const src = fs.readFileSync(
+      path.resolve(__dirname, '../../src/stacks/agent.ts'), 'utf8',
+    );
+    const fn = src.slice(src.indexOf('function pinLogDeliveryLogicalIds'));
+    const body = fn.slice(0, fn.indexOf('\n}'));
+    expect(body).toMatch(/if \(!pins\) return;/);
+
+    // And this stack — named TestAgentStack, absent from the table — got the
+    // library's naming, with none of backgroundagent-dev's ids leaking in.
+    const ids = Object.keys(template.findResources('AWS::Logs::DeliverySource'));
+    expect(ids).toHaveLength(2);
+    for (const id of ids) {
+      expect(id).not.toContain('backgroundagentdev');
+    }
+  });
+
+  test('the fan-out consumer can reach BOTH surfaces\' credentials registries', () => {
+    // Its Jira and Linear props are OPTIONAL on the construct, so dropping one
+    // from the stack wiring disables that surface's final-status comment with no
+    // synth error and no test failure elsewhere — a silent capability loss. Pin
+    // both env vars so the omission fails here instead.
+    const fns = template.findResources('AWS::Lambda::Function');
+    const fanout = Object.entries(fns).find(([id]) => id.startsWith('FanOutConsumer'));
+    expect(fanout).toBeDefined();
+    const vars = (fanout![1] as { Properties?: { Environment?: { Variables?: Record<string, unknown> } } })
+      .Properties?.Environment?.Variables ?? {};
+    expect(vars.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME).toBeDefined();
+    expect(vars.JIRA_WORKSPACE_REGISTRY_TABLE_NAME).toBeDefined();
+  });
+
+  test('the fan-out consumer is granted read on BOTH surfaces\' OAuth secret prefixes', () => {
+    // The registry table alone is not enough to post a comment — the dispatcher
+    // also needs the per-workspace OAuth secret.
+    //
+    // Scoped to the FanOutConsumer's OWN policy, deliberately. Grepping every
+    // synthesized policy for these ARN patterns passes even when the fan-out's
+    // grant is dropped, because the orchestrator and the webhook processors hold
+    // the same prefixes — the assertion then proves nothing about this consumer.
+    const policies = template.findResources('AWS::IAM::Policy');
+    const fanoutPolicies = Object.entries(policies)
+      .filter(([logicalId]) => logicalId.startsWith('FanOutConsumer'));
+    expect(fanoutPolicies.length).toBeGreaterThan(0);
+    const asJson = JSON.stringify(fanoutPolicies.map(([, p]) => p));
+    expect(asJson).toContain('bgagent-linear-oauth-*');
+    expect(asJson).toContain('bgagent-jira-oauth-*');
+  });
+
+  test('the stranded-orchestration sweep gets the registry its panel refresh needs', () => {
+    // It shares refreshPanelAndSettle with the live reconciler; without a
+    // registry that feedback no-ops and a recovered epic's panel stays stale.
+    const fns = template.findResources('AWS::Lambda::Function');
+    const sweep = Object.entries(fns).find(([id]) => id.startsWith('StrandedOrchestrationReconciler'));
+    expect(sweep).toBeDefined();
+    const vars = (sweep![1] as { Properties?: { Environment?: { Variables?: Record<string, unknown> } } })
+      .Properties?.Environment?.Variables ?? {};
+    expect(vars.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME).toBeDefined();
+  });
+
   test('creates a log group for model invocation logs', () => {
     template.hasResourceProperties('AWS::Logs::LogGroup', {
       LogGroupName: '/aws/bedrock/model-invocation-logs/TestAgentStack',
@@ -523,12 +685,459 @@ describe('AgentStack with the ECS substrate gate (--context compute_type=ecs)', 
     template = Template.fromStack(stack);
   });
 
-  test('provisions an ECS cluster + Fargate task definition', () => {
+  test('provisions an ECS cluster + both Fargate task definitions (build + planning)', () => {
     template.resourceCountIs('AWS::ECS::Cluster', 1);
-    template.resourceCountIs('AWS::ECS::TaskDefinition', 1);
+    // Two task defs — the 64 GB build def and the 8 GB read-only planning def
+    // (a read-only workflow runs on the smaller one). See
+    // docs/design/ECS_RIGHTSIZED_PLANNING.md.
+    template.resourceCountIs('AWS::ECS::TaskDefinition', 2);
   });
 
   test('outputs ComputeSubstrate=ecs so the CLI allows compute_type=ecs onboarding', () => {
     template.hasOutput('ComputeSubstrate', { Value: 'ecs' });
+  });
+
+  test('the orchestrator gets the PLANNING task-def ARN, not just the build one', () => {
+    // Without this env var the ECS strategy's `readOnly &&
+    // ECS_PLANNING_TASK_DEFINITION_ARN` guard is always falsy, so the planning
+    // def would be synthesized, billed for, and never receive a workflow — the
+    // feature inert while looking present in the template.
+    //
+    // This has to be asserted at the STACK level. The strategy's own unit tests
+    // set the env var by hand to exercise the routing branch, so they pass
+    // whether or not anything in the stack actually supplies it; only synth can
+    // tell us the wiring exists. Both ARNs are asserted together because the bug
+    // this pins is one being present without the other.
+    const envs = Object.values(
+      template.findResources('AWS::Lambda::Function'),
+    ).map(fn => fn.Properties?.Environment?.Variables ?? {});
+    const orchestrator = envs.filter(e => 'ECS_TASK_DEFINITION_ARN' in e);
+    expect(orchestrator).toHaveLength(1);
+    expect(orchestrator[0]).toHaveProperty('ECS_PLANNING_TASK_DEFINITION_ARN');
+    // ...and the two must be DIFFERENT task defs, or read-only workflows are
+    // silently running on the build box anyway.
+    expect(orchestrator[0].ECS_PLANNING_TASK_DEFINITION_ARN)
+      .not.toEqual(orchestrator[0].ECS_TASK_DEFINITION_ARN);
+  });
+
+  test('build-task sizing is reachable from deploy context, not only from the construct', () => {
+    // The construct's default is deliberately modest so an adopter who changes
+    // nothing does not pay for the Fargate ceiling. That is only defensible if a
+    // heavy monorepo can RAISE it without editing the construct — and `taskSizing`
+    // had no caller at all, so the ceiling was unreachable by any supported route.
+    // This asserts the whole path: context -> resolver -> construct -> template.
+    const app = new App({
+      context: {
+        compute_type: 'ecs',
+        ecsBuildTaskCpu: '16384',
+        ecsBuildTaskMemoryMiB: '122880',
+        ecsBuildTaskEphemeralStorageGiB: '100',
+      },
+    });
+    const sized = Template.fromStack(new AgentStack(app, 'SizedEcsStack', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    }));
+    sized.hasResourceProperties('AWS::ECS::TaskDefinition', {
+      Cpu: '16384',
+      Memory: '122880',
+      EphemeralStorage: { SizeInGiB: 100 },
+    });
+  });
+
+  test('the DEFAULT ECS build task stays modest', () => {
+    template.hasResourceProperties('AWS::ECS::TaskDefinition', {
+      Cpu: '4096',
+      Memory: '16384',
+    });
+  });
+});
+
+describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_type=lambda-microvm)', () => {
+  const BASE_IMAGE_ARN = 'arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1';
+
+  let template: Template;
+
+  beforeAll(() => {
+    // Gate ON *and* an image configured — the steady state. The intermediate
+    // "gate on, no image yet" state is covered in the construct test; here the
+    // point is the stack-level wiring (env vars + IAM + outputs) that only
+    // exists once an image identifier is available.
+    const app = new App({
+      context: {
+        compute_type: 'lambda-microvm',
+        microvm_base_image_arn: BASE_IMAGE_ARN,
+        microvm_base_image_version: '1',
+      },
+    });
+    const stack = new AgentStack(app, 'TestAgentStackMicrovm', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    });
+    template = Template.fromStack(stack);
+  });
+
+  test('provisions the MicroVM image + BOTH egress network connectors', () => {
+    template.resourceCountIs('AWS::Lambda::MicrovmImage', 1);
+    // Runtime (443) + build-time (443 + 80, for apt-get) — see ADR-021's
+    // build-time-egress security-table row.
+    template.resourceCountIs('AWS::Lambda::NetworkConnector', 2);
+  });
+
+  test('does NOT provision the ECS substrate (the gates are mutually exclusive)', () => {
+    template.resourceCountIs('AWS::ECS::Cluster', 0);
+    template.resourceCountIs('AWS::ECS::TaskDefinition', 0);
+  });
+
+  test('outputs ComputeSubstrate=lambda-microvm so the CLI allows that onboarding', () => {
+    template.hasOutput('ComputeSubstrate', { Value: 'lambda-microvm' });
+  });
+
+  test('outputs everything the packaging script needs to find (no predictable physical names)', () => {
+    for (const output of [
+      'MicrovmArtifactBucketName',
+      'MicrovmArtifactObjectKey',
+      'MicrovmBuildRoleArn',
+      'MicrovmExecutionRoleArn',
+      'MicrovmEgressConnectorArns',
+      // The script passes THIS one to create-microvm-image: the runtime
+      // connector is 443-only and the Dockerfile's apt-get needs port 80.
+      'MicrovmBuildEgressConnectorArns',
+      'MicrovmLogGroupName',
+    ]) {
+      template.hasOutput(output, {});
+    }
+  });
+
+  test('the build and runtime egress connector outputs are DIFFERENT connectors', () => {
+    const outputs = template.toJSON().Outputs as Record<string, { Value: unknown }>;
+    expect(JSON.stringify(outputs.MicrovmEgressConnectorArns.Value))
+      .not.toEqual(JSON.stringify(outputs.MicrovmBuildEgressConnectorArns.Value));
+  });
+
+  test('injects the MICROVM_* env vars the strategy reads, including explicit NO_INGRESS', () => {
+    const fns = template.findResources('AWS::Lambda::Function');
+    const [, orchestrator] = Object.entries(fns)
+      .find(([id]) => id.includes('TaskOrchestratorOrchestratorFn'))!;
+    const env = orchestrator.Properties.Environment.Variables as Record<string, unknown>;
+
+    expect(Object.keys(env).filter(k => k.startsWith('MICROVM_')).sort()).toEqual([
+      'MICROVM_EGRESS_CONNECTOR_ARNS',
+      'MICROVM_EXECUTION_ROLE_ARN',
+      'MICROVM_IMAGE_IDENTIFIER',
+      'MICROVM_INGRESS_CONNECTOR_ARNS',
+      'MICROVM_PAYLOAD_BUCKET',
+    ]);
+    // Image version is deliberately unpinned.
+    expect(env.MICROVM_IMAGE_VERSION).toBeUndefined();
+    // Ingress is NOT empty and NOT omitted: RunMicrovm attaches a PUBLIC
+    // HTTP_INGRESS connector (with a public endpoint) when the field is absent,
+    // so "no inbound" is an explicit control on every launch.
+    expect(JSON.stringify(env.MICROVM_INGRESS_CONNECTOR_ARNS)).toContain('NO_INGRESS');
+    expect(JSON.stringify(env.MICROVM_INGRESS_CONNECTOR_ARNS)).not.toContain('HTTP_INGRESS');
+  });
+
+  test('MICROVM_IMAGE_IDENTIFIER is the image ARN, not a bare name', () => {
+    // RunMicrovm rejects a bare name ("Malformed ARN - doesn't start with
+    // 'arn:'"), so the identifier the orchestrator receives must be the same ARN
+    // the lifecycle IAM grant is scoped to.
+    const fns = template.findResources('AWS::Lambda::Function');
+    const [, orchestrator] = Object.entries(fns)
+      .find(([id]) => id.includes('TaskOrchestratorOrchestratorFn'))!;
+    const env = orchestrator.Properties.Environment.Variables as Record<string, unknown>;
+    expect(JSON.stringify(env.MICROVM_IMAGE_IDENTIFIER))
+      .toMatch(/"Fn::GetAtt":\["LambdaMicrovmComputeImage[^"]*","ImageArn"\]/);
+  });
+
+  test('grants the orchestrator exactly the P1 lifecycle actions, image-scoped', () => {
+    const policies = Object.entries(template.findResources('AWS::IAM::Policy'))
+      .filter(([id]) => id.includes('TaskOrchestrator'));
+    const statements = policies.flatMap(([, p]) => p.Properties.PolicyDocument.Statement as Array<{
+      Sid?: string;
+      Action: string | string[];
+      Resource: unknown;
+    }>);
+
+    const lifecycle = statements.find(s => s.Sid === 'MicrovmLifecycle')!;
+    expect(lifecycle.Action).toEqual([
+      'lambda:RunMicrovm',
+      'lambda:GetMicrovm',
+      'lambda:TerminateMicrovm',
+    ]);
+    // Every MicroVM lifecycle action authorizes against the *image* resource,
+    // which is why "scoped to platform-created images" is achievable at all.
+    expect(JSON.stringify(lifecycle.Resource)).toMatch(
+      /"Fn::GetAtt":\["LambdaMicrovmComputeImage[^"]*","ImageArn"\]/,
+    );
+
+    // PassNetworkConnector supports no resource-level permissions.
+    const pass = statements.find(s => s.Sid === 'MicrovmPassNetworkConnector')!;
+    expect(pass.Action).toBe('lambda:PassNetworkConnector');
+    expect(pass.Resource).toBe('*');
+
+    // iam:PassRole for the execution role hand-off, service-conditioned.
+    const passRole = statements.find(s => s.Sid === 'MicrovmPassExecutionRole')!;
+    expect(passRole.Action).toBe('iam:PassRole');
+  });
+
+  test('does NOT grant suspend/resume (P3) or auth-token minting (never)', () => {
+    const rendered = JSON.stringify(template.toJSON());
+    expect(rendered).not.toContain('lambda:SuspendMicrovm');
+    expect(rendered).not.toContain('lambda:ResumeMicrovm');
+    expect(rendered).not.toContain('lambda:CreateMicrovmAuthToken');
+    expect(rendered).not.toContain('lambda:CreateMicrovmShellAuthToken');
+    expect(rendered).not.toContain('lambda:ConnectMicrovm');
+  });
+
+  test('orchestrator may WRITE the payload bucket; nothing grants it delete', () => {
+    const policies = Object.entries(template.findResources('AWS::IAM::Policy'))
+      .filter(([id]) => id.includes('TaskOrchestrator'));
+    const statements = policies.flatMap(([, p]) => p.Properties.PolicyDocument.Statement as Array<{
+      Action: string | string[];
+      Resource: unknown;
+    }>);
+    const payloadStatements = statements.filter(s =>
+      JSON.stringify(s.Resource).includes('LambdaMicrovmComputePayloadBucket'));
+
+    const actions = payloadStatements.flatMap(s => Array.isArray(s.Action) ? s.Action : [s.Action]);
+    expect(actions).toContain('s3:PutObject');
+    // The bucket's lifecycle rule is the reaper on this backend — unlike the ECS
+    // path the orchestrator never deletes, so the grant must not exist.
+    expect(actions).not.toContain('s3:DeleteObject');
+  });
+
+  test('cancel Lambda may terminate a MicroVM (and only terminate), image-scoped', () => {
+    const policies = Object.entries(template.findResources('AWS::IAM::Policy'))
+      .filter(([id]) => id.includes('CancelTaskFn'));
+    const statements = policies.flatMap(([, p]) => p.Properties.PolicyDocument.Statement as Array<{
+      Action: string | string[];
+      Resource: unknown;
+    }>);
+    const microvmStatements = statements.filter(s =>
+      JSON.stringify(s.Action).includes('Microvm'));
+
+    expect(microvmStatements).toHaveLength(1);
+    expect(microvmStatements[0]!.Action).toBe('lambda:TerminateMicrovm');
+    // Resolved through the stack's Lazy.string to the actual image resource
+    // (TaskApi is built before the MicroVM construct), so the grant names ONE
+    // image instead of an account/Region-wide `microvm-image:*`.
+    const rendered = JSON.stringify(microvmStatements[0]!.Resource);
+    expect(rendered).toMatch(/LambdaMicrovmComputeImage[^"]*","ImageArn"/);
+    expect(rendered).not.toContain('microvm-image:*');
+  });
+
+  test('MicroVM resources carry the backend cost-allocation tag', () => {
+    template.hasResourceProperties('AWS::Lambda::MicrovmImage', {
+      Tags: Match.arrayWith([{ Key: 'abca:compute-backend', Value: 'lambda-microvm' }]),
+    });
+    template.hasResourceProperties('AWS::Lambda::NetworkConnector', {
+      Tags: Match.arrayWith([{ Key: 'abca:compute-backend', Value: 'lambda-microvm' }]),
+    });
+  });
+
+  describe('Region gate', () => {
+    // TEST-CONVENTION EXEMPTION (cdk/AGENTS.md "synth once in beforeAll"): the
+    // failure case asserts the STACK CONSTRUCTOR throws, so there is no template
+    // to cache. It is also cheap — the gate runs inside the MicroVM construct
+    // before any resource is created, and no `Template.fromStack()` is called.
+    // The success case (escape hatch) does need a template, so it is cached here.
+    let overriddenTemplate: Template;
+
+    beforeAll(() => {
+      const app = new App({
+        context: {
+          compute_type: 'lambda-microvm',
+          microvm_region_override: true,
+          microvm_base_image_arn: BASE_IMAGE_ARN,
+          microvm_base_image_version: '1',
+        },
+      });
+      overriddenTemplate = Template.fromStack(new AgentStack(app, 'TestAgentStackMicrovmOverride', {
+        env: { account: '123456789012', region: 'eu-central-1' },
+      }));
+    });
+
+    test('fails synth when the stack Region has no Lambda MicroVMs', () => {
+      const app = new App({ context: { compute_type: 'lambda-microvm' } });
+      expect(() => new AgentStack(app, 'TestAgentStackMicrovmBadRegion', {
+        env: { account: '123456789012', region: 'eu-central-1' },
+      })).toThrow(/AWS Lambda MicroVMs are not available in eu-central-1/);
+    });
+
+    test('the microvm_region_override context flag unblocks an unsupported Region', () => {
+      overriddenTemplate.resourceCountIs('AWS::Lambda::MicrovmImage', 1);
+    });
+  });
+});
+
+describe('AgentStack default (agentcore) deploy — MicroVM substrate absent', () => {
+  let template: Template;
+
+  beforeAll(() => {
+    const app = new App();
+    const stack = new AgentStack(app, 'TestAgentStackNoMicrovm', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    });
+    template = Template.fromStack(stack);
+  });
+
+  test('synthesizes no MicroVM resources', () => {
+    template.resourceCountIs('AWS::Lambda::MicrovmImage', 0);
+    template.resourceCountIs('AWS::Lambda::NetworkConnector', 0);
+  });
+
+  test('injects no MICROVM_* env vars', () => {
+    const fns = Object.values(template.findResources('AWS::Lambda::Function'));
+    for (const fn of fns) {
+      const env = (fn.Properties.Environment?.Variables ?? {}) as Record<string, unknown>;
+      expect(Object.keys(env).filter(k => k.startsWith('MICROVM_'))).toEqual([]);
+    }
+  });
+
+  test('grants no MicroVM IAM actions anywhere', () => {
+    // Scoped to policy documents rather than the whole template: cdk-nag
+    // suppression *reasons* legitimately mention the actions in prose.
+    const statements = Object.values(template.findResources('AWS::IAM::Policy'))
+      .flatMap(p => p.Properties.PolicyDocument.Statement as Array<{ Action: string | string[] }>);
+    const actions = statements.flatMap(s => Array.isArray(s.Action) ? s.Action : [s.Action]);
+    expect(actions.filter(a => a.includes('Microvm'))).toEqual([]);
+  });
+});
+
+describe('AgentStack with the MicroVM gate on but no image configured (first deploy)', () => {
+  let template: Template;
+
+  beforeAll(() => {
+    // The bootstrap state: substrate provisioned so the artifact bucket exists,
+    // but no image yet. Exercises the false branch of the shared
+    // `isLambdaMicrovmImageConfigured` predicate that gates BOTH the
+    // orchestrator's MICROVM_* wiring and the cancel Lambda's grant.
+    const app = new App({ context: { compute_type: 'lambda-microvm' } });
+    const stack = new AgentStack(app, 'TestAgentStackMicrovmNoImage', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    });
+    template = Template.fromStack(stack);
+  });
+
+  test('provisions the substrate (buckets, roles, both connectors) but no image', () => {
+    template.resourceCountIs('AWS::Lambda::NetworkConnector', 2);
+    template.resourceCountIs('AWS::Lambda::MicrovmImage', 0);
+    template.hasOutput('MicrovmArtifactBucketName', {});
+    // The build-time connector output is what the packaging script reads next, so
+    // it must exist in exactly this pre-image state.
+    template.hasOutput('MicrovmBuildEgressConnectorArns', {});
+  });
+
+  test('grants no MicroVM IAM actions at all — nothing to run or cancel yet', () => {
+    // Notably this also proves the stack never resolves the image-ARN Lazy in
+    // this state: doing so would throw "accessed before LambdaMicrovmCompute was
+    // created"-class errors rather than synthesize.
+    const actions = Object.values(template.findResources('AWS::IAM::Policy'))
+      .flatMap(p => p.Properties.PolicyDocument.Statement as Array<{ Action: string | string[] }>)
+      .flatMap(s => Array.isArray(s.Action) ? s.Action : [s.Action]);
+    expect(actions.filter(a => a.includes('Microvm'))).toEqual([]);
+  });
+
+  test('injects no MICROVM_* env vars (the strategy fails fast with its own remedy)', () => {
+    const fns = Object.values(template.findResources('AWS::Lambda::Function'));
+    const keys = fns.flatMap(fn =>
+      Object.keys((fn.Properties.Environment?.Variables ?? {}) as Record<string, unknown>));
+    expect(keys.filter(k => k.startsWith('MICROVM_'))).toEqual([]);
+  });
+});
+
+describe('AgentStack MicroVM image ARN invariant', () => {
+  let synthError: unknown;
+
+  beforeAll(() => {
+    // Force the stack-side gate true while the real construct remains in its
+    // no-image bootstrap state. This is the only way to exercise the Lazy's
+    // defensive invariant without changing production behavior.
+    const configuredSpy = jest.spyOn(lambdaMicrovmCompute, 'isLambdaMicrovmImageConfigured')
+      .mockReturnValue(true);
+    try {
+      const app = new App({ context: { compute_type: 'lambda-microvm' } });
+      const stack = new AgentStack(app, 'TestAgentStackMicrovmInvariant', {
+        env: { account: '123456789012', region: 'us-east-1' },
+      });
+      Template.fromStack(stack);
+    } catch (err) {
+      synthError = err;
+    } finally {
+      configuredSpy.mockRestore();
+    }
+  });
+
+  test('fails synth if a configured deployment has no image ARN', () => {
+    expect(synthError).toEqual(expect.objectContaining({
+      message: expect.stringContaining(
+        'MicroVM image ARN was accessed before LambdaMicrovmCompute was created',
+      ),
+    }));
+  });
+});
+
+describe('AgentStack solution attribution (#319): AWS_SDK_UA_APP_ID via stack-level aspect', () => {
+  let template: Template;
+
+  beforeAll(() => {
+    const app = new App();
+    const stack = new AgentStack(app, 'UaAgentStack', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    });
+    // Mirror main.ts: the SolutionUaAspect is applied at the stack scope, not
+    // inside AgentStack. It must reach every Lambda in the tree — including the
+    // ones nested several construct levels deep (integrations, orchestrator),
+    // not just functions declared directly under the stack.
+    Aspects.of(stack).add(new SolutionUaAspect(buildAppId('UaAgentStack')), {
+      priority: AspectPriority.MUTATING,
+    });
+    template = Template.fromStack(stack);
+  });
+
+  // CDK synthesizes its own framework-owned Lambdas that are NOT part of the
+  // ABCA solution surface: the S3 auto-delete and VPC default-SG-restriction
+  // custom-resource provider handlers (CfnResource-backed, so the aspect's
+  // `instanceof lambda.Function` guard cannot visit them), plus the
+  // `AWS679f53fac002430cb0da5b7982bd2287…` `cr.AwsCustomResource` singleton
+  // (which CDK happens to give the env var today, but whose attribution we do
+  // not want to depend on across CDK upgrades). Every framework-owned id is
+  // enumerated explicitly so the coverage assertion below cannot silently
+  // stop covering an ABCA Lambda by relabelling it as "framework".
+  const FRAMEWORK_LAMBDA_ID =
+    /^(CustomResourceProviderHandler|CustomS3AutoDeleteObjects|CustomVpcRestrictDefaultSG|AWS679f53fac002430cb0da5b7982bd2287)/;
+
+  test('every solution Lambda carries AWS_SDK_UA_APP_ID (traverses nested scope)', () => {
+    const functions = template.findResources('AWS::Lambda::Function');
+    const abcaLambdas = Object.entries(functions).filter(
+      ([id]) => !FRAMEWORK_LAMBDA_ID.test(id),
+    );
+    // exact count — update when adding/removing a Lambda construct (#319).
+    // A loose `toBeGreaterThan` let a whole integration construct disappear
+    // unnoticed; the exact count fails if a Lambda is dropped OR if a new one
+    // is added without being attributed below.
+    expect(abcaLambdas.length).toBe(45);
+    // Every ABCA-authored Lambda must carry the canonical `#` app-id. Collect
+    // any offenders so a failure names the exact logical id(s) that are naked.
+    const unattributed = abcaLambdas
+      .filter(
+        ([, fn]) =>
+          fn.Properties?.Environment?.Variables?.AWS_SDK_UA_APP_ID !==
+          'uksb-wt64nei4u6#UaAgentStack',
+      )
+      .map(([id]) => id);
+    expect(unattributed).toEqual([]);
+  });
+
+  test('nested integration Lambdas (Jira/Slack/Linear) inherit the app-id', () => {
+    // The trap: these functions live inside integration constructs several
+    // scopes below the stack. The env-var still resolves the canonical `#`
+    // form (not the mangled `-` variant).
+    const functions = template.findResources('AWS::Lambda::Function');
+    const nested = Object.entries(functions).filter(([id]) =>
+      /Jira|Slack|Linear/.test(id),
+    );
+    expect(nested.length).toBeGreaterThan(0);
+    for (const [, fn] of nested) {
+      expect(fn.Properties.Environment?.Variables?.AWS_SDK_UA_APP_ID).toBe('uksb-wt64nei4u6#UaAgentStack');
+    }
   });
 });

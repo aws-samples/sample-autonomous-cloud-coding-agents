@@ -17,10 +17,10 @@
  *  SOFTWARE.
  */
 
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { S3Client } from '@aws-sdk/client-s3';
-import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { ulid } from 'ulid';
+import type { SessionHandle, SessionStatus } from './compute-strategy';
 import { AttachmentBudgetExceededError, AttachmentConfigurationError, AttachmentResolutionError, hydrateContext, resolveGitHubToken } from './context-hydration';
 import { logger, type Logger } from './logger';
 import { writeMinimalEpisode } from './memory';
@@ -29,10 +29,11 @@ import { computePromptVersion } from './prompt-version';
 import { loadRepoConfig, type BlueprintConfig, type ComputeType } from './repo-config';
 import { resolveUrlAttachments } from './resolve-url-attachments';
 import { APPROVAL_GATE_CAP_MAX, APPROVAL_GATE_CAP_MIN, type AgentAttachmentPayload, type AttachmentRecord, type TaskRecord } from './types';
+import { makeClient, makeDocClient } from './ua';
 import { computeTtlEpoch, DEFAULT_MAX_TURNS } from './validation';
 import { TaskStatus, TERMINAL_STATUSES, VALID_TRANSITIONS, type TaskStatusType } from '../../constructs/task-status';
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const ddb = makeDocClient();
 
 const TABLE_NAME = process.env.TASK_TABLE_NAME!;
 const EVENTS_TABLE_NAME = process.env.TASK_EVENTS_TABLE_NAME!;
@@ -58,6 +59,18 @@ export interface PollState {
   readonly consecutiveEcsPollFailures?: number;
   /** Consecutive polls where ECS reports completed but DDB is not terminal — escalated after 5. */
   readonly consecutiveEcsCompletedPolls?: number;
+  /**
+   * True once `microvm_suspend_anomaly` has been emitted for the CURRENT anomaly
+   * episode, so the event fires once per episode instead of on every ~30 s poll
+   * (an 8-hour suspended task would otherwise write ~960 identical events).
+   *
+   * Re-armed (set back to false) by any non-anomalous observation — see
+   * {@link reconcileMicrovmSubstrateState}. Kept as a plain boolean rather than a
+   * counter/timestamp on purpose: P3's suspend policy will reshape this area
+   * anyway, and one flag is the smallest thing that fixes the duplication without
+   * pre-committing to a shape that work will have to undo.
+   */
+  readonly microvmSuspendAnomalyReported?: boolean;
 }
 
 /** After RUNNING this long, we expect `agent_heartbeat_at` from the agent (if ever set). */
@@ -168,16 +181,16 @@ export async function transitionTask(
   }));
 }
 
-/** Correlation envelope stamped on orchestrator-plane task events (#245). */
+/** Correlation envelope stamped on orchestrator-plane task events. */
 export interface EventCorrelation {
   readonly user_id?: string;
-  /** `owner/repo`, or absent for repo-less workflows (#248 Phase 3). Matches
-   *  the source `TaskRecord.repo` (`string | undefined`). */
+  /** `owner/repo`, or absent for repo-less workflows (those with no target
+   *  repository). Matches the source `TaskRecord.repo` (`string | undefined`). */
   readonly repo?: string;
 }
 
 /**
- * Build the correlation envelope (#245) for a task from its identity fields:
+ * Build the correlation envelope for a task from its identity fields:
  * a `log` child stamping `{task_id, user_id, repo}` on every line, and the
  * matching `correlation` for `emitTaskEvent`. Single source so the log context
  * and the event envelope can't drift. `repo` is omitted (not null/empty) for
@@ -199,8 +212,8 @@ export function envelopeFor(
  * @param eventType - the event type string.
  * @param metadata - optional event metadata.
  * @param correlation - optional `{ user_id, repo }` stamped as top-level fields
- *   so the event stream joins to orchestrator logs by the correlation envelope
- *   (#245). `repo` is omitted when null/absent (repo-less workflows).
+ *   so the event stream joins to orchestrator logs by the correlation envelope.
+ *   `repo` is omitted when null/absent (repo-less workflows).
  */
 export async function emitTaskEvent(
   taskId: string,
@@ -229,17 +242,214 @@ const MIN_POLL_INTERVAL_MS = 5_000;
 const MAX_POLL_INTERVAL_MS = 300_000;
 
 /**
+ * Build the ``compute_metadata`` map persisted on the task row at session start,
+ * so a later handler can act on the right backend without re-deriving anything:
+ * ``cancel-task.ts`` reads ``clusterArn``/``taskArn`` from it today, and ADR-021
+ * sub-decision 2 has the approve/deny Lambdas read ``microvmId`` from it in P3.
+ *
+ * Kept as an exhaustive switch (not a ternary + spread) so a fourth backend is a
+ * compile error here rather than a silently empty metadata map — the field is
+ * load-bearing for compute shutdown, and a missing handle is exactly what
+ * ``task_cancel_compute_orphan`` exists to alarm on.
+ *
+ * DynamoDB stores this as ``Record<string, string>`` (see
+ * ``TaskRecord.compute_metadata``), so every value must already be a string.
+ */
+export function buildComputeMetadata(handle: SessionHandle): Record<string, string> {
+  switch (handle.strategyType) {
+    case 'ecs':
+      return { clusterArn: handle.clusterArn, taskArn: handle.taskArn };
+    case 'agentcore':
+      return { runtimeArn: handle.runtimeArn };
+    case 'lambda-microvm':
+      // ADR-021: `microvmId` keys every lifecycle API; `endpoint` is per-session
+      // state that becomes load-bearing the day an orchestrator→agent HTTP
+      // consumer appears (none exists in P1–P3).
+      return { microvmId: handle.microvmId, endpoint: handle.endpoint };
+    default: {
+      const _exhaustive: never = handle;
+      throw new Error(`Unknown strategyType on session handle: ${JSON.stringify(_exhaustive)}`);
+    }
+  }
+}
+
+/** Outcome of a MicroVM substrate cross-check. */
+export interface MicrovmReconcileResult {
+  /**
+   * True when this call drove the task to FAILED — the caller must stop polling
+   * and report ``lastStatus: FAILED``. False for every healthy or
+   * anomalous-but-not-fatal observation.
+   */
+  readonly taskFailed: boolean;
+
+  /**
+   * Value the caller must carry into the next poll cycle's
+   * ``PollState.microvmSuspendAnomalyReported``.
+   *
+   * True while a suspend anomaly is being (or has been) reported; false whenever
+   * the anomaly condition is absent, which RE-ARMS the event for a genuinely new
+   * episode. Returned rather than mutated so the durable poll's state stays a
+   * plain serializable value.
+   */
+  readonly suspendAnomalyReported: boolean;
+}
+
+/**
+ * Cross-reference a MicroVM's substrate state against the task's DynamoDB status
+ * — the interpretation half of ADR-021's "the strategy reports, the orchestrator
+ * interprets" split. ``pollSession`` can only see the handle, so every rule that
+ * needs the task status lives here, exactly as ``finalPollState`` already does
+ * the substrate/DDB cross-check for ECS and ``pollTaskStatus`` does it for
+ * AgentCore heartbeats.
+ *
+ * Rules (all three from ADR-021 sub-decision 1's EARS requirements):
+ *   - substrate ``suspended`` + task ``AWAITING_APPROVAL`` → HEALTHY. This is the
+ *     orchestrator's own intended suspend (P3); say nothing.
+ *   - substrate ``suspended`` + any other task status → ANOMALY, not a failure.
+ *     Surface a task event and keep polling: a suspended VM preserves full
+ *     memory/disk state and can be resumed, so failing the task would destroy
+ *     recoverable work over a condition we cannot yet explain.
+ *   - substrate terminal + non-terminal task status → FAIL the task with the
+ *     substrate-failure reason (``error-classifier`` has the matching entry).
+ *
+ * ## The anomaly event fires ONCE PER EPISODE, not once per poll
+ *
+ * The anomaly branch is reached on every poll while the condition holds, so a
+ * task suspended out of band for hours would write one identical TaskEvent every
+ * ~30 s (~960 of them across the 8 h poll window) — noise that buries the first,
+ * informative one and inflates TaskEvents. ``suspendAnomalyReported`` (threaded
+ * through {@link PollState}) suppresses the repeats while leaving the
+ * do-not-fail-fast behaviour untouched: the function still returns
+ * ``taskFailed: false`` on every one of those polls.
+ *
+ * **Recovery re-arms it.** Any observation that is NOT an anomaly — the VM
+ * resumed (``running``), or the task moved into ``AWAITING_APPROVAL`` so the
+ * suspend is now intended — resets the flag to false. A second, later episode is
+ * new information (something suspended this VM twice), so it earns its own event.
+ * The alternative (latch forever) would silently hide a flapping suspend loop,
+ * which is exactly the pathology an operator most needs to see.
+ *
+ * The WARN log is emitted on every poll regardless. Logs are cheap, per-poll
+ * evidence is what a timeline investigation needs, and CloudWatch is not a
+ * user-facing surface the way TaskEvents is.
+ *
+ * The terminal branch RE-READS the task row before failing. The DynamoDB status
+ * handed in was read earlier in the same poll cycle, and the ordinary happy path
+ * is "agent writes terminal status, agent exits, VM terminates" — so a stale read
+ * plus a fast teardown would otherwise fail a task that actually succeeded. The
+ * re-read is the same "confirm before acting on a lost race" move ``finalizeTask``
+ * makes after a failed transition. (ECS buys the same protection with a
+ * 5-consecutive-poll patience counter; one extra GetItem on a path that is about
+ * to end the task is cheaper and does not add state to ``PollState``.)
+ *
+ * @param taskId - the task being polled.
+ * @param ddbStatus - the task status observed by this poll cycle.
+ * @param substrate - what ``pollSession`` reported.
+ * @param microvmId - for event/log correlation.
+ * @param userId - owner, for ``failTask``.
+ * @param correlation - the #245 envelope for emitted events.
+ * @param log - the caller's child logger (already carries task/user/repo).
+ * @param repo - optional target repo for the correlation envelope.
+ * @param suspendAnomalyReported - the previous cycle's flag; see the section above.
+ */
+export async function reconcileMicrovmSubstrateState(args: {
+  taskId: string;
+  ddbStatus: TaskStatusType;
+  substrate: SessionStatus;
+  microvmId: string;
+  userId: string;
+  correlation: EventCorrelation;
+  log: Logger;
+  repo?: string;
+  suspendAnomalyReported?: boolean;
+}): Promise<MicrovmReconcileResult> {
+  const {
+    taskId, ddbStatus, substrate, microvmId, userId, correlation, log, repo,
+    suspendAnomalyReported = false,
+  } = args;
+
+  if (substrate.status === 'running') {
+    // Healthy — and it also ENDS any anomaly episode, so the next one reports.
+    return { taskFailed: false, suspendAnomalyReported: false };
+  }
+
+  if (substrate.status === 'suspended') {
+    if (ddbStatus === TaskStatus.AWAITING_APPROVAL) {
+      // Orchestrator-intended suspend during an approval wait — the whole point
+      // of this backend. Nothing to report, and the anomaly is re-armed: if the
+      // task later leaves AWAITING_APPROVAL while still suspended, that is a new
+      // and genuinely reportable episode.
+      return { taskFailed: false, suspendAnomalyReported: false };
+    }
+    // Suspended outside an approval wait. Nothing in ABCA suspends a MicroVM
+    // except the orchestrator's (P3) approval-wait policy, so this means either
+    // an out-of-band SuspendMicrovm call or a substrate-side suspend we did not
+    // ask for. Surface it — do NOT fail-fast (ADR-021: "an anomaly to surface,
+    // not fail-fast"); the VM's state is intact and resumable.
+    log.warn('MicroVM is suspended while the task is not awaiting approval', {
+      microvm_id: microvmId,
+      task_status: ddbStatus,
+      anomaly_already_reported: suspendAnomalyReported,
+    });
+    if (!suspendAnomalyReported) {
+      await emitTaskEvent(taskId, 'microvm_suspend_anomaly', {
+        microvm_id: microvmId,
+        task_status: ddbStatus,
+        reason: 'suspended_outside_approval_wait',
+      }, correlation);
+    }
+    return { taskFailed: false, suspendAnomalyReported: true };
+  }
+
+  // Terminal substrate report (`completed` or `failed`). `pollSession` reports
+  // TERMINATING/TERMINATED/NotFound as `completed` because it cannot see an exit
+  // code; `failed` only reaches here if a future mapping adds one.
+  const detail = substrate.status === 'failed' ? substrate.error : `substrate state ${substrate.status}`;
+
+  const reread = await loadTask(taskId);
+  if (TERMINAL_STATUSES.includes(reread.status)) {
+    // The agent wrote its terminal status between this cycle's status read and
+    // now — the normal shutdown ordering. Not a failure.
+    log.info('MicroVM terminated after the agent wrote a terminal status', {
+      microvm_id: microvmId,
+      task_status: reread.status,
+    });
+    // Terminal either way, so the flag no longer matters; carried through
+    // unchanged rather than reset so the value never lies about what happened.
+    return { taskFailed: false, suspendAnomalyReported };
+  }
+
+  log.error('MicroVM reached a terminal state before the agent wrote a terminal status', {
+    microvm_id: microvmId,
+    task_status: reread.status,
+    detail,
+  });
+  // `releaseConcurrency: false` — the finalize step sees the now-terminal task
+  // and decrements, matching the ECS substrate-failure branch in orchestrate-task.
+  await failTask(
+    taskId,
+    reread.status,
+    `MicroVM substrate terminated before the agent wrote a terminal status: ${detail}`,
+    userId,
+    false,
+    repo,
+  );
+  return { taskFailed: true, suspendAnomalyReported };
+}
+
+/**
  * Load blueprint configuration for a task's repository and merge with platform defaults.
  * @param task - the task record (needs task.repo).
  * @returns the merged blueprint config.
  */
 export async function loadBlueprintConfig(task: TaskRecord): Promise<BlueprintConfig> {
-  // Correlation envelope (#245) on this shared function's logs too, matching the
+  // Correlation envelope on this shared function's logs too, matching the
   // orchestrate handler's child logger. `repo` omitted for repo-less workflows.
   const { log } = envelopeFor(task);
 
-  // Repo-less workflows (#248 Phase 3) have no per-repo Blueprint — use platform
-  // defaults directly rather than a RepoTable lookup on a missing repo.
+  // Repo-less workflows (those with no target repository) have no per-repo
+  // Blueprint — use platform defaults directly rather than a RepoTable lookup
+  // on a missing repo.
   const repoConfig = task.repo ? await loadRepoConfig(task.repo) : null;
 
   if (repoConfig) {
@@ -268,6 +478,17 @@ export async function loadBlueprintConfig(task: TaskRecord): Promise<BlueprintCo
     }
   }
 
+  // Compute substrate is a per-repo property (``compute_type``, default
+  // ``agentcore``). It applies to ALL workflows on the repo — including a
+  // read-only pr-review task, because that task CLONES and
+  // READS the same repository the coding agent does, so its context/memory
+  // footprint is the same: a repo big enough to need the context-gated ECS
+  // tier for building is also big enough to OOM the fixed AgentCore microVM just
+  // reading it. So planning must run on the same substrate as the agent — do NOT
+  // special-case read-only workflows to agentcore. (An ecs-configured repo on a
+  // stack that hasn't wired the ECS substrate fails at session start; that's a
+  // stack-config gap surfaced by the honest "couldn't plan, nothing run — re-apply
+  // or run as single" note, not something to paper over by mis-routing compute.)
   return {
     compute_type: repoConfig?.compute_type ?? 'agentcore',
     runtime_arn: repoConfig?.runtime_arn ?? RUNTIME_ARN,
@@ -277,6 +498,8 @@ export async function loadBlueprintConfig(task: TaskRecord): Promise<BlueprintCo
     system_prompt_overrides: repoConfig?.system_prompt_overrides,
     github_token_secret_arn: repoConfig?.github_token_secret_arn ?? process.env.GITHUB_TOKEN_SECRET_ARN,
     poll_interval_ms: pollIntervalMs,
+    build_command: repoConfig?.build_command,
+    lint_command: repoConfig?.lint_command,
     cedar_policies: repoConfig?.cedar_policies,
     approval_gate_cap: repoConfig?.approval_gate_cap,
   };
@@ -335,9 +558,9 @@ function resolveAttachmentPayloads(
 }
 
 /**
- * Cedar HITL Chunk 7b: structural guard on the TaskRecord's persisted
- * ``approval_gate_cap`` before we thread it into the agent payload. The
- * submit path bounds-checks the blueprint value before writing it
+ * Structural guard on the TaskRecord's persisted ``approval_gate_cap`` (the
+ * human-in-the-loop approval limit) before we thread it into the agent payload.
+ * The submit path bounds-checks the blueprint value before writing it
  * (``create-task-core.ts``), so under a clean flow this guard is
  * tautologically satisfied. It exists to catch hand-edited DDB rows /
  * schema drift — a corrupted value would otherwise crash the agent's
@@ -430,8 +653,8 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
   // max_budget_usd uses 2-tier override (no platform default — absent means unlimited).
   const effectiveBudget = task.max_budget_usd ?? blueprintConfig?.max_budget_usd;
 
-  // Chunk 7b: warn if a persisted approval_gate_cap is present but not
-  // a valid integer in [APPROVAL_GATE_CAP_MIN, APPROVAL_GATE_CAP_MAX].
+  // Warn if a persisted approval_gate_cap is present but not a valid integer
+  // in [APPROVAL_GATE_CAP_MIN, APPROVAL_GATE_CAP_MAX].
   // The payload block below silently omits invalid values (rather than
   // crashing container start on PolicyEngine.__init__), but the only
   // way to reach this branch is schema drift or a hand-edited DDB row,
@@ -458,7 +681,7 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
       ? {
         guardrailId: process.env.GUARDRAIL_ID,
         guardrailVersion: process.env.GUARDRAIL_VERSION,
-        bedrockClient: new BedrockRuntimeClient({}),
+        bedrockClient: makeClient(BedrockRuntimeClient),
       }
       : undefined;
 
@@ -507,7 +730,7 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
       task.task_id,
       task.user_id,
       {
-        s3Client: new S3Client({}),
+        s3Client: makeClient(S3Client),
         bucketName: ATTACHMENTS_BUCKET_NAME,
         screeningConfig,
         githubToken,
@@ -528,10 +751,10 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     task_id: task.task_id,
     // user_id is required by the agent ONLY when ``trace`` is true —
     // the agent writes the trajectory to
-    // ``traces/<user_id>/<task_id>.jsonl.gz`` (design §10.1) and the
-    // handler's per-caller-prefix guard relies on the agent landing
-    // under the submitter's prefix. Threaded unconditionally so
-    // scripts that inspect the payload can always see it; costs one
+    // ``traces/<user_id>/<task_id>.jsonl.gz`` and the handler's
+    // per-caller-prefix guard relies on the agent landing under the
+    // submitter's prefix. Threaded unconditionally so scripts that
+    // inspect the payload can always see it; costs one
     // Cognito-sub-sized string in the JSON.
     user_id: task.user_id,
     branch_name: hydratedContext.resolved_branch_name ?? task.branch_name,
@@ -539,6 +762,15 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     resolved_workflow: task.resolved_workflow ?? { id: 'coding/new-task-v1', version: '1.0.0' },
     ...(task.pr_number !== undefined && { pr_number: task.pr_number }),
     ...(hydratedContext.resolved_base_branch && { base_branch: hydratedContext.resolved_base_branch }),
+    // Orchestration children carry their stacked base branch + (diamond
+    // dependency case) predecessor branches to merge in, via channel_metadata.
+    // The PR-task ``resolved_base_branch`` path above wins if both are set
+    // (a task is never both a PR-iteration and an orchestration child).
+    ...(!hydratedContext.resolved_base_branch
+      && task.channel_metadata?.orchestration_base_branch
+      && { base_branch: task.channel_metadata.orchestration_base_branch }),
+    ...(task.channel_metadata?.orchestration_merge_branches
+      && { merge_branches: parseMergeBranches(task.channel_metadata.orchestration_merge_branches) }),
     ...(task.task_description && { prompt: task.task_description }),
     max_turns: task.max_turns ?? blueprintConfig?.max_turns ?? DEFAULT_MAX_TURNS,
     ...(effectiveBudget !== undefined && { max_budget_usd: effectiveBudget }),
@@ -548,37 +780,42 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     ...(task.trace === true && { trace: true }),
     ...(blueprintConfig?.model_id && { model_id: blueprintConfig.model_id }),
     ...(blueprintConfig?.system_prompt_overrides && { system_prompt_overrides: blueprintConfig.system_prompt_overrides }),
+    // Per-repo build/lint verification commands. Absent → agent defaults
+    // to ``mise run build`` / ``mise run lint``. Set for non-mise repos so
+    // build-regression gating actually runs the repo's real command.
+    ...(blueprintConfig?.build_command && { build_command: blueprintConfig.build_command }),
+    ...(blueprintConfig?.lint_command && { lint_command: blueprintConfig.lint_command }),
     ...(blueprintConfig?.cedar_policies && blueprintConfig.cedar_policies.length > 0 && { cedar_policies: blueprintConfig.cedar_policies }),
-    // Cedar HITL: the agent's PreToolUse hook uses this to compute
-    // the maxLifetime ceiling on per-gate approval timeouts (§6.5).
+    // The agent's PreToolUse hook uses this to compute the maxLifetime
+    // ceiling on per-gate human-in-the-loop approval timeouts.
     // Stamped at HYDRATING → RUNNING transition time so the clock
     // only starts when the container is alive. Format is ISO 8601
     // UTC to match the rest of the TaskRecord timestamp fields.
     task_started_at: new Date().toISOString(),
-    // Cedar HITL pre-approval data (§7.3). Threaded so the agent's
+    // Human-in-the-loop pre-approval data. Threaded so the agent's
     // PolicyEngine can seed ApprovalAllowlist + set
     // task_default_timeout_s without a second DDB round-trip.
     ...(task.approval_timeout_s !== undefined && { approval_timeout_s: task.approval_timeout_s }),
     ...(task.initial_approvals && task.initial_approvals.length > 0 && { initial_approvals: task.initial_approvals }),
-    // Cedar HITL Chunk 7 (§13.6): seed the engine's per-task gate
-    // counter from the TaskTable-persisted value so a container
-    // restart mid-task resumes the cumulative gate budget instead of
-    // resetting to 0. Only forwarded when non-zero so the agent's
-    // default (0) path remains unchanged for fresh tasks; the
-    // TaskRecord is already loaded above, so no extra DDB read.
+    // Seed the engine's per-task approval-gate counter from the
+    // TaskTable-persisted value so a container restart mid-task resumes
+    // the cumulative gate budget instead of resetting to 0. Only
+    // forwarded when non-zero so the agent's default (0) path remains
+    // unchanged for fresh tasks; the TaskRecord is already loaded above,
+    // so no extra DDB read.
     ...(typeof task.approval_gate_count === 'number' && task.approval_gate_count > 0 && {
       initial_approval_gate_count: task.approval_gate_count,
     }),
-    // Cedar HITL Chunk 7b (§4 step 5, decision #13): thread the
-    // TaskRecord-persisted cap so the agent's PolicyEngine adopts the
-    // blueprint-configured value (or the platform default of 50 frozen
-    // at submit-time) instead of its compile-time fallback. Legacy task
-    // records predating Chunk 7b omit the field — the agent then falls
-    // back to its own default of 50. Extra guards past ``typeof``
-    // because a hand-edited DDB row could carry NaN, Infinity, a float,
-    // or an out-of-bounds value — all would crash PolicyEngine.__init__
-    // downstream; omitting here keeps the container starting cleanly
-    // with the engine default and leaves an operator-visible warning.
+    // Thread the TaskRecord-persisted approval-gate cap so the agent's
+    // PolicyEngine adopts the blueprint-configured value (or the platform
+    // default of 50 frozen at submit-time) instead of its compile-time
+    // fallback. Older task records that predate this field omit it — the
+    // agent then falls back to its own default of 50. Extra guards past
+    // ``typeof`` because a hand-edited DDB row could carry NaN, Infinity,
+    // a float, or an out-of-bounds value — all would crash
+    // PolicyEngine.__init__ downstream; omitting here keeps the container
+    // starting cleanly with the engine default and leaves an
+    // operator-visible warning.
     ...(isValidApprovalGateCap(task.approval_gate_cap)
       && { approval_gate_cap: task.approval_gate_cap }),
     prompt_version: promptVersion,
@@ -688,8 +925,8 @@ export async function finalizeTask(
 ): Promise<void> {
   const task = await loadTask(taskId);
   const currentStatus = task.status;
-  // Correlation envelope (#245) on this function's own log lines too, not just
-  // the events it emits — admission→terminal logs must join by {user_id, repo}.
+  // Correlation envelope on this function's own log lines too, not just the
+  // events it emits — admission→terminal logs must join by {user_id, repo}.
   const { log, correlation } = envelopeFor(task);
 
   // Lost session: RUNNING but agent heartbeats stopped (crash/OOM) — fail fast
@@ -774,7 +1011,7 @@ export async function finalizeTask(
           logger,
         );
         // Memory actorId: repo for coding tasks, user:{user_id} for repo-less
-        // workflows (#248 Phase 3, ADR-014 addendum 2026-06-08).
+        // workflows (those with no target repository).
         const actorNamespace = task.repo ?? `user:${task.user_id}`;
         const written = await writeMinimalEpisode(
           MEMORY_ID,
@@ -804,9 +1041,9 @@ export async function finalizeTask(
 
   // If still RUNNING / FINALIZING / AWAITING_APPROVAL after the poll
   // window closes, transition to TIMED_OUT. AWAITING_APPROVAL uses the
-  // same transition — the stranded-approval reconciler (Chunk 5,
-  // §13.6) is a secondary safety net with a longer timeout for tasks
-  // the orchestrator already lost track of.
+  // same transition — the stranded-approval reconciler is a secondary
+  // safety net with a longer timeout for tasks the orchestrator already
+  // lost track of.
   if (
     currentStatus === TaskStatus.RUNNING
     || currentStatus === TaskStatus.FINALIZING
@@ -866,7 +1103,7 @@ export async function finalizeTask(
  * @param userId - the user who owns the task.
  * @param releaseConcurrency - whether to decrement the concurrency counter.
  * @param repo - optional target repo (`owner/repo`) for the correlation
- *   envelope (#245); omit for repo-less workflows.
+ *   envelope; omit for repo-less workflows.
  */
 export async function failTask(
   taskId: string,
@@ -924,4 +1161,27 @@ async function decrementConcurrency(userId: string): Promise<void> {
       logger.warn('Failed to decrement concurrency counter', { user_id: userId, error: err instanceof Error ? err.message : String(err) });
     }
   }
+}
+
+/**
+ * Parse the JSON-encoded predecessor merge-branch list that the
+ * orchestration release path stashes in
+ * ``channel_metadata.orchestration_merge_branches`` (the diamond-dependency
+ * case, where a child depends on more than one predecessor). Best-effort: a
+ * malformed value yields an empty list rather than failing the orchestration —
+ * the child still branches off its base, it just won't have the predecessor
+ * code merged in (surfaced as a normal build failure if it actually needed it,
+ * never a silent crash here).
+ */
+function parseMergeBranches(raw: string): string[] {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (Array.isArray(parsed) && parsed.every((b) => typeof b === 'string')) {
+      return parsed as string[];
+    }
+  } catch {
+    // fall through
+  }
+  logger.warn('Ignoring malformed orchestration_merge_branches', { raw });
+  return [];
 }

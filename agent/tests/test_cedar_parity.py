@@ -23,7 +23,7 @@ from pathlib import Path
 # Hard import (not importorskip): the parity contract REQUIRES cedarpy.
 # A dependency regression that drops cedarpy must fail loudly, not be
 # silently skipped — skipping would let divergence reach production.
-# See silent-failure audit finding #8 (Chunk 1 review, 2026-05-07).
+# Surfaced by a silent-failure audit of this suite.
 import cedarpy
 import pytest
 
@@ -115,8 +115,8 @@ def _recover_rule_ids(policies: str, matching_policy_ids: list[str]) -> list[str
     Dropping unannotated matches would silently hide genuine cross-engine
     disagreement (e.g. one engine matching the base ``permit`` alongside a
     ``forbid``) — the whole point of this test is to fail such disagreement,
-    not bury it. See silent-failure audit finding #1 (Chunk 1 review,
-    2026-05-07). Fixture policies are expected to annotate every rule
+    not bury it (surfaced by a silent-failure audit of this suite).
+    Fixture policies are expected to annotate every rule
     including the base permit (``@rule_id("base_permit")``); a missing
     annotation raises rather than silently coerces to empty.
     """

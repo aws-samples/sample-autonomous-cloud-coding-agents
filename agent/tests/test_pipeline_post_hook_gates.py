@@ -21,6 +21,7 @@ import pytest
 
 from models import AgentResult, RepoSetup
 from pipeline import _apply_post_hook_gates
+from post_hooks import VerifyOutcome
 from workflow import Workflow, gate_status, load_workflow
 
 
@@ -324,8 +325,8 @@ class TestRunTaskHonorsGate:
             patch("pipeline.task_span", return_value=self._span()),
             patch("pipeline.task_state"),
             patch("pipeline.ensure_committed", return_value=False),
-            patch("pipeline.verify_build", return_value=build_passed),
-            patch("pipeline.verify_lint", return_value=True),
+            patch("pipeline.verify_build", return_value=VerifyOutcome(passed=build_passed)),
+            patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
             patch("pipeline.ensure_pr", mock_ensure_pr),
             patch("pipeline.get_disk_usage", return_value=0),
             patch("pipeline.print_metrics"),

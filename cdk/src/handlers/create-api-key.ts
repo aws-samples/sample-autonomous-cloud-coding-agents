@@ -17,8 +17,7 @@
  *  SOFTWARE.
  */
 
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
+import { PutCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
 import { generateApiKey, validateScopes } from './shared/api-key';
@@ -26,9 +25,10 @@ import { extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
 import type { ApiKeyRecord, ApiKeyScope, CreateApiKeyRequest, CreateApiKeyResponse } from './shared/types';
+import { makeDocClient } from './shared/ua';
 import { isValidWebhookName, parseBody } from './shared/validation';
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const ddb = makeDocClient();
 const TABLE_NAME = process.env.API_KEY_TABLE_NAME!;
 
 /** Default scope granted when the caller omits `scopes`. */

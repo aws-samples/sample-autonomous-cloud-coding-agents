@@ -31,16 +31,55 @@ class TestChannelPromptAddendum:
     def test_api_channel_returns_empty(self):
         assert _channel_prompt_addendum(_config(channel_source="api")) == ""
 
-    def test_linear_channel_includes_linear_tools(self):
+    def test_linear_addendum_is_deterministic_no_mcp(self):
+        # ADR-016: Linear is fully deterministic. The agent has no Linear tools,
+        # so the addendum must NOT reference any mcp__linear-server__* tool and
+        # must tell the agent context is pre-hydrated + status is automatic.
         addendum = _channel_prompt_addendum(
             _config(
                 channel_source="linear",
-                channel_metadata={"linear_issue_identifier": "ABC-42"},
+                channel_metadata={
+                    "linear_issue_id": "issue-uuid-1",
+                    "linear_issue_identifier": "ABC-42",
+                },
             )
         )
-        assert "Linear issue progress updates" in addendum
-        assert "mcp__linear-server__save_comment" in addendum
         assert "ABC-42" in addendum
+        assert "mcp__linear-server" not in addendum
+        # Inbound context is pre-hydrated; outbound status is platform-managed.
+        assert "already" in addendum.lower()
+        assert "Do NOT post Linear comments" in addendum
+
+    def test_linear_addendum_same_regardless_of_workflow(self):
+        # There is no longer per-workflow MCP choreography — new-task, iteration,
+        # and review all get the same deterministic "platform manages Linear"
+        # guidance, and none of them mention MCP tools.
+        base_meta = {"linear_issue_id": "issue-uuid-1", "linear_issue_identifier": "ABC-42"}
+        for wf in (None, "coding/pr-iteration-v1", "coding/pr-review-v1", "coding/new-task-v1"):
+            overrides: dict[str, Any] = {"channel_source": "linear", "channel_metadata": base_meta}
+            if wf is not None:
+                overrides["resolved_workflow"] = {"id": wf, "version": "1.0.0"}
+            addendum = _channel_prompt_addendum(_config(**overrides))
+            assert "mcp__linear-server" not in addendum
+            assert "🤖 Starting on this issue" not in addendum
+            assert "Linear context discovery" not in addendum
+
+    def test_linear_integration_node_gets_no_addendum(self):
+        # The synthetic orchestration integration node (#247) is a Linear
+        # task but has NO real sub-issue — channel_metadata omits
+        # linear_issue_id. No issue id → no addendum (the parent panel is the
+        # surface).
+        addendum = _channel_prompt_addendum(
+            _config(
+                channel_source="linear",
+                channel_metadata={
+                    "orchestration_id": "orch_abc",
+                    "orchestration_sub_issue_id": "orch_abc__integration",
+                    "parent_linear_issue_id": "parent-uuid",
+                },
+            )
+        )
+        assert addendum == ""
 
     def test_jira_channel_gets_no_addendum(self):
         # Jira comments are posted out-of-band by jira_reactions (REST shim);
@@ -63,6 +102,17 @@ class TestGetSystemPrompt:
         assert "{branch_name}" in prompt
         assert "{workflow}" not in prompt
 
+    def test_new_task_has_clarify_before_spend_branch(self):
+        # Clarify-before-spend (UX #4): the new_task workflow must tell the agent
+        # to ASK via the request_clarification tool instead of guessing on a
+        # genuinely vague request, and to not build unrequested scope.
+        prompt = get_system_prompt("coding/new-task-v1")
+        assert "request_clarification" in prompt  # the deterministic tool signal
+        assert "{needs_input_marker}" in prompt  # marker fallback, substituted at build time
+        assert "clarifying question" in prompt or "clarification" in prompt
+        # Scope discipline (the typo->button case).
+        assert "weren't requested" in prompt or "not requested" in prompt
+
     def test_pr_iteration_returns_prompt_with_update_pr(self):
         prompt = get_system_prompt("coding/pr-iteration-v1")
         assert "Post a summary comment on the PR" in prompt
@@ -74,6 +124,16 @@ class TestGetSystemPrompt:
         assert "{branch_name}" in prompt
         assert "{workflow}" not in prompt
 
+    def test_pr_iteration_distinguishes_question_from_change(self):
+        # A question-only comment ("where is the login page?") must be
+        # answered without forcing a code change, or the platform reports a
+        # false "✅ Updated". The prompt must carry the triage.
+        prompt = get_system_prompt("coding/pr-iteration-v1")
+        assert "QUESTION" in prompt
+        assert "CHANGE REQUEST" in prompt
+        # It must explicitly forbid inventing a commit to justify "doing something".
+        assert "empty or cosmetic commit" in prompt or "Do NOT invent a code change" in prompt
+
     def test_pr_review_returns_prompt_with_review_workflow(self):
         prompt = get_system_prompt("coding/pr-review-v1")
         assert "READ-ONLY" in prompt
@@ -84,8 +144,27 @@ class TestGetSystemPrompt:
         assert "Write and Edit are not available" in prompt
         assert "{workflow}" not in prompt
 
+    def test_restack_returns_prompt_with_remerge_workflow(self):
+        prompt = get_system_prompt("coding/restack-v1")
+        assert "RE-STACKING" in prompt
+        assert "predecessor" in prompt
+        assert (
+            "do NOT add features" in prompt
+            or "NOT new feature work" in prompt
+            or "not new feature" in prompt.lower()
+        )
+        assert "{branch_name}" in prompt  # pushes to the SAME existing branch
+        assert "{pr_number}" in prompt
+        assert "{repo_url}" in prompt
+        assert "{workflow}" not in prompt
+
     def test_all_workflows_contain_shared_base_sections(self):
-        for workflow_id in ("coding/new-task-v1", "coding/pr-iteration-v1", "coding/pr-review-v1"):
+        for workflow_id in (
+            "coding/new-task-v1",
+            "coding/pr-iteration-v1",
+            "coding/pr-review-v1",
+            "coding/restack-v1",
+        ):
             prompt = get_system_prompt(workflow_id)
             assert "## Environment" in prompt, f"Missing Environment in {workflow_id}"
             has_rules = "## Rules" in prompt or "## Rules override" in prompt

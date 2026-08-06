@@ -145,8 +145,13 @@ def resolve_credentials() -> dict[str, str]:
         return _ambient_credentials()
 
     try:
-        import boto3
+        # boto3 is imported here (not just via platform_client, which imports it
+        # lazily at call time) so a missing SDK still fails open to ambient creds
+        # — instead of raising an uncaught ImportError. (#319)
+        import boto3  # noqa: F401  -- availability probe for the fail-open below
         from botocore.exceptions import BotoCoreError, ClientError
+
+        from aws_session import platform_client
     except ImportError as exc:
         # boto3 missing/broken in the image is a packaging defect, not the
         # expected assume-role failure — name it explicitly so it can't hide.
@@ -157,7 +162,7 @@ def resolve_credentials() -> dict[str, str]:
     task_id = next((t["Value"] for t in tags if t.get("Key") == "task_id"), "")
     session_name = f"abca-bedrock-{task_id}"[:64] or "abca-bedrock"
     try:
-        resp = boto3.client("sts", region_name=region).assume_role(
+        resp = platform_client("sts", region_name=region).assume_role(
             RoleArn=role_arn,
             RoleSessionName=session_name,
             DurationSeconds=_CHAINED_SESSION_DURATION_S,

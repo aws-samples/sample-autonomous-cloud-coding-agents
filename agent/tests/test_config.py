@@ -508,7 +508,7 @@ class TestResolveLinearApiTokenRefreshPaths:
         monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
 
     def test_corrupted_secret_json_returns_empty_with_error_log(self, monkeypatch):
-        """B3: corrupted SM payload → empty string return, no traceback."""
+        """A corrupted SM payload → empty string return, no traceback."""
         monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
         monkeypatch.setenv("AWS_REGION", "us-east-1")
 
@@ -634,6 +634,56 @@ class TestResolveJiraOauthToken:
 
         assert _os.environ.get("JIRA_API_TOKEN") == "jira_oauth_fresh"
         # Reset for other tests.
+        monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
+
+    def test_obtains_secretsmanager_client_via_platform_client(self, monkeypatch):
+        """The Secrets Manager client is built through aws_session.platform_client
+        (carrying the md/ solution User-Agent), not a naked boto3.client. (#319)"""
+        from datetime import datetime, timedelta
+
+        monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        future = (datetime.now(UTC) + timedelta(hours=12)).isoformat().replace("+00:00", "Z")
+        mock_sm = MagicMock()
+        mock_sm.get_secret_value.return_value = {
+            "SecretString": __import__("json").dumps(
+                {
+                    "access_token": "jira_via_platform_client",
+                    "refresh_token": "rt",
+                    "expires_at": future,
+                    "scope": "read:jira-work",
+                    "client_id": "c",
+                    "client_secret": "s",
+                    "cloud_id": "cloud-uuid",
+                    "site_url": "https://acme.atlassian.net",
+                    "installed_at": "x",
+                    "updated_at": "x",
+                    "installed_by_platform_user_id": "u",
+                }
+            ),
+        }
+        with patch("aws_session.platform_client", return_value=mock_sm) as pc:
+            resolved = resolve_jira_oauth_token({"jira_oauth_secret_arn": "arn:test"})
+            assert resolved == "jira_via_platform_client"
+            pc.assert_called_with("secretsmanager", region_name="us-east-1")
+        monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
+
+    def test_graceful_skip_when_boto3_imports_unavailable(self, monkeypatch):
+        """If the in-function boto3/platform_client import fails, the resolver
+        degrades to '' rather than raising — the graceful-skip guard is preserved."""
+        import builtins
+
+        monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        real_import = builtins.__import__
+
+        def fake_import(name, *args, **kwargs):
+            if name == "boto3" or name == "aws_session":
+                raise ImportError(f"simulated missing {name}")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", fake_import)
+        assert resolve_jira_oauth_token({"jira_oauth_secret_arn": "arn:test"}) == ""
         monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
 
     def test_resolves_forge_app_actor_even_when_oauth_token_is_expiring(self, monkeypatch):

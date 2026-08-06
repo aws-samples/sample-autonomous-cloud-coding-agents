@@ -17,8 +17,9 @@
  *  SOFTWARE.
  */
 
-import { App, Aspects, Tags } from 'aws-cdk-lib';
+import { App, AspectPriority, Aspects, Tags } from 'aws-cdk-lib';
 import { AwsSolutionsChecks } from 'cdk-nag';
+import { buildAppId, SolutionUaAspect } from './constructs/solution-ua-aspect';
 import { AgentStack } from './stacks/agent';
 
 // for development, use account/region from cdk cli
@@ -42,6 +43,17 @@ const stack = new AgentStack(
   },
 );
 
+// Outbound SDK solution attribution (#319): set AWS_SDK_UA_APP_ID on every
+// Lambda so the SDK emits `app/uksb-wt64nei4u6#{stackName}` natively. One
+// Aspect covers current and future functions structurally. Override via
+// `-c sdkUaAppId=...`; `-c sdkUaAppId=''` opts out (no app/ segment anywhere).
+const sdkUaAppIdOverride = app.node.tryGetContext('sdkUaAppId') as string | undefined;
+// MUTATING priority so the env var is set before cdk-nag (priority 500)
+// inspects the synthesized functions — matches the agent stack's aspects.
+Aspects.of(stack).add(new SolutionUaAspect(buildAppId(stackName, sdkUaAppIdOverride)), {
+  priority: AspectPriority.MUTATING,
+});
+
 const computeType = app.node.tryGetContext('compute_type') ?? 'agentcore';
 
 // Route53 Resolver resources where tag changes trigger replacement cascades.
@@ -53,6 +65,15 @@ const excludeResourceTypes = [
   'AWS::Route53Resolver::ResolverQueryLoggingConfigAssociation',
 ];
 
+// TODO(#645): with three backends this single-valued tag is no longer an honest
+// statement of what a stack runs — a `--context compute_type=lambda-microvm`
+// deploy still provisions the AgentCore runtime, so every resource gets tagged
+// `compute_type=lambda-microvm` including the AgentCore ones. ADR-021
+// sub-decision 4 flags revisiting the semantics (e.g. a `compute_types` list).
+// Deliberately NOT changed here: retagging every resource in the stack is a
+// replacement-risk change of its own, and MicroVM spend is already attributable
+// through the per-resource `abca:compute-backend` tags the
+// LambdaMicrovmCompute construct applies.
 Tags.of(stack).add('compute_type', computeType, { excludeResourceTypes });
 
 const githubTagKeys = [

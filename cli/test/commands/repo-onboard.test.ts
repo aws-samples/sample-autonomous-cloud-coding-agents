@@ -65,6 +65,73 @@ describe('repo onboard/offboard', () => {
     expect(put.input.Item?.compute_type).toBe('agentcore');
   });
 
+  test('onboardRepo probes when an existing repo is switched to lambda-microvm', async () => {
+    const { loadRepoConfig } = jest.requireMock('../../src/repo-lookup') as {
+      loadRepoConfig: jest.Mock;
+    };
+    loadRepoConfig.mockResolvedValueOnce({
+      repo: 'acme/a',
+      status: 'active',
+      compute_type: 'agentcore',
+    });
+    const microvmSend = jest.fn().mockResolvedValue({ images: [] });
+
+    await onboardRepo(
+      'us-east-1',
+      'RepoTable',
+      'acme/a',
+      { computeType: 'lambda-microvm' },
+      { lambdaMicrovmClientFactory: () => ({ send: microvmSend }) },
+    );
+
+    expect(microvmSend).toHaveBeenCalledTimes(1);
+    const put = ddbSend.mock.calls[0][0] as PutCommand;
+    expect(put.input.Item?.compute_type).toBe('lambda-microvm');
+  });
+
+  test('onboardRepo probes when reactivating an existing lambda-microvm repo without a flag', async () => {
+    const { loadRepoConfig } = jest.requireMock('../../src/repo-lookup') as {
+      loadRepoConfig: jest.Mock;
+    };
+    loadRepoConfig.mockResolvedValueOnce({
+      repo: 'acme/a',
+      status: 'removed',
+      compute_type: 'lambda-microvm',
+    });
+    const microvmSend = jest.fn().mockResolvedValue({ images: [] });
+
+    await onboardRepo(
+      'us-east-1',
+      'RepoTable',
+      'acme/a',
+      {},
+      { lambdaMicrovmClientFactory: () => ({ send: microvmSend }) },
+    );
+
+    expect(microvmSend).toHaveBeenCalledTimes(1);
+    const put = ddbSend.mock.calls[0][0] as PutCommand;
+    expect(put.input.Item?.compute_type).toBe('lambda-microvm');
+  });
+
+  test('onboardRepo rejects lambda-microvm when its availability probe fails', async () => {
+    const microvmSend = jest.fn().mockRejectedValue(
+      Object.assign(new Error('unknown service'), { name: 'UnrecognizedClientException' }),
+    );
+
+    await expect(onboardRepo(
+      'eu-central-1',
+      'RepoTable',
+      'acme/a',
+      { computeType: 'lambda-microvm' },
+      { lambdaMicrovmClientFactory: () => ({ send: microvmSend }) },
+    )).rejects.toThrow(
+      'Launch regions: us-east-1, us-east-2, us-west-2, eu-west-1, ap-northeast-1. '
+      + 'Use --compute-type agentcore or --compute-type ecs',
+    );
+
+    expect(ddbSend).not.toHaveBeenCalled();
+  });
+
   test('offboardRepo sets removed status and TTL', async () => {
     await offboardRepo('us-east-1', 'RepoTable', 'acme/a');
 

@@ -8,7 +8,7 @@
   "scripts": {
     "compile": "tsc --build tsconfig.json",
     "watch": "tsc --build -w tsconfig.json",
-    "test": "jest",
+    "test": "jest --maxWorkers=${JEST_MAX_WORKERS:-25%}",
     "eslint": "eslint --fix src test",
     "synth": "npx cdk synth",
     "synth:quiet": "npx cdk synth -q"
@@ -21,6 +21,7 @@
     "@aws-sdk/client-dynamodb": "^3.1078.0",
     "@aws-sdk/client-ecs": "^3.1078.0",
     "@aws-sdk/client-lambda": "^3.1078.0",
+    "@aws-sdk/client-lambda-microvms": "^3.1098.0",
     "@aws-sdk/client-s3": "^3.1078.0",
     "@aws-sdk/client-secrets-manager": "^3.1078.0",
     "@aws-sdk/credential-provider-node": "^3.972.61",
@@ -36,7 +37,7 @@
     "cdk-nag": "^2.38.2",
     "constructs": "^10.6.0",
     "js-yaml": "^4.1.1",
-    "pdf-parse": "^2.4.5",
+    "pdf-parse": "2.4.5",
     "ulid": "^3.0.2",
     "ws": "^8.21.0"
   },
@@ -49,7 +50,6 @@
     "@types/jest": "^30.0.0",
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^26",
-    "@types/pdf-parse": "^1.1.5",
     "@types/ws": "^8.18.1",
     "@typescript-eslint/eslint-plugin": "^8",
     "@typescript-eslint/parser": "^8",
@@ -78,6 +78,8 @@
       "<rootDir>/@(src|test)/**/*(*.)@(spec|test).ts?(x)",
       "<rootDir>/@(src|test)/**/__tests__/**/*.ts?(x)"
     ],
+    "maxWorkers": "25%",
+    "workerIdleMemoryLimit": "1536MB",
     "clearMocks": true,
     "collectCoverage": true,
     "coverageReporters": [

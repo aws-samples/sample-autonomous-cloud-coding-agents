@@ -1,13 +1,13 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 
-"""Tests for the K2 Stage 4 --trace upload path (design §10.1).
+"""Tests for the --trace upload path (design §10.1).
 
 Covers:
   * ``_TrajectoryWriter`` accumulator behavior (enabled/disabled,
     bounded, JSONL header shape)
   * ``upload_trace_to_s3`` fail-open semantics and contract enforcement
-    from the K2 Stage 3 review (empty user_id -> skip + warn, never
+    (empty user_id -> skip + warn, never
     write ``traces//`` keys)
 """
 
@@ -404,7 +404,7 @@ class TestAccumulatorFlagsAreIndependent:
 
 
 class TestAccumulatorWhenCloudWatchDisabled:
-    """K2 review Finding #9: accumulator must capture events even when
+    """The accumulator must capture events even when
     the CloudWatch path is disabled (no log group env, or circuit
     breaker open). The S3 artifact is independent of CW health by
     design."""
@@ -423,7 +423,7 @@ class TestAccumulatorWhenCloudWatchDisabled:
 
 
 class TestTruncationCallback:
-    """K2 review Finding #3: accumulator cap trips fire a one-shot
+    """Accumulator cap trips fire a one-shot
     callback so the pipeline can surface ``trace_truncated`` in
     ``bgagent watch``."""
 

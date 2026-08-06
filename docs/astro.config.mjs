@@ -103,6 +103,8 @@ export default defineConfig({
             { slug: 'architecture/input-gateway' },
             { slug: 'architecture/observability' },
             { slug: 'architecture/cost-model' },
+            { slug: 'architecture/bedrock-cost-attribution' },
+            { slug: 'architecture/ci-build-performance' },
             { slug: 'architecture/evaluation' },
             { slug: 'architecture/attachments' },
             { slug: 'architecture/repo-onboarding' },
