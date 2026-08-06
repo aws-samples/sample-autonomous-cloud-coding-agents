@@ -72,6 +72,48 @@ describe('Bootstrap policy synth coverage', () => {
     expect(missingByType).toEqual({});
   });
 
+  it('maps every CFN type the ECS substrate adds (--context compute_type=ecs)', () => {
+    // The ECS gate is the ONLY path that synthesizes AWS::ECS::*, so the default
+    // synth above cannot see it — compute-ecs.ts granted 14 `ecs:*` actions that
+    // nothing verified. Synthesized IN-PROCESS with the gate on, deliberately
+    // NOT shelled out to `npx cdk synth`: a child process needs a try/catch, and
+    // swallowing a nonzero exit is what made the original version of this check
+    // pass while asserting nothing (#124 review B2).
+    const ecsApp = new App({ context: { compute_type: 'ecs' } });
+    new AgentStack(ecsApp, 'backgroundagent-dev', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    });
+    const ecsTemplate = Template.fromStack(
+      ecsApp.node.tryFindChild('backgroundagent-dev') as Stack,
+    );
+    const resources = ecsTemplate.toJSON().Resources as Record<string, { Type: string }>;
+    const typesInTemplate = new Set(Object.values(resources).map((r) => r.Type));
+
+    // Fail loudly if the gate silently stops provisioning ECS: without this the
+    // rest of the check would pass vacuously the moment the substrate regressed.
+    expect([...typesInTemplate]).toContain('AWS::ECS::Cluster');
+    expect([...typesInTemplate]).toContain('AWS::ECS::TaskDefinition');
+
+    const unmapped: string[] = [];
+    const missingByType: Record<string, string[]> = {};
+    for (const cfnType of typesInTemplate) {
+      if (CFN_TYPES_WITHOUT_EXEC_ROLE_IAM.has(cfnType)) {
+        continue;
+      }
+      if (!(cfnType in RESOURCE_ACTION_MAP)) {
+        unmapped.push(cfnType);
+        continue;
+      }
+      const missing = findMissingBootstrapActions(cfnType, allowedActions);
+      if (missing.length > 0) {
+        missingByType[cfnType] = missing;
+      }
+    }
+
+    expect(unmapped).toEqual([]);
+    expect(missingByType).toEqual({});
+  });
+
   it('covers integration resources that previously failed deploy (regression)', () => {
     const regressionTypes = [
       'AWS::SecretsManager::Secret',

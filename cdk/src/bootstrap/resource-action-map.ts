@@ -19,7 +19,7 @@
 
 import { aws_iam as iam } from 'aws-cdk-lib';
 
-import { allPolicies } from './policies';
+import { allPolicies, policiesForComputeType } from './policies';
 
 /**
  * CloudFormation resource types that do not require IAM actions on the
@@ -74,6 +74,11 @@ export const RESOURCE_ACTION_MAP: Record<string, readonly string[]> = {
   'AWS::EC2::Subnet': ['ec2:CreateSubnet'],
   'AWS::EC2::VPC': ['ec2:CreateVpc'],
   'AWS::EC2::VPCEndpoint': ['ec2:CreateVpcEndpoint'],
+  // Only synthesized under `--context compute_type=ecs` (EcsAgentCluster).
+  // Their absence is what let compute-ecs.ts grant 14 unverified `ecs:*`
+  // actions — see the ecs synth-coverage test, which now fails loudly (#124).
+  'AWS::ECS::Cluster': ['ecs:CreateCluster', 'ecs:TagResource'],
+  'AWS::ECS::TaskDefinition': ['ecs:RegisterTaskDefinition', 'ecs:TagResource'],
   'AWS::Events::Rule': ['events:PutRule'],
   'AWS::IAM::Policy': ['iam:CreatePolicy', 'iam:PutRolePolicy'],
   'AWS::IAM::Role': ['iam:CreateRole'],
@@ -117,10 +122,20 @@ export function actionIsAllowed(requiredAction: string, allowedAction: string): 
 
 /**
  * Collects all Allow actions declared across bootstrap managed policies.
+ *
+ * Pass ``computeType`` to scope the set to the policies an operator on that
+ * substrate actually deploys (RFC #120's `deployed ⊇ required` model). Omitting
+ * it keeps the historical UNION behaviour, which is right for "is this action
+ * grantable by SOME configuration?" but too permissive for validating a
+ * specific deploy: an agentcore-only operator never installs `compute-ecs`, so
+ * the union silently accepts `ecs:*` their real IaCRole cannot perform.
  */
-export function collectBootstrapAllowActions(): Set<string> {
+export function collectBootstrapAllowActions(computeType?: string): Set<string> {
   const actions = new Set<string>();
-  for (const policy of allPolicies()) {
+  const policies = computeType === undefined
+    ? allPolicies()
+    : policiesForComputeType(computeType);
+  for (const policy of policies) {
     const json = policy.toJSON();
     for (const stmt of json.Statement ?? []) {
       if (stmt.Effect !== 'Allow') {

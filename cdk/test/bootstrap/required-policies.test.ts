@@ -17,7 +17,9 @@
  *  SOFTWARE.
  */
 
+import { policiesForComputeType } from '../../src/bootstrap/policies';
 import { getRequiredBootstrapPolicies } from '../../src/bootstrap/required-policies';
+import { collectBootstrapAllowActions } from '../../src/bootstrap/resource-action-map';
 
 describe('getRequiredBootstrapPolicies', () => {
   it('returns core policies plus compute-agentcore for agentcore type', () => {
@@ -45,5 +47,50 @@ describe('getRequiredBootstrapPolicies', () => {
     expect(result).toEqual(['infrastructure', 'application', 'observability']);
     expect(result).not.toContain('compute-ecs');
     expect(result).not.toContain('compute-agentcore');
+  });
+
+  it('every selected name resolves to a real policy document', () => {
+    // Guards the drift this indirection exists to prevent: a name here with no
+    // document in policies/index.ts would silently under-scope validation.
+    for (const computeType of ['agentcore', 'ecs']) {
+      expect(() => policiesForComputeType(computeType)).not.toThrow();
+      expect(policiesForComputeType(computeType)).toHaveLength(
+        getRequiredBootstrapPolicies(computeType).length,
+      );
+    }
+  });
+});
+
+describe('collectBootstrapAllowActions scoping (RFC #120 `deployed ⊇ required`)', () => {
+  it('excludes ecs:* for an agentcore-only operator', () => {
+    // The defect this closes: validating against the UNION accepts actions the
+    // operator's real IaCRole cannot perform, because they never deployed
+    // compute-ecs. That is the over-permissive direction the map exists to catch.
+    const agentcore = collectBootstrapAllowActions('agentcore');
+    expect([...agentcore].filter((a) => a.startsWith('ecs:'))).toEqual([]);
+  });
+
+  it('includes ecs:* only under the ecs substrate, and drops agentcore-only grants', () => {
+    const ecs = collectBootstrapAllowActions('ecs');
+    expect([...ecs].filter((a) => a.startsWith('ecs:')).length).toBeGreaterThan(0);
+    expect([...ecs].filter((a) => a.startsWith('bedrock-agentcore:'))).toEqual([]);
+  });
+
+  it('each scoped set is a strict subset of the union', () => {
+    const union = collectBootstrapAllowActions();
+    for (const computeType of ['agentcore', 'ecs']) {
+      const scoped = collectBootstrapAllowActions(computeType);
+      for (const action of scoped) {
+        expect(union).toContain(action);
+      }
+      expect(scoped.size).toBeLessThan(union.size);
+    }
+  });
+
+  it('omitting the compute type preserves the historical union', () => {
+    const union = collectBootstrapAllowActions();
+    expect([...union].filter((a) => a.startsWith('ecs:')).length).toBeGreaterThan(0);
+    expect([...union].filter((a) => a.startsWith('bedrock-agentcore:')).length)
+      .toBeGreaterThan(0);
   });
 });
