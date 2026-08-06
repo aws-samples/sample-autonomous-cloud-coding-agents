@@ -1,4 +1,4 @@
-"""Registry of ``deliver_artifact`` deliverers (#248, ADR-014 addendum 2026-06-08).
+"""Registry of ``deliver_artifact`` deliverers (see ADR-014).
 
 A workflow's ``deliver_artifact`` step names a *deliverer* in its ``target``
 field; that name resolves here. This mirrors the step-handler registry pattern
@@ -7,15 +7,15 @@ deliverer, **not** a schema change — ``target`` is an open string, and the
 closed set of valid names lives in ``DELIVERERS`` rather than a JSON-Schema enum.
 
 Each deliverer declares the terminal outcomes it ``produces`` so the cross-field
-validator (rule 11) can check a workflow's declared ``terminal_outcomes.primary``
-is actually produced by some step — the single source of truth for the old
-``_DELIVER_TARGET_OUTCOMES`` map, now registry-driven.
+validator can check a workflow's declared ``terminal_outcomes.primary`` is
+actually produced by some step. This registry is the single source of truth for
+that mapping.
 
-The shared *plumbing* contract every deliverer builds on is frozen in the
-ADR-014 addendum: artifacts upload to a task-scoped key ``artifacts/{task_id}/``
-in the platform artifacts bucket (``ARTIFACTS_BUCKET_NAME``), the agent
-SessionRole carries a prefix-scoped IAM grant, a per-artifact size limit
-applies, and the delivered URL surfaces on ``TaskDetail`` (``artifact_uri``).
+The shared *plumbing* contract every deliverer builds on: artifacts upload to a
+task-scoped key ``artifacts/{task_id}/`` in the platform artifacts bucket
+(``ARTIFACTS_BUCKET_NAME``), the agent SessionRole carries a prefix-scoped IAM
+grant, a per-artifact size limit applies, and the delivered URL surfaces on
+``TaskDetail`` (``artifact_uri``).
 """
 
 from __future__ import annotations
@@ -85,13 +85,13 @@ def _strip_code_and_urls(text: str) -> str:
 def _reject_if_deferral(text: str) -> None:
     """Fail the deliver step if the final message defers instead of delivering.
 
-    Guards the exact silently-wrong-artifact failure observed on a repo-less
-    research task: the agent launched a background workflow and its final text
-    promised results elsewhere, which would have uploaded as the artifact.
-    Raising here routes to a terminal FAILED (see the pipeline delivery gate) so
-    the placeholder is never presented as the result. Matches full deferral
-    phrases against prose with code/URLs stripped, to avoid false-FAILing a
-    genuine answer that merely quotes such a phrase in a link or snippet.
+    Guards against a silently-wrong artifact: on a repo-less research task the
+    agent can launch a background workflow and end with text that promises
+    results elsewhere, which would then be uploaded as the artifact. Raising here
+    routes to a terminal FAILED (see the pipeline delivery gate) so the
+    placeholder is never presented as the result. Matches full deferral phrases
+    against prose with code/URLs stripped, to avoid false-FAILing a genuine
+    answer that merely quotes such a phrase in a link or snippet.
     """
     lowered = _strip_code_and_urls(text).lower()
     hit = next((m for m in _DEFERRAL_MARKERS if m in lowered), None)
@@ -117,18 +117,18 @@ class Deliverer:
 
     ``produces`` is the set of ``terminal_outcomes`` values this deliverer can
     satisfy (e.g. an S3 upload produces ``artifact``; a comment post produces
-    ``comment``). Used by validator rule 11 and by the runtime ``deliver``
-    dispatcher.
+    ``comment``). Used by the terminal-outcome validator and by the runtime
+    ``deliver`` dispatcher.
     """
 
     name: str
     produces: frozenset[str] = field(default_factory=frozenset)
 
 
-# First-party deliverers. The three names preserve the exact produced-outcome
-# sets of the pre-addendum ``_DELIVER_TARGET_OUTCOMES`` enum, so no existing
-# workflow / fixture / golden vector changes behavior — the closed enum is
-# widened to an open string + this registry, not redefined.
+# First-party deliverers. These three names and their produced-outcome sets match
+# the earlier hardcoded target→outcomes mapping this registry replaced, so no
+# existing workflow / fixture / golden vector changes behavior — the closed set
+# is widened to an open string + this registry, not redefined.
 DELIVERERS: dict[str, Deliverer] = {
     "s3": Deliverer("s3", frozenset({"artifact"})),
     "comment": Deliverer("comment", frozenset({"comment"})),
@@ -138,13 +138,12 @@ DELIVERERS: dict[str, Deliverer] = {
 # The target a ``deliver_artifact`` step uses when it omits ``target``. This is
 # the SINGLE source of truth for that default — both the runtime (runner.py's
 # ``_handle_deliver_artifact``) and the validator (``produced_outcomes(None)``)
-# key off it, so the two can never disagree about what an unset target delivers
-# (PR review #296 finding #7).
+# key off it, so the two can never disagree about what an unset target delivers.
 DEFAULT_DELIVER_TARGET = "s3"
 
 
 def _artifact_body(ctx: StepContext) -> bytes:
-    """The deliverable bytes: the agent's final result text (#248 Phase 3)."""
+    """The deliverable bytes: the agent's final result text."""
     text = ctx.agent_result.result_text if ctx.agent_result else ""
     if not text:
         raise ValueError("deliver_artifact: agent produced no result text to deliver")
@@ -154,10 +153,9 @@ def _artifact_body(ctx: StepContext) -> bytes:
     # Bound memory BEFORE encoding. UTF-8 uses ≥1 byte per character, so a string
     # whose character count already exceeds the byte cap cannot possibly fit —
     # reject it without materializing a second full copy as bytes. This is what
-    # makes the cap actually cap memory on the constrained MicroVM: previously the
-    # bytes were encoded first and the check ran after, so a multi-hundred-MB
-    # result had both the str and its bytes resident before the cap fired
-    # (PR review #296 finding #9).
+    # makes the cap actually cap memory in the agent's memory-constrained sandbox:
+    # encoding first and checking after would leave a multi-hundred-MB result with
+    # both the str and its bytes resident before the cap fired.
     if len(text) > MAX_ARTIFACT_BYTES:
         raise ValueError(
             f"deliver_artifact: artifact text is {len(text)} characters, exceeds the "
@@ -204,10 +202,11 @@ def _upload_to_s3(ctx: StepContext) -> str:
 def _post_comment(ctx: StepContext) -> bool:
     """Record the deliverable as a ``delivered_comment`` progress milestone.
 
-    The agent has no direct comment channel for a repo-less task (no GitHub repo;
-    Linear MCP is channel-gated). This records the result text as a
-    ``delivered_comment`` milestone on TaskEventsTable — visible in the live event
-    stream (``bgagent watch``) and to any consumer of the task's events.
+    The agent has no direct comment channel for a repo-less task (there is no
+    GitHub repo, and the agent posts nothing to the issue tracker directly). This
+    records the result text as a ``delivered_comment`` milestone on
+    TaskEventsTable — visible in the live event stream (``bgagent watch``) and to
+    any consumer of the task's events.
 
     NOTE: rendering this milestone to an external channel (Slack/email/GitHub) is
     NOT yet wired — ``delivered_comment`` is not in the fan-out's
@@ -225,8 +224,9 @@ def _post_comment(ctx: StepContext) -> bool:
 def deliver(target: str, ctx: StepContext) -> DeliveryResult:
     """Run the named deliverer against the step context.
 
-    Raises ``ValueError`` for an unknown target (the validator's rule-8 should
-    prevent this reaching runtime, but fail loud rather than silently no-op).
+    Raises ``ValueError`` for an unknown target (the validator's handler-coverage
+    check should prevent this reaching runtime, but fail loud rather than
+    silently no-op).
     """
     if target not in DELIVERERS:
         raise ValueError(
@@ -242,7 +242,7 @@ def deliver(target: str, ctx: StepContext) -> DeliveryResult:
 
 
 # Terminal outcomes that any deliver_artifact deliverer can produce (union over
-# the registry) — the set rule 11 treats as "deliver_artifact-backed".
+# the registry) — the set the validator treats as "deliver_artifact-backed".
 DELIVER_OUTCOMES: frozenset[str] = frozenset().union(*(d.produces for d in DELIVERERS.values()))
 
 
@@ -250,12 +250,11 @@ def produced_outcomes(target: str | None) -> frozenset[str]:
     """Terminal outcomes a deliver_artifact ``target`` produces.
 
     An unset target resolves to {@link DEFAULT_DELIVER_TARGET} — the SAME default
-    the runtime applies — so the validator models exactly what will run. (It was
-    previously lenient, returning the full set, which let a ``primary: comment``
+    the runtime applies — so the validator models exactly what will run. (Being
+    lenient here and returning the full set would let a ``primary: comment``
     workflow with no ``target`` pass validation while the runtime silently
-    delivered only to ``s3`` and never posted the comment — PR review #296
-    finding #7.) An unknown name returns the empty set (it produces nothing the
-    validator can vouch for).
+    delivered only to ``s3`` and never posted the comment.) An unknown name
+    returns the empty set (it produces nothing the validator can vouch for).
     """
     resolved = DEFAULT_DELIVER_TARGET if target is None else target
     deliverer = DELIVERERS.get(resolved)

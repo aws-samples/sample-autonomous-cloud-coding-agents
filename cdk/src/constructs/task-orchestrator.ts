@@ -157,7 +157,32 @@ export interface TaskOrchestratorProps {
     readonly containerName: string;
     readonly taskRoleArn: string;
     readonly executionRoleArn: string;
+    /**
+     * The smaller read-only PLANNING task def (see
+     * docs/design/ECS_RIGHTSIZED_PLANNING.md). The ECS strategy selects it for
+     * read-only workflows so planning doesn't run on the larger build box.
+     *
+     * Required, like its siblings, so the all-or-nothing constraint stays visible
+     * at the type level: the strategy reads this ARN from an env var, and an
+     * ecsConfig that omitted it would compile but leave the planning def defined
+     * and permanently unreachable.
+     *
+     * Needs no extra IAM — it shares the build def's task and execution roles,
+     * and the `ecs:RunTask` grant below is scoped by `ecs:cluster` rather than by
+     * task-definition ARN, so it already covers every def in the cluster.
+     */
+    readonly planningTaskDefinitionArn: string;
   };
+
+  /**
+   * S3 bucket for per-task ECS payloads. When provided (alongside
+   * ``ecsConfig``), the orchestrator writes the payload here and passes only an
+   * ``AGENT_PAYLOAD_S3_URI`` pointer in the RunTask override (the full payload
+   * exceeds the 8 KB containerOverrides limit), then deletes the object in the
+   * finalize step. The orchestrator gets write + delete; the ECS task role gets
+   * read-only (granted on the bucket by ``EcsAgentCluster``).
+   */
+  readonly ecsPayloadBucket?: s3.IBucket;
 
   /**
    * S3 bucket for task attachments. When provided, the orchestrator gets
@@ -220,6 +245,7 @@ export class TaskOrchestrator extends Construct {
         '@aws-sdk/client-ecs',
         '@aws-sdk/client-lambda',
         '@aws-sdk/client-bedrock-runtime',
+        '@aws-sdk/client-s3',
         '@aws-sdk/client-secrets-manager',
         '@aws-sdk/lib-dynamodb',
         '@aws-sdk/util-dynamodb',
@@ -241,6 +267,8 @@ export class TaskOrchestrator extends Construct {
         retentionPeriod: Duration.days(DURABLE_RETENTION_DAYS),
       },
       environment: {
+        // Solution-attribution component label (#319): orchestration plane.
+        ABCA_COMPONENT: 'orchestr',
         TASK_TABLE_NAME: props.taskTable.tableName,
         TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
         USER_CONCURRENCY_TABLE_NAME: props.userConcurrencyTable.tableName,
@@ -261,7 +289,15 @@ export class TaskOrchestrator extends Construct {
           ECS_SUBNETS: props.ecsConfig.subnets,
           ECS_SECURITY_GROUP: props.ecsConfig.securityGroup,
           ECS_CONTAINER_NAME: props.ecsConfig.containerName,
+          // Read-only workflows route here instead of the build def. Without this
+          // var the strategy's `readOnly && ECS_PLANNING_TASK_DEFINITION_ARN`
+          // guard is always falsy, so the planning def would be synthesized and
+          // never used.
+          ECS_PLANNING_TASK_DEFINITION_ARN: props.ecsConfig.planningTaskDefinitionArn,
         }),
+        // Bucket the orchestrator writes the ECS payload to (and deletes
+        // from at finalize); the ECS strategy reads this to build the S3 URI.
+        ...(props.ecsPayloadBucket && { ECS_PAYLOAD_BUCKET: props.ecsPayloadBucket.bucketName }),
         ...(props.attachmentsBucket && { ATTACHMENTS_BUCKET_NAME: props.attachmentsBucket.bucketName }),
       },
       bundling: orchestratorBundling,
@@ -278,6 +314,15 @@ export class TaskOrchestrator extends Construct {
     // Attachments bucket grants (URL fetch/screen/upload during hydration)
     if (props.attachmentsBucket) {
       props.attachmentsBucket.grantReadWrite(this.fn);
+    }
+
+    // ECS payload bucket — the orchestrator writes the payload before
+    // RunTask and deletes it at finalize. Write + delete only (it never reads
+    // its own payload back; the ECS container is the reader, with its own
+    // read-only grant from EcsAgentCluster).
+    if (props.ecsPayloadBucket) {
+      props.ecsPayloadBucket.grantPut(this.fn);
+      props.ecsPayloadBucket.grantDelete(this.fn);
     }
 
     // Durable execution managed policy

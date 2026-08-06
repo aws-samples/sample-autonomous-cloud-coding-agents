@@ -20,6 +20,23 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import type { BedrockRuntimeClient } from '@aws-sdk/client-bedrock-runtime';
+
+// pdf-parse v2 exposes a `PDFParse` CLASS (`new PDFParse({data}).getText()`), not
+// the v1 callable default. Mock it at that shape so the PDF-screening tests drive
+// the real v2 contract (see the PDF-extraction regression tests below). pdfjs runs
+// headless in the nodejs24.x Lambda, but ts-jest's CJS transform can't spin its
+// ESM worker under jest — so unit-mock the class and prove the wiring here; the
+// real extraction is validated on the live deploy.
+const pdfGetTextMock = jest.fn();
+const pdfDestroyMock = jest.fn().mockResolvedValue(undefined);
+jest.mock('pdf-parse', () => ({
+  __esModule: true,
+  PDFParse: jest.fn().mockImplementation(() => ({
+    getText: (...args: unknown[]) => pdfGetTextMock(...args),
+    destroy: (...args: unknown[]) => pdfDestroyMock(...args),
+  })),
+}));
+
 import {
   assertImageUploadBytes,
   AttachmentScreeningError,
@@ -318,6 +335,19 @@ describe('screenImage', () => {
 });
 
 describe('screenTextFile', () => {
+  // jest config sets clearMocks:true, which wipes the PDFParse constructor's
+  // implementation + pdfDestroyMock's resolved value before each test. Re-establish
+  // them so `new PDFParse({data})` keeps returning the getText/destroy stubs.
+  beforeEach(() => {
+    (pdfDestroyMock as jest.Mock).mockResolvedValue(undefined);
+    // eslint-disable-next-line @typescript-eslint/no-require-imports -- re-arm the mocked ctor after clearMocks
+    const { PDFParse } = require('pdf-parse') as { PDFParse: jest.Mock };
+    PDFParse.mockImplementation(() => ({
+      getText: (...args: unknown[]) => pdfGetTextMock(...args),
+      destroy: (...args: unknown[]) => pdfDestroyMock(...args),
+    }));
+  });
+
   test('screens plain text content', async () => {
     const config = {
       bedrockClient: mockBedrockPass(),
@@ -360,25 +390,108 @@ describe('screenTextFile', () => {
     }
   });
 
-  test('throws for PDF with no extractable text', async () => {
-    // Mock pdf-parse to return empty text
-    jest.mock('pdf-parse', () => ({
-      __esModule: true,
-      default: jest.fn().mockResolvedValue({ text: '' }),
-    }), { virtual: true });
+  // pdf-parse v2 is mocked at the PDFParse-class level (see the jest.mock at the
+  // top of this file). The prior code called the v1 callable shape
+  // (`pdfParseFn(buf)`), undefined on v2, so every PDF fail-closed as
+  // "processing unavailable". These assert the v2 contract:
+  // `new PDFParse({data}).getText()` → `{ text }`. Real end-to-end PDF extraction
+  // is validated on the live deploy (pdfjs runs headless in nodejs24.x; ts-jest's
+  // CJS transform can't drive its ESM worker, so a class mock is the right unit).
 
+  test('extracts and screens a PDF via the v2 PDFParse class', async () => {
+    pdfGetTextMock.mockResolvedValueOnce({ text: 'Design spec: add CONTRIBUTORS', total: 1, pages: [] });
     const config = {
       bedrockClient: mockBedrockPass(),
       guardrailId: 'test-guardrail',
       guardrailVersion: '1',
     };
+    const result = await screenTextFile(Buffer.from('%PDF-1.4 real'), 'application/pdf', 'design.pdf', config);
+    expect(result.screening.status).toBe('passed');
+    // The v2 API was actually driven: constructed with { data } + getText called.
+    expect(pdfGetTextMock).toHaveBeenCalledTimes(1);
+    expect(pdfDestroyMock).toHaveBeenCalledTimes(1); // worker released
+  });
 
-    // A minimal PDF-like buffer (pdf-parse is mocked so content doesn't matter)
-    const content = Buffer.from('%PDF-1.4 empty');
+  test('does not hand pdf-parse a view onto the CALLER\'s buffer', async () => {
+    // pdf-parse transfers ownership of whatever it is given to its worker, which
+    // DETACHES the underlying ArrayBuffer. A `new Uint8Array(content.buffer, …)`
+    // view shares that buffer with the caller's Buffer — and the caller uploads
+    // those same bytes to S3 AFTER screening returns. Sharing meant the upload read
+    // a detached buffer and threw "Cannot perform Construct on a detached
+    // ArrayBuffer"; fail-closed screening then rejected the task, so every PDF
+    // attachment was refused with "could not be stored". Observed in production.
+    //
+    // So this asserts the OWNERSHIP boundary: what pdf-parse receives must not share
+    // a backing store with what the caller keeps.
+    const { PDFParse } = jest.requireMock('pdf-parse') as { PDFParse: jest.Mock };
+    PDFParse.mockClear();
+    pdfGetTextMock.mockResolvedValueOnce({ text: 'Design spec', total: 1, pages: [] });
+    const content = Buffer.from('%PDF-1.4 real pdf bytes here');
+    await screenTextFile(content, 'application/pdf', 'design.pdf', {
+      bedrockClient: mockBedrockPass(),
+      guardrailId: 'test-guardrail',
+      guardrailVersion: '1',
+    });
+    const passed = (PDFParse.mock.calls[0][0] as { data: Uint8Array }).data;
+    // Same bytes…
+    expect(Buffer.from(passed).toString()).toBe(content.toString());
+    // …different backing store, so a transfer cannot detach the caller's copy.
+    expect(passed.buffer).not.toBe(content.buffer);
+  });
 
+  test('throws for PDF with no extractable text', async () => {
+    pdfGetTextMock.mockResolvedValueOnce({ text: '', total: 1, pages: [] });
+    const config = {
+      bedrockClient: mockBedrockPass(),
+      guardrailId: 'test-guardrail',
+      guardrailVersion: '1',
+    };
     await expect(
-      screenTextFile(content, 'application/pdf', 'empty.pdf', config),
+      screenTextFile(Buffer.from('%PDF-1.4 empty'), 'application/pdf', 'empty.pdf', config),
     ).rejects.toThrow(/no extractable text/);
+  });
+
+  test('FAILS CLOSED on a PDF with more pages than can be screened (finding #1 — no partial-screen-full-deliver)', async () => {
+    // 51-page PDF but we only screen the first 50 → the whole file would be
+    // delivered to the agent with page 51 unscreened. Reject instead.
+    pdfGetTextMock.mockResolvedValueOnce({ text: 'benign pages 1-50', total: 51, pages: [] });
+    const config = { bedrockClient: mockBedrockPass(), guardrailId: 'g', guardrailVersion: '1' };
+    await expect(
+      screenTextFile(Buffer.from('%PDF-1.4 big'), 'application/pdf', 'big.pdf', config),
+    ).rejects.toThrow(/over the .*page limit|fully screen/i);
+  });
+
+  test('FAILS CLOSED when extracted text exceeds the screened byte cap (finding #1)', async () => {
+    pdfGetTextMock.mockResolvedValueOnce({ text: 'x'.repeat(2 * 1024 * 1024), total: 3, pages: [] });
+    const config = { bedrockClient: mockBedrockPass(), guardrailId: 'g', guardrailVersion: '1' };
+    await expect(
+      screenTextFile(Buffer.from('%PDF-1.4 verbose'), 'application/pdf', 'verbose.pdf', config),
+    ).rejects.toThrow(/more text than .*can fully screen/i);
+  });
+
+  test('a within-limits PDF (≤50 pages) still screens + passes', async () => {
+    pdfGetTextMock.mockResolvedValueOnce({ text: 'short spec', total: 3, pages: [] });
+    const config = { bedrockClient: mockBedrockPass(), guardrailId: 'g', guardrailVersion: '1' };
+    const result = await screenTextFile(Buffer.from('%PDF-1.4 ok'), 'application/pdf', 'ok.pdf', config);
+    expect(result.screening.status).toBe('passed');
+  });
+
+  test('a pdfjs/DOMMatrix parse error logs a BUNDLING diagnostic, not just "corrupt PDF"', async () => {
+    // A Lambda that reaches this path but lacks the pdf-parse bundling carve-out
+    // throws a pdfjs/native-binding error. Detect the signature + log an
+    // actionable diagnostic so it's not misread as a bad user PDF.
+    const { logger } = jest.requireActual('../../../src/handlers/shared/logger') as { logger: { error: (...a: unknown[]) => void } };
+    const errSpy = jest.spyOn(logger, 'error').mockImplementation(() => {});
+    pdfGetTextMock.mockRejectedValueOnce(new Error('DOMMatrix is not defined'));
+    const config = { bedrockClient: mockBedrockPass(), guardrailId: 'g', guardrailVersion: '1' };
+    await expect(
+      screenTextFile(Buffer.from('%PDF-1.4 real'), 'application/pdf', 'spec.pdf', config),
+    ).rejects.toBeInstanceOf(AttachmentScreeningError);
+    // The loud diagnostic names the bundling cause + the fix.
+    const logged = errSpy.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(logged).toMatch(/BUNDLING bug/);
+    expect(logged).toMatch(/nodeModules/);
+    errSpy.mockRestore();
   });
 
   test('retries on transient Bedrock errors for text screening', async () => {

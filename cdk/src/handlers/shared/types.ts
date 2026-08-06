@@ -95,10 +95,40 @@ export interface TaskRecord {
   readonly agent_heartbeat_at?: string;
   readonly execution_id?: string;
   readonly pr_url?: string;
+  /**
+   * Public CloudFront URL of the deploy-preview screenshot captured for this
+   * task's PR (#247). Persisted best-effort by the screenshot pipeline
+   * (github-webhook-processor) keyed off the taskId in the deploy branch, so
+   * the orchestration reconciler can embed the INTEGRATION node's combined
+   * preview in the parent epic panel. Absent until a preview deploys (and for
+   * tasks with no UI to screenshot).
+   */
+  readonly screenshot_url?: string;
+  /**
+   * Live deploy-preview URL the {@link screenshot_url} image was captured from
+   * (e.g. the Vercel/Netlify preview deploy). Persisted alongside
+   * ``screenshot_url`` so the orchestration reconciler can make the INTEGRATION
+   * node's combined preview in the parent epic panel a clickable deep-link to
+   * the running combined site, not just a static image (#247 UX.17). Absent
+   * when no preview deployed.
+   */
+  readonly screenshot_preview_url?: string;
   readonly error_message?: string;
   readonly idempotency_key?: string;
   readonly channel_source: ChannelSource;
   readonly channel_metadata?: Record<string, string>;
+  /**
+   * Linear issue UUID, hoisted to the top level from
+   * ``channel_metadata.linear_issue_id`` at task-create time (#247 UX.3).
+   * Top-level because a DynamoDB GSI (``LinearIssueIndex``) cannot key off a
+   * nested map field — the standalone ``@bgagent`` comment trigger queries
+   * this index to resolve a plain issue back to its newest ABCA task + PR.
+   * Present only for Linear-origin tasks; absent for GitHub/Slack/API tasks
+   * (which keeps the GSI sparse).
+   */
+  readonly linear_issue_id?: string;
+  /** Sparse JiraIssueIndex key (`{cloudId}#{issueKey}`); internal only. */
+  readonly jira_issue_identity?: string;
   readonly status_created_at: string;
   readonly created_at: string;
   readonly updated_at: string;
@@ -107,6 +137,21 @@ export interface TaskRecord {
   readonly cost_usd?: number;
   readonly duration_s?: number;
   readonly build_passed?: boolean;
+  /**
+   * A6/#299: whether a PR-iteration advanced the branch HEAD (a real commit) vs.
+   * ran with no change (a question-only ``@bgagent`` comment). Absent for
+   * pre-fix tasks / non-iterations → the settle reply defaults to "✅ Updated".
+   */
+  readonly code_changed?: boolean;
+  /** A6/#299: the agent's answer, surfaced on a no-change iteration reply. */
+  readonly answer_text?: string;
+  /**
+   * The branch HEAD sha this iteration pushed. The screenshot webhook matches a
+   * deploy's commit sha → the iteration task that pushed it, so the preview
+   * thumbnail lands on the right reply when iterations overlap on one PR. Absent
+   * on pre-fix / non-PR tasks → the webhook falls back to the newest reply.
+   */
+  readonly head_sha?: string;
   /** Whether the post-run lint gate passed (#515). Written with `build_passed`
    *  at terminal state; absent on tasks that predate the field. */
   readonly lint_passed?: boolean;
@@ -175,6 +220,24 @@ export interface TaskRecord {
    * record). Absent until the first successful post.
    */
   readonly linear_final_comment_event_id?: string;
+  /**
+   * Event ID of the ``pr_created`` milestone whose Linear "PR opened"
+   * courtesy comment was successfully posted (fan-out plane, ADR-016 P4.5).
+   * Makes the first-run PR-opened comment post-once across partial-batch
+   * Lambda retries — the analogue of ``linear_final_comment_event_id`` for
+   * the mid-run PR notification. Absent until the first successful post.
+   */
+  readonly linear_pr_comment_event_id?: string;
+  /**
+   * Event ID of the terminal event whose Jira final-status comment was
+   * successfully posted (fan-out plane). Jira has no comment edit API,
+   * so the dispatcher is post-once: this marker makes the post
+   * idempotent across partial-batch Lambda retries (a sibling channel's
+   * infra rejection re-runs every dispatcher for the record). The Jira
+   * analogue of ``linear_final_comment_event_id``. Absent until the
+   * first successful post.
+   */
+  readonly jira_final_comment_event_id?: string;
   readonly attachments?: AttachmentRecord[];
   /**
    * Cedar HITL: per-task default approval timeout (design §10.2).
@@ -215,6 +278,33 @@ export interface TaskRecord {
    * atomically on resume (§10.2, §9).
    */
   readonly awaiting_approval_request_id?: string;
+  /**
+   * Linear parent/sub-issue orchestration (issue #247, Mode A).
+   * ``orchestration_id`` PK of the row in ``OrchestrationTable`` whose
+   * DAG this task is a child of. Absent on ordinary (non-orchestrated)
+   * tasks. PR A1 introduces the field; graph discovery (A2) and the
+   * reconciler (A3) populate and read it. Until then it is always
+   * ``undefined`` at runtime.
+   */
+  readonly orchestration_id?: string;
+  /**
+   * Linear orchestration (#247): the ``task_id`` of the parent task
+   * for attribution and rollup, when a parent task exists. Absent on
+   * non-orchestrated tasks and on root children whose parent is the
+   * Linear issue rather than an ABCA task. Introduced in PR A1;
+   * unused at runtime until A2/A3.
+   */
+  readonly parent_task_id?: string;
+  /**
+   * Linear orchestration (#247): sibling ``sub_issue_id``s this child
+   * is blocked by — the predecessors that must reach terminal-success
+   * (``COMPLETED`` with ``build_passed !== false``) before the
+   * reconciler releases this child. Empty/absent for root children.
+   * Authoritative gating state lives on the ``OrchestrationTable`` row;
+   * this is the denormalized copy threaded onto the task record.
+   * Introduced in PR A1; unused at runtime until A3.
+   */
+  readonly depends_on?: readonly string[];
 }
 
 /** Per-channel override for one notification channel. See
@@ -239,6 +329,7 @@ export interface TaskNotificationsConfig {
   readonly email?: ChannelConfig;
   readonly github?: ChannelConfig;
   readonly linear?: ChannelConfig;
+  readonly jira?: ChannelConfig;
 }
 
 /**
@@ -864,6 +955,95 @@ export function toWebhookDetail(record: WebhookRecord): WebhookDetail {
     status: record.status,
     created_at: record.created_at,
     updated_at: record.updated_at,
+    revoked_at: record.revoked_at ?? null,
+  };
+}
+
+/**
+ * Scopes a platform API key may hold. Phase 1 ships `webhooks:manage`;
+ * the remaining values are reserved for Phase 2 (read-only task APIs) so keys
+ * minted now can be validated against a stable vocabulary.
+ */
+export type ApiKeyScope = 'webhooks:manage' | 'webhooks:invoke' | 'tasks:read' | 'tasks:cancel';
+
+/** Scopes recognized by the platform. Order is not significant. */
+export const API_KEY_SCOPES: readonly ApiKeyScope[] = [
+  'webhooks:manage',
+  'webhooks:invoke',
+  'tasks:read',
+  'tasks:cancel',
+];
+
+/**
+ * Full platform API key record as stored in DynamoDB.
+ *
+ * `key_hash` is the SHA-256 hex digest of the secret portion of the presented
+ * key. The raw secret is never stored — it is returned once at creation.
+ */
+export interface ApiKeyRecord {
+  readonly key_id: string;
+  readonly user_id: string;
+  readonly name: string;
+  readonly key_hash: string;
+  readonly scopes: readonly ApiKeyScope[];
+  readonly status: 'active' | 'revoked';
+  readonly created_at: string;
+  readonly updated_at: string;
+  readonly expires_at?: string;
+  readonly revoked_at?: string;
+  readonly ttl?: number;
+}
+
+/**
+ * Platform API key detail for API responses. Excludes `key_hash` and `user_id`.
+ */
+export interface ApiKeyDetail {
+  readonly key_id: string;
+  readonly name: string;
+  readonly scopes: readonly ApiKeyScope[];
+  readonly status: 'active' | 'revoked';
+  readonly created_at: string;
+  readonly updated_at: string;
+  readonly expires_at: string | null;
+  readonly revoked_at: string | null;
+}
+
+/**
+ * Create API key request body.
+ */
+export interface CreateApiKeyRequest {
+  readonly name: string;
+  readonly scopes?: readonly ApiKeyScope[];
+  readonly expires_at?: string;
+}
+
+/**
+ * Create API key response — includes the full key material (shown only once).
+ * The `key` is the value the caller sends in the `X-API-Key` header.
+ */
+export interface CreateApiKeyResponse {
+  readonly key_id: string;
+  readonly name: string;
+  readonly key: string;
+  readonly scopes: readonly ApiKeyScope[];
+  readonly expires_at: string | null;
+  readonly created_at: string;
+}
+
+/**
+ * Map a DynamoDB API key record to the API detail response shape.
+ * @param record - the DynamoDB API key record.
+ * @returns the API-facing API key detail (never includes the hash or owner).
+ */
+export function toApiKeyDetail(record: ApiKeyRecord): ApiKeyDetail {
+  return {
+    key_id: record.key_id,
+    name: record.name,
+    scopes: record.scopes,
+    status: record.status,
+    created_at: record.created_at,
+    updated_at: record.updated_at,
+    expires_at: record.expires_at ?? null,
     revoked_at: record.revoked_at ?? null,
   };
 }

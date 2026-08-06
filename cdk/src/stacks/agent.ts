@@ -22,8 +22,7 @@ import * as bedrock from '@aws-cdk/aws-bedrock-alpha';
 import { ArnFormat, AspectPriority, Aspects, Stack, StackProps, RemovalPolicy, CfnOutput, CfnResource, Duration, Fn, Lazy } from 'aws-cdk-lib';
 import * as agentcore from 'aws-cdk-lib/aws-bedrockagentcore';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
-// ecr_assets import is only needed when the ECS block below is uncommented
-// import * as ecr_assets from 'aws-cdk-lib/aws-ecr-assets';
+import * as ecr_assets from 'aws-cdk-lib/aws-ecr-assets';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
@@ -33,6 +32,7 @@ import { Construct, IConstruct } from 'constructs';
 import { AgentMemory } from '../constructs/agent-memory';
 import { AgentSessionRole } from '../constructs/agent-session-role';
 import { AgentVpc } from '../constructs/agent-vpc';
+import { ApiKeyTable } from '../constructs/api-key-table';
 import { ApprovalMetricsPublisherConsumer } from '../constructs/approval-metrics-publisher-consumer';
 import { AttachmentsBucket } from '../constructs/attachments-bucket';
 import { resolveBedrockModelIds } from '../constructs/bedrock-models';
@@ -40,14 +40,20 @@ import { Blueprint } from '../constructs/blueprint';
 import { CedarWasmLayer } from '../constructs/cedar-wasm-layer';
 import { ConcurrencyReconciler } from '../constructs/concurrency-reconciler';
 import { DnsFirewall } from '../constructs/dns-firewall';
-// import { EcsAgentCluster } from '../constructs/ecs-agent-cluster';
+import { EcsAgentCluster, resolveEcsTaskSizing } from '../constructs/ecs-agent-cluster';
+import { EcsPayloadBucket } from '../constructs/ecs-payload-bucket';
 import { FanOutConsumer } from '../constructs/fanout-consumer';
 import { GitHubScreenshotIntegration } from '../constructs/github-screenshot-integration';
+import { IterationHeartbeat } from '../constructs/iteration-heartbeat';
 import { JiraIntegration } from '../constructs/jira-integration';
 import { LinearIntegration } from '../constructs/linear-integration';
+import { OrchestrationReconciler } from '../constructs/orchestration-reconciler';
+import { OrchestrationTable } from '../constructs/orchestration-table';
 import { PendingUploadCleanup } from '../constructs/pending-upload-cleanup';
 import { RepoTable } from '../constructs/repo-table';
 import { SlackIntegration } from '../constructs/slack-integration';
+import { buildAppId } from '../constructs/solution-ua-aspect';
+import { StrandedOrchestrationReconciler } from '../constructs/stranded-orchestration-reconciler';
 import { StrandedTaskReconciler } from '../constructs/stranded-task-reconciler';
 import { TaskApi } from '../constructs/task-api';
 import { TaskApprovalsTable } from '../constructs/task-approvals-table';
@@ -89,6 +95,8 @@ export class AgentStack extends Stack {
     const taskTable = new TaskTable(this, 'TaskTable');
     const taskEventsTable = new TaskEventsTable(this, 'TaskEventsTable');
     const taskNudgesTable = new TaskNudgesTable(this, 'TaskNudgesTable');
+    // Parent/sub-issue orchestration DAG state.
+    const orchestrationTable = new OrchestrationTable(this, 'OrchestrationTable');
     // Cedar HITL approval-gate state (design §10.1). Agent writes PENDING
     // rows + GSI query powers `bgagent pending`; Chunk 5 wires the
     // Approve/Deny Lambdas + fan-out consumer.
@@ -105,6 +113,7 @@ export class AgentStack extends Stack {
     const taskApprovalsTable = new TaskApprovalsTable(this, 'TaskApprovalsTableV2');
     const userConcurrencyTable = new UserConcurrencyTable(this, 'UserConcurrencyTable');
     const webhookTable = new WebhookTable(this, 'WebhookTable');
+    const apiKeyTable = new ApiKeyTable(this, 'ApiKeyTable');
     const repoTable = new RepoTable(this, 'RepoTable');
 
     // Cedar-wasm Lambda layer (§15.2 task 10). Instantiated here so the
@@ -223,8 +232,8 @@ export class AgentStack extends Stack {
         {
           type: bedrock.ContentFilterType.PROMPT_ATTACK,
           // MEDIUM blocks on MEDIUM+HIGH confidence; LOW-confidence
-          // detections are ignored. Observed during PR #52 Scenario
-          // 7-extended deploy validation: at HIGH (blocks LOW too) the
+          // detections are ignored. Observed during extended deploy
+          // validation: at HIGH (blocks LOW too) the
           // PROMPT_ATTACK classifier is stochastic at the LOW tier and
           // flags ordinary imperative-mood task descriptions and
           // ordinary PR bodies (pr_iteration hydration). MEDIUM matches
@@ -268,7 +277,7 @@ export class AgentStack extends Stack {
       },
     });
 
-    // SessionRole ARN placeholder — the per-task SessionRole (#209) is created
+    // SessionRole ARN placeholder — the per-task SessionRole is created
     // AFTER the Runtime (it lists runtime.role as an assuming principal), but
     // its ARN must be injected into the runtime's environment so the agent can
     // assume it. Break the cycle with a Lazy.string, same pattern as above.
@@ -291,6 +300,7 @@ export class AgentStack extends Stack {
       cedarWasmLayer: cedarWasmLayer.layer,
       repoTable: repoTable.table,
       webhookTable: webhookTable.table,
+      apiKeyTable: apiKeyTable.table,
       orchestratorFunctionArn: lazyOrchestratorArn,
       guardrailId: inputGuardrail.guardrailId,
       guardrailVersion: inputGuardrail.guardrailVersion,
@@ -304,6 +314,15 @@ export class AgentStack extends Stack {
     //
     // One runtime, invoked by OrchestratorFn via SigV4. See
     // `docs/design/INTERACTIVE_AGENTS.md` §3.1 and AD-1.
+    // Outbound SDK solution attribution (#319): the same app-id the
+    // SolutionUaAspect sets on Lambdas, computed here so the AgentCore runtime
+    // and ECS container (which the Lambda-only Aspect can't reach) carry it
+    // too. Respects the `-c sdkUaAppId` override / empty-string opt-out.
+    const sdkUaAppId = buildAppId(
+      this.stackName,
+      this.node.tryGetContext('sdkUaAppId') as string | undefined,
+    );
+
     const runtimeEnvironmentVariables = {
       GITHUB_TOKEN_SECRET_ARN: githubTokenSecret.secretArn,
       AWS_REGION: process.env.AWS_REGION ?? 'us-east-1',
@@ -327,7 +346,7 @@ export class AgentStack extends Stack {
       // lifecycle configuration below so drift is visible. 8 hours.
       AGENTCORE_MAX_LIFETIME_S: '28800',
       USER_CONCURRENCY_TABLE_NAME: userConcurrencyTable.table.tableName,
-      // Per-task SessionRole (#209): the agent assumes this with session tags
+      // Per-task SessionRole: the agent assumes this with session tags
       // {user_id, repo, task_id} and uses the scoped creds for tenant-data
       // (DDB/S3) access. Resolved lazily — the role lists runtime.role as an
       // assuming principal, so it is created after the runtime.
@@ -336,7 +355,7 @@ export class AgentStack extends Stack {
       // trajectory to ``traces/<user_id>/<task_id>.jsonl.gz`` on
       // terminal state when the submit payload enabled ``trace``.
       TRACE_ARTIFACTS_BUCKET_NAME: traceArtifactsBucket.bucket.bucketName,
-      // Repo-less deliverable artifacts (#248 Phase 3): a deliver_artifact step
+      // Repo-less deliverable artifacts: a deliver_artifact step
       // uploads its product to ``artifacts/<task_id>/`` in the same bucket.
       ARTIFACTS_BUCKET_NAME: traceArtifactsBucket.bucket.bucketName,
       LOG_GROUP_NAME: applicationLogGroup.logGroupName,
@@ -356,6 +375,10 @@ export class AgentStack extends Stack {
       CLAUDE_CONFIG_DIR: '/mnt/workspace/.claude-config',
       npm_config_cache: '/mnt/workspace/.npm-cache',
       // ENABLE_CLI_TELEMETRY: '1',
+      // Outbound SDK solution attribution (#319): botocore reads
+      // AWS_SDK_UA_APP_ID natively → `app/uksb-wt64nei4u6#{stack}`. The
+      // Lambda-only Aspect can't reach this runtime, so set it explicitly.
+      ...(sdkUaAppId ? { AWS_SDK_UA_APP_ID: sdkUaAppId } : {}),
     };
 
     const runtimeNetworkConfig = agentcore.RuntimeNetworkConfiguration.usingVpc(this, {
@@ -394,6 +417,31 @@ export class AgentStack extends Stack {
 
     runtimeArnHolder = runtime.agentRuntimeArn;
 
+    // --- AgentCore log-delivery: keep the logical ids STABLE across library
+    //     renames, so updating an existing stack never has to be opted into ---
+    //
+    // The AgentCore Runtime auto-creates AWS::Logs::DeliverySource + Delivery +
+    // DeliveryDestination per loggingConfig, naming them from the construct path
+    // the library happens to use. When that path changes — as it did between
+    // library versions here — the CFN logical ids change with it, and CFN treats
+    // renamed resources as new ones: it CREATES before it DELETES.
+    //
+    // A DeliverySource is unique per (resource ARN, log type) for the whole
+    // account, and the runtime ARN does not change across the rename. So the new
+    // source collides with the live one that is still there, CloudWatch Logs
+    // rejects it with ``AlreadyExists``, and the whole stack rolls back. Note
+    // what this means: renaming the resources cannot avoid the collision, because
+    // the conflict is on the ARN they point at, not on their own names. Only
+    // keeping the logical id stable avoids it, since that is what makes CFN
+    // update in place rather than create a second source for the same runtime.
+    //
+    // Hence: pinned ALWAYS, for every stack, with no context flag. A flag would
+    // mean the safe path is the one you have to know to ask for, and the failure
+    // it prevents is a mid-update rollback that says nothing about the flag's
+    // existence. A fresh stack is unaffected either way — it has no live sources
+    // to collide with, and these ids are as valid for it as the library's own.
+    pinLogDeliveryLogicalIds(runtime);
+
     // --- Session storage (preview) ---
     // The L2 construct does not yet expose filesystemConfigurations; use the
     // CFN escape hatch. /mnt/workspace mount backs the persistent cache
@@ -408,7 +456,7 @@ export class AgentStack extends Stack {
     ]);
 
     // --- IAM grants ---
-    // Per-session IAM scoping (#209): tenant-data access (the four
+    // Per-session IAM scoping: tenant-data access (the four
     // task_id-partitioned tables + the agent's trace/attachment S3 objects)
     // is NOT granted to the runtime ExecutionRole. Instead the agent assumes a
     // per-task SessionRole (created below) with session tags
@@ -427,9 +475,9 @@ export class AgentStack extends Stack {
 
     // Grant the runtime invoke on each configured foundation model + its US
     // cross-Region inference profile. The model set is a single source of truth
-    // (constructs/bedrock-models.ts, #434), shared with the ECS task role and
+    // (constructs/bedrock-models.ts), shared with the ECS task role and
     // overridable via the `bedrockModels` CDK context. Each invokable is also
-    // collected so the same set is granted to the SessionRole below (#215 cost
+    // collected so the same set is granted to the SessionRole below (for cost
     // attribution) — the two grants derive from one list and can't drift.
     // Scoping stays per-model (no Resource:'*'); account-level Bedrock access
     // remains the outer gate.
@@ -448,7 +496,7 @@ export class AgentStack extends Stack {
       invokableBedrockModels.push(foundationModel, crossRegionProfile);
     }
 
-    // --- Per-task SessionRole (#209) ---
+    // --- Per-task SessionRole ---
     // Holds the tenant-data grants (the four task_id-partitioned tables, plus
     // per-user-prefixed trace writes and attachment reads), each constrained
     // by aws:PrincipalTag conditions so a compromised session reaches only its
@@ -466,7 +514,7 @@ export class AgentStack extends Stack {
       ],
       traceArtifactsBucket: traceArtifactsBucket.bucket,
       attachmentsBucket: attachmentsBucket.bucket,
-      // #215: session-tagged Bedrock grant for cost attribution — the same
+      // Session-tagged Bedrock grant for cost attribution — the same
       // invokables grantInvoke-ed to the runtime above, so the grants stay in
       // lockstep.
       invokableModels: invokableBedrockModels,
@@ -561,6 +609,11 @@ export class AgentStack extends Stack {
       description: 'Name of the DynamoDB webhook table',
     });
 
+    new CfnOutput(this, 'ApiKeyTableName', {
+      value: apiKeyTable.table.tableName,
+      description: 'Name of the DynamoDB platform API key table',
+    });
+
     new CfnOutput(this, 'RepoTableName', {
       value: repoTable.table.tableName,
       description: 'Name of the DynamoDB repo config table',
@@ -576,37 +629,101 @@ export class AgentStack extends Stack {
       description: 'Name of the S3 bucket storing --trace trajectory artifacts (design §10.1)',
     });
 
-    // --- ECS Fargate compute backend (optional) ---
-    // To enable ECS as an alternative compute backend, uncomment the block below
-    // and the EcsAgentCluster import at the top of this file. Repos can then use
-    // compute_type: 'ecs' in their blueprint config to route tasks to ECS Fargate.
-    //
-    // const agentImageAsset = new ecr_assets.DockerImageAsset(this, 'AgentImage', {
-    //   directory: repoRoot,
-    //   file: 'agent/Dockerfile',
-    //   platform: ecr_assets.Platform.LINUX_ARM64,
-    // });
-    //
-    // const ecsCluster = new EcsAgentCluster(this, 'EcsAgentCluster', {
-    //   vpc: agentVpc.vpc,
-    //   agentImageAsset,
-    //   taskTable: taskTable.table,
-    //   taskEventsTable: taskEventsTable.table,
-    //   userConcurrencyTable: userConcurrencyTable.table,
-    //   githubTokenSecret,
-    //   memoryId: agentMemory.memory.memoryId,
-    //   // Per-session IAM scoping (#209): the ECS task role assumes the same
-    //   // SessionRole as the AgentCore runtime for tenant-data access. The
-    //   // construct admits the task role to the trust and injects
-    //   // AGENT_SESSION_ROLE_ARN into the container.
-    //   agentSessionRole,
-    // });
+    // --- ECS Fargate compute backend (CONTEXT-GATED) ---
+    // AgentCore's fixed microVM envelope OOM-kills heavy CI-parity builds
+    // (a ~2800-test suite, for instance). ECS Fargate
+    // gives a bigger, tunable task (see EcsAgentCluster for the exact vCPU/memory
+    // sizing and the measurements behind it — a 32 GB task was OOM-killed by a
+    // fully parallel build, which is why the build tier serialises with MISE_JOBS=1)
+    // for repos that set ``compute_type: 'ecs'``. GATED on the ``compute_type`` deploy context
+    // (default 'agentcore') — ECS resources only synthesize when you deploy with
+    // ``--context compute_type=ecs``, so the default synth (and the
+    // bootstrap-coverage test that synths with default context) stays
+    // agentcore-only, matching how other optional constructs are context-gated.
+    const computeType = this.node.tryGetContext('compute_type') ?? 'agentcore';
+    // Ephemeral bucket for ECS task payloads — the orchestrator writes the
+    // payload here (it exceeds the 8 KB RunTask containerOverrides limit) and
+    // passes only an S3 URI pointer; the container fetches it on boot, the
+    // orchestrator deletes it at finalize. Only synthesized under the ecs gate.
+    const ecsPayloadBucket = computeType === 'ecs'
+      ? new EcsPayloadBucket(this, 'EcsPayloadBucket')
+      : undefined;
+    if (ecsPayloadBucket) {
+      NagSuppressions.addResourceSuppressions(ecsPayloadBucket.bucket, [
+        {
+          id: 'AwsSolutions-S1',
+          reason: 'Ephemeral per-task payloads with a 1-day TTL; writes confined to the orchestrator IAM role by grantPut, reads to the ECS task role by grantRead, both scoped to this bucket. Object deleted at finalize. Object-level audit intentionally omitted — CloudTrail data events / a log bucket are not justified for transient boot payloads.',
+        },
+      ]);
+    }
+    // ECS build-task sizing, from deploy context. The construct's defaults are
+    // deliberately modest so an adopter who changes nothing does not pay for the
+    // Fargate ceiling — but a large monorepo genuinely needs more, so the knobs
+    // have to be reachable WITHOUT editing the construct. Same shape as
+    // ``compute_type`` above:
+    //   cdk deploy -c compute_type=ecs -c ecsBuildTaskCpu=16384 \
+    //     -c ecsBuildTaskMemoryMiB=122880 -c ecsBuildTaskEphemeralStorageGiB=100
+    //   cdk deploy -c ecsExtraBuildEnv='{"MISE_JOBS":"8"}'
+    const ecsTaskSizing = resolveEcsTaskSizing(this.node);
+    const ecsCluster = computeType === 'ecs'
+      ? new EcsAgentCluster(this, 'EcsAgentCluster', {
+        ...(ecsTaskSizing !== undefined && { taskSizing: ecsTaskSizing }),
+        vpc: agentVpc.vpc,
+        agentImageAsset: new ecr_assets.DockerImageAsset(this, 'AgentImage', {
+          directory: repoRoot,
+          file: 'agent/Dockerfile',
+          platform: ecr_assets.Platform.LINUX_ARM64,
+        }),
+        taskTable: taskTable.table,
+        taskEventsTable: taskEventsTable.table,
+        userConcurrencyTable: userConcurrencyTable.table,
+        githubTokenSecret,
+        memoryId: agentMemory.memory.memoryId,
+        // ECS parity: pass the Memory construct (not just its id) so the task
+        // role gets grantReadWrite — MEMORY_ID alone makes the agent ATTEMPT the
+        // write, which fails closed (bedrock-agentcore:CreateEvent AccessDenied)
+        // without this grant. The AgentCore runtime gets the equivalent grant
+        // where it is created above.
+        agentMemory,
+        // Read-only grant so the container can fetch its payload from S3.
+        payloadBucket: ecsPayloadBucket!.bucket,
+        // ECS parity: the same bucket the runtime uses for ARTIFACTS_BUCKET_NAME —
+        // a repo-bound artifact workflow delivers here. Wires the
+        // ARTIFACTS_BUCKET_NAME env only; delivery writes go through the per-task
+        // SessionRole (no direct task-role grant — see construct). Without the
+        // env, an ecs-repo artifact task fails at delivery.
+        artifactsBucket: traceArtifactsBucket.bucket,
+        // Per-session IAM scoping: the ECS task role assumes the same
+        // SessionRole as the AgentCore runtime for tenant-data access. The
+        // construct admits the task role to the trust and injects
+        // AGENT_SESSION_ROLE_ARN into the container.
+        agentSessionRole,
+      })
+      : undefined;
+
+    // Advertise which compute substrate this deploy actually provisioned, so the
+    // CLI can refuse to onboard a repo as ``compute_type: ecs`` when the ECS gate
+    // wasn't on (``--context compute_type=ecs``) — otherwise that mismatch only
+    // surfaces per-task as "ECS compute strategy requires ECS_CLUSTER_ARN…" at
+    // runtime. ``ecs`` implies the AgentCore runtime is ALSO available (the ECS
+    // gate is additive), so an agentcore repo works on either substrate.
+    new CfnOutput(this, 'ComputeSubstrate', {
+      value: ecsCluster ? 'ecs' : 'agentcore',
+      description: 'Compute substrate provisioned by this deploy: "agentcore" (default) or "ecs" '
+        + '(deployed with --context compute_type=ecs; adds the Fargate substrate alongside AgentCore).',
+    });
 
     // --- Task Orchestrator (durable Lambda function) ---
+    // Per-user concurrency cap, shared by the orchestrator (admission control)
+    // and the orchestration reconcilers (their release throttle), so the two
+    // never drift — the reconciler must throttle to the SAME ceiling admission
+    // enforces.
+    const maxConcurrentTasksPerUser = 10;
     const orchestrator = new TaskOrchestrator(this, 'TaskOrchestrator', {
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
       userConcurrencyTable: userConcurrencyTable.table,
+      maxConcurrentTasksPerUser,
       repoTable: repoTable.table,
       runtimeArn: runtime.agentRuntimeArn,
       githubTokenSecretArn: githubTokenSecret.secretArn,
@@ -614,16 +731,25 @@ export class AgentStack extends Stack {
       guardrailId: inputGuardrail.guardrailId,
       guardrailVersion: inputGuardrail.guardrailVersion,
       attachmentsBucket: attachmentsBucket.bucket,
-      // To wire ECS, uncomment the ecsCluster block above and add:
-      // ecsConfig: {
-      //   clusterArn: ecsCluster.cluster.clusterArn,
-      //   taskDefinitionArn: ecsCluster.taskDefinition.taskDefinitionArn,
-      //   subnets: agentVpc.vpc.selectSubnets({ subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS }).subnetIds.join(','),
-      //   securityGroup: ecsCluster.securityGroup.securityGroupId,
-      //   containerName: ecsCluster.containerName,
-      //   taskRoleArn: ecsCluster.taskRoleArn,
-      //   executionRoleArn: ecsCluster.executionRoleArn,
-      // },
+      // Route ``compute_type: 'ecs'`` repos to the Fargate cluster above —
+      // only when the cluster was synthesized (deploy --context compute_type=ecs).
+      ...(ecsCluster && {
+        ecsConfig: {
+          clusterArn: ecsCluster.cluster.clusterArn,
+          taskDefinitionArn: ecsCluster.taskDefinition.taskDefinitionArn,
+          // See docs/design/ECS_RIGHTSIZED_PLANNING.md: the smaller read-only planning
+          // def, so a read-only task doesn't over-allocate the larger build box.
+          planningTaskDefinitionArn: ecsCluster.planningTaskDefinition.taskDefinitionArn,
+          subnets: agentVpc.vpc.selectSubnets({ subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS }).subnetIds.join(','),
+          securityGroup: ecsCluster.securityGroup.securityGroupId,
+          containerName: ecsCluster.containerName,
+          taskRoleArn: ecsCluster.taskRoleArn,
+          executionRoleArn: ecsCluster.executionRoleArn,
+        },
+      }),
+      // Pass the payload bucket so the orchestrator writes/deletes the
+      // out-of-band payload and the ECS strategy builds the S3 URI pointer.
+      ...(ecsPayloadBucket && { ecsPayloadBucket: ecsPayloadBucket.bucket }),
     });
 
     // Now that the orchestrator exists, resolve the Lazy used by TaskApi at synth.
@@ -664,7 +790,7 @@ export class AgentStack extends Stack {
     // Linear dispatcher can receive ``linearIntegration.workspaceRegistryTable``.
 
     // --- Cedar HITL approval metrics publisher (Chunk 8, §11.3 / IMPL-28) ---
-    // Consumer #2 of the TaskEventsTable stream (FanOutConsumer is #1).
+    // The second consumer of the TaskEventsTable stream (FanOutConsumer is the first).
     // Reads agent_milestone records for approval events and emits
     // CloudWatch EMF for the dashboard widgets below. See the
     // 2-consumer architectural note in `task-events-table.ts` —
@@ -743,6 +869,11 @@ export class AgentStack extends Stack {
       description: 'Name of the DynamoDB Slack user mapping table',
     });
 
+    new CfnOutput(this, 'SlackChannelMappingTableName', {
+      value: slackIntegration.channelMappingTable.tableName,
+      description: 'Name of the DynamoDB Slack channel → default-repo mapping table',
+    });
+
     // --- Linear integration (inbound webhook + agent-side MCP outbound) ---
     const linearIntegration = new LinearIntegration(this, 'LinearIntegration', {
       api: taskApi.api,
@@ -750,10 +881,153 @@ export class AgentStack extends Stack {
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
       repoTable: repoTable.table,
+      // Enables the webhook processor's orchestration path
+      // (seed DAG + release roots). Sets ORCHESTRATION_TABLE_NAME.
+      orchestrationTable: orchestrationTable.table,
       orchestratorFunctionArn: orchestrator.alias.functionArn,
       guardrailId: inputGuardrail.guardrailId,
       guardrailVersion: inputGuardrail.guardrailVersion,
+      // Throttle the seed-time root release to the free concurrency
+      // budget so a wide-root epic doesn't over-release roots admission then
+      // hard-fails (an unrecoverable failure — a root has no predecessor for
+      // the sweep to re-release from).
+      userConcurrencyTable: userConcurrencyTable.table,
+      maxConcurrentTasksPerUser,
+      // Image attachments extracted from issue descriptions upload here
+      // (otherwise createTaskCore 503s "Attachment storage is not configured").
+      attachmentsBucket: attachmentsBucket.bucket,
     });
+
+    // The orchestration reconciler consumes the TaskTable stream and
+    // releases dependency-unblocked children as predecessors reach
+    // terminal-success. It invokes createTaskCore in-process, so it needs
+    // the same task-creation env + invoke permission as the webhook
+    // processor.
+    const orchestrationReconciler = new OrchestrationReconciler(this, 'OrchestrationReconciler', {
+      taskTable: taskTable.table,
+      orchestrationTable: orchestrationTable.table,
+      taskEventsTable: taskEventsTable.table,
+      orchestratorFunctionArn: orchestrator.alias.functionArn,
+    });
+    // createTaskCore (run inside the reconciler) screens descriptions with
+    // the input guardrail, reads repo onboarding/blueprint config, and
+    // async-invokes the orchestrator. Mirror the webhook processor's grants.
+    repoTable.table.grantReadData(orchestrationReconciler.fn);
+    orchestrationReconciler.fn.addEnvironment('REPO_TABLE_NAME', repoTable.table.tableName);
+    orchestrationReconciler.fn.addEnvironment('GUARDRAIL_ID', inputGuardrail.guardrailId);
+    orchestrationReconciler.fn.addEnvironment('GUARDRAIL_VERSION', inputGuardrail.guardrailVersion);
+    orchestrationReconciler.fn.addEnvironment(
+      'ORCHESTRATOR_FUNCTION_ARN',
+      orchestrator.alias.functionArn,
+    );
+    // The reconciler posts the parent rollup comment on completion —
+    // needs the workspace registry to resolve the per-workspace OAuth token.
+    linearIntegration.workspaceRegistryTable.grantReadData(orchestrationReconciler.fn);
+    orchestrationReconciler.fn.addEnvironment(
+      'LINEAR_WORKSPACE_REGISTRY_TABLE_NAME',
+      linearIntegration.workspaceRegistryTable.tableName,
+    );
+    // Read the user concurrency counter so a wide fan-out releases only
+    // up to the free budget (the cap throttles, not guillotines, children).
+    userConcurrencyTable.table.grantReadData(orchestrationReconciler.fn);
+    orchestrationReconciler.fn.addEnvironment(
+      'USER_CONCURRENCY_TABLE_NAME',
+      userConcurrencyTable.table.tableName,
+    );
+    orchestrationReconciler.fn.addEnvironment(
+      'MAX_CONCURRENT_TASKS_PER_USER',
+      String(maxConcurrentTasksPerUser),
+    );
+    orchestrationReconciler.fn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['lambda:InvokeFunction'],
+      resources: [orchestrator.alias.functionArn],
+    }));
+    orchestrationReconciler.fn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['bedrock:ApplyGuardrail'],
+      resources: [
+        Stack.of(this).formatArn({
+          service: 'bedrock',
+          resource: 'guardrail',
+          resourceName: inputGuardrail.guardrailId,
+        }),
+      ],
+    }));
+    // Released child tasks attributed to linear workspaces need the
+    // per-workspace OAuth secret prefix readable (createTaskCore stashes
+    // the ARN; agent reads it). Same prefix grant as the webhook processor.
+    orchestrationReconciler.fn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['secretsmanager:GetSecretValue'],
+      resources: [
+        Stack.of(this).formatArn({
+          service: 'secretsmanager',
+          resource: 'secret',
+          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+          resourceName: 'bgagent-linear-oauth-*',
+        }),
+      ],
+    }));
+    // Scheduled backstop that recovers orchestrations whose terminal
+    // events were lost while the live reconciler was unavailable. Runs the
+    // same createTaskCore release path, so it needs the identical grants
+    // (repo config, guardrail, orchestrator invoke, linear-oauth secret).
+    const strandedOrchestrationReconciler = new StrandedOrchestrationReconciler(
+      this, 'StrandedOrchestrationReconciler', {
+        orchestrationTable: orchestrationTable.table,
+        taskTable: taskTable.table,
+        taskEventsTable: taskEventsTable.table,
+        orchestratorFunctionArn: orchestrator.alias.functionArn,
+      },
+    );
+    repoTable.table.grantReadData(strandedOrchestrationReconciler.fn);
+    strandedOrchestrationReconciler.fn.addEnvironment('REPO_TABLE_NAME', repoTable.table.tableName);
+    strandedOrchestrationReconciler.fn.addEnvironment('GUARDRAIL_ID', inputGuardrail.guardrailId);
+    strandedOrchestrationReconciler.fn.addEnvironment('GUARDRAIL_VERSION', inputGuardrail.guardrailVersion);
+    strandedOrchestrationReconciler.fn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['lambda:InvokeFunction'],
+      resources: [orchestrator.alias.functionArn],
+    }));
+    strandedOrchestrationReconciler.fn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['bedrock:ApplyGuardrail'],
+      resources: [
+        Stack.of(this).formatArn({
+          service: 'bedrock',
+          resource: 'guardrail',
+          resourceName: inputGuardrail.guardrailId,
+        }),
+      ],
+    }));
+    strandedOrchestrationReconciler.fn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['secretsmanager:GetSecretValue'],
+      resources: [
+        Stack.of(this).formatArn({
+          service: 'secretsmanager',
+          resource: 'secret',
+          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+          resourceName: 'bgagent-linear-oauth-*',
+        }),
+      ],
+    }));
+    // The sweep shares the live reconciler's panel refresh + parent settle
+    // (refreshPanelAndSettle), which needs a credentials registry to resolve an
+    // outbound token — without it that feedback silently no-ops and a recovered
+    // epic's panel stays stale. It already had the matching secret grant above,
+    // just not the table, so the feedback half of the sweep never ran.
+    linearIntegration.workspaceRegistryTable.grantReadData(strandedOrchestrationReconciler.fn);
+    strandedOrchestrationReconciler.fn.addEnvironment(
+      'LINEAR_WORKSPACE_REGISTRY_TABLE_NAME',
+      linearIntegration.workspaceRegistryTable.tableName,
+    );
+    // The sweep is the drain path for throttle-deferred children, so it
+    // throttles to the same free budget the live reconciler does.
+    userConcurrencyTable.table.grantReadData(strandedOrchestrationReconciler.fn);
+    strandedOrchestrationReconciler.fn.addEnvironment(
+      'USER_CONCURRENCY_TABLE_NAME',
+      userConcurrencyTable.table.tableName,
+    );
+    strandedOrchestrationReconciler.fn.addEnvironment(
+      'MAX_CONCURRENT_TASKS_PER_USER',
+      String(maxConcurrentTasksPerUser),
+    );
 
     // Phase 2.0b-O2: agent runtime reads the per-workspace Linear OAuth
     // token directly from Secrets Manager. The CLI (`bgagent linear setup`)
@@ -807,6 +1081,33 @@ export class AgentStack extends Stack {
       ],
     }));
 
+    // Mid-run liveness heartbeat. A scheduled sweep edits the maturing
+    // Linear reply of RUNNING comment-triggered iterations to show elapsed time
+    // ("🔄 Working … _8m elapsed_") so a long run isn't a silent black box
+    // (observed in practice: a run went 22 minutes with no visible output).
+    // Needs the workspace registry + per-workspace
+    // linear-oauth secret read to resolve the outbound token (same as the
+    // reconciler's reply path). Read-only on the TaskTable.
+    const iterationHeartbeat = new IterationHeartbeat(this, 'IterationHeartbeat', {
+      taskTable: taskTable.table,
+    });
+    linearIntegration.workspaceRegistryTable.grantReadData(iterationHeartbeat.fn);
+    iterationHeartbeat.fn.addEnvironment(
+      'LINEAR_WORKSPACE_REGISTRY_TABLE_NAME',
+      linearIntegration.workspaceRegistryTable.tableName,
+    );
+    iterationHeartbeat.fn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['secretsmanager:GetSecretValue'],
+      resources: [
+        Stack.of(this).formatArn({
+          service: 'secretsmanager',
+          resource: 'secret',
+          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+          resourceName: 'bgagent-linear-oauth-*',
+        }),
+      ],
+    }));
+
     new CfnOutput(this, 'LinearWebhookSecretArn', {
       value: linearIntegration.webhookSecret.secretArn,
       description: 'Secrets Manager ARN for the Linear webhook signing secret — populate via `bgagent linear setup`',
@@ -837,6 +1138,9 @@ export class AgentStack extends Stack {
       orchestratorFunctionArn: orchestrator.alias.functionArn,
       guardrailId: inputGuardrail.guardrailId,
       guardrailVersion: inputGuardrail.guardrailVersion,
+      // Lets the processor fetch, screen, and store Jira media attachments at
+      // task-admission time. Same bucket the orchestrator hydrates from.
+      attachmentsBucket: attachmentsBucket.bucket,
     });
 
     // Agent runtime reads the per-tenant Jira OAuth token directly from
@@ -889,6 +1193,29 @@ export class AgentStack extends Stack {
       ],
     }));
 
+    // The reconciler picks the feedback surface from each orchestration's own
+    // recorded channel, so give it the Jira tenant registry too — otherwise a
+    // Jira-sourced orchestration would resolve to no adapter and silently skip
+    // its panel/reactions. Read + Put for the same reason as the orchestrator
+    // above (resolving an expiring token refreshes it in place). Harmless while
+    // only Linear seeds orchestrations; required the moment one can be Jira's.
+    jiraIntegration.workspaceRegistryTable.grantReadData(orchestrationReconciler.fn);
+    orchestrationReconciler.fn.addEnvironment(
+      'JIRA_WORKSPACE_REGISTRY_TABLE_NAME',
+      jiraIntegration.workspaceRegistryTable.tableName,
+    );
+    orchestrationReconciler.fn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['secretsmanager:GetSecretValue', 'secretsmanager:PutSecretValue'],
+      resources: [
+        Stack.of(this).formatArn({
+          service: 'secretsmanager',
+          resource: 'secret',
+          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+          resourceName: 'bgagent-jira-oauth-*',
+        }),
+      ],
+    }));
+
     new CfnOutput(this, 'JiraWebhookSecretArn', {
       value: jiraIntegration.webhookSecret.secretArn,
       description: 'Secrets Manager ARN for the Jira webhook signing secret — populate via `bgagent jira setup`',
@@ -913,8 +1240,8 @@ export class AgentStack extends Stack {
     // Consumes TaskEventsTable DynamoDB Streams and dispatches events to
     // Slack / GitHub / Linear / email per per-channel default filters.
     // GitHub dispatcher edits a single issue comment in place; Slack
-    // dispatcher (issue #64) reads per-workspace bot tokens from
-    // ``bgagent/slack/*``; Linear dispatcher (issue #239) posts a single
+    // dispatcher reads per-workspace bot tokens from
+    // ``bgagent/slack/*``; Linear dispatcher posts a single
     // deterministic final-status comment with cost/turns/duration.
     // Email remains a log-only stub until SES wires.
     new FanOutConsumer(this, 'FanOutConsumer', {
@@ -925,7 +1252,7 @@ export class AgentStack extends Stack {
       // Slack bot-token grant is guarded on this prop — pass the
       // ``bgagent/slack/*`` prefix so the FanOutConsumer can read
       // workspace tokens. Same scope SlackIntegration uses for its
-      // own writers (PR #79 review #2).
+      // own writers.
       slackSecretArnPattern: Stack.of(this).formatArn({
         service: 'secretsmanager',
         resource: 'secret',
@@ -941,6 +1268,20 @@ export class AgentStack extends Stack {
         service: 'secretsmanager',
         resource: 'secret',
         resourceName: 'bgagent-linear-oauth-*',
+        arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+      }),
+      // Jira dispatcher posts a deterministic final-status comment with
+      // cost/turns/duration on Jira-origin terminal tasks. Same scope
+      // `bgagent-jira-oauth-*` as the orchestrator and Jira webhook
+      // processor — Lambdas in this stack share the rotated-token write
+      // path. Both props are optional on the construct, so omitting them
+      // silently disables Jira final-status comments rather than failing
+      // synth: keep them wired.
+      jiraWorkspaceRegistryTable: jiraIntegration.workspaceRegistryTable,
+      jiraOauthSecretArnPattern: Stack.of(this).formatArn({
+        service: 'secretsmanager',
+        resource: 'secret',
+        resourceName: 'bgagent-jira-oauth-*',
         arnFormat: ArnFormat.COLON_RESOURCE_NAME,
       }),
     });
@@ -961,7 +1302,19 @@ export class AgentStack extends Stack {
       // workspace registry so token resolution reuses the per-workspace
       // OAuth secrets created by `bgagent linear setup`.
       linearWorkspaceRegistryTable: linearIntegration.workspaceRegistryTable,
+      // Persist screenshot_url on the deploy task so the
+      // orchestration reconciler can embed the integration node's combined
+      // preview in the parent epic panel.
+      taskTable: taskTable.table,
     });
+
+    // Re-stacking dependents is NOT a GitHub-webhook path. It runs inside the
+    // orchestration reconciler (off the TaskTable stream): when a Linear
+    // @bgagent comment re-iterates a sub-issue's PR (coding/pr-iteration-v1)
+    // and that task completes, the reconciler cascades coding/restack-v1
+    // tasks to the changed node's dependents. No inbound pull_request webhook
+    // (those are WAF-blocked by the API's managed rule set anyway), so there
+    // is no RestackProcessor Lambda to wire here.
 
     new CfnOutput(this, 'GitHubWebhookUrl', {
       value: `${taskApi.api.url}github/webhook`,
@@ -1014,7 +1367,8 @@ export class AgentStack extends Stack {
               // ("valid min length: 3") — and because the errors below are
               // swallowed and onUpdate never re-fires (static props), that
               // failure silently leaves model-invocation logging DISABLED, which
-              // in turn means Bedrock records no requestMetadata (#215 Track 2).
+              // in turn means Bedrock records no requestMetadata — the input
+              // per-task cost attribution depends on.
             },
             textDataDeliveryEnabled: true,
             imageDataDeliveryEnabled: false,
@@ -1098,5 +1452,109 @@ export class AgentStack extends Stack {
       value: taskApi.appClientId,
       description: 'Cognito App Client ID',
     });
+  }
+}
+
+/**
+ * A churned log-delivery resource to re-pin: the construct child id under the
+ * Runtime, the logical id CFN already has deployed, and (for the account-unique
+ * Source/Destination kinds) the deployed ``Name``. ``liveName`` is omitted for
+ * Delivery links, which have no Name.
+ */
+interface PinnedLogResource {
+  readonly childId: string;
+  readonly liveLogicalId: string;
+  readonly liveName?: string;
+}
+
+/**
+ * Log-delivery logical ids to keep stable, keyed by stack name. Consulted on
+ * every synth — see {@link pinLogDeliveryLogicalIds} for why there is no flag.
+ *
+ * Each entry records what CloudFormation already has for a stack deployed before
+ * the library renamed these resources. Read from `aws cloudformation
+ * list-stack-resources` against the live stack, so the ids are observed, not
+ * constructed — the hash in each one is not reproducible from the construct path
+ * alone, which is precisely why they have to be written down.
+ *
+ * An entry stays until its stack is gone. Removing one while the stack still
+ * exists re-introduces the rename and the failed update that comes with it.
+ */
+const PINNED_LOG_DELIVERY_BY_STACK: Record<string, readonly PinnedLogResource[]> = {
+  'backgroundagent-dev': [
+    {
+      childId: 'ApplicationLogsDeliverySource',
+      liveLogicalId: 'RuntimeCDKSourceAPPLICATIONLOGSbackgroundagentdevRuntimeBC0AE9ED96A02E02',
+      liveName: 'cdk-applicationlogs-source-backgroundagentdevRuntimeBC0AE9ED',
+    },
+    {
+      childId: 'UsageLogsDeliverySource',
+      liveLogicalId: 'RuntimeCDKSourceUSAGELOGSbackgroundagentdevRuntimeBC0AE9ED544FBB22',
+      liveName: 'cdk-usagelogs-source-backgroundagentdevRuntimeBC0AE9ED',
+    },
+    {
+      childId: 'ApplicationLogsDest',
+      liveLogicalId: 'RuntimeCdkLogGroupApplicationLogsDeliverybackgroundagentdevRuntimeBC0AE9EDbackgroundagentdevRuntimeApplicationLogGroup454A95E8DestapplicationlogsE09F77DC',
+      liveName: 'cdk-cwl-Destapplication-logs-dest-backgrounp454A95E829BF8A27',
+    },
+    {
+      childId: 'UsageLogsDest',
+      liveLogicalId: 'RuntimeCdkLogGroupUsageLogsDeliverybackgroundagentdevRuntimeBC0AE9EDbackgroundagentdevRuntimeUsageLogGroup7FA1FA67Destusagelogs9AB608D0',
+      liveName: 'cdk-cwl-Destusage-logs-dest-backgroundagroup7FA1FA67A8A16CEE',
+    },
+    // Delivery links: logical-id pin only (no Name — unique per source/dest pair).
+    {
+      childId: 'ApplicationLogsDelivery',
+      liveLogicalId: 'RuntimeCdkLogGroupApplicationLogsDeliverybackgroundagentdevRuntimeBC0AE9EDbackgroundagentdevRuntimeApplicationLogGroup454A95E8Delivery92FE492C',
+    },
+    {
+      childId: 'UsageLogsDelivery',
+      liveLogicalId: 'RuntimeCdkLogGroupUsageLogsDeliverybackgroundagentdevRuntimeBC0AE9EDbackgroundagentdevRuntimeUsageLogGroup7FA1FA67Delivery40F023D7',
+    },
+  ],
+};
+
+/**
+ * Pin the auto-created log-delivery resources to stable logical ids, ALWAYS.
+ *
+ * These resources are created for us by the AgentCore Runtime and named after
+ * whatever construct path the library uses internally, so a library-side rename
+ * silently renames them — and a renamed resource is, to CloudFormation, a new
+ * one to create before the old is deleted. That is fatal here: a DeliverySource
+ * is unique per (resource ARN, log type) account-wide, the runtime ARN is
+ * unchanged by a rename, so the create collides with the live source and the
+ * update rolls the whole stack back. Owning the ids ourselves decouples us from
+ * the library's internal naming.
+ *
+ * Applied unconditionally rather than behind a flag. Three cases, all safe:
+ *
+ *  - An existing stack in the account that owns these resources: the ids match
+ *    what CloudFormation already recorded, so it updates them in place. This is
+ *    the case that was broken.
+ *  - A fresh stack or account: nothing owns these names yet, so they create
+ *    normally. The ids are ours rather than the library's, which is the point;
+ *    the values themselves carry no meaning beyond being stable.
+ *  - Any other name: the ids embed the stack name, so each stack gets its own.
+ *
+ * The values were read off a stack deployed before the rename. Do not "tidy"
+ * them — they are a record of what CloudFormation already has, and editing one
+ * re-breaks exactly the update path this exists to protect.
+ */
+function pinLogDeliveryLogicalIds(runtime: agentcore.Runtime): void {
+  const stack = Stack.of(runtime);
+  const pins = PINNED_LOG_DELIVERY_BY_STACK[stack.stackName];
+  // Only the stack these ids were recorded from can use them: they embed that
+  // stack's name. Any other stack keeps the library's own naming, which is
+  // correct for it — it has no pre-rename resources to line up with.
+  if (!pins) return;
+
+  for (const pin of pins) {
+    const res = runtime.node.tryFindChild(pin.childId) as CfnResource | undefined;
+    // A future library rename moves the child, so the pin stops matching. Skip
+    // rather than throw: the stack still deploys, and the next update that hits
+    // the collision is the signal to re-record the ids from the live stack.
+    if (!res) continue;
+    res.overrideLogicalId(pin.liveLogicalId);
+    if (pin.liveName !== undefined) res.addPropertyOverride('Name', pin.liveName);
   }
 }

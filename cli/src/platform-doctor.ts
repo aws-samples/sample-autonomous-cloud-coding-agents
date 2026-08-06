@@ -24,9 +24,11 @@ import {
   DescribeUserPoolCommand,
 } from '@aws-sdk/client-cognito-identity-provider';
 import { isGithubTokenConfigured } from './github-token';
+import { checkLinearWorkspaceAuth, type LinearProbe, type LinearRefreshVerifier } from './linear-auth-health';
 import { PLATFORM_REPO_DEFAULTS } from './repo-display';
 import { countActiveRepos } from './repo-lookup';
 import { getStackOutput } from './stack-outputs';
+import { makeClient } from './ua';
 
 /**
  * Default foundation model checked when no onboarded repo specifies model_id.
@@ -51,6 +53,14 @@ export interface DoctorCheckResult {
 export interface RunPlatformDoctorOptions {
   readonly region: string;
   readonly stackName: string;
+  /** Injectable Linear auth probe (tests supply a fake; production uses the default). */
+  readonly linearProbe?: LinearProbe;
+  /**
+   * Opt-in resolver for the indeterminate auth state. Absent by default because
+   * it rotates a real token (safely — it persists the rotation), which an
+   * operator should choose rather than have a read-only-looking command do.
+   */
+  readonly linearVerifyRefresh?: LinearRefreshVerifier;
 }
 
 /** Smoke-check deployed platform readiness (operator AWS credentials). */
@@ -64,12 +74,14 @@ export async function runPlatformDoctor(
     appClientId,
     githubTokenSecretArn,
     repoTableName,
+    linearRegistryTableName,
   ] = await Promise.all([
     getStackOutput(region, stackName, 'ApiUrl'),
     getStackOutput(region, stackName, 'UserPoolId'),
     getStackOutput(region, stackName, 'AppClientId'),
     getStackOutput(region, stackName, 'GitHubTokenSecretArn'),
     getStackOutput(region, stackName, 'RepoTableName'),
+    getStackOutput(region, stackName, 'LinearWorkspaceRegistryTableName'),
   ]);
 
   const checks: DoctorCheckResult[] = [];
@@ -79,6 +91,9 @@ export async function runPlatformDoctor(
   checks.push(await checkGithubToken(region, githubTokenSecretArn));
   checks.push(await checkActiveRepos(region, repoTableName));
   checks.push(await checkBedrockModel(region, DEFAULT_BEDROCK_MODEL_ID));
+  checks.push(await checkLinearAuth(
+    region, linearRegistryTableName, options.linearProbe, options.linearVerifyRefresh,
+  ));
 
   return checks;
 }
@@ -132,7 +147,7 @@ async function checkCognitoConfig(
     };
   }
 
-  const cognito = new CognitoIdentityProviderClient({ region });
+  const cognito = makeClient(CognitoIdentityProviderClient, { region });
   try {
     await cognito.send(new DescribeUserPoolCommand({ UserPoolId: userPoolId }));
     await cognito.send(new DescribeUserPoolClientCommand({
@@ -211,7 +226,7 @@ async function checkActiveRepos(
 async function checkBedrockModel(region: string, modelId: string): Promise<DoctorCheckResult> {
   const id = 'bedrock_model';
   const label = `Bedrock model catalog (${modelId})`;
-  const bedrock = new BedrockClient({ region });
+  const bedrock = makeClient(BedrockClient, { region });
   try {
     await bedrock.send(new GetFoundationModelCommand({ modelIdentifier: modelId }));
     return {
@@ -228,6 +243,90 @@ async function checkBedrockModel(region: string, modelId: string): Promise<Docto
       label,
       status,
       detail: `${message} Enable model access in the Bedrock console if tasks fail at invoke time.`,
+    };
+  }
+}
+
+/**
+ * Linear workspaces whose OAuth authorization has died. This is the one failure
+ * mode that is otherwise INVISIBLE: the webhook processor can't resolve a token,
+ * drops the event, and the user sees their label do nothing at all. A revoked
+ * authorization is a total outage for that workspace, so it fails the check; an
+ * expired-but-refreshable token is normal and self-healing, so it doesn't.
+ */
+async function checkLinearAuth(
+  region: string,
+  registryTableName: string | null,
+  probe?: LinearProbe,
+  verifyRefresh?: LinearRefreshVerifier,
+): Promise<DoctorCheckResult> {
+  const id = 'linear_workspace_auth';
+  const label = 'Linear workspace authorizations live';
+  if (!registryTableName) {
+    // Linear is optional — a stack with no Linear integration is not broken.
+    return { id, label, status: 'pass', detail: 'No Linear workspace registry on this stack (integration not deployed).' };
+  }
+
+  try {
+    const health = await checkLinearWorkspaceAuth({
+      region,
+      registryTableName,
+      ...(probe && { probe }),
+      ...(verifyRefresh && { verifyRefresh }),
+    });
+    if (health.length === 0) {
+      return { id, label, status: 'pass', detail: 'No Linear workspaces onboarded yet.' };
+    }
+
+    const revoked = health.filter((w) => w.state === 'revoked');
+    // Indeterminate is NOT healthy. It is the exact shape of the workspace whose
+    // authorization died on 2026-07-25 — expired access token, refresh token
+    // present but dead — and reporting it as a pass is how that outage stayed
+    // invisible for over an hour. It is a warn rather than a fail because the
+    // same shape is also a perfectly healthy idle workspace, and failing every
+    // quiet workspace would train operators to ignore the check.
+    const indeterminate = health.filter((w) => w.state === 'expired_indeterminate');
+    const unknown = health.filter((w) => w.state === 'unknown');
+    const summary = health
+      .map((w) => `${w.workspaceSlug}=${w.state}`)
+      .join(', ');
+
+    if (revoked.length > 0) {
+      const remedies = revoked.map((w) => `  ${w.workspaceSlug}: ${w.detail}`).join('\n');
+      return {
+        id,
+        label,
+        status: 'fail',
+        detail: `${revoked.length} of ${health.length} workspace(s) have a REVOKED authorization — their `
+          + `Linear events are being dropped silently.\n${remedies}\n  (${summary})`,
+      };
+    }
+    if (indeterminate.length > 0) {
+      return {
+        id,
+        label,
+        status: 'warn',
+        detail: `${indeterminate.length} of ${health.length} workspace(s) could NOT be confirmed `
+          + 'authorized — an expired access token looks identical whether the refresh token behind it '
+          + 'is alive or revoked. Re-run `bgagent platform doctor --verify-refresh` to settle it '
+          + `(that performs the refresh the platform would, and persists the rotated token).\n  (${summary})`,
+      };
+    }
+    if (unknown.length > 0) {
+      return {
+        id,
+        label,
+        status: 'warn',
+        detail: `Could not assess ${unknown.length} of ${health.length} workspace(s): ${summary}`,
+      };
+    }
+    return { id, label, status: 'pass', detail: `${health.length} workspace(s) authorized: ${summary}` };
+  } catch (err) {
+    return {
+      id,
+      label,
+      status: 'warn',
+      detail: `Could not read the Linear workspace registry: ${err instanceof Error ? err.message : String(err)}`,
     };
   }
 }

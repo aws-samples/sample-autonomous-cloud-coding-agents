@@ -79,6 +79,7 @@ export function observabilityPolicy(): iam.PolicyDocument {
           'cloudwatch:TagResource',
           'cloudwatch:UntagResource',
           'logs:CreateDelivery',
+          'logs:UpdateDeliveryConfiguration',
           'logs:DescribeDeliveries',
           'logs:GetDelivery',
           'logs:GetDeliveryDestination',

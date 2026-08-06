@@ -90,6 +90,10 @@ run = "node --experimental-strip-types scripts/check-constants-sync.ts"
 description = "Drift check: contracts/coverage-thresholds.json ↔ cdk/cli jest coverageThreshold and agent pytest fail_under"
 run = "node --experimental-strip-types scripts/check-coverage-thresholds-sync.ts"
 
+[tasks."test:jira-forge-app"]
+description = "Test the standalone Jira Forge app-actor proxy"
+run = "npm test --prefix integrations/jira-forge-app"
+
 [tasks."sync:abca-commands"]
 description = "Generate commands stubs from .abca/commands for multiple AI assistants"
 run = "node scripts/sync-abca-commands.mjs"
@@ -102,6 +106,10 @@ run = "yarn knip"
 description = "Dead-code ratchet (#282): fail only if knip's issue count rises above knip-baseline.json. Advisory in CI for now; flips to blocking once the baseline is driven to zero."
 run = "node scripts/check-deadcode-ratchet.mjs"
 
+[tasks."check:transitive-pin-sync"]
+description = "Transitive-pin sync guard (#712): fail if a package pinned in root `resolutions` resolves below that floor in integrations/jira-forge-app's npm lockfile — the standalone project root `resolutions` can't reach."
+run = "node scripts/check-transitive-pin-sync.mjs"
+
 [tasks."drift-prevention"]
 description = "Run checks to prevent drift in contracts between packages and documentation links"
 run = [
@@ -109,6 +117,7 @@ run = [
   { task = "check:constants-sync" },
   { task = "check:types-sync" },
   { task = "check:coverage-thresholds-sync" },
+  { task = "check:transitive-pin-sync" },
   { task = "//docs:link-check" },
 ]
 
@@ -153,7 +162,7 @@ run = [
 [tasks."security:deps"]
 description = "Audit dependencies for known vulnerabilities (osv-scanner)"
 # Yarn workspaces use the repo-root lockfile only; do not scan stale cli/docs yarn.lock copies.
-run = "osv-scanner scan --lockfile agent/uv.lock --lockfile yarn.lock"
+run = "osv-scanner scan --lockfile agent/uv.lock --lockfile yarn.lock --lockfile integrations/jira-forge-app/package-lock.json"
 
 [tasks."security:grype"]
 description = "Run Grype on source files; generated/vendor dirs are excluded because lockfile, Retire, and image scans cover dependencies and runtime artifacts"
@@ -233,6 +242,7 @@ depends = [
   "//cdk:build",
   "//cli:build",
   "//docs:build",
+  ":test:jira-forge-app",
   ":drift-prevention"
 ]
 

@@ -54,7 +54,7 @@ Rules:
 - The PR title and description become the squash commit message, so keep them accurate throughout the review.
 - The CI workflow runs `mise run install` then `mise run build` (compile + lint + test + synth + security scans for all packages).
 - Iterate on review feedback by pushing new commits to the same branch. Maintainers squash-merge when approved.
-- For structured reviews (human or agent), use the [`review_pr` command](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/.abca/commands/review_pr.md) — including the **human review heuristics** (Proportionality, Coherence, Clarity, Appropriateness) for smell dimensions automation cannot catch.
+- For structured reviews (human or agent), use the [`review_pr` command](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/.abca/commands/review_pr.md) — including the **human review heuristics** (Proportionality, Coherence, Clarity, Appropriateness) for smell dimensions automation cannot catch. To review a queue of PRs in one pass, use the [`review_prs` command](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/.abca/commands/review_prs.md), which derives a filtered work-list and runs `review_pr` across each.
 
 ### PR checklist
 

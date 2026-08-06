@@ -75,6 +75,11 @@ export interface ErrorClassification {
   readonly description: string;
   readonly remedy: string;
   readonly retryable: boolean;
+  /** Retry-semantics axis: transient (self-heals on retry) vs service (admin
+   *  must fix) vs user (change the request/code). Optional (older classifications
+   *  omit it; absent ⇒ user). Inlined (not a named export) to mirror the cdk
+   *  ErrorClassification field without introducing a CLI-only exported type. */
+  readonly errorClass?: 'transient' | 'service' | 'user';
 }
 
 /** Task detail returned by GET /v1/tasks/{task_id}. */
@@ -409,6 +414,49 @@ export interface CreateWebhookResponse {
   readonly webhook_id: string;
   readonly name: string;
   readonly secret: string;
+  readonly created_at: string;
+}
+
+/**
+ * Scopes a platform API key may hold. Mirrors
+ * ``cdk/src/handlers/shared/types.ts`` per the CLI types-sync contract.
+ */
+export type ApiKeyScope = 'webhooks:manage' | 'webhooks:invoke' | 'tasks:read' | 'tasks:cancel';
+
+/** Scopes recognized by the platform. Order is not significant. */
+export const API_KEY_SCOPES: readonly ApiKeyScope[] = [
+  'webhooks:manage',
+  'webhooks:invoke',
+  'tasks:read',
+  'tasks:cancel',
+];
+
+/** Platform API key detail returned by API responses. */
+export interface ApiKeyDetail {
+  readonly key_id: string;
+  readonly name: string;
+  readonly scopes: readonly ApiKeyScope[];
+  readonly status: 'active' | 'revoked';
+  readonly created_at: string;
+  readonly updated_at: string;
+  readonly expires_at: string | null;
+  readonly revoked_at: string | null;
+}
+
+/** Create API key request body for POST /v1/api-keys. */
+export interface CreateApiKeyRequest {
+  readonly name: string;
+  readonly scopes?: readonly ApiKeyScope[];
+  readonly expires_at?: string;
+}
+
+/** Create API key response — includes the key material (shown only once). */
+export interface CreateApiKeyResponse {
+  readonly key_id: string;
+  readonly name: string;
+  readonly key: string;
+  readonly scopes: readonly ApiKeyScope[];
+  readonly expires_at: string | null;
   readonly created_at: string;
 }
 

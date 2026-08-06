@@ -17,9 +17,9 @@
  *  SOFTWARE.
  */
 
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand } from '@aws-sdk/lib-dynamodb';
 import { logger } from './logger';
+import { makeDocClient } from './ua';
 
 /**
  * Per-repository configuration written by the Blueprint CDK construct
@@ -40,6 +40,14 @@ export interface RepoConfig {
   readonly system_prompt_overrides?: string;
   readonly github_token_secret_arn?: string;
   readonly poll_interval_ms?: number;
+  /**
+   * Per-repo build/lint verification commands (#1 build-gate fix). The agent
+   * runs these to gate build/lint regressions before opening a PR; default to
+   * ``mise run build`` / ``mise run lint`` when unset. Set for non-mise repos
+   * (e.g. ``npm run build``) so build-regression gating actually works.
+   */
+  readonly build_command?: string;
+  readonly lint_command?: string;
   readonly egress_allowlist?: string[];
   readonly cedar_policies?: string[];
   /**
@@ -67,6 +75,9 @@ export interface BlueprintConfig {
   readonly system_prompt_overrides?: string;
   readonly github_token_secret_arn?: string;
   readonly poll_interval_ms?: number;
+  /** Per-repo build/lint verification commands (#1). Default mise when unset. The orchestrator threads these into the agent payload. */
+  readonly build_command?: string;
+  readonly lint_command?: string;
   readonly egress_allowlist?: string[];
   readonly cedar_policies?: string[];
   /**
@@ -79,7 +90,7 @@ export interface BlueprintConfig {
   readonly approval_gate_cap?: number;
 }
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const ddb = makeDocClient();
 
 /**
  * Combined result of a single RepoTable GetItem used by the submit

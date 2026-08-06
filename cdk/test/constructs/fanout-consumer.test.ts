@@ -165,6 +165,68 @@ describe('FanOutConsumer', () => {
     });
   });
 
+  test('wires JIRA_WORKSPACE_REGISTRY_TABLE_NAME + the bgagent-jira-oauth-* grant when the Jira props are provided (#573)', () => {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack');
+    const jiraRegistry = new dynamodb.Table(stack, 'JiraRegistry', {
+      partitionKey: { name: 'jira_cloud_id', type: dynamodb.AttributeType.STRING },
+    });
+    new FanOutConsumer(stack, 'FanOut', {
+      taskEventsTable: makeTaskEventsTable(stack),
+      jiraWorkspaceRegistryTable: jiraRegistry,
+      jiraOauthSecretArnPattern:
+        'arn:aws:secretsmanager:us-east-1:111122223333:secret:bgagent-jira-oauth-*',
+    });
+    const template = Template.fromStack(stack);
+
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: {
+        Variables: Match.objectLike({
+          JIRA_WORKSPACE_REGISTRY_TABLE_NAME: Match.anyValue(),
+        }),
+      },
+    });
+    // The resolver rotates an expiring token in place → needs Put as well
+    // as Get, scoped to the per-tenant secret prefix (same shape as Linear).
+    template.hasResourceProperties('AWS::IAM::Policy', {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Action: ['secretsmanager:GetSecretValue', 'secretsmanager:PutSecretValue'],
+            Effect: 'Allow',
+            Resource: Match.stringLikeRegexp('bgagent-jira-oauth-\\*'),
+          }),
+        ]),
+      },
+    });
+  });
+
+  test('omits the JIRA env var + bgagent-jira-oauth-* grant when the Jira props are absent (graceful degrade)', () => {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack');
+    new FanOutConsumer(stack, 'FanOut', {
+      taskEventsTable: makeTaskEventsTable(stack),
+      // intentionally no Jira props
+    });
+    const template = Template.fromStack(stack);
+
+    const fns = template.findResources('AWS::Lambda::Function');
+    for (const fn of Object.values(fns)) {
+      const vars = ((fn as { Properties?: { Environment?: { Variables?: Record<string, unknown> } } })
+        .Properties?.Environment?.Variables) ?? {};
+      expect(vars.JIRA_WORKSPACE_REGISTRY_TABLE_NAME).toBeUndefined();
+    }
+    const policies = template.findResources('AWS::IAM::Policy');
+    for (const policy of Object.values(policies)) {
+      const stmts = (policy as { Properties?: { PolicyDocument?: { Statement?: unknown[] } } })
+        .Properties?.PolicyDocument?.Statement ?? [];
+      for (const stmt of stmts) {
+        const resource = JSON.stringify((stmt as { Resource?: unknown }).Resource ?? '');
+        expect(resource.includes('bgagent-jira-oauth')).toBe(false);
+      }
+    }
+  });
+
   test('passes TASK_TABLE_NAME env var when taskTable is provided', () => {
     // The Slack dispatcher requires this env var (review #3); the
     // construct must wire it from the prop. Its absence triggers the

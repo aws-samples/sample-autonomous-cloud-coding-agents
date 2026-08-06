@@ -27,12 +27,12 @@
  * designed to prevent: someone re-introducing a literal declaration of
  * one of these constants in code.
  *
- * The TypeScript side is enforced by the compiler — every consumer
- * imports the JSON via ``resolveJsonModule``, so a missing or renamed
- * field fails ``tsc``. The Python side has no equivalent; this script
- * walks ``agent/src/policy.py`` and rejects any line that assigns a
- * known constant name to a numeric literal instead of reading the
- * JSON.
+ * The CDK TypeScript side is enforced by the compiler: consumers import
+ * the JSON via ``resolveJsonModule``, so a missing or renamed field fails
+ * ``tsc``. The Python side has no equivalent, so this script walks the
+ * agent consumers and rejects known constants assigned to numeric or
+ * string literals instead of reading the JSON. The published CLI's
+ * package-safe mirrors are covered by ``cli/test/constants-parity.test.ts``.
  *
  * Run via ``mise run check:constants-sync`` or
  * ``node --experimental-strip-types scripts/check-constants-sync.ts``.
@@ -46,6 +46,8 @@ import * as path from 'node:path';
 const REPO_ROOT = path.resolve(import.meta.dirname, '..');
 const CONSTANTS_JSON = path.join(REPO_ROOT, 'contracts/constants.json');
 const POLICY_PY = path.join(REPO_ROOT, 'agent/src/policy.py');
+const JIRA_REACTIONS_PY = path.join(REPO_ROOT, 'agent/src/jira_reactions.py');
+const PYTHON_CONSUMERS = [POLICY_PY, JIRA_REACTIONS_PY];
 
 /**
  * Constant names that ``contracts/constants.json`` owns and the
@@ -61,6 +63,8 @@ const OWNED_PYTHON_PATTERNS: ReadonlyArray<{ name: string; regex: RegExp }> = [
   { name: 'APPROVAL_GATE_CAP_MAX', regex: /^\s*APPROVAL_GATE_CAP_MAX\s*(?::\s*int)?\s*=\s*-?\d+\b/m },
   { name: 'FLOOR_TIMEOUT_S', regex: /^\s*FLOOR_TIMEOUT_S\s*(?::\s*int)?\s*=\s*-?\d+\b/m },
   { name: 'DEFAULT_TASK_TIMEOUT_S', regex: /^\s*DEFAULT_TASK_TIMEOUT_S\s*(?::\s*int)?\s*=\s*-?\d+\b/m },
+  { name: 'APP_ACTOR_MIN_SECRET_LENGTH', regex: /^\s*APP_ACTOR_MIN_SECRET_LENGTH\s*(?::\s*int)?\s*=\s*\d+\b/m },
+  { name: 'FORGE_WEBTRIGGER_SUFFIX', regex: /^\s*FORGE_WEBTRIGGER_SUFFIX\s*(?::\s*str)?\s*=\s*["']/m },
 ];
 
 interface Drift {
@@ -88,6 +92,7 @@ function main(): number {
   let json: {
     approval_gate_cap?: { min: number; max: number; default: number };
     approval_timeout_s?: { min: number; max: number; default: number };
+    jira_app_actor?: { min_secret_length: number; forge_webtrigger_suffix: string };
   };
   try {
     json = JSON.parse(fs.readFileSync(CONSTANTS_JSON, 'utf-8'));
@@ -107,6 +112,18 @@ function main(): number {
     console.error(`${CONSTANTS_JSON} is missing approval_timeout_s.{min,max,default}`);
     return 1;
   }
+  const jiraAppActor = json.jira_app_actor;
+  if (
+    !jiraAppActor
+    || typeof jiraAppActor.min_secret_length !== 'number'
+    || typeof jiraAppActor.forge_webtrigger_suffix !== 'string'
+  ) {
+    console.error(
+      `${CONSTANTS_JSON} is missing ` +
+      'jira_app_actor.{min_secret_length,forge_webtrigger_suffix}',
+    );
+    return 1;
+  }
 
   // Semantic invariants (belt-and-suspenders — agent also validates at import time)
   const invariantErrors: string[] = [];
@@ -116,6 +133,12 @@ function main(): number {
   if (ats.min <= 0) invariantErrors.push('approval_timeout_s.min must be > 0');
   if (ats.default < ats.min) invariantErrors.push('approval_timeout_s.default must be >= min');
   if (ats.max < ats.default) invariantErrors.push('approval_timeout_s.max must be >= default');
+  if (jiraAppActor.min_secret_length < 32) {
+    invariantErrors.push('jira_app_actor.min_secret_length must be >= 32');
+  }
+  if (!jiraAppActor.forge_webtrigger_suffix.startsWith('.')) {
+    invariantErrors.push('jira_app_actor.forge_webtrigger_suffix must start with "."');
+  }
 
   if (invariantErrors.length > 0) {
     console.error(`Semantic invariant violations in ${CONSTANTS_JSON}:\n`);
@@ -123,7 +146,7 @@ function main(): number {
     return 1;
   }
 
-  const drifts = findDriftInPython(POLICY_PY);
+  const drifts = PYTHON_CONSUMERS.flatMap(findDriftInPython);
 
   if (drifts.length > 0) {
     console.error('Cross-language constants drift detected:\n');
@@ -140,7 +163,8 @@ function main(): number {
 
   console.log(
     `Constants sync OK: contracts/constants.json validated; ` +
-      `${OWNED_PYTHON_PATTERNS.length} Python names checked in ${path.relative(REPO_ROOT, POLICY_PY)}.`,
+      `${OWNED_PYTHON_PATTERNS.length} Python names checked across ` +
+      `${PYTHON_CONSUMERS.length} consumers.`,
   );
   return 0;
 }

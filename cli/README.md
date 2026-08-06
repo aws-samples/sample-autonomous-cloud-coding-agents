@@ -302,15 +302,26 @@ With no flags, writes to the platform default `GitHubTokenSecretArn` stack outpu
 
 Configure the preview-deploy screenshot pipeline webhook. See [Deploy preview screenshots guide](../docs/guides/DEPLOY_PREVIEW_SCREENSHOTS_GUIDE.md).
 
-### `bgagent jira setup` / `map` / `invite-user` / `link`
+### `bgagent jira app-template` / `setup` / `app-setup` / `map` / `invite-user` / `link`
 
-Manage the Jira Cloud integration. `setup` authorizes a tenant via OAuth (3LO) and stores the token in Secrets Manager; `map` routes a Jira project to a GitHub repo; the two-step `invite-user` → `link` handshake links a teammate's Jira identity to their platform user. See the [Jira setup guide](../docs/guides/JIRA_SETUP_GUIDE.md) for the full walkthrough.
+Manage the Jira Cloud integration. `setup` authorizes a tenant via OAuth (3LO) for inbound reads and human lookup. `app-setup` verifies and stores the signed Forge proxy used for outbound comments and transitions as the dedicated `bgagent` app actor. `map` routes a Jira project to a GitHub repo; the two-step `invite-user` → `link` handshake links a teammate's Jira identity to their platform user. See the [Jira setup guide](../docs/guides/JIRA_SETUP_GUIDE.md) for Forge deployment, secret handling, permissions, and the full walkthrough.
 
 ```
-bgagent jira setup \
-  --stack-name backgroundagent-dev
+bgagent jira app-template
 
-bgagent jira map <cloud-id> <PROJECT-KEY> --repo owner/repo
+bgagent jira setup \
+  --region <region> \
+  --stack-name <stack-name>
+
+bgagent jira app-setup <cloud-id> \
+  --proxy-url https://<installation>.webtrigger.atlassian.app/public/<id> \
+  --region <region> \
+  --stack-name <stack-name>
+
+bgagent jira map <cloud-id> <PROJECT-KEY> \
+  --repo owner/repo \
+  --region <region> \
+  --stack-name <stack-name>
 
 bgagent jira invite-user <cloud-id> <account-id-or-email> \
   --region <region>            AWS region (defaults to configured region) \
@@ -318,6 +329,8 @@ bgagent jira invite-user <cloud-id> <account-id-or-email> \
 
 bgagent jira link <code>
 ```
+
+All Jira admin commands default to `backgroundagent-dev`; pass `--stack-name` for every custom stack. `app-setup` prompts for `BGAGENT_PROXY_SECRET` so the value stays out of shell history and refuses to save unless the Forge identity probe returns `accountType=app` from the expected Jira site.
 
 `invite-user` resolves the teammate's Jira identity through the tenant OAuth token, then writes a `pending#<code>` row (24h TTL) and prints the `bgagent jira link <code>` the teammate runs from their own machine. The teammate previews the Jira identity before confirming, so a wrong pick can be aborted rather than misattributed. If the identity is already linked, the command warns but still issues the code.
 

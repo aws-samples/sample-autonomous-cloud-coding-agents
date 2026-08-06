@@ -20,7 +20,6 @@
 import { execFile } from 'child_process';
 import * as readline from 'readline';
 import { CloudFormationClient, DescribeStacksCommand } from '@aws-sdk/client-cloudformation';
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
   CreateSecretCommand,
   GetSecretValueCommand,
@@ -43,10 +42,13 @@ import {
   generatePkce,
   LINEAR_OAUTH_SECRET_PREFIX,
   linearOauthSecretName,
+  readExistingWebhookSecret,
+  resolveWebhookSecretAction,
   StoredLinearOauthToken,
 } from '../linear-oauth';
 import { awaitOauthCallback, CALLBACK_URL } from '../oauth-callback-server';
 import { promptSecret } from '../prompt-secret';
+import { makeClient, makeDocClient } from '../ua';
 
 /** Default label that triggers an ABCA task when applied to a Linear issue. */
 const DEFAULT_LABEL_FILTER = 'bgagent';
@@ -111,12 +113,18 @@ export function renderLinearAppTemplate(opts: LinearAppTemplateOptions = {}): st
     '',
     'Click Save, copy the Client ID and Client Secret, then return here.',
     '',
-    'Why these specific fields:',
-    '  • GitHub username with [bot] suffix gates the actor=app agent flow.',
-    '    Without it, Linear surfaces a misleading "Invalid redirect_uri" error.',
+    'Non-obvious gotchas (Linear explains the fields themselves inline):',
+    '  • GitHub username is REQUIRED for actor=app — leaving it blank surfaces a',
+    '    misleading "Invalid redirect_uri" error, not a "missing username" one.',
     '  • Webhooks toggle must be ON for the same reason; the URL value is unused',
     '    by the OAuth dance and can be a placeholder.',
     '  • Wildcard callback URLs are not accepted by Linear; list each URL fully.',
+    '  • Do NOT enable Linear "agent" / app-notification events on this app. ABCA',
+    '    is a COMMENT-based integration (it replies + reacts on ordinary comments).',
+    '    With agent events on, Linear renders an @mention of the app as its',
+    '    interactive agent-activity surface instead of a comment thread, which',
+    '    breaks the reply/reaction UX. Leave agent/app events OFF; the trigger comes',
+    '    from the workspace webhook (Issues + Comments), configured separately next.',
     bar,
   ].join('\n');
 }
@@ -371,7 +379,9 @@ export function makeLinearCommand(): Command {
         console.log('In Linear → Settings → API → Webhooks → + New webhook, paste:');
         console.log();
         console.log(`  URL:             ${webhookUrl}`);
-        console.log('  Resource types:  Issues');
+        console.log('  Resource types:  Issues, Comments');
+        console.log('                   (Issues = label-triggered tasks + epic orchestration;');
+        console.log('                    Comments = @bgagent re-iteration on a sub-issue PR)');
         console.log('  Team:            (whichever team owns the projects you map)');
         console.log();
         console.log('Save, then open the webhook detail page and copy the signing secret');
@@ -444,6 +454,7 @@ export function makeLinearCommand(): Command {
       .option('--client-secret <secret>', 'Linear OAuth app Client Secret (else prompted; prefer interactive)')
       .option('--no-browser', 'Print the authorization URL instead of opening a browser (for SSH/headless)')
       .option('--no-actor-app', 'Drop actor=app from the OAuth flow (diagnostic: isolates whether agent-install is blocking)')
+      .option('--no-force-consent', 'Omit prompt=consent (diagnostic: restores the pre-fix behaviour that dead-ends on an already-installed app)')
       .action(async (slug: string, opts) => {
         if (!SLUG_RE.test(slug)) {
           throw new CliError(
@@ -522,6 +533,11 @@ export function makeLinearCommand(): Command {
           state,
           codeChallenge: pkce.codeChallenge,
           actorApp: useActorApp,
+          // Always force the consent screen. A FRESH install shows it anyway, so
+          // this only changes the already-installed case — which without it
+          // dead-ends on "already installed" and returns no code, making a
+          // revoked-but-installed workspace unrecoverable by this command.
+          forceConsent: opts.forceConsent !== false,
         });
         if (!useActorApp) {
           console.log('  ⚠ --no-actor-app: dropping actor=app for diagnosis. Token will not be agent-scoped.');
@@ -599,8 +615,45 @@ export function makeLinearCommand(): Command {
 
         // ─── Step 4: Persist token to per-workspace Secrets Manager ───
         process.stdout.write('  → Storing OAuth token...');
-        const sm = new SecretsManagerClient({ region });
+        const sm = makeClient(SecretsManagerClient, { region });
         const now = new Date().toISOString();
+        // Preserve any EXISTING per-workspace webhook signing secret before the
+        // OAuth overwrite below. Re-running `setup` on an already-installed
+        // workspace must NOT clobber its working signing secret with the
+        // stack-wide fallback (which belongs to whichever workspace installed
+        // first) — that silently breaks signature verification (401 "Invalid
+        // signature") for every workspace after the first in a multi-workspace
+        // deployment. Rotation stays the job of `update-webhook-secret`.
+        // Fail CLOSED: read this workspace's existing signing secret before the
+        // overwrite. Only ResourceNotFoundException is a clean first-install;
+        // any other Secrets Manager error (AccessDenied, KMSAccessDenied,
+        // Throttling, network) — or a corrupt bundle — must surface, NOT default
+        // to undefined (which would mirror the stack-wide secret over a working
+        // per-workspace one, producing a silent 401 on every webhook delivery
+        // behind a green "Setup complete"). Extracted to
+        // readExistingWebhookSecret + unit-tested.
+        let existingWebhookSecret: string | undefined;
+        try {
+          existingWebhookSecret = await readExistingWebhookSecret(
+            async () => {
+              const prior = await sm.send(new GetSecretValueCommand({ SecretId: linearOauthSecretName(slug) }));
+              return prior.SecretString;
+            },
+            (err) => (err as { name?: string }).name === 'ResourceNotFoundException',
+          );
+        } catch (err) {
+          const errorName = (err as { name?: string }).name;
+          const message = err instanceof Error ? err.message : String(err);
+          throw new CliError(
+            `Failed to read the existing Linear webhook secret for '${slug}' before re-write: `
+            + `${errorName ?? 'Error'}: ${message}. Refusing to proceed — continuing could clobber `
+            + 'this workspace\'s webhook signing secret with the stack-wide value (a 401 on every '
+            + 'delivery). Likely an IAM/KMS gap: confirm your CLI principal has '
+            + '`secretsmanager:GetSecretValue` (and kms:Decrypt if a CMK) on '
+            + `${linearOauthSecretName(slug)}, or run \`bgagent linear update-webhook-secret ${slug}\` `
+            + 'after fixing access.',
+          );
+        }
         const stored: StoredLinearOauthToken = {
           access_token: tokenResponse.access_token,
           refresh_token: tokenResponse.refresh_token ?? '',
@@ -615,6 +668,14 @@ export function makeLinearCommand(): Command {
           installed_at: now,
           updated_at: now,
           installed_by_platform_user_id: cognitoSub,
+          // Fold the preserved secret into the INITIAL bundle so that
+          // the OAuth-secret write below lands the correct bundle in ONE
+          // PutSecretValue, and the preserve path skips the later re-write. This
+          // also closes a narrow window — if any fallible step between the two
+          // writes threw, the bundle was left persisted WITHOUT the secret (401
+          // until update-webhook-secret). Only set for a real `lin_wh_` value;
+          // mirror-stackwide / prompt cases add it in the mirror-back below.
+          ...(existingWebhookSecret ? { webhook_signing_secret: existingWebhookSecret } : {}),
         };
         if (!stored.refresh_token) {
           throw new CliError(
@@ -627,11 +688,11 @@ export function makeLinearCommand(): Command {
         console.log(` ✓ (${secretName})`);
 
         // ─── Step 5: Persist registry + user-mapping rows ─────────────
-        const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
+        const ddb = makeDocClient({ region });
 
         // Best-effort: fetch team keys so the screenshot processor can
-        // prefix-route Linear issue lookups (e.g. ABCA-42 → workspace
-        // owning ABCA) instead of scanning every active workspace.
+        // prefix-route Linear issue lookups (e.g. ENG-42 → the workspace
+        // owning the ENG team) instead of scanning every active workspace.
         const teamKeys = await queryLinearTeamKeys(`Bearer ${tokenResponse.access_token}`);
         await ddb.send(new PutCommand({
           TableName: workspaceRegistryTable!,
@@ -676,19 +737,41 @@ export function makeLinearCommand(): Command {
         // without re-onboarding. Multi-workspace installs need each
         // workspace to own its own per-workspace signing secret — only
         // the FIRST install can populate the stack-wide one usefully.
-        // If stack-wide is already populated, this is either a re-run
-        // of setup on the SAME workspace or the FIRST workspace of a
-        // future multi-workspace install. Either way the stored value
-        // is this workspace's signing secret — lift it into the
-        // per-workspace bundle without prompting (auto-migration to
-        // the new shape). Rotation is not setup's job: use
-        // `bgagent linear update-webhook-secret <slug>` to rotate the
-        // signing secret without re-running OAuth.
+        //
+        // resolveWebhookSecretAction picks one of three outcomes from
+        // (existingWebhookSecret, stackWideAlreadyConfigured):
+        //   • preserve      — this workspace ALREADY has its own `lin_wh_`
+        //                     secret (a re-run). Keep it; do NOT overwrite from
+        //                     the stack-wide fallback, which is a DIFFERENT
+        //                     workspace's secret once >1 is installed. The
+        //                     stack-wide value is NOT necessarily this
+        //                     workspace's, so overwriting from it breaks
+        //                     signature verification for this workspace.
+        //   • mirror-stackwide — no per-workspace secret yet but stack-wide is
+        //                     set: mirror it (correct for the first/only
+        //                     workspace; warn for an additional one).
+        //   • prompt        — nothing to go on: ask for the signing secret.
+        // Rotation is not setup's job: use
+        // `bgagent linear update-webhook-secret <slug>` to rotate.
         const stackWideAlreadyConfigured = await isWebhookSecretConfigured(sm, webhookSecretArn!);
         let webhookSigningSecret: string | undefined;
 
-        if (stackWideAlreadyConfigured) {
-          console.log('  ✓ Webhook signing secret already configured stack-wide (mirroring to per-workspace)');
+        const secretAction = resolveWebhookSecretAction(existingWebhookSecret, stackWideAlreadyConfigured);
+        if (secretAction.kind === 'preserve') {
+          // This workspace already had its own signing secret — keep it. Do NOT
+          // overwrite from the stack-wide fallback (a DIFFERENT workspace's
+          // secret once >1 is installed). Re-run case; rotation is
+          // `update-webhook-secret`'s job, not setup's.
+          console.log('  ✓ Preserving this workspace\'s existing webhook signing secret (re-run — not overwriting)');
+          webhookSigningSecret = secretAction.secret;
+        } else if (secretAction.kind === 'mirror-stackwide') {
+          // No per-workspace secret yet, but the stack-wide one is set. Safe to
+          // mirror ONLY when this is the first/only workspace — for a genuinely
+          // new ADDITIONAL workspace the stack-wide secret is the wrong one, so
+          // warn that the operator should verify (or run `update-webhook-secret`).
+          console.log('  ✓ No per-workspace secret yet; mirroring the stack-wide signing secret');
+          console.log('    (if this is an ADDITIONAL workspace, its Linear webhook secret differs —');
+          console.log(`     run \`bgagent linear update-webhook-secret ${slug}\` with this workspace's secret.)`);
           try {
             const value = await sm.send(new GetSecretValueCommand({ SecretId: webhookSecretArn! }));
             if (value.SecretString && value.SecretString.startsWith('lin_wh_')) {
@@ -725,9 +808,11 @@ export function makeLinearCommand(): Command {
           webhookSigningSecret = webhookSecret;
         }
 
-        // Mirror into the per-workspace OAuth secret so the receiver can
-        // look it up by orgId. Re-upsert with the merged payload.
-        if (webhookSigningSecret) {
+        // Mirror into the per-workspace OAuth secret so the receiver can look it
+        // up by orgId. In the PRESERVE case the secret is already in `stored`
+        // (folded above) and was written by the OAuth-secret upsert — no re-write
+        // needed. Only mirror-stackwide / prompt produce a NEW secret to persist.
+        if (webhookSigningSecret && webhookSigningSecret !== stored.webhook_signing_secret) {
           const merged: StoredLinearOauthToken = {
             ...stored,
             webhook_signing_secret: webhookSigningSecret,
@@ -782,6 +867,7 @@ export function makeLinearCommand(): Command {
       .option('--stack-name <name>', 'CloudFormation stack name', 'backgroundagent-dev')
       .option('--no-browser', 'Print the authorization URL instead of opening a browser (for SSH/headless)')
       .option('--no-actor-app', 'Drop actor=app from the OAuth flow (diagnostic)')
+      .option('--no-force-consent', 'Omit prompt=consent (diagnostic)')
       .action(async (slug: string, opts) => {
         if (!SLUG_RE.test(slug)) {
           throw new CliError(
@@ -831,8 +917,8 @@ export function makeLinearCommand(): Command {
           );
         }
 
-        const sm = new SecretsManagerClient({ region });
-        const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
+        const sm = makeClient(SecretsManagerClient, { region });
+        const ddb = makeDocClient({ region });
 
         // ─── Linear OAuth app credentials ──────────────────────────────
         // Always prompt — never accept secrets via flags (shell history
@@ -879,6 +965,11 @@ export function makeLinearCommand(): Command {
           state,
           codeChallenge: pkce.codeChallenge,
           actorApp: useActorApp,
+          // Always force the consent screen. A FRESH install shows it anyway, so
+          // this only changes the already-installed case — which without it
+          // dead-ends on "already installed" and returns no code, making a
+          // revoked-but-installed workspace unrecoverable by this command.
+          forceConsent: opts.forceConsent !== false,
         });
         if (!useActorApp) {
           console.log('  ⚠ --no-actor-app: dropping actor=app for diagnosis. Token will not be agent-scoped.');
@@ -1101,7 +1192,7 @@ export function makeLinearCommand(): Command {
         const config = loadConfig();
         const region = opts.region || config.region;
 
-        const sm = new SecretsManagerClient({ region });
+        const sm = makeClient(SecretsManagerClient, { region });
         const secretName = linearOauthSecretName(slug);
 
         // ─── Read existing bundle ───────────────────────────────────
@@ -1220,8 +1311,8 @@ export function makeLinearCommand(): Command {
         const callerCognitoSub = extractCognitoSub();
 
         // ─── Resolve workspace + OAuth secret arn ──────────────────────
-        const sm = new SecretsManagerClient({ region });
-        const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
+        const sm = makeClient(SecretsManagerClient, { region });
+        const ddb = makeDocClient({ region });
         const registryScan = await ddb.send(new ScanCommand({
           TableName: workspaceRegistryTable!,
           FilterExpression: 'workspace_slug = :slug AND #status = :active',
@@ -1344,7 +1435,7 @@ export function makeLinearCommand(): Command {
         }
 
         const now = new Date().toISOString();
-        const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
+        const ddb = makeDocClient({ region });
         await ddb.send(new PutCommand({
           TableName: tableName,
           Item: {
@@ -1375,7 +1466,7 @@ export function makeLinearCommand(): Command {
       .action(async (opts) => {
         const config = loadConfig();
         const region = opts.region || config.region;
-        const sm = new SecretsManagerClient({ region });
+        const sm = makeClient(SecretsManagerClient, { region });
 
         // Resolve the set of workspace slugs to query. Either an
         // explicit `--slug` (one workspace) or every Linear workspace
@@ -1826,7 +1917,7 @@ export async function autoLinkTokenOwner(args: {
     return;
   }
 
-  const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: args.region }));
+  const ddb = makeDocClient({ region: args.region });
   await ddb.send(new PutCommand({
     TableName: args.userMappingTable,
     Item: {
@@ -1865,7 +1956,7 @@ function extractCognitoSub(): string {
 
 async function getStackOutput(region: string, stackName: string, outputKey: string): Promise<string | null> {
   try {
-    const cfn = new CloudFormationClient({ region });
+    const cfn = makeClient(CloudFormationClient, { region });
     const result = await cfn.send(new DescribeStacksCommand({ StackName: stackName }));
     const outputs = result.Stacks?.[0]?.Outputs ?? [];
     const output = outputs.find((o) => o.OutputKey === outputKey);

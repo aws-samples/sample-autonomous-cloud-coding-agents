@@ -75,6 +75,15 @@ global.fetch = mockFetch as unknown as typeof fetch;
 beforeEach(() => {
   jest.clearAllMocks();
   clearTokenCache();
+  // hydrateContext falls back to process.env.MEMORY_ID when no memoryId option
+  // is passed (context-hydration.ts:990). If MEMORY_ID leaks into the jest
+  // process env (set by another test file, or the deploy env when the suite
+  // runs in-container), the "memoryId not provided" tests would spuriously call
+  // loadMemoryContext and fail — an order/environment-dependent flake that
+  // forced the fork's build-gate to be bypassed with `git push --no-verify`.
+  // Pin a clean "no ambient memory" baseline; tests that want memory pass the
+  // memoryId option explicitly.
+  delete process.env.MEMORY_ID;
 });
 
 // ---------------------------------------------------------------------------

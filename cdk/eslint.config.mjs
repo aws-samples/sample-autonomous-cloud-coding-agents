@@ -259,7 +259,17 @@ export default [
   {
     files: ['test/**/*.ts'],
     rules: {
+      // Literal fixtures and expected values are the point of a test; naming every
+      // one defeats readability.
       '@typescript-eslint/no-magic-numbers': 'off',
+      // Table-driven assertions and long expected strings read better on one line
+      // than wrapped.
+      '@stylistic/max-len': 'off',
+      'max-len': 'off',
+      // NOTE: `no-shadow` is deliberately NOT relaxed here. It is
+      // correctness-adjacent in test code — a shadowed `row` or `mock` inside a
+      // nested describe is a common way to assert against the wrong fixture and
+      // still pass. Rename the inner binding instead.
     },
   },
 ];

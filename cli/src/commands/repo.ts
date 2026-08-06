@@ -166,14 +166,30 @@ export function makeRepoCommand(): Command {
         }
 
         const { region, stackName } = resolveOperatorContext(opts);
-        const [tableName, platformRuntimeArn, platformGithubTokenSecretArn] = await Promise.all([
+        const [tableName, platformRuntimeArn, platformGithubTokenSecretArn, computeSubstrate] = await Promise.all([
           getStackOutput(region, stackName, 'RepoTableName'),
           getStackOutput(region, stackName, 'RuntimeArn'),
           getStackOutput(region, stackName, 'GitHubTokenSecretArn'),
+          getStackOutput(region, stackName, 'ComputeSubstrate'),
         ]);
         if (!tableName) {
           throw new CliError(
             `Stack '${stackName}' is missing output 'RepoTableName'. Re-deploy the CDK stack.`,
+          );
+        }
+        // Refuse to onboard a repo as compute_type=ecs when the deployed stack did
+        // NOT provision the ECS substrate — otherwise every task on this repo fails
+        // at session start with "ECS compute strategy requires ECS_CLUSTER_ARN…".
+        // Catch it here, at config time, with a fixable message. ComputeSubstrate is
+        // null on stacks predating this output; treat that as "unknown" and only
+        // hard-block on an explicit non-ecs value, so onboarding still works against
+        // an older deploy (the runtime error remains the backstop there).
+        if (opts.computeType === 'ecs' && computeSubstrate && computeSubstrate !== 'ecs') {
+          throw new CliError(
+            `Stack '${stackName}' was deployed without the ECS substrate (ComputeSubstrate=${computeSubstrate}), `
+            + 'so a repo onboarded as --compute-type ecs would fail at task start. Redeploy the stack with '
+            + '`--context compute_type=ecs` first (adds the Fargate substrate alongside AgentCore), then re-run this — '
+            + 'or onboard with --compute-type agentcore.',
           );
         }
 

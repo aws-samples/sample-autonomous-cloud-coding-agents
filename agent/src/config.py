@@ -17,14 +17,28 @@ DEFAULT_WORKFLOW_ID = "coding/new-task-v1"
 # id whose ``requires_repo`` is false. Used by the load-failure fallback to
 # decide repo-optionality without loading the file.
 REPO_LESS_DEFAULT_WORKFLOW_ID = "default/agent-v1"
-# First-party workflow ids that operate on an existing pull request.
-PR_WORKFLOW_IDS = frozenset(("coding/pr-iteration-v1", "coding/pr-review-v1"))
+# First-party workflow ids that operate on an existing pull request — they
+# check out the existing PR branch instead of creating a fresh one. restack-v1
+# (#305) re-merges a changed predecessor into an existing stacked-child PR.
+PR_WORKFLOW_IDS = frozenset(("coding/pr-iteration-v1", "coding/pr-review-v1", "coding/restack-v1"))
+# Clarify-before-spend (customer UX #4): the exact marker a coding/new-task agent
+# puts on the FIRST line of its final message when a request is too ambiguous to
+# implement without guessing. Its presence tells the pipeline to hold — post the
+# question, open NO PR, and surface it as "needs input" rather than a finished
+# task. Kept as an unusual sentinel so it can't collide with ordinary prose.
+NEEDS_INPUT_MARKER = "[[ABCA_NEEDS_INPUT]]"
 # First-party workflow ids that are writeable (NOT read-only). Used only by the
 # load-failure fallback to bias an unrecognised id toward read-only (fail closed
 # on the write-deny invariant). pr-review-v1 is intentionally excluded (it is
 # read-only); default/agent-v1 is excluded because its conservative posture
 # should fail closed too.
-_KNOWN_WRITEABLE_WORKFLOW_IDS = frozenset(("coding/new-task-v1", "coding/pr-iteration-v1"))
+_KNOWN_WRITEABLE_WORKFLOW_IDS = frozenset(
+    (
+        "coding/new-task-v1",
+        "coding/pr-iteration-v1",
+        "coding/restack-v1",
+    )
+)
 
 
 def resolve_github_token() -> str:
@@ -40,10 +54,10 @@ def resolve_github_token() -> str:
         return cached
     secret_arn = os.environ.get("GITHUB_TOKEN_SECRET_ARN")
     if secret_arn:
-        import boto3
+        from aws_session import platform_client
 
         region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
-        client = boto3.client("secretsmanager", region_name=region)
+        client = platform_client("secretsmanager", region_name=region)
         resp = client.get_secret_value(SecretId=secret_arn)
         token = resp["SecretString"]
         # Cache in env so downstream tools (git, gh CLI) work unchanged
@@ -60,18 +74,17 @@ def resolve_linear_api_token(channel_metadata: dict[str, str] | None = None) -> 
     Pass that dict in via ``channel_metadata`` (the pipeline does this
     automatically). We fetch the per-workspace secret, parse the token
     JSON, refresh if expiring, and cache the access_token in
-    ``LINEAR_API_TOKEN`` so downstream consumers (the Linear MCP's
-    ``${LINEAR_API_TOKEN}`` placeholder in ``.mcp.json`` and
-    ``linear_reactions.py``'s GraphQL Authorization header) keep working
-    unchanged.
+    ``LINEAR_API_TOKEN`` so the one remaining consumer —
+    ``linear_reactions.py``'s direct-GraphQL Authorization header (reactions +
+    state transitions) — keeps working. (ADR-016: there is no Linear MCP; this
+    token no longer feeds an ``.mcp.json`` placeholder.)
 
     For local development, a pre-set ``LINEAR_API_TOKEN`` env var
     short-circuits the lookup so the agent can run outside the runtime.
 
-    Returns an empty string when the credential is absent — the agent-side
-    MCP config then renders with an unresolved ``${LINEAR_API_TOKEN}``
-    placeholder and the Linear MCP fails closed. This function is only
-    called when ``channel_source == 'linear'``.
+    Returns an empty string when the credential is absent — ``linear_reactions``
+    then skips its reactions/state calls (best-effort, logged). This function is
+    only called when ``channel_source == 'linear'``.
 
     Phase 2.0a (parked) used AgentCore Identity. Phase 2.0b-O2 reads
     Secrets Manager directly because AgentCore Identity's USER_FEDERATION
@@ -101,14 +114,19 @@ def resolve_linear_api_token(channel_metadata: dict[str, str] | None = None) -> 
         import json
         from datetime import datetime, timedelta
 
-        import boto3
+        # boto3 is imported here (not just via platform_client, which imports it
+        # lazily at call time) so a missing SDK still degrades gracefully — skip
+        # Linear MCP — instead of raising an uncaught ImportError. (#319)
+        import boto3  # noqa: F401  -- availability probe for the graceful skip below
         from botocore.exceptions import BotoCoreError, ClientError
+
+        from aws_session import platform_client
     except ImportError as e:
         log("WARN", f"resolve_linear_api_token: boto3 unavailable ({e}); skipping")
-        # nosemgrep: py-silent-success-masking -- optional Linear MCP; boto3 unavailable
+        # nosemgrep: py-silent-success-masking -- optional Linear reactions token; boto3 unavailable
         return ""
 
-    sm = boto3.client("secretsmanager", region_name=region)
+    sm = platform_client("secretsmanager", region_name=region)
 
     def _fetch_token() -> dict | None:
         """Fetch + parse the per-workspace OAuth secret.
@@ -116,8 +134,8 @@ def resolve_linear_api_token(channel_metadata: dict[str, str] | None = None) -> 
         Returns the parsed dict, or None if the SM payload can't be
         decoded as JSON (corrupted byte, missing SecretString key,
         etc.). The caller treats None like a missing secret — agent
-        proceeds without Linear MCP rather than crashing the task
-        pipeline thread on a raw traceback.
+        proceeds without the Linear reactions token rather than crashing
+        the task pipeline thread on a raw traceback.
         """
         resp = sm.get_secret_value(SecretId=secret_arn)
         try:
@@ -316,7 +334,7 @@ def resolve_linear_api_token(channel_metadata: dict[str, str] | None = None) -> 
         return ""
     if token_obj is None:
         # Corrupted secret JSON; already logged inside _fetch_token.
-        # Fail closed — Linear MCP renders with unresolved placeholder.
+        # Corrupted secret JSON → no token; linear_reactions skips (best-effort).
         return ""
 
     if _is_expiring(token_obj.get("expires_at", "")):
@@ -330,14 +348,29 @@ def resolve_linear_api_token(channel_metadata: dict[str, str] | None = None) -> 
     return access
 
 
+_JIRA_TASK_CREDENTIAL_ENV_VARS = (
+    "JIRA_API_TOKEN",
+    "JIRA_APP_ACTOR_CONFIGURED",
+    "JIRA_APP_ACTOR_PROXY_URL",
+    "JIRA_APP_ACTOR_SHARED_SECRET",
+)
+
+
+def clear_jira_task_credentials() -> None:
+    """Remove Jira credentials left by an earlier task in this process."""
+    for name in _JIRA_TASK_CREDENTIAL_ENV_VARS:
+        os.environ.pop(name, None)
+
+
 def resolve_jira_oauth_token(channel_metadata: dict[str, str] | None = None) -> str:
-    """Resolve the Jira Cloud OAuth access token from Secrets Manager.
+    """Resolve Jira outbound credentials from Secrets Manager.
 
     The orchestrator stamps ``jira_oauth_secret_arn`` into the task
-    record's ``channel_metadata`` at task-creation time. We fetch the
-    per-tenant secret, parse the token JSON, and cache the access_token in
-    ``JIRA_API_TOKEN`` so the agent-side Jira REST calls
-    (``jira_reactions``) can authorize.
+    record's ``channel_metadata`` at task-creation time. A tenant configured
+    with a Forge app actor gets ``JIRA_APP_ACTOR_*`` environment variables;
+    older tenants retain ``JIRA_API_TOKEN`` as an explicit migration fallback.
+    ``jira_reactions`` always prefers the app actor and never falls back to
+    OAuth when an app configuration is present but broken.
 
     **The agent never refreshes the token.** Unlike Linear, Atlassian
     *rotates the refresh_token on every use* — a successful refresh
@@ -359,20 +392,22 @@ def resolve_jira_oauth_token(channel_metadata: dict[str, str] | None = None) -> 
     session, so in practice the agent reads a freshly-written token with a
     full lifetime ahead of it.
 
-    For local development, a pre-set ``JIRA_API_TOKEN`` env var
-    short-circuits the lookup so the agent can run outside the runtime.
-
     This function is only called when ``channel_source == 'jira'``.
     """
-    cached = os.environ.get("JIRA_API_TOKEN", "")
-    if cached:
-        return cached
-
     secret_arn = ""
     if channel_metadata:
         secret_arn = channel_metadata.get("jira_oauth_secret_arn", "")
     if not secret_arn:
         secret_arn = os.environ.get("JIRA_OAUTH_SECRET_ARN", "")
+    cached = os.environ.get("JIRA_API_TOKEN", "")
+    if cached and not secret_arn and channel_metadata is None:
+        return cached
+
+    # AgentCore can reuse a warm process. Clear the prior task's tenant
+    # credentials before resolving a metadata-bound task so a missing ARN or
+    # failed SM read cannot reuse another tenant's token or proxy secret.
+    if channel_metadata is not None or secret_arn:
+        clear_jira_task_credentials()
     if not secret_arn:
         return ""
 
@@ -385,13 +420,18 @@ def resolve_jira_oauth_token(channel_metadata: dict[str, str] | None = None) -> 
         import json
         from datetime import datetime
 
-        import boto3
+        # boto3 is imported here (not just via platform_client, which imports it
+        # lazily at call time) so a missing SDK still degrades gracefully — skip
+        # Jira feedback — instead of raising an uncaught ImportError. (#319)
+        import boto3  # noqa: F401  -- availability probe for the graceful skip below
         from botocore.exceptions import BotoCoreError, ClientError
+
+        from aws_session import platform_client
     except ImportError as e:
         log("WARN", f"resolve_jira_oauth_token: boto3 unavailable ({e}); skipping")
-        return ""
+        return ""  # nosemgrep: py-silent-success-masking -- Jira feedback is advisory
 
-    sm = boto3.client("secretsmanager", region_name=region)
+    sm = platform_client("secretsmanager", region_name=region)
 
     def _fetch_token() -> dict | None:
         resp = sm.get_secret_value(SecretId=secret_arn)
@@ -403,7 +443,7 @@ def resolve_jira_oauth_token(channel_metadata: dict[str, str] | None = None) -> 
                 f"resolve_jira_oauth_token: secret '{secret_arn}' is not valid JSON "
                 f"({type(e).__name__}: {e}); tenant requires re-onboarding",
             )
-            return None
+            return None  # nosemgrep: py-silent-success-masking -- bad secret disables writes
 
     def _is_expiring(expires_at_iso: str, threshold_seconds: int = 60) -> bool:
         try:
@@ -425,19 +465,52 @@ def resolve_jira_oauth_token(channel_metadata: dict[str, str] | None = None) -> 
         is_hard_failure = code in ("AccessDeniedException", "ResourceNotFoundException")
         severity = "ERROR" if is_hard_failure else "WARN"
         log(severity, f"resolve_jira_oauth_token failed: {type(e).__name__}: {e}")
-        return ""
+        return ""  # nosemgrep: py-silent-success-masking -- feedback cannot fail the task
     if token_obj is None:
         return ""
+    if not isinstance(token_obj, dict):
+        log(
+            "ERROR",
+            f"resolve_jira_oauth_token: secret '{secret_arn}' contains non-object JSON; "
+            "tenant requires re-onboarding",
+        )
+        return ""
+
+    app_actor_fields = (
+        "app_actor_proxy_url",
+        "app_actor_shared_secret",
+        "app_actor_account_id",
+        "app_actor_display_name",
+        "app_actor_configured_at",
+    )
+    raw_app_proxy_url = token_obj.get("app_actor_proxy_url", "")
+    raw_app_shared_secret = token_obj.get("app_actor_shared_secret", "")
+    app_proxy_url = raw_app_proxy_url if isinstance(raw_app_proxy_url, str) else ""
+    app_shared_secret = raw_app_shared_secret if isinstance(raw_app_shared_secret, str) else ""
+    if any(field in token_obj for field in app_actor_fields):
+        # The marker makes partial/corrupt app setup fail closed in
+        # jira_reactions. Do not silently post as the OAuth authorizing user.
+        os.environ["JIRA_APP_ACTOR_CONFIGURED"] = "1"
+        if app_proxy_url:
+            os.environ["JIRA_APP_ACTOR_PROXY_URL"] = app_proxy_url
+        if app_shared_secret:
+            os.environ["JIRA_APP_ACTOR_SHARED_SECRET"] = app_shared_secret
 
     # Fail closed if the stored token is expiring — the agent cannot refresh
     # without burning Atlassian's rotating refresh_token (see docstring). The
-    # Lambda path owns refresh; advisory Jira comments simply no-op here.
+    # Lambda path owns refresh. A configured Forge app actor remains usable
+    # because its signed proxy credential is independent of 3LO expiry.
     if _is_expiring(token_obj.get("expires_at", "")):
+        suffix = (
+            " Forge app-actor writes remain enabled."
+            if os.environ.get("JIRA_APP_ACTOR_CONFIGURED") == "1"
+            else " Jira OAuth fallback writes will be skipped for this task."
+        )
         log(
             "WARN",
             "resolve_jira_oauth_token: stored token is expiring and the agent does not "
             "refresh (Atlassian rotates refresh_tokens; agent lacks PutSecretValue). "
-            "Failing closed — Jira comments will be skipped for this task.",
+            f"Failing closed for OAuth.{suffix}",
         )
         return ""
 
@@ -460,9 +533,13 @@ def build_config(
     dry_run: bool = False,
     task_id: str = "",
     system_prompt_overrides: str = "",
+    build_command: str = "",
+    lint_command: str = "",
     resolved_workflow: dict | None = None,
     branch_name: str = "",
     pr_number: str = "",
+    base_branch: str | None = None,
+    merge_branches: list[str] | None = None,
     channel_source: str = "",
     channel_metadata: dict[str, str] | None = None,
     trace: bool = False,
@@ -483,7 +560,7 @@ def build_config(
     resolved_github_token = github_token or resolve_github_token()
     resolved_aws_region = aws_region or os.environ.get("AWS_REGION", "")
     resolved_anthropic_model = anthropic_model or os.environ.get(
-        "ANTHROPIC_MODEL", "us.anthropic.claude-sonnet-4-6"
+        "ANTHROPIC_MODEL", "us.anthropic.claude-opus-4-8"
     )
     # Small/fast auxiliary model (WebFetch summarization etc.). Falls back to the
     # deployed ANTHROPIC_DEFAULT_HAIKU_MODEL env, then the platform default. Must
@@ -573,6 +650,8 @@ def build_config(
         max_turns=max_turns,
         max_budget_usd=max_budget_usd,
         system_prompt_overrides=system_prompt_overrides,
+        build_command=build_command,
+        lint_command=lint_command,
         resolved_workflow=workflow,
         policy_principal=policy_principal,
         read_only=workflow_read_only,
@@ -581,6 +660,8 @@ def build_config(
         is_pr_workflow=is_pr_workflow,
         branch_name=branch_name,
         pr_number=pr_number,
+        base_branch=base_branch,
+        merge_branches=merge_branches or [],
         task_id=task_id or uuid.uuid4().hex[:12],
         channel_source=channel_source,
         channel_metadata=channel_metadata or {},

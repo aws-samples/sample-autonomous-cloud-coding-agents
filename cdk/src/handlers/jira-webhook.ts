@@ -17,9 +17,9 @@
  *  SOFTWARE.
  */
 
-import { ConditionalCheckFailedException, DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
-import { DeleteCommand, DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
+import { DeleteCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import {
   isWebhookTimestampFresh,
@@ -27,9 +27,10 @@ import {
   verifyJiraRequestForTenant,
 } from './shared/jira-verify';
 import { logger } from './shared/logger';
+import { makeClient, makeDocClient } from './shared/ua';
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
-const lambdaClient = new LambdaClient({});
+const ddb = makeDocClient();
+const lambdaClient = makeClient(LambdaClient);
 
 const WEBHOOK_SECRET_ARN = process.env.JIRA_WEBHOOK_SECRET_ARN!;
 const DEDUP_TABLE_NAME = process.env.JIRA_WEBHOOK_DEDUP_TABLE_NAME!;
@@ -59,6 +60,9 @@ interface JiraWebhookEnvelope {
     readonly key?: string;
     readonly fields?: { readonly project?: { readonly id?: string; readonly key?: string } };
   };
+  readonly comment?: {
+    readonly id?: string;
+  };
   /** `cloudId` is delivered as a top-level field on Atlassian Cloud webhooks. */
   readonly matchedWebhookIds?: number[];
   readonly user?: { readonly accountId?: string };
@@ -79,7 +83,8 @@ interface JiraEnvelopeWithCloud extends JiraWebhookEnvelope {
  * POST /v1/jira/webhook — Jira Cloud webhook receiver.
  *
  * Verifies the `X-Hub-Signature` HMAC over the raw body, dedups on
- * `(issueKey, webhookEvent, timestamp)` with an 8h TTL, and async-invokes
+ * issue events on `(issueKey, webhookEvent, timestamp)` and comment events on
+ * `(issueKey, comment_created, commentId)` with an 8h TTL, then async-invokes
  * the processor Lambda so we can ack quickly. Atlassian sends the
  * algorithm prefix (`sha256=…`) — `verifyJiraSignature` strips it before
  * comparison.
@@ -184,9 +189,12 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     const webhookEvent = payload.webhookEvent;
-    if (webhookEvent !== 'jira:issue_created' && webhookEvent !== 'jira:issue_updated') {
-      // Silent 200 so Atlassian doesn't retry — every non-issue event is acked.
-      logger.info('Ignoring non-Issue Jira webhook', { webhookEvent });
+    const isIssueEvent =
+      webhookEvent === 'jira:issue_created' || webhookEvent === 'jira:issue_updated';
+    const isCommentEvent = webhookEvent === 'comment_created';
+    if (!isIssueEvent && !isCommentEvent) {
+      // Silent 200 so Atlassian doesn't retry unsupported event types.
+      logger.info('Ignoring unsupported Jira webhook', { webhookEvent });
       return jsonResponse(200, { ok: true });
     }
 
@@ -194,18 +202,25 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     const issueId = issue?.id;
     const issueKey = issue?.key;
     if (!issueId || !issueKey) {
-      logger.warn('Jira Issue webhook missing issue.id or issue.key', { webhookEvent });
+      logger.warn('Jira webhook missing issue.id or issue.key', { webhookEvent });
       return jsonResponse(400, { error: 'Missing issue identifier' });
+    }
+    const commentId = payload.comment?.id;
+    if (isCommentEvent && !commentId) {
+      logger.warn('Jira comment webhook missing comment.id', { issue_key: issueKey });
+      return jsonResponse(400, { error: 'Missing comment identifier' });
     }
 
     // Dedup via conditional PutItem.
     //
-    // Atlassian doesn't expose a per-delivery message ID we can rely on. The
-    // payload's top-level `timestamp` (UNIX ms) is set when the event was
-    // queued and remains stable across retries of the same delivery.
-    // Composing `${issueKey}#${webhookEvent}#${timestamp}` collapses retries
-    // (same timestamp) without merging distinct events.
-    const dedupKey = `${issueKey}#${webhookEvent}#${payload.timestamp ?? 'unknown'}`;
+    // Comment ids are stable and unique, so they are the strongest dedup key
+    // for comment_created. Issue events have no entity id beyond the issue and
+    // continue using the delivery timestamp so separate label additions do not
+    // collapse into one event.
+    const dedupDiscriminator = isCommentEvent
+      ? commentId!
+      : payload.timestamp ?? 'unknown';
+    const dedupKey = `${issueKey}#${webhookEvent}#${dedupDiscriminator}`;
     const nowSeconds = Math.floor(Date.now() / 1000);
     try {
       await ddb.send(new PutCommand({

@@ -17,6 +17,8 @@
  *  SOFTWARE.
  */
 
+import * as fs from 'fs';
+import * as path from 'path';
 import {
   buildRepoShowLines,
   formatGithubTokenSecretLine,
@@ -91,8 +93,25 @@ describe('buildRepoShowLines', () => {
     const cedar = lines.find((l) => l.key === 'cedar_policies');
 
     expect(compute?.text).toBe('(platform default) agentcore');
-    expect(maxTurns?.text).toBe('(platform default) 100');
+    // Assert against the constant, not a literal: the point of the line is "it
+    // shows the platform default", and hardcoding the number here is what let the
+    // constant drift out of step with the runtime unnoticed.
+    expect(maxTurns?.text).toBe(`(platform default) ${PLATFORM_REPO_DEFAULTS.max_turns}`);
     expect(cedar).toBeUndefined();
+  });
+
+  test('the advertised default model matches the one the agent actually falls back to', () => {
+    // Drift guard. This constant is not display-only: `platform doctor` derives the
+    // model it probes for ACCESS from it, so if it names a different model than the
+    // runtime invokes, doctor can report a healthy stack while every task fails at
+    // turn 0 with AccessDenied. Read the agent's own fallback rather than trusting
+    // a second copy of the string.
+    const configPy = fs.readFileSync(
+      path.resolve(__dirname, '../../../agent/src/config.py'), 'utf8',
+    );
+    const match = configPy.match(/"ANTHROPIC_MODEL",\s*"([^"]+)"/);
+    expect(match).not.toBeNull();
+    expect(PLATFORM_REPO_DEFAULTS.model_id).toBe(match![1]);
   });
 
   test('explains platform default github token in text output', () => {
