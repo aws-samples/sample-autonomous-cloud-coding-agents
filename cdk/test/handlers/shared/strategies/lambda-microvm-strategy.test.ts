@@ -1218,7 +1218,7 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
       // into MicroVM logs on a hook failure. Secret VALUES must never be reachable
       // from this producer, only the ARNs that name them.
       GITHUB_TOKEN: 'ghp_averysecrettokenvalue',
-      ANTHROPIC_API_KEY: 'sk-ant-secret',
+      ANTHROPIC_API_KEY: 'dummy-anthropic-credential-do-not-log',
       AWS_SECRET_ACCESS_KEY: 'wJalrXUtnFEMI',
       MICROVM_PAYLOAD_BUCKET: 'some-bucket',
     });
@@ -1226,7 +1226,7 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
     expect(Object.keys(config)).toEqual([...MICROVM_PLATFORM_CONFIG_KEYS]);
     const rendered = JSON.stringify(config);
     expect(rendered).not.toContain('ghp_');
-    expect(rendered).not.toContain('sk-ant-secret');
+    expect(rendered).not.toContain('dummy-anthropic-credential-do-not-log');
     expect(rendered).not.toContain('wJalrXUtnFEMI');
   });
 
