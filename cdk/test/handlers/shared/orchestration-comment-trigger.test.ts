@@ -204,6 +204,26 @@ describe('parseRetryIntent — recognise a plain "retry" command', () => {
     expect(parseRetryIntent('**retry**')).toBe(true);
   });
 
+  test('a retry phrase EMBEDDED in a longer word does not fire', () => {
+    // The phrase match is whole-word: only a non-[a-z0-9] char (or a string
+    // edge) may flank it. Guards the boundary contract that the substring scan
+    // in hasPhrase upholds (it replaced a phrase-interpolated `new RegExp`).
+    for (const s of ['retryx', 'abcretry', 'xrerun', 'rerunner', 'retry9', '9retry']) {
+      expect(parseRetryIntent(s)).toBe(false);
+    }
+  });
+
+  test('phrases containing regex metacharacters match literally, not as patterns', () => {
+    // "re-run" is a RETRY_PHRASES member containing '-'. A phrase must never be
+    // interpreted as a pattern: "re.run"/"reXrun" must NOT match "re-run", and a
+    // user typing regex syntax must not have it evaluated.
+    expect(parseRetryIntent('re-run')).toBe(true);
+    expect(parseRetryIntent('re.run')).toBe(false);
+    expect(parseRetryIntent('reXrun')).toBe(false);
+    expect(parseRetryIntent('.*')).toBe(false);
+    expect(parseRetryIntent('(retr)y')).toBe(false);
+  });
+
   test('KNOWN_EPIC_COMMANDS lists retry (kept in sync with the parser + panel copy)', () => {
     expect(KNOWN_EPIC_COMMANDS).toContain('retry');
   });

@@ -17,9 +17,6 @@
  *  SOFTWARE.
  */
 
-/** The explicit mention that turns a channel comment into an instruction. */
-export const COMMENT_TRIGGER_MENTION = '@bgagent';
-
 export interface CommentTrigger {
   readonly triggered: boolean;
   readonly instruction: string;

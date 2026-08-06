@@ -35,6 +35,7 @@ import {
   applicationPolicy,
   computeAgentcorePolicy,
   computeEcsPolicy,
+  computeLambdaMicrovmPolicy,
   infrastructurePolicy,
   observabilityPolicy,
 } from '../src/bootstrap/policies';
@@ -66,30 +67,36 @@ template.Parameters.ComputeTypes = {
   Type: 'CommaDelimitedList',
   Default: 'agentcore',
   Description:
-    'Comma-separated list of compute backends to enable. Valid values: agentcore, ecs.',
+    'Comma-separated list of compute backends to enable. Valid values: agentcore, ecs, lambda-microvm.',
 };
 
 // --- Step 3: Add conditions ---
-template.Conditions.IncludeComputeEcs = {
-  'Fn::Not': [
-    {
-      'Fn::Equals': [
-        {
-          'Fn::Select': [
-            0,
-            {
-              'Fn::Split': [
-                'ecs',
-                { 'Fn::Join': ['', { Ref: 'ComputeTypes' }] },
-              ],
-            },
-          ],
-        },
-        { 'Fn::Join': ['', { Ref: 'ComputeTypes' }] },
-      ],
-    },
-  ],
-};
+/**
+ * "The joined ComputeTypes list contains `needle`" as a CloudFormation
+ * condition. There is no `Fn::Contains`, so the trick is: split the joined list
+ * on the needle and compare element 0 against the whole string — they differ
+ * only if the needle was actually present. Extracted into a helper (it was
+ * inline for ECS) so a third backend cannot introduce a subtly different
+ * variant of the same expression.
+ */
+function includesComputeType(needle: string): Record<string, unknown> {
+  const joined = { 'Fn::Join': ['', { Ref: 'ComputeTypes' }] };
+  return {
+    'Fn::Not': [
+      {
+        'Fn::Equals': [
+          { 'Fn::Select': [0, { 'Fn::Split': [needle, joined] }] },
+          joined,
+        ],
+      },
+    ],
+  };
+}
+
+template.Conditions.IncludeComputeEcs = includesComputeType('ecs');
+// ADR-021: matched on the full `lambda-microvm` token, NOT a prefix — a bare
+// `Fn::Split` on `lambda` would also fire for any future `lambda*` backend name.
+template.Conditions.IncludeComputeLambdaMicrovms = includesComputeType('lambda-microvm');
 
 // --- Step 4: Add managed policy resources ---
 interface PolicyDef {
@@ -126,6 +133,12 @@ const policyDefs: PolicyDef[] = [
     policyName: 'IaCRole-ABCA-Compute-ECS',
     policyFn: computeEcsPolicy,
     condition: 'IncludeComputeEcs',
+  },
+  {
+    logicalId: 'IaCRoleABCAComputeLambdaMicrovms',
+    policyName: 'IaCRole-ABCA-Compute-LambdaMicrovms',
+    policyFn: computeLambdaMicrovmPolicy,
+    condition: 'IncludeComputeLambdaMicrovms',
   },
 ];
 
@@ -164,6 +177,13 @@ const coreRefs = [
   { Ref: 'IaCRoleABCAObservability' },
   { Ref: 'IaCRoleABCAComputeAgentcore' },
   { 'Fn::If': ['IncludeComputeEcs', { Ref: 'IaCRoleABCAComputeEcs' }, { Ref: 'AWS::NoValue' }] },
+  {
+    'Fn::If': [
+      'IncludeComputeLambdaMicrovms',
+      { Ref: 'IaCRoleABCAComputeLambdaMicrovms' },
+      { Ref: 'AWS::NoValue' },
+    ],
+  },
 ];
 
 template.Resources.CloudFormationExecutionRole.Properties.ManagedPolicyArns = {
@@ -196,6 +216,13 @@ template.Outputs.BootstrapPolicySet = {
         'Observability',
         'Compute-Agentcore',
         { 'Fn::If': ['IncludeComputeEcs', 'Compute-ECS', { Ref: 'AWS::NoValue' }] },
+        {
+          'Fn::If': [
+            'IncludeComputeLambdaMicrovms',
+            'Compute-LambdaMicrovms',
+            { Ref: 'AWS::NoValue' },
+          ],
+        },
       ],
     ],
   },
@@ -221,8 +248,8 @@ const header = [
   '# Based on the default CDK bootstrap template with the following modifications:',
   '#   - BootstrapVariant set to "ABCA: Least-Privilege Bootstrap"',
   '#   - ComputeTypes parameter added for compute-variant selection',
-  '#   - IncludeComputeEcs condition added',
-  '#   - 5 inline AWS::IAM::ManagedPolicy resources replace AdministratorAccess',
+  '#   - IncludeComputeEcs / IncludeComputeLambdaMicrovms conditions added',
+  '#   - 6 inline AWS::IAM::ManagedPolicy resources replace AdministratorAccess',
   '#   - CloudFormationExecutionRole references our least-privilege policies',
   '#   - BootstrapPolicyVersion, BootstrapPolicyHash, BootstrapPolicySet outputs added',
   '',

@@ -24,9 +24,14 @@ import {
   DescribeUserPoolCommand,
 } from '@aws-sdk/client-cognito-identity-provider';
 import { isGithubTokenConfigured } from './github-token';
+import {
+  LAMBDA_MICROVM_REMEDY,
+  LambdaMicrovmProbeClientFactory,
+  probeLambdaMicrovmAvailability,
+} from './lambda-microvm-availability';
 import { checkLinearWorkspaceAuth, type LinearProbe, type LinearRefreshVerifier } from './linear-auth-health';
 import { PLATFORM_REPO_DEFAULTS } from './repo-display';
-import { countActiveRepos } from './repo-lookup';
+import { listRepoConfigs, RepoConfigRow } from './repo-lookup';
 import { getStackOutput } from './stack-outputs';
 import { makeClient } from './ua';
 
@@ -38,7 +43,7 @@ import { makeClient } from './ua';
  * (`us.anthropic.…`) used at invoke time, while `GetFoundationModel` requires
  * the bare foundation-model id, so we strip the regional inference prefix.
  */
-export const DEFAULT_BEDROCK_MODEL_ID =
+const DEFAULT_BEDROCK_MODEL_ID =
   PLATFORM_REPO_DEFAULTS.model_id.replace(/^(us|eu|apac)\./, '');
 
 export type DoctorCheckStatus = 'pass' | 'fail' | 'warn';
@@ -53,6 +58,8 @@ export interface DoctorCheckResult {
 export interface RunPlatformDoctorOptions {
   readonly region: string;
   readonly stackName: string;
+  /** Override for deterministic/offline tests. */
+  readonly lambdaMicrovmClientFactory?: LambdaMicrovmProbeClientFactory;
   /** Injectable Linear auth probe (tests supply a fake; production uses the default). */
   readonly linearProbe?: LinearProbe;
   /**
@@ -89,8 +96,15 @@ export async function runPlatformDoctor(
   checks.push(await checkApiReachable(apiUrl));
   checks.push(await checkCognitoConfig(region, userPoolId, appClientId));
   checks.push(await checkGithubToken(region, githubTokenSecretArn));
-  checks.push(await checkActiveRepos(region, repoTableName));
+  const activeRepoResult = await loadActiveRepos(region, repoTableName);
+  checks.push(checkActiveRepos(repoTableName, activeRepoResult));
   checks.push(await checkBedrockModel(region, DEFAULT_BEDROCK_MODEL_ID));
+  if (activeRepoResult.repos.some((repo) => repo.compute_type === 'lambda-microvm')) {
+    checks.push(await checkLambdaMicrovmAvailability(
+      region,
+      options.lambdaMicrovmClientFactory,
+    ));
+  }
   checks.push(await checkLinearAuth(
     region, linearRegistryTableName, options.linearProbe, options.linearVerifyRefresh,
   ));
@@ -192,33 +206,73 @@ async function checkGithubToken(
   };
 }
 
-async function checkActiveRepos(
+async function loadActiveRepos(
   region: string,
   repoTableName: string | null,
-): Promise<DoctorCheckResult> {
+): Promise<{ readonly repos: RepoConfigRow[]; readonly error?: string }> {
+  if (!repoTableName) return { repos: [] };
+  try {
+    return {
+      repos: (await listRepoConfigs(region, repoTableName))
+        .filter((repo) => repo.status === 'active'),
+    };
+  } catch (err) {
+    return { repos: [], error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+function checkActiveRepos(
+  repoTableName: string | null,
+  result: { readonly repos: readonly RepoConfigRow[]; readonly error?: string },
+): DoctorCheckResult {
   const id = 'active_repos';
   const label = 'At least one active onboarded repo';
   if (!repoTableName) {
     return { id, label, status: 'fail', detail: 'Stack output RepoTableName is missing.' };
   }
 
+  if (result.error) {
+    return { id, label, status: 'fail', detail: result.error };
+  }
+
+  const count = result.repos.length;
+  if (count >= 1) {
+    return { id, label, status: 'pass', detail: `${count} active repo(s) in ${repoTableName}.` };
+  }
+  return {
+    id,
+    label,
+    status: 'fail',
+    detail: 'No active repos in RepoTable. Register a Blueprint and redeploy.',
+  };
+}
+
+async function checkLambdaMicrovmAvailability(
+  region: string,
+  clientFactory?: LambdaMicrovmProbeClientFactory,
+): Promise<DoctorCheckResult> {
+  const id = 'lambda_microvm_availability';
+  const label = `Lambda MicroVMs service (${region})`;
   try {
-    const count = await countActiveRepos(region, repoTableName);
-    if (count >= 1) {
-      return { id, label, status: 'pass', detail: `${count} active repo(s) in ${repoTableName}.` };
-    }
+    await probeLambdaMicrovmAvailability(region, clientFactory);
     return {
       id,
       label,
-      status: 'fail',
-      detail: 'No active repos in RepoTable. Register a Blueprint and redeploy.',
+      status: 'pass',
+      detail: `Managed MicroVM images are available in ${region}.`,
     };
   } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const errorName = err instanceof Error ? err.name : '';
+    const accessDenied = /AccessDenied|Unauthorized|not authorized/i.test(`${errorName} ${message}`);
     return {
       id,
       label,
-      status: 'fail',
-      detail: err instanceof Error ? err.message : String(err),
+      status: accessDenied ? 'warn' : 'fail',
+      detail: accessDenied
+        ? `${message}. Cannot verify Lambda MicroVM availability in ${region}; check IAM permissions for `
+          + 'lambda-microvms List* actions.'
+        : `${message}. ${LAMBDA_MICROVM_REMEDY}`,
     };
   }
 }
