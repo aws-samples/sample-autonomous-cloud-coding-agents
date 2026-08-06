@@ -86,6 +86,19 @@ describe('AdmissionQueuePickup construct', () => {
     });
   });
 
+  test('sets the ABCA_COMPONENT solution-attribution label (#319)', () => {
+    const template = createStack();
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: {
+        Variables: Match.objectLike({
+          // Matches the peer orchestration reconcilers so the md/ segment
+          // rides every outbound AWS call this handler makes.
+          ABCA_COMPONENT: 'orchestr',
+        }),
+      },
+    });
+  });
+
   test('grants lambda:InvokeFunction on the orchestrator alias only', () => {
     const template = createStack();
     template.hasResourceProperties('AWS::IAM::Policy', {

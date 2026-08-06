@@ -249,7 +249,7 @@ describe('reconcile-admission-queue — races and failures', () => {
     expect(mockLambdaSend).not.toHaveBeenCalled();
   });
 
-  test('orchestrator invoke failure after flip does NOT roll back (stranded reconciler sweeps)', async () => {
+  test('orchestrator invoke failure after flip re-queues the task (SUBMITTED -> QUEUED) for the next cycle', async () => {
     mockDdbSend.mockImplementation((cmd: SentCommand) => {
       if (cmd._type === 'Query') {
         return Promise.resolve({
@@ -268,10 +268,51 @@ describe('reconcile-admission-queue — races and failures', () => {
     // Invoke failure is its own counter, NOT a benign cancel race.
     expect(summary.invoke_failed).toBe(1);
     expect(summary.skipped_race).toBe(0);
-    // Only the QUEUED -> SUBMITTED flip — no compensating write back to QUEUED.
+    expect(summary.errors).toBe(0);
+
+    // Two conditional writes: the QUEUED -> SUBMITTED flip, then a
+    // compensating SUBMITTED -> QUEUED restore so the next cycle retries
+    // promptly (FIFO preserved — created_at untouched).
     const updates = sentDdbCommands('UpdateItem');
-    expect(updates).toHaveLength(1);
+    expect(updates).toHaveLength(2);
+    // Flip: guarded on QUEUED, sets SUBMITTED.
+    expect(updates[0].input.ConditionExpression).toBe('#s = :queued');
     expect(updates[0].input.ExpressionAttributeValues[':submitted']).toEqual({ S: 'SUBMITTED' });
+    // Restore: guarded on SUBMITTED, sets QUEUED with a fresh QUEUED#<ts> status key.
+    expect(updates[1].input.ConditionExpression).toBe('#s = :submitted');
+    expect(updates[1].input.ExpressionAttributeValues[':queued']).toEqual({ S: 'QUEUED' });
+    expect(updates[1].input.ExpressionAttributeValues[':sca'].S).toMatch(/^QUEUED#/);
+  });
+
+  test('invoke failure where the compensating re-queue also fails leaves the task SUBMITTED (stranded reconciler backstop)', async () => {
+    // The task left SUBMITTED before the restore (e.g. user cancel raced in):
+    // the conditional re-queue fails closed and we do NOT count a raw error.
+    const condErr = Object.assign(new Error('conditional failed'), { name: 'ConditionalCheckFailedException' });
+    let updateCount = 0;
+    mockDdbSend.mockImplementation((cmd: SentCommand) => {
+      if (cmd._type === 'Query') {
+        return Promise.resolve({
+          Items: [queuedRow({ task_id: 'T1', user_id: 'u1', created_at: isoAge(60) })],
+        });
+      }
+      if (cmd._type === 'GetItem') {
+        return Promise.resolve({ Item: { active_count: { N: '0' } } });
+      }
+      if (cmd._type === 'UpdateItem') {
+        updateCount++;
+        // First UpdateItem is the flip (succeeds); second is the restore (loses the race).
+        return updateCount === 1 ? Promise.resolve({}) : Promise.reject(condErr);
+      }
+      return Promise.resolve({});
+    });
+    mockLambdaSend.mockRejectedValue(new Error('lambda throttled'));
+
+    const summary = await handler();
+    expect(summary.picked_up).toBe(0);
+    expect(summary.invoke_failed).toBe(1);
+    // A failed restore must not surface as a raw per-task error or abort the loop.
+    expect(summary.errors).toBe(0);
+    expect(sentDdbCommands('UpdateItem')).toHaveLength(2);
   });
 
   test('a systemic invoke outage stranding every pickup escalates to ERROR', async () => {

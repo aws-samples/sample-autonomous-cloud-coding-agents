@@ -112,6 +112,9 @@ export class AdmissionQueuePickup extends Construct {
       timeout: Duration.minutes(PICKUP_TIMEOUT_MINUTES),
       memorySize: PICKUP_MEMORY_MB,
       environment: {
+        // md/ solution-attribution label (#319), matching the peer
+        // orchestration reconcilers (stranded-task, concurrency).
+        ABCA_COMPONENT: 'orchestr',
         TASK_TABLE_NAME: props.taskTable.tableName,
         TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
         USER_CONCURRENCY_TABLE_NAME: props.userConcurrencyTable.tableName,

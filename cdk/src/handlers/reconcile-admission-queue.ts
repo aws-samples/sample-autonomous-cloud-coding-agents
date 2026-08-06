@@ -58,9 +58,13 @@ import {
 import { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
 import { ulid } from 'ulid';
 import { logger } from './shared/logger';
+import { makeClient } from './shared/ua';
 
-const ddb = new DynamoDBClient({});
-const lambdaClient = new LambdaClient({});
+// Construct through the attributed factory so every outbound call carries the
+// ABCA solution-attribution `md/` segment (#319). A naked `new XxxClient({})`
+// would silently drop it.
+const ddb = makeClient(DynamoDBClient);
+const lambdaClient = makeClient(LambdaClient);
 
 const TASK_TABLE = process.env.TASK_TABLE_NAME!;
 const EVENTS_TABLE = process.env.TASK_EVENTS_TABLE_NAME!;
@@ -94,10 +98,11 @@ export interface PickupSummary {
   /**
    * Orchestrator re-invoke failures after a successful QUEUED -> SUBMITTED
    * flip. Counted separately from benign cancel races (`skipped_race`) so a
-   * systemic invoke outage (bad ARN / throttle / perms) — which strands every
-   * picked-up task — trips the `level='error'` escalation instead of hiding at
-   * INFO. Recovery is still handled by the stranded-task reconciler; this
-   * counter exists purely for visibility.
+   * systemic invoke outage (bad ARN / throttle / perms) — which fails every
+   * pickup — trips the `level='error'` escalation instead of hiding at INFO.
+   * Each such task is conditionally re-queued for the next cycle (with the
+   * stranded-task reconciler as the final backstop); this counter exists for
+   * visibility into the outage.
    */
   invoke_failed: number;
   errors: number;
@@ -109,7 +114,9 @@ export interface PickupSummary {
  * - `race`: the conditional flip lost to a concurrent transition (user
  *   cancel / another pickup instance) — benign.
  * - `invoke_failed`: the flip succeeded but the orchestrator re-invoke
- *   failed; the task is now a stranded SUBMITTED row for the reconciler.
+ *   failed; the task was conditionally re-queued (SUBMITTED -> QUEUED)
+ *   so the next cycle retries promptly rather than waiting a full
+ *   stranded-task timeout.
  */
 type PickupOutcome = 'picked_up' | 'race' | 'invoke_failed';
 
@@ -187,11 +194,54 @@ async function emitEvent(taskId: string, eventType: string, metadata: Record<str
 }
 
 /**
+ * Restore a task to QUEUED after a failed orchestrator re-invoke, so the
+ * next pickup cycle retries it instead of leaving a stranded SUBMITTED row
+ * that only the stranded-task reconciler (a full timeout away) would sweep.
+ *
+ * The flip is conditional on the task still being SUBMITTED, so a user
+ * cancel that raced in between cleanly wins and we leave the task alone.
+ * ``created_at`` is untouched, so FIFO position is preserved. ``queued_at``
+ * / ``admission_attempts`` are likewise left as-is (best-effort restore).
+ * A failure here is swallowed: the task is already SUBMITTED-with-no-
+ * pipeline, which the stranded-task reconciler still sweeps as the final
+ * backstop.
+ */
+async function requeueAfterInvokeFailure(taskId: string): Promise<void> {
+  const now = new Date().toISOString();
+  try {
+    await ddb.send(new UpdateItemCommand({
+      TableName: TASK_TABLE,
+      Key: { task_id: { S: taskId } },
+      UpdateExpression: 'SET #s = :queued, updated_at = :now, status_created_at = :sca',
+      ConditionExpression: '#s = :submitted',
+      ExpressionAttributeNames: { '#s': 'status' },
+      ExpressionAttributeValues: {
+        ':queued': { S: 'QUEUED' },
+        ':submitted': { S: 'SUBMITTED' },
+        ':now': { S: now },
+        ':sca': { S: `QUEUED#${now}` },
+      },
+    }));
+  } catch (err: unknown) {
+    // ConditionalCheckFailed: the task left SUBMITTED (e.g. user cancel) —
+    // fine, nothing to restore. Anything else: leave it SUBMITTED for the
+    // stranded-task reconciler; do not let a restore failure abort the loop.
+    if (!(err && typeof err === 'object' && 'name' in err && err.name === 'ConditionalCheckFailedException')) {
+      logger.warn('Failed to re-queue task after invoke failure — leaving for stranded-task reconciler', {
+        task_id: taskId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+}
+
+/**
  * Flip one task QUEUED -> SUBMITTED and re-invoke the orchestrator.
  * Returns `'race'` when the conditional flip lost to a concurrent
  * transition (user cancel / another pickup instance), `'invoke_failed'`
- * when the flip succeeded but the orchestrator re-invoke failed, and
- * `'picked_up'` on success.
+ * when the flip succeeded but the orchestrator re-invoke failed (the task
+ * is then conditionally re-queued for the next cycle), and `'picked_up'`
+ * on success.
  */
 async function pickUpTask(task: QueuedTask): Promise<PickupOutcome> {
   const now = new Date().toISOString();
@@ -235,13 +285,15 @@ async function pickUpTask(task: QueuedTask): Promise<PickupOutcome> {
       })),
     }));
   } catch (invokeErr) {
-    // The task is now SUBMITTED with no pipeline attached. Do NOT try to
-    // roll back (racy) — the stranded-task reconciler sweeps SUBMITTED
-    // tasks with no pipeline, which is exactly this failure mode.
-    logger.error('Orchestrator re-invoke failed after queue pickup — stranded-task reconciler will sweep', {
+    // The task is now SUBMITTED with no pipeline attached. Conditionally
+    // restore it to QUEUED so the next cycle retries promptly and FIFO
+    // position is preserved (created_at unchanged); the stranded-task
+    // reconciler remains the final backstop if the restore also fails.
+    logger.error('Orchestrator re-invoke failed after queue pickup — re-queuing for next cycle', {
       task_id: task.task_id,
       error: invokeErr instanceof Error ? invokeErr.message : String(invokeErr),
     });
+    await requeueAfterInvokeFailure(task.task_id);
     return 'invoke_failed';
   }
 
