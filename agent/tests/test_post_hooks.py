@@ -6,6 +6,7 @@ The two seams are ``subprocess.run`` (read-only git/gh queries) and
 ``shell.run_cmd`` (mutating git/gh commands) — both faked with recorders.
 """
 
+import os
 import subprocess
 from types import SimpleNamespace
 
@@ -278,14 +279,36 @@ class TestReconcileAgentBranch:
 
     @staticmethod
     def _git(repo, *args):
-        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True)
+        # Hard-isolate from the developer's real git identity (#720). `cwd` alone
+        # is NOT containment: a bare `git config` walks up to the nearest
+        # enclosing repo, and `git init` at a linked-worktree root re-inits the
+        # SHARED .git rather than creating a nested one — so both can write
+        # straight into the real .git/config. Pinning the HOME/config env vars
+        # means even a transcribed `git config user.email` cannot escape tmp.
+        env = {
+            **os.environ,
+            "HOME": str(repo),
+            "XDG_CONFIG_HOME": str(repo),
+            "GIT_CONFIG_GLOBAL": os.path.join(str(repo), ".gitconfig-test"),
+            "GIT_CONFIG_SYSTEM": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_AUTHOR_NAME": "ABCA Test",
+            "GIT_AUTHOR_EMAIL": "abca-test@example.invalid",
+            "GIT_COMMITTER_NAME": "ABCA Test",
+            "GIT_COMMITTER_EMAIL": "abca-test@example.invalid",
+        }
+        subprocess.run(
+            ["git", *args], cwd=repo, check=True, capture_output=True, text=True, env=env
+        )
 
     def _make_repo(self, tmp_path):
         repo = tmp_path / "repo"
         repo.mkdir()
         self._git(repo, "init", "-q")
-        self._git(repo, "config", "user.email", "t@t")
-        self._git(repo, "config", "user.name", "t")
+        # RFC-2606 reserved domain, and --local so the write cannot escape this
+        # repo even if the enclosing-repo fallback above is ever reintroduced.
+        self._git(repo, "config", "--local", "user.email", "abca-test@example.invalid")
+        self._git(repo, "config", "--local", "user.name", "ABCA Test")
         (repo / "f.txt").write_text("base\n")
         self._git(repo, "add", "-A")
         self._git(repo, "commit", "-qm", "base")
