@@ -64,6 +64,10 @@ interface IsCompleteResponse {
 
 const client = new BedrockAgentCoreControlClient({});
 
+/** clientToken length cap — a 64-hex-char (256-bit) prefix of the SHA-256 digest
+ *  is plenty of entropy for an idempotency token and stays within API limits. */
+const CLIENT_TOKEN_LENGTH = 64;
+
 /** The registry id is the last ARN segment; we also accept a bare id. */
 function registryIdFromArn(arn: string): string {
   return arn.includes('/') ? arn.split('/').pop()! : arn;
@@ -74,7 +78,7 @@ function registryIdFromArn(arn: string): string {
  *  an at-least-once retry of the same logical create is a substrate no-op rather
  *  than a duplicate registry. */
 function createTokenFrom(requestId: string | undefined, registryName: string): string {
-  return createHash('sha256').update(`${requestId ?? ''}:${registryName}`).digest('hex').slice(0, 64);
+  return createHash('sha256').update(`${requestId ?? ''}:${registryName}`).digest('hex').slice(0, CLIENT_TOKEN_LENGTH);
 }
 
 export async function onEvent(event: OnEventRequest): Promise<OnEventResponse> {

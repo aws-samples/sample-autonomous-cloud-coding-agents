@@ -58,6 +58,7 @@ import { OrchestrationReconciler } from '../constructs/orchestration-reconciler'
 import { OrchestrationTable } from '../constructs/orchestration-table';
 import { PendingUploadCleanup } from '../constructs/pending-upload-cleanup';
 import { AgentRegistryStack } from '../constructs/registry';
+import { RegistryApi } from '../constructs/registry-api';
 import { RepoTable } from '../constructs/repo-table';
 import { SlackIntegration } from '../constructs/slack-integration';
 import { buildAppId } from '../constructs/solution-ua-aspect';
@@ -393,7 +394,16 @@ export class AgentStack extends Stack {
       // immediately. Omitted when no image is configured — there can be no
       // MicroVM-backed task to cancel then.
       ...(microvmImageConfigured && { lambdaMicrovmImageArn: lazyMicrovmImageArn }),
+    });
+
+    // Agent asset registry API (#246) in its own NestedStack + RestApi so its
+    // ~35 resources don't count against this root stack's 500-resource limit.
+    // It authorizes against the SHARED Cognito user pool, so a caller's JWT works
+    // on both APIs; the CLI targets its distinct URL (RegistryApiUrl output) for
+    // `registry` commands.
+    const registryApi = new RegistryApi(this, 'RegistryApi', {
       agentRegistryId: agentRegistry.registryId,
+      userPool: taskApi.userPool,
     });
 
     // --- Tool-federation Gateway (ADR-019 P1, CONTEXT-GATED) ---
@@ -1716,6 +1726,11 @@ export class AgentStack extends Stack {
     new CfnOutput(this, 'ApiUrl', {
       value: taskApi.api.url,
       description: 'URL of the Task API',
+    });
+
+    new CfnOutput(this, 'RegistryApiUrl', {
+      value: registryApi.apiUrl,
+      description: 'URL of the agent asset registry API (#246) — the CLI targets this for `bgagent registry` commands',
     });
 
     new CfnOutput(this, 'UserPoolId', {

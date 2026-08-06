@@ -594,6 +594,11 @@ export interface JiraLinkResponse {
 /** CLI config stored in ~/.bgagent/config.json. */
 export interface CliConfig {
   readonly api_url: string;
+  /** URL of the agent asset registry API (#246), which is a separate API
+   *  Gateway from `api_url` (see RegistryApiUrl stack output). Optional for
+   *  backward compatibility with configs written before the registry shipped;
+   *  `bgagent registry` commands require it. */
+  readonly registry_api_url?: string;
   readonly region: string;
   readonly user_pool_id: string;
   readonly client_id: string;

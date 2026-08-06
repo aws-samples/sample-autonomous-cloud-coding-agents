@@ -85,7 +85,9 @@ CreateRegistryRecord → poll until not CREATING
 
 ## 7. API contract
 
-All routes are under the existing API Gateway stage (`/v1`), Cognito-authenticated. Wire fields are snake_case.
+The registry API is a **separate API Gateway** from the main Task API (its own `RestApi`, exposed as the `RegistryApiUrl` stack output), but authorized against the **same** Cognito user pool — so a caller's existing JWT works on both without re-auth. All routes are under the `/v1` stage, Cognito-authenticated. Wire fields are snake_case.
+
+> **Why a separate API.** The registry API's handler Lambdas + routes are ~35 CloudFormation resources. Once the orchestration arc (#695) landed, the root `AgentStack` was near CloudFormation's hard 500-resource-per-stack limit; API Gateway routes must live on the same stack as their `RestApi`, so giving the registry its own API (in a nested stack) is the only way to move that surface off the root and keep both the default and ECS compute paths under the cap. The cost is one extra config value: the CLI reads `registry_api_url` (from the `RegistryApiUrl` output) for `bgagent registry` commands — `bgagent configure --stack-name …` captures it automatically, or pass `--registry-api-url` explicitly.
 
 ### 7.1 `POST /registry/records` — publish
 

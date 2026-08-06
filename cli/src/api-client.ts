@@ -73,6 +73,8 @@ export interface ApiClientOptions {
 export class ApiClient {
   private baseUrl: string | undefined;
 
+  private registryBaseUrl: string | undefined;
+
   private readonly apiKey: string | undefined;
 
   constructor(options: ApiClientOptions = {}) {
@@ -88,18 +90,36 @@ export class ApiClient {
     return this.baseUrl;
   }
 
+  /** Base URL for the agent asset registry API (#246). It is a SEPARATE API
+   *  Gateway from the main one (RegistryApiUrl stack output), so it has its own
+   *  config field. Throws a clear error if the config predates the registry. */
+  private getRegistryBaseUrl(): string {
+    if (!this.registryBaseUrl) {
+      const config = loadConfig();
+      if (!config.registry_api_url) {
+        throw new Error(
+          'registry_api_url is not set in your bgagent config. Re-run setup (or add '
+          + 'registry_api_url from the stack\'s RegistryApiUrl output) to use `bgagent registry`.',
+        );
+      }
+      this.registryBaseUrl = config.registry_api_url.replace(/\/+$/, '');
+    }
+    return this.registryBaseUrl;
+  }
+
   private async request<T>(
     method: string,
     path: string,
     body?: unknown,
     headers?: Record<string, string>,
     signal?: AbortSignal,
+    baseUrl?: string,
   ): Promise<T> {
     // API-key mode skips Cognito entirely: no cached token, no refresh.
     const authHeaders: Record<string, string> = this.apiKey
       ? { 'X-API-Key': this.apiKey }
       : { Authorization: await getAuthToken() };
-    const url = `${this.getBaseUrl()}${path}`;
+    const url = `${baseUrl ?? this.getBaseUrl()}${path}`;
 
     debug(`${method} ${url}`);
     // Redaction + stringification are gated on isVerbose() so the deep copy
@@ -518,9 +538,14 @@ export class ApiClient {
 
   // --- Agent asset registry (#246) ---
 
+  // Registry (#246) commands target the SEPARATE registry API (its own API
+  // Gateway); getRegistryBaseUrl() resolves registry_api_url from config.
+
   /** POST /registry/records — publish an asset record. */
   async registryPublish(req: RegistryPublishRequest): Promise<RegistryRecordResponse> {
-    const res = await this.request<SuccessResponse<RegistryRecordResponse>>('POST', '/registry/records', req);
+    const res = await this.request<SuccessResponse<RegistryRecordResponse>>(
+      'POST', '/registry/records', req, undefined, undefined, this.getRegistryBaseUrl(),
+    );
     return res.data;
   }
 
@@ -529,6 +554,7 @@ export class ApiClient {
     const res = await this.request<SuccessResponse<RegistryResolveResponse>>(
       'GET',
       `/registry/resolve?ref=${encodeURIComponent(ref)}`,
+      undefined, undefined, undefined, this.getRegistryBaseUrl(),
     );
     return res.data;
   }
@@ -542,6 +568,7 @@ export class ApiClient {
     const res = await this.request<SuccessResponse<{ assets: RegistryListEntry[] }>>(
       'GET',
       `/registry/records${qs ? `?${qs}` : ''}`,
+      undefined, undefined, undefined, this.getRegistryBaseUrl(),
     );
     return res.data.assets;
   }
@@ -555,6 +582,7 @@ export class ApiClient {
     const res = await this.request<SuccessResponse<RegistryShowResponse>>(
       'GET',
       `/registry/records/${encodeURIComponent(kind)}/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}`,
+      undefined, undefined, undefined, this.getRegistryBaseUrl(),
     );
     return res.data;
   }

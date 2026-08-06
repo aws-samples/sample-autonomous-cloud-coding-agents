@@ -71,7 +71,10 @@ export async function listStackOutputs(region: string, stackName: string): Promi
 }
 
 /** CloudFormation output keys written by `bgagent configure`. */
-export const CONFIGURE_STACK_OUTPUT_KEYS = ['ApiUrl', 'UserPoolId', 'AppClientId'] as const;
+/** Stack outputs read into the CLI config. `RegistryApiUrl` is optional (only
+ *  present once the registry #246 is deployed); the rest are required. */
+export const CONFIGURE_STACK_OUTPUT_KEYS = ['ApiUrl', 'RegistryApiUrl', 'UserPoolId', 'AppClientId'] as const;
+const REQUIRED_CONFIGURE_OUTPUT_KEYS = ['ApiUrl', 'UserPoolId', 'AppClientId'] as const;
 
 /**
  * Resolve configure fields from stack outputs.
@@ -84,6 +87,7 @@ export async function resolveConfigureBundleFromStack(
   const outputs = await listStackOutputs(region, stackName);
   const byKey = new Map(outputs.map((o) => [o.key, o.value]));
   const apiUrl = byKey.get('ApiUrl');
+  const registryApiUrl = byKey.get('RegistryApiUrl');
   const userPoolId = byKey.get('UserPoolId');
   const appClientId = byKey.get('AppClientId');
   if (!apiUrl || !userPoolId || !appClientId) {
@@ -91,6 +95,9 @@ export async function resolveConfigureBundleFromStack(
   }
   return {
     api_url: apiUrl,
+    // Optional: only present once the registry (#246) is deployed. `bgagent
+    // registry` commands require it; other commands don't.
+    ...(registryApiUrl ? { registry_api_url: registryApiUrl } : {}),
     region,
     user_pool_id: userPoolId,
     client_id: appClientId,
@@ -108,7 +115,7 @@ export async function fetchConfigureBundleFromStack(
   }
   const outputs = await listStackOutputs(region, stackName);
   const byKey = new Map(outputs.map((o) => [o.key, o.value]));
-  const missing = CONFIGURE_STACK_OUTPUT_KEYS.filter((key) => !byKey.get(key));
+  const missing = REQUIRED_CONFIGURE_OUTPUT_KEYS.filter((key) => !byKey.get(key));
   throw new CliError(
     `Stack '${stackName}' is missing configure outputs in ${region}: ${missing.join(', ')}. `
     + 'Deploy the stack or pass --api-url / --user-pool-id / --client-id explicitly.',

@@ -26,9 +26,12 @@ import { handler as showHandler } from '../../src/handlers/registry-show';
 import type { RegistryClient } from '../../src/handlers/shared/registry/client';
 import { RegistryResolutionError } from '../../src/handlers/shared/registry/types';
 
-// Mock the factory so handlers get our fake client (no AWS).
+// Mock the factory so handlers get our fake client (no AWS). `publish` is a
+// standalone fn (not just a method on the object) so tests can assert on it
+// without tripping @typescript-eslint/unbound-method.
+const mockPublish = jest.fn();
 const mockClient: jest.Mocked<RegistryClient> = {
-  publish: jest.fn(),
+  publish: mockPublish,
   getRecord: jest.fn(),
   listRecords: jest.fn(),
   resolve: jest.fn(),
@@ -164,7 +167,7 @@ describe('registry-publish handler', () => {
 
     test('rejects an array runtime', async () => {
       expect(await publishAs({ ...validPublishBody, runtime: [] })).toBe(400);
-      expect(mockClient.publish).not.toHaveBeenCalled();
+      expect(mockPublish).not.toHaveBeenCalled();
     });
 
     test('rejects an empty mcp_server runtime', async () => {
@@ -193,8 +196,14 @@ describe('registry-publish handler', () => {
 
     test('accepts a well-formed stdio mcp_server (command, no url)', async () => {
       mockClient.publish.mockResolvedValue({
-        kind: 'mcp_server', namespace: 'acme', name: 'pdf-tools', version: '1.0.0',
-        status: 'PENDING_APPROVAL', storageMode: 'native', discovery: {}, runtime: {} as never,
+        kind: 'mcp_server',
+        namespace: 'acme',
+        name: 'pdf-tools',
+        version: '1.0.0',
+        status: 'PENDING_APPROVAL',
+        storageMode: 'native',
+        discovery: {},
+        runtime: {} as never,
       });
       expect(await publishAs({ ...validPublishBody, runtime: { transport: 'stdio', command: 'run-me' } })).toBe(201);
     });
@@ -245,7 +254,7 @@ describe('registry-resolve handler', () => {
       runtime: {
         transport: 'http',
         url: 'https://x',
-        headers: { Authorization: 'Bearer registry-secret', 'X-Api-Key': 'topsecret' },
+        headers: { 'Authorization': 'Bearer registry-secret', 'X-Api-Key': 'topsecret' },
       } as never,
       warnings: [],
     });
@@ -253,7 +262,7 @@ describe('registry-resolve handler', () => {
     expect(res.statusCode).toBe(200);
     const { runtime } = JSON.parse(res.body).data;
     // Header keys survive (discovery signal); values are masked.
-    expect(runtime.headers).toEqual({ Authorization: '***', 'X-Api-Key': '***' });
+    expect(runtime.headers).toEqual({ 'Authorization': '***', 'X-Api-Key': '***' });
     expect(JSON.stringify(res.body)).not.toContain('registry-secret');
     expect(JSON.stringify(res.body)).not.toContain('topsecret');
     // Non-secret fields are untouched.
