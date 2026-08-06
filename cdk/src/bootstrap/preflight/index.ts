@@ -22,4 +22,4 @@ export {
   getActionsForResource,
   getAllMappedActions,
 } from './resource-action-map';
-export type { ResourceActions } from './resource-action-map';
+export type { ResourceActions, LifecyclePhase } from './resource-action-map';

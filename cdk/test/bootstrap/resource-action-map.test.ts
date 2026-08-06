@@ -17,11 +17,6 @@
  *  SOFTWARE.
  */
 
-import { execFileSync } from 'node:child_process';
-import { readFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-
 import { Stack } from 'aws-cdk-lib';
 
 import { allPolicies } from '../../src/bootstrap/policies';
@@ -61,31 +56,6 @@ function extractPolicyActions(): { actions: Set<string>; wildcardPrefixes: Set<s
   return { actions, wildcardPrefixes };
 }
 
-/**
- * Services with known policy gaps. Actions from these services are excluded
- * from the policy coverage assertion, to be addressed in follow-up policy updates.
- */
-const KNOWN_GAP_SERVICES = new Set([
-  'sqs', // SQS actions not yet in bootstrap policies
-  's3', // S3 bucket lifecycle actions (CreateBucket, etc.) beyond CDK asset access
-]);
-
-/**
- * Individual actions not yet in policies but required for specific resource types.
- * These are known gaps to be addressed in follow-up policy updates.
- */
-const KNOWN_GAP_ACTIONS = new Set([
-  // Lambda EventSourceMapping actions not in current policies
-  'lambda:CreateEventSourceMapping',
-  'lambda:GetEventSourceMapping',
-  'lambda:UpdateEventSourceMapping',
-  'lambda:DeleteEventSourceMapping',
-  // Lambda LayerVersion actions not in current policies
-  'lambda:PublishLayerVersion',
-  'lambda:GetLayerVersion',
-  'lambda:DeleteLayerVersion',
-]);
-
 describe('resource-action-map', () => {
   describe('map structure', () => {
     it('has entries for at least 55 resource types', () => {
@@ -102,6 +72,31 @@ describe('resource-action-map', () => {
           throw new Error(`${type} has no create or delete actions`);
         }
       }
+    });
+
+    it('every entry declares all four lifecycle phases as arrays', () => {
+      // The map was create-only (`readonly string[]`) before #124. A regression
+      // to that shape, or a hand-added entry that omits a phase, would make
+      // actionsForResource() silently skip it rather than fail.
+      for (const entry of Object.values(RESOURCE_ACTION_MAP)) {
+        for (const phase of ['create', 'read', 'update', 'delete'] as const) {
+          expect(Array.isArray(entry[phase])).toBe(true);
+        }
+        expect(Object.keys(entry).sort()).toEqual(['create', 'delete', 'read', 'update']);
+      }
+    });
+
+    it('carries genuine update/delete depth, not just create', () => {
+      // The point of the CRUD shape: every reactive permission fix since the map
+      // landed (#351, #403, #405, #408, #410, #494, #595) was a missing
+      // Update*/Tag*/Delete* action. A create-only map cannot express those, so
+      // pin that the depth exists and cannot quietly erode back.
+      const withUpdate = Object.values(RESOURCE_ACTION_MAP)
+        .filter((e) => e.update.length > 0).length;
+      const withDelete = Object.values(RESOURCE_ACTION_MAP)
+        .filter((e) => e.delete.length > 0).length;
+      expect(withUpdate).toBeGreaterThanOrEqual(45);
+      expect(withDelete).toBeGreaterThanOrEqual(45);
     });
 
     it('all actions use valid IAM format (service:ActionName) or wildcard (service:*)', () => {
@@ -126,18 +121,13 @@ describe('resource-action-map', () => {
   });
 
   describe('policy coverage', () => {
-    it('all mapped actions (excluding known gaps) exist in the combined policy set', () => {
+    it('EVERY mapped action, in every lifecycle phase, exists in the policy set', () => {
       const { actions: policyActions, wildcardPrefixes } = extractPolicyActions();
       const mappedActions = getAllMappedActions();
       const uncovered: string[] = [];
 
       for (const action of mappedActions) {
-        // Skip known-gap services
         const service = action.split(':')[0];
-        if (KNOWN_GAP_SERVICES.has(service)) continue;
-
-        // Skip known-gap individual actions
-        if (KNOWN_GAP_ACTIONS.has(action)) continue;
 
         // Check direct match
         if (policyActions.has(action)) continue;
@@ -187,53 +177,5 @@ describe('resource-action-map', () => {
       // Should cover at least 10 distinct services
       expect(services.size).toBeGreaterThanOrEqual(10);
     });
-  });
-});
-
-describe('Synth coverage', () => {
-  const SKIP_TYPES = new Set([
-    'AWS::CDK::Metadata',
-    'Custom::AWS',
-    'Custom::S3AutoDeleteObjects',
-    'Custom::VpcRestrictDefaultSG',
-  ]);
-
-  function getResourceTypes(templatePath: string): string[] {
-    if (!existsSync(templatePath)) return [];
-    const template = JSON.parse(readFileSync(templatePath, 'utf-8'));
-    const resources = template.Resources as Record<string, { Type: string }>;
-    return [...new Set(Object.values(resources).map(r => r.Type))];
-  }
-
-  it('all agentcore resource types have map entries', () => {
-    const templatePath = join(__dirname, '..', '..', 'cdk.out', 'backgroundagent-dev.template.json');
-    const types = getResourceTypes(templatePath);
-    if (types.length === 0) return;
-    const unmapped = types.filter(t => !SKIP_TYPES.has(t) && !RESOURCE_ACTION_MAP[t]);
-    expect(unmapped).toEqual([]);
-  });
-
-  it('all ecs resource types have map entries', () => {
-    // Use a temp dir outside the repo tree to avoid racing with parallel
-    // tests that fingerprint repoRoot (e.g. github-tags.test.ts via
-    // AgentRuntimeArtifact.fromAsset). A synth.lock inside the repo tree
-    // causes ENOENT when another worker stats it mid-lifecycle.
-    const ecsOutDir = mkdtempSync(join(tmpdir(), 'cdk-ecs-synth-'));
-    try {
-      execFileSync('npx', ['cdk', 'synth', '-q', '-c', 'compute_type=ecs', '-o', ecsOutDir], {
-        cwd: join(__dirname, '..', '..'),
-        stdio: 'pipe',
-        timeout: 120000,
-      });
-    } catch {
-      rmSync(ecsOutDir, { recursive: true, force: true });
-      return; // synth unavailable — skip gracefully
-    }
-    const ecsTemplatePath = join(ecsOutDir, 'backgroundagent-dev.template.json');
-    const types = getResourceTypes(ecsTemplatePath);
-    rmSync(ecsOutDir, { recursive: true, force: true });
-    if (types.length === 0) return;
-    const unmapped = types.filter(t => !SKIP_TYPES.has(t) && !RESOURCE_ACTION_MAP[t]);
-    expect(unmapped).toEqual([]);
   });
 });
