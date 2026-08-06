@@ -20,6 +20,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { resolveCognitoAdminContext } from '../../src/cognito-admin';
 import { decodeBundle, encodeBundle, generateTempPassword, makeAdminCommand } from '../../src/commands/admin';
 import { CliError } from '../../src/errors';
 import { CliConfig } from '../../src/types';
@@ -165,5 +166,35 @@ describe('admin invite-user credentials file', () => {
 
     // The trailing first-login guidance the docs promise.
     expect(body).toContain('On first login you will be prompted to set a permanent password.');
+  });
+
+  test('the bundle label pads to the same value column as the others', async () => {
+    // The bundle line is the one rendered in USER_GUIDE.md's sample, and it is
+    // padded independently of email/temp-password — so un-padding ONLY that
+    // label would otherwise keep the suite green.
+    const bundleConfig: CliConfig = {
+      api_url: 'https://abc123.execute-api.us-east-1.amazonaws.com/v1',
+      region: 'us-east-1',
+      user_pool_id: 'us-east-1_AbCdEfGhI',
+      client_id: '1a2b3c4d5e6f7g8h9i0j1k2l3m',
+    };
+    jest.mocked(resolveCognitoAdminContext).mockResolvedValueOnce({
+      region: 'us-east-1',
+      userPoolId: 'us-east-1_abc',
+      configureBundle: bundleConfig,
+    } as Awaited<ReturnType<typeof resolveCognitoAdminContext>>);
+
+    const admin = makeAdminCommand();
+    await admin.parseAsync([
+      'node', 'admin',
+      'invite-user', 'teammate@example.com',
+      '--password', 'K9$mPq2nL!vXf3Hb',
+    ]);
+
+    const invitePath = path.join(tmpDir, 'invites', 'teammate@example.com.txt');
+    const lines = fs.readFileSync(invitePath, 'utf-8').split('\n');
+    const bundleLine = lines.find((l) => l.startsWith('bundle:'));
+    expect(bundleLine).toBeDefined();
+    expect(bundleLine!.indexOf(encodeBundle(bundleConfig))).toBe('temp password:'.length + 1);
   });
 });

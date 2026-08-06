@@ -87,14 +87,17 @@ export async function login(
     // TemporaryPasswordValidityDays. Once that window lapses the temp password
     // is dead and Cognito answers with a bare NotAuthorizedException — the same
     // error a genuinely wrong password produces, with nothing to say the temp
-    // one merely expired. Point the teammate at the fix (a fresh invite) rather
-    // than letting them retype a password that can never work again. We do not
+    // one merely expired. Point the teammate at a remedy that actually works
+    // rather than letting them retype a password that can never work again.
+    // `reset-password`, NOT `invite-user`: invite-user calls AdminCreateUser,
+    // which refuses an existing account with UsernameExistsException, so naming
+    // it sends the admin down a path the next command rejects. We do not
     // include the attempted password or any secret in the message.
     if (err instanceof Error && err.name === 'NotAuthorizedException') {
       throw new CliError(
         'Login failed: incorrect password, or your temporary password expired. '
-        + 'Temporary passwords lapse after a few days — ask your admin to re-run '
-        + '`bgagent admin invite-user` for a fresh one.',
+        + 'Temporary passwords lapse after a few days — ask your admin to run '
+        + '`bgagent admin reset-password <email>` for a fresh one.',
       );
     }
     throw err;

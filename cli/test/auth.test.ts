@@ -110,14 +110,18 @@ describe('auth', () => {
     test('maps NotAuthorizedException to an expired-temp-password hint (no secret leaked)', async () => {
       // Invited users lapse into a dead temp password after Cognito's default
       // 7-day window; Cognito answers with a bare NotAuthorizedException. The
-      // CLI should point at a fresh invite, not let the user retype a doomed
-      // password — and must not echo the attempted password.
+      // CLI should point at a remedy that WORKS for an existing account, not
+      // let the user retype a doomed password — and must not echo the attempted
+      // password. `reset-password`, not `invite-user`: the latter calls
+      // AdminCreateUser, which rejects an existing account, so naming it sends
+      // the admin to a command that refuses (#238 review N7).
       mockSend.mockRejectedValue(
         Object.assign(new Error('Incorrect username or password.'), { name: 'NotAuthorizedException' }),
       );
       const err = (await login('user@example.com', 'ExpiredTemp1!').catch((e: Error) => e)) as Error;
       expect(err.message).toMatch(/temporary password expired/);
-      expect(err.message).toContain('bgagent admin invite-user');
+      expect(err.message).toContain('bgagent admin reset-password');
+      expect(err.message).not.toContain('invite-user');
       expect(err.message).not.toContain('ExpiredTemp1!');
     });
 
