@@ -218,6 +218,7 @@ function hasPhrase(text: string, phrase: string): boolean {
   // Escape regex metachars (e.g. "re-run"); match on non-word boundaries so
   // "retry" doesn't fire inside a longer word.
   const esc = phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // nosemgrep: javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp -- `phrase` is never attacker-controlled: the only caller passes literals from the RETRY_PHRASES const, and metacharacters are escaped on the line above. `text` is the untrusted side and is the subject, not the pattern.
   return new RegExp(`(^|[^a-z0-9])${esc}([^a-z0-9]|$)`, 'i').test(text);
 }
 

@@ -86,6 +86,7 @@ def gql(query, variables=None):
         headers={"Authorization": pat(), "Content-Type": "application/json"},
     )
     try:
+        # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected -- the request target is the LINEAR_URL module constant (https://api.linear.app/graphql), not a caller-supplied or user-supplied URL, so there is no SSRF surface.
         with urllib.request.urlopen(req, timeout=30) as r:
             out = json.load(r)
     except urllib.error.HTTPError as e:
