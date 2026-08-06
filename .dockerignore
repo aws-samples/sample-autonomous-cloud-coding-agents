@@ -59,6 +59,14 @@ coverage/
 .coverage.*
 **/.coverage
 **/.coverage.*
+# Jest transform cache — same vanishing-file class as the coverage files above,
+# and the same consequence. Jest workers write and evict
+# ``.jest-cache/jest-transform-cache-*/<n>/<name>_<hash>.map.<random>`` entries
+# throughout a run, so a suite that synthesizes the agent image asset (which
+# fingerprints this tree) can hit ENOENT on an entry another worker just evicted.
+# Already in .gitignore, but .dockerignore is what CDK's fingerprint honours.
+.jest-cache/
+**/.jest-cache/
 
 # IDE / OS
 .idea/
