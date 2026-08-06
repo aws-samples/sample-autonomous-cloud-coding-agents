@@ -152,11 +152,13 @@ export class GitHubScreenshotIntegration extends Construct {
    *  so this metric ticks only on faults that ESCAPE the handler —
    *  init-time crashes (missing env at cold start, bundling defect),
    *  unhandled throws in an unguarded path, or the 120s hard timeout.
-   *  For that population it fires one evaluation window sooner than the
-   *  DLQ-depth alarm (which waits for Lambda's async-retry ladder to land
-   *  a message). Follows the ``metricErrors`` + 2-eval-period shape of
-   *  ``task-orchestrator.ts`` OrchestratorErrorAlarm (with threshold 1,
-   *  since any escaped error here is significant). */
+   *  For that population it fires no later than — and, when the retry
+   *  ladder straddles a period boundary, one window before — the DLQ-depth
+   *  alarm (which waits for Lambda's async-retry ladder to land a message).
+   *  Follows the ``metricErrors`` shape of ``task-orchestrator.ts``
+   *  OrchestratorErrorAlarm, but is 1-of-2 (``datapointsToAlarm: 1``) where
+   *  that alarm is genuinely 2-of-2, and uses threshold 1 since any escaped
+   *  error here is significant. */
   public readonly processorErrorAlarm: cloudwatch.Alarm;
 
   constructor(scope: Construct, id: string, props: GitHubScreenshotIntegrationProps) {
@@ -267,11 +269,11 @@ export class GitHubScreenshotIntegration extends Construct {
     // therefore fires on the faults that ESCAPE the handler: an init-time
     // crash (missing env at cold start, bundling defect), an unhandled
     // throw in an unguarded path, or the 120s hard timeout. That is the
-    // same failure class the DLQ eventually catches, but before Lambda's async-retry
-    // ladder has landed a message on the DLQ. The Errors metric is stamped
-    // at invocation time, so this alarm fires no later than — and, when the
-    // retry ladder straddles a period boundary, one window before — the
-    // DLQ-depth alarm. threshold 1 / 1-of-2 eval periods matches the AC;
+    // same failure class the DLQ eventually catches, but it is observable
+    // earlier: the Errors metric is stamped at invocation time, so this
+    // alarm fires no later than — and, when the retry ladder straddles a
+    // period boundary, one window before — the DLQ-depth alarm, which must
+    // wait for Lambda's async-retry ladder to land a message. threshold 1 / 1-of-2 eval periods matches the AC;
     // the metricErrors shape follows ``task-orchestrator.ts``
     // OrchestratorErrorAlarm (which uses threshold 3 — we use 1 because any
     // escaped error here is significant).
