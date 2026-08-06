@@ -22,6 +22,7 @@ import { allPolicies } from '../../src/bootstrap/policies';
 import { applicationPolicy } from '../../src/bootstrap/policies/application';
 import { computeAgentcorePolicy } from '../../src/bootstrap/policies/compute-agentcore';
 import { computeEcsPolicy } from '../../src/bootstrap/policies/compute-ecs';
+import { computeLambdaMicrovmPolicy } from '../../src/bootstrap/policies/compute-lambda-microvm';
 import { infrastructurePolicy } from '../../src/bootstrap/policies/infrastructure';
 import { observabilityPolicy } from '../../src/bootstrap/policies/observability';
 
@@ -399,6 +400,79 @@ describe('IaCRole-ABCA-Compute-ECS', () => {
   });
 });
 
+describe('computeLambdaMicrovmPolicy', () => {
+  const stack = new Stack();
+  const doc = computeLambdaMicrovmPolicy();
+  const json = doc.toJSON();
+  const rendered = JSON.stringify(json);
+
+  it('produces valid JSON', () => {
+    expect(() => JSON.parse(rendered)).not.toThrow();
+  });
+
+  it('is under 6144 characters when serialized', () => {
+    // AWS managed policy size limit
+    expect(rendered.length).toBeLessThan(6144);
+  });
+
+  it('contains the expected SIDs', () => {
+    const resolvedDoc = stack.resolve(doc);
+    const statements = resolvedDoc.Statement as Array<{ Sid: string }>;
+
+    expect(statements.map((s) => s.Sid)).toEqual(['LambdaMicrovms']);
+  });
+
+  it('covers the expected service prefixes', () => {
+    const resolvedDoc = stack.resolve(doc);
+    const statements = resolvedDoc.Statement as Array<{ Action: string | string[] }>;
+    const allActions = statements.flatMap((s) =>
+      Array.isArray(s.Action) ? s.Action : [s.Action],
+    );
+    const prefixes = new Set(allActions.map((a) => a.split(':')[0]));
+
+    expect(prefixes).toEqual(new Set(['lambda']));
+  });
+
+  it('covers both CFN resource types the construct synthesizes', () => {
+    const resolvedDoc = stack.resolve(doc);
+    const statements = resolvedDoc.Statement as Array<{ Action: string | string[] }>;
+    const allActions = statements.flatMap((s) =>
+      Array.isArray(s.Action) ? s.Action : [s.Action],
+    );
+
+    // AWS::Lambda::MicrovmImage + AWS::Lambda::NetworkConnector, plus the
+    // documented dependent of CreateMicrovmImage.
+    expect(allActions).toContain('lambda:CreateMicrovmImage');
+    expect(allActions).toContain('lambda:CreateNetworkConnector');
+    expect(allActions).toContain('lambda:PassNetworkConnector');
+  });
+
+  it('grants NO runtime session lifecycle actions (those belong to the orchestrator role)', () => {
+    // A deploy role that can start, suspend, or mint tokens for MicroVMs is a
+    // privilege escalation — the orchestrator gets those, per-deployment.
+    // Compared as exact actions, not substrings: `lambda:GetMicrovmImage` (which
+    // the deploy role legitimately needs) contains `lambda:GetMicrovm`.
+    const resolvedDoc = stack.resolve(doc);
+    const statements = resolvedDoc.Statement as Array<{ Action: string | string[] }>;
+    const allActions = new Set(statements.flatMap((s) =>
+      Array.isArray(s.Action) ? s.Action : [s.Action],
+    ));
+
+    for (const action of [
+      'lambda:RunMicrovm',
+      'lambda:GetMicrovm',
+      'lambda:TerminateMicrovm',
+      'lambda:SuspendMicrovm',
+      'lambda:ResumeMicrovm',
+      'lambda:CreateMicrovmAuthToken',
+      'lambda:CreateMicrovmShellAuthToken',
+      'lambda:ConnectMicrovm',
+    ]) {
+      expect(allActions.has(action)).toBe(false);
+    }
+  });
+});
+
 describe('Cross-policy validation', () => {
   const stack = new Stack();
   const policies = allPolicies();
@@ -416,8 +490,10 @@ describe('Cross-policy validation', () => {
     expect(unique.size).toBe(allSids.length);
   });
 
-  it('returns exactly 5 policies', () => {
-    expect(policies).toHaveLength(5);
+  it('returns exactly 6 policies', () => {
+    // infrastructure, application, observability, compute-agentcore,
+    // compute-ecs, compute-lambda-microvm (ADR-021).
+    expect(policies).toHaveLength(6);
   });
 
   it('every policy is under 6144 character limit', () => {

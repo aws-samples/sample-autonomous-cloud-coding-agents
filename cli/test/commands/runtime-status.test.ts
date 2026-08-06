@@ -57,6 +57,11 @@ describe('buildRuntimeStatusReport', () => {
         status: 'active',
         compute_type: 'ecs',
       },
+      {
+        repo: 'acme/microvm',
+        status: 'active',
+        compute_type: 'lambda-microvm',
+      },
     ]);
 
     const report = await buildRuntimeStatusReport(
@@ -67,6 +72,12 @@ describe('buildRuntimeStatusReport', () => {
 
     expect(report.agentcore_runtimes).toHaveLength(2);
     expect(report.ecs_substrates).toHaveLength(1);
+    expect(report.lambda_microvm_substrates).toEqual([expect.objectContaining({
+      compute_type: 'lambda-microvm',
+      used_by_repos: ['acme/microvm'],
+    })]);
+    expect(report.blueprints.find((blueprint) => blueprint.repo === 'acme/microvm')?.runtime_arn)
+      .toBeUndefined();
     expect(report.blueprints[0].runtime_arn_source).toBe('platform');
     expect(report.blueprints[1].runtime_arn_source).toBe('blueprint');
     expect(controlPlaneSend).toHaveBeenCalledTimes(2);

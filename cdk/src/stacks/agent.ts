@@ -47,6 +47,11 @@ import { FanOutConsumer } from '../constructs/fanout-consumer';
 import { GitHubScreenshotIntegration } from '../constructs/github-screenshot-integration';
 import { IterationHeartbeat } from '../constructs/iteration-heartbeat';
 import { JiraIntegration } from '../constructs/jira-integration';
+import {
+  LambdaMicrovmCompute,
+  isLambdaMicrovmImageConfigured,
+  type LambdaMicrovmImageInputs,
+} from '../constructs/lambda-microvm-compute';
 import { LinearIntegration } from '../constructs/linear-integration';
 import { OrchestrationReconciler } from '../constructs/orchestration-reconciler';
 import { OrchestrationTable } from '../constructs/orchestration-table';
@@ -210,6 +215,52 @@ export class AgentStack extends Stack {
       },
     ]);
 
+    // --- Compute-backend deploy gate (read early) ---
+    // Which optional compute substrate this deploy provisions, from the
+    // ``compute_type`` deploy context (default 'agentcore' — the AgentCore
+    // runtime is always present, the other backends are additive). Read HERE,
+    // well above the constructs it gates, because TaskApi is instantiated
+    // before them and needs to know whether to wire the cancel Lambda's
+    // MicroVM termination grant (ADR-021 sub-decision 4).
+    const computeType = this.node.tryGetContext('compute_type') ?? 'agentcore';
+    const lambdaMicrovmEnabled = computeType === 'lambda-microvm';
+
+    // The operator-supplied MicroVM image inputs, resolved HERE (pure context
+    // reads, no construct dependency) rather than at the construct's call site
+    // below, because TaskApi — created well before the MicroVM construct — needs
+    // to know whether an image will exist in order to decide whether the cancel
+    // Lambda gets a `lambda:TerminateMicrovm` grant at all. The same object is
+    // handed to the construct, and `isLambdaMicrovmImageConfigured` is the single
+    // shared predicate, so the two cannot drift.
+    //
+    // Base-image ARNs/versions are Region-scoped service data only discoverable
+    // through ``aws lambda-microvms list-managed-microvm-images``, and the
+    // artifact has to be uploaded to the bucket THIS stack creates — hence
+    // context values rather than defaults. See the construct's "three states"
+    // table and cdk/scripts/package-microvm-artifact.sh for the bootstrap
+    // sequence.
+    const microvmImageInputs: LambdaMicrovmImageInputs = {
+      baseImageArn: this.node.tryGetContext('microvm_base_image_arn'),
+      baseImageVersion: this.node.tryGetContext('microvm_base_image_version'),
+      externalImageIdentifier: this.node.tryGetContext('microvm_image_identifier'),
+      externalImageVersion: this.node.tryGetContext('microvm_image_version'),
+    };
+    const microvmImageConfigured = lambdaMicrovmEnabled
+      && isLambdaMicrovmImageConfigured(microvmImageInputs);
+
+    // MicroVM image ARN placeholder — the image is created AFTER TaskApi, but the
+    // cancel Lambda's grant must be scoped to it. Same Lazy.string cycle-break as
+    // the runtime / orchestrator / SessionRole ARNs below.
+    let microvmImageArnHolder: string | undefined;
+    const lazyMicrovmImageArn = Lazy.string({
+      produce: () => {
+        if (!microvmImageArnHolder) {
+          throw new Error('MicroVM image ARN was accessed before LambdaMicrovmCompute was created');
+        }
+        return microvmImageArnHolder;
+      },
+    });
+
     // Network isolation — VPC with restricted egress
     const agentVpc = new AgentVpc(this, 'AgentVpc');
 
@@ -309,6 +360,11 @@ export class AgentStack extends Stack {
       traceArtifactsBucket: traceArtifactsBucket.bucket,
       attachmentsBucket: attachmentsBucket.bucket,
       userConcurrencyTable: userConcurrencyTable.table,
+      // ADR-021: gives the cancel Lambda `lambda:TerminateMicrovm`, scoped to the
+      // platform MicroVM image, so cancelling a MicroVM-backed task stops compute
+      // immediately. Omitted when no image is configured — there can be no
+      // MicroVM-backed task to cancel then.
+      ...(microvmImageConfigured && { lambdaMicrovmImageArn: lazyMicrovmImageArn }),
     });
 
     // --- AgentCore Runtime (IAM-authed orchestrator path) ---
@@ -641,7 +697,8 @@ export class AgentStack extends Stack {
     // ``--context compute_type=ecs``, so the default synth (and the
     // bootstrap-coverage test that synths with default context) stays
     // agentcore-only, matching how other optional constructs are context-gated.
-    const computeType = this.node.tryGetContext('compute_type') ?? 'agentcore';
+    // (``computeType`` is read near the top of the constructor — TaskApi needs it
+    // for the conditional MicroVM cancel grant.)
     // Ephemeral bucket for ECS task payloads — the orchestrator writes the
     // payload here (it exceeds the 8 KB RunTask containerOverrides limit) and
     // passes only an S3 URI pointer; the container fetches it on boot, the
@@ -702,17 +759,88 @@ export class AgentStack extends Stack {
       })
       : undefined;
 
+    // --- AWS Lambda MicroVMs compute backend (CONTEXT-GATED) ---
+    // ADR-021 P1: a serverless Firecracker sandbox per session — VM-level
+    // isolation with no cluster to operate, and (from P3) suspend/resume so a
+    // task parked on a HITL approval gate stops billing compute while keeping
+    // its cloned repo and warm build caches in memory.
+    //
+    // Gated exactly like the ECS backend above: resources synthesize only under
+    // ``--context compute_type=lambda-microvm``, so the default synth — and the
+    // bootstrap-coverage test that synths with default context — stays
+    // agentcore-only. The construct itself enforces the ADR's Region gate, so a
+    // deploy into a Region without Lambda MicroVMs fails at synth rather than on
+    // the first task.
+    const lambdaMicrovm = lambdaMicrovmEnabled
+      ? new LambdaMicrovmCompute(this, 'LambdaMicrovmCompute', {
+        vpc: agentVpc.vpc,
+        // Per-session IAM scoping (#209): the MicroVM execution role is admitted
+        // to the same per-task SessionRole the AgentCore runtime and the Fargate
+        // task role use, so tenant-data access is tag-scoped on every substrate.
+        agentSessionRole,
+        // Resolved above TaskApi — see `microvmImageInputs`.
+        ...microvmImageInputs,
+      })
+      : undefined;
+
+    // Resolve the Lazy TaskApi's cancel grant is scoped by. The invariant the
+    // Lazy's `produce` guards: `microvmImageConfigured` (computed from the same
+    // inputs, via the same predicate) is true exactly when the construct sets
+    // `imageArn`, so a configured deployment always has an ARN to resolve and an
+    // unconfigured one never asks for it.
+    microvmImageArnHolder = lambdaMicrovm?.imageArn;
+
     // Advertise which compute substrate this deploy actually provisioned, so the
     // CLI can refuse to onboard a repo as ``compute_type: ecs`` when the ECS gate
     // wasn't on (``--context compute_type=ecs``) — otherwise that mismatch only
     // surfaces per-task as "ECS compute strategy requires ECS_CLUSTER_ARN…" at
     // runtime. ``ecs`` implies the AgentCore runtime is ALSO available (the ECS
-    // gate is additive), so an agentcore repo works on either substrate.
+    // gate is additive), so an agentcore repo works on either substrate — and the
+    // same holds for ``lambda-microvm`` (ADR-021).
     new CfnOutput(this, 'ComputeSubstrate', {
-      value: ecsCluster ? 'ecs' : 'agentcore',
-      description: 'Compute substrate provisioned by this deploy: "agentcore" (default) or "ecs" '
-        + '(deployed with --context compute_type=ecs; adds the Fargate substrate alongside AgentCore).',
+      value: ecsCluster ? 'ecs' : (lambdaMicrovm ? 'lambda-microvm' : 'agentcore'),
+      description: 'Compute substrate provisioned by this deploy: "agentcore" (default), "ecs" '
+        + '(deployed with --context compute_type=ecs; adds the Fargate substrate alongside AgentCore) '
+        + 'or "lambda-microvm" (--context compute_type=lambda-microvm; adds the Lambda MicroVMs '
+        + 'substrate alongside AgentCore).',
     });
+
+    if (lambdaMicrovm) {
+      // Emitted so the packaging helper (cdk/scripts/package-microvm-artifact.sh)
+      // can discover where to upload the zip+Dockerfile and which log group /
+      // build role to hand `create-microvm-image` — none of which have
+      // predictable physical names.
+      new CfnOutput(this, 'MicrovmArtifactBucketName', {
+        value: lambdaMicrovm.artifactBucket.bucketName,
+        description: 'S3 bucket the Lambda MicroVMs zip+Dockerfile artifact is uploaded to (ADR-021)',
+      });
+      new CfnOutput(this, 'MicrovmArtifactObjectKey', {
+        value: lambdaMicrovm.artifactObjectKey,
+        description: 'S3 key the Lambda MicroVMs artifact must be uploaded to (matches the build role\'s s3:GetObject scope)',
+      });
+      new CfnOutput(this, 'MicrovmBuildRoleArn', {
+        value: lambdaMicrovm.buildRole.roleArn,
+        description: 'IAM role for `aws lambda-microvms create-microvm-image --build-role-arn`',
+      });
+      new CfnOutput(this, 'MicrovmExecutionRoleArn', {
+        value: lambdaMicrovm.executionRole.roleArn,
+        description: 'IAM role the running MicroVM assumes (`run-microvm --execution-role-arn`)',
+      });
+      new CfnOutput(this, 'MicrovmEgressConnectorArns', {
+        value: lambdaMicrovm.egressConnectorArns.join(','),
+        description: 'Lambda network connector ARNs routing MicroVM egress through the platform VPC',
+      });
+      new CfnOutput(this, 'MicrovmBuildEgressConnectorArns', {
+        value: lambdaMicrovm.buildEgressConnectorArns.join(','),
+        description: 'Lambda network connector ARNs for the IMAGE BUILD path (TCP 443 + 80 — '
+          + 'agent/Dockerfile runs apt-get over HTTP; pass these to '
+          + '`create-microvm-image --egress-network-connectors`, NOT the runtime connectors)',
+      });
+      new CfnOutput(this, 'MicrovmLogGroupName', {
+        value: lambdaMicrovm.logGroup.logGroupName,
+        description: 'CloudWatch log group for MicroVM build- and run-time logs',
+      });
+    }
 
     // --- Task Orchestrator (durable Lambda function) ---
     // Per-user concurrency cap, shared by the orchestrator (admission control)
@@ -751,6 +879,29 @@ export class AgentStack extends Stack {
       // Pass the payload bucket so the orchestrator writes/deletes the
       // out-of-band payload and the ECS strategy builds the S3 URI pointer.
       ...(ecsPayloadBucket && { ecsPayloadBucket: ecsPayloadBucket.bucket }),
+      // ADR-021: route ``compute_type: 'lambda-microvm'`` repos to the MicroVM
+      // substrate. Wired only when an image is actually configured — without one
+      // the strategy has nothing to run, and injecting a partial MICROVM_* env
+      // block would trade the strategy's precise "deployed without the MicroVM
+      // substrate" error for an opaque service-side failure. The construct sets
+      // ``imageIdentifier`` and ``imageArn`` together (a bare image name is
+      // resolved to its exact ARN), so testing both keeps the all-or-nothing
+      // contract compile-checked rather than assumed.
+      ...(lambdaMicrovm?.imageIdentifier && lambdaMicrovm.imageArn && {
+        microvmConfig: {
+          imageIdentifier: lambdaMicrovm.imageIdentifier,
+          imageArn: lambdaMicrovm.imageArn,
+          imageVersion: lambdaMicrovm.imageVersion,
+          executionRoleArn: lambdaMicrovm.executionRole.roleArn,
+          egressConnectorArns: lambdaMicrovm.egressConnectorArns,
+          // Explicit NO_INGRESS, not an omission: RunMicrovm attaches a PUBLIC
+          // HTTP_INGRESS connector (and mints a public endpoint) when the field is
+          // absent, so ADR-021's "no inbound exposure" posture is a control the
+          // construct has to pass on every launch. Still no JWE tokens minted.
+          ingressConnectorArns: lambdaMicrovm.ingressConnectorArns,
+          payloadBucket: lambdaMicrovm.payloadBucket,
+        },
+      }),
     });
 
     // Now that the orchestrator exists, resolve the Lazy used by TaskApi at synth.
