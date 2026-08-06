@@ -33,6 +33,16 @@ interface StackOverrides {
   memoryId?: string;
   guardrailId?: string;
   guardrailVersion?: string;
+  /** ADR-021 P2: the identifiers the orchestrator forwards as `platform_config`. */
+  agentPlatformConfig?: {
+    taskApprovalsTableName: string;
+    nudgesTableName: string;
+    logGroupName: string;
+    artifactsBucketName: string;
+    traceArtifactsBucketName: string;
+    agentSessionRoleArn: string;
+    anthropicDefaultHaikuModel: string;
+  };
   ecsConfig?: {
     clusterArn: string;
     taskDefinitionArn: string;
@@ -760,5 +770,136 @@ describe('TaskOrchestrator with the Lambda MicroVMs backend (ADR-021)', () => {
   test('adds no MicroVM statements when microvmConfig is omitted', () => {
     expect(microvmStatements(noMicrovmTemplate)).toEqual([]);
     expect(orchestratorEnv(noMicrovmTemplate).MICROVM_IMAGE_IDENTIFIER).toBeUndefined();
+  });
+});
+
+describe('TaskOrchestrator agentPlatformConfig (ADR-021 P2 platform_config transport)', () => {
+  const SESSION_ROLE_ARN = 'arn:aws:iam::123456789012:role/AbcaAgentSessionRole';
+  const HAIKU_PROFILE = 'us.anthropic.claude-haiku-4-5-20251001-v1:0';
+
+  /**
+   * Stack with real approvals/nudges tables and buckets, so the "forwards the
+   * NAME, grants nothing" property can be asserted against actual logical IDs
+   * rather than string literals.
+   */
+  function createPlatformConfigStack(withConfig: boolean): { template: Template } {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    });
+    const mkTable = (id: string) => new dynamodb.Table(stack, id, {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+    });
+    const approvalsTable = mkTable('TaskApprovalsTable');
+    const nudgesTable = mkTable('TaskNudgesTable');
+    const traceBucket = new s3.Bucket(stack, 'TraceArtifactsBucket');
+
+    new TaskOrchestrator(stack, 'TaskOrchestrator', {
+      taskTable: mkTable('TaskTable'),
+      taskEventsTable: mkTable('TaskEventsTable'),
+      userConcurrencyTable: new dynamodb.Table(stack, 'UserConcurrencyTable', {
+        partitionKey: { name: 'user_id', type: dynamodb.AttributeType.STRING },
+      }),
+      runtimeArn: 'arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/test-runtime',
+      ...(withConfig && {
+        agentPlatformConfig: {
+          taskApprovalsTableName: approvalsTable.tableName,
+          nudgesTableName: nudgesTable.tableName,
+          logGroupName: '/aws/abca/application',
+          artifactsBucketName: traceBucket.bucketName,
+          traceArtifactsBucketName: traceBucket.bucketName,
+          agentSessionRoleArn: SESSION_ROLE_ARN,
+          anthropicDefaultHaikuModel: HAIKU_PROFILE,
+        },
+      }),
+    });
+
+    return { template: Template.fromStack(stack) };
+  }
+
+  function orchestratorEnvVars(template: Template): Record<string, unknown> {
+    const [, fn] = Object.entries(template.findResources('AWS::Lambda::Function'))
+      .find(([id]) => id.includes('OrchestratorFn'))!;
+    return fn.Properties.Environment.Variables as Record<string, unknown>;
+  }
+
+  let template: Template;
+  let withoutConfigTemplate: Template;
+
+  beforeAll(() => {
+    template = createPlatformConfigStack(true).template;
+    withoutConfigTemplate = createPlatformConfigStack(false).template;
+  });
+
+  test('injects the seven forwarded identifiers under the names the strategy reads', () => {
+    // These names are a CONTRACT with
+    // `handlers/shared/strategies/lambda-microvm-strategy.ts`'s
+    // PLATFORM_CONFIG_ENV_VARS map, and with the AgentCore runtime env block in
+    // `stacks/agent.ts` — one stack value, one name, three backends. Renaming one
+    // side silently strips a key from every MicroVM task's platform_config.
+    const env = orchestratorEnvVars(template);
+    expect(env.TASK_APPROVALS_TABLE_NAME).toEqual({ Ref: expect.stringMatching(/^TaskApprovalsTable/) });
+    expect(env.NUDGES_TABLE_NAME).toEqual({ Ref: expect.stringMatching(/^TaskNudgesTable/) });
+    expect(env.LOG_GROUP_NAME).toBe('/aws/abca/application');
+    expect(env.ARTIFACTS_BUCKET_NAME).toEqual({ Ref: expect.stringMatching(/^TraceArtifactsBucket/) });
+    expect(env.TRACE_ARTIFACTS_BUCKET_NAME).toEqual({ Ref: expect.stringMatching(/^TraceArtifactsBucket/) });
+    expect(env.AGENT_SESSION_ROLE_ARN).toBe(SESSION_ROLE_ARN);
+    expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe(HAIKU_PROFILE);
+  });
+
+  test('carries the four REQUIRED platform_config sources together (never a partial set)', () => {
+    // The strategy refuses to start a lambda-microvm session without these four.
+    // Three come from the orchestrator's own wiring and one from this block, so
+    // this is the assertion that they are all reachable from ONE deploy.
+    const env = orchestratorEnvVars(createStack({
+      githubTokenSecretArn: 'arn:aws:secretsmanager:us-east-1:123456789012:secret:github-token-abc123',
+      agentPlatformConfig: {
+        taskApprovalsTableName: 'approvals',
+        nudgesTableName: 'nudges',
+        logGroupName: '/aws/abca/application',
+        artifactsBucketName: 'artifacts',
+        traceArtifactsBucketName: 'traces',
+        agentSessionRoleArn: SESSION_ROLE_ARN,
+        anthropicDefaultHaikuModel: HAIKU_PROFILE,
+      },
+    }).template);
+    expect(env.TASK_TABLE_NAME).toBeDefined();
+    expect(env.TASK_EVENTS_TABLE_NAME).toBeDefined();
+    expect(env.GITHUB_TOKEN_SECRET_ARN).toBeDefined();
+    expect(env.AGENT_SESSION_ROLE_ARN).toBe(SESSION_ROLE_ARN);
+  });
+
+  test('omits every one of them when the prop is absent (isolated-construct posture)', () => {
+    const env = orchestratorEnvVars(withoutConfigTemplate);
+    for (const key of [
+      'TASK_APPROVALS_TABLE_NAME',
+      'NUDGES_TABLE_NAME',
+      'LOG_GROUP_NAME',
+      'ARTIFACTS_BUCKET_NAME',
+      'TRACE_ARTIFACTS_BUCKET_NAME',
+      'AGENT_SESSION_ROLE_ARN',
+      'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+    ]) {
+      expect(env[key]).toBeUndefined();
+    }
+  });
+
+  test('grants NOTHING for the forwarded resources — names only, no new reach', () => {
+    // The load-bearing property of this block. The orchestrator transports these
+    // identifiers to the agent and never calls the resources itself, so a
+    // "while I'm here" grant would hand the orchestration plane approvals/nudges
+    // tenant-data access it has never needed. The agent reaches them through its
+    // own execution role / the task-scoped SessionRole.
+    const orchestratorPolicies = JSON.stringify(
+      Object.entries(template.findResources('AWS::IAM::Policy'))
+        .filter(([id]) => id.includes('TaskOrchestrator')),
+    );
+    expect(orchestratorPolicies).not.toContain('TaskApprovalsTable');
+    expect(orchestratorPolicies).not.toContain('TaskNudgesTable');
+    expect(orchestratorPolicies).not.toContain('TraceArtifactsBucket');
+    // ...and no sts:AssumeRole on the SessionRole either: forwarding the ARN is
+    // not assuming the role.
+    expect(orchestratorPolicies).not.toContain(SESSION_ROLE_ARN);
+    expect(orchestratorPolicies).not.toContain('sts:AssumeRole');
   });
 });

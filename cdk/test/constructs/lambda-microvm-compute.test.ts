@@ -23,7 +23,10 @@ import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as s3 from 'aws-cdk-lib/aws-s3';
+import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
+import { AgentMemory } from '../../src/constructs/agent-memory';
 import { AgentSessionRole } from '../../src/constructs/agent-session-role';
+import { DEFAULT_BEDROCK_MODEL_IDS } from '../../src/constructs/bedrock-models';
 import {
   DEFAULT_MINIMUM_MEMORY_MIB,
   LambdaMicrovmCompute,
@@ -42,6 +45,8 @@ import {
 import { LAMBDA_MICROVM_SUPPORTED_REGIONS } from '../../src/handlers/shared/microvm-regions';
 
 const BASE_IMAGE_ARN = 'arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1';
+const GITHUB_TOKEN_SECRET_ARN =
+  'arn:aws:secretsmanager:us-east-1:123456789012:secret:abca/github-token-AbCdEf';
 
 interface BuildOptions {
   readonly region?: string;
@@ -50,6 +55,8 @@ interface BuildOptions {
   readonly externalImageIdentifier?: string;
   readonly externalImageVersion?: string;
   readonly withSessionRole?: boolean;
+  /** Wire the P2 runtime-parity props (GitHub PAT secret + AgentCore Memory). */
+  readonly withRuntimeParity?: boolean;
   readonly regionAgnostic?: boolean;
   readonly minimumMemoryInMiB?: number;
 }
@@ -104,6 +111,12 @@ function instantiate(options: BuildOptions = {}): Omit<Built, 'template'> {
   const construct = new LambdaMicrovmCompute(stack, 'LambdaMicrovmCompute', {
     vpc,
     agentSessionRole,
+    ...(options.withRuntimeParity && {
+      githubTokenSecret: secretsmanager.Secret.fromSecretCompleteArn(
+        stack, 'GitHubTokenSecret', GITHUB_TOKEN_SECRET_ARN,
+      ),
+      agentMemory: new AgentMemory(stack, 'AgentMemory'),
+    }),
     ...(options.withImage && {
       baseImageArn: BASE_IMAGE_ARN,
       baseImageVersion: '1',
@@ -127,7 +140,7 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
   let template: Template;
 
   beforeAll(() => {
-    built = build({ withImage: true, withSessionRole: true });
+    built = build({ withImage: true, withSessionRole: true, withRuntimeParity: true });
     template = built.template;
   });
 
@@ -163,28 +176,101 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     expect(Math.max(...MICROVM_SUPPORTED_MEMORY_MIB)).toBe(DEFAULT_MINIMUM_MEMORY_MIB);
   });
 
-  test('configures /ready + /run and NOTHING else (the rest fail their transition)', () => {
+  test('declares EXACTLY the four hooks the agent serves (P2), and no more', () => {
+    // `toEqual` on the whole object, not per-key assertions: the invariant runs in
+    // BOTH directions. A hook the agent serves but the image does not declare is
+    // never called (the P2 R2 regression this replaces — the agent gained
+    // /validate and /terminate while the construct still advertised two hooks);
+    // a hook the image declares but the agent does not serve fails the
+    // corresponding build or lifecycle transition. Only an exact set catches both.
     const images = template.findResources('AWS::Lambda::MicrovmImage');
     const hooks = Object.values(images)[0]!.Properties.Hooks;
     expect(hooks.Port).toBe(8080);
-    // Paths are the routes `agent/src/server.py` actually serves (the API model
-    // has no path field at all, so a made-up path would be a silent lie).
+
+    // RUNTIME hooks. Paths are the routes `agent/src/server.py` actually serves
+    // (the CFN type takes strings while the service API takes ENABLED/DISABLED
+    // flags — see RUN_HOOK_PATH — so a made-up path would be a silent lie).
     expect(hooks.MicrovmHooks).toEqual({
       Run: '/aws/lambda-microvms/runtime/v1/run',
       RunTimeoutInSeconds: 60,
+      Terminate: '/aws/lambda-microvms/runtime/v1/terminate',
+      // Near the BOTTOM of the service's 1–60 s window on purpose: the handler is
+      // a log-and-acknowledge with nothing to drain (progress writes are already
+      // durable per event), and the budget bounds how long teardown waits on a
+      // WEDGED guest that is still holding admission-gating memory quota.
+      TerminateTimeoutInSeconds: 15,
     });
-    // /ready is MANDATORY: create-microvm-image refuses ANY lifecycle hook
-    // without it, so "declare /run in P1, serve it in P2" was unreachable.
+
+    // BUILD (image) hooks. /ready is MANDATORY: create-microvm-image refuses ANY
+    // lifecycle hook without it, so "declare /run in P1, serve it in P2" was
+    // unreachable.
     expect(hooks.MicrovmImageHooks).toEqual({
       Ready: '/aws/lambda-microvms/runtime/v1/ready',
       ReadyTimeoutInSeconds: 60,
+      Validate: '/aws/lambda-microvms/runtime/v1/validate',
+      // Matches /ready deliberately: the checks are sub-millisecond, so the budget
+      // is sized for the still-initialising 503 path, which is the same allowance
+      // /ready needs in the same process on the same build path.
+      ValidateTimeoutInSeconds: 60,
     });
-    // A hook the service calls but the agent does not serve fails the lifecycle
-    // transition (or every build), so nothing else may be advertised.
+  });
+
+  test('does NOT declare /suspend or /resume — they are P3 and nothing answers them yet', () => {
+    // The remaining half of the exactness rule, called out separately because it
+    // is the one that must survive P3 landing suspend/resume in ONE commit across
+    // all three strategies: until then, declaring either fails the corresponding
+    // lifecycle transition on a real suspend attempt.
+    const images = template.findResources('AWS::Lambda::MicrovmImage');
+    const hooks = Object.values(images)[0]!.Properties.Hooks;
     expect(hooks.MicrovmHooks.Suspend).toBeUndefined();
+    expect(hooks.MicrovmHooks.SuspendTimeoutInSeconds).toBeUndefined();
     expect(hooks.MicrovmHooks.Resume).toBeUndefined();
-    expect(hooks.MicrovmHooks.Terminate).toBeUndefined();
-    expect(hooks.MicrovmImageHooks.Validate).toBeUndefined();
+    expect(hooks.MicrovmHooks.ResumeTimeoutInSeconds).toBeUndefined();
+  });
+
+  test('every declared hook path is under the agent-served hook prefix', () => {
+    // Keeps the four paths in lockstep with `MICROVM_HOOK_PREFIX` in
+    // `agent/src/server.py`. A typo'd prefix is invisible at synth and at deploy;
+    // it surfaces as a failed build (/ready, /validate) or a failed lifecycle
+    // transition on a real task (/run, /terminate).
+    const images = template.findResources('AWS::Lambda::MicrovmImage');
+    const hooks = Object.values(images)[0]!.Properties.Hooks;
+    const paths = [
+      ...Object.entries(hooks.MicrovmHooks as Record<string, unknown>),
+      ...Object.entries(hooks.MicrovmImageHooks as Record<string, unknown>),
+    ]
+      .filter(([, value]) => typeof value === 'string')
+      .map(([, value]) => value as string);
+
+    expect(paths).toHaveLength(4);
+    for (const hookPath of paths) {
+      expect(hookPath).toMatch(/^\/aws\/lambda-microvms\/runtime\/v1\/(ready|validate|run|terminate)$/);
+    }
+    expect([...paths].sort()).toEqual([
+      '/aws/lambda-microvms/runtime/v1/ready',
+      '/aws/lambda-microvms/runtime/v1/run',
+      '/aws/lambda-microvms/runtime/v1/terminate',
+      '/aws/lambda-microvms/runtime/v1/validate',
+    ]);
+  });
+
+  test('every declared hook timeout sits inside the service window for its kind', () => {
+    // Runtime hooks are capped at 60 s; build hooks allow up to 3600 s. A value
+    // outside its window is rejected at image-create time — minutes into a build,
+    // after the artifact has already been packaged and uploaded.
+    const images = template.findResources('AWS::Lambda::MicrovmImage');
+    const hooks = Object.values(images)[0]!.Properties.Hooks;
+
+    for (const key of ['RunTimeoutInSeconds', 'TerminateTimeoutInSeconds']) {
+      const value = (hooks.MicrovmHooks as Record<string, number>)[key]!;
+      expect(value).toBeGreaterThanOrEqual(1);
+      expect(value).toBeLessThanOrEqual(60);
+    }
+    for (const key of ['ReadyTimeoutInSeconds', 'ValidateTimeoutInSeconds']) {
+      const value = (hooks.MicrovmImageHooks as Record<string, number>)[key]!;
+      expect(value).toBeGreaterThanOrEqual(1);
+      expect(value).toBeLessThanOrEqual(3_600);
+    }
   });
 
   test('bakes NO environment variables into the snapshot (ADR-021: no secrets in the image)', () => {
@@ -453,14 +539,157 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     }
   });
 
-  test('execution role has NO Bedrock / Secrets Manager / DynamoDB grants (P2 scope)', () => {
-    const policies = Object.entries(template.findResources('AWS::IAM::Policy'))
-      .filter(([id]) => id.includes('LambdaMicrovmComputeExecutionRole'));
-    const rendered = JSON.stringify(policies);
+  /**
+   * Every statement on the execution role's inline policies, flattened. The role's
+   * grants arrive from several sources (CDK `grantRead`/`grantReadWrite` plus
+   * hand-written statements), and CDK may split them across policies, so the
+   * assertions below work from one flattened list rather than a policy index.
+   */
+  function executionRoleStatements(): Array<{
+    Action: string | string[];
+    Resource?: unknown;
+    Condition?: unknown;
+  }> {
+    return Object.entries(template.findResources('AWS::IAM::Policy'))
+      .filter(([id]) => id.includes('LambdaMicrovmComputeExecutionRole'))
+      .flatMap(([, p]) => p.Properties.PolicyDocument.Statement);
+  }
+
+  /** Statements whose action set includes `action`. */
+  function statementsWithAction(action: string) {
+    return executionRoleStatements().filter((statement) => {
+      const actions = Array.isArray(statement.Action) ? statement.Action : [statement.Action];
+      return actions.includes(action);
+    });
+  }
+
+  // --- ADR-021 P2 runtime parity on the execution role ---
+  //
+  // These replace P1's "the execution role has NO Bedrock / Secrets Manager /
+  // DynamoDB grants" assertion, which was a scope marker rather than a property:
+  // P2 is the phase that adds them. What remains a real, permanent property — and
+  // is still asserted below — is that DynamoDB is NOT among them.
+
+  test('execution role reads the GitHub PAT secret (needed before the SessionRole is assumed)', () => {
+    const statements = statementsWithAction('secretsmanager:GetSecretValue');
+    const rendered = JSON.stringify(statements);
+    expect(rendered).toContain(GITHUB_TOKEN_SECRET_ARN);
+    // grantRead, not write: the agent consumes the PAT, it never rotates it.
+    expect(rendered).not.toContain('secretsmanager:PutSecretValue');
+    expect(rendered).not.toContain('secretsmanager:UpdateSecret');
+  });
+
+  test('execution role gets the channel-OAuth PREFIX grant, GetSecretValue only', () => {
+    // Per-workspace secrets are created by the CLI at setup, so the name is
+    // unknown at synth and a prefix is the only expressible scope (mirroring
+    // ecs-agent-cluster). Without it a Linear/Jira task's 👀→✅ reaction and the
+    // channel MCP silently no-op.
+    const prefixStatement = executionRoleStatements().find(
+      statement => JSON.stringify(statement.Resource).includes('bgagent-linear-oauth-*'),
+    )!;
+    expect(prefixStatement).toBeDefined();
+    expect(prefixStatement.Action).toBe('secretsmanager:GetSecretValue');
+    const resources = JSON.stringify(prefixStatement.Resource);
+    expect(resources).toContain('bgagent-linear-oauth-*');
+    expect(resources).toContain('bgagent-jira-oauth-*');
+    // Scoped to THIS account/Region's secrets, and to those two prefixes only —
+    // never `secret:*`.
+    expect(resources).not.toContain('secret:*');
+  });
+
+  test('execution role Bedrock grant is scoped to explicit model + inference-profile ARNs', () => {
+    const statements = statementsWithAction('bedrock:InvokeModel');
+    expect(statements).toHaveLength(1);
+    const statement = statements[0]!;
+    expect(statement.Action).toEqual([
+      'bedrock:InvokeModel',
+      'bedrock:InvokeModelWithResponseStream',
+    ]);
+
+    const resources = statement.Resource as unknown[];
+    // Two ARNs per model: the all-Regions foundation model and its `us.`
+    // cross-Region inference profile — the same derivation the AgentCore runtime
+    // and the ECS task role use, from the same shared model list.
+    expect(resources).toHaveLength(DEFAULT_BEDROCK_MODEL_IDS.length * 2);
+    const rendered = JSON.stringify(resources);
+    for (const modelId of DEFAULT_BEDROCK_MODEL_IDS) {
+      expect(rendered).toContain(`:bedrock:*::foundation-model/${modelId}`);
+      expect(rendered).toContain(`inference-profile/us.${modelId}`);
+    }
+    // NEVER a wildcard resource — this role runs untrusted repo code.
+    expect(resources).not.toContain('*');
+  });
+
+  test('execution role gets AgentCore Memory read+write so learning actually persists', () => {
+    // MEMORY_ID reaches the agent in agent_payload either way, so without the
+    // grant the write is ATTEMPTED and fails closed (AccessDenied → logged,
+    // non-fatal), i.e. learning silently never persists on this substrate.
+    const rendered = JSON.stringify(executionRoleStatements());
+    expect(rendered).toContain('bedrock-agentcore:CreateEvent');
+    expect(rendered).toContain('bedrock-agentcore:RetrieveMemoryRecords');
+  });
+
+  test('execution role can describe AZs, for a CDK target repo\'s synth build gate', () => {
+    const statements = statementsWithAction('ec2:DescribeAvailabilityZones');
+    expect(statements).toHaveLength(1);
+    // EC2 describe actions have no resource-level scoping, so Resource:* is
+    // mandatory; it is read-only with no mutation and no data access. Without it
+    // `cdk synth` in a freshly-cloned CDK repo AccessDenies the AZ context lookup
+    // and the build gate fails on code that builds fine everywhere else.
+    expect(statements[0]!.Resource).toBe('*');
+    // ...and it is the ONLY ec2 action granted — the connector operator role owns
+    // ENI management, not this role.
+    const ec2Actions = executionRoleStatements()
+      .flatMap(st => (Array.isArray(st.Action) ? st.Action : [st.Action]))
+      .filter(action => action.startsWith('ec2:'));
+    expect(ec2Actions).toEqual(['ec2:DescribeAvailabilityZones']);
+  });
+
+  test('execution role still has NO direct DynamoDB grant — tenant data goes via the SessionRole', () => {
+    // The permanent property. Every table the agent touches is task_id-partitioned
+    // and reachable only through the SessionRole's `dynamodb:LeadingKeys`
+    // condition; a direct grant here would hand a role running untrusted repo code
+    // cross-task read/write and quietly break per-tenant isolation. Note the
+    // asymmetry with ecs-agent-cluster, which keeps a legacy no-SessionRole
+    // fallback branch — this backend has none.
+    expect(JSON.stringify(executionRoleStatements())).not.toContain('dynamodb:');
+  });
+
+  test('execution role gets no artifacts/trace bucket grant (delivery rides the SessionRole)', () => {
+    // The only S3 the execution role may reach is the payload bucket (read-only,
+    // asserted above). Artifact delivery writes go through the SessionRole's
+    // `artifacts/${task_id}/*` statement — the AgentCore runtime role has no direct
+    // grant either, and granting the whole bucket here would let one task read or
+    // clobber another's artifacts, traces and attachments.
+    const s3Resources = executionRoleStatements()
+      .flatMap(st => (Array.isArray(st.Action) ? st.Action : [st.Action]))
+      .filter(action => action.startsWith('s3:'));
+    expect(s3Resources).toEqual(['s3:GetObject*', 's3:GetBucket*', 's3:List*']);
+    const rendered = JSON.stringify(
+      executionRoleStatements().filter((st) => {
+        const actions = Array.isArray(st.Action) ? st.Action : [st.Action];
+        return actions.some(action => action.startsWith('s3:'));
+      }),
+    );
+    expect(rendered).toContain('LambdaMicrovmComputePayloadBucket');
+    expect(rendered).not.toContain('TraceBucket');
+    expect(rendered).not.toContain('AttachmentsBucket');
+  });
+
+  test('the BUILD role gains none of the P2 runtime grants', () => {
+    // The build role runs the /ready (and future /validate) hooks — i.e. code from
+    // the repo under build, at image-build time — so it must stay at
+    // "one artifact object + logs". A P2 grant leaking onto it would give
+    // build-time repo code Bedrock/Secrets/Memory reach.
+    const rendered = JSON.stringify(
+      Object.entries(template.findResources('AWS::IAM::Policy'))
+        .filter(([id]) => id.includes('LambdaMicrovmComputeBuildRole')),
+    );
     expect(rendered).not.toContain('bedrock:');
+    expect(rendered).not.toContain('bedrock-agentcore:');
     expect(rendered).not.toContain('secretsmanager:');
     expect(rendered).not.toContain('dynamodb:');
-    expect(rendered).not.toContain('bedrock-agentcore:');
+    expect(rendered).not.toContain('ec2:');
   });
 
   test('execution role is admitted to the per-task SessionRole (tenant-data delegation)', () => {
@@ -483,11 +712,11 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     expect(JSON.stringify(template.toJSON())).not.toContain('CreateMicrovmAuthToken');
   });
 
-  test('warns that a P1 image has no smoke-parity guarantee (hook phasing)', () => {
-    // ADR-021 sub-decision 3, as corrected by the live P1 run: P1 declares AND
-    // serves /ready + /run, so the image is creatable, launchable and
-    // payload-deliverable — which makes it look even more like a working backend
-    // than before, while nothing has exercised clone → change → PR on it.
+  test('warns that a configured image has no smoke-parity guarantee (hook phasing)', () => {
+    // ADR-021 sub-decision 3, as corrected by the live P1 run and completed in P2:
+    // all four served hooks are declared, so the image is creatable, launchable and
+    // payload-deliverable — which makes it look even MORE like a working backend,
+    // while nothing has exercised clone → change → PR on it.
     const warnings = built.construct.node.metadata.filter(m => m.type === 'aws:cdk:warning');
     const message = warnings.map(w => String(w.data)).join('\n');
     expect(JSON.stringify(built.construct.node.metadata))
@@ -497,19 +726,31 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
       .not.toContain('abca:microvm-image-p1-not-runnable');
     expect(message).toContain('smoke');
     expect(message).toContain('P2');
-    // It must state what IS true now, or it reads as the old (wrong) claim.
-    expect(message).toContain('/run');
-    expect(message).toContain('/ready');
+    // It must state what IS true now, or it reads as the old (wrong) claim — and
+    // the hook list here is what an operator compares against a failed build or a
+    // failed lifecycle transition, so all four have to be named.
+    for (const hook of ['/ready', '/validate', '/run', '/terminate']) {
+      expect(message).toContain(hook);
+    }
+    // ...and it must still say which two are NOT declared, or the enumeration
+    // above reads as "everything is wired".
+    expect(message).toContain('/suspend');
+    expect(message).toContain('/resume');
   });
 
-  test('declares no hook the agent does not serve yet', () => {
+  test('declares every hook the agent serves, and only those (rendered form)', () => {
+    // Same invariant as the structural assertions above, checked against the
+    // rendered template — this is the shape an operator reads in a `cdk diff`, and
+    // the shape the service receives.
     const images = template.findResources('AWS::Lambda::MicrovmImage');
     const rendered = JSON.stringify(Object.values(images)[0]!.Properties.Hooks);
-    for (const hook of ['Suspend', 'Resume', 'Terminate', 'Validate']) {
+    for (const hook of ['Run', 'Terminate', 'Ready', 'Validate']) {
+      expect(rendered).toContain(`"${hook}":"/aws/lambda-microvms/runtime/v1/${hook.toLowerCase()}"`);
+    }
+    // P3, and nothing answers them yet.
+    for (const hook of ['Suspend', 'Resume']) {
       expect(rendered).not.toContain(hook);
     }
-    expect(rendered).toContain('"Run":"/aws/lambda-microvms/runtime/v1/run"');
-    expect(rendered).toContain('"Ready":"/aws/lambda-microvms/runtime/v1/ready"');
   });
 
   test('tags every MicroVM resource with the backend cost-allocation tag', () => {
@@ -631,6 +872,38 @@ describe('LambdaMicrovmCompute — first deploy, no image configured', () => {
     // be unverified, and stacking both would blur two different remedies.
     expect(JSON.stringify(built.construct.node.metadata))
       .not.toContain('abca:microvm-image-p1-smoke-unverified');
+  });
+});
+
+describe('LambdaMicrovmCompute — optional runtime-parity props omitted', () => {
+  // Isolated-construct posture: the two PROP-driven parity grants disappear, while
+  // the three that need no stack input stay. Worth pinning because "the grant is
+  // conditional" is only half a contract — which half is conditional matters.
+  let template: Template;
+
+  beforeAll(() => {
+    template = build({ withImage: true, withSessionRole: true }).template;
+  });
+
+  function executionRolePolicies(): string {
+    return JSON.stringify(
+      Object.entries(template.findResources('AWS::IAM::Policy'))
+        .filter(([id]) => id.includes('LambdaMicrovmComputeExecutionRole')),
+    );
+  }
+
+  test('no GitHub PAT read and no AgentCore Memory grant without the props', () => {
+    expect(executionRolePolicies()).not.toContain(GITHUB_TOKEN_SECRET_ARN);
+    expect(executionRolePolicies()).not.toContain('bedrock-agentcore:');
+  });
+
+  test('the input-free parity grants are still there (Bedrock, channel OAuth, AZ describe)', () => {
+    const rendered = executionRolePolicies();
+    // These derive from the shared model list / a fixed secret-name prefix / no
+    // resource at all, so nothing about a deployment can make them optional.
+    expect(rendered).toContain('bedrock:InvokeModel');
+    expect(rendered).toContain('bgagent-linear-oauth-*');
+    expect(rendered).toContain('ec2:DescribeAvailabilityZones');
   });
 });
 

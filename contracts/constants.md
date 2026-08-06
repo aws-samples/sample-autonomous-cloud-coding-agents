@@ -21,7 +21,9 @@ the contract. This is the neutral location both runtimes read.
 |---|---|---|
 | `agent/src/shared_constants.py` | `/app/contracts/constants.json` | import-time |
 | `agent/src/policy.py`, `agent/src/jira_reactions.py` | `SHARED_CONSTANTS` | import-time |
+| `agent/src/server.py` | `SHARED_CONSTANTS["microvm_platform_config"]` | import-time |
 | `cdk/src/handlers/shared/types.ts`, `jira-app-actor.ts` | `../../../../contracts/constants.json` | synth-time `import` |
+| `cdk/src/handlers/shared/strategies/lambda-microvm-strategy.ts` | `microvm_platform_config` | synth-time `import`, read per session start |
 | `cdk/src/constructs/blueprint.ts` | re-exports from `types.ts` | synth-time |
 | `cli/test/constants-parity.test.ts` | package-safe literal parity | test-time |
 
@@ -51,6 +53,11 @@ JSON at TypeScript compile time via `resolveJsonModule`.
   "jira_app_actor": {
     "min_secret_length": 32,
     "forge_webtrigger_suffix": ".webtrigger.atlassian.app"
+  },
+  "microvm_platform_config": {
+    "env_by_key": { "task_table_name": "TASK_TABLE_NAME", "...": "..." },
+    "required": ["task_table_name", "task_events_table_name",
+                 "github_token_secret_arn", "agent_session_role_arn"]
   }
 }
 ```
@@ -81,6 +88,24 @@ JSON at TypeScript compile time via `resolveJsonModule`.
   accepted by the agent, CDK, and CLI Jira app-actor clients.
 - **`jira_app_actor.forge_webtrigger_suffix`** — hostname suffix required by
   app-actor proxy URL validation to prevent operator-supplied SSRF targets.
+- **`microvm_platform_config.env_by_key`** — the Lambda MicroVMs `platform_config`
+  allowlist (ADR-021 P2): each wire key (snake_case) mapped to the environment
+  variable the agent installs it as (UPPER_SNAKE). This block is unlike the
+  others — it is a **security allowlist**, not a tuning bound. The MicroVM image
+  is a snapshot whose env is frozen at build time, so the agent's non-secret
+  platform env arrives in the `/run` hook payload instead; the values land in
+  `os.environ`, which makes an unrecognised key an env-injection attempt. The
+  consumer (`agent/src/server.py`) therefore **rejects** any `platform_config`
+  carrying a key that is not in this map. Values are non-secret identifiers
+  (table/bucket names, secret ARNs, role ARNs) only.
+- **`microvm_platform_config.required`** — the subset without which a task cannot
+  run (task + event tables, GitHub secret ARN, session role ARN). A `/run` hook
+  whose `platform_config` misses or blanks any of these is rejected with HTTP 400.
+
+Both `microvm_platform_config` fields are validated for shape (snake_case keys,
+UPPER_SNAKE unique env names, `required ⊆ env_by_key`) by
+`scripts/check-constants-sync.ts` **and** by `agent/src/server.py` at import time,
+so a malformed contract fails the drift check *and* the MicroVM image build.
 
 The published CLI package contains only `lib/`, so it cannot load the repository
 contract at runtime. It mirrors these values as literals and

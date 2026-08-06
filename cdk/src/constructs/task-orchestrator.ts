@@ -191,6 +191,80 @@ export interface TaskOrchestratorProps {
   readonly attachmentsBucket?: s3.IBucket;
 
   /**
+   * Non-secret platform identifiers the orchestrator FORWARDS to the in-guest
+   * agent, for backends that have no deploy-time env block of their own.
+   *
+   * ## Why the orchestrator carries values it never uses itself
+   *
+   * On AgentCore these live in the runtime's `environmentVariables` and on ECS in
+   * the container's `environment` — CDK sets them directly on the compute. A
+   * Lambda MicroVM snapshot cannot have them: ADR-021 sub-decision 3 forbids
+   * baking configuration into an image that is shared across tasks and
+   * deployments, so the only channel is the `/run` payload the orchestrator
+   * writes (`platform_config`, assembled by
+   * `handlers/shared/strategies/lambda-microvm-strategy.ts`). That makes the
+   * orchestrator's own environment the transport, which is why these appear here
+   * rather than on `LambdaMicrovmCompute`.
+   *
+   * ## Names, ARNs — and NO grants
+   *
+   * Every field is an identifier, never a secret value, and NONE of them adds an
+   * IAM grant to the orchestrator role: it forwards these strings and never calls
+   * the resources they name (the agent does, through its own execution role /
+   * SessionRole). The approvals and nudges tables in particular stay ungranted to
+   * the orchestrator, which is asserted by a unit test — a "while I'm here" grant
+   * would hand the orchestration plane tenant-data access it has never needed.
+   *
+   * ## All-or-nothing, and wired unconditionally
+   *
+   * Every field is required so a partial configuration is unrepresentable (same
+   * rationale as `ecsConfig` / `microvmConfig`). The stack wires it for EVERY
+   * compute type rather than under the `lambda-microvm` gate: the strategy fails
+   * the session start when a required identifier is missing, and that guard should
+   * only ever fire for a hand-edited Lambda environment — never because a
+   * deploy-time gate and a per-repo `compute_type` disagreed.
+   *
+   * Optional as a prop only so isolated construct tests can omit it. Four of the
+   * thirteen `platform_config` keys come from env vars the orchestrator already
+   * carries for its own work (`TASK_TABLE_NAME`, `TASK_EVENTS_TABLE_NAME`,
+   * `GITHUB_TOKEN_SECRET_ARN`) or from the stack-wide `SolutionUaAspect`
+   * (`AWS_SDK_UA_APP_ID`), so they are deliberately NOT repeated here.
+   */
+  readonly agentPlatformConfig?: {
+    /**
+     * Cedar HITL approvals table (`TASK_APPROVALS_TABLE_NAME`). The agent's
+     * approval primitives write PENDING rows here; absent, the PreToolUse hook
+     * fails closed with `approval_write_failed`.
+     */
+    readonly taskApprovalsTableName: string;
+    /** Nudges table (`NUDGES_TABLE_NAME`) the agent polls for mid-task nudges. */
+    readonly nudgesTableName: string;
+    /** Application log group (`LOG_GROUP_NAME`) the agent writes progress logs to. */
+    readonly logGroupName: string;
+    /**
+     * Bucket a `deliver_artifact` step uploads to (`ARTIFACTS_BUCKET_NAME`).
+     * Without it an artifact workflow fails at delivery with
+     * "ARTIFACTS_BUCKET_NAME is not configured".
+     */
+    readonly artifactsBucketName: string;
+    /** Bucket the `--trace` trajectory upload targets (`TRACE_ARTIFACTS_BUCKET_NAME`). */
+    readonly traceArtifactsBucketName: string;
+    /**
+     * Per-task SessionRole ARN (`AGENT_SESSION_ROLE_ARN`). The sharpest field in
+     * this block: when the agent does not receive it, it falls back to ambient
+     * compute-role credentials and per-tenant scoping is silently OFF.
+     */
+    readonly agentSessionRoleArn: string;
+    /**
+     * Cross-region inference-profile id for the small/fast model
+     * (`ANTHROPIC_DEFAULT_HAIKU_MODEL`). Must be a `us.`-prefixed profile id, not
+     * a bare foundation-model id — Claude 4.x rejects on-demand invocation by
+     * bare id — and must match a granted profile (`constructs/bedrock-models.ts`).
+     */
+    readonly anthropicDefaultHaikuModel: string;
+  };
+
+  /**
    * AWS Lambda MicroVMs compute strategy configuration (ADR-021 sub-decision 4).
    * When provided, the `MICROVM_*` env vars and the MicroVM lifecycle IAM
    * statements are added to the orchestrator.
@@ -395,6 +469,21 @@ export class TaskOrchestrator extends Construct {
           }),
         }),
         ...(props.attachmentsBucket && { ATTACHMENTS_BUCKET_NAME: props.attachmentsBucket.bucketName }),
+        // ADR-021 P2: non-secret identifiers the orchestrator FORWARDS to the
+        // in-guest agent as `platform_config` on the MicroVM /run payload, because
+        // a MicroVM snapshot must not bake configuration in. Names match the
+        // AgentCore runtime env block in `stacks/agent.ts` and the strategy's
+        // PLATFORM_CONFIG_ENV_VARS map verbatim — one stack value, one name, three
+        // backends. NO IAM grant accompanies any of these (see the prop docs).
+        ...(props.agentPlatformConfig && {
+          TASK_APPROVALS_TABLE_NAME: props.agentPlatformConfig.taskApprovalsTableName,
+          NUDGES_TABLE_NAME: props.agentPlatformConfig.nudgesTableName,
+          LOG_GROUP_NAME: props.agentPlatformConfig.logGroupName,
+          ARTIFACTS_BUCKET_NAME: props.agentPlatformConfig.artifactsBucketName,
+          TRACE_ARTIFACTS_BUCKET_NAME: props.agentPlatformConfig.traceArtifactsBucketName,
+          AGENT_SESSION_ROLE_ARN: props.agentPlatformConfig.agentSessionRoleArn,
+          ANTHROPIC_DEFAULT_HAIKU_MODEL: props.agentPlatformConfig.anthropicDefaultHaikuModel,
+        }),
       },
       bundling: orchestratorBundling,
     });

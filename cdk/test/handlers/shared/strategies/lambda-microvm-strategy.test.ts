@@ -31,6 +31,18 @@ const PAYLOAD_BUCKET = 'test-microvm-payload-bucket';
 const MICROVM_ID = 'mvm-0123456789abcdef';
 const ENDPOINT = 'https://mvm-0123456789abcdef.microvm.lambda.us-east-1.amazonaws.com';
 
+// --- platform_config (ADR-021 P2) ---
+// The FOUR required identifiers, and only those, are set for the main describes,
+// so the default `platform_config` block is small and its exact serialized size is
+// known — which the 4 KB boundary probes below depend on. The nine optional keys
+// get their own describe (and are deleted here so a leaked env var from another
+// suite cannot silently change the envelope's byte length).
+const TASK_TABLE_NAME = 'abca-task-table';
+const TASK_EVENTS_TABLE_NAME = 'abca-task-events-table';
+const GITHUB_TOKEN_SECRET_ARN =
+  'arn:aws:secretsmanager:us-east-1:123456789012:secret:abca/github-token-AbCdEf';
+const AGENT_SESSION_ROLE_ARN = 'arn:aws:iam::123456789012:role/AbcaAgentSessionRole';
+
 // Set env vars BEFORE import — LambdaMicrovmComputeStrategy reads them as
 // module-level constants (same pattern as ecs-strategy). The top-of-file import
 // is the FULLY-CONFIGURED substrate; the missing-config describe block below
@@ -45,6 +57,24 @@ process.env.MICROVM_EGRESS_CONNECTOR_ARNS = EGRESS_CONNECTOR_ARN;
 process.env.MICROVM_PAYLOAD_BUCKET = PAYLOAD_BUCKET;
 process.env.AWS_REGION = 'us-east-1';
 delete process.env.MICROVM_INGRESS_CONNECTOR_ARNS;
+
+process.env.TASK_TABLE_NAME = TASK_TABLE_NAME;
+process.env.TASK_EVENTS_TABLE_NAME = TASK_EVENTS_TABLE_NAME;
+process.env.GITHUB_TOKEN_SECRET_ARN = GITHUB_TOKEN_SECRET_ARN;
+process.env.AGENT_SESSION_ROLE_ARN = AGENT_SESSION_ROLE_ARN;
+for (const optional of [
+  'TASK_APPROVALS_TABLE_NAME',
+  'NUDGES_TABLE_NAME',
+  'LOG_GROUP_NAME',
+  'ARTIFACTS_BUCKET_NAME',
+  'TRACE_ARTIFACTS_BUCKET_NAME',
+  'LINEAR_OAUTH_SECRET_ARN',
+  'JIRA_OAUTH_SECRET_ARN',
+  'AWS_SDK_UA_APP_ID',
+  'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+]) {
+  delete process.env[optional];
+}
 
 const mockSend = jest.fn();
 jest.mock('@aws-sdk/client-lambda-microvms', () => ({
@@ -76,12 +106,16 @@ jest.mock('@aws-sdk/client-s3', () => ({
 const mockLogger = { info: jest.fn(), warn: jest.fn(), error: jest.fn(), child: jest.fn() };
 jest.mock('../../../../src/handlers/shared/logger', () => ({ logger: mockLogger }));
 
+import sharedConstants from '../../../../../contracts/constants.json';
 import type { BlueprintConfig } from '../../../../src/handlers/shared/repo-config';
 import {
   LambdaMicrovmComputeStrategy,
   MICROVM_ERROR_MARKER,
   MICROVM_MAX_DURATION_SECONDS,
+  MICROVM_PLATFORM_CONFIG_KEYS,
+  MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS,
   MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES,
+  buildMicrovmPlatformConfig,
   microvmNoIngressConnectorArnForRegion,
   microvmPayloadKey,
 } from '../../../../src/handlers/shared/strategies/lambda-microvm-strategy';
@@ -89,15 +123,38 @@ import {
 const BLUEPRINT: BlueprintConfig = { compute_type: 'lambda-microvm', runtime_arn: '' };
 
 /**
- * Build a payload whose serialized `{"agent_payload": …}` envelope is EXACTLY
- * `targetBytes` long, so the 4 KB boundary can be probed on both sides. Asserts
- * its own arithmetic — if the envelope shape ever changes, this fails loudly
- * rather than silently testing the wrong boundary.
+ * The `platform_config` block every startSession in this file's main describes
+ * must produce, given the module-level environment above.
+ */
+const EXPECTED_PLATFORM_CONFIG = {
+  task_table_name: TASK_TABLE_NAME,
+  task_events_table_name: TASK_EVENTS_TABLE_NAME,
+  github_token_secret_arn: GITHUB_TOKEN_SECRET_ARN,
+  agent_session_role_arn: AGENT_SESSION_ROLE_ARN,
+};
+
+/**
+ * Build a payload whose serialized `{"agent_payload": …, "platform_config": …}`
+ * envelope is EXACTLY `targetBytes` long, so the 4 KB boundary can be probed on
+ * both sides.
+ *
+ * `platform_config` is part of the counted envelope (ADR-021 P2), so its bytes are
+ * subtracted from the payload's budget here. Asserts its own arithmetic — if the
+ * envelope shape or the platform block ever changes, this fails loudly rather than
+ * silently testing the wrong boundary.
  */
 function payloadWithEnvelopeBytes(targetBytes: number): Record<string, unknown> {
-  const overhead = Buffer.byteLength(JSON.stringify({ agent_payload: { p: '' } }), 'utf8');
+  const overhead = Buffer.byteLength(
+    JSON.stringify({ agent_payload: { p: '' }, platform_config: EXPECTED_PLATFORM_CONFIG }),
+    'utf8',
+  );
   const payload = { p: 'x'.repeat(targetBytes - overhead) };
-  expect(Buffer.byteLength(JSON.stringify({ agent_payload: payload }), 'utf8')).toBe(targetBytes);
+  expect(
+    Buffer.byteLength(
+      JSON.stringify({ agent_payload: payload, platform_config: EXPECTED_PLATFORM_CONFIG }),
+      'utf8',
+    ),
+  ).toBe(targetBytes);
   return payload;
 }
 
@@ -163,6 +220,41 @@ async function withRegionAsync(
     for (const key of ['AWS_REGION', 'AWS_DEFAULT_REGION'] as const) {
       if (saved[key] === undefined) delete process.env[key];
       else process.env[key] = saved[key];
+    }
+  }
+}
+
+/**
+ * Run `body` with the named environment variables DELETED, restoring them after.
+ *
+ * `buildMicrovmPlatformConfig` reads the environment at CALL time (unlike the
+ * `MICROVM_*` substrate constants, which are frozen at import), so a missing
+ * platform identifier needs no `jest.isolateModules` module reload — which is
+ * exactly why it is written that way.
+ */
+async function withoutEnvAsync(keys: string[], body: () => Promise<void>): Promise<void> {
+  const saved = Object.fromEntries(keys.map(key => [key, process.env[key]]));
+  try {
+    for (const key of keys) delete process.env[key];
+    await body();
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+/** {@link withoutEnvAsync}'s inverse: run `body` with extra env vars SET. */
+async function withEnvAsync(env: Record<string, string>, body: () => Promise<void>): Promise<void> {
+  const saved = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]));
+  try {
+    Object.assign(process.env, env);
+    await body();
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
     }
   }
 }
@@ -330,6 +422,10 @@ describe('LambdaMicrovmComputeStrategy', () => {
       const envelope = JSON.parse(mockSend.mock.calls[0][0].input.runHookPayload);
       expect(envelope.agent_payload).toEqual({ repo_url: 'org/repo', prompt: 'Fix the bug', max_turns: 50 });
       expect(envelope.agent_payload_s3_uri).toBeUndefined();
+      // The MicroVM's substitute for the env block the other two backends get at
+      // deploy time — a snapshot must not bake it in (ADR-021 sub-decision 3), so
+      // it rides the envelope alongside the payload.
+      expect(envelope.platform_config).toEqual(EXPECTED_PLATFORM_CONFIG);
     });
 
     test('uploads an oversized payload to S3 and inlines only the pointer', async () => {
@@ -351,12 +447,18 @@ describe('LambdaMicrovmComputeStrategy', () => {
       expect(put.input.Bucket).toBe(PAYLOAD_BUCKET);
       expect(put.input.Key).toBe('TASK001/payload.json');
       expect(put.input.ContentType).toBe('application/json');
-      expect(JSON.parse(put.input.Body)).toEqual(big);
+      // The S3 object carries the payload with platform_config merged in at the top
+      // level, so an agent that resolves the pointer gets the config with it.
+      expect(JSON.parse(put.input.Body)).toEqual({ ...big, platform_config: EXPECTED_PLATFORM_CONFIG });
 
       const runHookPayload = mockSend.mock.calls[0][0].input.runHookPayload;
       const envelope = JSON.parse(runHookPayload);
       expect(envelope.agent_payload_s3_uri).toBe(`s3://${PAYLOAD_BUCKET}/TASK001/payload.json`);
       expect(envelope.agent_payload).toBeUndefined();
+      // ...and ALSO inline on the pointer envelope, deliberately duplicated: the
+      // agent must be able to read its platform configuration whether it takes it
+      // off the hook body before fetching S3 or out of the fetched object.
+      expect(envelope.platform_config).toEqual(EXPECTED_PLATFORM_CONFIG);
       // The whole point: the hook body must sit far under the 4 KB cap.
       expect(Buffer.byteLength(runHookPayload, 'utf8')).toBeLessThan(MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES);
     });
@@ -429,7 +531,7 @@ describe('LambdaMicrovmComputeStrategy', () => {
       // 3-byte UTF-8 characters: 2000 chars is ~6 KB of bytes but only 2 KB of
       // chars, so measuring String.length would have wrongly inlined this.
       const payload = { prompt: '\u4f60'.repeat(2_000) };
-      expect(JSON.stringify({ agent_payload: payload }).length)
+      expect(JSON.stringify({ agent_payload: payload, platform_config: EXPECTED_PLATFORM_CONFIG }).length)
         .toBeLessThan(MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES);
       await new LambdaMicrovmComputeStrategy().startSession({
         taskId: 'TASK001',
@@ -536,6 +638,96 @@ describe('LambdaMicrovmComputeStrategy', () => {
       ).rejects.toThrow();
 
       expect(mockSend.mock.calls.filter(c => c[0]._type === 'TerminateMicrovm')).toHaveLength(0);
+    });
+
+    test('platform_config COUNTS toward the 4 KB boundary — an otherwise-inlineable payload goes to S3', async () => {
+      // The regression this locks: measuring `{agent_payload}` alone and then
+      // sending `{agent_payload, platform_config}` would inline an envelope the
+      // service rejects outright. So the branch decision has to be made on the
+      // FULL envelope. This payload is exactly 4 096 bytes WITHOUT the platform
+      // block — i.e. the old code would have inlined it — and must now upload.
+      mockS3Send.mockResolvedValueOnce({});
+      runMicrovmOk();
+
+      const overheadWithoutConfig = Buffer.byteLength(JSON.stringify({ agent_payload: { p: '' } }), 'utf8');
+      const payload = { p: 'x'.repeat(MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES - overheadWithoutConfig) };
+      expect(Buffer.byteLength(JSON.stringify({ agent_payload: payload }), 'utf8'))
+        .toBe(MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES);
+
+      await new LambdaMicrovmComputeStrategy().startSession({
+        taskId: 'TASK001',
+        userId: 'cognito-test',
+        payload,
+        blueprintConfig: BLUEPRINT,
+      });
+
+      expect(mockS3Send).toHaveBeenCalledTimes(1);
+      const runHookPayload = mockSend.mock.calls[0][0].input.runHookPayload;
+      expect(JSON.parse(runHookPayload).agent_payload_s3_uri).toBeDefined();
+      expect(Buffer.byteLength(runHookPayload, 'utf8'))
+        .toBeLessThanOrEqual(MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES);
+    });
+
+    test.each(MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS.map(key => [key]))(
+      'refuses to start — before any AWS call — when required platform config %s is missing',
+      async (key) => {
+        const envVar = sharedConstants.microvm_platform_config.env_by_key[key];
+
+        await withoutEnvAsync([envVar], async () => {
+          const start = new LambdaMicrovmComputeStrategy().startSession({
+            taskId: 'TASK001',
+            userId: 'cognito-test',
+            // Oversized on purpose: the guard must fire before the payload upload,
+            // or a misconfiguration leaves orphan objects in the payload bucket.
+            payload: payloadWithEnvelopeBytes(20_000),
+            blueprintConfig: BLUEPRINT,
+          });
+
+          await expect(start).rejects.toThrow(new RegExp(`${key} <- ${envVar}`));
+          await expect(start).rejects.toThrow(/redeploy the stack/);
+          expect(mockSend).not.toHaveBeenCalled();
+          expect(mockS3Send).not.toHaveBeenCalled();
+        });
+      },
+    );
+
+    test('logs which platform_config KEYS a session received, and never their values', async () => {
+      runMicrovmOk();
+
+      await new LambdaMicrovmComputeStrategy().startSession({
+        taskId: 'TASK001',
+        userId: 'cognito-test',
+        payload: { repo_url: 'org/repo' },
+        blueprintConfig: BLUEPRINT,
+      });
+
+      const started = mockLogger.info.mock.calls
+        .find(([message]) => message === 'Lambda MicroVM session started')!;
+      expect(started[1].platform_config_keys).toEqual(Object.keys(EXPECTED_PLATFORM_CONFIG));
+      // Key names are the diagnostic; values are not, and one of them is a secret
+      // ARN. Nothing resembling a value may appear on the log line.
+      expect(JSON.stringify(started[1])).not.toContain(GITHUB_TOKEN_SECRET_ARN);
+    });
+
+    test('fails BEFORE the upload when even the POINTER envelope cannot fit (no orphan object)', async () => {
+      // The one shape with no smaller fallback: the payload has already been moved
+      // to S3, so if `{pointer + platform_config}` still exceeds 4 096 bytes there
+      // is nothing left to shed. Only a pathological identifier length can cause it
+      // — hence the check, and hence its placement BEFORE the PutObject so a
+      // misconfiguration cannot leave objects behind for the lifecycle rule to reap.
+      await withEnvAsync({ LOG_GROUP_NAME: `/aws/${'x'.repeat(5_000)}` }, async () => {
+        const start = new LambdaMicrovmComputeStrategy().startSession({
+          taskId: 'TASK001',
+          userId: 'cognito-test',
+          payload: payloadWithEnvelopeBytes(20_000),
+          blueprintConfig: BLUEPRINT,
+        });
+
+        await expect(start).rejects.toThrow(/pointer envelope is \d+ bytes/);
+        await expect(start).rejects.toThrow(/shorten the stack name/);
+        expect(mockS3Send).not.toHaveBeenCalled();
+        expect(mockSend).not.toHaveBeenCalled();
+      });
     });
 
     test('microvmPayloadKey matches the ECS payload key shape', () => {
@@ -910,5 +1102,228 @@ describe('LambdaMicrovmComputeStrategy image-identifier validation', () => {
     });
 
     expect(mockSend.mock.calls[0][0].input.imageIdentifier).toBe(IMAGE_IDENTIFIER);
+  });
+});
+
+describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-time env block', () => {
+  /** A fully-populated orchestrator environment: all thirteen keys present. */
+  const FULL_ENV: NodeJS.ProcessEnv = {
+    TASK_TABLE_NAME: 'tasks',
+    TASK_EVENTS_TABLE_NAME: 'events',
+    TASK_APPROVALS_TABLE_NAME: 'approvals',
+    NUDGES_TABLE_NAME: 'nudges',
+    LOG_GROUP_NAME: '/aws/abca/application',
+    ARTIFACTS_BUCKET_NAME: 'artifacts-bucket',
+    TRACE_ARTIFACTS_BUCKET_NAME: 'trace-bucket',
+    GITHUB_TOKEN_SECRET_ARN: 'arn:aws:secretsmanager:us-east-1:123456789012:secret:gh-AbCdEf',
+    LINEAR_OAUTH_SECRET_ARN: 'arn:aws:secretsmanager:us-east-1:123456789012:secret:bgagent-linear-oauth-acme-XyZ',
+    JIRA_OAUTH_SECRET_ARN: 'arn:aws:secretsmanager:us-east-1:123456789012:secret:bgagent-jira-oauth-cloud1-XyZ',
+    AGENT_SESSION_ROLE_ARN: 'arn:aws:iam::123456789012:role/SessionRole',
+    AWS_SDK_UA_APP_ID: 'uksb-wt64nei4u6#backgroundagent-dev',
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
+  };
+
+  test('sources the wire key allow-list from the cross-language contract', () => {
+    // The pin is MECHANICAL, not this test: both this producer and
+    // `agent/src/server.py`'s consumer read
+    // `contracts/constants.json → microvm_platform_config`, and
+    // `scripts/check-constants-sync.ts` validates its shape and rejects a
+    // Python-side literal re-declaration. What this asserts is that the CDK side
+    // really is reading it (a local copy would pass every other test in this file)
+    // and, below, that its contents are what review approved — a contract edit is
+    // a wire-format change on both sides, so it must not slip through unnoticed.
+    expect([...MICROVM_PLATFORM_CONFIG_KEYS])
+      .toEqual(Object.keys(sharedConstants.microvm_platform_config.env_by_key));
+    expect([...MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS])
+      .toEqual(sharedConstants.microvm_platform_config.required);
+
+    // Order is part of the contract: it is the serialization order, which the 4 KB
+    // inline/S3 branch decision is computed against.
+    expect([...MICROVM_PLATFORM_CONFIG_KEYS]).toEqual([
+      'task_table_name',
+      'task_events_table_name',
+      'task_approvals_table_name',
+      'nudges_table_name',
+      'log_group_name',
+      'artifacts_bucket_name',
+      'trace_artifacts_bucket_name',
+      'github_token_secret_arn',
+      'linear_oauth_secret_arn',
+      'jira_oauth_secret_arn',
+      'agent_session_role_arn',
+      'aws_sdk_ua_app_id',
+      'anthropic_default_haiku_model',
+    ]);
+    expect(MICROVM_PLATFORM_CONFIG_KEYS).toHaveLength(13);
+    // snake_case on the wire, matching every other key in the /run envelope.
+    for (const key of MICROVM_PLATFORM_CONFIG_KEYS) {
+      expect(key).toMatch(/^[a-z][a-z0-9_]*$/);
+    }
+  });
+
+  test('pins the REQUIRED subset — these four are what a task cannot start without', () => {
+    expect([...MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS]).toEqual([
+      'task_table_name',
+      'task_events_table_name',
+      'github_token_secret_arn',
+      'agent_session_role_arn',
+    ]);
+    // Every required key must be a real wire key, or the guard would demand
+    // something the producer never emits.
+    for (const key of MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS) {
+      expect(MICROVM_PLATFORM_CONFIG_KEYS).toContain(key);
+    }
+  });
+
+  test('emits all thirteen keys, in declaration order, from a full environment', () => {
+    const config = buildMicrovmPlatformConfig(FULL_ENV);
+    expect(Object.keys(config)).toEqual([...MICROVM_PLATFORM_CONFIG_KEYS]);
+    expect(config.task_table_name).toBe('tasks');
+    expect(config.nudges_table_name).toBe('nudges');
+    expect(config.agent_session_role_arn).toBe('arn:aws:iam::123456789012:role/SessionRole');
+    expect(config.anthropic_default_haiku_model).toBe('us.anthropic.claude-haiku-4-5-20251001-v1:0');
+  });
+
+  test('OMITS optional keys the orchestrator does not carry (no `undefined` placeholders)', () => {
+    const config = buildMicrovmPlatformConfig({
+      TASK_TABLE_NAME: 'tasks',
+      TASK_EVENTS_TABLE_NAME: 'events',
+      GITHUB_TOKEN_SECRET_ARN: 'arn:aws:secretsmanager:us-east-1:123456789012:secret:gh-AbCdEf',
+      AGENT_SESSION_ROLE_ARN: 'arn:aws:iam::123456789012:role/SessionRole',
+    });
+
+    // Omitted, not present-and-undefined: the agent's `key in platform_config`
+    // checks must mean what they say, and a `"k":null` costs bytes against 4 KB.
+    expect(Object.keys(config)).toEqual([
+      'task_table_name',
+      'task_events_table_name',
+      'github_token_secret_arn',
+      'agent_session_role_arn',
+    ]);
+    expect('nudges_table_name' in config).toBe(false);
+    expect(JSON.stringify(config)).not.toContain('null');
+  });
+
+  test('treats an EMPTY value as absent', () => {
+    // CloudFormation renders an unresolved optional value as ''. A nameless table
+    // is worse than a missing one — the agent would build a request against it.
+    const config = buildMicrovmPlatformConfig({ ...FULL_ENV, NUDGES_TABLE_NAME: '' });
+    expect('nudges_table_name' in config).toBe(false);
+  });
+
+  test('is a closed map: an environment variable outside the allow-list can never leak', () => {
+    const config = buildMicrovmPlatformConfig({
+      ...FULL_ENV,
+      // The reason this matters: the envelope is written to an S3 object and echoed
+      // into MicroVM logs on a hook failure. Secret VALUES must never be reachable
+      // from this producer, only the ARNs that name them.
+      GITHUB_TOKEN: 'ghp_averysecrettokenvalue',
+      ANTHROPIC_API_KEY: 'sk-ant-secret',
+      AWS_SECRET_ACCESS_KEY: 'wJalrXUtnFEMI',
+      MICROVM_PAYLOAD_BUCKET: 'some-bucket',
+    });
+
+    expect(Object.keys(config)).toEqual([...MICROVM_PLATFORM_CONFIG_KEYS]);
+    const rendered = JSON.stringify(config);
+    expect(rendered).not.toContain('ghp_');
+    expect(rendered).not.toContain('sk-ant-secret');
+    expect(rendered).not.toContain('wJalrXUtnFEMI');
+  });
+
+  test.each([
+    ['TASK_TABLE_NAME', 'task_table_name'],
+    ['TASK_EVENTS_TABLE_NAME', 'task_events_table_name'],
+    ['GITHUB_TOKEN_SECRET_ARN', 'github_token_secret_arn'],
+    ['AGENT_SESSION_ROLE_ARN', 'agent_session_role_arn'],
+  ])('throws naming %s when it is missing', (envVar, wireKey) => {
+    const env = { ...FULL_ENV };
+    delete env[envVar];
+
+    // The message must carry the wire key, its env var, and the remedy — an
+    // operator reading a failed task should not have to open this file.
+    expect(() => buildMicrovmPlatformConfig(env)).toThrow(new RegExp(`${wireKey} <- ${envVar}`));
+    expect(() => buildMicrovmPlatformConfig(env)).toThrow(/redeploy the stack/);
+    expect(() => buildMicrovmPlatformConfig(env)).toThrow(/ADR-021 sub-decision 3/);
+  });
+
+  test('names EVERY missing required key at once, not just the first', () => {
+    // One redeploy should fix all of them; reporting one per attempt turns a
+    // misconfiguration into four round-trips.
+    expect(() => buildMicrovmPlatformConfig({})).toThrow(
+      /task_table_name.*task_events_table_name.*github_token_secret_arn.*agent_session_role_arn/s,
+    );
+  });
+
+  test('does NOT throw for a missing OPTIONAL key', () => {
+    const env = { ...FULL_ENV };
+    for (const optional of [
+      'TASK_APPROVALS_TABLE_NAME', 'NUDGES_TABLE_NAME', 'LOG_GROUP_NAME',
+      'ARTIFACTS_BUCKET_NAME', 'TRACE_ARTIFACTS_BUCKET_NAME', 'LINEAR_OAUTH_SECRET_ARN',
+      'JIRA_OAUTH_SECRET_ARN', 'AWS_SDK_UA_APP_ID', 'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+    ]) {
+      delete env[optional];
+    }
+    expect(() => buildMicrovmPlatformConfig(env)).not.toThrow();
+    expect(Object.keys(buildMicrovmPlatformConfig(env))).toEqual([
+      ...MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS,
+    ]);
+  });
+
+  test('defaults to process.env when no environment is passed', () => {
+    // The production call site passes nothing; this is the path that actually runs.
+    const config = buildMicrovmPlatformConfig();
+    expect(config).toEqual(EXPECTED_PLATFORM_CONFIG);
+  });
+
+  test('the full thirteen-key block fits the pointer envelope inside the 4 KB cap', () => {
+    // The one shape with no smaller fallback: if the pointer envelope itself
+    // exceeded 4 096 bytes there would be nothing left to move to S3. This asserts
+    // the design has real headroom rather than relying on the guard.
+    const pointerEnvelope = JSON.stringify({
+      agent_payload_s3_uri: `s3://${PAYLOAD_BUCKET}/TASK001/payload.json`,
+      platform_config: buildMicrovmPlatformConfig(FULL_ENV),
+    });
+    expect(Buffer.byteLength(pointerEnvelope, 'utf8'))
+      .toBeLessThan(MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES / 2);
+  });
+});
+
+describe('LambdaMicrovmComputeStrategy with the FULL platform_config environment', () => {
+  const OPTIONAL_ENV: Record<string, string> = {
+    TASK_APPROVALS_TABLE_NAME: 'approvals',
+    NUDGES_TABLE_NAME: 'nudges',
+    LOG_GROUP_NAME: '/aws/abca/application',
+    ARTIFACTS_BUCKET_NAME: 'artifacts-bucket',
+    TRACE_ARTIFACTS_BUCKET_NAME: 'trace-bucket',
+    LINEAR_OAUTH_SECRET_ARN: 'arn:aws:secretsmanager:us-east-1:123456789012:secret:bgagent-linear-oauth-acme-XyZ',
+    JIRA_OAUTH_SECRET_ARN: 'arn:aws:secretsmanager:us-east-1:123456789012:secret:bgagent-jira-oauth-cloud1-XyZ',
+    AWS_SDK_UA_APP_ID: 'uksb-wt64nei4u6#backgroundagent-dev',
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
+  };
+
+  beforeEach(() => {
+    Object.assign(process.env, OPTIONAL_ENV);
+  });
+
+  afterEach(() => {
+    for (const key of Object.keys(OPTIONAL_ENV)) delete process.env[key];
+  });
+
+  test('delivers every configured identifier on the wire, in both envelope halves', async () => {
+    mockS3Send.mockResolvedValueOnce({});
+    runMicrovmOk();
+
+    await new LambdaMicrovmComputeStrategy().startSession({
+      taskId: 'TASK001',
+      userId: 'cognito-test',
+      payload: { repo_url: 'org/repo', hydrated_context: { blob: 'x'.repeat(10_000) } },
+      blueprintConfig: BLUEPRINT,
+    });
+
+    const expected = { ...EXPECTED_PLATFORM_CONFIG, ...buildMicrovmPlatformConfig() };
+    const envelope = JSON.parse(mockSend.mock.calls[0][0].input.runHookPayload);
+    expect(envelope.platform_config).toEqual(expected);
+    expect(Object.keys(envelope.platform_config)).toHaveLength(13);
+    expect(JSON.parse(mockS3Send.mock.calls[0][0].input.Body).platform_config).toEqual(expected);
   });
 });

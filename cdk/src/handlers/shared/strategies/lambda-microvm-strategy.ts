@@ -25,6 +25,10 @@ import {
   TerminateMicrovmCommand,
 } from '@aws-sdk/client-lambda-microvms';
 import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+// Cross-language contract (S9): `microvm_platform_config` is read by BOTH this
+// producer and `agent/src/server.py`'s `/run` consumer. Imported (not copied) so
+// `tsc` fails on a renamed field — see `contracts/constants.md`.
+import sharedConstants from '../../../../../contracts/constants.json';
 import type { ComputeStrategy, SessionHandle, SessionStatus } from '../compute-strategy';
 import { logger } from '../logger';
 import type { BlueprintConfig } from '../repo-config';
@@ -122,6 +126,173 @@ export const MICROVM_MAX_DURATION_SECONDS = 28_800;
  * repo-less prompts), not the common case.
  */
 const RUN_HOOK_PAYLOAD_LIMIT_BYTES = 4_096;
+
+/**
+ * The `platform_config` contract (ADR-021 P2): the non-secret platform
+ * identifiers the in-guest agent needs, and the EXACT wire keys it reads.
+ *
+ * ## Why this block exists at all
+ *
+ * On AgentCore the same values arrive as runtime `environmentVariables`, and on
+ * ECS as container `environment` — both set at deploy time by CDK. A MicroVM
+ * snapshot cannot carry them: ADR-021 sub-decision 3 forbids baking
+ * configuration into the image (it is shared across every task and every
+ * deployment that reuses the snapshot, and its env is frozen at build time), so
+ * the `/run` hook payload is the only channel. `platform_config` is that channel
+ * — the third backend's equivalent of the other two backends' env blocks.
+ *
+ * ## Cross-language, and therefore contract-sourced
+ *
+ * The key set is NOT declared here. It is read from
+ * `contracts/constants.json` → `microvm_platform_config.env_by_key`, the same
+ * object `agent/src/server.py` reads to decide which keys it will install into
+ * the guest's `os.environ` — so producer and consumer cannot disagree about a
+ * key, its environment-variable name, or the required subset. `tsc` enforces
+ * this side (the JSON is imported, so a renamed field fails compilation);
+ * `scripts/check-constants-sync.ts` validates the contract's shape and rejects a
+ * Python-side literal re-declaration. See `contracts/constants.md`.
+ *
+ * That indirection is load-bearing on the agent side for a security reason: the
+ * values land in `os.environ`, so a key outside the allow-list is an
+ * env-injection attempt and the agent **refuses the whole block** rather than
+ * filtering it. A producer that invented a key would therefore fail every task,
+ * not silently drop a field.
+ *
+ * ## What may and may not go in here
+ *
+ * NON-SECRET IDENTIFIERS ONLY — table names, bucket names, log-group names, and
+ * secret/role **ARNs**. Never a token, never a secret *value*: the envelope is
+ * written to an S3 object and echoed into MicroVM logs on a hook failure, and
+ * the agent resolves an ARN itself through its own (SessionRole /
+ * execution-role) credentials. The producer below is a map over exactly the
+ * contract's keys, so a value can only reach the wire by being added to the
+ * contract — an unrelated `process.env` entry (`GITHUB_TOKEN`,
+ * `ANTHROPIC_API_KEY`, …) cannot leak in by accident.
+ *
+ * ## Ordering is part of the contract
+ *
+ * The contract's declaration order is the emission order (`JSON.stringify`
+ * preserves insertion order for string keys), which keeps the serialized
+ * envelope — and therefore the 4 KB inline/S3 branch decision — deterministic
+ * for a given environment.
+ */
+const PLATFORM_CONFIG_CONTRACT = sharedConstants.microvm_platform_config;
+
+/**
+ * Wire key → the environment variable the orchestrator carries it in, AND the
+ * name the agent installs it as in the guest.
+ *
+ * The env-var names are the ones `TaskOrchestrator` injects
+ * (`constructs/task-orchestrator.ts`), which are in turn the names the AgentCore
+ * runtime env block in `stacks/agent.ts` uses — so one stack-level value feeds
+ * all three backends under one name.
+ *
+ * Two entries have no CDK-injected source today, deliberately:
+ * `LINEAR_OAUTH_SECRET_ARN` / `JIRA_OAUTH_SECRET_ARN` name **per-workspace**
+ * secrets created by the CLI at setup, so no single ARN exists at synth time
+ * (which is why every consumer role gets a `bgagent-linear-oauth-*` /
+ * `bgagent-jira-oauth-*` PREFIX grant instead). The agent's normal source is
+ * `channel_metadata.{linear,jira}_oauth_secret_arn` inside `agent_payload`;
+ * these keys are the env-var fallback `agent/src/config.py` already reads, so
+ * they are forwarded when an operator sets them and omitted otherwise.
+ */
+const PLATFORM_CONFIG_ENV_VARS = PLATFORM_CONFIG_CONTRACT.env_by_key;
+
+/** One of the `platform_config` wire keys. */
+export type MicrovmPlatformConfigKey = keyof typeof PLATFORM_CONFIG_ENV_VARS;
+
+/**
+ * Every `platform_config` wire key, in contract (and therefore serialization)
+ * order.
+ */
+export const MICROVM_PLATFORM_CONFIG_KEYS = Object.keys(
+  PLATFORM_CONFIG_ENV_VARS,
+) as readonly MicrovmPlatformConfigKey[];
+
+/**
+ * The `platform_config` block as it appears on the wire. Every key is optional
+ * in the TYPE because the producer omits what the orchestrator's environment
+ * does not carry; {@link MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS} is the subset
+ * whose absence fails the session start instead.
+ */
+export type MicrovmPlatformConfig = Partial<Record<MicrovmPlatformConfigKey, string>>;
+
+/**
+ * Keys the agent cannot start a task without, so a missing one fails the session
+ * start here rather than producing a task that dies in-guest (the agent rejects
+ * the same set with an `…_INCOMPLETE` 400 — failing at the orchestrator is the
+ * cheaper, better-attributed half of the same rule).
+ *
+ * Each earns its place by what breaks without it:
+ *  - `task_table_name` / `task_events_table_name` — every status transition,
+ *    heartbeat and progress event the orchestrator polls for. Without them the
+ *    task looks hung to the poller and gets failed ~8.5 h later.
+ *  - `github_token_secret_arn` — no clone, no push, no PR.
+ *  - `agent_session_role_arn` — the agent falls back to AMBIENT execution-role
+ *    credentials and per-tenant scoping is silently OFF. That is the failure mode
+ *    `ecs-agent-cluster`'s reserved-env list calls the sharpest one in the
+ *    platform, and exactly the kind of security control that must not degrade
+ *    quietly.
+ *
+ * Everything else is genuinely optional: a deployment may have no approvals
+ * table wired, no artifacts bucket and no channel OAuth, and the agent's own
+ * fallbacks cover it.
+ *
+ * The cast is safe by contract: `scripts/check-constants-sync.ts` fails the build
+ * unless `required` is a duplicate-free subset of `env_by_key`.
+ */
+export const MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS =
+  PLATFORM_CONFIG_CONTRACT.required as readonly MicrovmPlatformConfigKey[];
+
+/**
+ * Assemble the `platform_config` block from the ORCHESTRATOR Lambda's own
+ * environment.
+ *
+ * Read at CALL time rather than module load (unlike the `MICROVM_*` constants
+ * above) for two reasons: the required-key check has to throw *during*
+ * `startSession` so the failure lands on the task with a remedy, and these are
+ * forwarded values rather than substrate identity — so there is nothing to
+ * freeze at import and one env lookup per session start costs nothing.
+ *
+ * @param env - environment to read; defaults to `process.env`. Injectable so
+ *   tests can vary it without reloading the module.
+ * @returns the block, with absent optional keys OMITTED (not `undefined`) so the
+ *   agent's `key in platform_config` checks mean what they say and the serialized
+ *   envelope carries no dead weight against the 4 KB cap.
+ * @throws Error naming every missing {@link MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS}
+ *   entry, its environment variable, and the redeploy remedy.
+ */
+export function buildMicrovmPlatformConfig(
+  env: NodeJS.ProcessEnv = process.env,
+): MicrovmPlatformConfig {
+  const config: Record<string, string> = {};
+  for (const key of MICROVM_PLATFORM_CONFIG_KEYS) {
+    const value = env[PLATFORM_CONFIG_ENV_VARS[key]];
+    // Empty/whitespace-only is treated as ABSENT, matching the agent's own rule:
+    // CloudFormation renders an unresolved optional value as `''`, and sending
+    // that would either clobber an image value with nothing or build a request
+    // against a nameless table. Omitting says "this deployment has no such
+    // resource", which is the truth.
+    if (value !== undefined && value.trim() !== '') {
+      config[key] = value;
+    }
+  }
+
+  const missing = MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS.filter(key => !(key in config));
+  if (missing.length > 0) {
+    throw new Error(
+      'Cannot start a lambda-microvm session: the orchestrator environment is missing platform '
+      + `configuration the in-guest agent cannot run without (${missing
+        .map(key => `${key} <- ${PLATFORM_CONFIG_ENV_VARS[key]}`)
+        .join(', ')}). A MicroVM snapshot must not bake these in (ADR-021 sub-decision 3), so the `
+      + '/run payload is the only channel for them. TaskOrchestrator injects every one of these '
+      + 'from stack-level values, so this indicates the orchestrator function\'s environment was '
+      + 'edited outside CDK — redeploy the stack to restore it.',
+    );
+  }
+
+  return config as MicrovmPlatformConfig;
+}
 
 /**
  * Stable marker prefixed onto every error this strategy lets escape, via
@@ -288,15 +459,26 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
     // inline branch is the exception. The MicroVM EXECUTION role holds the read
     // grant, exactly as the ECS task role does today.
     //
-    // Two keys, deliberately mirroring the ECS container env contract
+    // Three keys, deliberately mirroring the ECS container env contract
     // (AGENT_PAYLOAD / AGENT_PAYLOAD_S3_URI) so the agent's `/run` hook has one
     // self-describing shape to branch on:
-    //   { "agent_payload": {...} }              — inline
-    //   { "agent_payload_s3_uri": "s3://..." }  — pointer
-    const inlineEnvelope = JSON.stringify({ agent_payload: payload });
+    //   { "agent_payload": {...},     "platform_config": {...} }  — inline
+    //   { "agent_payload_s3_uri": "…", "platform_config": {...} }  — pointer
+    //
+    // `platform_config` (see MICROVM_PLATFORM_CONFIG_KEYS) rides in BOTH forms,
+    // and is ALSO merged into the S3 object on the pointer path:
+    //   s3://…/<task>/payload.json = { ...agent_payload, "platform_config": {…} }
+    // The duplication is deliberate and cheap (a few hundred bytes). It is the
+    // agent's env-block substitute — nothing else delivers it, because the
+    // snapshot must not bake it in — so it must be reachable whether the agent
+    // reads it off the hook body before fetching S3 or out of the fetched object.
+    const platformConfig = buildMicrovmPlatformConfig();
+    const inlineEnvelope = JSON.stringify({ agent_payload: payload, platform_config: platformConfig });
     // Measure the SERIALIZED envelope, not the bare payload: the envelope is
-    // what the service counts against the 4 KB cap. Byte length (not
-    // String.length) because a multi-byte prompt/diff makes chars an undercount.
+    // what the service counts against the 4 KB cap, and `platform_config` is part
+    // of it — which is precisely why nearly everything lands on the S3 path.
+    // Byte length (not String.length) because a multi-byte prompt/diff makes
+    // chars an undercount.
     const inlineBytes = Buffer.byteLength(inlineEnvelope, 'utf8');
 
     let runHookPayload: string;
@@ -307,7 +489,32 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
       runHookPayload = inlineEnvelope;
     } else {
       const key = microvmPayloadKey(taskId);
-      const payloadJson = JSON.stringify(payload);
+      const uri = `s3://${MICROVM_PAYLOAD_BUCKET}/${key}`;
+      const pointerEnvelope = JSON.stringify({
+        agent_payload_s3_uri: uri,
+        platform_config: platformConfig,
+      });
+      // The pointer envelope is the LAST RESORT — there is no smaller shape to
+      // fall back to — so check it BEFORE the upload (an upload followed by a
+      // throw would leave an orphan object for the lifecycle rule to reap) and
+      // name the one thing an operator can actually act on. Unreachable in
+      // practice: the pointer plus all thirteen identifiers is well under 4 KB.
+      const pointerBytes = Buffer.byteLength(pointerEnvelope, 'utf8');
+      if (pointerBytes > RUN_HOOK_PAYLOAD_LIMIT_BYTES) {
+        throw new Error(
+          `The MicroVM /run pointer envelope is ${pointerBytes} bytes, over the service's `
+          + `${RUN_HOOK_PAYLOAD_LIMIT_BYTES}-byte runHookPayload cap, with the payload already moved `
+          + 'to S3. The remaining size is the S3 URI plus the platform_config identifiers, so a '
+          + 'pathologically long table/bucket/ARN name is the only possible cause — shorten the '
+          + 'stack name (physical resource names derive from it) and redeploy.',
+        );
+      }
+      // The S3 object carries the payload with `platform_config` merged in at the
+      // top level, so an agent that fetches the object gets the config with it.
+      // Platform config wins on a key collision — the payload has no
+      // `platform_config` key today, and if one ever appeared the platform's
+      // value is the authoritative one.
+      const payloadJson = JSON.stringify({ ...payload, platform_config: platformConfig });
       try {
         await getS3Client().send(new PutObjectCommand({
           Bucket: MICROVM_PAYLOAD_BUCKET,
@@ -320,8 +527,8 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
         // rather than letting a bare S3 exception name fall through to UNKNOWN.
         throw wrapMicrovmError('payload upload', err);
       }
-      payloadS3Uri = `s3://${MICROVM_PAYLOAD_BUCKET}/${key}`;
-      runHookPayload = JSON.stringify({ agent_payload_s3_uri: payloadS3Uri });
+      payloadS3Uri = uri;
+      runHookPayload = pointerEnvelope;
       logger.info('Wrote MicroVM run-hook payload to S3', {
         task_id: taskId,
         bytes: Buffer.byteLength(payloadJson, 'utf8'),
@@ -426,6 +633,11 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
       maximum_duration_seconds: MICROVM_MAX_DURATION_SECONDS,
       payload_delivery: payloadS3Uri ? 's3_pointer' : 'inline',
       ...(payloadS3Uri && { payload_s3_uri: payloadS3Uri }),
+      // KEY NAMES only, never values: this is the one operator-visible record of
+      // which optional platform identifiers a given session actually received, and
+      // "the agent said ARTIFACTS_BUCKET_NAME is not configured" is otherwise a
+      // half-hour of guessing. Values stay out — see MICROVM_PLATFORM_CONFIG_KEYS.
+      platform_config_keys: Object.keys(platformConfig),
     });
 
     return {

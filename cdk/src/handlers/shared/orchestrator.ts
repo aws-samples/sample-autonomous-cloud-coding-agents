@@ -79,6 +79,50 @@ const AGENT_HEARTBEAT_GRACE_SEC = 120;
 const AGENT_HEARTBEAT_STALE_SEC = 240;
 
 /**
+ * Whether a backend's liveness is (partly) inferred from `agent_heartbeat_at`.
+ *
+ * The agent writes that timestamp UNCONDITIONALLY on every substrate — it is a
+ * DynamoDB write from the pipeline, with no backend awareness — so this predicate
+ * decides only whether the ORCHESTRATOR acts on it.
+ *
+ * - `agentcore` — yes, and it is the ONLY liveness signal there:
+ *   `AgentCoreComputeStrategy.pollSession` is an explicit stub that always
+ *   reports `running`, so a crashed container is invisible without the heartbeat.
+ * - `lambda-microvm` — yes, and it is the SECOND of two complementary signals
+ *   (ADR-021 P2). The substrate `GetMicrovm` check catches a VM that DIED; it
+ *   cannot catch a VM that is alive and healthy while the in-guest pipeline is
+ *   hung, deadlocked, or OOM-killed inside the guest — nothing self-terminates on
+ *   this substrate (live-verified: a MicroVM with a broken hook sat in `RUNNING`
+ *   indefinitely with no `stateReason`). Without the heartbeat check such a task
+ *   would burn the full ~8.5 h poll window, billing an 8-hour MicroVM
+ *   reservation, before the safety net fired. So liveness here is substrate state
+ *   AND agent heartbeat.
+ * - `ecs` — no, deliberately unchanged. `DescribeTasks` reports a real container
+ *   exit (including OOM-kill, exit 137) with an exit code, and the ECS poll block
+ *   in `orchestrate-task.ts` already interprets it with its own patience
+ *   counters. Layering the heartbeat on top would give one backend two
+ *   independently-tuned kill paths for the same failure and could fail a task
+ *   whose container is provably still running.
+ *
+ * A `switch` rather than a set membership test so a fourth backend cannot be
+ * added without making an explicit, compile-checked decision here — the culture
+ * ADR-021 sub-decision 1 asks for.
+ */
+function heartbeatLivenessApplies(computeType: ComputeType): boolean {
+  switch (computeType) {
+    case 'agentcore':
+    case 'lambda-microvm':
+      return true;
+    case 'ecs':
+      return false;
+    default: {
+      const _exhaustive: never = computeType;
+      throw new Error(`Unknown compute type for heartbeat liveness: ${String(_exhaustive)}`);
+    }
+  }
+}
+
+/**
  * Load a task record from DynamoDB.
  * @param taskId - the task to load.
  * @returns the task record.
@@ -847,6 +891,15 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
 /**
  * Poll the task record in DynamoDB to check if the agent wrote a terminal status.
  * Returns the updated PollState; the waitStrategy decides whether to continue.
+ *
+ * Heartbeat staleness is evaluated for the backends
+ * {@link heartbeatLivenessApplies} names — `agentcore` (its only liveness signal)
+ * and `lambda-microvm` (the in-guest half of "substrate state AND agent
+ * heartbeat"). Thresholds are shared across both on purpose: the timestamp is
+ * written by the same pipeline code at the same cadence regardless of substrate,
+ * so a backend-specific grace window would encode a difference that does not
+ * exist.
+ *
  * @param taskId - the task to poll.
  * @param state - current poll state.
  * @param computeType - the compute backend for this task (controls heartbeat checks).
@@ -869,7 +922,7 @@ export async function pollTaskStatus(
 
   let sessionUnhealthy = false;
   if (
-    computeType === 'agentcore'
+    heartbeatLivenessApplies(computeType)
     && currentStatus === TaskStatus.RUNNING
     && item?.session_id
     && typeof item.started_at === 'string'
@@ -888,6 +941,7 @@ export async function pollTaskStatus(
             sessionUnhealthy = true;
             logger.warn('Agent heartbeat stale while task RUNNING', {
               task_id: taskId,
+              compute_type: computeType,
               agent_heartbeat_at: item.agent_heartbeat_at,
               heartbeat_age_sec: Math.round(hbAgeSec),
             });
@@ -899,6 +953,7 @@ export async function pollTaskStatus(
         sessionUnhealthy = true;
         logger.warn('Agent never sent heartbeat while task RUNNING past grace period', {
           task_id: taskId,
+          compute_type: computeType,
           running_age_sec: Math.round(runningAgeSec),
         });
       }
