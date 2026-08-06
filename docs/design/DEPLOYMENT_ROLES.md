@@ -445,7 +445,9 @@ DynamoDB tables, Lambda functions, API Gateway, Cognito, WAFv2, EventBridge, SQS
         "sqs:TagQueue",
         "sqs:UntagQueue",
         "sqs:GetQueueUrl",
-        "sqs:ListQueueTags"
+        "sqs:ListQueueTags",
+        "sqs:AddPermission",
+        "sqs:RemovePermission"
       ],
       "Resource": "arn:aws:sqs:*:*:backgroundagent-dev-*"
     },
@@ -610,9 +612,11 @@ Bedrock Guardrails, CloudWatch Logs/Dashboards/Alarms, X-Ray, S3 (CDK assets), K
         "s3:DeleteBucket",
         "s3:PutBucketPolicy",
         "s3:DeleteBucketPolicy",
+        "s3:GetBucketPolicy",
         "s3:PutBucketPublicAccessBlock",
         "s3:GetBucketPublicAccessBlock",
         "s3:PutEncryptionConfiguration",
+        "s3:GetEncryptionConfiguration",
         "s3:PutLifecycleConfiguration",
         "s3:PutBucketVersioning",
         "s3:GetBucketVersioning",

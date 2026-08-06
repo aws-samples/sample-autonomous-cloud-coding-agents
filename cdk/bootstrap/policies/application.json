@@ -165,7 +165,9 @@
         "sqs:TagQueue",
         "sqs:UntagQueue",
         "sqs:GetQueueUrl",
-        "sqs:ListQueueTags"
+        "sqs:ListQueueTags",
+        "sqs:AddPermission",
+        "sqs:RemovePermission"
       ],
       "Effect": "Allow",
       "Resource": "arn:aws:sqs:*:*:backgroundagent-dev-*",

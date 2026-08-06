@@ -124,9 +124,16 @@ export function observabilityPolicy(): iam.PolicyDocument {
           's3:DeleteBucket',
           's3:PutBucketPolicy',
           's3:DeleteBucketPolicy',
+          // CloudFormation reads a bucket's policy and encryption config back on
+          // stack UPDATE (drift/no-op detection), so the Put* grants above are
+          // insufficient on their own. Every other Put* here has its Get* pair;
+          // these two were the omissions (#124 review — previously excluded via
+          // the resource-action-map's KNOWN_GAP set rather than granted).
+          's3:GetBucketPolicy',
           's3:PutBucketPublicAccessBlock',
           's3:GetBucketPublicAccessBlock',
           's3:PutEncryptionConfiguration',
+          's3:GetEncryptionConfiguration',
           's3:PutLifecycleConfiguration',
           's3:PutBucketVersioning',
           's3:GetBucketVersioning',

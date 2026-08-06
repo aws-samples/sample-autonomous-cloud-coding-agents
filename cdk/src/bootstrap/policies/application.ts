@@ -210,6 +210,13 @@ export function applicationPolicy(): iam.PolicyDocument {
           'sqs:UntagQueue',
           'sqs:GetQueueUrl',
           'sqs:ListQueueTags',
+          // AWS::SQS::QueuePolicy is a distinct CFN resource from the queue, and
+          // CloudFormation manages it with Add/RemovePermission — not
+          // SetQueueAttributes. The stack creates one (the DLQ redrive policy),
+          // so without these a queue-policy create/update/delete fails
+          // (#124 review — previously excluded via KNOWN_GAP rather than granted).
+          'sqs:AddPermission',
+          'sqs:RemovePermission',
         ],
         resources: ['arn:aws:sqs:*:*:backgroundagent-dev-*'],
       }),
