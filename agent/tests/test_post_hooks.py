@@ -10,6 +10,8 @@ import os
 import subprocess
 from types import SimpleNamespace
 
+import pytest
+
 import post_hooks
 from models import RepoSetup
 from tests.conftest import FakeRunCmd, make_task_config
@@ -277,28 +279,90 @@ class TestReconcileAgentBranch:
     higher confidence than faking subprocess. The two seams (subprocess.run for
     the branch read, run_cmd for the mutating ops) both hit the tmp repo."""
 
+    # Repo-LOCATION vars. An explicit GIT_DIR overrides repository discovery
+    # outright, so it beats cwd, HOME, the GIT_CONFIG_* pins and `--local`
+    # alike. Git exports these to hooks in a LINKED WORKTREE (unset in a normal
+    # repo), which is exactly how this suite runs as a pre-push gate from
+    # .worktrees/.
+    _GIT_LOCATION_VARS = (
+        "GIT_DIR",
+        "GIT_COMMON_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_PREFIX",
+        "GIT_CEILING_DIRECTORIES",
+    )
+
+    @pytest.fixture(autouse=True)
+    def _clear_ambient_git_location(self, monkeypatch):
+        """Strip repo-location vars for the whole class (#720).
+
+        Not just for the fixture helpers: ``post_hooks`` itself shells out to
+        git with the ambient environment (e.g. ``_current_branch``), so an
+        inherited GIT_DIR would point PRODUCTION code at the real repo instead
+        of the tmp one — the assertions would silently describe the wrong
+        repository.
+        """
+        for var in self._GIT_LOCATION_VARS:
+            monkeypatch.delenv(var, raising=False)
+
     @staticmethod
-    def _git(repo, *args):
+    def _isolated_env(repo):
         # Hard-isolate from the developer's real git identity (#720). `cwd` alone
         # is NOT containment: a bare `git config` walks up to the nearest
         # enclosing repo, and `git init` at a linked-worktree root re-inits the
         # SHARED .git rather than creating a nested one — so both can write
         # straight into the real .git/config. Pinning the HOME/config env vars
         # means even a transcribed `git config user.email` cannot escape tmp.
+        #
+        # Dropping the repo-LOCATION vars first is load-bearing, not tidiness.
+        # An explicit GIT_DIR overrides repository discovery outright, so it
+        # defeats cwd, HOME and the GIT_CONFIG_* pins together — and `--local`
+        # resolves relative to it, so that is no defence either. Git exports
+        # GIT_DIR to hooks in a LINKED WORKTREE (it is unset in a normal repo),
+        # which is exactly how this suite runs as a pre-push gate from
+        # .worktrees/: inheriting it re-opens #720 and additionally stamps
+        # `bare = true` on the real repo.
         env = {
-            **os.environ,
-            "HOME": str(repo),
-            "XDG_CONFIG_HOME": str(repo),
-            "GIT_CONFIG_GLOBAL": os.path.join(str(repo), ".gitconfig-test"),
-            "GIT_CONFIG_SYSTEM": os.devnull,
-            "GIT_CONFIG_NOSYSTEM": "1",
-            "GIT_AUTHOR_NAME": "ABCA Test",
-            "GIT_AUTHOR_EMAIL": "abca-test@example.invalid",
-            "GIT_COMMITTER_NAME": "ABCA Test",
-            "GIT_COMMITTER_EMAIL": "abca-test@example.invalid",
+            k: v
+            for k, v in os.environ.items()
+            if k
+            not in {
+                "GIT_DIR",
+                "GIT_COMMON_DIR",
+                "GIT_WORK_TREE",
+                "GIT_INDEX_FILE",
+                "GIT_OBJECT_DIRECTORY",
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                "GIT_PREFIX",
+                "GIT_CEILING_DIRECTORIES",
+            }
         }
+        env.update(
+            {
+                "HOME": str(repo),
+                "XDG_CONFIG_HOME": str(repo),
+                "GIT_CONFIG_GLOBAL": os.path.join(str(repo), ".gitconfig-test"),
+                "GIT_CONFIG_SYSTEM": os.devnull,
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_AUTHOR_NAME": "ABCA Test",
+                "GIT_AUTHOR_EMAIL": "abca-test@example.invalid",
+                "GIT_COMMITTER_NAME": "ABCA Test",
+                "GIT_COMMITTER_EMAIL": "abca-test@example.invalid",
+            }
+        )
+        return env
+
+    def _git(self, repo, *args):
         subprocess.run(
-            ["git", *args], cwd=repo, check=True, capture_output=True, text=True, env=env
+            ["git", *args],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+            env=self._isolated_env(repo),
         )
 
     def _make_repo(self, tmp_path):
@@ -316,14 +380,60 @@ class TestReconcileAgentBranch:
         self._git(repo, "branch", "-M", "main")
         return str(repo)
 
+    def test_fixture_cannot_touch_an_outer_repo_even_with_git_dir_set(self, tmp_path, monkeypatch):
+        """Regression guard for #720: the fixture must stay contained when a
+        repo-location var is present in the ambient environment.
+
+        Git exports GIT_DIR to hooks in a linked worktree, which is how this
+        suite runs as a pre-push gate. An inherited GIT_DIR overrides repository
+        discovery entirely, so it beats cwd/HOME/GIT_CONFIG_* *and* `--local` —
+        the fixture would re-init and rewrite the real shared repo. Fails if
+        _git ever stops stripping those vars."""
+        outer = tmp_path / "outer"
+        outer.mkdir()
+        # Build the stand-in "real" repo with the location vars still cleared by
+        # the autouse fixture, so this setup lands in tmp and not the actual repo.
+        subprocess.run(["git", "init", "-q"], cwd=outer, check=True, capture_output=True)
+        sentinel_config = outer / ".git" / "config"
+        subprocess.run(
+            ["git", "config", "--local", "user.email", "sentinel@example.invalid"],
+            cwd=outer,
+            check=True,
+            capture_output=True,
+        )
+        before = sentinel_config.read_text()
+
+        # Exactly what a pre-push hook in a linked worktree hands us.
+        monkeypatch.setenv("GIT_DIR", str(outer / ".git"))
+        monkeypatch.setenv("GIT_WORK_TREE", str(outer))
+
+        self._make_repo(tmp_path)
+
+        assert sentinel_config.read_text() == before, (
+            "fixture escaped into the outer repo — _git must strip GIT_DIR/"
+            "GIT_WORK_TREE before overlaying its pins (#720)"
+        )
+
     def _head_sha(self, repo):
+        # Same isolated env as _git: an inherited GIT_DIR would make this read
+        # the REAL repo's HEAD instead of the fixture's.
         return subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+            env=self._isolated_env(repo),
         ).stdout.strip()
 
     def _sha_of(self, repo, ref):
         return subprocess.run(
-            ["git", "rev-parse", ref], cwd=repo, check=True, capture_output=True, text=True
+            ["git", "rev-parse", ref],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+            env=self._isolated_env(repo),
         ).stdout.strip()
 
     def test_reconciles_when_agent_on_own_branch(self, tmp_path):
