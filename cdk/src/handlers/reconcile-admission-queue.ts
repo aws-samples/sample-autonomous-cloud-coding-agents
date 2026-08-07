@@ -18,7 +18,7 @@
  */
 
 /**
- * Scheduled handler: admission-queue deferred pickup (#441).
+ * Scheduled handler: admission-queue deferred pickup (see #441).
  *
  * Tasks that hit the per-user concurrency cap are parked in QUEUED by the
  * orchestrator instead of being FAILED (see `queueTask` in
