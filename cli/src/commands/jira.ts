@@ -338,7 +338,7 @@ export async function synchronizeJiraWebhookSecrets(
     throw new CliError(
       'Failed to update the stack-wide Jira webhook secret, but restored the tenant bundle '
       + `to its previous value: ${err instanceof Error ? err.message : String(err)}. `
-      + 'Both secrets remain consistent at the previous value; rotation can be safely retried.',
+      + 'Both secrets were restored to their prior values; rotation can be safely retried.',
     );
   }
   return merged;
