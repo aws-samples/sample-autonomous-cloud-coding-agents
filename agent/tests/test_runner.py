@@ -9,6 +9,7 @@ verified without spinning up the Claude Agent SDK client.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -475,3 +476,18 @@ class TestClaudeCliVersionProbe:
         # No point exec'ing a binary `which` could not find — and no exception:
         # this is diagnostics, so it must never be the thing that fails a task.
         assert calls == [["which", "claude"]]
+
+    def test_run_agent_invokes_the_cli_version_probe(self):
+        sentinel = RuntimeError("stop after version probe")
+        with (
+            patch.object(runner, "_setup_agent_env"),
+            patch.object(runner, "_log_claude_cli_version", side_effect=sentinel) as probe,
+        ):
+            try:
+                asyncio.run(runner.run_agent("prompt", "system", _config()))
+            except RuntimeError as error:
+                assert error is sentinel
+            else:
+                raise AssertionError("run_agent continued past the version probe")
+
+        probe.assert_called_once_with()

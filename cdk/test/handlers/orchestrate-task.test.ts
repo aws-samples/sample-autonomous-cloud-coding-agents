@@ -552,6 +552,14 @@ describe('pollTaskStatus', () => {
     expect(result.lastStatus).toBeUndefined();
   });
 
+  test('rejects an unknown compute type instead of silently skipping heartbeat liveness', async () => {
+    mockDdbSend.mockResolvedValueOnce({ Item: { status: 'RUNNING' } });
+
+    await expect(pollTaskStatus('TASK001', { attempts: 0 }, 'unknown' as never)).rejects.toThrow(
+      'Unknown compute type for heartbeat liveness: unknown',
+    );
+  });
+
   test('sets sessionUnhealthy when agent heartbeat is stale (RUNNING)', async () => {
     const old = new Date(Date.now() - 400_000).toISOString();
     mockDdbSend.mockResolvedValueOnce({
