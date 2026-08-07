@@ -1,15 +1,17 @@
-"""FastAPI server for AgentCore Runtime.
+"""FastAPI server for AgentCore Runtime and Lambda MicroVMs.
 
-Exposes /invocations (POST) and /ping (GET) on port 8080,
-matching the AgentCore Runtime container contract.
+Exposes /invocations (POST) and /ping (GET) on port 8080, matching the AgentCore
+Runtime container contract, plus the AWS Lambda MicroVMs lifecycle hooks under
+``/aws/lambda-microvms/runtime/v1/`` (ADR-021 P1) on the same port.
 
-The /invocations handler accepts the task, spawns a background thread to run
-the pipeline, and returns a small JSON acceptance immediately. Task progress
-is tracked in DynamoDB via ``task_state`` + ``ProgressWriter``.
+Both entry paths accept the task, spawn a background thread to run the pipeline,
+and return a small JSON acceptance immediately. Task progress is tracked in
+DynamoDB via ``task_state`` + ``ProgressWriter``.
 """
 
 import asyncio
 import contextlib as _ctx_for_debug
+import json
 import logging
 import os
 import threading
@@ -814,3 +816,226 @@ async def invoke_agent(request: Request, body: InvocationRequest):
             }
         }
     )
+
+
+# --------------------------------------------------------------------------
+# AWS Lambda MicroVMs lifecycle hooks (ADR-021 P1)
+# --------------------------------------------------------------------------
+# The MicroVM backend has NO orchestrator→agent HTTP path: the task payload
+# arrives as the ``/run`` hook's request body and nothing else dials in. The
+# service calls these routes on the port declared in the image's ``hooks.port``
+# (8080 — the same uvicorn process that serves /invocations and /ping), so the
+# hooks live here rather than in a sidecar.
+#
+# Only ``/ready`` and ``/run`` are implemented, and both are P1:
+#   * ``/ready`` is MANDATORY. ``CreateMicrovmImage`` refuses an image that
+#     enables ANY lifecycle hook without it ("The ready (/ready) MicroVM image
+#     hook must be enabled when any MicroVM lifecycle hook … is enabled"), and an
+#     image with no hooks at all cannot receive a ``runHookPayload``. So ADR-021's
+#     original "declare /run in P1, serve it in P2" split was not a reachable
+#     service state.
+#   * ``/run`` is the payload-delivery channel.
+# ``/suspend`` and ``/resume`` are P3 (they need the ComputeStrategy interface
+# widening), and ``/validate`` + ``/terminate`` are P2 polish. Declaring a hook
+# the agent does not answer fails the corresponding build or lifecycle
+# transition, which is why the construct declares exactly these two.
+MICROVM_HOOK_PREFIX = "/aws/lambda-microvms/runtime/v1"
+
+#: ``s3://`` scheme prefix for the out-of-band payload pointer.
+_S3_URI_SCHEME = "s3://"
+
+
+class MicrovmRunHookRequest(BaseModel):
+    """Body the MicroVM service POSTs to the ``/run`` hook.
+
+    ``runHookPayload`` is the opaque STRING the orchestrator passed to
+    ``RunMicrovm`` — the service does not parse it. ABCA's contract for that
+    string (``lambda-microvm-strategy.ts``) is one of two shapes, mirroring the
+    ECS container env contract (``AGENT_PAYLOAD`` / ``AGENT_PAYLOAD_S3_URI``):
+
+    * ``{"agent_payload": {...}}`` — the whole orchestrator payload, inline.
+    * ``{"agent_payload_s3_uri": "s3://bucket/key"}`` — a pointer to it.
+
+    The pointer form is the DOMINANT one: the service caps ``runHookPayload`` at
+    4 096 bytes and a hydrated payload is essentially always larger.
+
+    Both fields default to empty so a malformed call produces this module's
+    structured 400 rather than FastAPI's 422 — the service surfaces a 4xx as a
+    generic "client error" hook failure either way, and our own body is what ends
+    up in the MicroVM log group.
+    """
+
+    microvmId: str = ""  # service field name; camelCase on the wire
+    runHookPayload: str = ""  # service field name; camelCase on the wire
+
+
+def _fetch_microvm_payload_from_s3(uri: str) -> dict:
+    """Read and parse the out-of-band ``/run`` payload from S3.
+
+    Same fetch the ECS boot command performs for ``AGENT_PAYLOAD_S3_URI``; the
+    MicroVM **execution role** holds the read grant, scoped to the platform
+    payload bucket. Errors propagate to the caller, which turns them into a
+    structured 400/500 — silently starting a pipeline with no payload would
+    produce a task that runs with an empty prompt.
+    """
+    remainder = uri[len(_S3_URI_SCHEME) :]
+    bucket, _, key = remainder.partition("/")
+    if not bucket or not key:
+        raise ValueError(f"agent_payload_s3_uri is not a bucket/key URI: {uri!r}")
+
+    import boto3
+
+    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+    client = boto3.client("s3", region_name=region)
+    body = client.get_object(Bucket=bucket, Key=key)["Body"].read()
+    payload = json.loads(body)
+    if not isinstance(payload, dict):
+        raise ValueError(f"S3 payload at {uri!r} is {type(payload).__name__}, expected an object")
+    return payload
+
+
+def _resolve_microvm_run_payload(run_hook_payload: str) -> dict:
+    """Turn the ``runHookPayload`` string into the orchestrator payload dict.
+
+    Raises ``ValueError`` for every shape the agent cannot act on, so the caller
+    has exactly one failure branch to map onto a 400.
+    """
+    if not run_hook_payload.strip():
+        raise ValueError("runHookPayload is empty")
+
+    try:
+        envelope = json.loads(run_hook_payload)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"runHookPayload is not valid JSON: {exc}") from exc
+
+    if not isinstance(envelope, dict):
+        raise ValueError(f"runHookPayload must be a JSON object, got {type(envelope).__name__}")
+
+    inline = envelope.get("agent_payload")
+    if inline is not None:
+        if not isinstance(inline, dict):
+            raise ValueError(f"agent_payload must be an object, got {type(inline).__name__}")
+        return inline
+
+    uri = envelope.get("agent_payload_s3_uri")
+    if isinstance(uri, str) and uri.startswith(_S3_URI_SCHEME):
+        return _fetch_microvm_payload_from_s3(uri)
+    if uri is not None:
+        raise ValueError(f"agent_payload_s3_uri must be an s3:// URI, got {uri!r}")
+
+    raise ValueError(
+        "runHookPayload envelope has neither agent_payload nor agent_payload_s3_uri "
+        f"(keys: {sorted(envelope)})"
+    )
+
+
+@app.post(f"{MICROVM_HOOK_PREFIX}/ready")
+def microvm_ready():
+    """MicroVM image ``/ready`` build hook — "the application has initialised".
+
+    A 200 from this route is the signal the service waits for before taking the
+    snapshot, so answering it at all is what makes the image buildable: with the
+    hook enabled and nothing serving it, both chipset builds fail with "Ready hook
+    check failed: the application returned a client error (HTTP 4xx) response".
+
+    Reaching this handler already proves everything P1 needs: uvicorn is bound on
+    the hook port and ``server`` imported cleanly (which pulls in ``pipeline`` →
+    ``runner`` → the policy engine, so a missing policy file or a broken import
+    fails the BUILD instead of the first task). Deeper warm-up assertions —
+    Bedrock reachability, Memory access, tool availability — belong to P2's
+    ``/validate``, which is deliberately still not declared: a hook that 404s or
+    reports failure fails every image build.
+
+    Declared ``def`` rather than ``async def`` on purpose: Starlette runs sync
+    handlers in a threadpool, so this never competes with the event loop that has
+    to keep ``GET /ping`` fast.
+    """
+    _debug_cw("/ready hook: server is up, reporting ready for snapshot")
+    return {"status": "ready"}
+
+
+@app.post(f"{MICROVM_HOOK_PREFIX}/run")
+def microvm_run(request: Request, body: MicrovmRunHookRequest):
+    """MicroVM ``/run`` lifecycle hook — accept the task and start the pipeline.
+
+    Fast-notification contract (1-60 s hook budget): validate, spawn, return 200.
+    The pipeline itself must NOT run on the hook path, so this reuses the exact
+    mechanism ``/invocations`` uses — ``_extract_invocation_params`` →
+    ``_validate_required_params`` → ``_spawn_background`` — rather than a second,
+    drifting payload mapper. The orchestrator payload is byte-identical across
+    substrates (AgentCore receives it as ``input``, ECS as ``AGENT_PAYLOAD``,
+    MicroVMs inside this envelope), which is what makes that reuse correct.
+
+    Session/workload headers are absent here (there is no AgentCore Runtime in
+    front of this call), so ``_extract_invocation_params`` resolves an empty
+    ``session_id`` / workload token — the same posture the ECS backend already
+    has, per ADR-021 sub-decision 3's identity delta.
+
+    Sync ``def`` for the same reason as ``/ready``, and additionally because the
+    S3 payload fetch is a blocking boto3 call: in a threadpool it cannot stall
+    the event loop.
+    """
+    _debug_cw(f"/run hook received: microvm_id={body.microvmId!r} bytes={len(body.runHookPayload)}")
+
+    try:
+        payload = _resolve_microvm_run_payload(body.runHookPayload)
+    except ValueError as exc:
+        # Bad envelope — the orchestrator built something this agent cannot act
+        # on. 400 (not 500) because retrying an identical body cannot help.
+        _warn_cw(f"/run hook rejected: {exc}")
+        return JSONResponse(
+            status_code=400,
+            content={
+                "code": "MICROVM_RUN_PAYLOAD_INVALID",
+                "message": str(exc),
+            },
+        )
+    except Exception as exc:
+        # Payload fetch failed (S3 AccessDenied / NoSuchKey / transient). 500 so
+        # the failure is distinguishable from a malformed body, and loud enough to
+        # find in the MicroVM log group.
+        _debug_cw_exc("/run hook payload fetch FAILED", exc)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "code": "MICROVM_RUN_PAYLOAD_UNREADABLE",
+                "message": f"{type(exc).__name__}: {exc}",
+            },
+        )
+
+    task_id_log = str(payload.get("task_id", ""))
+    try:
+        params = _extract_invocation_params(payload, request)
+    except Exception as exc:
+        _debug_cw_exc(
+            "/run hook _extract_invocation_params FAILED", exc, task_id=task_id_log or None
+        )
+        raise
+
+    missing = _validate_required_params(params)
+    if missing:
+        _debug_cw(
+            f"/run hook rejected: missing required params {missing!r}",
+            task_id=task_id_log or None,
+        )
+        return JSONResponse(
+            status_code=400,
+            content={
+                "code": "TASK_RECORD_INCOMPLETE",
+                "message": (
+                    "Task record is missing required fields. The orchestrator "
+                    "should have populated these before starting the MicroVM."
+                ),
+                "missing": missing,
+            },
+        )
+
+    _spawn_background(params)
+    task_id = params["task_id"]
+    _debug_cw(f"/run hook accepted task_id={task_id!r}", task_id=task_id or None)
+    return {
+        "status": "accepted",
+        "task_id": task_id,
+        "microvm_id": body.microvmId,
+        "timestamp": datetime.now(UTC).isoformat(),
+    }

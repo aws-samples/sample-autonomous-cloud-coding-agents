@@ -25,6 +25,7 @@ import { reportIssueFailure } from './shared/linear-feedback';
 import { logger } from './shared/logger';
 import {
   admissionControl,
+  buildComputeMetadata,
   emitTaskEvent,
   envelopeFor,
   failTask,
@@ -33,6 +34,8 @@ import {
   loadBlueprintConfig,
   loadTask,
   pollTaskStatus,
+  queueTask,
+  reconcileMicrovmSubstrateState,
   transitionTask,
   type PollState,
 } from './shared/orchestrator';
@@ -44,6 +47,14 @@ import { workflowIsReadOnly, workflowRequiresRepo } from './shared/workflows';
 
 interface OrchestrateTaskEvent {
   readonly task_id: string;
+  /**
+   * Per-pickup nonce set by the admission-queue pickup Lambda (#441)
+   * when re-invoking after a QUEUED -> SUBMITTED flip. Unused by the
+   * handler; it exists so the re-invoke payload differs from the
+   * original create-task invocation and no layer (Lambda async dedup,
+   * durable-execution idempotency) can mistake it for a replay.
+   */
+  readonly queue_pickup_id?: string;
 }
 
 const MAX_POLL_ATTEMPTS = 1020; // ~8.5h at 30s intervals
@@ -77,7 +88,10 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
     }
   });
 
-  // Step 2: Admission control — check concurrency limit
+  // Step 2: Admission control — check concurrency limit. At capacity the
+  // task is QUEUED (durable, FIFO on created_at) instead of FAILED (#441):
+  // the admission-queue pickup Lambda re-attempts admission as slots free
+  // up, flips QUEUED -> SUBMITTED, and re-invokes this orchestrator.
   const admitted = await context.step('admission-control', async () => {
     // Re-read status to detect external cancellation between steps
     const current = await loadTask(taskId);
@@ -86,23 +100,30 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
     }
     const result = await admissionControl(task);
     if (!result) {
-      await failTask(taskId, current.status, 'User concurrency limit reached', task.user_id, false, task.repo);
-      await emitTaskEvent(taskId, 'admission_rejected', { reason: 'concurrency_limit' }, correlation);
-      // Channel feedback is non-fatal: a throw here would re-run failTask +
-      // emitTaskEvent on the durable-execution retry, producing duplicate events.
-      try {
-        await notifyLinearOnConcurrencyCap(task);
-      } catch (err) {
-        log.warn('Linear concurrency-cap feedback failed (non-fatal)', {
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-      try {
-        await notifyJiraOnConcurrencyCap(task);
-      } catch (err) {
-        log.warn('Jira concurrency-cap feedback failed (non-fatal)', {
-          error: err instanceof Error ? err.message : String(err),
-        });
+      // Re-read for queue bookkeeping: `task` is the step-1 snapshot, but a
+      // pickup-cycle re-queue must preserve the CURRENT queued_at /
+      // admission_attempts, which the pickup Lambda may have advanced.
+      // queueTask emits the `admission_queued` event itself.
+      await queueTask(current);
+      // Channel feedback only on the FIRST queue entry — a pickup-cycle
+      // re-queue (lost admission race) would otherwise spam the issue with
+      // one comment per cycle. Non-fatal: a throw here would re-run
+      // queueTask on the durable-execution retry, producing duplicate events.
+      if (current.queued_at === undefined) {
+        try {
+          await notifyLinearOnConcurrencyCap(task);
+        } catch (err) {
+          log.warn('Linear concurrency-cap feedback failed (non-fatal)', {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+        try {
+          await notifyJiraOnConcurrencyCap(task);
+        } catch (err) {
+          log.warn('Jira concurrency-cap feedback failed (non-fatal)', {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
       }
     }
     return result;
@@ -162,8 +183,12 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
   // Returns the full SessionHandle (serializable) so ECS polling can use it in step 5.
   const sessionHandle = await context.step('start-session', async () => {
     let autoRetried = false;
+    // Hoisted out of the `try` so the catch can reap a MicroVM that STARTED but
+    // whose handle never made it into DynamoDB — see the catch block.
+    let strategy: ReturnType<typeof resolveComputeStrategy> | undefined;
+    let startedHandle: Awaited<ReturnType<typeof startSessionWithRetry>>['handle'] | undefined;
     try {
-      const strategy = resolveComputeStrategy(blueprintConfig);
+      strategy = resolveComputeStrategy(blueprintConfig);
       const startInput = {
         taskId,
         userId: task.user_id,
@@ -190,11 +215,12 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
         },
       );
       autoRetried = retried;
+      startedHandle = handle;
 
-      // Build compute metadata for the task record so cancel-task can stop the right backend
-      const computeMetadata: Record<string, string> = handle.strategyType === 'ecs'
-        ? { clusterArn: handle.clusterArn, taskArn: handle.taskArn }
-        : { runtimeArn: handle.runtimeArn };
+      // Build compute metadata for the task record so cancel-task can stop the
+      // right backend (and, for lambda-microvm, so the P3 approve/deny Lambdas
+      // can load the handle they resume from — ADR-021 sub-decision 2).
+      const computeMetadata = buildComputeMetadata(handle);
 
       await transitionTask(taskId, TaskStatus.HYDRATING, TaskStatus.RUNNING, {
         session_id: handle.sessionId,
@@ -215,6 +241,42 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
 
       return handle;
     } catch (err) {
+      // ORPHAN REAP (ADR-021). `RunMicrovm` may have already succeeded and left a
+      // MicroVM RUNNING — the throw could have come from `buildComputeMetadata`,
+      // the `transitionTask` write, or the `session_started` emit. Nothing
+      // self-terminates on this substrate (live-verified: a MicroVM with no
+      // working hook reached RUNNING in 12 s and stayed RUNNING with no
+      // stateReason), and the handle only ever existed in this Lambda's memory —
+      // once we throw, no poll and no finalize step will ever see it. So the VM
+      // would bill until `maximumDurationInSeconds` (8 h) expired while also
+      // holding account memory quota that gates admission for everyone else.
+      //
+      // Best-effort in the strongest sense: `stopSession` is internally
+      // non-throwing for this backend, and the extra try/catch guarantees that
+      // even a surprise (a non-microvm strategy, a synchronous throw) cannot
+      // replace the ORIGINAL failure — which is the one the user needs to see.
+      //
+      // Scoped to `lambda-microvm` deliberately. ECS and AgentCore have the same
+      // structural window, but generalising here would issue `StopTask` /
+      // `StopRuntimeSession` calls the ORCHESTRATOR role may not be granted (those
+      // grants live on the cancel Lambda), turning a clean failure into a clean
+      // failure plus a misleading AccessDenied. Widening it is a follow-up that
+      // needs the IAM change reviewed alongside.
+      if (startedHandle?.strategyType === 'lambda-microvm' && strategy) {
+        try {
+          log.warn('Session start failed after the MicroVM was created — terminating the orphan', {
+            microvm_id: startedHandle.microvmId,
+            original_error: err instanceof Error ? err.message : String(err),
+          });
+          await strategy.stopSession(startedHandle);
+        } catch (reapErr) {
+          log.error('Failed to terminate the orphaned MicroVM — it may bill until its 8h cap', {
+            microvm_id: startedHandle.microvmId,
+            error: reapErr instanceof Error ? reapErr.message : String(reapErr),
+          });
+        }
+      }
+
       // Carry the auto-retry fact into error_message: the `[auto-retried]` suffix
       // is persisted verbatim (the error classifier ignores it — it does not
       // affect classification). It is a breadcrumb for a failure renderer to
@@ -238,6 +300,14 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
     ? resolveComputeStrategy(blueprintConfig)
     : undefined;
 
+  // Kept as a SEPARATE local rather than widening `computeStrategy`'s condition:
+  // the ECS cross-check below is gated on `computeStrategy` truthiness, so
+  // reusing that local for lambda-microvm would route MicroVM polls through the
+  // ECS exit-code/patience logic. Two locals keep the ECS path byte-identical.
+  const microvmStrategy = blueprintConfig.compute_type === 'lambda-microvm'
+    ? resolveComputeStrategy(blueprintConfig)
+    : undefined;
+
   // Step 5: Wait for agent to finish
   // Polls DynamoDB on each interval. The agent writes terminal status when done.
   // While RUNNING, the runtime updates `agent_heartbeat_at`; if that timestamp
@@ -251,6 +321,9 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
       const ddbState = await pollTaskStatus(taskId, state, blueprintConfig.compute_type);
       let consecutiveEcsPollFailures = 0;
       let consecutiveEcsCompletedPolls = 0;
+      // Carried forward by default: an unrelated poll (or a MicroVM poll that
+      // threw) must not silently re-arm the once-per-episode anomaly event.
+      let microvmSuspendAnomalyReported = state.microvmSuspendAnomalyReported ?? false;
 
       // ECS compute-level crash detection: if DDB is not terminal, check ECS task status
       if (
@@ -300,7 +373,52 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
         }
       }
 
-      return { ...ddbState, consecutiveEcsPollFailures, consecutiveEcsCompletedPolls };
+      // Lambda MicroVMs substrate cross-check (ADR-021 sub-decision 1). Same
+      // division of labour as the ECS block above — the strategy reports raw
+      // substrate state and `reconcileMicrovmSubstrateState` interprets it
+      // against the DDB status — but the rules differ: a `suspended` VM is
+      // healthy during an approval wait, an anomaly (not a failure) otherwise,
+      // and a terminal VM with a non-terminal task row is a substrate failure.
+      if (
+        ddbState.lastStatus
+        && !TERMINAL_STATUSES.includes(ddbState.lastStatus)
+        && microvmStrategy
+        && sessionHandle.strategyType === 'lambda-microvm'
+      ) {
+        try {
+          const substrateStatus = await microvmStrategy.pollSession(sessionHandle);
+          const { taskFailed, suspendAnomalyReported } = await reconcileMicrovmSubstrateState({
+            taskId,
+            ddbStatus: ddbState.lastStatus,
+            substrate: substrateStatus,
+            microvmId: sessionHandle.microvmId,
+            userId: task.user_id,
+            correlation,
+            log,
+            repo: task.repo,
+            // Threaded so `microvm_suspend_anomaly` is emitted once per anomaly
+            // EPISODE rather than on every ~30 s poll; a non-anomalous observation
+            // re-arms it (see reconcileMicrovmSubstrateState).
+            suspendAnomalyReported: microvmSuspendAnomalyReported,
+          });
+          microvmSuspendAnomalyReported = suspendAnomalyReported;
+          if (taskFailed) {
+            return { attempts: ddbState.attempts, lastStatus: TaskStatus.FAILED };
+          }
+        } catch (err) {
+          // Non-fatal: a GetMicrovm hiccup must not abort the durable poll step.
+          // The task stays bounded by MAX_POLL_ATTEMPTS (~8.5 h) and, once the
+          // agent is RUNNING, by its own terminal write. A repeated-failure
+          // escalation counter (the ECS `MAX_CONSECUTIVE_ECS_POLL_FAILURES`
+          // analogue) is deliberately deferred — it would add PollState fields
+          // that P3's suspend policy will need to reshape anyway.
+          log.warn('MicroVM pollSession check failed (non-fatal)', {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+
+      return { ...ddbState, consecutiveEcsPollFailures, consecutiveEcsCompletedPolls, microvmSuspendAnomalyReported };
     },
     {
       initialState: { attempts: 0 },
@@ -339,19 +457,32 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
     if (blueprintConfig.compute_type === 'ecs') {
       await deleteEcsPayload(taskId);
     }
+    // ADR-021: "When the orchestrator finalizes a `lambda-microvm` task, the
+    // orchestrator shall call terminate-microvm (termination shall not rely on
+    // any substrate timeout)." Without this the VM lingers until
+    // `maximumDurationInSeconds` (8 h) expires — with `idlePolicy` omitted there
+    // is no tighter substrate bound — so we would keep paying for a full 8-hour
+    // reservation after every task, and every SUSPENDED/RUNNING VM keeps counting
+    // against the account memory quota that gates admission.
+    //
+    // `stopSession` is internally best-effort (it swallows and level-differentiates
+    // every failure), so this cannot fail the finalize step or strand the task in
+    // a non-terminal state.
+    if (microvmStrategy && sessionHandle.strategyType === 'lambda-microvm') {
+      await microvmStrategy.stopSession(sessionHandle);
+    }
   });
 };
 
 export const handler = withDurableExecution(durableHandler);
 
 /**
- * Post a Linear comment + ❌ reaction when admission control rejects a task
- * for the user concurrency cap. Linear-only; silently no-ops for other
- * channels.
+ * Post a Linear comment when admission control queues a task on the user
+ * concurrency cap (#441). Linear-only; silently no-ops for other channels.
  *
  * The processor side (`linear-webhook-processor.ts`) already covers
  * pre-`createTaskCore` rejections (unmapped project, unlinked actor, guardrail);
- * this hook covers the post-201 case where the orchestrator rejects on
+ * this hook covers the post-201 case where the orchestrator queues on
  * admission. Without this, the only Linear-side signal would be the 👀
  * reaction the agent never gets to add — looks like the integration silently
  * dropped the request.
@@ -384,7 +515,7 @@ export async function notifyLinearOnConcurrencyCap(task: TaskRecord): Promise<vo
     await reportIssueFailure(
       { linearWorkspaceId, registryTableName },
       issueId,
-      '❌ ABCA hit your concurrency limit — too many tasks running for your user. Wait for one to finish, then re-apply the trigger label.',
+      '⏸️ ABCA hit your concurrency limit — this task has been queued and will start automatically when a slot frees up. No action needed.',
     );
   } catch (err) {
     logger.warn('Linear concurrency-cap feedback failed (non-fatal)', {
@@ -397,13 +528,13 @@ export async function notifyLinearOnConcurrencyCap(task: TaskRecord): Promise<vo
 }
 
 /**
- * Post a Jira issue comment when admission control rejects a task for the
- * user concurrency cap. Jira-only; silently no-ops for other channels.
+ * Post a Jira issue comment when admission control queues a task on the
+ * user concurrency cap (#441). Jira-only; silently no-ops for other channels.
  *
  * Parity with {@link notifyLinearOnConcurrencyCap}: the webhook processor
  * covers pre-`createTaskCore` rejections (unmapped project, unlinked actor,
  * guardrail), while this hook covers the post-201 case where the orchestrator
- * rejects on admission. Without it, a Jira user who hits the cap sees the
+ * queues on admission. Without it, a Jira user who hits the cap sees the
  * integration silently drop the request (the agent — which would otherwise
  * comment — never starts).
  *
@@ -427,7 +558,7 @@ export async function notifyJiraOnConcurrencyCap(task: TaskRecord): Promise<void
     await reportJiraIssueFailure(
       { cloudId, registryTableName },
       issueKey,
-      '❌ ABCA hit your concurrency limit — too many tasks running for your user. Wait for one to finish, then re-apply the trigger label.',
+      '⏸️ ABCA hit your concurrency limit — this task has been queued and will start automatically when a slot frees up. No action needed.',
     );
   } catch (err) {
     logger.warn('Jira concurrency-cap feedback failed (non-fatal)', {

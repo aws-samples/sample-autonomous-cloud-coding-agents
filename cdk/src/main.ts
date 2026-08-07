@@ -65,6 +65,15 @@ const excludeResourceTypes = [
   'AWS::Route53Resolver::ResolverQueryLoggingConfigAssociation',
 ];
 
+// TODO(#645): with three backends this single-valued tag is no longer an honest
+// statement of what a stack runs — a `--context compute_type=lambda-microvm`
+// deploy still provisions the AgentCore runtime, so every resource gets tagged
+// `compute_type=lambda-microvm` including the AgentCore ones. ADR-021
+// sub-decision 4 flags revisiting the semantics (e.g. a `compute_types` list).
+// Deliberately NOT changed here: retagging every resource in the stack is a
+// replacement-risk change of its own, and MicroVM spend is already attributable
+// through the per-resource `abca:compute-backend` tags the
+// LambdaMicrovmCompute construct applies.
 Tags.of(stack).add('compute_type', computeType, { excludeResourceTypes });
 
 const githubTagKeys = [

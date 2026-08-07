@@ -218,6 +218,34 @@ Immediate response (acceptance):
 
 Final metrics (PR URL, cost, turns, build status, etc.) appear in **container logs**, in **DynamoDB** when configured, and in the **REST API** for deployed tasks (`GET /v1/tasks/{task_id}` via the `bgagent` CLI or HTTP client).
 
+### AWS Lambda MicroVMs lifecycle hooks (ADR-021 P1)
+
+The same uvicorn process also serves the **Lambda MicroVMs** lifecycle hooks, on the same port (8080 — the port declared in the image's `hooks.port`). On that backend there is no `InvokeAgentRuntime` and no orchestrator→agent HTTP path at all: the task payload arrives as the `/run` hook body and nothing else dials in.
+
+**`POST /aws/lambda-microvms/runtime/v1/ready`** — Build hook. Returns `{"status": "ready"}` as soon as the server is up, which is the signal the service waits for before taking the snapshot. **Mandatory**, not optional: `CreateMicrovmImage` refuses an image that enables *any* lifecycle hook without `/ready`, and with the hook enabled but unserved every build fails with `Ready hook check failed: the application returned a client error (HTTP 4xx) response`.
+
+**`POST /aws/lambda-microvms/runtime/v1/run`** — Payload delivery. Validates the body, starts the pipeline in a background thread (the same `_extract_invocation_params` → `_spawn_background` path `/invocations` uses), and returns 200 inside the 1–60 s hook budget. Body:
+
+```json
+{
+  "microvmId": "microvm-b44b69d9-…",
+  "runHookPayload": "{\"agent_payload_s3_uri\": \"s3://bucket/<task_id>/payload.json\"}"
+}
+```
+
+`runHookPayload` is an opaque **string** the service passes through from `RunMicrovm`. ABCA's contract for it is one of two shapes, mirroring the ECS container env contract (`AGENT_PAYLOAD` / `AGENT_PAYLOAD_S3_URI`):
+
+| Envelope | When |
+|---|---|
+| `{"agent_payload": {…}}` | the whole orchestrator payload inline — only when it fits |
+| `{"agent_payload_s3_uri": "s3://bucket/key"}` | pointer to the payload in the platform payload bucket |
+
+The service caps `runHookPayload` at **4 096 bytes**, so the **pointer form is the normal one** — a hydrated payload is essentially always larger. Fetching it needs no new env var: the MicroVM execution role holds read-only access to that bucket and the URI carries bucket + key.
+
+Rejections are structured so they are readable in the MicroVM log group: `400 MICROVM_RUN_PAYLOAD_INVALID` (unusable envelope — retrying the same body cannot help), `500 MICROVM_RUN_PAYLOAD_UNREADABLE` (the S3 fetch failed), `400 TASK_RECORD_INCOMPLETE` (same validator and vocabulary as `/invocations`).
+
+`/validate` (build) and `/suspend`, `/resume`, `/terminate` (runtime) are deliberately **not** served — declaring a hook nothing answers fails the corresponding build or lifecycle transition, so the CDK construct declares exactly `/ready` + `/run`. `/terminate` and `/validate` land in P2; `/suspend` + `/resume` in P3 with the ComputeStrategy interface widening.
+
 ### Testing Server Mode Locally
 
 Use `run.sh --server` to build and start the server locally. It handles credentials, port mapping, and resource constraints automatically:
@@ -375,7 +403,7 @@ agent/
 │   ├── repo.py          Repository setup: clone, branch, git auth, mise trust/install/build/lint
 │   ├── shell.py         Shell utilities: log(), run_cmd(), redact_secrets(), slugify(), truncate()
 │   ├── telemetry.py     Metrics, disk usage, trajectory writer (_TrajectoryWriter with write_policy_decision)
-│   ├── server.py        FastAPI — async /invocations (background thread), /ping health check, heartbeat daemon; OTEL session correlation
+│   ├── server.py        FastAPI — async /invocations (background thread), /ping health check, MicroVM /ready + /run lifecycle hooks, heartbeat daemon; OTEL session correlation
 │   ├── task_state.py    Best-effort DynamoDB task status and heartbeat writes (no-op if TASK_TABLE_NAME unset)
 │   ├── observability.py OpenTelemetry helpers (e.g. AgentCore session id)
 │   ├── memory.py        Optional memory / episode integration for the agent

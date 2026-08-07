@@ -81,6 +81,12 @@ export const RESOURCE_ACTION_MAP: Record<string, readonly string[]> = {
   'AWS::Lambda::EventSourceMapping': ['lambda:CreateEventSourceMapping'],
   'AWS::Lambda::Function': ['lambda:CreateFunction'],
   'AWS::Lambda::LayerVersion': ['lambda:PublishLayerVersion'],
+  // ADR-021 lambda-microvm backend. Only synthesized under
+  // `--context compute_type=lambda-microvm`, so the default-context
+  // synth-coverage test never sees these — they are mapped anyway so the map
+  // stays a complete statement of what the bootstrap bundle must cover.
+  'AWS::Lambda::MicrovmImage': ['lambda:CreateMicrovmImage'],
+  'AWS::Lambda::NetworkConnector': ['lambda:CreateNetworkConnector'],
   'AWS::Logs::Delivery': ['logs:CreateDelivery'],
   'AWS::Logs::DeliveryDestination': ['logs:PutDeliveryDestination'],
   'AWS::Logs::DeliverySource': ['logs:PutDeliverySource'],
@@ -104,7 +110,7 @@ export const RESOURCE_ACTION_MAP: Record<string, readonly string[]> = {
  * Returns true when {@link allowedAction} covers {@link requiredAction}.
  * Supports service-level wildcards (e.g. `bedrock-agentcore:*`).
  */
-export function actionIsAllowed(requiredAction: string, allowedAction: string): boolean {
+function actionIsAllowed(requiredAction: string, allowedAction: string): boolean {
   if (allowedAction === requiredAction) {
     return true;
   }

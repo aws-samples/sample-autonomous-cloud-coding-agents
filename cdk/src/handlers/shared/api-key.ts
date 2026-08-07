@@ -27,7 +27,7 @@ import { API_KEY_SCOPES, type ApiKeyScope } from './types';
 export const API_KEY_PREFIX = 'bgak';
 
 /** Secret entropy per key (bytes; 256-bit). */
-export const API_KEY_SECRET_BYTES = 32;
+const API_KEY_SECRET_BYTES = 32;
 
 /** Number of underscore-delimited segments in a well-formed key. */
 const KEY_PART_COUNT = 3;
