@@ -54,6 +54,13 @@ const WEBHOOK_PROCESSOR_TIMEOUT_SECONDS = 120;
 /** Webhook-processor Lambda memory (MB). */
 const WEBHOOK_PROCESSOR_MEMORY_MB = 512;
 
+/** Remove-workspace Lambda timeout (seconds). 10s matches the sibling
+ *  link/webhook request handlers — the teardown is a bounded sequence
+ *  (registry lookup → registry revoke → secret delete → optional row purge).
+ *  The lookup scan is the only paginating phase, and it is bounded by the
+ *  registry's documented tens-of-rows scale, so 10s is comfortable. */
+const REMOVE_WORKSPACE_TIMEOUT_SECONDS = 10;
+
 /**
  * Properties for LinearIntegration construct.
  */
@@ -401,6 +408,42 @@ export class LinearIntegration extends Construct {
     });
     this.userMappingTable.grantReadWriteData(linkFn);
 
+    // --- Workspace removal (Cognito-authenticated, admin-only) ---
+    // Backs `bgagent linear remove-workspace <slug>`: revokes/purges the
+    // registry row and deletes the per-workspace OAuth secret. Keeping the
+    // DDB + Secrets Manager grants on this Lambda's role — not on every CLI
+    // user — is the whole point of routing removal through the API (see
+    // issue #306). Project mappings are intentionally NOT touched: mapping
+    // rows carry no workspace id, so they cannot be attributed to a
+    // workspace (removal is by project id).
+    const removeWorkspaceFn = new lambda.NodejsFunction(this, 'RemoveWorkspaceFn', {
+      entry: path.join(handlersDir, 'linear-remove-workspace.ts'),
+      handler: 'handler',
+      runtime: Runtime.NODEJS_24_X,
+      architecture: Architecture.ARM_64,
+      timeout: Duration.seconds(REMOVE_WORKSPACE_TIMEOUT_SECONDS),
+      environment: {
+        LINEAR_WORKSPACE_REGISTRY_TABLE_NAME: this.workspaceRegistryTable.tableName,
+      },
+      bundling: commonBundling,
+    });
+    this.workspaceRegistryTable.grantReadWriteData(removeWorkspaceFn);
+    // Delete the per-workspace OAuth secret created by the CLI at setup time
+    // (`bgagent-linear-oauth-<slug>`). The concrete name isn't known at synth
+    // time (operators add workspaces by slug at runtime), so scope to the
+    // documented prefix — same wildcard the webhook Lambdas already use.
+    removeWorkspaceFn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['secretsmanager:DeleteSecret'],
+      resources: [
+        Stack.of(this).formatArn({
+          service: 'secretsmanager',
+          resource: 'secret',
+          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+          resourceName: 'bgagent-linear-oauth-*',
+        }),
+      ],
+    }));
+
     // ═══════════════════════════════════════════════════════════════════════════
     // API Gateway Routes
     // ═══════════════════════════════════════════════════════════════════════════
@@ -420,6 +463,15 @@ export class LinearIntegration extends Construct {
     linkResource.addMethod(
       'POST',
       new apigw.LambdaIntegration(linkFn),
+      cognitoAuthOptions,
+    );
+
+    // DELETE /v1/linear/workspaces/{slug} — Cognito-authenticated, admin-only.
+    const workspacesResource = linear.addResource('workspaces');
+    const workspaceBySlug = workspacesResource.addResource('{slug}');
+    workspaceBySlug.addMethod(
+      'DELETE',
+      new apigw.LambdaIntegration(removeWorkspaceFn),
       cognitoAuthOptions,
     );
 
@@ -445,7 +497,7 @@ export class LinearIntegration extends Construct {
       },
     ]);
 
-    const allFunctions = [webhookFn, webhookProcessorFn, linkFn];
+    const allFunctions = [webhookFn, webhookProcessorFn, linkFn, removeWorkspaceFn];
     for (const fn of allFunctions) {
       NagSuppressions.addResourceSuppressions(fn, [
         {

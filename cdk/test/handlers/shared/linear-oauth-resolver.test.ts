@@ -149,6 +149,42 @@ describe('resolveLinearOauthToken', () => {
     expect(result).toBeNull();
   });
 
+  // Adversarial fail-closed guard for `bgagent linear remove-workspace` (#306):
+  // after a workspace is revoked (registry row flipped to status='revoked'),
+  // a request for that slug MUST NOT resolve to a usable token — even if a
+  // perfectly valid, non-expiring OAuth secret is still sitting in Secrets
+  // Manager. The status gate short-circuits BEFORE the secret is ever read,
+  // so a revoked workspace can never leak its token.
+  test('fail-closed: a revoked workspace is rejected without ever reading the secret', async () => {
+    const clients = makeFakeClients({
+      registryItem: {
+        workspace_slug: 'acme',
+        oauth_secret_arn: 'arn:secret:acme',
+        status: 'revoked',
+      },
+      // A fully valid, far-future token — the ONLY thing that should block
+      // resolution here is the revoked status.
+      storedToken: makeStoredToken({ access_token: 'lin_oauth_still_valid' }),
+    });
+    const result = await resolveLinearOauthToken('ws-uuid-1', REGISTRY_TABLE, clients);
+    expect(result).toBeNull();
+    // The secret must never be fetched for a revoked workspace.
+    expect(clients.smSend).not.toHaveBeenCalled();
+  });
+
+  test('control: the same secret DOES resolve when the workspace is active', async () => {
+    const clients = makeFakeClients({
+      registryItem: {
+        workspace_slug: 'acme',
+        oauth_secret_arn: 'arn:secret:acme',
+        status: 'active',
+      },
+      storedToken: makeStoredToken({ access_token: 'lin_oauth_still_valid' }),
+    });
+    const result = await resolveLinearOauthToken('ws-uuid-1', REGISTRY_TABLE, clients);
+    expect(result?.accessToken).toBe('lin_oauth_still_valid');
+  });
+
   test('returns null when secret JSON is missing required fields', async () => {
     const clients = makeFakeClients({
       registryItem: {

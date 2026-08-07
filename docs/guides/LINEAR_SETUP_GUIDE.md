@@ -286,9 +286,33 @@ Linear API rate limits per OAuth-installed app, per workspace: **5,000 requests/
 
 Linear access tokens expire in 24h. The webhook processor and orchestrator auto-refresh via the stored `refresh_token` and write the rotated token back to Secrets Manager. If Linear returns `invalid_grant` (a concurrent caller already refreshed), the resolver re-reads the secret and uses the freshly-rotated token.
 
-## Removing the integration
+## Removing a workspace
 
-Deactivate a project mapping:
+Deregister a workspace with a single command — the inverse of `setup` / `add-workspace`:
+
+```bash
+bgagent linear remove-workspace <slug>
+```
+
+This runs server-side (through an authenticated `DELETE /v1/linear/workspaces/{slug}` call, so the DynamoDB and Secrets Manager permissions stay on the API role, not on your local IAM identity) and by default:
+
+- Marks the registry row `status=revoked` (preserves the audit trail). The OAuth resolver fail-closes on any non-`active` status, so the workspace stops resolving tokens and routing webhooks the instant the command returns.
+- Deletes the per-workspace `bgagent-linear-oauth-<slug>` secret from Secrets Manager.
+
+Only the workspace **admin** — the platform user who ran `setup` / `add-workspace` for the slug — may remove it. You are prompted to re-type the slug before anything is torn down.
+
+Flags:
+
+- `--purge` — delete the registry row entirely instead of keeping it with `status=revoked` (drops the audit trail). The row is still revoked first (fail-closed) and is only hard-deleted after the OAuth secret is confirmed gone.
+- `--yes` — skip the slug-confirmation prompt (for scripted use).
+
+> **Project→repo mappings are not removed by this command.** Mapping rows carry no workspace identifier, so they cannot be attributed to a workspace. Remove a workspace's mappings by project id (see below).
+
+Then delete the Linear webhook from [Linear Settings → API](https://linear.app/settings/api) and uninstall the OAuth app from [Workspace Settings → Integrations](https://linear.app/settings/integrations) on the Linear side.
+
+### Deactivating a single project mapping
+
+To remove one project→repo mapping (the only supported way to tear a mapping down):
 
 ```bash
 aws dynamodb update-item \
@@ -299,7 +323,11 @@ aws dynamodb update-item \
   --expression-attribute-values '{":removed":{"S":"removed"}}'
 ```
 
-Revoke a workspace install:
+### Manual fallback
+
+If `remove-workspace` returns the `SECRET_DELETE_FAILED` error code, the workspace is already revoked (fail-closed, so it no longer resolves tokens or routes webhooks), but its OAuth secret was orphaned. The handler records this durably on the registry row: `secret_deletion_failed = true`, `secret_deletion_error` (the failing error name), and `orphaned_oauth_secret_arn` (the exact secret ARN to purge). When you see that marker — or the error code — run the `delete-secret` step below against `orphaned_oauth_secret_arn` to finish teardown.
+
+If the CLI is unavailable, you can revoke a workspace directly (equivalent to the default `remove-workspace` flow):
 
 ```bash
 aws secretsmanager delete-secret --secret-id bgagent-linear-oauth-<slug> --force-delete-without-recovery
@@ -311,5 +339,3 @@ aws dynamodb update-item \
   --expression-attribute-names '{"#s":"status"}' \
   --expression-attribute-values '{":revoked":{"S":"revoked"}}'
 ```
-
-Then delete the Linear webhook from [Linear Settings → API](https://linear.app/settings/api) and uninstall the OAuth app from [Workspace Settings → Integrations](https://linear.app/settings/integrations) on the Linear side.

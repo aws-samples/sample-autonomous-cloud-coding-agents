@@ -40,6 +40,7 @@ import {
   GetPoliciesResponse,
   JiraLinkResponse,
   LinearLinkResponse,
+  LinearRemoveWorkspaceResponse,
   NudgeRequest,
   NudgeResponse,
   SlackLinkResponse,
@@ -497,6 +498,24 @@ export class ApiClient {
     const body: Record<string, unknown> = { code };
     if (opts.dryRun) body.dry_run = true;
     const res = await this.request<SuccessResponse<LinearLinkResponse>>('POST', '/linear/link', body);
+    return res.data;
+  }
+
+  /** DELETE /linear/workspaces/{slug} — deregister a Linear workspace.
+   *
+   * Server-side: revokes the registry row (or deletes it with `purge`) and
+   * deletes the per-workspace OAuth secret. Admin-only, enforced by the
+   * handler against the recorded installer identity. Project→repo mappings
+   * are not touched (they carry no workspace id — remove by project id). */
+  async linearRemoveWorkspace(
+    slug: string,
+    opts: { purge?: boolean } = {},
+  ): Promise<LinearRemoveWorkspaceResponse> {
+    const params = new URLSearchParams();
+    if (opts.purge) params.set('purge', 'true');
+    const qs = params.toString();
+    const path = `/linear/workspaces/${encodeURIComponent(slug)}${qs ? `?${qs}` : ''}`;
+    const res = await this.request<SuccessResponse<LinearRemoveWorkspaceResponse>>('DELETE', path);
     return res.data;
   }
 
