@@ -27,6 +27,7 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
+import sharedConstants from '../../../contracts/constants.json';
 import { AgentMemory } from '../../src/constructs/agent-memory';
 import { AgentSessionRole } from '../../src/constructs/agent-session-role';
 import { DEFAULT_BEDROCK_MODEL_IDS } from '../../src/constructs/bedrock-models';
@@ -47,6 +48,9 @@ import {
   microvmNoIngressConnectorArn,
 } from '../../src/constructs/lambda-microvm-compute';
 import { LAMBDA_MICROVM_SUPPORTED_REGIONS } from '../../src/handlers/shared/microvm-regions';
+// The `/ready` budgets are a cross-language RELATIONSHIP, so the tests read the
+// same contract the construct and `agent/src/server.py` do — a literal here would
+// keep passing after someone lowered the real budget.
 
 const BASE_IMAGE_ARN = 'arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1';
 const GITHUB_TOKEN_SECRET_ARN =
@@ -236,8 +240,10 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
       // 300 s, not 60: since the P2-F5 fix /ready warms the 225 MiB `claude`
       // binary before the snapshot is captured, so it does real work whose
       // duration is a cold exec. Build hooks allow up to 3600 s, so a tight
-      // budget here would trade a runtime failure for a build failure.
-      ReadyTimeoutInSeconds: 300,
+      // budget here would trade a runtime failure for a build failure. Read from
+      // the contract, not re-typed: the value is half of the cross-language
+      // invariant `warmup_total < ready_hook` (see the dedicated test below).
+      ReadyTimeoutInSeconds: sharedConstants.microvm_hook_budgets.ready_hook_timeout_seconds,
       Validate: 'ENABLED',
       // Decoupled from /ready by that same change: /validate's checks are still
       // sub-millisecond, so its budget is sized only for the still-initialising
@@ -363,6 +369,30 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
       expect(value).toBeGreaterThanOrEqual(1);
       expect(value).toBeLessThanOrEqual(3_600);
     }
+  });
+
+  test("/ready's budget comes from the contract and outlasts the agent's warm-up", () => {
+    // The invariant that used to be asserted twice against two literals — a 300 in
+    // this tree and a 300 in `agent/tests/test_server.py`. Neither side could see
+    // the other, so lowering the hook budget would have silently made the agent's
+    // warm-up (P2-F5: warm the 225 MiB `claude` binary before the snapshot) unable
+    // to finish inside it, turning a runtime fix into a build failure. Both halves
+    // now live in `contracts/constants.json` → `microvm_hook_budgets`;
+    // `scripts/check-constants-sync.ts` enforces the ordering and bans a literal
+    // re-declaration on either side, and this test confirms the value the contract
+    // holds is the value that reaches CloudFormation.
+    const budgets = sharedConstants.microvm_hook_budgets;
+    const images = template.findResources('AWS::Lambda::MicrovmImage');
+    const imageHooks = Object.values(images)[0]!.Properties.Hooks.MicrovmImageHooks;
+
+    expect(imageHooks.ReadyTimeoutInSeconds).toBe(budgets.ready_hook_timeout_seconds);
+    expect(budgets.warmup_total_budget_seconds).toBeLessThan(budgets.ready_hook_timeout_seconds);
+    expect(budgets.warmup_required_timeout_seconds)
+      .toBeLessThan(budgets.warmup_total_budget_seconds);
+    // Real margin for uvicorn scheduling plus the request itself, not a rounding
+    // error — the same floor `agent/tests/test_server.py` asserts from its side.
+    expect(budgets.ready_hook_timeout_seconds - budgets.warmup_total_budget_seconds)
+      .toBeGreaterThanOrEqual(30);
   });
 
   test('bakes NO environment variables into the snapshot (ADR-021: no secrets in the image)', () => {
@@ -598,7 +628,9 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     //
     // The Lambda MicroVMs service presents NO source condition key when it assumes
     // these roles, so a trust policy carrying one is unassumable. Live 2026-08-06/07
-    // (`docs/verification/645-p2-smoke-runbook.md`), one root cause, two symptoms:
+    // (evidence inlined in ADR-021 §4; `docs/verification/645-p2-smoke-runbook.md`
+    // is the raw session log, additional detail rather than the sole proof), one
+    // root cause, two symptoms:
     // both network connectors CREATE_FAILED deterministically on a freshly deleted
     // stack (P2-F1), and RunMicrovm reported a MISLEADING caller-side
     // `iam:PassRole` AccessDenied on the orchestrator (P2-F3) — with the grant
@@ -606,10 +638,13 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     // boundary, and an unconditioned PassRole ALSO denied. Removing the execution
     // role's trust conditions made the next submission reach RUNNING in 6 s.
     //
-    // What compensates is asserted elsewhere in this file: these roles are only
-    // passable by the orchestrator (scoped `iam:PassRole` + `iam:PassedToService`,
-    // `test/constructs/task-orchestrator.test.ts`), and every resource they reach
-    // is account-scoped by ARN.
+    // What compensates is asserted elsewhere in this file and in
+    // `test/constructs/task-orchestrator.test.ts`: the EXECUTION role is passable by
+    // the orchestrator only, scoped to its EXACT ARN — and with NO
+    // `iam:PassedToService` condition either, because the same missing-context-key
+    // root cause blocks that path too (P2r2-F10), which is why the exact ARN is the
+    // whole of the scoping. Every resource these roles reach is account-scoped by
+    // ARN apart from two justified `Resource: '*'` statements.
     const roles = Object.entries(template.findResources('AWS::IAM::Role'))
       .filter(([id]) => id.includes('LambdaMicrovmComputeBuildRole')
         || id.includes('LambdaMicrovmComputeExecutionRole')

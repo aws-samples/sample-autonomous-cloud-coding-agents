@@ -468,19 +468,32 @@ def _log_claude_cli_version() -> None:
     timeout above is loose. Extracted from ``run_agent`` so the probe is assertable
     in a unit test without standing up the SDK client: this line, and only this
     line, is what failed every task on the MicroVM backend (P2-F5).
+
+    **Diagnostics-only means it cannot fail the task.** Raising the timeout to 60 s
+    made P2-F5 unlikely; it did not make it impossible, and a probe whose entire
+    output is a log line has no business propagating. So every failure mode of the
+    two ``subprocess.run`` calls is caught and downgraded to a ``WARN``:
+    ``TimeoutExpired`` (``SubprocessError``) for a still-hydrating binary,
+    ``FileNotFoundError`` / ``PermissionError`` (``OSError``) for a missing or
+    non-executable ``which``/``claude``. The real ``claude`` invocation happens
+    inside the SDK client below and still fails loudly — this line does not.
     """
-    cli_path = subprocess.run(
-        ["which", "claude"], capture_output=True, text=True, timeout=_WHICH_CLAUDE_TIMEOUT_S
-    )
-    if cli_path.returncode != 0:
-        log("WARN", "claude CLI not found on PATH")
+    try:
+        cli_path = subprocess.run(
+            ["which", "claude"], capture_output=True, text=True, timeout=_WHICH_CLAUDE_TIMEOUT_S
+        )
+        if cli_path.returncode != 0:
+            log("WARN", "claude CLI not found on PATH")
+            return
+        cli_ver = subprocess.run(
+            ["claude", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=_CLAUDE_VERSION_PROBE_TIMEOUT_S,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        log("WARN", f"claude CLI version probe failed (non-fatal): {type(exc).__name__}: {exc}")
         return
-    cli_ver = subprocess.run(
-        ["claude", "--version"],
-        capture_output=True,
-        text=True,
-        timeout=_CLAUDE_VERSION_PROBE_TIMEOUT_S,
-    )
     log("AGENT", f"claude CLI: {cli_path.stdout.strip()} version={cli_ver.stdout.strip()}")
 
 

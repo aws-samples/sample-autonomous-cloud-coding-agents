@@ -39,5 +39,10 @@
       "github_token_secret_arn",
       "agent_session_role_arn"
     ]
+  },
+  "microvm_hook_budgets": {
+    "ready_hook_timeout_seconds": 300,
+    "warmup_total_budget_seconds": 240,
+    "warmup_required_timeout_seconds": 120
   }
 }

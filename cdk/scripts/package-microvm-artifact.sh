@@ -112,7 +112,7 @@
 # intervention: that smoke needed a live IAM workaround, and the two defects behind
 # it (ADR-021 P2r2-F9 / P2r2-F10 — the `iam:PassedToService` condition on both
 # `iam:PassRole` paths) are fixed in source but not yet re-exercised live. Keep
- # production repos on compute_type=agentcore or ecs until a clean run is on record,
+# production repos on compute_type=agentcore or ecs until a clean run is on record,
 # and note that the CDK-managed image path additionally needs bootstrap policy
 # bundle >= 1.4.0 (see the banner after upload). The Dockerfile is the P2 tuned base
 # and is copied unmodified — further customization (e.g., Alpine adoption) would be

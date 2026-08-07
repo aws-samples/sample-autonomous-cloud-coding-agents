@@ -10,8 +10,11 @@ verified without spinning up the Claude Agent SDK client.
 from __future__ import annotations
 
 import asyncio
+import subprocess
 from typing import Any
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 import runner
 from models import TaskConfig
@@ -476,6 +479,47 @@ class TestClaudeCliVersionProbe:
         # No point exec'ing a binary `which` could not find — and no exception:
         # this is diagnostics, so it must never be the thing that fails a task.
         assert calls == [["which", "claude"]]
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            subprocess.TimeoutExpired(["claude", "--version"], 60),
+            FileNotFoundError(2, "No such file or directory", "claude"),
+            PermissionError(13, "Permission denied", "claude"),
+        ],
+        ids=["timeout", "missing-binary", "not-executable"],
+    )
+    def test_a_failing_version_call_warns_instead_of_killing_the_task(
+        self, monkeypatch, capfd, error
+    ):
+        # The other half of P2-F5. A looser timeout makes the 10 s failure unlikely,
+        # not impossible — and a probe whose entire output is a log line must not be
+        # able to end a task at turn 0 no matter how it fails.
+        def fake_run(argv, **_kwargs):
+            if argv[0] == "which":
+                return MagicMock(returncode=0, stdout="/usr/bin/claude\n")
+            raise error
+
+        monkeypatch.setattr(runner.subprocess, "run", fake_run)
+
+        _log_claude_cli_version()  # must not raise
+
+        out = capfd.readouterr().out
+        assert "claude CLI version probe failed (non-fatal)" in out
+        assert type(error).__name__ in out
+        # Degraded, not silent — and NOT reported as a successful probe.
+        assert "claude CLI:" not in out
+
+    def test_a_failing_path_lookup_also_only_warns(self, monkeypatch, capfd):
+        # `which` itself can be absent on a minimal image; same rule applies.
+        def fake_run(_argv, **_kwargs):
+            raise FileNotFoundError(2, "No such file or directory", "which")
+
+        monkeypatch.setattr(runner.subprocess, "run", fake_run)
+
+        _log_claude_cli_version()
+
+        assert "claude CLI version probe failed (non-fatal)" in capfd.readouterr().out
 
     def test_run_agent_invokes_the_cli_version_probe(self):
         sentinel = RuntimeError("stop after version probe")

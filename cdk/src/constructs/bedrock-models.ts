@@ -20,6 +20,24 @@
 import { Node } from 'constructs';
 
 /**
+ * The small/fast model the agent uses for cheap side-calls, as a BARE
+ * foundation-model id.
+ *
+ * Named separately from {@link DEFAULT_BEDROCK_MODEL_IDS} because it has a second
+ * consumer: the agent needs it as a runtime *value*
+ * (`ANTHROPIC_DEFAULT_HAIKU_MODEL`), not just as an IAM grant. Splicing it out of
+ * that list means the granted model and the delivered model id cannot drift — a
+ * mismatch would AccessDenied every Haiku call at run time while synth stayed
+ * green.
+ *
+ * Declared ABOVE the list rather than beside its inference-profile sibling below
+ * it because the list interpolates it: a `const` referenced before its
+ * declaration is a TDZ `ReferenceError` at module load, and re-inlining the
+ * literal into the list is exactly the drift this constant exists to prevent.
+ */
+export const DEFAULT_HAIKU_MODEL_ID = 'anthropic.claude-haiku-4-5-20251001-v1:0';
+
+/**
  * Single source of truth for the Bedrock **foundation-model IDs** the agent
  * runtime may invoke. Both grant sites — the AgentCore runtime in
  * `stacks/agent.ts` and the ECS task role in `constructs/ecs-agent-cluster.ts`
@@ -31,30 +49,6 @@ import { Node } from 'constructs';
  * hardening is preserved. Account-level Bedrock model access remains the outer
  * gate; this list only controls the IAM grant.
  */
-/**
- * The small/fast model the agent uses for cheap side-calls, as a BARE
- * foundation-model id.
- *
- * Named separately from the list below because it has a second consumer: the
- * agent needs it as a runtime *value* (`ANTHROPIC_DEFAULT_HAIKU_MODEL`), not just
- * as an IAM grant. Splicing it out of the list here means the granted model and
- * the delivered model id cannot drift — a mismatch would AccessDenied every
- * Haiku call at run time while synth stayed green.
- */
-export const DEFAULT_HAIKU_MODEL_ID = 'anthropic.claude-haiku-4-5-20251001-v1:0';
-
-/**
- * `ANTHROPIC_DEFAULT_HAIKU_MODEL` value delivered to the agent on every backend
- * (AgentCore runtime env, and `platform_config` for lambda-microvm).
- *
- * The **cross-region inference-profile** id, not the bare foundation-model id:
- * Claude 4.x cannot be invoked on-demand by bare id (400 "on-demand throughput
- * isn't supported"). The `us.` prefix matches how both grant sites derive their
- * inference-profile ARNs, so the value is always one of the granted profiles.
- * (`agent/src/runner.py` re-sets this at spawn time from the same value.)
- */
-export const DEFAULT_HAIKU_INFERENCE_PROFILE_ID = `us.${DEFAULT_HAIKU_MODEL_ID}`;
-
 export const DEFAULT_BEDROCK_MODEL_IDS: readonly string[] = [
   'anthropic.claude-sonnet-4-6',
   'anthropic.claude-opus-4-20250514-v1:0',
@@ -67,6 +61,18 @@ export const DEFAULT_BEDROCK_MODEL_IDS: readonly string[] = [
   'anthropic.claude-opus-4-8',
   DEFAULT_HAIKU_MODEL_ID,
 ];
+
+/**
+ * `ANTHROPIC_DEFAULT_HAIKU_MODEL` value delivered to the agent on every backend
+ * (AgentCore runtime env, and `platform_config` for lambda-microvm).
+ *
+ * The **cross-region inference-profile** id, not the bare foundation-model id:
+ * Claude 4.x cannot be invoked on-demand by bare id (400 "on-demand throughput
+ * isn't supported"). The `us.` prefix matches how both grant sites derive their
+ * inference-profile ARNs, so the value is always one of the granted profiles.
+ * (`agent/src/runner.py` re-sets this at spawn time from the same value.)
+ */
+export const DEFAULT_HAIKU_INFERENCE_PROFILE_ID = `us.${DEFAULT_HAIKU_MODEL_ID}`;
 
 /** CDK context key whose value (a string array) overrides the model set. */
 export const BEDROCK_MODELS_CONTEXT_KEY = 'bedrockModels';

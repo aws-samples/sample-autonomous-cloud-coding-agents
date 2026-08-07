@@ -252,14 +252,38 @@ Two networking facts the construct has to encode, both established live:
 
 - **Neither can the `iam:PassRole` grants carry an `iam:PassedToService` condition — same root cause, identity side (P2r2-F9 + P2r2-F10, live 2026-08-07 run 2).** An earlier revision of this ADR recorded the opposite, that the identity-side condition "was exonerated" by run 1's elimination. **That was a false negative**, and its cause is worth recording because it is a general trap: run 1 tested the conditioned grant by *adding* a temporary unconditioned `iam:PassRole` and watching the task still fail — but the temporary grant remained attached through the later submissions that succeeded, so the conditioned grant was never once tested against a working trust policy. A contaminated control.
 
-  Run 2 ran the clean experiment — same exact-ARN resource, same ~5-minute IAM settle, one variable:
+  Run 2 ran the clean experiment — same exact-ARN resource, same ~5-minute IAM settle, one variable. It removed the run-1 workaround **first** (submission 4: denied) and only then added the unconditioned grant back on the same resource (submission 5: `RUNNING`), which is the ordering run 1 got wrong:
 
   | Orchestrator `iam:PassRole` on the execution role | Result |
   |---|---|
   | exact ARN **+ `iam:PassedToService: lambda.amazonaws.com`** | **DENIED** (two independent submissions) |
   | exact ARN, **no condition** | **`RUNNING` in 9 s** |
 
-  And the same key blocks the *other* PassRole path, which run 1 never reached because the enum defect (P2-F2) stopped it earlier: CloudFormation could not pass the **build role** at `CreateMicrovmImage` under the bootstrap `infrastructure` policy's allowlisted `IAMPassRole` (`CREATE_FAILED`, `Service: LambdaMicrovms, Status Code: 403`), while the out-of-band `create-microvm-image` call passed the *same role* successfully with unconditioned operator credentials — the control that makes the denial caller-side rather than a trust problem. `simulate-principal-policy` answers `allowed` when the context key is supplied and `implicitDeny` without it, so the resource patterns are right and the condition is the variable.
+  The denial lands on the **caller**, which is what makes it so misleading — the statement names that exact ARN and `simulate-principal-policy` answers `allowed`:
+
+  ```
+  User: arn:aws:sts::<account>:assumed-role/backgroundagent-dev-TaskOrchestratorOrchestratorFn-…
+  is not authorized to perform: iam:PassRole on resource:
+  arn:aws:iam::<account>:role/backgroundagent-dev-LambdaMicrovmComputeExecutionRo-…
+  because no identity-based policy allows the iam:PassRole action
+  ```
+
+  And the same key blocks the *other* PassRole path, which run 1 never reached because the enum defect (P2-F2) stopped it earlier: CloudFormation could not pass the **build role** at `CreateMicrovmImage` under the bootstrap `infrastructure` policy's allowlisted `IAMPassRole`. Verbatim, so the diagnosis does not have to be taken on trust:
+
+  ```
+  LambdaMicrovmComputeImage…  CREATE_FAILED
+  User: arn:aws:sts::<account>:assumed-role/cdk-hnb659fds-cfn-exec-role-<account>-us-east-1/AWSCloudFormation
+  is not authorized to perform: iam:PassRole on resource:
+  arn:aws:iam::<account>:role/backgroundagent-dev-LambdaMicrovmComputeBuildRoleF0-…
+  because no identity-based policy allows the iam:PassRole action
+  (Service: LambdaMicrovms, Status Code: 403)
+  ```
+
+  Three pieces of evidence pin that to the *condition* rather than to a stale bootstrap or a wrong resource pattern:
+
+  1. the live `IaCRole-ABCA-Infrastructure` policy was byte-identical to this branch's `cdk/bootstrap/policies/infrastructure.json`, so `cdk bootstrap --force` would have changed nothing;
+  2. `aws iam simulate-principal-policy --policy-source-arn <cfn-exec-role> --action-names iam:PassRole --resource-arns <build-role-arn>` returned `allowed` **with** `--context-entries ContextKeyName=iam:PassedToService,ContextKeyValues=lambda.amazonaws.com,ContextKeyType=string` and `implicitDeny` with no context entry — so the resource pattern matches and the condition key is the only remaining variable;
+  3. the **control**: the out-of-band `create-microvm-image` call passed the *same build role* to the *same service* successfully, using operator credentials that carry no such condition. The role's trust is therefore fine and the denial is genuinely caller-side.
 
   So: **the Lambda MicroVMs service presents no usable value for `iam:PassedToService` on either PassRole path** (CloudFormation → build role at `CreateMicrovmImage`; orchestrator → execution role at `RunMicrovm`), exactly as it presents no `aws:SourceAccount` on the assume-role path. One root cause, two more symptoms. Both statements therefore drop the condition, and the fix is deliberately asymmetric so it stays contained:
 

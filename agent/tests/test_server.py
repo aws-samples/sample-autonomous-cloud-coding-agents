@@ -1161,9 +1161,22 @@ class TestMicrovmReadyWarmUpBudget:
             server._READY_WARMUP_REQUIRED_TIMEOUT_SECONDS
             < server._READY_WARMUP_TOTAL_BUDGET_SECONDS
         )
-        # READY_HOOK_TIMEOUT_SECONDS in cdk/src/constructs/lambda-microvm-compute.ts.
-        ready_hook_budget = 300
+        # Read from the contract, NOT re-declared here. `READY_HOOK_TIMEOUT_SECONDS`
+        # in `cdk/src/constructs/lambda-microvm-compute.ts` imports the same field,
+        # so this assertion compares the agent against the value the service is
+        # actually configured with — a hardcoded 300 would keep passing after
+        # someone lowered the real budget.
+        from shared_constants import SHARED_CONSTANTS
+
+        budgets = SHARED_CONSTANTS["microvm_hook_budgets"]
+        ready_hook_budget = budgets["ready_hook_timeout_seconds"]
         assert ready_hook_budget > server._READY_WARMUP_TOTAL_BUDGET_SECONDS
+        # Both agent-side constants come from that same block, so a single edit moves
+        # the pair rather than half of it.
+        assert budgets["warmup_total_budget_seconds"] == (server._READY_WARMUP_TOTAL_BUDGET_SECONDS)
+        assert budgets["warmup_required_timeout_seconds"] == (
+            server._READY_WARMUP_REQUIRED_TIMEOUT_SECONDS
+        )
         # Real margin, not a rounding error: enough for uvicorn scheduling plus the
         # request itself.
         assert ready_hook_budget - server._READY_WARMUP_TOTAL_BUDGET_SECONDS >= 30
@@ -1771,6 +1784,84 @@ class TestPlatformConfigContract:
             server._validate_platform_config_contract()
 
 
+class TestHookBudgetContract:
+    """The `/ready` budgets are a RELATIONSHIP, so the contract owns both halves.
+
+    ``warmup_required < warmup_total < ready_hook``: the agent's warm-up must finish
+    inside the budget the MicroVM service holds the hook to, or the P2-F5 fix (warm
+    the 225 MiB ``claude`` binary before the snapshot) trades a runtime failure for a
+    build failure. Neither side can enforce an ordering it only knows half of, which
+    is why ``READY_HOOK_TIMEOUT_SECONDS`` in the CDK construct and these two
+    constants read the same block. ``scripts/check-constants-sync.ts`` is the other
+    tripwire; this validator makes the same violation fail the IMAGE BUILD (uvicorn
+    never binds, so ``/ready`` never answers) rather than a task.
+    """
+
+    def test_budgets_are_sourced_from_the_shared_contract(self):
+        from shared_constants import SHARED_CONSTANTS
+
+        budgets = SHARED_CONSTANTS["microvm_hook_budgets"]
+        assert budgets["warmup_total_budget_seconds"] == server._READY_WARMUP_TOTAL_BUDGET_SECONDS
+        assert (
+            budgets["warmup_required_timeout_seconds"]
+            == server._READY_WARMUP_REQUIRED_TIMEOUT_SECONDS
+        )
+
+    def test_the_shipped_contract_satisfies_its_own_invariant(self):
+        server._validate_hook_budget_contract()
+
+    @pytest.mark.parametrize(
+        "budgets,match",
+        [
+            (
+                {
+                    "ready_hook_timeout_seconds": 300,
+                    "warmup_total_budget_seconds": 300,
+                    "warmup_required_timeout_seconds": 120,
+                },
+                "must be < ready_hook_timeout_seconds",
+            ),
+            (
+                {
+                    "ready_hook_timeout_seconds": 300,
+                    "warmup_total_budget_seconds": 240,
+                    "warmup_required_timeout_seconds": 240,
+                },
+                "must be < warmup_total_budget_seconds",
+            ),
+            (
+                {
+                    "ready_hook_timeout_seconds": 0,
+                    "warmup_total_budget_seconds": 240,
+                    "warmup_required_timeout_seconds": 120,
+                },
+                "must be a positive integer",
+            ),
+            (
+                {
+                    "ready_hook_timeout_seconds": 300,
+                    "warmup_total_budget_seconds": "240",
+                    "warmup_required_timeout_seconds": 120,
+                },
+                "must be a positive integer",
+            ),
+            (
+                {
+                    "ready_hook_timeout_seconds": 300,
+                    "warmup_total_budget_seconds": 240,
+                    "warmup_required_timeout_seconds": None,
+                },
+                "warmup_required_timeout_seconds must be a positive integer",
+            ),
+        ],
+        ids=["total-equals-hook", "required-equals-total", "zero", "string", "missing"],
+    )
+    def test_a_contract_that_cannot_hold_fails_the_image_build(self, monkeypatch, budgets, match):
+        monkeypatch.setattr(server, "_HOOK_BUDGETS", budgets)
+        with pytest.raises(ValueError, match=match):
+            server._validate_hook_budget_contract()
+
+
 class TestInstallPlatformConfig:
     """Installing into ``os.environ`` is an env-injection surface — fail closed."""
 
@@ -2007,7 +2098,13 @@ class TestMicrovmRunHookPlatformConfig:
         r = client.post(RUN_HOOK, json=_run_hook_body({"agent_payload": self._payload()}))
 
         assert r.status_code == 200
-        assert "no platform_config" in capfd.readouterr().out
+        # Still pre-install (nothing was installed), so the warning is stdout-only:
+        # `_warn_cw` here would spawn the CloudWatch thread off the snapshot's own
+        # baked env — the very thing it is warning about. See `TestMicrovmRunHook
+        # PreInstallAwsSilence`.
+        assert "[server/run-pre-config] /run hook received no platform_config" in (
+            capfd.readouterr().out
+        )
 
     def test_s3_pointer_takes_the_config_from_the_outer_envelope(
         self, client, monkeypatch, env_guard
@@ -2524,22 +2621,47 @@ class TestMicrovmRunHookPreInstallAwsSilence:
 
     @pytest.fixture
     def seam_guard(self, monkeypatch):
-        """Arm every AWS/credential seam to raise until the install has SUCCEEDED.
+        """Arm every AWS/credential seam to raise until the pre-install phase is OVER.
 
-        The flag flips only on a successful ``_install_platform_config`` — so on a
-        rejection path the seams stay armed for the whole request, which is exactly
-        the property to assert there (a rejected run installed nothing, so it has
-        no more right to an AWS call than it had before).
+        Two things end that phase, and only two:
+
+        * ``_install_platform_config`` returning a **non-empty** env list — a real
+          install. Flipping on *any* return would be a hole big enough to drive B2
+          through: the ``raw is None`` early return installs nothing and returns
+          ``[]``, so treating it as "installed" disarms the guard for the entire
+          legacy no-``platform_config`` path — which is exactly where a ``_warn_cw``
+          was spawning the CloudWatch thread off the snapshot's baked env.
+        * ``_extract_invocation_params`` being entered. Past that point the legacy
+          path is *allowed* to talk to AWS: running on the snapshot's own env is the
+          documented P1-compatibility behaviour, so the accepted-line ``_debug_cw``
+          and the pipeline below it are legitimate. Everything the handler does
+          *before* it — including the "no platform_config" warning — is not.
+
+        A rejection path reaches neither, so the seams stay armed for the whole
+        request: a rejected run installed nothing and has no more right to an AWS
+        call than it had before.
         """
-        state: dict[str, Any] = {"install_phase_done": False, "violations": []}
+        state: dict[str, Any] = {
+            "install_phase_done": False,
+            "installed_env": None,
+            "violations": [],
+        }
         real_install = server._install_platform_config
+        real_extract = server._extract_invocation_params
 
         def spy_install(raw):
             result = real_install(raw)
-            state["install_phase_done"] = True
+            state["installed_env"] = result
+            if result:
+                state["install_phase_done"] = True
             return result
 
+        def spy_extract(*args, **kwargs):
+            state["install_phase_done"] = True
+            return real_extract(*args, **kwargs)
+
         monkeypatch.setattr(server, "_install_platform_config", spy_install)
+        monkeypatch.setattr(server, "_extract_invocation_params", spy_extract)
 
         def guard(name):
             def _seam(*_args, **_kwargs):
@@ -2574,22 +2696,38 @@ class TestMicrovmRunHookPreInstallAwsSilence:
         monkeypatch.setenv("LOG_GROUP_NAME", "/abca/agent")
         return state
 
+    @pytest.mark.parametrize("with_config", [True, False], ids=["with-config", "no-config"])
     def test_no_cloudwatch_or_credential_seam_is_touched_before_the_install(
-        self, client, monkeypatch, env_guard, seam_guard
+        self, client, monkeypatch, env_guard, seam_guard, capfd, with_config
     ):
+        # The ``no-config`` arm is the legacy P1 envelope, and it is the harder case:
+        # nothing is ever installed, so EVERY line up to param extraction — including
+        # the "running on the snapshot's frozen env" warning itself — is still
+        # pre-install. A ``_warn_cw`` there would spawn the CloudWatch writer thread
+        # and pin ``boto3.DEFAULT_SESSION`` off the baked ``LOG_GROUP_NAME`` this
+        # fixture sets, which is precisely the defect the warning is reporting.
         monkeypatch.setattr(server, "run_task", MagicMock())
         monkeypatch.setattr(server.task_state, "write_terminal", MagicMock())
 
-        r = client.post(
-            RUN_HOOK,
-            json=_run_hook_body(
-                {"agent_payload": self._payload(), "platform_config": _platform_config()}
-            ),
-        )
+        envelope: dict[str, Any] = {"agent_payload": self._payload()}
+        if with_config:
+            envelope["platform_config"] = _platform_config()
+
+        r = client.post(RUN_HOOK, json=_run_hook_body(envelope))
 
         assert r.status_code == 200
         assert seam_guard["violations"] == []
         assert seam_guard["install_phase_done"] is True
+        if with_config:
+            assert seam_guard["installed_env"]
+        else:
+            # Vacuously "installed": the early return the flag must NOT trust.
+            assert seam_guard["installed_env"] == []
+            # The warning still reaches an operator — stdout, via the pre-install sink.
+            assert (
+                "[server/run-pre-config] /run hook received no platform_config"
+                in capfd.readouterr().out
+            )
 
     def test_the_received_line_is_stdout_only(
         self, client, monkeypatch, env_guard, seam_guard, capfd

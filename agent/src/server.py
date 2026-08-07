@@ -933,6 +933,56 @@ def _validate_platform_config_contract() -> None:
 _validate_platform_config_contract()
 
 
+#: MicroVM lifecycle-hook budgets, shared with the CDK construct that declares them.
+#:
+#: ``contracts/constants.json`` → ``microvm_hook_budgets``. The agent's ``/ready``
+#: warm-up ceiling and the service-side ``/ready`` hook timeout
+#: (``READY_HOOK_TIMEOUT_SECONDS`` in
+#: ``cdk/src/constructs/lambda-microvm-compute.ts``) are not two independent
+#: numbers: the warm-up must finish inside the hook budget or a fix for a runtime
+#: failure becomes a build failure. An invariant between two values cannot be
+#: enforced from one side, so both live in the contract and
+#: ``scripts/check-constants-sync.ts`` asserts ``warmup_total < ready_hook`` and
+#: rejects a literal re-declaration on either side.
+_HOOK_BUDGETS: dict[str, int] = SHARED_CONSTANTS["microvm_hook_budgets"]
+
+
+def _validate_hook_budget_contract() -> None:
+    """Fail-fast on a ``microvm_hook_budgets`` block that cannot hold.
+
+    Import time, so a contract whose warm-up no longer fits inside the hook budget
+    fails the IMAGE BUILD rather than producing a ``/ready`` that times out — the
+    same posture as :func:`_validate_platform_config_contract`.
+    """
+    where = "contracts/constants.json: microvm_hook_budgets"
+    for name in ("ready_hook_timeout_seconds", "warmup_total_budget_seconds"):
+        value = _HOOK_BUDGETS.get(name)
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise ValueError(f"{where}.{name} must be a positive integer, got {value!r}")
+    required = _HOOK_BUDGETS.get("warmup_required_timeout_seconds")
+    if not isinstance(required, int) or isinstance(required, bool) or required <= 0:
+        raise ValueError(
+            f"{where}.warmup_required_timeout_seconds must be a positive integer, got {required!r}"
+        )
+    if _HOOK_BUDGETS["warmup_total_budget_seconds"] >= _HOOK_BUDGETS["ready_hook_timeout_seconds"]:
+        raise ValueError(
+            f"{where}: warmup_total_budget_seconds "
+            f"({_HOOK_BUDGETS['warmup_total_budget_seconds']}) must be < "
+            f"ready_hook_timeout_seconds ({_HOOK_BUDGETS['ready_hook_timeout_seconds']}) — "
+            "/ready has to answer inside the hook budget."
+        )
+    if required >= _HOOK_BUDGETS["warmup_total_budget_seconds"]:
+        raise ValueError(
+            f"{where}: warmup_required_timeout_seconds ({required}) must be < "
+            f"warmup_total_budget_seconds "
+            f"({_HOOK_BUDGETS['warmup_total_budget_seconds']}) — the required command "
+            "must leave the optional ones something to share."
+        )
+
+
+_validate_hook_budget_contract()
+
+
 class _PlatformConfigError(Exception):
     """A ``platform_config`` block the agent refuses to install (fail closed).
 
@@ -1304,20 +1354,25 @@ _READY_WARMUP_OPTIONAL: tuple[tuple[str, ...], ...] = (
 #: image build (twice per image — one build per chipset). A cold 225 MiB ``exec``
 #: is exactly the operation whose duration nobody here can predict, which is the
 #: whole lesson of P2-F5, where a tight bound on a version probe cost every task.
-_READY_WARMUP_REQUIRED_TIMEOUT_SECONDS = 120
+#:
+#: Contract-sourced (see :data:`_HOOK_BUDGETS`) so that it, the total ceiling and
+#: the CDK hook budget are one edit rather than three.
+_READY_WARMUP_REQUIRED_TIMEOUT_SECONDS: int = _HOOK_BUDGETS["warmup_required_timeout_seconds"]
 
 #: Ceiling for the WHOLE warm-up (required + every optional), in seconds.
 #:
-#: The hook's own budget is 300 s (``READY_HOOK_TIMEOUT_SECONDS`` in
-#: ``cdk/src/constructs/lambda-microvm-compute.ts``), so this leaves ~60 s of
-#: margin for uvicorn scheduling and the request itself. That margin is the point:
-#: per-command budgets do NOT compose — three commands at 120 s each is 360 s,
-#: which would blow a 300 s hook budget and turn a warm-up meant to prevent a
-#: runtime failure into a build failure. So the required command takes its own
-#: 120 s and the optional ones SHARE whatever is left of this ceiling, meaning the
-#: warm-up's worst case is bounded by one number that can be compared against the
-#: hook budget by eye.
-_READY_WARMUP_TOTAL_BUDGET_SECONDS = 240
+#: The hook's own budget (``READY_HOOK_TIMEOUT_SECONDS`` in
+#: ``cdk/src/constructs/lambda-microvm-compute.ts``) comes from the SAME contract
+#: block, and this ceiling must stay strictly below it — ``/ready`` has to answer
+#: inside the hook budget, and the margin covers uvicorn scheduling plus the
+#: request itself. That margin is the point: per-command budgets do NOT compose —
+#: three commands at 120 s each is 360 s, which would blow a 300 s hook budget and
+#: turn a warm-up meant to prevent a runtime failure into a build failure. So the
+#: required command takes its own budget and the optional ones SHARE whatever is
+#: left of this ceiling, meaning the warm-up's worst case is bounded by one number
+#: that can be compared against the hook budget by eye — and by
+#: ``scripts/check-constants-sync.ts``, which rejects a contract where it is not.
+_READY_WARMUP_TOTAL_BUDGET_SECONDS: int = _HOOK_BUDGETS["warmup_total_budget_seconds"]
 
 #: Below this many seconds of remaining budget an optional warm-up is skipped
 #: rather than started: a sub-second timeout cannot warm a large binary, it can
@@ -1444,10 +1499,10 @@ def microvm_ready():
     time costs one build instead of every task.
 
     The whole warm-up is bounded by
-    :data:`_READY_WARMUP_TOTAL_BUDGET_SECONDS` (240 s), which sits inside the
-    hook's own 300 s budget with margin to spare — the required command takes its
-    own 120 s and the best-effort ones share the remainder, so this handler cannot
-    talk itself past the deadline the service is holding it to.
+    :data:`_READY_WARMUP_TOTAL_BUDGET_SECONDS`, which the shared contract keeps
+    strictly inside the hook's own budget with margin to spare — the required
+    command takes its own share and the best-effort ones split the remainder, so
+    this handler cannot talk itself past the deadline the service is holding it to.
 
     Makes ZERO AWS calls, including its own logging (``_build_hook_log``): this
     runs under the build role, and a client built here would freeze a build-time
@@ -1494,7 +1549,10 @@ _MIN_PYTHON_VERSION = (3, 13)
 
 # Set once, as the LAST statement of this module. ``/validate`` reports 503 until
 # then: it is the only honest "still initialising" signal available to a build
-# hook, and it stays honest if a future refactor adds warm-up work at import.
+# hook. Unreachable in practice today (uvicorn accepts no request until the import
+# completes) — it is a tripwire for the refactor that moves warm-up work behind the
+# bind, at which point the flag is the difference between a 503 and a snapshot
+# reported valid while still initialising. See ``microvm_validate``.
 _module_initialized = False
 
 
@@ -1538,6 +1596,17 @@ def microvm_validate():
     module has not finished initialising, per the hook contract's
     still-initialising semantics; a permanently failing check therefore fails the
     image build, which is the correct outcome for a genuinely broken snapshot.
+
+    **The 503 branch is a REFACTOR TRIPWIRE, not a reachable state today.**
+    ``_module_initialized`` is set as the last statement of this module and uvicorn
+    does not accept a request until the import completes, so under the current
+    import-time-only initialisation the check cannot be observed False from a real
+    hook call. It is kept because that is a property of *how the module happens to
+    initialise*, not of the contract: the moment anyone moves warm-up work behind
+    the bind — a lifespan startup task, a lazily-built cache, a thread the first
+    request has to wait on — the honest answer becomes 503, and a hook that had
+    only a 200 path would report a broken snapshot as a valid one. Cheap to keep,
+    silently wrong to delete.
 
     Baked-secret detection is REPORT-ONLY (``warnings``): the build environment's
     own credentials may legitimately be in this process's env, so failing here
@@ -1626,13 +1695,18 @@ async def microvm_terminate(request: Request):
         _emit_stdout_line(f"[server/warn] /terminate hook could not read its body: {exc!r}")
     microvm_id = _parse_terminate_microvm_id(raw)
 
-    active = 0
+    # `None`, not `0`: if the thread-count read below raises, "we could not tell"
+    # must not be reported as the confident "nothing was running" — the one reading
+    # an operator would use to conclude a clean teardown.
+    active: int | None = None
     try:
         with _threads_lock:
             active = sum(1 for t in _active_threads if t.is_alive())
         # Final structured line. Fire-and-forget CloudWatch (LOG_GROUP_NAME is
-        # present at runtime because /run installed it) so a terminated MicroVM
-        # leaves a last breadcrumb in the task's log group; stdout regardless.
+        # present at runtime when the orchestrator delivered it via /run's
+        # platform_config; on the legacy no-config path `_debug_cw` degrades to
+        # stdout) so a terminated MicroVM leaves a last breadcrumb in the task's log
+        # group; stdout regardless.
         #
         # `microvm_id` is normally `""` here — that is what the service sends on
         # this hook (P2-F8, see `_parse_terminate_microvm_id`), not a parse
@@ -1755,11 +1829,18 @@ def microvm_run(request: Request, body: MicrovmRunHookRequest):
             task_id=task_id_log or None,
         )
     else:
-        _warn_cw(
+        # STILL pre-install: nothing was installed, so this branch has exactly the
+        # rights the lines above it had — stdout only. A `_warn_cw` here would spawn
+        # the CloudWatch writer thread and pin `boto3.DEFAULT_SESSION` off the
+        # snapshot's baked env, which is the very defect this compatibility branch is
+        # reporting. The warning is not lost: on the intended deployment (no baked
+        # `LOG_GROUP_NAME`) `_warn_cw` would have degraded to this same stdout line,
+        # and on a legacy image the log group would be the wrong one anyway.
+        _pre_config_log(
             "/run hook received no platform_config; running on the image snapshot's "
             "own environment, which is frozen at build time. Expected only from an "
-            "orchestrator that predates ADR-021 P2.",
-            task_id=task_id_log or None,
+            "orchestrator that predates ADR-021 P2."
+            + (f" task_id={task_id_log!r}" if task_id_log else "")
         )
 
     try:

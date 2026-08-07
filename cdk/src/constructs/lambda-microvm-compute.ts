@@ -26,6 +26,12 @@ import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
+// Cross-language contract (S9): `microvm_hook_budgets` couples THIS construct's
+// `/ready` hook timeout to the agent's own warm-up ceiling in
+// `agent/src/server.py`. Imported (not copied) so `tsc` fails on a renamed field,
+// and `scripts/check-constants-sync.ts` enforces the `warmup_total < ready_hook`
+// invariant plus the no-literal-redeclaration rule on both sides. See
+// `contracts/constants.md`.
 // Single source of truth for the supported-Region list. ADR-021's
 // `microvm-regions.ts` header is explicit that the list "is the ONLY place the
 // list is declared — do not copy it", so the synth-time gate IMPORTS it rather
@@ -35,6 +41,7 @@ import { Construct } from 'constructs';
 import { AgentMemory } from './agent-memory';
 import { AgentSessionRole } from './agent-session-role';
 import { resolveBedrockModelIds } from './bedrock-models';
+import sharedConstants from '../../../contracts/constants.json';
 import { LAMBDA_MICROVM_SUPPORTED_REGIONS, isLambdaMicrovmRegionSupported } from '../handlers/shared/microvm-regions';
 
 /**
@@ -181,16 +188,21 @@ const RUN_HOOK_TIMEOUT_SECONDS = 60;
  * budget is only how long the service waits before calling a permanently-wedged
  * snapshot broken.
  *
- * The number is chosen against the agent's own warm-up ceiling, not guessed:
- * `_READY_WARMUP_TOTAL_BUDGET_SECONDS` in `agent/src/server.py` bounds the WHOLE
- * warm-up (required command + every best-effort one, which share the remainder) at
- * **240 s**, leaving ~60 s here for uvicorn scheduling and the request itself.
- * Per-command timeouts deliberately do NOT compose on the agent side — three
- * commands at 120 s each would be 360 s and would blow this budget, turning a fix
- * for a runtime failure into a build failure. If that ceiling moves, move this
- * with it.
+ * The number is chosen against the agent's own warm-up ceiling, not guessed — and
+ * it is not declared here either. Both this budget and the agent's
+ * `_READY_WARMUP_TOTAL_BUDGET_SECONDS` come from `contracts/constants.json` →
+ * `microvm_hook_budgets`, because the relationship between them is the invariant
+ * that matters and a relationship cannot be enforced from one side. The agent's
+ * ceiling bounds the WHOLE warm-up (required command + every best-effort one,
+ * which share the remainder) at 240 s, leaving ~60 s here for uvicorn scheduling
+ * and the request itself. Per-command timeouts deliberately do NOT compose on the
+ * agent side — three commands at 120 s each would be 360 s and would blow this
+ * budget, turning a fix for a runtime failure into a build failure.
+ * `scripts/check-constants-sync.ts` fails the build if the contract ever stops
+ * satisfying `warmup_total < ready_hook`, so the two numbers cannot drift apart in
+ * a single-sided edit.
  */
-const READY_HOOK_TIMEOUT_SECONDS = 300;
+const READY_HOOK_TIMEOUT_SECONDS = sharedConstants.microvm_hook_budgets.ready_hook_timeout_seconds;
 
 /**
  * `/validate` build-hook budget (seconds).
@@ -905,77 +917,23 @@ export class LambdaMicrovmCompute extends Construct {
     // is the correct principal — there is no `microvms.lambda.amazonaws.com`, and
     // using one is rejected at role-creation time with MalformedPolicyDocument.
     //
-    // **`aws:SourceAccount` is deliberately absent, and this is NOT an oversight.**
-    // The Lambda MicroVMs service does not populate ANY source condition key when
-    // it assumes these roles, so a trust policy carrying one is simply
-    // unassumable. Live 2026-08-06/07 (`docs/verification/645-p2-smoke-runbook.md`,
-    // P2-F1 + P2-F3 — one root cause, two symptoms):
+    // ⚠️ **`aws:SourceAccount`/`aws:SourceArn` are deliberately absent. Adding one
+    // back re-breaks the deploy.** The Lambda MicroVMs service populates NO source
+    // condition key when it assumes these roles, so a trust policy carrying one is
+    // unassumable: both network connectors CREATE_FAILED deterministically, and
+    // `RunMicrovm` surfaced the same root cause as a misleading caller-side
+    // `iam:PassRole` denial on the orchestrator. Removing the conditions fixed both
+    // within seconds. This looks like a regression to anyone applying the standard
+    // confused-deputy pattern — and it already WAS one in the other direction: P1's
+    // working probe had no conditions, and the P1 F2 fix added them "to mirror the
+    // build/execution roles". `sts:TagSession` stays; it was never implicated.
     //
-    //  - Both `AWS::Lambda::NetworkConnector` resources CREATE_FAILED,
-    //    deterministically, on a freshly deleted stack: "The service is unable to
-    //    assume the provided NetworkConnectorOperatorRole. Please verify the trust
-    //    policy on the role." Removing the condition → both connectors created
-    //    within a second. (That message is also the classic IAM-propagation
-    //    symptom, which is why the determinism matters: a re-run is the obvious
-    //    and wrong first guess.)
-    //  - `RunMicrovm` failed with a MISLEADING `iam:PassRole` AccessDenied on the
-    //    CALLER (the orchestrator), even though the orchestrator's grant was
-    //    present, `simulate-principal-policy` said `allowed`, an unconditioned
-    //    `iam:PassRole` was also denied, and there was no permissions boundary.
-    //    The real cause was the EXECUTION role's trust: removing the conditions
-    //    made the next submission reach `RUNNING` in 6 s. So the service reports a
-    //    role it cannot pass-and-assume as a caller-side PassRole denial.
-    //
-    // The irony worth recording, because it is how the regression got here: P1's
-    // standalone-validated operator-role probe trusted `lambda.amazonaws.com` with
-    // NO conditions and worked. The P1 F2 fix then wrote "trust mirrors the
-    // build/execution roles (`lambda.amazonaws.com` + `aws:SourceAccount`)" — and
-    // that mirroring is exactly what broke it. Consistency with the wrong sibling.
-    //
-    // `sts:TagSession` stays (see {@link grantTagSession}) on the build and
-    // execution roles: the service needs both actions, and it was never the
-    // problem. `aws:SourceArn` stays out for the same reason plus its own (the
-    // image does not exist yet at build time, and the docs disagree about the ARN
-    // separator).
-    //
-    // COMPENSATING CONTROLS, since the confused-deputy condition is not available.
-    // Enumerated PER ROLE. The deployment-role's shared IAMPassRole grant is
-    // NAME-PREFIX-scoped (`role/backgroundagent-dev-*` + passed-to-service allowlist),
-    // so it technically covers the execution role too; in practice the orchestrator
-    // is the only principal that requests it (CloudFormation never requests it).
-    // The other two are passed TO the deployment role, NOT TO the roles themselves.
-    //
-    // 1. Who can pass each role to `lambda.amazonaws.com`:
-    //      - `executionRole` — the ORCHESTRATOR only, at `RunMicrovm`, via an
-    //        `iam:PassRole` scoped to this role's EXACT ARN (no service condition)
-    //        (`task-orchestrator.ts`, sid `MicrovmPassExecutionRole`). The referenced
-    //        comment in that function contains the authoritative two-arm experiment
-    //        table and evidence that the condition is the true blocker (not missing
-    //        permissions or stale bootstrap).
-    //      - `buildRole` — the CLOUDFORMATION DEPLOYMENT ROLE, at
-    //        `CreateMicrovmImage` (this L1's `buildRoleArn`), via the bootstrap
-    //        `infrastructure` policy's `IAMPassRole`; plus any operator running
-    //        `package-microvm-artifact.sh --create-image` with their own credentials.
-    //      - `connectorOperatorRole` — the CLOUDFORMATION DEPLOYMENT ROLE, at
-    //        connector create/update, via that same statement.
-    //     That deploy-role grant is NAME-PREFIX-scoped (`role/backgroundagent-dev-*`
-    //     + the `iam:PassedToService` allowlist), not per-role, so it does not
-    //     distinguish these three from each other or from any other stack role. It
-    //     is the pre-existing bootstrap posture, and a trust condition here would
-    //     never have constrained the deploy role anyway.
-    //  2. Every resource these roles can reach is account-scoped by ARN EXCEPT two
-    //     deliberate `Resource: '*'` statements, both justified in the cdk-nag IAM5
-    //     suppressions at the bottom of this constructor: `ec2:DescribeAvailability
-    //     Zones` on the execution role (no resource-level scoping exists; read-only)
-    //     and the operator role's ENI/tag/private-IP statement (the ENI does not
-    //     exist yet at authorization time). The Logs grants are PREFIX-scoped
-    //     (`MICROVM_LOG_GROUP_PREFIX/*` plus one named log group) — wildcards inside
-    //     a namespace, not `*`. (The orchestrator's `lambda:PassNetworkConnector` is
-    //     `*` too, for a different and unavoidable reason: the AWS-managed
-    //     connectors live in the `aws` account. See `task-orchestrator.ts`.)
-    //  3. The roles hold no `iam:*`, no cross-account trust, and the only
-    //     `sts:AssumeRole` any of them has is the execution role's, scoped to the
-    //     per-task SessionRole.
+    // ADR-021 §4 is authoritative for the rest: the live evidence (P2-F1 / P2-F3,
+    // verbatim failures, the two-arm PassRole experiment, the contaminated control
+    // that produced run 1's false negative), the per-role compensating-controls
+    // table, and the conditions under which the condition could be restored. The
+    // trust shape here is asserted by `test/constructs/lambda-microvm-compute.test.ts`
+    // ("NO source-key condition on any MicroVM-facing role trust").
     const microvmAssumedBy = new iam.ServicePrincipal('lambda.amazonaws.com');
     this.connectorOperatorRole = new iam.Role(this, 'ConnectorOperatorRole', {
       assumedBy: microvmAssumedBy,
@@ -1110,9 +1068,10 @@ export class LambdaMicrovmCompute extends Construct {
     //
     // TRUST POLICY: all three MicroVM-facing roles share `microvmAssumedBy` —
     // the BARE `lambda.amazonaws.com` service principal, with NO source
-    // conditions. The full decision, the live evidence that forced it (P2-F1 /
-    // P2-F3) and the compensating controls are documented at that constant's
-    // declaration, above the connector operator role that needs it first. The
+    // conditions. The warning and the pointer live at that constant's
+    // declaration, above the connector operator role that needs it first; ADR-021
+    // §4 carries the evidence (P2-F1 / P2-F3) and the per-role compensating
+    // controls. The
     // build and execution roles additionally need `sts:TagSession` alongside
     // `sts:AssumeRole` (developer guide, "Trust policies"), which
     // {@link grantTagSession} adds.
@@ -1433,7 +1392,9 @@ export class LambdaMicrovmCompute extends Construct {
         + 'carries no smoke-parity guarantee for an unattended deployment - keep production repos on '
         + 'compute_type=agentcore or ecs until a clean run is on record. Only the /suspend and '
         + '/resume runtime hooks remain undeclared, until P3 implements them: a hook the service '
-        + 'calls but nothing answers fails the corresponding lifecycle transition.',
+        + 'calls but nothing answers fails the corresponding lifecycle transition. '
+        + "(This warning's id still reads p1- by design: it is frozen across phases so operator "
+        + 'greps and suppression lists keep matching — read the text, not the id, for the phase.)',
       );
     }
 
@@ -1499,7 +1460,7 @@ export class LambdaMicrovmCompute extends Construct {
           + 'to the platform VPC. An aws:SourceAccount confused-deputy condition is NOT available '
           + 'on this trust: the Lambda MicroVMs service presents no source key when it assumes the '
           + 'role, and adding one makes the connector un-creatable (live-verified, ADR-021 P2-F1 — '
-          + 'see the trust-policy block in the construct for the compensating controls). The '
+          + 'see ADR-021 section 4 for the per-role compensating controls). The '
           + 'AWS-managed VPC-access policy uses the same wildcard for the same reason.',
       },
     ], true);
