@@ -319,7 +319,12 @@ if [[ "${CREATE_IMAGE}" -eq 0 ]]; then
 
 ==> Artifact uploaded. Next: create (or update) the image.
 
-  CDK-managed (recommended) — redeploy with the base image pinned:
+  CDK-managed (recommended) — redeploy with the base image pinned. NOTE this path
+  was live-verified non-functional in the P2 smoke run and FIXED afterwards
+  (ADR-021 P2-F2: the L1 was sending hook paths and \`arm64\` where CloudFormation
+  wants ENABLED / ARM_64, and rejected the change set outright). The fix has not
+  yet been re-exercised live, so if the change set fails early validation, fall
+  back to --create-image below and report it:
 
     aws lambda-microvms list-managed-microvm-images
     MISE_EXPERIMENTAL=1 mise //cdk:deploy -- \\
@@ -354,12 +359,25 @@ echo "==> Creating MicroVM image '${IMAGE_NAME}' (${MEMORY_MIB} MiB baseline)"
 # Flags use the Lambda MicroVMs service API shape (which differs from the
 # CloudFormation shape used by CfnMicrovmImage), all confirmed against the live
 # CLI/SDK model on 2026-07-31:
-#   * `ARM_64` is the only documented architecture value.
-#   * hooks are ENABLED/DISABLED with timeouts, NOT paths. This is the ONE place
-#     the two shapes genuinely disagree: `CfnMicrovmImage` types every hook field
-#     as a string and the construct passes the agent's real route, while this API
-#     takes a HookState flag. Both are correct for their own surface — do not
-#     "fix" either to match the other.
+#   * `ARM_64` is the only accepted architecture value — on BOTH surfaces (see
+#     below); `arm64` is rejected.
+#   * hooks are ENABLED/DISABLED with timeouts, NOT paths.
+#   * CORRECTION (live 2026-08-06, ADR-021 P2-F2): this comment used to claim the
+#     hook/architecture fields were "the ONE place the two shapes genuinely
+#     disagree" — that `CfnMicrovmImage` routes on a path string while this API
+#     takes a flag, and that both were correct for their own surface. That was
+#     WRONG, and it made the CDK-managed image path non-functional. CloudFormation
+#     enforces the SAME enums at change-set early validation, and rejected all
+#     five values the construct was sending:
+#       "/aws/lambda-microvms/runtime/v1/run is not a valid enum value. Supported
+#        values: [DISABLED, ENABLED]" (x4, one per hook)
+#       "arm64 is not a valid enum value. Supported values: [ARM_64]"
+#     The L1 types them as plain strings and documents no allowed values, which is
+#     how the wrong shape survived synth, unit tests and cdk-nag. The construct now
+#     sends ENABLED / ARM_64, i.e. exactly what this script always sent. Neither
+#     surface takes a hook path at all: the service calls fixed well-known routes,
+#     which the agent serves and `MICROVM_AGENT_HOOK_ROUTES` in
+#     `cdk/src/constructs/lambda-microvm-compute.ts` records for that purpose only.
 #   * `/ready` is MANDATORY whenever any lifecycle hook is enabled:
 #       "The ready (/ready) MicroVM image hook must be enabled when any MicroVM
 #        lifecycle hook (run, resume, suspend, or terminate) is enabled."
@@ -370,8 +388,19 @@ echo "==> Creating MicroVM image '${IMAGE_NAME}' (${MEMORY_MIB} MiB baseline)"
 #   * the timeouts mirror the construct's constants
 #     (`RUN_/READY_/VALIDATE_/TERMINATE_HOOK_TIMEOUT_SECONDS` in
 #     `cdk/src/constructs/lambda-microvm-compute.ts`), which carry the rationale
-#     for each value. A bash helper cannot import them, so keep the two in step:
-#     an out-of-band image built here should behave like a CDK-built one.
+#     for each value. A bash helper cannot import them, and "keep the two in step"
+#     as prose already FAILED once — `readyTimeoutInSeconds` stayed at 60 here when
+#     the construct went to 300 — so the invariant is now enforced by a unit test
+#     that parses this exact `--hooks` string and compares it against the
+#     synthesized template (`cdk/test/constructs/lambda-microvm-compute.test.ts`,
+#     "the out-of-band script's API request matches the CDK-managed image"). If that
+#     test fails, one of the two moved: fix the one that is wrong, do not relax the
+#     test. An out-of-band image built here must behave like a CDK-built one.
+#   * `readyTimeoutInSeconds` is 300, NOT 60: as of ADR-021 P2-F5 the `/ready` hook
+#     warms the 225 MiB `claude` binary before the snapshot is captured, so it does
+#     real work whose duration is a cold `exec`. Build hooks are allowed up to
+#     3600 s. `validateTimeoutInSeconds` deliberately stays at 60 — /validate gained
+#     no warm-up, so sharing a number would size it for work it does not do.
 #   * the BUILD connector (443 + 80) is used here, not the runtime one.
 CREATE_RESPONSE="$(aws lambda-microvms create-microvm-image \
   --name "${IMAGE_NAME}" \
@@ -384,7 +413,7 @@ CREATE_RESPONSE="$(aws lambda-microvms create-microvm-image \
   --resources "[{\"minimumMemoryInMiB\":${MEMORY_MIB}}]" \
   --egress-network-connectors "${BUILD_EGRESS_CONNECTORS}" \
   --logging "{\"cloudWatch\":{\"logGroup\":\"${LOG_GROUP}\"}}" \
-  --hooks '{"port":8080,"microvmHooks":{"run":"ENABLED","runTimeoutInSeconds":60,"terminate":"ENABLED","terminateTimeoutInSeconds":15},"microvmImageHooks":{"ready":"ENABLED","readyTimeoutInSeconds":60,"validate":"ENABLED","validateTimeoutInSeconds":60}}' \
+  --hooks '{"port":8080,"microvmHooks":{"run":"ENABLED","runTimeoutInSeconds":60,"terminate":"ENABLED","terminateTimeoutInSeconds":15},"microvmImageHooks":{"ready":"ENABLED","readyTimeoutInSeconds":300,"validate":"ENABLED","validateTimeoutInSeconds":60}}' \
   --tags "abca:compute-backend=lambda-microvm" \
   --output json)"
 

@@ -886,17 +886,35 @@ def _run_hook_body(envelope: dict, microvm_id: str = "microvm-abc") -> dict:
     return {"microvmId": microvm_id, "runHookPayload": json.dumps(envelope)}
 
 
+#: A warm-up command that always succeeds, on any box, in well under a second.
+#:
+#: ``claude`` is absent from a CI checkout and PRESENT on some developer machines,
+#: so a test that lets the real warm-up table run would pass or fail depending on
+#: whose laptop it is. Every ``/ready`` test therefore pins the table.
+_PORTABLE_WARMUP = (sys.executable, "--version")
+
+
+@pytest.fixture
+def warm_ready(monkeypatch):
+    """Pin ``/ready``'s warm-up to :data:`_PORTABLE_WARMUP` and nothing optional."""
+    monkeypatch.setattr(server, "_READY_WARMUP_REQUIRED", _PORTABLE_WARMUP)
+    monkeypatch.setattr(server, "_READY_WARMUP_OPTIONAL", ())
+
+
 class TestMicrovmReadyHook:
     """``/ready`` is what makes a MicroVM image buildable at all.
 
     ``CreateMicrovmImage`` refuses an image that enables any lifecycle hook
     without ``/ready``, and with the hook enabled but unserved both chipset
     builds fail ("Ready hook check failed: the application returned a client
-    error (HTTP 4xx) response"). A 200 from a booted server is the whole
-    contract in P1 — deeper warm-up checks are P2's ``/validate``.
+    error (HTTP 4xx) response").
+
+    Since ADR-021 P2-F5 a 200 means TWO things: the server is up **and** the
+    snapshot's heavyweight binaries have been exec'd, so their pages are resident
+    when the snapshot is captured. See :class:`TestMicrovmReadyHookWarmUp`.
     """
 
-    def test_ready_returns_200_once_the_server_is_up(self, client):
+    def test_ready_returns_200_once_the_server_is_up_and_warm(self, client, warm_ready):
         r = client.post(READY_HOOK)
         assert r.status_code == 200
         assert r.json() == {"status": "ready"}
@@ -909,9 +927,11 @@ class TestMicrovmReadyHook:
         assert VALIDATE_HOOK in routes
         assert TERMINATE_HOOK in routes
 
-    def test_ready_does_not_start_a_pipeline(self, client, monkeypatch):
+    def test_ready_does_not_start_a_pipeline(self, client, monkeypatch, warm_ready):
         # A build hook must never run task work: the snapshot is taken right
         # after it answers, so anything it starts would be frozen into the image.
+        # (The warm-up subprocesses are not "task work": they are ``--version``
+        # execs that exit before the handler returns, and they join no thread.)
         monkeypatch.setattr(server, "run_task", MagicMock())
         client.post(READY_HOOK)
         with server._threads_lock:
@@ -925,6 +945,316 @@ class TestMicrovmReadyHook:
         # still 404 — the assertion that keeps the construct honest.
         for hook in ("suspend", "resume"):
             assert client.post(f"{server.MICROVM_HOOK_PREFIX}/{hook}").status_code == 404
+
+
+class TestMicrovmReadyHookWarmUp:
+    """``/ready`` warms the snapshot's heavyweight binaries (ADR-021 P2-F5).
+
+    THE DEFECT THIS EXISTS FOR, because it is not guessable from the code: on the
+    P2 live run every task died at turn 0 with
+
+        TimeoutExpired: Command '['claude', '--version']' timed out after 10 seconds
+
+    reproducibly, while the same binary in the same image answers in under a second
+    locally. ``claude`` is a 225 MiB statically-linked ELF whose pages had never
+    been touched when the snapshot was taken, so the first ``exec`` on a restored
+    guest had to fault all of them in from lazily-restored storage. ``/ready`` is
+    the only hook that runs BEFORE the snapshot is captured, which makes it the
+    only place a warm page can be created.
+
+    Three properties are load-bearing and all three are asserted here: the warm-up
+    actually EXECS the binary (a stat or a file read would not populate the same
+    pages), a required failure returns **503** rather than a 200 that would freeze
+    a cold — or broken — snapshot into every future MicroVM, and the whole thing
+    stays inside the hook budget the service is holding it to (see
+    :class:`TestMicrovmReadyWarmUpBudget`).
+    """
+
+    def test_the_warm_up_execs_every_command_once_required_first(self, client, monkeypatch):
+        calls: list[list[str]] = []
+
+        def fake_run(argv, **kwargs):
+            calls.append(list(argv))
+            assert kwargs["capture_output"] is True
+            assert kwargs["check"] is False
+            return subprocess.CompletedProcess(argv, 0, stdout="2.1.191 (Claude Code)\n", stderr="")
+
+        monkeypatch.setattr(server.subprocess, "run", fake_run)
+        assert client.post(READY_HOOK).status_code == 200
+        # The real constants, not a stand-in: `claude` must be warmed or the fix is
+        # a no-op, and it must go FIRST so no best-effort command can eat the budget
+        # the required one needs.
+        assert calls[0] == ["claude", "--version"]
+        assert calls == [list(server._READY_WARMUP_REQUIRED)] + [
+            list(argv) for argv in server._READY_WARMUP_OPTIONAL
+        ]
+
+    def test_claude_is_the_only_REQUIRED_warm_up(self):
+        # git/node are warmed on the same mechanism but must never fail a build:
+        # neither was measured to blow a timeout, and a snapshot missing them is
+        # still a snapshot that can start a task. `claude` is the opposite — hence
+        # two constants rather than one table with a boolean, so the ordering
+        # guarantee is structural instead of conventional.
+        assert server._READY_WARMUP_REQUIRED[0] == "claude"
+        assert "claude" not in [argv[0] for argv in server._READY_WARMUP_OPTIONAL]
+        # Every warm-up is a bare `--version`: no network, no credentials, nothing
+        # written — which is what keeps /ready AWS-silent.
+        for argv in (server._READY_WARMUP_REQUIRED, *server._READY_WARMUP_OPTIONAL):
+            assert argv[1:] == ("--version",)
+
+    def test_a_required_warm_up_timeout_reports_503_not_ready(self, client, monkeypatch, capfd):
+        # 503 is the hook contract's "still initialising", so the service keeps
+        # asking within the /ready budget and — if it never clears — fails the
+        # IMAGE BUILD. That is the correct trade: one failed build instead of every
+        # task failing at turn 0 on a snapshot that cannot exec its own agent.
+        def slow(argv, **kwargs):
+            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+        monkeypatch.setattr(server.subprocess, "run", slow)
+        r = client.post(READY_HOOK)
+        assert r.status_code == 503
+        assert r.json()["status"] == "not_ready"
+        assert any("claude" in f for f in r.json()["failed_warmups"])
+        # The attempt is logged (stdout only — build role has no Logs grant), or a
+        # failed build gives the operator nothing to read.
+        out = capfd.readouterr().out
+        assert "warm-up of 'claude' FAILED" in out
+        assert "TimeoutExpired" in out
+
+    def test_a_missing_binary_reports_503(self, client, monkeypatch):
+        # A snapshot without `claude` on PATH cannot run one task, so this must fail
+        # the build rather than be smoothed over.
+        def missing(argv, **kwargs):
+            raise FileNotFoundError(argv[0])
+
+        monkeypatch.setattr(server.subprocess, "run", missing)
+        assert client.post(READY_HOOK).status_code == 503
+
+    def test_a_nonzero_exit_reports_503(self, client, monkeypatch):
+        def broken(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, 1, stdout="", stderr="Exec format error")
+
+        monkeypatch.setattr(server.subprocess, "run", broken)
+        r = client.post(READY_HOOK)
+        assert r.status_code == 503
+        assert r.json()["failed_warmups"] == ["claude:exit1"]
+
+    def test_a_BEST_EFFORT_failure_still_reports_ready(self, client, monkeypatch, capfd):
+        # The other half of the required/best-effort split: git or node missing is
+        # logged and moves on. Failing the build on them would make the warm-up
+        # mechanism itself a liability.
+        def selective(argv, **kwargs):
+            if argv[0] == "claude":
+                return subprocess.CompletedProcess(argv, 0, stdout="2.1.191\n", stderr="")
+            raise FileNotFoundError(argv[0])
+
+        monkeypatch.setattr(server.subprocess, "run", selective)
+        r = client.post(READY_HOOK)
+        assert r.status_code == 200
+        assert r.json() == {"status": "ready"}
+        out = capfd.readouterr().out
+        assert "warmed 'claude'" in out
+        assert "warm-up of 'git' FAILED" in out
+
+    def test_an_unexpected_subprocess_error_becomes_503_not_500(self, client, monkeypatch):
+        # A warm-up defect must surface as the hook's own honest "not ready", never
+        # as a FastAPI 500 — the service reports both as a hook failure, but only
+        # one of them puts the reason in the build log.
+        def exploding(argv, **kwargs):
+            raise OSError("resource temporarily unavailable")
+
+        monkeypatch.setattr(server.subprocess, "run", exploding)
+        assert client.post(READY_HOOK).status_code == 503
+
+    def test_the_warm_up_makes_no_aws_call_even_with_a_log_group_baked(
+        self, client, monkeypatch, capfd, warm_ready
+    ):
+        # /ready runs under the BUILD role: a Logs write can only fail (and each
+        # failure pollutes the shared _debug_cw_failures alarm), and any boto3
+        # client built here freezes the build role's credential chain and the build
+        # region into the snapshot. Adding a subprocess must not have changed that.
+        monkeypatch.setenv("LOG_GROUP_NAME", "/abca/agent")
+
+        def forbidden(*_args, **_kwargs):
+            raise AssertionError("the /ready warm-up must not make AWS calls")
+
+        monkeypatch.setattr(server, "_debug_cw", forbidden)
+        monkeypatch.setattr(server, "_warn_cw", forbidden)
+        assert client.post(READY_HOOK).status_code == 200
+        assert "warmed" in capfd.readouterr().out
+
+    def test_warm_snapshot_binaries_returns_only_required_failures(self, monkeypatch):
+        # Unit-level, because the return value is the whole contract between the
+        # warm-up and the hook's status code.
+        monkeypatch.setattr(server, "_READY_WARMUP_REQUIRED", ("nope-required", "--version"))
+        monkeypatch.setattr(server, "_READY_WARMUP_OPTIONAL", (("nope-optional", "--version"),))
+
+        def missing(argv, **kwargs):
+            raise FileNotFoundError(argv[0])
+
+        monkeypatch.setattr(server.subprocess, "run", missing)
+        assert server._warm_snapshot_binaries() == ["nope-required:FileNotFoundError"]
+
+
+class _FakeClock:
+    """Monotonic clock the tests advance by hand.
+
+    The warm-up's budget arithmetic is about elapsed time, and the only honest way
+    to test "three slow commands cannot exceed the ceiling" without burning four
+    minutes of wall clock is to make time itself a test input. Patched onto
+    ``server._time_for_debug`` (the module-local ``time`` alias), so only the
+    server's view of the clock changes and monkeypatch restores it.
+    """
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class TestMicrovmReadyWarmUpBudget:
+    """The warm-up must fit inside the hook budget the SERVICE is enforcing.
+
+    Per-command timeouts do not compose. Three commands at 120 s each is 360 s
+    against a 300 s ``/ready`` budget (``READY_HOOK_TIMEOUT_SECONDS``), so a
+    warm-up added to prevent a RUNTIME failure could instead produce a BUILD
+    failure — and a hung best-effort command could starve the required one that
+    decides whether the snapshot is usable at all. Hence: required first with its
+    own budget, optional ones sharing the remainder of a total ceiling.
+    """
+
+    @pytest.fixture
+    def clock(self, monkeypatch):
+        fake = _FakeClock()
+        monkeypatch.setattr(server, "_time_for_debug", fake)
+        return fake
+
+    @staticmethod
+    def _timeout_recorder(clock: _FakeClock, *, hang: tuple[str, ...] = (), fail: bool = False):
+        """subprocess.run stand-in that BURNS its whole timeout for hung commands."""
+        seen: list[tuple[str, float]] = []
+
+        def fake_run(argv, **kwargs):
+            timeout = kwargs["timeout"]
+            seen.append((argv[0], timeout))
+            if argv[0] in hang:
+                clock.advance(timeout)
+                raise subprocess.TimeoutExpired(argv, timeout)
+            if fail:
+                clock.advance(timeout)
+                raise subprocess.TimeoutExpired(argv, timeout)
+            clock.advance(0.1)
+            return subprocess.CompletedProcess(argv, 0, stdout="v1\n", stderr="")
+
+        return fake_run, seen
+
+    def test_the_ceiling_leaves_margin_inside_the_hook_budget(self):
+        # The numbers have to be comparable by eye against the CDK constant, so this
+        # pins the relationship rather than the values: total warm-up < hook budget,
+        # and the required command's own budget fits inside the total.
+        assert server._READY_WARMUP_REQUIRED_TIMEOUT_SECONDS >= 60
+        assert (
+            server._READY_WARMUP_REQUIRED_TIMEOUT_SECONDS
+            < server._READY_WARMUP_TOTAL_BUDGET_SECONDS
+        )
+        # READY_HOOK_TIMEOUT_SECONDS in cdk/src/constructs/lambda-microvm-compute.ts.
+        ready_hook_budget = 300
+        assert ready_hook_budget > server._READY_WARMUP_TOTAL_BUDGET_SECONDS
+        # Real margin, not a rounding error: enough for uvicorn scheduling plus the
+        # request itself.
+        assert ready_hook_budget - server._READY_WARMUP_TOTAL_BUDGET_SECONDS >= 30
+
+    def test_ALL_commands_slow_still_answers_within_the_ceiling(self, client, clock, monkeypatch):
+        # The aggregate-budget property. Every command hangs for its full timeout;
+        # the handler must still answer, and the total elapsed must not exceed the
+        # ceiling (which is what keeps it inside the hook budget).
+        fake_run, seen = self._timeout_recorder(clock, fail=True)
+        monkeypatch.setattr(server.subprocess, "run", fake_run)
+        started = clock.now
+
+        r = client.post(READY_HOOK)
+
+        assert r.status_code == 503
+        elapsed = clock.now - started
+        assert elapsed <= server._READY_WARMUP_TOTAL_BUDGET_SECONDS
+        # The required command hung, so the optional ones were skipped entirely:
+        # the build cannot succeed now, and making the service wait longer for the
+        # 503 buys nothing.
+        assert [name for name, _ in seen] == ["claude"]
+        assert seen[0][1] == server._READY_WARMUP_REQUIRED_TIMEOUT_SECONDS
+
+    def test_every_command_slow_but_none_skipped_stays_under_the_ceiling(
+        self, client, clock, monkeypatch
+    ):
+        # Same aggregate property with the required command SUCCEEDING slowly, so the
+        # optional ones do run: their timeouts must be the shrinking remainder, never
+        # a fresh full budget each.
+        fake_run, seen = self._timeout_recorder(clock, hang=("git", "node"))
+        monkeypatch.setattr(server.subprocess, "run", fake_run)
+        started = clock.now
+
+        assert client.post(READY_HOOK).status_code == 200
+
+        assert clock.now - started <= server._READY_WARMUP_TOTAL_BUDGET_SECONDS
+        # Strictly decreasing budgets after the required one — the signature of a
+        # SHARED remainder rather than per-command budgets that sum past the hook's.
+        optional_timeouts = [timeout for name, timeout in seen if name != "claude"]
+        assert optional_timeouts == sorted(optional_timeouts, reverse=True)
+        assert sum(t for _, t in seen) <= (
+            server._READY_WARMUP_REQUIRED_TIMEOUT_SECONDS
+            + server._READY_WARMUP_TOTAL_BUDGET_SECONDS
+        )
+
+    def test_a_HUNG_optional_command_never_blocks_the_200(self, client, clock, monkeypatch, capfd):
+        # The starvation guard, stated as the property that matters: once the
+        # REQUIRED warm-up has succeeded the snapshot is usable, so no best-effort
+        # command may talk the handler out of saying so.
+        fake_run, seen = self._timeout_recorder(clock, hang=("git", "node"))
+        monkeypatch.setattr(server.subprocess, "run", fake_run)
+
+        r = client.post(READY_HOOK)
+
+        assert r.status_code == 200
+        assert r.json() == {"status": "ready"}
+        out = capfd.readouterr().out
+        assert "warmed 'claude'" in out
+        assert "warm-up of 'git' FAILED" in out
+        # `git` consumed the entire remainder, so `node` was skipped rather than
+        # started with a useless sub-second budget.
+        assert [name for name, _ in seen] == ["claude", "git"]
+        assert "skipping best-effort warm-up of 'node'" in out
+
+    def test_the_required_command_gets_its_OWN_budget_not_a_share(self, client, clock, monkeypatch):
+        # It runs first precisely so the number it gets cannot be reduced by anything
+        # else: the one warm-up that decides whether the snapshot is usable must not
+        # be squeezed by a best-effort neighbour.
+        fake_run, seen = self._timeout_recorder(clock)
+        monkeypatch.setattr(server.subprocess, "run", fake_run)
+        assert client.post(READY_HOOK).status_code == 200
+        assert seen[0] == ("claude", server._READY_WARMUP_REQUIRED_TIMEOUT_SECONDS)
+
+    def test_an_optional_command_is_skipped_when_the_remainder_is_useless(
+        self, clock, monkeypatch, capfd
+    ):
+        # A sub-second timeout cannot warm a large binary; it can only manufacture a
+        # scary log line in a build that actually succeeded.
+        monkeypatch.setattr(server, "_READY_WARMUP_REQUIRED", ("req", "--version"))
+        monkeypatch.setattr(server, "_READY_WARMUP_OPTIONAL", (("opt", "--version"),))
+        started = clock.now
+
+        def fake_run(argv, **kwargs):
+            # The required command eats the entire ceiling but SUCCEEDS.
+            clock.advance(server._READY_WARMUP_TOTAL_BUDGET_SECONDS)
+            return subprocess.CompletedProcess(argv, 0, stdout="v\n", stderr="")
+
+        monkeypatch.setattr(server.subprocess, "run", fake_run)
+        assert server._warm_snapshot_binaries() == []
+        assert clock.now - started == server._READY_WARMUP_TOTAL_BUDGET_SECONDS
+        assert "skipping best-effort warm-up of 'opt'" in capfd.readouterr().out
 
 
 class TestMicrovmRunHookInlinePayload:
@@ -1853,7 +2183,9 @@ class TestMicrovmValidateHook:
         # ...and it still logs, to stdout only.
         assert "/validate hook: ok" in capfd.readouterr().out
 
-    def test_ready_is_also_aws_silent_with_a_log_group_configured(self, client, monkeypatch, capfd):
+    def test_ready_is_also_aws_silent_with_a_log_group_configured(
+        self, client, monkeypatch, capfd, warm_ready
+    ):
         # /ready runs under the same build role, so the same rule applies. It used
         # to route through _debug_cw, whose write can only FAIL under a role with
         # no Logs grant — and each failure bumps the shared _debug_cw_failures
@@ -1951,6 +2283,22 @@ class TestMicrovmTerminateHook:
         r = client.post(TERMINATE_HOOK, json={"microvmId": "microvm-zzz"})
         assert r.status_code == 200
         assert r.json()["microvm_id"] == "microvm-zzz"
+
+    def test_an_EMPTY_microvm_id_is_expected_normal_and_earns_no_warning(self, client, capfd):
+        # What the service ACTUALLY sends (live 2026-08-07, ADR-021 P2-F8): the id
+        # is the empty string on this hook, unlike /run where it is populated. So it
+        # must not look like a defect in the guest's last log line — an operator
+        # reading a warning here would go hunting for a wire-contract break that
+        # does not exist. Only a genuinely unreadable body warns (tests below).
+        r = client.post(TERMINATE_HOOK, json={"microvmId": ""})
+        assert r.status_code == 200
+        assert r.json()["microvm_id"] == ""
+        out = capfd.readouterr().out
+        assert "[server/warn]" not in out
+        # ...and the breadcrumb still lands, carrying the pipeline state that IS
+        # this hook's value (correlation rides /run's accepted line instead).
+        assert '"microvm_id": ""' in out
+        assert '"active_pipeline_threads": 0' in out
 
     def test_never_writes_terminal_task_status(self, client, monkeypatch):
         # The orchestrator owns terminal state: it finalizes the task and THEN
@@ -2086,7 +2434,13 @@ import aws_session
 from fastapi.testclient import TestClient
 
 client = TestClient(server.app)
-client.post("/aws/lambda-microvms/runtime/v1/ready")
+# /ready warms the snapshot's heavyweight binaries by exec'ing them (ADR-021
+# P2-F5). `claude` is not installed in a CI checkout, so pin the warm-up to a
+# binary that always exists: the property under test is that a build hook's
+# subprocess exec creates no boto3 session, not WHICH binary it warms.
+server._READY_WARMUP_REQUIRED = (sys.executable, "--version")
+server._READY_WARMUP_OPTIONAL = ()
+assert client.post("/aws/lambda-microvms/runtime/v1/ready").status_code == 200
 client.post("/aws/lambda-microvms/runtime/v1/validate")
 
 # Any AWS work would happen on a fire-and-forget daemon thread, so give one a

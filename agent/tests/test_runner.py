@@ -12,11 +12,14 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import runner
 from models import TaskConfig
 from runner import (
+    _CLAUDE_VERSION_PROBE_TIMEOUT_S,
     _DISALLOWED_TOOLS,
     _FULL_TOOL_SURFACE,
     _initialize_policy_engine_and_hooks,
+    _log_claude_cli_version,
     _resolve_allowed_tools,
     _resolve_setting_sources,
     _setup_agent_env,
@@ -420,3 +423,55 @@ class TestSetupAgentEnv:
         # The platform default (no override) must be a us.* profile, never a bare
         # foundation-model id — the whole point of the fix.
         assert _config().haiku_model.startswith("us.")
+
+
+class TestClaudeCliVersionProbe:
+    """The diagnostic probe that killed every MicroVM task at turn 0 (P2-F5).
+
+    ``agent/src/runner.py`` used ``timeout=10`` on ``claude --version``. On the
+    ``lambda-microvm`` backend that failed EVERY task, reproducibly:
+
+        TimeoutExpired: Command '['claude', '--version']' timed out after 10 seconds
+
+    The binary answers in under a second in the same image locally; it is a 225 MiB
+    statically linked ELF whose pages had never been touched before the snapshot was
+    captured, so the first ``exec`` on a restored guest had to fault them all in.
+    The primary fix is warming it in ``/ready`` (``server._warm_snapshot_binaries``);
+    this bound is the backstop, and the point of these tests is that it stays loose.
+    """
+
+    def test_the_version_probe_bound_is_loose_enough_for_a_cold_start(self):
+        # A version string for a log line: nothing branches on it, and the failure
+        # mode is a dead task. Any cold-start environment must fit inside it.
+        assert _CLAUDE_VERSION_PROBE_TIMEOUT_S >= 60
+
+    def test_the_probe_passes_that_timeout_to_the_version_call_only(self, monkeypatch):
+        calls: list[tuple[list[str], float]] = []
+
+        def fake_run(argv, **kwargs):
+            calls.append((list(argv), kwargs["timeout"]))
+            return MagicMock(returncode=0, stdout="/usr/bin/claude\n")
+
+        monkeypatch.setattr(runner.subprocess, "run", fake_run)
+        _log_claude_cli_version()
+
+        assert calls[0][0] == ["which", "claude"]
+        assert calls[1][0] == ["claude", "--version"]
+        # The PATH lookup keeps its tight bound — it touches none of the 225 MiB —
+        # while the exec that DOES gets the loose one. Sharing one number would
+        # either loosen a lookup that cannot hang or re-tighten the exec that can.
+        assert calls[1][1] == _CLAUDE_VERSION_PROBE_TIMEOUT_S
+        assert calls[0][1] < calls[1][1]
+
+    def test_a_missing_cli_warns_and_skips_the_version_call(self, monkeypatch):
+        calls: list[list[str]] = []
+
+        def fake_run(argv, **_kwargs):
+            calls.append(list(argv))
+            return MagicMock(returncode=1, stdout="")
+
+        monkeypatch.setattr(runner.subprocess, "run", fake_run)
+        _log_claude_cli_version()
+        # No point exec'ing a binary `which` could not find — and no exception:
+        # this is diagnostics, so it must never be the thing that fails a task.
+        assert calls == [["which", "claude"]]

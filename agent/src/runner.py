@@ -435,6 +435,55 @@ def _resolve_setting_sources(config: TaskConfig) -> list[Literal["user", "projec
     return ["project"] if config.repo_url else []
 
 
+#: Timeout (seconds) for the ``claude --version`` diagnostic probe.
+#:
+#: 60, not the original 10 (ADR-021 P2-F5, live 2026-08-07). This probe killed
+#: EVERY task on the ``lambda-microvm`` backend at turn 0, reproducibly:
+#:
+#:   TimeoutExpired: Command '['claude', '--version']' timed out after 10 seconds
+#:
+#: The binary was fine — the same image answers ``2.1.191 (Claude Code)`` in under
+#: a second locally. It is a 225 MiB (236,305,136-byte) statically linked ELF, and
+#: on a MicroVM restored from a snapshot that never touched it, the first ``exec``
+#: must fault all of its pages in from lazily-restored storage.
+#:
+#: The real fix is warming the binary BEFORE the snapshot is captured
+#: (``_warm_snapshot_binaries`` in ``server.py``'s ``/ready`` hook); this bound is
+#: the belt to that braces, and it is deliberately loose because a tight bound buys
+#: NOTHING here: the call prints a version string into a log line, and its failure
+#: mode is a dead task. Any cold-start environment (a fresh container, a cold page
+#: cache, a throttled volume) has to fit inside it. 60 s still fails loudly on a
+#: genuinely broken binary.
+_CLAUDE_VERSION_PROBE_TIMEOUT_S = 60
+
+#: Timeout (seconds) for ``which claude``. Unchanged at 5: a PATH lookup touches no
+#: page of the 225 MiB binary, so it is not subject to the hydration cost above.
+_WHICH_CLAUDE_TIMEOUT_S = 5
+
+
+def _log_claude_cli_version() -> None:
+    """Log the resolved ``claude`` path and version, for protocol-mismatch triage.
+
+    Diagnostics only — nothing branches on the result, which is exactly why the
+    timeout above is loose. Extracted from ``run_agent`` so the probe is assertable
+    in a unit test without standing up the SDK client: this line, and only this
+    line, is what failed every task on the MicroVM backend (P2-F5).
+    """
+    cli_path = subprocess.run(
+        ["which", "claude"], capture_output=True, text=True, timeout=_WHICH_CLAUDE_TIMEOUT_S
+    )
+    if cli_path.returncode != 0:
+        log("WARN", "claude CLI not found on PATH")
+        return
+    cli_ver = subprocess.run(
+        ["claude", "--version"],
+        capture_output=True,
+        text=True,
+        timeout=_CLAUDE_VERSION_PROBE_TIMEOUT_S,
+    )
+    log("AGENT", f"claude CLI: {cli_path.stdout.strip()} version={cli_ver.stdout.strip()}")
+
+
 async def run_agent(
     prompt: str,
     system_prompt: str,
@@ -470,14 +519,7 @@ async def run_agent(
 
     sdk_version = getattr(_sdk, "__version__", "unknown")
     log("AGENT", f"claude-agent-sdk version: {sdk_version}")
-    cli_path = subprocess.run(["which", "claude"], capture_output=True, text=True, timeout=5)
-    if cli_path.returncode == 0:
-        cli_ver = subprocess.run(
-            ["claude", "--version"], capture_output=True, text=True, timeout=10
-        )
-        log("AGENT", f"claude CLI: {cli_path.stdout.strip()} version={cli_ver.stdout.strip()}")
-    else:
-        log("WARN", "claude CLI not found on PATH")
+    _log_claude_cli_version()
 
     # SDK tool surface — see _resolve_allowed_tools for the policy.
     allowed_tools = _resolve_allowed_tools(config)

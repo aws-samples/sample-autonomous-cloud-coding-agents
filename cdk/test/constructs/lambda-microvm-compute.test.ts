@@ -17,11 +17,14 @@
  *  SOFTWARE.
  */
 
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { App, Stack } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as logs from 'aws-cdk-lib/aws-logs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { AgentMemory } from '../../src/constructs/agent-memory';
@@ -30,6 +33,7 @@ import { DEFAULT_BEDROCK_MODEL_IDS } from '../../src/constructs/bedrock-models';
 import {
   DEFAULT_MINIMUM_MEMORY_MIB,
   LambdaMicrovmCompute,
+  MICROVM_AGENT_HOOK_ROUTES,
   MICROVM_ARTIFACT_OBJECT_KEY,
   MICROVM_BACKEND_TAG_KEY,
   MICROVM_BACKEND_TAG_VALUE,
@@ -47,6 +51,13 @@ import { LAMBDA_MICROVM_SUPPORTED_REGIONS } from '../../src/handlers/shared/micr
 const BASE_IMAGE_ARN = 'arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1';
 const GITHUB_TOKEN_SECRET_ARN =
   'arn:aws:secretsmanager:us-east-1:123456789012:secret:abca/github-token-AbCdEf';
+/**
+ * Physical name of the stand-in APPLICATION_LOGS group, spelled like the real one
+ * (`stacks/agent.ts` → `RuntimeApplicationLogGroup`) so the grant assertions read
+ * against a recognisable ARN rather than a CDK-generated one.
+ */
+const APPLICATION_LOG_GROUP_NAME =
+  '/aws/vendedlogs/bedrock-agentcore/runtime/APPLICATION_LOGS/TestStack';
 
 interface BuildOptions {
   readonly region?: string;
@@ -116,6 +127,12 @@ function instantiate(options: BuildOptions = {}): Omit<Built, 'template'> {
         stack, 'GitHubTokenSecret', GITHUB_TOKEN_SECRET_ARN,
       ),
       agentMemory: new AgentMemory(stack, 'AgentMemory'),
+      // Stands in for the stack's RuntimeApplicationLogGroup — the group whose
+      // NAME travels to the guest as platform_config.log_group_name, so the grant
+      // and the delivered value must come from one object (ADR-021 P2-F4).
+      applicationLogGroup: new logs.LogGroup(stack, 'ApplicationLogGroup', {
+        logGroupName: APPLICATION_LOG_GROUP_NAME,
+      }),
     }),
     ...(options.withImage && {
       baseImageArn: BASE_IMAGE_ARN,
@@ -167,8 +184,15 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     // are: [512, 1024, 2048, 4096, 8192]." Note this configures the BASELINE —
     // the service scales vertically to a 32 GiB / 16 vCPU peak on its own, which
     // is why nothing here asks for the peak.
+    //
+    // `ARM_64`, not `arm64`: the CDK L1 types Architecture as a plain string and
+    // documents no allowed values, and CloudFormation rejected the lowercase
+    // spelling at change-set early validation — "arm64 is not a valid enum value.
+    // Supported values: [ARM_64]" (ADR-021 P2-F2). The literal is spelled out here
+    // rather than imported from the construct so the test fails if the constant is
+    // "corrected" back to Docker's spelling.
     template.hasResourceProperties('AWS::Lambda::MicrovmImage', {
-      CpuConfigurations: [{ Architecture: 'arm64' }],
+      CpuConfigurations: [{ Architecture: 'ARM_64' }],
       Resources: [{ MinimumMemoryInMiB: 8192 }],
     });
     expect(DEFAULT_MINIMUM_MEMORY_MIB).toBe(8192);
@@ -187,13 +211,16 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     const hooks = Object.values(images)[0]!.Properties.Hooks;
     expect(hooks.Port).toBe(8080);
 
-    // RUNTIME hooks. Paths are the routes `agent/src/server.py` actually serves
-    // (the CFN type takes strings while the service API takes ENABLED/DISABLED
-    // flags — see RUN_HOOK_PATH — so a made-up path would be a silent lie).
+    // RUNTIME hooks. The VALUE of each hook field is the `ENABLED` enum, NOT the
+    // agent's route: CloudFormation rejected all four paths at change-set early
+    // validation — "/aws/lambda-microvms/runtime/v1/run is not a valid enum value.
+    // Supported values: [DISABLED, ENABLED]" (ADR-021 P2-F2). The CFN surface is
+    // identical to the API surface here; the routes are fixed and service-owned
+    // (asserted separately against MICROVM_AGENT_HOOK_ROUTES below).
     expect(hooks.MicrovmHooks).toEqual({
-      Run: '/aws/lambda-microvms/runtime/v1/run',
+      Run: 'ENABLED',
       RunTimeoutInSeconds: 60,
-      Terminate: '/aws/lambda-microvms/runtime/v1/terminate',
+      Terminate: 'ENABLED',
       // Near the BOTTOM of the service's 1–60 s window on purpose: the handler is
       // a log-and-acknowledge with nothing to drain (progress writes are already
       // durable per event), and the budget bounds how long teardown waits on a
@@ -205,14 +232,76 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     // lifecycle hook without it, so "declare /run in P1, serve it in P2" was
     // unreachable.
     expect(hooks.MicrovmImageHooks).toEqual({
-      Ready: '/aws/lambda-microvms/runtime/v1/ready',
-      ReadyTimeoutInSeconds: 60,
-      Validate: '/aws/lambda-microvms/runtime/v1/validate',
-      // Matches /ready deliberately: the checks are sub-millisecond, so the budget
-      // is sized for the still-initialising 503 path, which is the same allowance
-      // /ready needs in the same process on the same build path.
+      Ready: 'ENABLED',
+      // 300 s, not 60: since the P2-F5 fix /ready warms the 225 MiB `claude`
+      // binary before the snapshot is captured, so it does real work whose
+      // duration is a cold exec. Build hooks allow up to 3600 s, so a tight
+      // budget here would trade a runtime failure for a build failure.
+      ReadyTimeoutInSeconds: 300,
+      Validate: 'ENABLED',
+      // Decoupled from /ready by that same change: /validate's checks are still
+      // sub-millisecond, so its budget is sized only for the still-initialising
+      // 503 path and must NOT inherit /ready's warm-up allowance.
       ValidateTimeoutInSeconds: 60,
     });
+  });
+
+  test('sends NO hook path as a property value — the fields are enums (P2-F2)', () => {
+    // The regression guard for the defect that made the whole CDK-managed image
+    // path non-functional: the L1 types every hook field as `string` and documents
+    // no allowed values, which is how four route strings got sent as property
+    // values and were rejected at change-set validation — before the stack was
+    // touched, so there was no rollback and no runtime symptom to trace back.
+    // Asserting on the whole rendered resource (not just Hooks) also catches a
+    // route leaking into Description, a tag, or a future property.
+    const images = template.findResources('AWS::Lambda::MicrovmImage');
+    const rendered = JSON.stringify(Object.values(images)[0]!);
+    expect(rendered).not.toContain('/aws/lambda-microvms/runtime/v1');
+    for (const route of Object.values(MICROVM_AGENT_HOOK_ROUTES)) {
+      expect(rendered).not.toContain(route);
+    }
+  });
+
+  test("the out-of-band script's API request matches the CDK-managed image", () => {
+    // ADR-021 P2-F2/P2-F5 drift guard, and the reason it exists is that the prose
+    // version of it FAILED: `cdk/scripts/package-microvm-artifact.sh` said "the
+    // timeouts mirror the construct's constants … keep the two in step", and when
+    // READY_HOOK_TIMEOUT_SECONDS went 60 → 300 for the /ready warm-up, the script
+    // kept sending 60. Nothing caught it, because the two paths never meet in code:
+    // a bash helper cannot import a TypeScript constant.
+    //
+    // The two requests MUST agree. An operator reaches for --create-image exactly
+    // when the CDK path is failing, i.e. while debugging — so an out-of-band image
+    // that behaves differently from a CDK-built one turns the fallback into a
+    // second variable. This test parses the script's real flag values and compares
+    // them to the synthesized template.
+    const script = readFileSync(
+      resolve(__dirname, '../../scripts/package-microvm-artifact.sh'), 'utf8',
+    );
+
+    /** Value of a single-quoted `--flag '<json>'` argument in the script. */
+    const flagJson = (flag: string): unknown => {
+      const match = new RegExp(`--${flag} '([^']+)'`).exec(script);
+      expect(match).not.toBeNull();
+      return JSON.parse(match![1]!);
+    };
+
+    /** The API's camelCase keys → CloudFormation's PascalCase, recursively. */
+    const toCfnKeys = (value: unknown): unknown => {
+      if (Array.isArray(value)) return value.map(toCfnKeys);
+      if (value === null || typeof value !== 'object') return value;
+      return Object.fromEntries(
+        Object.entries(value as Record<string, unknown>)
+          .map(([key, inner]) => [key[0]!.toUpperCase() + key.slice(1), toCfnKeys(inner)]),
+      );
+    };
+
+    const image = Object.values(template.findResources('AWS::Lambda::MicrovmImage'))[0]!;
+    // Hooks: all four states AND all four timeouts, in one comparison — which is
+    // precisely the assertion the missing one would have been.
+    expect(toCfnKeys(flagJson('hooks'))).toEqual(image.Properties.Hooks);
+    // ...and the architecture enum, the other half of P2-F2.
+    expect(toCfnKeys(flagJson('cpu-configurations'))).toEqual(image.Properties.CpuConfigurations);
   });
 
   test('does NOT declare /suspend or /resume — they are P3 and nothing answers them yet', () => {
@@ -228,36 +317,39 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     expect(hooks.MicrovmHooks.ResumeTimeoutInSeconds).toBeUndefined();
   });
 
-  test('every declared hook path is under the agent-served hook prefix', () => {
-    // Keeps the four paths in lockstep with `MICROVM_HOOK_PREFIX` in
-    // `agent/src/server.py`. A typo'd prefix is invisible at synth and at deploy;
-    // it surfaces as a failed build (/ready, /validate) or a failed lifecycle
-    // transition on a real task (/run, /terminate).
-    const images = template.findResources('AWS::Lambda::MicrovmImage');
-    const hooks = Object.values(images)[0]!.Properties.Hooks;
-    const paths = [
-      ...Object.entries(hooks.MicrovmHooks as Record<string, unknown>),
-      ...Object.entries(hooks.MicrovmImageHooks as Record<string, unknown>),
-    ]
-      .filter(([, value]) => typeof value === 'string')
-      .map(([, value]) => value as string);
-
-    expect(paths).toHaveLength(4);
-    for (const hookPath of paths) {
-      expect(hookPath).toMatch(/^\/aws\/lambda-microvms\/runtime\/v1\/(ready|validate|run|terminate)$/);
+  test('the agent hook routes are exactly the four the service calls, under one prefix', () => {
+    // The cross-package contract that used to be checked against the rendered
+    // template. It cannot be any more: the template carries `ENABLED`, not a path
+    // (P2-F2), so the routes now have a dedicated source — MICROVM_AGENT_HOOK_ROUTES
+    // — and this asserts THAT against `MICROVM_HOOK_PREFIX` in
+    // `agent/src/server.py`. A prefix drift is invisible at synth and at deploy; it
+    // surfaces as a failed image build (/ready, /validate) or a failed lifecycle
+    // transition on a real task (/run, /terminate). Live 2026-08-06 confirmed the
+    // service POSTs to exactly these paths ("POST /aws/lambda-microvms/runtime/v1/
+    // ready HTTP/1.1" 200 OK, and the same for the other three).
+    const routes = Object.values(MICROVM_AGENT_HOOK_ROUTES);
+    expect(routes).toHaveLength(4);
+    for (const route of routes) {
+      expect(route).toMatch(/^\/aws\/lambda-microvms\/runtime\/v1\/(ready|validate|run|terminate)$/);
     }
-    expect([...paths].sort()).toEqual([
+    expect([...routes].sort()).toEqual([
       '/aws/lambda-microvms/runtime/v1/ready',
       '/aws/lambda-microvms/runtime/v1/run',
       '/aws/lambda-microvms/runtime/v1/terminate',
       '/aws/lambda-microvms/runtime/v1/validate',
     ]);
+    // The map's KEYS are the service's hook names, i.e. the same names the L1's
+    // Hooks properties use — so "the agent serves every hook the image enables"
+    // stays checkable from one place.
+    expect(Object.keys(MICROVM_AGENT_HOOK_ROUTES).sort())
+      .toEqual(['ready', 'run', 'terminate', 'validate']);
   });
 
   test('every declared hook timeout sits inside the service window for its kind', () => {
     // Runtime hooks are capped at 60 s; build hooks allow up to 3600 s. A value
     // outside its window is rejected at image-create time — minutes into a build,
-    // after the artifact has already been packaged and uploaded.
+    // after the artifact has already been packaged and uploaded. The build-hook
+    // ceiling is what makes /ready's 300 s warm-up budget legal (P2-F5).
     const images = template.findResources('AWS::Lambda::MicrovmImage');
     const hooks = Object.values(images)[0]!.Properties.Hooks;
 
@@ -347,14 +439,16 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     const [, role] = Object.entries(template.findResources('AWS::IAM::Role'))
       .find(([id]) => id.includes('LambdaMicrovmComputeConnectorOperatorRole'))!;
 
-    // Same confused-deputy posture as the build/execution roles.
+    // Same trust posture as the build/execution roles, and the same reason it
+    // carries NO condition — see the dedicated test below. This role is where the
+    // defect was FIRST observed: with aws:SourceAccount present, both connectors
+    // CREATE_FAILED deterministically with "The service is unable to assume the
+    // provided NetworkConnectorOperatorRole" (ADR-021 P2-F1).
     const statements = role.Properties.AssumeRolePolicyDocument.Statement;
     expect(statements).toHaveLength(1);
     expect(statements[0].Action).toBe('sts:AssumeRole');
     expect(statements[0].Principal).toEqual({ Service: 'lambda.amazonaws.com' });
-    expect(statements[0].Condition).toEqual({
-      StringEquals: { 'aws:SourceAccount': '123456789012' },
-    });
+    expect(statements[0].Condition).toBeUndefined();
 
     // The AWS-managed policy for exactly this job...
     expect(JSON.stringify(role.Properties.ManagedPolicyArns))
@@ -480,7 +574,7 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     expect(rules[0].ExpirationInDays).toBeUndefined();
   });
 
-  test('both roles are trusted by lambda.amazonaws.com for AssumeRole AND TagSession, pinned to this account', () => {
+  test('both roles are trusted by lambda.amazonaws.com for AssumeRole AND TagSession', () => {
     const roles = Object.entries(template.findResources('AWS::IAM::Role'))
       .filter(([id]) => id.includes('LambdaMicrovmComputeBuildRole') || id.includes('LambdaMicrovmComputeExecutionRole'));
     expect(roles).toHaveLength(2);
@@ -493,13 +587,44 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
         // `microvms.lambda.amazonaws.com` does not exist — using it is rejected
         // with MalformedPolicyDocument.
         expect(statement.Principal).toEqual({ Service: 'lambda.amazonaws.com' });
-        // Confused-deputy: lambda.amazonaws.com is shared with every other
-        // Lambda feature, so aws:SourceAccount must be on BOTH actions.
-        expect(statement.Condition).toEqual({
-          StringEquals: { 'aws:SourceAccount': '123456789012' },
-        });
-        expect(JSON.stringify(statement.Condition)).not.toContain('aws:SourceArn');
       }
+    }
+  });
+
+  test('NO source-key condition on any MicroVM-facing role trust (P2-F1/F3)', () => {
+    // The sharpest IAM assertion in this file, and the one most likely to be
+    // "fixed" back by a reviewer applying the standard service-principal
+    // confused-deputy pattern. It must not be.
+    //
+    // The Lambda MicroVMs service presents NO source condition key when it assumes
+    // these roles, so a trust policy carrying one is unassumable. Live 2026-08-06/07
+    // (`docs/verification/645-p2-smoke-runbook.md`), one root cause, two symptoms:
+    // both network connectors CREATE_FAILED deterministically on a freshly deleted
+    // stack (P2-F1), and RunMicrovm reported a MISLEADING caller-side
+    // `iam:PassRole` AccessDenied on the orchestrator (P2-F3) — with the grant
+    // present, `simulate-principal-policy` returning `allowed`, no permissions
+    // boundary, and an unconditioned PassRole ALSO denied. Removing the execution
+    // role's trust conditions made the next submission reach RUNNING in 6 s.
+    //
+    // What compensates is asserted elsewhere in this file: these roles are only
+    // passable by the orchestrator (scoped `iam:PassRole` + `iam:PassedToService`,
+    // `test/constructs/task-orchestrator.test.ts`), and every resource they reach
+    // is account-scoped by ARN.
+    const roles = Object.entries(template.findResources('AWS::IAM::Role'))
+      .filter(([id]) => id.includes('LambdaMicrovmComputeBuildRole')
+        || id.includes('LambdaMicrovmComputeExecutionRole')
+        || id.includes('LambdaMicrovmComputeConnectorOperatorRole'));
+    expect(roles).toHaveLength(3);
+
+    for (const [, role] of roles) {
+      const trust = role.Properties.AssumeRolePolicyDocument;
+      for (const statement of trust.Statement) {
+        expect(statement.Condition).toBeUndefined();
+      }
+      const rendered = JSON.stringify(trust);
+      expect(rendered).not.toContain('aws:SourceAccount');
+      expect(rendered).not.toContain('aws:SourceArn');
+      expect(rendered).not.toContain('aws:SourceOrgID');
     }
   });
 
@@ -629,6 +754,48 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     expect(rendered).toContain('bedrock-agentcore:RetrieveMemoryRecords');
   });
 
+  test('execution role can write to the APPLICATION_LOGS group platform_config names', () => {
+    // ADR-021 P2-F4. P2 delivered `log_group_name` in platform_config — which makes
+    // the agent ATTEMPT the write — without the matching grant, so every structured
+    // per-task line AND the METRICS_REPORT were denied live:
+    //   "…LambdaMicrovmComputeExecutionRo…/Lambda-microvmsExecutor-… is not
+    //    authorized to perform: logs:CreateLogStream on resource:
+    //    …:/aws/vendedlogs/bedrock-agentcore/runtime/APPLICATION_LOGS/…"
+    // Non-fatal (stdout fallback lands in the MicroVM log group) which is exactly
+    // why it survived P2: the substrate looked fine while the platform's canonical
+    // observability streams were empty.
+    const statements = executionRoleStatements().filter((statement) => {
+      const resource = JSON.stringify(statement.Resource);
+      return resource.includes('ApplicationLogGroup');
+    });
+    expect(statements).toHaveLength(1);
+    // Write-only, and only the two actions the agent's writer calls — no
+    // CreateLogGroup (the stack owns the group and its retention), no read.
+    expect(statements[0]!.Action).toEqual(['logs:CreateLogStream', 'logs:PutLogEvents']);
+    // Scoped to that ONE group's ARN (whose trailing `:*` is the log-STREAM
+    // wildcard — streams are minted per task), never to a log-group prefix.
+    const rendered = JSON.stringify(statements[0]!.Resource);
+    expect(rendered).toContain('ApplicationLogGroup');
+    expect(rendered).not.toContain(`${MICROVM_LOG_GROUP_PREFIX}/*`);
+  });
+
+  test('the two logs grants stay separate — one namespace cannot cover the other', () => {
+    // The service's own `/aws/lambda-microvms/*` grant and the platform's
+    // APPLICATION_LOGS grant are unrelated namespaces, so neither can be widened
+    // into the other. Asserting both are present keeps a future "consolidation"
+    // from silently dropping one.
+    const logsStatements = executionRoleStatements().filter((statement) => {
+      const actions = Array.isArray(statement.Action) ? statement.Action : [statement.Action];
+      return actions.some(action => action.startsWith('logs:'));
+    });
+    expect(logsStatements).toHaveLength(2);
+    const rendered = JSON.stringify(logsStatements);
+    expect(rendered).toContain(`${MICROVM_LOG_GROUP_PREFIX}/*`);
+    expect(rendered).toContain('ApplicationLogGroup');
+    // `logs:*` would satisfy both and is exactly what must not happen.
+    expect(rendered).not.toContain('"logs:*"');
+  });
+
   test('execution role can describe AZs, for a CDK target repo\'s synth build gate', () => {
     const statements = statementsWithAction('ec2:DescribeAvailabilityZones');
     expect(statements).toHaveLength(1);
@@ -690,6 +857,11 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     expect(rendered).not.toContain('secretsmanager:');
     expect(rendered).not.toContain('dynamodb:');
     expect(rendered).not.toContain('ec2:');
+    // ...including the P2-F4 application-log-group grant: the build hooks log to
+    // stdout only (`_build_hook_log`), precisely so no build-time Logs write is
+    // attempted, and the build role's own `/aws/lambda-microvms/*` grant is what
+    // carries the service's build logs.
+    expect(rendered).not.toContain('ApplicationLogGroup');
   });
 
   test('execution role is admitted to the per-task SessionRole (tenant-data delegation)', () => {
@@ -738,19 +910,21 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     expect(message).toContain('/resume');
   });
 
-  test('declares every hook the agent serves, and only those (rendered form)', () => {
+  test('enables every hook the agent serves, and only those (rendered form)', () => {
     // Same invariant as the structural assertions above, checked against the
     // rendered template — this is the shape an operator reads in a `cdk diff`, and
-    // the shape the service receives.
+    // the shape CloudFormation validates. `"ENABLED"`, never a path (P2-F2).
     const images = template.findResources('AWS::Lambda::MicrovmImage');
     const rendered = JSON.stringify(Object.values(images)[0]!.Properties.Hooks);
     for (const hook of ['Run', 'Terminate', 'Ready', 'Validate']) {
-      expect(rendered).toContain(`"${hook}":"/aws/lambda-microvms/runtime/v1/${hook.toLowerCase()}"`);
+      expect(rendered).toContain(`"${hook}":"ENABLED"`);
     }
-    // P3, and nothing answers them yet.
+    // P3, and nothing answers them yet. OMITTED rather than "DISABLED", so the
+    // absence assertion stays meaningful.
     for (const hook of ['Suspend', 'Resume']) {
       expect(rendered).not.toContain(hook);
     }
+    expect(rendered).not.toContain('DISABLED');
   });
 
   test('tags every MicroVM resource with the backend cost-allocation tag', () => {
@@ -895,6 +1069,16 @@ describe('LambdaMicrovmCompute — optional runtime-parity props omitted', () =>
   test('no GitHub PAT read and no AgentCore Memory grant without the props', () => {
     expect(executionRolePolicies()).not.toContain(GITHUB_TOKEN_SECRET_ARN);
     expect(executionRolePolicies()).not.toContain('bedrock-agentcore:');
+  });
+
+  test('no APPLICATION_LOGS grant without the log group, and the MicroVM one remains', () => {
+    // The application-log-group grant is prop-driven (isolated construct tests have
+    // no stack log group), so its absence here is the contract — but the service's
+    // own /aws/lambda-microvms/* grant must NOT be conditional, or a MicroVM cannot
+    // write build/run logs at all.
+    const rendered = executionRolePolicies();
+    expect(rendered).not.toContain('ApplicationLogGroup');
+    expect(rendered).toContain(`${MICROVM_LOG_GROUP_PREFIX}/*`);
   });
 
   test('the input-free parity grants are still there (Bedrock, channel OAuth, AZ describe)', () => {

@@ -654,6 +654,21 @@ export class TaskOrchestrator extends Construct {
       // execution roles to ecs-tasks.amazonaws.com. ADR-021's grant list omits
       // it because it enumerates MicroVM actions, not the IAM plumbing they
       // imply; without it RunMicrovm fails on the role hand-off.
+      //
+      // ⚠️ DEBUGGING NOTE (ADR-021 P2-F3, live 2026-08-07). If `RunMicrovm` ever
+      // returns
+      //   "… is not authorized to perform: iam:PassRole on resource:
+      //    …LambdaMicrovmComputeExecutionRole… because no identity-based policy
+      //    allows the iam:PassRole action"
+      // do NOT start by widening this statement. That message was reproduced with
+      // this grant present, with `simulate-principal-policy` returning `allowed`,
+      // with no permissions boundary, and with a temporary UNCONDITIONED
+      // `iam:PassRole` attached — still denied. The real cause was the TARGET
+      // role's trust policy (a source-condition key the MicroVM service does not
+      // present), and the service reports a role it cannot pass-and-assume as a
+      // caller-side PassRole denial. Read the execution role's
+      // `AssumeRolePolicyDocument` first; this statement — including its
+      // `iam:PassedToService` condition — was explicitly exonerated and stays.
       this.fn.addToRolePolicy(new iam.PolicyStatement({
         sid: 'MicrovmPassExecutionRole',
         actions: ['iam:PassRole'],

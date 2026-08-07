@@ -787,6 +787,14 @@ export class AgentStack extends Stack {
         // AZ describe) need no stack input and are wired inside the construct.
         githubTokenSecret,
         agentMemory,
+        // ADR-021 P2-F4: the SAME log group whose name travels to the guest in
+        // `agentPlatformConfig.logGroupName` below (→ `LOG_GROUP_NAME`). P2
+        // delivered the name without the grant, so the agent's structured per-task
+        // lines and its METRICS_REPORT were AccessDenied on
+        // logs:CreateLogStream and the platform's canonical observability streams
+        // were empty on this backend. Passing the construct (not the name) keeps the
+        // grant and the delivered value derived from one object.
+        applicationLogGroup,
         // Resolved above TaskApi — see `microvmImageInputs`.
         ...microvmImageInputs,
       })
@@ -886,8 +894,17 @@ export class AgentStack extends Stack {
         taskApprovalsTableName: taskApprovalsTable.table.tableName,
         nudgesTableName: taskNudgesTable.table.tableName,
         logGroupName: applicationLogGroup.logGroupName,
-        // Repo-less deliverable artifacts share the trace bucket, exactly as
-        // ARTIFACTS_BUCKET_NAME does in the runtime env block above.
+        // INTENTIONAL, not a wiring bug: both keys resolve to the SAME bucket
+        // (`traceArtifactsBucket`), exactly as `ARTIFACTS_BUCKET_NAME` and
+        // `TRACE_ARTIFACTS_BUCKET_NAME` do in the AgentCore runtime env block above
+        // — a live P2 run flagged the coincidence (ADR-021 P2-F8) so it is recorded
+        // here rather than re-derived. They stay two keys because the agent reads
+        // them from two independent code paths with two different prefixes
+        // (`deliver_artifact` → `artifacts/<task_id>/`, `telemetry.py --trace` →
+        // `traces/<user_id>/<task_id>.jsonl.gz`), and the per-task SessionRole
+        // scopes each prefix separately. Collapsing them to one key would make
+        // splitting the buckets later a cross-package contract change; sending one
+        // bucket through two keys costs nothing today.
         artifactsBucketName: traceArtifactsBucket.bucket.bucketName,
         traceArtifactsBucketName: traceArtifactsBucket.bucket.bucketName,
         // The SessionRole is created above (before the orchestrator), so this needs

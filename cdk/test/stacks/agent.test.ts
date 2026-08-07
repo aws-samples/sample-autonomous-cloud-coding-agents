@@ -1003,6 +1003,29 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
     expect(policies).toContain('sts:TagSession');
   });
 
+  test('grants the MicroVM execution role writes on the SAME log group platform_config names', () => {
+    // ADR-021 P2-F4, and a stack-level property by construction: the construct can
+    // only grant against the log group the stack hands it, and the orchestrator can
+    // only deliver the name the stack puts in `agentPlatformConfig`. If those two
+    // ever came from different objects the deploy would still succeed and every
+    // per-task log line would AccessDenied — which is exactly what the live P2 run
+    // hit. So this asserts they are the SAME logical resource.
+    const policies = JSON.stringify(
+      Object.entries(template.findResources('AWS::IAM::Policy'))
+        .filter(([id]) => id.includes('LambdaMicrovmComputeExecutionRole')),
+    );
+    expect(policies).toContain('logs:CreateLogStream');
+    expect(policies).toContain('RuntimeApplicationLogGroup');
+
+    // ...and the orchestrator delivers that group's NAME as LOG_GROUP_NAME.
+    const orchestrator = Object.entries(template.findResources('AWS::Lambda::Function'))
+      .find(([id]) => id.includes('TaskOrchestratorOrchestratorFn'))!;
+    const logGroupEnv = JSON.stringify(
+      orchestrator[1].Properties.Environment.Variables.LOG_GROUP_NAME,
+    );
+    expect(logGroupEnv).toContain('RuntimeApplicationLogGroup');
+  });
+
   test('MicroVM resources carry the backend cost-allocation tag', () => {
     template.hasResourceProperties('AWS::Lambda::MicrovmImage', {
       Tags: Match.arrayWith([{ Key: 'abca:compute-backend', Value: 'lambda-microvm' }]),

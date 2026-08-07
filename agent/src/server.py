@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import sys
 import threading
 import time as _time_for_debug
@@ -1093,6 +1094,20 @@ def _parse_terminate_microvm_id(raw: bytes) -> str:
     anything unparseable, non-object, or missing simply yields ``""`` and the hook
     still acknowledges.
 
+    **``""`` is the EXPECTED result in production, not a degraded one** (ADR-021
+    P2-F8, live 2026-08-07). The service sends a body whose ``microvmId`` is the
+    empty string — ``{"microvm_id": ""}`` in the guest's own breadcrumb — unlike
+    ``/run``, where it is populated. So an empty id is normal-and-uninteresting and
+    is logged without comment; only a body that is genuinely unreadable (not JSON,
+    not an object) earns a warning, because that would mean the wire contract
+    changed shape rather than merely omitting a value.
+
+    The consequence for correlation, stated plainly because the hook's original
+    rationale claimed the opposite: **this hook cannot join the guest record to the
+    control-plane one.** ``/run``'s "hook accepted task_id=… microvm_id=…" line
+    carries that join (it always has, and its id IS populated); ``/terminate``'s
+    value is the pipeline-state snapshot it reports, not the id.
+
     Accepts both spellings of the field (``microvmId`` is the service's camelCase
     wire name; ``microvm_id`` is tolerated because it costs one ``or``). The id is
     used only as a log/response correlation string, never as an authorization or
@@ -1247,6 +1262,160 @@ def _resolve_microvm_run_payload(run_hook_payload: str) -> tuple[dict, Any]:
     )
 
 
+#: The ONE executable whose warm-up gates the snapshot, exec'd FIRST.
+#:
+#: WHY THIS EXISTS (ADR-021 P2-F5, live 2026-08-07). ``/ready`` used to answer 200
+#: the moment uvicorn was bound, and its own docstring said the point of the hook
+#: was that "the snapshot is taken with a warm server". The snapshot was warm for
+#: uvicorn and stone cold for the binary that does all the work: ``claude`` is a
+#: **225 MiB (236,305,136-byte) statically-linked ELF** whose pages had never been
+#: touched when the snapshot was captured. On a guest restored from that snapshot,
+#: the FIRST ``exec`` of it has to fault those pages in from lazily-restored
+#: storage — and ``runner.py``'s version probe timed out at 10 s, failing EVERY
+#: task at turn 0, reproducibly, while the same binary in the same image answers
+#: in under a second locally. Exec'ing it here means those pages are resident when
+#: the snapshot is taken, so every MicroVM cloned from it inherits them warm.
+#:
+#: It is REQUIRED (a failure answers 503 and ultimately fails the image build)
+#: because a snapshot that cannot exec ``claude`` cannot run a single task, and it
+#: goes FIRST so no best-effort warm-up can eat the budget it needs.
+#:
+#: ``--version`` is the cheapest argv that still exec's the real binary: it touches
+#: no network, writes nothing, and needs no credentials — which is what keeps
+#: ``/ready`` AWS-silent (see ``_build_hook_log``).
+_READY_WARMUP_REQUIRED: tuple[str, ...] = ("claude", "--version")
+
+#: Best-effort warm-ups, exec'd AFTER the required one and only with what is left
+#: of :data:`_READY_WARMUP_TOTAL_BUDGET_SECONDS`.
+#:
+#: Same mechanism, no measured problem: neither was observed to blow a timeout, and
+#: a snapshot missing them is still a snapshot that can start a task — so neither
+#: may fail a build, and neither may delay the 200 that a successful required
+#: warm-up has already earned. Nothing is added here on speculation: every entry
+#: costs build time and, more importantly, snapshot memory.
+_READY_WARMUP_OPTIONAL: tuple[tuple[str, ...], ...] = (
+    ("git", "--version"),
+    ("node", "--version"),
+)
+
+#: Budget for the REQUIRED warm-up alone, in seconds.
+#:
+#: Deliberately generous, and generosity is nearly free: the hook runs once per
+#: image build (twice per image — one build per chipset). A cold 225 MiB ``exec``
+#: is exactly the operation whose duration nobody here can predict, which is the
+#: whole lesson of P2-F5, where a tight bound on a version probe cost every task.
+_READY_WARMUP_REQUIRED_TIMEOUT_SECONDS = 120
+
+#: Ceiling for the WHOLE warm-up (required + every optional), in seconds.
+#:
+#: The hook's own budget is 300 s (``READY_HOOK_TIMEOUT_SECONDS`` in
+#: ``cdk/src/constructs/lambda-microvm-compute.ts``), so this leaves ~60 s of
+#: margin for uvicorn scheduling and the request itself. That margin is the point:
+#: per-command budgets do NOT compose — three commands at 120 s each is 360 s,
+#: which would blow a 300 s hook budget and turn a warm-up meant to prevent a
+#: runtime failure into a build failure. So the required command takes its own
+#: 120 s and the optional ones SHARE whatever is left of this ceiling, meaning the
+#: warm-up's worst case is bounded by one number that can be compared against the
+#: hook budget by eye.
+_READY_WARMUP_TOTAL_BUDGET_SECONDS = 240
+
+#: Below this many seconds of remaining budget an optional warm-up is skipped
+#: rather than started: a sub-second timeout cannot warm a large binary, it can
+#: only manufacture a scary log line.
+_READY_WARMUP_MIN_TIMEOUT_SECONDS = 1
+
+
+def _warm_one_binary(argv: tuple[str, ...], timeout: float) -> str | None:
+    """Exec ``argv`` once, bounded by ``timeout``. Returns a failure tag or ``None``.
+
+    Every failure mode of ``subprocess.run`` is caught here rather than propagating
+    — a warm-up defect must produce the hook's own honest 503, not a FastAPI 500
+    that reports a hook failure with no explanation in the build log. The caller
+    decides whether the returned tag is fatal.
+    """
+    name = argv[0]
+    started = _time_for_debug.monotonic()
+    try:
+        # Fixed argv from the module constants above, `shell=False`, and no user- or
+        # payload-derived input anywhere on this path (`/ready` takes no request
+        # body at all) — so there is no injection surface here.
+        completed = subprocess.run(
+            list(argv),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except Exception as exc:
+        # FileNotFoundError (not on PATH), TimeoutExpired, PermissionError, …
+        elapsed = _time_for_debug.monotonic() - started
+        _build_hook_log(f"/ready hook: warm-up of {name!r} FAILED after {elapsed:.1f}s: {exc!r}")
+        return f"{name}:{type(exc).__name__}"
+
+    elapsed = _time_for_debug.monotonic() - started
+    # Version strings only — no repo content, no credentials — and the first line
+    # is enough to identify the binary that was warmed.
+    detail = (completed.stdout or completed.stderr or "").strip().splitlines()
+    version = detail[0] if detail else ""
+    if completed.returncode != 0:
+        _build_hook_log(
+            f"/ready hook: warm-up of {name!r} exited {completed.returncode} "
+            f"after {elapsed:.1f}s ({version!r})"
+        )
+        return f"{name}:exit{completed.returncode}"
+
+    _build_hook_log(f"/ready hook: warmed {name!r} in {elapsed:.1f}s (version={version!r})")
+    return None
+
+
+def _warm_snapshot_binaries() -> list[str]:
+    """Warm the snapshot's heavyweight binaries; return the REQUIRED failures.
+
+    An empty list means the snapshot is warm enough to capture. Best-effort
+    failures are logged and never appear in the return value.
+
+    Ordering and budgeting are the contract, not an implementation detail:
+
+    * the REQUIRED command runs FIRST, with its own
+      :data:`_READY_WARMUP_REQUIRED_TIMEOUT_SECONDS`, so no best-effort warm-up can
+      starve the one that decides whether the snapshot is usable;
+    * if it fails, the optional ones are SKIPPED — the image build is already going
+      to fail, so spending more of the hook budget warming ``git`` buys nothing and
+      delays the 503 the service is waiting for;
+    * the optional ones then SHARE what is left of
+      :data:`_READY_WARMUP_TOTAL_BUDGET_SECONDS`, each bounded by the remaining
+      budget, so a hung optional command can delay the 200 by at most the remainder
+      and can never prevent it. Once the remainder falls below
+      :data:`_READY_WARMUP_MIN_TIMEOUT_SECONDS` the rest are skipped with a log line.
+
+    Makes ZERO AWS calls and no network calls: ``--version`` execs plus stdout
+    lines, so ``/ready``'s AWS-silence property is intact.
+    """
+    deadline = _time_for_debug.monotonic() + _READY_WARMUP_TOTAL_BUDGET_SECONDS
+
+    failure = _warm_one_binary(_READY_WARMUP_REQUIRED, _READY_WARMUP_REQUIRED_TIMEOUT_SECONDS)
+    if failure is not None:
+        _build_hook_log(
+            f"/ready hook: skipping best-effort warm-ups after {_READY_WARMUP_REQUIRED[0]!r} "
+            "failed — the image build cannot succeed, so the 503 should not wait"
+        )
+        return [failure]
+
+    for argv in _READY_WARMUP_OPTIONAL:
+        remaining = deadline - _time_for_debug.monotonic()
+        if remaining < _READY_WARMUP_MIN_TIMEOUT_SECONDS:
+            _build_hook_log(
+                f"/ready hook: skipping best-effort warm-up of {argv[0]!r} — "
+                f"{remaining:.1f}s left of the {_READY_WARMUP_TOTAL_BUDGET_SECONDS}s warm-up "
+                "ceiling. The required warm-up already succeeded, so this does not "
+                "block the snapshot."
+            )
+            continue
+        _warm_one_binary(argv, remaining)
+
+    return []
+
+
 @app.post(f"{MICROVM_HOOK_PREFIX}/ready")
 def microvm_ready():
     """MicroVM image ``/ready`` build hook — "the application has initialised".
@@ -1256,22 +1425,52 @@ def microvm_ready():
     hook enabled and nothing serving it, both chipset builds fail with "Ready hook
     check failed: the application returned a client error (HTTP 4xx) response".
 
-    Reaching this handler already proves everything ``/ready`` needs: uvicorn is
-    bound on the hook port and ``server`` imported cleanly (which pulls in
-    ``pipeline`` → ``runner`` → the policy engine, so a missing policy file or a
-    broken import fails the BUILD instead of the first task). The *shape* checks —
-    hook routes registered, interpreter and contract sanity — belong to
-    ``/validate``, which reports them individually.
+    Reaching this handler already proves everything the ORIGINAL ``/ready``
+    contract needed: uvicorn is bound on the hook port and ``server`` imported
+    cleanly (which pulls in ``pipeline`` → ``runner`` → the policy engine, so a
+    missing policy file or a broken import fails the BUILD instead of the first
+    task). The *shape* checks — hook routes registered, interpreter and contract
+    sanity — belong to ``/validate``, which reports them individually.
+
+    **It then WARMS the snapshot** (:func:`_warm_snapshot_binaries`, ADR-021
+    P2-F5). This is the hook's second job and the reason it can now take seconds
+    rather than microseconds: the snapshot is only as warm as the pages that were
+    touched before it was captured, and the 225 MiB ``claude`` binary was never
+    among them — which failed every P2 smoke task at turn 0. A **required**
+    warm-up failure returns **503**, the hook contract's "not ready yet" signal,
+    so the service keeps asking within the ``/ready`` budget and — if it never
+    clears — fails the image build. Failing the build is right: a snapshot that
+    cannot exec ``claude`` cannot run a single task, and discovering that at build
+    time costs one build instead of every task.
+
+    The whole warm-up is bounded by
+    :data:`_READY_WARMUP_TOTAL_BUDGET_SECONDS` (240 s), which sits inside the
+    hook's own 300 s budget with margin to spare — the required command takes its
+    own 120 s and the best-effort ones share the remainder, so this handler cannot
+    talk itself past the deadline the service is holding it to.
 
     Makes ZERO AWS calls, including its own logging (``_build_hook_log``): this
     runs under the build role, and a client built here would freeze a build-time
-    boto3 session into the snapshot.
+    boto3 session into the snapshot. A ``--version`` subprocess is not an AWS call
+    and touches no network, so the warm-up does not weaken that property.
 
-    Declared ``def`` rather than ``async def`` on purpose: Starlette runs sync
-    handlers in a threadpool, so this never competes with the event loop that has
-    to keep ``GET /ping`` fast.
+    Declared ``def`` rather than ``async def`` on purpose, and now load-bearing
+    rather than stylistic: Starlette runs sync handlers in a threadpool, so a
+    warm-up that blocks for seconds never competes with the event loop that has to
+    keep ``GET /ping`` fast.
     """
-    _build_hook_log("/ready hook: server is up, reporting ready for snapshot")
+    _build_hook_log("/ready hook: server is up, warming the snapshot before it is taken")
+    failures = _warm_snapshot_binaries()
+    if failures:
+        _build_hook_log(
+            f"/ready hook: NOT ready — required warm-up failed for {failures}. "
+            "The snapshot would launch MicroVMs that cannot exec these binaries."
+        )
+        return JSONResponse(
+            status_code=503,
+            content={"status": "not_ready", "failed_warmups": failures},
+        )
+    _build_hook_log("/ready hook: reporting ready for snapshot")
     return {"status": "ready"}
 
 
@@ -1311,6 +1510,14 @@ def microvm_validate():
     Bedrock reachability, Memory access, tool availability — are NOT implementable
     here: every one of them would AccessDenied and fail every image build. They
     belong to the first task's own error handling, not to a build hook.
+
+    The one member of that list that turned out to be *partly* implementable landed
+    on ``/ready`` instead, and for a different reason: ``/ready`` warms (and so
+    incidentally proves the execability of) the local ``claude`` binary, because a
+    cold 225 MiB ELF in the snapshot killed every task at turn 0 (ADR-021 P2-F5).
+    That is a local ``exec``, not an AWS call, so it violates nothing above — but it
+    belongs to the hook whose 200 gates the snapshot, not to the hook that reports
+    check results.
 
     It must also not touch credential resolution: ``platform_config`` has not
     arrived yet (it comes with ``/run``), and any client built here would leave a
@@ -1426,6 +1633,10 @@ async def microvm_terminate(request: Request):
         # Final structured line. Fire-and-forget CloudWatch (LOG_GROUP_NAME is
         # present at runtime because /run installed it) so a terminated MicroVM
         # leaves a last breadcrumb in the task's log group; stdout regardless.
+        #
+        # `microvm_id` is normally `""` here — that is what the service sends on
+        # this hook (P2-F8, see `_parse_terminate_microvm_id`), not a parse
+        # failure. The load-bearing fields are the pipeline-state ones.
         _debug_cw(
             "/terminate hook: "
             + json.dumps(

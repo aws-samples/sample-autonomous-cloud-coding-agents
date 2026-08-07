@@ -84,34 +84,82 @@ export const MICROVM_ARTIFACT_OBJECT_KEY = 'microvm-images/agent-artifact.zip';
 const AGENT_HOOK_PORT = 8080;
 
 /**
- * `/run` hook path, as SERVED by `agent/src/server.py`.
+ * Value every hook field on `AWS::Lambda::MicrovmImage` takes to turn a hook ON.
  *
- * Load-bearing in P1: it is how the task payload reaches the agent
- * (`runHookPayload`, ADR-021 sub-decision 3) — there is no other
- * orchestrator→agent channel on this backend.
+ * **The field is an ENUM, not a path** — `[DISABLED, ENABLED]`. The CDK L1 types
+ * `hooks.microvmHooks.run` and its three siblings as plain `string` and documents
+ * no allowed values, which is why this construct originally sent the agent's
+ * route there. CloudFormation **rejected all four at change-set early validation**
+ * (live 2026-08-06, ADR-021 P2-F2 — the stack was never touched, so there was no
+ * rollback to read):
  *
- * The value is the service's fixed lifecycle-hook route, not a path of our
- * choosing. Live verification (2026-07-31, issue #645) found that the
- * `CreateMicrovmImage` **API** model has no hook-path field at all — it takes
- * only `ENABLED`/`DISABLED` plus a timeout — while the generated
- * CloudFormation type still types these as strings. Setting the string to the
- * route the agent actually answers is therefore correct under either reading:
- * if CloudFormation genuinely routes on it, it points at the real endpoint; if
- * it is ignored (as the API model implies), the value is inert. Keep in lockstep
- * with `MICROVM_HOOK_PREFIX` in `agent/src/server.py`.
+ * > /aws/lambda-microvms/runtime/v1/run is not a valid enum value. Supported
+ * > values: [DISABLED, ENABLED] (at
+ * > /Resources/…/Properties/Hooks/MicrovmHooks/Run)
+ *
+ * So the CloudFormation surface is IDENTICAL to the `CreateMicrovmImage` API
+ * surface (`--hooks '{"microvmHooks":{"run":"ENABLED",…}}'`), not different from
+ * it as the previous comment here claimed. There is no hook-path field on either
+ * surface: the service calls fixed well-known routes, which
+ * {@link MICROVM_AGENT_HOOK_ROUTES} records and the live build/run logs confirm.
+ *
+ * `DISABLED` is never emitted: a hook the agent does not serve is OMITTED rather
+ * than disabled, so the exactness test can assert the declared set in both
+ * directions (see `/suspend` + `/resume`, P3).
  */
-const RUN_HOOK_PATH = '/aws/lambda-microvms/runtime/v1/run';
+const HOOK_ENABLED = 'ENABLED';
 
-/** `/run` hook budget (seconds). The hook only validates + starts the pipeline
- *  asynchronously, so it stays well inside the service's 1–60 s hook window. */
+/**
+ * Route prefix the MicroVM service POSTs its lifecycle hooks to, and the prefix
+ * the agent mounts them under (`MICROVM_HOOK_PREFIX` in `agent/src/server.py`).
+ */
+const MICROVM_HOOK_ROUTE_PREFIX = '/aws/lambda-microvms/runtime/v1';
+
+/**
+ * The service's fixed hook ROUTES, keyed by hook name — the paths
+ * `agent/src/server.py` must serve.
+ *
+ * ## ⚠️ These are AGENT ROUTE CONSTANTS ONLY. Never send them to an AWS API.
+ *
+ * They were previously passed as the `hooks.*` property VALUES on the L1, on the
+ * reasoning that the generated CloudFormation type accepts strings and documents
+ * no allowed-value constraint. CloudFormation refused every one of them
+ * (P2-F2 — see {@link HOOK_ENABLED} for the verbatim early-validation output):
+ * the hook fields are `ENABLED`/`DISABLED` enums on BOTH the CloudFormation and
+ * the API surface, and neither surface accepts a path at all.
+ *
+ * The routes are still worth declaring here because they are a CROSS-PACKAGE
+ * CONTRACT that nothing else in the CDK tree records: the service POSTs to these
+ * exact paths (live 2026-08-06 — `"POST /aws/lambda-microvms/runtime/v1/ready
+ * HTTP/1.1" 200 OK`, and the same for `/validate`, `/run` and `/terminate`), so a
+ * prefix drift between this map and the agent's `MICROVM_HOOK_PREFIX` surfaces as
+ * a failed image build (`/ready`, `/validate`) or a failed lifecycle transition on
+ * a real task (`/run`, `/terminate`). The construct test compares THIS map — not
+ * the rendered template, which no longer contains a path — against the routes the
+ * agent serves.
+ */
+export const MICROVM_AGENT_HOOK_ROUTES = {
+  ready: `${MICROVM_HOOK_ROUTE_PREFIX}/ready`,
+  validate: `${MICROVM_HOOK_ROUTE_PREFIX}/validate`,
+  run: `${MICROVM_HOOK_ROUTE_PREFIX}/run`,
+  terminate: `${MICROVM_HOOK_ROUTE_PREFIX}/terminate`,
+} as const;
+
+/**
+ * `/run` runtime-hook budget (seconds).
+ *
+ * `/run` is how the task payload reaches the agent (`runHookPayload`, ADR-021
+ * sub-decision 3) — there is no other orchestrator→agent channel on this
+ * backend. The hook only validates + starts the pipeline asynchronously, so it
+ * stays well inside the service's 1–60 s runtime-hook window.
+ */
 const RUN_HOOK_TIMEOUT_SECONDS = 60;
 
 /**
- * `/ready` build hook path, as SERVED by `agent/src/server.py` (see
- * {@link RUN_HOOK_PATH} for why the string is the real route).
+ * `/ready` build-hook budget (seconds).
  *
- * **Mandatory, not optional.** `CreateMicrovmImage` rejects an image that
- * enables ANY lifecycle hook without `/ready` (live 2026-07-31):
+ * `/ready` is **mandatory, not optional**: `CreateMicrovmImage` rejects an image
+ * that enables ANY lifecycle hook without it (live 2026-07-31):
  *
  * > The ready (/ready) MicroVM image hook must be enabled when any MicroVM
  * > lifecycle hook (run, resume, suspend, or terminate) is enabled. The ready
@@ -119,68 +167,72 @@ const RUN_HOOK_TIMEOUT_SECONDS = 60;
  * > is taken in a ready state.
  *
  * So ADR-021's original "declare `/run` in P1, serve it in P2" plan was not a
- * reachable service state: `/ready` + `/run` now land together in P1.
+ * reachable service state: `/ready` + `/run` land together in P1.
+ *
+ * **The budget is 300 s, not 60 s, because as of the P2-F5 fix `/ready` does real
+ * work.** It no longer just reports that uvicorn is bound: it warms the 225 MiB
+ * `claude` binary (`agent/src/server.py` → `_warm_snapshot_binaries`) so the
+ * binary's pages are resident when the snapshot is taken, instead of being faulted
+ * in lazily on the first task and blowing a timeout there (the defect that failed
+ * every P2 smoke task at turn 0). A cold 225 MiB `exec` is the one thing on this
+ * path that can plausibly take tens of seconds, and the build hook window allows
+ * up to 3600 s, so a 60 s budget would trade the runtime failure for a build
+ * failure. It stays far below the service ceiling: the cost of a too-generous
+ * budget is only how long the service waits before calling a permanently-wedged
+ * snapshot broken.
+ *
+ * The number is chosen against the agent's own warm-up ceiling, not guessed:
+ * `_READY_WARMUP_TOTAL_BUDGET_SECONDS` in `agent/src/server.py` bounds the WHOLE
+ * warm-up (required command + every best-effort one, which share the remainder) at
+ * **240 s**, leaving ~60 s here for uvicorn scheduling and the request itself.
+ * Per-command timeouts deliberately do NOT compose on the agent side — three
+ * commands at 120 s each would be 360 s and would blow this budget, turning a fix
+ * for a runtime failure into a build failure. If that ceiling moves, move this
+ * with it.
  */
-const READY_HOOK_PATH = '/aws/lambda-microvms/runtime/v1/ready';
-
-/** `/ready` build-hook budget (seconds). The agent answers as soon as uvicorn is
- *  bound, so the snapshot is taken with a warm server. */
-const READY_HOOK_TIMEOUT_SECONDS = 60;
+const READY_HOOK_TIMEOUT_SECONDS = 300;
 
 /**
- * `/validate` build hook path, as SERVED by `agent/src/server.py` (see
- * {@link RUN_HOOK_PATH} for why the string is the real route).
+ * `/validate` build-hook budget (seconds).
  *
- * Declared as of P2, when the agent started serving it. What the hook actually
+ * `/validate` is declared as of P2, when the agent started serving it. What it
  * asserts is narrower than ADR-021 first sketched, and the narrowing is a
- * consequence of THIS construct's IAM: `/validate` runs during the image build
- * under {@link LambdaMicrovmCompute.buildRole}, which holds only `s3:GetObject`
- * on the artifact plus log writes. So the "deeper warm-up assertions" (Bedrock
+ * consequence of THIS construct's IAM: it runs during the image build under
+ * {@link LambdaMicrovmCompute.buildRole}, which holds only `s3:GetObject` on the
+ * artifact plus log writes. So the "deeper warm-up assertions" (Bedrock
  * reachability, Memory access, tool availability) are not implementable here —
- * each would `AccessDenied` and fail every build. The agent's hook is therefore
- * an in-process self-check (server alive, every declared hook route registered,
+ * each would `AccessDenied` and fail every build. The agent's hook is therefore an
+ * in-process self-check (server alive, every declared hook route registered,
  * interpreter floor, cross-package `platform_config` contract loaded), which is
- * exactly the class of failure a build hook CAN catch: a typo'd hook prefix
- * would otherwise surface as a failed lifecycle transition on the first real
- * task instead of as a failed build.
- */
-const VALIDATE_HOOK_PATH = '/aws/lambda-microvms/runtime/v1/validate';
-
-/**
- * `/validate` build-hook budget (seconds) — deliberately the same as
- * {@link READY_HOOK_TIMEOUT_SECONDS}.
+ * exactly the class of failure a build hook CAN catch: a typo'd hook prefix would
+ * otherwise surface as a failed lifecycle transition on the first real task
+ * instead of as a failed build.
  *
- * The checks themselves are sub-millisecond (no AWS calls, no I/O beyond a
- * stdout line), so the budget is not sized for the work: it is sized for the
+ * The checks themselves are sub-millisecond (no AWS calls, no I/O beyond a stdout
+ * line), so the budget is not sized for the work: it is sized for the
  * still-initialising path, where the agent answers **503** until module import
- * completes. That is the same "the server may not be up yet" allowance `/ready`
- * needs, on the same build path, in the same process — so one number covers both
- * and nobody has to reason about which build hook got which budget. Well inside
- * the service's 1–3600 s window, and set explicitly rather than relying on the
- * 30 s default: a permanently failing check SHOULD fail the image build, and the
- * budget is what decides how long the service waits before calling it that.
+ * completes. 60 s covers that with orders of magnitude to spare. This used to be
+ * an alias for {@link READY_HOOK_TIMEOUT_SECONDS} on the argument that one number
+ * should cover both build hooks; the two DECOUPLED when `/ready` gained the
+ * binary warm-up (P2-F5) and `/validate` did not, so sharing a number would now
+ * mean sizing `/validate` for work it does not do. Set explicitly rather than
+ * relying on the service's 30 s default: a permanently failing check SHOULD fail
+ * the image build, and the budget is what decides how long the service waits
+ * before calling it that.
  */
-const VALIDATE_HOOK_TIMEOUT_SECONDS = READY_HOOK_TIMEOUT_SECONDS;
-
-/**
- * `/terminate` runtime hook path, as SERVED by `agent/src/server.py` (see
- * {@link RUN_HOOK_PATH} for why the string is the real route).
- *
- * Declared as of P2. It is a log-and-acknowledge breadcrumb, NOT a shutdown
- * mechanism: the orchestrator finalizes the task and *then* calls
- * `TerminateMicrovm`, so the hook must not write terminal task status (it would
- * race the finalization it follows) and must not join the pipeline thread. Its
- * value is the last structured line in the task's log group from inside the
- * guest — which, on a substrate where nothing self-terminates, is the difference
- * between "the VM was reaped" and "we know what the agent was doing when it was".
- */
-const TERMINATE_HOOK_PATH = '/aws/lambda-microvms/runtime/v1/terminate';
+const VALIDATE_HOOK_TIMEOUT_SECONDS = 60;
 
 /**
  * `/terminate` runtime-hook budget (seconds).
  *
- * The one hook where a GENEROUS budget buys nothing and costs something. There
- * is nothing to drain — `_ProgressWriter` does a synchronous `put_item` per
+ * `/terminate` is declared as of P2. It is a log-and-acknowledge breadcrumb, NOT
+ * a shutdown mechanism: the orchestrator finalizes the task and *then* calls
+ * `TerminateMicrovm`, so the hook must not write terminal task status (it would
+ * race the finalization it follows) and must not join the pipeline thread. Its
+ * value is the last structured line in the task's log group from inside the guest.
+ *
+ * This is the one hook where a GENEROUS budget buys nothing and costs something.
+ * There is nothing to drain — `_ProgressWriter` does a synchronous `put_item` per
  * event, so every progress write is already durable when this hook is called —
  * and the handler never joins the pipeline thread, so it completes in
  * milliseconds by construction. Meanwhile the budget bounds how long teardown
@@ -264,8 +316,18 @@ const HTTPS_PORT = 443;
  */
 const HTTP_PORT = 80;
 
-/** Graviton/ARM64: the agent image is ARM64 on every backend. */
-const CPU_ARCHITECTURE = 'arm64';
+/**
+ * Graviton/ARM64: the agent image is ARM64 on every backend.
+ *
+ * The value is the service's **enum member spelling**, `ARM_64` — not the
+ * lowercase `arm64` Docker/CDK use elsewhere. The CDK L1 types
+ * `cpuConfigurations[].architecture` as a plain `string` and documents no allowed
+ * values, and `arm64` was rejected at change-set early validation (live
+ * 2026-08-06, ADR-021 P2-F2): *"arm64 is not a valid enum value. Supported
+ * values: [ARM_64]"*. Matches `--cpu-configurations '[{"architecture":"ARM_64"}]'`
+ * in `cdk/scripts/package-microvm-artifact.sh`, which had it right all along.
+ */
+const CPU_ARCHITECTURE = 'ARM_64';
 
 /**
  * Resource-name half of the Lambda-managed **`NO_INGRESS`** network connector
@@ -454,6 +516,32 @@ export interface LambdaMicrovmComputeProps extends LambdaMicrovmImageInputs {
   readonly agentMemory?: AgentMemory;
 
   /**
+   * The platform's APPLICATION_LOGS group — the same log group whose NAME travels
+   * to the guest as `platform_config.log_group_name` (`stacks/agent.ts` →
+   * `TaskOrchestrator.agentPlatformConfig` → `LOG_GROUP_NAME`). When provided, the
+   * MicroVM **execution role** gets `logs:CreateLogStream` + `logs:PutLogEvents`
+   * on it.
+   *
+   * Not optional in spirit — omitted only in isolated construct tests. P2 wired
+   * the name into `platform_config`, which makes the agent ATTEMPT the write, and
+   * shipped without the matching grant, so every structured per-task log line was
+   * denied (live 2026-08-07, ADR-021 P2-F4):
+   *
+   * > User: …:assumed-role/…LambdaMicrovmComputeExecutionRo…/Lambda-microvmsExecutor-…
+   * > is not authorized to perform: logs:CreateLogStream on resource:
+   * > …:log-group:/aws/vendedlogs/bedrock-agentcore/runtime/APPLICATION_LOGS/…
+   *
+   * The role's OTHER logs grant ({@link LambdaMicrovmCompute.grantMicrovmLogWrites})
+   * is scoped to the service's own `/aws/lambda-microvms/*` namespace and cannot
+   * cover this group — the two namespaces are unrelated. Non-fatal (the agent
+   * degrades to stdout, which the MicroVM log group captures) but it empties the
+   * platform's canonical per-task observability streams, `METRICS_REPORT`
+   * included, on this backend only. Exactly the omission class the P2 Bedrock /
+   * Secrets Manager / Memory grants exist to close.
+   */
+  readonly applicationLogGroup?: logs.ILogGroup;
+
+  /**
    * ARN of the Lambda-managed base MicroVM image to build on
    * (`aws lambda-microvms list-managed-microvm-images`), e.g.
    * `arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1`.
@@ -565,8 +653,10 @@ export interface LambdaMicrovmComputeProps extends LambdaMicrovmImageInputs {
  *  3. **Build role** — assumed by Lambda during image creation: `s3:GetObject`
  *     on the artifact object and CloudWatch Logs writes. Without it Lambda
  *     cannot emit build logs, which makes a failed snapshot build undebuggable.
- *  4. **Execution role** — assumed by the running MicroVM: CloudWatch Logs,
- *     read-only on the payload bucket, the P2 runtime-parity grants (GitHub PAT +
+ *  4. **Execution role** — assumed by the running MicroVM: CloudWatch Logs (both
+ *     the service's own `/aws/lambda-microvms/*` namespace and the platform
+ *     APPLICATION_LOGS group whose name `platform_config` delivers), read-only on
+ *     the payload bucket, the P2 runtime-parity grants (GitHub PAT +
  *     channel-OAuth secret reads, scoped Bedrock invocation, AgentCore Memory,
  *     `ec2:DescribeAvailabilityZones` for a CDK repo's synth gate), and — when a
  *     SessionRole is wired — admission to the per-task SessionRole, which is the
@@ -598,8 +688,8 @@ export interface LambdaMicrovmComputeProps extends LambdaMicrovmImageInputs {
  * and `/run` (`agent/src/server.py`), because live verification proved the
  * original "declare in P1, serve in P2" split was not a reachable service state
  * — `CreateMicrovmImage` refuses any lifecycle hook without `/ready` (see
- * {@link READY_HOOK_PATH}), and an image with no hooks at all cannot receive a
- * `runHookPayload`.
+ * {@link READY_HOOK_TIMEOUT_SECONDS}), and an image with no hooks at all cannot
+ * receive a `runHookPayload`.
  *
  * P2 adds the two halves an agent needs to actually finish a task: the runtime
  * IAM parity on the execution role (see item 4 above) and non-secret
@@ -607,9 +697,10 @@ export interface LambdaMicrovmComputeProps extends LambdaMicrovmImageInputs {
  * (`handlers/shared/strategies/lambda-microvm-strategy.ts`) — the substitute for
  * the env block the other two backends get at deploy time, since the snapshot must
  * not bake it in. It also declares the two hooks the agent gained in the same
- * phase: `/validate` (build-time self-check — see {@link VALIDATE_HOOK_PATH} for
- * why the build role's permissions bound what it can assert) and `/terminate`
- * (in-guest teardown breadcrumb — {@link TERMINATE_HOOK_PATH}).
+ * phase: `/validate` (build-time self-check — see
+ * {@link VALIDATE_HOOK_TIMEOUT_SECONDS} for why the build role's permissions bound
+ * what it can assert) and `/terminate` (in-guest teardown breadcrumb —
+ * {@link TERMINATE_HOOK_TIMEOUT_SECONDS}).
  *
  * What is still unverified is the thing no amount of wiring can assert: an
  * end-to-end clone → change → PR run on this substrate, plus egress specifics and
@@ -800,19 +891,88 @@ export class LambdaMicrovmCompute extends Construct {
     //
     // The permission set below is the minimal recipe validated standalone in that
     // run: `AWSLambdaVPCAccessExecutionRole` plus the ENI/tag/private-IP actions
-    // the managed policy omits. Trust mirrors the build/execution roles
-    // (`lambda.amazonaws.com` + `aws:SourceAccount`), so the confused-deputy
-    // posture is identical on all three.
+    // the managed policy omits.
     //
     // ONE role for BOTH connectors: they differ only in security group, both are
     // created and owned by this construct in the same VPC, and a second identical
     // role would double the IAM surface a reviewer has to check for no isolation
     // gain (the role manages ENIs, not traffic).
-    const microvmAssumedBy = new iam.ServicePrincipal('lambda.amazonaws.com', {
-      conditions: {
-        StringEquals: { 'aws:SourceAccount': stack.account },
-      },
-    });
+    //
+    // --- TRUST POLICY: bare service principal, NO source conditions (P2-F1/F3) ---
+    //
+    // Shared by all three MicroVM-facing roles (this one, `buildRole`,
+    // `executionRole`) because the decision is one decision. `lambda.amazonaws.com`
+    // is the correct principal — there is no `microvms.lambda.amazonaws.com`, and
+    // using one is rejected at role-creation time with MalformedPolicyDocument.
+    //
+    // **`aws:SourceAccount` is deliberately absent, and this is NOT an oversight.**
+    // The Lambda MicroVMs service does not populate ANY source condition key when
+    // it assumes these roles, so a trust policy carrying one is simply
+    // unassumable. Live 2026-08-06/07 (`docs/verification/645-p2-smoke-runbook.md`,
+    // P2-F1 + P2-F3 — one root cause, two symptoms):
+    //
+    //  - Both `AWS::Lambda::NetworkConnector` resources CREATE_FAILED,
+    //    deterministically, on a freshly deleted stack: "The service is unable to
+    //    assume the provided NetworkConnectorOperatorRole. Please verify the trust
+    //    policy on the role." Removing the condition → both connectors created
+    //    within a second. (That message is also the classic IAM-propagation
+    //    symptom, which is why the determinism matters: a re-run is the obvious
+    //    and wrong first guess.)
+    //  - `RunMicrovm` failed with a MISLEADING `iam:PassRole` AccessDenied on the
+    //    CALLER (the orchestrator), even though the orchestrator's grant was
+    //    present, `simulate-principal-policy` said `allowed`, an unconditioned
+    //    `iam:PassRole` was also denied, and there was no permissions boundary.
+    //    The real cause was the EXECUTION role's trust: removing the conditions
+    //    made the next submission reach `RUNNING` in 6 s. So the service reports a
+    //    role it cannot pass-and-assume as a caller-side PassRole denial.
+    //
+    // The irony worth recording, because it is how the regression got here: P1's
+    // standalone-validated operator-role probe trusted `lambda.amazonaws.com` with
+    // NO conditions and worked. The P1 F2 fix then wrote "trust mirrors the
+    // build/execution roles (`lambda.amazonaws.com` + `aws:SourceAccount`)" — and
+    // that mirroring is exactly what broke it. Consistency with the wrong sibling.
+    //
+    // `sts:TagSession` stays (see {@link grantTagSession}) on the build and
+    // execution roles: the service needs both actions, and it was never the
+    // problem. `aws:SourceArn` stays out for the same reason plus its own (the
+    // image does not exist yet at build time, and the docs disagree about the ARN
+    // separator).
+    //
+    // COMPENSATING CONTROLS, since the confused-deputy condition is not available.
+    // Enumerated PER ROLE, because "only the orchestrator can pass them" is true of
+    // exactly one of the three and stating it of all three would be a false comfort:
+    //  1. Who can pass each role to `lambda.amazonaws.com`:
+    //      - `executionRole` — the ORCHESTRATOR only, at `RunMicrovm`, via an
+    //        `iam:PassRole` scoped to this role's EXACT ARN plus
+    //        `iam:PassedToService: lambda.amazonaws.com` (`task-orchestrator.ts`,
+    //        sid `MicrovmPassExecutionRole`). CloudFormation never passes it. That
+    //        identity-side condition was EXONERATED live — an unconditioned
+    //        `iam:PassRole` was denied too — so it stays.
+    //      - `buildRole` — the CLOUDFORMATION DEPLOYMENT ROLE, at
+    //        `CreateMicrovmImage` (this L1's `buildRoleArn`), via the bootstrap
+    //        `infrastructure` policy's `IAMPassRole`; plus any operator running
+    //        `package-microvm-artifact.sh --create-image` with their own credentials.
+    //      - `connectorOperatorRole` — the CLOUDFORMATION DEPLOYMENT ROLE, at
+    //        connector create/update, via that same statement.
+    //     That deploy-role grant is NAME-PREFIX-scoped (`role/backgroundagent-dev-*`
+    //     + the `iam:PassedToService` allowlist), not per-role, so it does not
+    //     distinguish these three from each other or from any other stack role. It
+    //     is the pre-existing bootstrap posture, and a trust condition here would
+    //     never have constrained the deploy role anyway.
+    //  2. Every resource these roles can reach is account-scoped by ARN EXCEPT two
+    //     deliberate `Resource: '*'` statements, both justified in the cdk-nag IAM5
+    //     suppressions at the bottom of this constructor: `ec2:DescribeAvailability
+    //     Zones` on the execution role (no resource-level scoping exists; read-only)
+    //     and the operator role's ENI/tag/private-IP statement (the ENI does not
+    //     exist yet at authorization time). The Logs grants are PREFIX-scoped
+    //     (`MICROVM_LOG_GROUP_PREFIX/*` plus one named log group) — wildcards inside
+    //     a namespace, not `*`. (The orchestrator's `lambda:PassNetworkConnector` is
+    //     `*` too, for a different and unavoidable reason: the AWS-managed
+    //     connectors live in the `aws` account. See `task-orchestrator.ts`.)
+    //  3. The roles hold no `iam:*`, no cross-account trust, and the only
+    //     `sts:AssumeRole` any of them has is the execution role's, scoped to the
+    //     per-task SessionRole.
+    const microvmAssumedBy = new iam.ServicePrincipal('lambda.amazonaws.com');
     this.connectorOperatorRole = new iam.Role(this, 'ConnectorOperatorRole', {
       assumedBy: microvmAssumedBy,
       description:
@@ -944,30 +1104,14 @@ export class LambdaMicrovmCompute extends Construct {
 
     // --- Roles ---
     //
-    // TRUST POLICY (verified against the AWS developer guide, "Lambda MicroVMs
-    // → Security and permissions"): the build role, the execution role and the
-    // connector operator role are all assumed by the ORDINARY Lambda service
-    // principal `lambda.amazonaws.com` (`microvmAssumedBy`, declared with the
-    // connector above because the operator role needs it first). The build and
-    // execution roles additionally need `sts:TagSession` alongside
-    // `sts:AssumeRole`. There is no `microvms.lambda.amazonaws.com` principal —
-    // using one is rejected at role-creation time with MalformedPolicyDocument.
-    //
-    // CONFUSED-DEPUTY: `aws:SourceAccount` is pinned to this account, which is
-    // the meaningful protection here — `lambda.amazonaws.com` is shared with
-    // every other Lambda feature, so without it any caller who could make
-    // Lambda act in *some* account could target these roles.
-    //
-    // `aws:SourceArn` is deliberately NOT added. Field reports of this exact
-    // pattern (an `ArnLike` on `…:microvm-image/*`) have the service failing to
-    // satisfy the condition — the image does not exist yet at build time — so
-    // both `create-microvm-image` and `run-microvm` fail with "unable to assume
-    // role". The AWS docs themselves are inconsistent about the separator in
-    // MicroVM image ARNs (`microvm-image:<name>` vs `microvm-image/<name>`),
-    // which is a second reason an ARN condition here is a deploy-time
-    // foot-gun. The live 2026-07-31 run confirmed the observed image ARN uses
-    // the `microvm-image:<name>` (colon) form; narrowing to `aws:SourceArn`
-    // stays a P2 candidate rather than a P1 change.
+    // TRUST POLICY: all three MicroVM-facing roles share `microvmAssumedBy` —
+    // the BARE `lambda.amazonaws.com` service principal, with NO source
+    // conditions. The full decision, the live evidence that forced it (P2-F1 /
+    // P2-F3) and the compensating controls are documented at that constant's
+    // declaration, above the connector operator role that needs it first. The
+    // build and execution roles additionally need `sts:TagSession` alongside
+    // `sts:AssumeRole` (developer guide, "Trust policies"), which
+    // {@link grantTagSession} adds.
 
     this.buildRole = new iam.Role(this, 'BuildRole', {
       assumedBy: microvmAssumedBy,
@@ -994,6 +1138,17 @@ export class LambdaMicrovmCompute extends Construct {
     });
     grantTagSession(this.executionRole, microvmAssumedBy);
     this.grantMicrovmLogWrites(this.executionRole);
+
+    // The APPLICATION_LOGS group the agent is TOLD to write to (P2-F4). Separate
+    // from `grantMicrovmLogWrites` above and not reachable from it: that grant
+    // covers the service-owned `/aws/lambda-microvms/*` namespace, while
+    // `platform_config.log_group_name` points at the platform's vended
+    // `/aws/vendedlogs/bedrock-agentcore/runtime/APPLICATION_LOGS/<stack>` group —
+    // the one the dashboard and every per-task log query read. Scoped to that one
+    // group (CDK `grantWrite` → `logs:CreateLogStream` + `logs:PutLogEvents` on the
+    // group's ARN, stream wildcard only), so this adds no cross-log-group reach.
+    // See `applicationLogGroup` for the denial this fixes.
+    props.applicationLogGroup?.grantWrite(this.executionRole);
 
     // READ-ONLY on the payload bucket (ADR-021: "The MicroVM execution role
     // shall hold read-only access to the payload bucket, scoped to that
@@ -1158,34 +1313,40 @@ export class LambdaMicrovmCompute extends Construct {
         hooks: {
           port: AGENT_HOOK_PORT,
           microvmHooks: {
+            // Values are the `ENABLED` enum, NOT the hook route: CloudFormation
+            // rejects a path on every one of these four fields (P2-F2 — see
+            // {@link HOOK_ENABLED}). The routes are fixed and service-owned;
+            // {@link MICROVM_AGENT_HOOK_ROUTES} records them for the agent's
+            // benefit and must never be sent here again.
+            //
             // `/run` is the payload-delivery channel (and, since P2, the
             // platform-configuration channel); `/terminate` is the in-guest
-            // teardown breadcrumb. The agent serves BOTH — declaring a runtime
+            // teardown breadcrumb. The agent serves BOTH — enabling a runtime
             // hook nothing answers fails the corresponding lifecycle transition,
-            // so each is declared only once it is served.
+            // so each is enabled only once it is served.
             //
-            // `/suspend` and `/resume` stay out until P3, where the
-            // suspend/resume interface widening lands across all three
+            // `/suspend` and `/resume` stay OMITTED (not `DISABLED`) until P3,
+            // where the suspend/resume interface widening lands across all three
             // strategies. Note that termination does NOT depend on this hook:
             // `TerminateMicrovm` removes the VM with or without in-guest
             // cooperation, which is what makes a best-effort `/terminate` safe to
             // declare.
-            run: RUN_HOOK_PATH,
+            run: HOOK_ENABLED,
             runTimeoutInSeconds: RUN_HOOK_TIMEOUT_SECONDS,
-            terminate: TERMINATE_HOOK_PATH,
+            terminate: HOOK_ENABLED,
             terminateTimeoutInSeconds: TERMINATE_HOOK_TIMEOUT_SECONDS,
           },
           microvmImageHooks: {
             // `/ready` is MANDATORY whenever any lifecycle hook is enabled — the
-            // service refuses the create otherwise (see READY_HOOK_PATH), which
-            // is why it moved from P2 to P1. `/validate` joins it in P2, now that
-            // the agent serves a real (AWS-call-free — see VALIDATE_HOOK_PATH)
-            // self-check: a hook that 404s or reports failure fails every image
-            // build, so it could not be declared before there was something
-            // behind it.
-            ready: READY_HOOK_PATH,
+            // service refuses the create otherwise (see
+            // READY_HOOK_TIMEOUT_SECONDS), which is why it moved from P2 to P1.
+            // `/validate` joins it in P2, now that the agent serves a real
+            // (AWS-call-free — see VALIDATE_HOOK_TIMEOUT_SECONDS) self-check: a
+            // hook that 404s or reports failure fails every image build, so it
+            // could not be enabled before there was something behind it.
+            ready: HOOK_ENABLED,
             readyTimeoutInSeconds: READY_HOOK_TIMEOUT_SECONDS,
-            validate: VALIDATE_HOOK_PATH,
+            validate: HOOK_ENABLED,
             validateTimeoutInSeconds: VALIDATE_HOOK_TIMEOUT_SECONDS,
           },
         },
@@ -1289,8 +1450,12 @@ export class LambdaMicrovmCompute extends Construct {
           + 'synth-time ARN exists); S3 object/* wildcard comes from CDK grantRead on the dedicated '
           + 'payload bucket (read-only, scoped to that bucket — ADR-021 sub-decision 3). The build '
           + 'role\'s s3:GetObject is scoped to a single object key, not a wildcard. On the execution '
-          + 'role (ADR-021 P2 runtime parity, mirroring the ECS task role): Secrets Manager wildcards '
-          + 'are CDK grantRead on the GitHub PAT secret plus the bgagent-linear-oauth-*/'
+          + 'role (ADR-021 P2 runtime parity, mirroring the ECS task role): the second Logs grant is '
+          + 'CDK grantWrite (CreateLogStream + PutLogEvents only) on the SINGLE platform '
+          + 'APPLICATION_LOGS group whose name platform_config delivers to the guest, whose ARN ends '
+          + 'in a log-stream wildcard because streams are minted per task (ADR-021 P2-F4); '
+          + 'Secrets Manager wildcards are CDK grantRead on the GitHub PAT secret plus the '
+          + 'bgagent-linear-oauth-*/'
           + 'bgagent-jira-oauth-* prefix grant (ABCA-488 — per-workspace channel OAuth tokens are '
           + 'created by the CLI at setup, so the name is unknown at synth; GetSecretValue only); '
           + 'AgentCore Memory wildcards are CDK grantRead/grantWrite on the single platform Memory '
@@ -1322,9 +1487,12 @@ export class LambdaMicrovmCompute extends Construct {
         id: 'AwsSolutions-IAM5',
         reason: 'EC2 network-interface APIs are not meaningfully resource-scopable here: '
           + 'CreateNetworkInterface is authorized before the ENI exists, and the Describe* calls '
-          + 'take no resource at all. The role is assumable ONLY by lambda.amazonaws.com with '
-          + 'aws:SourceAccount pinned to this account, holds no data-plane permission, and is used '
-          + 'solely to attach the two platform-owned connectors to the platform VPC. The '
+          + 'take no resource at all. The role is assumable ONLY by lambda.amazonaws.com, holds no '
+          + 'data-plane permission, and is used solely to attach the two platform-owned connectors '
+          + 'to the platform VPC. An aws:SourceAccount confused-deputy condition is NOT available '
+          + 'on this trust: the Lambda MicroVMs service presents no source key when it assumes the '
+          + 'role, and adding one makes the connector un-creatable (live-verified, ADR-021 P2-F1 — '
+          + 'see the trust-policy block in the construct for the compensating controls). The '
           + 'AWS-managed VPC-access policy uses the same wildcard for the same reason.',
       },
     ], true);
@@ -1367,9 +1535,12 @@ export class LambdaMicrovmCompute extends Construct {
  *
  * The MicroVM service needs BOTH actions (developer guide, "Trust policies"),
  * but `iam.Role`'s `assumedBy` only renders `sts:AssumeRole`. Passing a second
- * statement through `assumeRolePolicy` keeps the `aws:SourceAccount` condition
- * identical on both actions — dropping it on the `TagSession` half would leave
- * the confused-deputy hole half-open.
+ * statement through `assumeRolePolicy` keeps the two halves identical — which
+ * since P2-F1/F3 means "identical and unconditioned": `principal.policyFragment.
+ * conditions` is now empty, and the pass-through is kept deliberately rather
+ * than hardcoding `{}` so that if a source-condition key ever becomes usable on
+ * this path (see the trust-policy block in the constructor), adding it to the
+ * principal fixes BOTH actions instead of half-closing the hole.
  */
 function grantTagSession(role: iam.Role, principal: iam.ServicePrincipal): void {
   role.assumeRolePolicy?.addStatements(new iam.PolicyStatement({
