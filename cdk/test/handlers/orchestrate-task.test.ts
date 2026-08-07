@@ -553,6 +553,14 @@ describe('pollTaskStatus', () => {
     expect(result.lastStatus).toBeUndefined();
   });
 
+  test('rejects an unknown compute type instead of silently skipping heartbeat liveness', async () => {
+    mockDdbSend.mockResolvedValueOnce({ Item: { status: 'RUNNING' } });
+
+    await expect(pollTaskStatus('TASK001', { attempts: 0 }, 'unknown' as never)).rejects.toThrow(
+      'Unknown compute type for heartbeat liveness: unknown',
+    );
+  });
+
   test('sets sessionUnhealthy when agent heartbeat is stale (RUNNING)', async () => {
     const old = new Date(Date.now() - 400_000).toISOString();
     mockDdbSend.mockResolvedValueOnce({
@@ -644,6 +652,119 @@ describe('pollTaskStatus', () => {
     });
     const result = await pollTaskStatus('TASK001', { attempts: 1 }, 'agentcore');
     expect(result.sessionUnhealthy).toBe(true);
+  });
+
+  // --- ADR-021 P2: heartbeat liveness on lambda-microvm ---
+  //
+  // The gap this closes: the agent writes `agent_heartbeat_at` on every substrate,
+  // but the orchestrator only ACTED on it for agentcore. On a MicroVM the
+  // substrate `GetMicrovm` cross-check catches a VM that DIED and nothing else —
+  // an alive, healthy VM whose in-guest pipeline is hung or was OOM-killed inside
+  // the guest looks perfectly fine (nothing self-terminates on this substrate, and
+  // it stays RUNNING with no stateReason). That task would burn the full ~8.5 h
+  // poll window while billing an 8-hour reservation. So liveness here is substrate
+  // state AND agent heartbeat.
+
+  test('sets sessionUnhealthy for lambda-microvm when the heartbeat is stale', async () => {
+    const old = new Date(Date.now() - 400_000).toISOString();
+    mockDdbSend.mockResolvedValueOnce({
+      Item: {
+        status: 'RUNNING',
+        session_id: 'mvm-0123456789abcdef',
+        started_at: old,
+        agent_heartbeat_at: old,
+      },
+    });
+    const result = await pollTaskStatus('TASK001', { attempts: 1 }, 'lambda-microvm');
+    expect(result.sessionUnhealthy).toBe(true);
+  });
+
+  test('sets sessionUnhealthy for lambda-microvm when the agent never heartbeat past the window', async () => {
+    // The in-guest early-crash case: the /run hook returned 200, the pipeline died
+    // before its first heartbeat, and the MicroVM is still happily RUNNING.
+    mockDdbSend.mockResolvedValueOnce({
+      Item: {
+        status: 'RUNNING',
+        session_id: 'mvm-0123456789abcdef',
+        started_at: new Date(Date.now() - 400_000).toISOString(),
+      },
+    });
+    const result = await pollTaskStatus('TASK001', { attempts: 1 }, 'lambda-microvm');
+    expect(result.sessionUnhealthy).toBe(true);
+  });
+
+  test('lambda-microvm uses the SAME thresholds as agentcore — a fresh heartbeat is healthy', async () => {
+    // Shared thresholds on purpose: the timestamp is written by the same pipeline
+    // code at the same cadence regardless of substrate, so a backend-specific grace
+    // window would encode a difference that does not exist.
+    const started = new Date(Date.now() - 200_000).toISOString();
+    const heartbeat = new Date(Date.now() - 30_000).toISOString();
+    const item = {
+      status: 'RUNNING',
+      session_id: 'mvm-0123456789abcdef',
+      started_at: started,
+      agent_heartbeat_at: heartbeat,
+    };
+
+    mockDdbSend.mockResolvedValueOnce({ Item: item });
+    const microvm = await pollTaskStatus('TASK001', { attempts: 1 }, 'lambda-microvm');
+    mockDdbSend.mockResolvedValueOnce({ Item: item });
+    const agentcore = await pollTaskStatus('TASK001', { attempts: 1 }, 'agentcore');
+
+    expect(microvm.sessionUnhealthy).toBe(false);
+    expect(microvm.sessionUnhealthy).toBe(agentcore.sessionUnhealthy);
+  });
+
+  test('lambda-microvm within the grace period is healthy, exactly as agentcore is', async () => {
+    const item = {
+      status: 'RUNNING',
+      session_id: 'mvm-0123456789abcdef',
+      started_at: new Date(Date.now() - 60_000).toISOString(),
+    };
+    mockDdbSend.mockResolvedValueOnce({ Item: item });
+    const microvm = await pollTaskStatus('TASK001', { attempts: 1 }, 'lambda-microvm');
+    mockDdbSend.mockResolvedValueOnce({ Item: item });
+    const agentcore = await pollTaskStatus('TASK001', { attempts: 1 }, 'agentcore');
+
+    expect(microvm.sessionUnhealthy).toBe(false);
+    expect(agentcore.sessionUnhealthy).toBe(false);
+  });
+
+  test('a stale heartbeat on a NON-RUNNING lambda-microvm task is not unhealthy', async () => {
+    // AWAITING_APPROVAL is the case that matters: from P3 the orchestrator SUSPENDS
+    // the MicroVM during an approval wait, which stops the in-guest pipeline (and
+    // its heartbeats) by design. Failing that task would be the worst possible
+    // regression — the check is scoped to RUNNING for exactly this reason.
+    const old = new Date(Date.now() - 400_000).toISOString();
+    mockDdbSend.mockResolvedValueOnce({
+      Item: {
+        status: 'AWAITING_APPROVAL',
+        session_id: 'mvm-0123456789abcdef',
+        started_at: old,
+        agent_heartbeat_at: old,
+      },
+    });
+    const result = await pollTaskStatus('TASK001', { attempts: 1 }, 'lambda-microvm');
+    expect(result.sessionUnhealthy).toBe(false);
+    expect(result.lastStatus).toBe('AWAITING_APPROVAL');
+  });
+
+  test('ECS remains untouched by the widening', async () => {
+    // The one backend deliberately left out: DescribeTasks reports a real container
+    // exit (including OOM-kill / exit 137) with an exit code, and the ECS poll block
+    // interprets it with its own patience counters. Layering the heartbeat on top
+    // would give one backend two independently-tuned kill paths for one failure.
+    const old = new Date(Date.now() - 400_000).toISOString();
+    mockDdbSend.mockResolvedValueOnce({
+      Item: {
+        status: 'RUNNING',
+        session_id: 'arn:aws:ecs:us-east-1:123456789012:task/agent/abc',
+        started_at: old,
+        agent_heartbeat_at: old,
+      },
+    });
+    const result = await pollTaskStatus('TASK001', { attempts: 1 }, 'ecs');
+    expect(result.sessionUnhealthy).toBe(false);
   });
 });
 

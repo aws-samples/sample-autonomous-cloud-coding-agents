@@ -21,7 +21,10 @@ the contract. This is the neutral location both runtimes read.
 |---|---|---|
 | `agent/src/shared_constants.py` | `/app/contracts/constants.json` | import-time |
 | `agent/src/policy.py`, `agent/src/jira_reactions.py` | `SHARED_CONSTANTS` | import-time |
+| `agent/src/server.py` | `SHARED_CONSTANTS["microvm_platform_config"]`, `SHARED_CONSTANTS["microvm_hook_budgets"]` | import-time |
 | `cdk/src/handlers/shared/types.ts`, `jira-app-actor.ts` | `../../../../contracts/constants.json` | synth-time `import` |
+| `cdk/src/handlers/shared/strategies/lambda-microvm-strategy.ts` | `microvm_platform_config` | synth-time `import`, read per session start |
+| `cdk/src/constructs/lambda-microvm-compute.ts` | `microvm_hook_budgets` | synth-time `import` |
 | `cdk/src/constructs/blueprint.ts` | re-exports from `types.ts` | synth-time |
 | `cli/test/constants-parity.test.ts` | package-safe literal parity | test-time |
 
@@ -51,6 +54,16 @@ JSON at TypeScript compile time via `resolveJsonModule`.
   "jira_app_actor": {
     "min_secret_length": 32,
     "forge_webtrigger_suffix": ".webtrigger.atlassian.app"
+  },
+  "microvm_platform_config": {
+    "env_by_key": { "task_table_name": "TASK_TABLE_NAME", "...": "..." },
+    "required": ["task_table_name", "task_events_table_name",
+                 "github_token_secret_arn", "agent_session_role_arn"]
+  },
+  "microvm_hook_budgets": {
+    "ready_hook_timeout_seconds": 300,
+    "warmup_total_budget_seconds": 240,
+    "warmup_required_timeout_seconds": 120
   }
 }
 ```
@@ -81,6 +94,49 @@ JSON at TypeScript compile time via `resolveJsonModule`.
   accepted by the agent, CDK, and CLI Jira app-actor clients.
 - **`jira_app_actor.forge_webtrigger_suffix`** — hostname suffix required by
   app-actor proxy URL validation to prevent operator-supplied SSRF targets.
+- **`microvm_platform_config.env_by_key`** — the Lambda MicroVMs `platform_config`
+  allowlist (ADR-021 P2): each wire key (snake_case) mapped to the environment
+  variable the agent installs it as (UPPER_SNAKE). This block is unlike the
+  others — it is a **security allowlist**, not a tuning bound. The MicroVM image
+  is a snapshot whose env is frozen at build time, so the agent's non-secret
+  platform env arrives in the `/run` hook payload instead; the values land in
+  `os.environ`, which makes an unrecognised key an env-injection attempt. The
+  consumer (`agent/src/server.py`) therefore **rejects** any `platform_config`
+  carrying a key that is not in this map. Values are non-secret identifiers
+  (table/bucket names, secret ARNs, role ARNs) only.
+- **`microvm_platform_config.required`** — the subset without which a task cannot
+  run (task + event tables, GitHub secret ARN, session role ARN). A `/run` hook
+  whose `platform_config` misses or blanks any of these is rejected with HTTP 400.
+
+Both `microvm_platform_config` fields are validated for shape (snake_case keys,
+UPPER_SNAKE unique env names, `required ⊆ env_by_key`) by
+`scripts/check-constants-sync.ts` **and** by `agent/src/server.py` at import time,
+so a malformed contract fails the drift check *and* the MicroVM image build.
+
+- **`microvm_hook_budgets.ready_hook_timeout_seconds`** — the `/ready` build-hook
+  budget the CDK construct declares to `CreateMicrovmImage`
+  (`READY_HOOK_TIMEOUT_SECONDS` in `cdk/src/constructs/lambda-microvm-compute.ts`).
+  300 s, not 60 s, because as of ADR-021 P2-F5 `/ready` does real work: it warms the
+  225 MiB `claude` binary so its pages are resident when the snapshot is taken.
+- **`microvm_hook_budgets.warmup_total_budget_seconds`** — the agent's ceiling for
+  the WHOLE `/ready` warm-up (`_READY_WARMUP_TOTAL_BUDGET_SECONDS` in
+  `agent/src/server.py`): required command plus every best-effort one, which share
+  the remainder rather than each getting a fresh budget.
+- **`microvm_hook_budgets.warmup_required_timeout_seconds`** — the required
+  warm-up's own slice (`_READY_WARMUP_REQUIRED_TIMEOUT_SECONDS`). Generous on
+  purpose: a cold 225 MiB `exec` has no predictable duration, which is the lesson of
+  P2-F5.
+
+Unlike every other block here, these three are not independent tuning bounds — they
+are a **relationship**: `warmup_required < warmup_total < ready_hook`. The warm-up
+must finish inside the budget the service holds the hook to, or a fix for a runtime
+failure turns into a build failure. A relationship cannot be enforced from one side,
+which is why both halves live in the contract even though each has a single
+consumer. `scripts/check-constants-sync.ts` asserts the ordering and rejects a
+literal re-declaration on **either** side — the Python constants *and*
+`READY_HOOK_TIMEOUT_SECONDS` in the TypeScript construct — and
+`agent/src/server.py` re-checks the same ordering at import time, so a bad contract
+fails the drift check *and* the image build.
 
 The published CLI package contains only `lib/`, so it cannot load the repository
 contract at runtime. It mirrors these values as literals and

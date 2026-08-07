@@ -373,6 +373,22 @@ export interface TaskDetail {
   readonly updated_at: string;
   readonly started_at: string | null;
   readonly completed_at: string | null;
+  /**
+   * ISO timestamp of the agent's last heartbeat, written by the in-guest pipeline
+   * every 45 s on every compute backend (``agent/src/server.py``
+   * ``_heartbeat_worker``). ``null`` before the first beat, on tasks that never
+   * ran, and on records predating the field.
+   *
+   * Surfaced (ADR-021 P2r2-F11) because it was the platform's only in-guest
+   * liveness signal and the API hid it: the orchestrator reads it for
+   * hang detection (``orchestrator.ts`` ``heartbeatLivenessApplies``) but
+   * ``toTaskDetail`` never mapped it, so ``bgagent status`` reported ``None``
+   * while DynamoDB held a 6-second-old value. That gap produced a WRONG
+   * live-verification conclusion ("heartbeats not observed", attributed to a
+   * different defect entirely), which is the cost of an internal signal no
+   * operator can see. Keep in sync with ``cli/src/types.ts::TaskDetail``.
+   */
+  readonly agent_heartbeat_at: string | null;
   readonly duration_s: number | null;
   readonly cost_usd: number | null;
   readonly build_passed: boolean | null;
@@ -834,6 +850,9 @@ export function toTaskDetail(
     updated_at: record.updated_at,
     started_at: record.started_at ?? null,
     completed_at: record.completed_at ?? null,
+    // ADR-021 P2r2-F11: written by every backend, consumed by the orchestrator for
+    // hang detection, and — until this line — invisible to every API consumer.
+    agent_heartbeat_at: record.agent_heartbeat_at ?? null,
     duration_s: coerceNumericOrNull(record.duration_s, { ...ctx, field: 'duration_s' }, logger),
     cost_usd: coerceNumericOrNull(record.cost_usd, { ...ctx, field: 'cost_usd' }, logger),
     build_passed: record.build_passed ?? null,

@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 import threading
 import time
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -438,6 +443,23 @@ def test_debug_cw_write_blocking_no_log_group_is_noop(monkeypatch):
     server._debug_cw("hello", task_id="t")
 
 
+def test_debug_cw_exc_appends_the_traceback(monkeypatch, capfd):
+    """``_debug_cw_exc`` is the exception-carrying variant used by the error paths.
+
+    Still reached from ``/invocations`` and from ``/run`` AFTER the config install
+    (the pre-install paths deliberately use the stdout-only ``_pre_config_log``),
+    so its formatting stays under test on its own rather than incidentally.
+    """
+    monkeypatch.delenv("LOG_GROUP_NAME", raising=False)
+    try:
+        raise RuntimeError("kaboom")
+    except RuntimeError as exc:
+        server._debug_cw_exc("something FAILED", exc, task_id="t")
+    out = capfd.readouterr().out
+    assert "something FAILED [RuntimeError: kaboom]" in out
+    assert "Traceback" in out
+
+
 def test_debug_cw_write_blocking_bumps_failure_counter_on_boto_error(monkeypatch):
     """On boto errors the failure counter increments so operators can alarm.
 
@@ -839,6 +861,19 @@ class TestExtractApprovalGateCap:
 
 READY_HOOK = f"{server.MICROVM_HOOK_PREFIX}/ready"
 RUN_HOOK = f"{server.MICROVM_HOOK_PREFIX}/run"
+VALIDATE_HOOK = f"{server.MICROVM_HOOK_PREFIX}/validate"
+TERMINATE_HOOK = f"{server.MICROVM_HOOK_PREFIX}/terminate"
+
+
+def _platform_config(**overrides) -> dict:
+    """A ``platform_config`` block carrying exactly the required subset.
+
+    Built from the contract rather than a literal key list so a contract change
+    cannot leave these tests asserting a stale required set.
+    """
+    config = {key: f"value-for-{key}" for key in server.MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS}
+    config.update(overrides)
+    return config
 
 
 def _run_hook_body(envelope: dict, microvm_id: str = "microvm-abc") -> dict:
@@ -851,17 +886,35 @@ def _run_hook_body(envelope: dict, microvm_id: str = "microvm-abc") -> dict:
     return {"microvmId": microvm_id, "runHookPayload": json.dumps(envelope)}
 
 
+#: A warm-up command that always succeeds, on any box, in well under a second.
+#:
+#: ``claude`` is absent from a CI checkout and PRESENT on some developer machines,
+#: so a test that lets the real warm-up table run would pass or fail depending on
+#: whose laptop it is. Every ``/ready`` test therefore pins the table.
+_PORTABLE_WARMUP = (sys.executable, "--version")
+
+
+@pytest.fixture
+def warm_ready(monkeypatch):
+    """Pin ``/ready``'s warm-up to :data:`_PORTABLE_WARMUP` and nothing optional."""
+    monkeypatch.setattr(server, "_READY_WARMUP_REQUIRED", _PORTABLE_WARMUP)
+    monkeypatch.setattr(server, "_READY_WARMUP_OPTIONAL", ())
+
+
 class TestMicrovmReadyHook:
     """``/ready`` is what makes a MicroVM image buildable at all.
 
     ``CreateMicrovmImage`` refuses an image that enables any lifecycle hook
     without ``/ready``, and with the hook enabled but unserved both chipset
     builds fail ("Ready hook check failed: the application returned a client
-    error (HTTP 4xx) response"). A 200 from a booted server is the whole
-    contract in P1 — deeper warm-up checks are P2's ``/validate``.
+    error (HTTP 4xx) response").
+
+    Since ADR-021 P2-F5 a 200 means TWO things: the server is up **and** the
+    snapshot's heavyweight binaries have been exec'd, so their pages are resident
+    when the snapshot is captured. See :class:`TestMicrovmReadyHookWarmUp`.
     """
 
-    def test_ready_returns_200_once_the_server_is_up(self, client):
+    def test_ready_returns_200_once_the_server_is_up_and_warm(self, client, warm_ready):
         r = client.post(READY_HOOK)
         assert r.status_code == 200
         assert r.json() == {"status": "ready"}
@@ -871,21 +924,350 @@ class TestMicrovmReadyHook:
         routes = {getattr(r, "path", None) for r in server.app.routes}
         assert READY_HOOK in routes
         assert RUN_HOOK in routes
+        assert VALIDATE_HOOK in routes
+        assert TERMINATE_HOOK in routes
 
-    def test_ready_does_not_start_a_pipeline(self, client, monkeypatch):
+    def test_ready_does_not_start_a_pipeline(self, client, monkeypatch, warm_ready):
         # A build hook must never run task work: the snapshot is taken right
         # after it answers, so anything it starts would be frozen into the image.
+        # (The warm-up subprocesses are not "task work": they are ``--version``
+        # execs that exit before the handler returns, and they join no thread.)
         monkeypatch.setattr(server, "run_task", MagicMock())
         client.post(READY_HOOK)
         with server._threads_lock:
             assert server._active_threads == []
 
-    def test_validate_and_suspend_resume_terminate_are_NOT_served(self, client):
+    def test_suspend_and_resume_are_NOT_served(self, client):
         # Declaring a hook nothing answers fails the corresponding build or
-        # lifecycle transition, so the construct declares exactly /ready + /run.
-        # This asserts the agent side of that: the others must 404.
-        for hook in ("validate", "suspend", "resume", "terminate"):
+        # lifecycle transition, so the construct declares exactly the hooks the
+        # agent serves. /validate + /terminate joined that set in P2; /suspend +
+        # /resume need the ComputeStrategy interface widening (P3), so they must
+        # still 404 — the assertion that keeps the construct honest.
+        for hook in ("suspend", "resume"):
             assert client.post(f"{server.MICROVM_HOOK_PREFIX}/{hook}").status_code == 404
+
+
+class TestMicrovmReadyHookWarmUp:
+    """``/ready`` warms the snapshot's heavyweight binaries (ADR-021 P2-F5).
+
+    THE DEFECT THIS EXISTS FOR, because it is not guessable from the code: on the
+    P2 live run every task died at turn 0 with
+
+        TimeoutExpired: Command '['claude', '--version']' timed out after 10 seconds
+
+    reproducibly, while the same binary in the same image answers in under a second
+    locally. ``claude`` is a 225 MiB statically-linked ELF whose pages had never
+    been touched when the snapshot was taken, so the first ``exec`` on a restored
+    guest had to fault all of them in from lazily-restored storage. ``/ready`` is
+    the only hook that runs BEFORE the snapshot is captured, which makes it the
+    only place a warm page can be created.
+
+    Three properties are load-bearing and all three are asserted here: the warm-up
+    actually EXECS the binary (a stat or a file read would not populate the same
+    pages), a required failure returns **503** rather than a 200 that would freeze
+    a cold — or broken — snapshot into every future MicroVM, and the whole thing
+    stays inside the hook budget the service is holding it to (see
+    :class:`TestMicrovmReadyWarmUpBudget`).
+    """
+
+    def test_the_warm_up_execs_every_command_once_required_first(self, client, monkeypatch):
+        calls: list[list[str]] = []
+
+        def fake_run(argv, **kwargs):
+            calls.append(list(argv))
+            assert kwargs["capture_output"] is True
+            assert kwargs["check"] is False
+            return subprocess.CompletedProcess(argv, 0, stdout="2.1.191 (Claude Code)\n", stderr="")
+
+        monkeypatch.setattr(server.subprocess, "run", fake_run)
+        assert client.post(READY_HOOK).status_code == 200
+        # The real constants, not a stand-in: `claude` must be warmed or the fix is
+        # a no-op, and it must go FIRST so no best-effort command can eat the budget
+        # the required one needs.
+        assert calls[0] == ["claude", "--version"]
+        assert calls == [list(server._READY_WARMUP_REQUIRED)] + [
+            list(argv) for argv in server._READY_WARMUP_OPTIONAL
+        ]
+
+    def test_claude_is_the_only_REQUIRED_warm_up(self):
+        # git/node are warmed on the same mechanism but must never fail a build:
+        # neither was measured to blow a timeout, and a snapshot missing them is
+        # still a snapshot that can start a task. `claude` is the opposite — hence
+        # two constants rather than one table with a boolean, so the ordering
+        # guarantee is structural instead of conventional.
+        assert server._READY_WARMUP_REQUIRED[0] == "claude"
+        assert "claude" not in [argv[0] for argv in server._READY_WARMUP_OPTIONAL]
+        # Every warm-up is a bare `--version`: no network, no credentials, nothing
+        # written — which is what keeps /ready AWS-silent.
+        for argv in (server._READY_WARMUP_REQUIRED, *server._READY_WARMUP_OPTIONAL):
+            assert argv[1:] == ("--version",)
+
+    def test_a_required_warm_up_timeout_reports_503_not_ready(self, client, monkeypatch, capfd):
+        # 503 is the hook contract's "still initialising", so the service keeps
+        # asking within the /ready budget and — if it never clears — fails the
+        # IMAGE BUILD. That is the correct trade: one failed build instead of every
+        # task failing at turn 0 on a snapshot that cannot exec its own agent.
+        def slow(argv, **kwargs):
+            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+        monkeypatch.setattr(server.subprocess, "run", slow)
+        r = client.post(READY_HOOK)
+        assert r.status_code == 503
+        assert r.json()["status"] == "not_ready"
+        assert any("claude" in f for f in r.json()["failed_warmups"])
+        # The attempt is logged (stdout only — build role has no Logs grant), or a
+        # failed build gives the operator nothing to read.
+        out = capfd.readouterr().out
+        assert "warm-up of 'claude' FAILED" in out
+        assert "TimeoutExpired" in out
+
+    def test_a_missing_binary_reports_503(self, client, monkeypatch):
+        # A snapshot without `claude` on PATH cannot run one task, so this must fail
+        # the build rather than be smoothed over.
+        def missing(argv, **kwargs):
+            raise FileNotFoundError(argv[0])
+
+        monkeypatch.setattr(server.subprocess, "run", missing)
+        assert client.post(READY_HOOK).status_code == 503
+
+    def test_a_nonzero_exit_reports_503(self, client, monkeypatch):
+        def broken(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, 1, stdout="", stderr="Exec format error")
+
+        monkeypatch.setattr(server.subprocess, "run", broken)
+        r = client.post(READY_HOOK)
+        assert r.status_code == 503
+        assert r.json()["failed_warmups"] == ["claude:exit1"]
+
+    def test_a_BEST_EFFORT_failure_still_reports_ready(self, client, monkeypatch, capfd):
+        # The other half of the required/best-effort split: git or node missing is
+        # logged and moves on. Failing the build on them would make the warm-up
+        # mechanism itself a liability.
+        def selective(argv, **kwargs):
+            if argv[0] == "claude":
+                return subprocess.CompletedProcess(argv, 0, stdout="2.1.191\n", stderr="")
+            raise FileNotFoundError(argv[0])
+
+        monkeypatch.setattr(server.subprocess, "run", selective)
+        r = client.post(READY_HOOK)
+        assert r.status_code == 200
+        assert r.json() == {"status": "ready"}
+        out = capfd.readouterr().out
+        assert "warmed 'claude'" in out
+        assert "warm-up of 'git' FAILED" in out
+
+    def test_an_unexpected_subprocess_error_becomes_503_not_500(self, client, monkeypatch):
+        # A warm-up defect must surface as the hook's own honest "not ready", never
+        # as a FastAPI 500 — the service reports both as a hook failure, but only
+        # one of them puts the reason in the build log.
+        def exploding(argv, **kwargs):
+            raise OSError("resource temporarily unavailable")
+
+        monkeypatch.setattr(server.subprocess, "run", exploding)
+        assert client.post(READY_HOOK).status_code == 503
+
+    def test_the_warm_up_makes_no_aws_call_even_with_a_log_group_baked(
+        self, client, monkeypatch, capfd, warm_ready
+    ):
+        # /ready runs under the BUILD role: a Logs write can only fail (and each
+        # failure pollutes the shared _debug_cw_failures alarm), and any boto3
+        # client built here freezes the build role's credential chain and the build
+        # region into the snapshot. Adding a subprocess must not have changed that.
+        monkeypatch.setenv("LOG_GROUP_NAME", "/abca/agent")
+
+        def forbidden(*_args, **_kwargs):
+            raise AssertionError("the /ready warm-up must not make AWS calls")
+
+        monkeypatch.setattr(server, "_debug_cw", forbidden)
+        monkeypatch.setattr(server, "_warn_cw", forbidden)
+        assert client.post(READY_HOOK).status_code == 200
+        assert "warmed" in capfd.readouterr().out
+
+    def test_warm_snapshot_binaries_returns_only_required_failures(self, monkeypatch):
+        # Unit-level, because the return value is the whole contract between the
+        # warm-up and the hook's status code.
+        monkeypatch.setattr(server, "_READY_WARMUP_REQUIRED", ("nope-required", "--version"))
+        monkeypatch.setattr(server, "_READY_WARMUP_OPTIONAL", (("nope-optional", "--version"),))
+
+        def missing(argv, **kwargs):
+            raise FileNotFoundError(argv[0])
+
+        monkeypatch.setattr(server.subprocess, "run", missing)
+        assert server._warm_snapshot_binaries() == ["nope-required:FileNotFoundError"]
+
+
+class _FakeClock:
+    """Monotonic clock the tests advance by hand.
+
+    The warm-up's budget arithmetic is about elapsed time, and the only honest way
+    to test "three slow commands cannot exceed the ceiling" without burning four
+    minutes of wall clock is to make time itself a test input. Patched onto
+    ``server._time_for_debug`` (the module-local ``time`` alias), so only the
+    server's view of the clock changes and monkeypatch restores it.
+    """
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class TestMicrovmReadyWarmUpBudget:
+    """The warm-up must fit inside the hook budget the SERVICE is enforcing.
+
+    Per-command timeouts do not compose. Three commands at 120 s each is 360 s
+    against a 300 s ``/ready`` budget (``READY_HOOK_TIMEOUT_SECONDS``), so a
+    warm-up added to prevent a RUNTIME failure could instead produce a BUILD
+    failure — and a hung best-effort command could starve the required one that
+    decides whether the snapshot is usable at all. Hence: required first with its
+    own budget, optional ones sharing the remainder of a total ceiling.
+    """
+
+    @pytest.fixture
+    def clock(self, monkeypatch):
+        fake = _FakeClock()
+        monkeypatch.setattr(server, "_time_for_debug", fake)
+        return fake
+
+    @staticmethod
+    def _timeout_recorder(clock: _FakeClock, *, hang: tuple[str, ...] = (), fail: bool = False):
+        """subprocess.run stand-in that BURNS its whole timeout for hung commands."""
+        seen: list[tuple[str, float]] = []
+
+        def fake_run(argv, **kwargs):
+            timeout = kwargs["timeout"]
+            seen.append((argv[0], timeout))
+            if argv[0] in hang:
+                clock.advance(timeout)
+                raise subprocess.TimeoutExpired(argv, timeout)
+            if fail:
+                clock.advance(timeout)
+                raise subprocess.TimeoutExpired(argv, timeout)
+            clock.advance(0.1)
+            return subprocess.CompletedProcess(argv, 0, stdout="v1\n", stderr="")
+
+        return fake_run, seen
+
+    def test_the_ceiling_leaves_margin_inside_the_hook_budget(self):
+        # The numbers have to be comparable by eye against the CDK constant, so this
+        # pins the relationship rather than the values: total warm-up < hook budget,
+        # and the required command's own budget fits inside the total.
+        assert server._READY_WARMUP_REQUIRED_TIMEOUT_SECONDS >= 60
+        assert (
+            server._READY_WARMUP_REQUIRED_TIMEOUT_SECONDS
+            < server._READY_WARMUP_TOTAL_BUDGET_SECONDS
+        )
+        # Read from the contract, NOT re-declared here. `READY_HOOK_TIMEOUT_SECONDS`
+        # in `cdk/src/constructs/lambda-microvm-compute.ts` imports the same field,
+        # so this assertion compares the agent against the value the service is
+        # actually configured with — a hardcoded 300 would keep passing after
+        # someone lowered the real budget.
+        from shared_constants import SHARED_CONSTANTS
+
+        budgets = SHARED_CONSTANTS["microvm_hook_budgets"]
+        ready_hook_budget = budgets["ready_hook_timeout_seconds"]
+        assert ready_hook_budget > server._READY_WARMUP_TOTAL_BUDGET_SECONDS
+        # Both agent-side constants come from that same block, so a single edit moves
+        # the pair rather than half of it.
+        assert budgets["warmup_total_budget_seconds"] == (server._READY_WARMUP_TOTAL_BUDGET_SECONDS)
+        assert budgets["warmup_required_timeout_seconds"] == (
+            server._READY_WARMUP_REQUIRED_TIMEOUT_SECONDS
+        )
+        # Real margin, not a rounding error: enough for uvicorn scheduling plus the
+        # request itself.
+        assert ready_hook_budget - server._READY_WARMUP_TOTAL_BUDGET_SECONDS >= 30
+
+    def test_ALL_commands_slow_still_answers_within_the_ceiling(self, client, clock, monkeypatch):
+        # The aggregate-budget property. Every command hangs for its full timeout;
+        # the handler must still answer, and the total elapsed must not exceed the
+        # ceiling (which is what keeps it inside the hook budget).
+        fake_run, seen = self._timeout_recorder(clock, fail=True)
+        monkeypatch.setattr(server.subprocess, "run", fake_run)
+        started = clock.now
+
+        r = client.post(READY_HOOK)
+
+        assert r.status_code == 503
+        elapsed = clock.now - started
+        assert elapsed <= server._READY_WARMUP_TOTAL_BUDGET_SECONDS
+        # The required command hung, so the optional ones were skipped entirely:
+        # the build cannot succeed now, and making the service wait longer for the
+        # 503 buys nothing.
+        assert [name for name, _ in seen] == ["claude"]
+        assert seen[0][1] == server._READY_WARMUP_REQUIRED_TIMEOUT_SECONDS
+
+    def test_every_command_slow_but_none_skipped_stays_under_the_ceiling(
+        self, client, clock, monkeypatch
+    ):
+        # Same aggregate property with the required command SUCCEEDING slowly, so the
+        # optional ones do run: their timeouts must be the shrinking remainder, never
+        # a fresh full budget each.
+        fake_run, seen = self._timeout_recorder(clock, hang=("git", "node"))
+        monkeypatch.setattr(server.subprocess, "run", fake_run)
+        started = clock.now
+
+        assert client.post(READY_HOOK).status_code == 200
+
+        assert clock.now - started <= server._READY_WARMUP_TOTAL_BUDGET_SECONDS
+        # Strictly decreasing budgets after the required one — the signature of a
+        # SHARED remainder rather than per-command budgets that sum past the hook's.
+        optional_timeouts = [timeout for name, timeout in seen if name != "claude"]
+        assert optional_timeouts == sorted(optional_timeouts, reverse=True)
+        assert sum(t for _, t in seen) <= (
+            server._READY_WARMUP_REQUIRED_TIMEOUT_SECONDS
+            + server._READY_WARMUP_TOTAL_BUDGET_SECONDS
+        )
+
+    def test_a_HUNG_optional_command_never_blocks_the_200(self, client, clock, monkeypatch, capfd):
+        # The starvation guard, stated as the property that matters: once the
+        # REQUIRED warm-up has succeeded the snapshot is usable, so no best-effort
+        # command may talk the handler out of saying so.
+        fake_run, seen = self._timeout_recorder(clock, hang=("git", "node"))
+        monkeypatch.setattr(server.subprocess, "run", fake_run)
+
+        r = client.post(READY_HOOK)
+
+        assert r.status_code == 200
+        assert r.json() == {"status": "ready"}
+        out = capfd.readouterr().out
+        assert "warmed 'claude'" in out
+        assert "warm-up of 'git' FAILED" in out
+        # `git` consumed the entire remainder, so `node` was skipped rather than
+        # started with a useless sub-second budget.
+        assert [name for name, _ in seen] == ["claude", "git"]
+        assert "skipping best-effort warm-up of 'node'" in out
+
+    def test_the_required_command_gets_its_OWN_budget_not_a_share(self, client, clock, monkeypatch):
+        # It runs first precisely so the number it gets cannot be reduced by anything
+        # else: the one warm-up that decides whether the snapshot is usable must not
+        # be squeezed by a best-effort neighbour.
+        fake_run, seen = self._timeout_recorder(clock)
+        monkeypatch.setattr(server.subprocess, "run", fake_run)
+        assert client.post(READY_HOOK).status_code == 200
+        assert seen[0] == ("claude", server._READY_WARMUP_REQUIRED_TIMEOUT_SECONDS)
+
+    def test_an_optional_command_is_skipped_when_the_remainder_is_useless(
+        self, clock, monkeypatch, capfd
+    ):
+        # A sub-second timeout cannot warm a large binary; it can only manufacture a
+        # scary log line in a build that actually succeeded.
+        monkeypatch.setattr(server, "_READY_WARMUP_REQUIRED", ("req", "--version"))
+        monkeypatch.setattr(server, "_READY_WARMUP_OPTIONAL", (("opt", "--version"),))
+        started = clock.now
+
+        def fake_run(argv, **kwargs):
+            # The required command eats the entire ceiling but SUCCEEDS.
+            clock.advance(server._READY_WARMUP_TOTAL_BUDGET_SECONDS)
+            return subprocess.CompletedProcess(argv, 0, stdout="v\n", stderr="")
+
+        monkeypatch.setattr(server.subprocess, "run", fake_run)
+        assert server._warm_snapshot_binaries() == []
+        assert clock.now - started == server._READY_WARMUP_TOTAL_BUDGET_SECONDS
+        assert "skipping best-effort warm-up of 'opt'" in capfd.readouterr().out
 
 
 class TestMicrovmRunHookInlinePayload:
@@ -1269,3 +1651,1335 @@ class TestInvocationParamContract:
             self._fake_req(),
         )
         assert params["merge_branches"] == ["ok", "ok2"]
+
+
+# --------------------------------------------------------------------------
+# platform_config: payload-sourced platform env (ADR-021 P2)
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def env_guard():
+    """Snapshot/restore ``os.environ`` around a test that installs into it.
+
+    ``_install_platform_config`` writes to the REAL process environment (that is
+    its job), and ``monkeypatch`` cannot undo a write it did not make — so
+    without this, one platform_config test would leak table names and a bogus
+    ``AGENT_SESSION_ROLE_ARN`` into every test that runs after it (the conftest
+    ``_clean_env`` fixture only strips the subset it knows about).
+    """
+    before = dict(os.environ)
+    yield
+    os.environ.clear()
+    os.environ.update(before)
+
+
+class TestPlatformConfigContract:
+    """The allowlist is a CROSS-PACKAGE contract, not an agent-local constant.
+
+    The producer is the orchestrator's run-hook envelope builder
+    (``cdk/src/handlers/shared/orchestrator.ts``); both sides read
+    ``contracts/constants.json``. These tests are the agent-side tripwire: an
+    edit to the contract that the CDK side has not followed shows up here.
+    """
+
+    def test_allowlist_is_sourced_from_the_shared_contract(self):
+        from shared_constants import SHARED_CONSTANTS
+
+        contract = SHARED_CONSTANTS["microvm_platform_config"]
+        assert contract["env_by_key"] == server.MICROVM_PLATFORM_CONFIG_ENV_BY_KEY
+        assert frozenset(contract["required"]) == server.MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS
+
+    def test_wire_contract_is_exactly_the_documented_key_set(self):
+        # Spelled out on purpose: this is the wire contract Stage B's producer is
+        # written against, so a silent add/remove/rename must fail a test rather
+        # than merely change a JSON file.
+        assert server.MICROVM_PLATFORM_CONFIG_ENV_BY_KEY == {
+            "task_table_name": "TASK_TABLE_NAME",
+            "task_events_table_name": "TASK_EVENTS_TABLE_NAME",
+            "task_approvals_table_name": "TASK_APPROVALS_TABLE_NAME",
+            "nudges_table_name": "NUDGES_TABLE_NAME",
+            "log_group_name": "LOG_GROUP_NAME",
+            "artifacts_bucket_name": "ARTIFACTS_BUCKET_NAME",
+            "trace_artifacts_bucket_name": "TRACE_ARTIFACTS_BUCKET_NAME",
+            "github_token_secret_arn": "GITHUB_TOKEN_SECRET_ARN",
+            "linear_oauth_secret_arn": "LINEAR_OAUTH_SECRET_ARN",
+            "jira_oauth_secret_arn": "JIRA_OAUTH_SECRET_ARN",
+            "agent_session_role_arn": "AGENT_SESSION_ROLE_ARN",
+            "aws_sdk_ua_app_id": "AWS_SDK_UA_APP_ID",
+            "anthropic_default_haiku_model": "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        }
+
+    def test_required_subset_is_exactly_the_four_run_blocking_keys(self):
+        assert (
+            frozenset(
+                {
+                    "task_table_name",
+                    "task_events_table_name",
+                    "github_token_secret_arn",
+                    "agent_session_role_arn",
+                }
+            )
+            == server.MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS
+        )
+
+    def test_required_keys_are_all_on_the_allowlist(self):
+        assert (
+            set(server.MICROVM_PLATFORM_CONFIG_ENV_BY_KEY)
+            >= server.MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS
+        )
+
+    def test_env_names_are_upper_snake_and_unique(self):
+        env_names = list(server.MICROVM_PLATFORM_CONFIG_ENV_BY_KEY.values())
+        assert len(set(env_names)) == len(env_names)
+        for name in env_names:
+            assert server._PLATFORM_CONFIG_ENV_RE.match(name), name
+
+    def test_memory_id_is_not_a_platform_config_key(self):
+        # memory_id stays inside agent_payload: it is per-task state, not process
+        # configuration. Asserted so a future "it's an env var too" refactor has
+        # to argue with a test.
+        assert "memory_id" not in server.MICROVM_PLATFORM_CONFIG_ENV_BY_KEY
+
+    def test_contract_validator_rejects_a_non_snake_case_key(self, monkeypatch):
+        monkeypatch.setattr(
+            server, "MICROVM_PLATFORM_CONFIG_ENV_BY_KEY", {"Task-Table": "TASK_TABLE_NAME"}
+        )
+        with pytest.raises(ValueError, match="not snake_case"):
+            server._validate_platform_config_contract()
+
+    def test_contract_validator_rejects_a_non_env_name_value(self, monkeypatch):
+        monkeypatch.setattr(
+            server, "MICROVM_PLATFORM_CONFIG_ENV_BY_KEY", {"task_table_name": "task table"}
+        )
+        with pytest.raises(ValueError, match="UPPER_SNAKE"):
+            server._validate_platform_config_contract()
+
+    def test_contract_validator_rejects_two_keys_on_one_env_var(self, monkeypatch):
+        monkeypatch.setattr(
+            server,
+            "MICROVM_PLATFORM_CONFIG_ENV_BY_KEY",
+            {"a_name": "SAME_ENV", "b_name": "SAME_ENV"},
+        )
+        monkeypatch.setattr(server, "MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS", frozenset({"a_name"}))
+        with pytest.raises(ValueError, match="same env var"):
+            server._validate_platform_config_contract()
+
+    def test_contract_validator_rejects_a_required_key_off_the_allowlist(self, monkeypatch):
+        monkeypatch.setattr(
+            server, "MICROVM_PLATFORM_CONFIG_ENV_BY_KEY", {"task_table_name": "TASK_TABLE_NAME"}
+        )
+        monkeypatch.setattr(server, "MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS", frozenset({"nope"}))
+        with pytest.raises(ValueError, match="absent from env_by_key"):
+            server._validate_platform_config_contract()
+
+    def test_contract_validator_rejects_an_empty_allowlist(self, monkeypatch):
+        monkeypatch.setattr(server, "MICROVM_PLATFORM_CONFIG_ENV_BY_KEY", {})
+        with pytest.raises(ValueError, match="must not be empty"):
+            server._validate_platform_config_contract()
+
+    def test_contract_validator_rejects_an_empty_required_set(self, monkeypatch):
+        monkeypatch.setattr(server, "MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS", frozenset())
+        with pytest.raises(ValueError, match="required must not be empty"):
+            server._validate_platform_config_contract()
+
+
+class TestHookBudgetContract:
+    """The `/ready` budgets are a RELATIONSHIP, so the contract owns both halves.
+
+    ``warmup_required < warmup_total < ready_hook``: the agent's warm-up must finish
+    inside the budget the MicroVM service holds the hook to, or the P2-F5 fix (warm
+    the 225 MiB ``claude`` binary before the snapshot) trades a runtime failure for a
+    build failure. Neither side can enforce an ordering it only knows half of, which
+    is why ``READY_HOOK_TIMEOUT_SECONDS`` in the CDK construct and these two
+    constants read the same block. ``scripts/check-constants-sync.ts`` is the other
+    tripwire; this validator makes the same violation fail the IMAGE BUILD (uvicorn
+    never binds, so ``/ready`` never answers) rather than a task.
+    """
+
+    def test_budgets_are_sourced_from_the_shared_contract(self):
+        from shared_constants import SHARED_CONSTANTS
+
+        budgets = SHARED_CONSTANTS["microvm_hook_budgets"]
+        assert budgets["warmup_total_budget_seconds"] == server._READY_WARMUP_TOTAL_BUDGET_SECONDS
+        assert (
+            budgets["warmup_required_timeout_seconds"]
+            == server._READY_WARMUP_REQUIRED_TIMEOUT_SECONDS
+        )
+
+    def test_the_shipped_contract_satisfies_its_own_invariant(self):
+        server._validate_hook_budget_contract()
+
+    @pytest.mark.parametrize(
+        "budgets,match",
+        [
+            (
+                {
+                    "ready_hook_timeout_seconds": 300,
+                    "warmup_total_budget_seconds": 300,
+                    "warmup_required_timeout_seconds": 120,
+                },
+                "must be < ready_hook_timeout_seconds",
+            ),
+            (
+                {
+                    "ready_hook_timeout_seconds": 300,
+                    "warmup_total_budget_seconds": 240,
+                    "warmup_required_timeout_seconds": 240,
+                },
+                "must be < warmup_total_budget_seconds",
+            ),
+            (
+                {
+                    "ready_hook_timeout_seconds": 0,
+                    "warmup_total_budget_seconds": 240,
+                    "warmup_required_timeout_seconds": 120,
+                },
+                "must be a positive integer",
+            ),
+            (
+                {
+                    "ready_hook_timeout_seconds": 300,
+                    "warmup_total_budget_seconds": "240",
+                    "warmup_required_timeout_seconds": 120,
+                },
+                "must be a positive integer",
+            ),
+            (
+                {
+                    "ready_hook_timeout_seconds": 300,
+                    "warmup_total_budget_seconds": 240,
+                    "warmup_required_timeout_seconds": None,
+                },
+                "warmup_required_timeout_seconds must be a positive integer",
+            ),
+        ],
+        ids=["total-equals-hook", "required-equals-total", "zero", "string", "missing"],
+    )
+    def test_a_contract_that_cannot_hold_fails_the_image_build(self, monkeypatch, budgets, match):
+        monkeypatch.setattr(server, "_HOOK_BUDGETS", budgets)
+        with pytest.raises(ValueError, match=match):
+            server._validate_hook_budget_contract()
+
+
+class TestInstallPlatformConfig:
+    """Installing into ``os.environ`` is an env-injection surface — fail closed."""
+
+    def test_absent_block_installs_nothing(self, env_guard):
+        # The P1 envelope shape. A MicroVM image must still boot under an
+        # orchestrator that predates Stage B: the snapshot env is all there is.
+        assert server._install_platform_config(None) == []
+        assert "TASK_TABLE_NAME" not in os.environ
+
+    def test_installs_the_allowlisted_keys_as_upper_snake_env_vars(self, env_guard):
+        installed = server._install_platform_config(_platform_config())
+        assert installed == sorted(
+            server.MICROVM_PLATFORM_CONFIG_ENV_BY_KEY[key]
+            for key in server.MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS
+        )
+        assert os.environ["TASK_TABLE_NAME"] == "value-for-task_table_name"
+        assert os.environ["AGENT_SESSION_ROLE_ARN"] == "value-for-agent_session_role_arn"
+
+    def test_every_allowlisted_key_is_installable(self, env_guard):
+        full = {key: f"v-{key}" for key in server.MICROVM_PLATFORM_CONFIG_ENV_BY_KEY}
+        installed = server._install_platform_config(full)
+        assert installed == sorted(server.MICROVM_PLATFORM_CONFIG_ENV_BY_KEY.values())
+        for key, env_name in server.MICROVM_PLATFORM_CONFIG_ENV_BY_KEY.items():
+            assert os.environ[env_name] == f"v-{key}"
+
+    def test_payload_wins_over_a_pre_existing_image_env_value(self, env_guard):
+        # The load-bearing precedence rule: image env is frozen at snapshot time,
+        # the payload describes the live deployment.
+        os.environ["TASK_TABLE_NAME"] = "baked-into-the-snapshot"
+        server._install_platform_config(_platform_config(task_table_name="live-table"))
+        assert os.environ["TASK_TABLE_NAME"] == "live-table"
+
+    def test_unknown_key_rejects_the_whole_block_and_installs_nothing(self, env_guard):
+        with pytest.raises(server._PlatformConfigError) as excinfo:
+            server._install_platform_config(_platform_config(ld_preload="/tmp/evil.so"))
+        assert excinfo.value.code == "MICROVM_RUN_PLATFORM_CONFIG_INVALID"
+        assert "ld_preload" in str(excinfo.value)
+        # Fail CLOSED: not one key from a rejected block reaches the environment,
+        # so a hostile key cannot ride along with valid ones.
+        assert "TASK_TABLE_NAME" not in os.environ
+
+    def test_unknown_key_message_lists_the_allowlist(self, env_guard):
+        with pytest.raises(server._PlatformConfigError, match="task_table_name"):
+            server._install_platform_config({"nope": "x"})
+
+    @pytest.mark.parametrize("raw", ["a string", ["a", "list"], 42, True])
+    def test_a_non_object_block_is_rejected(self, raw, env_guard):
+        with pytest.raises(server._PlatformConfigError) as excinfo:
+            server._install_platform_config(raw)
+        assert excinfo.value.code == "MICROVM_RUN_PLATFORM_CONFIG_INVALID"
+        assert "must be an object" in str(excinfo.value)
+
+    @pytest.mark.parametrize("value", [42, 1.5, ["x"], {"a": 1}, True])
+    def test_a_non_string_value_is_rejected(self, value, env_guard):
+        with pytest.raises(server._PlatformConfigError) as excinfo:
+            server._install_platform_config(_platform_config(log_group_name=value))
+        assert excinfo.value.code == "MICROVM_RUN_PLATFORM_CONFIG_INVALID"
+        assert "must be" in str(excinfo.value)
+        assert "LOG_GROUP_NAME" not in os.environ
+
+    @pytest.mark.parametrize("value", ["", "   ", None])
+    def test_a_blank_optional_value_is_treated_as_absent(self, value, env_guard):
+        # The natural producer (`process.env.X ?? ''`) emits an empty string for a
+        # resource the deployment does not have. Skipping is right; clobbering an
+        # image value with "" would turn "absent there" into "unconfigured here".
+        os.environ["LOG_GROUP_NAME"] = "from-the-image"
+        installed = server._install_platform_config(_platform_config(log_group_name=value))
+        assert "LOG_GROUP_NAME" not in installed
+        assert os.environ["LOG_GROUP_NAME"] == "from-the-image"
+
+    @pytest.mark.parametrize("value", ["", "  ", None])
+    def test_a_blank_required_value_is_rejected(self, value, env_guard):
+        with pytest.raises(server._PlatformConfigError) as excinfo:
+            server._install_platform_config(_platform_config(task_table_name=value))
+        assert excinfo.value.code == "MICROVM_RUN_PLATFORM_CONFIG_INCOMPLETE"
+        assert "task_table_name" in str(excinfo.value)
+        assert "TASK_EVENTS_TABLE_NAME" not in os.environ
+
+    def test_a_missing_required_key_is_rejected(self, env_guard):
+        partial = _platform_config()
+        partial.pop("agent_session_role_arn")
+        with pytest.raises(server._PlatformConfigError) as excinfo:
+            server._install_platform_config(partial)
+        assert excinfo.value.code == "MICROVM_RUN_PLATFORM_CONFIG_INCOMPLETE"
+        assert "agent_session_role_arn" in str(excinfo.value)
+
+    def test_an_explicitly_empty_block_is_incomplete_not_absent(self, env_guard):
+        # Sending the key with nothing in it is a producer bug; omitting the key
+        # is the documented "I have nothing to say".
+        with pytest.raises(server._PlatformConfigError) as excinfo:
+            server._install_platform_config({})
+        assert excinfo.value.code == "MICROVM_RUN_PLATFORM_CONFIG_INCOMPLETE"
+
+    def test_the_two_codes_are_distinct(self, env_guard):
+        # One exception type, two operator remedies: fix the producer vs. fix the
+        # deployment wiring. Collapsing them would send operators to the wrong one.
+        with pytest.raises(server._PlatformConfigError) as invalid:
+            server._install_platform_config({"bogus_key": "x"})
+        with pytest.raises(server._PlatformConfigError) as incomplete:
+            server._install_platform_config({"log_group_name": "lg"})
+        assert invalid.value.code != incomplete.value.code
+
+
+class TestMicrovmRunHookPlatformConfig:
+    """``platform_config`` arrives on the ``/run`` hook as a SIBLING of ``agent_payload``."""
+
+    def _payload(self, **extra) -> dict:
+        return {
+            "task_id": "t-pc",
+            "repo_url": "org/repo",
+            "prompt": "do it",
+            "github_token": "ghp_x",
+            **extra,
+        }
+
+    def test_inline_envelope_installs_the_config_and_accepts_the_task(
+        self, client, monkeypatch, env_guard
+    ):
+        monkeypatch.setattr(server, "run_task", MagicMock())
+        monkeypatch.setattr(server.task_state, "write_terminal", MagicMock())
+
+        r = client.post(
+            RUN_HOOK,
+            json=_run_hook_body(
+                {
+                    "agent_payload": self._payload(),
+                    "platform_config": _platform_config(log_group_name="/abca/agent"),
+                }
+            ),
+        )
+
+        assert r.status_code == 200
+        assert r.json()["status"] == "accepted"
+        assert os.environ["TASK_TABLE_NAME"] == "value-for-task_table_name"
+        assert os.environ["LOG_GROUP_NAME"] == "/abca/agent"
+
+    def test_the_config_is_installed_BEFORE_credential_resolution(
+        self, client, monkeypatch, env_guard
+    ):
+        # The ordering that makes the whole feature work: _extract_invocation_params
+        # resolves the GitHub token, which reads GITHUB_TOKEN_SECRET_ARN. Installing
+        # after that point would resolve the task against the snapshot's frozen env
+        # and silently ignore everything the orchestrator sent.
+        seen: dict = {}
+
+        def fake_resolve_github_token():
+            seen["gh_arn"] = os.environ.get("GITHUB_TOKEN_SECRET_ARN")
+            seen["session_role"] = os.environ.get("AGENT_SESSION_ROLE_ARN")
+            seen["threads_at_resolve"] = len(server._active_threads)
+            return "ghp_resolved"
+
+        monkeypatch.setattr(server, "resolve_github_token", fake_resolve_github_token)
+        monkeypatch.setattr(server, "run_task", MagicMock())
+        monkeypatch.setattr(server.task_state, "write_terminal", MagicMock())
+
+        payload = self._payload()
+        payload.pop("github_token")  # force the resolver to run
+        r = client.post(
+            RUN_HOOK,
+            json=_run_hook_body(
+                {
+                    "agent_payload": payload,
+                    "platform_config": _platform_config(
+                        github_token_secret_arn="arn:aws:secretsmanager:::secret:live"
+                    ),
+                }
+            ),
+        )
+
+        assert r.status_code == 200
+        assert seen["gh_arn"] == "arn:aws:secretsmanager:::secret:live"
+        assert seen["session_role"] == "value-for-agent_session_role_arn"
+        # ...and before the pipeline thread existed at all.
+        assert seen["threads_at_resolve"] == 0
+
+    def test_an_unknown_key_returns_400_and_starts_nothing(self, client, monkeypatch, env_guard):
+        monkeypatch.setattr(server, "run_task", MagicMock())
+
+        r = client.post(
+            RUN_HOOK,
+            json=_run_hook_body(
+                {
+                    "agent_payload": self._payload(),
+                    "platform_config": _platform_config(aws_endpoint_url="http://attacker"),
+                }
+            ),
+        )
+
+        assert r.status_code == 400
+        assert r.json()["code"] == "MICROVM_RUN_PLATFORM_CONFIG_INVALID"
+        assert "aws_endpoint_url" in r.json()["message"]
+        assert "TASK_TABLE_NAME" not in os.environ
+        with server._threads_lock:
+            assert server._active_threads == []
+
+    def test_a_missing_required_key_returns_400_and_starts_nothing(
+        self, client, monkeypatch, env_guard
+    ):
+        monkeypatch.setattr(server, "run_task", MagicMock())
+        partial = _platform_config()
+        partial.pop("task_events_table_name")
+
+        r = client.post(
+            RUN_HOOK,
+            json=_run_hook_body({"agent_payload": self._payload(), "platform_config": partial}),
+        )
+
+        assert r.status_code == 400
+        assert r.json()["code"] == "MICROVM_RUN_PLATFORM_CONFIG_INCOMPLETE"
+        assert "task_events_table_name" in r.json()["message"]
+        with server._threads_lock:
+            assert server._active_threads == []
+
+    def test_a_non_object_block_returns_400(self, client, monkeypatch, env_guard):
+        monkeypatch.setattr(server, "run_task", MagicMock())
+        r = client.post(
+            RUN_HOOK,
+            json=_run_hook_body(
+                {"agent_payload": self._payload(), "platform_config": "TASK_TABLE_NAME=x"}
+            ),
+        )
+        assert r.status_code == 400
+        assert r.json()["code"] == "MICROVM_RUN_PLATFORM_CONFIG_INVALID"
+
+    def test_an_envelope_without_platform_config_is_still_accepted(
+        self, client, monkeypatch, env_guard, capfd
+    ):
+        # P1 compatibility: image snapshot and orchestrator Lambda deploy on
+        # independent cadences, so a new image must not require a Stage-B
+        # orchestrator. It warns, loudly, rather than rejecting.
+        monkeypatch.setattr(server, "run_task", MagicMock())
+        monkeypatch.setattr(server.task_state, "write_terminal", MagicMock())
+
+        r = client.post(RUN_HOOK, json=_run_hook_body({"agent_payload": self._payload()}))
+
+        assert r.status_code == 200
+        # Still pre-install (nothing was installed), so the warning is stdout-only:
+        # `_warn_cw` here would spawn the CloudWatch thread off the snapshot's own
+        # baked env — the very thing it is warning about. See `TestMicrovmRunHook
+        # PreInstallAwsSilence`.
+        assert "[server/run-pre-config] /run hook received no platform_config" in (
+            capfd.readouterr().out
+        )
+
+    def test_s3_pointer_takes_the_config_from_the_outer_envelope(
+        self, client, monkeypatch, env_guard
+    ):
+        # The producer's pointer form: the bare task payload lands in S3 and the
+        # config rides beside the pointer, inside the 4 KB hook body.
+        monkeypatch.setattr(
+            server,
+            "_fetch_microvm_payload_from_s3",
+            lambda _uri: self._payload(task_id="t-outer"),
+        )
+        monkeypatch.setattr(server, "run_task", MagicMock())
+        monkeypatch.setattr(server.task_state, "write_terminal", MagicMock())
+
+        r = client.post(
+            RUN_HOOK,
+            json=_run_hook_body(
+                {
+                    "agent_payload_s3_uri": "s3://bucket/t-outer/payload.json",
+                    "platform_config": _platform_config(task_table_name="outer-table"),
+                }
+            ),
+        )
+
+        assert r.status_code == 200
+        assert r.json()["task_id"] == "t-outer"
+        assert os.environ["TASK_TABLE_NAME"] == "outer-table"
+
+    def test_s3_pointer_takes_the_config_merged_into_the_fetched_object(
+        self, client, monkeypatch, env_guard
+    ):
+        # The producer ALSO merges the config into the S3 object, so the agent
+        # gets it whichever end of the fetch it reads. A stray platform_config key
+        # left in the bare payload is inert — the extractor reads named fields.
+        fetched = self._payload(task_id="t-inner")
+        fetched["platform_config"] = _platform_config(task_table_name="inner-table")
+        monkeypatch.setattr(server, "_fetch_microvm_payload_from_s3", lambda _uri: fetched)
+        monkeypatch.setattr(server, "run_task", MagicMock())
+        monkeypatch.setattr(server.task_state, "write_terminal", MagicMock())
+
+        r = client.post(
+            RUN_HOOK,
+            json=_run_hook_body({"agent_payload_s3_uri": "s3://bucket/t-inner/payload.json"}),
+        )
+
+        assert r.status_code == 200
+        assert r.json()["task_id"] == "t-inner"
+        assert os.environ["TASK_TABLE_NAME"] == "inner-table"
+
+    def test_s3_object_may_itself_be_the_full_envelope(self, client, monkeypatch, env_guard):
+        monkeypatch.setattr(
+            server,
+            "_fetch_microvm_payload_from_s3",
+            lambda _uri: {
+                "agent_payload": self._payload(task_id="t-nested"),
+                "platform_config": _platform_config(task_table_name="nested-table"),
+            },
+        )
+        monkeypatch.setattr(server, "run_task", MagicMock())
+        monkeypatch.setattr(server.task_state, "write_terminal", MagicMock())
+
+        r = client.post(
+            RUN_HOOK,
+            json=_run_hook_body({"agent_payload_s3_uri": "s3://bucket/t-nested/payload.json"}),
+        )
+
+        assert r.status_code == 200
+        assert r.json()["task_id"] == "t-nested"
+        assert os.environ["TASK_TABLE_NAME"] == "nested-table"
+
+    def test_the_fetched_object_wins_over_the_outer_envelope(self, client, monkeypatch, env_guard):
+        fetched = self._payload(task_id="t-prec")
+        fetched["platform_config"] = _platform_config(task_table_name="inner-wins")
+        monkeypatch.setattr(server, "_fetch_microvm_payload_from_s3", lambda _uri: fetched)
+        monkeypatch.setattr(server, "run_task", MagicMock())
+        monkeypatch.setattr(server.task_state, "write_terminal", MagicMock())
+
+        r = client.post(
+            RUN_HOOK,
+            json=_run_hook_body(
+                {
+                    "agent_payload_s3_uri": "s3://bucket/t-prec/payload.json",
+                    "platform_config": _platform_config(task_table_name="outer-loses"),
+                }
+            ),
+        )
+
+        assert r.status_code == 200
+        assert os.environ["TASK_TABLE_NAME"] == "inner-wins"
+
+    def test_a_nested_agent_payload_of_the_wrong_type_is_a_400(self, client, monkeypatch):
+        monkeypatch.setattr(
+            server,
+            "_fetch_microvm_payload_from_s3",
+            lambda _uri: {"agent_payload": "not-an-object"},
+        )
+        monkeypatch.setattr(server, "run_task", MagicMock())
+
+        r = client.post(RUN_HOOK, json=_run_hook_body({"agent_payload_s3_uri": "s3://b/k"}))
+
+        assert r.status_code == 400
+        assert r.json()["code"] == "MICROVM_RUN_PAYLOAD_INVALID"
+        assert "agent_payload in the S3 payload must be an object" in r.json()["message"]
+
+    def test_resolve_returns_the_config_alongside_the_payload(self):
+        payload, config = server._resolve_microvm_run_payload(
+            json.dumps({"agent_payload": {"task_id": "t"}, "platform_config": {"a": "b"}})
+        )
+        assert payload == {"task_id": "t"}
+        assert config == {"a": "b"}
+
+    def test_resolve_returns_none_for_an_envelope_without_a_config(self):
+        _payload, config = server._resolve_microvm_run_payload(
+            json.dumps({"agent_payload": {"task_id": "t"}})
+        )
+        assert config is None
+
+
+# --------------------------------------------------------------------------
+# /validate + /terminate (ADR-021 P2)
+# --------------------------------------------------------------------------
+
+
+class TestMicrovmValidateHook:
+    """A BUILD hook running under the BUILD role — so: shallow, and AWS-silent.
+
+    ``CreateMicrovmImage`` runs ``/validate`` with the build role, which
+    deliberately holds no Bedrock / Secrets Manager / DynamoDB grants. Every
+    "deeper warm-up assertion" ADR-021 originally sketched here would therefore
+    AccessDenied and fail every image build. The hook is a self-check, not a
+    reachability probe.
+    """
+
+    def test_returns_200_with_the_individual_checks(self, client):
+        r = client.post(VALIDATE_HOOK)
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "valid"
+        assert body["checks"] == {
+            "server_initialized": True,
+            "hook_routes_registered": True,
+            "python_version_supported": True,
+            "platform_config_contract_loaded": True,
+        }
+        assert body["hook_prefix"] == server.MICROVM_HOOK_PREFIX
+        assert body["platform_config_keys"] == len(server.MICROVM_PLATFORM_CONFIG_ENV_BY_KEY)
+
+    def test_makes_zero_aws_calls_even_with_a_log_group_configured(
+        self, client, monkeypatch, capfd
+    ):
+        # The whole point. _debug_cw / _warn_cw build a CloudWatch Logs client
+        # whenever LOG_GROUP_NAME is set, so a build hook must not use them; and
+        # boto3.client() would populate boto3.DEFAULT_SESSION — a module global
+        # holding the BUILD role's resolved credentials and region — which the
+        # snapshot would then freeze in for every MicroVM launched from it.
+        monkeypatch.setenv("LOG_GROUP_NAME", "/abca/agent")
+
+        def forbidden(*_args, **_kwargs):
+            raise AssertionError("a build hook must not make AWS calls")
+
+        import boto3
+
+        import aws_session
+
+        monkeypatch.setattr(boto3, "client", forbidden)
+        monkeypatch.setattr(boto3, "Session", forbidden)
+        monkeypatch.setattr(aws_session, "platform_client", forbidden)
+        monkeypatch.setattr(aws_session, "get_session", forbidden)
+        monkeypatch.setattr(server, "_debug_cw", forbidden)
+        monkeypatch.setattr(server, "_warn_cw", forbidden)
+
+        assert client.post(VALIDATE_HOOK).status_code == 200
+        # ...and it still logs, to stdout only.
+        assert "/validate hook: ok" in capfd.readouterr().out
+
+    def test_ready_is_also_aws_silent_with_a_log_group_configured(
+        self, client, monkeypatch, capfd, warm_ready
+    ):
+        # /ready runs under the same build role, so the same rule applies. It used
+        # to route through _debug_cw, whose write can only FAIL under a role with
+        # no Logs grant — and each failure bumps the shared _debug_cw_failures
+        # counter, poisoning the "debug path is blind" signal on every build.
+        monkeypatch.setenv("LOG_GROUP_NAME", "/abca/agent")
+
+        def forbidden(*_args, **_kwargs):
+            raise AssertionError("a build hook must not make AWS calls")
+
+        monkeypatch.setattr(server, "_debug_cw", forbidden)
+        monkeypatch.setattr(server, "_warn_cw", forbidden)
+
+        assert client.post(READY_HOOK).status_code == 200
+        assert "/ready hook" in capfd.readouterr().out
+
+    def test_does_not_touch_credential_resolution(self, client, monkeypatch):
+        import aws_session
+
+        def forbidden(*_args, **_kwargs):
+            raise AssertionError("/validate must not resolve credentials")
+
+        monkeypatch.setattr(aws_session, "get_session", forbidden)
+        monkeypatch.setattr(server, "resolve_github_token", forbidden)
+
+        assert client.post(VALIDATE_HOOK).status_code == 200
+        assert aws_session._session is None
+        assert aws_session._scoped is None
+
+    def test_starts_no_pipeline(self, client, monkeypatch):
+        # The snapshot is taken right after the build hooks answer, so anything
+        # started here would be frozen into the image.
+        monkeypatch.setattr(server, "run_task", MagicMock())
+        client.post(VALIDATE_HOOK)
+        with server._threads_lock:
+            assert server._active_threads == []
+
+    def test_returns_503_while_the_module_is_still_initialising(self, client, monkeypatch):
+        # Per the hook contract, 503 means "not ready yet". A permanently failing
+        # check therefore fails the image build — the right outcome for a snapshot
+        # that is genuinely broken.
+        monkeypatch.setattr(server, "_module_initialized", False)
+        r = client.post(VALIDATE_HOOK)
+        assert r.status_code == 503
+        assert r.json()["status"] == "not_ready"
+        assert r.json()["failed_checks"] == ["server_initialized"]
+
+    def test_reports_a_missing_hook_route(self, client, monkeypatch):
+        monkeypatch.setattr(server, "MICROVM_HOOK_PREFIX", "/typo/prefix")
+        r = client.post(VALIDATE_HOOK)
+        assert r.status_code == 503
+        assert "hook_routes_registered" in r.json()["failed_checks"]
+        assert r.json()["missing_routes"] == [
+            "/typo/prefix/ready",
+            "/typo/prefix/run",
+            "/typo/prefix/terminate",
+            "/typo/prefix/validate",
+        ]
+
+    def test_reports_an_unsupported_interpreter(self, client, monkeypatch):
+        monkeypatch.setattr(server, "_MIN_PYTHON_VERSION", (99, 0))
+        r = client.post(VALIDATE_HOOK)
+        assert r.status_code == 503
+        assert "python_version_supported" in r.json()["failed_checks"]
+
+    def test_reports_baked_secret_env_as_a_warning_not_a_failure(self, client, monkeypatch):
+        # ADR-021 sub-decision 3: the snapshot must stay secret-free. REPORT-ONLY,
+        # because the build environment's own credentials may legitimately be in
+        # this process's env and failing here would fail every build. Names only.
+        for name in server._SNAPSHOT_FORBIDDEN_SECRET_ENV:
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_should_not_be_baked")
+        r = client.post(VALIDATE_HOOK)
+        assert r.status_code == 200
+        assert r.json()["warnings"] == ["secret_env_present_in_snapshot:GITHUB_TOKEN"]
+        assert "ghp_should_not_be_baked" not in r.text
+
+    def test_no_warnings_on_a_clean_snapshot_env(self, client, monkeypatch):
+        for name in server._SNAPSHOT_FORBIDDEN_SECRET_ENV:
+            monkeypatch.delenv(name, raising=False)
+        assert client.post(VALIDATE_HOOK).json()["warnings"] == []
+
+
+class TestMicrovmTerminateHook:
+    """Best-effort flush. Always 200, never a terminal status write."""
+
+    def test_returns_200_with_no_body_at_all(self, client):
+        # The hook must not turn a body-less call into FastAPI's 422: a 4xx here
+        # reports a hook failure for a teardown that actually succeeded.
+        r = client.post(TERMINATE_HOOK)
+        assert r.status_code == 200
+        assert r.json()["status"] == "acknowledged"
+        assert r.json()["active_pipeline_threads"] == 0
+
+    def test_echoes_the_microvm_id(self, client):
+        r = client.post(TERMINATE_HOOK, json={"microvmId": "microvm-zzz"})
+        assert r.status_code == 200
+        assert r.json()["microvm_id"] == "microvm-zzz"
+
+    def test_an_EMPTY_microvm_id_is_expected_normal_and_earns_no_warning(self, client, capfd):
+        # What the service ACTUALLY sends (live 2026-08-07, ADR-021 P2-F8): the id
+        # is the empty string on this hook, unlike /run where it is populated. So it
+        # must not look like a defect in the guest's last log line — an operator
+        # reading a warning here would go hunting for a wire-contract break that
+        # does not exist. Only a genuinely unreadable body warns (tests below).
+        r = client.post(TERMINATE_HOOK, json={"microvmId": ""})
+        assert r.status_code == 200
+        assert r.json()["microvm_id"] == ""
+        out = capfd.readouterr().out
+        assert "[server/warn]" not in out
+        # ...and the breadcrumb still lands, carrying the pipeline state that IS
+        # this hook's value (correlation rides /run's accepted line instead).
+        assert '"microvm_id": ""' in out
+        assert '"active_pipeline_threads": 0' in out
+
+    def test_never_writes_terminal_task_status(self, client, monkeypatch):
+        # The orchestrator owns terminal state: it finalizes the task and THEN
+        # calls TerminateMicrovm, so a terminate hook that wrote a status would
+        # race the finalization it follows and could clobber the real outcome.
+        write_terminal = MagicMock()
+        monkeypatch.setattr(server.task_state, "write_terminal", write_terminal)
+        write_heartbeat = MagicMock()
+        monkeypatch.setattr(server.task_state, "write_heartbeat", write_heartbeat)
+
+        client.post(TERMINATE_HOOK, json={"microvmId": "m-1"})
+
+        write_terminal.assert_not_called()
+        write_heartbeat.assert_not_called()
+
+    def test_returns_200_without_joining_a_running_pipeline(self, client, monkeypatch):
+        # A drain can take minutes (that is lifespan's job on graceful shutdown);
+        # the hook budget is 1-60 s, so /terminate must observe and return.
+        release = threading.Event()
+        entered = threading.Event()
+
+        def slow_run_task(**_kwargs):
+            entered.set()
+            release.wait(timeout=10.0)
+
+        monkeypatch.setattr(server, "run_task", slow_run_task)
+        monkeypatch.setattr(server.task_state, "write_terminal", MagicMock())
+        try:
+            client.post(
+                RUN_HOOK,
+                json=_run_hook_body(
+                    {"agent_payload": {"task_id": "t-term", "repo_url": "o/r", "prompt": "x"}}
+                ),
+            )
+            assert entered.wait(timeout=5.0)
+
+            r = client.post(TERMINATE_HOOK, json={"microvmId": "m-live"})
+            assert r.status_code == 200
+            assert r.json()["active_pipeline_threads"] == 1
+            # Still running: the hook did not stop or join it.
+            with server._threads_lock:
+                assert any(t.is_alive() for t in server._active_threads)
+        finally:
+            release.set()
+
+    def test_emits_a_final_structured_log_line(self, client, capfd):
+        client.post(TERMINATE_HOOK, json={"microvmId": "m-log"})
+        out = capfd.readouterr().out
+        assert "/terminate hook:" in out
+        assert '"event": "microvm_terminate"' in out
+        assert '"microvm_id": "m-log"' in out
+
+    def test_still_returns_200_when_the_best_effort_step_fails(self, client, monkeypatch, capfd):
+        def boom(*_args, **_kwargs):
+            raise RuntimeError("log sink exploded")
+
+        monkeypatch.setattr(server, "_debug_cw", boom)
+        r = client.post(TERMINATE_HOOK, json={"microvmId": "m-boom"})
+        assert r.status_code == 200
+        # Best-effort, but not silent.
+        assert "best-effort step failed" in capfd.readouterr().out
+
+
+class TestMicrovmPayloadFetchAttribution:
+    """Every outbound AWS call carries ABCA's solution attribution (#319)."""
+
+    def test_the_s3_payload_fetch_goes_through_the_attributed_factory(self, monkeypatch):
+        captured: dict = {}
+
+        class _Body:
+            @staticmethod
+            def read():
+                return b'{"task_id": "t-1"}'
+
+        def fake_platform_client(service_name, **kwargs):
+            captured["service"] = service_name
+            captured["kwargs"] = kwargs
+            return SimpleNamespace(get_object=lambda **_kw: {"Body": _Body})
+
+        import aws_session
+
+        monkeypatch.setattr(aws_session, "platform_client", fake_platform_client)
+
+        assert server._fetch_microvm_payload_from_s3("s3://b/k") == {"task_id": "t-1"}
+        assert captured["service"] == "s3"
+
+    def test_the_fetch_client_carries_the_md_user_agent_segment(self, monkeypatch):
+        # A naked boto3.client('s3') would silently drop the md/ segment. Assert on
+        # the OUTCOME (the UA on the config) rather than on which helper was used.
+        captured: dict = {}
+
+        class _Body:
+            @staticmethod
+            def read():
+                return b'{"task_id": "t-1"}'
+
+        def fake_boto3_client(service_name, **kwargs):
+            captured["service"] = service_name
+            captured["config"] = kwargs.get("config")
+            return SimpleNamespace(get_object=lambda **_kw: {"Body": _Body})
+
+        import boto3
+
+        monkeypatch.setattr(boto3, "client", fake_boto3_client)
+
+        server._fetch_microvm_payload_from_s3("s3://b/k")
+
+        import ua
+
+        assert captured["service"] == "s3"
+        assert ua.static_user_agent_extra() in captured["config"].user_agent_extra
+
+
+class TestSnapshotCredentialHygiene:
+    """Nothing on the server's import or /ready path may cache an SDK session.
+
+    The MicroVM image is a SNAPSHOT: whatever module state exists when the
+    snapshot is taken is replayed by every MicroVM launched from that image
+    version. A boto3 session created during import or a build hook would freeze
+    the BUILD role's resolved credential chain and the BUILD-time region into the
+    image — inherited, stale and cross-role, by every task.
+
+    Runs in a SUBPROCESS because the assertion is about process-global state
+    (``sys.modules``, ``boto3.DEFAULT_SESSION``, ``aws_session._session``) that
+    dozens of earlier tests in this suite have already populated in-process.
+    """
+
+    PROBE = """
+import sys, time, threading
+sys.path.insert(0, "src")
+import server
+import aws_session
+from fastapi.testclient import TestClient
+
+client = TestClient(server.app)
+# /ready warms the snapshot's heavyweight binaries by exec'ing them (ADR-021
+# P2-F5). `claude` is not installed in a CI checkout, so pin the warm-up to a
+# binary that always exists: the property under test is that a build hook's
+# subprocess exec creates no boto3 session, not WHICH binary it warms.
+server._READY_WARMUP_REQUIRED = (sys.executable, "--version")
+server._READY_WARMUP_OPTIONAL = ()
+assert client.post("/aws/lambda-microvms/runtime/v1/ready").status_code == 200
+client.post("/aws/lambda-microvms/runtime/v1/validate")
+
+# Any AWS work would happen on a fire-and-forget daemon thread, so give one a
+# chance to run before concluding that none exists.
+for _ in range(20):
+    if "boto3" in sys.modules:
+        break
+    time.sleep(0.05)
+
+findings = {
+    "boto3_imported": "boto3" in sys.modules,
+    "botocore_imported": "botocore" in sys.modules,
+    "cached_session": aws_session._session is not None,
+    "scoped_resolved": aws_session._scoped is not None,
+    "log_writer_threads": [
+        t.name for t in threading.enumerate() if "cw-write" in t.name
+    ],
+}
+print("FINDINGS:" + repr(findings))
+"""
+
+    def test_import_and_build_hooks_create_no_boto3_session(self):
+        agent_dir = Path(__file__).resolve().parent.parent
+        env = {
+            **os.environ,
+            # The hostile case: a snapshot that DID bake the log group would make
+            # the old _debug_cw-based /ready spawn a CloudWatch writer.
+            "LOG_GROUP_NAME": "/abca/agent",
+            "AWS_REGION": "us-east-1",
+            "PYTHONPATH": str(agent_dir / "src"),
+        }
+        proc = subprocess.run(
+            [sys.executable, "-c", self.PROBE],
+            cwd=str(agent_dir),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=90,
+            check=False,
+        )
+        assert proc.returncode == 0, proc.stderr
+        line = next(
+            (ln for ln in proc.stdout.splitlines() if ln.startswith("FINDINGS:")),
+            None,
+        )
+        assert line is not None, proc.stdout
+        findings = eval(line[len("FINDINGS:") :])  # noqa: S307 — our own repr()
+        assert findings == {
+            "boto3_imported": False,
+            "botocore_imported": False,
+            "cached_session": False,
+            "scoped_resolved": False,
+            "log_writer_threads": [],
+        }
+
+
+class TestMicrovmRunHookPreInstallAwsSilence:
+    """Before ``platform_config`` is installed, ``/run`` may touch exactly ONE AWS seam.
+
+    Same defect class the build hooks avoid, one phase later: until the install has
+    run, ``LOG_GROUP_NAME`` is whatever the snapshot happens to carry, so a
+    ``_debug_cw`` on this path would resolve credentials and pin
+    ``boto3.DEFAULT_SESSION`` *before* the orchestrator's own region /
+    ``AWS_SDK_UA_APP_ID`` / session role are in the environment. The sole permitted
+    pre-install call is the S3 payload fetch, because the config is inside the
+    object being fetched.
+
+    Every test here runs with a **baked ``LOG_GROUP_NAME``** — the hostile case the
+    fix exists for. Without it, ``_debug_cw`` degrades to stdout on its own and the
+    assertions would pass vacuously.
+    """
+
+    def _payload(self, **extra) -> dict:
+        return {
+            "task_id": "t-silent",
+            "repo_url": "org/repo",
+            "prompt": "do it",
+            "github_token": "ghp_x",
+            **extra,
+        }
+
+    @pytest.fixture
+    def seam_guard(self, monkeypatch):
+        """Arm every AWS/credential seam to raise until the pre-install phase is OVER.
+
+        Two things end that phase, and only two:
+
+        * ``_install_platform_config`` returning a **non-empty** env list — a real
+          install. Flipping on *any* return would be a hole big enough to drive B2
+          through: the ``raw is None`` early return installs nothing and returns
+          ``[]``, so treating it as "installed" disarms the guard for the entire
+          legacy no-``platform_config`` path — which is exactly where a ``_warn_cw``
+          was spawning the CloudWatch thread off the snapshot's baked env.
+        * ``_extract_invocation_params`` being entered. Past that point the legacy
+          path is *allowed* to talk to AWS: running on the snapshot's own env is the
+          documented P1-compatibility behaviour, so the accepted-line ``_debug_cw``
+          and the pipeline below it are legitimate. Everything the handler does
+          *before* it — including the "no platform_config" warning — is not.
+
+        A rejection path reaches neither, so the seams stay armed for the whole
+        request: a rejected run installed nothing and has no more right to an AWS
+        call than it had before.
+        """
+        state: dict[str, Any] = {
+            "install_phase_done": False,
+            "installed_env": None,
+            "violations": [],
+        }
+        real_install = server._install_platform_config
+        real_extract = server._extract_invocation_params
+
+        def spy_install(raw):
+            result = real_install(raw)
+            state["installed_env"] = result
+            if result:
+                state["install_phase_done"] = True
+            return result
+
+        def spy_extract(*args, **kwargs):
+            state["install_phase_done"] = True
+            return real_extract(*args, **kwargs)
+
+        monkeypatch.setattr(server, "_install_platform_config", spy_install)
+        monkeypatch.setattr(server, "_extract_invocation_params", spy_extract)
+
+        def guard(name):
+            def _seam(*_args, **_kwargs):
+                if not state["install_phase_done"]:
+                    state["violations"].append(name)
+                    raise AssertionError(f"{name} touched before platform_config was installed")
+                return MagicMock()
+
+            return _seam
+
+        import boto3
+
+        import aws_session
+
+        # Kept so a test can re-enable exactly the ONE permitted pre-install seam
+        # (the S3 payload fetch) and assert on it positively.
+        state["real_platform_client"] = aws_session.platform_client
+
+        for module, attr in (
+            (boto3, "client"),
+            (boto3, "Session"),
+            (aws_session, "platform_client"),
+            (aws_session, "tenant_client"),
+            (aws_session, "tenant_resource"),
+            (aws_session, "get_session"),
+            (server, "_debug_cw"),
+            (server, "_warn_cw"),
+            (server, "_debug_cw_exc"),
+        ):
+            monkeypatch.setattr(module, attr, guard(f"{module.__name__}.{attr}"))
+
+        monkeypatch.setenv("LOG_GROUP_NAME", "/abca/agent")
+        return state
+
+    @pytest.mark.parametrize("with_config", [True, False], ids=["with-config", "no-config"])
+    def test_no_cloudwatch_or_credential_seam_is_touched_before_the_install(
+        self, client, monkeypatch, env_guard, seam_guard, capfd, with_config
+    ):
+        # The ``no-config`` arm is the legacy P1 envelope, and it is the harder case:
+        # nothing is ever installed, so EVERY line up to param extraction — including
+        # the "running on the snapshot's frozen env" warning itself — is still
+        # pre-install. A ``_warn_cw`` there would spawn the CloudWatch writer thread
+        # and pin ``boto3.DEFAULT_SESSION`` off the baked ``LOG_GROUP_NAME`` this
+        # fixture sets, which is precisely the defect the warning is reporting.
+        monkeypatch.setattr(server, "run_task", MagicMock())
+        monkeypatch.setattr(server.task_state, "write_terminal", MagicMock())
+
+        envelope: dict[str, Any] = {"agent_payload": self._payload()}
+        if with_config:
+            envelope["platform_config"] = _platform_config()
+
+        r = client.post(RUN_HOOK, json=_run_hook_body(envelope))
+
+        assert r.status_code == 200
+        assert seam_guard["violations"] == []
+        assert seam_guard["install_phase_done"] is True
+        if with_config:
+            assert seam_guard["installed_env"]
+        else:
+            # Vacuously "installed": the early return the flag must NOT trust.
+            assert seam_guard["installed_env"] == []
+            # The warning still reaches an operator — stdout, via the pre-install sink.
+            assert (
+                "[server/run-pre-config] /run hook received no platform_config"
+                in capfd.readouterr().out
+            )
+
+    def test_the_received_line_is_stdout_only(
+        self, client, monkeypatch, env_guard, seam_guard, capfd
+    ):
+        monkeypatch.setattr(server, "run_task", MagicMock())
+        monkeypatch.setattr(server.task_state, "write_terminal", MagicMock())
+
+        client.post(
+            RUN_HOOK,
+            json=_run_hook_body(
+                {"agent_payload": self._payload(), "platform_config": _platform_config()},
+                microvm_id="microvm-quiet",
+            ),
+        )
+
+        out = capfd.readouterr().out
+        assert "[server/run-pre-config] /run hook received:" in out
+        assert "microvm-quiet" in out
+
+    def test_the_s3_payload_fetch_is_the_only_pre_install_aws_call(
+        self, client, monkeypatch, env_guard, seam_guard
+    ):
+        # The permitted exception, asserted positively: exactly one client, for s3,
+        # while the CloudWatch/credential seams stay armed.
+        services: list[str] = []
+
+        class _Body:
+            @staticmethod
+            def read():
+                return json.dumps(self._payload(task_id="t-from-s3")).encode()
+
+        def recording_client(service_name, **_kwargs):
+            services.append(service_name)
+            return SimpleNamespace(get_object=lambda **_kw: {"Body": _Body})
+
+        import boto3
+
+        import aws_session
+
+        # Re-enable the one permitted seam, and only it: the fetch must still go
+        # through the attributed factory (#319), which delegates to boto3.client.
+        monkeypatch.setattr(aws_session, "platform_client", seam_guard["real_platform_client"])
+        monkeypatch.setattr(boto3, "client", recording_client)
+        monkeypatch.setattr(server, "run_task", MagicMock())
+        monkeypatch.setattr(server.task_state, "write_terminal", MagicMock())
+
+        r = client.post(
+            RUN_HOOK,
+            json=_run_hook_body(
+                {
+                    "agent_payload_s3_uri": "s3://payload-bucket/t-from-s3/payload.json",
+                    "platform_config": _platform_config(),
+                }
+            ),
+        )
+
+        assert r.status_code == 200
+        assert r.json()["task_id"] == "t-from-s3"
+        assert services == ["s3"]
+        assert seam_guard["violations"] == []
+
+    def test_a_malformed_envelope_is_rejected_without_touching_a_seam(
+        self, client, monkeypatch, seam_guard, capfd
+    ):
+        monkeypatch.setattr(server, "run_task", MagicMock())
+
+        r = client.post(RUN_HOOK, json={"microvmId": "m", "runHookPayload": "not json"})
+
+        assert r.status_code == 400
+        assert r.json()["code"] == "MICROVM_RUN_PAYLOAD_INVALID"
+        assert seam_guard["violations"] == []
+        assert seam_guard["install_phase_done"] is False
+        # The reason still reaches an operator: stdout here, and the response body
+        # (which the MicroVM service surfaces) in every case.
+        assert "[server/run-pre-config] /run hook rejected:" in capfd.readouterr().out
+
+    def test_a_failed_payload_fetch_is_reported_without_touching_a_seam(
+        self, client, monkeypatch, seam_guard, capfd
+    ):
+        def boom(_uri):
+            raise RuntimeError("AccessDenied")
+
+        monkeypatch.setattr(server, "_fetch_microvm_payload_from_s3", boom)
+        monkeypatch.setattr(server, "run_task", MagicMock())
+
+        r = client.post(RUN_HOOK, json=_run_hook_body({"agent_payload_s3_uri": "s3://b/k"}))
+
+        assert r.status_code == 500
+        assert r.json()["code"] == "MICROVM_RUN_PAYLOAD_UNREADABLE"
+        assert seam_guard["violations"] == []
+        out = capfd.readouterr().out
+        assert "[server/run-pre-config] /run hook payload fetch FAILED" in out
+        # The traceback is preserved on the stdout line (it is the only diagnostic
+        # the response body does not carry).
+        assert "Traceback" in out
+
+    @pytest.mark.parametrize(
+        "config,expected_code",
+        [
+            ({"ld_preload": "/tmp/evil.so"}, "MICROVM_RUN_PLATFORM_CONFIG_INVALID"),
+            ({"log_group_name": "lg"}, "MICROVM_RUN_PLATFORM_CONFIG_INCOMPLETE"),
+        ],
+    )
+    def test_a_rejected_platform_config_touches_no_seam(
+        self, client, monkeypatch, env_guard, seam_guard, config, expected_code
+    ):
+        monkeypatch.setattr(server, "run_task", MagicMock())
+
+        r = client.post(
+            RUN_HOOK,
+            json=_run_hook_body({"agent_payload": self._payload(), "platform_config": config}),
+        )
+
+        assert r.status_code == 400
+        assert r.json()["code"] == expected_code
+        # Nothing was installed, so nothing earned the right to an AWS call.
+        assert seam_guard["violations"] == []
+        assert seam_guard["install_phase_done"] is False
+
+    def test_the_accepted_line_correlates_task_and_microvm_ids(
+        self, client, monkeypatch, env_guard, capfd
+    ):
+        # The pre-install "received" line is stdout-only now, so the first line that
+        # reaches the task's log group has to join both ids by itself.
+        monkeypatch.setattr(server, "run_task", MagicMock())
+        monkeypatch.setattr(server.task_state, "write_terminal", MagicMock())
+
+        client.post(
+            RUN_HOOK,
+            json=_run_hook_body(
+                {"agent_payload": self._payload(), "platform_config": _platform_config()},
+                microvm_id="microvm-joined",
+            ),
+        )
+
+        out = capfd.readouterr().out
+        assert "/run hook accepted task_id='t-silent' microvm_id='microvm-joined'" in out
+
+
+class TestTerminateHookBodyTolerance:
+    """``/terminate`` must answer 200 for ANY body — that is why it takes the raw request.
+
+    A Pydantic body model is validated BEFORE the handler runs, so malformed JSON,
+    a wrong content-type or a missing body would produce a 422 the handler never
+    gets to prevent: a reported hook failure on a teardown that actually succeeded.
+    """
+
+    def test_malformed_json_still_returns_200(self, client, capfd):
+        r = client.post(
+            TERMINATE_HOOK,
+            content=b'{"microvmId": "m-1"',  # truncated
+            headers={"content-type": "application/json"},
+        )
+        assert r.status_code == 200
+        assert r.json()["status"] == "acknowledged"
+        assert r.json()["microvm_id"] == ""
+        # Degraded, not silent.
+        assert "/terminate hook body is not JSON" in capfd.readouterr().out
+
+    def test_a_wrong_content_type_still_returns_200(self, client):
+        r = client.post(
+            TERMINATE_HOOK,
+            content=b"microvmId=m-1",
+            headers={"content-type": "text/plain"},
+        )
+        assert r.status_code == 200
+        assert r.json()["microvm_id"] == ""
+
+    def test_a_json_body_under_the_wrong_content_type_is_still_read(self, client):
+        # The handler reads bytes, so it does not care what the sender declared.
+        r = client.post(
+            TERMINATE_HOOK,
+            content=b'{"microvmId": "m-ct"}',
+            headers={"content-type": "text/plain"},
+        )
+        assert r.status_code == 200
+        assert r.json()["microvm_id"] == "m-ct"
+
+    def test_an_empty_body_still_returns_200(self, client):
+        r = client.post(TERMINATE_HOOK, content=b"")
+        assert r.status_code == 200
+        assert r.json()["microvm_id"] == ""
+
+    def test_a_whitespace_only_body_still_returns_200(self, client):
+        r = client.post(TERMINATE_HOOK, content=b"   \n ")
+        assert r.status_code == 200
+        assert r.json()["microvm_id"] == ""
+
+    @pytest.mark.parametrize("body", [[1, 2, 3], "a string", 42, True])
+    def test_a_non_object_json_body_still_returns_200(self, client, body):
+        r = client.post(TERMINATE_HOOK, json=body)
+        assert r.status_code == 200
+        assert r.json()["microvm_id"] == ""
+
+    @pytest.mark.parametrize("value", [42, None, ["m"], {"nested": "x"}])
+    def test_a_non_string_microvm_id_degrades_to_empty(self, client, value):
+        r = client.post(TERMINATE_HOOK, json={"microvmId": value})
+        assert r.status_code == 200
+        assert r.json()["microvm_id"] == ""
+
+    def test_no_typed_body_model_is_left_on_the_route(self):
+        # Structural guard: re-introducing a Pydantic body model would silently
+        # restore the 422. FastAPI records body params in the route's dependant.
+        routes: Any = server.app.routes
+        route = next(r for r in routes if getattr(r, "path", None) == TERMINATE_HOOK)
+        assert route.dependant.body_params == []
+
+    def test_a_body_read_failure_still_returns_200(self, client, monkeypatch, capfd):
+        # e.g. the service aborts mid-body as the VM goes down.
+        async def boom():
+            raise RuntimeError("connection reset")
+
+        import starlette.requests
+
+        monkeypatch.setattr(starlette.requests.Request, "body", lambda _self: boom())
+
+        r = client.post(TERMINATE_HOOK, json={"microvmId": "m-x"})
+        assert r.status_code == 200
+        assert r.json()["microvm_id"] == ""
+        assert "could not read its body" in capfd.readouterr().out
+
+
+class TestParseTerminateMicrovmId:
+    """Unit-level: the parser degrades, never raises."""
+
+    def test_reads_the_service_camel_case_field(self):
+        assert server._parse_terminate_microvm_id(b'{"microvmId": "m-1"}') == "m-1"
+
+    def test_tolerates_the_snake_case_spelling(self):
+        assert server._parse_terminate_microvm_id(b'{"microvm_id": "m-2"}') == "m-2"
+
+    def test_camel_case_wins_when_both_are_present(self):
+        raw = b'{"microvmId": "camel", "microvm_id": "snake"}'
+        assert server._parse_terminate_microvm_id(raw) == "camel"
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            b"",
+            b"   ",
+            b"{",
+            b"not json",
+            b"[1,2,3]",
+            b'"a string"',
+            b"{}",
+            b'{"microvmId": null}',
+            b'{"microvmId": 7}',
+            b"\xff\xfe\x00bad utf8",
+        ],
+    )
+    def test_every_unusable_body_yields_empty(self, raw):
+        assert server._parse_terminate_microvm_id(raw) == ""
+
+    def test_ignores_unrelated_fields(self):
+        assert server._parse_terminate_microvm_id(b'{"reason": "idle", "x": 1}') == ""

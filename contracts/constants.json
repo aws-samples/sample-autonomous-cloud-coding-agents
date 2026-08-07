@@ -16,5 +16,33 @@
   "jira_app_actor": {
     "min_secret_length": 32,
     "forge_webtrigger_suffix": ".webtrigger.atlassian.app"
+  },
+  "microvm_platform_config": {
+    "env_by_key": {
+      "task_table_name": "TASK_TABLE_NAME",
+      "task_events_table_name": "TASK_EVENTS_TABLE_NAME",
+      "task_approvals_table_name": "TASK_APPROVALS_TABLE_NAME",
+      "nudges_table_name": "NUDGES_TABLE_NAME",
+      "log_group_name": "LOG_GROUP_NAME",
+      "artifacts_bucket_name": "ARTIFACTS_BUCKET_NAME",
+      "trace_artifacts_bucket_name": "TRACE_ARTIFACTS_BUCKET_NAME",
+      "github_token_secret_arn": "GITHUB_TOKEN_SECRET_ARN",
+      "linear_oauth_secret_arn": "LINEAR_OAUTH_SECRET_ARN",
+      "jira_oauth_secret_arn": "JIRA_OAUTH_SECRET_ARN",
+      "agent_session_role_arn": "AGENT_SESSION_ROLE_ARN",
+      "aws_sdk_ua_app_id": "AWS_SDK_UA_APP_ID",
+      "anthropic_default_haiku_model": "ANTHROPIC_DEFAULT_HAIKU_MODEL"
+    },
+    "required": [
+      "task_table_name",
+      "task_events_table_name",
+      "github_token_secret_arn",
+      "agent_session_role_arn"
+    ]
+  },
+  "microvm_hook_budgets": {
+    "ready_hook_timeout_seconds": 300,
+    "warmup_total_budget_seconds": 240,
+    "warmup_required_timeout_seconds": 120
   }
 }

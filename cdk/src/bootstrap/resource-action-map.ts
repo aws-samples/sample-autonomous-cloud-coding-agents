@@ -85,8 +85,19 @@ export const RESOURCE_ACTION_MAP: Record<string, readonly string[]> = {
   // `--context compute_type=lambda-microvm`, so the default-context
   // synth-coverage test never sees these — they are mapped anyway so the map
   // stays a complete statement of what the bootstrap bundle must cover.
-  'AWS::Lambda::MicrovmImage': ['lambda:CreateMicrovmImage'],
-  'AWS::Lambda::NetworkConnector': ['lambda:CreateNetworkConnector'],
+  //
+  // `iam:PassRole` is listed on BOTH because CloudFormation hands a role to the
+  // Lambda MicroVMs service for each: `buildRoleArn` on the image and
+  // `operatorRole` on the (VPC_EGRESS) connector. Its absence here is what let
+  // ADR-021 P2r2-F9 through — the bundle's shared `IAMPassRole` statement carries
+  // an `iam:PassedToService` allowlist that this service presents no usable value
+  // for, so the deploy failed with `iam:PassRole … not authorized` on the build
+  // role while every mapped action was covered. The unconditioned pass now lives in
+  // the conditional `compute-lambda-microvm` policy; listing the action here is
+  // what makes its removal a test failure instead of a redeploy failure. Evidence
+  // inlined in ADR-021 §4.
+  'AWS::Lambda::MicrovmImage': ['lambda:CreateMicrovmImage', 'iam:PassRole'],
+  'AWS::Lambda::NetworkConnector': ['lambda:CreateNetworkConnector', 'iam:PassRole'],
   'AWS::Logs::Delivery': ['logs:CreateDelivery'],
   'AWS::Logs::DeliveryDestination': ['logs:PutDeliveryDestination'],
   'AWS::Logs::DeliverySource': ['logs:PutDeliverySource'],

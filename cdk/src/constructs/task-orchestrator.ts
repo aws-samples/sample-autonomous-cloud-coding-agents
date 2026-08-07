@@ -191,6 +191,80 @@ export interface TaskOrchestratorProps {
   readonly attachmentsBucket?: s3.IBucket;
 
   /**
+   * Non-secret platform identifiers the orchestrator FORWARDS to the in-guest
+   * agent, for backends that have no deploy-time env block of their own.
+   *
+   * ## Why the orchestrator carries values it never uses itself
+   *
+   * On AgentCore these live in the runtime's `environmentVariables` and on ECS in
+   * the container's `environment` — CDK sets them directly on the compute. A
+   * Lambda MicroVM snapshot cannot have them: ADR-021 sub-decision 3 forbids
+   * baking configuration into an image that is shared across tasks and
+   * deployments, so the only channel is the `/run` payload the orchestrator
+   * writes (`platform_config`, assembled by
+   * `handlers/shared/strategies/lambda-microvm-strategy.ts`). That makes the
+   * orchestrator's own environment the transport, which is why these appear here
+   * rather than on `LambdaMicrovmCompute`.
+   *
+   * ## Names, ARNs — and NO grants
+   *
+   * Every field is an identifier, never a secret value, and NONE of them adds an
+   * IAM grant to the orchestrator role: it forwards these strings and never calls
+   * the resources they name (the agent does, through its own execution role /
+   * SessionRole). The approvals and nudges tables in particular stay ungranted to
+   * the orchestrator, which is asserted by a unit test — a "while I'm here" grant
+   * would hand the orchestration plane tenant-data access it has never needed.
+   *
+   * ## All-or-nothing, and wired unconditionally
+   *
+   * Every field is required so a partial configuration is unrepresentable (same
+   * rationale as `ecsConfig` / `microvmConfig`). The stack wires it for EVERY
+   * compute type rather than under the `lambda-microvm` gate: the strategy fails
+   * the session start when a required identifier is missing, and that guard should
+   * only ever fire for a hand-edited Lambda environment — never because a
+   * deploy-time gate and a per-repo `compute_type` disagreed.
+   *
+   * Optional as a prop only so isolated construct tests can omit it. Four of the
+   * thirteen `platform_config` keys come from env vars the orchestrator already
+   * carries for its own work (`TASK_TABLE_NAME`, `TASK_EVENTS_TABLE_NAME`,
+   * `GITHUB_TOKEN_SECRET_ARN`) or from the stack-wide `SolutionUaAspect`
+   * (`AWS_SDK_UA_APP_ID`), so they are deliberately NOT repeated here.
+   */
+  readonly agentPlatformConfig?: {
+    /**
+     * Cedar HITL approvals table (`TASK_APPROVALS_TABLE_NAME`). The agent's
+     * approval primitives write PENDING rows here; absent, the PreToolUse hook
+     * fails closed with `approval_write_failed`.
+     */
+    readonly taskApprovalsTableName: string;
+    /** Nudges table (`NUDGES_TABLE_NAME`) the agent polls for mid-task nudges. */
+    readonly nudgesTableName: string;
+    /** Application log group (`LOG_GROUP_NAME`) the agent writes progress logs to. */
+    readonly logGroupName: string;
+    /**
+     * Bucket a `deliver_artifact` step uploads to (`ARTIFACTS_BUCKET_NAME`).
+     * Without it an artifact workflow fails at delivery with
+     * "ARTIFACTS_BUCKET_NAME is not configured".
+     */
+    readonly artifactsBucketName: string;
+    /** Bucket the `--trace` trajectory upload targets (`TRACE_ARTIFACTS_BUCKET_NAME`). */
+    readonly traceArtifactsBucketName: string;
+    /**
+     * Per-task SessionRole ARN (`AGENT_SESSION_ROLE_ARN`). The sharpest field in
+     * this block: when the agent does not receive it, it falls back to ambient
+     * compute-role credentials and per-tenant scoping is silently OFF.
+     */
+    readonly agentSessionRoleArn: string;
+    /**
+     * Cross-region inference-profile id for the small/fast model
+     * (`ANTHROPIC_DEFAULT_HAIKU_MODEL`). Must be a `us.`-prefixed profile id, not
+     * a bare foundation-model id — Claude 4.x rejects on-demand invocation by
+     * bare id — and must match a granted profile (`constructs/bedrock-models.ts`).
+     */
+    readonly anthropicDefaultHaikuModel: string;
+  };
+
+  /**
    * AWS Lambda MicroVMs compute strategy configuration (ADR-021 sub-decision 4).
    * When provided, the `MICROVM_*` env vars and the MicroVM lifecycle IAM
    * statements are added to the orchestrator.
@@ -395,6 +469,21 @@ export class TaskOrchestrator extends Construct {
           }),
         }),
         ...(props.attachmentsBucket && { ATTACHMENTS_BUCKET_NAME: props.attachmentsBucket.bucketName }),
+        // ADR-021 P2: non-secret identifiers the orchestrator FORWARDS to the
+        // in-guest agent as `platform_config` on the MicroVM /run payload, because
+        // a MicroVM snapshot must not bake configuration in. Names match the
+        // AgentCore runtime env block in `stacks/agent.ts` and the strategy's
+        // PLATFORM_CONFIG_ENV_VARS map verbatim — one stack value, one name, three
+        // backends. NO IAM grant accompanies any of these (see the prop docs).
+        ...(props.agentPlatformConfig && {
+          TASK_APPROVALS_TABLE_NAME: props.agentPlatformConfig.taskApprovalsTableName,
+          NUDGES_TABLE_NAME: props.agentPlatformConfig.nudgesTableName,
+          LOG_GROUP_NAME: props.agentPlatformConfig.logGroupName,
+          ARTIFACTS_BUCKET_NAME: props.agentPlatformConfig.artifactsBucketName,
+          TRACE_ARTIFACTS_BUCKET_NAME: props.agentPlatformConfig.traceArtifactsBucketName,
+          AGENT_SESSION_ROLE_ARN: props.agentPlatformConfig.agentSessionRoleArn,
+          ANTHROPIC_DEFAULT_HAIKU_MODEL: props.agentPlatformConfig.anthropicDefaultHaikuModel,
+        }),
       },
       bundling: orchestratorBundling,
     });
@@ -565,15 +654,57 @@ export class TaskOrchestrator extends Construct {
       // execution roles to ecs-tasks.amazonaws.com. ADR-021's grant list omits
       // it because it enumerates MicroVM actions, not the IAM plumbing they
       // imply; without it RunMicrovm fails on the role hand-off.
+      //
+      // ⚠️ NO `iam:PassedToService` CONDITION HERE, AND THAT IS DELIBERATE
+      // (ADR-021 P2r2-F10, live 2026-08-07 run 2). This reverses what an earlier
+      // revision of this comment asserted — that the condition "was explicitly
+      // EXONERATED live … so it stays". It was not. It is a second, independent
+      // blocker of exactly the same class as the trust-policy source keys: the
+      // Lambda MicroVMs service does not present a usable `iam:PassedToService`
+      // value on the `RunMicrovm` PassRole path, so a grant carrying the condition
+      // is denied.
+      //
+      // Proven by a controlled two-arm experiment — SAME exact-ARN resource, SAME
+      // ~5-minute IAM settle, one variable:
+      //
+      //   | grant                                            | result             |
+      //   |--------------------------------------------------|--------------------|
+      //   | exact ARN + iam:PassedToService (as written then) | DENIED (twice)     |
+      //   | exact ARN, no condition                           | RUNNING in 9 s     |
+      //
+      // …with this denial on the CALLER, which is what makes it so misleading:
+      //   "User: …/backgroundagent-dev-TaskOrchestratorOrchestratorFn-… is not
+      //    authorized to perform: iam:PassRole on resource:
+      //    …role/backgroundagent-dev-LambdaMicrovmComputeExecutionRo-… because no
+      //    identity-based policy allows the iam:PassRole action"
+      // even though the statement below names that exact ARN and
+      // `simulate-principal-policy` answers `allowed`.
+      //
+      // WHY RUN 1 GOT THIS WRONG, because the failure mode is worth knowing: run 1
+      // "exonerated" the condition by attaching a temporary UNCONDITIONED
+      // `iam:PassRole` and observing that the task still failed — but that
+      // temporary grant was **still attached** for the later submissions that
+      // reached `RUNNING`, so the conditioned grant was never once tested against
+      // a working trust policy. A false negative from a contaminated control.
+      // Run 2 removed the workaround first (submission 4: denied) and only then
+      // added back the unconditioned grant on the same resource (submission 5:
+      // `RUNNING`).
+      //
+      // Compensating control that REMAINS: the grant is scoped to the execution
+      // role's EXACT ARN (`props.microvmConfig.executionRoleArn`), not a name
+      // prefix and not `*` — so this Lambda can pass exactly one role, the one
+      // this deployment created for this backend. That is now the whole of the
+      // scoping, which is why the resource must never be relaxed to a wildcard.
+      //
+      // If AWS documents (or a bounded probe finds) the value the service does
+      // present, add it back as a condition — `microvms.lambda.amazonaws.com`,
+      // `lambda-microvms.amazonaws.com` and `microvms.amazonaws.com` are all
+      // candidates that were `implicitDeny` against the conditioned policy, so any
+      // of them would work as the allowlist entry if it is the right one.
       this.fn.addToRolePolicy(new iam.PolicyStatement({
         sid: 'MicrovmPassExecutionRole',
         actions: ['iam:PassRole'],
         resources: [props.microvmConfig.executionRoleArn],
-        conditions: {
-          StringEquals: {
-            'iam:PassedToService': 'lambda.amazonaws.com',
-          },
-        },
       }));
     }
 

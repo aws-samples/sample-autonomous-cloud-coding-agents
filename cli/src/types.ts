@@ -111,6 +111,13 @@ export interface TaskDetail {
   readonly updated_at: string;
   readonly started_at: string | null;
   readonly completed_at: string | null;
+  /** ISO timestamp of the agent's last heartbeat (45 s cadence, every compute
+   *  backend); ``null`` before the first beat or on tasks that never ran. The
+   *  platform's only in-guest liveness signal, surfaced through the API as of
+   *  ADR-021 P2r2-F11 — it was written and consumed internally but hidden from
+   *  every operator, which produced a wrong live-verification conclusion. Mirrors
+   *  ``cdk/src/handlers/shared/types.ts::TaskDetail``. */
+  readonly agent_heartbeat_at: string | null;
   readonly duration_s: number | null;
   readonly cost_usd: number | null;
   readonly build_passed: boolean | null;
