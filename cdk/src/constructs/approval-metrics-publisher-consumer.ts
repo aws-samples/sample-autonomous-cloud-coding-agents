@@ -97,8 +97,11 @@ export interface ApprovalMetricsPublisherConsumerProps {
 export class ApprovalMetricsPublisherConsumer extends Construct {
   public readonly fn: lambda.NodejsFunction;
   public readonly dlq: sqs.Queue;
-  /** CloudWatch alarm that fires when the DLQ has at least one poison-pill record. */
-  public readonly dlqAlarm: cloudwatch.IAlarm;
+  /** CloudWatch alarm that fires when the DLQ has at least one
+   *  poison-pill record. Concrete {@link cloudwatch.Alarm} so an
+   *  ``addAlarmAction`` (SNS) can be attached once a notification
+   *  channel is provisioned (#117). */
+  public readonly dlqAlarm: cloudwatch.Alarm;
 
   constructor(scope: Construct, id: string, props: ApprovalMetricsPublisherConsumerProps) {
     super(scope, id);

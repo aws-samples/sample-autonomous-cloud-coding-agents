@@ -193,9 +193,8 @@ describe('ApprovalMetricsPublisherConsumer', () => {
   test('creates a CloudWatch alarm on DLQ ApproximateNumberOfMessagesVisible (#117)', () => {
     const { template } = createStack();
 
-    // Exactly one alarm — guards against a future change accidentally
-    // duplicating the DLQ-depth alarm (the failure mode seen when this
-    // construct's near-identical FanOutConsumer twin merged with main).
+    // Exactly one alarm — guards against a future merge or refactor
+    // accidentally duplicating the DLQ-depth alarm on this construct.
     template.resourceCountIs('AWS::CloudWatch::Alarm', 1);
     template.hasResourceProperties('AWS::CloudWatch::Alarm', {
       MetricName: 'ApproximateNumberOfMessagesVisible',

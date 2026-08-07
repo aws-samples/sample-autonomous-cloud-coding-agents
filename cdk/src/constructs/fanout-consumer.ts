@@ -160,9 +160,11 @@ export class FanOutConsumer extends Construct {
   /** Fires when records land in the fan-out DLQ — a silent fan-out
    *  outage (every Slack/GitHub/Linear notification failing) would
    *  otherwise accumulate unnoticed for the queue's 14-day retention.
-   *  Exposed as {@link cloudwatch.IAlarm} so a future consumer can call
-   *  ``addAlarmAction`` once an SNS notification channel exists (#117). */
-  public readonly dlqDepthAlarm: cloudwatch.IAlarm;
+   *  Kept as the concrete {@link cloudwatch.Alarm} (matching the
+   *  ``errorAlarm`` precedent in task-orchestrator.ts) so a future
+   *  consumer can call ``addAlarmAction`` — declared on ``Alarm``, not
+   *  the ``IAlarm`` interface — once an SNS channel exists (#117). */
+  public readonly dlqDepthAlarm: cloudwatch.Alarm;
 
   constructor(scope: Construct, id: string, props: FanOutConsumerProps) {
     super(scope, id);
@@ -171,7 +173,7 @@ export class FanOutConsumer extends Construct {
 
     this.dlq = new sqs.Queue(this, 'FanOutDlq', {
       // Persistent failures (e.g., dispatcher throws non-caught error
-      // five times in a row) land here for operator inspection.
+      // three times in a row) land here for operator inspection.
       retentionPeriod: Duration.days(DLQ_RETENTION_DAYS),
       enforceSSL: true,
     });
