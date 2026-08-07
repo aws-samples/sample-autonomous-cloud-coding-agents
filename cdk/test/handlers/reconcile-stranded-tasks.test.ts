@@ -36,16 +36,21 @@ import { handler } from '../../src/handlers/reconcile-stranded-tasks';
 
 /**
  * Build a dynamodb AttributeValue map mimicking a TaskTable StatusIndex hit.
+ * ``status_created_at`` (composite ``<STATUS>#<iso>``) is optional so tests
+ * can exercise both the time-in-current-status anchor (#441) and the
+ * created_at fallback for records missing/with a malformed value.
  */
 function mockTaskRow(opts: {
   task_id: string;
   user_id: string;
   created_at: string;
+  status_created_at?: string;
 }): Record<string, { S: string }> {
   return {
     task_id: { S: opts.task_id },
     user_id: { S: opts.user_id },
     created_at: { S: opts.created_at },
+    ...(opts.status_created_at !== undefined && { status_created_at: { S: opts.status_created_at } }),
   };
 }
 
@@ -131,6 +136,96 @@ describe('reconcile-stranded-tasks', () => {
     const decrementCall = (mockDdbSend.mock.calls as [{ _type: string; input: Record<string, unknown> }][])
       .find(([c]) => c._type === 'UpdateItem' && String(c.input.UpdateExpression).includes('active_count'));
     expect(decrementCall).toBeDefined();
+  });
+
+  test('#441: task with old created_at but FRESH status_created_at is NOT failed (freshly picked up from the queue)', async () => {
+    // A task can sit QUEUED for longer than the stranded timeout and then
+    // be picked up (QUEUED -> SUBMITTED): old created_at, fresh status
+    // entry. Aging by time-in-current-status must skip it so we don't kill
+    // it before its pipeline attaches. The GSI cutoff on created_at still
+    // returns it as a candidate, so the handler must filter it in-code.
+    const ancientCreate = new Date(Date.now() - 2 * 3600 * 1000).toISOString(); // 2h ago
+    const freshStatus = new Date(Date.now() - 30 * 1000).toISOString(); // 30s ago
+    primeResponses([
+      {
+        Items: [mockTaskRow({
+          task_id: 't-just-picked-up',
+          user_id: 'u-1',
+          created_at: ancientCreate,
+          status_created_at: `SUBMITTED#${freshStatus}`,
+        })],
+      },
+      { Items: [] }, // HYDRATING
+      { Items: [] }, // AWAITING_APPROVAL
+    ]);
+
+    await handler();
+
+    // Only the 3 status queries — the fresh task is filtered in-code, so
+    // NO transition / event / decrement writes fire.
+    expect(mockDdbSend).toHaveBeenCalledTimes(3);
+  });
+
+  test('#441: task with old created_at AND old status_created_at is still failed (genuinely stranded)', async () => {
+    const ancient = new Date(Date.now() - 2 * 3600 * 1000).toISOString(); // 2h ago
+    primeResponses([
+      {
+        Items: [mockTaskRow({
+          task_id: 't-stuck',
+          user_id: 'u-2',
+          created_at: ancient,
+          status_created_at: `SUBMITTED#${ancient}`,
+        })],
+      },
+      {}, // conditional UpdateItem → FAILED
+      {}, // PutItem task_stranded event
+      {}, // PutItem task_failed event
+      {}, // UpdateItem decrement concurrency
+      { Items: [] }, // HYDRATING
+      { Items: [] }, // AWAITING_APPROVAL
+    ]);
+
+    await handler();
+
+    const transitionCall = (mockDdbSend.mock.calls as [{ _type: string; input: Record<string, unknown> }][])
+      .find(([c]) => c._type === 'UpdateItem' && String(c.input.ConditionExpression).includes('= :expected'));
+    expect(transitionCall).toBeDefined();
+    const input = transitionCall![0].input as {
+      Key: { task_id: { S: string } };
+      ExpressionAttributeValues: Record<string, { S?: string }>;
+    };
+    expect(input.Key.task_id.S).toBe('t-stuck');
+    expect(input.ExpressionAttributeValues[':failed'].S).toBe('FAILED');
+  });
+
+  test('#441: malformed status_created_at falls back to created_at (pre-#441 behavior)', async () => {
+    // A record whose status_created_at has no parseable timestamp must not
+    // be treated as age 0 (which would let a genuinely stranded task live
+    // forever). The handler falls back to created_at.
+    const ancient = new Date(Date.now() - 25 * 60 * 1000).toISOString(); // 25 min ago
+    primeResponses([
+      {
+        Items: [mockTaskRow({
+          task_id: 't-malformed',
+          user_id: 'u-3',
+          created_at: ancient,
+          status_created_at: 'SUBMITTED#not-a-timestamp',
+        })],
+      },
+      {}, // conditional UpdateItem → FAILED
+      {}, // PutItem task_stranded event
+      {}, // PutItem task_failed event
+      {}, // UpdateItem decrement concurrency
+      { Items: [] }, // HYDRATING
+      { Items: [] }, // AWAITING_APPROVAL
+    ]);
+
+    await handler();
+
+    const transitionCall = (mockDdbSend.mock.calls as [{ _type: string; input: Record<string, unknown> }][])
+      .find(([c]) => c._type === 'UpdateItem' && String(c.input.ConditionExpression).includes('= :expected'));
+    expect(transitionCall).toBeDefined();
+    expect((transitionCall![0].input as { Key: { task_id: { S: string } } }).Key.task_id.S).toBe('t-malformed');
   });
 
   test('task advances during reconcile (ConditionalCheckFailedException) → skipped cleanly', async () => {
