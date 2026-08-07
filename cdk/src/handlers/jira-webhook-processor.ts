@@ -304,16 +304,13 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       return;
     }
     const commentProjectKey = issue.fields?.project?.key;
-    if (!commentProjectKey) {
-      logger.info('Jira comment issue has no project.key — skipping (cannot establish onboarding)', {
-        issue_key: issue.key,
-      });
+    if (
+      commentProjectKey
+      && !await getActiveProjectMapping(cloudId, commentProjectKey, issue.key)
+    ) {
       return;
     }
-    if (!await getActiveProjectMapping(cloudId, commentProjectKey, issue.key)) {
-      return;
-    }
-    await handleCommentTrigger(payload, issue, cloudId);
+    await handleCommentTrigger(payload, issue, cloudId, commentProjectKey);
     return;
   }
 
@@ -589,14 +586,16 @@ export async function handler(event: ProcessorEvent): Promise<void> {
 /**
  * Handle `comment_created` independently of the label-trigger path.
  *
- * The prior task is the routing source of truth after the caller establishes
- * that the Jira project mapping is still active. Comments do not require the
- * trigger label to remain present.
+ * When Jira supplies project.key, the caller establishes that its mapping is
+ * active. Otherwise the prior task supplies the project key and this handler
+ * revalidates that mapping before producing feedback or creating a task.
+ * Comments do not require the trigger label to remain present.
  */
 async function handleCommentTrigger(
   payload: JiraIssueEvent,
   issue: NonNullable<JiraIssueEvent['issue']>,
   cloudId: string,
+  verifiedProjectKey?: string,
 ): Promise<void> {
   const comment = payload.comment;
   if (!comment?.id) {
@@ -631,6 +630,23 @@ async function handleCommentTrigger(
     cloudId,
     issue.key,
   );
+  if (!verifiedProjectKey) {
+    const priorProjectKey = priorTask?.channel_metadata?.jira_project_key;
+    if (!priorProjectKey) {
+      logger.info(
+        'Jira comment issue has no project.key or prior project metadata — skipping silently',
+        { issue_key: issue.key },
+      );
+      return;
+    }
+    if (!await getActiveProjectMapping(cloudId, priorProjectKey, issue.key)) {
+      return;
+    }
+    logger.warn('Jira comment issue has no project.key — routing via active prior task project', {
+      issue_key: issue.key,
+      project_key: priorProjectKey,
+    });
+  }
   const prNumber = priorTask ? prNumberFromTask(priorTask) : null;
   if (!priorTask || prNumber === null) {
     await safeReportIssueFailure(
