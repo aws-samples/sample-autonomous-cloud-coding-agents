@@ -46,6 +46,10 @@ function buildTask(overrides: Partial<TaskDetail> = {}): TaskDetail {
     updated_at: '2026-04-29T15:30:00Z',
     started_at: '2026-04-29T15:27:06Z', // 3m 14s before NOW
     completed_at: null,
+    // Default null: the exact-output assertion below must not have to carry a
+    // Heartbeat line, and "the agent has not beaten yet" is the honest default for
+    // a freshly-built fixture.
+    agent_heartbeat_at: null,
     duration_s: null,
     cost_usd: null,
     build_passed: null,
@@ -247,6 +251,48 @@ describe('formatStatusSnapshot', () => {
     expect(formatStatusSnapshot(task, [older, newer], NOW)).toContain(
       'Last milestone: newer',
     );
+  });
+
+  describe('agent_heartbeat_at — in-guest liveness (ADR-021 P2r2-F11)', () => {
+    // `bgagent status` renders this snapshot, so this is the surface that decides
+    // whether the heartbeat is observable at all. It was not: the field lived in
+    // DynamoDB, drove the orchestrator's hang detector, and never reached the API —
+    // so a live verification run polled `status`, saw nothing, and recorded
+    // "heartbeats NOT observed" against the wrong defect.
+
+    test('shows the age beside the Last event line while the task is live', () => {
+      const task = buildTask({ agent_heartbeat_at: '2026-04-29T15:29:36Z' }); // 44s before NOW
+      const rendered = formatStatusSnapshot(task, [], NOW);
+      expect(rendered).toContain('  Heartbeat:     44s ago');
+      // Ordering is the point of putting it here: control-plane freshness
+      // (`Last event`) and in-guest freshness (`Heartbeat`) read together.
+      expect(rendered.indexOf('Heartbeat:')).toBeLessThan(rendered.indexOf('Last event:'));
+    });
+
+    test('a stale beat is visible as a large age rather than being hidden', () => {
+      // The actionable case: the substrate says RUNNING and the guest went quiet.
+      // 45 s is the write cadence, so ~4 minutes is unambiguous.
+      const task = buildTask({ agent_heartbeat_at: '2026-04-29T15:26:20Z' });
+      expect(formatStatusSnapshot(task, [], NOW)).toContain('  Heartbeat:     4m 00s ago');
+    });
+
+    test('is suppressed on a terminal task', () => {
+      const task = buildTask({
+        status: 'COMPLETED',
+        completed_at: '2026-04-29T15:29:50Z',
+        agent_heartbeat_at: '2026-04-29T15:29:38Z',
+      });
+      expect(formatStatusSnapshot(task, [], NOW)).not.toContain('Heartbeat:');
+    });
+
+    test('is omitted entirely when the agent has not beaten yet', () => {
+      expect(formatStatusSnapshot(buildTask(), [], NOW)).not.toContain('Heartbeat:');
+    });
+
+    test('degrades to a placeholder on an unparseable timestamp', () => {
+      const task = buildTask({ agent_heartbeat_at: 'garbage' });
+      expect(formatStatusSnapshot(task, [], NOW)).toContain('  Heartbeat:     — ago');
+    });
   });
 
   test('missing / non-string timestamp degrades "Last event" to placeholder', () => {

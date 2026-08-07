@@ -106,11 +106,17 @@
 #                                   answers fails its lifecycle transition, so
 #                                   each is enabled only once it is served.
 #
-# Still unverified: no clone → change → PR run has happened on this substrate,
-# and egress specifics plus heartbeat/progress behaviour from a live MicroVM are
-# untested. Keep production repos on compute_type=agentcore or ecs until a P2
-# smoke run is on record. The Dockerfile is copied unmodified deliberately —
-# adapting it to a MicroVM base image is P2 work.
+# A P2 smoke run HAS now completed clone → change → PR on this substrate
+# (2026-08-07: two tasks COMPLETED with pull requests, live progress events, and
+# the 45 s agent heartbeat observed). What is still missing is a run with NO manual
+# intervention: that smoke needed a live IAM workaround, and the two defects behind
+# it (ADR-021 P2r2-F9 / P2r2-F10 — the `iam:PassedToService` condition on both
+# `iam:PassRole` paths) are fixed in source but not yet re-exercised live. Keep
+ # production repos on compute_type=agentcore or ecs until a clean run is on record,
+# and note that the CDK-managed image path additionally needs bootstrap policy
+# bundle >= 1.4.0 (see the banner after upload). The Dockerfile is the P2 tuned base
+# and is copied unmodified — further customization (e.g., Alpine adoption) would be
+# P2.5 work.
 #
 # Requires: awscli v2, zip, rsync, python3 (none of which are installed by this script).
 
@@ -259,17 +265,18 @@ echo "    log group       : ${LOG_GROUP}"
 print_p1_reminder() {
   cat <<'EOF'
 
-!! REMINDER (ADR-021 P2): the image is fully wired but NOT smoke-verified.
-   The image IS creatable and launchable and the agent DOES serve all four
-   declared hooks (/ready + /validate on the build path, /run + /terminate at
-   runtime), and P2 wired the execution role's runtime permissions plus
-   non-secret config delivery via the /run payload's platform_config block.
-   NOT verified: no clone -> change -> PR run has happened on this substrate, and
-   egress specifics plus heartbeat/progress behaviour from a live MicroVM are
-   untested. Keep production repos on compute_type=agentcore or ecs until a P2
-   smoke run is on record. /suspend and /resume stay disabled until P3. CDK synth
-   emits the same warning
-   (abca:microvm-image-p1-smoke-unverified) on every deploy that configures an image.
+!! REMINDER (ADR-021 P2): smoke-verified ONCE, and only WITH a manual workaround.
+   The image is creatable and launchable, the agent serves all four declared hooks
+   (/ready + /validate on the build path, /run + /terminate at runtime), the
+   execution role holds its full runtime permission set, and a 2026-08-07 run took
+   two tasks clone -> change -> PR to COMPLETED with a live 45 s heartbeat.
+   NOT verified: an UNATTENDED run. That smoke needed a live IAM workaround, and the
+   two defects behind it (ADR-021 P2r2-F9 / P2r2-F10) are fixed in source but not
+   re-exercised. The CDK-managed image path also needs bootstrap bundle >= 1.4.0.
+   Keep production repos on compute_type=agentcore or ecs until a clean run is on
+   record. /suspend and /resume stay disabled until P3. CDK synth emits the same
+   warning (abca:microvm-image-p1-smoke-unverified) on every deploy that configures
+   an image.
 EOF
 }
 
@@ -319,12 +326,28 @@ if [[ "${CREATE_IMAGE}" -eq 0 ]]; then
 
 ==> Artifact uploaded. Next: create (or update) the image.
 
-  CDK-managed (recommended) — redeploy with the base image pinned. NOTE this path
-  was live-verified non-functional in the P2 smoke run and FIXED afterwards
-  (ADR-021 P2-F2: the L1 was sending hook paths and \`arm64\` where CloudFormation
-  wants ENABLED / ARM_64, and rejected the change set outright). The fix has not
-  yet been re-exercised live, so if the change set fails early validation, fall
-  back to --create-image below and report it:
+  CDK-managed (recommended) — redeploy with the base image pinned.
+
+  !! RE-BOOTSTRAP REQUIRED (bootstrap policy bundle >= 1.4.0) !!
+  This path took two live-verified fixes to work. The first (ADR-021 P2-F2: the L1
+  sent hook paths and \`arm64\` where CloudFormation wants ENABLED / ARM_64) is
+  DISCHARGED — change-set early validation now passes. The second (ADR-021
+  P2r2-F9) is a BOOTSTRAP change: CloudFormation could not pass the MicroVM build
+  role, because the deploy role's \`iam:PassRole\` carried an
+  \`iam:PassedToService\` condition the Lambda MicroVMs service does not satisfy.
+  The fix is the \`MicrovmPassRoles\` statement in the conditional
+  IaCRole-ABCA-Compute-LambdaMicrovms policy, which only reaches your account when
+  you re-bootstrap:
+
+    aws cloudformation describe-stacks --stack-name CDKToolkit \\
+      --query 'Stacks[0].Outputs[?OutputKey==\`BootstrapPolicyVersion\`].OutputValue' --output text
+    # if that is below 1.4.0:
+    MISE_EXPERIMENTAL=1 mise //cdk:bootstrap   # ComputeTypes must include lambda-microvm
+
+  Without it the image resource fails with
+  "is not authorized to perform: iam:PassRole on resource:
+   ...LambdaMicrovmComputeBuildRole... (Service: LambdaMicrovms, Status Code: 403)".
+  Then:
 
     aws lambda-microvms list-managed-microvm-images
     MISE_EXPERIMENTAL=1 mise //cdk:deploy -- \\

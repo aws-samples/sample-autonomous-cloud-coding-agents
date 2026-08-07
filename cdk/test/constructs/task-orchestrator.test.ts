@@ -733,13 +733,23 @@ describe('TaskOrchestrator with the Lambda MicroVMs backend (ADR-021)', () => {
     expect(pass.Resource).toBe('*');
   });
 
-  test('passes the execution role to lambda.amazonaws.com only', () => {
+  test('passes ONLY the exact execution-role ARN, with NO iam:PassedToService condition', () => {
+    // ADR-021 P2r2-F10, and the sharpest IAM assertion in this file: the condition
+    // must NOT come back. A controlled two-arm experiment (same exact-ARN resource,
+    // same ~5-minute settle, one variable) showed the Lambda MicroVMs service does
+    // not present a usable `iam:PassedToService` value on the RunMicrovm PassRole
+    // path — with the condition every submission was DENIED, without it the next
+    // one reached RUNNING in 9 s. An earlier revision asserted the opposite
+    // ("exonerated live"); that was a false negative from a contaminated control
+    // (run 1's temporary unconditioned grant was still attached during its
+    // "control" arm). See the comment on the statement in task-orchestrator.ts.
     const passRole = microvmStatements(template).find(s => s.Sid === 'MicrovmPassExecutionRole')!;
     expect(passRole.Action).toBe('iam:PassRole');
+    expect(passRole.Condition).toBeUndefined();
+    // With the condition gone, the exact-ARN resource is the WHOLE of the scoping —
+    // so a widening here (a name prefix, or `*`) would leave the grant unbounded.
     expect(passRole.Resource).toBe(EXECUTION_ROLE_ARN);
-    expect(passRole.Condition).toEqual({
-      StringEquals: { 'iam:PassedToService': 'lambda.amazonaws.com' },
-    });
+    expect(JSON.stringify(passRole.Resource)).not.toContain('*');
   });
 
   test('grants NO suspend/resume (P3) and NO auth-token minting (never)', () => {

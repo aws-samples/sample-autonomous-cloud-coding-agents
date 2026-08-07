@@ -64,6 +64,24 @@ describe('infrastructurePolicy', () => {
     expect(unique.size).toBe(sids.length);
   });
 
+  it('KEEPS the iam:PassedToService allowlist on IAMPassRole', () => {
+    // ADR-021 P2r2-F9 added an UNCONDITIONED `iam:PassRole` to the
+    // `compute-lambda-microvm` policy, because the Lambda MicroVMs service presents
+    // no usable value for this key. That fix must not spread: this statement covers
+    // every role in the stack by prefix, so dropping its condition here would
+    // relax ~30 roles to fix two. The narrow statement lives in the conditional
+    // per-backend policy precisely so this one can stay as it is.
+    const resolvedDoc = stack.resolve(doc);
+    const statements = resolvedDoc.Statement as Array<{
+      Sid: string;
+      Condition?: { StringEquals?: Record<string, string[]> };
+    }>;
+    const passRole = statements.find((st) => st.Sid === 'IAMPassRole')!;
+    const services = passRole.Condition?.StringEquals?.['iam:PassedToService'];
+    expect(services).toBeDefined();
+    expect(services).toContain('lambda.amazonaws.com');
+  });
+
   it('covers the expected service prefixes', () => {
     const resolvedDoc = stack.resolve(doc);
     const statements = resolvedDoc.Statement as Array<{ Action: string | string[] }>;
@@ -419,7 +437,7 @@ describe('computeLambdaMicrovmPolicy', () => {
     const resolvedDoc = stack.resolve(doc);
     const statements = resolvedDoc.Statement as Array<{ Sid: string }>;
 
-    expect(statements.map((s) => s.Sid)).toEqual(['LambdaMicrovms']);
+    expect(statements.map((s) => s.Sid)).toEqual(['LambdaMicrovms', 'MicrovmPassRoles']);
   });
 
   it('covers the expected service prefixes', () => {
@@ -430,7 +448,84 @@ describe('computeLambdaMicrovmPolicy', () => {
     );
     const prefixes = new Set(allActions.map((a) => a.split(':')[0]));
 
-    expect(prefixes).toEqual(new Set(['lambda']));
+    // `iam` joins `lambda` as of the MicrovmPassRoles statement (ADR-021 P2r2-F9).
+    expect(prefixes).toEqual(new Set(['lambda', 'iam']));
+  });
+
+  describe('MicrovmPassRoles (ADR-021 P2r2-F9)', () => {
+    function passRoleStatement() {
+      const resolvedDoc = stack.resolve(doc);
+      const statements = resolvedDoc.Statement as Array<{
+        Sid: string;
+        Action: string | string[];
+        Resource: string | string[];
+        Condition?: unknown;
+      }>;
+      return statements.find((st) => st.Sid === 'MicrovmPassRoles')!;
+    }
+
+    it('carries NO iam:PassedToService condition — the service presents no usable value', () => {
+      // The whole point of the statement. `infrastructure`'s IAMPassRole already
+      // matches these roles by prefix, but its `iam:PassedToService` allowlist is
+      // DENIED on this path: live 2026-08-07, CloudFormation could not pass the
+      // build role to CreateMicrovmImage ("...is not authorized to perform:
+      // iam:PassRole ... (Service: LambdaMicrovms, Status Code: 403)") while the
+      // out-of-band create-image call passed the SAME role successfully with
+      // unconditioned operator credentials. Re-adding a condition here re-breaks
+      // the CDK-managed image path.
+      expect(passRoleStatement().Condition).toBeUndefined();
+    });
+
+    it('grants only iam:PassRole', () => {
+      expect(passRoleStatement().Action).toBe('iam:PassRole');
+    });
+
+    it('is scoped to the build + connector-operator role prefixes only', () => {
+      const resources = passRoleStatement().Resource as string[];
+      expect(resources).toEqual([
+        'arn:aws:iam::*:role/backgroundagent-dev-LambdaMicrovmComputeBuild*',
+        'arn:aws:iam::*:role/backgroundagent-dev-LambdaMicrovmComputeConnector*',
+      ]);
+      // NOT the stack-wide role prefix the conditioned statement uses: an
+      // unconditioned pass on `backgroundagent-dev-*` would drop the
+      // iam:PassedToService constraint for every role in the stack to fix two.
+      expect(resources).not.toContain('arn:aws:iam::*:role/backgroundagent-dev-*');
+    });
+
+    it('does NOT cover the MicroVM execution role', () => {
+      // CloudFormation never passes it — the orchestrator does, at RunMicrovm,
+      // under its own exact-ARN grant (task-orchestrator.ts). Including it here
+      // would extend an unconditioned pass to the role that runs untrusted repo
+      // code, for no deploy-time reason. The live physical name is
+      // `backgroundagent-dev-LambdaMicrovmComputeExecutionRo-<suffix>`.
+      const resources = passRoleStatement().Resource as string[];
+      const executionRoleArn =
+        'arn:aws:iam::123456789012:role/backgroundagent-dev-LambdaMicrovmComputeExecutionRo-abc123';
+      const matches = resources.some((pattern) => {
+        const re = new RegExp(`^${pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')}$`);
+        return re.test(executionRoleArn);
+      });
+      expect(matches).toBe(false);
+    });
+
+    it('matches the live physical names CloudFormation generated for both roles', () => {
+      // Regression guard on the truncation window: CFN truncates the logical id to
+      // fit 64 chars before appending a random suffix, so a pattern that reaches
+      // past the cut silently matches nothing. These two ARNs are verbatim from the
+      // live run (the build role's is the one in the AccessDenied above).
+      const resources = passRoleStatement().Resource as string[];
+      const live = [
+        'arn:aws:iam::704224321915:role/backgroundagent-dev-LambdaMicrovmComputeBuildRoleF0-9FxjQbiJC3px',
+        'arn:aws:iam::704224321915:role/backgroundagent-dev-LambdaMicrovmComputeConnectorOp-Ab12Cd34Ef56',
+      ];
+      for (const arn of live) {
+        const matched = resources.some((pattern) => {
+          const re = new RegExp(`^${pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')}$`);
+          return re.test(arn);
+        });
+        expect(matched).toBe(true);
+      }
+    });
   });
 
   it('covers both CFN resource types the construct synthesizes', () => {

@@ -25,11 +25,20 @@ import { allPolicies } from './policies';
  * Semantic version of the bootstrap policy bundle.
  *
  * Bump history: 1.0.0 → 1.1.0 added the `compute-ecs` policy (#162), 1.1.0 →
- * 1.2.0 refreshed policies for a full deploy (#350), 1.2.0 → 1.3.0 adds the
- * `compute-lambda-microvm` policy (#645 / ADR-021). Adding a policy to the
- * bundle is a minor bump — that is the precedent `compute-ecs` set.
+ * 1.2.0 refreshed policies for a full deploy (#350), 1.2.0 → 1.3.0 added the
+ * `compute-lambda-microvm` policy (#645 / ADR-021), 1.3.0 → 1.4.0 adds that
+ * policy's `MicrovmPassRoles` statement (#645, ADR-021 P2r2-F9).
+ *
+ * On the 1.4.0 bump specifically: it is a *statement* addition, not a new policy,
+ * and it is still a MINOR bump for the reason 1.2.0 was — **an operator must
+ * re-bootstrap to pick it up**, and the version is the only signal that says so.
+ * Without it the CDK-managed MicroVM image path fails at deploy with a caller-side
+ * `iam:PassRole` AccessDenied on the build role (live-verified; see
+ * `policies/compute-lambda-microvm.ts`), which is exactly the class of breakage a
+ * patch-level bump would under-advertise. Adding a whole policy remains a minor
+ * bump too — the precedent `compute-ecs` set.
  */
-export const BOOTSTRAP_VERSION = '1.3.0';
+export const BOOTSTRAP_VERSION = '1.4.0';
 
 /**
  * Computes a SHA-256 hash over all bootstrap policies.

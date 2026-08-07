@@ -40,6 +40,7 @@ describe('format', () => {
     updated_at: '2026-01-01T01:00:00Z',
     started_at: '2026-01-01T00:01:00Z',
     completed_at: '2026-01-01T01:00:00Z',
+    agent_heartbeat_at: '2026-01-01T00:59:48Z',
     duration_s: 3540,
     cost_usd: 0.1234,
     build_passed: true,
@@ -94,6 +95,57 @@ describe('format', () => {
       expect(output).not.toContain('Cost:');
       expect(output).not.toContain('Build:');
       expect(output).not.toContain('Max Turns:');
+    });
+
+    describe('agent_heartbeat_at (ADR-021 P2r2-F11)', () => {
+      // The field exists in DynamoDB and drives the orchestrator's hang detector,
+      // but was never projected into the API response — so `bgagent status`
+      // printed nothing while a 6-second-old beat sat in the table, and a live
+      // verification run concluded "heartbeats not observed". The CLI is the
+      // consumer that makes the signal actionable, so it renders the AGE (the beat
+      // is written every 45 s; the age is what tells you something is wrong).
+
+      test('shows the heartbeat and its age while the task is still running', () => {
+        const running: TaskDetail = {
+          ...task,
+          status: 'RUNNING',
+          completed_at: null,
+          agent_heartbeat_at: new Date(Date.now() - 12_000).toISOString(),
+        };
+        const output = formatTaskDetail(running);
+        expect(output).toContain('Heartbeat:   ');
+        expect(output).toMatch(/Heartbeat:.*\(1[0-9]s\)/);
+      });
+
+      test('hides it on a terminal task, where the last beat is noise', () => {
+        // The fixture is COMPLETED and DOES carry a heartbeat, so this asserts the
+        // suppression rather than an absent value.
+        expect(task.agent_heartbeat_at).not.toBeNull();
+        expect(formatTaskDetail(task)).not.toContain('Heartbeat:');
+      });
+
+      test('hides it when the agent has not beaten yet', () => {
+        const running: TaskDetail = {
+          ...task,
+          status: 'RUNNING',
+          completed_at: null,
+          agent_heartbeat_at: null,
+        };
+        expect(formatTaskDetail(running)).not.toContain('Heartbeat:');
+      });
+
+      test('degrades to a placeholder rather than throwing on a malformed value', () => {
+        // A bad timestamp must not take out `bgagent status` — the command a user
+        // reaches for when something is already wrong.
+        const running: TaskDetail = {
+          ...task,
+          status: 'RUNNING',
+          completed_at: null,
+          agent_heartbeat_at: 'not-a-timestamp',
+        };
+        expect(() => formatTaskDetail(running)).not.toThrow();
+        expect(formatTaskDetail(running)).toContain('Heartbeat:   not-a-timestamp (—)');
+      });
     });
 
     test('renders a repo-less placeholder when repo is null (#248 Phase 3)', () => {

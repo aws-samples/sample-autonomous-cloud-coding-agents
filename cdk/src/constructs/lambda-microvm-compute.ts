@@ -939,15 +939,19 @@ export class LambdaMicrovmCompute extends Construct {
     // separator).
     //
     // COMPENSATING CONTROLS, since the confused-deputy condition is not available.
-    // Enumerated PER ROLE, because "only the orchestrator can pass them" is true of
-    // exactly one of the three and stating it of all three would be a false comfort:
-    //  1. Who can pass each role to `lambda.amazonaws.com`:
+    // Enumerated PER ROLE. The deployment-role's shared IAMPassRole grant is
+    // NAME-PREFIX-scoped (`role/backgroundagent-dev-*` + passed-to-service allowlist),
+    // so it technically covers the execution role too; in practice the orchestrator
+    // is the only principal that requests it (CloudFormation never requests it).
+    // The other two are passed TO the deployment role, NOT TO the roles themselves.
+    //
+    // 1. Who can pass each role to `lambda.amazonaws.com`:
     //      - `executionRole` — the ORCHESTRATOR only, at `RunMicrovm`, via an
-    //        `iam:PassRole` scoped to this role's EXACT ARN plus
-    //        `iam:PassedToService: lambda.amazonaws.com` (`task-orchestrator.ts`,
-    //        sid `MicrovmPassExecutionRole`). CloudFormation never passes it. That
-    //        identity-side condition was EXONERATED live — an unconditioned
-    //        `iam:PassRole` was denied too — so it stays.
+    //        `iam:PassRole` scoped to this role's EXACT ARN (no service condition)
+    //        (`task-orchestrator.ts`, sid `MicrovmPassExecutionRole`). The referenced
+    //        comment in that function contains the authoritative two-arm experiment
+    //        table and evidence that the condition is the true blocker (not missing
+    //        permissions or stale bootstrap).
     //      - `buildRole` — the CLOUDFORMATION DEPLOYMENT ROLE, at
     //        `CreateMicrovmImage` (this L1's `buildRoleArn`), via the bootstrap
     //        `infrastructure` policy's `IAMPassRole`; plus any operator running
@@ -1417,16 +1421,19 @@ export class LambdaMicrovmCompute extends Construct {
       // rename would read as "the old warning is gone, so it must be fine").
       Annotations.of(this).addWarningV2(
         'abca:microvm-image-p1-smoke-unverified',
-        'A MicroVM image is configured. The image IS creatable and launchable, the agent DOES serve '
-        + 'the /ready, /validate, /run and /terminate hooks (all four are declared), and ADR-021 P2 '
-        + 'has wired the execution role\'s runtime permissions (GitHub + channel-OAuth secret reads, '
-        + 'scoped Bedrock invocation, AgentCore Memory) plus non-secret configuration delivery via '
-        + 'the /run payload\'s platform_config block — but the backend still carries NO smoke-parity '
-        + 'guarantee: no clone -> change -> PR run has happened on this substrate, and egress '
-        + 'specifics and heartbeat/progress behaviour from a live MicroVM are unverified. Keep '
-        + 'production repos on compute_type=agentcore or ecs until a P2 smoke run is on record. Only '
-        + 'the /suspend and /resume runtime hooks remain undeclared, until P3 implements them: a hook '
-        + 'the service calls but nothing answers fails the corresponding lifecycle transition.',
+        'A MicroVM image is configured. A P2 smoke run HAS now completed clone -> change -> PR on '
+        + 'this substrate (2026-08-07: two tasks COMPLETED with pull requests, progress streaming to '
+        + 'bgagent watch, and the 45s agent heartbeat observed live), the agent serves the /ready, '
+        + '/validate, /run and /terminate hooks, and the execution role holds its full runtime '
+        + 'permission set. What is still MISSING is a run with no manual intervention: that smoke '
+        + 'needed a live IAM workaround, and the two defects behind it (ADR-021 P2r2-F9 / P2r2-F10 — '
+        + 'the iam:PassedToService condition on both PassRole paths) are fixed in source but NOT yet '
+        + 're-exercised live. ALSO REQUIRED: re-bootstrap to policy bundle 1.4.0 or the CDK-managed '
+        + 'image path fails with iam:PassRole AccessDenied on the build role. So the backend still '
+        + 'carries no smoke-parity guarantee for an unattended deployment - keep production repos on '
+        + 'compute_type=agentcore or ecs until a clean run is on record. Only the /suspend and '
+        + '/resume runtime hooks remain undeclared, until P3 implements them: a hook the service '
+        + 'calls but nothing answers fails the corresponding lifecycle transition.',
       );
     }
 

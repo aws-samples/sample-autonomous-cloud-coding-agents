@@ -655,29 +655,56 @@ export class TaskOrchestrator extends Construct {
       // it because it enumerates MicroVM actions, not the IAM plumbing they
       // imply; without it RunMicrovm fails on the role hand-off.
       //
-      // ⚠️ DEBUGGING NOTE (ADR-021 P2-F3, live 2026-08-07). If `RunMicrovm` ever
-      // returns
-      //   "… is not authorized to perform: iam:PassRole on resource:
-      //    …LambdaMicrovmComputeExecutionRole… because no identity-based policy
-      //    allows the iam:PassRole action"
-      // do NOT start by widening this statement. That message was reproduced with
-      // this grant present, with `simulate-principal-policy` returning `allowed`,
-      // with no permissions boundary, and with a temporary UNCONDITIONED
-      // `iam:PassRole` attached — still denied. The real cause was the TARGET
-      // role's trust policy (a source-condition key the MicroVM service does not
-      // present), and the service reports a role it cannot pass-and-assume as a
-      // caller-side PassRole denial. Read the execution role's
-      // `AssumeRolePolicyDocument` first; this statement — including its
-      // `iam:PassedToService` condition — was explicitly exonerated and stays.
+      // ⚠️ NO `iam:PassedToService` CONDITION HERE, AND THAT IS DELIBERATE
+      // (ADR-021 P2r2-F10, live 2026-08-07 run 2). This reverses what an earlier
+      // revision of this comment asserted — that the condition "was explicitly
+      // EXONERATED live … so it stays". It was not. It is a second, independent
+      // blocker of exactly the same class as the trust-policy source keys: the
+      // Lambda MicroVMs service does not present a usable `iam:PassedToService`
+      // value on the `RunMicrovm` PassRole path, so a grant carrying the condition
+      // is denied.
+      //
+      // Proven by a controlled two-arm experiment — SAME exact-ARN resource, SAME
+      // ~5-minute IAM settle, one variable:
+      //
+      //   | grant                                            | result             |
+      //   |--------------------------------------------------|--------------------|
+      //   | exact ARN + iam:PassedToService (as written then) | DENIED (twice)     |
+      //   | exact ARN, no condition                           | RUNNING in 9 s     |
+      //
+      // …with this denial on the CALLER, which is what makes it so misleading:
+      //   "User: …/backgroundagent-dev-TaskOrchestratorOrchestratorFn-… is not
+      //    authorized to perform: iam:PassRole on resource:
+      //    …role/backgroundagent-dev-LambdaMicrovmComputeExecutionRo-… because no
+      //    identity-based policy allows the iam:PassRole action"
+      // even though the statement below names that exact ARN and
+      // `simulate-principal-policy` answers `allowed`.
+      //
+      // WHY RUN 1 GOT THIS WRONG, because the failure mode is worth knowing: run 1
+      // "exonerated" the condition by attaching a temporary UNCONDITIONED
+      // `iam:PassRole` and observing that the task still failed — but that
+      // temporary grant was **still attached** for the later submissions that
+      // reached `RUNNING`, so the conditioned grant was never once tested against
+      // a working trust policy. A false negative from a contaminated control.
+      // Run 2 removed the workaround first (submission 4: denied) and only then
+      // added back the unconditioned grant on the same resource (submission 5:
+      // `RUNNING`).
+      //
+      // Compensating control that REMAINS: the grant is scoped to the execution
+      // role's EXACT ARN (`props.microvmConfig.executionRoleArn`), not a name
+      // prefix and not `*` — so this Lambda can pass exactly one role, the one
+      // this deployment created for this backend. That is now the whole of the
+      // scoping, which is why the resource must never be relaxed to a wildcard.
+      //
+      // If AWS documents (or a bounded probe finds) the value the service does
+      // present, add it back as a condition — `microvms.lambda.amazonaws.com`,
+      // `lambda-microvms.amazonaws.com` and `microvms.amazonaws.com` are all
+      // candidates that were `implicitDeny` against the conditioned policy, so any
+      // of them would work as the allowlist entry if it is the right one.
       this.fn.addToRolePolicy(new iam.PolicyStatement({
         sid: 'MicrovmPassExecutionRole',
         actions: ['iam:PassRole'],
         resources: [props.microvmConfig.executionRoleArn],
-        conditions: {
-          StringEquals: {
-            'iam:PassedToService': 'lambda.amazonaws.com',
-          },
-        },
       }));
     }
 
