@@ -1681,7 +1681,7 @@ describe('synchronizeJiraWebhookSecrets', () => {
     )).rejects.toMatchObject({
       name: 'CliError',
       message: expect.stringMatching(
-        /restored the tenant bundle.*Both secrets remain consistent.*safely retried/s,
+        /restored the tenant bundle.*Both secrets were restored to their prior values.*safely retried/s,
       ),
     });
 
