@@ -130,9 +130,9 @@ export function makeAdminCommand(): Command {
   admin.addCommand(
     addAdminContextOptions(
       new Command('invite-user')
-        .description('Create a Cognito user with a permanent password and optional configure bundle')
+        .description('Create a Cognito user with a temporary password (rotated on first login) and optional configure bundle')
         .argument('<email>', 'Email address of the new user (Cognito username)')
-        .option('--password <pwd>', 'Permanent password (default: auto-generated)')
+        .option('--password <pwd>', 'Temporary password (default: auto-generated)')
         .option('--temp-password <pwd>', 'Alias for --password')
         .action(async (email: string, opts) => {
           assertLikelyEmail(email);
@@ -228,7 +228,7 @@ function printInviteSummary(email: string, password: string, bundle: string | nu
   const bar = '─'.repeat(SUMMARY_BAR_WIDTH);
   console.log();
   console.log(`✓ Created Cognito user ${email}`);
-  console.log('✓ Set permanent password (no first-login change required)');
+  console.log('✓ Set temporary password (teammate is prompted to set a permanent one on first login)');
   if (bundle) {
     console.log('✓ Included configure bundle for `bgagent configure --from-bundle`');
   } else {
@@ -264,17 +264,27 @@ function writeCredentialsFile(
   const inviteDir = path.join(getConfigDir(), 'invites');
   fs.mkdirSync(inviteDir, { recursive: true, mode: 0o700 });
   const invitePath = credentialsFilePath(email);
+  // Invites issue a temporary password the teammate rotates on first login;
+  // password-reset issues a permanent one. Label it so the recipient knows.
+  const passwordLabel = kind === 'invite' ? 'temp password:' : 'password:';
+  // Pad every label to the widest one (`temp password:` = 14) so the value
+  // column lines up regardless of which labels are present — the aligned block
+  // the USER_GUIDE advertises.
+  const LABEL_WIDTH = 'temp password:'.length;
   const lines = [
-    `email:    ${email}`,
-    `password: ${password}`,
+    `${'email:'.padEnd(LABEL_WIDTH)} ${email}`,
+    `${passwordLabel.padEnd(LABEL_WIDTH)} ${password}`,
   ];
   if (bundle) {
-    lines.push(`bundle:   ${bundle}`, '');
+    lines.push(`${'bundle:'.padEnd(LABEL_WIDTH)} ${bundle}`, '');
     lines.push('Run:');
     lines.push(`  bgagent configure --from-bundle ${bundle}`);
     lines.push(`  bgagent login --username ${email}`);
   } else if (kind === 'password-reset') {
     lines.push('', 'Run:', `  bgagent login --username ${email}`);
+  }
+  if (kind === 'invite') {
+    lines.push('', 'On first login you will be prompted to set a permanent password.');
   }
   lines.push('');
   fs.writeFileSync(invitePath, lines.join('\n'), { mode: SECRET_FILE_MODE });

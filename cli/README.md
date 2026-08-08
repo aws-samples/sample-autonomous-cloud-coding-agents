@@ -73,6 +73,18 @@ bgagent login \
 
 Tokens are saved to `~/.bgagent/credentials.json` (mode 0600). The CLI automatically refreshes expired tokens using the cached refresh token.
 
+**First login (invited users):** `admin invite-user` issues a *temporary* password, so your first login is a rotation. Cognito returns a `NEW_PASSWORD_REQUIRED` challenge and the CLI prompts you to set (and confirm) a permanent password, which replaces the admin-shared temp one. Run it interactively — **omit `--password`** so the CLI can prompt; passing `--password` (or piping on a non-TTY) skips the rotation prompt and fails with a clear "log in interactively" error rather than hanging. Temporary passwords also expire after a few days; if yours has lapsed the login reports that and asks the admin to re-run `invite-user`.
+
+### `bgagent change-password`
+
+Rotate the signed-in user's Cognito password (requires an active `bgagent login` session).
+
+```
+bgagent change-password
+```
+
+Prompts for your current password, then the new password twice (masked). Cognito enforces the pool's password policy on the new value — by default minimum 12 characters with an upper, lower, digit, and symbol. No flags: the current-password prompt doubles as verification, and the username is read from your cached session so you never retype your email.
+
 ### `bgagent submit`
 
 Submit a new coding task.
@@ -345,7 +357,7 @@ Manage Cognito users with operator AWS credentials (`cognito-idp:Admin*` on the 
 ```
 bgagent admin invite-user <email> \
   --stack-name backgroundagent-dev \
-  --password <pwd>              # optional; auto-generated if omitted
+  --password <pwd>              # optional temporary password; auto-generated if omitted
 
 bgagent admin list-users \
   --output <text|json>
@@ -356,7 +368,7 @@ bgagent admin reset-password <email> \
   --password <pwd>              # optional; auto-generated if omitted
 ```
 
-`invite-user` creates the user, sets a permanent password, and writes credentials plus an optional configure bundle to `~/.bgagent/invites/<email>.txt` (mode 0600). Replaces Quick Start Step 5 raw `aws cognito-idp` commands.
+`invite-user` creates the user with a *temporary* password (rotated on the teammate's first login via `bgagent login`) and writes credentials plus an optional configure bundle to `~/.bgagent/invites/<email>.txt` (mode 0600). The temp password stops being valid once they set their own, so the admin-shared string never becomes a standing credential. `reset-password` instead sets a *permanent* password for an existing user (no first-login rotation). Replaces Quick Start Step 5 raw `aws cognito-idp` commands.
 
 ## Output formats
 
