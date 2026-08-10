@@ -54,7 +54,7 @@ import {
   renderJiraFinishedPointerText,
 } from './shared/jira-status-comment';
 import { logger } from './shared/logger';
-import type { Channel, IssueRef } from './shared/orchestration-channel';
+import type { Channel, CommentRef, IssueRef } from './shared/orchestration-channel';
 import { channelForSource, type ChannelRegistryTables } from './shared/orchestration-channel-factory';
 import { computeLeaves, isIntegrationNode } from './shared/orchestration-integration-node';
 import { ORCH_LOG } from './shared/orchestration-log-events';
@@ -1212,7 +1212,7 @@ async function replyToIterationComment(
   const existing = evt.iterationReplyId
     ? { commentId: evt.iterationReplyId }
     : undefined;
-  let reply;
+  let reply: CommentRef | null | undefined;
   if (channel.kind === 'jira') {
     const pointerKind = !succeeded
       ? 'details'
