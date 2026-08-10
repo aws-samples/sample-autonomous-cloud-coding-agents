@@ -65,9 +65,11 @@ jest.mock('../../src/handlers/shared/orchestration-store', () => ({
 
 const releaseReadyChildrenMock = jest.fn();
 const applyTerminalCreateFailuresMock = jest.fn();
+const readConcurrencyBudgetMock = jest.fn();
 jest.mock('../../src/handlers/shared/orchestration-release', () => ({
   releaseReadyChildren: (...args: unknown[]) => releaseReadyChildrenMock(...args),
   applyTerminalCreateFailures: (...args: unknown[]) => applyTerminalCreateFailuresMock(...args),
+  readConcurrencyBudget: (...args: unknown[]) => readConcurrencyBudgetMock(...args),
 }));
 
 const upsertEpicPanelMock = jest.fn();
@@ -93,6 +95,8 @@ process.env.JIRA_USER_MAPPING_TABLE_NAME = 'JiraUsers';
 process.env.JIRA_WORKSPACE_REGISTRY_TABLE_NAME = 'JiraWorkspaceRegistry';
 process.env.TASK_TABLE_NAME = 'Tasks';
 process.env.ORCHESTRATION_TABLE_NAME = 'Orchestrations';
+process.env.USER_CONCURRENCY_TABLE_NAME = 'Concurrency';
+process.env.MAX_CONCURRENT_TASKS_PER_USER = '10';
 
 import { handler } from '../../src/handlers/jira-webhook-processor';
 
@@ -205,7 +209,8 @@ describe('jira-webhook-processor orchestration adapter', () => {
       })
       .mockResolvedValueOnce({
         Item: { status: 'active', platform_user_id: 'platform-user' },
-      });
+      })
+      .mockResolvedValue({ Item: { active_count: 3 } });
     createTaskCoreMock.mockReset();
     createTaskCoreMock.mockResolvedValue({ statusCode: 201, body: '{}' });
     reportIssueFailureMock.mockReset();
@@ -234,6 +239,7 @@ describe('jira-webhook-processor orchestration adapter', () => {
     releaseReadyChildrenMock.mockResolvedValue([]);
     applyTerminalCreateFailuresMock.mockReset();
     applyTerminalCreateFailuresMock.mockResolvedValue(snapshot.children);
+    readConcurrencyBudgetMock.mockReset().mockResolvedValue(7);
     upsertEpicPanelMock.mockReset();
     upsertEpicPanelMock.mockResolvedValue(null);
     setStatusCommentIdMock.mockReset();
@@ -278,6 +284,17 @@ describe('jira-webhook-processor orchestration adapter', () => {
       })],
     });
     expect(releaseReadyChildrenMock).toHaveBeenCalledTimes(1);
+    expect(releaseReadyChildrenMock).toHaveBeenCalledWith(
+      expect.anything(),
+      'Orchestrations',
+      snapshot.children,
+      snapshot.meta.release_context,
+      expect.any(Function),
+      expect.any(String),
+      snapshot.children,
+      'main',
+      7,
+    );
     expect(upsertEpicPanelMock).toHaveBeenCalledWith(expect.objectContaining({
       parent: expect.objectContaining({ issueId: 'ENG-1', credentialsRef: 'cloud-1' }),
     }));
@@ -315,8 +332,20 @@ describe('jira-webhook-processor orchestration adapter', () => {
         { ...failedSnapshot.children[2], child_status: 'blocked' },
       ],
     };
-    ddbSend.mockReset().mockResolvedValue({
-      Item: { status: 'active', repo: 'org/repo', label_filter: 'bgagent' },
+    ddbSend.mockReset().mockImplementation(async (command: {
+      _type?: string;
+      input?: { TableName?: string };
+    }) => {
+      if (command._type === 'Get' && command.input?.TableName === 'JiraProjects') {
+        return { Item: { status: 'active', repo: 'org/repo', label_filter: 'bgagent' } };
+      }
+      if (command._type === 'Get' && command.input?.TableName === 'JiraUsers') {
+        return { Item: { status: 'active', platform_user_id: 'platform-user' } };
+      }
+      if (command._type === 'Get' && command.input?.TableName === 'Concurrency') {
+        return { Item: { active_count: 3 } };
+      }
+      return {};
     });
     loadOrchestrationMock.mockReset()
       .mockResolvedValueOnce(failedSnapshot)
@@ -335,7 +364,7 @@ describe('jira-webhook-processor orchestration adapter', () => {
       expect.any(String),
       resetSnapshot.children,
       'main',
-      undefined,
+      7,
       true,
     );
     expect(clearRollupClaimMock).toHaveBeenCalledWith(
@@ -348,6 +377,87 @@ describe('jira-webhook-processor orchestration adapter', () => {
       expect.anything(),
       'ENG-1',
       expect.stringContaining('1 successful sub-issue(s) are unchanged'),
+    );
+  });
+
+  test('refuses parent retry from an unlinked Jira commenter before reading the graph', async () => {
+    ddbSend.mockReset()
+      .mockResolvedValueOnce({
+        Item: { status: 'active', repo: 'org/repo', label_filter: 'bgagent' },
+      })
+      .mockResolvedValueOnce({});
+
+    await handler(retryEvent());
+
+    expect(loadOrchestrationMock).not.toHaveBeenCalled();
+    expect(claimCommentAckMock).not.toHaveBeenCalled();
+    expect(releaseReadyChildrenMock).not.toHaveBeenCalled();
+    expect(reportIssueFailureMock).toHaveBeenCalledWith(
+      expect.anything(),
+      'ENG-1',
+      expect.stringContaining('linked ABCA user'),
+    );
+  });
+
+  test('continues parent retry when a conditional child reset loses a race', async () => {
+    const failedSnapshot = {
+      ...snapshot,
+      children: [
+        {
+          ...snapshot.children[0],
+          sub_issue_id: 'ENG-3',
+          child_status: 'failed',
+          child_task_id: 'failed-task',
+        },
+      ],
+    };
+    const resetSnapshot = {
+      ...failedSnapshot,
+      children: [{ ...failedSnapshot.children[0], child_status: 'ready' }],
+    };
+    ddbSend.mockReset().mockImplementation(async (command: {
+      _type?: string;
+      input?: {
+        TableName?: string;
+        Key?: { sub_issue_id?: string };
+      };
+    }) => {
+      if (command._type === 'Get' && command.input?.TableName === 'JiraProjects') {
+        return { Item: { status: 'active', repo: 'org/repo', label_filter: 'bgagent' } };
+      }
+      if (command._type === 'Get' && command.input?.TableName === 'JiraUsers') {
+        return { Item: { status: 'active', platform_user_id: 'platform-user' } };
+      }
+      if (command._type === 'Get' && command.input?.TableName === 'Concurrency') {
+        return { Item: { active_count: 0 } };
+      }
+      if (command._type === 'Update' && command.input?.Key?.sub_issue_id === 'ENG-3') {
+        throw Object.assign(new Error('racing transition'), {
+          name: 'ConditionalCheckFailedException',
+        });
+      }
+      return {};
+    });
+    loadOrchestrationMock.mockReset()
+      .mockResolvedValueOnce(failedSnapshot)
+      .mockResolvedValueOnce(resetSnapshot)
+      .mockResolvedValueOnce(resetSnapshot);
+    readConcurrencyBudgetMock.mockResolvedValueOnce(10);
+
+    await expect(handler(retryEvent())).resolves.toBeUndefined();
+
+    expect(clearRollupClaimMock).toHaveBeenCalled();
+    expect(releaseReadyChildrenMock).toHaveBeenCalledWith(
+      expect.anything(),
+      'Orchestrations',
+      [expect.objectContaining({ sub_issue_id: 'ENG-3', child_status: 'ready' })],
+      failedSnapshot.meta.release_context,
+      expect.any(Function),
+      expect.any(String),
+      resetSnapshot.children,
+      'main',
+      10,
+      true,
     );
   });
 

@@ -44,6 +44,9 @@ describe('JiraIntegration construct', () => {
       partitionKey: { name: 'orchestration_id', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'sub_issue_id', type: dynamodb.AttributeType.STRING },
     });
+    const userConcurrencyTable = new dynamodb.Table(stack, 'UserConcurrencyTable', {
+      partitionKey: { name: 'user_id', type: dynamodb.AttributeType.STRING },
+    });
 
     new JiraIntegration(stack, 'JiraIntegration', {
       api,
@@ -51,6 +54,8 @@ describe('JiraIntegration construct', () => {
       taskTable,
       taskEventsTable,
       orchestrationTable,
+      userConcurrencyTable,
+      maxConcurrentTasksPerUser: 7,
     });
 
     template = Template.fromStack(stack);
@@ -93,6 +98,17 @@ describe('JiraIntegration construct', () => {
       Environment: {
         Variables: Match.objectLike({
           ORCHESTRATION_TABLE_NAME: Match.anyValue(),
+        }),
+      },
+    });
+  });
+
+  test('wires the user concurrency budget into the webhook processor', () => {
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: {
+        Variables: Match.objectLike({
+          USER_CONCURRENCY_TABLE_NAME: Match.anyValue(),
+          MAX_CONCURRENT_TASKS_PER_USER: '7',
         }),
       },
     });

@@ -54,6 +54,7 @@ import { jiraGraphSource } from './shared/orchestration-graph-source';
 import { computeEpicRetryPlan } from './shared/orchestration-reconcile';
 import {
   applyTerminalCreateFailures,
+  readConcurrencyBudget,
   releaseReadyChildren,
 } from './shared/orchestration-release';
 import { upsertEpicPanel } from './shared/orchestration-rollup';
@@ -77,6 +78,8 @@ const USER_MAPPING_TABLE = process.env.JIRA_USER_MAPPING_TABLE_NAME!;
 const TASK_TABLE = process.env.TASK_TABLE_NAME!;
 const WORKSPACE_REGISTRY_TABLE = process.env.JIRA_WORKSPACE_REGISTRY_TABLE_NAME;
 const ORCHESTRATION_TABLE = process.env.ORCHESTRATION_TABLE_NAME;
+const USER_CONCURRENCY_TABLE = process.env.USER_CONCURRENCY_TABLE_NAME;
+const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT_TASKS_PER_USER ?? '10');
 const DEFAULT_LABEL_FILTER = 'bgagent';
 const COMMENT_ACK_TTL_SECONDS = 86_400;
 
@@ -135,22 +138,6 @@ async function safeReportIssueFailure(
   }
 }
 
-/**
- * Safe single-tenant fallback for `cloudId`.
- *
- * Webhooks created through the Jira **Settings → System → Webhooks** UI do
- * not include a top-level `cloudId` in their payload (only app/OAuth-
- * registered dynamic webhooks do). Without `cloudId` the processor can't
- * resolve the tenant. For the common single-tenant install we recover by
- * reading the workspace registry: if **exactly one** `active` tenant is
- * registered, that must be the sender, so we use it.
- *
- * This deliberately does NOT guess when multiple active tenants exist —
- * doing so could mis-route an event from site B to site A's repo/user.
- * In that case we return `undefined` and the caller drops the event, so
- * the multi-tenant design is preserved: a multi-tenant operator must use a
- * webhook that carries its own `cloudId`.
- */
 /**
  * Subset of the Jira Cloud `jira:issue_*` webhook payload we depend on.
  * Undocumented fields are tolerated.
@@ -268,7 +255,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   //   lookup only when the body omits it (Settings-UI webhooks).
   // - Stack-wide fallback signature: the secret is not bound to any tenant,
   //   so a body-supplied `cloudId` is attacker-controllable. We IGNORE it and
-  //   bind the delivery to the sole active tenant; `resolveSoleTenantCloudId`
+  //   bind the delivery to the sole active tenant; `resolveSoleActiveJiraTenant`
   //   returns undefined (→ drop) when zero or multiple tenants are active, so
   //   a stack-wide secret can never steer an event at a chosen tenant.
   let cloudId: string | undefined;
@@ -607,6 +594,14 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       const snapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId);
       if (snapshot) {
         const now = new Date().toISOString();
+        const budget = USER_CONCURRENCY_TABLE
+          ? await readConcurrencyBudget(
+            ddb,
+            USER_CONCURRENCY_TABLE,
+            snapshot.meta.release_context.platform_user_id,
+            MAX_CONCURRENT,
+          )
+          : undefined;
         const results = await releaseReadyChildren(
           ddb,
           ORCHESTRATION_TABLE,
@@ -615,6 +610,8 @@ export async function handler(event: ProcessorEvent): Promise<void> {
           createTaskCore,
           now,
           snapshot.children,
+          'main',
+          budget,
         );
         await applyTerminalCreateFailures(
           ddb,
@@ -783,9 +780,29 @@ async function handleCommentTrigger(
     return;
   }
 
-  if (parseRetryIntent(trigger.instruction)
-    && await handleJiraEpicRetry(issue.key, cloudId, comment.id)) {
-    return;
+  let linkedCommentAuthor: string | null | undefined;
+  if (parseRetryIntent(trigger.instruction)) {
+    linkedCommentAuthor = comment.author?.accountId
+      ? await lookupPlatformUser(cloudId, comment.author.accountId)
+      : null;
+    if (!linkedCommentAuthor) {
+      logger.warn('Jira epic retry refused: commenter has no linked platform user', {
+        jira_cloud_id: cloudId,
+        jira_account_id: comment.author?.accountId,
+        issue_key: issue.key,
+        comment_id: comment.id,
+      });
+      await safeReportIssueFailure(
+        issue.key,
+        cloudId,
+        'I can only retry an orchestration for a linked ABCA user. '
+          + 'Link your Jira account first, then comment `@bgagent retry` again.',
+      );
+      return;
+    }
+    if (await handleJiraEpicRetry(issue.key, cloudId, comment.id)) {
+      return;
+    }
   }
 
   const priorTask = await resolveTaskByJiraIssue(
@@ -829,7 +846,7 @@ async function handleCommentTrigger(
     return;
   }
 
-  const linkedCommentAuthor = comment.author?.accountId
+  linkedCommentAuthor ??= comment.author?.accountId
     ? await lookupPlatformUser(cloudId, comment.author.accountId)
     : null;
   const platformUserId = linkedCommentAuthor ?? priorTask.user_id;
@@ -974,17 +991,27 @@ async function handleJiraEpicRetry(
   );
   for (const update of plan.statusUpdates) {
     const prior = previousStatus.get(update.sub_issue_id);
-    await ddb.send(new UpdateCommand({
-      TableName: ORCHESTRATION_TABLE,
-      Key: { orchestration_id: orchestrationId, sub_issue_id: update.sub_issue_id },
-      UpdateExpression: 'SET child_status = :next, updated_at = :now',
-      ConditionExpression: 'child_status = :prior',
-      ExpressionAttributeValues: {
-        ':next': update.child_status,
-        ':prior': prior,
-        ':now': now,
-      },
-    }));
+    try {
+      await ddb.send(new UpdateCommand({
+        TableName: ORCHESTRATION_TABLE,
+        Key: { orchestration_id: orchestrationId, sub_issue_id: update.sub_issue_id },
+        UpdateExpression: 'SET child_status = :next, updated_at = :now',
+        ConditionExpression: 'child_status = :prior',
+        ExpressionAttributeValues: {
+          ':next': update.child_status,
+          ':prior': prior,
+          ':now': now,
+        },
+      }));
+    } catch (err) {
+      logger.warn('Jira epic retry child reset lost a race; continuing best-effort', {
+        orchestration_id: orchestrationId,
+        sub_issue_id: update.sub_issue_id,
+        prior_status: prior,
+        next_status: update.child_status,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
   await clearRollupClaim(ddb, ORCHESTRATION_TABLE, orchestrationId, now);
 
@@ -994,6 +1021,14 @@ async function handleJiraEpicRetry(
     (child) => plan.toRelease.includes(child.sub_issue_id)
       && child.child_status === 'ready',
   );
+  const budget = USER_CONCURRENCY_TABLE
+    ? await readConcurrencyBudget(
+      ddb,
+      USER_CONCURRENCY_TABLE,
+      reset.meta.release_context.platform_user_id,
+      MAX_CONCURRENT,
+    )
+    : undefined;
   const releaseResults = await releaseReadyChildren(
     ddb,
     ORCHESTRATION_TABLE,
@@ -1003,7 +1038,7 @@ async function handleJiraEpicRetry(
     now,
     reset.children,
     'main',
-    undefined,
+    budget,
     true,
   );
   await applyTerminalCreateFailures(
