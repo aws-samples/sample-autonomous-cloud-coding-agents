@@ -705,7 +705,7 @@ describe('AgentStack', () => {
     }
   });
 
-  test('does NOT subscribe an email when no alertEmail context is set', () => {
+  test('does NOT subscribe an email when no alertEmail context is set (#629)', () => {
     // The default deploy ships the topic with no confirmed target;
     // operators subscribe Slack / PagerDuty / email themselves.
     template.resourceCountIs('AWS::SNS::Subscription', 0);

@@ -662,17 +662,29 @@ Bedrock Guardrails, CloudWatch Logs/Dashboards/Alarms, X-Ray, S3 (CDK assets), K
       "Effect": "Allow",
       "Action": [
         "kms:CreateKey",
-        "kms:ScheduleKeyDeletion",
-        "kms:PutKeyPolicy",
         "kms:GetKeyPolicy",
         "kms:GetKeyRotationStatus",
-        "kms:EnableKeyRotation",
-        "kms:DisableKeyRotation",
         "kms:TagResource",
-        "kms:UntagResource",
         "kms:ListResourceTags"
       ],
       "Resource": "*"
+    },
+    {
+      "Sid": "KMSCustomerManagedKeysLifecycle",
+      "Effect": "Allow",
+      "Action": [
+        "kms:PutKeyPolicy",
+        "kms:ScheduleKeyDeletion",
+        "kms:EnableKeyRotation",
+        "kms:DisableKeyRotation",
+        "kms:UntagResource"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/ABCA": "operational-alerts"
+        }
+      }
     },
     {
       "Sid": "ECRForDockerAssets",

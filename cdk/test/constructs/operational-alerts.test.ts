@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { App, Duration, Stack } from 'aws-cdk-lib';
+import { App, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
@@ -46,10 +46,14 @@ describe('OperationalAlerts', () => {
 
     template.resourceCountIs('AWS::SNS::Topic', 1);
     template.resourceCountIs('AWS::KMS::Key', 1);
-    // The topic must reference the CMK (not the AWS-managed key) so
-    // CloudWatch can be granted publish/decrypt rights on it.
+    // The topic must reference THIS construct's CMK by GetAtt — asserting
+    // Match.anyValue() would pass even for the literal `alias/aws/sns`,
+    // the exact AWS-managed-key state the construct exists to prevent
+    // (CloudWatch can't publish through it). Pin the GetAtt to the Key.
     template.hasResourceProperties('AWS::SNS::Topic', {
-      KmsMasterKeyId: Match.anyValue(),
+      KmsMasterKeyId: {
+        'Fn::GetAtt': [Match.stringLikeRegexp('AlertsKey'), 'Arn'],
+      },
     });
     template.hasResourceProperties('AWS::KMS::Key', {
       EnableKeyRotation: true,
@@ -115,6 +119,27 @@ describe('OperationalAlerts', () => {
       Protocol: 'email',
       Endpoint: 'ops@example.com',
     });
+  });
+
+  test('throws at synth on a malformed alertEmail rather than shipping a junk subscription', () => {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack');
+    expect(
+      () => new OperationalAlerts(stack, 'Alerts', { alertEmail: 'not-an-email' }),
+    ).toThrow(/not a valid email/);
+  });
+
+  test('applies the removal policy to BOTH the topic and the key', () => {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack');
+    new OperationalAlerts(stack, 'Alerts', { removalPolicy: RemovalPolicy.RETAIN });
+    const template = Template.fromStack(stack);
+
+    // Regression guard: removalPolicy previously reached only the key,
+    // leaving the topic on CDK's implicit default — key and topic could
+    // diverge on stack deletion.
+    template.hasResource('AWS::SNS::Topic', { DeletionPolicy: 'Retain' });
+    template.hasResource('AWS::KMS::Key', { DeletionPolicy: 'Retain' });
   });
 
   test('addAlarmActions wires each alarm to publish to the topic', () => {

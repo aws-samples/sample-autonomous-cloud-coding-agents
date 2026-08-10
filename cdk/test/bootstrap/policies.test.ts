@@ -213,6 +213,23 @@ describe('IaCRole-ABCA-Application', () => {
       expect(resources).toContain(`arn:aws:secretsmanager:*:*:secret:${prefix}*`);
     }
   });
+
+  it('SNS statement grants the create + subscribe verbs the OperationalAlerts topic needs (#629)', () => {
+    // Per-verb guard (mirrors the #409/#407 provisioned-concurrency and
+    // event-source-mapping-tagging guards): a missing verb is invisible to
+    // the service-prefix check above (still `sns:`) but rolls back a fresh
+    // deploy with AccessDenied. CreateTopic creates the topic;
+    // Subscribe/GetTopicAttributes are exercised when `-c alertEmail=...`
+    // adds an email subscription.
+    const resolvedDoc = stack.resolve(doc);
+    const statements = resolvedDoc.Statement as Array<{ Sid: string; Action?: string | string[] }>;
+    const sns = statements.find((s) => s.Sid === 'SNS');
+    expect(sns).toBeDefined();
+    const actions = Array.isArray(sns!.Action) ? sns!.Action : [sns!.Action];
+    for (const action of ['sns:CreateTopic', 'sns:Subscribe', 'sns:GetTopicAttributes']) {
+      expect(actions).toContain(action);
+    }
+  });
 });
 
 describe('IaCRole-ABCA-Observability', () => {
@@ -242,6 +259,7 @@ describe('IaCRole-ABCA-Observability', () => {
       'S3ApplicationBuckets',
       'KMSForCDKAssets',
       'KMSCustomerManagedKeys',
+      'KMSCustomerManagedKeysLifecycle',
       'ECRForDockerAssets',
       'ECRAuthToken',
       'XRay',
@@ -312,6 +330,46 @@ describe('IaCRole-ABCA-Observability', () => {
     ]) {
       expect(actions).toContain(action);
     }
+  });
+
+  it('KMSCustomerManagedKeys grants CreateKey + tag on * (the unscopable create path) (#629)', () => {
+    // kms:CreateKey and kms:TagResource must be unconditioned on `*`:
+    // the key ARN does not exist at create time and TagResource applies
+    // the very tag that scopes the lifecycle statement below.
+    const resolvedDoc = stack.resolve(doc);
+    const statements = resolvedDoc.Statement as Array<{
+      Sid: string;
+      Action?: string | string[];
+      Condition?: unknown;
+    }>;
+    const create = statements.find((s) => s.Sid === 'KMSCustomerManagedKeys');
+    expect(create).toBeDefined();
+    const actions = Array.isArray(create!.Action) ? create!.Action : [create!.Action];
+    expect(actions).toContain('kms:CreateKey');
+    expect(actions).toContain('kms:TagResource');
+    // The create/read statement must NOT carry policy-mutation actions —
+    // those belong to the tag-scoped lifecycle statement.
+    expect(actions).not.toContain('kms:PutKeyPolicy');
+    expect(actions).not.toContain('kms:ScheduleKeyDeletion');
+    expect(create!.Condition).toBeUndefined();
+  });
+
+  it('KMSCustomerManagedKeysLifecycle gates key-takeover actions on the ABCA resource tag (#629)', () => {
+    // PutKeyPolicy / ScheduleKeyDeletion on `*` would let the deploy role
+    // take over or delete any CMK in the account. They are confined to
+    // keys carrying the `ABCA=operational-alerts` tag the construct stamps.
+    const resolvedDoc = stack.resolve(doc);
+    const statements = resolvedDoc.Statement as Array<{
+      Sid: string;
+      Action?: string | string[];
+      Condition?: { StringEquals?: Record<string, string> };
+    }>;
+    const lifecycle = statements.find((s) => s.Sid === 'KMSCustomerManagedKeysLifecycle');
+    expect(lifecycle).toBeDefined();
+    const actions = Array.isArray(lifecycle!.Action) ? lifecycle!.Action : [lifecycle!.Action];
+    expect(actions).toContain('kms:PutKeyPolicy');
+    expect(actions).toContain('kms:ScheduleKeyDeletion');
+    expect(lifecycle!.Condition?.StringEquals?.['aws:ResourceTag/ABCA']).toBe('operational-alerts');
   });
 });
 
