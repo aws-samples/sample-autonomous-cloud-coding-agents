@@ -59,5 +59,25 @@ export function buildRepoOnboardNotes(input: RepoOnboardNotesInput): readonly st
     );
   }
 
+  if (input.config.compute_type === 'lambda-microvm') {
+    // Mirrors the ECS note, plus the one thing that has no ECS analogue: the
+    // substrate can be fully deployed and still carry no IMAGE (ADR-021's
+    // three-state table — the artifact bucket must exist before the artifact can
+    // be uploaded), in which case the orchestrator gets no MICROVM_* env block at
+    // all and tasks fail with the strategy's own remedy. The `bgagent repo
+    // onboard` substrate gate cannot see that: `ComputeSubstrate` says the
+    // backend was provisioned, not that an image was configured.
+    notes.push(
+      'NOTE: compute_type=lambda-microvm requires the MicroVM substrate wired into the stack '
+      + '(TaskOrchestrator microvmConfig) AND a MicroVM image configured. A stack deployed with '
+      + '--context compute_type=lambda-microvm but no image yet (the expected FIRST deploy) still '
+      + 'rejects tasks: package the artifact with cdk/scripts/package-microvm-artifact.sh, then '
+      + 'redeploy with --context microvm_base_image_arn=<arn> --context microvm_base_image_version=<v> '
+      + '(or --context microvm_image_identifier=<imageArn>).',
+      'NOTE: the lambda-microvm backend has no smoke-parity guarantee yet (ADR-021 P1 — synth emits '
+      + 'abca:microvm-image-p1-smoke-unverified). Keep production repos on agentcore or ecs until P2.',
+    );
+  }
+
   return notes;
 }

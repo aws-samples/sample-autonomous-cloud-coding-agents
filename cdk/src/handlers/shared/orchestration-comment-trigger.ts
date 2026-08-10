@@ -213,12 +213,28 @@ export function buildIntegrationIterationInstruction(trigger: CommentTrigger): s
  */
 const MAX_COMMAND_WORDS = 6;
 
-/** Word/phrase boundary match: the phrase appears as whole words in ``text``. */
+/** True when ``c`` is one of the [a-z0-9] chars that count as "inside a word". */
+function isAlnum(c: string | undefined): boolean {
+  return c !== undefined && ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'));
+}
+
+/** Word/phrase boundary match: the phrase appears as whole words in ``text``.
+ *
+ *  Plain substring scan rather than a phrase-interpolated ``new RegExp`` — a
+ *  dynamically built pattern would need metachar escaping to stay correct and
+ *  would make the phrase list a regex-injection / ReDoS surface if it ever grew
+ *  a non-literal member. Comparing chars directly cannot misparse its input.
+ */
 function hasPhrase(text: string, phrase: string): boolean {
-  // Escape regex metachars (e.g. "re-run"); match on non-word boundaries so
-  // "retry" doesn't fire inside a longer word.
-  const esc = phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return new RegExp(`(^|[^a-z0-9])${esc}([^a-z0-9]|$)`, 'i').test(text);
+  const hay = text.toLowerCase();
+  const needle = phrase.toLowerCase();
+  if (!needle) return false;
+  // Accept only occurrences flanked by a non-[a-z0-9] char (or a string edge),
+  // so "retry" doesn't fire inside a longer word like "retryx" / "abcretry".
+  for (let i = hay.indexOf(needle); i !== -1; i = hay.indexOf(needle, i + 1)) {
+    if (!isAlnum(hay[i - 1]) && !isAlnum(hay[i + needle.length])) return true;
+  }
+  return false;
 }
 
 /**

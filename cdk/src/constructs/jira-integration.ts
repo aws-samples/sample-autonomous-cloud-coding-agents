@@ -51,14 +51,8 @@ const WEBHOOK_PROCESSOR_TIMEOUT_SECONDS = 300;
 
 /**
  * Marker key embedded in the auto-generated stack-wide webhook-secret
- * placeholder. The CLI (`bgagent jira setup`) recognizes a secret carrying
- * this key as "never configured" and seeds the operator's value over it.
- *
- * MUST stay in sync with `JIRA_WEBHOOK_SECRET_PLACEHOLDER_KEY` in
- * `cli/src/commands/jira.ts`. Unlike Linear (whose real secrets always start
- * with `lin_wh_`), Atlassian webhook signing secrets are operator-chosen bare
- * strings with no fixed shape, so the *placeholder* — not the real value — is
- * the thing we make recognizable. See #368.
+ * placeholder. `bgagent jira setup` replaces the complete placeholder with
+ * the sole active tenant's admin-console webhook secret.
  */
 const JIRA_WEBHOOK_SECRET_PLACEHOLDER_KEY = 'abca_jira_webhook_placeholder';
 
@@ -187,24 +181,18 @@ export class JiraIntegration extends Construct {
 
     // --- Webhook signing secret (placeholder, populated by `bgagent jira setup`) ---
     // Per-tenant OAuth tokens live in `bgagent-jira-oauth-<cloudId>` secrets
-    // created by the CLI at runtime — not here. This stack-wide secret is
-    // a back-compat fallback for single-tenant installs predating per-
-    // tenant signing.
+    // created by the CLI at runtime — not here. Jira admin-console webhooks
+    // omit cloudId, so a single-tenant install verifies them against this
+    // stack-wide copy of the tenant's signing secret.
     //
-    // The initial value is an explicit JSON placeholder carrying
-    // `JIRA_WEBHOOK_SECRET_PLACEHOLDER_KEY`. Without `generateSecretString`,
-    // CDK seeds a BARE random string — which the CLI's placeholder heuristic
-    // mistook for an already-configured secret, so `setup` never seeded the
-    // operator's value and every admin-UI webhook delivery (whose payload has
-    // no `cloudId`, forcing stack-wide verification) failed HMAC with 401,
-    // silently (#368). Making the placeholder explicit lets the CLI reliably
-    // tell "never configured" from an operator-set value.
+    // The generated JSON is a non-operational initial value. Setup
+    // unconditionally replaces the complete value before the webhook is enabled.
     this.webhookSecret = new secretsmanager.Secret(this, 'WebhookSecret', {
       description: 'Jira webhook signing secret — populate via `bgagent jira setup`',
       removalPolicy,
       generateSecretString: {
-        // Yields `{"abca_jira_webhook_placeholder":true,"value":"<random>"}`:
-        // a JSON object (starts with `{`) with an explicit marker key.
+        // Yields `{"abca_jira_webhook_placeholder":true,"value":"<random>"}`.
+        // No runtime code interprets the marker key.
         secretStringTemplate: JSON.stringify({ [JIRA_WEBHOOK_SECRET_PLACEHOLDER_KEY]: true }),
         generateStringKey: 'value',
       },

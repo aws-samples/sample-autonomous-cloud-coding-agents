@@ -82,7 +82,9 @@ export function makeRuntimeCommand(): Command {
             ? `${b.runtime_arn} (${b.runtime_arn_source})`
             : b.compute_type === 'ecs'
               ? '(n/a — ECS uses platform cluster)'
-              : '(missing)';
+              : b.compute_type === 'lambda-microvm'
+                ? '(n/a — Lambda MicroVMs are platform-managed)'
+                : '(missing)';
           console.log(
             `${b.repo.padEnd(REPO_WIDTH)} ${b.status.padEnd(10)} `
             + `${b.compute_type.padEnd(COMPUTE_WIDTH)} ${runtimeLabel}`,
@@ -110,6 +112,14 @@ export function makeRuntimeCommand(): Command {
           for (const ecs of report.ecs_substrates) {
             console.log(`  repos: ${ecs.used_by_repos.join(', ')}`);
             console.log(`  note: ${ecs.note}`);
+          }
+        }
+
+        if ((report.lambda_microvm_substrates ?? []).length > 0) {
+          console.log('\nLambda MicroVM compute substrates:');
+          for (const microvm of report.lambda_microvm_substrates ?? []) {
+            console.log(`  repos: ${microvm.used_by_repos.join(', ')}`);
+            console.log(`  note: ${microvm.note}`);
           }
         }
       }),

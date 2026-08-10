@@ -22,12 +22,14 @@ import { aws_iam as iam } from 'aws-cdk-lib';
 import { applicationPolicy } from './application';
 import { computeAgentcorePolicy } from './compute-agentcore';
 import { computeEcsPolicy } from './compute-ecs';
+import { computeLambdaMicrovmPolicy } from './compute-lambda-microvm';
 import { infrastructurePolicy } from './infrastructure';
 import { observabilityPolicy } from './observability';
 
 export { applicationPolicy } from './application';
 export { computeAgentcorePolicy } from './compute-agentcore';
 export { computeEcsPolicy } from './compute-ecs';
+export { computeLambdaMicrovmPolicy } from './compute-lambda-microvm';
 export { infrastructurePolicy } from './infrastructure';
 export { observabilityPolicy } from './observability';
 
@@ -41,5 +43,6 @@ export function allPolicies(): iam.PolicyDocument[] {
     observabilityPolicy(),
     computeAgentcorePolicy(),
     computeEcsPolicy(),
+    computeLambdaMicrovmPolicy(),
   ];
 }

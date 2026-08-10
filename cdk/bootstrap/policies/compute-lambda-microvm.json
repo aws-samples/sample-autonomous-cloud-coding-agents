@@ -1,0 +1,31 @@
+{
+  "Statement": [
+    {
+      "Action": [
+        "lambda:CreateMicrovmImage",
+        "lambda:GetMicrovmImage",
+        "lambda:UpdateMicrovmImage",
+        "lambda:DeleteMicrovmImage",
+        "lambda:ListMicrovmImages",
+        "lambda:GetMicrovmImageVersion",
+        "lambda:UpdateMicrovmImageVersion",
+        "lambda:DeleteMicrovmImageVersion",
+        "lambda:ListMicrovmImageVersions",
+        "lambda:GetMicrovmImageBuild",
+        "lambda:ListMicrovmImageBuilds",
+        "lambda:ListManagedMicrovmImages",
+        "lambda:ListManagedMicrovmImageVersions",
+        "lambda:CreateNetworkConnector",
+        "lambda:GetNetworkConnector",
+        "lambda:UpdateNetworkConnector",
+        "lambda:DeleteNetworkConnector",
+        "lambda:ListNetworkConnectors",
+        "lambda:PassNetworkConnector"
+      ],
+      "Effect": "Allow",
+      "Resource": "*",
+      "Sid": "LambdaMicrovms"
+    }
+  ],
+  "Version": "2012-10-17"
+}

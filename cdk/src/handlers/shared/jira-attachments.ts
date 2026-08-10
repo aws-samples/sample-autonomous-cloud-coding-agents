@@ -77,7 +77,7 @@ const ATTACHMENT_FETCH_TIMEOUT_MS = 10_000;
 const COMMENT_FETCH_TIMEOUT_MS = 5_000;
 
 /** Default cap on recent comments folded into the task context. */
-export const DEFAULT_MAX_COMMENTS = 10;
+const DEFAULT_MAX_COMMENTS = 10;
 
 /**
  * Tenant-scoped context for a Jira REST call, resolved once per task by the

@@ -21,6 +21,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { App, AspectPriority, Aspects } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
+import * as lambdaMicrovmCompute from '../../src/constructs/lambda-microvm-compute';
 import { buildAppId, SolutionUaAspect } from '../../src/constructs/solution-ua-aspect';
 import { AgentStack } from '../../src/stacks/agent';
 
@@ -751,6 +752,329 @@ describe('AgentStack with the ECS substrate gate (--context compute_type=ecs)', 
   });
 });
 
+describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_type=lambda-microvm)', () => {
+  const BASE_IMAGE_ARN = 'arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1';
+
+  let template: Template;
+
+  beforeAll(() => {
+    // Gate ON *and* an image configured — the steady state. The intermediate
+    // "gate on, no image yet" state is covered in the construct test; here the
+    // point is the stack-level wiring (env vars + IAM + outputs) that only
+    // exists once an image identifier is available.
+    const app = new App({
+      context: {
+        compute_type: 'lambda-microvm',
+        microvm_base_image_arn: BASE_IMAGE_ARN,
+        microvm_base_image_version: '1',
+      },
+    });
+    const stack = new AgentStack(app, 'TestAgentStackMicrovm', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    });
+    template = Template.fromStack(stack);
+  });
+
+  test('provisions the MicroVM image + BOTH egress network connectors', () => {
+    template.resourceCountIs('AWS::Lambda::MicrovmImage', 1);
+    // Runtime (443) + build-time (443 + 80, for apt-get) — see ADR-021's
+    // build-time-egress security-table row.
+    template.resourceCountIs('AWS::Lambda::NetworkConnector', 2);
+  });
+
+  test('does NOT provision the ECS substrate (the gates are mutually exclusive)', () => {
+    template.resourceCountIs('AWS::ECS::Cluster', 0);
+    template.resourceCountIs('AWS::ECS::TaskDefinition', 0);
+  });
+
+  test('outputs ComputeSubstrate=lambda-microvm so the CLI allows that onboarding', () => {
+    template.hasOutput('ComputeSubstrate', { Value: 'lambda-microvm' });
+  });
+
+  test('outputs everything the packaging script needs to find (no predictable physical names)', () => {
+    for (const output of [
+      'MicrovmArtifactBucketName',
+      'MicrovmArtifactObjectKey',
+      'MicrovmBuildRoleArn',
+      'MicrovmExecutionRoleArn',
+      'MicrovmEgressConnectorArns',
+      // The script passes THIS one to create-microvm-image: the runtime
+      // connector is 443-only and the Dockerfile's apt-get needs port 80.
+      'MicrovmBuildEgressConnectorArns',
+      'MicrovmLogGroupName',
+    ]) {
+      template.hasOutput(output, {});
+    }
+  });
+
+  test('the build and runtime egress connector outputs are DIFFERENT connectors', () => {
+    const outputs = template.toJSON().Outputs as Record<string, { Value: unknown }>;
+    expect(JSON.stringify(outputs.MicrovmEgressConnectorArns.Value))
+      .not.toEqual(JSON.stringify(outputs.MicrovmBuildEgressConnectorArns.Value));
+  });
+
+  test('injects the MICROVM_* env vars the strategy reads, including explicit NO_INGRESS', () => {
+    const fns = template.findResources('AWS::Lambda::Function');
+    const [, orchestrator] = Object.entries(fns)
+      .find(([id]) => id.includes('TaskOrchestratorOrchestratorFn'))!;
+    const env = orchestrator.Properties.Environment.Variables as Record<string, unknown>;
+
+    expect(Object.keys(env).filter(k => k.startsWith('MICROVM_')).sort()).toEqual([
+      'MICROVM_EGRESS_CONNECTOR_ARNS',
+      'MICROVM_EXECUTION_ROLE_ARN',
+      'MICROVM_IMAGE_IDENTIFIER',
+      'MICROVM_INGRESS_CONNECTOR_ARNS',
+      'MICROVM_PAYLOAD_BUCKET',
+    ]);
+    // Image version is deliberately unpinned.
+    expect(env.MICROVM_IMAGE_VERSION).toBeUndefined();
+    // Ingress is NOT empty and NOT omitted: RunMicrovm attaches a PUBLIC
+    // HTTP_INGRESS connector (with a public endpoint) when the field is absent,
+    // so "no inbound" is an explicit control on every launch.
+    expect(JSON.stringify(env.MICROVM_INGRESS_CONNECTOR_ARNS)).toContain('NO_INGRESS');
+    expect(JSON.stringify(env.MICROVM_INGRESS_CONNECTOR_ARNS)).not.toContain('HTTP_INGRESS');
+  });
+
+  test('MICROVM_IMAGE_IDENTIFIER is the image ARN, not a bare name', () => {
+    // RunMicrovm rejects a bare name ("Malformed ARN - doesn't start with
+    // 'arn:'"), so the identifier the orchestrator receives must be the same ARN
+    // the lifecycle IAM grant is scoped to.
+    const fns = template.findResources('AWS::Lambda::Function');
+    const [, orchestrator] = Object.entries(fns)
+      .find(([id]) => id.includes('TaskOrchestratorOrchestratorFn'))!;
+    const env = orchestrator.Properties.Environment.Variables as Record<string, unknown>;
+    expect(JSON.stringify(env.MICROVM_IMAGE_IDENTIFIER))
+      .toMatch(/"Fn::GetAtt":\["LambdaMicrovmComputeImage[^"]*","ImageArn"\]/);
+  });
+
+  test('grants the orchestrator exactly the P1 lifecycle actions, image-scoped', () => {
+    const policies = Object.entries(template.findResources('AWS::IAM::Policy'))
+      .filter(([id]) => id.includes('TaskOrchestrator'));
+    const statements = policies.flatMap(([, p]) => p.Properties.PolicyDocument.Statement as Array<{
+      Sid?: string;
+      Action: string | string[];
+      Resource: unknown;
+    }>);
+
+    const lifecycle = statements.find(s => s.Sid === 'MicrovmLifecycle')!;
+    expect(lifecycle.Action).toEqual([
+      'lambda:RunMicrovm',
+      'lambda:GetMicrovm',
+      'lambda:TerminateMicrovm',
+    ]);
+    // Every MicroVM lifecycle action authorizes against the *image* resource,
+    // which is why "scoped to platform-created images" is achievable at all.
+    expect(JSON.stringify(lifecycle.Resource)).toMatch(
+      /"Fn::GetAtt":\["LambdaMicrovmComputeImage[^"]*","ImageArn"\]/,
+    );
+
+    // PassNetworkConnector supports no resource-level permissions.
+    const pass = statements.find(s => s.Sid === 'MicrovmPassNetworkConnector')!;
+    expect(pass.Action).toBe('lambda:PassNetworkConnector');
+    expect(pass.Resource).toBe('*');
+
+    // iam:PassRole for the execution role hand-off, service-conditioned.
+    const passRole = statements.find(s => s.Sid === 'MicrovmPassExecutionRole')!;
+    expect(passRole.Action).toBe('iam:PassRole');
+  });
+
+  test('does NOT grant suspend/resume (P3) or auth-token minting (never)', () => {
+    const rendered = JSON.stringify(template.toJSON());
+    expect(rendered).not.toContain('lambda:SuspendMicrovm');
+    expect(rendered).not.toContain('lambda:ResumeMicrovm');
+    expect(rendered).not.toContain('lambda:CreateMicrovmAuthToken');
+    expect(rendered).not.toContain('lambda:CreateMicrovmShellAuthToken');
+    expect(rendered).not.toContain('lambda:ConnectMicrovm');
+  });
+
+  test('orchestrator may WRITE the payload bucket; nothing grants it delete', () => {
+    const policies = Object.entries(template.findResources('AWS::IAM::Policy'))
+      .filter(([id]) => id.includes('TaskOrchestrator'));
+    const statements = policies.flatMap(([, p]) => p.Properties.PolicyDocument.Statement as Array<{
+      Action: string | string[];
+      Resource: unknown;
+    }>);
+    const payloadStatements = statements.filter(s =>
+      JSON.stringify(s.Resource).includes('LambdaMicrovmComputePayloadBucket'));
+
+    const actions = payloadStatements.flatMap(s => Array.isArray(s.Action) ? s.Action : [s.Action]);
+    expect(actions).toContain('s3:PutObject');
+    // The bucket's lifecycle rule is the reaper on this backend — unlike the ECS
+    // path the orchestrator never deletes, so the grant must not exist.
+    expect(actions).not.toContain('s3:DeleteObject');
+  });
+
+  test('cancel Lambda may terminate a MicroVM (and only terminate), image-scoped', () => {
+    const policies = Object.entries(template.findResources('AWS::IAM::Policy'))
+      .filter(([id]) => id.includes('CancelTaskFn'));
+    const statements = policies.flatMap(([, p]) => p.Properties.PolicyDocument.Statement as Array<{
+      Action: string | string[];
+      Resource: unknown;
+    }>);
+    const microvmStatements = statements.filter(s =>
+      JSON.stringify(s.Action).includes('Microvm'));
+
+    expect(microvmStatements).toHaveLength(1);
+    expect(microvmStatements[0]!.Action).toBe('lambda:TerminateMicrovm');
+    // Resolved through the stack's Lazy.string to the actual image resource
+    // (TaskApi is built before the MicroVM construct), so the grant names ONE
+    // image instead of an account/Region-wide `microvm-image:*`.
+    const rendered = JSON.stringify(microvmStatements[0]!.Resource);
+    expect(rendered).toMatch(/LambdaMicrovmComputeImage[^"]*","ImageArn"/);
+    expect(rendered).not.toContain('microvm-image:*');
+  });
+
+  test('MicroVM resources carry the backend cost-allocation tag', () => {
+    template.hasResourceProperties('AWS::Lambda::MicrovmImage', {
+      Tags: Match.arrayWith([{ Key: 'abca:compute-backend', Value: 'lambda-microvm' }]),
+    });
+    template.hasResourceProperties('AWS::Lambda::NetworkConnector', {
+      Tags: Match.arrayWith([{ Key: 'abca:compute-backend', Value: 'lambda-microvm' }]),
+    });
+  });
+
+  describe('Region gate', () => {
+    // TEST-CONVENTION EXEMPTION (cdk/AGENTS.md "synth once in beforeAll"): the
+    // failure case asserts the STACK CONSTRUCTOR throws, so there is no template
+    // to cache. It is also cheap — the gate runs inside the MicroVM construct
+    // before any resource is created, and no `Template.fromStack()` is called.
+    // The success case (escape hatch) does need a template, so it is cached here.
+    let overriddenTemplate: Template;
+
+    beforeAll(() => {
+      const app = new App({
+        context: {
+          compute_type: 'lambda-microvm',
+          microvm_region_override: true,
+          microvm_base_image_arn: BASE_IMAGE_ARN,
+          microvm_base_image_version: '1',
+        },
+      });
+      overriddenTemplate = Template.fromStack(new AgentStack(app, 'TestAgentStackMicrovmOverride', {
+        env: { account: '123456789012', region: 'eu-central-1' },
+      }));
+    });
+
+    test('fails synth when the stack Region has no Lambda MicroVMs', () => {
+      const app = new App({ context: { compute_type: 'lambda-microvm' } });
+      expect(() => new AgentStack(app, 'TestAgentStackMicrovmBadRegion', {
+        env: { account: '123456789012', region: 'eu-central-1' },
+      })).toThrow(/AWS Lambda MicroVMs are not available in eu-central-1/);
+    });
+
+    test('the microvm_region_override context flag unblocks an unsupported Region', () => {
+      overriddenTemplate.resourceCountIs('AWS::Lambda::MicrovmImage', 1);
+    });
+  });
+});
+
+describe('AgentStack default (agentcore) deploy — MicroVM substrate absent', () => {
+  let template: Template;
+
+  beforeAll(() => {
+    const app = new App();
+    const stack = new AgentStack(app, 'TestAgentStackNoMicrovm', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    });
+    template = Template.fromStack(stack);
+  });
+
+  test('synthesizes no MicroVM resources', () => {
+    template.resourceCountIs('AWS::Lambda::MicrovmImage', 0);
+    template.resourceCountIs('AWS::Lambda::NetworkConnector', 0);
+  });
+
+  test('injects no MICROVM_* env vars', () => {
+    const fns = Object.values(template.findResources('AWS::Lambda::Function'));
+    for (const fn of fns) {
+      const env = (fn.Properties.Environment?.Variables ?? {}) as Record<string, unknown>;
+      expect(Object.keys(env).filter(k => k.startsWith('MICROVM_'))).toEqual([]);
+    }
+  });
+
+  test('grants no MicroVM IAM actions anywhere', () => {
+    // Scoped to policy documents rather than the whole template: cdk-nag
+    // suppression *reasons* legitimately mention the actions in prose.
+    const statements = Object.values(template.findResources('AWS::IAM::Policy'))
+      .flatMap(p => p.Properties.PolicyDocument.Statement as Array<{ Action: string | string[] }>);
+    const actions = statements.flatMap(s => Array.isArray(s.Action) ? s.Action : [s.Action]);
+    expect(actions.filter(a => a.includes('Microvm'))).toEqual([]);
+  });
+});
+
+describe('AgentStack with the MicroVM gate on but no image configured (first deploy)', () => {
+  let template: Template;
+
+  beforeAll(() => {
+    // The bootstrap state: substrate provisioned so the artifact bucket exists,
+    // but no image yet. Exercises the false branch of the shared
+    // `isLambdaMicrovmImageConfigured` predicate that gates BOTH the
+    // orchestrator's MICROVM_* wiring and the cancel Lambda's grant.
+    const app = new App({ context: { compute_type: 'lambda-microvm' } });
+    const stack = new AgentStack(app, 'TestAgentStackMicrovmNoImage', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    });
+    template = Template.fromStack(stack);
+  });
+
+  test('provisions the substrate (buckets, roles, both connectors) but no image', () => {
+    template.resourceCountIs('AWS::Lambda::NetworkConnector', 2);
+    template.resourceCountIs('AWS::Lambda::MicrovmImage', 0);
+    template.hasOutput('MicrovmArtifactBucketName', {});
+    // The build-time connector output is what the packaging script reads next, so
+    // it must exist in exactly this pre-image state.
+    template.hasOutput('MicrovmBuildEgressConnectorArns', {});
+  });
+
+  test('grants no MicroVM IAM actions at all — nothing to run or cancel yet', () => {
+    // Notably this also proves the stack never resolves the image-ARN Lazy in
+    // this state: doing so would throw "accessed before LambdaMicrovmCompute was
+    // created"-class errors rather than synthesize.
+    const actions = Object.values(template.findResources('AWS::IAM::Policy'))
+      .flatMap(p => p.Properties.PolicyDocument.Statement as Array<{ Action: string | string[] }>)
+      .flatMap(s => Array.isArray(s.Action) ? s.Action : [s.Action]);
+    expect(actions.filter(a => a.includes('Microvm'))).toEqual([]);
+  });
+
+  test('injects no MICROVM_* env vars (the strategy fails fast with its own remedy)', () => {
+    const fns = Object.values(template.findResources('AWS::Lambda::Function'));
+    const keys = fns.flatMap(fn =>
+      Object.keys((fn.Properties.Environment?.Variables ?? {}) as Record<string, unknown>));
+    expect(keys.filter(k => k.startsWith('MICROVM_'))).toEqual([]);
+  });
+});
+
+describe('AgentStack MicroVM image ARN invariant', () => {
+  let synthError: unknown;
+
+  beforeAll(() => {
+    // Force the stack-side gate true while the real construct remains in its
+    // no-image bootstrap state. This is the only way to exercise the Lazy's
+    // defensive invariant without changing production behavior.
+    const configuredSpy = jest.spyOn(lambdaMicrovmCompute, 'isLambdaMicrovmImageConfigured')
+      .mockReturnValue(true);
+    try {
+      const app = new App({ context: { compute_type: 'lambda-microvm' } });
+      const stack = new AgentStack(app, 'TestAgentStackMicrovmInvariant', {
+        env: { account: '123456789012', region: 'us-east-1' },
+      });
+      Template.fromStack(stack);
+    } catch (err) {
+      synthError = err;
+    } finally {
+      configuredSpy.mockRestore();
+    }
+  });
+
+  test('fails synth if a configured deployment has no image ARN', () => {
+    expect(synthError).toEqual(expect.objectContaining({
+      message: expect.stringContaining(
+        'MicroVM image ARN was accessed before LambdaMicrovmCompute was created',
+      ),
+    }));
+  });
+});
+
 describe('AgentStack solution attribution (#319): AWS_SDK_UA_APP_ID via stack-level aspect', () => {
   let template: Template;
 
@@ -790,7 +1114,7 @@ describe('AgentStack solution attribution (#319): AWS_SDK_UA_APP_ID via stack-le
     // A loose `toBeGreaterThan` let a whole integration construct disappear
     // unnoticed; the exact count fails if a Lambda is dropped OR if a new one
     // is added without being attributed below.
-    expect(abcaLambdas.length).toBe(45);
+    expect(abcaLambdas.length).toBe(46);
     // Every ABCA-authored Lambda must carry the canonical `#` app-id. Collect
     // any offenders so a failure names the exact logical id(s) that are naked.
     const unattributed = abcaLambdas

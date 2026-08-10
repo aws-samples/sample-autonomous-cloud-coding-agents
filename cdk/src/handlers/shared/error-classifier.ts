@@ -17,6 +17,8 @@
  *  SOFTWARE.
  */
 
+import { LAMBDA_MICROVM_SUPPORTED_REGIONS } from './microvm-regions';
+
 /**
  * Error categories for runtime task errors.
  */
@@ -61,7 +63,7 @@ export const ErrorClass = {
   USER: 'user',
 } as const;
 
-export type ErrorClassType = (typeof ErrorClass)[keyof typeof ErrorClass];
+type ErrorClassType = (typeof ErrorClass)[keyof typeof ErrorClass];
 
 /**
  * Structured classification of a task error.
@@ -189,6 +191,132 @@ const PATTERNS: readonly ErrorPattern[] = [
       errorClass: ErrorClass.TRANSIENT,
     },
   },
+  {
+    // ADR-021 sub-decision 4, "Regional availability enforcement" (defense in
+    // depth): Lambda MicroVMs launched in 5 Regions, so a stack deployed
+    // elsewhere gets an endpoint-resolution failure from the SDK rather than a
+    // typed service error. Classify it as CONFIG + non-retryable so the task
+    // reply names the cause and the supported Regions instead of "temporary
+    // infrastructure issue — reply to retry" (which would loop forever).
+    //
+    // ORDERING: this entry MUST stay ABOVE the generic `Session start failed`
+    // pattern below, which would otherwise win on the persisted (wrapped)
+    // error_message and hand the user a retry remedy. Both alternatives are
+    // anchored on a `lambda`/`microvm` marker precisely so an AgentCore or ECS
+    // endpoint failure cannot be hijacked into MicroVM copy — their endpoint
+    // hosts are `bedrock-agentcore.*` / `ecs.*`.
+    pattern: /(?:UnknownEndpoint|Inaccessible host|Could not resolve endpoint).{0,120}lambda|(?:lambda[- ]?microvms?|microvms?).{0,60}(?:not available|not supported|unavailable)|(?:not available|not supported|unavailable).{0,60}(?:lambda[- ]?microvms?)/i,
+    classification: {
+      category: ErrorCategory.CONFIG,
+      title: 'Lambda MicroVMs is not available in this Region',
+      description:
+        'The task\'s Blueprint selects the `lambda-microvm` compute backend, but the AWS Lambda MicroVMs service could not be reached in this stack\'s Region — the regional endpoint does not resolve.',
+      remedy:
+        'Lambda MicroVMs is available in: '
+        + LAMBDA_MICROVM_SUPPORTED_REGIONS.join(', ')
+        + '. Either redeploy the platform in a supported Region, or move this repo to a backend that is available here '
+        + '(bgagent repo onboard <repo> --compute-type agentcore, or --compute-type ecs for large repos). '
+        + 'If AWS has since launched MicroVMs in this Region, update the supported-Region list in '
+        + 'cdk/src/handlers/shared/microvm-regions.ts. Retrying as-is will not help.',
+      retryable: false,
+      errorClass: ErrorClass.SERVICE,
+    },
+  },
+  // --- Lambda MicroVMs (ADR-021) ---
+  //
+  // SCOPING: the three SDK-exception entries below are anchored on the
+  // ``MicroVM <operation> failed`` marker that
+  // ``lambda-microvm-strategy.wrapMicrovmError`` puts on every error it lets
+  // escape (see ``MICROVM_ERROR_MARKER``). The anchor is mandatory, not
+  // decorative: ``ThrottlingException``, ``ServiceQuotaExceededException`` and
+  // ``ResourceNotFoundException`` are generic AWS exception names that AgentCore,
+  // ECS, DynamoDB and Secrets Manager all throw too. Matching them unscoped
+  // would retroactively re-classify every other backend's throttle — changing
+  // its ``errorClass`` and therefore whether ``startSessionWithRetry``
+  // auto-retries it. Unmarked occurrences must keep falling through to whatever
+  // classified them before this section existed (a precise earlier pattern, or
+  // UNKNOWN).
+  //
+  // Both orders are accepted in each pattern so a future wrapper that puts the
+  // exception name ahead of the marker still matches; ``[\s\S]`` rather than
+  // ``.`` because SDK messages can span lines.
+  //
+  // ORDERING: this section sits immediately ABOVE the generic
+  // `Session start failed` catch-all. That is only safe BECAUSE of the marker:
+  // an unmarked `Session start failed: ThrottlingException` from AgentCore or ECS
+  // cannot match here and still reaches the generic entry with its original
+  // copy, while a MicroVM failure gets the precise remedy (quota-increase path,
+  // the MICROVM_* env vars to check) instead of "Check AgentCore Runtime or ECS
+  // cluster health" — advice that names the wrong substrate entirely. If the
+  // marker anchor is ever dropped, these MUST move back below the catch-all.
+  {
+    pattern: /MicroVM substrate terminated before the agent wrote a terminal status/i,
+    classification: {
+      category: ErrorCategory.COMPUTE,
+      title: 'The MicroVM stopped before the agent reported a result',
+      description:
+        'The Lambda MicroVM running this task reached a terminal state (session duration cap, host fault, or an external terminate) while the task was still mid-flight, so no result was ever written.',
+      remedy:
+        'This is a compute-substrate fault, not a problem with your request — reply here to try again. '
+        + 'If it repeats, check the MicroVM logs for the session and whether the task is exceeding the 8-hour session cap; '
+        + 'a long-running repo may belong on --compute-type ecs.',
+      retryable: true,
+      errorClass: ErrorClass.TRANSIENT,
+    },
+  },
+  {
+    // Account-level MicroVM memory quota. Deliberately TRANSIENT rather than
+    // SERVICE: this quota is capacity-shaped, not configuration-shaped — it
+    // frees as running/suspended MicroVMs terminate (AWS counts SUSPENDED VMs
+    // toward the quota), which is the same "wait and retry" character as the
+    // existing per-user `concurrency limit` entry above. The remedy still names
+    // the quota-increase path for the case where the ceiling is genuinely too
+    // low, so a persistently failing deployment is not left guessing.
+    pattern: /MicroVM [\w ]+failed[\s\S]*ServiceQuotaExceededException|ServiceQuotaExceededException[\s\S]*MicroVM [\w ]+failed/i,
+    classification: {
+      category: ErrorCategory.COMPUTE,
+      title: 'Couldn\'t start — the MicroVM compute quota is currently exhausted',
+      description: 'Starting the MicroVM was rejected because the account\'s Lambda MicroVMs quota (memory across running and suspended MicroVMs) is fully consumed.',
+      remedy:
+        'Wait for in-flight tasks to finish and retry — the quota frees as MicroVMs terminate. '
+        + 'If the platform hits this routinely, request a Lambda MicroVMs quota increase in Service Quotas, '
+        + 'or lower the per-user concurrency cap so admission stops accepting tasks the substrate cannot start.',
+      retryable: true,
+      errorClass: ErrorClass.TRANSIENT,
+    },
+  },
+  {
+    pattern: /MicroVM [\w ]+failed[\s\S]*(?:ThrottlingException|TooManyRequestsException)|(?:ThrottlingException|TooManyRequestsException)[\s\S]*MicroVM [\w ]+failed/i,
+    classification: {
+      category: ErrorCategory.COMPUTE,
+      title: 'Couldn\'t start — the MicroVM control plane throttled the request',
+      description: 'The Lambda MicroVMs control plane returned a throttling error for this session\'s lifecycle call.',
+      remedy: 'This is a rate limit, not a problem with your request — reply here to try again. If it is constant, an admin should check the account\'s Lambda MicroVMs request-rate quotas.',
+      retryable: true,
+      errorClass: ErrorClass.TRANSIENT,
+    },
+  },
+  {
+    // A named resource the strategy was handed does not exist: a MicroVM image
+    // identifier/version, an execution role, or a network connector ARN. Always
+    // a deploy/config fault — retrying with the same ARNs cannot succeed.
+    //
+    // NOTE: `pollSession` maps a ResourceNotFoundException from `GetMicrovm` to
+    // `completed` (a reaped MicroVM) and never lets it reach here, so this entry
+    // only ever sees start-time resource faults.
+    pattern: /MicroVM [\w ]+failed[\s\S]*ResourceNotFoundException|ResourceNotFoundException[\s\S]*MicroVM [\w ]+failed/i,
+    classification: {
+      category: ErrorCategory.CONFIG,
+      title: 'A MicroVM resource referenced by this deployment does not exist',
+      description: 'The Lambda MicroVMs control plane rejected the session because a resource it was pointed at — MicroVM image, execution role, or network connector — could not be found.',
+      remedy:
+        'Retrying won\'t help: an admin needs to re-deploy the MicroVM substrate so the image, execution role, and network connector ARNs wired into the orchestrator actually exist. '
+        + 'Check the MICROVM_IMAGE_IDENTIFIER / MICROVM_EXECUTION_ROLE_ARN / MICROVM_*_CONNECTOR_ARNS values on the orchestrator function against the deployed resources.',
+      retryable: false,
+      errorClass: ErrorClass.SERVICE,
+    },
+  },
+
   {
     pattern: /Session start failed/i,
     classification: {
@@ -521,6 +649,7 @@ const PATTERNS: readonly ErrorPattern[] = [
       errorClass: ErrorClass.TRANSIENT,
     },
   },
+
 ];
 
 /**

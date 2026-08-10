@@ -142,6 +142,7 @@ async function resolveSoleTenantCloudId(): Promise<string | undefined> {
       ProjectionExpression: 'jira_cloud_id, #s',
       ExpressionAttributeNames: { '#s': 'status' },
       ExclusiveStartKey: lastKey,
+      ConsistentRead: true,
     }));
     for (const item of page.Items ?? []) {
       if (item.status === 'active' && typeof item.jira_cloud_id === 'string') {
@@ -302,7 +303,14 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       });
       return;
     }
-    await handleCommentTrigger(payload, issue, cloudId);
+    const commentProjectKey = issue.fields?.project?.key;
+    if (
+      commentProjectKey
+      && !await getActiveProjectMapping(cloudId, commentProjectKey, issue.key)
+    ) {
+      return;
+    }
+    await handleCommentTrigger(payload, issue, cloudId, commentProjectKey);
     return;
   }
 
@@ -311,11 +319,6 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     logger.info('Jira issue has no project.key — skipping (cannot route to a repo)', {
       issue_key: issue.key,
     });
-    await safeReportIssueFailure(
-      issue.key,
-      cloudId,
-      "❌ This Jira issue isn't in a project — ABCA needs a Jira project to route the task to a repo. Move the issue into a project and re-apply the trigger label.",
-    );
     return;
   }
 
@@ -331,25 +334,12 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     return;
   }
 
-  const projectIdentity = `${cloudId}#${projectKey}`;
-  const mapping = await ddb.send(new GetCommand({
-    TableName: PROJECT_MAPPING_TABLE,
-    Key: { jira_project_identity: projectIdentity },
-  }));
-  if (!mapping.Item || mapping.Item.status !== 'active') {
-    logger.info('Jira project is not onboarded or is removed — skipping', {
-      jira_project_identity: projectIdentity,
-      issue_key: issue.key,
-    });
-    await safeReportIssueFailure(
-      issue.key,
-      cloudId,
-      `❌ This Jira project isn't onboarded to ABCA. An admin can onboard it with \`bgagent jira map ${cloudId} ${projectKey} --repo <owner>/<repo>\` (add \`--label <trigger>\` to change the trigger label).`,
-    );
+  const mapping = await getActiveProjectMapping(cloudId, projectKey, issue.key);
+  if (!mapping) {
     return;
   }
-  const repo = mapping.Item.repo as string;
-  const labelFilter = (mapping.Item.label_filter as string | undefined) ?? DEFAULT_LABEL_FILTER;
+  const repo = mapping.repo as string;
+  const labelFilter = (mapping.label_filter as string | undefined) ?? DEFAULT_LABEL_FILTER;
 
   if (!shouldTrigger(payload, labelFilter)) {
     logger.info('Jira webhook does not match trigger criteria', {
@@ -362,13 +352,24 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     return;
   }
 
-  const accountId = payload.user?.accountId
-    ?? issue.fields?.reporter?.accountId
-    ?? issue.fields?.creator?.accountId;
+  const actorAccountId = payload.user?.accountId;
+  const reporterAccountId = issue.fields?.reporter?.accountId;
+  const creatorAccountId = issue.fields?.creator?.accountId;
+  const accountId = actorAccountId ?? reporterAccountId ?? creatorAccountId;
+  const accountSource = actorAccountId
+    ? 'webhook_user'
+    : reporterAccountId
+      ? 'issue_reporter'
+      : creatorAccountId
+        ? 'issue_creator'
+        : undefined;
   if (!accountId) {
     logger.warn('Jira webhook missing user.accountId — cannot attribute task', {
       issue_key: issue.key,
       jira_cloud_id: cloudId,
+      jira_actor_account_id: actorAccountId,
+      jira_reporter_account_id: reporterAccountId,
+      jira_creator_account_id: creatorAccountId,
     });
     await safeReportIssueFailure(
       issue.key,
@@ -383,12 +384,18 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     logger.warn('Jira account has no linked platform user — skipping task creation', {
       jira_cloud_id: cloudId,
       jira_account_id: accountId,
+      jira_account_source: accountSource,
+      jira_actor_account_id: actorAccountId,
+      jira_reporter_account_id: reporterAccountId,
+      jira_creator_account_id: creatorAccountId,
+      jira_identity_lookup_key: `${cloudId}#${accountId}`,
       issue_key: issue.key,
     });
     await safeReportIssueFailure(
       issue.key,
       cloudId,
-      "❌ This Jira user isn't linked to a platform user. Run `bgagent jira link <code>` from a Cognito-authenticated CLI session to complete linking.",
+      `❌ The Jira user for this trigger isn't linked to a platform user (accountId: \`${accountId}\`). `
+      + `Ask an admin to run \`bgagent jira invite-user ${cloudId} ${accountId}\`, then redeem the generated link code.`,
     );
     return;
   }
@@ -408,8 +415,8 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   // admin configured `bgagent jira map ... --status-on-start/--status-on-pr`,
   // stamp them so the agent's best-effort transition helpers prefer these
   // status names over the built-in statusCategory / "In Review" heuristics.
-  const statusOnStart = mapping.Item.status_on_start as string | undefined;
-  const statusOnPr = mapping.Item.status_on_pr as string | undefined;
+  const statusOnStart = mapping.status_on_start as string | undefined;
+  const statusOnPr = mapping.status_on_pr as string | undefined;
   if (statusOnStart) {
     channelMetadata.jira_status_on_start = statusOnStart;
   }
@@ -579,14 +586,16 @@ export async function handler(event: ProcessorEvent): Promise<void> {
 /**
  * Handle `comment_created` independently of the label-trigger path.
  *
- * The prior task is the routing source of truth: comments do not require the
- * trigger label to still be present or the Jira project mapping to remain
- * active. This preserves reviewer follow-ups after the original run.
+ * When Jira supplies project.key, the caller establishes that its mapping is
+ * active. Otherwise the prior task supplies the project key and this handler
+ * revalidates that mapping before producing feedback or creating a task.
+ * Comments do not require the trigger label to remain present.
  */
 async function handleCommentTrigger(
   payload: JiraIssueEvent,
   issue: NonNullable<JiraIssueEvent['issue']>,
   cloudId: string,
+  verifiedProjectKey?: string,
 ): Promise<void> {
   const comment = payload.comment;
   if (!comment?.id) {
@@ -621,6 +630,23 @@ async function handleCommentTrigger(
     cloudId,
     issue.key,
   );
+  if (!verifiedProjectKey) {
+    const priorProjectKey = priorTask?.channel_metadata?.jira_project_key;
+    if (!priorProjectKey) {
+      logger.info(
+        'Jira comment issue has no project.key or prior project metadata — skipping silently',
+        { issue_key: issue.key },
+      );
+      return;
+    }
+    if (!await getActiveProjectMapping(cloudId, priorProjectKey, issue.key)) {
+      return;
+    }
+    logger.warn('Jira comment issue has no project.key — routing via active prior task project', {
+      issue_key: issue.key,
+      project_key: priorProjectKey,
+    });
+  }
   const prNumber = priorTask ? prNumberFromTask(priorTask) : null;
   if (!priorTask || prNumber === null) {
     await safeReportIssueFailure(
@@ -1021,7 +1047,38 @@ async function lookupPlatformUser(cloudId: string, accountId: string): Promise<s
   const result = await ddb.send(new GetCommand({
     TableName: USER_MAPPING_TABLE,
     Key: { jira_identity: key },
+    ConsistentRead: true,
   }));
-  if (!result.Item || result.Item.status === 'pending') return null;
-  return (result.Item.platform_user_id as string) ?? null;
+  const platformUserId = result.Item?.platform_user_id;
+  if (
+    result.Item?.status !== 'active'
+    || typeof platformUserId !== 'string'
+    || !platformUserId
+  ) {
+    return null;
+  }
+  return platformUserId;
+}
+
+async function getActiveProjectMapping(
+  cloudId: string,
+  projectKey: string,
+  issueKey: string,
+): Promise<Record<string, unknown> | null> {
+  const projectIdentity = `${cloudId}#${projectKey}`;
+  const mapping = await ddb.send(new GetCommand({
+    TableName: PROJECT_MAPPING_TABLE,
+    Key: { jira_project_identity: projectIdentity },
+    ConsistentRead: true,
+  }));
+  if (!mapping.Item || mapping.Item.status !== 'active') {
+    // Jira admin-console webhooks fire site-wide. An unmapped project has not
+    // opted into ABCA, so it must remain a true no-op for every event type.
+    logger.info('Jira project is not onboarded or is removed — skipping silently', {
+      jira_project_identity: projectIdentity,
+      issue_key: issueKey,
+    });
+    return null;
+  }
+  return mapping.Item;
 }
