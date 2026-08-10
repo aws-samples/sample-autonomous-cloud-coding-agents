@@ -155,6 +155,29 @@ export function observabilityPolicy(): iam.PolicyDocument {
       }),
 
       new iam.PolicyStatement({
+        // Customer-managed keys created BY the stack (e.g. the
+        // OperationalAlerts SNS topic key, issue #629), distinct from
+        // the CDK bootstrap asset key used above. kms:CreateKey cannot
+        // be resource-scoped (the key ARN does not exist yet) and CMK
+        // ARNs are UUIDs, so this statement is unavoidably `*`.
+        sid: 'KMSCustomerManagedKeys',
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'kms:CreateKey',
+          'kms:ScheduleKeyDeletion',
+          'kms:PutKeyPolicy',
+          'kms:GetKeyPolicy',
+          'kms:GetKeyRotationStatus',
+          'kms:EnableKeyRotation',
+          'kms:DisableKeyRotation',
+          'kms:TagResource',
+          'kms:UntagResource',
+          'kms:ListResourceTags',
+        ],
+        resources: ['*'],
+      }),
+
+      new iam.PolicyStatement({
         sid: 'ECRForDockerAssets',
         effect: iam.Effect.ALLOW,
         actions: [

@@ -119,6 +119,23 @@
     },
     {
       "Action": [
+        "kms:CreateKey",
+        "kms:ScheduleKeyDeletion",
+        "kms:PutKeyPolicy",
+        "kms:GetKeyPolicy",
+        "kms:GetKeyRotationStatus",
+        "kms:EnableKeyRotation",
+        "kms:DisableKeyRotation",
+        "kms:TagResource",
+        "kms:UntagResource",
+        "kms:ListResourceTags"
+      ],
+      "Effect": "Allow",
+      "Resource": "*",
+      "Sid": "KMSCustomerManagedKeys"
+    },
+    {
+      "Action": [
         "ecr:CreateRepository",
         "ecr:DescribeRepositories",
         "ecr:GetAuthorizationToken",
