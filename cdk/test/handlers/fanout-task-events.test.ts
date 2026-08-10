@@ -2392,6 +2392,22 @@ describe('fanout-task-events: Jira dispatcher (issue #573)', () => {
     expect(mockUpdateIssueCommentAdf).not.toHaveBeenCalled();
   });
 
+  test('iteration without a captured reply id honors the post-once marker on redelivery', async () => {
+    mockGet({
+      ...TASK_RECORD_JIRA,
+      jira_final_comment_event_id: 'EVT001',
+      channel_metadata: {
+        ...TASK_RECORD_JIRA.channel_metadata,
+        trigger_comment_id: 'human-comment-1',
+      },
+    });
+
+    await handler({ Records: [mkEvent('task_completed', 't-jira')] });
+
+    expect(mockUpdateIssueCommentAdf).not.toHaveBeenCalled();
+    expect(mockPostIssueCommentAdf).not.toHaveBeenCalled();
+  });
+
   test('failed standalone iteration update releases its terminal claim', async () => {
     const task = {
       ...TASK_RECORD_JIRA,

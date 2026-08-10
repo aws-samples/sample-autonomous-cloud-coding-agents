@@ -1647,10 +1647,11 @@ async function dispatchToJira(event: FanOutEvent): Promise<void> {
   // must settle that comment before continuing the dependent restack cascade.
   if (isOrchestratedIteration) return;
 
-  // Ordinary Jira terminal comments are created once. A re-run (for example,
-  // because a sibling channel rejected the record) would otherwise duplicate
-  // that comment, so persist a marker after the first successful post below.
-  if (!isIteration && task.jira_final_comment_event_id) {
+  // Ordinary Jira terminal comments and iterations whose acknowledgement was
+  // never captured both use the post-once fallback below. A re-run (for
+  // example, because a sibling channel rejected the record) would otherwise
+  // duplicate that comment, so honor the marker persisted after the first post.
+  if ((!isIteration || !iterationReplyId) && task.jira_final_comment_event_id) {
     logger.info('[fanout/jira] final comment already posted — skipping (idempotent retry)', {
       event: 'fanout.jira.already_posted',
       task_id: task.task_id,
