@@ -67,6 +67,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     const pending = await ddb.send(new GetCommand({
       TableName: USER_MAPPING_TABLE,
       Key: { jira_identity: `pending#${code}` },
+      ConsistentRead: true,
     }));
 
     if (!pending.Item || pending.Item.status !== 'pending') {

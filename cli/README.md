@@ -302,14 +302,18 @@ With no flags, writes to the platform default `GitHubTokenSecretArn` stack outpu
 
 Configure the preview-deploy screenshot pipeline webhook. See [Deploy preview screenshots guide](../docs/guides/DEPLOY_PREVIEW_SCREENSHOTS_GUIDE.md).
 
-### `bgagent jira app-template` / `setup` / `app-setup` / `map` / `invite-user` / `link`
+### `bgagent jira app-template` / `setup` / `update-webhook-secret` / `app-setup` / `map` / `invite-user` / `link`
 
-Manage the Jira Cloud integration. `setup` authorizes a tenant via OAuth (3LO) for inbound reads and human lookup. `app-setup` verifies and stores the signed Forge proxy used for outbound comments and transitions as the dedicated `bgagent` app actor. `map` routes a Jira project to a GitHub repo; the two-step `invite-user` → `link` handshake links a teammate's Jira identity to their platform user. See the [Jira setup guide](../docs/guides/JIRA_SETUP_GUIDE.md) for Forge deployment, secret handling, permissions, and the full walkthrough.
+Manage the Jira Cloud integration. `setup` authorizes a tenant via OAuth (3LO) for inbound reads and human lookup. `update-webhook-secret` rotates the admin-console webhook secret in both required Secrets Manager locations without repeating OAuth. `app-setup` verifies and stores the signed Forge proxy used for outbound comments and transitions as the dedicated `bgagent` app actor. `map` routes a Jira project to a GitHub repo; the two-step `invite-user` → `link` handshake links a teammate's Jira identity to their platform user. See the [Jira setup guide](../docs/guides/JIRA_SETUP_GUIDE.md) for Forge deployment, secret handling, permissions, and the full walkthrough.
 
 ```
 bgagent jira app-template
 
 bgagent jira setup \
+  --region <region> \
+  --stack-name <stack-name>
+
+bgagent jira update-webhook-secret <cloud-id> \
   --region <region> \
   --stack-name <stack-name>
 
