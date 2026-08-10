@@ -694,6 +694,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
           (child) => discovery.releasableSubIssueIds.includes(child.sub_issue_id)
             && child.child_status === 'ready',
         );
+        let panelSnapshot = snapshot;
         if (releasableRows.length > 0) {
           const now = new Date().toISOString();
           const results = await releaseReadyChildren(
@@ -713,16 +714,17 @@ export async function handler(event: ProcessorEvent): Promise<void> {
             results,
             now,
           );
+          panelSnapshot = await loadOrchestration(
+            ddb,
+            ORCHESTRATION_TABLE,
+            discovery.orchestrationId,
+          ) ?? snapshot;
         }
 
         if (WORKSPACE_REGISTRY_TABLE) {
           try {
-            const fresh = await loadOrchestration(
-              ddb,
-              ORCHESTRATION_TABLE,
-              discovery.orchestrationId,
-            );
-            const panelSnapshot = fresh ?? snapshot;
+            // Unlike seed, extension already has a durable snapshot. Refresh the
+            // panel from it even if a post-release read is temporarily unavailable.
             const commentId = await upsertEpicPanel({
               channel: makeJiraChannel(WORKSPACE_REGISTRY_TABLE),
               parent: {

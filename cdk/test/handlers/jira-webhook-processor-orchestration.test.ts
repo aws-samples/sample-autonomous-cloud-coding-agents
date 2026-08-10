@@ -81,12 +81,15 @@ jest.mock('../../src/handlers/shared/orchestration-channel-jira', () => ({
   makeJiraChannel: jest.fn(() => ({ kind: 'jira' })),
 }));
 
+const fetchRecentHumanCommentsMock = jest.fn();
+const downloadScreenAndStoreJiraAttachmentsMock = jest.fn();
 jest.mock('../../src/handlers/shared/jira-attachments', () => {
   const actual = jest.requireActual('../../src/handlers/shared/jira-attachments');
   return {
     ...actual,
-    fetchRecentHumanComments: jest.fn().mockResolvedValue([]),
-    downloadScreenAndStoreJiraAttachments: jest.fn().mockResolvedValue([]),
+    fetchRecentHumanComments: (...args: unknown[]) => fetchRecentHumanCommentsMock(...args),
+    downloadScreenAndStoreJiraAttachments: (...args: unknown[]) =>
+      downloadScreenAndStoreJiraAttachmentsMock(...args),
   };
 });
 
@@ -247,6 +250,8 @@ describe('jira-webhook-processor orchestration adapter', () => {
     setStatusCommentIdMock.mockReset();
     claimCommentAckMock.mockReset().mockResolvedValue(true);
     clearRollupClaimMock.mockReset().mockResolvedValue(undefined);
+    fetchRecentHumanCommentsMock.mockReset().mockResolvedValue([]);
+    downloadScreenAndStoreJiraAttachmentsMock.mockReset().mockResolvedValue([]);
   });
 
   test('seeds the shared graph, releases roots, and suppresses the parent coding task', async () => {
@@ -628,13 +633,20 @@ describe('jira-webhook-processor orchestration adapter', () => {
     loadOrchestrationMock.mockReset();
     loadOrchestrationMock
       .mockResolvedValueOnce(snapshot)
-      .mockResolvedValueOnce(extendedSnapshot)
       .mockResolvedValueOnce(extendedSnapshot);
     upsertEpicPanelMock.mockResolvedValueOnce('new-panel');
 
-    await handler(event());
+    const extensionEvent = event();
+    const payload = JSON.parse(extensionEvent.raw_body);
+    payload.issue.fields.attachment = [{ id: 'existing-parent-attachment' }];
+    extensionEvent.raw_body = JSON.stringify(payload);
+
+    await handler(extensionEvent);
 
     expect(releaseReadyChildrenMock).not.toHaveBeenCalled();
+    expect(loadOrchestrationMock).toHaveBeenCalledTimes(2);
+    expect(fetchRecentHumanCommentsMock).not.toHaveBeenCalled();
+    expect(downloadScreenAndStoreJiraAttachmentsMock).not.toHaveBeenCalled();
     expect(upsertEpicPanelMock).toHaveBeenCalledWith(expect.objectContaining({
       inProgress: true,
       children: extendedSnapshot.children,
