@@ -92,6 +92,12 @@ export interface OrchestrationChildRow {
   /** Sub-issue title, used to build the child task description. */
   readonly title?: string;
   /**
+   * Opaque, adapter-owned values copied onto the released task's
+   * ``channel_metadata``. The orchestration engine persists these without
+   * interpreting them; release-owned keys overwrite collisions.
+   */
+  readonly channel_metadata?: Readonly<Record<string, string>>;
+  /**
    * Sub-issue scope/description (PM-4). The Mode-B planner's rich per-piece
    * scope — persisted at seed so the coding agent's task_description carries
    * what the reviewer approved (e.g. a promised filename), not the title alone.
@@ -173,6 +179,16 @@ export interface OrchestrationReleaseContext {
   readonly linear_oauth_secret_arn?: string;
   readonly linear_workspace_slug?: string;
   readonly linear_project_id?: string;
+  /** Jira parent workflow destination overrides captured from the project map. */
+  readonly jira_status_on_start?: string;
+  readonly jira_status_on_pr?: string;
+  /** Project-specific label that triggers orchestration. */
+  readonly trigger_label?: string;
+  /** Parent context inherited by every released child. */
+  readonly parent_context?: {
+    readonly title?: string;
+    readonly description?: string;
+  };
   /**
    * Parent-issue attachments, screened + stored ONCE at seed time, so every
    * child inherits them (finding #1 — the parent's attached spec must reach the
@@ -182,6 +198,14 @@ export interface OrchestrationReleaseContext {
    * The PARENT owns the objects' lifecycle — children never delete them.
    */
   readonly pre_screened_attachments?: readonly AttachmentRecord[];
+}
+
+export const PARENT_CONTEXT_MAX_CHARS = 4000;
+
+function clampParentContext(text: string): string {
+  const trimmed = text.trim();
+  if (trimmed.length <= PARENT_CONTEXT_MAX_CHARS) return trimmed;
+  return `${trimmed.slice(0, PARENT_CONTEXT_MAX_CHARS)}\n… [truncated]`;
 }
 
 export interface SeedOrchestrationParams {
@@ -393,6 +417,7 @@ export async function seedOrchestration(
     ...(c.identifier !== undefined && dualWrite('display_id', 'linear_identifier', c.identifier)),
     ...(c.title !== undefined && { title: c.title }),
     ...(c.description !== undefined && c.description !== '' && { description: c.description }),
+    ...(c.channel_metadata !== undefined && { channel_metadata: c.channel_metadata }),
     created_at: now,
     updated_at: now,
     ...(ttl !== undefined && { ttl }),
@@ -420,7 +445,26 @@ export async function seedOrchestration(
     ...(releaseContext.linear_project_id !== undefined && {
       linear_project_id: releaseContext.linear_project_id,
     }),
-    // Parent attachments (finding #1) — stored as a JSON string so the nested
+    ...(releaseContext.jira_status_on_start !== undefined && {
+      jira_status_on_start: releaseContext.jira_status_on_start,
+    }),
+    ...(releaseContext.jira_status_on_pr !== undefined && {
+      jira_status_on_pr: releaseContext.jira_status_on_pr,
+    }),
+    ...(releaseContext.trigger_label !== undefined && {
+      trigger_label: releaseContext.trigger_label,
+    }),
+    // The epic's own title/body, inherited by every child so parallel siblings
+    // share one source of truth for names and shapes. Stored FLAT (not nested)
+    // and TRUNCATED here, at the single write site, so no reader has to remember
+    // to bound it — see PARENT_CONTEXT_MAX_CHARS for why a bound is required.
+    ...(releaseContext.parent_context?.title !== undefined && {
+      parent_context_title: clampParentContext(releaseContext.parent_context.title),
+    }),
+    ...(releaseContext.parent_context?.description !== undefined && {
+      parent_context_description: clampParentContext(releaseContext.parent_context.description),
+    }),
+    // Parent attachments, inherited by every child — stored as a JSON string so the nested
     // AttachmentRecord[] round-trips cleanly through the Document client without
     // per-field marshalling. Omitted when the parent had none.
     ...(releaseContext.pre_screened_attachments && releaseContext.pre_screened_attachments.length > 0 && {
@@ -573,6 +617,7 @@ export async function extendOrchestration(params: {
       ...(n.identifier !== undefined && dualWrite('display_id', 'linear_identifier', n.identifier)),
       ...(n.title !== undefined && { title: n.title }),
       ...(n.description !== undefined && n.description !== '' && { description: n.description }),
+      ...(n.channel_metadata !== undefined && { channel_metadata: n.channel_metadata }),
       created_at: now,
       updated_at: now,
       ...(ttl !== undefined && { ttl }),
@@ -899,6 +944,26 @@ export async function loadOrchestration(
       }),
       ...(metaItem.linear_project_id !== undefined && {
         linear_project_id: metaItem.linear_project_id as string,
+      }),
+      ...(metaItem.jira_status_on_start !== undefined && {
+        jira_status_on_start: metaItem.jira_status_on_start as string,
+      }),
+      ...(metaItem.jira_status_on_pr !== undefined && {
+        jira_status_on_pr: metaItem.jira_status_on_pr as string,
+      }),
+      ...(metaItem.trigger_label !== undefined && {
+        trigger_label: metaItem.trigger_label as string,
+      }),
+      ...((metaItem.parent_context_title !== undefined
+        || metaItem.parent_context_description !== undefined) && {
+        parent_context: {
+          ...(metaItem.parent_context_title !== undefined && {
+            title: metaItem.parent_context_title as string,
+          }),
+          ...(metaItem.parent_context_description !== undefined && {
+            description: metaItem.parent_context_description as string,
+          }),
+        },
       }),
       ...(preScreened.length > 0 && { pre_screened_attachments: preScreened }),
     },

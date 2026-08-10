@@ -40,12 +40,22 @@ describe('JiraIntegration construct', () => {
       partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'event_id', type: dynamodb.AttributeType.STRING },
     });
+    const orchestrationTable = new dynamodb.Table(stack, 'OrchestrationTable', {
+      partitionKey: { name: 'orchestration_id', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'sub_issue_id', type: dynamodb.AttributeType.STRING },
+    });
+    const userConcurrencyTable = new dynamodb.Table(stack, 'UserConcurrencyTable', {
+      partitionKey: { name: 'user_id', type: dynamodb.AttributeType.STRING },
+    });
 
     new JiraIntegration(stack, 'JiraIntegration', {
       api,
       userPool,
       taskTable,
       taskEventsTable,
+      orchestrationTable,
+      userConcurrencyTable,
+      maxConcurrentTasksPerUser: 7,
     });
 
     template = Template.fromStack(stack);
@@ -70,6 +80,38 @@ describe('JiraIntegration construct', () => {
         SecretStringTemplate: Match.stringLikeRegexp('abca_jira_webhook_placeholder'),
         GenerateStringKey: 'value',
       }),
+    });
+  });
+  test('every Lambda carries ABCA_COMPONENT=webhook via ComponentUaAspect (#319)', () => {
+    // The Jira integration was the one integration missing ComponentUaAspect,
+    // so its Lambdas fell back to the `api` label. Match slack/linear/github.
+    const functions = template.findResources('AWS::Lambda::Function');
+    const fnIds = Object.keys(functions);
+    expect(fnIds.length).toBeGreaterThan(0);
+    for (const fnId of fnIds) {
+      const envVars = functions[fnId].Properties.Environment?.Variables ?? {};
+      expect(envVars).toHaveProperty('ABCA_COMPONENT', 'webhook');
+    }
+  });
+
+  test('wires the shared orchestration table into the webhook processor', () => {
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: {
+        Variables: Match.objectLike({
+          ORCHESTRATION_TABLE_NAME: Match.anyValue(),
+        }),
+      },
+    });
+  });
+
+  test('wires the user concurrency budget into the webhook processor', () => {
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: {
+        Variables: Match.objectLike({
+          USER_CONCURRENCY_TABLE_NAME: Match.anyValue(),
+          MAX_CONCURRENT_TASKS_PER_USER: '7',
+        }),
+      },
     });
   });
 });

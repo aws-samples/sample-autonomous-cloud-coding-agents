@@ -39,6 +39,7 @@
 import {
   postIssueComment,
   reportIssueFailure,
+  transitionIssueState,
   type JiraFeedbackContext,
 } from './jira-feedback';
 import { type Channel, type IssueRef } from './orchestration-channel';
@@ -77,10 +78,19 @@ export function makeJiraChannel(registryTableName: string): Channel {
       await reportIssueFailure(ctxFor(issue), issue.issueId, message);
     },
 
-    // Every optional capability is intentionally omitted — Jira's wired feedback
-    // surface is comment-only today: no reaction API (reactToComment,
-    // replaceCommentReaction, replaceIssueReaction), no workflow transition
-    // (transitionState, revertState), no threaded-reply helper
+    async transitionState(issue, intent, options) {
+      return transitionIssueState(
+        ctxFor(issue),
+        issue.issueId,
+        intent,
+        issue.stateOverrides,
+        options,
+      );
+    },
+
+    // Remaining optional capabilities are intentionally omitted: no reaction API
+    // (reactToComment, replaceCommentReaction, replaceIssueReaction), no guarded
+    // revertState, no threaded-reply helper
     // (postThreadedReply, upsertThreadedReply), no note sweep (sweepNotes), and
     // the sub-issue DAG isn't derived from Jira (fetchChildGraph). The engine
     // checks for each method and skips it, so the same orchestration core drives

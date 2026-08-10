@@ -169,6 +169,34 @@ describe('seedOrchestration — first write', () => {
     expect(b).not.toHaveProperty('description'); // absent, not an empty string
   });
 
+  test('persists adapter-owned channel metadata on the child row', async () => {
+    const ddb = makeDdb();
+    ddb.send.mockResolvedValueOnce({ Item: undefined }).mockResolvedValueOnce({});
+
+    await seedOrchestration({
+      ddb: ddb as never,
+      tableName: TABLE,
+      parentIssueRef: 'ENG-1',
+      credentialsRef: 'cloud-1',
+      repo: 'o/r',
+      children: [child('ENG-2', [], {
+        channel_metadata: {
+          jira_cloud_id: 'cloud-1',
+          jira_issue_key: 'ENG-2',
+        },
+      })],
+      now: NOW,
+      releaseContext: { ...RC, channel_source: 'jira' },
+    });
+
+    const puts = ddb.send.mock.calls[1][0].input.RequestItems[TABLE] as Array<{ PutRequest: { Item: Record<string, unknown> } }>;
+    const row = puts.find((put) => put.PutRequest.Item.sub_issue_id === 'ENG-2')!.PutRequest.Item;
+    expect(row.channel_metadata).toEqual({
+      jira_cloud_id: 'cloud-1',
+      jira_issue_key: 'ENG-2',
+    });
+  });
+
   test('chunks BatchWrite into groups of 25', async () => {
     const ddb = makeDdb();
     ddb.send.mockResolvedValue({}); // Get + all batches

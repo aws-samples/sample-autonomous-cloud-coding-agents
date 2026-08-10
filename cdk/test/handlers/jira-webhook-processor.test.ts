@@ -289,6 +289,31 @@ describe('jira-webhook-processor handler', () => {
       expect(ddbSend.mock.calls[1][0].input.ConsistentRead).toBe(true);
     });
 
+    test('an orchestrated child iteration preserves routing and marks the restack source', async () => {
+      resolveTaskByJiraIssueMock.mockResolvedValueOnce({
+        ...priorTask,
+        channel_metadata: {
+          ...priorTask.channel_metadata,
+          orchestration_id: 'orch-1',
+          orchestration_sub_issue_id: 'ENG-42',
+        },
+      });
+      ddbSend.mockResolvedValueOnce({
+        Item: { platform_user_id: 'linked-reviewer', status: 'active' },
+      });
+      createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: '{}' });
+
+      await handler(eventWith(comment()));
+
+      expect(createTaskCoreMock.mock.calls[0][1].channelMetadata).toMatchObject({
+        orchestration_id: 'orch-1',
+        orchestration_sub_issue_id: 'ENG-42',
+        orchestration_iteration: 'true',
+        trigger_comment_id: 'comment-1',
+        trigger_comment_issue_id: 'ENG-42',
+      });
+    });
+
     test('ADF mention node creates a PR iteration', async () => {
       resolveTaskByJiraIssueMock.mockResolvedValueOnce(priorTask);
       createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: '{}' });

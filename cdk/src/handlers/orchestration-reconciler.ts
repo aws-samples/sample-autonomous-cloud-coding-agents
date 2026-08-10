@@ -128,9 +128,26 @@ const channelForMeta = (meta: { release_context?: { channel_source?: string } })
 const channelFor = (source: string | undefined) => channelForSource(source, CHANNEL_REGISTRY_TABLES);
 
 /** Build the neutral issue reference the channel operates on. */
-const issueRef = (issueId: string, workspaceId: string): IssueRef => ({
+const issueRef = (
+  issueId: string,
+  workspaceId: string,
+  releaseContext?: {
+    readonly jira_status_on_start?: string;
+    readonly jira_status_on_pr?: string;
+  },
+): IssueRef => ({
   issueId,
   credentialsRef: workspaceId,
+  ...((releaseContext?.jira_status_on_start || releaseContext?.jira_status_on_pr) && {
+    stateOverrides: {
+      ...(releaseContext.jira_status_on_start && {
+        started: releaseContext.jira_status_on_start,
+      }),
+      ...(releaseContext.jira_status_on_pr && {
+        inReview: releaseContext.jira_status_on_pr,
+      }),
+    },
+  }),
 });
 // createTaskCore rejects idempotency keys longer than this; synthesized keys
 // slice to fit the validated /^[A-Za-z0-9_-]{1,128}$/ pattern.
@@ -729,7 +746,12 @@ export async function refreshPanelAndSettle(
     parent_issue_ref: string;
     status_comment_id?: string;
     retry_comment_id?: string;
-    release_context?: { channel_source?: string };
+    release_context?: {
+      channel_source?: string;
+      trigger_label?: string;
+      jira_status_on_start?: string;
+      jira_status_on_pr?: string;
+    };
   },
   now: string,
 ): Promise<void> {
@@ -777,7 +799,7 @@ export async function refreshPanelAndSettle(
 
   const newId = await upsertEpicPanel({
     channel,
-    parent: issueRef(meta.parent_issue_ref, meta.credentials_ref),
+    parent: issueRef(meta.parent_issue_ref, meta.credentials_ref, meta.release_context),
     ...(meta.status_comment_id !== undefined && { statusCommentId: meta.status_comment_id }),
     children,
     prUrls,
@@ -980,7 +1002,7 @@ async function cascadeRestack(evt: TerminalTaskEvent): Promise<void> {
     const integration = panelChildren.find((c) => isIntegrationNode(c.sub_issue_id));
     await upsertEpicPanel({
       channel: cascadeChannel,
-      parent: issueRef(meta.parent_issue_ref, meta.credentials_ref),
+      parent: issueRef(meta.parent_issue_ref, meta.credentials_ref, meta.release_context),
       ...(meta.status_comment_id !== undefined && { statusCommentId: meta.status_comment_id }),
       children: panelChildren,
       prUrls,

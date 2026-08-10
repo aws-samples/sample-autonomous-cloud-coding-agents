@@ -33,6 +33,11 @@ import {
   upsertOauthSecret,
 } from '../../src/commands/jira';
 import * as config from '../../src/config';
+
+const loadActiveRepoConfigMock = jest.fn();
+jest.mock('../../src/repo-lookup', () => ({
+  loadActiveRepoConfig: (...args: unknown[]) => loadActiveRepoConfigMock(...args),
+}));
 import { generateInviteCode, INVITE_CODE_ALPHABET } from '../../src/invite-code';
 import type { StoredJiraOauthToken } from '../../src/jira-oauth';
 
@@ -166,10 +171,12 @@ describe('jira map action', () => {
 
   beforeEach(() => {
     ddbSend.mockReset().mockResolvedValue({});
+    loadActiveRepoConfigMock.mockReset().mockResolvedValue({ repo: 'org/repo', status: 'active' });
     cfnSend.mockReset().mockResolvedValue({
       Stacks: [{
         Outputs: [
           { OutputKey: 'JiraProjectMappingTableName', OutputValue: 'JiraProjectsTable' },
+          { OutputKey: 'RepoTableName', OutputValue: 'RepoTable' },
         ],
       }],
     });
@@ -199,6 +206,11 @@ describe('jira map action', () => {
       status_on_start: 'Doing',
       status_on_pr: 'Code Review',
     });
+    expect(loadActiveRepoConfigMock).toHaveBeenCalledWith(
+      'us-west-2',
+      'RepoTable',
+      'org/repo',
+    );
   });
 
   test('omits status_on_* keys entirely when the flags are not supplied', async () => {
@@ -1236,8 +1248,14 @@ describe('jira map action', () => {
 
   beforeEach(() => {
     ddbSend.mockReset().mockResolvedValue({});
+    loadActiveRepoConfigMock.mockReset().mockResolvedValue({ repo: 'owner/repo', status: 'active' });
     cfnSend.mockReset().mockResolvedValue({
-      Stacks: [{ Outputs: [{ OutputKey: 'JiraProjectMappingTableName', OutputValue: 'ProjMapTable' }] }],
+      Stacks: [{
+        Outputs: [
+          { OutputKey: 'JiraProjectMappingTableName', OutputValue: 'ProjMapTable' },
+          { OutputKey: 'RepoTableName', OutputValue: 'RepoTable' },
+        ],
+      }],
     });
     loadConfigSpy = jest.spyOn(config, 'loadConfig').mockReturnValue({ region: 'us-west-2' } as ReturnType<typeof config.loadConfig>);
     consoleLogSpy = jest.spyOn(console, 'log').mockImplementation();
@@ -1278,6 +1296,13 @@ describe('jira map action', () => {
   test('defaults the trigger label to bgagent when --label is omitted', async () => {
     await runMap(['cloud-123', 'ENG', '--repo', 'owner/repo']);
     expect(ddbSend.mock.calls[0][0].input.Item.label_filter).toBe('bgagent');
+  });
+
+  test('rejects a repository that is not actively onboarded before writing', async () => {
+    loadActiveRepoConfigMock.mockRejectedValueOnce(new Error('Repository is not onboarded'));
+    await expect(runMap(['cloud-123', 'ENG', '--repo', 'owner/missing']))
+      .rejects.toThrow('Repository is not onboarded');
+    expect(ddbSend).not.toHaveBeenCalled();
   });
 
   test('rejects an invalid --repo value before writing', async () => {

@@ -79,6 +79,18 @@ export interface JiraIntegrationProps {
   /** The DynamoDB task events table. */
   readonly taskEventsTable: dynamodb.ITable;
 
+  /** Shared orchestration DAG table. Omit to retain one-issue/one-task mode. */
+  readonly orchestrationTable?: dynamodb.ITable;
+
+  /**
+   * User concurrency counter table. When provided with ``orchestrationTable``,
+   * seed and retry releases are limited to the user's current free slots.
+   */
+  readonly userConcurrencyTable?: dynamodb.ITable;
+
+  /** Per-user concurrency cap shared with task admission. Default 10. */
+  readonly maxConcurrentTasksPerUser?: number;
+
   /** The DynamoDB repo config table (optional — for repo onboarding checks). */
   readonly repoTable?: dynamodb.ITable;
 
@@ -225,6 +237,15 @@ export class JiraIntegration extends Construct {
     if (props.attachmentsBucket) {
       createTaskEnv.ATTACHMENTS_BUCKET_NAME = props.attachmentsBucket.bucketName;
     }
+    if (props.orchestrationTable) {
+      createTaskEnv.ORCHESTRATION_TABLE_NAME = props.orchestrationTable.tableName;
+    }
+    if (props.orchestrationTable && props.userConcurrencyTable) {
+      createTaskEnv.USER_CONCURRENCY_TABLE_NAME = props.userConcurrencyTable.tableName;
+      createTaskEnv.MAX_CONCURRENT_TASKS_PER_USER = String(
+        props.maxConcurrentTasksPerUser ?? 10,
+      );
+    }
 
     // --- Cognito Authorizer (for /jira/link) ---
     const cognitoAuthorizer = new apigw.CognitoUserPoolsAuthorizer(this, 'JiraCognitoAuthorizer', {
@@ -279,6 +300,12 @@ export class JiraIntegration extends Construct {
     }));
     props.taskTable.grantReadWriteData(webhookProcessorFn);
     props.taskEventsTable.grantReadWriteData(webhookProcessorFn);
+    if (props.orchestrationTable) {
+      props.orchestrationTable.grantReadWriteData(webhookProcessorFn);
+    }
+    if (props.orchestrationTable && props.userConcurrencyTable) {
+      props.userConcurrencyTable.grantReadData(webhookProcessorFn);
+    }
     if (props.repoTable) {
       props.repoTable.grantReadData(webhookProcessorFn);
     }

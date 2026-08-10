@@ -192,6 +192,32 @@ describe('releaseChild — ABCA-659 retry salts the idempotency key with the pri
 });
 
 describe('releaseChild — happy path', () => {
+  test('forwards adapter metadata while protecting orchestration-owned keys', async () => {
+    const createTaskCore = created('T-jira');
+    await releaseChild({
+      ddb: { send: jest.fn().mockResolvedValue({}) } as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow({
+        channel_metadata: {
+          jira_cloud_id: 'cloud-1',
+          jira_issue_key: 'ENG-2',
+          orchestration_id: 'adapter-cannot-override',
+        },
+      }),
+      platformUserId: 'user-1',
+      channelSource: 'jira',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+
+    expect(createTaskCore.mock.calls[0][1].channelMetadata).toMatchObject({
+      jira_cloud_id: 'cloud-1',
+      jira_issue_key: 'ENG-2',
+      orchestration_id: 'orch_abc',
+      orchestration_sub_issue_id: 'SUB-1',
+    });
+  });
+
   test('creates a task and flips the row to released', async () => {
     const ddb = { send: jest.fn().mockResolvedValue({}) };
     const createTaskCore = created('T-100');

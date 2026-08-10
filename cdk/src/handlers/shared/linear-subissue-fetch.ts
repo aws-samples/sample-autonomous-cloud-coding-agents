@@ -111,6 +111,12 @@ export interface SubIssueNode extends DagNode {
    * on the Mode-A path that fetches an existing sub-issue graph by title only.
    */
   readonly description?: string;
+  /**
+   * Opaque, adapter-owned metadata copied onto the released child task.
+   * The orchestration engine persists and forwards these string fields without
+   * interpreting them.
+   */
+  readonly channel_metadata?: Readonly<Record<string, string>>;
   /** Sub-issue ids that block this one (intra-epic predecessors). */
   readonly depends_on: readonly string[];
 }

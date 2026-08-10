@@ -50,6 +50,10 @@
  * before handing ``discoverOrchestration`` a uniform interface.
  */
 
+import {
+  fetchJiraSubIssueGraph,
+  type FetchJiraSubIssueGraphOptions,
+} from './jira-subissue-fetch';
 import { fetchSubIssueGraph, type FetchSubIssueGraphOptions, type SubIssueNode } from './linear-subissue-fetch';
 
 /**
@@ -81,6 +85,26 @@ export function linearGraphSource(
 ): OrchestrationGraphSource {
   return async () => {
     const fetched = await fetchSubIssueGraph(accessToken, parentIssueId, fetchOptions);
+    if (fetched.kind === 'error') return { kind: 'error', message: fetched.message };
+    if (fetched.kind === 'no_children') return { kind: 'no_children' };
+    return { kind: 'ok', children: fetched.children };
+  };
+}
+
+/** Tier 1 - Jira authored subtasks plus standard blocker links. */
+export function jiraGraphSource(
+  accessToken: string,
+  cloudId: string,
+  parentIssueKey: string,
+  fetchOptions?: FetchJiraSubIssueGraphOptions,
+): OrchestrationGraphSource {
+  return async () => {
+    const fetched = await fetchJiraSubIssueGraph(
+      accessToken,
+      cloudId,
+      parentIssueKey,
+      fetchOptions,
+    );
     if (fetched.kind === 'error') return { kind: 'error', message: fetched.message };
     if (fetched.kind === 'no_children') return { kind: 'no_children' };
     return { kind: 'ok', children: fetched.children };
