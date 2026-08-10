@@ -23,14 +23,10 @@
  * (`postIssueComment` / `reportIssueFailure`, which render the body as an Atlassian
  * Document Format doc under the hood).
  *
- * This adapter demonstrates the capability-awareness of the interface: Jira's
- * feedback surface is comment-only, so the adapter implements the REQUIRED methods
- * (`postComment`, `upsertComment`, `reportFailure`) and OMITS the optional ones
- * the surface can't do today — there's no reaction API, no workflow-state
- * transition wired here, and the sub-issue DAG isn't derived from Jira. The
- * orchestration engine checks for those methods and no-ops gracefully when a
- * surface omits them, so the same engine drives Jira without any Jira-specific
- * branching in the core.
+ * Jira's feedback surface is comment-only, so the adapter implements the required
+ * post/update/failure methods plus workflow transitions. It omits reaction
+ * capabilities because Jira has no equivalent primitive. The orchestration engine
+ * checks optional methods and no-ops gracefully when a surface omits them.
  *
  * ``credentialsRef`` on an {@link IssueRef} is the Atlassian tenant id (``cloudId``)
  * that keys the Jira token registry.

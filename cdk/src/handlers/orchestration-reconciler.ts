@@ -50,8 +50,13 @@ import { sumIterationCostForIssue } from './shared/iteration-cost';
 import { isNoChangeIteration, renderMaturingReply } from './shared/iteration-reply';
 import { claimTerminalReply, releaseReplyClaim } from './shared/iteration-reply-claim';
 import {
-  renderJiraFinalStatusText,
-  renderJiraFinishedPointerText,
+  buildAdfDocument,
+  postIssueCommentAdf,
+  updateIssueCommentAdf,
+} from './shared/jira-feedback';
+import {
+  renderJiraFinalStatusComment,
+  renderJiraFinishedPointer,
 } from './shared/jira-status-comment';
 import { logger } from './shared/logger';
 import type { Channel, CommentRef, IssueRef } from './shared/orchestration-channel';
@@ -1213,38 +1218,63 @@ async function replyToIterationComment(
     ? { commentId: evt.iterationReplyId }
     : undefined;
   let reply: CommentRef | null | undefined;
+  let jiraFinalBody: Record<string, unknown> | undefined;
   if (channel.kind === 'jira') {
     const pointerKind = !succeeded
       ? 'details'
       : (isNoChangeIteration(evt.codeChanged) ? 'answer' : 'result');
+    const jiraCtx = {
+      cloudId: workspaceId,
+      registryTableName: JIRA_REGISTRY_TABLE!,
+    };
+    jiraFinalBody = buildAdfDocument(renderJiraFinalStatusComment({
+      eventType: succeeded
+        ? 'task_completed'
+        : (evt.status === TaskStatus.COMPLETED
+          ? 'task_failed'
+          : `task_${evt.status.toLowerCase()}`),
+      prUrl,
+      costUsd: evt.costUsd ?? null,
+      turns: evt.turns ?? null,
+      maxTurns: evt.maxTurns ?? null,
+      durationS: evt.durationS ?? null,
+      taskId: evt.taskId,
+      errorTitle: classifyError(evt.errorMessage)?.title ?? null,
+    }));
     if (existing) {
-      const pointer = await channel.upsertComment(
-        target,
-        renderJiraFinishedPointerText(pointerKind),
-        existing,
+      const pointer = await updateIssueCommentAdf(
+        jiraCtx,
+        target.issueId,
+        existing.commentId,
+        buildAdfDocument(renderJiraFinishedPointer(pointerKind)),
       );
-      if (pointer === null) {
+      if (!pointer.ok) {
         reply = null;
       }
     }
     if (reply !== null) {
-      reply = await channel.postComment(
-        target,
-        renderJiraFinalStatusText({
-          eventType: succeeded
-            ? 'task_completed'
-            : (evt.status === TaskStatus.COMPLETED
-              ? 'task_failed'
-              : `task_${evt.status.toLowerCase()}`),
-          prUrl,
-          costUsd: evt.costUsd ?? null,
-          turns: evt.turns ?? null,
-          maxTurns: evt.maxTurns ?? null,
-          durationS: evt.durationS ?? null,
-          taskId: evt.taskId,
-          errorTitle: classifyError(evt.errorMessage)?.title ?? null,
-        }),
+      const finalResult = await postIssueCommentAdf(
+        jiraCtx,
+        target.issueId,
+        jiraFinalBody,
       );
+      reply = finalResult.ok ? { commentId: finalResult.commentId } : null;
+      if (!finalResult.ok && !finalResult.retryable && existing) {
+        const fallback = await updateIssueCommentAdf(
+          jiraCtx,
+          target.issueId,
+          existing.commentId,
+          jiraFinalBody,
+        );
+        if (fallback.ok) {
+          logger.warn('Jira iteration result post failed terminally — folded outcome into status comment', {
+            task_id: evt.taskId,
+            jira_issue_key: target.issueId,
+            comment_id: existing.commentId,
+          });
+          reply = existing;
+        }
+      }
     }
   } else {
     reply = await channel.upsertThreadedReply?.(
@@ -1278,6 +1308,25 @@ async function replyToIterationComment(
         release,
       });
       return;
+    }
+    if (channel.kind === 'jira' && existing && jiraFinalBody) {
+      const fallback = await updateIssueCommentAdf(
+        {
+          cloudId: workspaceId,
+          registryTableName: JIRA_REGISTRY_TABLE!,
+        },
+        target.issueId,
+        existing.commentId,
+        jiraFinalBody,
+      );
+      if (fallback.ok) {
+        logger.warn('Jira iteration retries exhausted — folded outcome into status comment', {
+          task_id: evt.taskId,
+          jira_issue_key: target.issueId,
+          comment_id: existing.commentId,
+        });
+        reply = existing;
+      }
     }
     // No attempt is coming. Fall through WITHOUT a reply so the reaction on the
     // trigger comment still moves off 👀: a reply that will never arrive is

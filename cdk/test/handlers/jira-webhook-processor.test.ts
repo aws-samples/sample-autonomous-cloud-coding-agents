@@ -335,6 +335,36 @@ describe('jira-webhook-processor handler', () => {
       expect(postIssueCommentMock).toHaveBeenCalledTimes(1);
     });
 
+    test('an acknowledgement that posts but cannot persist its id does not fail task creation', async () => {
+      resolveTaskByJiraIssueMock.mockResolvedValueOnce(priorTask);
+      createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: '{}' });
+      ddbSend.mockImplementation((command: {
+        _type?: string;
+        input: { TableName?: string; UpdateExpression?: string };
+      }) => {
+        if (command.input.TableName === 'JiraProjects') {
+          return Promise.resolve({
+            Item: { repo: 'org/repo', status: 'active', label_filter: 'bgagent' },
+          });
+        }
+        if (command.input.TableName === 'JiraUsers') {
+          return Promise.resolve({ Item: undefined });
+        }
+        if (
+          command._type === 'Update'
+          && command.input.UpdateExpression?.includes('iteration_reply_comment_id')
+        ) {
+          return Promise.reject(new Error('DynamoDB unavailable'));
+        }
+        return Promise.resolve({});
+      });
+
+      await expect(handler(eventWith(comment()))).resolves.toBeUndefined();
+
+      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+      expect(postIssueCommentMock).toHaveBeenCalledTimes(1);
+    });
+
     test('ADF mention node creates a PR iteration', async () => {
       resolveTaskByJiraIssueMock.mockResolvedValueOnce(priorTask);
       createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: '{}' });

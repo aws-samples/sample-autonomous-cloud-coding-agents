@@ -2474,7 +2474,7 @@ describe('fanout-task-events: Jira dispatcher', () => {
     expect(releases).toHaveLength(1);
   });
 
-  test('failed separate iteration result releases its terminal claim', async () => {
+  test('terminal separate-result failure folds the full outcome into the status comment', async () => {
     mockGet({
       ...TASK_RECORD_JIRA,
       channel_metadata: {
@@ -2490,8 +2490,43 @@ describe('fanout-task-events: Jira dispatcher', () => {
 
     await handler({ Records: [mkEvent('task_completed', 't-jira')] });
 
-    expect(mockUpdateIssueCommentAdf).toHaveBeenCalledTimes(1);
+    expect(mockUpdateIssueCommentAdf).toHaveBeenCalledTimes(2);
     expect(mockPostIssueCommentAdf).toHaveBeenCalledTimes(1);
+    const [, , fallbackCommentId, fallbackBody] = mockUpdateIssueCommentAdf.mock.calls[1];
+    expect(fallbackCommentId).toBe('status-comment-1');
+    expect(adfText(fallbackBody)).toContain('cost: $0.55 • turns: 27 / 100 • duration: 3m 41s');
+    expect(adfText(fallbackBody)).toContain('task t-jira');
+    const releases = mockDdbSend.mock.calls
+      .map(([command]) => command as {
+        _type?: string;
+        input?: { UpdateExpression?: string };
+      })
+      .filter(command =>
+        command._type === 'Update'
+        && /REMOVE ack_replied_at/.test(command.input?.UpdateExpression ?? ''),
+      );
+    expect(releases).toHaveLength(0);
+  });
+
+  test('retryable separate-result failure releases the claim and retries the record', async () => {
+    mockGet({
+      ...TASK_RECORD_JIRA,
+      channel_metadata: {
+        ...TASK_RECORD_JIRA.channel_metadata,
+        trigger_comment_id: 'human-comment-1',
+        iteration_reply_comment_id: 'status-comment-1',
+      },
+    });
+    mockPostIssueCommentAdf.mockResolvedValue({
+      ok: false,
+      retryable: true,
+    });
+    const record = mkEvent('task_completed', 't-jira');
+
+    const result = await handler({ Records: [record] });
+
+    expect(result.batchItemFailures).toEqual([{ itemIdentifier: record.eventID }]);
+    expect(mockUpdateIssueCommentAdf).toHaveBeenCalledTimes(1);
     const releases = mockDdbSend.mock.calls
       .map(([command]) => command as {
         _type?: string;
@@ -2502,6 +2537,47 @@ describe('fanout-task-events: Jira dispatcher', () => {
         && /REMOVE ack_replied_at/.test(command.input?.UpdateExpression ?? ''),
       );
     expect(releases).toHaveLength(1);
+  });
+
+  test('exhausted separate-result retries fold the full outcome into the status comment', async () => {
+    const task = {
+      ...TASK_RECORD_JIRA,
+      channel_metadata: {
+        ...TASK_RECORD_JIRA.channel_metadata,
+        trigger_comment_id: 'human-comment-1',
+        iteration_reply_comment_id: 'status-comment-1',
+      },
+    };
+    mockDdbSend.mockReset().mockImplementation((cmd: {
+      _type?: string;
+      input?: {
+        ProjectionExpression?: string;
+        UpdateExpression?: string;
+      };
+    }) => {
+      if (cmd?._type === 'Get' && cmd.input?.ProjectionExpression === 'ack_reply_attempts') {
+        return Promise.resolve({ Item: { ack_reply_attempts: 3 } });
+      }
+      if (cmd?._type === 'Get') return Promise.resolve({ Item: task });
+      if (cmd?._type === 'Update' && /REMOVE ack_replied_at/.test(cmd.input?.UpdateExpression ?? '')) {
+        return Promise.reject(Object.assign(new Error('spent'), {
+          name: 'ConditionalCheckFailedException',
+        }));
+      }
+      return Promise.resolve({});
+    });
+    mockPostIssueCommentAdf.mockResolvedValue({
+      ok: false,
+      retryable: true,
+    });
+
+    const result = await handler({
+      Records: [mkEvent('task_completed', 't-jira')],
+    });
+
+    expect(result.batchItemFailures).toEqual([]);
+    expect(mockUpdateIssueCommentAdf).toHaveBeenCalledTimes(2);
+    expect(adfText(mockUpdateIssueCommentAdf.mock.calls[1][3])).toContain('task t-jira');
   });
 
   test('non-Jira task short-circuits — postIssueCommentAdf never called', async () => {
