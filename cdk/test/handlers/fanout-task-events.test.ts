@@ -187,6 +187,10 @@ import {
   type FanOutEvent,
   type TaskNotificationsConfig,
 } from '../../src/handlers/fanout-task-events';
+import {
+  renderJiraFinalStatusText,
+  renderJiraFinishedPointer,
+} from '../../src/handlers/shared/jira-status-comment';
 
 function mkRecord(
   eventName: 'INSERT' | 'MODIFY' | 'REMOVE',
@@ -2310,7 +2314,7 @@ describe('fanout-task-events: Jira dispatcher (issue #573)', () => {
     expect(adfText(body)).toContain('❌');
   });
 
-  test('standalone iteration matures its stored comment instead of posting a new one', async () => {
+  test('standalone iteration finishes its progress comment and posts a separate result', async () => {
     mockGet({
       ...TASK_RECORD_JIRA,
       channel_metadata: {
@@ -2331,9 +2335,20 @@ describe('fanout-task-events: Jira dispatcher (issue #573)', () => {
     });
     expect(issueKey).toBe('KAN-42');
     expect(commentId).toBe('status-comment-1');
-    expect(adfText(body)).toContain('cost: $0.55 • turns: 27 / 100 • duration: 3m 41s');
-    expect(adfText(body)).toContain('task t-jira');
-    expect(mockPostIssueCommentAdf).not.toHaveBeenCalled();
+    expect(adfText(body)).toBe('✅ Finished — result posted below.');
+
+    expect(mockPostIssueCommentAdf).toHaveBeenCalledTimes(1);
+    const [, finalIssueKey, finalBody] = mockPostIssueCommentAdf.mock.calls[0];
+    expect(finalIssueKey).toBe('KAN-42');
+    expect(adfText(finalBody)).toContain('cost: $0.55 • turns: 27 / 100 • duration: 3m 41s');
+    expect(adfText(finalBody)).toContain('task t-jira');
+    const finalRuns = (finalBody as {
+      _adf: ReadonlyArray<ReadonlyArray<{ text: string; href?: string }>>;
+    })._adf.flat();
+    expect(finalRuns).toContainEqual(expect.objectContaining({
+      text: 'https://github.com/owner/repo/pull/13',
+      href: 'https://github.com/owner/repo/pull/13',
+    }));
   });
 
   test('orchestrated iteration leaves terminal maturation to the reconciler', async () => {
@@ -2436,6 +2451,36 @@ describe('fanout-task-events: Jira dispatcher (issue #573)', () => {
     expect(result.batchItemFailures).toEqual([
       { itemIdentifier: record.eventID },
     ]);
+    const releases = mockDdbSend.mock.calls
+      .map(([command]) => command as {
+        _type?: string;
+        input?: { UpdateExpression?: string };
+      })
+      .filter(command =>
+        command._type === 'Update'
+        && /REMOVE ack_replied_at/.test(command.input?.UpdateExpression ?? ''),
+      );
+    expect(releases).toHaveLength(1);
+  });
+
+  test('failed separate iteration result releases its terminal claim', async () => {
+    mockGet({
+      ...TASK_RECORD_JIRA,
+      channel_metadata: {
+        ...TASK_RECORD_JIRA.channel_metadata,
+        trigger_comment_id: 'human-comment-1',
+        iteration_reply_comment_id: 'status-comment-1',
+      },
+    });
+    mockPostIssueCommentAdf.mockResolvedValue({
+      ok: false,
+      retryable: false,
+    });
+
+    await handler({ Records: [mkEvent('task_completed', 't-jira')] });
+
+    expect(mockUpdateIssueCommentAdf).toHaveBeenCalledTimes(1);
+    expect(mockPostIssueCommentAdf).toHaveBeenCalledTimes(1);
     const releases = mockDdbSend.mock.calls
       .map(([command]) => command as {
         _type?: string;
@@ -2617,6 +2662,24 @@ describe('renderJiraFinalStatusComment', () => {
     // follow-up). Find the run whose text is the URL and assert its href.
     const urlRun = paragraphs.flat().find((r) => r.text === 'https://github.com/o/r/pull/7');
     expect(urlRun).toEqual({ text: 'https://github.com/o/r/pull/7', href: 'https://github.com/o/r/pull/7' });
+    expect(renderJiraFinalStatusText({
+      eventType: 'task_completed',
+      prUrl: 'https://github.com/o/r/pull/7',
+      costUsd: 0.5,
+      turns: 3,
+      maxTurns: 100,
+      durationS: 60,
+      taskId: 't',
+      errorTitle: null,
+    })).toContain('[https://github.com/o/r/pull/7](https://github.com/o/r/pull/7)');
+  });
+
+  test.each([
+    ['result', '✅ Finished — result posted below.'],
+    ['details', '❌ Finished — details posted below.'],
+    ['answer', '💬 Finished — answer posted below.'],
+  ] as const)('renders the %s terminal pointer', (kind, expected) => {
+    expect(flatten(renderJiraFinishedPointer(kind))).toBe(expected);
   });
 
   test('✅ success path without a PR omits the PR line', () => {

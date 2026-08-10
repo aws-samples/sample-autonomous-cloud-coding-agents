@@ -30,6 +30,28 @@ export interface JiraFinalStatusInput {
   readonly errorTitle: string | null;
 }
 
+export type JiraFinishedPointerKind = 'result' | 'details' | 'answer';
+
+/** Short terminal pointer that replaces the long-running progress comment. */
+export function renderJiraFinishedPointer(
+  kind: JiraFinishedPointerKind,
+): ReadonlyArray<AdfParagraph> {
+  if (kind === 'result') {
+    return [[{ text: '✅ Finished — result posted below.', strong: true }]];
+  }
+  if (kind === 'answer') {
+    return [[{ text: '💬 Finished — answer posted below.', strong: true }]];
+  }
+  return [[{ text: '❌ Finished — details posted below.', strong: true }]];
+}
+
+/** Plain-text/markdown form for the channel adapter. */
+export function renderJiraFinishedPointerText(kind: JiraFinishedPointerKind): string {
+  return renderJiraFinishedPointer(kind)
+    .map((paragraph) => paragraph.map((run) => run.text).join(''))
+    .join('\n');
+}
+
 function formatDuration(seconds: number): string {
   const rounded = Math.max(0, Math.round(seconds));
   const minutes = Math.floor(rounded / 60);
@@ -87,6 +109,8 @@ export function renderJiraFinalStatusComment(
 /** Plain-text equivalent for the channel adapter's string comment contract. */
 export function renderJiraFinalStatusText(args: JiraFinalStatusInput): string {
   return renderJiraFinalStatusComment(args)
-    .map((paragraph) => paragraph.map((run) => run.text).join(''))
+    .map((paragraph) => paragraph
+      .map((run) => run.href ? `[${run.text}](${run.href})` : run.text)
+      .join(''))
     .join('\n');
 }

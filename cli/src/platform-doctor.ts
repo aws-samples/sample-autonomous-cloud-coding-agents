@@ -23,6 +23,8 @@ import {
   DescribeUserPoolClientCommand,
   DescribeUserPoolCommand,
 } from '@aws-sdk/client-cognito-identity-provider';
+import { ScanCommand } from '@aws-sdk/lib-dynamodb';
+import { documentClient } from './dynamo-clients';
 import { isGithubTokenConfigured } from './github-token';
 import { checkLinearWorkspaceAuth, type LinearProbe, type LinearRefreshVerifier } from './linear-auth-health';
 import { PLATFORM_REPO_DEFAULTS } from './repo-display';
@@ -74,6 +76,7 @@ export async function runPlatformDoctor(
     githubTokenSecretArn,
     repoTableName,
     linearRegistryTableName,
+    jiraRegistryTableName,
   ] = await Promise.all([
     getStackOutput(region, stackName, 'ApiUrl'),
     getStackOutput(region, stackName, 'UserPoolId'),
@@ -81,6 +84,7 @@ export async function runPlatformDoctor(
     getStackOutput(region, stackName, 'GitHubTokenSecretArn'),
     getStackOutput(region, stackName, 'RepoTableName'),
     getStackOutput(region, stackName, 'LinearWorkspaceRegistryTableName'),
+    getStackOutput(region, stackName, 'JiraWorkspaceRegistryTableName'),
   ]);
 
   const checks: DoctorCheckResult[] = [];
@@ -93,8 +97,97 @@ export async function runPlatformDoctor(
   checks.push(await checkLinearAuth(
     region, linearRegistryTableName, options.linearProbe, options.linearVerifyRefresh,
   ));
+  checks.push(await checkJiraAppIdentity(region, jiraRegistryTableName));
 
   return checks;
+}
+
+interface JiraRegistryIdentityRow {
+  readonly jira_cloud_id?: string;
+  readonly status?: string;
+  readonly outbound_identity?: string;
+  readonly app_actor_account_id?: string;
+  readonly app_actor_display_name?: string;
+  readonly app_actor_configured_at?: string;
+}
+
+/** Warn when Jira writes would still be attributed to the OAuth setup user. */
+export async function checkJiraAppIdentity(
+  region: string,
+  registryTableName: string | null,
+): Promise<DoctorCheckResult> {
+  const id = 'jira_app_identity';
+  const label = 'Jira outbound app identity';
+  if (!registryTableName) {
+    return {
+      id,
+      label,
+      status: 'pass',
+      detail: 'No Jira workspace registry on this stack (integration not deployed).',
+    };
+  }
+
+  try {
+    const ddb = documentClient(region);
+    const rows: JiraRegistryIdentityRow[] = [];
+    let startKey: Record<string, unknown> | undefined;
+    do {
+      const page = await ddb.send(new ScanCommand({
+        TableName: registryTableName,
+        ProjectionExpression: [
+          'jira_cloud_id',
+          '#status',
+          'outbound_identity',
+          'app_actor_account_id',
+          'app_actor_display_name',
+          'app_actor_configured_at',
+        ].join(', '),
+        ExpressionAttributeNames: { '#status': 'status' },
+        ...(startKey && { ExclusiveStartKey: startKey }),
+      }));
+      rows.push(...(page.Items ?? []) as JiraRegistryIdentityRow[]);
+      startKey = page.LastEvaluatedKey;
+    } while (startKey);
+
+    const active = rows.filter((row) => row.status === 'active');
+    if (active.length === 0) {
+      return { id, label, status: 'pass', detail: 'No active Jira tenants onboarded yet.' };
+    }
+
+    const incomplete = active.filter((row) =>
+      row.outbound_identity !== 'app'
+      || !row.app_actor_account_id
+      || !row.app_actor_display_name
+      || !row.app_actor_configured_at,
+    );
+    if (incomplete.length === 0) {
+      return {
+        id,
+        label,
+        status: 'pass',
+        detail: `${active.length} active Jira tenant(s) use the dedicated app identity.`,
+      };
+    }
+
+    const tenantIds = incomplete
+      .map((row) => row.jira_cloud_id ?? '<unknown-cloud-id>')
+      .join(', ');
+    return {
+      id,
+      label,
+      status: 'warn',
+      detail: `${incomplete.length} of ${active.length} active Jira tenant(s) will write as the OAuth `
+        + `setup user or have incomplete Forge metadata: ${tenantIds}. Run \`bgagent jira app-setup `
+        + '<cloud-id> --proxy-url <forge-v2-url> --stack-name <stack>\` for each tenant.',
+    };
+  } catch (err) {
+    return {
+      id,
+      label,
+      status: 'warn',
+      detail: `Could not read the Jira workspace registry: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
 }
 
 async function checkApiReachable(apiUrl: string | null): Promise<DoctorCheckResult> {

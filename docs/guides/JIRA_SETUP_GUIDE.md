@@ -158,7 +158,96 @@ The repository includes a narrow Forge app under `integrations/jira-forge-app`. 
 Run the login in an interactive terminal. Forge asks for your Atlassian email and the Forge CLI scoped token from the prerequisites; the Jira 3LO access token is not a Forge CLI credential. On the first registration, Forge also asks you to create or select a **Developer Space**.
 
 ```bash
-bgagent jira map <cloud-id> <PROJECT-KEY> --repo owner/repo
+cd integrations/jira-forge-app
+npm ci
+forge login
+forge register bgagent --accept-terms
+```
+
+`forge register bgagent` replaces the placeholder `app.id` in `manifest.yml` with an app ID owned by your Atlassian Developer Space. That ID is not a secret, but it is operator-specific: keep it in the deployment checkout for future Forge commands and do not commit it to the sample repository or a contribution branch. If you restore the placeholder to keep a worktree clean, record the existing app ID and put it back before a future deploy; do not register a second app.
+
+Generate a shared secret and store it in the Forge **production** environment:
+
+```bash
+BGAGENT_PROXY_SECRET="$(openssl rand -hex 32)"
+forge variables set --encrypt BGAGENT_PROXY_SECRET "$BGAGENT_PROXY_SECRET" \
+  --environment production
+```
+
+The value is held in the current shell without being written to shell history. Keep that terminal open for the final `bgagent` command; never commit or print the value. Forge variables apply only after a deployment, so set or rotate the variable **before** `forge deploy`.
+
+Deploy and install the same production environment on the Jira site, then create the URL for the allowlisted `bgagent-outbound` trigger:
+
+```bash
+forge deploy --environment production
+forge install \
+  --product Jira \
+  --site <your-site>.atlassian.net \
+  --environment production \
+  --confirm-scopes
+forge webtrigger create \
+  --functionKey bgagent-outbound \
+  --product Jira \
+  --site <your-site>.atlassian.net \
+  --environment production
+```
+
+Forge prints a v2 installation URL shaped like:
+
+```text
+https://<installation-id>.webtrigger.atlassian.app/public/<trigger-id>
+```
+
+The URL is installation- and environment-specific. Register it and the same shared secret with the intended ABCA stack:
+
+```bash
+bgagent jira app-setup <cloud-id> \
+  --proxy-url https://<installation-id>.webtrigger.atlassian.app/public/<trigger-id> \
+  --region "$REGION" \
+  --stack-name "$STACK_NAME"
+```
+
+Paste `BGAGENT_PROXY_SECRET` into the hidden prompt. The CLI sends an HMAC-signed identity probe and refuses to save unless Jira reports `accountType=app` and `/rest/api/3/serverInfo` identifies the selected tenant. It stores the proxy URL and secret on `bgagent-jira-oauth-<cloudId>` and non-secret identity metadata in `JiraWorkspaceRegistryTable`. Run `unset BGAGENT_PROXY_SECRET` after setup. The `--shared-secret` option is available for non-interactive automation, but exposes the value to local process inspection while the command runs.
+
+The Forge app scopes authorize API families, but Jira project permissions still apply. Ensure the installed app has **Browse Projects**, **Add Comments**, and **Transition Issues** access in each mapped project.
+
+Confirm the installation and ABCA registration before triggering a task:
+
+```bash
+forge install list --environment production
+
+JIRA_REGISTRY_TABLE=$(aws cloudformation describe-stacks \
+  --stack-name "$STACK_NAME" \
+  --region "$REGION" \
+  --query 'Stacks[0].Outputs[?OutputKey==`JiraWorkspaceRegistryTableName`].OutputValue' \
+  --output text)
+
+aws dynamodb get-item \
+  --region "$REGION" \
+  --table-name "$JIRA_REGISTRY_TABLE" \
+  --key '{"jira_cloud_id":{"S":"<cloud-id>"}}' \
+  --projection-expression 'jira_cloud_id,outbound_identity,app_actor_display_name,app_actor_configured_at'
+```
+
+The Forge installation should be `Up-to-date`. The registry row should contain `outbound_identity = app` and `app_actor_display_name = bgagent`. Do not print the tenant secret to verify it; `app-setup` has already proved that the URL and HMAC secret work together.
+
+Run the platform diagnostic after registration:
+
+```bash
+bgagent platform doctor \
+  --region "$REGION" \
+  --stack-name "$STACK_NAME"
+```
+
+`Jira outbound app identity` should pass. A warning means at least one active Jira tenant still writes as the OAuth setup user or has incomplete Forge metadata; re-run `bgagent jira app-setup` for the listed cloud ID.
+
+### 5. Map a project to a repository
+
+```bash
+bgagent jira map <cloud-id> <PROJECT-KEY> \
+  --repo owner/repo \
+  --region "$REGION" \
+  --stack-name "$STACK_NAME"
 ```
 
 - `<cloud-id>` — the tenant UUID. `setup`'s final **Next steps** block prints this exact `map` command with the cloudId pre-filled — paste it and swap in your project key and repo. If that terminal output is gone, recover the cloudId from `https://<your-site>.atlassian.net/_edge/tenant_info` (returns it as JSON) or from the workspace-registry table — it is *not* shown anywhere in the Jira UI
@@ -199,7 +288,10 @@ The teammate needs their own ABCA account first (Cognito user + configured CLI).
 
 Add the trigger label (`bgagent` by default) to a Jira issue in a mapped project. The agent should start within ~30 seconds, comment on the issue as it works, and post a PR link when ready. The issue **summary** plus the **description** (converted from Atlassian Document Format to markdown), the issue's **recent comments**, and any supported **file attachments** become the task context — see [Issue context: attachments and comments](#issue-context-attachments-and-comments).
 
-After the PR exists, add a Jira comment such as `@bgagent update the README too`. ABCA should create one acknowledgement status comment, update it with elapsed time during a long run, update the existing PR, and finally replace the same comment with the terminal outcome and metrics.
+After the PR exists, add a Jira comment such as `@bgagent update the README too`. ABCA should create one acknowledgement status comment, update it with elapsed time during a long run, update the existing PR, and finally:
+
+1. Replace the progress text with a short `Finished — result posted below` pointer.
+2. Add a separate terminal comment containing the outcome, metrics, and a clickable PR link.
 
 ## How webhook signature verification works
 
