@@ -57,7 +57,11 @@ import {
   postIssueCommentAdf,
   updateIssueCommentAdf,
 } from './shared/jira-feedback';
-import { renderJiraFinalStatusComment } from './shared/jira-status-comment';
+import {
+  renderJiraFinalStatusComment,
+  renderJiraFinishedPointer,
+  type JiraFinishedPointerKind,
+} from './shared/jira-status-comment';
 import { EMOJI_FAILURE, EMOJI_NEEDS_INPUT, EMOJI_SUCCESS, postIssueComment, swapCommentReaction, upsertThreadedReply } from './shared/linear-feedback';
 import { logger } from './shared/logger';
 import { coerceNumericOrNull } from './shared/numeric';
@@ -1678,18 +1682,50 @@ async function dispatchToJira(event: FanOutEvent): Promise<void> {
     );
     if (!claim.won) return;
 
+    const pointerKind: JiraFinishedPointerKind = event.event_type !== 'task_completed'
+      ? 'details'
+      : (task.code_changed === false ? 'answer' : 'result');
     const updateResult = await updateIssueCommentAdf(
       { cloudId, registryTableName },
       issueKey,
       iterationReplyId,
-      buildAdfDocument(paragraphs),
+      buildAdfDocument(renderJiraFinishedPointer(pointerKind)),
     );
-    if (updateResult.ok) {
-      logger.info('[fanout/jira] iteration comment matured in place', {
-        event: 'fanout.jira.iteration_matured',
+    if (!updateResult.ok) {
+      const release = await releaseReplyClaim(
+        ddb,
+        tableName,
+        task.task_id,
+        claim.stamp,
+      );
+      logger.warn('[fanout/jira] iteration pointer update failed (non-fatal)', {
+        event: 'fanout.jira.iteration_pointer_failed',
         task_id: task.task_id,
         jira_issue_key: issueKey,
         comment_id: iterationReplyId,
+        retryable: updateResult.retryable,
+        release,
+      });
+      if (updateResult.retryable && release !== 'exhausted') {
+        throw new Error(
+          `[fanout/jira] transient Jira iteration pointer failure for task ${task.task_id}`,
+        );
+      }
+      return;
+    }
+
+    const finalResult = await postIssueCommentAdf(
+      { cloudId, registryTableName },
+      issueKey,
+      buildAdfDocument(paragraphs),
+    );
+    if (finalResult.ok) {
+      logger.info('[fanout/jira] iteration result posted separately', {
+        event: 'fanout.jira.iteration_result_posted',
+        task_id: task.task_id,
+        jira_issue_key: issueKey,
+        pointer_comment_id: iterationReplyId,
+        result_comment_id: finalResult.commentId,
       });
       return;
     }
@@ -1700,17 +1736,16 @@ async function dispatchToJira(event: FanOutEvent): Promise<void> {
       task.task_id,
       claim.stamp,
     );
-    logger.warn('[fanout/jira] iteration comment update failed (non-fatal)', {
-      event: 'fanout.jira.iteration_update_failed',
+    logger.warn('[fanout/jira] iteration result post failed (non-fatal)', {
+      event: 'fanout.jira.iteration_result_failed',
       task_id: task.task_id,
       jira_issue_key: issueKey,
-      comment_id: iterationReplyId,
-      retryable: updateResult.retryable,
+      retryable: finalResult.retryable,
       release,
     });
-    if (updateResult.retryable && release !== 'exhausted') {
+    if (finalResult.retryable && release !== 'exhausted') {
       throw new Error(
-        `[fanout/jira] transient Jira iteration update failure for task ${task.task_id}`,
+        `[fanout/jira] transient Jira iteration result failure for task ${task.task_id}`,
       );
     }
     return;

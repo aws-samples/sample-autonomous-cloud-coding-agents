@@ -247,6 +247,16 @@ aws dynamodb get-item \
 
 The Forge installation should be `Up-to-date`. The registry row should contain `outbound_identity = app` and `app_actor_display_name = bgagent`. Do not print the tenant secret to verify it; `app-setup` has already proved that the URL and HMAC secret work together.
 
+Run the platform diagnostic after registration:
+
+```bash
+bgagent platform doctor \
+  --region "$REGION" \
+  --stack-name "$STACK_NAME"
+```
+
+`Jira outbound app identity` should pass. A warning means at least one active Jira tenant still writes as the OAuth setup user or has incomplete Forge metadata; re-run `bgagent jira app-setup` for the listed cloud ID.
+
 ### 5. Map a project to a repository
 
 ```bash
@@ -296,7 +306,10 @@ The teammate needs their own ABCA account first (Cognito user + configured CLI).
 
 Add the trigger label (`bgagent` by default) to a Jira issue in a mapped project. The agent should start within ~30 seconds, comment on the issue as it works, and post a PR link when ready. The issue **summary** plus the **description** (converted from Atlassian Document Format to markdown), the issue's **recent comments**, and any supported **file attachments** become the task context — see [Issue context: attachments and comments](#issue-context-attachments-and-comments).
 
-After the PR exists, add a Jira comment such as `@bgagent update the README too`. ABCA should create one acknowledgement status comment, update it with elapsed time during a long run, update the existing PR, and finally replace the same comment with the terminal outcome and metrics.
+After the PR exists, add a Jira comment such as `@bgagent update the README too`. ABCA should create one acknowledgement status comment, update it with elapsed time during a long run, update the existing PR, and finally:
+
+1. Replace the progress text with a short `Finished — result posted below` pointer.
+2. Add a separate terminal comment containing the outcome, metrics, and a clickable PR link.
 
 The progress comment author and transition actor should be the `bgagent` app. The task owner shown by `bgagent list`, audit records, concurrency accounting, and cost attribution should remain the linked human who triggered the Jira event.
 

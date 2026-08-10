@@ -7,11 +7,23 @@ import pytest
 from pydantic import ValidationError
 
 from models import AgentResult, RepoSetup, TaskConfig
-from pipeline import _chain_prior_agent_error, _resolve_overall_task_status
+from pipeline import (
+    _chain_prior_agent_error,
+    _resolve_overall_task_status,
+    _should_post_start_comment,
+)
 from post_hooks import VerifyOutcome
 
 # Minimal Linear channel metadata for the early-ACK ordering tests.
 _LINEAR_META = {"issue_id": "ABCA-1", "workspace_id": "ws-1"}
+
+
+class TestStartCommentPolicy:
+    def test_suppresses_only_jira_pr_iteration_comment(self):
+        assert not _should_post_start_comment("jira", "coding/pr-iteration-v1")
+        assert _should_post_start_comment("jira", "coding/new-task-v1")
+        assert _should_post_start_comment("jira", "coding/pr-review-v1")
+        assert _should_post_start_comment("linear", "coding/pr-iteration-v1")
 
 
 class TestCedarPoliciesInjection:

@@ -295,16 +295,18 @@ describe('jira-webhook-processor handler', () => {
         UpdateExpression: 'SET channel_metadata.iteration_reply_comment_id = :comment_id',
         ExpressionAttributeValues: { ':comment_id': 'ack-comment-1' },
       });
-      // Comment triggers route from the prior task, not the current project
-      // mapping or label state. The only DDB Get is author attribution; the
-      // additional write stores the maturing acknowledgement id.
+      // Comment triggers validate the active project mapping, then attribute
+      // the task to the linked comment author. The additional write stores the
+      // maturing acknowledgement id.
       const gets = ddbSend.mock.calls
         .map(([command]) => command)
         .filter((command) => command?._type === 'Get');
-      expect(gets).toHaveLength(1);
-      expect(gets[0].input.Key)
+      expect(gets).toHaveLength(2);
+      const userGet = gets.find((command) =>
+        command.input.TableName === 'JiraUsers');
+      expect(userGet?.input.Key)
         .toEqual({ jira_identity: 'cloud-1#reviewer-1' });
-      expect(gets[0].input.ConsistentRead).toBe(true);
+      expect(userGet?.input.ConsistentRead).toBe(true);
     });
 
     test('an orchestrated child iteration preserves routing and marks the restack source', async () => {
@@ -460,10 +462,10 @@ describe('jira-webhook-processor handler', () => {
       });
       expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
       expect(createTaskCoreMock.mock.calls[0][1].channelMetadata.jira_project_key).toBe('ENG');
-      expect(reportIssueFailureMock).toHaveBeenCalledWith(
+      expect(postIssueCommentMock).toHaveBeenCalledWith(
         expect.anything(),
         'ENG-42',
-        '👀 ABCA accepted this follow-up and is updating PR #42.',
+        '👀 On it — reading the PR…',
       );
     });
 

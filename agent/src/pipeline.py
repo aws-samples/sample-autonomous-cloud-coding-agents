@@ -266,6 +266,11 @@ def _execute_agent_step(
     return ctx.agent_result
 
 
+def _should_post_start_comment(channel_source: str | None, workflow_id: str) -> bool:
+    """Avoid duplicating the platform-owned Jira iteration acknowledgement."""
+    return channel_source != "jira" or workflow_id != "coding/pr-iteration-v1"
+
+
 def _run_repoless_task(
     *,
     config,
@@ -1092,10 +1097,12 @@ def run_task(
             # "Starting" comment on the Jira issue through the Forge app actor
             # (or legacy OAuth fallback). No-op for non-Jira tasks.
             # Best-effort; failures are logged, never block.
-            comment_task_started(
-                config.channel_source,
-                config.channel_metadata,
-            )
+            workflow_id = (config.resolved_workflow or {}).get("id", "coding/new-task-v1")
+            if _should_post_start_comment(config.channel_source, workflow_id):
+                comment_task_started(
+                    config.channel_source,
+                    config.channel_metadata,
+                )
 
             # Move the Jira card To Do → In Progress so the board reflects that
             # work has started (issue #572). No-op for non-Jira tasks.

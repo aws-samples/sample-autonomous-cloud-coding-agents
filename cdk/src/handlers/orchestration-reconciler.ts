@@ -49,7 +49,10 @@ import { renderFailureReply, renderPanelFailureReason } from './shared/failure-r
 import { sumIterationCostForIssue } from './shared/iteration-cost';
 import { isNoChangeIteration, renderMaturingReply } from './shared/iteration-reply';
 import { claimTerminalReply, releaseReplyClaim } from './shared/iteration-reply-claim';
-import { renderJiraFinalStatusText } from './shared/jira-status-comment';
+import {
+  renderJiraFinalStatusText,
+  renderJiraFinishedPointerText,
+} from './shared/jira-status-comment';
 import { logger } from './shared/logger';
 import type { Channel, IssueRef } from './shared/orchestration-channel';
 import { channelForSource, type ChannelRegistryTables } from './shared/orchestration-channel-factory';
@@ -1209,26 +1212,42 @@ async function replyToIterationComment(
   const existing = evt.iterationReplyId
     ? { commentId: evt.iterationReplyId }
     : undefined;
-  const reply = channel.kind === 'jira'
-    ? await channel.upsertComment(
-      target,
-      renderJiraFinalStatusText({
-        eventType: succeeded
-          ? 'task_completed'
-          : (evt.status === TaskStatus.COMPLETED
-            ? 'task_failed'
-            : `task_${evt.status.toLowerCase()}`),
-        prUrl,
-        costUsd: evt.costUsd ?? null,
-        turns: evt.turns ?? null,
-        maxTurns: evt.maxTurns ?? null,
-        durationS: evt.durationS ?? null,
-        taskId: evt.taskId,
-        errorTitle: classifyError(evt.errorMessage)?.title ?? null,
-      }),
-      existing,
-    )
-    : await channel.upsertThreadedReply?.(
+  let reply;
+  if (channel.kind === 'jira') {
+    const pointerKind = !succeeded
+      ? 'details'
+      : (isNoChangeIteration(evt.codeChanged) ? 'answer' : 'result');
+    if (existing) {
+      const pointer = await channel.upsertComment(
+        target,
+        renderJiraFinishedPointerText(pointerKind),
+        existing,
+      );
+      if (pointer === null) {
+        reply = null;
+      }
+    }
+    if (reply !== null) {
+      reply = await channel.postComment(
+        target,
+        renderJiraFinalStatusText({
+          eventType: succeeded
+            ? 'task_completed'
+            : (evt.status === TaskStatus.COMPLETED
+              ? 'task_failed'
+              : `task_${evt.status.toLowerCase()}`),
+          prUrl,
+          costUsd: evt.costUsd ?? null,
+          turns: evt.turns ?? null,
+          maxTurns: evt.maxTurns ?? null,
+          durationS: evt.durationS ?? null,
+          taskId: evt.taskId,
+          errorTitle: classifyError(evt.errorMessage)?.title ?? null,
+        }),
+      );
+    }
+  } else {
+    reply = await channel.upsertThreadedReply?.(
       target,
       { commentId },
       linearBody,
@@ -1238,6 +1257,7 @@ async function replyToIterationComment(
       // it — so re-assert the outcome if that happened.
       { preservePreview: true, repairIfOverwritten: true },
     );
+  }
   // A surface that cannot mature a reply at all (the capability is optional)
   // legitimately returns undefined; only an attempted-and-failed reply — null —
   // means the outcome went unsaid.

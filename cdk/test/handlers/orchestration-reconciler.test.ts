@@ -70,9 +70,11 @@ jest.mock('../../src/handlers/shared/linear-feedback', () => ({
 
 const jiraPostIssueCommentMock = jest.fn();
 const jiraUpdateIssueCommentMock = jest.fn();
+const jiraTransitionIssueStateMock = jest.fn();
 jest.mock('../../src/handlers/shared/jira-feedback', () => ({
   postIssueComment: (...args: unknown[]) => jiraPostIssueCommentMock(...args),
   updateIssueComment: (...args: unknown[]) => jiraUpdateIssueCommentMock(...args),
+  transitionIssueState: (...args: unknown[]) => jiraTransitionIssueStateMock(...args),
 }));
 
 jest.mock('../../src/handlers/shared/logger', () => ({
@@ -1146,6 +1148,7 @@ describe('orchestration-reconciler handler — the iteration ack reply', () => {
     upsertThreadedReplyMock.mockReset().mockResolvedValue('reply-1');
     jiraPostIssueCommentMock.mockReset().mockResolvedValue('jira-reply-1');
     jiraUpdateIssueCommentMock.mockReset().mockResolvedValue(true);
+    jiraTransitionIssueStateMock.mockReset().mockResolvedValue(true);
   });
 
   /** An iteration event carrying the human comment id that triggered it. */
@@ -1183,7 +1186,7 @@ describe('orchestration-reconciler handler — the iteration ack reply', () => {
     expect(transitionIssueStateMock).toHaveBeenCalledWith(expect.anything(), 'A', 'started', ['In Review'], false);
   });
 
-  test('a Jira orchestration iteration matures the stored top-level comment with metrics', async () => {
+  test('a Jira orchestration iteration finishes its progress comment and posts metrics separately', async () => {
     mockCascade(
       [{
         sub_issue_id: 'KAN-2',
@@ -1226,8 +1229,14 @@ describe('orchestration-reconciler handler — the iteration ack reply', () => {
     });
     expect(issueKey).toBe('KAN-2');
     expect(commentId).toBe('jira-status-1');
-    expect(body).toContain('cost: $1.25 • turns: 12 / 100 • duration: 2m 5s');
-    expect(body).toContain('task iter-task-1');
+    expect(body).toBe('✅ Finished — result posted below.');
+    const finalPost = jiraPostIssueCommentMock.mock.calls.find(
+      (([, postedIssueKey, postedBody]) =>
+        postedIssueKey === 'KAN-2'
+        && String(postedBody).includes('cost: $1.25 • turns: 12 / 100 • duration: 2m 5s')),
+    );
+    expect(finalPost).toBeDefined();
+    expect(finalPost![2]).toContain('task iter-task-1');
     expect(upsertThreadedReplyMock).not.toHaveBeenCalled();
   });
 
@@ -1334,6 +1343,11 @@ describe('orchestration-reconciler handler — the iteration ack reply', () => {
       (([, , commentId]) => commentId === 'jira-status-1'),
     );
     expect(statusUpdates).toHaveLength(1);
+    const resultPosts = jiraPostIssueCommentMock.mock.calls.filter(
+      (([, issueKey, body]) =>
+        issueKey === 'KAN-2' && String(body).includes('task iter-task-1')),
+    );
+    expect(resultPosts).toHaveLength(1);
   });
 
   test('a no-change iteration (a question) settles 💬 and leaves the sub-issue state alone', async () => {
