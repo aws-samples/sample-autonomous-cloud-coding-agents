@@ -35,8 +35,10 @@
  * (reconciler) later overwrites the working line with ✅/❌ as today.
  */
 
-import { DynamoDBClient, GetItemCommand, QueryCommand } from '@aws-sdk/client-dynamodb';
+import { DynamoDBClient, QueryCommand } from '@aws-sdk/client-dynamodb';
+import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { planHeartbeat, type HeartbeatTaskView } from './shared/iteration-heartbeat';
+import { terminalReplyClaimed } from './shared/iteration-reply-claim';
 import { logger } from './shared/logger';
 import {
   channelForSource,
@@ -45,6 +47,7 @@ import {
 import { makeClient } from './shared/ua';
 
 const ddb = makeClient(DynamoDBClient);
+const docDdb = DynamoDBDocumentClient.from(ddb);
 const TASK_TABLE = process.env.TASK_TABLE_NAME!;
 const STATUS_INDEX = process.env.TASK_STATUS_INDEX_NAME ?? 'StatusIndex';
 const CHANNEL_REGISTRY_TABLES: ChannelRegistryTables = {
@@ -83,25 +86,6 @@ function toView(img: DdbMap): HeartbeatTaskView {
     ...(prNumberRaw !== undefined && { prNumber: Number(prNumberRaw) }),
     ...(img.pr_url?.S !== undefined && { prUrl: img.pr_url.S }),
   };
-}
-
-/** Strongly-consistent terminal guard immediately before a cosmetic edit. */
-async function terminalReplyAlreadyClaimed(taskId: string): Promise<boolean> {
-  try {
-    const result = await ddb.send(new GetItemCommand({
-      TableName: TASK_TABLE,
-      Key: { task_id: { S: taskId } },
-      ProjectionExpression: 'ack_replied_at',
-      ConsistentRead: true,
-    }));
-    return Boolean(result.Item?.ack_replied_at?.S);
-  } catch (err) {
-    logger.warn('Heartbeat sweep: terminal-claim check failed (non-fatal)', {
-      task_id: taskId,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return false;
-  }
 }
 
 /** Query every RUNNING task via the StatusIndex GSI (paginated). */
@@ -159,7 +143,7 @@ export async function handler(): Promise<void> {
   let edited = 0;
   for (const plan of plans.slice(0, MAX_EDITS_PER_SWEEP)) {
     try {
-      if (await terminalReplyAlreadyClaimed(plan.taskId)) continue;
+      if (await terminalReplyClaimed(docDdb, TASK_TABLE, plan.taskId)) continue;
       const channel = channelForSource(plan.channelSource, CHANNEL_REGISTRY_TABLES);
       if (!channel) continue;
       const issue = { issueId: plan.issueId, credentialsRef: plan.credentialsRef };

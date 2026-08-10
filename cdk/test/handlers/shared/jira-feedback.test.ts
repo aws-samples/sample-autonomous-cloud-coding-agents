@@ -633,8 +633,42 @@ describe('jira-feedback: updateIssueComment', () => {
     await expect(updateIssueComment(CTX, 'ENG-42', '10001', 'done')).resolves.toBe(false);
   });
 
-  test('rejects a create response that omitted the Jira comment id', async () => {
+  test('treats a create response without an id as a successful, non-editable post', async () => {
     global.fetch = jest.fn().mockResolvedValue(mockResponse(201, '{}')) as unknown as typeof fetch;
-    await expect(postIssueComment(CTX, 'ENG-42', 'hello')).resolves.toBeNull();
+    await expect(postIssueComment(CTX, 'ENG-42', 'hello')).resolves.toBe('');
+  });
+
+  test('coerces a numeric Jira comment id to a usable string', async () => {
+    global.fetch = jest.fn().mockResolvedValue(
+      mockResponse(201, '{"id":10002}'),
+    ) as unknown as typeof fetch;
+    await expect(postIssueComment(CTX, 'ENG-42', 'hello')).resolves.toBe('10002');
+  });
+
+  test('Forge app comment creation returns its comment id end to end', async () => {
+    resolveJiraOauthTokenMock.mockResolvedValueOnce({
+      kind: 'app',
+      appActor: {
+        proxyUrl: 'https://install.webtrigger.atlassian.app/public/trigger-id',
+        sharedSecret: 's'.repeat(64),
+      },
+      siteUrl: 'https://acme.atlassian.net',
+      oauthSecretArn: 'arn:secret:acme',
+    });
+    global.fetch = jest.fn().mockResolvedValue(
+      mockResponse(201, '{"id":"10003"}'),
+    ) as unknown as typeof fetch;
+
+    await expect(postIssueComment(CTX, 'ENG-42', 'hello')).resolves.toBe('10003');
+  });
+
+  test('rejects a non-numeric update comment id before resolving credentials', async () => {
+    await expect(updateIssueComment(
+      CTX,
+      'ENG-42',
+      '../comments/1',
+      'hello',
+    )).resolves.toBe(false);
+    expect(resolveJiraOauthTokenMock).not.toHaveBeenCalled();
   });
 });

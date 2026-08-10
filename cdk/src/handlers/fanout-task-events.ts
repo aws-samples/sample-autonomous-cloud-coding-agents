@@ -1755,6 +1755,32 @@ async function dispatchToJira(event: FanOutEvent): Promise<void> {
       return;
     }
 
+    if (!finalResult.retryable) {
+      const fallback = await updateIssueCommentAdf(
+        { cloudId, registryTableName },
+        issueKey,
+        iterationReplyId,
+        buildAdfDocument(paragraphs),
+      );
+      if (fallback.ok) {
+        logger.warn('[fanout/jira] iteration result post failed terminally — folded outcome into status comment', {
+          event: 'fanout.jira.iteration_result_folded',
+          task_id: task.task_id,
+          jira_issue_key: issueKey,
+          comment_id: iterationReplyId,
+        });
+        return;
+      }
+      logger.error('[fanout/jira] terminal result and fallback status update both failed', {
+        event: 'fanout.jira.iteration_result_fallback_failed',
+        task_id: task.task_id,
+        jira_issue_key: issueKey,
+        comment_id: iterationReplyId,
+        fallback_retryable: fallback.retryable,
+      });
+      return;
+    }
+
     const release = await releaseReplyClaim(
       ddb,
       tableName,
@@ -1768,7 +1794,23 @@ async function dispatchToJira(event: FanOutEvent): Promise<void> {
       retryable: finalResult.retryable,
       release,
     });
-    if (finalResult.retryable && release !== 'exhausted') {
+    if (release === 'exhausted') {
+      const fallback = await updateIssueCommentAdf(
+        { cloudId, registryTableName },
+        issueKey,
+        iterationReplyId,
+        buildAdfDocument(paragraphs),
+      );
+      logger.warn('[fanout/jira] iteration result retries exhausted — folded outcome into status comment', {
+        event: 'fanout.jira.iteration_result_exhausted',
+        task_id: task.task_id,
+        jira_issue_key: issueKey,
+        comment_id: iterationReplyId,
+        folded: fallback.ok,
+      });
+      return;
+    }
+    if (release === 'released') {
       throw new Error(
         `[fanout/jira] transient Jira iteration result failure for task ${task.task_id}`,
       );

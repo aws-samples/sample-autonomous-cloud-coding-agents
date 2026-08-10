@@ -25,7 +25,13 @@ const ddbSend = jest.fn();
 jest.mock('@aws-sdk/client-dynamodb', () => ({
   DynamoDBClient: jest.fn(() => ({ send: ddbSend })),
   QueryCommand: jest.fn((input: unknown) => ({ _type: 'Query', input })),
-  GetItemCommand: jest.fn((input: unknown) => ({ _type: 'GetItem', input })),
+}));
+jest.mock('@aws-sdk/lib-dynamodb', () => ({
+  DynamoDBDocumentClient: {
+    from: jest.fn(() => ({ send: ddbSend })),
+  },
+  GetCommand: jest.fn((input: unknown) => ({ _type: 'GetItem', input })),
+  UpdateCommand: jest.fn((input: unknown) => ({ _type: 'Update', input })),
 }));
 
 // Mock at the per-surface helper, NOT the channel: the real Linear adapter runs,
@@ -180,6 +186,20 @@ describe('iteration heartbeat sweep', () => {
 
     await expect(handler()).resolves.toBeUndefined();
     expect(upsertThreadedReplyMock).toHaveBeenCalledTimes(2);
+  });
+
+  test('one Jira task edit failure does not stop the rest of the sweep', async () => {
+    const second = runningJiraTask();
+    second.task_id.S = 'task-jira-2';
+    ddbSend.mockImplementation((command: { _type?: string }) => (
+      command._type === 'Query'
+        ? Promise.resolve({ Items: [runningJiraTask(), second] })
+        : Promise.resolve({})
+    ));
+    updateIssueCommentMock.mockRejectedValueOnce(new Error('surface hiccup'));
+
+    await expect(handler()).resolves.toBeUndefined();
+    expect(updateIssueCommentMock).toHaveBeenCalledTimes(2);
   });
 
   test('a query failure is swallowed — a cosmetic sweep never throws', async () => {

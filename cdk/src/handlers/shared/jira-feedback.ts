@@ -590,7 +590,7 @@ async function postCommentWithResult(
       issue_key: issueIdOrKey,
       body,
     });
-    return createdCommentResult(appResult);
+    return createdCommentResult(appResult, ctx, issueIdOrKey);
   }
 
   const outcome = await writeComment(resolved.accessToken, ctx.cloudId, issueIdOrKey, body);
@@ -598,7 +598,7 @@ async function postCommentWithResult(
     return createdCommentResult({
       ok: true,
       body: outcome.responseBody,
-    });
+    }, ctx, issueIdOrKey);
   }
   if (outcome.kind === 'error') return { ok: false, retryable: outcome.retryable };
 
@@ -619,7 +619,7 @@ async function postCommentWithResult(
       issue_key: issueIdOrKey,
       body,
     });
-    return createdCommentResult(appResult);
+    return createdCommentResult(appResult, ctx, issueIdOrKey);
   }
   // If the refresh handed back the same access token, the retry can only
   // reproduce the 401 — skip the redundant network call.
@@ -635,7 +635,7 @@ async function postCommentWithResult(
     return createdCommentResult({
       ok: true,
       body: retryOutcome.responseBody,
-    });
+    }, ctx, issueIdOrKey);
   }
   // A second auth rejection means the credential is genuinely unusable —
   // terminal. A transient error on the retry stays retryable so the
@@ -647,6 +647,8 @@ async function postCommentWithResult(
 function createdCommentResult(
   result: { readonly ok: true; readonly body: string }
     | { readonly ok: false; readonly retryable: boolean },
+  ctx: JiraFeedbackContext,
+  issueIdOrKey: string,
 ): JiraPostResult {
   if (!result.ok) return { ok: false, retryable: result.retryable };
   try {
@@ -655,11 +657,21 @@ function createdCommentResult(
       ? value.id
       : (typeof value.id === 'number' ? String(value.id) : '');
     if (commentId) return { ok: true, commentId };
-  } catch {
-    // Handled by the common missing-id warning below.
+    logger.warn('Jira comment create succeeded without a usable comment id', {
+      jira_cloud_id: ctx.cloudId,
+      issue_id_or_key: issueIdOrKey,
+      response_id_type: typeof value.id,
+    });
+  } catch (err) {
+    logger.warn('Jira comment create succeeded but its response was not valid JSON', {
+      jira_cloud_id: ctx.cloudId,
+      issue_id_or_key: issueIdOrKey,
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
-  logger.warn('Jira comment create succeeded without a usable comment id');
-  return { ok: false, retryable: false };
+  // The write itself succeeded. Returning success prevents a caller from
+  // creating a duplicate just because this response cannot support a later edit.
+  return { ok: true, commentId: '' };
 }
 
 /**
@@ -688,6 +700,14 @@ export async function updateIssueCommentAdf(
   commentId: string,
   body: Record<string, unknown>,
 ): Promise<JiraUpdateResult> {
+  if (!/^\d+$/.test(commentId)) {
+    logger.warn('Refusing to update Jira comment with an invalid id', {
+      jira_cloud_id: ctx.cloudId,
+      issue_id_or_key: issueIdOrKey,
+      comment_id: commentId,
+    });
+    return { ok: false, retryable: false };
+  }
   const resolved = await resolveTenantAuth(ctx);
   if (!resolved) return { ok: false, retryable: false };
 

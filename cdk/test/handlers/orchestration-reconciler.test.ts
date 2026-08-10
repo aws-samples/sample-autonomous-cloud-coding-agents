@@ -71,10 +71,18 @@ jest.mock('../../src/handlers/shared/linear-feedback', () => ({
 
 const jiraPostIssueCommentMock = jest.fn();
 const jiraUpdateIssueCommentMock = jest.fn();
+const jiraPostIssueCommentAdfMock = jest.fn();
+const jiraUpdateIssueCommentAdfMock = jest.fn();
+const jiraBuildAdfDocumentMock = jest.fn(
+  (paragraphs: ReadonlyArray<ReadonlyArray<{ text: string }>>) => ({ _adf: paragraphs }),
+);
 const jiraTransitionIssueStateMock = jest.fn();
 jest.mock('../../src/handlers/shared/jira-feedback', () => ({
   postIssueComment: (...args: unknown[]) => jiraPostIssueCommentMock(...args),
   updateIssueComment: (...args: unknown[]) => jiraUpdateIssueCommentMock(...args),
+  postIssueCommentAdf: (...args: unknown[]) => jiraPostIssueCommentAdfMock(...args),
+  updateIssueCommentAdf: (...args: unknown[]) => jiraUpdateIssueCommentAdfMock(...args),
+  buildAdfDocument: (...args: unknown[]) => jiraBuildAdfDocumentMock(...args),
   transitionIssueState: (...args: unknown[]) => jiraTransitionIssueStateMock(...args),
 }));
 
@@ -1374,6 +1382,12 @@ describe('orchestration-reconciler handler — A6 iteration ack reply (#247 UX.3
     upsertThreadedReplyMock.mockReset().mockResolvedValue('reply-1');
     jiraPostIssueCommentMock.mockReset().mockResolvedValue('jira-reply-1');
     jiraUpdateIssueCommentMock.mockReset().mockResolvedValue(true);
+    jiraPostIssueCommentAdfMock.mockReset().mockResolvedValue({
+      ok: true,
+      commentId: 'jira-result-1',
+    });
+    jiraUpdateIssueCommentAdfMock.mockReset().mockResolvedValue({ ok: true });
+    jiraBuildAdfDocumentMock.mockClear();
     jiraTransitionIssueStateMock.mockReset().mockResolvedValue(true);
   });
 
@@ -1444,7 +1458,7 @@ describe('orchestration-reconciler handler — A6 iteration ack reply (#247 UX.3
       })],
     } as never);
 
-    const statusUpdate = jiraUpdateIssueCommentMock.mock.calls.find(
+    const statusUpdate = jiraUpdateIssueCommentAdfMock.mock.calls.find(
       (([, , commentId]) => commentId === 'jira-status-1'),
     );
     expect(statusUpdate).toBeDefined();
@@ -1455,14 +1469,26 @@ describe('orchestration-reconciler handler — A6 iteration ack reply (#247 UX.3
     });
     expect(issueKey).toBe('KAN-2');
     expect(commentId).toBe('jira-status-1');
-    expect(body).toBe('✅ Finished — result posted below.');
-    const finalPost = jiraPostIssueCommentMock.mock.calls.find(
-      (([, postedIssueKey, postedBody]) =>
-        postedIssueKey === 'KAN-2'
-        && String(postedBody).includes('cost: $1.25 • turns: 12 / 100 • duration: 2m 5s')),
+    expect(body).toEqual({
+      _adf: [[{ text: '✅ Finished — result posted below.', strong: true }]],
+    });
+    const finalPost = jiraPostIssueCommentAdfMock.mock.calls.find(
+      (([, postedIssueKey, postedBody]) => {
+        const text = (postedBody._adf as Array<Array<{ text: string }>>)
+          .flat()
+          .map((run) => run.text)
+          .join('');
+        return postedIssueKey === 'KAN-2'
+          && text.includes('cost: $1.25 • turns: 12 / 100 • duration: 2m 5s');
+      }),
     );
     expect(finalPost).toBeDefined();
-    expect(finalPost![2]).toContain('task iter-task-1');
+    const finalRuns = (finalPost![2]._adf as Array<Array<{ text: string; href?: string }>>).flat();
+    expect(finalRuns.map((run) => run.text).join('')).toContain('task iter-task-1');
+    expect(finalRuns).toContainEqual(expect.objectContaining({
+      text: expect.stringContaining('/pull/'),
+      href: expect.stringContaining('/pull/'),
+    }));
     expect(upsertThreadedReplyMock).not.toHaveBeenCalled();
   });
 
@@ -1480,8 +1506,12 @@ describe('orchestration-reconciler handler — A6 iteration ack reply (#247 UX.3
         credentials_ref: 'cloud-1',
       },
     );
-    jiraUpdateIssueCommentMock.mockImplementation(
-      (_ctx, _issueKey, commentId) => Promise.resolve(commentId !== 'jira-status-1'),
+    jiraUpdateIssueCommentAdfMock.mockImplementation(
+      (_ctx, _issueKey, commentId) => Promise.resolve(
+        commentId === 'jira-status-1'
+          ? { ok: false, retryable: false }
+          : { ok: true },
+      ),
     );
 
     await handler({
@@ -1513,6 +1543,60 @@ describe('orchestration-reconciler handler — A6 iteration ack reply (#247 UX.3
     expect(claims[1].input?.UpdateExpression).toContain('REMOVE ack_replied_at');
     expect(claims[1].input?.ExpressionAttributeValues?.[':ours'])
       .toBe(claims[0].input?.ExpressionAttributeValues?.[':now']);
+    expect(jiraPostIssueCommentAdfMock).not.toHaveBeenCalled();
+  });
+
+  test('a terminal Jira result-post failure folds the full ADF outcome into the status comment', async () => {
+    mockCascade(
+      [{
+        sub_issue_id: 'KAN-2',
+        child_status: 'succeeded',
+        child_task_id: 'task-A',
+        child_branch_name: 'branch-A',
+      }],
+      {
+        channel_source: 'jira',
+        parent_issue_ref: 'KAN-1',
+        credentials_ref: 'cloud-1',
+      },
+    );
+    jiraPostIssueCommentAdfMock.mockResolvedValue({
+      ok: false,
+      retryable: false,
+    });
+
+    await handler({
+      Records: [taskRecord({
+        task_id: 'iter-task-1',
+        status: 'COMPLETED',
+        orchestration_id: 'orch_1',
+        orchestration_sub_issue_id: 'KAN-2',
+        orchestration_iteration: true,
+        trigger_comment_id: 'human-cmt-1',
+        trigger_comment_issue_id: 'KAN-2',
+        iteration_reply_comment_id: 'jira-status-1',
+        cost_usd: 1.25,
+      })],
+    } as never);
+
+    expect(jiraUpdateIssueCommentAdfMock).toHaveBeenCalledTimes(2);
+    const [, , commentId, fallbackBody] = jiraUpdateIssueCommentAdfMock.mock.calls[1];
+    expect(commentId).toBe('jira-status-1');
+    const runs = (fallbackBody._adf as Array<Array<{ text: string; href?: string }>>).flat();
+    expect(runs.map((run) => run.text).join('')).toContain('cost: $1.25');
+    expect(runs).toContainEqual(expect.objectContaining({
+      href: expect.stringContaining('/pull/'),
+    }));
+    const releases = ddbSend.mock.calls
+      .map(([command]) => command as {
+        _type?: string;
+        input?: { UpdateExpression?: string };
+      })
+      .filter(command =>
+        command._type === 'Update'
+        && /REMOVE ack_replied_at/.test(command.input?.UpdateExpression ?? ''),
+      );
+    expect(releases).toHaveLength(0);
   });
 
   test('redelivered Jira iteration matures its status comment once', async () => {
@@ -1565,13 +1649,18 @@ describe('orchestration-reconciler handler — A6 iteration ack reply (#247 UX.3
     await handler(event);
     await handler(event);
 
-    const statusUpdates = jiraUpdateIssueCommentMock.mock.calls.filter(
+    const statusUpdates = jiraUpdateIssueCommentAdfMock.mock.calls.filter(
       (([, , commentId]) => commentId === 'jira-status-1'),
     );
     expect(statusUpdates).toHaveLength(1);
-    const resultPosts = jiraPostIssueCommentMock.mock.calls.filter(
-      (([, issueKey, body]) =>
-        issueKey === 'KAN-2' && String(body).includes('task iter-task-1')),
+    const resultPosts = jiraPostIssueCommentAdfMock.mock.calls.filter(
+      (([, issueKey, body]) => {
+        const text = (body._adf as Array<Array<{ text: string }>>)
+          .flat()
+          .map((run) => run.text)
+          .join('');
+        return issueKey === 'KAN-2' && text.includes('task iter-task-1');
+      }),
     );
     expect(resultPosts).toHaveLength(1);
   });

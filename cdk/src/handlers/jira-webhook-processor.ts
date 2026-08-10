@@ -54,6 +54,7 @@ import {
 import { resolveSoleActiveJiraTenant } from './shared/jira-tenant-registry';
 import type { SubIssueNode } from './shared/linear-subissue-fetch';
 import { logger } from './shared/logger';
+import type { CommentRef } from './shared/orchestration-channel';
 import { makeJiraChannel } from './shared/orchestration-channel-jira';
 import { parseRetryIntent } from './shared/orchestration-comment-trigger';
 import { discoverOrchestration } from './shared/orchestration-discovery';
@@ -1017,12 +1018,21 @@ async function handleCommentTrigger(
     return;
   }
 
+  let reply: CommentRef | null = null;
   try {
-    const reply = await makeJiraChannel(WORKSPACE_REGISTRY_TABLE).postComment(
+    reply = await makeJiraChannel(WORKSPACE_REGISTRY_TABLE).postComment(
       { issueId: issue.key, credentialsRef: cloudId },
       renderMaturingReply({ state: 'on_it' }),
     );
-    if (reply?.commentId) {
+  } catch (err) {
+    logger.warn('Jira iteration acknowledgement post failed (non-fatal)', {
+      task_id: taskId,
+      issue_key: issue.key,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+  if (reply?.commentId) {
+    try {
       await ddb.send(new UpdateCommand({
         TableName: TASK_TABLE,
         Key: { task_id: taskId },
@@ -1030,13 +1040,14 @@ async function handleCommentTrigger(
         ConditionExpression: 'attribute_exists(task_id)',
         ExpressionAttributeValues: { ':comment_id': reply.commentId },
       }));
+    } catch (err) {
+      logger.warn('Jira iteration acknowledgement posted but its comment id was not persisted', {
+        task_id: taskId,
+        issue_key: issue.key,
+        comment_id: reply.commentId,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
-  } catch (err) {
-    logger.warn('Jira iteration acknowledgement failed (non-fatal)', {
-      task_id: taskId,
-      issue_key: issue.key,
-      error: err instanceof Error ? err.message : String(err),
-    });
   }
   logger.info('Jira comment-triggered PR iteration task created', {
     task_id: taskId,
