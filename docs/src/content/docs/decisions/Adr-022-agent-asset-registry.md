@@ -1,4 +1,8 @@
-# ADR-018: Central agent asset registry
+---
+title: Adr 022 agent asset registry
+---
+
+# ADR-022: Central agent asset registry
 
 **Status:** proposed
 **Date:** 2026-07-08
@@ -12,7 +16,7 @@ This has three costs:
 
 1. **Every new tool/skill/policy costs a deploy.** Rolling out a new MCP server to N repos is N Blueprint edits + a CDK deploy. Teams can't publish autonomously.
 2. **No pin, no reproducibility.** Because assets aren't versioned, "the tool the agent used on 2026-05-01" can't be reconstructed from the task record.
-3. **The vocabulary already anticipates a registry.** [ADR-014](./ADR-014-workflow-driven-tasks.md) and [WORKFLOWS.md](../design/WORKFLOWS.md) already:
+3. **The vocabulary already anticipates a registry.** [ADR-014](/sample-autonomous-cloud-coding-agents/architecture/adr-014-workflow-driven-tasks) and [WORKFLOWS.md](/sample-autonomous-cloud-coding-agents/architecture/workflows) already:
    - Coined `registry://kind/name` refs (grammar in [`agent/src/workflow/validator.py`](../../agent/src/workflow/validator.py) `_REGISTRY_REF`).
    - Modeled `agent_config` asset kinds (`mcp_servers`, `skills`, `plugins`, `subagents`, `prompt_fragments`, `cedar_policy_modules`) 1:1 with the vocabulary this ADR needs.
    - Designed a resolver interface as a **drop-in swap** — filesystem-backed today, registry-backed later ([`agent/src/workflow/loader.py:107`](../../agent/src/workflow/loader.py), WORKFLOWS.md §"Registry integration (#246)").
@@ -28,7 +32,7 @@ Two forces shape the decision:
 Adjacent decisions the ADR must respect but not re-open:
 
 - **[#381](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/381) — ADR↔Persona↔Skill graph.** #381 wires bidirectional frontmatter edges between ADRs, personas, and skills as `docs/` and plugin markdown, enforced by a parity linter. Both #246 and #381 mention "skills," but they mean different things: #381 is *documentation graph consistency*; #246 is a *runtime artifact catalog*. This ADR keeps them cleanly separated.
-- **[ADR-014](./ADR-014-workflow-driven-tasks.md).** Workflows are the registry's first `capability`-kind consumer; the `workflow_ref` field's resolution semantics are the model this ADR generalizes to all asset kinds. Workflows themselves stay filesystem-backed in the MVP — they already ship and are validated; migrating them to the registry is a separate follow-up, not part of #246.
+- **[ADR-014](/sample-autonomous-cloud-coding-agents/architecture/adr-014-workflow-driven-tasks).** Workflows are the registry's first `capability`-kind consumer; the `workflow_ref` field's resolution semantics are the model this ADR generalizes to all asset kinds. Workflows themselves stay filesystem-backed in the MVP — they already ship and are validated; migrating them to the registry is a separate follow-up, not part of #246.
 
 ## Decision
 
@@ -42,7 +46,7 @@ The ADR fixes the **contract**. The substrate ranking below was written to defer
 
 1. **URI grammar and kinds.** `registry://<kind>/<namespace>/<name>@<constraint>`. MVP kinds: `mcp_server`, `cedar_policy_module`, `skill`. Schema declares — but does not yet load — `plugin`, `subagent`, `prompt_fragment`, `capability` (`capability` = workflow, ADR-014 vocabulary). This grammar *extends* the shape pre-declared for ADR-014 at [`agent/src/workflow/validator.py`](../../agent/src/workflow/validator.py) `_REGISTRY_REF`, which admitted a 2-segment `registry://kind/name` form but not the `@<constraint>` suffix or `_` (snake_case) in the kind segment. The implementation widens that lenient acceptance check and lands the **authoritative, strict grammar** in a dedicated parser mirrored byte-for-byte across both languages (`cdk/src/handlers/shared/registry/ref.ts` and `agent/src/registry/ref.py`); `validator.py` remains a lenient pre-flight admitting both forms.
 
-   **Short vs long forms (migration note).** [WORKFLOWS.md](../design/WORKFLOWS.md) illustrates refs in a *short* 2-segment form with no constraint (`registry://prompt/web-research-workflow`, `registry://mcp/web-search-v1`, `registry://skill/research-synthesis-v1`). Those are **forward-declarations** — the WORKFLOWS spec explicitly marks `registry://` refs as "declared in the schema now but ignored by the runner until the registry (#246) can resolve them." This ADR's strict grammar is the *long* form: 3 segments (`<kind>/<namespace>/<name>`), snake_case kinds (`mcp_server`, not `mcp`; `prompt_fragment`, not `prompt`; `cedar_policy_module`, not `cedar`), and a **mandatory** `@<constraint>`. Only the long form resolves. The short form stays **lenient-only** — accepted syntactically by `validator.py`'s pre-flight so existing illustrative workflows don't fail validation, but *not resolvable* by the registry until rewritten to the long form. There is no automatic aliasing (`mcp` → `mcp_server`) at resolve time: a ref must be long-form to load. Migrating the WORKFLOWS examples to long form is doc-only cleanup tracked with the workflow/registry integration, not a blocker for #246.
+   **Short vs long forms (migration note).** [WORKFLOWS.md](/sample-autonomous-cloud-coding-agents/architecture/workflows) illustrates refs in a *short* 2-segment form with no constraint (`registry://prompt/web-research-workflow`, `registry://mcp/web-search-v1`, `registry://skill/research-synthesis-v1`). Those are **forward-declarations** — the WORKFLOWS spec explicitly marks `registry://` refs as "declared in the schema now but ignored by the runner until the registry (#246) can resolve them." This ADR's strict grammar is the *long* form: 3 segments (`<kind>/<namespace>/<name>`), snake_case kinds (`mcp_server`, not `mcp`; `prompt_fragment`, not `prompt`; `cedar_policy_module`, not `cedar`), and a **mandatory** `@<constraint>`. Only the long form resolves. The short form stays **lenient-only** — accepted syntactically by `validator.py`'s pre-flight so existing illustrative workflows don't fail validation, but *not resolvable* by the registry until rewritten to the long form. There is no automatic aliasing (`mcp` → `mcp_server`) at resolve time: a ref must be long-form to load. Migrating the WORKFLOWS examples to long form is doc-only cleanup tracked with the workflow/registry integration, not a blocker for #246.
 
 2. **Semver, not floating.** Allowed constraints: exact (`1.4.1`), caret (`^1.4.1`), tilde (`~1.4.1`). Rejected at validation time: `*`, `latest`, `>=`, and bare prerelease modifiers. Resolution rule: *highest semver-comparable version matching the constraint; prereleases rank below their base version.*
 
@@ -172,9 +176,9 @@ Regardless of substrate, the invariants above (semver, immutability, resolve-at-
 - Issue [#481](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/481) — capability descriptors.
 - Issue [#230](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/230) — event-rule packs (defer to registry Phase 3).
 - Issue [#99](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/99) — ToolBuilderAgent / meta-agent vision (out of scope; registry is a prerequisite).
-- [ADR-003](./ADR-003-contribution-governance.md) — contribution governance (publish/promote follows the same approval path).
-- [ADR-014](./ADR-014-workflow-driven-tasks.md) — workflow-driven tasks (defines the `registry://` grammar, resolver interface, and asset-kind vocabulary this ADR generalizes).
-- [docs/design/WORKFLOWS.md](../design/WORKFLOWS.md) §"Registry integration (#246)" — the workflow-side spec this ADR closes.
+- [ADR-003](/sample-autonomous-cloud-coding-agents/architecture/adr-003-contribution-governance) — contribution governance (publish/promote follows the same approval path).
+- [ADR-014](/sample-autonomous-cloud-coding-agents/architecture/adr-014-workflow-driven-tasks) — workflow-driven tasks (defines the `registry://` grammar, resolver interface, and asset-kind vocabulary this ADR generalizes).
+- [docs/design/WORKFLOWS.md](/sample-autonomous-cloud-coding-agents/architecture/workflows) §"Registry integration (#246)" — the workflow-side spec this ADR closes.
 - [`agent/src/workflow/validator.py`](../../agent/src/workflow/validator.py) `_REGISTRY_REF` — the lenient pre-flight ref check (pre-dates this ADR; widened here to admit the strict form).
 - `cdk/src/handlers/shared/registry/ref.ts` / `agent/src/registry/ref.py` — the authoritative strict `registry://` grammar (two-language, parity-tested). *(Ships in the implementation PRs #664/#665, not this ADR branch — referenced as paths rather than links until they land on `main`.)*
 - [`agent/src/workflow/loader.py:107`](../../agent/src/workflow/loader.py) — Phase 4 deferral comment this ADR unblocks.
