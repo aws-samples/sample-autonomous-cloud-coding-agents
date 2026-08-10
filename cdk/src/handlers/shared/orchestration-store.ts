@@ -178,6 +178,9 @@ export interface OrchestrationReleaseContext {
   readonly linear_oauth_secret_arn?: string;
   readonly linear_workspace_slug?: string;
   readonly linear_project_id?: string;
+  /** Jira parent workflow destination overrides captured from the project map. */
+  readonly jira_status_on_start?: string;
+  readonly jira_status_on_pr?: string;
   /**
    * The project's resolved trigger label (the project mapping's ``label_filter``).
    * Persisted at SEED time because that is the only point where the mapping is in
@@ -478,6 +481,12 @@ export async function seedOrchestration(
     }),
     ...(releaseContext.linear_project_id !== undefined && {
       linear_project_id: releaseContext.linear_project_id,
+    }),
+    ...(releaseContext.jira_status_on_start !== undefined && {
+      jira_status_on_start: releaseContext.jira_status_on_start,
+    }),
+    ...(releaseContext.jira_status_on_pr !== undefined && {
+      jira_status_on_pr: releaseContext.jira_status_on_pr,
     }),
     ...(releaseContext.trigger_label !== undefined && {
       trigger_label: releaseContext.trigger_label,
@@ -973,6 +982,12 @@ export async function loadOrchestration(
       }),
       ...(metaItem.linear_project_id !== undefined && {
         linear_project_id: metaItem.linear_project_id as string,
+      }),
+      ...(metaItem.jira_status_on_start !== undefined && {
+        jira_status_on_start: metaItem.jira_status_on_start as string,
+      }),
+      ...(metaItem.jira_status_on_pr !== undefined && {
+        jira_status_on_pr: metaItem.jira_status_on_pr as string,
       }),
       ...(metaItem.trigger_label !== undefined && {
         trigger_label: metaItem.trigger_label as string,

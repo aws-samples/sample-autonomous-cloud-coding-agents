@@ -23,6 +23,7 @@ jest.mock('@aws-sdk/lib-dynamodb', () => ({
   DynamoDBDocumentClient: { from: jest.fn(() => ({ send: ddbSend })) },
   GetCommand: jest.fn((input: unknown) => ({ _type: 'Get', input })),
   ScanCommand: jest.fn((input: unknown) => ({ _type: 'Scan', input })),
+  UpdateCommand: jest.fn((input: unknown) => ({ _type: 'Update', input })),
 }));
 
 const createTaskCoreMock = jest.fn();
@@ -52,10 +53,14 @@ jest.mock('../../src/handlers/shared/orchestration-discovery', () => ({
 
 const loadOrchestrationMock = jest.fn();
 const setStatusCommentIdMock = jest.fn();
+const claimCommentAckMock = jest.fn();
+const clearRollupClaimMock = jest.fn();
 jest.mock('../../src/handlers/shared/orchestration-store', () => ({
   deriveOrchestrationId: (parent: string) => `orch-${parent}`,
   loadOrchestration: (...args: unknown[]) => loadOrchestrationMock(...args),
   setStatusCommentId: (...args: unknown[]) => setStatusCommentIdMock(...args),
+  claimCommentAck: (...args: unknown[]) => claimCommentAckMock(...args),
+  clearRollupClaim: (...args: unknown[]) => clearRollupClaimMock(...args),
 }));
 
 const releaseReadyChildrenMock = jest.fn();
@@ -147,6 +152,32 @@ function event(): { raw_body: string } {
   };
 }
 
+function retryEvent(): { raw_body: string } {
+  return {
+    raw_body: JSON.stringify({
+      webhookEvent: 'comment_created',
+      cloudId: 'cloud-1',
+      issue: {
+        id: '10001',
+        key: 'ENG-1',
+        fields: { project: { id: 'p1', key: 'ENG' } },
+      },
+      comment: {
+        id: 'retry-comment-1',
+        author: { accountId: 'account-1', accountType: 'atlassian' },
+        body: {
+          type: 'doc',
+          version: 1,
+          content: [{
+            type: 'paragraph',
+            content: [{ type: 'text', text: '@bgagent retry' }],
+          }],
+        },
+      },
+    }),
+  };
+}
+
 function child(key = 'ENG-2', projectKey = 'ENG') {
   return {
     id: key,
@@ -206,6 +237,8 @@ describe('jira-webhook-processor orchestration adapter', () => {
     upsertEpicPanelMock.mockReset();
     upsertEpicPanelMock.mockResolvedValue(null);
     setStatusCommentIdMock.mockReset();
+    claimCommentAckMock.mockReset().mockResolvedValue(true);
+    clearRollupClaimMock.mockReset().mockResolvedValue(undefined);
   });
 
   test('seeds the shared graph, releases roots, and suppresses the parent coding task', async () => {
@@ -246,9 +279,76 @@ describe('jira-webhook-processor orchestration adapter', () => {
     });
     expect(releaseReadyChildrenMock).toHaveBeenCalledTimes(1);
     expect(upsertEpicPanelMock).toHaveBeenCalledWith(expect.objectContaining({
-      parent: { issueId: 'ENG-1', credentialsRef: 'cloud-1' },
+      parent: expect.objectContaining({ issueId: 'ENG-1', credentialsRef: 'cloud-1' }),
     }));
     expect(createTaskCoreMock).not.toHaveBeenCalled();
+  });
+
+  test('parent retry preserves successes and releases only failed/skipped work', async () => {
+    const failedSnapshot = {
+      ...snapshot,
+      meta: {
+        ...snapshot.meta,
+        status_comment_id: 'panel-1',
+      },
+      children: [
+        { ...snapshot.children[0], sub_issue_id: 'ENG-2', child_status: 'succeeded' },
+        {
+          ...snapshot.children[0],
+          sub_issue_id: 'ENG-3',
+          child_status: 'failed',
+          child_task_id: 'failed-task',
+        },
+        {
+          ...snapshot.children[0],
+          sub_issue_id: 'ENG-4',
+          depends_on: ['ENG-3'],
+          child_status: 'skipped',
+        },
+      ],
+    };
+    const resetSnapshot = {
+      ...failedSnapshot,
+      children: [
+        failedSnapshot.children[0],
+        { ...failedSnapshot.children[1], child_status: 'ready' },
+        { ...failedSnapshot.children[2], child_status: 'blocked' },
+      ],
+    };
+    ddbSend.mockReset().mockResolvedValue({
+      Item: { status: 'active', repo: 'org/repo', label_filter: 'bgagent' },
+    });
+    loadOrchestrationMock.mockReset()
+      .mockResolvedValueOnce(failedSnapshot)
+      .mockResolvedValueOnce(resetSnapshot)
+      .mockResolvedValueOnce(resetSnapshot);
+    releaseReadyChildrenMock.mockResolvedValueOnce([]);
+
+    await handler(retryEvent());
+
+    expect(releaseReadyChildrenMock).toHaveBeenCalledWith(
+      expect.anything(),
+      'Orchestrations',
+      [expect.objectContaining({ sub_issue_id: 'ENG-3', child_status: 'ready' })],
+      failedSnapshot.meta.release_context,
+      expect.any(Function),
+      expect.any(String),
+      resetSnapshot.children,
+      'main',
+      undefined,
+      true,
+    );
+    expect(clearRollupClaimMock).toHaveBeenCalledWith(
+      expect.anything(),
+      'Orchestrations',
+      'orch-ENG-1',
+      expect.any(String),
+    );
+    expect(reportIssueFailureMock).toHaveBeenCalledWith(
+      expect.anything(),
+      'ENG-1',
+      expect.stringContaining('1 successful sub-issue(s) are unchanged'),
+    );
   });
 
   test('falls through to the existing single-task path when Jira has no children', async () => {

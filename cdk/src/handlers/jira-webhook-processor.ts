@@ -20,7 +20,7 @@
 import * as crypto from 'crypto';
 import { BedrockRuntimeClient, ApplyGuardrailCommand } from '@aws-sdk/client-bedrock-runtime';
 import { S3Client } from '@aws-sdk/client-s3';
-import { GetCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { ulid } from 'ulid';
 import type { ScreeningConfig } from './shared/attachment-screening';
 import {
@@ -44,17 +44,22 @@ import {
   resolveTaskByJiraIssue,
   type JiraIssueTask,
 } from './shared/jira-task-by-issue';
+import { resolveSoleActiveJiraTenant } from './shared/jira-tenant-registry';
 import type { SubIssueNode } from './shared/linear-subissue-fetch';
 import { logger } from './shared/logger';
 import { makeJiraChannel } from './shared/orchestration-channel-jira';
+import { parseRetryIntent } from './shared/orchestration-comment-trigger';
 import { discoverOrchestration } from './shared/orchestration-discovery';
 import { jiraGraphSource } from './shared/orchestration-graph-source';
+import { computeEpicRetryPlan } from './shared/orchestration-reconcile';
 import {
   applyTerminalCreateFailures,
   releaseReadyChildren,
 } from './shared/orchestration-release';
 import { upsertEpicPanel } from './shared/orchestration-rollup';
 import {
+  claimCommentAck,
+  clearRollupClaim,
   deriveOrchestrationId,
   loadOrchestration,
   setStatusCommentId,
@@ -73,6 +78,7 @@ const TASK_TABLE = process.env.TASK_TABLE_NAME!;
 const WORKSPACE_REGISTRY_TABLE = process.env.JIRA_WORKSPACE_REGISTRY_TABLE_NAME;
 const ORCHESTRATION_TABLE = process.env.ORCHESTRATION_TABLE_NAME;
 const DEFAULT_LABEL_FILTER = 'bgagent';
+const COMMENT_ACK_TTL_SECONDS = 86_400;
 
 /** Max length of the idempotency key (matches validation's IDEMPOTENCY_KEY_PATTERN). */
 const MAX_IDEMPOTENCY_KEY_LENGTH = 128;
@@ -145,40 +151,6 @@ async function safeReportIssueFailure(
  * the multi-tenant design is preserved: a multi-tenant operator must use a
  * webhook that carries its own `cloudId`.
  */
-async function resolveSoleTenantCloudId(): Promise<string | undefined> {
-  if (!WORKSPACE_REGISTRY_TABLE) return undefined;
-  // Full-table Scan: the workspace registry holds one row per OAuth-installed
-  // tenant and is expected to stay small (tens of rows at most), so a Scan is
-  // cheap. The >1-active-tenant short-circuit below caps the work regardless.
-  // If this table ever grows large, add a GSI on `status` and Query it.
-  let activeCloudIds: string[] = [];
-  let lastKey: Record<string, unknown> | undefined;
-  do {
-    const page = await ddb.send(new ScanCommand({
-      TableName: WORKSPACE_REGISTRY_TABLE,
-      ProjectionExpression: 'jira_cloud_id, #s',
-      ExpressionAttributeNames: { '#s': 'status' },
-      ExclusiveStartKey: lastKey,
-      ConsistentRead: true,
-    }));
-    for (const item of page.Items ?? []) {
-      if (item.status === 'active' && typeof item.jira_cloud_id === 'string') {
-        activeCloudIds.push(item.jira_cloud_id);
-      }
-    }
-    lastKey = page.LastEvaluatedKey;
-    // Short-circuit: once we've seen more than one active tenant the
-    // fallback is ambiguous, so stop scanning.
-    if (activeCloudIds.length > 1) break;
-  } while (lastKey);
-
-  if (activeCloudIds.length === 1) return activeCloudIds[0];
-  logger.warn('Cannot infer cloudId: registry does not have exactly one active tenant', {
-    active_tenant_count: activeCloudIds.length,
-  });
-  return undefined;
-}
-
 /**
  * Subset of the Jira Cloud `jira:issue_*` webhook payload we depend on.
  * Undocumented fields are tolerated.
@@ -301,7 +273,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   //   a stack-wide secret can never steer an event at a chosen tenant.
   let cloudId: string | undefined;
   if (event.verified_via_stack_wide) {
-    cloudId = await resolveSoleTenantCloudId();
+    cloudId = await resolveSoleActiveJiraTenant(ddb, WORKSPACE_REGISTRY_TABLE);
     if (payload.cloudId && payload.cloudId !== cloudId) {
       logger.warn('Ignoring body cloudId on stack-wide-verified webhook; binding to sole active tenant', {
         body_cloud_id: payload.cloudId,
@@ -310,7 +282,8 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       });
     }
   } else {
-    cloudId = payload.cloudId ?? (await resolveSoleTenantCloudId());
+    cloudId = payload.cloudId
+      ?? (await resolveSoleActiveJiraTenant(ddb, WORKSPACE_REGISTRY_TABLE));
   }
 
   if (isCommentEvent) {
@@ -496,7 +469,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       const routed = await routeJiraOrchestrationChildren({
         cloudId,
         parentProjectKey: projectKey,
-        parentMapping: mapping.Item,
+        parentMapping: mapping,
         parentRepo: repo,
         children: graphResult.children as readonly JiraSubIssueNode[],
         oauthSecretArn: resolvedJira.oauthSecretArn,
@@ -587,6 +560,8 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       platform_user_id: platformUserId,
       channel_source: 'jira',
       trigger_label: (labelFilter || DEFAULT_LABEL_FILTER).trim().toLowerCase(),
+      ...(statusOnStart && { jira_status_on_start: statusOnStart }),
+      ...(statusOnPr && { jira_status_on_pr: statusOnPr }),
       parent_context: {
         ...(issue.fields?.summary && { title: issue.fields.summary }),
         ...(descriptionMarkdown && { description: descriptionMarkdown }),
@@ -660,7 +635,14 @@ export async function handler(event: ProcessorEvent): Promise<void> {
             if (fresh) {
               const commentId = await upsertEpicPanel({
                 channel: makeJiraChannel(WORKSPACE_REGISTRY_TABLE),
-                parent: { issueId: issue.key, credentialsRef: cloudId },
+                parent: {
+                  issueId: issue.key,
+                  credentialsRef: cloudId,
+                  stateOverrides: {
+                    ...(statusOnStart && { started: statusOnStart }),
+                    ...(statusOnPr && { inReview: statusOnPr }),
+                  },
+                },
                 children: fresh.children,
                 labelFilter,
               });
@@ -798,6 +780,11 @@ async function handleCommentTrigger(
       issue_key: issue.key,
       comment_id: comment.id,
     });
+    return;
+  }
+
+  if (parseRetryIntent(trigger.instruction)
+    && await handleJiraEpicRetry(issue.key, cloudId, comment.id)) {
     return;
   }
 
@@ -940,6 +927,135 @@ async function handleCommentTrigger(
     attributed_to_linked_comment_author: Boolean(linkedCommentAuthor),
     request_id: requestId,
   });
+}
+
+/**
+ * Retry a terminal Jira parent orchestration without requiring the parent to
+ * have its own task or PR. Successful children remain untouched; only failed
+ * and transitively skipped nodes are reset and released.
+ */
+async function handleJiraEpicRetry(
+  parentIssueKey: string,
+  cloudId: string,
+  commentId: string,
+): Promise<boolean> {
+  if (!ORCHESTRATION_TABLE) return false;
+  const orchestrationId = deriveOrchestrationId(parentIssueKey);
+  const snapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, orchestrationId);
+  if (!snapshot || snapshot.meta.parent_issue_ref !== parentIssueKey) return false;
+
+  const now = new Date().toISOString();
+  const claimed = await claimCommentAck(
+    ddb,
+    ORCHESTRATION_TABLE,
+    orchestrationId,
+    `retry:${commentId}`,
+    now,
+    Math.floor(Date.now() / 1000) + COMMENT_ACK_TTL_SECONDS,
+  );
+  if (!claimed) return true;
+
+  const plan = computeEpicRetryPlan(snapshot.children);
+  if (plan.statusUpdates.length === 0) {
+    const allSucceeded = plan.succeededCount === snapshot.children.length
+      && snapshot.children.length > 0;
+    await safeReportIssueFailure(
+      parentIssueKey,
+      cloudId,
+      allSucceeded
+        ? "👋 Everything in this orchestration already succeeded — there's nothing to retry."
+        : "👋 This orchestration is still running — nothing has failed yet, so there's nothing to retry.",
+    );
+    return true;
+  }
+
+  const previousStatus = new Map(
+    snapshot.children.map((child) => [child.sub_issue_id, child.child_status]),
+  );
+  for (const update of plan.statusUpdates) {
+    const prior = previousStatus.get(update.sub_issue_id);
+    await ddb.send(new UpdateCommand({
+      TableName: ORCHESTRATION_TABLE,
+      Key: { orchestration_id: orchestrationId, sub_issue_id: update.sub_issue_id },
+      UpdateExpression: 'SET child_status = :next, updated_at = :now',
+      ConditionExpression: 'child_status = :prior',
+      ExpressionAttributeValues: {
+        ':next': update.child_status,
+        ':prior': prior,
+        ':now': now,
+      },
+    }));
+  }
+  await clearRollupClaim(ddb, ORCHESTRATION_TABLE, orchestrationId, now);
+
+  const reset = await loadOrchestration(ddb, ORCHESTRATION_TABLE, orchestrationId);
+  if (!reset) return true;
+  const ready = reset.children.filter(
+    (child) => plan.toRelease.includes(child.sub_issue_id)
+      && child.child_status === 'ready',
+  );
+  const releaseResults = await releaseReadyChildren(
+    ddb,
+    ORCHESTRATION_TABLE,
+    ready,
+    reset.meta.release_context,
+    createTaskCore,
+    now,
+    reset.children,
+    'main',
+    undefined,
+    true,
+  );
+  await applyTerminalCreateFailures(
+    ddb,
+    ORCHESTRATION_TABLE,
+    orchestrationId,
+    reset.children,
+    releaseResults,
+    now,
+  );
+
+  await safeReportIssueFailure(
+    parentIssueKey,
+    cloudId,
+    `🔄 Retrying ${plan.failedCount} failed and ${plan.skippedCount} skipped sub-issue(s); `
+      + `${plan.succeededCount} successful sub-issue(s) are unchanged.`,
+  );
+  if (WORKSPACE_REGISTRY_TABLE) {
+    const refreshed = await loadOrchestration(ddb, ORCHESTRATION_TABLE, orchestrationId);
+    if (refreshed) {
+      const panelId = await upsertEpicPanel({
+        channel: makeJiraChannel(WORKSPACE_REGISTRY_TABLE),
+        parent: {
+          issueId: parentIssueKey,
+          credentialsRef: cloudId,
+          stateOverrides: {
+            ...(refreshed.meta.release_context.jira_status_on_start && {
+              started: refreshed.meta.release_context.jira_status_on_start,
+            }),
+            ...(refreshed.meta.release_context.jira_status_on_pr && {
+              inReview: refreshed.meta.release_context.jira_status_on_pr,
+            }),
+          },
+        },
+        children: refreshed.children,
+        statusCommentId: refreshed.meta.status_comment_id,
+        inProgress: true,
+        labelFilter: refreshed.meta.release_context.trigger_label,
+      });
+      if (panelId) {
+        await setStatusCommentId(ddb, ORCHESTRATION_TABLE, orchestrationId, panelId);
+      }
+    }
+  }
+  logger.info('Jira epic retry released failed/skipped graph', {
+    orchestration_id: orchestrationId,
+    parent_issue_key: parentIssueKey,
+    failed: plan.failedCount,
+    skipped: plan.skippedCount,
+    succeeded: plan.succeededCount,
+  });
+  return true;
 }
 
 function buildIterationChannelMetadata(

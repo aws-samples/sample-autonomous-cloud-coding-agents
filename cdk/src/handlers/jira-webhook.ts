@@ -21,6 +21,7 @@ import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
 import { DeleteCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
+import { resolveSoleActiveJiraTenant } from './shared/jira-tenant-registry';
 import {
   isWebhookTimestampFresh,
   verifyJiraRequest,
@@ -135,10 +136,12 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     // binding it to the sole active tenant instead.
     let verified = false;
     let verifiedViaStackWide = false;
-    if (WORKSPACE_REGISTRY_TABLE && payload.cloudId) {
+    const verificationCloudId = payload.cloudId
+      ?? await resolveSoleActiveJiraTenant(ddb, WORKSPACE_REGISTRY_TABLE);
+    if (WORKSPACE_REGISTRY_TABLE && verificationCloudId) {
       const result = await verifyJiraRequestForTenant(
         WORKSPACE_REGISTRY_TABLE,
-        payload.cloudId,
+        verificationCloudId,
         signature,
         event.body,
       );
@@ -147,11 +150,13 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       } else if (result === 'mismatch') {
         logger.warn('Jira webhook signature mismatch against per-tenant secret', {
           jira_cloud_id: payload.cloudId,
+          verified_jira_cloud_id: verificationCloudId,
         });
         return jsonResponse(401, { error: 'Invalid signature' });
       } else if (result === 'revoked') {
         logger.warn('Jira webhook from revoked tenant — rejecting without stack-wide verification', {
           jira_cloud_id: payload.cloudId,
+          verified_jira_cloud_id: verificationCloudId,
         });
         return jsonResponse(401, { error: 'Tenant not active' });
       }

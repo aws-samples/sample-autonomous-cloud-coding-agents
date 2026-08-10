@@ -59,6 +59,7 @@ import {
 } from '../jira-oauth';
 import { awaitOauthCallback, CALLBACK_URL } from '../oauth-callback-server';
 import { promptSecret } from '../prompt-secret';
+import { loadActiveRepoConfig } from '../repo-lookup';
 import { makeClient, makeDocClient } from '../ua';
 
 /** Default label that triggers an ABCA task when applied to a Jira issue. */
@@ -1231,9 +1232,14 @@ export function makeJiraCommand(): Command {
         const config = loadConfig();
         const region = opts.region || config.region;
 
-        const tableName = await getStackOutput(region, opts.stackName, 'JiraProjectMappingTableName');
-        if (!tableName) {
-          console.error('Could not find JiraProjectMappingTableName in stack outputs. Deploy the stack first.');
+        const [tableName, repoTableName] = await Promise.all([
+          getStackOutput(region, opts.stackName, 'JiraProjectMappingTableName'),
+          getStackOutput(region, opts.stackName, 'RepoTableName'),
+        ]);
+        if (!tableName || !repoTableName) {
+          console.error(
+            'Could not find JiraProjectMappingTableName and RepoTableName in stack outputs. Deploy the stack first.',
+          );
           process.exit(1);
         }
 
@@ -1247,6 +1253,8 @@ export function makeJiraCommand(): Command {
           console.error('Project keys are uppercase, start with a letter, and contain letters/digits/underscore.');
           process.exit(1);
         }
+
+        await loadActiveRepoConfig(region, repoTableName, opts.repo);
 
         // Trim transition-status overrides and treat blank/whitespace-only as
         // unset. A whitespace value is truthy in JS, so without this it would

@@ -23,6 +23,7 @@ import {
   type ResolvedJiraOutboundAuth,
 } from './jira-oauth-resolver';
 import { logger } from './logger';
+import type { StateIntent, TransitionOptions } from './orchestration-channel';
 
 /**
  * Lambda-side helper for posting comments onto Jira Cloud issues through the
@@ -50,25 +51,23 @@ const REQUEST_TIMEOUT_MS = 5000;
  * agent-side path (`agent/src/jira_reactions.py`) uses the same base.
  */
 const JIRA_API_BASE = 'https://api.atlassian.com/ex/jira';
+const CATEGORY_RANK: Readonly<Record<string, number>> = {
+  new: 0,
+  indeterminate: 1,
+  done: 2,
+};
+const REVIEW_STATUS_NAMES = [
+  'in review',
+  'code review',
+  'review',
+  'peer review',
+  'reviewing',
+  'in progress',
+] as const;
 
-/**
- * Wrap a plain message string in Atlassian Document Format. Jira REST v3
- * comments require ADF, not markdown. We keep this minimal — a single
- * paragraph with the raw text — because the messages are short, user-
- * facing strings written by the processor (no embedded markdown to
- * preserve).
- */
+/** Render ABCA-generated Markdown into the small ADF subset Jira comments use. */
 function toAdfDocument(message: string): Record<string, unknown> {
-  return {
-    type: 'doc',
-    version: 1,
-    content: [
-      {
-        type: 'paragraph',
-        content: [{ type: 'text', text: message }],
-      },
-    ],
-  };
+  return buildAdfDocument(message.split('\n').map(parseMarkdownRuns));
 }
 
 /**
@@ -88,12 +87,82 @@ export interface AdfTextRun {
   readonly text: string;
   readonly strong?: boolean;
   readonly em?: boolean;
+  readonly code?: boolean;
   /** When set, the run renders as a clickable hyperlink to this URL. */
   readonly href?: string;
 }
 
 /** A paragraph is a list of runs; an empty run list renders a blank line. */
 export type AdfParagraph = ReadonlyArray<AdfTextRun>;
+
+/**
+ * Parse the controlled Markdown emitted by ABCA's own status renderers.
+ *
+ * This is intentionally not a general Markdown parser. The generated comments
+ * use only bold, inline code, and links; handling that exact subset avoids
+ * treating the whole panel as one literal ADF text node while keeping malformed
+ * input harmless as plain text.
+ */
+export function parseMarkdownRuns(line: string): AdfParagraph {
+  const runs: AdfTextRun[] = [];
+  let cursor = 0;
+  const append = (run: AdfTextRun): void => {
+    if (!run.text) return;
+    const previous = runs.at(-1);
+    if (
+      previous
+      && previous.strong === run.strong
+      && previous.em === run.em
+      && previous.code === run.code
+      && previous.href === run.href
+    ) {
+      runs[runs.length - 1] = { ...previous, text: previous.text + run.text };
+      return;
+    }
+    runs.push(run);
+  };
+
+  while (cursor < line.length) {
+    if (line.startsWith('**', cursor)) {
+      const end = line.indexOf('**', cursor + 2);
+      if (end !== -1) {
+        for (const run of parseMarkdownRuns(line.slice(cursor + 2, end))) {
+          append({ ...run, strong: true });
+        }
+        cursor = end + 2;
+        continue;
+      }
+    }
+
+    if (line[cursor] === '`') {
+      const end = line.indexOf('`', cursor + 1);
+      if (end !== -1) {
+        append({ text: line.slice(cursor + 1, end), code: true });
+        cursor = end + 1;
+        continue;
+      }
+    }
+
+    if (line[cursor] === '[') {
+      const match = line.slice(cursor).match(/^\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/);
+      if (match) {
+        append({ text: match[1], href: match[2] });
+        cursor += match[0].length;
+        continue;
+      }
+    }
+
+    const nextTokens = [
+      line.indexOf('**', cursor + 1),
+      line.indexOf('`', cursor + 1),
+      line.indexOf('[', cursor + 1),
+    ].filter((index) => index !== -1);
+    const next = nextTokens.length > 0 ? Math.min(...nextTokens) : line.length;
+    append({ text: line.slice(cursor, next) });
+    cursor = next;
+  }
+  return runs;
+}
 
 /**
  * Build a multi-paragraph ADF document. Each element of ``paragraphs``
@@ -116,6 +185,7 @@ export function buildAdfDocument(paragraphs: ReadonlyArray<AdfParagraph>): Recor
         const marks: Array<Record<string, unknown>> = [];
         if (run.strong) marks.push({ type: 'strong' });
         if (run.em) marks.push({ type: 'em' });
+        if (run.code) marks.push({ type: 'code' });
         // ADF ``link`` mark — the only way to make a URL clickable in a
         // Jira comment; a bare URL in a text node stays plain text.
         if (run.href) marks.push({ type: 'link', attrs: { href: run.href } });
@@ -233,6 +303,220 @@ async function resolveTenantAuth(
     });
     return null; // nosemgrep: ts-silent-success-masking -- Jira feedback is advisory and cannot block task execution
   }
+}
+
+interface JiraTransition {
+  readonly id?: unknown;
+  readonly hasScreen?: unknown;
+  readonly to?: {
+    readonly name?: unknown;
+    readonly statusCategory?: { readonly key?: unknown };
+  };
+}
+
+interface JiraTransitionSnapshot {
+  readonly fields?: {
+    readonly status?: {
+      readonly name?: unknown;
+      readonly statusCategory?: { readonly key?: unknown };
+    };
+  };
+  readonly transitions?: unknown;
+}
+
+async function readTransitionSnapshot(
+  ctx: JiraFeedbackContext,
+  issueIdOrKey: string,
+  auth: ResolvedJiraOutboundAuth,
+): Promise<JiraTransitionSnapshot | null> {
+  let status: number;
+  let body: string;
+  if (auth.kind === 'app') {
+    const result = await requestJiraAppActor(auth.appActor, {
+      version: 1,
+      operation: 'get_transitions',
+      cloud_id: ctx.cloudId,
+      issue_key: issueIdOrKey,
+    });
+    if (!result.ok) return null;
+    status = result.status;
+    body = result.body;
+  } else {
+    const url = `${JIRA_API_BASE}/${encodeURIComponent(ctx.cloudId)}`
+      + `/rest/api/3/issue/${encodeURIComponent(issueIdOrKey)}?fields=status&expand=transitions`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    try {
+      const result = await fetch(url, {
+        headers: {
+          Authorization: `Bearer ${auth.accessToken}`,
+          Accept: 'application/json',
+        },
+        signal: controller.signal,
+      });
+      status = result.status;
+      body = await result.text();
+    } catch (err) {
+      logger.warn('Jira transition lookup failed', {
+        jira_cloud_id: ctx.cloudId,
+        issue_id_or_key: issueIdOrKey,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  if (status !== 200) {
+    logger.warn('Jira transition lookup returned non-200', {
+      jira_cloud_id: ctx.cloudId,
+      issue_id_or_key: issueIdOrKey,
+      status,
+    });
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(body) as unknown;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as JiraTransitionSnapshot
+      : null;
+  } catch (err) {
+    logger.warn('Jira transition lookup returned invalid JSON', {
+      issue_id_or_key: issueIdOrKey,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
+function transitionName(transition: JiraTransition): string {
+  return typeof transition.to?.name === 'string'
+    ? transition.to.name.trim().toLowerCase()
+    : '';
+}
+
+function transitionCategory(transition: JiraTransition): string {
+  return typeof transition.to?.statusCategory?.key === 'string'
+    ? transition.to.statusCategory.key
+    : '';
+}
+
+function selectTransition(
+  transitions: readonly JiraTransition[],
+  override: string | undefined,
+  preferredNames: readonly string[],
+  fallbackCategory: string | undefined,
+): JiraTransition | undefined {
+  const usable = transitions.filter(
+    (transition) => transition && transition.hasScreen !== true && typeof transition.id === 'string',
+  );
+  if (override) {
+    const wanted = override.trim().toLowerCase();
+    return usable.find((transition) => transitionName(transition) === wanted);
+  }
+  for (const name of preferredNames) {
+    const match = usable.find((transition) => transitionName(transition) === name);
+    if (match) return match;
+  }
+  return fallbackCategory
+    ? usable.find((transition) =>
+      transitionCategory(transition) === fallbackCategory
+      && transitionName(transition) !== 'blocked')
+    : undefined;
+}
+
+async function executeTransition(
+  ctx: JiraFeedbackContext,
+  issueIdOrKey: string,
+  transitionId: string,
+  auth: ResolvedJiraOutboundAuth,
+): Promise<boolean> {
+  if (auth.kind === 'app') {
+    const result = await requestJiraAppActor(auth.appActor, {
+      version: 1,
+      operation: 'transition',
+      cloud_id: ctx.cloudId,
+      issue_key: issueIdOrKey,
+      transition_id: transitionId,
+    });
+    return result.ok && result.status === 204;
+  }
+  const url = `${JIRA_API_BASE}/${encodeURIComponent(ctx.cloudId)}`
+    + `/rest/api/3/issue/${encodeURIComponent(issueIdOrKey)}/transitions`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const result = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${auth.accessToken}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      },
+      body: JSON.stringify({ transition: { id: transitionId } }),
+      signal: controller.signal,
+    });
+    return result.status === 204;
+  } catch (err) {
+    logger.warn('Jira transition request failed', {
+      jira_cloud_id: ctx.cloudId,
+      issue_id_or_key: issueIdOrKey,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Best-effort Jira workflow transition used by orchestration parent panels. */
+export async function transitionIssueState(
+  ctx: JiraFeedbackContext,
+  issueIdOrKey: string,
+  intent: StateIntent,
+  overrides: { readonly started?: string; readonly inReview?: string } = {},
+  options: TransitionOptions = {},
+): Promise<boolean> {
+  const auth = await resolveTenantAuth(ctx);
+  if (!auth) return false;
+  const snapshot = await readTransitionSnapshot(ctx, issueIdOrKey, auth);
+  if (!snapshot) return false;
+
+  const currentCategory = typeof snapshot.fields?.status?.statusCategory?.key === 'string'
+    ? snapshot.fields.status.statusCategory.key
+    : '';
+  const currentRank = CATEGORY_RANK[currentCategory];
+  const targetRank = intent === 'completed' ? CATEGORY_RANK.done : CATEGORY_RANK.indeterminate;
+  if (currentRank !== undefined) {
+    if (currentRank > targetRank) return false;
+    if (intent === 'started' && currentRank === targetRank && !options.allowRegression) {
+      return false;
+    }
+    if (intent === 'completed' && currentRank === targetRank) return false;
+  }
+
+  const transitions = Array.isArray(snapshot.transitions)
+    ? snapshot.transitions.filter((value): value is JiraTransition =>
+      Boolean(value) && typeof value === 'object' && !Array.isArray(value))
+    : [];
+  const override = intent === 'started' ? overrides.started : overrides.inReview;
+  const preferred = intent === 'started'
+    ? ['in progress']
+    : (intent === 'in_review' ? REVIEW_STATUS_NAMES : ['done', 'completed', 'closed']);
+  const fallbackCategory = override
+    ? undefined
+    : (intent === 'completed' ? 'done' : 'indeterminate');
+  const transition = selectTransition(transitions, override, preferred, fallbackCategory);
+  if (!transition || typeof transition.id !== 'string') {
+    logger.warn('No matching Jira workflow transition', {
+      issue_id_or_key: issueIdOrKey,
+      intent,
+      override,
+      current_status: snapshot.fields?.status?.name,
+    });
+    return false;
+  }
+  return executeTransition(ctx, issueIdOrKey, transition.id, auth);
 }
 
 /**
