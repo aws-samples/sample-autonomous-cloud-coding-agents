@@ -716,7 +716,18 @@ export async function handler(event: ProcessorEvent): Promise<void> {
             const panelSnapshot = fresh ?? snapshot;
             const commentId = await upsertEpicPanel({
               channel: makeJiraChannel(WORKSPACE_REGISTRY_TABLE),
-              parent: { issueId: issue.key, credentialsRef: cloudId },
+              parent: {
+                issueId: issue.key,
+                credentialsRef: cloudId,
+                stateOverrides: {
+                  ...(panelSnapshot.meta.release_context.jira_status_on_start && {
+                    started: panelSnapshot.meta.release_context.jira_status_on_start,
+                  }),
+                  ...(panelSnapshot.meta.release_context.jira_status_on_pr && {
+                    inReview: panelSnapshot.meta.release_context.jira_status_on_pr,
+                  }),
+                },
+              },
               ...(panelSnapshot.meta.status_comment_id && {
                 statusCommentId: panelSnapshot.meta.status_comment_id,
               }),

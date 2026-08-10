@@ -117,6 +117,8 @@ const snapshot = {
     release_context: {
       platform_user_id: 'platform-user',
       channel_source: 'jira',
+      jira_status_on_start: 'Doing',
+      jira_status_on_pr: 'Review',
     },
   },
   children: [{
@@ -587,6 +589,14 @@ describe('jira-webhook-processor orchestration adapter', () => {
       statusCommentId: 'panel-1',
       inProgress: true,
       children: extendedSnapshot.children,
+      parent: expect.objectContaining({
+        issueId: 'ENG-1',
+        credentialsRef: 'cloud-1',
+        stateOverrides: {
+          started: 'Doing',
+          inReview: 'Review',
+        },
+      }),
     }));
     expect(setStatusCommentIdMock).not.toHaveBeenCalled();
   });
