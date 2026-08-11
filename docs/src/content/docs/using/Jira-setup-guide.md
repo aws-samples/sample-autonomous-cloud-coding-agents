@@ -367,6 +367,18 @@ To extend an existing orchestration, add Jira subtasks and re-apply the trigger 
 
 Re-applying the label without adding a child is an idempotent no-op. Changes only to blocker links between existing children are also ignored; dependency edits do not rewrite work that may already be running or complete. Extending a terminal orchestration reopens the parent progress panel and settles it again when the added work finishes.
 
+## Authored subtask orchestration
+
+Applying the trigger label to a parent that already has Jira subtasks runs those subtasks as one orchestration instead of creating a separate coding task for the parent. Each subtask becomes an ordinary ABCA task. Standard Jira `blocks` / `is blocked by` links between those subtasks determine release order: roots start immediately, and blocked work starts only after all predecessors succeed.
+
+All executable subtasks must belong to active Jira project mappings that resolve to the same repository as the parent. Cross-project subtasks are supported when their mappings name that same repository; cross-repository graphs, unmapped projects, cycles, and blocker links to issues outside the parent's executable subtask set are rejected before any orchestration rows are written. Jira API or authentication failures are reported on the parent and never silently degrade to a single parent task.
+
+The parent receives orchestration progress and the terminal rollup. Parallel leaves converge through an internal integration task so the orchestration produces one combined pull request; that internal task does not address a nonexistent Jira issue. An `@bgagent` comment on a real child updates that child's pull request and restacks dependent pull requests through the shared orchestration reconciler.
+
+To extend an existing orchestration, add Jira subtasks and re-apply the trigger label. ABCA appends only genuinely new issue keys: existing tasks, branches, statuses, and dependencies are preserved. A new child starts immediately when all of its declared predecessors have already succeeded; otherwise it remains blocked for the reconciler. A new child with no explicit blocker stacks on the existing epic tip rather than bare `main`.
+
+Re-applying the label without adding a child is an idempotent no-op. Changes only to blocker links between existing children are also ignored; dependency edits do not rewrite work that may already be running or complete. Extending a terminal orchestration reopens the parent progress panel and settles it again when the added work finishes.
+
 ## Issue context: attachments and comments
 
 Beyond the summary and description, the processor enriches the task with the practical context a Jira ticket usually carries — attached files and recent clarifications — so the agent isn't left guessing at "see the attached log" or an acceptance detail buried in a comment. Both are fetched **authenticated at task-admission time** using the tenant's existing `read:jira-work` scope (**no new OAuth scopes, no re-authorization**), because a headless agent can't fetch them itself.

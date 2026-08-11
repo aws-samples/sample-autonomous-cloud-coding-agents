@@ -688,6 +688,46 @@ describe('AgentStack', () => {
       ]),
     });
   });
+
+  test('provisions a single OperationalAlerts SNS topic + CMK and exports its ARN (#629)', () => {
+    // One stack-wide topic, not per-consumer — every DLQ-depth alarm
+    // shares one subscription surface.
+    template.resourceCountIs('AWS::SNS::Topic', 1);
+    template.hasResourceProperties('AWS::SNS::Topic', {
+      KmsMasterKeyId: Match.anyValue(),
+    });
+    template.hasOutput('OperationalAlertsTopicArn', {
+      Description: Match.stringLikeRegexp('#629'),
+    });
+  });
+
+  test('wires all three DLQ-depth alarms to the alerts topic (#629)', () => {
+    // FanOut, ApprovalMetricsPublisher, and the screenshot processor
+    // DLQ alarms must each carry an AlarmActions entry — otherwise a
+    // poison-pill pile-up stays silent (the whole point of #629).
+    const alarms = template.findResources('AWS::CloudWatch::Alarm');
+    const dlqAlarmsWithActions = Object.values(alarms).filter((r: any) => {
+      const dims: Array<{ Name: string }> = r.Properties?.Dimensions ?? [];
+      const isSqsDepth =
+        r.Properties?.Namespace === 'AWS/SQS' &&
+        r.Properties?.MetricName === 'ApproximateNumberOfMessagesVisible' &&
+        dims.some((d) => d.Name === 'QueueName');
+      const hasActions =
+        Array.isArray(r.Properties?.AlarmActions) && r.Properties.AlarmActions.length > 0;
+      return isSqsDepth && hasActions;
+    });
+    expect(dlqAlarmsWithActions).toHaveLength(3);
+    // Each action must reference the operational-alerts topic.
+    for (const alarm of dlqAlarmsWithActions) {
+      expect(JSON.stringify((alarm as any).Properties.AlarmActions)).toContain('OperationalAlerts');
+    }
+  });
+
+  test('does NOT subscribe an email when no alertEmail context is set (#629)', () => {
+    // The default deploy ships the topic with no confirmed target;
+    // operators subscribe Slack / PagerDuty / email themselves.
+    template.resourceCountIs('AWS::SNS::Subscription', 0);
+  });
 });
 
 describe('AgentStack with the ECS substrate gate (--context compute_type=ecs)', () => {

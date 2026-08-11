@@ -1594,12 +1594,16 @@ Every `agent_milestone("approval_*")` event carries `trace_id` / `span_id`. A sp
 
 - **FanOutConsumer DLQ** — poison-pill DynamoDB Stream records that failed three consecutive Lambda invocations.
 - **ApprovalMetricsPublisher DLQ** — same failure mode for the metrics-publisher consumer.
+- **GitHubScreenshotIntegration processor DLQ** — failed async invocations of the screenshot pipeline (same threshold-1 shape).
 
-These alarms transition to `ALARM` state in CloudWatch and appear in the console/dashboard, providing operator visibility into silent record loss. They ship **without an `addAlarmAction` / SNS notification target** — operators must check the CloudWatch Alarms console or configure a subscription manually. This is an intentional intermediate step: alarm state is durable and queryable even without push notifications, and prevents poison records from accumulating silently for the full 14-day DLQ retention window.
+These alarms transition to `ALARM` state in CloudWatch and appear in the console/dashboard, providing operator visibility into silent record loss, and prevent poison records from accumulating silently for the full 14-day DLQ retention window.
 
-**Follow-up — notification channel wiring:** Once an operational notification channel (SNS topic → Slack / PagerDuty / email) is provisioned, add `alarm.addAlarmAction(new SnsAction(topic))` to both alarms. No metric or alarm restructuring is needed.
+**Notification channel wiring (shipped, issue #629):** All three DLQ-depth alarms above are wired to a stack-wide SNS topic via `alarm.addAlarmAction(new SnsAction(topic))`. The topic is provisioned by the reusable `OperationalAlerts` construct (`cdk/src/constructs/operational-alerts.ts`) and its ARN is exported as the `OperationalAlertsTopicArn` stack output.
 
-**Additional alarms (not yet shipped):** The following remain deferred until the notification channel exists (alarm-without-action provides limited value for rate/latency conditions that require human triage):
+- **Encryption.** The topic is encrypted with a **customer-managed KMS key**, not the AWS-managed `alias/aws/sns` key. This is load-bearing: CloudWatch cannot publish to a topic on the AWS-managed key (its key policy can't be edited to grant the `cloudwatch.amazonaws.com` service principal `kms:Decrypt` / `kms:GenerateDataKey*`), so the alarm action would fail silently at delivery. The CMK grants CloudWatch exactly those actions.
+- **Delivery target (configurable).** Pass `-c alertEmail=ops@example.com` at deploy to create an email subscription (AWS sends a confirmation link that must be clicked). With no context set, the topic ships with no subscription — operators subscribe Slack / PagerDuty / email manually against the exported topic ARN. Delivery is not hard-coded.
+
+**Additional alarms (not yet shipped):** The following remain deferred (each is a rate/latency condition that needs metric-math or composite-alarm design beyond the threshold-1 DLQ shape); now that the notification channel exists they can be wired to the same `OperationalAlerts` topic as separate follow-ups:
 
 - High approval-timeout rate (users not responding, notifications broken)
 - Tasks stuck in AWAITING_APPROVAL beyond `timeout_s + 60s` (reconciler failure)
@@ -2112,7 +2116,7 @@ See §17.18 for the off-hours escalation future-work primitive, and §13.14 for 
 **Future work — polish (tracked in §17):**
 - CLI inline streaming prompt (UX research first)
 - `approve --defer` / allowlist revocation (`bgagent revoke-approval`)
-- CloudWatch alarm SNS notification wiring (§11.5) — DLQ-depth alarms ship without an action target; add `SnsAction` once a notification channel is provisioned
+- ~~CloudWatch alarm SNS notification wiring (§11.5) — DLQ-depth alarms ship without an action target; add `SnsAction` once a notification channel is provisioned~~ — **shipped (issue #629):** all three DLQ-depth alarms are wired to the `OperationalAlerts` SNS topic (§11.5)
 - More soft-deny policies in the default set based on real usage
 - Persistent recent-decision cache (if container-restart telemetry justifies it)
 - Persistent per-minute rate limit (if restart amplification becomes significant)

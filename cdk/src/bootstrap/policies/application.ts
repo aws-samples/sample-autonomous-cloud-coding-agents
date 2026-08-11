@@ -215,6 +215,25 @@ export function applicationPolicy(): iam.PolicyDocument {
       }),
 
       new iam.PolicyStatement({
+        sid: 'SNS',
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'sns:CreateTopic',
+          'sns:DeleteTopic',
+          'sns:GetTopicAttributes',
+          'sns:SetTopicAttributes',
+          'sns:Subscribe',
+          'sns:Unsubscribe',
+          'sns:GetSubscriptionAttributes',
+          'sns:ListSubscriptionsByTopic',
+          'sns:TagResource',
+          'sns:UntagResource',
+          'sns:ListTagsForResource',
+        ],
+        resources: ['arn:aws:sns:*:*:backgroundagent-dev-*'],
+      }),
+
+      new iam.PolicyStatement({
         sid: 'CloudFront',
         effect: iam.Effect.ALLOW,
         actions: [
