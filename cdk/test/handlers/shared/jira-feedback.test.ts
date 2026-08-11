@@ -19,7 +19,7 @@
 
 const resolveJiraOauthTokenMock = jest.fn();
 jest.mock('../../../src/handlers/shared/jira-oauth-resolver', () => ({
-  resolveJiraOauthToken: (...args: unknown[]) => resolveJiraOauthTokenMock(...args),
+  resolveJiraOutboundAuth: (...args: unknown[]) => resolveJiraOauthTokenMock(...args),
 }));
 
 import {

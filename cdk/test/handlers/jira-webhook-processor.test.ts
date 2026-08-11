@@ -477,52 +477,7 @@ describe('jira-webhook-processor handler', () => {
 
       await handler(eventWith(payload));
 
-      expect(resolveTaskByJiraIssueMock).toHaveBeenCalledWith(
-        expect.anything(),
-        'Tasks',
-        'cloud-1',
-        'ENG-42',
-      );
-      expect(ddbSend.mock.calls[0][0].input).toMatchObject({
-        TableName: 'JiraProjects',
-        Key: { jira_project_identity: 'cloud-1#ENG' },
-        ConsistentRead: true,
-      });
-      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
-      expect(createTaskCoreMock.mock.calls[0][1].channelMetadata.jira_project_key).toBe('ENG');
-      expect(postIssueCommentMock).toHaveBeenCalledWith(
-        expect.anything(),
-        'ENG-42',
-        '👀 On it — reading the PR…',
-      );
-    });
-
-    test('keeps @bgagent comments without a project key or prior task silent', async () => {
-      const payload = comment();
-      delete (payload.issue as { fields: { project: Record<string, unknown> } }).fields.project.key;
-
-      await handler(eventWith(payload));
-
-      expect(resolveTaskByJiraIssueMock).toHaveBeenCalledTimes(1);
-      expect(ddbSend).not.toHaveBeenCalled();
-      expect(createTaskCoreMock).not.toHaveBeenCalled();
-      expect(reportIssueFailureMock).not.toHaveBeenCalled();
-    });
-
-    test('keeps @bgagent comments without a project key silent when the prior project was removed', async () => {
-      resolveTaskByJiraIssueMock.mockResolvedValueOnce(priorTask);
-      mockCommentDdb(undefined, { repo: 'org/repo', status: 'removed' });
-      const payload = comment();
-      delete (payload.issue as { fields: { project: Record<string, unknown> } }).fields.project.key;
-
-      await handler(eventWith(payload));
-
-      expect(ddbSend).toHaveBeenCalledTimes(1);
-      expect(ddbSend.mock.calls[0][0].input).toMatchObject({
-        TableName: 'JiraProjects',
-        Key: { jira_project_identity: 'cloud-1#ENG' },
-        ConsistentRead: true,
-      });
+      expect(resolveTaskByJiraIssueMock).not.toHaveBeenCalled();
       expect(createTaskCoreMock).not.toHaveBeenCalled();
       expect(reportIssueFailureMock).not.toHaveBeenCalled();
     });

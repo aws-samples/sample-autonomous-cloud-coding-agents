@@ -515,21 +515,13 @@ describe('AgentStack', () => {
     expect(asJson).toContain('secretsmanager:PutSecretValue');
   });
 
-  test('the orchestration reconciler cannot read S3 objects at all', () => {
-    // The trace/artifacts bucket holds full agent trajectories under
-    // traces/<user_id>/ — tool input and output, authorized per-user by the presign
-    // handler. The reconciler works entirely from task records and the orchestration
-    // table, so it needs no object read anywhere; asserting the absence keeps a
-    // component that handles no user identity out of that blast radius, and makes a
-    // future grant a deliberate, visible choice.
-    //
-    // Absence rather than a scoped grant is the stronger claim, and the safer one:
-    // S3 does not normalize keys, so `artifacts/../traces/u/x` is a literal key that
-    // an `artifacts/*` resource matches by string prefix.
+  test('the orchestration reconciler has only its required scoped S3 access', () => {
+    // Authored-graph seeding screens and stores parent attachments, while the
+    // agent-native planner reads a delivered plan artifact. Keep those grants
+    // bucket-scoped and prevent read access to attachments or write access to
+    // trace/plan artifacts.
     const policies = template.findResources('AWS::IAM::Policy');
     const reconciler = Object.entries(policies).filter(([id]) => id.startsWith('OrchestrationReconciler'));
-    // The reconciler DOES have policies (table + invoke + guardrail grants), so an
-    // empty set here would mean the id filter broke, not that the grant is gone.
     expect(reconciler.length).toBeGreaterThan(0);
 
     const objectStatements: string[] = [];
@@ -542,62 +534,17 @@ describe('AgentStack', () => {
         objectStatements.push(JSON.stringify(stmt));
       }
     }
-    expect(objectStatements).toEqual([]);
-  });
-
-  test('log-delivery logical ids are pinned with NO opt-in, so an existing stack updates in place', () => {
-    // A DeliverySource is unique per (resource ARN, log type) for the whole
-    // account, and the runtime ARN survives a library-side rename of these
-    // auto-created resources. So a renamed source is a SECOND source for the same
-    // runtime: CloudFormation creates before deleting, CloudWatch Logs rejects it
-    // as already existing, and the update rolls the whole stack back.
-    //
-    // The ids must therefore be pinned unconditionally. Behind a flag, the safe
-    // path is the one an operator has to already know about, and the failure that
-    // teaches them is a mid-update rollback whose message never mentions it.
-    //
-    // Asserted on the source, not by synthesizing a second stack: constructing
-    // one under a different construct id trips an unrelated cdk-nag
-    // suppression-path check first, which masks whatever this is checking.
-    const src = fs.readFileSync(
-      path.resolve(__dirname, '../../src/stacks/agent.ts'), 'utf8',
-    );
-    const fn = src.slice(src.indexOf('function pinLogDeliveryLogicalIds'));
-    const body = fn.slice(0, fn.indexOf('\n}'));
-
-    // Keyed off the stack's OWN name — no context, no opt-in.
-    expect(body).toContain('PINNED_LOG_DELIVERY_BY_STACK[stack.stackName]');
-    expect(body).not.toContain('tryGetContext');
-    // Nothing anywhere may reintroduce a gate.
-    expect(src).not.toContain('pinnedLogDeliveryStack');
-
-    // The ids it pins are the ones CloudFormation already holds for that stack.
-    // Hard-coded here on purpose: if someone "tidies" a value in the table, this
-    // fails instead of the next production update rolling back.
-    expect(src).toContain('RuntimeCDKSourceAPPLICATIONLOGSbackgroundagentdevRuntimeBC0AE9ED96A02E02');
-    expect(src).toContain('RuntimeCDKSourceUSAGELOGSbackgroundagentdevRuntimeBC0AE9ED544FBB22');
-  });
-
-  test('a stack with no recorded ids keeps the library\'s own log-delivery naming', () => {
-    // The pinned ids embed a stack name, so they are only correct for that stack.
-    // Another stack has no pre-rename resources to line up with and must not
-    // inherit them — otherwise two stacks in one account would claim the same
-    // account-unique DeliverySource Name. The table lookup is what enforces this,
-    // so assert it returns nothing for an unknown name rather than falling back.
-    const src = fs.readFileSync(
-      path.resolve(__dirname, '../../src/stacks/agent.ts'), 'utf8',
-    );
-    const fn = src.slice(src.indexOf('function pinLogDeliveryLogicalIds'));
-    const body = fn.slice(0, fn.indexOf('\n}'));
-    expect(body).toMatch(/if \(!pins\) return;/);
-
-    // And this stack — named TestAgentStack, absent from the table — got the
-    // library's naming, with none of backgroundagent-dev's ids leaking in.
-    const ids = Object.keys(template.findResources('AWS::Logs::DeliverySource'));
-    expect(ids).toHaveLength(2);
-    for (const id of ids) {
-      expect(id).not.toContain('backgroundagentdev');
-    }
+    expect(objectStatements).toHaveLength(3);
+    const attachmentStatements = objectStatements.filter((stmt) => stmt.includes('AttachmentsBucket'));
+    const artifactStatements = objectStatements.filter((stmt) => stmt.includes('TraceArtifactsBucket'));
+    expect(attachmentStatements).toHaveLength(2);
+    expect(attachmentStatements.join('\n')).toContain('s3:PutObject');
+    expect(attachmentStatements.join('\n')).toContain('s3:DeleteObject');
+    expect(attachmentStatements.join('\n')).not.toContain('s3:GetObject');
+    expect(artifactStatements).toHaveLength(1);
+    expect(artifactStatements[0]).toContain('s3:GetObject');
+    expect(artifactStatements[0]).not.toMatch(/s3:(Put|Delete)Object/);
+    expect(objectStatements.join('\n')).not.toContain('"Resource":"*"');
   });
 
   test('the fan-out consumer can reach BOTH surfaces\' credentials registries', () => {

@@ -609,10 +609,20 @@ describe('renderEpicPanel (#247 UX — the single maturing panel)', () => {
     expect(body).toContain('To retry:');
     expect(body).toContain('`@bgagent retry`');
     // The label is still discoverable — just not billed as the same thing.
-    expect(body).toContain('re-applying the `abca` label');
+    expect(body).toContain('re-applying the `bgagent` label');
     expect(body).not.toContain('either way');
     // The comment must be named before the label, so the reliable route reads first.
     expect(body.indexOf('`@bgagent retry`')).toBeLessThan(body.indexOf('re-applying'));
+  });
+
+  test('the retry hint names the project trigger label', () => {
+    const body = renderEpicPanel({
+      inProgress: false,
+      rows: [row('a', 'succeeded'), row('b', 'failed')],
+      labelFilter: 'ship',
+    });
+    expect(body).toContain('re-applying the `ship` label');
+    expect(body).not.toContain('`bgagent` label');
   });
 
   test('no retry hint on a clean complete, or while still in progress', () => {

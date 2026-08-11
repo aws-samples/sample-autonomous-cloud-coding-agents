@@ -26,6 +26,7 @@ import {
   invalidateJiraOauthCache,
   isTokenExpiring,
   resolveJiraOauthToken,
+  resolveJiraOutboundAuth,
   type StoredOauthToken,
 } from '../../../src/handlers/shared/jira-oauth-resolver';
 
@@ -573,6 +574,87 @@ describe('resolveJiraOauthToken', () => {
       (c) => c[0].constructor.name === 'GetSecretValueCommand',
     );
     expect(getSecretCalls.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe('resolveJiraOutboundAuth', () => {
+  beforeEach(() => {
+    _resetCachesForTesting();
+  });
+
+  test('prefers a complete Forge app actor even when OAuth is expired', async () => {
+    const clients = makeFakeClients({
+      registryItem: {
+        site_url: 'https://acme.atlassian.net',
+        oauth_secret_arn: 'arn:secret:acme',
+        status: 'active',
+      },
+      storedToken: makeStoredToken({
+        expires_at: new Date(Date.now() - 60_000).toISOString(),
+        app_actor_proxy_url: 'https://install.webtrigger.atlassian.app/public/trigger',
+        app_actor_shared_secret: 's'.repeat(64),
+      }),
+    });
+
+    const result = await resolveJiraOutboundAuth('cloud-uuid-1', REGISTRY_TABLE, clients);
+
+    expect(result).toEqual({
+      kind: 'app',
+      appActor: {
+        proxyUrl: 'https://install.webtrigger.atlassian.app/public/trigger',
+        sharedSecret: 's'.repeat(64),
+      },
+      siteUrl: 'https://acme.atlassian.net',
+      oauthSecretArn: 'arn:secret:acme',
+    });
+  });
+
+  test('uses OAuth only when no app-actor configuration exists', async () => {
+    const clients = makeFakeClients({
+      registryItem: {
+        site_url: 'https://acme.atlassian.net',
+        oauth_secret_arn: 'arn:secret:acme',
+        status: 'active',
+      },
+      storedToken: makeStoredToken(),
+    });
+
+    await expect(resolveJiraOutboundAuth('cloud-uuid-1', REGISTRY_TABLE, clients))
+      .resolves.toMatchObject({
+        kind: 'oauth',
+        accessToken: 'jira_oauth_default',
+        oauthSecretArn: 'arn:secret:acme',
+      });
+  });
+
+  test('fails closed for partial or untrusted app-actor configuration', async () => {
+    const partial = makeFakeClients({
+      registryItem: {
+        site_url: 'https://acme.atlassian.net',
+        oauth_secret_arn: 'arn:secret:partial',
+        status: 'active',
+      },
+      storedToken: makeStoredToken({
+        app_actor_proxy_url: 'https://install.webtrigger.atlassian.app/public/trigger',
+      }),
+    });
+    await expect(resolveJiraOutboundAuth('cloud-partial', REGISTRY_TABLE, partial))
+      .resolves.toBeNull();
+
+    _resetCachesForTesting();
+    const untrusted = makeFakeClients({
+      registryItem: {
+        site_url: 'https://acme.atlassian.net',
+        oauth_secret_arn: 'arn:secret:untrusted',
+        status: 'active',
+      },
+      storedToken: makeStoredToken({
+        app_actor_proxy_url: 'https://attacker.example/public/trigger',
+        app_actor_shared_secret: 's'.repeat(64),
+      }),
+    });
+    await expect(resolveJiraOutboundAuth('cloud-untrusted', REGISTRY_TABLE, untrusted))
+      .resolves.toBeNull();
   });
 });
 

@@ -53,10 +53,6 @@ import { classifyError } from './shared/error-classifier';
 import { renderFailureReply, renderPanelFailureReason } from './shared/failure-reply';
 import { isNoChangeIteration, renderMaturingReply } from './shared/iteration-reply';
 import { claimTerminalReply, releaseReplyClaim } from './shared/iteration-reply-claim';
-import { downloadScreenAndStoreLinearAttachments, isLinearUploadsUrl, LinearAttachmentError } from './shared/linear-attachments';
-import { probeLinearIssueContext } from './shared/linear-issue-context-probe';
-import { resolveLinearOauthToken } from './shared/linear-oauth-resolver';
-import type { SubIssueNode } from './shared/linear-subissue-fetch';
 import {
   buildAdfDocument,
   postIssueCommentAdf,
@@ -66,6 +62,10 @@ import {
   renderJiraFinalStatusComment,
   renderJiraFinishedPointer,
 } from './shared/jira-status-comment';
+import { downloadScreenAndStoreLinearAttachments, isLinearUploadsUrl, LinearAttachmentError } from './shared/linear-attachments';
+import { probeLinearIssueContext } from './shared/linear-issue-context-probe';
+import { resolveLinearOauthToken } from './shared/linear-oauth-resolver';
+import type { SubIssueNode } from './shared/linear-subissue-fetch';
 import { logger } from './shared/logger';
 import type { Channel, CommentRef, IssueRef } from './shared/orchestration-channel';
 import { channelForSource, type ChannelRegistryTables } from './shared/orchestration-channel-factory';

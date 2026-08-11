@@ -24,7 +24,6 @@ import { S3Client } from '@aws-sdk/client-s3';
 import {
   DynamoDBDocumentClient,
   GetCommand,
-  ScanCommand,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
 import { ulid } from 'ulid';
