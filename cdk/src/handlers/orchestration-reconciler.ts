@@ -44,12 +44,22 @@ import {
 } from '@aws-sdk/lib-dynamodb';
 import type { DynamoDBBatchResponse, DynamoDBRecord, DynamoDBStreamEvent } from 'aws-lambda';
 import { createTaskCore } from './shared/create-task-core';
+import { classifyError } from './shared/error-classifier';
 import { renderFailureReply, renderPanelFailureReason } from './shared/failure-reply';
 import { sumIterationCostForIssue } from './shared/iteration-cost';
 import { isNoChangeIteration, renderMaturingReply } from './shared/iteration-reply';
 import { claimTerminalReply, releaseReplyClaim } from './shared/iteration-reply-claim';
+import {
+  buildAdfDocument,
+  postIssueCommentAdf,
+  updateIssueCommentAdf,
+} from './shared/jira-feedback';
+import {
+  renderJiraFinalStatusComment,
+  renderJiraFinishedPointer,
+} from './shared/jira-status-comment';
 import { logger } from './shared/logger';
-import type { Channel, IssueRef } from './shared/orchestration-channel';
+import type { Channel, CommentRef, IssueRef } from './shared/orchestration-channel';
 import { channelForSource, type ChannelRegistryTables } from './shared/orchestration-channel-factory';
 import { computeLeaves, isIntegrationNode } from './shared/orchestration-integration-node';
 import { ORCH_LOG } from './shared/orchestration-log-events';
@@ -204,6 +214,10 @@ interface TerminalTaskEvent {
   readonly costUsd?: number;
   /** This iteration's wall-clock seconds — folded into the reply. */
   readonly durationS?: number;
+  /** Agent turns consumed by this iteration. */
+  readonly turns?: number;
+  /** Configured turn cap for this iteration. */
+  readonly maxTurns?: number;
 }
 
 /**
@@ -246,6 +260,10 @@ export function parseTerminalTaskRecord(record: DynamoDBRecord): TerminalTaskEve
     : (img.cost_usd?.S !== undefined ? Number(img.cost_usd.S) : undefined);
   const durationS = img.duration_s?.N !== undefined ? Number(img.duration_s.N)
     : (img.duration_s?.S !== undefined ? Number(img.duration_s.S) : undefined);
+  const turns = img.turns_attempted?.N !== undefined ? Number(img.turns_attempted.N)
+    : (img.turns_attempted?.S !== undefined ? Number(img.turns_attempted.S) : undefined);
+  const maxTurns = img.max_turns?.N !== undefined ? Number(img.max_turns.N)
+    : (img.max_turns?.S !== undefined ? Number(img.max_turns.S) : undefined);
 
   // Cascade marker: an iteration/restack task names the node it acted on
   // via channel_metadata. A restack task also carries
@@ -281,6 +299,8 @@ export function parseTerminalTaskRecord(record: DynamoDBRecord): TerminalTaskEve
     ...(iterationReplyId !== undefined && { iterationReplyId }),
     ...(costUsd !== undefined && Number.isFinite(costUsd) && { costUsd }),
     ...(durationS !== undefined && Number.isFinite(durationS) && { durationS }),
+    ...(turns !== undefined && Number.isFinite(turns) && { turns }),
+    ...(maxTurns !== undefined && Number.isFinite(maxTurns) && { maxTurns }),
   };
 }
 
@@ -1165,7 +1185,7 @@ async function replyToIterationComment(
   // 'updated' (real edit) state folds the thumbnail in — a question didn't change UI.
   const isUpdated = !isNoChangeIteration(evt.codeChanged);
   const shot = isUpdated ? await reloadIterationScreenshot(evt.taskId) : { screenshotUrl: null, deployUrl: null };
-  const body = succeeded
+  const linearBody = succeeded
     ? renderMaturingReply({
       state: isNoChangeIteration(evt.codeChanged) ? 'answered' : 'updated',
       prNumber,
@@ -1193,16 +1213,81 @@ async function replyToIterationComment(
   // threaded reply for older tasks that captured no reply id.
   // preservePreview: converge with the screenshot webhook's async `[preview]`
   // append so this terminal re-render doesn't clobber it.
-  const reply = await channel.upsertThreadedReply?.(
-    issueRef(replyIssueId, workspaceId),
-    { commentId },
-    body,
-    evt.iterationReplyId ? { commentId: evt.iterationReplyId } : undefined,
-    // repairIfOverwritten: a progress render delivered at the same moment can land
-    // on top of this outcome, and the surface has no conditional update to prevent
-    // it — so re-assert the outcome if that happened.
-    { preservePreview: true, repairIfOverwritten: true },
-  );
+  const target = issueRef(replyIssueId, workspaceId);
+  const existing = evt.iterationReplyId
+    ? { commentId: evt.iterationReplyId }
+    : undefined;
+  let reply: CommentRef | null | undefined;
+  let jiraFinalBody: Record<string, unknown> | undefined;
+  if (channel.kind === 'jira') {
+    const pointerKind = !succeeded
+      ? 'details'
+      : (isNoChangeIteration(evt.codeChanged) ? 'answer' : 'result');
+    const jiraCtx = {
+      cloudId: workspaceId,
+      registryTableName: JIRA_REGISTRY_TABLE!,
+    };
+    jiraFinalBody = buildAdfDocument(renderJiraFinalStatusComment({
+      eventType: succeeded
+        ? 'task_completed'
+        : (evt.status === TaskStatus.COMPLETED
+          ? 'task_failed'
+          : `task_${evt.status.toLowerCase()}`),
+      prUrl,
+      costUsd: evt.costUsd ?? null,
+      turns: evt.turns ?? null,
+      maxTurns: evt.maxTurns ?? null,
+      durationS: evt.durationS ?? null,
+      taskId: evt.taskId,
+      errorTitle: classifyError(evt.errorMessage)?.title ?? null,
+    }));
+    if (existing) {
+      const pointer = await updateIssueCommentAdf(
+        jiraCtx,
+        target.issueId,
+        existing.commentId,
+        buildAdfDocument(renderJiraFinishedPointer(pointerKind)),
+      );
+      if (!pointer.ok) {
+        reply = null;
+      }
+    }
+    if (reply !== null) {
+      const finalResult = await postIssueCommentAdf(
+        jiraCtx,
+        target.issueId,
+        jiraFinalBody,
+      );
+      reply = finalResult.ok ? { commentId: finalResult.commentId } : null;
+      if (!finalResult.ok && !finalResult.retryable && existing) {
+        const fallback = await updateIssueCommentAdf(
+          jiraCtx,
+          target.issueId,
+          existing.commentId,
+          jiraFinalBody,
+        );
+        if (fallback.ok) {
+          logger.warn('Jira iteration result post failed terminally — folded outcome into status comment', {
+            task_id: evt.taskId,
+            jira_issue_key: target.issueId,
+            comment_id: existing.commentId,
+          });
+          reply = existing;
+        }
+      }
+    }
+  } else {
+    reply = await channel.upsertThreadedReply?.(
+      target,
+      { commentId },
+      linearBody,
+      existing,
+      // repairIfOverwritten: a progress render delivered at the same moment can land
+      // on top of this outcome, and the surface has no conditional update to prevent
+      // it — so re-assert the outcome if that happened.
+      { preservePreview: true, repairIfOverwritten: true },
+    );
+  }
   // A surface that cannot mature a reply at all (the capability is optional)
   // legitimately returns undefined; only an attempted-and-failed reply — null —
   // means the outcome went unsaid.
@@ -1223,6 +1308,25 @@ async function replyToIterationComment(
         release,
       });
       return;
+    }
+    if (channel.kind === 'jira' && existing && jiraFinalBody) {
+      const fallback = await updateIssueCommentAdf(
+        {
+          cloudId: workspaceId,
+          registryTableName: JIRA_REGISTRY_TABLE!,
+        },
+        target.issueId,
+        existing.commentId,
+        jiraFinalBody,
+      );
+      if (fallback.ok) {
+        logger.warn('Jira iteration retries exhausted — folded outcome into status comment', {
+          task_id: evt.taskId,
+          jira_issue_key: target.issueId,
+          comment_id: existing.commentId,
+        });
+        reply = existing;
+      }
     }
     // No attempt is coming. Fall through WITHOUT a reply so the reaction on the
     // trigger comment still moves off 👀: a reply that will never arrive is

@@ -23,6 +23,7 @@ jest.mock('@aws-sdk/lib-dynamodb', () => ({
   DynamoDBDocumentClient: { from: jest.fn(() => ({ send: ddbSend })) },
   GetCommand: jest.fn((input: unknown) => ({ _type: 'Get', input })),
   ScanCommand: jest.fn((input: unknown) => ({ _type: 'Scan', input })),
+  UpdateCommand: jest.fn((input: unknown) => ({ _type: 'Update', input })),
 }));
 
 const createTaskCoreMock = jest.fn();
@@ -31,8 +32,10 @@ jest.mock('../../src/handlers/shared/create-task-core', () => ({
 }));
 
 const reportIssueFailureMock = jest.fn();
+const postIssueCommentMock = jest.fn();
 jest.mock('../../src/handlers/shared/jira-feedback', () => ({
   reportIssueFailure: (...args: unknown[]) => reportIssueFailureMock(...args),
+  postIssueComment: (...args: unknown[]) => postIssueCommentMock(...args),
 }));
 
 const resolveJiraOauthTokenMock = jest.fn();
@@ -160,6 +163,8 @@ describe('jira-webhook-processor handler', () => {
     createTaskCoreMock.mockReset();
     reportIssueFailureMock.mockReset();
     reportIssueFailureMock.mockResolvedValue(undefined);
+    postIssueCommentMock.mockReset();
+    postIssueCommentMock.mockResolvedValue('ack-comment-1');
     resolveJiraOauthTokenMock.mockReset();
     // Default: tenant IS resolvable. Drop-path tests override per-case
     // with `.mockResolvedValueOnce(null)`.
@@ -272,21 +277,92 @@ describe('jira-webhook-processor handler', () => {
         jira_status_on_pr: 'Code Review',
         jira_trigger_comment_id: 'comment-1',
         jira_prior_task_id: 'prior-task',
+        trigger_comment_id: 'comment-1',
+        trigger_comment_issue_id: 'ENG-42',
         jira_oauth_secret_arn:
           'arn:aws:secretsmanager:us-east-1:123:secret:bgagent-jira-oauth-cloud-1',
       });
-      expect(reportIssueFailureMock).toHaveBeenCalledWith(
+      expect(postIssueCommentMock).toHaveBeenCalledWith(
         expect.anything(),
         'ENG-42',
-        '👀 ABCA accepted this follow-up and is updating PR #42.',
+        '👀 On it — reading the PR…',
       );
-      expect(ddbSend.mock.calls).toHaveLength(2);
-      expect(ddbSend.mock.calls[0][0].input.Key)
-        .toEqual({ jira_project_identity: 'cloud-1#ENG' });
-      expect(ddbSend.mock.calls[0][0].input.ConsistentRead).toBe(true);
-      expect(ddbSend.mock.calls[1][0].input.Key)
+      const ackUpdate = ddbSend.mock.calls
+        .map(([command]) => command)
+        .find((command) => command?._type === 'Update');
+      expect(ackUpdate.input).toMatchObject({
+        TableName: 'Tasks',
+        UpdateExpression: 'SET channel_metadata.iteration_reply_comment_id = :comment_id',
+        ExpressionAttributeValues: { ':comment_id': 'ack-comment-1' },
+      });
+      // Comment triggers validate the active project mapping, then attribute
+      // the task to the linked comment author. The additional write stores the
+      // maturing acknowledgement id.
+      const gets = ddbSend.mock.calls
+        .map(([command]) => command)
+        .filter((command) => command?._type === 'Get');
+      expect(gets).toHaveLength(2);
+      const userGet = gets.find((command) =>
+        command.input.TableName === 'JiraUsers');
+      expect(userGet?.input.Key)
         .toEqual({ jira_identity: 'cloud-1#reviewer-1' });
-      expect(ddbSend.mock.calls[1][0].input.ConsistentRead).toBe(true);
+      expect(userGet?.input.ConsistentRead).toBe(true);
+    });
+
+    test('an orchestrated child iteration preserves routing and marks the restack source', async () => {
+      resolveTaskByJiraIssueMock.mockResolvedValueOnce({
+        ...priorTask,
+        channel_metadata: {
+          ...priorTask.channel_metadata,
+          orchestration_id: 'orch-1',
+          orchestration_sub_issue_id: 'ENG-42',
+        },
+      });
+      ddbSend.mockResolvedValueOnce({
+        Item: { platform_user_id: 'linked-reviewer', status: 'active' },
+      });
+      createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: '{}' });
+
+      await handler(eventWith(comment()));
+
+      expect(createTaskCoreMock.mock.calls[0][1].channelMetadata).toMatchObject({
+        orchestration_id: 'orch-1',
+        orchestration_sub_issue_id: 'ENG-42',
+        orchestration_iteration: 'true',
+        trigger_comment_id: 'comment-1',
+        trigger_comment_issue_id: 'ENG-42',
+      });
+      expect(postIssueCommentMock).toHaveBeenCalledTimes(1);
+    });
+
+    test('an acknowledgement that posts but cannot persist its id does not fail task creation', async () => {
+      resolveTaskByJiraIssueMock.mockResolvedValueOnce(priorTask);
+      createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: '{}' });
+      ddbSend.mockImplementation((command: {
+        _type?: string;
+        input: { TableName?: string; UpdateExpression?: string };
+      }) => {
+        if (command.input.TableName === 'JiraProjects') {
+          return Promise.resolve({
+            Item: { repo: 'org/repo', status: 'active', label_filter: 'bgagent' },
+          });
+        }
+        if (command.input.TableName === 'JiraUsers') {
+          return Promise.resolve({ Item: undefined });
+        }
+        if (
+          command._type === 'Update'
+          && command.input.UpdateExpression?.includes('iteration_reply_comment_id')
+        ) {
+          return Promise.reject(new Error('DynamoDB unavailable'));
+        }
+        return Promise.resolve({});
+      });
+
+      await expect(handler(eventWith(comment()))).resolves.toBeUndefined();
+
+      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+      expect(postIssueCommentMock).toHaveBeenCalledTimes(1);
     });
 
     test('an orchestrated child iteration preserves routing and marks the restack source', async () => {
@@ -441,10 +517,10 @@ describe('jira-webhook-processor handler', () => {
       });
       expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
       expect(createTaskCoreMock.mock.calls[0][1].channelMetadata.jira_project_key).toBe('ENG');
-      expect(reportIssueFailureMock).toHaveBeenCalledWith(
+      expect(postIssueCommentMock).toHaveBeenCalledWith(
         expect.anything(),
         'ENG-42',
-        '👀 ABCA accepted this follow-up and is updating PR #42.',
+        '👀 On it — reading the PR…',
       );
     });
 
@@ -537,6 +613,7 @@ describe('jira-webhook-processor handler', () => {
 
       expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
       expect(reportIssueFailureMock).not.toHaveBeenCalled();
+      expect(postIssueCommentMock).not.toHaveBeenCalled();
     });
 
     test('task admission failure is reported instead of acknowledged', async () => {
