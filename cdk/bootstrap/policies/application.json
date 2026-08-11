@@ -173,6 +173,24 @@
     },
     {
       "Action": [
+        "sns:CreateTopic",
+        "sns:DeleteTopic",
+        "sns:GetTopicAttributes",
+        "sns:SetTopicAttributes",
+        "sns:Subscribe",
+        "sns:Unsubscribe",
+        "sns:GetSubscriptionAttributes",
+        "sns:ListSubscriptionsByTopic",
+        "sns:TagResource",
+        "sns:UntagResource",
+        "sns:ListTagsForResource"
+      ],
+      "Effect": "Allow",
+      "Resource": "arn:aws:sns:*:*:backgroundagent-dev-*",
+      "Sid": "SNS"
+    },
+    {
+      "Action": [
         "cloudfront:CreateDistribution",
         "cloudfront:UpdateDistribution",
         "cloudfront:DeleteDistribution",

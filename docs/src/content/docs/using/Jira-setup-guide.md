@@ -332,6 +332,16 @@ When the comment author has linked their Jira and ABCA accounts, the iteration i
 
 The acknowledgement is immediate after task admission. The existing platform fan-out path posts the terminal outcome and cost comment when the iteration finishes. Comment redelivery is idempotent: the webhook receiver deduplicates by Jira comment ID, and task creation uses a deterministic idempotency key as a second guard.
 
+## Authored subtask orchestration
+
+Applying the trigger label to a parent that already has Jira subtasks runs those subtasks as one orchestration instead of creating a separate coding task for the parent. Each subtask becomes an ordinary ABCA task. Standard Jira `blocks` / `is blocked by` links between those subtasks determine release order: roots start immediately, and blocked work starts only after all predecessors succeed.
+
+All executable subtasks must belong to active Jira project mappings that resolve to the same repository as the parent. Cross-project subtasks are supported when their mappings name that same repository; cross-repository graphs, unmapped projects, cycles, and blocker links to issues outside the parent's executable subtask set are rejected before any orchestration rows are written. Jira API or authentication failures are reported on the parent and never silently degrade to a single parent task.
+
+The parent receives orchestration progress and the terminal rollup. Parallel leaves converge through an internal integration task so the orchestration produces one combined pull request; that internal task does not address a nonexistent Jira issue. An `@bgagent` comment on a real child updates that child's pull request and restacks dependent pull requests through the shared orchestration reconciler.
+
+In this version the authored graph is frozen at the first successful seed. Re-applying the trigger label to an already-seeded parent is an idempotent no-op; it does not rerun completed children or add newly created subtasks.
+
 ## Issue context: attachments and comments
 
 Beyond the summary and description, the processor enriches the task with the practical context a Jira ticket usually carries — attached files and recent clarifications — so the agent isn't left guessing at "see the attached log" or an acceptance detail buried in a comment. Both are fetched **authenticated at task-admission time** using the tenant's existing `read:jira-work` scope (**no new OAuth scopes, no re-authorization**), because a headless agent can't fetch them itself.

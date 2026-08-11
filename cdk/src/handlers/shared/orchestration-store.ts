@@ -91,6 +91,12 @@ export interface OrchestrationChildRow {
   /** Sub-issue title, used to build the child task description. */
   readonly title?: string;
   /**
+   * Opaque, adapter-owned values copied onto the released task's
+   * ``channel_metadata``. The orchestration engine persists these without
+   * interpreting them; release-owned keys overwrite collisions.
+   */
+  readonly channel_metadata?: Readonly<Record<string, string>>;
+  /**
    * Sub-issue scope/description, when the graph source supplied one. Persisted at
    * seed so the coding agent's task_description carries the per-piece scope (e.g.
    * a promised filename), not the title alone. Absent when the graph was read
@@ -172,6 +178,9 @@ export interface OrchestrationReleaseContext {
   readonly linear_oauth_secret_arn?: string;
   readonly linear_workspace_slug?: string;
   readonly linear_project_id?: string;
+  /** Jira parent workflow destination overrides captured from the project map. */
+  readonly jira_status_on_start?: string;
+  readonly jira_status_on_pr?: string;
   /**
    * The project's resolved trigger label (the project mapping's ``label_filter``).
    * Persisted at SEED time because that is the only point where the mapping is in
@@ -445,6 +454,7 @@ export async function seedOrchestration(
     ...(c.identifier !== undefined && dualWrite('display_id', 'linear_identifier', c.identifier)),
     ...(c.title !== undefined && { title: c.title }),
     ...(c.description !== undefined && c.description !== '' && { description: c.description }),
+    ...(c.channel_metadata !== undefined && { channel_metadata: c.channel_metadata }),
     created_at: now,
     updated_at: now,
     ...(ttl !== undefined && { ttl }),
@@ -471,6 +481,12 @@ export async function seedOrchestration(
     }),
     ...(releaseContext.linear_project_id !== undefined && {
       linear_project_id: releaseContext.linear_project_id,
+    }),
+    ...(releaseContext.jira_status_on_start !== undefined && {
+      jira_status_on_start: releaseContext.jira_status_on_start,
+    }),
+    ...(releaseContext.jira_status_on_pr !== undefined && {
+      jira_status_on_pr: releaseContext.jira_status_on_pr,
     }),
     ...(releaseContext.trigger_label !== undefined && {
       trigger_label: releaseContext.trigger_label,
@@ -639,6 +655,7 @@ export async function extendOrchestration(params: {
       ...(n.identifier !== undefined && dualWrite('display_id', 'linear_identifier', n.identifier)),
       ...(n.title !== undefined && { title: n.title }),
       ...(n.description !== undefined && n.description !== '' && { description: n.description }),
+      ...(n.channel_metadata !== undefined && { channel_metadata: n.channel_metadata }),
       created_at: now,
       updated_at: now,
       ...(ttl !== undefined && { ttl }),
@@ -965,6 +982,12 @@ export async function loadOrchestration(
       }),
       ...(metaItem.linear_project_id !== undefined && {
         linear_project_id: metaItem.linear_project_id as string,
+      }),
+      ...(metaItem.jira_status_on_start !== undefined && {
+        jira_status_on_start: metaItem.jira_status_on_start as string,
+      }),
+      ...(metaItem.jira_status_on_pr !== undefined && {
+        jira_status_on_pr: metaItem.jira_status_on_pr as string,
       }),
       ...(metaItem.trigger_label !== undefined && {
         trigger_label: metaItem.trigger_label as string,

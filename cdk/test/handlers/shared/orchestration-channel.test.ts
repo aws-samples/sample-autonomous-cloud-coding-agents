@@ -60,9 +60,11 @@ jest.mock('../../../src/handlers/shared/linear-subissue-fetch', () => ({
 
 const jiraPostIssueComment = jest.fn();
 const jiraReportIssueFailure = jest.fn();
+const jiraTransitionIssueState = jest.fn();
 jest.mock('../../../src/handlers/shared/jira-feedback', () => ({
   postIssueComment: (...a: unknown[]) => jiraPostIssueComment(...a),
   reportIssueFailure: (...a: unknown[]) => jiraReportIssueFailure(...a),
+  transitionIssueState: (...a: unknown[]) => jiraTransitionIssueState(...a),
 }));
 
 import { type IssueRef } from '../../../src/handlers/shared/orchestration-channel';
@@ -247,14 +249,28 @@ describe('Jira channel adapter (capability-limited surface)', () => {
     );
   });
 
-  test('OMITS every optional capability Jira lacks — the engine no-ops them', () => {
+  test('implements workflow transitions and omits unsupported capabilities', async () => {
+    jiraTransitionIssueState.mockResolvedValue(true);
+    const issue: IssueRef = {
+      ...jiraIssue,
+      stateOverrides: { started: 'Doing', inReview: 'Review' },
+    };
+    await expect(ch.transitionState!(issue, 'started', { allowRegression: true }))
+      .resolves.toBe(true);
+    expect(jiraTransitionIssueState).toHaveBeenCalledWith(
+      { cloudId: 'cloud-1', registryTableName: 'JiraRegistry' },
+      'ABC-1',
+      'started',
+      { started: 'Doing', inReview: 'Review' },
+      { allowRegression: true },
+    );
+
     // Check presence via the key, not the bound method, so the engine's
     // `if (channel.reactToComment)` capability guard is what's exercised.
     for (const capability of [
       'reactToComment',
       'replaceCommentReaction',
       'replaceIssueReaction',
-      'transitionState',
       'revertState',
       'postThreadedReply',
       'upsertThreadedReply',

@@ -53,6 +53,7 @@ import {
   type LambdaMicrovmImageInputs,
 } from '../constructs/lambda-microvm-compute';
 import { LinearIntegration } from '../constructs/linear-integration';
+import { OperationalAlerts } from '../constructs/operational-alerts';
 import { OrchestrationReconciler } from '../constructs/orchestration-reconciler';
 import { OrchestrationTable } from '../constructs/orchestration-table';
 import { PendingUploadCleanup } from '../constructs/pending-upload-cleanup';
@@ -960,7 +961,7 @@ export class AgentStack extends Stack {
     // 2-consumer architectural note in `task-events-table.ts` —
     // adding a third consumer here requires the Kinesis Data Streams
     // for DynamoDB migration.
-    new ApprovalMetricsPublisherConsumer(this, 'ApprovalMetricsPublisherConsumer', {
+    const approvalMetricsPublisher = new ApprovalMetricsPublisherConsumer(this, 'ApprovalMetricsPublisherConsumer', {
       taskEventsTable: taskEventsTable.table,
     });
 
@@ -1298,6 +1299,9 @@ export class AgentStack extends Stack {
       userPool: taskApi.userPool,
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
+      orchestrationTable: orchestrationTable.table,
+      userConcurrencyTable: userConcurrencyTable.table,
+      maxConcurrentTasksPerUser: maxConcurrentTasksPerUser,
       repoTable: repoTable.table,
       orchestratorFunctionArn: orchestrator.alias.functionArn,
       guardrailId: inputGuardrail.guardrailId,
@@ -1408,7 +1412,7 @@ export class AgentStack extends Stack {
     // ``bgagent/slack/*``; Linear dispatcher posts a single
     // deterministic final-status comment with cost/turns/duration.
     // Email remains a log-only stub until SES wires.
-    new FanOutConsumer(this, 'FanOutConsumer', {
+    const fanOutConsumer = new FanOutConsumer(this, 'FanOutConsumer', {
       taskEventsTable: taskEventsTable.table,
       taskTable: taskTable.table,
       repoTable: repoTable.table,
@@ -1479,6 +1483,31 @@ export class AgentStack extends Stack {
     // tasks to the changed node's dependents. No inbound pull_request webhook
     // (those are WAF-blocked by the API's managed rule set anyway), so there
     // is no RestackProcessor Lambda to wire here.
+
+    // --- Operational alerts channel (§11.5 follow-up, issue #629) ---
+    // A single stack-wide SNS topic that the DLQ-depth alarms publish to
+    // on state change, so poison-pill accumulation pushes a notification
+    // instead of sitting silently in the Alarms console. Delivery target
+    // is configurable: pass an email via `-c alertEmail=ops@example.com`
+    // (AWS sends a confirmation link that must be clicked), or leave it
+    // unset and subscribe Slack / PagerDuty manually against the exported
+    // topic ARN below.
+    const operationalAlerts = new OperationalAlerts(this, 'OperationalAlerts', {
+      alertEmail: this.node.tryGetContext('alertEmail') as string | undefined,
+    });
+    // Wire the DLQ-depth alarms shipped in #117 (FanOut + approval-metrics
+    // publisher) plus the screenshot processor's async-invoke DLQ alarm —
+    // all three share the threshold-1 "records landed in a DLQ" shape.
+    operationalAlerts.addAlarmActions(
+      fanOutConsumer.dlqDepthAlarm,
+      approvalMetricsPublisher.dlqAlarm,
+      githubScreenshot.processorDlqDepthAlarm,
+    );
+
+    new CfnOutput(this, 'OperationalAlertsTopicArn', {
+      value: operationalAlerts.topic.topicArn,
+      description: 'SNS topic for DLQ-depth CloudWatch alarms — subscribe Slack / PagerDuty / email here (#629)',
+    });
 
     new CfnOutput(this, 'GitHubWebhookUrl', {
       value: `${taskApi.api.url}github/webhook`,

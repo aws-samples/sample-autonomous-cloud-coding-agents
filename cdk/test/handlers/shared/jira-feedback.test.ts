@@ -24,9 +24,11 @@ jest.mock('../../../src/handlers/shared/jira-oauth-resolver', () => ({
 
 import {
   buildAdfDocument,
+  parseMarkdownRuns,
   postIssueComment,
   postIssueCommentAdf,
   reportIssueFailure,
+  transitionIssueState,
 } from '../../../src/handlers/shared/jira-feedback';
 
 const CTX = { cloudId: 'cloud-uuid-1', registryTableName: 'JiraWorkspaceRegistry' };
@@ -210,6 +212,79 @@ describe('jira-feedback: postIssueComment', () => {
   });
 });
 
+describe('jira-feedback: transitionIssueState', () => {
+  test('moves a To Do parent to the configured start status', async () => {
+    const fetchMock = jest.fn()
+      .mockResolvedValueOnce({
+        ...mockResponse(200),
+        text: async () => JSON.stringify({
+          fields: {
+            status: {
+              name: 'To Do',
+              statusCategory: { key: 'new' },
+            },
+          },
+          transitions: [
+            {
+              id: '31',
+              hasScreen: false,
+              to: {
+                name: 'Doing',
+                statusCategory: { key: 'indeterminate' },
+              },
+            },
+          ],
+        }),
+      })
+      .mockResolvedValueOnce(mockResponse(204));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(transitionIssueState(
+      CTX,
+      'ENG-1',
+      'started',
+      { started: 'Doing' },
+    )).resolves.toBe(true);
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body as string))
+      .toEqual({ transition: { id: '31' } });
+  });
+
+  test('permits the explicit same-category review-to-progress reopen', async () => {
+    const fetchMock = jest.fn()
+      .mockResolvedValueOnce({
+        ...mockResponse(200),
+        text: async () => JSON.stringify({
+          fields: {
+            status: {
+              name: 'In Review',
+              statusCategory: { key: 'indeterminate' },
+            },
+          },
+          transitions: [
+            {
+              id: '11',
+              hasScreen: false,
+              to: {
+                name: 'In Progress',
+                statusCategory: { key: 'indeterminate' },
+              },
+            },
+          ],
+        }),
+      })
+      .mockResolvedValueOnce(mockResponse(204));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(transitionIssueState(
+      CTX,
+      'ENG-1',
+      'started',
+      {},
+      { allowRegression: true },
+    )).resolves.toBe(true);
+  });
+});
+
 describe('jira-feedback: 401 → forced refresh → retry (issue #370)', () => {
   test('refreshes the token and retries once on 401, succeeding the second time', async () => {
     // First resolve hands back a (stale) token; the forced-refresh resolve
@@ -311,6 +386,19 @@ describe('jira-feedback: 401 → forced refresh → retry (issue #370)', () => {
 });
 
 describe('jira-feedback: buildAdfDocument (multi-paragraph ADF, #573)', () => {
+  test('parses generated bold, code, and PR links into ADF marks', () => {
+    expect(parseMarkdownRuns(
+      '- ✅ **TG-5** — succeeded — [PR](https://github.com/acme/repo/pull/26) `task-1`',
+    )).toEqual([
+      { text: '- ✅ ' },
+      { text: 'TG-5', strong: true },
+      { text: ' — succeeded — ' },
+      { text: 'PR', href: 'https://github.com/acme/repo/pull/26' },
+      { text: ' ' },
+      { text: 'task-1', code: true },
+    ]);
+  });
+
   test('maps each paragraph to an ADF paragraph node, preserving order', () => {
     const doc = buildAdfDocument([
       [{ text: 'header', strong: true }],
