@@ -78,6 +78,27 @@ describe('RegistryApi nested stack', () => {
     });
   });
 
+  test('handler roles are scoped to the wired registry ARN — no bare "*" resource (#246 review)', () => {
+    const { template } = synth();
+    const policies = template.findResources('AWS::IAM::Policy');
+    const serialized = JSON.stringify(policies);
+    // The wired registry id must appear in the resource ARNs...
+    expect(serialized).toContain('reg-abc123');
+    // ...and no registry statement may grant a bare "*" resource (the finding-10
+    // regression: a resource:['*'] would let a read handler reach other registries).
+    for (const policy of Object.values(policies)) {
+      const statements = (policy as { Properties: { PolicyDocument: { Statement: Array<{ Action: unknown; Resource: unknown }> } } })
+        .Properties.PolicyDocument.Statement;
+      for (const stmt of statements) {
+        const actions = JSON.stringify(stmt.Action);
+        if (actions.includes('bedrock-agentcore:')) {
+          expect(stmt.Resource).not.toBe('*');
+          expect(JSON.stringify(stmt.Resource)).not.toBe('"*"');
+        }
+      }
+    }
+  });
+
   test('exposes an apiUrl for the CLI to target', () => {
     const { registryApi } = synth();
     expect(registryApi.apiUrl).toBeDefined();

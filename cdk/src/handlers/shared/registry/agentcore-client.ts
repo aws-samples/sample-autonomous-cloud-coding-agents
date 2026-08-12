@@ -41,7 +41,9 @@ import {
   ConflictException,
   ResourceNotFoundException,
 } from '@aws-sdk/client-bedrock-agentcore-control';
+import * as yaml from 'js-yaml';
 import { logger } from '../logger';
+import { makeClient } from '../ua';
 import type { RegistryClient } from './client';
 import type { ParsedRef } from './ref';
 import { selectHighest } from './resolver';
@@ -114,47 +116,69 @@ function buildSkillMd(input: {
   const description = String(
     input.discovery.description ?? input.discovery.summary ?? `${input.namespace}/${input.name} skill`,
   ).slice(0, 100);
-  // Base64-encode the runtime JSON. Emitting raw JSON in a single-quoted YAML
-  // scalar breaks the moment the payload contains a `'` (e.g. prompt_fragment
-  // "Don't skip tests") — js-yaml rejects the frontmatter and native AgentCore
-  // descriptor validation fails, even though the ABCA API accepted it (#246
-  // review). Base64 is quote/newline/apostrophe-safe and needs no YAML escaping.
+  // Base64-encode the runtime JSON so the value is quote/newline/apostrophe-safe.
   const runtimeB64 = Buffer.from(JSON.stringify(input.runtime), 'utf-8').toString('base64');
-  const lines = [
+  // Serialize the frontmatter with a real YAML emitter rather than concatenating
+  // lines. Hand-built lines let a caller-controlled `description` containing a
+  // newline smuggle a second `x-abca-runtime:` key that shadows the validated
+  // one on read, bypassing publish-time validation (#246 review B1/B2). `yaml.dump`
+  // quotes/escapes any newline in a value, so no discovery field can inject a key.
+  const frontmatter: Record<string, unknown> = {
+    name: skillNameSlug(input.namespace, input.name),
+    description,
+    version: input.version,
+    [SKILL_RUNTIME_FM_KEY]: runtimeB64,
+  };
+  if (input.publisher) frontmatter[PUBLISHER_FM_KEY] = input.publisher;
+  const frontmatterYaml = yaml.dump(frontmatter, { lineWidth: -1 }).trimEnd();
+  return [
     '---',
-    `name: ${skillNameSlug(input.namespace, input.name)}`,
-    `description: ${description}`,
-    `version: ${input.version}`,
-    `${SKILL_RUNTIME_FM_KEY}: ${runtimeB64}`,
-  ];
-  if (input.publisher) lines.push(`${PUBLISHER_FM_KEY}: ${input.publisher}`);
-  lines.push(
+    frontmatterYaml,
     '---',
     `# ${input.namespace}/${input.name}`,
     '',
     String(input.discovery.body ?? 'ABCA registry skill.'),
-  );
-  return lines.join('\n');
+  ].join('\n');
 }
 
-/** Recover the publisher (Cognito sub) from a SKILL.md frontmatter line. */
+/** Extract and YAML-parse the frontmatter block (between the first `---`/`---`
+ *  pair) into an object. Returns {} when there is no valid block. Parsing the
+ *  whole block as one document (rather than a per-line regex) is what makes key
+ *  injection via a newline-bearing value impossible — a duplicate key is a YAML
+ *  error, and a value's newline stays inside that value. */
+function parseSkillFrontmatter(skillMd: string): Record<string, unknown> {
+  const m = skillMd.match(/^---\n([\s\S]*?)\n---/);
+  if (!m) return {};
+  try {
+    const parsed = yaml.load(m[1], { json: true });
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Recover the publisher (Cognito sub) from the parsed SKILL.md frontmatter. */
 function parseSkillPublisher(skillMd: string): string | undefined {
-  const m = skillMd.match(new RegExp(`^${PUBLISHER_FM_KEY}:\\s*(.+?)\\s*$`, 'm'));
-  return m ? m[1] : undefined;
+  const v = parseSkillFrontmatter(skillMd)[PUBLISHER_FM_KEY];
+  return typeof v === 'string' ? v : undefined;
 }
 
 /** Recover the ABCA runtime payload from a SKILL.md's `x-abca-runtime`
- *  frontmatter line (base64-encoded JSON). Mirrors
+ *  frontmatter key (base64-encoded JSON). Mirrors
  *  ``agent/src/registry/agentcore_client.py``. Also accepts the legacy
  *  single-quoted-JSON form so records published before the base64 switch still
- *  resolve. */
+ *  resolve. Reads the key from the YAML-parsed frontmatter object, so a
+ *  caller-controlled discovery field cannot inject a shadowing key. */
 function parseSkillRuntime(skillMd: string): unknown {
-  const line = skillMd.match(new RegExp(`^${SKILL_RUNTIME_FM_KEY}:\\s*(.+?)\\s*$`, 'm'));
-  if (!line) return {};
-  const raw = line[1];
-  // Legacy form: '<json>' (single-quoted). New form: bare base64.
-  if (raw.startsWith("'") && raw.endsWith("'")) {
-    return JSON.parse(raw.slice(1, -1));
+  const raw = parseSkillFrontmatter(skillMd)[SKILL_RUNTIME_FM_KEY];
+  if (typeof raw !== 'string') return {};
+  // Legacy form: raw JSON (YAML has already unwrapped its single-quoting, so the
+  // value arrives starting with `{`). New form: base64-encoded JSON.
+  const trimmed = raw.trim();
+  if (trimmed.startsWith('{')) {
+    return JSON.parse(trimmed);
   }
   return JSON.parse(Buffer.from(raw, 'base64').toString('utf-8'));
 }
@@ -173,7 +197,9 @@ export class AgentCoreRegistryClient implements RegistryClient {
 
   constructor(opts: AgentCoreRegistryClientOptions) {
     this.registryId = opts.registryId;
-    this.client = opts.client ?? new BedrockAgentCoreControlClient({});
+    // makeClient attaches the ABCA solution UA segment (#319); the injection
+    // seam (opts.client) is preserved for tests.
+    this.client = opts.client ?? makeClient(BedrockAgentCoreControlClient);
   }
 
   // --- name (Option A) encode/decode ------------------------------------------

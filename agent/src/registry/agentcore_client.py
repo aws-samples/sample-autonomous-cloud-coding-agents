@@ -13,6 +13,8 @@ import json
 import re
 from typing import TYPE_CHECKING, Any
 
+import yaml
+
 from registry.client import RegistryResolutionError, ResolvedAsset
 from registry.resolver import select_highest
 
@@ -28,9 +30,11 @@ _RUNTIME_META_KEY = "dev.abca.runtime"
 # Frontmatter key carrying the runtime payload (JSON) in a native AGENT_SKILLS
 # SKILL.md — mirrors SKILL_RUNTIME_FM_KEY in registry/agentcore-client.ts.
 _SKILL_RUNTIME_FM_KEY = "x-abca-runtime"
-# Capture the whole frontmatter value; the runtime is base64-encoded JSON (new
-# form) or, for records published before the base64 switch, single-quoted JSON.
-_SKILL_RUNTIME_RE = re.compile(rf"^{_SKILL_RUNTIME_FM_KEY}:\s*(.+?)\s*$", re.MULTILINE)
+# Match the whole frontmatter block between the first ---/--- pair. We parse that
+# block as one YAML document (not a per-line regex) so a caller-controlled
+# `description` containing a newline cannot inject a shadowing runtime key
+# (#246 review B1/B2) — mirrors parseSkillFrontmatter in agentcore-client.ts.
+_SKILL_FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---", re.DOTALL)
 _RESOLVABLE_STATUSES = ("APPROVED", "DEPRECATED")
 
 
@@ -71,13 +75,22 @@ class AgentCoreRegistryClient:
             skill_md = (
                 descriptors.get("agentSkills", {}).get("skillMd", {}).get("inlineContent", "")
             )
-            m = _SKILL_RUNTIME_RE.search(skill_md)
+            m = _SKILL_FRONTMATTER_RE.search(skill_md)
             if not m:
                 return {}
-            raw_value = m.group(1)
-            # Legacy form: '<json>' (single-quoted). New form: bare base64.
-            if raw_value.startswith("'") and raw_value.endswith("'"):
-                return json.loads(raw_value[1:-1])
+            try:
+                fm = yaml.safe_load(m.group(1))
+            except yaml.YAMLError:
+                return {}
+            if not isinstance(fm, dict):
+                return {}
+            raw_value = fm.get(_SKILL_RUNTIME_FM_KEY)
+            if not isinstance(raw_value, str):
+                return {}
+            # Legacy form: raw JSON (YAML already unwrapped its single-quoting, so
+            # the value starts with `{`). New form: base64-encoded JSON.
+            if raw_value.lstrip().startswith("{"):
+                return json.loads(raw_value)
             return json.loads(base64.b64decode(raw_value).decode("utf-8"))
         # MCP: JSON server.json with the runtime in a `_meta` block.
         inline = descriptors.get("mcp", {}).get("server", {}).get("inlineContent") or "{}"

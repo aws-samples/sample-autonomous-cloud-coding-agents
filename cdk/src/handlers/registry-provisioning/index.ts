@@ -37,6 +37,7 @@ import {
   ResourceNotFoundException,
 } from '@aws-sdk/client-bedrock-agentcore-control';
 import { logger } from '../shared/logger';
+import { makeClient } from '../shared/ua';
 
 // The Provider framework's request/response shapes are not exported from
 // aws-cdk-lib's public entrypoints, so we model the fields we use.
@@ -62,7 +63,9 @@ interface IsCompleteResponse {
   readonly Data?: Record<string, string>;
 }
 
-const client = new BedrockAgentCoreControlClient({});
+// Route through makeClient so the ABCA solution UA segment is attached (#319);
+// a naked `new BedrockAgentCoreControlClient({})` silently drops attribution.
+const client = makeClient(BedrockAgentCoreControlClient);
 
 /** clientToken length cap — a 64-hex-char (256-bit) prefix of the SHA-256 digest
  *  is plenty of entropy for an idempotency token and stays within API limits. */

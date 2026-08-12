@@ -141,6 +141,14 @@ function validate(body: RegistryPublishRequest): string | null {
   if (!isPlainObject(body.runtime)) {
     return 'runtime must be a JSON object.';
   }
+  // The flags are typed boolean? — enforce it so a truthy string like
+  // `custom: "false"` can't silently flip storage mode (#246 review nit).
+  if (body.custom !== undefined && typeof body.custom !== 'boolean') {
+    return 'custom, when present, must be a boolean.';
+  }
+  if (body.auto_approve !== undefined && typeof body.auto_approve !== 'boolean') {
+    return 'auto_approve, when present, must be a boolean.';
+  }
   return validateRuntime(body.kind, body.runtime);
 }
 
@@ -157,7 +165,25 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
  * skipped it — while the task audit still claimed the pin was used. Reject those
  * at publish so a published record's runtime is always loadable.
  */
+/** Keys each kind's runtime may carry. Publishing any other key is rejected so
+ *  the payload is closed at the gateway — a publisher cannot smuggle an
+ *  `api_key`/`env`/… field that a denylist-based reader would later leak
+ *  (#246 review B2). Kept in sync with the allowlist in registry-resolve.ts. */
+const ALLOWED_RUNTIME_KEYS: Record<string, ReadonlySet<string>> = {
+  mcp_server: new Set(['transport', 'url', 'command', 'args', 'headers', 'tool_prefix']),
+  cedar_policy_module: new Set(['cedar_text']),
+  skill: new Set(['prompt_fragment', 'tool_hints']),
+};
+
 function validateRuntime(kind: string, runtime: Record<string, unknown>): string | null {
+  const allowed = ALLOWED_RUNTIME_KEYS[kind];
+  if (allowed) {
+    const unknown = Object.keys(runtime).filter((k) => !allowed.has(k));
+    if (unknown.length > 0) {
+      return `${kind} runtime has unsupported field(s): ${unknown.join(', ')}. `
+        + `Allowed: ${[...allowed].join(', ')}. Credentials must be referenced (e.g. a Secrets Manager ARN), not inlined.`;
+    }
+  }
   switch (kind) {
     case 'mcp_server': {
       const transport = runtime.transport;

@@ -73,6 +73,9 @@ export class AgentRegistry extends Construct {
       timeout: Duration.seconds(PROVISION_TIMEOUT_SECONDS),
       memorySize: PROVISION_MEMORY_MB,
       bundling,
+      // Names this component in the solution UA segment (#319) instead of
+      // falling through to the generic `api` default.
+      environment: { ABCA_COMPONENT: 'registry-provisioning' },
     };
 
     const onEventFn = new lambda.NodejsFunction(this, 'OnEventFn', {

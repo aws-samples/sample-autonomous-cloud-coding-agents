@@ -28,35 +28,54 @@ import { ErrorCode, errorResponse, successResponse } from './shared/response';
 import type { RegistryResolveResponse } from './shared/types';
 
 /**
- * Redact secret-bearing fields from a runtime payload before returning it on the
- * human-facing resolve response. An mcp_server payload may carry secrets in two
- * places: `headers` (e.g. `Authorization: Bearer …`) on http/sse transports, and
- * `command`/`args` on a `stdio` transport (tokens are routinely passed as CLI
- * args such as `--api-key=…` or embedded in the command string). This endpoint is
- * open to any authenticated caller (resolve/read is not group-gated,
- * REGISTRY.md §10), so returning either verbatim would turn the catalog into a
- * tenant-wide secret-read endpoint (#246 review). Header *keys* are retained as
- * discovery signal — a caller can see the server expects an `Authorization`
- * header without learning its value; `command`/`args` are masked wholesale
- * because their structure itself can encode secrets. The orchestrator does NOT go
- * through this handler: it resolves via the `RegistryClient` port directly and
- * receives the unredacted payload it needs to connect.
+ * Project a runtime payload down to its known-safe discovery fields before
+ * returning it on the human-facing resolve response. This endpoint is open to
+ * any authenticated caller (resolve/read is not group-gated, REGISTRY.md §10),
+ * and the runtime is an open `Record<string, unknown>` — a publisher can attach
+ * arbitrary keys (`api_key`, `env`, a token in a `url` query string, …). A
+ * denylist over a few field names is therefore fail-open by construction, so we
+ * fail closed with an **allowlist**: only fields that are structurally
+ * non-secret for the given kind are returned, everything else is dropped
+ * (#246 review B1/B2). The orchestrator does NOT go through this handler — it
+ * resolves via the `RegistryClient` port directly and receives the full,
+ * unredacted payload it needs to connect.
  */
-function redactRuntimeForResponse(runtime: Record<string, unknown>): Record<string, unknown> {
-  const out = { ...runtime };
-  const headers = out.headers;
-  if (headers && typeof headers === 'object' && !Array.isArray(headers)) {
-    const redacted: Record<string, string> = {};
-    for (const key of Object.keys(headers as Record<string, unknown>)) {
-      redacted[key] = '***';
+function redactRuntimeForResponse(
+  kind: string,
+  runtime: Record<string, unknown>,
+): Record<string, unknown> {
+  if (kind === 'cedar_policy_module') {
+    // Cedar policy source is not a secret (it is authored policy text).
+    return typeof runtime.cedar_text === 'string' ? { cedar_text: runtime.cedar_text } : {};
+  }
+  if (kind === 'skill') {
+    // Skills are prompt text + advisory tool hints — no secret surface.
+    const out: Record<string, unknown> = {};
+    if (typeof runtime.prompt_fragment === 'string') out.prompt_fragment = runtime.prompt_fragment;
+    if (Array.isArray(runtime.tool_hints)) out.tool_hints = runtime.tool_hints;
+    return out;
+  }
+  // mcp_server: return only the discovery-safe shape. transport/type + tool_prefix
+  // are safe; `url` is reduced to its origin (scheme+host) so a token embedded in
+  // the query string or path is never disclosed; header *keys* are retained as a
+  // discovery signal with values masked; command/args and every other key (env,
+  // api_key, …) are dropped.
+  const out: Record<string, unknown> = {};
+  if (typeof runtime.transport === 'string') out.transport = runtime.transport;
+  if (typeof runtime.type === 'string') out.type = runtime.type;
+  if (typeof runtime.tool_prefix === 'string') out.tool_prefix = runtime.tool_prefix;
+  if (typeof runtime.url === 'string') {
+    try {
+      out.url = new URL(runtime.url).origin;
+    } catch {
+      out.url = '***';
     }
-    out.headers = redacted;
   }
-  if (typeof out.command === 'string') {
-    out.command = '***';
-  }
-  if (Array.isArray(out.args)) {
-    out.args = (out.args as unknown[]).map(() => '***');
+  const headers = runtime.headers;
+  if (headers && typeof headers === 'object' && !Array.isArray(headers)) {
+    const masked: Record<string, string> = {};
+    for (const key of Object.keys(headers as Record<string, unknown>)) masked[key] = '***';
+    out.headers = masked;
   }
   return out;
 }
@@ -93,7 +112,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       namespace: asset.namespace,
       name: asset.name,
       version: asset.version,
-      runtime: redactRuntimeForResponse(asset.runtime as unknown as Record<string, unknown>),
+      runtime: redactRuntimeForResponse(asset.kind, asset.runtime as unknown as Record<string, unknown>),
       warnings: asset.warnings,
     };
     return successResponse(200, response, requestId);

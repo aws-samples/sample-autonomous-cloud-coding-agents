@@ -194,6 +194,17 @@ describe('registry-publish handler', () => {
       })).toBe(400);
     });
 
+    test('rejects an mcp_server runtime carrying an unknown/secret field (#246 B2)', async () => {
+      expect(await publishAs({
+        ...validPublishBody,
+        runtime: { transport: 'http', url: 'https://x', api_key: 'AKIA-LEAKED' },
+      })).toBe(400);
+    });
+
+    test('rejects a non-boolean custom flag (#246 review nit)', async () => {
+      expect(await publishAs({ ...validPublishBody, custom: 'false' as unknown as boolean })).toBe(400);
+    });
+
     test('accepts a well-formed stdio mcp_server (command, no url)', async () => {
       mockClient.publish.mockResolvedValue({
         kind: 'mcp_server',
@@ -245,7 +256,7 @@ describe('registry-resolve handler', () => {
     expect(JSON.parse(res.body).error.message).toContain('NO_MATCHING_VERSION');
   });
 
-  test('redacts secret header values but keeps header keys (#246 secret-leak fix)', async () => {
+  test('allowlist: keeps header keys, masks values, reduces url to origin (#246 B2)', async () => {
     mockClient.resolve.mockResolvedValue({
       kind: 'mcp_server',
       namespace: 'acme',
@@ -253,7 +264,8 @@ describe('registry-resolve handler', () => {
       version: '1.4.1',
       runtime: {
         transport: 'http',
-        url: 'https://x',
+        url: 'https://mcp.example/sse?token=SUPERSECRET',
+        tool_prefix: 'mcp__pdf__',
         headers: { 'Authorization': 'Bearer registry-secret', 'X-Api-Key': 'topsecret' },
       } as never,
       warnings: [],
@@ -261,34 +273,44 @@ describe('registry-resolve handler', () => {
     const res = await resolveHandler(ev('registry://mcp_server/acme/pdf-tools@^1.4.1'));
     expect(res.statusCode).toBe(200);
     const { runtime } = JSON.parse(res.body).data;
-    // Header keys survive (discovery signal); values are masked.
+    // Header keys survive (discovery signal); values masked; url reduced to origin.
     expect(runtime.headers).toEqual({ 'Authorization': '***', 'X-Api-Key': '***' });
+    expect(runtime.url).toBe('https://mcp.example'); // query-string token dropped
+    expect(runtime.transport).toBe('http');
+    expect(runtime.tool_prefix).toBe('mcp__pdf__');
+    expect(JSON.stringify(res.body)).not.toContain('SUPERSECRET');
     expect(JSON.stringify(res.body)).not.toContain('registry-secret');
     expect(JSON.stringify(res.body)).not.toContain('topsecret');
-    // Non-secret fields are untouched.
-    expect(runtime.url).toBe('https://x');
   });
 
-  test('redacts stdio command and args (secrets are routinely passed as CLI args)', async () => {
+  test('allowlist: drops unknown/secret-bearing fields entirely (#246 B2 fail-closed)', async () => {
     mockClient.resolve.mockResolvedValue({
       kind: 'mcp_server',
       namespace: 'acme',
       name: 'pdf-tools',
       version: '1.4.1',
+      // A record that (pre-fix) slipped extra keys past publish; the reader must
+      // not leak them even though they are not on any denylist.
       runtime: {
-        transport: 'stdio',
-        command: 'run-secret-server',
-        args: ['--api-key=topsecret', '--verbose'],
+        transport: 'http',
+        url: 'https://h/mcp',
+        api_key: 'AKIA-LEAKED',
+        env: { TOKEN: 'ghp_leak' },
+        command: 'x',
+        args: ['--secret'],
       } as never,
       warnings: [],
     });
     const res = await resolveHandler(ev('registry://mcp_server/acme/pdf-tools@^1.4.1'));
     expect(res.statusCode).toBe(200);
     const { runtime } = JSON.parse(res.body).data;
-    expect(runtime.command).toBe('***');
-    expect(runtime.args).toEqual(['***', '***']);
-    expect(JSON.stringify(res.body)).not.toContain('topsecret');
-    expect(JSON.stringify(res.body)).not.toContain('run-secret-server');
+    // Only allowlisted fields survive; api_key/env/command/args are absent.
+    expect(runtime.api_key).toBeUndefined();
+    expect(runtime.env).toBeUndefined();
+    expect(runtime.command).toBeUndefined();
+    expect(runtime.args).toBeUndefined();
+    expect(JSON.stringify(res.body)).not.toContain('AKIA-LEAKED');
+    expect(JSON.stringify(res.body)).not.toContain('ghp_leak');
   });
 });
 
