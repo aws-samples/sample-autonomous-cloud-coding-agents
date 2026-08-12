@@ -259,13 +259,24 @@ describe('AgentStack', () => {
 
   test('runtime is granted the default Bedrock model set', () => {
     // Default (no bedrockModels context): the runtime execution role must hold
-    // bedrock:InvokeModel on the three default foundation models + their US
-    // inference profiles, scoped (never Resource: '*').
+    // bedrock:InvokeModel on every default foundation model + its US
+    // inference profile, scoped (never Resource: '*').
     const serialized = JSON.stringify(template.findResources('AWS::IAM::Policy'));
     expect(serialized).toContain('foundation-model/anthropic.claude-sonnet-4-6');
     expect(serialized).toContain('inference-profile/us.anthropic.claude-sonnet-4-6');
     expect(serialized).toContain('anthropic.claude-opus-4-20250514-v1:0');
     expect(serialized).toContain('anthropic.claude-haiku-4-5-20251001-v1:0');
+    // Claude Opus 5 (#744). Granted ahead of any default flip: the bare id is
+    // not on-demand invocable (Bedrock returns ValidationException), so the
+    // `us.`-prefixed inference profile is the one actually called — both ARNs
+    // must be present or the agent gets AccessDenied at turn 0.
+    expect(serialized).toContain('foundation-model/anthropic.claude-opus-5');
+    expect(serialized).toContain('inference-profile/us.anthropic.claude-opus-5');
+    // REGRESSION (#744): Opus 4.8 stays granted alongside Opus 5. Blueprints may
+    // pin 4.8 per-repo; dropping it would fail those repos at turn 0. Retiring
+    // 4.8 is a separate, announced change — not a side effect of adding 5.
+    expect(serialized).toContain('foundation-model/anthropic.claude-opus-4-8');
+    expect(serialized).toContain('inference-profile/us.anthropic.claude-opus-4-8');
   });
 
   test('bedrockModels context override propagates to the runtime execution role', () => {

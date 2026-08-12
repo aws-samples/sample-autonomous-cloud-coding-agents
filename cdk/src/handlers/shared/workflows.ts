@@ -94,6 +94,14 @@ export const WORKFLOW_MODEL_ALLOWLIST: readonly string[] = [
   // `bedrockModels` context) in the same change.
   'anthropic.claude-opus-4-8',
   'us.anthropic.claude-opus-4-8',
+  // Claude Opus 5 (#744) — kept in step with the IAM grant added to
+  // DEFAULT_BEDROCK_MODEL_IDS in the same change, per the note above. Only the
+  // bare and `us.`-prefixed forms: `global.anthropic.claude-opus-5` is a live
+  // profile but is deliberately withheld until the grant sites derive the
+  // `global.` ARN (#747) — admitting it here first would pass admission and then
+  // fail at turn 0 with AccessDenied, exactly the drift this comment warns about.
+  'anthropic.claude-opus-5',
+  'us.anthropic.claude-opus-5',
   'anthropic.claude-haiku-4-5-20251001-v1:0',
   'us.anthropic.claude-haiku-4-5-20251001-v1:0',
 ];
