@@ -18,9 +18,13 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from typing import Any
 
 from shell import log
+
+# Seconds to allow each git plumbing call when protecting .mcp.json from commit.
+_GIT_GUARD_TIMEOUT_S = 15
 
 # The runtime payload for an mcp_server asset is a single ``mcpServers`` entry's
 # value (transport/url/headers/…); we key it by ``<namespace>__<name>`` so two
@@ -102,11 +106,56 @@ def _read_existing_mcp_config(path: str) -> dict[str, Any]:
 
 
 class RegistryAssetLoadError(RuntimeError):
-    """A resolved asset could not be applied due to an *infrastructure* failure
-    (the asset resolved fine, but writing it to disk failed). Raised so the task
-    fails-closed rather than running with an audit record claiming an asset that
-    was never actually loaded (#246 Option C). Contrast with *degraded-but-safe*
-    conditions (empty runtime, malformed existing config), which warn + skip."""
+    """A resolved asset could not be applied. Raised so the task fails-closed
+    rather than running with an audit record claiming an asset that was never
+    actually loaded (#246 Option C). This covers every condition that would leave
+    a pinned asset unloaded — missing repo dir, empty/invalid runtime, structurally
+    invalid connection config, or a write error (see :func:`apply_mcp_assets`). The
+    only warn-and-continue case is a pre-existing malformed ``.mcp.json`` on disk
+    (:func:`_read_existing_mcp_config`), which is replaced, not fatal."""
+
+
+def _protect_mcp_json_from_commit(repo_dir: str, mcp_path: str) -> None:
+    """Mark ``.mcp.json`` skip-worktree so the safety-net commit can't push it.
+
+    The resolved runtime we just wrote may carry secret-bearing fields (bearer
+    ``headers``, a ``url`` with a token query string, ``args`` like
+    ``--api-key=…``). ``.mcp.json`` lives in the live git clone, and the
+    post-hook safety net (``git add -u`` → commit → ``git push``) will exfiltrate
+    it into the PR whenever the target repo *tracks* ``.mcp.json`` (#246 review
+    B4). Setting ``skip-worktree`` blocks both ``git add -u`` and an explicit
+    ``git add .mcp.json``; for an untracked file we first ``--intent-to-add`` so
+    the flag has an index entry to attach to. Mechanical enforcement, mirroring
+    the ADR-016 Linear-strip posture — a prompt is not a security boundary.
+
+    Best-effort: git plumbing failures here are logged, not fatal. The SDK still
+    reads the on-disk file (skip-worktree only affects the index, not the
+    working tree), so loading is unaffected either way.
+    """
+
+    def _git(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", "-C", repo_dir, *args],
+            capture_output=True,
+            text=True,
+            timeout=_GIT_GUARD_TIMEOUT_S,
+            check=False,
+        )
+
+    try:
+        tracked = _git("ls-files", "--error-unmatch", ".mcp.json").returncode == 0
+        if not tracked:
+            # Give the untracked file an index entry so skip-worktree can attach.
+            _git("add", "--intent-to-add", ".mcp.json")
+        result = _git("update-index", "--skip-worktree", ".mcp.json")
+        if result.returncode != 0:
+            log(
+                "WARN",
+                f"Registry: could not skip-worktree {mcp_path} "
+                f"(exit {result.returncode}): {result.stderr.strip()}",
+            )
+    except (OSError, subprocess.SubprocessError) as e:
+        log("WARN", f"Registry: skip-worktree guard for {mcp_path} failed: {type(e).__name__}: {e}")
 
 
 def apply_mcp_assets(repo_dir: str, resolved_assets: list[dict[str, Any]]) -> list[str]:
@@ -155,9 +204,6 @@ def apply_mcp_assets(repo_dir: str, resolved_assets: list[dict[str, Any]]) -> li
         servers[key] = _to_mcp_config(runtime, key)
         written.append(key)
 
-    if not written:
-        return []
-
     config["mcpServers"] = servers
     try:
         with open(mcp_path, "w", encoding="utf-8") as f:
@@ -165,6 +211,10 @@ def apply_mcp_assets(repo_dir: str, resolved_assets: list[dict[str, Any]]) -> li
             f.write("\n")
     except OSError as e:
         raise RegistryAssetLoadError(f"failed to write {mcp_path}: {e}") from e
+
+    # The runtime we just wrote may carry secrets; keep the safety-net commit
+    # from pushing it to the PR (#246 review B4).
+    _protect_mcp_json_from_commit(repo_dir, mcp_path)
 
     log("TASK", f"Registry: merged {len(written)} MCP server(s) into {mcp_path}")
     return written

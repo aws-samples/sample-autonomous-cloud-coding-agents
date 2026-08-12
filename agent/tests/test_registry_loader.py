@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 
 import pytest
 
@@ -284,3 +285,64 @@ class TestAdr016LinearReStrip:
         servers = _read_mcp(tmp_path)["mcpServers"]
         assert "evil__linear" not in servers  # Linear scrubbed
         assert "acme__pdf" in servers  # benign server survives
+
+
+class TestMcpJsonNotCommittable:
+    """A written .mcp.json carries the resolved runtime, which may hold secrets
+    (bearer headers, url tokens, --api-key args). It lives in the live git clone,
+    so the post-hook `git add -u` → commit → push must NOT be able to exfiltrate
+    it to the PR. apply_mcp_assets marks it skip-worktree to block that (#246 B4)."""
+
+    @staticmethod
+    def _git(repo, *args) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["git", "-C", str(repo), *args],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def _init_repo(self, tmp_path):
+        self._git(tmp_path, "init", "-q")
+        self._git(tmp_path, "config", "user.email", "t@t")
+        self._git(tmp_path, "config", "user.name", "t")
+        (tmp_path / "README.md").write_text("x")
+        self._git(tmp_path, "add", "README.md")
+        self._git(tmp_path, "commit", "-qm", "init")
+
+    def _secret_asset(self):
+        return _mcp_asset(
+            "acme",
+            "secretful",
+            "1.0.0",
+            {
+                "transport": "http",
+                "url": "https://mcp.example/sse?token=SUPERSECRET",
+                "headers": {"Authorization": "Bearer sk-live-abc123"},
+            },
+        )
+
+    def test_untracked_mcp_json_cannot_be_staged(self, tmp_path):
+        self._init_repo(tmp_path)
+        apply_mcp_assets(str(tmp_path), [self._secret_asset()])
+        # The file exists on disk (the SDK still reads it)...
+        assert (tmp_path / ".mcp.json").exists()
+        # ...but the safety-net `git add -u` (and even an explicit add) cannot stage it.
+        self._git(tmp_path, "add", "-u")
+        self._git(tmp_path, "add", ".mcp.json")
+        staged = self._git(tmp_path, "diff", "--cached")
+        assert "SUPERSECRET" not in staged.stdout
+        assert "sk-live-abc123" not in staged.stdout
+
+    def test_tracked_mcp_json_change_cannot_be_staged(self, tmp_path):
+        # The dangerous case Scott reproduced: the repo already tracks .mcp.json.
+        self._init_repo(tmp_path)
+        (tmp_path / ".mcp.json").write_text('{"mcpServers":{}}\n')
+        self._git(tmp_path, "add", ".mcp.json")
+        self._git(tmp_path, "commit", "-qm", "track mcp")
+        apply_mcp_assets(str(tmp_path), [self._secret_asset()])
+        # git add -u stages tracked-but-modified files — must skip .mcp.json now.
+        self._git(tmp_path, "add", "-u")
+        staged = self._git(tmp_path, "diff", "--cached")
+        assert staged.stdout.strip() == ""
+        assert "SUPERSECRET" not in staged.stdout

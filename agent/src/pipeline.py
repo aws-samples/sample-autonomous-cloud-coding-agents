@@ -1156,11 +1156,11 @@ def run_task(
             # Registry assets (#246): merge resolved mcp_server configs into
             # .mcp.json alongside the channel MCP entry, before the project scan.
             # Fail-closed (#246 Option C): apply_resolved_assets raises
-            # RegistryAssetLoadError on an infrastructure failure (missing
-            # repo_dir / .mcp.json write error) — we let it propagate so the task
+            # RegistryAssetLoadError for any condition that would leave a pinned
+            # asset unloaded (missing repo_dir, empty/invalid runtime, structurally
+            # invalid config, or a write error) — we let it propagate so the task
             # fails rather than running with a pinned-but-absent asset while the
-            # audit record claims it was loaded. Degraded-but-safe cases (empty
-            # runtime) are warn+skip inside the loader.
+            # audit record claims it was loaded.
             if config.resolved_assets:
                 from registry.loader import apply_resolved_assets
 
