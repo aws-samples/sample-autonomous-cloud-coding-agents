@@ -124,7 +124,7 @@ From lowest to highest priority:
 |---|---|---|
 | `compute_type` | `agentcore` | Platform constant |
 | `runtime_arn` | Stack-level env var | CDK stack props |
-| `model_id` | Claude Sonnet 4 | CDK stack props |
+| `model_id` | `us.anthropic.claude-opus-4-8` | Python literal in `agent/src/config.py` (no CDK prop or env knob today) — see [Model configuration](/sample-autonomous-cloud-coding-agents/developer-guide/model-configuration) |
 | `max_turns` | 100 | Platform constant |
 | `max_budget_usd` | None (unlimited) | - |
 | `memory_token_budget` | 2000 | Platform constant |

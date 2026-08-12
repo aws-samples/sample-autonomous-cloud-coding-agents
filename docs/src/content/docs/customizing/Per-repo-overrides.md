@@ -2,13 +2,13 @@
 title: Per-repo overrides
 ---
 
-Blueprints can configure per-repository settings that override platform defaults:
+Blueprints can configure per-repository settings that override platform defaults. For how `model_id` is layered against the platform default, per-task overrides, and the IAM invoke allowlist — plus the cost tradeoffs of picking a different model — see [Model configuration](/sample-autonomous-cloud-coding-agents/developer-guide/model-configuration).
 
 | Setting | Description | Default |
 |---|---|---|
 | `compute_type` | Compute strategy (`agentcore` or `ecs`) | `agentcore` |
 | `runtime_arn` | AgentCore runtime ARN override | Platform default |
-| `model_id` | Foundation model ID | Platform default |
+| `model_id` | Bedrock inference-profile ID (`us.`-prefixed) | `us.anthropic.claude-opus-4-8` |
 | `max_turns` | Default turn limit for tasks | 100 |
 | `max_budget_usd` | Default cost budget in USD per task | None (unlimited) |
 | `system_prompt_overrides` | Additional system prompt instructions | None |

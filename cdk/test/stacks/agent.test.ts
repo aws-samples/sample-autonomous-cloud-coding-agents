@@ -294,15 +294,23 @@ describe('AgentStack', () => {
     // and the per-task session role (the coding agent's task-model grants). The
     // override replaces the model set for the WORKLOAD; these are its surfaces.
     //
-    // Deliberately EXCLUDES the Linear webhook processor's policy: the
-    // deterministic-revise interpreter (linear-integration.ts) makes one tiny
-    // "which plan-edit did they mean?" classification call pinned to a FIXED
-    // model (DEFAULT_REVISE_MODEL_ID = sonnet), by design independent of the
-    // per-task ``bedrockModels`` override — you don't want a cheap classification
-    // running on whatever heavyweight coding model an operator selected. That
-    // grant is scoped to its single fixed model (asserted in the linear
-    // integration tests), so it's not a wildcard/drift risk; it just isn't part
-    // of the override contract this test checks.
+    // The prefix filter, not a blanket scan, is what this test asserts against.
+    // On main those two roles are in fact the ONLY policies in the stack holding
+    // a bedrock:InvokeModel statement — the Linear webhook processor deliberately
+    // has none (`linear-integration.ts`: "No bedrock:InvokeModel grant: this
+    // processor never calls a model directly"; its only Bedrock action is
+    // ApplyGuardrail). So the filter is currently a no-op belt-and-braces guard
+    // that keeps this assertion honest if a future construct adds an
+    // InvokeModel grant that the ``bedrockModels`` override is not meant to
+    // govern — e.g. a cheap fixed-model classification call, which you would not
+    // want running on whatever heavyweight coding model an operator selected.
+    //
+    // (An earlier revision of this comment cited a fixed-model revise grant via a
+    // `DEFAULT_REVISE_MODEL_ID` constant. That constant and its
+    // orchestration-plan-revise-interpret module exist only on the unmerged
+    // #299 branch and never landed on main, so the reference was dangling — see
+    // #742. Corrected rather than deleted to record that the exclusion describes
+    // a hypothetical, not a live grant.)
     const OVERRIDE_GOVERNED_POLICY_PREFIXES = ['RuntimeExecutionRole', 'AgentSessionRole'];
     const policies = overridden.findResources('AWS::IAM::Policy');
     const bedrockResources: unknown[] = [];
