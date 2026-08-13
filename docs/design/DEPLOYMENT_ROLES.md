@@ -22,7 +22,7 @@ The policies are split into six IAM managed policies (each under the 6,144-chara
 | Policy Name | Scope | When applied |
 |-------------|-------|--------------|
 | `IaCRole-ABCA-Infrastructure` | CloudFormation, IAM, VPC networking, Route 53 Resolver DNS Firewall | Always |
-| `IaCRole-ABCA-Application` | DynamoDB, Lambda, API Gateway, Cognito, WAFv2, EventBridge, SQS, CloudFront, Secrets Manager | Always |
+| `IaCRole-ABCA-Application` | DynamoDB, Lambda, API Gateway, Cognito, WAFv2, EventBridge, SQS, SNS, CloudFront, Secrets Manager | Always |
 | `IaCRole-ABCA-Observability` | Bedrock Guardrails, CloudWatch, X-Ray, S3, ECR, KMS, SSM, STS | Always |
 | `IaCRole-ABCA-Compute-Agentcore` | Bedrock AgentCore (`bedrock-agentcore:*`) | Always (default compute backend) |
 | `IaCRole-ABCA-Compute-ECS` | ECS cluster + task-definition operations | Only when `ecs` is in `ComputeTypes` |
@@ -116,6 +116,7 @@ CloudFormation stack operations, IAM roles/policies, VPC networking, and Route 5
       ],
       "Resource": [
         "arn:aws:cloudformation:*:*:stack/backgroundagent-dev/*",
+        "arn:aws:cloudformation:*:*:stack/backgroundagent-dev-*",
         "arn:aws:cloudformation:*:*:stack/CDKToolkit/*"
       ]
     },
@@ -171,6 +172,7 @@ CloudFormation stack operations, IAM roles/policies, VPC networking, and Route 5
             "bedrock.amazonaws.com",
             "bedrock-agentcore.amazonaws.com",
             "events.amazonaws.com",
+            "states.amazonaws.com",
             "vpc-flow-logs.amazonaws.com"
           ]
         }
@@ -392,6 +394,10 @@ DynamoDB tables, Lambda functions, API Gateway, Cognito, WAFv2, EventBridge, SQS
         "cognito-idp:DeleteUserPoolClient",
         "cognito-idp:DescribeUserPoolClient",
         "cognito-idp:UpdateUserPoolClient",
+        "cognito-idp:CreateGroup",
+        "cognito-idp:DeleteGroup",
+        "cognito-idp:GetGroup",
+        "cognito-idp:UpdateGroup",
         "cognito-idp:TagResource",
         "cognito-idp:UntagResource",
         "cognito-idp:ListTagsForResource",
@@ -449,6 +455,38 @@ DynamoDB tables, Lambda functions, API Gateway, Cognito, WAFv2, EventBridge, SQS
         "sqs:ListQueueTags"
       ],
       "Resource": "arn:aws:sqs:*:*:backgroundagent-dev-*"
+    },
+    {
+      "Sid": "SNS",
+      "Effect": "Allow",
+      "Action": [
+        "sns:CreateTopic",
+        "sns:DeleteTopic",
+        "sns:GetTopicAttributes",
+        "sns:SetTopicAttributes",
+        "sns:Subscribe",
+        "sns:Unsubscribe",
+        "sns:GetSubscriptionAttributes",
+        "sns:ListSubscriptionsByTopic",
+        "sns:TagResource",
+        "sns:UntagResource",
+        "sns:ListTagsForResource"
+      ],
+      "Resource": "arn:aws:sns:*:*:backgroundagent-dev-*"
+    },
+    {
+      "Sid": "StepFunctions",
+      "Effect": "Allow",
+      "Action": [
+        "states:CreateStateMachine",
+        "states:DeleteStateMachine",
+        "states:DescribeStateMachine",
+        "states:UpdateStateMachine",
+        "states:TagResource",
+        "states:UntagResource",
+        "states:ListTagsForResource"
+      ],
+      "Resource": "arn:aws:states:*:*:stateMachine:backgroundagent-dev-*"
     },
     {
       "Sid": "CloudFront",
@@ -638,6 +676,35 @@ Bedrock Guardrails, CloudWatch Logs/Dashboards/Alarms, X-Ray, S3 (CDK assets), K
         "kms:GenerateDataKey"
       ],
       "Resource": "*"
+    },
+    {
+      "Sid": "KMSCustomerManagedKeys",
+      "Effect": "Allow",
+      "Action": [
+        "kms:CreateKey",
+        "kms:GetKeyPolicy",
+        "kms:GetKeyRotationStatus",
+        "kms:TagResource",
+        "kms:ListResourceTags"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "KMSCustomerManagedKeysLifecycle",
+      "Effect": "Allow",
+      "Action": [
+        "kms:PutKeyPolicy",
+        "kms:ScheduleKeyDeletion",
+        "kms:EnableKeyRotation",
+        "kms:DisableKeyRotation",
+        "kms:UntagResource"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/ABCA": "operational-alerts"
+        }
+      }
     },
     {
       "Sid": "ECRForDockerAssets",

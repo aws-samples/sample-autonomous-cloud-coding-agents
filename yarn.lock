@@ -371,6 +371,20 @@
     "@smithy/types" "^4.15.1"
     tslib "^2.6.2"
 
+"@aws-sdk/client-bedrock-agentcore-control@^3.1078.0":
+  version "3.1106.0"
+  resolved "https://registry.yarnpkg.com/@aws-sdk/client-bedrock-agentcore-control/-/client-bedrock-agentcore-control-3.1106.0.tgz#818583ef1b8da270bcee2cb90d936a737d52ef9c"
+  integrity sha512-jhs4jyApl3REd2BP/YBw5aXTOZ0NvTdvF7WjBc1KVmKXIin2JDczyechrYqpBth59CkUblxKPtVbwmZ3FQxCkw==
+  dependencies:
+    "@aws-sdk/core" "^3.977.6"
+    "@aws-sdk/credential-provider-node" "^3.972.78"
+    "@aws-sdk/types" "^3.974.2"
+    "@smithy/core" "^3.31.1"
+    "@smithy/fetch-http-handler" "^5.6.13"
+    "@smithy/node-http-handler" "^4.9.13"
+    "@smithy/types" "^4.16.1"
+    tslib "^2.6.2"
+
 "@aws-sdk/client-bedrock-agentcore@^3.1078.0":
   version "3.1081.0"
   resolved "https://registry.yarnpkg.com/@aws-sdk/client-bedrock-agentcore/-/client-bedrock-agentcore-3.1081.0.tgz#7b652ffe2daef75cf85895dfcf427879e6df386c"
@@ -7040,10 +7054,10 @@ muggle-string@^0.4.1:
   resolved "https://registry.yarnpkg.com/muggle-string/-/muggle-string-0.4.1.tgz#3b366bd43b32f809dc20659534dd30e7c8a0d328"
   integrity sha512-VNTrAak/KhO2i8dqqnqnAHOa3cYBwXEZe9h+D5h/1ZqFSTEFHdM65lR7RoIqq3tBBYavsOXV84NoHXZ0AkPyqQ==
 
-nanoid@^3.3.16:
-  version "3.3.16"
-  resolved "https://registry.yarnpkg.com/nanoid/-/nanoid-3.3.16.tgz#a04d8ec4b1f10009d2d533947aefe4293737816c"
-  integrity sha512-bzlKTyNJ7+LdGIIwy8ijFpIqEQIvafahV7eYykJ8Cvh42EdJeODoJ6gUJXpQJvej1BddH8OqTXZNE/KfbWAu8Q==
+nanoid@^3.3.16, nanoid@^3.3.17:
+  version "3.3.18"
+  resolved "https://registry.yarnpkg.com/nanoid/-/nanoid-3.3.18.tgz#f66a2de1199ffde0fcf21c8a5f13106b1c081913"
+  integrity sha512-DTg4MJbGMWkfi6VZFdNt2/caMbQy4Ou+Op/hJQvGEWcnVfoA1QA+xzRKAzw9jD6+GVOOeYr/mIcuDSdug6F6+w==
 
 napi-postinstall@^0.3.4:
   version "0.3.4"

@@ -501,6 +501,24 @@ describe('AgentStack', () => {
     expect(vars.JIRA_WORKSPACE_REGISTRY_TABLE_NAME).toBeDefined();
   });
 
+  test('the iteration heartbeat can reach BOTH surfaces and refresh Jira OAuth', () => {
+    const fns = template.findResources('AWS::Lambda::Function');
+    const heartbeat = Object.entries(fns).find(([id]) => id.startsWith('IterationHeartbeat'));
+    expect(heartbeat).toBeDefined();
+    const vars = (heartbeat![1] as { Properties?: { Environment?: { Variables?: Record<string, unknown> } } })
+      .Properties?.Environment?.Variables ?? {};
+    expect(vars.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME).toBeDefined();
+    expect(vars.JIRA_WORKSPACE_REGISTRY_TABLE_NAME).toBeDefined();
+
+    const policies = template.findResources('AWS::IAM::Policy');
+    const heartbeatPolicies = Object.entries(policies)
+      .filter(([logicalId]) => logicalId.startsWith('IterationHeartbeat'));
+    const asJson = JSON.stringify(heartbeatPolicies.map(([, policy]) => policy));
+    expect(asJson).toContain('bgagent-jira-oauth-*');
+    expect(asJson).toContain('secretsmanager:GetSecretValue');
+    expect(asJson).toContain('secretsmanager:PutSecretValue');
+  });
+
   test('the orchestration reconciler cannot read S3 objects at all', () => {
     // The trace/artifacts bucket holds full agent trajectories under
     // traces/<user_id>/ — tool input and output, authorized per-user by the presign
@@ -669,6 +687,46 @@ describe('AgentStack', () => {
         }),
       ]),
     });
+  });
+
+  test('provisions a single OperationalAlerts SNS topic + CMK and exports its ARN (#629)', () => {
+    // One stack-wide topic, not per-consumer — every DLQ-depth alarm
+    // shares one subscription surface.
+    template.resourceCountIs('AWS::SNS::Topic', 1);
+    template.hasResourceProperties('AWS::SNS::Topic', {
+      KmsMasterKeyId: Match.anyValue(),
+    });
+    template.hasOutput('OperationalAlertsTopicArn', {
+      Description: Match.stringLikeRegexp('#629'),
+    });
+  });
+
+  test('wires all three DLQ-depth alarms to the alerts topic (#629)', () => {
+    // FanOut, ApprovalMetricsPublisher, and the screenshot processor
+    // DLQ alarms must each carry an AlarmActions entry — otherwise a
+    // poison-pill pile-up stays silent (the whole point of #629).
+    const alarms = template.findResources('AWS::CloudWatch::Alarm');
+    const dlqAlarmsWithActions = Object.values(alarms).filter((r: any) => {
+      const dims: Array<{ Name: string }> = r.Properties?.Dimensions ?? [];
+      const isSqsDepth =
+        r.Properties?.Namespace === 'AWS/SQS' &&
+        r.Properties?.MetricName === 'ApproximateNumberOfMessagesVisible' &&
+        dims.some((d) => d.Name === 'QueueName');
+      const hasActions =
+        Array.isArray(r.Properties?.AlarmActions) && r.Properties.AlarmActions.length > 0;
+      return isSqsDepth && hasActions;
+    });
+    expect(dlqAlarmsWithActions).toHaveLength(3);
+    // Each action must reference the operational-alerts topic.
+    for (const alarm of dlqAlarmsWithActions) {
+      expect(JSON.stringify((alarm as any).Properties.AlarmActions)).toContain('OperationalAlerts');
+    }
+  });
+
+  test('does NOT subscribe an email when no alertEmail context is set (#629)', () => {
+    // The default deploy ships the topic with no confirmed target;
+    // operators subscribe Slack / PagerDuty / email themselves.
+    template.resourceCountIs('AWS::SNS::Subscription', 0);
   });
 });
 
@@ -1139,5 +1197,108 @@ describe('AgentStack solution attribution (#319): AWS_SDK_UA_APP_ID via stack-le
     for (const [, fn] of nested) {
       expect(fn.Properties.Environment?.Variables?.AWS_SDK_UA_APP_ID).toBe('uksb-wt64nei4u6#UaAgentStack');
     }
+  });
+});
+
+describe('AgentStack tool-gateway gate (ADR-019 P1)', () => {
+  test('default (no-gate) synth provisions NO Gateway — synth stays byte-unchanged', () => {
+    // The whole ToolGateway construct is context-gated; without the flag the
+    // template must contain zero Gateway/GatewayTarget resources so the default
+    // deploy is untouched and no new CFN type enters the bootstrap coverage set.
+    const app = new App();
+    const stack = new AgentStack(app, 'NoGatewayStack', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    });
+    const template = Template.fromStack(stack);
+    template.resourceCountIs('AWS::BedrockAgentCore::Gateway', 0);
+    template.resourceCountIs('AWS::BedrockAgentCore::GatewayTarget', 0);
+  });
+
+  describe('with --context enableToolGateway=true', () => {
+    let template: Template;
+
+    beforeAll(() => {
+      const app = new App({ context: { enableToolGateway: true } });
+      const stack = new AgentStack(app, 'GatewayStack', {
+        env: { account: '123456789012', region: 'us-east-1' },
+      });
+      template = Template.fromStack(stack);
+    });
+
+    test('provisions exactly one AWS_IAM Gateway + one Lambda target', () => {
+      template.resourceCountIs('AWS::BedrockAgentCore::Gateway', 1);
+      template.hasResourceProperties('AWS::BedrockAgentCore::Gateway', {
+        AuthorizerType: 'AWS_IAM',
+      });
+      template.resourceCountIs('AWS::BedrockAgentCore::GatewayTarget', 1);
+    });
+
+    test('the AgentCore runtime carries ABCA_TOOL_GATEWAY_URL', () => {
+      template.hasResourceProperties('AWS::BedrockAgentCore::Runtime', {
+        EnvironmentVariables: Match.objectLike({
+          ABCA_TOOL_GATEWAY_URL: Match.anyValue(),
+        }),
+      });
+    });
+  });
+
+  describe('substrate parity: with BOTH --context enableToolGateway=true AND compute_type=ecs', () => {
+    // #641 requires the federated tool to work on BOTH substrates. The
+    // AgentCore-runtime wiring is asserted above; without these two the ECS
+    // task could ship with no gateway URL and no InvokeGateway grant — the tool
+    // silently absent on Fargate while looking present in the AgentCore path.
+    // This is the both-substrates acceptance bar the ADR-019 review called out.
+    let template: Template;
+
+    beforeAll(() => {
+      const app = new App({
+        context: { enableToolGateway: true, compute_type: 'ecs' },
+      });
+      const stack = new AgentStack(app, 'GatewayEcsStack', {
+        env: { account: '123456789012', region: 'us-east-1' },
+      });
+      template = Template.fromStack(stack);
+    });
+
+    test('every ECS task definition container carries ABCA_TOOL_GATEWAY_URL', () => {
+      // Both the build and planning task defs share the base container env, so
+      // each must carry the gateway URL — assert on all of them, not just one.
+      const taskDefs = Object.values(
+        template.findResources('AWS::ECS::TaskDefinition'),
+      );
+      expect(taskDefs.length).toBeGreaterThan(0);
+      for (const taskDef of taskDefs) {
+        const containers = taskDef.Properties?.ContainerDefinitions ?? [];
+        const withGatewayUrl = containers.filter(
+          (c: { Environment?: { Name: string }[] }) =>
+            (c.Environment ?? []).some((e) => e.Name === 'ABCA_TOOL_GATEWAY_URL'),
+        );
+        expect(withGatewayUrl.length).toBeGreaterThan(0);
+      }
+    });
+
+    test('the ECS task role is granted bedrock-agentcore:InvokeGateway', () => {
+      // Scope the assertion to the ECS TASK role. The AgentCore runtime role is
+      // granted the same InvokeGateway action in this very template, so an
+      // unscoped `hasResourceProperties` would stay green even if the ECS
+      // grant (ecs-agent-cluster.ts:554) were deleted — precisely the
+      // cross-substrate regression this test exists to catch. Pin the policy to
+      // the EcsAgentCluster TaskRole via its `Roles` attachment.
+      template.hasResourceProperties('AWS::IAM::Policy', {
+        PolicyDocument: Match.objectLike({
+          Statement: Match.arrayWith([
+            Match.objectLike({
+              Action: 'bedrock-agentcore:InvokeGateway',
+              Effect: 'Allow',
+            }),
+          ]),
+        }),
+        Roles: Match.arrayWith([
+          Match.objectLike({
+            Ref: Match.stringLikeRegexp('EcsAgentClusterTaskRole'),
+          }),
+        ]),
+      });
+    });
   });
 });

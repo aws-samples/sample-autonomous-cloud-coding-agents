@@ -32,6 +32,7 @@ import { AgentMemory } from './agent-memory';
 import { AgentSessionRole } from './agent-session-role';
 import { resolveBedrockModelIds } from './bedrock-models';
 import { buildAppId } from './solution-ua-aspect';
+import { ToolGateway } from './tool-gateway';
 
 export interface EcsAgentClusterProps {
   readonly vpc: ec2.IVpc;
@@ -103,6 +104,16 @@ export interface EcsAgentClusterProps {
    * memory-less deployments.
    */
   readonly agentMemory?: AgentMemory;
+
+  /**
+   * Tool-federation Gateway (ADR-019 P1). When provided, the ECS task role is
+   * granted ``bedrock-agentcore:InvokeGateway`` and the container gets
+   * ``ABCA_TOOL_GATEWAY_URL`` — parity with the AgentCore runtime, so a
+   * gateway-federated MCP tool works on the ECS substrate too. Omitted when the
+   * gateway is not provisioned (the default) or in isolated construct tests →
+   * no grant, no env.
+   */
+  readonly toolGateway?: ToolGateway;
 }
 
 /** HTTPS port — the only egress allowed from the agent task ENIs. */
@@ -381,6 +392,9 @@ export class EcsAgentCluster extends Construct {
       // #319 outbound SDK solution attribution — set on the shared base so both
       // task defs emit `app/uksb-wt64nei4u6#{stack}`.
       ...(sdkUaAppId ? { AWS_SDK_UA_APP_ID: sdkUaAppId } : {}),
+      // ADR-019 P1: federated-tool Gateway URL, parity with the AgentCore
+      // runtime env. Present only when the gateway is provisioned.
+      ...(props.toolGateway && { ABCA_TOOL_GATEWAY_URL: props.toolGateway.gatewayUrl }),
     };
     const image = ecs.ContainerImage.fromDockerImageAsset(props.agentImageAsset);
     const makeTaskDef = (
@@ -531,6 +545,13 @@ export class EcsAgentCluster extends Construct {
     // (logged, non-fatal), so learning never persists on an ECS-only deployment.
     if (props.agentMemory) {
       props.agentMemory.grantReadWrite(taskRole);
+    }
+
+    // ADR-019 P1: parity with the AgentCore runtime's InvokeGateway grant in
+    // agent.ts — the ECS task role SigV4-invokes the same tool Gateway. Without
+    // this, a gateway-federated MCP tool AccessDenies on the ECS substrate.
+    if (props.toolGateway) {
+      props.toolGateway.grantInvoke(taskRole);
     }
 
     // Per-workspace Linear/Jira OAuth tokens live in Secrets Manager under

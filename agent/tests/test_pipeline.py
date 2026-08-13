@@ -7,11 +7,23 @@ import pytest
 from pydantic import ValidationError
 
 from models import AgentResult, RepoSetup, TaskConfig
-from pipeline import _chain_prior_agent_error, _resolve_overall_task_status
+from pipeline import (
+    _chain_prior_agent_error,
+    _resolve_overall_task_status,
+    _should_post_start_comment,
+)
 from post_hooks import VerifyOutcome
 
 # Minimal Linear channel metadata for the early-ACK ordering tests.
 _LINEAR_META = {"issue_id": "ABCA-1", "workspace_id": "ws-1"}
+
+
+class TestStartCommentPolicy:
+    def test_suppresses_only_jira_pr_iteration_comment(self):
+        assert not _should_post_start_comment("jira", "coding/pr-iteration-v1")
+        assert _should_post_start_comment("jira", "coding/new-task-v1")
+        assert _should_post_start_comment("jira", "coding/pr-review-v1")
+        assert _should_post_start_comment("linear", "coding/pr-iteration-v1")
 
 
 class TestCedarPoliciesInjection:
@@ -146,6 +158,87 @@ class TestCedarPoliciesInjection:
 
         assert captured_config is not None
         assert captured_config.cedar_policies == []
+
+    @patch("runner.run_agent")
+    @patch("pipeline.build_system_prompt")
+    @patch("pipeline.discover_project_config")
+    @patch("repo.setup_repo")
+    @patch("pipeline.task_span")
+    @patch("pipeline.task_state")
+    def test_malformed_registry_asset_fails_the_task_closed(
+        self,
+        mock_task_state,
+        mock_task_span,
+        mock_setup_repo,
+        _mock_discover,
+        _mock_build_prompt,
+        mock_run_agent,
+        monkeypatch,
+        tmp_path,
+    ):
+        """#246 fail-closed: a resolved mcp_server whose runtime is structurally
+        invalid must fail the task (write_terminal FAILED) and re-raise, never run
+        the agent with the pinned asset silently missing."""
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+
+        # A real repo_dir so the loader reaches the transport-validation branch
+        # (the failure we want is the invalid payload, not a missing dir).
+        mock_setup_repo.return_value = RepoSetup(
+            repo_dir=str(tmp_path),
+            branch="bgagent/test/branch",
+            build_before=True,
+        )
+
+        agent_ran = False
+
+        async def fake_run_agent(_prompt, _system_prompt, config, cwd=None, trajectory=None):
+            nonlocal agent_ran
+            agent_ran = True
+            return AgentResult(status="success", turns=1, cost_usd=0.01, num_turns=1)
+
+        mock_run_agent.side_effect = fake_run_agent
+
+        mock_span = MagicMock()
+        mock_span.__enter__ = MagicMock(return_value=mock_span)
+        mock_span.__exit__ = MagicMock(return_value=False)
+        mock_task_span.return_value = mock_span
+        mock_task_state.get_task.return_value = None
+
+        with (
+            patch("pipeline.configure_channel_mcp"),
+            patch("pipeline.strip_linear_mcp_servers", return_value=0),
+            patch("pipeline.get_disk_usage", return_value=0),
+            patch("pipeline.print_metrics"),
+        ):
+            from pipeline import run_task
+
+            # http transport with no url → RegistryAssetLoadError inside the loader.
+            bad_asset = {
+                "kind": "mcp_server",
+                "namespace": "acme",
+                "name": "pdf-tools",
+                "version": "1.0.0",
+                "runtime": {"transport": "http"},
+            }
+            with pytest.raises(Exception):  # noqa: B017 — re-raised after FAILED write
+                run_task(
+                    repo_url="owner/repo",
+                    task_description="fix bug",
+                    github_token="ghp_test",
+                    aws_region="us-east-1",
+                    task_id="test-id",
+                    resolved_assets=[bad_asset],
+                )
+
+        # The task was marked FAILED and the agent never ran with a missing asset.
+        assert agent_ran is False
+        failed_writes = [
+            c for c in mock_task_state.write_terminal.call_args_list if c.args[1] == "FAILED"
+        ]
+        assert failed_writes, (
+            "expected a write_terminal(..., 'FAILED', ...) on the fail-closed path"
+        )
 
     @patch("runner.run_agent")
     @patch("pipeline.build_system_prompt")

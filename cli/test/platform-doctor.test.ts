@@ -35,12 +35,21 @@ jest.mock('../src/stack-outputs', () => ({
   getStackOutput: (...args: unknown[]) => stackOutputMock(...args),
 }));
 
+const ddbSendMock = jest.fn();
+jest.mock('../src/dynamo-clients', () => ({
+  documentClient: () => ({ send: (...args: unknown[]) => ddbSendMock(...args) }),
+}));
+
 jest.mock('@aws-sdk/client-bedrock', () => ({
   BedrockClient: jest.fn(() => ({ send: jest.fn().mockRejectedValue(new Error('not under test')) })),
   GetFoundationModelCommand: jest.fn(),
 }));
 
-import { runPlatformDoctor, type DoctorCheckResult } from '../src/platform-doctor';
+import {
+  checkJiraAppIdentity,
+  runPlatformDoctor,
+  type DoctorCheckResult,
+} from '../src/platform-doctor';
 
 const REGISTRY = 'LinearWorkspaceRegistry';
 
@@ -58,8 +67,72 @@ async function linearCheck(): Promise<DoctorCheckResult> {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  ddbSendMock.mockResolvedValue({ Items: [] });
   stackOutputMock.mockImplementation(async (_region: string, _stack: string, output: string) =>
     (output === 'LinearWorkspaceRegistryTableName' ? REGISTRY : null));
+});
+
+describe('doctor verdict for Jira app identity', () => {
+  test('warns when an active tenant still writes through OAuth', async () => {
+    ddbSendMock.mockResolvedValue({
+      Items: [{
+        jira_cloud_id: 'cloud-1',
+        status: 'active',
+        outbound_identity: 'oauth',
+      }],
+    });
+
+    const check = await checkJiraAppIdentity('us-east-1', 'JiraRegistry');
+
+    expect(check.status).toBe('warn');
+    expect(check.detail).toContain('cloud-1');
+    expect(check.detail).toContain('bgagent jira app-setup');
+  });
+
+  test('passes when every active tenant has complete Forge metadata', async () => {
+    ddbSendMock.mockResolvedValue({
+      Items: [{
+        jira_cloud_id: 'cloud-1',
+        status: 'active',
+        outbound_identity: 'app',
+        app_actor_account_id: 'app-account',
+        app_actor_display_name: 'bgagent',
+        app_actor_configured_at: '2026-08-10T12:00:00.000Z',
+      }],
+    });
+
+    const check = await checkJiraAppIdentity('us-east-1', 'JiraRegistry');
+
+    expect(check.status).toBe('pass');
+    expect(check.detail).toContain('1 active Jira tenant');
+  });
+
+  test('warns when app identity metadata is incomplete', async () => {
+    ddbSendMock.mockResolvedValue({
+      Items: [{
+        jira_cloud_id: 'cloud-1',
+        status: 'active',
+        outbound_identity: 'app',
+        app_actor_display_name: 'bgagent',
+      }],
+    });
+
+    expect((await checkJiraAppIdentity('us-east-1', 'JiraRegistry')).status).toBe('warn');
+  });
+
+  test('passes when Jira is not deployed or no tenant is active', async () => {
+    expect((await checkJiraAppIdentity('us-east-1', null)).status).toBe('pass');
+    expect((await checkJiraAppIdentity('us-east-1', 'JiraRegistry')).status).toBe('pass');
+  });
+
+  test('warns when the registry cannot be read', async () => {
+    ddbSendMock.mockRejectedValue(new Error('AccessDeniedException'));
+
+    const check = await checkJiraAppIdentity('us-east-1', 'JiraRegistry');
+
+    expect(check.status).toBe('warn');
+    expect(check.detail).toContain('AccessDeniedException');
+  });
 });
 
 describe('doctor verdict for Linear workspace auth', () => {

@@ -232,6 +232,7 @@ export interface TaskApiProps {
    * Required when attachmentsBucket is provided.
    */
   readonly userConcurrencyTable?: dynamodb.ITable;
+
 }
 
 /**
@@ -1378,6 +1379,11 @@ export class TaskApi extends Construct {
       // Add webhook functions to nag suppression list
       allFunctions.push(createWebhookFn, listWebhooksFn, deleteWebhookFn, webhookAuthorizerFn, webhookCreateTaskFn);
     }
+
+    // Agent asset registry endpoints (#246) live in their own NestedStack with a
+    // separate RestApi (see RegistryApi + agent.ts) so their ~35 resources don't
+    // count against this root stack's 500-resource CloudFormation limit. Nothing
+    // for the registry API is created here.
 
     // --- cdk-nag suppressions for CDK-generated IAM policies ---
     for (const fn of allFunctions) {

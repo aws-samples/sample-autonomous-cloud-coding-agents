@@ -300,6 +300,114 @@ describe('Blueprint construct', () => {
     expect(serialized).toContain('#cedar_policies');
   });
 
+  // --- Registry asset refs (#246) ---
+
+  test('maps registry asset refs to DynamoDB lists', () => {
+    const { template } = createStack({
+      assets: {
+        mcpServers: ['registry://mcp_server/acme/pdf-tools@^1.4.1'],
+        cedarPolicyModules: ['registry://cedar_policy_module/acme/force-push@~2.0.0'],
+        skills: ['registry://skill/acme/research@1.0.0'],
+      },
+    });
+    const serialized = getCreateJoinParts(template).join('');
+    expect(serialized).toContain('"mcp_servers":{"L":[{"S":"registry://mcp_server/acme/pdf-tools@^1.4.1"}]}');
+    expect(serialized).toContain('"cedar_policy_modules":{"L":[{"S":"registry://cedar_policy_module/acme/force-push@~2.0.0"}]}');
+    expect(serialized).toContain('"skills":{"L":[{"S":"registry://skill/acme/research@1.0.0"}]}');
+  });
+
+  test('omits asset columns when no assets are pinned', () => {
+    const serialized = getCreateJoinParts(createStack().template).join('');
+    expect(serialized).not.toContain('mcp_servers');
+    expect(serialized).not.toContain('cedar_policy_modules');
+    expect(serialized).not.toContain('"skills"');
+  });
+
+  test('onUpdate also writes asset refs (redeploy of an onboarded repo must not drop them)', () => {
+    const { template } = createStack({
+      assets: {
+        mcpServers: ['registry://mcp_server/acme/pdf-tools@^1.4.1'],
+        cedarPolicyModules: ['registry://cedar_policy_module/acme/force-push@~2.0.0'],
+        skills: ['registry://skill/acme/research@1.0.0'],
+      },
+    });
+    const serialized = getUpdateJoinParts(template).join('');
+    // Regression guard (#246): the onUpdate UpdateExpression previously omitted
+    // the three asset-ref columns, so a redeploy silently dropped them.
+    expect(serialized).toContain('#mcp_servers');
+    expect(serialized).toContain('#cedar_policy_modules');
+    expect(serialized).toContain('#skills');
+    // All three populated → nothing to REMOVE.
+    expect(serialized).not.toContain('REMOVE');
+  });
+
+  test('onUpdate REMOVEs asset columns that are now empty (detach on redeploy)', () => {
+    // Only mcpServers pinned: cedar_policy_modules + skills must be REMOVEd so a
+    // redeploy that cleared them detaches the stale DDB refs (#246).
+    const { template } = createStack({
+      assets: { mcpServers: ['registry://mcp_server/acme/pdf-tools@^1.4.1'] },
+    });
+    const serialized = getUpdateJoinParts(template).join('');
+    // mcp_servers is SET (populated); the other two are REMOVEd. Assert on the
+    // exact REMOVE clause so the ExpressionAttributeNames block (which maps all
+    // three names) doesn't confuse the check.
+    expect(serialized).toContain('#mcp_servers = :mcp_servers');
+    expect(serialized).toContain('REMOVE #cedar_policy_modules, #skills');
+    expect(serialized).not.toContain('REMOVE #mcp_servers');
+  });
+
+  test('onUpdate REMOVEs all three asset columns when none are pinned', () => {
+    const { template } = createStack();
+    const serialized = getUpdateJoinParts(template).join('');
+    expect(serialized).toContain('REMOVE #mcp_servers, #cedar_policy_modules, #skills');
+  });
+
+  test('rejects a floating asset ref at synth', () => {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack');
+    const repoTable = new dynamodb.Table(stack, 'RepoTable', {
+      partitionKey: { name: 'repo', type: dynamodb.AttributeType.STRING },
+    });
+    new Blueprint(stack, 'Blueprint', {
+      repo: 'org/my-repo',
+      repoTable,
+      assets: { mcpServers: ['registry://mcp_server/acme/pdf-tools'] },
+    });
+    expect(() => Template.fromStack(stack)).toThrow(/Invalid assets.mcpServers ref.*INVALID_REGISTRY_REF/);
+  });
+
+  test('rejects a malformed constraint on a skill ref at synth', () => {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack');
+    const repoTable = new dynamodb.Table(stack, 'RepoTable', {
+      partitionKey: { name: 'repo', type: dynamodb.AttributeType.STRING },
+    });
+    new Blueprint(stack, 'Blueprint', {
+      repo: 'org/my-repo',
+      repoTable,
+      assets: { skills: ['registry://skill/acme/research@latest'] },
+    });
+    expect(() => Template.fromStack(stack)).toThrow(/Invalid assets.skills ref.*INVALID_CONSTRAINT/);
+  });
+
+  test('rejects a ref whose kind does not match its field at synth', () => {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack');
+    const repoTable = new dynamodb.Table(stack, 'RepoTable', {
+      partitionKey: { name: 'repo', type: dynamodb.AttributeType.STRING },
+    });
+    new Blueprint(stack, 'Blueprint', {
+      repo: 'org/my-repo',
+      repoTable,
+      // A well-formed skill ref, but pinned under mcpServers — must be rejected
+      // so a field typo can't silently activate a different asset class.
+      assets: { mcpServers: ['registry://skill/acme/research@1.0.0'] },
+    });
+    expect(() => Template.fromStack(stack)).toThrow(
+      /Wrong kind for assets.mcpServers ref.*expected a 'mcp_server' ref but got 'skill'/,
+    );
+  });
+
   // --- Chunk 7b: security.approvalGateCap ---------------------------------
 
   test('exposes approvalGateCap as public property when configured', () => {

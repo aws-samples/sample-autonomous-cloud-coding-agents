@@ -26,6 +26,7 @@ import { Construct, IValidation } from 'constructs';
 // the JSON directly rather than re-using ``handlers/shared/types.ts`` so
 // the construct layer stays decoupled from runtime-side types.
 import sharedConstants from '../../../contracts/constants.json';
+import { parseRef } from '../handlers/shared/registry/ref';
 
 const REPO_PATTERN = /^[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+$/;
 const DOMAIN_PATTERN = /^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/;
@@ -170,6 +171,21 @@ export interface BlueprintProps {
      */
     readonly egressAllowlist?: string[];
   };
+
+  /**
+   * Registry assets (#246) this repo pins. Each entry is a strict
+   * ``registry://kind/namespace/name@constraint`` ref, validated at synth. The
+   * orchestrator resolves the refs at task start and threads the resolved bundle
+   * into the agent payload; an unresolvable ref fails the task (fail-closed).
+   */
+  readonly assets?: {
+    /** MCP servers merged into the agent's ``.mcp.json`` (PR 2). */
+    readonly mcpServers?: string[];
+    /** Cedar policy modules concatenated into the agent's cedar_policies (PR 3). */
+    readonly cedarPolicyModules?: string[];
+    /** Skills whose prompt fragments are appended to the system prompt (PR 3). */
+    readonly skills?: string[];
+  };
 }
 
 /**
@@ -204,12 +220,26 @@ export class Blueprint extends Construct {
    */
   public readonly approvalGateCap?: number;
 
+  /**
+   * Registry ``registry://`` refs for MCP servers (#246), exposed for inspection.
+   */
+  public readonly mcpServerRefs: readonly string[];
+
+  /** Registry ``registry://`` refs for Cedar policy modules (#246). */
+  public readonly cedarPolicyModuleRefs: readonly string[];
+
+  /** Registry ``registry://`` refs for skills (#246). */
+  public readonly skillRefs: readonly string[];
+
   constructor(scope: Construct, id: string, props: BlueprintProps) {
     super(scope, id);
 
     this.egressAllowlist = [...(props.networking?.egressAllowlist ?? [])];
     this.cedarPolicies = [...(props.security?.cedarPolicies ?? [])];
     this.approvalGateCap = props.security?.approvalGateCap;
+    this.mcpServerRefs = [...(props.assets?.mcpServers ?? [])];
+    this.cedarPolicyModuleRefs = [...(props.assets?.cedarPolicyModules ?? [])];
+    this.skillRefs = [...(props.assets?.skills ?? [])];
 
     // Chunk 7c: emit a synth-time info annotation when the blueprint did
     // not configure an override so operators see a signal that this repo
@@ -228,6 +258,9 @@ export class Blueprint extends Construct {
     this.node.addValidation(new RepoFormatValidation(props.repo));
     this.node.addValidation(new DomainFormatValidation(this.egressAllowlist));
     this.node.addValidation(new ApprovalGateCapValidation(this.approvalGateCap));
+    this.node.addValidation(new RegistryRefValidation('assets.mcpServers', this.mcpServerRefs, 'mcp_server'));
+    this.node.addValidation(new RegistryRefValidation('assets.cedarPolicyModules', this.cedarPolicyModuleRefs, 'cedar_policy_module'));
+    this.node.addValidation(new RegistryRefValidation('assets.skills', this.skillRefs, 'skill'));
 
     const now = new Date().toISOString();
 
@@ -275,6 +308,15 @@ export class Blueprint extends Construct {
     if (this.approvalGateCap !== undefined) {
       item.approval_gate_cap = { N: String(this.approvalGateCap) };
     }
+    if (this.mcpServerRefs.length > 0) {
+      item.mcp_servers = { L: this.mcpServerRefs.map(r => ({ S: r })) };
+    }
+    if (this.cedarPolicyModuleRefs.length > 0) {
+      item.cedar_policy_modules = { L: this.cedarPolicyModuleRefs.map(r => ({ S: r })) };
+    }
+    if (this.skillRefs.length > 0) {
+      item.skills = { L: this.skillRefs.map(r => ({ S: r })) };
+    }
 
     new cr.AwsCustomResource(this, 'RepoConfigCR', {
       timeout: Duration.minutes(REPO_CONFIG_CR_TIMEOUT_MINUTES),
@@ -293,11 +335,12 @@ export class Blueprint extends Construct {
         parameters: {
           TableName: props.repoTable.tableName,
           Key: { repo: { S: props.repo } },
-          UpdateExpression: `SET #status = :active, #updated = :now${this.buildUpdateFields(props)}`,
+          UpdateExpression: `SET #status = :active, #updated = :now${this.buildUpdateFields(props)}${this.buildRemoveClause()}`,
           ExpressionAttributeNames: {
             '#status': 'status',
             '#updated': 'updated_at',
             ...this.buildExpressionNames(props),
+            ...this.buildRemoveNames(),
           },
           ExpressionAttributeValues: {
             ':active': { S: 'active' },
@@ -349,6 +392,11 @@ export class Blueprint extends Construct {
     if (this.egressAllowlist.length > 0) fields.push(', #egress_allowlist = :egress_allowlist');
     if (this.cedarPolicies.length > 0) fields.push(', #cedar_policies = :cedar_policies');
     if (this.approvalGateCap !== undefined) fields.push(', #approval_gate_cap = :approval_gate_cap');
+    // Registry asset refs (#246) — must mirror onCreate's item, else a redeploy
+    // of an already-onboarded repo silently drops asset-ref changes.
+    if (this.mcpServerRefs.length > 0) fields.push(', #mcp_servers = :mcp_servers');
+    if (this.cedarPolicyModuleRefs.length > 0) fields.push(', #cedar_policy_modules = :cedar_policy_modules');
+    if (this.skillRefs.length > 0) fields.push(', #skills = :skills');
     return fields.join('');
   }
 
@@ -366,6 +414,9 @@ export class Blueprint extends Construct {
     if (this.egressAllowlist.length > 0) names['#egress_allowlist'] = 'egress_allowlist';
     if (this.cedarPolicies.length > 0) names['#cedar_policies'] = 'cedar_policies';
     if (this.approvalGateCap !== undefined) names['#approval_gate_cap'] = 'approval_gate_cap';
+    if (this.mcpServerRefs.length > 0) names['#mcp_servers'] = 'mcp_servers';
+    if (this.cedarPolicyModuleRefs.length > 0) names['#cedar_policy_modules'] = 'cedar_policy_modules';
+    if (this.skillRefs.length > 0) names['#skills'] = 'skills';
     return names;
   }
 
@@ -383,7 +434,33 @@ export class Blueprint extends Construct {
     if (this.egressAllowlist.length > 0) values[':egress_allowlist'] = { L: this.egressAllowlist.map(d => ({ S: d })) };
     if (this.cedarPolicies.length > 0) values[':cedar_policies'] = { L: this.cedarPolicies.map(p => ({ S: p })) };
     if (this.approvalGateCap !== undefined) values[':approval_gate_cap'] = { N: String(this.approvalGateCap) };
+    if (this.mcpServerRefs.length > 0) values[':mcp_servers'] = { L: this.mcpServerRefs.map(r => ({ S: r })) };
+    if (this.cedarPolicyModuleRefs.length > 0) values[':cedar_policy_modules'] = { L: this.cedarPolicyModuleRefs.map(r => ({ S: r })) };
+    if (this.skillRefs.length > 0) values[':skills'] = { L: this.skillRefs.map(r => ({ S: r })) };
     return values;
+  }
+
+  /** Registry asset fields that are now empty must be REMOVEd on update, not
+   *  just omitted from SET — otherwise a redeploy that cleared the last
+   *  mcp_server/cedar_policy_module/skill leaves the stale DDB refs active and
+   *  operators can't detach a pinned asset through the Blueprint API (#246). */
+  private emptyAssetFields(): string[] {
+    const empty: string[] = [];
+    if (this.mcpServerRefs.length === 0) empty.push('mcp_servers');
+    if (this.cedarPolicyModuleRefs.length === 0) empty.push('cedar_policy_modules');
+    if (this.skillRefs.length === 0) empty.push('skills');
+    return empty;
+  }
+
+  private buildRemoveClause(): string {
+    const empty = this.emptyAssetFields();
+    return empty.length > 0 ? ` REMOVE ${empty.map(f => `#${f}`).join(', ')}` : '';
+  }
+
+  private buildRemoveNames(): Record<string, string> {
+    const names: Record<string, string> = {};
+    for (const f of this.emptyAssetFields()) names[`#${f}`] = f;
+    return names;
   }
 }
 
@@ -442,5 +519,43 @@ class ApprovalGateCapValidation implements IValidation {
       ];
     }
     return [];
+  }
+}
+
+/**
+ * Registry (#246) — validates each ``registry://`` asset ref against the strict
+ * grammar at synth, so a floating or malformed pin cannot deploy and then fail
+ * every task at resolve time. Uses the same ``parseRef`` the resolver enforces.
+ *
+ * Also enforces that the ref's kind matches the field it was pinned under
+ * (``expectedKind``). Each typed Blueprint field stores into a distinct DDB
+ * column, and the orchestrator dispatches by the ref's embedded kind — so a
+ * ``skill`` ref placed under ``assets.mcpServers`` would otherwise deploy and
+ * then silently activate skill behavior from an "MCP" column. Reject the
+ * mismatch at synth instead.
+ */
+class RegistryRefValidation implements IValidation {
+  constructor(
+    private readonly field: string,
+    private readonly refs: readonly string[],
+    private readonly expectedKind: string,
+  ) {}
+
+  public validate(): string[] {
+    const errors: string[] = [];
+    for (const ref of this.refs) {
+      const result = parseRef(ref);
+      if (!result.ok) {
+        errors.push(`Invalid ${this.field} ref '${ref}': ${result.reason} — ${result.message}`);
+        continue;
+      }
+      if (result.ref.kind !== this.expectedKind) {
+        errors.push(
+          `Wrong kind for ${this.field} ref '${ref}': expected a '${this.expectedKind}' ref `
+          + `but got '${result.ref.kind}'.`,
+        );
+      }
+    }
+    return errors;
   }
 }

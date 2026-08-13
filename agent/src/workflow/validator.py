@@ -50,8 +50,18 @@ _REPO_ONLY_KINDS = frozenset(
 
 # Built-in (Phase 1-3) policy modules / MCP servers. Registry refs (registry://)
 # are accepted syntactically now and resolved against #246 in Phase 4 (rule 8).
+#
+# This is a LENIENT acceptance check for the workflow validator only — it admits
+# both the legacy 2-segment illustrative form (``registry://prompt/name``, still
+# used by the workflow-validation corpus) and the strict #246 3-segment form
+# (``registry://mcp_server/ns/name@^1.4.1``). The authoritative #246 grammar is
+# ``registry.ref.parse_ref`` (mirrored in registry/ref.ts); resolution enforces
+# the strict form. The kind segment gains ``_`` (snake_case kinds) and an optional
+# ``@<constraint>`` suffix so a valid strict ref never fails this check.
 _BUILTIN_REF = re.compile(r"^builtin/[a-z][a-z0-9_]*$")
-_REGISTRY_REF = re.compile(r"^registry://[a-z][a-z0-9-]*/[a-z0-9][a-z0-9./-]*$")
+_REGISTRY_REF = re.compile(
+    r"^registry://[a-z][a-z0-9_-]*/[a-z0-9][a-z0-9./-]*(?:/[a-z0-9][a-z0-9._-]*)?(?:@[\^~]?\S+)?$"
+)
 
 # Mutating built-in tools — forbidden under the read-only tier (rule 6) and when
 # read_only:true (rule 4, shape half is in the schema).

@@ -23,6 +23,7 @@ import {
   type ResolvedJiraOutboundAuth,
 } from './jira-oauth-resolver';
 import { logger } from './logger';
+import type { StateIntent, TransitionOptions } from './orchestration-channel';
 
 /**
  * Lambda-side helper for posting comments onto Jira Cloud issues through the
@@ -50,25 +51,23 @@ const REQUEST_TIMEOUT_MS = 5000;
  * agent-side path (`agent/src/jira_reactions.py`) uses the same base.
  */
 const JIRA_API_BASE = 'https://api.atlassian.com/ex/jira';
+const CATEGORY_RANK: Readonly<Record<string, number>> = {
+  new: 0,
+  indeterminate: 1,
+  done: 2,
+};
+const REVIEW_STATUS_NAMES = [
+  'in review',
+  'code review',
+  'review',
+  'peer review',
+  'reviewing',
+  'in progress',
+] as const;
 
-/**
- * Wrap a plain message string in Atlassian Document Format. Jira REST v3
- * comments require ADF, not markdown. We keep this minimal — a single
- * paragraph with the raw text — because the messages are short, user-
- * facing strings written by the processor (no embedded markdown to
- * preserve).
- */
+/** Render ABCA-generated Markdown into the small ADF subset Jira comments use. */
 function toAdfDocument(message: string): Record<string, unknown> {
-  return {
-    type: 'doc',
-    version: 1,
-    content: [
-      {
-        type: 'paragraph',
-        content: [{ type: 'text', text: message }],
-      },
-    ],
-  };
+  return buildAdfDocument(message.split('\n').map(parseMarkdownRuns));
 }
 
 /**
@@ -88,12 +87,82 @@ export interface AdfTextRun {
   readonly text: string;
   readonly strong?: boolean;
   readonly em?: boolean;
+  readonly code?: boolean;
   /** When set, the run renders as a clickable hyperlink to this URL. */
   readonly href?: string;
 }
 
 /** A paragraph is a list of runs; an empty run list renders a blank line. */
 export type AdfParagraph = ReadonlyArray<AdfTextRun>;
+
+/**
+ * Parse the controlled Markdown emitted by ABCA's own status renderers.
+ *
+ * This is intentionally not a general Markdown parser. The generated comments
+ * use only bold, inline code, and links; handling that exact subset avoids
+ * treating the whole panel as one literal ADF text node while keeping malformed
+ * input harmless as plain text.
+ */
+export function parseMarkdownRuns(line: string): AdfParagraph {
+  const runs: AdfTextRun[] = [];
+  let cursor = 0;
+  const append = (run: AdfTextRun): void => {
+    if (!run.text) return;
+    const previous = runs.at(-1);
+    if (
+      previous
+      && previous.strong === run.strong
+      && previous.em === run.em
+      && previous.code === run.code
+      && previous.href === run.href
+    ) {
+      runs[runs.length - 1] = { ...previous, text: previous.text + run.text };
+      return;
+    }
+    runs.push(run);
+  };
+
+  while (cursor < line.length) {
+    if (line.startsWith('**', cursor)) {
+      const end = line.indexOf('**', cursor + 2);
+      if (end !== -1) {
+        for (const run of parseMarkdownRuns(line.slice(cursor + 2, end))) {
+          append({ ...run, strong: true });
+        }
+        cursor = end + 2;
+        continue;
+      }
+    }
+
+    if (line[cursor] === '`') {
+      const end = line.indexOf('`', cursor + 1);
+      if (end !== -1) {
+        append({ text: line.slice(cursor + 1, end), code: true });
+        cursor = end + 1;
+        continue;
+      }
+    }
+
+    if (line[cursor] === '[') {
+      const match = line.slice(cursor).match(/^\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/);
+      if (match) {
+        append({ text: match[1], href: match[2] });
+        cursor += match[0].length;
+        continue;
+      }
+    }
+
+    const nextTokens = [
+      line.indexOf('**', cursor + 1),
+      line.indexOf('`', cursor + 1),
+      line.indexOf('[', cursor + 1),
+    ].filter((index) => index !== -1);
+    const next = nextTokens.length > 0 ? Math.min(...nextTokens) : line.length;
+    append({ text: line.slice(cursor, next) });
+    cursor = next;
+  }
+  return runs;
+}
 
 /**
  * Build a multi-paragraph ADF document. Each element of ``paragraphs``
@@ -116,6 +185,7 @@ export function buildAdfDocument(paragraphs: ReadonlyArray<AdfParagraph>): Recor
         const marks: Array<Record<string, unknown>> = [];
         if (run.strong) marks.push({ type: 'strong' });
         if (run.em) marks.push({ type: 'em' });
+        if (run.code) marks.push({ type: 'code' });
         // ADF ``link`` mark — the only way to make a URL clickable in a
         // Jira comment; a bare URL in a text node stays plain text.
         if (run.href) marks.push({ type: 'link', attrs: { href: run.href } });
@@ -133,11 +203,15 @@ export function buildAdfDocument(paragraphs: ReadonlyArray<AdfParagraph>): Recor
  * (network error, request timeout, HTTP 5xx/429) — where a Lambda retry
  * may genuinely succeed — from terminal ones (bad issue id, revoked
  * credential, malformed request) where it cannot. The best-effort
- * boolean-returning {@link postIssueComment} collapses this to
- * ``ok``/``!ok``; the fan-out dispatcher branches on ``retryable`` to
- * decide whether to escalate to the partial-batch retry path (#573).
+ * {@link postIssueComment} returns the created comment ID or null; the fan-out
+ * dispatcher uses this classified result to decide whether to escalate to the
+ * partial-batch retry path (#573).
  */
 export type JiraPostResult =
+  | { readonly ok: true; readonly commentId: string }
+  | { readonly ok: false; readonly retryable: boolean };
+
+export type JiraUpdateResult =
   | { readonly ok: true }
   | { readonly ok: false; readonly retryable: boolean };
 
@@ -148,29 +222,31 @@ export type JiraPostResult =
  * classified caller ({@link postCommentWithResult}) can tell a transient
  * 5xx/429/network blip from a terminal 4xx.
  */
-type PostOutcome =
-  | { readonly kind: 'ok' }
+type WriteOutcome =
+  | { readonly kind: 'ok'; readonly responseBody: string }
   | { readonly kind: 'auth' }
   | { readonly kind: 'error'; readonly retryable: boolean };
 
-async function postComment(
+async function writeComment(
   accessToken: string,
   cloudId: string,
   issueIdOrKey: string,
   body: Record<string, unknown>,
-): Promise<PostOutcome> {
+  commentId?: string,
+): Promise<WriteOutcome> {
   // The 3LO token (audience=api.atlassian.com) is only valid against the
   // gateway base scoped by cloudId — see JIRA_API_BASE. Posting to the raw
   // site host (`*.atlassian.net`) would 401. Both path segments are
   // URL-encoded for defense-in-depth: cloudId is registry-sourced (a stored
   // tenant UUID), but encoding it keeps a malformed/compromised row from
   // injecting extra path segments into the gateway URL.
-  const url = `${JIRA_API_BASE}/${encodeURIComponent(cloudId)}/rest/api/3/issue/${encodeURIComponent(issueIdOrKey)}/comment`;
+  const commentPath = commentId ? `/comment/${encodeURIComponent(commentId)}` : '/comment';
+  const url = `${JIRA_API_BASE}/${encodeURIComponent(cloudId)}/rest/api/3/issue/${encodeURIComponent(issueIdOrKey)}${commentPath}`;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
     const resp = await fetch(url, {
-      method: 'POST',
+      method: commentId ? 'PUT' : 'POST',
       headers: {
         'Authorization': `Bearer ${accessToken}`,
         'Content-Type': 'application/json',
@@ -179,7 +255,8 @@ async function postComment(
       body: JSON.stringify({ body }),
       signal: controller.signal,
     });
-    if (resp.ok) return { kind: 'ok' };
+    const responseBody = await resp.text();
+    if (resp.ok) return { kind: 'ok', responseBody };
     // 401/403 are recoverable via a forced refresh: the stored access token
     // may be dead despite a not-yet-reached `expires_at` (server-side
     // revocation, scope re-issue, or a value cached past its out-of-band
@@ -235,6 +312,220 @@ async function resolveTenantAuth(
   }
 }
 
+interface JiraTransition {
+  readonly id?: unknown;
+  readonly hasScreen?: unknown;
+  readonly to?: {
+    readonly name?: unknown;
+    readonly statusCategory?: { readonly key?: unknown };
+  };
+}
+
+interface JiraTransitionSnapshot {
+  readonly fields?: {
+    readonly status?: {
+      readonly name?: unknown;
+      readonly statusCategory?: { readonly key?: unknown };
+    };
+  };
+  readonly transitions?: unknown;
+}
+
+async function readTransitionSnapshot(
+  ctx: JiraFeedbackContext,
+  issueIdOrKey: string,
+  auth: ResolvedJiraOutboundAuth,
+): Promise<JiraTransitionSnapshot | null> {
+  let status: number;
+  let body: string;
+  if (auth.kind === 'app') {
+    const result = await requestJiraAppActor(auth.appActor, {
+      version: 1,
+      operation: 'get_transitions',
+      cloud_id: ctx.cloudId,
+      issue_key: issueIdOrKey,
+    });
+    if (!result.ok) return null;
+    status = result.status;
+    body = result.body;
+  } else {
+    const url = `${JIRA_API_BASE}/${encodeURIComponent(ctx.cloudId)}`
+      + `/rest/api/3/issue/${encodeURIComponent(issueIdOrKey)}?fields=status&expand=transitions`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    try {
+      const result = await fetch(url, {
+        headers: {
+          Authorization: `Bearer ${auth.accessToken}`,
+          Accept: 'application/json',
+        },
+        signal: controller.signal,
+      });
+      status = result.status;
+      body = await result.text();
+    } catch (err) {
+      logger.warn('Jira transition lookup failed', {
+        jira_cloud_id: ctx.cloudId,
+        issue_id_or_key: issueIdOrKey,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  if (status !== 200) {
+    logger.warn('Jira transition lookup returned non-200', {
+      jira_cloud_id: ctx.cloudId,
+      issue_id_or_key: issueIdOrKey,
+      status,
+    });
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(body) as unknown;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as JiraTransitionSnapshot
+      : null;
+  } catch (err) {
+    logger.warn('Jira transition lookup returned invalid JSON', {
+      issue_id_or_key: issueIdOrKey,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
+function transitionName(transition: JiraTransition): string {
+  return typeof transition.to?.name === 'string'
+    ? transition.to.name.trim().toLowerCase()
+    : '';
+}
+
+function transitionCategory(transition: JiraTransition): string {
+  return typeof transition.to?.statusCategory?.key === 'string'
+    ? transition.to.statusCategory.key
+    : '';
+}
+
+function selectTransition(
+  transitions: readonly JiraTransition[],
+  override: string | undefined,
+  preferredNames: readonly string[],
+  fallbackCategory: string | undefined,
+): JiraTransition | undefined {
+  const usable = transitions.filter(
+    (transition) => transition && transition.hasScreen !== true && typeof transition.id === 'string',
+  );
+  if (override) {
+    const wanted = override.trim().toLowerCase();
+    return usable.find((transition) => transitionName(transition) === wanted);
+  }
+  for (const name of preferredNames) {
+    const match = usable.find((transition) => transitionName(transition) === name);
+    if (match) return match;
+  }
+  return fallbackCategory
+    ? usable.find((transition) =>
+      transitionCategory(transition) === fallbackCategory
+      && transitionName(transition) !== 'blocked')
+    : undefined;
+}
+
+async function executeTransition(
+  ctx: JiraFeedbackContext,
+  issueIdOrKey: string,
+  transitionId: string,
+  auth: ResolvedJiraOutboundAuth,
+): Promise<boolean> {
+  if (auth.kind === 'app') {
+    const result = await requestJiraAppActor(auth.appActor, {
+      version: 1,
+      operation: 'transition',
+      cloud_id: ctx.cloudId,
+      issue_key: issueIdOrKey,
+      transition_id: transitionId,
+    });
+    return result.ok && result.status === 204;
+  }
+  const url = `${JIRA_API_BASE}/${encodeURIComponent(ctx.cloudId)}`
+    + `/rest/api/3/issue/${encodeURIComponent(issueIdOrKey)}/transitions`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const result = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${auth.accessToken}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      },
+      body: JSON.stringify({ transition: { id: transitionId } }),
+      signal: controller.signal,
+    });
+    return result.status === 204;
+  } catch (err) {
+    logger.warn('Jira transition request failed', {
+      jira_cloud_id: ctx.cloudId,
+      issue_id_or_key: issueIdOrKey,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Best-effort Jira workflow transition used by orchestration parent panels. */
+export async function transitionIssueState(
+  ctx: JiraFeedbackContext,
+  issueIdOrKey: string,
+  intent: StateIntent,
+  overrides: { readonly started?: string; readonly inReview?: string } = {},
+  options: TransitionOptions = {},
+): Promise<boolean> {
+  const auth = await resolveTenantAuth(ctx);
+  if (!auth) return false;
+  const snapshot = await readTransitionSnapshot(ctx, issueIdOrKey, auth);
+  if (!snapshot) return false;
+
+  const currentCategory = typeof snapshot.fields?.status?.statusCategory?.key === 'string'
+    ? snapshot.fields.status.statusCategory.key
+    : '';
+  const currentRank = CATEGORY_RANK[currentCategory];
+  const targetRank = intent === 'completed' ? CATEGORY_RANK.done : CATEGORY_RANK.indeterminate;
+  if (currentRank !== undefined) {
+    if (currentRank > targetRank) return false;
+    if (intent === 'started' && currentRank === targetRank && !options.allowRegression) {
+      return false;
+    }
+    if (intent === 'completed' && currentRank === targetRank) return false;
+  }
+
+  const transitions = Array.isArray(snapshot.transitions)
+    ? snapshot.transitions.filter((value): value is JiraTransition =>
+      Boolean(value) && typeof value === 'object' && !Array.isArray(value))
+    : [];
+  const override = intent === 'started' ? overrides.started : overrides.inReview;
+  const preferred = intent === 'started'
+    ? ['in progress']
+    : (intent === 'in_review' ? REVIEW_STATUS_NAMES : ['done', 'completed', 'closed']);
+  const fallbackCategory = override
+    ? undefined
+    : (intent === 'completed' ? 'done' : 'indeterminate');
+  const transition = selectTransition(transitions, override, preferred, fallbackCategory);
+  if (!transition || typeof transition.id !== 'string') {
+    logger.warn('No matching Jira workflow transition', {
+      issue_id_or_key: issueIdOrKey,
+      intent,
+      override,
+      current_status: snapshot.fields?.status?.name,
+    });
+    return false;
+  }
+  return executeTransition(ctx, issueIdOrKey, transition.id, auth);
+}
+
 /**
  * Post a comment onto a Jira issue. Returns true on success, false on any
  * failure (network, auth, REST errors). Never throws — callers proceed
@@ -255,9 +546,9 @@ export async function postIssueComment(
   ctx: JiraFeedbackContext,
   issueIdOrKey: string,
   body: string,
-): Promise<boolean> {
+): Promise<string | null> {
   const result = await postCommentWithResult(ctx, issueIdOrKey, toAdfDocument(body));
-  return result.ok;
+  return result.ok ? result.commentId : null;
 }
 
 /**
@@ -295,13 +586,16 @@ async function postCommentWithResult(
       issue_key: issueIdOrKey,
       body,
     });
-    return appResult.ok
-      ? { ok: true }
-      : { ok: false, retryable: appResult.retryable };
+    return createdCommentResult(appResult, ctx, issueIdOrKey);
   }
 
-  const outcome = await postComment(resolved.accessToken, ctx.cloudId, issueIdOrKey, body);
-  if (outcome.kind === 'ok') return { ok: true };
+  const outcome = await writeComment(resolved.accessToken, ctx.cloudId, issueIdOrKey, body);
+  if (outcome.kind === 'ok') {
+    return createdCommentResult({
+      ok: true,
+      body: outcome.responseBody,
+    }, ctx, issueIdOrKey);
+  }
   if (outcome.kind === 'error') return { ok: false, retryable: outcome.retryable };
 
   // outcome.kind === 'auth': the stored access token was rejected. Force a
@@ -321,9 +615,7 @@ async function postCommentWithResult(
       issue_key: issueIdOrKey,
       body,
     });
-    return appResult.ok
-      ? { ok: true }
-      : { ok: false, retryable: appResult.retryable };
+    return createdCommentResult(appResult, ctx, issueIdOrKey);
   }
   // If the refresh handed back the same access token, the retry can only
   // reproduce the 401 — skip the redundant network call.
@@ -334,12 +626,150 @@ async function postCommentWithResult(
     });
     return { ok: false, retryable: false };
   }
-  const retryOutcome = await postComment(refreshed.accessToken, ctx.cloudId, issueIdOrKey, body);
-  if (retryOutcome.kind === 'ok') return { ok: true };
+  const retryOutcome = await writeComment(refreshed.accessToken, ctx.cloudId, issueIdOrKey, body);
+  if (retryOutcome.kind === 'ok') {
+    return createdCommentResult({
+      ok: true,
+      body: retryOutcome.responseBody,
+    }, ctx, issueIdOrKey);
+  }
   // A second auth rejection means the credential is genuinely unusable —
   // terminal. A transient error on the retry stays retryable so the
   // dispatcher can escalate for a Lambda retry.
   if (retryOutcome.kind === 'error') return { ok: false, retryable: retryOutcome.retryable };
+  return { ok: false, retryable: false };
+}
+
+function createdCommentResult(
+  result: { readonly ok: true; readonly body: string }
+    | { readonly ok: false; readonly retryable: boolean },
+  ctx: JiraFeedbackContext,
+  issueIdOrKey: string,
+): JiraPostResult {
+  if (!result.ok) return { ok: false, retryable: result.retryable };
+  try {
+    const value = JSON.parse(result.body) as { id?: unknown };
+    const commentId = typeof value.id === 'string'
+      ? value.id
+      : (typeof value.id === 'number' ? String(value.id) : '');
+    if (commentId) return { ok: true, commentId };
+    logger.warn('Jira comment create succeeded without a usable comment id', {
+      jira_cloud_id: ctx.cloudId,
+      issue_id_or_key: issueIdOrKey,
+      response_id_type: typeof value.id,
+    });
+  } catch (err) {
+    logger.warn('Jira comment create succeeded but its response was not valid JSON', {
+      jira_cloud_id: ctx.cloudId,
+      issue_id_or_key: issueIdOrKey,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+  // The write itself succeeded. Returning success prevents a caller from
+  // creating a duplicate just because this response cannot support a later edit.
+  return { ok: true, commentId: '' };
+}
+
+/**
+ * Update an existing Jira comment in place. Returns true on success and false
+ * on any failure. Like comment creation, this is advisory and never throws.
+ */
+export async function updateIssueComment(
+  ctx: JiraFeedbackContext,
+  issueIdOrKey: string,
+  commentId: string,
+  body: string,
+): Promise<boolean> {
+  const result = await updateIssueCommentAdf(
+    ctx,
+    issueIdOrKey,
+    commentId,
+    toAdfDocument(body),
+  );
+  return result.ok;
+}
+
+/** Update an existing Jira comment with a pre-built ADF document. */
+export async function updateIssueCommentAdf(
+  ctx: JiraFeedbackContext,
+  issueIdOrKey: string,
+  commentId: string,
+  body: Record<string, unknown>,
+): Promise<JiraUpdateResult> {
+  if (!/^\d+$/.test(commentId)) {
+    logger.warn('Refusing to update Jira comment with an invalid id', {
+      jira_cloud_id: ctx.cloudId,
+      issue_id_or_key: issueIdOrKey,
+      comment_id: commentId,
+    });
+    return { ok: false, retryable: false };
+  }
+  const resolved = await resolveTenantAuth(ctx);
+  if (!resolved) return { ok: false, retryable: false };
+
+  if (resolved.kind === 'app') {
+    const appResult = await requestJiraAppActor(resolved.appActor, {
+      version: 1,
+      operation: 'update_comment',
+      cloud_id: ctx.cloudId,
+      issue_key: issueIdOrKey,
+      comment_id: commentId,
+      body,
+    });
+    return appResult.ok
+      ? { ok: true }
+      : { ok: false, retryable: appResult.retryable };
+  }
+
+  const outcome = await writeComment(
+    resolved.accessToken,
+    ctx.cloudId,
+    issueIdOrKey,
+    body,
+    commentId,
+  );
+  if (outcome.kind === 'ok') return { ok: true };
+  if (outcome.kind === 'error') return { ok: false, retryable: outcome.retryable };
+
+  logger.info('Jira feedback got auth rejection — forcing token refresh and retrying once', {
+    jira_cloud_id: ctx.cloudId,
+    issue_id_or_key: issueIdOrKey,
+    comment_id: commentId,
+  });
+  const refreshed = await resolveTenantAuth(ctx, true);
+  if (!refreshed) return { ok: false, retryable: false };
+  if (refreshed.kind === 'app') {
+    const appResult = await requestJiraAppActor(refreshed.appActor, {
+      version: 1,
+      operation: 'update_comment',
+      cloud_id: ctx.cloudId,
+      issue_key: issueIdOrKey,
+      comment_id: commentId,
+      body,
+    });
+    return appResult.ok
+      ? { ok: true }
+      : { ok: false, retryable: appResult.retryable };
+  }
+  if (refreshed.accessToken === resolved.accessToken) {
+    logger.warn('Jira feedback refresh returned an unchanged token — not retrying', {
+      jira_cloud_id: ctx.cloudId,
+      issue_id_or_key: issueIdOrKey,
+      comment_id: commentId,
+    });
+    return { ok: false, retryable: false };
+  }
+  const retryOutcome = await writeComment(
+    refreshed.accessToken,
+    ctx.cloudId,
+    issueIdOrKey,
+    body,
+    commentId,
+  );
+  if (retryOutcome.kind === 'ok') return { ok: true };
+  if (retryOutcome.kind === 'error') {
+    return { ok: false, retryable: retryOutcome.retryable };
+  }
   return { ok: false, retryable: false };
 }
 

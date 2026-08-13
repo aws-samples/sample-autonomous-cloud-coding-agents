@@ -72,6 +72,33 @@ describe('Bootstrap policy synth coverage', () => {
     expect(missingByType).toEqual({});
   });
 
+  it('maps the context-gated tool-gateway CFN types (ADR-019, not in default synth)', () => {
+    // The default synth above never instantiates the ToolGateway construct, so
+    // its two CFN types would slip past the coverage loop. Synthesize the gated
+    // path explicitly and assert both types are mapped AND fully covered by the
+    // bootstrap policy bundle — the same guarantee the loop gives default types.
+    const app = new App({ context: { enableToolGateway: true } });
+    const gatedTemplate = Template.fromStack(
+      new AgentStack(app, 'GatewayCoverageStack', {
+        env: { account: '123456789012', region: 'us-east-1' },
+      }),
+    );
+    const gatedTypes = new Set(
+      Object.values(
+        gatedTemplate.toJSON().Resources as Record<string, { Type: string }>,
+      ).map((r) => r.Type),
+    );
+
+    for (const cfnType of [
+      'AWS::BedrockAgentCore::Gateway',
+      'AWS::BedrockAgentCore::GatewayTarget',
+    ]) {
+      expect(gatedTypes.has(cfnType)).toBe(true);
+      expect(cfnType in RESOURCE_ACTION_MAP).toBe(true);
+      expect(findMissingBootstrapActions(cfnType, allowedActions)).toEqual([]);
+    }
+  });
+
   it('covers integration resources that previously failed deploy (regression)', () => {
     const regressionTypes = [
       'AWS::SecretsManager::Secret',
