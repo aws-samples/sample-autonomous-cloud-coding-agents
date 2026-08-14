@@ -138,7 +138,7 @@ Each step declares `on_failure: fail | continue | skip_remaining` (default `fail
 | Field | Required | Meaning |
 |---|---|---|
 | `mode` | ✓ | `test_gated` \| `artifact_delivered` \| `human_approved` \| `review_submitted`. Non-test modes require their matching terminal outcome. |
-| `required_sensors` | For `test_gated` | Verification results that must be evaluated using their step's existing `gate` semantics. Current sensors are `verify_build` and `verify_lint`; each must have a matching step. |
+| `required_sensors` | For `test_gated` | Verification results a conforming harness would evaluate using their step's existing `gate` semantics. Current sensors are `verify_build` and `verify_lint`; each must have a matching step, enforced at load. |
 | `terminal_outcomes` | ✓ | Observable convergence signals: `pr_opened` \| `review_published` \| `artifact_delivered` \| `human_approved`. At least one is required. |
 | `early_exit.allow_on_policy_deny` | – | Declares that a policy denial may terminate without the normal terminal outcome. Defaults to `false`. |
 

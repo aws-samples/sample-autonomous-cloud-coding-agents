@@ -46,6 +46,8 @@ DeliverTarget = str
 TerminalOutcome = Literal["pr_url", "review_posted", "artifact", "comment"]
 ConvergenceMode = Literal["test_gated", "artifact_delivered", "human_approved", "review_submitted"]
 ConvergenceSensor = Literal["verify_build", "verify_lint"]
+# These are observable signals, unlike artifact-oriented TerminalOutcome values.
+# Mode/outcome coupling is enforced by the loader's JSON Schema pass.
 ConvergenceTerminalOutcome = Literal[
     "pr_opened", "review_published", "artifact_delivered", "human_approved"
 ]
@@ -175,7 +177,7 @@ class Convergence(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     mode: ConvergenceMode
-    required_sensors: list[ConvergenceSensor] = Field(default_factory=list)
+    required_sensors: list[ConvergenceSensor] | None = Field(default=None, min_length=1)
     terminal_outcomes: list[ConvergenceTerminalOutcome]
     early_exit: ConvergenceEarlyExit | None = None
 

@@ -11,8 +11,15 @@ import textwrap
 from typing import TYPE_CHECKING
 
 import pytest
+from pydantic import ValidationError
 
-from workflow import Workflow, WorkflowValidationError, load_workflow, load_workflow_file
+from workflow import (
+    Convergence,
+    Workflow,
+    WorkflowValidationError,
+    load_workflow,
+    load_workflow_file,
+)
 from workflow.loader import parse_workflow, validate_shape
 
 if TYPE_CHECKING:
@@ -110,6 +117,34 @@ class TestParseWorkflow:
         del body["convergence"]
         assert parse_workflow(body).convergence is None
 
+    def test_early_exit_policy_deny_defaults_false(self):
+        body = _valid_new_task()
+        body["convergence"]["early_exit"] = {}
+        workflow = parse_workflow(body)
+        assert workflow.convergence is not None
+        assert workflow.convergence.early_exit is not None
+        assert workflow.convergence.early_exit.allow_on_policy_deny is False
+
+    def test_parses_valid_human_approved_convergence(self):
+        body = _valid_new_task()
+        body["convergence"] = {
+            "mode": "human_approved",
+            "terminal_outcomes": ["human_approved"],
+        }
+        workflow = parse_workflow(body)
+        assert workflow.convergence is not None
+        assert workflow.convergence.mode == "human_approved"
+        assert workflow.convergence.required_sensors is None
+        assert workflow.convergence.terminal_outcomes == ["human_approved"]
+
+    def test_model_rejects_explicit_empty_required_sensors(self):
+        with pytest.raises(ValidationError, match="required_sensors"):
+            Convergence(
+                mode="review_submitted",
+                required_sensors=[],
+                terminal_outcomes=["review_published"],
+            )
+
     @pytest.mark.parametrize(
         ("convergence", "error_path"),
         [
@@ -126,6 +161,14 @@ class TestParseWorkflow:
                     "terminal_outcomes": ["pr_opened"],
                 },
                 "convergence",
+            ),
+            (
+                {
+                    "mode": "test_gated",
+                    "required_sensors": [],
+                    "terminal_outcomes": ["pr_opened"],
+                },
+                "convergence/required_sensors",
             ),
             (
                 {
@@ -150,19 +193,37 @@ class TestParseWorkflow:
                 },
                 "convergence/terminal_outcomes",
             ),
+            (
+                {
+                    "mode": "artifact_delivered",
+                    "terminal_outcomes": ["pr_opened"],
+                },
+                "convergence/terminal_outcomes",
+            ),
+            (
+                {
+                    "mode": "human_approved",
+                    "terminal_outcomes": ["pr_opened"],
+                },
+                "convergence/terminal_outcomes",
+            ),
         ],
     )
     def test_invalid_convergence_rejected_with_clear_path(self, convergence, error_path):
         body = _valid_new_task()
         body["convergence"] = convergence
-        with pytest.raises(WorkflowValidationError, match=error_path):
+        with pytest.raises(WorkflowValidationError) as exc:
             parse_workflow(body)
+        assert f"{error_path}:" in str(exc.value)
 
-    def test_required_sensor_must_have_matching_step(self):
+    @pytest.mark.parametrize("sensor", ["verify_build", "verify_lint"])
+    def test_required_sensor_must_have_matching_step(self, sensor):
         body = _valid_new_task()
-        body["convergence"]["required_sensors"] = ["verify_lint"]
-        with pytest.raises(WorkflowValidationError, match="steps"):
+        body["convergence"]["required_sensors"] = [sensor]
+        body["steps"] = [step for step in body["steps"] if step["kind"] != sensor]
+        with pytest.raises(WorkflowValidationError) as exc:
             parse_workflow(body)
+        assert "steps:" in str(exc.value)
 
 
 class TestRequiresRepoDefault:
