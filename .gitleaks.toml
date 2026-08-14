@@ -65,6 +65,11 @@ paths = [
     '''(.*/)?yarn\.lock$''',
     '''(.*/)?package-lock\.json$''',
     '''(.*/)?uv\.lock$''',
+    # Terraform dependency lock (#644). The `zh:` entries are SHA256 provider
+    # checksums; a 12-digit run inside one is not an account ID — observed in the
+    # aws 6.60.0 checksum `…facae063c61584758ea697428f…`, which matches
+    # `063c61584758`. Same rationale as the yarn/uv lockfiles above.
+    '''(.*/)?\.terraform\.lock\.hcl$''',
 ]
 # Per-line opt-out: append `# gitleaks:allow account-id` on a legitimate line.
 stopwords = ["gitleaks:allow account-id"]

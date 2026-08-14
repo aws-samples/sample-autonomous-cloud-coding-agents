@@ -28,6 +28,13 @@ semgrep = "latest"
 osv-scanner = "latest"
 "grype" = "latest"
 "aqua:zizmorcore/zizmor" = "latest"
+# Pinned EXACTLY (not "latest") so CI and every operator run the same binary.
+# `terraform fmt` canonicalization and provider-schema validation both shift
+# between minor releases, so a floating version would make `terraform:fmt` fail
+# on a tree that was formatted by a different machine. 1.15.8 also confirms
+# S3-native `use_lockfile` locking (no DynamoDB lock table) — see
+# terraform/backend.tf.
+terraform = "1.15.8"
 
 [monorepo]
 config_roots = ["cdk", "agent", "cli", "docs"]
@@ -77,6 +84,36 @@ run = [
   "MISE_EXPERIMENTAL=1 mise //cli:eslint",
   "MISE_EXPERIMENTAL=1 mise //docs:check",
 ]
+
+# ── Terraform (additive deploy path, #644) ───────────────────────────────────
+# `terraform/` is NOT a [monorepo] config_root: it has no package manifest and
+# no install step, so a nested mise.toml would buy nothing. These live at the
+# root and are invoked as `mise run terraform:fmt`.
+#
+# Both are credential-free by design, matching build.yml (which has no
+# configure-aws-credentials step). `-backend=false` is what keeps `init`
+# offline — with a backend, init would try to reach the state bucket.
+[tasks."terraform:fmt"]
+description = "Check Terraform formatting (fails on unformatted files; run terraform:fmt:fix to rewrite)"
+run = "terraform fmt -recursive -check -diff terraform"
+
+[tasks."terraform:fmt:fix"]
+description = "Rewrite Terraform files to canonical format in place"
+run = "terraform fmt -recursive terraform"
+
+[tasks."terraform:validate"]
+description = "Validate the Terraform root module, bootstrap, and parity-check example. Credential-free (-backend=false). More than a syntax check: enforces provider-schema required arguments, which is where CDK-default divergence surfaces."
+# Each root module validates independently — `validate` is per-configuration and
+# does not recurse. Kept as an explicit list rather than a glob so a new root
+# module is a deliberate addition here, not a silently unvalidated directory.
+run = '''
+set -e
+for dir in terraform terraform/bootstrap terraform/examples/parity-check; do
+  echo "==> terraform validate ($dir)"
+  terraform -chdir="$dir" init -backend=false -input=false -no-color >/dev/null
+  terraform -chdir="$dir" validate -no-color
+done
+'''
 
 [tasks."check:types-sync"]
 description = "Drift check: CDK shared/types.ts ↔ cli/src/types.ts (S8). Fails if a public type exists in both with different shapes, or if CLI exports a name CDK doesn't."
@@ -260,7 +297,9 @@ depends = [
   "//cli:build",
   "//docs:build",
   ":test:jira-forge-app",
-  ":drift-prevention"
+  ":drift-prevention",
+  ":terraform:fmt",
+  ":terraform:validate"
 ]
 
 [tasks.default]
