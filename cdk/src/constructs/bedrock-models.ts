@@ -17,6 +17,7 @@
  *  SOFTWARE.
  */
 
+import { CrossRegionInferenceProfileRegion } from '@aws-cdk/aws-bedrock-alpha';
 import { Node } from 'constructs';
 
 /**
@@ -46,15 +47,86 @@ export const DEFAULT_BEDROCK_MODEL_IDS: readonly string[] = [
   // turn 0 with AccessDenied. Bare ID by contract: Bedrock refuses the bare ID
   // for on-demand invocation ("ValidationException: … isn't supported. Retry
   // your request with the ID or ARN of an inference profile"), and both grant
-  // sites derive the `us.`-prefixed inference-profile ARN — the invocable one —
-  // from this entry. Opus 4.8 above stays granted: blueprints may pin it
-  // per-repo, so removing it would fail those repos at turn 0.
+  // sites derive the geo-prefixed inference-profile ARN — the invocable one —
+  // from this entry plus `bedrockGeoRegion` (default `us`). Opus 4.8 above
+  // stays granted: blueprints may pin it per-repo, so removing it would fail
+  // those repos at turn 0.
   'anthropic.claude-opus-5',
   'anthropic.claude-haiku-4-5-20251001-v1:0',
 ];
 
 /** CDK context key whose value (a string array) overrides the model set. */
 export const BEDROCK_MODELS_CONTEXT_KEY = 'bedrockModels';
+
+/** CDK context key selecting the cross-Region inference-profile geography. */
+export const BEDROCK_GEO_REGION_CONTEXT_KEY = 'bedrockGeoRegion';
+
+/**
+ * Default inference-profile geography: the US cross-Region profiles
+ * (`us.anthropic.…`). Documented here rather than in `cdk.json` so a deploy that
+ * passes no context at all still resolves — `cdk.json` context is not present
+ * when the app is synthesized from a test or another CDK app.
+ */
+export const DEFAULT_BEDROCK_GEO_REGION = CrossRegionInferenceProfileRegion.US;
+
+/**
+ * The geographies `@aws-cdk/aws-bedrock-alpha` actually models — the single
+ * source of truth for both the {@link resolveBedrockGeoRegion} allow-list and
+ * the region-prefix rejection in {@link resolveBedrockModelIds}. Derived from
+ * the enum, so a future CDK release that adds a geography widens both at once
+ * instead of leaving one of them silently behind.
+ */
+export const BEDROCK_GEO_REGIONS: readonly CrossRegionInferenceProfileRegion[] =
+  Object.values(CrossRegionInferenceProfileRegion);
+
+/**
+ * `global|us-gov|apac|eu|us|jp|au` — an alternation over
+ * {@link BEDROCK_GEO_REGIONS}, sorted longest-first so the pattern reads
+ * unambiguously with `us-gov` ahead of `us`. Readability only: because
+ * {@link GEO_PREFIX_RE} anchors a literal `.` after the alternation, a `us`-first
+ * order would still reject `us-gov.…` correctly (the engine backtracks when the
+ * `.` fails against `-`). Sorting just means nobody has to reason about that.
+ */
+const GEO_ALTERNATION = [...BEDROCK_GEO_REGIONS]
+  .sort((a, b) => b.length - a.length)
+  .join('|');
+
+/** Matches a leading `<geo>.` inference-profile prefix on a model ID. */
+const GEO_PREFIX_RE = new RegExp(`^(?:${GEO_ALTERNATION})\\.`);
+
+/**
+ * Resolves the cross-Region inference-profile geography: CDK context
+ * `bedrockGeoRegion` when provided, else {@link DEFAULT_BEDROCK_GEO_REGION}
+ * (`us`). Set via `cdk.json` `context` or `-c bedrockGeoRegion=global`, then
+ * redeploy, to move the deployment's inference profiles to another geography —
+ * no construct edits needed.
+ *
+ * Both grant sites derive their inference-profile ARNs from this one value (the
+ * AgentCore runtime in `stacks/agent.ts` via
+ * `CrossRegionInferenceProfile.fromConfig`, the ECS task role in
+ * `constructs/ecs-agent-cluster.ts` via the `<geo>.<modelId>` ARN resource
+ * name), and the agent's auxiliary-model env var (`ANTHROPIC_DEFAULT_HAIKU_MODEL`)
+ * takes the same prefix — so the main and auxiliary models can never route
+ * through different geographies.
+ *
+ * Throws at synth on an unrecognized value: an invented geography would produce
+ * a syntactically valid but non-existent inference-profile ARN, and the grant
+ * would silently authorize nothing (the agent then fails at turn 0 with
+ * AccessDenied). A typo must fail the synth, not the deployment.
+ */
+export function resolveBedrockGeoRegion(node: Node): CrossRegionInferenceProfileRegion {
+  const override = node.tryGetContext(BEDROCK_GEO_REGION_CONTEXT_KEY);
+  if (override === undefined || override === null) {
+    return DEFAULT_BEDROCK_GEO_REGION;
+  }
+  if (typeof override !== 'string' || !BEDROCK_GEO_REGIONS.includes(override as CrossRegionInferenceProfileRegion)) {
+    throw new Error(
+      `Context '${BEDROCK_GEO_REGION_CONTEXT_KEY}' must be one of `
+      + `${BEDROCK_GEO_REGIONS.map((g) => `'${g}'`).join(', ')}; got ${JSON.stringify(override)}.`,
+    );
+  }
+  return override as CrossRegionInferenceProfileRegion;
+}
 
 /**
  * Resolves the invocable foundation-model IDs: CDK context `bedrockModels`
@@ -63,14 +135,18 @@ export const BEDROCK_MODELS_CONTEXT_KEY = 'bedrockModels';
  * `-c bedrockModels='["anthropic.claude-opus-4-8", …]'`, then redeploy, to add
  * a model the runtime may invoke — no construct edits needed.
  *
- * **Use the bare foundation-model ID (`anthropic.claude-…`), NOT the
- * `us.`-prefixed inference-profile ID.** Both grant sites derive the US
- * inference-profile ARN by prefixing `us.`, so passing `us.anthropic.…` here
- * would produce an invalid `us.us.anthropic.…` ARN. The resolver rejects a
- * `us.`/`eu.`/`apac.`-prefixed entry to catch that early.
+ * **Use the bare foundation-model ID (`anthropic.claude-…`), NOT a
+ * geo-prefixed inference-profile ID.** Both grant sites derive the
+ * inference-profile ARN by prefixing the geography from
+ * {@link resolveBedrockGeoRegion} (`bedrockGeoRegion`, default `us`), so passing
+ * `us.anthropic.…` here would produce an invalid `us.us.anthropic.…` ARN. The
+ * resolver rejects an entry carrying ANY modelled geo prefix
+ * ({@link BEDROCK_GEO_REGIONS}) to catch that early — including `global.`,
+ * which previously slipped through and silently yielded
+ * `us.global.anthropic.…`.
  *
  * Throws on a malformed override (non-array, non-string / empty entries, or a
- * region-prefixed ID) so a typo fails synth loudly instead of silently
+ * geo-prefixed ID) so a typo fails synth loudly instead of silently
  * granting nothing or an invalid ARN.
  */
 export function resolveBedrockModelIds(node: Node): readonly string[] {
@@ -90,11 +166,12 @@ export function resolveBedrockModelIds(node: Node): readonly string[] {
         `Context '${BEDROCK_MODELS_CONTEXT_KEY}' entries must be non-empty strings; got ${JSON.stringify(id)}.`,
       );
     }
-    if (/^(us|eu|apac)\./.test(id)) {
+    if (GEO_PREFIX_RE.test(id)) {
       throw new Error(
-        `Context '${BEDROCK_MODELS_CONTEXT_KEY}' expects bare foundation-model IDs, not region-prefixed `
-        + `inference-profile IDs — got '${id}'. Use '${id.replace(/^(us|eu|apac)\./, '')}'; `
-        + 'the US inference-profile ARN is derived automatically.',
+        `Context '${BEDROCK_MODELS_CONTEXT_KEY}' expects bare foundation-model IDs, not geo-prefixed `
+        + `inference-profile IDs — got '${id}'. Use '${id.replace(GEO_PREFIX_RE, '')}'; `
+        + `the inference-profile ARN is derived automatically from the '${BEDROCK_GEO_REGION_CONTEXT_KEY}' `
+        + 'context key (default \'us\').',
       );
     }
   }

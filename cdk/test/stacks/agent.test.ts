@@ -21,6 +21,11 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { App, AspectPriority, Aspects } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
+import {
+  BEDROCK_GEO_REGION_CONTEXT_KEY,
+  DEFAULT_BEDROCK_GEO_REGION,
+  DEFAULT_BEDROCK_MODEL_IDS,
+} from '../../src/constructs/bedrock-models';
 import * as lambdaMicrovmCompute from '../../src/constructs/lambda-microvm-compute';
 import { buildAppId, SolutionUaAspect } from '../../src/constructs/solution-ua-aspect';
 import { AgentStack } from '../../src/stacks/agent';
@@ -147,16 +152,22 @@ describe('AgentStack', () => {
     }
   });
 
-  test('default Haiku model env var is the cross-region inference profile (us.), not the bare model id', () => {
+  test('default Haiku model env var is the cross-region inference profile, not the bare model id', () => {
     // Claude 4.x on Bedrock cannot be invoked on-demand by bare foundation-model
     // id (400 "on-demand throughput isn't supported"); WebFetch's Haiku sub-calls
-    // hit this. The env var must be the granted us.* inference profile.
+    // hit this. The env var must be the granted inference profile.
+    //
+    // The expectation is DERIVED from the default geography rather than hardcoded
+    // `us.` (#746): the prefix is now a function of `bedrockGeoRegion`, so a
+    // hardcoded literal here would assert the default's value twice and go stale
+    // the moment the default moves — while the thing worth guarding (main and
+    // auxiliary models routing through the SAME geography) went unchecked.
     const runtimes = template.findResources('AWS::BedrockAgentCore::Runtime');
     for (const rt of Object.values(runtimes)) {
       const envVars = (rt as { Properties?: { EnvironmentVariables?: Record<string, unknown> } })
         .Properties?.EnvironmentVariables ?? {};
       expect(envVars.ANTHROPIC_DEFAULT_HAIKU_MODEL)
-        .toBe('us.anthropic.claude-haiku-4-5-20251001-v1:0');
+        .toBe(`${DEFAULT_BEDROCK_GEO_REGION}.anthropic.claude-haiku-4-5-20251001-v1:0`);
     }
   });
 
@@ -261,6 +272,11 @@ describe('AgentStack', () => {
     // Default (no bedrockModels context): the runtime execution role must hold
     // bedrock:InvokeModel on every default foundation model + its US
     // inference profile, scoped (never Resource: '*').
+    //
+    // The `us.` literals below are deliberate, not stale (#746): this test pins
+    // the DEFAULT deploy, and the default geography is still `us`. The
+    // geo-parameterized behaviour is covered separately; template identity under
+    // default context is covered by the exact-set test further down.
     const serialized = JSON.stringify(template.findResources('AWS::IAM::Policy'));
     expect(serialized).toContain('foundation-model/anthropic.claude-sonnet-4-6');
     expect(serialized).toContain('inference-profile/us.anthropic.claude-sonnet-4-6');
@@ -333,6 +349,136 @@ describe('AgentStack', () => {
     expect(serialized).not.toContain('claude-haiku-4-5');
     // ...and the grant is never a bare wildcard.
     expect(serialized).not.toContain('"*"');
+  });
+
+  /**
+   * TEMPLATE IDENTITY (#746). Making the inference-profile geography
+   * configurable must not MOVE it: the default is still `us`, so a stack
+   * deployed before this change and re-synthesized after it must produce the
+   * same Bedrock IAM resources. That is the whole safety argument for shipping
+   * the refactor on its own, ahead of the geo flip (#747) — so it is asserted,
+   * not asserted-in-a-PR-description.
+   *
+   * The expected set below is the literal, exhaustive list captured from a
+   * pre-change `origin/main` synth of this same stack (`fb1e007b`, before the
+   * `bedrockGeoRegion` key existed) — every `foundation-model/…` and
+   * `inference-profile/…` resource name appearing in any `bedrock:` IAM
+   * statement of the default-context template. Asserted as EXACT set equality,
+   * so the refactor can neither add, drop, nor re-prefix a grant unnoticed. A
+   * `toContain`-style check would pass on a template that also granted
+   * something new.
+   *
+   * (The full 25k-line template was also diffed pre/post out-of-band and is
+   * identical modulo CDK's own local synth non-determinism — asset hashes,
+   * custom-resource timestamps, the InputGuardrail version logical id — which
+   * differ between two synths of the SAME tree and so cannot be asserted here.
+   * The Bedrock resources are the change's entire blast radius.)
+   */
+  test('default-context Bedrock grants are byte-identical to the pre-#746 template', () => {
+    const PRE_CHANGE_BEDROCK_RESOURCE_NAMES = [
+      'foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0',
+      'foundation-model/anthropic.claude-opus-4-20250514-v1:0',
+      'foundation-model/anthropic.claude-opus-4-8',
+      'foundation-model/anthropic.claude-opus-5',
+      'foundation-model/anthropic.claude-sonnet-4-6',
+      'inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0',
+      'inference-profile/us.anthropic.claude-opus-4-20250514-v1:0',
+      'inference-profile/us.anthropic.claude-opus-4-8',
+      'inference-profile/us.anthropic.claude-opus-5',
+      'inference-profile/us.anthropic.claude-sonnet-4-6',
+    ];
+
+    const serialized = JSON.stringify(template.findResources('AWS::IAM::Policy'));
+    const found = [...new Set(
+      serialized.match(/(?:foundation-model|inference-profile)\/[^"]+/g) ?? [],
+    )].sort();
+    expect(found).toEqual(PRE_CHANGE_BEDROCK_RESOURCE_NAMES);
+
+    // Sanity: the set is derived from the shared model list, so a model added to
+    // DEFAULT_BEDROCK_MODEL_IDS without updating this baseline fails loudly here
+    // rather than silently widening the "identical" claim.
+    expect(found).toHaveLength(DEFAULT_BEDROCK_MODEL_IDS.length * 2);
+
+    // And the auxiliary-model env var is still the `us.` profile it always was.
+    const runtimes = template.findResources('AWS::BedrockAgentCore::Runtime');
+    const envVars = (Object.values(runtimes)[0] as {
+      Properties?: { EnvironmentVariables?: Record<string, unknown> };
+    }).Properties?.EnvironmentVariables ?? {};
+    expect(envVars.ANTHROPIC_DEFAULT_HAIKU_MODEL)
+      .toBe('us.anthropic.claude-haiku-4-5-20251001-v1:0');
+    expect(DEFAULT_BEDROCK_GEO_REGION).toBe('us');
+  });
+
+  /**
+   * The point of the key: a non-`us` deploy must be reachable from context
+   * alone, with no construct edit. Parameterized over the geographies with a
+   * distinct ARN shape from the default, `global` included — `global.` was the
+   * specific case verified live (its profile ARN is regional + account-qualified,
+   * identical in shape to `us.`), and is what #747 will flip the default to.
+   */
+  describe.each(['global', 'eu', 'apac'])('bedrockGeoRegion=%s', (geo) => {
+    let geoTemplate: Template;
+
+    beforeAll(() => {
+      const app = new App({ context: { [BEDROCK_GEO_REGION_CONTEXT_KEY]: geo } });
+      const stack = new AgentStack(app, `GeoAgentStack${geo.replace('-', '')}`, {
+        env: { account: '123456789012', region: 'us-east-1' },
+      });
+      geoTemplate = Template.fromStack(stack);
+    });
+
+    test('re-prefixes every inference-profile ARN and drops the us. ones', () => {
+      const serialized = JSON.stringify(geoTemplate.findResources('AWS::IAM::Policy'));
+      for (const modelId of DEFAULT_BEDROCK_MODEL_IDS) {
+        expect(serialized).toContain(`inference-profile/${geo}.${modelId}`);
+        // The default geography must be GONE, not merely joined — a grant left
+        // on `us.` while the agent calls `global.` is an AccessDenied at turn 0.
+        expect(serialized).not.toContain(`inference-profile/us.${modelId}`);
+        // The foundation-model half is already geo-agnostic (region: '*'), so it
+        // is unchanged — and must NOT pick up a geo prefix.
+        expect(serialized).toContain(`foundation-model/${modelId}`);
+        expect(serialized).not.toContain(`foundation-model/${geo}.${modelId}`);
+      }
+      // Still per-model scoped; the geo knob must never become a wildcard.
+      // Scoped to the bedrock:InvokeModel* statements — the stack legitimately
+      // holds Resource:'*' elsewhere (ec2/route53resolver describes have no
+      // resource-level scoping), so a blanket scan would assert nothing here.
+      const bedrockStatements: unknown[] = [];
+      for (const p of Object.values(geoTemplate.findResources('AWS::IAM::Policy'))) {
+        for (const s of (p.Properties?.PolicyDocument?.Statement ?? []) as Array<{ Action?: unknown; Resource?: unknown }>) {
+          const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+          if (actions.some((a) => typeof a === 'string' && a.startsWith('bedrock:InvokeModel'))) {
+            bedrockStatements.push(s.Resource);
+          }
+        }
+      }
+      expect(bedrockStatements.length).toBeGreaterThan(0);
+      expect(bedrockStatements).not.toContain('*');
+      expect(JSON.stringify(bedrockStatements)).not.toContain('"*"');
+    });
+
+    test('derives the auxiliary Haiku model prefix from the same key', () => {
+      // Without this the main model routes through `geo` while WebFetch's Haiku
+      // sub-calls still ask for `us.` — a grant/env split that only shows up as a
+      // mid-task failure on the auxiliary path.
+      const runtimes = geoTemplate.findResources('AWS::BedrockAgentCore::Runtime');
+      for (const rt of Object.values(runtimes)) {
+        const envVars = (rt as { Properties?: { EnvironmentVariables?: Record<string, unknown> } })
+          .Properties?.EnvironmentVariables ?? {};
+        expect(envVars.ANTHROPIC_DEFAULT_HAIKU_MODEL)
+          .toBe(`${geo}.anthropic.claude-haiku-4-5-20251001-v1:0`);
+      }
+    });
+  });
+
+  test('an unknown bedrockGeoRegion fails at synth, not at turn 0', () => {
+    // Synth-time because the value feeds grantInvoke's ARN construction: a
+    // CloudFormation parameter would resolve after synth and force the grant back
+    // to Resource: '*'. A typo must therefore fail here, loudly.
+    const app = new App({ context: { [BEDROCK_GEO_REGION_CONTEXT_KEY]: 'usa' } });
+    expect(() => new AgentStack(app, 'BadGeoAgentStack', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    })).toThrow(/must be one of/);
   });
 
   test('outputs ApiUrl', () => {
