@@ -1,0 +1,69 @@
+{
+  "name": "rule3-repo-less-has-self-review",
+  "description": "Repo-less knowledge workflow illegally declares a self_review step. self_review is repo-only (it diffs and re-runs the agent against a cloned tree), so both the schema's requires_repo:false conditional and cross-field rule 3 reject it.",
+  "workflow": {
+    "id": "knowledge/web-research-v1",
+    "version": "1.0.0",
+    "domain": "knowledge",
+    "requires_repo": false,
+    "read_only": false,
+    "prompt": {
+      "template": "registry://prompt/web-research-workflow"
+    },
+    "hydration": {
+      "sources": [
+        "task_description",
+        "urls"
+      ]
+    },
+    "agent_config": {
+      "tier": "elevated",
+      "allowed_tools": [
+        "Read",
+        "WebFetch"
+      ],
+      "cedar_policy_modules": [
+        "builtin/hard_deny",
+        "builtin/soft_deny"
+      ]
+    },
+    "repo_config": {
+      "discover": false
+    },
+    "required_inputs": {
+      "all_of": [
+        "task_description"
+      ]
+    },
+    "steps": [
+      {
+        "kind": "hydrate_context",
+        "name": "context"
+      },
+      {
+        "kind": "run_agent",
+        "name": "research"
+      },
+      {
+        "kind": "self_review",
+        "name": "review"
+      },
+      {
+        "kind": "deliver_artifact",
+        "name": "deliver",
+        "target": "s3_and_comment"
+      }
+    ],
+    "terminal_outcomes": {
+      "primary": "artifact"
+    },
+    "status": "production"
+  },
+  "expected": {
+    "valid": false,
+    "violations": [
+      "rule-3",
+      "schema"
+    ]
+  }
+}
