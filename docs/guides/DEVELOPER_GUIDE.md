@@ -190,7 +190,7 @@ Token ratio 1.169; cost ratio 1.169 — identical. **The per-token rate is uncha
 | Per task, CLI | `bgagent submit --max-budget <dollars>` (`cli/src/commands/submit.ts:69`), range 0.01–100 | Works |
 | Per task, REST | `max_budget_usd` in the `POST /v1/tasks` body | Works |
 | Local batch only | `MAX_BUDGET_USD` shell env, when running `entrypoint.py` directly | Works locally; **ignored** by the deployed AgentCore **server** mode, which reads the budget from the `/invocations` JSON body |
-| Per repo, Blueprint | `agent.maxBudgetUsd` | **Not implemented** — `cdk/src/constructs/blueprint.ts` has no such prop (it implements `maxTurns`). Tracked in [#748](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/748), which owns that documentation. |
+| Per repo, Blueprint | `agent.maxBudgetUsd` on the repo's `Blueprint` construct | Works — persisted to `RepoTable.max_budget_usd`; same `0.01`–`100` range as the CLI, validated at CDK synth so an out-of-range value cannot deploy. See [Per-repo overrides](./USER_GUIDE.md#per-repo-overrides). |
 | Platform default | — | None by design: **unset means unlimited** |
 
 **Unlimited-by-default is deliberate — pair it with the escape hatch.** Because no platform budget ceiling applies, the documented mitigation for cost is choosing a lighter-token model rather than relying on a cap:
