@@ -568,59 +568,57 @@ describe('AgentStack', () => {
     expect(objectStatements).toEqual([]);
   });
 
-  test('log-delivery logical ids are pinned with NO opt-in, so an existing stack updates in place', () => {
-    // A DeliverySource is unique per (resource ARN, log type) for the whole
-    // account, and the runtime ARN survives a library-side rename of these
-    // auto-created resources. So a renamed source is a SECOND source for the same
-    // runtime: CloudFormation creates before deleting, CloudWatch Logs rejects it
-    // as already existing, and the update rolls the whole stack back.
+  test('no hard-coded log-delivery logical ids or names anywhere in the stack', () => {
+    // The template must not carry values recorded from one account's live stack.
     //
-    // The ids must therefore be pinned unconditionally. Behind a flag, the safe
-    // path is the one an operator has to already know about, and the failure that
-    // teaches them is a mid-update rollback whose message never mentions it.
+    // These resources are created and named by the AgentCore Runtime. An earlier
+    // version overrode their logical ids from a table keyed by STACK NAME, holding
+    // ids read off one deployed stack — but stack name is not a proxy for deployed
+    // state. Two accounts running a stack of the same name had diverged, so the
+    // table was right for one and actively caused the rename on the other, which is
+    // fatal: a DeliverySource is unique per (resource ARN, log type) account-wide,
+    // the runtime ARN survives a rename, so CloudFormation's create-before-delete
+    // collides with the live source and the whole update rolls back.
     //
-    // Asserted on the source, not by synthesizing a second stack: constructing
-    // one under a different construct id trips an unrelated cdk-nag
-    // suppression-path check first, which masks whatever this is checking.
+    // There is no set of literals that serves every account, so the fix is to hold
+    // none. Asserted on the source because the failure mode is a value being
+    // reintroduced, not a synth-visible shape.
     const src = fs.readFileSync(
       path.resolve(__dirname, '../../src/stacks/agent.ts'), 'utf8',
     );
-    const fn = src.slice(src.indexOf('function pinLogDeliveryLogicalIds'));
-    const body = fn.slice(0, fn.indexOf('\n}'));
 
-    // Keyed off the stack's OWN name — no context, no opt-in.
-    expect(body).toContain('PINNED_LOG_DELIVERY_BY_STACK[stack.stackName]');
-    expect(body).not.toContain('tryGetContext');
-    // Nothing anywhere may reintroduce a gate.
+    // No table, no lookup, no per-stack keying, and no flag to gate any of it.
+    expect(src).not.toContain('PINNED_LOG_DELIVERY_BY_STACK');
     expect(src).not.toContain('pinnedLogDeliveryStack');
+    expect(src).not.toContain('overrideLogicalId');
 
-    // The ids it pins are the ones CloudFormation already holds for that stack.
-    // Hard-coded here on purpose: if someone "tidies" a value in the table, this
-    // fails instead of the next production update rolling back.
-    expect(src).toContain('RuntimeCDKSourceAPPLICATIONLOGSbackgroundagentdevRuntimeBC0AE9ED96A02E02');
-    expect(src).toContain('RuntimeCDKSourceUSAGELOGSbackgroundagentdevRuntimeBC0AE9ED544FBB22');
+    // No captured logical id or account-unique Name, in any of their shapes.
+    expect(src).not.toMatch(/RuntimeCDKSource/);
+    expect(src).not.toMatch(/cdk-(application|usage)logs-source-/);
+    expect(src).not.toMatch(/cdk-cwl-Dest/);
   });
 
-  test('a stack with no recorded ids keeps the library\'s own log-delivery naming', () => {
-    // The pinned ids embed a stack name, so they are only correct for that stack.
-    // Another stack has no pre-rename resources to line up with and must not
-    // inherit them — otherwise two stacks in one account would claim the same
-    // account-unique DeliverySource Name. The table lookup is what enforces this,
-    // so assert it returns nothing for an unknown name rather than falling back.
-    const src = fs.readFileSync(
-      path.resolve(__dirname, '../../src/stacks/agent.ts'), 'utf8',
-    );
-    const fn = src.slice(src.indexOf('function pinLogDeliveryLogicalIds'));
-    const body = fn.slice(0, fn.indexOf('\n}'));
-    expect(body).toMatch(/if \(!pins\) return;/);
-
-    // And this stack — named TestAgentStack, absent from the table — got the
-    // library's naming, with none of backgroundagent-dev's ids leaking in.
-    const ids = Object.keys(template.findResources('AWS::Logs::DeliverySource'));
+  test('log delivery is left to the library, so every account synthesizes the same ids', () => {
+    // The point of holding no ids: what lands in the template comes from the
+    // library, so the same code produces the same ids in every account. A stack
+    // already on the library's naming sees no change at all.
+    const sources = template.findResources('AWS::Logs::DeliverySource');
+    const ids = Object.keys(sources);
     expect(ids).toHaveLength(2);
+
     for (const id of ids) {
+      // Library-generated, not ours: no self-chosen prefix and no stack name baked
+      // in. A stack name in a logical id is the signature of the old table.
       expect(id).not.toContain('backgroundagentdev');
+      expect(id).not.toContain('AgentRuntimeApplication');
+      expect(id).toMatch(/^Runtime(Application|Usage)LogsDeliverySource[0-9A-F]{8}$/);
     }
+
+    // Both log types are wired, so "no pin" cannot mean "no delivery".
+    const logTypes = Object.values(sources)
+      .map((r) => (r as { Properties?: { LogType?: string } }).Properties?.LogType)
+      .sort();
+    expect(logTypes).toEqual(['APPLICATION_LOGS', 'USAGE_LOGS']);
   });
 
   test('the fan-out consumer can reach BOTH surfaces\' credentials registries', () => {
