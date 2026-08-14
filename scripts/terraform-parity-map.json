@@ -1,0 +1,299 @@
+{
+  "$schema-note": [
+    "CloudFormation resource TYPE -> AWS provider resource TYPE(s) mapping for",
+    "scripts/check-terraform-parity.mjs (ADR sub-decision 4, tier 1).",
+    "",
+    "SEMANTICS. A CFN type is COVERED when at least ONE of its `terraform` names",
+    "appears in the Terraform plan census. This is deliberately an OR, not an",
+    "AND: idiomatic HCL splits some CFN resources across several provider",
+    "resources (AWS::S3::Bucket -> aws_s3_bucket + a dozen aws_s3_bucket_* side",
+    "resources) and collapses others into arguments. Requiring all names would",
+    "fail on every legitimate partial implementation.",
+    "",
+    "An empty `terraform` array means NO provider resource corresponds to this",
+    "CFN type. Such a type can only ever be satisfied by terraform/PARITY_ALLOWLIST.md.",
+    "",
+    "FAILURE DIRECTION. The names here are only ever tested for PRESENCE in the",
+    "plan census, so a typo or a stale provider name produces a false FAILURE,",
+    "never a false pass. That is the safe direction for a blocking gate: the",
+    "harness cannot be silently disarmed by a bad mapping entry.",
+    "",
+    "Names verified against hashicorp/aws 6.60.0 registry docs on 2026-08-14.",
+    "CFN types enumerated from cdk/cdk.out/*.template.json (69 types, 539",
+    "resources at the default agentcore synth), plus the context-gated compute",
+    "variants synthesized with `-c compute_type=ecs` (+2 types) and",
+    "`-c compute_type=lambda-microvm` (+1 type)."
+  ],
+  "mappings": {
+    "AWS::ApiGateway::Account": {
+      "terraform": ["aws_api_gateway_account"]
+    },
+    "AWS::ApiGateway::Authorizer": {
+      "terraform": ["aws_api_gateway_authorizer"]
+    },
+    "AWS::ApiGateway::Deployment": {
+      "terraform": ["aws_api_gateway_deployment"]
+    },
+    "AWS::ApiGateway::Method": {
+      "terraform": [
+        "aws_api_gateway_method",
+        "aws_api_gateway_integration",
+        "aws_api_gateway_method_response",
+        "aws_api_gateway_integration_response"
+      ],
+      "note": "One CFN Method carries the integration and both response shapes inline; the provider splits them into four resources. Any one of them proves the capability is wired."
+    },
+    "AWS::ApiGateway::RequestValidator": {
+      "terraform": ["aws_api_gateway_request_validator"]
+    },
+    "AWS::ApiGateway::Resource": {
+      "terraform": ["aws_api_gateway_resource"]
+    },
+    "AWS::ApiGateway::RestApi": {
+      "terraform": ["aws_api_gateway_rest_api", "aws_api_gateway_rest_api_put"]
+    },
+    "AWS::ApiGateway::Stage": {
+      "terraform": ["aws_api_gateway_stage", "aws_api_gateway_method_settings"]
+    },
+    "AWS::Bedrock::Guardrail": {
+      "terraform": ["aws_bedrock_guardrail"]
+    },
+    "AWS::Bedrock::GuardrailVersion": {
+      "terraform": ["aws_bedrock_guardrail_version"]
+    },
+    "AWS::BedrockAgentCore::Memory": {
+      "terraform": ["aws_bedrockagentcore_memory", "aws_bedrockagentcore_memory_strategy"],
+      "note": "CDK's L1 embeds MemoryStrategies inline; the provider hoists each strategy into its own aws_bedrockagentcore_memory_strategy. Both names count."
+    },
+    "AWS::BedrockAgentCore::Runtime": {
+      "terraform": [
+        "aws_bedrockagentcore_agent_runtime",
+        "aws_bedrockagentcore_agent_runtime_endpoint"
+      ]
+    },
+    "AWS::CDK::Metadata": {
+      "terraform": [],
+      "note": "No provider equivalent by construction — see allowlist."
+    },
+    "AWS::CloudFormation::Stack": {
+      "terraform": [],
+      "note": "Nested-stack plumbing. Terraform's analogue is a `module` block, which is not a resource and never appears in the plan's resource census — see allowlist."
+    },
+    "AWS::CloudFront::Distribution": {
+      "terraform": ["aws_cloudfront_distribution"]
+    },
+    "AWS::CloudFront::OriginAccessControl": {
+      "terraform": ["aws_cloudfront_origin_access_control"]
+    },
+    "AWS::CloudWatch::Alarm": {
+      "terraform": ["aws_cloudwatch_metric_alarm", "aws_cloudwatch_composite_alarm"]
+    },
+    "AWS::CloudWatch::Dashboard": {
+      "terraform": ["aws_cloudwatch_dashboard"]
+    },
+    "AWS::Cognito::UserPool": {
+      "terraform": ["aws_cognito_user_pool"]
+    },
+    "AWS::Cognito::UserPoolClient": {
+      "terraform": ["aws_cognito_user_pool_client"]
+    },
+    "AWS::Cognito::UserPoolGroup": {
+      "terraform": ["aws_cognito_user_group"],
+      "note": "Provider drops the `Pool` infix: aws_cognito_user_group, not aws_cognito_user_pool_group."
+    },
+    "AWS::DynamoDB::Table": {
+      "terraform": ["aws_dynamodb_table", "aws_dynamodb_global_secondary_index"]
+    },
+    "AWS::EC2::EIP": {
+      "terraform": ["aws_eip"]
+    },
+    "AWS::EC2::FlowLog": {
+      "terraform": ["aws_flow_log"],
+      "note": "Provider name has no `vpc_`/`ec2_` prefix."
+    },
+    "AWS::EC2::InternetGateway": {
+      "terraform": ["aws_internet_gateway"]
+    },
+    "AWS::EC2::NatGateway": {
+      "terraform": ["aws_nat_gateway"]
+    },
+    "AWS::EC2::Route": {
+      "terraform": ["aws_route"]
+    },
+    "AWS::EC2::RouteTable": {
+      "terraform": ["aws_route_table"]
+    },
+    "AWS::EC2::SecurityGroup": {
+      "terraform": [
+        "aws_security_group",
+        "aws_vpc_security_group_egress_rule",
+        "aws_vpc_security_group_ingress_rule"
+      ],
+      "note": "CFN inlines SecurityGroupIngress/Egress; current provider guidance is standalone rule resources. Any of the three counts."
+    },
+    "AWS::EC2::Subnet": {
+      "terraform": ["aws_subnet"]
+    },
+    "AWS::EC2::SubnetRouteTableAssociation": {
+      "terraform": ["aws_route_table_association"]
+    },
+    "AWS::EC2::VPC": {
+      "terraform": ["aws_vpc"]
+    },
+    "AWS::EC2::VPCEndpoint": {
+      "terraform": ["aws_vpc_endpoint"]
+    },
+    "AWS::EC2::VPCGatewayAttachment": {
+      "terraform": ["aws_internet_gateway_attachment", "aws_internet_gateway"],
+      "note": "Idiomatic HCL attaches by setting `vpc_id` on aws_internet_gateway, so the attachment usually has no resource of its own; aws_internet_gateway_attachment exists for the split-lifecycle case. This is the archetypal legitimate collapse the type census must tolerate."
+    },
+    "AWS::Events::Rule": {
+      "terraform": ["aws_cloudwatch_event_rule", "aws_cloudwatch_event_target"],
+      "note": "EventBridge lives under the cloudwatch_event_* prefix, and CFN's inline Targets[] become separate aws_cloudwatch_event_target resources."
+    },
+    "AWS::IAM::Policy": {
+      "terraform": [
+        "aws_iam_role_policy",
+        "aws_iam_policy",
+        "aws_iam_role_policy_attachment"
+      ],
+      "note": "CDK emits AWS::IAM::Policy for inline role policies. Terraform models the same thing as aws_iam_role_policy (inline) or aws_iam_policy + attachment (managed)."
+    },
+    "AWS::IAM::Role": {
+      "terraform": ["aws_iam_role"]
+    },
+    "AWS::KMS::Key": {
+      "terraform": ["aws_kms_key", "aws_kms_alias"]
+    },
+    "AWS::Lambda::Alias": {
+      "terraform": ["aws_lambda_alias"]
+    },
+    "AWS::Lambda::EventInvokeConfig": {
+      "terraform": ["aws_lambda_function_event_invoke_config"]
+    },
+    "AWS::Lambda::EventSourceMapping": {
+      "terraform": ["aws_lambda_event_source_mapping"]
+    },
+    "AWS::Lambda::Function": {
+      "terraform": ["aws_lambda_function"]
+    },
+    "AWS::Lambda::LayerVersion": {
+      "terraform": ["aws_lambda_layer_version"]
+    },
+    "AWS::Lambda::Permission": {
+      "terraform": ["aws_lambda_permission"]
+    },
+    "AWS::Lambda::Version": {
+      "terraform": [],
+      "note": "No provider resource — `publish = true` on aws_lambda_function creates the version. See allowlist."
+    },
+    "AWS::Logs::Delivery": {
+      "terraform": ["aws_cloudwatch_log_delivery"]
+    },
+    "AWS::Logs::DeliveryDestination": {
+      "terraform": [
+        "aws_cloudwatch_log_delivery_destination",
+        "aws_cloudwatch_log_delivery_destination_policy"
+      ]
+    },
+    "AWS::Logs::DeliverySource": {
+      "terraform": ["aws_cloudwatch_log_delivery_source"]
+    },
+    "AWS::Logs::LogGroup": {
+      "terraform": ["aws_cloudwatch_log_group"]
+    },
+    "AWS::Logs::ResourcePolicy": {
+      "terraform": ["aws_cloudwatch_log_resource_policy"]
+    },
+    "AWS::Route53Resolver::FirewallDomainList": {
+      "terraform": ["aws_route53_resolver_firewall_domain_list"]
+    },
+    "AWS::Route53Resolver::FirewallRuleGroup": {
+      "terraform": [
+        "aws_route53_resolver_firewall_rule_group",
+        "aws_route53_resolver_firewall_rule"
+      ],
+      "note": "CFN inlines FirewallRules[]; the provider hoists each into aws_route53_resolver_firewall_rule."
+    },
+    "AWS::Route53Resolver::FirewallRuleGroupAssociation": {
+      "terraform": ["aws_route53_resolver_firewall_rule_group_association"]
+    },
+    "AWS::Route53Resolver::ResolverQueryLoggingConfig": {
+      "terraform": ["aws_route53_resolver_query_log_config"],
+      "note": "Provider drops `Resolver...Logging` for `query_log`."
+    },
+    "AWS::Route53Resolver::ResolverQueryLoggingConfigAssociation": {
+      "terraform": ["aws_route53_resolver_query_log_config_association"]
+    },
+    "AWS::S3::Bucket": {
+      "terraform": [
+        "aws_s3_bucket",
+        "aws_s3_bucket_versioning",
+        "aws_s3_bucket_server_side_encryption_configuration",
+        "aws_s3_bucket_public_access_block",
+        "aws_s3_bucket_lifecycle_configuration",
+        "aws_s3_bucket_logging",
+        "aws_s3_bucket_ownership_controls"
+      ],
+      "note": "AWS provider v4+ split every bucket sub-configuration into its own resource. One CFN bucket routinely becomes 5-8 provider resources — the reason this harness censuses types and never counts."
+    },
+    "AWS::S3::BucketPolicy": {
+      "terraform": ["aws_s3_bucket_policy"]
+    },
+    "AWS::SNS::Topic": {
+      "terraform": ["aws_sns_topic"]
+    },
+    "AWS::SNS::TopicPolicy": {
+      "terraform": ["aws_sns_topic_policy"]
+    },
+    "AWS::SQS::Queue": {
+      "terraform": ["aws_sqs_queue"]
+    },
+    "AWS::SQS::QueuePolicy": {
+      "terraform": ["aws_sqs_queue_policy"]
+    },
+    "AWS::SecretsManager::Secret": {
+      "terraform": ["aws_secretsmanager_secret", "aws_secretsmanager_secret_version"],
+      "note": "ABCA provisions secrets as empty shells populated out-of-band, so only aws_secretsmanager_secret is expected. aws_secretsmanager_secret_version is listed for completeness — ADR sub-decision 4 relies on the module NOT managing it (that is what makes the PR 8 GetSecretValue Deny free)."
+    },
+    "AWS::StepFunctions::StateMachine": {
+      "terraform": ["aws_sfn_state_machine"]
+    },
+    "AWS::WAFv2::WebACL": {
+      "terraform": ["aws_wafv2_web_acl", "aws_wafv2_web_acl_rule"]
+    },
+    "AWS::WAFv2::WebACLAssociation": {
+      "terraform": ["aws_wafv2_web_acl_association"]
+    },
+    "Custom::AWS": {
+      "terraform": [],
+      "note": "AwsCustomResource — an arbitrary SDK call, not a resource type. Must be decided case by case; see allowlist."
+    },
+    "Custom::AgentCoreRegistry": {
+      "terraform": ["aws_bedrockagentcore_registry"],
+      "note": "aws_bedrockagentcore_registry DOES exist in provider 6.60.0 but the provider itself marks it deprecated for the agent-registry namespace move. Mapped so that a future implementation satisfies the census without a map edit; allowlisted today with that deprecation as the reason."
+    },
+    "Custom::S3AutoDeleteObjects": {
+      "terraform": [],
+      "note": "Collapses into `force_destroy = true` on aws_s3_bucket — an argument, not a resource. See allowlist."
+    },
+    "Custom::VpcRestrictDefaultSG": {
+      "terraform": ["aws_default_security_group"],
+      "note": "Mapped so an explicit aws_default_security_group satisfies the census, but the module may equally leave it unmanaged. Allowlisted today."
+    },
+    "AWS::ECS::Cluster": {
+      "terraform": ["aws_ecs_cluster", "aws_ecs_cluster_capacity_providers"]
+    },
+    "AWS::ECS::TaskDefinition": {
+      "terraform": ["aws_ecs_task_definition"]
+    },
+    "AWS::Lambda::NetworkConnector": {
+      "terraform": [],
+      "note": "No aws_lambda_network_connector in provider 6.60.0 (resource list checked 2026-08-14). Unimplementable, not merely deferred. See allowlist."
+    },
+    "AWS::Lambda::MicrovmImage": {
+      "terraform": [],
+      "note": "No aws_lambda_microvm_image in provider 6.60.0 (resource list checked 2026-08-14). Unimplementable, not merely deferred. See allowlist."
+    }
+  }
+}
