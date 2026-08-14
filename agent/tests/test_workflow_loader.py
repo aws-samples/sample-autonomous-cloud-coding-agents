@@ -45,6 +45,12 @@ def _valid_new_task() -> dict:
             {"kind": "ensure_pr", "name": "open_pr", "strategy": "create"},
         ],
         "terminal_outcomes": {"primary": "pr_url"},
+        "convergence": {
+            "mode": "test_gated",
+            "required_sensors": ["verify_build"],
+            "terminal_outcomes": ["pr_opened"],
+            "early_exit": {"allow_on_policy_deny": True},
+        },
         "limits": {"max_turns": 100},
         "promotion_gate": {"requires": ["tests:agent/new_task"]},
         "status": "production",
@@ -61,6 +67,12 @@ class TestParseWorkflow:
         assert wf.steps[3].gate == "regression_only"
         assert wf.steps[4].strategy == "create"
         assert wf.terminal_outcomes.primary == "pr_url"
+        assert wf.convergence is not None
+        assert wf.convergence.mode == "test_gated"
+        assert wf.convergence.required_sensors == ["verify_build"]
+        assert wf.convergence.terminal_outcomes == ["pr_opened"]
+        assert wf.convergence.early_exit is not None
+        assert wf.convergence.early_exit.allow_on_policy_deny is True
 
     def test_unknown_top_level_field_rejected(self):
         body = _valid_new_task()
@@ -93,6 +105,65 @@ class TestParseWorkflow:
         with pytest.raises(WorkflowValidationError):
             parse_workflow(body)
 
+    def test_convergence_is_optional_for_existing_workflows(self):
+        body = _valid_new_task()
+        del body["convergence"]
+        assert parse_workflow(body).convergence is None
+
+    @pytest.mark.parametrize(
+        ("convergence", "error_path"),
+        [
+            (
+                {
+                    "mode": "fixed_iterations",
+                    "terminal_outcomes": ["pr_opened"],
+                },
+                "convergence/mode",
+            ),
+            (
+                {
+                    "mode": "test_gated",
+                    "terminal_outcomes": ["pr_opened"],
+                },
+                "convergence",
+            ),
+            (
+                {
+                    "mode": "test_gated",
+                    "required_sensors": ["verify_tests"],
+                    "terminal_outcomes": ["pr_opened"],
+                },
+                "convergence/required_sensors/0",
+            ),
+            (
+                {
+                    "mode": "review_submitted",
+                    "terminal_outcomes": ["review_published"],
+                    "early_exit": {"ignore_failures": True},
+                },
+                "convergence/early_exit",
+            ),
+            (
+                {
+                    "mode": "review_submitted",
+                    "terminal_outcomes": ["pr_opened"],
+                },
+                "convergence/terminal_outcomes",
+            ),
+        ],
+    )
+    def test_invalid_convergence_rejected_with_clear_path(self, convergence, error_path):
+        body = _valid_new_task()
+        body["convergence"] = convergence
+        with pytest.raises(WorkflowValidationError, match=error_path):
+            parse_workflow(body)
+
+    def test_required_sensor_must_have_matching_step(self):
+        body = _valid_new_task()
+        body["convergence"]["required_sensors"] = ["verify_lint"]
+        with pytest.raises(WorkflowValidationError, match="steps"):
+            parse_workflow(body)
+
 
 class TestRequiresRepoDefault:
     def test_coding_defaults_true(self):
@@ -113,6 +184,10 @@ class TestRequiresRepoDefault:
             {"kind": "deliver_artifact", "target": "s3_and_comment"},
         ]
         body["terminal_outcomes"] = {"primary": "artifact"}
+        body["convergence"] = {
+            "mode": "artifact_delivered",
+            "terminal_outcomes": ["artifact_delivered"],
+        }
         assert parse_workflow(body).resolved_requires_repo is False
 
     def test_explicit_value_overrides_domain_default(self):
@@ -175,6 +250,20 @@ class TestLoadWorkflowFile:
 
 
 class TestLoadWorkflow:
+    @pytest.mark.parametrize(
+        ("workflow_id", "mode", "outcome"),
+        [
+            ("coding/new-task-v1", "test_gated", "pr_opened"),
+            ("coding/pr-iteration-v1", "test_gated", "pr_opened"),
+            ("coding/pr-review-v1", "review_submitted", "review_published"),
+        ],
+    )
+    def test_shipped_coding_workflow_declares_convergence(self, workflow_id, mode, outcome):
+        workflow = load_workflow(workflow_id)
+        assert workflow.convergence is not None
+        assert workflow.convergence.mode == mode
+        assert workflow.convergence.terminal_outcomes == [outcome]
+
     def test_missing_id_raises(self):
         with pytest.raises(WorkflowValidationError, match="not found"):
             load_workflow("coding/does-not-exist-v9")

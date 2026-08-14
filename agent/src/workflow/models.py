@@ -44,6 +44,11 @@ VerifyGate = Literal["strict", "regression_only", "informational"]
 # 2026-06-08). First-party names: s3, comment, s3_and_comment.
 DeliverTarget = str
 TerminalOutcome = Literal["pr_url", "review_posted", "artifact", "comment"]
+ConvergenceMode = Literal["test_gated", "artifact_delivered", "human_approved", "review_submitted"]
+ConvergenceSensor = Literal["verify_build", "verify_lint"]
+ConvergenceTerminalOutcome = Literal[
+    "pr_opened", "review_published", "artifact_delivered", "human_approved"
+]
 Status = Literal["draft", "validated", "production", "deprecated"]
 
 
@@ -151,6 +156,30 @@ class TerminalOutcomes(BaseModel):
     secondary: list[TerminalOutcome] = Field(default_factory=list)
 
 
+class ConvergenceEarlyExit(BaseModel):
+    """Explicit exceptions to the workflow's normal convergence path."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    allow_on_policy_deny: bool = False
+
+
+class Convergence(BaseModel):
+    """How a harness decides that this workflow is complete.
+
+    The v1 contract is declarative metadata for conformance tooling. Runtime
+    success inference continues to use the existing step and terminal-outcome
+    behavior until a later version explicitly adopts this contract.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    mode: ConvergenceMode
+    required_sensors: list[ConvergenceSensor] = Field(default_factory=list)
+    terminal_outcomes: list[ConvergenceTerminalOutcome]
+    early_exit: ConvergenceEarlyExit | None = None
+
+
 class Limits(BaseModel):
     """Workflow-level defaults; per-task / per-repo overrides still win."""
 
@@ -192,6 +221,7 @@ class Workflow(BaseModel):
     required_inputs: RequiredInputs | None = None
     steps: list[Step]
     terminal_outcomes: TerminalOutcomes
+    convergence: Convergence | None = None
     limits: Limits | None = None
     promotion_gate: PromotionGate | None = None
     status: Status
