@@ -49,6 +49,11 @@ function rewriteDocsLinkTarget(target) {
     DEPLOY_PREVIEW_SCREENSHOTS_GUIDE: '/using/deploy-preview-screenshots-guide',
     CEDAR_POLICY_GUIDE: '/customizing/cedar-policies',
     DEPLOYMENT_GUIDE: '/getting-started/deployment-guide',
+    // Mirrored to getting-started/Cost-attribution.md (see the copy list below), NOT
+    // architecture/. Without this entry a relative `./COST_ATTRIBUTION.md` link misses
+    // the `/guides/` bail-out and falls through to the `/architecture/${slug}` default,
+    // producing a 404 on the published site.
+    COST_ATTRIBUTION: '/getting-started/cost-attribution',
   };
 
   /** `splitGuide` emits each `##` from DEVELOPER_GUIDE as its own page — map #anchors to those routes. */

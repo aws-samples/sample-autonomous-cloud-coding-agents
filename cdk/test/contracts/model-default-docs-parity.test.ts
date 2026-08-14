@@ -126,4 +126,67 @@ describe('documented model defaults match the agent runtime defaults', () => {
       expect(agentDefaultFor(envVar)).toMatch(/^(us|eu|apac|global)\./);
     }
   });
+
+  /**
+   * The env-var-table assertions above only reach the two docs that HAVE such a
+   * table. Four other places quote a model literal — the `model_id` rows in
+   * USER_GUIDE / REPO_ONBOARDING and their two generated Starlight mirrors — and
+   * nothing read them, so on the next model bump CI would force the two guarded
+   * docs to update while those four quietly went stale again. That is precisely
+   * the rot this file exists to stop, so sweep every model literal in the doc set
+   * instead of enumerating table shapes: any `us.`/`eu.`/`apac.`/`global.`-prefixed
+   * Claude id in a guarded doc must be one the agent actually defaults to.
+   *
+   * Deliberately literal-based rather than row-based: it survives someone
+   * re-wording a table, moving the value into prose, or adding a doc — none of
+   * which a row parser would follow.
+   */
+  it('no guarded doc presents a stale model id AS the default', () => {
+    const allowed = new Set([
+      agentDefaultFor('ANTHROPIC_MODEL'),
+      agentDefaultFor('ANTHROPIC_DEFAULT_HAIKU_MODEL'),
+    ]);
+    // Only lines that CLAIM to state the default are in scope. A doc legitimately
+    // names other models as illustrative examples — a per-repo override snippet, a
+    // cost-comparison row, "switch to a lighter model such as X" — and failing those
+    // would make the guard unmaintainable, so it would end up deleted rather than
+    // fixed. Match on the claim, not on the mere presence of an id.
+    // Two shapes claim a default: prose/cells saying so, and a `model_id` table row
+    // whose Default CELL carries the literal with no such word on the line at all
+    // (REPO_ONBOARDING's blueprint-defaults table and USER_GUIDE's per-repo table
+    // are both this shape — mutation-tested, and a keyword-only rule misses them).
+    const CLAIMS_DEFAULT = /\bdefaults?\b|\bfallback\b|^\s*\|\s*`model_id`\s*\|/i;
+    // Prefixed inference-profile ids only. Bare `anthropic.claude-…` ids appear
+    // legitimately when the docs explain WHY a bare id is not invocable, and the
+    // IAM grant list in bedrock-models.ts is bare-by-contract — both out of scope
+    // here and already covered by bedrock-models.test.ts.
+    const MODEL_ID = /\b(?:us|eu|apac|global)\.anthropic\.claude-[a-z0-9-]+(?::[0-9]+)?/g;
+    // Hand-authored sources plus every generated mirror that actually quotes a
+    // prefixed id (enumerated from the tree, not guessed — `using/Overview.md`
+    // mirrors USER_GUIDE but carries no literal, so listing it would assert
+    // nothing while implying coverage).
+    const GUARDED_DOCS = [
+      'docs/guides/DEVELOPER_GUIDE.md',
+      'docs/guides/USER_GUIDE.md',
+      'docs/design/REPO_ONBOARDING.md',
+      'agent/README.md',
+      'docs/src/content/docs/architecture/Repo-onboarding.md',
+      'docs/src/content/docs/customizing/Per-repo-overrides.md',
+      'docs/src/content/docs/developer-guide/Model-configuration.md',
+      'docs/src/content/docs/developer-guide/Repository-preparation.md',
+      'docs/src/content/docs/developer-guide/Installation.md',
+      'docs/src/content/docs/getting-started/Quick-start.mdx',
+    ] as const;
+
+    const offenders: string[] = [];
+    for (const docPath of GUARDED_DOCS) {
+      for (const [i, line] of read(docPath).split('\n').entries()) {
+        if (!CLAIMS_DEFAULT.test(line)) continue;
+        for (const id of line.match(MODEL_ID) ?? []) {
+          if (!allowed.has(id)) offenders.push(`${docPath}:${i + 1} → ${id}`);
+        }
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
 });
