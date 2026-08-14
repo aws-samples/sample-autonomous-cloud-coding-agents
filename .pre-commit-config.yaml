@@ -1,7 +1,7 @@
 # Git hooks via https://github.com/j178/prek (installed by `mise run install` in a Git checkout; re-run `mise run hooks:install` after edits).
 # Config format matches pre-commit; run hooks with `prek` from mise (`mise.toml` [tools]).
 
-default_install_hook_types: [pre-commit, pre-push]
+default_install_hook_types: [commit-msg, pre-commit, pre-push]
 fail_fast: false
 exclude: ^\.threat-composer/
 
@@ -22,6 +22,23 @@ repos:
 
   - repo: local
     hooks:
+      # ADR-003 Tier 0: every commit must reference an issue (Refs/Fixes/Closes #N).
+      # prek passes the commit-message file path as the positional arg; forward it.
+      - id: adr003-commit-msg
+        name: ADR-003 commit-msg issue reference
+        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && node scripts/hooks/check-commit-msg.mjs "$@"' --
+        language: system
+        stages: [commit-msg]
+
+      # ADR-003: feature branch must match (feat|fix|chore|docs)/<issue-number>-*.
+      # Runs at pre-push (branch name is stable by then); reads the current branch.
+      - id: adr003-branch-name
+        name: ADR-003 branch naming convention
+        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && node scripts/hooks/check-branch-name.mjs'
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+
       - id: gitleaks
         name: gitleaks (staged)
         entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && mise run security:secrets:staged'
