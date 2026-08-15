@@ -19,14 +19,14 @@ ARG GH_VERSION=2.93.0
 #
 # To bump: `docker buildx imagetools inspect <image>:<tag>` and copy the Digest.
 # Keep the tag alongside the digest; it documents what the digest is meant to be.
-FROM --platform=$TARGETPLATFORM jdxcode/mise:latest@sha256:b2297770273f71e685b8056e3b07bfda4ffc35f0fb62e0339b3cdc1e5766e2fe AS mise
+FROM --platform=$TARGETPLATFORM jdxcode/mise:latest@sha256:92dbc3f2573926d8974e4641ad8449f16c323130b9f41c39aff19b7b2f500ef6 AS mise
 
 # Build gh with a patched Go toolchain; upstream packages can lag Go CVE fixes.
-FROM --platform=$TARGETPLATFORM golang:1.26.4-bookworm@sha256:b305420a68d0f229d91eb3b3ed9e519fcf2cf5461da4bef997bf927e8c0bfd2b AS gh-builder
+FROM --platform=$TARGETPLATFORM golang:1.27rc1-bookworm@sha256:19163082e6ab06e25286f6900720a5360dbd7ba9791802880fb44c9d4c6c5fe8 AS gh-builder
 ARG GH_VERSION
 RUN GOPROXY=direct GOBIN=/out go install "github.com/cli/cli/v2/cmd/gh@v${GH_VERSION}"
 
-FROM --platform=$TARGETPLATFORM python:3.13-slim@sha256:dc1546eefcbe8caaa1f004f16ab76b204b5e1dbd58ff81b899f21cd40541232f
+FROM --platform=$TARGETPLATFORM python:3.14-slim@sha256:ce40764625a4ff50df3548277632e7f96c4e77fe75fa848aae9885476e7df5a4
 
 # Install mise (polyglot dev tool manager)
 COPY --from=mise /usr/local/bin/mise /usr/local/bin/mise
