@@ -20,6 +20,7 @@
     "@aws-sdk/client-bedrock-agentcore-control": "^3.1078.0",
     "@aws-sdk/client-bedrock-runtime": "^3.1078.0",
     "@aws-sdk/client-dynamodb": "^3.1078.0",
+    "@aws-sdk/client-ec2": "^3.1078.0",
     "@aws-sdk/client-ecs": "^3.1078.0",
     "@aws-sdk/client-lambda": "^3.1078.0",
     "@aws-sdk/client-lambda-microvms": "^3.1098.0",
