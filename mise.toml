@@ -106,6 +106,10 @@ run = "yarn knip"
 description = "Dead-code ratchet (#282): fail only if knip's issue count rises above knip-baseline.json. Advisory in CI for now; flips to blocking once the baseline is driven to zero."
 run = "node scripts/check-deadcode-ratchet.mjs"
 
+[tasks."check:transitive-pin-sync"]
+description = "Transitive-pin sync guard (#712): fail if a package pinned in root `resolutions` resolves below that floor in integrations/jira-forge-app's npm lockfile — the standalone project root `resolutions` can't reach."
+run = "node scripts/check-transitive-pin-sync.mjs"
+
 [tasks."drift-prevention"]
 description = "Run checks to prevent drift in contracts between packages and documentation links"
 run = [
@@ -113,6 +117,7 @@ run = [
   { task = "check:constants-sync" },
   { task = "check:types-sync" },
   { task = "check:coverage-thresholds-sync" },
+  { task = "check:transitive-pin-sync" },
   { task = "//docs:link-check" },
 ]
 
@@ -121,11 +126,28 @@ run = [
 ##################
 
 [tasks."security:secrets"]
-description = "Scan all git history for secrets with gitleaks (full-history sweep)"
+description = "Scan the checked-out history for secrets with gitleaks (scheduled sweep + pre-push)"
 # `gitleaks git` (history-aware) replaces the deprecated `gitleaks detect`
-# (removed from --help in v8.19.0). With no --log-opts this scans the full
-# history reachable from the checkout, matching the previous behaviour.
-run = "gitleaks git . --no-banner --redact"
+# (removed from --help in v8.19.0).
+#
+# Scoped to `HEAD` rather than left bare (#721, decision ratified in #723).
+# Bare `gitleaks git .` walks EVERY fetched ref, so a secret in an unmerged,
+# no-PR branch reddens this scan for everyone — it trains reviewers to ignore a
+# red security gate, which is the worst outcome for one.
+#
+# `HEAD` is deliberate, and is NOT interchangeable with `main` here. HEAD is
+# relative: in the scheduled CI run it resolves to `main`, but on pre-push in a
+# feature worktree it also covers the commits being pushed. Pinning this to
+# `main` would skip the developer's own commits — the pre-push hook would stop
+# catching the secret you are about to publish.
+#
+# Do NOT "scope" this with a ref pattern like `--remotes=origin/main`: that
+# matches no ref in a plain worktree, walks 0 commits, and silently turns the
+# scan into a fail-OPEN no-op.
+#
+# Secrets introduced by a PR are independently caught at merge time by the
+# required range-scoped check (`security:secrets:range`, see security-pr.yml).
+run = 'gitleaks git . --no-banner --redact --log-opts="HEAD"'
 
 [tasks."security:secrets:range"]
 description = "gitleaks over a commit range only (per-PR gate). Set GITLEAKS_RANGE, e.g. origin/main..HEAD"

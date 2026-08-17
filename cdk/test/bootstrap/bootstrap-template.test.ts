@@ -48,6 +48,15 @@ describe('Bootstrap template', () => {
       expect(template.Conditions.IncludeComputeEcs).toBeDefined();
       expect(template.Conditions.IncludeComputeEcs['Fn::Not']).toBeDefined();
     });
+
+    it('has IncludeComputeLambdaMicrovms condition matching the full backend token', () => {
+      const condition = template.Conditions.IncludeComputeLambdaMicrovms;
+      expect(condition).toBeDefined();
+      expect(condition['Fn::Not']).toBeDefined();
+      // Split on the WHOLE `lambda-microvm` token: splitting on a `lambda`
+      // prefix would also fire for any future `lambda*` backend name.
+      expect(JSON.stringify(condition)).toContain('lambda-microvm');
+    });
   });
 
   describe('Managed policy resources', () => {
@@ -57,6 +66,7 @@ describe('Bootstrap template', () => {
       'IaCRoleABCAObservability',
       'IaCRoleABCAComputeAgentcore',
       'IaCRoleABCAComputeEcs',
+      'IaCRoleABCAComputeLambdaMicrovms',
     ];
 
     for (const logicalId of expectedPolicies) {
@@ -75,9 +85,16 @@ describe('Bootstrap template', () => {
       expect(template.Resources.IaCRoleABCAComputeEcs.Condition).toBe('IncludeComputeEcs');
     });
 
-    it('non-ECS policies do not have a condition', () => {
-      const nonEcs = expectedPolicies.filter((p) => p !== 'IaCRoleABCAComputeEcs');
-      for (const logicalId of nonEcs) {
+    it('IaCRoleABCAComputeLambdaMicrovms has IncludeComputeLambdaMicrovms condition', () => {
+      expect(template.Resources.IaCRoleABCAComputeLambdaMicrovms.Condition)
+        .toBe('IncludeComputeLambdaMicrovms');
+    });
+
+    it('non-optional-compute policies do not have a condition', () => {
+      const unconditional = expectedPolicies.filter(
+        (p) => p !== 'IaCRoleABCAComputeEcs' && p !== 'IaCRoleABCAComputeLambdaMicrovms',
+      );
+      for (const logicalId of unconditional) {
         expect(template.Resources[logicalId].Condition).toBeUndefined();
       }
     });
@@ -122,6 +139,15 @@ describe('Bootstrap template', () => {
       expect(ecsEntry).toBeDefined();
       expect(ecsEntry['Fn::If'][1]).toEqual({ Ref: 'IaCRoleABCAComputeEcs' });
       expect(ecsEntry['Fn::If'][2]).toEqual({ Ref: 'AWS::NoValue' });
+
+      // ...and so should Lambda MicroVMs (ADR-021).
+      const microvmEntry = fallback.find(
+
+        (item: any) => item['Fn::If'] && item['Fn::If'][0] === 'IncludeComputeLambdaMicrovms',
+      );
+      expect(microvmEntry).toBeDefined();
+      expect(microvmEntry['Fn::If'][1]).toEqual({ Ref: 'IaCRoleABCAComputeLambdaMicrovms' });
+      expect(microvmEntry['Fn::If'][2]).toEqual({ Ref: 'AWS::NoValue' });
     });
 
     it('does not reference AdministratorAccess', () => {
@@ -157,10 +183,13 @@ describe('Bootstrap template', () => {
 
       // ECS should be conditional
 
-      const ecsItem = items.find((item: any) => item['Fn::If']);
-      expect(ecsItem).toBeDefined();
-      expect(ecsItem['Fn::If'][0]).toBe('IncludeComputeEcs');
-      expect(ecsItem['Fn::If'][1]).toBe('Compute-ECS');
+      const conditionalItems = items.filter((item: any) => item['Fn::If']);
+      expect(conditionalItems.map((item: any) => item['Fn::If'][0])).toEqual([
+        'IncludeComputeEcs',
+        'IncludeComputeLambdaMicrovms',
+      ]);
+      expect(conditionalItems[0]['Fn::If'][1]).toBe('Compute-ECS');
+      expect(conditionalItems[1]['Fn::If'][1]).toBe('Compute-LambdaMicrovms');
     });
   });
 

@@ -60,11 +60,17 @@ runner picks task with channel_source="jira"
 Outbound terminal status (Platform → Jira) — Forge app actor, deterministic:
 
 ```
-task reaches a terminal event (completed / failed / cancelled /
+ordinary task reaches a terminal event (completed / failed / cancelled /
   stranded / timed out) → TaskEventsTable DynamoDB Stream → fan-out
   Lambda's dispatchToJira resolves the same Forge proxy and posts ONE
   app-authored final-status comment with cost, turns, duration, task id,
   and the PR link
+
+@bgagent iteration is admitted → JiraWebhookProcessor posts ONE
+  app-authored status comment and stores its comment id
+  → heartbeat edits that comment with elapsed time while the task runs
+  → fan-out (standalone) or reconciler (orchestrated child) edits that
+  same comment with the terminal outcome and metrics
 ```
 
 Outbound board transitions (Agent → Jira) — Forge app actor:
@@ -79,17 +85,19 @@ the originating issue as it works — the same signal Linear-origin tasks alread
 give. See [Board transitions](#board-transitions) below for the resolution order
 and the permission it requires.
 
-The **start** comment is posted by the agent. The **terminal** comment is
-posted by the platform's fan-out plane, not the agent — so it always includes
-cost / turns / duration and fires even when the agent crashes before
-completing (max-turns, OOM). The final comment frames three outcomes:
+For an ordinary task, the **start** comment is posted by the agent and the
+**terminal** comment is posted by the platform's fan-out plane. For an
+`@bgagent` iteration, the processor immediately posts one status comment; the
+heartbeat and terminal owner edit that same comment in place. Terminal feedback
+therefore includes cost / turns / duration even when the agent crashes before
+completing (max-turns, OOM). The final state frames three outcomes:
 
 - ✅ **Task completed** — with the PR link when one was opened.
 - ⚠️ **Shipped a PR but stopped early** — the PR link plus the reason it
   stopped (e.g. "Hit max-turns cap"), so you can review and decide.
 - ❌ **Task failed / cancelled / timed out** — with a short classifier reason.
 
-Comments are advisory and best-effort: network/auth failures are logged and swallowed (the agent path has an auth circuit-breaker; the platform path classifies transient failures as retryable and retries the record), never gating the task itself. Jira has no comment-edit API, so the terminal comment is posted exactly once (a per-task marker guards against duplicate posts on stream retries).
+Comments are advisory and best-effort: network/auth failures are logged and swallowed (the agent path has an auth circuit-breaker; the platform path classifies transient failures as retryable and retries the record), never gating the task itself. Ordinary terminal comments use a per-task post-once marker. Iteration terminal writers use a per-task claim before updating the stored comment ID, and the heartbeat checks that claim before writing, so retries do not duplicate the comment or regress a terminal outcome back to running.
 
 **Identity selection rule.** A complete Forge app configuration always wins for every outbound path. If that configured proxy, signature, permission, or Jira API call fails, ABCA logs the failure and skips the advisory write; it does **not** retry as the 3LO user. Tenants with no Forge configuration retain the old 3LO writer as an explicit migration fallback, with a warning.
 
@@ -101,7 +109,7 @@ Comments are advisory and best-effort: network/auth failures are logged and swal
 > actor through `api.asApp().requestJira(...)`. See
 > [ADR-015](/sample-autonomous-cloud-coding-agents/architecture/adr-015-jira-integration).
 
-Inbound admission (webhook → task) is Jira-specific and has no DynamoDB Streams consumer of its own. The **terminal** status comment, however, is delivered by the shared fan-out plane's DynamoDB Streams consumer (`dispatchToJira`) — the same platform-side surface that posts Linear final-status comments — so it behaves identically to Linear for terminal outcomes.
+Inbound admission (webhook → task) is Jira-specific and has no DynamoDB Streams consumer of its own. Ordinary **terminal** status comments are delivered by the shared fan-out plane's DynamoDB Streams consumer (`dispatchToJira`). For comment-triggered iterations, fan-out matures standalone status comments while the orchestration reconciler matures child-iteration comments before restacking dependents.
 
 ## Setup walkthrough
 
@@ -149,11 +157,23 @@ This runs the OAuth 3LO dance:
 - **Events** — *Issue: created*, *Issue: updated*, and *Comment: created*
 - **Secret** — a strong random value, e.g. `openssl rand -hex 32`
 
-Paste that same secret value back at the `Webhook signing secret:` prompt. ABCA stores it on the per-tenant OAuth bundle and seeds the stack-wide single-tenant fallback only when it is still unset. The receiver looks up the tenant value to verify `X-Hub-Signature` on each delivery.
+Paste that same secret value back at the `Webhook signing secret:` prompt. ABCA stores it on the per-tenant OAuth bundle and synchronizes the stack-wide verifier. The receiver looks up that value to verify `X-Hub-Signature` on each delivery.
+
+> **One active tenant for Jira admin-console webhooks.** Webhooks created under **Settings → System → Webhooks** do not include `cloudId` in their payload, so the receiver cannot select among multiple tenant secrets. `jira setup` therefore refuses to configure a second active Jira tenant through this flow. For the sole active tenant it always synchronizes the tenant bundle and stack-wide verifier, including on setup reruns.
+
+When recreating the webhook or rotating its secret later, update the secret in Jira and then run:
+
+```bash
+bgagent jira update-webhook-secret <cloud-id>
+```
+
+The command prompts for the new value and updates both required Secrets Manager values without repeating OAuth. Keep the Jira webhook disabled until the command succeeds.
+
+The operator role running this command needs `cloudformation:DescribeStacks`; `dynamodb:GetItem` and `dynamodb:Scan` on `JiraWorkspaceRegistryTable`; `secretsmanager:GetSecretValue` and `secretsmanager:PutSecretValue` on the tenant's `bgagent-jira-oauth-<cloudId>` secret; and `secretsmanager:PutSecretValue` on the stack-wide ARN from `JiraWebhookSecretArn`.
 
 ### 4. Install the dedicated outbound app
 
-The repository includes a narrow Forge app under `integrations/jira-forge-app`. Its web trigger accepts only four signed operations: identity probe, comment, read transitions, and perform transition. It does not expose a general Jira REST proxy.
+The repository includes a narrow Forge app under `integrations/jira-forge-app`. Its web trigger accepts only five signed operations: identity probe, create comment, update comment, read transitions, and perform transition. It does not expose a general Jira REST proxy.
 
 Run the login in an interactive terminal. Forge asks for your Atlassian email and the Forge CLI scoped token from the prerequisites; the Jira 3LO access token is not a Forge CLI credential. On the first registration, Forge also asks you to create or select a **Developer Space**.
 
@@ -231,6 +251,16 @@ aws dynamodb get-item \
 
 The Forge installation should be `Up-to-date`. The registry row should contain `outbound_identity = app` and `app_actor_display_name = bgagent`. Do not print the tenant secret to verify it; `app-setup` has already proved that the URL and HMAC secret work together.
 
+Run the platform diagnostic after registration:
+
+```bash
+bgagent platform doctor \
+  --region "$REGION" \
+  --stack-name "$STACK_NAME"
+```
+
+`Jira outbound app identity` should pass. A warning means at least one active Jira tenant still writes as the OAuth setup user or has incomplete Forge metadata; re-run `bgagent jira app-setup` for the listed cloud ID.
+
 ### 5. Map a project to a repository
 
 ```bash
@@ -280,7 +310,10 @@ The teammate needs their own ABCA account first (Cognito user + configured CLI).
 
 Add the trigger label (`bgagent` by default) to a Jira issue in a mapped project. The agent should start within ~30 seconds, comment on the issue as it works, and post a PR link when ready. The issue **summary** plus the **description** (converted from Atlassian Document Format to markdown), the issue's **recent comments**, and any supported **file attachments** become the task context — see [Issue context: attachments and comments](#issue-context-attachments-and-comments).
 
-After the PR exists, add a Jira comment such as `@bgagent update the README too`. ABCA should acknowledge the request on the issue and update the existing PR.
+After the PR exists, add a Jira comment such as `@bgagent update the README too`. ABCA should create one acknowledgement status comment, update it with elapsed time during a long run, update the existing PR, and finally:
+
+1. Replace the progress text with a short `Finished — result posted below` pointer.
+2. Add a separate terminal comment containing the outcome, metrics, and a clickable PR link.
 
 The progress comment author and transition actor should be the `bgagent` app. The task owner shown by `bgagent list`, audit records, concurrency accounting, and cost attribution should remain the linked human who triggered the Jira event.
 
@@ -297,7 +330,7 @@ Re-running `bgagent jira setup` preserves an existing app-actor configuration. O
 Atlassian signs each delivery with HMAC-SHA256 over the **raw request body**, delivered as `X-Hub-Signature: sha256=<hex>`. The receiver:
 
 1. Computes `HMAC-SHA256(rawBody, secret)` and compares it constant-time against the header value (tolerating a pasted value with or without the `sha256=` prefix).
-2. Prefers the **per-tenant** signing secret stored on `bgagent-jira-oauth-<cloudId>`; falls back to the stack-wide `JiraWebhookSecret` for installs that predate per-tenant storage.
+2. Uses the per-tenant signing secret when the payload carries `cloudId`. Admin-console payloads omit it, so they use the synchronized stack-wide `JiraWebhookSecret` and bind to the sole active tenant.
 3. Rejects with 401 on mismatch.
 
 The body must be verified as the *raw unparsed bytes* — never parsed-and-restringified JSON, which would change the byte sequence and break the HMAC.
@@ -308,6 +341,7 @@ The body must be verified as the *raw unparsed bytes* — never parsed-and-restr
 - **`jira:issue_updated`** — triggers only if the label was **newly added** in this update. Jira reports label changes in `changelog.items[]` (`field: "labels"`, with `fromString` / `toString`), *not* by re-sending the full label list. The processor diffs the changelog rather than inspecting `issue.fields.labels`, so re-saving an issue that already has the label does not re-trigger.
 - **`comment_created`** — triggers only when the new comment contains a token-bounded `@bgagent` mention and the issue has a prior ABCA pull request.
 - All other event types get a silent `200`.
+- Issues outside active project mappings are always silent, even if they use the same label. This includes explicit `@bgagent` follow-ups after a project mapping is removed: offboarding ends all ABCA interaction for that project. Site-wide Jira activity must not cause ABCA comments in projects that were never onboarded or are no longer connected.
 
 ## Comment-triggered PR iteration
 
@@ -317,7 +351,33 @@ ABCA resolves the Jira tenant and issue key to the newest prior task that actual
 
 When the comment author has linked their Jira and ABCA accounts, the iteration is attributed to that user. Otherwise, ABCA falls back to the original task owner so a useful reviewer request is not dropped. Comments without the mention, app-authored comments, and ABCA's own generated status comments are no-ops.
 
-The acknowledgement is immediate after task admission. The existing platform fan-out path posts the terminal outcome and cost comment when the iteration finishes. Comment redelivery is idempotent: the webhook receiver deduplicates by Jira comment ID, and task creation uses a deterministic idempotency key as a second guard.
+The acknowledgement is immediate after task admission and its Jira comment ID is stored on the iteration task. Eligible long-running iterations edit that comment with elapsed time; they do not add heartbeat comments. When the iteration finishes, fan-out owns the terminal edit for a standalone iteration and the orchestration reconciler owns it for a child iteration so dependent restacking remains ordered. Both replace the same comment with the outcome, cost, turns, duration, task ID, and PR link when available.
+
+Comment redelivery is idempotent: the webhook receiver deduplicates by Jira comment ID, task creation uses a deterministic idempotency key as a second guard, and terminal writers claim the stored status comment before editing it. A heartbeat checks the terminal claim immediately before its cosmetic edit, preventing an overlapping sweep from replacing a completed outcome with a running message.
+
+## Authored subtask orchestration
+
+Applying the trigger label to a parent that already has Jira subtasks runs those subtasks as one orchestration instead of creating a separate coding task for the parent. Each subtask becomes an ordinary ABCA task. Standard Jira `blocks` / `is blocked by` links between those subtasks determine release order: roots start immediately, and blocked work starts only after all predecessors succeed.
+
+All executable subtasks must belong to active Jira project mappings that resolve to the same repository as the parent. Cross-project subtasks are supported when their mappings name that same repository; cross-repository graphs, unmapped projects, cycles, and blocker links to issues outside the parent's executable subtask set are rejected before any orchestration rows are written. Jira API or authentication failures are reported on the parent and never silently degrade to a single parent task.
+
+The parent receives orchestration progress and the terminal rollup. Parallel leaves converge through an internal integration task so the orchestration produces one combined pull request; that internal task does not address a nonexistent Jira issue. An `@bgagent` comment on a real child updates that child's pull request and restacks dependent pull requests through the shared orchestration reconciler.
+
+To extend an existing orchestration, add Jira subtasks and re-apply the trigger label. ABCA appends only genuinely new issue keys: existing tasks, branches, statuses, and dependencies are preserved. A new child starts immediately when all of its declared predecessors have already succeeded; otherwise it remains blocked for the reconciler. A new child with no explicit blocker stacks on the existing epic tip rather than bare `main`.
+
+Re-applying the label without adding a child is an idempotent no-op. Changes only to blocker links between existing children are also ignored; dependency edits do not rewrite work that may already be running or complete. Extending a terminal orchestration reopens the parent progress panel and settles it again when the added work finishes.
+
+## Authored subtask orchestration
+
+Applying the trigger label to a parent that already has Jira subtasks runs those subtasks as one orchestration instead of creating a separate coding task for the parent. Each subtask becomes an ordinary ABCA task. Standard Jira `blocks` / `is blocked by` links between those subtasks determine release order: roots start immediately, and blocked work starts only after all predecessors succeed.
+
+All executable subtasks must belong to active Jira project mappings that resolve to the same repository as the parent. Cross-project subtasks are supported when their mappings name that same repository; cross-repository graphs, unmapped projects, cycles, and blocker links to issues outside the parent's executable subtask set are rejected before any orchestration rows are written. Jira API or authentication failures are reported on the parent and never silently degrade to a single parent task.
+
+The parent receives orchestration progress and the terminal rollup. Parallel leaves converge through an internal integration task so the orchestration produces one combined pull request; that internal task does not address a nonexistent Jira issue. An `@bgagent` comment on a real child updates that child's pull request and restacks dependent pull requests through the shared orchestration reconciler.
+
+To extend an existing orchestration, add Jira subtasks and re-apply the trigger label. ABCA appends only genuinely new issue keys: existing tasks, branches, statuses, and dependencies are preserved. A new child starts immediately when all of its declared predecessors have already succeeded; otherwise it remains blocked for the reconciler. A new child with no explicit blocker stacks on the existing epic tip rather than bare `main`.
+
+Re-applying the label without adding a child is an idempotent no-op. Changes only to blocker links between existing children are also ignored; dependency edits do not rewrite work that may already be running or complete. Extending a terminal orchestration reopens the parent progress panel and settles it again when the added work finishes.
 
 ## Issue context: attachments and comments
 
@@ -386,12 +446,23 @@ The receiver dedupes issue events on `{issueKey}#{webhookEvent}#{timestamp}` and
 
 ### Webhook signature verification fails repeatedly (401)
 
-The signing secret stored for this tenant doesn't match what Jira is sending. Most often the value pasted at the `Webhook signing secret:` prompt differs from the one entered in Jira's webhook config (or the webhook secret was rotated in Jira). Re-run `bgagent jira setup` for the tenant and re-enter matching values. To inspect what's stored:
+The signing secret stored for this tenant doesn't match what Jira is sending. Most often the value entered in Jira differs from ABCA's copy, or the webhook was recreated with a new secret. Run `bgagent jira update-webhook-secret <cloud-id>` and enter the exact value configured in Jira. This synchronizes both locations required by admin-console webhooks. To inspect what's stored:
 
 ```bash
 aws secretsmanager get-secret-value \
   --secret-id bgagent-jira-oauth-<cloudId> \
   --query SecretString --output text | jq .webhook_signing_secret
+```
+
+### Linking succeeds but a trigger says the Jira user is unlinked
+
+Jira attributes a trigger to the account in the webhook's `user.accountId`. That may differ from the issue reporter, creator, or the OAuth account ABCA uses to post comments. The name shown above an ABCA comment is therefore not proof that the same account triggered the event.
+
+Check the webhook-processor warning for `jira_account_id`, `jira_account_source`, and `jira_identity_lookup_key`. The failure comment on an onboarded, explicitly triggered issue also prints the selected account ID. Invite and link that exact account:
+
+```bash
+bgagent jira invite-user <cloud-id> <jira-account-id-from-the-log>
+bgagent jira link <generated-code>
 ```
 
 ### `setup` hangs at "Waiting for browser callback…"

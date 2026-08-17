@@ -17,17 +17,17 @@
  *  SOFTWARE.
  */
 
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
 import { extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
 import { type ApiKeyRecord, toApiKeyDetail } from './shared/types';
+import { makeDocClient } from './shared/ua';
 import { computeTtlEpoch } from './shared/validation';
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const ddb = makeDocClient();
 const TABLE_NAME = process.env.API_KEY_TABLE_NAME!;
 const API_KEY_RETENTION_DAYS = Number(process.env.API_KEY_RETENTION_DAYS ?? '30');
 

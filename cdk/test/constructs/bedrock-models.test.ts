@@ -17,6 +17,8 @@
  *  SOFTWARE.
  */
 
+import * as fs from 'fs';
+import * as path from 'path';
 import { App, Stack } from 'aws-cdk-lib';
 import {
   BEDROCK_MODELS_CONTEXT_KEY,
@@ -83,5 +85,30 @@ describe('resolveBedrockModelIds', () => {
     expect(() =>
       resolveBedrockModelIds(nodeWithContext({ [BEDROCK_MODELS_CONTEXT_KEY]: ['eu.anthropic.claude-sonnet-4-6'] })),
     ).toThrow(/bare foundation-model IDs/);
+  });
+});
+
+/**
+ * Drift guard: the agent picks a fallback model when a repo pins none, and the
+ * IAM grant that lets it invoke that model is derived from
+ * DEFAULT_BEDROCK_MODEL_IDS. If the two disagree, every task on the stack fails
+ * at turn 0 with AccessDenied — and nothing else in the suite notices, because
+ * the agent-side default and the CDK-side grant live in different languages.
+ */
+describe('DEFAULT_BEDROCK_MODEL_IDS covers the agent runtime default', () => {
+  it('grants the fallback model the agent falls back to', () => {
+    const configPy = fs.readFileSync(
+      path.resolve(__dirname, '../../../agent/src/config.py'), 'utf8',
+    );
+    // The fallback is the second argument to the ANTHROPIC_MODEL env lookup.
+    const match = configPy.match(/"ANTHROPIC_MODEL",\s*"([^"]+)"/);
+    expect(match).not.toBeNull();
+    const agentDefault = match![1];
+
+    // The agent names the US inference profile (`us.anthropic.…`); the grant list
+    // holds bare foundation-model IDs and both grant sites add the `us.` prefix.
+    expect(agentDefault).toMatch(/^us\./);
+    const bare = agentDefault.replace(/^us\./, '');
+    expect(DEFAULT_BEDROCK_MODEL_IDS).toContain(bare);
   });
 });

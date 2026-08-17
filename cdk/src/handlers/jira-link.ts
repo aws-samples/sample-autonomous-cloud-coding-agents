@@ -17,16 +17,16 @@
  *  SOFTWARE.
  */
 
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, GetCommand, PutCommand, DeleteCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, PutCommand, DeleteCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
 import { extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
+import { makeDocClient } from './shared/ua';
 import { parseBody } from './shared/validation';
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const ddb = makeDocClient();
 
 const USER_MAPPING_TABLE = process.env.JIRA_USER_MAPPING_TABLE_NAME!;
 
@@ -67,6 +67,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     const pending = await ddb.send(new GetCommand({
       TableName: USER_MAPPING_TABLE,
       Key: { jira_identity: `pending#${code}` },
+      ConsistentRead: true,
     }));
 
     if (!pending.Item || pending.Item.status !== 'pending') {

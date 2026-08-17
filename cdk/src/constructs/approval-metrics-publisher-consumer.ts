@@ -19,6 +19,7 @@
 
 import * as path from 'path';
 import { Duration, RemovalPolicy } from 'aws-cdk-lib';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import { FilterCriteria, FilterRule, StartingPosition, Architecture, Runtime } from 'aws-cdk-lib/aws-lambda';
 import { DynamoEventSource, SqsDlq } from 'aws-cdk-lib/aws-lambda-event-sources';
@@ -30,6 +31,9 @@ import { Construct } from 'constructs';
 
 /** DLQ message retention for persistent-failure records (days). */
 const DLQ_RETENTION_DAYS = 14;
+
+/** DLQ-depth alarm metric period (minutes). */
+const DLQ_ALARM_PERIOD_MINUTES = 5;
 
 /** Max batching window before the Lambda is invoked on a partial batch (seconds). */
 const DEFAULT_MAX_BATCHING_WINDOW_SECONDS = 5;
@@ -93,6 +97,11 @@ export interface ApprovalMetricsPublisherConsumerProps {
 export class ApprovalMetricsPublisherConsumer extends Construct {
   public readonly fn: lambda.NodejsFunction;
   public readonly dlq: sqs.Queue;
+  /** CloudWatch alarm that fires when the DLQ has at least one
+   *  poison-pill record. Concrete {@link cloudwatch.Alarm} so an
+   *  ``addAlarmAction`` (SNS) can be attached once a notification
+   *  channel is provisioned (#117). */
+  public readonly dlqAlarm: cloudwatch.Alarm;
 
   constructor(scope: Construct, id: string, props: ApprovalMetricsPublisherConsumerProps) {
     super(scope, id);
@@ -102,10 +111,9 @@ export class ApprovalMetricsPublisherConsumer extends Construct {
     this.dlq = new sqs.Queue(this, 'ApprovalMetricsPublisherDlq', {
       // Persistent failures (malformed records the handler's
       // per-record try/catch throws on three times in a row) land
-      // here for operator inspection. Alarm wiring is deferred to
-      // Chunk 10 follow-ups — until a notification channel is wired
-      // to SNS, an alarm on ``ApproximateNumberOfMessagesVisible``
-      // would fire into the void.
+      // here for operator inspection. Depth is alarmed below (#117);
+      // an SNS action can be attached to ``dlqAlarm`` once a
+      // notification channel is provisioned.
       retentionPeriod: Duration.days(DLQ_RETENTION_DAYS),
       enforceSSL: true,
     });
@@ -161,6 +169,23 @@ export class ApprovalMetricsPublisherConsumer extends Construct {
       reportBatchItemFailures: true,
       filters: [agentMilestoneFilter],
     }));
+
+    // #117: alarm on DLQ depth so poison-pill records don't silently
+    // accumulate without operator visibility.
+    this.dlqAlarm = new cloudwatch.Alarm(this, 'DlqMessageAlarm', {
+      metric: this.dlq.metricApproximateNumberOfMessagesVisible({
+        period: Duration.minutes(DLQ_ALARM_PERIOD_MINUTES),
+        statistic: 'Maximum',
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      alarmDescription:
+        'ApprovalMetricsPublisher DLQ has at least one message; investigate poison records. ' +
+        'Check CloudWatch Logs for the ApprovalMetricsPublisherFn error that caused the DLQ send. ' +
+        'See: https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/117',
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
 
     NagSuppressions.addResourceSuppressions(this.fn, [
       {

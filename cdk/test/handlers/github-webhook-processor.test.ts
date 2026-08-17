@@ -23,6 +23,15 @@ jest.mock('@aws-sdk/client-s3', () => ({
   PutObjectCommand: jest.fn((input: unknown) => ({ _type: 'Put', input })),
 }));
 
+// DynamoDB doc client — drives persistScreenshotUrl.
+const ddbSend = jest.fn();
+jest.mock('@aws-sdk/client-dynamodb', () => ({ DynamoDBClient: jest.fn(() => ({})) }));
+jest.mock('@aws-sdk/lib-dynamodb', () => ({
+  DynamoDBDocumentClient: { from: jest.fn(() => ({ send: ddbSend })) },
+  UpdateCommand: jest.fn((input: unknown) => ({ _type: 'Update', input })),
+  GetCommand: jest.fn((input: unknown) => ({ _type: 'Get', input })),
+}));
+
 const captureScreenshotMock = jest.fn();
 jest.mock('../../src/handlers/shared/agentcore-browser', () => ({
   captureScreenshot: (...args: unknown[]) => captureScreenshotMock(...args),
@@ -45,15 +54,18 @@ jest.mock('../../src/handlers/shared/linear-feedback', () => ({
 
 const findLinearIssueMock = jest.fn();
 const extractLinearIdentifierMock = jest.fn();
+const extractFromBranchMock = jest.fn();
 jest.mock('../../src/handlers/shared/linear-issue-lookup', () => ({
   findLinearIssueByIdentifier: (...args: unknown[]) => findLinearIssueMock(...args),
   extractLinearIdentifier: (...args: unknown[]) => extractLinearIdentifierMock(...args),
+  extractLinearIdentifierFromBranch: (...args: unknown[]) => extractFromBranchMock(...args),
 }));
 
 process.env.SCREENSHOT_BUCKET_NAME = 'screenshot-bucket';
 process.env.SCREENSHOT_PUBLIC_HOST = 'd1.cloudfront.net';
 process.env.GITHUB_TOKEN_SECRET_ARN = 'arn:aws:secretsmanager:us-east-1:123:secret:gh-token';
 process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME = 'LinearWorkspaceRegistry';
+process.env.TASK_TABLE_NAME = 'TaskTable';
 
 import { handler } from '../../src/handlers/github-webhook-processor';
 
@@ -88,6 +100,11 @@ describe('github-webhook-processor handler', () => {
     postIssueCommentMock.mockReset();
     findLinearIssueMock.mockReset();
     extractLinearIdentifierMock.mockReset();
+    extractFromBranchMock.mockReset();
+    // Default: persistScreenshotUrl's UpdateItem succeeds with a NON-integration
+    // task record (no orchestration_sub_issue_id) → standalone Linear comment
+    // still posts, as the pre-existing tests expect.
+    ddbSend.mockReset().mockResolvedValue({ Attributes: { channel_metadata: {} } });
     jest.restoreAllMocks();
   });
 
@@ -145,6 +162,32 @@ describe('github-webhook-processor handler', () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+
+  test('picks the head-SHA owner when commit-pulls returns a stacked chain', async () => {
+    // A stacked sub-issue chain: the deploy SHA `abc1234` is the head of
+    // PR 73, but the commit-pulls API also lists PRs 74 and 75 stacked on
+    // top (their history contains the commit). The PR whose own head is
+    // the SHA must win, so the screenshot routes to 73's branch.
+    resolveGitHubTokenMock.mockResolvedValue('gh-tok');
+    fetchOk([
+      { number: 73, state: 'open', title: 't73', body: 'b73', head: { ref: 'bgagent/01T/abca-152-x', sha: 'abc1234' } },
+      { number: 74, state: 'open', title: 't74', body: 'b74', head: { ref: 'bgagent/01T/abca-153-y', sha: 'def5678' } },
+      { number: 75, state: 'open', title: 't75', body: 'b75', head: { ref: 'bgagent/01T/abca-154-z', sha: 'aaa9999' } },
+    ]);
+    captureScreenshotMock.mockResolvedValueOnce(new Uint8Array([1]));
+    s3Send.mockResolvedValueOnce({});
+    upsertTaskCommentMock.mockResolvedValueOnce({ commentId: 'cmt-1' });
+    extractFromBranchMock.mockReturnValueOnce('ABCA-152');
+    findLinearIssueMock.mockResolvedValueOnce({ issueId: 'issue-152', linearWorkspaceId: 'ws-1', workspaceSlug: 'abca' });
+    postIssueCommentMock.mockResolvedValueOnce(true);
+
+    await handler(payload());
+
+    const commentArg = upsertTaskCommentMock.mock.calls[0][0] as { issueOrPrNumber: number };
+    expect(commentArg.issueOrPrNumber).toBe(73);
+    expect(extractFromBranchMock).toHaveBeenCalledWith('bgagent/01T/abca-152-x');
+    expect(postIssueCommentMock.mock.calls[0][1]).toBe('issue-152');
   });
 
   test('happy path: PR found → screenshot → S3 → PR comment posted', async () => {
@@ -208,10 +251,12 @@ describe('github-webhook-processor handler', () => {
 
   test('Linear branch fires when registry table set + identifier in PR title', async () => {
     resolveGitHubTokenMock.mockResolvedValue('gh-tok');
-    fetchOk([{ number: 17, state: 'open', title: 'ABCA-42 fix login', body: 'body' }]);
+    // No branch identifier here — exercises the title fallback path.
+    fetchOk([{ number: 17, state: 'open', title: 'ABCA-42 fix login', body: 'body', head: { ref: 'feature-x', sha: 'abc1234' } }]);
     captureScreenshotMock.mockResolvedValueOnce(new Uint8Array([1]));
     s3Send.mockResolvedValueOnce({});
     upsertTaskCommentMock.mockResolvedValueOnce({ commentId: 'cmt-1' });
+    extractFromBranchMock.mockReturnValueOnce(null);
     extractLinearIdentifierMock.mockReturnValueOnce('ABCA-42');
     findLinearIssueMock.mockResolvedValueOnce({
       issueId: 'issue-uuid',
@@ -230,12 +275,48 @@ describe('github-webhook-processor handler', () => {
     expect(linearArg[2]).toMatch(/https:\/\/d1\.cloudfront\.net\/screenshots\/owner_repo\/abc1234-42-[0-9a-f]{16}\.png/);
   });
 
-  test('falls back to extractor on PR body when title yields no identifier', async () => {
+  test('branch-name identifier wins over a predecessor named in the PR body (stacked PR)', async () => {
+    // A stacked PR closes one issue but its body mentions the PREDECESSOR
+    // issue first ("cherry-picked from predecessor branch ..."). Branch-first
+    // routing must win so the screenshot lands on the issue this PR actually
+    // implements, not the predecessor named earlier in the body.
     resolveGitHubTokenMock.mockResolvedValue('gh-tok');
-    fetchOk([{ number: 17, state: 'open', title: 'feat: add foo', body: 'closes ABCA-42' }]);
+    fetchOk([{
+      number: 73,
+      state: 'open',
+      title: 'feat(destinations): add Lisbon destination card',
+      body: 'cherry-picked from predecessor branch ABCA-151 ... Closes ABCA-152',
+      head: { ref: 'bgagent/01TASK/abca-152-link-lisbon-from-destinationsht', sha: 'abc1234' },
+    }]);
     captureScreenshotMock.mockResolvedValueOnce(new Uint8Array([1]));
     s3Send.mockResolvedValueOnce({});
     upsertTaskCommentMock.mockResolvedValueOnce({ commentId: 'cmt-1' });
+    // Real branch extractor behaviour: pulls ABCA-152 from the branch.
+    extractFromBranchMock.mockReturnValueOnce('ABCA-152');
+    findLinearIssueMock.mockResolvedValueOnce({
+      issueId: 'issue-152',
+      linearWorkspaceId: 'ws-1',
+      workspaceSlug: 'abca',
+    });
+    postIssueCommentMock.mockResolvedValueOnce(true);
+
+    await handler(payload());
+
+    // Routed to ABCA-152 from the branch; title/body extractor never consulted.
+    expect(extractFromBranchMock).toHaveBeenCalledWith('bgagent/01TASK/abca-152-link-lisbon-from-destinationsht');
+    expect(findLinearIssueMock).toHaveBeenCalledWith('ABCA-152', 'LinearWorkspaceRegistry');
+    expect(extractLinearIdentifierMock).not.toHaveBeenCalled();
+    expect(postIssueCommentMock).toHaveBeenCalledTimes(1);
+    expect(postIssueCommentMock.mock.calls[0][1]).toBe('issue-152');
+  });
+
+  test('falls back to title then body when branch yields no identifier', async () => {
+    resolveGitHubTokenMock.mockResolvedValue('gh-tok');
+    fetchOk([{ number: 17, state: 'open', title: 'feat: add foo', body: 'closes ABCA-42', head: { ref: 'random-branch', sha: 'abc1234' } }]);
+    captureScreenshotMock.mockResolvedValueOnce(new Uint8Array([1]));
+    s3Send.mockResolvedValueOnce({});
+    upsertTaskCommentMock.mockResolvedValueOnce({ commentId: 'cmt-1' });
+    extractFromBranchMock.mockReturnValueOnce(null); // branch produces no match
     extractLinearIdentifierMock
       .mockReturnValueOnce(null) // title produces no match
       .mockReturnValueOnce('ABCA-42'); // body does
@@ -248,6 +329,7 @@ describe('github-webhook-processor handler', () => {
 
     await handler(payload());
 
+    expect(extractFromBranchMock).toHaveBeenCalledTimes(1);
     expect(extractLinearIdentifierMock).toHaveBeenCalledTimes(2);
     expect(postIssueCommentMock).toHaveBeenCalledTimes(1);
   });
@@ -296,5 +378,56 @@ describe('github-webhook-processor handler', () => {
 
     // No throw — postIssueComment returning false is just logged.
     await expect(handler(payload())).resolves.toBeUndefined();
+  });
+
+  test('persists BOTH screenshot_url and screenshot_preview_url on the task record', async () => {
+    resolveGitHubTokenMock.mockResolvedValue('gh-tok');
+    fetchOk([{ number: 17, state: 'open', title: 't', body: '', head: { ref: 'bgagent/01TASKID/abca-42-x', sha: 'abc1234' } }]);
+    captureScreenshotMock.mockResolvedValueOnce(new Uint8Array([1]));
+    s3Send.mockResolvedValueOnce({});
+    upsertTaskCommentMock.mockResolvedValueOnce({ commentId: 'cmt-1' });
+    extractFromBranchMock.mockReturnValueOnce(null);
+    extractLinearIdentifierMock.mockReturnValue(null);
+
+    await handler(payload());
+
+    const upd = ddbSend.mock.calls.find((c) => c[0]?._type === 'Update');
+    expect(upd).toBeDefined();
+    const input = upd![0].input as { Key: { task_id: string }; ExpressionAttributeValues: Record<string, string> };
+    expect(input.Key.task_id).toBe('01TASKID'); // 2nd branch segment
+    expect(input.ExpressionAttributeValues[':u']).toMatch(/cloudfront\.net\/screenshots/);
+    expect(input.ExpressionAttributeValues[':p']).toBe('https://preview.example.com'); // the deploy preview URL
+  });
+
+  test('integration node deploy persists the URL but does NOT post a standalone Linear comment', async () => {
+    resolveGitHubTokenMock.mockResolvedValue('gh-tok');
+    // The integration node's PR — branch + title both name the PARENT epic,
+    // which WOULD route a Linear comment onto the parent.
+    fetchOk([{
+      number: 191,
+      state: 'open',
+      title: 'feat(pages): integrate FAQ + Reviews (ABCA-301 combined result)',
+      body: 'combined',
+      head: { ref: 'bgagent/01INTEGRATION/integrate-the-sub-issues', sha: 'abc1234' },
+    }]);
+    captureScreenshotMock.mockResolvedValueOnce(new Uint8Array([1]));
+    s3Send.mockResolvedValueOnce({});
+    upsertTaskCommentMock.mockResolvedValueOnce({ commentId: 'cmt-1' });
+    // The persisted task record marks this as the synthetic integration node.
+    ddbSend.mockReset().mockResolvedValue({
+      Attributes: { channel_metadata: { orchestration_sub_issue_id: 'orch_1__integration' } },
+    });
+    extractFromBranchMock.mockReturnValue(null);
+    extractLinearIdentifierMock.mockReturnValue('ABCA-301');
+
+    await handler(payload());
+
+    // URL persisted (panel embed path) …
+    expect(ddbSend.mock.calls.some((c) => c[0]?._type === 'Update')).toBe(true);
+    // … the GitHub PR comment still posts (load-bearing on the PR) …
+    expect(upsertTaskCommentMock).toHaveBeenCalledTimes(1);
+    // … but NO standalone Linear comment on the parent epic.
+    expect(findLinearIssueMock).not.toHaveBeenCalled();
+    expect(postIssueCommentMock).not.toHaveBeenCalled();
   });
 });

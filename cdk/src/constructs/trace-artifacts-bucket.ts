@@ -35,6 +35,16 @@ export const TRACE_ARTIFACT_TTL_DAYS = 7;
 export const TRACE_OBJECT_KEY_PREFIX = 'traces/';
 
 /**
+ * This bucket holds a SECOND, disjoint key space the agent writes to:
+ * ``artifacts/<task_id>/<name>``, a task's declared output. There is deliberately
+ * no exported constant for it, because nothing on the platform side reads an
+ * artifact today. Any component that starts to MUST be granted on that prefix
+ * alone and never on the bucket, or it could reach ``traces/<user_id>/`` — a full
+ * agent trajectory including tool input and output, readable only by the user who
+ * produced it.
+ */
+
+/**
  * Properties for TraceArtifactsBucket construct.
  */
 export interface TraceArtifactsBucketProps {

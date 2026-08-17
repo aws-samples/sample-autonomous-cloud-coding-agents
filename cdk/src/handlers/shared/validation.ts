@@ -348,11 +348,26 @@ export function validateMagicBytes(data: Buffer, contentType: string): boolean {
     return sig.bytes.every((b, i) => data[offset + i] === b);
   }
 
-  // Text types: valid UTF-8, no null bytes in first 8 KB
+  // Text types: the WHOLE buffer must be valid, null-free UTF-8 (review #3 — an
+  // 8 KB ASCII preamble followed by binary must NOT pass; validate everything, not
+  // just a prefix). Attachments are already size-capped (MAX_ATTACHMENT_SIZE_BYTES),
+  // and this runs once at admission, so full-buffer decode is affordable.
+  //
+  // What this does and does NOT guarantee: it proves the bytes are decodable UTF-8
+  // text with no embedded NULs — enough to safely feed them to the text guardrail
+  // and store them. It does NOT prove the content is "harmless" — a valid-UTF-8
+  // SVG or HTML file labeled .txt passes (it IS text), and is then SCREENED AS TEXT
+  // by the Bedrock guardrail like any other text attachment. That's the intended
+  // contract: text is screened as text; binary (non-UTF-8 / NUL-bearing) is rejected.
   if (contentType.startsWith('text/') || contentType === 'application/json') {
-    const check = data.subarray(0, TEXT_MAGIC_BYTE_CHECK_BYTES);
-    for (let i = 0; i < check.length; i++) {
-      if (check[i] === 0) return false;
+    try {
+      // fatal:true throws on any invalid UTF-8 sequence (no U+FFFD substitution).
+      new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(data);
+    } catch {
+      return false; // not valid UTF-8 end-to-end → not a text attachment
+    }
+    for (let i = 0; i < data.length; i++) {
+      if (data[i] === 0) return false; // embedded NUL → binary, not text
     }
     return true;
   }
@@ -363,6 +378,29 @@ export function validateMagicBytes(data: Buffer, contentType: string): boolean {
 
 /**
  * Detect MIME type from magic bytes (for inline attachments without content_type).
+ *
+ * This is a DETECTION HEURISTIC, not a validation gate, and it deliberately
+ * keeps the cheap 8 KB prefix scan that {@link validateMagicBytes} no longer
+ * uses. The two differ on purpose:
+ *
+ *  - Here the answer is only a GUESS at what the caller probably sent, used to
+ *    fill in a missing `content_type`. Guessing `text/plain` grants nothing:
+ *    whatever this returns is handed straight to `isAllowedMimeType` and then
+ *    to `validateMagicBytes`, which re-checks the WHOLE buffer. A wrong guess
+ *    is caught one call later, so scanning more bytes here buys no safety.
+ *  - There the answer is an admission decision with nothing downstream to catch
+ *    a mistake, so it must hold for every byte.
+ *
+ * That re-check is what makes this safe, so it is load-bearing rather than
+ * incidental: `validateAttachments` deliberately runs `validateMagicBytes` on
+ * every inline attachment, DETECTED types included. It used to run only on
+ * declared ones, which left this path's 8 KB guess as the final word and let
+ * ~8 KB of ASCII followed by binary through as `text/plain`. Do not narrow that
+ * call site back to declared types only.
+ *
+ * Keep this function itself lenient: making it strict would reject attachments
+ * validation would have accepted (returning `null` instead of the correct type),
+ * turning a detection miss into a spurious rejection.
  */
 export function detectMimeTypeFromMagicBytes(data: Buffer): string | null {
   for (const sig of MAGIC_BYTES) {
@@ -448,7 +486,16 @@ function filenameFromUrl(url: string, index: number): string {
   return `url_attachment_${index}`;
 }
 
-const MIME_TO_EXTENSION: Record<string, string> = {
+/**
+ * Canonical MIME → file-extension map for the platform-allowed attachment types.
+ * This is the single source of truth for the type↔extension relationship: other
+ * modules that need the reverse (extension → MIME, e.g. to type a generic
+ * `application/octet-stream` download) derive it from {@link EXTENSION_TO_MIME}
+ * rather than re-listing the types — so adding a supported type is a one-line
+ * change here, inherited in both directions. Keep in step with
+ * ALLOWED_IMAGE_MIME_TYPES / ALLOWED_FILE_MIME_TYPES.
+ */
+export const MIME_TO_EXTENSION: Record<string, string> = {
   'image/png': 'png',
   'image/jpeg': 'jpg',
   'text/plain': 'txt',
@@ -458,6 +505,28 @@ const MIME_TO_EXTENSION: Record<string, string> = {
   'application/pdf': 'pdf',
   'text/x-log': 'log',
 };
+
+/**
+ * Reverse of {@link MIME_TO_EXTENSION}: file-extension → MIME, for typing a
+ * download whose HTTP content-type is generic. Derived (not hand-listed) so it
+ * can never drift from the canonical map. `jpg` → `image/jpeg` covers the common
+ * `.jpeg` alias too via the extra entry below.
+ */
+export const EXTENSION_TO_MIME: Readonly<Record<string, string>> = Object.freeze({
+  ...Object.fromEntries(Object.entries(MIME_TO_EXTENSION).map(([mime, ext]) => [ext, mime])),
+  jpeg: 'image/jpeg', // `.jpeg` is a common alias MIME_TO_EXTENSION collapses to `jpg`
+});
+
+/**
+ * Human-friendly list of supported attachment file extensions, derived from
+ * {@link EXTENSION_TO_MIME}'s KEYS (deduped, upper-cased) — e.g. "PNG, JPG, JPEG,
+ * TXT, CSV, MD, JSON, PDF, LOG". Keyed off EXTENSION_TO_MIME (not MIME_TO_EXTENSION)
+ * so the accepted `.jpeg` alias is listed too — the label is exactly the set of
+ * extensions the type-inference will actually accept. For user-facing
+ * "unsupported file type" messages, so the list can never drift from the allowlist.
+ */
+export const SUPPORTED_ATTACHMENT_EXTENSIONS_LABEL: string =
+  [...new Set(Object.keys(EXTENSION_TO_MIME))].map((e) => e.toUpperCase()).join(', ');
 
 export type AttachmentValidationResult =
   | { readonly valid: true; readonly parsed: ValidatedAttachment[] }
@@ -554,8 +623,14 @@ export function validateAttachments(
       return { valid: false, error: `attachments[${i}]: content_type is required for presigned uploads` };
     }
 
-    // Magic bytes check against declared content_type (for inline data with declared type)
-    if (decoded && att.content_type) {
+    // Magic-bytes check for ALL inline data, whether the type was DECLARED or
+    // DETECTED. Gating this on `att.content_type` left the detected path
+    // unvalidated, which is the weaker of the two: `detectMimeTypeFromMagicBytes`
+    // only scans an 8 KB prefix for NULs, so ~8 KB of clean ASCII followed by
+    // binary was guessed `text/plain` and admitted with no whole-buffer check —
+    // exactly the laundering `validateMagicBytes` was hardened to stop. A
+    // detected type is a GUESS and needs verifying more than a declared one does.
+    if (decoded) {
       if (!validateMagicBytes(decoded, resolvedContentType)) {
         return { valid: false, error: `attachments[${i}]: content does not match declared type` };
       }

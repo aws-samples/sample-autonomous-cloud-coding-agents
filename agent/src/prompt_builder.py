@@ -6,7 +6,7 @@ import glob
 import os
 from typing import TYPE_CHECKING
 
-from config import AGENT_WORKSPACE
+from config import AGENT_WORKSPACE, NEEDS_INPUT_MARKER
 from prompts import get_system_prompt
 from sanitization import sanitize_external_content as sanitize_memory_content
 from shell import log
@@ -30,6 +30,10 @@ def build_system_prompt(
     system_prompt = system_prompt.replace("{branch_name}", setup.branch)
     system_prompt = system_prompt.replace("{default_branch}", setup.default_branch)
     system_prompt = system_prompt.replace("{max_turns}", str(config.max_turns))
+    # Clarify-before-spend (UX #4): the new_task workflow references this marker
+    # in its "ask instead of guess" branch. Harmless no-op for prompts that don't
+    # contain the placeholder.
+    system_prompt = system_prompt.replace("{needs_input_marker}", NEEDS_INPUT_MARKER)
     setup_notes = (
         "\n".join(f"- {n}" for n in setup.notes)
         if setup.notes
@@ -76,6 +80,13 @@ def build_system_prompt(
     if channel_addendum:
         system_prompt += channel_addendum
 
+    # Registry skill assets (#246, PR 3): append resolved prompt fragments. Placed
+    # after channel guidance so operator-attached skills sit at the recency end.
+    if config.resolved_assets:
+        from registry.loader import build_skill_prompt_fragment
+
+        system_prompt += build_skill_prompt_fragment(config.resolved_assets)
+
     return system_prompt
 
 
@@ -109,6 +120,11 @@ def build_repoless_system_prompt(
     if channel_addendum:
         system_prompt += channel_addendum
 
+    if config.resolved_assets:
+        from registry.loader import build_skill_prompt_fragment
+
+        system_prompt += build_skill_prompt_fragment(config.resolved_assets)
+
     return system_prompt
 
 
@@ -132,9 +148,21 @@ def _render_memory_context(hydrated_context: HydratedContext | None) -> str:
 def _channel_prompt_addendum(config: TaskConfig) -> str:
     """Return channel-specific prompt guidance, or empty string.
 
-    For Linear-origin tasks, instruct the agent to post progress comments and
-    transition state using the already-loaded Linear MCP tools. The tool names
-    are stated explicitly so the agent doesn't grope for them.
+    Linear-origin tasks (ADR-016 "Linear is fully deterministic"): the agent has
+    NO Linear MCP and NO Linear write access. All Linear I/O is handled by the
+    platform, not the agent:
+      * inbound context — the issue title/description, recent human comments,
+        project wiki-document CONTENT, and attachments are ALREADY pre-hydrated
+        into the task description + ``attachments`` at admission time
+        (linear-webhook-processor + linear-attachments.ts +
+        linear-feedback.fetchRecentComments + linear-issue-context-probe's doc
+        fetch). There is nothing to fetch at runtime.
+      * outbound status — 👀/✅/❌ reactions and Backlog→In Progress→In Review
+        state transitions are posted deterministically by ``linear_reactions.py``;
+        the "🤖 Starting" and PR-opened comments are posted at the Lambda tier;
+        the terminal ✅/⚠️/❌ summary (cost/turns/PR link) is posted by the
+        fan-out plane. So the addendum's whole job now is to tell the agent to
+        do the code work and NOT attempt any Linear calls.
 
     Jira-origin tasks intentionally get NO addendum: Atlassian's Remote MCP
     requires an interactive OAuth flow a headless agent can't complete, so the
@@ -145,36 +173,39 @@ def _channel_prompt_addendum(config: TaskConfig) -> str:
     """
     if config.channel_source != "linear":
         return ""
+    # A synthetic orchestration integration node (#247) has NO real Linear
+    # sub-issue — `linear_issue_id` is intentionally omitted from its
+    # channel_metadata (see orchestration-release.ts). Without a target issue
+    # there is nothing issue-specific to say; the parent panel is the surface.
+    if not config.channel_metadata.get("linear_issue_id"):
+        return ""
     issue_identifier = config.channel_metadata.get("linear_issue_identifier") or ""
     issue_ref = f" (`{issue_identifier}`)" if issue_identifier else ""
+
     return (
-        "\n\n## Linear issue progress updates (REQUIRED)\n\n"
-        f"This task was submitted from Linear issue{issue_ref}. The Linear MCP "
-        "server is loaded. You MUST perform these updates; they are part of "
-        "the task contract, not optional:\n\n"
-        "1. **At start** — call `mcp__linear-server__save_comment` with a short "
-        '"🤖 Starting on this issue…" message, then call '
-        "`mcp__linear-server__save_issue` to transition the issue state. Use "
-        "`mcp__linear-server__list_issue_statuses` first if you don't already "
-        "know the state ids; pick the one named `In Progress` (fall back to "
-        "`Todo` if that state doesn't exist). If the issue is already in "
-        "`In Progress` or any later state (`In Review`, `Done`), skip the "
-        "transition. If neither exists, skip — the comment alone is enough. "
-        "Do not invent state names or loop on `list_issue_statuses`.\n"
-        "2. **When you open the PR** — call `mcp__linear-server__save_comment` "
-        "with the PR URL, then call `mcp__linear-server__save_issue` to "
-        "transition the issue state to `In Review` (fall back to `In Progress` "
-        "if that state doesn't exist). If neither exists, skip the state "
-        "transition — the PR comment alone is enough. Do not invent state "
-        "names or loop on `list_issue_statuses`.\n\n"
-        "**Do NOT post a final 'task completed' or 'task failed' comment.** "
-        "The platform fan-out plane (issue #239) posts a structured "
-        "✅/⚠️/❌ summary on terminal events with cost / turns / duration / "
-        "PR-link metrics that you don't have visibility into. A redundant "
-        "agent-side completion comment would just stack two near-identical "
-        "comments on the issue.\n\n"
-        "Keep the start + PR-opened comments concise. Do not mirror the full "
-        "agent transcript back to Linear."
+        "\n\n## Linear issue\n\n"
+        f"This task was submitted from Linear issue{issue_ref}. The platform "
+        "manages ALL Linear interaction for you — you have no Linear tools and "
+        "must not try to call any:\n\n"
+        "- **Context is already here.** The issue title, description, recent "
+        "human comments, the reporter's uploaded files (inline images and "
+        "paperclip attachments), and the content of any project wiki documents "
+        "have been pre-fetched and included in your task description (see the "
+        "`## Project documents` and `## Recent comments` sections if present) + "
+        "attachments. You have no way to fetch more from Linear, so work from "
+        "what you've been given. If the task clearly references material that "
+        "ISN'T in your context (an external link, a file you can't see, or a doc "
+        "noted as present-but-not-included), don't guess — say so in the PR and "
+        "proceed with best effort on what you have.\n"
+        "- **Status is automatic.** The platform posts the issue reactions "
+        "(👀 on start, ✅/❌ on finish), moves the issue through its workflow "
+        "states (In Progress → In Review), posts the start + PR-opened comments, "
+        "and posts the final ✅/⚠️/❌ summary with cost/PR-link metrics. Do NOT "
+        "post Linear comments or change the issue state yourself — you'd only "
+        "duplicate the platform's messages.\n\n"
+        "Just do the code work: make the change, open the PR, and let the "
+        "platform narrate it. Reference issues/PRs in your GitHub PR description "
+        "as usual.\n"
     )
 
 

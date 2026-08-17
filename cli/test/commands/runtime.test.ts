@@ -51,6 +51,7 @@ describe('runtime status command', () => {
         control_plane_status: 'READY',
       }],
       ecs_substrates: [],
+      lambda_microvm_substrates: [],
     });
   });
 
@@ -84,6 +85,7 @@ describe('runtime status command', () => {
         used_by_repos: ['acme/ecs'],
         note: 'ECS note',
       }],
+      lambda_microvm_substrates: [],
     });
 
     const cmd = makeRuntimeCommand();
@@ -109,6 +111,7 @@ describe('runtime status command', () => {
         used_by_repos: ['acme/ecs'],
         note: 'ECS note',
       }],
+      lambda_microvm_substrates: [],
     });
 
     const cmd = makeRuntimeCommand();
@@ -117,6 +120,34 @@ describe('runtime status command', () => {
     const output = consoleSpy.mock.calls.map((c) => c[0]).join('\n');
     expect(output).toContain('ECS compute substrates');
     expect(output).toContain('ECS note');
+  });
+
+  test('prints Lambda MicroVM substrate note without runtime probing', async () => {
+    (buildRuntimeStatusReport as jest.Mock).mockResolvedValue({
+      platform_default_runtime_arn: 'arn:aws:bedrock-agentcore:us-east-1:123:runtime/platform',
+      blueprints: [{
+        repo: 'acme/microvm',
+        status: 'active',
+        compute_type: 'lambda-microvm',
+        runtime_arn: undefined,
+        runtime_arn_source: 'platform',
+      }],
+      agentcore_runtimes: [],
+      ecs_substrates: [],
+      lambda_microvm_substrates: [{
+        compute_type: 'lambda-microvm',
+        used_by_repos: ['acme/microvm'],
+        note: 'Lambda MicroVM sessions are platform-managed.',
+      }],
+    });
+
+    const cmd = makeRuntimeCommand();
+    await cmd.parseAsync(['node', 'test', 'status', '--region', 'us-east-1']);
+
+    const output = consoleSpy.mock.calls.map((c) => c[0]).join('\n');
+    expect(output).toContain('n/a — Lambda MicroVMs are platform-managed');
+    expect(output).toContain('Lambda MicroVM compute substrates');
+    expect(output).toContain('Lambda MicroVM sessions are platform-managed.');
   });
 
   test('fails when RepoTable output is missing', async () => {
@@ -136,6 +167,7 @@ describe('runtime status command', () => {
       blueprints: [],
       agentcore_runtimes: [],
       ecs_substrates: [],
+      lambda_microvm_substrates: [],
     });
 
     const cmd = makeRuntimeCommand();

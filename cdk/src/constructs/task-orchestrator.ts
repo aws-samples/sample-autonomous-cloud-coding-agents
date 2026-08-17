@@ -18,7 +18,7 @@
  */
 
 import * as path from 'path';
-import { Duration, Stack } from 'aws-cdk-lib';
+import { ArnFormat, Duration, Stack } from 'aws-cdk-lib';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
@@ -157,10 +157,25 @@ export interface TaskOrchestratorProps {
     readonly containerName: string;
     readonly taskRoleArn: string;
     readonly executionRoleArn: string;
+    /**
+     * The smaller read-only PLANNING task def (see
+     * docs/design/ECS_RIGHTSIZED_PLANNING.md). The ECS strategy selects it for
+     * read-only workflows so planning doesn't run on the larger build box.
+     *
+     * Required, like its siblings, so the all-or-nothing constraint stays visible
+     * at the type level: the strategy reads this ARN from an env var, and an
+     * ecsConfig that omitted it would compile but leave the planning def defined
+     * and permanently unreachable.
+     *
+     * Needs no extra IAM — it shares the build def's task and execution roles,
+     * and the `ecs:RunTask` grant below is scoped by `ecs:cluster` rather than by
+     * task-definition ARN, so it already covers every def in the cluster.
+     */
+    readonly planningTaskDefinitionArn: string;
   };
 
   /**
-   * S3 bucket for per-task ECS payloads (#502). When provided (alongside
+   * S3 bucket for per-task ECS payloads. When provided (alongside
    * ``ecsConfig``), the orchestrator writes the payload here and passes only an
    * ``AGENT_PAYLOAD_S3_URI`` pointer in the RunTask override (the full payload
    * exceeds the 8 KB containerOverrides limit), then deletes the object in the
@@ -174,6 +189,89 @@ export interface TaskOrchestratorProps {
    * ReadWrite grants for URL fetch/screen/upload during hydration.
    */
   readonly attachmentsBucket?: s3.IBucket;
+
+  /**
+   * AWS Lambda MicroVMs compute strategy configuration (ADR-021 sub-decision 4).
+   * When provided, the `MICROVM_*` env vars and the MicroVM lifecycle IAM
+   * statements are added to the orchestrator.
+   *
+   * Grouped into one all-or-nothing object for the same reason `ecsConfig` is:
+   * the strategy refuses to start a session unless `imageIdentifier`,
+   * `executionRoleArn`, `egressConnectorArns` and `payloadBucket` are ALL
+   * present, so the type makes a partial configuration unrepresentable instead
+   * of deferring the failure to the first task on the backend.
+   *
+   * `ingressConnectorArns` is required for a different reason — it is a security
+   * control whose absence has a *wider* meaning than "off" (see the field). Only
+   * `imageVersion` is genuinely optional, and its absent state ("let the service
+   * resolve the latest ACTIVE version") is a real, intended configuration.
+   */
+  readonly microvmConfig?: {
+    /**
+     * Image **ARN** passed as `imageIdentifier` on every `RunMicrovm`.
+     *
+     * Must be an ARN, not a bare name: `RunMicrovm` rejects names
+     * (`Malformed ARN - doesn't start with 'arn:'`). `LambdaMicrovmCompute`
+     * resolves a name to its exact ARN, so in practice this is the same value as
+     * {@link imageArn} — both fields are kept because they answer different
+     * questions (request field vs IAM resource) and could legitimately diverge
+     * if the service ever accepts a version-qualified identifier.
+     */
+    readonly imageIdentifier: string;
+    /**
+     * The image's IAM resource ARN, used to scope every MicroVM lifecycle grant
+     * to that one platform-created image (ADR-021).
+     *
+     * REQUIRED, and separate from {@link imageIdentifier} for the reason above.
+     * Required rather than optional on purpose: an optional field here would
+     * silently re-introduce an account-wide `microvm-image:*` fallback, and no
+     * caller needs one — the `microvmImage` ARN shape is fully derivable from an
+     * image name plus the stack's partition/Region/account, which
+     * `LambdaMicrovmCompute` does.
+     */
+    readonly imageArn: string;
+    /**
+     * Optional image version pin. Omitted ⇒ the service resolves the latest
+     * active version, which is what a rebuild-in-place flow wants.
+     */
+    readonly imageVersion?: string;
+    /** Role the MicroVM assumes at runtime; passed on `RunMicrovm`. */
+    readonly executionRoleArn: string;
+    /** Egress network connectors; comma-joined into the env var. */
+    readonly egressConnectorArns: string[];
+    /**
+     * Ingress network connectors. **Required** — and required for a security
+     * reason, not a stylistic one.
+     *
+     * `RunMicrovm` attaches a PUBLIC `HTTP_INGRESS` connector (and mints a public
+     * `*.lambda-microvm.<region>.on.aws` endpoint) when the request omits the
+     * field, so "nothing dials into the MicroVM" is an ACTIVE control that has to
+     * be passed on every launch. An optional field here would let a caller
+     * express "no ingress configured" and silently get the widest possible
+     * posture — which is exactly the class of bug the omitted-field rule in
+     * ADR-021's source-hierarchy note warns about.
+     *
+     * In P1–P3 `LambdaMicrovmCompute` always supplies the Lambda-managed
+     * `NO_INGRESS` connector; #391 operator shell access can widen it without a
+     * strategy change.
+     */
+    readonly ingressConnectorArns: string[];
+    /**
+     * Bucket for `/run` payloads that exceed the 4 KB `runHookPayload` cap —
+     * i.e. nearly all of them, since a hydrated payload is bigger than that.
+     * The orchestrator gets **write only**: unlike the ECS payload bucket
+     * there is no finalize-time delete on this backend (the bucket's lifecycle
+     * rule is the reaper), so `grantDelete` would be an unused permission.
+     */
+    readonly payloadBucket: s3.IBucket;
+  };
+
+  /**
+   * AgentCore registry id (#246). When provided, the orchestrator resolves the
+   * Blueprint's ``registry://`` asset refs at task start and threads the bundle
+   * into the agent payload. Requires bedrock-agentcore registry read actions.
+   */
+  readonly agentRegistryId?: string;
 }
 
 /**
@@ -252,6 +350,8 @@ export class TaskOrchestrator extends Construct {
         retentionPeriod: Duration.days(DURABLE_RETENTION_DAYS),
       },
       environment: {
+        // Solution-attribution component label (#319): orchestration plane.
+        ABCA_COMPONENT: 'orchestr',
         TASK_TABLE_NAME: props.taskTable.tableName,
         TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
         USER_CONCURRENCY_TABLE_NAME: props.userConcurrencyTable.tableName,
@@ -272,11 +372,37 @@ export class TaskOrchestrator extends Construct {
           ECS_SUBNETS: props.ecsConfig.subnets,
           ECS_SECURITY_GROUP: props.ecsConfig.securityGroup,
           ECS_CONTAINER_NAME: props.ecsConfig.containerName,
+          // Read-only workflows route here instead of the build def. Without this
+          // var the strategy's `readOnly && ECS_PLANNING_TASK_DEFINITION_ARN`
+          // guard is always falsy, so the planning def would be synthesized and
+          // never used.
+          ECS_PLANNING_TASK_DEFINITION_ARN: props.ecsConfig.planningTaskDefinitionArn,
         }),
-        // #502: bucket the orchestrator writes the ECS payload to (and deletes
+        // Bucket the orchestrator writes the ECS payload to (and deletes
         // from at finalize); the ECS strategy reads this to build the S3 URI.
         ...(props.ecsPayloadBucket && { ECS_PAYLOAD_BUCKET: props.ecsPayloadBucket.bucketName }),
+        // ADR-021: the MicroVM substrate's deployment-time configuration. Names
+        // are the contract `lambda-microvm-strategy.ts` reads verbatim — do not
+        // rename one side without the other.
+        ...(props.microvmConfig && {
+          MICROVM_IMAGE_IDENTIFIER: props.microvmConfig.imageIdentifier,
+          MICROVM_EXECUTION_ROLE_ARN: props.microvmConfig.executionRoleArn,
+          MICROVM_EGRESS_CONNECTOR_ARNS: props.microvmConfig.egressConnectorArns.join(','),
+          // ALWAYS injected, never conditional — part of the same all-or-nothing
+          // block as the four above. The value is a control (`NO_INGRESS`), not a
+          // configuration nicety: `RunMicrovm` attaches a PUBLIC HTTP_INGRESS
+          // connector when the field is absent from the request, so a deployment
+          // that omitted this var would hand every agent MicroVM a public
+          // endpoint. Making the prop required is what lets this be
+          // unconditional; there is no "no ingress configured" state to express.
+          MICROVM_INGRESS_CONNECTOR_ARNS: props.microvmConfig.ingressConnectorArns.join(','),
+          MICROVM_PAYLOAD_BUCKET: props.microvmConfig.payloadBucket.bucketName,
+          ...(props.microvmConfig.imageVersion && {
+            MICROVM_IMAGE_VERSION: props.microvmConfig.imageVersion,
+          }),
+        }),
         ...(props.attachmentsBucket && { ATTACHMENTS_BUCKET_NAME: props.attachmentsBucket.bucketName }),
+        ...(props.agentRegistryId && { AGENT_REGISTRY_ID: props.agentRegistryId }),
       },
       bundling: orchestratorBundling,
     });
@@ -294,13 +420,23 @@ export class TaskOrchestrator extends Construct {
       props.attachmentsBucket.grantReadWrite(this.fn);
     }
 
-    // #502: ECS payload bucket — the orchestrator writes the payload before
+    // ECS payload bucket — the orchestrator writes the payload before
     // RunTask and deletes it at finalize. Write + delete only (it never reads
     // its own payload back; the ECS container is the reader, with its own
     // read-only grant from EcsAgentCluster).
     if (props.ecsPayloadBucket) {
       props.ecsPayloadBucket.grantPut(this.fn);
       props.ecsPayloadBucket.grantDelete(this.fn);
+    }
+
+    // ADR-021: MicroVM payload bucket. WRITE only — the strategy uploads an
+    // oversized /run payload and never reads it back (the MicroVM execution
+    // role is the reader, with its own read-only grant), and it never deletes
+    // (the bucket's lifecycle rule reaps). No grantDelete, deliberately: the ECS
+    // path has one because the orchestrator deletes at finalize; this one does
+    // not, so the grant would be dead permission.
+    if (props.microvmConfig) {
+      props.microvmConfig.payloadBucket.grantPut(this.fn);
     }
 
     // Durable execution managed policy
@@ -337,6 +473,34 @@ export class TaskOrchestrator extends Construct {
       resources: runtimeResources,
     }));
 
+    // Registry (#246): read-only access so the orchestrator can resolve the
+    // Blueprint's registry:// asset refs at task start. Scoped to THIS registry
+    // (the id is in scope here); only the record suffix is a wildcard, because
+    // record ids are server-assigned and unknown at synth — mirrors the scoping
+    // in registry-api.ts (#246 review nit).
+    if (props.agentRegistryId) {
+      this.fn.addToRolePolicy(new iam.PolicyStatement({
+        actions: [
+          'bedrock-agentcore:GetRegistryRecord',
+          'bedrock-agentcore:ListRegistryRecords',
+        ],
+        resources: [
+          Stack.of(this).formatArn({
+            service: 'bedrock-agentcore',
+            resource: 'registry',
+            resourceName: props.agentRegistryId,
+            arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
+          }),
+          Stack.of(this).formatArn({
+            service: 'bedrock-agentcore',
+            resource: 'registry',
+            resourceName: `${props.agentRegistryId}/record/*`,
+            arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
+          }),
+        ],
+      }));
+    }
+
     // ECS compute strategy permissions (only when ECS is configured)
     if (props.ecsConfig) {
       this.fn.addToRolePolicy(new iam.PolicyStatement({
@@ -359,6 +523,91 @@ export class TaskOrchestrator extends Construct {
         conditions: {
           StringEquals: {
             'iam:PassedToService': 'ecs-tasks.amazonaws.com',
+          },
+        },
+      }));
+    }
+
+    // Lambda MicroVMs compute strategy permissions (only when configured).
+    //
+    // EXACTLY the four control-plane actions the P1 strategy calls, per
+    // ADR-021's "only the MicroVM lifecycle actions it calls" requirement:
+    //   RunMicrovm       — startSession
+    //   GetMicrovm       — pollSession
+    //   TerminateMicrovm — stopSession / finalize (the active cleanup path)
+    //   PassNetworkConnector — required to attach egress connectors, even the
+    //                          AWS-managed ones
+    //
+    // NOT granted, deliberately:
+    //   - lambda:SuspendMicrovm / lambda:ResumeMicrovm — the ADR's grant list
+    //     names them, but P1 has no suspend/resume code path. They land with the
+    //     P3 interface widening (mandatory suspendSession/resumeSession across
+    //     all three strategies) together with the approve/deny Lambdas'
+    //     conditional ResumeMicrovm + GetMicrovm.
+    //   - lambda:CreateMicrovmAuthToken — granted to no role in any phase; no
+    //     JWE consumer exists (ADR-021 sub-decision 3).
+    if (props.microvmConfig) {
+      // RESOURCE SCOPING — every MicroVM lifecycle action authorizes against the
+      // *image*, not the running instance: the Service Authorization Reference
+      // lists `microvmImage`
+      // (`arn:<partition>:lambda:<region>:<account>:microvm-image:<name>`) as the
+      // required resource for RunMicrovm, GetMicrovm and TerminateMicrovm alike.
+      // That is what makes ADR-021's "scoped to platform-created images"
+      // achievable even though `microvmId` is minted per session — the
+      // per-session identifier never appears in IAM.
+      //
+      // There is NO account-wide fallback: `imageArn` is a required prop, and
+      // `LambdaMicrovmCompute` resolves a bare image name to its exact ARN, so
+      // this statement always names exactly one image.
+      //
+      // The `<arn>:*` sibling is a version-suffix hedge, not a widening. The SAR
+      // pattern ends at the image name, but the CLI and console surface
+      // version-qualified `…:microvm-image:<name>:<version>` forms, and the docs
+      // are already inconsistent about MicroVM ARN separators. If the authorized
+      // resource turns out to carry the version, an exact-only policy would
+      // AccessDenied every task; if it does not, this entry is inert. Either way
+      // it stays pinned to this image's name (names cannot contain `:`), so it
+      // can never match a different image.
+      const { imageArn } = props.microvmConfig;
+      const microvmImageResources = [imageArn, `${imageArn}:*`];
+
+      this.fn.addToRolePolicy(new iam.PolicyStatement({
+        sid: 'MicrovmLifecycle',
+        actions: [
+          'lambda:RunMicrovm',
+          'lambda:GetMicrovm',
+          'lambda:TerminateMicrovm',
+        ],
+        resources: microvmImageResources,
+      }));
+
+      // `lambda:PassNetworkConnector` supports NO resource-level permissions
+      // (the Service Authorization Reference lists no resource type for it), so
+      // `Resource: '*'` is mandatory — a narrowed ARN would simply never match
+      // and RunMicrovm would fail with AccessDenied. It is also why the ADR
+      // notes the action is needed "even for the default connectors": the
+      // AWS-managed connectors live in the `aws` account, outside any ARN we
+      // could enumerate. The action only permits *passing* a connector to a
+      // service, not creating or reading one.
+      this.fn.addToRolePolicy(new iam.PolicyStatement({
+        sid: 'MicrovmPassNetworkConnector',
+        actions: ['lambda:PassNetworkConnector'],
+        resources: ['*'],
+      }));
+
+      // RunMicrovm hands the MicroVM its execution role, which is a PassRole in
+      // IAM's eyes (the Reference lists `iam:PassRole` as a documented dependent
+      // of RunMicrovm) — same shape as the ECS branch above passing the task and
+      // execution roles to ecs-tasks.amazonaws.com. ADR-021's grant list omits
+      // it because it enumerates MicroVM actions, not the IAM plumbing they
+      // imply; without it RunMicrovm fails on the role hand-off.
+      this.fn.addToRolePolicy(new iam.PolicyStatement({
+        sid: 'MicrovmPassExecutionRole',
+        actions: ['iam:PassRole'],
+        resources: [props.microvmConfig.executionRoleArn],
+        conditions: {
+          StringEquals: {
+            'iam:PassedToService': 'lambda.amazonaws.com',
           },
         },
       }));
@@ -415,7 +664,7 @@ export class TaskOrchestrator extends Construct {
       },
       {
         id: 'AwsSolutions-IAM5',
-        reason: 'DynamoDB index/* wildcards generated by CDK grantReadWriteData; AgentCore runtime/* required for sub-resource invocation; Secrets Manager wildcards generated by CDK grantRead; AgentCore Memory wildcards generated by CDK grantRead/grantWrite; ECS RunTask/DescribeTasks/StopTask conditioned on cluster ARN; iam:PassRole scoped to ECS task/execution roles and conditioned on ecs-tasks.amazonaws.com',
+        reason: 'DynamoDB index/* wildcards generated by CDK grantReadWriteData; AgentCore runtime/* required for sub-resource invocation; Secrets Manager wildcards generated by CDK grantRead; AgentCore Memory wildcards generated by CDK grantRead/grantWrite; ECS RunTask/DescribeTasks/StopTask conditioned on cluster ARN; iam:PassRole scoped to ECS task/execution roles and conditioned on ecs-tasks.amazonaws.com; S3 object/* wildcard from CDK grantPut on the dedicated MicroVM payload bucket; MicroVM lifecycle actions (RunMicrovm/GetMicrovm/TerminateMicrovm) are scoped to the single platform MicroVM image ARN plus a <arn>:* version-suffix sibling (every one of them authorizes against the image resource, not the per-session instance; no account-wide wildcard is used); lambda:PassNetworkConnector requires Resource:* because the action supports no resource-level permissions and the AWS-managed connectors live outside this account; iam:PassRole is scoped to the MicroVM execution role and conditioned on lambda.amazonaws.com; AgentCore registry read scoped to the wired registry ARN, with a record/* suffix wildcard because record ids are server-assigned and unknown at synth (#246)',
       },
     ], true);
   }

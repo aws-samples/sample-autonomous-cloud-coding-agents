@@ -1,0 +1,1533 @@
+/**
+ *  MIT No Attribution
+ *
+ *  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ *
+ *  Permission is hereby granted, free of charge, to any person obtaining a copy of
+ *  the Software without restriction, including without limitation the rights to
+ *  use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+ *  the Software, and to permit persons to whom the Software is furnished to do so.
+ *
+ *  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ *  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ *  SOFTWARE.
+ */
+
+/**
+ * Orchestration reconciler for a declared parent/sub-issue dependency graph.
+ *
+ * Consumes the **TaskTable DynamoDB stream** (sole consumer — TaskTable
+ * had no stream before this; TaskEventsTable's is at its 2-consumer
+ * limit, see that construct's note). On each child task that reaches a
+ * terminal status, it:
+ *   1. resolves the task's orchestration via the ChildTaskIndex GSI
+ *      (skips non-orchestration tasks — they have no orchestration_id),
+ *   2. loads the orchestration snapshot,
+ *   3. computes the gating plan (pure: orchestration-reconcile.ts),
+ *   4. persists child-status updates and releases newly-unblocked
+ *      children via the shared release helper.
+ *
+ * Idempotent: stream redelivery re-runs the same plan; status updates
+ * are conditional and releaseChild is idempotency-keyed, so a replayed
+ * terminal event neither double-releases nor regresses state.
+ */
+
+import {
+  BatchGetCommand,
+  GetCommand,
+  QueryCommand,
+  UpdateCommand,
+} from '@aws-sdk/lib-dynamodb';
+import type { DynamoDBBatchResponse, DynamoDBRecord, DynamoDBStreamEvent } from 'aws-lambda';
+import { createTaskCore } from './shared/create-task-core';
+import { classifyError } from './shared/error-classifier';
+import { renderFailureReply, renderPanelFailureReason } from './shared/failure-reply';
+import { sumIterationCostForIssue } from './shared/iteration-cost';
+import { isNoChangeIteration, renderMaturingReply } from './shared/iteration-reply';
+import { claimTerminalReply, releaseReplyClaim } from './shared/iteration-reply-claim';
+import {
+  buildAdfDocument,
+  postIssueCommentAdf,
+  updateIssueCommentAdf,
+} from './shared/jira-feedback';
+import {
+  renderJiraFinalStatusComment,
+  renderJiraFinishedPointer,
+} from './shared/jira-status-comment';
+import { logger } from './shared/logger';
+import type { Channel, CommentRef, IssueRef } from './shared/orchestration-channel';
+import { channelForSource, type ChannelRegistryTables } from './shared/orchestration-channel-factory';
+import { computeLeaves, isIntegrationNode } from './shared/orchestration-integration-node';
+import { ORCH_LOG } from './shared/orchestration-log-events';
+import {
+  computeReconcilePlan,
+  computeRecoveryPlan,
+  type ReconcileChild,
+  type TerminalOutcome,
+} from './shared/orchestration-reconcile';
+import { applyTerminalCreateFailures, readConcurrencyBudget, releaseReadyChildren } from './shared/orchestration-release';
+import { planDirectRestack, type RestackStep } from './shared/orchestration-restack';
+import { cascadeNodeLabel, upsertEpicPanel } from './shared/orchestration-rollup';
+import {
+  claimRollup,
+  clearRollupClaim,
+  loadOrchestration,
+  setRetryCommentId,
+  setStatusCommentId,
+  type OrchestrationChildRow,
+} from './shared/orchestration-store';
+import { encodeMarkdownUrl } from './shared/screenshot-url';
+import { makeDocClient } from './shared/ua';
+import { OrchestrationTable } from '../constructs/orchestration-table';
+import { TaskStatus, TERMINAL_STATUSES, type TaskStatusType } from '../constructs/task-status';
+
+const ddb = makeDocClient();
+const ORCHESTRATION_TABLE = process.env.ORCHESTRATION_TABLE_NAME!;
+const TASK_TABLE = process.env.TASK_TABLE_NAME!;
+// Registry table for the parent rollup comment's per-workspace OAuth
+// token. Unset → rollup is skipped (gating still works).
+const WORKSPACE_REGISTRY_TABLE = process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME;
+/** Jira's tenant-credentials registry. Unset until the stack wires it, which is
+ *  why a Jira-sourced orchestration resolves to no adapter (and skips feedback)
+ *  rather than failing every call. */
+const JIRA_REGISTRY_TABLE = process.env.JIRA_WORKSPACE_REGISTRY_TABLE_NAME;
+
+/** Credentials registry per surface, for picking an adapter from a stored row.
+ *  A surface left unset here simply has no adapter available in this handler. */
+const CHANNEL_REGISTRY_TABLES: ChannelRegistryTables = {
+  linear: WORKSPACE_REGISTRY_TABLE,
+  jira: JIRA_REGISTRY_TABLE,
+};
+
+/**
+ * The surface adapter all issue feedback goes through, chosen from the
+ * orchestration's OWN recorded channel rather than assumed. This handler is
+ * event-driven: it acts on an orchestration it loaded, so the surface is a
+ * property of that row, not of the trigger that woke us. Returns undefined when
+ * the row's surface has no adapter or no configured registry — the caller then
+ * skips feedback instead of addressing the wrong surface.
+ */
+const channelForMeta = (meta: { release_context?: { channel_source?: string } }): Channel | undefined =>
+  channelForSource(meta.release_context?.channel_source, CHANNEL_REGISTRY_TABLES);
+
+/** Build the neutral issue reference the channel operates on. */
+const issueRef = (
+  issueId: string,
+  workspaceId: string,
+  releaseContext?: {
+    readonly jira_status_on_start?: string;
+    readonly jira_status_on_pr?: string;
+  },
+): IssueRef => ({
+  issueId,
+  credentialsRef: workspaceId,
+  ...((releaseContext?.jira_status_on_start || releaseContext?.jira_status_on_pr) && {
+    stateOverrides: {
+      ...(releaseContext.jira_status_on_start && {
+        started: releaseContext.jira_status_on_start,
+      }),
+      ...(releaseContext.jira_status_on_pr && {
+        inReview: releaseContext.jira_status_on_pr,
+      }),
+    },
+  }),
+});
+// createTaskCore rejects idempotency keys longer than this; synthesized keys
+// slice to fit the validated /^[A-Za-z0-9_-]{1,128}$/ pattern.
+const MAX_IDEMPOTENCY_KEY_LENGTH = 128;
+// Throttle releases to the user's free concurrency budget so a wide
+// fan-out doesn't over-release children that admission then hard-fails. Unset
+// table → no throttle (release-all, back-compat; admission still gates).
+const USER_CONCURRENCY_TABLE = process.env.USER_CONCURRENCY_TABLE_NAME;
+const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT_TASKS_PER_USER ?? '10');
+/**
+ * Terminal task statuses that the reconciler reacts to.
+ *
+ * DERIVED from the same constant the stream's ``FilterCriteria`` is built from,
+ * not restated. The two must agree: the filter decides which records reach this
+ * handler, and this set decides which of them it acts on. A second literal list
+ * would let them drift silently — a status added to one but not the other either
+ * never arrives or arrives and is dropped, and both look like nothing happened.
+ */
+const TERMINAL: ReadonlySet<TaskStatusType> = new Set<TaskStatusType>(TERMINAL_STATUSES);
+
+/** A terminal task event extracted from a TaskTable stream record. */
+interface TerminalTaskEvent {
+  readonly taskId: string;
+  readonly status: TaskStatusType;
+  readonly buildPassed?: boolean;
+  /** Raw agent error_message, if any — drives the failure reply's detail line. */
+  readonly errorMessage?: string;
+  readonly orchestrationId?: string;
+  /**
+   * Cascade marker: set when this terminal task is an
+   * ITERATION or RESTACK on an orchestration node (carries
+   * ``orchestration_sub_issue_id`` in channel_metadata but is NOT itself a
+   * child-row task — its task_id isn't a ``child_task_id``). On COMPLETED we
+   * re-stack that node's DIRECT dependents. The marker is set by the comment
+   * trigger (pr-iteration) and by restack tasks themselves (so a restack's
+   * completion cascades the next hop).
+   */
+  readonly cascadeSubIssueId?: string;
+  /**
+   * True when the cascade source was an ITERATION (a human @bgagent comment),
+   * vs a restack (a predecessor-change ripple). Drives the panel's "updating
+   * per <X>'s comment" vs "updating to include <X>'s change" phrasing.
+   */
+  readonly cascadeIsIteration?: boolean;
+  /**
+   * The Linear comment id that triggered this iteration (set only
+   * for iterations — a human @bgagent comment). When the iteration task lands,
+   * the reconciler posts a threaded ✅/❌ reply BENEATH this comment, closing
+   * the conversation the human opened. Absent on restack cascades (no human
+   * comment to reply to).
+   */
+  readonly triggerCommentId?: string;
+  /**
+   * The Linear ISSUE the trigger comment lives on. Usually the
+   * iterated sub-issue, but for a comment left on the PARENT epic (which the
+   * processor routes to a sub-issue) it's the PARENT issue id. The reply must
+   * use THIS as commentCreate's issueId — Linear rejects a reply whose parentId
+   * belongs to a different issue. Absent on older tasks → reply falls back to
+   * the sub-issue id (the prior behavior).
+   */
+  readonly triggerCommentIssueId?: string;
+  /**
+   * Whether this iteration advanced the PR branch (a real commit) vs.
+   * ran with no change (a question-only comment). ``undefined`` for older
+   * tasks / non-iterations → the success reply defaults to "✅ Updated".
+   */
+  readonly codeChanged?: boolean;
+  /** The agent's answer, surfaced on a no-change iteration reply. */
+  readonly answerText?: string;
+  /**
+   * The maturing "👀 On it" reply posted at trigger time. When
+   * present, the settle EDITS this reply (👀→✅/💬) instead of posting a fresh
+   * one. Absent on older tasks → falls back to a new threaded reply.
+   */
+  readonly iterationReplyId?: string;
+  /** This iteration's cost (USD) — folded into the settle reply. */
+  readonly costUsd?: number;
+  /** This iteration's wall-clock seconds — folded into the reply. */
+  readonly durationS?: number;
+  /** Agent turns consumed by this iteration. */
+  readonly turns?: number;
+  /** Configured turn cap for this iteration. */
+  readonly maxTurns?: number;
+}
+
+/**
+ * Extract a terminal-task event from a TaskTable stream record. Returns
+ * null for records we don't act on (inserts, non-terminal MODIFYs,
+ * non-orchestration tasks, malformed images).
+ */
+export function parseTerminalTaskRecord(record: DynamoDBRecord): TerminalTaskEvent | null {
+  if (record.eventName !== 'MODIFY' && record.eventName !== 'INSERT') return null;
+  const img = record.dynamodb?.NewImage;
+  if (!img) return null;
+
+  const taskId = img.task_id?.S;
+  const status = img.status?.S as TaskStatusType | undefined;
+  if (!taskId || !status) return null;
+  if (!TERMINAL.has(status)) return null;
+
+  // Only orchestration children carry orchestration_id. Non-orchestration
+  // tasks stream through here too (single consumer on the whole table) —
+  // skip them cheaply.
+  //
+  // createTaskCore persists channel metadata as a nested ``channel_metadata``
+  // MAP, NOT as a top-level attribute — so read orchestration_id from there.
+  // (A top-level ``orchestration_id`` exists on the TaskRecord type for
+  // future use, but createTaskCore doesn't populate it from channel context;
+  // releaseChild threads the id via channelMetadata.orchestration_id.)
+  const orchestrationId =
+    img.orchestration_id?.S
+    ?? img.channel_metadata?.M?.orchestration_id?.S;
+  if (!orchestrationId) return null;
+
+  const buildPassed = img.build_passed?.BOOL;
+  const errorMessage = img.error_message?.S;
+  // Did this iteration commit anything, and (if not) what did the agent say?
+  const codeChanged = img.code_changed?.BOOL;
+  const answerText = img.answer_text?.S;
+  // The maturing reply to edit + this run's cost/duration.
+  const iterationReplyId = img.channel_metadata?.M?.iteration_reply_comment_id?.S;
+  const costUsd = img.cost_usd?.N !== undefined ? Number(img.cost_usd.N)
+    : (img.cost_usd?.S !== undefined ? Number(img.cost_usd.S) : undefined);
+  const durationS = img.duration_s?.N !== undefined ? Number(img.duration_s.N)
+    : (img.duration_s?.S !== undefined ? Number(img.duration_s.S) : undefined);
+  const turns = img.turns_attempted?.N !== undefined ? Number(img.turns_attempted.N)
+    : (img.turns_attempted?.S !== undefined ? Number(img.turns_attempted.S) : undefined);
+  const maxTurns = img.max_turns?.N !== undefined ? Number(img.max_turns.N)
+    : (img.max_turns?.S !== undefined ? Number(img.max_turns.S) : undefined);
+
+  // Cascade marker: an iteration/restack task names the node it acted on
+  // via channel_metadata. A restack task also carries
+  // ``restack_predecessor_sub_issue_id`` — its presence (or the explicit
+  // ``orchestration_iteration`` flag the comment trigger sets) marks this as
+  // a cascade SOURCE rather than a normal child task. We resolve the acted-on
+  // node from ``orchestration_sub_issue_id`` and confirm "is this a child row?"
+  // in the handler (a child-row task drives normal gating; a non-child-row
+  // task with this marker drives the cascade).
+  const cm = img.channel_metadata?.M;
+  const isIteration = cm?.orchestration_iteration?.S === 'true';
+  const isCascadeSource =
+    cm?.restack_predecessor_sub_issue_id?.S !== undefined || isIteration;
+  const cascadeSubIssueId = isCascadeSource ? cm?.orchestration_sub_issue_id?.S : undefined;
+  // The human comment that triggered this iteration, if any.
+  const triggerCommentId = isIteration ? cm?.trigger_comment_id?.S : undefined;
+  // The issue that comment lives on (the parent epic for a parent-routed
+  // comment; the sub-issue for a direct comment).
+  const triggerCommentIssueId = isIteration ? cm?.trigger_comment_issue_id?.S : undefined;
+
+  return {
+    taskId,
+    status,
+    ...(buildPassed !== undefined && { buildPassed }),
+    ...(errorMessage !== undefined && { errorMessage }),
+    orchestrationId,
+    ...(cascadeSubIssueId !== undefined && { cascadeSubIssueId }),
+    ...(cascadeSubIssueId !== undefined && { cascadeIsIteration: isIteration }),
+    ...(triggerCommentId !== undefined && { triggerCommentId }),
+    ...(triggerCommentIssueId !== undefined && { triggerCommentIssueId }),
+    ...(codeChanged !== undefined && { codeChanged }),
+    ...(answerText !== undefined && { answerText }),
+    ...(iterationReplyId !== undefined && { iterationReplyId }),
+    ...(costUsd !== undefined && Number.isFinite(costUsd) && { costUsd }),
+    ...(durationS !== undefined && Number.isFinite(durationS) && { durationS }),
+    ...(turns !== undefined && Number.isFinite(turns) && { turns }),
+    ...(maxTurns !== undefined && Number.isFinite(maxTurns) && { maxTurns }),
+  };
+}
+
+/**
+ * Resolve the sub_issue_id for a terminal task within its orchestration.
+ * Prefers the ChildTaskIndex GSI (task_id → row); the orchestration_id on
+ * the task record is the authoritative grouping.
+ */
+async function resolveSubIssueId(taskId: string): Promise<string | null> {
+  const res = await ddb.send(new QueryCommand({
+    TableName: ORCHESTRATION_TABLE,
+    IndexName: OrchestrationTable.CHILD_TASK_INDEX,
+    KeyConditionExpression: 'child_task_id = :tid',
+    ExpressionAttributeValues: { ':tid': taskId },
+    Limit: 1,
+  }));
+  const item = res.Items?.[0] as OrchestrationChildRow | undefined;
+  return item?.sub_issue_id ?? null;
+}
+
+/**
+ * Batch-read each child's PR url from the TaskTable for the final rollup.
+ * pr_url lands on the TaskRecord in a separate write from the
+ * status transition, so it is not on the orchestration row — but by the
+ * time the orchestration is all-terminal the PRs have settled, so a read
+ * here is reliable. Best-effort: a failed/partial read just yields fewer
+ * links (never throws out of the reconcile). Returns ``sub_issue_id → pr_url``.
+ */
+async function resolveChildPrUrls(
+  children: readonly OrchestrationChildRow[],
+): Promise<Record<string, string>> {
+  const withTask = children.filter((c) => c.child_task_id);
+  if (withTask.length === 0) return {};
+  const taskToSub = new Map(withTask.map((c) => [c.child_task_id!, c.sub_issue_id]));
+  const keys = [...taskToSub.keys()].map((task_id) => ({ task_id }));
+  const out: Record<string, string> = {};
+  try {
+    // BatchGet caps at 100 keys/request; an orchestration is far smaller,
+    // but chunk defensively so a large epic never throws on the limit.
+    for (let i = 0; i < keys.length; i += 100) {
+      const chunk = keys.slice(i, i + 100);
+      const res = await ddb.send(new BatchGetCommand({
+        RequestItems: { [TASK_TABLE]: { Keys: chunk, ProjectionExpression: 'task_id, pr_url' } },
+      }));
+      for (const rec of res.Responses?.[TASK_TABLE] ?? []) {
+        const taskId = rec.task_id as string | undefined;
+        const prUrl = rec.pr_url as string | undefined;
+        const sub = taskId ? taskToSub.get(taskId) : undefined;
+        if (sub && prUrl) out[sub] = prUrl;
+      }
+    }
+  } catch (err) {
+    logger.warn('Rollup pr_url batch-read failed (non-fatal) — rollup posts without links', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+  return out;
+}
+
+/**
+ * Batch-read each FAILED child's failure detail from the
+ * TaskTable so the panel can render WHY it failed + WHERE to read it. Mirrors
+ * {@link resolveChildPrUrls}: ``error_message`` / ``build_passed`` land on the
+ * TaskRecord (not the orchestration row), and by the time the epic settles
+ * they've been written. Only failed children with a task id are read. Composes
+ * the one-line reason via {@link renderPanelFailureReason}, tagging the
+ * synthetic integration node so its copy names the combined merge build — the
+ * exact failure that was previously surfaced as a bare "❌ … failed".
+ * Best-effort: a read miss just yields no sub-line (never throws out of the
+ * reconcile). Returns ``sub_issue_id → reason``.
+ */
+async function resolveChildFailureReasons(
+  children: readonly OrchestrationChildRow[],
+): Promise<Record<string, string>> {
+  // A child that failed WITHOUT ever getting a task (deterministic create
+  // failure — guardrail/validation) carries its reason on the row's
+  // ``failure_reason`` instead of a task record. Seed the map with those first
+  // so the panel ❌ has a "why + how to fix" line even though there's no task.
+  const out: Record<string, string> = {};
+  for (const c of children) {
+    if (c.child_status === 'failed' && !c.child_task_id && c.failure_reason) {
+      out[c.sub_issue_id] = c.failure_reason;
+    }
+  }
+  const failed = children.filter((c) => c.child_status === 'failed' && c.child_task_id);
+  if (failed.length === 0) return out;
+  const taskToSub = new Map(failed.map((c) => [c.child_task_id!, c.sub_issue_id]));
+  const isIntegration = new Map(failed.map((c) => [c.sub_issue_id, isIntegrationNode(c.sub_issue_id)]));
+  const keys = [...taskToSub.keys()].map((task_id) => ({ task_id }));
+  try {
+    for (let i = 0; i < keys.length; i += 100) {
+      const chunk = keys.slice(i, i + 100);
+      const res = await ddb.send(new BatchGetCommand({
+        RequestItems: {
+          [TASK_TABLE]: { Keys: chunk, ProjectionExpression: 'task_id, error_message, build_passed' },
+        },
+      }));
+      for (const rec of res.Responses?.[TASK_TABLE] ?? []) {
+        const taskId = rec.task_id as string | undefined;
+        const sub = taskId ? taskToSub.get(taskId) : undefined;
+        if (!sub || !taskId) continue;
+        const reason = renderPanelFailureReason({
+          ...(typeof rec.build_passed === 'boolean' && { buildPassed: rec.build_passed as boolean }),
+          ...(typeof rec.error_message === 'string' && { errorMessage: rec.error_message as string }),
+          taskId,
+          isIntegration: isIntegration.get(sub) ?? false,
+        });
+        if (reason) out[sub] = reason;
+      }
+    }
+  } catch (err) {
+    logger.warn('Panel failure-reason batch-read failed (non-fatal) — panel posts without sub-lines', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+  return out;
+}
+
+/**
+ * The single leaf of a graph that has exactly one, or undefined when the graph
+ * has several leaves (an integration node covers that case) or none.
+ *
+ * Reuses {@link computeLeaves} rather than re-deriving "has no successor" here,
+ * so the panel's idea of the final node cannot drift from the seeder's.
+ */
+function soleLeafChild(
+  children: readonly OrchestrationChildRow[],
+): OrchestrationChildRow | undefined {
+  const leaves = computeLeaves(children.map((c) => ({
+    id: c.sub_issue_id,
+    depends_on: [...c.depends_on],
+    title: c.sub_issue_id,
+  })));
+  if (leaves.length !== 1) return undefined;
+  return children.find((c) => c.sub_issue_id === leaves[0]);
+}
+
+/**
+ * Read the integration node's deploy-preview screenshot URL from its
+ * TaskRecord (persisted by the screenshot pipeline) so the parent panel can
+ * embed the combined preview. Best-effort — null when the node has no task,
+ * no preview deployed yet, or the read fails. Only the integration node is
+ * read (one Get), since that's the only node whose preview is "combined".
+ */
+async function resolveCombinedScreenshotUrl(
+  taskId?: string,
+): Promise<{ url: string; previewUrl?: string } | null> {
+  if (!taskId) return null;
+  try {
+    const res = await ddb.send(new GetCommand({
+      TableName: TASK_TABLE,
+      Key: { task_id: taskId },
+      ProjectionExpression: 'screenshot_url, screenshot_preview_url',
+    }));
+    const url = res.Item?.screenshot_url;
+    if (typeof url !== 'string' || url.length === 0) return null;
+    const previewUrl = res.Item?.screenshot_preview_url;
+    // The live preview-deploy URL makes the panel's combined
+    // preview a clickable deep-link to the running combined site.
+    return {
+      url,
+      ...(typeof previewUrl === 'string' && previewUrl.length > 0 && { previewUrl }),
+    };
+  } catch (err) {
+    logger.warn('Combined screenshot read failed (non-fatal) — panel posts without it', {
+      task_id: taskId, error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
+/**
+ * Strongly-consistent re-read of the iteration task's screenshot +
+ * deploy URL, taken right before the settle renders. Mirrors the fanout
+ * (standalone) path's ``reloadScreenshotFields``: the screenshot webhook persists
+ * ``screenshot_url`` onto this task durably but AFTER the deploy, so a non-
+ * consistent read (or relying only on the comment-append convergence) can miss
+ * it and the terminal-settle re-render then clobbers the preview — a defect the
+ * standalone path already fixed this way. ConsistentRead beats the lag. Returns
+ * nulls on any failure (best-effort). Caller renders the thumbnail when present.
+ */
+async function reloadIterationScreenshot(taskId?: string): Promise<{ screenshotUrl: string | null; deployUrl: string | null }> {
+  if (!taskId) return { screenshotUrl: null, deployUrl: null };
+  try {
+    const res = await ddb.send(new GetCommand({
+      TableName: TASK_TABLE,
+      Key: { task_id: taskId },
+      ProjectionExpression: 'screenshot_url, screenshot_preview_url',
+      ConsistentRead: true,
+    }));
+    const s = res.Item?.screenshot_url;
+    const d = res.Item?.screenshot_preview_url;
+    return {
+      screenshotUrl: typeof s === 'string' && s.length > 0 ? s : null,
+      deployUrl: typeof d === 'string' && d.length > 0 ? d : null,
+    };
+  } catch (err) {
+    logger.warn('Iteration screenshot re-read failed (non-fatal)', {
+      task_id: taskId, error: err instanceof Error ? err.message : String(err),
+    });
+    return { screenshotUrl: null, deployUrl: null };
+  }
+}
+
+/** Apply one terminal child's reconcile plan. */
+async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
+  const orchestrationId = evt.orchestrationId!;
+
+  const subIssueId = await resolveSubIssueId(evt.taskId);
+  if (!subIssueId) {
+    logger.warn('Reconciler could not resolve sub_issue_id for terminal task', {
+      task_id: evt.taskId,
+      orchestration_id: orchestrationId,
+    });
+    return;
+  }
+
+  const snapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, orchestrationId);
+  if (!snapshot) {
+    logger.warn('Reconciler found no orchestration snapshot (TTL-reaped?)', {
+      orchestration_id: orchestrationId,
+      task_id: evt.taskId,
+    });
+    return;
+  }
+
+  const children: ReconcileChild[] = snapshot.children.map((c) => ({
+    sub_issue_id: c.sub_issue_id,
+    depends_on: c.depends_on,
+    child_status: c.child_status,
+  }));
+
+  const outcome: TerminalOutcome = {
+    sub_issue_id: subIssueId,
+    status: evt.status as TerminalOutcome['status'],
+    ...(evt.buildPassed !== undefined && { build_passed: evt.buildPassed }),
+  };
+
+  const plan = computeReconcilePlan(outcome, children);
+  const now = new Date().toISOString();
+
+  // 1. Persist status updates (terminal child + any skips). Each is
+  //    conditional on the row not already being in the target state so a
+  //    replayed event is a no-op.
+  for (const update of plan.statusUpdates) {
+    // ``toRelease`` rows are handled by releaseChild below (which flips
+    // them to released conditionally); skip them here to avoid a
+    // double-write race.
+    if (plan.toRelease.includes(update.sub_issue_id)) continue;
+    // A `skipped` transition must only apply from a non-live source
+    // (blocked/ready). Without this, a skip cascade racing a recovery re-release
+    // could stamp a `released`/`releasing`/running child terminal-`skipped`,
+    // letting the epic claim its once-only rollup while work is still in flight.
+    // Other resets (failed→ready/blocked) keep the plain not-already-there guard.
+    const skipGuard = update.child_status === 'skipped';
+    const values: Record<string, unknown> = { ':s': update.child_status, ':now': now };
+    let condition = 'child_status <> :s';
+    if (skipGuard) {
+      values[':blocked'] = 'blocked';
+      values[':ready'] = 'ready';
+      condition = 'child_status IN (:blocked, :ready)';
+    }
+    try {
+      await ddb.send(new UpdateCommand({
+        TableName: ORCHESTRATION_TABLE,
+        Key: { orchestration_id: orchestrationId, sub_issue_id: update.sub_issue_id },
+        UpdateExpression: 'SET child_status = :s, updated_at = :now',
+        ConditionExpression: condition,
+        ExpressionAttributeValues: values,
+      }));
+    } catch (err) {
+      if (isConditionalCheckFailed(err)) continue; // already in target / not a skippable source
+      throw err;
+    }
+  }
+
+  // 1b. Reconcile a FAILED child's OWN issue state on the surface. The agent
+  //     moves a writeable child to awaiting-review only on AGENT success; but the
+  //     platform build gate is independent — a child can finish COMPLETED with
+  //     build_passed=false (PR opened, build red), and a child that succeeded on
+  //     an EARLIER run (→ awaiting-review) then fails a RETRY leaves that state
+  //     behind (the agent's failure path leaves state as-is; transitions never
+  //     move backward). Either way the graph says `failed` while the issue still
+  //     reads awaiting-review with a PR link — a visible contradiction. The
+  //     reconciler holds the authoritative verdict, so when a terminal child did
+  //     NOT succeed we pull its issue back out of any bot-set running state.
+  //     `revertState` is tightly guarded per surface (only demotes an issue still
+  //     in a bot-set running state — never a human-advanced done/canceled or a
+  //     human-pulled-back one) and idempotent on replay. The ❌ reaction + the
+  //     failure reason on the panel convey "it failed"; a reply re-runs it (the
+  //     retry re-drives the state not-started → running). Skip the integration
+  //     node (synthetic id, no real issue). Best-effort; never throws.
+  const settleChannel = channelForMeta(snapshot.meta);
+  if (settleChannel && !plan.terminalSucceeded && !isIntegrationNode(subIssueId)) {
+    const channel = settleChannel;
+    const childRef = issueRef(subIssueId, snapshot.meta.credentials_ref);
+    try {
+      const reverted = (await channel.revertState?.(childRef)) ?? false;
+      // Also settle the child's ISSUE reaction to ❌. The agent reacts ✅ on its
+      // OWN verdict (agent-success + regression-only build gate — a build that was
+      // already red before the agent isn't counted as the agent's regression, so
+      // it posts ✅ and "Task completed"). The orchestration gate is stricter
+      // (build_passed===false ⇒ failed, absolute), so a child can legitimately end
+      // agent-✅ but graph-failed — leaving a ✅ reaction that contradicts the
+      // failed node (observed in practice: PR opened, agent ✅, build red).
+      // Replacing the reaction clears only the bot's own status markers and adds
+      // ❌ — a human's reaction is never touched, and it's idempotent on replay.
+      // This makes the reaction agree with the reverted state + the panel's ❌
+      // row. (The stale "✅ Task completed" comment is left as history — the
+      // surface won't let us edit another actor's comment; the reaction + state +
+      // panel are the authoritative signals, and a reply re-runs the child.)
+      const reactionSwapped = (await channel.replaceIssueReaction?.(childRef, 'failed')) ?? false;
+      if (reverted || reactionSwapped) {
+        logger.info('Reconciler settled a failed child to match the graph (state + reaction)', {
+          orchestration_id: orchestrationId,
+          sub_issue_id: subIssueId,
+          task_status: outcome.status,
+          build_passed: outcome.build_passed,
+          state_reverted: reverted,
+          reaction_swapped: reactionSwapped,
+        });
+      }
+    } catch (err) {
+      logger.warn('Failed to reconcile failed child Linear state/reaction (non-fatal)', {
+        orchestration_id: orchestrationId,
+        sub_issue_id: subIssueId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  // 2. Re-evaluate releasability against a FRESH read, not the initial
+  //    snapshot.
+  //
+  //    Concurrency (failure-matrix row 3): when two predecessors of the
+  //    same child D finish simultaneously, each reconciler invocation
+  //    loads its own snapshot, persists only ITS child as succeeded, and
+  //    — working from its stale snapshot — sees D's OTHER predecessor not
+  //    yet succeeded, so neither releases D and it strands ``blocked``.
+  //    The plan's ``toRelease`` (computed from the initial snapshot) is
+  //    therefore unreliable under concurrency. Reloading after the
+  //    status write means whichever invocation reads last sees BOTH
+  //    predecessors succeeded and releases D; the conditional
+  //    ready→released flip in releaseChild dedups if both happen to see it.
+  const fresh = await loadOrchestration(ddb, ORCHESTRATION_TABLE, orchestrationId);
+  // Reassignable so a terminal create-failure can be patched into the view
+  // before the settle below (see applyTerminalCreateFailures).
+  let freshChildren = fresh?.children ?? snapshot.children;
+  const succeeded = new Set(
+    freshChildren.filter((c) => c.child_status === 'succeeded').map((c) => c.sub_issue_id),
+  );
+  const releasableRows = freshChildren
+    .filter((c) =>
+      // newly-unblocked: all predecessors now succeeded
+      (c.child_status === 'blocked' && c.depends_on.every((d) => succeeded.has(d)))
+      // OR still `ready` and un-released: either throttle-deferred (a prior
+      // pass left it ready when the concurrency budget was full) OR reset-to-ready
+      // by an epic retry (which KEEPS its prior child_task_id so the
+      // idempotency salt spawns a fresh task). We deliberately do NOT gate on
+      // !child_task_id: that gate stranded retried children forever, and the
+      // flip-then-create claim (ready→releasing) is now the race guard —
+      // only one releaser wins, so re-picking a ready-with-id child is safe. Roots
+      // have no predecessors so depends_on.every(...) is vacuously true.
+      || (c.child_status === 'ready' && c.depends_on.every((d) => succeeded.has(d))))
+    .map((c) => ({ ...c, child_status: 'ready' as const }));
+
+  if (releasableRows.length > 0) {
+    const releaseCtx = (fresh ?? snapshot).meta.release_context;
+    // Throttle this pass to the user's free concurrency budget so a
+    // wide fan-out doesn't over-release children that admission then
+    // hard-fails (the cap is a throttle, not a guillotine). Leftover ready
+    // children are released by the next reconcile (a sibling completing
+    // re-fires this handler) or the stranded-orchestration sweep, as slots
+    // free. Unset table → release all (back-compat; admission still gates).
+    const budget = USER_CONCURRENCY_TABLE
+      ? await readConcurrencyBudget(ddb, USER_CONCURRENCY_TABLE, releaseCtx.platform_user_id, MAX_CONCURRENT)
+      : undefined;
+    const results = await releaseReadyChildren(
+      ddb,
+      ORCHESTRATION_TABLE,
+      releasableRows,
+      releaseCtx,
+      createTaskCore,
+      now,
+      // Pass the full child set so each releasable child's base
+      // branch can be derived from its predecessors' persisted branches.
+      freshChildren,
+      'main',
+      budget,
+    );
+    logger.info('Reconciler released children', {
+      orchestration_id: orchestrationId,
+      trigger_sub_issue_id: subIssueId,
+      released: results.filter((r) => r.kind === 'released').length,
+      terminally_failed: results.filter((r) => r.kind === 'create_failed_terminal').length,
+      requested: releasableRows.length,
+      ...(budget !== undefined && { concurrency_budget: budget }),
+    });
+    // A child that failed DETERMINISTICALLY (guardrail/validation) was just
+    // marked terminally 'failed' in the store, but our in-memory freshChildren
+    // still shows it releasing/ready — and no later stream event will re-drive
+    // this reconciler for a child that never became a task. Persist the
+    // transitive skips of its dependents + patch the local view so the settle
+    // below sees the full terminal picture and can reach all-terminal + post ❌.
+    freshChildren = await applyTerminalCreateFailures(
+      ddb, ORCHESTRATION_TABLE, orchestrationId, freshChildren, results, now,
+    );
+  }
+
+  // Refresh the panel + settle the parent state against the fresh view.
+  await refreshPanelAndSettle(orchestrationId, freshChildren, (fresh ?? snapshot).meta, now);
+}
+
+/**
+ * Maintain the SINGLE maturing epic panel — one comment, edited in
+ * place — and settle the parent state when the epic reaches all-terminal.
+ * Shared by the normal child-gating path (``reconcileTerminalChild``) AND the
+ * cascade path (``cascadeRestack``): a re-stack/iteration task completing must
+ * ALSO clear its node's ``🔄 updating`` row and re-run the completion check, or
+ * an epic whose only remaining activity is a cascade hangs forever at
+ * "🔄 N/M" with a stale updating row (observed in practice — a re-stack of a
+ * no-dependents node returned early and never refreshed).
+ *
+ * Best-effort; only when the orchestration's surface has a usable adapter. The
+ * panel BODY edit is idempotent (same body = no-op), so it always runs; the
+ * parent-STATE mirror is claimed once via ``claimRollup`` on the first
+ * all-terminal caller.
+ */
+export async function refreshPanelAndSettle(
+  orchestrationId: string,
+  children: readonly OrchestrationChildRow[],
+  meta: {
+    credentials_ref: string;
+    parent_issue_ref: string;
+    status_comment_id?: string;
+    retry_comment_id?: string;
+    release_context?: {
+      channel_source?: string;
+      trigger_label?: string;
+      jira_status_on_start?: string;
+      jira_status_on_pr?: string;
+    };
+  },
+  now: string,
+): Promise<void> {
+  const channel = channelForMeta(meta);
+  if (!channel) return;
+
+  // Completion check: every child terminal (succeeded/failed/skipped —
+  // released is NOT terminal).
+  const allTerminal = children.every((c) =>
+    c.child_status === 'succeeded' || c.child_status === 'failed' || c.child_status === 'skipped',
+  );
+
+  const prUrls = await resolveChildPrUrls(children);
+  // When any node failed, resolve its one-line reason + CloudWatch pointer
+  // so the panel row carries a diagnostic sub-line (the integration node's
+  // combined-build failure has no other surface). Only read on a failure —
+  // healthy epics skip the extra BatchGet.
+  const anyFailed = children.some((c) => c.child_status === 'failed');
+  const failureReasons = anyFailed ? await resolveChildFailureReasons(children) : {};
+  const integration = children.find((c) => isIntegrationNode(c.sub_issue_id));
+  const combinedPrUrl = integration ? prUrls[integration.sub_issue_id] : undefined;
+  // The node whose deploy preview represents the WHOLE epic.
+  //
+  // With several leaves that is the synthetic integration node, which exists to
+  // merge them. With ONE leaf there is no integration node — by then everything
+  // has already converged on that final node, so a synthetic one would re-run
+  // work it had just done and its "combined" preview would duplicate the leaf's
+  // own. The final node IS the combined result.
+  //
+  // Either way the panel should carry a preview: a reviewer reads the parent, and
+  // "no integration node" is not a reason to show them nothing when a finished
+  // node holds exactly the artifact they want.
+  const previewNode = integration ?? soleLeafChild(children);
+  // Only read on the all-terminal settle (the node has deployed by then); skip
+  // the extra Get on every in-flight panel edit.
+  const combinedScreenshot = (allTerminal && previewNode)
+    ? await resolveCombinedScreenshotUrl(previewNode.child_task_id)
+    : null;
+
+  if (allTerminal) {
+    logger.info('Orchestration complete', {
+      event: ORCH_LOG.orchestrationComplete,
+      orchestration_id: orchestrationId,
+      parent_linear_issue_id: meta.parent_issue_ref,
+      succeeded: children.filter((c) => c.child_status === 'succeeded').length,
+      failed: children.filter((c) => c.child_status === 'failed').length,
+      skipped: children.filter((c) => c.child_status === 'skipped').length,
+    });
+  }
+
+  // Idempotency for the PARENT-STATE mirror: the orchestration can reach "all
+  // terminal" on more than one stream event. Mirror only once, on the first
+  // all-terminal caller. The panel BODY edit is naturally idempotent.
+  const won = !allTerminal || await claimRollup(ddb, ORCHESTRATION_TABLE, orchestrationId, now);
+
+  const newId = await upsertEpicPanel({
+    channel,
+    parent: issueRef(meta.parent_issue_ref, meta.credentials_ref, meta.release_context),
+    ...(meta.status_comment_id !== undefined && { statusCommentId: meta.status_comment_id }),
+    children,
+    prUrls,
+    ...(Object.keys(failureReasons).length > 0 && { failureReasons }),
+    ...(combinedPrUrl !== undefined && { combinedPrUrl }),
+    ...(combinedScreenshot !== null && { combinedScreenshotUrl: combinedScreenshot.url }),
+    ...(combinedScreenshot?.previewUrl !== undefined && { combinedPreviewUrl: combinedScreenshot.previewUrl }),
+    inProgress: !allTerminal,
+    mirrorParentState: allTerminal ? won : false,
+    ...(meta.release_context?.trigger_label !== undefined
+      && { labelFilter: meta.release_context.trigger_label }),
+  });
+  // Persist a freshly-created panel comment id so later edits reuse it.
+  if (newId && !meta.status_comment_id) {
+    try {
+      await setStatusCommentId(ddb, ORCHESTRATION_TABLE, orchestrationId, newId);
+    } catch (err) {
+      logger.warn('Failed to persist panel comment id (non-fatal)', {
+        orchestration_id: orchestrationId, error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  // Settle the `@bgagent retry` comment that asked for this run, if one did.
+  // The retry path can only ack it (👀) — it finishes the moment the work is
+  // dispatched — so the comment the user is watching has no outcome unless this
+  // settle gives it one. Gated on ``won`` so it happens once per settle, the same
+  // way the parent-state mirror is.
+  if (allTerminal && won && meta.retry_comment_id) {
+    await settleRetryComment(orchestrationId, meta.retry_comment_id, children, channel, meta);
+  }
+}
+
+/**
+ * Move a retry comment's marker from the receipt 👀 to the run's outcome.
+ *
+ * Mirrors what an iteration's settle does for its trigger comment: the marker is
+ * the whole answer here, because the retry path posts no maturing reply. ✅ when
+ * everything ended up succeeding, ❌ when anything is still failed or skipped —
+ * matching the panel header the user reads directly above it.
+ *
+ * The record is cleared FIRST. If the marker swap were to succeed and the clear
+ * then fail, a later settle of the same epic would re-swap a marker on a comment
+ * that has already been answered; clearing first means a failure leaves the marker
+ * un-updated instead, which is the same state as before this ran and is visibly
+ * wrong rather than silently stale. Best-effort throughout: this is feedback.
+ */
+async function settleRetryComment(
+  orchestrationId: string,
+  retryCommentId: string,
+  children: readonly OrchestrationChildRow[],
+  channel: Channel,
+  meta: { credentials_ref: string; parent_issue_ref: string },
+): Promise<void> {
+  const anyBad = children.some((c) => c.child_status === 'failed' || c.child_status === 'skipped');
+  try {
+    await setRetryCommentId(ddb, ORCHESTRATION_TABLE, orchestrationId, undefined);
+    await channel.replaceCommentReaction?.(
+      { commentId: retryCommentId },
+      issueRef(meta.parent_issue_ref, meta.credentials_ref),
+      anyBad ? 'failed' : 'succeeded',
+    );
+    logger.info('Settled the retry comment to match the epic outcome', {
+      orchestration_id: orchestrationId,
+      comment_id: retryCommentId,
+      outcome: anyBad ? 'failed' : 'succeeded',
+    });
+  } catch (err) {
+    logger.warn('Could not settle the retry comment (non-fatal)', {
+      orchestration_id: orchestrationId,
+      comment_id: retryCommentId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/**
+ * Restack cascade. A terminal ITERATION or RESTACK task on node X
+ * just completed — re-stack X's DIRECT dependents so they pick up X's new
+ * branch. Each dependent's own restack completion re-fires this handler and
+ * cascades the next hop (see ``planDirectRestack``). Only on COMPLETED — a
+ * failed iteration leaves dependents on the prior (still-valid) base.
+ *
+ * Idempotent: the per-dependent task's idempotency key includes the SOURCE
+ * task id, so the same completion never spawns a dependent's restack twice;
+ * a different source (the next real change) gets a new key. Best-effort —
+ * a failure to spawn one dependent does not block the others.
+ */
+async function cascadeRestack(evt: TerminalTaskEvent): Promise<void> {
+  const orchestrationId = evt.orchestrationId!;
+  const changedSubIssueId = evt.cascadeSubIssueId!;
+  const succeeded = evt.status === TaskStatus.COMPLETED && evt.buildPassed !== false;
+  const now = new Date().toISOString();
+
+  // An ITERATION carries the human comment that triggered it. When
+  // it lands — success OR failure — reply ✅/❌ in a thread beneath that
+  // comment, closing the conversation the human opened. This runs regardless
+  // of whether there are dependents to re-stack (a leaf node has none) and
+  // before the success-gate below (a failed iteration still gets its ❌ reply).
+  if (evt.triggerCommentId) {
+    await replyToIterationComment(evt, changedSubIssueId, succeeded);
+  }
+
+  // Only a successful change should cascade onto dependents.
+  if (!succeeded) {
+    logger.info('Restack cascade: source task not successful — not cascading', {
+      orchestration_id: orchestrationId,
+      changed_sub_issue_id: changedSubIssueId,
+      status: evt.status,
+    });
+    return;
+  }
+
+  const snapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, orchestrationId);
+  if (!snapshot) {
+    logger.warn('Restack cascade: orchestration snapshot not found', { orchestration_id: orchestrationId });
+    return;
+  }
+
+  // RECOVERY cascade. If this successful iteration was a fix on a
+  // node that is currently ``failed`` (a human commented a fix on a ❌ sub-issue),
+  // un-fail it and re-release the dependents that were transitively ``skipped``
+  // when it first failed — so the WHOLE epic can recover, not just this one PR.
+  // No-ops cleanly when the node wasn't failed (the normal forward cascade below
+  // handles a healthy iteration's dependents).
+  await maybeRecoverFailedNode(orchestrationId, snapshot, changedSubIssueId, now);
+
+  const steps = planDirectRestack(snapshot.children, changedSubIssueId);
+  if (steps.length === 0) {
+    logger.info('Restack cascade: no started direct dependents to re-stack', {
+      orchestration_id: orchestrationId,
+      changed_sub_issue_id: changedSubIssueId,
+    });
+    // The cascade source (this re-stack/iteration) itself just completed and
+    // carried a '🔄 updating' row on the panel. With no dependents to ripple
+    // to, NOTHING else will fire for this node — so we MUST refresh here to
+    // clear its updating row and re-run the completion check. Without this, an
+    // epic whose only remaining activity is a leaf-node re-stack hangs forever
+    // at "🔄 N/M" with a stale updating row (observed in practice).
+    // Re-load so the panel reflects this node's freshly-persisted terminal
+    // status, then settle.
+    const fresh = await loadOrchestration(ddb, ORCHESTRATION_TABLE, orchestrationId);
+    await refreshPanelAndSettle(orchestrationId, (fresh ?? snapshot).children, (fresh ?? snapshot).meta, now);
+    return;
+  }
+
+  logger.info('Restack cascade: re-stacking direct dependents', {
+    orchestration_id: orchestrationId,
+    changed_sub_issue_id: changedSubIssueId,
+    source_task_id: evt.taskId,
+    dependent_count: steps.length,
+  });
+
+  // Human-readable label for the changed node (the predecessor that was
+  // revised), used in the surfacing comments. Prefer its Linear identifier.
+  const meta = snapshot.meta;
+  const changedRow = snapshot.children.find((c) => c.sub_issue_id === changedSubIssueId);
+  // Friendly short name — for the integration node this is "the integration",
+  // NOT its raw synthetic title (which read clumsily in the possessive cascade
+  // reason "…'s change" — observed in practice).
+  const changedLabel = cascadeNodeLabel(changedSubIssueId, changedRow?.display_id, changedRow?.title);
+
+  const cascadeChannel = channelForMeta(meta);
+
+  const updatingIds: string[] = [];
+  for (const step of steps) {
+    const created = await spawnRestackTask(step, meta.release_context.platform_user_id, evt.taskId, changedSubIssueId);
+    // Surface ONLY on a genuinely NEW restack task (201). A 200 means an
+    // idempotent replay (the cascade source's stream record is redelivered
+    // multiple times — observed 3× live), so don't re-mark. 'failed' = skip.
+    if (created !== 'created') continue;
+    updatingIds.push(step.child.sub_issue_id);
+  }
+
+  // Instead of standalone '🔄 Re-stacked' / 'revised' comments,
+  // refresh the SINGLE epic panel so the impacted rows show '🔄 updating per
+  // <reason>' and the header reverts to in-progress. The dependent's own
+  // sub-issue gets the react/reply ack, not a status comment here. The
+  // 'updating' rows settle back to ✅ when their restack tasks complete — those
+  // completions route to cascadeRestack (NOT reconcileTerminalChild) and clear
+  // the row via refreshPanelAndSettle (the no-dependents path).
+  if (cascadeChannel && updatingIds.length > 0) {
+    // A cascade re-opened an epic that may have ALREADY completed (a comment on
+    // a finished epic). Release the once-only rollup claim so the parent state
+    // can re-settle (👀→✅) when the re-stacks finish — else the claim stays
+    // taken forever and the parent reaction never re-mirrors.
+    await clearRollupClaim(ddb, ORCHESTRATION_TABLE, orchestrationId, now);
+    const reason = evt.cascadeIsIteration
+      ? `per ${changedLabel}'s comment`
+      : `to include ${changedLabel}'s change`;
+    const updating: Record<string, string> = {};
+    for (const id of updatingIds) updating[id] = reason;
+    // Render from a FRESH read, not the pre-spawn snapshot: spawnRestackTask just
+    // flipped the restacked rows to `released` and stamped branches, so the
+    // snapshot is stale. The forward-gating path already re-loads after writes;
+    // mirror that here so the panel reflects current child state (else a stale
+    // row status shows for one event window). Fall back to the snapshot on a
+    // read miss. (The `updating` overlay is driven by updatingIds, not statuses.)
+    const cascadeFresh = await loadOrchestration(ddb, ORCHESTRATION_TABLE, orchestrationId);
+    const panelChildren = cascadeFresh?.children ?? snapshot.children;
+    const prUrls = await resolveChildPrUrls(panelChildren);
+    const integration = panelChildren.find((c) => isIntegrationNode(c.sub_issue_id));
+    await upsertEpicPanel({
+      channel: cascadeChannel,
+      parent: issueRef(meta.parent_issue_ref, meta.credentials_ref, meta.release_context),
+      ...(meta.status_comment_id !== undefined && { statusCommentId: meta.status_comment_id }),
+      children: panelChildren,
+      prUrls,
+      updating,
+      ...(integration && prUrls[integration.sub_issue_id] !== undefined
+        && { combinedPrUrl: prUrls[integration.sub_issue_id] }),
+      inProgress: true, // a cascade re-opened the epic
+    });
+  }
+}
+
+/**
+ * RECOVERY cascade. A successful iteration on a node that is
+ * currently ``failed`` (a human commented a fix on a ❌ sub-issue). Un-fail the
+ * node and re-release the dependents that were transitively ``skipped`` when it
+ * first failed, so the whole epic can recover rather than stranding at "finished
+ * with failures". No-ops when the node isn't failed.
+ *
+ * Mirrors {@link reconcileTerminalChild}'s persist-then-release shape:
+ *  1. {@link computeRecoveryPlan} decides the un-fail + un-skip writes.
+ *  2. Persist each conditionally (skip the ones release will flip).
+ *  3. Re-release the freed children via {@link releaseReadyChildren}, honoring
+ *     the user's concurrency budget exactly like the forward path.
+ * Best-effort + idempotent: a redelivered iteration event finds the node already
+ * ``succeeded`` (recovery plan empty) and no-ops.
+ */
+async function maybeRecoverFailedNode(
+  orchestrationId: string,
+  snapshot: NonNullable<Awaited<ReturnType<typeof loadOrchestration>>>,
+  recoveredSubIssueId: string,
+  now: string,
+): Promise<void> {
+  const children: ReconcileChild[] = snapshot.children.map((c) => ({
+    sub_issue_id: c.sub_issue_id,
+    depends_on: c.depends_on,
+    child_status: c.child_status,
+  }));
+  const plan = computeRecoveryPlan(recoveredSubIssueId, children);
+  if (plan.statusUpdates.length === 0) return; // node wasn't failed — nothing to recover
+
+  logger.info('Recovery cascade: un-failing node + resetting skipped subtree', {
+    orchestration_id: orchestrationId,
+    recovered_sub_issue_id: recoveredSubIssueId,
+    un_skipped: plan.statusUpdates.length - 1,
+    re_releasing: plan.toRelease.length,
+  });
+
+  // 1. Persist ALL the un-fail (→succeeded) + un-skip (→blocked) writes,
+  //    INCLUDING the toRelease rows. Unlike the forward path (reconcileTerminalChild),
+  //    we must NOT exclude the toRelease rows here: there they're already
+  //    'blocked' in the store so releaseReadyChildren can flip them; here they're
+  //    still 'skipped', and releaseReadyChildren's conditional write only accepts
+  //    child_status IN (blocked, ready) — so without first persisting
+  //    skipped→'blocked' the release spawns the task but the row stays 'skipped'
+  //    (observed in practice: a dependent ran + opened a PR yet the panel kept
+  //    showing ⏭️ skipped and the epic never advanced). Persist blocked first,
+  //    then release flips blocked→released.
+  for (const update of plan.statusUpdates) {
+    try {
+      await ddb.send(new UpdateCommand({
+        TableName: ORCHESTRATION_TABLE,
+        Key: { orchestration_id: orchestrationId, sub_issue_id: update.sub_issue_id },
+        UpdateExpression: 'SET child_status = :s, updated_at = :now',
+        ConditionExpression: 'child_status <> :s',
+        ExpressionAttributeValues: { ':s': update.child_status, ':now': now },
+      }));
+    } catch (err) {
+      if (isConditionalCheckFailed(err)) continue;
+      throw err;
+    }
+  }
+
+  // 2. The epic had settled to "⚠️ finished with failures" — its rollup claim is
+  //    held and the parent carries the ❌ reaction. Recovery re-opens it: release
+  //    the once-only rollup claim so the parent state can re-settle (❌→🔄→✅) as
+  //    the recovered work lands. Without this the panel + parent reaction stay
+  //    stuck at the failed snapshot even though work is running again (observed
+  //    in practice).
+  await clearRollupClaim(ddb, ORCHESTRATION_TABLE, orchestrationId, now);
+
+  // 3. Re-release the now-'blocked' freed children against a FRESH read (the
+  //    un-skip writes above must be visible), gated on the concurrency budget
+  //    like the forward path. releaseReadyChildren accepts child_status IN
+  //    (blocked, ready); present them as ready.
+  const fresh = await loadOrchestration(ddb, ORCHESTRATION_TABLE, orchestrationId);
+  const freshChildren = fresh?.children ?? snapshot.children;
+  if (plan.toRelease.length > 0) {
+    const releasableRows = freshChildren
+      .filter((c) => plan.toRelease.includes(c.sub_issue_id))
+      .map((c) => ({ ...c, child_status: 'ready' as const }));
+    if (releasableRows.length > 0) {
+      const releaseCtx = (fresh ?? snapshot).meta.release_context;
+      const budget = USER_CONCURRENCY_TABLE
+        ? await readConcurrencyBudget(ddb, USER_CONCURRENCY_TABLE, releaseCtx.platform_user_id, MAX_CONCURRENT)
+        : undefined;
+      const results = await releaseReadyChildren(
+        ddb,
+        ORCHESTRATION_TABLE,
+        releasableRows,
+        releaseCtx,
+        createTaskCore,
+        now,
+        freshChildren,
+        'main',
+        budget,
+      );
+      logger.info('Recovery cascade: re-released children', {
+        orchestration_id: orchestrationId,
+        recovered_sub_issue_id: recoveredSubIssueId,
+        released: results.filter((r) => r.kind === 'released').length,
+        requested: releasableRows.length,
+      });
+    }
+  }
+
+  // 4. Refresh the panel against the fresh post-recovery view so the un-skipped
+  //    rows stop rendering ⏭️ and the header reverts from "finished with
+  //    failures" to in-progress (the parent reaction re-settles on completion).
+  const refreshed = await loadOrchestration(ddb, ORCHESTRATION_TABLE, orchestrationId);
+  await refreshPanelAndSettle(
+    orchestrationId,
+    (refreshed ?? fresh ?? snapshot).children,
+    (refreshed ?? fresh ?? snapshot).meta,
+    now,
+  );
+}
+
+/**
+ * Post the threaded ✅/❌ reply beneath the human ``@bgagent``
+ * comment that triggered this iteration. The 👀 reaction already landed (the
+ * processor's instant ack); this reply closes the loop when the work lands.
+ *
+ * Idempotent: the cascade source's stream record is redelivered multiple times
+ * (observed 3× live), so we claim the right to reply exactly once by
+ * conditionally stamping ``ack_replied_at`` on the iteration task's own
+ * TaskTable record (its ``task_id`` is the per-iteration unit). The first
+ * caller wins and posts; redeliveries lose the conditional write and skip.
+ * Best-effort throughout — a Linear or DDB hiccup never blocks the cascade.
+ */
+async function replyToIterationComment(
+  evt: TerminalTaskEvent,
+  changedSubIssueId: string,
+  succeeded: boolean,
+): Promise<void> {
+  const commentId = evt.triggerCommentId!;
+
+  // Resolve the workspace for the reply. The iteration task carries it in
+  // channel_metadata; rather than re-read the record, load the orchestration
+  // meta (already cached-cheap) for the workspace id — and the surface to
+  // answer on, which is the orchestration's own, not an assumed one.
+  const snapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, evt.orchestrationId!);
+  if (!snapshot) return;
+  const channel = channelForMeta(snapshot.meta);
+  if (!channel) return;
+  const workspaceId = snapshot.meta.credentials_ref;
+
+  // Claim the one reply for this iteration task.
+  const claim = await claimTerminalReply(ddb, TASK_TABLE, evt.taskId, new Date().toISOString());
+  if (!claim.won) return; // lost the claim (replay) or errored → don't double-reply
+
+  // Mature the settle reply (👀→✅/💬) with cost + running total,
+  // editing the trigger-time reply when its id was captured. A failure keeps the
+  // standard failure reply (which a human can reply to, to retry).
+  const prNumber = await resolvePrNumber(evt.taskId);
+  const prUrl = await resolvePrUrl(evt.taskId);
+  const { total: runningTotalUsd, partial: runningTotalPartial } = await sumIterationCostForIssue({
+    ddb,
+    taskTableName: TASK_TABLE,
+    linearIssueId: changedSubIssueId,
+    thisTaskId: evt.taskId,
+    ...(evt.costUsd !== undefined && { thisCost: evt.costUsd }),
+    logLabel: 'reconciler',
+  });
+  // Strongly-consistent re-read of this iteration's screenshot so
+  // the settle renders the preview thumbnail itself (race-free against the
+  // screenshot webhook's append), matching the fanout/standalone path. Only an
+  // 'updated' (real edit) state folds the thumbnail in — a question didn't change UI.
+  const isUpdated = !isNoChangeIteration(evt.codeChanged);
+  const shot = isUpdated ? await reloadIterationScreenshot(evt.taskId) : { screenshotUrl: null, deployUrl: null };
+  const linearBody = succeeded
+    ? renderMaturingReply({
+      state: isNoChangeIteration(evt.codeChanged) ? 'answered' : 'updated',
+      prNumber,
+      ...(prUrl !== null && { prUrl }),
+      ...(evt.answerText !== undefined && { answerText: evt.answerText }),
+      ...(evt.costUsd !== undefined && { costUsd: evt.costUsd }),
+      ...(evt.durationS !== undefined && { durationS: evt.durationS }),
+      ...(runningTotalUsd !== null && { runningTotalUsd, runningTotalPartial }),
+      ...(shot.screenshotUrl ? { screenshotUrl: shot.screenshotUrl } : {}),
+      ...(shot.screenshotUrl && shot.deployUrl ? { deployUrl: encodeMarkdownUrl(shot.deployUrl) } : {}),
+    })
+    : renderFailureReply({
+      status: evt.status,
+      buildPassed: evt.buildPassed,
+      ...(evt.errorMessage !== undefined && { errorMessage: evt.errorMessage }),
+      taskId: evt.taskId,
+    });
+  // The reply must be addressed to the issue the trigger comment lives on — a
+  // surface can reject a threaded reply whose parent comment belongs to a
+  // different issue. For a comment left on the PARENT epic that's the parent
+  // issue, NOT changedSubIssueId. Fall back to the sub-issue id for tasks
+  // created before the trigger issue was persisted.
+  const replyIssueId = evt.triggerCommentIssueId ?? changedSubIssueId;
+  // EDIT the maturing reply posted at trigger time; fall back to a fresh
+  // threaded reply for older tasks that captured no reply id.
+  // preservePreview: converge with the screenshot webhook's async `[preview]`
+  // append so this terminal re-render doesn't clobber it.
+  const target = issueRef(replyIssueId, workspaceId);
+  const existing = evt.iterationReplyId
+    ? { commentId: evt.iterationReplyId }
+    : undefined;
+  let reply: CommentRef | null | undefined;
+  let jiraFinalBody: Record<string, unknown> | undefined;
+  if (channel.kind === 'jira') {
+    const pointerKind = !succeeded
+      ? 'details'
+      : (isNoChangeIteration(evt.codeChanged) ? 'answer' : 'result');
+    const jiraCtx = {
+      cloudId: workspaceId,
+      registryTableName: JIRA_REGISTRY_TABLE!,
+    };
+    jiraFinalBody = buildAdfDocument(renderJiraFinalStatusComment({
+      eventType: succeeded
+        ? 'task_completed'
+        : (evt.status === TaskStatus.COMPLETED
+          ? 'task_failed'
+          : `task_${evt.status.toLowerCase()}`),
+      prUrl,
+      costUsd: evt.costUsd ?? null,
+      turns: evt.turns ?? null,
+      maxTurns: evt.maxTurns ?? null,
+      durationS: evt.durationS ?? null,
+      taskId: evt.taskId,
+      errorTitle: classifyError(evt.errorMessage)?.title ?? null,
+    }));
+    if (existing) {
+      const pointer = await updateIssueCommentAdf(
+        jiraCtx,
+        target.issueId,
+        existing.commentId,
+        buildAdfDocument(renderJiraFinishedPointer(pointerKind)),
+      );
+      if (!pointer.ok) {
+        reply = null;
+      }
+    }
+    if (reply !== null) {
+      const finalResult = await postIssueCommentAdf(
+        jiraCtx,
+        target.issueId,
+        jiraFinalBody,
+      );
+      reply = finalResult.ok ? { commentId: finalResult.commentId } : null;
+      if (!finalResult.ok && !finalResult.retryable && existing) {
+        const fallback = await updateIssueCommentAdf(
+          jiraCtx,
+          target.issueId,
+          existing.commentId,
+          jiraFinalBody,
+        );
+        if (fallback.ok) {
+          logger.warn('Jira iteration result post failed terminally — folded outcome into status comment', {
+            task_id: evt.taskId,
+            jira_issue_key: target.issueId,
+            comment_id: existing.commentId,
+          });
+          reply = existing;
+        }
+      }
+    }
+  } else {
+    reply = await channel.upsertThreadedReply?.(
+      target,
+      { commentId },
+      linearBody,
+      existing,
+      // repairIfOverwritten: a progress render delivered at the same moment can land
+      // on top of this outcome, and the surface has no conditional update to prevent
+      // it — so re-assert the outcome if that happened.
+      { preservePreview: true, repairIfOverwritten: true },
+    );
+  }
+  // A surface that cannot mature a reply at all (the capability is optional)
+  // legitimately returns undefined; only an attempted-and-failed reply — null —
+  // means the outcome went unsaid.
+  if (reply === null) {
+    // Holding a claim over a reply that never landed makes the failure permanent:
+    // no redelivery may retry it, and the progress + heartbeat writers read the
+    // claim as "an outcome has landed" and stand down too, so the reply stays on
+    // its last progress text. So hand the claim back — but only while attempts
+    // remain.
+    const release = await releaseReplyClaim(ddb, TASK_TABLE, evt.taskId, claim.stamp);
+    if (release !== 'exhausted') {
+      // A retry is still coming (or another delivery owns the reply). Settle
+      // nothing yet: a ✅ reaction beside a reply still saying "On it" is the
+      // contradiction this design exists to remove.
+      logger.warn('Iteration ack: reply failed — deferring the settle to another attempt', {
+        task_id: evt.taskId,
+        linear_issue_id: replyIssueId,
+        release,
+      });
+      return;
+    }
+    if (channel.kind === 'jira' && existing && jiraFinalBody) {
+      const fallback = await updateIssueCommentAdf(
+        {
+          cloudId: workspaceId,
+          registryTableName: JIRA_REGISTRY_TABLE!,
+        },
+        target.issueId,
+        existing.commentId,
+        jiraFinalBody,
+      );
+      if (fallback.ok) {
+        logger.warn('Jira iteration retries exhausted — folded outcome into status comment', {
+          task_id: evt.taskId,
+          jira_issue_key: target.issueId,
+          comment_id: existing.commentId,
+        });
+        reply = existing;
+      }
+    }
+    // No attempt is coming. Fall through WITHOUT a reply so the reaction on the
+    // trigger comment still moves off 👀: a reply that will never arrive is
+    // strictly worse than an outcome shown only as a marker, because 👀 forever
+    // reads as "still working" — the black box this whole design removes.
+    logger.error('Iteration ack: giving up on the reply — settling via the reaction alone', {
+      task_id: evt.taskId,
+      linear_issue_id: replyIssueId,
+    });
+  }
+
+  // Settle the comment + sub-issue so all three views agree (panel row,
+  // sub-issue state, comment reaction) — the platform owns this, not the agent
+  // (whose prompt-driven state-setting flapped between running and in-review).
+  //   - replace the TRIGGER comment's 👀 with ✅ (success) / ❌ (failure), so the
+  //     comment itself reads done at a glance, not just the threaded reply.
+  //   - on success, advance the SUB-ISSUE to awaiting-review (its PR is updated
+  //     & open, awaiting human merge — same convention the epic uses). On
+  //     failure, leave the state (the ❌ + reply convey it). Never demote.
+  // Best-effort + idempotent (the ack_replied_at claim above already gates this
+  // to once per iteration; the reaction replace + transition re-converge anyway).
+  // A no-change iteration (a question) is neither a success-edit nor a failure —
+  // it's an answer. Don't stamp ✅ (implies "PR updated, merge-worthy") and don't
+  // advance the sub-issue (nothing changed). Use 💬 and leave the state
+  // untouched. A real edit keeps the ✅ + awaiting-review convention.
+  const noChange = succeeded && isNoChangeIteration(evt.codeChanged);
+  await channel.replaceCommentReaction?.(
+    { commentId },
+    issueRef(replyIssueId, workspaceId),
+    noChange ? 'needs_input' : (succeeded ? 'succeeded' : 'failed'),
+  );
+  if (succeeded && !noChange) {
+    await channel.transitionState?.(issueRef(changedSubIssueId, workspaceId), 'in_review');
+  }
+}
+
+/**
+ * Spawn one coding/restack-v1 task for a direct dependent. Best-effort.
+ * Returns ``'created'`` for a genuinely new task (201), ``'exists'`` for an
+ * idempotent replay (200 — the source event was redelivered), or ``'failed'``.
+ * The caller surfaces the re-stack to the user ONLY on ``'created'`` so
+ * redelivered stream records don't post duplicate comments.
+ */
+async function spawnRestackTask(
+  step: RestackStep,
+  platformUserId: string,
+  sourceTaskId: string,
+  changedSubIssueId: string,
+): Promise<'created' | 'exists' | 'failed'> {
+  const child = step.child;
+  const prNumber = await resolvePrNumber(child.child_task_id);
+  if (prNumber === null) {
+    logger.warn('Restack cascade: dependent has no resolvable PR number — skipping', {
+      orchestration_id: child.orchestration_id,
+      sub_issue_id: child.sub_issue_id,
+      child_task_id: child.child_task_id,
+    });
+    return 'failed';
+  }
+
+  // Idempotency keyed on the SOURCE task id: this exact completion re-stacks
+  // a given dependent at most once. Within [A-Za-z0-9_-], ≤128 chars.
+  const idempotencyKey = `restack_${child.sub_issue_id}_${sourceTaskId}`.replace(/[^A-Za-z0-9_-]/g, '').slice(0, MAX_IDEMPOTENCY_KEY_LENGTH);
+
+  try {
+    const result = await createTaskCore(
+      {
+        repo: child.repo,
+        workflow_ref: 'coding/restack-v1',
+        pr_number: prNumber,
+      },
+      {
+        userId: platformUserId,
+        channelSource: 'webhook',
+        channelMetadata: {
+          orchestration_id: child.orchestration_id,
+          // This dependent is the next cascade SOURCE: when its restack
+          // completes, parseTerminalTaskRecord sees restack_predecessor_*
+          // and cascades to ITS dependents.
+          orchestration_sub_issue_id: child.sub_issue_id,
+          restack_predecessor_sub_issue_id: changedSubIssueId,
+          // repo.py merges these updated predecessor branches into the
+          // dependent's existing branch before the agent runs.
+          orchestration_merge_branches: JSON.stringify(step.mergeBranches),
+        },
+        idempotencyKey,
+      },
+      idempotencyKey,
+    );
+    logger.info('Restack cascade: created restack task for dependent', {
+      orchestration_id: child.orchestration_id,
+      sub_issue_id: child.sub_issue_id,
+      pr_number: prNumber,
+      status_code: result.statusCode,
+    });
+    // 201 = newly created, 200 = idempotent replay (task already existed from a
+    // prior delivery of this same source event). Only 201 should surface a
+    // user-facing comment; 200 means we already did. Other codes = not created.
+    if (result.statusCode === 201) return 'created';
+    if (result.statusCode === 200) return 'exists';
+    return 'failed';
+  } catch (err) {
+    logger.error('Restack cascade: createTaskCore threw for dependent', {
+      orchestration_id: child.orchestration_id,
+      sub_issue_id: child.sub_issue_id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return 'failed';
+  }
+}
+
+/**
+ * Read a dependent's PR number from its TaskRecord. Prefers numeric
+ * ``pr_number``; orchestration child tasks commonly persist only ``pr_url``
+ * (``.../pull/N``) with ``pr_number`` null — fall back to parsing it.
+ */
+/** The dependent's PR URL (for a clickable reply link). Null when absent. */
+async function resolvePrUrl(taskId?: string): Promise<string | null> {
+  if (!taskId) return null;
+  try {
+    const res = await ddb.send(new GetCommand({
+      TableName: TASK_TABLE, Key: { task_id: taskId }, ProjectionExpression: 'pr_url',
+    }));
+    return typeof res.Item?.pr_url === 'string' ? res.Item.pr_url : null;
+  } catch {
+    return null;
+  }
+}
+
+async function resolvePrNumber(taskId?: string): Promise<number | null> {
+  if (!taskId) return null;
+  try {
+    const res = await ddb.send(new GetCommand({ TableName: TASK_TABLE, Key: { task_id: taskId } }));
+    const pr = res.Item?.pr_number;
+    if (typeof pr === 'number') return pr;
+    const url = res.Item?.pr_url;
+    if (typeof url === 'string') {
+      const m = url.match(/\/pull\/(\d+)\b/);
+      if (m) return Number(m[1]);
+    }
+    return null;
+  } catch (err) {
+    logger.warn('Restack cascade: failed to read dependent TaskRecord for PR number', {
+      task_id: taskId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
+/**
+ * Lambda entry point — TaskTable stream handler.
+ *
+ * Processes records sequentially; a failure on one record throws so the
+ * stream retries the batch (idempotent replay is safe). Non-terminal /
+ * non-orchestration records are skipped cheaply.
+ */
+export async function handler(event: DynamoDBStreamEvent): Promise<DynamoDBBatchResponse> {
+  let processed = 0;
+  // Per-record isolation. A thrown record is reported as a
+  // batch item failure (by its stream sequence number) so ONLY it retries,
+  // instead of failing the whole batch and re-driving its healthy siblings.
+  const batchItemFailures: { itemIdentifier: string }[] = [];
+  for (const record of event.Records) {
+    const seq = record.dynamodb?.SequenceNumber;
+    try {
+      const evt = parseTerminalTaskRecord(record);
+      if (!evt) continue;
+      // Restack cascade: an iteration/restack task on a node X (NOT a child-row task)
+      // re-stacks X's direct dependents. Routed here, not through child gating.
+      if (evt.cascadeSubIssueId) {
+        await cascadeRestack(evt);
+      } else {
+        await reconcileTerminalChild(evt);
+      }
+      processed += 1;
+    } catch (err) {
+      logger.error('Orchestration reconciler record failed — reporting for isolated retry', {
+        sequence_number: seq,
+        event_name: record.eventName,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      // Without a sequence number we can't report the item individually; rethrow
+      // so the batch fails rather than silently dropping a real error.
+      if (!seq) throw err;
+      batchItemFailures.push({ itemIdentifier: seq });
+    }
+  }
+  logger.info('Orchestration reconciler batch processed', {
+    records: event.Records.length,
+    reconciled: processed,
+    failed: batchItemFailures.length,
+  });
+  return { batchItemFailures };
+}
+
+function isConditionalCheckFailed(err: unknown): boolean {
+  return (
+    typeof err === 'object'
+    && err !== null
+    && 'name' in err
+    && (err as { name?: string }).name === 'ConditionalCheckFailedException'
+  );
+}

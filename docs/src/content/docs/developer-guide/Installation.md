@@ -133,12 +133,12 @@ The `--local-events` flag connects the agent container to DynamoDB Local on the 
 
 | Variable | Default | Description |
 |---|---|---|
-| `ANTHROPIC_MODEL` | `us.anthropic.claude-sonnet-4-6` | Bedrock model ID |
+| `ANTHROPIC_MODEL` | `us.anthropic.claude-opus-4-8` | Bedrock inference-profile ID for the main coding model |
 | `MAX_TURNS` | `100` | Max agent turns before stopping |
 | `MAX_BUDGET_USD` | | Cost ceiling for local batch runs only (production uses the API field) |
 | `DRY_RUN` | | Set to `1` to validate and print prompt without running the agent |
 
-For the full list, see `agent/README.md`.
+For the full list, see `agent/README.md`. For how the model default is layered, overridden, and priced, see [Model configuration](/sample-autonomous-cloud-coding-agents/developer-guide/model-configuration).
 
 #### Troubleshooting
 

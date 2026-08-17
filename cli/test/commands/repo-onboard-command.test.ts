@@ -104,7 +104,20 @@ describe('repo onboard/offboard commands', () => {
       'node', 'test', 'onboard', 'acme/a',
       '--region', 'us-east-1',
       '--compute-type', 'lambda',
-    ])).rejects.toThrow("compute-type must be 'agentcore' or 'ecs'");
+    ])).rejects.toThrow("compute-type must be 'agentcore', 'ecs', or 'lambda-microvm'");
+  });
+
+  test('repo onboard accepts lambda-microvm compute type', async () => {
+    const cmd = makeRepoCommand();
+    await cmd.parseAsync([
+      'node', 'test', 'onboard', 'acme/a',
+      '--region', 'us-east-1',
+      '--compute-type', 'lambda-microvm',
+    ]);
+
+    expect((onboardRepo as jest.Mock).mock.calls[0][3]).toEqual(
+      expect.objectContaining({ computeType: 'lambda-microvm' }),
+    );
   });
 
   test('repo offboard invokes offboardRepo', async () => {

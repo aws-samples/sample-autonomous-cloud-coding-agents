@@ -38,6 +38,11 @@ junit.xml
 # Node / JS
 # ──────────────────────────────────────────────
 node_modules/
+# Also match a SYMLINK named node_modules. The trailing-slash form above matches
+# directories only, so a symlink (e.g. one pointing at a shared install in
+# another worktree) slips past it and can be committed by `git add -A`. A
+# committed symlink then breaks CI at install time with EEXIST.
+node_modules
 jspm_packages/
 .eslintcache
 *.tgz

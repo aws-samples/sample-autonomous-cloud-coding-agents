@@ -1,0 +1,29 @@
+# Exclusions for a build context rooted at THIS directory.
+#
+# The real image is built from the repo root (see cdk/src/stacks/agent.ts) and
+# uses the root .dockerignore. This file covers the other way this tree is used:
+# CDK asset fingerprinting of `agent/` on its own, which the CDK test suite does.
+#
+# Both need the same thing for the same reason — a fingerprint walk must not see
+# files that are being written and deleted underneath it.
+
+# Coverage data. pytest-cov writes per-process temp files
+# (`.coverage.<host>.<pid>.<random>`) and removes them as it combines. The agent
+# suite and the CDK suite run in parallel, so a fingerprint walk that stats one of
+# these and then opens it fails with ENOENT on a path nothing will read again.
+.coverage
+.coverage.*
+coverage/
+
+# Tool caches — churn during a run, contribute nothing to an image.
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+**/__pycache__/
+**/*.pyc
+
+# Rebuilt inside the image by uv.
+.venv/
+
+# Scan output.
+gitleaks-report.json

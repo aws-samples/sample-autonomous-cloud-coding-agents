@@ -56,10 +56,10 @@ def _emit_metrics_to_cloudwatch(json_payload: dict) -> None:
     try:
         import contextlib
 
-        import boto3
+        from aws_session import platform_client
 
         region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
-        client = boto3.client("logs", region_name=region)
+        client = platform_client("logs", region_name=region)
 
         task_id = json_payload.get("task_id", "unknown")
         log_stream = f"metrics/{task_id}"
@@ -164,10 +164,10 @@ class _TrajectoryWriter:
 
         import contextlib
 
-        import boto3
+        from aws_session import platform_client
 
         region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
-        self._client = boto3.client("logs", region_name=region)
+        self._client = platform_client("logs", region_name=region)
 
         log_stream = f"trajectory/{self._task_id}"
         with contextlib.suppress(self._client.exceptions.ResourceAlreadyExistsException):
