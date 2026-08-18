@@ -194,8 +194,8 @@ export type ReleaseChildReadyResult = ReleaseChildResult & { readonly subIssueId
 // The status codes createTaskCore ACTUALLY returns on a non-success (verified
 // against create-task-core.ts, not assumed from HTTP-code lore): 400
 // VALIDATION_ERROR (incl. the guardrail block), 409 DUPLICATE_TASK (idempotent
-// replay), 422 REPO_NOT_ONBOARDED, 500/503 server/service errors. There is no
-// 403/404/408/429 path here.
+// replay), 422 REPO_NOT_ONBOARDED, 429 BUDGET_EXCEEDED, 500/503 server/service
+// errors. There is no 403/404/408 path here.
 const HTTP_CONFLICT = 409; // idempotent replay — a task already exists for this key
 const HTTP_CLIENT_ERROR_MIN = 400;
 const HTTP_SERVER_ERROR_MIN = 500;
@@ -213,6 +213,9 @@ const HTTP_SERVER_ERROR_MIN = 500;
  *    DETERMINISTIC. Neither self-heals; the user must edit/reword the sub-issue
  *    or onboard the repo, THEN re-run via ``@bgagent retry``. Rolling back would
  *    loop the sweep forever.
+ *  - 429 (monthly budget exhausted) → DETERMINISTIC for this release attempt.
+ *    An operator must adjust/disable the budget or wait for the next UTC month,
+ *    then re-run via ``@bgagent retry``.
  *  - 409 (duplicate/idempotent replay) → NOT a real failure: a task already
  *    exists for this key, so treat like a transient (roll back; a re-release
  *    idempotent-replays to 200 and finalizes). Never terminal.
@@ -224,6 +227,7 @@ function isDeterministicCreateFailure(statusCode: number): boolean {
 }
 
 const HTTP_UNPROCESSABLE = 422; // REPO_NOT_ONBOARDED
+const HTTP_TOO_MANY_REQUESTS = 429; // BUDGET_EXCEEDED
 
 /**
  * A short, user-facing reason for a deterministic create failure, shown as
@@ -239,6 +243,9 @@ function deterministicFailureReason(statusCode: number, body: string): string {
   const retry = 'then reply `@bgagent retry` on the epic to re-run.';
   if (statusCode === HTTP_UNPROCESSABLE) {
     return `Couldn't start — this repo isn't onboarded to ABCA. Onboard it, ${retry}`;
+  }
+  if (statusCode === HTTP_TOO_MANY_REQUESTS) {
+    return `Couldn't start — a monthly budget is exhausted. Adjust the budget or wait for the next UTC month, ${retry}`;
   }
   // 400: distinguish a guardrail/content-policy block (rewordable) from other validation.
   if (/content policy|guardrail/i.test(body || '')) {
@@ -561,13 +568,13 @@ export async function releaseChild(params: ReleaseChildParams): Promise<ReleaseC
     // terminal state, no ❌, epic stuck 👀). Mark it terminally 'failed' so the
     // reconcile settles the epic finished-with-failures and the child gets a ❌
     // + a reason (posted by the caller's terminal path). Only TRANSIENT failures
-    // (5xx / throttle) roll back to 'ready' for a later retry.
+    // (5xx) roll back to 'ready' for a later retry.
     if (isDeterministicCreateFailure(result.statusCode)) {
       const failureReason = deterministicFailureReason(result.statusCode, result.body);
       await failClaimTerminal(ddb, tableName, row, now, failureReason);
       return { kind: 'create_failed_terminal', statusCode: result.statusCode, body: result.body, failureReason };
     }
-    // Claim won but the create failed transiently (5xx, throttle) — roll the
+    // Claim won but the create failed transiently (5xx) — roll the
     // claim back to 'ready' so the next reconcile/sweep retries it, rather than
     // stranding the child in 'releasing'. Note 422 (repo not onboarded) is NOT
     // here: it is deterministic and handled above, since a repo doesn't onboard

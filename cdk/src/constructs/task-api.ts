@@ -233,6 +233,12 @@ export interface TaskApiProps {
    */
   readonly userConcurrencyTable?: dynamodb.ITable;
 
+  /**
+   * Monthly user/team budget configuration and spend table. When provided,
+   * task creation resolves Cognito groups and enforces hard-stop budgets.
+   */
+  readonly budgetTable?: dynamodb.ITable;
+
 }
 
 /**
@@ -603,6 +609,10 @@ export class TaskApi extends Construct {
     if (props.attachmentsBucket) {
       createTaskEnv.ATTACHMENTS_BUCKET_NAME = props.attachmentsBucket.bucketName;
     }
+    if (props.budgetTable) {
+      createTaskEnv.BUDGET_TABLE_NAME = props.budgetTable.tableName;
+      createTaskEnv.USER_POOL_ID = this.userPool.userPoolId;
+    }
 
     const createTaskFn = new lambda.NodejsFunction(this, 'CreateTaskFn', {
       entry: path.join(handlersDir, 'create-task.ts'),
@@ -748,6 +758,9 @@ export class TaskApi extends Construct {
     // Repo table read for onboarding gate
     if (props.repoTable) {
       props.repoTable.grantReadData(createTaskFn);
+    }
+    if (props.budgetTable) {
+      props.budgetTable.grantReadData(createTaskFn);
     }
 
     // Read-only for get, list, and events
@@ -1275,6 +1288,13 @@ export class TaskApi extends Construct {
       props.taskEventsTable.grantReadWriteData(webhookCreateTaskFn);
       if (props.repoTable) {
         props.repoTable.grantReadData(webhookCreateTaskFn);
+      }
+      if (props.budgetTable) {
+        props.budgetTable.grantReadData(webhookCreateTaskFn);
+        webhookCreateTaskFn.addToRolePolicy(new iam.PolicyStatement({
+          actions: ['cognito-idp:AdminListGroupsForUser'],
+          resources: [this.userPool.userPoolArn],
+        }));
       }
 
       if (props.orchestratorFunctionArn) {

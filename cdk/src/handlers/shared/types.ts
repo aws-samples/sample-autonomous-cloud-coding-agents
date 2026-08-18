@@ -156,6 +156,8 @@ export type ChannelSource = 'api' | 'webhook' | 'slack' | 'linear' | 'jira';
 export interface TaskRecord {
   readonly task_id: string;
   readonly user_id: string;
+  /** Cognito group names captured at admission for team-budget rollups. */
+  readonly team_ids?: readonly string[];
   readonly status: TaskStatusType;
   /** Target repository (``owner/repo``). Optional since #248 Phase 3: a
    *  repo-less workflow (``requires_repo: false``) runs with no repo. */

@@ -11,7 +11,7 @@ ABCA gives you three independent views of cost. They answer different questions;
 
 | Meter | Granularity | Source of truth for | Where |
 |---|---|---|---|
-| **In-app `cost_usd`** | Per task | Per-task budget guardrails (`max_budget_usd`) | Task metadata / control panel |
+| **In-app `cost_usd`** | Per task; monthly rollups by user/team | Per-task and fleet admission guardrails | Task metadata / `bgagent budget` |
 | **CUR session-tag chargeback** | Per user / per repo, aggregated per usage-type per day | AWS-native FinOps chargeback | Cost Explorer / CUR 2.0 |
 | **Invocation-log metadata** | Per Bedrock call | Per-call forensics, reconciliation | `/aws/bedrock/model-invocation-logs/<stack>` |
 
@@ -20,6 +20,12 @@ Why all three: the in-app meter is an estimate the platform computes; it does no
 ## What the platform does automatically
 
 Once deployed, each agent task makes its Bedrock calls under **session-tagged, refreshable credentials** carrying `{user_id, repo, task_id}`, and stamps the same values as **request metadata** on every call. You do **not** need to change any code. What remains is **operator setup in the AWS Billing console** — AWS does not surface tag-based cost data until you activate it, and (see the ordering note below) you can only activate *after* the platform has run tagged tasks.
+
+## ABCA monthly budget guardrails
+
+ABCA can aggregate terminal task `cost_usd` by Cognito user and Cognito-group team, alert at 80%/100%, and optionally reject new tasks at 100%. Configure it with `bgagent budget set` and inspect the current UTC month with `bgagent budget status`; see [Monthly user and team budgets](./USER_GUIDE.md#monthly-user-and-team-budgets).
+
+This is an operational guardrail, not invoice reconciliation. It inherits every limitation of the SDK estimate, counts a task only when it reaches a terminal state, and can overshoot while tasks run concurrently. Use AWS Budgets over activated cost-allocation tags for authoritative billing alerts.
 
 ## FinOps checklist
 

@@ -80,6 +80,9 @@ export interface JiraIntegrationProps {
   /** The DynamoDB task events table. */
   readonly taskEventsTable: dynamodb.ITable;
 
+  /** Monthly user/team budget configuration and spend table. */
+  readonly budgetTable?: dynamodb.ITable;
+
   /** Shared orchestration DAG table. Omit to retain one-issue/one-task mode. */
   readonly orchestrationTable?: dynamodb.ITable;
 
@@ -253,6 +256,10 @@ export class JiraIntegration extends Construct {
         props.maxConcurrentTasksPerUser ?? 10,
       );
     }
+    if (props.budgetTable) {
+      createTaskEnv.BUDGET_TABLE_NAME = props.budgetTable.tableName;
+      createTaskEnv.USER_POOL_ID = props.userPool.userPoolId;
+    }
 
     // --- Cognito Authorizer (for /jira/link) ---
     const cognitoAuthorizer = new apigw.CognitoUserPoolsAuthorizer(this, 'JiraCognitoAuthorizer', {
@@ -315,6 +322,13 @@ export class JiraIntegration extends Construct {
     }
     if (props.repoTable) {
       props.repoTable.grantReadData(webhookProcessorFn);
+    }
+    if (props.budgetTable) {
+      props.budgetTable.grantReadData(webhookProcessorFn);
+      webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
+        actions: ['cognito-idp:AdminListGroupsForUser'],
+        resources: [props.userPool.userPoolArn],
+      }));
     }
     if (props.orchestratorFunctionArn) {
       webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({

@@ -30,6 +30,7 @@ import type { APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
 import { isDegeneratePattern, parseApprovalScope } from './approval-scope';
 import { screenImage, screenTextFile, AttachmentScreeningError, type ScreeningConfig } from './attachment-screening';
+import { checkBudgetAdmission } from './budgets';
 import { generateBranchName } from './gateway';
 import { estimateImageTokensFromBuffer } from './image-tokens';
 import { logger } from './logger';
@@ -63,6 +64,12 @@ import { TaskStatus } from '../../constructs/task-status';
  */
 export interface TaskCreationContext {
   readonly userId: string;
+  /**
+   * Cognito group names used as team IDs for fleet budgets. The direct API
+   * supplies these from the authenticated JWT; headless channel adapters omit
+   * them and the budget helper resolves current membership from Cognito.
+   */
+  readonly teamIds?: readonly string[];
   readonly channelSource: ChannelSource;
   readonly channelMetadata: Record<string, string>;
   readonly idempotencyKey?: string;
@@ -680,6 +687,44 @@ export async function createTaskCore(
     }
   }
 
+  // 3b. Fleet budget admission. This intentionally runs AFTER idempotency
+  // replay so retrying an already-created task remains a 200 even if the
+  // user's/team's budget was exhausted after the original submission.
+  // Headless adapters resolve Cognito groups here; direct API calls pass the
+  // token's group claim through TaskCreationContext.
+  let budgetAdmission;
+  try {
+    budgetAdmission = await checkBudgetAdmission(context.userId, context.teamIds);
+  } catch (budgetErr) {
+    if (s3Client) await cleanupOrphanedAttachments(s3Client, uploadedS3Keys);
+    logger.error('Budget admission check failed closed', {
+      user_id: context.userId,
+      request_id: requestId,
+      error: budgetErr instanceof Error ? budgetErr.message : String(budgetErr),
+      metric_type: 'budget_admission_failure',
+    });
+    return errorResponse(
+      503,
+      ErrorCode.SERVICE_UNAVAILABLE,
+      'Budget admission is temporarily unavailable. Please try again later.',
+      requestId,
+    );
+  }
+  if (budgetAdmission.blocked) {
+    if (s3Client) await cleanupOrphanedAttachments(s3Client, uploadedS3Keys);
+    const blocked = budgetAdmission.blocked;
+    const owner = blocked.scopeType === 'user'
+      ? 'Your monthly budget'
+      : `The monthly budget for team '${blocked.scopeId}'`;
+    return errorResponse(
+      429,
+      ErrorCode.BUDGET_EXCEEDED,
+      `${owner} is exhausted ($${blocked.spendUsd.toFixed(2)} of `
+        + `$${blocked.monthlyLimitUsd.toFixed(2)}). New tasks are disabled until the next UTC month.`,
+      requestId,
+    );
+  }
+
   // 4. Generate identifiers and timestamps
   const now = new Date().toISOString();
   // A task with no repo never clones, branches, or opens a PR (the agent prompt
@@ -703,6 +748,7 @@ export async function createTaskCore(
   const taskRecord: TaskRecord = {
     task_id: taskId,
     user_id: context.userId,
+    ...(budgetAdmission.teamIds.length > 0 && { team_ids: budgetAdmission.teamIds }),
     status: initialStatus,
     ...(body.repo ? { repo: body.repo } : {}),
     ...(body.issue_number !== undefined && { issue_number: body.issue_number }),

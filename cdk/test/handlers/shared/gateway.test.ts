@@ -21,6 +21,7 @@ import type { APIGatewayProxyEvent } from 'aws-lambda';
 import {
   buildChannelMetadata,
   buildWebhookChannelMetadata,
+  extractUserGroups,
   extractUserId,
   extractWebhookContext,
   generateBranchName,
@@ -107,6 +108,20 @@ describe('extractUserId', () => {
     const event = makeEvent();
     event.requestContext.authorizer = { claims: { sub: 'from-claims' }, userId: 'from-ctx' };
     expect(extractUserId(event)).toBe('from-claims');
+  });
+});
+
+describe('extractUserGroups', () => {
+  test('normalizes, deduplicates, and sorts Cognito group claims', () => {
+    const event = makeEvent();
+    event.requestContext.authorizer = {
+      claims: { 'cognito:groups': 'Platform,Developers Platform' },
+    };
+    expect(extractUserGroups(event)).toEqual(['Developers', 'Platform']);
+  });
+
+  test('returns an empty list when the claim is absent', () => {
+    expect(extractUserGroups(makeEvent())).toEqual([]);
   });
 });
 

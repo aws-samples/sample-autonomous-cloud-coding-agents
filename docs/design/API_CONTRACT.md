@@ -183,7 +183,7 @@ For PR tasks, `branch_name` is initially `pending:pr_resolution` and resolved to
 
 **Idempotency:** Clients may send `Idempotency-Key` (see [Conventions](#conventions)). The first successful create returns **`201 Created`** (or `202` for presigned tasks). A subsequent request with the same key and the **same authenticated user** returns **`200 OK`** with the full `TaskDetail` reflecting **current** task state, plus response header `Idempotent-Replay: true`. No duplicate task is created and the orchestrator is not invoked again for that replay. If the key is already bound to a task owned by **another** user, the API returns **`409 DUPLICATE_TASK`** without exposing that task (extremely unlikely for high-entropy keys).
 
-**Errors:** `400 VALIDATION_ERROR` (invalid body/parameters, or task description blocked by content screening), `400 ATTACHMENT_INVALID_CONTENT` (content does not match declared MIME type or could not be sanitized), `400 ATTACHMENT_BLOCKED` (inline attachment failed content screening), `400 ATTACHMENT_INLINE_TOO_LARGE` (single inline attachment > 500 KB; total inline > 3 MB surfaces as `VALIDATION_ERROR`), `400 ATTACHMENTS_TOTAL_TOO_LARGE` (aggregate declared size > 50 MB), `401 UNAUTHORIZED`, `409 DUPLICATE_TASK` (idempotency key collision across users only), `422 REPO_NOT_ONBOARDED`, `503 SERVICE_UNAVAILABLE`, `503 ATTACHMENT_SCREENING_UNAVAILABLE`.
+**Errors:** `400 VALIDATION_ERROR` (invalid body/parameters, or task description blocked by content screening), `400 ATTACHMENT_INVALID_CONTENT` (content does not match declared MIME type or could not be sanitized), `400 ATTACHMENT_BLOCKED` (inline attachment failed content screening), `400 ATTACHMENT_INLINE_TOO_LARGE` (single inline attachment > 500 KB; total inline > 3 MB surfaces as `VALIDATION_ERROR`), `400 ATTACHMENTS_TOTAL_TOO_LARGE` (aggregate declared size > 50 MB), `401 UNAUTHORIZED`, `409 DUPLICATE_TASK` (idempotency key collision across users only), `422 REPO_NOT_ONBOARDED`, `429 BUDGET_EXCEEDED` (a user or Cognito-team monthly hard-stop budget is exhausted), `503 SERVICE_UNAVAILABLE`, `503 ATTACHMENT_SCREENING_UNAVAILABLE`.
 
 > Task-description content screening (Bedrock Guardrails) that intervenes returns `400 VALIDATION_ERROR` with message "Task description was blocked by content policy." — there is no separate `GUARDRAIL_BLOCKED` code.
 
@@ -529,7 +529,7 @@ HMAC verification runs in the handler (not the authorizer) because API Gateway R
 
 Tasks created via webhook record `channel_source: 'webhook'` with audit metadata (`webhook_id`, `source_ip`, `user_agent`).
 
-**Errors:** `400 VALIDATION_ERROR` (includes task descriptions blocked by content screening), `401 UNAUTHORIZED`, `409 DUPLICATE_TASK`, `422 REPO_NOT_ONBOARDED`, `503 SERVICE_UNAVAILABLE`.
+**Errors:** `400 VALIDATION_ERROR` (includes task descriptions blocked by content screening), `401 UNAUTHORIZED`, `409 DUPLICATE_TASK`, `422 REPO_NOT_ONBOARDED`, `429 BUDGET_EXCEEDED`, `503 SERVICE_UNAVAILABLE`.
 
 ## Rate limiting and throttling
 
@@ -546,6 +546,8 @@ There is no per-user request-rate or "tasks-per-hour" limiter on task creation. 
 
 - `POST /v1/tasks/{task_id}/confirm-uploads` rejects with `429 RATE_LIMIT_EXCEEDED` when the user is already at their concurrency limit.
 - For the orchestrator admission path (the `SUBMITTED → HYDRATING` transition), exceeding the limit does not return an HTTP error — the task is already created. The orchestrator drives the task to `FAILED` with `error_message` "User concurrency limit reached" and emits an `admission_rejected` event.
+
+**Monthly budget admission.** Task creation checks the current UTC-month estimated spend for the authenticated user and every Cognito group captured as a team. A configured hard-stop scope at or above 100% returns `429 BUDGET_EXCEEDED` before creating a new task. Alerts-only scopes continue. Same-user idempotent replays return their existing task before this check.
 
 ## Error codes
 
@@ -578,6 +580,7 @@ There is no per-user request-rate or "tasks-per-hour" limiter on task creation. 
 | `SCREENING_DEADLINE_EXCEEDED` | 503 | Attachment screening did not complete within the time limit (retry; already-screened attachments are skipped) |
 | `GITHUB_UNREACHABLE` | 502 | GitHub API unreachable during pre-flight (transient) |
 | `RATE_LIMIT_EXCEEDED` | 429 | Rate/concurrency gate exceeded — per-task nudge limit, the application rate limiter on approval endpoints, or the user concurrency limit on confirm-uploads |
+| `BUDGET_EXCEEDED` | 429 | A configured user or Cognito-team monthly budget reached 100% with hard stop enabled |
 | `REQUEST_NOT_FOUND` | 404 | Cedar HITL approval request not found (also returned when the caller does not own it) |
 | `REQUEST_ALREADY_DECIDED` | 409 | Cedar HITL approval request was already approved or denied |
 | `TASK_NOT_AWAITING_APPROVAL` | 409 | Task is not in `AWAITING_APPROVAL`, so the approval decision does not apply |
