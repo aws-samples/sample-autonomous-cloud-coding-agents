@@ -296,8 +296,29 @@ Returns the authenticated user's tasks, newest first. Paginated.
 | `repo` | String | all | Filter by repository (`owner/repo`) |
 | `limit` | Number | 20 | Page size (1-100) |
 | `next_token` | String | - | Pagination token from previous response |
+| `view` | String | tasks | `budget` returns the authenticated caller's personal monthly budget instead of a task page |
 
 Returns a summary subset of fields. Use `GET /v1/tasks/{task_id}` for full details.
+
+With `view=budget`, the Cognito-authenticated caller receives only their personal estimated-spend scope:
+
+```json
+{
+  "data": {
+    "period": "2026-08",
+    "resets_at": "2026-09-01T00:00:00.000Z",
+    "configured": true,
+    "spend_usd": 25,
+    "monthly_limit_usd": 100,
+    "remaining_usd": 75,
+    "utilization_percent": 25,
+    "hard_stop": true,
+    "hard_stop_active": false
+  }
+}
+```
+
+When no personal limit exists, `configured` is false, the limit/remaining/utilization fields are null, and `spend_usd` still reports the caller's current estimated spend. Team budgets are not returned. This read-only view backs `bgagent budget status --me`; budget mutation remains an operator-AWS-credential workflow.
 
 **Errors:** `400 VALIDATION_ERROR`, `401 UNAUTHORIZED`.
 

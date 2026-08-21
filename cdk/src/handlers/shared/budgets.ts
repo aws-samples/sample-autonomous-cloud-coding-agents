@@ -23,6 +23,7 @@ import {
 } from '@aws-sdk/client-cognito-identity-provider';
 import { BatchGetCommand } from '@aws-sdk/lib-dynamodb';
 import { logger } from './logger';
+import type { PersonalBudgetStatus } from './types';
 import { makeClient, makeDocClient } from './ua';
 
 export const BUDGET_CONFIG_PERIOD = 'CONFIG';
@@ -78,6 +79,10 @@ export function budgetPeriod(date: Date = new Date()): string {
   const year = date.getUTCFullYear();
   const month = String(date.getUTCMonth() + 1).padStart(2, '0');
   return `${year}-${month}`;
+}
+
+export function budgetResetAt(date: Date = new Date()): string {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 1)).toISOString();
 }
 
 export function userBudgetScopeKey(userId: string): string {
@@ -207,6 +212,54 @@ export async function loadBudgetStates(
     });
   }
   return states;
+}
+
+/** Read the authenticated user's own monthly estimated-spend status. */
+export async function loadPersonalBudgetStatus(
+  userId: string,
+  now: Date = new Date(),
+): Promise<PersonalBudgetStatus> {
+  const period = budgetPeriod(now);
+  const scopeKey = userBudgetScopeKey(userId);
+  const items = await batchGetItems([
+    { scope_key: scopeKey, period: BUDGET_CONFIG_PERIOD },
+    { scope_key: scopeKey, period },
+  ]);
+  const config = items.find(item => item.period === BUDGET_CONFIG_PERIOD);
+  const spend = items.find(item => item.period === period);
+  const spendUsd = Math.max(0, numeric(spend?.spend_usd));
+
+  if (!config) {
+    return {
+      period,
+      resets_at: budgetResetAt(now),
+      configured: false,
+      spend_usd: spendUsd,
+      monthly_limit_usd: null,
+      remaining_usd: null,
+      utilization_percent: null,
+      hard_stop: false,
+      hard_stop_active: false,
+    };
+  }
+
+  const monthlyLimitUsd = numeric(config.monthly_limit_usd);
+  if (monthlyLimitUsd <= 0) {
+    throw new Error(`Budget config ${scopeKey} has invalid monthly_limit_usd.`);
+  }
+  const utilizationPercent = (spendUsd / monthlyLimitUsd) * 100;
+  const hardStop = config.hard_stop === true;
+  return {
+    period,
+    resets_at: budgetResetAt(now),
+    configured: true,
+    spend_usd: spendUsd,
+    monthly_limit_usd: monthlyLimitUsd,
+    remaining_usd: Math.max(0, monthlyLimitUsd - spendUsd),
+    utilization_percent: utilizationPercent,
+    hard_stop: hardStop,
+    hard_stop_active: hardStop && utilizationPercent >= BUDGET_EXCEEDED_PERCENT,
+  };
 }
 
 /**

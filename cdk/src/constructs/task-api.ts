@@ -248,6 +248,7 @@ export interface TaskApiProps {
  * Exposes endpoints:
  * - POST   /tasks                → createTask (Cognito)
  * - GET    /tasks                → listTasks (Cognito)
+ * - GET    /tasks?view=budget    → personal monthly budget status (Cognito)
  * - GET    /tasks/{task_id}      → getTask (Cognito)
  * - DELETE /tasks/{task_id}      → cancelTask (Cognito)
  * - GET    /tasks/{task_id}/events → getTaskEvents (Cognito)
@@ -639,12 +640,16 @@ export class TaskApi extends Construct {
       bundling: commonBundling,
     });
 
+    const listTasksEnv: Record<string, string> = { ...commonEnv };
+    if (props.budgetTable) {
+      listTasksEnv.BUDGET_TABLE_NAME = props.budgetTable.tableName;
+    }
     const listTasksFn = new lambda.NodejsFunction(this, 'ListTasksFn', {
       entry: path.join(handlersDir, 'list-tasks.ts'),
       handler: 'handler',
       runtime: Runtime.NODEJS_24_X,
       architecture: Architecture.ARM_64,
-      environment: commonEnv,
+      environment: listTasksEnv,
       bundling: commonBundling,
     });
 
@@ -761,6 +766,7 @@ export class TaskApi extends Construct {
     }
     if (props.budgetTable) {
       props.budgetTable.grantReadData(createTaskFn);
+      props.budgetTable.grantReadData(listTasksFn);
     }
 
     // Read-only for get, list, and events

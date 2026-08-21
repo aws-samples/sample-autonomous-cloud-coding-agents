@@ -23,6 +23,7 @@ import {
   type AdminGetUserCommandOutput,
 } from '@aws-sdk/client-cognito-identity-provider';
 import { Command } from 'commander';
+import { ApiClient } from '../api-client';
 import {
   type BudgetScope,
   type BudgetStatus,
@@ -38,6 +39,7 @@ import {
 import { CliError } from '../errors';
 import { DEFAULT_STACK_NAME, resolveOperatorContext } from '../operator-context';
 import { getStackOutput } from '../stack-outputs';
+import type { PersonalBudgetStatus } from '../types';
 
 const SCOPE_TYPE_WIDTH = 8;
 const SCOPE_ID_WIDTH = 36;
@@ -152,6 +154,26 @@ function printStatus(rows: readonly BudgetStatus[]): void {
   }
 }
 
+function printPersonalStatus(status: PersonalBudgetStatus): void {
+  console.log(`Personal monthly budget (${status.period} UTC)`);
+  console.log(`Estimated spend: ${dollars(status.spend_usd)}`);
+  if (!status.configured) {
+    console.log('Monthly limit: not configured');
+    console.log(`Resets at: ${status.resets_at}`);
+    console.log('Team budgets are not shown here and may also apply.');
+    return;
+  }
+  console.log(`Monthly limit: ${dollars(status.monthly_limit_usd ?? 0)}`);
+  console.log(`Remaining: ${dollars(status.remaining_usd ?? 0)}`);
+  console.log(`Used: ${(status.utilization_percent ?? 0).toFixed(1)}%`);
+  const hardStop = status.hard_stop
+    ? (status.hard_stop_active ? 'ACTIVE' : 'enabled')
+    : 'disabled';
+  console.log(`Hard stop: ${hardStop}`);
+  console.log(`Resets at: ${status.resets_at}`);
+  console.log('Team budgets are not shown here and may also apply.');
+}
+
 function assertOutputFormat(format: string): void {
   if (!OUTPUT_FORMATS.has(format)) {
     throw new CliError('--output must be text or json.');
@@ -172,16 +194,29 @@ function addScopeOptions(command: Command): Command {
 
 export function makeBudgetCommand(): Command {
   const budget = new Command('budget')
-    .description('Monthly user/team spend budgets (operator AWS credentials)');
+    .description('View or administer monthly user/team spend budgets');
 
   budget.addCommand(
     addOperatorOptions(addScopeOptions(
       new Command('status')
         .description('Show current UTC-month spend and limits')
+        .option('--me', 'Show your personal budget using Cognito authentication')
         .option('--output <format>', 'Output format: text or json', 'text')
         .action(async (opts) => {
-          requestedScope(opts);
           assertOutputFormat(opts.output);
+          if (opts.me) {
+            if (opts.user || opts.team) {
+              throw new CliError('--me cannot be combined with --user or --team.');
+            }
+            const status = await new ApiClient().getPersonalBudget();
+            if (opts.output === 'json') {
+              console.log(JSON.stringify(status, null, 2));
+              return;
+            }
+            printPersonalStatus(status);
+            return;
+          }
+          requestedScope(opts);
           const ctx = await budgetContext(opts);
           const scope = await resolveScope(opts, false);
           const rows = await listBudgetStatus(ctx.region, ctx.tableName, scope);

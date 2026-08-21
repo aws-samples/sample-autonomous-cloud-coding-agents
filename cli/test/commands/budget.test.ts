@@ -17,6 +17,7 @@
  *  SOFTWARE.
  */
 
+import { ApiClient } from '../../src/api-client';
 import {
   currentBudgetPeriod,
   listBudgetStatus,
@@ -31,6 +32,7 @@ import { makeBudgetCommand } from '../../src/commands/budget';
 import { getStackOutput } from '../../src/stack-outputs';
 
 jest.mock('../../src/budget-store');
+jest.mock('../../src/api-client');
 jest.mock('../../src/cognito-admin');
 jest.mock('../../src/stack-outputs');
 jest.mock('../../src/operator-context', () => ({
@@ -49,6 +51,8 @@ const resolveCognitoAdminContextMock = resolveCognitoAdminContext as jest.Mock;
 const resolveCognitoUsernameMock = resolveCognitoUsername as jest.Mock;
 const cognitoClientMock = cognitoClient as jest.Mock;
 const cognitoSend = jest.fn();
+const getPersonalBudgetMock = jest.fn();
+const ApiClientMock = ApiClient as jest.MockedClass<typeof ApiClient>;
 
 describe('budget command', () => {
   let consoleSpy: jest.SpiedFunction<typeof console.log>;
@@ -64,6 +68,8 @@ describe('budget command', () => {
     resolveCognitoUsernameMock.mockReset();
     cognitoClientMock.mockReset();
     cognitoSend.mockReset();
+    getPersonalBudgetMock.mockReset();
+    ApiClientMock.mockReset();
 
     getStackOutputMock.mockResolvedValue('BudgetTable');
     resolveCognitoAdminContextMock.mockResolvedValue({
@@ -79,6 +85,20 @@ describe('budget command', () => {
     listBudgetStatusMock.mockResolvedValue([]);
     setMonthlyBudgetMock.mockResolvedValue(undefined);
     currentBudgetPeriodMock.mockReturnValue('2026-08');
+    ApiClientMock.mockImplementation(() => ({
+      getPersonalBudget: getPersonalBudgetMock,
+    }) as never);
+    getPersonalBudgetMock.mockResolvedValue({
+      period: '2026-08',
+      resets_at: '2026-09-01T00:00:00.000Z',
+      configured: true,
+      spend_usd: 25,
+      monthly_limit_usd: 100,
+      remaining_usd: 75,
+      utilization_percent: 25,
+      hard_stop: true,
+      hard_stop_active: false,
+    });
   });
 
   afterEach(() => {
@@ -196,6 +216,73 @@ describe('budget command', () => {
       period: '2026-08',
       budgets: [],
     });
+  });
+
+  test('shows the authenticated user personal budget without operator AWS calls', async () => {
+    const command = makeBudgetCommand();
+    await command.parseAsync(['node', 'test', 'status', '--me']);
+
+    expect(getPersonalBudgetMock).toHaveBeenCalledTimes(1);
+    expect(getStackOutputMock).not.toHaveBeenCalled();
+    expect(resolveCognitoAdminContextMock).not.toHaveBeenCalled();
+    expect(consoleSpy).toHaveBeenCalledWith('Personal monthly budget (2026-08 UTC)');
+    expect(consoleSpy).toHaveBeenCalledWith('Remaining: $75.00');
+    expect(consoleSpy).toHaveBeenCalledWith('Hard stop: enabled');
+  });
+
+  test('renders an unconfigured personal budget without hiding estimated spend', async () => {
+    getPersonalBudgetMock.mockResolvedValueOnce({
+      period: '2026-08',
+      resets_at: '2026-09-01T00:00:00.000Z',
+      configured: false,
+      spend_usd: 12.25,
+      monthly_limit_usd: null,
+      remaining_usd: null,
+      utilization_percent: null,
+      hard_stop: false,
+      hard_stop_active: false,
+    });
+    const command = makeBudgetCommand();
+    await command.parseAsync(['node', 'test', 'status', '--me']);
+
+    expect(consoleSpy).toHaveBeenCalledWith('Estimated spend: $12.25');
+    expect(consoleSpy).toHaveBeenCalledWith('Monthly limit: not configured');
+  });
+
+  test('shows when the personal hard stop is active', async () => {
+    getPersonalBudgetMock.mockResolvedValueOnce({
+      period: '2026-08',
+      resets_at: '2026-09-01T00:00:00.000Z',
+      configured: true,
+      spend_usd: 100,
+      monthly_limit_usd: 100,
+      remaining_usd: 0,
+      utilization_percent: 100,
+      hard_stop: true,
+      hard_stop_active: true,
+    });
+    const command = makeBudgetCommand();
+    await command.parseAsync(['node', 'test', 'status', '--me']);
+
+    expect(consoleSpy).toHaveBeenCalledWith('Hard stop: ACTIVE');
+  });
+
+  test('outputs the personal budget as JSON', async () => {
+    const command = makeBudgetCommand();
+    await command.parseAsync(['node', 'test', 'status', '--me', '--output', 'json']);
+
+    expect(JSON.parse(consoleSpy.mock.calls[0][0] as string)).toEqual(
+      await getPersonalBudgetMock.mock.results[0].value,
+    );
+  });
+
+  test('rejects --me with an operator-selected scope before making API calls', async () => {
+    const command = makeBudgetCommand();
+    await expect(
+      command.parseAsync(['node', 'test', 'status', '--me', '--user', 'alice@example.com']),
+    ).rejects.toThrow('--me cannot be combined with --user or --team');
+    expect(getPersonalBudgetMock).not.toHaveBeenCalled();
+    expect(getStackOutputMock).not.toHaveBeenCalled();
   });
 
   test('rejects invalid output before reading stack outputs', async () => {

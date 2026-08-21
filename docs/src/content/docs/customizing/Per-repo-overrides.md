@@ -58,9 +58,14 @@ Note that the reported `cost_usd` is a client-side estimate, not authoritative b
 
 ### Monthly user and team budgets
 
-Operators can set recurring monthly USD limits for a Cognito user or team. Team IDs are Cognito group names, and every configured group budget applies to each member.
+Operators can set recurring monthly USD limits for a Cognito user or team. Team IDs are Cognito group names, and every configured group budget applies to each member. Standard users can inspect their personal limit but cannot change it or view other users' budgets.
+
+For the lowest-overhead organization-wide control, create one Cognito group such as `Everyone`, add every existing user, and make group assignment part of the new-user onboarding process. The budget command validates an existing group; it does not create the group or manage membership.
 
 ```bash
+# One shared organization pool. Every member contributes to the same limit.
+bgagent budget set --team Everyone --monthly-usd 10000 --hard-stop
+
 # Alert at 80% and 100%, but continue admitting tasks.
 bgagent budget set --user alice@example.com --monthly-usd 100
 
@@ -71,12 +76,20 @@ bgagent budget set --team Platform --monthly-usd 1000 --hard-stop
 bgagent budget status
 bgagent budget status --user alice@example.com
 bgagent budget status --team Platform --output json
+
+# Cognito-authenticated users can inspect only their own personal scope.
+bgagent budget status --me
+bgagent budget status --me --output json
 ```
 
-These are operator commands: they use your AWS credentials and discover `BudgetTableName` and `UserPoolId` from the deployed CloudFormation stack. A user may be supplied by email or Cognito username/subject; a team must already exist as a Cognito group. Running `budget set` again replaces the recurring limit and enables or disables the hard stop for that scope.
+`budget set` and operator-scoped `budget status` use AWS credentials and discover `BudgetTableName` and `UserPoolId` from the deployed CloudFormation stack. A user may be supplied by email or Cognito username/subject; a team must already exist as a Cognito group. Running `budget set` again replaces the recurring limit and enables or disables the hard stop for that scope.
+
+`budget status --me` is different: it uses the caller's cached Cognito login and the authenticated REST API, requires no operator AWS credentials, and never permits mutation. It reports personal estimated spend even when no personal limit is configured. Team and organization budgets are not exposed by this view and may still block new work.
 
 Monthly accounting uses terminal task `cost_usd` estimates and UTC calendar months. A task is attributed to its submitting user and the user's Cognito groups captured when the task was created. Failed tasks count when they report a positive cost. Running tasks do not count until they finish, so concurrent or long-running work can overshoot a limit.
 
 At 80% and 100%, each scope emits a one-shot CloudWatch threshold metric for the UTC month. The aggregate threshold alarms notify the shared `OperationalAlerts` SNS topic; simultaneous scope crossings may be coalesced into one alarm notification, so inspect the `OrchestrationReconciler` Lambda logs for exact scope and spend details. `--hard-stop` rejects new task creation at 100% with `429 BUDGET_EXCEEDED`. Existing tasks, same-user idempotent replays, and tasks already awaiting upload confirmation are not interrupted.
 
 Like `max_budget_usd`, monthly spend is based on the Claude Agent SDK's estimated `cost_usd`, not the AWS invoice. Use AWS Cost Explorer or CUR 2.0 for authoritative financial controls.
+
+Administrative overhead is one budget command per controlled scope. A single `Everyone` group needs one initial bulk membership pass and one group assignment for each new user; the recurring limit and UTC-month reset require no monthly maintenance. See [Cost attribution](/sample-autonomous-cloud-coding-agents/getting-started/cost-attribution#setting-up-cost-controls) for the setup checklist and incremental AWS cost.

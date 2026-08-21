@@ -126,5 +126,73 @@ describe('budget admission', () => {
     const budgets = await loadBudgets({ enabled: false });
     expect(budgets.budgetPeriod(new Date('2026-08-31T23:59:59Z'))).toBe('2026-08');
     expect(budgets.budgetPeriod(new Date('2026-09-01T00:00:00Z'))).toBe('2026-09');
+    expect(budgets.budgetResetAt(new Date('2026-12-31T23:59:59Z')))
+      .toBe('2027-01-01T00:00:00.000Z');
+  });
+
+  test('returns the authenticated user personal budget status', async () => {
+    const budgets = await loadBudgets();
+    ddbSend.mockResolvedValue({
+      Responses: {
+        Budgets: [
+          {
+            scope_key: 'USER#user-1',
+            period: 'CONFIG',
+            monthly_limit_usd: 100,
+            hard_stop: true,
+          },
+          {
+            scope_key: 'USER#user-1',
+            period: '2026-08',
+            spend_usd: 82.5,
+          },
+        ],
+      },
+    });
+
+    await expect(budgets.loadPersonalBudgetStatus(
+      'user-1',
+      new Date('2026-08-21T12:00:00Z'),
+    )).resolves.toEqual({
+      period: '2026-08',
+      resets_at: '2026-09-01T00:00:00.000Z',
+      configured: true,
+      spend_usd: 82.5,
+      monthly_limit_usd: 100,
+      remaining_usd: 17.5,
+      utilization_percent: 82.5,
+      hard_stop: true,
+      hard_stop_active: false,
+    });
+  });
+
+  test('shows spend without inventing a personal limit when none is configured', async () => {
+    const budgets = await loadBudgets();
+    ddbSend.mockResolvedValue({
+      Responses: {
+        Budgets: [
+          {
+            scope_key: 'USER#user-1',
+            period: '2026-08',
+            spend_usd: 12.25,
+          },
+        ],
+      },
+    });
+
+    await expect(budgets.loadPersonalBudgetStatus(
+      'user-1',
+      new Date('2026-08-21T12:00:00Z'),
+    )).resolves.toEqual({
+      period: '2026-08',
+      resets_at: '2026-09-01T00:00:00.000Z',
+      configured: false,
+      spend_usd: 12.25,
+      monthly_limit_usd: null,
+      remaining_usd: null,
+      utilization_percent: null,
+      hard_stop: false,
+      hard_stop_active: false,
+    });
   });
 });

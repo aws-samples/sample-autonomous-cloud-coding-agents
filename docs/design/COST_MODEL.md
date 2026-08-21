@@ -112,6 +112,10 @@ Monthly budgets use UTC calendar months and the same estimated `cost_usd` stored
 
 The 80% and 100% crossings emit one-shot, per-scope `ABCA/Budgets` CloudWatch metrics. Aggregate threshold alarms notify the shared `OperationalAlerts` SNS topic; simultaneous crossings can be coalesced, while the reconciler logs retain exact scope details. Metric claims are stored per scope/month so retries and later tasks do not emit the same crossing again. Operators configure and inspect limits with `bgagent budget set|status`.
 
+Authenticated users can inspect their personal scope with `bgagent budget status --me` (`GET /v1/tasks?view=budget`). The response includes estimated spend even when no personal limit is configured. It does not expose team scopes or permit mutation; administrators remain the only actors who set user/team limits.
+
+The controls add one on-demand DynamoDB table with PITR, two standard CloudWatch alarms, and up to two custom metric time series. Admission, terminal rollup, and user-status requests incur usage-based DynamoDB/API Gateway/Lambda/SNS charges; no dedicated continuously running compute is added. See the operator guide's [cost-control setup and cost breakdown](../guides/COST_ATTRIBUTION.md#setting-up-cost-controls).
+
 ## Additional guardrails
 
 - Token-denominated monthly budgets (the shipped fleet budget is USD-denominated).

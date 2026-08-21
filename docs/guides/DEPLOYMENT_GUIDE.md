@@ -51,6 +51,12 @@ The dominant idle cost is VPC networking: 7 interface endpoints across 2 AZs (~$
 
 For the full cost model including per-task costs, see [COST_MODEL.md](../design/COST_MODEL.md).
 
+### Incremental cost-control cost
+
+Monthly user/team controls add one DynamoDB on-demand table with PITR and two standard CloudWatch alarms. The table, API/Lambda reads, stream rollups, and SNS notifications are usage-based; the existing list Lambda and TaskTable reconciler perform the work, so there is no additional always-running compute.
+
+At public US East (N. Virginia) first-tier list rates verified in August 2026, the two alarms are approximately $0.20/month total. The two possible custom threshold metric series can add up to approximately $0.60/month when active. CloudWatch's account-wide free tier includes 10 custom metrics and 10 alarm metrics, so the incremental CloudWatch charge may be $0 when that allowance is still available. DynamoDB storage/PITR and request charges depend on task volume and the number of team scopes. See [Setting up cost controls](./COST_ATTRIBUTION.md#setting-up-cost-controls) for the operational overhead and pricing links.
+
 ## AWS services inventory
 
 ### Compute
