@@ -83,10 +83,11 @@ function toStatus(
   period: string,
 ): BudgetStatus {
   const monthlyLimitUsd = numeric(config.monthly_limit_usd);
+  if (monthlyLimitUsd <= 0) {
+    throw new Error(`Budget config ${String(config.scope_key)} has invalid monthly_limit_usd.`);
+  }
   const spendUsd = Math.max(0, numeric(spend?.spend_usd));
-  const utilizationPercent = monthlyLimitUsd > 0
-    ? (spendUsd / monthlyLimitUsd) * 100
-    : 0;
+  const utilizationPercent = (spendUsd / monthlyLimitUsd) * 100;
   const hardStop = config.hard_stop === true;
   return {
     scope_type: config.scope_type === 'team' ? 'team' : 'user',

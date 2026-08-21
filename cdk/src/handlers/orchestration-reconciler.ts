@@ -1479,9 +1479,10 @@ async function resolvePrNumber(taskId?: string): Promise<number | null> {
 /**
  * Lambda entry point — TaskTable stream handler.
  *
- * Processes records sequentially. Every terminal record first gets an
- * idempotent budget rollup; graph tasks then run orchestration reconciliation.
- * Per-record failure reporting retries only the failed item.
+ * Processes records sequentially. Orchestration reconciliation and the
+ * idempotent budget rollup are attempted independently, so an outage in either
+ * subsystem cannot prevent the other from progressing. Either failure still
+ * reports the record for retry.
  */
 export async function handler(event: DynamoDBStreamEvent): Promise<DynamoDBBatchResponse> {
   let processed = 0;
@@ -1492,27 +1493,46 @@ export async function handler(event: DynamoDBStreamEvent): Promise<DynamoDBBatch
   const batchItemFailures: { itemIdentifier: string }[] = [];
   for (const record of event.Records) {
     const seq = record.dynamodb?.SequenceNumber;
+    let orchestrationError: unknown;
+    let budgetError: unknown;
+
+    try {
+      const evt = parseTerminalTaskRecord(record);
+      if (evt) {
+        // Restack cascade: an iteration/restack task on a node X (NOT a child-row task)
+        // re-stacks X's direct dependents. Routed here, not through child gating.
+        if (evt.cascadeSubIssueId) {
+          await cascadeRestack(evt);
+        } else {
+          await reconcileTerminalChild(evt);
+        }
+        processed += 1;
+      }
+    } catch (err) {
+      orchestrationError = err;
+    }
+
     try {
       if (await rollupTaskCost(record)) budgetRolledUp += 1;
-      const evt = parseTerminalTaskRecord(record);
-      if (!evt) continue;
-      // Restack cascade: an iteration/restack task on a node X (NOT a child-row task)
-      // re-stacks X's direct dependents. Routed here, not through child gating.
-      if (evt.cascadeSubIssueId) {
-        await cascadeRestack(evt);
-      } else {
-        await reconcileTerminalChild(evt);
-      }
-      processed += 1;
     } catch (err) {
-      logger.error('Orchestration reconciler record failed — reporting for isolated retry', {
+      budgetError = err;
+    }
+
+    const error = orchestrationError ?? budgetError;
+    if (error) {
+      logger.error('TaskTable reconciler record failed — reporting for isolated retry', {
         sequence_number: seq,
         event_name: record.eventName,
-        error: err instanceof Error ? err.message : String(err),
+        orchestration_error: orchestrationError instanceof Error
+          ? orchestrationError.message
+          : orchestrationError === undefined ? undefined : String(orchestrationError),
+        budget_error: budgetError instanceof Error
+          ? budgetError.message
+          : budgetError === undefined ? undefined : String(budgetError),
       });
       // Without a sequence number we can't report the item individually; rethrow
       // so the batch fails rather than silently dropping a real error.
-      if (!seq) throw err;
+      if (!seq) throw error;
       batchItemFailures.push({ itemIdentifier: seq });
     }
   }

@@ -337,17 +337,43 @@ describe('orchestration-reconciler handler', () => {
     expect(createTaskCoreMock).not.toHaveBeenCalled();
   });
 
-  test('reports a budget-rollup failure for isolated stream retry', async () => {
+  test('releases orchestration dependents before reporting a budget-rollup retry', async () => {
+    mockOrchestration({
+      subIssueId: 'A',
+      children: [
+        { sub_issue_id: 'A', child_status: 'released' },
+        { sub_issue_id: 'B', depends_on: ['A'], child_status: 'blocked' },
+      ],
+    });
     rollupTaskCostMock.mockRejectedValueOnce(new Error('budget table unavailable'));
     const record = taskRecord({
-      task_id: 'standalone',
+      task_id: 'TA',
       status: 'COMPLETED',
+      orchestration_id: 'orch_1',
       sequenceNumber: 'seq-budget',
     });
 
     const result = await handler({ Records: [record] } as never);
 
+    expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+    expect(createTaskCoreMock.mock.calls[0][1].idempotencyKey).toBe('orch_1_B');
     expect(result.batchItemFailures).toEqual([{ itemIdentifier: 'seq-budget' }]);
+  });
+
+  test('rolls up spend even when orchestration reconciliation needs a retry', async () => {
+    ddbSend.mockRejectedValueOnce(new Error('orchestration table unavailable'));
+    rollupTaskCostMock.mockResolvedValueOnce(true);
+    const record = taskRecord({
+      task_id: 'TA',
+      status: 'COMPLETED',
+      orchestration_id: 'orch_1',
+      sequenceNumber: 'seq-orchestration',
+    });
+
+    const result = await handler({ Records: [record] } as never);
+
+    expect(rollupTaskCostMock).toHaveBeenCalledWith(record);
+    expect(result.batchItemFailures).toEqual([{ itemIdentifier: 'seq-orchestration' }]);
   });
 
   test('A fails → no release, B skipped (createTaskCore not called)', async () => {

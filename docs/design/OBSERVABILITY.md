@@ -123,7 +123,7 @@ All events carry `task_id` and `user_id` for filtering.
 |--------|------|---------|
 | Task duration (p50, p95) | Latency | Performance baseline and regression detection |
 | Token usage per task | Cost | Cost attribution and budget enforcement |
-| `ABCA/Budgets:BudgetThresholdCrossed` | Cost | One-shot 80%/100% monthly user/team budget crossings |
+| `ABCA/Budgets:BudgetThresholdCrossed` | Cost | Claimed 80%/100% monthly user/team budget crossings; retries can rarely duplicate a metric |
 | Cold start duration | Latency | Image optimization signal |
 | Active tasks (RUNNING count) | Capacity | Admission control and capacity planning |
 | Pending tasks (SUBMITTED count) | Capacity | Backlog depth and throughput monitoring |

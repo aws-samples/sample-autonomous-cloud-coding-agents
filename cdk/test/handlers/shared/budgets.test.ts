@@ -122,6 +122,16 @@ describe('budget admission', () => {
     expect(ddbSend).not.toHaveBeenCalled();
   });
 
+  test('rejects more team scopes than one DynamoDB rollup transaction supports', async () => {
+    const budgets = await loadBudgets();
+    const teamIds = Array.from({ length: 99 }, (_, index) => `Team-${index}`);
+
+    await expect(budgets.checkBudgetAdmission('user-1', teamIds))
+      .rejects.toThrow('belongs to 99 teams; budget rollup supports at most 98');
+    expect(ddbSend).not.toHaveBeenCalled();
+    expect(cognitoSend).not.toHaveBeenCalled();
+  });
+
   test('uses UTC calendar months', async () => {
     const budgets = await loadBudgets({ enabled: false });
     expect(budgets.budgetPeriod(new Date('2026-08-31T23:59:59Z'))).toBe('2026-08');

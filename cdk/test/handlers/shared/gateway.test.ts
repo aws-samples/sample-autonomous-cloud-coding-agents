@@ -120,6 +120,14 @@ describe('extractUserGroups', () => {
     expect(extractUserGroups(event)).toEqual(['Developers', 'Platform']);
   });
 
+  test('preserves exact group names when Cognito provides the native array claim', () => {
+    const event = makeEvent();
+    event.requestContext.authorizer = {
+      claims: { 'cognito:groups': ['Platform Team', 'FinOps,Core', 'Platform Team'] },
+    };
+    expect(extractUserGroups(event)).toEqual(['FinOps,Core', 'Platform Team']);
+  });
+
   test('returns an empty list when the claim is absent', () => {
     expect(extractUserGroups(makeEvent())).toEqual([]);
   });

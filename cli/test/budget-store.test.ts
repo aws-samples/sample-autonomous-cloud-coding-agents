@@ -165,4 +165,25 @@ describe('budget store', () => {
       hard_stop_active: true,
     });
   });
+
+  test('rejects a corrupt non-positive configured limit', async () => {
+    sendMock
+      .mockResolvedValueOnce({
+        Item: {
+          scope_key: 'USER#user-1',
+          scope_type: 'user',
+          scope_id: 'user-1',
+          monthly_limit_usd: 0,
+          hard_stop: true,
+        },
+      })
+      .mockResolvedValueOnce({ Responses: { Budgets: [] } });
+
+    await expect(listBudgetStatus(
+      'us-east-1',
+      'Budgets',
+      { type: 'user', id: 'user-1' },
+      new Date('2026-08-18T12:00:00Z'),
+    )).rejects.toThrow('Budget config USER#user-1 has invalid monthly_limit_usd');
+  });
 });

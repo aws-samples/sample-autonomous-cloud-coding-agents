@@ -60,6 +60,8 @@ export interface BudgetState extends BudgetConfig {
   readonly period: string;
   readonly spendUsd: number;
   readonly utilizationPercent: number;
+  readonly warningAlerted: boolean;
+  readonly exceededAlerted: boolean;
 }
 
 export interface BudgetBlock {
@@ -209,6 +211,8 @@ export async function loadBudgetStates(
       period,
       spendUsd,
       utilizationPercent: (spendUsd / monthlyLimitUsd) * 100,
+      warningAlerted: spend !== undefined && Object.hasOwn(spend, 'alerted_80_at'),
+      exceededAlerted: spend !== undefined && Object.hasOwn(spend, 'alerted_100_at'),
     });
   }
   return states;

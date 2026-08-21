@@ -83,6 +83,18 @@ describe('budget rollup handler', () => {
     });
   });
 
+  test('rejects a task with more scopes than one transaction supports', async () => {
+    const rollup = await loadRollup();
+    const overflow = record();
+    overflow.dynamodb!.NewImage!.team_ids = {
+      L: Array.from({ length: 99 }, (_, index) => ({ S: `Team-${index}` })),
+    };
+
+    await expect(rollup.rollupTaskCost(overflow))
+      .rejects.toThrow('has 100 budget scopes; maximum is 99');
+    expect(sendMock).not.toHaveBeenCalled();
+  });
+
   test('writes one transaction and emits the 80 percent threshold once', async () => {
     const rollup = await loadRollup();
     const stdout = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
@@ -118,6 +130,68 @@ describe('budget rollup handler', () => {
       expect(item.Update.ExpressionAttributeNames).toEqual({ '#ttl': 'ttl' });
     }
     expect(stdout.mock.calls.map(call => String(call[0])).join('')).toContain('"Threshold":"80"');
+  });
+
+  test('emits both 80 and 100 percent thresholds for one large rollup', async () => {
+    const rollup = await loadRollup();
+    const stdout = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    sendMock
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({
+        Responses: {
+          Budgets: [
+            {
+              scope_key: 'USER#user-1',
+              period: 'CONFIG',
+              monthly_limit_usd: 10,
+              hard_stop: true,
+            },
+            {
+              scope_key: 'USER#user-1',
+              period: '2026-08',
+              spend_usd: 12,
+            },
+          ],
+        },
+      })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({});
+
+    await expect(rollup.rollupTaskCost(record())).resolves.toBe(true);
+
+    const output = stdout.mock.calls.map(call => String(call[0])).join('');
+    expect(output.match(/"Threshold":"80"/g)).toHaveLength(1);
+    expect(output.match(/"Threshold":"100"/g)).toHaveLength(1);
+  });
+
+  test('does not re-emit a threshold that was already claimed', async () => {
+    const rollup = await loadRollup();
+    const stdout = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    sendMock
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({
+        Responses: {
+          Budgets: [
+            {
+              scope_key: 'USER#user-1',
+              period: 'CONFIG',
+              monthly_limit_usd: 10,
+              hard_stop: true,
+            },
+            {
+              scope_key: 'USER#user-1',
+              period: '2026-08',
+              spend_usd: 8.5,
+              alerted_80_at: '2026-08-18T12:00:00.000Z',
+            },
+          ],
+        },
+      });
+
+    await expect(rollup.rollupTaskCost(record())).resolves.toBe(true);
+
+    expect(stdout).not.toHaveBeenCalled();
+    expect(sendMock).toHaveBeenCalledTimes(2);
   });
 
   test('treats an existing task marker as an idempotent replay', async () => {
@@ -172,6 +246,47 @@ describe('budget rollup handler', () => {
     await expect(rollup.rollupTaskCost(record())).resolves.toBe(false);
 
     expect(stdout.mock.calls.map(call => String(call[0])).join('')).toContain('"Threshold":"80"');
+  });
+
+  test('re-emits a threshold when its first claim write fails', async () => {
+    const rollup = await loadRollup();
+    const stdout = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const canceled = Object.assign(new Error('cancelled'), {
+      name: 'TransactionCanceledException',
+    });
+    const budgetState = {
+      Responses: {
+        Budgets: [
+          {
+            scope_key: 'USER#user-1',
+            period: 'CONFIG',
+            monthly_limit_usd: 10,
+            hard_stop: true,
+          },
+          {
+            scope_key: 'USER#user-1',
+            period: '2026-08',
+            spend_usd: 8.5,
+          },
+        ],
+      },
+    };
+    sendMock
+      // First delivery commits spend and emits, but cannot persist the claim.
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce(budgetState)
+      .mockRejectedValueOnce(new Error('claim throttled'))
+      // Retry proves spend was already applied, then re-emits and claims.
+      .mockRejectedValueOnce(canceled)
+      .mockResolvedValueOnce({ Item: { scope_key: 'TASK#task-1' } })
+      .mockResolvedValueOnce(budgetState)
+      .mockResolvedValueOnce({});
+
+    await expect(rollup.rollupTaskCost(record())).rejects.toThrow('claim throttled');
+    await expect(rollup.rollupTaskCost(record())).resolves.toBe(false);
+
+    const output = stdout.mock.calls.map(call => String(call[0])).join('');
+    expect(output.match(/"Threshold":"80"/g)).toHaveLength(2);
   });
 
   test('throws so the shared stream consumer retries the record', async () => {

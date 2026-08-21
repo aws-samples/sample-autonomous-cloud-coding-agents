@@ -29,7 +29,7 @@ This is an operational guardrail, not invoice reconciliation. It inherits every 
 
 ### Setting up cost controls
 
-1. **Choose scopes.** Use one Cognito group such as `Everyone` for a shared organization pool. Add department/project groups or personal limits only when they represent a real independent control.
+1. **Choose scopes.** Use one Cognito group such as `Everyone` for a shared organization pool. Add department/project groups or personal limits only when they represent a real independent control. Avoid whitespace and commas in budget-team group names: API Gateway can expose the Cognito group claim as a delimited string, where those characters are treated as separators.
 2. **Create and populate groups.** Cognito group membership is the team mapping. `bgagent budget` validates groups but does not create them or add users. For an organization pool, bulk-add existing users once and add group assignment to the invitation/onboarding process.
 
    Get `UserPoolId` from `bgagent platform outputs`, then create the shared group and add each existing user in the Cognito console or AWS CLI:
