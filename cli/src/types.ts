@@ -332,6 +332,28 @@ export interface TaskSummary {
   readonly updated_at: string;
 }
 
+/** Authenticated caller's personal monthly budget status. */
+export interface PersonalBudgetStatus {
+  /** UTC calendar month in ``YYYY-MM`` form. */
+  readonly period: string;
+  /** First instant of the next UTC calendar month. */
+  readonly resets_at: string;
+  /** Whether an administrator configured a recurring personal limit. */
+  readonly configured: boolean;
+  /** Estimated terminal-task spend attributed to the caller this month. */
+  readonly spend_usd: number;
+  /** Configured recurring limit, or null when no personal limit exists. */
+  readonly monthly_limit_usd: number | null;
+  /** Non-negative estimated amount remaining, or null without a limit. */
+  readonly remaining_usd: number | null;
+  /** Percentage of the configured limit used, or null without a limit. */
+  readonly utilization_percent: number | null;
+  /** Whether the administrator enabled admission hard-stop enforcement. */
+  readonly hard_stop: boolean;
+  /** Whether the configured hard stop is currently blocking new tasks. */
+  readonly hard_stop_active: boolean;
+}
+
 /** Task event returned by GET /v1/tasks/{task_id}/events. */
 export interface TaskEvent {
   readonly event_id: string;

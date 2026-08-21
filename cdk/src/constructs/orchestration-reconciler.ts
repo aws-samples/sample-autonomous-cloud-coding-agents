@@ -47,18 +47,20 @@ export interface OrchestrationReconcilerProps {
 
   /** Forwarded so released child tasks land in the right tables. */
   readonly taskEventsTable: dynamodb.ITable;
+
+  /** Monthly budget config/rollup table. When set, terminal task costs roll up here. */
+  readonly budgetTable?: dynamodb.ITable;
 }
 
 /**
- * TaskTable-stream consumer that drives Linear parent/sub-issue
- * orchestration. On each child task reaching a
- * terminal status it releases newly-unblocked children in dependency
- * order (see `handlers/orchestration-reconciler.ts`).
+ * TaskTable terminal-record consumer. It rolls up every positive task cost into
+ * monthly user/team budgets, then drives parent/sub-issue orchestration for
+ * records that belong to a graph.
  *
  * Stream-source rationale: TaskEventsTable's stream is at its 2-consumer
  * limit (FanOutConsumer + ApprovalMetricsPublisher); TaskTable had no
- * stream, so the reconciler is its first and only consumer — zero
- * contention with the fan-out plane.
+ * stream, so this combined consumer has zero contention with the fan-out plane
+ * and leaves one DynamoDB Streams consumer slot available.
  */
 
 /** DLQ message retention (days) — long enough for an operator to inspect a
@@ -90,6 +92,9 @@ export class OrchestrationReconciler extends Construct {
         ORCHESTRATION_TABLE_NAME: props.orchestrationTable.tableName,
         TASK_TABLE_NAME: props.taskTable.tableName,
         TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
+        ...(props.budgetTable && {
+          BUDGET_TABLE_NAME: props.budgetTable.tableName,
+        }),
         ...(props.orchestratorFunctionArn && {
           ORCHESTRATOR_FUNCTION_ARN: props.orchestratorFunctionArn,
         }),
@@ -121,6 +126,7 @@ export class OrchestrationReconciler extends Construct {
     props.orchestrationTable.grantReadWriteData(this.fn);
     props.taskTable.grantReadWriteData(this.fn);
     props.taskEventsTable.grantReadWriteData(this.fn);
+    props.budgetTable?.grantReadWriteData(this.fn);
 
     // Subscribe to the TaskTable stream. LATEST: we only care about
     // tasks transitioning to terminal from here on. bisectBatchOnError +

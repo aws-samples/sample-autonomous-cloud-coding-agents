@@ -52,6 +52,11 @@ jest.mock('../../../src/handlers/shared/repo-config', () => ({
   lookupRepo: mockLookupRepo,
 }));
 
+const mockCheckBudgetAdmission = jest.fn();
+jest.mock('../../../src/handlers/shared/budgets', () => ({
+  checkBudgetAdmission: (...args: unknown[]) => mockCheckBudgetAdmission(...args),
+}));
+
 // Partial-mock the workflows module: keep every real resolver/descriptor, but
 // make ``disallowedWorkflowModel`` controllable so the rule-13 admission path
 // can be exercised without shipping a workflow that pins a bad model. Defaults
@@ -96,6 +101,13 @@ beforeEach(() => {
   // Default: the resolved workflow's model is permitted (matches the real
   // implementation for every shipped workflow). Rule-13 tests override this.
   mockDisallowedWorkflowModel.mockReturnValue(null);
+  mockCheckBudgetAdmission.mockImplementation(
+    (_userId: string, teamIds?: readonly string[]) => Promise.resolve({
+      teamIds: teamIds ?? [],
+      period: '2026-08',
+      blocked: null,
+    }),
+  );
 });
 
 describe('createTaskCore', () => {
@@ -112,6 +124,75 @@ describe('createTaskCore', () => {
     expect(body.data.repo).toBe('org/repo');
     expect(mockSend).toHaveBeenCalledTimes(2); // task + event
     expect(mockLambdaSend).toHaveBeenCalledTimes(1);
+  });
+
+  test('persists the Cognito teams captured by budget admission', async () => {
+    mockCheckBudgetAdmission.mockResolvedValue({
+      teamIds: ['Developers', 'Platform'],
+      period: '2026-08',
+      blocked: null,
+    });
+
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_description: 'Fix the bug' },
+      makeContext({ teamIds: ['Platform', 'Developers'] }),
+      'req-budget-teams',
+    );
+
+    expect(result.statusCode).toBe(201);
+    expect(mockCheckBudgetAdmission).toHaveBeenCalledWith(
+      'user-123',
+      ['Platform', 'Developers'],
+    );
+    const taskPut = mockSend.mock.calls.find(
+      ([command]) => command._type === 'Put' && command.input.TableName === 'Tasks',
+    );
+    expect(taskPut![0].input.Item.team_ids).toEqual(['Developers', 'Platform']);
+  });
+
+  test('returns 429 without creating a task when a hard-stop budget is exhausted', async () => {
+    mockCheckBudgetAdmission.mockResolvedValue({
+      teamIds: ['Platform'],
+      period: '2026-08',
+      blocked: {
+        scopeType: 'team',
+        scopeId: 'Platform',
+        spendUsd: 101.25,
+        monthlyLimitUsd: 100,
+      },
+    });
+
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_description: 'Fix the bug' },
+      makeContext(),
+      'req-budget-blocked',
+    );
+
+    expect(result.statusCode).toBe(429);
+    expect(JSON.parse(result.body).error).toMatchObject({
+      code: 'BUDGET_EXCEEDED',
+      message: expect.stringContaining("team 'Platform'"),
+    });
+    expect(mockSend).not.toHaveBeenCalled();
+    expect(mockLambdaSend).not.toHaveBeenCalled();
+  });
+
+  test('fails closed when monthly budget admission is unavailable', async () => {
+    mockCheckBudgetAdmission.mockRejectedValue(new Error('budget table unavailable'));
+
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_description: 'Fix the bug' },
+      makeContext(),
+      'req-budget-unavailable',
+    );
+
+    expect(result.statusCode).toBe(503);
+    expect(JSON.parse(result.body).error).toMatchObject({
+      code: 'SERVICE_UNAVAILABLE',
+      message: expect.stringContaining('Budget admission'),
+    });
+    expect(mockSend).not.toHaveBeenCalled();
+    expect(mockLambdaSend).not.toHaveBeenCalled();
   });
 
   test('hoists tenant-scoped Jira issue identity for the sparse lookup index', async () => {
@@ -350,6 +431,7 @@ describe('createTaskCore', () => {
     expect(body.data.task_description).toBe('Original work');
     expect(mockSend).toHaveBeenCalledTimes(2);
     expect(mockLambdaSend).not.toHaveBeenCalled();
+    expect(mockCheckBudgetAdmission).not.toHaveBeenCalled();
   });
 
   test('returns 200 for a repo-less idempotency replay despite empty branch_name', async () => {

@@ -40,8 +40,8 @@ describe('AgentStack', () => {
     expect(template).toBeDefined();
   });
 
-  test('creates exactly 21 DynamoDB tables', () => {
-    // task, task-events, repo, user-concurrency, webhook, task-nudges,
+  test('creates exactly 22 DynamoDB tables', () => {
+    // task, task-events, repo, user-concurrency, budget, webhook, task-nudges,
     // task-approvals (Cedar HITL V2),
     // api-key (platform API keys for headless webhook management),
     // slack-installation, slack-user-mapping,
@@ -52,8 +52,8 @@ describe('AgentStack', () => {
     // jira-project-mapping, jira-user-mapping, jira-workspace-registry,
     // jira-webhook-dedup (added for the Jira Cloud integration on main),
     // orchestration (parent/sub-issue DAG state).
-    // = 16 shared/base + 4 Jira + 1 orchestration = 21.
-    template.resourceCountIs('AWS::DynamoDB::Table', 21);
+    // = 17 shared/base + 4 Jira + 1 orchestration = 22.
+    template.resourceCountIs('AWS::DynamoDB::Table', 22);
   });
 
   test('creates TaskApprovalsTable with user_id-status-index GSI', () => {
@@ -74,6 +74,12 @@ describe('AgentStack', () => {
   test('outputs TaskApprovalsTableName', () => {
     template.hasOutput('TaskApprovalsTableName', {
       Description: 'Name of the DynamoDB task approvals table (Cedar HITL)',
+    });
+  });
+
+  test('outputs BudgetTableName', () => {
+    template.hasOutput('BudgetTableName', {
+      Description: 'Name of the monthly user/team budget configuration and spend table',
     });
   });
 
@@ -721,8 +727,8 @@ describe('AgentStack', () => {
   });
 
   test('wires all three DLQ-depth alarms to the alerts topic (#629)', () => {
-    // FanOut, ApprovalMetricsPublisher, and the screenshot processor
-    // DLQ alarms must each carry an AlarmActions entry — otherwise a
+    // FanOut, ApprovalMetricsPublisher, and screenshot processor DLQ alarms
+    // must each carry an AlarmActions entry — otherwise a
     // poison-pill pile-up stays silent (the whole point of #629).
     const alarms = template.findResources('AWS::CloudWatch::Alarm');
     const dlqAlarmsWithActions = Object.values(alarms).filter((r: any) => {
@@ -738,6 +744,17 @@ describe('AgentStack', () => {
     expect(dlqAlarmsWithActions).toHaveLength(3);
     // Each action must reference the operational-alerts topic.
     for (const alarm of dlqAlarmsWithActions) {
+      expect(JSON.stringify((alarm as any).Properties.AlarmActions)).toContain('OperationalAlerts');
+    }
+  });
+
+  test('wires the 80/100 budget alarms to the alerts topic (#471)', () => {
+    const alarms = template.findResources('AWS::CloudWatch::Alarm');
+    const budgetAlarms = Object.values(alarms).filter((r: any) =>
+      r.Properties?.Namespace === 'ABCA/Budgets'
+      && r.Properties?.MetricName === 'BudgetThresholdCrossed');
+    expect(budgetAlarms).toHaveLength(2);
+    for (const alarm of budgetAlarms) {
       expect(JSON.stringify((alarm as any).Properties.AlarmActions)).toContain('OperationalAlerts');
     }
   });

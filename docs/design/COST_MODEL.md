@@ -2,7 +2,7 @@
 
 This document provides an order-of-magnitude cost model for the platform. Cost efficiency is a first-class design principle (see [ARCHITECTURE.md](./ARCHITECTURE.md)). The model covers infrastructure baseline costs, per-task variable costs, and cost attribution guidance.
 
-Detailed cost management (per-user budgets, cost attribution dashboards, token budget enforcement) builds on this baseline analysis and focuses on the dominant cost drivers.
+Monthly user/team USD budgets and AWS-native cost attribution build on this baseline analysis and focus controls on the dominant cost drivers.
 
 ## Infrastructure baseline (monthly, idle)
 
@@ -13,7 +13,7 @@ These costs are incurred regardless of task volume:
 | NAT Gateway (1×) | ~$32/month | Fixed hourly cost + data processing. Single AZ (see [COMPUTE.md  - Network architecture](./COMPUTE.md)). |
 | VPC Interface Endpoints (7×, 2 AZs) | ~$102/month | $0.01/hr × 7 endpoints × 2 AZs × 730 hrs. |
 | VPC Flow Logs | ~$3/month | CloudWatch ingestion. |
-| DynamoDB (on-demand, idle) | ~$0/month | Pay-per-request; 7 core tables (Tasks, Events, Nudges, Approvals, UserConcurrency, Webhooks, Repo). Integration tables add more when enabled (Slack: installation, user-mapping; Linear: project-mapping, user-mapping, workspace-registry, webhook-dedup). No cost when idle. |
+| DynamoDB (on-demand, idle) | ~$0/month | Pay-per-request; 8 core tables (Tasks, Events, Nudges, Approvals, UserConcurrency, Budgets, Webhooks, Repo). Integration tables add more when enabled. No cost when idle. |
 | S3 Trace Artifacts bucket (idle) | ~$0/month | 7-day lifecycle auto-expires objects; no cost when no traces are stored. |
 | EventBridge reconciler rule | <$0.01/month | Invokes Lambda every 5 min (288/day). Rule itself is free; Lambda invocation is the cost (see below). |
 | Stranded task reconciler Lambda (idle) | <$0.01/month | 288 invocations/day × 256 MB × ~100 ms avg (early exit when no stranded tasks). ~$0.005/month total (requests + duration). |
@@ -23,7 +23,7 @@ These costs are incurred regardless of task volume:
 
 ### Scale-to-zero characteristics
 
-Most platform components are fully serverless and incur zero cost when idle: DynamoDB (PAY_PER_REQUEST, 7 core tables plus integration tables when Slack/Linear are enabled), Lambda, API Gateway, S3 (trace artifacts auto-expire in 7 days), SQS (fanout DLQ), ECS Fargate (cluster is free, when enabled), AgentCore Runtime (per-session), Bedrock (per-token), and Cognito (free tier). The stranded task reconciler adds <$0.01/month even when idle (288 Lambda invocations/day, early-exit). The always-on cost floor (~$140–150/month) is dominated by VPC networking infrastructure (NAT Gateway + 7 interface endpoints across 2 AZs) which is required for private subnet connectivity to AWS services and GitHub. See the [Deployment guide](../guides/DEPLOYMENT_GUIDE.md) for the full scale-to-zero breakdown.
+Most platform components are fully serverless and incur zero cost when idle: DynamoDB (PAY_PER_REQUEST, 8 core tables plus integration tables), Lambda, API Gateway, S3 (trace artifacts auto-expire in 7 days), SQS, ECS Fargate (cluster is free, when enabled), AgentCore Runtime (per-session), Bedrock (per-token), and Cognito (free tier). The stranded task reconciler adds <$0.01/month even when idle (288 Lambda invocations/day, early-exit). The always-on cost floor (~$140–150/month) is dominated by VPC networking infrastructure (NAT Gateway + 7 interface endpoints across 2 AZs) which is required for private subnet connectivity to AWS services and GitHub. See the [Deployment guide](../guides/DEPLOYMENT_GUIDE.md) for the full scale-to-zero breakdown.
 
 ## Per-task variable costs
 
@@ -41,7 +41,7 @@ Assuming a typical task: 1–2 hours, Claude Sonnet, ~100K input tokens, ~20K ou
 | Lambda fanout consumer | <$0.01 | Triggered per batch of task events (batch size 100, 5 s window). Typically 5–20 invocations per task at 256 MB. Negligible. |
 | Lambda nudge / trace / events | <$0.01 | On-demand per user request. Negligible unless heavily polled. |
 | DynamoDB reads/writes | <$0.01 | ~30–80 operations per task (task CRUD, events, nudges, counter updates). Negligible. |
-| DynamoDB Streams (fanout) | <$0.01 | Stream reads charged per 25 KB. Typical task: ~20–50 event records. Negligible. |
+| DynamoDB Streams (fanout and budget rollup) | <$0.01 | Stream reads charged per 25 KB. Event fanout processes progress records; budget rollup processes terminal TaskTable records. Negligible. |
 | S3 trace upload (if `--trace`) | <$0.01 | One PUT per task + storage (gzipped NDJSON, typically 50–500 KB, auto-expires in 7 days). |
 | NAT Gateway data | <$0.01 | GitHub API traffic: clone + push. Small repos: <10 MB. |
 | Custom step Lambdas | $0–0.05 | Only if configured. Per-invocation: ~$0.01 per step. |
@@ -90,6 +90,7 @@ For multi-user deployments, cost should be attributable to individual users and 
 
 - **Per-task:** Token usage and compute duration are captured in task metadata (`agent.cost_usd`, `agent.turns`  - see [OBSERVABILITY.md](./OBSERVABILITY.md)). Note: `agent.cost_usd` is the Claude Agent SDK's **client-side estimate** (a build-time price table), not authoritative billing — use it for guardrails, and AWS Cost Explorer / CUR 2.0 for the real bill (see [COST_ATTRIBUTION.md](../guides/COST_ATTRIBUTION.md)).
 - **Per-user:** Aggregate task costs by `user_id`.
+- **Per-team:** Attribute a task to the Cognito groups captured at task creation.
 - **Per-repo:** Aggregate task costs by `repo`.
 - **Dashboard:** Cost attribution dashboards should be built from the same task-level metrics.
 
@@ -101,14 +102,23 @@ For **AWS-native** chargeback of Bedrock spend (Cost Explorer / CUR 2.0 by `user
 |---|---|---|
 | Turn limit | `max_turns` per task | 100 |
 | Cost budget | `max_budget_usd` per task | None (unlimited) |
+| Monthly user/team warning | Estimated terminal-task cost rollup | CloudWatch/SNS at 80% and 100% |
+| Monthly user/team hard stop | Admission check at 100% | Disabled per scope unless `--hard-stop` is set |
 | Session timeout | Orchestrator timeout | 9 hours |
 | Concurrency limit | Per-user atomic counter | 3 concurrent tasks |
 | System concurrency | System-wide counter | Account-level AgentCore quota |
 
+Monthly budgets use UTC calendar months and the same estimated `cost_usd` stored on terminal tasks. The TaskTable stream consumer transactionally increments the user and captured Cognito-team rollups and writes a task marker so duplicate stream delivery cannot double count. Admission checks every configured applicable scope; any scope at 100% with hard stop enabled rejects a new task. In-flight tasks continue and can overshoot because their final cost is unknown until termination.
+
+The 80% and 100% crossings emit claimed, per-scope `ABCA/Budgets` CloudWatch metrics. Aggregate threshold alarms notify the shared `OperationalAlerts` SNS topic; simultaneous crossings can be coalesced, while the reconciler logs retain exact scope details. Metric claims normally limit each crossing to one emission per scope/month. Emission happens before the claim is persisted so a crash cannot permanently suppress an alert; a concurrent or crash retry can therefore emit a harmless duplicate. Operators configure and inspect limits with `bgagent budget set|status`.
+
+Authenticated users can inspect their personal scope with `bgagent budget status --me` (`GET /v1/tasks?view=budget`). The response includes estimated spend even when no personal limit is configured. It does not expose team scopes or permit mutation; administrators remain the only actors who set user/team limits.
+
+The controls add one on-demand DynamoDB table with PITR, two standard CloudWatch alarms, and up to two custom metric time series. Admission, terminal rollup, and user-status requests incur usage-based DynamoDB/API Gateway/Lambda/SNS charges; no dedicated continuously running compute is added. See the operator guide's [cost-control setup and cost breakdown](../guides/COST_ATTRIBUTION.md#setting-up-cost-controls).
+
 ## Additional guardrails
 
-- Per-user monthly token budgets with alerts at 80% and hard stop at 100%.
-- Per-team monthly cost budgets.
+- Token-denominated monthly budgets (the shipped fleet budget is USD-denominated).
 - Cost attribution dashboard in the control panel.
 - Automated model downgrade (e.g. Sonnet -> Haiku) when approaching budget limits.
 

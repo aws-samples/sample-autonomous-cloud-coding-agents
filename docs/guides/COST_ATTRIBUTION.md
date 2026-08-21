@@ -11,7 +11,7 @@ ABCA gives you three independent views of cost. They answer different questions;
 
 | Meter | Granularity | Source of truth for | Where |
 |---|---|---|---|
-| **In-app `cost_usd`** | Per task | Per-task budget guardrails (`max_budget_usd`) | Task metadata / control panel |
+| **In-app `cost_usd`** | Per task; monthly rollups by user/team | Per-task and fleet admission guardrails | Task metadata / `bgagent budget` |
 | **CUR session-tag chargeback** | Per user / per repo, aggregated per usage-type per day | AWS-native FinOps chargeback | Cost Explorer / CUR 2.0 |
 | **Invocation-log metadata** | Per Bedrock call | Per-call forensics, reconciliation | `/aws/bedrock/model-invocation-logs/<stack>` |
 
@@ -20,6 +20,58 @@ Why all three: the in-app meter is an estimate the platform computes; it does no
 ## What the platform does automatically
 
 Once deployed, each agent task makes its Bedrock calls under **session-tagged, refreshable credentials** carrying `{user_id, repo, task_id}`, and stamps the same values as **request metadata** on every call. You do **not** need to change any code. What remains is **operator setup in the AWS Billing console** — AWS does not surface tag-based cost data until you activate it, and (see the ordering note below) you can only activate *after* the platform has run tagged tasks.
+
+## ABCA monthly budget guardrails
+
+ABCA can aggregate terminal task `cost_usd` by Cognito user and Cognito-group team, alert at 80%/100%, and optionally reject new tasks at 100%. Configure it with `bgagent budget set` and inspect the current UTC month with `bgagent budget status`; see [Monthly user and team budgets](./USER_GUIDE.md#monthly-user-and-team-budgets).
+
+This is an operational guardrail, not invoice reconciliation. It inherits every limitation of the SDK estimate, counts a task only when it reaches a terminal state, and can overshoot while tasks run concurrently. Use AWS Budgets over activated cost-allocation tags for authoritative billing alerts.
+
+### Setting up cost controls
+
+1. **Choose scopes.** Use one Cognito group such as `Everyone` for a shared organization pool. Add department/project groups or personal limits only when they represent a real independent control. Avoid whitespace and commas in budget-team group names: API Gateway can expose the Cognito group claim as a delimited string, where those characters are treated as separators.
+2. **Create and populate groups.** Cognito group membership is the team mapping. `bgagent budget` validates groups but does not create them or add users. For an organization pool, bulk-add existing users once and add group assignment to the invitation/onboarding process.
+
+   Get `UserPoolId` from `bgagent platform outputs`, then create the shared group and add each existing user in the Cognito console or AWS CLI:
+
+   ```bash
+   aws cognito-idp create-group \
+     --user-pool-id <user-pool-id> \
+     --group-name Everyone
+
+   aws cognito-idp admin-add-user-to-group \
+     --user-pool-id <user-pool-id> \
+     --username <cognito-username> \
+     --group-name Everyone
+   ```
+
+   Repeat `admin-add-user-to-group` during each new-user onboarding. A logged-in user should run `bgagent login` again after a membership change so interactive API requests carry current group claims; linked headless integrations resolve current groups server-side.
+3. **Set recurring limits.**
+
+   ```bash
+   # Shared organization pool with admission stopped at 100%.
+   bgagent budget set --team Everyone --monthly-usd 10000 --hard-stop
+
+   # Optional personal alerts-only limit.
+   bgagent budget set --user alice@example.com --monthly-usd 100
+   ```
+
+4. **Connect notifications.** Confirm the deployment's `alertEmail` subscription or subscribe an operations destination to the exported `OperationalAlertsTopicArn`.
+5. **Verify both views.** Operators run `bgagent budget status`; users run `bgagent budget status --me` after `bgagent login`. Users see only their personal scope and cannot change it.
+6. **Test enforcement.** Use a non-production user/group and a small limit. Let a task finish so its estimated cost rolls up, then verify the 80%/100% notification and a `429 BUDGET_EXCEEDED` response for a hard-stop scope.
+
+The recurring configuration survives month boundaries; spend automatically starts from zero at the next UTC month. Changing a limit or toggling hard stop is one `budget set` command. There is currently no `budget unset` command and no automatic default-group assignment.
+
+### Cost of the controls
+
+There are two kinds of cost:
+
+- **Administrative effort:** one initial group-creation/bulk-membership pass, one budget command per user/team scope, and one group assignment per new user. A single `Everyone` scope has no recurring monthly configuration work.
+- **AWS charges:** one on-demand DynamoDB table with point-in-time recovery, two standard CloudWatch alarms, up to two custom metric time series (`Threshold=80` and `Threshold=100`), and small usage-based DynamoDB/API Gateway/Lambda/SNS charges. The implementation reuses the existing task-list Lambda for `--me` and the existing TaskTable stream reconciler for rollups, so it adds no continuously running compute.
+
+At the public US East (N. Virginia) first-tier list rates verified in August 2026, the two standard alarms are about **$0.20/month** total. If both custom threshold metric series are active, their list-rate equivalent is up to about **$0.60/month**, making the CloudWatch portion approximately **$0.80/month** before free-tier allowance. The [CloudWatch free tier](https://aws.amazon.com/cloudwatch/pricing/) includes 10 custom metrics and 10 alarm metrics per month, shared with the rest of the account, so a lightly used account may pay $0 for that portion.
+
+DynamoDB is `PAY_PER_REQUEST`; costs scale with task volume, group count, retained deduplication markers, table storage, and PITR backup storage. Each task admission strongly reads its user/team scopes, and each terminal task transactionally writes one deduplication marker plus one spend increment per applicable scope. See [DynamoDB pricing](https://aws.amazon.com/dynamodb/pricing/on-demand/) and use the [AWS Pricing Calculator](https://calculator.aws/) for the deployment Region and expected task volume. API Gateway, Lambda, and SNS are request-based and normally negligible compared with agent inference for this low-frequency control plane.
 
 ## FinOps checklist
 

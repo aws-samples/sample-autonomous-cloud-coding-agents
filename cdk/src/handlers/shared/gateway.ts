@@ -41,6 +41,18 @@ export function extractUserId(event: APIGatewayProxyEvent): string | null {
 }
 
 /**
+ * Extract Cognito group membership from the authenticated JWT. Group names are
+ * the platform's team identifiers for monthly budgets.
+ */
+export function extractUserGroups(event: APIGatewayProxyEvent): string[] {
+  const raw = event.requestContext.authorizer?.claims?.['cognito:groups'];
+  if (!raw) return [];
+  const groups = Array.isArray(raw) ? raw : String(raw).split(/[,\s]+/);
+  return [...new Set(groups.filter((group): group is string =>
+    typeof group === 'string' && group.length > 0))].sort();
+}
+
+/**
  * Check whether the authenticated caller is in a Cognito group. Cognito places
  * group membership in the `cognito:groups` claim, which the authorizer surfaces
  * either as a comma/space-separated string or an array depending on the token
@@ -50,10 +62,7 @@ export function extractUserId(event: APIGatewayProxyEvent): string | null {
  * @returns true if the caller is a member of `group`.
  */
 export function userInGroup(event: APIGatewayProxyEvent, group: string): boolean {
-  const raw = event.requestContext.authorizer?.claims?.['cognito:groups'];
-  if (!raw) return false;
-  const groups = Array.isArray(raw) ? raw : String(raw).split(/[,\s]+/);
-  return groups.includes(group);
+  return extractUserGroups(event).includes(group);
 }
 
 /**

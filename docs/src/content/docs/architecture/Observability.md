@@ -117,6 +117,7 @@ All events carry `task_id` and `user_id` for filtering.
 ### Cost and performance
 
 - **Token usage** - Per task, per user, per repo. Feeds cost attribution and budget enforcement.
+- **Monthly estimated spend** - Terminal task `cost_usd` rolled up by user and Cognito team for the UTC month.
 - **Task duration** - End-to-end, cold start (clone + install), and time to first agent output.
 - **Error rates** - By failure type (agent crash, timeout, cancellation, orchestration failure).
 
@@ -126,6 +127,7 @@ All events carry `task_id` and `user_id` for filtering.
 |--------|------|---------|
 | Task duration (p50, p95) | Latency | Performance baseline and regression detection |
 | Token usage per task | Cost | Cost attribution and budget enforcement |
+| `ABCA/Budgets:BudgetThresholdCrossed` | Cost | Claimed 80%/100% monthly user/team budget crossings; retries can rarely duplicate a metric |
 | Cold start duration | Latency | Image optimization signal |
 | Active tasks (RUNNING count) | Capacity | Admission control and capacity planning |
 | Pending tasks (SUBMITTED count) | Capacity | Backlog depth and throughput monitoring |
@@ -160,6 +162,8 @@ The CloudWatch GenAI Observability console provides additional views: per-sessio
 | Agent crash rate spike | Sustained high session failure rate | Check for model API errors, compute quota exhaustion, image pull failures. |
 | Submitted backlog depth | SUBMITTED count exceeds threshold | System at capacity. Increase concurrency limits or wait for running tasks. |
 | Guardrail screening failures | Sustained Bedrock Guardrail API failures | Tasks fail at submission (503) and hydration (FAILED). Recovers when Bedrock recovers. |
+| Monthly budget warning | Estimated spend crosses 80% | Notify the shared `OperationalAlerts` SNS topic; inspect `OrchestrationReconciler` logs for scope details. |
+| Monthly budget exceeded | Estimated spend crosses 100% | Notify the shared topic. Scopes configured with hard stop reject new tasks. |
 
 ## Code attribution
 
@@ -171,6 +175,7 @@ Task conversations, tool calls, decisions, and outcomes are persisted with metad
 
 - **TaskEvents table** - Append-only audit log of all task events. Records carry a DynamoDB TTL and are auto-deleted after the retention period (default 90 days, configurable via `taskRetentionDays`).
 - **Task records** - Status, timestamps, metadata. TTL is stamped when the task reaches a terminal state (default 90 days). Active tasks are retained indefinitely.
+- **Budget records** - Recurring configs persist; monthly spend rows and task deduplication markers expire after about 400 days.
 - **Logs** - Application and usage logs retained for 90 days in CloudWatch. Traces flow to X-Ray via CloudWatch Transaction Search.
 - **Model invocation logs** - Bedrock model invocation logging with 90-day retention for compliance and prompt injection investigation.
 

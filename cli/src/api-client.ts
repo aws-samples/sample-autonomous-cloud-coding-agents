@@ -49,6 +49,7 @@ import {
   RegistryShowResponse,
   SlackLinkResponse,
   PaginatedResponse,
+  PersonalBudgetStatus,
   ReplayBundle,
   SuccessResponse,
   TaskDetail,
@@ -223,6 +224,15 @@ export class ApiClient {
     const qs = params.toString();
     const path = `/tasks${qs ? `?${qs}` : ''}`;
     return this.request<PaginatedResponse<TaskSummary>>('GET', path);
+  }
+
+  /** GET /tasks?view=budget — read the authenticated caller's personal budget. */
+  async getPersonalBudget(): Promise<PersonalBudgetStatus> {
+    const res = await this.request<SuccessResponse<PersonalBudgetStatus>>(
+      'GET',
+      '/tasks?view=budget',
+    );
+    return res.data;
   }
 
   /** GET /tasks/{task_id} — get task detail. */

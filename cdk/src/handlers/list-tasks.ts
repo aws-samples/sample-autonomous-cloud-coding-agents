@@ -20,9 +20,10 @@
 import { QueryCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
+import { loadPersonalBudgetStatus } from './shared/budgets';
 import { extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
-import { ErrorCode, errorResponse, paginatedResponse } from './shared/response';
+import { ErrorCode, errorResponse, paginatedResponse, successResponse } from './shared/response';
 import { type TaskRecord, toTaskSummary } from './shared/types';
 import { makeDocClient } from './shared/ua';
 import { decodePaginationToken, encodePaginationToken, parseLimit, parseStatusFilter } from './shared/validation';
@@ -51,6 +52,10 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     // 2. Parse query parameters
     const params = event.queryStringParameters ?? {};
+    if (params.view === 'budget') {
+      const budget = await loadPersonalBudgetStatus(userId);
+      return successResponse(200, budget, requestId);
+    }
     const limit = parseLimit(params.limit, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT);
     const statusFilter = params.status !== undefined ? parseStatusFilter(params.status) : null;
     const repoFilter = params.repo;

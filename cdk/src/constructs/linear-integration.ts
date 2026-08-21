@@ -70,6 +70,9 @@ export interface LinearIntegrationProps {
   /** The DynamoDB task events table. */
   readonly taskEventsTable: dynamodb.ITable;
 
+  /** Monthly user/team budget configuration and spend table. */
+  readonly budgetTable?: dynamodb.ITable;
+
   /** The DynamoDB repo config table (optional — for repo onboarding checks). */
   readonly repoTable?: dynamodb.ITable;
 
@@ -233,6 +236,10 @@ export class LinearIntegration extends Construct {
     if (props.attachmentsBucket) {
       createTaskEnv.ATTACHMENTS_BUCKET_NAME = props.attachmentsBucket.bucketName;
     }
+    if (props.budgetTable) {
+      createTaskEnv.BUDGET_TABLE_NAME = props.budgetTable.tableName;
+      createTaskEnv.USER_POOL_ID = props.userPool.userPoolId;
+    }
 
     // --- Cognito Authorizer (for /linear/link) ---
     const cognitoAuthorizer = new apigw.CognitoUserPoolsAuthorizer(this, 'LinearCognitoAuthorizer', {
@@ -314,6 +321,13 @@ export class LinearIntegration extends Construct {
     props.taskEventsTable.grantReadWriteData(webhookProcessorFn);
     if (props.repoTable) {
       props.repoTable.grantReadData(webhookProcessorFn);
+    }
+    if (props.budgetTable) {
+      props.budgetTable.grantReadData(webhookProcessorFn);
+      webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
+        actions: ['cognito-idp:AdminListGroupsForUser'],
+        resources: [props.userPool.userPoolArn],
+      }));
     }
     if (props.orchestratorFunctionArn) {
       webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({

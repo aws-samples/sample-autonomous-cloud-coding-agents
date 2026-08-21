@@ -156,6 +156,8 @@ export type ChannelSource = 'api' | 'webhook' | 'slack' | 'linear' | 'jira';
 export interface TaskRecord {
   readonly task_id: string;
   readonly user_id: string;
+  /** Cognito group names captured at admission for team-budget rollups. */
+  readonly team_ids?: readonly string[];
   readonly status: TaskStatusType;
   /** Target repository (``owner/repo``). Optional since #248 Phase 3: a
    *  repo-less workflow (``requires_repo: false``) runs with no repo. */
@@ -535,6 +537,28 @@ export interface TaskSummary {
   readonly pr_url: string | null;
   readonly created_at: string;
   readonly updated_at: string;
+}
+
+/** Authenticated caller's personal monthly budget status. */
+export interface PersonalBudgetStatus {
+  /** UTC calendar month in ``YYYY-MM`` form. */
+  readonly period: string;
+  /** First instant of the next UTC calendar month. */
+  readonly resets_at: string;
+  /** Whether an administrator configured a recurring personal limit. */
+  readonly configured: boolean;
+  /** Estimated terminal-task spend attributed to the caller this month. */
+  readonly spend_usd: number;
+  /** Configured recurring limit, or null when no personal limit exists. */
+  readonly monthly_limit_usd: number | null;
+  /** Non-negative estimated amount remaining, or null without a limit. */
+  readonly remaining_usd: number | null;
+  /** Percentage of the configured limit used, or null without a limit. */
+  readonly utilization_percent: number | null;
+  /** Whether the administrator enabled admission hard-stop enforcement. */
+  readonly hard_stop: boolean;
+  /** Whether the configured hard stop is currently blocking new tasks. */
+  readonly hard_stop_active: boolean;
 }
 
 /**

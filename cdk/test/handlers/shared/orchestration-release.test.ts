@@ -671,8 +671,9 @@ describe('releaseChild — idempotency + failure', () => {
     expect(fail.input.ExpressionAttributeValues![':reason']).toContain('content policy');
   });
 
-  // Against the codes createTaskCore ACTUALLY returns: 400 (validation/guardrail)
-  // + 422 (repo-not-onboarded) are terminal; 409 (dup) + 5xx are transient.
+  // Against the codes createTaskCore ACTUALLY returns: 400 (validation/guardrail),
+  // 422 (repo-not-onboarded), and 429 (budget exhausted) are terminal;
+  // 409 (dup) + 5xx are transient.
   test('422 REPO_NOT_ONBOARDED is TERMINAL with an "onboard it" reason (sweep can\'t bound it)', async () => {
     const ddb = { send: jest.fn().mockResolvedValue({}) };
     const createTaskCore = jest.fn().mockResolvedValue({
@@ -691,6 +692,30 @@ describe('releaseChild — idempotency + failure', () => {
     if (result.kind === 'create_failed_terminal') expect(result.failureReason).toMatch(/onboard/i);
     const fail = ddb.send.mock.calls[1][0] as UpdateCommand;
     expect(fail.input.ExpressionAttributeValues![':failed']).toBe('failed');
+  });
+
+  test('429 BUDGET_EXCEEDED is TERMINAL with an actionable budget reason', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    const createTaskCore = jest.fn().mockResolvedValue({
+      statusCode: 429,
+      body: '{"error":{"code":"BUDGET_EXCEEDED","message":"monthly budget exhausted"}}',
+    });
+    const result = await releaseChild({
+      ddb: ddb as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow(),
+      platformUserId: 'user-1',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+    expect(result.kind).toBe('create_failed_terminal');
+    if (result.kind === 'create_failed_terminal') {
+      expect(result.failureReason).toMatch(/monthly budget/i);
+      expect(result.failureReason).toMatch(/next UTC month/i);
+    }
+    const fail = ddb.send.mock.calls[1][0] as UpdateCommand;
+    expect(fail.input.ExpressionAttributeValues![':failed']).toBe('failed');
+    expect(fail.input.ExpressionAttributeValues![':reason']).toContain('monthly budget');
   });
 
   test('5xx (server) + 409 (duplicate replay) are TRANSIENT — roll back to ready', async () => {
