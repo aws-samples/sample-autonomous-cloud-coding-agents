@@ -161,8 +161,11 @@ async function writeRollup(evt: TaskCostEvent): Promise<boolean> {
             TableName: BUDGET_TABLE_NAME,
             Key: { scope_key: scopeKey, period: evt.period },
             UpdateExpression:
-              'SET updated_at = :now, ttl = :ttl '
+              'SET updated_at = :now, #ttl = :ttl '
               + 'ADD spend_usd :cost, task_count :one',
+            ExpressionAttributeNames: {
+              '#ttl': 'ttl',
+            },
             ExpressionAttributeValues: {
               ':now': now,
               ':ttl': ttl,

@@ -136,9 +136,12 @@ export async function setMonthlyBudget(
           TableName: tableName,
           Key: { scope_key: scopeKey, period },
           UpdateExpression:
-            'SET scope_type = :scopeType, scope_id = :scopeId, updated_at = :updatedAt, ttl = :ttl '
+            'SET scope_type = :scopeType, scope_id = :scopeId, updated_at = :updatedAt, #ttl = :ttl '
             + 'REMOVE alerted_80_at, alerted_80_spend_usd, alerted_80_limit_usd, '
             + 'alerted_100_at, alerted_100_spend_usd, alerted_100_limit_usd',
+          ExpressionAttributeNames: {
+            '#ttl': 'ttl',
+          },
           ExpressionAttributeValues: {
             ':scopeType': scope.type,
             ':scopeId': scope.id,

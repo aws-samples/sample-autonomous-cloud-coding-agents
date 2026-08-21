@@ -72,7 +72,10 @@ describe('budget store', () => {
     });
     expect(command.input.TransactItems?.[1]?.Update).toMatchObject({
       Key: { scope_key: 'TEAM#Platform', period: '2026-08' },
+      ExpressionAttributeNames: { '#ttl': 'ttl' },
     });
+    expect(command.input.TransactItems?.[1]?.Update?.UpdateExpression)
+      .toContain('#ttl = :ttl');
     expect(command.input.TransactItems?.[1]?.Update?.UpdateExpression)
       .toContain('REMOVE alerted_80_at');
   });

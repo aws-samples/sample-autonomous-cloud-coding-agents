@@ -113,6 +113,10 @@ describe('budget rollup handler', () => {
     const transaction = sendMock.mock.calls[0][0];
     expect(transaction.input.TransactItems).toHaveLength(3);
     expect(transaction.input.TransactItems[0].Put.Item.scope_key).toBe('TASK#task-1');
+    for (const item of transaction.input.TransactItems.slice(1)) {
+      expect(item.Update.UpdateExpression).toContain('#ttl = :ttl');
+      expect(item.Update.ExpressionAttributeNames).toEqual({ '#ttl': 'ttl' });
+    }
     expect(stdout.mock.calls.map(call => String(call[0])).join('')).toContain('"Threshold":"80"');
   });
 
