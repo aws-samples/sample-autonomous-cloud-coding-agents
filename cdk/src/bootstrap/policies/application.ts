@@ -239,7 +239,7 @@ export function applicationPolicy(): iam.PolicyDocument {
       }),
 
       new iam.PolicyStatement({
-        // The CDK Provider framework (AgentCore registry provisioning, #246)
+        // The CDK Provider framework (Agent Registry provisioning, #246)
         // creates a Step Functions state machine as its async completion waiter.
         sid: 'StepFunctions',
         effect: iam.Effect.ALLOW,

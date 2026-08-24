@@ -45,9 +45,9 @@ describe('AgentRegistry construct', () => {
     });
   });
 
-  test('registers the custom resource with the AgentCore type', () => {
+  test('registers the custom resource with the standalone Agent Registry type', () => {
     const template = createStack();
-    template.hasResourceProperties('Custom::AgentCoreRegistry', {
+    template.hasResourceProperties('Custom::AgentRegistry', {
       RegistryName: 'abca_test',
       Description: 'test registry',
     });
@@ -58,7 +58,7 @@ describe('AgentRegistry construct', () => {
     const stack = new Stack(app, 'TestStack');
     new AgentRegistry(stack, 'AgentRegistry', { registryName: 'abca_test' });
     const template = Template.fromStack(stack);
-    template.hasResourceProperties('Custom::AgentCoreRegistry', {
+    template.hasResourceProperties('Custom::AgentRegistry', {
       RegistryName: 'abca_test',
       Description: '',
     });
@@ -71,9 +71,8 @@ describe('AgentRegistry construct', () => {
         Statement: Match.arrayWith([
           Match.objectLike({
             Action: Match.arrayWith([
-              'bedrock-agentcore:CreateRegistry',
-              'bedrock-agentcore:ListRegistries',
-              'bedrock-agentcore:CreateWorkloadIdentity',
+              'agent-registry:CreateRegistry',
+              'agent-registry:ListRegistries',
             ]),
             Resource: '*',
           }),
@@ -89,11 +88,9 @@ describe('AgentRegistry construct', () => {
         Statement: Match.arrayWith([
           Match.objectLike({
             Action: Match.arrayWith([
-              'bedrock-agentcore:GetRegistry',
-              'bedrock-agentcore:UpdateRegistry',
-              'bedrock-agentcore:DeleteRegistry',
-              'bedrock-agentcore:ListRegistryRecords',
-              'bedrock-agentcore:DeleteRegistryRecord',
+              'agent-registry:GetRegistry',
+              'agent-registry:UpdateRegistry',
+              'agent-registry:DeleteRegistry',
             ]),
           }),
         ]),

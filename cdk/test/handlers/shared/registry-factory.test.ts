@@ -17,24 +17,24 @@
  *  SOFTWARE.
  */
 
-// Single place handlers obtain a `RegistryClient`. Keeping the concrete adapter
-// choice here (not in each handler) means the substrate swap touches one file.
+import { makeRegistryClient } from '../../../src/handlers/shared/registry/factory';
 
-import { AgentRegistryClient } from './agent-registry-client';
-import type { RegistryClient } from './client';
+describe('makeRegistryClient', () => {
+  const originalRegistryId = process.env.AGENT_REGISTRY_ID;
 
-/** Cognito group names that gate publish / approval (#246, REGISTRY.md §10). */
-export const REGISTRY_PUBLISHER_GROUP = 'RegistryPublisher';
-export const REGISTRY_APPROVER_GROUP = 'RegistryApprover';
+  afterEach(() => {
+    if (originalRegistryId === undefined) {
+      delete process.env.AGENT_REGISTRY_ID;
+    } else {
+      process.env.AGENT_REGISTRY_ID = originalRegistryId;
+    }
+  });
 
-/** Build the registry client from the handler's environment. */
-export function makeRegistryClient(): RegistryClient {
-  const registryId = process.env.AGENT_REGISTRY_ID;
-  if (!registryId) {
-    throw new Error(
-      'Agent Registry is disabled or not configured (AGENT_REGISTRY_ID is not set); '
-      + 'remove registry:// refs or deploy with enableAgentRegistry=true',
+  test('explains how to resolve registry references when the feature is disabled', () => {
+    delete process.env.AGENT_REGISTRY_ID;
+
+    expect(() => makeRegistryClient()).toThrow(
+      'remove registry:// refs or deploy with enableAgentRegistry=true',
     );
-  }
-  return new AgentRegistryClient({ registryId });
-}
+  });
+});

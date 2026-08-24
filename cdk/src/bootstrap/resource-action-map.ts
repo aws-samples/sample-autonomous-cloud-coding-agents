@@ -68,7 +68,7 @@ export const RESOURCE_ACTION_MAP: Record<string, readonly string[]> = {
   'AWS::BedrockAgentCore::Runtime': ['bedrock-agentcore:CreateRuntime'],
   'AWS::CloudFront::Distribution': ['cloudfront:CreateDistribution'],
   'AWS::CloudFront::OriginAccessControl': ['cloudfront:CreateOriginAccessControl'],
-  // NestedStack for the AgentCore registry (#246) — CFN creates a child stack.
+  // NestedStack for Agent Registry (#246) — CFN creates a child stack.
   'AWS::CloudFormation::Stack': ['cloudformation:CreateStack'],
   'AWS::CloudWatch::Alarm': ['cloudwatch:PutMetricAlarm'],
   'AWS::CloudWatch::Dashboard': ['cloudwatch:PutDashboard'],
@@ -115,13 +115,13 @@ export const RESOURCE_ACTION_MAP: Record<string, readonly string[]> = {
   'AWS::SNS::Subscription': ['sns:Subscribe'],
   'AWS::SNS::Topic': ['sns:CreateTopic'],
   'AWS::SQS::Queue': ['sqs:CreateQueue'],
-  // The AgentCore registry provisioning custom resource uses the CDK Provider
+  // The Agent Registry provisioning custom resource uses the CDK Provider
   // framework, whose async waiter is a Step Functions state machine (#246).
   'AWS::StepFunctions::StateMachine': ['states:CreateStateMachine'],
   'AWS::WAFv2::WebACL': ['wafv2:CreateWebACL'],
   'AWS::WAFv2::WebACLAssociation': ['wafv2:AssociateWebACL'],
   'Custom::AWS': ['lambda:InvokeFunction'],
-  'Custom::AgentCoreRegistry': ['lambda:InvokeFunction'],
+  'Custom::AgentRegistry': ['lambda:InvokeFunction'],
   'Custom::S3AutoDeleteObjects': ['lambda:InvokeFunction'],
   'Custom::VpcRestrictDefaultSG': ['lambda:InvokeFunction'],
 };

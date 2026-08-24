@@ -17,16 +17,11 @@
  *  SOFTWARE.
  */
 
-// Provisions the AgentCore registry that backs the agent asset registry (#246).
+// Provisions the standalone AWS Agent Registry that backs the agent asset registry.
 //
-// CreateRegistry is asynchronous (CREATING -> READY, ~70s observed) and there is
-// no CDK L1/L2 construct for it during preview, so this wraps the CDK Provider
-// framework: an `onEvent` Lambda starts the mutation and an `isComplete` Lambda is
-// polled until the registry reaches a stable state.
-//
-// GA-THROWAWAY: replace this whole construct with the native AgentCore CDK
-// construct once it ships (~2026-08-06). Everything downstream talks to the
-// registry through the `RegistryClient` seam, so this swap is self-contained.
+// Create/Delete are asynchronous and there is no CDK L1/L2 construct yet, so
+// this wraps the CDK Provider framework: an `onEvent` Lambda starts the mutation
+// and an `isComplete` Lambda is polled until the registry reaches a stable state.
 import * as path from 'path';
 import { CustomResource, Duration, NestedStack, type NestedStackProps, Stack } from 'aws-cdk-lib';
 import * as iam from 'aws-cdk-lib/aws-iam';
@@ -52,7 +47,7 @@ export interface AgentRegistryProps {
 }
 
 /**
- * The AgentCore registry resource. Exposes {@link registryId} / {@link registryArn}
+ * The Agent Registry resource. Exposes {@link registryId} / {@link registryArn}
  * for handlers and the `RegistryClient` adapter to target.
  */
 export class AgentRegistry extends Construct {
@@ -63,7 +58,7 @@ export class AgentRegistry extends Construct {
     super(scope, id);
 
     const entry = path.join(__dirname, '..', 'handlers', 'registry-provisioning', 'index.ts');
-    // The AgentCore control-plane SDK is preview and NOT in the Lambda runtime, so
+    // The Agent Registry control-plane SDK is not in the Lambda runtime, so
     // it must be bundled (the repo default externalizes @aws-sdk/*, which we override).
     const bundling = { externalModules: [] as string[] };
 
@@ -89,42 +84,26 @@ export class AgentRegistry extends Construct {
       handler: 'isComplete',
     });
 
-    // Account-level actions authorized against the account ARN (`:*`), NOT a
-    // `registry/{id}` ARN — at call time the target resource does not exist yet.
-    // Scoping these to `registry/*` fails with AccessDenied (observed on deploy).
-    //   - CreateRegistry/ListRegistries: no registry exists at create time.
-    //   - CreateRegistry ALSO provisions a workload identity under the hood, so
-    //     the role needs the WorkloadIdentity create/get/delete actions too —
-    //     the registry lands in CREATE_FAILED ("Unable to create workload
-    //     identity because access was denied") without them.
+    // Account-level actions need `*`: at CreateRegistry time the target resource
+    // does not exist, and ListRegistries has no resource-level target.
     const createPolicy = new iam.PolicyStatement({
       actions: [
-        'bedrock-agentcore:CreateRegistry',
-        'bedrock-agentcore:ListRegistries',
-        'bedrock-agentcore:CreateWorkloadIdentity',
-        'bedrock-agentcore:GetWorkloadIdentity',
-        'bedrock-agentcore:DeleteWorkloadIdentity',
+        'agent-registry:CreateRegistry',
+        'agent-registry:ListRegistries',
       ],
       resources: ['*'],
     });
     const registryPolicy = new iam.PolicyStatement({
       actions: [
-        'bedrock-agentcore:GetRegistry',
-        'bedrock-agentcore:UpdateRegistry',
-        'bedrock-agentcore:DeleteRegistry',
-        'bedrock-agentcore:ListRegistryRecords',
-        'bedrock-agentcore:DeleteRegistryRecord',
+        'agent-registry:GetRegistry',
+        'agent-registry:UpdateRegistry',
+        'agent-registry:DeleteRegistry',
       ],
       resources: [
         Stack.of(this).formatArn({
-          service: 'bedrock-agentcore',
+          service: 'agent-registry',
           resource: 'registry',
           resourceName: '*',
-        }),
-        Stack.of(this).formatArn({
-          service: 'bedrock-agentcore',
-          resource: 'registry',
-          resourceName: '*/record/*',
         }),
       ],
     });
@@ -142,7 +121,9 @@ export class AgentRegistry extends Construct {
 
     const resource = new CustomResource(this, 'Resource', {
       serviceToken: provider.serviceToken,
-      resourceType: 'Custom::AgentCoreRegistry',
+      // Changing the resource type forces replacement from the retired preview
+      // namespace; an old preview registry id cannot be updated in the GA API.
+      resourceType: 'Custom::AgentRegistry',
       properties: {
         RegistryName: props.registryName,
         Description: props.description ?? '',
@@ -163,9 +144,8 @@ export class AgentRegistry extends Construct {
           id: 'AwsSolutions-IAM5',
           reason:
             'CreateRegistry/ListRegistries are account-level actions authorized against '
-            + '`*` (no registry exists yet at create time). GetRegistry/DeleteRegistry + '
-            + 'record actions use registry/* and registry/*/record/* wildcards because the '
-            + 'registry id and record ids are server-assigned and unknown at synth.',
+            + '`*` (no registry exists yet at create time). Get/Update/DeleteRegistry use '
+            + 'registry/* because the registry id is server-assigned and unknown at synth.',
         },
       ],
       true,

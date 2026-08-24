@@ -6,11 +6,11 @@ title: Registry
 
 A **registry asset** is a versioned, immutable-per-version runtime artifact that a task can load — an MCP server, a Cedar policy module, or a skill. Today those artifacts are vendored into the container image (`agent/src/channel_mcp.py`), inlined on the Blueprint construct (Cedar policies), or committed to a repo (`.mcp.json`). None of them are versioned, none carry an audit trail, and adding one means a **core-code change plus a CDK deploy**. The registry replaces that with a catalog: publishers push typed, versioned records via an API; blueprints pin them by `registry://kind/namespace/name@constraint`; the orchestrator resolves the pins at task start; and the agent receives a resolved bundle.
 
-- **Use this doc for:** the asset-kind catalog, the substrate mapping (AgentCore descriptor types + the `_meta` runtime convention), the publish/resolve/list/show API contract, resolution semantics (semver, immutability, status), governance (the approval state machine), and how a resolved bundle flows from orchestrator to agent.
+- **Use this doc for:** the asset-kind catalog, the substrate mapping (Agent Registry descriptor types + the `_meta` runtime convention), the publish/resolve/list/show API contract, resolution semantics (semver, immutability, status), governance (the approval state machine), and how a resolved bundle flows from orchestrator to agent.
 - **Related docs:** [WORKFLOWS.md](/sample-autonomous-cloud-coding-agents/architecture/workflows) for the `registry://` grammar and asset-kind vocabulary, [REPO_ONBOARDING.md](/sample-autonomous-cloud-coding-agents/architecture/repo-onboarding) for the per-repo **Blueprint** that references assets, [CEDAR_HITL_GATES.md](/sample-autonomous-cloud-coding-agents/architecture/cedar-hitl-gates) for the policy engine that consumes `cedar_policy_module` assets, [SECURITY.md](/sample-autonomous-cloud-coding-agents/architecture/security) for tool tiers, and [IDENTITY_AND_AUTH.md](/sample-autonomous-cloud-coding-agents/architecture/identity-and-auth) for the Cognito groups that gate publish.
 - **Tracking issue:** [#246](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/246).
 
-> **Substrate: AWS Agent Registry (Bedrock AgentCore).** The registry is built on the managed AgentCore Registry (public preview), not a first-party DynamoDB+S3 store. AgentCore natively provides typed descriptor validation, a governance state machine, hybrid search, and audit — so ABCA builds only the substrate-agnostic parts (grammar, semver resolution, orchestrator/agent integration) plus one adapter. A design-time spike validated this substrate (async provisioning, `_meta` survival on native descriptors, verbatim `CUSTOM` round-trip, and the approval state machine).
+> **Substrate: AWS Agent Registry.** The registry uses the standalone AWS Agent Registry service namespace (currently in preview), not a first-party DynamoDB+S3 store. Agent Registry provides typed descriptor validation, a governance state machine, hybrid search, and audit — so ABCA builds only the substrate-agnostic parts (grammar, semver resolution, orchestrator/agent integration) plus one adapter. The original implementation used the Bedrock AgentCore public-preview namespace; issue [#771](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/771) migrates the SDK, IAM actions, ARNs, and descriptor shapes to the standalone `agent-registry` namespace.
 
 ## 1. Goals and non-goals
 
@@ -43,32 +43,46 @@ A **registry asset** is a versioned, immutable-per-version runtime artifact that
 
 ## 3. Substrate mapping (the core design)
 
-AgentCore Registry answers *"what servers/skills exist, find me one"* (discovery metadata + semantic search). ABCA needs *"give me the exact runtime config to load this pinned asset."* These are two different objects, and the spike proved AgentCore validates the discovery object against the official schemas (an MCP record's `server` body must be a valid MCP `server.json`, not our `.mcp.json`). So **every record carries BOTH a discovery descriptor AND ABCA's runtime payload.**
+Agent Registry answers *"what servers/skills exist, find me one"* (discovery metadata + semantic search). ABCA needs *"give me the exact runtime config to load this pinned asset."* These are two different objects, and the service validates the discovery object against the official schemas (an MCP record's body must be a valid MCP `server.json`, not our `.mcp.json`). So **every record carries BOTH a discovery descriptor AND ABCA's runtime payload.**
 
 ### 3.1 Descriptor types
 
-| Kind | Default AgentCore type | Validated against | Where runtime config lives |
+| Kind | Default Agent Registry type | Validated against | Where runtime config lives |
 |------|------------------------|-------------------|----------------------------|
-| `mcp_server` | `MCP` | official MCP `server.json` | `_meta["dev.abca.runtime"]` inside `server.inlineContent` |
-| `skill` | `AGENT_SKILLS` | AgentSkills spec (SKILL.md) | `_meta["dev.abca.runtime"]` inside `skillMd.inlineContent` |
-| `cedar_policy_module` | `CUSTOM` | none (arbitrary JSON) | the CUSTOM body's `runtime` field |
+| `mcp_server` | `MCP` | official MCP `server.json` | `_meta["dev.abca.runtime"]` inside `mcpServer.data` |
+| `skill` | `SKILL` | Agent Skills spec (`SKILL.md`) | `x-abca-runtime` frontmatter inside `agentSkillsDefinition.additionalData.skillMd.data` |
+| `cedar_policy_module` | `CUSTOM` | none (arbitrary JSON) | the JSON in `custom.data`, under `runtime` |
 
-**Purist by default + `--custom` escape hatch.** Native types (`MCP`, `AGENT_SKILLS`) are used by default for their discovery/validation/search value; the runtime payload rides in a `_meta` block on the validated body (spike-verified to survive validation intact). When `--custom` is passed — or when content can't satisfy the official schema — the record is stored as `CUSTOM`, which round-trips its `inlineContent` verbatim (spike-verified). In **both** modes the resolver and agent loaders read the runtime payload, never the validated discovery body. The `--custom` flag toggles validation/discoverability; it does not change the fact that runtime config is stored separately from discovery metadata.
+**Purist by default + `--custom` escape hatch.** Native types (`MCP`, `SKILL`) are used by default for their discovery/validation/search value. MCP runtime data rides in `_meta`; skill runtime data is serialized into a dedicated `SKILL.md` frontmatter key. When `--custom` is passed — or when content cannot satisfy the official schema — the record is stored as `CUSTOM`, whose `data` field contains the structurally validated ABCA body. In **both** modes the resolver and agent loaders read the runtime payload, never the validated discovery body. The `--custom` flag toggles native validation/discoverability; it does not change the fact that runtime config is stored separately from discovery metadata.
 
 ### 3.2 Namespace (Option A)
 
-AgentCore has no namespace concept, so ABCA folds `kind/namespace/name` into the record `name` (`mcp_server/acme/pdf-tools`) and the adapter splits/joins on read. This keeps the `registry://` grammar, CLI, resolver, and audit shape unchanged, and uses a single ABCA registry. (Alternatives considered: registry-per-namespace = more infra + single-registry search limits; drop namespace = breaks the grammar + loses ownership scoping.)
+Agent Registry has no namespace concept, so ABCA folds `kind/namespace/name` into the record `name` (`mcp_server/acme/pdf-tools`) and the adapter splits/joins on read. This keeps the `registry://` grammar, CLI, resolver, and audit shape unchanged, and uses a single ABCA registry. (Alternatives considered: registry-per-namespace = more infra + single-registry search limits; drop namespace = breaks the grammar + loses ownership scoping.)
 
 ## 4. Ports & adapters
 
 - **`RegistryClient` port** — substrate-neutral verbs (`publish`, `getRecord`, `listRecords`, `resolve`), one per language: TypeScript (`cdk/src/handlers/shared/registry/client.ts`) for handlers/orchestrator, Python (`agent/src/registry/client.py`, read-only) for the agent. **Nothing upstream imports the AWS SDK directly.**
-- **`AgentCoreRegistryClient`** — the one implementation per language (`agentcore-client.ts` / `agentcore_client.py`). Owns: the native-vs-`CUSTOM` descriptor decision, the `_meta` runtime convention, Option-A name encode/decode, the async-record polling, and the multi-call publish (§6).
-- **Stays ABCA-side (substrate-agnostic):** the `registry://` grammar (`ref.ts` / `ref.py`, mirrored by the `contracts/registry-resolution/` parity corpus), **semver resolution** (`resolver.ts` / `resolver.py` — AgentCore stores a plain version string, so ranking is always in code), the orchestrator resolve-step, and the agent loaders.
-- **Ceded to AgentCore (not built):** MCP/A2A schema validation, hybrid search, EventBridge notifications, CloudTrail audit, and the governance *state machine* (§6). ABCA still *drives* that state machine — see the multi-call publish.
+- **`AgentRegistryClient`** — the one implementation per language (`agent-registry-client.ts` / `agent_registry_client.py`). Owns: the native-vs-`CUSTOM` descriptor decision, the runtime-data convention, Option-A name encode/decode, the async-record polling, and the multi-call publish (§6).
+- **Stays ABCA-side (substrate-agnostic):** the `registry://` grammar (`ref.ts` / `ref.py`, mirrored by the `contracts/registry-resolution/` parity corpus), **semver resolution** (`resolver.ts` / `resolver.py` — Agent Registry stores a plain version string, so ranking is always in code), the orchestrator resolve-step, and the agent loaders.
+- **Ceded to Agent Registry (not built):** MCP/A2A schema validation, hybrid search, EventBridge notifications, CloudTrail audit, and the governance *state machine* (§6). ABCA still *drives* that state machine — see the multi-call publish.
 
 ## 5. Provisioning
 
-The registry itself is provisioned by a CDK **Provider-framework custom resource** (`cdk/src/constructs/registry.ts`), because `CreateRegistry` is asynchronous (`CREATING → READY`, ~70s observed) and AgentCore has no CDK L1/L2 construct during preview. `onEvent` fires `CreateRegistry`; `isComplete` polls `GetRegistry` until `READY`; teardown drains records then deletes the registry (records block registry deletion). The stack exposes `AgentRegistryId` / `AgentRegistryArn` outputs. **GA-throwaway:** swap this construct for the native AgentCore construct when it ships; the `RegistryClient` seam keeps that swap confined.
+The registry itself is provisioned by a CDK **Provider-framework custom resource** (`cdk/src/constructs/registry.ts`), because standalone `CreateRegistry` and `DeleteRegistry` are asynchronous and there is no CDK L1/L2 construct yet. `onEvent` starts the operation; `isComplete` polls `GetRegistry` until `READY` or until deletion returns not found. Standalone deletion removes the registry and its records, so the custom resource no longer drains records first. The stack exposes `AgentRegistryId` / `AgentRegistryArn` outputs.
+
+The namespace migration is a **fresh-registry cutover** for ABCA. The custom-resource type changes from `Custom::AgentCoreRegistry` to `Custom::AgentRegistry`, forcing CloudFormation replacement because a registry id from the former namespace cannot be updated through the standalone API. Existing assets are not copied by this deployment: re-publish them into the new registry, or use AWS's migration tooling outside ABCA before switching workloads.
+
+### 5.1 Optional deployment
+
+Agent Registry is enabled by default for compatibility. Customers that cannot use the service in their account or region can omit the complete registry surface:
+
+```bash
+cdk deploy --context enableAgentRegistry=false
+```
+
+The boolean or string value `false` omits the registry nested stack, registry API, IAM grants, `AGENT_REGISTRY_ID`, and registry outputs. Blueprints without `registry://` references continue to run normally. If a Blueprint still contains a registry reference, task startup fails closed with an error directing the operator to remove the references or deploy with `enableAgentRegistry=true`.
+
+This is an infrastructure switch, not a pause control. Changing an existing enabled deployment to `false` removes its CloudFormation-managed registry and records; re-enabling creates an empty registry that must be republished.
 
 ## 6. Governance: the approval state machine
 
@@ -85,7 +99,7 @@ CreateRegistryRecord → poll until not CREATING
   → (if autoApprove) SubmitRegistryRecordForApproval → UpdateRegistryRecordStatus(APPROVED)
 ```
 
-"Dev auto-approve" therefore means *ABCA orchestrating these calls under an approver identity*, not the AgentCore `autoApproval` flag. This maps cleanly onto the two Cognito groups (§9): a `RegistryPublisher` publishes (record lands `PENDING_APPROVAL` after submit); a `RegistryApprover` drives the final `UpdateRegistryRecordStatus`.
+"Dev auto-approve" therefore means *ABCA orchestrating these calls under an approver identity*, not the Agent Registry `autoApproval` flag. This maps cleanly onto the two Cognito groups (§9): a `RegistryPublisher` publishes (record lands `PENDING_APPROVAL` after submit); a `RegistryApprover` drives the final `UpdateRegistryRecordStatus`.
 
 ## 7. API contract
 
@@ -179,13 +193,13 @@ The strict grammar is implemented by `parseRef` (TS) and `parse_ref` (Python), k
 
 **PR 3** added the `cedar_policy_module` and `skill` loaders: resolved Cedar text is concatenated into the **same** `cedar_policies` payload field as inline blueprint policies (byte-identical from the `PolicyEngine`'s view — cedar-parity holds by construction), and resolved skill `prompt_fragment`s are appended to the system prompt (`prompt_builder.py`, after channel guidance).
 
-> **Resolve happens in the orchestrator, not create-task.** `createTaskCore` is shared by 5+ entry-point Lambdas (API, Slack, Jira, Linear, webhook); resolving there would force the AgentCore SDK + IAM into all of them. The orchestrator is a single Lambda that already loads `blueprintConfig` and assembles the payload — exactly how `cedar_policies` already flows. Trade-off: an unresolvable ref surfaces as a FAILED task rather than a 422 at submit. This is still fail-closed (the task never runs with a missing/substituted asset), and Blueprint refs are already validated at synth by the construct.
+> **Resolve happens in the orchestrator, not create-task.** `createTaskCore` is shared by 5+ entry-point Lambdas (API, Slack, Jira, Linear, webhook); resolving there would force the Agent Registry SDK + IAM into all of them. The orchestrator is a single Lambda that already loads `blueprintConfig` and assembles the payload — exactly how `cedar_policies` already flows. Trade-off: an unresolvable ref surfaces as a FAILED task rather than a 422 at submit. This is still fail-closed (the task never runs with a missing/substituted asset), and Blueprint refs are already validated at synth by the construct.
 
 ## 12. Test plan
 
 - **Resolver unit tests** (`cdk/test/handlers/shared/registry-resolver.test.ts`): semver match for exact/`^`/`~`; highest-version selection; prerelease ranking; no-match.
 - **Grammar parity corpus** (`contracts/registry-resolution/`): annotated `(ref) → verdict` fixtures run against **both** the Python `parse_ref` and the TS `parseRef`.
-- **Adapter tests** (`agentcore-client.test.ts`): 3-call publish, native `_meta` embedding, `CUSTOM` verbatim round-trip, immutability, resolve status-filter + semver + deprecation warning.
+- **Adapter tests** (`agent-registry-client.test.ts`): 3-call publish, native runtime embedding, `CUSTOM` round-trip, immutability, resolve status-filter + semver + deprecation warning.
 - **Handler tests**: publish auth/validation/`409`, resolve `422` reasons, list grouping, show.
 - **Construct tests**: `registry.test.ts` (Provider wiring + IAM).
 - **E2E (PR 2)**: publish an MCP server → reference from a Blueprint → run a task → assert the agent payload carries the bundle and the `TaskRecord` has `resolved_assets`.
@@ -211,7 +225,7 @@ normal deploy.
 
 ## 13. Accepted risk
 
-Preview API: AgentCore Registry hard-migrates namespaces at GA (~2026-08-06) with breaking API-schema changes. The `RegistryClient` port confines the rework to one adapter file per language; experimental project + no prod data ⇒ acceptable. Swap the provisioning custom resource for native CDK constructs when they ship at GA.
+AWS Agent Registry is not necessarily available or permitted in every customer account and target region. The default-on context gate preserves existing deployments while `enableAgentRegistry=false` lets those customers deploy ABCA without the service. The remaining accepted migration risk is catalog continuity: the standalone namespace requires a fresh registry and explicit asset migration or re-publication.
 
 ## 14. Out of scope (explicit)
 

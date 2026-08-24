@@ -455,12 +455,12 @@ describe('TaskOrchestrator construct', () => {
   });
 
   test('registry read grant is scoped to the wired registry id — no bare "*" (#246 review)', () => {
-    const { template } = createStack({ agentRegistryId: 'reg-xyz789' });
+    const { template } = createStack({ agentRegistryId: 'AbCdEfGh1234' });
     const policies = template.findResources('AWS::IAM::Policy');
     const serialized = JSON.stringify(policies);
     // The wired registry id must appear in the resource ARNs...
-    expect(serialized).toContain('reg-xyz789');
-    // ...and no bedrock-agentcore registry statement may grant a bare "*" or a
+    expect(serialized).toContain('AbCdEfGh1234');
+    // ...and no Agent Registry statement may grant a bare "*" or a
     // registry/* wildcard (the finding: it should scope to registry/{id}).
     for (const policy of Object.values(policies)) {
       const statements = (policy as {
@@ -468,11 +468,26 @@ describe('TaskOrchestrator construct', () => {
       }).Properties.PolicyDocument.Statement;
       for (const stmt of statements) {
         const actions = JSON.stringify(stmt.Action);
-        if (actions.includes('bedrock-agentcore:GetRegistryRecord')) {
+        if (actions.includes('agent-registry:GetRegistryRecord')) {
           const resources = JSON.stringify(stmt.Resource);
           expect(resources).not.toContain('registry/*');
           expect(stmt.Resource).not.toBe('*');
         }
+      }
+    }
+  });
+
+  test('omits registry environment and IAM when no registry id is provided', () => {
+    const functions = baseTemplate.findResources('AWS::Lambda::Function');
+    for (const fn of Object.values(functions)) {
+      expect(fn.Properties?.Environment?.Variables ?? {}).not.toHaveProperty('AGENT_REGISTRY_ID');
+    }
+
+    const policies = baseTemplate.findResources('AWS::IAM::Policy');
+    for (const policy of Object.values(policies)) {
+      const statements = policy.Properties?.PolicyDocument?.Statement ?? [];
+      for (const statement of statements) {
+        expect(JSON.stringify(statement.Action)).not.toContain('agent-registry:');
       }
     }
   });

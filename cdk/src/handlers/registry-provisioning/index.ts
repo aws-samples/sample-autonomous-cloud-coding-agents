@@ -17,25 +17,19 @@
  *  SOFTWARE.
  */
 
-// Custom-resource handlers that provision the AgentCore registry that backs the
-// agent asset registry (#246). CreateRegistry is asynchronous (CREATING -> READY,
-// ~70s observed), so this uses the CDK Provider framework: `onEvent` kicks off the
-// mutation and `isComplete` is polled until the registry reaches a stable state.
-//
-// GA-THROWAWAY: swap this for the native AgentCore CDK L1/L2 construct once it
-// ships (~2026-08-06). The `RegistryClient` seam keeps that swap confined.
+// Custom-resource handlers that provision the standalone AWS Agent Registry
+// backing ABCA's agent asset registry. Create/Delete are asynchronous, so this
+// uses the CDK Provider framework: `onEvent` starts the mutation and `isComplete`
+// polls until the registry reaches a stable state.
 import { createHash } from 'node:crypto';
 import {
-  BedrockAgentCoreControlClient,
+  AgentRegistryControlClient,
   CreateRegistryCommand,
   GetRegistryCommand,
   UpdateRegistryCommand,
   DeleteRegistryCommand,
-  ListRegistryRecordsCommand,
-  DeleteRegistryRecordCommand,
-  ConflictException,
   ResourceNotFoundException,
-} from '@aws-sdk/client-bedrock-agentcore-control';
+} from '@aws-sdk/client-agent-registry-control';
 import { logger } from '../shared/logger';
 import { makeClient } from '../shared/ua';
 
@@ -64,8 +58,8 @@ interface IsCompleteResponse {
 }
 
 // Route through makeClient so the ABCA solution UA segment is attached (#319);
-// a naked `new BedrockAgentCoreControlClient({})` silently drops attribution.
-const client = makeClient(BedrockAgentCoreControlClient);
+// a naked `new AgentRegistryControlClient({})` silently drops attribution.
+const client = makeClient(AgentRegistryControlClient);
 
 /** clientToken length cap — a 64-hex-char (256-bit) prefix of the SHA-256 digest
  *  is plenty of entropy for an idempotency token and stays within API limits. */
@@ -130,17 +124,13 @@ export async function onEvent(event: OnEventRequest): Promise<OnEventResponse> {
     }
     case 'Delete': {
       const registryId = event.PhysicalResourceId!;
-      // If Create never succeeded the id is a CFN-generated token, not a real
-      // registry — GetRegistry will 404 and isComplete short-circuits.
-      await drainRecords(registryId);
       try {
         await client.send(new DeleteRegistryCommand({ registryId }));
       } catch (err) {
         if (err instanceof ResourceNotFoundException) {
           return { PhysicalResourceId: registryId };
         }
-        // Records may still be settling; isComplete will retry the delete.
-        if (!(err instanceof ConflictException)) throw err;
+        throw err;
       }
       return { PhysicalResourceId: registryId };
     }
@@ -151,18 +141,15 @@ export async function isComplete(event: IsCompleteRequest): Promise<IsCompleteRe
   const registryId = event.PhysicalResourceId;
   if (event.RequestType === 'Delete') {
     try {
-      await client.send(new GetRegistryCommand({ registryId }));
+      const res = await client.send(new GetRegistryCommand({ registryId }));
+      if (res.status === 'DELETE_FAILED') {
+        throw new Error(
+          `Registry ${registryId} entered DELETE_FAILED: ${res.statusReason ?? 'no reason given'}`,
+        );
+      }
     } catch (err) {
       if (err instanceof ResourceNotFoundException) return { IsComplete: true };
       throw err;
-    }
-    // Still present — keep draining + deleting until it's gone.
-    await drainRecords(registryId);
-    try {
-      await client.send(new DeleteRegistryCommand({ registryId }));
-    } catch (err) {
-      if (err instanceof ResourceNotFoundException) return { IsComplete: true };
-      if (!(err instanceof ConflictException)) throw err;
     }
     return { IsComplete: false };
   }
@@ -177,35 +164,4 @@ export async function isComplete(event: IsCompleteRequest): Promise<IsCompleteRe
     throw new Error(`Registry ${registryId} entered ${status}: ${res.statusReason ?? 'no reason given'}`);
   }
   return { IsComplete: false };
-}
-
-/**
- * Delete every record in a registry so the registry itself can be deleted
- * (DeleteRegistry ConflictExceptions while records exist). Records are also
- * async and eventually consistent in List; best-effort per invocation, with
- * isComplete re-invoking until the registry is empty.
- */
-async function drainRecords(registryId: string): Promise<void> {
-  let nextToken: string | undefined;
-  do {
-    let page;
-    try {
-      page = await client.send(new ListRegistryRecordsCommand({ registryId, nextToken, maxResults: 50 }));
-    } catch (err) {
-      if (err instanceof ResourceNotFoundException) return;
-      throw err;
-    }
-    const records = page.registryRecords ?? [];
-    for (const rec of records) {
-      const recordId = rec.recordArn ? registryIdFromArn(rec.recordArn) : rec.recordId;
-      if (!recordId) continue;
-      try {
-        await client.send(new DeleteRegistryRecordCommand({ registryId, recordId }));
-      } catch (err) {
-        // CREATING/UPDATING records reject delete; isComplete retries next poll.
-        if (!(err instanceof ConflictException) && !(err instanceof ResourceNotFoundException)) throw err;
-      }
-    }
-    nextToken = page.nextToken;
-  } while (nextToken);
 }

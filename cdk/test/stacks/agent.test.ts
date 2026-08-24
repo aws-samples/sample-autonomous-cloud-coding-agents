@@ -87,6 +87,12 @@ describe('AgentStack', () => {
     template.hasOutput('CedarWasmLayerArn', {});
   });
 
+  test('enables Agent Registry by default', () => {
+    template.hasOutput('AgentRegistryId', {});
+    template.hasOutput('AgentRegistryArn', {});
+    template.hasOutput('RegistryApiUrl', {});
+  });
+
   test('creates the Cedar-wasm Lambda layer', () => {
     template.resourceCountIs('AWS::Lambda::LayerVersion', 1);
     template.hasResourceProperties('AWS::Lambda::LayerVersion', {
@@ -1320,4 +1326,37 @@ describe('AgentStack tool-gateway gate (ADR-019 P1)', () => {
       });
     });
   });
+});
+
+describe('AgentStack Agent Registry gate', () => {
+  test.each([false, 'false'])(
+    'enableAgentRegistry=%p omits registry resources, wiring, and outputs',
+    (enableAgentRegistry) => {
+      const app = new App({ context: { enableAgentRegistry } });
+      const stack = new AgentStack(app, `NoAgentRegistryStack${typeof enableAgentRegistry}`, {
+        env: { account: '123456789012', region: 'us-east-1' },
+      });
+      const template = Template.fromStack(stack);
+      const rendered = template.toJSON();
+      const nestedStackIds = Object.keys(template.findResources('AWS::CloudFormation::Stack'));
+      const outputs = rendered.Outputs ?? {};
+
+      expect(nestedStackIds.some(id => id.includes('AgentRegistryStack'))).toBe(false);
+      expect(nestedStackIds.some(id => id.includes('RegistryApi'))).toBe(false);
+      expect(outputs).not.toHaveProperty('AgentRegistryId');
+      expect(outputs).not.toHaveProperty('AgentRegistryArn');
+      expect(outputs).not.toHaveProperty('RegistryApiUrl');
+
+      for (const fn of Object.values(template.findResources('AWS::Lambda::Function'))) {
+        expect(fn.Properties?.Environment?.Variables ?? {}).not.toHaveProperty('AGENT_REGISTRY_ID');
+      }
+
+      for (const policy of Object.values(template.findResources('AWS::IAM::Policy'))) {
+        const statements = policy.Properties?.PolicyDocument?.Statement ?? [];
+        for (const statement of statements) {
+          expect(JSON.stringify(statement.Action)).not.toContain('agent-registry:');
+        }
+      }
+    },
+  );
 });
