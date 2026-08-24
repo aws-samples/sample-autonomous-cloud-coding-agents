@@ -116,7 +116,22 @@ export class AgentRegistry extends Construct {
         },
       },
     });
+    const workloadIdentityPolicy = new iam.PolicyStatement({
+      actions: [
+        'bedrock-agentcore:CreateWorkloadIdentity',
+        'bedrock-agentcore:GetWorkloadIdentity',
+        'bedrock-agentcore:DeleteWorkloadIdentity',
+      ],
+      resources: [
+        Stack.of(this).formatArn({
+          service: 'bedrock-agentcore',
+          resource: 'workload-identity-directory',
+          resourceName: '*',
+        }),
+      ],
+    });
     onEventFn.addToRolePolicy(serviceLinkedRolePolicy);
+    onEventFn.addToRolePolicy(workloadIdentityPolicy);
     for (const fn of [onEventFn, isCompleteFn]) {
       fn.addToRolePolicy(createPolicy);
       fn.addToRolePolicy(registryPolicy);
@@ -156,6 +171,7 @@ export class AgentRegistry extends Construct {
             'CreateRegistry/ListRegistries are account-level actions authorized against '
             + '`*` (no registry exists yet at create time). CreateServiceLinkedRole is '
             + 'restricted to agent-registry.amazonaws.com by iam:AWSServiceName. '
+            + 'Workload identity lifecycle actions use workload-identity-directory/*, and '
             + 'Get/Update/DeleteRegistry use '
             + 'registry/* because the registry id is server-assigned and unknown at synth.',
         },

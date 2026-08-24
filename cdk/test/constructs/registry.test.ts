@@ -100,6 +100,27 @@ describe('AgentRegistry construct', () => {
     });
   });
 
+  test('grants workload identity lifecycle actions on the AgentCore directory', () => {
+    const template = createStack();
+    const policies = template.findResources('AWS::IAM::Policy');
+    const statements = Object.values(policies).flatMap(resource =>
+      resource.Properties.PolicyDocument.Statement as Array<Record<string, unknown>>,
+    );
+    const statement = statements.find(candidate => {
+      const actions = Array.isArray(candidate.Action) ? candidate.Action : [candidate.Action];
+      return actions.includes('bedrock-agentcore:CreateWorkloadIdentity');
+    });
+
+    expect(statement).toBeDefined();
+    expect(statement?.Action).toEqual(expect.arrayContaining([
+      'bedrock-agentcore:CreateWorkloadIdentity',
+      'bedrock-agentcore:GetWorkloadIdentity',
+      'bedrock-agentcore:DeleteWorkloadIdentity',
+    ]));
+    expect(statement?.Resource).not.toBe('*');
+    expect(JSON.stringify(statement?.Resource)).toContain('workload-identity-directory/*');
+  });
+
   test('grants the per-registry + record actions scoped to registry ARNs', () => {
     const template = createStack();
     template.hasResourceProperties('AWS::IAM::Policy', {
