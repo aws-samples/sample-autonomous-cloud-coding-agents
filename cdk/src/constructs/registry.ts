@@ -107,6 +107,16 @@ export class AgentRegistry extends Construct {
         }),
       ],
     });
+    const serviceLinkedRolePolicy = new iam.PolicyStatement({
+      actions: ['iam:CreateServiceLinkedRole'],
+      resources: ['*'],
+      conditions: {
+        StringEquals: {
+          'iam:AWSServiceName': 'agent-registry.amazonaws.com',
+        },
+      },
+    });
+    onEventFn.addToRolePolicy(serviceLinkedRolePolicy);
     for (const fn of [onEventFn, isCompleteFn]) {
       fn.addToRolePolicy(createPolicy);
       fn.addToRolePolicy(registryPolicy);
@@ -144,7 +154,9 @@ export class AgentRegistry extends Construct {
           id: 'AwsSolutions-IAM5',
           reason:
             'CreateRegistry/ListRegistries are account-level actions authorized against '
-            + '`*` (no registry exists yet at create time). Get/Update/DeleteRegistry use '
+            + '`*` (no registry exists yet at create time). CreateServiceLinkedRole is '
+            + 'restricted to agent-registry.amazonaws.com by iam:AWSServiceName. '
+            + 'Get/Update/DeleteRegistry use '
             + 'registry/* because the registry id is server-assigned and unknown at synth.',
         },
       ],

@@ -81,6 +81,25 @@ describe('AgentRegistry construct', () => {
     });
   });
 
+  test('allows creation of only the Agent Registry service-linked role', () => {
+    const template = createStack();
+    template.hasResourceProperties('AWS::IAM::Policy', {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Action: 'iam:CreateServiceLinkedRole',
+            Resource: '*',
+            Condition: {
+              StringEquals: {
+                'iam:AWSServiceName': 'agent-registry.amazonaws.com',
+              },
+            },
+          }),
+        ]),
+      },
+    });
+  });
+
   test('grants the per-registry + record actions scoped to registry ARNs', () => {
     const template = createStack();
     template.hasResourceProperties('AWS::IAM::Policy', {
