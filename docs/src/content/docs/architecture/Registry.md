@@ -82,6 +82,8 @@ cdk deploy --context enableAgentRegistry=false
 
 The boolean or string value `false` omits the registry nested stack, registry API, IAM grants, `AGENT_REGISTRY_ID`, and registry outputs. Blueprints without `registry://` references continue to run normally. If a Blueprint still contains a registry reference, task startup fails closed with an error directing the operator to remove the references or deploy with `enableAgentRegistry=true`.
 
+The string form is case-sensitive: use lowercase `false`. Other string values leave Agent Registry enabled.
+
 This is an infrastructure switch, not a pause control. Changing an existing enabled deployment to `false` removes its CloudFormation-managed registry and records; re-enabling creates an empty registry that must be republished.
 
 ## 6. Governance: the approval state machine

@@ -147,7 +147,8 @@ export class AgentRegistry extends Construct {
     const resource = new CustomResource(this, 'Resource', {
       serviceToken: provider.serviceToken,
       // Changing the resource type forces replacement from the retired preview
-      // namespace; an old preview registry id cannot be updated in the GA API.
+      // namespace; an old preview registry id cannot be updated through the
+      // standalone API.
       resourceType: 'Custom::AgentRegistry',
       properties: {
         RegistryName: props.registryName,
@@ -181,7 +182,7 @@ export class AgentRegistry extends Construct {
 
     // The CDK Provider framework synthesizes its own waiter state machine and
     // framework Lambdas (onEvent/isComplete/onTimeout) that we do not author.
-    // These findings are on framework-managed resources; GA-throwaway anyway.
+    // These findings are on framework-managed resources.
     NagSuppressions.addResourceSuppressions(
       provider,
       [

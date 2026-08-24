@@ -38,13 +38,37 @@ class ResourceNotFoundException extends Error {
   }
 }
 
+class ConflictException extends Error {
+  constructor() {
+    super('conflict');
+    this.name = 'ConflictException';
+  }
+}
+
+class ThrottlingException extends Error {
+  constructor() {
+    super('throttled');
+    this.name = 'ThrottlingException';
+  }
+}
+
+class InternalServerException extends Error {
+  constructor() {
+    super('internal');
+    this.name = 'InternalServerException';
+  }
+}
+
 jest.mock('@aws-sdk/client-agent-registry-control', () => ({
   AgentRegistryControlClient: jest.fn(() => ({ send: mockSend })),
+  ConflictException,
   CreateRegistryCommand: jest.fn((input: unknown) => ({ _type: 'CreateRegistry', input })),
-  GetRegistryCommand: jest.fn((input: unknown) => ({ _type: 'GetRegistry', input })),
-  UpdateRegistryCommand: jest.fn((input: unknown) => ({ _type: 'UpdateRegistry', input })),
   DeleteRegistryCommand: jest.fn((input: unknown) => ({ _type: 'DeleteRegistry', input })),
+  GetRegistryCommand: jest.fn((input: unknown) => ({ _type: 'GetRegistry', input })),
+  InternalServerException,
   ResourceNotFoundException,
+  ThrottlingException,
+  UpdateRegistryCommand: jest.fn((input: unknown) => ({ _type: 'UpdateRegistry', input })),
 }));
 
 import { isComplete, onEvent } from '../../../src/handlers/registry-provisioning/index';
@@ -163,6 +187,25 @@ describe('onEvent Delete', () => {
     ).resolves.toMatchObject({ PhysicalResourceId: REGISTRY_ID });
   });
 
+  test.each([
+    ['conflict', ConflictException],
+    ['throttling', ThrottlingException],
+    ['internal service error', InternalServerException],
+  ])('defers a retryable %s to the waiter', async (_label, ErrorType) => {
+    routeSend({
+      DeleteRegistry: () => {
+        throw new ErrorType();
+      },
+    });
+    await expect(
+      onEvent({
+        RequestType: 'Delete',
+        PhysicalResourceId: REGISTRY_ID,
+        ResourceProperties: { RegistryName: 'abca' },
+      }),
+    ).resolves.toMatchObject({ PhysicalResourceId: REGISTRY_ID });
+  });
+
   test('rethrows an unexpected error from DeleteRegistry', async () => {
     routeSend({
       DeleteRegistry: () => {
@@ -240,6 +283,50 @@ describe('isComplete Delete', () => {
     expect(res.IsComplete).toBe(false);
     const types = mockSend.mock.calls.map((c) => (c[0] as TaggedCommand)._type);
     expect(types).toEqual(['GetRegistry']);
+  });
+
+  test('re-drives deletion when the registry is not yet deleting', async () => {
+    routeSend({
+      GetRegistry: () => ({ status: 'READY' }),
+      DeleteRegistry: () => ({ status: 'DELETING' }),
+    });
+    const res = await isComplete({
+      RequestType: 'Delete',
+      PhysicalResourceId: REGISTRY_ID,
+      ResourceProperties: { RegistryName: 'abca' },
+    });
+    expect(res.IsComplete).toBe(false);
+    const types = mockSend.mock.calls.map((c) => (c[0] as TaggedCommand)._type);
+    expect(types).toEqual(['GetRegistry', 'DeleteRegistry']);
+  });
+
+  test('keeps polling when a re-driven delete gets a retryable conflict', async () => {
+    routeSend({
+      GetRegistry: () => ({ status: 'READY' }),
+      DeleteRegistry: () => {
+        throw new ConflictException();
+      },
+    });
+    const res = await isComplete({
+      RequestType: 'Delete',
+      PhysicalResourceId: REGISTRY_ID,
+      ResourceProperties: { RegistryName: 'abca' },
+    });
+    expect(res.IsComplete).toBe(false);
+  });
+
+  test('keeps polling when GetRegistry is throttled', async () => {
+    routeSend({
+      GetRegistry: () => {
+        throw new ThrottlingException();
+      },
+    });
+    const res = await isComplete({
+      RequestType: 'Delete',
+      PhysicalResourceId: REGISTRY_ID,
+      ResourceProperties: { RegistryName: 'abca' },
+    });
+    expect(res.IsComplete).toBe(false);
   });
 
   test('throws when asynchronous deletion fails', async () => {
