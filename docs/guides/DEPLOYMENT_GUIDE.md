@@ -29,7 +29,7 @@ cdk deploy --context enableAgentRegistry=false
 
 Blueprints without `registry://` asset references continue to work. A remaining registry reference fails task startup rather than silently skipping the asset.
 
-The string form is case-sensitive: use lowercase `false`. Other string values leave Agent Registry enabled.
+The string form is case-sensitive: use lowercase `true` or `false`. Any other value fails synthesis with an actionable validation error.
 
 This context is an infrastructure switch, not a pause control. Applying it to an existing enabled deployment deletes the CloudFormation-managed registry and its records; re-enabling creates an empty registry that must be republished. See [REGISTRY.md](../design/REGISTRY.md) for the catalog migration and runtime behavior.
 

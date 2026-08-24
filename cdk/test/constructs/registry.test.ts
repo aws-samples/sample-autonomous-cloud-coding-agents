@@ -33,6 +33,19 @@ function createStack(): Template {
   return Template.fromStack(stack);
 }
 
+function policyStatementsForRole(
+  template: Template,
+  roleLogicalIdFragment: string,
+): Array<Record<string, unknown>> {
+  const policy = Object.values(template.findResources('AWS::IAM::Policy')).find(resource =>
+    JSON.stringify(resource.Properties.Roles).includes(roleLogicalIdFragment),
+  );
+  if (!policy) {
+    throw new Error(`No IAM policy found for role matching ${roleLogicalIdFragment}`);
+  }
+  return policy.Properties.PolicyDocument.Statement as Array<Record<string, unknown>>;
+}
+
 describe('AgentRegistry construct', () => {
   test('creates onEvent and isComplete Lambda handlers plus the provider framework', () => {
     const template = createStack();
@@ -64,16 +77,13 @@ describe('AgentRegistry construct', () => {
     });
   });
 
-  test('grants CreateRegistry/ListRegistries on * (account-level actions)', () => {
+  test('grants CreateRegistry on * because the registry does not exist yet', () => {
     const template = createStack();
     template.hasResourceProperties('AWS::IAM::Policy', {
       PolicyDocument: {
         Statement: Match.arrayWith([
           Match.objectLike({
-            Action: Match.arrayWith([
-              'agent-registry:CreateRegistry',
-              'agent-registry:ListRegistries',
-            ]),
+            Action: 'agent-registry:CreateRegistry',
             Resource: '*',
           }),
         ]),
@@ -100,41 +110,46 @@ describe('AgentRegistry construct', () => {
     });
   });
 
-  test('grants workload identity lifecycle actions on the AgentCore directory', () => {
+  test('grants workload identity lifecycle actions to both Provider handlers', () => {
     const template = createStack();
-    const policies = template.findResources('AWS::IAM::Policy');
-    const statements = Object.values(policies).flatMap(resource =>
+
+    for (const role of [
+      'AgentRegistryOnEventFnServiceRole',
+      'AgentRegistryIsCompleteFnServiceRole',
+    ]) {
+      const statement = policyStatementsForRole(template, role).find(candidate => {
+        const actions = Array.isArray(candidate.Action) ? candidate.Action : [candidate.Action];
+        return actions.includes('bedrock-agentcore:CreateWorkloadIdentity');
+      });
+
+      expect(statement).toBeDefined();
+      expect(statement?.Action).toEqual(expect.arrayContaining([
+        'bedrock-agentcore:CreateWorkloadIdentity',
+        'bedrock-agentcore:GetWorkloadIdentity',
+        'bedrock-agentcore:DeleteWorkloadIdentity',
+      ]));
+      expect(statement?.Resource).not.toBe('*');
+      expect(JSON.stringify(statement?.Resource)).toContain('workload-identity-directory/*');
+    }
+  });
+
+  test('grants the per-registry actions scoped to registry ARNs', () => {
+    const template = createStack();
+    const statements = Object.values(template.findResources('AWS::IAM::Policy')).flatMap(resource =>
       resource.Properties.PolicyDocument.Statement as Array<Record<string, unknown>>,
     );
     const statement = statements.find(candidate => {
       const actions = Array.isArray(candidate.Action) ? candidate.Action : [candidate.Action];
-      return actions.includes('bedrock-agentcore:CreateWorkloadIdentity');
+      return actions.includes('agent-registry:GetRegistry');
     });
 
     expect(statement).toBeDefined();
     expect(statement?.Action).toEqual(expect.arrayContaining([
-      'bedrock-agentcore:CreateWorkloadIdentity',
-      'bedrock-agentcore:GetWorkloadIdentity',
-      'bedrock-agentcore:DeleteWorkloadIdentity',
+      'agent-registry:GetRegistry',
+      'agent-registry:UpdateRegistry',
+      'agent-registry:DeleteRegistry',
     ]));
     expect(statement?.Resource).not.toBe('*');
-    expect(JSON.stringify(statement?.Resource)).toContain('workload-identity-directory/*');
-  });
-
-  test('grants the per-registry + record actions scoped to registry ARNs', () => {
-    const template = createStack();
-    template.hasResourceProperties('AWS::IAM::Policy', {
-      PolicyDocument: {
-        Statement: Match.arrayWith([
-          Match.objectLike({
-            Action: Match.arrayWith([
-              'agent-registry:GetRegistry',
-              'agent-registry:UpdateRegistry',
-              'agent-registry:DeleteRegistry',
-            ]),
-          }),
-        ]),
-      },
-    });
+    expect(JSON.stringify(statement?.Resource)).toContain('registry/*');
   });
 });

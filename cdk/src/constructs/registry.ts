@@ -84,13 +84,9 @@ export class AgentRegistry extends Construct {
       handler: 'isComplete',
     });
 
-    // Account-level actions need `*`: at CreateRegistry time the target resource
-    // does not exist, and ListRegistries has no resource-level target.
+    // CreateRegistry needs `*`: at call time the target resource does not exist.
     const createPolicy = new iam.PolicyStatement({
-      actions: [
-        'agent-registry:CreateRegistry',
-        'agent-registry:ListRegistries',
-      ],
+      actions: ['agent-registry:CreateRegistry'],
       resources: ['*'],
     });
     const registryPolicy = new iam.PolicyStatement({
@@ -116,6 +112,13 @@ export class AgentRegistry extends Construct {
         },
       },
     });
+    // Agent Registry calls these AgentCore workload-identity APIs using the
+    // caller's credentials during CreateRegistry and DeleteRegistry. Keep the
+    // bedrock-agentcore namespace: this is an intentional cross-service
+    // dependency, not a missed rename or migration residue. Without these
+    // actions, creation fails with "Unable to create workload identity because
+    // access was denied"; deletion can fail the same way when the Provider
+    // waiter re-drives DeleteRegistry.
     const workloadIdentityPolicy = new iam.PolicyStatement({
       actions: [
         'bedrock-agentcore:CreateWorkloadIdentity',
@@ -131,10 +134,10 @@ export class AgentRegistry extends Construct {
       ],
     });
     onEventFn.addToRolePolicy(serviceLinkedRolePolicy);
-    onEventFn.addToRolePolicy(workloadIdentityPolicy);
     for (const fn of [onEventFn, isCompleteFn]) {
       fn.addToRolePolicy(createPolicy);
       fn.addToRolePolicy(registryPolicy);
+      fn.addToRolePolicy(workloadIdentityPolicy);
     }
 
     const provider = new cr.Provider(this, 'Provider', {
@@ -169,8 +172,8 @@ export class AgentRegistry extends Construct {
         {
           id: 'AwsSolutions-IAM5',
           reason:
-            'CreateRegistry/ListRegistries are account-level actions authorized against '
-            + '`*` (no registry exists yet at create time). CreateServiceLinkedRole is '
+            'CreateRegistry is an account-level action authorized against `*` '
+            + '(no registry exists yet at create time). CreateServiceLinkedRole is '
             + 'restricted to agent-registry.amazonaws.com by iam:AWSServiceName. '
             + 'Workload identity lifecycle actions use workload-identity-directory/*, and '
             + 'Get/Update/DeleteRegistry use '

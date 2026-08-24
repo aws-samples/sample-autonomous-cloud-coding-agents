@@ -90,6 +90,18 @@ export class AgentStack extends Stack {
     super(scope, id, props);
 
     const enableAgentRegistry = this.node.tryGetContext('enableAgentRegistry');
+    if (
+      enableAgentRegistry !== undefined
+      && enableAgentRegistry !== true
+      && enableAgentRegistry !== false
+      && enableAgentRegistry !== 'true'
+      && enableAgentRegistry !== 'false'
+    ) {
+      throw new Error(
+        `enableAgentRegistry must be true or false, got '${String(enableAgentRegistry)}'`,
+      );
+    }
+    // Default-on for compatibility (contrast enableToolGateway, which is opt-in).
     const agentRegistryEnabled = enableAgentRegistry !== false && enableAgentRegistry !== 'false';
 
     // Build context is repo root (not agent/) so the Dockerfile can COPY

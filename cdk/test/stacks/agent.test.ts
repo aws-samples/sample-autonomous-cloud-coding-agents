@@ -1329,6 +1329,22 @@ describe('AgentStack tool-gateway gate (ADR-019 P1)', () => {
 });
 
 describe('AgentStack Agent Registry gate', () => {
+  test.each([undefined, true, 'true'])(
+    'enableAgentRegistry=%p includes the registry by default or explicit enablement',
+    (enableAgentRegistry) => {
+      const context = enableAgentRegistry === undefined ? {} : { enableAgentRegistry };
+      const app = new App({ context });
+      const stack = new AgentStack(app, `AgentRegistryStack${String(enableAgentRegistry)}`, {
+        env: { account: '123456789012', region: 'us-east-1' },
+      });
+      const nestedStackIds = Object.keys(
+        Template.fromStack(stack).findResources('AWS::CloudFormation::Stack'),
+      );
+
+      expect(nestedStackIds.some(id => id.includes('AgentRegistryStack'))).toBe(true);
+    },
+  );
+
   test.each([false, 'false'])(
     'enableAgentRegistry=%p omits registry resources, wiring, and outputs',
     (enableAgentRegistry) => {
@@ -1359,4 +1375,12 @@ describe('AgentStack Agent Registry gate', () => {
       }
     },
   );
+
+  test('rejects malformed enableAgentRegistry context values', () => {
+    const app = new App({ context: { enableAgentRegistry: 'fasle' } });
+
+    expect(() => new AgentStack(app, 'InvalidAgentRegistryContext', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    })).toThrow("enableAgentRegistry must be true or false, got 'fasle'");
+  });
 });
