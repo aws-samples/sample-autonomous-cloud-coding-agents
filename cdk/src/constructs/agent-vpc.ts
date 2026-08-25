@@ -31,6 +31,12 @@ const HTTPS_PORT = 443;
  */
 export interface AgentVpcProps {
   /**
+   * Availability zones to use. Zone names must be resolved for the target
+   * account because AZ name-to-ID mappings differ between accounts.
+   */
+  readonly availabilityZones?: string[];
+
+  /**
    * Maximum number of availability zones to use.
    * @default 2
    */
@@ -69,10 +75,13 @@ export class AgentVpc extends Construct {
     const maxAzs = props.maxAzs ?? 2;
     const natGateways = props.natGateways ?? 1;
     const removalPolicy = props.removalPolicy ?? RemovalPolicy.DESTROY;
+    const availabilityZoneSelection = props.availabilityZones
+      ? { availabilityZones: props.availabilityZones }
+      : { maxAzs };
 
     // --- VPC ---
     this.vpc = new ec2.Vpc(this, 'Vpc', {
-      maxAzs,
+      ...availabilityZoneSelection,
       natGateways,
       restrictDefaultSecurityGroup: true,
       subnetConfiguration: [

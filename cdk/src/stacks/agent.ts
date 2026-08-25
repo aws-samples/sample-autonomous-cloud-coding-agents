@@ -317,7 +317,18 @@ export class AgentStack extends Stack {
     });
 
     // Network isolation — VPC with restricted egress
-    const agentVpc = new AgentVpc(this, 'AgentVpc');
+    const agentcoreAvailabilityZonesContext = this.node.tryGetContext(
+      'agentcoreAvailabilityZones',
+    ) as string | undefined;
+    const agentcoreAvailabilityZones = agentcoreAvailabilityZonesContext
+      ?.split(',')
+      .map(zone => zone.trim())
+      .filter(Boolean);
+    const agentVpc = new AgentVpc(this, 'AgentVpc', {
+      availabilityZones: agentcoreAvailabilityZones?.length
+        ? agentcoreAvailabilityZones
+        : undefined,
+    });
 
     // DNS Firewall — domain-level egress filtering (observation mode for initial deployment)
     const additionalDomains = [...new Set(blueprints.flatMap(b => b.egressAllowlist))];

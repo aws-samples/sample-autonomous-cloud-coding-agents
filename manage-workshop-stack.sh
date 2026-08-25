@@ -14,6 +14,11 @@ BLUEPRINT_REPO="${BLUEPRINT_REPO:-aws-samples/sample-abca-playground}"
 PARTICIPANT_USERNAME="${PARTICIPANT_USERNAME:-participant@workshop.local}"
 PARTICIPANT_SECRET_NAME="${PARTICIPANT_SECRET_NAME:-abca-workshop/participant-credentials}"
 ENABLE_AGENT_REGISTRY="${ENABLE_AGENT_REGISTRY:-false}"
+AGENTCORE_SUPPORTED_ZONE_IDS="${AGENTCORE_SUPPORTED_ZONE_IDS:-}"
+
+if [[ -z "$AGENTCORE_SUPPORTED_ZONE_IDS" && "$REGION" == "us-east-1" ]]; then
+    AGENTCORE_SUPPORTED_ZONE_IDS="use1-az1,use1-az2"
+fi
 
 export AWS_REGION="$REGION"
 export AWS_DEFAULT_REGION="$REGION"
@@ -39,6 +44,43 @@ prepare_arm64_builder() {
     if [[ "$(uname -m)" != "aarch64" ]]; then
         docker run --privileged --rm tonistiigi/binfmt --install arm64 >/dev/null
     fi
+}
+
+bind_cdk_environment() {
+    CDK_DEFAULT_ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+    CDK_DEFAULT_REGION="$REGION"
+    export CDK_DEFAULT_ACCOUNT
+    export CDK_DEFAULT_REGION
+}
+
+resolve_agentcore_availability_zones() {
+    if [[ -z "$AGENTCORE_SUPPORTED_ZONE_IDS" ]]; then
+        return
+    fi
+
+    local zone_id zone_name
+    local -a zone_ids zone_names
+    IFS=',' read -r -a zone_ids <<<"$AGENTCORE_SUPPORTED_ZONE_IDS"
+
+    for zone_id in "${zone_ids[@]}"; do
+        zone_id="${zone_id//[[:space:]]/}"
+        zone_name=$(aws ec2 describe-availability-zones \
+            --region "$REGION" \
+            --filters \
+                "Name=zone-id,Values=${zone_id}" \
+                "Name=state,Values=available" \
+            --query 'AvailabilityZones[0].ZoneName' \
+            --output text)
+
+        if [[ -z "$zone_name" || "$zone_name" == "None" ]]; then
+            echo "AgentCore availability zone ${zone_id} is unavailable in ${REGION}" >&2
+            return 1
+        fi
+        zone_names+=("$zone_name")
+    done
+
+    local IFS=','
+    printf '%s\n' "${zone_names[*]}"
 }
 
 stack_output() {
@@ -171,14 +213,25 @@ ensure_participant_user() {
 deploy_stack() {
     install_toolchain
     prepare_arm64_builder
+    bind_cdk_environment
+
+    local agentcore_availability_zones
+    agentcore_availability_zones=$(resolve_agentcore_availability_zones)
 
     pushd cdk >/dev/null
-    npx cdk bootstrap \
-        "aws://$(aws sts get-caller-identity --query Account --output text)/${REGION}"
-    npx cdk deploy "$STACK_NAME" \
-        --require-approval never \
-        --context "blueprintRepo=${BLUEPRINT_REPO}" \
+    npx cdk bootstrap "aws://${CDK_DEFAULT_ACCOUNT}/${CDK_DEFAULT_REGION}"
+
+    local -a deploy_args=(
+        "$STACK_NAME"
+        --require-approval never
+        --context "blueprintRepo=${BLUEPRINT_REPO}"
         --context "enableAgentRegistry=${ENABLE_AGENT_REGISTRY}"
+    )
+    if [[ -n "$agentcore_availability_zones" ]]; then
+        deploy_args+=(--context "agentcoreAvailabilityZones=${agentcore_availability_zones}")
+    fi
+
+    npx cdk deploy "${deploy_args[@]}"
     popd >/dev/null
 
     seed_github_token
@@ -237,6 +290,7 @@ delete_bootstrap_stack() {
 
 destroy_stack() {
     install_toolchain
+    bind_cdk_environment
 
     if aws cloudformation describe-stacks \
         --stack-name "$STACK_NAME" \

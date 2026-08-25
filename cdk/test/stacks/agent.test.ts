@@ -1368,3 +1368,26 @@ describe('AgentStack registry gate', () => {
     expect(renderedPolicies).not.toContain('bedrock-agentcore:ListRegistryRecords');
   });
 });
+
+describe('AgentStack AgentCore availability zones', () => {
+  test('uses account-local zones supplied by workshop context', () => {
+    const app = new App({
+      context: {
+        agentcoreAvailabilityZones: 'us-east-1b,us-east-1d',
+        enableAgentRegistry: 'false',
+      },
+    });
+    const stack = new AgentStack(app, 'WorkshopAzStack', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    });
+    const template = Template.fromStack(stack);
+    const subnets = Object.values(template.findResources('AWS::EC2::Subnet')) as Array<{
+      Properties: { AvailabilityZone?: string };
+    }>;
+
+    expect(subnets).toHaveLength(4);
+    expect(new Set(subnets.map(subnet => subnet.Properties.AvailabilityZone))).toEqual(
+      new Set(['us-east-1b', 'us-east-1d']),
+    );
+  });
+});
