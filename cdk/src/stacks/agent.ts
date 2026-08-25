@@ -135,10 +135,19 @@ export class AgentStack extends Stack {
     // resources; nesting keeps the root stack under CloudFormation's hard
     // 500-resource limit. registryId/registryArn cross the boundary via CDK's
     // automatic cross-stack export/import.
-    const agentRegistry = new AgentRegistryStack(this, 'AgentRegistryStack', {
-      registryName: `abca_${this.stackName.replace(/[^a-zA-Z0-9]/g, '_')}`,
-      description: 'ABCA agent asset registry (#246)',
-    });
+    //
+    // Workshop accounts can restrict the preview CreateRegistry API. Preserve
+    // the normal deploy default, but allow those environments to omit the
+    // registry and its API with ``--context enableAgentRegistry=false``.
+    const enableAgentRegistryContext = this.node.tryGetContext('enableAgentRegistry');
+    const agentRegistryEnabled = enableAgentRegistryContext !== false
+      && enableAgentRegistryContext !== 'false';
+    const agentRegistry = agentRegistryEnabled
+      ? new AgentRegistryStack(this, 'AgentRegistryStack', {
+        registryName: `abca_${this.stackName.replace(/[^a-zA-Z0-9]/g, '_')}`,
+        description: 'ABCA agent asset registry (#246)',
+      })
+      : undefined;
 
     // Cedar-wasm Lambda layer (§15.2 task 10). Instantiated here so the
     // asset is in the synthed template; Chunk 5 handlers (Approve,
@@ -418,10 +427,12 @@ export class AgentStack extends Stack {
     // It authorizes against the SHARED Cognito user pool, so a caller's JWT works
     // on both APIs; the CLI targets its distinct URL (RegistryApiUrl output) for
     // `registry` commands.
-    const registryApi = new RegistryApi(this, 'RegistryApi', {
-      agentRegistryId: agentRegistry.registryId,
-      userPool: taskApi.userPool,
-    });
+    const registryApi = agentRegistry
+      ? new RegistryApi(this, 'RegistryApi', {
+        agentRegistryId: agentRegistry.registryId,
+        userPool: taskApi.userPool,
+      })
+      : undefined;
 
     // --- Tool-federation Gateway (ADR-019 P1, CONTEXT-GATED) ---
     // Provisioned only under ``--context enableToolGateway=true`` (gate read
@@ -758,15 +769,17 @@ export class AgentStack extends Stack {
       description: 'ARN of the Secrets Manager secret for the GitHub token',
     });
 
-    new CfnOutput(this, 'AgentRegistryId', {
-      value: agentRegistry.registryId,
-      description: 'ID of the AgentCore-backed agent asset registry (#246)',
-    });
+    if (agentRegistry) {
+      new CfnOutput(this, 'AgentRegistryId', {
+        value: agentRegistry.registryId,
+        description: 'ID of the AgentCore-backed agent asset registry (#246)',
+      });
 
-    new CfnOutput(this, 'AgentRegistryArn', {
-      value: agentRegistry.registryArn,
-      description: 'ARN of the AgentCore-backed agent asset registry (#246)',
-    });
+      new CfnOutput(this, 'AgentRegistryArn', {
+        value: agentRegistry.registryArn,
+        description: 'ARN of the AgentCore-backed agent asset registry (#246)',
+      });
+    }
 
     new CfnOutput(this, 'TraceArtifactsBucketName', {
       value: traceArtifactsBucket.bucket.bucketName,
@@ -950,7 +963,7 @@ export class AgentStack extends Stack {
       guardrailId: inputGuardrail.guardrailId,
       guardrailVersion: inputGuardrail.guardrailVersion,
       attachmentsBucket: attachmentsBucket.bucket,
-      agentRegistryId: agentRegistry.registryId,
+      ...(agentRegistry && { agentRegistryId: agentRegistry.registryId }),
       // Route ``compute_type: 'ecs'`` repos to the Fargate cluster above —
       // only when the cluster was synthesized (deploy --context compute_type=ecs).
       ...(ecsCluster && {
@@ -1746,10 +1759,12 @@ export class AgentStack extends Stack {
       description: 'URL of the Task API',
     });
 
-    new CfnOutput(this, 'RegistryApiUrl', {
-      value: registryApi.apiUrl,
-      description: 'URL of the agent asset registry API (#246) — the CLI targets this for `bgagent registry` commands',
-    });
+    if (registryApi) {
+      new CfnOutput(this, 'RegistryApiUrl', {
+        value: registryApi.apiUrl,
+        description: 'URL of the agent asset registry API (#246) — the CLI targets this for `bgagent registry` commands',
+      });
+    }
 
     new CfnOutput(this, 'UserPoolId', {
       value: taskApi.userPool.userPoolId,

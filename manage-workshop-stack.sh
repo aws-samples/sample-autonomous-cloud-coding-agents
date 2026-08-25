@@ -13,6 +13,7 @@ STACK_NAME="${ABCA_STACK_NAME:-backgroundagent-dev}"
 BLUEPRINT_REPO="${BLUEPRINT_REPO:-aws-samples/sample-abca-playground}"
 PARTICIPANT_USERNAME="${PARTICIPANT_USERNAME:-participant@workshop.local}"
 PARTICIPANT_SECRET_NAME="${PARTICIPANT_SECRET_NAME:-abca-workshop/participant-credentials}"
+ENABLE_AGENT_REGISTRY="${ENABLE_AGENT_REGISTRY:-false}"
 
 export AWS_REGION="$REGION"
 export AWS_DEFAULT_REGION="$REGION"
@@ -176,7 +177,8 @@ deploy_stack() {
         "aws://$(aws sts get-caller-identity --query Account --output text)/${REGION}"
     npx cdk deploy "$STACK_NAME" \
         --require-approval never \
-        --context "blueprintRepo=${BLUEPRINT_REPO}"
+        --context "blueprintRepo=${BLUEPRINT_REPO}" \
+        --context "enableAgentRegistry=${ENABLE_AGENT_REGISTRY}"
     popd >/dev/null
 
     seed_github_token

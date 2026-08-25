@@ -194,6 +194,12 @@ describe('AgentStack', () => {
     template.hasOutput('RuntimeArn', {});
   });
 
+  test('enables the AgentCore registry by default', () => {
+    template.hasOutput('AgentRegistryId', {});
+    template.hasOutput('AgentRegistryArn', {});
+    template.hasOutput('RegistryApiUrl', {});
+  });
+
   test('creates exactly one AgentCore Runtime', () => {
     template.resourceCountIs('AWS::BedrockAgentCore::Runtime', 1);
   });
@@ -1319,5 +1325,46 @@ describe('AgentStack tool-gateway gate (ADR-019 P1)', () => {
         ]),
       });
     });
+  });
+});
+
+describe('AgentStack registry gate', () => {
+  let template: Template;
+
+  beforeAll(() => {
+    const app = new App({ context: { enableAgentRegistry: 'false' } });
+    const stack = new AgentStack(app, 'NoRegistryStack', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    });
+    template = Template.fromStack(stack);
+  });
+
+  test('omits the registry nested stacks and outputs', () => {
+    const rendered = template.toJSON() as {
+      Resources: Record<string, unknown>;
+      Outputs?: Record<string, unknown>;
+    };
+    const resourceIds = Object.keys(rendered.Resources);
+
+    expect(resourceIds.some(id => id.includes('AgentRegistryStack'))).toBe(false);
+    expect(resourceIds.some(id => id.includes('RegistryApi'))).toBe(false);
+    expect(rendered.Outputs).not.toHaveProperty('AgentRegistryId');
+    expect(rendered.Outputs).not.toHaveProperty('AgentRegistryArn');
+    expect(rendered.Outputs).not.toHaveProperty('RegistryApiUrl');
+  });
+
+  test('does not configure registry access on the task orchestrator', () => {
+    const functions = template.findResources('AWS::Lambda::Function');
+    const [, orchestrator] = Object.entries(functions)
+      .find(([id]) => id.includes('TaskOrchestratorOrchestratorFn'))!;
+    const env = orchestrator.Properties.Environment.Variables as Record<string, unknown>;
+
+    expect(env.AGENT_REGISTRY_ID).toBeUndefined();
+
+    const policies = Object.entries(template.findResources('AWS::IAM::Policy'))
+      .filter(([id]) => id.includes('TaskOrchestrator'));
+    const renderedPolicies = JSON.stringify(policies);
+    expect(renderedPolicies).not.toContain('bedrock-agentcore:GetRegistryRecord');
+    expect(renderedPolicies).not.toContain('bedrock-agentcore:ListRegistryRecords');
   });
 });
