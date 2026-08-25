@@ -36,7 +36,9 @@ install_toolchain() {
 
 prepare_arm64_builder() {
     docker info >/dev/null
-    docker run --privileged --rm tonistiigi/binfmt --install arm64 >/dev/null
+    if [[ "$(uname -m)" != "aarch64" ]]; then
+        docker run --privileged --rm tonistiigi/binfmt --install arm64 >/dev/null
+    fi
 }
 
 stack_output() {
