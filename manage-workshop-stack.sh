@@ -26,7 +26,6 @@ install_toolchain() {
 
     eval "$("${HOME}/.local/bin/mise" activate bash)"
     mise use --global node@22
-    mise install
 
     corepack enable
     corepack prepare yarn@1.22.22 --activate
