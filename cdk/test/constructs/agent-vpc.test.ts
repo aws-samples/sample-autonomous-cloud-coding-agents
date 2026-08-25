@@ -127,6 +127,25 @@ describe('AgentVpc', () => {
 });
 
 describe('AgentVpc with custom props', () => {
+  test('accepts account-local availability zone names', () => {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    });
+    new AgentVpc(stack, 'AgentVpc', {
+      availabilityZones: ['us-east-1b', 'us-east-1d'],
+    });
+    const template = Template.fromStack(stack);
+
+    template.hasResourceProperties('AWS::EC2::Subnet', {
+      AvailabilityZone: 'us-east-1b',
+    });
+    template.hasResourceProperties('AWS::EC2::Subnet', {
+      AvailabilityZone: 'us-east-1d',
+    });
+    template.resourceCountIs('AWS::EC2::Subnet', 4);
+  });
+
   test('accepts custom maxAzs', () => {
     const app = new App();
     const stack = new Stack(app, 'TestStack', {
