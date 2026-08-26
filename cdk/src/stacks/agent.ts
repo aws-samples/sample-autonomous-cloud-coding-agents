@@ -82,6 +82,9 @@ const GUARDRAIL_NAME_MAX_LENGTH = 50;
 /** AgentCore Runtime session lifecycle ceiling (hours) — the AgentCore maximum. */
 const RUNTIME_SESSION_TIMEOUT_HOURS = 8;
 
+/** Model available in the Workshop Studio environment. */
+const WORKSHOP_MODEL_ID = 'global.anthropic.claude-opus-4-6-v1';
+
 /** Index of the stage segment in a split API Gateway URL. */
 const API_URL_STAGE_SEGMENT_INDEX = 3;
 
@@ -197,6 +200,7 @@ export class AgentStack extends Stack {
     const agentPluginsBlueprint = new Blueprint(this, 'AgentPluginsBlueprint', {
       repo: blueprintRepo,
       repoTable: repoTable.table,
+      agent: { modelId: WORKSHOP_MODEL_ID },
     });
 
     const blueprints = [agentPluginsBlueprint];
@@ -651,6 +655,18 @@ export class AgentStack extends Stack {
       crossRegionProfile.grantInvoke(runtime);
       invokableBedrockModels.push(foundationModel, crossRegionProfile);
     }
+
+    const workshopFoundationModel = new bedrock.BedrockFoundationModel(
+      WORKSHOP_MODEL_ID.replace(/^global\./, ''),
+      { supportsAgents: true, supportsCrossRegion: true },
+    );
+    const workshopInferenceProfile = bedrock.CrossRegionInferenceProfile.fromConfig({
+      geoRegion: bedrock.CrossRegionInferenceProfileRegion.GLOBAL,
+      model: workshopFoundationModel,
+    });
+    workshopFoundationModel.grantInvoke(runtime);
+    workshopInferenceProfile.grantInvoke(runtime);
+    invokableBedrockModels.push(workshopFoundationModel, workshopInferenceProfile);
 
     // --- Per-task SessionRole ---
     // Holds the tenant-data grants (the four task_id-partitioned tables, plus
