@@ -41,6 +41,15 @@ export const DEFAULT_BEDROCK_MODEL_IDS: readonly string[] = [
   // this entry and that default in the same change — a fallback the role cannot
   // invoke fails every task on the stack, not just an edge case.
   'anthropic.claude-opus-4-8',
+  // Claude Opus 5 — granted ahead of anything selecting it (#744). The grant
+  // must be DEPLOYED before the platform default flips, or every task fails at
+  // turn 0 with AccessDenied. Bare ID by contract: Bedrock refuses the bare ID
+  // for on-demand invocation ("ValidationException: … isn't supported. Retry
+  // your request with the ID or ARN of an inference profile"), and both grant
+  // sites derive the `us.`-prefixed inference-profile ARN — the invocable one —
+  // from this entry. Opus 4.8 above stays granted: blueprints may pin it
+  // per-repo, so removing it would fail those repos at turn 0.
+  'anthropic.claude-opus-5',
   'anthropic.claude-haiku-4-5-20251001-v1:0',
 ];
 

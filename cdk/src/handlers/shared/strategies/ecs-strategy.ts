@@ -22,12 +22,13 @@ import { S3Client, PutObjectCommand, DeleteObjectCommand } from '@aws-sdk/client
 import type { ComputeStrategy, SessionHandle, SessionStatus } from '../compute-strategy';
 import { logger } from '../logger';
 import type { BlueprintConfig } from '../repo-config';
+import { makeClient } from '../ua';
 import { DEFAULT_MAX_TURNS } from '../validation';
 
 let sharedClient: ECSClient | undefined;
 function getClient(): ECSClient {
   if (!sharedClient) {
-    sharedClient = new ECSClient({});
+    sharedClient = makeClient(ECSClient);
   }
   return sharedClient;
 }
@@ -35,7 +36,7 @@ function getClient(): ECSClient {
 let sharedS3Client: S3Client | undefined;
 function getS3Client(): S3Client {
   if (!sharedS3Client) {
-    sharedS3Client = new S3Client({});
+    sharedS3Client = makeClient(S3Client);
   }
   return sharedS3Client;
 }

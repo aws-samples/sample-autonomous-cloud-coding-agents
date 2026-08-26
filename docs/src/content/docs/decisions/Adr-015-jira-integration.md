@@ -6,6 +6,7 @@ title: Adr 015 jira integration
 
 **Status:** accepted
 **Date:** 2026-06-08
+**Revised:** 2026-08-05 by [#709](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/709)
 
 ## Context
 
@@ -45,14 +46,16 @@ Web-trigger URLs have no Forge-managed caller authentication. ABCA signs `timest
 These are the points where blindly copying Linear would have been wrong:
 
 1. **Label-add detection on updates.** Jira's `jira:issue_updated` payload reports label changes in `changelog.items[]` (`field: "labels"`, `fromString` / `toString`) — it does *not* re-send the full label list. The processor diffs the changelog, not `issue.fields.labels`, so re-saving an issue that already carries the label does not re-trigger.
-2. **Webhook signing secret is operator-chosen.** Atlassian does not auto-generate a per-subscription signing secret the way Linear does. The operator picks one at webhook-create time and pastes it during `bgagent jira setup`; ABCA stores it on the per-tenant OAuth bundle. The stack-wide secret is seeded only once (from the first tenant) for single-tenant back-compat — it is **not** copied into later tenants' bundles (see *Multi-tenant signature binding* below).
+2. **Webhook signing secret is operator-chosen and synchronized.** Atlassian does not auto-generate a per-subscription signing secret the way Linear does. The operator picks one at webhook-create time and pastes it during `bgagent jira setup`; ABCA stores the same value on the sole active tenant's OAuth bundle and in the stack-wide verifier. Jira admin-console webhook payloads omit `cloudId`, so the channel supports exactly one active Jira tenant.
 3. **Signature scheme.** Atlassian signs with HMAC-SHA256 over the *raw* request body, delivered as `X-Hub-Signature: sha256=<hex>`. Verification uses a constant-time compare over the unparsed bytes.
 4. **ADF descriptions.** Jira issue descriptions are Atlassian Document Format, not markdown. The processor extracts text/headings/lists (and external `media` image URLs) into markdown for the task description rather than rolling a full ADF converter.
 5. **Dedup key.** `{issueKey}#{webhookEvent}#{timestamp}` with an 8-hour TTL, rather than keying on event type alone — so two distinct label-adds in quick succession aren't collapsed, while retries of one delivery (same timestamp) are. Jira retries far less aggressively than Linear, so 8 hours is safe parity. A timestamp-less delivery collapses to `…#unknown` and skips the (advisory, unsigned) replay-window check, which is logged rather than treated as fatal.
 
-### Multi-tenant signature binding
+### Admin-console webhook tenant binding
 
-The per-tenant signing secret proves which tenant signed a delivery, so a per-tenant-verified webhook's body `cloudId` is trusted for routing. The **stack-wide fallback secret is not bound to any `cloudId`**, so a delivery verified that way cannot trust a body-supplied `cloudId`. The receiver flags stack-wide verifications (`verified_via_stack_wide`) to the processor, which then ignores the body `cloudId` and binds the event to the **sole active tenant**, dropping when zero or multiple tenants are active. This preserves the fail-closed multi-tenant guarantee: a holder of the stack-wide secret cannot steer a webhook at an arbitrary tenant's mappings.
+Jira admin-console webhook payloads omit `cloudId`, so one webhook URL cannot select among multiple tenant secrets. `bgagent jira setup` therefore refuses to onboard a second active Jira tenant and synchronizes the sole active tenant's signing secret to both its OAuth bundle and the stack-wide verifier.
+
+Payloads that do carry `cloudId` can still use the per-tenant copy. For stack-wide verifications, the receiver flags the delivery (`verified_via_stack_wide`) and the processor ignores any body-supplied `cloudId`, binding the event to the sole active tenant. It drops the event when zero or multiple tenants are active, so a holder of the stack-wide secret cannot steer a webhook at arbitrary tenant mappings.
 
 ### Token refresh ownership
 
@@ -64,17 +67,19 @@ Atlassian **rotates the `refresh_token` on every use**. Only trusted Lambda code
 - (+) Jira comments and workflow history identify the dedicated `bgagent` app instead of the OAuth setup user.
 - (+) Inbound human attribution remains independent: `JiraUserMappingTable` still controls task ownership, concurrency, cost, and audit.
 - (+) One identity-selection rule covers Lambda and agent writes, and a configured app failure cannot silently change actor.
-- (+) Per-tenant credential isolation, signature binding, and the changelog-diff trigger keep the trust and re-trigger semantics correct for multi-tenant installs.
+- (+) Synchronizing the tenant and stack-wide signing-secret copies keeps admin-console webhook verification deterministic.
 - (-) Operators deploy and install a small Forge app per Atlassian environment and manage one additional HMAC secret.
+- (-) The Jira channel supports exactly one active tenant because admin-console webhook payloads provide no tenant-routing key.
 - (-) Forge web-trigger and invocation limits become part of the outbound path.
 - (-) ADF→markdown is lossy by design (text/headings/lists + external image URLs only); rich content in descriptions is flattened, and `file`-type attachment media (needing a Jira API round-trip) are skipped.
 - (!) `cloudId` must be used consistently as the tenant key. Indexing on domain or site name anywhere would break tenant resolution.
-- (!) The webhook signing secret lives on the per-tenant OAuth bundle; rotating it in Jira without re-running `bgagent jira setup` causes silent 401s on every delivery.
+- (!) The webhook signing secret lives in both the per-tenant OAuth bundle and the stack-wide verifier; after rotating it in Jira, run `bgagent jira update-webhook-secret <cloudId>` to synchronize both copies and avoid silent 401s.
 
 ## References
 
 - Issue: [#288 — Jira Cloud integration (parity with Linear)](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/288)
 - Issue: [#642 — give Jira outbound actions a bgagent app identity](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/642)
+- Issue: [#709 — repair Jira webhook admission and secret rotation](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/709)
 - [JIRA_SETUP_GUIDE.md](/sample-autonomous-cloud-coding-agents/using/jira-setup-guide) — operational walkthrough
 - [LINEAR_SETUP_GUIDE.md](/sample-autonomous-cloud-coding-agents/using/linear-setup-guide) — the analog integration this mirrors
 - Reference implementation: `cdk/src/constructs/jira-integration.ts`, `cdk/src/handlers/jira-*.ts`, `cdk/src/handlers/shared/jira-{verify,oauth-resolver,feedback}.ts`, `agent/src/jira_reactions.py`, `agent/src/channel_mcp.py`

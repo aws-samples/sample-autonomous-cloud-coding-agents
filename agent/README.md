@@ -119,11 +119,11 @@ The `run.sh` script overrides the container's default CMD to run `python /app/sr
 | `AWS_SECRET_ACCESS_KEY` | Conditional† | | Explicit keys, if you are not using CLI-based resolution |
 | `AWS_SESSION_TOKEN` | No | | For temporary credentials |
 | `AWS_PROFILE` | No | | Profile for `aws configure export-credentials` in `run.sh`, or default profile when using the `~/.aws` mount fallback |
-| `ANTHROPIC_MODEL` | No | `us.anthropic.claude-sonnet-4-6` | Bedrock **inference profile** or model ID for `InvokeModel` (see [inference profiles](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-use.html)) |
+| `ANTHROPIC_MODEL` | No | `us.anthropic.claude-opus-5` | Bedrock **inference profile** ID for `InvokeModel` (see [inference profiles](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-use.html)). Must be the `us.`-prefixed profile ID, not a bare foundation-model ID — see [Model configuration](../docs/guides/DEVELOPER_GUIDE.md#model-configuration) |
 | `MAX_TURNS` | No | `100` | Max agent turns before stopping |
 | `MAX_BUDGET_USD` | No | | **Local batch only** (shell env when running `entrypoint.py` directly). Range 0.01–100; agent stops when the budget is reached. For deployed AgentCore **server** mode and production tasks, set **`max_budget_usd`** on task creation (REST API, CLI `--max-budget`, or Blueprint default); the orchestrator sends it in the `/invocations` JSON body — server mode does not read `MAX_BUDGET_USD` from the environment. |
 | `DRY_RUN` | No | | Set to `1` to validate config and print the prompt without running the agent |
-| `ANTHROPIC_DEFAULT_HAIKU_MODEL` | No | `anthropic.claude-haiku-4-5-20251001-v1:0` | Bedrock model ID for the pre-flight safety check (see below) |
+| `ANTHROPIC_DEFAULT_HAIKU_MODEL` | No | `us.anthropic.claude-haiku-4-5-20251001-v1:0` | Bedrock **inference profile** ID for the small/fast auxiliary model — the pre-flight safety check and WebFetch summarization (see below). Set by the CDK stack (`cdk/src/stacks/agent.ts` (the runtime environment block)); the `us.` prefix is required |
 | `NUDGES_TABLE_NAME` | No | | **Phase 2.** DynamoDB table for mid-task user nudges (`<user_nudge>` XML blocks injected between turns). If unset, the agent runs without nudge support — `nudge_reader.read_pending()` returns `[]` and logs a WARN once. Set automatically by the CDK stack on both AgentCore runtimes. |
 | `JIRA_APP_ACTOR_PROXY_URL` | No | | Resolved per-task from the Jira tenant secret. Forge v2 web-trigger URL used for app-authored Jira comments and transitions. |
 | `JIRA_APP_ACTOR_SHARED_SECRET` | No | | Resolved per-task from the Jira tenant secret. HMAC key for the Forge proxy; redacted from agent diagnostics. |
@@ -133,7 +133,7 @@ The `run.sh` script overrides the container's default CMD to run `python /app/sr
 including non-Jira tasks, so a warm AgentCore process cannot expose one
 tenant's OAuth or Forge credential to the next task.
 
-**Bedrock model access (main model):** Configuring `ANTHROPIC_MODEL` and IAM credentials is not enough. Your AWS account must be able to **invoke** that model in Amazon Bedrock: follow [Request access to models](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) (Marketplace permissions on first use, Anthropic first-time use where required, valid payment method for Marketplace-backed models). Use an inference profile ID such as `us.anthropic.claude-sonnet-4-6` when Bedrock requires it. If the CLI stops with a message that the model is not available on your Bedrock deployment, fix model access in the console or switch `ANTHROPIC_MODEL` to an entitled profile, then retry.
+**Bedrock model access (main model):** Configuring `ANTHROPIC_MODEL` and IAM credentials is not enough. Your AWS account must be able to **invoke** that model in Amazon Bedrock: follow [Request access to models](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) (Marketplace permissions on first use, Anthropic first-time use where required, valid payment method for Marketplace-backed models). Always use an inference profile ID such as `us.anthropic.claude-opus-5`: a bare foundation-model ID cannot be invoked with on-demand throughput and Bedrock rejects it with `ValidationException`. IAM must also grant the model — see [Model configuration](../docs/guides/DEVELOPER_GUIDE.md#model-configuration) for the full layering. If the CLI stops with a message that the model is not available on your Bedrock deployment, fix model access in the console or switch `ANTHROPIC_MODEL` to an entitled profile, then retry.
 
 **Pre-flight check model**: Claude Code runs a quick safety verification using a small Haiku model before executing each tool command. On Bedrock, the default Haiku model ID may not be enabled in your account, causing the check to time out with *"Pre-flight check is taking longer than expected"* warnings. The agent sets `ANTHROPIC_DEFAULT_HAIKU_MODEL` to a known-available Bedrock Haiku model ID to avoid this. If you see pre-flight timeout warnings, verify that this model is enabled in your Bedrock model access settings.
 
@@ -145,7 +145,8 @@ tenant's OAuth or Forge credential to the next task.
 # Dry run — validate config, fetch issue, print assembled prompt, then exit
 DRY_RUN=1 ./agent/run.sh "owner/repo" 42
 
-# Run with a specific model
+# Run with a specific model (overrides the us.anthropic.claude-opus-5 default).
+# Must be a `us.`-prefixed inference profile that IAM grants — see Model configuration.
 ANTHROPIC_MODEL="us.anthropic.claude-sonnet-4-6" ./agent/run.sh "owner/repo" 42
 
 # Limit agent to 50 turns
@@ -217,6 +218,34 @@ Immediate response (acceptance):
 ```
 
 Final metrics (PR URL, cost, turns, build status, etc.) appear in **container logs**, in **DynamoDB** when configured, and in the **REST API** for deployed tasks (`GET /v1/tasks/{task_id}` via the `bgagent` CLI or HTTP client).
+
+### AWS Lambda MicroVMs lifecycle hooks (ADR-021 P1)
+
+The same uvicorn process also serves the **Lambda MicroVMs** lifecycle hooks, on the same port (8080 — the port declared in the image's `hooks.port`). On that backend there is no `InvokeAgentRuntime` and no orchestrator→agent HTTP path at all: the task payload arrives as the `/run` hook body and nothing else dials in.
+
+**`POST /aws/lambda-microvms/runtime/v1/ready`** — Build hook. Returns `{"status": "ready"}` as soon as the server is up, which is the signal the service waits for before taking the snapshot. **Mandatory**, not optional: `CreateMicrovmImage` refuses an image that enables *any* lifecycle hook without `/ready`, and with the hook enabled but unserved every build fails with `Ready hook check failed: the application returned a client error (HTTP 4xx) response`.
+
+**`POST /aws/lambda-microvms/runtime/v1/run`** — Payload delivery. Validates the body, starts the pipeline in a background thread (the same `_extract_invocation_params` → `_spawn_background` path `/invocations` uses), and returns 200 inside the 1–60 s hook budget. Body:
+
+```json
+{
+  "microvmId": "microvm-b44b69d9-…",
+  "runHookPayload": "{\"agent_payload_s3_uri\": \"s3://bucket/<task_id>/payload.json\"}"
+}
+```
+
+`runHookPayload` is an opaque **string** the service passes through from `RunMicrovm`. ABCA's contract for it is one of two shapes, mirroring the ECS container env contract (`AGENT_PAYLOAD` / `AGENT_PAYLOAD_S3_URI`):
+
+| Envelope | When |
+|---|---|
+| `{"agent_payload": {…}}` | the whole orchestrator payload inline — only when it fits |
+| `{"agent_payload_s3_uri": "s3://bucket/key"}` | pointer to the payload in the platform payload bucket |
+
+The service caps `runHookPayload` at **4 096 bytes**, so the **pointer form is the normal one** — a hydrated payload is essentially always larger. Fetching it needs no new env var: the MicroVM execution role holds read-only access to that bucket and the URI carries bucket + key.
+
+Rejections are structured so they are readable in the MicroVM log group: `400 MICROVM_RUN_PAYLOAD_INVALID` (unusable envelope — retrying the same body cannot help), `500 MICROVM_RUN_PAYLOAD_UNREADABLE` (the S3 fetch failed), `400 TASK_RECORD_INCOMPLETE` (same validator and vocabulary as `/invocations`).
+
+`/validate` (build) and `/suspend`, `/resume`, `/terminate` (runtime) are deliberately **not** served — declaring a hook nothing answers fails the corresponding build or lifecycle transition, so the CDK construct declares exactly `/ready` + `/run`. `/terminate` and `/validate` land in P2; `/suspend` + `/resume` in P3 with the ComputeStrategy interface widening.
 
 ### Testing Server Mode Locally
 
@@ -375,7 +404,7 @@ agent/
 │   ├── repo.py          Repository setup: clone, branch, git auth, mise trust/install/build/lint
 │   ├── shell.py         Shell utilities: log(), run_cmd(), redact_secrets(), slugify(), truncate()
 │   ├── telemetry.py     Metrics, disk usage, trajectory writer (_TrajectoryWriter with write_policy_decision)
-│   ├── server.py        FastAPI — async /invocations (background thread), /ping health check, heartbeat daemon; OTEL session correlation
+│   ├── server.py        FastAPI — async /invocations (background thread), /ping health check, MicroVM /ready + /run lifecycle hooks, heartbeat daemon; OTEL session correlation
 │   ├── task_state.py    Best-effort DynamoDB task status and heartbeat writes (no-op if TASK_TABLE_NAME unset)
 │   ├── observability.py OpenTelemetry helpers (e.g. AgentCore session id)
 │   ├── memory.py        Optional memory / episode integration for the agent

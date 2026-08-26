@@ -416,6 +416,14 @@ describe('EcsAgentCluster construct', () => {
     expect(serialized).toContain('inference-profile/us.anthropic.claude-sonnet-4-6');
     expect(serialized).toContain('anthropic.claude-opus-4-20250514-v1:0');
     expect(serialized).toContain('anthropic.claude-haiku-4-5-20251001-v1:0');
+    // Claude Opus 5 (#744) — AgentCore/ECS parity. Both ARNs: the bare id isn't
+    // on-demand invocable, so the `us.` profile is the one actually called.
+    expect(serialized).toContain('foundation-model/anthropic.claude-opus-5');
+    expect(serialized).toContain('inference-profile/us.anthropic.claude-opus-5');
+    // REGRESSION (#744): Opus 4.8 stays granted alongside Opus 5 — blueprints may
+    // pin it per-repo, so dropping it would fail those repos at turn 0.
+    expect(serialized).toContain('foundation-model/anthropic.claude-opus-4-8');
+    expect(serialized).toContain('inference-profile/us.anthropic.claude-opus-4-8');
   });
 
   test('task role can DescribeAvailabilityZones so a CDK target repo can `cdk synth` on a fresh clone (ECS-parity)', () => {

@@ -119,6 +119,35 @@
     },
     {
       "Action": [
+        "kms:CreateKey",
+        "kms:GetKeyPolicy",
+        "kms:GetKeyRotationStatus",
+        "kms:TagResource",
+        "kms:ListResourceTags"
+      ],
+      "Effect": "Allow",
+      "Resource": "*",
+      "Sid": "KMSCustomerManagedKeys"
+    },
+    {
+      "Action": [
+        "kms:PutKeyPolicy",
+        "kms:ScheduleKeyDeletion",
+        "kms:EnableKeyRotation",
+        "kms:DisableKeyRotation",
+        "kms:UntagResource"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/ABCA": "operational-alerts"
+        }
+      },
+      "Effect": "Allow",
+      "Resource": "*",
+      "Sid": "KMSCustomerManagedKeysLifecycle"
+    },
+    {
+      "Action": [
         "ecr:CreateRepository",
         "ecr:DescribeRepositories",
         "ecr:GetAuthorizationToken",

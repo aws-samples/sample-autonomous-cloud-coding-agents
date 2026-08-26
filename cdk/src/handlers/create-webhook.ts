@@ -18,19 +18,19 @@
  */
 
 import * as crypto from 'crypto';
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { CreateSecretCommand, DeleteSecretCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
-import { DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
+import { PutCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
 import { extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
 import type { CreateWebhookRequest, CreateWebhookResponse, WebhookRecord } from './shared/types';
+import { makeClient, makeDocClient } from './shared/ua';
 import { isValidWebhookName, parseBody } from './shared/validation';
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
-const sm = new SecretsManagerClient({});
+const ddb = makeDocClient();
+const sm = makeClient(SecretsManagerClient);
 const TABLE_NAME = process.env.WEBHOOK_TABLE_NAME!;
 const SECRET_PREFIX = 'bgagent/webhook/';
 

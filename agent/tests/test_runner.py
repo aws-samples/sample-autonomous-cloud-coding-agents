@@ -12,11 +12,13 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+from gateway_tools import GATEWAY_SERVER_NAME
 from models import TaskConfig
 from runner import (
     _DISALLOWED_TOOLS,
     _FULL_TOOL_SURFACE,
     _initialize_policy_engine_and_hooks,
+    _register_gateway_server,
     _resolve_allowed_tools,
     _resolve_setting_sources,
     _setup_agent_env,
@@ -420,3 +422,42 @@ class TestSetupAgentEnv:
         # The platform default (no override) must be a us.* profile, never a bare
         # foundation-model id — the whole point of the fix.
         assert _config().haiku_model.startswith("us.")
+
+
+class TestRegisterGatewayServer:
+    """The runner-side wiring that registers the AgentCore Gateway bridge.
+
+    ``gateway_tools`` unit tests cover ``build_gateway_server`` itself; these
+    pin the ``run_agent`` registration path — that a built server lands under
+    ``GATEWAY_SERVER_NAME`` and that a disabled bridge adds nothing (#641 P1
+    review flagged this wiring as untested / N6).
+    """
+
+    def test_registers_built_server_under_gateway_name(self):
+        sentinel = object()
+        with patch("runner.build_gateway_server", return_value=sentinel) as mock_build:
+            mcp_servers: dict[str, Any] = {}
+            _register_gateway_server(mcp_servers)
+        mock_build.assert_called_once_with()
+        assert mcp_servers == {GATEWAY_SERVER_NAME: sentinel}
+
+    def test_no_registration_when_bridge_disabled(self):
+        # build_gateway_server returns None when the feature is off (URL unset)
+        # or the SDK is missing — the runner must then offer no gateway tool.
+        with patch("runner.build_gateway_server", return_value=None):
+            mcp_servers: dict[str, Any] = {}
+            _register_gateway_server(mcp_servers)
+        assert mcp_servers == {}
+
+    def test_preserves_other_servers_already_registered(self):
+        # Registration must be additive — a pre-registered server (e.g. the
+        # clarification tool) is left untouched.
+        sentinel = object()
+        existing = object()
+        with patch("runner.build_gateway_server", return_value=sentinel):
+            mcp_servers: dict[str, Any] = {"clarification": existing}
+            _register_gateway_server(mcp_servers)
+        assert mcp_servers == {
+            "clarification": existing,
+            GATEWAY_SERVER_NAME: sentinel,
+        }

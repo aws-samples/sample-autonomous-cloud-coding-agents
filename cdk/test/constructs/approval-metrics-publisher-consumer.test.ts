@@ -189,4 +189,33 @@ describe('ApprovalMetricsPublisherConsumer', () => {
     // expect exactly one Table in the synthesized stack.
     template.resourceCountIs('AWS::DynamoDB::Table', 1);
   });
+
+  test('creates a CloudWatch alarm on DLQ ApproximateNumberOfMessagesVisible (#117)', () => {
+    const { template } = createStack();
+
+    // Exactly one alarm — guards against a future merge or refactor
+    // accidentally duplicating the DLQ-depth alarm on this construct.
+    template.resourceCountIs('AWS::CloudWatch::Alarm', 1);
+    template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      MetricName: 'ApproximateNumberOfMessagesVisible',
+      Namespace: 'AWS/SQS',
+      Threshold: 1,
+      EvaluationPeriods: 1,
+      ComparisonOperator: 'GreaterThanOrEqualToThreshold',
+      TreatMissingData: 'notBreaching',
+      Statistic: 'Maximum',
+      Period: 300,
+      // The alarm must watch THIS construct's DLQ, not some other queue.
+      Dimensions: Match.arrayWith([
+        Match.objectLike({
+          Name: 'QueueName',
+          Value: Match.objectLike({
+            'Fn::GetAtt': Match.arrayWith([
+              Match.stringLikeRegexp('ApprovalMetricsPublisherDlq'),
+            ]),
+          }),
+        }),
+      ]),
+    });
+  });
 });

@@ -17,9 +17,8 @@
  *  SOFTWARE.
  */
 
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
-import { DynamoDBDocumentClient, GetCommand, QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { captureScreenshot } from './shared/agentcore-browser';
 import { resolveGitHubToken } from './shared/context-hydration';
 import { upsertTaskComment } from './shared/github-comment';
@@ -37,9 +36,10 @@ import {
 import { logger } from './shared/logger';
 import { isIntegrationNode } from './shared/orchestration-integration-node';
 import { buildScreenshotKey, encodeMarkdownUrl, extractTaskIdFromBranch, isAllowedScreenshotUrl } from './shared/screenshot-url';
+import { makeClient, makeDocClient } from './shared/ua';
 
-const s3 = new S3Client({});
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const s3 = makeClient(S3Client);
+const ddb = makeDocClient();
 // Optional — when set, the processor persists the screenshot's public URL onto
 // the deploy task's TaskRecord (keyed by the taskId in the deploy branch) so
 // the orchestration reconciler can embed the integration node's combined

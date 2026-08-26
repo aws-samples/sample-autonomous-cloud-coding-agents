@@ -36,14 +36,24 @@
  */
 
 import { DynamoDBClient, QueryCommand } from '@aws-sdk/client-dynamodb';
+import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { planHeartbeat, type HeartbeatTaskView } from './shared/iteration-heartbeat';
+import { terminalReplyClaimed } from './shared/iteration-reply-claim';
 import { logger } from './shared/logger';
-import { makeLinearChannel } from './shared/orchestration-channel-linear';
+import {
+  channelForSource,
+  type ChannelRegistryTables,
+} from './shared/orchestration-channel-factory';
+import { makeClient } from './shared/ua';
 
-const ddb = new DynamoDBClient({});
+const ddb = makeClient(DynamoDBClient);
+const docDdb = DynamoDBDocumentClient.from(ddb);
 const TASK_TABLE = process.env.TASK_TABLE_NAME!;
 const STATUS_INDEX = process.env.TASK_STATUS_INDEX_NAME ?? 'StatusIndex';
-const WORKSPACE_REGISTRY_TABLE = process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME;
+const CHANNEL_REGISTRY_TABLES: ChannelRegistryTables = {
+  linear: process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME,
+  jira: process.env.JIRA_WORKSPACE_REGISTRY_TABLE_NAME,
+};
 
 /** Hard cap on tasks edited per sweep — a backstop against an unexpected flood. */
 const MAX_EDITS_PER_SWEEP = 50;
@@ -60,6 +70,7 @@ function toView(img: DdbMap): HeartbeatTaskView {
     ...(img.created_at?.S !== undefined && { createdAt: img.created_at.S }),
     ...(img.channel_source?.S !== undefined && { channelSource: img.channel_source.S }),
     ...(cm.linear_workspace_id?.S !== undefined && { linearWorkspaceId: cm.linear_workspace_id.S }),
+    ...(cm.jira_cloud_id?.S !== undefined && { jiraCloudId: cm.jira_cloud_id.S }),
     ...(cm.iteration_reply_comment_id?.S !== undefined && { iterationReplyCommentId: cm.iteration_reply_comment_id.S }),
     ...(cm.trigger_comment_id?.S !== undefined && { triggerCommentId: cm.trigger_comment_id.S }),
     // The issue the reply lives on. The orchestration path stamps
@@ -67,8 +78,9 @@ function toView(img: DdbMap): HeartbeatTaskView {
     // the STANDALONE path stamps only ``linear_issue_id`` (the reply is on that
     // same issue). Fall back to it so standalone iterations get a heartbeat —
     // the reconciler's reply path uses the same precedence.
-    ...((cm.trigger_comment_issue_id?.S ?? cm.linear_issue_id?.S) !== undefined && {
-      triggerCommentIssueId: cm.trigger_comment_issue_id?.S ?? cm.linear_issue_id?.S,
+    ...((cm.trigger_comment_issue_id?.S ?? cm.linear_issue_id?.S ?? cm.jira_issue_key?.S) !== undefined && {
+      triggerCommentIssueId:
+        cm.trigger_comment_issue_id?.S ?? cm.linear_issue_id?.S ?? cm.jira_issue_key?.S,
     }),
     isIteration: cm.orchestration_iteration?.S === 'true',
     ...(prNumberRaw !== undefined && { prNumber: Number(prNumberRaw) }),
@@ -101,8 +113,8 @@ async function loadRunningTasks(): Promise<DdbMap[]> {
  * never wedge or alarm).
  */
 export async function handler(): Promise<void> {
-  if (!WORKSPACE_REGISTRY_TABLE) {
-    logger.info('Heartbeat sweep skipped — no Linear workspace registry configured');
+  if (!CHANNEL_REGISTRY_TABLES.linear && !CHANNEL_REGISTRY_TABLES.jira) {
+    logger.info('Heartbeat sweep skipped — no channel credentials registry configured');
     return;
   }
 
@@ -128,29 +140,35 @@ export async function handler(): Promise<void> {
     edited_cap: MAX_EDITS_PER_SWEEP,
   });
 
-  // The reply edit goes through the surface-agnostic channel; only the surface
-  // this sweep reads from (a Linear iteration reply) picks the adapter.
-  const channel = makeLinearChannel(WORKSPACE_REGISTRY_TABLE);
-
   let edited = 0;
   for (const plan of plans.slice(0, MAX_EDITS_PER_SWEEP)) {
     try {
-      await channel.upsertThreadedReply?.(
-        { issueId: plan.issueId, credentialsRef: plan.linearWorkspaceId },
-        { commentId: plan.parentCommentId },
-        plan.body,
-        { commentId: plan.replyId },
-        {
-          // Keep any already-landed deploy-preview block (a heartbeat must never
-          // clobber the screenshot the webhook may have appended).
-          preservePreview: true,
-          // A liveness tick is the LEAST important writer of this reply: if the
-          // task has already settled, saying "working" again would un-settle it
-          // in the reader's eyes.
-          skipIfSettled: true,
-        },
-      );
-      edited += 1;
+      if (await terminalReplyClaimed(docDdb, TASK_TABLE, plan.taskId)) continue;
+      const channel = channelForSource(plan.channelSource, CHANNEL_REGISTRY_TABLES);
+      if (!channel) continue;
+      const issue = { issueId: plan.issueId, credentialsRef: plan.credentialsRef };
+      const ref = plan.channelSource === 'linear' && plan.parentCommentId
+        ? await channel.upsertThreadedReply?.(
+          issue,
+          { commentId: plan.parentCommentId },
+          plan.body,
+          { commentId: plan.replyId },
+          {
+            // Keep any already-landed deploy-preview block (a heartbeat must never
+            // clobber the screenshot the webhook may have appended).
+            preservePreview: true,
+            // A liveness tick is the LEAST important writer of this reply: if the
+            // task has already settled, saying "working" again would un-settle it
+            // in the reader's eyes.
+            skipIfSettled: true,
+          },
+        )
+        : await channel.upsertComment(
+          issue,
+          plan.body,
+          { commentId: plan.replyId },
+        );
+      if (ref) edited += 1;
     } catch (err) {
       logger.warn('Heartbeat sweep: reply edit failed (non-fatal)', {
         task_id: plan.taskId,

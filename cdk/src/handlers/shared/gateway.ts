@@ -41,6 +41,22 @@ export function extractUserId(event: APIGatewayProxyEvent): string | null {
 }
 
 /**
+ * Check whether the authenticated caller is in a Cognito group. Cognito places
+ * group membership in the `cognito:groups` claim, which the authorizer surfaces
+ * either as a comma/space-separated string or an array depending on the token
+ * shape — this normalizes both. Used to gate registry publish/approve (#246).
+ * @param event - the API Gateway proxy event.
+ * @param group - the Cognito group name to check for.
+ * @returns true if the caller is a member of `group`.
+ */
+export function userInGroup(event: APIGatewayProxyEvent, group: string): boolean {
+  const raw = event.requestContext.authorizer?.claims?.['cognito:groups'];
+  if (!raw) return false;
+  const groups = Array.isArray(raw) ? raw : String(raw).split(/[,\s]+/);
+  return groups.includes(group);
+}
+
+/**
  * Generate a branch name from task ID and description.
  * Pattern: `bgagent/{taskId}/{slug}`
  * @param taskId - the ULID task identifier.

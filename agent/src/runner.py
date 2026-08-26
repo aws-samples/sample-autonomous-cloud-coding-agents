@@ -36,6 +36,7 @@ from clarification_tool import (
     build_clarification_server,
 )
 from config import AGENT_WORKSPACE
+from gateway_tools import GATEWAY_SERVER_NAME, build_gateway_server
 from models import AgentResult, TaskConfig, TokenUsage
 from progress_writer import _ProgressWriter
 from shell import log, log_error_cw, truncate
@@ -435,6 +436,21 @@ def _resolve_setting_sources(config: TaskConfig) -> list[Literal["user", "projec
     return ["project"] if config.repo_url else []
 
 
+def _register_gateway_server(mcp_servers: dict[str, Any]) -> None:
+    """Register the AgentCore Gateway bridge into ``mcp_servers`` if enabled.
+
+    Mutates ``mcp_servers`` in place, adding the bridge under
+    :data:`GATEWAY_SERVER_NAME` when :func:`build_gateway_server` returns a
+    server (feature deployed + SDK present). A no-op otherwise. Extracted from
+    ``run_agent`` so the registration wiring is unit-testable without driving
+    the whole SDK session (the #641 P1 review flagged this path as untested).
+    """
+    gateway_server = build_gateway_server()
+    if gateway_server is not None:
+        mcp_servers[GATEWAY_SERVER_NAME] = gateway_server
+        log("AGENT", "AgentCore Gateway tool bridge registered (mcp__abca_gateway__*)")
+
+
 async def run_agent(
     prompt: str,
     system_prompt: str,
@@ -533,6 +549,13 @@ async def run_agent(
             # allowed_tools, but list it explicitly so intent is clear + robust
             # to a future permission-mode change.
             allowed_tools = [*allowed_tools, CLARIFICATION_TOOL_NAME]
+
+    # AgentCore Gateway federation (ADR-019 P1): register the in-process
+    # SigV4-signed bridge to the Gateway's read-only tools when the feature is
+    # deployed (ABCA_TOOL_GATEWAY_URL set via --context enableToolGateway=true).
+    # Offered regardless of read_only — the tool is itself read-only. No-op when
+    # the URL is unset or the SDK is unavailable.
+    _register_gateway_server(mcp_servers)
 
     options = ClaudeAgentOptions(
         model=config.anthropic_model,

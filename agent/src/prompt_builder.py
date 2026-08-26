@@ -80,6 +80,13 @@ def build_system_prompt(
     if channel_addendum:
         system_prompt += channel_addendum
 
+    # Registry skill assets (#246, PR 3): append resolved prompt fragments. Placed
+    # after channel guidance so operator-attached skills sit at the recency end.
+    if config.resolved_assets:
+        from registry.loader import build_skill_prompt_fragment
+
+        system_prompt += build_skill_prompt_fragment(config.resolved_assets)
+
     return system_prompt
 
 
@@ -112,6 +119,11 @@ def build_repoless_system_prompt(
     channel_addendum = _channel_prompt_addendum(config)
     if channel_addendum:
         system_prompt += channel_addendum
+
+    if config.resolved_assets:
+        from registry.loader import build_skill_prompt_fragment
+
+        system_prompt += build_skill_prompt_fragment(config.resolved_assets)
 
     return system_prompt
 

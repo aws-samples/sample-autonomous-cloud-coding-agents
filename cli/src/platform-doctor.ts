@@ -23,11 +23,19 @@ import {
   DescribeUserPoolClientCommand,
   DescribeUserPoolCommand,
 } from '@aws-sdk/client-cognito-identity-provider';
+import { ScanCommand } from '@aws-sdk/lib-dynamodb';
+import { documentClient } from './dynamo-clients';
 import { isGithubTokenConfigured } from './github-token';
+import {
+  LAMBDA_MICROVM_REMEDY,
+  LambdaMicrovmProbeClientFactory,
+  probeLambdaMicrovmAvailability,
+} from './lambda-microvm-availability';
 import { checkLinearWorkspaceAuth, type LinearProbe, type LinearRefreshVerifier } from './linear-auth-health';
 import { PLATFORM_REPO_DEFAULTS } from './repo-display';
-import { countActiveRepos } from './repo-lookup';
+import { listRepoConfigs, RepoConfigRow } from './repo-lookup';
 import { getStackOutput } from './stack-outputs';
+import { makeClient } from './ua';
 
 /**
  * Default foundation model checked when no onboarded repo specifies model_id.
@@ -37,7 +45,7 @@ import { getStackOutput } from './stack-outputs';
  * (`us.anthropic.…`) used at invoke time, while `GetFoundationModel` requires
  * the bare foundation-model id, so we strip the regional inference prefix.
  */
-export const DEFAULT_BEDROCK_MODEL_ID =
+const DEFAULT_BEDROCK_MODEL_ID =
   PLATFORM_REPO_DEFAULTS.model_id.replace(/^(us|eu|apac)\./, '');
 
 export type DoctorCheckStatus = 'pass' | 'fail' | 'warn';
@@ -52,6 +60,8 @@ export interface DoctorCheckResult {
 export interface RunPlatformDoctorOptions {
   readonly region: string;
   readonly stackName: string;
+  /** Override for deterministic/offline tests. */
+  readonly lambdaMicrovmClientFactory?: LambdaMicrovmProbeClientFactory;
   /** Injectable Linear auth probe (tests supply a fake; production uses the default). */
   readonly linearProbe?: LinearProbe;
   /**
@@ -74,6 +84,7 @@ export async function runPlatformDoctor(
     githubTokenSecretArn,
     repoTableName,
     linearRegistryTableName,
+    jiraRegistryTableName,
   ] = await Promise.all([
     getStackOutput(region, stackName, 'ApiUrl'),
     getStackOutput(region, stackName, 'UserPoolId'),
@@ -81,6 +92,7 @@ export async function runPlatformDoctor(
     getStackOutput(region, stackName, 'GitHubTokenSecretArn'),
     getStackOutput(region, stackName, 'RepoTableName'),
     getStackOutput(region, stackName, 'LinearWorkspaceRegistryTableName'),
+    getStackOutput(region, stackName, 'JiraWorkspaceRegistryTableName'),
   ]);
 
   const checks: DoctorCheckResult[] = [];
@@ -88,13 +100,109 @@ export async function runPlatformDoctor(
   checks.push(await checkApiReachable(apiUrl));
   checks.push(await checkCognitoConfig(region, userPoolId, appClientId));
   checks.push(await checkGithubToken(region, githubTokenSecretArn));
-  checks.push(await checkActiveRepos(region, repoTableName));
+  const activeRepoResult = await loadActiveRepos(region, repoTableName);
+  checks.push(checkActiveRepos(repoTableName, activeRepoResult));
   checks.push(await checkBedrockModel(region, DEFAULT_BEDROCK_MODEL_ID));
+  if (activeRepoResult.repos.some((repo) => repo.compute_type === 'lambda-microvm')) {
+    checks.push(await checkLambdaMicrovmAvailability(
+      region,
+      options.lambdaMicrovmClientFactory,
+    ));
+  }
   checks.push(await checkLinearAuth(
     region, linearRegistryTableName, options.linearProbe, options.linearVerifyRefresh,
   ));
+  checks.push(await checkJiraAppIdentity(region, jiraRegistryTableName));
 
   return checks;
+}
+
+interface JiraRegistryIdentityRow {
+  readonly jira_cloud_id?: string;
+  readonly status?: string;
+  readonly outbound_identity?: string;
+  readonly app_actor_account_id?: string;
+  readonly app_actor_display_name?: string;
+  readonly app_actor_configured_at?: string;
+}
+
+/** Warn when Jira writes would still be attributed to the OAuth setup user. */
+export async function checkJiraAppIdentity(
+  region: string,
+  registryTableName: string | null,
+): Promise<DoctorCheckResult> {
+  const id = 'jira_app_identity';
+  const label = 'Jira outbound app identity';
+  if (!registryTableName) {
+    return {
+      id,
+      label,
+      status: 'pass',
+      detail: 'No Jira workspace registry on this stack (integration not deployed).',
+    };
+  }
+
+  try {
+    const ddb = documentClient(region);
+    const rows: JiraRegistryIdentityRow[] = [];
+    let startKey: Record<string, unknown> | undefined;
+    do {
+      const page = await ddb.send(new ScanCommand({
+        TableName: registryTableName,
+        ProjectionExpression: [
+          'jira_cloud_id',
+          '#status',
+          'outbound_identity',
+          'app_actor_account_id',
+          'app_actor_display_name',
+          'app_actor_configured_at',
+        ].join(', '),
+        ExpressionAttributeNames: { '#status': 'status' },
+        ...(startKey && { ExclusiveStartKey: startKey }),
+      }));
+      rows.push(...(page.Items ?? []) as JiraRegistryIdentityRow[]);
+      startKey = page.LastEvaluatedKey;
+    } while (startKey);
+
+    const active = rows.filter((row) => row.status === 'active');
+    if (active.length === 0) {
+      return { id, label, status: 'pass', detail: 'No active Jira tenants onboarded yet.' };
+    }
+
+    const incomplete = active.filter((row) =>
+      row.outbound_identity !== 'app'
+      || !row.app_actor_account_id
+      || !row.app_actor_display_name
+      || !row.app_actor_configured_at,
+    );
+    if (incomplete.length === 0) {
+      return {
+        id,
+        label,
+        status: 'pass',
+        detail: `${active.length} active Jira tenant(s) use the dedicated app identity.`,
+      };
+    }
+
+    const tenantIds = incomplete
+      .map((row) => row.jira_cloud_id ?? '<unknown-cloud-id>')
+      .join(', ');
+    return {
+      id,
+      label,
+      status: 'warn',
+      detail: `${incomplete.length} of ${active.length} active Jira tenant(s) will write as the OAuth `
+        + `setup user or have incomplete Forge metadata: ${tenantIds}. Run \`bgagent jira app-setup `
+        + '<cloud-id> --proxy-url <forge-v2-url> --stack-name <stack>\` for each tenant.',
+    };
+  } catch (err) {
+    return {
+      id,
+      label,
+      status: 'warn',
+      detail: `Could not read the Jira workspace registry: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
 }
 
 async function checkApiReachable(apiUrl: string | null): Promise<DoctorCheckResult> {
@@ -146,7 +254,7 @@ async function checkCognitoConfig(
     };
   }
 
-  const cognito = new CognitoIdentityProviderClient({ region });
+  const cognito = makeClient(CognitoIdentityProviderClient, { region });
   try {
     await cognito.send(new DescribeUserPoolCommand({ UserPoolId: userPoolId }));
     await cognito.send(new DescribeUserPoolClientCommand({
@@ -191,33 +299,73 @@ async function checkGithubToken(
   };
 }
 
-async function checkActiveRepos(
+async function loadActiveRepos(
   region: string,
   repoTableName: string | null,
-): Promise<DoctorCheckResult> {
+): Promise<{ readonly repos: RepoConfigRow[]; readonly error?: string }> {
+  if (!repoTableName) return { repos: [] };
+  try {
+    return {
+      repos: (await listRepoConfigs(region, repoTableName))
+        .filter((repo) => repo.status === 'active'),
+    };
+  } catch (err) {
+    return { repos: [], error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+function checkActiveRepos(
+  repoTableName: string | null,
+  result: { readonly repos: readonly RepoConfigRow[]; readonly error?: string },
+): DoctorCheckResult {
   const id = 'active_repos';
   const label = 'At least one active onboarded repo';
   if (!repoTableName) {
     return { id, label, status: 'fail', detail: 'Stack output RepoTableName is missing.' };
   }
 
+  if (result.error) {
+    return { id, label, status: 'fail', detail: result.error };
+  }
+
+  const count = result.repos.length;
+  if (count >= 1) {
+    return { id, label, status: 'pass', detail: `${count} active repo(s) in ${repoTableName}.` };
+  }
+  return {
+    id,
+    label,
+    status: 'fail',
+    detail: 'No active repos in RepoTable. Register a Blueprint and redeploy.',
+  };
+}
+
+async function checkLambdaMicrovmAvailability(
+  region: string,
+  clientFactory?: LambdaMicrovmProbeClientFactory,
+): Promise<DoctorCheckResult> {
+  const id = 'lambda_microvm_availability';
+  const label = `Lambda MicroVMs service (${region})`;
   try {
-    const count = await countActiveRepos(region, repoTableName);
-    if (count >= 1) {
-      return { id, label, status: 'pass', detail: `${count} active repo(s) in ${repoTableName}.` };
-    }
+    await probeLambdaMicrovmAvailability(region, clientFactory);
     return {
       id,
       label,
-      status: 'fail',
-      detail: 'No active repos in RepoTable. Register a Blueprint and redeploy.',
+      status: 'pass',
+      detail: `Managed MicroVM images are available in ${region}.`,
     };
   } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const errorName = err instanceof Error ? err.name : '';
+    const accessDenied = /AccessDenied|Unauthorized|not authorized/i.test(`${errorName} ${message}`);
     return {
       id,
       label,
-      status: 'fail',
-      detail: err instanceof Error ? err.message : String(err),
+      status: accessDenied ? 'warn' : 'fail',
+      detail: accessDenied
+        ? `${message}. Cannot verify Lambda MicroVM availability in ${region}; check IAM permissions for `
+          + 'lambda-microvms List* actions.'
+        : `${message}. ${LAMBDA_MICROVM_REMEDY}`,
     };
   }
 }
@@ -225,7 +373,7 @@ async function checkActiveRepos(
 async function checkBedrockModel(region: string, modelId: string): Promise<DoctorCheckResult> {
   const id = 'bedrock_model';
   const label = `Bedrock model catalog (${modelId})`;
-  const bedrock = new BedrockClient({ region });
+  const bedrock = makeClient(BedrockClient, { region });
   try {
     await bedrock.send(new GetFoundationModelCommand({ modelIdentifier: modelId }));
     return {

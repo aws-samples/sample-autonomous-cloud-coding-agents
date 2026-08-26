@@ -55,6 +55,14 @@ jest.mock('../../src/handlers/shared/repo-config', () => ({
   checkRepoOnboarded: jest.fn(),
 }));
 
+// Registry client (#246): the orchestrator resolves Blueprint registry:// refs
+// through this factory. Mock it so hydrateAndTransition tests can drive the
+// resolve → stamp → payload path without the AgentCore SDK.
+const mockRegistryResolve = jest.fn();
+jest.mock('../../src/handlers/shared/registry/factory', () => ({
+  makeRegistryClient: jest.fn(() => ({ resolve: mockRegistryResolve })),
+}));
+
 let ulidCounter = 0;
 jest.mock('ulid', () => ({ ulid: jest.fn(() => `ULID${ulidCounter++}`) }));
 
@@ -77,8 +85,10 @@ import {
   loadBlueprintConfig,
   loadTask,
   pollTaskStatus,
+  queueTask,
   transitionTask,
 } from '../../src/handlers/shared/orchestrator';
+import { RegistryResolutionError } from '../../src/handlers/shared/registry/types';
 
 const baseTask = {
   task_id: 'TASK001',
@@ -896,6 +906,125 @@ describe('hydrateAndTransition with blueprint config', () => {
   });
 });
 
+describe('hydrateAndTransition — registry asset resolution (#246)', () => {
+  const mockHydratedContext = {
+    version: 1,
+    user_prompt: 'Task ID: TASK001\nRepository: org/repo\n\n## Task\n\nFix the bug',
+    sources: ['task_description'],
+    token_estimate: 20,
+    truncated: false,
+    content_trust: { task_description: 'trusted' },
+  };
+
+  const resolvedAsset = (over: Record<string, unknown>) => ({
+    kind: 'mcp_server',
+    namespace: 'acme',
+    name: 'pdf-tools',
+    version: '1.0.0',
+    runtime: { transport: 'http', url: 'https://x' },
+    warnings: [],
+    ...over,
+  });
+
+  test('stamps resolved_assets on the TaskRecord and threads the bundle into the payload', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    mockRegistryResolve.mockResolvedValueOnce(resolvedAsset({}));
+
+    const payload = await hydrateAndTransition(baseTask as any, {
+      compute_type: 'agentcore',
+      runtime_arn: 'arn:test',
+      mcp_servers: ['registry://mcp_server/acme/pdf-tools@^1.0.0'],
+    });
+
+    // Threaded into the agent payload.
+    expect(payload.resolved_assets).toEqual([
+      expect.objectContaining({ kind: 'mcp_server', namespace: 'acme', name: 'pdf-tools', version: '1.0.0' }),
+    ]);
+    // Stamped on the TaskRecord via an UpdateCommand carrying resolved_assets.
+    const stamp = mockDdbSend.mock.calls
+      .map((c) => c[0])
+      .find((cmd: any) => cmd._type === 'Update' && cmd.input?.ExpressionAttributeNames?.['#ra'] === 'resolved_assets');
+    expect(stamp).toBeDefined();
+    expect(stamp.input.ExpressionAttributeValues[':ra']).toEqual([
+      { kind: 'mcp_server', id: 'acme/pdf-tools', version: '1.0.0' },
+    ]);
+  });
+
+  test('emits a registry_asset_warning TaskEvent for a DEPRECATED asset', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    mockRegistryResolve.mockResolvedValueOnce(resolvedAsset({ warnings: ['DEPRECATED'] }));
+
+    await hydrateAndTransition(baseTask as any, {
+      compute_type: 'agentcore',
+      runtime_arn: 'arn:test',
+      mcp_servers: ['registry://mcp_server/acme/pdf-tools@^1.0.0'],
+    });
+
+    // A TaskEvent Put (event_type registry_asset_warning) was written.
+    const warnPut = mockDdbSend.mock.calls
+      .map((c) => c[0])
+      .find((cmd: any) => cmd._type === 'Put' && JSON.stringify(cmd.input?.Item ?? {}).includes('registry_asset_warning'));
+    expect(warnPut).toBeDefined();
+    // The stamped audit triple keeps the warning too.
+    const stamp = mockDdbSend.mock.calls
+      .map((c) => c[0])
+      .find((cmd: any) => cmd._type === 'Update' && cmd.input?.ExpressionAttributeNames?.['#ra'] === 'resolved_assets');
+    expect(stamp.input.ExpressionAttributeValues[':ra'][0].warnings).toEqual(['DEPRECATED']);
+  });
+
+  test('merges resolved cedar_policy_module text after inline blueprint policies', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    mockRegistryResolve.mockResolvedValueOnce(resolvedAsset({
+      kind: 'cedar_policy_module',
+      name: 'guard',
+      runtime: { cedar_text: 'forbid (principal, action, resource);' },
+    }));
+
+    const payload = await hydrateAndTransition(baseTask as any, {
+      compute_type: 'agentcore',
+      runtime_arn: 'arn:test',
+      cedar_policies: ['permit (principal, action, resource);'],
+      cedar_policy_modules: ['registry://cedar_policy_module/acme/guard@^1.0.0'],
+    });
+
+    expect(payload.cedar_policies).toEqual([
+      'permit (principal, action, resource);',
+      'forbid (principal, action, resource);',
+    ]);
+  });
+
+  test('fails closed when a pinned cedar_policy_module resolves to empty cedar_text', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    mockRegistryResolve.mockResolvedValueOnce(resolvedAsset({
+      kind: 'cedar_policy_module',
+      name: 'guard',
+      runtime: { cedar_text: '   ' },
+    }));
+
+    await expect(hydrateAndTransition(baseTask as any, {
+      compute_type: 'agentcore',
+      runtime_arn: 'arn:test',
+      cedar_policy_modules: ['registry://cedar_policy_module/acme/guard@^1.0.0'],
+    })).rejects.toThrow(/empty cedar_text/);
+  });
+
+  test('fails closed (propagates) when a registry ref cannot be resolved', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    mockRegistryResolve.mockRejectedValueOnce(new RegistryResolutionError('NO_MATCHING_VERSION', 'r', 'none'));
+
+    await expect(hydrateAndTransition(baseTask as any, {
+      compute_type: 'agentcore',
+      runtime_arn: 'arn:test',
+      mcp_servers: ['registry://mcp_server/acme/pdf-tools@^9.0.0'],
+    })).rejects.toBeInstanceOf(RegistryResolutionError);
+  });
+});
+
 describe('finalizeTask', () => {
   test('handles already-terminal task', async () => {
     mockDdbSend
@@ -1020,6 +1149,61 @@ describe('failTask', () => {
 
     await expect(failTask('TASK001', 'HYDRATING', 'durable replay', 'user-123', true)).resolves.toBeUndefined();
     expect(mockDdbSend).toHaveBeenCalledTimes(1); // transition attempt only; no Put, no concurrency Update
+  });
+});
+
+describe('queueTask (#441 admission queue)', () => {
+  test('transitions SUBMITTED -> QUEUED, stamps queued_at + admission_attempts, emits admission_queued', async () => {
+    mockDdbSend.mockResolvedValue({});
+    const result = await queueTask(baseTask as any);
+    expect(result).toBe(true);
+
+    const transition = mockDdbSend.mock.calls[0][0];
+    expect(transition._type).toBe('Update');
+    expect(transition.input.ExpressionAttributeValues[':fromStatus']).toBe('SUBMITTED');
+    expect(transition.input.ExpressionAttributeValues[':toStatus']).toBe('QUEUED');
+    // First queue entry stamps queued_at and attempts=1
+    expect(transition.input.ExpressionAttributeValues[':attr_queued_at']).toBeDefined();
+    expect(transition.input.ExpressionAttributeValues[':attr_admission_attempts']).toBe(1);
+
+    const event = mockDdbSend.mock.calls[1][0];
+    expect(event._type).toBe('Put');
+    expect(event.input.Item.event_type).toBe('admission_queued');
+    expect(event.input.Item.metadata.reason).toBe('concurrency_limit');
+  });
+
+  test('re-queue preserves original queued_at and increments admission_attempts', async () => {
+    mockDdbSend.mockResolvedValue({});
+    const requeued = { ...baseTask, queued_at: '2024-01-01T00:00:00Z', admission_attempts: 2 };
+    await queueTask(requeued as any);
+
+    const transition = mockDdbSend.mock.calls[0][0];
+    // queued_at already set — must NOT be overwritten
+    expect(transition.input.ExpressionAttributeValues[':attr_queued_at']).toBeUndefined();
+    expect(transition.input.ExpressionAttributeValues[':attr_admission_attempts']).toBe(3);
+  });
+
+  test('returns false without emitting when a concurrent transition wins the conditional check', async () => {
+    const condErr = new Error('The conditional request failed');
+    condErr.name = 'ConditionalCheckFailedException';
+    mockDdbSend.mockRejectedValueOnce(condErr);
+
+    const result = await queueTask(baseTask as any);
+    expect(result).toBe(false);
+    expect(mockDdbSend).toHaveBeenCalledTimes(1); // transition attempt only, no event
+  });
+
+  test('rethrows unexpected DDB errors so the durable step retries', async () => {
+    mockDdbSend.mockRejectedValueOnce(new Error('DDB timeout'));
+    await expect(queueTask(baseTask as any)).rejects.toThrow('DDB timeout');
+  });
+
+  test('never touches the concurrency counter (no slot held while QUEUED)', async () => {
+    mockDdbSend.mockResolvedValue({});
+    await queueTask(baseTask as any);
+    for (const call of mockDdbSend.mock.calls) {
+      expect(call[0].input.TableName).not.toBe('UserConcurrency');
+    }
   });
 });
 

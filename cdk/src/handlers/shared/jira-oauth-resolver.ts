@@ -17,7 +17,6 @@
  *  SOFTWARE.
  */
 
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
   GetSecretValueCommand,
   PutSecretValueCommand,
@@ -30,6 +29,7 @@ import {
   validateJiraAppActorProxyUrl,
 } from './jira-app-actor';
 import { logger } from './logger';
+import { makeClient, makeDocClient } from './ua';
 
 /**
  * Lambda-side resolver for the per-tenant Jira Cloud OAuth token written
@@ -93,14 +93,14 @@ export interface StoredOauthToken {
   /** Per-tenant Jira webhook signing secret.
    *
    *  Atlassian's "Generic webhooks" support a per-webhook secret that signs
-   *  events with `X-Hub-Signature: sha256=<hex>`. Webhook subscriptions are
-   *  tenant-scoped, so a single stack-wide signing secret cannot verify
-   *  events from multiple tenants. The webhook receiver looks this up by
-   *  `cloudId` at verify time.
+   *  events with `X-Hub-Signature: sha256=<hex>`. The receiver uses this copy
+   *  when the payload carries cloudId. Jira admin-console payloads omit
+   *  cloudId, so the sole active tenant also synchronizes its value to the
+   *  stack-wide verifier.
    *
    *  Optional for back-compat: tokens written before per-tenant signing
-   *  was wired up won't have it, and the receiver falls back to the
-   *  stack-wide `JIRA_WEBHOOK_SECRET_ARN` for those installs. */
+   *  was wired up won't have it, so the receiver uses the stack-wide
+   *  `JIRA_WEBHOOK_SECRET_ARN` verifier for those installs. */
   readonly webhook_signing_secret?: string;
 }
 
@@ -194,8 +194,8 @@ export async function resolveJiraOutboundAuth(
   options: ResolverOptions = {},
 ): Promise<ResolvedJiraOutboundAuth | null> {
   const region = options.region ?? process.env.AWS_REGION ?? 'us-east-1';
-  const ddb = options.dynamoDbClient ?? DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
-  const sm = options.secretsManagerClient ?? new SecretsManagerClient({ region });
+  const ddb = options.dynamoDbClient ?? makeDocClient({ region });
+  const sm = options.secretsManagerClient ?? makeClient(SecretsManagerClient, { region });
 
   const row = await getRegistryRow(ddb, registryTableName, cloudId);
   if (!row || row.status !== 'active') {
@@ -276,8 +276,8 @@ export async function resolveJiraOauthToken(
   options: ResolverOptions = {},
 ): Promise<ResolvedJiraToken | null> {
   const region = options.region ?? process.env.AWS_REGION ?? 'us-east-1';
-  const ddb = options.dynamoDbClient ?? DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
-  const sm = options.secretsManagerClient ?? new SecretsManagerClient({ region });
+  const ddb = options.dynamoDbClient ?? makeDocClient({ region });
+  const sm = options.secretsManagerClient ?? makeClient(SecretsManagerClient, { region });
   const forceRefresh = options.forceRefresh ?? false;
 
   // ─── Step 1: Registry row ────────────────────────────────────────
@@ -341,8 +341,8 @@ export async function resolveJiraOauthToken(
  * Strict variant of {@link getRegistryRow}: throws on infra error
  * (DDB throttle, network) instead of returning null. Use this from the
  * webhook signature-verification path where a `null` return would let
- * a transient throttle silently downgrade per-tenant verification to
- * the stack-wide fallback secret.
+ * a transient throttle silently bypass per-tenant verification by using
+ * the stack-wide verifier.
  */
 export async function getRegistryRowStrict(
   ddb: DynamoDBDocumentClient,
@@ -355,6 +355,7 @@ export async function getRegistryRowStrict(
   const result = await ddb.send(new GetCommand({
     TableName: tableName,
     Key: { jira_cloud_id: cloudId },
+    ConsistentRead: true,
   }));
   return parseRegistryRow(result.Item, cloudId);
 }
@@ -372,6 +373,7 @@ export async function getRegistryRow(
     result = await ddb.send(new GetCommand({
       TableName: tableName,
       Key: { jira_cloud_id: cloudId },
+      ConsistentRead: true,
     }));
   } catch (err) {
     logger.error('Failed to fetch Jira workspace registry row', {
