@@ -341,6 +341,46 @@ describe('AgentStack', () => {
     expect(serialized).not.toContain('"*"');
   });
 
+  test('global inference profile context propagates to runtime and session-role grants', () => {
+    const app = new App({
+      context: {
+        bedrockModels: ['anthropic.claude-opus-4-6-v1'],
+        bedrockInferenceProfileRegion: 'global',
+      },
+    });
+    const stack = new AgentStack(app, 'GlobalProfileAgentStack', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    });
+    const globalProfileTemplate = Template.fromStack(stack);
+    const serialized = JSON.stringify(globalProfileTemplate.findResources('AWS::IAM::Policy'));
+    expect(serialized).toContain('foundation-model/anthropic.claude-opus-4-6-v1');
+    expect(serialized).toContain('inference-profile/global.anthropic.claude-opus-4-6-v1');
+    expect(serialized).not.toContain('inference-profile/us.anthropic.claude-opus-4-6-v1');
+  });
+
+  test('WORKSHOP_MODEL_ID pins the Blueprint and runtime model', () => {
+    const previous = process.env.WORKSHOP_MODEL_ID;
+    process.env.WORKSHOP_MODEL_ID = 'global.anthropic.claude-opus-4-6-v1';
+    try {
+      const app = new App();
+      const stack = new AgentStack(app, 'WorkshopModelAgentStack', {
+        env: { account: '123456789012', region: 'us-east-1' },
+      });
+      const workshopTemplate = Template.fromStack(stack);
+      const serialized = JSON.stringify(workshopTemplate.toJSON());
+      expect(serialized).toContain('global.anthropic.claude-opus-4-6-v1');
+
+      const runtimes = workshopTemplate.findResources('AWS::BedrockAgentCore::Runtime');
+      const envVars = (Object.values(runtimes)[0] as {
+        Properties?: { EnvironmentVariables?: Record<string, unknown> };
+      }).Properties?.EnvironmentVariables ?? {};
+      expect(envVars.ANTHROPIC_MODEL).toBe('global.anthropic.claude-opus-4-6-v1');
+    } finally {
+      if (previous === undefined) delete process.env.WORKSHOP_MODEL_ID;
+      else process.env.WORKSHOP_MODEL_ID = previous;
+    }
+  });
+
   test('outputs ApiUrl', () => {
     template.hasOutput('ApiUrl', {
       Description: 'URL of the Task API',

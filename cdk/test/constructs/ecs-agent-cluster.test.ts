@@ -33,6 +33,7 @@ import { EcsAgentCluster, resolveEcsTaskSizing } from '../../src/constructs/ecs-
 function createStack(overrides?: {
   memoryId?: string;
   bedrockModels?: string[];
+  bedrockInferenceProfileRegion?: string;
   withMemory?: boolean;
   taskSizing?: {
     buildTaskCpu?: number;
@@ -43,8 +44,14 @@ function createStack(overrides?: {
     extraBuildEnvironment?: Record<string, string>;
   };
 }): { stack: Stack; template: Template } {
+  const context = {
+    ...(overrides?.bedrockModels && { bedrockModels: overrides.bedrockModels }),
+    ...(overrides?.bedrockInferenceProfileRegion && {
+      bedrockInferenceProfileRegion: overrides.bedrockInferenceProfileRegion,
+    }),
+  };
   const app = new App({
-    context: overrides?.bedrockModels ? { bedrockModels: overrides.bedrockModels } : undefined,
+    context: Object.keys(context).length > 0 ? context : undefined,
   });
   const stack = new Stack(app, 'TestStack');
 
@@ -467,6 +474,17 @@ describe('EcsAgentCluster construct', () => {
     expect(serialized).not.toContain('claude-sonnet-4-6');
     // Still scoped, never a wildcard.
     expect(bedrockStatement!.Resource).not.toEqual('*');
+  });
+
+  test('global inference profile context changes the granted profile ARN', () => {
+    const template = createStack({
+      bedrockModels: ['anthropic.claude-opus-4-6-v1'],
+      bedrockInferenceProfileRegion: 'global',
+    }).template;
+    const serialized = JSON.stringify(template.findResources('AWS::IAM::Policy'));
+    expect(serialized).toContain('foundation-model/anthropic.claude-opus-4-6-v1');
+    expect(serialized).toContain('inference-profile/global.anthropic.claude-opus-4-6-v1');
+    expect(serialized).not.toContain('inference-profile/us.anthropic.claude-opus-4-6-v1');
   });
 
   test('container has required environment variables', () => {
