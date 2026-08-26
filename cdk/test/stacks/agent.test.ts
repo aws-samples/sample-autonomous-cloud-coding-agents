@@ -160,6 +160,17 @@ describe('AgentStack', () => {
     }
   });
 
+  test('workshop Blueprint and runtime use Claude Opus 4.6 global profile', () => {
+    const serialized = JSON.stringify(template.toJSON());
+    expect(serialized).toContain('global.anthropic.claude-opus-4-6-v1');
+
+    const runtimes = template.findResources('AWS::BedrockAgentCore::Runtime');
+    const envVars = (Object.values(runtimes)[0] as {
+      Properties?: { EnvironmentVariables?: Record<string, unknown> };
+    }).Properties?.EnvironmentVariables ?? {};
+    expect(envVars.ANTHROPIC_MODEL).toBe('global.anthropic.claude-opus-4-6-v1');
+  });
+
   test('outputs TaskTableName', () => {
     template.hasOutput('TaskTableName', {
       Description: 'Name of the DynamoDB task state table',
@@ -283,6 +294,21 @@ describe('AgentStack', () => {
     // 4.8 is a separate, announced change — not a side effect of adding 5.
     expect(serialized).toContain('foundation-model/anthropic.claude-opus-4-8');
     expect(serialized).toContain('inference-profile/us.anthropic.claude-opus-4-8');
+    // Workshop Studio pins Opus 4.6 through the global inference profile.
+    // grantInvoke also grants the routed foundation model in every supported
+    // Region; both runtime and session role derive from this same invokable.
+    expect(serialized).toContain('foundation-model/anthropic.claude-opus-4-6-v1');
+    expect(serialized).toContain('inference-profile/global.anthropic.claude-opus-4-6-v1');
+
+    const policies = template.findResources('AWS::IAM::Policy');
+    for (const prefix of ['RuntimeExecutionRole', 'AgentSessionRole']) {
+      const rolePolicies = Object.fromEntries(
+        Object.entries(policies).filter(([logicalId]) => logicalId.startsWith(prefix)),
+      );
+      const roleSerialized = JSON.stringify(rolePolicies);
+      expect(roleSerialized).toContain('foundation-model/anthropic.claude-opus-4-6-v1');
+      expect(roleSerialized).toContain('inference-profile/global.anthropic.claude-opus-4-6-v1');
+    }
   });
 
   test('bedrockModels context override propagates to the runtime execution role', () => {

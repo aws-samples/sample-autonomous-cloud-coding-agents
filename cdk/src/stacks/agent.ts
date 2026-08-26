@@ -82,6 +82,9 @@ const GUARDRAIL_NAME_MAX_LENGTH = 50;
 /** AgentCore Runtime session lifecycle ceiling (hours) — the AgentCore maximum. */
 const RUNTIME_SESSION_TIMEOUT_HOURS = 8;
 
+/** Main model used by coding tasks in the Workshop Studio environment. */
+const WORKSHOP_MODEL_ID = 'global.anthropic.claude-opus-4-6-v1';
+
 /** Index of the stage segment in a split API Gateway URL. */
 const API_URL_STAGE_SEGMENT_INDEX = 3;
 
@@ -197,7 +200,7 @@ export class AgentStack extends Stack {
     const agentPluginsBlueprint = new Blueprint(this, 'AgentPluginsBlueprint', {
       repo: blueprintRepo,
       repoTable: repoTable.table,
-      agent: { modelId: 'global.anthropic.claude-opus-4-6-v1' },
+      agent: { modelId: WORKSHOP_MODEL_ID },
     });
 
     const blueprints = [agentPluginsBlueprint];
@@ -474,6 +477,7 @@ export class AgentStack extends Stack {
       AWS_REGION: process.env.AWS_REGION ?? 'us-east-1',
       CLAUDE_CODE_USE_BEDROCK: '1',
       ANTHROPIC_LOG: 'debug',
+      ANTHROPIC_MODEL: WORKSHOP_MODEL_ID,
       // Cross-region inference-profile id (``us.`` prefix), NOT the bare
       // foundation-model id: Claude 4.x can't be invoked on-demand by bare id
       // (400 "on-demand throughput isn't supported"). Must match a granted
@@ -652,6 +656,17 @@ export class AgentStack extends Stack {
       crossRegionProfile.grantInvoke(runtime);
       invokableBedrockModels.push(foundationModel, crossRegionProfile);
     }
+
+    const workshopFoundationModel = new bedrock.BedrockFoundationModel(
+      WORKSHOP_MODEL_ID.replace(/^global\./, ''),
+      { supportsAgents: true, supportsCrossRegion: true },
+    );
+    const workshopInferenceProfile = bedrock.CrossRegionInferenceProfile.fromConfig({
+      geoRegion: bedrock.CrossRegionInferenceProfileRegion.GLOBAL,
+      model: workshopFoundationModel,
+    });
+    workshopInferenceProfile.grantInvoke(runtime);
+    invokableBedrockModels.push(workshopInferenceProfile);
 
     // --- Per-task SessionRole ---
     // Holds the tenant-data grants (the four task_id-partitioned tables, plus
