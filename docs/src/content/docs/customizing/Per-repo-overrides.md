@@ -8,7 +8,7 @@ Blueprints can configure per-repository settings that override platform defaults
 |---|---|---|
 | `compute_type` | Compute strategy (`agentcore` or `ecs`) | `agentcore` |
 | `runtime_arn` | AgentCore runtime ARN override | Platform default |
-| `model_id` | Bedrock inference-profile ID (`us.`-prefixed) | `us.anthropic.claude-opus-5` |
+| `model_id` | Bedrock inference-profile ID (geo-prefixed, matching the deployment's `bedrockGeoRegion`) | `global.anthropic.claude-opus-5` |
 | `max_turns` | Default turn limit for tasks | 100 |
 | `max_budget_usd` | Default cost budget in USD per task, `0.01`–`100` (Blueprint `agent.maxBudgetUsd`) | None (unlimited) |
 | `system_prompt_overrides` | Additional system prompt instructions | None |

@@ -94,16 +94,25 @@ export const WORKFLOW_MODEL_ALLOWLIST: readonly string[] = [
   // `bedrockModels` context) in the same change.
   'anthropic.claude-opus-4-8',
   'us.anthropic.claude-opus-4-8',
-  // Claude Opus 5 (#744) — kept in step with the IAM grant added to
-  // DEFAULT_BEDROCK_MODEL_IDS in the same change, per the note above. Only the
-  // bare and `us.`-prefixed forms: `global.anthropic.claude-opus-5` is a live
-  // profile but is deliberately withheld until the grant sites derive the
-  // `global.` ARN (#747) — admitting it here first would pass admission and then
-  // fail at turn 0 with AccessDenied, exactly the drift this comment warns about.
+  // Claude Opus 5 — kept in step with the IAM grant in
+  // DEFAULT_BEDROCK_MODEL_IDS, per the note above.
+  //
+  // The `global.` forms were withheld until the grant sites could derive a
+  // `global.` ARN, because admitting one earlier would have passed admission and
+  // then failed at turn 0 with AccessDenied — exactly the drift this comment
+  // warns about. They are admitted now that the geography is configurable and
+  // `bedrockGeoRegion` defaults to `global`, so the grant covers them.
+  //
+  // Both prefixes stay listed. The allow-list has to accept whatever geography a
+  // deployment is configured for, and a residency-constrained deployer sets
+  // `bedrockGeoRegion=us` — dropping the `us.` forms would reject their
+  // workflows at admission.
   'anthropic.claude-opus-5',
   'us.anthropic.claude-opus-5',
+  'global.anthropic.claude-opus-5',
   'anthropic.claude-haiku-4-5-20251001-v1:0',
   'us.anthropic.claude-haiku-4-5-20251001-v1:0',
+  'global.anthropic.claude-haiku-4-5-20251001-v1:0',
 ];
 
 /**

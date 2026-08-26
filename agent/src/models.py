@@ -154,7 +154,7 @@ class TaskConfig(BaseModel):
     task_description: str = ""
     github_token: str = ""
     aws_region: str
-    anthropic_model: str = "us.anthropic.claude-opus-5"
+    anthropic_model: str = "global.anthropic.claude-opus-5"
     # The "small/fast" model Claude Code uses for auxiliary work (e.g. WebFetch
     # page summarization). Must be a cross-region INFERENCE-PROFILE id (``us.``
     # prefix), not a bare foundation-model id — Claude 4.x cannot be invoked

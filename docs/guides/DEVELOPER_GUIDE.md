@@ -142,7 +142,7 @@ See the [Cedar policy guide](./CEDAR_POLICY_GUIDE.md) for the full authoring ref
 per-task payload model_id            (layer 5)
   > blueprint agent.modelId          (layer 4, arrives as stack env ANTHROPIC_MODEL)
   > stack env ANTHROPIC_MODEL        (layer 3-adjacent / local shell)
-  > agent/src/config.py fallback     (layer 2 — us.anthropic.claude-opus-5)
+  > agent/src/config.py fallback     (layer 2 — global.anthropic.claude-opus-5)
 ```
 
 Every one of those is gated by the **IAM invoke allowlist** (layer 1), which is itself gated by **account-level Bedrock model access**. Both gates are silent until invocation: a model that resolves fine through precedence still fails at turn 0 with `AccessDenied` if it is not in the grant list, and fails again if your account has not completed [Bedrock model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) for it.
@@ -160,7 +160,7 @@ throughput isn't supported. Retry your request with the ID or ARN of an inferenc
 profile that contains this model.
 ```
 
-So: `bedrockModels` context → `anthropic.claude-opus-5`. Everywhere else → `us.anthropic.claude-opus-5`.
+So: `bedrockModels` context → `anthropic.claude-opus-5`. Everywhere else → `global.anthropic.claude-opus-5`.
 
 ### Bumping the default model
 
@@ -179,7 +179,7 @@ Model choice is a **cost** decision, which is why it is adjustable per repo and 
 | Model | Input tokens | Reported `cost_usd` | Implied input rate |
 |---|---|---|---|
 | `us.anthropic.claude-opus-4-8` | 32,145 | $0.160850 | **$5.00/MTok** |
-| `us.anthropic.claude-opus-5` | 37,584 | $0.188020 | **$5.00/MTok** |
+| `global.anthropic.claude-opus-5` | 37,584 | $0.188020 | **$5.00/MTok** |
 
 Token ratio 1.169; cost ratio 1.169 — identical. **The per-token rate is unchanged; the whole delta is token volume on an identical prompt.** Read it that way: "Opus 5 costs ~17% more per task" invites the wrong remedy (switch models), while "same rate, more tokens" points at the real levers — prompt size, prompt caching, and `max_turns`.
 
@@ -336,7 +336,7 @@ The `--local-events` flag connects the agent container to DynamoDB Local on the 
 
 | Variable | Default | Description |
 |---|---|---|
-| `ANTHROPIC_MODEL` | `us.anthropic.claude-opus-5` | Bedrock inference-profile ID for the main coding model |
+| `ANTHROPIC_MODEL` | `global.anthropic.claude-opus-5` | Bedrock inference-profile ID for the main coding model |
 | `MAX_TURNS` | `100` | Max agent turns before stopping |
 | `MAX_BUDGET_USD` | | Cost ceiling for local batch runs only (production uses the API field) |
 | `DRY_RUN` | | Set to `1` to validate and print prompt without running the agent |
