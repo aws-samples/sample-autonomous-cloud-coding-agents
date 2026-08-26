@@ -30,10 +30,7 @@ import { NagSuppressions } from 'cdk-nag';
 import { Construct, type Node } from 'constructs';
 import { AgentMemory } from './agent-memory';
 import { AgentSessionRole } from './agent-session-role';
-import {
-  resolveBedrockInferenceProfileRegion,
-  resolveBedrockModelIds,
-} from './bedrock-models';
+import { resolveBedrockModelIds } from './bedrock-models';
 import { buildAppId } from './solution-ua-aspect';
 import { ToolGateway } from './tool-gateway';
 
@@ -593,7 +590,6 @@ export class EcsAgentCluster extends Construct {
     // ECS and AgentCore backends can't drift.
     const stack = Stack.of(this);
     const bedrockResources: string[] = [];
-    const inferenceProfileRegion = resolveBedrockInferenceProfileRegion(this.node);
     for (const modelId of resolveBedrockModelIds(this.node)) {
       bedrockResources.push(
         stack.formatArn({
@@ -607,7 +603,7 @@ export class EcsAgentCluster extends Construct {
         stack.formatArn({
           service: 'bedrock',
           resource: 'inference-profile',
-          resourceName: `${inferenceProfileRegion}.${modelId}`,
+          resourceName: `us.${modelId}`,
           arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
         }),
       );

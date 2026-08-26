@@ -17,7 +17,6 @@
  *  SOFTWARE.
  */
 
-import * as bedrock from '@aws-cdk/aws-bedrock-alpha';
 import { Node } from 'constructs';
 
 /**
@@ -57,12 +56,6 @@ export const DEFAULT_BEDROCK_MODEL_IDS: readonly string[] = [
 /** CDK context key whose value (a string array) overrides the model set. */
 export const BEDROCK_MODELS_CONTEXT_KEY = 'bedrockModels';
 
-/** CDK context key selecting the system-defined inference-profile geography. */
-export const BEDROCK_INFERENCE_PROFILE_REGION_CONTEXT_KEY = 'bedrockInferenceProfileRegion';
-
-/** Existing deployments use US cross-Region inference unless explicitly overridden. */
-export const DEFAULT_BEDROCK_INFERENCE_PROFILE_REGION = bedrock.CrossRegionInferenceProfileRegion.US;
-
 /**
  * Resolves the invocable foundation-model IDs: CDK context `bedrockModels`
  * (an array of **bare foundation-model IDs**) when provided, else
@@ -71,10 +64,10 @@ export const DEFAULT_BEDROCK_INFERENCE_PROFILE_REGION = bedrock.CrossRegionInfer
  * a model the runtime may invoke — no construct edits needed.
  *
  * **Use the bare foundation-model ID (`anthropic.claude-…`), NOT the
- * inference-profile ID.** Both grant sites derive the configured profile
- * prefix, so passing `us.anthropic.…` here would produce an invalid
- * `us.us.anthropic.…` ARN. The resolver rejects known profile prefixes to
- * catch that early.
+ * `us.`-prefixed inference-profile ID.** Both grant sites derive the US
+ * inference-profile ARN by prefixing `us.`, so passing `us.anthropic.…` here
+ * would produce an invalid `us.us.anthropic.…` ARN. The resolver rejects a
+ * `us.`/`eu.`/`apac.`-prefixed entry to catch that early.
  *
  * Throws on a malformed override (non-array, non-string / empty entries, or a
  * region-prefixed ID) so a typo fails synth loudly instead of silently
@@ -97,40 +90,13 @@ export function resolveBedrockModelIds(node: Node): readonly string[] {
         `Context '${BEDROCK_MODELS_CONTEXT_KEY}' entries must be non-empty strings; got ${JSON.stringify(id)}.`,
       );
     }
-    if (/^(global|us|eu|apac|us-gov|jp|au)\./.test(id)) {
+    if (/^(us|eu|apac)\./.test(id)) {
       throw new Error(
         `Context '${BEDROCK_MODELS_CONTEXT_KEY}' expects bare foundation-model IDs, not region-prefixed `
-        + `inference-profile IDs — got '${id}'. Use '${id.replace(/^(global|us|eu|apac|us-gov|jp|au)\./, '')}'; `
-        + 'the inference-profile ARN is derived automatically.',
+        + `inference-profile IDs — got '${id}'. Use '${id.replace(/^(us|eu|apac)\./, '')}'; `
+        + 'the US inference-profile ARN is derived automatically.',
       );
     }
   }
   return override as string[];
-}
-
-/**
- * Resolve the system-defined inference-profile geography used for every
- * configured foundation model. The default remains US for backward
- * compatibility; workshop deployments override this to GLOBAL for models that
- * are available only through the global inference profile.
- */
-export function resolveBedrockInferenceProfileRegion(
-  node: Node,
-): bedrock.CrossRegionInferenceProfileRegion {
-  const override = node.tryGetContext(BEDROCK_INFERENCE_PROFILE_REGION_CONTEXT_KEY);
-  if (override === undefined || override === null) {
-    return DEFAULT_BEDROCK_INFERENCE_PROFILE_REGION;
-  }
-
-  const supported = Object.values(bedrock.CrossRegionInferenceProfileRegion);
-  if (
-    typeof override !== 'string'
-    || !supported.includes(override as bedrock.CrossRegionInferenceProfileRegion)
-  ) {
-    throw new Error(
-      `Context '${BEDROCK_INFERENCE_PROFILE_REGION_CONTEXT_KEY}' must be one of `
-      + `${supported.join(', ')}; got ${JSON.stringify(override)}.`,
-    );
-  }
-  return override as bedrock.CrossRegionInferenceProfileRegion;
 }

@@ -15,14 +15,6 @@ PARTICIPANT_USERNAME="${PARTICIPANT_USERNAME:-participant@workshop.local}"
 PARTICIPANT_SECRET_NAME="${PARTICIPANT_SECRET_NAME:-abca-workshop/participant-credentials}"
 ENABLE_AGENT_REGISTRY="${ENABLE_AGENT_REGISTRY:-false}"
 AGENTCORE_SUPPORTED_ZONE_IDS="${AGENTCORE_SUPPORTED_ZONE_IDS:-}"
-WORKSHOP_MODEL_ID="${WORKSHOP_MODEL_ID:-global.anthropic.claude-opus-4-6-v1}"
-WORKSHOP_FOUNDATION_MODEL_ID="${WORKSHOP_FOUNDATION_MODEL_ID:-anthropic.claude-opus-4-6-v1}"
-WORKSHOP_INFERENCE_PROFILE_REGION="${WORKSHOP_INFERENCE_PROFILE_REGION:-global}"
-
-if [[ "$WORKSHOP_MODEL_ID" != "${WORKSHOP_INFERENCE_PROFILE_REGION}.${WORKSHOP_FOUNDATION_MODEL_ID}" ]]; then
-    echo "WORKSHOP_MODEL_ID must equal WORKSHOP_INFERENCE_PROFILE_REGION.WORKSHOP_FOUNDATION_MODEL_ID" >&2
-    exit 1
-fi
 
 if [[ -z "$AGENTCORE_SUPPORTED_ZONE_IDS" && "$REGION" == "us-east-1" ]]; then
     AGENTCORE_SUPPORTED_ZONE_IDS="use1-az1,use1-az2"
@@ -31,7 +23,6 @@ fi
 export AWS_REGION="$REGION"
 export AWS_DEFAULT_REGION="$REGION"
 export BLUEPRINT_REPO
-export WORKSHOP_MODEL_ID
 export MISE_EXPERIMENTAL=1
 
 install_toolchain() {
@@ -235,8 +226,6 @@ deploy_stack() {
         --require-approval never
         --context "blueprintRepo=${BLUEPRINT_REPO}"
         --context "enableAgentRegistry=${ENABLE_AGENT_REGISTRY}"
-        --context "bedrockModels=[\"${WORKSHOP_FOUNDATION_MODEL_ID}\"]"
-        --context "bedrockInferenceProfileRegion=${WORKSHOP_INFERENCE_PROFILE_REGION}"
     )
     if [[ -n "$agentcore_availability_zones" ]]; then
         deploy_args+=(--context "agentcoreAvailabilityZones=${agentcore_availability_zones}")

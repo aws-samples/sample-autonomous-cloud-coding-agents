@@ -21,11 +21,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { App, Stack } from 'aws-cdk-lib';
 import {
-  BEDROCK_INFERENCE_PROFILE_REGION_CONTEXT_KEY,
   BEDROCK_MODELS_CONTEXT_KEY,
-  DEFAULT_BEDROCK_INFERENCE_PROFILE_REGION,
   DEFAULT_BEDROCK_MODEL_IDS,
-  resolveBedrockInferenceProfileRegion,
   resolveBedrockModelIds,
 } from '../../src/constructs/bedrock-models';
 
@@ -64,38 +61,15 @@ describe('resolveBedrockModelIds', () => {
     ).toThrow(/non-empty strings/);
   });
 
-  it('throws on a prefixed inference-profile ID', () => {
-    // Guards double-prefix footguns such as us.us.… and global.global.…:
-    // both grant sites derive the configured profile prefix, so the model
-    // context must contain only the bare foundation-model id.
+  it('throws on a region-prefixed (us./eu./apac.) inference-profile ID', () => {
+    // Guards the us.us.… double-prefix footgun: both grant sites derive the
+    // inference-profile ARN by prefixing `us.`, so the context wants the bare id.
     expect(() =>
       resolveBedrockModelIds(nodeWithContext({ [BEDROCK_MODELS_CONTEXT_KEY]: ['us.anthropic.claude-opus-4-8'] })),
     ).toThrow(/bare foundation-model IDs/);
     expect(() =>
       resolveBedrockModelIds(nodeWithContext({ [BEDROCK_MODELS_CONTEXT_KEY]: ['eu.anthropic.claude-sonnet-4-6'] })),
     ).toThrow(/bare foundation-model IDs/);
-    expect(() =>
-      resolveBedrockModelIds(nodeWithContext({ [BEDROCK_MODELS_CONTEXT_KEY]: ['global.anthropic.claude-opus-4-6-v1'] })),
-    ).toThrow(/bare foundation-model IDs/);
-  });
-});
-
-describe('resolveBedrockInferenceProfileRegion', () => {
-  it('defaults to the US profile geography', () => {
-    expect(resolveBedrockInferenceProfileRegion(nodeWithContext()))
-      .toBe(DEFAULT_BEDROCK_INFERENCE_PROFILE_REGION);
-  });
-
-  it('accepts the global profile geography', () => {
-    expect(resolveBedrockInferenceProfileRegion(nodeWithContext({
-      [BEDROCK_INFERENCE_PROFILE_REGION_CONTEXT_KEY]: 'global',
-    }))).toBe('global');
-  });
-
-  it('rejects an unsupported profile geography', () => {
-    expect(() => resolveBedrockInferenceProfileRegion(nodeWithContext({
-      [BEDROCK_INFERENCE_PROFILE_REGION_CONTEXT_KEY]: 'moon',
-    }))).toThrow(/must be one of/);
   });
 });
 

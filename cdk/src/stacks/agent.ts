@@ -36,10 +36,7 @@ import { AgentVpc } from '../constructs/agent-vpc';
 import { ApiKeyTable } from '../constructs/api-key-table';
 import { ApprovalMetricsPublisherConsumer } from '../constructs/approval-metrics-publisher-consumer';
 import { AttachmentsBucket } from '../constructs/attachments-bucket';
-import {
-  resolveBedrockInferenceProfileRegion,
-  resolveBedrockModelIds,
-} from '../constructs/bedrock-models';
+import { resolveBedrockModelIds } from '../constructs/bedrock-models';
 import { Blueprint } from '../constructs/blueprint';
 import { CedarWasmLayer } from '../constructs/cedar-wasm-layer';
 import { ConcurrencyReconciler } from '../constructs/concurrency-reconciler';
@@ -197,11 +194,9 @@ export class AgentStack extends Stack {
 
     // --- Repository onboarding ---
     const blueprintRepo = process.env.BLUEPRINT_REPO ?? this.node.tryGetContext('blueprintRepo') ?? 'awslabs/agent-plugins';
-    const workshopModelId = process.env.WORKSHOP_MODEL_ID;
     const agentPluginsBlueprint = new Blueprint(this, 'AgentPluginsBlueprint', {
       repo: blueprintRepo,
       repoTable: repoTable.table,
-      ...(workshopModelId && { agent: { modelId: workshopModelId } }),
     });
 
     const blueprints = [agentPluginsBlueprint];
@@ -478,11 +473,10 @@ export class AgentStack extends Stack {
       AWS_REGION: process.env.AWS_REGION ?? 'us-east-1',
       CLAUDE_CODE_USE_BEDROCK: '1',
       ANTHROPIC_LOG: 'debug',
-      ...(workshopModelId && { ANTHROPIC_MODEL: workshopModelId }),
-      // Cross-region inference-profile id, NOT the bare foundation-model id:
-      // Claude 4.x can't be invoked on-demand by bare id (400 "on-demand
-      // throughput isn't supported"). Must match a granted profile (see
-      // bedrock-models.ts). runner.py re-sets this at spawn time.
+      // Cross-region inference-profile id (``us.`` prefix), NOT the bare
+      // foundation-model id: Claude 4.x can't be invoked on-demand by bare id
+      // (400 "on-demand throughput isn't supported"). Must match a granted
+      // profile (see bedrock-models.ts). runner.py re-sets this at spawn time.
       ANTHROPIC_DEFAULT_HAIKU_MODEL: 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
       TASK_TABLE_NAME: taskTable.table.tableName,
       TASK_EVENTS_TABLE_NAME: taskEventsTable.table.tableName,
@@ -644,14 +638,13 @@ export class AgentStack extends Stack {
     // Scoping stays per-model (no Resource:'*'); account-level Bedrock access
     // remains the outer gate.
     const invokableBedrockModels: bedrock.IBedrockInvokable[] = [];
-    const inferenceProfileRegion = resolveBedrockInferenceProfileRegion(this.node);
     for (const modelId of resolveBedrockModelIds(this.node)) {
       const foundationModel = new bedrock.BedrockFoundationModel(modelId, {
         supportsAgents: true,
         supportsCrossRegion: true,
       });
       const crossRegionProfile = bedrock.CrossRegionInferenceProfile.fromConfig({
-        geoRegion: inferenceProfileRegion,
+        geoRegion: bedrock.CrossRegionInferenceProfileRegion.US,
         model: foundationModel,
       });
       foundationModel.grantInvoke(runtime);
