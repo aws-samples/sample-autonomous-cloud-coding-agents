@@ -2,8 +2,8 @@
 
 The agent is a read-only consumer: it resolves refs and fetches records, but never
 publishes or governs. It talks to the substrate through this Protocol, never a raw
-AWS SDK client — the one implementation is ``AgentCoreRegistryClient``
-(``registry.agentcore_client``), so a substrate swap is confined there.
+AWS SDK client — the one implementation is ``AgentRegistryClient``
+(``registry.agent_registry_client``), so a substrate swap is confined there.
 
 The write-side verbs (publish / submit / approve) live only on the TypeScript port
 (``cdk/src/handlers/shared/registry/client.ts``); the agent has no business

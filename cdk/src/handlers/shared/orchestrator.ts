@@ -517,7 +517,7 @@ export async function loadBlueprintConfig(task: TaskRecord): Promise<BlueprintCo
  * turns into a FAILED task rather than running with a missing/substituted asset.
  *
  * Resolution runs here (not at create-task) so only this one Lambda carries the
- * AgentCore SDK + IAM, mirroring how ``cedar_policies`` already flows from
+ * Agent Registry SDK + IAM, mirroring how ``cedar_policies`` already flows from
  * RepoConfig into the payload.
  */
 export async function resolveRegistryAssets(

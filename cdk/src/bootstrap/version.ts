@@ -29,10 +29,10 @@ import { allPolicies } from './policies';
  * `compute-lambda-microvm` policy (#645 / ADR-021), 1.3.0 → 1.4.0 grants SNS
  * topic + customer-managed-KMS-key create/lifecycle for the OperationalAlerts
  * notification channel (#629), 1.4.0 → 1.5.0 adds the agent asset registry
- * policies (#246: bedrock-agentcore registry + workload identity, Step
- * Functions, Cognito group, and CloudFormation nested-stack actions). Adding
- * policies to the bundle is a minor bump — that is the precedent `compute-ecs`
- * set.
+ * policies (#246: Step Functions, Cognito group, and CloudFormation
+ * nested-stack actions — the registry's own control-plane calls run under the
+ * custom resource's Lambda execution role). Adding policies to the bundle is a
+ * minor bump — that is the precedent `compute-ecs` set.
  */
 export const BOOTSTRAP_VERSION = '1.5.0';
 

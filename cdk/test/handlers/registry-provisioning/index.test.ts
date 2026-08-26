@@ -20,23 +20,17 @@
 /**
  * Unit tests for the registry provisioning custom-resource handlers (#246):
  * onEvent (Create/Update/Delete) and isComplete (Create/Update/Delete). The
- * handler drives an async AgentCore registry lifecycle, so these lock in the
+ * handler drives an async Agent Registry lifecycle, so these lock in the
  * non-obvious branches the source comments flag as prior bugs: idempotent
- * create tokens, the Update branch actually issuing UpdateRegistry, and the
- * delete drain + Conflict/NotFound retry semantics.
+ * create tokens, the Update branch actually issuing UpdateRegistry, and
+ * asynchronous delete completion.
  */
 
 // Command classes are tagged so the mock `send` can dispatch on constructor.
-// The two exception classes must be real (throwable) classes because the
+// The exception class must be a real (throwable) class because the
 // handler branches on `instanceof`.
 const mockSend = jest.fn();
 
-class ConflictException extends Error {
-  constructor() {
-    super('conflict');
-    this.name = 'ConflictException';
-  }
-}
 class ResourceNotFoundException extends Error {
   constructor() {
     super('not found');
@@ -44,16 +38,37 @@ class ResourceNotFoundException extends Error {
   }
 }
 
-jest.mock('@aws-sdk/client-bedrock-agentcore-control', () => ({
-  BedrockAgentCoreControlClient: jest.fn(() => ({ send: mockSend })),
-  CreateRegistryCommand: jest.fn((input: unknown) => ({ _type: 'CreateRegistry', input })),
-  GetRegistryCommand: jest.fn((input: unknown) => ({ _type: 'GetRegistry', input })),
-  UpdateRegistryCommand: jest.fn((input: unknown) => ({ _type: 'UpdateRegistry', input })),
-  DeleteRegistryCommand: jest.fn((input: unknown) => ({ _type: 'DeleteRegistry', input })),
-  ListRegistryRecordsCommand: jest.fn((input: unknown) => ({ _type: 'ListRegistryRecords', input })),
-  DeleteRegistryRecordCommand: jest.fn((input: unknown) => ({ _type: 'DeleteRegistryRecord', input })),
+class ConflictException extends Error {
+  constructor() {
+    super('conflict');
+    this.name = 'ConflictException';
+  }
+}
+
+class ThrottlingException extends Error {
+  constructor() {
+    super('throttled');
+    this.name = 'ThrottlingException';
+  }
+}
+
+class InternalServerException extends Error {
+  constructor() {
+    super('internal');
+    this.name = 'InternalServerException';
+  }
+}
+
+jest.mock('@aws-sdk/client-agent-registry-control', () => ({
+  AgentRegistryControlClient: jest.fn(() => ({ send: mockSend })),
   ConflictException,
+  CreateRegistryCommand: jest.fn((input: unknown) => ({ _type: 'CreateRegistry', input })),
+  DeleteRegistryCommand: jest.fn((input: unknown) => ({ _type: 'DeleteRegistry', input })),
+  GetRegistryCommand: jest.fn((input: unknown) => ({ _type: 'GetRegistry', input })),
+  InternalServerException,
   ResourceNotFoundException,
+  ThrottlingException,
+  UpdateRegistryCommand: jest.fn((input: unknown) => ({ _type: 'UpdateRegistry', input })),
 }));
 
 import { isComplete, onEvent } from '../../../src/handlers/registry-provisioning/index';
@@ -76,7 +91,8 @@ function routeSend(handlers: Record<string, (input: Record<string, unknown>) => 
   });
 }
 
-const ARN = 'arn:aws:bedrock-agentcore:us-east-1:1:registry/reg-123';
+const REGISTRY_ID = 'AbCdEfGh1234';
+const ARN = `arn:aws:agent-registry:us-east-1:123456789012:registry/${REGISTRY_ID}`;
 
 describe('onEvent Create', () => {
   test('creates the registry and returns the id as PhysicalResourceId', async () => {
@@ -86,8 +102,8 @@ describe('onEvent Create', () => {
       RequestId: 'req-1',
       ResourceProperties: { RegistryName: 'abca', Description: 'd' },
     });
-    expect(res.PhysicalResourceId).toBe('reg-123');
-    expect(res.Data).toMatchObject({ RegistryId: 'reg-123', RegistryArn: ARN });
+    expect(res.PhysicalResourceId).toBe(REGISTRY_ID);
+    expect(res.Data).toMatchObject({ RegistryId: REGISTRY_ID, RegistryArn: ARN });
     const createInput = mockSend.mock.calls[0][0].input as Record<string, unknown>;
     expect(createInput.name).toBe('abca');
     expect(typeof createInput.clientToken).toBe('string');
@@ -110,7 +126,7 @@ describe('onEvent Update', () => {
     routeSend({ UpdateRegistry: () => ({}) });
     await onEvent({
       RequestType: 'Update',
-      PhysicalResourceId: 'reg-123',
+      PhysicalResourceId: REGISTRY_ID,
       ResourceProperties: { RegistryName: 'new-name', Description: 'same' },
       OldResourceProperties: { RegistryName: 'old-name', Description: 'same' },
     });
@@ -124,7 +140,7 @@ describe('onEvent Update', () => {
     routeSend({ UpdateRegistry: () => ({}) });
     await onEvent({
       RequestType: 'Update',
-      PhysicalResourceId: 'reg-123',
+      PhysicalResourceId: REGISTRY_ID,
       ResourceProperties: { RegistryName: 'abca' },
       OldResourceProperties: { RegistryName: 'abca', Description: 'was here' },
     });
@@ -136,7 +152,7 @@ describe('onEvent Update', () => {
     routeSend({});
     await onEvent({
       RequestType: 'Update',
-      PhysicalResourceId: 'reg-123',
+      PhysicalResourceId: REGISTRY_ID,
       ResourceProperties: { RegistryName: 'abca', Description: 'd' },
       OldResourceProperties: { RegistryName: 'abca', Description: 'd' },
     });
@@ -145,38 +161,63 @@ describe('onEvent Update', () => {
 });
 
 describe('onEvent Delete', () => {
-  test('drains records then deletes the registry', async () => {
-    routeSend({
-      ListRegistryRecords: () => ({ registryRecords: [{ recordId: 'r1' }, { recordId: 'r2' }] }),
-      DeleteRegistryRecord: () => ({}),
-      DeleteRegistry: () => ({}),
+  test('starts asynchronous registry deletion', async () => {
+    routeSend({ DeleteRegistry: () => ({ status: 'DELETING' }) });
+    await onEvent({
+      RequestType: 'Delete',
+      PhysicalResourceId: REGISTRY_ID,
+      ResourceProperties: { RegistryName: 'abca' },
     });
-    await onEvent({ RequestType: 'Delete', PhysicalResourceId: 'reg-123', ResourceProperties: { RegistryName: 'abca' } });
     const types = mockSend.mock.calls.map((c) => (c[0] as TaggedCommand)._type);
-    expect(types).toEqual(['ListRegistryRecords', 'DeleteRegistryRecord', 'DeleteRegistryRecord', 'DeleteRegistry']);
+    expect(types).toEqual(['DeleteRegistry']);
   });
 
-  test('swallows a ConflictException on DeleteRegistry (isComplete will retry)', async () => {
+  test('treats an already-absent registry as deleted', async () => {
     routeSend({
-      ListRegistryRecords: () => ({ registryRecords: [] }),
       DeleteRegistry: () => {
-        throw new ConflictException();
+        throw new ResourceNotFoundException();
       },
     });
     await expect(
-      onEvent({ RequestType: 'Delete', PhysicalResourceId: 'reg-123', ResourceProperties: { RegistryName: 'abca' } }),
-    ).resolves.toMatchObject({ PhysicalResourceId: 'reg-123' });
+      onEvent({
+        RequestType: 'Delete',
+        PhysicalResourceId: REGISTRY_ID,
+        ResourceProperties: { RegistryName: 'abca' },
+      }),
+    ).resolves.toMatchObject({ PhysicalResourceId: REGISTRY_ID });
+  });
+
+  test.each([
+    ['conflict', ConflictException],
+    ['throttling', ThrottlingException],
+    ['internal service error', InternalServerException],
+  ])('defers a retryable %s to the waiter', async (_label, ErrorType) => {
+    routeSend({
+      DeleteRegistry: () => {
+        throw new ErrorType();
+      },
+    });
+    await expect(
+      onEvent({
+        RequestType: 'Delete',
+        PhysicalResourceId: REGISTRY_ID,
+        ResourceProperties: { RegistryName: 'abca' },
+      }),
+    ).resolves.toMatchObject({ PhysicalResourceId: REGISTRY_ID });
   });
 
   test('rethrows an unexpected error from DeleteRegistry', async () => {
     routeSend({
-      ListRegistryRecords: () => ({ registryRecords: [] }),
       DeleteRegistry: () => {
         throw new Error('AccessDenied');
       },
     });
     await expect(
-      onEvent({ RequestType: 'Delete', PhysicalResourceId: 'reg-123', ResourceProperties: { RegistryName: 'abca' } }),
+      onEvent({
+        RequestType: 'Delete',
+        PhysicalResourceId: REGISTRY_ID,
+        ResourceProperties: { RegistryName: 'abca' },
+      }),
     ).rejects.toThrow('AccessDenied');
   });
 });
@@ -186,17 +227,20 @@ describe('isComplete Create/Update', () => {
     routeSend({ GetRegistry: () => ({ status: 'READY', registryArn: ARN }) });
     const res = await isComplete({
       RequestType: 'Create',
-      PhysicalResourceId: 'reg-123',
+      PhysicalResourceId: REGISTRY_ID,
       ResourceProperties: { RegistryName: 'abca' },
     });
-    expect(res).toMatchObject({ IsComplete: true, Data: { RegistryId: 'reg-123', RegistryArn: ARN } });
+    expect(res).toMatchObject({
+      IsComplete: true,
+      Data: { RegistryId: REGISTRY_ID, RegistryArn: ARN },
+    });
   });
 
   test('keeps polling while still CREATING', async () => {
     routeSend({ GetRegistry: () => ({ status: 'CREATING' }) });
     const res = await isComplete({
       RequestType: 'Create',
-      PhysicalResourceId: 'reg-123',
+      PhysicalResourceId: REGISTRY_ID,
       ResourceProperties: { RegistryName: 'abca' },
     });
     expect(res.IsComplete).toBe(false);
@@ -205,7 +249,11 @@ describe('isComplete Create/Update', () => {
   test('throws (fails the deploy) on a FAILED status with the substrate reason', async () => {
     routeSend({ GetRegistry: () => ({ status: 'CREATE_FAILED', statusReason: 'quota exceeded' }) });
     await expect(
-      isComplete({ RequestType: 'Create', PhysicalResourceId: 'reg-123', ResourceProperties: { RegistryName: 'abca' } }),
+      isComplete({
+        RequestType: 'Create',
+        PhysicalResourceId: REGISTRY_ID,
+        ResourceProperties: { RegistryName: 'abca' },
+      }),
     ).rejects.toThrow(/CREATE_FAILED.*quota exceeded/);
   });
 });
@@ -219,25 +267,78 @@ describe('isComplete Delete', () => {
     });
     const res = await isComplete({
       RequestType: 'Delete',
-      PhysicalResourceId: 'reg-123',
+      PhysicalResourceId: REGISTRY_ID,
       ResourceProperties: { RegistryName: 'abca' },
     });
     expect(res.IsComplete).toBe(true);
   });
 
-  test('not complete while the registry still exists — drains + retries delete', async () => {
-    routeSend({
-      GetRegistry: () => ({ status: 'READY' }),
-      ListRegistryRecords: () => ({ registryRecords: [] }),
-      DeleteRegistry: () => ({}),
-    });
+  test('not complete while the registry is still deleting', async () => {
+    routeSend({ GetRegistry: () => ({ status: 'DELETING' }) });
     const res = await isComplete({
       RequestType: 'Delete',
-      PhysicalResourceId: 'reg-123',
+      PhysicalResourceId: REGISTRY_ID,
       ResourceProperties: { RegistryName: 'abca' },
     });
     expect(res.IsComplete).toBe(false);
     const types = mockSend.mock.calls.map((c) => (c[0] as TaggedCommand)._type);
-    expect(types).toContain('DeleteRegistry');
+    expect(types).toEqual(['GetRegistry']);
+  });
+
+  test('re-drives deletion when the registry is not yet deleting', async () => {
+    routeSend({
+      GetRegistry: () => ({ status: 'READY' }),
+      DeleteRegistry: () => ({ status: 'DELETING' }),
+    });
+    const res = await isComplete({
+      RequestType: 'Delete',
+      PhysicalResourceId: REGISTRY_ID,
+      ResourceProperties: { RegistryName: 'abca' },
+    });
+    expect(res.IsComplete).toBe(false);
+    const types = mockSend.mock.calls.map((c) => (c[0] as TaggedCommand)._type);
+    expect(types).toEqual(['GetRegistry', 'DeleteRegistry']);
+  });
+
+  test('keeps polling when a re-driven delete gets a retryable conflict', async () => {
+    routeSend({
+      GetRegistry: () => ({ status: 'READY' }),
+      DeleteRegistry: () => {
+        throw new ConflictException();
+      },
+    });
+    const res = await isComplete({
+      RequestType: 'Delete',
+      PhysicalResourceId: REGISTRY_ID,
+      ResourceProperties: { RegistryName: 'abca' },
+    });
+    expect(res.IsComplete).toBe(false);
+  });
+
+  test('keeps polling when GetRegistry is throttled', async () => {
+    routeSend({
+      GetRegistry: () => {
+        throw new ThrottlingException();
+      },
+    });
+    const res = await isComplete({
+      RequestType: 'Delete',
+      PhysicalResourceId: REGISTRY_ID,
+      ResourceProperties: { RegistryName: 'abca' },
+    });
+    expect(res.IsComplete).toBe(false);
+  });
+
+  test('throws when asynchronous deletion fails', async () => {
+    routeSend({
+      GetRegistry: () => ({ status: 'DELETE_FAILED', statusReason: 'records locked' }),
+    });
+    await expect(
+      isComplete({
+        RequestType: 'Delete',
+        PhysicalResourceId: REGISTRY_ID,
+        ResourceProperties: { RegistryName: 'abca' },
+      }),
+    ).rejects.toThrow(/DELETE_FAILED.*records locked/);
   });
 });
