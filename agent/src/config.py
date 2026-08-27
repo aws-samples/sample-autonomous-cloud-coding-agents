@@ -560,7 +560,7 @@ def build_config(
     resolved_github_token = github_token or resolve_github_token()
     resolved_aws_region = aws_region or os.environ.get("AWS_REGION", "")
     resolved_anthropic_model = anthropic_model or os.environ.get(
-        "ANTHROPIC_MODEL", "us.anthropic.claude-opus-4-8"
+        "ANTHROPIC_MODEL", "us.anthropic.claude-opus-5"
     )
     # Small/fast auxiliary model (WebFetch summarization etc.). Falls back to the
     # deployed ANTHROPIC_DEFAULT_HAIKU_MODEL env, then the platform default. Must

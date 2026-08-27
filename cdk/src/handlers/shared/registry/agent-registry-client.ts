@@ -17,22 +17,21 @@
  *  SOFTWARE.
  */
 
-// The ONE AgentCore-aware implementation of the `RegistryClient` port (#246).
+// The ONE AWS Agent Registry implementation of the `RegistryClient` port (#246).
 // This is the only file upstream of the port that imports the AWS SDK. It owns
-// the substrate-specific decisions established by the live spikes
-// (ISSUE_246_AGENTCORE_FINDINGS.md):
+// the substrate-specific decisions established by the live spikes:
 //
-//   - namespace-in-`name` encoding (Option A): AgentCore has no namespace, so we
+//   - namespace-in-`name` encoding (Option A): Agent Registry has no namespace, so we
 //     fold `kind/namespace/name` into the record `name` and split on read.
-//   - native-vs-CUSTOM storage: purist native descriptors (MCP/AGENT_SKILLS)
+//   - native-vs-CUSTOM storage: purist native descriptors (MCP/SKILL)
 //     by default, carrying ABCA runtime config in a `_meta` block; `custom:true`
 //     stores a verbatim CUSTOM body instead.
 //   - 3-call publish: CreateRegistryRecord is async and lands in DRAFT even with
 //     registry autoApproval; `autoApprove` drives create→submit→approve.
-//   - resolve ranks semver in code (AgentCore stores a plain version string).
+//   - resolve ranks semver in code (Agent Registry stores a plain version string).
 
 import {
-  BedrockAgentCoreControlClient,
+  AgentRegistryControlClient,
   CreateRegistryRecordCommand,
   GetRegistryRecordCommand,
   ListRegistryRecordsCommand,
@@ -40,7 +39,9 @@ import {
   UpdateRegistryRecordStatusCommand,
   ConflictException,
   ResourceNotFoundException,
-} from '@aws-sdk/client-bedrock-agentcore-control';
+  type Descriptors,
+  type GetRegistryRecordCommandOutput,
+} from '@aws-sdk/client-agent-registry-control';
 import * as yaml from 'js-yaml';
 import { logger } from '../logger';
 import { makeClient } from '../ua';
@@ -78,19 +79,19 @@ function isNonEmptyRuntime(runtime: unknown): boolean {
   );
 }
 
-/** Kinds that map onto a native AgentCore descriptor type. */
-const NATIVE_DESCRIPTOR_BY_KIND: Record<string, 'MCP' | 'AGENT_SKILLS'> = {
+/** Kinds that map onto a native Agent Registry record type. */
+const NATIVE_RECORD_TYPE_BY_KIND: Record<string, 'MCP' | 'SKILL'> = {
   mcp_server: 'MCP',
-  skill: 'AGENT_SKILLS',
+  skill: 'SKILL',
 };
 
 /** Frontmatter key carrying the ABCA runtime payload (JSON) inside a native
- *  AGENT_SKILLS SKILL.md — the AGENT_SKILLS validator requires Markdown
+ *  SKILL record's SKILL.md — the Agent Skills validator requires Markdown
  *  frontmatter (not JSON), so the MCP `_meta` convention can't be reused here. */
 const SKILL_RUNTIME_FM_KEY = 'x-abca-runtime';
 const SKILL_NAME_MAX = 64;
 
-/** Derive a SKILL.md `name` from namespace/name: the AGENT_SKILLS validator
+/** Derive a SKILL.md `name` from namespace/name: the Agent Skills validator
  *  requires 1-64 lowercase alphanumerics + single hyphens (no slash, no
  *  leading/trailing/consecutive hyphens). */
 function skillNameSlug(namespace: string, name: string): string {
@@ -155,7 +156,7 @@ function parseSkillFrontmatter(skillMd: string): Record<string, unknown> {
       ? (parsed as Record<string, unknown>)
       : {};
   } catch {
-    return {};
+    return {}; // nosemgrep: ts-silent-success-masking -- invalid YAML becomes an unreadable payload
   }
 }
 
@@ -167,7 +168,7 @@ function parseSkillPublisher(skillMd: string): string | undefined {
 
 /** Recover the ABCA runtime payload from a SKILL.md's `x-abca-runtime`
  *  frontmatter key (base64-encoded JSON). Mirrors
- *  ``agent/src/registry/agentcore_client.py``. Also accepts the legacy
+ *  ``agent/src/registry/agent_registry_client.py``. Also accepts the legacy
  *  single-quoted-JSON form so records published before the base64 switch still
  *  resolve. Reads the key from the YAML-parsed frontmatter object, so a
  *  caller-controlled discovery field cannot inject a shadowing key. */
@@ -183,23 +184,23 @@ function parseSkillRuntime(skillMd: string): unknown {
   return JSON.parse(Buffer.from(raw, 'base64').toString('utf-8'));
 }
 
-export interface AgentCoreRegistryClientOptions {
+export interface AgentRegistryClientOptions {
   readonly registryId: string;
   /** Injectable for tests; defaults to a real client in the target region. */
-  readonly client?: BedrockAgentCoreControlClient;
+  readonly client?: AgentRegistryControlClient;
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
-export class AgentCoreRegistryClient implements RegistryClient {
-  private readonly client: BedrockAgentCoreControlClient;
+export class AgentRegistryClient implements RegistryClient {
+  private readonly client: AgentRegistryControlClient;
   private readonly registryId: string;
 
-  constructor(opts: AgentCoreRegistryClientOptions) {
+  constructor(opts: AgentRegistryClientOptions) {
     this.registryId = opts.registryId;
     // makeClient attaches the ABCA solution UA segment (#319); the injection
     // seam (opts.client) is preserved for tests.
-    this.client = opts.client ?? makeClient(BedrockAgentCoreControlClient);
+    this.client = opts.client ?? makeClient(AgentRegistryControlClient);
   }
 
   // --- name (Option A) encode/decode ------------------------------------------
@@ -216,7 +217,7 @@ export class AgentCoreRegistryClient implements RegistryClient {
   // --- publish (3-call) -------------------------------------------------------
 
   async publish(input: PublishInput): Promise<RegistryRecord> {
-    const useCustom = input.custom || !(input.kind in NATIVE_DESCRIPTOR_BY_KIND);
+    const useCustom = input.custom || !(input.kind in NATIVE_RECORD_TYPE_BY_KIND);
     const name = this.encodeName(input.kind, input.namespace, input.name);
 
     // Immutability: reject a re-publish of the same coordinates.
@@ -229,14 +230,14 @@ export class AgentCoreRegistryClient implements RegistryClient {
     }
 
     const descriptors = useCustom
-      ? { custom: { inlineContent: JSON.stringify(this.customBody(input)) } }
+      ? { custom: { data: JSON.stringify(this.customBody(input)) } }
       : this.nativeDescriptors(input);
 
     const res = await this.client.send(
       new CreateRegistryRecordCommand({
         registryId: this.registryId,
         name,
-        descriptorType: useCustom ? 'CUSTOM' : NATIVE_DESCRIPTOR_BY_KIND[input.kind],
+        recordType: useCustom ? 'CUSTOM' : NATIVE_RECORD_TYPE_BY_KIND[input.kind],
         descriptors,
         recordVersion: input.version,
       }),
@@ -296,17 +297,17 @@ export class AgentCoreRegistryClient implements RegistryClient {
     name: string,
     version: string,
   ): Promise<RegistryRecord | null> {
-    // AgentCore keys records by opaque id, not our coordinates, and List is
+    // Agent Registry keys records by opaque id, not our coordinates, and List is
     // eventually consistent — so scan the (small) record set and match.
     const records = await this.listRecords({ kind, namespace });
     return records.find((r) => r.name === name && r.version === version) ?? null;
   }
 
   async listRecords(filter?: ListFilter): Promise<readonly RegistryRecord[]> {
-    // TODO(GA): O(n) — List + one GetRegistryRecord per summary, and every read
+    // O(n): List + one GetRegistryRecord per summary, and every read
     // path (resolve/show/getRecord) funnels through here. Fine at MVP catalog
-    // sizes; revisit when the native AgentCore construct lands (server-side
-    // filter / batch get) so large catalogs don't pay a per-record round trip.
+    // sizes; revisit with a secondary coordinate index if large catalogs make
+    // the per-record round trips material.
     const out: RegistryRecord[] = [];
     let nextToken: string | undefined;
     do {
@@ -429,7 +430,9 @@ export class AgentCoreRegistryClient implements RegistryClient {
         new GetRegistryRecordCommand({ registryId: this.registryId, recordId }),
       );
     } catch (err) {
-      if (err instanceof ResourceNotFoundException) return null;
+      if (err instanceof ResourceNotFoundException) {
+        return null; // nosemgrep: ts-silent-success-masking -- service 404 is the port's absent-record contract
+      }
       throw err;
     }
     const decoded = this.decodeName(raw.name ?? '');
@@ -450,21 +453,14 @@ export class AgentCoreRegistryClient implements RegistryClient {
 
   /** Pull the ABCA runtime payload back out of the descriptor (native `_meta` or
    *  the verbatim CUSTOM body). */
-  private extractPayload(raw: {
-    descriptorType?: string;
-    descriptors?: {
-      custom?: { inlineContent?: string };
-      mcp?: { server?: { inlineContent?: string } };
-      agentSkills?: { skillMd?: { inlineContent?: string } };
-    };
-  }): {
+  private extractPayload(raw: Pick<GetRegistryRecordCommandOutput, 'recordType' | 'descriptors'>): {
     runtime: RuntimePayload;
     storageMode: StorageMode;
     discovery: Record<string, unknown>;
     publisher?: string;
   } {
-    if (raw.descriptorType === 'CUSTOM') {
-      const body = JSON.parse(raw.descriptors?.custom?.inlineContent ?? '{}');
+    if (raw.recordType === 'CUSTOM') {
+      const body = JSON.parse(raw.descriptors?.custom?.data ?? '{}');
       return {
         runtime: body.runtime as RuntimePayload,
         storageMode: 'custom',
@@ -472,10 +468,10 @@ export class AgentCoreRegistryClient implements RegistryClient {
         publisher: typeof body.publisher === 'string' ? body.publisher : undefined,
       };
     }
-    if (raw.descriptorType === 'AGENT_SKILLS') {
+    if (raw.recordType === 'SKILL') {
       // SKILL.md is Markdown frontmatter, not JSON — recover the runtime from
       // the `x-abca-runtime` frontmatter key.
-      const skillMd = raw.descriptors?.agentSkills?.skillMd?.inlineContent ?? '';
+      const skillMd = raw.descriptors?.agentSkillsDefinition?.additionalData?.skillMd?.data ?? '';
       return {
         runtime: parseSkillRuntime(skillMd) as RuntimePayload,
         storageMode: 'native',
@@ -484,7 +480,7 @@ export class AgentCoreRegistryClient implements RegistryClient {
       };
     }
     // MCP: JSON server.json with the runtime in a `_meta` block.
-    const inline = raw.descriptors?.mcp?.server?.inlineContent ?? '{}';
+    const inline = raw.descriptors?.mcpServer?.data ?? '{}';
     const body = JSON.parse(inline);
     const meta = body._meta?.[RUNTIME_META_KEY];
     const publisher = body._meta?.[PUBLISHER_META_KEY];
@@ -505,11 +501,8 @@ export class AgentCoreRegistryClient implements RegistryClient {
     };
   }
 
-  private nativeDescriptors(input: PublishInput): {
-    mcp?: { server: { inlineContent: string } };
-    agentSkills?: { skillMd: { inlineContent: string } };
-  } {
-    if (NATIVE_DESCRIPTOR_BY_KIND[input.kind] === 'MCP') {
+  private nativeDescriptors(input: PublishInput): Descriptors {
+    if (NATIVE_RECORD_TYPE_BY_KIND[input.kind] === 'MCP') {
       // MCP: embed the runtime + publisher in a `_meta` block on the validated
       // server.json. A valid server.json may legitimately carry its own `_meta`
       // (the MCP spec reserves it for arbitrary metadata), so merge our ABCA keys
@@ -523,9 +516,9 @@ export class AgentCoreRegistryClient implements RegistryClient {
       const meta: Record<string, unknown> = { ...callerMeta, [RUNTIME_META_KEY]: input.runtime };
       if (input.publisher) meta[PUBLISHER_META_KEY] = input.publisher;
       const withMeta = { ...input.discovery, _meta: meta };
-      return { mcp: { server: { inlineContent: JSON.stringify(withMeta) } } };
+      return { mcpServer: { data: JSON.stringify(withMeta) } };
     }
-    // AGENT_SKILLS: the validator requires Markdown frontmatter (not JSON), so
+    // SKILL: the validator requires Markdown frontmatter (not JSON), so
     // the runtime rides in an `x-abca-runtime` frontmatter key inside SKILL.md.
     const skillMd = buildSkillMd({
       namespace: input.namespace,
@@ -535,6 +528,10 @@ export class AgentCoreRegistryClient implements RegistryClient {
       runtime: input.runtime,
       publisher: input.publisher,
     });
-    return { agentSkills: { skillMd: { inlineContent: skillMd } } };
+    return {
+      agentSkillsDefinition: {
+        additionalData: { skillMd: { data: skillMd } },
+      },
+    };
   }
 }

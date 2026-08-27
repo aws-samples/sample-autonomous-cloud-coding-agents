@@ -23,6 +23,20 @@ Both backends are orchestrated by the same durable Lambda function. The `Compute
 
 ECS Fargate is currently **opt-in** -- the `EcsAgentCluster` construct is present in the stack code but commented out. To enable it, uncomment the ECS blocks in `cdk/src/stacks/agent.ts`.
 
+### Optional Agent Registry
+
+AWS Agent Registry is enabled by default. In an account or region where the preview service is unavailable or prohibited, omit the registry, its REST API, IAM grants, environment wiring, and stack outputs:
+
+```bash
+cdk deploy --context enableAgentRegistry=false
+```
+
+Blueprints without `registry://` asset references continue to work. A remaining registry reference fails task startup rather than silently skipping the asset.
+
+The string form is case-sensitive: use lowercase `true` or `false`. Any other value fails synthesis with an actionable validation error.
+
+This context is an infrastructure switch, not a pause control. Applying it to an existing enabled deployment deletes the CloudFormation-managed registry and its records; re-enabling creates an empty registry that must be republished. See [REGISTRY.md](/sample-autonomous-cloud-coding-agents/architecture/registry) for the catalog migration and runtime behavior.
+
 ## Scale-to-zero analysis
 
 ### Components that scale to zero (pay-per-use)
@@ -72,6 +86,7 @@ For the full cost model including per-task costs, see [COST_MODEL.md](/sample-au
 | Bedrock (Claude Sonnet 4.6, Opus 4, Haiku 4.5) | Agent reasoning, cross-region inference profiles | Yes |
 | Bedrock Guardrails | Prompt injection detection on task input | Yes |
 | Bedrock AgentCore Memory | Semantic + episodic extraction strategies | Yes |
+| AWS Agent Registry (preview, default-on) | Versioned agent asset catalog and governance | N/A (managed preview service) |
 
 ### Networking
 

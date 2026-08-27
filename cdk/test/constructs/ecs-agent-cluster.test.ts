@@ -28,11 +28,13 @@ import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { AgentMemory } from '../../src/constructs/agent-memory';
 import { AgentSessionRole } from '../../src/constructs/agent-session-role';
+import { DEFAULT_BEDROCK_MODEL_IDS } from '../../src/constructs/bedrock-models';
 import { EcsAgentCluster, resolveEcsTaskSizing } from '../../src/constructs/ecs-agent-cluster';
 
 function createStack(overrides?: {
   memoryId?: string;
   bedrockModels?: string[];
+  bedrockGeoRegion?: string;
   withMemory?: boolean;
   taskSizing?: {
     buildTaskCpu?: number;
@@ -44,7 +46,10 @@ function createStack(overrides?: {
   };
 }): { stack: Stack; template: Template } {
   const app = new App({
-    context: overrides?.bedrockModels ? { bedrockModels: overrides.bedrockModels } : undefined,
+    context: {
+      ...(overrides?.bedrockModels && { bedrockModels: overrides.bedrockModels }),
+      ...(overrides?.bedrockGeoRegion && { bedrockGeoRegion: overrides.bedrockGeoRegion }),
+    },
   });
   const stack = new Stack(app, 'TestStack');
 
@@ -424,6 +429,73 @@ describe('EcsAgentCluster construct', () => {
     // pin it per-repo, so dropping it would fail those repos at turn 0.
     expect(serialized).toContain('foundation-model/anthropic.claude-opus-4-8');
     expect(serialized).toContain('inference-profile/us.anthropic.claude-opus-4-8');
+  });
+
+  /**
+   * TEMPLATE IDENTITY (#746), ECS half. The `us.` literal that used to be
+   * string-concatenated into this ARN is now the resolved `bedrockGeoRegion`
+   * (default `us`), so the default-context grant must be UNCHANGED. Exact set
+   * equality against the list captured from a pre-change `origin/main` synth
+   * (`fb1e007b`) — the AgentCore half is asserted the same way in
+   * `test/stacks/agent.test.ts`, and the two lists being identical is itself the
+   * substrate-parity invariant this construct exists to keep.
+   */
+  test('default-context Bedrock grants are byte-identical to the pre-#746 template', () => {
+    const PRE_CHANGE_BEDROCK_RESOURCE_NAMES = [
+      'foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0',
+      'foundation-model/anthropic.claude-opus-4-20250514-v1:0',
+      'foundation-model/anthropic.claude-opus-4-8',
+      'foundation-model/anthropic.claude-opus-5',
+      'foundation-model/anthropic.claude-sonnet-4-6',
+      'inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0',
+      'inference-profile/us.anthropic.claude-opus-4-20250514-v1:0',
+      'inference-profile/us.anthropic.claude-opus-4-8',
+      'inference-profile/us.anthropic.claude-opus-5',
+      'inference-profile/us.anthropic.claude-sonnet-4-6',
+    ];
+    const serialized = JSON.stringify(baseTemplate.findResources('AWS::IAM::Policy'));
+    const found = [...new Set(
+      serialized.match(/(?:foundation-model|inference-profile)\/[^"]+/g) ?? [],
+    )].sort();
+    expect(found).toEqual(PRE_CHANGE_BEDROCK_RESOURCE_NAMES);
+    expect(found).toHaveLength(DEFAULT_BEDROCK_MODEL_IDS.length * 2);
+  });
+
+  /**
+   * ECS/AgentCore parity for the geo knob. The two substrates build their
+   * inference-profile ARNs by different routes — AgentCore through
+   * `CrossRegionInferenceProfile.fromConfig`, ECS through `Stack.formatArn` —
+   * so a geo threaded into only one of them would grant a repo running on ECS a
+   * different profile than the same repo on AgentCore. Both reduce to
+   * `<geo>.<modelId>`; that equivalence is what this asserts.
+   */
+  test.each(['global', 'eu'])('bedrockGeoRegion=%s re-prefixes the task role inference-profile ARNs', (geo) => {
+    const template = createStack({ bedrockGeoRegion: geo }).template;
+    const policies = template.findResources('AWS::IAM::Policy');
+    let bedrockStatement: { Resource: unknown } | undefined;
+    for (const policy of Object.values(policies)) {
+      for (const s of policy.Properties.PolicyDocument.Statement) {
+        const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+        if (actions.includes('bedrock:InvokeModel')) bedrockStatement = s;
+      }
+    }
+    expect(bedrockStatement).toBeDefined();
+    const serialized = JSON.stringify(bedrockStatement!.Resource);
+    for (const modelId of DEFAULT_BEDROCK_MODEL_IDS) {
+      expect(serialized).toContain(`inference-profile/${geo}.${modelId}`);
+      // The default geo must be replaced, not appended: a stale `us.` grant
+      // alongside a `global.` call is the AccessDenied this guards.
+      expect(serialized).not.toContain(`inference-profile/us.${modelId}`);
+      // Foundation-model half is geo-agnostic (region '*') and stays bare.
+      expect(serialized).toContain(`foundation-model/${modelId}`);
+    }
+    // Never widened to a wildcard by the geo knob.
+    expect(bedrockStatement!.Resource).not.toEqual('*');
+    expect(serialized).not.toContain('"*"');
+  });
+
+  test('an unknown bedrockGeoRegion fails at synth', () => {
+    expect(() => createStack({ bedrockGeoRegion: 'usa' })).toThrow(/must be one of/);
   });
 
   test('task role can DescribeAvailabilityZones so a CDK target repo can `cdk synth` on a fresh clone (ECS-parity)', () => {

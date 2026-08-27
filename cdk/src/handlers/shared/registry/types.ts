@@ -18,13 +18,13 @@
  */
 
 // Substrate-neutral domain types for the agent asset registry (#246). These are
-// the types the `RegistryClient` port speaks — nothing here references AgentCore
-// or the AWS SDK. The AgentCore-specific mapping lives in agentcore-client.ts.
+// the types the `RegistryClient` port speaks — nothing here references Agent Registry
+// or the AWS SDK. The substrate mapping lives in agent-registry-client.ts.
 //
 // API *wire* types shared with the CLI live in ../types.ts (types-sync contract);
 // these port-internal types are deliberately kept out of that sync.
 
-/** Canonical record status. Mirrors AgentCore's `RegistryRecordStatus` tokens so
+/** Canonical record status. Mirrors Agent Registry's `RegistryRecordStatus` tokens so
  *  the resolver's status filter is spelled identically on both sides. Only
  *  `APPROVED` resolves; `DEPRECATED` resolves with a warning. */
 export type RegistryStatus =
@@ -50,7 +50,7 @@ export const RUNTIME_META_KEY = 'dev.abca.runtime';
  *  Lambda role. Written once at publish; immutable with the rest of the record. */
 export const PUBLISHER_META_KEY = 'dev.abca.publisher';
 
-/** Frontmatter key carrying the publisher inside a native AGENT_SKILLS SKILL.md
+/** Frontmatter key carrying the publisher inside a native SKILL record's SKILL.md
  *  (skills can't hold a `_meta` block). */
 export const PUBLISHER_FM_KEY = 'x-abca-publisher';
 

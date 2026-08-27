@@ -30,7 +30,7 @@ import { NagSuppressions } from 'cdk-nag';
 import { Construct, type Node } from 'constructs';
 import { AgentMemory } from './agent-memory';
 import { AgentSessionRole } from './agent-session-role';
-import { resolveBedrockModelIds } from './bedrock-models';
+import { resolveBedrockGeoRegion, resolveBedrockModelIds } from './bedrock-models';
 import { buildAppId } from './solution-ua-aspect';
 import { ToolGateway } from './tool-gateway';
 
@@ -585,10 +585,12 @@ export class EcsAgentCluster extends Construct {
 
     // Bedrock model invocation — scoped to explicit foundation-model and
     // cross-region inference-profile ARNs (parity with the AgentCore runtime
-    // grants in agent.ts), NOT a Resource: '*' wildcard. The model set is the
-    // shared, context-overridable list (constructs/bedrock-models.ts) so the
-    // ECS and AgentCore backends can't drift.
+    // grants in agent.ts), NOT a Resource: '*' wildcard. The model set and the
+    // inference-profile geography are both the shared, context-overridable
+    // values (constructs/bedrock-models.ts: `bedrockModels`, `bedrockGeoRegion`)
+    // so the ECS and AgentCore backends can't drift.
     const stack = Stack.of(this);
+    const bedrockGeoRegion = resolveBedrockGeoRegion(this.node);
     const bedrockResources: string[] = [];
     for (const modelId of resolveBedrockModelIds(this.node)) {
       bedrockResources.push(
@@ -603,7 +605,10 @@ export class EcsAgentCluster extends Construct {
         stack.formatArn({
           service: 'bedrock',
           resource: 'inference-profile',
-          resourceName: `us.${modelId}`,
+          // Same `<geo>.<modelId>` shape CrossRegionInferenceProfile.fromConfig
+          // builds for the AgentCore grant — regional + account-qualified for
+          // every geography, `global.` included.
+          resourceName: `${bedrockGeoRegion}.${modelId}`,
           arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
         }),
       );

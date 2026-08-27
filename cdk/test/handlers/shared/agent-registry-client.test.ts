@@ -23,14 +23,14 @@ import {
   ListRegistryRecordsCommand,
   SubmitRegistryRecordForApprovalCommand,
   UpdateRegistryRecordStatusCommand,
-} from '@aws-sdk/client-bedrock-agentcore-control';
-import { AgentCoreRegistryClient } from '../../../src/handlers/shared/registry/agentcore-client';
+} from '@aws-sdk/client-agent-registry-control';
+import { AgentRegistryClient } from '../../../src/handlers/shared/registry/agent-registry-client';
 import { parseRef } from '../../../src/handlers/shared/registry/ref';
 import { RegistryPublishIncompleteError, RegistryResolutionError } from '../../../src/handlers/shared/registry/types';
 
 const RUNTIME_META_KEY = 'dev.abca.runtime';
 
-/** A tiny in-memory fake of the AgentCore control-plane client. Records are
+/** A tiny in-memory fake of the Agent Registry control-plane client. Records are
  *  keyed by an opaque id; List returns summaries, Get returns the full record. */
 class FakeClient {
   private records = new Map<string, Record<string, unknown>>();
@@ -56,30 +56,39 @@ class FakeClient {
       this.sent.push('create');
       const input = cmd.input as {
         name?: string;
-        descriptorType?: string;
-        descriptors?: { agentSkills?: { skillMd?: { inlineContent?: string } } };
+        recordType?: string;
+        descriptors?: {
+          agentSkillsDefinition?: {
+            additionalData?: { skillMd?: { data?: string } };
+          };
+        };
         recordVersion?: string;
       };
-      // Mirror the real AGENT_SKILLS validator: SKILL.md must be Markdown
+      // Mirror the real SKILL validator: SKILL.md must be Markdown
       // frontmatter (start with '---'), not JSON. This guards the adapter's
       // skill descriptor build against regressing to JSON (the original bug).
-      if (input.descriptorType === 'AGENT_SKILLS') {
-        const md = input.descriptors?.agentSkills?.skillMd?.inlineContent ?? '';
+      if (input.recordType === 'SKILL') {
+        const md =
+          input.descriptors?.agentSkillsDefinition?.additionalData?.skillMd?.data ?? '';
         if (!md.startsWith('---')) {
-          throw new Error("agentSkills.skillMd inlineContent must start with frontmatter delimited by '---'");
+          throw new Error("agentSkillsDefinition.skillMd data must start with frontmatter delimited by '---'");
         }
       }
       const id = `rec-${++this.seq}`;
       this.records.set(id, {
         recordId: id,
-        recordArn: `arn:aws:bedrock-agentcore:us-east-1:1:registry/r/record/${id}`,
+        recordArn: `arn:aws:agent-registry:us-east-1:123456789012:registry/AbCdEfGh1234/record/${id}`,
         name: input.name,
-        descriptorType: input.descriptorType,
+        recordType: input.recordType,
         descriptors: input.descriptors,
         recordVersion: input.recordVersion,
         status: 'CREATING',
       });
-      return { recordArn: `arn:aws:bedrock-agentcore:us-east-1:1:registry/r/record/${id}`, status: 'CREATING' };
+      return {
+        recordArn:
+          `arn:aws:agent-registry:us-east-1:123456789012:registry/AbCdEfGh1234/record/${id}`,
+        status: 'CREATING',
+      };
     }
     if (cmd instanceof GetRegistryRecordCommand) {
       const id = (cmd.input as { recordId: string }).recordId;
@@ -115,14 +124,14 @@ class FakeClient {
   }
 }
 
-function makeClient(fake: FakeClient): AgentCoreRegistryClient {
-  return new AgentCoreRegistryClient({
-    registryId: 'r',
+function makeClient(fake: FakeClient): AgentRegistryClient {
+  return new AgentRegistryClient({
+    registryId: 'AbCdEfGh1234',
     client: fake as never,
   });
 }
 
-describe('AgentCoreRegistryClient', () => {
+describe('AgentRegistryClient', () => {
   test('publish (native + autoApprove) drives create → submit → approve and embeds _meta', async () => {
     const fake = new FakeClient();
     const client = makeClient(fake);
@@ -355,8 +364,8 @@ describe('AgentCoreRegistryClient', () => {
     const seedMcp = (version: string, status: string): void => {
       fake.seed({
         name: 'mcp_server/acme/pdf-tools',
-        descriptorType: 'MCP',
-        descriptors: { mcp: { server: { inlineContent: JSON.stringify({ name: 'acme/pdf-tools', version, _meta: { [RUNTIME_META_KEY]: { transport: 'http', url: `https://x/${version}` } } }) } } },
+        recordType: 'MCP',
+        descriptors: { mcpServer: { data: JSON.stringify({ name: 'acme/pdf-tools', version, _meta: { [RUNTIME_META_KEY]: { transport: 'http', url: `https://x/${version}` } } }) } },
         recordVersion: version,
         status,
       });
@@ -379,8 +388,8 @@ describe('AgentCoreRegistryClient', () => {
     const client = makeClient(fake);
     fake.seed({
       name: 'mcp_server/acme/pdf-tools',
-      descriptorType: 'MCP',
-      descriptors: { mcp: { server: { inlineContent: JSON.stringify({ name: 'acme/pdf-tools', version: '1.4.1', _meta: { [RUNTIME_META_KEY]: { transport: 'http' } } }) } } },
+      recordType: 'MCP',
+      descriptors: { mcpServer: { data: JSON.stringify({ name: 'acme/pdf-tools', version: '1.4.1', _meta: { [RUNTIME_META_KEY]: { transport: 'http' } } }) } },
       recordVersion: '1.4.1',
       status: 'DEPRECATED',
     });
@@ -396,8 +405,8 @@ describe('AgentCoreRegistryClient', () => {
     const client = makeClient(fake);
     fake.seed({
       name: 'mcp_server/acme/pdf-tools',
-      descriptorType: 'MCP',
-      descriptors: { mcp: { server: { inlineContent: JSON.stringify({ name: 'acme/pdf-tools', version: '1.4.1' }) } } },
+      recordType: 'MCP',
+      descriptors: { mcpServer: { data: JSON.stringify({ name: 'acme/pdf-tools', version: '1.4.1' }) } },
       recordVersion: '1.4.1',
       status: 'PENDING_APPROVAL',
     });
@@ -417,8 +426,8 @@ describe('AgentCoreRegistryClient', () => {
     // resolving to {} (REGISTRY.md §8).
     fake.seed({
       name: 'mcp_server/acme/pdf-tools',
-      descriptorType: 'MCP',
-      descriptors: { mcp: { server: { inlineContent: JSON.stringify({ name: 'acme/pdf-tools', version: '1.4.1' }) } } },
+      recordType: 'MCP',
+      descriptors: { mcpServer: { data: JSON.stringify({ name: 'acme/pdf-tools', version: '1.4.1' }) } },
       recordVersion: '1.4.1',
       status: 'APPROVED',
     });
