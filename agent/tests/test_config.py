@@ -306,6 +306,179 @@ class TestResolveLinearApiToken:
         monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
 
 
+class TestResolveLinearApiTokenVaultPath:
+    """RFC #249 Phase 1: token minted via the AgentCore Identity Token Vault.
+
+    When LINEAR_VAULT_ENABLED and the task carries linear_provider_name +
+    linear_workspace_id, the vault path is tried first; any failure falls back
+    to the Secrets-Manager path so the vault never blocks a task.
+    """
+
+    def _enable_vault(self, monkeypatch):
+        monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        monkeypatch.setenv("LINEAR_VAULT_ENABLED", "true")
+        monkeypatch.setenv("LINEAR_WORKLOAD_IDENTITY_NAME", "abca_linear_oauth")
+
+    def _meta(self):
+        return {
+            "linear_provider_name": "bgagent-linear-oauth-acme",
+            "linear_workspace_id": "org-abc",
+            "linear_oauth_secret_arn": "arn:sm:acme",
+        }
+
+    def test_mints_via_vault_and_caches(self, monkeypatch):
+        """Happy path: user-bound workload token then exchange → access token, no SM read."""
+        self._enable_vault(monkeypatch)
+        mock_client = MagicMock()
+        mock_client.get_workload_access_token_for_user_id.return_value = {
+            "workloadAccessToken": "wat-xyz",
+        }
+        mock_client.get_resource_oauth2_token.return_value = {"accessToken": "lin_oauth_vault"}
+        with patch("boto3.client", return_value=mock_client):
+            resolved = resolve_linear_api_token(self._meta())
+        assert resolved == "lin_oauth_vault"
+        # User id is per-workspace; SM secret was never read.
+        mock_client.get_workload_access_token_for_user_id.assert_called_once_with(
+            workloadName="abca_linear_oauth", userId="linear-workspace-org-abc"
+        )
+        mock_client.get_secret_value.assert_not_called()
+        monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
+
+    def test_consent_required_falls_back_to_secrets_manager(self, monkeypatch):
+        """authorizationUrl (no accessToken) → fall through to the SM token."""
+        from datetime import datetime, timedelta
+
+        self._enable_vault(monkeypatch)
+        future = (datetime.now(UTC) + timedelta(hours=12)).isoformat().replace("+00:00", "Z")
+        mock_client = MagicMock()
+        mock_client.get_workload_access_token_for_user_id.return_value = {
+            "workloadAccessToken": "wat"
+        }
+        mock_client.get_resource_oauth2_token.return_value = {
+            "authorizationUrl": "https://bedrock-agentcore.../authorize?request_uri=urn:x",
+        }
+        mock_client.get_secret_value.return_value = {
+            "SecretString": __import__("json").dumps(
+                {
+                    "access_token": "lin_oauth_sm_fallback",
+                    "refresh_token": "rt",
+                    "expires_at": future,
+                    "scope": "read",
+                    "client_id": "c",
+                    "client_secret": "s",
+                    "workspace_id": "w",
+                    "workspace_slug": "s",
+                    "installed_at": "x",
+                    "updated_at": "x",
+                    "installed_by_platform_user_id": "u",
+                }
+            ),
+        }
+        with patch("boto3.client", return_value=mock_client):
+            resolved = resolve_linear_api_token(self._meta())
+        assert resolved == "lin_oauth_sm_fallback"
+        mock_client.get_secret_value.assert_called()
+        monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
+
+    def test_vault_error_falls_back_to_secrets_manager(self, monkeypatch):
+        """A ClientError on the vault call degrades to the SM path, never raises."""
+        from datetime import datetime, timedelta
+
+        from botocore.exceptions import ClientError
+
+        self._enable_vault(monkeypatch)
+        future = (datetime.now(UTC) + timedelta(hours=12)).isoformat().replace("+00:00", "Z")
+        mock_client = MagicMock()
+        mock_client.get_workload_access_token_for_user_id.side_effect = ClientError(
+            {"Error": {"Code": "AccessDeniedException", "Message": "no perms"}},
+            "GetWorkloadAccessTokenForUserId",
+        )
+        mock_client.get_secret_value.return_value = {
+            "SecretString": __import__("json").dumps(
+                {
+                    "access_token": "lin_oauth_sm_after_error",
+                    "refresh_token": "rt",
+                    "expires_at": future,
+                    "scope": "read",
+                    "client_id": "c",
+                    "client_secret": "s",
+                    "workspace_id": "w",
+                    "workspace_slug": "s",
+                    "installed_at": "x",
+                    "updated_at": "x",
+                    "installed_by_platform_user_id": "u",
+                }
+            ),
+        }
+        with patch("boto3.client", return_value=mock_client):
+            resolved = resolve_linear_api_token(self._meta())
+        assert resolved == "lin_oauth_sm_after_error"
+        monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
+
+    def test_skips_vault_when_no_provider_name(self, monkeypatch):
+        """SM-only install (no linear_provider_name) → vault never called."""
+        from datetime import datetime, timedelta
+
+        self._enable_vault(monkeypatch)
+        future = (datetime.now(UTC) + timedelta(hours=12)).isoformat().replace("+00:00", "Z")
+        mock_client = MagicMock()
+        mock_client.get_secret_value.return_value = {
+            "SecretString": __import__("json").dumps(
+                {
+                    "access_token": "lin_oauth_sm_only",
+                    "refresh_token": "rt",
+                    "expires_at": future,
+                    "scope": "read",
+                    "client_id": "c",
+                    "client_secret": "s",
+                    "workspace_id": "w",
+                    "workspace_slug": "s",
+                    "installed_at": "x",
+                    "updated_at": "x",
+                    "installed_by_platform_user_id": "u",
+                }
+            ),
+        }
+        with patch("boto3.client", return_value=mock_client):
+            resolved = resolve_linear_api_token({"linear_oauth_secret_arn": "arn:sm:acme"})
+        assert resolved == "lin_oauth_sm_only"
+        mock_client.get_workload_access_token_for_user_id.assert_not_called()
+        monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
+
+    def test_disabled_flag_skips_vault(self, monkeypatch):
+        """LINEAR_VAULT_ENABLED unset → vault never called even with provider_name."""
+        from datetime import datetime, timedelta
+
+        monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
+        monkeypatch.delenv("LINEAR_VAULT_ENABLED", raising=False)
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        future = (datetime.now(UTC) + timedelta(hours=12)).isoformat().replace("+00:00", "Z")
+        mock_client = MagicMock()
+        mock_client.get_secret_value.return_value = {
+            "SecretString": __import__("json").dumps(
+                {
+                    "access_token": "lin_oauth_sm_flag_off",
+                    "refresh_token": "rt",
+                    "expires_at": future,
+                    "scope": "read",
+                    "client_id": "c",
+                    "client_secret": "s",
+                    "workspace_id": "w",
+                    "workspace_slug": "s",
+                    "installed_at": "x",
+                    "updated_at": "x",
+                    "installed_by_platform_user_id": "u",
+                }
+            ),
+        }
+        with patch("boto3.client", return_value=mock_client):
+            resolved = resolve_linear_api_token(self._meta())
+        assert resolved == "lin_oauth_sm_flag_off"
+        mock_client.get_workload_access_token_for_user_id.assert_not_called()
+        monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
+
+
 class TestResolveLinearApiTokenRefreshPaths:
     """Tests for the refresh sub-flow inside resolve_linear_api_token.
 
