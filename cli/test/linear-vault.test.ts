@@ -42,6 +42,7 @@ jest.mock('@aws-sdk/client-bedrock-agentcore', () => ({
   BedrockAgentCoreClient: jest.fn(() => ({ send: (...a: unknown[]) => dataSend(...a) })),
   GetWorkloadAccessTokenForUserIdCommand: jest.fn((input: unknown) => ({ _type: 'WAT', input })),
   GetResourceOauth2TokenCommand: jest.fn((input: unknown) => ({ _type: 'Token', input })),
+  CompleteResourceTokenAuthCommand: jest.fn((input: unknown) => ({ _type: 'Complete', input })),
 }));
 
 // makeClient just constructs the (mocked) client; pass it through.
@@ -54,6 +55,7 @@ import {
 } from '@aws-sdk/client-bedrock-agentcore-control';
 import {
   beginVaultConsent,
+  finalizeVaultConsent,
   linearVaultProviderName,
   linearVaultUserId,
   upsertLinearCredentialProvider,
@@ -150,8 +152,10 @@ describe('beginVaultConsent', () => {
 
   test('first request returns an authorization URL (consent needed); poll returns the token once minted', async () => {
     dataSend
-      .mockResolvedValueOnce({ workloadAccessToken: 'wat-1' }) // WAT (first)
-      .mockResolvedValueOnce({ authorizationUrl: 'https://bedrock-agentcore.../authorize?request_uri=urn:x' }) // Token (no token yet)
+      .mockResolvedValueOnce({ workloadAccessToken: 'wat-0' }) // WAT (cached probe)
+      .mockResolvedValueOnce({ authorizationUrl: 'https://x/authorize?request_uri=urn:x' }) // no cached grant
+      .mockResolvedValueOnce({ workloadAccessToken: 'wat-1' }) // WAT (forced)
+      .mockResolvedValueOnce({ authorizationUrl: 'https://bedrock-agentcore.../authorize?request_uri=urn:x' }) // consent needed
       .mockResolvedValueOnce({ workloadAccessToken: 'wat-2' }) // WAT (poll)
       .mockResolvedValueOnce({ accessToken: 'lin_oauth_minted' }); // Token (poll → minted)
 
@@ -166,19 +170,73 @@ describe('beginVaultConsent', () => {
     expect(token).toBe('lin_oauth_minted');
   });
 
-  test('already-consented: first request returns a token directly, poll yields it, no auth URL', async () => {
+  test('already-consented re-run needs NO browser and does NOT force re-auth', async () => {
+    // A healthy workspace must be a cheap no-op: forcing unconditionally would
+    // drag the operator through consent again just to re-record a provider name.
     dataSend
       .mockResolvedValueOnce({ workloadAccessToken: 'wat-1' })
       .mockResolvedValueOnce({ accessToken: 'lin_oauth_cached' });
     const step = await beginVaultConsent(args);
     expect(step.authorizationUrl).toBe('');
     expect(await step.poll()).toBe('lin_oauth_cached');
+    // The cached probe must NOT set forceAuthentication.
+    const probe = dataSend.mock.calls[1][0] as Tagged;
+    expect(probe.input.forceAuthentication).toBeUndefined();
+    // And it must not have needed a second (forced) round trip.
+    expect(dataSend).toHaveBeenCalledTimes(2);
+  });
+
+  test('exposes the sessionUri so the caller can finalize the consent', async () => {
+    // The sessionUri is what CompleteResourceTokenAuth needs. The first
+    // implementation dropped it and only polled — so consent never finalized,
+    // the poll spun forever, and the browser 404'd on an unlistened return URL.
+    dataSend
+      .mockResolvedValueOnce({ workloadAccessToken: 'wat-0' })
+      .mockResolvedValueOnce({ authorizationUrl: 'https://x?request_uri=urn:x' }) // no cached grant
+      .mockResolvedValueOnce({ workloadAccessToken: 'wat-1' })
+      .mockResolvedValueOnce({
+        authorizationUrl: 'https://bedrock-agentcore.../authorize?request_uri=urn:x',
+        sessionUri: 'urn:ietf:params:oauth:request_uri:abc123',
+      });
+    const step = await beginVaultConsent(args);
+    expect(step.sessionUri).toBe('urn:ietf:params:oauth:request_uri:abc123');
   });
 
   test('throws when the vault returns neither a token nor an authorization URL', async () => {
     dataSend
+      .mockResolvedValueOnce({ workloadAccessToken: 'wat-0' })
+      .mockResolvedValueOnce({}) // cached probe: neither
       .mockResolvedValueOnce({ workloadAccessToken: 'wat-1' })
-      .mockResolvedValueOnce({}); // neither
+      .mockResolvedValueOnce({}); // forced: neither
     await expect(beginVaultConsent(args)).rejects.toThrow(/neither a token nor an authorization URL/);
+  });
+});
+
+describe('finalizeVaultConsent', () => {
+  // The step whose absence broke the first implementation: until the session is
+  // completed, GetResourceOauth2Token keeps returning an authorizationUrl as if
+  // consent never happened, so polling alone never yields a token.
+  test('completes the session for the per-workspace user id', async () => {
+    dataSend.mockResolvedValueOnce({});
+    await finalizeVaultConsent({
+      region: 'us-east-1',
+      linearWorkspaceId: 'org-abc',
+      sessionUri: 'urn:ietf:params:oauth:request_uri:abc123',
+    });
+    const call = dataSend.mock.calls[0][0] as Tagged;
+    expect(call._type).toBe('Complete');
+    expect(call.input).toEqual({
+      userIdentifier: { userId: 'linear-workspace-org-abc' },
+      sessionUri: 'urn:ietf:params:oauth:request_uri:abc123',
+    });
+  });
+
+  test('propagates a finalization failure rather than leaving the caller polling', async () => {
+    dataSend.mockRejectedValueOnce(new Error('InvalidInputException: session expired'));
+    await expect(finalizeVaultConsent({
+      region: 'us-east-1',
+      linearWorkspaceId: 'org-abc',
+      sessionUri: 'urn:expired',
+    })).rejects.toThrow(/session expired/);
   });
 });

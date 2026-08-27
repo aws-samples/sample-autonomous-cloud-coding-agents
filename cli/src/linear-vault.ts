@@ -29,6 +29,7 @@
 // idempotent (create → fall back to update).
 import {
   BedrockAgentCoreClient,
+  CompleteResourceTokenAuthCommand,
   GetResourceOauth2TokenCommand,
   GetWorkloadAccessTokenForUserIdCommand,
 } from '@aws-sdk/client-bedrock-agentcore';
@@ -141,8 +142,42 @@ function isAlreadyExistsError(err: unknown): boolean {
 export interface VaultConsentStep {
   /** URL the operator opens to consent (AgentCore PAR → Linear authorize). */
   readonly authorizationUrl: string;
+  /**
+   * The federation session this consent belongs to
+   * (`urn:ietf:params:oauth:request_uri:…`). AgentCore appends the same value to
+   * the return URL as `?session_id=…` once consent completes, and it must be
+   * handed to {@link finalizeVaultConsent} before a token can be fetched.
+   */
+  readonly sessionUri: string;
   /** Poll this to check whether the token has been minted yet. */
   readonly poll: () => Promise<string | null>;
+}
+
+/**
+ * Finalize a consented federation session so the vault mints + caches the token.
+ *
+ * **This step is mandatory and easy to miss.** The browser flow is:
+ * Linear consent → AgentCore's own callback (AWS exchanges the code for a token)
+ * → AgentCore redirects the browser to `resourceOauth2ReturnUrl?session_id=…`.
+ * Until `CompleteResourceTokenAuth` is called with that `session_id`, the session
+ * stays open and `GetResourceOauth2Token` keeps returning an `authorizationUrl`
+ * as if consent never happened — so a caller that only polls waits forever.
+ * Live-caught: the first vault-setup implementation skipped this and hung on the
+ * poll while the browser 404'd on an unlistened return URL.
+ */
+export async function finalizeVaultConsent(args: {
+  region: string;
+  linearWorkspaceId: string;
+  sessionUri: string;
+  client?: BedrockAgentCoreClient;
+}): Promise<void> {
+  const dataplane = args.client ?? makeClient(BedrockAgentCoreClient, { region: args.region });
+  await dataplane.send(
+    new CompleteResourceTokenAuthCommand({
+      userIdentifier: { userId: linearVaultUserId(args.linearWorkspaceId) },
+      sessionUri: args.sessionUri,
+    }),
+  );
 }
 
 /**
@@ -167,7 +202,9 @@ export async function beginVaultConsent(args: {
   const dataplane = makeClient(BedrockAgentCoreClient, { region: args.region });
   const userId = linearVaultUserId(args.linearWorkspaceId);
 
-  async function requestToken(forceAuth: boolean): Promise<{ token: string | null; authUrl: string | null }> {
+  async function requestToken(
+    forceAuth: boolean,
+  ): Promise<{ token: string | null; authUrl: string | null; sessionUri: string | null }> {
     const wat = await dataplane.send(
       new GetWorkloadAccessTokenForUserIdCommand({ workloadName: args.workloadName, userId }),
     );
@@ -189,13 +226,26 @@ export async function beginVaultConsent(args: {
         ...(forceAuth ? { forceAuthentication: true } : {}),
       }),
     );
-    return { token: resp.accessToken ?? null, authUrl: resp.authorizationUrl ?? null };
+    return {
+      token: resp.accessToken ?? null,
+      authUrl: resp.authorizationUrl ?? null,
+      sessionUri: resp.sessionUri ?? null,
+    };
+  }
+
+  // Try the CACHED grant first (no forceAuthentication). A re-run on a healthy
+  // workspace then costs nothing and needs no browser — forcing unconditionally
+  // would drag the operator through consent again just to re-record a provider
+  // name. Only when there is no usable grant do we force a fresh authorization.
+  const cached = await requestToken(false);
+  if (cached.token) {
+    return { authorizationUrl: '', sessionUri: cached.sessionUri ?? '', poll: async () => cached.token };
   }
 
   const first = await requestToken(true);
   if (first.token) {
-    // Already consented (rare on a fresh setup) — hand back a poll that returns it.
-    return { authorizationUrl: '', poll: async () => first.token };
+    // Raced with another consent between the two calls — take the token.
+    return { authorizationUrl: '', sessionUri: first.sessionUri ?? '', poll: async () => first.token };
   }
   if (!first.authUrl) {
     throw new CliError(
@@ -205,6 +255,7 @@ export async function beginVaultConsent(args: {
   }
   return {
     authorizationUrl: first.authUrl,
+    sessionUri: first.sessionUri ?? '',
     poll: async () => (await requestToken(false)).token,
   };
 }

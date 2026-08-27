@@ -48,6 +48,7 @@ import {
 } from '../linear-oauth';
 import {
   beginVaultConsent,
+  finalizeVaultConsent,
   upsertLinearCredentialProvider,
 } from '../linear-vault';
 import { awaitOauthCallback, CALLBACK_URL } from '../oauth-callback-server';
@@ -982,9 +983,16 @@ export function makeLinearCommand(): Command {
 
         let accessToken: string | null = null;
         if (!consent.authorizationUrl) {
-          // Already consented.
+          // Already consented — the vault handed the cached token straight back.
           accessToken = await consent.poll();
         } else {
+          // The listener starts BEFORE the browser opens so it is already bound
+          // when AgentCore bounces back. The bounce is NOT cosmetic: it carries
+          // the `session_id` that CompleteResourceTokenAuth needs. Skipping this
+          // (the first implementation did) leaves the session open forever — the
+          // poll never yields a token and the browser 404s on an unlistened port.
+          const callbackPromise = awaitOauthCallback();
+
           if (opts.browser !== false) {
             const opened = await openBrowser(consent.authorizationUrl);
             console.log(opened
@@ -993,27 +1001,46 @@ export function makeLinearCommand(): Command {
           } else {
             console.log(`  → --no-browser: open this URL to consent:\n    ${consent.authorizationUrl}`);
           }
-          // Poll for the minted token. Consent completes server-side at the
-          // AgentCore callback; there is no localhost redirect to catch.
-          process.stdout.write('  → Waiting for consent to complete...');
-          const POLL_INTERVAL_MS = 3000;
-          const MAX_ATTEMPTS = 100; // ~5 minutes
+
+          process.stdout.write('  → Waiting for the consent redirect...');
+          const callback = await callbackPromise;
+          console.log(' ✓');
+          if (callback.kind !== 'agentcore') {
+            throw new CliError(
+              'The consent redirect carried an OAuth code instead of an AgentCore session_id. '
+              + 'That is the direct (Secrets-Manager) flow — use `bgagent linear setup` for it. '
+              + `Verify the Linear app's redirect URI is the vault callback:\n    ${callbackUrl}`,
+            );
+          }
+
+          // Finalize: without this the vault never mints, no matter how long we poll.
+          process.stdout.write('  → Finalizing the session...');
+          await finalizeVaultConsent({
+            region,
+            linearWorkspaceId,
+            sessionUri: callback.sessionId,
+          });
+          console.log(' ✓');
+
+          // The token is available immediately after finalization; retry a few
+          // times only to absorb read-after-write lag.
+          const POLL_INTERVAL_MS = 2000;
+          const MAX_ATTEMPTS = 10;
           for (let i = 0; i < MAX_ATTEMPTS && !accessToken; i++) {
-            await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
             try {
               accessToken = await consent.poll();
             } catch {
               // transient; keep polling
             }
-            process.stdout.write('.');
+            if (!accessToken) await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
           }
-          console.log('');
         }
 
         if (!accessToken) {
           throw new CliError(
-            'Consent did not complete within the timeout. Re-run `bgagent linear vault-setup` after authorizing, '
-            + 'or verify the redirect URI matches the vault callback URL printed above.',
+            'The session was finalized but the vault did not return a token. Re-run '
+            + '`bgagent linear vault-setup` — if it keeps happening, confirm the Linear app grants '
+            + `the requested scopes and that its redirect URI is the vault callback:\n    ${callbackUrl}`,
           );
         }
         console.log('  ✓ Vault minted a Linear access token (cached in the vault).');
