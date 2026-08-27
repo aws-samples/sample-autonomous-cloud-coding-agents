@@ -385,6 +385,20 @@
     "@smithy/types" "^4.15.1"
     tslib "^2.6.2"
 
+"@aws-sdk/client-bedrock-agentcore-control@^3.1078.0":
+  version "3.1119.0"
+  resolved "https://registry.yarnpkg.com/@aws-sdk/client-bedrock-agentcore-control/-/client-bedrock-agentcore-control-3.1119.0.tgz#87d6bdf84a2b144d84303e0805879d0bc766e213"
+  integrity sha512-KcJ54TuDYHVuSaZ6TO9lwib/FKTp5ffZj1yAeAVQNwihT27F6j8FUBEKPDINNujlGFF67Y8j5R9h/kGHtDn60A==
+  dependencies:
+    "@aws-sdk/core" "^3.977.9"
+    "@aws-sdk/credential-provider-node" "^3.972.81"
+    "@aws-sdk/types" "^3.974.5"
+    "@smithy/core" "^3.33.3"
+    "@smithy/fetch-http-handler" "^5.7.2"
+    "@smithy/node-http-handler" "^4.11.3"
+    "@smithy/types" "^4.17.2"
+    tslib "^2.6.2"
+
 "@aws-sdk/client-bedrock-agentcore@^3.1078.0":
   version "3.1081.0"
   resolved "https://registry.yarnpkg.com/@aws-sdk/client-bedrock-agentcore/-/client-bedrock-agentcore-3.1081.0.tgz#7b652ffe2daef75cf85895dfcf427879e6df386c"

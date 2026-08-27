@@ -52,6 +52,7 @@ import {
   isLambdaMicrovmImageConfigured,
   type LambdaMicrovmImageInputs,
 } from '../constructs/lambda-microvm-compute';
+import { LinearIdentityVault } from '../constructs/linear-identity-vault';
 import { LinearIntegration } from '../constructs/linear-integration';
 import { OperationalAlerts } from '../constructs/operational-alerts';
 import { OrchestrationReconciler } from '../constructs/orchestration-reconciler';
@@ -1163,8 +1164,34 @@ export class AgentStack extends Stack {
       description: 'Name of the DynamoDB Slack channel → default-repo mapping table',
     });
 
+    // --- Linear OAuth token vault (RFC #249 Phase 1) ---
+    // Additive + default-off: the workload identity + token grants synthesize
+    // only under `--context enableLinearIdentityVault=true`, so the default
+    // synth stays byte-for-byte unchanged (same context-gate shape as the tool
+    // gateway / ECS / MicroVM backends). When off, the Linear resolver stays on
+    // the per-workspace Secrets-Manager token path.
+    const linearIdentityVaultEnabled = this.node.tryGetContext('enableLinearIdentityVault') === true
+      || this.node.tryGetContext('enableLinearIdentityVault') === 'true';
+    let linearIdentityVault: LinearIdentityVault | undefined;
+    if (linearIdentityVaultEnabled) {
+      // Return URLs the 3LO consent flow may bounce back to (spike F9: allowlist
+      // enforced; F11: localhost + hosted coexist so either onboarding mode
+      // works off one identity). The CLI localhost loopback is always allowed;
+      // a hosted static onboarding page URL is added when configured (wired by
+      // the S3+CloudFront onboarding page — Slice 2 — or supplied via context).
+      const hostedReturnUrl = this.node.tryGetContext('linearVaultHostedReturnUrl') as string | undefined;
+      linearIdentityVault = new LinearIdentityVault(this, 'LinearIdentityVault', {
+        workloadName: 'abca_linear_oauth',
+        allowedReturnUrls: [
+          'http://localhost:8080/oauth/callback',
+          ...(hostedReturnUrl ? [hostedReturnUrl] : []),
+        ],
+      });
+    }
+
     // --- Linear integration (inbound webhook + agent-side MCP outbound) ---
     const linearIntegration = new LinearIntegration(this, 'LinearIntegration', {
+      identityVault: linearIdentityVault,
       api: taskApi.api,
       userPool: taskApi.userPool,
       taskTable: taskTable.table,

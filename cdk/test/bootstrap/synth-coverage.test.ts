@@ -115,6 +115,29 @@ describe('Bootstrap policy synth coverage', () => {
     }
   });
 
+  it('maps the context-gated Linear identity vault custom resource (#249 P1, not in default synth)', () => {
+    // The default synth never instantiates LinearIdentityVault, so its custom
+    // resource type would slip past the coverage loop. Synthesize the gated path
+    // explicitly and assert the type is present, mapped, AND fully covered by the
+    // bootstrap policy bundle — same guarantee the loop gives default types.
+    const app = new App({ context: { enableLinearIdentityVault: true } });
+    const gatedTemplate = Template.fromStack(
+      new AgentStack(app, 'LinearVaultCoverageStack', {
+        env: { account: '123456789012', region: 'us-east-1' },
+      }),
+    );
+    const gatedTypes = new Set(
+      Object.values(
+        gatedTemplate.toJSON().Resources as Record<string, { Type: string }>,
+      ).map((r) => r.Type),
+    );
+
+    const cfnType = 'Custom::LinearWorkloadIdentity';
+    expect(gatedTypes.has(cfnType)).toBe(true);
+    expect(cfnType in RESOURCE_ACTION_MAP).toBe(true);
+    expect(findMissingBootstrapActions(cfnType, allowedActions)).toEqual([]);
+  });
+
   it('covers integration resources that previously failed deploy (regression)', () => {
     const regressionTypes = [
       'AWS::SecretsManager::Secret',

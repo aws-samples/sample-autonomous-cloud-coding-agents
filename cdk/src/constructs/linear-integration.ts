@@ -29,6 +29,7 @@ import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
+import { LinearIdentityVault } from './linear-identity-vault';
 import { LinearProjectMappingTable } from './linear-project-mapping-table';
 import { LinearUserMappingTable } from './linear-user-mapping-table';
 import { LinearWorkspaceRegistryTable } from './linear-workspace-registry-table';
@@ -119,6 +120,17 @@ export interface LinearIntegrationProps {
 
   /** Removal policy for Linear DynamoDB tables. */
   readonly removalPolicy?: RemovalPolicy;
+
+  /**
+   * Optional AgentCore Identity vault backing Linear OAuth tokens (RFC #249
+   * Phase 1). When provided, the webhook processor is granted the token
+   * data-plane permissions and told which workload identity to use via
+   * `LINEAR_VAULT_ENABLED` / `LINEAR_WORKLOAD_IDENTITY_NAME`; the resolver then
+   * mints tokens through the vault, falling back to the per-workspace Secrets
+   * Manager token when issuance is unavailable. Omitted (the default) ⇒ the
+   * existing Secrets-Manager-only path, synthesized byte-for-byte unchanged.
+   */
+  readonly identityVault?: LinearIdentityVault;
 }
 
 /**
@@ -161,6 +173,9 @@ export class LinearIntegration extends Construct {
 
   /** Linear webhook signing secret (placeholder — populated by `bgagent linear setup`). */
   public readonly webhookSecret: secretsmanager.Secret;
+
+  /** Webhook async processor — resolves the workspace OAuth token (vault or SM). */
+  public readonly webhookProcessorFn: lambda.NodejsFunction;
 
   constructor(scope: Construct, id: string, props: LinearIntegrationProps) {
     super(scope, id);
@@ -279,10 +294,19 @@ export class LinearIntegration extends Construct {
           USER_CONCURRENCY_TABLE_NAME: props.userConcurrencyTable.tableName,
           MAX_CONCURRENT_TASKS_PER_USER: String(props.maxConcurrentTasksPerUser ?? 10),
         }),
+        // RFC #249 Phase 1: when an identity vault is wired, resolve Linear
+        // tokens through the AgentCore Token Vault (falling back to the
+        // per-workspace SM token when issuance is unavailable). Unset ⇒ the
+        // resolver stays on the Secrets-Manager-only path.
+        ...(props.identityVault && {
+          LINEAR_VAULT_ENABLED: 'true',
+          LINEAR_WORKLOAD_IDENTITY_NAME: props.identityVault.workloadName,
+        }),
       },
       // Uses the PDF attachment-screening path — pdf-parse must stay unbundled.
       bundling: attachmentScreeningBundling,
     });
+    this.webhookProcessorFn = webhookProcessorFn;
     this.projectMappingTable.grantReadData(webhookProcessorFn);
     this.userMappingTable.grantReadData(webhookProcessorFn);
     this.workspaceRegistryTable.grantReadData(webhookProcessorFn);
@@ -310,6 +334,12 @@ export class LinearIntegration extends Construct {
         }),
       ],
     }));
+    // RFC #249 Phase 1: grant the vault token data-plane calls when an identity
+    // vault is wired. The SM grant above stays regardless — it is the fallback
+    // path when vault issuance is unavailable.
+    if (props.identityVault) {
+      props.identityVault.grantMintToken(webhookProcessorFn);
+    }
     props.taskTable.grantReadWriteData(webhookProcessorFn);
     props.taskEventsTable.grantReadWriteData(webhookProcessorFn);
     if (props.repoTable) {
