@@ -17,6 +17,7 @@
  *  SOFTWARE.
  */
 
+import { createHash } from 'node:crypto';
 import {
   _resetCachesForTesting,
   invalidateLinearOauthCache,
@@ -24,6 +25,7 @@ import {
   resolveLinearOauthToken,
   type StoredOauthToken,
 } from '../../../src/handlers/shared/linear-oauth-resolver';
+import { logger } from '../../../src/handlers/shared/logger';
 
 const REGISTRY_TABLE = 'TestLinearWorkspaceRegistry';
 
@@ -402,5 +404,108 @@ describe('resolveLinearOauthToken', () => {
       (c) => c[0].constructor.name === 'GetSecretValueCommand',
     );
     expect(getSecretCalls.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe('token-lineage diagnostic logging (#807)', () => {
+  const RAW_REFRESH = 'lin_refresh_SENSITIVE_should_never_be_logged';
+  // sha256("lin_refresh_SENSITIVE_should_never_be_logged").slice(0,12) — computed
+  // independently so the test pins the exact fingerprint the code must emit.
+  const EXPECTED_FP = createHash('sha256').update(RAW_REFRESH).digest('hex').slice(0, 12);
+
+  let infoSpy: jest.SpyInstance;
+  let warnSpy: jest.SpyInstance;
+  let errorSpy: jest.SpyInstance;
+
+  beforeEach(() => {
+    _resetCachesForTesting();
+    infoSpy = jest.spyOn(logger, 'info').mockImplementation(() => {});
+    warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+    errorSpy = jest.spyOn(logger, 'error').mockImplementation(() => {});
+  });
+  afterEach(() => jest.restoreAllMocks());
+
+  /** Every string in every log call across all levels — for leak assertions. */
+  function allLoggedText(): string {
+    return [infoSpy, warnSpy, errorSpy]
+      .flatMap((s) => s.mock.calls)
+      .map((c) => JSON.stringify(c))
+      .join(' ');
+  }
+
+  test('permanent rejection logs the fingerprint + age and NEVER the raw refresh token', async () => {
+    const stored = makeStoredToken({
+      refresh_token: RAW_REFRESH,
+      expires_at: new Date(Date.now() - 1000).toISOString(), // force a refresh
+      installed_at: new Date(Date.now() - 25 * 3600 * 1000).toISOString(), // ~25h old
+    });
+    const clients = makeFakeClients({
+      registryItem: { workspace_slug: 'acme', oauth_secret_arn: 'arn:secret:acme', status: 'active' },
+      storedToken: stored,
+    });
+    // 400 invalid_grant; the re-read returns the SAME token → permanent rejection.
+    const fetchImpl = jest.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      json: async () => ({ error: 'invalid_grant', error_description: 'Refresh token revoked' }),
+    });
+
+    const result = await resolveLinearOauthToken('ws-uuid-1', REGISTRY_TABLE, {
+      ...clients,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    expect(result).toBeNull(); // behavior unchanged: still returns null on revocation
+    const forensics = errorSpy.mock.calls.find(
+      (c) => typeof c[0] === 'string' && c[0].includes('permanently rejected'),
+    );
+    expect(forensics).toBeDefined();
+    const data = forensics![1] as Record<string, unknown>;
+    expect(data.refresh_token_fp).toBe(EXPECTED_FP);
+    expect(data.token_age_h).toBe(25); // the ~25h death-age clue is captured
+    // The raw token must not appear ANYWHERE in ANY log.
+    expect(allLoggedText()).not.toContain(RAW_REFRESH);
+  });
+
+  test('successful refresh logs the old→new fingerprint rotation, not raw tokens', async () => {
+    const stored = makeStoredToken({
+      refresh_token: RAW_REFRESH,
+      expires_at: new Date(Date.now() - 1000).toISOString(),
+    });
+    const clients = makeFakeClients({
+      registryItem: { workspace_slug: 'acme', oauth_secret_arn: 'arn:secret:acme', status: 'active' },
+      storedToken: stored,
+    });
+    const NEW_RAW = 'rt-rotated-new-SENSITIVE';
+    const fetchImpl = jest.fn().mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        access_token: 'lin_oauth_new',
+        token_type: 'Bearer',
+        expires_in: 86399,
+        refresh_token: NEW_RAW,
+        scope: 'read write app:assignable app:mentionable',
+      }),
+    });
+
+    const result = await resolveLinearOauthToken('ws-uuid-1', REGISTRY_TABLE, {
+      ...clients,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    expect(result?.accessToken).toBe('lin_oauth_new'); // behavior unchanged
+    const refreshed = infoSpy.mock.calls.find(
+      (c) => typeof c[0] === 'string' && c[0].includes('token refreshed'),
+    );
+    expect(refreshed).toBeDefined();
+    const data = refreshed![1] as Record<string, unknown>;
+    expect(data.rotated_from_fp).toBe(EXPECTED_FP);
+    expect(data.rotated_to_fp).toBe(
+      createHash('sha256').update(NEW_RAW).digest('hex').slice(0, 12),
+    );
+    // Neither the old nor the new raw refresh token may appear in logs.
+    expect(allLoggedText()).not.toContain(RAW_REFRESH);
+    expect(allLoggedText()).not.toContain(NEW_RAW);
   });
 });

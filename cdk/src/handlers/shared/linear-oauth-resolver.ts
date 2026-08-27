@@ -17,6 +17,7 @@
  *  SOFTWARE.
  */
 
+import { createHash } from 'node:crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
   GetSecretValueCommand,
@@ -406,6 +407,45 @@ type RefreshOutcome =
   | { kind: 'invalid_grant' }
   | { kind: 'failure' };
 
+/** Milliseconds per hour — for the token-age diagnostics (#807). */
+const MS_PER_HOUR = 3_600_000;
+/** Length of the truncated SHA-256 token fingerprint logged for lineage (#807). */
+const TOKEN_FP_LENGTH = 12;
+
+/**
+ * Diagnostic lineage of a stored OAuth grant, for the token-revocation
+ * investigation (#807). Additive observability only — never affects control flow.
+ *
+ * ``refresh_token_fp`` is a TRUNCATED SHA-256 of the refresh token: it lets us
+ * follow one token across refresh events (and tell a spent/rotated token replayed
+ * from a live grant killed server-side) WITHOUT ever logging the token itself.
+ * ``token_age_h`` (since ``installed_at``, the original onboard) and
+ * ``since_last_refresh_h`` (since ``updated_at``) surface the age-at-death that is
+ * the strongest clue in the recurring ~25h revocation.
+ */
+function tokenLineage(token: StoredOauthToken): Record<string, string | number> {
+  const nowMs = Date.now();
+  const ageH = (fromIso: string | undefined): number | 'unknown' => {
+    if (!fromIso) return 'unknown';
+    const t = Date.parse(fromIso);
+    return Number.isNaN(t) ? 'unknown' : Math.round(((nowMs - t) / MS_PER_HOUR) * 10) / 10;
+  };
+  return {
+    // Truncated hash — identifies the token across events; NOT reversible to the secret.
+    refresh_token_fp: fingerprintToken(token.refresh_token),
+    token_age_h: ageH(token.installed_at),
+    since_last_refresh_h: ageH(token.updated_at),
+    installed_at: token.installed_at ?? 'unknown',
+    updated_at: token.updated_at ?? 'unknown',
+  };
+}
+
+/** 12-char SHA-256 prefix of a token — safe to log; never the raw value. */
+function fingerprintToken(token: string | undefined): string {
+  if (!token) return 'none';
+  return createHash('sha256').update(token).digest('hex').slice(0, TOKEN_FP_LENGTH);
+}
+
 async function refreshLinearToken(
   current: StoredOauthToken,
   sm: SecretsManagerClient,
@@ -425,6 +465,7 @@ async function refreshLinearToken(
   logger.warn('Linear token refresh got invalid_grant — re-reading secret to check for concurrent refresh', {
     secret_arn: secretArn,
     workspace_id: current.workspace_id,
+    ...tokenLineage(current),
   });
 
   const fresh = await getOauthSecret(sm, secretArn);
@@ -434,10 +475,13 @@ async function refreshLinearToken(
   }
   if (fresh.refresh_token === current.refresh_token) {
     // No race — Linear truly rejected this refresh_token. Caller needs
-    // a fresh OAuth dance.
+    // a fresh OAuth dance. This is the revocation-forensics line (#807): the
+    // fingerprint + age let us confirm whether Linear killed a grant we still
+    // held (server-side revocation) and how old it was at death (the ~25h clue).
     logger.error('Linear token refresh permanently rejected — workspace requires re-onboarding', {
       secret_arn: secretArn,
       workspace_id: current.workspace_id,
+      ...tokenLineage(current),
     });
     invalidateLinearOauthCache(current.workspace_id, secretArn);
     return null;
@@ -525,6 +569,8 @@ async function tryRefreshOnce(
       status: resp.status,
       error: errObj.error,
       error_description: errObj.error_description,
+      secret_arn: secretArn,
+      ...tokenLineage(current),
     });
     invalidateLinearOauthCache(current.workspace_id, secretArn);
     if (errObj.error === 'invalid_grant') {
@@ -567,6 +613,11 @@ async function tryRefreshOnce(
     logger.error('Failed to persist refreshed Linear OAuth token', {
       secret_arn: secretArn,
       error: err instanceof Error ? err.message : String(err),
+      // #807: the rotated token lives only in THIS invocation's memory; SM still
+      // holds the old one, so a later refresh replays a spent token → invalid_grant.
+      // The fp pair pins that scenario if it happens.
+      rotated_from_fp: fingerprintToken(current.refresh_token),
+      rotated_to_fp: fingerprintToken(next.refresh_token),
     });
     // Even if persistence fails, the in-memory token still works for
     // THIS Lambda invocation. Other concurrent Lambdas may race-refresh
@@ -576,10 +627,18 @@ async function tryRefreshOnce(
 
   // Positive-path log so operators diagnosing intermittent 401s have
   // a breadcrumb showing which workspace refreshed and to what expiry.
+  // The rotation trail (old_fp → new_fp, #807) lets a LATER invalid_grant be
+  // correlated to the exact token we just persisted: if Linear rejects new_fp
+  // on the next call, the grant was killed server-side (not a stale/raced token).
   logger.info('Linear OAuth token refreshed', {
     workspace_id: next.workspace_id,
     workspace_slug: next.workspace_slug,
     new_expires_at: next.expires_at,
+    rotated_from_fp: fingerprintToken(current.refresh_token),
+    rotated_to_fp: fingerprintToken(next.refresh_token),
+    // Age of the grant being refreshed FROM (since original onboard) — pairs with
+    // the death-age on a later permanent rejection.
+    token_age_h: tokenLineage(current).token_age_h,
   });
 
   // Cache the freshest value.
