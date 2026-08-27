@@ -21,6 +21,7 @@ import { PutCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
 import {
   autoLinkTokenOwner,
   findReusableOauthAppCredentials,
+  findWorkspaceRowBySlug,
   isWebhookSecretConfigured,
   queryLinearTeamKeys,
   renderLinearAppTemplate,
@@ -248,6 +249,47 @@ describe('isWebhookSecretConfigured', () => {
   test('returns false when SecretString is missing', async () => {
     mockSend.mockResolvedValueOnce({});
     expect(await isWebhookSecretConfigured(mockClient, 'arn:secret')).toBe(false);
+  });
+});
+
+describe('findWorkspaceRowBySlug', () => {
+  // Regression: `bgagent linear vault-setup maguireb` reported an already-
+  // onboarded workspace as "not onboarded". Cause: the filtered Scan passed
+  // `Limit: 1`, and DynamoDB applies `Limit` to the items READ *before* the
+  // FilterExpression runs — so it read one arbitrary row (demo-abca), filtered
+  // it out, and returned nothing. Live-caught on a two-workspace registry.
+  beforeEach(() => {
+    ddbSend.mockReset();
+  });
+
+  const ddbClient = () => ({ send: ddbSend }) as unknown as Parameters<typeof findWorkspaceRowBySlug>[0];
+
+  test('finds a workspace that is NOT the first row scanned', async () => {
+    // Mirrors the live table: demo-abca first, maguireb second.
+    ddbSend.mockResolvedValueOnce({
+      Items: [
+        { workspace_slug: 'demo-abca', linear_workspace_id: 'ws-demo', oauth_secret_arn: 'arn:demo' },
+        { workspace_slug: 'maguireb', linear_workspace_id: 'ws-mag', oauth_secret_arn: 'arn:mag' },
+      ],
+    });
+    const row = await findWorkspaceRowBySlug(ddbClient(), 'TestRegistry', 'maguireb');
+    expect(row?.linear_workspace_id).toBe('ws-mag');
+  });
+
+  test('passes NO Limit on the filtered scan (the bug that broke the lookup)', async () => {
+    ddbSend.mockResolvedValueOnce({ Items: [] });
+    await findWorkspaceRowBySlug(ddbClient(), 'TestRegistry', 'maguireb');
+    const scanCmd = ddbSend.mock.calls[0][0] as ScanCommand;
+    expect(scanCmd.input.FilterExpression).toBe('workspace_slug = :s');
+    // A Limit here silently breaks the lookup — see the describe comment.
+    expect(scanCmd.input.Limit).toBeUndefined();
+  });
+
+  test('returns undefined when the workspace is genuinely absent', async () => {
+    ddbSend.mockResolvedValueOnce({
+      Items: [{ workspace_slug: 'demo-abca', linear_workspace_id: 'ws-demo' }],
+    });
+    expect(await findWorkspaceRowBySlug(ddbClient(), 'TestRegistry', 'maguireb')).toBeUndefined();
   });
 });
 

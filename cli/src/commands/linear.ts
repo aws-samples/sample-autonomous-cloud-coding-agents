@@ -330,6 +330,30 @@ export async function findReusableOauthAppCredentials(
   };
 }
 
+/**
+ * Look up a workspace's registry row by its Linear `urlKey` slug.
+ *
+ * Deliberately passes NO `Limit` to the filtered Scan: DynamoDB applies `Limit`
+ * to the items READ, *before* the FilterExpression runs, so `Limit: 1` reads one
+ * arbitrary row, filters it out, and reports the workspace as missing whenever it
+ * is not the first row scanned (live-caught on a two-workspace registry: the
+ * lookup told an already-onboarded workspace to run `setup` again). The registry
+ * holds one small row per workspace install, so an unbounded scan is both cheap
+ * and correct. Exported for tests.
+ */
+export async function findWorkspaceRowBySlug(
+  ddb: DynamoDBDocumentClient,
+  registryTableName: string,
+  slug: string,
+): Promise<Record<string, unknown> | undefined> {
+  const result = await ddb.send(new ScanCommand({
+    TableName: registryTableName,
+    FilterExpression: 'workspace_slug = :s',
+    ExpressionAttributeValues: { ':s': slug },
+  }));
+  return (result.Items ?? []).find((item) => item.workspace_slug === slug);
+}
+
 export function makeLinearCommand(): Command {
   const linear = new Command('linear')
     .description('Manage Linear integration');
@@ -904,13 +928,7 @@ export function makeLinearCommand(): Command {
 
         // ─── Read the existing (SM-onboarded) workspace row ──────────────
         const secretName = linearOauthSecretName(slug);
-        const existing = await ddb.send(new ScanCommand({
-          TableName: registryTable,
-          FilterExpression: 'workspace_slug = :s',
-          ExpressionAttributeValues: { ':s': slug },
-          Limit: 1,
-        }));
-        const row = existing.Items?.[0];
+        const row = await findWorkspaceRowBySlug(ddb, registryTable, slug);
         if (!row || !row.linear_workspace_id || !row.oauth_secret_arn) {
           throw new CliError(
             `Workspace '${slug}' is not onboarded. Run \`bgagent linear setup ${slug}\` first — `
