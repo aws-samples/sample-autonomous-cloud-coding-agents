@@ -23,6 +23,12 @@ import {
   SecretsManagerClient,
 } from '@aws-sdk/client-secrets-manager';
 import { DynamoDBDocumentClient, GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import {
+  LINEAR_VAULT_SCOPES,
+  isVaultEnabled,
+  resolveLinearTokenViaVault,
+  vaultWorkloadIdentityName,
+} from './linear-vault-token';
 import { logger } from './logger';
 import { makeClient, makeDocClient } from './ua';
 
@@ -71,6 +77,15 @@ export interface RegistryRow {
    * Optional — rows written before it was recorded have none.
    */
   readonly installed_at?: string;
+  /**
+   * Full AgentCore Identity credential-provider name for this workspace, written
+   * by `bgagent linear setup` when onboarding through the token vault (RFC #249
+   * Phase 1). Absent for workspaces onboarded via the Secrets-Manager-only flow;
+   * the resolver only attempts the vault path when this is present AND
+   * `LINEAR_VAULT_ENABLED` is set, and always falls back to the SM token
+   * (`oauth_secret_arn`) if vault issuance is unavailable.
+   */
+  readonly provider_name?: string;
 }
 
 export interface StoredOauthToken {
@@ -115,6 +130,16 @@ export interface ResolverOptions {
    * with registry write access opt in. Must not throw; the caller wraps it.
    */
   readonly onAuthorizationRevoked?: (linearWorkspaceId: string) => Promise<void>;
+  /**
+   * Override the vault token resolver in tests. Production leaves this unset and
+   * uses {@link resolveLinearTokenViaVault}. Returns the access token string, or
+   * null to fall back to the Secrets-Manager token.
+   */
+  readonly resolveViaVault?: (
+    linearWorkspaceId: string,
+    providerName: string,
+    workloadIdentityName: string,
+  ) => Promise<string | null>;
 }
 
 interface CacheEntry<T> {
@@ -181,6 +206,31 @@ export async function resolveLinearOauthToken(
       status: row.status,
     });
     return null;
+  }
+
+  // ─── Step 1b: AgentCore Identity vault (RFC #249 Phase 1) ────────
+  // When the vault is enabled AND this workspace was onboarded through it
+  // (provider_name recorded), mint the token via the Token Vault. Any failure
+  // (not consented, permission, throttle, provider missing) returns null and
+  // falls through to the Secrets-Manager path below — the vault NEVER blocks
+  // token resolution. Absent provider_name / disabled flag skips it entirely,
+  // so SM-only installs are unaffected.
+  const workloadName = vaultWorkloadIdentityName();
+  if (row.provider_name && workloadName && (isVaultEnabled() || options.resolveViaVault)) {
+    const viaVault = options.resolveViaVault ?? ((wsId, provider, wl) =>
+      resolveLinearTokenViaVault({ linearWorkspaceId: wsId, providerName: provider, region }, wl));
+    const vaultToken = await viaVault(linearWorkspaceId, row.provider_name, workloadName);
+    if (vaultToken) {
+      return {
+        accessToken: vaultToken,
+        scope: LINEAR_VAULT_SCOPES.join(' '),
+        workspaceSlug: row.workspace_slug,
+        // No SM secret is read/written on the vault path; expose the vault
+        // provider name in place of the secret ARN for caller diagnostics.
+        oauthSecretArn: row.oauth_secret_arn,
+      };
+    }
+    // vaultToken === null ⇒ fall through to Secrets-Manager resolution.
   }
 
   // ─── Step 2: Cached or fresh token JSON ──────────────────────────
@@ -395,6 +445,9 @@ function parseRegistryRow(rawItem: unknown, linearWorkspaceId: string): Registry
     oauth_secret_arn: item.oauth_secret_arn,
     status,
     ...(typeof item.installed_at === 'string' && { installed_at: item.installed_at }),
+    // Present only for vault-onboarded workspaces (RFC #249 Phase 1); gates the
+    // vault resolution path in resolveLinearOauthToken.
+    ...(typeof item.provider_name === 'string' && { provider_name: item.provider_name }),
   };
   registryCache.set(linearWorkspaceId, { value: row, expiresAt: Date.now() + REGISTRY_CACHE_TTL_MS });
   return row;

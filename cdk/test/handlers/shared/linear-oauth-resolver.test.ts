@@ -53,6 +53,7 @@ function makeFakeClients(opts: {
     workspace_slug: string;
     oauth_secret_arn: string;
     status: string;
+    provider_name: string;
   }> | null;
   storedToken?: StoredOauthToken | null;
   putSecretValueShouldFail?: boolean;
@@ -134,6 +135,94 @@ describe('resolveLinearOauthToken', () => {
     const clients = makeFakeClients({ registryItem: null });
     const result = await resolveLinearOauthToken('ws-not-installed', REGISTRY_TABLE, clients);
     expect(result).toBeNull();
+  });
+
+  describe('AgentCore Identity vault path (#809)', () => {
+    const WORKLOAD = 'abca_linear_oauth';
+    let savedWorkload: string | undefined;
+    let savedEnabled: string | undefined;
+
+    beforeEach(() => {
+      savedWorkload = process.env.LINEAR_WORKLOAD_IDENTITY_NAME;
+      savedEnabled = process.env.LINEAR_VAULT_ENABLED;
+      process.env.LINEAR_WORKLOAD_IDENTITY_NAME = WORKLOAD;
+      process.env.LINEAR_VAULT_ENABLED = 'true';
+    });
+    afterEach(() => {
+      if (savedWorkload === undefined) delete process.env.LINEAR_WORKLOAD_IDENTITY_NAME;
+      else process.env.LINEAR_WORKLOAD_IDENTITY_NAME = savedWorkload;
+      if (savedEnabled === undefined) delete process.env.LINEAR_VAULT_ENABLED;
+      else process.env.LINEAR_VAULT_ENABLED = savedEnabled;
+    });
+
+    test('vault token is used (no Secrets Manager read) when provider_name is present and the vault succeeds', async () => {
+      const clients = makeFakeClients({
+        registryItem: {
+          workspace_slug: 'acme',
+          oauth_secret_arn: 'arn:secret:acme',
+          status: 'active',
+          provider_name: 'bgagent-linear-oauth-acme',
+        },
+        // A stored token exists but must NOT be read on the vault-success path.
+        storedToken: makeStoredToken({ access_token: 'lin_oauth_SM_should_not_be_used' }),
+      });
+      const resolveViaVault = jest.fn().mockResolvedValue('lin_oauth_from_vault');
+
+      const result = await resolveLinearOauthToken('ws-uuid-1', REGISTRY_TABLE, {
+        ...clients,
+        resolveViaVault,
+      });
+
+      expect(resolveViaVault).toHaveBeenCalledWith('ws-uuid-1', 'bgagent-linear-oauth-acme', WORKLOAD);
+      expect(result?.accessToken).toBe('lin_oauth_from_vault');
+      expect(result?.workspaceSlug).toBe('acme');
+      // Secrets Manager was never queried on the vault-success path.
+      expect(clients.smSend).not.toHaveBeenCalled();
+    });
+
+    test('falls back to the Secrets Manager token when the vault returns null', async () => {
+      const clients = makeFakeClients({
+        registryItem: {
+          workspace_slug: 'acme',
+          oauth_secret_arn: 'arn:secret:acme',
+          status: 'active',
+          provider_name: 'bgagent-linear-oauth-acme',
+        },
+        storedToken: makeStoredToken({ access_token: 'lin_oauth_SM_fallback' }),
+      });
+      const resolveViaVault = jest.fn().mockResolvedValue(null);
+
+      const result = await resolveLinearOauthToken('ws-uuid-1', REGISTRY_TABLE, {
+        ...clients,
+        resolveViaVault,
+      });
+
+      expect(resolveViaVault).toHaveBeenCalledTimes(1);
+      // Fell through to the SM path.
+      expect(result?.accessToken).toBe('lin_oauth_SM_fallback');
+      expect(clients.smSend).toHaveBeenCalled();
+    });
+
+    test('skips the vault entirely when the workspace has no provider_name (SM-only install)', async () => {
+      const clients = makeFakeClients({
+        registryItem: {
+          workspace_slug: 'acme',
+          oauth_secret_arn: 'arn:secret:acme',
+          status: 'active',
+          // no provider_name
+        },
+        storedToken: makeStoredToken({ access_token: 'lin_oauth_SM_only' }),
+      });
+      const resolveViaVault = jest.fn().mockResolvedValue('should-not-be-called');
+
+      const result = await resolveLinearOauthToken('ws-uuid-1', REGISTRY_TABLE, {
+        ...clients,
+        resolveViaVault,
+      });
+
+      expect(resolveViaVault).not.toHaveBeenCalled();
+      expect(result?.accessToken).toBe('lin_oauth_SM_only');
+    });
   });
 
   test('returns null when registry status is not active', async () => {
