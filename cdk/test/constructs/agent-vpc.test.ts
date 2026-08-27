@@ -150,14 +150,13 @@ describe('AgentVpc with custom props', () => {
     template.resourceCountIs('AWS::EC2::NatGateway', 2);
   });
 
-  test('accepts explicit availabilityZones and ignores maxAzs', () => {
+  test('accepts explicit availabilityZones', () => {
     const app = new App();
     const stack = new Stack(app, 'TestStack', {
       env: { account: '123456789012', region: 'us-east-1' },
     });
     new AgentVpc(stack, 'AgentVpc', {
       availabilityZones: ['us-east-1b', 'us-east-1c'],
-      maxAzs: 3, // should be ignored when availabilityZones is provided
     });
     const template = Template.fromStack(stack);
 
@@ -168,6 +167,26 @@ describe('AgentVpc with custom props', () => {
     // fix (a wrong-count assertion would pass even if AZs were unpinned).
     template.hasResourceProperties('AWS::EC2::Subnet', { AvailabilityZone: 'us-east-1b' });
     template.hasResourceProperties('AWS::EC2::Subnet', { AvailabilityZone: 'us-east-1c' });
+  });
+
+  test('throws when both availabilityZones and maxAzs are supplied', () => {
+    // ec2.Vpc rejects the combination; surface it rather than silently dropping
+    // maxAzs, which hid a wrong mental model at the call site.
+    const stack = new Stack(new App(), 'TestStack', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    });
+    expect(() => new AgentVpc(stack, 'AgentVpc', {
+      availabilityZones: ['us-east-1b', 'us-east-1c'],
+      maxAzs: 3,
+    })).toThrow(/availabilityZones or maxAzs, but not both/);
+  });
+
+  test('throws when fewer than two availabilityZones are supplied', () => {
+    const stack = new Stack(new App(), 'TestStack', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    });
+    expect(() => new AgentVpc(stack, 'AgentVpc', { availabilityZones: ['us-east-1b'] }))
+      .toThrow(/at least 2 availability zones/);
   });
 
   test('env-agnostic synth falls back to Fn::GetAZs (no pinning, no crash)', () => {

@@ -94,10 +94,14 @@ export interface AgentStackProps extends StackProps {
    * Resolved in `main.ts` via `resolveAgentCoreAzs` — the validated
    * `agentcore:availabilityZones` context override, else auto-selected from the
    * account's supported zones when synth has a concrete account/region. Leave
-   * `undefined` (env-agnostic synth, unknown region) to keep CDK's default
+   * `undefined` (env-agnostic synth, unlisted region) to keep CDK's default
    * `maxAzs` selection.
+   *
+   * Deliberately NOT named `availabilityZones`: `Stack` already exposes an
+   * `availabilityZones` getter returning the *unpinned* set, and two different
+   * values under one name in one class is a trap for `Stack.of(x)` callers.
    */
-  readonly availabilityZones?: string[];
+  readonly agentCoreAvailabilityZones?: string[];
 }
 
 export class AgentStack extends Stack {
@@ -345,13 +349,15 @@ export class AgentStack extends Stack {
     // AgentCore only supports a subset of physical availability zones per
     // region, and AZ *names* are aliased per-account, so the default maxAzs
     // selection can land the Runtime ENIs in an unsupported zone and fail the
-    // deploy. `props.availabilityZones` carries the AZ names resolved in
+    // deploy. `props.agentCoreAvailabilityZones` carries the AZ names resolved in
     // main.ts (`resolveAgentCoreAzs`): the validated `agentcore:availabilityZones`
     // override, else auto-selected from the account's AgentCore-supported zones
     // when synth has a concrete account/region. Left undefined otherwise, so the
     // construct keeps CDK's default AZ selection. See constructs/agentcore-azs.ts.
     const agentVpc = new AgentVpc(this, 'AgentVpc', {
-      ...(props.availabilityZones ? { availabilityZones: props.availabilityZones } : {}),
+      ...(props.agentCoreAvailabilityZones?.length
+        ? { availabilityZones: props.agentCoreAvailabilityZones }
+        : {}),
     });
 
     // DNS Firewall — domain-level egress filtering (observation mode for initial deployment)

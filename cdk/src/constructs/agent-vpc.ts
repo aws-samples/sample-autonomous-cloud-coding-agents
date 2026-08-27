@@ -27,6 +27,17 @@ import { Construct } from 'constructs';
 const HTTPS_PORT = 443;
 
 /**
+ * Default zone count. Kept equal to `AUTO_PIN_AZ_COUNT` in
+ * `constructs/agentcore-azs.ts` so auto-pinning does not change the topology of
+ * a stack that deploys fine today; the coupling is asserted in
+ * `test/constructs/agentcore-azs.test.ts`.
+ */
+const DEFAULT_AGENT_VPC_AZS = 2;
+
+/** AgentCore high-availability floor: at least two zones. */
+const MIN_AGENT_VPC_AZS = 2;
+
+/**
  * Properties for the AgentVpc construct.
  */
 export interface AgentVpcProps {
@@ -56,16 +67,18 @@ export interface AgentVpcProps {
    * make a fresh deploy deterministic regardless of the account's
    * name → zone-ID mapping. The supported zone-ID set differs per region and
    * can change over time — see the AWS
-   * {@link https://aws.github.io/bedrock-agentcore-starter-toolkit/user-guide/security/agentcore-vpc/#supported-availability-zones Supported Availability Zones}
+   * {@link https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/agentcore-vpc.html#agentcore-supported-azs Supported Availability Zones}
    * table, and the per-region `AGENTCORE_SUPPORTED_AZ_IDS` map in
    * `constructs/agentcore-azs.ts`.
    *
    * Callers normally don't set this directly: `resolveAgentCoreAzs` (invoked
    * from `main.ts`) auto-selects supported zone names for the target account,
    * or honors the validated `agentcore:availabilityZones` context override, and
-   * passes the result through {@link AgentStackProps.availabilityZones}.
+   * passes the result through `AgentStackProps.agentCoreAvailabilityZones`.
    *
-   * When provided, takes precedence over {@link maxAzs}.
+   * Mutually exclusive with {@link maxAzs} — supplying both throws, matching
+   * `ec2.Vpc`'s own contract rather than silently ignoring one of them.
+   * Must list at least two zones (AgentCore high-availability guidance).
    * @default - CDK selects the first `maxAzs` zones by name
    */
   readonly availabilityZones?: string[];
@@ -100,7 +113,25 @@ export class AgentVpc extends Construct {
   constructor(scope: Construct, id: string, props: AgentVpcProps = {}) {
     super(scope, id);
 
-    const maxAzs = props.maxAzs ?? 2;
+    const pinnedAzs = props.availabilityZones;
+
+    // `ec2.Vpc` rejects `availabilityZones` + `maxAzs` together. Surface that as
+    // our own error instead of spreading one away silently: a caller who set
+    // both has a wrong mental model and should hear about it.
+    if (pinnedAzs?.length && props.maxAzs !== undefined) {
+      throw new Error(
+        'AgentVpc supports availabilityZones or maxAzs, but not both — '
+        + 'an explicit zone list already fixes the zone count.',
+      );
+    }
+    if (pinnedAzs && pinnedAzs.length < MIN_AGENT_VPC_AZS) {
+      throw new Error(
+        `AgentVpc requires at least ${MIN_AGENT_VPC_AZS} availability zones for AgentCore high `
+        + `availability; got ${JSON.stringify(pinnedAzs)}.`,
+      );
+    }
+
+    const maxAzs = props.maxAzs ?? DEFAULT_AGENT_VPC_AZS;
     const natGateways = props.natGateways ?? 1;
     const removalPolicy = props.removalPolicy ?? RemovalPolicy.DESTROY;
 
@@ -108,8 +139,8 @@ export class AgentVpc extends Construct {
     // When explicit AZs are provided (to target AgentCore-supported physical
     // zones), pass them directly and omit maxAzs — CDK does not allow both.
     this.vpc = new ec2.Vpc(this, 'Vpc', {
-      ...(props.availabilityZones
-        ? { availabilityZones: props.availabilityZones }
+      ...(pinnedAzs?.length
+        ? { availabilityZones: pinnedAzs }
         : { maxAzs }),
       natGateways,
       restrictDefaultSecurityGroup: true,

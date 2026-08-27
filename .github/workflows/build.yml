@@ -191,10 +191,20 @@ jobs:
           TAG_EVENT: ${{ github.event_name }}
           TAG_WORKFLOW: ${{ github.workflow }}
           TAG_REPOSITORY: ${{ github.repository }}
+          # AgentCore-supported AZ pin for the deployed stack. The assembly this
+          # step feeds is synthesized WITHOUT credentials (env-agnostic), so
+          # auto-pin cannot run and this override is the only way the pipeline
+          # can keep the Runtime ENIs out of unsupported zones. Set the repo/env
+          # variable AGENTCORE_AVAILABILITY_ZONES to a JSON array of zone NAMES
+          # whose zone IDs are AgentCore-supported in the deploy account, e.g.
+          # ["us-east-1b","us-east-1c"]. Unset => not pinned (synth warns).
+          # See docs/guides/DEPLOYMENT_GUIDE.md "AgentCore unsupported Availability Zones".
+          AGENTCORE_AZS: ${{ vars.AGENTCORE_AVAILABILITY_ZONES }}
         run: |
           jq -n \
             --arg compute_type "$COMPUTE_TYPE" \
             --arg stackName "$STACK_NAME" \
+            --arg agentcore_azs "$AGENTCORE_AZS" \
             --arg sha "$TAG_SHA" \
             --arg ref "$TAG_REF" \
             --arg ref_type "$TAG_REF_TYPE" \
@@ -223,7 +233,10 @@ jobs:
               "github:workflow": $workflow,
               "github:repository": $repository,
               "github:clean": "true"
-            }' > cdk/cdk.context.json
+            }
+            + (if $agentcore_azs == "" then {}
+               else {"agentcore:availabilityZones": ($agentcore_azs | fromjson)} end)' \
+            > cdk/cdk.context.json
           cat cdk/cdk.context.json
       - name: Install mise
         uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
