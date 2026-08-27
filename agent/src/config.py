@@ -73,6 +73,14 @@ _LINEAR_VAULT_SCOPES = ["read", "write", "app:assignable", "app:mentionable"]
 # already consented in this non-interactive path, so it is never visited. The
 # CLI localhost loopback is always on the workload identity allowlist.
 _LINEAR_VAULT_RETURN_URL = "http://localhost:8080/oauth/callback"
+# Extra authorize-URL parameters for Linear's agent install. NOT optional at
+# resolve time: AgentCore keys a cached grant by the full token-request shape,
+# customParameters included — live-proven that the same user + provider returns
+# the cached token when these are passed and "needs consent" when they are
+# omitted. Must match what `bgagent linear vault-setup` sent at consent time, or
+# every resolve is a cache miss that silently falls back to Secrets Manager.
+# Mirrors LINEAR_VAULT_CUSTOM_PARAMS in cdk/src/handlers/shared/linear-vault-token.ts.
+_LINEAR_VAULT_CUSTOM_PARAMS = {"actor": "app", "prompt": "consent"}
 
 
 def _resolve_linear_token_via_vault(
@@ -143,6 +151,7 @@ def _resolve_linear_token_via_vault(
             scopes=_LINEAR_VAULT_SCOPES,
             oauth2Flow="USER_FEDERATION",
             resourceOauth2ReturnUrl=_LINEAR_VAULT_RETURN_URL,
+            customParameters=_LINEAR_VAULT_CUSTOM_PARAMS,
         )
         access = resp.get("accessToken", "")
         if access:

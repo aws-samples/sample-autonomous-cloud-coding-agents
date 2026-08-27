@@ -342,6 +342,12 @@ class TestResolveLinearApiTokenVaultPath:
         mock_client.get_workload_access_token_for_user_id.assert_called_once_with(
             workloadName="abca_linear_oauth", userId="linear-workspace-org-abc"
         )
+        # customParameters are part of the vault's cache key: omitting them made
+        # every resolve a cache miss ("needs consent") despite a valid cached
+        # grant, silently degrading to Secrets Manager. Live-proven.
+        assert mock_client.get_resource_oauth2_token.call_args.kwargs[
+            "customParameters"
+        ] == {"actor": "app", "prompt": "consent"}
         mock_client.get_secret_value.assert_not_called()
         monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
 

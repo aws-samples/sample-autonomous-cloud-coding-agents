@@ -48,6 +48,25 @@ import { makeClient } from './ua';
 export const LINEAR_VAULT_SCOPES = ['read', 'write', 'app:assignable', 'app:mentionable'] as const;
 
 /**
+ * Extra authorize-URL parameters for Linear's agent install.
+ *
+ * These are NOT optional at resolve time. AgentCore keys a cached grant by the
+ * full token-request shape, `customParameters` included — live-proven: the same
+ * user + provider returns the cached `accessToken` when these are passed and an
+ * `authorizationUrl` ("needs consent") when they are omitted. So the runtime
+ * resolvers must send the IDENTICAL set that `bgagent linear vault-setup` used at
+ * consent time, or every resolve is a cache miss that silently degrades to the
+ * Secrets-Manager fallback.
+ *
+ * Keep in sync with `cli/src/linear-vault.ts` (consent) and
+ * `agent/src/config.py::_LINEAR_VAULT_CUSTOM_PARAMS` (agent-side resolve).
+ */
+export const LINEAR_VAULT_CUSTOM_PARAMS: Record<string, string> = {
+  actor: 'app',
+  prompt: 'consent',
+};
+
+/**
  * Return URL required by USER_FEDERATION (spike F7: mandatory). In the resolver
  * (non-interactive) path the grant is already consented, so this URL is never
  * actually visited — but the API rejects the call without one, and it must be
@@ -115,6 +134,9 @@ export async function resolveLinearTokenViaVault(
         scopes: [...LINEAR_VAULT_SCOPES],
         oauth2Flow: 'USER_FEDERATION',
         resourceOauth2ReturnUrl: RESOLVER_RETURN_URL,
+        // Part of the vault's cache key — omitting these turns every resolve into
+        // a cache miss. See LINEAR_VAULT_CUSTOM_PARAMS.
+        customParameters: LINEAR_VAULT_CUSTOM_PARAMS,
       }),
     );
 

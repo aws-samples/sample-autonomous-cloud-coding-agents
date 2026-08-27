@@ -94,6 +94,9 @@ describe('resolveLinearTokenViaVault', () => {
       resourceCredentialProviderName: 'bgagent-linear-oauth-acme',
       oauth2Flow: 'USER_FEDERATION',
       scopes: ['read', 'write', 'app:assignable', 'app:mentionable'],
+      // Part of the vault's cache key: omitting these made every resolve a cache
+      // miss ("needs consent") even with a valid cached grant — live-proven.
+      customParameters: { actor: 'app', prompt: 'consent' },
     });
   });
 
