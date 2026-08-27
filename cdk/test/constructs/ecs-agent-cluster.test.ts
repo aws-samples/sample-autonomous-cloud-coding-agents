@@ -469,6 +469,30 @@ describe('EcsAgentCluster construct', () => {
    * different profile than the same repo on AgentCore. Both reduce to
    * `<geo>.<modelId>`; that equivalence is what this asserts.
    */
+  test.each(['global', 'eu'])('bedrockGeoRegion=%s injects both models into BOTH task definitions', (geo) => {
+    // Neither variable was set here at all, so an ECS task read the Python literals
+    // regardless of the deployed geography — the same divergence as the runtime, on
+    // the other substrate. Deleting both lines survived this whole suite.
+    //
+    // Both task definitions, because they are separate resources: the build tier and
+    // the read-only planning tier. Setting only one leaves planning tasks calling a
+    // geography the grants do not cover.
+    const template = createStack({ bedrockGeoRegion: geo }).template;
+    const defs = Object.values(template.findResources('AWS::ECS::TaskDefinition'));
+    expect(defs.length).toBe(2);
+    for (const def of defs) {
+      const containers = (def as { Properties?: { ContainerDefinitions?: Array<{ Environment?: Array<{ Name: string; Value: string }> }> } })
+        .Properties?.ContainerDefinitions ?? [];
+      expect(containers.length).toBeGreaterThan(0);
+      for (const c of containers) {
+        const env = Object.fromEntries((c.Environment ?? []).map((e) => [e.Name, e.Value]));
+        expect(env.ANTHROPIC_MODEL).toBe(`${geo}.anthropic.claude-opus-5`);
+        expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL)
+          .toBe(`${geo}.anthropic.claude-haiku-4-5-20251001-v1:0`);
+      }
+    }
+  });
+
   test.each(['global', 'eu'])('bedrockGeoRegion=%s re-prefixes the task role inference-profile ARNs', (geo) => {
     const template = createStack({ bedrockGeoRegion: geo }).template;
     const policies = template.findResources('AWS::IAM::Policy');

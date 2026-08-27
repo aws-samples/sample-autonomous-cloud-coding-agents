@@ -441,6 +441,28 @@ describe('AgentStack', () => {
       geoTemplate = Template.fromStack(stack);
     });
 
+    test('injects BOTH models into the runtime env at this geography', () => {
+      // The headline fix, and it had no guard: deleting the ANTHROPIC_MODEL line from
+      // the runtime env survived the whole suite. The stack previously injected only
+      // the auxiliary model, so the main one fell through to a Python literal a
+      // geography change does not touch — grants moved, the agent did not, and every
+      // task with no per-repo override failed at turn 0 with AccessDenied.
+      //
+      // Asserted per geography rather than once, because the failure only appears
+      // when the two disagree.
+      const runtimes = geoTemplate.findResources('AWS::BedrockAgentCore::Runtime');
+      const envs = Object.values(runtimes).map(
+        (r) => (r as { Properties?: { EnvironmentVariables?: Record<string, string> } })
+          .Properties?.EnvironmentVariables ?? {},
+      );
+      expect(envs.length).toBeGreaterThan(0);
+      for (const env of envs) {
+        expect(env.ANTHROPIC_MODEL).toBe(`${geo}.anthropic.claude-opus-5`);
+        expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL)
+          .toBe(`${geo}.anthropic.claude-haiku-4-5-20251001-v1:0`);
+      }
+    });
+
     test('re-prefixes every inference-profile ARN and drops the us. ones', () => {
       const serialized = JSON.stringify(geoTemplate.findResources('AWS::IAM::Policy'));
       for (const modelId of DEFAULT_BEDROCK_MODEL_IDS) {

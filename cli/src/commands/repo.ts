@@ -212,17 +212,27 @@ export function makeRepoCommand(): Command {
         // Same reasoning as the substrate gate above: reuse an output already
         // fetched, and fail here rather than let a task die at turn 0 with an
         // AccessDenied that names nothing.
+        //
+        // Trimmed HERE, not just inside the guard: validating a trimmed copy while
+        // writing the raw value means a trailing space passes the check and lands in
+        // the RepoTable, where it matches no real profile id. The granted set is
+        // trimmed for the same reason — `resolveBedrockModelIds` validates
+        // `trim().length` but stores the entry untrimmed, so an untrimmed grant would
+        // make the exact-match check falsely reject a model it just listed.
+        const modelId = opts.model?.trim() || undefined;
         assertModelIdUsable({
-          modelId: opts.model,
+          modelId,
           deployedGeo,
           stackName,
-          ...(grantedModelIds && { grantedBareIds: grantedModelIds.split(',').filter(Boolean) }),
+          ...(grantedModelIds && {
+            grantedBareIds: grantedModelIds.split(',').map((m) => m.trim()).filter(Boolean),
+          }),
         });
 
         const config = await onboardRepo(region, tableName, repoId, {
           computeType: opts.computeType,
           runtimeArn: opts.runtimeArn,
-          modelId: opts.model,
+          modelId,
           githubTokenSecretArn: opts.tokenSecretArn,
           maxTurns: opts.maxTurns,
           pollIntervalMs: opts.pollInterval,

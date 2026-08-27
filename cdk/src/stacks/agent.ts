@@ -916,6 +916,17 @@ export class AgentStack extends Stack {
         // task role use, so tenant-data access is tag-scoped on every substrate.
         agentSessionRole,
         // Resolved above TaskApi — see `microvmImageInputs`.
+        // Both models, from the same resolved geography as the grants — parity with the
+        // AgentCore runtime env and the ECS task definitions. Omitted before, which left
+        // this substrate with exactly the divergence the other two had fixed: on a
+        // `-c bedrockGeoRegion=us` deploy the grants were `us.` while the agent still
+        // read the `global.` literal from config.py, so every task with no per-repo
+        // override failed at turn 0 with AccessDenied.
+        imageEnvironmentVariables: {
+          ANTHROPIC_MODEL: inferenceProfileId(bedrockGeoRegion, PLATFORM_DEFAULT_MODEL_ID),
+          ANTHROPIC_DEFAULT_HAIKU_MODEL:
+            inferenceProfileId(bedrockGeoRegion, PLATFORM_DEFAULT_AUX_MODEL_ID),
+        },
         ...microvmImageInputs,
       })
       : undefined;

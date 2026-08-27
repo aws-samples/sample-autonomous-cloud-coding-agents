@@ -37,6 +37,24 @@ The string form is case-sensitive: use lowercase `true` or `false`. Any other va
 
 This context is an infrastructure switch, not a pause control. Applying it to an existing enabled deployment deletes the CloudFormation-managed registry and its records; re-enabling creates an empty registry that must be republished. See [REGISTRY.md](/sample-autonomous-cloud-coding-agents/architecture/registry) for the catalog migration and runtime behavior.
 
+## Bedrock inference geography
+
+The shipped `cdk/cdk.json` sets `bedrockGeoRegion: "global"`, so inference routes to
+any supported commercial Region — better throughput and resilience under burst, which
+matters for tasks that run for hours.
+
+**If you have a data-residency requirement, set the geography before upgrading:**
+
+```bash
+mise //cdk:deploy -- -c bedrockGeoRegion=us   # or eu, apac, jp, au, us-gov
+```
+
+One value drives every Bedrock grant and both injected model env vars, so the geography
+cannot disagree with what the agent calls. Changing it needs a redeploy, because the IAM
+grants are scoped to explicit profile ARNs resolved at synth. Full detail, including the
+per-layer model precedence, is in
+[Model configuration](/sample-autonomous-cloud-coding-agents/developer-guide/model-configuration).
+
 ## Scale-to-zero analysis
 
 ### Components that scale to zero (pay-per-use)

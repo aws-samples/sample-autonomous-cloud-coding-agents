@@ -184,3 +184,25 @@ describe('DEFAULT_BEDROCK_MODEL_IDS covers the agent runtime default', () => {
     expect(bareDefault.match(new RegExp(`^(${[...BEDROCK_GEO_REGIONS].join('|')})\\.`))).toBeNull();
   });
 });
+
+describe('the shipped cdk.json geography', () => {
+  it('is a value resolveBedrockGeoRegion accepts, and is what tests claim it is', () => {
+    // Nothing read cdk.json, so the suite exercised the CODE default (`us`) while every
+    // deployment shipped `global`. Deleting the context block, or setting it to a
+    // different geography, survived the whole suite — the value the thesis rests on was
+    // unguarded.
+    const cdkJson = JSON.parse(
+      fs.readFileSync(path.resolve(__dirname, '../../cdk.json'), 'utf8'),
+    ) as { context?: Record<string, unknown> };
+    const shipped = cdkJson.context?.[BEDROCK_GEO_REGION_CONTEXT_KEY];
+    expect(typeof shipped).toBe('string');
+    // Must be resolvable — a typo here fails every deploy at synth, but only if
+    // something checks.
+    expect(() => resolveBedrockGeoRegion(
+      nodeWithContext({ [BEDROCK_GEO_REGION_CONTEXT_KEY]: shipped }),
+    )).not.toThrow();
+    // Pinned deliberately: this is a deploy-affecting default with data-residency
+    // implications, so changing it should require changing a test that says so.
+    expect(shipped).toBe('global');
+  });
+});

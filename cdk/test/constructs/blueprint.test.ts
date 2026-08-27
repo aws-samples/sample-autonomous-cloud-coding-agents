@@ -437,24 +437,21 @@ describe('Blueprint construct', () => {
     expect(removeClause).not.toContain('#skills');
   });
 
-  test('onUpdate REMOVEs model_id when the Blueprint no longer declares one', () => {
-    // SET-only updates left a dropped `agent.modelId` live in DynamoDB, so the repo
-    // kept overriding the platform default with no trace of it in the Blueprint
-    // source. After a geography change that surviving override names a profile the
-    // stack no longer grants, and every task on the repo fails at turn 0 with
-    // AccessDenied while the source says nothing is overridden.
-    const { template } = createStack();
-    const removeClause = /REMOVE ([^"\\]*)/.exec(getUpdateJoinParts(template).join(''))?.[1] ?? '';
-    expect(removeClause).toContain('#model_id');
-  });
+  test('onUpdate does NOT remove model_id — the CLI is a sanctioned co-writer of it', () => {
+    // Regression guard for a fix that was WRONG. Clearing `model_id` when a Blueprint
+    // declares none looked symmetric with the asset refs, but onUpdate runs on every
+    // deploy (its parameters embed a synth-time timestamp) and `bgagent repo onboard
+    // --model` deliberately carries the value forward (ADR-017 sanctions both writers).
+    // The clear therefore deleted an operator's CLI pin on every unrelated redeploy,
+    // while the troubleshooting guide prescribes that pin as the fix for a wrong model.
+    const noModel = /REMOVE ([^"\\]*)/.exec(getUpdateJoinParts(createStack().template).join(''))?.[1] ?? '';
+    expect(noModel).not.toContain('#model_id');
 
-  test('onUpdate does NOT remove model_id when the Blueprint declares one', () => {
-    // The other direction: a declared override must survive its own redeploy.
-    const { template } = createStack({ agent: { modelId: 'global.anthropic.claude-opus-5' } });
-    const serialized = getUpdateJoinParts(template).join('');
-    const removeClause = /REMOVE ([^"\\]*)/.exec(serialized)?.[1] ?? '';
-    expect(removeClause).not.toContain('#model_id');
-    expect(serialized).toContain('#model_id = :model_id');
+    // And a declared override is still written, not merely left alone.
+    const withModel = getUpdateJoinParts(
+      createStack({ agent: { modelId: 'global.anthropic.claude-opus-5' } }).template,
+    ).join('');
+    expect(withModel).toContain('#model_id = :model_id');
   });
 
   test('onUpdate REMOVEs asset columns that are now empty (detach on redeploy)', () => {

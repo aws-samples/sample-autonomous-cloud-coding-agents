@@ -34,6 +34,7 @@
  */
 
 import { ResolvedWorkflow } from './types';
+import { BEDROCK_GEO_REGIONS, DEFAULT_BEDROCK_MODEL_IDS } from '../../constructs/bedrock-models';
 
 /** The required-input contract a workflow declares (mirrors the YAML). */
 export interface WorkflowRequiredInputs {
@@ -81,42 +82,9 @@ export interface WorkflowDescriptor {
  * it's added here too. A future Phase 4 will source this from the repo
  * Blueprint; consolidating it with `bedrock-models.ts` is tracked separately.
  */
-export const WORKFLOW_MODEL_ALLOWLIST: readonly string[] = [
-  'anthropic.claude-sonnet-4-6',
-  'us.anthropic.claude-sonnet-4-6',
-  'global.anthropic.claude-sonnet-4-6',
-  'anthropic.claude-opus-4-20250514-v1:0',
-  'us.anthropic.claude-opus-4-20250514-v1:0',
-  'global.anthropic.claude-opus-4-20250514-v1:0',
-  // Claude Opus 4.8. Admitting an id here does NOT grant permission to invoke
-  // it — this list and the IAM grant in `bedrock-models.ts` are independent, and
-  // a model must be on BOTH to be usable. A workflow pinning an allow-listed but
-  // un-granted id passes admission and then fails at turn 0 with AccessDenied,
-  // so keep the two in step: when adding an id here, add it there (or to the
-  // `bedrockModels` context) in the same change.
-  'anthropic.claude-opus-4-8',
-  'us.anthropic.claude-opus-4-8',
-  'global.anthropic.claude-opus-4-8',
-  // Claude Opus 5 — kept in step with the IAM grant in
-  // DEFAULT_BEDROCK_MODEL_IDS, per the note above.
-  //
-  // The `global.` forms were withheld until the grant sites could derive a
-  // `global.` ARN, because admitting one earlier would have passed admission and
-  // then failed at turn 0 with AccessDenied — exactly the drift this comment
-  // warns about. They are admitted now that the geography is configurable and
-  // `bedrockGeoRegion` defaults to `global`, so the grant covers them.
-  //
-  // Both prefixes stay listed. The allow-list has to accept whatever geography a
-  // deployment is configured for, and a residency-constrained deployer sets
-  // `bedrockGeoRegion=us` — dropping the `us.` forms would reject their
-  // workflows at admission.
-  'anthropic.claude-opus-5',
-  'us.anthropic.claude-opus-5',
-  'global.anthropic.claude-opus-5',
-  'anthropic.claude-haiku-4-5-20251001-v1:0',
-  'us.anthropic.claude-haiku-4-5-20251001-v1:0',
-  'global.anthropic.claude-haiku-4-5-20251001-v1:0',
-];
+export const WORKFLOW_MODEL_ALLOWLIST: readonly string[] = DEFAULT_BEDROCK_MODEL_IDS.flatMap(
+  (bare) => [bare, ...BEDROCK_GEO_REGIONS.map((geo) => `${geo}.${bare}`)],
+);
 
 /**
  * Validate a resolved workflow's declared model against the platform allow-list

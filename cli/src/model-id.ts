@@ -59,9 +59,11 @@ export function geoPrefixOf(modelId: string): string | undefined {
  *    `<geo>.<model>` profile ARNs resolved at synth, so a `us.` model on a stack
  *    deployed with `bedrockGeoRegion=global` is granted nothing.
  *
- * Deliberately does NOT check membership in the granted model set: the CLI has no
- * way to read `bedrockModels` today, and a guess dressed as validation is worse
- * than no check. `platform doctor` covers the profile-resolves question; see #805.
+ * Checks membership in the granted set when the stack exports one (`BedrockModelIds`).
+ * An earlier version did not, on the reasoning that the CLI could not read
+ * `bedrockModels` — which was wrong: it is recoverable from the deployed template, and
+ * is now published as an output. Skipped only when the output is absent, i.e. on a
+ * stack deployed before it existed.
  *
  * `deployedGeo` is null on a stack that predates the `BedrockGeoRegion` output — the
  * geography check is then skipped rather than assumed, but the bare-id check still
@@ -74,7 +76,10 @@ export function assertModelIdUsable(args: {
   /** Bare ids the stack grants, from its `BedrockModelIds` output. */
   grantedBareIds?: readonly string[];
 }): void {
-  const { modelId, deployedGeo, stackName, grantedBareIds } = args;
+  const { deployedGeo, stackName, grantedBareIds } = args;
+  // Trim before anything else. A trailing space survived every check and was written
+  // to the RepoTable verbatim, where it never matches a real profile id.
+  const modelId = args.modelId?.trim();
   if (!modelId) return;
 
   const geo = geoPrefixOf(modelId);
@@ -97,6 +102,25 @@ export function assertModelIdUsable(args: {
   // older stack is not blocked — but checked whenever the information exists,
   // because this is the case that otherwise reaches turn 0 with no explanation.
   const bare = modelId.slice(geo.length + 1);
+  // `'global.'` — a prefix with nothing after it — yields an empty bare id. It passed
+  // every check on a stack with no granted-set output, i.e. every stack deployed
+  // before this change, and landed in the RepoTable as-is.
+  if (!bare) {
+    throw new CliError(
+      `--model '${modelId}' is a geography prefix with no model after it. Use `
+      + `'${geo}.<model-id>', e.g. '${geo}.anthropic.claude-opus-5'.`,
+    );
+  }
+  // A second geo prefix on the bare half means the operator prefixed twice; the
+  // resulting id names no real profile. Caught here rather than left to the grant
+  // check, which is skipped on a stack that exports no granted set.
+  const doublePrefix = geoPrefixOf(bare);
+  if (doublePrefix) {
+    throw new CliError(
+      `--model '${modelId}' carries two geography prefixes ('${geo}.' then `
+      + `'${doublePrefix}.'). Use one: '${geo}.${bare.slice(doublePrefix.length + 1)}'.`,
+    );
+  }
   if (grantedBareIds && grantedBareIds.length > 0 && !grantedBareIds.includes(bare)) {
     throw new CliError(
       `--model '${modelId}' is not granted by stack '${stackName}'. It grants: `
@@ -105,13 +129,17 @@ export function assertModelIdUsable(args: {
     );
   }
 
-  if (!deployedGeo || geo === deployedGeo) return;
+  // An EMPTY deployedGeo is not the same as an absent one: `getStackOutput` returns
+  // null when the output is missing, so an empty string means the stack exported a
+  // blank value. Treat it as unknown rather than as "matches anything".
+  const declaredGeo = deployedGeo?.trim() || undefined;
+  if (!declaredGeo || geo === declaredGeo) return;
 
   throw new CliError(
     `--model '${modelId}' is a '${geo}' inference profile, but stack '${stackName}' grants `
     + `'${deployedGeo}' profiles (BedrockGeoRegion). The IAM grant is scoped to `
     + `'${deployedGeo}.' ARNs, so this model is granted nothing and tasks would fail at turn 0 `
-    + `with AccessDenied. Use '${deployedGeo}.${modelId.slice(geo.length + 1)}', or redeploy the `
+    + `with AccessDenied. Use '${declaredGeo}.${bare}', or redeploy the `
     + `stack with -c bedrockGeoRegion=${geo}.`,
   );
 }

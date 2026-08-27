@@ -20,7 +20,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as yaml from 'js-yaml';
-import { DEFAULT_BEDROCK_MODEL_IDS } from '../../../src/constructs/bedrock-models';
+import { BEDROCK_GEO_REGIONS, DEFAULT_BEDROCK_MODEL_IDS } from '../../../src/constructs/bedrock-models';
 import {
   CODING_WORKFLOW_ID,
   DEFAULT_WORKFLOW_ID,
@@ -306,11 +306,13 @@ describe('disallowedWorkflowModel (WORKFLOWS.md rule 13)', () => {
     expect(WORKFLOW_MODEL_ALLOWLIST).toContain('us.anthropic.claude-sonnet-4-6');
   });
 
-  // Geographies a deployment may realistically select. Not the full CDK enum: the
-  // allow-list is hand-maintained, and demanding all seven would add entries nobody
-  // can deploy against today. `us` is the code default, `global` the cdk.json default,
-  // so both must be admitted for the same reason a residency deployer needs `us`.
-  const DEPLOYABLE_GEOS = ['us', 'global'] as const;
+  // Every geography `resolveBedrockGeoRegion` ACCEPTS, not a hand-picked pair.
+  // `-c bedrockGeoRegion=eu` synths and deploys today, so an allow-list carrying only
+  // bare/`us.`/`global.` rejects every model-pinning workflow at admission on five of
+  // the seven — and the previous hardcoded ['us','global'] could not see it, while its
+  // comment claimed the others were undeployable. Derived, so a geography the CDK adds
+  // widens this test rather than silently escaping it.
+  const DEPLOYABLE_GEOS = BEDROCK_GEO_REGIONS;
 
   test('the allow-list covers every GRANTED model in every geography it may be deployed with', () => {
     // The real invariant: parity with the IAM grant list, not internal pairing.

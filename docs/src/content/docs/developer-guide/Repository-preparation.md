@@ -48,7 +48,7 @@ new Blueprint(this, 'MyServiceBlueprint', {
   repoTable: repoTable.table,
   compute: { runtimeArn: '...' },                    // override the default runtime ARN
   agent: {
-    modelId: 'us.anthropic.claude-sonnet-4-6',       // foundation model override
+    modelId: 'global.anthropic.claude-opus-5',       // foundation model override
     maxTurns: 150,                                    // default turn limit for this repo
     systemPromptOverrides: 'Extra instructions...',   // appended to the platform prompt
   },

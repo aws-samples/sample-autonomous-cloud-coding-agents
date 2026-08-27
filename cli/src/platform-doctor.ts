@@ -398,7 +398,15 @@ async function checkBedrockModel(region: string, modelId: string): Promise<Docto
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    const status: DoctorCheckStatus = message.includes('AccessDenied') ? 'warn' : 'fail';
+    // Match on name AND message, the idiom `checkGithubToken` above already uses. A
+    // real denial carries the identifier ONLY in `err.name`
+    // (`AccessDeniedException`); its message reads "User: … is not authorized to
+    // perform: …". So `message.includes('AccessDenied')` never fires, and an
+    // operator on a least-privilege role got `fail` — which exits doctor non-zero
+    // and reports a healthy stack as broken.
+    const errorName = err instanceof Error ? err.name : '';
+    const accessDenied = /AccessDenied|Unauthorized|not authorized/i.test(`${errorName} ${message}`);
+    const status: DoctorCheckStatus = accessDenied ? 'warn' : 'fail';
     return {
       id,
       label,
@@ -465,7 +473,15 @@ async function checkBedrockInferenceProfile(
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    const status: DoctorCheckStatus = message.includes('AccessDenied') ? 'warn' : 'fail';
+    // Match on name AND message, the idiom `checkGithubToken` above already uses. A
+    // real denial carries the identifier ONLY in `err.name`
+    // (`AccessDeniedException`); its message reads "User: … is not authorized to
+    // perform: …". So `message.includes('AccessDenied')` never fires, and an
+    // operator on a least-privilege role got `fail` — which exits doctor non-zero
+    // and reports a healthy stack as broken.
+    const errorName = err instanceof Error ? err.name : '';
+    const accessDenied = /AccessDenied|Unauthorized|not authorized/i.test(`${errorName} ${message}`);
+    const status: DoctorCheckStatus = accessDenied ? 'warn' : 'fail';
     return {
       id,
       label,

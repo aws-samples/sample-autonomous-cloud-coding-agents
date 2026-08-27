@@ -9,7 +9,7 @@ title: Model configuration
 | # | Layer | What it controls | Where | ID form |
 |---|---|---|---|---|
 | 1 | **IAM invoke allowlist** | Which models the agent's roles may invoke at all, and in which geography. The outer gate — everything below fails without it. | `DEFAULT_BEDROCK_MODEL_IDS` (`cdk/src/constructs/bedrock-models.ts`); override with CDK context `bedrockModels`. Geography via context `bedrockGeoRegion` (default `us`) | **Bare** (`anthropic.claude-…`) |
-| 2 | **Platform default model** | The model used when nothing narrower is set. A **Python literal only** — there is no CDK prop or environment knob in front of it today. | `agent/src/config.py:563` (the `ANTHROPIC_MODEL` fallback) and `agent/src/models.py:157` (`TaskConfig.anthropic_model`) | Prefixed (`<geo>.anthropic.…`) |
+| 2 | **Platform default model** | The model used when nothing narrower is set. Injected by the stack as `ANTHROPIC_MODEL`, derived from `bedrockGeoRegion`; the Python literal is the fallback a run with no env reaches. | `agent/src/config.py:563` (the `ANTHROPIC_MODEL` fallback) and `agent/src/models.py:157` (`TaskConfig.anthropic_model`) | Prefixed (`<geo>.anthropic.…`) |
 | 3 | **Auxiliary / fast model** | The small model Claude Code uses for auxiliary work (WebFetch page summarization, the pre-flight safety check). | Stack env `ANTHROPIC_DEFAULT_HAIKU_MODEL` (`cdk/src/stacks/agent.ts` (the runtime environment block)); agent-side fallback at `agent/src/config.py:569` | Prefixed (`<geo>.anthropic.…`) |
 | 4 | **Per-repo override** | One repository's model, with no agent redeploy. | Blueprint `agent.modelId` (`cdk/src/constructs/blueprint.ts`, `BlueprintProps.agent.modelId`) → RepoTable `model_id` (`cdk/src/handlers/shared/repo-config.ts:37`) → ECS injects `ANTHROPIC_MODEL` (`cdk/src/handlers/shared/strategies/ecs-strategy.ts:217`) | Prefixed (`<geo>.anthropic.…`) |
 | 5 | **Per-task / local** | One task's model. Payload `model_id` is aliased to `anthropic_model` (`agent/src/pipeline.py`, `_PAYLOAD_KEY_ALIASES`); local batch runs read `ANTHROPIC_MODEL` from the shell via `agent/run.sh`. | Task payload `model_id`; shell `ANTHROPIC_MODEL` | Prefixed (`<geo>.anthropic.…`) |
@@ -56,9 +56,9 @@ Which geography those prefixes name is itself configurable, via CDK context `bed
 $ cdk deploy -c bedrockGeoRegion=global
 ```
 
-or as a `context` entry in `cdk/cdk.json`. It defaults to `us`, and the accepted values are whatever `@aws-cdk/aws-bedrock-alpha` models — currently `global`, `us`, `us-gov`, `eu`, `apac`, `jp`, `au`. An unrecognized value **fails at synth** rather than at deploy: an invented geography produces a well-formed ARN for a profile that does not exist, so the grant would authorize nothing and the agent would fail at turn 0 with `AccessDenied` and nothing to explain why.
+or as a `context` entry in `cdk/cdk.json`. The shipped `cdk.json` sets `global`; the code default absent any context is `us`. The accepted values are whatever `@aws-cdk/aws-bedrock-alpha` models — currently `global`, `us`, `us-gov`, `eu`, `apac`, `jp`, `au`. An unrecognized value **fails at synth** rather than at deploy: an invented geography produces a well-formed ARN for a profile that does not exist, so the grant would authorize nothing and the agent would fail at turn 0 with `AccessDenied` and nothing to explain why.
 
-One value drives everything that needs a prefix — both grant sites (the AgentCore runtime and the ECS task role) and the layer-3 `ANTHROPIC_DEFAULT_HAIKU_MODEL` env var. That is deliberate: a deployment can never grant one geography's profiles while telling the agent to call another's.
+One value drives everything that needs a prefix — every grant site (AgentCore runtime, ECS task role, Lambda MicroVM) and both injected env vars, `ANTHROPIC_MODEL` and `ANTHROPIC_DEFAULT_HAIKU_MODEL`. That is deliberate: a deployment can never grant one geography's profiles while telling the agent to call another's.
 
 **Which to choose.** A `global.` profile routes to any supported commercial Region, which gives better throughput and resilience under peak demand — worth having for tasks that run for hours and burst. A geo profile (`us.`, `eu.`, `apac.`, …) keeps inference within that geography, which is what you need under a **data-residency requirement**. Pick the geo profile in that case; the throughput benefit is not worth a compliance breach.
 
@@ -86,7 +86,7 @@ Model choice is a **cost** decision, which is why it is adjustable per repo and 
 | Model | Input tokens | Reported `cost_usd` | Implied input rate |
 |---|---|---|---|
 | `us.anthropic.claude-opus-4-8` | 32,145 | $0.160850 | **$5.00/MTok** |
-| `global.anthropic.claude-opus-5` | 37,584 | $0.188020 | **$5.00/MTok** |
+| `us.anthropic.claude-opus-5` | 37,584 | $0.188020 | **$5.00/MTok** |
 
 Token ratio 1.169; cost ratio 1.169 — identical. **The per-token rate is unchanged; the whole delta is token volume on an identical prompt.** Read it that way: "Opus 5 costs ~17% more per task" invites the wrong remedy (switch models), while "same rate, more tokens" points at the real levers — prompt size, prompt caching, and `max_turns`.
 

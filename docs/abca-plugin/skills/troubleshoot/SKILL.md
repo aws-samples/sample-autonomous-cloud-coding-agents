@@ -111,7 +111,7 @@ node cli/lib/bin/bgagent.js events <TASK_ID> --output json
 - Common: repo build/test commands not documented in CLAUDE.md
 
 **403 "not authorized to perform bedrock:InvokeModelWithResponseStream":**
-- The repo's `model_id` is a model the runtime IAM role wasn't granted. The runtime only has `grantInvoke` for the models in the stack's configured set (Sonnet 4.6, Opus 4, Haiku 4.5 by default).
+- The repo's `model_id` is a model the runtime IAM role wasn't granted. The runtime only has `grantInvoke` for the models in the stack's configured set (Sonnet 4.6, Opus 4, Opus 4.8, Opus 5, Haiku 4.5 by default).
 - **Quick fix:** point the repo at an already-granted model — `bgagent repo onboard <owner/repo> --model global.anthropic.claude-opus-5` (no redeploy).
 - **To add a new model to the runtime:** grant it in the stack and redeploy. The model set is the shared list in `cdk/src/constructs/bedrock-models.ts` — add the model via the `bedrockModels` CDK context (`cdk.json`) so both the AgentCore and ECS backends grant it (#433). Adding a model also requires **account-level Bedrock access** for it (separate from IAM — see the next row).
 

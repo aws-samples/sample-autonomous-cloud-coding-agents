@@ -493,17 +493,26 @@ export class Blueprint extends Construct {
     return empty;
   }
 
-  /** Per-repo overrides to CLEAR when their prop is dropped, same reason as the
-   *  asset refs above: SET-only means removing `agent.modelId` from a Blueprint
-   *  leaves the old `model_id` live in DynamoDB, so the repo keeps overriding the
-   *  platform default forever. That is worse than stale — after a geography change
-   *  the surviving override names a profile the stack no longer grants, and every
-   *  task on that repo fails at turn 0 with AccessDenied while the Blueprint
-   *  source says nothing is overridden. */
-  private clearedOverrideFields(props: BlueprintProps): string[] {
-    const cleared: string[] = [];
-    if (!props.agent?.modelId) cleared.push('model_id');
-    return cleared;
+  /** Per-repo overrides to clear when their prop is dropped.
+   *
+   *  EMPTY, deliberately, and this is the second attempt at it. Clearing `model_id`
+   *  when a Blueprint declares no `agent.modelId` looked symmetric with the asset
+   *  refs above, but it is not: `onUpdate`'s parameters embed a synth-time timestamp,
+   *  so CloudFormation issues an Update on EVERY deploy, and `bgagent repo onboard
+   *  --model` is a sanctioned second writer of this same row (ADR-017) that
+   *  deliberately carries the value forward. The clear therefore deleted an
+   *  operator's CLI pin on every unrelated redeploy — and the troubleshooting guide
+   *  prescribes that CLI pin as the fix for a wrong model.
+   *
+   *  Worst case was this very upgrade: a deployer who pinned `us.` per repo would
+   *  lose the pin AND get the default flipped to `global.` in one deploy.
+   *
+   *  The underlying gap is real but wider than one column — 12 other SET-only fields
+   *  survive being dropped too — and fixing it needs an explicit "clear" signal
+   *  (`modelId: null`) plus a warning, not a silent delete. Tracked separately.
+   */
+  private clearedOverrideFields(_props: BlueprintProps): string[] {
+    return [];
   }
 
   private buildRemoveClause(props?: BlueprintProps): string {
