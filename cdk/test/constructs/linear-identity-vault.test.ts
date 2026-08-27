@@ -131,9 +131,13 @@ describe('LinearIdentityVault construct', () => {
     // ("not authorized … on resource: …/workload-identity-directory/default"),
     // so the bare directory ARN must be present — this is the regression guard.
     expect(rendered).toContain('workload-identity-directory/default');
-    // GetResourceOauth2Token authorizes against the token-vault credential
-    // provider; names are created at onboarding time so the grant is scoped to
-    // this account's oauth2 providers rather than '*'.
+    // GetResourceOauth2Token authorizes against the token VAULT itself — a second
+    // live AccessDenied ("… on resource: …:token-vault/default") proved the
+    // credential-provider sub-path alone is not enough. Both are granted: the
+    // vault (what the service checks today) and the per-provider path (scoped to
+    // this account's oauth2 providers rather than '*', since provider names are
+    // created at onboarding time and unknown at synth).
+    expect(rendered).toContain('token-vault/default"');
     expect(rendered).toContain('token-vault/default/oauth2credentialprovider/*');
     // The vault reads each provider's client secret through the caller.
     expect(rendered).toContain('bedrock-agentcore-identity!*');

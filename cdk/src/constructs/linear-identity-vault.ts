@@ -194,10 +194,19 @@ export class LinearIdentityVault extends Construct {
       resource: 'workload-identity-directory',
       resourceName: 'default',
     });
+    // `GetResourceOauth2Token` authorizes against the token VAULT itself
+    // (`token-vault/default`) — live-confirmed by a second AccessDenied after the
+    // directory fix: "not authorized … on resource: …:token-vault/default".
+    const tokenVaultArn = stack.formatArn({
+      service: 'bedrock-agentcore',
+      resource: 'token-vault',
+      resourceName: 'default',
+    });
     // Provider names are per-workspace (`bgagent-linear-oauth-<slug>`) and created
     // at onboarding time by `bgagent linear vault-setup`, so they are unknown at
     // synth — scope to the account's oauth2 credential providers in the default
-    // token vault rather than a single name.
+    // token vault rather than a single name. Kept alongside the vault ARN above
+    // so the grant still holds if the service moves to per-provider authorization.
     const credentialProviderArn = stack.formatArn({
       service: 'bedrock-agentcore',
       resource: 'token-vault',
@@ -213,7 +222,12 @@ export class LinearIdentityVault extends Construct {
     grantee.grantPrincipal.addToPrincipalPolicy(
       new iam.PolicyStatement({
         actions: ['bedrock-agentcore:GetResourceOauth2Token'],
-        resources: [workloadDirectoryArn, this.workloadIdentityArn, credentialProviderArn],
+        resources: [
+          workloadDirectoryArn,
+          this.workloadIdentityArn,
+          tokenVaultArn,
+          credentialProviderArn,
+        ],
       }),
     );
     // The vault stores each provider's client secret in a service-owned secret
