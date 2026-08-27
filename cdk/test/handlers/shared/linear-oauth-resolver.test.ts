@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { createHash } from 'node:crypto';
+import { createHmac } from 'node:crypto';
 import {
   _resetCachesForTesting,
   invalidateLinearOauthCache,
@@ -618,9 +618,12 @@ describe('markWorkspaceRevoked — the verdict must not outlive the grant it jud
 
 describe('token-lineage diagnostic logging (#807)', () => {
   const RAW_REFRESH = 'lin_refresh_SENSITIVE_should_never_be_logged';
-  // sha256("lin_refresh_SENSITIVE_should_never_be_logged").slice(0,12) — computed
-  // independently so the test pins the exact fingerprint the code must emit.
-  const EXPECTED_FP = createHash('sha256').update(RAW_REFRESH).digest('hex').slice(0, 12);
+  // Mirror the source's HMAC-SHA-256(salt) fingerprint (js/insufficient-password-hash:
+  // a keyed digest, not a bare hash of the secret). Kept in lockstep with
+  // TOKEN_FP_SALT / TOKEN_FP_LENGTH in linear-oauth-resolver.ts.
+  const fp = (token: string): string =>
+    createHmac('sha256', 'abca.linear.token-lineage.v1').update(token).digest('hex').slice(0, 12);
+  const EXPECTED_FP = fp(RAW_REFRESH);
 
   let infoSpy: jest.SpyInstance;
   let warnSpy: jest.SpyInstance;
@@ -710,9 +713,7 @@ describe('token-lineage diagnostic logging (#807)', () => {
     expect(refreshed).toBeDefined();
     const data = refreshed![1] as Record<string, unknown>;
     expect(data.rotated_from_fp).toBe(EXPECTED_FP);
-    expect(data.rotated_to_fp).toBe(
-      createHash('sha256').update(NEW_RAW).digest('hex').slice(0, 12),
-    );
+    expect(data.rotated_to_fp).toBe(fp(NEW_RAW));
     // Neither the old nor the new raw refresh token may appear in logs.
     expect(allLoggedText()).not.toContain(RAW_REFRESH);
     expect(allLoggedText()).not.toContain(NEW_RAW);

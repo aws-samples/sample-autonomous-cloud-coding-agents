@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { createHash } from 'node:crypto';
+import { createHmac } from 'node:crypto';
 import {
   GetSecretValueCommand,
   PutSecretValueCommand,
@@ -535,10 +535,19 @@ function tokenLineage(token: StoredOauthToken): Record<string, string | number> 
   };
 }
 
-/** 12-char SHA-256 prefix of a token — safe to log; never the raw value. */
+/**
+ * A short, stable, non-reversible fingerprint of a token — safe to log; never
+ * the raw value. Uses HMAC-SHA-256 with a fixed application salt (not a bare
+ * hash of the secret): this is the correct primitive for fingerprinting a
+ * credential — the keyed digest is not a plain "password hash" a fast-hash
+ * attack applies to, and it matches the ``createHmac`` idiom the webhook-verify
+ * handlers already use. Truncated to a prefix — enough to correlate one token
+ * across log events, not enough to be a credential.
+ */
+const TOKEN_FP_SALT = 'abca.linear.token-lineage.v1';
 function fingerprintToken(token: string | undefined): string {
   if (!token) return 'none';
-  return createHash('sha256').update(token).digest('hex').slice(0, TOKEN_FP_LENGTH);
+  return createHmac('sha256', TOKEN_FP_SALT).update(token).digest('hex').slice(0, TOKEN_FP_LENGTH);
 }
 
 async function refreshLinearToken(
