@@ -216,7 +216,9 @@ export interface BlueprintProps {
  * CDK construct that registers a repository with the platform by writing
  * a RepoConfig record to the shared RepoTable via a custom resource.
  *
- * Create/Update: PutItem with status='active' and all config fields.
+ * Create: PutItem with status='active' and all config fields. Update: UpdateItem,
+ * which SETs the fields a Blueprint declares and REMOVEs the per-repo overrides it
+ * no longer declares — a SET-only update would leave a dropped override live.
  * Delete: UpdateItem to set status='removed' and TTL for eventual cleanup.
  *
  * NOTE: Timestamps (onboarded_at, updated_at) are captured at CDK synth time,
@@ -371,12 +373,12 @@ export class Blueprint extends Construct {
         parameters: {
           TableName: props.repoTable.tableName,
           Key: { repo: { S: props.repo } },
-          UpdateExpression: `SET #status = :active, #updated = :now${this.buildUpdateFields(props)}${this.buildRemoveClause()}`,
+          UpdateExpression: `SET #status = :active, #updated = :now${this.buildUpdateFields(props)}${this.buildRemoveClause(props)}`,
           ExpressionAttributeNames: {
             '#status': 'status',
             '#updated': 'updated_at',
             ...this.buildExpressionNames(props),
-            ...this.buildRemoveNames(),
+            ...this.buildRemoveNames(props),
           },
           ExpressionAttributeValues: {
             ':active': { S: 'active' },
@@ -491,14 +493,28 @@ export class Blueprint extends Construct {
     return empty;
   }
 
-  private buildRemoveClause(): string {
-    const empty = this.emptyAssetFields();
-    return empty.length > 0 ? ` REMOVE ${empty.map(f => `#${f}`).join(', ')}` : '';
+  /** Per-repo overrides to CLEAR when their prop is dropped, same reason as the
+   *  asset refs above: SET-only means removing `agent.modelId` from a Blueprint
+   *  leaves the old `model_id` live in DynamoDB, so the repo keeps overriding the
+   *  platform default forever. That is worse than stale — after a geography change
+   *  the surviving override names a profile the stack no longer grants, and every
+   *  task on that repo fails at turn 0 with AccessDenied while the Blueprint
+   *  source says nothing is overridden. */
+  private clearedOverrideFields(props: BlueprintProps): string[] {
+    const cleared: string[] = [];
+    if (!props.agent?.modelId) cleared.push('model_id');
+    return cleared;
   }
 
-  private buildRemoveNames(): Record<string, string> {
+  private buildRemoveClause(props?: BlueprintProps): string {
+    const fields = [...this.emptyAssetFields(), ...(props ? this.clearedOverrideFields(props) : [])];
+    return fields.length > 0 ? ` REMOVE ${fields.map(f => `#${f}`).join(', ')}` : '';
+  }
+
+  private buildRemoveNames(props?: BlueprintProps): Record<string, string> {
     const names: Record<string, string> = {};
-    for (const f of this.emptyAssetFields()) names[`#${f}`] = f;
+    const fields = [...this.emptyAssetFields(), ...(props ? this.clearedOverrideFields(props) : [])];
+    for (const f of fields) names[`#${f}`] = f;
     return names;
   }
 }

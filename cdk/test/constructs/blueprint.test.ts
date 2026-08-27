@@ -424,8 +424,37 @@ describe('Blueprint construct', () => {
     expect(serialized).toContain('#mcp_servers');
     expect(serialized).toContain('#cedar_policy_modules');
     expect(serialized).toContain('#skills');
-    // All three populated → nothing to REMOVE.
-    expect(serialized).not.toContain('REMOVE');
+    // All three populated → none of the ASSET columns is removed. Asserted per
+    // column rather than as "no REMOVE anywhere": the clause is shared with the
+    // per-repo overrides, and this blueprint declares no `agent.modelId`, so it
+    // legitimately removes `model_id`. A blanket assertion coupled this test to
+    // an unrelated field and failed for the wrong reason.
+    // Only the REMOVE clause of the UpdateExpression — not everything after the
+    // word, which would sweep in ExpressionAttributeNames and match every column.
+    const removeClause = /REMOVE ([^"\\]*)/.exec(serialized)?.[1] ?? '';
+    expect(removeClause).not.toContain('#mcp_servers');
+    expect(removeClause).not.toContain('#cedar_policy_modules');
+    expect(removeClause).not.toContain('#skills');
+  });
+
+  test('onUpdate REMOVEs model_id when the Blueprint no longer declares one', () => {
+    // SET-only updates left a dropped `agent.modelId` live in DynamoDB, so the repo
+    // kept overriding the platform default with no trace of it in the Blueprint
+    // source. After a geography change that surviving override names a profile the
+    // stack no longer grants, and every task on the repo fails at turn 0 with
+    // AccessDenied while the source says nothing is overridden.
+    const { template } = createStack();
+    const removeClause = /REMOVE ([^"\\]*)/.exec(getUpdateJoinParts(template).join(''))?.[1] ?? '';
+    expect(removeClause).toContain('#model_id');
+  });
+
+  test('onUpdate does NOT remove model_id when the Blueprint declares one', () => {
+    // The other direction: a declared override must survive its own redeploy.
+    const { template } = createStack({ agent: { modelId: 'global.anthropic.claude-opus-5' } });
+    const serialized = getUpdateJoinParts(template).join('');
+    const removeClause = /REMOVE ([^"\\]*)/.exec(serialized)?.[1] ?? '';
+    expect(removeClause).not.toContain('#model_id');
+    expect(serialized).toContain('#model_id = :model_id');
   });
 
   test('onUpdate REMOVEs asset columns that are now empty (detach on redeploy)', () => {

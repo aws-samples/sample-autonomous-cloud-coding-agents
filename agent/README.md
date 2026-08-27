@@ -384,7 +384,7 @@ docker images bgagent-local --format "{{.Size}}"
 
 ```
 agent/
-├── Dockerfile           Python 3.13 + Node.js 20 + Claude Code CLI + git + gh + mise (default platform linux/arm64)
+├── Dockerfile           Python 3.13 + Node.js 24 + Claude Code CLI + git + gh + mise (default platform linux/arm64)
 ├── .dockerignore
 ├── pyproject.toml       App dependencies (claude-agent-sdk, FastAPI, boto3, OpenTelemetry distro, MCP, cedarpy, …)
 ├── uv.lock              Locked deps for reproducible `uv sync` in the image

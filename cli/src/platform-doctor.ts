@@ -32,25 +32,20 @@ import {
   probeLambdaMicrovmAvailability,
 } from './lambda-microvm-availability';
 import { checkLinearWorkspaceAuth, type LinearProbe, type LinearRefreshVerifier } from './linear-auth-health';
+import { BEDROCK_GEO_PREFIXES } from './model-id';
 import { PLATFORM_REPO_DEFAULTS } from './repo-display';
 import { listRepoConfigs, RepoConfigRow } from './repo-lookup';
 import { getStackOutput } from './stack-outputs';
 import { makeClient } from './ua';
 
 /**
- * Every cross-Region inference-profile geography, mirroring
- * `CrossRegionInferenceProfileRegion` in `@aws-cdk/aws-bedrock-alpha` (the CLI is
- * a separate package and does not depend on CDK — see `PLATFORM_REPO_DEFAULTS`
- * for the same mirroring).
+ * Strips a leading `<geo>.` inference-profile prefix, if present.
  *
- * Must list them ALL. An earlier version matched only `us|eu|apac`, so when the
- * platform default moved to a `global.` profile the strip below silently did
- * nothing and `GetFoundationModel` was handed a profile id it cannot resolve —
- * turning the one Bedrock check `doctor` performs into a false failure.
+ * Built from the ONE geography list (`model-id.ts`) rather than a second copy. Two
+ * copies is how this broke: the list here matched only `us|eu|apac`, so when the
+ * platform default moved to `global.` the strip silently did nothing and
+ * `GetFoundationModel` was handed a profile id it cannot resolve.
  */
-const BEDROCK_GEO_PREFIXES = ['global', 'us-gov', 'us', 'eu', 'apac', 'jp', 'au'] as const;
-
-/** Strips a leading `<geo>.` inference-profile prefix, if present. */
 const GEO_PREFIX_RE = new RegExp(`^(?:${BEDROCK_GEO_PREFIXES.join('|')})\\.`);
 
 /**

@@ -653,7 +653,7 @@ export class AgentStack extends Stack {
 
     // Grant the runtime invoke on each configured foundation model + its
     // cross-Region inference profile in the configured geography
-    // (`bedrockGeoRegion`, default `us`). The model set is a single source of
+    // (`bedrockGeoRegion` — `global` in the shipped cdk.json, `us` absent any context). The model set is a single source of
     // truth (constructs/bedrock-models.ts), shared with the ECS task role and
     // overridable via the `bedrockModels` CDK context. Each invokable is also
     // collected so the same set is granted to the SessionRole below (for cost

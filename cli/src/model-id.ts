@@ -45,9 +45,11 @@ export function geoPrefixOf(modelId: string): string | undefined {
  * Reject a `--model` value that cannot work, at the point the operator can still
  * fix it.
  *
- * Both mistakes this catches produce the SAME opaque outcome today: the task
- * dispatches, runs, and dies at turn 0 with `AccessDenied` — with nothing at
- * onboard time and nothing in the failure naming the model as the cause.
+ * Each mistake this catches fails at turn 0 with nothing naming the model as the
+ * cause — but NOT with the same error, and the distinction matters when reading a
+ * failure: a bare id raises `ValidationException` from Bedrock (the id is not
+ * invocable at all), while a wrong geography or an ungranted model raises
+ * `AccessDenied` from IAM (the id is fine, the grant is not).
  *
  *  - A **bare** foundation-model id. Bedrock refuses bare ids for on-demand
  *    invocation of Claude 4.x and later ("ValidationException: … isn't supported.

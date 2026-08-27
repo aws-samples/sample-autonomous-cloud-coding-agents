@@ -48,7 +48,7 @@ export const DEFAULT_BEDROCK_MODEL_IDS: readonly string[] = [
   // for on-demand invocation ("ValidationException: … isn't supported. Retry
   // your request with the ID or ARN of an inference profile"), and both grant
   // sites derive the geo-prefixed inference-profile ARN — the invocable one —
-  // from this entry plus `bedrockGeoRegion` (default `us`). Opus 4.8 above
+  // from this entry plus `bedrockGeoRegion` (`global` in the shipped cdk.json; `us` only if no context is supplied). Opus 4.8 above
   // stays granted: blueprints may pin it per-repo, so removing it would fail
   // those repos at turn 0.
   'anthropic.claude-opus-5',
@@ -165,7 +165,7 @@ export function resolveBedrockGeoRegion(node: Node): CrossRegionInferenceProfile
  * **Use the bare foundation-model ID (`anthropic.claude-…`), NOT a
  * geo-prefixed inference-profile ID.** Both grant sites derive the
  * inference-profile ARN by prefixing the geography from
- * {@link resolveBedrockGeoRegion} (`bedrockGeoRegion`, default `us`), so passing
+ * {@link resolveBedrockGeoRegion} (`bedrockGeoRegion` — `global` in the shipped cdk.json, `us` absent any context), so passing
  * `us.anthropic.…` here would produce an invalid `us.us.anthropic.…` ARN. The
  * resolver rejects an entry carrying ANY modelled geo prefix
  * ({@link BEDROCK_GEO_REGIONS}) to catch that early — including `global.`,
