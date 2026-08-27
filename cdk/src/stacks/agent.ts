@@ -866,9 +866,39 @@ export class AgentStack extends Stack {
     //     -c ecsBuildTaskMemoryMiB=122880 -c ecsBuildTaskEphemeralStorageGiB=100
     //   cdk deploy -c ecsExtraBuildEnv='{"MISE_JOBS":"8"}'
     const ecsTaskSizing = resolveEcsTaskSizing(this.node);
+
+    // --- Linear OAuth token vault (RFC #249 Phase 1) ---
+    // Additive + default-off (flag resolved above): synthesizes only under
+    // `--context enableLinearIdentityVault=true`, so the default synth stays
+    // byte-for-byte unchanged (same context-gate shape as the tool gateway /
+    // ECS / MicroVM backends). When off, Linear token resolution stays on the
+    // per-workspace Secrets-Manager path.
+    //
+    // Created HERE, before the ECS cluster, because EcsAgentCluster takes it as
+    // a prop (the ECS container needs its own env + task-role grant — the
+    // AgentCore runtime env does not reach it). Grants are added at each
+    // consumer: runtime role below, ECS task role inside EcsAgentCluster,
+    // webhook processor inside LinearIntegration.
+    let linearIdentityVault: LinearIdentityVault | undefined;
+    if (linearIdentityVaultEnabled) {
+      // Return URLs the 3LO consent flow may bounce back to (spike F9: allowlist
+      // enforced; F11: localhost + hosted coexist so either onboarding mode works
+      // off one identity). The CLI localhost loopback is always allowed; a hosted
+      // static onboarding page URL is added when configured.
+      const hostedReturnUrl = this.node.tryGetContext('linearVaultHostedReturnUrl') as string | undefined;
+      linearIdentityVault = new LinearIdentityVault(this, 'LinearIdentityVault', {
+        workloadName: LINEAR_VAULT_WORKLOAD_NAME,
+        allowedReturnUrls: [
+          'http://localhost:8080/oauth/callback',
+          ...(hostedReturnUrl ? [hostedReturnUrl] : []),
+        ],
+      });
+    }
+
     const ecsCluster = computeType === 'ecs'
       ? new EcsAgentCluster(this, 'EcsAgentCluster', {
         ...(ecsTaskSizing !== undefined && { taskSizing: ecsTaskSizing }),
+        ...(linearIdentityVault && { linearIdentityVault }),
         vpc: agentVpc.vpc,
         agentImageAsset: new ecr_assets.DockerImageAsset(this, 'AgentImage', {
           directory: repoRoot,
@@ -1191,24 +1221,13 @@ export class AgentStack extends Stack {
     // true`, so the default synth stays byte-for-byte unchanged (same context-
     // gate shape as the tool gateway / ECS / MicroVM backends). When off, the
     // Linear resolver stays on the per-workspace Secrets-Manager token path.
-    let linearIdentityVault: LinearIdentityVault | undefined;
-    if (linearIdentityVaultEnabled) {
-      // Return URLs the 3LO consent flow may bounce back to (spike F9: allowlist
-      // enforced; F11: localhost + hosted coexist so either onboarding mode
-      // works off one identity). The CLI localhost loopback is always allowed;
-      // a hosted static onboarding page URL is added when configured (wired by
-      // the S3+CloudFront onboarding page — Slice 2 — or supplied via context).
-      const hostedReturnUrl = this.node.tryGetContext('linearVaultHostedReturnUrl') as string | undefined;
-      linearIdentityVault = new LinearIdentityVault(this, 'LinearIdentityVault', {
-        workloadName: LINEAR_VAULT_WORKLOAD_NAME,
-        allowedReturnUrls: [
-          'http://localhost:8080/oauth/callback',
-          ...(hostedReturnUrl ? [hostedReturnUrl] : []),
-        ],
-      });
-      // The agent self-mints Linear tokens via boto3 (config.py), so the agent
-      // session role needs the token data-plane calls. The webhook processor
-      // grant is wired inside LinearIntegration.
+    // The construct itself is created earlier (it has to exist before the ECS
+    // cluster, which takes it as a prop). Here we only add the grant that needs
+    // `runtime` to exist: the agent self-mints Linear tokens via boto3
+    // (config.py) on the AgentCore substrate using the runtime execution role's
+    // ambient credentials. The ECS task-role grant is wired inside
+    // EcsAgentCluster, and the webhook-processor grant inside LinearIntegration.
+    if (linearIdentityVault) {
       linearIdentityVault.grantMintToken(runtime.role);
     }
 

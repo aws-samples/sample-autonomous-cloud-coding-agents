@@ -28,7 +28,7 @@
 // framework with a bundled `onEvent` handler (mirrors registry.ts). Workload-
 // identity create/delete are synchronous, so no `isComplete` poller is needed.
 import * as path from 'path';
-import { CustomResource, Duration, Stack } from 'aws-cdk-lib';
+import { ArnFormat, CustomResource, Duration, Stack } from 'aws-cdk-lib';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import { Architecture, Runtime } from 'aws-cdk-lib/aws-lambda';
 import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
@@ -165,23 +165,72 @@ export class LinearIdentityVault extends Construct {
   /**
    * Grant a principal the data-plane permissions to mint a Linear OAuth token
    * for a user via this workload identity (3LO USER_FEDERATION). Used by the
-   * token resolvers (webhook processor, orchestrator) and the agent session role.
+   * token resolvers (webhook processor, orchestrator) and the agent runtime role.
    *
    * `GetWorkloadAccessTokenForUserId` mints the user-bound workload token (spike
    * F2: USER_FEDERATION requires a user-bound token, not a plain one), and
    * `GetResourceOauth2Token` exchanges it for the Linear access token.
+   *
+   * **Resource scoping is service-dictated, and was live-corrected.** An earlier
+   * revision scoped both actions to the named workload-identity ARN, which the
+   * service rejected:
+   *
+   *     not authorized to perform: bedrock-agentcore:GetWorkloadAccessTokenForUserId
+   *     on resource: …:workload-identity-directory/default
+   *
+   * `GetWorkloadAccessTokenForUserId` authorizes against the workload-identity
+   * **directory** (`workload-identity-directory/default`), not the named identity
+   * beneath it, so the directory ARN must be granted (the named-identity ARN is
+   * kept alongside it — harmless, and future-proof if the service tightens to
+   * per-identity). `GetResourceOauth2Token` authorizes against the token-vault
+   * **credential provider**, so it is scoped to this account's oauth2 providers
+   * rather than `*`. Unit tests assert the ARN we *chose*, so only a live run
+   * surfaces a mismatch — see the deploy verification on #809.
    */
   public grantMintToken(grantee: iam.IGrantable): void {
+    const stack = Stack.of(this);
+    const workloadDirectoryArn = stack.formatArn({
+      service: 'bedrock-agentcore',
+      resource: 'workload-identity-directory',
+      resourceName: 'default',
+    });
+    // Provider names are per-workspace (`bgagent-linear-oauth-<slug>`) and created
+    // at onboarding time by `bgagent linear vault-setup`, so they are unknown at
+    // synth — scope to the account's oauth2 credential providers in the default
+    // token vault rather than a single name.
+    const credentialProviderArn = stack.formatArn({
+      service: 'bedrock-agentcore',
+      resource: 'token-vault',
+      resourceName: 'default/oauth2credentialprovider/*',
+    });
+
     grantee.grantPrincipal.addToPrincipalPolicy(
       new iam.PolicyStatement({
-        actions: [
-          'bedrock-agentcore:GetWorkloadAccessTokenForUserId',
-          'bedrock-agentcore:GetResourceOauth2Token',
+        actions: ['bedrock-agentcore:GetWorkloadAccessTokenForUserId'],
+        resources: [workloadDirectoryArn, this.workloadIdentityArn],
+      }),
+    );
+    grantee.grantPrincipal.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        actions: ['bedrock-agentcore:GetResourceOauth2Token'],
+        resources: [workloadDirectoryArn, this.workloadIdentityArn, credentialProviderArn],
+      }),
+    );
+    // The vault stores each provider's client secret in a service-owned secret
+    // named `bedrock-agentcore-identity!…`; resolving a token reads it through
+    // the caller's credentials, so without this the exchange fails on
+    // GetSecretValue (ADR-016 P1 notes this same grant).
+    grantee.grantPrincipal.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        actions: ['secretsmanager:GetSecretValue'],
+        resources: [
+          stack.formatArn({
+            service: 'secretsmanager',
+            resource: 'secret',
+            arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+            resourceName: 'bedrock-agentcore-identity!*',
+          }),
         ],
-        // Data-plane token calls authorize against the workload-identity ARN;
-        // the credential-provider name is a request parameter, not an ARN
-        // segment, so it cannot be scoped further here.
-        resources: [this.workloadIdentityArn],
       }),
     );
   }

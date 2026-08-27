@@ -112,29 +112,38 @@ describe('LinearIdentityVault construct', () => {
     });
   });
 
-  test('grantMintToken adds ONLY the token data-plane actions, scoped to the workload identity ARN', () => {
+  test('grantMintToken grants the token data-plane actions on the SERVICE-REQUIRED resources', () => {
     const { vault, stack } = build();
     const role = new iam.Role(stack, 'Consumer', { assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com') });
     vault.grantMintToken(role);
     const t2 = Template.fromStack(stack);
-    t2.hasResourceProperties('AWS::IAM::Policy', {
-      PolicyDocument: {
-        Statement: Match.arrayWith([
-          Match.objectLike({
-            Action: [
-              'bedrock-agentcore:GetWorkloadAccessTokenForUserId',
-              'bedrock-agentcore:GetResourceOauth2Token',
-            ],
-          }),
-        ]),
-      },
-    });
-    // The grant must NOT hand out control-plane create/delete.
     const consumerPolicy = Object.values(t2.findResources('AWS::IAM::Policy')).find(p =>
       JSON.stringify(p.Properties.Roles ?? '').includes('Consumer'),
     );
-    const consumerActions = JSON.stringify(consumerPolicy?.Properties.PolicyDocument.Statement ?? []);
-    expect(consumerActions).not.toContain('CreateWorkloadIdentity');
-    expect(consumerActions).not.toContain('DeleteWorkloadIdentity');
+    const rendered = JSON.stringify(consumerPolicy?.Properties.PolicyDocument.Statement ?? []);
+
+    // Both token actions present.
+    expect(rendered).toContain('bedrock-agentcore:GetWorkloadAccessTokenForUserId');
+    expect(rendered).toContain('bedrock-agentcore:GetResourceOauth2Token');
+
+    // GetWorkloadAccessTokenForUserId authorizes against the workload-identity
+    // DIRECTORY. Granting only the named identity produced a live AccessDenied
+    // ("not authorized … on resource: …/workload-identity-directory/default"),
+    // so the bare directory ARN must be present — this is the regression guard.
+    expect(rendered).toContain('workload-identity-directory/default');
+    // GetResourceOauth2Token authorizes against the token-vault credential
+    // provider; names are created at onboarding time so the grant is scoped to
+    // this account's oauth2 providers rather than '*'.
+    expect(rendered).toContain('token-vault/default/oauth2credentialprovider/*');
+    // The vault reads each provider's client secret through the caller.
+    expect(rendered).toContain('bedrock-agentcore-identity!*');
+
+    // Still least-privilege: no control-plane lifecycle, no wildcard resource.
+    expect(rendered).not.toContain('CreateWorkloadIdentity');
+    expect(rendered).not.toContain('DeleteWorkloadIdentity');
+    expect(rendered).not.toContain('CreateOauth2CredentialProvider');
+    expect(consumerPolicy?.Properties.PolicyDocument.Statement).toEqual(
+      expect.not.arrayContaining([expect.objectContaining({ Resource: '*' })]),
+    );
   });
 });
