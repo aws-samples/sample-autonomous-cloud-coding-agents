@@ -18,6 +18,7 @@
  */
 
 import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { GetCommand, QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { captureScreenshot } from './shared/agentcore-browser';
 import { resolveGitHubToken } from './shared/context-hydration';
 import { upsertTaskComment } from './shared/github-comment';
@@ -25,12 +26,26 @@ import {
   type GitHubDeploymentStatusPayload,
   validateDeploymentStatusPayload,
 } from './shared/github-deployment-status';
-import { postIssueComment } from './shared/linear-feedback';
-import { extractLinearIdentifier, findLinearIssueByIdentifier } from './shared/linear-issue-lookup';
+import { renderPreviewBlock } from './shared/iteration-reply';
+import { appendOnceToComment, postIssueComment } from './shared/linear-feedback';
+import {
+  extractLinearIdentifier,
+  extractLinearIdentifierFromBranch,
+  findLinearIssueByIdentifier,
+} from './shared/linear-issue-lookup';
 import { logger } from './shared/logger';
-import { buildScreenshotKey, encodeMarkdownUrl, isAllowedScreenshotUrl } from './shared/screenshot-url';
+import { isIntegrationNode } from './shared/orchestration-integration-node';
+import { buildScreenshotKey, encodeMarkdownUrl, extractTaskIdFromBranch, isAllowedScreenshotUrl } from './shared/screenshot-url';
+import { makeClient, makeDocClient } from './shared/ua';
 
-const s3 = new S3Client({});
+const s3 = makeClient(S3Client);
+const ddb = makeDocClient();
+// Optional — when set, the processor persists the screenshot's public URL onto
+// the deploy task's TaskRecord (keyed by the taskId in the deploy branch) so
+// the orchestration reconciler can embed the integration node's combined
+// preview in the parent epic panel. Unset → persistence is skipped (the PR +
+// Linear comments still post).
+const TASK_TABLE = process.env.TASK_TABLE_NAME;
 
 const SCREENSHOT_BUCKET = process.env.SCREENSHOT_BUCKET_NAME!;
 // CloudFront distribution domain — `<dist>.cloudfront.net`. Used as
@@ -41,7 +56,7 @@ const SCREENSHOT_PUBLIC_HOST = process.env.SCREENSHOT_PUBLIC_HOST!;
 const GITHUB_TOKEN_SECRET_ARN = process.env.GITHUB_TOKEN_SECRET_ARN!;
 // Optional — when set, the processor also tries to post the
 // screenshot comment onto a linked Linear issue. Resolved from the
-// GitHub PR title/body via a Linear-identifier regex (e.g. `ABCA-42`),
+// GitHub PR title/body via a Linear-identifier regex (e.g. `ENG-42`),
 // then looked up across all active workspaces in the registry.
 const LINEAR_WORKSPACE_REGISTRY_TABLE = process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME;
 
@@ -106,7 +121,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   // + S3 PUT + comment POST. Without this, findPullRequestForShaWithRetry
   // could spend ~35s before captureScreenshot starts its independent 60s
   // budget — totaling ~95s + S3 + comment, which exceeds the 120s Lambda
-  // timeout on slow-GitHub days. (theagenticguy PR-241 review item B1.)
+  // timeout on slow-GitHub days.
   const deadline = Date.now() + TOTAL_BUDGET_MS;
   const remaining = (): number => Math.max(0, deadline - Date.now());
 
@@ -141,8 +156,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   // SSRF defense-in-depth: the path is HMAC-gated and AgentCore Browser
   // sits outside the customer VPC, but whatever renders ends up on a
   // public CloudFront URL. Reject obviously-wrong shapes (non-https,
-  // literal-IP, link-local, loopback) at the boundary. (theagenticguy
-  // PR-241 review.)
+  // literal-IP, link-local, loopback) at the boundary.
   if (!isAllowedScreenshotUrl(previewUrl)) {
     logger.warn('Rejected deployment_status preview URL on allowlist', {
       repo,
@@ -179,7 +193,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   if (!pr) {
     // Promote to error: "no PR after the retry budget" is the shape of
     // a systematic break (deploy-without-PR, token regression, GitHub
-    // outage). theagenticguy review: warn-level was invisible. Add a
+    // outage). At warn level it went unnoticed. Add a
     // tagged event_id for the CloudWatch metric filter / alarm.
     logger.error('No open PR found for SHA after retries — skipping screenshot post', {
       event: 'screenshot.pr_lookup_exhausted',
@@ -249,6 +263,19 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   const publicUrl = `https://${SCREENSHOT_PUBLIC_HOST}/${key}`;
   const commentBody = renderCommentBody(publicUrl, previewUrl);
 
+  // Persist the screenshot + preview URLs on the deploy task's record
+  // (keyed by the taskId in the branch) so the orchestration reconciler can
+  // embed the integration node's combined preview in the parent epic panel.
+  // Best-effort, before the comment posts so a comment-post failure doesn't
+  // skip it. The return tells us whether this is the synthetic integration
+  // node — whose screenshot belongs in the panel only, never as a standalone
+  // Linear comment on the parent epic.
+  const { isIntegrationNode: isIntegrationDeploy, isIteration: isIterationDeploy } = await persistScreenshotUrl(
+    pr.headRefName,
+    publicUrl,
+    previewUrl,
+  );
+
   try {
     const result = await upsertTaskComment({
       repo,
@@ -270,8 +297,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     // Promoted from warn → error: by this point we've already paid for
     // the AgentCore session + S3 PUT, so a comment-post failure is the
     // ONLY signal the operator gets that the screenshot wasn't
-    // delivered. tagged event_id for the CloudWatch metric filter.
-    // (theagenticguy PR-241 review.)
+    // delivered. Tagged event_id for the CloudWatch metric filter.
     logger.error('Failed to post screenshot PR comment', {
       event: 'screenshot.pr_comment_post_failed',
       error_id: 'SCREENSHOT_PR_COMMENT_POST_FAILED',
@@ -285,32 +311,73 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   // Best-effort Linear comment. The GitHub PR comment above is the
   // load-bearing artifact; the Linear comment is bonus surface for
   // reviewers who live in Linear. Only fires when the registry table
-  // is configured AND the PR title/body carries a Linear identifier.
-  if (LINEAR_WORKSPACE_REGISTRY_TABLE) {
-    const identifier = extractLinearIdentifier(pr.title) ?? extractLinearIdentifier(pr.body);
+  // is configured AND the PR carries a Linear identifier.
+  //
+  // The synthetic integration node has no Linear sub-issue of its
+  // own, so a Linear post here would resolve the parent-epic identifier from
+  // the PR title and land a "🖼️ Preview screenshot" comment ON THE PARENT —
+  // cluttering the maturing panel (which already embeds the combined preview
+  // via the persisted screenshot_url). Skip the Linear post for the integration
+  // node; the panel is the only Linear surface for the combined result.
+  if (LINEAR_WORKSPACE_REGISTRY_TABLE && !isIntegrationDeploy) {
+    // Branch-name first — it deterministically encodes this PR's own
+    // issue (`bgagent/{taskId}/eng-151-...`). Title/body are ambiguous
+    // fallbacks: in a stacked orchestration the body often names a
+    // predecessor issue before the one the PR closes, and
+    // `extractLinearIdentifier` returns the first match in document
+    // order — which would misroute the screenshot to the predecessor.
+    const identifier =
+      extractLinearIdentifierFromBranch(pr.headRefName)
+      ?? extractLinearIdentifier(pr.title)
+      ?? extractLinearIdentifier(pr.body);
     if (identifier) {
       const linearIssue = await findLinearIssueByIdentifier(identifier, LINEAR_WORKSPACE_REGISTRY_TABLE);
       if (linearIssue) {
-        const postResult = await postIssueComment(
-          {
-            linearWorkspaceId: linearIssue.linearWorkspaceId,
-            registryTableName: LINEAR_WORKSPACE_REGISTRY_TABLE,
-          },
-          linearIssue.issueId,
-          renderLinearCommentBody(publicUrl, previewUrl),
-        );
-        if (postResult.ok) {
-          logger.info('Posted screenshot comment to Linear issue', {
-            identifier,
-            linear_issue_id: linearIssue.issueId,
-            workspace_slug: linearIssue.workspaceSlug,
-          });
+        const ctx = {
+          linearWorkspaceId: linearIssue.linearWorkspaceId,
+          registryTableName: LINEAR_WORKSPACE_REGISTRY_TABLE,
+        };
+        if (isIterationDeploy) {
+          // The preview belongs IN the iteration's maturing reply,
+          // not a standalone comment. The screenshot capture is async and usually
+          // lands AFTER the reply settled (✅ + cost), so we APPEND the preview
+          // link to that reply now (in place). Find the most-recent iteration
+          // reply id for this issue and edit it; idempotent via the [preview]
+          // marker so a webhook redelivery won't double-append.
+          const iter = await findIterationReplyId(linearIssue.issueId, sha);
+          if (iter) {
+            // (1) Durably persist the screenshot onto the ITERATION task so the
+            // terminal-settle renders the thumbnail from a strongly-consistent
+            // DDB read — race-free against this comment edit, which used to
+            // clobber the preview.
+            await persistScreenshotOnIterationTask(iter.taskId, publicUrl, previewUrl);
+            // (2) Also append to the reply now, for the case where the deploy is
+            // slow and the settle already ran (the append then wins). Embed the
+            // captured PNG as a clickable thumbnail linking to the live deploy —
+            // same shape as the first-task 🖼️ comment, NOT a bare text link.
+            // previewUrl is payload-derived → markdown-escape (publicUrl is ours).
+            const previewBlock = renderPreviewBlock(publicUrl, encodeMarkdownUrl(previewUrl));
+            const appended = await appendOnceToComment(ctx, iter.replyId, `\n\n${previewBlock}`, '[preview]');
+            logger.info('Appended preview thumbnail to iteration reply', {
+              linear_issue_id: linearIssue.issueId, reply_id: iter.replyId, task_id: iter.taskId, appended,
+            });
+          } else {
+            logger.info('Iteration deploy but no reply id found — skipping preview append', {
+              linear_issue_id: linearIssue.issueId,
+            });
+          }
         } else {
-          logger.warn('Failed to post screenshot Linear comment (non-fatal)', {
-            event: 'screenshot.linear_comment_post_failed',
-            identifier,
-            linear_issue_id: linearIssue.issueId,
-          });
+          // First deploy / non-iteration: post the headline 🖼️ standalone comment.
+          const postResult = await postIssueComment(ctx, linearIssue.issueId, renderLinearCommentBody(publicUrl, previewUrl));
+          if (postResult.ok) {
+            logger.info('Posted screenshot comment to Linear issue', {
+              identifier, linear_issue_id: linearIssue.issueId, workspace_slug: linearIssue.workspaceSlug,
+            });
+          } else {
+            logger.warn('Failed to post screenshot Linear comment (non-fatal)', {
+              event: 'screenshot.linear_comment_post_failed', identifier, linear_issue_id: linearIssue.issueId,
+            });
+          }
         }
       } else {
         logger.info('Linear identifier did not resolve to an issue — skipping Linear post', {
@@ -324,6 +391,94 @@ export async function handler(event: ProcessorEvent): Promise<void> {
 }
 
 /**
+ * Find the most-recent iteration's maturing-reply comment id AND
+ * its task id for a Linear issue. An @bgagent iteration persists
+ * ``iteration_reply_comment_id`` on its task's channel_metadata. The screenshot
+ * webhook (resolving the issue by PR identifier) uses the reply id to append the
+ * preview to that reply, and the task id to persist the screenshot DURABLY onto
+ * the iteration task — so the terminal-settle renders the preview from a
+ * strongly-consistent DDB read rather than racing the (eventually-consistent)
+ * Linear comment edit, which used to clobber the preview.
+ *
+ * Attribution: this deploy's commit ``sha`` is matched to the iteration task that
+ * PUSHED it (``head_sha``), so when two iterations overlap on one PR the preview
+ * lands on the RIGHT reply — not just the newest. ``head_sha`` is a top-level
+ * field (NOT in the LinearIssueIndex INCLUDE projection, which can't be changed
+ * in place), so we GetItem ``head_sha`` per reply-bearing candidate (bounded by
+ * iterations-per-issue, newest-first so the common single-iteration case is one
+ * read). Falls back to the newest reply-bearing task when no head_sha matches
+ * (pre-fix tasks that never stored it, or a non-PR deploy). Null when none.
+ */
+async function findIterationReplyId(
+  linearIssueId: string,
+  deploySha?: string,
+): Promise<{ replyId: string; taskId: string } | null> {
+  if (!TASK_TABLE) return null;
+  try {
+    const res = await ddb.send(new QueryCommand({
+      TableName: TASK_TABLE,
+      IndexName: 'LinearIssueIndex',
+      KeyConditionExpression: 'linear_issue_id = :iid',
+      ExpressionAttributeValues: { ':iid': linearIssueId },
+      ScanIndexForward: false, // newest first (SK = created_at)
+    }));
+    const candidates = ((res.Items ?? []) as Array<{ task_id?: string; channel_metadata?: { iteration_reply_comment_id?: string } }>)
+      .map((item) => ({ taskId: item.task_id, replyId: item.channel_metadata?.iteration_reply_comment_id }))
+      .filter((c): c is { taskId: string; replyId: string } =>
+        typeof c.taskId === 'string' && typeof c.replyId === 'string' && c.replyId.length > 0);
+    if (candidates.length === 0) return null;
+
+    // Prefer the task whose pushed head_sha matches this deploy's commit (correct
+    // attribution under overlapping iterations). Walk newest-first; GetItem the
+    // head_sha per candidate. Stop at the first match.
+    if (deploySha) {
+      for (const c of candidates) {
+        const got = await ddb.send(new GetCommand({
+          TableName: TASK_TABLE, Key: { task_id: c.taskId }, ProjectionExpression: 'head_sha',
+        }));
+        if (got.Item?.head_sha === deploySha) return { replyId: c.replyId, taskId: c.taskId };
+      }
+    }
+    // No SHA match (pre-fix task / non-PR deploy) → newest reply-bearing task.
+    return { replyId: candidates[0].replyId, taskId: candidates[0].taskId };
+  } catch (err) {
+    logger.warn('findIterationReplyId query failed (non-fatal)', {
+      linear_issue_id: linearIssueId, error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
+/**
+ * Durably persist the captured screenshot URLs onto the ITERATION
+ * task record (the one carrying the reply id), so the terminal-settle can render
+ * the preview thumbnail from a strongly-consistent DDB read. This is the
+ * race-free half of the fix: an @bgagent iteration's deploy pushes the SAME PR
+ * branch, so ``persistScreenshotUrl`` (keyed by branch → original task) never
+ * touches the iteration task — the settle then had no screenshot and the only
+ * preview writer was the comment append, which the settle then clobbered.
+ * Best-effort; guarded by attribute_exists so a TTL eviction can't zombie-create.
+ */
+async function persistScreenshotOnIterationTask(taskId: string, publicUrl: string, previewUrl: string): Promise<void> {
+  if (!TASK_TABLE) return;
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: TASK_TABLE,
+      Key: { task_id: taskId },
+      UpdateExpression: 'SET screenshot_url = :u, screenshot_preview_url = :p',
+      ConditionExpression: 'attribute_exists(task_id)',
+      ExpressionAttributeValues: { ':u': publicUrl, ':p': previewUrl },
+    }));
+  } catch (err) {
+    if ((err as { name?: string })?.name !== 'ConditionalCheckFailedException') {
+      logger.warn('persistScreenshotOnIterationTask failed (non-fatal)', {
+        task_id: taskId, error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+}
+
+/**
  * Open PR shape we extract from the GitHub commit-pulls API. Title +
  * body are used downstream by the Linear issue lookup; the others go
  * into log lines for debugging.
@@ -332,6 +487,12 @@ interface OpenPr {
   readonly number: number;
   readonly title: string;
   readonly body: string;
+  /**
+   * Head branch ref (e.g. `bgagent/{taskId}/eng-151-...`). The
+   * authoritative source for the linked Linear issue — see
+   * `extractLinearIdentifierFromBranch`.
+   */
+  readonly headRefName: string;
 }
 
 /**
@@ -343,7 +504,7 @@ interface OpenPr {
  *
  * Schedule: 0s, 5s, 10s, 20s — covers the observed gap with one
  * generous bonus retry. Capped by `budgetMs` so the caller can hand
- * over only what it can afford to spend (B1: shared deadline). Returns
+ * over only what it can afford to spend off the shared deadline. Returns
  * null on exhaustion (no PR yet) or budget timeout.
  */
 async function findPullRequestForShaWithRetry(
@@ -382,9 +543,9 @@ async function findPullRequestForShaWithRetry(
  * "List pull requests associated with a commit" GitHub API
  * (https://docs.github.com/rest/commits/commits#list-pull-requests-associated-with-a-commit).
  *
- * Returns the first OPEN PR (with title/body), or null if none.
- * Closed/merged PRs are filtered out — v1 only screenshots active
- * reviews.
+ * Returns the OPEN PR that the deploy is *for* (head SHA == `sha`), or
+ * the first open PR as a fallback, or null if none. Closed/merged PRs
+ * are filtered out — v1 only screenshots active reviews.
  */
 async function findPullRequestForSha(
   repo: string,
@@ -454,17 +615,93 @@ async function findPullRequestForSha(
     state?: string;
     title?: string;
     body?: string | null;
+    head?: { ref?: string; sha?: string } | null;
   }>;
-  const open = pulls.find((p) => p.state === 'open' && typeof p.number === 'number');
-  if (!open) return null;
+  const openPulls = pulls.filter((p) => p.state === 'open' && typeof p.number === 'number');
+  if (openPulls.length === 0) return null;
+  // Prefer the PR whose own head is this SHA — the PR that introduced the
+  // commit. For a stacked PR chain the commit-pulls API also lists every
+  // PR stacked on top (their history contains the commit); routing reads
+  // the selected PR's branch, so we must pick its true owner. Fall back to
+  // the first open PR for non-head SHAs (e.g. a merge/base commit).
+  const owner = openPulls.find((p) => p.head?.sha === sha) ?? openPulls[0];
   return {
-    number: open.number!,
-    title: open.title ?? '',
-    body: open.body ?? '',
+    number: owner.number!,
+    title: owner.title ?? '',
+    body: owner.body ?? '',
+    headRefName: owner.head?.ref ?? '',
   };
 }
 
 /** Render the PR comment body. */
+/**
+ * Persist the captured screenshot's public URL onto the deploy task's
+ * TaskRecord, so the orchestration reconciler can embed the integration node's
+ * combined preview in the parent epic panel. Keyed by the taskId encoded in
+ * the deploy branch (``bgagent/{taskId}/…``). Best-effort and never throws —
+ * a non-ABCA branch (no taskId), an unset table, or a vanished record (TTL)
+ * just skips persistence; the PR + Linear comments are the load-bearing
+ * artifacts. Conditional on ``attribute_exists`` so we never resurrect a
+ * TTL-reaped row.
+ */
+async function persistScreenshotUrl(
+  branchName: string,
+  publicUrl: string,
+  previewUrl: string,
+): Promise<{ isIntegrationNode: boolean; isIteration: boolean }> {
+  const result = { isIntegrationNode: false, isIteration: false };
+  if (!TASK_TABLE) return result;
+  const taskId = extractTaskIdFromBranch(branchName);
+  if (!taskId) return result;
+  try {
+    // Persist BOTH the captured image URL and the live preview-deploy URL so
+    // the reconciler can render a clickable combined-preview deep-link in the
+    // panel. Return-on-values so we learn whether this deploy task
+    // is a synthetic integration node WITHOUT a second Get: the
+    // integration node's screenshot belongs in the PANEL only — it must NOT
+    // also post a standalone Linear comment on the parent epic.
+    // ALL_OLD so we can see the PRE-update state: whether a screenshot was
+    // already posted for this task (→ this is a RE-DEPLOY, i.e. an iteration push
+    // on the same branch), and the channel_metadata (unchanged by this write).
+    const upd = await ddb.send(new UpdateCommand({
+      TableName: TASK_TABLE,
+      Key: { task_id: taskId },
+      UpdateExpression: 'SET screenshot_url = :u, screenshot_preview_url = :p',
+      ConditionExpression: 'attribute_exists(task_id)',
+      ExpressionAttributeValues: { ':u': publicUrl, ':p': previewUrl },
+      ReturnValues: 'ALL_OLD',
+    }));
+    const subIssueId = upd.Attributes?.channel_metadata?.orchestration_sub_issue_id;
+    result.isIntegrationNode = typeof subIssueId === 'string' && isIntegrationNode(subIssueId);
+    // Suppress the standalone "🖼️ Preview screenshot" Linear comment
+    // on a RE-DEPLOY. An @bgagent iteration pushes to the SAME PR branch, so the
+    // task resolved by branch is the original (no trigger_comment_id) — the
+    // reliable signal is that a screenshot_url was ALREADY set on this task before
+    // this write. First deploy: no prior screenshot → post the headline 🖼️. Any
+    // later push (iteration): prior screenshot present → suppress (the maturing
+    // reply already carries the [preview](…) link). Also suppress when the task is
+    // itself an iteration task (carries trigger_comment_id).
+    const hadPriorScreenshot = typeof upd.Attributes?.screenshot_url === 'string';
+    const isIterationTask = typeof upd.Attributes?.channel_metadata?.trigger_comment_id === 'string';
+    result.isIteration = hadPriorScreenshot || isIterationTask;
+    logger.info('Persisted screenshot_url on task record', {
+      task_id: taskId,
+      public_url: publicUrl,
+      is_integration_node: result.isIntegrationNode,
+      is_iteration: result.isIteration,
+    });
+  } catch (err) {
+    // ConditionalCheckFailed = the task row is gone (TTL); anything else is a
+    // transient DDB error. Either way the comments still posted — log + move on.
+    logger.warn('Failed to persist screenshot_url (non-fatal)', {
+      event: 'screenshot.persist_failed',
+      task_id: taskId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+  return result;
+}
+
 function renderCommentBody(publicUrl: string, previewUrl: string): string {
   // previewUrl is payload-derived; percent-encode its parens so a crafted
   // path can't break out of the markdown link and inject content into a

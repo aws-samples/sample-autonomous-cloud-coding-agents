@@ -26,6 +26,7 @@ import {
   invalidateJiraOauthCache,
   isTokenExpiring,
   resolveJiraOauthToken,
+  resolveJiraOutboundAuth,
   type StoredOauthToken,
 } from '../../../src/handlers/shared/jira-oauth-resolver';
 
@@ -121,6 +122,7 @@ describe('resolveJiraOauthToken', () => {
 
     const result = await resolveJiraOauthToken('cloud-uuid-1', REGISTRY_TABLE, clients);
 
+    expect(clients.ddbSend.mock.calls[0][0].input.ConsistentRead).toBe(true);
     expect(result).toEqual({
       accessToken: 'jira_oauth_happy',
       scope: stored.scope,
@@ -575,6 +577,149 @@ describe('resolveJiraOauthToken', () => {
   });
 });
 
+describe('resolveJiraOutboundAuth', () => {
+  beforeEach(() => {
+    _resetCachesForTesting();
+  });
+
+  test('prefers a complete Forge app actor even when the OAuth token is expired', async () => {
+    const clients = makeFakeClients({
+      registryItem: {
+        site_url: 'https://acme.atlassian.net',
+        oauth_secret_arn: 'arn:secret:acme',
+        status: 'active',
+      },
+      storedToken: makeStoredToken({
+        expires_at: new Date(Date.now() - 60_000).toISOString(),
+        app_actor_proxy_url: 'https://install.webtrigger.atlassian.app/public/trigger',
+        app_actor_shared_secret: 's'.repeat(64),
+        app_actor_configured_at: new Date().toISOString(),
+      }),
+    });
+    const fetchImpl = jest.fn();
+
+    const result = await resolveJiraOutboundAuth('cloud-uuid-1', REGISTRY_TABLE, {
+      ...clients,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    expect(result).toEqual({
+      kind: 'app',
+      appActor: {
+        proxyUrl: 'https://install.webtrigger.atlassian.app/public/trigger',
+        sharedSecret: 's'.repeat(64),
+      },
+      siteUrl: 'https://acme.atlassian.net',
+      oauthSecretArn: 'arn:secret:acme',
+    });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  test('uses OAuth only when no app-actor configuration exists', async () => {
+    const clients = makeFakeClients({
+      registryItem: {
+        site_url: 'https://acme.atlassian.net',
+        oauth_secret_arn: 'arn:secret:acme',
+        status: 'active',
+      },
+      storedToken: makeStoredToken(),
+    });
+
+    const result = await resolveJiraOutboundAuth('cloud-uuid-1', REGISTRY_TABLE, clients);
+
+    expect(result).toMatchObject({
+      kind: 'oauth',
+      accessToken: 'jira_oauth_default',
+      oauthSecretArn: 'arn:secret:acme',
+    });
+  });
+
+  test('re-reads the secret so cached OAuth cannot mask newly configured app credentials', async () => {
+    const options = {
+      registryItem: {
+        site_url: 'https://acme.atlassian.net',
+        oauth_secret_arn: 'arn:secret:acme',
+        status: 'active',
+      },
+      storedToken: makeStoredToken(),
+    };
+    const clients = makeFakeClients(options);
+    await resolveJiraOauthToken('cloud-uuid-1', REGISTRY_TABLE, clients);
+
+    options.storedToken = makeStoredToken({
+      app_actor_proxy_url: 'https://install.webtrigger.atlassian.app/public/trigger',
+      app_actor_shared_secret: 's'.repeat(64),
+      app_actor_configured_at: new Date().toISOString(),
+    });
+    const result = await resolveJiraOutboundAuth('cloud-uuid-1', REGISTRY_TABLE, clients);
+
+    expect(result).toMatchObject({
+      kind: 'app',
+      appActor: {
+        proxyUrl: 'https://install.webtrigger.atlassian.app/public/trigger',
+      },
+    });
+    const getSecretCalls = clients.smSend.mock.calls.filter(
+      (call) => call[0].constructor.name === 'GetSecretValueCommand',
+    );
+    expect(getSecretCalls).toHaveLength(2);
+  });
+
+  test('fails closed instead of using OAuth for partial app configuration', async () => {
+    const clients = makeFakeClients({
+      registryItem: {
+        site_url: 'https://acme.atlassian.net',
+        oauth_secret_arn: 'arn:secret:acme',
+        status: 'active',
+      },
+      storedToken: makeStoredToken({
+        app_actor_proxy_url: 'https://install.webtrigger.atlassian.app/public/trigger',
+        app_actor_configured_at: new Date().toISOString(),
+      }),
+    });
+
+    const result = await resolveJiraOutboundAuth('cloud-uuid-1', REGISTRY_TABLE, clients);
+
+    expect(result).toBeNull();
+  });
+
+  test('rejects a non-Forge proxy URL without OAuth fallback', async () => {
+    const clients = makeFakeClients({
+      registryItem: {
+        site_url: 'https://acme.atlassian.net',
+        oauth_secret_arn: 'arn:secret:acme',
+        status: 'active',
+      },
+      storedToken: makeStoredToken({
+        app_actor_proxy_url: 'https://attacker.example/proxy',
+        app_actor_shared_secret: 's'.repeat(64),
+        app_actor_configured_at: new Date().toISOString(),
+      }),
+    });
+
+    await expect(
+      resolveJiraOutboundAuth('cloud-uuid-1', REGISTRY_TABLE, clients),
+    ).resolves.toBeNull();
+  });
+
+  test('fails closed when only app identity metadata remains', async () => {
+    const clients = makeFakeClients({
+      registryItem: {
+        site_url: 'https://acme.atlassian.net',
+        oauth_secret_arn: 'arn:secret:acme',
+        status: 'active',
+      },
+      storedToken: makeStoredToken({
+        app_actor_account_id: 'app-account-1',
+      }),
+    });
+
+    await expect(
+      resolveJiraOutboundAuth('cloud-uuid-1', REGISTRY_TABLE, clients),
+    ).resolves.toBeNull();
+  });
+});
+
 describe('resolveJiraOauthToken: forceRefresh (reactive-401 path, issue #370)', () => {
   beforeEach(() => {
     _resetCachesForTesting();
@@ -694,6 +839,7 @@ describe('getRegistryRow / parseRegistryRow', () => {
     const send = jest.fn().mockResolvedValue({ Item: undefined });
     const row = await getRegistryRow(asDdb(send), REGISTRY_TABLE, 'cloud-x');
     expect(row).toBeNull();
+    expect(send.mock.calls[0][0].input.ConsistentRead).toBe(true);
   });
 
   test('returns null and logs when DDB throws (non-strict swallows error)', async () => {
@@ -727,6 +873,7 @@ describe('getRegistryRow / parseRegistryRow', () => {
     await expect(getRegistryRowStrict(asDdb(send), REGISTRY_TABLE, 'cloud-x')).rejects.toThrow(
       'DDB throttle',
     );
+    expect(send.mock.calls[0][0].input.ConsistentRead).toBe(true);
   });
 });
 

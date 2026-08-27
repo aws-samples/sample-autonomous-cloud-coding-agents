@@ -35,6 +35,7 @@ export function makeConfigureCommand(): Command {
   return new Command('configure')
     .description('Configure the CLI with API endpoint and Cognito settings')
     .option('--api-url <url>', 'API Gateway base URL')
+    .option('--registry-api-url <url>', 'Agent asset registry API base URL (#246; separate API Gateway)')
     .option('--region <region>', 'AWS region')
     .option('--user-pool-id <id>', 'Cognito User Pool ID')
     .option('--client-id <id>', 'Cognito App Client ID')
@@ -44,7 +45,7 @@ export function makeConfigureCommand(): Command {
       'Read ApiUrl, UserPoolId, and AppClientId from CloudFormation stack outputs',
     )
     .action(async (opts) => {
-      const individualFlagsProvided = opts.apiUrl || opts.region || opts.userPoolId || opts.clientId;
+      const individualFlagsProvided = opts.apiUrl || opts.registryApiUrl || opts.region || opts.userPoolId || opts.clientId;
       if (opts.fromBundle && (individualFlagsProvided || opts.stackName)) {
         throw new CliError(
           '--from-bundle is mutually exclusive with --api-url / --region / --user-pool-id / --client-id / --stack-name.',
@@ -67,12 +68,14 @@ export function makeConfigureCommand(): Command {
           ...providedFields,
           ...(opts.region !== undefined ? { region: opts.region } : {}),
           ...(opts.apiUrl !== undefined ? { api_url: opts.apiUrl } : {}),
+          ...(opts.registryApiUrl !== undefined ? { registry_api_url: opts.registryApiUrl } : {}),
           ...(opts.userPoolId !== undefined ? { user_pool_id: opts.userPoolId } : {}),
           ...(opts.clientId !== undefined ? { client_id: opts.clientId } : {}),
         };
       } else {
         providedFields = {
           ...(opts.apiUrl !== undefined ? { api_url: opts.apiUrl } : {}),
+          ...(opts.registryApiUrl !== undefined ? { registry_api_url: opts.registryApiUrl } : {}),
           ...(opts.region !== undefined ? { region: opts.region } : {}),
           ...(opts.userPoolId !== undefined ? { user_pool_id: opts.userPoolId } : {}),
           ...(opts.clientId !== undefined ? { client_id: opts.clientId } : {}),

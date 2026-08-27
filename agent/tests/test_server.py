@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from typing import Any
@@ -343,6 +344,26 @@ def test_validate_required_params_pr_workflows_require_pr_number():
     )
     assert missing == []
 
+    # Restack (#305) is a PR workflow — pr_number suffices, NO description
+    # required (regression: it previously fell into the non-PR branch and
+    # 400'd on missing issue_number_or_task_description).
+    missing = server._validate_required_params(
+        {
+            "repo_url": "o/r",
+            "resolved_workflow": {"id": "coding/restack-v1", "version": "1.0.0"},
+            "pr_number": "113",
+        }
+    )
+    assert missing == []
+    missing = server._validate_required_params(
+        {
+            "repo_url": "o/r",
+            "resolved_workflow": {"id": "coding/restack-v1", "version": "1.0.0"},
+            "pr_number": "",
+        }
+    )
+    assert missing == ["pr_number"]
+
     # A non-PR workflow needs issue OR description.
     missing = server._validate_required_params(
         {
@@ -629,7 +650,7 @@ class TestExtractTrace:
 
 
 class TestExtractUserId:
-    """K2 Stage 3: ``user_id`` is the platform Cognito ``sub`` threaded
+    """``user_id`` is the platform Cognito ``sub`` threaded
     from the orchestrator. The agent uses it to construct the trace S3
     key ``traces/<user_id>/<task_id>.jsonl.gz``. A non-string value
     must be coerced to empty so a surprise ``None`` / int doesn't flow
@@ -809,3 +830,442 @@ class TestExtractApprovalGateCap:
             self._fake_req(),
         )
         assert params["approval_gate_cap"] is None
+
+
+# --------------------------------------------------------------------------
+# AWS Lambda MicroVMs lifecycle hooks (ADR-021 P1)
+# --------------------------------------------------------------------------
+
+
+READY_HOOK = f"{server.MICROVM_HOOK_PREFIX}/ready"
+RUN_HOOK = f"{server.MICROVM_HOOK_PREFIX}/run"
+
+
+def _run_hook_body(envelope: dict, microvm_id: str = "microvm-abc") -> dict:
+    """Wrap an ABCA payload envelope in the service's ``/run`` request body.
+
+    The service passes ``runHookPayload`` through as an opaque STRING (it never
+    parses it), so the double encoding here is the real wire shape, not a test
+    artifact.
+    """
+    return {"microvmId": microvm_id, "runHookPayload": json.dumps(envelope)}
+
+
+class TestMicrovmReadyHook:
+    """``/ready`` is what makes a MicroVM image buildable at all.
+
+    ``CreateMicrovmImage`` refuses an image that enables any lifecycle hook
+    without ``/ready``, and with the hook enabled but unserved both chipset
+    builds fail ("Ready hook check failed: the application returned a client
+    error (HTTP 4xx) response"). A 200 from a booted server is the whole
+    contract in P1 — deeper warm-up checks are P2's ``/validate``.
+    """
+
+    def test_ready_returns_200_once_the_server_is_up(self, client):
+        r = client.post(READY_HOOK)
+        assert r.status_code == 200
+        assert r.json() == {"status": "ready"}
+
+    def test_ready_is_mounted_under_the_service_hook_prefix(self):
+        assert server.MICROVM_HOOK_PREFIX == "/aws/lambda-microvms/runtime/v1"
+        routes = {getattr(r, "path", None) for r in server.app.routes}
+        assert READY_HOOK in routes
+        assert RUN_HOOK in routes
+
+    def test_ready_does_not_start_a_pipeline(self, client, monkeypatch):
+        # A build hook must never run task work: the snapshot is taken right
+        # after it answers, so anything it starts would be frozen into the image.
+        monkeypatch.setattr(server, "run_task", MagicMock())
+        client.post(READY_HOOK)
+        with server._threads_lock:
+            assert server._active_threads == []
+
+    def test_validate_and_suspend_resume_terminate_are_NOT_served(self, client):
+        # Declaring a hook nothing answers fails the corresponding build or
+        # lifecycle transition, so the construct declares exactly /ready + /run.
+        # This asserts the agent side of that: the others must 404.
+        for hook in ("validate", "suspend", "resume", "terminate"):
+            assert client.post(f"{server.MICROVM_HOOK_PREFIX}/{hook}").status_code == 404
+
+
+class TestMicrovmRunHookInlinePayload:
+    """Inline envelope: ``{"agent_payload": {...}}``.
+
+    The exception rather than the rule — the service caps ``runHookPayload`` at
+    4 096 bytes and a hydrated payload is larger — but it is the branch that
+    proves the payload→pipeline mapping without any S3 involvement.
+    """
+
+    def test_accepts_the_payload_and_starts_the_pipeline_asynchronously(self, client, monkeypatch):
+        started = threading.Event()
+        seen: dict = {}
+
+        def fake_run_task(**kwargs):
+            seen.update(kwargs)
+            started.set()
+
+        monkeypatch.setattr(server, "run_task", fake_run_task)
+        monkeypatch.setattr(server.task_state, "write_terminal", MagicMock())
+
+        r = client.post(
+            RUN_HOOK,
+            json=_run_hook_body(
+                {
+                    "agent_payload": {
+                        "task_id": "t-microvm-1",
+                        "repo_url": "org/repo",
+                        "prompt": "Fix the bug",
+                        "github_token": "ghp_x",
+                        "aws_region": "us-east-1",
+                    }
+                },
+                microvm_id="microvm-inline",
+            ),
+        )
+
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "accepted"
+        assert body["task_id"] == "t-microvm-1"
+        # Echoed so a MicroVM log line can be joined to the control-plane id.
+        assert body["microvm_id"] == "microvm-inline"
+
+        assert started.wait(timeout=5.0), "pipeline thread did not start"
+        # Same mapping the /invocations path performs: prompt→task_description,
+        # model_id→anthropic_model, etc. — one mapper, not two.
+        assert seen["task_id"] == "t-microvm-1"
+        assert seen["repo_url"] == "org/repo"
+        assert seen["task_description"] == "Fix the bug"
+
+    def test_returns_before_the_pipeline_finishes(self, client, monkeypatch):
+        release = threading.Event()
+        entered = threading.Event()
+
+        def slow_run_task(**_kwargs):
+            entered.set()
+            release.wait(timeout=10.0)
+
+        monkeypatch.setattr(server, "run_task", slow_run_task)
+        monkeypatch.setattr(server.task_state, "write_terminal", MagicMock())
+
+        try:
+            r = client.post(
+                RUN_HOOK,
+                json=_run_hook_body(
+                    {"agent_payload": {"task_id": "t-async", "repo_url": "o/r", "prompt": "x"}}
+                ),
+            )
+            # The hook budget is 1-60 s and the pipeline runs for minutes, so the
+            # 200 must land while the pipeline is still executing.
+            assert r.status_code == 200
+            assert entered.wait(timeout=5.0)
+            with server._threads_lock:
+                assert any(t.is_alive() for t in server._active_threads)
+        finally:
+            release.set()
+
+    def test_uses_the_same_model_id_and_prompt_aliases_as_invocations(self, client, monkeypatch):
+        seen: dict = {}
+        started = threading.Event()
+
+        def fake_run_task(**kwargs):
+            seen.update(kwargs)
+            started.set()
+
+        monkeypatch.setattr(server, "run_task", fake_run_task)
+        monkeypatch.setattr(server.task_state, "write_terminal", MagicMock())
+
+        client.post(
+            RUN_HOOK,
+            json=_run_hook_body(
+                {
+                    "agent_payload": {
+                        "task_id": "t-alias",
+                        "repo_url": "o/r",
+                        "prompt": "do it",
+                        "model_id": "anthropic.claude-x",
+                        "cedar_policies": ["p1"],
+                        "channel_source": "linear",
+                    }
+                }
+            ),
+        )
+        assert started.wait(timeout=5.0)
+        assert seen["anthropic_model"] == "anthropic.claude-x"
+        assert seen["cedar_policies"] == ["p1"]
+        assert seen["channel_source"] == "linear"
+
+
+class TestMicrovmRunHookS3Payload:
+    """S3-pointer envelope: ``{"agent_payload_s3_uri": "s3://bucket/key"}``.
+
+    The DOMINANT path on this backend: with a 4 096-byte ``runHookPayload`` cap,
+    any hydrated payload is offloaded to the platform payload bucket and only the
+    pointer travels in the hook body.
+    """
+
+    def test_fetches_the_payload_from_s3_and_starts_the_pipeline(self, client, monkeypatch):
+        seen: dict = {}
+        started = threading.Event()
+
+        def fake_run_task(**kwargs):
+            seen.update(kwargs)
+            started.set()
+
+        fetched: dict = {}
+
+        def fake_fetch(uri):
+            fetched["uri"] = uri
+            return {"task_id": "t-s3", "repo_url": "org/repo", "prompt": "from s3"}
+
+        monkeypatch.setattr(server, "_fetch_microvm_payload_from_s3", fake_fetch)
+        monkeypatch.setattr(server, "run_task", fake_run_task)
+        monkeypatch.setattr(server.task_state, "write_terminal", MagicMock())
+
+        r = client.post(
+            RUN_HOOK,
+            json=_run_hook_body({"agent_payload_s3_uri": "s3://payload-bucket/t-s3/payload.json"}),
+        )
+
+        assert r.status_code == 200
+        assert r.json()["task_id"] == "t-s3"
+        assert fetched["uri"] == "s3://payload-bucket/t-s3/payload.json"
+        assert started.wait(timeout=5.0)
+        assert seen["task_description"] == "from s3"
+
+    def test_parses_bucket_and_key_out_of_the_uri(self, monkeypatch):
+        captured: dict = {}
+
+        class _Body:
+            @staticmethod
+            def read():
+                return b'{"task_id": "t-1", "repo_url": "o/r"}'
+
+        class _S3:
+            @staticmethod
+            def get_object(**kwargs):
+                captured.update(kwargs)
+                return {"Body": _Body}
+
+        import boto3
+
+        monkeypatch.setattr(boto3, "client", lambda *_a, **_k: _S3)
+
+        payload = server._fetch_microvm_payload_from_s3("s3://my-bucket/prefix/t-1/payload.json")
+
+        # Key keeps every slash after the bucket — a naive split would truncate it.
+        assert captured == {"Bucket": "my-bucket", "Key": "prefix/t-1/payload.json"}
+        assert payload == {"task_id": "t-1", "repo_url": "o/r"}
+
+    def test_rejects_a_uri_with_no_key(self, monkeypatch):
+        with pytest.raises(ValueError, match="not a bucket/key URI"):
+            server._fetch_microvm_payload_from_s3("s3://bucket-only")
+
+    def test_rejects_a_non_object_s3_body(self, monkeypatch):
+        class _Body:
+            @staticmethod
+            def read():
+                return b"[1, 2, 3]"
+
+        class _S3:
+            @staticmethod
+            def get_object(**_kwargs):
+                return {"Body": _Body}
+
+        import boto3
+
+        monkeypatch.setattr(boto3, "client", lambda *_a, **_k: _S3)
+
+        with pytest.raises(ValueError, match="expected an object"):
+            server._fetch_microvm_payload_from_s3("s3://b/k")
+
+    def test_s3_failure_returns_500_and_starts_nothing(self, client, monkeypatch):
+        def boom(_uri):
+            raise RuntimeError("AccessDenied")
+
+        monkeypatch.setattr(server, "_fetch_microvm_payload_from_s3", boom)
+        monkeypatch.setattr(server, "run_task", MagicMock())
+
+        r = client.post(RUN_HOOK, json=_run_hook_body({"agent_payload_s3_uri": "s3://bucket/key"}))
+
+        # 500, not 400: the body was well-formed, the fetch was not. Retrying an
+        # identical body CAN help here, unlike a malformed envelope.
+        assert r.status_code == 500
+        assert r.json()["code"] == "MICROVM_RUN_PAYLOAD_UNREADABLE"
+        assert "AccessDenied" in r.json()["message"]
+        with server._threads_lock:
+            assert server._active_threads == []
+
+
+class TestMicrovmRunHookRejections:
+    """Every shape the agent cannot act on must fail LOUDLY, before spawning.
+
+    A hook that 200s on a payload it could not read would start a pipeline with
+    an empty prompt and burn a full task before anyone noticed.
+    """
+
+    @pytest.mark.parametrize(
+        "run_hook_payload,expected_fragment",
+        [
+            ("", "runHookPayload is empty"),
+            ("   ", "runHookPayload is empty"),
+            ("not json at all", "not valid JSON"),
+            ('"a string"', "must be a JSON object"),
+            ("[1,2,3]", "must be a JSON object"),
+            ('{"agent_payload": "not-an-object"}', "agent_payload must be an object"),
+            ('{"agent_payload_s3_uri": "https://example.com/x"}', "must be an s3:// URI"),
+            ('{"agent_payload_s3_uri": 42}', "must be an s3:// URI"),
+            ('{"something_else": 1}', "neither agent_payload nor agent_payload_s3_uri"),
+        ],
+    )
+    def test_returns_400_with_a_named_code(
+        self, client, monkeypatch, run_hook_payload, expected_fragment
+    ):
+        monkeypatch.setattr(server, "run_task", MagicMock())
+
+        r = client.post(
+            RUN_HOOK, json={"microvmId": "microvm-x", "runHookPayload": run_hook_payload}
+        )
+
+        assert r.status_code == 400
+        body = r.json()
+        assert body["code"] == "MICROVM_RUN_PAYLOAD_INVALID"
+        assert expected_fragment in body["message"]
+        with server._threads_lock:
+            assert server._active_threads == []
+
+    def test_a_missing_body_field_is_a_400_not_a_422(self, client, monkeypatch):
+        # Both fields default to "", so an empty body reaches our own structured
+        # rejection instead of FastAPI's 422 — the message ends up in the MicroVM
+        # log group, so it has to be ours.
+        monkeypatch.setattr(server, "run_task", MagicMock())
+        r = client.post(RUN_HOOK, json={})
+        assert r.status_code == 400
+        assert r.json()["code"] == "MICROVM_RUN_PAYLOAD_INVALID"
+
+    def test_incomplete_task_record_reuses_the_invocations_rejection_shape(
+        self, client, monkeypatch
+    ):
+        monkeypatch.setattr(server, "run_task", MagicMock())
+
+        r = client.post(
+            RUN_HOOK,
+            json=_run_hook_body({"agent_payload": {"task_id": "t-bad"}}),
+        )
+
+        assert r.status_code == 400
+        body = r.json()
+        assert body["code"] == "TASK_RECORD_INCOMPLETE"
+        # Same validator as /invocations, so the same missing-field vocabulary.
+        assert "repo_url" in body["missing"]
+        with server._threads_lock:
+            assert server._active_threads == []
+
+
+class TestMicrovmRunHookHeaderPosture:
+    """No AgentCore Runtime sits in front of this call.
+
+    So there is no session-id header and no workload access token — the same
+    env-var identity posture the ECS backend already has (ADR-021 sub-decision 3,
+    identity delta). Asserted so a future reader does not mistake the empty
+    values for a bug.
+    """
+
+    def test_session_id_and_workload_token_resolve_empty(self, client, monkeypatch):
+        seen: dict = {}
+        started = threading.Event()
+
+        def fake_run_task(**kwargs):
+            seen.update(kwargs)
+            started.set()
+
+        monkeypatch.setattr(server, "run_task", fake_run_task)
+        monkeypatch.setattr(server.task_state, "write_terminal", MagicMock())
+
+        client.post(
+            RUN_HOOK,
+            json=_run_hook_body(
+                {"agent_payload": {"task_id": "t-hdr", "repo_url": "o/r", "prompt": "x"}}
+            ),
+        )
+        assert started.wait(timeout=5.0)
+        # run_task never receives the token/session (they are consumed by
+        # _run_task_background), so assert via the extractor instead.
+        fake_request: Any = _FakeRequest()
+        params = server._extract_invocation_params(
+            {"task_id": "t-hdr", "repo_url": "o/r", "prompt": "x"}, fake_request
+        )
+        assert params["session_id"] == ""
+        assert params["workload_access_token"] == ""
+
+
+class TestInvocationParamContract:
+    """The invocation boundary is wired as:
+
+        params = _extract_invocation_params(inp, request)   # a dict
+        _run_task_background(**params)                       # kwargs unpack
+
+    The ONLY thing keeping these in sync is that every dict key is a valid
+    parameter name of ``_run_task_background`` (and vice-versa for required
+    fields). A mismatch is invisible until runtime and crashes EVERY task
+    with a ``NameError`` / ``TypeError`` — exactly the stacked-child regression
+    (#247) where ``base_branch`` was passed to ``run_task`` but never extracted
+    into the params dict. These tests lock that contract structurally so
+    the next field added on one side but not the other fails in CI.
+    """
+
+    def _fake_req(self) -> Any:
+        return _FakeRequest()
+
+    def _payload(self, **extra):
+        return {"repo_url": "org/repo", "task_description": "x", "task_id": "t-1", **extra}
+
+    def test_every_extracted_key_is_a_valid_background_param(self):
+        import inspect
+
+        params = server._extract_invocation_params(self._payload(), self._fake_req())
+        sig = inspect.signature(server._run_task_background)
+        bg_param_names = set(sig.parameters)
+
+        unknown = set(params) - bg_param_names
+        assert not unknown, (
+            f"_extract_invocation_params returns keys that _run_task_background "
+            f"does not accept (would crash on **kwargs unpack): {sorted(unknown)}"
+        )
+
+    def test_extracted_params_unpack_into_background_signature(self):
+        # Binding the extracted dict against the real signature is exactly
+        # what `_run_task_background(**params)` does — this raises TypeError
+        # if a key is unknown OR a required (no-default) param is missing.
+        import inspect
+
+        params = server._extract_invocation_params(self._payload(), self._fake_req())
+        sig = inspect.signature(server._run_task_background)
+        # Should not raise.
+        sig.bind(**params)
+
+    def test_base_branch_and_merge_branches_extracted_and_accepted(self):
+        # The specific stacked-child fields whose omission caused the regression.
+        import inspect
+
+        params = server._extract_invocation_params(
+            self._payload(base_branch="bgagent/taskA/a", merge_branches=["b1", "b2"]),
+            self._fake_req(),
+        )
+        assert params["base_branch"] == "bgagent/taskA/a"
+        assert params["merge_branches"] == ["b1", "b2"]
+        # And they are real parameters of the background runner.
+        bg = set(inspect.signature(server._run_task_background).parameters)
+        assert {"base_branch", "merge_branches"} <= bg
+
+    def test_stacking_fields_default_safely_when_absent(self):
+        params = server._extract_invocation_params(self._payload(), self._fake_req())
+        assert params["base_branch"] is None
+        assert params["merge_branches"] == []
+
+    def test_merge_branches_non_string_entries_filtered(self):
+        params = server._extract_invocation_params(
+            self._payload(merge_branches=["ok", 123, None, "ok2"]),
+            self._fake_req(),
+        )
+        assert params["merge_branches"] == ["ok", "ok2"]

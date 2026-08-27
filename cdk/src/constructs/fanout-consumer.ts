@@ -159,7 +159,11 @@ export class FanOutConsumer extends Construct {
   public readonly dlq: sqs.Queue;
   /** Fires when records land in the fan-out DLQ — a silent fan-out
    *  outage (every Slack/GitHub/Linear notification failing) would
-   *  otherwise accumulate unnoticed for the queue's 14-day retention. */
+   *  otherwise accumulate unnoticed for the queue's 14-day retention.
+   *  Kept as the concrete {@link cloudwatch.Alarm} (matching the
+   *  ``errorAlarm`` precedent in task-orchestrator.ts) so a future
+   *  consumer can call ``addAlarmAction`` — declared on ``Alarm``, not
+   *  the ``IAlarm`` interface — once an SNS channel exists (#117). */
   public readonly dlqDepthAlarm: cloudwatch.Alarm;
 
   constructor(scope: Construct, id: string, props: FanOutConsumerProps) {
@@ -169,7 +173,7 @@ export class FanOutConsumer extends Construct {
 
     this.dlq = new sqs.Queue(this, 'FanOutDlq', {
       // Persistent failures (e.g., dispatcher throws non-caught error
-      // five times in a row) land here for operator inspection.
+      // three times in a row) land here for operator inspection.
       retentionPeriod: Duration.days(DLQ_RETENTION_DAYS),
       enforceSSL: true,
     });
@@ -196,6 +200,11 @@ export class FanOutConsumer extends Construct {
         externalModules: ['@aws-sdk/*'],
       },
     });
+
+    // Solution-attribution component label (#319): fan-out is part of the
+    // orchestration plane. The universal `app/` segment (AWS_SDK_UA_APP_ID) is
+    // set by the stack-level SolutionUaAspect.
+    this.fn.addEnvironment('ABCA_COMPONENT', 'orchestr');
 
     // GitHub dispatcher plumbing. Each grant/env var is guarded so the
     // fan-out plane still deploys cleanly in a dev environment that
@@ -287,8 +296,11 @@ export class FanOutConsumer extends Construct {
       }),
       threshold: 1,
       evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       alarmDescription:
-        'Fan-out DLQ has undelivered task-event records — Slack/GitHub/Linear/Jira notifications are failing',
+        'Fan-out DLQ has undelivered task-event records — Slack/GitHub/Linear/Jira notifications are failing. ' +
+        'Check CloudWatch Logs for the FanOutFn error that caused the DLQ send. ' +
+        'See: https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/117',
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
 

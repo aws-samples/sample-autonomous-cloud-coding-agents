@@ -20,7 +20,6 @@
 import { execFile } from 'child_process';
 import * as readline from 'readline';
 import { CloudFormationClient, DescribeStacksCommand } from '@aws-sdk/client-cloudformation';
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
   CreateSecretCommand,
   GetSecretValueCommand,
@@ -28,13 +27,24 @@ import {
   ResourceExistsException,
   SecretsManagerClient,
 } from '@aws-sdk/client-secrets-manager';
-import { DynamoDBDocumentClient, GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
+import {
+  DynamoDBDocumentClient,
+  GetCommand,
+  PutCommand,
+  ScanCommand,
+  UpdateCommand,
+} from '@aws-sdk/lib-dynamodb';
 import { Command } from 'commander';
 import { ApiClient } from '../api-client';
 import { loadConfig, loadCredentials } from '../config';
 import { CliError } from '../errors';
 import { formatJson } from '../format';
 import { generateInviteCode } from '../invite-code';
+import {
+  JIRA_APP_ACTOR_MIN_SECRET_LENGTH,
+  probeJiraAppActor,
+  validateJiraAppActorProxyUrl,
+} from '../jira-app-actor';
 import {
   buildAuthorizationUrl,
   computeExpiresAt,
@@ -49,6 +59,8 @@ import {
 } from '../jira-oauth';
 import { awaitOauthCallback, CALLBACK_URL } from '../oauth-callback-server';
 import { promptSecret } from '../prompt-secret';
+import { loadActiveRepoConfig } from '../repo-lookup';
+import { makeClient, makeDocClient } from '../ua';
 
 /** Default label that triggers an ABCA task when applied to a Jira issue. */
 const DEFAULT_LABEL_FILTER = 'bgagent';
@@ -113,6 +125,30 @@ export function renderJiraAppTemplate(opts: JiraAppTemplateOptions = {}): string
     '    it as a togglable scope.',
     '  • The localhost callback removes the self-signed-cert browser warning',
     '    and works without a public hostname on the operator\'s machine.',
+    '',
+    'Dedicated outbound app identity (Forge):',
+    '  1. Open integrations/jira-forge-app in this repository.',
+    '  2. Create a scoped token at https://go.atlassian.com/forge-cli-api-token,',
+    '     run `forge login` in an interactive terminal, then:',
+    '       npm ci',
+    '       forge register bgagent --accept-terms',
+    '     The first registration may prompt you to create a Developer Space.',
+    '     Do not commit the operator-owned app.id written to manifest.yml.',
+    '  3. Set a 32+ character secret in the Forge production environment:',
+    '       BGAGENT_PROXY_SECRET="$(openssl rand -hex 32)"',
+    '       forge variables set --encrypt BGAGENT_PROXY_SECRET \\',
+    '         "$BGAGENT_PROXY_SECRET" --environment production',
+    '  4. Deploy and install the production app, then create the URL for the',
+    '     bgagent-outbound trigger. See docs/guides/JIRA_SETUP_GUIDE.md for',
+    '     the exact forge deploy/install/webtrigger commands.',
+    '  5. Register the same secret and URL with ABCA:',
+    '       bgagent jira app-setup <cloud-id> --proxy-url <forge-v2-url> \\',
+    '         --region <region> --stack-name <stack-name>',
+    '     Paste BGAGENT_PROXY_SECRET into the hidden prompt.',
+    '',
+    'The OAuth app remains required for inbound reads and user lookup. Forge',
+    'is the outbound writer: api.asApp().requestJira makes comments and',
+    'workflow transitions appear from the dedicated Jira app account.',
     bar,
   ].join('\n');
 }
@@ -158,12 +194,11 @@ export async function upsertOauthSecret(
   payload: StoredJiraOauthToken,
   cloudId: string,
 ): Promise<string> {
-  const secretString = JSON.stringify(payload);
   try {
     const create = await client.send(new CreateSecretCommand({
       Name: secretName,
       Description: `Jira OAuth token for tenant '${cloudId}'`,
-      SecretString: secretString,
+      SecretString: JSON.stringify(payload),
       Tags: [
         { Key: 'bgagent:integration', Value: 'jira' },
         { Key: 'bgagent:jira:cloud_id', Value: cloudId },
@@ -175,9 +210,35 @@ export async function upsertOauthSecret(
     return create.ARN;
   } catch (err) {
     if (err instanceof ResourceExistsException) {
+      // Re-running OAuth setup must not erase a previously configured Forge
+      // app actor. Preserve only the known app fields from the existing
+      // bundle; all OAuth/webhook fields come from the fresh setup payload.
+      let nextPayload = payload;
+      const existing = await client.send(new GetSecretValueCommand({ SecretId: secretName }));
+      if (existing.SecretString) {
+        try {
+          const value = JSON.parse(existing.SecretString) as Partial<StoredJiraOauthToken>;
+          nextPayload = {
+            ...payload,
+            ...(typeof value.app_actor_proxy_url === 'string'
+              && { app_actor_proxy_url: value.app_actor_proxy_url }),
+            ...(typeof value.app_actor_shared_secret === 'string'
+              && { app_actor_shared_secret: value.app_actor_shared_secret }),
+            ...(typeof value.app_actor_account_id === 'string'
+              && { app_actor_account_id: value.app_actor_account_id }),
+            ...(typeof value.app_actor_display_name === 'string'
+              && { app_actor_display_name: value.app_actor_display_name }),
+            ...(typeof value.app_actor_configured_at === 'string'
+              && { app_actor_configured_at: value.app_actor_configured_at }),
+          };
+        } catch { // nosemgrep: ts-silent-success-masking -- OAuth setup intentionally replaces malformed secret JSON
+          // OAuth setup is the recovery path for malformed secret JSON. It
+          // deliberately replaces the bad value instead of preserving it.
+        }
+      }
       const put = await client.send(new PutSecretValueCommand({
         SecretId: secretName,
-        SecretString: secretString,
+        SecretString: JSON.stringify(nextPayload),
       }));
       if (!put.ARN) {
         throw new CliError(`PutSecretValue returned no ARN for '${secretName}'.`);
@@ -188,78 +249,100 @@ export async function upsertOauthSecret(
   }
 }
 
-/**
- * Marker key embedded in the CDK-generated stack-wide webhook-secret
- * placeholder. A secret whose JSON carries this key has never been
- * configured by an operator, so `setup` is free to seed the real value.
- *
- * MUST stay in sync with `JIRA_WEBHOOK_SECRET_PLACEHOLDER_KEY` in
- * `cdk/src/constructs/jira-integration.ts`. See #368.
- */
-export const JIRA_WEBHOOK_SECRET_PLACEHOLDER_KEY = 'abca_jira_webhook_placeholder';
-
-/**
- * Check whether the JiraWebhookSecret already holds a real, operator-set
- * signing secret (vs the CDK-generated placeholder). Used to decide whether
- * to seed the stack-wide secret on a `setup` run.
- *
- * Atlassian's generic-webhook signing secrets are operator-chosen — they have
- * no fixed prefix like Linear's `lin_wh_`, so we cannot positively recognize a
- * *real* value by shape. Instead we recognize the *placeholder*: the CDK
- * construct seeds an explicit JSON object carrying
- * `JIRA_WEBHOOK_SECRET_PLACEHOLDER_KEY`. Anything that is not that placeholder
- * is treated as an operator value.
- *
- * NOTE (#368 migration): stacks deployed before the explicit-placeholder fix
- * seeded a *bare random string* placeholder, which is indistinguishable from
- * an operator value and so is (conservatively) reported as configured. Such
- * installs must redeploy the CDK stack — which regenerates the secret with the
- * JSON placeholder — before `setup` will seed it.
- */
-export async function isWebhookSecretConfigured(
-  client: SecretsManagerClient,
-  secretArn: string,
-): Promise<boolean> {
-  try {
-    const result = await client.send(new GetSecretValueCommand({ SecretId: secretArn }));
-    const value = result.SecretString;
-    if (typeof value !== 'string' || value.length === 0) return false;
-    return !isWebhookSecretPlaceholder(value);
-  } catch (err) {
-    const errorName = (err as { name?: string }).name;
-    if (errorName === 'ResourceNotFoundException') {
-      return false;
+async function listActiveJiraTenantIds(
+  ddb: DynamoDBDocumentClient,
+  tableName: string,
+): Promise<string[]> {
+  const ids = new Set<string>();
+  let lastKey: Record<string, unknown> | undefined;
+  do {
+    const page = await ddb.send(new ScanCommand({
+      TableName: tableName,
+      ProjectionExpression: 'jira_cloud_id, #s',
+      FilterExpression: '#s = :active',
+      ExpressionAttributeNames: { '#s': 'status' },
+      ExpressionAttributeValues: { ':active': 'active' },
+      ExclusiveStartKey: lastKey,
+      ConsistentRead: true,
+    }));
+    for (const item of page.Items ?? []) {
+      if (typeof item.jira_cloud_id === 'string' && item.jira_cloud_id) {
+        ids.add(item.jira_cloud_id);
+      }
     }
-    const message = err instanceof Error ? err.message : String(err);
-    throw new CliError(
-      `Failed to read Jira webhook secret '${secretArn}': ${errorName ?? 'Error'}: ${message}. `
-      + 'Likely IAM permission gap — confirm your CLI principal has '
-      + '`secretsmanager:GetSecretValue` on this ARN.',
+    lastKey = page.LastEvaluatedKey;
+  } while (lastKey);
+  return [...ids];
+}
+
+function multiTenantWebhookError(cloudIds: readonly string[]): CliError {
+  if (cloudIds.length === 0) {
+    return new CliError(
+      'Could not confirm a sole active Jira tenant in the workspace registry. '
+      + 'Re-run `bgagent jira setup` before configuring or rotating this webhook.',
     );
   }
+  return new CliError(
+    'Jira admin-console webhooks omit cloudId, so one webhook URL cannot select among '
+    + `multiple tenant secrets (active tenants: ${cloudIds.join(', ')}). `
+    + 'This setup supports exactly one active Jira tenant. Remove or revoke the other '
+    + 'tenant before configuring or rotating this webhook.',
+  );
 }
 
 /**
- * True when `value` is the CDK-generated placeholder — a JSON object carrying
- * the {@link JIRA_WEBHOOK_SECRET_PLACEHOLDER_KEY} marker. A non-JSON value, or
- * JSON without the marker, is an operator-set secret.
+ * Persist one signing secret to both locations required by Jira
+ * admin-console webhooks. These payloads omit cloudId, so the receiver uses
+ * the stack-wide verifier; the per-tenant copy is retained for payloads that
+ * do carry cloudId.
+ *
+ * The writes are not atomic. If the process exits between them, re-run the
+ * command to converge both copies.
  */
-function isWebhookSecretPlaceholder(value: string): boolean {
-  const trimmed = value.trim();
-  // Fast reject: real Atlassian signing secrets are bare strings.
-  if (!trimmed.startsWith('{')) return false;
+export async function synchronizeJiraWebhookSecrets(
+  sm: SecretsManagerClient,
+  oauthSecretArn: string,
+  stackWideSecretArn: string,
+  stored: StoredJiraOauthToken,
+  webhookSigningSecret: string,
+): Promise<StoredJiraOauthToken> {
+  const merged: StoredJiraOauthToken = {
+    ...stored,
+    webhook_signing_secret: webhookSigningSecret,
+    updated_at: new Date().toISOString(),
+  };
+  const originalSecretString = JSON.stringify(stored);
+
+  await sm.send(new PutSecretValueCommand({
+    SecretId: oauthSecretArn,
+    SecretString: JSON.stringify(merged),
+  }));
   try {
-    const parsed: unknown = JSON.parse(trimmed);
-    return (
-      typeof parsed === 'object'
-      && parsed !== null
-      && JIRA_WEBHOOK_SECRET_PLACEHOLDER_KEY in (parsed as Record<string, unknown>)
+    await sm.send(new PutSecretValueCommand({
+      SecretId: stackWideSecretArn,
+      SecretString: webhookSigningSecret,
+    }));
+  } catch (err) {
+    try {
+      await sm.send(new PutSecretValueCommand({
+        SecretId: oauthSecretArn,
+        SecretString: originalSecretString,
+      }));
+    } catch (rollbackErr) {
+      throw new CliError(
+        'Failed to update the stack-wide Jira webhook secret and failed to restore the tenant bundle: '
+        + `${err instanceof Error ? err.message : String(err)}; rollback: `
+        + `${rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)}. `
+        + 'Manually synchronize both Secrets Manager values before re-enabling the Jira webhook.',
+      );
+    }
+    throw new CliError(
+      'Failed to update the stack-wide Jira webhook secret, but restored the tenant bundle '
+      + `to its previous value: ${err instanceof Error ? err.message : String(err)}. `
+      + 'Both secrets were restored to their prior values; rotation can be safely retried.',
     );
-  } catch {
-    // Starts with `{` but isn't valid JSON — not our placeholder. Treat as a
-    // (malformed) operator value rather than silently re-seeding over it.
-    return false; // nosemgrep: ts-silent-success-masking -- unparseable secret is conservatively treated as operator-set (not the placeholder), so setup never overwrites it
   }
+  return merged;
 }
 
 interface JiraUserSearchResult {
@@ -422,7 +505,7 @@ function extractCognitoSub(): string {
 
 async function getStackOutput(region: string, stackName: string, outputKey: string): Promise<string | null> {
   try {
-    const cfn = new CloudFormationClient({ region });
+    const cfn = makeClient(CloudFormationClient, { region });
     const result = await cfn.send(new DescribeStacksCommand({ StackName: stackName }));
     const outputs = result.Stacks?.[0]?.Outputs ?? [];
     const output = outputs.find((o) => o.OutputKey === outputKey);
@@ -431,7 +514,7 @@ async function getStackOutput(region: string, stackName: string, outputKey: stri
     const name = (err as Error)?.name ?? '';
     const message = (err as Error)?.message ?? '';
     if (name === 'ValidationError' && /does not exist/i.test(message)) {
-      return null;
+      return null; // nosemgrep: ts-silent-success-masking -- missing stack is the lookup helper's null contract
     }
     throw err;
   }
@@ -444,7 +527,7 @@ export function makeJiraCommand(): Command {
   // ─── app-template ─────────────────────────────────────────────────────────
   jira.addCommand(
     new Command('app-template')
-      .description('Print the field values to paste into Atlassian\'s developer-console OAuth app form')
+      .description('Print the Jira OAuth and Forge app identity setup template')
       .option('--developer-name <name>', 'Developer name shown on Atlassian\'s consent screen')
       .option('--description <text>', 'App description shown on Atlassian\'s consent screen')
       .option('--callback-url <url>', 'OAuth callback URL (defaults to localhost:8080/oauth/callback)')
@@ -616,9 +699,20 @@ export function makeJiraCommand(): Command {
         console.log(`  cloud_id: ${cloudId}`);
         console.log(`  site_url: ${siteUrl}`);
 
+        // Jira Settings → System → Webhooks payloads omit cloudId, so the
+        // receiver must use one stack-wide verifier. Refuse a second active
+        // tenant before writing its OAuth or registry state rather than
+        // presenting an apparently complete but unverifiable setup.
+        const ddb = makeDocClient({ region });
+        const activeTenantIds = await listActiveJiraTenantIds(ddb, workspaceRegistryTable!);
+        const otherActiveTenantIds = activeTenantIds.filter((id) => id !== cloudId);
+        if (otherActiveTenantIds.length > 0) {
+          throw multiTenantWebhookError([...otherActiveTenantIds, cloudId]);
+        }
+
         // ─── Step 4: Persist token to per-tenant Secrets Manager ─────────
         process.stdout.write('  → Storing OAuth token...');
-        const sm = new SecretsManagerClient({ region });
+        const sm = makeClient(SecretsManagerClient, { region });
         const now = new Date().toISOString();
         const stored: StoredJiraOauthToken = {
           access_token: tokenResponse.access_token,
@@ -638,35 +732,39 @@ export function makeJiraCommand(): Command {
         console.log(` ✓ (${secretName})`);
 
         // ─── Step 5: Persist registry row ────────────────────────────────
-        const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
-        await ddb.send(new PutCommand({
+        // Update instead of replacing the row so re-running OAuth setup keeps
+        // app-actor audit metadata written by `jira app-setup`.
+        await ddb.send(new UpdateCommand({
           TableName: workspaceRegistryTable!,
-          Item: {
-            jira_cloud_id: cloudId,
-            site_url: siteUrl,
-            oauth_secret_arn: oauthSecretArn,
-            installed_by_platform_user_id: cognitoSub,
-            installed_at: now,
-            updated_at: now,
-            status: 'active',
+          Key: { jira_cloud_id: cloudId },
+          UpdateExpression: [
+            'SET site_url = :siteUrl',
+            'oauth_secret_arn = :oauthSecretArn',
+            'installed_by_platform_user_id = :installedBy',
+            'installed_at = :installedAt',
+            'updated_at = :updatedAt',
+            '#status = :status',
+          ].join(', '),
+          ExpressionAttributeNames: {
+            '#status': 'status',
+          },
+          ExpressionAttributeValues: {
+            ':siteUrl': siteUrl,
+            ':oauthSecretArn': oauthSecretArn,
+            ':installedBy': cognitoSub,
+            ':installedAt': now,
+            ':updatedAt': now,
+            ':status': 'active',
           },
         }));
         console.log('  ✓ Recorded tenant in registry');
 
-        // ─── Step 6: Webhook signing secret (per-tenant primary) ─────────
+        // ─── Step 6: Webhook signing secret ──────────────────────────────
         //
         // Atlassian doesn't auto-generate webhook signing secrets — they're
-        // operator-chosen at webhook-create time in the Jira admin UI, and
-        // each tenant's webhook is configured independently with its OWN
-        // secret. So we always prompt for THIS tenant's secret and store it
-        // on the per-tenant OAuth bundle — the primary verification path.
-        //
-        // We deliberately do NOT copy an existing stack-wide secret into a
-        // new tenant's bundle (the old behavior): that would make tenant A's
-        // secret verify per-tenant for tenant B, and a holder of the
-        // stack-wide secret could then forge per-tenant-signed events for any
-        // tenant. The stack-wide secret is only seeded once, from the FIRST
-        // tenant's secret, as the single-tenant back-compat fallback.
+        // operator-chosen in the Jira admin UI. Those webhook payloads omit
+        // cloudId, so the sole active tenant's value must be kept in both its
+        // OAuth bundle and the stack-wide verifier.
         const apiBaseUrl = config.api_url.replace(/\/+$/, '');
         console.log();
         console.log('  Webhook signing secret needed for THIS tenant.');
@@ -675,45 +773,248 @@ export function makeJiraCommand(): Command {
         console.log('    Events:        Issue: created, Issue: updated, Comment: created');
         console.log('    Secret:        choose a strong random value (e.g. `openssl rand -hex 32`)');
         console.log();
-        const webhookSigningSecret = await promptSecret('Webhook signing secret: ');
+        const webhookSigningSecret = (await promptSecret('Webhook signing secret: ')).trim();
         if (!webhookSigningSecret) {
           throw new CliError('Webhook signing secret is required.');
         }
 
-        const merged: StoredJiraOauthToken = {
-          ...stored,
-          webhook_signing_secret: webhookSigningSecret,
-          updated_at: new Date().toISOString(),
-        };
-        await upsertOauthSecret(sm, secretName, merged, cloudId);
-        console.log('  ✓ Stored signing secret on the per-tenant OAuth bundle');
-
-        // Seed the stack-wide fallback only if it has never been set, so a
-        // single-tenant install (no per-tenant routing) still verifies. Once
-        // a second tenant onboards, its secret is per-tenant only — the
-        // stack-wide secret stays pinned to the first tenant.
-        const stackWideAlreadyConfigured = await isWebhookSecretConfigured(sm, webhookSecretArn!);
-        if (stackWideAlreadyConfigured) {
-          console.log('  ✓ Stack-wide fallback already configured (leaving as-is)');
-        } else {
-          await sm.send(new PutSecretValueCommand({
-            SecretId: webhookSecretArn!,
-            SecretString: webhookSigningSecret,
-          }));
-          console.log('  ✓ Seeded stack-wide fallback for single-tenant back-compat');
-        }
+        // upsertOauthSecret preserves Forge app-actor fields on setup reruns.
+        // Read back that persisted bundle so synchronization does not replace
+        // it with the fresh OAuth-only object assembled above.
+        const persistedOauthSecret = await sm.send(new GetSecretValueCommand({
+          SecretId: oauthSecretArn,
+        }));
+        const persistedStored = parseStoredJiraOauthToken(
+          persistedOauthSecret.SecretString,
+          oauthSecretArn,
+        );
+        await synchronizeJiraWebhookSecrets(
+          sm,
+          oauthSecretArn,
+          webhookSecretArn!,
+          persistedStored,
+          webhookSigningSecret,
+        );
+        console.log('  ✓ Synchronized tenant and stack-wide signing secrets');
 
         // ─── Done ─────────────────────────────────────────────────────────
         console.log();
         console.log('✅ Setup complete.');
         console.log();
         console.log('Next steps:');
-        console.log('  1. Map a Jira project to a GitHub repo:');
-        console.log(`       bgagent jira map ${cloudId} <PROJECT-KEY> --repo owner/repo`);
-        console.log('  2. Link your Jira account so triggered tasks attribute to your platform user:');
-        console.log(`       bgagent jira invite-user ${cloudId} <account-id-or-email>`);
+        console.log('  1. Install the Forge app identity, then register its v2 web-trigger URL:');
+        console.log(
+          `       bgagent jira app-setup ${cloudId} --proxy-url <forge-v2-url> `
+          + `--region ${region} --stack-name ${stackName}`,
+        );
+        console.log('  2. Map a Jira project to a GitHub repo:');
+        console.log(
+          `       bgagent jira map ${cloudId} <PROJECT-KEY> --repo owner/repo `
+          + `--region ${region} --stack-name ${stackName}`,
+        );
+        console.log('  3. Link your Jira account so triggered tasks attribute to your platform user:');
+        console.log(
+          `       bgagent jira invite-user ${cloudId} <account-id-or-email> `
+          + `--region ${region} --stack-name ${stackName}`,
+        );
         console.log('       bgagent jira link <code>');
-        console.log(`  3. Add the trigger label '${DEFAULT_LABEL_FILTER}' to a Jira issue in a mapped project.`);
+        console.log(`  4. Add the trigger label '${DEFAULT_LABEL_FILTER}' to a Jira issue in a mapped project.`);
+      }),
+  );
+
+  // ─── app-setup ───────────────────────────────────────────────────────────
+  jira.addCommand(
+    new Command('app-setup')
+      .description('Configure the dedicated Jira Forge app identity for outbound writes')
+      .argument('<cloud-id>', 'Atlassian tenant cloudId (UUID)')
+      .requiredOption('--proxy-url <url>', 'v2 URL from `forge webtrigger create`')
+      .option('--shared-secret <secret>', 'Forge BGAGENT_PROXY_SECRET (else prompted; prefer interactive)')
+      .option('--region <region>', 'AWS region (defaults to configured region)')
+      .option('--stack-name <name>', 'CloudFormation stack name', 'backgroundagent-dev')
+      .action(async (cloudId: string, opts) => {
+        const config = loadConfig();
+        const region = opts.region || config.region;
+        const registryTableName = await getStackOutput(
+          region,
+          opts.stackName,
+          'JiraWorkspaceRegistryTableName',
+        );
+        if (!registryTableName) {
+          throw new CliError(
+            `Stack '${opts.stackName}' is missing output JiraWorkspaceRegistryTableName. `
+            + 'Deploy the Jira integration before configuring its app identity.',
+          );
+        }
+
+        const ddb = makeDocClient({ region });
+        const registry = await ddb.send(new GetCommand({
+          TableName: registryTableName,
+          Key: { jira_cloud_id: cloudId },
+          ConsistentRead: true,
+        }));
+        const row = registry.Item;
+        if (!row || row.status !== 'active' || typeof row.oauth_secret_arn !== 'string') {
+          throw new CliError(
+            `Jira tenant '${cloudId}' is not active in the workspace registry. `
+            + 'Run `bgagent jira setup` first.',
+          );
+        }
+
+        const sharedSecret = (
+          opts.sharedSecret ?? await promptSecret('Forge BGAGENT_PROXY_SECRET: ')
+        ).trim();
+        if (sharedSecret.length < JIRA_APP_ACTOR_MIN_SECRET_LENGTH) {
+          throw new CliError('Forge proxy shared secret must be at least 32 characters.');
+        }
+        const proxyUrl = validateJiraAppActorProxyUrl(opts.proxyUrl);
+
+        const sm = makeClient(SecretsManagerClient, { region });
+        const secretResult = await sm.send(new GetSecretValueCommand({
+          SecretId: row.oauth_secret_arn as string,
+        }));
+        const stored = parseStoredJiraOauthToken(
+          secretResult.SecretString,
+          row.oauth_secret_arn as string,
+        );
+        if (stored.cloud_id !== cloudId) {
+          throw new CliError(
+            `Jira OAuth secret cloud_id '${stored.cloud_id}' does not match requested tenant '${cloudId}'.`,
+          );
+        }
+
+        process.stdout.write('  → Verifying Forge app identity...');
+        const identity = await probeJiraAppActor({
+          proxyUrl,
+          sharedSecret,
+          cloudId,
+          siteUrl: stored.site_url,
+        });
+        console.log(` ✓ (${identity.display_name}, accountType=app)`);
+
+        // The identity probe is a network round trip. Re-read the bundle
+        // afterward so a concurrent Lambda token refresh is not overwritten
+        // with the stale access/refresh pair read before the probe.
+        const latestSecret = await sm.send(new GetSecretValueCommand({
+          SecretId: row.oauth_secret_arn as string,
+        }));
+        const latestStored = parseStoredJiraOauthToken(
+          latestSecret.SecretString,
+          row.oauth_secret_arn as string,
+        );
+        if (latestStored.cloud_id !== cloudId) {
+          throw new CliError(
+            `Jira OAuth secret cloud_id '${latestStored.cloud_id}' changed during setup; retry.`,
+          );
+        }
+        const now = new Date().toISOString();
+        const updated: StoredJiraOauthToken = {
+          ...latestStored,
+          app_actor_proxy_url: proxyUrl,
+          app_actor_shared_secret: sharedSecret,
+          app_actor_account_id: identity.account_id,
+          app_actor_display_name: identity.display_name,
+          app_actor_configured_at: now,
+          updated_at: now,
+        };
+        await sm.send(new PutSecretValueCommand({
+          SecretId: row.oauth_secret_arn as string,
+          SecretString: JSON.stringify(updated),
+        }));
+        await ddb.send(new UpdateCommand({
+          TableName: registryTableName,
+          Key: { jira_cloud_id: cloudId },
+          UpdateExpression: [
+            'SET outbound_identity = :identity',
+            'app_actor_account_id = :account',
+            'app_actor_display_name = :display',
+            'app_actor_configured_at = :configured',
+            'updated_at = :updated',
+          ].join(', '),
+          ExpressionAttributeValues: {
+            ':identity': 'app',
+            ':account': identity.account_id,
+            ':display': identity.display_name,
+            ':configured': now,
+            ':updated': now,
+          },
+        }));
+
+        console.log('✅ Jira outbound app identity configured.');
+        console.log(`  tenant:  ${cloudId}`);
+        console.log(`  identity: ${identity.display_name} (${identity.account_id})`);
+        console.log('  3LO remains available for inbound reads; outbound failures will not fall back to it.');
+      }),
+  );
+
+  // ─── update-webhook-secret ────────────────────────────────────────────────
+  jira.addCommand(
+    new Command('update-webhook-secret')
+      .description('Rotate the Jira admin-console webhook signing secret (single active tenant)')
+      .argument('<cloud-id>', 'Atlassian tenant cloudId (UUID)')
+      .option('--region <region>', 'AWS region (defaults to configured region)')
+      .option('--stack-name <name>', 'CloudFormation stack name', 'backgroundagent-dev')
+      .action(async (cloudId: string, opts) => {
+        const config = loadConfig();
+        const region = opts.region || config.region;
+        const stackName = opts.stackName;
+        const [workspaceRegistryTable, webhookSecretArn] = await Promise.all([
+          getStackOutput(region, stackName, 'JiraWorkspaceRegistryTableName'),
+          getStackOutput(region, stackName, 'JiraWebhookSecretArn'),
+        ]);
+        const missing: string[] = [];
+        if (!workspaceRegistryTable) missing.push('JiraWorkspaceRegistryTableName');
+        if (!webhookSecretArn) missing.push('JiraWebhookSecretArn');
+        if (missing.length > 0) {
+          throw new CliError(
+            `Stack '${stackName}' is missing outputs ${missing.join(', ')}. `
+            + 'Re-deploy with the JiraIntegration CDK changes (mise //cdk:deploy).',
+          );
+        }
+
+        const ddb = makeDocClient({ region });
+        const registry = await ddb.send(new GetCommand({
+          TableName: workspaceRegistryTable!,
+          Key: { jira_cloud_id: cloudId },
+          ConsistentRead: true,
+        }));
+        const registryRow = registry.Item;
+        if (!registryRow || registryRow.status !== 'active') {
+          throw new CliError(
+            `Jira tenant '${cloudId}' is not in the registry (or status != 'active'). `
+            + 'Run `bgagent jira setup` for that tenant first.',
+          );
+        }
+        const oauthSecretArn = registryRow.oauth_secret_arn as string | undefined;
+        if (!oauthSecretArn) {
+          throw new CliError(
+            `Jira tenant '${cloudId}' registry row is missing oauth_secret_arn. `
+            + 'Re-run `bgagent jira setup`.',
+          );
+        }
+
+        const activeTenantIds = await listActiveJiraTenantIds(ddb, workspaceRegistryTable!);
+        if (activeTenantIds.length !== 1 || activeTenantIds[0] !== cloudId) {
+          throw multiTenantWebhookError(activeTenantIds);
+        }
+
+        const webhookSigningSecret = (await promptSecret('New webhook signing secret: ')).trim();
+        if (!webhookSigningSecret) {
+          throw new CliError('Webhook signing secret is required.');
+        }
+
+        const sm = makeClient(SecretsManagerClient, { region });
+        const oauthSecret = await sm.send(new GetSecretValueCommand({ SecretId: oauthSecretArn }));
+        const stored = parseStoredJiraOauthToken(oauthSecret.SecretString, oauthSecretArn);
+        await synchronizeJiraWebhookSecrets(
+          sm,
+          oauthSecretArn,
+          webhookSecretArn!,
+          stored,
+          webhookSigningSecret,
+        );
+
+        console.log(`✓ Updated Jira webhook signing secret for tenant '${cloudId}'.`);
+        console.log('  Tenant OAuth bundle and stack-wide verifier are synchronized.');
       }),
   );
 
@@ -750,12 +1051,13 @@ export function makeJiraCommand(): Command {
         }
         const callerCognitoSub = extractCognitoSub();
 
-        const sm = new SecretsManagerClient({ region });
-        const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
+        const sm = makeClient(SecretsManagerClient, { region });
+        const ddb = makeDocClient({ region });
 
         const registry = await ddb.send(new GetCommand({
           TableName: workspaceRegistryTable!,
           Key: { jira_cloud_id: cloudId },
+          ConsistentRead: true,
         }));
         const registryRow = registry.Item;
         if (!registryRow || registryRow.status !== 'active') {
@@ -930,9 +1232,14 @@ export function makeJiraCommand(): Command {
         const config = loadConfig();
         const region = opts.region || config.region;
 
-        const tableName = await getStackOutput(region, opts.stackName, 'JiraProjectMappingTableName');
-        if (!tableName) {
-          console.error('Could not find JiraProjectMappingTableName in stack outputs. Deploy the stack first.');
+        const [tableName, repoTableName] = await Promise.all([
+          getStackOutput(region, opts.stackName, 'JiraProjectMappingTableName'),
+          getStackOutput(region, opts.stackName, 'RepoTableName'),
+        ]);
+        if (!tableName || !repoTableName) {
+          console.error(
+            'Could not find JiraProjectMappingTableName and RepoTableName in stack outputs. Deploy the stack first.',
+          );
           process.exit(1);
         }
 
@@ -947,6 +1254,8 @@ export function makeJiraCommand(): Command {
           process.exit(1);
         }
 
+        await loadActiveRepoConfig(region, repoTableName, opts.repo);
+
         // Trim transition-status overrides and treat blank/whitespace-only as
         // unset. A whitespace value is truthy in JS, so without this it would
         // be persisted and then permanently no-op at the agent (`.strip()` → ""
@@ -956,7 +1265,7 @@ export function makeJiraCommand(): Command {
         const statusOnPr = opts.statusOnPr?.trim() || undefined;
 
         const now = new Date().toISOString();
-        const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
+        const ddb = makeDocClient({ region });
         await ddb.send(new PutCommand({
           TableName: tableName,
           Item: {

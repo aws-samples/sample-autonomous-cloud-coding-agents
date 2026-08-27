@@ -22,6 +22,7 @@ import { allPolicies } from '../../src/bootstrap/policies';
 import { applicationPolicy } from '../../src/bootstrap/policies/application';
 import { computeAgentcorePolicy } from '../../src/bootstrap/policies/compute-agentcore';
 import { computeEcsPolicy } from '../../src/bootstrap/policies/compute-ecs';
+import { computeLambdaMicrovmPolicy } from '../../src/bootstrap/policies/compute-lambda-microvm';
 import { infrastructurePolicy } from '../../src/bootstrap/policies/infrastructure';
 import { observabilityPolicy } from '../../src/bootstrap/policies/observability';
 
@@ -111,6 +112,8 @@ describe('IaCRole-ABCA-Application', () => {
       'WAFv2',
       'EventBridge',
       'SQS',
+      'SNS',
+      'StepFunctions',
       'CloudFront',
       'SecretsManager',
       'SecretsManagerAccountLevel',
@@ -143,7 +146,9 @@ describe('IaCRole-ABCA-Application', () => {
         'events',
         'lambda',
         'secretsmanager',
+        'sns',
         'sqs',
+        'states',
         'wafv2',
       ]),
     );
@@ -210,6 +215,23 @@ describe('IaCRole-ABCA-Application', () => {
       expect(resources).toContain(`arn:aws:secretsmanager:*:*:secret:${prefix}*`);
     }
   });
+
+  it('SNS statement grants the create + subscribe verbs the OperationalAlerts topic needs (#629)', () => {
+    // Per-verb guard (mirrors the #409/#407 provisioned-concurrency and
+    // event-source-mapping-tagging guards): a missing verb is invisible to
+    // the service-prefix check above (still `sns:`) but rolls back a fresh
+    // deploy with AccessDenied. CreateTopic creates the topic;
+    // Subscribe/GetTopicAttributes are exercised when `-c alertEmail=...`
+    // adds an email subscription.
+    const resolvedDoc = stack.resolve(doc);
+    const statements = resolvedDoc.Statement as Array<{ Sid: string; Action?: string | string[] }>;
+    const sns = statements.find((s) => s.Sid === 'SNS');
+    expect(sns).toBeDefined();
+    const actions = Array.isArray(sns!.Action) ? sns!.Action : [sns!.Action];
+    for (const action of ['sns:CreateTopic', 'sns:Subscribe', 'sns:GetTopicAttributes']) {
+      expect(actions).toContain(action);
+    }
+  });
 });
 
 describe('IaCRole-ABCA-Observability', () => {
@@ -238,6 +260,8 @@ describe('IaCRole-ABCA-Observability', () => {
       'S3CDKAssets',
       'S3ApplicationBuckets',
       'KMSForCDKAssets',
+      'KMSCustomerManagedKeys',
+      'KMSCustomerManagedKeysLifecycle',
       'ECRForDockerAssets',
       'ECRAuthToken',
       'XRay',
@@ -308,6 +332,46 @@ describe('IaCRole-ABCA-Observability', () => {
     ]) {
       expect(actions).toContain(action);
     }
+  });
+
+  it('KMSCustomerManagedKeys grants CreateKey + tag on * (the unscopable create path) (#629)', () => {
+    // kms:CreateKey and kms:TagResource must be unconditioned on `*`:
+    // the key ARN does not exist at create time and TagResource applies
+    // the very tag that scopes the lifecycle statement below.
+    const resolvedDoc = stack.resolve(doc);
+    const statements = resolvedDoc.Statement as Array<{
+      Sid: string;
+      Action?: string | string[];
+      Condition?: unknown;
+    }>;
+    const create = statements.find((s) => s.Sid === 'KMSCustomerManagedKeys');
+    expect(create).toBeDefined();
+    const actions = Array.isArray(create!.Action) ? create!.Action : [create!.Action];
+    expect(actions).toContain('kms:CreateKey');
+    expect(actions).toContain('kms:TagResource');
+    // The create/read statement must NOT carry policy-mutation actions —
+    // those belong to the tag-scoped lifecycle statement.
+    expect(actions).not.toContain('kms:PutKeyPolicy');
+    expect(actions).not.toContain('kms:ScheduleKeyDeletion');
+    expect(create!.Condition).toBeUndefined();
+  });
+
+  it('KMSCustomerManagedKeysLifecycle gates key-takeover actions on the ABCA resource tag (#629)', () => {
+    // PutKeyPolicy / ScheduleKeyDeletion on `*` would let the deploy role
+    // take over or delete any CMK in the account. They are confined to
+    // keys carrying the `ABCA=operational-alerts` tag the construct stamps.
+    const resolvedDoc = stack.resolve(doc);
+    const statements = resolvedDoc.Statement as Array<{
+      Sid: string;
+      Action?: string | string[];
+      Condition?: { StringEquals?: Record<string, string> };
+    }>;
+    const lifecycle = statements.find((s) => s.Sid === 'KMSCustomerManagedKeysLifecycle');
+    expect(lifecycle).toBeDefined();
+    const actions = Array.isArray(lifecycle!.Action) ? lifecycle!.Action : [lifecycle!.Action];
+    expect(actions).toContain('kms:PutKeyPolicy');
+    expect(actions).toContain('kms:ScheduleKeyDeletion');
+    expect(lifecycle!.Condition?.StringEquals?.['aws:ResourceTag/ABCA']).toBe('operational-alerts');
   });
 });
 
@@ -399,6 +463,79 @@ describe('IaCRole-ABCA-Compute-ECS', () => {
   });
 });
 
+describe('computeLambdaMicrovmPolicy', () => {
+  const stack = new Stack();
+  const doc = computeLambdaMicrovmPolicy();
+  const json = doc.toJSON();
+  const rendered = JSON.stringify(json);
+
+  it('produces valid JSON', () => {
+    expect(() => JSON.parse(rendered)).not.toThrow();
+  });
+
+  it('is under 6144 characters when serialized', () => {
+    // AWS managed policy size limit
+    expect(rendered.length).toBeLessThan(6144);
+  });
+
+  it('contains the expected SIDs', () => {
+    const resolvedDoc = stack.resolve(doc);
+    const statements = resolvedDoc.Statement as Array<{ Sid: string }>;
+
+    expect(statements.map((s) => s.Sid)).toEqual(['LambdaMicrovms']);
+  });
+
+  it('covers the expected service prefixes', () => {
+    const resolvedDoc = stack.resolve(doc);
+    const statements = resolvedDoc.Statement as Array<{ Action: string | string[] }>;
+    const allActions = statements.flatMap((s) =>
+      Array.isArray(s.Action) ? s.Action : [s.Action],
+    );
+    const prefixes = new Set(allActions.map((a) => a.split(':')[0]));
+
+    expect(prefixes).toEqual(new Set(['lambda']));
+  });
+
+  it('covers both CFN resource types the construct synthesizes', () => {
+    const resolvedDoc = stack.resolve(doc);
+    const statements = resolvedDoc.Statement as Array<{ Action: string | string[] }>;
+    const allActions = statements.flatMap((s) =>
+      Array.isArray(s.Action) ? s.Action : [s.Action],
+    );
+
+    // AWS::Lambda::MicrovmImage + AWS::Lambda::NetworkConnector, plus the
+    // documented dependent of CreateMicrovmImage.
+    expect(allActions).toContain('lambda:CreateMicrovmImage');
+    expect(allActions).toContain('lambda:CreateNetworkConnector');
+    expect(allActions).toContain('lambda:PassNetworkConnector');
+  });
+
+  it('grants NO runtime session lifecycle actions (those belong to the orchestrator role)', () => {
+    // A deploy role that can start, suspend, or mint tokens for MicroVMs is a
+    // privilege escalation — the orchestrator gets those, per-deployment.
+    // Compared as exact actions, not substrings: `lambda:GetMicrovmImage` (which
+    // the deploy role legitimately needs) contains `lambda:GetMicrovm`.
+    const resolvedDoc = stack.resolve(doc);
+    const statements = resolvedDoc.Statement as Array<{ Action: string | string[] }>;
+    const allActions = new Set(statements.flatMap((s) =>
+      Array.isArray(s.Action) ? s.Action : [s.Action],
+    ));
+
+    for (const action of [
+      'lambda:RunMicrovm',
+      'lambda:GetMicrovm',
+      'lambda:TerminateMicrovm',
+      'lambda:SuspendMicrovm',
+      'lambda:ResumeMicrovm',
+      'lambda:CreateMicrovmAuthToken',
+      'lambda:CreateMicrovmShellAuthToken',
+      'lambda:ConnectMicrovm',
+    ]) {
+      expect(allActions.has(action)).toBe(false);
+    }
+  });
+});
+
 describe('Cross-policy validation', () => {
   const stack = new Stack();
   const policies = allPolicies();
@@ -416,8 +553,10 @@ describe('Cross-policy validation', () => {
     expect(unique.size).toBe(allSids.length);
   });
 
-  it('returns exactly 5 policies', () => {
-    expect(policies).toHaveLength(5);
+  it('returns exactly 6 policies', () => {
+    // infrastructure, application, observability, compute-agentcore,
+    // compute-ecs, compute-lambda-microvm (ADR-021).
+    expect(policies).toHaveLength(6);
   });
 
   it('every policy is under 6144 character limit', () => {

@@ -17,10 +17,17 @@
  *  SOFTWARE.
  */
 
+import * as fs from 'fs';
+import * as path from 'path';
+import { CrossRegionInferenceProfileRegion } from '@aws-cdk/aws-bedrock-alpha';
 import { App, Stack } from 'aws-cdk-lib';
 import {
+  BEDROCK_GEO_REGION_CONTEXT_KEY,
+  BEDROCK_GEO_REGIONS,
   BEDROCK_MODELS_CONTEXT_KEY,
+  DEFAULT_BEDROCK_GEO_REGION,
   DEFAULT_BEDROCK_MODEL_IDS,
+  resolveBedrockGeoRegion,
   resolveBedrockModelIds,
 } from '../../src/constructs/bedrock-models';
 
@@ -59,14 +66,121 @@ describe('resolveBedrockModelIds', () => {
     ).toThrow(/non-empty strings/);
   });
 
-  it('throws on a region-prefixed (us./eu./apac.) inference-profile ID', () => {
+  it('throws on a geo-prefixed inference-profile ID', () => {
     // Guards the us.us.… double-prefix footgun: both grant sites derive the
-    // inference-profile ARN by prefixing `us.`, so the context wants the bare id.
+    // inference-profile ARN by prefixing the geo, so the context wants the bare id.
     expect(() =>
       resolveBedrockModelIds(nodeWithContext({ [BEDROCK_MODELS_CONTEXT_KEY]: ['us.anthropic.claude-opus-4-8'] })),
     ).toThrow(/bare foundation-model IDs/);
     expect(() =>
       resolveBedrockModelIds(nodeWithContext({ [BEDROCK_MODELS_CONTEXT_KEY]: ['eu.anthropic.claude-sonnet-4-6'] })),
     ).toThrow(/bare foundation-model IDs/);
+  });
+
+  // The guard used to test only /^(us|eu|apac)\./, so a `global.`-, `us-gov.`-,
+  // `jp.`- or `au.`-prefixed entry sailed through and produced a syntactically
+  // valid but non-existent `us.global.anthropic.…` inference-profile ARN — the
+  // grant then authorized nothing and the agent failed at turn 0 with
+  // AccessDenied, with nothing at synth to say why. Every geography the CDK enum
+  // models must be rejected, so the hole cannot reopen when a geography is added.
+  it.each([...BEDROCK_GEO_REGIONS])('throws on a %s-prefixed entry (no silent double-prefix)', (geo) => {
+    expect(() =>
+      resolveBedrockModelIds(nodeWithContext({ [BEDROCK_MODELS_CONTEXT_KEY]: [`${geo}.anthropic.claude-opus-5`] })),
+    ).toThrow(/bare foundation-model IDs/);
+  });
+
+  it('names the bare id and the geo context key in the rejection message', () => {
+    // The error is the only place the bare-ids-only contract is stated at the
+    // moment an operator gets it wrong, so it must carry the fix, not just the
+    // complaint: strip the geo the operator actually typed (`us-gov`, not `us`,
+    // for a `us-gov.` entry) and point at where geo really belongs.
+    expect(() =>
+      resolveBedrockModelIds(nodeWithContext({ [BEDROCK_MODELS_CONTEXT_KEY]: ['us-gov.anthropic.claude-opus-5'] })),
+    ).toThrow(/Use 'anthropic\.claude-opus-5'/);
+    expect(() =>
+      resolveBedrockModelIds(nodeWithContext({ [BEDROCK_MODELS_CONTEXT_KEY]: ['global.anthropic.claude-opus-5'] })),
+    ).toThrow(new RegExp(BEDROCK_GEO_REGION_CONTEXT_KEY));
+  });
+
+  it('still accepts a bare id whose name merely starts with a geo word', () => {
+    // The rejection keys on the `<geo>.` separator, not a bare prefix match, so a
+    // hypothetical `august.…`/`european.…` model id is not collateral damage.
+    expect(resolveBedrockModelIds(nodeWithContext({ [BEDROCK_MODELS_CONTEXT_KEY]: ['august-labs.model-1'] })))
+      .toEqual(['august-labs.model-1']);
+  });
+});
+
+describe('resolveBedrockGeoRegion', () => {
+  it('defaults to the US geography so an existing deploy is unchanged', () => {
+    expect(resolveBedrockGeoRegion(nodeWithContext())).toBe(CrossRegionInferenceProfileRegion.US);
+    expect(DEFAULT_BEDROCK_GEO_REGION).toBe(CrossRegionInferenceProfileRegion.US);
+  });
+
+  it.each([...BEDROCK_GEO_REGIONS])('accepts the %s geography the CDK enum models', (geo) => {
+    expect(resolveBedrockGeoRegion(nodeWithContext({ [BEDROCK_GEO_REGION_CONTEXT_KEY]: geo }))).toBe(geo);
+  });
+
+  it('covers exactly the geographies @aws-cdk/aws-bedrock-alpha models', () => {
+    // Derived from the enum rather than hand-listed: a CDK release that adds a
+    // geography must widen the allow-list automatically, and one that REMOVES a
+    // geography must not leave us granting an ARN the SDK no longer builds.
+    expect([...BEDROCK_GEO_REGIONS].sort())
+      .toEqual(['apac', 'au', 'eu', 'global', 'jp', 'us', 'us-gov']);
+  });
+
+  it('throws at synth on an unknown geography rather than granting an invalid ARN', () => {
+    // A typo'd geo yields a well-formed but non-existent inference-profile ARN.
+    // The grant would be accepted by IAM and authorize nothing, so the failure
+    // would surface as a turn-0 AccessDenied on a deployed stack instead of here.
+    expect(() => resolveBedrockGeoRegion(nodeWithContext({ [BEDROCK_GEO_REGION_CONTEXT_KEY]: 'usa' })))
+      .toThrow(/must be one of/);
+    expect(() => resolveBedrockGeoRegion(nodeWithContext({ [BEDROCK_GEO_REGION_CONTEXT_KEY]: 'US' })))
+      .toThrow(/must be one of/);
+    expect(() => resolveBedrockGeoRegion(nodeWithContext({ [BEDROCK_GEO_REGION_CONTEXT_KEY]: 'us-east-1' })))
+      .toThrow(/must be one of/);
+  });
+
+  it('throws on a non-string value', () => {
+    expect(() => resolveBedrockGeoRegion(nodeWithContext({ [BEDROCK_GEO_REGION_CONTEXT_KEY]: ['us'] })))
+      .toThrow(/must be one of/);
+  });
+});
+
+/**
+ * Drift guard: the agent picks a fallback model when a repo pins none, and the
+ * IAM grant that lets it invoke that model is derived from
+ * DEFAULT_BEDROCK_MODEL_IDS. If the two disagree, every task on the stack fails
+ * at turn 0 with AccessDenied — and nothing else in the suite notices, because
+ * the agent-side default and the CDK-side grant live in different languages.
+ */
+describe('DEFAULT_BEDROCK_MODEL_IDS covers the agent runtime default', () => {
+  it('grants the fallback model the agent falls back to', () => {
+    const configPy = fs.readFileSync(
+      path.resolve(__dirname, '../../../agent/src/config.py'), 'utf8',
+    );
+    // The fallback is the second argument to the ANTHROPIC_MODEL env lookup.
+    const match = configPy.match(/"ANTHROPIC_MODEL",\s*"([^"]+)"/);
+    expect(match).not.toBeNull();
+    const agentDefault = match![1];
+
+    // The agent names a cross-Region inference profile (`<geo>.anthropic.…`); the
+    // grant list holds bare foundation-model IDs and both grant sites add the geo
+    // prefix from `bedrockGeoRegion`. Accept any geography the CDK enum models —
+    // deliberately NOT `.*`: the assertion's teeth are that a BARE id here is a
+    // bug, because Bedrock refuses a bare Claude 4.x/5 id for on-demand
+    // invocation ("ValidationException: … on-demand throughput isn't supported").
+    // Widening to `.*` would let that un-invokable default land unnoticed.
+    const geoPrefix = agentDefault.match(new RegExp(`^(${[...BEDROCK_GEO_REGIONS].join('|')})\\.`));
+    expect(geoPrefix).not.toBeNull();
+    const bare = agentDefault.slice(geoPrefix![0].length);
+    expect(DEFAULT_BEDROCK_MODEL_IDS).toContain(bare);
+  });
+
+  it('rejects a bare foundation-model id as the agent default', () => {
+    // Mutation-proof for the assertion above: if someone "simplifies" the geo
+    // regex to `.*`, or drops it, this test is what still fails. Exercises the
+    // same matcher against the shape the guard exists to catch.
+    const bareDefault = 'anthropic.claude-opus-4-8';
+    expect(bareDefault.match(new RegExp(`^(${[...BEDROCK_GEO_REGIONS].join('|')})\\.`))).toBeNull();
   });
 });

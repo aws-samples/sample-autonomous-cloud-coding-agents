@@ -86,8 +86,14 @@ describe('EcsComputeStrategy', () => {
 
       const call = mockSend.mock.calls[0][0];
       expect(call.input.cluster).toBe(CLUSTER_ARN);
-      expect(call.input.taskDefinition).toBe(TASK_DEF_ARN);
+      // Dispatch against the task-def FAMILY, not the pinned revision, so a deploy
+      // that deregisters the old revision can't strand the task ("TaskDefinition is
+      // inactive", ABCA-660/663). TASK_DEF_ARN ends in `agent:1` → family `agent`.
+      expect(call.input.taskDefinition).toBe('agent');
       expect(call.input.launchType).toBe('FARGATE');
+      // review #5c: clientToken = taskId dedups a double-RunTask (client-side
+      // timeout on a launch that actually succeeded → auto-retry re-fires).
+      expect(call.input.clientToken).toBe('TASK001');
       expect(call.input.networkConfiguration.awsvpcConfiguration.subnets).toEqual(['subnet-aaa', 'subnet-bbb']);
       expect(call.input.networkConfiguration.awsvpcConfiguration.securityGroups).toEqual(['sg-12345']);
       expect(call.input.networkConfiguration.awsvpcConfiguration.assignPublicIp).toBe('DISABLED');
@@ -116,6 +122,24 @@ describe('EcsComputeStrategy', () => {
       // Container command override — runs Python directly instead of uvicorn
       expect(override.command).toBeDefined();
       expect(override.command[0]).toBe('python');
+    });
+
+    test('readOnly falls back to the build def when no planning def is wired (older deploy — never worse)', async () => {
+      // The top-of-file import has NO ECS_PLANNING_TASK_DEFINITION_ARN, so even a
+      // read-only workflow must run on the build def (pre-rightsize behavior).
+      mockSend.mockResolvedValueOnce({ tasks: [{ taskArn: TASK_ARN }] });
+
+      const strategy = new EcsComputeStrategy();
+      await strategy.startSession({
+        taskId: 'TASK001',
+        userId: 'cognito-test',
+        payload: { repo_url: 'org/repo' },
+        blueprintConfig: { compute_type: 'ecs', runtime_arn: '' },
+        readOnly: true,
+      });
+
+      // No planning def wired → build def, resolved to its family (`agent`).
+      expect(mockSend.mock.calls[0][0].input.taskDefinition).toBe('agent');
     });
 
     test('throws when RunTask returns no task', async () => {
@@ -456,6 +480,71 @@ describe('EcsComputeStrategy with ECS_PAYLOAD_BUCKET (S3-pointer path, #502)', (
     mockS3Send.mockRejectedValueOnce(new Error('AccessDenied'));
     const { deleteEcsPayload } = loadStrategyWithBucket();
     await expect(deleteEcsPayload('TASK001')).resolves.toBeUndefined();
+  });
+});
+
+// #299 ECS_RIGHTSIZED_PLANNING: the planning task def ARN is a module-level
+// constant, so set it BEFORE import via isolateModules (mirrors the #502 bucket
+// pattern above) — this keeps it out of the inline tests at the top.
+describe('EcsComputeStrategy read-only planning-def selection (#299 ECS_RIGHTSIZED_PLANNING)', () => {
+  const PLANNING_DEF_ARN = 'arn:aws:ecs:us-east-1:123456789012:task-definition/agent-planning:1';
+
+  function loadStrategyWithPlanningDef(): typeof import('../../../../src/handlers/shared/strategies/ecs-strategy').EcsComputeStrategy {
+    let Strategy!: typeof import('../../../../src/handlers/shared/strategies/ecs-strategy').EcsComputeStrategy;
+    jest.isolateModules(() => {
+      process.env.ECS_CLUSTER_ARN = CLUSTER_ARN;
+      process.env.ECS_TASK_DEFINITION_ARN = TASK_DEF_ARN;
+      process.env.ECS_PLANNING_TASK_DEFINITION_ARN = PLANNING_DEF_ARN;
+      process.env.ECS_SUBNETS = 'subnet-aaa,subnet-bbb';
+      process.env.ECS_SECURITY_GROUP = 'sg-12345';
+      process.env.ECS_CONTAINER_NAME = 'AgentContainer';
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      Strategy = require('../../../../src/handlers/shared/strategies/ecs-strategy').EcsComputeStrategy;
+    });
+    return Strategy;
+  }
+
+  afterEach(() => {
+    delete process.env.ECS_PLANNING_TASK_DEFINITION_ARN;
+  });
+
+  test('a read-only workflow runs on the PLANNING def', async () => {
+    mockSend.mockResolvedValueOnce({ tasks: [{ taskArn: TASK_ARN }] });
+    const Strategy = loadStrategyWithPlanningDef();
+    await new Strategy().startSession({
+      taskId: 'TASK001',
+      userId: 'cognito-test',
+      payload: { repo_url: 'org/repo' },
+      blueprintConfig: { compute_type: 'ecs', runtime_arn: '' },
+      readOnly: true,
+    });
+    // read-only → planning def, resolved to its family (`agent-planning`).
+    expect(mockSend.mock.calls[0][0].input.taskDefinition).toBe('agent-planning');
+  });
+
+  test('a non-read-only workflow still runs on the BUILD def even when a planning def is wired', async () => {
+    mockSend.mockResolvedValueOnce({ tasks: [{ taskArn: TASK_ARN }] });
+    const Strategy = loadStrategyWithPlanningDef();
+    await new Strategy().startSession({
+      taskId: 'TASK001',
+      userId: 'cognito-test',
+      payload: { repo_url: 'org/repo' },
+      blueprintConfig: { compute_type: 'ecs', runtime_arn: '' },
+      readOnly: false,
+    });
+    expect(mockSend.mock.calls[0][0].input.taskDefinition).toBe('agent');
+  });
+
+  test('omitting readOnly defaults to the BUILD def', async () => {
+    mockSend.mockResolvedValueOnce({ tasks: [{ taskArn: TASK_ARN }] });
+    const Strategy = loadStrategyWithPlanningDef();
+    await new Strategy().startSession({
+      taskId: 'TASK001',
+      userId: 'cognito-test',
+      payload: { repo_url: 'org/repo' },
+      blueprintConfig: { compute_type: 'ecs', runtime_arn: '' },
+    });
+    expect(mockSend.mock.calls[0][0].input.taskDefinition).toBe('agent');
   });
 });
 

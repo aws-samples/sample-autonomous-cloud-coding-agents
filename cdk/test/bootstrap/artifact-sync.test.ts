@@ -19,7 +19,14 @@
 
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { infrastructurePolicy, applicationPolicy, observabilityPolicy } from '../../src/bootstrap/policies';
+import {
+  infrastructurePolicy,
+  applicationPolicy,
+  observabilityPolicy,
+  computeAgentcorePolicy,
+  computeEcsPolicy,
+  computeLambdaMicrovmPolicy,
+} from '../../src/bootstrap/policies';
 import { BOOTSTRAP_VERSION, computeBootstrapHash } from '../../src/bootstrap/version';
 
 const artifactsDir = join(__dirname, '..', '..', 'bootstrap');
@@ -40,6 +47,9 @@ describe('Bootstrap artifact sync', () => {
       { name: 'infrastructure', fn: infrastructurePolicy },
       { name: 'application', fn: applicationPolicy },
       { name: 'observability', fn: observabilityPolicy },
+      { name: 'compute-agentcore', fn: computeAgentcorePolicy },
+      { name: 'compute-ecs', fn: computeEcsPolicy },
+      { name: 'compute-lambda-microvm', fn: computeLambdaMicrovmPolicy },
     ] as const;
 
     for (const { name, fn } of cases) {

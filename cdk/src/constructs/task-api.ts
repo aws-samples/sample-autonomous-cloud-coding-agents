@@ -136,6 +136,15 @@ export interface TaskApiProps {
   readonly orchestratorFunctionArn?: string;
 
   /**
+   * Maximum concurrent tasks per user (#441). Threaded to the get-task
+   * handler so the queue-wait ETA heuristic agrees with the
+   * orchestrator's admission cap. Must match
+   * ``TaskOrchestrator.maxConcurrentTasksPerUser``.
+   * @default 10
+   */
+  readonly maxConcurrentTasksPerUser?: number;
+
+  /**
    * API Gateway stage name.
    * @default 'v1'
    */
@@ -190,6 +199,29 @@ export interface TaskApiProps {
   readonly ecsClusterArn?: string;
 
   /**
+   * IAM resource ARN of the MicroVM image this deployment provisioned (ADR-021
+   * sub-decision 4). When provided, the cancel Lambda gets
+   * `lambda:TerminateMicrovm` **scoped to that one image**, so a cancelled
+   * MicroVM-backed task actually stops billing — mirroring the conditional
+   * AgentCore `RUNTIME_ARN` / `ecsClusterArn` wiring above.
+   *
+   * An ARN rather than an on/off boolean so the grant is exactly scoped. `TaskApi`
+   * is constructed before `LambdaMicrovmCompute` (the cancel Lambda's ARN is
+   * needed earlier), so the stack passes a `Lazy.string` that resolves after the
+   * image exists — the same cycle-breaking pattern `agentCoreStopSessionRuntimeArn`
+   * uses for the AgentCore runtime ARN.
+   *
+   * Absent ⇒ no grant. That is the correct behaviour in the "backend enabled but
+   * no image configured yet" bootstrap state too: with no image there can be no
+   * MicroVM-backed task to cancel.
+   *
+   * No matching env var: `cancel-task.ts` reads the `microvmId` from the task
+   * row's `compute_metadata` and — unlike the AgentCore path — never falls back
+   * to a stack-level identifier.
+   */
+  readonly lambdaMicrovmImageArn?: string;
+
+  /**
    * S3 bucket for task attachments. When provided, the create-task Lambda
    * gets PutObject/DeleteObject grants and the bucket name as env var.
    */
@@ -200,6 +232,7 @@ export interface TaskApiProps {
    * Required when attachmentsBucket is provided.
    */
   readonly userConcurrencyTable?: dynamodb.ITable;
+
 }
 
 /**
@@ -314,6 +347,15 @@ export class TaskApi extends Construct {
           // attachments up to 3 MB, presigned upload metadata). Excludes
           // SizeRestrictions_BODY only; all other CRS rules apply. Payload
           // size is bounded by API GW (10 MB) and validateAttachments().
+          //
+          // NOTE (known limitation, tracked as backlog): CrossSiteScripting_BODY here BLOCKS a
+          // Linear/Jira webhook whose issue body contains HTML markup
+          // (``<head>``, ``<meta>``, ``<div>``) at the WAF edge with a 403
+          // before the Lambda runs — the task silently never starts and the
+          // sender gets an opaque 403. XSS protection is intentionally kept ON
+          // for now (a real defense-in-depth layer); the false-positive is
+          // tracked as a backlog item to fix deliberately (e.g. a considered
+          // per-route exclusion + operator alarm) rather than weaken WAF here.
           name: 'AWSManagedRulesCommonRuleSet-TaskPaths',
           priority: 1,
           overrideAction: { none: {} },
@@ -515,6 +557,10 @@ export class TaskApi extends Construct {
       TASK_TABLE_NAME: props.taskTable.tableName,
       TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
       TASK_RETENTION_DAYS: String(props.taskRetentionDays ?? DEFAULT_TASK_RETENTION_DAYS),
+      // Solution-attribution component label (#319): the `md/` segment for the
+      // REST API surface. The universal `app/` segment (AWS_SDK_UA_APP_ID) is
+      // set separately by the stack-level SolutionUaAspect.
+      ABCA_COMPONENT: 'api',
     };
     // The Node.js Lambda runtime ships an AWS SDK, but its pinned version
     // lags current. `@aws-sdk/client-bedrock-agentcore` in particular has
@@ -574,7 +620,12 @@ export class TaskApi extends Construct {
       handler: 'handler',
       runtime: Runtime.NODEJS_24_X,
       architecture: Architecture.ARM_64,
-      environment: commonEnv,
+      environment: {
+        ...commonEnv,
+        // #441: queue-position ETA heuristic must agree with the
+        // orchestrator's per-user admission cap.
+        MAX_CONCURRENT_TASKS_PER_USER: String(props.maxConcurrentTasksPerUser ?? 10),
+      },
       bundling: commonBundling,
     });
 
@@ -620,7 +671,7 @@ export class TaskApi extends Construct {
       bundling: commonBundling,
     });
 
-    // Operator replay bundle (#515): aggregates TaskRecord + chronological
+    // Operator replay bundle: aggregates TaskRecord + chronological
     // TaskEvents. Reads both tables; commonEnv already carries both table names.
     // Heaviest read path — GetItem + a multi-page Query loop (up to
     // MAX_REPLAY_EVENTS / ~5 pages) + full-bundle serialization — so it gets the
@@ -662,6 +713,35 @@ export class TaskApi extends Construct {
             'ecs:cluster': props.ecsClusterArn,
           },
         },
+      }));
+    }
+
+    // ADR-021: cancelling a `lambda-microvm` task must actively terminate the
+    // MicroVM — leaving it to the 8-hour `maximumDurationInSeconds` cap would
+    // keep billing 16 vCPU and would hold account memory quota that gates
+    // admission of new tasks. Conditional for the same reason the AgentCore and
+    // ECS grants above are: a deployment without the backend gets no grant.
+    //
+    // ONLY `lambda:TerminateMicrovm`. `cancel-task.ts` sends
+    // `TerminateMicrovmCommand` and nothing else — it does not read MicroVM
+    // state first — so `lambda:GetMicrovm` would be a permission with no caller.
+    // (The approve/deny Lambdas get `ResumeMicrovm` + `GetMicrovm` in P3, where
+    // a state read is genuinely needed for the resume reconciliation.)
+    //
+    // Resource is the MicroVM *image*, not the running instance: every MicroVM
+    // lifecycle action authorizes against `microvm-image:<name>` (Service
+    // Authorization Reference), so the per-session `microvmId` never appears in
+    // IAM — which is what lets this be scoped to the one platform-created image
+    // rather than an account-wide `microvm-image:*`. The ARN arrives as a
+    // `Lazy.string` because TaskApi is built before the MicroVM construct.
+    //
+    // `<arn>:*` sibling: version-suffix hedge, same rationale as the
+    // orchestrator's lifecycle grant in `task-orchestrator.ts` — still pinned to
+    // this image's name, so it can never match a different image.
+    if (props.lambdaMicrovmImageArn) {
+      cancelTaskFn.addToRolePolicy(new iam.PolicyStatement({
+        actions: ['lambda:TerminateMicrovm'],
+        resources: [props.lambdaMicrovmImageArn, `${props.lambdaMicrovmImageArn}:*`],
       }));
     }
 
@@ -776,7 +856,7 @@ export class TaskApi extends Construct {
     const events = taskById.addResource('events');
     events.addMethod('GET', new apigw.LambdaIntegration(getTaskEventsFn), cognitoAuthOptions);
 
-    // Operator replay bundle (#515): GET /tasks/{task_id}/replay. Same Cognito
+    // Operator replay bundle: GET /tasks/{task_id}/replay. Same Cognito
     // owner-scoped auth as GET /tasks/{task_id} (cognitoAuthOptions).
     const replay = taskById.addResource('replay');
     replay.addMethod('GET', new apigw.LambdaIntegration(getTaskReplayFn), cognitoAuthOptions);
@@ -1029,14 +1109,18 @@ export class TaskApi extends Construct {
     //
     // Default: webhook management routes stay Cognito-only. When an API key
     // table is wired, a unified REQUEST authorizer replaces Cognito on those
-    // routes so they accept EITHER a Cognito JWT OR a `webhooks:manage` API key
-    // (issue #376). Key *creation* stays Cognito-gated.
+    // routes so they accept EITHER a Cognito JWT OR a `webhooks:manage` API
+    // key. Key *creation* stays Cognito-gated.
     let webhookMgmtAuthOptions: apigw.MethodOptions = cognitoAuthOptions;
 
     if (props.apiKeyTable) {
       const apiKeyEnv: Record<string, string> = {
         API_KEY_TABLE_NAME: props.apiKeyTable.tableName,
         API_KEY_RETENTION_DAYS: String(props.apiKeyRetentionDays ?? DEFAULT_WEBHOOK_RETENTION_DAYS),
+        // Solution-attribution component label (#319): API-key management is
+        // part of the REST API surface. apiKeyEnv does NOT spread commonEnv, so
+        // set it explicitly here rather than relying on the `api` default fallback.
+        ABCA_COMPONENT: 'api',
       };
 
       // --- Unified authorizer: Cognito JWT OR platform API key ---
@@ -1050,6 +1134,8 @@ export class TaskApi extends Construct {
           API_KEY_REQUIRED_SCOPE: 'webhooks:manage',
           USER_POOL_ID: this.userPool.userPoolId,
           APP_CLIENT_ID: this.appClient.userPoolClientId,
+          // #319: REST API surface (see apiKeyEnv above).
+          ABCA_COMPONENT: 'api',
         },
         bundling: commonBundling,
       });
@@ -1119,6 +1205,9 @@ export class TaskApi extends Construct {
       const webhookEnv: Record<string, string> = {
         WEBHOOK_TABLE_NAME: props.webhookTable.tableName,
         WEBHOOK_RETENTION_DAYS: String(props.webhookRetentionDays ?? DEFAULT_WEBHOOK_RETENTION_DAYS),
+        // Solution-attribution component label (#319): webhook ingest surface.
+        // (webhookEnv does NOT spread commonEnv, so set it explicitly here.)
+        ABCA_COMPONENT: 'webhook',
       };
 
       // --- Webhook management Lambdas (Cognito-authenticated) ---
@@ -1160,12 +1249,16 @@ export class TaskApi extends Construct {
       });
 
       // --- Webhook task creation Lambda ---
+      // Same env as createTask, but this is the webhook ingest surface, so
+      // relabel the #319 solution-attribution component to `webhook` (matches
+      // the sibling webhook Lambdas above; createTaskEnv inherits `api`).
+      const webhookCreateTaskEnv: Record<string, string> = { ...createTaskEnv, ABCA_COMPONENT: 'webhook' };
       const webhookCreateTaskFn = new lambda.NodejsFunction(this, 'WebhookCreateTaskFn', {
         entry: path.join(handlersDir, 'webhook-create-task.ts'),
         handler: 'handler',
         runtime: Runtime.NODEJS_24_X,
         architecture: Architecture.ARM_64,
-        environment: createTaskEnv,
+        environment: webhookCreateTaskEnv,
         bundling: attachmentScreeningBundling,
         memorySize: HEAVY_ATTACHMENT_HANDLER_MEMORY_MB,
         timeout: Duration.seconds(API_HANDLER_TIMEOUT_SECONDS),
@@ -1263,12 +1356,12 @@ export class TaskApi extends Construct {
 
       // When the unified authorizer is in use these methods are CUSTOM, not
       // Cognito — suppress COG4 (the authorizer still enforces a Cognito JWT
-      // or a scoped API key; issue #376).
+      // or a scoped API key).
       if (props.apiKeyTable) {
         NagSuppressions.addResourceSuppressions([createWebhookMethod, listWebhooksMethod, deleteWebhookMethod], [
           {
             id: 'AwsSolutions-COG4',
-            reason: 'Webhook management uses a unified REQUEST authorizer accepting a Cognito JWT or a scoped platform API key — by design for headless automation (issue #376)',
+            reason: 'Webhook management uses a unified REQUEST authorizer accepting a Cognito JWT or a scoped platform API key — by design for headless automation',
           },
         ]);
       }
@@ -1287,6 +1380,11 @@ export class TaskApi extends Construct {
       allFunctions.push(createWebhookFn, listWebhooksFn, deleteWebhookFn, webhookAuthorizerFn, webhookCreateTaskFn);
     }
 
+    // Agent asset registry endpoints (#246) live in their own NestedStack with a
+    // separate RestApi (see RegistryApi + agent.ts) so their ~35 resources don't
+    // count against this root stack's 500-resource CloudFormation limit. Nothing
+    // for the registry API is created here.
+
     // --- cdk-nag suppressions for CDK-generated IAM policies ---
     for (const fn of allFunctions) {
       NagSuppressions.addResourceSuppressions(fn, [
@@ -1296,7 +1394,7 @@ export class TaskApi extends Construct {
         },
         {
           id: 'AwsSolutions-IAM5',
-          reason: 'DynamoDB index/* wildcards generated by CDK grantReadWriteData/grantReadData for GSI access',
+          reason: 'DynamoDB index/* wildcards generated by CDK grantReadWriteData/grantReadData for GSI access; ecs:StopTask is conditioned on the cluster ARN; lambda:TerminateMicrovm is scoped to the single platform MicroVM image ARN plus a <arn>:* version-suffix sibling (delivered as a Lazy.string because TaskApi is built before the MicroVM construct) — ADR-021',
         },
       ], true);
     }

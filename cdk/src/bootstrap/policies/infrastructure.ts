@@ -54,6 +54,9 @@ export function infrastructurePolicy(): iam.PolicyDocument {
         ],
         resources: [
           'arn:aws:cloudformation:*:*:stack/backgroundagent-dev/*',
+          // Nested stacks (e.g. Agent Registry, #246) synth as child
+          // stacks named ``backgroundagent-dev-<Child><hash>``.
+          'arn:aws:cloudformation:*:*:stack/backgroundagent-dev-*',
           'arn:aws:cloudformation:*:*:stack/CDKToolkit/*',
         ],
       }),
@@ -111,6 +114,7 @@ export function infrastructurePolicy(): iam.PolicyDocument {
               'bedrock.amazonaws.com',
               'bedrock-agentcore.amazonaws.com',
               'events.amazonaws.com',
+              'states.amazonaws.com',
               'vpc-flow-logs.amazonaws.com',
             ],
           },

@@ -18,7 +18,7 @@
  */
 
 import * as path from 'path';
-import { ArnFormat, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
+import { ArnFormat, Aspects, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import * as apigw from 'aws-cdk-lib/aws-apigateway';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
@@ -28,8 +28,10 @@ import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
+import { SlackChannelMappingTable } from './slack-channel-mapping-table';
 import { SlackInstallationTable } from './slack-installation-table';
 import { SlackUserMappingTable } from './slack-user-mapping-table';
+import { ComponentUaAspect } from './solution-ua-aspect';
 
 /** Default task-record retention used for TTL computation (days). */
 const DEFAULT_TASK_RETENTION_DAYS = 90;
@@ -91,8 +93,8 @@ export interface SlackIntegrationProps {
  * - API Gateway routes under /slack/*
  *
  * Outbound Slack delivery (task lifecycle notifications) runs through
- * ``FanOutConsumer`` as a per-channel dispatcher. Before issue #64 this
- * construct also owned a ``SlackNotifyFn`` DynamoDB Streams consumer on
+ * ``FanOutConsumer`` as a per-channel dispatcher. This
+ * construct used to also own a ``SlackNotifyFn`` DynamoDB Streams consumer on
  * ``TaskEventsTable``; that consumer was removed to keep the stream at
  * the DynamoDB-documented one-reader-per-shard limit.
  */
@@ -102,6 +104,9 @@ export class SlackIntegration extends Construct {
 
   /** The Slack user mapping table. */
   public readonly userMappingTable: dynamodb.Table;
+
+  /** The Slack channel → default-repo mapping table. */
+  public readonly channelMappingTable: dynamodb.Table;
 
   /** The Slack signing secret (placeholder — user populates after creating the Slack App). */
   public readonly signingSecret: secretsmanager.Secret;
@@ -115,13 +120,21 @@ export class SlackIntegration extends Construct {
   constructor(scope: Construct, id: string, props: SlackIntegrationProps) {
     super(scope, id);
 
+    // Solution-attribution component label (#319): every Lambda in this Slack
+    // integration is part of the webhook ingest surface. One aspect labels
+    // them all (and any future function added here) without per-function env
+    // edits; the universal `app/` segment is set by the stack-level aspect.
+    Aspects.of(this).add(new ComponentUaAspect('webhook'));
+
     const removalPolicy = props.removalPolicy ?? RemovalPolicy.DESTROY;
 
     // --- DynamoDB Tables ---
     const installationTable = new SlackInstallationTable(this, 'InstallationTable', { removalPolicy });
     const userMappingTable = new SlackUserMappingTable(this, 'UserMappingTable', { removalPolicy });
+    const channelMappingTable = new SlackChannelMappingTable(this, 'ChannelMappingTable', { removalPolicy });
     this.installationTable = installationTable.table;
     this.userMappingTable = userMappingTable.table;
+    this.channelMappingTable = channelMappingTable.table;
 
     // --- Slack App Secrets (CDK-created placeholders) ---
     // Users populate these after creating the Slack App via the SlackAppCreateUrl output.
@@ -142,6 +155,15 @@ export class SlackIntegration extends Construct {
     const handlersDir = path.join(__dirname, '..', 'handlers');
     const commonBundling: lambda.BundlingOptions = {
       externalModules: ['@aws-sdk/*'],
+    };
+    // pdf-parse (v2, pdfjs-based) can't be esbuild-bundled — ship it unbundled so
+    // it resolves natively at runtime. The Slack command processor hands inline
+    // file attachments to createTaskCore, which screens them (screenTextFile →
+    // extractPdfText for a PDF). Any handler that reaches attachment-screening's
+    // PDF path needs this carve-out — see the //:check:pdf-parse-bundling guard.
+    const attachmentScreeningBundling: lambda.BundlingOptions = {
+      ...commonBundling,
+      nodeModules: ['pdf-parse'],
     };
 
     // Secrets Manager ARN prefix for Slack secrets (bgagent/slack/*)
@@ -268,11 +290,14 @@ export class SlackIntegration extends Construct {
         ...createTaskEnv,
         SLACK_USER_MAPPING_TABLE_NAME: this.userMappingTable.tableName,
         SLACK_INSTALLATION_TABLE_NAME: this.installationTable.tableName,
+        SLACK_CHANNEL_MAPPING_TABLE_NAME: this.channelMappingTable.tableName,
       },
-      bundling: commonBundling,
+      // Screens inline file attachments via createTaskCore — pdf-parse must stay unbundled.
+      bundling: attachmentScreeningBundling,
     });
     this.userMappingTable.grantReadWriteData(commandProcessorFn);
     this.installationTable.grantReadData(commandProcessorFn);
+    this.channelMappingTable.grantReadData(commandProcessorFn);
     commandProcessorFn.addToRolePolicy(readSlackSecretsPolicy);
     props.taskTable.grantReadWriteData(commandProcessorFn);
     props.taskEventsTable.grantReadWriteData(commandProcessorFn);
@@ -355,7 +380,7 @@ export class SlackIntegration extends Construct {
     this.userMappingTable.grantReadWriteData(slackLinkFn);
 
     // Outbound Slack delivery runs through FanOutConsumer — see the
-    // construct doc above for the reader-count rationale (issue #64).
+    // construct doc above for the reader-count rationale.
 
     // ═══════════════════════════════════════════════════════════════════════════
     // API Gateway Routes

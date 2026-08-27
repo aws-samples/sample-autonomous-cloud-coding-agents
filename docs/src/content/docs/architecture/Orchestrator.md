@@ -50,13 +50,14 @@ The orchestrator is deliberately scoped. It handles coordination and bookkeeping
 
 ## Task state machine
 
-Every task moves through a finite set of states from creation to a terminal outcome. The state machine is the backbone of the orchestrator: it determines what actions are valid at each point, when resources are acquired or released, and how the platform recovers from failures. Four of the ten states are terminal, meaning the task is done and no further transitions occur.
+Every task moves through a finite set of states from creation to a terminal outcome. The state machine is the backbone of the orchestrator: it determines what actions are valid at each point, when resources are acquired or released, and how the platform recovers from failures. Four of the eleven states are terminal, meaning the task is done and no further transitions occur.
 
 ### States
 
 | State | Description | Duration |
 |---|---|---|
 | `PENDING_UPLOADS` | Presigned-upload task awaiting client file uploads | Minutes (30-min auto-cancel) |
+| `QUEUED` | Admission-capped task awaiting a free concurrency slot (#441) | Minutes to hours (24h backstop) |
 | `SUBMITTED` | Task accepted, awaiting orchestration | Milliseconds |
 | `HYDRATING` | Fetching GitHub data, querying memory, assembling prompt | Seconds |
 | `RUNNING` | Agent session active in compute environment | Minutes to hours |
@@ -78,8 +79,13 @@ stateDiagram-v2
     PENDING_UPLOADS --> CANCELLED : User cancels or 30-min auto-cancel
 
     SUBMITTED --> HYDRATING : Admission passes
+    SUBMITTED --> QUEUED : Concurrency cap hit
     SUBMITTED --> FAILED : Admission rejected
     SUBMITTED --> CANCELLED : User cancels
+
+    QUEUED --> SUBMITTED : Queue pickup (slot free)
+    QUEUED --> CANCELLED : User cancels
+    QUEUED --> FAILED : Queue-age backstop (24h)
 
     HYDRATING --> RUNNING : Session started
     HYDRATING --> AWAITING_APPROVAL : Cedar soft-deny gate
@@ -109,7 +115,11 @@ stateDiagram-v2
 | `PENDING_UPLOADS` | `FAILED` | Screening blocked | Any attachment fails security screening |
 | `PENDING_UPLOADS` | `CANCELLED` | User cancels or auto-cancel | Upload window expired (30 min) or explicit cancel |
 | `SUBMITTED` | `HYDRATING` | Admission passes | Concurrency slot acquired |
-| `SUBMITTED` | `FAILED` | Admission rejected | Repo not onboarded, rate/concurrency limit, validation error |
+| `SUBMITTED` | `QUEUED` | Concurrency cap hit | Per-user cap reached; task parked in FIFO admission queue (#441). No slot held. |
+| `SUBMITTED` | `FAILED` | Admission rejected | Repo not onboarded, validation error |
+| `QUEUED` | `SUBMITTED` | Queue pickup | Admission-queue pickup Lambda sees free capacity; re-invokes the orchestrator. FIFO by `created_at`. |
+| `QUEUED` | `CANCELLED` | User cancels | Explicit cancel removes the task from the queue |
+| `QUEUED` | `FAILED` | Queue-age backstop | Task waited longer than `QUEUE_MAX_AGE_SECONDS` (default 24h) without admission |
 | `HYDRATING` | `RUNNING` | Hydration complete | `invoke_agent_runtime` returns session ID |
 | `HYDRATING` | `AWAITING_APPROVAL` | Cedar soft-deny gate fires | Tool call triggers a soft-deny policy rule during hydration |
 | `HYDRATING` | `FAILED` | Hydration error | GitHub API failure, guardrail blocks content, Bedrock unavailable |
@@ -130,6 +140,7 @@ Users can cancel a task at any point. The orchestrator's response depends on how
 | State when cancel arrives | Action |
 |---|---|
 | `PENDING_UPLOADS` | Transition to `CANCELLED`. Clean up S3 objects under the task's attachment prefix. No concurrency slot to release. |
+| `QUEUED` | Transition to `CANCELLED`. Removes the task from the admission queue. No compute or concurrency slot to release (a queued task never held one). |
 | `SUBMITTED` | Transition to `CANCELLED`. No cleanup needed. |
 | `HYDRATING` | Abort hydration, release concurrency slot, transition to `CANCELLED`. |
 | `RUNNING` | Call `stop_runtime_session`, wait for confirmation, release concurrency, transition to `CANCELLED`. Partial work on GitHub remains for the user to inspect. |
@@ -169,9 +180,9 @@ The orchestrator (`orchestrate-task.ts`) runs these as distinct durable-executio
 Validates the task before any compute is consumed. Checks run in order:
 
 1. **Repo onboarding** - `GetItem` on `RepoTable`. If not found or inactive, reject with `REPO_NOT_ONBOARDED`. This runs at the API handler level (`createTaskCore`) for fast rejection.
-2. **User concurrency** - Atomic check-and-increment on `UserConcurrency` counter. If at limit (default 3-5), reject.
+2. **User concurrency** - Atomic check-and-increment on `UserConcurrency` counter. If at limit (default 10), the task is **queued, not failed** (#441): it transitions `SUBMITTED → QUEUED` and a scheduled admission-queue pickup Lambda re-attempts admission in FIFO order (by `created_at`) as slots free up, flipping `QUEUED → SUBMITTED` and re-invoking the orchestrator. The pickup Lambda does a read-only capacity pre-check; the orchestrator's atomic increment remains the single writer of the counter, so a pickup that loses the race harmlessly re-queues without losing FIFO position. `GET /tasks/{id}` surfaces `queue_position` and `estimated_wait_s` while queued.
 3. **System concurrency** - Compare total running + hydrating tasks to system limit (bounded by AgentCore quotas).
-4. **Rate limiting** - Sliding window counter (10 tasks/hour per user). Exceeded tasks are rejected, not queued.
+4. **Rate limiting** - Sliding window counter (10 tasks/hour per user). Rate-limit rejections happen at submit time and are rejected, not queued (unlike the concurrency cap, which queues).
 5. **Idempotency** - If the request includes an idempotency key and a task with that key exists, return the existing task.
 
 On acceptance, the concurrency slot is acquired and the orchestrator proceeds to pre-flight.

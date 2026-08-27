@@ -26,6 +26,7 @@ import {
   applicationPolicy,
   computeAgentcorePolicy,
   computeEcsPolicy,
+  computeLambdaMicrovmPolicy,
   infrastructurePolicy,
   observabilityPolicy,
 } from '../../src/bootstrap/policies';
@@ -73,12 +74,13 @@ describe('Golden-file parity: TypeScript policies match DEPLOYMENT_ROLES.md', ()
   const markdownPath = join(__dirname, '..', '..', '..', 'docs', 'design', 'DEPLOYMENT_ROLES.md');
   const markdown = readFileSync(markdownPath, 'utf-8');
 
-  // Extract JSON blocks: [0]=trust, [1]=infrastructure, [2]=application, [3]=observability, [4]=ECS
+  // Extract JSON blocks: [0]=trust, [1]=infrastructure, [2]=application, [3]=observability, [4]=ECS, [5]=Lambda MicroVMs
   const jsonBlocks = extractJsonBlocks(markdown);
   const goldenInfra = JSON.parse(jsonBlocks[1]);
   const goldenApp = JSON.parse(jsonBlocks[2]);
   const goldenObs = JSON.parse(jsonBlocks[3]);
   const goldenEcs = JSON.parse(jsonBlocks[4]);
+  const goldenLambdaMicrovm = JSON.parse(jsonBlocks[5]);
 
   // Resolve TypeScript policies via CDK Stack
   const tsInfra = stack.resolve(infrastructurePolicy());
@@ -86,6 +88,7 @@ describe('Golden-file parity: TypeScript policies match DEPLOYMENT_ROLES.md', ()
   const tsObs = stack.resolve(observabilityPolicy());
   const tsComputeAgentcore = stack.resolve(computeAgentcorePolicy());
   const tsComputeEcs = stack.resolve(computeEcsPolicy());
+  const tsComputeLambdaMicrovm = stack.resolve(computeLambdaMicrovmPolicy());
 
   // --- Infrastructure and Application: direct parity ---
   const directTestCases: Array<{
@@ -198,6 +201,30 @@ describe('Golden-file parity: TypeScript policies match DEPLOYMENT_ROLES.md', ()
       const goldenSids = goldenNorm.map((s) => s.sid);
       const tsSids = tsNorm.map((s) => s.sid);
       expect(tsSids).toEqual(goldenSids);
+    });
+
+    it('has identical actions (sorted)', () => {
+      for (let i = 0; i < goldenNorm.length; i++) {
+        expect(tsNorm[i].actions).toEqual(goldenNorm[i].actions);
+      }
+    });
+
+    it('has identical resources (sorted)', () => {
+      for (let i = 0; i < goldenNorm.length; i++) {
+        expect(tsNorm[i].resources).toEqual(goldenNorm[i].resources);
+      }
+    });
+  });
+
+  // --- Compute-LambdaMicrovms: matches block 5 from markdown ---
+  describe('Compute-LambdaMicrovms policy', () => {
+    const goldenNorm = normalizeStatements(goldenLambdaMicrovm.Statement);
+    const tsNorm = normalizeStatements(
+      (tsComputeLambdaMicrovm as { Statement: Array<{ Sid?: string; Action?: string | string[]; Resource?: string | string[] }> }).Statement,
+    );
+
+    it('has the same SIDs', () => {
+      expect(tsNorm.map((s) => s.sid)).toEqual(goldenNorm.map((s) => s.sid));
     });
 
     it('has identical actions (sorted)', () => {

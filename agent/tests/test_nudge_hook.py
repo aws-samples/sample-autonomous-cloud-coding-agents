@@ -321,7 +321,7 @@ class TestStopHook:
     def test_registry_default_contains_cancel_then_nudge(self):
         # Freshly-imported registry: cancel runs FIRST so it short-circuits
         # nudge injection on cancelled tasks; nudge runs AFTER it for running
-        # tasks. The K7 stuck-guard is inserted between them (it also wants to
+        # tasks. The stuck-guard is inserted between them (it also wants to
         # short-circuit before the nudge reader mutates DDB on a bail), so the
         # invariant we assert is the relative ORDER (cancel < stuck-guard <
         # nudge), not exact adjacency.

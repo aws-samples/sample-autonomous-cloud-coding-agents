@@ -48,8 +48,9 @@ import {
 } from '@aws-sdk/client-dynamodb';
 import { ulid } from 'ulid';
 import { logger } from './shared/logger';
+import { makeClient } from './shared/ua';
 
-const ddb = new DynamoDBClient({});
+const ddb = makeClient(DynamoDBClient);
 const TASK_TABLE = process.env.TASK_TABLE_NAME!;
 const EVENTS_TABLE = process.env.TASK_EVENTS_TABLE_NAME!;
 const CONCURRENCY_TABLE = process.env.USER_CONCURRENCY_TABLE_NAME!;
@@ -123,8 +124,22 @@ async function findStrandedCandidates(
       const createdAt = item.created_at?.S;
       if (!taskId || !userId || !createdAt) continue;
 
-      const createdMs = Date.parse(createdAt);
-      const ageSec = Math.floor((now.getTime() - createdMs) / 1000);
+      // Age by time-in-CURRENT-status, not creation time (#441). A task
+      // that waited in the admission queue longer than the stranded
+      // timeout and was then picked up (QUEUED -> SUBMITTED) has an old
+      // created_at but a fresh status entry — failing it here would kill
+      // it before its pipeline attaches. status_created_at is
+      // `<STATUS>#<iso>`; created_at <= status-entry time always, so the
+      // GSI cutoff on created_at remains a correct superset pre-filter.
+      // Records missing/with a malformed status_created_at fall back to
+      // created_at (pre-#441 behavior).
+      const statusEnteredAt = item.status_created_at?.S?.split('#')[1];
+      const ageAnchor = statusEnteredAt && !Number.isNaN(Date.parse(statusEnteredAt))
+        ? statusEnteredAt
+        : createdAt;
+      const anchorMs = Date.parse(ageAnchor);
+      const ageSec = Math.floor((now.getTime() - anchorMs) / 1000);
+      if (ageSec < timeoutSeconds) continue;
 
       matches.push({
         task_id: taskId,

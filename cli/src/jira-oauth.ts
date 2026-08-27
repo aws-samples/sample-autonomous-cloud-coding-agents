@@ -100,17 +100,28 @@ export interface StoredJiraOauthToken {
   readonly updated_at: string;
   /** Cognito sub of the admin who ran `bgagent jira setup`. Audit only. */
   readonly installed_by_platform_user_id: string;
+  /** Forge v2 web-trigger URL used for outbound app-auth writes. */
+  readonly app_actor_proxy_url?: string;
+  /** HMAC secret shared with the Forge app's web-trigger handler. */
+  readonly app_actor_shared_secret?: string;
+  /** Jira app account id verified during `bgagent jira app-setup`. */
+  readonly app_actor_account_id?: string;
+  /** Jira app display name verified during `bgagent jira app-setup`. */
+  readonly app_actor_display_name?: string;
+  /** ISO-8601 timestamp of the latest successful app-actor setup. */
+  readonly app_actor_configured_at?: string;
   /**
    * Per-tenant Jira webhook signing secret.
    *
-   * Atlassian's "Generic webhooks" support a per-webhook secret that
-   * signs events with `X-Hub-Signature: sha256=<hex>`. Webhook
-   * subscriptions are tenant-scoped, so a single stack-wide signing
-   * secret cannot verify events from multiple tenants.
+   * Atlassian's "Generic webhooks" support a per-webhook secret that signs
+   * events with `X-Hub-Signature: sha256=<hex>`. The receiver uses this copy
+   * when the payload carries cloudId. Jira admin-console payloads omit
+   * cloudId, so the sole active tenant also synchronizes its value to the
+   * stack-wide verifier.
    *
    * Optional for back-compat: tokens written before per-tenant signing
-   * was wired up won't have it, and the receiver falls back to the
-   * stack-wide `JIRA_WEBHOOK_SECRET_ARN` for those installs.
+   * was wired up won't have it, so the receiver uses the stack-wide
+   * `JIRA_WEBHOOK_SECRET_ARN` verifier for those installs.
    */
   readonly webhook_signing_secret?: string;
 }
