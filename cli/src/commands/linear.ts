@@ -46,6 +46,10 @@ import {
   resolveWebhookSecretAction,
   StoredLinearOauthToken,
 } from '../linear-oauth';
+import {
+  beginVaultConsent,
+  upsertLinearCredentialProvider,
+} from '../linear-vault';
 import { awaitOauthCallback, CALLBACK_URL } from '../oauth-callback-server';
 import { promptSecret } from '../prompt-secret';
 import { makeClient, makeDocClient } from '../ua';
@@ -856,6 +860,156 @@ export function makeLinearCommand(): Command {
           console.log('  2. Add the trigger label to a Linear issue in a mapped project.');
           console.log('  (To onboard teammates: `bgagent linear invite-user <slug>`.)');
         }
+      }),
+  );
+
+  linear.addCommand(
+    new Command('vault-setup')
+      .description(
+        'Onboard a Linear workspace through the AgentCore Identity Token Vault (RFC #249 Phase 1). '
+        + 'Run AFTER `bgagent linear setup <slug>`; requires the stack deployed with '
+        + '--context enableLinearIdentityVault=true.',
+      )
+      .argument('<slug>', 'Linear workspace urlKey already onboarded via `bgagent linear setup`')
+      .option('--region <region>', 'AWS region (defaults to configured region)')
+      .option('--stack-name <name>', 'CloudFormation stack name', 'backgroundagent-dev')
+      .option('--client-id <id>', 'Linear OAuth app Client ID (else read from the SM secret)')
+      .option('--client-secret <secret>', 'Linear OAuth app Client Secret (else read from the SM secret)')
+      .option('--no-browser', 'Print the consent URL instead of opening a browser (SSH/headless)')
+      .action(async (slug: string, opts) => {
+        if (!SLUG_RE.test(slug)) {
+          throw new CliError(`Invalid workspace slug '${slug}'.`);
+        }
+        const config = loadConfig();
+        const region = opts.region || config.region;
+        const stackName = opts.stackName;
+
+        // The workload identity name is fixed by the CDK construct.
+        const WORKLOAD_NAME = 'abca_linear_oauth';
+        // USER_FEDERATION requires a return URL that's on the workload identity
+        // allowlist. The CLI localhost loopback is always registered; consent
+        // completes server-side (polled below), so nothing listens on it here.
+        const RETURN_URL = 'http://localhost:8080/oauth/callback';
+
+        const registryTable = await getStackOutput(region, stackName, 'LinearWorkspaceRegistryTableName');
+        if (!registryTable) {
+          throw new CliError(
+            `Stack '${stackName}' has no LinearWorkspaceRegistryTableName output. `
+            + 'Deploy the stack (with --context enableLinearIdentityVault=true) first.',
+          );
+        }
+
+        const ddb = makeDocClient({ region });
+        const sm = makeClient(SecretsManagerClient, { region });
+
+        // ─── Read the existing (SM-onboarded) workspace row ──────────────
+        const secretName = linearOauthSecretName(slug);
+        const existing = await ddb.send(new ScanCommand({
+          TableName: registryTable,
+          FilterExpression: 'workspace_slug = :s',
+          ExpressionAttributeValues: { ':s': slug },
+          Limit: 1,
+        }));
+        const row = existing.Items?.[0];
+        if (!row || !row.linear_workspace_id || !row.oauth_secret_arn) {
+          throw new CliError(
+            `Workspace '${slug}' is not onboarded. Run \`bgagent linear setup ${slug}\` first — `
+            + 'vault-setup layers the Token Vault onto an already-authorized workspace.',
+          );
+        }
+        const linearWorkspaceId = row.linear_workspace_id as string;
+
+        // Source the Linear app credentials: flags override, else the SM secret.
+        let clientId = (opts.clientId as string | undefined)?.trim() ?? '';
+        let clientSecret = (opts.clientSecret as string | undefined)?.trim() ?? '';
+        if (!clientId || !clientSecret) {
+          const value = await sm.send(new GetSecretValueCommand({ SecretId: row.oauth_secret_arn as string }));
+          if (!value.SecretString) {
+            throw new CliError(`OAuth secret '${secretName}' is empty — re-run \`bgagent linear setup ${slug}\`.`);
+          }
+          const parsed = JSON.parse(value.SecretString) as Partial<StoredLinearOauthToken>;
+          clientId = clientId || (parsed.client_id ?? '');
+          clientSecret = clientSecret || (parsed.client_secret ?? '');
+        }
+        if (!clientId || !clientSecret) {
+          throw new CliError('Could not resolve Linear client_id/client_secret. Pass --client-id/--client-secret.');
+        }
+
+        console.log(`bgagent linear vault-setup — workspace '${slug}'`);
+        console.log(`  region: ${region}`);
+
+        // ─── Step 1: create/update the CustomOauth2 credential provider ──
+        process.stdout.write('  → Creating AgentCore credential provider...');
+        const { providerName, callbackUrl } = await upsertLinearCredentialProvider({
+          region,
+          workspaceSlug: slug,
+          clientId,
+          clientSecret,
+        });
+        console.log(` ✓ (${providerName})`);
+        console.log(
+          `\n  IMPORTANT: your Linear OAuth app's redirect URI must include the vault callback:\n    ${callbackUrl}\n`
+          + '  (Linear → Settings → API → your app → Redirect URIs). Consent fails with '
+          + 'redirect_uri_mismatch until it is added.\n',
+        );
+
+        // ─── Step 2: 3LO consent round-trip (mints + caches the token) ───
+        const consent = await beginVaultConsent({
+          region,
+          workloadName: WORKLOAD_NAME,
+          providerName,
+          linearWorkspaceId,
+          returnUrl: RETURN_URL,
+        });
+
+        let accessToken: string | null = null;
+        if (!consent.authorizationUrl) {
+          // Already consented.
+          accessToken = await consent.poll();
+        } else {
+          if (opts.browser !== false) {
+            const opened = await openBrowser(consent.authorizationUrl);
+            console.log(opened
+              ? '  → Opened your browser to consent (actor=app). Authorize the workspace, then return here.'
+              : `  → Open this URL to consent:\n    ${consent.authorizationUrl}`);
+          } else {
+            console.log(`  → --no-browser: open this URL to consent:\n    ${consent.authorizationUrl}`);
+          }
+          // Poll for the minted token. Consent completes server-side at the
+          // AgentCore callback; there is no localhost redirect to catch.
+          process.stdout.write('  → Waiting for consent to complete...');
+          const POLL_INTERVAL_MS = 3000;
+          const MAX_ATTEMPTS = 100; // ~5 minutes
+          for (let i = 0; i < MAX_ATTEMPTS && !accessToken; i++) {
+            await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+            try {
+              accessToken = await consent.poll();
+            } catch {
+              // transient; keep polling
+            }
+            process.stdout.write('.');
+          }
+          console.log('');
+        }
+
+        if (!accessToken) {
+          throw new CliError(
+            'Consent did not complete within the timeout. Re-run `bgagent linear vault-setup` after authorizing, '
+            + 'or verify the redirect URI matches the vault callback URL printed above.',
+          );
+        }
+        console.log('  ✓ Vault minted a Linear access token (cached in the vault).');
+
+        // ─── Step 3: record provider_name on the registry row ────────────
+        await ddb.send(new PutCommand({
+          TableName: registryTable,
+          Item: { ...row, provider_name: providerName, updated_at: new Date().toISOString() },
+        }));
+        console.log(`  ✓ Recorded provider_name '${providerName}' on the workspace registry row.`);
+        console.log(
+          '\n  Done. With the stack deployed under --context enableLinearIdentityVault=true, this '
+          + 'workspace\'s Linear tokens now resolve through the Token Vault (Secrets Manager remains the fallback).',
+        );
       }),
   );
 
