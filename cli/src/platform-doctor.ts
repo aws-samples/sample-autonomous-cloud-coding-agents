@@ -38,15 +38,31 @@ import { getStackOutput } from './stack-outputs';
 import { makeClient } from './ua';
 
 /**
+ * Every cross-Region inference-profile geography, mirroring
+ * `CrossRegionInferenceProfileRegion` in `@aws-cdk/aws-bedrock-alpha` (the CLI is
+ * a separate package and does not depend on CDK — see `PLATFORM_REPO_DEFAULTS`
+ * for the same mirroring).
+ *
+ * Must list them ALL. An earlier version matched only `us|eu|apac`, so when the
+ * platform default moved to a `global.` profile the strip below silently did
+ * nothing and `GetFoundationModel` was handed a profile id it cannot resolve —
+ * turning the one Bedrock check `doctor` performs into a false failure.
+ */
+const BEDROCK_GEO_PREFIXES = ['global', 'us-gov', 'us', 'eu', 'apac', 'jp', 'au'] as const;
+
+/** Strips a leading `<geo>.` inference-profile prefix, if present. */
+const GEO_PREFIX_RE = new RegExp(`^(?:${BEDROCK_GEO_PREFIXES.join('|')})\\.`);
+
+/**
  * Default foundation model checked when no onboarded repo specifies model_id.
  *
  * Derived from the platform default model so the two never drift on a model
- * bump: `PLATFORM_REPO_DEFAULTS.model_id` is the cross-region inference profile
- * (`us.anthropic.…`) used at invoke time, while `GetFoundationModel` requires
- * the bare foundation-model id, so we strip the regional inference prefix.
+ * bump: `PLATFORM_REPO_DEFAULTS.model_id` is the cross-Region inference profile
+ * used at invoke time, while `GetFoundationModel` requires the bare
+ * foundation-model id, so the geo prefix is stripped.
  */
 const DEFAULT_BEDROCK_MODEL_ID =
-  PLATFORM_REPO_DEFAULTS.model_id.replace(/^(us|eu|apac)\./, '');
+  PLATFORM_REPO_DEFAULTS.model_id.replace(GEO_PREFIX_RE, '');
 
 export type DoctorCheckStatus = 'pass' | 'fail' | 'warn';
 

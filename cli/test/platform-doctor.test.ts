@@ -199,3 +199,39 @@ describe('doctor verdict for Linear workspace auth', () => {
     expect(healthMock.mock.calls[1][0]).toHaveProperty('verifyRefresh', verify);
   });
 });
+
+describe('doctor Bedrock catalog check', () => {
+  it('strips ANY geo prefix before calling GetFoundationModel', async () => {
+    // GetFoundationModel resolves BARE foundation-model ids only; handed a
+    // `<geo>.`-prefixed inference-profile id it returns ResourceNotFoundException
+    // (verified against the live API). So the one Bedrock check doctor performs
+    // would report a false failure.
+    //
+    // This regressed once: the strip matched `us|eu|apac` only, and when the
+    // platform default moved to a `global.` profile it silently stopped stripping.
+    // Asserting every geography the CDK models means a future default on any of
+    // them cannot reopen the hole.
+    const { PLATFORM_REPO_DEFAULTS } = await import('../src/repo-display');
+    const GEOS = ['global', 'us-gov', 'us', 'eu', 'apac', 'jp', 'au'];
+
+    for (const geo of GEOS) {
+      jest.clearAllMocks();
+      jest.resetModules();
+      jest.doMock('../src/repo-display', () => ({
+        ...jest.requireActual('../src/repo-display'),
+        PLATFORM_REPO_DEFAULTS: {
+          ...PLATFORM_REPO_DEFAULTS,
+          model_id: `${geo}.anthropic.claude-opus-5`,
+        },
+      }));
+      const { runPlatformDoctor: run } = await import('../src/platform-doctor');
+      const checks = await run({ region: 'us-east-1', stackName: 'Abca' });
+      const bedrock = checks.find((c) => c.id === 'bedrock_model');
+      if (!bedrock) throw new Error('doctor no longer reports a Bedrock check');
+      // The label carries the id that was queried, so it proves what was sent
+      // without reaching into the mocked client.
+      expect(bedrock.label).toContain('anthropic.claude-opus-5');
+      expect(bedrock.label).not.toContain(`${geo}.anthropic`);
+    }
+  });
+});
