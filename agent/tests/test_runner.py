@@ -419,9 +419,14 @@ class TestSetupAgentEnv:
         )
 
     def test_config_default_haiku_model_is_an_inference_profile(self):
-        # The platform default (no override) must be a us.* profile, never a bare
-        # foundation-model id — the whole point of the fix.
-        assert _config().haiku_model.startswith("us.")
+        # The platform default (no override) must be a GEO-PREFIXED profile, never a
+        # bare foundation-model id — Claude 4.x cannot be invoked on-demand by bare
+        # id. Asserted as "has a geo prefix" rather than "starts with us.": the
+        # geography is a deploy-time choice (bedrockGeoRegion), so pinning one here
+        # would fail the moment the platform default moves, which tells us nothing
+        # about the property that matters.
+        geos = ("global.", "us.", "us-gov.", "eu.", "apac.", "jp.", "au.")
+        assert _config().haiku_model.startswith(geos)
 
 
 class TestRegisterGatewayServer:

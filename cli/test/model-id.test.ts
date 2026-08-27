@@ -20,8 +20,13 @@
 import { BEDROCK_GEO_PREFIXES, assertModelIdUsable, geoPrefixOf } from '../src/model-id';
 
 const STACK = 'Abca';
-const check = (modelId: string | undefined, deployedGeo: string | null) =>
-  () => assertModelIdUsable({ modelId, deployedGeo, stackName: STACK });
+const check = (
+  modelId: string | undefined,
+  deployedGeo: string | null,
+  grantedBareIds?: readonly string[],
+) => () => assertModelIdUsable({ modelId, deployedGeo, stackName: STACK, grantedBareIds });
+
+const GRANTED = ['anthropic.claude-opus-5', 'anthropic.claude-sonnet-4-6'];
 
 describe('assertModelIdUsable', () => {
   it('accepts a profile matching the deployed geography', () => {
@@ -73,6 +78,34 @@ describe('assertModelIdUsable', () => {
     // The bare-id rule holds for every geography, so it must not be skipped along
     // with the geography comparison.
     expect(check('anthropic.claude-opus-5', null)).toThrow(/bare foundation-model id/);
+  });
+
+  it('rejects a model the stack does not grant, and lists what it does', () => {
+    // The gap the first version of this guard left open: well-formed, right geography,
+    // granted nothing. It reached turn 0 as an AccessDenied naming no model.
+    const t = check('global.anthropic.example-ungranted-model', 'global', GRANTED);
+    expect(t).toThrow(/is not granted by stack/);
+    expect(t).toThrow(/anthropic\.claude-opus-5/);
+    expect(check('global.not-a-bedrock-model', 'global', GRANTED)).toThrow(/not granted/);
+  });
+
+  it('accepts a granted model', () => {
+    expect(check('global.anthropic.claude-opus-5', 'global', GRANTED)).not.toThrow();
+  });
+
+  it('skips the grant check when the stack does not export the set', () => {
+    // An older stack has no BedrockModelIds output. Blocking every --model there
+    // would be worse than the gap this closes.
+    expect(check('global.anthropic.whatever', 'global')).not.toThrow();
+    expect(check('global.anthropic.whatever', 'global', [])).not.toThrow();
+  });
+
+  it('does not prescribe a geography it was not told', () => {
+    // Suggesting `us.` on a stack deployed as `global` trades one turn-0 failure for
+    // another. With no exported geography the message must offer examples, not a value.
+    const t = check('anthropic.claude-opus-5', null);
+    expect(t).toThrow(/prefixed with the deployment's geography/);
+    expect(t).not.toThrow(/Use the inference-profile form: 'us\./);
   });
 });
 

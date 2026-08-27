@@ -40,7 +40,9 @@ Use AskUserQuestion to collect (only the repository is required — the rest fal
 
 - **Repository** — GitHub `owner/repo`. Must match exactly what's passed to `bgagent submit --repo` later.
 - **Compute type** — `agentcore` (default) or `ecs`.
-- **Model** — default is the platform model (Sonnet 4.6). If overriding, it must be a model **already granted to the runtime** (see "Model not yet wired into the runtime"), specified as a cross-Region **inference-profile ID** (e.g. `us.anthropic.claude-sonnet-4-6`), not a raw `anthropic.*` foundation-model ID.
+- **Model** — default is the platform model (Opus 5). The geo prefix in the examples
+  below (`global.`) must match the deployment's `bedrockGeoRegion`; `bgagent repo
+  onboard` rejects a mismatch at the CLI rather than letting the task fail at turn 0. If overriding, it must be a model **already granted to the runtime** (see "Model not yet wired into the runtime"), specified as a cross-Region **inference-profile ID** (e.g. `global.anthropic.claude-opus-5`), not a raw `anthropic.*` foundation-model ID.
 - **Max turns** — default 100 (range 1–500).
 - **Per-repo GitHub token** — only if this repo needs a different token than the platform default (provide its Secrets Manager ARN).
 
@@ -57,7 +59,7 @@ no `cdk deploy`.**
 ```bash
 bgagent repo onboard <owner/repo>
 # common overrides:
-#   --model <inference-profile-id>     e.g. us.anthropic.claude-sonnet-4-6 (must be runtime-granted)
+#   --model <inference-profile-id>     e.g. global.anthropic.claude-opus-5 (must be runtime-granted)
 #   --compute-type <agentcore|ecs>
 #   --max-turns <n>                    per-repo default turn limit
 #   --token-secret-arn <arn>           per-repo GitHub token (else platform default)
@@ -76,7 +78,7 @@ That's it — the repo is onboarded. Submit a task with the `submit-task` skill.
 
 **Pick a model that is already wired into the runtime.** With no `--model`, the repo
 uses the platform default (Sonnet 4.6). If you pass `--model`, use a cross-Region
-**inference profile ID** (e.g. `us.anthropic.claude-sonnet-4-6`), not a raw
+**inference profile ID** (e.g. `global.anthropic.claude-opus-5`), not a raw
 `anthropic.*` foundation-model ID. Only models the stack has granted the runtime can
 be invoked — see "Model not yet wired into the runtime" before choosing a model the
 deployment doesn't already support.
@@ -97,7 +99,7 @@ editing the stack and redeploying.
      repoTable: repoTable.table,
      // Optional overrides:
      // computeType: 'agentcore',
-     // modelId: 'us.anthropic.claude-sonnet-4-6',
+     // modelId: 'global.anthropic.claude-opus-5',
      // maxTurns: 100,
      // maxBudgetUsd: 50,
      // githubTokenSecretArn: 'arn:aws:secretsmanager:...',
@@ -116,7 +118,7 @@ editing the stack and redeploying.
 A repo can only use a model the **runtime IAM role has `grantInvoke` for**. As of now
 the stack wires **Sonnet 4.6, Opus 4 (`claude-opus-4-20250514`), and Haiku 4.5** (see
 the `grantInvoke` block in `agent.ts`). Onboarding a repo pinned to any **other** model
-(e.g. Opus 4.8 / `us.anthropic.claude-opus-4-8`) will fail at invoke with a 403 — the
+(e.g. Opus 4.8 / `global.anthropic.claude-opus-4-8`) will fail at invoke with a 403 — the
 CLI onboard succeeds, but tasks can't run.
 
 Adding a new model **is** a platform source change, so it follows ADR-003 (issue →
@@ -164,6 +166,6 @@ Task-level parameters override per-repo defaults; if neither specifies a value, 
 
 - **`REPO_NOT_ONBOARDED` / 422** — the repo isn't registered. Run `bgagent repo onboard <owner/repo>` (Path A). Confirm the `owner/repo` matches exactly what you pass to `bgagent submit --repo`.
 - **Preflight failure after onboarding** — the GitHub PAT lacks access to the new repo. Ensure the token has Contents (read/write) + Pull requests (read/write) on it, or onboard with a repo-specific `--token-secret-arn`.
-- **400 "Invocation with on-demand throughput isn't supported"** — `model_id` is a raw foundation-model ID; use the inference-profile ID (e.g. `us.anthropic.claude-sonnet-4-6`).
+- **400 "Invocation with on-demand throughput isn't supported"** — `model_id` is a raw foundation-model ID; use the inference-profile ID (e.g. `global.anthropic.claude-opus-5`).
 - **403 "not authorized to perform bedrock:InvokeModelWithResponseStream"** — the repo's model isn't wired into the runtime. See "Model not yet wired into the runtime."
 - **Model not available / "not available on your Bedrock deployment"** — account-level Bedrock access isn't enabled for that model/Region (separate from IAM); complete [model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html), then use an enabled inference-profile ID.

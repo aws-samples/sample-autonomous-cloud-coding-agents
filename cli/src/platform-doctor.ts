@@ -449,7 +449,11 @@ async function checkBedrockInferenceProfile(
   }
 
   const profileId = `${geoRegion}.${bareModelId}`;
-  const label = `Bedrock inference profile (${profileId})`;
+  // Labelled as VISIBILITY, not readiness. This resolves under the operator's
+  // credentials while tasks invoke under the workload role, so a PASS here can
+  // coexist with AccessDenied at turn 0 — and a PASS feeding "All checks passed"
+  // would otherwise read as "the workload can call this".
+  const label = `Bedrock inference profile visible (${profileId})`;
   const bedrock = makeClient(BedrockClient, { region });
   try {
     await bedrock.send(new GetInferenceProfileCommand({ inferenceProfileIdentifier: profileId }));
@@ -460,7 +464,9 @@ async function checkBedrockInferenceProfile(
       // Deliberately not claiming invocability: resolving a profile proves it
       // exists and is reachable, not that a task can call it. Only InvokeModel
       // proves that, and doctor does not spend a token to find out.
-      detail: `Inference profile ${profileId} resolves in ${region}.`,
+      detail: `Inference profile ${profileId} resolves in ${region} for these operator `
+        + 'credentials. Does not prove the workload role can invoke it — that grant is '
+        + 'checked at task time.',
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

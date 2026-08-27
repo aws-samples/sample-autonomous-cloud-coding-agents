@@ -8,7 +8,7 @@ title: Model configuration
 
 | # | Layer | What it controls | Where | ID form |
 |---|---|---|---|---|
-| 1 | **IAM invoke allowlist** | Which models the agent's roles may invoke at all. The outer gate — everything below fails without it. | `DEFAULT_BEDROCK_MODEL_IDS` (`cdk/src/constructs/bedrock-models.ts:34`); override with CDK context `bedrockModels` (key at `:48`, resolver at `:67`) | **Bare** (`anthropic.claude-…`) |
+| 1 | **IAM invoke allowlist** | Which models the agent's roles may invoke at all, and in which geography. The outer gate — everything below fails without it. | `DEFAULT_BEDROCK_MODEL_IDS` (`cdk/src/constructs/bedrock-models.ts`); override with CDK context `bedrockModels`. Geography via context `bedrockGeoRegion` (default `us`) | **Bare** (`anthropic.claude-…`) |
 | 2 | **Platform default model** | The model used when nothing narrower is set. A **Python literal only** — there is no CDK prop or environment knob in front of it today. | `agent/src/config.py:563` (the `ANTHROPIC_MODEL` fallback) and `agent/src/models.py:157` (`TaskConfig.anthropic_model`) | Prefixed (`us.anthropic.…`) |
 | 3 | **Auxiliary / fast model** | The small model Claude Code uses for auxiliary work (WebFetch page summarization, the pre-flight safety check). | Stack env `ANTHROPIC_DEFAULT_HAIKU_MODEL` (`cdk/src/stacks/agent.ts` (the runtime environment block)); agent-side fallback at `agent/src/config.py:569` | Prefixed (`us.anthropic.…`) |
 | 4 | **Per-repo override** | One repository's model, with no agent redeploy. | Blueprint `agent.modelId` (`cdk/src/constructs/blueprint.ts`, `BlueprintProps.agent.modelId`) → RepoTable `model_id` (`cdk/src/handlers/shared/repo-config.ts:37`) → ECS injects `ANTHROPIC_MODEL` (`cdk/src/handlers/shared/strategies/ecs-strategy.ts:217`) | Prefixed (`us.anthropic.…`) |
@@ -35,7 +35,7 @@ Every one of those is gated by the **IAM invoke allowlist** (layer 1), which is 
 
 ### Bare vs. prefixed IDs — the one rule that bites
 
-Layer 1 takes **bare foundation-model IDs**; every other layer takes the **prefixed inference-profile ID**. This asymmetry is deliberate: both grant sites derive the inference-profile ARN by *adding* the `us.` prefix themselves, so a prefixed entry in `bedrockModels` would produce an invalid `us.us.anthropic.…` ARN. The resolver rejects a `us.`/`eu.`/`apac.`-prefixed entry at `cdk/src/constructs/bedrock-models.ts:84` so the typo fails at synth rather than at runtime.
+Layer 1 takes **bare foundation-model IDs**; every other layer takes the **prefixed inference-profile ID**. This asymmetry is deliberate: both grant sites derive the inference-profile ARN by *adding* the geo prefix themselves, so a prefixed entry in `bedrockModels` would produce an invalid `us.us.anthropic.…` ARN. The resolver rejects an entry carrying any modelled geo prefix so the typo fails at synth rather than at runtime.
 
 In the other direction, a **bare** ID cannot be invoked on demand at all. Verified:
 
@@ -46,7 +46,28 @@ throughput isn't supported. Retry your request with the ID or ARN of an inferenc
 profile that contains this model.
 ```
 
-So: `bedrockModels` context → `anthropic.claude-opus-5`. Everywhere else → `global.anthropic.claude-opus-5`.
+So: `bedrockModels` context → `anthropic.claude-opus-5`. Everywhere else → `global.anthropic.claude-opus-5` (or whatever geo you have configured — see below).
+
+### Choosing the inference-profile geography
+
+Which geography those prefixes name is itself configurable, via CDK context `bedrockGeoRegion`:
+
+```console
+$ cdk deploy -c bedrockGeoRegion=global
+```
+
+or as a `context` entry in `cdk/cdk.json`. It defaults to `us`, and the accepted values are whatever `@aws-cdk/aws-bedrock-alpha` models — currently `global`, `us`, `us-gov`, `eu`, `apac`, `jp`, `au`. An unrecognized value **fails at synth** rather than at deploy: an invented geography produces a well-formed ARN for a profile that does not exist, so the grant would authorize nothing and the agent would fail at turn 0 with `AccessDenied` and nothing to explain why.
+
+One value drives everything that needs a prefix — both grant sites (the AgentCore runtime and the ECS task role) and the layer-3 `ANTHROPIC_DEFAULT_HAIKU_MODEL` env var. That is deliberate: a deployment can never grant one geography's profiles while telling the agent to call another's.
+
+**Which to choose.** A `global.` profile routes to any supported commercial Region, which gives better throughput and resilience under peak demand — worth having for tasks that run for hours and burst. A geo profile (`us.`, `eu.`, `apac.`, …) keeps inference within that geography, which is what you need under a **data-residency requirement**. Pick the geo profile in that case; the throughput benefit is not worth a compliance breach.
+
+Two things to check when changing it, both of which fail at runtime rather than synth:
+
+- The models you use must have an active profile in the target geography. Not every model is published to every geo.
+- Your account's [Bedrock model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) must cover the deployment Region's entitlements for that geography.
+
+Changing the geography requires a **redeploy**, because the IAM grants are scoped to explicit profile ARNs resolved at synth. Switching among already-granted models does not — see layer 4.
 
 ### Bumping the default model
 

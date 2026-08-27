@@ -173,12 +173,14 @@ export function makeRepoCommand(): Command {
         const { region, stackName } = resolveOperatorContext(opts);
         const [
           tableName, platformRuntimeArn, platformGithubTokenSecretArn, computeSubstrate, deployedGeo,
+          grantedModelIds,
         ] = await Promise.all([
           getStackOutput(region, stackName, 'RepoTableName'),
           getStackOutput(region, stackName, 'RuntimeArn'),
           getStackOutput(region, stackName, 'GitHubTokenSecretArn'),
           getStackOutput(region, stackName, 'ComputeSubstrate'),
           getStackOutput(region, stackName, 'BedrockGeoRegion'),
+          getStackOutput(region, stackName, 'BedrockModelIds'),
         ]);
         if (!tableName) {
           throw new CliError(
@@ -210,7 +212,12 @@ export function makeRepoCommand(): Command {
         // Same reasoning as the substrate gate above: reuse an output already
         // fetched, and fail here rather than let a task die at turn 0 with an
         // AccessDenied that names nothing.
-        assertModelIdUsable({ modelId: opts.model, deployedGeo, stackName });
+        assertModelIdUsable({
+          modelId: opts.model,
+          deployedGeo,
+          stackName,
+          ...(grantedModelIds && { grantedBareIds: grantedModelIds.split(',').filter(Boolean) }),
+        });
 
         const config = await onboardRepo(region, tableName, repoId, {
           computeType: opts.computeType,

@@ -55,6 +55,33 @@ export const DEFAULT_BEDROCK_MODEL_IDS: readonly string[] = [
   'anthropic.claude-haiku-4-5-20251001-v1:0',
 ];
 
+/**
+ * The bare foundation-model ids the platform itself defaults to, as opposed to the
+ * full grant list. Both are injected into the runtime as geo-prefixed profile ids
+ * so a deploy cannot grant one geography and tell the agent to call another.
+ *
+ * Named separately from {@link DEFAULT_BEDROCK_MODEL_IDS} because that list is the
+ * IAM ALLOWANCE — several models a repo may pin — while these two are what a task
+ * uses when it pins nothing. A model can be granted without being a default.
+ */
+export const PLATFORM_DEFAULT_MODEL_ID = 'anthropic.claude-opus-5';
+export const PLATFORM_DEFAULT_AUX_MODEL_ID = 'anthropic.claude-haiku-4-5-20251001-v1:0';
+
+/**
+ * The geo-prefixed inference-profile id for a bare model, in the geography this
+ * deploy grants. The single place that prefix is applied for runtime env vars.
+ *
+ * Exists because the main model was previously NOT injected at all: the stack set
+ * only the auxiliary var, so the main model came from a Python literal that a
+ * geography change did not touch. Deploying with a different geography then granted
+ * one set of profiles while the agent asked for another, and every task with no
+ * per-repo override failed at turn 0 with AccessDenied. Deriving both from here
+ * makes that divergence unrepresentable rather than merely documented.
+ */
+export function inferenceProfileId(geoRegion: string, bareModelId: string): string {
+  return `${geoRegion}.${bareModelId}`;
+}
+
 /** CDK context key whose value (a string array) overrides the model set. */
 export const BEDROCK_MODELS_CONTEXT_KEY = 'bedrockModels';
 

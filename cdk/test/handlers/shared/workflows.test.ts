@@ -20,6 +20,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as yaml from 'js-yaml';
+import { DEFAULT_BEDROCK_MODEL_IDS } from '../../../src/constructs/bedrock-models';
 import {
   CODING_WORKFLOW_ID,
   DEFAULT_WORKFLOW_ID,
@@ -305,32 +306,46 @@ describe('disallowedWorkflowModel (WORKFLOWS.md rule 13)', () => {
     expect(WORKFLOW_MODEL_ALLOWLIST).toContain('us.anthropic.claude-sonnet-4-6');
   });
 
-  test('every geo-prefixed allow-listed id is paired with its bare form', () => {
-    // An id admitted in only one form is a latent rejection: the workflow YAML may
-    // legitimately pin either, and admission compares the literal string. Pairing
-    // is the invariant, so assert it for every entry rather than spot-checking.
+  // Geographies a deployment may realistically select. Not the full CDK enum: the
+  // allow-list is hand-maintained, and demanding all seven would add entries nobody
+  // can deploy against today. `us` is the code default, `global` the cdk.json default,
+  // so both must be admitted for the same reason a residency deployer needs `us`.
+  const DEPLOYABLE_GEOS = ['us', 'global'] as const;
+
+  test('the allow-list covers every GRANTED model in every geography it may be deployed with', () => {
+    // The real invariant: parity with the IAM grant list, not internal pairing.
     //
-    // Keyed on the geo prefixes the allow-list actually uses, not on `us.` alone.
-    // The list carries more than one geography now that `bedrockGeoRegion` is
-    // configurable, and a `us.`-only rule would read `global.anthropic.…` as a BARE
-    // id and demand a nonsensical `us.global.anthropic.…` pairing.
-    const GEO_PREFIXES = ['us.', 'global.'];
-    const geoOf = (id: string) => GEO_PREFIXES.find(p => id.startsWith(p));
+    // The previous version only checked that each entry had a matching bare/prefixed
+    // partner WITHIN the allow-list. That is satisfiable while being wrong in both
+    // directions, and both were live: three granted models had no `global.` form (so
+    // a workflow pinning one was rejected at admission on a global deploy), and an
+    // invented model pair passed the whole suite despite being granted nothing.
+    //
+    // Admission compares the literal string a workflow pins, and a deployment may run
+    // any geography, so every granted model needs its bare form plus a form for each
+    // geography a deploy could select.
+    const missing: string[] = [];
+    for (const bare of DEFAULT_BEDROCK_MODEL_IDS) {
+      if (!WORKFLOW_MODEL_ALLOWLIST.includes(bare)) missing.push(bare);
+      for (const geo of DEPLOYABLE_GEOS) {
+        const id = `${geo}.${bare}`;
+        if (!WORKFLOW_MODEL_ALLOWLIST.includes(id)) missing.push(id);
+      }
+    }
+    expect(missing).toEqual([]);
+  });
 
-    const bare = WORKFLOW_MODEL_ALLOWLIST.filter(id => geoOf(id) === undefined);
-    expect(bare.length).toBeGreaterThan(0);
-
-    // Every prefixed entry must have its bare form admitted too.
-    const orphaned = WORKFLOW_MODEL_ALLOWLIST
-      .filter(id => geoOf(id) !== undefined)
-      .filter(id => !WORKFLOW_MODEL_ALLOWLIST.includes(id.slice(geoOf(id)!.length)));
-    expect(orphaned).toEqual([]);
-
-    // And every bare entry must be admitted in at least one geography, or a
-    // workflow pinning the profile form it is actually deployed with is rejected.
-    const unprefixed = bare.filter(
-      id => !GEO_PREFIXES.some(p => WORKFLOW_MODEL_ALLOWLIST.includes(`${p}${id}`)),
-    );
-    expect(unprefixed).toEqual([]);
+  test('the allow-list admits nothing that is not granted', () => {
+    // The other direction, which the old test could not see: an id admitted here but
+    // absent from the grant list passes admission and then fails at turn 0 with
+    // AccessDenied. The file's own comment warns about exactly this; now it is
+    // enforced instead of hoped for.
+    const grantedForms = new Set<string>();
+    for (const bare of DEFAULT_BEDROCK_MODEL_IDS) {
+      grantedForms.add(bare);
+      for (const geo of DEPLOYABLE_GEOS) grantedForms.add(`${geo}.${bare}`);
+    }
+    const ungranted = WORKFLOW_MODEL_ALLOWLIST.filter((id) => !grantedForms.has(id));
+    expect(ungranted).toEqual([]);
   });
 });

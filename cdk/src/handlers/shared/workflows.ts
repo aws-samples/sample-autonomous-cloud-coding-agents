@@ -84,8 +84,10 @@ export interface WorkflowDescriptor {
 export const WORKFLOW_MODEL_ALLOWLIST: readonly string[] = [
   'anthropic.claude-sonnet-4-6',
   'us.anthropic.claude-sonnet-4-6',
+  'global.anthropic.claude-sonnet-4-6',
   'anthropic.claude-opus-4-20250514-v1:0',
   'us.anthropic.claude-opus-4-20250514-v1:0',
+  'global.anthropic.claude-opus-4-20250514-v1:0',
   // Claude Opus 4.8. Admitting an id here does NOT grant permission to invoke
   // it — this list and the IAM grant in `bedrock-models.ts` are independent, and
   // a model must be on BOTH to be usable. A workflow pinning an allow-listed but
@@ -94,6 +96,7 @@ export const WORKFLOW_MODEL_ALLOWLIST: readonly string[] = [
   // `bedrockModels` context) in the same change.
   'anthropic.claude-opus-4-8',
   'us.anthropic.claude-opus-4-8',
+  'global.anthropic.claude-opus-4-8',
   // Claude Opus 5 — kept in step with the IAM grant in
   // DEFAULT_BEDROCK_MODEL_IDS, per the note above.
   //

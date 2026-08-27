@@ -36,7 +36,13 @@ import { AgentVpc } from '../constructs/agent-vpc';
 import { ApiKeyTable } from '../constructs/api-key-table';
 import { ApprovalMetricsPublisherConsumer } from '../constructs/approval-metrics-publisher-consumer';
 import { AttachmentsBucket } from '../constructs/attachments-bucket';
-import { resolveBedrockGeoRegion, resolveBedrockModelIds } from '../constructs/bedrock-models';
+import {
+  PLATFORM_DEFAULT_AUX_MODEL_ID,
+  PLATFORM_DEFAULT_MODEL_ID,
+  inferenceProfileId,
+  resolveBedrockGeoRegion,
+  resolveBedrockModelIds,
+} from '../constructs/bedrock-models';
 import { Blueprint } from '../constructs/blueprint';
 import { CedarWasmLayer } from '../constructs/cedar-wasm-layer';
 import { ConcurrencyReconciler } from '../constructs/concurrency-reconciler';
@@ -478,15 +484,22 @@ export class AgentStack extends Stack {
       AWS_REGION: process.env.AWS_REGION ?? 'us-east-1',
       CLAUDE_CODE_USE_BEDROCK: '1',
       ANTHROPIC_LOG: 'debug',
-      // Cross-region inference-profile id (geo prefix, `us.` by default), NOT
-      // the bare foundation-model id: Claude 4.x can't be invoked on-demand by
-      // bare id (400 "on-demand throughput isn't supported"). The prefix is
-      // derived from `bedrockGeoRegion` rather than hardcoded so this auxiliary
-      // model routes through the same geography as the granted profiles (see
-      // bedrock-models.ts) — a second hardcode here would silently split the
-      // two on any non-`us` deploy. runner.py re-sets this at spawn time.
+      // Both models as geo-prefixed inference-profile ids, NOT bare foundation-model
+      // ids: Claude 4.x can't be invoked on-demand by bare id (400 "on-demand
+      // throughput isn't supported").
+      //
+      // The MAIN model is set here deliberately, and it was previously missing. Only
+      // the auxiliary var was injected, so the main model fell through to a literal
+      // in agent/src/config.py that a geography change did not touch — deploying a
+      // different `bedrockGeoRegion` granted one geography's profiles while the agent
+      // asked for another's, and every task with no per-repo override failed at turn 0
+      // with AccessDenied. Injecting both from the resolved geography makes the
+      // divergence impossible rather than something a checklist has to catch.
+      //
+      // runner.py re-sets these at spawn time; a per-repo `model_id` still overrides.
+      ANTHROPIC_MODEL: inferenceProfileId(bedrockGeoRegion, PLATFORM_DEFAULT_MODEL_ID),
       ANTHROPIC_DEFAULT_HAIKU_MODEL:
-        `${bedrockGeoRegion}.anthropic.claude-haiku-4-5-20251001-v1:0`,
+        inferenceProfileId(bedrockGeoRegion, PLATFORM_DEFAULT_AUX_MODEL_ID),
       TASK_TABLE_NAME: taskTable.table.tableName,
       TASK_EVENTS_TABLE_NAME: taskEventsTable.table.tableName,
       NUDGES_TABLE_NAME: taskNudgesTable.table.tableName,
@@ -926,11 +939,21 @@ export class AgentStack extends Stack {
     // reads it: without the geography, its Bedrock check can only ask "is this
     // model published in this Region", which passes on a stack granted profiles
     // the account cannot invoke — the failure then lands at turn 0 as AccessDenied.
+    // The granted model set, so a client can reject an ungranted --model instead of
+    // letting the task reach turn 0 and fail with AccessDenied. Recoverable from the
+    // deployed template's profile ARNs, but an output makes it a documented contract
+    // rather than something a consumer has to regex out of CloudFormation.
+    new CfnOutput(this, 'BedrockModelIds', {
+      value: resolveBedrockModelIds(this.node).join(','),
+      description: 'Comma-separated BARE foundation-model ids this deploy grants. '
+        + 'Invoked as `<BedrockGeoRegion>.<modelId>`.',
+    });
+
     new CfnOutput(this, 'BedrockGeoRegion', {
       value: bedrockGeoRegion,
-      description: 'Cross-Region inference-profile geography this deploy grants '
-        + '(the `bedrockGeoRegion` context key, default "us"). Model ids are invoked '
-        + 'as `<geo>.<modelId>`.',
+      description: 'Cross-Region inference-profile geography this deploy grants (the '
+        + '`bedrockGeoRegion` context key; "global" in the shipped cdk.json, "us" if no '
+        + 'context is supplied at all). Model ids are invoked as `<geo>.<modelId>`.',
     });
 
     new CfnOutput(this, 'ComputeSubstrate', {

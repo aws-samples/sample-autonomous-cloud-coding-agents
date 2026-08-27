@@ -69,16 +69,37 @@ export function assertModelIdUsable(args: {
   modelId: string | undefined;
   deployedGeo: string | null | undefined;
   stackName: string;
+  /** Bare ids the stack grants, from its `BedrockModelIds` output. */
+  grantedBareIds?: readonly string[];
 }): void {
-  const { modelId, deployedGeo, stackName } = args;
+  const { modelId, deployedGeo, stackName, grantedBareIds } = args;
   if (!modelId) return;
 
   const geo = geoPrefixOf(modelId);
   if (!geo) {
+    // Suggest a geography only when the stack told us one. Naming `us` on a stack
+    // deployed as `global` would hand the operator a value it does not grant —
+    // trading one turn-0 failure for another.
+    const suggestion = deployedGeo
+      ? ` Use the inference-profile form: '${deployedGeo}.${modelId}'.`
+      : " Use the inference-profile form, prefixed with the deployment's geography "
+        + "(e.g. 'global.' or 'us.').";
     throw new CliError(
       `--model '${modelId}' looks like a bare foundation-model id, which Bedrock cannot `
-      + 'invoke on demand — a task using it would fail at turn 0 with a ValidationException. '
-      + `Use the inference-profile form: '${deployedGeo ?? 'us'}.${modelId}'.`,
+      + 'invoke on demand — a task using it would fail at turn 0 with a ValidationException.'
+      + suggestion,
+    );
+  }
+
+  // Membership in the granted set. Skipped when the stack does not export it, so an
+  // older stack is not blocked — but checked whenever the information exists,
+  // because this is the case that otherwise reaches turn 0 with no explanation.
+  const bare = modelId.slice(geo.length + 1);
+  if (grantedBareIds && grantedBareIds.length > 0 && !grantedBareIds.includes(bare)) {
+    throw new CliError(
+      `--model '${modelId}' is not granted by stack '${stackName}'. It grants: `
+      + `${grantedBareIds.join(', ')}. A task using an ungranted model fails at turn 0 with `
+      + 'AccessDenied. Add it with -c bedrockModels=\'[…]\' and redeploy, or pick a granted one.',
     );
   }
 

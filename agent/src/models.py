@@ -156,10 +156,15 @@ class TaskConfig(BaseModel):
     aws_region: str
     anthropic_model: str = "global.anthropic.claude-opus-5"
     # The "small/fast" model Claude Code uses for auxiliary work (e.g. WebFetch
-    # page summarization). Must be a cross-region INFERENCE-PROFILE id (``us.``
+    # page summarization). Must be a cross-region INFERENCE-PROFILE id (geo
     # prefix), not a bare foundation-model id — Claude 4.x cannot be invoked
     # on-demand by bare id on Bedrock. Threaded to ANTHROPIC_DEFAULT_HAIKU_MODEL.
-    haiku_model: str = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+    #
+    # A deployed task never reaches this default: the stack injects both model env
+    # vars from its resolved bedrockGeoRegion. It applies to direct construction
+    # (tests, local runs), so it must name the same geography as the deployment or
+    # those paths silently exercise a different one.
+    haiku_model: str = "global.anthropic.claude-haiku-4-5-20251001-v1:0"
     dry_run: bool = False
     max_turns: int = 10
     max_budget_usd: float | None = None
