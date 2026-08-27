@@ -88,6 +88,14 @@ describe('AgentStack', () => {
     template.hasOutput('ComputeSubstrate', { Value: 'agentcore' });
   });
 
+  test('outputs BedrockGeoRegion so a client can check the profile it will invoke', () => {
+    // `platform doctor` reads this. Without it, its Bedrock check can only ask "is
+    // this model published in this Region", which passes on a stack granted
+    // profiles the account cannot invoke — the failure then lands at turn 0 as
+    // AccessDenied. Defaults to `us`; the test app passes no context.
+    template.hasOutput('BedrockGeoRegion', { Value: 'us' });
+  });
+
   test('outputs CedarWasmLayerArn', () => {
     template.hasOutput('CedarWasmLayerArn', {});
   });

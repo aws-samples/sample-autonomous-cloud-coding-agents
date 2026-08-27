@@ -20,6 +20,7 @@
 import { Command } from 'commander';
 import { assertComputeSubstrateDeployed } from '../compute-substrate';
 import { CliError } from '../errors';
+import { assertModelIdUsable } from '../model-id';
 import { DEFAULT_STACK_NAME, redactSecretArn, resolveOperatorContext } from '../operator-context';
 import {
   buildRepoShowLines,
@@ -170,11 +171,14 @@ export function makeRepoCommand(): Command {
         }
 
         const { region, stackName } = resolveOperatorContext(opts);
-        const [tableName, platformRuntimeArn, platformGithubTokenSecretArn, computeSubstrate] = await Promise.all([
+        const [
+          tableName, platformRuntimeArn, platformGithubTokenSecretArn, computeSubstrate, deployedGeo,
+        ] = await Promise.all([
           getStackOutput(region, stackName, 'RepoTableName'),
           getStackOutput(region, stackName, 'RuntimeArn'),
           getStackOutput(region, stackName, 'GitHubTokenSecretArn'),
           getStackOutput(region, stackName, 'ComputeSubstrate'),
+          getStackOutput(region, stackName, 'BedrockGeoRegion'),
         ]);
         if (!tableName) {
           throw new CliError(
@@ -202,6 +206,11 @@ export function makeRepoCommand(): Command {
         // See `assertComputeSubstrateDeployed` for the ComputeSubstrate output's
         // exact semantics (single-valued today, list-tolerant by construction).
         assertComputeSubstrateDeployed({ stackName, computeType: opts.computeType, computeSubstrate });
+
+        // Same reasoning as the substrate gate above: reuse an output already
+        // fetched, and fail here rather than let a task die at turn 0 with an
+        // AccessDenied that names nothing.
+        assertModelIdUsable({ modelId: opts.model, deployedGeo, stackName });
 
         const config = await onboardRepo(region, tableName, repoId, {
           computeType: opts.computeType,

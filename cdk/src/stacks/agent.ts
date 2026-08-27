@@ -921,6 +921,18 @@ export class AgentStack extends Stack {
     // runtime. ``ecs`` implies the AgentCore runtime is ALSO available (the ECS
     // gate is additive), so an agentcore repo works on either substrate — and the
     // same holds for ``lambda-microvm`` (ADR-021).
+    // Surfaced so a client can check the profile the deployment will actually
+    // invoke, not just whether the model exists in the catalog. `platform doctor`
+    // reads it: without the geography, its Bedrock check can only ask "is this
+    // model published in this Region", which passes on a stack granted profiles
+    // the account cannot invoke — the failure then lands at turn 0 as AccessDenied.
+    new CfnOutput(this, 'BedrockGeoRegion', {
+      value: bedrockGeoRegion,
+      description: 'Cross-Region inference-profile geography this deploy grants '
+        + '(the `bedrockGeoRegion` context key, default "us"). Model ids are invoked '
+        + 'as `<geo>.<modelId>`.',
+    });
+
     new CfnOutput(this, 'ComputeSubstrate', {
       value: ecsCluster ? 'ecs' : (lambdaMicrovm ? 'lambda-microvm' : 'agentcore'),
       description: 'Compute substrate provisioned by this deploy: "agentcore" (default), "ecs" '

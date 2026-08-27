@@ -40,9 +40,11 @@ jest.mock('../src/dynamo-clients', () => ({
   documentClient: () => ({ send: (...args: unknown[]) => ddbSendMock(...args) }),
 }));
 
+const bedrockSendMock = jest.fn();
 jest.mock('@aws-sdk/client-bedrock', () => ({
-  BedrockClient: jest.fn(() => ({ send: jest.fn().mockRejectedValue(new Error('not under test')) })),
-  GetFoundationModelCommand: jest.fn(),
+  BedrockClient: jest.fn(() => ({ send: (...args: unknown[]) => bedrockSendMock(...args) })),
+  GetFoundationModelCommand: jest.fn((input: unknown) => ({ _type: 'GetFoundationModel', input })),
+  GetInferenceProfileCommand: jest.fn((input: unknown) => ({ _type: 'GetInferenceProfile', input })),
 }));
 
 import {
@@ -233,5 +235,72 @@ describe('doctor Bedrock catalog check', () => {
       expect(bedrock.label).toContain('anthropic.claude-opus-5');
       expect(bedrock.label).not.toContain(`${geo}.anthropic`);
     }
+  });
+});
+
+describe('doctor Bedrock inference-profile check', () => {
+  /** Drive the doctor with a given BedrockGeoRegion output and Bedrock behaviour. */
+  async function profileCheck(
+    geo: string | null,
+    send: jest.Mock = jest.fn().mockResolvedValue({}),
+  ): Promise<DoctorCheckResult> {
+    bedrockSendMock.mockImplementation((...args: unknown[]) => send(...args));
+    stackOutputMock.mockImplementation(async (_r: string, _s: string, output: string) => {
+      if (output === 'BedrockGeoRegion') return geo;
+      if (output === 'LinearWorkspaceRegistryTableName') return REGISTRY;
+      return null;
+    });
+    const checks = await runPlatformDoctor({ region: 'us-east-1', stackName: 'Abca' });
+    const check = checks.find((c) => c.id === 'bedrock_inference_profile');
+    if (!check) throw new Error('doctor no longer reports an inference-profile check');
+    return check;
+  }
+
+  it('probes the profile the deployment will invoke, not just the catalog', async () => {
+    // The catalog check answers "is this model published in this Region"; the agent
+    // invokes a `<geo>.<model>` PROFILE and the IAM grant is scoped to profile ARNs.
+    // A stack whose geography has no profile passes the catalog check and then fails
+    // every task at turn 0 with AccessDenied — the thing doctor exists to pre-empt.
+    const send = jest.fn().mockResolvedValue({});
+    const check = await profileCheck('global', send);
+    expect(check.status).toBe('pass');
+    expect(check.label).toContain('global.anthropic.claude-opus-5');
+
+    // The queried identifier is the geo-prefixed profile, not the bare model id.
+    const queried = send.mock.calls
+      .map(([c]) => (c as { _type?: string; input?: { inferenceProfileIdentifier?: string } }))
+      .filter((c) => c._type === 'GetInferenceProfile')
+      .map((c) => c.input?.inferenceProfileIdentifier);
+    expect(queried).toContain('global.anthropic.claude-opus-5');
+  });
+
+  it('uses the geography the stack reports, not a hardcoded one', async () => {
+    // The whole point of reading the output: a residency-constrained deployment runs
+    // `us` and must be checked against `us.`, not against the current default.
+    const send = jest.fn().mockResolvedValue({});
+    const check = await profileCheck('us', send);
+    expect(check.label).toContain('us.anthropic.claude-opus-5');
+    expect(check.label).not.toContain('global.');
+  });
+
+  it('fails, with the geography named, when the profile does not resolve', async () => {
+    // Verified against the live API: an absent profile returns
+    // ResourceNotFoundException. The remedy has to name the configured geography,
+    // because "not found" alone does not tell an operator which knob is wrong.
+    const check = await profileCheck(
+      'jp',
+      jest.fn().mockRejectedValue(new Error('ResourceNotFoundException: profile not found')),
+    );
+    expect(check.status).toBe('fail');
+    expect(check.detail).toContain('jp');
+    expect(check.detail).toMatch(/bedrockGeoRegion/);
+  });
+
+  it('warns rather than passing when the stack does not export the geography', async () => {
+    // An older stack has no BedrockGeoRegion output. Defaulting to `us` and passing
+    // would report a verification that never happened.
+    const check = await profileCheck(null);
+    expect(check.status).toBe('warn');
+    expect(check.detail).toMatch(/BedrockGeoRegion/);
   });
 });

@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { BedrockClient, GetFoundationModelCommand } from '@aws-sdk/client-bedrock';
+import { BedrockClient, GetFoundationModelCommand, GetInferenceProfileCommand } from '@aws-sdk/client-bedrock';
 import {
   CognitoIdentityProviderClient,
   DescribeUserPoolClientCommand,
@@ -101,6 +101,7 @@ export async function runPlatformDoctor(
     repoTableName,
     linearRegistryTableName,
     jiraRegistryTableName,
+    bedrockGeoRegion,
   ] = await Promise.all([
     getStackOutput(region, stackName, 'ApiUrl'),
     getStackOutput(region, stackName, 'UserPoolId'),
@@ -109,6 +110,7 @@ export async function runPlatformDoctor(
     getStackOutput(region, stackName, 'RepoTableName'),
     getStackOutput(region, stackName, 'LinearWorkspaceRegistryTableName'),
     getStackOutput(region, stackName, 'JiraWorkspaceRegistryTableName'),
+    getStackOutput(region, stackName, 'BedrockGeoRegion'),
   ]);
 
   const checks: DoctorCheckResult[] = [];
@@ -119,6 +121,7 @@ export async function runPlatformDoctor(
   const activeRepoResult = await loadActiveRepos(region, repoTableName);
   checks.push(checkActiveRepos(repoTableName, activeRepoResult));
   checks.push(await checkBedrockModel(region, DEFAULT_BEDROCK_MODEL_ID));
+  checks.push(await checkBedrockInferenceProfile(region, DEFAULT_BEDROCK_MODEL_ID, bedrockGeoRegion));
   if (activeRepoResult.repos.some((repo) => repo.compute_type === 'lambda-microvm')) {
     checks.push(await checkLambdaMicrovmAvailability(
       region,
@@ -406,6 +409,69 @@ async function checkBedrockModel(region: string, modelId: string): Promise<Docto
       label,
       status,
       detail: `${message} Enable model access in the Bedrock console if tasks fail at invoke time.`,
+    };
+  }
+}
+
+/**
+ * Check the cross-Region inference profile the deployment will actually invoke.
+ *
+ * Distinct from the catalog check above, and the reason both exist: the catalog
+ * answers "is this model published in this Region", while the agent invokes a
+ * `<geo>.<modelId>` PROFILE and the IAM grant is scoped to profile ARNs. A stack
+ * configured for a geography whose profile does not exist — or whose entitlements
+ * the account lacks — passes the catalog check and then fails every task at turn 0
+ * with AccessDenied, which is exactly what doctor is supposed to pre-empt.
+ *
+ * Keeping the two separate also keeps the remedies distinct: a missing catalog
+ * entry means the model is unavailable here at all, while a missing profile means
+ * the geography is wrong for this model or Region.
+ *
+ * `geoRegion` is null when the stack predates the `BedrockGeoRegion` output. That
+ * is reported rather than defaulted: guessing `us` and passing would state a
+ * verification that never happened.
+ */
+async function checkBedrockInferenceProfile(
+  region: string,
+  bareModelId: string,
+  geoRegion: string | null,
+): Promise<DoctorCheckResult> {
+  const id = 'bedrock_inference_profile';
+  if (!geoRegion) {
+    return {
+      id,
+      label: 'Bedrock inference profile',
+      status: 'warn',
+      detail: 'Stack does not export BedrockGeoRegion, so the inference profile the '
+        + 'agent invokes cannot be determined. Redeploy to surface it; until then this '
+        + 'check is skipped rather than assuming a geography.',
+    };
+  }
+
+  const profileId = `${geoRegion}.${bareModelId}`;
+  const label = `Bedrock inference profile (${profileId})`;
+  const bedrock = makeClient(BedrockClient, { region });
+  try {
+    await bedrock.send(new GetInferenceProfileCommand({ inferenceProfileIdentifier: profileId }));
+    return {
+      id,
+      label,
+      status: 'pass',
+      // Deliberately not claiming invocability: resolving a profile proves it
+      // exists and is reachable, not that a task can call it. Only InvokeModel
+      // proves that, and doctor does not spend a token to find out.
+      detail: `Inference profile ${profileId} resolves in ${region}.`,
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const status: DoctorCheckStatus = message.includes('AccessDenied') ? 'warn' : 'fail';
+    return {
+      id,
+      label,
+      status,
+      detail: `${message} The deployment grants '${geoRegion}' profiles (bedrockGeoRegion). `
+        + `Either ${bareModelId} has no profile in that geography, or this account lacks its `
+        + 'entitlements — tasks would fail at turn 0 with AccessDenied.',
     };
   }
 }
