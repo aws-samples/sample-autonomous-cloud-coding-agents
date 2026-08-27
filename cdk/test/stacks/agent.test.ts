@@ -1474,6 +1474,48 @@ describe('AgentStack tool-gateway gate (ADR-019 P1)', () => {
   });
 });
 
+describe('AgentStack Linear identity vault gate (#809)', () => {
+  test('default synth omits the vault: no workload identity, no token grant, no agent env', () => {
+    const app = new App();
+    const stack = new AgentStack(app, 'LinearVaultOffStack', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    });
+    const rendered = JSON.stringify(Template.fromStack(stack).toJSON());
+    expect(rendered).not.toContain('Custom::LinearWorkloadIdentity');
+    expect(rendered).not.toContain('GetResourceOauth2Token');
+    expect(rendered).not.toContain('LINEAR_WORKLOAD_IDENTITY_NAME');
+  });
+
+  test('flag on: agent runtime role gets the token data-plane grant + the agent env is set', () => {
+    const app = new App({ context: { enableLinearIdentityVault: true } });
+    const template = Template.fromStack(
+      new AgentStack(app, 'LinearVaultOnStack', {
+        env: { account: '123456789012', region: 'us-east-1' },
+      }),
+    );
+    // The workload identity is provisioned.
+    template.resourceCountIs('Custom::LinearWorkloadIdentity', 1);
+    // Some role is granted the two token data-plane actions.
+    template.hasResourceProperties('AWS::IAM::Policy', {
+      PolicyDocument: Match.objectLike({
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Action: [
+              'bedrock-agentcore:GetWorkloadAccessTokenForUserId',
+              'bedrock-agentcore:GetResourceOauth2Token',
+            ],
+            Effect: 'Allow',
+          }),
+        ]),
+      }),
+    });
+    // The agent runtime carries the vault env so config.py takes the vault path.
+    const rendered = JSON.stringify(template.toJSON());
+    expect(rendered).toContain('LINEAR_WORKLOAD_IDENTITY_NAME');
+    expect(rendered).toContain('abca_linear_oauth');
+  });
+});
+
 describe('AgentStack Agent Registry gate', () => {
   test.each([undefined, true, 'true'])(
     'enableAgentRegistry=%p includes the registry by default or explicit enablement',

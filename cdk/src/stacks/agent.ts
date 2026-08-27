@@ -86,6 +86,13 @@ const RUNTIME_SESSION_TIMEOUT_HOURS = 8;
 /** Index of the stage segment in a split API Gateway URL. */
 const API_URL_STAGE_SEGMENT_INDEX = 3;
 
+/**
+ * Name of the AgentCore workload identity backing the Linear OAuth token vault
+ * (RFC #249 Phase 1). Shared by the LinearIdentityVault construct and the agent
+ * runtime env (`LINEAR_WORKLOAD_IDENTITY_NAME`) so the two cannot drift.
+ */
+const LINEAR_VAULT_WORKLOAD_NAME = 'abca_linear_oauth';
+
 export class AgentStack extends Stack {
   constructor(scope: Construct, id: string, props: StackProps = {}) {
     super(scope, id, props);
@@ -290,6 +297,12 @@ export class AgentStack extends Stack {
     // Same context-gate shape as the ECS / MicroVM compute backends above.
     const toolGatewayEnabled = this.node.tryGetContext('enableToolGateway') === true
       || this.node.tryGetContext('enableToolGateway') === 'true';
+
+    // RFC #249 Phase 1 (Linear OAuth token vault). Additive + default-off:
+    // resolved here (early) so the agent runtime env map + the LinearIdentityVault
+    // construct + the token grants all key off one predicate and cannot drift.
+    const linearIdentityVaultEnabled = this.node.tryGetContext('enableLinearIdentityVault') === true
+      || this.node.tryGetContext('enableLinearIdentityVault') === 'true';
 
     // The operator-supplied MicroVM image inputs, resolved HERE (pure context
     // reads, no construct dependency) rather than at the construct's call site
@@ -539,6 +552,14 @@ export class AgentStack extends Stack {
       // MCP bridge (gateway_tools.build_gateway_server) reads it to register the
       // ``abca_gateway`` SDK server. Absent → no gateway tool, unchanged.
       ...(toolGateway ? { ABCA_TOOL_GATEWAY_URL: toolGateway.gatewayUrl } : {}),
+      // RFC #249 Phase 1 (context-gated `enableLinearIdentityVault`): tell the
+      // agent's Linear token resolver to mint via the AgentCore Token Vault when
+      // a task carries a provider name. Absent → the agent stays on the
+      // Secrets-Manager path. Workload name matches the LinearIdentityVault
+      // construct's fixed `abca_linear_oauth`.
+      ...(linearIdentityVaultEnabled
+        ? { LINEAR_VAULT_ENABLED: 'true', LINEAR_WORKLOAD_IDENTITY_NAME: LINEAR_VAULT_WORKLOAD_NAME }
+        : {}),
     };
 
     const runtimeNetworkConfig = agentcore.RuntimeNetworkConfiguration.usingVpc(this, {
@@ -1165,13 +1186,11 @@ export class AgentStack extends Stack {
     });
 
     // --- Linear OAuth token vault (RFC #249 Phase 1) ---
-    // Additive + default-off: the workload identity + token grants synthesize
-    // only under `--context enableLinearIdentityVault=true`, so the default
-    // synth stays byte-for-byte unchanged (same context-gate shape as the tool
-    // gateway / ECS / MicroVM backends). When off, the Linear resolver stays on
-    // the per-workspace Secrets-Manager token path.
-    const linearIdentityVaultEnabled = this.node.tryGetContext('enableLinearIdentityVault') === true
-      || this.node.tryGetContext('enableLinearIdentityVault') === 'true';
+    // Additive + default-off (flag resolved above): the workload identity +
+    // token grants synthesize only under `--context enableLinearIdentityVault=
+    // true`, so the default synth stays byte-for-byte unchanged (same context-
+    // gate shape as the tool gateway / ECS / MicroVM backends). When off, the
+    // Linear resolver stays on the per-workspace Secrets-Manager token path.
     let linearIdentityVault: LinearIdentityVault | undefined;
     if (linearIdentityVaultEnabled) {
       // Return URLs the 3LO consent flow may bounce back to (spike F9: allowlist
@@ -1181,12 +1200,16 @@ export class AgentStack extends Stack {
       // the S3+CloudFront onboarding page — Slice 2 — or supplied via context).
       const hostedReturnUrl = this.node.tryGetContext('linearVaultHostedReturnUrl') as string | undefined;
       linearIdentityVault = new LinearIdentityVault(this, 'LinearIdentityVault', {
-        workloadName: 'abca_linear_oauth',
+        workloadName: LINEAR_VAULT_WORKLOAD_NAME,
         allowedReturnUrls: [
           'http://localhost:8080/oauth/callback',
           ...(hostedReturnUrl ? [hostedReturnUrl] : []),
         ],
       });
+      // The agent self-mints Linear tokens via boto3 (config.py), so the agent
+      // session role needs the token data-plane calls. The webhook processor
+      // grant is wired inside LinearIntegration.
+      linearIdentityVault.grantMintToken(runtime.role);
     }
 
     // --- Linear integration (inbound webhook + agent-side MCP outbound) ---

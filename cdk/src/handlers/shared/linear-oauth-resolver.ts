@@ -183,6 +183,14 @@ export interface ResolvedLinearToken {
   readonly scope: string;
   readonly workspaceSlug: string;
   readonly oauthSecretArn: string;
+  /**
+   * AgentCore credential-provider name for this workspace, when it was onboarded
+   * through the vault (RFC #249 Phase 1). Undefined for Secrets-Manager-only
+   * installs. Stamped into the agent's channel_metadata so the agent-side
+   * resolver can mint its own token via the vault (config.py); absent ⇒ the
+   * agent stays on the SM path.
+   */
+  readonly providerName?: string;
 }
 
 export async function resolveLinearOauthToken(
@@ -225,9 +233,10 @@ export async function resolveLinearOauthToken(
         accessToken: vaultToken,
         scope: LINEAR_VAULT_SCOPES.join(' '),
         workspaceSlug: row.workspace_slug,
-        // No SM secret is read/written on the vault path; expose the vault
-        // provider name in place of the secret ARN for caller diagnostics.
+        // No SM secret is read/written on the vault path, but the ARN is still
+        // returned so downstream SM-fallback wiring stays populated.
         oauthSecretArn: row.oauth_secret_arn,
+        providerName: row.provider_name,
       };
     }
     // vaultToken === null ⇒ fall through to Secrets-Manager resolution.
@@ -281,6 +290,9 @@ export async function resolveLinearOauthToken(
     scope: token.scope,
     workspaceSlug: token.workspace_slug,
     oauthSecretArn: row.oauth_secret_arn,
+    // Carried through even on the SM path so the agent's channel_metadata gets
+    // the provider name and can attempt the vault itself (RFC #249 Phase 1).
+    ...(row.provider_name && { providerName: row.provider_name }),
   };
 }
 

@@ -873,6 +873,14 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     }
     channelMetadata.linear_oauth_secret_arn = resolved.oauthSecretArn;
     channelMetadata.linear_workspace_slug = resolved.workspaceSlug;
+    // RFC #249 Phase 1: when the workspace is vault-onboarded, pass the
+    // credential-provider name + workspace id so the agent-side resolver
+    // (config.py) can mint its own Linear token via the vault. Absent ⇒ the
+    // agent stays on the Secrets-Manager path.
+    if (resolved.providerName) {
+      channelMetadata.linear_provider_name = resolved.providerName;
+      channelMetadata.linear_workspace_id = workspaceId;
+    }
     resolvedAccessToken = resolved.accessToken;
     // Probe the issue once for native paperclip attachments + project docs. The
     // uploads.linear.app paperclips are fetched/screened/stored below (like
@@ -963,6 +971,12 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       }),
       ...(channelMetadata.linear_workspace_slug && {
         linear_workspace_slug: channelMetadata.linear_workspace_slug,
+      }),
+      // RFC #249 Phase 1: persist the vault provider name so released sub-issue
+      // children can mint via the vault too (workspace id is re-stamped on
+      // release from credentials_ref).
+      ...(channelMetadata.linear_provider_name && {
+        linear_provider_name: channelMetadata.linear_provider_name,
       }),
       linear_project_id: projectId,
       // The label this project actually triggers on, persisted at seed time
