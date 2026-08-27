@@ -97,6 +97,38 @@ describe('linear-identity-provisioning onEvent', () => {
     expect(second.input.name).toBe('abca_linear_oauth');
   });
 
+  test('Create on the REAL duplicate error (ValidationException "already exists") updates in place', async () => {
+    // Regression: AgentCore reports a duplicate workload-identity name as a
+    // ValidationException, not a ConflictException (verified live). Without
+    // handling it, the SECOND deploy fails — CloudFormation sends an Update, the
+    // handler re-issues Create, and the unhandled error rolls the stack back.
+    const dup = Object.assign(
+      new Error("WorkloadIdentity with name 'abca_linear_oauth' already exists."),
+      { name: 'ValidationException' },
+    );
+    mockSend.mockRejectedValueOnce(dup).mockResolvedValueOnce({});
+    await onEvent({
+      RequestType: 'Create',
+      ResourceProperties: { WorkloadName: 'abca_linear_oauth', AllowedReturnUrls: JSON.stringify(['http://localhost:8080/oauth/callback']) },
+    });
+    expect(mockSend).toHaveBeenCalledTimes(2);
+    expect((mockSend.mock.calls[1][0] as TaggedCall)._type).toBe('Update');
+  });
+
+  test('a GENUINE ValidationException still fails the resource (not treated as already-exists)', async () => {
+    const bad = Object.assign(
+      new Error('Invalid redirectUrl http://bad provided'),
+      { name: 'ValidationException' },
+    );
+    mockSend.mockRejectedValueOnce(bad);
+    await expect(
+      onEvent({
+        RequestType: 'Create',
+        ResourceProperties: { WorkloadName: 'abca_linear_oauth', AllowedReturnUrls: '[]' },
+      }),
+    ).rejects.toThrow(/Invalid redirectUrl/);
+  });
+
   test('Update reconciles the allowlist via UpdateWorkloadIdentity when the identity already exists', async () => {
     mockSend
       .mockRejectedValueOnce(new ConflictException())

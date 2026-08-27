@@ -84,10 +84,30 @@ function parseReturnUrls(raw?: string): string[] {
 }
 
 /**
- * Create or update the workload identity. `CreateWorkloadIdentity` fails with
- * `ConflictException` if the name already exists (e.g. a retried Create after a
- * partial success, or a stack re-deploy), so fall back to update-in-place —
- * which also reconciles the return-URL allowlist when it changes between deploys.
+ * True when a create failed only because the workload identity already exists,
+ * so the caller can fall back to update-in-place and stay idempotent.
+ *
+ * AgentCore reports a duplicate name as a **`ValidationException`**
+ * ("WorkloadIdentity with name '<name>' already exists."), NOT the
+ * `ConflictException` the name suggests — verified against the live service.
+ * Without this, the SECOND deploy fails: CloudFormation sends an Update, the
+ * handler re-issues Create, and the unhandled duplicate error rolls the stack
+ * back. `ConflictException` is still accepted in case the service tightens this
+ * later, and the message check keeps genuine validation errors (bad return URL,
+ * malformed name) surfacing instead of being silently treated as "exists".
+ */
+function isAlreadyExistsError(err: unknown): boolean {
+  if (err instanceof ConflictException) return true;
+  const name = (err as { name?: string } | undefined)?.name;
+  const message = (err as { message?: string } | undefined)?.message ?? '';
+  return name === 'ValidationException' && /already exists/i.test(message);
+}
+
+/**
+ * Create or update the workload identity. If the name already exists (a retried
+ * Create after a partial success, or a stack re-deploy), fall back to
+ * update-in-place — which also reconciles the return-URL allowlist when it
+ * changes between deploys.
  */
 async function upsertWorkloadIdentity(name: string, returnUrls: string[]): Promise<void> {
   try {
@@ -99,7 +119,7 @@ async function upsertWorkloadIdentity(name: string, returnUrls: string[]): Promi
     );
     logger.info('Created workload identity', { name, returnUrlCount: returnUrls.length });
   } catch (err) {
-    if (err instanceof ConflictException) {
+    if (isAlreadyExistsError(err)) {
       await client.send(
         new UpdateWorkloadIdentityCommand({
           name,

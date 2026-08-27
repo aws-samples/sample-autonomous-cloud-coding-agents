@@ -103,7 +103,7 @@ export async function upsertLinearCredentialProvider(args: {
     );
     return { providerName, callbackUrl: created.callbackUrl ?? '' };
   } catch (err) {
-    if (!(err instanceof ConflictException)) throw err;
+    if (!isAlreadyExistsError(err)) throw err;
     // Provider exists (re-run) — update the client credentials in place so a
     // rotated Linear app secret is picked up, then re-read the callback URL.
     await control.send(
@@ -118,6 +118,24 @@ export async function upsertLinearCredentialProvider(args: {
     );
     return { providerName, callbackUrl: existing.callbackUrl ?? '' };
   }
+}
+
+/**
+ * True when a create failed only because the provider already exists, so the
+ * caller can fall back to update-in-place and stay idempotent across re-runs.
+ *
+ * AgentCore reports a duplicate provider name as a **`ValidationException`**
+ * ("Credential provider with name: <name> already exists"), NOT the
+ * `ConflictException` the name suggests — live-caught when a second
+ * `vault-setup` run aborted instead of updating. `ConflictException` is still
+ * accepted in case the service tightens this later, and the message check keeps
+ * genuine validation errors (bad endpoints, malformed config) surfacing.
+ */
+function isAlreadyExistsError(err: unknown): boolean {
+  if (err instanceof ConflictException) return true;
+  const name = (err as { name?: string } | undefined)?.name;
+  const message = (err as { message?: string } | undefined)?.message ?? '';
+  return name === 'ValidationException' && /already exists/i.test(message);
 }
 
 export interface VaultConsentStep {

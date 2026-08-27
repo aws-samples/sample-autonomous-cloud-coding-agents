@@ -110,6 +110,33 @@ describe('upsertLinearCredentialProvider', () => {
     expect((controlSend.mock.calls[1][0] as Tagged)._type).toBe('UpdateProvider');
     expect((controlSend.mock.calls[2][0] as Tagged)._type).toBe('GetProvider');
   });
+
+  test('idempotent on the REAL duplicate-name error: ValidationException "already exists"', async () => {
+    // Regression: AgentCore reports a duplicate provider name as a
+    // ValidationException, not a ConflictException — a second `vault-setup` run
+    // aborted with "Credential provider with name: … already exists" instead of
+    // updating in place. Live-caught.
+    const dup = Object.assign(
+      new Error('Credential provider with name: bgagent-linear-oauth-acme already exists'),
+      { name: 'ValidationException' },
+    );
+    controlSend
+      .mockRejectedValueOnce(dup) // Create
+      .mockResolvedValueOnce({}) // Update
+      .mockResolvedValueOnce({ callbackUrl: 'https://bedrock-agentcore.../callback/existing' }); // Get
+    const res = await upsertLinearCredentialProvider(args);
+    expect(res.callbackUrl).toBe('https://bedrock-agentcore.../callback/existing');
+    expect((controlSend.mock.calls[1][0] as Tagged)._type).toBe('UpdateProvider');
+  });
+
+  test('a GENUINE ValidationException still surfaces (not swallowed as already-exists)', async () => {
+    const bad = Object.assign(
+      new Error('Invalid tokenEndpoint: must be an absolute https URL'),
+      { name: 'ValidationException' },
+    );
+    controlSend.mockRejectedValueOnce(bad);
+    await expect(upsertLinearCredentialProvider(args)).rejects.toThrow(/Invalid tokenEndpoint/);
+  });
 });
 
 describe('beginVaultConsent', () => {
