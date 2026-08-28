@@ -133,20 +133,38 @@ Pin the **geo-prefixed inference-profile** form, matching the stack's `BedrockGe
 output (e.g. `global.anthropic.claude-opus-4-8`), not the bare id — Bedrock refuses bare
 ids for on-demand invocation, and the IAM grant is scoped to one geography's profile ARNs.
 
-Granting a **new** model is a deploy-time change, not a source edit: the list is
-overridable via CDK context, so no construct edit is needed.
+Granting a **new** model is a deploy-time change, not a construct edit: the list is
+overridable via CDK context. `bedrockModels` takes an **array**, and that rules out the
+command-line form — `-c` supplies each value as a string, so
+`-c bedrockModels='["anthropic.claude-opus-5"]'` is rejected at synth ("must be a
+non-empty array"), and `--context-file` is accepted but has no effect on it. Set it in
+the `context` block of `cdk.json` and redeploy:
 
-```bash
-# every model the role may invoke — this REPLACES the default list, so include
-# the platform defaults (Opus 5 + Haiku 4.5) or the stack's own defaults are ungranted
-cdk deploy -c bedrockModels='["anthropic.claude-opus-5","anthropic.claude-haiku-4-5-20251001-v1:0","anthropic.claude-sonnet-4-6"]'
+```jsonc
+// cdk.json — this REPLACES the default list, so include the platform defaults
+// (Opus 5 + Haiku 4.5) or the stack's own defaults are ungranted
+"context": {
+  "bedrockModels": [
+    "anthropic.claude-opus-5",
+    "anthropic.claude-haiku-4-5-20251001-v1:0",
+    "anthropic.claude-sonnet-4-6"
+  ]
+}
 ```
 
-Two constraints on the value: entries are **bare** ids (the geo prefix is derived from
-`bedrockGeoRegion`), and each must have a live cross-Region inference profile — check with
-`aws bedrock get-inference-profile --inference-profile-identifier <geo>.<model>` before
-relying on it, because a granted model with no profile passes every check here and then
-fails at turn 0.
+Three constraints on the value. Entries are **bare** ids — the geo prefix is derived from
+`bedrockGeoRegion`, and a prefixed entry is rejected. Patterns are rejected too: these ids
+become the resource half of the IAM grant, so a `*` would grant every inference profile in
+the account. And each entry must have a live cross-Region inference profile:
+
+```bash
+aws bedrock get-inference-profile --inference-profile-identifier <geo>.<model>
+```
+
+A granted model with **no** profile is the trap — it passes the CLI's `--model` check and
+workflow admission (both read the grant list) and only fails at turn 0.
+`bgagent platform doctor` checks the whole granted set for exactly this and names any
+model that does not resolve.
 
 **Account-level Bedrock model access** is separate from IAM: the account must have the
 model enabled for the Region — complete [model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html)
