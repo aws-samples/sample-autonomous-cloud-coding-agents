@@ -67,6 +67,7 @@ process.env.MAX_CONCURRENT_TASKS_PER_USER = '3';
 process.env.TASK_RETENTION_DAYS = '90';
 process.env.MEMORY_ID = 'mem-test-default';
 
+import { classifyError } from '../../src/handlers/shared/error-classifier';
 import {
   admissionControl,
   emitTaskEvent,
@@ -551,6 +552,50 @@ describe('pollTaskStatus', () => {
     const result = await pollTaskStatus('TASK001', { attempts: 0 }, 'agentcore');
     expect(result.attempts).toBe(1);
     expect(result.lastStatus).toBeUndefined();
+  });
+
+  // The gate `finalizeTask`'s defensive FINALIZING arm depends on. That arm is
+  // currently unreachable BECAUSE of this predicate, and its comment says so — so
+  // this test is what keeps the comment true. If `pollTaskStatus` ever widens the
+  // status gate, the arm becomes live and this test is the place that says the
+  // reachability changed.
+  test.each([
+    'FINALIZING',
+    'AWAITING_APPROVAL',
+    'HYDRATING',
+    'QUEUED',
+  ])('never sets sessionUnhealthy for a %s task — the flag is RUNNING-scoped', async (status) => {
+    const longAgo = new Date(Date.now() - 3_600_000).toISOString();
+    mockDdbSend.mockResolvedValueOnce({
+      Item: {
+        status,
+        session_id: 'sess-1',
+        started_at: longAgo,
+        // Stale by any measure: an hour old against a 45 s cadence.
+        agent_heartbeat_at: longAgo,
+      },
+    });
+
+    const result = await pollTaskStatus('TASK001', { attempts: 5 }, 'lambda-microvm');
+
+    expect(result.lastStatus).toBe(status);
+    expect(result.sessionUnhealthy).toBe(false);
+  });
+
+  test('DOES set it for RUNNING with the same stale inputs (proves the above is not vacuous)', async () => {
+    const longAgo = new Date(Date.now() - 3_600_000).toISOString();
+    mockDdbSend.mockResolvedValueOnce({
+      Item: {
+        status: 'RUNNING',
+        session_id: 'sess-1',
+        started_at: longAgo,
+        agent_heartbeat_at: longAgo,
+      },
+    });
+
+    const result = await pollTaskStatus('TASK001', { attempts: 5 }, 'lambda-microvm');
+
+    expect(result.sessionUnhealthy).toBe(true);
   });
 
   test('rejects an unknown compute type instead of silently skipping heartbeat liveness', async () => {
@@ -1045,6 +1090,71 @@ describe('finalizeTask', () => {
     expect(eventCall.input.Item.metadata.reason).toBe('agent_heartbeat_stale');
     // Terminal event carries the correlation envelope (#245).
     expect(eventCall.input.Item).toMatchObject({ user_id: 'user-123', repo: 'org/repo' });
+  });
+
+  // --- substrate noun in the heartbeat-stale message (ayushtr nit 5) ---
+  //
+  // The message hard-coded "container", which was true for the only two backends
+  // that existed when it was written and became false the moment `lambda-microvm`
+  // joined the heartbeat path: a MicroVM has no container, so the copy sent the
+  // operator looking for one. Same defect class as "substrate state completed".
+
+  test.each([
+    ['lambda-microvm', 'the MicroVM'],
+    ['ecs', 'the container'],
+    ['agentcore', 'the container'],
+  ])('names the right substrate in the heartbeat-stale message for %s', async (computeType, noun) => {
+    mockDdbSend
+      .mockResolvedValueOnce({ Item: { ...baseTask, status: 'RUNNING', compute_type: computeType } })
+      .mockResolvedValue({});
+
+    await finalizeTask(
+      'TASK001',
+      { attempts: 12, lastStatus: 'RUNNING', sessionUnhealthy: true },
+      'user-123',
+    );
+
+    const message = mockDdbSend.mock.calls[1][0].input
+      .ExpressionAttributeValues[':attr_error_message'] as string;
+    expect(message).toBe(
+      `Agent session lost: no recent heartbeat from the runtime (${noun} may have crashed, `
+      + 'been OOM-killed, or stopped)',
+    );
+  });
+
+  test('degrades to a true generic on a record with no compute_type', async () => {
+    // `compute_type` is optional on TaskRecord (absent on older records), and the
+    // fallback must be accurate rather than a guess at the likely backend.
+    const { compute_type: _dropped, ...noComputeType } = { ...baseTask, compute_type: 'ecs' };
+    mockDdbSend
+      .mockResolvedValueOnce({ Item: { ...noComputeType, status: 'RUNNING' } })
+      .mockResolvedValue({});
+
+    await finalizeTask(
+      'TASK001',
+      { attempts: 12, lastStatus: 'RUNNING', sessionUnhealthy: true },
+      'user-123',
+    );
+
+    const message = mockDdbSend.mock.calls[1][0].input
+      .ExpressionAttributeValues[':attr_error_message'] as string;
+    expect(message).toContain('(the runtime may have crashed');
+  });
+
+  test('the heartbeat-stale message still classifies as a lost session', async () => {
+    // The noun swap must not break the classifier pattern.
+    mockDdbSend
+      .mockResolvedValueOnce({ Item: { ...baseTask, status: 'RUNNING', compute_type: 'lambda-microvm' } })
+      .mockResolvedValue({});
+    await finalizeTask(
+      'TASK001',
+      { attempts: 12, lastStatus: 'RUNNING', sessionUnhealthy: true },
+      'user-123',
+    );
+    const message = mockDdbSend.mock.calls[1][0].input
+      .ExpressionAttributeValues[':attr_error_message'] as string;
+
+    expect(classifyError(message)!.title).toBe('Agent session lost');
   });
 
   test('transitions RUNNING to TIMED_OUT on poll timeout', async () => {

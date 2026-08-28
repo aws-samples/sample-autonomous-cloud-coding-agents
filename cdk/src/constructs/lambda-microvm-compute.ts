@@ -1091,7 +1091,8 @@ export class LambdaMicrovmCompute extends Construct {
       actions: ['s3:GetObject'],
       resources: [this.artifactBucket.arnForObjects(this.artifactObjectKey)],
     }));
-    this.grantMicrovmLogWrites(this.buildRole);
+    // Build role: keeps `logs:CreateLogGroup` — see `grantMicrovmLogWrites`.
+    this.grantMicrovmLogWrites(this.buildRole, { allowCreateLogGroup: true });
 
     this.executionRole = new iam.Role(this, 'ExecutionRole', {
       assumedBy: microvmAssumedBy,
@@ -1100,7 +1101,10 @@ export class LambdaMicrovmCompute extends Construct {
         + 'lifecycle hooks; writes logs and reads out-of-band /run payloads.',
     });
     grantTagSession(this.executionRole, microvmAssumedBy);
-    this.grantMicrovmLogWrites(this.executionRole);
+    // Execution role: NO `logs:CreateLogGroup`. It runs untrusted repo code and
+    // live evidence shows it only ever writes into the pre-created group — see
+    // `grantMicrovmLogWrites` for the runbook citations and the re-verify note.
+    this.grantMicrovmLogWrites(this.executionRole, { allowCreateLogGroup: false });
 
     // The APPLICATION_LOGS group the agent is TOLD to write to (P2-F4). Separate
     // from `grantMicrovmLogWrites` above and not reachable from it: that grant
@@ -1469,17 +1473,46 @@ export class LambdaMicrovmCompute extends Construct {
   /**
    * CloudWatch Logs writes scoped to the MicroVM log namespace.
    *
-   * The service documents `logs:CreateLogGroup` + `CreateLogStream` +
-   * `PutLogEvents` for the build role; the execution role gets the same set so
-   * runtime logs land in the same, retention-managed group. `CreateLogGroup` is
-   * included even though this construct pre-creates the group: the service
-   * creates per-image/per-MicroVM groups under the prefix, and a missing
-   * `CreateLogGroup` silently costs you the build logs — the one artifact you
-   * need when a snapshot build fails.
+   * `CreateLogStream` + `PutLogEvents` go to both MicroVM-facing roles; the
+   * `logs:CreateLogGroup` half is **build-role only**, and that asymmetry is
+   * evidence-based rather than tidiness:
+   *
+   * - The service documents `CreateLogGroup` for the BUILD role, and losing build
+   *   logs costs you the one artifact you need when a snapshot build fails — a
+   *   failure mode we have actually hit (ADR-021 P1 4.3: the 443-only SG made the
+   *   image unbuildable, and the root cause was only readable from this group).
+   *   So the build role keeps it.
+   * - The EXECUTION role does not get it. Across all three live runs (P1, P2 run
+   *   1, P2 run 2) exactly ONE group under this prefix ever existed —
+   *   `/aws/lambda-microvms/<imageName>`, the one CloudFormation pre-creates
+   *   below — and both build-time and guest-runtime lines landed in it. No
+   *   per-MicroVM or per-image sub-group was ever observed, and the post-run
+   *   inventory (`645-p2-smoke-runbook.md` §8.6) records `/aws/lambda-microvms/*`
+   *   log groups: **none** after stack deletion, with the "service-vended log
+   *   groups created outside CloudFormation" list naming only
+   *   `/aws/bedrock-agentcore/runtimes/…` and `/aws/lambda/…`. A create right the
+   *   runtime provably never exercises does not belong on the role that runs
+   *   untrusted repo code.
+   *
+   * ⚠️ RE-VERIFY on the pending clean re-run (ADR-021 P2 "the row is not yet
+   * fully closed"). If guest logging ever goes silent on this backend, this
+   * narrowing is the first thing to re-widen — the symptom would be an
+   * `AccessDeniedException` naming `logs:CreateLogGroup` in the guest's stdout
+   * fallback, which the MicroVM group still captures.
+   *
+   * @param role - the role to grant.
+   * @param options - `allowCreateLogGroup` gates the build-role-only half.
    */
-  private grantMicrovmLogWrites(role: iam.IRole): void {
+  private grantMicrovmLogWrites(
+    role: iam.IRole,
+    options: { readonly allowCreateLogGroup: boolean },
+  ): void {
     role.addToPrincipalPolicy(new iam.PolicyStatement({
-      actions: ['logs:CreateLogGroup', 'logs:CreateLogStream', 'logs:PutLogEvents'],
+      actions: [
+        ...(options.allowCreateLogGroup ? ['logs:CreateLogGroup'] : []),
+        'logs:CreateLogStream',
+        'logs:PutLogEvents',
+      ],
       resources: [
         Stack.of(this).formatArn({
           service: 'logs',

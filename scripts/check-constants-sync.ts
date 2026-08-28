@@ -60,10 +60,17 @@ const CONFIG_KEY_PATTERN = /^[a-z][a-z0-9_]*$/;
 /**
  * Constant names that ``contracts/constants.json`` owns and the
  * pre-compiled regex that catches their literal assignment in any
- * consumer file.  Each pattern matches ``NAME = 50`` and
- * ``NAME: int = 50`` styles; the regex literals are hard-coded (not
- * built from string concatenation) so semgrep's
+ * consumer file.  Each pattern matches ``NAME = 50``, ``NAME: int = 50``
+ * and ``NAME: float = 50.0`` styles; the regex literals are hard-coded
+ * (not built from string concatenation) so semgrep's
  * ``detect-non-literal-regexp`` rule is satisfied without an exception.
+ *
+ * The annotation group accepts ``float`` as well as ``int`` deliberately. The
+ * value half (``-?\d+\b``) already matches a float literal — ``\d+`` takes the
+ * integral part and ``\b`` is satisfied by the following ``.`` — so an
+ * unannotated ``NAME = 240.0`` was always caught; what a narrower group would
+ * have missed is an *annotated* ``NAME: float = 240.0``. Widening costs nothing
+ * and removes the only shape that could have slipped through.
  *
  * The two ``MICROVM_PLATFORM_CONFIG_*`` patterns are shaped differently: those
  * constants are a mapping and a set, so the drift they catch is a collection
@@ -71,12 +78,12 @@ const CONFIG_KEY_PATTERN = /^[a-z][a-z0-9_]*$/;
  * contract-sourced ``= dict(_CONTRACT["env_by_key"])`` does not match.
  */
 const OWNED_PYTHON_PATTERNS: ReadonlyArray<{ name: string; regex: RegExp }> = [
-  { name: 'DEFAULT_APPROVAL_GATE_CAP', regex: /^\s*DEFAULT_APPROVAL_GATE_CAP\s*(?::\s*int)?\s*=\s*-?\d+\b/m },
-  { name: 'APPROVAL_GATE_CAP_MIN', regex: /^\s*APPROVAL_GATE_CAP_MIN\s*(?::\s*int)?\s*=\s*-?\d+\b/m },
-  { name: 'APPROVAL_GATE_CAP_MAX', regex: /^\s*APPROVAL_GATE_CAP_MAX\s*(?::\s*int)?\s*=\s*-?\d+\b/m },
-  { name: 'FLOOR_TIMEOUT_S', regex: /^\s*FLOOR_TIMEOUT_S\s*(?::\s*int)?\s*=\s*-?\d+\b/m },
-  { name: 'DEFAULT_TASK_TIMEOUT_S', regex: /^\s*DEFAULT_TASK_TIMEOUT_S\s*(?::\s*int)?\s*=\s*-?\d+\b/m },
-  { name: 'APP_ACTOR_MIN_SECRET_LENGTH', regex: /^\s*APP_ACTOR_MIN_SECRET_LENGTH\s*(?::\s*int)?\s*=\s*\d+\b/m },
+  { name: 'DEFAULT_APPROVAL_GATE_CAP', regex: /^\s*DEFAULT_APPROVAL_GATE_CAP\s*(?::\s*(?:int|float))?\s*=\s*-?\d+\b/m },
+  { name: 'APPROVAL_GATE_CAP_MIN', regex: /^\s*APPROVAL_GATE_CAP_MIN\s*(?::\s*(?:int|float))?\s*=\s*-?\d+\b/m },
+  { name: 'APPROVAL_GATE_CAP_MAX', regex: /^\s*APPROVAL_GATE_CAP_MAX\s*(?::\s*(?:int|float))?\s*=\s*-?\d+\b/m },
+  { name: 'FLOOR_TIMEOUT_S', regex: /^\s*FLOOR_TIMEOUT_S\s*(?::\s*(?:int|float))?\s*=\s*-?\d+\b/m },
+  { name: 'DEFAULT_TASK_TIMEOUT_S', regex: /^\s*DEFAULT_TASK_TIMEOUT_S\s*(?::\s*(?:int|float))?\s*=\s*-?\d+\b/m },
+  { name: 'APP_ACTOR_MIN_SECRET_LENGTH', regex: /^\s*APP_ACTOR_MIN_SECRET_LENGTH\s*(?::\s*(?:int|float))?\s*=\s*\d+\b/m },
   { name: 'FORGE_WEBTRIGGER_SUFFIX', regex: /^\s*FORGE_WEBTRIGGER_SUFFIX\s*(?::\s*str)?\s*=\s*["']/m },
   {
     name: 'MICROVM_PLATFORM_CONFIG_ENV_BY_KEY',
@@ -92,11 +99,11 @@ const OWNED_PYTHON_PATTERNS: ReadonlyArray<{ name: string; regex: RegExp }> = [
   // a literal. A contract-sourced `= _HOOK_BUDGETS["…"]` does not match.
   {
     name: '_READY_WARMUP_TOTAL_BUDGET_SECONDS',
-    regex: /^\s*_READY_WARMUP_TOTAL_BUDGET_SECONDS\s*(?::\s*int)?\s*=\s*-?\d+\b/m,
+    regex: /^\s*_READY_WARMUP_TOTAL_BUDGET_SECONDS\s*(?::\s*(?:int|float))?\s*=\s*-?\d+\b/m,
   },
   {
     name: '_READY_WARMUP_REQUIRED_TIMEOUT_SECONDS',
-    regex: /^\s*_READY_WARMUP_REQUIRED_TIMEOUT_SECONDS\s*(?::\s*int)?\s*=\s*-?\d+\b/m,
+    regex: /^\s*_READY_WARMUP_REQUIRED_TIMEOUT_SECONDS\s*(?::\s*(?:int|float))?\s*=\s*-?\d+\b/m,
   },
 ];
 
@@ -154,7 +161,12 @@ function main(): number {
     approval_gate_cap?: { min: number; max: number; default: number };
     approval_timeout_s?: { min: number; max: number; default: number };
     jira_app_actor?: { min_secret_length: number; forge_webtrigger_suffix: string };
-    microvm_platform_config?: { env_by_key: Record<string, string>; required: string[] };
+    microvm_platform_config?: {
+      env_by_key: Record<string, string>;
+      required: string[];
+      arn_keys: string[];
+      account_anchor_key: string;
+    };
     microvm_hook_budgets?: {
       ready_hook_timeout_seconds: number;
       warmup_total_budget_seconds: number;
@@ -260,6 +272,40 @@ function main(): number {
   }
   if (new Set(mpc.required).size !== mpc.required.length) {
     invariantErrors.push('microvm_platform_config.required contains a duplicate');
+  }
+
+  // ARN pinning (ADR-021 P2, review B5). `arn_keys` names the values the agent
+  // pins to its own partition/account before installing them into the env that
+  // resolves credentials and fetches secrets; `account_anchor_key` names the ARN
+  // that supplies the expected partition/account. Both are validated here as well
+  // as at agent import time, because a malformed entry would silently WIDEN what
+  // the agent accepts from a network payload.
+  if (!Array.isArray(mpc.arn_keys) || mpc.arn_keys.length === 0) {
+    invariantErrors.push('microvm_platform_config.arn_keys must be a non-empty array');
+  } else {
+    for (const key of mpc.arn_keys) {
+      if (!Object.hasOwn(envByKey, key)) {
+        invariantErrors.push(
+          `microvm_platform_config.arn_keys names "${key}", absent from env_by_key`,
+        );
+      }
+    }
+    if (new Set(mpc.arn_keys).size !== mpc.arn_keys.length) {
+      invariantErrors.push('microvm_platform_config.arn_keys contains a duplicate');
+    }
+    if (!mpc.arn_keys.includes(mpc.account_anchor_key)) {
+      invariantErrors.push(
+        'microvm_platform_config.account_anchor_key must be one of arn_keys',
+      );
+    }
+  }
+  // The anchor MUST be required, or a payload can disarm ARN pinning by simply
+  // omitting the anchor.
+  if (!mpc.required.includes(mpc.account_anchor_key)) {
+    invariantErrors.push(
+      'microvm_platform_config.account_anchor_key must also be listed in required — '
+      + 'an optional anchor would make ARN pinning skippable by omission',
+    );
   }
 
   // ADR-021 P2: `/ready` does real work (it warms the 225 MiB `claude` binary), so

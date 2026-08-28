@@ -107,6 +107,10 @@ const mockLogger = { info: jest.fn(), warn: jest.fn(), error: jest.fn(), child: 
 jest.mock('../../../../src/handlers/shared/logger', () => ({ logger: mockLogger }));
 
 import sharedConstants from '../../../../../contracts/constants.json';
+// The REAL classifier, not a mock: review B2's whole point is that the message
+// assertions passed while the classification was wrong, so only the real patterns
+// can prove the fix.
+import { classifyError } from '../../../../src/handlers/shared/error-classifier';
 import type { BlueprintConfig } from '../../../../src/handlers/shared/repo-config';
 import {
   LambdaMicrovmComputeStrategy,
@@ -116,6 +120,7 @@ import {
   MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS,
   MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES,
   buildMicrovmPlatformConfig,
+  deleteMicrovmPayload,
   microvmNoIngressConnectorArnForRegion,
   microvmPayloadKey,
 } from '../../../../src/handlers/shared/strategies/lambda-microvm-strategy';
@@ -735,6 +740,49 @@ describe('LambdaMicrovmComputeStrategy', () => {
     });
   });
 
+  // --- finalize-time payload delete (review NB3 / ayushtr nit 2) ---
+  //
+  // Not cosmetic parity with ECS. The execution role's payload-bucket grant is
+  // `grantRead` on the WHOLE bucket (the guest must read its object before any
+  // tenant identity exists) and keys are `<taskId>/payload.json`, so a TTL-only
+  // reaper left every finished task's HYDRATED PROMPT readable by any concurrently
+  // running MicroVM — which runs untrusted repo code — for up to ~24 h.
+  describe('deleteMicrovmPayload — closes the cross-task payload-read window', () => {
+    test('deletes the task\'s own object from the payload bucket', async () => {
+      await deleteMicrovmPayload('TASK001');
+
+      expect(mockS3Send).toHaveBeenCalledTimes(1);
+      const call = mockS3Send.mock.calls[0][0];
+      expect(call._type).toBe('DeleteObject');
+      expect(call.input).toEqual({
+        Bucket: PAYLOAD_BUCKET,
+        Key: microvmPayloadKey('TASK001'),
+      });
+    });
+
+    test('is best-effort — a failed delete never throws', async () => {
+      mockS3Send.mockRejectedValueOnce(new Error('AccessDenied'));
+
+      await expect(deleteMicrovmPayload('TASK001')).resolves.toBeUndefined();
+      // Not silent: the lifecycle rule is the backstop, but an operator must be
+      // able to see the delete is failing.
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        'Failed to delete MicroVM payload object (non-fatal)',
+        expect.objectContaining({ task_id: 'TASK001', error: 'AccessDenied' }),
+      );
+    });
+
+    test('deletes ONLY the given task\'s key — never a prefix or the bucket', async () => {
+      // The delete must not become a cleanup that can reach another task's object.
+      await deleteMicrovmPayload('TASK001');
+
+      const { input } = mockS3Send.mock.calls[0][0];
+      expect(input.Key).toBe('TASK001/payload.json');
+      expect(input.Key).not.toContain('*');
+      expect(input).not.toHaveProperty('Prefix');
+    });
+  });
+
   describe('pollSession — mechanical state mapping, no task-state interpretation', () => {
     test.each([
       ['PENDING', 'running'],
@@ -800,6 +848,72 @@ describe('LambdaMicrovmComputeStrategy', () => {
           runtimeArn: 'arn:test',
         }),
       ).rejects.toThrow('pollSession called with non-lambda-microvm handle');
+    });
+
+    // --- stateReason pass-through (review B1) ---
+    //
+    // The substrate's own account of WHY is the difference between a usable failure
+    // report and a fabricated one. `TERMINATED → completed` has no error slot, so
+    // discarding `stateReason` made the DOMINANT runtime failure — a /run hook 4xx,
+    // reaped in ~12 s — render as the bare "substrate state completed".
+
+    test('carries stateReason through on a terminal state', async () => {
+      const reason = 'Run lifecycle hook returned HTTP status 400. Please check your hook endpoint '
+        + 'and application logs for more details.';
+      mockSend.mockResolvedValueOnce({ microvmId: MICROVM_ID, state: 'TERMINATED', stateReason: reason });
+
+      const result = await new LambdaMicrovmComputeStrategy().pollSession(makeHandle());
+
+      expect(result).toEqual({ status: 'completed', reason });
+    });
+
+    test('logs a WARNING when a terminal MicroVM carries a reason', async () => {
+      const reason = 'Run lifecycle hook returned HTTP status 400.';
+      mockSend.mockResolvedValueOnce({ microvmId: MICROVM_ID, state: 'TERMINATED', stateReason: reason });
+
+      await new LambdaMicrovmComputeStrategy().pollSession(makeHandle());
+
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        'MicroVM reached a terminal state with a substrate reason',
+        expect.objectContaining({ microvm_id: MICROVM_ID, state: 'TERMINATED', state_reason: reason }),
+      );
+    });
+
+    test('normalizes the service\'s "Success." away rather than appending noise', async () => {
+      // Every cleanly-terminated MicroVM reports `Success.`; carrying it would put
+      // "(Success.)" on the detail string of every healthy task.
+      mockSend.mockResolvedValueOnce({
+        microvmId: MICROVM_ID, state: 'TERMINATED', stateReason: 'Success.',
+      });
+
+      const result = await new LambdaMicrovmComputeStrategy().pollSession(makeHandle());
+
+      expect(result).toEqual({ status: 'completed' });
+      expect(mockLogger.warn).not.toHaveBeenCalled();
+    });
+
+    test('omits reason entirely when the substrate supplies none', async () => {
+      // `undefined` must be OMITTED, not present-as-undefined: the orchestrator's
+      // detail string tests `substrate.reason` for truthiness and a live-verified
+      // hung MicroVM reports no reason at all.
+      mockSend.mockResolvedValueOnce({ microvmId: MICROVM_ID, state: 'RUNNING' });
+
+      const result = await new LambdaMicrovmComputeStrategy().pollSession(makeHandle());
+
+      expect(result).toEqual({ status: 'running' });
+      expect('reason' in result).toBe(false);
+    });
+
+    test.each([
+      ['RUNNING', 'running'],
+      ['SUSPENDED', 'suspended'],
+      ['HIBERNATING_SOMEDAY', 'running'],
+    ])('carries stateReason on %s too, not just terminal states', async (state, expected) => {
+      mockSend.mockResolvedValueOnce({ microvmId: MICROVM_ID, state, stateReason: 'because' });
+
+      const result = await new LambdaMicrovmComputeStrategy().pollSession(makeHandle());
+
+      expect(result).toEqual({ status: expected, reason: 'because' });
     });
   });
 
@@ -1252,6 +1366,62 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
     expect(() => buildMicrovmPlatformConfig({})).toThrow(
       /task_table_name.*task_events_table_name.*github_token_secret_arn.*agent_session_role_arn/s,
     );
+  });
+
+  // --- CLASSIFICATION, not just message text (review B2) ---
+  //
+  // The message assertions above passed both before and after the marker was added,
+  // which is exactly how the misclassification slipped through. These assert what an
+  // operator actually receives.
+
+  test('the throw carries the MicroVM marker so the classifier can scope it', () => {
+    expect(() => buildMicrovmPlatformConfig({})).toThrow(
+      new RegExp(`${MICROVM_ERROR_MARKER} platform config failed`),
+    );
+  });
+
+  test('classifies as a non-retryable CONFIG fault, NOT a transient compute one', () => {
+    // Without the marker this fell to the generic `/Session start failed/i`
+    // catch-all: `errorClass: TRANSIENT`, `retryable: true`, and the remedy "Check
+    // AgentCore Runtime or ECS cluster health / the service quota may be
+    // exhausted" — the wrong substrate AND advice that cannot possibly work for a
+    // hand-edited orchestrator environment.
+    let thrown: unknown;
+    try {
+      buildMicrovmPlatformConfig({});
+    } catch (err) {
+      thrown = err;
+    }
+
+    const classification = classifyError(String(thrown));
+
+    expect(classification).not.toBeNull();
+    expect(classification!.retryable).toBe(false);
+    expect(classification!.errorClass).toBe('service');
+    expect(classification!.category).toBe('config');
+    expect(classification!.title).toBe('The orchestrator is missing MicroVM platform configuration');
+    // The remedy must not send an operator to the wrong substrate.
+    expect(classification!.remedy).not.toMatch(/AgentCore Runtime or ECS cluster health/);
+    expect(classification!.remedy).toMatch(/redeploy the stack/i);
+  });
+
+  test('survives the `Session start failed:` prefix the failure path adds', () => {
+    // `failTask` persists `Session start failed: <raw>`, and `failure-reply.ts`
+    // re-classifies THAT string — which is where the TRANSIENT misclassification
+    // actually reached the user. The marker has to win against the catch-all even
+    // with the prefix attached.
+    let raw = '';
+    try {
+      buildMicrovmPlatformConfig({});
+    } catch (err) {
+      raw = err instanceof Error ? err.message : String(err);
+    }
+
+    const classification = classifyError(`Session start failed: ${raw}`);
+
+    expect(classification!.retryable).toBe(false);
+    expect(classification!.errorClass).toBe('service');
+    expect(classification!.remedy).not.toMatch(/AgentCore Runtime or ECS cluster health/);
   });
 
   test('does NOT throw for a missing OPTIONAL key', () => {

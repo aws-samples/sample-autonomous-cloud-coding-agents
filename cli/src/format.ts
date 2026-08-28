@@ -32,8 +32,17 @@ export function formatVerdict(passed: boolean | null, dash = '—'): string {
   return passed === null ? dash : passed ? 'PASSED' : 'FAILED';
 }
 
-/** Format a TaskDetail as a key-value detail view. */
-export function formatTaskDetail(task: TaskDetail): string {
+/**
+ * Format a TaskDetail as a key-value detail view.
+ *
+ * @param task - the task detail from ``GET /tasks/{id}``.
+ * @param now - reference time for relative durations (epoch ms). Injected rather
+ *   than read inside, matching {@link formatStatusSnapshot}: the heartbeat line
+ *   renders an AGE, so without an anchor this function is non-deterministic and
+ *   its only interesting case (a stale beat) cannot be asserted. Defaults to
+ *   ``Date.now()`` in production; tests pass a fixed value.
+ */
+export function formatTaskDetail(task: TaskDetail, now: number = Date.now()): string {
   const lines: string[] = [
     `Task:        ${task.task_id}`,
     `Status:      ${task.status}`,
@@ -95,7 +104,7 @@ export function formatTaskDetail(task: TaskDetail): string {
   // next to Completed/Duration. The relative age is what an operator actually
   // needs, so it is rendered alongside the timestamp rather than instead of it.
   if (task.agent_heartbeat_at && !isTerminalStatus(task.status)) {
-    lines.push(`Heartbeat:   ${task.agent_heartbeat_at} (${heartbeatAge(task.agent_heartbeat_at)})`);
+    lines.push(`Heartbeat:   ${task.agent_heartbeat_at} (${heartbeatAge(task.agent_heartbeat_at, now)})`);
   }
   if (task.duration_s !== null) {
     lines.push(`Duration:    ${task.duration_s}s`);
@@ -119,13 +128,19 @@ function formatQueueEta(estimatedWaitS: number | null): string {
   return ` (est. wait ~${minutes}m)`;
 }
 
-/** Format a list of TaskSummary as an aligned table. */
-export function formatTaskList(tasks: TaskSummary[]): string {
+/**
+ * Format a list of TaskSummary as an aligned table.
+ *
+ * @param tasks - the summaries from ``GET /v1/tasks``.
+ * @param now - reference time for the HEARTBEAT column's relative age (epoch ms).
+ *   Injected for the same reason as {@link formatStatusSnapshot}'s.
+ */
+export function formatTaskList(tasks: TaskSummary[], now: number = Date.now()): string {
   if (tasks.length === 0) {
     return 'No tasks found.';
   }
 
-  const headers = ['TASK ID', 'STATUS', 'REPO', 'CREATED', 'DESCRIPTION'];
+  const headers = ['TASK ID', 'STATUS', 'REPO', 'CREATED', 'HEARTBEAT', 'DESCRIPTION'];
   const rows = tasks.map(t => {
     let desc = t.task_description || (t.issue_number !== null ? `#${t.issue_number}` : '-');
     if (t.resolved_workflow?.id === 'coding/pr-iteration-v1' && t.pr_number !== null) {
@@ -137,6 +152,14 @@ export function formatTaskList(tasks: TaskSummary[]): string {
       // Repo-less workflows (#248 Phase 3) have no repo — show a dash.
       t.repo ?? '—',
       t.created_at,
+      // In-guest liveness, at LIST level: "is anything still alive?" is asked
+      // across tasks, and one `bgagent status` at a time is how a hung task goes
+      // unnoticed. Suppressed on a terminal task (the last beat is noise beside a
+      // final status) and where the agent has not beaten — same rule as the detail
+      // view, so the two never disagree.
+      t.agent_heartbeat_at && !isTerminalStatus(t.status)
+        ? `${heartbeatAge(t.agent_heartbeat_at, now)} ago`
+        : PLACEHOLDER,
       truncate(desc, DESCRIPTION_COLUMN_WIDTH),
     ];
   });
@@ -676,15 +699,19 @@ function readNumberField(meta: Record<string, unknown> | undefined, key: string)
 /**
  * Age of the agent's last heartbeat, as the detail view renders it.
  *
- * Wraps {@link relativeTime} with `Date.now()` and a placeholder, because the
- * heartbeat's VALUE is the age rather than the timestamp: the beat is written every
- * 45 s, so anything much past that is the signal an operator is looking for (it is
- * the same field the orchestrator's own hang detector reads). Unparseable input
- * degrades to a dash rather than throwing — a malformed timestamp must not take out
+ * Wraps {@link relativeTime} with a placeholder, because the heartbeat's VALUE is
+ * the age rather than the timestamp: the beat is written every 45 s, so anything
+ * much past that is the signal an operator is looking for (it is the same field
+ * the orchestrator's own hang detector reads). Unparseable input degrades to a
+ * dash rather than throwing — a malformed timestamp must not take out
  * `bgagent status`.
+ *
+ * `now` is a required parameter, not a `Date.now()` default: every caller already
+ * has an anchor threaded in, and a default here is exactly how the
+ * non-determinism this signature removes creeps back.
  */
-function heartbeatAge(isoTimestamp: string): string {
-  return relativeTime(isoTimestamp, Date.now()) ?? PLACEHOLDER;
+function heartbeatAge(isoTimestamp: string, now: number): string {
+  return relativeTime(isoTimestamp, now) ?? PLACEHOLDER;
 }
 
 /**

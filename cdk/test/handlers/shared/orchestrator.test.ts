@@ -40,6 +40,9 @@ process.env.TASK_RETENTION_DAYS = '90';
 
 import { TaskStatus } from '../../../src/constructs/task-status';
 import type { SessionHandle, SessionStatus } from '../../../src/handlers/shared/compute-strategy';
+// The real classifier: the reason-append must not break the anchor the substrate
+// -failure classification keys on.
+import { classifyError } from '../../../src/handlers/shared/error-classifier';
 import { buildComputeMetadata, reconcileMicrovmSubstrateState } from '../../../src/handlers/shared/orchestrator';
 
 const MICROVM_ID = 'mvm-0123456789abcdef';
@@ -363,6 +366,67 @@ describe('reconcileMicrovmSubstrateState', () => {
       expect(values[':attr_error_message']).toBe(
         'MicroVM substrate terminated before the agent wrote a terminal status: host fault',
       );
+    });
+
+    // --- stateReason in the detail (review B1) ---
+
+    test('appends the substrate reason so the DOMINANT failure names its real cause', async () => {
+      // The exact live shape: a /run hook 4xx self-terminates the VM in ~12 s
+      // (645-p2-smoke-runbook.md §6.1). Without the reason this read "substrate
+      // state completed" and the classifier's remedy named a session duration cap, a
+      // host fault, or an external terminate — none of which happened.
+      primeReread(TaskStatus.RUNNING);
+      const reason = 'Run lifecycle hook returned HTTP status 400. Please check your hook endpoint '
+        + 'and application logs for more details.';
+
+      await reconcile({ status: 'completed', reason }, TaskStatus.RUNNING);
+
+      const values = commandsOfType('Update')[0].input.ExpressionAttributeValues as Record<string, unknown>;
+      expect(values[':attr_error_message']).toBe(
+        'MicroVM substrate terminated before the agent wrote a terminal status: '
+        + `substrate state completed (${reason})`,
+      );
+    });
+
+    test('appends the reason to a failed substrate report too, without losing the error', async () => {
+      primeReread(TaskStatus.RUNNING);
+
+      await reconcile(
+        { status: 'failed', error: 'host fault', reason: 'hypervisor evicted the guest' },
+        TaskStatus.RUNNING,
+      );
+
+      const values = commandsOfType('Update')[0].input.ExpressionAttributeValues as Record<string, unknown>;
+      expect(values[':attr_error_message']).toBe(
+        'MicroVM substrate terminated before the agent wrote a terminal status: '
+        + 'host fault (hypervisor evicted the guest)',
+      );
+    });
+
+    test('renders unchanged when the substrate supplies no reason', async () => {
+      // A live-verified hung MicroVM reports no `stateReason` at all, so the
+      // reason-less string stays the baseline — and stays the one the classifier's
+      // `MicroVM substrate terminated…` pattern is anchored on.
+      primeReread(TaskStatus.RUNNING);
+
+      await reconcile({ status: 'completed' }, TaskStatus.RUNNING);
+
+      const values = commandsOfType('Update')[0].input.ExpressionAttributeValues as Record<string, unknown>;
+      expect(values[':attr_error_message']).toBe(
+        'MicroVM substrate terminated before the agent wrote a terminal status: substrate state completed',
+      );
+    });
+
+    test('the reason-carrying message still classifies as a MicroVM substrate failure', async () => {
+      // The append must not break the classifier anchor — that would trade a
+      // misleading remedy for no remedy.
+      primeReread(TaskStatus.RUNNING);
+      await reconcile({ status: 'completed', reason: 'Run lifecycle hook returned HTTP status 400.' }, TaskStatus.RUNNING);
+      const values = commandsOfType('Update')[0].input.ExpressionAttributeValues as Record<string, unknown>;
+
+      const classification = classifyError(String(values[':attr_error_message']));
+
+      expect(classification!.title).toBe('The MicroVM stopped before the agent reported a result');
     });
 
     test('fails from AWAITING_APPROVAL too — a terminated VM cannot resume the gate', async () => {

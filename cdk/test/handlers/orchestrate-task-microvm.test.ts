@@ -54,8 +54,12 @@ jest.mock('@aws-sdk/client-lambda-microvms', () => ({
   },
 }));
 
+// ONE shared send, not a fresh `jest.fn()` per client construction: the payload
+// PUT and the finalize DELETE are both assertions this file needs to make, and a
+// per-instance mock silently discards them.
+const mockS3Send = jest.fn().mockResolvedValue({});
 jest.mock('@aws-sdk/client-s3', () => ({
-  S3Client: jest.fn(() => ({ send: jest.fn().mockResolvedValue({}) })),
+  S3Client: jest.fn(() => ({ send: mockS3Send })),
   PutObjectCommand: jest.fn((input: unknown) => ({ _type: 'PutObject', input })),
   DeleteObjectCommand: jest.fn((input: unknown) => ({ _type: 'DeleteObject', input })),
 }));
@@ -150,6 +154,49 @@ function fakeContext(opts: { pollOnce?: boolean } = {}) {
   };
 }
 
+/**
+ * A context that HONORS `waitStrategy`, so the poll loop's exit decision is part
+ * of the test rather than assumed.
+ *
+ * `fakeContext` above runs the poll body once and ignores `waitStrategy` entirely,
+ * which means the composition the heartbeat work exists FOR — a stale heartbeat
+ * stops the poll, finalize runs, and `TerminateMicrovm` reclaims the reservation —
+ * was never asserted end to end for any backend. This drives real iterations until
+ * the strategy says stop (bounded, so a broken exit condition fails as a timeout
+ * rather than hanging the suite).
+ */
+function loopingContext(maxIterations = 10) {
+  const steps: string[] = [];
+  const iterations: Array<Record<string, unknown>> = [];
+  return {
+    steps,
+    iterations,
+    ctx: {
+      step: async (name: string, fn: () => Promise<unknown>) => {
+        steps.push(name);
+        return fn();
+      },
+      waitForCondition: async (
+        name: string,
+        fn: (state: Record<string, unknown>) => Promise<Record<string, unknown>>,
+        cfg: {
+          initialState: Record<string, unknown>;
+          waitStrategy: (state: Record<string, unknown>) => { shouldContinue: boolean };
+        },
+      ) => {
+        steps.push(name);
+        let state = cfg.initialState;
+        for (let i = 0; i < maxIterations; i++) {
+          state = await fn(state);
+          iterations.push(state);
+          if (!cfg.waitStrategy(state).shouldContinue) return state;
+        }
+        throw new Error(`waitStrategy never stopped after ${maxIterations} iterations`);
+      },
+    },
+  };
+}
+
 function runMicrovmOk() {
   mockMicrovmSend.mockResolvedValueOnce({
     microvmId: MICROVM_ID,
@@ -164,8 +211,15 @@ function commandsOfType(type: string) {
   return mockMicrovmSend.mock.calls.map(c => c[0]).filter(c => c._type === type);
 }
 
+/** S3 commands of a given type — the payload bucket lives on its own client. */
+function s3CommandsOfType(type: string) {
+  return mockS3Send.mock.calls.map(c => c[0]).filter(c => c._type === type);
+}
+
 beforeEach(() => {
   jest.clearAllMocks();
+  mockS3Send.mockReset();
+  mockS3Send.mockResolvedValue({});
   mockMicrovmSend.mockReset();
   mockPollTaskStatus.mockResolvedValue({ attempts: 1, lastStatus: TaskStatus.COMPLETED });
   mockReconcile.mockResolvedValue({ taskFailed: false });
@@ -241,6 +295,81 @@ describe('orchestrate-task for a lambda-microvm task', () => {
     await handler({ task_id: 'TASK001' }, fakeContext().ctx as never);
 
     expect(mockDeleteEcsPayload).not.toHaveBeenCalled();
+  });
+
+  // --- finalize-time payload delete (review NB3) ---
+
+  test('deletes its OWN payload object on finalize, closing the cross-task read window', async () => {
+    // The execution role's payload-bucket grant is bucket-wide `grantRead`, so a
+    // TTL-only reaper left every finished task's hydrated prompt readable by any
+    // running MicroVM for ~24 h. ECS already deleted at finalize; this is the parity
+    // that matters.
+    runMicrovmOk();
+
+    await handler({ task_id: 'TASK001' }, fakeContext().ctx as never);
+
+    const deletes = s3CommandsOfType('DeleteObject');
+    expect(deletes).toHaveLength(1);
+    expect(deletes[0].input).toEqual({
+      Bucket: 'test-microvm-payload-bucket',
+      Key: 'TASK001/payload.json',
+    });
+    // ...and it did not reach for the ECS deleter.
+    expect(mockDeleteEcsPayload).not.toHaveBeenCalled();
+  });
+
+  // --- heartbeat -> stop polling -> finalize -> TerminateMicrovm (review test gap) ---
+  //
+  // The composition the heartbeat change EXISTS for: a hung guest inside a healthy
+  // VM is invisible to `GetMicrovm`, so only the stale heartbeat can stop the poll —
+  // and if it stops the poll but nothing terminates, the 8-hour reservation is still
+  // billed. `fakeContext` runs one iteration and ignores `waitStrategy`, so this
+  // needed `loopingContext` to be assertable at all.
+
+  test('a stale agent heartbeat stops the poll AND reclaims the MicroVM', async () => {
+    runMicrovmOk();
+    // The substrate stays healthy throughout — this is the blind spot.
+    mockMicrovmSend.mockResolvedValue({ microvmId: MICROVM_ID, state: 'RUNNING' });
+    mockReconcile.mockResolvedValue({ taskFailed: false, suspendAnomalyReported: false });
+    mockPollTaskStatus.mockResolvedValue({
+      attempts: 1,
+      lastStatus: TaskStatus.RUNNING,
+      sessionUnhealthy: true,
+    });
+
+    const looping = loopingContext();
+    await handler({ task_id: 'TASK001' }, looping.ctx as never);
+
+    // Exited on the FIRST unhealthy observation — not after burning the 8.5 h window.
+    expect(looping.iterations).toHaveLength(1);
+    // finalize ran, and it saw the unhealthy flag (that is what writes FAILED).
+    expect(mockFinalizeTask).toHaveBeenCalledTimes(1);
+    expect(mockFinalizeTask.mock.calls[0][1]).toMatchObject({ sessionUnhealthy: true });
+    // ...and the reservation was actually reclaimed. This is the billing outcome.
+    expect(commandsOfType('TerminateMicrovm')).toHaveLength(1);
+    expect(commandsOfType('TerminateMicrovm')[0].input)
+      .toEqual({ microvmIdentifier: MICROVM_ID });
+  });
+
+  test('a healthy heartbeat keeps polling until a terminal task status', async () => {
+    // The other side of the same predicate: without this, a `sessionUnhealthy: true`
+    // hard-coded into the poll would pass the test above.
+    runMicrovmOk();
+    mockMicrovmSend.mockResolvedValue({ microvmId: MICROVM_ID, state: 'RUNNING' });
+    mockReconcile.mockResolvedValue({ taskFailed: false, suspendAnomalyReported: false });
+    mockPollTaskStatus
+      .mockResolvedValueOnce({ attempts: 1, lastStatus: TaskStatus.RUNNING, sessionUnhealthy: false })
+      .mockResolvedValueOnce({ attempts: 2, lastStatus: TaskStatus.RUNNING, sessionUnhealthy: false })
+      .mockResolvedValue({ attempts: 3, lastStatus: TaskStatus.COMPLETED, sessionUnhealthy: false });
+
+    const looping = loopingContext();
+    await handler({ task_id: 'TASK001' }, looping.ctx as never);
+
+    expect(looping.iterations).toHaveLength(3);
+    expect(mockFinalizeTask.mock.calls[0][1]).toMatchObject({ lastStatus: TaskStatus.COMPLETED });
+    // Terminate happens on every finalize, healthy or not — the VM does not
+    // self-terminate on this substrate.
+    expect(commandsOfType('TerminateMicrovm')).toHaveLength(1);
   });
 
   test('cross-checks the substrate through reconcileMicrovmSubstrateState while non-terminal', async () => {

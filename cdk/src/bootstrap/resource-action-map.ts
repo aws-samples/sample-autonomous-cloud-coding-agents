@@ -93,9 +93,27 @@ export const RESOURCE_ACTION_MAP: Record<string, readonly string[]> = {
   // an `iam:PassedToService` allowlist that this service presents no usable value
   // for, so the deploy failed with `iam:PassRole … not authorized` on the build
   // role while every mapped action was covered. The unconditioned pass now lives in
-  // the conditional `compute-lambda-microvm` policy; listing the action here is
-  // what makes its removal a test failure instead of a redeploy failure. Evidence
-  // inlined in ADR-021 §4.
+  // the conditional `compute-lambda-microvm` policy. Evidence inlined in
+  // ADR-021 §4.
+  //
+  // NOTE: listing the action here does NOT guard that statement.
+  // `collectBootstrapAllowActions` (this file) compares action STRINGS only —
+  // `Resource` and `Condition` are discarded — and `policies/infrastructure.ts`'s
+  // conditioned `IAMPassRole` already contributes a bare `iam:PassRole` to every
+  // bundle, so the requirement is satisfied by the very statement P2r2-F9 proved
+  // is denied on this path. Deleting `MicrovmPassRoles` leaves this check green.
+  // Compounding it, `synth-coverage.test.ts` synthesizes only the default context,
+  // where `AWS::Lambda::MicrovmImage` is never emitted, so these two entries are
+  // never even consulted there.
+  //
+  // The REAL guard against dropping the unconditioned pass is
+  // `test/bootstrap/policies.test.ts` ("MicrovmPassRoles"), which asserts the sid
+  // list, the two name-prefix resources, the ABSENT condition, and the
+  // execution-role exclusion — plus `test/bootstrap/bootstrap-template.test.ts`,
+  // which asserts it survives into the rendered template. These entries DOCUMENT
+  // the create-time need; they do not enforce it. Making the map enforce it would
+  // need `findMissingBootstrapActions` to require an *unconditioned* match for a
+  // declared subset of actions — deliberately not done here.
   'AWS::Lambda::MicrovmImage': ['lambda:CreateMicrovmImage', 'iam:PassRole'],
   'AWS::Lambda::NetworkConnector': ['lambda:CreateNetworkConnector', 'iam:PassRole'],
   'AWS::Logs::Delivery': ['logs:CreateDelivery'],

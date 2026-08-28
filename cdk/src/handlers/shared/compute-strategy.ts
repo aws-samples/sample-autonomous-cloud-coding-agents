@@ -57,12 +57,22 @@ export type SessionHandle =
  * API (today: ``lambda-microvm``). It is NOT a health verdict — a suspended
  * MicroVM is healthy while the task is ``AWAITING_APPROVAL`` and an anomaly
  * otherwise, and only the orchestrator can tell the two apart.
+ *
+ * ``reason`` on the non-``failed`` variants is the SUBSTRATE's own explanation of
+ * the state, verbatim and uninterpreted (``GetMicrovm``'s ``stateReason``, ECS's
+ * ``stoppedReason``). It exists because ``completed`` has no error slot, so
+ * without it the dominant MicroVM runtime failure — a ``/run`` hook 4xx, which
+ * the service reaps within ~12 s — reached the operator as the bare, and
+ * therefore fabricated, ``"substrate state completed"``. It is OPTIONAL and
+ * OPAQUE: no control flow may branch on its content (that would put substrate
+ * interpretation back in the strategy), and it is for the reconcile ``detail``
+ * string and logs only.
  */
 export type SessionStatus =
-  | { readonly status: 'running' }
-  | { readonly status: 'suspended' }
-  | { readonly status: 'completed' }
-  | { readonly status: 'failed'; readonly error: string };
+  | { readonly status: 'running'; readonly reason?: string }
+  | { readonly status: 'suspended'; readonly reason?: string }
+  | { readonly status: 'completed'; readonly reason?: string }
+  | { readonly status: 'failed'; readonly error: string; readonly reason?: string };
 
 export interface ComputeStrategy {
   readonly type: ComputeType;

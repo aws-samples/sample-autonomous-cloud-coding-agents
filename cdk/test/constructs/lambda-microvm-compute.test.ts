@@ -814,6 +814,33 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     expect(rendered).not.toContain(`${MICROVM_LOG_GROUP_PREFIX}/*`);
   });
 
+  test('logs:CreateLogGroup is on the BUILD role only, never the execution role', () => {
+    // Review NB11, resolved by the runbooks rather than by taste. Across all three
+    // live runs (P1, P2 run 1, P2 run 2) exactly ONE group under this prefix ever
+    // existed — the one CloudFormation pre-creates — and both build-time and
+    // guest-runtime lines landed in it; the post-run inventory records
+    // `/aws/lambda-microvms/*` log groups: **none** after stack deletion, and the
+    // "service-vended log groups created outside CloudFormation" list names only
+    // `/aws/bedrock-agentcore/runtimes/…` and `/aws/lambda/…`. So the runtime never
+    // exercises a create right — and it is the role that runs untrusted repo code.
+    //
+    // The build role KEEPS it: the service documents it there, and losing build logs
+    // costs the one artifact you need when a snapshot build fails (P1 4.3 was
+    // diagnosed from exactly that group).
+    const buildActions = Object.entries(template.findResources('AWS::IAM::Policy'))
+      .filter(([id]) => id.includes('LambdaMicrovmComputeBuildRole'))
+      .flatMap(([, p]) => p.Properties.PolicyDocument.Statement)
+      .flatMap((st: { Action: string | string[] }) => (Array.isArray(st.Action) ? st.Action : [st.Action]));
+    expect(buildActions).toContain('logs:CreateLogGroup');
+
+    const execActions = executionRoleStatements()
+      .flatMap(st => (Array.isArray(st.Action) ? st.Action : [st.Action]));
+    expect(execActions).not.toContain('logs:CreateLogGroup');
+    // ...but it still writes: the pre-created group is where its lines go.
+    expect(execActions).toContain('logs:CreateLogStream');
+    expect(execActions).toContain('logs:PutLogEvents');
+  });
+
   test('the two logs grants stay separate — one namespace cannot cover the other', () => {
     // The service's own `/aws/lambda-microvms/*` grant and the platform's
     // APPLICATION_LOGS grant are unrelated namespaces, so neither can be widened

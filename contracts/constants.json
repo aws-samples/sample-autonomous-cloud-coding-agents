@@ -38,7 +38,14 @@
       "task_events_table_name",
       "github_token_secret_arn",
       "agent_session_role_arn"
-    ]
+    ],
+    "arn_keys": [
+      "github_token_secret_arn",
+      "linear_oauth_secret_arn",
+      "jira_oauth_secret_arn",
+      "agent_session_role_arn"
+    ],
+    "account_anchor_key": "agent_session_role_arn"
   },
   "microvm_hook_budgets": {
     "ready_hook_timeout_seconds": 300,

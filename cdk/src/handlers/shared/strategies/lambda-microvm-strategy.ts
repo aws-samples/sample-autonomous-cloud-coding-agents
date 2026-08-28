@@ -24,7 +24,7 @@ import {
   RunMicrovmCommand,
   TerminateMicrovmCommand,
 } from '@aws-sdk/client-lambda-microvms';
-import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { DeleteObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 // Cross-language contract (S9): `microvm_platform_config` is read by BOTH this
 // producer and `agent/src/server.py`'s `/run` consumer. Imported (not copied) so
 // `tsc` fails on a renamed field — see `contracts/constants.md`.
@@ -259,8 +259,10 @@ export const MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS =
  * @returns the block, with absent optional keys OMITTED (not `undefined`) so the
  *   agent's `key in platform_config` checks mean what they say and the serialized
  *   envelope carries no dead weight against the 4 KB cap.
- * @throws Error naming every missing {@link MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS}
- *   entry, its environment variable, and the redeploy remedy.
+ * @throws Error carrying {@link MICROVM_ERROR_MARKER} and naming every missing
+ *   {@link MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS} entry, its environment
+ *   variable, and the redeploy remedy. The marker is what keeps the CLASSIFIER
+ *   honest, and it is not optional here — see the throw site.
  */
 export function buildMicrovmPlatformConfig(
   env: NodeJS.ProcessEnv = process.env,
@@ -280,14 +282,30 @@ export function buildMicrovmPlatformConfig(
 
   const missing = MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS.filter(key => !(key in config));
   if (missing.length > 0) {
-    throw new Error(
-      'Cannot start a lambda-microvm session: the orchestrator environment is missing platform '
-      + `configuration the in-guest agent cannot run without (${missing
-        .map(key => `${key} <- ${PLATFORM_CONFIG_ENV_VARS[key]}`)
-        .join(', ')}). A MicroVM snapshot must not bake these in (ADR-021 sub-decision 3), so the `
-      + '/run payload is the only channel for them. TaskOrchestrator injects every one of these '
-      + 'from stack-level values, so this indicates the orchestrator function\'s environment was '
-      + 'edited outside CDK — redeploy the stack to restore it.',
+    // Wrapped, NOT a bare `new Error`. This is a deploy/config fault that no
+    // retry can fix, but the marker is what makes the classifier say so. Without
+    // it: `startSessionWithRetry` classifies the RAW message (#599), which
+    // matches no transient pattern and so throws immediately — correct — but
+    // `failTask` then persists `"Session start failed: <raw>"`, and the
+    // operator/channel-facing re-classification in `failure-reply.ts` matches
+    // that PREFIXED string against `/Session start failed/i`
+    // (`error-classifier.ts`), landing `errorClass: TRANSIENT` and the remedy
+    // "Check AgentCore Runtime or ECS cluster health / the service quota may be
+    // exhausted" — the wrong substrate AND the wrong remedy for a hand-edited
+    // orchestrator environment. The marker anchors the MicroVM classifier
+    // entries instead. Asserted by a CLASSIFICATION test, not just a message
+    // test: message-only assertions passed either way, which is how this slipped.
+    throw wrapMicrovmError(
+      'platform config',
+      new Error(
+        'the orchestrator environment is missing platform '
+        + `configuration the in-guest agent cannot run without (${missing
+          .map(key => `${key} <- ${PLATFORM_CONFIG_ENV_VARS[key]}`)
+          .join(', ')}). A MicroVM snapshot must not bake these in (ADR-021 sub-decision 3), so the `
+        + '/run payload is the only channel for them. TaskOrchestrator injects every one of these '
+        + 'from stack-level values, so this indicates the orchestrator function\'s environment was '
+        + 'edited outside CDK — redeploy the stack to restore it.',
+      ),
     );
   }
 
@@ -332,12 +350,46 @@ function wrapMicrovmError(operation: string, err: unknown): Error {
 /**
  * S3 object key for a task's MicroVM ``/run`` payload. Same key shape as the
  * ECS payload bucket (``ecsPayloadKey``): one object per task under its own
- * task-id prefix. The payload bucket's lifecycle-expiry rule (ADR-021
- * sub-decision 3) is the reaper — unlike the ECS path there is no orchestrator
- * finalize-time delete on this backend yet.
+ * task-id prefix, deleted by the orchestrator at finalize (see
+ * {@link deleteMicrovmPayload}), with the payload bucket's lifecycle-expiry rule
+ * (ADR-021 sub-decision 3, ``MICROVM_PAYLOAD_TTL_DAYS``) as the backstop.
  */
 export function microvmPayloadKey(taskId: string): string {
   return `${taskId}/payload.json`;
+}
+
+/**
+ * Delete a task's MicroVM ``/run`` payload object. Best-effort: a failed delete
+ * must never fail the task — the bucket's 1-day lifecycle rule reaps it
+ * regardless. Called from the orchestrator's ``finalize`` step once the task is
+ * terminal. No-ops when the payload bucket isn't configured.
+ *
+ * WHY this exists rather than leaning on the TTL alone (ECS parity, and a real
+ * exposure delta): the execution role's payload-bucket grant is
+ * ``grantRead`` on the WHOLE bucket — it cannot be per-task scoped, because the
+ * MicroVM has to read its own object before any tenant identity is installed.
+ * The key shape is ``<taskId>/payload.json``, so any running MicroVM that knows
+ * (or guesses) another task's id can read that task's HYDRATED PROMPT — issue
+ * body, comment thread, repo context. The MicroVM also runs untrusted repo code.
+ * Relying only on ``MICROVM_PAYLOAD_TTL_DAYS = 1`` left that window open for up
+ * to ~24 h; deleting at finalize closes it to the task's own lifetime, which is
+ * exactly the posture ``deleteEcsPayload`` already gives the ECS backend.
+ */
+export async function deleteMicrovmPayload(taskId: string): Promise<void> {
+  if (!MICROVM_PAYLOAD_BUCKET) return;
+  try {
+    await getS3Client().send(new DeleteObjectCommand({
+      Bucket: MICROVM_PAYLOAD_BUCKET,
+      Key: microvmPayloadKey(taskId),
+    }));
+    logger.info('Deleted MicroVM payload object', { task_id: taskId });
+  } catch (err) {
+    // Non-fatal — the lifecycle rule is the backstop.
+    logger.warn('Failed to delete MicroVM payload object (non-fatal)', {
+      task_id: taskId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 /** Split a comma-separated env-var list into trimmed, non-empty entries. */
@@ -681,6 +733,18 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
    *     that waited for NotFound would spin on a finished VM.
    *   - anything else (an unrecognized future state) → ``running``, so a service
    *     enum addition can never fail a healthy task.
+   *
+   * ``stateReason`` is carried through on every mapped state as
+   * ``SessionStatus.reason``, VERBATIM and uninterpreted. It is the substrate's
+   * own account of WHY, and mapping it away is what made the dominant runtime
+   * failure unreadable: a ``/run`` hook 4xx self-terminates the VM within ~12 s
+   * (``docs/verification/645-p2-smoke-runbook.md`` §6.1) with
+   * ``stateReason = "Run lifecycle hook returned HTTP status 400. Please check
+   * your hook endpoint and application logs for more details."`` — and because
+   * ``TERMINATED → completed`` has no error slot, the orchestrator's reconcile
+   * detail read ``"substrate state completed"``, naming none of the three causes
+   * its remedy suggested. Reporting the reason keeps this method mechanical (no
+   * branch reads it) while giving the orchestrator something true to say.
    */
   async pollSession(handle: SessionHandle): Promise<SessionStatus> {
     if (handle.strategyType !== 'lambda-microvm') {
@@ -689,11 +753,19 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
     const { microvmId } = handle;
 
     let state: string | undefined;
+    let stateReason: string | undefined;
     try {
       const result = await getClient().send(new GetMicrovmCommand({
         microvmIdentifier: microvmId,
       }));
       state = result.state;
+      // ``Success.`` is the service's own "nothing to report" value on a clean
+      // termination — carrying it would append noise to every healthy task's
+      // detail string, so it is normalized away here rather than filtered at
+      // each of the three call sites below.
+      stateReason = result.stateReason && result.stateReason !== 'Success.'
+        ? result.stateReason
+        : undefined;
     } catch (err) {
       // A MicroVM that the control plane no longer knows about is gone, not
       // broken — treat NotFound as terminal (``completed``) rather than
@@ -727,19 +799,31 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
     switch (state) {
       case MicrovmState.PENDING:
       case MicrovmState.RUNNING:
-        return { status: 'running' };
+        return { status: 'running', ...(stateReason && { reason: stateReason }) };
       case MicrovmState.SUSPENDING:
       case MicrovmState.SUSPENDED:
-        return { status: 'suspended' };
+        return { status: 'suspended', ...(stateReason && { reason: stateReason }) };
       case MicrovmState.TERMINATING:
       case MicrovmState.TERMINATED:
-        return { status: 'completed' };
+        if (stateReason) {
+          // WARN, not info: a terminal MicroVM with a reason attached is either
+          // the hook-4xx path or a service-side fault, and this line is the
+          // in-CloudWatch record of it even when the reconcile detail is not
+          // where the operator happens to be looking.
+          logger.warn('MicroVM reached a terminal state with a substrate reason', {
+            microvm_id: microvmId,
+            state,
+            state_reason: stateReason,
+          });
+        }
+        return { status: 'completed', ...(stateReason && { reason: stateReason }) };
       default:
         logger.warn('Unrecognized MicroVM state — reporting running', {
           microvm_id: microvmId,
           state,
+          ...(stateReason && { state_reason: stateReason }),
         });
-        return { status: 'running' };
+        return { status: 'running', ...(stateReason && { reason: stateReason }) };
     }
   }
 

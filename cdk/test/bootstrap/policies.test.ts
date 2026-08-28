@@ -511,12 +511,16 @@ describe('computeLambdaMicrovmPolicy', () => {
     it('matches the live physical names CloudFormation generated for both roles', () => {
       // Regression guard on the truncation window: CFN truncates the logical id to
       // fit 64 chars before appending a random suffix, so a pattern that reaches
-      // past the cut silently matches nothing. These two ARNs are verbatim from the
-      // live run (the build role's is the one in the AccessDenied above).
+      // past the cut silently matches nothing. The ROLE-NAME segments below are
+      // verbatim from the live run (the build role's is the one in the
+      // AccessDenied above) — that is the part the assertion exercises. The
+      // account id is the repo's standard placeholder, not the live one: the glob
+      // match depends only on the role-name segment, and this is a public sample
+      // repo.
       const resources = passRoleStatement().Resource as string[];
       const live = [
-        'arn:aws:iam::704224321915:role/backgroundagent-dev-LambdaMicrovmComputeBuildRoleF0-9FxjQbiJC3px',
-        'arn:aws:iam::704224321915:role/backgroundagent-dev-LambdaMicrovmComputeConnectorOp-Ab12Cd34Ef56',
+        'arn:aws:iam::123456789012:role/backgroundagent-dev-LambdaMicrovmComputeBuildRoleF0-9FxjQbiJC3px',
+        'arn:aws:iam::123456789012:role/backgroundagent-dev-LambdaMicrovmComputeConnectorOp-Ab12Cd34Ef56',
       ];
       for (const arn of live) {
         const matched = resources.some((pattern) => {

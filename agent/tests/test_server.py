@@ -865,13 +865,43 @@ VALIDATE_HOOK = f"{server.MICROVM_HOOK_PREFIX}/validate"
 TERMINATE_HOOK = f"{server.MICROVM_HOOK_PREFIX}/terminate"
 
 
+#: The 12-digit account every ARN in a test ``platform_config`` block belongs to.
+#:
+#: One account for the whole block on purpose: ``_reject_foreign_arns`` pins every
+#: ARN-shaped value to the partition/account of
+#: ``MICROVM_PLATFORM_CONFIG_ACCOUNT_ANCHOR_KEY``, so a helper that minted
+#: mismatched accounts would make every install test fail for the right reason at
+#: the wrong time. Tests that WANT a cross-account ARN override one key explicitly.
+_TEST_ACCOUNT = "123456789012"
+
+
+def _platform_config_value(key: str) -> str:
+    """A contract-shaped value for one ``platform_config`` key.
+
+    ARN keys get a well-formed, in-``_TEST_ACCOUNT`` ARN because the agent now
+    validates ARN VALUES, not just keys (review B5) — an opaque ``value-for-…``
+    string is no longer a valid block. Everything else keeps the opaque string:
+    those values are never parsed, and a recognisable placeholder is what makes a
+    failed assertion readable.
+    """
+    if key not in server.MICROVM_PLATFORM_CONFIG_ARN_KEYS:
+        return f"value-for-{key}"
+    # IAM is global (empty region field); Secrets Manager is regional. Both shapes
+    # appear here so the helper exercises the same two the producer really sends.
+    if key.endswith("_role_arn"):
+        return f"arn:aws:iam::{_TEST_ACCOUNT}:role/for-{key}"
+    return f"arn:aws:secretsmanager:us-east-1:{_TEST_ACCOUNT}:secret:for-{key}"
+
+
 def _platform_config(**overrides) -> dict:
     """A ``platform_config`` block carrying exactly the required subset.
 
     Built from the contract rather than a literal key list so a contract change
     cannot leave these tests asserting a stale required set.
     """
-    config = {key: f"value-for-{key}" for key in server.MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS}
+    config = {
+        key: _platform_config_value(key) for key in server.MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS
+    }
     config.update(overrides)
     return config
 
@@ -1278,7 +1308,13 @@ class TestMicrovmRunHookInlinePayload:
     proves the payload→pipeline mapping without any S3 involvement.
     """
 
-    def test_accepts_the_payload_and_starts_the_pipeline_asynchronously(self, client, monkeypatch):
+    def test_accepts_the_payload_and_starts_the_pipeline_asynchronously(
+        self, client, monkeypatch, baked_platform_env
+    ):
+        # `baked_platform_env`: this envelope carries no `platform_config`, which
+        # since review N2 requires the effective env to supply the required values
+        # (a legacy image that bakes its own). This class is about the
+        # payload->pipeline mapping, not about config delivery.
         started = threading.Event()
         seen: dict = {}
 
@@ -1319,7 +1355,11 @@ class TestMicrovmRunHookInlinePayload:
         assert seen["repo_url"] == "org/repo"
         assert seen["task_description"] == "Fix the bug"
 
-    def test_returns_before_the_pipeline_finishes(self, client, monkeypatch):
+    def test_returns_before_the_pipeline_finishes(self, client, monkeypatch, baked_platform_env):
+        # `baked_platform_env`: this envelope carries no `platform_config`, which
+        # since review N2 requires the effective env to supply the required values
+        # (a legacy image that bakes its own). This class is about the
+        # payload->pipeline mapping, not about config delivery.
         release = threading.Event()
         entered = threading.Event()
 
@@ -1346,7 +1386,13 @@ class TestMicrovmRunHookInlinePayload:
         finally:
             release.set()
 
-    def test_uses_the_same_model_id_and_prompt_aliases_as_invocations(self, client, monkeypatch):
+    def test_uses_the_same_model_id_and_prompt_aliases_as_invocations(
+        self, client, monkeypatch, baked_platform_env
+    ):
+        # `baked_platform_env`: this envelope carries no `platform_config`, which
+        # since review N2 requires the effective env to supply the required values
+        # (a legacy image that bakes its own). This class is about the
+        # payload->pipeline mapping, not about config delivery.
         seen: dict = {}
         started = threading.Event()
 
@@ -1386,7 +1432,13 @@ class TestMicrovmRunHookS3Payload:
     pointer travels in the hook body.
     """
 
-    def test_fetches_the_payload_from_s3_and_starts_the_pipeline(self, client, monkeypatch):
+    def test_fetches_the_payload_from_s3_and_starts_the_pipeline(
+        self, client, monkeypatch, baked_platform_env
+    ):
+        # `baked_platform_env`: this envelope carries no `platform_config`, which
+        # since review N2 requires the effective env to supply the required values
+        # (a legacy image that bakes its own). This class is about the
+        # payload->pipeline mapping, not about config delivery.
         seen: dict = {}
         started = threading.Event()
 
@@ -1458,8 +1510,13 @@ class TestMicrovmRunHookS3Payload:
 
         monkeypatch.setattr(boto3, "client", lambda *_a, **_k: _S3)
 
-        with pytest.raises(ValueError, match="expected an object"):
+        # `_PayloadFetchError`, NOT `ValueError` (review N1): the object is bad, not
+        # the orchestrator's envelope, so the handler must route it to its RETRYABLE
+        # 500 rather than the "retrying cannot help" 400. Asserting the type is the
+        # point — `ValueError` here would silently restore the misclassification.
+        with pytest.raises(server._PayloadFetchError, match="expected an object"):
             server._fetch_microvm_payload_from_s3("s3://b/k")
+        assert not issubclass(server._PayloadFetchError, ValueError)
 
     def test_s3_failure_returns_500_and_starts_nothing(self, client, monkeypatch):
         def boom(_uri):
@@ -1526,8 +1583,10 @@ class TestMicrovmRunHookRejections:
         assert r.json()["code"] == "MICROVM_RUN_PAYLOAD_INVALID"
 
     def test_incomplete_task_record_reuses_the_invocations_rejection_shape(
-        self, client, monkeypatch
+        self, client, monkeypatch, baked_platform_env
     ):
+        # `baked_platform_env` so the run gets PAST config delivery and reaches the
+        # task-record check this test is actually about.
         monkeypatch.setattr(server, "run_task", MagicMock())
 
         r = client.post(
@@ -1553,7 +1612,13 @@ class TestMicrovmRunHookHeaderPosture:
     values for a bug.
     """
 
-    def test_session_id_and_workload_token_resolve_empty(self, client, monkeypatch):
+    def test_session_id_and_workload_token_resolve_empty(
+        self, client, monkeypatch, baked_platform_env
+    ):
+        # `baked_platform_env`: this envelope carries no `platform_config`, which
+        # since review N2 requires the effective env to supply the required values
+        # (a legacy image that bakes its own). This class is about the
+        # payload->pipeline mapping, not about config delivery.
         seen: dict = {}
         started = threading.Event()
 
@@ -1656,6 +1721,30 @@ class TestInvocationParamContract:
 # --------------------------------------------------------------------------
 # platform_config: payload-sourced platform env (ADR-021 P2)
 # --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def baked_platform_env(env_guard):
+    """Simulate a legacy/hand-built image that BAKES its own required config.
+
+    Needed by every ``/run`` test whose envelope carries no ``platform_config``.
+    Since review N2 the no-config branch re-runs the required-key check against the
+    EFFECTIVE environment and rejects when it is unsatisfied — because
+    ``aws_session`` silently drops tenant scoping when ``AGENT_SESSION_ROLE_ARN``
+    is unset, and running a task unscoped is worse than refusing it. That check is
+    what this fixture satisfies, and satisfying it is exactly what a real legacy
+    image does: the compatibility path is "the snapshot supplies the values", not
+    "nobody supplies them".
+
+    Depends on ``env_guard`` so the writes are reverted with everything else.
+    """
+    for key in server.MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS:
+        os.environ[server.MICROVM_PLATFORM_CONFIG_ENV_BY_KEY[key]] = _platform_config_value(key)
+    # A baked GITHUB_TOKEN_SECRET_ARN makes `resolve_github_token` reach for real
+    # Secrets Manager; pre-seeding its cache keeps these tests offline. Realistic
+    # for the image this fixture models, and it changes nothing they assert.
+    os.environ["GITHUB_TOKEN"] = "ghp_baked_for_tests"  # noqa: S105 -- test placeholder, not a secret
+    yield
 
 
 @pytest.fixture
@@ -1878,14 +1967,20 @@ class TestInstallPlatformConfig:
             for key in server.MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS
         )
         assert os.environ["TASK_TABLE_NAME"] == "value-for-task_table_name"
-        assert os.environ["AGENT_SESSION_ROLE_ARN"] == "value-for-agent_session_role_arn"
+        assert os.environ["AGENT_SESSION_ROLE_ARN"] == _platform_config_value(
+            "agent_session_role_arn"
+        )
 
     def test_every_allowlisted_key_is_installable(self, env_guard):
-        full = {key: f"v-{key}" for key in server.MICROVM_PLATFORM_CONFIG_ENV_BY_KEY}
+        # Contract-shaped values throughout: ARN keys must be well-formed and
+        # in-account or `_reject_foreign_arns` refuses the block (review B5).
+        full = {
+            key: _platform_config_value(key) for key in server.MICROVM_PLATFORM_CONFIG_ENV_BY_KEY
+        }
         installed = server._install_platform_config(full)
         assert installed == sorted(server.MICROVM_PLATFORM_CONFIG_ENV_BY_KEY.values())
         for key, env_name in server.MICROVM_PLATFORM_CONFIG_ENV_BY_KEY.items():
-            assert os.environ[env_name] == f"v-{key}"
+            assert os.environ[env_name] == _platform_config_value(key)
 
     def test_payload_wins_over_a_pre_existing_image_env_value(self, env_guard):
         # The load-bearing precedence rule: image env is frozen at snapshot time,
@@ -1931,6 +2026,137 @@ class TestInstallPlatformConfig:
         installed = server._install_platform_config(_platform_config(log_group_name=value))
         assert "LOG_GROUP_NAME" not in installed
         assert os.environ["LOG_GROUP_NAME"] == "from-the-image"
+
+    # --- value CONTENT validation (review B5 + the control-character nit) ---
+
+    @pytest.mark.parametrize(
+        ("char", "label"),
+        [("\x00", "NUL"), ("\n", "newline"), ("\r", "carriage-return")],
+    )
+    def test_a_control_character_in_a_value_is_a_structured_400(self, char, label, env_guard):
+        # A NUL reaching `os.environ` raises a bare `ValueError` that is NOT a
+        # `_PlatformConfigError`, so before this check it escaped the handler's
+        # structured-400 path and became a FastAPI 500 — mid-loop, leaving already
+        # -installed keys behind. A newline forges extra lines in the structured logs.
+        with pytest.raises(server._PlatformConfigError) as excinfo:
+            server._install_platform_config(_platform_config(log_group_name=f"grp{char}injected"))
+        assert excinfo.value.code == "MICROVM_RUN_PLATFORM_CONFIG_INVALID"
+        assert "control-characters" in str(excinfo.value)
+        assert "LOG_GROUP_NAME" not in os.environ
+
+    def test_a_control_character_installs_NOTHING_at_all(self, env_guard):
+        # The fail-closed half, asserted separately because it is the property that a
+        # "catch the ValueError and continue" fix would NOT give: the whole block is
+        # refused, so no earlier key is left installed.
+        for env_name in server.MICROVM_PLATFORM_CONFIG_ENV_BY_KEY.values():
+            os.environ.pop(env_name, None)
+        with pytest.raises(server._PlatformConfigError):
+            server._install_platform_config(_platform_config(log_group_name="a\x00b"))
+        assert [
+            env_name
+            for env_name in server.MICROVM_PLATFORM_CONFIG_ENV_BY_KEY.values()
+            if env_name in os.environ
+        ] == []
+
+    def test_a_control_character_in_a_value_never_reaches_os_environ_as_a_500(self, client):
+        # End-to-end: the /run handler answers the structured 400, not a 500. This is
+        # the assertion the unit test above cannot make, since the escape route was
+        # the handler's `except` clause rather than the function.
+        r = client.post(
+            RUN_HOOK,
+            json=_run_hook_body(
+                {
+                    "agent_payload": {"task_id": "t", "repo_url": "o/r", "prompt": "x"},
+                    "platform_config": _platform_config(log_group_name="a\x00b"),
+                }
+            ),
+        )
+        assert r.status_code == 400
+        assert r.json()["code"] == "MICROVM_RUN_PLATFORM_CONFIG_INVALID"
+
+    def test_an_arn_in_a_foreign_account_is_rejected(self, env_guard):
+        # THE finding (review B5). The execution role holds a PREFIX grant on
+        # `bgagent-linear-oauth-*` / `bgagent-jira-oauth-*`, and
+        # `resolve_github_token` fetches whatever `GITHUB_TOKEN_SECRET_ARN` names and
+        # caches it into `os.environ["GITHUB_TOKEN"]`, which `shell.py` hands to every
+        # repo subprocess. So an unpinned ARN is a cross-workspace token read.
+        with pytest.raises(server._PlatformConfigError) as excinfo:
+            server._install_platform_config(
+                _platform_config(
+                    github_token_secret_arn=(
+                        "arn:aws:secretsmanager:us-east-1:999988887777"
+                        ":secret:bgagent-linear-oauth-victim"
+                    )
+                )
+            )
+        assert excinfo.value.code == "MICROVM_RUN_PLATFORM_CONFIG_INVALID"
+        assert "github_token_secret_arn:foreign-partition-or-account" in str(excinfo.value)
+        assert "GITHUB_TOKEN_SECRET_ARN" not in os.environ
+
+    def test_an_arn_in_a_foreign_partition_is_rejected(self, env_guard):
+        with pytest.raises(server._PlatformConfigError) as excinfo:
+            server._install_platform_config(
+                _platform_config(
+                    github_token_secret_arn=(
+                        f"arn:aws-cn:secretsmanager:cn-north-1:{_TEST_ACCOUNT}:secret:gh"
+                    )
+                )
+            )
+        assert "foreign-partition-or-account" in str(excinfo.value)
+
+    def test_a_malformed_arn_is_rejected(self, env_guard):
+        with pytest.raises(server._PlatformConfigError) as excinfo:
+            server._install_platform_config(
+                _platform_config(github_token_secret_arn="not-an-arn-at-all")
+            )
+        assert "github_token_secret_arn:malformed" in str(excinfo.value)
+
+    def test_every_arn_key_is_pinned_not_just_the_github_one(self, env_guard):
+        # The optional channel-OAuth ARNs are the same class of exfiltration
+        # primitive; a per-key check that covered only the required ones would leave
+        # them open. Driven from the contract so a new ARN key is covered by default.
+        foreign = "arn:aws:secretsmanager:us-east-1:999988887777:secret:x"
+        for key in server.MICROVM_PLATFORM_CONFIG_ARN_KEYS:
+            if key == server.MICROVM_PLATFORM_CONFIG_ACCOUNT_ANCHOR_KEY:
+                continue  # the anchor defines the expectation; covered separately
+            with pytest.raises(server._PlatformConfigError) as excinfo:
+                server._install_platform_config(_platform_config(**{key: foreign}))
+            assert f"{key}:foreign-partition-or-account" in str(excinfo.value), key
+
+    def test_a_cross_region_arn_in_the_SAME_account_is_allowed(self, env_guard):
+        # Region is deliberately NOT pinned: IAM ARNs are region-less and a
+        # cross-Region secret is a supported shape, while the execution role's grants
+        # are account-scoped — so an in-account cross-Region ARN reaches nothing the
+        # in-Region one does not. Pinning it would reject valid deployments.
+        installed = server._install_platform_config(
+            _platform_config(
+                github_token_secret_arn=(
+                    f"arn:aws:secretsmanager:eu-west-1:{_TEST_ACCOUNT}:secret:gh"
+                )
+            )
+        )
+        assert "GITHUB_TOKEN_SECRET_ARN" in installed
+
+    def test_a_malformed_ANCHOR_is_rejected_rather_than_disarming_the_check(self, env_guard):
+        # If the anchor is unusable the check cannot run — and silently skipping it
+        # would be the worst outcome, since the anchor is attacker-influenced too.
+        with pytest.raises(server._PlatformConfigError) as excinfo:
+            server._install_platform_config(_platform_config(agent_session_role_arn="arn:bogus"))
+        assert excinfo.value.code == "MICROVM_RUN_PLATFORM_CONFIG_INVALID"
+        assert "anchor" in str(excinfo.value)
+
+    def test_the_anchor_key_is_contract_guaranteed_to_be_required(self):
+        # The invariant that stops a payload disarming ARN pinning by omitting the
+        # anchor. Enforced at import time; asserted here so the contract edit that
+        # would break it fails a test rather than a deploy.
+        assert (
+            server.MICROVM_PLATFORM_CONFIG_ACCOUNT_ANCHOR_KEY
+            in server.MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS
+        )
+        assert (
+            server.MICROVM_PLATFORM_CONFIG_ACCOUNT_ANCHOR_KEY
+            in server.MICROVM_PLATFORM_CONFIG_ARN_KEYS
+        )
 
     @pytest.mark.parametrize("value", ["", "  ", None])
     def test_a_blank_required_value_is_rejected(self, value, env_guard):
@@ -2025,15 +2251,17 @@ class TestMicrovmRunHookPlatformConfig:
                 {
                     "agent_payload": payload,
                     "platform_config": _platform_config(
-                        github_token_secret_arn="arn:aws:secretsmanager:::secret:live"
+                        github_token_secret_arn=(
+                            f"arn:aws:secretsmanager:us-east-1:{_TEST_ACCOUNT}:secret:live"
+                        )
                     ),
                 }
             ),
         )
 
         assert r.status_code == 200
-        assert seen["gh_arn"] == "arn:aws:secretsmanager:::secret:live"
-        assert seen["session_role"] == "value-for-agent_session_role_arn"
+        assert seen["gh_arn"] == f"arn:aws:secretsmanager:us-east-1:{_TEST_ACCOUNT}:secret:live"
+        assert seen["session_role"] == _platform_config_value("agent_session_role_arn")
         # ...and before the pipeline thread existed at all.
         assert seen["threads_at_resolve"] == 0
 
@@ -2086,12 +2314,13 @@ class TestMicrovmRunHookPlatformConfig:
         assert r.status_code == 400
         assert r.json()["code"] == "MICROVM_RUN_PLATFORM_CONFIG_INVALID"
 
-    def test_an_envelope_without_platform_config_is_still_accepted(
-        self, client, monkeypatch, env_guard, capfd
+    def test_an_envelope_without_platform_config_is_accepted_when_the_image_bakes_it(
+        self, client, monkeypatch, baked_platform_env, capfd
     ):
-        # P1 compatibility: image snapshot and orchestrator Lambda deploy on
-        # independent cadences, so a new image must not require a Stage-B
-        # orchestrator. It warns, loudly, rather than rejecting.
+        # P1 compatibility, PRECISELY scoped (review N2): image snapshot and
+        # orchestrator Lambda deploy on independent cadences, so a new image must not
+        # require a Stage-B orchestrator — PROVIDED the values come from somewhere.
+        # Here the image bakes them, which is what the compatibility path is for.
         monkeypatch.setattr(server, "run_task", MagicMock())
         monkeypatch.setattr(server.task_state, "write_terminal", MagicMock())
 
@@ -2105,6 +2334,53 @@ class TestMicrovmRunHookPlatformConfig:
         assert "[server/run-pre-config] /run hook received no platform_config" in (
             capfd.readouterr().out
         )
+
+    def test_no_platform_config_and_no_baked_env_is_refused_not_run_unscoped(
+        self, client, monkeypatch, env_guard, capfd
+    ):
+        # Review N2, the version-skew case: a pre-Stage-B orchestrator launching a P2
+        # image. The image bakes NOTHING by design (`imageEnvironmentVariables`
+        # defaults to `{}`), so nothing supplies `AGENT_SESSION_ROLE_ARN` — and
+        # `aws_session.get_session` silently falls back to the ambient compute role
+        # with tenant scoping OFF when it is unset. Refusing is the only correct
+        # answer; the previous behaviour was a 200 and a stdout breadcrumb.
+        run_task = MagicMock()
+        monkeypatch.setattr(server, "run_task", run_task)
+        monkeypatch.setattr(server.task_state, "write_terminal", MagicMock())
+        for key in server.MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS:
+            os.environ.pop(server.MICROVM_PLATFORM_CONFIG_ENV_BY_KEY[key], None)
+
+        r = client.post(RUN_HOOK, json=_run_hook_body({"agent_payload": self._payload()}))
+
+        assert r.status_code == 400
+        body = r.json()
+        assert body["code"] == "MICROVM_RUN_PLATFORM_CONFIG_INCOMPLETE"
+        # The response NAMES the unset variables — the whole point is that a skewed
+        # deployment is diagnosable rather than mysterious.
+        assert body["missing_env"] == sorted(
+            server.MICROVM_PLATFORM_CONFIG_ENV_BY_KEY[key]
+            for key in server.MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS
+        )
+        assert "AGENT_SESSION_ROLE_ARN" in body["missing_env"]
+        # Nothing was started.
+        run_task.assert_not_called()
+        # And the rejection is attributable in the log, not just in the response.
+        assert "/run hook REJECTED: no platform_config" in capfd.readouterr().out
+
+    def test_a_partially_baked_env_names_only_what_is_actually_missing(
+        self, client, monkeypatch, baked_platform_env
+    ):
+        # The realistic skew: an image that bakes SOME config. The rejection must
+        # name only the genuinely-unset variables, or an operator chases the wrong
+        # one.
+        monkeypatch.setattr(server, "run_task", MagicMock())
+        monkeypatch.setattr(server.task_state, "write_terminal", MagicMock())
+        os.environ.pop("AGENT_SESSION_ROLE_ARN", None)
+
+        r = client.post(RUN_HOOK, json=_run_hook_body({"agent_payload": self._payload()}))
+
+        assert r.status_code == 400
+        assert r.json()["missing_env"] == ["AGENT_SESSION_ROLE_ARN"]
 
     def test_s3_pointer_takes_the_config_from_the_outer_envelope(
         self, client, monkeypatch, env_guard
@@ -2195,7 +2471,11 @@ class TestMicrovmRunHookPlatformConfig:
         assert r.status_code == 200
         assert os.environ["TASK_TABLE_NAME"] == "inner-wins"
 
-    def test_a_nested_agent_payload_of_the_wrong_type_is_a_400(self, client, monkeypatch):
+    def test_a_nested_agent_payload_of_the_wrong_type_is_a_retryable_500(self, client, monkeypatch):
+        # Review N1: this is a problem with the FETCHED OBJECT, not with the envelope
+        # the orchestrator built, so it belongs on the retryable 500 branch. The old
+        # 400 told the operator "the orchestrator built a bad envelope; retrying
+        # cannot help" — both halves wrong for a racing or half-written S3 object.
         monkeypatch.setattr(
             server,
             "_fetch_microvm_payload_from_s3",
@@ -2205,8 +2485,8 @@ class TestMicrovmRunHookPlatformConfig:
 
         r = client.post(RUN_HOOK, json=_run_hook_body({"agent_payload_s3_uri": "s3://b/k"}))
 
-        assert r.status_code == 400
-        assert r.json()["code"] == "MICROVM_RUN_PAYLOAD_INVALID"
+        assert r.status_code == 500
+        assert r.json()["code"] == "MICROVM_RUN_PAYLOAD_UNREADABLE"
         assert "agent_payload in the S3 payload must be an object" in r.json()["message"]
 
     def test_resolve_returns_the_config_alongside_the_payload(self):
@@ -2364,6 +2644,34 @@ class TestMicrovmValidateHook:
             monkeypatch.delenv(name, raising=False)
         assert client.post(VALIDATE_HOOK).json()["warnings"] == []
 
+    def test_the_warning_also_reaches_the_BUILD_LOG_not_just_the_response(
+        self, client, monkeypatch, capfd
+    ):
+        # Report-only is the right call; DISCARDING the report is not. The `warnings`
+        # array rides a 200 that the MicroVM service does not parse, so without a log
+        # line the one signal that a snapshot froze a credential reaches nobody.
+        # `_build_hook_log` puts it in the build log group, which is what an operator
+        # actually reads. (Still AWS-silent — see `_build_hook_log`.)
+        for name in server._SNAPSHOT_FORBIDDEN_SECRET_ENV:
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_should_not_be_baked")
+
+        r = client.post(VALIDATE_HOOK)
+
+        assert r.status_code == 200
+        out = capfd.readouterr().out
+        assert "/validate hook WARNING: secret-bearing env var(s) present" in out
+        assert "GITHUB_TOKEN" in out
+        # Names only, on the log line as well as in the body — the VALUE must never
+        # be logged.
+        assert "ghp_should_not_be_baked" not in out
+
+    def test_no_warning_line_on_a_clean_snapshot(self, client, monkeypatch, capfd):
+        for name in server._SNAPSHOT_FORBIDDEN_SECRET_ENV:
+            monkeypatch.delenv(name, raising=False)
+        client.post(VALIDATE_HOOK)
+        assert "/validate hook WARNING" not in capfd.readouterr().out
+
 
 class TestMicrovmTerminateHook:
     """Best-effort flush. Always 200, never a terminal status write."""
@@ -2411,7 +2719,13 @@ class TestMicrovmTerminateHook:
         write_terminal.assert_not_called()
         write_heartbeat.assert_not_called()
 
-    def test_returns_200_without_joining_a_running_pipeline(self, client, monkeypatch):
+    def test_returns_200_without_joining_a_running_pipeline(
+        self, client, monkeypatch, baked_platform_env
+    ):
+        # `baked_platform_env`: this envelope carries no `platform_config`, which
+        # since review N2 requires the effective env to supply the required values
+        # (a legacy image that bakes its own). This class is about the
+        # payload->pipeline mapping, not about config delivery.
         # A drain can take minutes (that is lifespan's job on graceful shutdown);
         # the hook budget is 1-60 s, so /terminate must observe and return.
         release = threading.Event()
@@ -2456,6 +2770,36 @@ class TestMicrovmTerminateHook:
         r = client.post(TERMINATE_HOOK, json={"microvmId": "m-boom"})
         assert r.status_code == 200
         # Best-effort, but not silent.
+        assert "best-effort step failed" in capfd.readouterr().out
+        # NOTE: this test does NOT exercise the `active is None` branch — `active` is
+        # assigned before `_debug_cw` runs, so it is an int by the time this raises.
+        # The test below is the one that covers it.
+
+    def test_an_unreadable_thread_count_reports_None_not_a_confident_zero(
+        self, client, monkeypatch, capfd
+    ):
+        # The `active: int | None = None` initialiser is load-bearing and was
+        # untested: if the thread-count read itself fails, "we could not tell" must
+        # not be reported as the confident "nothing was running" — that is the
+        # reading an operator would use to conclude a clean teardown. Failing the
+        # COUNT is the only way to reach it, which is why patching `_debug_cw` (the
+        # existing test above) cannot — by then `active` is already an int.
+        class _UnreadableThreadList(list):
+            """Raises when COUNTED, but still clearable by the reset fixture."""
+
+            def __iter__(self):
+                raise RuntimeError("thread registry read exploded")
+
+        monkeypatch.setattr(server, "_active_threads", _UnreadableThreadList())
+
+        r = client.post(TERMINATE_HOOK, json={"microvmId": "m-unknown"})
+
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "acknowledged"
+        # `None`, NOT `0` — this is the whole point.
+        assert body["active_pipeline_threads"] is None
+        assert body["microvm_id"] == "m-unknown"
         assert "best-effort step failed" in capfd.readouterr().out
 
 
@@ -2698,7 +3042,7 @@ class TestMicrovmRunHookPreInstallAwsSilence:
 
     @pytest.mark.parametrize("with_config", [True, False], ids=["with-config", "no-config"])
     def test_no_cloudwatch_or_credential_seam_is_touched_before_the_install(
-        self, client, monkeypatch, env_guard, seam_guard, capfd, with_config
+        self, client, monkeypatch, baked_platform_env, seam_guard, capfd, with_config
     ):
         # The ``no-config`` arm is the legacy P1 envelope, and it is the harder case:
         # nothing is ever installed, so EVERY line up to param extraction — including
@@ -2706,6 +3050,12 @@ class TestMicrovmRunHookPreInstallAwsSilence:
         # pre-install. A ``_warn_cw`` there would spawn the CloudWatch writer thread
         # and pin ``boto3.DEFAULT_SESSION`` off the baked ``LOG_GROUP_NAME`` this
         # fixture sets, which is precisely the defect the warning is reporting.
+        #
+        # ``baked_platform_env`` (rather than ``env_guard``) so that arm reaches the
+        # ACCEPT path: since review N2 a no-config run with an unsatisfied effective
+        # env is refused, and a rejected run installs nothing and so proves nothing
+        # about the seams staying silent all the way to param extraction. Baking the
+        # env is also the only shape in which the no-config path is legitimate.
         monkeypatch.setattr(server, "run_task", MagicMock())
         monkeypatch.setattr(server.task_state, "write_terminal", MagicMock())
 
@@ -2728,6 +3078,24 @@ class TestMicrovmRunHookPreInstallAwsSilence:
                 "[server/run-pre-config] /run hook received no platform_config"
                 in capfd.readouterr().out
             )
+
+    def test_the_no_config_REJECTION_also_touches_no_seam(
+        self, client, monkeypatch, env_guard, seam_guard, capfd
+    ):
+        # Review N2's rejection is itself a pre-install path, and it emits a NEW log
+        # line — so it needs the same guarantee as every other rejection here: the
+        # refusal must not be the thing that pins `boto3.DEFAULT_SESSION` off the
+        # snapshot's baked `LOG_GROUP_NAME` (which `seam_guard` sets).
+        monkeypatch.setattr(server, "run_task", MagicMock())
+        for key in server.MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS:
+            os.environ.pop(server.MICROVM_PLATFORM_CONFIG_ENV_BY_KEY[key], None)
+
+        r = client.post(RUN_HOOK, json=_run_hook_body({"agent_payload": self._payload()}))
+
+        assert r.status_code == 400
+        assert r.json()["code"] == "MICROVM_RUN_PLATFORM_CONFIG_INCOMPLETE"
+        assert seam_guard["violations"] == []
+        assert "/run hook REJECTED: no platform_config" in capfd.readouterr().out
 
     def test_the_received_line_is_stdout_only(
         self, client, monkeypatch, env_guard, seam_guard, capfd

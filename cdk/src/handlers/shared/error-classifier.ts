@@ -255,13 +255,39 @@ const PATTERNS: readonly ErrorPattern[] = [
       category: ErrorCategory.COMPUTE,
       title: 'The MicroVM stopped before the agent reported a result',
       description:
-        'The Lambda MicroVM running this task reached a terminal state (session duration cap, host fault, or an external terminate) while the task was still mid-flight, so no result was ever written.',
+        'The Lambda MicroVM running this task reached a terminal state while the task was still mid-flight, so no result was ever written. When the substrate supplied a reason (GetMicrovm\'s stateReason) the orchestrator appends it in parentheses on the message above — read that first, because it distinguishes the common causes (a /run lifecycle-hook 4xx, which the service reaps in ~12 s) from the rarer ones (the session duration cap, a host fault, or an external terminate).',
       remedy:
         'This is a compute-substrate fault, not a problem with your request — reply here to try again. '
-        + 'If it repeats, check the MicroVM logs for the session and whether the task is exceeding the 8-hour session cap; '
+        + 'If the message names a lifecycle-hook HTTP status, the guest rejected the run: check the MicroVM log group for the agent\'s structured response body. '
+        + 'Otherwise check the MicroVM logs for the session and whether the task is exceeding the 8-hour session cap; '
         + 'a long-running repo may belong on --compute-type ecs.',
       retryable: true,
       errorClass: ErrorClass.TRANSIENT,
+    },
+  },
+  {
+    // A `platform_config` block the orchestrator could not even assemble: a
+    // REQUIRED key is absent from the orchestrator Lambda's own environment, so
+    // `buildMicrovmPlatformConfig` refuses to start the session (ADR-021
+    // sub-decision 3 forbids baking these into the snapshot, so the /run payload
+    // is the only channel and an incomplete one cannot be sent).
+    //
+    // Distinct entry rather than letting it reach the generic `Session start
+    // failed` catch-all, which would call it TRANSIENT and tell the operator to
+    // check AgentCore/ECS health — the wrong substrate for a fault that lives in
+    // this backend's own wiring, and one that no retry can fix. Placed above the
+    // catch-all for the same marker-anchored reason as the SDK entries below.
+    pattern: /MicroVM platform config failed/i,
+    classification: {
+      category: ErrorCategory.CONFIG,
+      title: 'The orchestrator is missing MicroVM platform configuration',
+      description:
+        'Starting a lambda-microvm session requires the orchestrator to forward deployment identifiers (task/event table names, the GitHub token secret ARN, the per-task session role ARN) in the /run payload, because a MicroVM snapshot must not bake them in. At least one of those values is absent from the orchestrator function\'s environment.',
+      remedy:
+        'Retrying won\'t help — the value is missing, not unavailable. The message names each missing key and the environment variable it comes from. '
+        + 'TaskOrchestrator injects all of them from stack-level values, so this means the function\'s environment was edited outside CDK: an admin should redeploy the stack to restore it.',
+      retryable: false,
+      errorClass: ErrorClass.SERVICE,
     },
   },
   {
@@ -377,8 +403,8 @@ const PATTERNS: readonly ErrorPattern[] = [
     classification: {
       category: ErrorCategory.COMPUTE,
       title: 'Agent session lost',
-      description: 'The agent stopped sending heartbeats. The container may have crashed, been OOM-killed, or stopped unexpectedly.',
-      remedy: 'Check CloudWatch logs for the agent session. If OOM, consider a less memory-intensive task or a larger container.',
+      description: 'The agent stopped sending heartbeats. The compute substrate running it may have crashed, been OOM-killed, or stopped unexpectedly — the message above names which substrate (container or MicroVM).',
+      remedy: 'Check CloudWatch logs for the agent session. If OOM, consider a less memory-intensive task or more memory for the substrate (a larger container, or a higher MicroVM memory baseline).',
       retryable: true,
       errorClass: ErrorClass.TRANSIENT,
     },

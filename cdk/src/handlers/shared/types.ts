@@ -464,6 +464,21 @@ export interface TaskSummary {
   readonly pr_url: string | null;
   readonly created_at: string;
   readonly updated_at: string;
+  /**
+   * Last in-guest liveness beat (ISO-8601), or ``null`` when the agent has not
+   * beaten yet, on a substrate whose agent never beats, or on records predating
+   * the field.
+   *
+   * On the SUMMARY as well as the detail (ADR-021 P2r2-F11 follow-up) because
+   * liveness is a list-level question: "is anything still alive?" is asked across
+   * tasks, and answering it one `bgagent status` at a time is how a hung task
+   * goes unnoticed. The field's history is the argument — while `toTaskDetail`
+   * omitted it, `bgagent status` reported `None` against a 6-second-old DynamoDB
+   * value, and that produced a WRONG live-verification conclusion attributed to a
+   * different defect entirely. Keep in sync with the sibling declaration in the
+   * other package's `types.ts`.
+   */
+  readonly agent_heartbeat_at: string | null;
 }
 
 /**
@@ -1119,6 +1134,7 @@ export function toTaskSummary(record: TaskRecord): TaskSummary {
     pr_url: record.pr_url ?? null,
     created_at: record.created_at,
     updated_at: record.updated_at,
+    agent_heartbeat_at: record.agent_heartbeat_at ?? null,
   };
 }
 
