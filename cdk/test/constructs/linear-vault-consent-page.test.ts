@@ -187,7 +187,33 @@ describe('the consent page, executed', () => {
   test('with no session_id it explains itself and removes the empty slots', () => {
     const r = runPageScript('');
     expect(r.title).toBe('Nothing to finish here');
-    expect(r.lede).toContain('vault-setup');
+    expect(r.lede).toContain('linear setup');
     expect(r.removed).toEqual(expect.arrayContaining(['session', 'command']));
+  });
+
+  test('the DIRECT-flow redirect (code + state) is served by the same page', () => {
+    // Serving both flows from one page is what removes localhost entirely: the
+    // Linear app can register this URL instead of a loopback the browser may not
+    // be able to reach.
+    const r = runPageScript('?code=abc123&state=st-9');
+    expect(r.title).toBe('Linear authorized');
+    expect(r.session).toBe('abc123');
+    expect(r.command).toContain('bgagent linear setup');
+    expect(r.command).toContain('--code abc123');
+    expect(r.command).toContain('--state st-9');
+    expect(r.markupWrites).toEqual([]);
+  });
+
+  test('a hostile authorization code is also rendered as text, never markup', () => {
+    const payload = '"><script>alert(1)</script>';
+    const r = runPageScript(`?code=${encodeURIComponent(payload)}`);
+    expect(r.session).toBe(payload);
+    expect(r.markupWrites).toEqual([]);
+  });
+
+  test('session_id wins when both are present, so the vault bounce is unambiguous', () => {
+    const r = runPageScript('?session_id=urn:sess&code=abc123');
+    expect(r.command).toContain('vault-setup');
+    expect(r.session).toBe('urn:sess');
   });
 });

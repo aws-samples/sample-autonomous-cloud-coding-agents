@@ -47,6 +47,10 @@ import {
   StoredLinearOauthToken,
 } from '../linear-oauth';
 import {
+  savePendingConsent,
+  takePendingConsent,
+} from '../linear-pending-consent';
+import {
   beginVaultConsent,
   finalizeVaultConsent,
   upsertLinearCredentialProvider,
@@ -82,6 +86,13 @@ export interface LinearAppTemplateOptions {
    * template explains where to get it instead of silently listing one URL.
    */
   readonly vaultCallbackUrl?: string;
+  /**
+   * The stack's hosted consent page (`LinearVaultConsentUrl`). When supplied it is
+   * listed as a callback URL, which is what lets an operator onboard with NO
+   * localhost listener — the browser can reach this page from anywhere, whereas a
+   * loopback redirect dead-ends on a cloud desktop / SSH box / container.
+   */
+  readonly hostedConsentUrl?: string;
 }
 
 export function renderLinearAppTemplate(opts: LinearAppTemplateOptions = {}): string {
@@ -115,6 +126,7 @@ export function renderLinearAppTemplate(opts: LinearAppTemplateOptions = {}): st
     '',
     '  Callback URLs (one per line, NO line wrapping):',
     `    ${callbackUrl}`,
+    ...(opts.hostedConsentUrl ? [`    ${opts.hostedConsentUrl}`] : []),
     ...(opts.vaultCallbackUrl
       ? [`    ${opts.vaultCallbackUrl}`]
       : [
@@ -122,6 +134,16 @@ export function renderLinearAppTemplate(opts: LinearAppTemplateOptions = {}): st
         '    `bgagent linear vault-setup <slug>` prints. It ends in a per-provider id',
         '    that does not exist until the provider is created, so it cannot be shown',
         '    here — consent fails with "Invalid redirect_uri" until you add it.',
+      ]),
+    ...(opts.hostedConsentUrl
+      ? []
+      : [
+        '',
+        '    Onboarding from a cloud desktop / SSH box / container? The localhost URL',
+        '    above cannot work there — the browser cannot reach the CLI. Pass',
+        '    --hosted-consent-url (see `bgagent linear app-template --help`) to list the',
+        '    stack\'s hosted consent page instead, and onboard with',
+        '    `bgagent linear setup <slug> --hosted`.',
       ]),
     '',
     `  GitHub username:     ${botName}      ← REQUIRED for actor=app`,
@@ -140,9 +162,10 @@ export function renderLinearAppTemplate(opts: LinearAppTemplateOptions = {}): st
     '    by the OAuth dance and can be a placeholder.',
     '  • Wildcard callback URLs are not accepted by Linear; list each URL fully.',
     '  • Using the AgentCore Identity vault? Linear must list BOTH callback URLs: the',
-    '    localhost one above (direct setup) and the vault provider callback that',
-    '    `vault-setup` prints. Missing the second is the usual cause of a',
-    '    "Invalid redirect_uri parameter for the application" error mid-consent.',
+    '    one the direct `setup` uses (localhost, or the hosted consent page) and the',
+    '    vault provider callback that `vault-setup` prints. Missing the second is the',
+    '    usual cause of a "Invalid redirect_uri parameter for the application" error',
+    '    mid-consent.',
     '  • Do NOT enable Linear "agent" / app-notification events on this app. ABCA',
     '    is a COMMENT-based integration (it replies + reacts on ordinary comments).',
     '    With agent events on, Linear renders an @mention of the app as its',
@@ -387,6 +410,7 @@ export function makeLinearCommand(): Command {
       .option('--description <text>', 'App description shown on Linear\'s consent screen')
       .option('--aws-callback-url <url>', 'AWS-hosted callback URL from create-oauth2-credential-provider')
       .option('--vault-callback-url <url>', 'AgentCore provider callback URL printed by `linear vault-setup` — renders a complete template')
+      .option('--hosted-consent-url <url>', 'Stack LinearVaultConsentUrl output — lists the hosted consent page so onboarding needs no localhost')
       .action((opts) => {
         if (opts.botName && !/\[bot\]$/.test(opts.botName)) {
           console.error(
@@ -402,6 +426,7 @@ export function makeLinearCommand(): Command {
           description: opts.description,
           awsCallbackUrl: opts.awsCallbackUrl,
           vaultCallbackUrl: opts.vaultCallbackUrl,
+          hostedConsentUrl: opts.hostedConsentUrl,
         }));
       }),
   );
@@ -505,6 +530,17 @@ export function makeLinearCommand(): Command {
       .option('--no-browser', 'Print the authorization URL instead of opening a browser (for SSH/headless)')
       .option('--no-actor-app', 'Drop actor=app from the OAuth flow (diagnostic: isolates whether agent-install is blocking)')
       .option('--no-force-consent', 'Omit prompt=consent (diagnostic: restores the pre-fix behaviour that dead-ends on an already-installed app)')
+      .option(
+        '--hosted',
+        'Send the consent redirect to the stack\'s hosted consent page instead of a localhost '
+        + 'listener. Use on a cloud desktop / SSH box, where the browser cannot reach this machine. '
+        + 'Prints a code to paste back with --code.',
+      )
+      .option(
+        '--code <code>',
+        'Finish a --hosted consent: the authorization code shown on the consent page. Uses the PKCE '
+        + 'verifier saved by the --hosted run, so it must be the same machine and the same workspace.',
+      )
       .action(async (slug: string, opts) => {
         if (!SLUG_RE.test(slug)) {
           throw new CliError(
@@ -571,7 +607,45 @@ export function makeLinearCommand(): Command {
           throw new CliError('Client Secret is required.');
         }
 
+        // HOSTED FINISH. `--code` resumes the consent the --hosted run started: the
+        // PKCE verifier and `state` come from the saved pending entry (the code alone
+        // cannot complete a PKCE exchange), and it is consumed on read so one
+        // verifier can never be replayed.
+        let resumed: { code: string; codeVerifier: string; redirectUri: string } | undefined;
+        if (opts.code) {
+          const pending = takePendingConsent(slug);
+          if (pending.clientId !== clientId) {
+            throw new CliError(
+              'The pending consent was started with a different Linear Client ID. Re-run '
+              + `\`bgagent linear setup ${slug} --hosted\` with the client you intend to use.`,
+            );
+          }
+          resumed = {
+            code: String(opts.code).trim(),
+            codeVerifier: pending.codeVerifier,
+            redirectUri: pending.redirectUri,
+          };
+          console.log('  → Resuming the hosted consent for this workspace.');
+        }
+
         // ─── Step 1: Generate PKCE + open browser to Linear consent ────
+        // Where Linear sends the authorization code. Default is the localhost
+        // loopback the CLI listens on. `--hosted` points it at the stack's consent
+        // page instead, which is what makes onboarding possible on a cloud desktop /
+        // SSH box / container: there the browser cannot reach the CLI's localhost, so
+        // the loopback redirect dead-ends and the workspace can never be onboarded.
+        const setupHostedUrl = opts.hosted
+          ? await getStackOutput(region, stackName, 'LinearVaultConsentUrl')
+          : undefined;
+        if (opts.hosted && !setupHostedUrl) {
+          throw new CliError(
+            `--hosted needs the stack to expose LinearVaultConsentUrl. Deploy '${stackName}' with `
+            + '`--context enableLinearIdentityVault=true` (which provisions the consent page), '
+            + 'or drop --hosted to use the localhost loopback.',
+          );
+        }
+        const setupRedirectUri = setupHostedUrl ?? CALLBACK_URL;
+
         const pkce = generatePkce();
         const state = randomState();
         // `opts.actorApp` is true by default; --no-actor-app sets it false.
@@ -579,7 +653,7 @@ export function makeLinearCommand(): Command {
         const useActorApp = opts.actorApp !== false;
         const authorizationUrl = buildAuthorizationUrl({
           clientId,
-          redirectUri: CALLBACK_URL,
+          redirectUri: setupRedirectUri,
           state,
           codeChallenge: pkce.codeChallenge,
           actorApp: useActorApp,
@@ -593,12 +667,36 @@ export function makeLinearCommand(): Command {
           console.log('  ⚠ --no-actor-app: dropping actor=app for diagnosis. Token will not be agent-scoped.');
         }
 
-        // The localhost callback server starts BEFORE we open the browser
-        // so it's listening when Linear's redirect arrives.
-        const callbackPromise = awaitOauthCallback();
+        // HOSTED START. Consent happens in a browser that need not reach this
+        // machine, so there is nothing to listen for: persist the PKCE verifier +
+        // state and stop, telling the operator how to finish. Without persisting,
+        // the pasted code would be unusable — the verifier only exists in this
+        // process, and `state` still has to be checked for CSRF.
+        if (setupHostedUrl && !resumed) {
+          savePendingConsent({
+            slug,
+            state,
+            codeVerifier: pkce.codeVerifier,
+            clientId,
+            redirectUri: setupRedirectUri,
+            createdAt: new Date().toISOString(),
+          });
+          console.log('\n  → Hosted consent. Open this URL in any browser:\n');
+          console.log(`    ${authorizationUrl}\n`);
+          console.log(`  After you Authorize you will land on:\n    ${setupHostedUrl}`);
+          console.log('  It shows an authorization code. Finish with:\n');
+          console.log(`    bgagent linear setup ${slug} --code <code>\n`);
+          console.log('  (Codes are single-use and expire quickly, so run it promptly.)');
+          return;
+        }
+
+        // When resuming, the code is already in hand — no listener, no browser.
+        const callbackPromise = resumed ? undefined : awaitOauthCallback();
 
         console.log();
-        if (opts.browser !== false) {
+        if (resumed) {
+          // nothing to open: consent already happened in the operator's browser.
+        } else if (opts.browser !== false) {
           const opened = await openBrowser(authorizationUrl);
           if (opened) {
             console.log('  → Opened your browser to the Linear consent screen.');
@@ -612,34 +710,45 @@ export function makeLinearCommand(): Command {
           console.log(`    ${authorizationUrl}`);
         }
 
-        process.stdout.write('  → Waiting for browser callback...');
-        const callback = await callbackPromise;
-        console.log(' ✓');
+        let exchangeCode: string;
+        let exchangeVerifier: string;
+        let exchangeRedirect: string;
+        if (resumed) {
+          exchangeCode = resumed.code;
+          exchangeVerifier = resumed.codeVerifier;
+          exchangeRedirect = resumed.redirectUri;
+        } else {
+          process.stdout.write('  → Waiting for browser callback...');
+          const callback = await callbackPromise!;
+          console.log(' ✓');
 
-        // Phase 2.0b Option 2 expects Linear to redirect with `code` +
-        // `state`. If we got the AgentCore session_id shape, the user
-        // likely configured an `actor=app` flow against an AgentCore
-        // Identity provider — that path is parked, error out clearly.
-        if (callback.kind !== 'direct-oauth') {
-          throw new CliError(
-            'Localhost callback returned an AgentCore session_id, not a direct OAuth code. '
-            + 'Phase 2.0b Option 2 only supports the direct redirect — verify Linear\'s '
-            + 'redirect URI is set to http://localhost:8080/oauth/callback and re-run.',
-          );
-        }
-        if (callback.state !== state) {
-          throw new CliError(
-            `OAuth state mismatch (expected '${state}', got '${callback.state}'). `
-            + 'Possible CSRF attack or stale tab — re-run setup.',
-          );
+          // The direct flow expects Linear to redirect with `code` + `state`. An
+          // AgentCore `session_id` means the redirect URI points at a vault provider
+          // callback — that is `vault-setup`'s flow, not this one.
+          if (callback.kind !== 'direct-oauth') {
+            throw new CliError(
+              'Localhost callback returned an AgentCore session_id, not a direct OAuth code. '
+            + '`bgagent linear setup` uses the direct redirect — verify Linear\'s redirect URI is '
+              + `${CALLBACK_URL} (or use \`bgagent linear vault-setup\` for the Token Vault flow).`,
+            );
+          }
+          if (callback.state !== state) {
+            throw new CliError(
+              `OAuth state mismatch (expected '${state}', got '${callback.state}'). `
+              + 'Possible CSRF attack or stale tab — re-run setup.',
+            );
+          }
+          exchangeCode = callback.code;
+          exchangeVerifier = pkce.codeVerifier;
+          exchangeRedirect = setupRedirectUri;
         }
 
         // ─── Step 2: Exchange code for access token ───────────────────
         process.stdout.write('  → Exchanging code for access token...');
         const tokenResponse = await exchangeAuthorizationCode({
-          code: callback.code,
-          codeVerifier: pkce.codeVerifier,
-          redirectUri: CALLBACK_URL,
+          code: exchangeCode,
+          codeVerifier: exchangeVerifier,
+          redirectUri: exchangeRedirect,
           clientId,
           clientSecret,
         });

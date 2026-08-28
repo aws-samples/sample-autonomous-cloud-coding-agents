@@ -209,6 +209,23 @@ describe('renderLinearAppTemplate', () => {
     expect(out).toContain('http://localhost:8080/oauth/callback');
   });
 
+  test('a hosted consent URL is listed so onboarding needs no localhost', () => {
+    // The localhost callback cannot work on a cloud desktop / SSH box — the browser
+    // cannot reach the CLI. Listing the hosted page is what makes that case
+    // onboardable at all, so the template has to be able to say so.
+    const hosted = 'https://d1xfr79wd9vxmx.cloudfront.net/';
+    const out = renderLinearAppTemplate({ hostedConsentUrl: hosted });
+    expect(out).toContain(hosted);
+    // Localhost stays listed: dropping it would break the default same-machine flow.
+    expect(out).toContain('http://localhost:8080/oauth/callback');
+  });
+
+  test('without a hosted URL it explains the cloud-desktop limitation instead of staying silent', () => {
+    const out = renderLinearAppTemplate();
+    expect(out).toMatch(/cloud desktop/i);
+    expect(out).toContain('--hosted');
+  });
+
   test('overrides bot name, developer fields, description', () => {
     const out = renderLinearAppTemplate({
       botName: 'acme-bot[bot]',
