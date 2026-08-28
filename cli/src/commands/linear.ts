@@ -75,6 +75,13 @@ export interface LinearAppTemplateOptions {
   readonly developerUrl?: string;
   readonly description?: string;
   readonly awsCallbackUrl?: string;
+  /**
+   * AgentCore provider callback URL (`…/identities/oauth2/callback/<uuid>`), for
+   * rendering a COMPLETE template once the credential provider exists. Omitted on
+   * a first run — the id is minted at provider-create time — in which case the
+   * template explains where to get it instead of silently listing one URL.
+   */
+  readonly vaultCallbackUrl?: string;
 }
 
 export function renderLinearAppTemplate(opts: LinearAppTemplateOptions = {}): string {
@@ -108,6 +115,14 @@ export function renderLinearAppTemplate(opts: LinearAppTemplateOptions = {}): st
     '',
     '  Callback URLs (one per line, NO line wrapping):',
     `    ${callbackUrl}`,
+    ...(opts.vaultCallbackUrl
+      ? [`    ${opts.vaultCallbackUrl}`]
+      : [
+        '    (AgentCore Identity vault only) ALSO add the provider callback URL that',
+        '    `bgagent linear vault-setup <slug>` prints. It ends in a per-provider id',
+        '    that does not exist until the provider is created, so it cannot be shown',
+        '    here — consent fails with "Invalid redirect_uri" until you add it.',
+      ]),
     '',
     `  GitHub username:     ${botName}      ← REQUIRED for actor=app`,
     '  Public:              OFF',
@@ -124,6 +139,10 @@ export function renderLinearAppTemplate(opts: LinearAppTemplateOptions = {}): st
     '  • Webhooks toggle must be ON for the same reason; the URL value is unused',
     '    by the OAuth dance and can be a placeholder.',
     '  • Wildcard callback URLs are not accepted by Linear; list each URL fully.',
+    '  • Using the AgentCore Identity vault? Linear must list BOTH callback URLs: the',
+    '    localhost one above (direct setup) and the vault provider callback that',
+    '    `vault-setup` prints. Missing the second is the usual cause of a',
+    '    "Invalid redirect_uri parameter for the application" error mid-consent.',
     '  • Do NOT enable Linear "agent" / app-notification events on this app. ABCA',
     '    is a COMMENT-based integration (it replies + reacts on ordinary comments).',
     '    With agent events on, Linear renders an @mention of the app as its',
@@ -367,6 +386,7 @@ export function makeLinearCommand(): Command {
       .option('--developer-url <url>', 'Developer URL shown on Linear\'s consent screen')
       .option('--description <text>', 'App description shown on Linear\'s consent screen')
       .option('--aws-callback-url <url>', 'AWS-hosted callback URL from create-oauth2-credential-provider')
+      .option('--vault-callback-url <url>', 'AgentCore provider callback URL printed by `linear vault-setup` — renders a complete template')
       .action((opts) => {
         if (opts.botName && !/\[bot\]$/.test(opts.botName)) {
           console.error(
@@ -381,6 +401,7 @@ export function makeLinearCommand(): Command {
           developerUrl: opts.developerUrl,
           description: opts.description,
           awsCallbackUrl: opts.awsCallbackUrl,
+          vaultCallbackUrl: opts.vaultCallbackUrl,
         }));
       }),
   );

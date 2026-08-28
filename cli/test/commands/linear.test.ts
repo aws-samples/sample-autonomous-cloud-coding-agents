@@ -188,6 +188,27 @@ describe('renderLinearAppTemplate', () => {
     expect(out).not.toContain('http://localhost:8080/oauth/callback');
   });
 
+  test('without a vault callback, it says WHERE to get the second URL (the live-caught trap)', () => {
+    // The vault flow needs a SECOND callback URL on the Linear app — the provider
+    // callback, whose id only exists once the provider is created. Printing just
+    // the localhost URL sent an operator into a "Invalid redirect_uri parameter
+    // for the application" dead-end with nothing pointing at the cause.
+    const out = renderLinearAppTemplate();
+    expect(out).toContain('vault-setup');
+    expect(out).toMatch(/Invalid redirect_uri/);
+    // And the gotcha list must spell out that BOTH URLs belong on the app.
+    expect(out).toMatch(/BOTH callback URLs/);
+  });
+
+  test('with a vault callback supplied it lists BOTH URLs, keeping the direct flow working', () => {
+    // Adding the vault callback must be ADDITIVE: dropping localhost would break
+    // `bgagent linear setup`, which still listens there.
+    const vault = 'https://bedrock-agentcore.us-east-1.amazonaws.com/identities/oauth2/callback/f8804c1b';
+    const out = renderLinearAppTemplate({ vaultCallbackUrl: vault });
+    expect(out).toContain(vault);
+    expect(out).toContain('http://localhost:8080/oauth/callback');
+  });
+
   test('overrides bot name, developer fields, description', () => {
     const out = renderLinearAppTemplate({
       botName: 'acme-bot[bot]',
