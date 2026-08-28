@@ -735,20 +735,35 @@ export class AgentStack extends Stack {
     // runtime ExecutionRole so any present or future overflow is
     // suppressed automatically without hardcoding
     // ``OverflowPolicy<N>`` indices.
+    // Roles known to overflow, with the evidence for each. Keyed by a path
+    // fragment rather than an `OverflowPolicy<N>` index so future splits are
+    // covered automatically.
+    const OVERFLOW_SUPPRESSIONS: readonly { readonly pathFragment: string; readonly reason: string }[] = [
+      {
+        pathFragment: '/Runtime/ExecutionRole/OverflowPolicy',
+        reason:
+          'CDK-generated overflow policy on the runtime ExecutionRole inherits the same wildcard Bedrock / CloudWatch actions suppressed on the base policy. Auto-split triggers when the role exceeds the inline-policy size limit; suppression applies to all overflow policies via an Aspect so future splits are covered.',
+      },
+      {
+        // #812: granting the Linear webhook processor SNS publish on the
+        // CMK-encrypted alerts topic pushed its role over the same limit. The
+        // wildcard is `kms:GenerateDataKey*`, emitted by SNS Topic.grantPublish for
+        // an encrypted topic (the * covers the …WithoutPlaintext variant) and
+        // scoped to that one topic key — not a wildcard resource.
+        pathFragment: '/LinearIntegration/WebhookProcessorFn/ServiceRole/OverflowPolicy',
+        reason:
+          'CDK-generated overflow policy on the Linear webhook processor role carries the kms:GenerateDataKey* that SNS Topic.grantPublish emits for the CMK-encrypted operational-alerts topic. Scoped to that single topic key; the wildcard only spans the GenerateDataKey/GenerateDataKeyWithoutPlaintext pair.',
+      },
+    ];
     const overflowSuppressionAspect = {
       visit(node: IConstruct) {
         const nodePath = node.node.path;
-        if (
-          nodePath.includes('/Runtime/ExecutionRole/OverflowPolicy')
-          && nodePath.endsWith('/Resource')
-        ) {
-          NagSuppressions.addResourceSuppressions(node, [
-            {
-              id: 'AwsSolutions-IAM5',
-              reason:
-                'CDK-generated overflow policy on the runtime ExecutionRole inherits the same wildcard Bedrock / CloudWatch actions suppressed on the base policy. Auto-split triggers when the role exceeds the inline-policy size limit; suppression applies to all overflow policies via an Aspect so future splits are covered.',
-            },
-          ]);
+        if (!nodePath.endsWith('/Resource')) return;
+        for (const { pathFragment, reason } of OVERFLOW_SUPPRESSIONS) {
+          if (nodePath.includes(pathFragment)) {
+            NagSuppressions.addResourceSuppressions(node, [{ id: 'AwsSolutions-IAM5', reason }]);
+            return;
+          }
         }
       },
     };
@@ -1742,13 +1757,15 @@ export class AgentStack extends Stack {
     // SNS is deliberately the channel — the dead credential is Linear's own, so a
     // Linear comment cannot report it. The topic has an independent credential and
     // therefore still works when Linear does not.
-    operationalAlerts.topic.grantPublish(linearIntegration.webhookProcessorFn);
-    // The topic is CMK-encrypted, and `grantPublish` does NOT grant the key.
-    // Without this the publish fails KMSAccessDenied — and because announcing is
-    // best-effort (it must never break token resolution), that failure would be
-    // swallowed and the alert would be silently inert: exactly the dormant-feature
-    // trap this issue exists to remove.
-    operationalAlerts.key.grantEncryptDecrypt(linearIntegration.webhookProcessorFn);
+    // grantPublish covers the topic AND the minimal CMK actions. Without the key
+    // grant the publish fails KMSAccessDenied, and because announcing is
+    // best-effort (it must never break token resolution) that failure would be
+    // swallowed — a silently mute alarm in place of the dormant feature #812 exists
+    // to fix.
+    // The IAM5 finding on the wildcard this emits is suppressed by the
+    // overflow-policy Aspect above — the grant lands in an OverflowPolicy that does
+    // not exist yet at this point in the constructor.
+    operationalAlerts.grantPublish(linearIntegration.webhookProcessorFn);
     linearIntegration.webhookProcessorFn.addEnvironment(
       'OPERATIONAL_ALERT_TOPIC_ARN',
       operationalAlerts.topic.topicArn,

@@ -169,4 +169,24 @@ export class OperationalAlerts extends Construct {
       alarm.addAlarmAction(action);
     }
   }
+
+  /**
+   * Let a principal publish its own notifications to this topic.
+   *
+   * `topic.grantPublish()` already covers the CMK for an encrypted topic in this
+   * CDK version — it emits `kms:Decrypt` + `kms:GenerateDataKey*` alongside
+   * `sns:Publish`, so no separate key grant is needed (adding one just duplicates
+   * the statement, which is not free when the role is near IAM's inline-policy size
+   * limit).
+   *
+   * What the caller DOES still owe is a cdk-nag AwsSolutions-IAM5 suppression for
+   * that CDK-generated `kms:GenerateDataKey*`. It must be applied BY PATH: once a
+   * role's inline policy overflows, CDK spills the excess into an `OverflowPolicy`
+   * created during synth — after `addResourceSuppressions(..., applyToChildren)`
+   * has already resolved the child tree — so a construct-scoped suppression
+   * silently misses it. See {@link suppressPublisherKmsWildcard}.
+   */
+  public grantPublish(grantee: iam.IGrantable): void {
+    this.topic.grantPublish(grantee);
+  }
 }

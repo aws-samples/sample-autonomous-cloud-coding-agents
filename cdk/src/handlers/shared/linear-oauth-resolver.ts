@@ -630,6 +630,34 @@ type RefreshOutcome =
   | { kind: 'invalid_grant' }
   | { kind: 'failure' };
 
+/**
+ * Does this token-endpoint rejection mean the refresh token itself is dead?
+ *
+ * LIVE-CORRECTED: this used to test `error === 'invalid_grant'` only, which is what
+ * RFC 6749 specifies — and which Linear does not send. Linear answers a dead
+ * refresh token with HTTP 400 and:
+ *
+ *     { "error": "invalid_request", "error_description": "Refresh token revoked" }
+ *     { "error": "invalid_request", "error_description": "Invalid refresh token" }
+ *
+ * so every real revocation was classified as a generic `failure`. The consequence
+ * was invisible but total: the permanent-rejection branch never ran, so the
+ * registry was never marked revoked and no operator was ever notified — the
+ * detection existed and could not fire. Confirmed against the token-lineage logs
+ * from the #807 investigation and reproduced deliberately with a bogus refresh
+ * token (#812).
+ *
+ * `invalid_request` alone is NOT enough to conclude the grant is dead — it is also
+ * what a malformed request (our bug) returns — so the description must name the
+ * refresh token. `invalid_grant` stays accepted in case Linear aligns with the RFC.
+ */
+export function isRefreshTokenRejection(
+  status: number,
+  err: { error?: string; error_description?: string },
+): boolean {
+  if (err.error === 'invalid_grant') return true;
+  return status === 400 && /refresh token/i.test(err.error_description ?? '');
+}
 async function refreshLinearToken(
   current: StoredOauthToken,
   sm: SecretsManagerClient,
@@ -774,7 +802,7 @@ async function tryRefreshOnce(
       error_description: errObj.error_description,
     });
     invalidateLinearOauthCache(current.workspace_id, secretArn);
-    if (errObj.error === 'invalid_grant') {
+    if (isRefreshTokenRejection(resp.status, errObj)) {
       return { kind: 'invalid_grant' };
     }
     return { kind: 'failure' };

@@ -19,6 +19,7 @@
 
 import {
   _resetCachesForTesting,
+  isRefreshTokenRejection,
   invalidateLinearOauthCache,
   isTokenExpiring,
   markWorkspaceRevoked,
@@ -709,5 +710,41 @@ describe('markWorkspaceRevoked — the verdict must not outlive the grant it jud
     expect(updates[0].input!.ConditionExpression).toContain('installed_at = :installed');
     expect((updates[0].input!.ExpressionAttributeValues as Record<string, unknown>)[':installed'])
       .toBe(INSTALLED);
+  });
+});
+
+describe('isRefreshTokenRejection — Linear does not send invalid_grant', () => {
+  // The classifier used to test `error === 'invalid_grant'` (what RFC 6749
+  // specifies) and Linear does not send that. Every real revocation was therefore
+  // filed as a generic failure, the permanent-rejection branch never ran, and the
+  // registry was never marked — detection that existed and could not fire. These
+  // are the exact payloads observed live.
+  test("Linear's real revoked-token response is recognised", () => {
+    expect(isRefreshTokenRejection(400, {
+      error: 'invalid_request', error_description: 'Refresh token revoked',
+    })).toBe(true);
+  });
+
+  test("Linear's real invalid-token response is recognised", () => {
+    expect(isRefreshTokenRejection(400, {
+      error: 'invalid_request', error_description: 'Invalid refresh token',
+    })).toBe(true);
+  });
+
+  test('the RFC-standard invalid_grant is still accepted, in case Linear aligns', () => {
+    expect(isRefreshTokenRejection(400, { error: 'invalid_grant' })).toBe(true);
+  });
+
+  test('a generic invalid_request is NOT treated as a dead grant', () => {
+    // invalid_request is also what a malformed request — our own bug — returns.
+    // Marking a workspace revoked for that would take a working workspace offline.
+    expect(isRefreshTokenRejection(400, {
+      error: 'invalid_request', error_description: 'Missing required parameter: client_id',
+    })).toBe(false);
+  });
+
+  test('a 5xx or throttle is transient, never a revocation', () => {
+    expect(isRefreshTokenRejection(503, { error: 'server_error' })).toBe(false);
+    expect(isRefreshTokenRejection(429, { error_description: 'Too many requests' })).toBe(false);
   });
 });
