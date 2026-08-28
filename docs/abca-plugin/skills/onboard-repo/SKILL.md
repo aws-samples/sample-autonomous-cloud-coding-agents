@@ -115,37 +115,47 @@ editing the stack and redeploying.
 
 ## Model not yet wired into the runtime (the one real code change)
 
-A repo can only use a model the **runtime IAM role has `grantInvoke` for**. As of now
-the stack wires **Sonnet 4.6, Opus 4 (`claude-opus-4-20250514`), and Haiku 4.5** (see
-the `grantInvoke` block in `agent.ts`). Onboarding a repo pinned to any **other** model
-(e.g. Opus 4.8 / `global.anthropic.claude-opus-4-8`) will fail at invoke with a 403 — the
-CLI onboard succeeds, but tasks can't run.
+A repo can only use a model the **runtime IAM role has `grantInvoke` for**. The granted
+set is `DEFAULT_BEDROCK_MODEL_IDS` in `cdk/src/constructs/bedrock-models.ts` — Sonnet 4.6,
+Opus 4.8, Opus 5, and Haiku 4.5 — and a deployed stack publishes it as the
+`BedrockModelIds` output, so read that rather than trusting this list to stay current:
 
-Adding a new model **is** a platform source change, so it follows ADR-003 (issue →
-approval → feature branch) and requires:
+```bash
+aws cloudformation describe-stacks --stack-name <stack> \
+  --query "Stacks[0].Outputs[?OutputKey=='BedrockModelIds'].OutputValue" --output text
+```
 
-1. **Wire the model + inference profile and grant the runtime**, in `agent.ts`:
-   ```typescript
-   const model = new bedrock.BedrockFoundationModel('anthropic.claude-opus-4-8', {
-     supportsAgents: true,
-     supportsCrossRegion: true,
-   });
-   model.grantInvoke(runtime);
-   const profile = bedrock.CrossRegionInferenceProfile.fromConfig({
-     geoRegion: bedrock.CrossRegionInferenceProfileRegion.US,
-     model,
-   });
-   profile.grantInvoke(runtime);
-   ```
-   then redeploy.
-2. **Account-level Bedrock model access** (separate from IAM): the account must have the
-   model enabled for the Region — complete [model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html)
-   prerequisites (Marketplace actions / Anthropic first-time use where applicable). For
-   cross-Region profiles, IAM and SCPs must allow Bedrock in source **and** destination
-   Regions.
+Onboarding a repo pinned to any **other** model fails at invoke with a 403 — the CLI
+onboard succeeds, but tasks can't run. `bgagent repo onboard --model` checks the value
+against that output and rejects an ungranted model up front.
 
-If the user just wants the agent working now, steer them to a wired model (Sonnet 4.6)
-via Path A and treat "add model X" as a separate, later change.
+Pin the **geo-prefixed inference-profile** form, matching the stack's `BedrockGeoRegion`
+output (e.g. `global.anthropic.claude-opus-4-8`), not the bare id — Bedrock refuses bare
+ids for on-demand invocation, and the IAM grant is scoped to one geography's profile ARNs.
+
+Granting a **new** model is a deploy-time change, not a source edit: the list is
+overridable via CDK context, so no construct edit is needed.
+
+```bash
+# every model the role may invoke — this REPLACES the default list, so include
+# the platform defaults (Opus 5 + Haiku 4.5) or the stack's own defaults are ungranted
+cdk deploy -c bedrockModels='["anthropic.claude-opus-5","anthropic.claude-haiku-4-5-20251001-v1:0","anthropic.claude-sonnet-4-6"]'
+```
+
+Two constraints on the value: entries are **bare** ids (the geo prefix is derived from
+`bedrockGeoRegion`), and each must have a live cross-Region inference profile — check with
+`aws bedrock get-inference-profile --inference-profile-identifier <geo>.<model>` before
+relying on it, because a granted model with no profile passes every check here and then
+fails at turn 0.
+
+**Account-level Bedrock model access** is separate from IAM: the account must have the
+model enabled for the Region — complete [model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html)
+prerequisites (Marketplace actions / Anthropic first-time use where applicable). For
+cross-Region profiles, IAM and SCPs must allow Bedrock in source **and** destination
+Regions.
+
+If the user just wants the agent working now, leave `model_id` unset so the repo takes the
+platform default, and treat "add model X" as a separate, later change.
 
 ## Per-repository configuration reference
 
@@ -153,7 +163,7 @@ via Path A and treat "add model X" as a separate, later change.
 |---------|---------|---------|
 | `compute_type` | Execution strategy | `agentcore` |
 | `runtime_arn` | AgentCore runtime override | Platform default |
-| `model_id` | AI model for tasks (inference profile ID) | Platform default (Sonnet 4.6) |
+| `model_id` | AI model for tasks (inference profile ID) | Platform default (Opus 5, as `<BedrockGeoRegion>.anthropic.claude-opus-5`) |
 | `max_turns` | Turn limit per task | 100 |
 | `max_budget_usd` | Cost ceiling per task | Unlimited |
 | `system_prompt_overrides` | Custom system instructions | None |

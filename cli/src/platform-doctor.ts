@@ -97,6 +97,7 @@ export async function runPlatformDoctor(
     linearRegistryTableName,
     jiraRegistryTableName,
     bedrockGeoRegion,
+    bedrockModelIds,
   ] = await Promise.all([
     getStackOutput(region, stackName, 'ApiUrl'),
     getStackOutput(region, stackName, 'UserPoolId'),
@@ -106,6 +107,7 @@ export async function runPlatformDoctor(
     getStackOutput(region, stackName, 'LinearWorkspaceRegistryTableName'),
     getStackOutput(region, stackName, 'JiraWorkspaceRegistryTableName'),
     getStackOutput(region, stackName, 'BedrockGeoRegion'),
+    getStackOutput(region, stackName, 'BedrockModelIds'),
   ]);
 
   const checks: DoctorCheckResult[] = [];
@@ -117,6 +119,7 @@ export async function runPlatformDoctor(
   checks.push(checkActiveRepos(repoTableName, activeRepoResult));
   checks.push(await checkBedrockModel(region, DEFAULT_BEDROCK_MODEL_ID));
   checks.push(await checkBedrockInferenceProfile(region, DEFAULT_BEDROCK_MODEL_ID, bedrockGeoRegion));
+  checks.push(await checkGrantedModelProfiles(region, bedrockModelIds, bedrockGeoRegion));
   if (activeRepoResult.repos.some((repo) => repo.compute_type === 'lambda-microvm')) {
     checks.push(await checkLambdaMicrovmAvailability(
       region,
@@ -491,6 +494,98 @@ async function checkBedrockInferenceProfile(
         + 'entitlements — tasks would fail at turn 0 with AccessDenied.',
     };
   }
+}
+
+/**
+ * Every model the stack GRANTS, not just the one it defaults to.
+ *
+ * A granted model with no inference profile is invisible to every other check the
+ * platform has, because they all read the same grant list: `repo onboard --model`
+ * admits it (it is granted), workflow admission admits it (same list), and the IAM
+ * policy carries a grant for a profile ARN that cannot exist. The first signal is a
+ * task failing at turn 0. That was live —
+ * `anthropic.claude-opus-4-20250514-v1:0` was granted with no profile in any
+ * geography — and removing it only stays fixed if something notices the next one.
+ *
+ * Reported as ONE check rather than N so a wide grant list cannot bury the rest of
+ * doctor's output, and named per-model in the detail so the offender is actionable.
+ *
+ * Severity mirrors {@link checkBedrockInferenceProfile}: a denial is a `warn`
+ * (the operator's own credentials are least-privilege, which says nothing about
+ * the model), while a genuine not-found is a `fail` — that one is a real defect in
+ * the grant list regardless of who is looking.
+ */
+async function checkGrantedModelProfiles(
+  region: string,
+  bedrockModelIds: string | null,
+  geoRegion: string | null,
+): Promise<DoctorCheckResult> {
+  const id = 'bedrock_granted_model_profiles';
+  const label = 'Every granted Bedrock model has an inference profile';
+  if (!bedrockModelIds || !geoRegion) {
+    return {
+      id,
+      label,
+      status: 'warn',
+      detail: 'Stack does not export BedrockModelIds and BedrockGeoRegion, so the granted '
+        + 'set cannot be enumerated. Redeploy to surface them; until then this check is '
+        + 'skipped rather than assuming a list.',
+    };
+  }
+
+  const bare = bedrockModelIds.split(',').map((s) => s.trim()).filter(Boolean);
+  if (bare.length === 0) {
+    return { id, label, status: 'warn', detail: 'BedrockModelIds is exported but empty.' };
+  }
+
+  const bedrock = makeClient(BedrockClient, { region });
+  const missing: string[] = [];
+  const denied: string[] = [];
+  for (const model of bare) {
+    const profileId = `${geoRegion}.${model}`;
+    try {
+      await bedrock.send(new GetInferenceProfileCommand({ inferenceProfileIdentifier: profileId }));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const errorName = err instanceof Error ? err.name : '';
+      // Name AND message: a denial carries the identifier only in `err.name`.
+      if (/AccessDenied|Unauthorized|not authorized/i.test(`${errorName} ${message}`)) {
+        denied.push(profileId);
+      } else {
+        missing.push(profileId);
+      }
+    }
+  }
+
+  if (missing.length > 0) {
+    return {
+      id,
+      label,
+      status: 'fail',
+      detail: `${missing.length} of ${bare.length} granted model(s) have no inference profile in `
+        + `'${geoRegion}': ${missing.join(', ')}. Each is granted by IAM and passes `
+        + '`repo onboard --model` and workflow admission, then fails at turn 0. Remove it from '
+        + 'the bedrockModels context, or deploy a geography where it resolves.',
+    };
+  }
+  if (denied.length > 0) {
+    return {
+      id,
+      label,
+      status: 'warn',
+      detail: `${denied.length} of ${bare.length} granted model(s) could not be resolved under `
+        + `these operator credentials: ${denied.join(', ')}. That is a permissions gap on the `
+        + 'caller, not evidence the profile is missing — re-run with credentials holding '
+        + 'bedrock:GetInferenceProfile to settle it.',
+    };
+  }
+  return {
+    id,
+    label,
+    status: 'pass',
+    detail: `All ${bare.length} granted model(s) resolve as '${geoRegion}.' inference profiles in `
+      + `${region}. Visibility only: does not prove the workload role can invoke them.`,
+  };
 }
 
 /**

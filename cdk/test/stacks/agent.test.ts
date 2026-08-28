@@ -351,7 +351,7 @@ describe('AgentStack', () => {
     const serialized = JSON.stringify(template.findResources('AWS::IAM::Policy'));
     expect(serialized).toContain('foundation-model/anthropic.claude-sonnet-4-6');
     expect(serialized).toContain('inference-profile/us.anthropic.claude-sonnet-4-6');
-    expect(serialized).toContain('anthropic.claude-opus-4-20250514-v1:0');
+    expect(serialized).toContain('anthropic.claude-opus-4-8');
     expect(serialized).toContain('anthropic.claude-haiku-4-5-20251001-v1:0');
     // Claude Opus 5 (#744). Granted ahead of any default flip: the bare id is
     // not on-demand invocable (Bedrock returns ValidationException), so the
@@ -445,15 +445,19 @@ describe('AgentStack', () => {
    * differ between two synths of the SAME tree and so cannot be asserted here.
    * The Bedrock resources are the change's entire blast radius.)
    */
-  test('default-context Bedrock grants are byte-identical to the pre-#746 template', () => {
-    const PRE_CHANGE_BEDROCK_RESOURCE_NAMES = [
+  test('default-context Bedrock grants are the exact expected set, nothing wider', () => {
+    // `anthropic.claude-opus-4-20250514-v1:0` was REMOVED from this baseline
+    // deliberately: it has no cross-Region inference profile in any geography, so
+    // the pair of ARNs it contributed granted a profile that cannot exist while
+    // making the model pass every admission check that reads the grant list. This
+    // exact-set assertion is what makes that removal reviewable — a grant cannot be
+    // added, dropped, or re-prefixed without failing here.
+    const EXPECTED_BEDROCK_RESOURCE_NAMES = [
       'foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0',
-      'foundation-model/anthropic.claude-opus-4-20250514-v1:0',
       'foundation-model/anthropic.claude-opus-4-8',
       'foundation-model/anthropic.claude-opus-5',
       'foundation-model/anthropic.claude-sonnet-4-6',
       'inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0',
-      'inference-profile/us.anthropic.claude-opus-4-20250514-v1:0',
       'inference-profile/us.anthropic.claude-opus-4-8',
       'inference-profile/us.anthropic.claude-opus-5',
       'inference-profile/us.anthropic.claude-sonnet-4-6',
@@ -463,7 +467,7 @@ describe('AgentStack', () => {
     const found = [...new Set(
       serialized.match(/(?:foundation-model|inference-profile)\/[^"]+/g) ?? [],
     )].sort();
-    expect(found).toEqual(PRE_CHANGE_BEDROCK_RESOURCE_NAMES);
+    expect(found).toEqual(EXPECTED_BEDROCK_RESOURCE_NAMES);
 
     // Sanity: the set is derived from the shared model list, so a model added to
     // DEFAULT_BEDROCK_MODEL_IDS without updating this baseline fails loudly here

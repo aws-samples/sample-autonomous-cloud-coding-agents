@@ -52,7 +52,13 @@ export const DEFAULT_HAIKU_MODEL_ID = 'anthropic.claude-haiku-4-5-20251001-v1:0'
  */
 export const DEFAULT_BEDROCK_MODEL_IDS: readonly string[] = [
   'anthropic.claude-sonnet-4-6',
-  'anthropic.claude-opus-4-20250514-v1:0',
+  // NOTE: `anthropic.claude-opus-4-20250514-v1:0` was granted here but has no
+  // cross-Region inference profile to grant — `GetInferenceProfile` returns
+  // not-found for both its `global.` and `us.` forms while every other entry in
+  // this list resolves. It was therefore granted and un-invocable: it passed the
+  // CLI's `--model` check and workflow admission (both keyed off this list) and
+  // then failed at turn 0, while the IAM policy carried a grant for a profile
+  // ARN that cannot exist. Use Opus 4.8 below for an Opus-4-class model.
   // Claude Opus 4.8 — the agent's fallback model when a repo pins none
   // (``agent/src/config.py``). REQUIRED in this grant list or the agent's
   // InvokeModel gets AccessDenied at turn 0: both the AgentCore runtime and the
@@ -255,6 +261,21 @@ export function resolveBedrockModelIds(node: Node): readonly string[] {
         + `inference-profile IDs — got '${id}'. Use '${id.replace(GEO_PREFIX_RE, '')}'; `
         + `the inference-profile ARN is derived automatically from the '${BEDROCK_GEO_REGION_CONTEXT_KEY}' `
         + 'context key (default \'us\').',
+      );
+    }
+    // An IAM wildcard character. These entries become the resource half of the
+    // Bedrock grant, so '*' synths cleanly into `inference-profile/<geo>.*` —
+    // the account-wide grant the resource scoping above exists to avoid,
+    // reached through a context value rather than a policy edit. Nothing
+    // downstream can distinguish it from a model name, and the rendered
+    // template shows a resource-scoped statement that happens to match
+    // everything. An operator who wants a broader grant should widen the policy
+    // deliberately, where a reviewer sees it.
+    if (id.includes('*') || id.includes('?')) {
+      throw new Error(
+        `Context '${BEDROCK_MODELS_CONTEXT_KEY}' entries must be literal foundation-model IDs, not `
+        + `patterns — got '${id}'. These IDs form the resource half of the Bedrock IAM grant, so a `
+        + 'wildcard would grant every inference profile in the account. List each model explicitly.',
       );
     }
   }

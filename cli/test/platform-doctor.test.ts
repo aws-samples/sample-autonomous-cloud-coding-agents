@@ -304,3 +304,101 @@ describe('doctor Bedrock inference-profile check', () => {
     expect(check.detail).toMatch(/BedrockGeoRegion/);
   });
 });
+
+/**
+ * The GRANTED-SET check, distinct from the one above: that one probes the single
+ * model the platform defaults to, this one probes every model the stack grants.
+ *
+ * The gap it closes was live. `anthropic.claude-opus-4-20250514-v1:0` was in the
+ * grant list with no inference profile in any geography, and nothing could see it:
+ * every other check reads the same grant list, so `repo onboard --model` admitted
+ * it, workflow admission admitted it, and the IAM policy carried a grant for an ARN
+ * that cannot exist. The first signal was a task dying at turn 0.
+ */
+describe('doctor granted-model profile check', () => {
+  async function grantedCheck(
+    modelIds: string | null,
+    geo: string | null,
+    send: jest.Mock = jest.fn().mockResolvedValue({}),
+  ): Promise<DoctorCheckResult> {
+    bedrockSendMock.mockImplementation((...args: unknown[]) => send(...args));
+    stackOutputMock.mockImplementation(async (_r: string, _s: string, output: string) => {
+      if (output === 'BedrockGeoRegion') return geo;
+      if (output === 'BedrockModelIds') return modelIds;
+      if (output === 'LinearWorkspaceRegistryTableName') return REGISTRY;
+      return null;
+    });
+    const checks = await runPlatformDoctor({ region: 'us-east-1', stackName: 'Abca' });
+    const check = checks.find((c) => c.id === 'bedrock_granted_model_profiles');
+    if (!check) throw new Error('doctor no longer reports a granted-model profile check');
+    return check;
+  }
+
+  it('probes EVERY granted model, not only the platform default', async () => {
+    // The defect this exists for sat on a NON-default granted model, so a check that
+    // only probed the default could never have found it.
+    const send = jest.fn().mockResolvedValue({});
+    const check = await grantedCheck('anthropic.claude-opus-5,anthropic.claude-sonnet-4-6', 'global', send);
+    expect(check.status).toBe('pass');
+    const queried = send.mock.calls
+      .map(([c]) => (c as { _type?: string; input?: { inferenceProfileIdentifier?: string } }))
+      .filter((c) => c._type === 'GetInferenceProfile')
+      .map((c) => c.input?.inferenceProfileIdentifier);
+    expect(queried).toContain('global.anthropic.claude-opus-5');
+    expect(queried).toContain('global.anthropic.claude-sonnet-4-6');
+  });
+
+  it('fails and NAMES the offender when a granted model has no profile', async () => {
+    // Naming it is the whole value: "one model is broken" sends an operator through
+    // the whole list by hand.
+    const send = jest.fn().mockImplementation((cmd: { input?: { inferenceProfileIdentifier?: string } }) => {
+      if (cmd.input?.inferenceProfileIdentifier === 'global.anthropic.claude-opus-4-20250514-v1:0') {
+        return Promise.reject(new Error('ResourceNotFoundException: profile not found'));
+      }
+      return Promise.resolve({});
+    });
+    const check = await grantedCheck(
+      'anthropic.claude-opus-5,anthropic.claude-opus-4-20250514-v1:0', 'global', send,
+    );
+    expect(check.status).toBe('fail');
+    expect(check.detail).toContain('global.anthropic.claude-opus-4-20250514-v1:0');
+    // …and must NOT implicate the model that resolved fine.
+    expect(check.detail).not.toContain('global.anthropic.claude-opus-5,');
+    // The remedy, since "no profile" does not say what to do about it.
+    expect(check.detail).toMatch(/bedrockModels|geography where it resolves/);
+  });
+
+  it('warns, not fails, when the operator lacks GetInferenceProfile', async () => {
+    // A least-privilege operator role says nothing about whether the profile exists.
+    // Failing here would report a healthy stack as broken and exit doctor non-zero.
+    const denied = new Error('User: … is not authorized to perform: bedrock:GetInferenceProfile');
+    denied.name = 'AccessDeniedException';
+    const check = await grantedCheck('anthropic.claude-opus-5', 'global', jest.fn().mockRejectedValue(denied));
+    expect(check.status).toBe('warn');
+    expect(check.detail).toMatch(/permissions gap on the caller/);
+  });
+
+  it('warns rather than passing when the stack exports no granted set', async () => {
+    // A stack deployed before BedrockModelIds existed. Passing would claim a
+    // verification of a list that was never read.
+    const check = await grantedCheck(null, 'global');
+    expect(check.status).toBe('warn');
+    expect(check.detail).toMatch(/BedrockModelIds/);
+  });
+
+  // A list that is non-empty as a STRING but yields zero models after trimming.
+  // `''` does not test this: it is falsy, so it is caught by the missing-output
+  // branch above and never reaches the zero-length guard — a first version of this
+  // test used `''` and passed with the guard deleted. These values are truthy, so
+  // they reach it, and without it the loop runs zero times and reports
+  // "all 0 granted models resolve" as a PASS having probed nothing.
+  it.each([',', '  ', ',,,'])('does not pass %p as a verified grant list', async (value) => {
+    const send = jest.fn().mockResolvedValue({});
+    const check = await grantedCheck(value, 'global', send);
+    expect(check.status).toBe('warn');
+    // A pass here would be vacuous, so assert the count it would have claimed is not
+    // in the detail. (The number of PROBES cannot be asserted from this mock: the
+    // default-model profile check shares it and always sends exactly one.)
+    expect(check.detail).not.toMatch(/All 0 granted/);
+  });
+});

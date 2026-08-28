@@ -122,8 +122,11 @@ node cli/lib/bin/bgagent.js events <TASK_ID> --output json
 - **Task status:** When the Claude CLI reports a terminal error via `ResultMessage.is_error`, the agent marks the task **FAILED** (not COMPLETED) and persists `error_message` in DynamoDB.
 
 **400 "Invocation with on-demand throughput isn't supported":**
-- The Blueprint `modelId` uses a raw foundation model ID (e.g. `anthropic.claude-opus-4-20250514-v1:0`)
-- Fix: change to the inference profile ID (e.g. `global.anthropic.claude-opus-4-20250514-v1:0`), update DynamoDB via redeploy
+- The Blueprint `modelId` uses a raw foundation model ID (e.g. `anthropic.claude-opus-4-8`)
+- Fix: change to the inference profile ID, prefixed with the geography the stack grants —
+  its `BedrockGeoRegion` output (e.g. `global.anthropic.claude-opus-4-8`) — then update
+  DynamoDB via redeploy. A prefix from a *different* geography raises `AccessDenied`
+  rather than this 400, since the IAM grant is scoped per geography.
 
 **503 "Too many connections" / task completes with 0 tokens after long duration:**
 - Bedrock is throttling model invocations. The agent retries for minutes then gives up.

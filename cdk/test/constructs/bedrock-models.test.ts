@@ -89,6 +89,36 @@ describe('resolveBedrockModelIds', () => {
     ).toThrow(/bare foundation-model IDs/);
   });
 
+  // These entries become the RESOURCE half of the Bedrock IAM grant, so a `*` is
+  // not a malformed model name — it is a working wildcard. `bedrockModels: ['*']`
+  // synthed clean and produced `inference-profile/global.*`, i.e. every profile in
+  // the account, which is the `Resource: '*'` grant the per-model scoping exists to
+  // avoid, arrived at through a context value rather than a reviewable policy edit.
+  it.each(['*', 'anthropic.*', 'anthropic.claude-opus-?', '*.anthropic.claude-opus-5'])(
+    'throws on the pattern entry %p rather than granting it as a resource wildcard',
+    (pattern) => {
+      expect(() =>
+        resolveBedrockModelIds(nodeWithContext({ [BEDROCK_MODELS_CONTEXT_KEY]: [pattern] })),
+      ).toThrow(/literal foundation-model IDs, not patterns/);
+    },
+  );
+
+  it('says WHY a pattern is refused, not just that it is', () => {
+    // An operator reading "invalid id" would reasonably retry with a different
+    // pattern. The message has to name the consequence — the grant is what widens.
+    expect(() =>
+      resolveBedrockModelIds(nodeWithContext({ [BEDROCK_MODELS_CONTEXT_KEY]: ['*'] })),
+    ).toThrow(/grant every inference profile in the account/);
+  });
+
+  it('still accepts every shipped default (the guard is not over-broad)', () => {
+    // `?` and `*` are the only rejected characters, and no real model id contains
+    // them — but `:` and `.` and digits abound, so assert the default list survives.
+    expect(() =>
+      resolveBedrockModelIds(nodeWithContext({ [BEDROCK_MODELS_CONTEXT_KEY]: [...DEFAULT_BEDROCK_MODEL_IDS] })),
+    ).not.toThrow();
+  });
+
   it('names the bare id and the geo context key in the rejection message', () => {
     // The error is the only place the bare-ids-only contract is stated at the
     // moment an operator gets it wrong, so it must carry the fix, not just the
