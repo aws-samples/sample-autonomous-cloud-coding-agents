@@ -98,3 +98,96 @@ describe('the consent page itself', () => {
     expect(html).toContain('noindex');
   });
 });
+
+/**
+ * Execute the page's inline script against a minimal DOM shim.
+ *
+ * The grep-based assertions above prove a dangerous sink is ABSENT; these prove the
+ * page actually BEHAVES correctly — that it reads the right query parameter, writes
+ * to the right elements, and treats a hostile session id as text. A typo in an
+ * element id or param name would sail past a grep and only surface in a browser.
+ */
+function runPageScript(search: string): {
+  title: string;
+  lede: string;
+  session?: string;
+  command?: string;
+  removed: string[];
+  markupWrites: string[];
+} {
+  const html = renderConsentPage();
+  const script = html.slice(html.indexOf('<script>') + '<script>'.length, html.indexOf('</script>'));
+  const removed: string[] = [];
+  const markupWrites: string[] = [];
+  const make = (id: string) => {
+    const el: Record<string, unknown> = {
+      id,
+      _text: '',
+      remove: () => { removed.push(id); },
+    };
+    Object.defineProperty(el, 'textContent', {
+      get: () => el._text as string,
+      set: (v: unknown) => { el._text = String(v); },
+    });
+    // Any attempt to write markup is recorded rather than silently allowed.
+    for (const sink of ['innerHTML', 'outerHTML']) {
+      Object.defineProperty(el, sink, {
+        set: () => { markupWrites.push(`${id}.${sink}`); },
+        get: () => '',
+      });
+    }
+    return el;
+  };
+  const els: Record<string, Record<string, unknown>> = {
+    title: make('title'),
+    lede: make('lede'),
+    session: make('session'),
+    hint: make('hint'),
+    command: make('command'),
+  };
+  const sandbox = {
+    window: { location: { search } },
+    document: { getElementById: (id: string) => els[id] ?? null },
+    URLSearchParams,
+  };
+
+  const vm = require('vm') as typeof import('vm');
+  vm.runInNewContext(script, sandbox);
+  return {
+    title: els.title!._text as string,
+    lede: els.lede!._text as string,
+    session: els.session!._text as string,
+    command: els.command!._text as string,
+    removed,
+    markupWrites,
+  };
+}
+
+describe('the consent page, executed', () => {
+  test('extracts session_id and renders it plus the command to run', () => {
+    const id = 'urn:ietf:params:oauth:request_uri:Y2VlYThlMjc';
+    const r = runPageScript(`?session_id=${encodeURIComponent(id)}`);
+    expect(r.title).toBe('Linear authorized');
+    expect(r.session).toBe(id);
+    expect(r.command).toContain(id);
+    expect(r.command).toContain('bgagent linear vault-setup');
+    expect(r.markupWrites).toEqual([]);
+  });
+
+  test('a HOSTILE session id is rendered as text, never as markup', () => {
+    // Behavioural XSS proof: the payload must survive verbatim as text content and
+    // no markup sink may be touched. This is what the grep assertions imply but
+    // cannot actually demonstrate.
+    const payload = '"><img src=x onerror=alert(1)>';
+    const r = runPageScript(`?session_id=${encodeURIComponent(payload)}`);
+    expect(r.session).toBe(payload);
+    expect(r.markupWrites).toEqual([]);
+  });
+
+  test('with no session_id it explains itself and removes the empty slots', () => {
+    const r = runPageScript('');
+    expect(r.title).toBe('Nothing to finish here');
+    expect(r.lede).toContain('vault-setup');
+    expect(r.removed).toEqual(expect.arrayContaining(['session', 'command']));
+  });
+});
