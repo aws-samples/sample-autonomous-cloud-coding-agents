@@ -89,6 +89,13 @@ export const RESOURCE_ACTION_MAP: Record<string, readonly string[]> = {
   'AWS::EC2::VPCEndpoint': ['ec2:CreateVpcEndpoint'],
   'AWS::Events::Rule': ['events:PutRule'],
   'AWS::IAM::Policy': ['iam:CreatePolicy', 'iam:PutRolePolicy'],
+  // CDK spills a role's inline policy into an ATTACHED managed policy once it
+  // exceeds IAM's inline-policy size limit ("…ServiceRoleOverflowPolicy"). The
+  // Linear webhook processor crossed that line when the revocation-alert grants
+  // were added (#812), so a fresh deploy now creates this type and the bootstrap
+  // policy has to allow it — otherwise the first deploy into a clean account fails
+  // on an action nobody added deliberately.
+  'AWS::IAM::ManagedPolicy': ['iam:CreatePolicy', 'iam:AttachRolePolicy'],
   'AWS::IAM::Role': ['iam:CreateRole'],
   'AWS::KMS::Key': ['kms:CreateKey'],
   'AWS::Lambda::EventInvokeConfig': ['lambda:PutFunctionEventInvokeConfig'],

@@ -80,8 +80,8 @@ describe('resolveLinearTokenViaVault', () => {
       .mockResolvedValueOnce({ workloadAccessToken: 'wat-xyz' }) // GetWorkloadAccessTokenForUserId
       .mockResolvedValueOnce({ accessToken: 'lin_oauth_vault' }); // GetResourceOauth2Token
 
-    const token = await resolveLinearTokenViaVault(input, 'abca_linear_oauth');
-    expect(token).toBe('lin_oauth_vault');
+    const result = await resolveLinearTokenViaVault(input, 'abca_linear_oauth');
+    expect(result).toEqual({ kind: 'token', accessToken: 'lin_oauth_vault' });
 
     const watCall = mockSend.mock.calls[0][0] as Tagged;
     expect(watCall._type).toBe('WAT');
@@ -100,24 +100,29 @@ describe('resolveLinearTokenViaVault', () => {
     });
   });
 
-  test('returns null (SM fallback) when the exchange yields an authorizationUrl instead of a token', async () => {
+  test('reports consent-required (not a vague failure) when the exchange yields an authorizationUrl', async () => {
     mockSend
       .mockResolvedValueOnce({ workloadAccessToken: 'wat-xyz' })
       .mockResolvedValueOnce({ authorizationUrl: 'https://bedrock-agentcore.../authorize?request_uri=urn:...', sessionStatus: undefined });
-    const token = await resolveLinearTokenViaVault(input, 'abca_linear_oauth');
-    expect(token).toBeNull();
+    // The distinction matters: consent-required means the grant is DEAD and an
+    // operator must act (#812), where an unavailable result is transient.
+    const result = await resolveLinearTokenViaVault(input, 'abca_linear_oauth');
+    expect(result).toEqual({ kind: 'consent-required' });
   });
 
-  test('returns null when no workload token is minted', async () => {
+  test('reports unavailable (transient) when no workload token is minted', async () => {
     mockSend.mockResolvedValueOnce({}); // no workloadAccessToken
-    const token = await resolveLinearTokenViaVault(input, 'abca_linear_oauth');
-    expect(token).toBeNull();
+    const result = await resolveLinearTokenViaVault(input, 'abca_linear_oauth');
+    expect(result).toEqual({ kind: 'unavailable', reason: 'no_workload_access_token' });
     // Did not attempt the exchange.
     expect(mockSend).toHaveBeenCalledTimes(1);
   });
 
-  test('never throws — an API error degrades to null for SM fallback', async () => {
+  test('never throws — an API error degrades to unavailable, NOT consent-required', async () => {
+    // A throttle or permission error must not be mistaken for a dead grant, or
+    // #812 would page an operator for a transient blip.
     mockSend.mockRejectedValueOnce(new Error('AccessDeniedException'));
-    await expect(resolveLinearTokenViaVault(input, 'abca_linear_oauth')).resolves.toBeNull();
+    await expect(resolveLinearTokenViaVault(input, 'abca_linear_oauth'))
+      .resolves.toEqual({ kind: 'unavailable', reason: 'Error' });
   });
 });

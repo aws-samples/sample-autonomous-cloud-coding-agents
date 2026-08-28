@@ -309,7 +309,16 @@ export class LinearIntegration extends Construct {
     this.webhookProcessorFn = webhookProcessorFn;
     this.projectMappingTable.grantReadData(webhookProcessorFn);
     this.userMappingTable.grantReadData(webhookProcessorFn);
-    this.workspaceRegistryTable.grantReadData(webhookProcessorFn);
+    // WRITE, not just read (#812). `markWorkspaceRevoked` has existed since the
+    // revocation was first diagnosed but was permanently inert: every
+    // token-resolving role held read-only registry access, so the conditional
+    // update failed AccessDenied and the failure was deliberately swallowed (a
+    // diagnosis must never break token resolution). The feature therefore read as
+    // implemented while doing nothing. This processor is the right holder of the
+    // write — it is the path a revoked workspace hits on every event, and the
+    // update is conditioned on `installed_at` so a verdict can never revoke the
+    // successor installation.
+    this.workspaceRegistryTable.grantReadWriteData(webhookProcessorFn);
     // Seed the orchestration DAG + release root children.
     if (props.orchestrationTable) {
       props.orchestrationTable.grantReadWriteData(webhookProcessorFn);

@@ -1738,6 +1738,22 @@ export class AgentStack extends Stack {
       githubScreenshot.processorDlqDepthAlarm,
     );
 
+    // #812: the Linear webhook processor announces a revoked authorization here.
+    // SNS is deliberately the channel — the dead credential is Linear's own, so a
+    // Linear comment cannot report it. The topic has an independent credential and
+    // therefore still works when Linear does not.
+    operationalAlerts.topic.grantPublish(linearIntegration.webhookProcessorFn);
+    // The topic is CMK-encrypted, and `grantPublish` does NOT grant the key.
+    // Without this the publish fails KMSAccessDenied — and because announcing is
+    // best-effort (it must never break token resolution), that failure would be
+    // swallowed and the alert would be silently inert: exactly the dormant-feature
+    // trap this issue exists to remove.
+    operationalAlerts.key.grantEncryptDecrypt(linearIntegration.webhookProcessorFn);
+    linearIntegration.webhookProcessorFn.addEnvironment(
+      'OPERATIONAL_ALERT_TOPIC_ARN',
+      operationalAlerts.topic.topicArn,
+    );
+
     new CfnOutput(this, 'OperationalAlertsTopicArn', {
       value: operationalAlerts.topic.topicArn,
       description: 'SNS topic for DLQ-depth CloudWatch alarms — subscribe Slack / PagerDuty / email here (#629)',

@@ -166,7 +166,7 @@ describe('resolveLinearOauthToken', () => {
         // A stored token exists but must NOT be read on the vault-success path.
         storedToken: makeStoredToken({ access_token: 'lin_oauth_SM_should_not_be_used' }),
       });
-      const resolveViaVault = jest.fn().mockResolvedValue('lin_oauth_from_vault');
+      const resolveViaVault = jest.fn().mockResolvedValue({ kind: 'token', accessToken: 'lin_oauth_from_vault' });
 
       const result = await resolveLinearOauthToken('ws-uuid-1', REGISTRY_TABLE, {
         ...clients,
@@ -180,7 +180,7 @@ describe('resolveLinearOauthToken', () => {
       expect(clients.smSend).not.toHaveBeenCalled();
     });
 
-    test('falls back to the Secrets Manager token when the vault returns null', async () => {
+    test('falls back to the Secrets Manager token when the vault cannot issue one', async () => {
       const clients = makeFakeClients({
         registryItem: {
           workspace_slug: 'acme',
@@ -190,7 +190,7 @@ describe('resolveLinearOauthToken', () => {
         },
         storedToken: makeStoredToken({ access_token: 'lin_oauth_SM_fallback' }),
       });
-      const resolveViaVault = jest.fn().mockResolvedValue(null);
+      const resolveViaVault = jest.fn().mockResolvedValue({ kind: 'consent-required' });
 
       const result = await resolveLinearOauthToken('ws-uuid-1', REGISTRY_TABLE, {
         ...clients,
@@ -213,7 +213,7 @@ describe('resolveLinearOauthToken', () => {
         },
         storedToken: makeStoredToken({ access_token: 'lin_oauth_SM_only' }),
       });
-      const resolveViaVault = jest.fn().mockResolvedValue('should-not-be-called');
+      const resolveViaVault = jest.fn().mockResolvedValue({ kind: 'token', accessToken: 'should-not-be-called' });
 
       const result = await resolveLinearOauthToken('ws-uuid-1', REGISTRY_TABLE, {
         ...clients,
@@ -479,9 +479,9 @@ describe('resolveLinearOauthToken', () => {
       dynamoDbClient: ddbClient,
       secretsManagerClient: { send: smSend } as unknown as Opts['secretsManagerClient'],
       fetchImpl: fetchImpl as unknown as typeof fetch,
-      onAuthorizationRevoked: (workspaceId) => markWorkspaceRevoked(
-        ddbClient as never, REGISTRY_TABLE, workspaceId,
-      ),
+      onAuthorizationRevoked: (detail) => markWorkspaceRevoked(
+        ddbClient as never, REGISTRY_TABLE, detail.linearWorkspaceId,
+      ).then(() => undefined),
     });
     expect(result).toBeNull();
 
@@ -609,8 +609,17 @@ describe('markWorkspaceRevoked — the verdict must not outlive the grant it jud
     const send = jest.fn().mockRejectedValue(conditional);
 
     // Never throws — recording a diagnosis must not break token resolution.
+    // Returning FALSE (not just "not throwing") is what makes the alert dedup
+    // work: a revoked workspace keeps producing events, and only the caller whose
+    // conditional write actually applied may announce it (#812).
     await expect(markWorkspaceRevoked({ send } as never, REGISTRY_TABLE, WS, INSTALLED))
-      .resolves.toBeUndefined();
+      .resolves.toBe(false);
+  });
+
+  test('a latch that APPLIES reports true, so exactly one caller announces it', async () => {
+    const send = jest.fn().mockResolvedValue({});
+    await expect(markWorkspaceRevoked({ send } as never, REGISTRY_TABLE, WS, INSTALLED))
+      .resolves.toBe(true);
   });
 
   test('with no installation to name, it requires the attribute to still be ABSENT', async () => {
@@ -688,9 +697,9 @@ describe('markWorkspaceRevoked — the verdict must not outlive the grant it jud
     await resolveLinearOauthToken(WS, REGISTRY_TABLE, {
       ...clients,
       fetchImpl: fetchImpl as unknown as typeof fetch,
-      onAuthorizationRevoked: (workspaceId) => markWorkspaceRevoked(
-        clients.dynamoDbClient as never, REGISTRY_TABLE, workspaceId, INSTALLED,
-      ),
+      onAuthorizationRevoked: (detail) => markWorkspaceRevoked(
+        clients.dynamoDbClient as never, REGISTRY_TABLE, detail.linearWorkspaceId, INSTALLED,
+      ).then(() => undefined),
     });
 
     const updates = clients.ddbSend.mock.calls

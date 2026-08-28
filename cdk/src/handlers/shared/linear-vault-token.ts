@@ -96,16 +96,30 @@ export function workspaceUserId(linearWorkspaceId: string): string {
 }
 
 /**
- * Mint a Linear access token via the vault. Returns the access token string, or
- * null if issuance is unavailable for ANY reason (not enabled, no cached grant,
- * consent required, or an API/permission error). Never throws — the caller's
- * contract is to fall back to the Secrets-Manager token, so a vault hiccup must
- * degrade gracefully rather than break token resolution.
+ * Outcome of a vault token request.
+ *
+ * Deliberately NOT `string | null`. Collapsing "the grant needs a fresh consent"
+ * and "the call was throttled" into one null hid the only distinction the caller
+ * cares about: the first means the workspace is dead and an operator must act, the
+ * second is transient and self-heals. That is the silent-success-masking shape the
+ * repo lints against, and it is why a revoked vault grant would otherwise be
+ * indistinguishable from a blip (#812).
+ */
+export type VaultTokenResult =
+  | { readonly kind: 'token'; readonly accessToken: string }
+  | { readonly kind: 'consent-required' }
+  | { readonly kind: 'unavailable'; readonly reason: string };
+
+/**
+ * Mint a Linear access token via the vault. Never throws — a vault hiccup must
+ * degrade to the Secrets-Manager fallback rather than break token resolution — but
+ * the reason is returned so the caller can tell a dead grant from a transient
+ * failure.
  */
 export async function resolveLinearTokenViaVault(
   input: VaultTokenInput,
   workloadIdentityName: string,
-): Promise<string | null> {
+): Promise<VaultTokenResult> {
   const region = input.region ?? process.env.AWS_REGION ?? 'us-east-1';
   const client = input.client ?? makeClient(BedrockAgentCoreClient, { region });
   const userId = workspaceUserId(input.linearWorkspaceId);
@@ -123,7 +137,7 @@ export async function resolveLinearTokenViaVault(
       logger.warn('Vault returned no workload access token; falling back to SM', {
         linear_workspace_id: input.linearWorkspaceId,
       });
-      return null;
+      return { kind: 'unavailable', reason: 'no_workload_access_token' };
     }
 
     // Step 2: exchange for the Linear access token (USER_FEDERATION).
@@ -145,7 +159,7 @@ export async function resolveLinearTokenViaVault(
         linear_workspace_id: input.linearWorkspaceId,
         provider_name: input.providerName,
       });
-      return resp.accessToken;
+      return { kind: 'token', accessToken: resp.accessToken };
     }
 
     // No token but an authorization URL ⇒ the grant needs (re-)consent, which
@@ -156,7 +170,7 @@ export async function resolveLinearTokenViaVault(
       session_status: resp.sessionStatus,
       has_authorization_url: Boolean(resp.authorizationUrl),
     });
-    return null;
+    return { kind: 'consent-required' };
   } catch (err) {
     // Any error (permission, throttle, provider missing, service) → SM fallback.
     logger.warn('Vault token resolution failed; falling back to SM', {
@@ -164,7 +178,7 @@ export async function resolveLinearTokenViaVault(
       provider_name: input.providerName,
       error: err instanceof Error ? err.message : String(err),
     });
-    return null;
+    return { kind: 'unavailable', reason: err instanceof Error ? err.name : 'unknown_error' };
   }
 }
 

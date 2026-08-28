@@ -47,6 +47,7 @@ import {
   renderWrongMentionNudge,
 } from './shared/linear-notes';
 import { resolveLinearOauthToken } from './shared/linear-oauth-resolver';
+import { revocationAlerterFromEnv } from './shared/linear-revocation-alert';
 import { fetchIssueParentId } from './shared/linear-subissue-fetch';
 import { lookupTaskByLinearIssue, prNumberFromTask } from './shared/linear-task-by-issue';
 import { logger } from './shared/logger';
@@ -86,6 +87,22 @@ const ddb = makeDocClient();
 const PROJECT_MAPPING_TABLE = process.env.LINEAR_PROJECT_MAPPING_TABLE_NAME!;
 const USER_MAPPING_TABLE = process.env.LINEAR_USER_MAPPING_TABLE_NAME!;
 const WORKSPACE_REGISTRY_TABLE = process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME;
+
+/**
+ * Latch + announce a dead Linear authorization (#812).
+ *
+ * This handler is the right owner: it holds registry WRITE (unlike the read-only
+ * token consumers), and it is the path a revoked workspace hits on every event —
+ * so it is where the platform first learns the grant is gone. Undefined when the
+ * registry table is not configured, which keeps the pre-#812 behaviour (detect,
+ * log, drop) on a stack that has not wired it.
+ */
+const onLinearAuthorizationRevoked = revocationAlerterFromEnv(ddb, WORKSPACE_REGISTRY_TABLE);
+
+/** Resolver options carrying the revocation recorder, spread at each call site. */
+const REVOCATION_RESOLVER_OPTS = onLinearAuthorizationRevoked
+  ? { onAuthorizationRevoked: onLinearAuthorizationRevoked }
+  : {};
 // Sub-issue orchestration: name of OrchestrationTable. Unset until the
 // orchestration stack is deployed — while unset, the parent/sub-issue path is
 // fully dormant and the handler behaves exactly as one-issue → one-task.
@@ -863,7 +880,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   // hydration fails-closed on this rather than run blind.
   let probeOk = true;
   if (WORKSPACE_REGISTRY_TABLE) {
-    const resolved = await resolveLinearOauthToken(workspaceId, WORKSPACE_REGISTRY_TABLE);
+    const resolved = await resolveLinearOauthToken(workspaceId, WORKSPACE_REGISTRY_TABLE, REVOCATION_RESOLVER_OPTS);
     if (!resolved) {
       logger.warn('Linear workspace not resolvable from registry — dropping event', {
         linear_workspace_id: workspaceId,
@@ -1746,7 +1763,7 @@ async function handleNearMissMention(payload: LinearCommentEvent): Promise<void>
   const commentId = payload.data?.id;
   if (!commentedIssueId || !workspaceId || !commentId) return;
 
-  const resolved = await resolveLinearOauthToken(workspaceId, WORKSPACE_REGISTRY_TABLE);
+  const resolved = await resolveLinearOauthToken(workspaceId, WORKSPACE_REGISTRY_TABLE, REVOCATION_RESOLVER_OPTS);
   if (!resolved) {
     logger.info('Near-miss mention: workspace not resolvable — ignoring', { linear_workspace_id: workspaceId });
     return;
@@ -1810,7 +1827,7 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
     return;
   }
 
-  const resolved = await resolveLinearOauthToken(workspaceId, WORKSPACE_REGISTRY_TABLE);
+  const resolved = await resolveLinearOauthToken(workspaceId, WORKSPACE_REGISTRY_TABLE, REVOCATION_RESOLVER_OPTS);
   if (!resolved) {
     logger.info('Comment trigger: workspace not resolvable — ignoring', { linear_workspace_id: workspaceId });
     return;

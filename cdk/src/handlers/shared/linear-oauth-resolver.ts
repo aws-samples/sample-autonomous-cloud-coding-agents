@@ -25,6 +25,7 @@ import {
 import { DynamoDBDocumentClient, GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import {
   LINEAR_VAULT_SCOPES,
+  type VaultTokenResult,
   isVaultEnabled,
   resolveLinearTokenViaVault,
   vaultWorkloadIdentityName,
@@ -115,6 +116,27 @@ export interface StoredOauthToken {
   readonly webhook_signing_secret?: string;
 }
 
+/**
+ * What the platform knows at the moment it discovers an authorization is dead.
+ *
+ * `source` matters because the two paths fail differently: Secrets Manager
+ * surfaces a revoked grant as an `invalid_grant` REJECTION, while the AgentCore
+ * vault surfaces it as "consent required" (an authorization URL instead of a
+ * token). A detector that only understood the first would go quiet exactly when a
+ * workspace moved onto the vault.
+ */
+export interface RevocationDetail {
+  readonly linearWorkspaceId: string;
+  /** Human-facing name for the alert; the slug is what goes in the fix command. */
+  readonly workspaceSlug?: string;
+  /**
+   * `installed_at` of the grant being diagnosed. Passed through to the registry
+   * latch so a verdict about one installation can never revoke its successor.
+   */
+  readonly installedAt?: string;
+  readonly source: 'secrets-manager-refresh' | 'vault-consent-required';
+}
+
 export interface ResolverOptions {
   /** AWS region for SDK clients. Falls back to AWS_REGION env. */
   readonly region?: string;
@@ -124,12 +146,16 @@ export interface ResolverOptions {
   /** Override fetch for token-endpoint refresh in tests. */
   readonly fetchImpl?: typeof fetch;
   /**
-   * Called once the authorization is known dead (the refresh token was rejected
-   * and no concurrent caller had rotated it). Injected rather than written
+   * Called once the authorization is known dead. Injected rather than written
    * inline so this module keeps doing one job — resolving a token — and callers
    * with registry write access opt in. Must not throw; the caller wraps it.
+   *
+   * Receives the full {@link RevocationDetail} rather than just an id, because a
+   * notification that cannot name the workspace or the recovery command is not
+   * actionable, and `source` is what lets an operator tell "Linear rejected our
+   * refresh token" apart from "the vault wants a fresh consent".
    */
-  readonly onAuthorizationRevoked?: (linearWorkspaceId: string) => Promise<void>;
+  readonly onAuthorizationRevoked?: (detail: RevocationDetail) => Promise<void>;
   /**
    * Override the vault token resolver in tests. Production leaves this unset and
    * uses {@link resolveLinearTokenViaVault}. Returns the access token string, or
@@ -139,7 +165,7 @@ export interface ResolverOptions {
     linearWorkspaceId: string,
     providerName: string,
     workloadIdentityName: string,
-  ) => Promise<string | null>;
+  ) => Promise<VaultTokenResult>;
 }
 
 interface CacheEntry<T> {
@@ -216,6 +242,10 @@ export async function resolveLinearOauthToken(
     return null;
   }
 
+  // Set when the vault says the grant needs a fresh consent. Consumed only if no
+  // path yields a token, so a vault-dead / SM-alive workspace keeps working.
+  let vaultConsentRequired = false;
+
   // ─── Step 1b: AgentCore Identity vault (RFC #249 Phase 1) ────────
   // When the vault is enabled AND this workspace was onboarded through it
   // (provider_name recorded), mint the token via the Token Vault. Any failure
@@ -227,10 +257,16 @@ export async function resolveLinearOauthToken(
   if (row.provider_name && workloadName && (isVaultEnabled() || options.resolveViaVault)) {
     const viaVault = options.resolveViaVault ?? ((wsId, provider, wl) =>
       resolveLinearTokenViaVault({ linearWorkspaceId: wsId, providerName: provider, region }, wl));
-    const vaultToken = await viaVault(linearWorkspaceId, row.provider_name, workloadName);
-    if (vaultToken) {
+    const vaultResult = await viaVault(linearWorkspaceId, row.provider_name, workloadName);
+    // A vault grant that needs consent is DEAD, not slow — remember it so the
+    // no-token-anywhere path below can report it. Deliberately NOT latched here:
+    // a workspace may still hold a working Secrets-Manager token, and marking the
+    // row `revoked` while resolution still succeeds would take a functioning
+    // workspace offline (the resolver refuses a non-active row).
+    vaultConsentRequired = vaultResult.kind === 'consent-required';
+    if (vaultResult.kind === 'token') {
       return {
-        accessToken: vaultToken,
+        accessToken: vaultResult.accessToken,
         scope: LINEAR_VAULT_SCOPES.join(' '),
         workspaceSlug: row.workspace_slug,
         // No SM secret is read/written on the vault path, but the ARN is still
@@ -239,7 +275,7 @@ export async function resolveLinearOauthToken(
         providerName: row.provider_name,
       };
     }
-    // vaultToken === null ⇒ fall through to Secrets-Manager resolution.
+    // Anything other than a token ⇒ fall through to Secrets-Manager resolution.
   }
 
   // ─── Step 2: Cached or fresh token JSON ──────────────────────────
@@ -254,6 +290,26 @@ export async function resolveLinearOauthToken(
         oauth_secret_arn: row.oauth_secret_arn,
         linear_workspace_id: linearWorkspaceId,
       });
+      // Vault-onboarded workspace whose grant needs consent AND whose Secrets
+      // Manager fallback is gone: nothing can produce a token, so this IS the
+      // revocation. Report it here rather than letting the vault path fail
+      // silently — the whole point of #812 is that the vault's "consent required"
+      // is as terminal as Secrets Manager's `invalid_grant`, just quieter.
+      if (vaultConsentRequired && options.onAuthorizationRevoked) {
+        try {
+          await options.onAuthorizationRevoked({
+            linearWorkspaceId,
+            workspaceSlug: row.workspace_slug,
+            installedAt: row.installed_at,
+            source: 'vault-consent-required',
+          });
+        } catch (err) {
+          logger.warn('Could not mark the Linear workspace as revoked (non-fatal)', {
+            linear_workspace_id: linearWorkspaceId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
       return null;
     }
     token = fetched;
@@ -336,6 +392,12 @@ export async function resolveLinearOauthToken(
  * When the caller has no ``installed_at`` to name (a row written before it was
  * recorded), the write falls back to requiring the attribute to still be absent —
  * so a re-authorization, which adds it, likewise takes the row out of scope.
+ *
+ * Returns whether THIS call latched the row. That boolean is the dedup key for
+ * notification (#812): a revoked workspace keeps producing events, and each one
+ * re-detects the same dead grant, so alerting on detection would page once per
+ * event. Only the caller that actually flipped `active → revoked` should announce
+ * it; everyone else gets `false` because the conditional write did not apply.
  */
 export async function markWorkspaceRevoked(
   ddb: DynamoDBDocumentClient,
@@ -343,7 +405,8 @@ export async function markWorkspaceRevoked(
   linearWorkspaceId: string,
   expectedInstalledAt?: string,
   now: string = new Date().toISOString(),
-): Promise<void> {
+  reason: string = 'refresh_token_rejected',
+): Promise<boolean> {
   try {
     await ddb.send(new UpdateCommand({
       TableName: tableName,
@@ -357,7 +420,7 @@ export async function markWorkspaceRevoked(
         ':revoked': 'revoked',
         ':active': 'active',
         ':now': now,
-        ':reason': 'refresh_token_rejected',
+        ':reason': reason,
         ...(expectedInstalledAt !== undefined && { ':installed': expectedInstalledAt }),
       },
     }));
@@ -371,11 +434,12 @@ export async function markWorkspaceRevoked(
       logger.info('Skipped the revoked marker — the registry row is no longer the installation diagnosed', {
         linear_workspace_id: linearWorkspaceId,
       });
-      return;
+      return false;
     }
     throw err;
   }
   registryCache.delete(linearWorkspaceId);
+  return true;
 }
 
 export async function getRegistryRowStrict(
@@ -609,7 +673,12 @@ async function refreshLinearToken(
     // feedback outage into a thrown handler.
     if (options.onAuthorizationRevoked) {
       try {
-        await options.onAuthorizationRevoked(current.workspace_id);
+        await options.onAuthorizationRevoked({
+          linearWorkspaceId: current.workspace_id,
+          workspaceSlug: current.workspace_slug,
+          installedAt: current.installed_at,
+          source: 'secrets-manager-refresh',
+        });
       } catch (err) {
         logger.warn('Could not mark the Linear workspace as revoked (non-fatal)', {
           workspace_id: current.workspace_id,

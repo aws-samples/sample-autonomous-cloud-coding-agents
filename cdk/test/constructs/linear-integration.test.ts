@@ -260,3 +260,34 @@ describe('LinearIntegration construct — attachmentsBucket wiring', () => {
     });
   });
 });
+
+describe('revoked-authorization recording (#812)', () => {
+  // The whole point of the issue: markWorkspaceRevoked existed but every
+  // token-resolving role held read-only registry access, so the conditional write
+  // failed AccessDenied and was swallowed — a feature that read as implemented
+  // while being permanently inert. The grant is the fix; assert it exists, so a
+  // future least-privilege tightening cannot quietly make it dormant again.
+  test('the webhook processor holds registry WRITE, not just read', () => {
+    const app = new App();
+    const stack = new Stack(app, 'RevocationStack');
+    const api = new apigw.RestApi(stack, 'TestApi');
+    const userPool = new cognito.UserPool(stack, 'TestUserPool');
+    const taskTable = new dynamodb.Table(stack, 'TaskTable', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+    });
+    const taskEventsTable = new dynamodb.Table(stack, 'TaskEventsTable', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'event_id', type: dynamodb.AttributeType.STRING },
+    });
+    new LinearIntegration(stack, 'LinearIntegration', { api, userPool, taskTable, taskEventsTable });
+    const template = Template.fromStack(stack);
+
+    const processorPolicy = Object.values(template.findResources('AWS::IAM::Policy')).find((p) =>
+      JSON.stringify(p.Properties.Roles ?? '').includes('WebhookProcessorFn'),
+    );
+    expect(processorPolicy).toBeDefined();
+    const actions = JSON.stringify(processorPolicy!.Properties.PolicyDocument.Statement);
+    // UpdateItem is what markWorkspaceRevoked needs; a read-only grant omits it.
+    expect(actions).toContain('dynamodb:UpdateItem');
+  });
+});
