@@ -4,20 +4,58 @@ This guide covers deploying ABCA into an AWS account, including compute backend 
 
 ## Architecture overview
 
-ABCA deploys as a **single CDK stack** (`backgroundagent-dev`) containing all platform resources. The stack uses a `ComputeStrategy` interface to support two compute backends within the same stack:
+ABCA deploys as a **single CDK stack** (`backgroundagent-dev`) containing all platform resources. The stack uses a `ComputeStrategy` interface to support three compute backends within the same stack:
 
-| Aspect | AgentCore (default) | ECS Fargate (opt-in) |
-|--------|--------------------|--------------------|
-| **Compute** | Bedrock AgentCore Runtime (Firecracker MicroVMs) | ECS Fargate containers |
-| **Resources** | 2 vCPU, 8 GB RAM, 2 GB max image size | 2 vCPU, 4 GB RAM |
-| **Orchestration** | Durable Lambda (checkpoint/replay) | Same durable Lambda via `ComputeStrategy` |
-| **Agent mode** | FastAPI server (HTTP invocation) | Batch (run-to-completion) |
-| **Startup** | ~10s (warm MicroVM) | ~60-180s (Fargate cold start) |
-| **Max duration** | 8 hours (AgentCore service limit) | 9 hours (orchestrator `executionTimeout`) |
+| Aspect | AgentCore (default) | ECS Fargate (opt-in) | Lambda MicroVMs (experimental) |
+|--------|--------------------|--------------------|--------------------|
+| **Compute** | Bedrock AgentCore Runtime (Firecracker MicroVMs) | ECS Fargate containers | AWS Lambda MicroVMs |
+| **Resources** | 2 vCPU, 8 GB RAM, 2 GB max image size | 2 vCPU, 4 GB RAM | 8 GB baseline / 32 GB peak memory |
+| **Orchestration** | Durable Lambda (checkpoint/replay) | Same durable Lambda via `ComputeStrategy` | Same durable Lambda via `ComputeStrategy` |
+| **Agent mode** | FastAPI server (HTTP invocation) | Batch (run-to-completion) | FastAPI server (lifecycle hooks) |
+| **Startup** | ~10s (warm MicroVM) | ~60-180s (Fargate cold start) | ~6s to `RUNNING` (live-measured) |
+| **Max duration** | 8 hours (AgentCore service limit) | 9 hours (orchestrator `executionTimeout`) | 8 hours (`maximumDurationInSeconds`) |
 
-Both backends are orchestrated by the same durable Lambda function. The `ComputeStrategy` interface abstracts `startSession()`, `pollSession()`, and `stopSession()` -- the ECS strategy calls `ecs:RunTask` / `ecs:DescribeTasks` / `ecs:StopTask` directly from the Lambda. No Step Functions are used.
+All backends are orchestrated by the same durable Lambda function. The `ComputeStrategy` interface abstracts `startSession()`, `pollSession()`, and `stopSession()` -- the ECS strategy calls `ecs:RunTask` / `ecs:DescribeTasks` / `ecs:StopTask` directly from the Lambda. No Step Functions are used.
 
 ECS Fargate is currently **opt-in** -- the `EcsAgentCluster` construct is present in the stack code but commented out. To enable it, uncomment the ECS blocks in `cdk/src/stacks/agent.ts`.
+
+### Lambda MicroVMs backend (experimental)
+
+> **Not for production.** `lambda-microvm` carries no smoke-parity guarantee for an unattended deployment. Keep production repositories on `agentcore` or `ecs`. Synth emits an unsuppressible warning to this effect whenever the backend is selected. Design detail: [COMPUTE.md](../design/COMPUTE.md) and [ADR-021](../decisions/ADR-021-lambda-microvms-compute-backend.md).
+
+Selecting it is a synth-time context flag:
+
+```bash
+mise //cdk:deploy -- --context compute_type=lambda-microvm
+```
+
+**You must re-bootstrap first.** This is the single most common way this backend fails, and the failure does not look like a configuration problem:
+
+1. Check the bootstrap policy bundle already deployed in the account:
+
+   ```bash
+   aws cloudformation describe-stacks --stack-name CDKToolkit \
+     --query "Stacks[0].Outputs[?OutputKey=='BootstrapPolicyVersion'].OutputValue | [0]" --output text
+   ```
+
+2. If it is **below 1.6.0**, re-bootstrap with the backend included in `ComputeTypes`. `cdk bootstrap` cannot pass template parameters, so the parameter goes on the `CDKToolkit` stack directly:
+
+   ```bash
+   aws cloudformation deploy \
+     --template-file cdk/bootstrap/bootstrap-template.yaml \
+     --stack-name CDKToolkit --capabilities CAPABILITY_NAMED_IAM \
+     --parameters ParameterKey=ComputeTypes,ParameterValue=agentcore\,lambda-microvm
+   ```
+
+   Bundle 1.6.0 adds the `MicrovmPassRoles` statement, without which the CDK-managed MicroVM image deploy fails with an `iam:PassRole` **AccessDenied on the build role** -- an IAM error that reads like a code bug. Rationale and the live evidence for the missing `iam:PassedToService` condition: [DEPLOYMENT_ROLES.md](../design/DEPLOYMENT_ROLES.md#iacrole-abca-compute-lambdamicrovms).
+
+3. Regional availability is limited (5 Regions at launch). Synth fails fast with the supported list if the stack's Region is not among them; `bgagent doctor` probes it live.
+
+Operational notes specific to this backend:
+
+- **Nothing self-terminates.** A MicroVM whose task finished, crashed, or hung stays `RUNNING` and billing until the 8-hour cap. The orchestrator calls `TerminateMicrovm` on finalize, and the heartbeat-staleness check catches a hung guest inside a healthy VM -- but a leaked handle is a cost incident. The one exception: the service reaps a VM whose `/run` hook returns 4xx (~12s).
+- **Logs** land in `/aws/lambda-microvms/<image-name>`. Guest stdout goes there too, which is the fallback path when the agent cannot reach the application log group.
+- **Deployment identifiers are not baked into the image.** The snapshot carries no configuration; table names, secret ARNs, and the per-task session-role ARN arrive in the `/run` payload as a `platform_config` block. A version-skewed orchestrator that does not send it is refused rather than run with tenant scoping disabled.
 
 ### Optional Agent Registry
 
@@ -91,6 +129,7 @@ For the full cost model including per-task costs, see [COST_MODEL.md](../design/
 |---------|---------|---------------|
 | Bedrock AgentCore Runtime (MicroVMs) | Agent sessions (default) | Yes |
 | ECS Fargate (when enabled) | Agent sessions (opt-in) | Yes |
+| AWS Lambda MicroVMs (when enabled) | Agent sessions (experimental, `--context compute_type=lambda-microvm`) | Yes |
 | Lambda (Node.js 24, ARM64) | Orchestrator, API handlers, fanout consumer, reconcilers, custom resources | Yes |
 
 ### AI/ML
@@ -264,3 +303,4 @@ For users without AWS CLI access.
 - [COST_MODEL.md](../design/COST_MODEL.md) -- Per-task costs, cost guardrails, cost at scale.
 - [COST_ATTRIBUTION.md](./COST_ATTRIBUTION.md) -- Operator FinOps setup for per-user/per-repo Bedrock chargeback (Cost Explorer / CUR 2.0, invocation-log forensics).
 - [COMPUTE.md](../design/COMPUTE.md) -- Compute backend architecture and trade-offs.
+- [ADR-021](../decisions/ADR-021-lambda-microvms-compute-backend.md) -- Lambda MicroVMs backend decision, phased rollout, and live-verification evidence.

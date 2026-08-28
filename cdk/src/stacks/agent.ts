@@ -37,8 +37,8 @@ import { ApiKeyTable } from '../constructs/api-key-table';
 import { ApprovalMetricsPublisherConsumer } from '../constructs/approval-metrics-publisher-consumer';
 import { AttachmentsBucket } from '../constructs/attachments-bucket';
 import {
-  PLATFORM_DEFAULT_AUX_MODEL_ID,
   PLATFORM_DEFAULT_MODEL_ID,
+  haikuInferenceProfileId,
   inferenceProfileId,
   resolveBedrockGeoRegion,
   resolveBedrockModelIds,
@@ -484,22 +484,25 @@ export class AgentStack extends Stack {
       AWS_REGION: process.env.AWS_REGION ?? 'us-east-1',
       CLAUDE_CODE_USE_BEDROCK: '1',
       ANTHROPIC_LOG: 'debug',
-      // Both models as geo-prefixed inference-profile ids, NOT bare foundation-model
+      // Cross-region inference-profile ids (geo prefix), NOT bare foundation-model
       // ids: Claude 4.x can't be invoked on-demand by bare id (400 "on-demand
-      // throughput isn't supported").
+      // throughput isn't supported"). Both are derived from `bedrockGeoRegion` rather
+      // than hardcoded, so neither can silently split from the granted profiles on a
+      // non-default deploy, and the model ids come from the same constants the grant
+      // list interpolates.
       //
-      // The MAIN model is set here deliberately, and it was previously missing. Only
-      // the auxiliary var was injected, so the main model fell through to a literal
-      // in agent/src/config.py that a geography change did not touch — deploying a
-      // different `bedrockGeoRegion` granted one geography's profiles while the agent
-      // asked for another's, and every task with no per-repo override failed at turn 0
-      // with AccessDenied. Injecting both from the resolved geography makes the
-      // divergence impossible rather than something a checklist has to catch.
+      // The MAIN model is set here deliberately, and was previously absent: only the
+      // auxiliary var was injected, so the main model fell through to a literal in
+      // agent/src/config.py that a geography change does not touch. A deploy with a
+      // different `bedrockGeoRegion` therefore granted one geography's profiles while
+      // the agent asked for another's, and every task with no per-repo override failed
+      // at turn 0 with AccessDenied.
       //
-      // runner.py re-sets these at spawn time; a per-repo `model_id` still overrides.
+      // The lambda-microvm `platform_config` block below derives the same two values
+      // from the same geography. runner.py re-sets both at spawn time; a per-repo
+      // `model_id` still overrides.
       ANTHROPIC_MODEL: inferenceProfileId(bedrockGeoRegion, PLATFORM_DEFAULT_MODEL_ID),
-      ANTHROPIC_DEFAULT_HAIKU_MODEL:
-        inferenceProfileId(bedrockGeoRegion, PLATFORM_DEFAULT_AUX_MODEL_ID),
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: haikuInferenceProfileId(bedrockGeoRegion),
       TASK_TABLE_NAME: taskTable.table.tableName,
       TASK_EVENTS_TABLE_NAME: taskEventsTable.table.tableName,
       NUDGES_TABLE_NAME: taskNudgesTable.table.tableName,
@@ -915,18 +918,23 @@ export class AgentStack extends Stack {
         // to the same per-task SessionRole the AgentCore runtime and the Fargate
         // task role use, so tenant-data access is tag-scoped on every substrate.
         agentSessionRole,
+        // ADR-021 P2 runtime parity on the MicroVM execution role. Same two props
+        // EcsAgentCluster takes, for the same reasons: the PAT is read at startup
+        // before the SessionRole is assumed, and MEMORY_ID (already delivered in
+        // agent_payload) makes the agent ATTEMPT a memory write that fails closed
+        // without the grant. The remaining parity grants (channel OAuth, Bedrock,
+        // AZ describe) need no stack input and are wired inside the construct.
+        githubTokenSecret,
+        agentMemory,
+        // ADR-021 P2-F4: the SAME log group whose name travels to the guest in
+        // `agentPlatformConfig.logGroupName` below (→ `LOG_GROUP_NAME`). P2
+        // delivered the name without the grant, so the agent's structured per-task
+        // lines and its METRICS_REPORT were AccessDenied on
+        // logs:CreateLogStream and the platform's canonical observability streams
+        // were empty on this backend. Passing the construct (not the name) keeps the
+        // grant and the delivered value derived from one object.
+        applicationLogGroup,
         // Resolved above TaskApi — see `microvmImageInputs`.
-        // Both models, from the same resolved geography as the grants — parity with the
-        // AgentCore runtime env and the ECS task definitions. Omitted before, which left
-        // this substrate with exactly the divergence the other two had fixed: on a
-        // `-c bedrockGeoRegion=us` deploy the grants were `us.` while the agent still
-        // read the `global.` literal from config.py, so every task with no per-repo
-        // override failed at turn 0 with AccessDenied.
-        imageEnvironmentVariables: {
-          ANTHROPIC_MODEL: inferenceProfileId(bedrockGeoRegion, PLATFORM_DEFAULT_MODEL_ID),
-          ANTHROPIC_DEFAULT_HAIKU_MODEL:
-            inferenceProfileId(bedrockGeoRegion, PLATFORM_DEFAULT_AUX_MODEL_ID),
-        },
         ...microvmImageInputs,
       })
       : undefined;
@@ -1031,6 +1039,50 @@ export class AgentStack extends Stack {
       guardrailVersion: inputGuardrail.guardrailVersion,
       attachmentsBucket: attachmentsBucket.bucket,
       ...(agentRegistry && { agentRegistryId: agentRegistry.registryId }),
+      // ADR-021 P2: non-secret platform identifiers the orchestrator forwards to
+      // the in-guest agent as `platform_config` on the MicroVM /run payload — the
+      // MicroVM equivalent of the AgentCore runtime env block above and the ECS
+      // container env, because a snapshot must not bake configuration in.
+      //
+      // Sourced from the SAME stack-level values that block uses, deliberately, so
+      // an agent behaves identically on all three substrates and a value can only
+      // be changed in one place. Wired unconditionally (not under the
+      // lambda-microvm gate) so the strategy's required-identifier guard can only
+      // ever fire for an environment edited outside CDK.
+      //
+      // No grant rides along: the orchestrator forwards these names and calls none
+      // of the resources they identify.
+      agentPlatformConfig: {
+        taskApprovalsTableName: taskApprovalsTable.table.tableName,
+        nudgesTableName: taskNudgesTable.table.tableName,
+        logGroupName: applicationLogGroup.logGroupName,
+        // INTENTIONAL, not a wiring bug: both keys resolve to the SAME bucket
+        // (`traceArtifactsBucket`), exactly as `ARTIFACTS_BUCKET_NAME` and
+        // `TRACE_ARTIFACTS_BUCKET_NAME` do in the AgentCore runtime env block above
+        // — a live P2 run flagged the coincidence (ADR-021 P2-F8) so it is recorded
+        // here rather than re-derived. They stay two keys because the agent reads
+        // them from two independent code paths with two different prefixes
+        // (`deliver_artifact` → `artifacts/<task_id>/`, `telemetry.py --trace` →
+        // `traces/<user_id>/<task_id>.jsonl.gz`), and the per-task SessionRole
+        // scopes each prefix separately. Collapsing them to one key would make
+        // splitting the buckets later a cross-package contract change; sending one
+        // bucket through two keys costs nothing today.
+        artifactsBucketName: traceArtifactsBucket.bucket.bucketName,
+        traceArtifactsBucketName: traceArtifactsBucket.bucket.bucketName,
+        // The SessionRole is created above (before the orchestrator), so this needs
+        // no Lazy — it is the same CFN token the runtime env receives.
+        agentSessionRoleArn: agentSessionRole.role.roleArn,
+        // Same helper, same resolved geography as the AgentCore runtime env
+        // above (#764) — the two substrates cannot be told to call different
+        // inference profiles.
+        anthropicDefaultHaikuModel: haikuInferenceProfileId(bedrockGeoRegion),
+        // The MAIN model, delivered the same way for the same reason. Only the auxiliary
+        // one was, so on this substrate the main model came from a literal in
+        // agent/src/config.py that a geography change does not touch: a non-default
+        // `bedrockGeoRegion` granted one geography while the agent asked for another,
+        // and every task with no per-repo override failed at turn 0 with AccessDenied.
+        anthropicModel: inferenceProfileId(bedrockGeoRegion, PLATFORM_DEFAULT_MODEL_ID),
+      },
       // Route ``compute_type: 'ecs'`` repos to the Fargate cluster above —
       // only when the cluster was synthesized (deploy --context compute_type=ecs).
       ...(ecsCluster && {
