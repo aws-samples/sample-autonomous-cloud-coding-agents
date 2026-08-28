@@ -684,6 +684,14 @@ export function makeLinearCommand(): Command {
           console.log('\n  → Hosted consent. Open this URL in any browser:\n');
           console.log(`    ${authorizationUrl}\n`);
           console.log(`  After you Authorize you will land on:\n    ${setupHostedUrl}`);
+          console.log(
+            '\n  ⚠ That exact URL must be registered as a Callback URL on the Linear app,'
+            + '\n    or consent fails with "Invalid redirect_uri". It is a generated'
+            + '\n    CloudFront domain, so it CHANGES if the consent page is ever recreated'
+            + '\n    (flag toggled off/on, stack recreated). If consent starts failing after a'
+            + '\n    redeploy, re-check this URL against the app — Linear accepts several, so'
+            + '\n    adding the new one is safe and the stale entry does no harm.',
+          );
           console.log('  It shows an authorization code. Finish with:\n');
           console.log(`    bgagent linear setup ${slug} --code <code>\n`);
           console.log('  (Codes are single-use and expire quickly, so run it promptly.)');
@@ -1180,6 +1188,11 @@ export function makeLinearCommand(): Command {
           console.log('\n  → Hosted consent. Open this URL in any browser:\n');
           console.log(`    ${consent.authorizationUrl}\n`);
           console.log(`  After you Authorize, you will land on:\n    ${hostedReturnUrl}`);
+          console.log(
+            '  (Generated CloudFront domain — it changes if the consent page is recreated.'
+            + '\n   Linear accepts several callback URLs, so add the new one if consent starts'
+            + '\n   failing after a redeploy.)',
+          );
           console.log('  Copy the session id it shows, then finish with:\n');
           console.log(`    bgagent linear vault-setup ${slug} --session <session-id>\n`);
           console.log('  (The session id is also the `session_id` value in that page\'s URL.)');
