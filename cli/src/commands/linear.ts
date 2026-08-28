@@ -202,10 +202,10 @@ export function renderLinearAppTemplate(opts: LinearAppTemplateOptions = {}): st
   // produces a usable config without forcing every operator to invent strings.
   // Operators with custom branding override via flags.
   const appName = opts.appName?.trim() || DEFAULT_APP_NAME;
-  // Derived from the app name so choosing one name is enough — Linear requires a
-  // GitHub username for actor=app, and making the operator invent a second
-  // consistent identifier is just another thing to get wrong. `--bot-name` still
-  // wins for anyone who needs the two to differ.
+  // Derived from the app name so choosing one name is enough: some versions of
+  // Linear's app form ask for a GitHub username, and making the operator invent a
+  // second consistent identifier is just another thing to get wrong. `--bot-name`
+  // still wins for anyone who needs the two to differ.
   const botName = opts.botName ?? `${githubUsernameFrom(appName)}[bot]`;
   const developerName = opts.developerName ?? 'ABCA';
   const developerUrl = opts.developerUrl ?? 'https://github.com/aws-samples/sample-autonomous-cloud-coding-agents';
@@ -269,12 +269,13 @@ export function renderLinearAppTemplate(opts: LinearAppTemplateOptions = {}): st
         '    with `bgagent linear setup <slug> --hosted`.',
       ]),
     '',
-    `  GitHub username:     ${annotate(botName, 'REQUIRED for actor=app')}`,
+    `  GitHub username:     ${annotate(botName, 'only if your form shows this field')}`,
     '  Public:              OFF',
     '  Client credentials:  OFF',
-    '  Webhooks:            ON              ← REQUIRED for actor=app',
-    '    Webhook URL:       https://example.com/placeholder  ← any HTTPS URL',
-    '    (You do NOT need to subscribe to any events for the OAuth flow itself)',
+    '',
+    '  Leave the app\'s own Webhooks toggle alone — ABCA does not use it. Its events',
+    '  arrive via a WORKSPACE webhook you create separately; `bgagent linear',
+    '  webhook-info` prints the URL and values for it.',
     '',
     'Click Save, copy the Client ID and Client Secret, then return here.',
     '',
@@ -284,23 +285,25 @@ export function renderLinearAppTemplate(opts: LinearAppTemplateOptions = {}): st
     '    and strips spaces for the display handle). But it does NOT change how',
     `    people summon the agent: the trigger is always \`${COMMENT_TRIGGER_TOKEN} <request>\`,`,
     '    whatever you name the app. Renaming changes the label, not the trigger.',
-    '  • GitHub username is REQUIRED for actor=app — leaving it blank surfaces a',
-    '    misleading "Invalid redirect_uri" error, not a "missing username" one.',
-    '    It is derived from the application name above; override with --bot-name.',
-    '  • Webhooks toggle must be ON for the same reason; the URL value is unused',
-    '    by the OAuth dance and can be a placeholder.',
-    '  • Wildcard callback URLs are not accepted by Linear; list each URL fully.',
-    '  • Using the AgentCore Identity vault? Linear must list BOTH callback URLs: the',
-    '    one the direct `setup` uses (localhost, or the hosted consent page) and the',
-    '    vault provider callback that `vault-setup` prints. Missing the second is the',
-    '    usual cause of a "Invalid redirect_uri parameter for the application" error',
-    '    mid-consent.',
+    '  • "Invalid redirect_uri parameter for the application" means the exact URL',
+    '    you are being redirected to is not registered on the app. Check that every',
+    '    URL above is listed, on ONE line each — a wrapped URL becomes two',
+    '    malformed entries Linear silently rejects — and that wildcards are not',
+    '    used, since Linear does not accept them. Using the vault? Both the setup',
+    '    URL and the vault provider callback have to be there; a missing provider',
+    '    callback is the usual cause of this error mid-consent.',
+    '  • The GitHub username line is there only because some versions of Linear\'s',
+    '    app form ask for one; it is derived from the application name (override',
+    '    with --bot-name). Linear\'s current docs and API describe no such field, so',
+    '    if your form does not show it, skip it — it is not an actor=app',
+    '    requirement, and a blank one is not what causes the error above.',
     '  • Do NOT enable Linear "agent" / app-notification events on this app. ABCA',
     '    is a COMMENT-based integration (it replies + reacts on ordinary comments).',
     '    With agent events on, Linear renders an @mention of the app as its',
     '    interactive agent-activity surface instead of a comment thread, which',
     '    breaks the reply/reaction UX. Leave agent/app events OFF; the trigger comes',
     '    from the workspace webhook (Issues + Comments), configured separately next.',
+    '  • actor=app cannot also request the `admin` scope — Linear rejects the pair.',
     bar,
   ].join('\n');
 }
@@ -534,7 +537,7 @@ export function makeLinearCommand(): Command {
     new Command('app-template')
       .description('Print the field values to paste into Linear\'s OAuth app form')
       .option('--app-name <name>', `Your agent's name in Linear (default: ${DEFAULT_APP_NAME})`)
-      .option('--bot-name <name>', 'GitHub username for actor=app (derived from --app-name; must end with [bot])')
+      .option('--bot-name <name>', 'GitHub username, if your Linear app form asks for one (derived from --app-name; must end with [bot])')
       .option('--developer-name <name>', 'Developer name shown on Linear\'s consent screen')
       .option('--developer-url <url>', 'Developer URL shown on Linear\'s consent screen')
       .option('--description <text>', 'App description shown on Linear\'s consent screen')

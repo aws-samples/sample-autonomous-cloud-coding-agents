@@ -159,8 +159,39 @@ describe('renderLinearAppTemplate', () => {
   test('uses sane defaults when no options are passed', () => {
     const out = renderLinearAppTemplate();
     expect(out).toContain('bgagent[bot]');
-    expect(out).toContain('Webhooks:            ON');
-    expect(out).toContain('REQUIRED for actor=app');
+    expect(out).toContain('actor=app');
+  });
+
+  test('does NOT claim a GitHub username or app webhook is required for actor=app', () => {
+    // Both claims were unsupportable: Linear's docs and its Application API expose
+    // no GitHub-username field, and ABCA's events arrive via a WORKSPACE webhook
+    // created separately, not the app's own webhook toggle. Asserting a
+    // requirement that isn't one sends operators to fix the wrong field while the
+    // real cause (an unregistered callback URL) stays broken.
+    const out = renderLinearAppTemplate();
+    expect(out).not.toMatch(/GitHub username is REQUIRED/);
+    expect(out).not.toMatch(/Webhooks:\s+ON\s+←\s+REQUIRED/);
+    expect(out).not.toMatch(/Webhooks toggle must be ON/);
+  });
+
+  test('points "Invalid redirect_uri" at the registered-URL list, the verified cause', () => {
+    const out = renderLinearAppTemplate();
+    expect(out).toContain('Invalid redirect_uri parameter for the application');
+    expect(out).toMatch(/not registered on the app/);
+    // The line-wrap trap is real and stays.
+    expect(out).toMatch(/ONE line each/);
+  });
+
+  test('says the app webhook toggle is not what delivers ABCA events', () => {
+    const out = renderLinearAppTemplate();
+    expect(out).toMatch(/WORKSPACE webhook/);
+    expect(out).toContain('bgagent linear');
+    expect(out).toContain('webhook-info');
+  });
+
+  test('records that actor=app and the admin scope are mutually exclusive', () => {
+    // Linear rejects the pair; requesting both is a silent dead-end otherwise.
+    expect(renderLinearAppTemplate()).toMatch(/cannot also request the `admin` scope/);
   });
 
   test('warns against enabling Linear agent / app-notification events (breaks comment-thread UX)', () => {
@@ -197,7 +228,7 @@ describe('renderLinearAppTemplate', () => {
     expect(out).toContain('vault-setup');
     expect(out).toMatch(/Invalid redirect_uri/);
     // And the gotcha list must spell out that BOTH URLs belong on the app.
-    expect(out).toMatch(/BOTH callback URLs/);
+    expect(out).toMatch(/vault provider callback have to be there/);
   });
 
   test('with a vault callback supplied it lists BOTH URLs, keeping the direct flow working', () => {
@@ -327,7 +358,7 @@ describe('renderLinearAppTemplate', () => {
     // docs — without it operators paste blindly and hit the cryptic Linear
     // "Invalid redirect_uri" error documented in the 2.0b spike.
     expect(out).toContain('Invalid redirect_uri');
-    expect(out).toContain('Wildcard callback URLs are not accepted');
+    expect(out).toMatch(/wildcards are not\s+used/);
   });
 });
 

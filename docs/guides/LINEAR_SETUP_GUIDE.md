@@ -264,13 +264,15 @@ A `WARN … Ignoring Linear agent-mode webhook …` line (with `linear_workspace
 
 ### "Invalid redirect_uri parameter for the application" during step 3
 
-Linear's misleading error for `actor=app` flows where the OAuth app config is incomplete (it reports `Invalid redirect_uri` regardless of which required field is actually missing). In your Linear app settings, confirm:
+Nearly always what it says: the exact URL you are being redirected to is not registered on the app. In your Linear app settings, confirm:
 
-- **GitHub username** is filled in (Linear's inline help describes the field and the `[bot]` suffix) — a blank value triggers this error.
-- **Webhooks** toggle is ON.
-- The Callback URL is on a **single line** (line-wrapped URLs become two malformed entries Linear silently rejects).
+- **Every callback URL you use is listed.** The direct flow and the AgentCore Identity vault redirect to *different* URLs, and both need to be present — a missing vault provider callback fails here mid-consent. `bgagent linear app-template --slug <slug>` prints the full list.
+- Each URL is on a **single line** (line-wrapped URLs become two malformed entries Linear silently rejects).
+- No **wildcards** — Linear does not accept them; list each URL in full.
 
 Re-run `bgagent linear setup` after fixing.
+
+> Earlier versions of this guide also blamed a blank **GitHub username** field and an off **Webhooks** toggle. Neither is an `actor=app` requirement: Linear's docs and its `Application` API describe no GitHub-username field, and ABCA's events arrive through the workspace webhook you create in step 4, not the app's own webhook toggle. Fill the username in if your app form asks for one, but check the callback URLs first.
 
 ### Agent doesn't post comments to Linear
 
