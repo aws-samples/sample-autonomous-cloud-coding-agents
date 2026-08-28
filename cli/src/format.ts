@@ -706,9 +706,13 @@ function readNumberField(meta: Record<string, unknown> | undefined, key: string)
  * dash rather than throwing — a malformed timestamp must not take out
  * `bgagent status`.
  *
- * `now` is a required parameter, not a `Date.now()` default: every caller already
- * has an anchor threaded in, and a default here is exactly how the
- * non-determinism this signature removes creeps back.
+ * `now` is a required parameter here rather than defaulting to `Date.now()`, so
+ * that the two exported formatters above own the one anchor each render uses and a
+ * new heartbeat line cannot quietly acquire its own clock. Those exported
+ * functions DO default to `Date.now()` — that is the public-API boundary, matching
+ * {@link formatStatusSnapshot}, and it is what lets `commands/list.ts` and
+ * `commands/status.ts` stay clock-free. The rule is "one anchor per render,
+ * injectable at the edge", not "no defaults anywhere".
  */
 function heartbeatAge(isoTimestamp: string, now: number): string {
   return relativeTime(isoTimestamp, now) ?? PLACEHOLDER;

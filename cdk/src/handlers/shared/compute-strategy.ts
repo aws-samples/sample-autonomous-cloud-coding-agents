@@ -58,15 +58,33 @@ export type SessionHandle =
  * MicroVM is healthy while the task is ``AWAITING_APPROVAL`` and an anomaly
  * otherwise, and only the orchestrator can tell the two apart.
  *
- * ``reason`` on the non-``failed`` variants is the SUBSTRATE's own explanation of
- * the state, verbatim and uninterpreted (``GetMicrovm``'s ``stateReason``, ECS's
- * ``stoppedReason``). It exists because ``completed`` has no error slot, so
- * without it the dominant MicroVM runtime failure — a ``/run`` hook 4xx, which
- * the service reaps within ~12 s — reached the operator as the bare, and
- * therefore fabricated, ``"substrate state completed"``. It is OPTIONAL and
- * OPAQUE: no control flow may branch on its content (that would put substrate
- * interpretation back in the strategy), and it is for the reconcile ``detail``
- * string and logs only.
+ * ``reason`` is the SUBSTRATE's own explanation of the state, verbatim and
+ * uninterpreted. Today exactly ONE strategy populates it:
+ * ``LambdaMicrovmComputeStrategy.pollSession``, from ``GetMicrovm``'s
+ * ``stateReason``. The ECS strategy does NOT — it folds ``stoppedReason`` into
+ * ``error`` on the ``failed`` variant and returns a bare ``{ status: 'completed' }``
+ * on a clean exit — and the AgentCore strategy is a stub that always reports
+ * ``running``. Do not read this field as a cross-backend contract.
+ *
+ * It exists because ``completed`` has no error slot, so without it the dominant
+ * MicroVM runtime failure — a ``/run`` hook 4xx, which the service reaps within
+ * ~12 s — reached the operator as the bare, and therefore fabricated,
+ * ``"substrate state completed"``.
+ *
+ * It is OPTIONAL and OPAQUE: no control flow may branch on its content (that would
+ * put substrate interpretation back in the strategy), and it is for the reconcile
+ * ``detail`` string and logs only.
+ *
+ * Declared on all four variants for UNIFORMITY, though only ``completed`` and
+ * ``failed`` are read today (``reconcileMicrovmSubstrateState`` returns early for
+ * the other two). The wide union is deliberate rather than dead weight:
+ * ``suspended.reason`` has a named future consumer — P3's suspend/resume policy
+ * (ADR-021 sub-decision 2) has to distinguish an orchestrator-intended suspend
+ * during an approval wait from a substrate-side one, and ``stateReason`` is the
+ * only evidence the substrate offers for that. Narrowing the union now would mean
+ * widening it again there, and a per-variant union would invite call sites to
+ * branch on which variant carries a reason — the opposite of the opacity rule
+ * above.
  */
 export type SessionStatus =
   | { readonly status: 'running'; readonly reason?: string }

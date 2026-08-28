@@ -903,28 +903,56 @@ MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS: frozenset[str] = frozenset(
     _PLATFORM_CONFIG_CONTRACT["required"]
 )
 
-#: Keys whose VALUE is an ARN, and which are therefore pinned to this
-#: deployment's own partition + account before installation.
+#: Keys whose VALUE is an ARN, and which are therefore checked for
+#: partition/account agreement with the anchor before installation.
 #:
-#: WHY value validation exists at all, when the KEY allowlist above already fails
-#: closed: the key allowlist stops a payload setting ``LD_PRELOAD``; it does not
-#: stop a payload pointing an *allowlisted* key at someone else's resource. The
-#: sharp case is ``github_token_secret_arn``: ``config.resolve_github_token``
+#: WHAT THIS BUYS, STATED PRECISELY — because the honest answer is narrower than
+#: "stops secret exfiltration", and overstating it would hide the residual gap.
+#:
+#: The key allowlist above stops a payload setting ``LD_PRELOAD``; it does not stop
+#: a payload pointing an *allowlisted* key at a different resource. The value that
+#: matters most is ``github_token_secret_arn``: ``config.resolve_github_token``
 #: fetches whatever ARN it names using the UNSCOPED execution role and caches the
-#: raw ``SecretString`` into ``os.environ["GITHUB_TOKEN"]``, from which
-#: ``shell.py`` hands the environment to every repo subprocess — i.e. into the
-#: model's tool surface. That role holds a *prefix* grant on
-#: ``bgagent-linear-oauth-*`` / ``bgagent-jira-oauth-*`` (unavoidable: the CLI
-#: mints those names at setup, so they are unknown at synth), so a ``/run``
-#: payload naming another workspace's channel-OAuth secret would otherwise
-#: succeed — allowlisted key, unvalidated value, matching grant.
+#: raw ``SecretString`` into ``os.environ["GITHUB_TOKEN"]``, from which ``shell.py``
+#: hands the environment to every repo subprocess — i.e. into the model's tool
+#: surface. So the value is worth validating.
 #:
-#: The prefix grant is at ECS parity. The ASYMMETRY that makes it reachable is
-#: new to this backend: on ECS these ARNs arrive as deploy-time container env; here
-#: they arrive in a network payload. So this is where an ARN stops being free-form.
+#: This check is DEFENCE IN DEPTH AND FAIL-FAST, not the primary control:
+#:
+#: * What actually stops a cross-account read today is IAM. Every grant on the
+#:   execution role is account-scoped by construction — ``grantRead`` on the GitHub
+#:   PAT secret, and the ``bgagent-linear-oauth-*`` / ``bgagent-jira-oauth-*``
+#:   prefix grants built with ``stack.formatArn`` (``lambda-microvm-compute.ts``).
+#:   A foreign-account ARN therefore AccessDenies with or without this check. What
+#:   this adds is a structured 400 at the door instead of an opaque
+#:   ``AccessDeniedException`` mid-startup, and a guard that still holds if a
+#:   future grant is ever widened.
+#: * What this check does NOT stop is an IN-ACCOUNT redirect. The channel-OAuth
+#:   grants are prefix grants (unavoidable: the CLI mints ``bgagent-*-oauth-<id>``
+#:   at setup, so the names are unknown at synth), so a block whose anchor and
+#:   whose ``github_token_secret_arn`` name the SAME account but a DIFFERENT
+#:   workspace's OAuth secret is accepted here. Partition + account is the only
+#:   boundary this check enforces; it is not a per-workspace authorization check.
+#: * That residual gap is currently unreachable from the guest, which is why it is
+#:   left open. ``platform_config`` is produced by the orchestrator Lambda and the
+#:   MicroVM execution role holds ``grantRead`` ONLY on the payload bucket
+#:   (``payloadBucket.grantRead``), so a running MicroVM can read another task's
+#:   payload but cannot write one. Reaching the in-account case requires already
+#:   controlling the orchestrator's environment or the bucket's write path.
+#:
+#: ESCALATION: if the payload path ever becomes less trusted — a third-party
+#: producer, an operator-editable envelope, or any grant that lets the guest write
+#: the payload bucket — this must grow into a name-shape check that ties
+#: ``github_token_secret_arn`` to the task's own channel/workspace, because
+#: partition+account pinning provably does not cover that case.
+#:
+#: The prefix grant itself is at ECS parity. The ASYMMETRY that makes value
+#: validation worth doing here at all is new to this backend: on ECS these ARNs
+#: arrive as deploy-time container env; here they arrive in a network payload.
 MICROVM_PLATFORM_CONFIG_ARN_KEYS: frozenset[str] = frozenset(_PLATFORM_CONFIG_CONTRACT["arn_keys"])
 
-#: The key whose ARN supplies the partition/account every other ARN must match.
+#: The key whose ARN supplies the partition/account every other ARN is checked
+#: against.
 #:
 #: Deliberately a payload key rather than ``os.environ`` or an STS call.
 #: ``os.environ`` is empty here by construction (nothing is baked into the
@@ -932,26 +960,59 @@ MICROVM_PLATFORM_CONFIG_ARN_KEYS: frozenset[str] = frozenset(_PLATFORM_CONFIG_CO
 #: would silently degrade this whole check to shape-only in the intended
 #: deployment. An ``sts:GetCallerIdentity`` is not available either: this runs
 #: BEFORE ``platform_config`` is installed, on the path that must make zero AWS
-#: calls beyond the S3 payload fetch. ``agent_session_role_arn`` is the right
-#: anchor because it is REQUIRED (so always present when this check runs) and
-#: because it is the one ARN that cannot be usefully forged: a foreign session
-#: role fails closed at ``sts:AssumeRole`` (``SessionScopingError``), so an
-#: attacker who redirects it loses the run instead of gaining a secret.
+#: calls beyond the S3 payload fetch.
+#:
+#: CONSEQUENCE, stated plainly: because the anchor travels in the same block as the
+#: values it validates, this check enforces INTERNAL CONSISTENCY of the block, not
+#: agreement with the account the guest is actually running in. A block that names
+#: one foreign account throughout is self-consistent and passes here — it then
+#: fails at IAM, which is the control that really holds (see
+#: :data:`MICROVM_PLATFORM_CONFIG_ARN_KEYS`). ``agent_session_role_arn`` is still
+#: the best available anchor: it is REQUIRED (so always present when this check
+#: runs, which is what stops disarm-by-omission) and it is the one value whose
+#: misdirection costs the attacker the run rather than gaining them anything — a
+#: foreign session role fails closed at ``sts:AssumeRole``
+#: (``SessionScopingError``).
 MICROVM_PLATFORM_CONFIG_ACCOUNT_ANCHOR_KEY: str = _PLATFORM_CONFIG_CONTRACT["account_anchor_key"]
 
 _PLATFORM_CONFIG_KEY_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 _PLATFORM_CONFIG_ENV_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
-#: Control characters refused in any ``platform_config`` value.
+#: Control characters refused in any ``platform_config`` value: the whole C0 range
+#: (``\x00``-``\x1f``) plus ``DEL`` (``\x7f``).
 #:
-#: A NUL makes ``os.environ[...] = value`` raise ``ValueError`` — which is NOT a
-#: :class:`_PlatformConfigError`, so it escaped the handler's structured-400 path
-#: and became a bare FastAPI 500, mid-loop, leaving the keys installed so far in
-#: place (a partial install breaks the fail-closed contract this block exists
-#: for). A newline forges extra lines in the structured logs emitted below. Keys
-#: were regex-validated and values were not; this closes the other half of the
-#: same threat model.
-_PLATFORM_CONFIG_FORBIDDEN_VALUE_CHARS = ("\x00", "\n", "\r")
+#: The ORIGINAL three (NUL, LF, CR) each had a concrete failure:
+#:
+#: * A NUL makes ``os.environ[...] = value`` raise ``ValueError`` — which is NOT a
+#:   :class:`_PlatformConfigError`, so it escaped the handler's structured-400 path
+#:   and became a bare FastAPI 500, mid-loop, leaving the keys installed so far in
+#:   place (a partial install breaks the fail-closed contract this block exists
+#:   for).
+#: * LF/CR forge extra lines in the structured logs emitted below.
+#:
+#: The range is refused rather than that trio because the trio did not cover the
+#: injection class its own rationale invokes. ``\x1b`` (ESC) is the ANSI
+#: introducer: a value carrying it renders as cursor moves, colour, or title-set
+#: sequences in the operator terminal that tails these logs — the same
+#: "forge output the operator trusts" defect as a newline, one escape byte away.
+#: ``\x0b``/``\x0c``/``\x1c``-``\x1e`` are additionally Python
+#: ``str.splitlines()`` boundaries, so they forge lines in any consumer that splits
+#: that way even though CloudWatch splits only on LF.
+#:
+#: KNOWN RESIDUAL, stated rather than implied: ``str.splitlines()`` also breaks on
+#: NEL (``\x85``), LS (``\u2028``) and PS (``\u2029``), none of which are C0 and so
+#: none of which this refuses. That is accepted, not overlooked — the sink that
+#: matters is CloudWatch, which splits on LF only, so those three cannot forge a
+#: log line where it counts. "The whole C0 range plus DEL" is therefore the honest
+#: description of this set, and it is deliberately not "every character that could
+#: ever split a line".
+#:
+#: Nothing legitimate is lost. All thirteen allowlisted keys carry an ARN
+#: (secret/role), a DynamoDB/S3/CloudWatch resource NAME, a Bedrock model id, or
+#: the SDK UA app id — character sets that are alphanumerics plus ``-_./:*`` and
+#: never include a control byte, TAB included. A value that needs one is malformed.
+_PLATFORM_CONFIG_FORBIDDEN_VALUE_CHARS = frozenset(chr(code) for code in range(0x20)) | {"\x7f"}
+
 
 #: Colon-separated fields in a well-formed ARN:
 #: ``arn:partition:service:region:account:resource``. The resource segment may
@@ -1094,31 +1155,46 @@ def _absent_required_platform_env() -> list[str]:
 
 
 def _reject_foreign_arns(resolved: dict[str, str]) -> None:
-    """Pin every ARN-shaped value to this deployment's own partition + account.
+    """Require every ARN-shaped value to agree with the anchor's partition + account.
+
+    NOT "pin to this deployment's own account": the anchor travels in the same
+    payload as the values it validates, so what this enforces is that the block is
+    INTERNALLY CONSISTENT. A block that names one foreign account throughout passes
+    here and is then refused by IAM. See
+    :data:`MICROVM_PLATFORM_CONFIG_ARN_KEYS` for what that does and does not buy,
+    and :data:`MICROVM_PLATFORM_CONFIG_ACCOUNT_ANCHOR_KEY` for why the anchor
+    cannot be the environment or STS.
 
     Raises :class:`_PlatformConfigError` (``…_INVALID``) if any
-    :data:`MICROVM_PLATFORM_CONFIG_ARN_KEYS` value is malformed or names a
-    different partition/account than
-    :data:`MICROVM_PLATFORM_CONFIG_ACCOUNT_ANCHOR_KEY` does. See that constant for
-    why the anchor is a payload key rather than the environment or STS.
+    :data:`MICROVM_PLATFORM_CONFIG_ARN_KEYS` value is malformed or disagrees with
+    :data:`MICROVM_PLATFORM_CONFIG_ACCOUNT_ANCHOR_KEY` on partition or account.
 
-    Region is deliberately NOT pinned. Secrets Manager and IAM ARNs legitimately
+    Region is deliberately NOT compared. Secrets Manager and IAM ARNs legitimately
     differ on that axis in this system — IAM is global (empty region field), and a
     cross-Region secret is a supported deployment shape — so requiring agreement
     would reject valid configurations while adding nothing: the execution role's
     grants are account-scoped, so an in-account cross-Region ARN reaches nothing
-    the in-Region one does not. Partition + account is the boundary that matters.
+    the in-Region one does not. Partition + account is the boundary this checks.
     """
     anchor_value = resolved.get(MICROVM_PLATFORM_CONFIG_ACCOUNT_ANCHOR_KEY, "")
     # The anchor is contract-guaranteed REQUIRED (asserted at import), so by the
-    # time this runs the required-key check has already accepted it.
+    # time this runs the required-key check has already accepted it. The ``""``
+    # default is unreachable belt-and-braces: it splits to ``[""]``, length 1, and
+    # so fails the shape check below rather than silently disarming the comparison.
     anchor_parts = anchor_value.split(":")
-    if len(anchor_parts) < _ARN_MIN_FIELDS or anchor_parts[0] != "arn":
+    # ``parts[2] == "iam"`` as well as the generic ARN shape. The anchor is the one
+    # ARN whose SERVICE is fixed by the contract — it is a role ARN — and without
+    # this a 6-field string like ``arn:zz:a:b:<account>:c`` was accepted as an
+    # anchor, letting a malformed block choose ``want_partition``/``want_account``
+    # freely and then agree with itself. Checking the service is what makes the
+    # anchor's own shape non-negotiable instead of merely colon-counted.
+    if len(anchor_parts) < _ARN_MIN_FIELDS or anchor_parts[0] != "arn" or anchor_parts[2] != "iam":
         raise _PlatformConfigError(
             "MICROVM_RUN_PLATFORM_CONFIG_INVALID",
             f"platform_config.{MICROVM_PLATFORM_CONFIG_ACCOUNT_ANCHOR_KEY} must be a "
-            "well-formed ARN — it is the anchor every other ARN in the block is "
-            f"checked against; got {anchor_value!r}",
+            "well-formed IAM role ARN (arn:<partition>:iam::<account>:role/…) — it is "
+            "the anchor every other ARN in the block is checked against, so a "
+            f"malformed one would let the block agree with itself; got {anchor_value!r}",
         )
     want_partition, want_account = anchor_parts[1], anchor_parts[4]
 
@@ -1138,11 +1214,11 @@ def _reject_foreign_arns(resolved: dict[str, str]) -> None:
         raise _PlatformConfigError(
             "MICROVM_RUN_PLATFORM_CONFIG_INVALID",
             "platform_config ARN values are installed into the environment that "
-            "resolves credentials and fetches secrets, so an ARN outside this "
-            "deployment's own partition and account is an exfiltration primitive, "
-            f"not a configuration choice; rejected {rejected} "
-            f"(expected partition {want_partition!r}, account {want_account!r}, "
-            f"taken from {MICROVM_PLATFORM_CONFIG_ACCOUNT_ANCHOR_KEY})",
+            "resolves credentials and fetches secrets, so an ARN that disagrees with "
+            "the rest of the block is refused at the door rather than left to "
+            "AccessDeny mid-startup; "
+            f"rejected {rejected} (expected partition {want_partition!r}, account "
+            f"{want_account!r}, taken from {MICROVM_PLATFORM_CONFIG_ACCOUNT_ANCHOR_KEY})",
         )
 
 
@@ -1169,8 +1245,12 @@ def _install_platform_config(raw: Any) -> list[str]:
     * every required key must survive that filter, else reject
       (``…_INCOMPLETE``). An explicitly-sent-but-empty ``{}`` therefore fails —
       a producer with nothing to say must omit the key entirely.
-    * every ARN-shaped value must name THIS deployment's partition + account,
-      else reject (``…_INVALID``) — see :func:`_reject_foreign_arns`.
+    * every ARN-shaped value must agree with the anchor ARN's partition + account,
+      else reject (``…_INVALID``) — see :func:`_reject_foreign_arns`, which is
+      explicit that this is internal consistency plus fail-fast, not an
+      account-ownership proof.
+
+    Surviving values are installed STRIPPED of surrounding whitespace.
 
     Payload values WIN over pre-existing/image env (see the block comment above:
     image env is version-frozen, the payload describes the live deployment).
@@ -1201,16 +1281,31 @@ def _install_platform_config(raw: Any) -> list[str]:
         if not isinstance(value, str):
             bad_types.append(f"{key}:{type(value).__name__}")
             continue
-        if any(char in value for char in _PLATFORM_CONFIG_FORBIDDEN_VALUE_CHARS):
+        if any(char in _PLATFORM_CONFIG_FORBIDDEN_VALUE_CHARS for char in value):
             # Rejected BEFORE any install, not caught during it: see
             # ``_PLATFORM_CONFIG_FORBIDDEN_VALUE_CHARS``. A NUL reaching
             # ``os.environ`` raises a bare ``ValueError`` mid-loop, which both
             # escapes this module's structured-400 contract and leaves a partial
             # install behind.
+            #
+            # Checked on the RAW value, before the strip below, so a TRAILING
+            # control byte is refused rather than silently cleaned. Deliberate:
+            # ``\x1b`` or ``\n`` at the end of a value is as much a malformed
+            # value as one in the middle, and the producer should hear about it.
+            # (Ordinary spaces are not control bytes and ARE stripped — see below.)
             bad_types.append(f"{key}:control-characters")
             continue
-        if value.strip():
-            resolved[key] = value
+        # STRIPPED on the way in, not just tested for emptiness. The env var is
+        # consumed as a table name / ARN / model id by code that does not trim, so
+        # a value that only differs from the intended one by surrounding
+        # whitespace must not reach it: `boto3.resource('dynamodb').Table('t ')`
+        # fails with a ResourceNotFound an operator cannot see the cause of, and
+        # an ARN with a trailing space passes `_reject_foreign_arns` (the space
+        # lands in the resource segment, not in `parts[1]`/`parts[4]`) and then
+        # AccessDenies. Normalising here is the only place that covers every key.
+        cleaned = value.strip()
+        if cleaned:
+            resolved[key] = cleaned
 
     if bad_types:
         raise _PlatformConfigError(

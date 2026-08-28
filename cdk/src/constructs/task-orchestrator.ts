@@ -257,9 +257,14 @@ export interface TaskOrchestratorProps {
     readonly agentSessionRoleArn: string;
     /**
      * Cross-region inference-profile id for the small/fast model
-     * (`ANTHROPIC_DEFAULT_HAIKU_MODEL`). Must be a `us.`-prefixed profile id, not
-     * a bare foundation-model id — Claude 4.x rejects on-demand invocation by
-     * bare id — and must match a granted profile (`constructs/bedrock-models.ts`).
+     * (`ANTHROPIC_DEFAULT_HAIKU_MODEL`). Must be a GEO-PREFIXED profile id, not a
+     * bare foundation-model id — Claude 4.x rejects on-demand invocation by bare
+     * id — and must match a granted profile (`constructs/bedrock-models.ts`).
+     *
+     * The prefix is whichever geography `resolveBedrockGeoRegion` resolves for the
+     * deployment (`bedrockGeoRegion` context, default `us`), NOT a hardcoded `us.`:
+     * pass `haikuInferenceProfileId(bedrockGeoRegion)` so this value and the
+     * inference-profile ARNs the roles are granted come from the same source (#764).
      */
     readonly anthropicDefaultHaikuModel: string;
   };

@@ -2031,7 +2031,26 @@ class TestInstallPlatformConfig:
 
     @pytest.mark.parametrize(
         ("char", "label"),
-        [("\x00", "NUL"), ("\n", "newline"), ("\r", "carriage-return")],
+        [
+            # The original three, each with its own concrete failure.
+            ("\x00", "NUL"),
+            ("\n", "newline"),
+            ("\r", "carriage-return"),
+            # The widening (P2r2 review): the trio did not cover the injection class
+            # its own rationale invoked. ESC is the ANSI introducer, so a value
+            # carrying it renders as cursor/colour/title-set sequences in the
+            # operator terminal that tails these logs — the same "forge output the
+            # operator trusts" defect as a newline, one byte away. VT is
+            # additionally a `str.splitlines()` boundary. TAB and DEL are here
+            # because no allowlisted value (ARNs, resource names, model ids, a UA
+            # app id) can legitimately contain a control byte, so the whole C0
+            # range plus DEL is the honest rule and "control characters" in the
+            # docstring is then true rather than aspirational.
+            ("\t", "tab"),
+            ("\x1b", "escape-ANSI-introducer"),
+            ("\x0b", "vertical-tab-splitlines-boundary"),
+            ("\x7f", "delete"),
+        ],
     )
     def test_a_control_character_in_a_value_is_a_structured_400(self, char, label, env_guard):
         # A NUL reaching `os.environ` raises a bare `ValueError` that is NOT a
@@ -2043,6 +2062,59 @@ class TestInstallPlatformConfig:
         assert excinfo.value.code == "MICROVM_RUN_PLATFORM_CONFIG_INVALID"
         assert "control-characters" in str(excinfo.value)
         assert "LOG_GROUP_NAME" not in os.environ
+
+    def test_the_forbidden_set_is_the_whole_C0_range_plus_DEL(self):
+        # Pins the RULE, not a sample of it: a future edit that trims the set back to
+        # a hand-picked trio would leave the parametrized cases above passing for
+        # whichever chars happened to survive. 0x00-0x1f inclusive plus 0x7f = 33.
+        assert (
+            frozenset(chr(code) for code in range(0x20)) | {"\x7f"}
+            == server._PLATFORM_CONFIG_FORBIDDEN_VALUE_CHARS
+        )
+        # ...and an ordinary space is NOT in it — spaces are stripped, not refused.
+        assert " " not in server._PLATFORM_CONFIG_FORBIDDEN_VALUE_CHARS
+
+    @pytest.mark.parametrize(
+        ("char", "label"), [("\x85", "NEL"), ("\u2028", "LS"), ("\u2029", "PS")]
+    )
+    def test_the_non_C0_splitlines_boundaries_are_a_DOCUMENTED_residual(
+        self, char, label, env_guard
+    ):
+        # Pins the KNOWN GAP so it stays a decision rather than becoming a surprise.
+        # `str.splitlines()` also breaks on these three, but they are not C0 and this
+        # check is scoped to C0 + DEL. Accepted because the sink that matters is
+        # CloudWatch, which splits on LF only — so they cannot forge a log line where
+        # it counts.
+        #
+        # If this ever needs to flip to `pytest.raises`, widen
+        # `_PLATFORM_CONFIG_FORBIDDEN_VALUE_CHARS` rather than special-casing here.
+        assert char not in server._PLATFORM_CONFIG_FORBIDDEN_VALUE_CHARS
+        installed = server._install_platform_config(
+            _platform_config(log_group_name=f"grp{char}suffix")
+        )
+        assert "LOG_GROUP_NAME" in installed
+
+    def test_a_TRAILING_control_byte_is_refused_rather_than_silently_cleaned(self, env_guard):
+        # The check runs on the RAW value, before the strip. A trailing `\x1b` or
+        # `\n` would vanish under `.strip()`, and a value the producer got wrong
+        # should not be quietly repaired into a different one.
+        with pytest.raises(server._PlatformConfigError) as excinfo:
+            server._install_platform_config(_platform_config(log_group_name="grp\x1b"))
+        assert "control-characters" in str(excinfo.value)
+
+    def test_surrounding_whitespace_is_STRIPPED_from_installed_values(self, env_guard):
+        # Not merely tested-for-emptiness. Downstream consumers do not trim: a
+        # `Table('t ')` lookup fails with a ResourceNotFound whose cause is invisible,
+        # and an ARN with a trailing space passes `_reject_foreign_arns` (the space
+        # lands in the resource segment, never in `parts[1]`/`parts[4]`) and then
+        # AccessDenies. Normalising on the way in is the only place that covers
+        # every key at once.
+        padded_arn = f"  arn:aws:secretsmanager:us-east-1:{_TEST_ACCOUNT}:secret:gh  "
+        server._install_platform_config(
+            _platform_config(task_table_name="  tbl  ", github_token_secret_arn=padded_arn)
+        )
+        assert os.environ["TASK_TABLE_NAME"] == "tbl"
+        assert os.environ["GITHUB_TOKEN_SECRET_ARN"] == padded_arn.strip()
 
     def test_a_control_character_installs_NOTHING_at_all(self, env_guard):
         # The fail-closed half, asserted separately because it is the property that a
@@ -2075,11 +2147,19 @@ class TestInstallPlatformConfig:
         assert r.json()["code"] == "MICROVM_RUN_PLATFORM_CONFIG_INVALID"
 
     def test_an_arn_in_a_foreign_account_is_rejected(self, env_guard):
-        # THE finding (review B5). The execution role holds a PREFIX grant on
-        # `bgagent-linear-oauth-*` / `bgagent-jira-oauth-*`, and
-        # `resolve_github_token` fetches whatever `GITHUB_TOKEN_SECRET_ARN` names and
-        # caches it into `os.environ["GITHUB_TOKEN"]`, which `shell.py` hands to every
-        # repo subprocess. So an unpinned ARN is a cross-workspace token read.
+        # Review B5. What this pins is the CROSS-ACCOUNT axis, and the fixture is a
+        # foreign-account ARN accordingly — the earlier comment here described a
+        # cross-WORKSPACE (same-account) attack, which is a different axis this check
+        # does not cover and which `test_an_in_account_redirect_is_NOT_rejected`
+        # below pins as the known limitation.
+        #
+        # Why the value is worth checking at all: `resolve_github_token` fetches
+        # whatever `GITHUB_TOKEN_SECRET_ARN` names using the UNSCOPED execution role
+        # and caches it into `os.environ["GITHUB_TOKEN"]`, which `shell.py` hands to
+        # every repo subprocess. Value validation here is fail-fast — a structured
+        # 400 at the door instead of an opaque AccessDenied mid-startup — plus depth
+        # if a grant is ever widened; the account-scoped identity policy is what
+        # actually denies the read.
         with pytest.raises(server._PlatformConfigError) as excinfo:
             server._install_platform_config(
                 _platform_config(
@@ -2092,6 +2172,47 @@ class TestInstallPlatformConfig:
         assert excinfo.value.code == "MICROVM_RUN_PLATFORM_CONFIG_INVALID"
         assert "github_token_secret_arn:foreign-partition-or-account" in str(excinfo.value)
         assert "GITHUB_TOKEN_SECRET_ARN" not in os.environ
+
+    def test_an_in_account_redirect_is_NOT_rejected(self, env_guard):
+        # The KNOWN LIMITATION, pinned as a test so it cannot be quietly mistaken for
+        # coverage. This check compares partition + account only, so a block naming
+        # another workspace's channel-OAuth secret in the SAME account is accepted —
+        # and the `bgagent-*-oauth-*` grants are prefix grants, so IAM would allow
+        # that read too.
+        #
+        # It is left open because it is currently unreachable from the guest:
+        # `platform_config` is produced by the orchestrator Lambda, and the MicroVM
+        # execution role holds `grantRead` ONLY on the payload bucket, so a running
+        # MicroVM can read another task's payload but cannot write one.
+        #
+        # If this test ever needs to flip to `pytest.raises`, the escalation is a
+        # name-shape check tying `github_token_secret_arn` to the task's own
+        # channel/workspace — see `MICROVM_PLATFORM_CONFIG_ARN_KEYS`.
+        installed = server._install_platform_config(
+            _platform_config(
+                github_token_secret_arn=(
+                    f"arn:aws:secretsmanager:us-east-1:{_TEST_ACCOUNT}"
+                    ":secret:bgagent-jira-oauth-OTHERWORKSPACE-AbCdEf"
+                )
+            )
+        )
+        assert "GITHUB_TOKEN_SECRET_ARN" in installed
+
+    def test_a_wholesale_partition_swap_is_NOT_rejected(self, env_guard):
+        # The other half of the same limitation, and the reason the docstrings say
+        # "internally consistent" rather than "pinned to this deployment": the anchor
+        # travels in the block it validates, so a payload that moves EVERY ARN to
+        # another partition agrees with itself and passes. IAM is what refuses it.
+        installed = server._install_platform_config(
+            _platform_config(
+                agent_session_role_arn=f"arn:aws-cn:iam::{_TEST_ACCOUNT}:role/r",
+                github_token_secret_arn=(
+                    f"arn:aws-cn:secretsmanager:cn-north-1:{_TEST_ACCOUNT}:secret:gh"
+                ),
+            )
+        )
+        assert "GITHUB_TOKEN_SECRET_ARN" in installed
+        assert "AGENT_SESSION_ROLE_ARN" in installed
 
     def test_an_arn_in_a_foreign_partition_is_rejected(self, env_guard):
         with pytest.raises(server._PlatformConfigError) as excinfo:
@@ -2111,10 +2232,11 @@ class TestInstallPlatformConfig:
             )
         assert "github_token_secret_arn:malformed" in str(excinfo.value)
 
-    def test_every_arn_key_is_pinned_not_just_the_github_one(self, env_guard):
-        # The optional channel-OAuth ARNs are the same class of exfiltration
-        # primitive; a per-key check that covered only the required ones would leave
-        # them open. Driven from the contract so a new ARN key is covered by default.
+    def test_every_arn_key_is_checked_not_just_the_github_one(self, env_guard):
+        # The optional channel-OAuth ARNs reach the same token-resolution path, so a
+        # per-key check that covered only the required ones would leave them
+        # unvalidated. Driven from the contract so a new ARN key is covered by
+        # default.
         foreign = "arn:aws:secretsmanager:us-east-1:111122223333:secret:x"
         for key in server.MICROVM_PLATFORM_CONFIG_ARN_KEYS:
             if key == server.MICROVM_PLATFORM_CONFIG_ACCOUNT_ANCHOR_KEY:
@@ -2144,6 +2266,49 @@ class TestInstallPlatformConfig:
             server._install_platform_config(_platform_config(agent_session_role_arn="arn:bogus"))
         assert excinfo.value.code == "MICROVM_RUN_PLATFORM_CONFIG_INVALID"
         assert "anchor" in str(excinfo.value)
+
+    @pytest.mark.parametrize(
+        ("anchor", "label"),
+        [
+            (f"arn:zz:a:b:{_TEST_ACCOUNT}:c", "six-junk-fields"),
+            ("arn:aws:s3:::bucket/key", "well-formed-but-not-iam"),
+            (f"arn:aws:sts::{_TEST_ACCOUNT}:assumed-role/x/y", "iam-adjacent-but-sts"),
+        ],
+    )
+    def test_a_SHAPE_VALID_but_non_IAM_anchor_is_rejected(self, anchor, label, env_guard):
+        # Colon-counting alone was not enough. `arn:zz:a:b:<account>:c` has six fields
+        # and starts with `arn`, so it used to be ACCEPTED as an anchor — letting a
+        # malformed block pick `want_partition`/`want_account` freely and then agree
+        # with itself, which is the check disarming itself by a different route than
+        # omission. The anchor is the one value whose SERVICE the contract fixes (it
+        # is a role ARN), so `parts[2] == "iam"` is checkable and is checked.
+        with pytest.raises(server._PlatformConfigError) as excinfo:
+            server._install_platform_config(_platform_config(agent_session_role_arn=anchor))
+        assert excinfo.value.code == "MICROVM_RUN_PLATFORM_CONFIG_INVALID"
+        assert "anchor" in str(excinfo.value)
+
+    def test_the_anchor_shapes_the_PRODUCER_really_sends_are_accepted(self, env_guard):
+        # The false-positive control for the check above: every IAM role-ARN shape
+        # `buildMicrovmPlatformConfig` can emit must still pass, or the tightening
+        # breaks real deployments instead of malformed payloads. Paths and non-`aws`
+        # partitions are both legitimate.
+        for anchor in (
+            f"arn:aws:iam::{_TEST_ACCOUNT}:role/backgroundagent-dev-AgentSessionRole",
+            f"arn:aws:iam::{_TEST_ACCOUNT}:role/service-path/nested/SessionRole",
+            f"arn:aws-cn:iam::{_TEST_ACCOUNT}:role/SessionRole",
+            f"arn:aws-us-gov:iam::{_TEST_ACCOUNT}:role/SessionRole",
+        ):
+            installed = server._install_platform_config(
+                _platform_config(
+                    agent_session_role_arn=anchor,
+                    # Same partition, or the block would disagree with itself.
+                    github_token_secret_arn=(
+                        f"arn:{anchor.split(':')[1]}:secretsmanager:us-east-1"
+                        f":{_TEST_ACCOUNT}:secret:gh"
+                    ),
+                )
+            )
+            assert "AGENT_SESSION_ROLE_ARN" in installed, anchor
 
     def test_the_anchor_key_is_contract_guaranteed_to_be_required(self):
         # The invariant that stops a payload disarming ARN pinning by omitting the

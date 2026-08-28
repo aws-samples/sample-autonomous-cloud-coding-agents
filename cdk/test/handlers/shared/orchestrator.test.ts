@@ -417,16 +417,38 @@ describe('reconcileMicrovmSubstrateState', () => {
       );
     });
 
-    test('the reason-carrying message still classifies as a MicroVM substrate failure', async () => {
-      // The append must not break the classifier anchor — that would trade a
-      // misleading remedy for no remedy.
+    test('a reason-carrying message still classifies, and a hook 4xx outranks the generic entry', async () => {
+      // The append must not break classification — that would trade a misleading
+      // remedy for no remedy. It now does BETTER than preserve the generic anchor:
+      // a hook-4xx reason reaches a dedicated NON-retryable entry, because every
+      // 4xx the guest can answer is a wiring fault an identical retry cannot fix.
+      // Both strings live in one `error_message`, so this is really an assertion
+      // about classifier ORDER.
       primeReread(TaskStatus.RUNNING);
       await reconcile({ status: 'completed', reason: 'Run lifecycle hook returned HTTP status 400.' }, TaskStatus.RUNNING);
       const values = commandsOfType('Update')[0].input.ExpressionAttributeValues as Record<string, unknown>;
 
       const classification = classifyError(String(values[':attr_error_message']));
 
+      expect(classification!.title).toBe('The MicroVM rejected its own run payload');
+      expect(classification!.retryable).toBe(false);
+    });
+
+    test('a NON-hook reason keeps the generic retryable substrate-failure entry', async () => {
+      // The other half: the `MicroVM substrate terminated…` anchor must still be
+      // the answer for the reasons it was written for (duration cap, host fault,
+      // external terminate), so the entry above must not have swallowed them.
+      primeReread(TaskStatus.RUNNING);
+      await reconcile(
+        { status: 'completed', reason: 'host fault (hypervisor evicted the guest)' },
+        TaskStatus.RUNNING,
+      );
+      const values = commandsOfType('Update')[0].input.ExpressionAttributeValues as Record<string, unknown>;
+
+      const classification = classifyError(String(values[':attr_error_message']));
+
       expect(classification!.title).toBe('The MicroVM stopped before the agent reported a result');
+      expect(classification!.retryable).toBe(true);
     });
 
     test('fails from AWAITING_APPROVAL too — a terminated VM cannot resume the gate', async () => {

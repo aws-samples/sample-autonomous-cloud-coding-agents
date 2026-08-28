@@ -13,5 +13,16 @@
 
 # Non-placeholder foreign-account fixtures in the already-pushed baa365fc
 # test commit. HEAD uses the allowlisted AWS-published placeholder instead.
+#
+# BELT ONLY — the braces is the path-scoped `999988887777` allowlist in
+# .gitleaks.toml, which is SHA-independent and is what actually keeps the
+# per-PR range scan green across a rebase or squash of this branch. These two
+# fingerprints are kept because they are more precise (two exact lines rather
+# than a value pattern) while the branch is open, and they are the FIRST thing to
+# delete once #733 merges: at that point they are either dead (squash-merge, the
+# blob never reaches main) or redundant with the .gitleaks.toml block.
+#
+# Do not add a fingerprint here WITHOUT its SHA-independent counterpart — that is
+# the exact #537 regression the note above describes.
 baa365fc4137fee701bd7655b3255c0755adcb57:agent/tests/test_server.py:aws-account-id:2087
 baa365fc4137fee701bd7655b3255c0755adcb57:agent/tests/test_server.py:aws-account-id:2118

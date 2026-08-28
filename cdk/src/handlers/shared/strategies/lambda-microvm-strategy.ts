@@ -128,6 +128,31 @@ export const MICROVM_MAX_DURATION_SECONDS = 28_800;
 const RUN_HOOK_PAYLOAD_LIMIT_BYTES = 4_096;
 
 /**
+ * The ``GetMicrovm`` ``stateReason`` value that means "nothing to report".
+ *
+ * Live-observed, not guessed: an orchestrator-initiated ``TerminateMicrovm`` on the
+ * SUCCESS path leaves the MicroVM ``TERMINATED`` with exactly
+ * ``stateReason: "Success."`` — trailing period included. Recorded three times in
+ * ``docs/verification/645-p2-smoke-runbook.md``: **§5.1** ("Finalization called
+ * `TerminateMicrovm`", the verbatim CLI output), **§6.2** (the suspend/resume
+ * latency table) and **§2.9** ("Lifecycle — PASS", run 2). A healthy ``RUNNING``
+ * MicroVM reports no reason at all (``None``, same §6.2 table).
+ *
+ * Normalized away in {@link LambdaMicrovmComputeStrategy.pollSession} so it never
+ * reaches the reconcile ``detail`` string, where it would append noise to every
+ * cleanly-finished task.
+ *
+ * A bare literal comparison is deliberate and the brittleness is bounded: this is
+ * a service-owned display string, so an exact match can only fail OPEN — a future
+ * ``"Success"`` without the period, or a different capitalisation, would leak one
+ * benign phrase into an operator-facing string. It cannot suppress a real reason,
+ * which is the direction that would matter. Left out of
+ * ``contracts/constants.json`` for the same reason: nothing in the agent reads it,
+ * so it is not a cross-language contract.
+ */
+const MICROVM_BENIGN_STATE_REASON = 'Success.';
+
+/**
  * The `platform_config` contract (ADR-021 P2): the non-secret platform
  * identifiers the in-guest agent needs, and the EXACT wire keys it reads.
  *
@@ -374,15 +399,36 @@ export function microvmPayloadKey(taskId: string): string {
  * Relying only on ``MICROVM_PAYLOAD_TTL_DAYS = 1`` left that window open for up
  * to ~24 h; deleting at finalize closes it to the task's own lifetime, which is
  * exactly the posture ``deleteEcsPayload`` already gives the ECS backend.
+ *
+ * ISSUED UNCONDITIONALLY, including for a task whose payload went INLINE (under
+ * the {@link RUN_HOOK_PAYLOAD_LIMIT_BYTES} cap, so no object was ever written).
+ * That is on purpose: ``DeleteObject`` on a missing key succeeds, so the call is
+ * harmless and idempotent, whereas *deciding* to skip it would mean trusting a
+ * per-task record of the delivery mode — and if that record were ever wrong or
+ * absent, the skip would leave a real payload behind for the full TTL. Attempting
+ * always is the fail-safe direction.
+ *
+ * The consequence is that a successful call proves a delete was ISSUED, never that
+ * an object existed — S3 returns nothing that distinguishes the two on an
+ * unversioned bucket. The log line below says exactly that and no more; an earlier
+ * "Deleted MicroVM payload object" asserted a deletion that never happened on
+ * every inline task.
  */
 export async function deleteMicrovmPayload(taskId: string): Promise<void> {
   if (!MICROVM_PAYLOAD_BUCKET) return;
+  const key = microvmPayloadKey(taskId);
   try {
     await getS3Client().send(new DeleteObjectCommand({
       Bucket: MICROVM_PAYLOAD_BUCKET,
-      Key: microvmPayloadKey(taskId),
+      Key: key,
     }));
-    logger.info('Deleted MicroVM payload object', { task_id: taskId });
+    // "issued", not "deleted": see the docstring. An inline-delivered task has no
+    // object here and the call still succeeds.
+    logger.info('MicroVM payload delete issued', {
+      task_id: taskId,
+      bucket: MICROVM_PAYLOAD_BUCKET,
+      key,
+    });
   } catch (err) {
     // Non-fatal — the lifecycle rule is the backstop.
     logger.warn('Failed to delete MicroVM payload object (non-fatal)', {
@@ -759,11 +805,13 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
         microvmIdentifier: microvmId,
       }));
       state = result.state;
-      // ``Success.`` is the service's own "nothing to report" value on a clean
+      // `Success.` is the service's own "nothing to report" value on a clean
       // termination — carrying it would append noise to every healthy task's
       // detail string, so it is normalized away here rather than filtered at
-      // each of the three call sites below.
-      stateReason = result.stateReason && result.stateReason !== 'Success.'
+      // each of the three call sites below. See
+      // `MICROVM_BENIGN_STATE_REASON` for the live evidence and why an exact
+      // match is acceptable here.
+      stateReason = result.stateReason && result.stateReason !== MICROVM_BENIGN_STATE_REASON
         ? result.stateReason
         : undefined;
     } catch (err) {

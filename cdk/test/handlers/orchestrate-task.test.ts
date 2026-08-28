@@ -1245,7 +1245,7 @@ describe('finalizeTask', () => {
     const message = mockDdbSend.mock.calls[1][0].input
       .ExpressionAttributeValues[':attr_error_message'] as string;
     expect(message).toBe(
-      `Agent session lost: no recent heartbeat from the runtime (${noun} may have crashed, `
+      `Agent session lost: no recent heartbeat from the agent (${noun} may have crashed, `
       + 'been OOM-killed, or stopped)',
     );
   });
@@ -1267,6 +1267,14 @@ describe('finalizeTask', () => {
     const message = mockDdbSend.mock.calls[1][0].input
       .ExpressionAttributeValues[':attr_error_message'] as string;
     expect(message).toContain('(the runtime may have crashed');
+    // ...and the sentence does not stutter. The prefix names WHO stopped beating
+    // (the agent); the parenthetical names WHAT it was running on. When the noun
+    // degrades to the generic "the runtime", a prefix that also said "the runtime"
+    // produced "no recent heartbeat from the runtime (the runtime may have…)".
+    expect(message).toBe(
+      'Agent session lost: no recent heartbeat from the agent '
+      + '(the runtime may have crashed, been OOM-killed, or stopped)',
+    );
   });
 
   test('the heartbeat-stale message still classifies as a lost session', async () => {

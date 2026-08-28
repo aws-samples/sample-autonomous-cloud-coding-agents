@@ -58,7 +58,10 @@ JSON at TypeScript compile time via `resolveJsonModule`.
   "microvm_platform_config": {
     "env_by_key": { "task_table_name": "TASK_TABLE_NAME", "...": "..." },
     "required": ["task_table_name", "task_events_table_name",
-                 "github_token_secret_arn", "agent_session_role_arn"]
+                 "github_token_secret_arn", "agent_session_role_arn"],
+    "arn_keys": ["github_token_secret_arn", "linear_oauth_secret_arn",
+                 "jira_oauth_secret_arn", "agent_session_role_arn"],
+    "account_anchor_key": "agent_session_role_arn"
   },
   "microvm_hook_budgets": {
     "ready_hook_timeout_seconds": 300,
@@ -107,11 +110,35 @@ JSON at TypeScript compile time via `resolveJsonModule`.
 - **`microvm_platform_config.required`** — the subset without which a task cannot
   run (task + event tables, GitHub secret ARN, session role ARN). A `/run` hook
   whose `platform_config` misses or blanks any of these is rejected with HTTP 400.
+- **`microvm_platform_config.arn_keys`** — the subset of `env_by_key` whose VALUES
+  are ARNs, and which the agent therefore checks for partition/account agreement
+  before installing. The key allowlist stops a payload setting an unrecognised
+  variable; it does not stop a payload pointing an **allowlisted** key at a
+  different resource, and `github_token_secret_arn` is fetched with the unscoped
+  execution role and cached into `GITHUB_TOKEN`. Any value that is malformed, or
+  that disagrees with the anchor below on partition or account, is rejected
+  (HTTP 400 `MICROVM_RUN_PLATFORM_CONFIG_INVALID`). This is **fail-fast plus
+  defence in depth, not an ownership proof** — the account-scoped IAM grants are
+  what actually deny a foreign read, and an in-account redirect is deliberately
+  *not* covered (see `MICROVM_PLATFORM_CONFIG_ARN_KEYS` in
+  `agent/src/server.py` for the full statement of what this does and does not buy).
+- **`microvm_platform_config.account_anchor_key`** — which `arn_keys` entry supplies
+  the expected partition + account. Must be `agent_session_role_arn`-shaped: a
+  payload key rather than `os.environ` or an `sts:GetCallerIdentity`, because the
+  environment is empty by construction on this backend (the snapshot bakes nothing)
+  and this check runs on the path that must make zero AWS calls beyond the S3
+  payload fetch. Two invariants follow and both are enforced: the anchor must be in
+  `arn_keys`, **and** it must be in `required` — an optional anchor would let a
+  payload disarm the whole check by simply omitting it.
 
-Both `microvm_platform_config` fields are validated for shape (snake_case keys,
-UPPER_SNAKE unique env names, `required ⊆ env_by_key`) by
+All four `microvm_platform_config` fields are validated for shape (snake_case keys,
+UPPER_SNAKE unique env names, `required ⊆ env_by_key`, `arn_keys ⊆ env_by_key`
+non-empty, `account_anchor_key ∈ arn_keys ∩ required`) by
 `scripts/check-constants-sync.ts` **and** by `agent/src/server.py` at import time,
-so a malformed contract fails the drift check *and* the MicroVM image build.
+so a malformed contract fails the drift check *and* the MicroVM image build. The
+duplication is deliberate: a malformed entry here would silently **widen** what the
+agent accepts from a network payload, so neither side is trusted to be the only
+gate.
 
 - **`microvm_hook_budgets.ready_hook_timeout_seconds`** — the `/ready` build-hook
   budget the CDK construct declares to `CreateMicrovmImage`

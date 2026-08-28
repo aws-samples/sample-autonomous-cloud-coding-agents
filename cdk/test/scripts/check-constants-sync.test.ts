@@ -32,6 +32,18 @@
  * spawned, against a throwaway repo root assembled in a temp dir. That also means
  * these tests cover the real regexes and the real JSON validation rather than a
  * re-implementation of either.
+ *
+ * WHY THIS LIVES UNDER `cdk/test/` for a ROOT-level script: there is no test tree
+ * at the repo root, and `scripts/check-constants-sync.ts` is a monorepo-CI file
+ * (AGENTS.md routing table, "Monorepo CI / tasks" row) rather than a `cdk/` one.
+ * `cdk/` is the only workspace with a Jest runner that can reach `../../scripts`,
+ * so this is deliberate placement, not misrouting. Two consequences to know about:
+ * the suite reports 0 % coverage for `cdk/src` (it exercises a subprocess, so
+ * nothing in this package is instrumented), and `FIXTURE_FILES` below hand-mirrors
+ * the script's own consumer list — if the script gains a consumer and that list is
+ * not updated, the copy is incomplete and the script dies on `ENOENT` rather than
+ * passing vacuously. Loud, but the message will point at a missing file rather
+ * than at drift.
  */
 
 import { execFileSync } from 'node:child_process';

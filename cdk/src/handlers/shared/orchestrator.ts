@@ -109,11 +109,17 @@ const AGENT_HEARTBEAT_STALE_SEC = 240;
  *   `run_task_from_payload` directly and "bypasses the uvicorn server entirely",
  *   so `_heartbeat_worker` NEVER STARTS and `agent_heartbeat_at` is written
  *   exactly once. Enabling this for `ecs` would fail EVERY ECS task after
- *   ~6 minutes (`AGENT_HEARTBEAT_GRACE_SEC` 120 + `AGENT_HEARTBEAT_STALE_SEC`
- *   240) regardless of container health. Separately — and only as a secondary
- *   point — ECS does not need it: `DescribeTasks` reports a real container exit
- *   (including OOM-kill, exit 137) with an exit code, and the ECS poll block in
- *   `orchestrate-task.ts` already interprets it with its own patience counters.
+ *   ~4 minutes, regardless of container health: that single write makes the
+ *   timestamp PRESENT, so the staleness arm below applies (`runningAge > 120 &&
+ *   hbAge > 240`), not the never-beat arm (`runningAge > 120 + 240`). The two
+ *   thresholds are not additive on this path — `pipeline.py` calls
+ *   `write_running` and `write_heartbeat` back to back, so `hbAge ≈ runningAge`
+ *   and the 120 s gate is already cleared by the time the 240 s one binds.
+ *   `AGENT_HEARTBEAT_STALE_SEC` alone sets the deadline. Separately — and only as
+ *   a secondary point — ECS does not need it: `DescribeTasks` reports a real
+ *   container exit (including OOM-kill, exit 137) with an exit code, and the ECS
+ *   poll block in `orchestrate-task.ts` already interprets it with its own
+ *   patience counters.
  *
  * A `switch` rather than a set membership test so a fourth backend cannot be
  * added without making an explicit, compile-checked decision here — the culture
@@ -1176,7 +1182,7 @@ export async function finalizeTask(
       await transitionTask(taskId, currentStatus, TaskStatus.FAILED, {
         completed_at: new Date().toISOString(),
         error_message:
-          'Agent session lost: no recent heartbeat from the runtime '
+          'Agent session lost: no recent heartbeat from the agent '
           + `(${substrateNoun(task.compute_type)} may have crashed, been OOM-killed, or stopped)`,
       });
       transitioned = true;

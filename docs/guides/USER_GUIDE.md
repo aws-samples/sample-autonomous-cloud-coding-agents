@@ -694,6 +694,20 @@ node lib/bin/bgagent.js list --status RUNNING,SUBMITTED
 node lib/bin/bgagent.js list --repo owner/repo --limit 10
 ```
 
+The table is `TASK ID`, `STATUS`, `REPO`, `CREATED`, `HEARTBEAT`, `DESCRIPTION`.
+
+#### Is a running task actually alive? (`HEARTBEAT`)
+
+While a task is `RUNNING` the agent writes a liveness beat every 45 seconds. `bgagent status` shows it as a `Heartbeat:` line and `bgagent list` as a `HEARTBEAT` column, both as an **age** rather than a timestamp, because the age is the signal:
+
+```text
+Heartbeat:   2026-04-01T00:41:02.118Z (12s ago)
+```
+
+- **Under ~1 minute** - healthy; the agent is working.
+- **Several minutes and climbing** - the agent is hung, deadlocked, or was OOM-killed inside an otherwise-healthy compute environment. The platform detects this itself and fails the task rather than letting it burn its full timeout, so you do not need to act; the failure message will name the compute substrate.
+- **`—`** - nothing to report. Shown for terminal tasks (the last beat means nothing next to a final status), before the first beat arrives, and on the `ecs` backend, where the agent runs the pipeline directly rather than serving HTTP and so beats only once at start.
+
 ### Viewing task events
 
 ```bash
