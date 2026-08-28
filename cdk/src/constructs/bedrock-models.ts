@@ -21,6 +21,24 @@ import { CrossRegionInferenceProfileRegion } from '@aws-cdk/aws-bedrock-alpha';
 import { Node } from 'constructs';
 
 /**
+ * The small/fast model the agent uses for cheap side-calls, as a BARE
+ * foundation-model id.
+ *
+ * Named separately from {@link DEFAULT_BEDROCK_MODEL_IDS} because it has a second
+ * consumer: the agent needs it as a runtime *value*
+ * (`ANTHROPIC_DEFAULT_HAIKU_MODEL`), not just as an IAM grant. Splicing it out of
+ * that list means the granted model and the delivered model id cannot drift — a
+ * mismatch would AccessDenied every Haiku call at run time while synth stayed
+ * green.
+ *
+ * Declared ABOVE the list rather than beside {@link haikuInferenceProfileId}
+ * below it because the list interpolates it: a `const` referenced before its
+ * declaration is a TDZ `ReferenceError` at module load, and re-inlining the
+ * literal into the list is exactly the drift this constant exists to prevent.
+ */
+export const DEFAULT_HAIKU_MODEL_ID = 'anthropic.claude-haiku-4-5-20251001-v1:0';
+
+/**
  * Single source of truth for the Bedrock **foundation-model IDs** the agent
  * runtime may invoke. Both grant sites — the AgentCore runtime in
  * `stacks/agent.ts` and the ECS task role in `constructs/ecs-agent-cluster.ts`
@@ -52,7 +70,7 @@ export const DEFAULT_BEDROCK_MODEL_IDS: readonly string[] = [
   // stays granted: blueprints may pin it per-repo, so removing it would fail
   // those repos at turn 0.
   'anthropic.claude-opus-5',
-  'anthropic.claude-haiku-4-5-20251001-v1:0',
+  DEFAULT_HAIKU_MODEL_ID,
 ];
 
 /** CDK context key whose value (a string array) overrides the model set. */
@@ -106,8 +124,8 @@ const GEO_PREFIX_RE = new RegExp(`^(?:${GEO_ALTERNATION})\\.`);
  * `CrossRegionInferenceProfile.fromConfig`, the ECS task role in
  * `constructs/ecs-agent-cluster.ts` via the `<geo>.<modelId>` ARN resource
  * name), and the agent's auxiliary-model env var (`ANTHROPIC_DEFAULT_HAIKU_MODEL`)
- * takes the same prefix — so the main and auxiliary models can never route
- * through different geographies.
+ * takes the same prefix via {@link haikuInferenceProfileId} — so the main and
+ * auxiliary models can never route through different geographies.
  *
  * Throws at synth on an unrecognized value: an invented geography would produce
  * a syntactically valid but non-existent inference-profile ARN, and the grant
@@ -126,6 +144,44 @@ export function resolveBedrockGeoRegion(node: Node): CrossRegionInferenceProfile
     );
   }
   return override as CrossRegionInferenceProfileRegion;
+}
+
+/**
+ * The `ANTHROPIC_DEFAULT_HAIKU_MODEL` value delivered to the agent, for the
+ * geography `geoRegion` (from {@link resolveBedrockGeoRegion}).
+ *
+ * A **cross-Region inference-profile** id, not the bare foundation-model id:
+ * Claude 4.x cannot be invoked on-demand by bare id (400 "on-demand throughput
+ * isn't supported"). The prefix is the resolved geography rather than a hardcoded
+ * `us.` so this auxiliary model routes through the same geography as the granted
+ * profiles — every grant site derives its inference-profile ARN from the same
+ * value, so the delivered id is always one of the granted profiles.
+ * (`agent/src/runner.py` re-sets the env var at spawn time from whatever arrives.)
+ *
+ * A function rather than a `const` for exactly that reason: the geography is a
+ * per-deployment context read (`bedrockGeoRegion`, #764), so a module-level
+ * constant could only ever bake one geography in — which is the split this
+ * function exists to make impossible.
+ *
+ * TWO delivery sites call it, and both must — the second is the easy one to
+ * forget:
+ *  1. the AgentCore runtime env block (`stacks/agent.ts`);
+ *  2. the lambda-microvm `platform_config` block (`stacks/agent.ts`) — a MicroVM
+ *     restored from a snapshot cannot inherit a baked env, so the orchestrator
+ *     forwards the value on the `/run` payload instead (ADR-021 P2). This is the
+ *     "third site" flagged on #746 (after the two Bedrock ARN derivations in
+ *     `stacks/agent.ts` and `constructs/ecs-agent-cluster.ts`): a geo change that
+ *     missed it would leave one substrate calling a profile the role does not
+ *     grant.
+ *
+ * The ECS container env is deliberately NOT in that list — it never carried
+ * `ANTHROPIC_DEFAULT_HAIKU_MODEL`, so an ECS agent falls back to
+ * `agent/src/config.py`'s own `us.`-prefixed default. That is correct on the
+ * default geography and a pre-existing gap on any other; it predates this merge
+ * and is left alone here rather than fixed in a conflict resolution.
+ */
+export function haikuInferenceProfileId(geoRegion: CrossRegionInferenceProfileRegion): string {
+  return `${geoRegion}.${DEFAULT_HAIKU_MODEL_ID}`;
 }
 
 /**

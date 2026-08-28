@@ -90,6 +90,30 @@ describe('Bootstrap template', () => {
         .toBe('IncludeComputeLambdaMicrovms');
     });
 
+    it('IaCRoleABCAComputeLambdaMicrovms carries the unconditioned MicrovmPassRoles statement', () => {
+      // ADR-021 P2r2-F9, asserted on the artifact operators actually deploy rather
+      // than only on the TypeScript source: CloudFormation cannot pass the MicroVM
+      // build role while an `iam:PassedToService` condition is in force, so the
+      // CDK-managed image path depends on this statement reaching the YAML with no
+      // Condition key. It lives in the CONDITIONAL per-backend policy, so an
+      // agentcore-only bootstrap never gains the unconditioned pass at all.
+      const statements = template.Resources.IaCRoleABCAComputeLambdaMicrovms
+        .Properties.PolicyDocument.Statement as Array<{
+        Sid: string;
+        Action: string | string[];
+        Resource: string | string[];
+        Condition?: unknown;
+      }>;
+      const passRole = statements.find((s) => s.Sid === 'MicrovmPassRoles');
+      expect(passRole).toBeDefined();
+      expect(passRole!.Action).toBe('iam:PassRole');
+      expect(passRole!.Condition).toBeUndefined();
+      expect(passRole!.Resource).toEqual([
+        'arn:aws:iam::*:role/backgroundagent-dev-LambdaMicrovmComputeBuild*',
+        'arn:aws:iam::*:role/backgroundagent-dev-LambdaMicrovmComputeConnector*',
+      ]);
+    });
+
     it('non-optional-compute policies do not have a condition', () => {
       const unconditional = expectedPolicies.filter(
         (p) => p !== 'IaCRoleABCAComputeEcs' && p !== 'IaCRoleABCAComputeLambdaMicrovms',
