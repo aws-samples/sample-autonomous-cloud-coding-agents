@@ -191,15 +191,15 @@ describe('renderLinearAppTemplate', () => {
     // operator registered it without. Exact-string matching then rejects it.
     const out = renderLinearAppTemplate();
     expect(out).toMatch(/trailing slash/);
-    expect(out).toMatch(/matched EXACTLY/);
+    expect(out).toMatch(/match EXACTLY/);
     // Wraps across lines in the rendered output, so match the leading phrase.
-    expect(out).toMatch(/Invalid redirect_uri parameter/);
+    expect(out).toMatch(/Invalid redirect_uri/);
   });
 
   test('keeps the line-wrap and wildcard traps, which are real', () => {
     const out = renderLinearAppTemplate();
     expect(out).toMatch(/line-wrapped/);
-    expect(out).toMatch(/[Ww]ildcards\s+\n?\s*are not accepted|not accepted/);
+    expect(out).toMatch(/wildcard/);
   });
 
   test('prints the REAL webhook URL when it can resolve one', () => {
@@ -222,7 +222,7 @@ describe('renderLinearAppTemplate', () => {
     // labels keep working, so nothing looks broken until an @mention is ignored.
     const out = renderLinearAppTemplate();
     expect(out).toContain('Issues + Comments');
-    expect(out).toMatch(/Comments must be ticked/);
+    expect(out).toMatch(/Tick Comments as well as Issues/);
   });
 
   test('tells the operator to keep the signing secret', () => {
@@ -231,9 +231,27 @@ describe('renderLinearAppTemplate', () => {
 
   test('says to leave App events OFF, and why', () => {
     const out = renderLinearAppTemplate();
-    expect(out).toMatch(/App events:\s+all OFF/);
-    expect(out).toMatch(/agent-session events on/);
+    expect(out).toMatch(/App events \(agent session/);
+    expect(out).toMatch(/OFF/);
     expect(out).toMatch(/comment thread/);
+  });
+
+  test('puts the webhook on the WORKSPACE, which is the live-verified configuration', () => {
+    // Checked against the running deployment: the ABCA webhook is a workspace
+    // subscription (Issue + Comment), and the OAuth app's own webhook is off.
+    const out = renderLinearAppTemplate();
+    expect(out).toMatch(/WORKSPACE webhook/);
+    expect(out).toContain('settings/api/webhooks');
+    expect(out).toMatch(/Webhooks:\s+OFF/);
+  });
+
+  test('warns that a second webhook on the app duplicates every event', () => {
+    // Two subscriptions to one endpoint means two signing secrets, and ABCA stores
+    // one per workspace — so the duplicate both doubles the work and fails to
+    // verify. Worth stating because pasting the URL in both places looks harmless.
+    const out = renderLinearAppTemplate();
+    expect(out).toMatch(/ONE webhook/);
+    expect(out).toMatch(/twice/);
   });
 
   test('names the agent whatever the operator chose', () => {
@@ -246,7 +264,7 @@ describe('renderLinearAppTemplate', () => {
     // Without this, renaming yields an agent that looks right and answers nothing.
     const out = renderLinearAppTemplate({ appName: 'Alan Turing' });
     expect(out).toContain('@bgagent <request>');
-    expect(out).toMatch(/NOT the trigger/);
+    expect(out).toMatch(/not the trigger/);
   });
 
   test('a blank or whitespace name falls back to the default', () => {

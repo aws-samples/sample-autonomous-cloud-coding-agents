@@ -276,7 +276,7 @@ Re-run `bgagent linear setup` after fixing.
 
 > Earlier versions of this guide blamed a blank **GitHub username** field for this error. Linear's app form has no such field (verified against the live form: icon, application name, developer name, developer URL, description, redirect URIs), so there is nothing to fill in — check the redirect URIs instead.
 >
-> Webhooks can be configured **either** on the OAuth application itself (its own Webhooks toggle, URL and signing secret) **or** as a separate workspace webhook as described in step 4. ABCA verifies whichever signing secret you give it, so both work; the app-level one is one less thing to create. Note that an app-level webhook has a single signing secret shared across every workspace the app is installed on, whereas workspace webhooks get one each.
+> Leave the OAuth app's own **Webhooks** toggle OFF. ABCA's events come from the *workspace* webhook you create in step 4 — that is the configuration in use on the live deployment. Enabling both, pointed at the same endpoint, delivers every event twice under two different signing secrets, and ABCA stores one secret per workspace, so the second subscription fails verification.
 
 ### Agent doesn't post comments to Linear
 
