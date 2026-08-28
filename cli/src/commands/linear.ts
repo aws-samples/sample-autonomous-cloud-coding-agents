@@ -828,6 +828,18 @@ export function makeLinearCommand(): Command {
         const callbackPromise = resumed ? undefined : awaitOauthCallback();
 
         console.log();
+        // Name the redirect URI BEFORE handing off to the browser. Linear matches it
+        // as an exact string and reports a mismatch only in the browser, as
+        // "Invalid redirect_uri parameter for the application" — which names the
+        // application, not the URI, so there is nothing on screen to compare
+        // against what the app has registered. The hosted path prints its own
+        // (longer) version of this warning further up.
+        if (!resumed && !setupHostedUrl) {
+          console.log(`  Redirecting to: ${setupRedirectUri}`);
+          console.log('  That exact URI must be one of the app\'s Redirect URIs, or consent');
+          console.log('  fails with "Invalid redirect_uri parameter for the application".');
+          console.log('  No localhost on this machine? Use --hosted instead.\n');
+        }
         if (resumed) {
           // nothing to open: consent already happened in the operator's browser.
         } else if (opts.browser !== false) {
