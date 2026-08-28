@@ -122,6 +122,10 @@ export const RESOURCE_ACTION_MAP: Record<string, readonly string[]> = {
   'AWS::WAFv2::WebACLAssociation': ['wafv2:AssociateWebACL'],
   'Custom::AWS': ['lambda:InvokeFunction'],
   'Custom::AgentRegistry': ['lambda:InvokeFunction'],
+  // CDK BucketDeployment's custom resource — ships the static Linear vault consent
+  // page into its bucket (context-gated `enableLinearIdentityVault`, not in the
+  // default synth).
+  'Custom::CDKBucketDeployment': ['lambda:InvokeFunction'],
   // The Linear identity vault's workload-identity provisioning custom resource
   // (RFC #249 Phase 1; context-gated `enableLinearIdentityVault`, not in the
   // default synth). Same CDK Provider-framework shape as Custom::AgentRegistry.

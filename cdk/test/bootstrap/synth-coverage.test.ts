@@ -132,10 +132,25 @@ describe('Bootstrap policy synth coverage', () => {
       ).map((r) => r.Type),
     );
 
-    const cfnType = 'Custom::LinearWorkloadIdentity';
-    expect(gatedTypes.has(cfnType)).toBe(true);
-    expect(cfnType in RESOURCE_ACTION_MAP).toBe(true);
-    expect(findMissingBootstrapActions(cfnType, allowedActions)).toEqual([]);
+    // Every CFN type the gated path adds must be mapped AND covered — the vault's
+    // own custom resource plus the CloudFront/S3/BucketDeployment types behind the
+    // hosted consent page.
+    for (const cfnType of [
+      'Custom::LinearWorkloadIdentity',
+      'Custom::CDKBucketDeployment',
+      'AWS::CloudFront::Distribution',
+      'AWS::S3::Bucket',
+    ]) {
+      expect(gatedTypes.has(cfnType)).toBe(true);
+      expect(cfnType in RESOURCE_ACTION_MAP).toBe(true);
+      expect(findMissingBootstrapActions(cfnType, allowedActions)).toEqual([]);
+    }
+
+    // And nothing the gated path adds may slip past unmapped.
+    const unmapped = [...gatedTypes].filter(
+      (t) => !CFN_TYPES_WITHOUT_EXEC_ROLE_IAM.has(t) && !(t in RESOURCE_ACTION_MAP),
+    );
+    expect(unmapped).toEqual([]);
   });
 
   it('covers integration resources that previously failed deploy (regression)', () => {

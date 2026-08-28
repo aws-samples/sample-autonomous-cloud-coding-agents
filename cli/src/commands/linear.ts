@@ -901,6 +901,16 @@ export function makeLinearCommand(): Command {
       .option('--client-id <id>', 'Linear OAuth app Client ID (else read from the SM secret)')
       .option('--client-secret <secret>', 'Linear OAuth app Client Secret (else read from the SM secret)')
       .option('--no-browser', 'Print the consent URL instead of opening a browser (SSH/headless)')
+      .option(
+        '--hosted',
+        'Bounce consent through the stack\'s hosted consent page instead of a localhost listener. '
+        + 'Use this on a cloud desktop / SSH box, where the browser cannot reach the CLI\'s localhost.',
+      )
+      .option(
+        '--session <sessionUri>',
+        'Finish a consent that already happened in the browser: paste the session id shown on the '
+        + 'consent page (or the `session_id` in the redirect URL). Needs no listener at all.',
+      )
       .action(async (slug: string, opts) => {
         if (!SLUG_RE.test(slug)) {
           throw new CliError(`Invalid workspace slug '${slug}'.`);
@@ -911,10 +921,22 @@ export function makeLinearCommand(): Command {
 
         // The workload identity name is fixed by the CDK construct.
         const WORKLOAD_NAME = 'abca_linear_oauth';
-        // USER_FEDERATION requires a return URL that's on the workload identity
-        // allowlist. The CLI localhost loopback is always registered; consent
-        // completes server-side (polled below), so nothing listens on it here.
-        const RETURN_URL = 'http://localhost:8080/oauth/callback';
+        // USER_FEDERATION requires a return URL that is on the workload identity's
+        // allowlist. The CLI localhost loopback is always registered; when the
+        // stack was deployed with a hosted landing page its URL is registered too
+        // and can be selected with --hosted (see below).
+        const LOOPBACK_RETURN_URL = CALLBACK_URL;
+        const hostedReturnUrl = opts.hosted
+          ? await getStackOutput(region, stackName, 'LinearVaultConsentUrl')
+          : undefined;
+        if (opts.hosted && !hostedReturnUrl) {
+          throw new CliError(
+            `--hosted needs the stack to expose LinearVaultConsentUrl. Deploy '${stackName}' with `
+            + '`--context enableLinearIdentityVault=true` (which provisions the hosted consent page), '
+            + 'or drop --hosted to use the localhost loopback.',
+          );
+        }
+        const RETURN_URL = hostedReturnUrl ?? LOOPBACK_RETURN_URL;
 
         const registryTable = await getStackOutput(region, stackName, 'LinearWorkspaceRegistryTableName');
         if (!registryTable) {
@@ -973,6 +995,39 @@ export function makeLinearCommand(): Command {
         );
 
         // ─── Step 2: 3LO consent round-trip (mints + caches the token) ───
+        // `--session` finishes a consent the operator already completed in a
+        // browser: they paste the session id and we finalize it here, with THEIR
+        // AWS credentials. No listener, no hosted endpoint, works on a cloud
+        // desktop where the browser cannot reach the CLI's localhost.
+        if (opts.session) {
+          const sessionUri = String(opts.session).trim();
+          process.stdout.write('  → Finalizing the pasted session...');
+          await finalizeVaultConsent({ region, linearWorkspaceId, sessionUri });
+          console.log(' ✓');
+          const resumed = await beginVaultConsent({
+            region,
+            workloadName: WORKLOAD_NAME,
+            providerName,
+            linearWorkspaceId,
+            returnUrl: RETURN_URL,
+          });
+          const token = await resumed.poll();
+          if (!token) {
+            throw new CliError(
+              'The session was finalized but the vault returned no token. Check that the pasted '
+              + 'session id is the one from THIS consent (they are single-use and short-lived), then '
+              + 're-run `bgagent linear vault-setup` to start a fresh consent.',
+            );
+          }
+          console.log('  ✓ Vault minted a Linear access token (cached in the vault).');
+          await ddb.send(new PutCommand({
+            TableName: registryTable,
+            Item: { ...row, provider_name: providerName, updated_at: new Date().toISOString() },
+          }));
+          console.log(`  ✓ Recorded provider_name '${providerName}' on the workspace registry row.`);
+          return;
+        }
+
         const consent = await beginVaultConsent({
           region,
           workloadName: WORKLOAD_NAME,
@@ -985,6 +1040,20 @@ export function makeLinearCommand(): Command {
         if (!consent.authorizationUrl) {
           // Already consented — the vault handed the cached token straight back.
           accessToken = await consent.poll();
+        } else if (hostedReturnUrl) {
+          // Hosted mode: consent lands on the stack's page instead of a localhost
+          // listener, so the browser does not have to reach this machine. The page
+          // shows the session id; the operator pastes it back so THIS CLI (with
+          // their AWS credentials) finalizes. We deliberately do NOT finalize
+          // server-side: that would mean a public, unauthenticated endpoint that
+          // completes OAuth sessions.
+          console.log('\n  → Hosted consent. Open this URL in any browser:\n');
+          console.log(`    ${consent.authorizationUrl}\n`);
+          console.log(`  After you Authorize, you will land on:\n    ${hostedReturnUrl}`);
+          console.log('  Copy the session id it shows, then finish with:\n');
+          console.log(`    bgagent linear vault-setup ${slug} --session <session-id>\n`);
+          console.log('  (The session id is also the `session_id` value in that page\'s URL.)');
+          return;
         } else {
           // The listener starts BEFORE the browser opens so it is already bound
           // when AgentCore bounces back. The bounce is NOT cosmetic: it carries

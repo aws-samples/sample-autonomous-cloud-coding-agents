@@ -1484,6 +1484,9 @@ describe('AgentStack Linear identity vault gate (#809)', () => {
     expect(rendered).not.toContain('Custom::LinearWorkloadIdentity');
     expect(rendered).not.toContain('GetResourceOauth2Token');
     expect(rendered).not.toContain('LINEAR_WORKLOAD_IDENTITY_NAME');
+    // The hosted consent page is part of the same gate.
+    expect(rendered).not.toContain('LinearVaultConsentPage');
+    expect(rendered).not.toContain('LinearVaultConsentUrl');
   });
 
   test('flag on: agent runtime role gets the token data-plane grant + the agent env is set', () => {
@@ -1495,24 +1498,25 @@ describe('AgentStack Linear identity vault gate (#809)', () => {
     );
     // The workload identity is provisioned.
     template.resourceCountIs('Custom::LinearWorkloadIdentity', 1);
-    // Some role is granted the two token data-plane actions.
-    template.hasResourceProperties('AWS::IAM::Policy', {
-      PolicyDocument: Match.objectLike({
-        Statement: Match.arrayWith([
-          Match.objectLike({
-            Action: [
-              'bedrock-agentcore:GetWorkloadAccessTokenForUserId',
-              'bedrock-agentcore:GetResourceOauth2Token',
-            ],
-            Effect: 'Allow',
-          }),
-        ]),
-      }),
-    });
+    // Some role is granted the two token data-plane actions. Asserted on the
+    // rendered policies rather than a fixed Action shape: the two actions live in
+    // separate statements (they authorize against different resources), and CDK
+    // renders a single-action statement as a string, not a one-element array.
+    const policyJson = JSON.stringify(template.findResources('AWS::IAM::Policy'));
+    expect(policyJson).toContain('bedrock-agentcore:GetWorkloadAccessTokenForUserId');
+    expect(policyJson).toContain('bedrock-agentcore:GetResourceOauth2Token');
+    expect(policyJson).toContain('workload-identity-directory/default');
     // The agent runtime carries the vault env so config.py takes the vault path.
     const rendered = JSON.stringify(template.toJSON());
     expect(rendered).toContain('LINEAR_WORKLOAD_IDENTITY_NAME');
     expect(rendered).toContain('abca_linear_oauth');
+
+    // Hosted consent page ships with the gate, and its URL is published so
+    // `vault-setup --hosted` can find it. Without the output the CLI cannot
+    // resolve a return URL and --hosted fails closed.
+    const outputs = template.toJSON().Outputs as Record<string, unknown>;
+    expect(Object.keys(outputs)).toContain('LinearVaultConsentUrl');
+    expect(rendered).toContain('Custom::CDKBucketDeployment');
   });
 });
 

@@ -54,6 +54,7 @@ import {
 } from '../constructs/lambda-microvm-compute';
 import { LinearIdentityVault } from '../constructs/linear-identity-vault';
 import { LinearIntegration } from '../constructs/linear-integration';
+import { LinearVaultConsentPage } from '../constructs/linear-vault-consent-page';
 import { OperationalAlerts } from '../constructs/operational-alerts';
 import { OrchestrationReconciler } from '../constructs/orchestration-reconciler';
 import { OrchestrationTable } from '../constructs/orchestration-table';
@@ -880,12 +881,23 @@ export class AgentStack extends Stack {
     // consumer: runtime role below, ECS task role inside EcsAgentCluster,
     // webhook processor inside LinearIntegration.
     let linearIdentityVault: LinearIdentityVault | undefined;
+    let linearVaultConsentPage: LinearVaultConsentPage | undefined;
     if (linearIdentityVaultEnabled) {
+      // Hosted consent landing page, so onboarding works where the browser cannot
+      // reach the CLI's localhost (cloud desktop, SSH box, container). Static by
+      // design — it only displays the session id; the CLI finalizes with the
+      // operator's own credentials rather than exposing a public endpoint that
+      // completes OAuth sessions. An explicit context override is still honoured
+      // for operators fronting the callback with their own URL.
+      const hostedReturnUrlOverride = this.node.tryGetContext('linearVaultHostedReturnUrl') as string | undefined;
+      if (!hostedReturnUrlOverride) {
+        linearVaultConsentPage = new LinearVaultConsentPage(this, 'LinearVaultConsentPage');
+      }
+      const hostedReturnUrl = hostedReturnUrlOverride ?? linearVaultConsentPage?.consentUrl;
+
       // Return URLs the 3LO consent flow may bounce back to (spike F9: allowlist
       // enforced; F11: localhost + hosted coexist so either onboarding mode works
-      // off one identity). The CLI localhost loopback is always allowed; a hosted
-      // static onboarding page URL is added when configured.
-      const hostedReturnUrl = this.node.tryGetContext('linearVaultHostedReturnUrl') as string | undefined;
+      // off one identity). Both are registered: the CLI picks per call.
       linearIdentityVault = new LinearIdentityVault(this, 'LinearIdentityVault', {
         workloadName: LINEAR_VAULT_WORKLOAD_NAME,
         allowedReturnUrls: [
@@ -893,6 +905,13 @@ export class AgentStack extends Stack {
           ...(hostedReturnUrl ? [hostedReturnUrl] : []),
         ],
       });
+
+      if (hostedReturnUrl) {
+        new CfnOutput(this, 'LinearVaultConsentUrl', {
+          value: hostedReturnUrl,
+          description: 'Hosted Linear vault consent landing page — used by `bgagent linear vault-setup --hosted`',
+        });
+      }
     }
 
     const ecsCluster = computeType === 'ecs'
