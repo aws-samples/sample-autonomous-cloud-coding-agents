@@ -58,6 +58,7 @@ import {
 } from '../linear-vault';
 import { awaitOauthCallback, CALLBACK_URL } from '../oauth-callback-server';
 import { promptSecret } from '../prompt-secret';
+import type { CliConfig } from '../types';
 import { makeClient, makeDocClient } from '../ua';
 
 /** Default label that triggers an ABCA task when applied to a Linear issue. */
@@ -83,9 +84,6 @@ export const DEFAULT_APP_NAME = 'bgagent';
  */
 export const COMMENT_TRIGGER_TOKEN = '@bgagent';
 
-/** GitHub usernames are limited to 39 characters. */
-const GITHUB_USERNAME_MAX = 39;
-
 /**
  * Column the `←` annotations start at, so operator-chosen values of different
  * lengths still leave the notes in a readable column instead of a ragged edge.
@@ -96,25 +94,6 @@ const ANNOTATION_COLUMN = 22;
 /** `value  ← note`, with the note pinned to {@link ANNOTATION_COLUMN}. */
 function annotate(value: string, note: string): string {
   return `${value.padEnd(ANNOTATION_COLUMN)} ← ${note}`;
-}
-
-/**
- * Turn a human-chosen agent name into something Linear accepts in its (required)
- * GitHub username field: lowercase, alphanumerics and single inner hyphens only.
- *
- * Falls back to the default when a name sanitizes away to nothing (e.g. one made
- * entirely of punctuation or non-Latin script), because an empty username fails
- * on Linear's side with the misleading "Invalid redirect_uri" error rather than
- * anything naming the real problem.
- */
-export function githubUsernameFrom(appName: string): string {
-  const slug = appName
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, GITHUB_USERNAME_MAX)
-    .replace(/-+$/, '');
-  return slug || DEFAULT_APP_NAME;
 }
 
 /**
@@ -135,7 +114,6 @@ export interface LinearAppTemplateOptions {
    * produces an agent that looks right and answers nothing.
    */
   readonly appName?: string;
-  readonly botName?: string;
   readonly developerName?: string;
   readonly developerUrl?: string;
   readonly description?: string;
@@ -154,10 +132,25 @@ export interface LinearAppTemplateOptions {
    * loopback redirect dead-ends on a cloud desktop / SSH box / container.
    */
   readonly hostedConsentUrl?: string;
+  /**
+   * ABCA's Linear webhook endpoint, derived from the configured API URL.
+   *
+   * Printed because the template used to show `https://example.com/placeholder`
+   * and claim no event subscription was needed — which is true of the OAuth dance
+   * alone, but left operators with an app that could never deliver an event. The
+   * real URL is one string concatenation away from the CLI's own config, so there
+   * was never a reason to make anyone go and find it.
+   */
+  readonly webhookUrl?: string;
+}
+
+/** ABCA's Linear webhook endpoint for a configured API URL. */
+export function linearWebhookUrl(apiUrl: string): string {
+  return `${apiUrl.replace(/\/+$/, '')}/linear/webhook`;
 }
 
 /**
- * Best-effort discovery of the two callback URLs the Linear app must register.
+ * Best-effort discovery of every URL the Linear app form needs.
  *
  * `app-template` runs BEFORE anything else exists, so this never throws and never
  * prompts: an unconfigured CLI, absent credentials, an undeployed stack, or a
@@ -170,17 +163,20 @@ export async function resolveTemplateCallbackUrls(args: {
   region?: string;
   stackName?: string;
   slug?: string;
-}): Promise<{ hostedConsentUrl?: string; vaultCallbackUrl?: string }> {
-  let region = args.region;
-  if (!region) {
-    // Unconfigured CLI is an expected state here, not an error.
-    try {
-      region = loadConfig().region;
-    } catch {
-      return {};
-    }
+}): Promise<{ hostedConsentUrl?: string; vaultCallbackUrl?: string; webhookUrl?: string }> {
+  // Unconfigured CLI is an expected state here, not an error.
+  let config: CliConfig | undefined;
+  try {
+    config = loadConfig();
+  } catch {
+    config = undefined;
   }
-  if (!region) return {};
+  // The webhook endpoint is pure string work on the configured API URL — no AWS
+  // call, so it survives having no credentials at all.
+  const webhookUrl = config?.api_url ? linearWebhookUrl(config.api_url) : undefined;
+
+  const region = args.region ?? config?.region;
+  if (!region) return { webhookUrl };
 
   const hostedConsentUrl = args.stackName
     ? await getStackOutput(region, args.stackName, 'LinearVaultConsentUrl').catch(() => null)
@@ -194,6 +190,7 @@ export async function resolveTemplateCallbackUrls(args: {
   return {
     hostedConsentUrl: hostedConsentUrl ?? undefined,
     vaultCallbackUrl: vaultCallbackUrl ?? undefined,
+    webhookUrl,
   };
 }
 
@@ -202,11 +199,6 @@ export function renderLinearAppTemplate(opts: LinearAppTemplateOptions = {}): st
   // produces a usable config without forcing every operator to invent strings.
   // Operators with custom branding override via flags.
   const appName = opts.appName?.trim() || DEFAULT_APP_NAME;
-  // Derived from the app name so choosing one name is enough: some versions of
-  // Linear's app form ask for a GitHub username, and making the operator invent a
-  // second consistent identifier is just another thing to get wrong. `--bot-name`
-  // still wins for anyone who needs the two to differ.
-  const botName = opts.botName ?? `${githubUsernameFrom(appName)}[bot]`;
   const developerName = opts.developerName ?? 'ABCA';
   const developerUrl = opts.developerUrl ?? 'https://github.com/aws-samples/sample-autonomous-cloud-coding-agents';
   const description = opts.description ?? 'Autonomous Background Coding Agent';
@@ -231,78 +223,64 @@ export function renderLinearAppTemplate(opts: LinearAppTemplateOptions = {}): st
     `  Developer URL:       ${developerUrl}`,
     `  Description:         ${description}`,
     '',
-    '  Callback URLs (one per line, NO line wrapping):',
-    // Each URL is annotated with the command that redirects to it. Operators were
-    // registering one and hitting "Invalid redirect_uri" from the other, with
-    // nothing in the template to say the two flows need two entries.
-    `    ${callbackUrl}`,
-    '      └─ used by: bgagent linear setup            (same machine as the browser)',
+    // Linear's field is literally "Redirect URIs — All OAuth redirect URIs,
+    // separated with newlines". Each entry is annotated with the command that
+    // redirects to it: the flows use DIFFERENT URIs, and registering one then
+    // running the other yields an opaque "Invalid redirect_uri".
+    '  Redirect URIs (one per line, copied EXACTLY — trailing slash included):',
     ...(opts.hostedConsentUrl
       ? [
         `    ${opts.hostedConsentUrl}`,
-        '      └─ used by: bgagent linear setup --hosted  (no localhost needed)',
+        '      └─ bgagent linear setup --hosted   (browser anywhere; no localhost)',
       ]
-      : [
-        '    (hosted consent page) NOT FOUND — see the note below if you are',
-        '    onboarding from a cloud desktop / SSH box / container.',
-      ]),
+      : []),
+    `    ${callbackUrl}`,
+    '      └─ bgagent linear setup            (browser on this machine)',
     ...(opts.vaultCallbackUrl
       ? [
         `    ${opts.vaultCallbackUrl}`,
-        '      └─ used by: bgagent linear vault-setup     (AgentCore Identity vault)',
+        '      └─ bgagent linear vault-setup      (AgentCore Identity vault)',
       ]
       : [
-        '    (AgentCore vault) NOT FOUND — the vault redirect_uri ends in an id that',
-        '    AgentCore mints when the credential provider is created, so it cannot',
-        '    exist before then. `bgagent linear vault-setup <slug>` creates the',
-        '    provider and prints the URL; add it to this app, then re-run vault-setup.',
-        '    Skipping it is the usual cause of "Invalid redirect_uri" mid-consent.',
+        '    …plus the vault provider callback, if you use the AgentCore Identity',
+        '    vault. It ends in an id AgentCore mints at provider-create time, so it',
+        '    cannot be shown yet: `bgagent linear vault-setup <slug>` creates the',
+        '    provider and prints it, then add it here and re-run.',
       ]),
     ...(opts.hostedConsentUrl
       ? []
       : [
-        '',
-        '    Onboarding from a cloud desktop / SSH box / container? The localhost URL',
-        '    above cannot work there — the browser cannot reach the CLI. Deploy the',
-        '    stack with `--context enableLinearIdentityVault=true` to get the hosted',
-        '    consent page (this command then lists it automatically), and onboard',
-        '    with `bgagent linear setup <slug> --hosted`.',
+        '    (No hosted consent page found. On a cloud desktop / SSH box the',
+        '    localhost URI cannot work — the browser cannot reach the CLI. Deploy',
+        '    with `--context enableLinearIdentityVault=true` and this command will',
+        '    list the hosted page automatically.)',
       ]),
     '',
-    `  GitHub username:     ${annotate(botName, 'only if your form shows this field')}`,
     '  Public:              OFF',
     '  Client credentials:  OFF',
+    '  Webhooks:            ON',
+    `    Webhook URL:       ${opts.webhookUrl ?? '(bgagent linear webhook-info)'}`,
+    '    Data change events:  Issues + Comments   ← both, see below',
+    '    App events:          all OFF             ← see below',
+    '    Then copy the "Webhook signing secret" (lin_wh_…) — setup asks for it.',
     '',
-    '  Leave the app\'s own Webhooks toggle alone — ABCA does not use it. Its events',
-    '  arrive via a WORKSPACE webhook you create separately; `bgagent linear',
-    '  webhook-info` prints the URL and values for it.',
+    'Click Create, copy the Client ID and Client Secret, then return here.',
     '',
-    'Click Save, copy the Client ID and Client Secret, then return here.',
-    '',
-    'Non-obvious gotchas (Linear explains the fields themselves inline):',
-    '  • The application name is yours to pick — Linear shows it on the consent',
-    '    screen and as the author of every comment the agent posts (it lowercases',
-    '    and strips spaces for the display handle). But it does NOT change how',
-    `    people summon the agent: the trigger is always \`${COMMENT_TRIGGER_TOKEN} <request>\`,`,
-    '    whatever you name the app. Renaming changes the label, not the trigger.',
-    '  • "Invalid redirect_uri parameter for the application" means the exact URL',
-    '    you are being redirected to is not registered on the app. Check that every',
-    '    URL above is listed, on ONE line each — a wrapped URL becomes two',
-    '    malformed entries Linear silently rejects — and that wildcards are not',
-    '    used, since Linear does not accept them. Using the vault? Both the setup',
-    '    URL and the vault provider callback have to be there; a missing provider',
-    '    callback is the usual cause of this error mid-consent.',
-    '  • The GitHub username line is there only because some versions of Linear\'s',
-    '    app form ask for one; it is derived from the application name (override',
-    '    with --bot-name). Linear\'s current docs and API describe no such field, so',
-    '    if your form does not show it, skip it — it is not an actor=app',
-    '    requirement, and a blank one is not what causes the error above.',
-    '  • Do NOT enable Linear "agent" / app-notification events on this app. ABCA',
-    '    is a COMMENT-based integration (it replies + reacts on ordinary comments).',
-    '    With agent events on, Linear renders an @mention of the app as its',
-    '    interactive agent-activity surface instead of a comment thread, which',
-    '    breaks the reply/reaction UX. Leave agent/app events OFF; the trigger comes',
-    '    from the workspace webhook (Issues + Comments), configured separately next.',
+    'Traps worth knowing:',
+    '  • Redirect URIs are matched EXACTLY. A missing trailing slash, or a URI that',
+    '    got line-wrapped into two entries, gives "Invalid redirect_uri parameter',
+    '    for the application" — the error names the URI, not the mismatch. Wildcards',
+    '    are not accepted; list each URI in full.',
+    '  • Comments must be ticked, not just Issues. Issues alone gets you',
+    `    label-triggered tasks; \`${COMMENT_TRIGGER_TOKEN}\` replies arrive as Comment events, so`,
+    '    without it the comment trigger silently never fires.',
+    '  • Leave App events (agent session / inbox / permissions) OFF. ABCA replies and',
+    '    reacts on ordinary comments; with agent-session events on, Linear renders an',
+    '    @mention as its interactive agent surface instead of a comment thread, which',
+    '    breaks that UX.',
+    '  • The application name is yours, but it is NOT the trigger: that is always',
+    `    \`${COMMENT_TRIGGER_TOKEN} <request>\`, whatever you name the app. Linear derives the`,
+    '    agent\'s display handle from the name (lowercased, spaces stripped).',
     '  • actor=app cannot also request the `admin` scope — Linear rejects the pair.',
     bar,
   ].join('\n');
@@ -537,7 +515,6 @@ export function makeLinearCommand(): Command {
     new Command('app-template')
       .description('Print the field values to paste into Linear\'s OAuth app form')
       .option('--app-name <name>', `Your agent's name in Linear (default: ${DEFAULT_APP_NAME})`)
-      .option('--bot-name <name>', 'GitHub username, if your Linear app form asks for one (derived from --app-name; must end with [bot])')
       .option('--developer-name <name>', 'Developer name shown on Linear\'s consent screen')
       .option('--developer-url <url>', 'Developer URL shown on Linear\'s consent screen')
       .option('--description <text>', 'App description shown on Linear\'s consent screen')
@@ -549,32 +526,13 @@ export function makeLinearCommand(): Command {
       .option('--stack-name <name>', 'CloudFormation stack name', 'backgroundagent-dev')
       .option('--offline', 'Skip the AWS lookups and render from flags alone')
       .action(async (opts) => {
-        if (opts.botName && !/\[bot\]$/.test(opts.botName)) {
-          console.error(
-            'Error: --bot-name must end with the literal "[bot]" suffix '
-            + `(Linear requires this for actor=app). Got: ${opts.botName}`,
-          );
-          process.exit(1);
-        }
-        // A name with nothing GitHub accepts (punctuation only, non-Latin script)
-        // silently stops driving the username it is documented to drive. Say so
-        // rather than printing a template whose own explanation is wrong.
-        if (opts.appName && !opts.botName
-          && opts.appName.trim().toLowerCase() !== DEFAULT_APP_NAME
-          && githubUsernameFrom(opts.appName) === DEFAULT_APP_NAME) {
-          console.error(
-            `Note: "${opts.appName}" contains no characters GitHub allows in a username, so the `
-            + `GitHub username field falls back to ${DEFAULT_APP_NAME}[bot]. `
-            + 'Pass --bot-name to choose it yourself.',
-          );
-        }
         // Look the callback URLs up rather than making the operator hunt for a
         // CloudFormation output and an AgentCore-minted id and paste them back in.
         // This is the FIRST command in onboarding, so it has to survive having no
         // config, no credentials, and no deployed stack: every lookup is
         // best-effort and the template degrades to explaining what is missing.
         const looked = opts.offline
-          ? { hostedConsentUrl: undefined, vaultCallbackUrl: undefined }
+          ? { hostedConsentUrl: undefined, vaultCallbackUrl: undefined, webhookUrl: undefined }
           : await resolveTemplateCallbackUrls({
             region: opts.region,
             stackName: opts.stackName,
@@ -582,13 +540,13 @@ export function makeLinearCommand(): Command {
           });
         console.log(renderLinearAppTemplate({
           appName: opts.appName,
-          botName: opts.botName,
           developerName: opts.developerName,
           developerUrl: opts.developerUrl,
           description: opts.description,
           awsCallbackUrl: opts.awsCallbackUrl,
           vaultCallbackUrl: opts.vaultCallbackUrl ?? looked.vaultCallbackUrl,
           hostedConsentUrl: opts.hostedConsentUrl ?? looked.hostedConsentUrl,
+          webhookUrl: looked.webhookUrl,
         }));
       }),
   );
@@ -607,7 +565,7 @@ export function makeLinearCommand(): Command {
             'No API URL configured. Run `bgagent configure` first to point at a deployed stack.',
           );
         }
-        const webhookUrl = `${config.api_url.replace(/\/+$/, '')}/linear/webhook`;
+        const webhookUrl = linearWebhookUrl(config.api_url);
         const bar = '═'.repeat(BANNER_WIDTH);
         console.log(bar);
         console.log('Linear webhook configuration');
@@ -1115,7 +1073,8 @@ export function makeLinearCommand(): Command {
           console.log('  Webhook signing secret needed.');
           console.log('  In Linear → Settings → API → Webhooks, create a webhook pointing at:');
           console.log(`    ${apiBaseUrl}/linear/webhook`);
-          console.log('  Subscribe to: Issues. Copy the signing secret from the webhook detail page.');
+          console.log('  Subscribe to: Issues AND Comments (Comments carries the @bgagent trigger).');
+          console.log('  Copy the signing secret from the webhook detail page.');
           console.log();
           const webhookSecret = await promptSecret('Webhook signing secret (lin_wh_…): ');
           if (!webhookSecret) {
@@ -1690,7 +1649,8 @@ export function makeLinearCommand(): Command {
         console.log(`  Webhook signing secret needed for '${slug}'.`);
         console.log(`  In Linear (signed into '${slug}') → Settings → API → Webhooks, create a webhook pointing at:`);
         console.log(`    ${apiBaseUrl}/linear/webhook`);
-        console.log('  Subscribe to: Issues. Copy the signing secret from the webhook detail page.');
+        console.log('  Subscribe to: Issues AND Comments (Comments carries the @bgagent trigger).');
+        console.log('  Copy the signing secret from the webhook detail page.');
         console.log();
         const webhookSigningSecret = (await promptSecret('  Webhook signing secret (lin_wh_…): ')).trim();
         if (!webhookSigningSecret) {

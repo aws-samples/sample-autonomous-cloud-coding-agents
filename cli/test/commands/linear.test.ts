@@ -156,209 +156,151 @@ describe('autoLinkTokenOwner', () => {
 });
 
 describe('renderLinearAppTemplate', () => {
+  // Every expectation below was checked against Linear's ACTUAL app-creation form.
+  // The template previously asserted a GitHub-username field and a placeholder
+  // webhook URL that do not and should not exist there, which cost two onboarding
+  // attempts — so these tests pin the form's real field names and values.
+
   test('uses sane defaults when no options are passed', () => {
     const out = renderLinearAppTemplate();
-    expect(out).toContain('bgagent[bot]');
+    expect(out).toContain('Application name:    bgagent');
+    expect(out).toContain('Developer name:      ABCA');
     expect(out).toContain('actor=app');
   });
 
-  test('does NOT claim a GitHub username or app webhook is required for actor=app', () => {
-    // Both claims were unsupportable: Linear's docs and its Application API expose
-    // no GitHub-username field, and ABCA's events arrive via a WORKSPACE webhook
-    // created separately, not the app's own webhook toggle. Asserting a
-    // requirement that isn't one sends operators to fix the wrong field while the
-    // real cause (an unregistered callback URL) stays broken.
+  test('names the field "Redirect URIs", as Linear\'s form does', () => {
+    // It is not called "Callback URLs" anywhere in the form; an operator scanning
+    // for the label we printed would not find it.
     const out = renderLinearAppTemplate();
-    expect(out).not.toMatch(/GitHub username is REQUIRED/);
-    expect(out).not.toMatch(/Webhooks:\s+ON\s+←\s+REQUIRED/);
-    expect(out).not.toMatch(/Webhooks toggle must be ON/);
+    expect(out).toContain('Redirect URIs');
+    expect(out).not.toContain('Callback URLs');
   });
 
-  test('points "Invalid redirect_uri" at the registered-URL list, the verified cause', () => {
+  test('does NOT ask for a GitHub username — the form has no such field', () => {
+    // Verified against the live form: icon, Application name, Developer name,
+    // Developer URL, Description, Redirect URIs. No GitHub username. Printing one
+    // sent operators to fix a field that does not exist while the real cause of
+    // "Invalid redirect_uri" (an unregistered URI) stayed broken.
+    const out = renderLinearAppTemplate({ appName: 'Acme Agent' });
+    expect(out).not.toMatch(/GitHub username/i);
+    expect(out).not.toMatch(/\[bot\]/);
+  });
+
+  test('warns that redirect URIs match EXACTLY, including the trailing slash', () => {
+    // The live cause of a real dead-end: the consent page URL ends in "/" and an
+    // operator registered it without. Exact-string matching then rejects it.
     const out = renderLinearAppTemplate();
-    expect(out).toContain('Invalid redirect_uri parameter for the application');
-    expect(out).toMatch(/not registered on the app/);
-    // The line-wrap trap is real and stays.
-    expect(out).toMatch(/ONE line each/);
+    expect(out).toMatch(/trailing slash/);
+    expect(out).toMatch(/matched EXACTLY/);
+    // Wraps across lines in the rendered output, so match the leading phrase.
+    expect(out).toMatch(/Invalid redirect_uri parameter/);
   });
 
-  test('says the app webhook toggle is not what delivers ABCA events', () => {
+  test('keeps the line-wrap and wildcard traps, which are real', () => {
     const out = renderLinearAppTemplate();
-    expect(out).toMatch(/WORKSPACE webhook/);
-    expect(out).toContain('bgagent linear');
-    expect(out).toContain('webhook-info');
+    expect(out).toMatch(/line-wrapped/);
+    expect(out).toMatch(/[Ww]ildcards\s+\n?\s*are not accepted|not accepted/);
   });
 
-  test('records that actor=app and the admin scope are mutually exclusive', () => {
-    // Linear rejects the pair; requesting both is a silent dead-end otherwise.
-    expect(renderLinearAppTemplate()).toMatch(/cannot also request the `admin` scope/);
-  });
-
-  test('warns against enabling Linear agent / app-notification events (breaks comment-thread UX)', () => {
-    // ABCA is a comment-based integration; an OAuth app in Linear "agent" mode
-    // makes @mentions render as interactive agent activity instead of comment
-    // threads. The template must steer operators away from that toggle.
-    const out = renderLinearAppTemplate();
-    expect(out.toLowerCase()).toContain('agent');
-    expect(out).toMatch(/do not enable .*agent/i);
-  });
-
-  test('defaults the callback URL to the localhost endpoint that setup listens on', () => {
-    // Phase 2.0b-O2 (shipped) uses an ephemeral localhost server during
-    // `bgagent linear setup`. Printing the right URL by default
-    // eliminates the "and now substitute the placeholder" step the
-    // setup guide used to embed.
-    const out = renderLinearAppTemplate();
-    expect(out).toContain('http://localhost:8080/oauth/callback');
-  });
-
-  test('substitutes a different callback URL when supplied (parked AgentCore Identity flow)', () => {
-    const url = 'https://bedrock-agentcore.us-east-1.amazonaws.com/identities/oauth2/callback/abc-123';
-    const out = renderLinearAppTemplate({ awsCallbackUrl: url });
+  test('prints the REAL webhook URL when it can resolve one', () => {
+    // It used to print https://example.com/placeholder and say no events were
+    // needed, which left operators with an app that could never deliver an event.
+    const url = 'https://abc123.execute-api.us-east-1.amazonaws.com/v1/linear/webhook';
+    const out = renderLinearAppTemplate({ webhookUrl: url });
     expect(out).toContain(url);
-    expect(out).not.toContain('http://localhost:8080/oauth/callback');
+    expect(out).not.toContain('example.com/placeholder');
   });
 
-  test('without a vault callback, it says WHERE to get the second URL (the live-caught trap)', () => {
-    // The vault flow needs a SECOND callback URL on the Linear app — the provider
-    // callback, whose id only exists once the provider is created. Printing just
-    // the localhost URL sent an operator into a "Invalid redirect_uri parameter
-    // for the application" dead-end with nothing pointing at the cause.
+  test('without a resolved webhook URL it names the command that prints one', () => {
     const out = renderLinearAppTemplate();
-    expect(out).toContain('vault-setup');
-    expect(out).toMatch(/Invalid redirect_uri/);
-    // And the gotcha list must spell out that BOTH URLs belong on the app.
-    expect(out).toMatch(/vault provider callback have to be there/);
+    expect(out).toContain('webhook-info');
+    expect(out).not.toContain('example.com/placeholder');
   });
 
-  test('with a vault callback supplied it lists BOTH URLs, keeping the direct flow working', () => {
-    // Adding the vault callback must be ADDITIVE: dropping localhost would break
-    // `bgagent linear setup`, which still listens there.
-    const vault = 'https://bedrock-agentcore.us-east-1.amazonaws.com/identities/oauth2/callback/f8804c1b';
-    const out = renderLinearAppTemplate({ vaultCallbackUrl: vault });
-    expect(out).toContain(vault);
-    expect(out).toContain('http://localhost:8080/oauth/callback');
-  });
-
-  test('a hosted consent URL is listed so onboarding needs no localhost', () => {
-    // The localhost callback cannot work on a cloud desktop / SSH box — the browser
-    // cannot reach the CLI. Listing the hosted page is what makes that case
-    // onboardable at all, so the template has to be able to say so.
-    const hosted = 'https://d1xfr79wd9vxmx.cloudfront.net/';
-    const out = renderLinearAppTemplate({ hostedConsentUrl: hosted });
-    expect(out).toContain(hosted);
-    // Localhost stays listed: dropping it would break the default same-machine flow.
-    expect(out).toContain('http://localhost:8080/oauth/callback');
-  });
-
-  test('without a hosted URL it explains the cloud-desktop limitation instead of staying silent', () => {
+  test('requires Comments as well as Issues, or the comment trigger never fires', () => {
+    // Issues alone yields label-triggered tasks only. This is silent when wrong:
+    // labels keep working, so nothing looks broken until an @mention is ignored.
     const out = renderLinearAppTemplate();
-    expect(out).toMatch(/cloud desktop/i);
-    expect(out).toContain('--hosted');
+    expect(out).toContain('Issues + Comments');
+    expect(out).toMatch(/Comments must be ticked/);
   });
 
-  test('labels EVERY callback URL with the command that redirects to it', () => {
-    // Three URLs, three different commands, and registering the wrong subset
-    // presents as an opaque "Invalid redirect_uri" from Linear. An unlabelled list
-    // gives the operator no way to tell which entry a failing command wanted.
-    const out = renderLinearAppTemplate({
-      hostedConsentUrl: 'https://d2ud1woydykuxp.cloudfront.net/',
-      vaultCallbackUrl: 'https://bedrock-agentcore.us-east-1.amazonaws.com/identities/oauth2/callback/f88',
-    });
-    expect(out).toMatch(/bgagent linear setup\s+\(same machine/);
-    expect(out).toMatch(/bgagent linear setup --hosted\s+\(no localhost/);
-    expect(out).toMatch(/bgagent linear vault-setup\s+\(AgentCore Identity vault/);
+  test('tells the operator to keep the signing secret', () => {
+    expect(renderLinearAppTemplate()).toMatch(/signing secret/i);
   });
 
-  test('says NOT FOUND for a URL it could not resolve, rather than omitting the line', () => {
-    // Silence reads as "there is no such URL". The operator needs to know the slot
-    // exists and is empty — otherwise a missing hosted page looks like a feature
-    // that does not exist rather than a stack that has not been deployed with it.
+  test('says to leave App events OFF, and why', () => {
     const out = renderLinearAppTemplate();
-    expect(out).toMatch(/hosted consent page\) NOT FOUND/);
-    expect(out).toMatch(/AgentCore vault\) NOT FOUND/);
-  });
-
-  test('tells the operator how to MAKE the hosted page exist, not just that it is absent', () => {
-    // The fix is a context flag at deploy time; naming it is the difference
-    // between an actionable message and a dead end.
-    const out = renderLinearAppTemplate();
-    expect(out).toContain('enableLinearIdentityVault=true');
-    // And it must not tell them to pass a URL by hand — the command looks it up.
-    expect(out).not.toContain('--hosted-consent-url');
+    expect(out).toMatch(/App events:\s+all OFF/);
+    expect(out).toMatch(/agent-session events on/);
+    expect(out).toMatch(/comment thread/);
   });
 
   test('names the agent whatever the operator chose', () => {
-    const out = renderLinearAppTemplate({ appName: 'Acme Agent' });
-    expect(out).toContain('Application name:    Acme Agent');
-  });
-
-  test('derives the GitHub username from the chosen name, so one choice is enough', () => {
-    // Linear REQUIRES a GitHub username for actor=app. Making the operator invent
-    // a second identifier consistent with the first is one more thing to get wrong.
-    expect(renderLinearAppTemplate({ appName: 'Acme Agent' })).toContain('acme-agent[bot]');
-    expect(renderLinearAppTemplate({ appName: 'Acme  --  Agent!!' })).toContain('acme-agent[bot]');
-  });
-
-  test('an explicit --bot-name still beats the derived one', () => {
-    const out = renderLinearAppTemplate({ appName: 'Acme Agent', botName: 'other-bot[bot]' });
-    expect(out).toContain('other-bot[bot]');
-    expect(out).not.toContain('acme-agent[bot]');
-  });
-
-  test('the default name reproduces the previous output exactly (no silent rebrand)', () => {
-    // Deriving the username from the name must not change what existing operators
-    // see, or an unrelated flag would quietly alter their app config.
-    const out = renderLinearAppTemplate();
-    expect(out).toContain('Application name:    bgagent');
-    expect(out).toContain('bgagent[bot]');
+    expect(renderLinearAppTemplate({ appName: 'Alan Turing' }))
+      .toContain('Application name:    Alan Turing');
   });
 
   test('states that renaming does NOT change the trigger phrase', () => {
     // The trigger is a hardcoded @bgagent token in the platform, not the app name.
-    // Without this, renaming yields an agent that looks right and answers nothing —
-    // the operator types @acme, gets silence, and has nothing to go on.
-    const out = renderLinearAppTemplate({ appName: 'Acme Agent' });
+    // Without this, renaming yields an agent that looks right and answers nothing.
+    const out = renderLinearAppTemplate({ appName: 'Alan Turing' });
     expect(out).toContain('@bgagent <request>');
-    expect(out).toMatch(/does NOT change how|still answers only to/i);
+    expect(out).toMatch(/NOT the trigger/);
   });
 
-  test('a name with nothing GitHub accepts still yields a VALID username', () => {
-    // Punctuation-only or non-Latin names must not render an empty username field:
-    // Linear rejects that with the misleading "Invalid redirect_uri" error.
-    expect(renderLinearAppTemplate({ appName: '!!!' })).toContain('bgagent[bot]');
-    expect(renderLinearAppTemplate({ appName: '日本語' })).toContain('bgagent[bot]');
+  test('a blank or whitespace name falls back to the default', () => {
     expect(renderLinearAppTemplate({ appName: '   ' })).toContain('Application name:    bgagent');
   });
 
-  test('a long name is truncated to a username GitHub would accept', () => {
-    const out = renderLinearAppTemplate({ appName: 'a'.repeat(60) });
-    const username = /GitHub username:\s+(\S+)\[bot\]/.exec(out)?.[1] ?? '';
-    expect(username.length).toBeLessThanOrEqual(39);
-    // And must not end mid-hyphen, which GitHub rejects.
-    expect(username).not.toMatch(/-$/);
+  test('lists each redirect URI with the command that uses it', () => {
+    // Three URIs, three commands; registering the wrong subset presents as an
+    // opaque "Invalid redirect_uri" with no clue which entry was wanted.
+    const out = renderLinearAppTemplate({
+      hostedConsentUrl: 'https://d2ud1woydykuxp.cloudfront.net/',
+      vaultCallbackUrl: 'https://bedrock-agentcore.us-east-1.amazonaws.com/identities/oauth2/callback/f88',
+    });
+    expect(out).toMatch(/bgagent linear setup --hosted/);
+    expect(out).toMatch(/bgagent linear setup\s+\(browser on this machine/);
+    expect(out).toMatch(/bgagent linear vault-setup/);
   });
 
-  test('overrides bot name, developer fields, description', () => {
+  test('the hosted URI is listed FIRST when present — it is the one that always works', () => {
+    const hosted = 'https://d2ud1woydykuxp.cloudfront.net/';
+    const out = renderLinearAppTemplate({ hostedConsentUrl: hosted });
+    expect(out.indexOf(hosted)).toBeLessThan(out.indexOf('http://localhost:8080/oauth/callback'));
+  });
+
+  test('without a vault callback it says WHY it cannot be shown yet', () => {
+    const out = renderLinearAppTemplate();
+    expect(out).toMatch(/AgentCore mints at provider-create time/);
+    expect(out).toContain('vault-setup');
+  });
+
+  test('without a hosted URL it explains the cloud-desktop limitation and the fix', () => {
+    const out = renderLinearAppTemplate();
+    expect(out).toMatch(/cloud desktop/i);
+    expect(out).toContain('enableLinearIdentityVault=true');
+  });
+
+  test('records that actor=app and the admin scope are mutually exclusive', () => {
+    expect(renderLinearAppTemplate()).toMatch(/cannot also request the `admin` scope/);
+  });
+
+  test('overrides developer fields and description', () => {
     const out = renderLinearAppTemplate({
-      botName: 'acme-bot[bot]',
       developerName: 'Acme Corp',
       developerUrl: 'https://acme.com',
       description: 'Internal coding agent',
     });
-    expect(out).toContain('acme-bot[bot]');
     expect(out).toContain('Acme Corp');
     expect(out).toContain('https://acme.com');
     expect(out).toContain('Internal coding agent');
   });
 
-  test('explains why each gating field matters (actor=app context)', () => {
-    const out = renderLinearAppTemplate();
-    // The "why" explainer is the core differentiator of this command vs. raw
-    // docs — without it operators paste blindly and hit the cryptic Linear
-    // "Invalid redirect_uri" error documented in the 2.0b spike.
-    expect(out).toContain('Invalid redirect_uri');
-    expect(out).toMatch(/wildcards are not\s+used/);
+  test('stays short enough to act on — it is a form to fill, not a manual', () => {
+    // It grew to the point the operator stopped reading and missed real fields.
+    expect(renderLinearAppTemplate().split('\n').length).toBeLessThanOrEqual(50);
   });
 });
 

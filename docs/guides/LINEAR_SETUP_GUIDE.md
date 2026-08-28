@@ -31,9 +31,11 @@ bgagent linear app-template
 
 The command prints exact field values to paste. Open [Linear Settings → API → New application](https://linear.app/settings/api/applications/new) (signed into the right workspace — use Linear's sidebar workspace switcher if needed) and fill in the fields exactly as the template lists.
 
-The template marks which fields are required for the `actor=app` agent flow; missing them produces a cryptic "Invalid redirect_uri" error.
+The template resolves the URLs for you — the hosted consent page, the localhost loopback, the AgentCore vault provider callback (pass `--slug <slug>` once it exists), and ABCA's webhook endpoint. Copy the **Redirect URIs** exactly as printed, **including any trailing slash**: Linear matches them as exact strings and reports a mismatch as a cryptic "Invalid redirect_uri parameter for the application".
 
-Click **Save**, then copy the **Client ID** and **Client Secret** from the app's detail page.
+Name the app whatever you like with `--app-name`; it becomes the agent's display name in Linear. It does *not* change the trigger, which is always `@bgagent`.
+
+Click **Create**, then copy the **Client ID** and **Client Secret** from the app's detail page.
 
 > **Adding a second workspace?** You only need a new OAuth app if you want per-workspace isolation. Otherwise, edit your existing app and toggle **Public: ON** so it can be authorized from any workspace. Trade-off: shared apps revoke together; per-workspace apps don't.
 
@@ -272,7 +274,9 @@ Nearly always what it says: the exact URL you are being redirected to is not reg
 
 Re-run `bgagent linear setup` after fixing.
 
-> Earlier versions of this guide also blamed a blank **GitHub username** field and an off **Webhooks** toggle. Neither is an `actor=app` requirement: Linear's docs and its `Application` API describe no GitHub-username field, and ABCA's events arrive through the workspace webhook you create in step 4, not the app's own webhook toggle. Fill the username in if your app form asks for one, but check the callback URLs first.
+> Earlier versions of this guide blamed a blank **GitHub username** field for this error. Linear's app form has no such field (verified against the live form: icon, application name, developer name, developer URL, description, redirect URIs), so there is nothing to fill in — check the redirect URIs instead.
+>
+> Webhooks can be configured **either** on the OAuth application itself (its own Webhooks toggle, URL and signing secret) **or** as a separate workspace webhook as described in step 4. ABCA verifies whichever signing secret you give it, so both work; the app-level one is one less thing to create. Note that an app-level webhook has a single signing secret shared across every workspace the app is installed on, whereas workspace webhooks get one each.
 
 ### Agent doesn't post comments to Linear
 

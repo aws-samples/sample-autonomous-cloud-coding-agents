@@ -28,6 +28,7 @@
  * run before onboarding.
  */
 
+import { CloudFormationClient } from '@aws-sdk/client-cloudformation';
 import { resolveTemplateCallbackUrls } from '../../src/commands/linear';
 import * as config from '../../src/config';
 import * as linearVault from '../../src/linear-vault';
@@ -85,16 +86,47 @@ describe('app-template callback discovery', () => {
     expect(config.loadConfig).toHaveBeenCalled();
   });
 
-  test('an explicit --region is used without consulting config', async () => {
+  test('an explicit --region wins for the stack lookup', async () => {
     stackServingConsentUrl();
     await resolveTemplateCallbackUrls({ region: 'eu-west-1', stackName: 'st' });
-    expect(config.loadConfig).not.toHaveBeenCalled();
+    expect(jest.mocked(CloudFormationClient)).toHaveBeenCalledWith(
+      expect.objectContaining({ region: 'eu-west-1' }),
+    );
+  });
+
+  test('the webhook URL comes from config, so it resolves with no AWS call at all', async () => {
+    // It is pure string work on the configured API URL. The template used to print
+    // a placeholder here, which left operators with an app that could never
+    // deliver an event.
+    jest.spyOn(config, 'loadConfig').mockReturnValue({
+      region: 'us-east-1',
+      api_url: 'https://abc123.execute-api.us-east-1.amazonaws.com/v1',
+    } as never);
+    const out = await resolveTemplateCallbackUrls({});
+    expect(out.webhookUrl).toBe('https://abc123.execute-api.us-east-1.amazonaws.com/v1/linear/webhook');
+    expect(cfnSend).not.toHaveBeenCalled();
+  });
+
+  test('a trailing slash on the configured API URL does not double up', async () => {
+    jest.spyOn(config, 'loadConfig').mockReturnValue({
+      region: 'us-east-1',
+      api_url: 'https://abc123.execute-api.us-east-1.amazonaws.com/v1/',
+    } as never);
+    const out = await resolveTemplateCallbackUrls({});
+    expect(out.webhookUrl).toBe('https://abc123.execute-api.us-east-1.amazonaws.com/v1/linear/webhook');
+  });
+
+  test('no api_url in config yields no webhook URL rather than a malformed one', async () => {
+    jest.spyOn(config, 'loadConfig').mockReturnValue({ region: 'us-east-1' } as never);
+    const out = await resolveTemplateCallbackUrls({});
+    expect(out.webhookUrl).toBeUndefined();
   });
 
   test('an UNCONFIGURED CLI yields no URLs instead of throwing', async () => {
     // The expected state on a first run: `bgagent configure` has not been run yet.
     jest.spyOn(config, 'loadConfig').mockImplementation(() => { throw new Error('Not configured'); });
-    await expect(resolveTemplateCallbackUrls({ stackName: 'st', slug: 'acme' })).resolves.toEqual({});
+    await expect(resolveTemplateCallbackUrls({ stackName: 'st', slug: 'acme' }))
+      .resolves.toEqual({ webhookUrl: undefined });
     // And it must not have tried to call AWS with an undefined region.
     expect(cfnSend).not.toHaveBeenCalled();
     expect(lookupVaultCallback).not.toHaveBeenCalled();
