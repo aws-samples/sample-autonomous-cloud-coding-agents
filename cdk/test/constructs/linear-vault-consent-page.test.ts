@@ -17,6 +17,7 @@
  *  SOFTWARE.
  */
 
+import * as vm from 'vm';
 import { App, Stack } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import { LinearVaultConsentPage, renderConsentPage } from '../../src/constructs/linear-vault-consent-page';
@@ -151,7 +152,6 @@ function runPageScript(search: string): {
     URLSearchParams,
   };
 
-  const vm = require('vm') as typeof import('vm');
   vm.runInNewContext(script, sandbox);
   return {
     title: els.title!._text as string,
