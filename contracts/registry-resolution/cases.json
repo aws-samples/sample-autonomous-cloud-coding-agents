@@ -1,0 +1,105 @@
+{
+  "description": "Grammar parity corpus for the registry:// reference syntax (#246). Each case is run against BOTH the Python parser (agent/src/registry/ref.py::parse_ref) and the TypeScript parser (cdk/src/handlers/shared/registry/ref.ts::parseRef). Both must agree on ok/reason and, when ok, on the parsed fields. See README.md.",
+  "cases": [
+    {
+      "name": "exact-pin",
+      "ref": "registry://mcp_server/acme/pdf-tools@1.4.1",
+      "expected": { "ok": true, "kind": "mcp_server", "namespace": "acme", "name": "pdf-tools", "op": "exact", "major": 1, "minor": 4, "patch": 1, "prerelease": null }
+    },
+    {
+      "name": "caret-pin",
+      "ref": "registry://mcp_server/acme/pdf-tools@^1.4.1",
+      "expected": { "ok": true, "kind": "mcp_server", "namespace": "acme", "name": "pdf-tools", "op": "caret", "major": 1, "minor": 4, "patch": 1, "prerelease": null }
+    },
+    {
+      "name": "tilde-pin",
+      "ref": "registry://cedar_policy_module/acme/force-push@~2.0.3",
+      "expected": { "ok": true, "kind": "cedar_policy_module", "namespace": "acme", "name": "force-push", "op": "tilde", "major": 2, "minor": 0, "patch": 3, "prerelease": null }
+    },
+    {
+      "name": "exact-prerelease",
+      "ref": "registry://skill/acme/research@1.0.0-rc.1",
+      "expected": { "ok": true, "kind": "skill", "namespace": "acme", "name": "research", "op": "exact", "major": 1, "minor": 0, "patch": 0, "prerelease": "rc.1" }
+    },
+    {
+      "name": "name-with-dots-and-dashes",
+      "ref": "registry://mcp_server/acme/pdf.tools-v2@1.0.0",
+      "expected": { "ok": true, "kind": "mcp_server", "namespace": "acme", "name": "pdf.tools-v2", "op": "exact", "major": 1, "minor": 0, "patch": 0, "prerelease": null }
+    },
+    {
+      "name": "snake-case-kind",
+      "ref": "registry://cedar_policy_module/team-security/deny-all@0.1.0",
+      "expected": { "ok": true, "kind": "cedar_policy_module", "namespace": "team-security", "name": "deny-all", "op": "exact", "major": 0, "minor": 1, "patch": 0, "prerelease": null }
+    },
+    {
+      "name": "missing-constraint",
+      "ref": "registry://mcp_server/acme/pdf-tools",
+      "expected": { "ok": false, "reason": "INVALID_REGISTRY_REF" }
+    },
+    {
+      "name": "wildcard-constraint",
+      "ref": "registry://mcp_server/acme/pdf-tools@*",
+      "expected": { "ok": false, "reason": "INVALID_CONSTRAINT" }
+    },
+    {
+      "name": "latest-constraint",
+      "ref": "registry://mcp_server/acme/pdf-tools@latest",
+      "expected": { "ok": false, "reason": "INVALID_CONSTRAINT" }
+    },
+    {
+      "name": "gte-range-constraint",
+      "ref": "registry://mcp_server/acme/pdf-tools@>=1.0.0",
+      "expected": { "ok": false, "reason": "INVALID_CONSTRAINT" }
+    },
+    {
+      "name": "x-range-constraint",
+      "ref": "registry://mcp_server/acme/pdf-tools@1.x",
+      "expected": { "ok": false, "reason": "INVALID_CONSTRAINT" }
+    },
+    {
+      "name": "partial-version-constraint",
+      "ref": "registry://mcp_server/acme/pdf-tools@1.4",
+      "expected": { "ok": false, "reason": "INVALID_CONSTRAINT" }
+    },
+    {
+      "name": "uppercase-kind-rejected",
+      "ref": "registry://McpServer/acme/pdf-tools@1.0.0",
+      "expected": { "ok": false, "reason": "INVALID_REGISTRY_REF" }
+    },
+    {
+      "name": "two-segment-rejected-by-strict",
+      "ref": "registry://mcp/web-search@1.0.0",
+      "expected": { "ok": false, "reason": "INVALID_REGISTRY_REF" }
+    },
+    {
+      "name": "wrong-scheme",
+      "ref": "https://mcp_server/acme/pdf-tools@1.0.0",
+      "expected": { "ok": false, "reason": "INVALID_REGISTRY_REF" }
+    },
+    {
+      "name": "namespace-leading-digit-rejected",
+      "ref": "registry://mcp_server/9acme/pdf-tools@1.0.0",
+      "expected": { "ok": false, "reason": "INVALID_REGISTRY_REF" }
+    },
+    {
+      "name": "leading-zero-major-rejected",
+      "ref": "registry://mcp_server/acme/pdf-tools@01.0.0",
+      "expected": { "ok": false, "reason": "INVALID_CONSTRAINT" }
+    },
+    {
+      "name": "caret-zero-minor",
+      "ref": "registry://mcp_server/acme/pdf-tools@^0.2.0",
+      "expected": { "ok": true, "kind": "mcp_server", "namespace": "acme", "name": "pdf-tools", "op": "caret", "major": 0, "minor": 2, "patch": 0, "prerelease": null }
+    },
+    {
+      "name": "trailing-newline-rejected",
+      "ref": "registry://mcp_server/acme/pdf-tools@1.0.0\n",
+      "expected": { "ok": false, "reason": "INVALID_REGISTRY_REF" }
+    },
+    {
+      "name": "component-beyond-max-safe-integer-rejected",
+      "ref": "registry://mcp_server/acme/pdf-tools@9007199254740993.0.0",
+      "expected": { "ok": false, "reason": "INVALID_CONSTRAINT" }
+    }
+  ]
+}

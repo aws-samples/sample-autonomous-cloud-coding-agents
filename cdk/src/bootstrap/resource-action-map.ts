@@ -34,6 +34,7 @@ export const CFN_TYPES_WITHOUT_EXEC_ROLE_IAM = new Set([
   'AWS::ApiGateway::Stage',
   'AWS::ApiGateway::Account',
   'AWS::S3::BucketPolicy',
+  'AWS::SNS::TopicPolicy',
   'AWS::SQS::QueuePolicy',
   'AWS::EC2::VPCGatewayAttachment',
   'AWS::EC2::SubnetRouteTableAssociation',
@@ -55,14 +56,26 @@ export const RESOURCE_ACTION_MAP: Record<string, readonly string[]> = {
   'AWS::ApiGateway::RestApi': ['apigateway:POST'],
   'AWS::Bedrock::Guardrail': ['bedrock:CreateGuardrail'],
   'AWS::Bedrock::GuardrailVersion': ['bedrock:CreateGuardrailVersion'],
+  // ADR-019 tool-gateway feature. Only synthesized under
+  // `--context enableToolGateway=true`, so the default-context synth-coverage
+  // test never sees these — they are mapped anyway so the map stays a complete
+  // statement of what the bootstrap bundle must cover (same pattern as the
+  // lambda-microvm entries below). All create actions fall under the
+  // `bedrock-agentcore:*` grant in `policies/compute-agentcore.ts`.
+  'AWS::BedrockAgentCore::Gateway': ['bedrock-agentcore:CreateGateway'],
+  'AWS::BedrockAgentCore::GatewayTarget': ['bedrock-agentcore:CreateGatewayTarget'],
   'AWS::BedrockAgentCore::Memory': ['bedrock-agentcore:CreateMemory'],
   'AWS::BedrockAgentCore::Runtime': ['bedrock-agentcore:CreateRuntime'],
   'AWS::CloudFront::Distribution': ['cloudfront:CreateDistribution'],
   'AWS::CloudFront::OriginAccessControl': ['cloudfront:CreateOriginAccessControl'],
+  // NestedStack for Agent Registry (#246) — CFN creates a child stack.
+  'AWS::CloudFormation::Stack': ['cloudformation:CreateStack'],
   'AWS::CloudWatch::Alarm': ['cloudwatch:PutMetricAlarm'],
   'AWS::CloudWatch::Dashboard': ['cloudwatch:PutDashboard'],
   'AWS::Cognito::UserPool': ['cognito-idp:CreateUserPool'],
   'AWS::Cognito::UserPoolClient': ['cognito-idp:CreateUserPoolClient'],
+  // RegistryPublisher / RegistryApprover groups (#246).
+  'AWS::Cognito::UserPoolGroup': ['cognito-idp:CreateGroup'],
   'AWS::DynamoDB::Table': ['dynamodb:CreateTable'],
   'AWS::EC2::EIP': ['ec2:AllocateAddress'],
   'AWS::EC2::FlowLog': ['ec2:CreateFlowLogs'],
@@ -77,6 +90,7 @@ export const RESOURCE_ACTION_MAP: Record<string, readonly string[]> = {
   'AWS::Events::Rule': ['events:PutRule'],
   'AWS::IAM::Policy': ['iam:CreatePolicy', 'iam:PutRolePolicy'],
   'AWS::IAM::Role': ['iam:CreateRole'],
+  'AWS::KMS::Key': ['kms:CreateKey'],
   'AWS::Lambda::EventInvokeConfig': ['lambda:PutFunctionEventInvokeConfig'],
   'AWS::Lambda::EventSourceMapping': ['lambda:CreateEventSourceMapping'],
   'AWS::Lambda::Function': ['lambda:CreateFunction'],
@@ -127,10 +141,16 @@ export const RESOURCE_ACTION_MAP: Record<string, readonly string[]> = {
   'AWS::Route53Resolver::ResolverQueryLoggingConfigAssociation': ['route53resolver:AssociateResolverQueryLogConfig'],
   'AWS::S3::Bucket': ['s3:CreateBucket'],
   'AWS::SecretsManager::Secret': ['secretsmanager:CreateSecret'],
+  'AWS::SNS::Subscription': ['sns:Subscribe'],
+  'AWS::SNS::Topic': ['sns:CreateTopic'],
   'AWS::SQS::Queue': ['sqs:CreateQueue'],
+  // The Agent Registry provisioning custom resource uses the CDK Provider
+  // framework, whose async waiter is a Step Functions state machine (#246).
+  'AWS::StepFunctions::StateMachine': ['states:CreateStateMachine'],
   'AWS::WAFv2::WebACL': ['wafv2:CreateWebACL'],
   'AWS::WAFv2::WebACLAssociation': ['wafv2:AssociateWebACL'],
   'Custom::AWS': ['lambda:InvokeFunction'],
+  'Custom::AgentRegistry': ['lambda:InvokeFunction'],
   'Custom::S3AutoDeleteObjects': ['lambda:InvokeFunction'],
   'Custom::VpcRestrictDefaultSG': ['lambda:InvokeFunction'],
 };

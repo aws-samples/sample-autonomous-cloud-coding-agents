@@ -23,14 +23,10 @@
  * (`postIssueComment` / `reportIssueFailure`, which render the body as an Atlassian
  * Document Format doc under the hood).
  *
- * This adapter demonstrates the capability-awareness of the interface: Jira's
- * feedback surface is comment-only, so the adapter implements the REQUIRED methods
- * (`postComment`, `upsertComment`, `reportFailure`) and OMITS the optional ones
- * the surface can't do today — there's no reaction API, no workflow-state
- * transition wired here, and the sub-issue DAG isn't derived from Jira. The
- * orchestration engine checks for those methods and no-ops gracefully when a
- * surface omits them, so the same engine drives Jira without any Jira-specific
- * branching in the core.
+ * Jira's feedback surface is comment-only, so the adapter implements the required
+ * post/update/failure methods plus workflow transitions. It omits reaction
+ * capabilities because Jira has no equivalent primitive. The orchestration engine
+ * checks optional methods and no-ops gracefully when a surface omits them.
  *
  * ``credentialsRef`` on an {@link IssueRef} is the Atlassian tenant id (``cloudId``)
  * that keys the Jira token registry.
@@ -39,6 +35,8 @@
 import {
   postIssueComment,
   reportIssueFailure,
+  transitionIssueState,
+  updateIssueComment,
   type JiraFeedbackContext,
 } from './jira-feedback';
 import { type Channel, type IssueRef } from './orchestration-channel';
@@ -58,29 +56,41 @@ export function makeJiraChannel(registryTableName: string): Channel {
     kind: 'jira',
 
     async postComment(issue, body) {
-      const ok = await postIssueComment(ctxFor(issue), issue.issueId, body);
-      // The Jira helper doesn't return the new comment id, so an edit-in-place
-      // isn't possible yet (see upsertComment); report success/failure only.
-      return ok ? { commentId: '' } : null;
+      const commentId = await postIssueComment(ctxFor(issue), issue.issueId, body);
+      return commentId ? { commentId } : null;
     },
 
-    async upsertComment(issue, body) {
-      // Jira has no comment-update helper wired today, so a repeated "upsert"
-      // posts a fresh comment rather than editing in place. Behaviourally safe
-      // (the reviewer sees the latest state); a true edit-in-place needs a Jira
-      // update-comment call and a returned comment id — tracked as a follow-up.
-      const ok = await postIssueComment(ctxFor(issue), issue.issueId, body);
-      return ok ? { commentId: '' } : null;
+    async upsertComment(issue, body, existing) {
+      if (!existing?.commentId) {
+        const commentId = await postIssueComment(ctxFor(issue), issue.issueId, body);
+        return commentId ? { commentId } : null;
+      }
+      const ok = await updateIssueComment(
+        ctxFor(issue),
+        issue.issueId,
+        existing.commentId,
+        body,
+      );
+      return ok ? existing : null;
     },
 
     async reportFailure(issue, message) {
       await reportIssueFailure(ctxFor(issue), issue.issueId, message);
     },
 
-    // Every optional capability is intentionally omitted — Jira's wired feedback
-    // surface is comment-only today: no reaction API (reactToComment,
-    // replaceCommentReaction, replaceIssueReaction), no workflow transition
-    // (transitionState, revertState), no threaded-reply helper
+    async transitionState(issue, intent, options) {
+      return transitionIssueState(
+        ctxFor(issue),
+        issue.issueId,
+        intent,
+        issue.stateOverrides,
+        options,
+      );
+    },
+
+    // Remaining optional capabilities are intentionally omitted: no reaction API
+    // (reactToComment, replaceCommentReaction, replaceIssueReaction), no guarded
+    // revertState, no threaded-reply helper
     // (postThreadedReply, upsertThreadedReply), no note sweep (sweepNotes), and
     // the sub-issue DAG isn't derived from Jira (fetchChildGraph). The engine
     // checks for each method and skips it, so the same orchestration core drives

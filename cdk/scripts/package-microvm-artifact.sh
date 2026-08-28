@@ -114,7 +114,7 @@
 # `iam:PassRole` paths) are fixed in source but not yet re-exercised live. Keep
 # production repos on compute_type=agentcore or ecs until a clean run is on record,
 # and note that the CDK-managed image path additionally needs bootstrap policy
-# bundle >= 1.4.0 (see the banner after upload). The Dockerfile is the P2 tuned base
+# bundle >= 1.6.0 (see the banner after upload). The Dockerfile is the P2 tuned base
 # and is copied unmodified — further customization (e.g., Alpine adoption) would be
 # P2.5 work.
 #
@@ -272,7 +272,7 @@ print_p1_reminder() {
    two tasks clone -> change -> PR to COMPLETED with a live 45 s heartbeat.
    NOT verified: an UNATTENDED run. That smoke needed a live IAM workaround, and the
    two defects behind it (ADR-021 P2r2-F9 / P2r2-F10) are fixed in source but not
-   re-exercised. The CDK-managed image path also needs bootstrap bundle >= 1.4.0.
+   re-exercised. The CDK-managed image path also needs bootstrap bundle >= 1.6.0.
    Keep production repos on compute_type=agentcore or ecs until a clean run is on
    record. /suspend and /resume stay disabled until P3. CDK synth emits the same
    warning (abca:microvm-image-p1-smoke-unverified) on every deploy that configures
@@ -328,7 +328,7 @@ if [[ "${CREATE_IMAGE}" -eq 0 ]]; then
 
   CDK-managed (recommended) — redeploy with the base image pinned.
 
-  !! RE-BOOTSTRAP REQUIRED (bootstrap policy bundle >= 1.4.0) !!
+  !! RE-BOOTSTRAP REQUIRED (bootstrap policy bundle >= 1.6.0) !!
   This path took two live-verified fixes to work. The first (ADR-021 P2-F2: the L1
   sent hook paths and \`arm64\` where CloudFormation wants ENABLED / ARM_64) is
   DISCHARGED — change-set early validation now passes. The second (ADR-021
@@ -341,7 +341,7 @@ if [[ "${CREATE_IMAGE}" -eq 0 ]]; then
 
     aws cloudformation describe-stacks --stack-name CDKToolkit \\
       --query 'Stacks[0].Outputs[?OutputKey==\`BootstrapPolicyVersion\`].OutputValue' --output text
-    # if that is below 1.4.0:
+    # if that is below 1.6.0:
     MISE_EXPERIMENTAL=1 mise //cdk:bootstrap   # ComputeTypes must include lambda-microvm
 
   Without it the image resource fails with

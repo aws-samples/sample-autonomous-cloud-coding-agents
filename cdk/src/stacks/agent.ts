@@ -36,7 +36,11 @@ import { AgentVpc } from '../constructs/agent-vpc';
 import { ApiKeyTable } from '../constructs/api-key-table';
 import { ApprovalMetricsPublisherConsumer } from '../constructs/approval-metrics-publisher-consumer';
 import { AttachmentsBucket } from '../constructs/attachments-bucket';
-import { DEFAULT_HAIKU_INFERENCE_PROFILE_ID, resolveBedrockModelIds } from '../constructs/bedrock-models';
+import {
+  haikuInferenceProfileId,
+  resolveBedrockGeoRegion,
+  resolveBedrockModelIds,
+} from '../constructs/bedrock-models';
 import { Blueprint } from '../constructs/blueprint';
 import { CedarWasmLayer } from '../constructs/cedar-wasm-layer';
 import { ConcurrencyReconciler } from '../constructs/concurrency-reconciler';
@@ -53,9 +57,12 @@ import {
   type LambdaMicrovmImageInputs,
 } from '../constructs/lambda-microvm-compute';
 import { LinearIntegration } from '../constructs/linear-integration';
+import { OperationalAlerts } from '../constructs/operational-alerts';
 import { OrchestrationReconciler } from '../constructs/orchestration-reconciler';
 import { OrchestrationTable } from '../constructs/orchestration-table';
 import { PendingUploadCleanup } from '../constructs/pending-upload-cleanup';
+import { AgentRegistryStack } from '../constructs/registry';
+import { RegistryApi } from '../constructs/registry-api';
 import { RepoTable } from '../constructs/repo-table';
 import { SlackIntegration } from '../constructs/slack-integration';
 import { buildAppId } from '../constructs/solution-ua-aspect';
@@ -68,6 +75,7 @@ import { TaskEventsTable } from '../constructs/task-events-table';
 import { TaskNudgesTable } from '../constructs/task-nudges-table';
 import { TaskOrchestrator } from '../constructs/task-orchestrator';
 import { TaskTable } from '../constructs/task-table';
+import { ToolGateway } from '../constructs/tool-gateway';
 import { TraceArtifactsBucket } from '../constructs/trace-artifacts-bucket';
 import { UserConcurrencyTable } from '../constructs/user-concurrency-table';
 import { WebhookTable } from '../constructs/webhook-table';
@@ -84,6 +92,21 @@ const API_URL_STAGE_SEGMENT_INDEX = 3;
 export class AgentStack extends Stack {
   constructor(scope: Construct, id: string, props: StackProps = {}) {
     super(scope, id, props);
+
+    const enableAgentRegistry = this.node.tryGetContext('enableAgentRegistry');
+    if (
+      enableAgentRegistry !== undefined
+      && enableAgentRegistry !== true
+      && enableAgentRegistry !== false
+      && enableAgentRegistry !== 'true'
+      && enableAgentRegistry !== 'false'
+    ) {
+      throw new Error(
+        `enableAgentRegistry must be true or false, got '${String(enableAgentRegistry)}'`,
+      );
+    }
+    // Default-on for compatibility (contrast enableToolGateway, which is opt-in).
+    const agentRegistryEnabled = enableAgentRegistry !== false && enableAgentRegistry !== 'false';
 
     // Build context is repo root (not agent/) so the Dockerfile can COPY
     // sibling trees the agent reads at runtime — currently
@@ -121,6 +144,24 @@ export class AgentStack extends Stack {
     const webhookTable = new WebhookTable(this, 'WebhookTable');
     const apiKeyTable = new ApiKeyTable(this, 'ApiKeyTable');
     const repoTable = new RepoTable(this, 'RepoTable');
+
+    // Standalone Agent Registry asset registry (#246). Provisioned via a custom
+    // resource because CreateRegistry is async and has no CDK L2. Enabled by
+    // default for compatibility; set ``enableAgentRegistry=false`` to omit the
+    // registry, its API, permissions, environment variables, and outputs.
+    // Registry names allow only alphanumerics + underscores, so sanitize the
+    // stack name.
+    //
+    // Isolated in a NestedStack: the registry + its Provider framework add ~20
+    // resources; nesting keeps the root stack under CloudFormation's hard
+    // 500-resource limit. registryId/registryArn cross the boundary via CDK's
+    // automatic cross-stack export/import.
+    const agentRegistry = agentRegistryEnabled
+      ? new AgentRegistryStack(this, 'AgentRegistryStack', {
+        registryName: `abca_${this.stackName.replace(/[^a-zA-Z0-9]/g, '_')}`,
+        description: 'ABCA agent asset registry (#246)',
+      })
+      : undefined;
 
     // Cedar-wasm Lambda layer (§15.2 task 10). Instantiated here so the
     // asset is in the synthed template; Chunk 5 handlers (Approve,
@@ -174,6 +215,23 @@ export class AgentStack extends Stack {
 
     const blueprints = [agentPluginsBlueprint];
 
+    // Optional per-repo blueprint pinning registry assets (#246), opt-in via
+    // context/env so it does not hardcode a specific fork for other contributors.
+    // Set ``forkBlueprintRepo`` (e.g. ``--context forkBlueprintRepo=owner/repo``)
+    // to onboard a repo with the AWS Knowledge MCP asset pinned.
+    const forkBlueprintRepo = process.env.FORK_BLUEPRINT_REPO ?? this.node.tryGetContext('forkBlueprintRepo');
+    if (forkBlueprintRepo) {
+      blueprints.push(new Blueprint(this, 'ForkBlueprint', {
+        repo: forkBlueprintRepo,
+        repoTable: repoTable.table,
+        assets: {
+          mcpServers: ['registry://mcp_server/acme/aws-knowledge@^1.0.0'],
+          cedarPolicyModules: ['registry://cedar_policy_module/acme/guard@^1.0.0'],
+          skills: ['registry://skill/acme/readme-helper@^1.0.0'],
+        },
+      }));
+    }
+
     // The AwsCustomResource singleton Lambda used by Blueprint constructs
     NagSuppressions.addResourceSuppressionsByPath(this, [
       `${this.stackName}/AWS679f53fac002430cb0da5b7982bd2287/ServiceRole/Resource`,
@@ -224,6 +282,17 @@ export class AgentStack extends Stack {
     // MicroVM termination grant (ADR-021 sub-decision 4).
     const computeType = this.node.tryGetContext('compute_type') ?? 'agentcore';
     const lambdaMicrovmEnabled = computeType === 'lambda-microvm';
+
+    // --- Tool-federation Gateway deploy gate (ADR-019 P1) ---
+    // Whether to provision the AgentCore Gateway that federates the agent's MCP
+    // tools (P1: one read-only Lambda target, ``abca_repo_config``). OFF by
+    // default and additive — the resources synthesize only under
+    // ``--context enableToolGateway=true``, so the default synth (and the
+    // synth-coverage test that synths with default context) stays byte-for-byte
+    // unchanged and introduces no new CFN types into the bootstrap policy set.
+    // Same context-gate shape as the ECS / MicroVM compute backends above.
+    const toolGatewayEnabled = this.node.tryGetContext('enableToolGateway') === true
+      || this.node.tryGetContext('enableToolGateway') === 'true';
 
     // The operator-supplied MicroVM image inputs, resolved HERE (pure context
     // reads, no construct dependency) rather than at the construct's call site
@@ -367,6 +436,28 @@ export class AgentStack extends Stack {
       ...(microvmImageConfigured && { lambdaMicrovmImageArn: lazyMicrovmImageArn }),
     });
 
+    // Agent asset registry API (#246) in its own NestedStack + RestApi so its
+    // ~35 resources don't count against this root stack's 500-resource limit.
+    // It authorizes against the SHARED Cognito user pool, so a caller's JWT works
+    // on both APIs; the CLI targets its distinct URL (RegistryApiUrl output) for
+    // `registry` commands.
+    const registryApi = agentRegistry
+      ? new RegistryApi(this, 'RegistryApi', {
+        agentRegistryId: agentRegistry.registryId,
+        userPool: taskApi.userPool,
+      })
+      : undefined;
+
+    // --- Tool-federation Gateway (ADR-019 P1, CONTEXT-GATED) ---
+    // Provisioned only under ``--context enableToolGateway=true`` (gate read
+    // above). When on, exposes one read-only Lambda tool (``abca_repo_config``)
+    // through an AgentCore Gateway with SigV4 inbound + gateway-role outbound.
+    // The agent reaches it via an in-process SigV4-signing MCP bridge that reads
+    // ``ABCA_TOOL_GATEWAY_URL`` (wired below on every substrate role).
+    const toolGateway = toolGatewayEnabled
+      ? new ToolGateway(this, 'ToolGateway', { repoTable: repoTable.table })
+      : undefined;
+
     // --- AgentCore Runtime (IAM-authed orchestrator path) ---
     //
     // One runtime, invoked by OrchestratorFn via SigV4. See
@@ -380,18 +471,27 @@ export class AgentStack extends Stack {
       this.node.tryGetContext('sdkUaAppId') as string | undefined,
     );
 
+    // Cross-Region inference-profile geography (`bedrockGeoRegion`, default
+    // `us`). Resolved once and used for BOTH the auxiliary-model env var below
+    // and the Bedrock grants further down, so a deployment can never grant one
+    // geography's profiles while telling the agent to call another's.
+    const bedrockGeoRegion = resolveBedrockGeoRegion(this.node);
+
     const runtimeEnvironmentVariables = {
       GITHUB_TOKEN_SECRET_ARN: githubTokenSecret.secretArn,
       AWS_REGION: process.env.AWS_REGION ?? 'us-east-1',
       CLAUDE_CODE_USE_BEDROCK: '1',
       ANTHROPIC_LOG: 'debug',
-      // Cross-region inference-profile id (``us.`` prefix), NOT the bare
-      // foundation-model id: Claude 4.x can't be invoked on-demand by bare id
-      // (400 "on-demand throughput isn't supported"). Read from bedrock-models.ts
-      // so the granted model and the delivered id cannot drift, and so the
-      // lambda-microvm `platform_config` block below carries the same value.
-      // runner.py re-sets this at spawn time.
-      ANTHROPIC_DEFAULT_HAIKU_MODEL: DEFAULT_HAIKU_INFERENCE_PROFILE_ID,
+      // Cross-region inference-profile id (geo prefix, `us.` by default), NOT
+      // the bare foundation-model id: Claude 4.x can't be invoked on-demand by
+      // bare id (400 "on-demand throughput isn't supported"). Derived through
+      // bedrock-models.ts's `haikuInferenceProfileId` so (a) the prefix comes from
+      // `bedrockGeoRegion` rather than a second hardcode that would silently split
+      // this auxiliary model from the granted profiles on any non-`us` deploy, and
+      // (b) the model id itself comes from the same constant the grant list
+      // interpolates. The lambda-microvm `platform_config` block below calls the
+      // same helper with the same geography. runner.py re-sets this at spawn time.
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: haikuInferenceProfileId(bedrockGeoRegion),
       TASK_TABLE_NAME: taskTable.table.tableName,
       TASK_EVENTS_TABLE_NAME: taskEventsTable.table.tableName,
       NUDGES_TABLE_NAME: taskNudgesTable.table.tableName,
@@ -438,6 +538,11 @@ export class AgentStack extends Stack {
       // AWS_SDK_UA_APP_ID natively → `app/uksb-wt64nei4u6#{stack}`. The
       // Lambda-only Aspect can't reach this runtime, so set it explicitly.
       ...(sdkUaAppId ? { AWS_SDK_UA_APP_ID: sdkUaAppId } : {}),
+      // ADR-019 P1: the federated-tool Gateway URL (context-gated). Present only
+      // when ``--context enableToolGateway=true``; the agent's in-process SigV4
+      // MCP bridge (gateway_tools.build_gateway_server) reads it to register the
+      // ``abca_gateway`` SDK server. Absent → no gateway tool, unchanged.
+      ...(toolGateway ? { ABCA_TOOL_GATEWAY_URL: toolGateway.gatewayUrl } : {}),
     };
 
     const runtimeNetworkConfig = agentcore.RuntimeNetworkConfiguration.usingVpc(this, {
@@ -532,9 +637,16 @@ export class AgentStack extends Stack {
     applicationLogGroup.grantWrite(runtime);
     agentMemory.grantReadWrite(runtime);
 
-    // Grant the runtime invoke on each configured foundation model + its US
-    // cross-Region inference profile. The model set is a single source of truth
-    // (constructs/bedrock-models.ts), shared with the ECS task role and
+    // ADR-019 P1 (context-gated): let the runtime SigV4-invoke the tool Gateway
+    // (``bedrock-agentcore:InvokeGateway``). No-op unless the gateway is
+    // provisioned. The ECS task role gets the parallel grant via the
+    // EcsAgentCluster prop below (substrate parity).
+    toolGateway?.grantInvoke(runtime);
+
+    // Grant the runtime invoke on each configured foundation model + its
+    // cross-Region inference profile in the configured geography
+    // (`bedrockGeoRegion`, default `us`). The model set is a single source of
+    // truth (constructs/bedrock-models.ts), shared with the ECS task role and
     // overridable via the `bedrockModels` CDK context. Each invokable is also
     // collected so the same set is granted to the SessionRole below (for cost
     // attribution) — the two grants derive from one list and can't drift.
@@ -547,7 +659,7 @@ export class AgentStack extends Stack {
         supportsCrossRegion: true,
       });
       const crossRegionProfile = bedrock.CrossRegionInferenceProfile.fromConfig({
-        geoRegion: bedrock.CrossRegionInferenceProfileRegion.US,
+        geoRegion: bedrockGeoRegion,
         model: foundationModel,
       });
       foundationModel.grantInvoke(runtime);
@@ -683,6 +795,18 @@ export class AgentStack extends Stack {
       description: 'ARN of the Secrets Manager secret for the GitHub token',
     });
 
+    if (agentRegistry) {
+      new CfnOutput(this, 'AgentRegistryId', {
+        value: agentRegistry.registryId,
+        description: 'ID of the standalone Agent Registry asset registry (#246)',
+      });
+
+      new CfnOutput(this, 'AgentRegistryArn', {
+        value: agentRegistry.registryArn,
+        description: 'ARN of the standalone Agent Registry asset registry (#246)',
+      });
+    }
+
     new CfnOutput(this, 'TraceArtifactsBucketName', {
       value: traceArtifactsBucket.bucket.bucketName,
       description: 'Name of the S3 bucket storing --trace trajectory artifacts (design §10.1)',
@@ -758,6 +882,9 @@ export class AgentStack extends Stack {
         // construct admits the task role to the trust and injects
         // AGENT_SESSION_ROLE_ARN into the container.
         agentSessionRole,
+        // ADR-019 P1: parity — grants the task role InvokeGateway + injects
+        // ABCA_TOOL_GATEWAY_URL. Undefined unless --context enableToolGateway=true.
+        toolGateway,
       })
       : undefined;
 
@@ -878,6 +1005,7 @@ export class AgentStack extends Stack {
       guardrailId: inputGuardrail.guardrailId,
       guardrailVersion: inputGuardrail.guardrailVersion,
       attachmentsBucket: attachmentsBucket.bucket,
+      ...(agentRegistry && { agentRegistryId: agentRegistry.registryId }),
       // ADR-021 P2: non-secret platform identifiers the orchestrator forwards to
       // the in-guest agent as `platform_config` on the MicroVM /run payload — the
       // MicroVM equivalent of the AgentCore runtime env block above and the ECS
@@ -911,7 +1039,10 @@ export class AgentStack extends Stack {
         // The SessionRole is created above (before the orchestrator), so this needs
         // no Lazy — it is the same CFN token the runtime env receives.
         agentSessionRoleArn: agentSessionRole.role.roleArn,
-        anthropicDefaultHaikuModel: DEFAULT_HAIKU_INFERENCE_PROFILE_ID,
+        // Same helper, same resolved geography as the AgentCore runtime env
+        // above (#764) — the two substrates cannot be told to call different
+        // inference profiles.
+        anthropicDefaultHaikuModel: haikuInferenceProfileId(bedrockGeoRegion),
       },
       // Route ``compute_type: 'ecs'`` repos to the Fargate cluster above —
       // only when the cluster was synthesized (deploy --context compute_type=ecs).
@@ -1013,7 +1144,7 @@ export class AgentStack extends Stack {
     // 2-consumer architectural note in `task-events-table.ts` —
     // adding a third consumer here requires the Kinesis Data Streams
     // for DynamoDB migration.
-    new ApprovalMetricsPublisherConsumer(this, 'ApprovalMetricsPublisherConsumer', {
+    const approvalMetricsPublisher = new ApprovalMetricsPublisherConsumer(this, 'ApprovalMetricsPublisherConsumer', {
       taskEventsTable: taskEventsTable.table,
     });
 
@@ -1299,12 +1430,12 @@ export class AgentStack extends Stack {
     }));
 
     // Mid-run liveness heartbeat. A scheduled sweep edits the maturing
-    // Linear reply of RUNNING comment-triggered iterations to show elapsed time
+    // Linear/Jira comment of RUNNING comment-triggered iterations to show elapsed time
     // ("🔄 Working … _8m elapsed_") so a long run isn't a silent black box
     // (observed in practice: a run went 22 minutes with no visible output).
-    // Needs the workspace registry + per-workspace
-    // linear-oauth secret read to resolve the outbound token (same as the
-    // reconciler's reply path). Read-only on the TaskTable.
+    // Needs each surface registry and scoped OAuth-secret access to resolve
+    // outbound credentials (same as the reconciler's reply path). Read-only on
+    // the TaskTable.
     const iterationHeartbeat = new IterationHeartbeat(this, 'IterationHeartbeat', {
       taskTable: taskTable.table,
     });
@@ -1351,6 +1482,9 @@ export class AgentStack extends Stack {
       userPool: taskApi.userPool,
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
+      orchestrationTable: orchestrationTable.table,
+      userConcurrencyTable: userConcurrencyTable.table,
+      maxConcurrentTasksPerUser: maxConcurrentTasksPerUser,
       repoTable: repoTable.table,
       orchestratorFunctionArn: orchestrator.alias.functionArn,
       guardrailId: inputGuardrail.guardrailId,
@@ -1359,6 +1493,26 @@ export class AgentStack extends Stack {
       // task-admission time. Same bucket the orchestrator hydrates from.
       attachmentsBucket: attachmentsBucket.bucket,
     });
+
+    // Add Jira to the channel-neutral heartbeat sweep. Token resolution can
+    // refresh an expiring OAuth bundle, so this trusted Lambda needs scoped
+    // Get+Put on the per-tenant secret prefix as well as registry-table read.
+    jiraIntegration.workspaceRegistryTable.grantReadData(iterationHeartbeat.fn);
+    iterationHeartbeat.fn.addEnvironment(
+      'JIRA_WORKSPACE_REGISTRY_TABLE_NAME',
+      jiraIntegration.workspaceRegistryTable.tableName,
+    );
+    iterationHeartbeat.fn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['secretsmanager:GetSecretValue', 'secretsmanager:PutSecretValue'],
+      resources: [
+        Stack.of(this).formatArn({
+          service: 'secretsmanager',
+          resource: 'secret',
+          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+          resourceName: 'bgagent-jira-oauth-*',
+        }),
+      ],
+    }));
 
     // Agent runtime reads the per-tenant Jira OAuth token directly from
     // Secrets Manager. The CLI (`bgagent jira setup`) creates
@@ -1461,7 +1615,7 @@ export class AgentStack extends Stack {
     // ``bgagent/slack/*``; Linear dispatcher posts a single
     // deterministic final-status comment with cost/turns/duration.
     // Email remains a log-only stub until SES wires.
-    new FanOutConsumer(this, 'FanOutConsumer', {
+    const fanOutConsumer = new FanOutConsumer(this, 'FanOutConsumer', {
       taskEventsTable: taskEventsTable.table,
       taskTable: taskTable.table,
       repoTable: repoTable.table,
@@ -1532,6 +1686,31 @@ export class AgentStack extends Stack {
     // tasks to the changed node's dependents. No inbound pull_request webhook
     // (those are WAF-blocked by the API's managed rule set anyway), so there
     // is no RestackProcessor Lambda to wire here.
+
+    // --- Operational alerts channel (§11.5 follow-up, issue #629) ---
+    // A single stack-wide SNS topic that the DLQ-depth alarms publish to
+    // on state change, so poison-pill accumulation pushes a notification
+    // instead of sitting silently in the Alarms console. Delivery target
+    // is configurable: pass an email via `-c alertEmail=ops@example.com`
+    // (AWS sends a confirmation link that must be clicked), or leave it
+    // unset and subscribe Slack / PagerDuty manually against the exported
+    // topic ARN below.
+    const operationalAlerts = new OperationalAlerts(this, 'OperationalAlerts', {
+      alertEmail: this.node.tryGetContext('alertEmail') as string | undefined,
+    });
+    // Wire the DLQ-depth alarms shipped in #117 (FanOut + approval-metrics
+    // publisher) plus the screenshot processor's async-invoke DLQ alarm —
+    // all three share the threshold-1 "records landed in a DLQ" shape.
+    operationalAlerts.addAlarmActions(
+      fanOutConsumer.dlqDepthAlarm,
+      approvalMetricsPublisher.dlqAlarm,
+      githubScreenshot.processorDlqDepthAlarm,
+    );
+
+    new CfnOutput(this, 'OperationalAlertsTopicArn', {
+      value: operationalAlerts.topic.topicArn,
+      description: 'SNS topic for DLQ-depth CloudWatch alarms — subscribe Slack / PagerDuty / email here (#629)',
+    });
 
     new CfnOutput(this, 'GitHubWebhookUrl', {
       value: `${taskApi.api.url}github/webhook`,
@@ -1659,6 +1838,13 @@ export class AgentStack extends Stack {
       value: taskApi.api.url,
       description: 'URL of the Task API',
     });
+
+    if (registryApi) {
+      new CfnOutput(this, 'RegistryApiUrl', {
+        value: registryApi.apiUrl,
+        description: 'URL of the agent asset registry API (#246) — the CLI targets this for `bgagent registry` commands',
+      });
+    }
 
     new CfnOutput(this, 'UserPoolId', {
       value: taskApi.userPool.userPoolId,

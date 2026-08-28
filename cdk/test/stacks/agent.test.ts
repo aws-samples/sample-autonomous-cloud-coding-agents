@@ -21,6 +21,11 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { App, AspectPriority, Aspects } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
+import {
+  BEDROCK_GEO_REGION_CONTEXT_KEY,
+  DEFAULT_BEDROCK_GEO_REGION,
+  DEFAULT_BEDROCK_MODEL_IDS,
+} from '../../src/constructs/bedrock-models';
 import * as lambdaMicrovmCompute from '../../src/constructs/lambda-microvm-compute';
 import { buildAppId, SolutionUaAspect } from '../../src/constructs/solution-ua-aspect';
 import { AgentStack } from '../../src/stacks/agent';
@@ -144,6 +149,12 @@ describe('AgentStack', () => {
     template.hasOutput('CedarWasmLayerArn', {});
   });
 
+  test('enables Agent Registry by default', () => {
+    template.hasOutput('AgentRegistryId', {});
+    template.hasOutput('AgentRegistryArn', {});
+    template.hasOutput('RegistryApiUrl', {});
+  });
+
   test('creates the Cedar-wasm Lambda layer', () => {
     template.resourceCountIs('AWS::Lambda::LayerVersion', 1);
     template.hasResourceProperties('AWS::Lambda::LayerVersion', {
@@ -204,16 +215,22 @@ describe('AgentStack', () => {
     }
   });
 
-  test('default Haiku model env var is the cross-region inference profile (us.), not the bare model id', () => {
+  test('default Haiku model env var is the cross-region inference profile, not the bare model id', () => {
     // Claude 4.x on Bedrock cannot be invoked on-demand by bare foundation-model
     // id (400 "on-demand throughput isn't supported"); WebFetch's Haiku sub-calls
-    // hit this. The env var must be the granted us.* inference profile.
+    // hit this. The env var must be the granted inference profile.
+    //
+    // The expectation is DERIVED from the default geography rather than hardcoded
+    // `us.` (#746): the prefix is now a function of `bedrockGeoRegion`, so a
+    // hardcoded literal here would assert the default's value twice and go stale
+    // the moment the default moves — while the thing worth guarding (main and
+    // auxiliary models routing through the SAME geography) went unchecked.
     const runtimes = template.findResources('AWS::BedrockAgentCore::Runtime');
     for (const rt of Object.values(runtimes)) {
       const envVars = (rt as { Properties?: { EnvironmentVariables?: Record<string, unknown> } })
         .Properties?.EnvironmentVariables ?? {};
       expect(envVars.ANTHROPIC_DEFAULT_HAIKU_MODEL)
-        .toBe('us.anthropic.claude-haiku-4-5-20251001-v1:0');
+        .toBe(`${DEFAULT_BEDROCK_GEO_REGION}.anthropic.claude-haiku-4-5-20251001-v1:0`);
     }
   });
 
@@ -316,13 +333,29 @@ describe('AgentStack', () => {
 
   test('runtime is granted the default Bedrock model set', () => {
     // Default (no bedrockModels context): the runtime execution role must hold
-    // bedrock:InvokeModel on the three default foundation models + their US
-    // inference profiles, scoped (never Resource: '*').
+    // bedrock:InvokeModel on every default foundation model + its US
+    // inference profile, scoped (never Resource: '*').
+    //
+    // The `us.` literals below are deliberate, not stale (#746): this test pins
+    // the DEFAULT deploy, and the default geography is still `us`. The
+    // geo-parameterized behaviour is covered separately; template identity under
+    // default context is covered by the exact-set test further down.
     const serialized = JSON.stringify(template.findResources('AWS::IAM::Policy'));
     expect(serialized).toContain('foundation-model/anthropic.claude-sonnet-4-6');
     expect(serialized).toContain('inference-profile/us.anthropic.claude-sonnet-4-6');
     expect(serialized).toContain('anthropic.claude-opus-4-20250514-v1:0');
     expect(serialized).toContain('anthropic.claude-haiku-4-5-20251001-v1:0');
+    // Claude Opus 5 (#744). Granted ahead of any default flip: the bare id is
+    // not on-demand invocable (Bedrock returns ValidationException), so the
+    // `us.`-prefixed inference profile is the one actually called — both ARNs
+    // must be present or the agent gets AccessDenied at turn 0.
+    expect(serialized).toContain('foundation-model/anthropic.claude-opus-5');
+    expect(serialized).toContain('inference-profile/us.anthropic.claude-opus-5');
+    // REGRESSION (#744): Opus 4.8 stays granted alongside Opus 5. Blueprints may
+    // pin 4.8 per-repo; dropping it would fail those repos at turn 0. Retiring
+    // 4.8 is a separate, announced change — not a side effect of adding 5.
+    expect(serialized).toContain('foundation-model/anthropic.claude-opus-4-8');
+    expect(serialized).toContain('inference-profile/us.anthropic.claude-opus-4-8');
   });
 
   test('bedrockModels context override propagates to the runtime execution role', () => {
@@ -340,15 +373,23 @@ describe('AgentStack', () => {
     // and the per-task session role (the coding agent's task-model grants). The
     // override replaces the model set for the WORKLOAD; these are its surfaces.
     //
-    // Deliberately EXCLUDES the Linear webhook processor's policy: the
-    // deterministic-revise interpreter (linear-integration.ts) makes one tiny
-    // "which plan-edit did they mean?" classification call pinned to a FIXED
-    // model (DEFAULT_REVISE_MODEL_ID = sonnet), by design independent of the
-    // per-task ``bedrockModels`` override — you don't want a cheap classification
-    // running on whatever heavyweight coding model an operator selected. That
-    // grant is scoped to its single fixed model (asserted in the linear
-    // integration tests), so it's not a wildcard/drift risk; it just isn't part
-    // of the override contract this test checks.
+    // The prefix filter, not a blanket scan, is what this test asserts against.
+    // On main those two roles are in fact the ONLY policies in the stack holding
+    // a bedrock:InvokeModel statement — the Linear webhook processor deliberately
+    // has none (`linear-integration.ts`: "No bedrock:InvokeModel grant: this
+    // processor never calls a model directly"; its only Bedrock action is
+    // ApplyGuardrail). So the filter is currently a no-op belt-and-braces guard
+    // that keeps this assertion honest if a future construct adds an
+    // InvokeModel grant that the ``bedrockModels`` override is not meant to
+    // govern — e.g. a cheap fixed-model classification call, which you would not
+    // want running on whatever heavyweight coding model an operator selected.
+    //
+    // (An earlier revision of this comment cited a fixed-model revise grant via a
+    // `DEFAULT_REVISE_MODEL_ID` constant. That constant and its
+    // orchestration-plan-revise-interpret module exist only on the unmerged
+    // #299 branch and never landed on main, so the reference was dangling — see
+    // #742. Corrected rather than deleted to record that the exclusion describes
+    // a hypothetical, not a live grant.)
     const OVERRIDE_GOVERNED_POLICY_PREFIXES = ['RuntimeExecutionRole', 'AgentSessionRole'];
     const policies = overridden.findResources('AWS::IAM::Policy');
     const bedrockResources: unknown[] = [];
@@ -371,6 +412,136 @@ describe('AgentStack', () => {
     expect(serialized).not.toContain('claude-haiku-4-5');
     // ...and the grant is never a bare wildcard.
     expect(serialized).not.toContain('"*"');
+  });
+
+  /**
+   * TEMPLATE IDENTITY (#746). Making the inference-profile geography
+   * configurable must not MOVE it: the default is still `us`, so a stack
+   * deployed before this change and re-synthesized after it must produce the
+   * same Bedrock IAM resources. That is the whole safety argument for shipping
+   * the refactor on its own, ahead of the geo flip (#747) — so it is asserted,
+   * not asserted-in-a-PR-description.
+   *
+   * The expected set below is the literal, exhaustive list captured from a
+   * pre-change `origin/main` synth of this same stack (`fb1e007b`, before the
+   * `bedrockGeoRegion` key existed) — every `foundation-model/…` and
+   * `inference-profile/…` resource name appearing in any `bedrock:` IAM
+   * statement of the default-context template. Asserted as EXACT set equality,
+   * so the refactor can neither add, drop, nor re-prefix a grant unnoticed. A
+   * `toContain`-style check would pass on a template that also granted
+   * something new.
+   *
+   * (The full 25k-line template was also diffed pre/post out-of-band and is
+   * identical modulo CDK's own local synth non-determinism — asset hashes,
+   * custom-resource timestamps, the InputGuardrail version logical id — which
+   * differ between two synths of the SAME tree and so cannot be asserted here.
+   * The Bedrock resources are the change's entire blast radius.)
+   */
+  test('default-context Bedrock grants are byte-identical to the pre-#746 template', () => {
+    const PRE_CHANGE_BEDROCK_RESOURCE_NAMES = [
+      'foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0',
+      'foundation-model/anthropic.claude-opus-4-20250514-v1:0',
+      'foundation-model/anthropic.claude-opus-4-8',
+      'foundation-model/anthropic.claude-opus-5',
+      'foundation-model/anthropic.claude-sonnet-4-6',
+      'inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0',
+      'inference-profile/us.anthropic.claude-opus-4-20250514-v1:0',
+      'inference-profile/us.anthropic.claude-opus-4-8',
+      'inference-profile/us.anthropic.claude-opus-5',
+      'inference-profile/us.anthropic.claude-sonnet-4-6',
+    ];
+
+    const serialized = JSON.stringify(template.findResources('AWS::IAM::Policy'));
+    const found = [...new Set(
+      serialized.match(/(?:foundation-model|inference-profile)\/[^"]+/g) ?? [],
+    )].sort();
+    expect(found).toEqual(PRE_CHANGE_BEDROCK_RESOURCE_NAMES);
+
+    // Sanity: the set is derived from the shared model list, so a model added to
+    // DEFAULT_BEDROCK_MODEL_IDS without updating this baseline fails loudly here
+    // rather than silently widening the "identical" claim.
+    expect(found).toHaveLength(DEFAULT_BEDROCK_MODEL_IDS.length * 2);
+
+    // And the auxiliary-model env var is still the `us.` profile it always was.
+    const runtimes = template.findResources('AWS::BedrockAgentCore::Runtime');
+    const envVars = (Object.values(runtimes)[0] as {
+      Properties?: { EnvironmentVariables?: Record<string, unknown> };
+    }).Properties?.EnvironmentVariables ?? {};
+    expect(envVars.ANTHROPIC_DEFAULT_HAIKU_MODEL)
+      .toBe('us.anthropic.claude-haiku-4-5-20251001-v1:0');
+    expect(DEFAULT_BEDROCK_GEO_REGION).toBe('us');
+  });
+
+  /**
+   * The point of the key: a non-`us` deploy must be reachable from context
+   * alone, with no construct edit. Parameterized over the geographies with a
+   * distinct ARN shape from the default, `global` included — `global.` was the
+   * specific case verified live (its profile ARN is regional + account-qualified,
+   * identical in shape to `us.`), and is what #747 will flip the default to.
+   */
+  describe.each(['global', 'eu', 'apac'])('bedrockGeoRegion=%s', (geo) => {
+    let geoTemplate: Template;
+
+    beforeAll(() => {
+      const app = new App({ context: { [BEDROCK_GEO_REGION_CONTEXT_KEY]: geo } });
+      const stack = new AgentStack(app, `GeoAgentStack${geo.replace('-', '')}`, {
+        env: { account: '123456789012', region: 'us-east-1' },
+      });
+      geoTemplate = Template.fromStack(stack);
+    });
+
+    test('re-prefixes every inference-profile ARN and drops the us. ones', () => {
+      const serialized = JSON.stringify(geoTemplate.findResources('AWS::IAM::Policy'));
+      for (const modelId of DEFAULT_BEDROCK_MODEL_IDS) {
+        expect(serialized).toContain(`inference-profile/${geo}.${modelId}`);
+        // The default geography must be GONE, not merely joined — a grant left
+        // on `us.` while the agent calls `global.` is an AccessDenied at turn 0.
+        expect(serialized).not.toContain(`inference-profile/us.${modelId}`);
+        // The foundation-model half is already geo-agnostic (region: '*'), so it
+        // is unchanged — and must NOT pick up a geo prefix.
+        expect(serialized).toContain(`foundation-model/${modelId}`);
+        expect(serialized).not.toContain(`foundation-model/${geo}.${modelId}`);
+      }
+      // Still per-model scoped; the geo knob must never become a wildcard.
+      // Scoped to the bedrock:InvokeModel* statements — the stack legitimately
+      // holds Resource:'*' elsewhere (ec2/route53resolver describes have no
+      // resource-level scoping), so a blanket scan would assert nothing here.
+      const bedrockStatements: unknown[] = [];
+      for (const p of Object.values(geoTemplate.findResources('AWS::IAM::Policy'))) {
+        for (const s of (p.Properties?.PolicyDocument?.Statement ?? []) as Array<{ Action?: unknown; Resource?: unknown }>) {
+          const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+          if (actions.some((a) => typeof a === 'string' && a.startsWith('bedrock:InvokeModel'))) {
+            bedrockStatements.push(s.Resource);
+          }
+        }
+      }
+      expect(bedrockStatements.length).toBeGreaterThan(0);
+      expect(bedrockStatements).not.toContain('*');
+      expect(JSON.stringify(bedrockStatements)).not.toContain('"*"');
+    });
+
+    test('derives the auxiliary Haiku model prefix from the same key', () => {
+      // Without this the main model routes through `geo` while WebFetch's Haiku
+      // sub-calls still ask for `us.` — a grant/env split that only shows up as a
+      // mid-task failure on the auxiliary path.
+      const runtimes = geoTemplate.findResources('AWS::BedrockAgentCore::Runtime');
+      for (const rt of Object.values(runtimes)) {
+        const envVars = (rt as { Properties?: { EnvironmentVariables?: Record<string, unknown> } })
+          .Properties?.EnvironmentVariables ?? {};
+        expect(envVars.ANTHROPIC_DEFAULT_HAIKU_MODEL)
+          .toBe(`${geo}.anthropic.claude-haiku-4-5-20251001-v1:0`);
+      }
+    });
+  });
+
+  test('an unknown bedrockGeoRegion fails at synth, not at turn 0', () => {
+    // Synth-time because the value feeds grantInvoke's ARN construction: a
+    // CloudFormation parameter would resolve after synth and force the grant back
+    // to Resource: '*'. A typo must therefore fail here, loudly.
+    const app = new App({ context: { [BEDROCK_GEO_REGION_CONTEXT_KEY]: 'usa' } });
+    expect(() => new AgentStack(app, 'BadGeoAgentStack', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    })).toThrow(/must be one of/);
   });
 
   test('outputs ApiUrl', () => {
@@ -558,6 +729,24 @@ describe('AgentStack', () => {
     expect(vars.JIRA_WORKSPACE_REGISTRY_TABLE_NAME).toBeDefined();
   });
 
+  test('the iteration heartbeat can reach BOTH surfaces and refresh Jira OAuth', () => {
+    const fns = template.findResources('AWS::Lambda::Function');
+    const heartbeat = Object.entries(fns).find(([id]) => id.startsWith('IterationHeartbeat'));
+    expect(heartbeat).toBeDefined();
+    const vars = (heartbeat![1] as { Properties?: { Environment?: { Variables?: Record<string, unknown> } } })
+      .Properties?.Environment?.Variables ?? {};
+    expect(vars.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME).toBeDefined();
+    expect(vars.JIRA_WORKSPACE_REGISTRY_TABLE_NAME).toBeDefined();
+
+    const policies = template.findResources('AWS::IAM::Policy');
+    const heartbeatPolicies = Object.entries(policies)
+      .filter(([logicalId]) => logicalId.startsWith('IterationHeartbeat'));
+    const asJson = JSON.stringify(heartbeatPolicies.map(([, policy]) => policy));
+    expect(asJson).toContain('bgagent-jira-oauth-*');
+    expect(asJson).toContain('secretsmanager:GetSecretValue');
+    expect(asJson).toContain('secretsmanager:PutSecretValue');
+  });
+
   test('the orchestration reconciler cannot read S3 objects at all', () => {
     // The trace/artifacts bucket holds full agent trajectories under
     // traces/<user_id>/ — tool input and output, authorized per-user by the presign
@@ -726,6 +915,46 @@ describe('AgentStack', () => {
         }),
       ]),
     });
+  });
+
+  test('provisions a single OperationalAlerts SNS topic + CMK and exports its ARN (#629)', () => {
+    // One stack-wide topic, not per-consumer — every DLQ-depth alarm
+    // shares one subscription surface.
+    template.resourceCountIs('AWS::SNS::Topic', 1);
+    template.hasResourceProperties('AWS::SNS::Topic', {
+      KmsMasterKeyId: Match.anyValue(),
+    });
+    template.hasOutput('OperationalAlertsTopicArn', {
+      Description: Match.stringLikeRegexp('#629'),
+    });
+  });
+
+  test('wires all three DLQ-depth alarms to the alerts topic (#629)', () => {
+    // FanOut, ApprovalMetricsPublisher, and the screenshot processor
+    // DLQ alarms must each carry an AlarmActions entry — otherwise a
+    // poison-pill pile-up stays silent (the whole point of #629).
+    const alarms = template.findResources('AWS::CloudWatch::Alarm');
+    const dlqAlarmsWithActions = Object.values(alarms).filter((r: any) => {
+      const dims: Array<{ Name: string }> = r.Properties?.Dimensions ?? [];
+      const isSqsDepth =
+        r.Properties?.Namespace === 'AWS/SQS' &&
+        r.Properties?.MetricName === 'ApproximateNumberOfMessagesVisible' &&
+        dims.some((d) => d.Name === 'QueueName');
+      const hasActions =
+        Array.isArray(r.Properties?.AlarmActions) && r.Properties.AlarmActions.length > 0;
+      return isSqsDepth && hasActions;
+    });
+    expect(dlqAlarmsWithActions).toHaveLength(3);
+    // Each action must reference the operational-alerts topic.
+    for (const alarm of dlqAlarmsWithActions) {
+      expect(JSON.stringify((alarm as any).Properties.AlarmActions)).toContain('OperationalAlerts');
+    }
+  });
+
+  test('does NOT subscribe an email when no alertEmail context is set (#629)', () => {
+    // The default deploy ships the topic with no confirmed target;
+    // operators subscribe Slack / PagerDuty / email themselves.
+    template.resourceCountIs('AWS::SNS::Subscription', 0);
   });
 });
 
@@ -1241,5 +1470,165 @@ describe('AgentStack solution attribution (#319): AWS_SDK_UA_APP_ID via stack-le
     for (const [, fn] of nested) {
       expect(fn.Properties.Environment?.Variables?.AWS_SDK_UA_APP_ID).toBe('uksb-wt64nei4u6#UaAgentStack');
     }
+  });
+});
+
+describe('AgentStack tool-gateway gate (ADR-019 P1)', () => {
+  test('default (no-gate) synth provisions NO Gateway — synth stays byte-unchanged', () => {
+    // The whole ToolGateway construct is context-gated; without the flag the
+    // template must contain zero Gateway/GatewayTarget resources so the default
+    // deploy is untouched and no new CFN type enters the bootstrap coverage set.
+    const app = new App();
+    const stack = new AgentStack(app, 'NoGatewayStack', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    });
+    const template = Template.fromStack(stack);
+    template.resourceCountIs('AWS::BedrockAgentCore::Gateway', 0);
+    template.resourceCountIs('AWS::BedrockAgentCore::GatewayTarget', 0);
+  });
+
+  describe('with --context enableToolGateway=true', () => {
+    let template: Template;
+
+    beforeAll(() => {
+      const app = new App({ context: { enableToolGateway: true } });
+      const stack = new AgentStack(app, 'GatewayStack', {
+        env: { account: '123456789012', region: 'us-east-1' },
+      });
+      template = Template.fromStack(stack);
+    });
+
+    test('provisions exactly one AWS_IAM Gateway + one Lambda target', () => {
+      template.resourceCountIs('AWS::BedrockAgentCore::Gateway', 1);
+      template.hasResourceProperties('AWS::BedrockAgentCore::Gateway', {
+        AuthorizerType: 'AWS_IAM',
+      });
+      template.resourceCountIs('AWS::BedrockAgentCore::GatewayTarget', 1);
+    });
+
+    test('the AgentCore runtime carries ABCA_TOOL_GATEWAY_URL', () => {
+      template.hasResourceProperties('AWS::BedrockAgentCore::Runtime', {
+        EnvironmentVariables: Match.objectLike({
+          ABCA_TOOL_GATEWAY_URL: Match.anyValue(),
+        }),
+      });
+    });
+  });
+
+  describe('substrate parity: with BOTH --context enableToolGateway=true AND compute_type=ecs', () => {
+    // #641 requires the federated tool to work on BOTH substrates. The
+    // AgentCore-runtime wiring is asserted above; without these two the ECS
+    // task could ship with no gateway URL and no InvokeGateway grant — the tool
+    // silently absent on Fargate while looking present in the AgentCore path.
+    // This is the both-substrates acceptance bar the ADR-019 review called out.
+    let template: Template;
+
+    beforeAll(() => {
+      const app = new App({
+        context: { enableToolGateway: true, compute_type: 'ecs' },
+      });
+      const stack = new AgentStack(app, 'GatewayEcsStack', {
+        env: { account: '123456789012', region: 'us-east-1' },
+      });
+      template = Template.fromStack(stack);
+    });
+
+    test('every ECS task definition container carries ABCA_TOOL_GATEWAY_URL', () => {
+      // Both the build and planning task defs share the base container env, so
+      // each must carry the gateway URL — assert on all of them, not just one.
+      const taskDefs = Object.values(
+        template.findResources('AWS::ECS::TaskDefinition'),
+      );
+      expect(taskDefs.length).toBeGreaterThan(0);
+      for (const taskDef of taskDefs) {
+        const containers = taskDef.Properties?.ContainerDefinitions ?? [];
+        const withGatewayUrl = containers.filter(
+          (c: { Environment?: { Name: string }[] }) =>
+            (c.Environment ?? []).some((e) => e.Name === 'ABCA_TOOL_GATEWAY_URL'),
+        );
+        expect(withGatewayUrl.length).toBeGreaterThan(0);
+      }
+    });
+
+    test('the ECS task role is granted bedrock-agentcore:InvokeGateway', () => {
+      // Scope the assertion to the ECS TASK role. The AgentCore runtime role is
+      // granted the same InvokeGateway action in this very template, so an
+      // unscoped `hasResourceProperties` would stay green even if the ECS
+      // grant (ecs-agent-cluster.ts:554) were deleted — precisely the
+      // cross-substrate regression this test exists to catch. Pin the policy to
+      // the EcsAgentCluster TaskRole via its `Roles` attachment.
+      template.hasResourceProperties('AWS::IAM::Policy', {
+        PolicyDocument: Match.objectLike({
+          Statement: Match.arrayWith([
+            Match.objectLike({
+              Action: 'bedrock-agentcore:InvokeGateway',
+              Effect: 'Allow',
+            }),
+          ]),
+        }),
+        Roles: Match.arrayWith([
+          Match.objectLike({
+            Ref: Match.stringLikeRegexp('EcsAgentClusterTaskRole'),
+          }),
+        ]),
+      });
+    });
+  });
+});
+
+describe('AgentStack Agent Registry gate', () => {
+  test.each([undefined, true, 'true'])(
+    'enableAgentRegistry=%p includes the registry by default or explicit enablement',
+    (enableAgentRegistry) => {
+      const context = enableAgentRegistry === undefined ? {} : { enableAgentRegistry };
+      const app = new App({ context });
+      const stack = new AgentStack(app, `AgentRegistryStack${String(enableAgentRegistry)}`, {
+        env: { account: '123456789012', region: 'us-east-1' },
+      });
+      const nestedStackIds = Object.keys(
+        Template.fromStack(stack).findResources('AWS::CloudFormation::Stack'),
+      );
+
+      expect(nestedStackIds.some(id => id.includes('AgentRegistryStack'))).toBe(true);
+    },
+  );
+
+  test.each([false, 'false'])(
+    'enableAgentRegistry=%p omits registry resources, wiring, and outputs',
+    (enableAgentRegistry) => {
+      const app = new App({ context: { enableAgentRegistry } });
+      const stack = new AgentStack(app, `NoAgentRegistryStack${typeof enableAgentRegistry}`, {
+        env: { account: '123456789012', region: 'us-east-1' },
+      });
+      const template = Template.fromStack(stack);
+      const rendered = template.toJSON();
+      const nestedStackIds = Object.keys(template.findResources('AWS::CloudFormation::Stack'));
+      const outputs = rendered.Outputs ?? {};
+
+      expect(nestedStackIds.some(id => id.includes('AgentRegistryStack'))).toBe(false);
+      expect(nestedStackIds.some(id => id.includes('RegistryApi'))).toBe(false);
+      expect(outputs).not.toHaveProperty('AgentRegistryId');
+      expect(outputs).not.toHaveProperty('AgentRegistryArn');
+      expect(outputs).not.toHaveProperty('RegistryApiUrl');
+
+      for (const fn of Object.values(template.findResources('AWS::Lambda::Function'))) {
+        expect(fn.Properties?.Environment?.Variables ?? {}).not.toHaveProperty('AGENT_REGISTRY_ID');
+      }
+
+      for (const policy of Object.values(template.findResources('AWS::IAM::Policy'))) {
+        const statements = policy.Properties?.PolicyDocument?.Statement ?? [];
+        for (const statement of statements) {
+          expect(JSON.stringify(statement.Action)).not.toContain('agent-registry:');
+        }
+      }
+    },
+  );
+
+  test('rejects malformed enableAgentRegistry context values', () => {
+    const app = new App({ context: { enableAgentRegistry: 'fasle' } });
+
+    expect(() => new AgentStack(app, 'InvalidAgentRegistryContext', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    })).toThrow("enableAgentRegistry must be true or false, got 'fasle'");
   });
 });

@@ -327,7 +327,7 @@ function buildChildDescription(
   // echoes the title.
   const desc = (row.description ?? '').trim();
   if (desc && desc !== row.title) parts.push(desc);
-  return parts.join('\n\n') || `Linear sub-issue ${row.sub_issue_id}`;
+  return parts.join('\n\n') || `Orchestration child ${row.sub_issue_id}`;
 }
 
 /**
@@ -343,6 +343,9 @@ export async function releaseChild(params: ReleaseChildParams): Promise<ReleaseC
   // The reconciler maps a terminal task back to its row via the orchestration
   // pair, so it must not depend on any one surface's metadata.
   const channelMetadata: Record<string, string> = {
+    // Adapter-owned values are the base. Engine-owned identity below wins on
+    // collision so an adapter cannot detach a task from its persisted row.
+    ...(row.channel_metadata ?? {}),
     orchestration_id: row.orchestration_id,
     orchestration_sub_issue_id: row.sub_issue_id,
   };

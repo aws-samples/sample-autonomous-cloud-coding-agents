@@ -21,6 +21,7 @@ import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
 import { DeleteCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
+import { resolveSoleActiveJiraTenant } from './shared/jira-tenant-registry';
 import {
   isWebhookTimestampFresh,
   verifyJiraRequest,
@@ -122,10 +123,10 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return jsonResponse(400, { error: 'Invalid JSON' });
     }
 
-    // Per-tenant verification first. Falls through to stack-wide if (a) registry
+    // Per-tenant verification first. Uses the stack-wide verifier if (a) registry
     // table not configured, (b) no cloudId in body, (c) tenant not in registry,
     // or (d) tenant's stored secret lacks `webhook_signing_secret`.
-    // Per-tenant MISMATCH and REVOKED are fatal — no fallback.
+    // Per-tenant MISMATCH and REVOKED are fatal — no alternate verification.
     //
     // `verifiedViaStackWide` is propagated to the processor: a per-tenant
     // signature proves the sender knows *that* tenant's secret (so the
@@ -135,10 +136,12 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     // binding it to the sole active tenant instead.
     let verified = false;
     let verifiedViaStackWide = false;
-    if (WORKSPACE_REGISTRY_TABLE && payload.cloudId) {
+    const verificationCloudId = payload.cloudId
+      ?? await resolveSoleActiveJiraTenant(ddb, WORKSPACE_REGISTRY_TABLE);
+    if (WORKSPACE_REGISTRY_TABLE && verificationCloudId) {
       const result = await verifyJiraRequestForTenant(
         WORKSPACE_REGISTRY_TABLE,
-        payload.cloudId,
+        verificationCloudId,
         signature,
         event.body,
       );
@@ -147,15 +150,17 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       } else if (result === 'mismatch') {
         logger.warn('Jira webhook signature mismatch against per-tenant secret', {
           jira_cloud_id: payload.cloudId,
+          verified_jira_cloud_id: verificationCloudId,
         });
         return jsonResponse(401, { error: 'Invalid signature' });
       } else if (result === 'revoked') {
-        logger.warn('Jira webhook from revoked tenant — rejecting without stack-wide fallback', {
+        logger.warn('Jira webhook from revoked tenant — rejecting without stack-wide verification', {
           jira_cloud_id: payload.cloudId,
+          verified_jira_cloud_id: verificationCloudId,
         });
         return jsonResponse(401, { error: 'Tenant not active' });
       }
-      // 'no-per-tenant-secret' falls through to stack-wide.
+      // 'no-per-tenant-secret' uses the stack-wide verifier.
     }
 
     if (!verified) {
@@ -166,7 +171,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
         return jsonResponse(401, { error: 'Invalid signature' });
       }
       verifiedViaStackWide = true;
-      logger.info('Jira webhook verified via stack-wide fallback secret', {
+      logger.info('Jira webhook verified via stack-wide secret', {
         jira_cloud_id: payload.cloudId,
         per_tenant_registry_configured: Boolean(WORKSPACE_REGISTRY_TABLE),
       });

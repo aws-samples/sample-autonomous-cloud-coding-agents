@@ -42,7 +42,7 @@ mise //cdk:deploy -- --context compute_type=lambda-microvm
      --query "Stacks[0].Outputs[?OutputKey=='BootstrapPolicyVersion'].OutputValue | [0]" --output text
    ```
 
-2. If it is **below 1.4.0**, re-bootstrap with the backend included in `ComputeTypes`. `cdk bootstrap` cannot pass template parameters, so the parameter goes on the `CDKToolkit` stack directly:
+2. If it is **below 1.6.0**, re-bootstrap with the backend included in `ComputeTypes`. `cdk bootstrap` cannot pass template parameters, so the parameter goes on the `CDKToolkit` stack directly:
 
    ```bash
    aws cloudformation deploy \
@@ -51,7 +51,7 @@ mise //cdk:deploy -- --context compute_type=lambda-microvm
      --parameters ParameterKey=ComputeTypes,ParameterValue=agentcore\,lambda-microvm
    ```
 
-   Bundle 1.4.0 adds the `MicrovmPassRoles` statement, without which the CDK-managed MicroVM image deploy fails with an `iam:PassRole` **AccessDenied on the build role** -- an IAM error that reads like a code bug. Rationale and the live evidence for the missing `iam:PassedToService` condition: [DEPLOYMENT_ROLES.md](/sample-autonomous-cloud-coding-agents/architecture/deployment-roles#iacrole-abca-compute-lambdamicrovms).
+   Bundle 1.6.0 adds the `MicrovmPassRoles` statement, without which the CDK-managed MicroVM image deploy fails with an `iam:PassRole` **AccessDenied on the build role** -- an IAM error that reads like a code bug. Rationale and the live evidence for the missing `iam:PassedToService` condition: [DEPLOYMENT_ROLES.md](/sample-autonomous-cloud-coding-agents/architecture/deployment-roles#iacrole-abca-compute-lambdamicrovms).
 
 3. Regional availability is limited (5 Regions at launch). Synth fails fast with the supported list if the stack's Region is not among them; `bgagent doctor` probes it live.
 
@@ -60,6 +60,20 @@ Operational notes specific to this backend:
 - **Nothing self-terminates.** A MicroVM whose task finished, crashed, or hung stays `RUNNING` and billing until the 8-hour cap. The orchestrator calls `TerminateMicrovm` on finalize, and the heartbeat-staleness check catches a hung guest inside a healthy VM -- but a leaked handle is a cost incident. The one exception: the service reaps a VM whose `/run` hook returns 4xx (~12s).
 - **Logs** land in `/aws/lambda-microvms/<image-name>`. Guest stdout goes there too, which is the fallback path when the agent cannot reach the application log group.
 - **Deployment identifiers are not baked into the image.** The snapshot carries no configuration; table names, secret ARNs, and the per-task session-role ARN arrive in the `/run` payload as a `platform_config` block. A version-skewed orchestrator that does not send it is refused rather than run with tenant scoping disabled.
+
+### Optional Agent Registry
+
+AWS Agent Registry is enabled by default. In an account or region where the preview service is unavailable or prohibited, omit the registry, its REST API, IAM grants, environment wiring, and stack outputs:
+
+```bash
+cdk deploy --context enableAgentRegistry=false
+```
+
+Blueprints without `registry://` asset references continue to work. A remaining registry reference fails task startup rather than silently skipping the asset.
+
+The string form is case-sensitive: use lowercase `true` or `false`. Any other value fails synthesis with an actionable validation error.
+
+This context is an infrastructure switch, not a pause control. Applying it to an existing enabled deployment deletes the CloudFormation-managed registry and its records; re-enabling creates an empty registry that must be republished. See [REGISTRY.md](/sample-autonomous-cloud-coding-agents/architecture/registry) for the catalog migration and runtime behavior.
 
 ## Scale-to-zero analysis
 
@@ -111,6 +125,7 @@ For the full cost model including per-task costs, see [COST_MODEL.md](/sample-au
 | Bedrock (Claude Sonnet 4.6, Opus 4, Haiku 4.5) | Agent reasoning, cross-region inference profiles | Yes |
 | Bedrock Guardrails | Prompt injection detection on task input | Yes |
 | Bedrock AgentCore Memory | Semantic + episodic extraction strategies | Yes |
+| AWS Agent Registry (preview, default-on) | Versioned agent asset catalog and governance | N/A (managed preview service) |
 
 ### Networking
 
@@ -272,6 +287,6 @@ For users without AWS CLI access.
 - [User guide](/sample-autonomous-cloud-coding-agents/using/overview) -- API reference, CLI usage, task management.
 - [DEPLOYMENT_ROLES.md](/sample-autonomous-cloud-coding-agents/architecture/deployment-roles) -- Least-privilege IAM policies for CloudFormation execution.
 - [COST_MODEL.md](/sample-autonomous-cloud-coding-agents/architecture/cost-model) -- Per-task costs, cost guardrails, cost at scale.
-- [COST_ATTRIBUTION.md](/sample-autonomous-cloud-coding-agents/architecture/cost-attribution) -- Operator FinOps setup for per-user/per-repo Bedrock chargeback (Cost Explorer / CUR 2.0, invocation-log forensics).
+- [COST_ATTRIBUTION.md](/sample-autonomous-cloud-coding-agents/getting-started/cost-attribution) -- Operator FinOps setup for per-user/per-repo Bedrock chargeback (Cost Explorer / CUR 2.0, invocation-log forensics).
 - [COMPUTE.md](/sample-autonomous-cloud-coding-agents/architecture/compute) -- Compute backend architecture and trade-offs.
 - [ADR-021](/sample-autonomous-cloud-coding-agents/architecture/adr-021-lambda-microvms-compute-backend) -- Lambda MicroVMs backend decision, phased rollout, and live-verification evidence.

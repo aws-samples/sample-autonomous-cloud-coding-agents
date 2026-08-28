@@ -27,6 +27,7 @@ import { listStackOutputs } from '../stack-outputs';
 /** Stack outputs most operators need during setup (shown first in text mode). */
 const HIGHLIGHT_OUTPUT_KEYS = [
   'ApiUrl',
+  'RegistryApiUrl',
   'UserPoolId',
   'AppClientId',
   'GitHubTokenSecretArn',

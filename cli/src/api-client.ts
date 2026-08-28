@@ -42,6 +42,11 @@ import {
   LinearLinkResponse,
   NudgeRequest,
   NudgeResponse,
+  RegistryListEntry,
+  RegistryPublishRequest,
+  RegistryRecordResponse,
+  RegistryResolveResponse,
+  RegistryShowResponse,
   SlackLinkResponse,
   PaginatedResponse,
   ReplayBundle,
@@ -68,6 +73,8 @@ export interface ApiClientOptions {
 export class ApiClient {
   private baseUrl: string | undefined;
 
+  private registryBaseUrl: string | undefined;
+
   private readonly apiKey: string | undefined;
 
   constructor(options: ApiClientOptions = {}) {
@@ -83,18 +90,36 @@ export class ApiClient {
     return this.baseUrl;
   }
 
+  /** Base URL for the agent asset registry API (#246). It is a SEPARATE API
+   *  Gateway from the main one (RegistryApiUrl stack output), so it has its own
+   *  config field. Throws a clear error if the config predates the registry. */
+  private getRegistryBaseUrl(): string {
+    if (!this.registryBaseUrl) {
+      const config = loadConfig();
+      if (!config.registry_api_url) {
+        throw new Error(
+          'registry_api_url is not set in your bgagent config. Re-run setup (or add '
+          + 'registry_api_url from the stack\'s RegistryApiUrl output) to use `bgagent registry`.',
+        );
+      }
+      this.registryBaseUrl = config.registry_api_url.replace(/\/+$/, '');
+    }
+    return this.registryBaseUrl;
+  }
+
   private async request<T>(
     method: string,
     path: string,
     body?: unknown,
     headers?: Record<string, string>,
     signal?: AbortSignal,
+    baseUrl?: string,
   ): Promise<T> {
     // API-key mode skips Cognito entirely: no cached token, no refresh.
     const authHeaders: Record<string, string> = this.apiKey
       ? { 'X-API-Key': this.apiKey }
       : { Authorization: await getAuthToken() };
-    const url = `${this.getBaseUrl()}${path}`;
+    const url = `${baseUrl ?? this.getBaseUrl()}${path}`;
 
     debug(`${method} ${url}`);
     // Redaction + stringification are gated on isVerbose() so the deep copy
@@ -508,6 +533,57 @@ export class ApiClient {
     const body: Record<string, unknown> = { code };
     if (opts.dryRun) body.dry_run = true;
     const res = await this.request<SuccessResponse<JiraLinkResponse>>('POST', '/jira/link', body);
+    return res.data;
+  }
+
+  // --- Agent asset registry (#246) ---
+
+  // Registry (#246) commands target the SEPARATE registry API (its own API
+  // Gateway); getRegistryBaseUrl() resolves registry_api_url from config.
+
+  /** POST /registry/records — publish an asset record. */
+  async registryPublish(req: RegistryPublishRequest): Promise<RegistryRecordResponse> {
+    const res = await this.request<SuccessResponse<RegistryRecordResponse>>(
+      'POST', '/registry/records', req, undefined, undefined, this.getRegistryBaseUrl(),
+    );
+    return res.data;
+  }
+
+  /** GET /registry/resolve?ref=… — resolve a pinned ref to a single asset. */
+  async registryResolve(ref: string): Promise<RegistryResolveResponse> {
+    const res = await this.request<SuccessResponse<RegistryResolveResponse>>(
+      'GET',
+      `/registry/resolve?ref=${encodeURIComponent(ref)}`,
+      undefined, undefined, undefined, this.getRegistryBaseUrl(),
+    );
+    return res.data;
+  }
+
+  /** GET /registry/records — list assets (optionally filtered). */
+  async registryList(opts?: { kind?: string; namespace?: string }): Promise<RegistryListEntry[]> {
+    const params = new URLSearchParams();
+    if (opts?.kind) params.set('kind', opts.kind);
+    if (opts?.namespace) params.set('namespace', opts.namespace);
+    const qs = params.toString();
+    const res = await this.request<SuccessResponse<{ assets: RegistryListEntry[] }>>(
+      'GET',
+      `/registry/records${qs ? `?${qs}` : ''}`,
+      undefined, undefined, undefined, this.getRegistryBaseUrl(),
+    );
+    return res.data.assets;
+  }
+
+  /** GET /registry/records/{kind}/{namespace}/{name} — show all versions. */
+  async registryShow(
+    kind: string,
+    namespace: string,
+    name: string,
+  ): Promise<RegistryShowResponse> {
+    const res = await this.request<SuccessResponse<RegistryShowResponse>>(
+      'GET',
+      `/registry/records/${encodeURIComponent(kind)}/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}`,
+      undefined, undefined, undefined, this.getRegistryBaseUrl(),
+    );
     return res.data;
   }
 }

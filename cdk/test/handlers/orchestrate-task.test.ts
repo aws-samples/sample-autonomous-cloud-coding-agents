@@ -55,6 +55,14 @@ jest.mock('../../src/handlers/shared/repo-config', () => ({
   checkRepoOnboarded: jest.fn(),
 }));
 
+// Registry client (#246): the orchestrator resolves Blueprint registry:// refs
+// through this factory. Mock it so hydrateAndTransition tests can drive the
+// resolve → stamp → payload path without the AgentCore SDK.
+const mockRegistryResolve = jest.fn();
+jest.mock('../../src/handlers/shared/registry/factory', () => ({
+  makeRegistryClient: jest.fn(() => ({ resolve: mockRegistryResolve })),
+}));
+
 let ulidCounter = 0;
 jest.mock('ulid', () => ({ ulid: jest.fn(() => `ULID${ulidCounter++}`) }));
 
@@ -81,6 +89,7 @@ import {
   queueTask,
   transitionTask,
 } from '../../src/handlers/shared/orchestrator';
+import { RegistryResolutionError } from '../../src/handlers/shared/registry/types';
 
 const baseTask = {
   task_id: 'TASK001',
@@ -1060,6 +1069,125 @@ describe('hydrateAndTransition with blueprint config', () => {
       cedar_policies: [],
     });
     expect(payload.cedar_policies).toBeUndefined();
+  });
+});
+
+describe('hydrateAndTransition — registry asset resolution (#246)', () => {
+  const mockHydratedContext = {
+    version: 1,
+    user_prompt: 'Task ID: TASK001\nRepository: org/repo\n\n## Task\n\nFix the bug',
+    sources: ['task_description'],
+    token_estimate: 20,
+    truncated: false,
+    content_trust: { task_description: 'trusted' },
+  };
+
+  const resolvedAsset = (over: Record<string, unknown>) => ({
+    kind: 'mcp_server',
+    namespace: 'acme',
+    name: 'pdf-tools',
+    version: '1.0.0',
+    runtime: { transport: 'http', url: 'https://x' },
+    warnings: [],
+    ...over,
+  });
+
+  test('stamps resolved_assets on the TaskRecord and threads the bundle into the payload', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    mockRegistryResolve.mockResolvedValueOnce(resolvedAsset({}));
+
+    const payload = await hydrateAndTransition(baseTask as any, {
+      compute_type: 'agentcore',
+      runtime_arn: 'arn:test',
+      mcp_servers: ['registry://mcp_server/acme/pdf-tools@^1.0.0'],
+    });
+
+    // Threaded into the agent payload.
+    expect(payload.resolved_assets).toEqual([
+      expect.objectContaining({ kind: 'mcp_server', namespace: 'acme', name: 'pdf-tools', version: '1.0.0' }),
+    ]);
+    // Stamped on the TaskRecord via an UpdateCommand carrying resolved_assets.
+    const stamp = mockDdbSend.mock.calls
+      .map((c) => c[0])
+      .find((cmd: any) => cmd._type === 'Update' && cmd.input?.ExpressionAttributeNames?.['#ra'] === 'resolved_assets');
+    expect(stamp).toBeDefined();
+    expect(stamp.input.ExpressionAttributeValues[':ra']).toEqual([
+      { kind: 'mcp_server', id: 'acme/pdf-tools', version: '1.0.0' },
+    ]);
+  });
+
+  test('emits a registry_asset_warning TaskEvent for a DEPRECATED asset', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    mockRegistryResolve.mockResolvedValueOnce(resolvedAsset({ warnings: ['DEPRECATED'] }));
+
+    await hydrateAndTransition(baseTask as any, {
+      compute_type: 'agentcore',
+      runtime_arn: 'arn:test',
+      mcp_servers: ['registry://mcp_server/acme/pdf-tools@^1.0.0'],
+    });
+
+    // A TaskEvent Put (event_type registry_asset_warning) was written.
+    const warnPut = mockDdbSend.mock.calls
+      .map((c) => c[0])
+      .find((cmd: any) => cmd._type === 'Put' && JSON.stringify(cmd.input?.Item ?? {}).includes('registry_asset_warning'));
+    expect(warnPut).toBeDefined();
+    // The stamped audit triple keeps the warning too.
+    const stamp = mockDdbSend.mock.calls
+      .map((c) => c[0])
+      .find((cmd: any) => cmd._type === 'Update' && cmd.input?.ExpressionAttributeNames?.['#ra'] === 'resolved_assets');
+    expect(stamp.input.ExpressionAttributeValues[':ra'][0].warnings).toEqual(['DEPRECATED']);
+  });
+
+  test('merges resolved cedar_policy_module text after inline blueprint policies', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    mockRegistryResolve.mockResolvedValueOnce(resolvedAsset({
+      kind: 'cedar_policy_module',
+      name: 'guard',
+      runtime: { cedar_text: 'forbid (principal, action, resource);' },
+    }));
+
+    const payload = await hydrateAndTransition(baseTask as any, {
+      compute_type: 'agentcore',
+      runtime_arn: 'arn:test',
+      cedar_policies: ['permit (principal, action, resource);'],
+      cedar_policy_modules: ['registry://cedar_policy_module/acme/guard@^1.0.0'],
+    });
+
+    expect(payload.cedar_policies).toEqual([
+      'permit (principal, action, resource);',
+      'forbid (principal, action, resource);',
+    ]);
+  });
+
+  test('fails closed when a pinned cedar_policy_module resolves to empty cedar_text', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    mockRegistryResolve.mockResolvedValueOnce(resolvedAsset({
+      kind: 'cedar_policy_module',
+      name: 'guard',
+      runtime: { cedar_text: '   ' },
+    }));
+
+    await expect(hydrateAndTransition(baseTask as any, {
+      compute_type: 'agentcore',
+      runtime_arn: 'arn:test',
+      cedar_policy_modules: ['registry://cedar_policy_module/acme/guard@^1.0.0'],
+    })).rejects.toThrow(/empty cedar_text/);
+  });
+
+  test('fails closed (propagates) when a registry ref cannot be resolved', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    mockRegistryResolve.mockRejectedValueOnce(new RegistryResolutionError('NO_MATCHING_VERSION', 'r', 'none'));
+
+    await expect(hydrateAndTransition(baseTask as any, {
+      compute_type: 'agentcore',
+      runtime_arn: 'arn:test',
+      mcp_servers: ['registry://mcp_server/acme/pdf-tools@^9.0.0'],
+    })).rejects.toBeInstanceOf(RegistryResolutionError);
   });
 });
 

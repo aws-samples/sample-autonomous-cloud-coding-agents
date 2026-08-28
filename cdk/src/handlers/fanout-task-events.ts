@@ -55,9 +55,13 @@ import { claimTerminalReply, releaseReplyClaim, terminalReplyClaimed } from './s
 import {
   buildAdfDocument,
   postIssueCommentAdf,
-  type AdfParagraph,
-  type AdfTextRun,
+  updateIssueCommentAdf,
 } from './shared/jira-feedback';
+import {
+  renderJiraFinalStatusComment,
+  renderJiraFinishedPointer,
+  type JiraFinishedPointerKind,
+} from './shared/jira-status-comment';
 import { EMOJI_FAILURE, EMOJI_NEEDS_INPUT, EMOJI_SUCCESS, postIssueComment, swapCommentReaction, upsertThreadedReply } from './shared/linear-feedback';
 import { logger } from './shared/logger';
 import { coerceNumericOrNull } from './shared/numeric';
@@ -206,10 +210,11 @@ export const CHANNEL_DEFAULTS: Record<NotificationChannel, ReadonlySet<string>> 
   // now emits it as a distinct terminal event (``orchestrator.ts``); the
   // Slack + email defaults already subscribe to it.
   //
-  // Jira has no comment-edit API (same as Linear), so this is post-once:
-  // idempotency across partial-batch retries rides on the
-  // ``jira_final_comment_event_id`` marker. The agent-side start comment
-  // ("🤖 ABCA picked up this issue…") stays for in-flight progress.
+  // Ordinary Jira tasks receive a post-once terminal comment, with idempotency
+  // carried by ``jira_final_comment_event_id``. Comment-triggered iterations
+  // instead edit their stored status comment under a terminal-writer claim.
+  // The agent-side start comment ("🤖 ABCA picked up this issue…") stays for
+  // ordinary tasks' in-flight progress.
   jira: new Set<string>([
     ...TERMINAL_EVENT_TYPES,
     'task_timed_out',
@@ -691,10 +696,9 @@ async function saveLinearPrCommentState(taskId: string, eventId: string): Promis
 }
 
 /**
- * Persist the post-once marker after a successful Jira final-status comment
- * (see ``dispatchToJira``). The Jira analogue of ``saveLinearCommentState`` —
- * Jira has no comment-edit API, so the marker is what makes the post
- * idempotent across partial-batch retries.
+ * Persist the post-once marker after a successful ordinary Jira final-status
+ * comment (see ``dispatchToJira``). Iteration comments are edited in place and
+ * use the shared terminal-reply claim instead.
  */
 async function saveJiraCommentState(taskId: string, eventId: string): Promise<void> {
   await saveDispatchMarker({
@@ -1546,93 +1550,7 @@ async function sumIterationCostForIssue(
   });
 }
 
-/**
- * Render the Jira final-status comment as ADF paragraphs. Mirrors
- * ``renderLinearFinalStatusComment`` framing — the difference is the output
- * shape (ADF runs vs Markdown string), because Jira REST v3 comments require
- * Atlassian Document Format, not Markdown.
- *
- * Three outcomes based on ``(eventType, prUrl)``:
- *
- *   1. ``task_completed``                        → ✅ "Task completed"
- *   2. any non-completed terminal event WITH PR  → ⚠️ "Shipped a PR but stopped early"
- *   3. any non-completed terminal event NO PR    → ❌ "Task <subtype>" + classifier title
- *
- * The PR URL is rendered on the ✅ success path too — not just the ⚠️ path —
- * because the agent's own "PR opened" comment is not guaranteed to have fired
- * (an agent that skipped that step), so the platform comment must always carry
- * the link or it can be lost entirely.
- * ``renderLinearFinalStatusComment`` does the same for Linear.
- *
- * Missing metric values render as ``—``. The result is a list of ADF
- * paragraphs (blank lines are empty paragraphs — ADF text nodes do not
- * honor ``\n``), fed to ``buildAdfDocument``.
- */
-export function renderJiraFinalStatusComment(args: {
-  eventType: string;
-  prUrl: string | null;
-  costUsd: number | null;
-  turns: number | null;
-  maxTurns: number | null;
-  durationS: number | null;
-  taskId: string;
-  errorTitle: string | null;
-}): ReadonlyArray<AdfParagraph> {
-  const isCompleted = args.eventType === 'task_completed';
-  const shippedDespiteFailure = !isCompleted && args.prUrl != null;
-
-  // Header runs. Bold scope mirrors Linear's Markdown: the ⚠️ frame bolds
-  // only through the reason and leaves the trailing "review and decide…"
-  // advice unbolded, so it's a two-run paragraph. The ✅ / ❌ frames are a
-  // single bold run.
-  let headerRuns: AdfTextRun[];
-  if (isCompleted) {
-    headerRuns = [{ text: '✅ Task completed', strong: true }];
-  } else if (shippedDespiteFailure) {
-    const reason = args.errorTitle ? ` — ${args.errorTitle}` : '';
-    headerRuns = [
-      { text: `⚠️ Shipped a PR but stopped early${reason}`, strong: true },
-      { text: ' — review and decide if more work is needed' },
-    ];
-  } else {
-    // Humanize the event subtype for the header: strip the ``task_`` prefix
-    // and turn underscores into spaces so ``task_timed_out`` reads "Task
-    // timed out" rather than the raw "Task timed_out". Jira is the only
-    // channel routing ``task_timed_out`` through this renderer, so this
-    // multi-word subtype is a case the copied-from-Linear code never hit.
-    const subtype = args.eventType.replace(/^task_/, '').replace(/_/g, ' ');
-    const reason = args.errorTitle ? `: ${args.errorTitle}` : '';
-    headerRuns = [{ text: `❌ Task ${subtype}${reason}`, strong: true }];
-  }
-
-  const costStr = args.costUsd != null ? `$${args.costUsd.toFixed(2)}` : '—';
-  const turnsStr = args.turns != null
-    ? `${args.turns}${args.maxTurns != null ? ` / ${args.maxTurns}` : ''}`
-    : '—';
-  const durationStr = args.durationS != null
-    ? formatDuration(args.durationS)
-    : '—';
-
-  const paragraphs: AdfParagraph[] = [
-    headerRuns,
-    [{ text: `cost: ${costStr} • turns: ${turnsStr} • duration: ${durationStr}` }],
-  ];
-  // Render the PR link whenever one exists — on both the ✅ success path and
-  // the ⚠️ shipped-but-stopped path — because the agent's own "PR opened"
-  // comment is not guaranteed to have fired, so this is the only guaranteed
-  // PR-link surface. The URL run carries an ``href`` so it renders as a
-  // clickable hyperlink — ADF does not auto-linkify a bare URL in a plain
-  // text node the way Linear's Markdown does, so without this the requester
-  // would have to copy-paste it.
-  if (args.prUrl) {
-    paragraphs.push([
-      { text: 'PR: ' },
-      { text: args.prUrl, href: args.prUrl },
-    ]);
-  }
-  paragraphs.push([{ text: `task ${args.taskId}`, em: true }]);
-  return paragraphs;
-}
+export { renderJiraFinalStatusComment };
 
 /**
  * Jira dispatcher — posts a deterministic final-status comment when a
@@ -1697,11 +1615,19 @@ async function dispatchToJira(event: FanOutEvent): Promise<void> {
     return;
   }
 
-  // Idempotency across partial-batch retries: Jira has no comment edit API,
-  // so a re-run (e.g. a sibling channel's infra rejection pushed the whole
-  // stream record into batchItemFailures) would post a duplicate. The
-  // marker is persisted after the first successful post below.
-  if (task.jira_final_comment_event_id) {
+  const iterationReplyId = task.channel_metadata?.iteration_reply_comment_id;
+  const isIteration = Boolean(task.channel_metadata?.trigger_comment_id);
+  const isOrchestratedIteration =
+    task.channel_metadata?.orchestration_iteration === 'true';
+  // The reconciler owns an orchestrated iteration's terminal comment because it
+  // must settle that comment before continuing the dependent restack cascade.
+  if (isOrchestratedIteration) return;
+
+  // Ordinary Jira terminal comments and iterations whose acknowledgement was
+  // never captured both use the post-once fallback below. A re-run (for
+  // example, because a sibling channel rejected the record) would otherwise
+  // duplicate that comment, so honor the marker persisted after the first post.
+  if ((!isIteration || !iterationReplyId) && task.jira_final_comment_event_id) {
     logger.info('[fanout/jira] final comment already posted — skipping (idempotent retry)', {
       event: 'fanout.jira.already_posted',
       task_id: task.task_id,
@@ -1745,6 +1671,128 @@ async function dispatchToJira(event: FanOutEvent): Promise<void> {
     taskId: task.task_id,
     errorTitle: classification?.title ?? null,
   });
+
+  if (isIteration && iterationReplyId) {
+    const tableName = process.env.TASK_TABLE_NAME;
+    if (!tableName) return;
+    const claim = await claimTerminalReply(
+      ddb,
+      tableName,
+      task.task_id,
+      event.timestamp,
+    );
+    if (!claim.won) return;
+
+    const pointerKind: JiraFinishedPointerKind = event.event_type !== 'task_completed'
+      ? 'details'
+      : (task.code_changed === false ? 'answer' : 'result');
+    const updateResult = await updateIssueCommentAdf(
+      { cloudId, registryTableName },
+      issueKey,
+      iterationReplyId,
+      buildAdfDocument(renderJiraFinishedPointer(pointerKind)),
+    );
+    if (!updateResult.ok) {
+      const release = await releaseReplyClaim(
+        ddb,
+        tableName,
+        task.task_id,
+        claim.stamp,
+      );
+      logger.warn('[fanout/jira] iteration pointer update failed (non-fatal)', {
+        event: 'fanout.jira.iteration_pointer_failed',
+        task_id: task.task_id,
+        jira_issue_key: issueKey,
+        comment_id: iterationReplyId,
+        retryable: updateResult.retryable,
+        release,
+      });
+      if (updateResult.retryable && release !== 'exhausted') {
+        throw new Error(
+          `[fanout/jira] transient Jira iteration pointer failure for task ${task.task_id}`,
+        );
+      }
+      return;
+    }
+
+    const finalResult = await postIssueCommentAdf(
+      { cloudId, registryTableName },
+      issueKey,
+      buildAdfDocument(paragraphs),
+    );
+    if (finalResult.ok) {
+      logger.info('[fanout/jira] iteration result posted separately', {
+        event: 'fanout.jira.iteration_result_posted',
+        task_id: task.task_id,
+        jira_issue_key: issueKey,
+        pointer_comment_id: iterationReplyId,
+        result_comment_id: finalResult.commentId,
+      });
+      return;
+    }
+
+    if (!finalResult.retryable) {
+      const fallback = await updateIssueCommentAdf(
+        { cloudId, registryTableName },
+        issueKey,
+        iterationReplyId,
+        buildAdfDocument(paragraphs),
+      );
+      if (fallback.ok) {
+        logger.warn('[fanout/jira] iteration result post failed terminally — folded outcome into status comment', {
+          event: 'fanout.jira.iteration_result_folded',
+          task_id: task.task_id,
+          jira_issue_key: issueKey,
+          comment_id: iterationReplyId,
+        });
+        return;
+      }
+      logger.error('[fanout/jira] terminal result and fallback status update both failed', {
+        event: 'fanout.jira.iteration_result_fallback_failed',
+        task_id: task.task_id,
+        jira_issue_key: issueKey,
+        comment_id: iterationReplyId,
+        fallback_retryable: fallback.retryable,
+      });
+      return;
+    }
+
+    const release = await releaseReplyClaim(
+      ddb,
+      tableName,
+      task.task_id,
+      claim.stamp,
+    );
+    logger.warn('[fanout/jira] iteration result post failed (non-fatal)', {
+      event: 'fanout.jira.iteration_result_failed',
+      task_id: task.task_id,
+      jira_issue_key: issueKey,
+      retryable: finalResult.retryable,
+      release,
+    });
+    if (release === 'exhausted') {
+      const fallback = await updateIssueCommentAdf(
+        { cloudId, registryTableName },
+        issueKey,
+        iterationReplyId,
+        buildAdfDocument(paragraphs),
+      );
+      logger.warn('[fanout/jira] iteration result retries exhausted — folded outcome into status comment', {
+        event: 'fanout.jira.iteration_result_exhausted',
+        task_id: task.task_id,
+        jira_issue_key: issueKey,
+        comment_id: iterationReplyId,
+        folded: fallback.ok,
+      });
+      return;
+    }
+    if (release === 'released') {
+      throw new Error(
+        `[fanout/jira] transient Jira iteration result failure for task ${task.task_id}`,
+      );
+    }
+    return;
+  }
 
   const postResult = await postIssueCommentAdf(
     { cloudId, registryTableName },

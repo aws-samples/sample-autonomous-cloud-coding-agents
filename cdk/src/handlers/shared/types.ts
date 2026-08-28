@@ -47,6 +47,88 @@ export type ResolvedWorkflow = {
   readonly version: string;
 };
 
+/**
+ * A resolved registry-asset pin stamped on the TaskRecord for audit (#246):
+ * ``{kind, id, version}`` where ``id`` is ``namespace/name``. The full runtime
+ * payload is NOT persisted here — it rides in the agent invocation payload; this
+ * triple is the immutable record of *what* the task loaded.
+ */
+export type ResolvedAssetTriple = {
+  readonly kind: string;
+  readonly id: string;
+  readonly version: string;
+};
+
+// --- Agent asset registry (#246) API wire types ------------------------------
+// snake_case wire shapes shared with the CLI. The substrate-neutral *domain*
+// types (RegistryRecord, ResolvedAsset, the RegistryClient port) live in
+// ``handlers/shared/registry/`` and are intentionally NOT part of the CLI
+// types-sync contract — only these request/response envelopes are.
+
+/** `POST /registry/records` request body. */
+export type RegistryPublishRequest = {
+  readonly kind: string;
+  readonly namespace: string;
+  readonly name: string;
+  /** semver string, immutable once written. */
+  readonly asset_version: string;
+  /** discovery descriptor body (server.json / SKILL.md / arbitrary JSON). */
+  readonly discovery: Record<string, unknown>;
+  /** ABCA runtime payload (connection config / cedar text / prompt fragment). */
+  readonly runtime: Record<string, unknown>;
+  /** force CUSTOM (verbatim) storage instead of a native descriptor. */
+  readonly custom?: boolean;
+  /** dev convenience: drive create→submit→approve so the record resolves. */
+  readonly auto_approve?: boolean;
+};
+
+/** One version row in a `show` response. */
+export type RegistryVersionSummary = {
+  readonly version: string;
+  readonly status: string;
+  readonly created_at: string | null;
+  readonly publisher: string | null;
+};
+
+/** `GET /registry/records/{kind}/{namespace}/{name}` response — one asset's
+ *  versions. Named (rather than inlined on the handler + client) so it rides the
+ *  CDK↔CLI types-sync guard like the other registry envelopes. */
+export type RegistryShowResponse = {
+  readonly kind: string;
+  readonly namespace: string;
+  readonly name: string;
+  readonly versions: readonly RegistryVersionSummary[];
+};
+
+/** A record envelope returned by publish / show. */
+export type RegistryRecordResponse = {
+  readonly kind: string;
+  readonly namespace: string;
+  readonly name: string;
+  readonly version: string;
+  readonly status: string;
+  readonly storage_mode: string;
+};
+
+/** `GET /registry/resolve?ref=…` response. */
+export type RegistryResolveResponse = {
+  readonly kind: string;
+  readonly namespace: string;
+  readonly name: string;
+  readonly version: string;
+  readonly runtime: Record<string, unknown>;
+  readonly warnings: readonly string[];
+};
+
+/** One asset row in a `list` response. */
+export type RegistryListEntry = {
+  readonly kind: string;
+  readonly namespace: string;
+  readonly name: string;
+  readonly latest_version: string | null;
+  readonly status: string;
+};
+
 /** Shared across all attachment interfaces. Add new types here (e.g., 'audio'). */
 export type AttachmentType = 'image' | 'file' | 'url';
 
@@ -85,6 +167,9 @@ export interface TaskRecord {
   /** The pinned ``{id, version}`` this task runs. Resolved at the create-task
    *  boundary; optional only on records that predate the cutover. */
   readonly resolved_workflow?: ResolvedWorkflow;
+  /** Registry assets (#246) resolved for this task, stamped by the orchestrator
+   *  at task start for audit. Absent when the blueprint pins no assets. */
+  readonly resolved_assets?: ResolvedAssetTriple[];
   readonly pr_number?: number;
   readonly task_description?: string;
   readonly branch_name: string;
@@ -229,13 +314,11 @@ export interface TaskRecord {
    */
   readonly linear_pr_comment_event_id?: string;
   /**
-   * Event ID of the terminal event whose Jira final-status comment was
-   * successfully posted (fan-out plane). Jira has no comment edit API,
-   * so the dispatcher is post-once: this marker makes the post
-   * idempotent across partial-batch Lambda retries (a sibling channel's
-   * infra rejection re-runs every dispatcher for the record). The Jira
-   * analogue of ``linear_final_comment_event_id``. Absent until the
-   * first successful post.
+   * Event ID of the terminal event whose ordinary Jira final-status comment
+   * was successfully posted (fan-out plane). This marker makes that create
+   * idempotent across partial-batch Lambda retries. Comment-triggered
+   * iterations edit their stored status comment instead and do not use this
+   * marker. Absent until the first successful ordinary-task post.
    */
   readonly jira_final_comment_event_id?: string;
   readonly attachments?: AttachmentRecord[];
@@ -356,6 +439,8 @@ export interface TaskDetail {
   readonly repo: string | null;
   readonly issue_number: number | null;
   readonly resolved_workflow: ResolvedWorkflow | null;
+  /** Registry assets resolved for this task (#246); null when none pinned. */
+  readonly resolved_assets: ResolvedAssetTriple[] | null;
   readonly pr_number: number | null;
   readonly task_description: string | null;
   readonly branch_name: string;
@@ -458,6 +543,8 @@ export interface TaskSummary {
   readonly repo: string | null;
   readonly issue_number: number | null;
   readonly resolved_workflow: ResolvedWorkflow | null;
+  /** Registry assets resolved for this task (#246); null when none pinned. */
+  readonly resolved_assets: ResolvedAssetTriple[] | null;
   readonly pr_number: number | null;
   readonly task_description: string | null;
   readonly branch_name: string;
@@ -853,6 +940,7 @@ export function toTaskDetail(
     repo: record.repo ?? null,
     issue_number: record.issue_number ?? null,
     resolved_workflow: record.resolved_workflow ?? null,
+    resolved_assets: record.resolved_assets ?? null,
     pr_number: record.pr_number ?? null,
     task_description: record.task_description ?? null,
     branch_name: record.branch_name,
@@ -1128,6 +1216,7 @@ export function toTaskSummary(record: TaskRecord): TaskSummary {
     repo: record.repo ?? null,
     issue_number: record.issue_number ?? null,
     resolved_workflow: record.resolved_workflow ?? null,
+    resolved_assets: record.resolved_assets ?? null,
     pr_number: record.pr_number ?? null,
     task_description: record.task_description ?? null,
     branch_name: record.branch_name,

@@ -1391,7 +1391,7 @@ export class LambdaMicrovmCompute extends Construct {
         + 'permission set. What is still MISSING is a run with no manual intervention: that smoke '
         + 'needed a live IAM workaround, and the two defects behind it (ADR-021 P2r2-F9 / P2r2-F10 — '
         + 'the iam:PassedToService condition on both PassRole paths) are fixed in source but NOT yet '
-        + 're-exercised live. ALSO REQUIRED: re-bootstrap to policy bundle 1.4.0 or the CDK-managed '
+        + 're-exercised live. ALSO REQUIRED: re-bootstrap to policy bundle 1.6.0 or the CDK-managed '
         + 'image path fails with iam:PassRole AccessDenied on the build role. So the backend still '
         + 'carries no smoke-parity guarantee for an unattended deployment - keep production repos on '
         + 'compute_type=agentcore or ecs until a clean run is on record. Only the /suspend and '
