@@ -122,6 +122,30 @@ export async function upsertLinearCredentialProvider(args: {
 }
 
 /**
+ * Read the callback URL of an EXISTING provider, or null if there isn't one.
+ *
+ * Read-only and best-effort by design: this exists so `linear app-template` can
+ * print the real vault redirect_uri instead of asking the operator to go and find
+ * it. On a first run the provider does not exist yet, and the operator may have no
+ * credentials at all, so every failure is reported as "unknown" rather than
+ * raised — a template command must still work offline.
+ */
+export async function lookupLinearVaultCallbackUrl(args: {
+  region: string;
+  workspaceSlug: string;
+}): Promise<string | null> {
+  try {
+    const control = makeClient(BedrockAgentCoreControlClient, { region: args.region });
+    const existing = await control.send(
+      new GetOauth2CredentialProviderCommand({ name: linearVaultProviderName(args.workspaceSlug) }),
+    );
+    return existing.callbackUrl ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * True when a create failed only because the provider already exists, so the
  * caller can fall back to update-in-place and stay idempotent across re-runs.
  *

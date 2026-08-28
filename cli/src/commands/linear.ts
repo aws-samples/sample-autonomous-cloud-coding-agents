@@ -53,6 +53,7 @@ import {
 import {
   beginVaultConsent,
   finalizeVaultConsent,
+  lookupLinearVaultCallbackUrl,
   upsertLinearCredentialProvider,
 } from '../linear-vault';
 import { awaitOauthCallback, CALLBACK_URL } from '../oauth-callback-server';
@@ -95,6 +96,47 @@ export interface LinearAppTemplateOptions {
   readonly hostedConsentUrl?: string;
 }
 
+/**
+ * Best-effort discovery of the two callback URLs the Linear app must register.
+ *
+ * `app-template` runs BEFORE anything else exists, so this never throws and never
+ * prompts: an unconfigured CLI, absent credentials, an undeployed stack, or a
+ * not-yet-created credential provider all resolve to `undefined`, and the template
+ * then explains what is missing instead of printing a half-truth. Anything it does
+ * find is real, which is the point — the operator should not have to go and look
+ * up a CloudFormation output or an AgentCore-minted callback id by hand.
+ */
+export async function resolveTemplateCallbackUrls(args: {
+  region?: string;
+  stackName?: string;
+  slug?: string;
+}): Promise<{ hostedConsentUrl?: string; vaultCallbackUrl?: string }> {
+  let region = args.region;
+  if (!region) {
+    // Unconfigured CLI is an expected state here, not an error.
+    try {
+      region = loadConfig().region;
+    } catch {
+      return {};
+    }
+  }
+  if (!region) return {};
+
+  const hostedConsentUrl = args.stackName
+    ? await getStackOutput(region, args.stackName, 'LinearVaultConsentUrl').catch(() => null)
+    : null;
+  // Needs a slug: the provider is per-workspace, so without one there is nothing
+  // specific to look up.
+  const vaultCallbackUrl = args.slug
+    ? await lookupLinearVaultCallbackUrl({ region, workspaceSlug: args.slug })
+    : null;
+
+  return {
+    hostedConsentUrl: hostedConsentUrl ?? undefined,
+    vaultCallbackUrl: vaultCallbackUrl ?? undefined,
+  };
+}
+
 export function renderLinearAppTemplate(opts: LinearAppTemplateOptions = {}): string {
   // Defaults match the upstream sample so unmodified `bgagent linear app-template`
   // produces a usable config without forcing every operator to invent strings.
@@ -125,25 +167,41 @@ export function renderLinearAppTemplate(opts: LinearAppTemplateOptions = {}): st
     `  Description:         ${description}`,
     '',
     '  Callback URLs (one per line, NO line wrapping):',
+    // Each URL is annotated with the command that redirects to it. Operators were
+    // registering one and hitting "Invalid redirect_uri" from the other, with
+    // nothing in the template to say the two flows need two entries.
     `    ${callbackUrl}`,
-    ...(opts.hostedConsentUrl ? [`    ${opts.hostedConsentUrl}`] : []),
-    ...(opts.vaultCallbackUrl
-      ? [`    ${opts.vaultCallbackUrl}`]
+    '      └─ used by: bgagent linear setup            (same machine as the browser)',
+    ...(opts.hostedConsentUrl
+      ? [
+        `    ${opts.hostedConsentUrl}`,
+        '      └─ used by: bgagent linear setup --hosted  (no localhost needed)',
+      ]
       : [
-        '    (AgentCore Identity vault only) ALSO add the provider callback URL that',
-        '    `bgagent linear vault-setup <slug>` prints. It ends in a per-provider id',
-        '    that does not exist until the provider is created, so it cannot be shown',
-        '    here — consent fails with "Invalid redirect_uri" until you add it.',
+        '    (hosted consent page) NOT FOUND — see the note below if you are',
+        '    onboarding from a cloud desktop / SSH box / container.',
+      ]),
+    ...(opts.vaultCallbackUrl
+      ? [
+        `    ${opts.vaultCallbackUrl}`,
+        '      └─ used by: bgagent linear vault-setup     (AgentCore Identity vault)',
+      ]
+      : [
+        '    (AgentCore vault) NOT FOUND — the vault redirect_uri ends in an id that',
+        '    AgentCore mints when the credential provider is created, so it cannot',
+        '    exist before then. `bgagent linear vault-setup <slug>` creates the',
+        '    provider and prints the URL; add it to this app, then re-run vault-setup.',
+        '    Skipping it is the usual cause of "Invalid redirect_uri" mid-consent.',
       ]),
     ...(opts.hostedConsentUrl
       ? []
       : [
         '',
         '    Onboarding from a cloud desktop / SSH box / container? The localhost URL',
-        '    above cannot work there — the browser cannot reach the CLI. Pass',
-        '    --hosted-consent-url (see `bgagent linear app-template --help`) to list the',
-        '    stack\'s hosted consent page instead, and onboard with',
-        '    `bgagent linear setup <slug> --hosted`.',
+        '    above cannot work there — the browser cannot reach the CLI. Deploy the',
+        '    stack with `--context enableLinearIdentityVault=true` to get the hosted',
+        '    consent page (this command then lists it automatically), and onboard',
+        '    with `bgagent linear setup <slug> --hosted`.',
       ]),
     '',
     `  GitHub username:     ${botName}      ← REQUIRED for actor=app`,
@@ -409,9 +467,13 @@ export function makeLinearCommand(): Command {
       .option('--developer-url <url>', 'Developer URL shown on Linear\'s consent screen')
       .option('--description <text>', 'App description shown on Linear\'s consent screen')
       .option('--aws-callback-url <url>', 'AWS-hosted callback URL from create-oauth2-credential-provider')
-      .option('--vault-callback-url <url>', 'AgentCore provider callback URL printed by `linear vault-setup` — renders a complete template')
-      .option('--hosted-consent-url <url>', 'Stack LinearVaultConsentUrl output — lists the hosted consent page so onboarding needs no localhost')
-      .action((opts) => {
+      .option('--vault-callback-url <url>', 'AgentCore provider callback URL — looked up automatically for --slug; this overrides it')
+      .option('--hosted-consent-url <url>', 'Hosted consent page URL — read from the stack automatically; this overrides it')
+      .option('--slug <slug>', 'Workspace slug, so an existing vault callback URL can be looked up and listed')
+      .option('--region <region>', 'AWS region (defaults to configured region)')
+      .option('--stack-name <name>', 'CloudFormation stack name', 'backgroundagent-dev')
+      .option('--offline', 'Skip the AWS lookups and render from flags alone')
+      .action(async (opts) => {
         if (opts.botName && !/\[bot\]$/.test(opts.botName)) {
           console.error(
             'Error: --bot-name must end with the literal "[bot]" suffix '
@@ -419,14 +481,26 @@ export function makeLinearCommand(): Command {
           );
           process.exit(1);
         }
+        // Look the callback URLs up rather than making the operator hunt for a
+        // CloudFormation output and an AgentCore-minted id and paste them back in.
+        // This is the FIRST command in onboarding, so it has to survive having no
+        // config, no credentials, and no deployed stack: every lookup is
+        // best-effort and the template degrades to explaining what is missing.
+        const looked = opts.offline
+          ? { hostedConsentUrl: undefined, vaultCallbackUrl: undefined }
+          : await resolveTemplateCallbackUrls({
+            region: opts.region,
+            stackName: opts.stackName,
+            slug: opts.slug,
+          });
         console.log(renderLinearAppTemplate({
           botName: opts.botName,
           developerName: opts.developerName,
           developerUrl: opts.developerUrl,
           description: opts.description,
           awsCallbackUrl: opts.awsCallbackUrl,
-          vaultCallbackUrl: opts.vaultCallbackUrl,
-          hostedConsentUrl: opts.hostedConsentUrl,
+          vaultCallbackUrl: opts.vaultCallbackUrl ?? looked.vaultCallbackUrl,
+          hostedConsentUrl: opts.hostedConsentUrl ?? looked.hostedConsentUrl,
         }));
       }),
   );

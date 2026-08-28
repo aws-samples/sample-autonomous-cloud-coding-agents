@@ -226,6 +226,37 @@ describe('renderLinearAppTemplate', () => {
     expect(out).toContain('--hosted');
   });
 
+  test('labels EVERY callback URL with the command that redirects to it', () => {
+    // Three URLs, three different commands, and registering the wrong subset
+    // presents as an opaque "Invalid redirect_uri" from Linear. An unlabelled list
+    // gives the operator no way to tell which entry a failing command wanted.
+    const out = renderLinearAppTemplate({
+      hostedConsentUrl: 'https://d2ud1woydykuxp.cloudfront.net/',
+      vaultCallbackUrl: 'https://bedrock-agentcore.us-east-1.amazonaws.com/identities/oauth2/callback/f88',
+    });
+    expect(out).toMatch(/bgagent linear setup\s+\(same machine/);
+    expect(out).toMatch(/bgagent linear setup --hosted\s+\(no localhost/);
+    expect(out).toMatch(/bgagent linear vault-setup\s+\(AgentCore Identity vault/);
+  });
+
+  test('says NOT FOUND for a URL it could not resolve, rather than omitting the line', () => {
+    // Silence reads as "there is no such URL". The operator needs to know the slot
+    // exists and is empty — otherwise a missing hosted page looks like a feature
+    // that does not exist rather than a stack that has not been deployed with it.
+    const out = renderLinearAppTemplate();
+    expect(out).toMatch(/hosted consent page\) NOT FOUND/);
+    expect(out).toMatch(/AgentCore vault\) NOT FOUND/);
+  });
+
+  test('tells the operator how to MAKE the hosted page exist, not just that it is absent', () => {
+    // The fix is a context flag at deploy time; naming it is the difference
+    // between an actionable message and a dead end.
+    const out = renderLinearAppTemplate();
+    expect(out).toContain('enableLinearIdentityVault=true');
+    // And it must not tell them to pass a URL by hand — the command looks it up.
+    expect(out).not.toContain('--hosted-consent-url');
+  });
+
   test('overrides bot name, developer fields, description', () => {
     const out = renderLinearAppTemplate({
       botName: 'acme-bot[bot]',
