@@ -10,3 +10,8 @@
 # by commit-SHA fingerprint, #530) is now suppressed SHA-independently via a
 # stopword allowlist in .gitleaks.toml — a commit-SHA fingerprint here broke when
 # history was rewritten. See #537.
+
+# Non-placeholder foreign-account fixtures in the already-pushed baa365fc
+# test commit. HEAD uses the allowlisted AWS-published placeholder instead.
+baa365fc4137fee701bd7655b3255c0755adcb57:agent/tests/test_server.py:aws-account-id:2087
+baa365fc4137fee701bd7655b3255c0755adcb57:agent/tests/test_server.py:aws-account-id:2118

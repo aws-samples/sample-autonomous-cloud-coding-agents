@@ -2084,7 +2084,7 @@ class TestInstallPlatformConfig:
             server._install_platform_config(
                 _platform_config(
                     github_token_secret_arn=(
-                        "arn:aws:secretsmanager:us-east-1:999988887777"
+                        "arn:aws:secretsmanager:us-east-1:111122223333"
                         ":secret:bgagent-linear-oauth-victim"
                     )
                 )
@@ -2115,7 +2115,7 @@ class TestInstallPlatformConfig:
         # The optional channel-OAuth ARNs are the same class of exfiltration
         # primitive; a per-key check that covered only the required ones would leave
         # them open. Driven from the contract so a new ARN key is covered by default.
-        foreign = "arn:aws:secretsmanager:us-east-1:999988887777:secret:x"
+        foreign = "arn:aws:secretsmanager:us-east-1:111122223333:secret:x"
         for key in server.MICROVM_PLATFORM_CONFIG_ARN_KEYS:
             if key == server.MICROVM_PLATFORM_CONFIG_ACCOUNT_ANCHOR_KEY:
                 continue  # the anchor defines the expectation; covered separately
