@@ -230,15 +230,20 @@ export function renderLinearAppTemplate(opts: LinearAppTemplateOptions = {}): st
     // separated with newlines". Each entry is annotated with the command that
     // redirects to it: the flows use DIFFERENT URIs, and registering one then
     // running the other yields an opaque "Invalid redirect_uri".
-    '  Redirect URIs (one per line, copied EXACTLY — trailing slash included):',
+    '  Redirect URIs (one per line, copied EXACTLY — paste, do not retype):',
     ...(opts.hostedConsentUrl
       ? [
+        // BOTH forms, deliberately. Linear compares redirect URIs as exact strings,
+        // and whether this one carries a trailing slash is invisible to anyone
+        // typing it by hand — a one-character difference that presents only as
+        // "Invalid redirect_uri" mid-consent. Registering both removes the choice.
         `    ${opts.hostedConsentUrl}`,
-        '      └─ bgagent linear setup --hosted   (browser anywhere; no localhost)',
+        `    ${opts.hostedConsentUrl.replace(/\/+$/, '')}`,
+        '      └─ bgagent linear setup            (the default; browser anywhere)',
       ]
       : []),
     `    ${callbackUrl}`,
-    '      └─ bgagent linear setup            (browser on this machine)',
+    '      └─ bgagent linear setup --localhost (browser on this machine)',
     ...(opts.vaultCallbackUrl
       ? [
         `    ${opts.vaultCallbackUrl}`,
@@ -658,14 +663,19 @@ export function makeLinearCommand(): Command {
       .option('--no-force-consent', 'Omit prompt=consent (diagnostic: restores the pre-fix behaviour that dead-ends on an already-installed app)')
       .option(
         '--hosted',
-        'Send the consent redirect to the stack\'s hosted consent page instead of a localhost '
-        + 'listener. Use on a cloud desktop / SSH box, where the browser cannot reach this machine. '
-        + 'Prints a code to paste back with --code.',
+        'Use the stack\'s hosted consent page. This is already the default when the stack has one; '
+        + 'passing it explicitly turns a missing consent page into an error instead of a silent '
+        + 'fallback to the localhost loopback.',
+      )
+      .option(
+        '--localhost',
+        'Send the consent redirect to a localhost listener on this machine instead of the hosted '
+        + 'consent page. Only works when the browser runs here — not on a cloud desktop / SSH box.',
       )
       .option(
         '--code <code>',
-        'Finish a --hosted consent: the authorization code shown on the consent page. Uses the PKCE '
-        + 'verifier saved by the --hosted run, so it must be the same machine and the same workspace.',
+        'Finish a hosted consent: the authorization code shown on the consent page. Uses the PKCE '
+        + 'verifier saved by the first run, so it must be the same machine and the same workspace.',
       )
       .action(async (slug: string, opts) => {
         if (!SLUG_RE.test(slug)) {
@@ -755,19 +765,19 @@ export function makeLinearCommand(): Command {
         }
 
         // ─── Step 1: Generate PKCE + open browser to Linear consent ────
-        // Where Linear sends the authorization code. Default is the localhost
-        // loopback the CLI listens on. `--hosted` points it at the stack's consent
-        // page instead, which is what makes onboarding possible on a cloud desktop /
-        // SSH box / container: there the browser cannot reach the CLI's localhost, so
-        // the loopback redirect dead-ends and the workspace can never be onboarded.
-        const setupHostedUrl = opts.hosted
-          ? await getStackOutput(region, stackName, 'LinearVaultConsentUrl')
-          : undefined;
+        // Where Linear sends the authorization code. The hosted consent page is
+        // PREFERRED whenever the stack has one, because it works from any browser;
+        // the localhost loopback only works when the browser runs on this machine,
+        // and dead-ends on a cloud desktop / SSH box / container with an error that
+        // does not explain itself. `--localhost` forces the loopback.
+        const setupHostedUrl = opts.localhost
+          ? undefined
+          : await getStackOutput(region, stackName, 'LinearVaultConsentUrl');
         if (opts.hosted && !setupHostedUrl) {
           throw new CliError(
             `--hosted needs the stack to expose LinearVaultConsentUrl. Deploy '${stackName}' with `
             + '`--context enableLinearIdentityVault=true` (which provisions the consent page), '
-            + 'or drop --hosted to use the localhost loopback.',
+            + 'or pass --localhost to use the loopback.',
           );
         }
         const setupRedirectUri = setupHostedUrl ?? CALLBACK_URL;

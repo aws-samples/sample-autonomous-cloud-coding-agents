@@ -280,15 +280,24 @@ describe('renderLinearAppTemplate', () => {
       hostedConsentUrl: 'https://d2ud1woydykuxp.cloudfront.net/',
       vaultCallbackUrl: 'https://bedrock-agentcore.us-east-1.amazonaws.com/identities/oauth2/callback/f88',
     });
-    expect(out).toMatch(/bgagent linear setup --hosted/);
-    expect(out).toMatch(/bgagent linear setup\s+\(browser on this machine/);
+    expect(out).toMatch(/bgagent linear setup\s+\(the default; browser anywhere/);
+    expect(out).toMatch(/bgagent linear setup --localhost/);
     expect(out).toMatch(/bgagent linear vault-setup/);
   });
 
-  test('the hosted URI is listed FIRST when present — it is the one that always works', () => {
+  test('the hosted URI is listed FIRST when present — it is the default', () => {
     const hosted = 'https://d2ud1woydykuxp.cloudfront.net/';
     const out = renderLinearAppTemplate({ hostedConsentUrl: hosted });
     expect(out.indexOf(hosted)).toBeLessThan(out.indexOf('http://localhost:8080/oauth/callback'));
+  });
+
+  test('lists the hosted URI BOTH with and without a trailing slash', () => {
+    // Linear compares redirect URIs as exact strings, and the slash is invisible
+    // to anyone typing the URL by hand. A real onboarding failed on exactly this
+    // one character, so both forms are registered and the choice disappears.
+    const out = renderLinearAppTemplate({ hostedConsentUrl: 'https://d2ud1woydykuxp.cloudfront.net/' });
+    expect(out).toContain('    https://d2ud1woydykuxp.cloudfront.net/\n');
+    expect(out).toContain('    https://d2ud1woydykuxp.cloudfront.net\n');
   });
 
   test('without a vault callback it says WHY it cannot be shown yet', () => {

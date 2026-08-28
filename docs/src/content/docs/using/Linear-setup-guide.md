@@ -59,7 +59,9 @@ For each additional workspace after the first:
 bgagent linear add-workspace <slug>
 ```
 
-Both commands prompt for the **Client ID** and **Client Secret**, open your browser to Linear's consent screen, and store the OAuth token bundle. **Make sure your browser is signed into the right workspace** before authorizing — that's where the app gets installed.
+Both commands prompt for the **Client ID** and **Client Secret**, take you through Linear's consent screen, and store the OAuth token bundle.
+
+When the stack has a hosted consent page, consent runs through it by default: the command prints an authorization URL, you open it in any browser, and you paste the code it shows back with `--code <code>`. That works from a cloud desktop, an SSH session, or a container. Pass `--localhost` to use a loopback listener on this machine instead — one command rather than two, but only if the browser runs here. **Make sure your browser is signed into the right workspace** before authorizing — that's where the app gets installed.
 
 `add-workspace` defaults the Client ID to the existing workspace's value; press Enter to reuse it (Public app), or paste a new one (per-workspace app).
 
