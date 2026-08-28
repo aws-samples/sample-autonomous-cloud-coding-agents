@@ -69,12 +69,72 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 /** Width of the `═` banner bars in printed setup output. */
 const BANNER_WIDTH = 72;
 
+/** Agent name used when the operator does not choose one. */
+export const DEFAULT_APP_NAME = 'bgagent';
+
+/**
+ * The literal token a comment must contain to summon the agent.
+ *
+ * Hardcoded in the platform (`parseCommentTrigger` in
+ * `cdk/src/handlers/shared/comment-trigger.ts`) and NOT derived from the app's
+ * name, so it stays the same however the operator brands the app. Duplicated
+ * here rather than imported because the CLI does not depend on the CDK package;
+ * the two must be changed together.
+ */
+export const COMMENT_TRIGGER_TOKEN = '@bgagent';
+
+/** GitHub usernames are limited to 39 characters. */
+const GITHUB_USERNAME_MAX = 39;
+
+/**
+ * Column the `←` annotations start at, so operator-chosen values of different
+ * lengths still leave the notes in a readable column instead of a ragged edge.
+ * A value longer than the column keeps a single separating space.
+ */
+const ANNOTATION_COLUMN = 22;
+
+/** `value  ← note`, with the note pinned to {@link ANNOTATION_COLUMN}. */
+function annotate(value: string, note: string): string {
+  return `${value.padEnd(ANNOTATION_COLUMN)} ← ${note}`;
+}
+
+/**
+ * Turn a human-chosen agent name into something Linear accepts in its (required)
+ * GitHub username field: lowercase, alphanumerics and single inner hyphens only.
+ *
+ * Falls back to the default when a name sanitizes away to nothing (e.g. one made
+ * entirely of punctuation or non-Latin script), because an empty username fails
+ * on Linear's side with the misleading "Invalid redirect_uri" error rather than
+ * anything naming the real problem.
+ */
+export function githubUsernameFrom(appName: string): string {
+  const slug = appName
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, GITHUB_USERNAME_MAX)
+    .replace(/-+$/, '');
+  return slug || DEFAULT_APP_NAME;
+}
+
 /**
  * Render the printable Linear OAuth app config. Standalone export so
  * `bgagent linear setup` can call it inline (Phase 2.0b setup wizard
  * Step 2 — show the user what to paste into Linear's app form).
  */
 export interface LinearAppTemplateOptions {
+  /**
+   * What the agent is CALLED in Linear. Linear derives the app's display name
+   * from this, so it is the name that appears on the consent screen and as the
+   * author of every comment the agent posts — operators running ABCA under their
+   * own branding should set it.
+   *
+   * It does NOT change what people type to summon the agent: the comment trigger
+   * is a fixed `@bgagent` token (see `parseCommentTrigger`), independent of this
+   * name. The rendered template says so, because otherwise renaming the app
+   * produces an agent that looks right and answers nothing.
+   */
+  readonly appName?: string;
   readonly botName?: string;
   readonly developerName?: string;
   readonly developerUrl?: string;
@@ -141,7 +201,12 @@ export function renderLinearAppTemplate(opts: LinearAppTemplateOptions = {}): st
   // Defaults match the upstream sample so unmodified `bgagent linear app-template`
   // produces a usable config without forcing every operator to invent strings.
   // Operators with custom branding override via flags.
-  const botName = opts.botName ?? 'bgagent[bot]';
+  const appName = opts.appName?.trim() || DEFAULT_APP_NAME;
+  // Derived from the app name so choosing one name is enough — Linear requires a
+  // GitHub username for actor=app, and making the operator invent a second
+  // consistent identifier is just another thing to get wrong. `--bot-name` still
+  // wins for anyone who needs the two to differ.
+  const botName = opts.botName ?? `${githubUsernameFrom(appName)}[bot]`;
   const developerName = opts.developerName ?? 'ABCA';
   const developerUrl = opts.developerUrl ?? 'https://github.com/aws-samples/sample-autonomous-cloud-coding-agents';
   const description = opts.description ?? 'Autonomous Background Coding Agent';
@@ -161,7 +226,7 @@ export function renderLinearAppTemplate(opts: LinearAppTemplateOptions = {}): st
     '',
     'Open https://linear.app/settings/api/applications/new and paste:',
     '',
-    '  Application name:    bgagent',
+    `  Application name:    ${annotate(appName, 'your agent\'s name in Linear')}`,
     `  Developer name:      ${developerName}`,
     `  Developer URL:       ${developerUrl}`,
     `  Description:         ${description}`,
@@ -204,7 +269,7 @@ export function renderLinearAppTemplate(opts: LinearAppTemplateOptions = {}): st
         '    with `bgagent linear setup <slug> --hosted`.',
       ]),
     '',
-    `  GitHub username:     ${botName}      ← REQUIRED for actor=app`,
+    `  GitHub username:     ${annotate(botName, 'REQUIRED for actor=app')}`,
     '  Public:              OFF',
     '  Client credentials:  OFF',
     '  Webhooks:            ON              ← REQUIRED for actor=app',
@@ -214,8 +279,14 @@ export function renderLinearAppTemplate(opts: LinearAppTemplateOptions = {}): st
     'Click Save, copy the Client ID and Client Secret, then return here.',
     '',
     'Non-obvious gotchas (Linear explains the fields themselves inline):',
+    '  • The application name is yours to pick — Linear shows it on the consent',
+    '    screen and as the author of every comment the agent posts (it lowercases',
+    '    and strips spaces for the display handle). But it does NOT change how',
+    `    people summon the agent: the trigger is always \`${COMMENT_TRIGGER_TOKEN} <request>\`,`,
+    '    whatever you name the app. Renaming changes the label, not the trigger.',
     '  • GitHub username is REQUIRED for actor=app — leaving it blank surfaces a',
     '    misleading "Invalid redirect_uri" error, not a "missing username" one.',
+    '    It is derived from the application name above; override with --bot-name.',
     '  • Webhooks toggle must be ON for the same reason; the URL value is unused',
     '    by the OAuth dance and can be a placeholder.',
     '  • Wildcard callback URLs are not accepted by Linear; list each URL fully.',
@@ -462,7 +533,8 @@ export function makeLinearCommand(): Command {
   linear.addCommand(
     new Command('app-template')
       .description('Print the field values to paste into Linear\'s OAuth app form')
-      .option('--bot-name <name>', 'GitHub username for actor=app (must end with [bot])')
+      .option('--app-name <name>', `Your agent's name in Linear (default: ${DEFAULT_APP_NAME})`)
+      .option('--bot-name <name>', 'GitHub username for actor=app (derived from --app-name; must end with [bot])')
       .option('--developer-name <name>', 'Developer name shown on Linear\'s consent screen')
       .option('--developer-url <url>', 'Developer URL shown on Linear\'s consent screen')
       .option('--description <text>', 'App description shown on Linear\'s consent screen')
@@ -481,6 +553,18 @@ export function makeLinearCommand(): Command {
           );
           process.exit(1);
         }
+        // A name with nothing GitHub accepts (punctuation only, non-Latin script)
+        // silently stops driving the username it is documented to drive. Say so
+        // rather than printing a template whose own explanation is wrong.
+        if (opts.appName && !opts.botName
+          && opts.appName.trim().toLowerCase() !== DEFAULT_APP_NAME
+          && githubUsernameFrom(opts.appName) === DEFAULT_APP_NAME) {
+          console.error(
+            `Note: "${opts.appName}" contains no characters GitHub allows in a username, so the `
+            + `GitHub username field falls back to ${DEFAULT_APP_NAME}[bot]. `
+            + 'Pass --bot-name to choose it yourself.',
+          );
+        }
         // Look the callback URLs up rather than making the operator hunt for a
         // CloudFormation output and an AgentCore-minted id and paste them back in.
         // This is the FIRST command in onboarding, so it has to survive having no
@@ -494,6 +578,7 @@ export function makeLinearCommand(): Command {
             slug: opts.slug,
           });
         console.log(renderLinearAppTemplate({
+          appName: opts.appName,
           botName: opts.botName,
           developerName: opts.developerName,
           developerUrl: opts.developerUrl,

@@ -257,6 +257,57 @@ describe('renderLinearAppTemplate', () => {
     expect(out).not.toContain('--hosted-consent-url');
   });
 
+  test('names the agent whatever the operator chose', () => {
+    const out = renderLinearAppTemplate({ appName: 'Acme Agent' });
+    expect(out).toContain('Application name:    Acme Agent');
+  });
+
+  test('derives the GitHub username from the chosen name, so one choice is enough', () => {
+    // Linear REQUIRES a GitHub username for actor=app. Making the operator invent
+    // a second identifier consistent with the first is one more thing to get wrong.
+    expect(renderLinearAppTemplate({ appName: 'Acme Agent' })).toContain('acme-agent[bot]');
+    expect(renderLinearAppTemplate({ appName: 'Acme  --  Agent!!' })).toContain('acme-agent[bot]');
+  });
+
+  test('an explicit --bot-name still beats the derived one', () => {
+    const out = renderLinearAppTemplate({ appName: 'Acme Agent', botName: 'other-bot[bot]' });
+    expect(out).toContain('other-bot[bot]');
+    expect(out).not.toContain('acme-agent[bot]');
+  });
+
+  test('the default name reproduces the previous output exactly (no silent rebrand)', () => {
+    // Deriving the username from the name must not change what existing operators
+    // see, or an unrelated flag would quietly alter their app config.
+    const out = renderLinearAppTemplate();
+    expect(out).toContain('Application name:    bgagent');
+    expect(out).toContain('bgagent[bot]');
+  });
+
+  test('states that renaming does NOT change the trigger phrase', () => {
+    // The trigger is a hardcoded @bgagent token in the platform, not the app name.
+    // Without this, renaming yields an agent that looks right and answers nothing —
+    // the operator types @acme, gets silence, and has nothing to go on.
+    const out = renderLinearAppTemplate({ appName: 'Acme Agent' });
+    expect(out).toContain('@bgagent <request>');
+    expect(out).toMatch(/does NOT change how|still answers only to/i);
+  });
+
+  test('a name with nothing GitHub accepts still yields a VALID username', () => {
+    // Punctuation-only or non-Latin names must not render an empty username field:
+    // Linear rejects that with the misleading "Invalid redirect_uri" error.
+    expect(renderLinearAppTemplate({ appName: '!!!' })).toContain('bgagent[bot]');
+    expect(renderLinearAppTemplate({ appName: '日本語' })).toContain('bgagent[bot]');
+    expect(renderLinearAppTemplate({ appName: '   ' })).toContain('Application name:    bgagent');
+  });
+
+  test('a long name is truncated to a username GitHub would accept', () => {
+    const out = renderLinearAppTemplate({ appName: 'a'.repeat(60) });
+    const username = /GitHub username:\s+(\S+)\[bot\]/.exec(out)?.[1] ?? '';
+    expect(username.length).toBeLessThanOrEqual(39);
+    // And must not end mid-hyphen, which GitHub rejects.
+    expect(username).not.toMatch(/-$/);
+  });
+
   test('overrides bot name, developer fields, description', () => {
     const out = renderLinearAppTemplate({
       botName: 'acme-bot[bot]',
