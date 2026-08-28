@@ -67,13 +67,17 @@ Both commands prompt for the **Client ID** and **Client Secret**, open your brow
 
 ### 4. Configure the Linear webhook
 
+If you filled in the app's **Webhooks** section in step 2, this is already done — skip to step 5 with the signing secret the app form showed you.
+
+To use a separate **workspace** webhook instead (one signing secret per workspace, rather than one shared by every workspace the app is installed on):
+
 ```bash
 bgagent linear webhook-info
 ```
 
 This prints the URL and values to paste into Linear. Open `https://linear.app/<slug>/settings/api/webhooks` and create the webhook with those values.
 
-Under **Resource types**, enable both **Issues** and **Comments**:
+Either way, enable both **Issues** and **Comments**:
 
 - **Issues** — label-triggered tasks and parent/sub-issue epic orchestration.
 - **Comments** — the `@bgagent` re-iteration trigger: a reviewer comments `@bgagent <change>` on a sub-issue and ABCA updates that sub-issue's PR, then re-stacks its dependents. Without the Comments subscription this trigger silently never fires.
@@ -280,7 +284,7 @@ Re-run `bgagent linear setup` after fixing.
 
 > Earlier versions of this guide blamed a blank **GitHub username** field for this error. Linear's app form has no such field (verified against the live form: icon, application name, developer name, developer URL, description, redirect URIs), so there is nothing to fill in — check the redirect URIs instead.
 >
-> Leave the OAuth app's own **Webhooks** toggle OFF. ABCA's events come from the *workspace* webhook you create in step 4 — that is the configuration in use on the live deployment. Enabling both, pointed at the same endpoint, delivers every event twice under two different signing secrets, and ABCA stores one secret per workspace, so the second subscription fails verification.
+> Configure the webhook **on the OAuth app itself** (its Webhooks toggle, URL, and signing secret) — `bgagent linear app-template` prints the values. A separate workspace webhook is the alternative, not an addition: pointing both at ABCA delivers every event twice under two different signing secrets, and only one can verify. Pick one.
 
 ### Agent doesn't post comments to Linear
 

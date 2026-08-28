@@ -144,6 +144,9 @@ export interface LinearAppTemplateOptions {
   readonly webhookUrl?: string;
 }
 
+/** Shown when the API URL is unknown, so the operator still knows where to look. */
+const WEBHOOK_URL_HINT = '(run `bgagent linear webhook-info`)';
+
 /** ABCA's Linear webhook endpoint for a configured API URL. */
 export function linearWebhookUrl(apiUrl: string): string {
   return `${apiUrl.replace(/\/+$/, '')}/linear/webhook`;
@@ -258,15 +261,14 @@ export function renderLinearAppTemplate(opts: LinearAppTemplateOptions = {}): st
     '',
     '  Public:              OFF',
     '  Client credentials:  OFF',
-    '  Webhooks:            OFF     ← leave the app\'s own webhook off; see below',
+    '  Webhooks:            ON      ← this IS ABCA\'s webhook; no second one needed',
+    `    Webhook URL:       ${opts.webhookUrl ?? WEBHOOK_URL_HINT}`,
+    '    Data change events:  Issues + Comments   ← both, see below',
+    '    App events:          all OFF             ← see below',
+    '    Copy the "Webhook signing secret" (lin_wh_…) — setup asks for it.',
     '',
-    'Click Create, copy the Client ID and Client Secret, then return here.',
-    '',
-    'ABCA\'s events come from a WORKSPACE webhook, which you create separately at',
-    'https://linear.app/<slug>/settings/api/webhooks with:',
-    `    URL:             ${opts.webhookUrl ?? '(run `bgagent linear webhook-info`)'}`,
-    '    Resource types:  Issues + Comments   ← both, see below',
-    '    Then copy that webhook\'s signing secret (lin_wh_…) — setup asks for it.',
+    'Click Create, then come back with the Client ID, Client Secret and that',
+    'signing secret:  bgagent linear setup <slug>',
     '',
     // Each trap below cost someone a failed onboarding. Kept short deliberately:
     // the list grew long enough that operators stopped reading it and missed real
@@ -277,8 +279,9 @@ export function renderLinearAppTemplate(opts: LinearAppTemplateOptions = {}): st
     '    parameter for the application". The error names the URI, not the mismatch.',
     '  • Tick Comments as well as Issues, or the trigger silently never fires:',
     `    Issues alone gives label-triggered tasks, and \`${COMMENT_TRIGGER_TOKEN}\` arrives as a Comment.`,
-    '  • ONE webhook. Pointing the app\'s own webhook at ABCA too delivers every',
-    '    event twice under two signing secrets, and only one can verify.',
+    '  • ONE webhook. The app\'s webhook above is the whole story — do not also add a',
+    '    workspace webhook pointing here, or every event arrives twice under two',
+    '    signing secrets, and only one of them can verify.',
     '  • Leave App events (agent session / inbox / permissions) OFF, or Linear turns',
     '    @mentions into an interactive agent surface instead of a comment thread,',
     '    which breaks the reply/reaction UX ABCA depends on.',

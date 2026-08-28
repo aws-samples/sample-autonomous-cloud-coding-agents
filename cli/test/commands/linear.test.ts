@@ -236,13 +236,14 @@ describe('renderLinearAppTemplate', () => {
     expect(out).toMatch(/comment thread/);
   });
 
-  test('puts the webhook on the WORKSPACE, which is the live-verified configuration', () => {
-    // Checked against the running deployment: the ABCA webhook is a workspace
-    // subscription (Issue + Comment), and the OAuth app's own webhook is off.
-    const out = renderLinearAppTemplate();
-    expect(out).toMatch(/WORKSPACE webhook/);
-    expect(out).toContain('settings/api/webhooks');
-    expect(out).toMatch(/Webhooks:\s+OFF/);
+  test('configures the webhook ON THE APP, so there is only one thing to set up', () => {
+    // The receiver routes on the payload's organizationId and verifies the HMAC
+    // against whichever secret it was given, so it does not care which surface the
+    // webhook was created on — one webhook on the app is the least to configure.
+    const out = renderLinearAppTemplate({ webhookUrl: 'https://x.example.com/v1/linear/webhook' });
+    expect(out).toMatch(/Webhooks:\s+ON/);
+    expect(out).toContain('https://x.example.com/v1/linear/webhook');
+    expect(out).toMatch(/Data change events:\s+Issues \+ Comments/);
   });
 
   test('warns that a second webhook on the app duplicates every event', () => {
@@ -251,6 +252,7 @@ describe('renderLinearAppTemplate', () => {
     // verify. Worth stating because pasting the URL in both places looks harmless.
     const out = renderLinearAppTemplate();
     expect(out).toMatch(/ONE webhook/);
+    expect(out).toMatch(/workspace webhook pointing here/);
     expect(out).toMatch(/twice/);
   });
 
