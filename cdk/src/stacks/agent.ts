@@ -54,7 +54,7 @@ import {
 } from '../constructs/lambda-microvm-compute';
 import { LinearIdentityVault } from '../constructs/linear-identity-vault';
 import { LinearIntegration } from '../constructs/linear-integration';
-import { LinearVaultConsentPage } from '../constructs/linear-vault-consent-page';
+import { LinearVaultConsentPageStack } from '../constructs/linear-vault-consent-page';
 import { OperationalAlerts } from '../constructs/operational-alerts';
 import { OrchestrationReconciler } from '../constructs/orchestration-reconciler';
 import { OrchestrationTable } from '../constructs/orchestration-table';
@@ -881,7 +881,7 @@ export class AgentStack extends Stack {
     // consumer: runtime role below, ECS task role inside EcsAgentCluster,
     // webhook processor inside LinearIntegration.
     let linearIdentityVault: LinearIdentityVault | undefined;
-    let linearVaultConsentPage: LinearVaultConsentPage | undefined;
+    let linearVaultConsentPage: LinearVaultConsentPageStack | undefined;
     if (linearIdentityVaultEnabled) {
       // Hosted consent landing page, so onboarding works where the browser cannot
       // reach the CLI's localhost (cloud desktop, SSH box, container). Static by
@@ -891,7 +891,9 @@ export class AgentStack extends Stack {
       // for operators fronting the callback with their own URL.
       const hostedReturnUrlOverride = this.node.tryGetContext('linearVaultHostedReturnUrl') as string | undefined;
       if (!hostedReturnUrlOverride) {
-        linearVaultConsentPage = new LinearVaultConsentPage(this, 'LinearVaultConsentPage');
+        // Nested so its ~10 resources do not eat the root stack's remaining
+        // headroom against CloudFormation's hard 500-per-stack limit.
+        linearVaultConsentPage = new LinearVaultConsentPageStack(this, 'LinearVaultConsentPageStack');
       }
       const hostedReturnUrl = hostedReturnUrlOverride ?? linearVaultConsentPage?.consentUrl;
 

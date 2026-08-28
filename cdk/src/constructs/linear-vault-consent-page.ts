@@ -35,7 +35,7 @@
 // endpoint that completes OAuth sessions on behalf of whoever calls it. Instead the
 // page only DISPLAYS the id, and the CLI finalizes using the operator's own AWS
 // credentials — the privileged step stays with a principal we can authorize.
-import { RemovalPolicy, Stack } from 'aws-cdk-lib';
+import { NestedStack, type NestedStackProps, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
 import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
 import * as s3 from 'aws-cdk-lib/aws-s3';
@@ -156,6 +156,34 @@ export class LinearVaultConsentPage extends Construct {
         },
       ], true);
     }
+  }
+}
+
+/**
+ * {@link LinearVaultConsentPage} in its own nested stack.
+ *
+ * The page + its delivery machinery (bucket, bucket policy, auto-delete custom
+ * resource, distribution, OAC, and CDK's BucketDeployment singleton with its
+ * AWS-CLI layer, role and policy) contribute ~10 resources. The root `AgentStack`
+ * was at 486 and CloudFormation's hard limit is 500 per stack, so carrying them in
+ * the root would spend most of the remaining headroom on a landing page. Nesting
+ * gives them their own budget and costs the parent a single
+ * `AWS::CloudFormation::Stack` — the same trade the Agent Registry makes.
+ *
+ * `consentUrl` is surfaced so the parent can register it on the workload identity's
+ * return-URL allowlist and publish it as an output; CDK auto-wires the cross-stack
+ * export/import.
+ */
+export class LinearVaultConsentPageStack extends NestedStack {
+  public readonly consentUrl: string;
+
+  constructor(scope: Construct, id: string, props: LinearVaultConsentPageProps & NestedStackProps = {}) {
+    super(scope, id, props);
+    const page = new LinearVaultConsentPage(this, 'ConsentPage', {
+      ...(props.removalPolicy !== undefined && { removalPolicy: props.removalPolicy }),
+      ...(props.autoDeleteObjects !== undefined && { autoDeleteObjects: props.autoDeleteObjects }),
+    });
+    this.consentUrl = page.consentUrl;
   }
 }
 

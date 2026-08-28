@@ -1516,7 +1516,11 @@ describe('AgentStack Linear identity vault gate (#809)', () => {
     // resolve a return URL and --hosted fails closed.
     const outputs = template.toJSON().Outputs as Record<string, unknown>;
     expect(Object.keys(outputs)).toContain('LinearVaultConsentUrl');
-    expect(rendered).toContain('Custom::CDKBucketDeployment');
+    // The page ships in a NESTED stack so its ~13 resources do not eat the root's
+    // headroom against the 500-per-stack ceiling; the root therefore pays only a
+    // single AWS::CloudFormation::Stack for it.
+    expect(rendered).not.toContain('Custom::CDKBucketDeployment');
+    expect(rendered).toContain('LinearVaultConsentPageStack');
   });
 });
 

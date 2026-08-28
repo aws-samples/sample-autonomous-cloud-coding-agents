@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { App, Stack } from 'aws-cdk-lib';
+import { App, NestedStack, Stack } from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
 
 import {
@@ -132,22 +132,38 @@ describe('Bootstrap policy synth coverage', () => {
       ).map((r) => r.Type),
     );
 
-    // Every CFN type the gated path adds must be mapped AND covered — the vault's
-    // own custom resource plus the CloudFront/S3/BucketDeployment types behind the
-    // hosted consent page.
-    for (const cfnType of [
-      'Custom::LinearWorkloadIdentity',
-      'Custom::CDKBucketDeployment',
-      'AWS::CloudFront::Distribution',
-      'AWS::S3::Bucket',
-    ]) {
+    // The vault's own custom resource lives in the ROOT template.
+    for (const cfnType of ['Custom::LinearWorkloadIdentity']) {
       expect(gatedTypes.has(cfnType)).toBe(true);
       expect(cfnType in RESOURCE_ACTION_MAP).toBe(true);
       expect(findMissingBootstrapActions(cfnType, allowedActions)).toEqual([]);
     }
 
-    // And nothing the gated path adds may slip past unmapped.
-    const unmapped = [...gatedTypes].filter(
+    // The hosted consent page sits in a NESTED stack (to stay clear of the root's
+    // 500-resource ceiling), so its types are not in the root template — but CFN
+    // still creates them with the same execution role, so they need the same
+    // bootstrap coverage. Walk the nested stack explicitly; a nested resource that
+    // slips past the map fails deploy exactly like a root one.
+    const gatedStack = new AgentStack(new App({ context: { enableLinearIdentityVault: true } }), 'LinearVaultNestedStack', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    });
+    const consentPageStack = gatedStack.node.tryFindChild('LinearVaultConsentPageStack') as NestedStack | undefined;
+    expect(consentPageStack).toBeDefined();
+    const nestedTypes = new Set(
+      Object.values(
+        Template.fromStack(consentPageStack!).toJSON().Resources as Record<string, { Type: string }>,
+      ).map((r) => r.Type),
+    );
+    for (const cfnType of [
+      'Custom::CDKBucketDeployment',
+      'AWS::CloudFront::Distribution',
+      'AWS::S3::Bucket',
+    ]) {
+      expect(nestedTypes.has(cfnType)).toBe(true);
+    }
+
+    // Nothing the gated path adds — root OR nested — may slip past unmapped.
+    const unmapped = [...gatedTypes, ...nestedTypes].filter(
       (t) => !CFN_TYPES_WITHOUT_EXEC_ROLE_IAM.has(t) && !(t in RESOURCE_ACTION_MAP),
     );
     expect(unmapped).toEqual([]);
