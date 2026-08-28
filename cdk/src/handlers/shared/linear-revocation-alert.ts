@@ -38,13 +38,22 @@
 // Everything here is best-effort: recording or announcing a diagnosis must never
 // turn a feedback outage into a thrown handler.
 import { PublishCommand, SNSClient } from '@aws-sdk/client-sns';
-import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
-import { markWorkspaceRevoked, type RevocationDetail } from './linear-oauth-resolver';
 import { logger } from './logger';
 import { makeClient } from './ua';
 
+/**
+ * Mirrors `RevocationDetail` from the resolver, declared locally ON PURPOSE: the
+ * resolver owns the latch and calls into this module, so importing its types here
+ * would create a cycle (resolver → alert → resolver).
+ */
+export interface AnnounceableRevocation {
+  readonly linearWorkspaceId: string;
+  readonly workspaceSlug?: string;
+  readonly source: 'secrets-manager-refresh' | 'vault-consent-required';
+}
+
 /** Why the grant is dead, in words an operator can act on. */
-const SOURCE_EXPLANATION: Record<RevocationDetail['source'], string> = {
+const SOURCE_EXPLANATION: Record<AnnounceableRevocation['source'], string> = {
   'secrets-manager-refresh':
     'Linear rejected the stored refresh token, so the saved authorization can no longer be renewed.',
   'vault-consent-required':
@@ -52,114 +61,64 @@ const SOURCE_EXPLANATION: Record<RevocationDetail['source'], string> = {
     + 'Secrets Manager fallback token is usable.',
 };
 
-export interface RevocationAlertConfig {
-  readonly ddb: DynamoDBDocumentClient;
-  readonly registryTableName: string;
-  /** SNS topic for operator notification. Absent ⇒ latch only, no announcement. */
-  readonly alertTopicArn?: string;
-  readonly region?: string;
-  /** Override for tests. */
-  readonly snsClient?: SNSClient;
+/** The operator alert topic, or undefined when the stack has not wired one. */
+export function revocationAlertTopicArn(): string | undefined {
+  return process.env.OPERATIONAL_ALERT_TOPIC_ARN || undefined;
 }
 
 /**
- * Build the `onAuthorizationRevoked` handler for the token resolver.
+ * Announce ONE revoked authorization to the operator.
  *
- * Returns a function that latches the registry row and, only if that latch
- * applied, publishes one operator notification.
+ * Call this only after the registry latch actually applied — that conditional
+ * write is the dedup key. A revoked workspace keeps producing events, so
+ * announcing on detection instead of on latch would page once per event.
+ *
+ * Never throws. The latch has already landed by the time this runs, so the state
+ * is discoverable via `bgagent platform doctor` even if the notification fails, and
+ * this executes inside token resolution where an exception would turn a
+ * notification outage into a broken webhook handler.
  */
-export function makeRevocationAlerter(
-  config: RevocationAlertConfig,
-): (detail: RevocationDetail) => Promise<void> {
-  return async (detail: RevocationDetail): Promise<void> => {
-    const latched = await markWorkspaceRevoked(
-      config.ddb,
-      config.registryTableName,
-      detail.linearWorkspaceId,
-      detail.installedAt,
-      undefined,
-      detail.source === 'vault-consent-required' ? 'vault_consent_required' : 'refresh_token_rejected',
-    );
+export async function announceRevocation(
+  detail: AnnounceableRevocation,
+  opts: { readonly topicArn: string; readonly region?: string; readonly snsClient?: SNSClient },
+): Promise<void> {
+  const slug = detail.workspaceSlug ?? detail.linearWorkspaceId;
+  const subject = `ABCA: Linear workspace '${slug}' needs re-authorization`;
+  const message = [
+    `The Linear authorization for workspace '${slug}' is no longer usable.`,
+    '',
+    SOURCE_EXPLANATION[detail.source],
+    '',
+    'Until it is re-authorized, Linear-triggered tasks for this workspace are dropped:',
+    'applying the trigger label will appear to do nothing.',
+    '',
+    'To fix it, run:',
+    `  bgagent linear setup ${slug}`,
+    detail.source === 'vault-consent-required'
+      ? `  bgagent linear vault-setup ${slug}    (to restore the Token Vault path)`
+      : '',
+    '',
+    `Workspace id: ${detail.linearWorkspaceId}`,
+    `Detected by:  ${detail.source}`,
+  ].filter((line) => line !== '').join('\n');
 
-    if (!latched) {
-      // Already revoked, or the row has moved on to a NEWER installation than the
-      // one this verdict describes. Either way there is nothing new to announce.
-      logger.info('Revocation already recorded — not announcing again', {
-        linear_workspace_id: detail.linearWorkspaceId,
-        source: detail.source,
-      });
-      return;
-    }
-
-    if (!config.alertTopicArn) {
-      logger.warn('Linear authorization revoked, but no alert topic is configured — recorded only', {
-        linear_workspace_id: detail.linearWorkspaceId,
-        source: detail.source,
-      });
-      return;
-    }
-
-    const slug = detail.workspaceSlug ?? detail.linearWorkspaceId;
-    const subject = `ABCA: Linear workspace '${slug}' needs re-authorization`;
-    const message = [
-      `The Linear authorization for workspace '${slug}' is no longer usable.`,
-      '',
-      SOURCE_EXPLANATION[detail.source],
-      '',
-      'Until it is re-authorized, Linear-triggered tasks for this workspace are dropped:',
-      'applying the trigger label will appear to do nothing.',
-      '',
-      'To fix it, run:',
-      `  bgagent linear setup ${slug}`,
-      detail.source === 'vault-consent-required'
-        ? `  bgagent linear vault-setup ${slug}    (to restore the Token Vault path)`
-        : '',
-      '',
-      `Workspace id: ${detail.linearWorkspaceId}`,
-      `Detected by:  ${detail.source}`,
-    ].filter((line) => line !== '').join('\n');
-
-    try {
-      const sns = config.snsClient
-        ?? makeClient(SNSClient, { region: config.region ?? process.env.AWS_REGION ?? 'us-east-1' });
-      await sns.send(new PublishCommand({
-        TopicArn: config.alertTopicArn,
-        Subject: subject.slice(0, 100), // SNS caps Subject at 100 chars.
-        Message: message,
-      }));
-      logger.warn('Announced revoked Linear authorization to the operational alert topic', {
-        linear_workspace_id: detail.linearWorkspaceId,
-        workspace_slug: detail.workspaceSlug,
-        source: detail.source,
-      });
-    } catch (err) {
-      // The latch already landed, so the state is discoverable via `platform
-      // doctor` even though this announcement failed. Never rethrow: a failed
-      // notification must not escalate into a broken handler.
-      logger.error('Could not announce the revoked Linear authorization (recorded, but not notified)', {
-        linear_workspace_id: detail.linearWorkspaceId,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  };
-}
-
-/**
- * Convenience wiring for a handler that already has a doc client and reads its
- * configuration from the environment. Returns undefined when the registry table is
- * not configured, so callers can pass the result straight through as
- * `onAuthorizationRevoked` and get today's behaviour (no latch, no alert) on a
- * stack that has not wired it.
- */
-export function revocationAlerterFromEnv(
-  ddb: DynamoDBDocumentClient,
-  registryTableName: string | undefined,
-): ((detail: RevocationDetail) => Promise<void>) | undefined {
-  if (!registryTableName) return undefined;
-  const alertTopicArn = process.env.OPERATIONAL_ALERT_TOPIC_ARN;
-  return makeRevocationAlerter({
-    ddb,
-    registryTableName,
-    ...(alertTopicArn && { alertTopicArn }),
-  });
+  try {
+    const sns = opts.snsClient
+      ?? makeClient(SNSClient, { region: opts.region ?? process.env.AWS_REGION ?? 'us-east-1' });
+    await sns.send(new PublishCommand({
+      TopicArn: opts.topicArn,
+      Subject: subject.slice(0, 100), // SNS caps Subject at 100 chars.
+      Message: message,
+    }));
+    logger.warn('Announced revoked Linear authorization to the operational alert topic', {
+      linear_workspace_id: detail.linearWorkspaceId,
+      workspace_slug: detail.workspaceSlug,
+      source: detail.source,
+    });
+  } catch (err) {
+    logger.error('Could not announce the revoked Linear authorization (recorded, but not notified)', {
+      linear_workspace_id: detail.linearWorkspaceId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }

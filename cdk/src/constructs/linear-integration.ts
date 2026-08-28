@@ -302,6 +302,11 @@ export class LinearIntegration extends Construct {
           LINEAR_VAULT_ENABLED: 'true',
           LINEAR_WORKLOAD_IDENTITY_NAME: props.identityVault.workloadName,
         }),
+        // #812: this role — and ONLY this role — holds registry write, so the
+        // resolver's revocation recorder is enabled here. Elsewhere the conditional
+        // write would fail AccessDenied and be swallowed, which is the
+        // inert-but-looks-implemented state the issue exists to remove.
+        LINEAR_REVOCATION_RECORDING: 'true',
       },
       // Uses the PDF attachment-screening path — pdf-parse must stay unbundled.
       bundling: attachmentScreeningBundling,

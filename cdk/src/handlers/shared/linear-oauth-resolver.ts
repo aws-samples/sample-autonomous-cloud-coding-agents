@@ -23,6 +23,7 @@ import {
   SecretsManagerClient,
 } from '@aws-sdk/client-secrets-manager';
 import { DynamoDBDocumentClient, GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { announceRevocation, revocationAlertTopicArn } from './linear-revocation-alert';
 import {
   LINEAR_VAULT_SCOPES,
   type VaultTokenResult,
@@ -219,6 +220,57 @@ export interface ResolvedLinearToken {
   readonly providerName?: string;
 }
 
+/**
+ * The recorder used when a caller does not supply one.
+ *
+ * WHY THIS IS A DEFAULT AND NOT THREADED THROUGH CALLERS. Seven modules resolve
+ * Linear tokens inside the webhook processor (feedback, issue lookup, orchestration
+ * channel, the processor itself…). Passing the recorder from each one was tried and
+ * missed four of them — the live test tripped over `linear-feedback`, which is where
+ * a revocation is often discovered because posting a reply is the first thing that
+ * needs a token. Any future caller would have to remember too, and forgetting is
+ * silent. Defaulting here covers every path, present and future.
+ *
+ * Gated on `LINEAR_REVOCATION_RECORDING` so it stays OFF for roles that hold only
+ * READ on the registry: there the conditional write would fail AccessDenied and be
+ * swallowed, which is the inert-but-looks-implemented state this whole issue exists
+ * to remove. Only the role granted the write has the variable set.
+ */
+function defaultRevocationRecorder(
+  ddb: DynamoDBDocumentClient,
+  registryTableName: string,
+): ((detail: RevocationDetail) => Promise<void>) | undefined {
+  if (process.env.LINEAR_REVOCATION_RECORDING !== 'true') return undefined;
+  return async (detail: RevocationDetail): Promise<void> => {
+    const latched = await markWorkspaceRevoked(
+      ddb,
+      registryTableName,
+      detail.linearWorkspaceId,
+      detail.installedAt,
+      undefined,
+      detail.source === 'vault-consent-required' ? 'vault_consent_required' : 'refresh_token_rejected',
+    );
+    if (!latched) {
+      // Already revoked, or the row has moved on to a NEWER installation than the
+      // one this verdict describes. Nothing new to announce.
+      logger.info('Revocation already recorded — not announcing again', {
+        linear_workspace_id: detail.linearWorkspaceId,
+        source: detail.source,
+      });
+      return;
+    }
+    const topicArn = revocationAlertTopicArn();
+    if (!topicArn) {
+      logger.warn('Linear authorization revoked, but no alert topic is configured — recorded only', {
+        linear_workspace_id: detail.linearWorkspaceId,
+        source: detail.source,
+      });
+      return;
+    }
+    await announceRevocation(detail, { topicArn });
+  };
+}
+
 export async function resolveLinearOauthToken(
   linearWorkspaceId: string,
   registryTableName: string,
@@ -227,6 +279,10 @@ export async function resolveLinearOauthToken(
   const region = options.region ?? process.env.AWS_REGION ?? 'us-east-1';
   const ddb = options.dynamoDbClient ?? makeDocClient({ region });
   const sm = options.secretsManagerClient ?? makeClient(SecretsManagerClient, { region });
+  // Caller-supplied recorder wins (tests inject one); otherwise the env-gated
+  // default covers every code path in this Lambda.
+  const recordRevocation = options.onAuthorizationRevoked
+    ?? defaultRevocationRecorder(ddb, registryTableName);
 
   // ─── Step 1: Registry row ────────────────────────────────────────
   const row = await getRegistryRow(ddb, registryTableName, linearWorkspaceId);
@@ -295,9 +351,9 @@ export async function resolveLinearOauthToken(
       // revocation. Report it here rather than letting the vault path fail
       // silently — the whole point of #812 is that the vault's "consent required"
       // is as terminal as Secrets Manager's `invalid_grant`, just quieter.
-      if (vaultConsentRequired && options.onAuthorizationRevoked) {
+      if (vaultConsentRequired && recordRevocation) {
         try {
-          await options.onAuthorizationRevoked({
+          await recordRevocation({
             linearWorkspaceId,
             workspaceSlug: row.workspace_slug,
             installedAt: row.installed_at,
@@ -328,7 +384,12 @@ export async function resolveLinearOauthToken(
     // A caller that genuinely holds registry write (or supplies its own recorder)
     // passes ``onAuthorizationRevoked`` explicitly. When the grant lands, flip the
     // default here in the same change — not before.
-    const refreshed = await refreshLinearToken(token, sm, row.oauth_secret_arn, options);
+    // Pass the RESOLVED recorder (caller-supplied or env-gated default) so the
+    // permanent-rejection branch inside the refresh can record + announce.
+    const refreshed = await refreshLinearToken(token, sm, row.oauth_secret_arn, {
+      ...options,
+      ...(recordRevocation && { onAuthorizationRevoked: recordRevocation }),
+    });
     if (!refreshed) {
       // Refresh failed — return null so the caller can fall back to
       // best-effort behaviour. Cache is already invalidated.
