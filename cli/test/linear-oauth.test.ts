@@ -532,13 +532,17 @@ describe('readExistingOauthTokens — keeps the fallback real when moving to the
 
   test('returns the token fields worth preserving', async () => {
     const got = await readExistingOauthTokens(async () => JSON.stringify({
-      access_token: 'lin_oauth_a', refresh_token: 'lin_refresh_b',
-      expires_at: '2026-09-01T00:00:00.000Z', scope: 'read write',
+      access_token: 'lin_oauth_a',
+      refresh_token: 'lin_refresh_b',
+      expires_at: '2026-09-01T00:00:00.000Z',
+      scope: 'read write',
       webhook_signing_secret: 'lin_wh_zzz',
     }), notFound);
     expect(got).toEqual({
-      access_token: 'lin_oauth_a', refresh_token: 'lin_refresh_b',
-      expires_at: '2026-09-01T00:00:00.000Z', scope: 'read write',
+      access_token: 'lin_oauth_a',
+      refresh_token: 'lin_refresh_b',
+      expires_at: '2026-09-01T00:00:00.000Z',
+      scope: 'read write',
     });
   });
 

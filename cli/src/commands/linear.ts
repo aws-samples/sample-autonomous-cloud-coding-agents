@@ -787,13 +787,13 @@ export function makeLinearCommand(): Command {
         let vaultUserId: string | undefined;
         let vaultAccessToken: string | undefined;
         if (useVault) {
-          let provider: { providerName: string; callbackUrl: string } | undefined;
+          let provider: { providerName: string; callbackUrl: string; created: boolean } | undefined;
           try {
             process.stdout.write('  → Registering the Linear app with the Identity vault...');
             provider = await upsertLinearCredentialProvider({
               region, workspaceSlug: slug, clientId, clientSecret,
             });
-            console.log(` ✓ (${provider.providerName})`);
+            console.log(' ✓');
           } catch (err) {
             console.log(' —');
             // A workspace already living on the vault must not be quietly moved to
@@ -803,16 +803,22 @@ export function makeLinearCommand(): Command {
             console.log(`  AgentCore Identity not available in ${region} — using Secrets Manager.`);
           }
 
+          // FIRST run: the callback URL was minted a moment ago, so it cannot be on
+          // the Linear app yet and consent is guaranteed to fail with "Invalid
+          // redirect_uri". Stop with the ONE thing to do rather than opening a
+          // browser to a dead end and listing URLs that are not actionable yet.
+          if (provider?.created) {
+            console.log('\n  One more Redirect URI to add to the Linear app:\n');
+            console.log(`    ${provider.callbackUrl}\n`);
+            console.log('  Then re-run:\n');
+            console.log(`    bgagent linear setup ${slug}\n`);
+            return;
+          }
+
           if (provider) {
             vaultProviderName = provider.providerName;
             vaultUserId = linearVaultUserIdForSlug(slug);
             const returnUrl = consentPageUrl!;
-            console.log(
-              '\n  The vault redirects through its own URL. Both of these must be listed as'
-              + '\n  Redirect URIs on the Linear app, or consent fails with "Invalid redirect_uri":'
-              + `\n    ${provider.callbackUrl}`
-              + `\n    ${returnUrl}\n`,
-            );
 
             const consent = await beginVaultConsent({
               region,
@@ -823,10 +829,12 @@ export function makeLinearCommand(): Command {
             });
 
             if (consent.authorizationUrl) {
-              console.log('  → Open this URL in any browser and Authorize:\n');
+              // One URL, one action. The page the browser lands on shows the session
+              // id and names itself, so printing it here is noise; the redirect URIs
+              // were dealt with on the first run above.
+              console.log('\n  → Open this URL and Authorize:\n');
               console.log(`    ${consent.authorizationUrl}\n`);
-              console.log(`  You will land on ${returnUrl}, which shows a session id.\n`);
-              const sessionId = (await promptLine('  Paste the session id shown on that page')).trim();
+              const sessionId = (await promptLine('  Paste the session id from the page you land on')).trim();
               if (!sessionId) {
                 throw new CliError(
                   'No session id entered, so the consent cannot be completed. Re-run '

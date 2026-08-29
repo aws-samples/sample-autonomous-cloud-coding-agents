@@ -84,13 +84,19 @@ export function linearVaultUserIdForSlug(workspaceSlug: string): string {
  * Create (or update, if it already exists) the CustomOauth2 credential provider
  * for a Linear workspace. Returns the provider name + the fixed callback URL the
  * operator must register as the Linear OAuth app's redirect_uri (spike F6).
+ *
+ * `created` distinguishes the first run from every later one, which matters
+ * because the callback URL ends in an id AgentCore mints here. On a first run that
+ * URL cannot yet be registered on the Linear app, so consent is guaranteed to fail
+ * with "Invalid redirect_uri" — the caller should print it and stop rather than
+ * open a browser to a dead end.
  */
 export async function upsertLinearCredentialProvider(args: {
   region: string;
   workspaceSlug: string;
   clientId: string;
   clientSecret: string;
-}): Promise<{ providerName: string; callbackUrl: string }> {
+}): Promise<{ providerName: string; callbackUrl: string; created: boolean }> {
   const control = makeClient(BedrockAgentCoreControlClient, { region: args.region });
   const providerName = linearVaultProviderName(args.workspaceSlug);
   const providerConfig: Oauth2ProviderConfigInput = {
@@ -117,7 +123,7 @@ export async function upsertLinearCredentialProvider(args: {
         oauth2ProviderConfigInput: providerConfig,
       }),
     );
-    return { providerName, callbackUrl: created.callbackUrl ?? '' };
+    return { providerName, callbackUrl: created.callbackUrl ?? '', created: true };
   } catch (err) {
     if (!isAlreadyExistsError(err)) throw err;
     // Provider exists (re-run) — update the client credentials in place so a
@@ -132,7 +138,7 @@ export async function upsertLinearCredentialProvider(args: {
     const existing = await control.send(
       new GetOauth2CredentialProviderCommand({ name: providerName }),
     );
-    return { providerName, callbackUrl: existing.callbackUrl ?? '' };
+    return { providerName, callbackUrl: existing.callbackUrl ?? '', created: false };
   }
 }
 

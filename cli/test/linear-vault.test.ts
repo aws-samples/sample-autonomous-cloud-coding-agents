@@ -92,7 +92,14 @@ describe('upsertLinearCredentialProvider', () => {
   test('creates a CustomOauth2 provider with Linear endpoints and returns its callback URL', async () => {
     controlSend.mockResolvedValueOnce({ callbackUrl: 'https://bedrock-agentcore.../callback/uuid' });
     const res = await upsertLinearCredentialProvider(args);
-    expect(res).toEqual({ providerName: 'bgagent-linear-oauth-acme', callbackUrl: 'https://bedrock-agentcore.../callback/uuid' });
+    // `created` distinguishes the first run: the callback URL is minted here, so on
+    // a first run it cannot be registered on the Linear app yet and consent would
+    // fail. Setup stops and asks for it instead of opening a doomed browser.
+    expect(res).toEqual({
+      providerName: 'bgagent-linear-oauth-acme',
+      callbackUrl: 'https://bedrock-agentcore.../callback/uuid',
+      created: true,
+    });
 
     const call = controlSend.mock.calls[0][0] as Tagged;
     expect(call._type).toBe('CreateProvider');
@@ -239,6 +246,25 @@ describe('finalizeVaultConsent', () => {
       userId: 'linear-workspace-org-abc',
       sessionUri: 'urn:expired',
     })).rejects.toThrow(/session expired/);
+  });
+});
+
+describe('upsertLinearCredentialProvider — re-runs', () => {
+  test('an EXISTING provider reports created:false, so setup proceeds to consent', async () => {
+    // If a re-run reported created:true, setup would stop and ask for the redirect
+    // URI forever and consent could never happen.
+    controlSend
+      .mockRejectedValueOnce(Object.assign(new Error('Credential provider with name: x already exists'), {
+        name: 'ValidationException',
+      }))
+      .mockResolvedValueOnce({}) // Update
+      .mockResolvedValueOnce({ callbackUrl: 'https://bedrock-agentcore.../callback/uuid' }); // Get
+
+    const res = await upsertLinearCredentialProvider({
+      region: 'us-east-1', workspaceSlug: 'acme', clientId: 'cid', clientSecret: 'sec',
+    });
+    expect(res.created).toBe(false);
+    expect(res.callbackUrl).toBe('https://bedrock-agentcore.../callback/uuid');
   });
 });
 
