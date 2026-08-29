@@ -392,6 +392,45 @@ export async function readExistingWebhookSecret(
 }
 
 /**
+ * The OAuth token fields of an existing bundle, or undefined when there is no
+ * usable one.
+ *
+ * Used when a workspace MOVES onto the Identity vault. A fresh vault onboarding
+ * has no Linear token to store, so the bundle is written without one — but a
+ * workspace that already had a working Secrets-Manager token would have it
+ * overwritten with empty strings, destroying the only credential that still works
+ * if the vault later becomes unreachable. Carrying it forward keeps that fallback
+ * real instead of vestigial.
+ *
+ * Same fail-closed contract as {@link readExistingWebhookSecret}: only a genuine
+ * "no such secret" yields undefined; anything else throws so the caller can refuse
+ * to proceed rather than silently discard a live credential.
+ */
+export async function readExistingOauthTokens(
+  fetchSecretString: () => Promise<string | undefined>,
+  isNotFound: (err: unknown) => boolean,
+): Promise<Pick<StoredLinearOauthToken, 'access_token' | 'refresh_token' | 'expires_at' | 'scope'> | undefined> {
+  let raw: string | undefined;
+  try {
+    raw = await fetchSecretString();
+  } catch (err) {
+    if (isNotFound(err)) return undefined; // genuine first install
+    throw err;
+  }
+  if (!raw) return undefined;
+  const bundle = JSON.parse(raw) as Partial<StoredLinearOauthToken>;
+  // A refresh token is what makes the bundle usable on its own; without one there
+  // is nothing worth preserving.
+  if (!bundle.refresh_token) return undefined;
+  return {
+    access_token: bundle.access_token ?? '',
+    refresh_token: bundle.refresh_token,
+    expires_at: bundle.expires_at ?? '',
+    scope: bundle.scope ?? '',
+  };
+}
+
+/**
  * Attempt a workspace's refresh and PERSIST the rotated token — the only way to
  * settle "is this expired token's grant still alive?" definitively.
  *

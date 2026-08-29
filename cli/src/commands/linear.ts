@@ -43,6 +43,7 @@ import {
   LINEAR_OAUTH_SECRET_PREFIX,
   linearOauthSecretName,
   type LinearTokenResponse,
+  readExistingOauthTokens,
   readExistingWebhookSecret,
   resolveWebhookSecretAction,
   StoredLinearOauthToken,
@@ -1079,15 +1080,43 @@ export function makeLinearCommand(): Command {
             + 'after fixing access.',
           );
         }
-        // On the vault path AgentCore owns the grant, so the bundle deliberately
-        // carries NO access or refresh token — only what re-consent and webhook
-        // verification need. Storing a copy would recreate the long-lived
-        // Secrets-Manager credential the vault exists to remove.
+        // On the vault path AgentCore owns the grant, so a FRESH vault onboarding
+        // stores no Linear token — only what re-consent and webhook verification
+        // need. But a workspace MOVING onto the vault already has a working token,
+        // and overwriting it with empty strings would destroy the one credential
+        // that still works if the vault later becomes unreachable, turning the
+        // documented Secrets-Manager fallback into a fiction.
+        let preservedTokens: Awaited<ReturnType<typeof readExistingOauthTokens>>;
+        if (vaultAccessToken) {
+          try {
+            preservedTokens = await readExistingOauthTokens(
+              async () => {
+                const prior = await sm.send(
+                  new GetSecretValueCommand({ SecretId: linearOauthSecretName(slug) }),
+                );
+                return prior.SecretString;
+              },
+              (err) => (err as { name?: string }).name === 'ResourceNotFoundException',
+            );
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            throw new CliError(
+              `Failed to read '${slug}''s existing Linear token before moving it onto the vault: `
+              + `${message}. Refusing to proceed — the re-write would discard a working `
+              + 'credential, leaving no fallback if the vault becomes unreachable.',
+            );
+          }
+          if (preservedTokens) {
+            console.log('  ✓ Keeping the existing Secrets Manager token as a fallback');
+          }
+        }
         const stored: StoredLinearOauthToken = {
-          access_token: tokenResponse?.access_token ?? '',
-          refresh_token: tokenResponse?.refresh_token ?? '',
-          expires_at: tokenResponse ? computeExpiresAt(tokenResponse.expires_in) : '',
-          scope: tokenResponse?.scope ?? '',
+          access_token: tokenResponse?.access_token ?? preservedTokens?.access_token ?? '',
+          refresh_token: tokenResponse?.refresh_token ?? preservedTokens?.refresh_token ?? '',
+          expires_at: tokenResponse
+            ? computeExpiresAt(tokenResponse.expires_in)
+            : preservedTokens?.expires_at ?? '',
+          scope: tokenResponse?.scope ?? preservedTokens?.scope ?? '',
           // Co-located so Lambda-side refresh works without per-Lambda
           // env vars — one secret holds everything needed to renew.
           client_id: clientId,

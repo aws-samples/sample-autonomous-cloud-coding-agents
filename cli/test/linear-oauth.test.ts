@@ -28,6 +28,7 @@ import {
   LINEAR_OAUTH_SCOPES,
   LINEAR_TOKEN_ENDPOINT,
   linearOauthSecretName,
+  readExistingOauthTokens,
   readExistingWebhookSecret,
   refreshAccessToken,
   resolveWebhookSecretAction,
@@ -519,5 +520,57 @@ describe('readExistingWebhookSecret — fail-closed pre-read (#612 review B1/B2)
     await expect(
       readExistingWebhookSecret(async () => '{not valid json', notFound),
     ).rejects.toThrow();
+  });
+});
+
+describe('readExistingOauthTokens — keeps the fallback real when moving to the vault', () => {
+  // A fresh vault onboarding stores no Linear token, which is the point. But a
+  // workspace MOVING onto the vault already has a working one, and writing empty
+  // strings over it would destroy the only credential that still works if the vault
+  // becomes unreachable — making the documented Secrets-Manager fallback a fiction.
+  const notFound = (err: unknown) => (err as { name?: string }).name === 'ResourceNotFoundException';
+
+  test('returns the token fields worth preserving', async () => {
+    const got = await readExistingOauthTokens(async () => JSON.stringify({
+      access_token: 'lin_oauth_a', refresh_token: 'lin_refresh_b',
+      expires_at: '2026-09-01T00:00:00.000Z', scope: 'read write',
+      webhook_signing_secret: 'lin_wh_zzz',
+    }), notFound);
+    expect(got).toEqual({
+      access_token: 'lin_oauth_a', refresh_token: 'lin_refresh_b',
+      expires_at: '2026-09-01T00:00:00.000Z', scope: 'read write',
+    });
+  });
+
+  test('a bundle with NO refresh token has nothing worth preserving', async () => {
+    // Without a refresh token the bundle cannot renew itself, so it is not a
+    // fallback — carrying it forward would only look like one.
+    const got = await readExistingOauthTokens(
+      async () => JSON.stringify({ access_token: 'lin_oauth_a', webhook_signing_secret: 'lin_wh_z' }),
+      notFound,
+    );
+    expect(got).toBeUndefined();
+  });
+
+  test('a genuine first install yields undefined, not an error', async () => {
+    const got = await readExistingOauthTokens(async () => {
+      throw Object.assign(new Error('nope'), { name: 'ResourceNotFoundException' });
+    }, notFound);
+    expect(got).toBeUndefined();
+  });
+
+  test('any OTHER read failure throws — silently discarding a live token is worse', async () => {
+    // AccessDenied/KMS/throttle must not be mistaken for "nothing to preserve".
+    await expect(readExistingOauthTokens(async () => {
+      throw Object.assign(new Error('denied'), { name: 'AccessDeniedException' });
+    }, notFound)).rejects.toThrow(/denied/);
+  });
+
+  test('a corrupt bundle surfaces rather than being read as empty', async () => {
+    await expect(readExistingOauthTokens(async () => '{not json', notFound)).rejects.toThrow();
+  });
+
+  test('an empty secret string yields undefined', async () => {
+    expect(await readExistingOauthTokens(async () => '', notFound)).toBeUndefined();
   });
 });
