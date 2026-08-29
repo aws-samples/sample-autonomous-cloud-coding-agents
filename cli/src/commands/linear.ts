@@ -47,6 +47,7 @@ import {
   StoredLinearOauthToken,
 } from '../linear-oauth';
 import {
+  clearPendingConsent,
   savePendingConsent,
   takePendingConsent,
 } from '../linear-pending-consent';
@@ -804,10 +805,13 @@ export function makeLinearCommand(): Command {
         }
 
         // HOSTED START. Consent happens in a browser that need not reach this
-        // machine, so there is nothing to listen for: persist the PKCE verifier +
-        // state and stop, telling the operator how to finish. Without persisting,
-        // the pasted code would be unusable — the verifier only exists in this
-        // process, and `state` still has to be checked for CSRF.
+        // machine, so there is nothing to listen for — but the terminal is still
+        // here, so ASK for the code rather than exiting and making the operator
+        // re-enter the client id and secret in a second invocation.
+        //
+        // The verifier is persisted anyway: it only exists in this process, so if
+        // the operator abandons the prompt or the shell dies, `--code` can still
+        // finish the consent instead of forcing a fresh one.
         if (setupHostedUrl && !resumed) {
           savePendingConsent({
             slug,
@@ -817,21 +821,35 @@ export function makeLinearCommand(): Command {
             redirectUri: setupRedirectUri,
             createdAt: new Date().toISOString(),
           });
-          console.log('\n  → Hosted consent. Open this URL in any browser:\n');
+          console.log('\n  → Open this URL in any browser and Authorize:\n');
           console.log(`    ${authorizationUrl}\n`);
-          console.log(`  After you Authorize you will land on:\n    ${setupHostedUrl}`);
+          console.log(`  You will land on ${setupHostedUrl}, which shows a code.`);
           console.log(
-            '\n  ⚠ That exact URL must be registered as a Callback URL on the Linear app,'
+            '\n  ⚠ That exact URL must be registered as a Redirect URI on the Linear app,'
             + '\n    or consent fails with "Invalid redirect_uri". It is a generated'
             + '\n    CloudFront domain, so it CHANGES if the consent page is ever recreated'
             + '\n    (flag toggled off/on, stack recreated). If consent starts failing after a'
             + '\n    redeploy, re-check this URL against the app — Linear accepts several, so'
-            + '\n    adding the new one is safe and the stale entry does no harm.',
+            + '\n    adding the new one is safe and the stale entry does no harm.\n',
           );
-          console.log('  It shows an authorization code. Finish with:\n');
-          console.log(`    bgagent linear setup ${slug} --code <code>\n`);
-          console.log('  (Codes are single-use and expire quickly, so run it promptly.)');
-          return;
+          const pasted = (await promptLine('  Paste the code shown on that page')).trim();
+          if (!pasted) {
+            // Nothing typed: leave the saved verifier in place so the operator can
+            // pick this up later rather than starting over.
+            console.log('\n  No code entered. When you have it, finish with:');
+            console.log(`    bgagent linear setup ${slug} --code <code>`);
+            console.log('  (Codes are single-use and expire quickly, so run it promptly.)');
+            return;
+          }
+          // Consume the pending entry we just wrote — the verifier is already in
+          // this process, and leaving a live one-time secret on disk after use is
+          // exactly what the store is designed to avoid.
+          clearPendingConsent(slug);
+          resumed = {
+            code: pasted,
+            codeVerifier: pkce.codeVerifier,
+            redirectUri: setupRedirectUri,
+          };
         }
 
         // When resuming, the code is already in hand — no listener, no browser.
