@@ -209,6 +209,10 @@ export function renderConsentPage(): string {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
+<!-- Empty data: icon so the browser does not auto-request /favicon.ico. The bucket
+     holds only this page, so that request 403s, and an operator watching the
+     network tab mid-consent sees a red failure that has nothing to do with them. -->
+<link rel="icon" href="data:,">
 <title>Linear authorized — ABCA</title>
 <style>
   :root { color-scheme: light dark; }

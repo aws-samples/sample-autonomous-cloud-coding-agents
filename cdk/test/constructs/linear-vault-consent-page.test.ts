@@ -82,7 +82,8 @@ describe('the consent page itself', () => {
     // Renders on a locked-down browser, and has nothing to exfiltrate the session
     // id to.
     expect(html).not.toMatch(/<script[^>]+src=/);
-    expect(html).not.toMatch(/<link[^>]+href=/);
+    // An inline `data:` icon is allowed — it fetches nothing. Anything remote is not.
+    expect(html).not.toMatch(/<link[^>]+href=["']?https?:/);
     expect(html).not.toMatch(/https?:\/\//);
   });
 
@@ -93,6 +94,12 @@ describe('the consent page itself', () => {
 
   test('degrades to a clear message when opened without a session_id', () => {
     expect(html).toContain('Nothing to finish here');
+  });
+
+  test('suppresses the favicon request, which would 403 from the page-only bucket', () => {
+    // The browser fetches /favicon.ico unprompted; nothing serves it, so an operator
+    // with devtools open sees a 403 during consent and reasonably suspects the flow.
+    expect(html).toContain('<link rel="icon" href="data:,">');
   });
 
   test('asks not to be indexed (it is a one-shot operator landing page)', () => {

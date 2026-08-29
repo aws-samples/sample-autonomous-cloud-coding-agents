@@ -1113,9 +1113,6 @@ export function makeLinearCommand(): Command {
               + 'credential, leaving no fallback if the vault becomes unreachable.',
             );
           }
-          if (preservedTokens) {
-            console.log('  ✓ Keeping the existing Secrets Manager token as a fallback');
-          }
         }
         const stored: StoredLinearOauthToken = {
           access_token: tokenResponse?.access_token ?? preservedTokens?.access_token ?? '',
@@ -1153,6 +1150,10 @@ export function makeLinearCommand(): Command {
         const secretName = linearOauthSecretName(slug);
         const oauthSecretArn = await upsertOauthSecret(sm, secretName, stored, slug);
         console.log(` ✓ (${secretName})`);
+        // After the progress line closes, not during it.
+        if (preservedTokens) {
+          console.log('  ✓ Kept the existing Secrets Manager token as a fallback');
+        }
 
         // ─── Step 5: Persist registry + user-mapping rows ─────────────
         const ddb = makeDocClient({ region });
