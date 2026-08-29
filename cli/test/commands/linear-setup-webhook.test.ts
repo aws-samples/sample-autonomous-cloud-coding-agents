@@ -177,6 +177,30 @@ describe('linear setup — second-workspace re-run preserves the per-workspace w
     global.fetch = originalFetch;
   });
 
+  test('refuses to proceed when the workspace has no signing secret of its own', async () => {
+    // Skipping here is exactly how a workspace ended up holding the stack-wide
+    // secret and 401ing on every delivery while looking installed. With nothing
+    // legitimate to keep there is nothing to skip TO, so it is refused rather than
+    // warned about — and refused BEFORE consent, so no browser work is wasted.
+    smSend.mockImplementation((cmd: unknown) => {
+      if (cmd instanceof GetSecretValueCommand) {
+        const id = (cmd as GetSecretValueCommand).input.SecretId ?? '';
+        if (String(id).includes('bgagent-linear-oauth-')) {
+          // No prior bundle at all — a genuine first install for this workspace.
+          return Promise.reject(Object.assign(new Error('nope'), { name: 'ResourceNotFoundException' }));
+        }
+        return Promise.resolve({ SecretString: 'lin_wh_stackWideOther' });
+      }
+      return Promise.resolve({});
+    });
+
+    const program = makeLinearCommand();
+    await expect(program.parseAsync([
+      'node', 'bgagent', 'setup', 'zzsecondws',
+      '--client-id', 'cid', '--client-secret', 'csecret', '--webhook-secret', '', '--no-browser',
+    ])).rejects.toThrow(/no webhook signing secret of its own/);
+  });
+
   test('the final per-workspace PutSecretValue keeps THIS workspace secret, not the stack-wide other', async () => {
     // SM.send routing by command + target:
     //  1. pre-read GetSecretValue(per-workspace bundle) → prior bundle carrying

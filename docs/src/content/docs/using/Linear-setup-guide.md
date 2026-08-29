@@ -88,7 +88,7 @@ https://bedrock-agentcore.us-east-1.amazonaws.com/identities/oauth2/callback/<id
 
 Add that URI to the app, re-run the same command, and it proceeds to consent. This happens once per workspace. (`bgagent linear app-template --slug <slug>` will include the URI once the provider exists, if you'd rather regenerate the whole template.)
 
-Press Enter to skip the signing secret if you don't have it yet and set it later with `bgagent linear update-webhook-secret <slug>`. If you skip it on a **second or later** workspace, setup falls back to the stack-wide value — which belongs to whichever workspace was installed first, so every delivery from this one fails signature verification with a 401 and no task is ever created. Setup warns when that happens, and warns again on later runs.
+The signing secret is **required** the first time a workspace is onboarded — there is nothing to fall back to, and a workspace without its own secret fails every signature check while looking perfectly installed. On later runs the prompt offers to keep the stored one, so re-running (say, to re-authorize after a revocation) doesn't send you back to the Linear app page.
 
 All three values can also be passed as flags (`--client-id`, `--client-secret`, `--webhook-secret`) for non-interactive use; interactive is preferred so secrets stay out of shell history.
 

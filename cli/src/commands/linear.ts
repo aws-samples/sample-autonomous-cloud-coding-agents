@@ -740,15 +740,75 @@ export function makeLinearCommand(): Command {
         if (!clientSecret) {
           throw new CliError('Client Secret is required.');
         }
+        // Whether this workspace ALREADY holds a signing secret of its own decides
+        // whether the prompt below may be skipped. Read before asking, because the
+        // answer changes the question: with nothing stored there is nothing to keep,
+        // so skipping could only leave the workspace unverifiable.
+        const sm = makeClient(SecretsManagerClient, { region });
+        let existingWebhookSecret: string | undefined;
+        try {
+          existingWebhookSecret = await readExistingWebhookSecret(
+            async () => {
+              const prior = await sm.send(new GetSecretValueCommand({ SecretId: linearOauthSecretName(slug) }));
+              return prior.SecretString;
+            },
+            (err) => (err as { name?: string }).name === 'ResourceNotFoundException',
+          );
+        } catch (err) {
+          const errorName = (err as { name?: string }).name;
+          const message = err instanceof Error ? err.message : String(err);
+          throw new CliError(
+            `Failed to read the existing Linear webhook secret for '${slug}' before re-write: `
+            + `${errorName ?? 'Error'}: ${message}. Refusing to proceed — continuing could clobber `
+            + 'this workspace\'s webhook signing secret with the stack-wide value (a 401 on every '
+            + 'delivery). Likely an IAM/KMS gap: confirm your CLI principal has '
+            + '`secretsmanager:GetSecretValue` (and kms:Decrypt if a CMK) on '
+            + `${linearOauthSecretName(slug)}, or run \`bgagent linear update-webhook-secret ${slug}\` `
+            + 'after fixing access.',
+          );
+        }
+        const stackWideAlreadyConfigured = await isWebhookSecretConfigured(sm, webhookSecretArn!);
+        // The stack-wide value is only used to tell an INHERITED secret from one this
+        // workspace owns; they are byte-identical on disk otherwise.
+        let stackWideSecretValue: string | undefined;
+        if (stackWideAlreadyConfigured && webhookSecretArn) {
+          try {
+            const sw = await sm.send(new GetSecretValueCommand({ SecretId: webhookSecretArn }));
+            stackWideSecretValue = sw.SecretString?.trim();
+          } catch {
+            stackWideSecretValue = undefined;
+          }
+        }
+        // A stored secret equal to the stack-wide one was inherited by an earlier
+        // mirror, not read from this workspace's webhook — so it does not count as
+        // "already have one", and the operator must supply the real thing.
+        const holdsOwnWebhookSecret = Boolean(
+          existingWebhookSecret && existingWebhookSecret !== stackWideSecretValue,
+        );
+
         // Asked HERE, with the other two, because all three come off the same Linear
         // app form and the operator is looking at it right now. It used to be
         // collected after consent, and only when nothing was stored — so a second
         // workspace silently inherited the stack-wide secret instead of being asked
         // for its own, and then 401'd on every delivery.
+        const webhookSecretPrompt = holdsOwnWebhookSecret
+          ? 'Webhook signing secret (Enter to keep the one already stored): '
+          : 'Webhook signing secret (lin_wh_…, from the app\'s Webhooks section): ';
         const suppliedWebhookSecret = (
-          (opts.webhookSecret as string | undefined)
-          ?? await promptSecret('Webhook signing secret (lin_wh_…, from the app\'s Webhooks section; Enter to skip): ')
+          (opts.webhookSecret as string | undefined) ?? await promptSecret(webhookSecretPrompt)
         ).trim();
+        if (!suppliedWebhookSecret && !holdsOwnWebhookSecret) {
+          // Nothing entered and nothing legitimate stored. Skipping here is what left
+          // a workspace holding the stack-wide secret and 401ing on every delivery,
+          // so it is refused rather than warned about.
+          throw new CliError(
+            `Workspace '${slug}' has no webhook signing secret of its own, so one is required.\n`
+            + '  Copy it from the Linear app you are onboarding: Settings → API → your app →\n'
+            + '  Webhooks → Webhook signing secret (starts with `lin_wh_`).\n'
+            + '  Without it, Linear\'s deliveries fail signature verification and no task is\n'
+            + '  ever created — the integration looks installed and does nothing.',
+          );
+        }
         if (suppliedWebhookSecret && !suppliedWebhookSecret.startsWith('lin_wh_')) {
           // Reject before consent rather than after: a bad paste is cheap to fix now
           // and expensive once the operator has been through the browser.
@@ -1071,45 +1131,7 @@ export function makeLinearCommand(): Command {
 
         // ─── Step 4: Persist token to per-workspace Secrets Manager ───
         process.stdout.write('  → Storing OAuth token...');
-        const sm = makeClient(SecretsManagerClient, { region });
         const now = new Date().toISOString();
-        // Preserve any EXISTING per-workspace webhook signing secret before the
-        // OAuth overwrite below. Re-running `setup` on an already-installed
-        // workspace must NOT clobber its working signing secret with the
-        // stack-wide fallback (which belongs to whichever workspace installed
-        // first) — that silently breaks signature verification (401 "Invalid
-        // signature") for every workspace after the first in a multi-workspace
-        // deployment. Rotation stays the job of `update-webhook-secret`.
-        // Fail CLOSED: read this workspace's existing signing secret before the
-        // overwrite. Only ResourceNotFoundException is a clean first-install;
-        // any other Secrets Manager error (AccessDenied, KMSAccessDenied,
-        // Throttling, network) — or a corrupt bundle — must surface, NOT default
-        // to undefined (which would mirror the stack-wide secret over a working
-        // per-workspace one, producing a silent 401 on every webhook delivery
-        // behind a green "Setup complete"). Extracted to
-        // readExistingWebhookSecret + unit-tested.
-        let existingWebhookSecret: string | undefined;
-        try {
-          existingWebhookSecret = await readExistingWebhookSecret(
-            async () => {
-              const prior = await sm.send(new GetSecretValueCommand({ SecretId: linearOauthSecretName(slug) }));
-              return prior.SecretString;
-            },
-            (err) => (err as { name?: string }).name === 'ResourceNotFoundException',
-          );
-        } catch (err) {
-          const errorName = (err as { name?: string }).name;
-          const message = err instanceof Error ? err.message : String(err);
-          throw new CliError(
-            `Failed to read the existing Linear webhook secret for '${slug}' before re-write: `
-            + `${errorName ?? 'Error'}: ${message}. Refusing to proceed — continuing could clobber `
-            + 'this workspace\'s webhook signing secret with the stack-wide value (a 401 on every '
-            + 'delivery). Likely an IAM/KMS gap: confirm your CLI principal has '
-            + '`secretsmanager:GetSecretValue` (and kms:Decrypt if a CMK) on '
-            + `${linearOauthSecretName(slug)}, or run \`bgagent linear update-webhook-secret ${slug}\` `
-            + 'after fixing access.',
-          );
-        }
         // On the vault path AgentCore owns the grant, so a FRESH vault onboarding
         // stores no Linear token — only what re-consent and webhook verification
         // need. But a workspace MOVING onto the vault already has a working token,
@@ -1249,21 +1271,8 @@ export function makeLinearCommand(): Command {
         //   • prompt        — nothing to go on: ask for the signing secret.
         // Rotation is not setup's job: use
         // `bgagent linear update-webhook-secret <slug>` to rotate.
-        const stackWideAlreadyConfigured = await isWebhookSecretConfigured(sm, webhookSecretArn!);
+        // Both already read before the prompt above.
         let webhookSigningSecret: string | undefined;
-
-        // Fetch the stack-wide value so an INHERITED secret can be told apart from
-        // one this workspace actually owns; they are indistinguishable otherwise.
-        let stackWideSecretValue: string | undefined;
-        if (stackWideAlreadyConfigured && webhookSecretArn) {
-          try {
-            const sw = await sm.send(new GetSecretValueCommand({ SecretId: webhookSecretArn }));
-            stackWideSecretValue = sw.SecretString?.trim();
-          } catch {
-            // Best-effort: only used to decide whether to WARN, never to write.
-            stackWideSecretValue = undefined;
-          }
-        }
         const secretAction = resolveWebhookSecretAction(
           existingWebhookSecret,
           stackWideAlreadyConfigured,
