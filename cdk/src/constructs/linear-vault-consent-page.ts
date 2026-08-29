@@ -233,8 +233,6 @@ export function renderConsentPage(): string {
   <p id="lede"></p>
   <pre id="session"></pre>
   <p class="muted" id="hint"></p>
-  <pre id="command"></pre>
-  <p class="muted">You can close this tab once the command has run.</p>
 </main>
 <script>
   (function () {
@@ -249,27 +247,22 @@ export function renderConsentPage(): string {
     var lede = document.getElementById('lede');
     var session = document.getElementById('session');
     var hint = document.getElementById('hint');
-    var command = document.getElementById('command');
-    if (sessionId) {
+    // The CLI is sitting on a prompt waiting for this value, so the whole job of
+    // this page is to show one thing to copy. It used to also print a command to
+    // run, which was both a second thing to read and wrong as soon as the command
+    // changed — the page ships with the stack and drifts from the CLI silently.
+    if (sessionId || code) {
       title.textContent = 'Linear authorized';
-      lede.textContent = 'Copy this session id and paste it back into your terminal:';
+      lede.textContent = 'Paste this into your terminal:';
       // Assigned as TEXT, never as markup — this value is untrusted query input.
-      session.textContent = sessionId;
-      hint.textContent = 'Then finish onboarding with:';
-      command.textContent = 'bgagent linear vault-setup <workspace> --session ' + sessionId;
-    } else if (code) {
-      title.textContent = 'Linear authorized';
-      lede.textContent = 'Copy this authorization code and paste it back into your terminal:';
-      session.textContent = code;
-      hint.textContent = 'Then finish onboarding with (the code is single-use and expires quickly):';
-      command.textContent = 'bgagent linear setup <workspace> --code ' + code
-        + (state ? ' --state ' + state : '');
+      session.textContent = sessionId || code;
+      hint.textContent = 'You can close this tab.';
     } else {
       title.textContent = 'Nothing to finish here';
-      lede.textContent = 'This page expects a code or session_id from an authorization redirect. '
-        + 'Start onboarding with: bgagent linear setup <workspace> --hosted';
+      lede.textContent = 'This page shows the value that finishes onboarding, and only after '
+        + 'an authorization redirect sends you here. Run: bgagent linear setup <workspace>';
       session.remove();
-      command.remove();
+      hint.remove();
     }
   })();
 </script>

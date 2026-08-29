@@ -87,9 +87,18 @@ describe('the consent page itself', () => {
     expect(html).not.toMatch(/https?:\/\//);
   });
 
-  test('reads session_id from the query string and tells the operator what to run', () => {
+  test('reads both flows from the query string', () => {
     expect(html).toContain("params.get('session_id')");
-    expect(html).toContain('bgagent linear vault-setup');
+    expect(html).toContain("params.get('code')");
+  });
+
+  test('does NOT print a command to run', () => {
+    // The CLI is already waiting on a prompt for this value, so a command here is a
+    // second thing to read. It is also a drift hazard: the page ships with the stack
+    // and kept telling operators to run `vault-setup` after that command was removed.
+    expect(html).not.toContain('bgagent linear vault-setup');
+    expect(html).not.toContain('--session');
+    expect(html).not.toContain('--code');
   });
 
   test('degrades to a clear message when opened without a session_id', () => {
@@ -171,13 +180,12 @@ function runPageScript(search: string): {
 }
 
 describe('the consent page, executed', () => {
-  test('extracts session_id and renders it plus the command to run', () => {
+  test('shows the session id and nothing else to act on', () => {
     const id = 'urn:ietf:params:oauth:request_uri:Y2VlYThlMjc';
     const r = runPageScript(`?session_id=${encodeURIComponent(id)}`);
     expect(r.title).toBe('Linear authorized');
     expect(r.session).toBe(id);
-    expect(r.command).toContain(id);
-    expect(r.command).toContain('bgagent linear vault-setup');
+    expect(r.lede).toBe('Paste this into your terminal:');
     expect(r.markupWrites).toEqual([]);
   });
 
@@ -194,20 +202,17 @@ describe('the consent page, executed', () => {
   test('with no session_id it explains itself and removes the empty slots', () => {
     const r = runPageScript('');
     expect(r.title).toBe('Nothing to finish here');
-    expect(r.lede).toContain('linear setup');
-    expect(r.removed).toEqual(expect.arrayContaining(['session', 'command']));
+    expect(r.lede).toContain('bgagent linear setup');
+    expect(r.removed).toEqual(expect.arrayContaining(['session', 'hint']));
   });
 
-  test('the DIRECT-flow redirect (code + state) is served by the same page', () => {
+  test('the DIRECT-flow redirect (code) is served by the same page', () => {
     // Serving both flows from one page is what removes localhost entirely: the
     // Linear app can register this URL instead of a loopback the browser may not
-    // be able to reach.
+    // be able to reach. Both render identically — one value to copy.
     const r = runPageScript('?code=abc123&state=st-9');
     expect(r.title).toBe('Linear authorized');
     expect(r.session).toBe('abc123');
-    expect(r.command).toContain('bgagent linear setup');
-    expect(r.command).toContain('--code abc123');
-    expect(r.command).toContain('--state st-9');
     expect(r.markupWrites).toEqual([]);
   });
 
@@ -220,7 +225,6 @@ describe('the consent page, executed', () => {
 
   test('session_id wins when both are present, so the vault bounce is unambiguous', () => {
     const r = runPageScript('?session_id=urn:sess&code=abc123');
-    expect(r.command).toContain('vault-setup');
     expect(r.session).toBe('urn:sess');
   });
 });
