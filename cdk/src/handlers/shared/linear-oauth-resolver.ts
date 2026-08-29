@@ -357,6 +357,12 @@ export async function resolveLinearOauthToken(
         // returned so downstream SM-fallback wiring stays populated.
         oauthSecretArn: row.oauth_secret_arn,
         providerName: row.provider_name,
+        // The agent mints its own token and must use the SAME subject. Omitting it
+        // here — while the Secrets-Manager return below carried it — meant the
+        // SUCCESSFUL vault path was the one that failed to pass it on, so the agent
+        // derived the legacy subject, found no grant, and dropped back to a dead
+        // Secrets-Manager token: reactions 401'd while the Lambda's own calls worked.
+        ...(row.vault_user_id && { vaultUserId: row.vault_user_id }),
       };
     }
     // Anything other than a token ⇒ fall through to Secrets-Manager resolution.

@@ -156,6 +156,30 @@ describe('resolveLinearOauthToken', () => {
       else process.env.LINEAR_VAULT_ENABLED = savedEnabled;
     });
 
+    test('RETURNS the vault subject on the vault-success path, for the agent', async () => {
+      // The agent mints its own token and must use the same subject, so the resolver
+      // has to hand it back — on the path that SUCCEEDS. It was only on the
+      // Secrets-Manager return, so a working vault resolution passed nothing on and
+      // the agent silently fell back to a dead token: reactions 401'd on an issue
+      // whose task was otherwise running fine.
+      const clients = makeFakeClients({
+        registryItem: {
+          workspace_slug: 'acme',
+          oauth_secret_arn: 'arn:secret:acme',
+          status: 'active',
+          provider_name: 'bgagent-linear-oauth-acme',
+          vault_user_id: 'linear-ws-acme',
+        },
+        storedToken: makeStoredToken({ access_token: 'lin_oauth_SM' }),
+      });
+      const result = await resolveLinearOauthToken('ws-uuid-1', REGISTRY_TABLE, {
+        ...clients,
+        resolveViaVault: async () => ({ kind: 'token', accessToken: 'lin_oauth_vault' }),
+      });
+      expect(result.accessToken).toBe('lin_oauth_vault');
+      expect(result.vaultUserId).toBe('linear-ws-acme');
+    });
+
     test('passes the RECORDED vault_user_id through, not a derived one', async () => {
       // The subject is stored because it cannot be derived: it is slug-based, so one
       // consent can onboard a workspace whose organization UUID is not yet known.
