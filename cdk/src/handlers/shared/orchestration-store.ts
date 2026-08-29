@@ -182,6 +182,7 @@ export interface OrchestrationReleaseContext {
    *  vault. Workspace id rides the existing credentials_ref stamp on release.
    *  Absent ⇒ Secrets-Manager path. */
   readonly linear_provider_name?: string;
+  readonly linear_vault_user_id?: string;
   readonly linear_project_id?: string;
   /** Jira parent workflow destination overrides captured from the project map. */
   readonly jira_status_on_start?: string;
@@ -486,6 +487,9 @@ export async function seedOrchestration(
     }),
     ...(releaseContext.linear_provider_name !== undefined && {
       linear_provider_name: releaseContext.linear_provider_name,
+    }),
+    ...(releaseContext.linear_vault_user_id !== undefined && {
+      linear_vault_user_id: releaseContext.linear_vault_user_id,
     }),
     ...(releaseContext.linear_project_id !== undefined && {
       linear_project_id: releaseContext.linear_project_id,
@@ -990,6 +994,9 @@ export async function loadOrchestration(
       }),
       ...(metaItem.linear_provider_name !== undefined && {
         linear_provider_name: metaItem.linear_provider_name as string,
+      }),
+      ...(metaItem.linear_vault_user_id !== undefined && {
+        linear_vault_user_id: metaItem.linear_vault_user_id as string,
       }),
       ...(metaItem.linear_project_id !== undefined && {
         linear_project_id: metaItem.linear_project_id as string,

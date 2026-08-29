@@ -146,7 +146,7 @@ describe('beginVaultConsent', () => {
     region: 'us-east-1',
     workloadName: 'abca_linear_oauth',
     providerName: 'bgagent-linear-oauth-acme',
-    linearWorkspaceId: 'org-uuid',
+    userId: 'linear-workspace-org-uuid',
     returnUrl: 'http://localhost:8080/oauth/callback',
   };
 
@@ -220,7 +220,7 @@ describe('finalizeVaultConsent', () => {
     dataSend.mockResolvedValueOnce({});
     await finalizeVaultConsent({
       region: 'us-east-1',
-      linearWorkspaceId: 'org-abc',
+      userId: 'linear-workspace-org-abc',
       sessionUri: 'urn:ietf:params:oauth:request_uri:abc123',
     });
     const call = dataSend.mock.calls[0][0] as Tagged;
@@ -235,7 +235,7 @@ describe('finalizeVaultConsent', () => {
     dataSend.mockRejectedValueOnce(new Error('InvalidInputException: session expired'));
     await expect(finalizeVaultConsent({
       region: 'us-east-1',
-      linearWorkspaceId: 'org-abc',
+      userId: 'linear-workspace-org-abc',
       sessionUri: 'urn:expired',
     })).rejects.toThrow(/session expired/);
   });

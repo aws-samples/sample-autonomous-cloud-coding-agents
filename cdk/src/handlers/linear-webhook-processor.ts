@@ -880,6 +880,10 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     if (resolved.providerName) {
       channelMetadata.linear_provider_name = resolved.providerName;
       channelMetadata.linear_workspace_id = workspaceId;
+      // The subject the grant is bound to. Recorded rather than derived from the
+      // workspace id, so a single consent can onboard a workspace whose org UUID
+      // is not yet known. Absent ⇒ the agent derives the legacy form.
+      if (resolved.vaultUserId) channelMetadata.linear_vault_user_id = resolved.vaultUserId;
     }
     resolvedAccessToken = resolved.accessToken;
     // Probe the issue once for native paperclip attachments + project docs. The
@@ -977,6 +981,9 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       // release from credentials_ref).
       ...(channelMetadata.linear_provider_name && {
         linear_provider_name: channelMetadata.linear_provider_name,
+      }),
+      ...(channelMetadata.linear_vault_user_id && {
+        linear_vault_user_id: channelMetadata.linear_vault_user_id,
       }),
       linear_project_id: projectId,
       // The label this project actually triggers on, persisted at seed time

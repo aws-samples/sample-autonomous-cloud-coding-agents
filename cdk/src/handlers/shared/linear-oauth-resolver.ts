@@ -88,6 +88,15 @@ export interface RegistryRow {
    * (`oauth_secret_arn`) if vault issuance is unavailable.
    */
   readonly provider_name?: string;
+  /**
+   * The user id the vault grant was bound to at consent time.
+   *
+   * Recorded rather than derived from `linear_workspace_id`, because the
+   * organization UUID is only knowable once a token exists — deriving it forces a
+   * second consent just to learn the org. Absent on workspaces onboarded before
+   * this was stored; those fall back to the derived form.
+   */
+  readonly vault_user_id?: string;
 }
 
 export interface StoredOauthToken {
@@ -218,6 +227,11 @@ export interface ResolvedLinearToken {
    * agent stays on the SM path.
    */
   readonly providerName?: string;
+  /**
+   * The user id the vault grant is bound to, as recorded at consent time. Passed
+   * to the agent so it mints under the same subject; see RegistryRow.vault_user_id.
+   */
+  readonly vaultUserId?: string;
 }
 
 /**
@@ -312,7 +326,10 @@ export async function resolveLinearOauthToken(
   const workloadName = vaultWorkloadIdentityName();
   if (row.provider_name && workloadName && (isVaultEnabled() || options.resolveViaVault)) {
     const viaVault = options.resolveViaVault ?? ((wsId, provider, wl) =>
-      resolveLinearTokenViaVault({ linearWorkspaceId: wsId, providerName: provider, region }, wl));
+      resolveLinearTokenViaVault(
+        { linearWorkspaceId: wsId, providerName: provider, vaultUserId: row.vault_user_id, region },
+        wl,
+      ));
     const vaultResult = await viaVault(linearWorkspaceId, row.provider_name, workloadName);
     // A vault grant that needs consent is DEAD, not slow — remember it so the
     // no-token-anywhere path below can report it. Deliberately NOT latched here:
@@ -410,6 +427,7 @@ export async function resolveLinearOauthToken(
     // Carried through even on the SM path so the agent's channel_metadata gets
     // the provider name and can attempt the vault itself (RFC #249 Phase 1).
     ...(row.provider_name && { providerName: row.provider_name }),
+    ...(row.vault_user_id && { vaultUserId: row.vault_user_id }),
   };
 }
 

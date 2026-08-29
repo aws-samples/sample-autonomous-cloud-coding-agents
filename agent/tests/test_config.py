@@ -327,6 +327,45 @@ class TestResolveLinearApiTokenVaultPath:
             "linear_oauth_secret_arn": "arn:sm:acme",
         }
 
+    def test_prefers_the_recorded_vault_user_id(self, monkeypatch):
+        """The subject comes from the task, not from the workspace UUID.
+
+        Consent binds the grant to a slug-derived subject, because the organization
+        UUID is not knowable until a token exists. Deriving it here would look up a
+        grant that was never created, so every mint on a correctly onboarded
+        workspace would fail as "consent required" and fall back to Secrets Manager.
+        """
+        self._enable_vault(monkeypatch)
+        mock_client = MagicMock()
+        mock_client.get_workload_access_token_for_user_id.return_value = {
+            "workloadAccessToken": "wat-xyz",
+        }
+        mock_client.get_resource_oauth2_token.return_value = {"accessToken": "lin_oauth_vault"}
+        meta = {**self._meta(), "linear_vault_user_id": "linear-ws-acme"}
+        with patch("boto3.client", return_value=mock_client):
+            assert resolve_linear_api_token(meta) == "lin_oauth_vault"
+        mock_client.get_workload_access_token_for_user_id.assert_called_once_with(
+            workloadName="abca_linear_oauth", userId="linear-ws-acme"
+        )
+
+    def test_falls_back_to_derived_user_id_when_none_recorded(self, monkeypatch):
+        """Workspaces onboarded before the id was recorded keep working.
+
+        Their grant really is under linear-workspace-<orgId>; preferring the
+        recorded id must not orphan them.
+        """
+        self._enable_vault(monkeypatch)
+        mock_client = MagicMock()
+        mock_client.get_workload_access_token_for_user_id.return_value = {
+            "workloadAccessToken": "wat-xyz",
+        }
+        mock_client.get_resource_oauth2_token.return_value = {"accessToken": "lin_oauth_vault"}
+        with patch("boto3.client", return_value=mock_client):
+            assert resolve_linear_api_token(self._meta()) == "lin_oauth_vault"
+        mock_client.get_workload_access_token_for_user_id.assert_called_once_with(
+            workloadName="abca_linear_oauth", userId="linear-workspace-org-abc"
+        )
+
     def test_mints_via_vault_and_caches(self, monkeypatch):
         """Happy path: user-bound workload token then exchange → access token, no SM read."""
         self._enable_vault(monkeypatch)
@@ -345,9 +384,10 @@ class TestResolveLinearApiTokenVaultPath:
         # customParameters are part of the vault's cache key: omitting them made
         # every resolve a cache miss ("needs consent") despite a valid cached
         # grant, silently degrading to Secrets Manager. Live-proven.
-        assert mock_client.get_resource_oauth2_token.call_args.kwargs[
-            "customParameters"
-        ] == {"actor": "app", "prompt": "consent"}
+        assert mock_client.get_resource_oauth2_token.call_args.kwargs["customParameters"] == {
+            "actor": "app",
+            "prompt": "consent",
+        }
         mock_client.get_secret_value.assert_not_called()
         monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
 

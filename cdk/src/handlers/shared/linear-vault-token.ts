@@ -80,6 +80,19 @@ export interface VaultTokenInput {
   readonly linearWorkspaceId: string;
   /** Credential-provider name recorded by `bgagent linear setup`. */
   readonly providerName: string;
+  /**
+   * The user id the grant was actually bound to, as recorded at consent time.
+   *
+   * Preferred over deriving it, because the organization UUID is only knowable
+   * AFTER a token exists — so an onboarding that derives the id from it needs one
+   * consent to learn the org, then a second to bind the vault. Recording the id
+   * instead lets `bgagent linear setup` bind a grant before it knows the org, and
+   * onboard with a single consent.
+   *
+   * Absent on workspaces onboarded before this was recorded; those fall back to
+   * the derived form, which is what their grant is under.
+   */
+  readonly vaultUserId?: string;
   /** AWS region for the SDK client. */
   readonly region?: string;
   /** Override client for testing. */
@@ -122,7 +135,8 @@ export async function resolveLinearTokenViaVault(
 ): Promise<VaultTokenResult> {
   const region = input.region ?? process.env.AWS_REGION ?? 'us-east-1';
   const client = input.client ?? makeClient(BedrockAgentCoreClient, { region });
-  const userId = workspaceUserId(input.linearWorkspaceId);
+  // Recorded id wins; derive only for workspaces onboarded before it was stored.
+  const userId = input.vaultUserId?.trim() || workspaceUserId(input.linearWorkspaceId);
 
   try {
     // Step 1: user-bound workload token (F2).

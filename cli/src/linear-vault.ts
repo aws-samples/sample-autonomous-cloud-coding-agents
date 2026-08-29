@@ -66,6 +66,21 @@ export function linearVaultUserId(linearWorkspaceId: string): string {
 }
 
 /**
+ * Vault subject derived from the workspace SLUG rather than its organization UUID.
+ *
+ * The UUID is only knowable once a Linear token exists, so binding the grant to it
+ * forces two consents during onboarding: one to learn the organization, a second to
+ * bind the vault. The slug is known from the command line, so a slug-derived
+ * subject lets a single consent onboard a workspace. The chosen id is recorded on
+ * the registry row (`vault_user_id`) because it is no longer derivable at runtime.
+ *
+ * Distinct prefix from {@link linearVaultUserId} so the two forms can never collide.
+ */
+export function linearVaultUserIdForSlug(workspaceSlug: string): string {
+  return `linear-ws-${workspaceSlug}`;
+}
+
+/**
  * Create (or update, if it already exists) the CustomOauth2 credential provider
  * for a Linear workspace. Returns the provider name + the fixed callback URL the
  * operator must register as the Linear OAuth app's redirect_uri (spike F6).
@@ -191,14 +206,15 @@ export interface VaultConsentStep {
  */
 export async function finalizeVaultConsent(args: {
   region: string;
-  linearWorkspaceId: string;
+  /** The subject the consent was started under — must match beginVaultConsent. */
+  userId: string;
   sessionUri: string;
   client?: BedrockAgentCoreClient;
 }): Promise<void> {
   const dataplane = args.client ?? makeClient(BedrockAgentCoreClient, { region: args.region });
   await dataplane.send(
     new CompleteResourceTokenAuthCommand({
-      userIdentifier: { userId: linearVaultUserId(args.linearWorkspaceId) },
+      userIdentifier: { userId: args.userId },
       sessionUri: args.sessionUri,
     }),
   );
@@ -220,11 +236,12 @@ export async function beginVaultConsent(args: {
   region: string;
   workloadName: string;
   providerName: string;
-  linearWorkspaceId: string;
+  /** The subject to bind the grant to; recorded so runtime can reuse it. */
+  userId: string;
   returnUrl: string;
 }): Promise<VaultConsentStep> {
   const dataplane = makeClient(BedrockAgentCoreClient, { region: args.region });
-  const userId = linearVaultUserId(args.linearWorkspaceId);
+  const userId = args.userId;
 
   async function requestToken(
     forceAuth: boolean,

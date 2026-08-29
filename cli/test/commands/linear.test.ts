@@ -273,22 +273,35 @@ describe('renderLinearAppTemplate', () => {
     expect(renderLinearAppTemplate({ appName: '   ' })).toContain('Application name:    bgagent');
   });
 
-  test('lists each redirect URI with the command that uses it', () => {
-    // Three URIs, three commands; registering the wrong subset presents as an
-    // opaque "Invalid redirect_uri" with no clue which entry was wanted.
+  test('lists exactly the URIs the single setup command uses — no menu', () => {
+    // One command means one set of URIs. Listing per-command alternatives was the
+    // menu that got the wrong subset registered and produced an opaque
+    // "Invalid redirect_uri".
     const out = renderLinearAppTemplate({
       hostedConsentUrl: 'https://d2ud1woydykuxp.cloudfront.net/',
       vaultCallbackUrl: 'https://bedrock-agentcore.us-east-1.amazonaws.com/identities/oauth2/callback/f88',
     });
-    expect(out).toMatch(/bgagent linear setup\s+\(the default; browser anywhere/);
-    expect(out).toMatch(/bgagent linear setup --localhost/);
-    expect(out).toMatch(/bgagent linear vault-setup/);
+    expect(out).toContain('https://d2ud1woydykuxp.cloudfront.net/');
+    expect(out).toContain('https://bedrock-agentcore.us-east-1.amazonaws.com/identities/oauth2/callback/f88');
+    // The loopback is NOT listed when a hosted page exists — setup will not use it.
+    expect(out).not.toContain('http://localhost:8080/oauth/callback');
+    // And no vault-setup: that command no longer exists.
+    expect(out).not.toContain('vault-setup');
   });
 
-  test('the hosted URI is listed FIRST when present — it is the default', () => {
-    const hosted = 'https://d2ud1woydykuxp.cloudfront.net/';
-    const out = renderLinearAppTemplate({ hostedConsentUrl: hosted });
-    expect(out.indexOf(hosted)).toBeLessThan(out.indexOf('http://localhost:8080/oauth/callback'));
+  test('falls back to the loopback URI only when there is no hosted page', () => {
+    const out = renderLinearAppTemplate();
+    expect(out).toContain('http://localhost:8080/oauth/callback');
+    expect(out).toMatch(/only works when your browser runs on the/);
+    expect(out).toContain('enableLinearIdentityVault=true');
+  });
+
+  test('the hosted URI REPLACES the loopback rather than joining it', () => {
+    // Two URIs for two flows was the confusion; setup picks one substrate, so the
+    // template lists one.
+    const out = renderLinearAppTemplate({ hostedConsentUrl: 'https://d2ud1woydykuxp.cloudfront.net/' });
+    expect(out).toContain('https://d2ud1woydykuxp.cloudfront.net/');
+    expect(out).not.toContain('localhost:8080');
   });
 
   test('lists the hosted URI BOTH with and without a trailing slash', () => {
@@ -300,15 +313,17 @@ describe('renderLinearAppTemplate', () => {
     expect(out).toContain('    https://d2ud1woydykuxp.cloudfront.net\n');
   });
 
-  test('without a vault callback it says WHY it cannot be shown yet', () => {
-    const out = renderLinearAppTemplate();
-    expect(out).toMatch(/AgentCore mints at provider-create time/);
-    expect(out).toContain('vault-setup');
+  test('with a hosted page but no vault callback, it says setup will print one', () => {
+    // The vault callback id does not exist until the provider is created, which
+    // `setup` does on its first run — so the template promises it rather than
+    // pretending it is unavailable.
+    const out = renderLinearAppTemplate({ hostedConsentUrl: 'https://d2ud1woydykuxp.cloudfront.net/' });
+    expect(out).toMatch(/prints one more URI the first time it runs/);
   });
 
-  test('without a hosted URL it explains the cloud-desktop limitation and the fix', () => {
+  test('without a hosted URL it explains the loopback limitation and the fix', () => {
     const out = renderLinearAppTemplate();
-    expect(out).toMatch(/cloud desktop/i);
+    expect(out).toMatch(/same machine as the CLI/);
     expect(out).toContain('enableLinearIdentityVault=true');
   });
 

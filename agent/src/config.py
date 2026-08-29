@@ -108,9 +108,11 @@ def _resolve_linear_token_via_vault(
 
     provider_name = ""
     workspace_id = ""
+    recorded_user_id = ""
     if channel_metadata:
         provider_name = channel_metadata.get("linear_provider_name", "")
         workspace_id = channel_metadata.get("linear_workspace_id", "")
+        recorded_user_id = channel_metadata.get("linear_vault_user_id", "")
     if not provider_name or not workspace_id:
         # SM-only install (or missing context) — skip the vault entirely.
         return ""
@@ -131,9 +133,12 @@ def _resolve_linear_token_via_vault(
         return ""
 
     client = platform_client("bedrock-agentcore", region_name=region)
-    # One bot identity per workspace (matches the registry-table convention and
-    # the Lambda resolver's workspaceUserId).
-    user_id = f"linear-workspace-{workspace_id}"
+    # One bot identity per workspace. Prefer the id recorded at consent time: the
+    # organization UUID is only knowable once a token exists, so deriving it would
+    # force a second consent during onboarding just to learn the org. Workspaces
+    # onboarded before it was recorded fall back to the derived form, which is what
+    # their grant is under. Must stay in step with the Lambda resolver.
+    user_id = recorded_user_id.strip() or f"linear-workspace-{workspace_id}"
 
     try:
         wat = client.get_workload_access_token_for_user_id(

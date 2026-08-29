@@ -75,6 +75,42 @@ describe('isVaultEnabled / vaultWorkloadIdentityName', () => {
 describe('resolveLinearTokenViaVault', () => {
   const input = { linearWorkspaceId: 'org-abc', providerName: 'bgagent-linear-oauth-acme' };
 
+  test('uses the RECORDED vault user id when the row has one', async () => {
+    // The grant is bound at consent time to a slug-derived subject, because the
+    // organization UUID is not knowable until a token exists. Deriving the subject
+    // here instead of reading it would look up a grant that was never created, and
+    // every mint would fail "consent required" on a correctly onboarded workspace.
+    mockSend
+      .mockResolvedValueOnce({ workloadAccessToken: 'wat-xyz' })
+      .mockResolvedValueOnce({ accessToken: 'lin_oauth_vault' });
+
+    await resolveLinearTokenViaVault({ ...input, vaultUserId: 'linear-ws-acme' }, 'abca_linear_oauth');
+    const watCall = mockSend.mock.calls[0][0] as Tagged;
+    expect(watCall.input).toEqual({ workloadName: 'abca_linear_oauth', userId: 'linear-ws-acme' });
+  });
+
+  test('falls back to the DERIVED id for workspaces onboarded before it was recorded', async () => {
+    // Their grant really is under linear-workspace-<orgId>; preferring the recorded
+    // id must not orphan them.
+    mockSend
+      .mockResolvedValueOnce({ workloadAccessToken: 'wat-xyz' })
+      .mockResolvedValueOnce({ accessToken: 'lin_oauth_vault' });
+
+    await resolveLinearTokenViaVault(input, 'abca_linear_oauth');
+    const watCall = mockSend.mock.calls[0][0] as Tagged;
+    expect(watCall.input).toEqual({ workloadName: 'abca_linear_oauth', userId: 'linear-workspace-org-abc' });
+  });
+
+  test('a blank recorded id falls back rather than binding to an empty subject', async () => {
+    mockSend
+      .mockResolvedValueOnce({ workloadAccessToken: 'wat-xyz' })
+      .mockResolvedValueOnce({ accessToken: 'lin_oauth_vault' });
+
+    await resolveLinearTokenViaVault({ ...input, vaultUserId: '   ' }, 'abca_linear_oauth');
+    const watCall = mockSend.mock.calls[0][0] as Tagged;
+    expect(watCall.input).toEqual({ workloadName: 'abca_linear_oauth', userId: 'linear-workspace-org-abc' });
+  });
+
   test('happy path: mints user-bound workload token, exchanges it, returns the access token', async () => {
     mockSend
       .mockResolvedValueOnce({ workloadAccessToken: 'wat-xyz' }) // GetWorkloadAccessTokenForUserId
