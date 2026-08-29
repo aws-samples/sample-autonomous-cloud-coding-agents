@@ -304,13 +304,16 @@ describe('renderLinearAppTemplate', () => {
     expect(out).not.toContain('localhost:8080');
   });
 
-  test('lists the hosted URI BOTH with and without a trailing slash', () => {
-    // Linear compares redirect URIs as exact strings, and the slash is invisible
-    // to anyone typing the URL by hand. A real onboarding failed on exactly this
-    // one character, so both forms are registered and the choice disappears.
+  test('lists the hosted URI EXACTLY once, as the CLI sends it', () => {
+    // An earlier version printed a second slashless variant as insurance against a
+    // typo. Linear validates the whole Redirect URIs field on save, so an extra bad
+    // line loses the good ones with it — and the failure then reads as though it
+    // were about the line just added. One entry, matching what the CLI sends.
     const out = renderLinearAppTemplate({ hostedConsentUrl: 'https://d2ud1woydykuxp.cloudfront.net/' });
-    expect(out).toContain('    https://d2ud1woydykuxp.cloudfront.net/\n');
-    expect(out).toContain('    https://d2ud1woydykuxp.cloudfront.net\n');
+    const lines = out.split('\n').map((l) => l.trim());
+    expect(lines.filter((l) => l.startsWith('https://d2ud1woydykuxp.cloudfront.net'))).toEqual([
+      'https://d2ud1woydykuxp.cloudfront.net/',
+    ]);
   });
 
   test('with a hosted page but no vault callback, it says setup will print one', () => {

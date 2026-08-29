@@ -242,11 +242,11 @@ export function renderLinearAppTemplate(opts: LinearAppTemplateOptions = {}): st
     // redirects to it: the flows use DIFFERENT URIs, and registering one then
     // running the other yields an opaque "Invalid redirect_uri".
     '  Redirect URIs (one per line, copied EXACTLY — paste, do not retype):',
-    // Exactly the URI the CLI sends — no variants. Registering a second, slashless
-    // form looked like cheap insurance against a typo, but Linear rejects a URI with
-    // no path as invalid, and it rejects the WHOLE field when any line is bad: the
-    // error then appears to be about the line being added rather than the stale one.
-    // Cost a real onboarding attempt.
+    // Exactly the URI the CLI sends, and no variants of it. Listing a second
+    // slashless form was meant as insurance against a typo, but Linear validates the
+    // whole field on save, so one bad line loses the good ones too — and the error
+    // then reads as though it were about the line just added. Fewer entries is
+    // strictly safer here; the CLI sends one string and this prints that string.
     ...(opts.hostedConsentUrl ? [`    ${opts.hostedConsentUrl}`] : [`    ${callbackUrl}`]),
     ...(opts.vaultCallbackUrl ? [`    ${opts.vaultCallbackUrl}`] : []),
     ...(opts.hostedConsentUrl
