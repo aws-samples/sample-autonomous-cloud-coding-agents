@@ -45,6 +45,10 @@ import { CliError } from './errors';
 import { LINEAR_AUTHORIZE_ENDPOINT, LINEAR_OAUTH_SCOPES, LINEAR_TOKEN_ENDPOINT } from './linear-oauth';
 import { makeClient } from './ua';
 
+/** Consent-time parameters. Part of the vault's cache key, so every resolve must
+ *  send the identical set or a live grant reads as "needs consent". */
+const LINEAR_VAULT_CUSTOM_PARAMS: Record<string, string> = { actor: 'app', prompt: 'consent' };
+
 /** Linear OAuth issuer, for the CustomOauth2 discovery metadata. */
 const LINEAR_ISSUER = 'https://linear.app';
 
@@ -203,6 +207,55 @@ export function isVaultUnavailableError(err: unknown): boolean {
   const name = (err as { name?: string } | undefined)?.name ?? '';
   if (name === 'ValidationException' || name === 'ConflictException') return false;
   return true;
+}
+
+/**
+ * Mint a Linear token from an EXISTING vault grant, or null if there isn't one.
+ *
+ * Read-only: no `forceAuthentication`, so it can never open a browser or start a
+ * consent. That is what makes it safe for ordinary CLI commands — they want a
+ * token, not an onboarding flow.
+ *
+ * Needed because a workspace onboarded onto the vault has no usable Secrets
+ * Manager token (deliberately, for a fresh onboarding — and any preserved one dies
+ * with the app it was issued for). Without this, every CLI command that calls
+ * Linear fails with a bare 401 on exactly the workspaces the vault is managing.
+ *
+ * The return URL is NOT part of the vault's cache key — verified against a
+ * workspace consented through the hosted page and minted with the loopback URL —
+ * so callers do not have to know which one consent used.
+ */
+export async function mintLinearTokenFromVault(args: {
+  region: string;
+  workloadName: string;
+  providerName: string;
+  userId: string;
+  returnUrl?: string;
+}): Promise<string | null> {
+  try {
+    const dataplane = makeClient(BedrockAgentCoreClient, { region: args.region });
+    const wat = await dataplane.send(
+      new GetWorkloadAccessTokenForUserIdCommand({ workloadName: args.workloadName, userId: args.userId }),
+    );
+    if (!wat.workloadAccessToken) return null;
+    const resp = await dataplane.send(
+      new GetResourceOauth2TokenCommand({
+        workloadIdentityToken: wat.workloadAccessToken,
+        resourceCredentialProviderName: args.providerName,
+        scopes: [...LINEAR_OAUTH_SCOPES],
+        oauth2Flow: 'USER_FEDERATION',
+        resourceOauth2ReturnUrl: args.returnUrl ?? 'http://localhost:8080/oauth/callback',
+        // Must match what consent sent: customParameters are part of the vault's
+        // cache key, so omitting them reports "needs consent" despite a live grant.
+        customParameters: { ...LINEAR_VAULT_CUSTOM_PARAMS },
+      }),
+    );
+    // An authorizationUrl with no token means the grant is gone. Report that as
+    // null rather than surfacing a URL a non-interactive command cannot use.
+    return resp.accessToken ?? null;
+  } catch {
+    return null;
+  }
 }
 
 export interface VaultConsentStep {

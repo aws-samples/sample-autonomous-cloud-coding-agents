@@ -57,7 +57,9 @@ import {
   beginVaultConsent,
   finalizeVaultConsent,
   isVaultUnavailableError,
+  linearVaultUserId,
   linearVaultUserIdForSlug,
+  mintLinearTokenFromVault,
   lookupLinearVaultCallbackUrl,
   upsertLinearCredentialProvider,
 } from '../linear-vault';
@@ -898,7 +900,18 @@ export function makeLinearCommand(): Command {
 
           if (provider) {
             vaultProviderName = provider.providerName;
-            vaultUserId = linearVaultUserIdForSlug(slug);
+            // A workspace already on the vault from BEFORE the subject was recorded
+            // has its grant under the derived form. Re-deriving the same value keeps
+            // a re-run a no-op; switching it to the slug form would find no cached
+            // grant, force a fresh consent, and — because Linear replaces the
+            // installation on re-authorization — could invalidate the working grant
+            // this command was only meant to inspect.
+            const priorVaultUserId = priorRow?.vault_user_id as string | undefined;
+            const priorWorkspaceId = priorRow?.linear_workspace_id as string | undefined;
+            vaultUserId = priorVaultUserId
+              ?? (alreadyOnVault && priorWorkspaceId
+                ? linearVaultUserId(priorWorkspaceId)
+                : linearVaultUserIdForSlug(slug));
             const returnUrl = consentPageUrl!;
 
             const consent = await beginVaultConsent({
@@ -2001,6 +2014,7 @@ export function makeLinearCommand(): Command {
     new Command('list-projects')
       .description('List Linear projects visible to the OAuth-installed workspace (with full UUIDs)')
       .option('--region <region>', 'AWS region (defaults to configured region)')
+      .option('--stack-name <name>', 'CloudFormation stack name', 'backgroundagent-dev')
       .option('--slug <slug>', 'Linear workspace slug (urlKey). If omitted, queries every active workspace in the registry.')
       .option('--output <format>', 'Output format (text or json)', 'text')
       .action(async (opts) => {
@@ -2050,20 +2064,47 @@ export function makeLinearCommand(): Command {
         };
         const rows: ProjectRow[] = [];
 
+        // Vault-first, exactly like the runtime resolver. A vault-managed workspace
+        // has no usable Secrets Manager token, so reading the bundle alone reports a
+        // bare 401 on precisely the workspaces that are working fine.
+        const registryTableForVault = await getStackOutput(region, opts.stackName as string, 'LinearWorkspaceRegistryTableName');
+        const ddbForVault = registryTableForVault ? makeDocClient({ region }) : undefined;
+
         for (const slug of slugs) {
           const secretName = linearOauthSecretName(slug);
-          let accessToken: string;
-          try {
-            const resp = await sm.send(new GetSecretValueCommand({ SecretId: secretName }));
-            const stored = JSON.parse(resp.SecretString ?? '{}') as { access_token?: string };
-            if (!stored.access_token) {
-              console.error(`Secret ${secretName} is missing access_token; skipping.`);
+          let accessToken: string | undefined;
+
+          if (ddbForVault && registryTableForVault) {
+            const row = await findWorkspaceRowBySlug(ddbForVault, registryTableForVault, slug)
+              .catch(() => undefined);
+            const providerName = row?.provider_name as string | undefined;
+            if (providerName) {
+              const workspaceId = row?.linear_workspace_id as string | undefined;
+              const recorded = row?.vault_user_id as string | undefined;
+              const userId = recorded
+                ?? (workspaceId ? linearVaultUserId(workspaceId) : linearVaultUserIdForSlug(slug));
+              accessToken = await mintLinearTokenFromVault({
+                region,
+                workloadName: LINEAR_VAULT_WORKLOAD_NAME,
+                providerName,
+                userId,
+              }) ?? undefined;
+            }
+          }
+
+          if (!accessToken) {
+            try {
+              const resp = await sm.send(new GetSecretValueCommand({ SecretId: secretName }));
+              const stored = JSON.parse(resp.SecretString ?? '{}') as { access_token?: string };
+              if (!stored.access_token) {
+                console.error(`Secret ${secretName} is missing access_token; skipping.`);
+                continue;
+              }
+              accessToken = stored.access_token;
+            } catch (err) {
+              console.error(`Failed to read ${secretName}: ${err instanceof Error ? err.message : String(err)}`);
               continue;
             }
-            accessToken = stored.access_token;
-          } catch (err) {
-            console.error(`Failed to read ${secretName}: ${err instanceof Error ? err.message : String(err)}`);
-            continue;
           }
 
           try {
