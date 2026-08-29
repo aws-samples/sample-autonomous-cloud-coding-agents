@@ -178,6 +178,27 @@ function isAlreadyExistsError(err: unknown): boolean {
   return name === 'ValidationException' && /already exists/i.test(message);
 }
 
+/**
+ * True when a vault call failed because AgentCore Identity is not usable here —
+ * as opposed to the service answering and rejecting our input.
+ *
+ * The distinction matters because the two demand opposite handling: unusable means
+ * fall back to Secrets Manager and onboard anyway (AgentCore Identity is
+ * region-limited, and a sample has to work where it is absent), while a rejected
+ * request means the operator gave us something wrong — bad client credentials, a
+ * malformed name — and silently switching substrate would bury that behind a
+ * second, unrelated failure.
+ *
+ * `ValidationException` and `ConflictException` are the service talking, so they
+ * surface. Everything else (endpoint resolution, no such service in region,
+ * credentials, network, throttling) is treated as unusable.
+ */
+export function isVaultUnavailableError(err: unknown): boolean {
+  const name = (err as { name?: string } | undefined)?.name ?? '';
+  if (name === 'ValidationException' || name === 'ConflictException') return false;
+  return true;
+}
+
 export interface VaultConsentStep {
   /** URL the operator opens to consent (AgentCore PAR → Linear authorize). */
   readonly authorizationUrl: string;

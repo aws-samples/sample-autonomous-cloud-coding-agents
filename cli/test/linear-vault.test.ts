@@ -56,6 +56,7 @@ import {
 import {
   beginVaultConsent,
   finalizeVaultConsent,
+  isVaultUnavailableError,
   linearVaultProviderName,
   linearVaultUserId,
   upsertLinearCredentialProvider,
@@ -238,5 +239,42 @@ describe('finalizeVaultConsent', () => {
       userId: 'linear-workspace-org-abc',
       sessionUri: 'urn:expired',
     })).rejects.toThrow(/session expired/);
+  });
+});
+
+describe('isVaultUnavailableError', () => {
+  // Decides whether onboarding falls back to Secrets Manager or surfaces the error.
+  // Getting it backwards either buries a bad client secret behind an unrelated
+  // second failure, or refuses to onboard in a region AgentCore Identity has not
+  // reached — so both directions are pinned.
+
+  test('an absent service / endpoint / credential failure is UNAVAILABLE', () => {
+    for (const name of [
+      'UnknownEndpoint', 'EndpointError', 'CredentialsProviderError',
+      'AccessDeniedException', 'ThrottlingException', 'TimeoutError',
+    ]) {
+      expect(isVaultUnavailableError(Object.assign(new Error('x'), { name }))).toBe(true);
+    }
+    // A bare network error carries no name at all.
+    expect(isVaultUnavailableError(new Error('socket hang up'))).toBe(true);
+  });
+
+  test('a ValidationException is the service REJECTING our input — surface it', () => {
+    // e.g. a mistyped client secret. Falling back would hide it behind a second,
+    // unrelated Secrets-Manager failure.
+    expect(isVaultUnavailableError(
+      Object.assign(new Error('invalid clientSecret'), { name: 'ValidationException' }),
+    )).toBe(false);
+  });
+
+  test('a ConflictException is also the service talking', () => {
+    expect(isVaultUnavailableError(
+      Object.assign(new Error('already exists'), { name: 'ConflictException' }),
+    )).toBe(false);
+  });
+
+  test('a non-error value does not crash the classifier', () => {
+    expect(isVaultUnavailableError(undefined)).toBe(true);
+    expect(isVaultUnavailableError('boom')).toBe(true);
   });
 });

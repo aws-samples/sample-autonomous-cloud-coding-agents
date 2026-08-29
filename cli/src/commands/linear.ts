@@ -55,6 +55,7 @@ import {
 import {
   beginVaultConsent,
   finalizeVaultConsent,
+  isVaultUnavailableError,
   linearVaultUserIdForSlug,
   lookupLinearVaultCallbackUrl,
   upsertLinearCredentialProvider,
@@ -764,6 +765,13 @@ export function makeLinearCommand(): Command {
         // automatic and silent-by-design-but-announced, because AgentCore Identity is
         // not available in every region and onboarding must still work there.
         const consentPageUrl = await getStackOutput(region, stackName, 'LinearVaultConsentUrl');
+        // Is this workspace ALREADY on the vault? If so a vault hiccup must not
+        // silently move it to Secrets Manager (see the fallback below).
+        const priorRow = workspaceRegistryTable
+          ? await findWorkspaceRowBySlug(makeDocClient({ region }), workspaceRegistryTable, slug)
+            .catch(() => undefined)
+          : undefined;
+        const alreadyOnVault = Boolean(priorRow?.provider_name);
         const useVault = Boolean(consentPageUrl) && !resumed;
         if (!consentPageUrl && !resumed) {
           console.log(`  AgentCore Identity not available in ${region} — using Secrets Manager.`);
@@ -778,58 +786,71 @@ export function makeLinearCommand(): Command {
         let vaultUserId: string | undefined;
         let vaultAccessToken: string | undefined;
         if (useVault) {
-          process.stdout.write('  → Registering the Linear app with the Identity vault...');
-          const provider = await upsertLinearCredentialProvider({
-            region, workspaceSlug: slug, clientId, clientSecret,
-          });
-          vaultProviderName = provider.providerName;
-          vaultUserId = linearVaultUserIdForSlug(slug);
-          const returnUrl = consentPageUrl!;
-          console.log(` ✓ (${provider.providerName})`);
-          console.log(
-            '\n  The vault redirects through its own URL. Both of these must be listed as'
-            + '\n  Redirect URIs on the Linear app, or consent fails with "Invalid redirect_uri":'
-            + `\n    ${provider.callbackUrl}`
-            + `\n    ${consentPageUrl}\n`,
-          );
+          let provider: { providerName: string; callbackUrl: string } | undefined;
+          try {
+            process.stdout.write('  → Registering the Linear app with the Identity vault...');
+            provider = await upsertLinearCredentialProvider({
+              region, workspaceSlug: slug, clientId, clientSecret,
+            });
+            console.log(` ✓ (${provider.providerName})`);
+          } catch (err) {
+            console.log(' —');
+            // A workspace already living on the vault must not be quietly moved to
+            // Secrets Manager by a transient error: that rewrites its substrate
+            // behind a success message. Only a FIRST onboarding falls back.
+            if (!isVaultUnavailableError(err) || alreadyOnVault) throw err;
+            console.log(`  AgentCore Identity not available in ${region} — using Secrets Manager.`);
+          }
 
-          const consent = await beginVaultConsent({
-            region,
-            workloadName: LINEAR_VAULT_WORKLOAD_NAME,
-            providerName: provider.providerName,
-            userId: vaultUserId,
-            returnUrl,
-          });
+          if (provider) {
+            vaultProviderName = provider.providerName;
+            vaultUserId = linearVaultUserIdForSlug(slug);
+            const returnUrl = consentPageUrl!;
+            console.log(
+              '\n  The vault redirects through its own URL. Both of these must be listed as'
+              + '\n  Redirect URIs on the Linear app, or consent fails with "Invalid redirect_uri":'
+              + `\n    ${provider.callbackUrl}`
+              + `\n    ${returnUrl}\n`,
+            );
 
-          if (consent.authorizationUrl) {
-            console.log('  → Open this URL in any browser and Authorize:\n');
-            console.log(`    ${consent.authorizationUrl}\n`);
-            console.log(`  You will land on ${returnUrl}, which shows a session id.\n`);
-            const sessionId = (await promptLine('  Paste the session id shown on that page')).trim();
-            if (!sessionId) {
+            const consent = await beginVaultConsent({
+              region,
+              workloadName: LINEAR_VAULT_WORKLOAD_NAME,
+              providerName: provider.providerName,
+              userId: vaultUserId,
+              returnUrl,
+            });
+
+            if (consent.authorizationUrl) {
+              console.log('  → Open this URL in any browser and Authorize:\n');
+              console.log(`    ${consent.authorizationUrl}\n`);
+              console.log(`  You will land on ${returnUrl}, which shows a session id.\n`);
+              const sessionId = (await promptLine('  Paste the session id shown on that page')).trim();
+              if (!sessionId) {
+                throw new CliError(
+                  'No session id entered, so the consent cannot be completed. Re-run '
+                  + `\`bgagent linear setup ${slug}\` when you have it.`,
+                );
+              }
+              process.stdout.write('  → Completing the consent...');
+              await finalizeVaultConsent({ region, userId: vaultUserId, sessionUri: sessionId });
+              console.log(' ✓');
+            } else {
+              console.log('  ✓ Existing vault grant is healthy — no consent needed.');
+            }
+
+            process.stdout.write('  → Minting a Linear token from the vault...');
+            const minted = await consent.poll();
+            if (!minted) {
               throw new CliError(
-                'No session id entered, so the consent cannot be completed. Re-run '
-                + `\`bgagent linear setup ${slug}\` when you have it.`,
+                'The vault did not return a token after the consent completed. Re-run '
+                + `\`bgagent linear setup ${slug}\`; if it recurs, confirm the Linear app lists both `
+                + 'redirect URIs printed above.',
               );
             }
-            process.stdout.write('  → Completing the consent...');
-            await finalizeVaultConsent({ region, userId: vaultUserId!, sessionUri: sessionId });
+            vaultAccessToken = minted;
             console.log(' ✓');
-          } else {
-            console.log('  ✓ Existing vault grant is healthy — no consent needed.');
           }
-
-          process.stdout.write('  → Minting a Linear token from the vault...');
-          const minted = await consent.poll();
-          if (!minted) {
-            throw new CliError(
-              'The vault did not return a token after the consent completed. Re-run '
-              + `\`bgagent linear setup ${slug}\`; if it recurs, confirm the Linear app lists both `
-              + 'redirect URIs printed above.',
-            );
-          }
-          vaultAccessToken = minted;
-          console.log(' ✓');
         }
 
         // ─── Step 1: Direct OAuth consent (Secrets-Manager path only) ──
