@@ -662,6 +662,11 @@ export function makeLinearCommand(): Command {
       .option('--stack-name <name>', 'CloudFormation stack name', 'backgroundagent-dev')
       .option('--client-id <id>', 'Linear OAuth app Client ID (else prompted)')
       .option('--client-secret <secret>', 'Linear OAuth app Client Secret (else prompted; prefer interactive)')
+      .option(
+        '--webhook-secret <secret>',
+        'Webhook signing secret from the app\'s Webhooks section (else prompted; prefer interactive). '
+        + 'Pass an empty value to skip and set it later with `update-webhook-secret`.',
+      )
       .option('--no-browser', 'Print the authorization URL instead of opening a browser (for SSH/headless)')
       .option('--no-actor-app', 'Drop actor=app from the OAuth flow (diagnostic: isolates whether agent-install is blocking)')
       .option('--no-force-consent', 'Omit prompt=consent (diagnostic: restores the pre-fix behaviour that dead-ends on an already-installed app)')
@@ -734,6 +739,24 @@ export function makeLinearCommand(): Command {
         const clientSecret = (opts.clientSecret ?? await promptSecret('Linear Client Secret: ')).trim();
         if (!clientSecret) {
           throw new CliError('Client Secret is required.');
+        }
+        // Asked HERE, with the other two, because all three come off the same Linear
+        // app form and the operator is looking at it right now. It used to be
+        // collected after consent, and only when nothing was stored — so a second
+        // workspace silently inherited the stack-wide secret instead of being asked
+        // for its own, and then 401'd on every delivery.
+        const suppliedWebhookSecret = (
+          (opts.webhookSecret as string | undefined)
+          ?? await promptSecret('Webhook signing secret (lin_wh_…, from the app\'s Webhooks section; Enter to skip): ')
+        ).trim();
+        if (suppliedWebhookSecret && !suppliedWebhookSecret.startsWith('lin_wh_')) {
+          // Reject before consent rather than after: a bad paste is cheap to fix now
+          // and expensive once the operator has been through the browser.
+          throw new CliError(
+            'That does not look like a Linear webhook signing secret (they start with `lin_wh_`). '
+            + 'Copy it from the app\'s Webhooks section, or press Enter to skip and set it later '
+            + `with \`bgagent linear update-webhook-secret ${slug}\`.`,
+          );
         }
 
         // HOSTED FINISH. `--code` resumes the consent the --hosted run started: the
@@ -1246,7 +1269,17 @@ export function makeLinearCommand(): Command {
           stackWideAlreadyConfigured,
           stackWideSecretValue,
         );
-        if (secretAction.kind === 'preserve-inherited') {
+        if (suppliedWebhookSecret) {
+          // The operator just read this off the app they are onboarding, which is more
+          // authoritative than anything already stored — so no mirror, no inherit, and
+          // no second command afterwards.
+          webhookSigningSecret = suppliedWebhookSecret;
+          console.log('  ✓ Using the webhook signing secret you entered');
+          // Deliberately NOT also stamped as the stack-wide fallback. That fallback
+          // exists for installs predating per-workspace signing; seeding it here
+          // would make the NEXT workspace silently inherit this one's secret instead
+          // of being asked for its own — the failure this prompt removes.
+        } else if (secretAction.kind === 'preserve-inherited') {
           console.log('  ⚠ This workspace\'s stored webhook signing secret is the STACK-WIDE one,');
           console.log('    inherited by an earlier run — not read from this workspace\'s webhook.');
           console.log('    Correct for the first workspace; WRONG for any other, and every');

@@ -219,7 +219,9 @@ describe('linear setup — second-workspace re-run preserves the per-workspace w
       const program = makeLinearCommand();
       await program.parseAsync([
         'node', 'bgagent', 'setup', 'demo',
-        '--client-id', 'cid', '--client-secret', 'csecret', '--no-browser',
+        // Empty webhook secret = "skip", which is what exercises the PRESERVE path
+        // this test is about. Passed as a flag so the run stays non-interactive.
+        '--client-id', 'cid', '--client-secret', 'csecret', '--webhook-secret', '', '--no-browser',
       ]);
     } finally {
       cfgSpy.mockRestore();
