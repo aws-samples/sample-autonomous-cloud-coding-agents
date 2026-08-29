@@ -242,14 +242,12 @@ export function renderLinearAppTemplate(opts: LinearAppTemplateOptions = {}): st
     // redirects to it: the flows use DIFFERENT URIs, and registering one then
     // running the other yields an opaque "Invalid redirect_uri".
     '  Redirect URIs (one per line, copied EXACTLY — paste, do not retype):',
-    ...(opts.hostedConsentUrl
-      ? [
-        // Both slash forms: Linear compares these as exact strings and the trailing
-        // slash is invisible to anyone typing the URL by hand.
-        `    ${opts.hostedConsentUrl}`,
-        `    ${opts.hostedConsentUrl.replace(/\/+$/, '')}`,
-      ]
-      : [`    ${callbackUrl}`]),
+    // Exactly the URI the CLI sends — no variants. Registering a second, slashless
+    // form looked like cheap insurance against a typo, but Linear rejects a URI with
+    // no path as invalid, and it rejects the WHOLE field when any line is bad: the
+    // error then appears to be about the line being added rather than the stale one.
+    // Cost a real onboarding attempt.
+    ...(opts.hostedConsentUrl ? [`    ${opts.hostedConsentUrl}`] : [`    ${callbackUrl}`]),
     ...(opts.vaultCallbackUrl ? [`    ${opts.vaultCallbackUrl}`] : []),
     ...(opts.hostedConsentUrl
       ? []
@@ -808,10 +806,10 @@ export function makeLinearCommand(): Command {
           // redirect_uri". Stop with the ONE thing to do rather than opening a
           // browser to a dead end and listing URLs that are not actionable yet.
           if (provider?.created) {
-            console.log('\n  One more Redirect URI to add to the Linear app:\n');
-            console.log(`    ${provider.callbackUrl}\n`);
-            console.log('  Then re-run:\n');
-            console.log(`    bgagent linear setup ${slug}\n`);
+            console.log('\n  One more Redirect URI to add to the Linear app.');
+            console.log('  Copy the whole line below — leading spaces make it invalid:\n');
+            console.log(provider.callbackUrl);
+            console.log(`\n  Then re-run:  bgagent linear setup ${slug}\n`);
             return;
           }
 
@@ -833,7 +831,8 @@ export function makeLinearCommand(): Command {
               // id and names itself, so printing it here is noise; the redirect URIs
               // were dealt with on the first run above.
               console.log('\n  → Open this URL and Authorize:\n');
-              console.log(`    ${consent.authorizationUrl}\n`);
+              console.log(consent.authorizationUrl);
+              console.log('');
               const sessionId = (await promptLine('  Paste the session id from the page you land on')).trim();
               if (!sessionId) {
                 throw new CliError(
