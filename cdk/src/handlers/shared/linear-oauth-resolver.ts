@@ -29,6 +29,7 @@ import {
   type VaultTokenResult,
   isVaultEnabled,
   resolveLinearTokenViaVault,
+  type VaultTokenInput,
   vaultWorkloadIdentityName,
 } from './linear-vault-token';
 import { logger } from './logger';
@@ -171,9 +172,15 @@ export interface ResolverOptions {
    * uses {@link resolveLinearTokenViaVault}. Returns the access token string, or
    * null to fall back to the Secrets-Manager token.
    */
+  /**
+   * Test seam for the vault call. Takes the FULL request, not a few unpacked
+   * fields: the earlier three-argument shape could not observe `vaultUserId`, so no
+   * test at this seam could catch the subject being dropped upstream — and one was,
+   * silently, by the row parser. A mock narrower than the real call hides exactly
+   * the mistakes it exists to catch.
+   */
   readonly resolveViaVault?: (
-    linearWorkspaceId: string,
-    providerName: string,
+    input: VaultTokenInput,
     workloadIdentityName: string,
   ) => Promise<VaultTokenResult>;
 }
@@ -325,12 +332,16 @@ export async function resolveLinearOauthToken(
   // so SM-only installs are unaffected.
   const workloadName = vaultWorkloadIdentityName();
   if (row.provider_name && workloadName && (isVaultEnabled() || options.resolveViaVault)) {
-    const viaVault = options.resolveViaVault ?? ((wsId, provider, wl) =>
-      resolveLinearTokenViaVault(
-        { linearWorkspaceId: wsId, providerName: provider, vaultUserId: row.vault_user_id, region },
-        wl,
-      ));
-    const vaultResult = await viaVault(linearWorkspaceId, row.provider_name, workloadName);
+    const viaVault = options.resolveViaVault ?? resolveLinearTokenViaVault;
+    const vaultResult = await viaVault(
+      {
+        linearWorkspaceId,
+        providerName: row.provider_name,
+        vaultUserId: row.vault_user_id,
+        region,
+      },
+      workloadName,
+    );
     // A vault grant that needs consent is DEAD, not slow — remember it so the
     // no-token-anywhere path below can report it. Deliberately NOT latched here:
     // a workspace may still hold a working Secrets-Manager token, and marking the
@@ -603,6 +614,12 @@ function parseRegistryRow(rawItem: unknown, linearWorkspaceId: string): Registry
     // Present only for vault-onboarded workspaces (RFC #249 Phase 1); gates the
     // vault resolution path in resolveLinearOauthToken.
     ...(typeof item.provider_name === 'string' && { provider_name: item.provider_name }),
+    // The subject the vault grant is bound to. This parser copies fields
+    // explicitly, so anything omitted here is silently dropped no matter how
+    // correctly the callers thread it — which is exactly what happened: the
+    // resolver fell back to deriving the subject from the organization UUID, found
+    // no grant under it, and reported "requires consent" for a healthy workspace.
+    ...(typeof item.vault_user_id === 'string' && { vault_user_id: item.vault_user_id }),
   };
   registryCache.set(linearWorkspaceId, { value: row, expiresAt: Date.now() + REGISTRY_CACHE_TTL_MS });
   return row;

@@ -156,6 +156,33 @@ describe('resolveLinearOauthToken', () => {
       else process.env.LINEAR_VAULT_ENABLED = savedEnabled;
     });
 
+    test('passes the RECORDED vault_user_id through, not a derived one', async () => {
+      // The subject is stored because it cannot be derived: it is slug-based, so one
+      // consent can onboard a workspace whose organization UUID is not yet known.
+      // The row parser copies fields explicitly and this one was missing from it, so
+      // the resolver silently fell back to deriving from the UUID, found no grant,
+      // and reported "requires consent" for a healthy workspace. Caught in
+      // production, not here, because the old test seam could not see this argument.
+      const clients = makeFakeClients({
+        registryItem: {
+          workspace_slug: 'acme',
+          oauth_secret_arn: 'arn:secret:acme',
+          status: 'active',
+          provider_name: 'bgagent-linear-oauth-acme',
+          vault_user_id: 'linear-ws-acme',
+        },
+        storedToken: makeStoredToken({ access_token: 'lin_oauth_SM' }),
+      });
+      const resolveViaVault = jest.fn().mockResolvedValue({ kind: 'token', accessToken: 'lin_oauth_vault' });
+
+      await resolveLinearOauthToken('ws-uuid-1', REGISTRY_TABLE, { ...clients, resolveViaVault });
+
+      expect(resolveViaVault).toHaveBeenCalledWith(
+        expect.objectContaining({ vaultUserId: 'linear-ws-acme' }),
+        WORKLOAD,
+      );
+    });
+
     test('vault token is used (no Secrets Manager read) when provider_name is present and the vault succeeds', async () => {
       const clients = makeFakeClients({
         registryItem: {
@@ -174,7 +201,10 @@ describe('resolveLinearOauthToken', () => {
         resolveViaVault,
       });
 
-      expect(resolveViaVault).toHaveBeenCalledWith('ws-uuid-1', 'bgagent-linear-oauth-acme', WORKLOAD);
+      expect(resolveViaVault).toHaveBeenCalledWith(
+        expect.objectContaining({ linearWorkspaceId: 'ws-uuid-1', providerName: 'bgagent-linear-oauth-acme' }),
+        WORKLOAD,
+      );
       expect(result?.accessToken).toBe('lin_oauth_from_vault');
       expect(result?.workspaceSlug).toBe('acme');
       // Secrets Manager was never queried on the vault-success path.
