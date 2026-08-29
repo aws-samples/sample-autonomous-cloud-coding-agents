@@ -310,6 +310,13 @@ export function computeExpiresAt(expiresInSeconds: number, now: Date = new Date(
 export type WebhookSecretAction =
   /** This workspace already has its own signing secret — keep it (re-run). */
   | { readonly kind: 'preserve'; readonly secret: string }
+  /**
+   * The stored secret is byte-identical to the stack-wide one, so it was inherited
+   * by an earlier mirror rather than taken from this workspace's own webhook. Keep
+   * it — it may well be correct for the FIRST workspace — but say so, because for
+   * any additional workspace it is the wrong secret and every delivery 401s.
+   */
+  | { readonly kind: 'preserve-inherited'; readonly secret: string }
   /** No per-workspace secret; mirror the stack-wide one (safe for the first
    *  workspace, ambiguous for an additional one — caller should warn). */
   | { readonly kind: 'mirror-stackwide' }
@@ -338,8 +345,16 @@ export type WebhookSecretAction =
 export function resolveWebhookSecretAction(
   existingPerWorkspaceSecret: string | undefined,
   stackWideConfigured: boolean,
+  stackWideSecret?: string,
 ): WebhookSecretAction {
   if (existingPerWorkspaceSecret?.startsWith('lin_wh_')) {
+    // A stored value equal to the stack-wide secret is NOT evidence this workspace
+    // has its own: an earlier run mirrored it. Treating it as owned silences the
+    // mirror warning forever, so a workspace that inherited the wrong secret can
+    // never be told about it again — it just 401s on every delivery. Seen live.
+    if (stackWideSecret && existingPerWorkspaceSecret === stackWideSecret) {
+      return { kind: 'preserve-inherited', secret: existingPerWorkspaceSecret };
+    }
     return { kind: 'preserve', secret: existingPerWorkspaceSecret };
   }
   if (stackWideConfigured) {

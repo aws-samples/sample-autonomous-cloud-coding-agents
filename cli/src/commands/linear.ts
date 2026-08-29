@@ -1229,8 +1229,31 @@ export function makeLinearCommand(): Command {
         const stackWideAlreadyConfigured = await isWebhookSecretConfigured(sm, webhookSecretArn!);
         let webhookSigningSecret: string | undefined;
 
-        const secretAction = resolveWebhookSecretAction(existingWebhookSecret, stackWideAlreadyConfigured);
-        if (secretAction.kind === 'preserve') {
+        // Fetch the stack-wide value so an INHERITED secret can be told apart from
+        // one this workspace actually owns; they are indistinguishable otherwise.
+        let stackWideSecretValue: string | undefined;
+        if (stackWideAlreadyConfigured && webhookSecretArn) {
+          try {
+            const sw = await sm.send(new GetSecretValueCommand({ SecretId: webhookSecretArn }));
+            stackWideSecretValue = sw.SecretString?.trim();
+          } catch {
+            // Best-effort: only used to decide whether to WARN, never to write.
+            stackWideSecretValue = undefined;
+          }
+        }
+        const secretAction = resolveWebhookSecretAction(
+          existingWebhookSecret,
+          stackWideAlreadyConfigured,
+          stackWideSecretValue,
+        );
+        if (secretAction.kind === 'preserve-inherited') {
+          console.log('  ⚠ This workspace\'s stored webhook signing secret is the STACK-WIDE one,');
+          console.log('    inherited by an earlier run — not read from this workspace\'s webhook.');
+          console.log('    Correct for the first workspace; WRONG for any other, and every');
+          console.log('    delivery then fails signature verification with a 401. Confirm with:');
+          console.log(`      bgagent linear update-webhook-secret ${slug}`);
+          webhookSigningSecret = secretAction.secret;
+        } else if (secretAction.kind === 'preserve') {
           // This workspace already had its own signing secret — keep it. Do NOT
           // overwrite from the stack-wide fallback (a DIFFERENT workspace's
           // secret once >1 is installed). Re-run case; rotation is

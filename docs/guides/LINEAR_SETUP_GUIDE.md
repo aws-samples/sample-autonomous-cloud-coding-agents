@@ -84,7 +84,9 @@ https://bedrock-agentcore.us-east-1.amazonaws.com/identities/oauth2/callback/<id
 
 Add that URI to the app, re-run the same command, and it proceeds to consent. This happens once per workspace. (`bgagent linear app-template --slug <slug>` will include the URI once the provider exists, if you'd rather regenerate the whole template.)
 
-Setup also prompts for the **webhook signing secret** the first time, and preserves the existing one on re-runs rather than overwriting it.
+Setup also asks for the **webhook signing secret** from step 2, and preserves the existing one on re-runs rather than overwriting it.
+
+> **Watch for this on a second or later workspace.** If a stored secret is missing, setup mirrors the stack-wide fallback and says so. That value is correct only for the *first* workspace — for any other it is a different workspace's secret, so every delivery fails signature verification with a 401 and no task is ever created. Setup warns whenever the stored secret is the stack-wide one; confirm with `bgagent linear update-webhook-secret <slug>` using the secret from *this* workspace's app.
 
 Finally it offers a picker so you can map your own Linear identity to your ABCA account — pick yourself. ([Why a picker is needed.](#why-the-two-step-handshake))
 

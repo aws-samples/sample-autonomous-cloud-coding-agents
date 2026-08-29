@@ -578,3 +578,44 @@ describe('readExistingOauthTokens — keeps the fallback real when moving to the
     expect(await readExistingOauthTokens(async () => '', notFound)).toBeUndefined();
   });
 });
+
+describe('resolveWebhookSecretAction — inherited vs owned', () => {
+  // These two states are byte-identical on disk and demand different handling. A
+  // workspace that inherited the stack-wide secret by an earlier mirror was being
+  // reported as owning its own, which silenced the mirror warning permanently — so
+  // an additional workspace holding the wrong secret 401s on every delivery and is
+  // never told why. Observed live on a second workspace.
+  const OWN = 'lin_wh_this_workspaces_own_secret';
+  const STACKWIDE = 'lin_wh_the_stack_wide_secret';
+
+  test('a stored secret that EQUALS the stack-wide one is reported as inherited', () => {
+    expect(resolveWebhookSecretAction(STACKWIDE, true, STACKWIDE))
+      .toEqual({ kind: 'preserve-inherited', secret: STACKWIDE });
+  });
+
+  test('a stored secret that DIFFERS is genuinely this workspace\'s own', () => {
+    expect(resolveWebhookSecretAction(OWN, true, STACKWIDE))
+      .toEqual({ kind: 'preserve', secret: OWN });
+  });
+
+  test('the value is preserved either way — this changes what is SAID, not what is stored', () => {
+    // Rewriting the credential on a warning would risk breaking a first workspace
+    // for which the stack-wide secret is the correct one.
+    const a = resolveWebhookSecretAction(STACKWIDE, true, STACKWIDE);
+    const b = resolveWebhookSecretAction(OWN, true, STACKWIDE);
+    expect('secret' in a && a.secret).toBe(STACKWIDE);
+    expect('secret' in b && b.secret).toBe(OWN);
+  });
+
+  test('without the stack-wide value it cannot tell, and does not guess', () => {
+    // Reading the stack-wide secret is best-effort; an unreadable one must not turn
+    // a legitimate owned secret into a warning.
+    expect(resolveWebhookSecretAction(STACKWIDE, true, undefined))
+      .toEqual({ kind: 'preserve', secret: STACKWIDE });
+  });
+
+  test('no stored secret still mirrors or prompts as before', () => {
+    expect(resolveWebhookSecretAction(undefined, true, STACKWIDE)).toEqual({ kind: 'mirror-stackwide' });
+    expect(resolveWebhookSecretAction(undefined, false, undefined)).toEqual({ kind: 'prompt' });
+  });
+});
