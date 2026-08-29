@@ -1522,6 +1522,44 @@ describe('AgentStack Linear identity vault gate (#809)', () => {
     expect(rendered).not.toContain('Custom::CDKBucketDeployment');
     expect(rendered).toContain('LinearVaultConsentPageStack');
   });
+
+  test('EVERY Lambda that writes to Linear can mint from the vault', () => {
+    // The webhook processor was granted vault access and nothing else was, on the
+    // assumption widening could wait. It could not: the fan-out plane posts the
+    // PR-opened and terminal comments, the orchestrator posts epic rollups, and the
+    // GitHub processor updates the linked issue. Each fell back to a
+    // Secrets-Manager token a vault-onboarded workspace does not maintain, so a
+    // task would succeed while its Linear issue showed nothing after the opening
+    // comment. Live-caught as 401s in the fan-out log.
+    //
+    // Pinned by COUNT so a newly added Linear writer fails here rather than in
+    // production: adding one without the grant leaves the count short.
+    const app = new App({ context: { enableLinearIdentityVault: true } });
+    const template = Template.fromStack(
+      new AgentStack(app, 'LinearVaultWritersStack', {
+        env: { account: '123456789012', region: 'us-east-1' },
+      }),
+    );
+    const fns = template.findResources('AWS::Lambda::Function');
+    const withVaultEnv = Object.entries(fns).filter(([, f]) => {
+      const vars = (f as { Properties?: { Environment?: { Variables?: Record<string, unknown> } } })
+        .Properties?.Environment?.Variables ?? {};
+      return vars.LINEAR_VAULT_ENABLED === 'true';
+    }).map(([id]) => id);
+
+    // The Linear webhook processor plus the three writers wired alongside it.
+    expect(withVaultEnv).toHaveLength(4);
+    const joined = withVaultEnv.join(' ');
+    expect(joined).toMatch(/FanOut/);
+    expect(joined).toMatch(/Orchestrator/);
+    expect(joined).toMatch(/GitHubScreenshot|WebhookProcessor/);
+    // Every one of them also carries the workload name, or the env is inert.
+    for (const id of withVaultEnv) {
+      const vars = (fns[id] as { Properties: { Environment: { Variables: Record<string, unknown> } } })
+        .Properties.Environment.Variables;
+      expect(vars.LINEAR_WORKLOAD_IDENTITY_NAME).toBe('abca_linear_oauth');
+    }
+  });
 });
 
 describe('AgentStack Agent Registry gate', () => {

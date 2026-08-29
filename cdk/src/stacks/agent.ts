@@ -1725,6 +1725,27 @@ export class AgentStack extends Stack {
       taskTable: taskTable.table,
     });
 
+    // --- Vault parity for every Lambda that talks to Linear -----------------
+    // The webhook processor was granted vault access when the vault landed and
+    // nothing else was, on the assumption that widening could wait. It could not:
+    // these three post the PR-opened comment, the terminal comment, the epic
+    // rollup, and the GitHub-side issue updates. Without the grant each falls back
+    // to a Secrets-Manager token that a vault-onboarded workspace does not
+    // maintain, so the task succeeds and the Linear issue shows nothing after the
+    // opening comment — no reaction, no state change, no PR link. Live-caught as
+    // 401s in the fan-out log while the task itself completed and opened its PR.
+    if (linearIdentityVault) {
+      for (const linearWriter of [
+        fanOutConsumer.fn,
+        orchestrator.fn,
+        githubScreenshot.webhookProcessorFn,
+      ]) {
+        linearWriter.addEnvironment('LINEAR_VAULT_ENABLED', 'true');
+        linearWriter.addEnvironment('LINEAR_WORKLOAD_IDENTITY_NAME', LINEAR_VAULT_WORKLOAD_NAME);
+        linearIdentityVault.grantMintToken(linearWriter);
+      }
+    }
+
     // Re-stacking dependents is NOT a GitHub-webhook path. It runs inside the
     // orchestration reconciler (off the TaskTable stream): when a Linear
     // @bgagent comment re-iterates a sub-issue's PR (coding/pr-iteration-v1)
