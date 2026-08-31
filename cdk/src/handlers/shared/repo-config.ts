@@ -25,7 +25,7 @@ import { makeDocClient } from './ua';
  * Per-repository configuration written by the Blueprint CDK construct
  * and read at runtime by the task API gate and the orchestrator.
  */
-export type ComputeType = 'agentcore' | 'ecs';
+export type ComputeType = 'agentcore' | 'ecs' | 'lambda-microvm';
 
 export interface RepoConfig {
   readonly repo: string;
@@ -60,6 +60,18 @@ export interface RepoConfig {
    * path falls back to the platform default of 50.
    */
   readonly approval_gate_cap?: number;
+  /**
+   * Registry (#246) ``registry://`` refs for MCP servers pinned by the
+   * blueprint. Resolved by the orchestrator at task start and merged into the
+   * agent's ``.mcp.json``.
+   */
+  readonly mcp_servers?: string[];
+  /** Registry (#246) Cedar policy module refs; resolved cedar_text is merged
+   *  into the ``cedar_policies`` payload. */
+  readonly cedar_policy_modules?: string[];
+  /** Registry (#246) skill refs; resolved prompt fragments append to the
+   *  system prompt. */
+  readonly skills?: string[];
 }
 
 /**
@@ -88,6 +100,15 @@ export interface BlueprintConfig {
    * field is informational for the runtime path.
    */
   readonly approval_gate_cap?: number;
+  /**
+   * Registry (#246) MCP server ``registry://`` refs surfaced from RepoConfig so
+   * the orchestrator can resolve + merge them into the agent payload.
+   */
+  readonly mcp_servers?: string[];
+  /** Registry (#246) Cedar policy module refs surfaced from RepoConfig. */
+  readonly cedar_policy_modules?: string[];
+  /** Registry (#246) skill refs surfaced from RepoConfig. */
+  readonly skills?: string[];
 }
 
 const ddb = makeDocClient();

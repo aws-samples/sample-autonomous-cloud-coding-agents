@@ -21,13 +21,22 @@
  * Valid task states in the task lifecycle state machine.
  *
  * States progress through the lifecycle:
- *   [PENDING_UPLOADS ->] SUBMITTED -> HYDRATING ->
+ *   [PENDING_UPLOADS ->] SUBMITTED [<-> QUEUED] -> HYDRATING ->
  *   RUNNING -> FINALIZING -> terminal (COMPLETED / FAILED / CANCELLED / TIMED_OUT).
  * See ORCHESTRATOR.md for the full state transition table.
  *
  * PENDING_UPLOADS is a pre-active state for tasks with presigned-upload
  * attachments: no compute allocated, no concurrency slot consumed. The
  * task transitions to SUBMITTED once uploads are confirmed and screened.
+ *
+ * QUEUED (#441) is a pre-active state for tasks that hit the per-user
+ * admission cap: the admission slot was NOT acquired, so no compute is
+ * allocated and no concurrency slot is consumed. The admission-queue
+ * pickup Lambda re-attempts admission in FIFO order (by ``created_at``)
+ * as slots free up, transitioning QUEUED -> SUBMITTED and re-invoking
+ * the orchestrator. A pickup that loses the admission race simply
+ * re-queues (SUBMITTED -> QUEUED); FIFO position is preserved because
+ * ``created_at`` never changes.
  *
  * AWAITING_APPROVAL is the Cedar-HITL soft-deny gate surface: the
  * task is alive but paused on a human decision. See
@@ -37,6 +46,7 @@
  */
 export const TaskStatus = {
   PENDING_UPLOADS: 'PENDING_UPLOADS',
+  QUEUED: 'QUEUED',
   SUBMITTED: 'SUBMITTED',
   HYDRATING: 'HYDRATING',
   RUNNING: 'RUNNING',
@@ -66,10 +76,14 @@ export const TERMINAL_STATUSES: readonly TaskStatusType[] = [
 /**
  * Pre-active states where the task exists but has not entered the
  * orchestration pipeline. No compute resources are allocated and no
- * concurrency slot is consumed.
+ * concurrency slot is consumed. QUEUED belongs here (#441): admission
+ * explicitly did NOT acquire a slot, so counting it as active would
+ * deadlock the queue (queued tasks would hold the very slots they
+ * are waiting for).
  */
 export const PRE_ACTIVE_STATUSES: readonly TaskStatusType[] = [
   TaskStatus.PENDING_UPLOADS,
+  TaskStatus.QUEUED,
 ];
 
 /**
@@ -97,7 +111,11 @@ export const VALID_TRANSITIONS: Readonly<Record<TaskStatusType, readonly TaskSta
   // Transitions to SUBMITTED on confirm-uploads success, FAILED on
   // screening failure, CANCELLED on user cancel or 30-min auto-cancel.
   [TaskStatus.PENDING_UPLOADS]: [TaskStatus.SUBMITTED, TaskStatus.FAILED, TaskStatus.CANCELLED],
-  [TaskStatus.SUBMITTED]: [TaskStatus.HYDRATING, TaskStatus.FAILED, TaskStatus.CANCELLED],
+  // QUEUED (#441): admission-capped task awaiting a free concurrency
+  // slot. SUBMITTED on pickup (slot acquired), CANCELLED on user
+  // cancel, FAILED only via the queue-stranded backstop.
+  [TaskStatus.QUEUED]: [TaskStatus.SUBMITTED, TaskStatus.CANCELLED, TaskStatus.FAILED],
+  [TaskStatus.SUBMITTED]: [TaskStatus.QUEUED, TaskStatus.HYDRATING, TaskStatus.FAILED, TaskStatus.CANCELLED],
   [TaskStatus.HYDRATING]: [
     TaskStatus.RUNNING,
     TaskStatus.AWAITING_APPROVAL,

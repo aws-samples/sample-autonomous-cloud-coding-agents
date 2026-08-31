@@ -30,6 +30,82 @@ export type ResolvedWorkflow = {
   readonly version: string;
 };
 
+/**
+ * A resolved registry-asset pin stamped on the TaskRecord for audit (#246).
+ * Mirrors ``cdk/src/handlers/shared/types.ts::ResolvedAssetTriple``.
+ */
+export type ResolvedAssetTriple = {
+  readonly kind: string;
+  readonly id: string;
+  readonly version: string;
+};
+
+// --- Agent asset registry (#246) API wire types ------------------------------
+// Mirrors ``cdk/src/handlers/shared/types.ts`` per the CLI types-sync contract.
+
+/** `POST /registry/records` request body. */
+export type RegistryPublishRequest = {
+  readonly kind: string;
+  readonly namespace: string;
+  readonly name: string;
+  /** semver string, immutable once written. */
+  readonly asset_version: string;
+  /** discovery descriptor body (server.json / SKILL.md / arbitrary JSON). */
+  readonly discovery: Record<string, unknown>;
+  /** ABCA runtime payload (connection config / cedar text / prompt fragment). */
+  readonly runtime: Record<string, unknown>;
+  /** force CUSTOM (verbatim) storage instead of a native descriptor. */
+  readonly custom?: boolean;
+  /** dev convenience: drive create→submit→approve so the record resolves. */
+  readonly auto_approve?: boolean;
+};
+
+/** One version row in a `show` response. */
+export type RegistryVersionSummary = {
+  readonly version: string;
+  readonly status: string;
+  readonly created_at: string | null;
+  readonly publisher: string | null;
+};
+
+/** `GET /registry/records/{kind}/{namespace}/{name}` response — one asset's
+ *  versions. Mirrors cdk/src/handlers/shared/types.ts (types-sync contract). */
+export type RegistryShowResponse = {
+  readonly kind: string;
+  readonly namespace: string;
+  readonly name: string;
+  readonly versions: readonly RegistryVersionSummary[];
+};
+
+/** A record envelope returned by publish / show. */
+export type RegistryRecordResponse = {
+  readonly kind: string;
+  readonly namespace: string;
+  readonly name: string;
+  readonly version: string;
+  readonly status: string;
+  readonly storage_mode: string;
+};
+
+/** `GET /registry/resolve?ref=…` response. */
+export type RegistryResolveResponse = {
+  readonly kind: string;
+  readonly namespace: string;
+  readonly name: string;
+  readonly version: string;
+  readonly runtime: Record<string, unknown>;
+  readonly warnings: readonly string[];
+};
+
+/** One asset row in a `list` response. */
+export type RegistryListEntry = {
+  readonly kind: string;
+  readonly namespace: string;
+  readonly name: string;
+  readonly latest_version: string | null;
+  readonly status: string;
+};
+
 /** Shared across all attachment interfaces. Add new types here (e.g., 'audio'). */
 export type AttachmentType = 'image' | 'file' | 'url';
 
@@ -41,6 +117,7 @@ export type AttachmentType = 'image' | 'file' | 'url';
  */
 export type TaskStatusType =
   | 'PENDING_UPLOADS'
+  | 'QUEUED'
   | 'SUBMITTED'
   | 'HYDRATING'
   | 'RUNNING'
@@ -90,6 +167,8 @@ export interface TaskDetail {
   readonly repo: string | null;
   readonly issue_number: number | null;
   readonly resolved_workflow: ResolvedWorkflow | null;
+  /** Registry assets resolved for this task (#246); null when none pinned. */
+  readonly resolved_assets: ResolvedAssetTriple[] | null;
   readonly pr_number: number | null;
   readonly task_description: string | null;
   readonly branch_name: string;
@@ -110,6 +189,13 @@ export interface TaskDetail {
   readonly updated_at: string;
   readonly started_at: string | null;
   readonly completed_at: string | null;
+  /** ISO timestamp of the agent's last heartbeat (45 s cadence, every compute
+   *  backend); ``null`` before the first beat or on tasks that never ran. The
+   *  platform's only in-guest liveness signal, surfaced through the API as of
+   *  ADR-021 P2r2-F11 — it was written and consumed internally but hidden from
+   *  every operator, which produced a wrong live-verification conclusion. Mirrors
+   *  ``cdk/src/handlers/shared/types.ts::TaskDetail``. */
+  readonly agent_heartbeat_at: string | null;
   readonly duration_s: number | null;
   readonly cost_usd: number | null;
   readonly build_passed: boolean | null;
@@ -156,6 +242,18 @@ export interface TaskDetail {
   /** Cedar HITL: when ``status = AWAITING_APPROVAL``, the
    *  ``request_id`` of the pending approval row. Null otherwise. */
   readonly awaiting_approval_request_id: string | null;
+  /** Admission queue (#441): ISO timestamp the task first entered
+   *  QUEUED; null for tasks that were admitted directly. Mirrors
+   *  ``cdk/src/handlers/shared/types.ts::TaskDetail``. */
+  readonly queued_at: string | null;
+  /** Admission queue (#441): 1-based FIFO position among the caller's
+   *  QUEUED tasks when ``status = QUEUED``; null otherwise. Computed
+   *  at read time by the server — it changes as the queue drains. */
+  readonly queue_position: number | null;
+  /** Admission queue (#441): rough ETA (seconds) until pickup, derived
+   *  from queue position and recent task durations. Null when
+   *  ``queue_position`` is null. */
+  readonly estimated_wait_s: number | null;
 }
 
 /** Response body of ``GET /v1/tasks/{task_id}/trace`` (design §10.1). */
@@ -231,12 +329,29 @@ export interface TaskSummary {
   readonly repo: string | null;
   readonly issue_number: number | null;
   readonly resolved_workflow: ResolvedWorkflow | null;
+  /** Registry assets resolved for this task (#246); null when none pinned. */
+  readonly resolved_assets: ResolvedAssetTriple[] | null;
   readonly pr_number: number | null;
   readonly task_description: string | null;
   readonly branch_name: string;
   readonly pr_url: string | null;
   readonly created_at: string;
   readonly updated_at: string;
+  /**
+   * Last in-guest liveness beat (ISO-8601), or ``null`` when the agent has not
+   * beaten yet, on a substrate whose agent never beats, or on records predating
+   * the field.
+   *
+   * On the SUMMARY as well as the detail (ADR-021 P2r2-F11 follow-up) because
+   * liveness is a list-level question: "is anything still alive?" is asked across
+   * tasks, and answering it one `bgagent status` at a time is how a hung task
+   * goes unnoticed. The field's history is the argument — while `toTaskDetail`
+   * omitted it, `bgagent status` reported `None` against a 6-second-old DynamoDB
+   * value, and that produced a WRONG live-verification conclusion attributed to a
+   * different defect entirely. Keep in sync with the sibling declaration in the
+   * other package's `types.ts`.
+   */
+  readonly agent_heartbeat_at: string | null;
 }
 
 /** Task event returned by GET /v1/tasks/{task_id}/events. */
@@ -501,6 +616,11 @@ export interface JiraLinkResponse {
 /** CLI config stored in ~/.bgagent/config.json. */
 export interface CliConfig {
   readonly api_url: string;
+  /** URL of the agent asset registry API (#246), which is a separate API
+   *  Gateway from `api_url` (see RegistryApiUrl stack output). Optional for
+   *  backward compatibility with configs written before the registry shipped;
+   *  `bgagent registry` commands require it. */
+  readonly registry_api_url?: string;
   readonly region: string;
   readonly user_pool_id: string;
   readonly client_id: string;

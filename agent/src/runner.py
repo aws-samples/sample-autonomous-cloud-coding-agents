@@ -36,6 +36,7 @@ from clarification_tool import (
     build_clarification_server,
 )
 from config import AGENT_WORKSPACE
+from gateway_tools import GATEWAY_SERVER_NAME, build_gateway_server
 from models import AgentResult, TaskConfig, TokenUsage
 from progress_writer import _ProgressWriter
 from shell import log, log_error_cw, truncate
@@ -435,6 +436,83 @@ def _resolve_setting_sources(config: TaskConfig) -> list[Literal["user", "projec
     return ["project"] if config.repo_url else []
 
 
+#: Timeout (seconds) for the ``claude --version`` diagnostic probe.
+#:
+#: 60, not the original 10 (ADR-021 P2-F5, live 2026-08-07). This probe killed
+#: EVERY task on the ``lambda-microvm`` backend at turn 0, reproducibly:
+#:
+#:   TimeoutExpired: Command '['claude', '--version']' timed out after 10 seconds
+#:
+#: The binary was fine — the same image answers ``2.1.191 (Claude Code)`` in under
+#: a second locally. It is a 225 MiB (236,305,136-byte) statically linked ELF, and
+#: on a MicroVM restored from a snapshot that never touched it, the first ``exec``
+#: must fault all of its pages in from lazily-restored storage.
+#:
+#: The real fix is warming the binary BEFORE the snapshot is captured
+#: (``_warm_snapshot_binaries`` in ``server.py``'s ``/ready`` hook); this bound is
+#: the belt to that braces, and it is deliberately loose because a tight bound buys
+#: NOTHING here: the call prints a version string into a log line, and its failure
+#: mode is a dead task. Any cold-start environment (a fresh container, a cold page
+#: cache, a throttled volume) has to fit inside it. 60 s still fails loudly on a
+#: genuinely broken binary.
+_CLAUDE_VERSION_PROBE_TIMEOUT_S = 60
+
+#: Timeout (seconds) for ``which claude``. Unchanged at 5: a PATH lookup touches no
+#: page of the 225 MiB binary, so it is not subject to the hydration cost above.
+_WHICH_CLAUDE_TIMEOUT_S = 5
+
+
+def _log_claude_cli_version() -> None:
+    """Log the resolved ``claude`` path and version, for protocol-mismatch triage.
+
+    Diagnostics only — nothing branches on the result, which is exactly why the
+    timeout above is loose. Extracted from ``run_agent`` so the probe is assertable
+    in a unit test without standing up the SDK client: this line, and only this
+    line, is what failed every task on the MicroVM backend (P2-F5).
+
+    **Diagnostics-only means it cannot fail the task.** Raising the timeout to 60 s
+    made P2-F5 unlikely; it did not make it impossible, and a probe whose entire
+    output is a log line has no business propagating. So every failure mode of the
+    two ``subprocess.run`` calls is caught and downgraded to a ``WARN``:
+    ``TimeoutExpired`` (``SubprocessError``) for a still-hydrating binary,
+    ``FileNotFoundError`` / ``PermissionError`` (``OSError``) for a missing or
+    non-executable ``which``/``claude``. The real ``claude`` invocation happens
+    inside the SDK client below and still fails loudly — this line does not.
+    """
+    try:
+        cli_path = subprocess.run(
+            ["which", "claude"], capture_output=True, text=True, timeout=_WHICH_CLAUDE_TIMEOUT_S
+        )
+        if cli_path.returncode != 0:
+            log("WARN", "claude CLI not found on PATH")
+            return
+        cli_ver = subprocess.run(
+            ["claude", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=_CLAUDE_VERSION_PROBE_TIMEOUT_S,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        log("WARN", f"claude CLI version probe failed (non-fatal): {type(exc).__name__}: {exc}")
+        return
+    log("AGENT", f"claude CLI: {cli_path.stdout.strip()} version={cli_ver.stdout.strip()}")
+
+
+def _register_gateway_server(mcp_servers: dict[str, Any]) -> None:
+    """Register the AgentCore Gateway bridge into ``mcp_servers`` if enabled.
+
+    Mutates ``mcp_servers`` in place, adding the bridge under
+    :data:`GATEWAY_SERVER_NAME` when :func:`build_gateway_server` returns a
+    server (feature deployed + SDK present). A no-op otherwise. Extracted from
+    ``run_agent`` so the registration wiring is unit-testable without driving
+    the whole SDK session (the #641 P1 review flagged this path as untested).
+    """
+    gateway_server = build_gateway_server()
+    if gateway_server is not None:
+        mcp_servers[GATEWAY_SERVER_NAME] = gateway_server
+        log("AGENT", "AgentCore Gateway tool bridge registered (mcp__abca_gateway__*)")
+
+
 async def run_agent(
     prompt: str,
     system_prompt: str,
@@ -470,14 +548,7 @@ async def run_agent(
 
     sdk_version = getattr(_sdk, "__version__", "unknown")
     log("AGENT", f"claude-agent-sdk version: {sdk_version}")
-    cli_path = subprocess.run(["which", "claude"], capture_output=True, text=True, timeout=5)
-    if cli_path.returncode == 0:
-        cli_ver = subprocess.run(
-            ["claude", "--version"], capture_output=True, text=True, timeout=10
-        )
-        log("AGENT", f"claude CLI: {cli_path.stdout.strip()} version={cli_ver.stdout.strip()}")
-    else:
-        log("WARN", "claude CLI not found on PATH")
+    _log_claude_cli_version()
 
     # SDK tool surface — see _resolve_allowed_tools for the policy.
     allowed_tools = _resolve_allowed_tools(config)
@@ -533,6 +604,13 @@ async def run_agent(
             # allowed_tools, but list it explicitly so intent is clear + robust
             # to a future permission-mode change.
             allowed_tools = [*allowed_tools, CLARIFICATION_TOOL_NAME]
+
+    # AgentCore Gateway federation (ADR-019 P1): register the in-process
+    # SigV4-signed bridge to the Gateway's read-only tools when the feature is
+    # deployed (ABCA_TOOL_GATEWAY_URL set via --context enableToolGateway=true).
+    # Offered regardless of read_only — the tool is itself read-only. No-op when
+    # the URL is unset or the SDK is unavailable.
+    _register_gateway_server(mcp_servers)
 
     options = ClaudeAgentOptions(
         model=config.anthropic_model,

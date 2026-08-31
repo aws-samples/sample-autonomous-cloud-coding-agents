@@ -20,6 +20,10 @@
 import { PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { documentClient } from './dynamo-clients';
 import {
+  LambdaMicrovmProbeClientFactory,
+  requireLambdaMicrovmAvailability,
+} from './lambda-microvm-availability';
+import {
   assertRepoFormat,
   loadRepoConfig,
   parseRepoConfigRow,
@@ -31,12 +35,17 @@ import {
 export const REMOVED_REPO_TTL_DAYS = 30;
 
 export interface OnboardRepoOptions {
-  readonly computeType?: 'agentcore' | 'ecs';
+  readonly computeType?: 'agentcore' | 'ecs' | 'lambda-microvm';
   readonly runtimeArn?: string;
   readonly modelId?: string;
   readonly maxTurns?: number;
   readonly githubTokenSecretArn?: string;
   readonly pollIntervalMs?: number;
+}
+
+export interface OnboardRepoDependencies {
+  /** Override for deterministic/offline tests; production uses the regional AWS client. */
+  readonly lambdaMicrovmClientFactory?: LambdaMicrovmProbeClientFactory;
 }
 
 /** Register or re-activate a repository in RepoTable (operator path). */
@@ -45,6 +54,7 @@ export async function onboardRepo(
   tableName: string,
   repo: string,
   options: OnboardRepoOptions = {},
+  dependencies: OnboardRepoDependencies = {},
 ): Promise<RepoConfigRow> {
   assertRepoFormat(repo);
   const now = new Date().toISOString();
@@ -61,6 +71,11 @@ export async function onboardRepo(
       throw err;
     }
     existing = undefined;
+  }
+
+  const effectiveComputeType = options.computeType ?? existing?.compute_type ?? 'agentcore';
+  if (effectiveComputeType === 'lambda-microvm') {
+    await requireLambdaMicrovmAvailability(region, dependencies.lambdaMicrovmClientFactory);
   }
 
   const item: Record<string, unknown> = {

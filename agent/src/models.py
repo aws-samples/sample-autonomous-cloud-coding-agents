@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal, Self
+from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -154,7 +154,7 @@ class TaskConfig(BaseModel):
     task_description: str = ""
     github_token: str = ""
     aws_region: str
-    anthropic_model: str = "us.anthropic.claude-opus-4-8"
+    anthropic_model: str = "us.anthropic.claude-opus-5"
     # The "small/fast" model Claude Code uses for auxiliary work (e.g. WebFetch
     # page summarization). Must be a cross-region INFERENCE-PROFILE id (``us.``
     # prefix), not a bare foundation-model id — Claude 4.x cannot be invoked
@@ -228,6 +228,11 @@ class TaskConfig(BaseModel):
     trace: bool = False
     # Enriched mid-flight by pipeline.py:
     cedar_policies: list[str] = []
+    # Registry assets (#246) resolved by the orchestrator and threaded in the
+    # payload. Each entry is ``{kind, namespace, name, version, runtime}``; the
+    # per-kind loaders (registry.loader) apply them — mcp_server merges into
+    # ``.mcp.json`` (PR 2); cedar_policy_module / skill land in PR 3.
+    resolved_assets: list[dict[str, Any]] = Field(default_factory=list)
     # Cedar human-in-the-loop approvals. Per-task approval defaults threaded
     # from the orchestrator payload; consumed by PolicyEngine at
     # construction so the engine seeds ApprovalAllowlist and adopts

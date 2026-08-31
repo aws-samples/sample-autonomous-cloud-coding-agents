@@ -372,6 +372,29 @@ class TestBuildSystemPrompt:
         assert "Always use tabs" in result
         assert "Additional instructions" in result
 
+    def test_resolved_skill_fragment_appended_to_system_prompt(self):
+        # #246: a resolved skill's prompt_fragment must reach the system prompt.
+        config = TaskConfig(
+            repo_url="o/r",
+            task_id="t1",
+            max_turns=10,
+            github_token="ghp_test",
+            aws_region="us-east-1",
+            resolved_assets=[
+                {
+                    "kind": "skill",
+                    "namespace": "acme",
+                    "name": "readme-helper",
+                    "version": "1.0.0",
+                    "runtime": {"prompt_fragment": "Add an ABCA-REVIEWED marker."},
+                }
+            ],
+        )
+        setup = RepoSetup(repo_dir="/workspace/t1", branch="b", default_branch="main", notes=[])
+        result = _build_system_prompt(config, setup, None, "")
+        assert "## Skills" in result
+        assert "Add an ABCA-REVIEWED marker." in result
+
 
 # ---------------------------------------------------------------------------
 # build_config — workflow resolution

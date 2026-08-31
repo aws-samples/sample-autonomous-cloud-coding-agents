@@ -149,9 +149,3 @@ export async function listRepoConfigs(
 
   return items.sort((a, b) => a.repo.localeCompare(b.repo));
 }
-
-/** Count active repos in RepoTable. */
-export async function countActiveRepos(region: string, tableName: string): Promise<number> {
-  const repos = await listRepoConfigs(region, tableName);
-  return repos.filter((r) => r.status === 'active').length;
-}

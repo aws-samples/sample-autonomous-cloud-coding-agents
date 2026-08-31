@@ -131,14 +131,15 @@ async function handleCancelAction(payload: SlackInteractionPayload, actionId: st
     return;
   }
 
-  // Attempt to cancel.
-  const CANCELLABLE_STATUSES = ['PENDING_UPLOADS', 'SUBMITTED', 'HYDRATING', 'RUNNING', 'AWAITING_APPROVAL', 'FINALIZING'];
+  // Attempt to cancel. QUEUED (#441) is cancellable — it removes the
+  // task from the admission queue (no compute or concurrency to release).
+  const CANCELLABLE_STATUSES = ['PENDING_UPLOADS', 'QUEUED', 'SUBMITTED', 'HYDRATING', 'RUNNING', 'AWAITING_APPROVAL', 'FINALIZING'];
   try {
     await ddb.send(new UpdateCommand({
       TableName: TASK_TABLE,
       Key: { task_id: taskId },
       UpdateExpression: 'SET #s = :cancelled, updated_at = :now',
-      ConditionExpression: '#s IN (:s1, :s2, :s3, :s4, :s5, :s6)',
+      ConditionExpression: '#s IN (:s1, :s2, :s3, :s4, :s5, :s6, :s7)',
       ExpressionAttributeNames: { '#s': 'status' },
       ExpressionAttributeValues: {
         ':cancelled': 'CANCELLED',
@@ -149,6 +150,7 @@ async function handleCancelAction(payload: SlackInteractionPayload, actionId: st
         ':s4': CANCELLABLE_STATUSES[3],
         ':s5': CANCELLABLE_STATUSES[4],
         ':s6': CANCELLABLE_STATUSES[5],
+        ':s7': CANCELLABLE_STATUSES[6],
       },
     }));
 

@@ -18,6 +18,7 @@
  */
 
 import { classifyError, ErrorCategory, ErrorClass, isTransientError, retryGuidance, type ErrorClassification } from '../../../src/handlers/shared/error-classifier';
+import { LAMBDA_MICROVM_SUPPORTED_REGIONS } from '../../../src/handlers/shared/microvm-regions';
 import { toTaskDetail, type TaskRecord } from '../../../src/handlers/shared/types';
 
 describe('classifyError', () => {
@@ -473,6 +474,271 @@ describe('classifyError', () => {
       expect(result!.errorClass).toBe(ErrorClass.USER);
       // Must NOT fall through to the generic Unexpected error.
       expect(result!.title).not.toMatch(/Unexpected error/i);
+    });
+  });
+
+  // --- Lambda MicroVMs (ADR-021) ---
+
+  describe('Lambda MicroVMs errors', () => {
+    test('classifies regional unavailability as a non-retryable CONFIG fault with the supported-Region list', () => {
+      // ADR-021: "If startSession fails because the MicroVM service is unavailable
+      // in the stack region, then the orchestrator shall classify the failure with
+      // a configuration remedy and shall not retry."
+      const result = classifyError(
+        'Session start failed: UnknownEndpoint: Inaccessible host: `lambda.eu-central-1.amazonaws.com\'. '
+        + 'This service may not be available in the `eu-central-1\' region.',
+      )!;
+      expect(result.category).toBe(ErrorCategory.CONFIG);
+      expect(result.title).toBe('Lambda MicroVMs is not available in this Region');
+      expect(result.retryable).toBe(false);
+      expect(result.errorClass).toBe(ErrorClass.SERVICE);
+      expect(isTransientError(result)).toBe(false);
+      // The remedy must name the supported Regions AND the alternative backends.
+      for (const region of LAMBDA_MICROVM_SUPPORTED_REGIONS) {
+        expect(result.remedy).toContain(region);
+      }
+      expect(result.remedy).toContain('--compute-type agentcore');
+      expect(result.remedy).toContain('microvm-regions.ts');
+    });
+
+    test('classifies regional unavailability from the raw (unwrapped) SDK error too', () => {
+      // startSessionWithRetry classifies String(err) — no "Session start failed"
+      // wrapper — so the no-retry verdict must hold on the raw string as well.
+      const result = classifyError('Could not resolve endpoint for lambda in region ap-south-1')!;
+      expect(result.title).toBe('Lambda MicroVMs is not available in this Region');
+      expect(isTransientError(result)).toBe(false);
+    });
+
+    test('regional unavailability wins over the generic "Session start failed" copy (ordering)', () => {
+      // The generic compute entry would tell the user "reply to retry", which
+      // loops forever against a Region that will never have the service.
+      const generic = classifyError('Session start failed: boom')!;
+      expect(generic.title).toBe('Agent session failed to start');
+      const regional = classifyError('Session start failed: MicroVMs not available in this region')!;
+      expect(regional.title).toBe('Lambda MicroVMs is not available in this Region');
+    });
+
+    test('does NOT hijack an AgentCore or ECS endpoint failure (marker-anchored pattern)', () => {
+      // Their endpoint hosts are bedrock-agentcore.* / ecs.*, so the MicroVM
+      // entry must not match — otherwise a transient AgentCore blip would be
+      // reported as a permanent regional misconfiguration.
+      const agentcore = classifyError(
+        'Session start failed: UnknownEndpoint: Inaccessible host: `bedrock-agentcore.us-east-1.amazonaws.com\'.',
+      )!;
+      expect(agentcore.title).toBe('Agent session failed to start');
+      const ecs = classifyError(
+        'Session start failed: UnknownEndpoint: Inaccessible host: `ecs.us-east-1.amazonaws.com\'.',
+      )!;
+      expect(ecs.title).toBe('Agent session failed to start');
+    });
+
+    test('classifies ServiceQuotaExceededException as a retryable capacity fault', () => {
+      const result = classifyError(
+        'Session start failed: Error: MicroVM RunMicrovm failed: ServiceQuotaExceededException: MicroVM memory quota exceeded',
+      )!;
+      expect(result.category).toBe(ErrorCategory.COMPUTE);
+      expect(result.retryable).toBe(true);
+      // Capacity-shaped, not configuration-shaped: it frees as MicroVMs
+      // terminate, so the session-start auto-retry is allowed to try once.
+      expect(result.errorClass).toBe(ErrorClass.TRANSIENT);
+      expect(isTransientError(result)).toBe(true);
+      expect(result.remedy).toMatch(/quota increase/i);
+    });
+
+    test('classifies ThrottlingException as retryable/transient', () => {
+      const result = classifyError('MicroVM RunMicrovm failed: ThrottlingException: Rate exceeded')!;
+      expect(result.category).toBe(ErrorCategory.COMPUTE);
+      expect(result.retryable).toBe(true);
+      expect(result.errorClass).toBe(ErrorClass.TRANSIENT);
+      expect(isTransientError(result)).toBe(true);
+    });
+
+    test('classifies TooManyRequestsException alongside ThrottlingException', () => {
+      const result = classifyError('MicroVM GetMicrovm failed: TooManyRequestsException: slow down')!;
+      expect(result.errorClass).toBe(ErrorClass.TRANSIENT);
+    });
+
+    test('classifies a marked ResourceNotFoundException as a non-retryable deploy fault', () => {
+      const result = classifyError('MicroVM RunMicrovm failed: ResourceNotFoundException: MicroVM image not found')!;
+      expect(result.category).toBe(ErrorCategory.CONFIG);
+      expect(result.retryable).toBe(false);
+      expect(result.errorClass).toBe(ErrorClass.SERVICE);
+      // A retry with the same ARNs cannot succeed — no auto-retry.
+      expect(isTransientError(result)).toBe(false);
+      expect(result.remedy).toContain('MICROVM_IMAGE_IDENTIFIER');
+    });
+
+    test('classifies a marked payload-upload failure', () => {
+      const result = classifyError('MicroVM payload upload failed: ThrottlingException: SlowDown')!;
+      // The marker admits multi-word operation names ("payload upload").
+      expect(result.errorClass).toBe(ErrorClass.TRANSIENT);
+    });
+
+    test('classifies a MicroVM substrate-failure reason written by the orchestrator', () => {
+      // Must stay in lockstep with the reason string
+      // `reconcileMicrovmSubstrateState` persists.
+      const result = classifyError(
+        'MicroVM substrate terminated before the agent wrote a terminal status: substrate state completed',
+      )!;
+      expect(result.category).toBe(ErrorCategory.COMPUTE);
+      expect(result.retryable).toBe(true);
+      expect(result.errorClass).toBe(ErrorClass.TRANSIENT);
+      expect(result.title).not.toMatch(/Unexpected error/i);
+    });
+
+    // --- lifecycle-hook 4xx: non-retryable, and it must OUTRANK the generic entry ---
+    //
+    // The service reports a guest 4xx in `stateReason`, which
+    // `reconcileMicrovmSubstrateState` appends to the persisted message — so BOTH
+    // the generic `MicroVM substrate terminated` string and the hook-status string
+    // are present in one `error_message` and ORDER decides the answer. These tests
+    // exist because the wrong order is invisible to a message-only assertion.
+
+    /** The `stateReason` the service really sends, verbatim from the runbook §6.1. */
+    const hookReason = (status: number) =>
+      `Run lifecycle hook returned HTTP status ${status}. `
+      + 'Please check your hook endpoint and application logs for more details.';
+    /** ...as `reconcileMicrovmSubstrateState` persists it. */
+    const reconciled = (reason: string) =>
+      'MicroVM substrate terminated before the agent wrote a terminal status: '
+      + `substrate state completed (${reason})`;
+
+    test.each([400, 403, 404, 422, 499])(
+      'classifies a lifecycle-hook %i as a NON-retryable config fault',
+      (status) => {
+        // Every 4xx the guest can answer is a wiring fault no retry fixes:
+        // MICROVM_RUN_PAYLOAD_INVALID, ..._PLATFORM_CONFIG_INVALID and
+        // ..._PLATFORM_CONFIG_INCOMPLETE. Before this entry they all landed on the
+        // generic COMPUTE/TRANSIENT entry whose remedy is "reply here to try
+        // again" — an invitation to loop forever on a version-skewed deployment.
+        const result = classifyError(reconciled(hookReason(status)))!;
+        expect(result.category).toBe(ErrorCategory.CONFIG);
+        expect(result.retryable).toBe(false);
+        expect(result.errorClass).toBe(ErrorClass.SERVICE);
+        expect(result.title).toMatch(/rejected its own run payload/i);
+        // The remedy must send the operator to the one place the MICROVM_RUN_* code
+        // actually exists: the guest log group. The service does NOT propagate the
+        // response body into `stateReason` (runbook §6.1), so the code cannot be
+        // read from the message itself.
+        expect(result.remedy).toMatch(/log group/i);
+      },
+    );
+
+    test('a lifecycle-hook 5xx stays RETRYABLE — MICROVM_RUN_PAYLOAD_UNREADABLE is a 500', () => {
+      // The scoping that makes the entry above safe. The agent answers 500 for a
+      // truncated/racing S3 payload, which a retry genuinely can fix, so the 4xx
+      // pattern must not swallow the 5xx family.
+      const result = classifyError(reconciled(hookReason(500)))!;
+      expect(result.category).toBe(ErrorCategory.COMPUTE);
+      expect(result.retryable).toBe(true);
+      expect(result.errorClass).toBe(ErrorClass.TRANSIENT);
+    });
+
+    test('a terminal MicroVM with NO hook status keeps the generic retryable entry', () => {
+      // Session duration cap, host fault, external terminate — and the clean
+      // `Success.` case, which `pollSession` normalizes away entirely.
+      const result = classifyError(
+        'MicroVM substrate terminated before the agent wrote a terminal status: substrate state completed',
+      )!;
+      expect(result.title).toMatch(/stopped before the agent reported a result/i);
+      expect(result.retryable).toBe(true);
+    });
+
+    test('every new MicroVM classification carries a full, non-empty guidance shape', () => {
+      const messages = [
+        'Session start failed: UnknownEndpoint: Inaccessible host: `lambda.eu-central-1.amazonaws.com\'',
+        'MicroVM RunMicrovm failed: ServiceQuotaExceededException: quota exceeded',
+        'MicroVM RunMicrovm failed: ThrottlingException: Rate exceeded',
+        'MicroVM RunMicrovm failed: ResourceNotFoundException: image not found',
+        'MicroVM substrate terminated before the agent wrote a terminal status: substrate state completed',
+        reconciled(hookReason(400)),
+      ];
+      for (const msg of messages) {
+        const result = classifyError(msg) as ErrorClassification;
+        expect(result.title.length).toBeGreaterThan(0);
+        expect(result.description.length).toBeGreaterThan(0);
+        expect(result.remedy.length).toBeGreaterThan(0);
+        expect(typeof result.retryable).toBe('boolean');
+        expect([ErrorClass.TRANSIENT, ErrorClass.SERVICE, ErrorClass.USER]).toContain(result.errorClass);
+        expect(result.category).not.toBe(ErrorCategory.UNKNOWN);
+      }
+    });
+  });
+
+  // --- Cross-backend scoping regression (ADR-021) ---
+
+  describe('MicroVM exception patterns must NOT change other backends', () => {
+    /**
+     * `ThrottlingException`, `ServiceQuotaExceededException` and
+     * `ResourceNotFoundException` are generic AWS exception names thrown by
+     * AgentCore, ECS, DynamoDB and Secrets Manager too. The MicroVM entries are
+     * therefore anchored on the `MicroVM <operation> failed` marker that
+     * `lambda-microvm-strategy.wrapMicrovmError` adds.
+     *
+     * These cases pin the PRE-ADR-021 behaviour for UNMARKED occurrences: on
+     * `main` the classifier contained no pattern for any of these names, so a
+     * bare occurrence fell through to UNKNOWN — category `unknown`, title
+     * "Unexpected error", `retryable: false`, `errorClass: USER`, and therefore
+     * NOT auto-retried by `startSessionWithRetry`. If a future edit drops the
+     * marker anchor, these fail instead of silently flipping every other
+     * backend's retry semantics.
+     */
+    const PRE_CHANGE_UNKNOWN = {
+      category: ErrorCategory.UNKNOWN,
+      title: 'Unexpected error',
+      retryable: false,
+      errorClass: ErrorClass.USER,
+    };
+
+    test.each([
+      ['ThrottlingException: Rate exceeded'],
+      ['ServiceQuotaExceededException: quota exceeded'],
+      ['ResourceNotFoundException: Requested resource not found'],
+      ['TooManyRequestsException: slow down'],
+    ])('an unmarked "%s" still classifies as UNKNOWN, exactly as before', (message) => {
+      const result = classifyError(message)!;
+      expect(result.category).toBe(PRE_CHANGE_UNKNOWN.category);
+      expect(result.title).toBe(PRE_CHANGE_UNKNOWN.title);
+      expect(result.retryable).toBe(PRE_CHANGE_UNKNOWN.retryable);
+      expect(result.errorClass).toBe(PRE_CHANGE_UNKNOWN.errorClass);
+      // The retry gate must be unchanged for other backends.
+      expect(isTransientError(result)).toBe(false);
+    });
+
+    test('an AgentCore StopRuntimeSession throttle is not re-classified as a MicroVM fault', () => {
+      const result = classifyError(
+        'ThrottlingException: Too many requests for agentRuntimeArn arn:aws:bedrock-agentcore:us-east-1:1:runtime/r',
+      )!;
+      expect(result.title).toBe('Unexpected error');
+      expect(result.title).not.toMatch(/MicroVM/i);
+    });
+
+    test('an ECS RunTask quota error is not re-classified as a MicroVM fault', () => {
+      const result = classifyError(
+        'ECS RunTask returned no task: arn:test: ServiceQuotaExceededException',
+      )!;
+      expect(result.title).not.toMatch(/MicroVM/i);
+      expect(result.category).toBe(ErrorCategory.UNKNOWN);
+    });
+
+    test('the generic "Session start failed" wrapper still wins for agentcore/ECS quota + throttle', () => {
+      // Pinned by the pre-existing compute-errors test too; restated here so the
+      // scoping intent is explicit at the regression site.
+      expect(classifyError('Session start failed: ServiceQuotaExceededException')!.title)
+        .toBe('Agent session failed to start');
+      expect(classifyError('Session start failed: ThrottlingException: Rate exceeded')!.title)
+        .toBe('Agent session failed to start');
+      expect(classifyError('Session start failed: ResourceNotFoundException')!.title)
+        .toBe('Agent session failed to start');
+    });
+
+    test('Blueprint / hydration ResourceNotFoundException keep their precise CONFIG copy', () => {
+      expect(
+        classifyError('Blueprint config load failed: ResourceNotFoundException: Requested resource not found')!.title,
+      ).toBe('Blueprint configuration error');
+      expect(
+        classifyError('Hydration failed: ResourceNotFoundException: secret missing')!.title,
+      ).toBe('Context hydration failed');
     });
   });
 
