@@ -106,8 +106,37 @@ export const RESOURCE_ACTION_MAP: Record<string, readonly string[]> = {
   // `--context compute_type=lambda-microvm`, so the default-context
   // synth-coverage test never sees these — they are mapped anyway so the map
   // stays a complete statement of what the bootstrap bundle must cover.
-  'AWS::Lambda::MicrovmImage': ['lambda:CreateMicrovmImage'],
-  'AWS::Lambda::NetworkConnector': ['lambda:CreateNetworkConnector'],
+  //
+  // `iam:PassRole` is listed on BOTH because CloudFormation hands a role to the
+  // Lambda MicroVMs service for each: `buildRoleArn` on the image and
+  // `operatorRole` on the (VPC_EGRESS) connector. Its absence here is what let
+  // ADR-021 P2r2-F9 through — the bundle's shared `IAMPassRole` statement carries
+  // an `iam:PassedToService` allowlist that this service presents no usable value
+  // for, so the deploy failed with `iam:PassRole … not authorized` on the build
+  // role while every mapped action was covered. The unconditioned pass now lives in
+  // the conditional `compute-lambda-microvm` policy. Evidence inlined in
+  // ADR-021 §4.
+  //
+  // NOTE: listing the action here does NOT guard that statement.
+  // `collectBootstrapAllowActions` (this file) compares action STRINGS only —
+  // `Resource` and `Condition` are discarded — and `policies/infrastructure.ts`'s
+  // conditioned `IAMPassRole` already contributes a bare `iam:PassRole` to every
+  // bundle, so the requirement is satisfied by the very statement P2r2-F9 proved
+  // is denied on this path. Deleting `MicrovmPassRoles` leaves this check green.
+  // Compounding it, `synth-coverage.test.ts` synthesizes only the default context,
+  // where `AWS::Lambda::MicrovmImage` is never emitted, so these two entries are
+  // never even consulted there.
+  //
+  // The REAL guard against dropping the unconditioned pass is
+  // `test/bootstrap/policies.test.ts` ("MicrovmPassRoles"), which asserts the sid
+  // list, the two name-prefix resources, the ABSENT condition, and the
+  // execution-role exclusion — plus `test/bootstrap/bootstrap-template.test.ts`,
+  // which asserts it survives into the rendered template. These entries DOCUMENT
+  // the create-time need; they do not enforce it. Making the map enforce it would
+  // need `findMissingBootstrapActions` to require an *unconditioned* match for a
+  // declared subset of actions — deliberately not done here.
+  'AWS::Lambda::MicrovmImage': ['lambda:CreateMicrovmImage', 'iam:PassRole'],
+  'AWS::Lambda::NetworkConnector': ['lambda:CreateNetworkConnector', 'iam:PassRole'],
   'AWS::Logs::Delivery': ['logs:CreateDelivery'],
   'AWS::Logs::DeliveryDestination': ['logs:PutDeliveryDestination'],
   'AWS::Logs::DeliverySource': ['logs:PutDeliverySource'],
