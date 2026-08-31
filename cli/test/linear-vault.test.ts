@@ -57,6 +57,8 @@ import {
   beginVaultConsent,
   finalizeVaultConsent,
   isVaultUnavailableError,
+  lookupLinearVaultCallbackUrl,
+  mintLinearTokenFromVault,
   linearVaultProviderName,
   linearVaultUserId,
   upsertLinearCredentialProvider,
@@ -302,5 +304,89 @@ describe('isVaultUnavailableError', () => {
   test('a non-error value does not crash the classifier', () => {
     expect(isVaultUnavailableError(undefined)).toBe(true);
     expect(isVaultUnavailableError('boom')).toBe(true);
+  });
+});
+
+describe('lookupLinearVaultCallbackUrl', () => {
+  // Read-only and best-effort by design: `app-template` calls it before anything
+  // exists, so every failure must read as "unknown" rather than raise. A throw here
+  // would make the command that explains onboarding the one that cannot run first.
+  test('returns the callback URL of an existing provider', async () => {
+    controlSend.mockResolvedValueOnce({ callbackUrl: 'https://bedrock-agentcore.../callback/uuid' });
+    await expect(lookupLinearVaultCallbackUrl({ region: 'us-east-1', workspaceSlug: 'acme' }))
+      .resolves.toBe('https://bedrock-agentcore.../callback/uuid');
+  });
+
+  test('a provider that does not exist yet yields null, not an error', async () => {
+    controlSend.mockRejectedValueOnce(Object.assign(new Error('nope'), { name: 'ResourceNotFoundException' }));
+    await expect(lookupLinearVaultCallbackUrl({ region: 'us-east-1', workspaceSlug: 'acme' }))
+      .resolves.toBeNull();
+  });
+
+  test('absent credentials or an unavailable service also yield null', async () => {
+    controlSend.mockRejectedValueOnce(Object.assign(new Error('no creds'), { name: 'CredentialsProviderError' }));
+    await expect(lookupLinearVaultCallbackUrl({ region: 'us-east-1', workspaceSlug: 'acme' }))
+      .resolves.toBeNull();
+  });
+
+  test('a provider without a callback URL yields null rather than an empty string', async () => {
+    controlSend.mockResolvedValueOnce({});
+    await expect(lookupLinearVaultCallbackUrl({ region: 'us-east-1', workspaceSlug: 'acme' }))
+      .resolves.toBeNull();
+  });
+});
+
+describe('mintLinearTokenFromVault', () => {
+  const args = {
+    region: 'us-east-1',
+    workloadName: 'abca_linear_oauth',
+    providerName: 'bgagent-linear-oauth-acme',
+    userId: 'linear-ws-acme',
+  };
+
+  test('mints from an existing grant', async () => {
+    dataSend
+      .mockResolvedValueOnce({ workloadAccessToken: 'wat-xyz' })
+      .mockResolvedValueOnce({ accessToken: 'lin_oauth_vault' });
+    await expect(mintLinearTokenFromVault(args)).resolves.toBe('lin_oauth_vault');
+  });
+
+  test('sends the consent-time customParameters — they are part of the cache key', async () => {
+    // Omitting them reports "needs consent" against a live grant, which silently
+    // degrades every caller to the Secrets-Manager path. Live-proven.
+    dataSend
+      .mockResolvedValueOnce({ workloadAccessToken: 'wat-xyz' })
+      .mockResolvedValueOnce({ accessToken: 'lin_oauth_vault' });
+    await mintLinearTokenFromVault(args);
+    const tok = dataSend.mock.calls[1][0] as { input: { customParameters?: Record<string, string> } };
+    expect(tok.input.customParameters).toEqual({ actor: 'app', prompt: 'consent' });
+  });
+
+  test('NEVER forces authentication — an ordinary command must not start a consent', async () => {
+    dataSend
+      .mockResolvedValueOnce({ workloadAccessToken: 'wat-xyz' })
+      .mockResolvedValueOnce({ accessToken: 'lin_oauth_vault' });
+    await mintLinearTokenFromVault(args);
+    const tok = dataSend.mock.calls[1][0] as { input: { forceAuthentication?: boolean } };
+    expect(tok.input.forceAuthentication).toBeUndefined();
+  });
+
+  test('a grant that needs consent yields null, not an authorization URL', async () => {
+    // Returning the URL would tempt a non-interactive caller into printing
+    // something it cannot complete.
+    dataSend
+      .mockResolvedValueOnce({ workloadAccessToken: 'wat-xyz' })
+      .mockResolvedValueOnce({ authorizationUrl: 'https://linear.app/oauth/authorize?x=1' });
+    await expect(mintLinearTokenFromVault(args)).resolves.toBeNull();
+  });
+
+  test('no workload token yields null', async () => {
+    dataSend.mockResolvedValueOnce({});
+    await expect(mintLinearTokenFromVault(args)).resolves.toBeNull();
+  });
+
+  test('an API failure yields null so the caller can fall back', async () => {
+    dataSend.mockRejectedValueOnce(new Error('AccessDenied'));
+    await expect(mintLinearTokenFromVault(args)).resolves.toBeNull();
   });
 });
