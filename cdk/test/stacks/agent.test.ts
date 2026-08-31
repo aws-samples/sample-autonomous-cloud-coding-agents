@@ -820,6 +820,15 @@ describe('AgentStack', () => {
       // in. A stack name in a logical id is the signature of the old table.
       expect(id).not.toContain('backgroundagentdev');
       expect(id).not.toContain('AgentRuntimeApplication');
+      // Deliberately the library's CURRENT id shape, so this assertion doubles as a
+      // canary: the next time the AgentCore library renames these resources, this
+      // fails here rather than in a deploy. Read the failure as an operational
+      // warning, not a string mismatch — every already-deployed stack will try to
+      // rename its DeliverySource on the next update, and a renamed source collides
+      // with the live one on the unchanged runtime ARN and rolls the stack back.
+      // Update the regex, and add the new shape to the migration note in
+      // docs/design/OBSERVABILITY.md ("AgentCore log delivery") so operators can
+      // tell which side of the rename their stack is on.
       expect(id).toMatch(/^Runtime(Application|Usage)LogsDeliverySource[0-9A-F]{8}$/);
     }
 

@@ -179,6 +179,69 @@ For post-mortems, eval-harness input, and compliance export, the API exposes a s
 
 Fields whose source did not run for a given task are returned `null`/empty (e.g. no `--trace` → `trace_uri: null`), so the schema is stable for consumers.
 
+## AgentCore log delivery
+
+The agent runtime's application and usage logs reach CloudWatch through a trio of resources per log type — `AWS::Logs::DeliverySource`, `AWS::Logs::DeliveryDestination`, and an `AWS::Logs::Delivery` link joining them. The stack does not declare these. The AgentCore `Runtime` L2 construct creates them from the `loggingConfigs` passed to it, and names them from its own internal construct path.
+
+**The stack deliberately does not override their logical ids.** That is a load-bearing decision rather than an oversight, because the obvious alternatives are worse in a way that is not obvious until a deployment fails.
+
+### Why a rename of these resources is fatal
+
+A `DeliverySource` is unique per `(resource ARN, log type)` for the whole account. The agent runtime's ARN does not change when the delivery resources are renamed, so:
+
+1. Changing a delivery resource's logical id makes CloudFormation treat it as a new resource, which it **creates before deleting** the old one.
+2. The new source points at the same runtime ARN as the live one, which still exists at that moment.
+3. CloudWatch Logs rejects it — `AlreadyExists`, "This ResourceId has already been used in another Delivery Source in this account."
+4. The whole stack update rolls back.
+
+The counter-intuitive consequence: **no choice of name avoids this.** The conflict is on the ARN the sources point at, not on their own names, so renaming them to library-generated ids, to hand-picked stable ids, or to anything else collides identically. Only leaving a logical id untouched avoids it, because that is what makes CloudFormation update in place instead of creating a second source for the same runtime.
+
+### Why the ids are not pinned in the template
+
+An earlier version of the stack held a table of logical ids to override, keyed by stack name, with values read off a live stack. This does not work, because **stack name is not a proxy for deployed state.** Two accounts running a stack of the same name can sit on different library versions' naming, so one set of literals is correct for one account and actively causes the fatal rename on the other. Re-recording the table inverts which account breaks rather than fixing either.
+
+Since no set of literals can describe every account's deployed state, the stack holds none. Log delivery is left to the library, which generates the ids from the construct path — deterministically, identically in every account, with nothing to keep in sync.
+
+The cost of this choice is bounded and one-time: a stack deployed before a library-side rename, or held on older ids by the pin table, must converge once. See the migration below. The cost of the alternative was unbounded — a hand-maintained table that silently breaks a different account every time any library version or any deployment moves.
+
+### Migrating a stack that predates the current naming
+
+Fresh deployments need nothing here. A stack whose live delivery resources already match what the library generates needs nothing either, and `cdk diff` will show the six resources untouched.
+
+A stack still on older ids has to converge, and because the create-before-delete collision above applies, the old resources must be gone before the new ones are created. Check first:
+
+```bash
+aws cloudformation list-stack-resources \
+  --stack-name backgroundagent-dev \
+  --query "StackResourceSummaries[?contains(ResourceType,\
+'Logs::Delivery')].LogicalResourceId" --output text
+```
+
+Logical ids of the form `RuntimeApplicationLogsDeliverySource<hash>` are current — nothing to do. Ids carrying a `CDKSource` segment or the stack name (`RuntimeCDKSourceAPPLICATIONLOGS<stack>Runtime<hash>`) predate the rename and need the one-time step below.
+
+Delete the delivery configuration out of band, then deploy. Deliveries first — they reference the source and destination:
+
+```bash
+REGION=us-east-1
+for d in $(aws logs describe-deliveries --region "$REGION" \
+    --query 'deliveries[].id' --output text); do
+  aws logs delete-delivery --region "$REGION" --id "$d"
+done
+for s in $(aws logs describe-delivery-sources --region "$REGION" \
+    --query 'deliverySources[].name' --output text); do
+  aws logs delete-delivery-source --region "$REGION" --name "$s"
+done
+for t in $(aws logs describe-delivery-destinations --region "$REGION" \
+    --query 'deliveryDestinations[].name' --output text); do
+  aws logs delete-delivery-destination --region "$REGION" --name "$t"
+done
+mise //cdk:deploy
+```
+
+The loops above delete **every** delivery configuration in the account and region, which is what you want on a dedicated deployment account and is not what you want anywhere else. On a shared account, filter to the six resources the previous command listed.
+
+The deploy then creates the delivery trio under the library's naming and drops the old logical ids, whose underlying resources are already gone — CloudFormation treats a delete of an absent resource as done. Agent logs stop being delivered between the deletion and the end of the deploy; nothing else is affected, and no log data already in CloudWatch is touched.
+
 ## Deployment safety
 
 Agent sessions run for up to 8 hours. CDK deployments replace Lambda functions, which can orphan in-flight orchestrator executions. The platform handles this through multiple mechanisms:

@@ -612,12 +612,32 @@ export class AgentStack extends Stack {
 
     runtimeArnHolder = runtime.agentRuntimeArn;
 
-    // Log delivery is left entirely to the AgentCore Runtime, which creates and
-    // names the DeliverySource / Delivery / DeliveryDestination trio itself. We
-    // deliberately do not override those logical ids: see the note in the design
-    // docs, but in short, pinning them to values recorded from one account's live
-    // stack made the template describe that account rather than the code, and broke
-    // every other account on update.
+    // --- AgentCore log delivery: the library owns these logical ids, not us ---
+    //
+    // The Runtime above creates a DeliverySource / DeliveryDestination / Delivery
+    // trio per loggingConfig, naming them from its own construct path. We
+    // deliberately leave those names alone, and that is load-bearing.
+    //
+    // Renaming any of them is fatal on an existing stack. A DeliverySource is
+    // unique per (resource ARN, log type) account-wide and the runtime ARN does not
+    // change, so CloudFormation's create-before-delete produces a second source for
+    // the same runtime, CloudWatch Logs rejects it as already existing, and the
+    // whole update rolls back. Note what that implies: no choice of name avoids the
+    // collision, because the conflict is on the ARN they point at rather than on
+    // their own names. Only leaving a logical id untouched updates in place.
+    //
+    // An earlier version overrode them from a table of ids recorded off a live
+    // stack, keyed by stack NAME. Stack name is not a proxy for deployed state:
+    // two accounts running a stack of the same name had diverged, so the table was
+    // correct for one and caused the rename on the other. No set of literals can
+    // describe every account, so we hold none and let the library generate them —
+    // deterministically, identically in every account, with nothing to keep in sync.
+    //
+    // The one cost: a stack deployed before a library-side rename, or held on older
+    // ids by that table, converges once and needs a one-time operator step first,
+    // since the old resources must be gone before the new ones are created. That
+    // step, and how to tell whether a stack needs it, are in
+    // docs/design/OBSERVABILITY.md ("AgentCore log delivery").
 
     // --- Session storage (preview) ---
     // The L2 construct does not yet expose filesystemConfigurations; use the
