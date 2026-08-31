@@ -156,6 +156,18 @@ describe('autoLinkTokenOwner', () => {
   });
 });
 
+/**
+ * Just the Redirect URIs block. The invariant is about what goes in that FIELD, not
+ * about the word "localhost" appearing anywhere — the traps below legitimately
+ * mention the loopback when explaining which command needs it.
+ */
+function redirectUriBlock(out: string): string {
+  const lines = out.split('\n');
+  const start = lines.findIndex((l) => l.includes('Redirect URIs'));
+  const end = lines.findIndex((l, i) => i > start && l.includes('Public:'));
+  return lines.slice(start, end).join('\n');
+}
+
 describe('renderLinearAppTemplate', () => {
   // Every expectation below was checked against Linear's ACTUAL app-creation form.
   // The template previously asserted a GitHub-username field and a placeholder
@@ -284,8 +296,10 @@ describe('renderLinearAppTemplate', () => {
     });
     expect(out).toContain('https://d2ud1woydykuxp.cloudfront.net/');
     expect(out).toContain('https://bedrock-agentcore.us-east-1.amazonaws.com/identities/oauth2/callback/f88');
-    // The loopback is NOT listed when a hosted page exists — setup will not use it.
-    expect(out).not.toContain('http://localhost:8080/oauth/callback');
+    // The loopback is NOT one of the listed URIs when a hosted page exists — setup
+    // will not redirect to it. (A trap further down may still explain that the older
+    // add-workspace command does; that is guidance, not a field value.)
+    expect(redirectUriBlock(out)).not.toContain('http://localhost:8080/oauth/callback');
     // And no vault-setup: that command no longer exists.
     expect(out).not.toContain('vault-setup');
   });
@@ -302,7 +316,7 @@ describe('renderLinearAppTemplate', () => {
     // template lists one.
     const out = renderLinearAppTemplate({ hostedConsentUrl: 'https://d2ud1woydykuxp.cloudfront.net/' });
     expect(out).toContain('https://d2ud1woydykuxp.cloudfront.net/');
-    expect(out).not.toContain('localhost:8080');
+    expect(redirectUriBlock(out)).not.toContain('localhost:8080');
   });
 
   test('lists the hosted URI EXACTLY once, as the CLI sends it', () => {

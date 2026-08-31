@@ -317,6 +317,14 @@ export function renderLinearAppTemplate(opts: LinearAppTemplateOptions = {}): st
     `  • The app name is not the trigger: that is always \`${COMMENT_TRIGGER_TOKEN} <request>\`, however`,
     '    you name the app (Linear lowercases the name for the display handle).',
     '  • actor=app cannot also request the `admin` scope — Linear rejects the pair.',
+    ...(opts.hostedConsentUrl
+      ? [
+        '  • Using the older `add-workspace` command? It still redirects to',
+        `    ${'http://localhost:8080/oauth/callback'} and is Secrets-Manager only, so add`,
+        '    that URI too if you plan to use it. `bgagent linear setup <slug>` needs no',
+        '    localhost and is the only path that supports the Identity vault.',
+      ]
+      : []),
     bar,
   ].join('\n');
 }
@@ -1585,6 +1593,15 @@ export function makeLinearCommand(): Command {
           console.log('  ⚠ --no-actor-app: dropping actor=app for diagnosis. Token will not be agent-scoped.');
         }
 
+        // add-workspace still uses the loopback: it predates the hosted consent page
+        // and is Secrets-Manager-only. Say so BEFORE the browser opens — an app
+        // configured from `app-template` while a hosted page exists lists only the
+        // hosted URI, and Linear answers the mismatch with an opaque
+        // "Invalid redirect_uri parameter for the application".
+        console.log(`\n  Redirecting to: ${CALLBACK_URL}`);
+        console.log('  That exact URI must be one of the app\'s Redirect URIs.');
+        console.log(`  No localhost here? Use \`bgagent linear setup ${slug}\` instead — it needs`);
+        console.log('  none, and is the only path that supports the Identity vault.\n');
         const callbackPromise = awaitOauthCallback();
 
         console.log();
@@ -1829,9 +1846,13 @@ export function makeLinearCommand(): Command {
             `Could not read existing OAuth bundle: ${err instanceof Error ? err.message : String(err)}`,
           );
         }
-        if (!stored.access_token || !stored.workspace_id) {
+        // Rotating a webhook signing secret needs no OAuth token: the two are
+        // unrelated, and a vault-managed workspace legitimately has no access token in
+        // this bundle. Demanding one made the signing secret unsettable on exactly the
+        // workspaces whose webhooks were failing verification.
+        if (!stored.workspace_id) {
           throw new CliError(
-            `Secret '${secretName}' is missing required fields (access_token / workspace_id). `
+            `Secret '${secretName}' is missing the workspace_id field. `
             + `Bundle may be corrupted; re-run \`bgagent linear setup ${slug}\` to rebuild.`,
           );
         }
@@ -1945,11 +1966,30 @@ export function makeLinearCommand(): Command {
         process.stdout.write('  → Querying Linear for workspace members...');
         const oauthSecret = await sm.send(new GetSecretValueCommand({ SecretId: oauthSecretArn }));
         const stored = JSON.parse(oauthSecret.SecretString ?? '{}') as { access_token?: string };
-        if (!stored.access_token) {
-          console.log(' ✗');
-          throw new CliError(`OAuth secret '${oauthSecretArn}' has no access_token. Re-run setup.`);
+        // Vault-first, like list-projects and the runtime resolver. A vault-managed
+        // workspace has no access token in this bundle by design, so reading only the
+        // bundle failed on exactly the workspaces the vault manages.
+        let inviteToken = stored.access_token;
+        const inviteProvider = registryRow.provider_name as string | undefined;
+        if (inviteProvider) {
+          const recordedSubject = registryRow.vault_user_id as string | undefined;
+          const inviteWorkspaceId = registryRow.linear_workspace_id as string | undefined;
+          inviteToken = await mintLinearTokenFromVault({
+            region,
+            workloadName: LINEAR_VAULT_WORKLOAD_NAME,
+            providerName: inviteProvider,
+            userId: recordedSubject
+              ?? (inviteWorkspaceId ? linearVaultUserId(inviteWorkspaceId) : linearVaultUserIdForSlug(slug)),
+          }) ?? stored.access_token;
         }
-        const members = await queryLinearWorkspaceMembers(`Bearer ${stored.access_token}`);
+        if (!inviteToken) {
+          console.log(' ✗');
+          throw new CliError(
+            `No usable Linear token for '${slug}': the vault has no live grant and `
+            + `'${oauthSecretArn}' holds no access token. Re-run \`bgagent linear setup ${slug}\`.`,
+          );
+        }
+        const members = await queryLinearWorkspaceMembers(`Bearer ${inviteToken}`);
         if (!members || members.length === 0) {
           console.log(' ✗');
           throw new CliError('Linear API returned no workspace members. Token may be expired or scope insufficient.');

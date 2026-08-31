@@ -1162,6 +1162,18 @@ export class AgentStack extends Stack {
         // above (#764) — the two substrates cannot be told to call different
         // inference profiles.
         anthropicDefaultHaikuModel: haikuInferenceProfileId(bedrockGeoRegion),
+        // Substrate parity for the Identity vault: the AgentCore runtime gets these
+        // as env and the ECS container via EcsAgentCluster, so a MicroVM guest must
+        // receive them too or its agent skips vault minting and falls back to a
+        // Secrets-Manager token a vault-managed workspace does not have — losing
+        // reactions and state transitions on work that otherwise succeeds. Forwarded
+        // as platform_config because a snapshot must not bake configuration in.
+        ...(linearIdentityVault
+          ? {
+            linearVaultEnabled: 'true',
+            linearWorkloadIdentityName: LINEAR_VAULT_WORKLOAD_NAME,
+          }
+          : {}),
       },
       // Route ``compute_type: 'ecs'`` repos to the Fargate cluster above —
       // only when the cluster was synthesized (deploy --context compute_type=ecs).
@@ -1355,6 +1367,13 @@ export class AgentStack extends Stack {
     // EcsAgentCluster, and the webhook-processor grant inside LinearIntegration.
     if (linearIdentityVault) {
       linearIdentityVault.grantMintToken(runtime.role);
+      // MicroVM parity: the guest self-mints with its AMBIENT identity, which is the
+      // compute's execution role — not the tenant-scoped session role. Without this
+      // the platform_config above would tell the agent to use the vault and the call
+      // would be denied, which is worse than not offering it at all.
+      if (lambdaMicrovm) {
+        linearIdentityVault.grantMintToken(lambdaMicrovm.executionRole);
+      }
     }
 
     // --- Linear integration (inbound webhook + agent-side MCP outbound) ---

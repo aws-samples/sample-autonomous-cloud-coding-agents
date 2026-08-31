@@ -1664,6 +1664,31 @@ describe('AgentStack Linear identity vault gate (#809)', () => {
     }
   });
 
+  test('MicroVM + vault currently EXCEEDS CloudFormation\'s 500-resource limit', () => {
+    // Deliberately pinning a limitation, not a behaviour. The vault IS wired for the
+    // MicroVM substrate — platform_config carries the workload name and the guest's
+    // execution role gets the mint grant — but the two cannot be enabled together
+    // today: 505 resources against a HARD limit of 500 (microvm alone 496, vault
+    // alone 488). The wiring is therefore unreachable, and claiming MicroVM support
+    // without saying this would be false.
+    //
+    // Reclaiming room means moving a subsystem into a nested stack. The API Gateway
+    // surface (64 Methods + 33 Resources + 6 Authorizers) is the obvious candidate,
+    // but re-homing an existing RestApi changes its logical id and therefore its URL,
+    // which breaks every registered webhook — so it is a migration, not a refactor.
+    //
+    // When that room is found this test will FAIL, which is the point: it is the
+    // trigger to restore a real parity assertion here.
+    const app = new App({
+      context: { enableLinearIdentityVault: true, compute_type: 'lambda-microvm' },
+    });
+    expect(() => Template.fromStack(
+      new AgentStack(app, 'LinearVaultMicrovmStack', {
+        env: { account: '123456789012', region: 'us-east-1' },
+      }),
+    )).toThrow(/greater than allowed maximum of 500/);
+  });
+
   test('the source graph names no Linear-minting handler that is unwired', () => {
     // The completeness half. Recomputes, from the handler sources, which Lambdas can
     // reach `resolveLinearOauthToken` at runtime — following VALUE imports only,
