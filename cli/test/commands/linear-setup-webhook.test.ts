@@ -194,11 +194,25 @@ describe('linear setup — second-workspace re-run preserves the per-workspace w
       return Promise.resolve({});
     });
 
-    const program = makeLinearCommand();
-    await expect(program.parseAsync([
-      'node', 'bgagent', 'setup', 'zzsecondws',
-      '--client-id', 'cid', '--client-secret', 'csecret', '--webhook-secret', '', '--no-browser',
-    ])).rejects.toThrow(/no webhook signing secret of its own/);
+    // Stub the CLI config: without it this passes only on a machine that happens to
+    // have `bgagent configure` run, and fails on a clean runner with "Not
+    // configured" — which is what CI caught.
+    const cfgSpy = jest.spyOn(configMod, 'loadConfig').mockReturnValue(
+      { region: 'us-west-2', api_url: 'https://api.example.test' } as ReturnType<typeof configMod.loadConfig>,
+    );
+    const credSpy = jest.spyOn(configMod, 'loadCredentials').mockReturnValue(
+      { id_token: FAKE_ID_TOKEN } as ReturnType<typeof configMod.loadCredentials>,
+    );
+    try {
+      const program = makeLinearCommand();
+      await expect(program.parseAsync([
+        'node', 'bgagent', 'setup', 'zzsecondws',
+        '--client-id', 'cid', '--client-secret', 'csecret', '--webhook-secret', '', '--no-browser',
+      ])).rejects.toThrow(/no webhook signing secret of its own/);
+    } finally {
+      cfgSpy.mockRestore();
+      credSpy.mockRestore();
+    }
   });
 
   test('the final per-workspace PutSecretValue keeps THIS workspace secret, not the stack-wide other', async () => {
