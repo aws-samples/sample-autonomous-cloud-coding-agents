@@ -40,6 +40,28 @@ jest.mock('@aws-sdk/client-bedrock-agentcore', () => ({
   StopRuntimeSessionCommand: jest.fn((input: unknown) => ({ _type: 'StopRuntimeSession', input })),
 }));
 
+const mockMicrovmSend = jest.fn();
+jest.mock('@aws-sdk/client-lambda-microvms', () => ({
+  LambdaMicrovmsClient: jest.fn(() => ({ send: mockMicrovmSend })),
+  RunMicrovmCommand: jest.fn((input: unknown) => ({ _type: 'RunMicrovm', input })),
+  GetMicrovmCommand: jest.fn((input: unknown) => ({ _type: 'GetMicrovm', input })),
+  TerminateMicrovmCommand: jest.fn((input: unknown) => ({ _type: 'TerminateMicrovm', input })),
+  MicrovmState: {
+    PENDING: 'PENDING',
+    RUNNING: 'RUNNING',
+    SUSPENDED: 'SUSPENDED',
+    SUSPENDING: 'SUSPENDING',
+    TERMINATED: 'TERMINATED',
+    TERMINATING: 'TERMINATING',
+  },
+}));
+
+jest.mock('@aws-sdk/client-s3', () => ({
+  S3Client: jest.fn(() => ({ send: jest.fn().mockResolvedValue({}) })),
+  PutObjectCommand: jest.fn((input: unknown) => ({ _type: 'PutObject', input })),
+  DeleteObjectCommand: jest.fn((input: unknown) => ({ _type: 'DeleteObject', input })),
+}));
+
 jest.mock('../../src/handlers/shared/repo-config', () => ({
   loadRepoConfig: jest.fn(),
   checkRepoOnboarded: jest.fn(),
@@ -66,10 +88,23 @@ process.env.USER_CONCURRENCY_TABLE_NAME = 'UserConcurrency';
 process.env.RUNTIME_ARN = 'arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/test';
 process.env.MAX_CONCURRENT_TASKS_PER_USER = '3';
 process.env.TASK_RETENTION_DAYS = '90';
+process.env.MICROVM_IMAGE_IDENTIFIER = 'arn:aws:lambda:us-east-1:123456789012:microvm-image/abca-agent';
+process.env.MICROVM_EXECUTION_ROLE_ARN = 'arn:aws:iam::123456789012:role/AbcaMicrovmExecution';
+process.env.MICROVM_EGRESS_CONNECTOR_ARNS = 'arn:aws:lambda:us-east-1:123456789012:network-connector/egress-1';
+process.env.MICROVM_PAYLOAD_BUCKET = 'test-microvm-payload-bucket';
+
+// platform_config (ADR-021 P2): the four REQUIRED identifiers the MicroVM
+// strategy refuses to start a session without — they are the agent's only
+// channel for them, since a snapshot must not bake configuration in. Read at
+// call time by `buildMicrovmPlatformConfig`, but set here alongside the rest
+// for clarity.
+process.env.GITHUB_TOKEN_SECRET_ARN =
+  'arn:aws:secretsmanager:us-east-1:123456789012:secret:abca/github-token-AbCdEf';
+process.env.AGENT_SESSION_ROLE_ARN = 'arn:aws:iam::123456789012:role/AbcaAgentSessionRole';
 
 import { TaskStatus } from '../../src/constructs/task-status';
 import { resolveComputeStrategy } from '../../src/handlers/shared/compute-strategy';
-import { transitionTask, emitTaskEvent, failTask } from '../../src/handlers/shared/orchestrator';
+import { transitionTask, emitTaskEvent, failTask, buildComputeMetadata } from '../../src/handlers/shared/orchestrator';
 import type { BlueprintConfig } from '../../src/handlers/shared/repo-config';
 
 beforeEach(() => {
@@ -154,5 +189,81 @@ describe('start-session step composition', () => {
     expect(mockAgentCoreSend).toHaveBeenCalledTimes(1);
     // transitionTask failed (1) + failTask: transitionTask (1) + emitTaskEvent (1) + decrement (1) = 4
     expect(mockDdbSend).toHaveBeenCalledTimes(4);
+  });
+});
+
+describe('start-session step composition — lambda-microvm (ADR-021)', () => {
+  const taskId = 'TASK001';
+  const MICROVM_ID = 'mvm-0123456789abcdef';
+  const ENDPOINT = 'https://mvm-0123456789abcdef.microvm.lambda.us-east-1.amazonaws.com';
+  const blueprintConfig: BlueprintConfig = { compute_type: 'lambda-microvm', runtime_arn: '' };
+  const payload = { repo_url: 'org/repo', task_id: taskId };
+
+  test('startSession → buildComputeMetadata → transitionTask persists microvmId and endpoint', async () => {
+    mockMicrovmSend.mockResolvedValueOnce({
+      microvmId: MICROVM_ID,
+      endpoint: ENDPOINT,
+      state: 'RUNNING',
+      imageArn: 'arn:image',
+      imageVersion: '7',
+    });
+    mockDdbSend.mockResolvedValue({});
+
+    const strategy = resolveComputeStrategy(blueprintConfig);
+    const handle = await strategy.startSession({ taskId, userId: 'cognito-test', payload, blueprintConfig });
+
+    await transitionTask(taskId, TaskStatus.HYDRATING, TaskStatus.RUNNING, {
+      session_id: handle.sessionId,
+      started_at: new Date().toISOString(),
+      compute_type: handle.strategyType,
+      compute_metadata: buildComputeMetadata(handle),
+    });
+
+    // RunMicrovm actually went out.
+    expect(mockMicrovmSend).toHaveBeenCalledTimes(1);
+    expect(mockMicrovmSend.mock.calls[0][0]._type).toBe('RunMicrovm');
+
+    // The persisted attributes are what cancel-task (and P3's approve/deny
+    // resume) read back, so assert them on the real UpdateCommand input.
+    const update = mockDdbSend.mock.calls.find(c => c[0]._type === 'Update')![0];
+    const values = update.input.ExpressionAttributeValues as Record<string, unknown>;
+    expect(values[':attr_compute_type']).toBe('lambda-microvm');
+    expect(values[':attr_compute_metadata']).toEqual({ microvmId: MICROVM_ID, endpoint: ENDPOINT });
+    expect(values[':attr_session_id']).toBe(MICROVM_ID);
+    expect(values[':toStatus']).toBe(TaskStatus.RUNNING);
+  });
+
+  test('compute_metadata carries ONLY the two lifecycle keys (no image ARN)', async () => {
+    mockMicrovmSend.mockResolvedValueOnce({
+      microvmId: MICROVM_ID,
+      endpoint: ENDPOINT,
+      state: 'RUNNING',
+      imageArn: 'arn:aws:lambda:us-east-1:123456789012:microvm-image/abca-agent',
+      imageVersion: '7',
+    });
+
+    const strategy = resolveComputeStrategy(blueprintConfig);
+    const handle = await strategy.startSession({ taskId, userId: 'cognito-test', payload, blueprintConfig });
+    const metadata = buildComputeMetadata(handle);
+
+    // ADR-021: the image ARN is deployment-time config, logged not persisted.
+    expect(Object.keys(metadata).sort()).toEqual(['endpoint', 'microvmId']);
+    expect(JSON.stringify(metadata)).not.toContain('microvm-image');
+  });
+
+  test('error path: a marked RunMicrovm failure flows into failTask', async () => {
+    const err = new Error('Rate exceeded');
+    err.name = 'ThrottlingException';
+    mockMicrovmSend.mockRejectedValueOnce(err);
+    mockDdbSend.mockResolvedValue({});
+
+    const strategy = resolveComputeStrategy(blueprintConfig);
+
+    await expect(
+      strategy.startSession({ taskId, userId: 'cognito-test', payload, blueprintConfig }),
+    ).rejects.toThrow('MicroVM RunMicrovm failed: ThrottlingException: Rate exceeded');
+
+    await failTask(taskId, TaskStatus.HYDRATING, 'Session start failed: boom', 'user-123', true);
+    expect(mockDdbSend).toHaveBeenCalled();
   });
 });

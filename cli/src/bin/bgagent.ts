@@ -38,6 +38,7 @@ import { makeOpsCommand } from '../commands/ops';
 import { makePendingCommand } from '../commands/pending';
 import { makePlatformCommand } from '../commands/platform';
 import { makePoliciesCommand } from '../commands/policies';
+import { makeRegistryCommand } from '../commands/registry';
 import { makeReplayCommand } from '../commands/replay';
 import { makeRepoCommand } from '../commands/repo';
 import { makeRuntimeCommand } from '../commands/runtime';
@@ -93,6 +94,7 @@ program.addCommand(makeTraceCommand());
 program.addCommand(makeWebhookCommand());
 program.addCommand(makeApiKeyCommand());
 program.addCommand(makeAdminCommand());
+program.addCommand(makeRegistryCommand());
 
 // Execute the CLI only when run directly. Importing this module (e.g.
 // from a test harness or a wrapper) must not parse the importer's

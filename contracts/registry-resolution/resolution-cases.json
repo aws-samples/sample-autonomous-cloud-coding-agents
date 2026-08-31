@@ -1,0 +1,77 @@
+{
+  "description": "Semver RESOLUTION parity corpus for the registry (#246). Each case is a set of candidate version strings plus a constraint; the expected `winner` is the highest candidate satisfying the constraint (or null for no match). Run against BOTH the TypeScript selectHighest (cdk/src/handlers/shared/registry/resolver.ts) and the Python select_highest (agent/src/registry/resolver.py). Both must agree. This complements cases.json (which covers grammar parsing only) by locking the RANKING semantics — caret/tilde ranges, prerelease exclusion, and near-MAX_SAFE_INTEGER comparisons — in lockstep across the two languages. See README.md.",
+  "cases": [
+    {
+      "name": "exact-match",
+      "constraint": "1.4.1",
+      "candidates": ["1.4.0", "1.4.1", "1.4.2"],
+      "winner": "1.4.1"
+    },
+    {
+      "name": "exact-no-match",
+      "constraint": "1.4.1",
+      "candidates": ["1.4.0", "1.4.2"],
+      "winner": null
+    },
+    {
+      "name": "caret-picks-highest-within-major",
+      "constraint": "^1.4.1",
+      "candidates": ["1.4.1", "1.9.9", "1.9.10", "2.0.0"],
+      "winner": "1.9.10"
+    },
+    {
+      "name": "caret-excludes-next-major",
+      "constraint": "^1.4.1",
+      "candidates": ["2.0.0", "2.5.0"],
+      "winner": null
+    },
+    {
+      "name": "caret-zero-major-pins-minor",
+      "constraint": "^0.2.0",
+      "candidates": ["0.2.0", "0.2.9", "0.3.0"],
+      "winner": "0.2.9"
+    },
+    {
+      "name": "tilde-pins-minor",
+      "constraint": "~1.4.1",
+      "candidates": ["1.4.1", "1.4.9", "1.5.0"],
+      "winner": "1.4.9"
+    },
+    {
+      "name": "tilde-excludes-next-minor",
+      "constraint": "~1.4.1",
+      "candidates": ["1.5.0", "1.6.0"],
+      "winner": null
+    },
+    {
+      "name": "prerelease-excluded-from-caret-range",
+      "constraint": "^1.4.1",
+      "candidates": ["1.4.1", "1.5.0-rc.1"],
+      "winner": "1.4.1"
+    },
+    {
+      "name": "prerelease-ranks-below-its-release-on-exact",
+      "constraint": "1.4.1",
+      "candidates": ["1.4.1-rc.1", "1.4.1"],
+      "winner": "1.4.1"
+    },
+    {
+      "name": "exact-prerelease-matches-only-itself",
+      "constraint": "1.4.1-rc.1",
+      "candidates": ["1.4.1-rc.1", "1.4.1"],
+      "winner": "1.4.1-rc.1"
+    },
+    {
+      "name": "empty-candidate-set",
+      "constraint": "^1.0.0",
+      "candidates": [],
+      "winner": null
+    },
+    {
+      "name": "near-max-safe-integer-patch-comparison",
+      "constraint": "^1.0.0",
+      "candidates": ["1.0.9007199254740991", "1.0.9007199254740990"],
+      "winner": "1.0.9007199254740991"
+    }
+  ]
+}

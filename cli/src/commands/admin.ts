@@ -64,6 +64,8 @@ export function generateTempPassword(): string {
 export function encodeBundle(config: CliConfig): string {
   const json = JSON.stringify({
     api_url: config.api_url,
+    // Optional (#246): only present once the registry is deployed.
+    ...(config.registry_api_url ? { registry_api_url: config.registry_api_url } : {}),
     region: config.region,
     user_pool_id: config.user_pool_id,
     client_id: config.client_id,
@@ -100,6 +102,9 @@ export function decodeBundle(bundle: string): CliConfig {
   }
   return {
     api_url: obj.api_url as string,
+    ...(typeof obj.registry_api_url === 'string' && obj.registry_api_url.length > 0
+      ? { registry_api_url: obj.registry_api_url }
+      : {}),
     region: obj.region as string,
     user_pool_id: obj.user_pool_id as string,
     client_id: obj.client_id as string,

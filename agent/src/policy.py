@@ -879,13 +879,26 @@ class PolicyEngine:
         if legacy_extra:
             soft_text = soft_text + "\n" + "\n".join(legacy_extra)
 
-        # 64 KB cap on combined blueprint text (finding #12). Built-ins do
-        # not count against the cap — they are trusted platform content.
-        blueprint_text = "".join(filter(None, [blueprint_hard_policies, blueprint_soft_policies]))
-        if len(blueprint_text.encode("utf-8")) > POLICIES_MAX_BYTES:
+        # 64 KB cap on combined operator-supplied policy text (finding #12).
+        # Built-ins do not count — they are trusted platform content. Registry
+        # cedar_policy_module assets arrive via the legacy ``extra_policies``
+        # path, so they MUST be counted here too; otherwise a large registry
+        # policy bypasses the cap entirely (#246 review). Count the raw operator
+        # text (pre-synthetic-wrapper) so the bound reflects authored bytes.
+        operator_text = "".join(
+            filter(
+                None,
+                [
+                    blueprint_hard_policies,
+                    blueprint_soft_policies,
+                    *(extra_policies or []),
+                ],
+            )
+        )
+        if len(operator_text.encode("utf-8")) > POLICIES_MAX_BYTES:
             raise ValueError(
                 f"cedar_policies exceeds {POLICIES_MAX_BYTES // 1024} KB cap "
-                f"({len(blueprint_text.encode('utf-8'))} bytes)"
+                f"({len(operator_text.encode('utf-8'))} bytes)"
             )
 
         # Parse + validate annotations on each tier.
