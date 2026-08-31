@@ -71,6 +71,11 @@ export interface IssueRef {
   readonly credentialsRef: string;
   /** Optional human-facing id for display in panels (e.g. ``ENG-42``). */
   readonly displayId?: string;
+  /** Optional surface workflow names resolved when the issue was admitted. */
+  readonly stateOverrides?: {
+    readonly started?: string;
+    readonly inReview?: string;
+  };
 }
 
 /** A reference to a comment the adapter created, so it can be edited/reacted to. */

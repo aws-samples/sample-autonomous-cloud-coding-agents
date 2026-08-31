@@ -27,24 +27,40 @@ import {
   findMissingBootstrapActions,
   resolveBootstrapPolicies,
 } from '../../src/bootstrap/resource-action-map';
+import { AgentRegistryStack } from '../../src/constructs/registry';
 import { AgentStack } from '../../src/stacks/agent';
 
 describe('Bootstrap policy synth coverage', () => {
   let template: Template;
+  let registryTemplate: Template;
   let allowedActions: Set<string>;
 
   beforeAll(() => {
     const app = new App();
-    new AgentStack(app, 'backgroundagent-dev', {
+    const stack = new AgentStack(app, 'backgroundagent-dev', {
       env: { account: '123456789012', region: 'us-east-1' },
     });
-    template = Template.fromStack(
-      app.node.tryFindChild('backgroundagent-dev') as Stack,
-    );
+    template = Template.fromStack(stack);
+    const registryStack = stack.node.tryFindChild('AgentRegistryStack') as
+      AgentRegistryStack | undefined;
+    if (!registryStack) {
+      throw new Error('AgentRegistryStack was not synthesized');
+    }
+    registryTemplate = Template.fromStack(registryStack);
 
     const resolver = new Stack();
     resolveBootstrapPolicies(resolver);
     allowedActions = collectBootstrapAllowActions();
+  });
+
+  it('maps the nested Agent Registry custom resource to bootstrap actions', () => {
+    const resources = registryTemplate.toJSON().Resources as Record<string, { Type: string }>;
+    const typesInTemplate = new Set(Object.values(resources).map((r) => r.Type));
+    const cfnType = 'Custom::AgentRegistry';
+
+    expect(typesInTemplate.has(cfnType)).toBe(true);
+    expect(cfnType in RESOURCE_ACTION_MAP).toBe(true);
+    expect(findMissingBootstrapActions(cfnType, allowedActions)).toEqual([]);
   });
 
   it('maps every synthesized CFN type (that needs IAM) to bootstrap actions', () => {
@@ -70,6 +86,33 @@ describe('Bootstrap policy synth coverage', () => {
 
     expect(unmapped).toEqual([]);
     expect(missingByType).toEqual({});
+  });
+
+  it('maps the context-gated tool-gateway CFN types (ADR-019, not in default synth)', () => {
+    // The default synth above never instantiates the ToolGateway construct, so
+    // its two CFN types would slip past the coverage loop. Synthesize the gated
+    // path explicitly and assert both types are mapped AND fully covered by the
+    // bootstrap policy bundle — the same guarantee the loop gives default types.
+    const app = new App({ context: { enableToolGateway: true } });
+    const gatedTemplate = Template.fromStack(
+      new AgentStack(app, 'GatewayCoverageStack', {
+        env: { account: '123456789012', region: 'us-east-1' },
+      }),
+    );
+    const gatedTypes = new Set(
+      Object.values(
+        gatedTemplate.toJSON().Resources as Record<string, { Type: string }>,
+      ).map((r) => r.Type),
+    );
+
+    for (const cfnType of [
+      'AWS::BedrockAgentCore::Gateway',
+      'AWS::BedrockAgentCore::GatewayTarget',
+    ]) {
+      expect(gatedTypes.has(cfnType)).toBe(true);
+      expect(cfnType in RESOURCE_ACTION_MAP).toBe(true);
+      expect(findMissingBootstrapActions(cfnType, allowedActions)).toEqual([]);
+    }
   });
 
   it('covers integration resources that previously failed deploy (regression)', () => {

@@ -152,6 +152,7 @@ describe('FanOutConsumer', () => {
       Period: 300,
       Threshold: 1,
       EvaluationPeriods: 1,
+      ComparisonOperator: 'GreaterThanOrEqualToThreshold',
       TreatMissingData: 'notBreaching',
       // The alarm must watch THIS construct's DLQ, not some other queue.
       Dimensions: Match.arrayWith([

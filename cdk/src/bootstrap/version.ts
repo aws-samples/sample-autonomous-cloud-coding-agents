@@ -21,8 +21,36 @@ import { createHash } from 'node:crypto';
 
 import { allPolicies } from './policies';
 
-/** Semantic version of the bootstrap policy bundle. */
-export const BOOTSTRAP_VERSION = '1.2.0';
+/**
+ * Semantic version of the bootstrap policy bundle.
+ *
+ * Bump history: 1.0.0 → 1.1.0 added the `compute-ecs` policy (#162), 1.1.0 →
+ * 1.2.0 refreshed policies for a full deploy (#350), 1.2.0 → 1.3.0 added the
+ * `compute-lambda-microvm` policy (#645 / ADR-021), 1.3.0 → 1.4.0 granted SNS
+ * topic + customer-managed-KMS-key create/lifecycle for the OperationalAlerts
+ * notification channel (#629), 1.4.0 → 1.5.0 added the agent asset registry
+ * policies (#246: Step Functions, Cognito group, and CloudFormation
+ * nested-stack actions — the registry's own control-plane calls run under the
+ * custom resource's Lambda execution role), 1.5.0 → 1.6.0 adds the
+ * `compute-lambda-microvm` policy's `MicrovmPassRoles` statement (#645, ADR-021
+ * P2r2-F9). Adding policies to the bundle is a minor bump — that is the
+ * precedent `compute-ecs` set.
+ *
+ * On the 1.6.0 bump specifically: it is a *statement* addition, not a new policy,
+ * and it is still a MINOR bump for the reason 1.2.0 was — **an operator must
+ * re-bootstrap to pick it up**, and the version is the only signal that says so.
+ * Without it the CDK-managed MicroVM image path fails at deploy with a caller-side
+ * `iam:PassRole` AccessDenied on the build role (live-verified; see
+ * `policies/compute-lambda-microvm.ts`), which is exactly the class of breakage a
+ * patch-level bump would under-advertise.
+ *
+ * It is 1.6.0 and not 1.4.0 because #629 and #246 landed on `main` first and took
+ * 1.4.0 and 1.5.0 in the interim. The number is an operator-visible contract (the
+ * `CDKToolkit` stack's `BootstrapPolicyVersion` output), so re-using a published
+ * version would make two different bundles indistinguishable to the `>=` check
+ * operators are told to run.
+ */
+export const BOOTSTRAP_VERSION = '1.6.0';
 
 /**
  * Computes a SHA-256 hash over all bootstrap policies.

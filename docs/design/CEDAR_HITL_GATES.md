@@ -1584,20 +1584,29 @@ Extend `TaskDashboard` (`cdk/src/constructs/task-dashboard.ts`). These are read-
 
 Every `agent_milestone("approval_*")` event carries `trace_id` / `span_id`. A span `hitl.approval_wait` brackets the PreToolUse poll loop: `span.duration = decided_at - created_at`. `hitl.approval_race_loss` emitted when the agent's local timeout fired <5s before a late user decision (useful for tuning).
 
-### 11.5 CloudWatch alarms — deferred (notification-channel gated)
+### 11.5 CloudWatch alarms
 
-Operator-facing CloudWatch alarms that would page on:
+**DLQ-depth alarms (shipped):** CloudWatch alarms on `ApproximateNumberOfMessagesVisible >= 1` (5-min period, Maximum statistic, `treatMissingData: NOT_BREACHING`) are deployed for:
+
+- **FanOutConsumer DLQ** — poison-pill DynamoDB Stream records that failed three consecutive Lambda invocations.
+- **ApprovalMetricsPublisher DLQ** — same failure mode for the metrics-publisher consumer.
+- **GitHubScreenshotIntegration processor DLQ** — failed async invocations of the screenshot pipeline (same threshold-1 shape).
+
+These alarms transition to `ALARM` state in CloudWatch and appear in the console/dashboard, providing operator visibility into silent record loss, and prevent poison records from accumulating silently for the full 14-day DLQ retention window.
+
+**Notification channel wiring (shipped, issue #629):** All three DLQ-depth alarms above are wired to a stack-wide SNS topic via `alarm.addAlarmAction(new SnsAction(topic))`. The topic is provisioned by the reusable `OperationalAlerts` construct (`cdk/src/constructs/operational-alerts.ts`) and its ARN is exported as the `OperationalAlertsTopicArn` stack output.
+
+- **Encryption.** The topic is encrypted with a **customer-managed KMS key**, not the AWS-managed `alias/aws/sns` key. This is load-bearing: CloudWatch cannot publish to a topic on the AWS-managed key (its key policy can't be edited to grant the `cloudwatch.amazonaws.com` service principal `kms:Decrypt` / `kms:GenerateDataKey*`), so the alarm action would fail silently at delivery. The CMK grants CloudWatch exactly those actions.
+- **Delivery target (configurable).** Pass `-c alertEmail=ops@example.com` at deploy to create an email subscription (AWS sends a confirmation link that must be clicked). With no context set, the topic ships with no subscription — operators subscribe Slack / PagerDuty / email manually against the exported topic ARN. Delivery is not hard-coded.
+
+**Additional alarms (not yet shipped):** The following remain deferred (each is a rate/latency condition that needs metric-math or composite-alarm design beyond the threshold-1 DLQ shape); now that the notification channel exists they can be wired to the same `OperationalAlerts` topic as separate follow-ups:
+
 - High approval-timeout rate (users not responding, notifications broken)
 - Tasks stuck in AWAITING_APPROVAL beyond `timeout_s + 60s` (reconciler failure)
 - High approval-write failure rate (DDB throttled or IAM drift)
 - Approval-gate cap hit (suspicious retry loop)
-- Publisher / fanout DLQ non-empty (persistent consumer-side poison pills)
 - `MetricEmitSkipped` sustained > 0 (publisher schema mismatch — agent / publisher version skew)
 - `MetricsPublisherHeartbeat` flat-line (publisher pipeline broken)
-
-…are **out of scope for v1** because the project does not yet have a notification channel (Slack / PagerDuty / SNS topic / email distribution list) configured for operational alerts. Adding alarms without a notification channel produces CloudWatch widgets that nobody sees — no safety benefit.
-
-**Plumbing status (post-Chunk 8):** the supporting metric data now flows as native CloudWatch metrics in namespace `ABCA/Cedar-HITL` via `ApprovalMetricsPublisherFn` (§11.3). Alarm wiring becomes a per-threshold `cloudwatch.Alarm` + `SnsAction`; no additional metric-extraction infra is needed. The remaining gap is the SNS topic + subscriber wiring itself — when that lands, the alarms above are a small bounded follow-up (not a multi-PR metrics build-out as they were pre-Chunk-8).
 
 ---
 
@@ -2103,7 +2112,7 @@ See §17.18 for the off-hours escalation future-work primitive, and §13.14 for 
 **Future work — polish (tracked in §17):**
 - CLI inline streaming prompt (UX research first)
 - `approve --defer` / allowlist revocation (`bgagent revoke-approval`)
-- CloudWatch alarm plumbing (§11.5) — deferred until an operational notification channel is available
+- ~~CloudWatch alarm SNS notification wiring (§11.5) — DLQ-depth alarms ship without an action target; add `SnsAction` once a notification channel is provisioned~~ — **shipped (issue #629):** all three DLQ-depth alarms are wired to the `OperationalAlerts` SNS topic (§11.5)
 - More soft-deny policies in the default set based on real usage
 - Persistent recent-decision cache (if container-restart telemetry justifies it)
 - Persistent per-minute rate limit (if restart amplification becomes significant)

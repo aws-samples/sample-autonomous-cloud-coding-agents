@@ -40,12 +40,22 @@ describe('JiraIntegration construct', () => {
       partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'event_id', type: dynamodb.AttributeType.STRING },
     });
+    const orchestrationTable = new dynamodb.Table(stack, 'OrchestrationTable', {
+      partitionKey: { name: 'orchestration_id', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'sub_issue_id', type: dynamodb.AttributeType.STRING },
+    });
+    const userConcurrencyTable = new dynamodb.Table(stack, 'UserConcurrencyTable', {
+      partitionKey: { name: 'user_id', type: dynamodb.AttributeType.STRING },
+    });
 
     new JiraIntegration(stack, 'JiraIntegration', {
       api,
       userPool,
       taskTable,
       taskEventsTable,
+      orchestrationTable,
+      userConcurrencyTable,
+      maxConcurrentTasksPerUser: 7,
     });
 
     template = Template.fromStack(stack);
@@ -58,15 +68,13 @@ describe('JiraIntegration construct', () => {
     });
   });
 
-  // #368: the webhook secret MUST seed an explicit JSON placeholder so the CLI
-  // can distinguish "never configured" from an operator-set value. A bare
-  // generated string (CDK's default with no GenerateSecretString) caused
-  // `bgagent jira setup` to skip seeding, leaving every admin-UI webhook
-  // delivery to fail HMAC verification with 401.
-  test('webhook secret seeds a JSON placeholder carrying the explicit marker key (#368)', () => {
+  // A structured initial value avoids seeding a bare signing-key-shaped
+  // secret. Setup unconditionally replaces the complete value; no runtime
+  // code interprets the marker key.
+  test('webhook secret seeds a non-signing JSON placeholder', () => {
     template.hasResourceProperties('AWS::SecretsManager::Secret', {
       GenerateSecretString: Match.objectLike({
-        // secretStringTemplate is the JSON object carrying the marker key.
+        // secretStringTemplate pins the non-operational initial JSON shape.
         SecretStringTemplate: Match.stringLikeRegexp('abca_jira_webhook_placeholder'),
         GenerateStringKey: 'value',
       }),
@@ -83,5 +91,26 @@ describe('JiraIntegration construct', () => {
       const envVars = functions[fnId].Properties.Environment?.Variables ?? {};
       expect(envVars).toHaveProperty('ABCA_COMPONENT', 'webhook');
     }
+  });
+
+  test('wires the shared orchestration table into the webhook processor', () => {
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: {
+        Variables: Match.objectLike({
+          ORCHESTRATION_TABLE_NAME: Match.anyValue(),
+        }),
+      },
+    });
+  });
+
+  test('wires the user concurrency budget into the webhook processor', () => {
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: {
+        Variables: Match.objectLike({
+          USER_CONCURRENCY_TABLE_NAME: Match.anyValue(),
+          MAX_CONCURRENT_TASKS_PER_USER: '7',
+        }),
+      },
+    });
   });
 });

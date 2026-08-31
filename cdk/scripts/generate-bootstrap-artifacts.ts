@@ -24,6 +24,7 @@ import {
   applicationPolicy,
   computeAgentcorePolicy,
   computeEcsPolicy,
+  computeLambdaMicrovmPolicy,
   infrastructurePolicy,
   observabilityPolicy,
 } from '../src/bootstrap/policies';
@@ -38,6 +39,7 @@ const policies = [
   { name: 'observability', fn: observabilityPolicy },
   { name: 'compute-agentcore', fn: computeAgentcorePolicy },
   { name: 'compute-ecs', fn: computeEcsPolicy },
+  { name: 'compute-lambda-microvm', fn: computeLambdaMicrovmPolicy },
 ];
 
 for (const { name, fn } of policies) {

@@ -42,6 +42,8 @@ describe('planHeartbeat — eligibility', () => {
     const plan = planHeartbeat(task(), NOW);
     expect(plan).not.toBeNull();
     expect(plan!.taskId).toBe('t-1');
+    expect(plan!.channelSource).toBe('linear');
+    expect(plan!.credentialsRef).toBe('ws-1');
     expect(plan!.replyId).toBe('reply-1');
     expect(plan!.parentCommentId).toBe('cmt-1');
     expect(plan!.issueId).toBe('issue-1');
@@ -74,7 +76,24 @@ describe('planHeartbeat — eligibility', () => {
     expect(planHeartbeat(task({ iterationReplyCommentId: undefined }), NOW)).toBeNull();
   });
 
-  test('non-linear channel → no plan (reply edit only wired for linear)', () => {
+  test('a Jira iteration uses the tenant and top-level status comment', () => {
+    const plan = planHeartbeat(task({
+      channelSource: 'jira',
+      linearWorkspaceId: undefined,
+      jiraCloudId: 'cloud-1',
+      triggerCommentId: undefined,
+      triggerCommentIssueId: 'ENG-42',
+    }), NOW);
+    expect(plan).toMatchObject({
+      channelSource: 'jira',
+      credentialsRef: 'cloud-1',
+      issueId: 'ENG-42',
+      replyId: 'reply-1',
+    });
+    expect(plan).not.toHaveProperty('parentCommentId');
+  });
+
+  test('unsupported channel → no plan', () => {
     expect(planHeartbeat(task({ channelSource: 'slack' }), NOW)).toBeNull();
   });
 
@@ -88,6 +107,11 @@ describe('planHeartbeat — eligibility', () => {
     expect(planHeartbeat(task({ triggerCommentId: undefined }), NOW)).toBeNull();
     expect(planHeartbeat(task({ triggerCommentIssueId: undefined }), NOW)).toBeNull();
     expect(planHeartbeat(task({ linearWorkspaceId: undefined }), NOW)).toBeNull();
+    expect(planHeartbeat(task({
+      channelSource: 'jira',
+      linearWorkspaceId: undefined,
+      jiraCloudId: undefined,
+    }), NOW)).toBeNull();
   });
 
   test('unparseable / missing created_at → no plan', () => {

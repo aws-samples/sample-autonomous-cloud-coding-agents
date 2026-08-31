@@ -448,6 +448,60 @@ describe('TaskApi construct', () => {
       expect(vars).not.toHaveProperty('ECS_CLUSTER_ARN');
     }
   });
+
+  describe('Lambda MicroVMs cancel wiring (ADR-021)', () => {
+    const MICROVM_IMAGE_ARN = 'arn:aws:lambda:us-east-1:123456789012:microvm-image:abca-agent';
+
+    // One synth per configuration, cached (cdk/AGENTS.md): the backend enabled,
+    // and — via the outer describe's `baseTemplate` — the backend disabled.
+    let microvmTemplate: Template;
+
+    beforeAll(() => {
+      microvmTemplate = createStack({ lambdaMicrovmImageArn: MICROVM_IMAGE_ARN }).template;
+    });
+
+    /** Every MicroVM-related IAM action granted anywhere in the template. */
+    function microvmActions(template: Template): string[] {
+      return Object.values(template.findResources('AWS::IAM::Policy'))
+        .flatMap((p) => (p as any).Properties.PolicyDocument.Statement as Array<{ Action: string | string[] }>)
+        .flatMap((stmt) => (Array.isArray(stmt.Action) ? stmt.Action : [stmt.Action]))
+        .filter((action) => action.includes('Microvm'));
+    }
+
+    /** MICROVM_* env keys across every Lambda in the template. */
+    function microvmEnvKeys(template: Template): string[] {
+      return Object.values(template.findResources('AWS::Lambda::Function'))
+        .flatMap((fn) => Object.keys(((fn as any).Properties?.Environment?.Variables ?? {}) as Record<string, unknown>))
+        .filter((key) => key.startsWith('MICROVM_'));
+    }
+
+    test('grants ONLY lambda:TerminateMicrovm when the backend is enabled', () => {
+      // cancel-task.ts sends TerminateMicrovmCommand and nothing else — it never
+      // reads MicroVM state — so lambda:GetMicrovm would be an unused grant.
+      expect(microvmActions(microvmTemplate)).toEqual(['lambda:TerminateMicrovm']);
+    });
+
+    test('scopes the grant to the one platform image, never an account wildcard', () => {
+      const statement = Object.values(microvmTemplate.findResources('AWS::IAM::Policy'))
+        .flatMap((p) => (p as any).Properties.PolicyDocument.Statement as Array<{ Action: string | string[]; Resource: unknown }>)
+        .find((stmt) => stmt.Action === 'lambda:TerminateMicrovm')!;
+
+      // Every MicroVM lifecycle action authorizes against the image resource, so
+      // the per-session microvmId never appears in IAM and this can be exact.
+      expect(statement.Resource).toEqual([MICROVM_IMAGE_ARN, `${MICROVM_IMAGE_ARN}:*`]);
+      expect(statement.Resource).not.toBe('*');
+      expect(JSON.stringify(statement.Resource)).not.toContain('microvm-image:*');
+    });
+
+    test('adds no MicroVM grant when no image is configured', () => {
+      expect(microvmActions(baseTemplate)).toEqual([]);
+      expect(microvmEnvKeys(baseTemplate)).toEqual([]);
+    });
+
+    test('needs no env var — the handler reads microvmId from the task row', () => {
+      expect(microvmEnvKeys(microvmTemplate)).toEqual([]);
+    });
+  });
 });
 
 describe('TaskApi construct with webhooks', () => {

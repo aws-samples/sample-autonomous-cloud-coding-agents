@@ -40,6 +40,7 @@ describe('format', () => {
     updated_at: '2026-01-01T01:00:00Z',
     started_at: '2026-01-01T00:01:00Z',
     completed_at: '2026-01-01T01:00:00Z',
+    agent_heartbeat_at: '2026-01-01T00:59:48Z',
     duration_s: 3540,
     cost_usd: 0.1234,
     build_passed: true,
@@ -54,6 +55,9 @@ describe('format', () => {
     approval_gate_count: 0,
     approval_gate_cap: 50,
     awaiting_approval_request_id: null,
+    queued_at: null,
+    queue_position: null,
+    estimated_wait_s: null,
   };
 
   describe('formatTaskDetail', () => {
@@ -70,6 +74,39 @@ describe('format', () => {
       expect(output).toContain('Cost:        $0.1234');
       expect(output).toContain('Build:       PASSED');
       expect(output).toContain('Max Turns:   100');
+    });
+
+    test('renders queue position + ETA for a QUEUED task (#441)', () => {
+      const queued: TaskDetail = {
+        ...task,
+        status: 'QUEUED',
+        queued_at: '2026-01-01T00:00:30Z',
+        queue_position: 3,
+        estimated_wait_s: 600,
+      };
+      const output = formatTaskDetail(queued);
+      expect(output).toContain('Status:      QUEUED');
+      expect(output).toContain('Queue:       position 3 (est. wait ~10m)');
+    });
+
+    test('renders queue position without ETA when estimated_wait_s is null', () => {
+      const queued: TaskDetail = {
+        ...task,
+        status: 'QUEUED',
+        queue_position: 1,
+        estimated_wait_s: null,
+      };
+      const output = formatTaskDetail(queued);
+      expect(output).toContain('Queue:       position 1');
+      expect(output).not.toContain('est. wait');
+    });
+
+    test('omits the queue line when position is null (GSI fail-open) or task not QUEUED', () => {
+      const queuedNoPos: TaskDetail = { ...task, status: 'QUEUED', queue_position: null };
+      expect(formatTaskDetail(queuedNoPos)).not.toContain('Queue:');
+      // RUNNING task with a stale position value should not render it either.
+      const running: TaskDetail = { ...task, status: 'RUNNING', queue_position: 2 };
+      expect(formatTaskDetail(running)).not.toContain('Queue:');
     });
 
     test('omits null fields', () => {
@@ -94,6 +131,86 @@ describe('format', () => {
       expect(output).not.toContain('Cost:');
       expect(output).not.toContain('Build:');
       expect(output).not.toContain('Max Turns:');
+    });
+
+    describe('agent_heartbeat_at (ADR-021 P2r2-F11)', () => {
+      // The field exists in DynamoDB and drives the orchestrator's hang detector,
+      // but was never projected into the API response — so `bgagent status`
+      // printed nothing while a 6-second-old beat sat in the table, and a live
+      // verification run concluded "heartbeats not observed". The CLI is the
+      // consumer that makes the signal actionable, so it renders the AGE (the beat
+      // is written every 45 s; the age is what tells you something is wrong).
+
+      test('shows the heartbeat and its age while the task is still running', () => {
+        const running: TaskDetail = {
+          ...task,
+          status: 'RUNNING',
+          completed_at: null,
+          agent_heartbeat_at: new Date(Date.now() - 12_000).toISOString(),
+        };
+        const output = formatTaskDetail(running);
+        expect(output).toContain('Heartbeat:   ');
+        expect(output).toMatch(/Heartbeat:.*\(1[0-9]s\)/);
+      });
+
+      test('hides it on a terminal task, where the last beat is noise', () => {
+        // The fixture is COMPLETED and DOES carry a heartbeat, so this asserts the
+        // suppression rather than an absent value.
+        expect(task.agent_heartbeat_at).not.toBeNull();
+        expect(formatTaskDetail(task)).not.toContain('Heartbeat:');
+      });
+
+      test('hides it when the agent has not beaten yet', () => {
+        const running: TaskDetail = {
+          ...task,
+          status: 'RUNNING',
+          completed_at: null,
+          agent_heartbeat_at: null,
+        };
+        expect(formatTaskDetail(running)).not.toContain('Heartbeat:');
+      });
+
+      test('degrades to a placeholder rather than throwing on a malformed value', () => {
+        // A bad timestamp must not take out `bgagent status` — the command a user
+        // reaches for when something is already wrong.
+        const running: TaskDetail = {
+          ...task,
+          status: 'RUNNING',
+          completed_at: null,
+          agent_heartbeat_at: 'not-a-timestamp',
+        };
+        expect(() => formatTaskDetail(running)).not.toThrow();
+        expect(formatTaskDetail(running)).toContain('Heartbeat:   not-a-timestamp (—)');
+      });
+
+      test('renders the age against an INJECTED now, deterministically', () => {
+        // Review nit: this function read `Date.now()` internally, unlike its
+        // `formatStatusSnapshot` sibling, so the only interesting case — a beat old
+        // enough to be the signal — could not be asserted without wall-clock games.
+        const beat = '2026-08-07T00:00:00.000Z';
+        const running: TaskDetail = {
+          ...task,
+          status: 'RUNNING',
+          completed_at: null,
+          agent_heartbeat_at: beat,
+        };
+
+        const now = Date.parse('2026-08-07T00:05:30.000Z');
+
+        expect(formatTaskDetail(running, now)).toContain(`Heartbeat:   ${beat} (5m 30s)`);
+      });
+
+      test('the same input and now always render the same output', () => {
+        const running: TaskDetail = {
+          ...task,
+          status: 'RUNNING',
+          completed_at: null,
+          agent_heartbeat_at: '2026-08-07T00:00:00.000Z',
+        };
+        const now = Date.parse('2026-08-07T01:00:00.000Z');
+
+        expect(formatTaskDetail(running, now)).toBe(formatTaskDetail(running, now));
+      });
     });
 
     test('renders a repo-less placeholder when repo is null (#248 Phase 3)', () => {
@@ -222,12 +339,69 @@ describe('format', () => {
         pr_url: null,
         created_at: '2026-01-01T00:00:00Z',
         updated_at: '2026-01-01T00:00:00Z',
+        agent_heartbeat_at: null,
       }];
       const output = formatTaskList(tasks);
       expect(output).toContain('TASK ID');
       expect(output).toContain('STATUS');
       expect(output).toContain('abc');
       expect(output).toContain('RUNNING');
+    });
+
+    describe('HEARTBEAT column (in-guest liveness at list level)', () => {
+      // "Is anything still alive?" is a LIST question. While the field was only on
+      // the detail view, answering it meant one `bgagent status` per task — which is
+      // how a hung task goes unnoticed. Same suppression rules as the detail view so
+      // the two never disagree.
+      const base: TaskSummary = {
+        task_id: 'abc',
+        status: 'RUNNING',
+        repo: 'owner/repo',
+        issue_number: null,
+        resolved_workflow: { id: 'coding/new-task-v1', version: '1.0.0' },
+        pr_number: null,
+        task_description: 'work',
+        branch_name: 'bgagent/abc/fix',
+        pr_url: null,
+        created_at: '2026-01-01T00:00:00Z',
+        updated_at: '2026-01-01T00:00:00Z',
+        agent_heartbeat_at: null,
+      };
+      const now = Date.parse('2026-08-07T00:05:30.000Z');
+
+      test('renders the header', () => {
+        expect(formatTaskList([base], now)).toContain('HEARTBEAT');
+      });
+
+      test('renders the age for a live task, against an injected now', () => {
+        const live = { ...base, agent_heartbeat_at: '2026-08-07T00:05:18.000Z' };
+        expect(formatTaskList([live], now)).toContain('12s ago');
+      });
+
+      test('shows a placeholder when the agent has not beaten yet', () => {
+        expect(formatTaskList([base], now)).toContain('—');
+      });
+
+      test('suppresses it on a terminal task, where the last beat is noise', () => {
+        const done = {
+          ...base,
+          status: 'COMPLETED' as const,
+          agent_heartbeat_at: '2026-08-07T00:05:18.000Z',
+        };
+        expect(formatTaskList([done], now)).not.toContain('12s ago');
+      });
+
+      test('a stale beat renders as an obviously large age, not as healthy', () => {
+        // The actionable case: the beat cadence is 45 s, so minutes of age is the
+        // signal. The orchestrator fails the task at grace 120 s + stale 240 s.
+        const stale = { ...base, agent_heartbeat_at: '2026-08-06T23:55:00.000Z' };
+        expect(formatTaskList([stale], now)).toContain('10m 30s ago');
+      });
+
+      test('is deterministic for a fixed now', () => {
+        const live = { ...base, agent_heartbeat_at: '2026-08-07T00:05:18.000Z' };
+        expect(formatTaskList([live], now)).toBe(formatTaskList([live], now));
+      });
     });
 
     test('shows task description when present', () => {
@@ -243,6 +417,7 @@ describe('format', () => {
         pr_url: null,
         created_at: '2026-01-01T00:00:00Z',
         updated_at: '2026-01-01T00:00:00Z',
+        agent_heartbeat_at: null,
       }];
       const output = formatTaskList(tasks);
       expect(output).toContain('Fix the login bug');
@@ -262,6 +437,7 @@ describe('format', () => {
         pr_url: null,
         created_at: '2026-01-01T00:00:00Z',
         updated_at: '2026-01-01T00:00:00Z',
+        agent_heartbeat_at: null,
       }];
       const output = formatTaskList(tasks);
       expect(output).toContain('#42');
@@ -280,6 +456,7 @@ describe('format', () => {
         pr_url: null,
         created_at: '2026-01-01T00:00:00Z',
         updated_at: '2026-01-01T00:00:00Z',
+        agent_heartbeat_at: null,
       }];
       const output = formatTaskList(tasks);
       expect(output).toContain('—');
@@ -335,6 +512,7 @@ describe('format', () => {
         status: 'active',
         created_at: '2026-01-01T00:00:00Z',
         updated_at: '2026-01-01T00:00:00Z',
+        agent_heartbeat_at: null,
         revoked_at: null,
       }];
       const output = formatWebhookList(webhooks);
@@ -375,6 +553,7 @@ describe('format', () => {
         status: 'active',
         created_at: '2026-01-01T00:00:00Z',
         updated_at: '2026-01-01T00:00:00Z',
+        agent_heartbeat_at: null,
         revoked_at: null,
       };
       const output = formatWebhookDetail(webhook);
