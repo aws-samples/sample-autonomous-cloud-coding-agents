@@ -1,9 +1,9 @@
-"""Unit tests for registry.agentcore_client read-side extraction (#246).
+"""Unit tests for registry.agent_registry_client read-side extraction.
 
 Focus: ``_extract_runtime`` must recover the runtime payload from all three
 descriptor storage shapes — CUSTOM (verbatim JSON), MCP (JSON + ``_meta``), and
-AGENT_SKILLS (Markdown frontmatter, runtime in ``x-abca-runtime``). The
-AGENT_SKILLS parse must byte-match what the TS adapter writes (parity).
+SKILL (Markdown frontmatter, runtime in ``x-abca-runtime``). The SKILL parse
+must byte-match what the TS adapter writes (parity).
 """
 
 from __future__ import annotations
@@ -13,19 +13,19 @@ import json
 
 import pytest
 
-from registry.agentcore_client import AgentCoreRegistryClient
+from registry.agent_registry_client import AgentRegistryClient
 from registry.client import RegistryResolutionError
 from registry.ref import parse_ref
 
 _RUNTIME_META_KEY = "dev.abca.runtime"
 
 
-def _client() -> AgentCoreRegistryClient:
-    return AgentCoreRegistryClient("r", None)
+def _client() -> AgentRegistryClient:
+    return AgentRegistryClient("r", None)
 
 
 class _FakeBoto:
-    """Minimal bedrock-agentcore-control stand-in: one page of records, and
+    """Minimal agent-registry-control stand-in: one page of records, and
     get_registry_record echoing the seeded record by id."""
 
     def __init__(self, records: list[dict]) -> None:
@@ -45,10 +45,8 @@ class TestExtractRuntime:
     def test_custom_reads_body_runtime(self):
         runtime = {"cedar_text": "forbid(principal, action, resource);"}
         raw = {
-            "descriptorType": "CUSTOM",
-            "descriptors": {
-                "custom": {"inlineContent": json.dumps({"runtime": runtime, "discovery": {}})}
-            },
+            "recordType": "CUSTOM",
+            "descriptors": {"custom": {"data": json.dumps({"runtime": runtime, "discovery": {}})}},
         }
         assert _client()._extract_runtime(raw) == runtime
 
@@ -56,8 +54,8 @@ class TestExtractRuntime:
         runtime = {"type": "http", "url": "https://mcp.example.com/mcp"}
         server = {"name": "acme/x", "version": "1.0.0", "_meta": {_RUNTIME_META_KEY: runtime}}
         raw = {
-            "descriptorType": "MCP",
-            "descriptors": {"mcp": {"server": {"inlineContent": json.dumps(server)}}},
+            "recordType": "MCP",
+            "descriptors": {"mcpServer": {"data": json.dumps(server)}},
         }
         assert _client()._extract_runtime(raw) == runtime
 
@@ -74,8 +72,10 @@ class TestExtractRuntime:
             "body"
         )
         return {
-            "descriptorType": "AGENT_SKILLS",
-            "descriptors": {"agentSkills": {"skillMd": {"inlineContent": skill_md}}},
+            "recordType": "SKILL",
+            "descriptors": {
+                "agentSkillsDefinition": {"additionalData": {"skillMd": {"data": skill_md}}}
+            },
         }
 
     def test_agent_skills_parses_base64_frontmatter(self):
@@ -99,8 +99,10 @@ class TestExtractRuntime:
     def test_agent_skills_missing_frontmatter_key_returns_empty(self):
         skill_md = "---\nname: x\ndescription: d\nversion: 1.0.0\n---\nbody"
         raw = {
-            "descriptorType": "AGENT_SKILLS",
-            "descriptors": {"agentSkills": {"skillMd": {"inlineContent": skill_md}}},
+            "recordType": "SKILL",
+            "descriptors": {
+                "agentSkillsDefinition": {"additionalData": {"skillMd": {"data": skill_md}}}
+            },
         }
         assert _client()._extract_runtime(raw) == {}
 
@@ -121,8 +123,10 @@ class TestExtractRuntime:
         }
         skill_md = "---\n" + yaml.dump(frontmatter).strip() + "\n---\n# acme/tdd\nbody"
         raw = {
-            "descriptorType": "AGENT_SKILLS",
-            "descriptors": {"agentSkills": {"skillMd": {"inlineContent": skill_md}}},
+            "recordType": "SKILL",
+            "descriptors": {
+                "agentSkillsDefinition": {"additionalData": {"skillMd": {"data": skill_md}}}
+            },
         }
         assert _client()._extract_runtime(raw) == legit
 
@@ -138,16 +142,18 @@ class TestResolveFailClosed:
             server["_meta"] = {_RUNTIME_META_KEY: {"type": "http", "url": "https://x"}}
         return {
             "recordId": f"rec-{version}",
-            "recordArn": f"arn:aws:bedrock-agentcore:us-east-1:1:registry/r/record/rec-{version}",
+            "recordArn": (
+                f"arn:aws:agent-registry:us-east-1:123456789012:registry/r/record/rec-{version}"
+            ),
             "name": "mcp_server/acme/pdf-tools",
-            "descriptorType": "MCP",
-            "descriptors": {"mcp": {"server": {"inlineContent": json.dumps(server)}}},
+            "recordType": "MCP",
+            "descriptors": {"mcpServer": {"data": json.dumps(server)}},
             "recordVersion": version,
             "status": status,
         }
 
     def _resolve(self, records: list[dict], ref_str: str):
-        client = AgentCoreRegistryClient("r", _FakeBoto(records))
+        client = AgentRegistryClient("r", _FakeBoto(records))
         return client.resolve(parse_ref(ref_str))
 
     def test_resolves_when_runtime_present(self):

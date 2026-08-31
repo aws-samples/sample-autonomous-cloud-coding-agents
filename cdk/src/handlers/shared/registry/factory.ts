@@ -20,7 +20,7 @@
 // Single place handlers obtain a `RegistryClient`. Keeping the concrete adapter
 // choice here (not in each handler) means the substrate swap touches one file.
 
-import { AgentCoreRegistryClient } from './agentcore-client';
+import { AgentRegistryClient } from './agent-registry-client';
 import type { RegistryClient } from './client';
 
 /** Cognito group names that gate publish / approval (#246, REGISTRY.md §10). */
@@ -31,7 +31,10 @@ export const REGISTRY_APPROVER_GROUP = 'RegistryApprover';
 export function makeRegistryClient(): RegistryClient {
   const registryId = process.env.AGENT_REGISTRY_ID;
   if (!registryId) {
-    throw new Error('AGENT_REGISTRY_ID env var is not set');
+    throw new Error(
+      'Agent Registry is disabled or not configured (AGENT_REGISTRY_ID is not set); '
+      + 'remove registry:// refs or deploy with enableAgentRegistry=true',
+    );
   }
-  return new AgentCoreRegistryClient({ registryId });
+  return new AgentRegistryClient({ registryId });
 }

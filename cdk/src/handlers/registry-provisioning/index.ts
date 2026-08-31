@@ -17,25 +17,22 @@
  *  SOFTWARE.
  */
 
-// Custom-resource handlers that provision the AgentCore registry that backs the
-// agent asset registry (#246). CreateRegistry is asynchronous (CREATING -> READY,
-// ~70s observed), so this uses the CDK Provider framework: `onEvent` kicks off the
-// mutation and `isComplete` is polled until the registry reaches a stable state.
-//
-// GA-THROWAWAY: swap this for the native AgentCore CDK L1/L2 construct once it
-// ships (~2026-08-06). The `RegistryClient` seam keeps that swap confined.
+// Custom-resource handlers that provision the standalone AWS Agent Registry
+// backing ABCA's agent asset registry. Create/Delete are asynchronous, so this
+// uses the CDK Provider framework: `onEvent` starts the mutation and `isComplete`
+// polls until the registry reaches a stable state.
 import { createHash } from 'node:crypto';
 import {
-  BedrockAgentCoreControlClient,
-  CreateRegistryCommand,
-  GetRegistryCommand,
-  UpdateRegistryCommand,
-  DeleteRegistryCommand,
-  ListRegistryRecordsCommand,
-  DeleteRegistryRecordCommand,
+  AgentRegistryControlClient,
   ConflictException,
+  CreateRegistryCommand,
+  DeleteRegistryCommand,
+  GetRegistryCommand,
+  InternalServerException,
   ResourceNotFoundException,
-} from '@aws-sdk/client-bedrock-agentcore-control';
+  ThrottlingException,
+  UpdateRegistryCommand,
+} from '@aws-sdk/client-agent-registry-control';
 import { logger } from '../shared/logger';
 import { makeClient } from '../shared/ua';
 
@@ -64,16 +61,51 @@ interface IsCompleteResponse {
 }
 
 // Route through makeClient so the ABCA solution UA segment is attached (#319);
-// a naked `new BedrockAgentCoreControlClient({})` silently drops attribution.
-const client = makeClient(BedrockAgentCoreControlClient);
+// a naked `new AgentRegistryControlClient({})` silently drops attribution.
+const client = makeClient(AgentRegistryControlClient);
 
 /** clientToken length cap — a 64-hex-char (256-bit) prefix of the SHA-256 digest
  *  is plenty of entropy for an idempotency token and stays within API limits. */
 const CLIENT_TOKEN_LENGTH = 64;
 
+type DeleteAttempt = 'started' | 'absent' | 'retryable';
+
 /** The registry id is the last ARN segment; we also accept a bare id. */
 function registryIdFromArn(arn: string): string {
   return arn.includes('/') ? arn.split('/').pop()! : arn;
+}
+
+function isRetryableDeleteError(err: unknown): boolean {
+  return (
+    err instanceof ConflictException
+    || err instanceof ThrottlingException
+    || err instanceof InternalServerException
+  );
+}
+
+/**
+ * Start or re-drive asynchronous deletion.
+ *
+ * A retryable service error is ambiguous: the request may have reached the
+ * service even though the response did not reach us. Returning `retryable`
+ * lets the Provider waiter observe the current state and re-issue the
+ * idempotent delete when the registry is not already DELETING.
+ */
+async function requestRegistryDeletion(registryId: string): Promise<DeleteAttempt> {
+  try {
+    await client.send(new DeleteRegistryCommand({ registryId }));
+    return 'started';
+  } catch (err) {
+    if (err instanceof ResourceNotFoundException) return 'absent';
+    if (isRetryableDeleteError(err)) {
+      logger.warn('registry deletion will be retried', {
+        registryId,
+        error: String(err),
+      });
+      return 'retryable';
+    }
+    throw err;
+  }
 }
 
 /** A deterministic, charset-safe idempotency token for CreateRegistry. Derived
@@ -130,18 +162,10 @@ export async function onEvent(event: OnEventRequest): Promise<OnEventResponse> {
     }
     case 'Delete': {
       const registryId = event.PhysicalResourceId!;
-      // If Create never succeeded the id is a CFN-generated token, not a real
-      // registry — GetRegistry will 404 and isComplete short-circuits.
-      await drainRecords(registryId);
-      try {
-        await client.send(new DeleteRegistryCommand({ registryId }));
-      } catch (err) {
-        if (err instanceof ResourceNotFoundException) {
-          return { PhysicalResourceId: registryId };
-        }
-        // Records may still be settling; isComplete will retry the delete.
-        if (!(err instanceof ConflictException)) throw err;
-      }
+      // The CDK Provider wrapper consumes its CREATE_FAILED marker before
+      // invoking this handler, so a validation error here is a real defect and
+      // must not be treated as an already-absent registry.
+      await requestRegistryDeletion(registryId);
       return { PhysicalResourceId: registryId };
     }
   }
@@ -150,20 +174,29 @@ export async function onEvent(event: OnEventRequest): Promise<OnEventResponse> {
 export async function isComplete(event: IsCompleteRequest): Promise<IsCompleteResponse> {
   const registryId = event.PhysicalResourceId;
   if (event.RequestType === 'Delete') {
+    let status: string;
+    let statusReason: string | undefined;
     try {
-      await client.send(new GetRegistryCommand({ registryId }));
+      const res = await client.send(new GetRegistryCommand({ registryId }));
+      status = res.status ?? '';
+      statusReason = res.statusReason;
     } catch (err) {
       if (err instanceof ResourceNotFoundException) return { IsComplete: true };
+      if (isRetryableDeleteError(err)) return { IsComplete: false };
       throw err;
     }
-    // Still present — keep draining + deleting until it's gone.
-    await drainRecords(registryId);
-    try {
-      await client.send(new DeleteRegistryCommand({ registryId }));
-    } catch (err) {
-      if (err instanceof ResourceNotFoundException) return { IsComplete: true };
-      if (!(err instanceof ConflictException)) throw err;
+
+    if (status === 'DELETE_FAILED') {
+      throw new Error(
+        `Registry ${registryId} entered DELETE_FAILED: ${statusReason ?? 'no reason given'}`,
+      );
     }
+    if (status === 'DELETING') return { IsComplete: false };
+
+    // The initial DeleteRegistry call may have been throttled or conflicted
+    // before deletion started. Re-drive it until the service reports DELETING.
+    const attempt = await requestRegistryDeletion(registryId);
+    if (attempt === 'absent') return { IsComplete: true };
     return { IsComplete: false };
   }
 
@@ -177,35 +210,4 @@ export async function isComplete(event: IsCompleteRequest): Promise<IsCompleteRe
     throw new Error(`Registry ${registryId} entered ${status}: ${res.statusReason ?? 'no reason given'}`);
   }
   return { IsComplete: false };
-}
-
-/**
- * Delete every record in a registry so the registry itself can be deleted
- * (DeleteRegistry ConflictExceptions while records exist). Records are also
- * async and eventually consistent in List; best-effort per invocation, with
- * isComplete re-invoking until the registry is empty.
- */
-async function drainRecords(registryId: string): Promise<void> {
-  let nextToken: string | undefined;
-  do {
-    let page;
-    try {
-      page = await client.send(new ListRegistryRecordsCommand({ registryId, nextToken, maxResults: 50 }));
-    } catch (err) {
-      if (err instanceof ResourceNotFoundException) return;
-      throw err;
-    }
-    const records = page.registryRecords ?? [];
-    for (const rec of records) {
-      const recordId = rec.recordArn ? registryIdFromArn(rec.recordArn) : rec.recordId;
-      if (!recordId) continue;
-      try {
-        await client.send(new DeleteRegistryRecordCommand({ registryId, recordId }));
-      } catch (err) {
-        // CREATING/UPDATING records reject delete; isComplete retries next poll.
-        if (!(err instanceof ConflictException) && !(err instanceof ResourceNotFoundException)) throw err;
-      }
-    }
-    nextToken = page.nextToken;
-  } while (nextToken);
 }

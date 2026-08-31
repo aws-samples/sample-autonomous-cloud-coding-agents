@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { ConflictException } from '@aws-sdk/client-bedrock-agentcore-control';
+import { ConflictException } from '@aws-sdk/client-agent-registry-control';
 import type { APIGatewayProxyEvent } from 'aws-lambda';
 import { handler as listHandler } from '../../src/handlers/registry-list';
 import { handler as publishHandler } from '../../src/handlers/registry-publish';

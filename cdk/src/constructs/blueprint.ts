@@ -40,6 +40,17 @@ const DOMAIN_PATTERN = /^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9
 const APPROVAL_GATE_CAP_MIN = sharedConstants.approval_gate_cap.min;
 const APPROVAL_GATE_CAP_MAX = sharedConstants.approval_gate_cap.max;
 
+/**
+ * Bounds on a per-repo cost budget (#748). Same JSON the task-submit path
+ * validates ``max_budget_usd`` against (``handlers/shared/types.ts`` →
+ * ``MAX_BUDGET_USD_MIN``/``MAX_BUDGET_USD_MAX``, used by
+ * ``cli/src/commands/submit.ts``). Reading the shared constants rather than
+ * re-declaring literals is what keeps the per-repo default and the per-task
+ * override from disagreeing about what is in range.
+ */
+const MAX_BUDGET_USD_MIN = sharedConstants.max_budget_usd.min;
+const MAX_BUDGET_USD_MAX = sharedConstants.max_budget_usd.max;
+
 /** Timeout for the RepoConfig custom resource (minutes). */
 const REPO_CONFIG_CR_TIMEOUT_MINUTES = 5;
 
@@ -89,6 +100,19 @@ export interface BlueprintProps {
      * Default turn limit for tasks against this repo.
      */
     readonly maxTurns?: number;
+
+    /**
+     * Default cost budget in USD for tasks against this repo (#748).
+     *
+     * A per-task ``max_budget_usd`` (REST) / ``--max-budget`` (CLI) wins over
+     * this value; when neither is set NO budget applies (there is no platform
+     * default — unset means unlimited, deliberately).
+     *
+     * Must be in ``[0.01, 100]`` — the same range the task-submit path
+     * enforces, so a per-repo default cannot be a value a per-task override
+     * would have rejected. Out-of-range values fail at synth.
+     */
+    readonly maxBudgetUsd?: number;
 
     /**
      * Additional system prompt instructions appended to the platform default.
@@ -221,6 +245,13 @@ export class Blueprint extends Construct {
   public readonly approvalGateCap?: number;
 
   /**
+   * Per-repo cost budget in USD from the agent.maxBudgetUsd prop (#748),
+   * exposed for inspection. Undefined when the blueprint did not configure
+   * one — there is no platform default, so unset means unlimited.
+   */
+  public readonly maxBudgetUsd?: number;
+
+  /**
    * Registry ``registry://`` refs for MCP servers (#246), exposed for inspection.
    */
   public readonly mcpServerRefs: readonly string[];
@@ -237,6 +268,7 @@ export class Blueprint extends Construct {
     this.egressAllowlist = [...(props.networking?.egressAllowlist ?? [])];
     this.cedarPolicies = [...(props.security?.cedarPolicies ?? [])];
     this.approvalGateCap = props.security?.approvalGateCap;
+    this.maxBudgetUsd = props.agent?.maxBudgetUsd;
     this.mcpServerRefs = [...(props.assets?.mcpServers ?? [])];
     this.cedarPolicyModuleRefs = [...(props.assets?.cedarPolicyModules ?? [])];
     this.skillRefs = [...(props.assets?.skills ?? [])];
@@ -258,6 +290,7 @@ export class Blueprint extends Construct {
     this.node.addValidation(new RepoFormatValidation(props.repo));
     this.node.addValidation(new DomainFormatValidation(this.egressAllowlist));
     this.node.addValidation(new ApprovalGateCapValidation(this.approvalGateCap));
+    this.node.addValidation(new MaxBudgetUsdValidation(this.maxBudgetUsd));
     this.node.addValidation(new RegistryRefValidation('assets.mcpServers', this.mcpServerRefs, 'mcp_server'));
     this.node.addValidation(new RegistryRefValidation('assets.cedarPolicyModules', this.cedarPolicyModuleRefs, 'cedar_policy_module'));
     this.node.addValidation(new RegistryRefValidation('assets.skills', this.skillRefs, 'skill'));
@@ -283,6 +316,9 @@ export class Blueprint extends Construct {
     }
     if (props.agent?.maxTurns !== undefined) {
       item.max_turns = { N: String(props.agent.maxTurns) };
+    }
+    if (this.maxBudgetUsd !== undefined) {
+      item.max_budget_usd = { N: String(this.maxBudgetUsd) };
     }
     if (props.agent?.systemPromptOverrides) {
       item.system_prompt_overrides = { S: props.agent.systemPromptOverrides };
@@ -384,6 +420,7 @@ export class Blueprint extends Construct {
     if (props.compute?.runtimeArn) fields.push(', #runtime_arn = :runtime_arn');
     if (props.agent?.modelId) fields.push(', #model_id = :model_id');
     if (props.agent?.maxTurns !== undefined) fields.push(', #max_turns = :max_turns');
+    if (this.maxBudgetUsd !== undefined) fields.push(', #max_budget_usd = :max_budget_usd');
     if (props.agent?.systemPromptOverrides) fields.push(', #system_prompt_overrides = :system_prompt_overrides');
     if (props.credentials?.githubTokenSecretArn) fields.push(', #github_token_secret_arn = :github_token_secret_arn');
     if (props.pipeline?.pollIntervalMs !== undefined) fields.push(', #poll_interval_ms = :poll_interval_ms');
@@ -406,6 +443,7 @@ export class Blueprint extends Construct {
     if (props.compute?.runtimeArn) names['#runtime_arn'] = 'runtime_arn';
     if (props.agent?.modelId) names['#model_id'] = 'model_id';
     if (props.agent?.maxTurns !== undefined) names['#max_turns'] = 'max_turns';
+    if (this.maxBudgetUsd !== undefined) names['#max_budget_usd'] = 'max_budget_usd';
     if (props.agent?.systemPromptOverrides) names['#system_prompt_overrides'] = 'system_prompt_overrides';
     if (props.credentials?.githubTokenSecretArn) names['#github_token_secret_arn'] = 'github_token_secret_arn';
     if (props.pipeline?.pollIntervalMs !== undefined) names['#poll_interval_ms'] = 'poll_interval_ms';
@@ -426,6 +464,7 @@ export class Blueprint extends Construct {
     if (props.compute?.runtimeArn) values[':runtime_arn'] = { S: props.compute.runtimeArn };
     if (props.agent?.modelId) values[':model_id'] = { S: props.agent.modelId };
     if (props.agent?.maxTurns !== undefined) values[':max_turns'] = { N: String(props.agent.maxTurns) };
+    if (this.maxBudgetUsd !== undefined) values[':max_budget_usd'] = { N: String(this.maxBudgetUsd) };
     if (props.agent?.systemPromptOverrides) values[':system_prompt_overrides'] = { S: props.agent.systemPromptOverrides };
     if (props.credentials?.githubTokenSecretArn) values[':github_token_secret_arn'] = { S: props.credentials.githubTokenSecretArn };
     if (props.pipeline?.pollIntervalMs !== undefined) values[':poll_interval_ms'] = { N: String(props.pipeline.pollIntervalMs) };
@@ -516,6 +555,39 @@ class ApprovalGateCapValidation implements IValidation {
       return [
         `Invalid security.approvalGateCap: ${this.cap}. ` +
         `Must be between ${APPROVAL_GATE_CAP_MIN} and ${APPROVAL_GATE_CAP_MAX}.`,
+      ];
+    }
+    return [];
+  }
+}
+
+/**
+ * #748 — validates the per-repo cost budget is a finite number inside
+ * ``[MAX_BUDGET_USD_MIN, MAX_BUDGET_USD_MAX]``. Bounds come from
+ * ``contracts/constants.json``, the SAME source the task-submit path validates
+ * a per-task ``max_budget_usd`` against — so a blueprint cannot persist a
+ * per-repo default that a per-task override of the same value would reject.
+ * Out-of-range fails at synth rather than deploying a budget the agent would
+ * then act on. ``undefined`` is allowed: there is no platform default, and
+ * unset deliberately means unlimited.
+ *
+ * Fractional values ARE valid (unlike ``approvalGateCap``) — a budget is
+ * dollars-and-cents, and the minimum is one cent.
+ */
+class MaxBudgetUsdValidation implements IValidation {
+  constructor(private readonly budget: number | undefined) {}
+
+  public validate(): string[] {
+    if (this.budget === undefined) {
+      return [];
+    }
+    if (!Number.isFinite(this.budget)) {
+      return [`Invalid agent.maxBudgetUsd: ${this.budget}. Must be a finite number.`];
+    }
+    if (this.budget < MAX_BUDGET_USD_MIN || this.budget > MAX_BUDGET_USD_MAX) {
+      return [
+        `Invalid agent.maxBudgetUsd: ${this.budget}. ` +
+        `Must be between ${MAX_BUDGET_USD_MIN} and ${MAX_BUDGET_USD_MAX}.`,
       ];
     }
     return [];

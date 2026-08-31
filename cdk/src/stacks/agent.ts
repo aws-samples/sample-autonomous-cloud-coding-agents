@@ -36,7 +36,11 @@ import { AgentVpc } from '../constructs/agent-vpc';
 import { ApiKeyTable } from '../constructs/api-key-table';
 import { ApprovalMetricsPublisherConsumer } from '../constructs/approval-metrics-publisher-consumer';
 import { AttachmentsBucket } from '../constructs/attachments-bucket';
-import { resolveBedrockModelIds } from '../constructs/bedrock-models';
+import {
+  haikuInferenceProfileId,
+  resolveBedrockGeoRegion,
+  resolveBedrockModelIds,
+} from '../constructs/bedrock-models';
 import { Blueprint } from '../constructs/blueprint';
 import { CedarWasmLayer } from '../constructs/cedar-wasm-layer';
 import { ConcurrencyReconciler } from '../constructs/concurrency-reconciler';
@@ -85,9 +89,43 @@ const RUNTIME_SESSION_TIMEOUT_HOURS = 8;
 /** Index of the stage segment in a split API Gateway URL. */
 const API_URL_STAGE_SEGMENT_INDEX = 3;
 
+/** Properties for {@link AgentStack}. */
+export interface AgentStackProps extends StackProps {
+  /**
+   * Availability-zone *names* to pin the AgentCore VPC (and therefore the
+   * Runtime ENIs) into, so they land only in AgentCore-supported zones.
+   *
+   * Resolved in `main.ts` via `resolveAgentCoreAzs` — the validated
+   * `agentcore:availabilityZones` context override, else auto-selected from the
+   * account's supported zones when synth has a concrete account/region. Leave
+   * `undefined` (env-agnostic synth, unlisted region) to keep CDK's default
+   * `maxAzs` selection.
+   *
+   * Deliberately NOT named `availabilityZones`: `Stack` already exposes an
+   * `availabilityZones` getter returning the *unpinned* set, and two different
+   * values under one name in one class is a trap for `Stack.of(x)` callers.
+   */
+  readonly agentCoreAvailabilityZones?: string[];
+}
+
 export class AgentStack extends Stack {
-  constructor(scope: Construct, id: string, props: StackProps = {}) {
+  constructor(scope: Construct, id: string, props: AgentStackProps = {}) {
     super(scope, id, props);
+
+    const enableAgentRegistry = this.node.tryGetContext('enableAgentRegistry');
+    if (
+      enableAgentRegistry !== undefined
+      && enableAgentRegistry !== true
+      && enableAgentRegistry !== false
+      && enableAgentRegistry !== 'true'
+      && enableAgentRegistry !== 'false'
+    ) {
+      throw new Error(
+        `enableAgentRegistry must be true or false, got '${String(enableAgentRegistry)}'`,
+      );
+    }
+    // Default-on for compatibility (contrast enableToolGateway, which is opt-in).
+    const agentRegistryEnabled = enableAgentRegistry !== false && enableAgentRegistry !== 'false';
 
     // Build context is repo root (not agent/) so the Dockerfile can COPY
     // sibling trees the agent reads at runtime — currently
@@ -126,19 +164,23 @@ export class AgentStack extends Stack {
     const apiKeyTable = new ApiKeyTable(this, 'ApiKeyTable');
     const repoTable = new RepoTable(this, 'RepoTable');
 
-    // AgentCore-backed asset registry (#246). Provisioned via a custom resource
-    // because CreateRegistry is async and has no CDK L2 during preview.
-    // GA-throwaway — swap for the native construct at GA. Registry names allow
-    // only alphanumerics + underscores, so sanitize the stack name.
+    // Standalone Agent Registry asset registry (#246). Provisioned via a custom
+    // resource because CreateRegistry is async and has no CDK L2. Enabled by
+    // default for compatibility; set ``enableAgentRegistry=false`` to omit the
+    // registry, its API, permissions, environment variables, and outputs.
+    // Registry names allow only alphanumerics + underscores, so sanitize the
+    // stack name.
     //
     // Isolated in a NestedStack: the registry + its Provider framework add ~20
     // resources; nesting keeps the root stack under CloudFormation's hard
     // 500-resource limit. registryId/registryArn cross the boundary via CDK's
     // automatic cross-stack export/import.
-    const agentRegistry = new AgentRegistryStack(this, 'AgentRegistryStack', {
-      registryName: `abca_${this.stackName.replace(/[^a-zA-Z0-9]/g, '_')}`,
-      description: 'ABCA agent asset registry (#246)',
-    });
+    const agentRegistry = agentRegistryEnabled
+      ? new AgentRegistryStack(this, 'AgentRegistryStack', {
+        registryName: `abca_${this.stackName.replace(/[^a-zA-Z0-9]/g, '_')}`,
+        description: 'ABCA agent asset registry (#246)',
+      })
+      : undefined;
 
     // Cedar-wasm Lambda layer (§15.2 task 10). Instantiated here so the
     // asset is in the synthed template; Chunk 5 handlers (Approve,
@@ -307,8 +349,20 @@ export class AgentStack extends Stack {
       },
     });
 
-    // Network isolation — VPC with restricted egress
-    const agentVpc = new AgentVpc(this, 'AgentVpc');
+    // Network isolation — VPC with restricted egress.
+    // AgentCore only supports a subset of physical availability zones per
+    // region, and AZ *names* are aliased per-account, so the default maxAzs
+    // selection can land the Runtime ENIs in an unsupported zone and fail the
+    // deploy. `props.agentCoreAvailabilityZones` carries the AZ names resolved in
+    // main.ts (`resolveAgentCoreAzs`): the validated `agentcore:availabilityZones`
+    // override, else auto-selected from the account's AgentCore-supported zones
+    // when synth has a concrete account/region. Left undefined otherwise, so the
+    // construct keeps CDK's default AZ selection. See constructs/agentcore-azs.ts.
+    const agentVpc = new AgentVpc(this, 'AgentVpc', {
+      ...(props.agentCoreAvailabilityZones?.length
+        ? { availabilityZones: props.agentCoreAvailabilityZones }
+        : {}),
+    });
 
     // DNS Firewall — domain-level egress filtering (observation mode for initial deployment)
     const additionalDomains = [...new Set(blueprints.flatMap(b => b.egressAllowlist))];
@@ -418,10 +472,12 @@ export class AgentStack extends Stack {
     // It authorizes against the SHARED Cognito user pool, so a caller's JWT works
     // on both APIs; the CLI targets its distinct URL (RegistryApiUrl output) for
     // `registry` commands.
-    const registryApi = new RegistryApi(this, 'RegistryApi', {
-      agentRegistryId: agentRegistry.registryId,
-      userPool: taskApi.userPool,
-    });
+    const registryApi = agentRegistry
+      ? new RegistryApi(this, 'RegistryApi', {
+        agentRegistryId: agentRegistry.registryId,
+        userPool: taskApi.userPool,
+      })
+      : undefined;
 
     // --- Tool-federation Gateway (ADR-019 P1, CONTEXT-GATED) ---
     // Provisioned only under ``--context enableToolGateway=true`` (gate read
@@ -446,16 +502,27 @@ export class AgentStack extends Stack {
       this.node.tryGetContext('sdkUaAppId') as string | undefined,
     );
 
+    // Cross-Region inference-profile geography (`bedrockGeoRegion`, default
+    // `us`). Resolved once and used for BOTH the auxiliary-model env var below
+    // and the Bedrock grants further down, so a deployment can never grant one
+    // geography's profiles while telling the agent to call another's.
+    const bedrockGeoRegion = resolveBedrockGeoRegion(this.node);
+
     const runtimeEnvironmentVariables = {
       GITHUB_TOKEN_SECRET_ARN: githubTokenSecret.secretArn,
       AWS_REGION: process.env.AWS_REGION ?? 'us-east-1',
       CLAUDE_CODE_USE_BEDROCK: '1',
       ANTHROPIC_LOG: 'debug',
-      // Cross-region inference-profile id (``us.`` prefix), NOT the bare
-      // foundation-model id: Claude 4.x can't be invoked on-demand by bare id
-      // (400 "on-demand throughput isn't supported"). Must match a granted
-      // profile (see bedrock-models.ts). runner.py re-sets this at spawn time.
-      ANTHROPIC_DEFAULT_HAIKU_MODEL: 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
+      // Cross-region inference-profile id (geo prefix, `us.` by default), NOT
+      // the bare foundation-model id: Claude 4.x can't be invoked on-demand by
+      // bare id (400 "on-demand throughput isn't supported"). Derived through
+      // bedrock-models.ts's `haikuInferenceProfileId` so (a) the prefix comes from
+      // `bedrockGeoRegion` rather than a second hardcode that would silently split
+      // this auxiliary model from the granted profiles on any non-`us` deploy, and
+      // (b) the model id itself comes from the same constant the grant list
+      // interpolates. The lambda-microvm `platform_config` block below calls the
+      // same helper with the same geography. runner.py re-sets this at spawn time.
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: haikuInferenceProfileId(bedrockGeoRegion),
       TASK_TABLE_NAME: taskTable.table.tableName,
       TASK_EVENTS_TABLE_NAME: taskEventsTable.table.tableName,
       NUDGES_TABLE_NAME: taskNudgesTable.table.tableName,
@@ -607,9 +674,10 @@ export class AgentStack extends Stack {
     // EcsAgentCluster prop below (substrate parity).
     toolGateway?.grantInvoke(runtime);
 
-    // Grant the runtime invoke on each configured foundation model + its US
-    // cross-Region inference profile. The model set is a single source of truth
-    // (constructs/bedrock-models.ts), shared with the ECS task role and
+    // Grant the runtime invoke on each configured foundation model + its
+    // cross-Region inference profile in the configured geography
+    // (`bedrockGeoRegion`, default `us`). The model set is a single source of
+    // truth (constructs/bedrock-models.ts), shared with the ECS task role and
     // overridable via the `bedrockModels` CDK context. Each invokable is also
     // collected so the same set is granted to the SessionRole below (for cost
     // attribution) — the two grants derive from one list and can't drift.
@@ -622,7 +690,7 @@ export class AgentStack extends Stack {
         supportsCrossRegion: true,
       });
       const crossRegionProfile = bedrock.CrossRegionInferenceProfile.fromConfig({
-        geoRegion: bedrock.CrossRegionInferenceProfileRegion.US,
+        geoRegion: bedrockGeoRegion,
         model: foundationModel,
       });
       foundationModel.grantInvoke(runtime);
@@ -758,15 +826,17 @@ export class AgentStack extends Stack {
       description: 'ARN of the Secrets Manager secret for the GitHub token',
     });
 
-    new CfnOutput(this, 'AgentRegistryId', {
-      value: agentRegistry.registryId,
-      description: 'ID of the AgentCore-backed agent asset registry (#246)',
-    });
+    if (agentRegistry) {
+      new CfnOutput(this, 'AgentRegistryId', {
+        value: agentRegistry.registryId,
+        description: 'ID of the standalone Agent Registry asset registry (#246)',
+      });
 
-    new CfnOutput(this, 'AgentRegistryArn', {
-      value: agentRegistry.registryArn,
-      description: 'ARN of the AgentCore-backed agent asset registry (#246)',
-    });
+      new CfnOutput(this, 'AgentRegistryArn', {
+        value: agentRegistry.registryArn,
+        description: 'ARN of the standalone Agent Registry asset registry (#246)',
+      });
+    }
 
     new CfnOutput(this, 'TraceArtifactsBucketName', {
       value: traceArtifactsBucket.bucket.bucketName,
@@ -868,6 +938,22 @@ export class AgentStack extends Stack {
         // to the same per-task SessionRole the AgentCore runtime and the Fargate
         // task role use, so tenant-data access is tag-scoped on every substrate.
         agentSessionRole,
+        // ADR-021 P2 runtime parity on the MicroVM execution role. Same two props
+        // EcsAgentCluster takes, for the same reasons: the PAT is read at startup
+        // before the SessionRole is assumed, and MEMORY_ID (already delivered in
+        // agent_payload) makes the agent ATTEMPT a memory write that fails closed
+        // without the grant. The remaining parity grants (channel OAuth, Bedrock,
+        // AZ describe) need no stack input and are wired inside the construct.
+        githubTokenSecret,
+        agentMemory,
+        // ADR-021 P2-F4: the SAME log group whose name travels to the guest in
+        // `agentPlatformConfig.logGroupName` below (→ `LOG_GROUP_NAME`). P2
+        // delivered the name without the grant, so the agent's structured per-task
+        // lines and its METRICS_REPORT were AccessDenied on
+        // logs:CreateLogStream and the platform's canonical observability streams
+        // were empty on this backend. Passing the construct (not the name) keeps the
+        // grant and the delivered value derived from one object.
+        applicationLogGroup,
         // Resolved above TaskApi — see `microvmImageInputs`.
         ...microvmImageInputs,
       })
@@ -950,7 +1036,45 @@ export class AgentStack extends Stack {
       guardrailId: inputGuardrail.guardrailId,
       guardrailVersion: inputGuardrail.guardrailVersion,
       attachmentsBucket: attachmentsBucket.bucket,
-      agentRegistryId: agentRegistry.registryId,
+      ...(agentRegistry && { agentRegistryId: agentRegistry.registryId }),
+      // ADR-021 P2: non-secret platform identifiers the orchestrator forwards to
+      // the in-guest agent as `platform_config` on the MicroVM /run payload — the
+      // MicroVM equivalent of the AgentCore runtime env block above and the ECS
+      // container env, because a snapshot must not bake configuration in.
+      //
+      // Sourced from the SAME stack-level values that block uses, deliberately, so
+      // an agent behaves identically on all three substrates and a value can only
+      // be changed in one place. Wired unconditionally (not under the
+      // lambda-microvm gate) so the strategy's required-identifier guard can only
+      // ever fire for an environment edited outside CDK.
+      //
+      // No grant rides along: the orchestrator forwards these names and calls none
+      // of the resources they identify.
+      agentPlatformConfig: {
+        taskApprovalsTableName: taskApprovalsTable.table.tableName,
+        nudgesTableName: taskNudgesTable.table.tableName,
+        logGroupName: applicationLogGroup.logGroupName,
+        // INTENTIONAL, not a wiring bug: both keys resolve to the SAME bucket
+        // (`traceArtifactsBucket`), exactly as `ARTIFACTS_BUCKET_NAME` and
+        // `TRACE_ARTIFACTS_BUCKET_NAME` do in the AgentCore runtime env block above
+        // — a live P2 run flagged the coincidence (ADR-021 P2-F8) so it is recorded
+        // here rather than re-derived. They stay two keys because the agent reads
+        // them from two independent code paths with two different prefixes
+        // (`deliver_artifact` → `artifacts/<task_id>/`, `telemetry.py --trace` →
+        // `traces/<user_id>/<task_id>.jsonl.gz`), and the per-task SessionRole
+        // scopes each prefix separately. Collapsing them to one key would make
+        // splitting the buckets later a cross-package contract change; sending one
+        // bucket through two keys costs nothing today.
+        artifactsBucketName: traceArtifactsBucket.bucket.bucketName,
+        traceArtifactsBucketName: traceArtifactsBucket.bucket.bucketName,
+        // The SessionRole is created above (before the orchestrator), so this needs
+        // no Lazy — it is the same CFN token the runtime env receives.
+        agentSessionRoleArn: agentSessionRole.role.roleArn,
+        // Same helper, same resolved geography as the AgentCore runtime env
+        // above (#764) — the two substrates cannot be told to call different
+        // inference profiles.
+        anthropicDefaultHaikuModel: haikuInferenceProfileId(bedrockGeoRegion),
+      },
       // Route ``compute_type: 'ecs'`` repos to the Fargate cluster above —
       // only when the cluster was synthesized (deploy --context compute_type=ecs).
       ...(ecsCluster && {
@@ -1746,10 +1870,12 @@ export class AgentStack extends Stack {
       description: 'URL of the Task API',
     });
 
-    new CfnOutput(this, 'RegistryApiUrl', {
-      value: registryApi.apiUrl,
-      description: 'URL of the agent asset registry API (#246) — the CLI targets this for `bgagent registry` commands',
-    });
+    if (registryApi) {
+      new CfnOutput(this, 'RegistryApiUrl', {
+        value: registryApi.apiUrl,
+        description: 'URL of the agent asset registry API (#246) — the CLI targets this for `bgagent registry` commands',
+      });
+    }
 
     new CfnOutput(this, 'UserPoolId', {
       value: taskApi.userPool.userPoolId,
