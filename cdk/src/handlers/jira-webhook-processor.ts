@@ -1527,7 +1527,7 @@ async function screenCommentsOrDrop(
       jira_cloud_id: cloudId,
       error: err instanceof Error ? err.message : String(err),
     });
-    return [];
+    return []; // nosemgrep: ts-silent-success-masking -- comments are advisory enrichment; a screening outage drops them (logged) and the reporter's task still proceeds. Fail-open is the deliberate posture, not a masked bug (#756 Category 3)
   }
 }
 
