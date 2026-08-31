@@ -1797,6 +1797,13 @@ class TestPlatformConfigContract:
             "agent_session_role_arn": "AGENT_SESSION_ROLE_ARN",
             "aws_sdk_ua_app_id": "AWS_SDK_UA_APP_ID",
             "anthropic_default_haiku_model": "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            # The MAIN model. Absent until now, and silently: the AgentCore runtime
+            # and the ECS task definitions inject it into their own env, so only
+            # MicroVM depends on this transport — and its fallback in config.py is a
+            # ``global.``-prefixed literal, so a missing value was not an error but a
+            # wrong model that the IAM grant does not cover on any non-``global``
+            # deployment, surfacing as AccessDenied at turn 0.
+            "anthropic_model": "ANTHROPIC_MODEL",
         }
 
     def test_required_subset_is_exactly_the_four_run_blocking_keys(self):

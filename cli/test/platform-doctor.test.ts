@@ -296,6 +296,29 @@ describe('doctor Bedrock inference-profile check', () => {
     expect(check.detail).toMatch(/bedrockGeoRegion/);
   });
 
+  it('warns on a denial WITHOUT asserting anything about the profile', async () => {
+    // This check had no denial test, which is how the wrong message survived: the
+    // detail was shared between both branches, so a denial appended "Either <model>
+    // has no profile in that geography … tasks would fail at turn 0" — a conclusion
+    // about the PROFILE drawn from an error about the CALLER. Found by running
+    // doctor under a role deliberately missing bedrock:GetInferenceProfile and
+    // reading what it printed; on that role the profile was in fact fine.
+    const denied = new Error(
+      'User: arn:aws:sts::1:assumed-role/probe/s is not authorized to perform: '
+      + 'bedrock:GetInferenceProfile on resource: …',
+    );
+    denied.name = 'AccessDeniedException';
+    const check = await profileCheck('global', jest.fn().mockRejectedValue(denied));
+    expect(check.status).toBe('warn');
+    expect(check.detail).toMatch(/permissions gap on the caller/);
+    // The claim that must NOT be made: that the model has no profile, or that tasks
+    // would fail. Neither is known from a denial.
+    expect(check.detail).not.toMatch(/has no profile in that geography/);
+    expect(check.detail).not.toMatch(/would fail at turn 0/);
+    // The actionable remedy is the missing IAM action, not a redeploy.
+    expect(check.detail).toMatch(/bedrock:GetInferenceProfile/);
+  });
+
   it('warns rather than passing when the stack does not export the geography', async () => {
     // An older stack has no BedrockGeoRegion output. Defaulting to `us` and passing
     // would report a verification that never happened.

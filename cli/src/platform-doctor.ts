@@ -485,14 +485,22 @@ async function checkBedrockInferenceProfile(
     const errorName = err instanceof Error ? err.name : '';
     const accessDenied = /AccessDenied|Unauthorized|not authorized/i.test(`${errorName} ${message}`);
     const status: DoctorCheckStatus = accessDenied ? 'warn' : 'fail';
-    return {
-      id,
-      label,
-      status,
-      detail: `${message} The deployment grants '${geoRegion}' profiles (bedrockGeoRegion). `
+    // The remedy DEPENDS on which of the two happened, so it cannot be shared.
+    // Rendering the denial case showed why: it appended "Either <model> has no
+    // profile in that geography … tasks would fail at turn 0", which asserts a
+    // conclusion about the PROFILE from an error about the CALLER. On a
+    // least-privilege operator role the profile is very likely fine, and the
+    // sentence sent the reader to redeploy in another geography over a missing IAM
+    // action on their own credentials.
+    const detail = accessDenied
+      ? `${message} That is a permissions gap on the caller, not evidence the profile is `
+        + `missing — the deployment grants '${geoRegion}' profiles (bedrockGeoRegion), and `
+        + 'whether this one resolves is unknown until re-run with credentials holding '
+        + 'bedrock:GetInferenceProfile.'
+      : `${message} The deployment grants '${geoRegion}' profiles (bedrockGeoRegion). `
         + `Either ${bareModelId} has no profile in that geography, or this account lacks its `
-        + 'entitlements — tasks would fail at turn 0 with AccessDenied.',
-    };
+        + 'entitlements — tasks would fail at turn 0 with AccessDenied.';
+    return { id, label, status, detail };
   }
 }
 
