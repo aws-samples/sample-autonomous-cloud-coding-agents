@@ -189,6 +189,13 @@ export interface TaskDetail {
   readonly updated_at: string;
   readonly started_at: string | null;
   readonly completed_at: string | null;
+  /** ISO timestamp of the agent's last heartbeat (45 s cadence, every compute
+   *  backend); ``null`` before the first beat or on tasks that never ran. The
+   *  platform's only in-guest liveness signal, surfaced through the API as of
+   *  ADR-021 P2r2-F11 — it was written and consumed internally but hidden from
+   *  every operator, which produced a wrong live-verification conclusion. Mirrors
+   *  ``cdk/src/handlers/shared/types.ts::TaskDetail``. */
+  readonly agent_heartbeat_at: string | null;
   readonly duration_s: number | null;
   readonly cost_usd: number | null;
   readonly build_passed: boolean | null;
@@ -330,6 +337,21 @@ export interface TaskSummary {
   readonly pr_url: string | null;
   readonly created_at: string;
   readonly updated_at: string;
+  /**
+   * Last in-guest liveness beat (ISO-8601), or ``null`` when the agent has not
+   * beaten yet, on a substrate whose agent never beats, or on records predating
+   * the field.
+   *
+   * On the SUMMARY as well as the detail (ADR-021 P2r2-F11 follow-up) because
+   * liveness is a list-level question: "is anything still alive?" is asked across
+   * tasks, and answering it one `bgagent status` at a time is how a hung task
+   * goes unnoticed. The field's history is the argument — while `toTaskDetail`
+   * omitted it, `bgagent status` reported `None` against a 6-second-old DynamoDB
+   * value, and that produced a WRONG live-verification conclusion attributed to a
+   * different defect entirely. Keep in sync with the sibling declaration in the
+   * other package's `types.ts`.
+   */
+  readonly agent_heartbeat_at: string | null;
 }
 
 /** Task event returned by GET /v1/tasks/{task_id}/events. */

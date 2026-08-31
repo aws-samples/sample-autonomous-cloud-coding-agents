@@ -219,7 +219,7 @@ Blueprints can configure per-repository settings that override platform defaults
 
 | Setting | Description | Default |
 |---|---|---|
-| `compute_type` | Compute strategy (`agentcore` or `ecs`) | `agentcore` |
+| `compute_type` | Compute strategy (`agentcore`, `ecs`, or `lambda-microvm`) | `agentcore` |
 | `runtime_arn` | AgentCore runtime ARN override | Platform default |
 | `model_id` | Bedrock inference-profile ID (`us.`-prefixed) | `us.anthropic.claude-opus-5` |
 | `max_turns` | Default turn limit for tasks | 100 |
@@ -227,6 +227,8 @@ Blueprints can configure per-repository settings that override platform defaults
 | `system_prompt_overrides` | Additional system prompt instructions | None |
 | `github_token_secret_arn` | Per-repo GitHub token (Secrets Manager ARN) | Platform default |
 | `poll_interval_ms` | Poll interval for awaiting completion (5000–300000) | 30000 |
+
+> `lambda-microvm` is **experimental** and requires operator setup (a re-bootstrap to policy bundle ≥ 1.6.0 and a supported Region) before a repo can select it. Keep production repos on `agentcore` or `ecs` — see the [Deployment guide](./DEPLOYMENT_GUIDE.md#lambda-microvms-backend-experimental).
 
 When you specify `--max-turns` (CLI) or `max_turns` (API) on a task, your value takes precedence over the Blueprint default. If neither is specified, the platform default (100) is used. The same override pattern applies to `--max-budget` / `max_budget_usd`, except there is no platform default  - if neither the task nor the Blueprint specifies a budget, no cost limit is applied.
 
@@ -691,6 +693,20 @@ node lib/bin/bgagent.js list
 node lib/bin/bgagent.js list --status RUNNING,SUBMITTED
 node lib/bin/bgagent.js list --repo owner/repo --limit 10
 ```
+
+The table is `TASK ID`, `STATUS`, `REPO`, `CREATED`, `HEARTBEAT`, `DESCRIPTION`.
+
+#### Is a running task actually alive? (`HEARTBEAT`)
+
+While a task is `RUNNING` the agent writes a liveness beat every 45 seconds. `bgagent status` shows it as a `Heartbeat:` line and `bgagent list` as a `HEARTBEAT` column, both as an **age** rather than a timestamp, because the age is the signal:
+
+```text
+Heartbeat:   2026-04-01T00:41:02.118Z (12s ago)
+```
+
+- **Under ~1 minute** - healthy; the agent is working.
+- **Several minutes and climbing** - the agent is hung, deadlocked, or was OOM-killed inside an otherwise-healthy compute environment. The platform detects this itself and fails the task rather than letting it burn its full timeout, so you do not need to act; the failure message will name the compute substrate.
+- **`—`** - nothing to report. Shown for terminal tasks (the last beat means nothing next to a final status), before the first beat arrives, and on the `ecs` backend, where the agent runs the pipeline directly rather than serving HTTP and so beats only once at start.
 
 ### Viewing task events
 

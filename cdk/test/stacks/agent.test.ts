@@ -82,6 +82,63 @@ describe('AgentStack', () => {
     });
   });
 
+  test('the orchestrator carries the platform_config transport env on EVERY compute type', () => {
+    // Wired unconditionally rather than under the lambda-microvm gate: the strategy
+    // fails a session start when a required identifier is missing, and that guard
+    // must only ever fire for a hand-edited Lambda environment — never because a
+    // deploy-time gate and a per-repo `compute_type` disagreed. These are the
+    // MicroVM's substitute for the AgentCore runtime env block / ECS container env,
+    // since a snapshot must not bake configuration in (ADR-021 sub-decision 3).
+    const [, orchestrator] = Object.entries(template.findResources('AWS::Lambda::Function'))
+      .find(([id]) => id.includes('TaskOrchestratorOrchestratorFn'))!;
+    const env = orchestrator.Properties.Environment.Variables as Record<string, unknown>;
+
+    for (const key of [
+      'TASK_APPROVALS_TABLE_NAME',
+      'NUDGES_TABLE_NAME',
+      'LOG_GROUP_NAME',
+      'ARTIFACTS_BUCKET_NAME',
+      'TRACE_ARTIFACTS_BUCKET_NAME',
+      'AGENT_SESSION_ROLE_ARN',
+      'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+    ]) {
+      expect(env[key]).toBeDefined();
+    }
+    // Plus the three the orchestrator already carried for its own work — together
+    // these cover all four identifiers the MicroVM strategy treats as required.
+    expect(env.TASK_TABLE_NAME).toBeDefined();
+    expect(env.TASK_EVENTS_TABLE_NAME).toBeDefined();
+    expect(env.GITHUB_TOKEN_SECRET_ARN).toBeDefined();
+  });
+
+  test('the forwarded identifiers are the SAME stack values the AgentCore runtime gets', () => {
+    // One stack value, one env-var name, three backends — so an agent behaves
+    // identically on every substrate and a value can only be changed in one place.
+    // A drift here would mean a MicroVM agent writing approvals to a different
+    // table than an AgentCore agent on the same deployment.
+    const [, orchestrator] = Object.entries(template.findResources('AWS::Lambda::Function'))
+      .find(([id]) => id.includes('TaskOrchestratorOrchestratorFn'))!;
+    const orchestratorEnv = orchestrator.Properties.Environment.Variables as Record<string, unknown>;
+
+    const runtimes = template.findResources('AWS::BedrockAgentCore::Runtime');
+    const runtimeEnv = Object.values(runtimes)[0]!.Properties.EnvironmentVariables as Record<string, unknown>;
+
+    for (const key of [
+      'TASK_APPROVALS_TABLE_NAME',
+      'NUDGES_TABLE_NAME',
+      'LOG_GROUP_NAME',
+      'ARTIFACTS_BUCKET_NAME',
+      'TRACE_ARTIFACTS_BUCKET_NAME',
+      'AGENT_SESSION_ROLE_ARN',
+      'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+      'TASK_TABLE_NAME',
+      'TASK_EVENTS_TABLE_NAME',
+      'GITHUB_TOKEN_SECRET_ARN',
+    ]) {
+      expect(JSON.stringify(orchestratorEnv[key])).toEqual(JSON.stringify(runtimeEnv[key]));
+    }
+  });
+
   test('outputs ComputeSubstrate=agentcore on the default (no-gate) deploy', () => {
     // The CLI reads this to refuse onboarding a repo as compute_type=ecs on a
     // stack that never provisioned the ECS substrate.
@@ -1149,6 +1206,51 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
     const rendered = JSON.stringify(microvmStatements[0]!.Resource);
     expect(rendered).toMatch(/LambdaMicrovmComputeImage[^"]*","ImageArn"/);
     expect(rendered).not.toContain('microvm-image:*');
+  });
+
+  test('wires the P2 runtime-parity grants onto the MicroVM execution role', () => {
+    // Construct-level scoping is asserted in test/constructs/lambda-microvm-compute
+    // test; what only the STACK can get wrong is passing the props at all — a
+    // missing `githubTokenSecret` or `agentMemory` here synthesizes cleanly and
+    // fails at run time (no clone / silently-dropped memory writes).
+    const policies = JSON.stringify(
+      Object.entries(template.findResources('AWS::IAM::Policy'))
+        .filter(([id]) => id.includes('LambdaMicrovmComputeExecutionRole')),
+    );
+    // The platform GitHub PAT secret, by reference to the real stack secret.
+    expect(policies).toContain('secretsmanager:GetSecretValue');
+    expect(policies).toContain('GitHubTokenSecret');
+    // AgentCore Memory, so cross-task learning persists on this substrate.
+    expect(policies).toContain('bedrock-agentcore:CreateEvent');
+    // Bedrock, scoped to the shared model list rather than a wildcard.
+    expect(policies).toContain('bedrock:InvokeModel');
+    expect(policies).toContain('inference-profile/us.anthropic.claude-opus-4-8');
+    // Tenant data stays on the SessionRole: no direct DynamoDB, ever.
+    expect(policies).not.toContain('dynamodb:');
+    expect(policies).toContain('sts:TagSession');
+  });
+
+  test('grants the MicroVM execution role writes on the SAME log group platform_config names', () => {
+    // ADR-021 P2-F4, and a stack-level property by construction: the construct can
+    // only grant against the log group the stack hands it, and the orchestrator can
+    // only deliver the name the stack puts in `agentPlatformConfig`. If those two
+    // ever came from different objects the deploy would still succeed and every
+    // per-task log line would AccessDenied — which is exactly what the live P2 run
+    // hit. So this asserts they are the SAME logical resource.
+    const policies = JSON.stringify(
+      Object.entries(template.findResources('AWS::IAM::Policy'))
+        .filter(([id]) => id.includes('LambdaMicrovmComputeExecutionRole')),
+    );
+    expect(policies).toContain('logs:CreateLogStream');
+    expect(policies).toContain('RuntimeApplicationLogGroup');
+
+    // ...and the orchestrator delivers that group's NAME as LOG_GROUP_NAME.
+    const orchestrator = Object.entries(template.findResources('AWS::Lambda::Function'))
+      .find(([id]) => id.includes('TaskOrchestratorOrchestratorFn'))!;
+    const logGroupEnv = JSON.stringify(
+      orchestrator[1].Properties.Environment.Variables.LOG_GROUP_NAME,
+    );
+    expect(logGroupEnv).toContain('RuntimeApplicationLogGroup');
   });
 
   test('MicroVM resources carry the backend cost-allocation tag', () => {
