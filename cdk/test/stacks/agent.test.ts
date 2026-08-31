@@ -53,9 +53,13 @@ describe('AgentStack', () => {
    * grew". Worse, the stack's own status stays at whatever the previous deploy left,
    * so a status check reports success while nothing shipped.
    *
-   * This is not hypothetical headroom: `--context compute_type=lambda-microvm`
-   * synthesizes OVER the ceiling on `main` today and cannot be deployed at all. The
-   * default substrate is a few thousand bytes behind it.
+   * This is not hypothetical headroom. `compute_type=ecs` — the substrate deployments
+   * actually use — synthesizes at 992,111 bytes against the 1,000,000 ceiling. That
+   * is 7,889 bytes, roughly one medium construct.
+   *
+   * (`compute_type=lambda-microvm` is already past the ceiling, which is how this was
+   * noticed. That substrate is still in development, so its template not fitting yet
+   * is expected rather than a defect — it is not the reason this guard exists.)
    *
    * Asserted as a BUDGET below the real ceiling so the failure lands here — in a
    * test that says what the limit is and what to do — rather than at the end of a
