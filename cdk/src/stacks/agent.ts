@@ -92,11 +92,43 @@ const RUNTIME_SESSION_TIMEOUT_HOURS = 8;
 const API_URL_STAGE_SEGMENT_INDEX = 3;
 
 /**
- * Name of the AgentCore workload identity backing the Linear OAuth token vault
- * (RFC #249 Phase 1). Shared by the LinearIdentityVault construct and the agent
- * runtime env (`LINEAR_WORKLOAD_IDENTITY_NAME`) so the two cannot drift.
+ * Prefix for the AgentCore workload identity backing the Linear OAuth token vault
+ * (RFC #249 Phase 1).
  */
-const LINEAR_VAULT_WORKLOAD_NAME = 'abca_linear_oauth';
+const LINEAR_VAULT_WORKLOAD_PREFIX = 'abca_linear_oauth';
+
+/**
+ * AgentCore workload identity names are limited to 64 characters, so the
+ * stack-derived suffix is truncated to fit under the prefix and separator.
+ */
+const WORKLOAD_NAME_MAX_LENGTH = 64;
+
+/**
+ * Name of the workload identity for THIS stack.
+ *
+ * Stack-scoped, not a fixed constant, because AgentCore workload identity names
+ * are unique per account+region while CloudFormation stacks are not. Two
+ * vault-enabled stacks in one account sharing a name is not a no-op: the second
+ * `CreateWorkloadIdentity` conflicts, falls back to an update, and that update
+ * REPLACES `allowedResourceOauth2ReturnUrls` — silently dropping the first stack's
+ * consent page from the allowlist, so its consent starts failing. A `Delete` from
+ * either stack then removes the identity both were using. The repo already treats
+ * account-level AgentCore name uniqueness as load-bearing for `runtimeName`.
+ *
+ * `linearVaultWorkloadName` context overrides it, which is what an existing
+ * deployment sets to keep its already-consented grants: the grant is bound to
+ * (workload identity, user id), so renaming the identity orphans every consent.
+ */
+function linearVaultWorkloadName(stack: Stack): string {
+  const override = stack.node.tryGetContext('linearVaultWorkloadName');
+  if (typeof override === 'string' && override.trim()) return override.trim();
+  // Only [a-zA-Z0-9_] survives; stack names routinely carry hyphens.
+  const suffix = stack.stackName.replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  const room = WORKLOAD_NAME_MAX_LENGTH - LINEAR_VAULT_WORKLOAD_PREFIX.length - 1;
+  return suffix
+    ? `${LINEAR_VAULT_WORKLOAD_PREFIX}_${suffix.slice(0, room)}`
+    : LINEAR_VAULT_WORKLOAD_PREFIX;
+}
 
 /** Properties for {@link AgentStack}. */
 export interface AgentStackProps extends StackProps {
@@ -327,6 +359,11 @@ export class AgentStack extends Stack {
     // construct + the token grants all key off one predicate and cannot drift.
     const linearIdentityVaultEnabled = this.node.tryGetContext('enableLinearIdentityVault') === true
       || this.node.tryGetContext('enableLinearIdentityVault') === 'true';
+    // Resolved once, next to the gate, for the same anti-drift reason: the construct,
+    // the agent runtime env, the platform config and the CLI-facing output must all
+    // name the SAME workload identity, and a second copy of the derivation is a
+    // second chance to disagree.
+    const linearVaultWorkload = linearVaultWorkloadName(this);
 
     // The operator-supplied MicroVM image inputs, resolved HERE (pure context
     // reads, no construct dependency) rather than at the construct's call site
@@ -595,7 +632,7 @@ export class AgentStack extends Stack {
       // Secrets-Manager path. Workload name matches the LinearIdentityVault
       // construct's fixed `abca_linear_oauth`.
       ...(linearIdentityVaultEnabled
-        ? { LINEAR_VAULT_ENABLED: 'true', LINEAR_WORKLOAD_IDENTITY_NAME: LINEAR_VAULT_WORKLOAD_NAME }
+        ? { LINEAR_VAULT_ENABLED: 'true', LINEAR_WORKLOAD_IDENTITY_NAME: linearVaultWorkload }
         : {}),
     };
 
@@ -952,11 +989,21 @@ export class AgentStack extends Stack {
       // enforced; F11: localhost + hosted coexist so either onboarding mode works
       // off one identity). Both are registered: the CLI picks per call.
       linearIdentityVault = new LinearIdentityVault(this, 'LinearIdentityVault', {
-        workloadName: LINEAR_VAULT_WORKLOAD_NAME,
+        workloadName: linearVaultWorkload,
         allowedReturnUrls: [
           'http://localhost:8080/oauth/callback',
           ...(hostedReturnUrl ? [hostedReturnUrl] : []),
         ],
+      });
+
+      // Published so `bgagent linear setup` mints the grant under the identity THIS
+      // stack actually created. The CLI used to carry its own copy of the name,
+      // which was correct only while the name was a global constant — the moment it
+      // became stack-scoped, a hardcoded CLI would consent against a different
+      // (or nonexistent) identity than the resolvers read from.
+      new CfnOutput(this, 'LinearVaultWorkloadName', {
+        value: linearVaultWorkload,
+        description: 'AgentCore workload identity backing the Linear token vault — read by `bgagent linear setup`',
       });
 
       if (hostedReturnUrl) {
@@ -1171,7 +1218,7 @@ export class AgentStack extends Stack {
         ...(linearIdentityVault
           ? {
             linearVaultEnabled: 'true',
-            linearWorkloadIdentityName: LINEAR_VAULT_WORKLOAD_NAME,
+            linearWorkloadIdentityName: linearVaultWorkload,
           }
           : {}),
       },
@@ -1860,7 +1907,7 @@ export class AgentStack extends Stack {
         iterationHeartbeat.fn,
       ]) {
         linearWriter.addEnvironment('LINEAR_VAULT_ENABLED', 'true');
-        linearWriter.addEnvironment('LINEAR_WORKLOAD_IDENTITY_NAME', LINEAR_VAULT_WORKLOAD_NAME);
+        linearWriter.addEnvironment('LINEAR_WORKLOAD_IDENTITY_NAME', linearVaultWorkload);
         linearIdentityVault.grantMintToken(linearWriter);
       }
     }

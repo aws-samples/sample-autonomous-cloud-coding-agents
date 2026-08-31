@@ -78,10 +78,27 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const BANNER_WIDTH = 72;
 
 /**
- * Workload identity the vault mints Linear tokens under. Must match
- * LINEAR_VAULT_WORKLOAD_NAME in cdk/src/stacks/agent.ts.
+ * Workload identity name used when the stack does not publish one.
+ *
+ * The name is now stack-scoped — AgentCore workload identity names are unique per
+ * account+region while CloudFormation stacks are not — so the CLI reads it from the
+ * `LinearVaultWorkloadName` output instead of knowing it. This fixed value is what a
+ * stack deployed before that output existed actually uses, so it is the right
+ * fallback rather than an error.
  */
-const LINEAR_VAULT_WORKLOAD_NAME = 'abca_linear_oauth';
+const LINEAR_VAULT_WORKLOAD_NAME_FALLBACK = 'abca_linear_oauth';
+
+/**
+ * The workload identity THIS stack mints Linear tokens under.
+ *
+ * Read from the stack rather than hardcoded so the CLI consents against the same
+ * identity the Lambda resolvers read from. Getting this wrong is silent in the worst
+ * way: consent succeeds, the grant just lands under an identity nothing resolves.
+ */
+async function resolveLinearVaultWorkloadName(region: string, stackName: string): Promise<string> {
+  const fromStack = await getStackOutput(region, stackName, 'LinearVaultWorkloadName').catch(() => null);
+  return fromStack?.trim() || LINEAR_VAULT_WORKLOAD_NAME_FALLBACK;
+}
 
 /**
  * Split what the operator pasted from the consent page into a code and a state.
@@ -967,7 +984,7 @@ export function makeLinearCommand(): Command {
 
             const consent = await beginVaultConsent({
               region,
-              workloadName: LINEAR_VAULT_WORKLOAD_NAME,
+              workloadName: await resolveLinearVaultWorkloadName(region, stackName),
               providerName: provider.providerName,
               userId: vaultUserId,
               returnUrl,
@@ -1976,7 +1993,7 @@ export function makeLinearCommand(): Command {
           const inviteWorkspaceId = registryRow.linear_workspace_id as string | undefined;
           inviteToken = await mintLinearTokenFromVault({
             region,
-            workloadName: LINEAR_VAULT_WORKLOAD_NAME,
+            workloadName: await resolveLinearVaultWorkloadName(region, stackName),
             providerName: inviteProvider,
             userId: recordedSubject
               ?? (inviteWorkspaceId ? linearVaultUserId(inviteWorkspaceId) : linearVaultUserIdForSlug(slug)),
@@ -2167,6 +2184,11 @@ export function makeLinearCommand(): Command {
         // bare 401 on precisely the workspaces that are working fine.
         const registryTableForVault = await getStackOutput(region, opts.stackName as string, 'LinearWorkspaceRegistryTableName');
         const ddbForVault = registryTableForVault ? makeDocClient({ region }) : undefined;
+        // Hoisted out of the per-slug loop below: one DescribeStacks, not one per
+        // workspace.
+        const vaultWorkloadName = ddbForVault
+          ? await resolveLinearVaultWorkloadName(region, opts.stackName as string)
+          : LINEAR_VAULT_WORKLOAD_NAME_FALLBACK;
 
         for (const slug of slugs) {
           const secretName = linearOauthSecretName(slug);
@@ -2183,7 +2205,7 @@ export function makeLinearCommand(): Command {
                 ?? (workspaceId ? linearVaultUserId(workspaceId) : linearVaultUserIdForSlug(slug));
               accessToken = await mintLinearTokenFromVault({
                 region,
-                workloadName: LINEAR_VAULT_WORKLOAD_NAME,
+                workloadName: vaultWorkloadName,
                 providerName,
                 userId,
               }) ?? undefined;
