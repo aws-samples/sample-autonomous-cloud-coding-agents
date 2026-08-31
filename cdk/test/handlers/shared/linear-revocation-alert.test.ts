@@ -83,12 +83,19 @@ describe('announceRevocation', () => {
     expect(published().input.Message).toMatch(/dropped|appear to do nothing/i);
   });
 
-  test('the vault source gets its own remedy — vault-setup, not just setup', async () => {
-    // The two failure shapes need different fixes: a Secrets-Manager rejection is
-    // repaired by re-running setup, a dead vault consent by re-running vault-setup.
+  test('the vault source names a remedy that EXISTS, and says it is the vault', async () => {
+    // Both failure shapes are repaired by the same command now that onboarding is one
+    // command; the message must still say WHICH credential died, or an operator
+    // cannot tell a dead vault consent from a rejected Secrets-Manager refresh.
+    //
+    // This test previously demanded `vault-setup`, which was removed when onboarding
+    // was consolidated — so it was pinning an instruction that would fail with an
+    // unknown command. A remedy nobody can run is worse than none.
     await announceRevocation(detail({ source: 'vault-consent-required' }), opts());
-    expect(published().input.Message).toContain('vault-setup acme');
-    expect(published().input.Message).toMatch(/vault/i);
+    const message = published().input.Message as string;
+    expect(message).toContain('bgagent linear setup acme');
+    expect(message).not.toContain('vault-setup');
+    expect(message).toMatch(/vault/i);
   });
 
   test('a failed publish does NOT throw — this runs inside token resolution', async () => {

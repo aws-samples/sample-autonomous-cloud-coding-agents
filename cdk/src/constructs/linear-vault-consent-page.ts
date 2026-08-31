@@ -30,7 +30,7 @@
 // is reachable from anywhere, and the page shows the value the operator pastes back.
 // It serves BOTH onboarding steps, which is what removes localhost entirely:
 //   * direct OAuth (`bgagent linear setup --hosted`) redirects here with `code`
-//   * the vault 3LO bounce (`vault-setup --hosted`) arrives with `session_id`
+//   * the vault 3LO bounce (`bgagent linear setup`) arrives with `session_id`
 // Registering this one URL on the Linear app therefore replaces the localhost
 // callback rather than merely supplementing it.
 //
@@ -254,8 +254,14 @@ export function renderConsentPage(): string {
     if (sessionId || code) {
       title.textContent = 'Linear authorized';
       lede.textContent = 'Paste this into your terminal:';
+      // The direct flow hands back code AND state as a query fragment, so the CLI can
+      // check state against the value it generated — the OAuth correlation check that
+      // stops a code obtained elsewhere being pasted in and exchanged. Encoded as one
+      // string so the operator still copies a single thing.
+      // NOTE: no backticks anywhere in this script — it lives inside a TS template
+      // literal, and one would terminate it. Cost a broken build twice.
       // Assigned as TEXT, never as markup — this value is untrusted query input.
-      session.textContent = sessionId || code;
+      session.textContent = sessionId || (state ? 'code=' + code + '&state=' + state : code);
       hint.textContent = 'You can close this tab.';
     } else {
       title.textContent = 'Nothing to finish here';

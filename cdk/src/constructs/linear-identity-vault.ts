@@ -203,7 +203,7 @@ export class LinearIdentityVault extends Construct {
       resourceName: 'default',
     });
     // Provider names are per-workspace (`bgagent-linear-oauth-<slug>`) and created
-    // at onboarding time by `bgagent linear vault-setup`, so they are unknown at
+    // at onboarding time by `bgagent linear setup`, so they are unknown at
     // synth — scope to the account's oauth2 credential providers in the default
     // token vault rather than a single name. Kept alongside the vault ARN above
     // so the grant still holds if the service moves to per-provider authorization.

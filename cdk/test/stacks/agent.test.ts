@@ -1625,17 +1625,12 @@ describe('AgentStack Linear identity vault gate (#809)', () => {
     expect(rendered).toContain('LinearVaultConsentPageStack');
   });
 
-  test('EVERY Lambda that writes to Linear can mint from the vault', () => {
-    // The webhook processor was granted vault access and nothing else was, on the
-    // assumption widening could wait. It could not: the fan-out plane posts the
-    // PR-opened and terminal comments, the orchestrator posts epic rollups, and the
-    // GitHub processor updates the linked issue. Each fell back to a
-    // Secrets-Manager token a vault-onboarded workspace does not maintain, so a
-    // task would succeed while its Linear issue showed nothing after the opening
-    // comment. Live-caught as 401s in the fan-out log.
-    //
-    // Pinned by COUNT so a newly added Linear writer fails here rather than in
-    // production: adding one without the grant leaves the count short.
+  test('EVERY Lambda that can mint a Linear token has the vault env + grant', () => {
+    // Pinned as a SET, and cross-checked against the source graph below. The earlier
+    // version asserted a hardcoded count of 4, derived by grepping handlers that
+    // import a Linear module DIRECTLY — which silently omitted the two that reach a
+    // minting resolver two hops away, through orchestration-channel-factory. A guard
+    // built from an incomplete inventory just encodes the incompleteness.
     const app = new App({ context: { enableLinearIdentityVault: true } });
     const template = Template.fromStack(
       new AgentStack(app, 'LinearVaultWritersStack', {
@@ -1643,24 +1638,84 @@ describe('AgentStack Linear identity vault gate (#809)', () => {
       }),
     );
     const fns = template.findResources('AWS::Lambda::Function');
-    const withVaultEnv = Object.entries(fns).filter(([, f]) => {
-      const vars = (f as { Properties?: { Environment?: { Variables?: Record<string, unknown> } } })
-        .Properties?.Environment?.Variables ?? {};
-      return vars.LINEAR_VAULT_ENABLED === 'true';
-    }).map(([id]) => id);
+    const withVaultEnv = Object.entries(fns)
+      .filter(([, f]) => {
+        const vars = (f as { Properties?: { Environment?: { Variables?: Record<string, unknown> } } })
+          .Properties?.Environment?.Variables ?? {};
+        return vars.LINEAR_VAULT_ENABLED === 'true';
+      })
+      .map(([id]) => id);
 
-    // The Linear webhook processor plus the three writers wired alongside it.
-    expect(withVaultEnv).toHaveLength(4);
-    const joined = withVaultEnv.join(' ');
-    expect(joined).toMatch(/FanOut/);
-    expect(joined).toMatch(/Orchestrator/);
-    expect(joined).toMatch(/GitHubScreenshot|WebhookProcessor/);
-    // Every one of them also carries the workload name, or the env is inert.
+    for (const fragment of [
+      'LinearIntegrationWebhookProcessor',
+      'FanOut',
+      'Orchestrator',
+      'OrchestrationReconciler',
+      'IterationHeartbeat',
+      'GitHubScreenshot',
+    ]) {
+      expect(withVaultEnv.join(' ')).toContain(fragment);
+    }
+    // Every one also carries the workload name, or the env is inert.
     for (const id of withVaultEnv) {
       const vars = (fns[id] as { Properties: { Environment: { Variables: Record<string, unknown> } } })
         .Properties.Environment.Variables;
       expect(vars.LINEAR_WORKLOAD_IDENTITY_NAME).toBe('abca_linear_oauth');
     }
+  });
+
+  test('the source graph names no Linear-minting handler that is unwired', () => {
+    // The completeness half. Recomputes, from the handler sources, which Lambdas can
+    // reach `resolveLinearOauthToken` at runtime — following VALUE imports only,
+    // since `import type` is erased — and fails if that set grows beyond the handlers
+    // known to be wired. Adding an import is then a test failure rather than a
+    // production 401 on a vault-managed workspace.
+    const handlersDir = path.join(__dirname, '..', '..', 'src', 'handlers');
+    const sharedDir = path.join(handlersDir, 'shared');
+    const valueImports = (file: string): Set<string> => {
+      const src = fs.readFileSync(file, 'utf8');
+      const found = new Set<string>();
+      const re = /import\s+(type\s+)?(?:\{[^}]*\}|\*\s+as\s+\w+|\w+)\s+from\s+'(?:\.\/)?(?:shared\/)?([a-z0-9-]+)'/gs;
+      for (let m = re.exec(src); m !== null; m = re.exec(src)) {
+        if (!m[1]) found.add(m[2]!);
+      }
+      return found;
+    };
+    const sharedFiles = fs.readdirSync(sharedDir).filter((f) => f.endsWith('.ts'));
+    // Seed: shared modules that CALL the resolver (not merely import its file — the
+    // signature-verification helpers import a different export and never mint).
+    const minters = new Set<string>(
+      sharedFiles
+        .filter((f) => /\bresolveLinearOauthToken\s*\(/.test(fs.readFileSync(path.join(sharedDir, f), 'utf8')))
+        .map((f) => f.replace(/\.ts$/, '')),
+    );
+    for (let grew = true; grew;) {
+      grew = false;
+      for (const f of sharedFiles) {
+        const name = f.replace(/\.ts$/, '');
+        if (minters.has(name)) continue;
+        for (const dep of valueImports(path.join(sharedDir, f))) {
+          if (minters.has(dep)) { minters.add(name); grew = true; break; }
+        }
+      }
+    }
+    const reaching = fs.readdirSync(handlersDir)
+      .filter((f) => f.endsWith('.ts'))
+      .filter((f) => [...valueImports(path.join(handlersDir, f))].some((d) => minters.has(d)))
+      .sort();
+
+    // linear-webhook is the RECEIVER: it imports the resolver file for
+    // getOauthSecretStrict (signature verification) and never mints, so it needs no
+    // grant. Everything else here must be wired above.
+    expect(reaching).toEqual([
+      'fanout-task-events.ts',
+      'github-webhook-processor.ts',
+      'iteration-heartbeat-sweep.ts',
+      'linear-webhook-processor.ts',
+      'linear-webhook.ts',
+      'orchestrate-task.ts',
+      'orchestration-reconciler.ts',
+    ]);
   });
 });
 

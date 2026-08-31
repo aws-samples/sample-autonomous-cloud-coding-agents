@@ -95,7 +95,7 @@ export async function announceRevocation(
     'To fix it, run:',
     `  bgagent linear setup ${slug}`,
     detail.source === 'vault-consent-required'
-      ? `  bgagent linear vault-setup ${slug}    (to restore the Token Vault path)`
+      ? `  bgagent linear setup ${slug}    (re-consents; restores the Token Vault path)`
       : '',
     '',
     `Workspace id: ${detail.linearWorkspaceId}`,

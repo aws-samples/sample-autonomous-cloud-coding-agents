@@ -83,6 +83,25 @@ const BANNER_WIDTH = 72;
  */
 const LINEAR_VAULT_WORKLOAD_NAME = 'abca_linear_oauth';
 
+/**
+ * Split what the operator pasted from the consent page into a code and a state.
+ *
+ * The page returns `code=…&state=…` so the pasted value can be correlated with the
+ * authorization this machine started — the check the localhost callback performs
+ * against its own `state`, and which is otherwise impossible when the round trip
+ * goes through a human. A bare code is still accepted, for an authorization that
+ * carried no state or a page deployed before this; callers must then say that the
+ * check could not run rather than implying it passed.
+ */
+export function parsePastedAuthorization(raw: string): { code: string; state?: string } {
+  const trimmed = raw.trim();
+  if (!trimmed.includes('code=')) return { code: trimmed };
+  const parsed = new URLSearchParams(trimmed.startsWith('?') ? trimmed.slice(1) : trimmed);
+  const code = (parsed.get('code') ?? '').trim();
+  const state = parsed.get('state')?.trim();
+  return state ? { code, state } : { code };
+}
+
 /** Agent name used when the operator does not choose one. */
 export const DEFAULT_APP_NAME = 'bgagent';
 
@@ -831,11 +850,35 @@ export function makeLinearCommand(): Command {
           if (pending.clientId !== clientId) {
             throw new CliError(
               'The pending consent was started with a different Linear Client ID. Re-run '
-              + `\`bgagent linear setup ${slug} --hosted\` with the client you intend to use.`,
+              + `\`bgagent linear setup ${slug}\` with the client you intend to use.`,
             );
           }
+          // The consent page hands back `code=…&state=…` so the pasted value can be
+          // checked against the request we started — the same correlation the
+          // localhost callback performs. Without it, a code obtained elsewhere could
+          // be pasted in and exchanged, installing a grant we did not initiate.
+          // A bare code is still accepted (older page, or an authorization that
+          // omitted state), but then the check cannot run and we say so.
+          const { code: pastedCode, state: pastedState } = parsePastedAuthorization(String(opts.code));
+          if (!pastedCode) {
+            throw new CliError(
+              'Could not find an authorization code in what you pasted. Copy the whole '
+              + 'value the consent page shows, exactly as displayed.',
+            );
+          }
+          if (pastedState && pending.state && pastedState !== pending.state) {
+            throw new CliError(
+              'OAuth state mismatch: the pasted value did not come from the authorization '
+              + `this machine started for '${slug}'. Re-run \`bgagent linear setup ${slug}\` `
+              + 'and use the value from the page that run opens.',
+            );
+          }
+          if (!pastedState) {
+            console.log('  ⚠ The pasted value carried no state, so the request could not be');
+            console.log('    correlated with the one this machine started.');
+          }
           resumed = {
-            code: String(opts.code).trim(),
+            code: pastedCode,
             codeVerifier: pending.codeVerifier,
             redirectUri: pending.redirectUri,
           };
@@ -1009,7 +1052,7 @@ export function makeLinearCommand(): Command {
           });
           console.log('\n  → Open this URL in any browser and Authorize:\n');
           console.log(`    ${authorizationUrl}\n`);
-          console.log(`  You will land on ${setupHostedUrl}, which shows a code.`);
+          console.log(`  You will land on ${setupHostedUrl}, which shows a value to paste back.`);
           console.log(
             '\n  ⚠ That exact URL must be registered as a Redirect URI on the Linear app,'
             + '\n    or consent fails with "Invalid redirect_uri". It is a generated'
@@ -1018,7 +1061,7 @@ export function makeLinearCommand(): Command {
             + '\n    redeploy, re-check this URL against the app — Linear accepts several, so'
             + '\n    adding the new one is safe and the stale entry does no harm.\n',
           );
-          const pasted = (await promptLine('  Paste the code shown on that page')).trim();
+          const pasted = (await promptLine('  Paste the value shown on that page')).trim();
           if (!pasted) {
             // Nothing typed: leave the saved verifier in place so the operator can
             // pick this up later rather than starting over.
@@ -1031,8 +1074,23 @@ export function makeLinearCommand(): Command {
           // this process, and leaving a live one-time secret on disk after use is
           // exactly what the store is designed to avoid.
           clearPendingConsent(slug);
+          // Same correlation check as the --code path. Here `state` is still in scope,
+          // so a mismatch means the pasted value came from a different authorization.
+          const inSession = parsePastedAuthorization(pasted);
+          if (!inSession.code) {
+            throw new CliError(
+              'Could not find an authorization code in what you pasted. Copy the whole '
+              + 'value the consent page shows, exactly as displayed.',
+            );
+          }
+          if (inSession.state && inSession.state !== state) {
+            throw new CliError(
+              'OAuth state mismatch: the pasted value did not come from the authorization '
+              + 'this run started. Re-run the command and use the value from the page it opens.',
+            );
+          }
           resumed = {
-            code: pasted,
+            code: inSession.code,
             codeVerifier: pkce.codeVerifier,
             redirectUri: setupRedirectUri,
           };
@@ -1087,7 +1145,7 @@ export function makeLinearCommand(): Command {
 
           // The direct flow expects Linear to redirect with `code` + `state`. An
           // AgentCore `session_id` means the redirect URI points at a vault provider
-          // callback — that is `vault-setup`'s flow, not this one.
+          // callback — that is the vault branch above, not this one.
           if (callback.kind !== 'direct-oauth') {
             throw new CliError(
               'Localhost callback returned an AgentCore session_id, not a direct OAuth code. '

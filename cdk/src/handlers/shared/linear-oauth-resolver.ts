@@ -17,6 +17,7 @@
  *  SOFTWARE.
  */
 
+import { createHmac } from 'node:crypto';
 import {
   GetSecretValueCommand,
   PutSecretValueCommand,
@@ -643,6 +644,24 @@ function parseRegistryRow(rawItem: unknown, linearWorkspaceId: string): Registry
  * `cdk/test/contracts/stored-oauth-token-parity.test.ts` enforces
  * the cross-language match.
  */
+/**
+ * The four fields that describe an OAUTH GRANT, as opposed to the workspace
+ * identity and the webhook signing secret that live in the same bundle.
+ *
+ * A vault-managed workspace legitimately has none of them: AgentCore holds the
+ * refresh token and mints access tokens on demand, so the bundle carries only the
+ * client credentials and the signing secret. Requiring them for every read coupled
+ * webhook SIGNATURE VERIFICATION to the presence of an OAuth token — two unrelated
+ * concerns — and rejected the whole bundle before `webhook_signing_secret` could be
+ * read, so a freshly vault-onboarded workspace 401'd on every delivery.
+ */
+const STORED_OAUTH_GRANT_FIELDS: ReadonlyArray<keyof StoredOauthToken> = [
+  'access_token',
+  'refresh_token',
+  'expires_at',
+  'scope',
+];
+
 const STORED_OAUTH_TOKEN_REQUIRED_FIELDS: ReadonlyArray<keyof StoredOauthToken> = [
   'access_token',
   'refresh_token',
@@ -691,10 +710,27 @@ export async function getOauthSecretStrict(
   // rather than silently falling back to the stack-wide secret.
   const res = await sm.send(new GetSecretValueCommand({ SecretId: secretArn }));
   if (!res.SecretString) return null;
-  return parseOauthSecret(res.SecretString, secretArn);
+  // WITHOUT-GRANT deliberately: the only caller is webhook signature verification,
+  // which reads `webhook_signing_secret`. Requiring an access token here rejected
+  // vault-managed bundles — whose grant lives in AgentCore, not this secret — and
+  // silently downgraded them to the stack-wide fallback, i.e. 401 on every event.
+  return parseOauthSecret(res.SecretString, secretArn, 'without-grant');
 }
 
-function parseOauthSecret(secretString: string, secretArn: string): StoredOauthToken | null {
+/**
+ * `full` — the whole contract, for callers that will use or refresh the grant.
+ * `without-grant` — everything except the four grant fields, for callers that only
+ * need the workspace identity or the webhook signing secret. A vault-managed
+ * bundle is valid under `without-grant` and invalid under `full`, which is the
+ * distinction that matters.
+ */
+type OauthSecretParseMode = 'full' | 'without-grant';
+
+function parseOauthSecret(
+  secretString: string,
+  secretArn: string,
+  mode: OauthSecretParseMode = 'full',
+): StoredOauthToken | null {
   let parsed: StoredOauthToken;
   try {
     parsed = JSON.parse(secretString) as StoredOauthToken;
@@ -705,13 +741,17 @@ function parseOauthSecret(secretString: string, secretArn: string): StoredOauthT
     });
     return null; // nosemgrep: ts-silent-success-masking -- corrupt secret JSON is logged ERROR; null triggers re-onboard path, not a masked infra failure
   }
-  const missing = STORED_OAUTH_TOKEN_REQUIRED_FIELDS.filter(
+  const requiredFields = mode === 'full'
+    ? STORED_OAUTH_TOKEN_REQUIRED_FIELDS
+    : STORED_OAUTH_TOKEN_REQUIRED_FIELDS.filter((f) => !STORED_OAUTH_GRANT_FIELDS.includes(f));
+  const missing = requiredFields.filter(
     (f) => typeof parsed[f] !== 'string' || (parsed[f] as string).length === 0,
   );
   if (missing.length > 0) {
     logger.error('Linear OAuth secret JSON is missing required fields', {
       secret_arn: secretArn,
       missing_fields: missing,
+      parse_mode: mode,
     });
     return null;
   }
@@ -727,6 +767,57 @@ function parseOauthSecret(secretString: string, secretArn: string): StoredOauthT
  * - `failure` — any other error (network, 5xx, missing fields). No
  *    retry; surface null upward.
  */
+/** Milliseconds per hour — for the token-age diagnostics. */
+const MS_PER_HOUR = 3_600_000;
+/** Length of the truncated token fingerprint logged for lineage. */
+const TOKEN_FP_LENGTH = 12;
+
+/**
+ * A short, stable, non-reversible fingerprint of a token — safe to log; never the
+ * raw value.
+ *
+ * HMAC-SHA-256 with a fixed application salt rather than a bare hash of the
+ * secret: the keyed digest is the correct primitive for fingerprinting a
+ * credential, it is not the "password hash" a fast-hash attack applies to, and it
+ * matches the `createHmac` idiom the webhook-verify handlers already use.
+ * Truncated to a prefix — enough to correlate one token across log events, not
+ * enough to be a credential.
+ */
+const TOKEN_FP_SALT = 'abca.linear.token-lineage.v1';
+function fingerprintToken(token: string | undefined): string {
+  if (!token) return 'none';
+  // nosemgrep: javascript.lang.security.audit.hardcoded-hmac-key.hardcoded-hmac-key -- fixed DOMAIN-SEPARATION salt, not a key protecting anything: the digest authenticates nothing, is never compared against attacker input, and must be stable across Lambdas and invocations or fingerprints from different processes cannot be correlated — which is the whole purpose. A secret key would defeat the feature without adding a property anything relies on.
+  return createHmac('sha256', TOKEN_FP_SALT).update(token).digest('hex').slice(0, TOKEN_FP_LENGTH);
+}
+
+/**
+ * Diagnostic lineage of a stored OAuth grant. Additive observability only — never
+ * affects control flow.
+ *
+ * This is what distinguishes a grant that ROTATED normally and later died from one
+ * rejected on its very first refresh. That distinction is not recoverable after the
+ * fact from anything else: a revoked grant produces the same error either way, and
+ * Linear records no audit entry for it. `token_age_h` runs from `installed_at` (the
+ * original onboard) and `since_last_refresh_h` from `updated_at`, so the age-at-death
+ * is visible in the line that reports the death.
+ */
+function tokenLineage(token: StoredOauthToken): Record<string, string | number> {
+  const nowMs = Date.now();
+  const ageH = (fromIso: string | undefined): number | 'unknown' => {
+    if (!fromIso) return 'unknown';
+    const t = Date.parse(fromIso);
+    return Number.isNaN(t) ? 'unknown' : Math.round(((nowMs - t) / MS_PER_HOUR) * 10) / 10;
+  };
+  return {
+    // Truncated keyed digest — identifies the token across events; not reversible.
+    refresh_token_fp: fingerprintToken(token.refresh_token),
+    token_age_h: ageH(token.installed_at),
+    since_last_refresh_h: ageH(token.updated_at),
+    installed_at: token.installed_at ?? 'unknown',
+    updated_at: token.updated_at ?? 'unknown',
+  };
+}
+
 type RefreshOutcome =
   | { kind: 'success'; token: StoredOauthToken }
   | { kind: 'invalid_grant' }
@@ -779,6 +870,7 @@ async function refreshLinearToken(
   logger.warn('Linear token refresh got invalid_grant — re-reading secret to check for concurrent refresh', {
     secret_arn: secretArn,
     workspace_id: current.workspace_id,
+    ...tokenLineage(current),
   });
 
   const fresh = await getOauthSecret(sm, secretArn);
@@ -789,9 +881,12 @@ async function refreshLinearToken(
   if (fresh.refresh_token === current.refresh_token) {
     // No race — Linear truly rejected this refresh_token. Caller needs
     // a fresh OAuth dance.
+    // The revocation-forensics line: the fingerprint and ages tell whether Linear
+    // killed a grant we still held, and how old it was at death.
     logger.error('Linear token refresh permanently rejected — workspace requires re-onboarding', {
       secret_arn: secretArn,
       workspace_id: current.workspace_id,
+      ...tokenLineage(current),
     });
     // RECORD the verdict, don't just log it. This is the only moment the
     // platform knows the authorization is dead: from here on every event for
@@ -902,6 +997,8 @@ async function tryRefreshOnce(
       status: resp.status,
       error: errObj.error,
       error_description: errObj.error_description,
+      secret_arn: secretArn,
+      ...tokenLineage(current),
     });
     invalidateLinearOauthCache(current.workspace_id, secretArn);
     if (isRefreshTokenRejection(resp.status, errObj)) {
@@ -944,6 +1041,12 @@ async function tryRefreshOnce(
     logger.error('Failed to persist refreshed Linear OAuth token', {
       secret_arn: secretArn,
       error: err instanceof Error ? err.message : String(err),
+      // The rotated token lives only in THIS invocation's memory while Secrets
+      // Manager still holds the old one, so a later refresh replays a spent token
+      // and is rejected. The fingerprint pair is what pins that scenario if it
+      // happens, rather than leaving it indistinguishable from a real revocation.
+      rotated_from_fp: fingerprintToken(current.refresh_token),
+      rotated_to_fp: fingerprintToken(next.refresh_token),
     });
     // Even if persistence fails, the in-memory token still works for
     // THIS Lambda invocation. Other concurrent Lambdas may race-refresh
@@ -953,10 +1056,17 @@ async function tryRefreshOnce(
 
   // Positive-path log so operators diagnosing intermittent 401s have
   // a breadcrumb showing which workspace refreshed and to what expiry.
+  // The rotation trail lets a LATER rejection be correlated to the exact token just
+  // persisted: if Linear rejects rotated_to_fp on the next call, the grant was killed
+  // server-side rather than a stale or raced token being replayed.
   logger.info('Linear OAuth token refreshed', {
     workspace_id: next.workspace_id,
     workspace_slug: next.workspace_slug,
     new_expires_at: next.expires_at,
+    rotated_from_fp: fingerprintToken(current.refresh_token),
+    rotated_to_fp: fingerprintToken(next.refresh_token),
+    // Age of the grant refreshed FROM — pairs with the death-age on a later rejection.
+    token_age_h: tokenLineage(current).token_age_h,
   });
 
   // Cache the freshest value.

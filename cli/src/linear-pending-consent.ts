@@ -100,7 +100,7 @@ export function takePendingConsent(slug: string): PendingConsent {
   if (!fs.existsSync(p)) {
     throw new CliError(
       `No pending consent for workspace '${slug}'. Start one with:\n`
-      + `  bgagent linear setup ${slug} --hosted\n`
+      + `  bgagent linear setup ${slug}\n`
       + 'then re-run with --code once the browser shows it.',
     );
   }
@@ -111,7 +111,7 @@ export function takePendingConsent(slug: string): PendingConsent {
     fs.rmSync(p, { force: true });
     throw new CliError(
       `Pending consent for '${slug}' is unreadable (${err instanceof Error ? err.message : String(err)}). `
-      + `It has been discarded — re-run \`bgagent linear setup ${slug} --hosted\`.`,
+      + `It has been discarded — re-run \`bgagent linear setup ${slug}\`.`,
     );
   } finally {
     // Consume on read: one verifier, one attempt.
@@ -122,7 +122,7 @@ export function takePendingConsent(slug: string): PendingConsent {
   if (Number.isNaN(ageMs) || ageMs > PENDING_CONSENT_TTL_MS) {
     throw new CliError(
       `The pending consent for '${slug}' has expired (authorization codes are short-lived). `
-      + `Re-run \`bgagent linear setup ${slug} --hosted\` to start a fresh one.`,
+      + `Re-run \`bgagent linear setup ${slug}\` to start a fresh one.`,
     );
   }
   return parsed;

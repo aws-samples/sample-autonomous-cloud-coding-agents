@@ -17,15 +17,19 @@
  *  SOFTWARE.
  */
 
+import { createHmac } from 'node:crypto';
 import {
   _resetCachesForTesting,
-  isRefreshTokenRejection,
+  getOauthSecret,
+  getOauthSecretStrict,
   invalidateLinearOauthCache,
+  isRefreshTokenRejection,
   isTokenExpiring,
   markWorkspaceRevoked,
   resolveLinearOauthToken,
   type StoredOauthToken,
 } from '../../../src/handlers/shared/linear-oauth-resolver';
+import { logger } from '../../../src/handlers/shared/logger';
 
 const REGISTRY_TABLE = 'TestLinearWorkspaceRegistry';
 
@@ -800,5 +804,177 @@ describe('isRefreshTokenRejection — Linear does not send invalid_grant', () =>
   test('a 5xx or throttle is transient, never a revocation', () => {
     expect(isRefreshTokenRejection(503, { error: 'server_error' })).toBe(false);
     expect(isRefreshTokenRejection(429, { error_description: 'Too many requests' })).toBe(false);
+  });
+});
+
+describe('token-lineage diagnostic logging', () => {
+  // Answers the one question a revoked grant cannot otherwise be asked after the
+  // fact: did it ever ROTATE, or was it rejected on its first refresh? Linear
+  // records no audit entry for the revocation and returns the same error either
+  // way, so if this is not logged as it happens it is not recoverable.
+  const RAW_REFRESH = 'lin_refresh_SENSITIVE_should_never_be_logged';
+  // Mirrors the source's HMAC-SHA-256(salt) fingerprint — a keyed digest, not a
+  // bare hash of the secret. Kept in lockstep with TOKEN_FP_SALT / TOKEN_FP_LENGTH.
+  const fp = (token: string): string =>
+    createHmac('sha256', 'abca.linear.token-lineage.v1').update(token).digest('hex').slice(0, 12);
+  const EXPECTED_FP = fp(RAW_REFRESH);
+
+  let infoSpy: jest.SpyInstance;
+  let warnSpy: jest.SpyInstance;
+  let errorSpy: jest.SpyInstance;
+
+  beforeEach(() => {
+    _resetCachesForTesting();
+    infoSpy = jest.spyOn(logger, 'info').mockImplementation(() => {});
+    warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+    errorSpy = jest.spyOn(logger, 'error').mockImplementation(() => {});
+  });
+  afterEach(() => jest.restoreAllMocks());
+
+  /** Every string in every log call, across all levels — for leak assertions. */
+  function allLoggedText(): string {
+    return [infoSpy, warnSpy, errorSpy]
+      .flatMap((s) => s.mock.calls)
+      .map((c) => JSON.stringify(c))
+      .join(' ');
+  }
+
+  // BOTH rejection shapes. Linear actually answers a dead refresh token with
+  // `invalid_request` and puts the detail in error_description; `invalid_grant` is
+  // what RFC 6749 specifies and what this code originally tested for alone. The
+  // forensics must attach to whichever arrives, or they are absent for the real one.
+  test.each([
+    ['invalid_request (what Linear really sends)', 'invalid_request'],
+    ['invalid_grant (RFC 6749)', 'invalid_grant'],
+  ])('permanent rejection logs the fingerprint + age and never the raw token — %s', async (_label, code) => {
+    const stored = makeStoredToken({
+      refresh_token: RAW_REFRESH,
+      expires_at: new Date(Date.now() - 1000).toISOString(),
+      installed_at: new Date(Date.now() - 25 * 3600 * 1000).toISOString(),
+    });
+    const clients = makeFakeClients({
+      registryItem: { workspace_slug: 'acme', oauth_secret_arn: 'arn:secret:acme', status: 'active' },
+      storedToken: stored,
+    });
+    const fetchImpl = jest.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      json: async () => ({ error: code, error_description: 'Refresh token revoked' }),
+    });
+
+    const result = await resolveLinearOauthToken('ws-uuid-1', REGISTRY_TABLE, {
+      ...clients,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    expect(result).toBeNull();
+    const forensics = errorSpy.mock.calls.find(
+      (c) => typeof c[0] === 'string' && c[0].includes('permanently rejected'),
+    );
+    expect(forensics).toBeDefined();
+    const data = forensics![1] as Record<string, unknown>;
+    expect(data.refresh_token_fp).toBe(EXPECTED_FP);
+    // The age-at-death is the whole point of logging it here.
+    expect(data.token_age_h).toBe(25);
+    expect(allLoggedText()).not.toContain(RAW_REFRESH);
+  });
+
+  test('a successful refresh logs the old→new fingerprint rotation, not raw tokens', async () => {
+    const stored = makeStoredToken({
+      refresh_token: RAW_REFRESH,
+      expires_at: new Date(Date.now() - 1000).toISOString(),
+    });
+    const clients = makeFakeClients({
+      registryItem: { workspace_slug: 'acme', oauth_secret_arn: 'arn:secret:acme', status: 'active' },
+      storedToken: stored,
+    });
+    const NEW_RAW = 'rt-rotated-new-SENSITIVE';
+    const fetchImpl = jest.fn().mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        access_token: 'lin_oauth_new',
+        token_type: 'Bearer',
+        expires_in: 86399,
+        refresh_token: NEW_RAW,
+        scope: 'read write app:assignable app:mentionable',
+      }),
+    });
+
+    const result = await resolveLinearOauthToken('ws-uuid-1', REGISTRY_TABLE, {
+      ...clients,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    expect(result?.accessToken).toBe('lin_oauth_new');
+    const refreshed = infoSpy.mock.calls.find(
+      (c) => typeof c[0] === 'string' && c[0].includes('token refreshed'),
+    );
+    expect(refreshed).toBeDefined();
+    const data = refreshed![1] as Record<string, unknown>;
+    expect(data.rotated_from_fp).toBe(EXPECTED_FP);
+    expect(data.rotated_to_fp).toBe(fp(NEW_RAW));
+    // Neither the old nor the new raw refresh token may appear in any log.
+    expect(allLoggedText()).not.toContain(RAW_REFRESH);
+    expect(allLoggedText()).not.toContain(NEW_RAW);
+  });
+});
+
+describe('a vault-managed bundle carries no grant, and must still verify webhooks', () => {
+  // THE fresh-vault-install bug. A vault-onboarded workspace writes access_token,
+  // refresh_token, expires_at and scope as empty strings by design — AgentCore holds
+  // the grant. The strict parse required all four, so it rejected the bundle before
+  // `webhook_signing_secret` could be read, verification fell back to the
+  // stack-wide secret, and every delivery 401'd while the install looked healthy.
+  //
+  // Missed in live testing because the workspace under test was MIGRATED from
+  // Secrets Manager and therefore still had tokens — the preservation behaviour
+  // masked it. Only a genuinely fresh vault install reaches this.
+  const vaultBundle = JSON.stringify({
+    access_token: '',
+    refresh_token: '',
+    expires_at: '',
+    scope: '',
+    client_id: 'cid',
+    client_secret: 'csecret',
+    workspace_id: 'ws-uuid-1',
+    workspace_slug: 'acme',
+    installed_at: '2026-08-29T12:50:19.000Z',
+    updated_at: '2026-08-29T12:50:19.000Z',
+    installed_by_platform_user_id: 'u-1',
+    webhook_signing_secret: 'lin_wh_theRealSecret',
+  });
+
+  test('getOauthSecretStrict reads the signing secret out of a grantless bundle', async () => {
+    const send = jest.fn().mockResolvedValue({ SecretString: vaultBundle });
+    const stored = await getOauthSecretStrict(
+      { send } as unknown as Parameters<typeof getOauthSecretStrict>[0],
+      'arn:secret:acme',
+    );
+    expect(stored).not.toBeNull();
+    expect(stored?.webhook_signing_secret).toBe('lin_wh_theRealSecret');
+  });
+
+  test('a bundle missing IDENTITY fields is still rejected — this is not a blanket relaxation', async () => {
+    // Only the four grant fields become optional. A bundle without a workspace or
+    // client identity is corrupt and must not be treated as verifiable.
+    const corrupt = JSON.stringify({ access_token: '', refresh_token: '', webhook_signing_secret: 'lin_wh_x' });
+    const send = jest.fn().mockResolvedValue({ SecretString: corrupt });
+    const stored = await getOauthSecretStrict(
+      { send } as unknown as Parameters<typeof getOauthSecretStrict>[0],
+      'arn:secret:acme',
+    );
+    expect(stored).toBeNull();
+  });
+
+  test('the refresh path still demands a full grant', async () => {
+    // Relaxing verification must not let the refresh path try to renew a grant that
+    // is not there; a vault workspace has no Secrets-Manager token to refresh.
+    const send = jest.fn().mockResolvedValue({ SecretString: vaultBundle });
+    const fetched = await getOauthSecret(
+      { send } as unknown as Parameters<typeof getOauthSecret>[0],
+      'arn:secret:acme',
+    );
+    expect(fetched).toBeNull();
   });
 });

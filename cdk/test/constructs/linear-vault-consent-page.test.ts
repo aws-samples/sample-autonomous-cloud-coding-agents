@@ -206,14 +206,22 @@ describe('the consent page, executed', () => {
     expect(r.removed).toEqual(expect.arrayContaining(['session', 'hint']));
   });
 
-  test('the DIRECT-flow redirect (code) is served by the same page', () => {
-    // Serving both flows from one page is what removes localhost entirely: the
-    // Linear app can register this URL instead of a loopback the browser may not
-    // be able to reach. Both render identically — one value to copy.
+  test('the DIRECT flow hands back code AND state, so the CLI can correlate', () => {
+    // Serving both flows from one page is what removes localhost entirely. The direct
+    // flow additionally needs `state` returned: without it the CLI cannot check the
+    // pasted code against the request it started, which is the check that stops a
+    // code acquired elsewhere being exchanged. One string, so it is still one copy.
     const r = runPageScript('?code=abc123&state=st-9');
     expect(r.title).toBe('Linear authorized');
-    expect(r.session).toBe('abc123');
+    expect(r.session).toBe('code=abc123&state=st-9');
     expect(r.markupWrites).toEqual([]);
+  });
+
+  test('a direct redirect with no state still yields a bare code', () => {
+    // Defensive: an authorization that omitted state must remain pasteable rather
+    // than producing a malformed fragment.
+    const r = runPageScript('?code=abc123');
+    expect(r.session).toBe('abc123');
   });
 
   test('a hostile authorization code is also rendered as text, never markup', () => {

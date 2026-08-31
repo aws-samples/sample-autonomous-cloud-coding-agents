@@ -962,7 +962,7 @@ export class AgentStack extends Stack {
       if (hostedReturnUrl) {
         new CfnOutput(this, 'LinearVaultConsentUrl', {
           value: hostedReturnUrl,
-          description: 'Hosted Linear vault consent landing page — used by `bgagent linear vault-setup --hosted`',
+          description: 'Hosted Linear vault consent landing page — used by `bgagent linear setup`',
         });
       }
     }
@@ -1825,10 +1825,20 @@ export class AgentStack extends Stack {
     // opening comment — no reaction, no state change, no PR link. Live-caught as
     // 401s in the fan-out log while the task itself completed and opened its PR.
     if (linearIdentityVault) {
+      // The full set, derived from the transitive import graph rather than from the
+      // handlers that import a Linear module DIRECTLY — which is how the reconciler
+      // and the heartbeat were missed: both reach a minting resolver through
+      // orchestration-channel-factory, two hops away. A source-level test now
+      // recomputes this set and fails if a handler joins it without being wired.
+      //
+      // Deliberately NOT here: the webhook RECEIVER (verifies signatures, never
+      // mints) and the stranded reconciler (reaches no channel that mints).
       for (const linearWriter of [
         fanOutConsumer.fn,
         orchestrator.fn,
         githubScreenshot.webhookProcessorFn,
+        orchestrationReconciler.fn,
+        iterationHeartbeat.fn,
       ]) {
         linearWriter.addEnvironment('LINEAR_VAULT_ENABLED', 'true');
         linearWriter.addEnvironment('LINEAR_WORKLOAD_IDENTITY_NAME', LINEAR_VAULT_WORKLOAD_NAME);

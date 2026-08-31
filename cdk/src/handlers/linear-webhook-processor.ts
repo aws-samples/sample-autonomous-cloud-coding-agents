@@ -635,6 +635,25 @@ interface ProcessorEvent {
  *   the task back to the originating issue (the platform — not the agent —
  *   handles all Linear I/O deterministically; there is no Linear MCP).
  */
+/**
+ * The vault fields a task needs so the AGENT can mint its own Linear token.
+ *
+ * Every channel_metadata builder must spread this. They were added to the
+ * label-trigger path only, so tasks started from a comment — iteration, new work,
+ * clarify-resume — reached the agent without them, and it fell back to a
+ * Secrets-Manager token a vault-managed workspace does not have: no reactions, no
+ * state transitions, on work that otherwise succeeded. Third occurrence of the same
+ * mistake in this change (after the row parser and the vault-success return), which
+ * is why it is a helper with a test that finds unspread builders rather than four
+ * more hand-edits.
+ */
+function vaultMetadata(resolved: { providerName?: string; vaultUserId?: string }): Record<string, string> {
+  return {
+    ...(resolved.providerName && { linear_provider_name: resolved.providerName }),
+    ...(resolved.vaultUserId && { linear_vault_user_id: resolved.vaultUserId }),
+  };
+}
+
 export async function handler(event: ProcessorEvent): Promise<void> {
   if (!event.raw_body) {
     logger.error('Linear webhook processor invoked without raw_body');
@@ -1962,7 +1981,17 @@ async function handleParentEpicCommentTrigger(args: {
   commentBody: string | undefined;
   replyTargetId: string;
   trigger: CommentTrigger;
-  resolved: { accessToken: string; oauthSecretArn: string; workspaceSlug: string };
+  // Includes the vault fields: these builders write channel_metadata, and the agent
+  // needs the provider + subject to mint its own token. Narrowing this annotation to
+  // the three fields the function reads is what silently dropped them — the callers
+  // always passed the full resolver result.
+  resolved: {
+    accessToken: string;
+    oauthSecretArn: string;
+    workspaceSlug: string;
+    providerName?: string;
+    vaultUserId?: string;
+  };
   registryTableName: string;
 }): Promise<void> {
   const { orchestrationId, snapshot, workspaceId, commentId, commentBody, replyTargetId, trigger, resolved, registryTableName } = args;
@@ -2121,7 +2150,17 @@ async function iterateOrchestrationChild(args: {
   trigger: CommentTrigger;
   /** Raw @bgagent comment body — carries any newly-attached uploads.linear.app links. */
   commentBody: string | undefined;
-  resolved: { accessToken: string; oauthSecretArn: string; workspaceSlug: string };
+  // Includes the vault fields: these builders write channel_metadata, and the agent
+  // needs the provider + subject to mint its own token. Narrowing this annotation to
+  // the three fields the function reads is what silently dropped them — the callers
+  // always passed the full resolver result.
+  resolved: {
+    accessToken: string;
+    oauthSecretArn: string;
+    workspaceSlug: string;
+    providerName?: string;
+    vaultUserId?: string;
+  };
   registryTableName: string;
   skipAck?: boolean;
   prNumber?: number;
@@ -2180,6 +2219,7 @@ async function iterateOrchestrationChild(args: {
     linear_workspace_id: workspaceId,
     linear_oauth_secret_arn: resolved.oauthSecretArn,
     linear_workspace_slug: resolved.workspaceSlug,
+    ...vaultMetadata(resolved),
     // The agent addresses a REAL Linear issue for its reactions/comments. The
     // synthetic integration node has no Linear issue — its id is a derived string
     // (`<orchestrationId>__integration`), and handing that to the agent makes it
@@ -2325,7 +2365,17 @@ async function handleStandaloneCommentTrigger(args: {
   /** Thread ROOT to reply to (= parentId when the trigger is a reply, else commentId). */
   replyTargetId: string;
   trigger: CommentTrigger;
-  resolved: { accessToken: string; oauthSecretArn: string; workspaceSlug: string };
+  // Includes the vault fields: these builders write channel_metadata, and the agent
+  // needs the provider + subject to mint its own token. Narrowing this annotation to
+  // the three fields the function reads is what silently dropped them — the callers
+  // always passed the full resolver result.
+  resolved: {
+    accessToken: string;
+    oauthSecretArn: string;
+    workspaceSlug: string;
+    providerName?: string;
+    vaultUserId?: string;
+  };
   registryTableName: string;
 }): Promise<void> {
   const { subIssueId: issueId, workspaceId, commentId, commentBody, replyTargetId, trigger, resolved, registryTableName } = args;
@@ -2404,6 +2454,7 @@ async function handleStandaloneCommentTrigger(args: {
     linear_workspace_id: workspaceId,
     linear_oauth_secret_arn: resolved.oauthSecretArn,
     linear_workspace_slug: resolved.workspaceSlug,
+    ...vaultMetadata(resolved),
     // Iteration-UX: the maturing reply to EDIT on later events.
     ...(iterationReplyId && { iteration_reply_comment_id: iterationReplyId }),
   };
@@ -2490,7 +2541,17 @@ async function maybeStartStandaloneNewWork(args: {
   commentBody: string | undefined;
   replyTargetId: string;
   trigger: CommentTrigger;
-  resolved: { accessToken: string; oauthSecretArn: string; workspaceSlug: string };
+  // Includes the vault fields: these builders write channel_metadata, and the agent
+  // needs the provider + subject to mint its own token. Narrowing this annotation to
+  // the three fields the function reads is what silently dropped them — the callers
+  // always passed the full resolver result.
+  resolved: {
+    accessToken: string;
+    oauthSecretArn: string;
+    workspaceSlug: string;
+    providerName?: string;
+    vaultUserId?: string;
+  };
   registryTableName: string;
 }): Promise<boolean> {
   const { issueId, task, workspaceId, commentId, commentBody, replyTargetId, trigger, resolved, registryTableName } = args;
@@ -2572,6 +2633,7 @@ async function maybeStartStandaloneNewWork(args: {
     linear_workspace_id: workspaceId,
     linear_oauth_secret_arn: resolved.oauthSecretArn,
     linear_workspace_slug: resolved.workspaceSlug,
+    ...vaultMetadata(resolved),
     ...(iterationReplyId && { iteration_reply_comment_id: iterationReplyId }),
   };
 
@@ -2654,7 +2716,17 @@ async function maybeResumeClarifyHold(args: {
   commentBody: string | undefined;
   replyTargetId: string;
   trigger: CommentTrigger;
-  resolved: { accessToken: string; oauthSecretArn: string; workspaceSlug: string };
+  // Includes the vault fields: these builders write channel_metadata, and the agent
+  // needs the provider + subject to mint its own token. Narrowing this annotation to
+  // the three fields the function reads is what silently dropped them — the callers
+  // always passed the full resolver result.
+  resolved: {
+    accessToken: string;
+    oauthSecretArn: string;
+    workspaceSlug: string;
+    providerName?: string;
+    vaultUserId?: string;
+  };
   registryTableName: string;
 }): Promise<boolean> {
   const { issueId, task, workspaceId, commentId, commentBody, replyTargetId, trigger, resolved, registryTableName } = args;
@@ -2701,6 +2773,7 @@ async function maybeResumeClarifyHold(args: {
     linear_workspace_id: workspaceId,
     linear_oauth_secret_arn: resolved.oauthSecretArn,
     linear_workspace_slug: resolved.workspaceSlug,
+    ...vaultMetadata(resolved),
     // Reply to the thread root, and mature THIS ack on terminal (fanout path).
     trigger_comment_id: replyTargetId,
     ...(iterationReplyId && { iteration_reply_comment_id: iterationReplyId }),

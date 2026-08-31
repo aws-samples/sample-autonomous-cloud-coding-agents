@@ -17,6 +17,27 @@
  *  SOFTWARE.
  */
 
+import * as fs from 'fs';
+import * as path from 'path';
+/**
+ *  MIT No Attribution
+ *
+ *  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ *
+ *  Permission is hereby granted, free of charge, to any person obtaining a copy of
+ *  the Software without restriction, including without limitation the rights to
+ *  use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+ *  the Software, and to permit persons to whom the Software is furnished to do so.
+ *
+ *  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ *  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ *  SOFTWARE.
+ */
+
 const ddbSend = jest.fn();
 jest.mock('@aws-sdk/client-dynamodb', () => ({ DynamoDBClient: jest.fn(() => ({})) }));
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
@@ -1062,5 +1083,42 @@ describe('probeLinearIssueContext', () => {
       attachmentTitles: string[];
     };
     expect(result.attachmentTitles).toEqual([]);
+  });
+});
+
+describe('every channel_metadata builder carries the vault fields', () => {
+  // The agent mints its own Linear token, so a task's channel_metadata must carry the
+  // provider and the subject. They were added to the label-trigger builder only, and
+  // the four comment-triggered builders (iteration, new work, clarify-resume, routed
+  // comment) each construct their own object — so agents launched from a comment on a
+  // vault-managed workspace fell back to a Secrets-Manager token that does not exist
+  // there: no reactions, no state transitions, on work that otherwise succeeded.
+  //
+  // Asserted over the SOURCE because the failure is a missing line in a new builder,
+  // and a behavioural test only covers the builders someone remembered to exercise.
+  // This is the third instance of the same mistake in this change — after the row
+  // parser and the vault-success return — hence a structural check.
+  const src = fs.readFileSync(
+    path.join(__dirname, '..', '..', 'src', 'handlers', 'linear-webhook-processor.ts'),
+    'utf8',
+  );
+
+  test('each builder that writes the workspace slug also spreads vaultMetadata', () => {
+    const lines = src.split('\n');
+    const offenders: number[] = [];
+    lines.forEach((line, i) => {
+      if (line.trim() !== 'linear_workspace_slug: resolved.workspaceSlug,') return;
+      const next = (lines[i + 1] ?? '').trim();
+      if (next !== '...vaultMetadata(resolved),') offenders.push(i + 1);
+    });
+    expect(offenders).toEqual([]);
+  });
+
+  test('there is more than one such builder, so the check is not vacuous', () => {
+    // If the builders are ever refactored into one, this test should be deleted
+    // rather than left passing over nothing.
+    const count = src.split('\n')
+      .filter((l) => l.trim() === 'linear_workspace_slug: resolved.workspaceSlug,').length;
+    expect(count).toBeGreaterThanOrEqual(4);
   });
 });

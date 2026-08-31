@@ -123,8 +123,13 @@ describe('pending consent refusals', () => {
     }
   });
 
-  test('missing entry names the command that starts one', () => {
-    expect(() => takePendingConsent('nope')).toThrow(/setup nope --hosted/);
+  test('missing entry names a command that EXISTS', () => {
+    // Previously asserted `setup <slug> --hosted`. That flag was removed when
+    // onboarding was consolidated, so the recovery hint told operators to run
+    // something that fails before a new consent can start — and this test was what
+    // kept it that way.
+    expect(() => takePendingConsent('nope')).toThrow(/bgagent linear setup nope/);
+    expect(() => takePendingConsent('nope')).not.toThrow(/--hosted/);
   });
 
   test('entries are per-workspace, so two onboardings do not clobber each other', () => {

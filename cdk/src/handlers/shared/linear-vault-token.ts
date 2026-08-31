@@ -54,7 +54,7 @@ export const LINEAR_VAULT_SCOPES = ['read', 'write', 'app:assignable', 'app:ment
  * full token-request shape, `customParameters` included — live-proven: the same
  * user + provider returns the cached `accessToken` when these are passed and an
  * `authorizationUrl` ("needs consent") when they are omitted. So the runtime
- * resolvers must send the IDENTICAL set that `bgagent linear vault-setup` used at
+ * resolvers must send the IDENTICAL set that `bgagent linear setup` used at
  * consent time, or every resolve is a cache miss that silently degrades to the
  * Secrets-Manager fallback.
  *

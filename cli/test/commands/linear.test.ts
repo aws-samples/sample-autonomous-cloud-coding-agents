@@ -24,6 +24,7 @@ import {
   findWorkspaceRowBySlug,
   isWebhookSecretConfigured,
   queryLinearTeamKeys,
+  parsePastedAuthorization,
   renderLinearAppTemplate,
 } from '../../src/commands/linear';
 import * as config from '../../src/config';
@@ -651,5 +652,36 @@ describe('queryLinearTeamKeys', () => {
     }) as unknown as typeof fetch;
 
     expect(await queryLinearTeamKeys('Bearer tok')).toEqual([]);
+  });
+});
+
+describe('parsePastedAuthorization', () => {
+  // Restores the OAuth correlation check on the hosted path. When the round trip goes
+  // through a human copying a value, `state` is the only thing tying the pasted code
+  // to the authorization this machine started — without it, a code acquired elsewhere
+  // could be pasted in and exchanged, installing a grant nobody here initiated.
+  test('splits the code and state the consent page returns', () => {
+    expect(parsePastedAuthorization('code=abc123&state=st-9')).toEqual({ code: 'abc123', state: 'st-9' });
+  });
+
+  test('tolerates a leading question mark, as a copied URL fragment would have', () => {
+    expect(parsePastedAuthorization('?code=abc123&state=st-9')).toEqual({ code: 'abc123', state: 'st-9' });
+  });
+
+  test('a bare code parses, with NO state — the caller must not imply the check ran', () => {
+    expect(parsePastedAuthorization('abc123')).toEqual({ code: 'abc123' });
+  });
+
+  test('surrounding whitespace from a copy is stripped', () => {
+    expect(parsePastedAuthorization('  code=abc123&state=st-9  ')).toEqual({ code: 'abc123', state: 'st-9' });
+  });
+
+  test('a pair with an empty code yields an empty code, so callers can refuse it', () => {
+    expect(parsePastedAuthorization('code=&state=st-9').code).toBe('');
+  });
+
+  test('an empty state is reported as absent rather than as a value to compare', () => {
+    // Comparing against '' would make a stateless authorization look correlated.
+    expect(parsePastedAuthorization('code=abc123&state=')).toEqual({ code: 'abc123' });
   });
 });
