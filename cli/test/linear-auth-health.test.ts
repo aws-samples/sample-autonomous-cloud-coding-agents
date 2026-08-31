@@ -213,4 +213,137 @@ describe('checkLinearWorkspaceAuth — the real function, end to end', () => {
     expect((ddbSend.mock.calls[1][0] as { input: Record<string, unknown> }).input.ExclusiveStartKey)
       .toEqual({ k: 'next' });
   });
+  describe('a vault-managed workspace must not be judged by an empty bundle', () => {
+    // A fresh vault onboarding deliberately stores NO access token — the vault holds
+    // the grant. Reading only the Secrets Manager bundle therefore reported every
+    // healthy vault workspace as `revoked`, and this report is precisely what an
+    // operator opens to decide whether a latched row is genuinely dead.
+    const TOKENLESS_BUNDLE = JSON.stringify({
+      access_token: '',
+      refresh_token: '',
+      workspace_slug: 'cloud-dev',
+      client_id: 'cid',
+      client_secret: 'sec',
+    });
+    const vaultRow = (extra: Record<string, unknown> = {}) => row({
+      workspace_slug: 'cloud-dev',
+      provider_name: 'bgagent-linear-oauth-cloud-dev',
+      vault_user_id: 'linear-ws-cloud-dev',
+      ...extra,
+    });
+
+    beforeEach(() => {
+      smSend.mockResolvedValue({ SecretString: TOKENLESS_BUNDLE });
+    });
+
+    test('a vault workspace whose minted token Linear accepts is ACTIVE, not revoked', async () => {
+      ddbSend.mockResolvedValue({ Items: [vaultRow()] });
+      const health = await checkLinearWorkspaceAuth({
+        region: 'us-east-1',
+        registryTableName: 'Reg',
+        probe: async () => 'accepted',
+        mintVaultToken: async () => 'lin_oauth_from_vault',
+      });
+      expect(health[0].state).toBe('active');
+      expect(health[0].detail).toMatch(/AgentCore Identity token vault/);
+    });
+
+    test('the RECORDED subject is what gets minted under, not a derived one', async () => {
+      // The subject is slug-derived and stored precisely because it cannot be derived
+      // from the organization UUID at onboarding time. Minting under the wrong one
+      // does not fail loudly — it returns no token, which reads as a dead workspace.
+      ddbSend.mockResolvedValue({ Items: [vaultRow()] });
+      const mint = jest.fn().mockResolvedValue('lin_oauth_from_vault');
+      await checkLinearWorkspaceAuth({
+        region: 'us-east-1',
+        registryTableName: 'Reg',
+        probe: async () => 'accepted',
+        mintVaultToken: mint,
+      });
+      expect(mint).toHaveBeenCalledWith(expect.objectContaining({ userId: 'linear-ws-cloud-dev' }));
+    });
+
+    test('a vault workspace the vault will not mint for is revoked', async () => {
+      ddbSend.mockResolvedValue({ Items: [vaultRow()] });
+      const health = await checkLinearWorkspaceAuth({
+        region: 'us-east-1',
+        registryTableName: 'Reg',
+        probe: async () => 'accepted',
+        mintVaultToken: async () => null,
+      });
+      expect(health[0].state).toBe('revoked');
+      expect(health[0].detail).toMatch(/needs a\s+fresh consent/);
+    });
+
+    test('with no way to query the vault the verdict is unknown, NOT revoked', async () => {
+      // Reporting `revoked` here would send an operator to re-authorize a workspace
+      // that is working. `unknown` is a warn, which is the honest signal.
+      ddbSend.mockResolvedValue({ Items: [vaultRow()] });
+      const health = await checkLinearWorkspaceAuth({
+        region: 'us-east-1',
+        registryTableName: 'Reg',
+        probe: async () => 'accepted',
+      });
+      expect(health[0].state).toBe('unknown');
+    });
+
+    test('never reports expired_indeterminate — that would point at a refresh it cannot do', async () => {
+      // `--verify-refresh` only knows how to rotate a Secrets Manager bundle, which a
+      // vault-managed workspace does not have.
+      ddbSend.mockResolvedValue({ Items: [vaultRow()] });
+      const health = await checkLinearWorkspaceAuth({
+        region: 'us-east-1',
+        registryTableName: 'Reg',
+        probe: async () => 'rejected',
+        mintVaultToken: async () => 'lin_oauth_from_vault',
+      });
+      expect(health[0].state).toBe('revoked');
+      expect(health[0].state).not.toBe('expired_indeterminate');
+    });
+
+    test('a vault_consent_required latch is re-probed, and a live grant is reported STALE', async () => {
+      // That latch is an inference from a token-less vault response, not Linear
+      // refusing anything, and the resolver already re-probes it. Taking it at face
+      // value here is what makes a wrong latch look confirmed.
+      ddbSend.mockResolvedValue({
+        Items: [vaultRow({ status: 'revoked', revoked_reason: 'vault_consent_required', revoked_at: 'T0' })],
+      });
+      const health = await checkLinearWorkspaceAuth({
+        region: 'us-east-1',
+        registryTableName: 'Reg',
+        probe: async () => 'accepted',
+        mintVaultToken: async () => 'lin_oauth_from_vault',
+      });
+      expect(health[0].state).toBe('active');
+      expect(health[0].detail).toMatch(/stale/);
+    });
+
+    test('a refresh_token_rejected latch is NOT re-probed — Linear already refused', async () => {
+      ddbSend.mockResolvedValue({
+        Items: [vaultRow({ status: 'revoked', revoked_reason: 'refresh_token_rejected' })],
+      });
+      const mint = jest.fn();
+      const health = await checkLinearWorkspaceAuth({
+        region: 'us-east-1',
+        registryTableName: 'Reg',
+        probe: async () => 'accepted',
+        mintVaultToken: mint,
+      });
+      expect(health[0].state).toBe('revoked');
+      expect(mint).not.toHaveBeenCalled();
+    });
+
+    test('a re-probe that still needs consent leaves the revoked verdict standing', async () => {
+      ddbSend.mockResolvedValue({
+        Items: [vaultRow({ status: 'revoked', revoked_reason: 'vault_consent_required' })],
+      });
+      const health = await checkLinearWorkspaceAuth({
+        region: 'us-east-1',
+        registryTableName: 'Reg',
+        probe: async () => 'accepted',
+        mintVaultToken: async () => null,
+      });
+      expect(health[0].state).toBe('revoked');
+    });
+  });
 });

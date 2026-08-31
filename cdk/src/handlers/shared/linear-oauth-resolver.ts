@@ -64,6 +64,19 @@ const SECRET_CACHE_TTL_MS = 60_000;
 /** Refresh threshold: refresh tokens with <60s remaining. */
 const REFRESH_THRESHOLD_SECONDS = 60;
 
+/**
+ * `revoked_reason` written when the vault answered with an authorization URL
+ * instead of a token and no Secrets-Manager token could cover for it.
+ *
+ * Named rather than inlined because three places have to agree on the exact
+ * string — the writer, the re-probe guard and the un-latch condition — and a typo
+ * in any one of them silently turns the self-healing path off.
+ */
+const VAULT_CONSENT_REVOCATION_REASON = 'vault_consent_required';
+
+/** `revoked_reason` written when Linear itself rejected the refresh token. */
+const REFRESH_REJECTED_REVOCATION_REASON = 'refresh_token_rejected';
+
 /** Registry row status values. Anything else (missing, unknown
  *  string) is treated as `revoked` so a corrupt or partially-written
  *  row blocks resolution rather than silently granting access. */
@@ -99,6 +112,20 @@ export interface RegistryRow {
    * this was stored; those fall back to the derived form.
    */
   readonly vault_user_id?: string;
+  /**
+   * Why `status` was flipped to `revoked`, as written by {@link markWorkspaceRevoked}.
+   *
+   * Read, not just written, because the two reasons differ in how much they are
+   * worth believing. `refresh_token_rejected` is Linear itself refusing a refresh
+   * token — a fact. `vault_consent_required` is an INFERENCE from the vault
+   * answering with an authorization URL instead of a token, and this PR has
+   * already shipped one bug (`d415fd1f`, a row-parser fault) that produced that
+   * answer spuriously. Since the latch makes the resolver refuse the row, a
+   * spurious inference would be permanent: the vault is never retried, so the
+   * grant that still works is never consulted again. Rows latched on the
+   * inference are therefore re-probed — see `resolveLinearOauthToken`.
+   */
+  readonly revoked_reason?: string;
 }
 
 export interface StoredOauthToken {
@@ -263,33 +290,78 @@ function defaultRevocationRecorder(
   registryTableName: string,
 ): ((detail: RevocationDetail) => Promise<void>) | undefined {
   if (process.env.LINEAR_REVOCATION_RECORDING !== 'true') return undefined;
-  return async (detail: RevocationDetail): Promise<void> => {
-    const latched = await markWorkspaceRevoked(
-      ddb,
-      registryTableName,
-      detail.linearWorkspaceId,
-      detail.installedAt,
-      undefined,
-      detail.source === 'vault-consent-required' ? 'vault_consent_required' : 'refresh_token_rejected',
-    );
-    if (!latched) {
-      // Already revoked, or the row has moved on to a NEWER installation than the
-      // one this verdict describes. Nothing new to announce.
-      logger.info('Revocation already recorded — not announcing again', {
+  const latch = async (detail: RevocationDetail): Promise<void> => {
+    try {
+      await markWorkspaceRevoked(
+        ddb,
+        registryTableName,
+        detail.linearWorkspaceId,
+        detail.installedAt,
+        undefined,
+        detail.source === 'vault-consent-required'
+          ? VAULT_CONSENT_REVOCATION_REASON
+          : REFRESH_REJECTED_REVOCATION_REASON,
+      );
+    } catch (err) {
+      // `error`, not `warn`: the diagnosis is true and now unrecorded, and nothing
+      // downstream retries this write. A recording layer that fails quietly is the
+      // thing #812 was filed to remove. The operator has still been told, because
+      // the announcement above already went out.
+      logger.error('Could not record the revoked Linear authorization', {
         linear_workspace_id: detail.linearWorkspaceId,
         source: detail.source,
+        error: err instanceof Error ? err.message : String(err),
       });
-      return;
     }
+  };
+
+  return async (detail: RevocationDetail): Promise<void> => {
     const topicArn = revocationAlertTopicArn();
     if (!topicArn) {
       logger.warn('Linear authorization revoked, but no alert topic is configured — recorded only', {
         linear_workspace_id: detail.linearWorkspaceId,
         source: detail.source,
       });
+      await latch(detail);
       return;
     }
-    await announceRevocation(detail, { topicArn });
+
+    // ANNOUNCE FIRST, LATCH SECOND. The latch is what seals this code path — a
+    // `revoked` row makes the resolver return before it ever re-detects the dead
+    // grant — so doing it first made the notification a one-shot side effect of a
+    // single write. One SNS throttle or one KMS denial on the topic key during that
+    // invocation and the workspace was recorded dead with nobody told, permanently,
+    // because every later event took the "already recorded" path.
+    //
+    // Dedup therefore hangs off a claim of its own rather than off "did THIS call
+    // flip the status", which is what makes a failed publish retryable at all.
+    const claimed = await claimRevocationAnnouncement(
+      ddb,
+      registryTableName,
+      detail.linearWorkspaceId,
+      detail.installedAt,
+    );
+    if (!claimed) {
+      logger.info('Revocation already announced — not announcing again', {
+        linear_workspace_id: detail.linearWorkspaceId,
+        source: detail.source,
+      });
+      // Still latch. The claim may be held by an invocation that announced but could
+      // not record, and this write is conditional and idempotent — so retrying it is
+      // free and is the only thing that eventually gets the row marked.
+      await latch(detail);
+      return;
+    }
+
+    if (!await announceRevocation(detail, { topicArn })) {
+      // Hand the claim back and leave the row ACTIVE, so the next event for this
+      // workspace re-detects the same dead grant and tries the publish again.
+      // Latching here instead would trade a retryable failure for a silent one.
+      await releaseRevocationAnnouncement(ddb, registryTableName, detail.linearWorkspaceId);
+      return;
+    }
+
+    await latch(detail);
   };
 }
 
@@ -312,7 +384,19 @@ export async function resolveLinearOauthToken(
     logger.warn('Linear workspace not in registry', { linear_workspace_id: linearWorkspaceId });
     return null;
   }
-  if (row.status !== 'active') {
+  // A row latched `revoked` because the VAULT asked for consent is re-probed rather
+  // than written off. That verdict is an inference, not Linear refusing anything
+  // (see RegistryRow.revoked_reason), and the latch is self-sealing: it makes this
+  // guard return before Step 1b, so the vault is never asked again and a wrong
+  // inference can only be cleared by a human re-consent. Re-probing costs one
+  // GetResourceOauth2Token on a workspace that is already down, and a token in
+  // reply is proof the latch was wrong — so it is also what clears it.
+  //
+  // `refresh_token_rejected` is NOT re-probed: there Linear itself rejected the
+  // refresh token, and no amount of retrying changes that.
+  const latchedOnVaultInference = row.status === 'revoked'
+    && row.revoked_reason === 'vault_consent_required';
+  if (row.status !== 'active' && !latchedOnVaultInference) {
     logger.warn('Linear workspace registry status is not active', {
       linear_workspace_id: linearWorkspaceId,
       status: row.status,
@@ -349,6 +433,22 @@ export async function resolveLinearOauthToken(
     // row `revoked` while resolution still succeeds would take a functioning
     // workspace offline (the resolver refuses a non-active row).
     vaultConsentRequired = vaultResult.kind === 'consent-required';
+    if (vaultResult.kind === 'token' && latchedOnVaultInference) {
+      // The re-probe answered with a token, so the latch described a grant that is
+      // in fact alive. Clear it before returning: leaving the row `revoked` while
+      // handing back a working token means `platform doctor` and the alerting keep
+      // reporting a dead workspace, and the next cold Lambda re-probes again.
+      // Best-effort — a failed un-latch must not fail the resolve that just
+      // succeeded, and the next event retries it.
+      try {
+        await clearWorkspaceRevocation(ddb, registryTableName, linearWorkspaceId, row.installed_at);
+      } catch (err) {
+        logger.error('Vault re-probe succeeded but the revoked marker could not be cleared', {
+          linear_workspace_id: linearWorkspaceId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
     if (vaultResult.kind === 'token') {
       return {
         accessToken: vaultResult.accessToken,
@@ -367,6 +467,17 @@ export async function resolveLinearOauthToken(
       };
     }
     // Anything other than a token ⇒ fall through to Secrets-Manager resolution.
+  }
+
+  // The re-probe did not produce a token, so the latch stands. Stop here rather
+  // than falling through to Secrets Manager: this row is `revoked`, and the only
+  // reason it got past the status guard was to give the vault one more chance.
+  if (latchedOnVaultInference) {
+    logger.warn('Linear workspace is still latched revoked after a vault re-probe', {
+      linear_workspace_id: linearWorkspaceId,
+      revoked_reason: row.revoked_reason,
+    });
+    return null;
   }
 
   // ─── Step 2: Cached or fresh token JSON ──────────────────────────
@@ -468,13 +579,10 @@ export async function resolveLinearOauthToken(
  * refuses a non-active row, so this also stops the pointless
  * refresh-then-fail work on every subsequent event.
  *
- * NOT YET EFFECTIVE IN PRODUCTION: every Lambda that resolves a token currently
- * has READ-ONLY access to the registry table, so this write fails AccessDenied
- * and is swallowed (deliberately — recording the diagnosis must never break token
- * resolution). Granting the write is deferred; until then the operator-facing
- * signal is the indeterminate state from `bgagent platform doctor`, which reports
- * that the workspace could not be confirmed rather than claiming it is fine.
- * Tracked in the backlog under the Linear auth-revocation item.
+ * Effective only where the registry write is granted, which is why the caller is
+ * gated on `LINEAR_REVOCATION_RECORDING`: a role holding READ-ONLY on the table
+ * would fail AccessDenied here and have it swallowed, which is the
+ * looks-implemented-does-nothing state this function exists to leave behind.
  *
  * Scoped to the installation it actually diagnosed. ``status = active`` alone is
  * not enough: a re-authorization writes ``active`` again, so a straggler holding
@@ -529,6 +637,135 @@ export async function markWorkspaceRevoked(
       // Already marked, or re-authorized since this diagnosis was made — either
       // way the verdict no longer describes the row, so leave it alone.
       logger.info('Skipped the revoked marker — the registry row is no longer the installation diagnosed', {
+        linear_workspace_id: linearWorkspaceId,
+      });
+      return false;
+    }
+    throw err;
+  }
+  registryCache.delete(linearWorkspaceId);
+  return true;
+}
+
+/**
+ * Claim the right to announce this revocation, exactly once per installation.
+ *
+ * Deliberately independent of the `active → revoked` status latch. Keying the
+ * announcement off that write coupled "recorded" to "notified", so a publish that
+ * failed after a successful record could never be retried — the row was already
+ * `revoked`, so every later detection was deduped away. Here the notification has
+ * its own `attribute_not_exists` claim, which a failed publish releases.
+ *
+ * Conditioned on `installed_at` and NOT on `status`. A re-authorization rewrites
+ * `installed_at`, so a verdict about the previous installation cannot announce
+ * against its replacement — while `status` is deliberately not consulted, because
+ * this claim is taken BEFORE the row is latched and would otherwise never hold.
+ */
+async function claimRevocationAnnouncement(
+  ddb: DynamoDBDocumentClient,
+  tableName: string,
+  linearWorkspaceId: string,
+  expectedInstalledAt?: string,
+  now: string = new Date().toISOString(),
+): Promise<boolean> {
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: tableName,
+      Key: { linear_workspace_id: linearWorkspaceId },
+      UpdateExpression: 'SET revocation_announced_at = :now',
+      ConditionExpression: expectedInstalledAt === undefined
+        ? 'attribute_not_exists(revocation_announced_at) AND attribute_not_exists(installed_at)'
+        : 'attribute_not_exists(revocation_announced_at) AND installed_at = :installed',
+      ExpressionAttributeValues: {
+        ':now': now,
+        ...(expectedInstalledAt !== undefined && { ':installed': expectedInstalledAt }),
+      },
+    }));
+    return true;
+  } catch (err) {
+    if ((err as { name?: string })?.name === 'ConditionalCheckFailedException') return false;
+    // Not a dedup answer — the claim could not be evaluated. Announce rather than
+    // stay silent: a duplicate email costs an operator nothing, and this is the
+    // last step before the only signal that leaves the account.
+    logger.error('Could not claim the revocation announcement; announcing without dedup', {
+      linear_workspace_id: linearWorkspaceId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return true;
+  }
+}
+
+/**
+ * Release an announcement claim whose publish failed, so the next detection of the
+ * same dead grant retries it. Best-effort by construction: if this write also
+ * fails there is nothing further to fall back to, and the `error` log is the record.
+ */
+async function releaseRevocationAnnouncement(
+  ddb: DynamoDBDocumentClient,
+  tableName: string,
+  linearWorkspaceId: string,
+): Promise<void> {
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: tableName,
+      Key: { linear_workspace_id: linearWorkspaceId },
+      UpdateExpression: 'REMOVE revocation_announced_at',
+    }));
+    logger.warn('Released the revocation announcement claim after a failed publish — will retry', {
+      linear_workspace_id: linearWorkspaceId,
+    });
+  } catch (err) {
+    logger.error('Revocation was recorded but could not be announced, and the retry claim is stuck', {
+      linear_workspace_id: linearWorkspaceId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/**
+ * Undo a `vault_consent_required` latch after the vault has proven the grant alive.
+ *
+ * The counterpart to {@link markWorkspaceRevoked}, and the reason that latch is
+ * safe to apply on an inference. Without it a single wrong "consent required"
+ * answer takes a workspace offline until a human re-consents, because the latch
+ * stops the resolver before it can ever ask the vault again.
+ *
+ * Scoped the same way as the latch — same installation (`installed_at`), and only
+ * from `revoked`. That keeps it from resurrecting a row an operator revoked
+ * deliberately, or one revoked for `refresh_token_rejected`: the condition requires
+ * the reason to still be the inference this function is allowed to overturn.
+ *
+ * `revocation_announced_at` is removed too, so a later genuine revocation of the
+ * same installation is announced again instead of being deduped against this one.
+ */
+export async function clearWorkspaceRevocation(
+  ddb: DynamoDBDocumentClient,
+  tableName: string,
+  linearWorkspaceId: string,
+  expectedInstalledAt?: string,
+): Promise<boolean> {
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: tableName,
+      Key: { linear_workspace_id: linearWorkspaceId },
+      UpdateExpression: 'SET #s = :active REMOVE revoked_at, revoked_reason, revocation_announced_at',
+      ConditionExpression: expectedInstalledAt === undefined
+        ? '#s = :revoked AND revoked_reason = :inference AND attribute_not_exists(installed_at)'
+        : '#s = :revoked AND revoked_reason = :inference AND installed_at = :installed',
+      ExpressionAttributeNames: { '#s': 'status' },
+      ExpressionAttributeValues: {
+        ':active': 'active',
+        ':revoked': 'revoked',
+        ':inference': VAULT_CONSENT_REVOCATION_REASON,
+        ...(expectedInstalledAt !== undefined && { ':installed': expectedInstalledAt }),
+      },
+    }));
+    logger.warn('Cleared the revoked marker — the vault re-probe returned a working token', {
+      linear_workspace_id: linearWorkspaceId,
+    });
+  } catch (err) {
+    if ((err as { name?: string })?.name === 'ConditionalCheckFailedException') {
+      logger.info('Left the revoked marker in place — the row is no longer the latch this would clear', {
         linear_workspace_id: linearWorkspaceId,
       });
       return false;
@@ -627,6 +864,9 @@ function parseRegistryRow(rawItem: unknown, linearWorkspaceId: string): Registry
     // resolver fell back to deriving the subject from the organization UUID, found
     // no grant under it, and reported "requires consent" for a healthy workspace.
     ...(typeof item.vault_user_id === 'string' && { vault_user_id: item.vault_user_id }),
+    // Distinguishes a latch built on Linear's own refusal from one built on an
+    // inference the vault path can re-test. See RegistryRow.revoked_reason.
+    ...(typeof item.revoked_reason === 'string' && { revoked_reason: item.revoked_reason }),
   };
   registryCache.set(linearWorkspaceId, { value: row, expiresAt: Date.now() + REGISTRY_CACHE_TTL_MS });
   return row;

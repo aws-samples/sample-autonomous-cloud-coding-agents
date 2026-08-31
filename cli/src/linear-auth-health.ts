@@ -49,6 +49,7 @@ import {
 import { ScanCommand } from '@aws-sdk/lib-dynamodb';
 import { documentClient } from './dynamo-clients';
 import { verifyLinearRefreshAndPersist } from './linear-oauth';
+import { linearVaultUserId, mintLinearTokenFromVault } from './linear-vault';
 import { makeClient } from './ua';
 
 /** Linear's GraphQL endpoint — a cheap authenticated probe target. */
@@ -102,6 +103,17 @@ interface RegistryRow {
   /** Stamped by the platform when it detected the authorization was dead. */
   readonly revoked_at?: string;
   readonly revoked_reason?: string;
+  /**
+   * Set when the workspace is managed by the AgentCore Identity token vault.
+   *
+   * Read here because the Secrets-Manager bundle is NOT the credential for these
+   * workspaces: a vault onboarding writes no access token by design, so judging
+   * them by the bundle reported every healthy vault workspace as `revoked` — and
+   * this report is what an operator consults to explain a latched row.
+   */
+  readonly provider_name?: string;
+  /** Subject the vault grant was bound to at consent time. */
+  readonly vault_user_id?: string;
 }
 
 /** The stored-secret fields this check reads. Deliberately narrow: the token
@@ -203,6 +215,19 @@ export interface CheckLinearAuthOptions {
    * refresh does), but a state-changing action an operator should opt into.
    */
   readonly verifyRefresh?: LinearRefreshVerifier;
+  /**
+   * Mint the vault-managed token for one workspace, or null when the vault cannot
+   * produce one (consent required, provider missing, service unavailable).
+   *
+   * Supplied by the caller so this module keeps its narrow AWS surface and stays
+   * testable without an AgentCore stub. Omitted ⇒ vault-managed workspaces are
+   * reported `unknown` rather than judged by a bundle that is empty by design.
+   */
+  readonly mintVaultToken?: (args: {
+    readonly providerName: string;
+    readonly userId?: string;
+    readonly workspaceId: string;
+  }) => Promise<string | null>;
   readonly now?: Date;
 }
 
@@ -247,6 +272,34 @@ export async function checkLinearWorkspaceAuth(
       // The platform itself recorded this when a refresh was rejected, which is
       // the authoritative signal — more reliable than anything this check can
       // infer from a token, and it carries when it happened.
+      //
+      // With ONE exception. A `vault_consent_required` latch is not Linear refusing
+      // anything; it is an inference from the vault answering with an authorization
+      // URL, and this codebase has already shipped a bug that produced that answer
+      // spuriously. Taking it at face value here is what makes a wrong latch look
+      // confirmed — so when the vault can still be asked, ask it, and say plainly
+      // when the record and the live grant disagree. The runtime resolver re-probes
+      // the same rows for the same reason.
+      const staleLatchSuspected = row.revoked_reason === 'vault_consent_required'
+        && Boolean(row.provider_name) && Boolean(options.mintVaultToken);
+      if (staleLatchSuspected) {
+        const vaultToken = await options.mintVaultToken!({
+          providerName: row.provider_name!,
+          userId: row.vault_user_id,
+          workspaceId,
+        }).catch(() => null);
+        if (vaultToken && await probe(vaultToken) === 'accepted') {
+          out.push({
+            workspaceId,
+            workspaceSlug: slug,
+            state: 'active',
+            detail: `Recorded revoked at ${row.revoked_at ?? 'an unknown time'} for 'vault_consent_required', `
+              + 'but the vault mints a token Linear accepts — the record is stale. The platform clears it on '
+              + 'the next event for this workspace; no re-authorization is needed.',
+          });
+          continue;
+        }
+      }
       out.push({
         workspaceId,
         workspaceSlug: slug,
@@ -264,6 +317,57 @@ export async function checkLinearWorkspaceAuth(
       });
       continue;
     }
+    // ─── Vault-managed workspaces ─────────────────────────────────────
+    // Assessed through the vault, in the same order the runtime resolver uses. A
+    // fresh vault onboarding deliberately stores NO access token — the vault holds
+    // the grant — so the Secrets-Manager checks below have nothing to read and
+    // concluded `revoked` for every healthy one of these. That was the worst place
+    // to be wrong: this report is what an operator opens to find out whether a
+    // latched row is genuinely dead.
+    if (row.provider_name) {
+      if (!options.mintVaultToken) {
+        out.push({
+          workspaceId,
+          workspaceSlug: slug,
+          state: 'unknown',
+          detail: 'Managed by the AgentCore Identity token vault, which this check was not given a way to '
+            + 'query. Its Secrets Manager bundle is empty by design, so no verdict can be drawn from it.',
+        });
+        continue;
+      }
+      const vaultToken = await options.mintVaultToken({
+        providerName: row.provider_name,
+        userId: row.vault_user_id,
+        workspaceId,
+      }).catch(() => null);
+      if (!vaultToken) {
+        out.push({
+          workspaceId,
+          workspaceSlug: slug,
+          state: 'revoked',
+          detail: 'The AgentCore Identity vault would not mint a token for this workspace — the grant needs a '
+            + `fresh consent. Run \`bgagent linear setup ${slug}\`.`,
+        });
+        continue;
+      }
+      // `hasRefreshToken: false` and no expiry: the vault owns renewal, so there is
+      // no `expired_indeterminate` case to land in — a minted token that Linear
+      // rejects is simply dead. Reporting it indeterminate would also point the
+      // operator at `--verify-refresh`, which only knows how to rotate a
+      // Secrets-Manager bundle this workspace does not have.
+      const vaultState = classifyAuthState(await probe(vaultToken), { hasRefreshToken: false }, now);
+      out.push({
+        workspaceId,
+        workspaceSlug: slug,
+        state: vaultState,
+        detail: `Managed by the AgentCore Identity token vault (provider ${row.provider_name}). `
+          + (vaultState === 'active'
+            ? 'The vault minted a token and Linear accepted it.'
+            : `The vault minted a token but Linear rejected it. Run \`bgagent linear setup ${slug}\`.`),
+      });
+      continue;
+    }
+
     if (!row.oauth_secret_arn) {
       out.push({
         workspaceId,
@@ -351,6 +455,30 @@ function describeState(state: LinearAuthState, expiresAt?: string, revokedAt?: s
     default:
       return 'Could not determine authorization state.';
   }
+}
+
+/**
+ * The production vault minter for {@link CheckLinearAuthOptions.mintVaultToken}.
+ *
+ * Read-only with respect to the grant: `GetResourceOauth2Token` returns the cached
+ * token and does not rotate or consume it, so unlike `--verify-refresh` this needs
+ * no operator opt-in.
+ *
+ * The subject falls back to the derived `linear-workspace-<orgId>` form for
+ * workspaces onboarded before it was recorded on the row — the same fallback the
+ * Lambda resolver uses. Getting it wrong here does not fail loudly; it returns no
+ * token, which this check would report as a dead workspace.
+ */
+export function makeLinearVaultTokenMinter(
+  region: string,
+  workloadName: string,
+): NonNullable<CheckLinearAuthOptions['mintVaultToken']> {
+  return async ({ providerName, userId, workspaceId }) => mintLinearTokenFromVault({
+    region,
+    workloadName,
+    providerName,
+    userId: userId?.trim() || linearVaultUserId(workspaceId),
+  });
 }
 
 /**

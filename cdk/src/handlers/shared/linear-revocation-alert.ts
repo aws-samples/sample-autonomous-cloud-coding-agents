@@ -69,19 +69,20 @@ export function revocationAlertTopicArn(): string | undefined {
 /**
  * Announce ONE revoked authorization to the operator.
  *
- * Call this only after the registry latch actually applied — that conditional
- * write is the dedup key. A revoked workspace keeps producing events, so
- * announcing on detection instead of on latch would page once per event.
+ * A revoked workspace keeps producing events, so this must be deduped — but NOT on
+ * the `active → revoked` status latch. The caller holds a dedicated announcement
+ * claim instead (`claimRevocationAnnouncement`), because a publish failure has to
+ * stay retryable: keyed off the status write, one throttled publish meant every
+ * later detection found an already-revoked row and said nothing, permanently.
  *
- * Never throws. The latch has already landed by the time this runs, so the state
- * is discoverable via `bgagent platform doctor` even if the notification fails, and
- * this executes inside token resolution where an exception would turn a
- * notification outage into a broken webhook handler.
+ * Never throws — this runs inside token resolution, where an exception would turn a
+ * notification outage into a broken webhook handler. It RETURNS whether the publish
+ * landed, so the caller can release its claim and let a later detection retry.
  */
 export async function announceRevocation(
   detail: AnnounceableRevocation,
   opts: { readonly topicArn: string; readonly region?: string; readonly snsClient?: SNSClient },
-): Promise<void> {
+): Promise<boolean> {
   const slug = detail.workspaceSlug ?? detail.linearWorkspaceId;
   const subject = `ABCA: Linear workspace '${slug}' needs re-authorization`;
   const message = [
@@ -115,10 +116,12 @@ export async function announceRevocation(
       workspace_slug: detail.workspaceSlug,
       source: detail.source,
     });
+    return true;
   } catch (err) {
     logger.error('Could not announce the revoked Linear authorization (recorded, but not notified)', {
       linear_workspace_id: detail.linearWorkspaceId,
       error: err instanceof Error ? err.message : String(err),
     });
+    return false;
   }
 }

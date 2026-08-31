@@ -20,6 +20,7 @@
 import { createHmac } from 'node:crypto';
 import {
   _resetCachesForTesting,
+  clearWorkspaceRevocation,
   getOauthSecret,
   getOauthSecretStrict,
   invalidateLinearOauthCache,
@@ -59,13 +60,21 @@ function makeFakeClients(opts: {
     oauth_secret_arn: string;
     status: string;
     provider_name: string;
+    vault_user_id: string;
+    revoked_reason: string;
+    installed_at: string;
   }> | null;
+  /** Make every DynamoDB UpdateCommand fail, to exercise the write-failure paths. */
+  updateShouldFail?: Error;
   storedToken?: StoredOauthToken | null;
   putSecretValueShouldFail?: boolean;
 }) {
-  const ddbSend = jest.fn().mockImplementation(() => ({
-    Item: opts.registryItem === null ? undefined : opts.registryItem,
-  }));
+  const ddbSend = jest.fn().mockImplementation((command: { constructor: { name: string } }) => {
+    if (command.constructor.name === 'UpdateCommand' && opts.updateShouldFail) {
+      throw opts.updateShouldFail;
+    }
+    return { Item: opts.registryItem === null ? undefined : opts.registryItem };
+  });
   const smSend = jest.fn().mockImplementation((command: { constructor: { name: string } }) => {
     const name = command.constructor.name;
     if (name === 'GetSecretValueCommand') {
@@ -768,6 +777,151 @@ describe('markWorkspaceRevoked — the verdict must not outlive the grant it jud
     expect(updates[0].input!.ConditionExpression).toContain('installed_at = :installed');
     expect((updates[0].input!.ExpressionAttributeValues as Record<string, unknown>)[':installed'])
       .toBe(INSTALLED);
+  });
+});
+
+describe('a vault_consent_required latch must be able to self-heal', () => {
+  // The latch and the guard it trips are the same fact, so it seals itself: `status`
+  // goes to `revoked`, the resolver then returns before the vault is ever consulted
+  // again, and nothing short of a human re-consent can overturn it. That would be
+  // fine if the verdict were a measurement — but it is an inference from a token-less
+  // vault response, and this PR already fixed one bug (a row-parser fault) that
+  // produced it for a perfectly healthy workspace.
+  const WORKLOAD = 'abca_linear_oauth';
+  const INSTALLED_AT = '2026-08-01T00:00:00.000Z';
+  let savedWorkload: string | undefined;
+  let savedEnabled: string | undefined;
+
+  beforeEach(() => {
+    _resetCachesForTesting();
+    savedWorkload = process.env.LINEAR_WORKLOAD_IDENTITY_NAME;
+    savedEnabled = process.env.LINEAR_VAULT_ENABLED;
+    process.env.LINEAR_WORKLOAD_IDENTITY_NAME = WORKLOAD;
+    process.env.LINEAR_VAULT_ENABLED = 'true';
+  });
+  afterEach(() => {
+    if (savedWorkload === undefined) delete process.env.LINEAR_WORKLOAD_IDENTITY_NAME;
+    else process.env.LINEAR_WORKLOAD_IDENTITY_NAME = savedWorkload;
+    if (savedEnabled === undefined) delete process.env.LINEAR_VAULT_ENABLED;
+    else process.env.LINEAR_VAULT_ENABLED = savedEnabled;
+  });
+
+  function latchedRow(reason: string) {
+    return {
+      workspace_slug: 'acme',
+      oauth_secret_arn: 'arn:secret:acme',
+      status: 'revoked',
+      revoked_reason: reason,
+      provider_name: 'bgagent-linear-oauth-acme',
+      vault_user_id: 'linear-ws-acme',
+      installed_at: INSTALLED_AT,
+    };
+  }
+
+  function updatesFrom(clients: { ddbSend: jest.Mock }) {
+    return clients.ddbSend.mock.calls
+      .map((c) => c[0] as { constructor: { name: string }; input?: Record<string, unknown> })
+      .filter((cmd) => cmd.constructor.name === 'UpdateCommand');
+  }
+
+  test('the vault IS re-probed, and a token clears the latch and is returned', async () => {
+    const clients = makeFakeClients({
+      registryItem: latchedRow('vault_consent_required'),
+      storedToken: makeStoredToken({ access_token: '', refresh_token: '' }),
+    });
+    const resolveViaVault = jest.fn().mockResolvedValue({ kind: 'token', accessToken: 'lin_oauth_alive' });
+
+    const result = await resolveLinearOauthToken('ws-uuid-1', REGISTRY_TABLE, {
+      ...clients,
+      resolveViaVault,
+    });
+
+    expect(resolveViaVault).toHaveBeenCalled();
+    expect(result?.accessToken).toBe('lin_oauth_alive');
+    // And the row is put back: leaving it `revoked` while handing out a working token
+    // keeps `platform doctor` and the alerting reporting an outage that is over.
+    const updates = updatesFrom(clients);
+    expect(updates).toHaveLength(1);
+    expect(updates[0].input!.UpdateExpression).toContain('revoked_reason');
+    expect(updates[0].input!.ConditionExpression).toContain('installed_at = :installed');
+  });
+
+  test('a refresh_token_rejected latch is NOT re-probed — Linear already refused', async () => {
+    // The distinction is the whole point. That reason records a fact, not an
+    // inference, so re-probing it would be a pointless call on every event for a
+    // workspace that is genuinely dead.
+    const clients = makeFakeClients({
+      registryItem: latchedRow('refresh_token_rejected'),
+      storedToken: makeStoredToken(),
+    });
+    const resolveViaVault = jest.fn();
+
+    expect(await resolveLinearOauthToken('ws-uuid-1', REGISTRY_TABLE, { ...clients, resolveViaVault }))
+      .toBeNull();
+    expect(resolveViaVault).not.toHaveBeenCalled();
+  });
+
+  test('a re-probe that still needs consent leaves the latch alone and does NOT fall back to SM', async () => {
+    // The row is revoked; the only reason it got past the status guard was to give
+    // the vault one more chance. Falling through would resurrect a workspace an
+    // operator sees as down, using a token the vault path had already replaced.
+    const clients = makeFakeClients({
+      registryItem: latchedRow('vault_consent_required'),
+      storedToken: makeStoredToken({ access_token: 'lin_oauth_stale_SM' }),
+    });
+
+    const result = await resolveLinearOauthToken('ws-uuid-1', REGISTRY_TABLE, {
+      ...clients,
+      resolveViaVault: async () => ({ kind: 'consent-required', authorizationUrl: 'https://x/authorize' }),
+    });
+
+    expect(result).toBeNull();
+    expect(updatesFrom(clients)).toHaveLength(0);
+    expect(clients.smSend).not.toHaveBeenCalled();
+  });
+
+  test('a failed un-latch does not fail the resolve that just succeeded', async () => {
+    const clients = makeFakeClients({
+      registryItem: latchedRow('vault_consent_required'),
+      storedToken: makeStoredToken(),
+      updateShouldFail: Object.assign(new Error('throttled'), { name: 'ProvisionedThroughputExceededException' }),
+    });
+
+    const result = await resolveLinearOauthToken('ws-uuid-1', REGISTRY_TABLE, {
+      ...clients,
+      resolveViaVault: async () => ({ kind: 'token', accessToken: 'lin_oauth_alive' }),
+    });
+
+    expect(result?.accessToken).toBe('lin_oauth_alive');
+  });
+});
+
+describe('clearWorkspaceRevocation — scoped so it cannot resurrect the wrong row', () => {
+  test('requires the row to still be the same installation AND the inference reason', async () => {
+    const send = jest.fn().mockResolvedValue({});
+    await clearWorkspaceRevocation(
+      { send } as never, REGISTRY_TABLE, 'ws-uuid-1', '2026-08-01T00:00:00.000Z',
+    );
+    const input = send.mock.calls[0][0].input as Record<string, unknown>;
+    const condition = input.ConditionExpression as string;
+    // Without the reason clause this would also clear a `refresh_token_rejected`
+    // latch — a row Linear itself condemned — and hand back a workspace that is
+    // genuinely dead.
+    expect(condition).toContain('revoked_reason = :inference');
+    expect(condition).toContain('installed_at = :installed');
+    expect((input.ExpressionAttributeValues as Record<string, unknown>)[':inference'])
+      .toBe('vault_consent_required');
+    // The announcement claim goes too, or a later GENUINE revocation of this same
+    // installation would be deduped against the one being cleared here.
+    expect(input.UpdateExpression).toContain('revocation_announced_at');
+  });
+
+  test('reports false (not a throw) when the condition does not hold', async () => {
+    const send = jest.fn().mockRejectedValue(
+      Object.assign(new Error('nope'), { name: 'ConditionalCheckFailedException' }),
+    );
+    expect(await clearWorkspaceRevocation({ send } as never, REGISTRY_TABLE, 'ws-uuid-1'))
+      .toBe(false);
   });
 });
 

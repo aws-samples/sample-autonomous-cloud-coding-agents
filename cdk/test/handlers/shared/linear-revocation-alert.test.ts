@@ -98,11 +98,19 @@ describe('announceRevocation', () => {
     expect(message).toMatch(/vault/i);
   });
 
-  test('a failed publish does NOT throw — this runs inside token resolution', async () => {
-    // The registry latch has already landed by now, so the state stays discoverable
-    // via `platform doctor` even though this notification was lost.
+  test('a failed publish REPORTS false rather than throwing', async () => {
+    // Not throwing, because this runs inside token resolution and an exception would
+    // turn a notification outage into a broken webhook handler. But not silent
+    // either: swallowing the failure and returning void made the caller believe the
+    // operator had been told, which — with the caller latching the row `revoked` and
+    // then never re-detecting the dead grant — meant permanent silence. The boolean
+    // is what lets the caller release its claim and retry on a later event.
     snsSend.mockRejectedValueOnce(new Error('KMSAccessDeniedException'));
-    await expect(announceRevocation(detail(), opts())).resolves.toBeUndefined();
+    await expect(announceRevocation(detail(), opts())).resolves.toBe(false);
+  });
+
+  test('a successful publish reports true', async () => {
+    await expect(announceRevocation(detail(), opts())).resolves.toBe(true);
   });
 
   test('falls back to the workspace id when no slug is known', async () => {

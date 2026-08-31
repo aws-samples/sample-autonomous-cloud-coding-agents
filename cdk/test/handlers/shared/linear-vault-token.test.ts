@@ -143,7 +143,34 @@ describe('resolveLinearTokenViaVault', () => {
     // The distinction matters: consent-required means the grant is DEAD and an
     // operator must act (#812), where an unavailable result is transient.
     const result = await resolveLinearTokenViaVault(input, 'abca_linear_oauth');
-    expect(result).toEqual({ kind: 'consent-required' });
+    expect(result).toEqual({
+      kind: 'consent-required',
+      authorizationUrl: 'https://bedrock-agentcore.../authorize?request_uri=urn:...',
+    });
+  });
+
+  test('a token-less response with NO authorization URL is transient, not a revocation', async () => {
+    // The verdict that latches a workspace `revoked` must rest on evidence. Any
+    // token-less response used to fall through to consent-required, so an empty
+    // body, a truncated response or an unrecognised sessionStatus all reported
+    // "this workspace is dead" — and once #812 granted the registry write, that
+    // verdict stopped being advisory and took the workspace offline until a human
+    // re-consented.
+    mockSend
+      .mockResolvedValueOnce({ workloadAccessToken: 'wat-xyz' })
+      .mockResolvedValueOnce({});
+    expect(await resolveLinearTokenViaVault(input, 'abca_linear_oauth'))
+      .toEqual({ kind: 'unavailable', reason: 'no_token_no_auth_url' });
+  });
+
+  test('an empty-string authorization URL is also transient, not a revocation', async () => {
+    // Guards the truthiness check specifically: `authorizationUrl in resp` or a
+    // `!== undefined` test would accept '' and reinstate the evidence-free verdict.
+    mockSend
+      .mockResolvedValueOnce({ workloadAccessToken: 'wat-xyz' })
+      .mockResolvedValueOnce({ authorizationUrl: '', sessionStatus: 'FAILED' });
+    expect(await resolveLinearTokenViaVault(input, 'abca_linear_oauth'))
+      .toEqual({ kind: 'unavailable', reason: 'no_token_no_auth_url' });
   });
 
   test('reports unavailable (transient) when no workload token is minted', async () => {

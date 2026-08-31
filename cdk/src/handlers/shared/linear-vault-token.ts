@@ -34,8 +34,8 @@
 // In the resolver context there is no browser, so the grant must ALREADY be
 // consented (done at setup time). If the vault returns an `authorizationUrl`
 // instead of an `accessToken` — i.e. consent is required / the session is not
-// complete — this returns null so the caller falls back to the SM token rather
-// than blocking a task on an impossible interactive consent.
+// complete — this reports `consent-required` and the caller falls back to the SM
+// token rather than blocking a task on an impossible interactive consent.
 import {
   BedrockAgentCoreClient,
   GetResourceOauth2TokenCommand,
@@ -120,7 +120,17 @@ export function workspaceUserId(linearWorkspaceId: string): string {
  */
 export type VaultTokenResult =
   | { readonly kind: 'token'; readonly accessToken: string }
-  | { readonly kind: 'consent-required' }
+  /**
+   * Carries the authorization URL rather than being a bare tag, so the verdict
+   * cannot be reached without the evidence for it. "This workspace needs a fresh
+   * consent" is a terminal diagnosis that latches the registry row `revoked`
+   * (#812), and it used to be the fall-through for ANY tokenless response — an
+   * empty body, a partial response, an unrecognised `sessionStatus`. Requiring
+   * the URL makes the difference between "the grant is gone" and "the call came
+   * back malformed" unconstructable in the type rather than a code-reading
+   * exercise.
+   */
+  | { readonly kind: 'consent-required'; readonly authorizationUrl: string }
   | { readonly kind: 'unavailable'; readonly reason: string };
 
 /**
@@ -176,15 +186,30 @@ export async function resolveLinearTokenViaVault(
       return { kind: 'token', accessToken: resp.accessToken };
     }
 
-    // No token but an authorization URL ⇒ the grant needs (re-)consent, which
-    // cannot happen in this non-interactive path. Fall back to the SM token.
+    // No token AND no authorization URL is not a verdict about the grant — it is a
+    // response this code does not understand. Reporting it as "consent required"
+    // would latch the row `revoked` on the strength of an empty body, so it is
+    // classified transient instead: the SM fallback still runs, and the next event
+    // retries the vault.
+    const authorizationUrl = resp.authorizationUrl;
+    if (!authorizationUrl) {
+      logger.warn('Vault returned neither a token nor an authorization URL; treating as transient', {
+        linear_workspace_id: input.linearWorkspaceId,
+        provider_name: input.providerName,
+        session_status: resp.sessionStatus,
+      });
+      return { kind: 'unavailable', reason: 'no_token_no_auth_url' };
+    }
+
+    // A token-less response WITH an authorization URL ⇒ the grant needs
+    // (re-)consent, which cannot happen in this non-interactive path. Fall back to
+    // the SM token.
     logger.warn('Vault requires consent (no cached grant); falling back to SM', {
       linear_workspace_id: input.linearWorkspaceId,
       provider_name: input.providerName,
       session_status: resp.sessionStatus,
-      has_authorization_url: Boolean(resp.authorizationUrl),
     });
-    return { kind: 'consent-required' };
+    return { kind: 'consent-required', authorizationUrl };
   } catch (err) {
     // Any error (permission, throttle, provider missing, service) → SM fallback.
     logger.warn('Vault token resolution failed; falling back to SM', {
