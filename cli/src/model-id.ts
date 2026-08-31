@@ -25,12 +25,13 @@ import { CliError } from './errors';
  * separate package and does not depend on CDK — the same mirroring `platform-doctor`
  * and `PLATFORM_REPO_DEFAULTS` already do.
  *
- * Order does NOT matter here, and that is worth stating because it looks like it
- * should: `geoPrefixOf` matches `<geo>` followed by a literal `.`, so `us.` cannot
- * match `us-gov.…` — the dot fails against the hyphen. Listed longest-first only so
- * the list reads unambiguously; a reader should not have to reason about the
- * matcher to trust it. (`platform-doctor` builds a REGEX from a similar list, where
- * alternation order does matter more visibly — same reasoning recorded there.)
+ * Order does NOT matter, and that is worth stating because it looks like it should:
+ * `geoPrefixOf` matches `<geo>` followed by a literal `.`, so `us.` cannot match
+ * `us-gov.…` — the dot fails against the hyphen. The order below is arbitrary (it is
+ * NOT sorted by length: `apac` follows `us`), and a test asserts the `us-gov` case
+ * behaviourally so a future re-sort cannot be mistaken for load-bearing.
+ * (`platform-doctor` builds a REGEX from a similar list, where alternation order
+ * does matter more visibly — same reasoning recorded there.)
  */
 export const BEDROCK_GEO_PREFIXES = [
   'global', 'us-gov', 'us', 'eu', 'apac', 'jp', 'au',

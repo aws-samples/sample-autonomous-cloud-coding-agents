@@ -109,6 +109,45 @@ describe('assertModelIdUsable', () => {
   });
 });
 
+// Verified live at the terminal against a deployed stack, but never pinned here —
+// so a refactor could have dropped any of these three and the suite would not have
+// noticed. Each is a value that reaches the RepoTable and then fails at turn 0.
+it('rejects a geography prefix with no model after it', () => {
+  // `'global.'` passed every check on a stack exporting no granted set — i.e. every
+  // stack deployed before that output existed — and landed in the RepoTable as-is.
+  const t = check('global.', 'global');
+  expect(t).toThrow(/geography prefix with no model after it/);
+  // The message must show the shape, not just complain.
+  expect(t).toThrow(/global\.<model-id>/);
+});
+
+it('rejects a doubled geography prefix, and names the single-prefix form', () => {
+  // Caught here rather than left to the grant check, which is SKIPPED on a stack
+  // that exports no granted set — so without this the value would sail through.
+  const t = check('global.us.anthropic.claude-opus-5', 'global');
+  expect(t).toThrow(/two geography prefixes/);
+  expect(t).toThrow(/'global\.' then/);
+  expect(t).toThrow(/global\.anthropic\.claude-opus-5/);
+});
+
+it('trims before validating, so a trailing space cannot reach the RepoTable', () => {
+  // A trailing space survived every check and was written verbatim, where it never
+  // matches a real profile id. Asserted in both directions: the padded valid value
+  // is ACCEPTED, and a padded bare id is still rejected (trimming must not become a
+  // way to bypass the other rules).
+  expect(check('  global.anthropic.claude-opus-5  ', 'global', GRANTED)).not.toThrow();
+  expect(check('  anthropic.claude-opus-5  ', 'global')).toThrow(/bare foundation-model id/);
+  // And an all-whitespace value is treated as absent, not as an empty model id.
+  expect(check('   ', 'global')).not.toThrow();
+});
+
+it('treats an all-whitespace deployedGeo as unknown, not as a match', () => {
+  // `getStackOutput` returns null for a missing output, so a blank string means the
+  // stack exported an empty value. Treating it as "matches anything" would skip the
+  // geography check on exactly the stack whose geography is unclear.
+  expect(check('us.anthropic.claude-opus-5', '   ')).not.toThrow();
+});
+
 describe('geoPrefixOf', () => {
   it('recognizes every geography the CDK models', () => {
     for (const geo of BEDROCK_GEO_PREFIXES) {

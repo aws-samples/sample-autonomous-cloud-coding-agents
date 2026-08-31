@@ -319,6 +319,21 @@ describe('doctor Bedrock inference-profile check', () => {
     expect(check.detail).toMatch(/bedrock:GetInferenceProfile/);
   });
 
+  it('warns, not fails, on a transient error — the check did not run', async () => {
+    // The same blocker as in the granted-set check, in the single-model one: `fail`
+    // here tells the operator the model or geography is wrong, so a throttle or 5xx
+    // must not produce it. Mutation-caught — reverting to `accessDenied ? warn : fail`
+    // left every other test in this file green.
+    const err = new Error('Rate exceeded');
+    err.name = 'ThrottlingException';
+    const check = await profileCheck('global', jest.fn().mockRejectedValue(err));
+    expect(check.status).toBe('warn');
+    expect(check.detail).toMatch(/check did not complete/);
+    // Must NOT assert anything about the profile or the geography.
+    expect(check.detail).not.toMatch(/has no profile in that geography/);
+    expect(check.detail).not.toMatch(/would fail at turn 0/);
+  });
+
   it('warns rather than passing when the stack does not export the geography', async () => {
     // An older stack has no BedrockGeoRegion output. Defaulting to `us` and passing
     // would report a verification that never happened.
@@ -399,6 +414,45 @@ describe('doctor granted-model profile check', () => {
     const check = await grantedCheck('anthropic.claude-opus-5', 'global', jest.fn().mockRejectedValue(denied));
     expect(check.status).toBe('warn');
     expect(check.detail).toMatch(/permissions gap on the caller/);
+  });
+
+  // The reviewer's blocking finding: a binary `accessDenied ? warn : fail` sent EVERY
+  // other error into the fail branch, whose remedy is "remove it from the
+  // bedrockModels context". That is destructive advice — applied to a model that is
+  // actually fine, it narrows a working deployment because a call happened to fail.
+  it.each([
+    ['ThrottlingException', 'Rate exceeded'],
+    ['InternalServerException', 'Internal server error'],
+    ['TimeoutError', 'socket hang up'],
+    ['ExpiredTokenException', 'The security token included in the request is expired'],
+  ])('does not tell the operator to remove a model on a %s', async (name, msg) => {
+    const err = new Error(msg);
+    err.name = name;
+    const check = await grantedCheck('anthropic.claude-opus-5', 'global', jest.fn().mockRejectedValue(err));
+    expect(check.status).toBe('warn');
+    // The destructive remedy must NOT appear.
+    expect(check.detail).not.toMatch(/Remove it from/);
+    expect(check.detail).not.toMatch(/have no inference profile/);
+    // And it must say the check did not run, so the reader knows it proves nothing.
+    expect(check.detail).toMatch(/could not be checked/);
+    expect(check.detail).toMatch(/do NOT remove anything/);
+  });
+
+  it('still FAILS, with the remove remedy, when the service says the profile is absent', async () => {
+    // The one case that earns the destructive advice: the service answered, and the
+    // answer was "no such profile". Narrowing the three-way split must not have cost
+    // the real detection.
+    const err = new Error('ResourceNotFoundException: inference profile not found');
+    err.name = 'ResourceNotFoundException';
+    const check = await grantedCheck(
+      'anthropic.claude-opus-5,anthropic.made-up-model', 'global',
+      jest.fn().mockImplementation((cmd: { input?: { inferenceProfileIdentifier?: string } }) =>
+        cmd.input?.inferenceProfileIdentifier === 'global.anthropic.made-up-model'
+          ? Promise.reject(err) : Promise.resolve({})),
+    );
+    expect(check.status).toBe('fail');
+    expect(check.detail).toContain('global.anthropic.made-up-model');
+    expect(check.detail).toMatch(/Remove it from/);
   });
 
   it('warns rather than passing when the stack exports no granted set', async () => {

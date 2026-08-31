@@ -19,92 +19,35 @@
 
 import { CrossRegionInferenceProfileRegion } from '@aws-cdk/aws-bedrock-alpha';
 import { Node } from 'constructs';
+// Aliased locals: the re-export block below makes these part of this module's public
+// API, but a re-export does not bind names in local scope, so the functions here need
+// their own import.
+import {
+  BEDROCK_GEO_REGIONS as GEO_REGIONS,
+  DEFAULT_BEDROCK_MODEL_IDS as MODEL_IDS,
+} from '../handlers/shared/bedrock-model-constants';
 
 /**
- * The small/fast model the agent uses for cheap side-calls, as a BARE
- * foundation-model id.
+ * The model/geography values themselves live in the RUNTIME-side constants module
+ * and are re-exported here, so the many construct-layer importers keep working
+ * unchanged.
  *
- * Named separately from {@link DEFAULT_BEDROCK_MODEL_IDS} because it has a second
- * consumer: the agent needs it as a runtime *value*
- * (`ANTHROPIC_DEFAULT_HAIKU_MODEL`), not just as an IAM grant. Splicing it out of
- * that list means the granted model and the delivered model id cannot drift — a
- * mismatch would AccessDenied every Haiku call at run time while synth stayed
- * green.
- *
- * Declared ABOVE the list rather than beside {@link haikuInferenceProfileId}
- * below it because the list interpolates it: a `const` referenced before its
- * declaration is a TDZ `ReferenceError` at module load, and re-inlining the
- * literal into the list is exactly the drift this constant exists to prevent.
+ * The direction is deliberate and load-bearing. `handlers/shared/workflows.ts` needs
+ * the same two lists, and importing them FROM this file dragged `aws-cdk-lib` into
+ * every Lambda that reaches it (6.8 KB → 57 MB, 9,679 references) because
+ * {@link BEDROCK_GEO_REGIONS} used to be `Object.values()` of an alpha-CDK enum — a
+ * runtime read of a module that top-level `require`s the CDK, which esbuild cannot
+ * tree-shake. Values live on the dependency-free side; only the enum-typed helpers
+ * below stay here.
  */
-export const DEFAULT_HAIKU_MODEL_ID = 'anthropic.claude-haiku-4-5-20251001-v1:0';
-
-/**
- * Single source of truth for the Bedrock **foundation-model IDs** the agent
- * runtime may invoke. Both grant sites — the AgentCore runtime in
- * `stacks/agent.ts` and the ECS task role in `constructs/ecs-agent-cluster.ts`
- * — derive their `grantInvoke` / IAM ARNs from this one list, so the two
- * backends can never drift (they were previously two hand-synced arrays).
- *
- * Scoping is intentionally per-model (explicit foundation-model +
- * cross-Region inference-profile ARNs), NOT a `Resource: '*'` wildcard — that
- * hardening is preserved. Account-level Bedrock model access remains the outer
- * gate; this list only controls the IAM grant.
- */
-export const DEFAULT_BEDROCK_MODEL_IDS: readonly string[] = [
-  'anthropic.claude-sonnet-4-6',
-  // NOTE: `anthropic.claude-opus-4-20250514-v1:0` was granted here but has no
-  // cross-Region inference profile to grant — `GetInferenceProfile` returns
-  // not-found for both its `global.` and `us.` forms while every other entry in
-  // this list resolves. It was therefore granted and un-invocable: it passed the
-  // CLI's `--model` check and workflow admission (both keyed off this list) and
-  // then failed at turn 0, while the IAM policy carried a grant for a profile
-  // ARN that cannot exist. Use Opus 4.8 below for an Opus-4-class model.
-  // Claude Opus 4.8 — the agent's fallback model when a repo pins none
-  // (``agent/src/config.py``). REQUIRED in this grant list or the agent's
-  // InvokeModel gets AccessDenied at turn 0: both the AgentCore runtime and the
-  // ECS task role scope Bedrock to these IDs via resolveBedrockModelIds. Keep
-  // this entry and that default in the same change — a fallback the role cannot
-  // invoke fails every task on the stack, not just an edge case.
-  'anthropic.claude-opus-4-8',
-  // Claude Opus 5 — granted ahead of anything selecting it (#744). The grant
-  // must be DEPLOYED before the platform default flips, or every task fails at
-  // turn 0 with AccessDenied. Bare ID by contract: Bedrock refuses the bare ID
-  // for on-demand invocation ("ValidationException: … isn't supported. Retry
-  // your request with the ID or ARN of an inference profile"), and both grant
-  // sites derive the geo-prefixed inference-profile ARN — the invocable one —
-  // from this entry plus `bedrockGeoRegion` (`global` in the shipped cdk.json; `us` only if no context is supplied). Opus 4.8 above
-  // stays granted: blueprints may pin it per-repo, so removing it would fail
-  // those repos at turn 0.
-  'anthropic.claude-opus-5',
+export {
+  BEDROCK_GEO_REGIONS,
+  DEFAULT_BEDROCK_MODEL_IDS,
   DEFAULT_HAIKU_MODEL_ID,
-];
-
-/**
- * The bare foundation-model ids the platform itself defaults to, as opposed to the
- * full grant list. Both are injected into the runtime as geo-prefixed profile ids
- * so a deploy cannot grant one geography and tell the agent to call another.
- *
- * Named separately from {@link DEFAULT_BEDROCK_MODEL_IDS} because that list is the
- * IAM ALLOWANCE — several models a repo may pin — while these two are what a task
- * uses when it pins nothing. A model can be granted without being a default.
- */
-export const PLATFORM_DEFAULT_MODEL_ID = 'anthropic.claude-opus-5';
-export const PLATFORM_DEFAULT_AUX_MODEL_ID = 'anthropic.claude-haiku-4-5-20251001-v1:0';
-
-/**
- * The geo-prefixed inference-profile id for a bare model, in the geography this
- * deploy grants. The single place that prefix is applied for runtime env vars.
- *
- * Exists because the main model was previously NOT injected at all: the stack set
- * only the auxiliary var, so the main model came from a Python literal that a
- * geography change did not touch. Deploying with a different geography then granted
- * one set of profiles while the agent asked for another, and every task with no
- * per-repo override failed at turn 0 with AccessDenied. Deriving both from here
- * makes that divergence unrepresentable rather than merely documented.
- */
-export function inferenceProfileId(geoRegion: string, bareModelId: string): string {
-  return `${geoRegion}.${bareModelId}`;
-}
+  PLATFORM_DEFAULT_AUX_MODEL_ID,
+  PLATFORM_DEFAULT_MODEL_ID,
+  inferenceProfileId,
+} from '../handlers/shared/bedrock-model-constants';
 
 /** CDK context key whose value (a string array) overrides the model set. */
 export const BEDROCK_MODELS_CONTEXT_KEY = 'bedrockModels';
@@ -121,24 +64,29 @@ export const BEDROCK_GEO_REGION_CONTEXT_KEY = 'bedrockGeoRegion';
 export const DEFAULT_BEDROCK_GEO_REGION = CrossRegionInferenceProfileRegion.US;
 
 /**
- * The geographies `@aws-cdk/aws-bedrock-alpha` actually models — the single
- * source of truth for both the {@link resolveBedrockGeoRegion} allow-list and
- * the region-prefix rejection in {@link resolveBedrockModelIds}. Derived from
- * the enum, so a future CDK release that adds a geography widens both at once
- * instead of leaving one of them silently behind.
+ * The geographies `@aws-cdk/aws-bedrock-alpha` actually models, as ENUM members —
+ * the allow-list `resolveBedrockGeoRegion` validates against and the source of the
+ * prefix rejection in `resolveBedrockModelIds`.
+ *
+ * Construct-layer only, and deliberately NOT exported: this is the
+ * `Object.values()` read of the alpha enum that pulls in `aws-cdk-lib`, so a runtime
+ * handler importing it would put the whole CDK in its bundle. The exported
+ * `BEDROCK_GEO_REGIONS` is the dependency-free literal re-exported above; a test
+ * asserts the two are equal, so a CDK release adding a geography fails the suite
+ * rather than silently leaving the literal behind.
  */
-export const BEDROCK_GEO_REGIONS: readonly CrossRegionInferenceProfileRegion[] =
+const GEO_REGION_ENUM_VALUES: readonly CrossRegionInferenceProfileRegion[] =
   Object.values(CrossRegionInferenceProfileRegion);
 
 /**
- * `global|us-gov|apac|eu|us|jp|au` — an alternation over
- * {@link BEDROCK_GEO_REGIONS}, sorted longest-first so the pattern reads
- * unambiguously with `us-gov` ahead of `us`. Readability only: because
+ * `global|us-gov|apac|eu|us|jp|au` — an alternation over the geographies.
+ *
+ * Sorted longest-first so `us-gov` reads ahead of `us`. Presentation only: because
  * {@link GEO_PREFIX_RE} anchors a literal `.` after the alternation, a `us`-first
- * order would still reject `us-gov.…` correctly (the engine backtracks when the
- * `.` fails against `-`). Sorting just means nobody has to reason about that.
+ * order still rejects `us-gov.…` correctly (the engine backtracks when the `.` fails
+ * against `-`). Sorting just means nobody has to reason about that to trust it.
  */
-const GEO_ALTERNATION = [...BEDROCK_GEO_REGIONS]
+const GEO_ALTERNATION = [...GEO_REGION_ENUM_VALUES]
   .sort((a, b) => b.length - a.length)
   .join('|');
 
@@ -170,51 +118,13 @@ export function resolveBedrockGeoRegion(node: Node): CrossRegionInferenceProfile
   if (override === undefined || override === null) {
     return DEFAULT_BEDROCK_GEO_REGION;
   }
-  if (typeof override !== 'string' || !BEDROCK_GEO_REGIONS.includes(override as CrossRegionInferenceProfileRegion)) {
+  if (typeof override !== 'string' || !GEO_REGIONS.includes(override as CrossRegionInferenceProfileRegion)) {
     throw new Error(
       `Context '${BEDROCK_GEO_REGION_CONTEXT_KEY}' must be one of `
-      + `${BEDROCK_GEO_REGIONS.map((g) => `'${g}'`).join(', ')}; got ${JSON.stringify(override)}.`,
+      + `${GEO_REGIONS.map((g) => `'${g}'`).join(', ')}; got ${JSON.stringify(override)}.`,
     );
   }
   return override as CrossRegionInferenceProfileRegion;
-}
-
-/**
- * The `ANTHROPIC_DEFAULT_HAIKU_MODEL` value delivered to the agent, for the
- * geography `geoRegion` (from {@link resolveBedrockGeoRegion}).
- *
- * A **cross-Region inference-profile** id, not the bare foundation-model id:
- * Claude 4.x cannot be invoked on-demand by bare id (400 "on-demand throughput
- * isn't supported"). The prefix is the resolved geography rather than a hardcoded
- * `us.` so this auxiliary model routes through the same geography as the granted
- * profiles — every grant site derives its inference-profile ARN from the same
- * value, so the delivered id is always one of the granted profiles.
- * (`agent/src/runner.py` re-sets the env var at spawn time from whatever arrives.)
- *
- * A function rather than a `const` for exactly that reason: the geography is a
- * per-deployment context read (`bedrockGeoRegion`, #764), so a module-level
- * constant could only ever bake one geography in — which is the split this
- * function exists to make impossible.
- *
- * TWO delivery sites call it, and both must — the second is the easy one to
- * forget:
- *  1. the AgentCore runtime env block (`stacks/agent.ts`);
- *  2. the lambda-microvm `platform_config` block (`stacks/agent.ts`) — a MicroVM
- *     restored from a snapshot cannot inherit a baked env, so the orchestrator
- *     forwards the value on the `/run` payload instead (ADR-021 P2). This is the
- *     "third site" flagged on #746 (after the two Bedrock ARN derivations in
- *     `stacks/agent.ts` and `constructs/ecs-agent-cluster.ts`): a geo change that
- *     missed it would leave one substrate calling a profile the role does not
- *     grant.
- *
- * The ECS container env is deliberately NOT in that list — it never carried
- * `ANTHROPIC_DEFAULT_HAIKU_MODEL`, so an ECS agent falls back to
- * `agent/src/config.py`'s own `us.`-prefixed default. That is correct on the
- * default geography and a pre-existing gap on any other; it predates this merge
- * and is left alone here rather than fixed in a conflict resolution.
- */
-export function haikuInferenceProfileId(geoRegion: CrossRegionInferenceProfileRegion): string {
-  return `${geoRegion}.${DEFAULT_HAIKU_MODEL_ID}`;
 }
 
 /**
@@ -241,7 +151,7 @@ export function haikuInferenceProfileId(geoRegion: CrossRegionInferenceProfileRe
 export function resolveBedrockModelIds(node: Node): readonly string[] {
   const raw = node.tryGetContext(BEDROCK_MODELS_CONTEXT_KEY);
   if (raw === undefined || raw === null) {
-    return DEFAULT_BEDROCK_MODEL_IDS;
+    return MODEL_IDS;
   }
   // `cdk.context.json` delivers a real array, but the `-c key=value` form
   // documented above delivers a raw string. Parse the string form so both

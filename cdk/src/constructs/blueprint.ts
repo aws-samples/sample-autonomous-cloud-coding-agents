@@ -217,8 +217,11 @@ export interface BlueprintProps {
  * a RepoConfig record to the shared RepoTable via a custom resource.
  *
  * Create: PutItem with status='active' and all config fields. Update: UpdateItem,
- * which SETs the fields a Blueprint declares and REMOVEs the per-repo overrides it
- * no longer declares — a SET-only update would leave a dropped override live.
+ * which SETs the fields a Blueprint declares and REMOVEs only per-repo **asset
+ * refs** it no longer declares. Other dropped overrides are intentionally carried
+ * forward rather than cleared — see `clearedOverrideFields` for why a blanket clear
+ * was destructive (onUpdate runs on every deploy, and the CLI is a sanctioned
+ * co-writer per ADR-017).
  * Delete: UpdateItem to set status='removed' and TTL for eventual cleanup.
  *
  * NOTE: Timestamps (onboarded_at, updated_at) are captured at CDK synth time,

@@ -37,8 +37,8 @@ import { ApiKeyTable } from '../constructs/api-key-table';
 import { ApprovalMetricsPublisherConsumer } from '../constructs/approval-metrics-publisher-consumer';
 import { AttachmentsBucket } from '../constructs/attachments-bucket';
 import {
+  PLATFORM_DEFAULT_AUX_MODEL_ID,
   PLATFORM_DEFAULT_MODEL_ID,
-  haikuInferenceProfileId,
   inferenceProfileId,
   resolveBedrockGeoRegion,
   resolveBedrockModelIds,
@@ -533,7 +533,7 @@ export class AgentStack extends Stack {
       // from the same geography. runner.py re-sets both at spawn time; a per-repo
       // `model_id` still overrides.
       ANTHROPIC_MODEL: inferenceProfileId(bedrockGeoRegion, PLATFORM_DEFAULT_MODEL_ID),
-      ANTHROPIC_DEFAULT_HAIKU_MODEL: haikuInferenceProfileId(bedrockGeoRegion),
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: inferenceProfileId(bedrockGeoRegion, PLATFORM_DEFAULT_AUX_MODEL_ID),
       TASK_TABLE_NAME: taskTable.table.tableName,
       TASK_EVENTS_TABLE_NAME: taskEventsTable.table.tableName,
       NUDGES_TABLE_NAME: taskNudgesTable.table.tableName,
@@ -1106,7 +1106,7 @@ export class AgentStack extends Stack {
         // Same helper, same resolved geography as the AgentCore runtime env
         // above (#764) — the two substrates cannot be told to call different
         // inference profiles.
-        anthropicDefaultHaikuModel: haikuInferenceProfileId(bedrockGeoRegion),
+        anthropicDefaultHaikuModel: inferenceProfileId(bedrockGeoRegion, PLATFORM_DEFAULT_AUX_MODEL_ID),
         // The MAIN model, delivered the same way for the same reason. Only the auxiliary
         // one was, so on this substrate the main model came from a literal in
         // agent/src/config.py that a geography change does not touch: a non-default

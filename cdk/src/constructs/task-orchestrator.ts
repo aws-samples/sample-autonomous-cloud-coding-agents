@@ -263,7 +263,7 @@ export interface TaskOrchestratorProps {
      *
      * The prefix is whichever geography `resolveBedrockGeoRegion` resolves for the
      * deployment (`bedrockGeoRegion` context, default `us`), NOT a hardcoded `us.`:
-     * pass `haikuInferenceProfileId(bedrockGeoRegion)` so this value and the
+     * pass `inferenceProfileId(bedrockGeoRegion, PLATFORM_DEFAULT_AUX_MODEL_ID)` so this value and the
      * inference-profile ARNs the roles are granted come from the same source (#764).
      */
     readonly anthropicDefaultHaikuModel: string;

@@ -33,8 +33,12 @@
  * asserts the ids/versions match the YAML.
  */
 
+import { BEDROCK_GEO_REGIONS, DEFAULT_BEDROCK_MODEL_IDS } from './bedrock-model-constants';
 import { ResolvedWorkflow } from './types';
-import { BEDROCK_GEO_REGIONS, DEFAULT_BEDROCK_MODEL_IDS } from '../../constructs/bedrock-models';
+// Bundle boundary: these come from the dependency-free constants module, NOT from
+// `constructs/bedrock-models.ts`. That module derives its geography list from an
+// alpha-CDK enum at runtime, which esbuild cannot tree-shake — importing it here put
+// all of `aws-cdk-lib` into every Lambda that reaches this file (6.8 KB → 57 MB).
 
 /** The required-input contract a workflow declares (mirrors the YAML). */
 export interface WorkflowRequiredInputs {

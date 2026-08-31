@@ -143,6 +143,17 @@ async def smoke_test():
     elif counts["system"] == 0:
         print("\nFAIL — Zero messages at all. CLI subprocess may not start.")
         print("       Check: is claude-code installed? Run: claude --version")
+    else:
+        # Reachable: assistant>0 but result==0 (the model spoke, the run never
+        # terminated cleanly). Without this branch the script printed NO verdict at
+        # all and still exited 1 — a diagnostic that fails silently is the thing this
+        # file exists to rule out.
+        print("\nINDETERMINATE — Got AssistantMessages but no ResultMessage.")
+        print("       The model responded, so the SDK/CLI/Bedrock path works, but the")
+        print("       run did not terminate normally. Treat as a FAILURE of this")
+        print("       diagnostic, not evidence about the model. Check the CLI stderr")
+        print("       above for a mid-stream error, and whether the run was killed")
+        print("       (timeout, OOM, cancelled) before it could emit its result.")
     if errors:
         print(f"\nErrors: {errors}")
 

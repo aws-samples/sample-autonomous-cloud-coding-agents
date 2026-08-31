@@ -191,6 +191,20 @@ describe('AgentStack', () => {
     template.hasOutput('BedrockGeoRegion', { Value: 'us' });
   });
 
+  test('outputs BedrockModelIds — the linchpin both new consumers read', () => {
+    // Asserted on the PRODUCER side because two independent consumers depend on this
+    // output and BOTH degrade SILENTLY without it: `repo onboard --model`'s grant
+    // check and doctor's `checkGrantedModelProfiles` each skip themselves when the
+    // output is absent (deliberately, so an older stack is not blocked). A refactor
+    // that dropped or renamed it would therefore turn two guards into no-ops with
+    // nothing failing anywhere — every consumer-side test would still pass.
+    //
+    // Value asserted, not just presence: the consumers parse it as a comma-separated
+    // list of BARE ids, so a formatting change (JSON array, geo-prefixed entries)
+    // breaks them just as thoroughly as a missing output.
+    template.hasOutput('BedrockModelIds', { Value: DEFAULT_BEDROCK_MODEL_IDS.join(',') });
+  });
+
   test('outputs CedarWasmLayerArn', () => {
     template.hasOutput('CedarWasmLayerArn', {});
   });

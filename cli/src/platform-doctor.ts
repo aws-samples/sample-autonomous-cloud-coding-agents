@@ -483,23 +483,36 @@ async function checkBedrockInferenceProfile(
     // operator on a least-privilege role got `fail` — which exits doctor non-zero
     // and reports a healthy stack as broken.
     const errorName = err instanceof Error ? err.name : '';
-    const accessDenied = /AccessDenied|Unauthorized|not authorized/i.test(`${errorName} ${message}`);
-    const status: DoctorCheckStatus = accessDenied ? 'warn' : 'fail';
-    // The remedy DEPENDS on which of the two happened, so it cannot be shared.
-    // Rendering the denial case showed why: it appended "Either <model> has no
-    // profile in that geography … tasks would fail at turn 0", which asserts a
-    // conclusion about the PROFILE from an error about the CALLER. On a
-    // least-privilege operator role the profile is very likely fine, and the
-    // sentence sent the reader to redeploy in another geography over a missing IAM
-    // action on their own credentials.
-    const detail = accessDenied
-      ? `${message} That is a permissions gap on the caller, not evidence the profile is `
+    const both = `${errorName} ${message}`;
+    const accessDenied = /AccessDenied|Unauthorized|not authorized/i.test(both);
+    // THREE outcomes. `fail` here tells the operator the model or geography is wrong,
+    // so it must be reserved for an error that PROVES it: the service answered, and
+    // the answer was "no such profile". A binary `accessDenied ? warn : fail` also
+    // routed throttling, 5xx, timeouts and expired credentials into that verdict —
+    // reporting a healthy deployment as broken and exiting doctor non-zero because a
+    // call happened to fail.
+    const definitivelyAbsent =
+      /ResourceNotFound|ValidationException|NoSuchResource|not found|does not exist/i.test(both);
+    const status: DoctorCheckStatus = accessDenied || !definitivelyAbsent ? 'warn' : 'fail';
+    // The remedy depends on WHICH happened, so it cannot be shared. Rendering the
+    // denial case showed why the old shared string was wrong: it appended "Either
+    // <model> has no profile in that geography … tasks would fail at turn 0", drawing
+    // a conclusion about the PROFILE from an error about the CALLER.
+    let detail: string;
+    if (accessDenied) {
+      detail = `${message} That is a permissions gap on the caller, not evidence the profile is `
         + `missing — the deployment grants '${geoRegion}' profiles (bedrockGeoRegion), and `
         + 'whether this one resolves is unknown until re-run with credentials holding '
-        + 'bedrock:GetInferenceProfile.'
-      : `${message} The deployment grants '${geoRegion}' profiles (bedrockGeoRegion). `
+        + 'bedrock:GetInferenceProfile.';
+    } else if (definitivelyAbsent) {
+      detail = `${message} The deployment grants '${geoRegion}' profiles (bedrockGeoRegion). `
         + `Either ${bareModelId} has no profile in that geography, or this account lacks its `
         + 'entitlements — tasks would fail at turn 0 with AccessDenied.';
+    } else {
+      detail = `${message} The check did not complete, so this says nothing about whether `
+        + `${bareModelId} resolves in '${geoRegion}' — treat it as unverified, not as a `
+        + 'misconfiguration, and re-run.';
+    }
     return { id, label, status, detail };
   }
 }
@@ -547,8 +560,16 @@ async function checkGrantedModelProfiles(
   }
 
   const bedrock = makeClient(BedrockClient, { region });
+  // THREE buckets, not two. The remedy for a missing profile is "remove this model
+  // from the grant set", and that is destructive advice: applied to a model that is
+  // actually fine, it narrows a working deployment. So it may only be given for an
+  // error that PROVES the profile does not exist. A binary
+  // `accessDenied ? warn : fail` sent every throttle, 5xx, expired credential, and
+  // unreachable-endpoint into that branch — telling an operator to delete a healthy
+  // model because the check happened to run during a blip.
   const missing: string[] = [];
   const denied: string[] = [];
+  const unverified: string[] = [];
   for (const model of bare) {
     const profileId = `${geoRegion}.${model}`;
     try {
@@ -556,11 +577,17 @@ async function checkGrantedModelProfiles(
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const errorName = err instanceof Error ? err.name : '';
+      const both = `${errorName} ${message}`;
       // Name AND message: a denial carries the identifier only in `err.name`.
-      if (/AccessDenied|Unauthorized|not authorized/i.test(`${errorName} ${message}`)) {
+      if (/AccessDenied|Unauthorized|not authorized/i.test(both)) {
         denied.push(profileId);
-      } else {
+      } else if (/ResourceNotFound|ValidationException|NoSuchResource|not found|does not exist/i.test(both)) {
+        // Definitive: the service answered, and its answer was "no such profile".
         missing.push(profileId);
+      } else {
+        // Everything else — throttling, 5xx, timeouts, DNS, expired creds. The check
+        // did not run, which is not evidence about the model either way.
+        unverified.push(`${profileId} (${errorName || 'unknown error'})`);
       }
     }
   }
@@ -585,6 +612,17 @@ async function checkGrantedModelProfiles(
         + `these operator credentials: ${denied.join(', ')}. That is a permissions gap on the `
         + 'caller, not evidence the profile is missing — re-run with credentials holding '
         + 'bedrock:GetInferenceProfile to settle it.',
+    };
+  }
+  if (unverified.length > 0) {
+    return {
+      id,
+      label,
+      status: 'warn',
+      detail: `${unverified.length} of ${bare.length} granted model(s) could not be checked: `
+        + `${unverified.join(', ')}. The call failed for a reason unrelated to the model, so this `
+        + 'says nothing about whether the profile exists — do NOT remove anything from the grant '
+        + 'set on the strength of it. Re-run to settle.',
     };
   }
   return {

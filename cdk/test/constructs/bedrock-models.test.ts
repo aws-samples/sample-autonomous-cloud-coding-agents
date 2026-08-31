@@ -36,6 +36,38 @@ function nodeWithContext(context?: Record<string, unknown>) {
   return new Stack(app, 'TestStack').node;
 }
 
+/**
+ * The bundle boundary, asserted.
+ *
+ * `BEDROCK_GEO_REGIONS` is now a hand-written literal in the dependency-free
+ * `handlers/shared/bedrock-model-constants.ts` rather than
+ * `Object.values(CrossRegionInferenceProfileRegion)`. That was not a style choice:
+ * reading the alpha enum is a RUNTIME use of a module that top-level `require`s
+ * `aws-cdk-lib`, so when `handlers/shared/workflows.ts` imported the list from the
+ * construct layer, esbuild put the entire CDK into every Lambda reaching that file
+ * — measured at 6.8 KB → 57 MB with 9,679 `aws-cdk-lib` references, on the
+ * orchestrator, create-task, webhook create-task, three channel webhook processors
+ * and the reconcilers. `aws-cdk-lib` is in no construct's `externalModules`, so
+ * nothing downstream strips it.
+ *
+ * The cost of a literal is drift, and this is the test that pays it: a CDK release
+ * adding a geography fails HERE, loudly, instead of silently leaving the literal
+ * one short — which would make `resolveBedrockGeoRegion` accept a geography the
+ * workflow allow-list rejects.
+ */
+describe('the geography literal stays in step with the CDK enum', () => {
+  it('equals Object.values(CrossRegionInferenceProfileRegion), as a set', () => {
+    expect([...BEDROCK_GEO_REGIONS].sort())
+      .toEqual(Object.values(CrossRegionInferenceProfileRegion).sort());
+  });
+
+  it('is the same LENGTH, so neither side has a stray or duplicate entry', () => {
+    // Set equality above would pass if one side repeated a value.
+    expect(BEDROCK_GEO_REGIONS).toHaveLength(Object.values(CrossRegionInferenceProfileRegion).length);
+    expect(new Set(BEDROCK_GEO_REGIONS).size).toBe(BEDROCK_GEO_REGIONS.length);
+  });
+});
+
 describe('resolveBedrockModelIds', () => {
   it('returns the default set when no context override is present', () => {
     const ids = resolveBedrockModelIds(nodeWithContext());
