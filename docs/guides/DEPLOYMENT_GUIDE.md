@@ -235,6 +235,65 @@ Triggers via `workflow_run` when `build.yml` completes successfully. The pipelin
 
 ## Known deployment issues
 
+### AgentCore unsupported Availability Zones
+
+**Affects:** Fresh deploys in accounts whose default Availability Zones don't line up with the zones AgentCore supports for the region.
+
+**Symptom:** The `AWS::BedrockAgentCore::Runtime` resource fails to stabilize (`NotStabilized` — "subnets are in unsupported availability zones") and the stack rolls back.
+
+**Root cause:** AgentCore Runtime only places its network interfaces in a subset of each region's Availability Zones, published as physical **zone IDs** (e.g. `use1-az1`, `use1-az2`, `use1-az4` for `us-east-1`). Zone IDs are stable across accounts, but zone *names* (`us-east-1a`) are aliased per-account — so `us-east-1a` can map to a different physical zone in your account than in another. Left to its default, CDK picks zones by name and can land the Runtime subnets in an unsupported zone. See the AWS [Supported Availability Zones](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/agentcore-vpc.html#agentcore-supported-azs) table for the per-region set; the same table is snapshotted as `AGENTCORE_SUPPORTED_AZ_IDS` in `cdk/src/constructs/agentcore-azs.ts`.
+
+#### Which deploy paths are protected
+
+| Path | Auto-pinned? | What you must do |
+|------|--------------|------------------|
+| Local `cdk deploy` / `mise //cdk:deploy` (credentials resolve at synth) | Yes — for regions in the built-in map | Nothing, unless synth reports an `[AgentCore AZs]` error |
+| CI/CD (`build.yml` → `deploy.yml`) | **No** — the assembly is synthesized credential-less | Set the `AGENTCORE_AVAILABILITY_ZONES` repo/environment variable (below) |
+| Any region absent from the built-in map | No | Set the context override (below) |
+
+**Auto-pin (local deploys).** With a concrete account and region, synth confirms the credentials belong to that account (`sts:GetCallerIdentity`), reads the account's zone name-to-ID mapping (`ec2:DescribeAvailabilityZones`), and pins the VPC to the first two AZ *names* — sorted, so the pin is stable across synths — whose zone IDs are AgentCore-supported. Two zones matches `AgentVpc`'s default `maxAzs`, so enabling this does not widen an already-working topology.
+
+If auto-pin is attempted and cannot finish — lookup denied or throttled, credentials pointing at a different account, or fewer than two supported zones — synth **fails** with an `[AgentCore AZs]` error rather than quietly falling back. That is deliberate: a silent fallback produces a template that looks pinned but is not, which is the failure this section exists to prevent. Fix the cause or set the override.
+
+**CI/CD deploys are not auto-pinned.** Auto-pin needs a bound account at synth time and the pipeline has none: `build.yml` synthesizes `cdk.out` without credentials (env-agnostic) and `deploy.yml` deploys that pre-built assembly (`--app cdk/cdk.out`). Two consequences worth being explicit about:
+
+- Passing `-c 'agentcore:availabilityZones=...'` to `cdk deploy` **has no effect on the pipeline path** — the template is already synthesized by then. Context only matters at synth.
+- `cdk/cdk.context.json` is **not** a durable place to set this: it is gitignored, and `build.yml` regenerates the whole file.
+
+Instead, set the repo (or environment) variable **`AGENTCORE_AVAILABILITY_ZONES`** to a JSON array of zone names. `build.yml`'s "Generate CDK context" step folds it into the context that the uploaded assembly is synthesized with, and an unset variable simply leaves the stack unpinned (synth logs an `[AgentCore AZs]` warning):
+
+```
+AGENTCORE_AVAILABILITY_ZONES = ["us-east-1b","us-east-1c"]
+```
+
+**Choosing the values.**
+
+1. Discover your account's zone name-to-ID mapping:
+   ```bash
+   aws ec2 describe-availability-zones --region <region> \
+     --query 'AvailabilityZones[].[ZoneName,ZoneId]' --output text
+   ```
+2. Pick at least two zone **names** (column 1) whose **zone IDs** (column 2) appear in the AgentCore-supported set for that region.
+3. Set the value — the pipeline variable above, or for a local synth either `cdk/cdk.json` `context`:
+   ```json
+   { "context": { "agentcore:availabilityZones": ["us-east-1b", "us-east-1c"] } }
+   ```
+   or the CLI at synth time:
+   ```bash
+   cdk deploy -c 'agentcore:availabilityZones=["us-east-1b","us-east-1c"]'
+   ```
+
+The override is validated at synth time, and both the JSON-array and `-c` string forms behave identically. Synth fails with a message naming the key when the value is not an array, has an empty/non-string entry, lists fewer than two **distinct** zones, contains zone *IDs* instead of names (`use1-az2` — a common column mix-up), or names zones outside the target region. When the account's mapping is knowable, the override is additionally cross-checked against the supported set, and unsupported or nonexistent zones fail synth.
+
+**Upgrading an existing stack.** Auto-pin is on by default, so a local `cdk deploy` against a stack created before this change may select different zones than the deployed subnets use. `Subnet.AvailabilityZone` is create-only, so that is a **replacement** of the subnets and the resources bound to them (route tables, NAT gateway/EIP, VPC endpoints). Run `mise //cdk:diff` first. If the diff shows subnet replacement and you would rather keep the current topology, pin the override to the zones already deployed:
+
+```bash
+aws ec2 describe-subnets --filters "Name=vpc-id,Values=<vpc-id>" \
+  --query 'Subnets[].[SubnetId,AvailabilityZone,AvailabilityZoneId]' --output text
+```
+
+Be aware that destroying a VPC whose subnets held AgentCore ENIs can take 20–40 minutes while AWS reclaims them (see the `DELETE_FAILED` note in the [quick start](./QUICK_START.mdx) troubleshooting table).
+
 ### DNS Query Log Config replacement cascade (upgrading from pre-v0.5)
 
 **Affects:** Stacks deployed *before* the tag-exclusion fix ([#222](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/pull/222)). Stacks created after this fix are not affected.
