@@ -1607,7 +1607,13 @@ describe('AgentStack Linear identity vault gate (#809)', () => {
     const policyJson = JSON.stringify(template.findResources('AWS::IAM::Policy'));
     expect(policyJson).toContain('bedrock-agentcore:GetWorkloadAccessTokenForUserId');
     expect(policyJson).toContain('bedrock-agentcore:GetResourceOauth2Token');
-    expect(policyJson).toContain('workload-identity-directory/default');
+    // NOT asserted here: that the mint grant covers the workload-identity DIRECTORY,
+    // the resource whose omission caused a live AccessDenied. At this level the claim
+    // is unfalsifiable — the AgentCore Runtime L2 grants its own role
+    // `GetWorkloadAccessToken*` on `workload-identity-directory/default` for reasons
+    // unrelated to Linear, so the assertion passes with `grantMintToken`'s directory
+    // resource deleted. Verified by deleting it. The falsifiable, per-resource guard
+    // lives in linear-identity-vault.test.ts, scoped to one grantee's own policy.
     // The agent runtime carries the vault env so config.py takes the vault path.
     const rendered = JSON.stringify(template.toJSON());
     expect(rendered).toContain('LINEAR_WORKLOAD_IDENTITY_NAME');
@@ -1623,6 +1629,53 @@ describe('AgentStack Linear identity vault gate (#809)', () => {
     // single AWS::CloudFormation::Stack for it.
     expect(rendered).not.toContain('Custom::CDKBucketDeployment');
     expect(rendered).toContain('LinearVaultConsentPageStack');
+  });
+
+  test('the workload identity name is STACK-scoped, so two stacks cannot share one', () => {
+    // AgentCore workload identity names are unique per account+region; stacks are not.
+    // Sharing one is not a benign no-op: the second stack's CreateWorkloadIdentity
+    // conflicts, falls back to an update, and that update REPLACES
+    // allowedResourceOauth2ReturnUrls — dropping the first stack's consent page from
+    // the allowlist, so its consent begins failing. A Delete from either then removes
+    // the identity both were using.
+    const nameFor = (id: string): string => {
+      const app = new App({ context: { enableLinearIdentityVault: true } });
+      const rendered = JSON.stringify(Template.fromStack(
+        new AgentStack(app, id, { env: { account: '123456789012', region: 'us-east-1' } }),
+      ).toJSON());
+      const match = /"(abca_linear_oauth[A-Za-z0-9_]*)"/.exec(rendered);
+      return match![1];
+    };
+    const first = nameFor('AlphaAgentStack');
+    const second = nameFor('BetaAgentStack');
+    expect(first).not.toBe(second);
+    expect(first).toContain('AlphaAgentStack');
+    // 64 characters is the AgentCore limit; a long stack name must be truncated to
+    // fit rather than rejected at deploy time.
+    const long = nameFor('AgentStackWithAVeryLongDeliberatelyExcessiveNameForTruncation');
+    expect(long.length).toBeLessThanOrEqual(64);
+    expect(long.startsWith('abca_linear_oauth_')).toBe(true);
+  });
+
+  test('the workload identity name can be pinned by context, for an existing deployment', () => {
+    // A grant is bound to (workload identity, user id), so renaming the identity
+    // orphans every consent already given. An operator already running the vault
+    // pins the old name instead of re-consenting every workspace.
+    const app = new App({
+      context: { enableLinearIdentityVault: true, linearVaultWorkloadName: 'abca_linear_oauth' },
+    });
+    const template = Template.fromStack(
+      new AgentStack(app, 'PinnedNameStack', { env: { account: '123456789012', region: 'us-east-1' } }),
+    );
+    const outputs = template.toJSON().Outputs as Record<string, { Value: unknown }>;
+    // Published so `bgagent linear setup` consents against the identity this stack
+    // actually created, instead of carrying its own copy of the name.
+    expect(outputs.LinearVaultWorkloadName.Value).toBe('abca_linear_oauth');
+    const fns = template.findResources('AWS::Lambda::Function');
+    const withEnv = Object.values(fns).filter((f) => (f as {
+      Properties?: { Environment?: { Variables?: Record<string, unknown> } };
+    }).Properties?.Environment?.Variables?.LINEAR_WORKLOAD_IDENTITY_NAME === 'abca_linear_oauth');
+    expect(withEnv.length).toBeGreaterThan(0);
   });
 
   test('EVERY Lambda that can mint a Linear token has the vault env + grant', () => {
@@ -1656,12 +1709,13 @@ describe('AgentStack Linear identity vault gate (#809)', () => {
     ]) {
       expect(withVaultEnv.join(' ')).toContain(fragment);
     }
-    // Every one also carries the workload name, or the env is inert.
-    for (const id of withVaultEnv) {
-      const vars = (fns[id] as { Properties: { Environment: { Variables: Record<string, unknown> } } })
-        .Properties.Environment.Variables;
-      expect(vars.LINEAR_WORKLOAD_IDENTITY_NAME).toBe('abca_linear_oauth');
-    }
+    // Every one also carries the workload name, or the env is inert — and they all
+    // carry the SAME one. Two Lambdas naming different identities is a partial
+    // outage that no single-Lambda assertion would catch: one mints, one 404s.
+    const workloadNames = new Set(withVaultEnv.map((id) => (fns[id] as {
+      Properties: { Environment: { Variables: Record<string, unknown> } };
+    }).Properties.Environment.Variables.LINEAR_WORKLOAD_IDENTITY_NAME));
+    expect([...workloadNames]).toEqual(['abca_linear_oauth_LinearVaultWritersStack']);
   });
 
   test('MicroVM + vault currently EXCEEDS CloudFormation\'s 500-resource limit', () => {

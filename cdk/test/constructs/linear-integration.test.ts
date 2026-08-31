@@ -286,8 +286,21 @@ describe('revoked-authorization recording (#812)', () => {
       JSON.stringify(p.Properties.Roles ?? '').includes('WebhookProcessorFn'),
     );
     expect(processorPolicy).toBeDefined();
-    const actions = JSON.stringify(processorPolicy!.Properties.PolicyDocument.Statement);
+    // Scoped to the statement that actually covers the REGISTRY table. Stringifying
+    // the whole statement list and grepping for `dynamodb:UpdateItem` proved nothing:
+    // this same role holds grantReadWriteData on taskTable and taskEventsTable, which
+    // contribute that action anyway — so the assertion stayed green with the registry
+    // grant reverted to read-only, leaving `markWorkspaceRevoked` permanently inert,
+    // which is the dormancy this grant exists to end. Mutation-checked by reverting it.
+    const statements = processorPolicy!.Properties.PolicyDocument.Statement as Array<{
+      Action?: unknown;
+      Resource?: unknown;
+    }>;
+    const registryStatements = statements.filter((s) =>
+      JSON.stringify(s.Resource ?? '').includes('WorkspaceRegistryTable'),
+    );
+    expect(registryStatements.length).toBeGreaterThan(0);
     // UpdateItem is what markWorkspaceRevoked needs; a read-only grant omits it.
-    expect(actions).toContain('dynamodb:UpdateItem');
+    expect(JSON.stringify(registryStatements.map((s) => s.Action))).toContain('dynamodb:UpdateItem');
   });
 });

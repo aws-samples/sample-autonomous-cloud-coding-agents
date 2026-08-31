@@ -18,7 +18,7 @@
  */
 
 import { App, Stack } from 'aws-cdk-lib';
-import { Match, Template } from 'aws-cdk-lib/assertions';
+import { Template } from 'aws-cdk-lib/assertions';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import { LinearIdentityVault } from '../../src/constructs/linear-identity-vault';
 
@@ -76,7 +76,7 @@ describe('LinearIdentityVault construct', () => {
     });
   });
 
-  test('grants the onEvent handler workload-identity lifecycle scoped to the directory', () => {
+  test('the onEvent handler gets the full lifecycle, but Update/Delete are scoped to THIS identity', () => {
     const { template } = synth();
     const actions = allPolicyActions(template);
     for (const a of [
@@ -87,21 +87,49 @@ describe('LinearIdentityVault construct', () => {
     ]) {
       expect(actions).toContain(a);
     }
-    // Scoped to the workload-identity-directory, NOT '*'.
-    template.hasResourceProperties('AWS::IAM::Policy', {
-      PolicyDocument: {
-        Statement: Match.arrayWith([
-          Match.objectLike({
-            Action: Match.arrayWith(['bedrock-agentcore:CreateWorkloadIdentity']),
-            Resource: Match.objectLike({
-              'Fn::Join': Match.arrayWith([
-                Match.arrayWith([Match.stringLikeRegexp('workload-identity-directory')]),
-              ]),
-            }),
-          }),
-        ]),
-      },
-    });
+
+    // Create names the DIRECTORY because it authorizes before the identity exists —
+    // there is nothing narrower to point at. Everything else must not.
+    //
+    // Update is the one that makes this a real boundary, not hygiene: it REPLACES
+    // `allowedResourceOauth2ReturnUrls`, so a directory-wide grant lets this Lambda
+    // rewrite the consent allowlist of any workload identity in the account,
+    // including another stack's — whose consent then starts failing with nothing in
+    // either template to explain it.
+    const statements = Object.values(template.findResources('AWS::IAM::Policy'))
+      .flatMap((p) => (p.Properties.PolicyDocument.Statement ?? []) as Array<{
+        Action?: unknown; Resource?: unknown;
+      }>);
+    const forAction = (action: string) => statements
+      .filter((s) => {
+        const a = s.Action;
+        return Array.isArray(a) ? a.includes(action) : a === action;
+      })
+      .flatMap((s) => (Array.isArray(s.Resource) ? s.Resource : [s.Resource]) as unknown[]);
+
+    const arnTail = (resource: unknown): string => {
+      const join = (resource as { 'Fn::Join'?: [string, unknown[]] })?.['Fn::Join'];
+      const parts = join ? join[1] : [resource];
+      const last = parts[parts.length - 1];
+      return typeof last === 'string' ? last : String(resource);
+    };
+
+    const createTails = forAction('bedrock-agentcore:CreateWorkloadIdentity').map(arnTail);
+    expect(createTails.length).toBeGreaterThan(0);
+    // `default`, not `*` — the directory segment is always `default`.
+    expect(createTails.every((t) => t.endsWith('workload-identity-directory/default'))).toBe(true);
+
+    for (const action of [
+      'bedrock-agentcore:UpdateWorkloadIdentity',
+      'bedrock-agentcore:DeleteWorkloadIdentity',
+    ]) {
+      const tails = forAction(action).map(arnTail);
+      expect(tails.length).toBeGreaterThan(0);
+      // Every resource must name a specific identity UNDER the directory.
+      expect(tails.every((t) => /workload-identity-directory\/default\/workload-identity\/.+$/.test(t)))
+        .toBe(true);
+      expect(tails.some((t) => t.endsWith('workload-identity-directory/*'))).toBe(false);
+    }
   });
 
   test('multiple return URLs (localhost + hosted) are both registered', () => {
@@ -130,7 +158,31 @@ describe('LinearIdentityVault construct', () => {
     // DIRECTORY. Granting only the named identity produced a live AccessDenied
     // ("not authorized … on resource: …/workload-identity-directory/default"),
     // so the bare directory ARN must be present — this is the regression guard.
-    expect(rendered).toContain('workload-identity-directory/default');
+    //
+    // Asserted as a distinct resource ENTRY rather than a substring of the rendered
+    // statement, because the named-identity ARN is
+    // `…/workload-identity-directory/default/workload-identity/<name>` — it CONTAINS
+    // the directory ARN. A `toContain('workload-identity-directory/default')` therefore
+    // stayed green with the directory grant deleted, i.e. the guard for the live
+    // AccessDenied could not fail. Mutation-checked by removing the grant.
+    const statements = (consumerPolicy?.Properties.PolicyDocument.Statement ?? []) as Array<{
+      Action?: unknown;
+      Resource?: unknown;
+    }>;
+    const watResources = statements
+      .filter((s) => JSON.stringify(s.Action ?? '').includes('GetWorkloadAccessTokenForUserId'))
+      .flatMap((s) => (Array.isArray(s.Resource) ? s.Resource : [s.Resource]) as unknown[]);
+    expect(watResources.length).toBeGreaterThan(0);
+    // An ARN built by CDK renders as an Fn::Join; the path lives in its LAST literal,
+    // so "ends there" is what distinguishes the directory from the identity under it.
+    const arnTail = (resource: unknown): string => {
+      const join = (resource as { 'Fn::Join'?: [string, unknown[]] })?.['Fn::Join'];
+      const parts = join ? join[1] : [resource];
+      const last = parts[parts.length - 1];
+      return typeof last === 'string' ? last : '';
+    };
+    expect(watResources.map(arnTail).some((tail) => tail.endsWith('workload-identity-directory/default')))
+      .toBe(true);
     // GetResourceOauth2Token authorizes against the token VAULT itself — a second
     // live AccessDenied ("… on resource: …:token-vault/default") proved the
     // credential-provider sub-path alone is not enough. Both are granted: the
