@@ -32,8 +32,8 @@ import argparse
 import json
 import os
 import sys
-import urllib.request
 import urllib.error
+import urllib.request
 
 LINEAR_URL = "https://api.linear.app/graphql"
 
@@ -79,6 +79,25 @@ def pat():
     return p
 
 
+def https_opener():
+    """An opener that can speak ONLY https.
+
+    ``urllib.request.urlopen`` (and ``build_opener``) install the default
+    handler set, which includes ``file://``, ``ftp://`` and ``data://``. That
+    turns any future mistake which lets a URL be configured — an env var, a CLI
+    flag, an API-returned redirect target — into an arbitrary-file read, since
+    this function carries the Linear PAT. Building the director by hand keeps
+    HTTPS as the only reachable scheme, so no such mistake can escalate.
+    ``HTTPErrorProcessor``/``HTTPDefaultErrorHandler`` preserve the usual
+    raise-on-4xx/5xx behaviour the caller below relies on.
+    """
+    opener = urllib.request.OpenerDirector()
+    opener.add_handler(urllib.request.HTTPSHandler())
+    opener.add_handler(urllib.request.HTTPErrorProcessor())
+    opener.add_handler(urllib.request.HTTPDefaultErrorHandler())
+    return opener
+
+
 def gql(query, variables=None):
     body = json.dumps({"query": query, "variables": variables or {}}).encode()
     req = urllib.request.Request(
@@ -86,7 +105,7 @@ def gql(query, variables=None):
         headers={"Authorization": pat(), "Content-Type": "application/json"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=30) as r:
+        with https_opener().open(req, timeout=30) as r:
             out = json.load(r)
     except urllib.error.HTTPError as e:
         sys.exit(f"HTTP {e.code}: {e.read().decode()[:400]}")

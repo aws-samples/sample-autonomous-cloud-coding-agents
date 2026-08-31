@@ -9,14 +9,23 @@ verified without spinning up the Claude Agent SDK client.
 
 from __future__ import annotations
 
+import asyncio
+import subprocess
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+import runner
+from gateway_tools import GATEWAY_SERVER_NAME
 from models import TaskConfig
 from runner import (
+    _CLAUDE_VERSION_PROBE_TIMEOUT_S,
     _DISALLOWED_TOOLS,
     _FULL_TOOL_SURFACE,
     _initialize_policy_engine_and_hooks,
+    _log_claude_cli_version,
+    _register_gateway_server,
     _resolve_allowed_tools,
     _resolve_setting_sources,
     _setup_agent_env,
@@ -420,3 +429,150 @@ class TestSetupAgentEnv:
         # The platform default (no override) must be a us.* profile, never a bare
         # foundation-model id — the whole point of the fix.
         assert _config().haiku_model.startswith("us.")
+
+
+class TestClaudeCliVersionProbe:
+    """The diagnostic probe that killed every MicroVM task at turn 0 (P2-F5).
+
+    ``agent/src/runner.py`` used ``timeout=10`` on ``claude --version``. On the
+    ``lambda-microvm`` backend that failed EVERY task, reproducibly:
+
+        TimeoutExpired: Command '['claude', '--version']' timed out after 10 seconds
+
+    The binary answers in under a second in the same image locally; it is a 225 MiB
+    statically linked ELF whose pages had never been touched before the snapshot was
+    captured, so the first ``exec`` on a restored guest had to fault them all in.
+    The primary fix is warming it in ``/ready`` (``server._warm_snapshot_binaries``);
+    this bound is the backstop, and the point of these tests is that it stays loose.
+    """
+
+    def test_the_version_probe_bound_is_loose_enough_for_a_cold_start(self):
+        # A version string for a log line: nothing branches on it, and the failure
+        # mode is a dead task. Any cold-start environment must fit inside it.
+        assert _CLAUDE_VERSION_PROBE_TIMEOUT_S >= 60
+
+    def test_the_probe_passes_that_timeout_to_the_version_call_only(self, monkeypatch):
+        calls: list[tuple[list[str], float]] = []
+
+        def fake_run(argv, **kwargs):
+            calls.append((list(argv), kwargs["timeout"]))
+            return MagicMock(returncode=0, stdout="/usr/bin/claude\n")
+
+        monkeypatch.setattr(runner.subprocess, "run", fake_run)
+        _log_claude_cli_version()
+
+        assert calls[0][0] == ["which", "claude"]
+        assert calls[1][0] == ["claude", "--version"]
+        # The PATH lookup keeps its tight bound — it touches none of the 225 MiB —
+        # while the exec that DOES gets the loose one. Sharing one number would
+        # either loosen a lookup that cannot hang or re-tighten the exec that can.
+        assert calls[1][1] == _CLAUDE_VERSION_PROBE_TIMEOUT_S
+        assert calls[0][1] < calls[1][1]
+
+    def test_a_missing_cli_warns_and_skips_the_version_call(self, monkeypatch):
+        calls: list[list[str]] = []
+
+        def fake_run(argv, **_kwargs):
+            calls.append(list(argv))
+            return MagicMock(returncode=1, stdout="")
+
+        monkeypatch.setattr(runner.subprocess, "run", fake_run)
+        _log_claude_cli_version()
+        # No point exec'ing a binary `which` could not find — and no exception:
+        # this is diagnostics, so it must never be the thing that fails a task.
+        assert calls == [["which", "claude"]]
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            subprocess.TimeoutExpired(["claude", "--version"], 60),
+            FileNotFoundError(2, "No such file or directory", "claude"),
+            PermissionError(13, "Permission denied", "claude"),
+        ],
+        ids=["timeout", "missing-binary", "not-executable"],
+    )
+    def test_a_failing_version_call_warns_instead_of_killing_the_task(
+        self, monkeypatch, capfd, error
+    ):
+        # The other half of P2-F5. A looser timeout makes the 10 s failure unlikely,
+        # not impossible — and a probe whose entire output is a log line must not be
+        # able to end a task at turn 0 no matter how it fails.
+        def fake_run(argv, **_kwargs):
+            if argv[0] == "which":
+                return MagicMock(returncode=0, stdout="/usr/bin/claude\n")
+            raise error
+
+        monkeypatch.setattr(runner.subprocess, "run", fake_run)
+
+        _log_claude_cli_version()  # must not raise
+
+        out = capfd.readouterr().out
+        assert "claude CLI version probe failed (non-fatal)" in out
+        assert type(error).__name__ in out
+        # Degraded, not silent — and NOT reported as a successful probe.
+        assert "claude CLI:" not in out
+
+    def test_a_failing_path_lookup_also_only_warns(self, monkeypatch, capfd):
+        # `which` itself can be absent on a minimal image; same rule applies.
+        def fake_run(_argv, **_kwargs):
+            raise FileNotFoundError(2, "No such file or directory", "which")
+
+        monkeypatch.setattr(runner.subprocess, "run", fake_run)
+
+        _log_claude_cli_version()
+
+        assert "claude CLI version probe failed (non-fatal)" in capfd.readouterr().out
+
+    def test_run_agent_invokes_the_cli_version_probe(self):
+        sentinel = RuntimeError("stop after version probe")
+        with (
+            patch.object(runner, "_setup_agent_env"),
+            patch.object(runner, "_log_claude_cli_version", side_effect=sentinel) as probe,
+        ):
+            try:
+                asyncio.run(runner.run_agent("prompt", "system", _config()))
+            except RuntimeError as error:
+                assert error is sentinel
+            else:
+                raise AssertionError("run_agent continued past the version probe")
+
+        probe.assert_called_once_with()
+
+
+class TestRegisterGatewayServer:
+    """The runner-side wiring that registers the AgentCore Gateway bridge.
+
+    ``gateway_tools`` unit tests cover ``build_gateway_server`` itself; these
+    pin the ``run_agent`` registration path — that a built server lands under
+    ``GATEWAY_SERVER_NAME`` and that a disabled bridge adds nothing (#641 P1
+    review flagged this wiring as untested / N6).
+    """
+
+    def test_registers_built_server_under_gateway_name(self):
+        sentinel = object()
+        with patch("runner.build_gateway_server", return_value=sentinel) as mock_build:
+            mcp_servers: dict[str, Any] = {}
+            _register_gateway_server(mcp_servers)
+        mock_build.assert_called_once_with()
+        assert mcp_servers == {GATEWAY_SERVER_NAME: sentinel}
+
+    def test_no_registration_when_bridge_disabled(self):
+        # build_gateway_server returns None when the feature is off (URL unset)
+        # or the SDK is missing — the runner must then offer no gateway tool.
+        with patch("runner.build_gateway_server", return_value=None):
+            mcp_servers: dict[str, Any] = {}
+            _register_gateway_server(mcp_servers)
+        assert mcp_servers == {}
+
+    def test_preserves_other_servers_already_registered(self):
+        # Registration must be additive — a pre-registered server (e.g. the
+        # clarification tool) is left untouched.
+        sentinel = object()
+        existing = object()
+        with patch("runner.build_gateway_server", return_value=sentinel):
+            mcp_servers: dict[str, Any] = {"clarification": existing}
+            _register_gateway_server(mcp_servers)
+        assert mcp_servers == {
+            "clarification": existing,
+            GATEWAY_SERVER_NAME: sentinel,
+        }

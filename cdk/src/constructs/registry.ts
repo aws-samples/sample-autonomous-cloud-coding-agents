@@ -1,0 +1,237 @@
+/**
+ *  MIT No Attribution
+ *
+ *  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ *
+ *  Permission is hereby granted, free of charge, to any person obtaining a copy of
+ *  the Software without restriction, including without limitation the rights to
+ *  use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+ *  the Software, and to permit persons to whom the Software is furnished to do so.
+ *
+ *  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ *  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ *  SOFTWARE.
+ */
+
+// Provisions the standalone AWS Agent Registry that backs the agent asset registry.
+//
+// Create/Delete are asynchronous and there is no CDK L1/L2 construct yet, so
+// this wraps the CDK Provider framework: an `onEvent` Lambda starts the mutation
+// and an `isComplete` Lambda is polled until the registry reaches a stable state.
+import * as path from 'path';
+import { CustomResource, Duration, NestedStack, type NestedStackProps, Stack } from 'aws-cdk-lib';
+import * as iam from 'aws-cdk-lib/aws-iam';
+import { Architecture, Runtime } from 'aws-cdk-lib/aws-lambda';
+import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
+import * as cr from 'aws-cdk-lib/custom-resources';
+import { NagSuppressions } from 'cdk-nag';
+import { Construct } from 'constructs';
+
+const PROVISION_TIMEOUT_SECONDS = 60;
+const PROVISION_MEMORY_MB = 256;
+// Registry create observed at ~70s; poll generously and cap the total wait.
+const POLL_INTERVAL_SECONDS = 10;
+const TOTAL_TIMEOUT_MINUTES = 15;
+const POLL_INTERVAL = Duration.seconds(POLL_INTERVAL_SECONDS);
+const TOTAL_TIMEOUT = Duration.minutes(TOTAL_TIMEOUT_MINUTES);
+
+export interface AgentRegistryProps {
+  /** Registry name — unique per account, alphanumerics + underscores. */
+  readonly registryName: string;
+  /** Optional human description stored on the registry. */
+  readonly description?: string;
+}
+
+/**
+ * The Agent Registry resource. Exposes {@link registryId} / {@link registryArn}
+ * for handlers and the `RegistryClient` adapter to target.
+ */
+export class AgentRegistry extends Construct {
+  public readonly registryId: string;
+  public readonly registryArn: string;
+
+  constructor(scope: Construct, id: string, props: AgentRegistryProps) {
+    super(scope, id);
+
+    const entry = path.join(__dirname, '..', 'handlers', 'registry-provisioning', 'index.ts');
+    // The Agent Registry control-plane SDK is not in the Lambda runtime, so
+    // it must be bundled (the repo default externalizes @aws-sdk/*, which we override).
+    const bundling = { externalModules: [] as string[] };
+
+    const commonFnProps = {
+      runtime: Runtime.NODEJS_24_X,
+      architecture: Architecture.ARM_64,
+      timeout: Duration.seconds(PROVISION_TIMEOUT_SECONDS),
+      memorySize: PROVISION_MEMORY_MB,
+      bundling,
+      // Names this component in the solution UA segment (#319) instead of
+      // falling through to the generic `api` default.
+      environment: { ABCA_COMPONENT: 'registry-provisioning' },
+    };
+
+    const onEventFn = new lambda.NodejsFunction(this, 'OnEventFn', {
+      ...commonFnProps,
+      entry,
+      handler: 'onEvent',
+    });
+    const isCompleteFn = new lambda.NodejsFunction(this, 'IsCompleteFn', {
+      ...commonFnProps,
+      entry,
+      handler: 'isComplete',
+    });
+
+    // CreateRegistry needs `*`: at call time the target resource does not exist.
+    const createPolicy = new iam.PolicyStatement({
+      actions: ['agent-registry:CreateRegistry'],
+      resources: ['*'],
+    });
+    const registryPolicy = new iam.PolicyStatement({
+      actions: [
+        'agent-registry:GetRegistry',
+        'agent-registry:UpdateRegistry',
+        'agent-registry:DeleteRegistry',
+      ],
+      resources: [
+        Stack.of(this).formatArn({
+          service: 'agent-registry',
+          resource: 'registry',
+          resourceName: '*',
+        }),
+      ],
+    });
+    const serviceLinkedRolePolicy = new iam.PolicyStatement({
+      actions: ['iam:CreateServiceLinkedRole'],
+      resources: ['*'],
+      conditions: {
+        StringEquals: {
+          'iam:AWSServiceName': 'agent-registry.amazonaws.com',
+        },
+      },
+    });
+    // Agent Registry calls these AgentCore workload-identity APIs using the
+    // caller's credentials during CreateRegistry and DeleteRegistry. Keep the
+    // bedrock-agentcore namespace: this is an intentional cross-service
+    // dependency, not a missed rename or migration residue. Without these
+    // actions, creation fails with "Unable to create workload identity because
+    // access was denied"; deletion can fail the same way when the Provider
+    // waiter re-drives DeleteRegistry.
+    const workloadIdentityPolicy = new iam.PolicyStatement({
+      actions: [
+        'bedrock-agentcore:CreateWorkloadIdentity',
+        'bedrock-agentcore:GetWorkloadIdentity',
+        'bedrock-agentcore:DeleteWorkloadIdentity',
+      ],
+      resources: [
+        Stack.of(this).formatArn({
+          service: 'bedrock-agentcore',
+          resource: 'workload-identity-directory',
+          resourceName: '*',
+        }),
+      ],
+    });
+    onEventFn.addToRolePolicy(serviceLinkedRolePolicy);
+    for (const fn of [onEventFn, isCompleteFn]) {
+      fn.addToRolePolicy(createPolicy);
+      fn.addToRolePolicy(registryPolicy);
+      fn.addToRolePolicy(workloadIdentityPolicy);
+    }
+
+    const provider = new cr.Provider(this, 'Provider', {
+      onEventHandler: onEventFn,
+      isCompleteHandler: isCompleteFn,
+      queryInterval: POLL_INTERVAL,
+      totalTimeout: TOTAL_TIMEOUT,
+    });
+
+    const resource = new CustomResource(this, 'Resource', {
+      serviceToken: provider.serviceToken,
+      // Changing the resource type forces replacement from the retired preview
+      // namespace; an old preview registry id cannot be updated through the
+      // standalone API.
+      resourceType: 'Custom::AgentRegistry',
+      properties: {
+        RegistryName: props.registryName,
+        Description: props.description ?? '',
+      },
+    });
+
+    this.registryId = resource.getAttString('RegistryId');
+    this.registryArn = resource.getAttString('RegistryArn');
+
+    NagSuppressions.addResourceSuppressions(
+      [onEventFn, isCompleteFn],
+      [
+        {
+          id: 'AwsSolutions-IAM4',
+          reason: 'AWSLambdaBasicExecutionRole is required for CloudWatch Logs access',
+        },
+        {
+          id: 'AwsSolutions-IAM5',
+          reason:
+            'CreateRegistry is an account-level action authorized against `*` '
+            + '(no registry exists yet at create time). CreateServiceLinkedRole is '
+            + 'restricted to agent-registry.amazonaws.com by iam:AWSServiceName. '
+            + 'Workload identity lifecycle actions use workload-identity-directory/*, and '
+            + 'Get/Update/DeleteRegistry use '
+            + 'registry/* because the registry id is server-assigned and unknown at synth.',
+        },
+      ],
+      true,
+    );
+
+    // The CDK Provider framework synthesizes its own waiter state machine and
+    // framework Lambdas (onEvent/isComplete/onTimeout) that we do not author.
+    // These findings are on framework-managed resources.
+    NagSuppressions.addResourceSuppressions(
+      provider,
+      [
+        {
+          id: 'AwsSolutions-SF1',
+          reason: 'Provider-framework waiter state machine; logging config is managed by the CDK custom-resources framework',
+        },
+        {
+          id: 'AwsSolutions-SF2',
+          reason: 'Provider-framework waiter state machine; X-Ray config is managed by the CDK custom-resources framework',
+        },
+        {
+          id: 'AwsSolutions-IAM4',
+          reason: 'Provider-framework Lambdas use AWS managed AWSLambdaBasicExecutionRole — required by the CDK custom-resources framework',
+        },
+        {
+          id: 'AwsSolutions-IAM5',
+          reason: 'Provider-framework grants InvokeFunction on the user handler versions (Arn:*) — generated by the CDK custom-resources framework',
+        },
+      ],
+      true,
+    );
+  }
+}
+
+/**
+ * NestedStack wrapper for {@link AgentRegistry} (#246).
+ *
+ * The registry + its Provider framework (custom-resource Lambdas, IAM roles,
+ * Step Functions waiter) contribute ~20 resources. Nesting them keeps the root
+ * ``AgentStack`` under CloudFormation's hard 500-resource-per-stack limit — the
+ * nested stack gets its own budget. ``registryId``/``registryArn`` are surfaced
+ * so the parent can thread them into the orchestrator + TaskApi exactly as
+ * before (CDK auto-wires the cross-stack export/import).
+ */
+export class AgentRegistryStack extends NestedStack {
+  public readonly registryId: string;
+  public readonly registryArn: string;
+
+  constructor(scope: Construct, id: string, props: AgentRegistryProps & NestedStackProps) {
+    super(scope, id, props);
+    const registry = new AgentRegistry(this, 'AgentRegistry', {
+      registryName: props.registryName,
+      description: props.description,
+    });
+    this.registryId = registry.registryId;
+    this.registryArn = registry.registryArn;
+  }
+}

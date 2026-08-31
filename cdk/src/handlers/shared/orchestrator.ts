@@ -20,11 +20,15 @@
 import { S3Client } from '@aws-sdk/client-s3';
 import { GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { ulid } from 'ulid';
+import type { SessionHandle, SessionStatus } from './compute-strategy';
 import { AttachmentBudgetExceededError, AttachmentConfigurationError, AttachmentResolutionError, hydrateContext, resolveGitHubToken } from './context-hydration';
 import { logger, type Logger } from './logger';
 import { writeMinimalEpisode } from './memory';
 import { coerceNumericOrNull } from './numeric';
 import { computePromptVersion } from './prompt-version';
+import { makeRegistryClient } from './registry/factory';
+import { parseRef } from './registry/ref';
+import { RegistryResolutionError, type ResolvedAsset } from './registry/types';
 import { loadRepoConfig, type BlueprintConfig, type ComputeType } from './repo-config';
 import { resolveUrlAttachments } from './resolve-url-attachments';
 import { APPROVAL_GATE_CAP_MAX, APPROVAL_GATE_CAP_MIN, type AgentAttachmentPayload, type AttachmentRecord, type TaskRecord } from './types';
@@ -58,12 +62,113 @@ export interface PollState {
   readonly consecutiveEcsPollFailures?: number;
   /** Consecutive polls where ECS reports completed but DDB is not terminal — escalated after 5. */
   readonly consecutiveEcsCompletedPolls?: number;
+  /**
+   * True once `microvm_suspend_anomaly` has been emitted for the CURRENT anomaly
+   * episode, so the event fires once per episode instead of on every ~30 s poll
+   * (an 8-hour suspended task would otherwise write ~960 identical events).
+   *
+   * Re-armed (set back to false) by any non-anomalous observation — see
+   * {@link reconcileMicrovmSubstrateState}. Kept as a plain boolean rather than a
+   * counter/timestamp on purpose: P3's suspend policy will reshape this area
+   * anyway, and one flag is the smallest thing that fixes the duplication without
+   * pre-committing to a shape that work will have to undo.
+   */
+  readonly microvmSuspendAnomalyReported?: boolean;
 }
 
 /** After RUNNING this long, we expect `agent_heartbeat_at` from the agent (if ever set). */
 const AGENT_HEARTBEAT_GRACE_SEC = 120;
 /** If `agent_heartbeat_at` exists and is older than this, the session is treated as lost. */
 const AGENT_HEARTBEAT_STALE_SEC = 240;
+
+/**
+ * Whether a backend's liveness is (partly) inferred from `agent_heartbeat_at`.
+ *
+ * The *periodic* writer is `_heartbeat_worker` (`agent/src/server.py`, 45 s
+ * cadence), which runs ONLY on substrates that go through the FastAPI server:
+ * `/invocations` (AgentCore) and the `/run` hook (MicroVMs) both reach it via
+ * `_run_task_background`. `agent/src/pipeline.py` also writes the timestamp ONCE
+ * at RUNNING on every substrate, but that single write goes stale by design — so
+ * this predicate decides which backends may treat staleness as SIGNAL rather than
+ * as an artefact of never being refreshed.
+ *
+ * - `agentcore` — yes, and it is the ONLY liveness signal there:
+ *   `AgentCoreComputeStrategy.pollSession` is an explicit stub that always
+ *   reports `running`, so a crashed container is invisible without the heartbeat.
+ * - `lambda-microvm` — yes, and it is the SECOND of two complementary signals
+ *   (ADR-021 P2). The substrate `GetMicrovm` check catches a VM that DIED; it
+ *   cannot catch a VM that is alive and healthy while the in-guest pipeline is
+ *   hung, deadlocked, or OOM-killed inside the guest — nothing self-terminates on
+ *   this substrate (live-verified: a MicroVM with a broken hook sat in `RUNNING`
+ *   indefinitely with no `stateReason`). Without the heartbeat check such a task
+ *   would burn the full ~8.5 h poll window, billing an 8-hour MicroVM
+ *   reservation, before the safety net fired. So liveness here is substrate state
+ *   AND agent heartbeat.
+ * - `ecs` — no, and this is a HARD CORRECTNESS CONSTRAINT, not a tuning
+ *   preference. The ECS boot command (`ecs-strategy.ts`) invokes
+ *   `run_task_from_payload` directly and "bypasses the uvicorn server entirely",
+ *   so `_heartbeat_worker` NEVER STARTS and `agent_heartbeat_at` is written
+ *   exactly once. Enabling this for `ecs` would fail EVERY ECS task after
+ *   ~4 minutes, regardless of container health: that single write makes the
+ *   timestamp PRESENT, so the staleness arm below applies (`runningAge > 120 &&
+ *   hbAge > 240`), not the never-beat arm (`runningAge > 120 + 240`). The two
+ *   thresholds are not additive on this path — `pipeline.py` calls
+ *   `write_running` and `write_heartbeat` back to back, so `hbAge ≈ runningAge`
+ *   and the 120 s gate is already cleared by the time the 240 s one binds.
+ *   `AGENT_HEARTBEAT_STALE_SEC` alone sets the deadline. Separately — and only as
+ *   a secondary point — ECS does not need it: `DescribeTasks` reports a real
+ *   container exit (including OOM-kill, exit 137) with an exit code, and the ECS
+ *   poll block in `orchestrate-task.ts` already interprets it with its own
+ *   patience counters.
+ *
+ * A `switch` rather than a set membership test so a fourth backend cannot be
+ * added without making an explicit, compile-checked decision here — the culture
+ * ADR-021 sub-decision 1 asks for. The checkable fact that decides a new
+ * backend's answer is "does the agent serve HTTP on it?", not taste: if the
+ * substrate boots through `server.py` the worker runs, and if it boots the
+ * pipeline directly it does not.
+ */
+function heartbeatLivenessApplies(computeType: ComputeType): boolean {
+  switch (computeType) {
+    case 'agentcore':
+    case 'lambda-microvm':
+      return true;
+    case 'ecs':
+      return false;
+    default: {
+      const _exhaustive: never = computeType;
+      throw new Error(`Unknown compute type for heartbeat liveness: ${String(_exhaustive)}`);
+    }
+  }
+}
+
+/**
+ * What to CALL the thing that died, in operator-facing failure copy.
+ *
+ * The heartbeat-stale message used to hard-code "container", which was true for
+ * the only two backends that existed when it was written and became false the
+ * moment `lambda-microvm` joined the heartbeat path: a MicroVM has no container,
+ * so the message told the operator to go looking for one. Same defect class as
+ * the reconcile detail that said "substrate state completed" — copy that names
+ * something which did not happen.
+ *
+ * Deliberately NOT exhaustive-switched: `compute_type` is optional on
+ * `TaskRecord` (absent on tasks written before the field existed), and the
+ * fallback has to be a true generic rather than a guess. A new backend that
+ * forgets to add itself here degrades to "runtime", which is accurate — so this
+ * is one of the few places where a `default` is better than a `never` guard.
+ */
+function substrateNoun(computeType: ComputeType | undefined): string {
+  switch (computeType) {
+    case 'lambda-microvm':
+      return 'the MicroVM';
+    case 'ecs':
+    case 'agentcore':
+      return 'the container';
+    default:
+      return 'the runtime';
+  }
+}
 
 /**
  * Load a task record from DynamoDB.
@@ -229,6 +334,214 @@ const MIN_POLL_INTERVAL_MS = 5_000;
 const MAX_POLL_INTERVAL_MS = 300_000;
 
 /**
+ * Build the ``compute_metadata`` map persisted on the task row at session start,
+ * so a later handler can act on the right backend without re-deriving anything:
+ * ``cancel-task.ts`` reads ``clusterArn``/``taskArn`` from it today, and ADR-021
+ * sub-decision 2 has the approve/deny Lambdas read ``microvmId`` from it in P3.
+ *
+ * Kept as an exhaustive switch (not a ternary + spread) so a fourth backend is a
+ * compile error here rather than a silently empty metadata map — the field is
+ * load-bearing for compute shutdown, and a missing handle is exactly what
+ * ``task_cancel_compute_orphan`` exists to alarm on.
+ *
+ * DynamoDB stores this as ``Record<string, string>`` (see
+ * ``TaskRecord.compute_metadata``), so every value must already be a string.
+ */
+export function buildComputeMetadata(handle: SessionHandle): Record<string, string> {
+  switch (handle.strategyType) {
+    case 'ecs':
+      return { clusterArn: handle.clusterArn, taskArn: handle.taskArn };
+    case 'agentcore':
+      return { runtimeArn: handle.runtimeArn };
+    case 'lambda-microvm':
+      // ADR-021: `microvmId` keys every lifecycle API; `endpoint` is per-session
+      // state that becomes load-bearing the day an orchestrator→agent HTTP
+      // consumer appears (none exists in P1–P3).
+      return { microvmId: handle.microvmId, endpoint: handle.endpoint };
+    default: {
+      const _exhaustive: never = handle;
+      throw new Error(`Unknown strategyType on session handle: ${JSON.stringify(_exhaustive)}`);
+    }
+  }
+}
+
+/** Outcome of a MicroVM substrate cross-check. */
+export interface MicrovmReconcileResult {
+  /**
+   * True when this call drove the task to FAILED — the caller must stop polling
+   * and report ``lastStatus: FAILED``. False for every healthy or
+   * anomalous-but-not-fatal observation.
+   */
+  readonly taskFailed: boolean;
+
+  /**
+   * Value the caller must carry into the next poll cycle's
+   * ``PollState.microvmSuspendAnomalyReported``.
+   *
+   * True while a suspend anomaly is being (or has been) reported; false whenever
+   * the anomaly condition is absent, which RE-ARMS the event for a genuinely new
+   * episode. Returned rather than mutated so the durable poll's state stays a
+   * plain serializable value.
+   */
+  readonly suspendAnomalyReported: boolean;
+}
+
+/**
+ * Cross-reference a MicroVM's substrate state against the task's DynamoDB status
+ * — the interpretation half of ADR-021's "the strategy reports, the orchestrator
+ * interprets" split. ``pollSession`` can only see the handle, so every rule that
+ * needs the task status lives here, exactly as ``finalPollState`` already does
+ * the substrate/DDB cross-check for ECS and ``pollTaskStatus`` does it for
+ * AgentCore heartbeats.
+ *
+ * Rules (all three from ADR-021 sub-decision 1's EARS requirements):
+ *   - substrate ``suspended`` + task ``AWAITING_APPROVAL`` → HEALTHY. This is the
+ *     orchestrator's own intended suspend (P3); say nothing.
+ *   - substrate ``suspended`` + any other task status → ANOMALY, not a failure.
+ *     Surface a task event and keep polling: a suspended VM preserves full
+ *     memory/disk state and can be resumed, so failing the task would destroy
+ *     recoverable work over a condition we cannot yet explain.
+ *   - substrate terminal + non-terminal task status → FAIL the task with the
+ *     substrate-failure reason (``error-classifier`` has the matching entry).
+ *
+ * ## The anomaly event fires ONCE PER EPISODE, not once per poll
+ *
+ * The anomaly branch is reached on every poll while the condition holds, so a
+ * task suspended out of band for hours would write one identical TaskEvent every
+ * ~30 s (~960 of them across the 8 h poll window) — noise that buries the first,
+ * informative one and inflates TaskEvents. ``suspendAnomalyReported`` (threaded
+ * through {@link PollState}) suppresses the repeats while leaving the
+ * do-not-fail-fast behaviour untouched: the function still returns
+ * ``taskFailed: false`` on every one of those polls.
+ *
+ * **Recovery re-arms it.** Any observation that is NOT an anomaly — the VM
+ * resumed (``running``), or the task moved into ``AWAITING_APPROVAL`` so the
+ * suspend is now intended — resets the flag to false. A second, later episode is
+ * new information (something suspended this VM twice), so it earns its own event.
+ * The alternative (latch forever) would silently hide a flapping suspend loop,
+ * which is exactly the pathology an operator most needs to see.
+ *
+ * The WARN log is emitted on every poll regardless. Logs are cheap, per-poll
+ * evidence is what a timeline investigation needs, and CloudWatch is not a
+ * user-facing surface the way TaskEvents is.
+ *
+ * The terminal branch RE-READS the task row before failing. The DynamoDB status
+ * handed in was read earlier in the same poll cycle, and the ordinary happy path
+ * is "agent writes terminal status, agent exits, VM terminates" — so a stale read
+ * plus a fast teardown would otherwise fail a task that actually succeeded. The
+ * re-read is the same "confirm before acting on a lost race" move ``finalizeTask``
+ * makes after a failed transition. (ECS buys the same protection with a
+ * 5-consecutive-poll patience counter; one extra GetItem on a path that is about
+ * to end the task is cheaper and does not add state to ``PollState``.)
+ *
+ * @param taskId - the task being polled.
+ * @param ddbStatus - the task status observed by this poll cycle.
+ * @param substrate - what ``pollSession`` reported.
+ * @param microvmId - for event/log correlation.
+ * @param userId - owner, for ``failTask``.
+ * @param correlation - the #245 envelope for emitted events.
+ * @param log - the caller's child logger (already carries task/user/repo).
+ * @param repo - optional target repo for the correlation envelope.
+ * @param suspendAnomalyReported - the previous cycle's flag; see the section above.
+ */
+export async function reconcileMicrovmSubstrateState(args: {
+  taskId: string;
+  ddbStatus: TaskStatusType;
+  substrate: SessionStatus;
+  microvmId: string;
+  userId: string;
+  correlation: EventCorrelation;
+  log: Logger;
+  repo?: string;
+  suspendAnomalyReported?: boolean;
+}): Promise<MicrovmReconcileResult> {
+  const {
+    taskId, ddbStatus, substrate, microvmId, userId, correlation, log, repo,
+    suspendAnomalyReported = false,
+  } = args;
+
+  if (substrate.status === 'running') {
+    // Healthy — and it also ENDS any anomaly episode, so the next one reports.
+    return { taskFailed: false, suspendAnomalyReported: false };
+  }
+
+  if (substrate.status === 'suspended') {
+    if (ddbStatus === TaskStatus.AWAITING_APPROVAL) {
+      // Orchestrator-intended suspend during an approval wait — the whole point
+      // of this backend. Nothing to report, and the anomaly is re-armed: if the
+      // task later leaves AWAITING_APPROVAL while still suspended, that is a new
+      // and genuinely reportable episode.
+      return { taskFailed: false, suspendAnomalyReported: false };
+    }
+    // Suspended outside an approval wait. Nothing in ABCA suspends a MicroVM
+    // except the orchestrator's (P3) approval-wait policy, so this means either
+    // an out-of-band SuspendMicrovm call or a substrate-side suspend we did not
+    // ask for. Surface it — do NOT fail-fast (ADR-021: "an anomaly to surface,
+    // not fail-fast"); the VM's state is intact and resumable.
+    log.warn('MicroVM is suspended while the task is not awaiting approval', {
+      microvm_id: microvmId,
+      task_status: ddbStatus,
+      anomaly_already_reported: suspendAnomalyReported,
+    });
+    if (!suspendAnomalyReported) {
+      await emitTaskEvent(taskId, 'microvm_suspend_anomaly', {
+        microvm_id: microvmId,
+        task_status: ddbStatus,
+        reason: 'suspended_outside_approval_wait',
+      }, correlation);
+    }
+    return { taskFailed: false, suspendAnomalyReported: true };
+  }
+
+  // Terminal substrate report (`completed` or `failed`). `pollSession` reports
+  // TERMINATING/TERMINATED/NotFound as `completed` because it cannot see an exit
+  // code; `failed` only reaches here if a future mapping adds one.
+  //
+  // `substrate.reason` is `GetMicrovm`'s `stateReason`, carried through verbatim.
+  // Appending it is what makes this string true on the dominant failure: without
+  // it a `/run` hook 4xx (which self-terminates the VM in ~12 s) rendered as the
+  // bare "substrate state completed", and the classifier's remedy then named a
+  // session duration cap, a host fault, or an external terminate — none of which
+  // happened. With it the operator gets "substrate state completed (Run lifecycle
+  // hook returned HTTP status 400…)", which points at the guest logs where the
+  // agent's own structured 4xx body already is.
+  const substrateReason = substrate.reason ? ` (${substrate.reason})` : '';
+  const detail = substrate.status === 'failed'
+    ? `${substrate.error}${substrateReason}`
+    : `substrate state ${substrate.status}${substrateReason}`;
+
+  const reread = await loadTask(taskId);
+  if (TERMINAL_STATUSES.includes(reread.status)) {
+    // The agent wrote its terminal status between this cycle's status read and
+    // now — the normal shutdown ordering. Not a failure.
+    log.info('MicroVM terminated after the agent wrote a terminal status', {
+      microvm_id: microvmId,
+      task_status: reread.status,
+    });
+    // Terminal either way, so the flag no longer matters; carried through
+    // unchanged rather than reset so the value never lies about what happened.
+    return { taskFailed: false, suspendAnomalyReported };
+  }
+
+  log.error('MicroVM reached a terminal state before the agent wrote a terminal status', {
+    microvm_id: microvmId,
+    task_status: reread.status,
+    detail,
+  });
+  // `releaseConcurrency: false` — the finalize step sees the now-terminal task
+  // and decrements, matching the ECS substrate-failure branch in orchestrate-task.
+  await failTask(
+    taskId,
+    reread.status,
+    `MicroVM substrate terminated before the agent wrote a terminal status: ${detail}`,
+    userId,
+    false,
+    repo,
+  );
+  return { taskFailed: true, suspendAnomalyReported };
+}
+
+/**
  * Load blueprint configuration for a task's repository and merge with platform defaults.
  * @param task - the task record (needs task.repo).
  * @returns the merged blueprint config.
@@ -293,7 +606,47 @@ export async function loadBlueprintConfig(task: TaskRecord): Promise<BlueprintCo
     lint_command: repoConfig?.lint_command,
     cedar_policies: repoConfig?.cedar_policies,
     approval_gate_cap: repoConfig?.approval_gate_cap,
+    mcp_servers: repoConfig?.mcp_servers,
+    cedar_policy_modules: repoConfig?.cedar_policy_modules,
+    skills: repoConfig?.skills,
   };
+}
+
+/**
+ * Resolve the Blueprint's ``registry://`` asset refs (#246) to a bundle the
+ * agent can load. Fail-closed: any unresolved ref throws, which the orchestrator
+ * turns into a FAILED task rather than running with a missing/substituted asset.
+ *
+ * Resolution runs here (not at create-task) so only this one Lambda carries the
+ * Agent Registry SDK + IAM, mirroring how ``cedar_policies`` already flows from
+ * RepoConfig into the payload.
+ */
+export async function resolveRegistryAssets(
+  blueprintConfig: BlueprintConfig | undefined,
+  log: Logger,
+): Promise<ResolvedAsset[]> {
+  const refs = [
+    ...(blueprintConfig?.mcp_servers ?? []),
+    ...(blueprintConfig?.cedar_policy_modules ?? []),
+    ...(blueprintConfig?.skills ?? []),
+  ];
+  if (refs.length === 0) return [];
+
+  const client = makeRegistryClient();
+  const resolved: ResolvedAsset[] = [];
+  for (const ref of refs) {
+    const parsed = parseRef(ref);
+    if (!parsed.ok) {
+      throw new RegistryResolutionError(parsed.reason, ref, parsed.message);
+    }
+    const asset = await client.resolve(parsed.ref);
+    if (asset.warnings.length > 0) {
+      log.warn('Registry asset resolved with warnings', { ref, warnings: asset.warnings });
+    }
+    resolved.push(asset);
+  }
+  log.info('Resolved registry assets', { count: resolved.length });
+  return resolved;
 }
 
 /**
@@ -537,6 +890,71 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     ? resolveAttachmentPayloads(resolvedAttachments, Number(process.env.USER_PROMPT_TOKEN_BUDGET ?? '100000'))
     : [];
 
+  // Resolve registry assets (#246). Fail-closed: an unresolved ref throws here
+  // and the orchestrator transitions the task to FAILED. The audit triple is
+  // stamped on the TaskRecord; the runtime bundle rides in the payload.
+  const resolvedAssets = await resolveRegistryAssets(blueprintConfig, log);
+  if (resolvedAssets.length > 0) {
+    await ddb.send(new UpdateCommand({
+      TableName: TABLE_NAME,
+      Key: { task_id: task.task_id },
+      UpdateExpression: 'SET #ra = :ra, #ua = :now',
+      ExpressionAttributeNames: { '#ra': 'resolved_assets', '#ua': 'updated_at' },
+      ExpressionAttributeValues: {
+        // Persist warnings (e.g. ["DEPRECATED"]) alongside the audit triple so a
+        // user inspecting the task record can see a deprecated asset ran — ADR-022
+        // sub-decision 4 promises this, and a Lambda log alone isn't durable (#246).
+        ':ra': resolvedAssets.map((a) => ({
+          kind: a.kind,
+          id: `${a.namespace}/${a.name}`,
+          version: a.version,
+          ...(a.warnings.length > 0 && { warnings: [...a.warnings] }),
+        })),
+        ':now': new Date().toISOString(),
+      },
+    }));
+
+    // Emit a durable TaskEvent per warned asset (deprecation is the main case),
+    // so the warning surfaces in the task's event stream, not just Lambda logs.
+    for (const a of resolvedAssets) {
+      if (a.warnings.length > 0) {
+        await emitTaskEvent(task.task_id, 'registry_asset_warning', {
+          kind: a.kind,
+          id: `${a.namespace}/${a.name}`,
+          version: a.version,
+          warnings: [...a.warnings],
+        }, correlation);
+      }
+    }
+  }
+
+  // Registry cedar_policy_module assets (#246, PR 3) reach the agent through the
+  // SAME cedar_policies payload field as inline blueprint policies, so they are
+  // byte-identical from the PolicyEngine's view (the cedar-parity contract holds
+  // by construction). Inline blueprint policies come first, then resolved modules.
+  //
+  // Fail-closed: a pinned module whose cedar_text is empty/whitespace must fail
+  // the task, not be silently dropped — a dropped policy is usually a *deny* rule,
+  // so silently omitting it would WIDEN what the agent may do while the audit
+  // record still claims the module was applied (#246 review).
+  const resolvedCedar = resolvedAssets
+    .filter((a) => a.kind === 'cedar_policy_module')
+    .map((a) => {
+      const text = (a.runtime as { cedar_text?: string }).cedar_text;
+      if (typeof text !== 'string' || text.trim().length === 0) {
+        throw new RegistryResolutionError(
+          'REMOVED',
+          `registry://cedar_policy_module/${a.namespace}/${a.name}@${a.version}`,
+          `resolved cedar_policy_module ${a.namespace}/${a.name}@${a.version} has empty cedar_text`,
+        );
+      }
+      return text;
+    });
+  const cedarText = [
+    ...(blueprintConfig?.cedar_policies ?? []),
+    ...resolvedCedar,
+  ];
+
   const payload: Record<string, unknown> = {
     repo_url: task.repo,
     task_id: task.task_id,
@@ -576,7 +994,18 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     // build-regression gating actually runs the repo's real command.
     ...(blueprintConfig?.build_command && { build_command: blueprintConfig.build_command }),
     ...(blueprintConfig?.lint_command && { lint_command: blueprintConfig.lint_command }),
-    ...(blueprintConfig?.cedar_policies && blueprintConfig.cedar_policies.length > 0 && { cedar_policies: blueprintConfig.cedar_policies }),
+    // cedarText is inline blueprint policies ++ resolved registry
+    // cedar_policy_module text (#246), so it supersedes the raw
+    // blueprintConfig.cedar_policies — byte-identical to inline when no
+    // registry cedar is pinned.
+    ...(cedarText.length > 0 && { cedar_policies: cedarText }),
+    // Registry (#246): the resolved runtime bundle the agent's loaders apply
+    // (MCP servers merged into .mcp.json; cedar/skills applied downstream).
+    ...(resolvedAssets.length > 0 && {
+      resolved_assets: resolvedAssets.map((a) => ({
+        kind: a.kind, namespace: a.namespace, name: a.name, version: a.version, runtime: a.runtime,
+      })),
+    }),
     // The agent's PreToolUse hook uses this to compute the maxLifetime
     // ceiling on per-gate human-in-the-loop approval timeouts.
     // Stamped at HYDRATING → RUNNING transition time so the clock
@@ -638,6 +1067,15 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
 /**
  * Poll the task record in DynamoDB to check if the agent wrote a terminal status.
  * Returns the updated PollState; the waitStrategy decides whether to continue.
+ *
+ * Heartbeat staleness is evaluated for the backends
+ * {@link heartbeatLivenessApplies} names — `agentcore` (its only liveness signal)
+ * and `lambda-microvm` (the in-guest half of "substrate state AND agent
+ * heartbeat"). Thresholds are shared across both on purpose: the timestamp is
+ * written by the same pipeline code at the same cadence regardless of substrate,
+ * so a backend-specific grace window would encode a difference that does not
+ * exist.
+ *
  * @param taskId - the task to poll.
  * @param state - current poll state.
  * @param computeType - the compute backend for this task (controls heartbeat checks).
@@ -660,7 +1098,7 @@ export async function pollTaskStatus(
 
   let sessionUnhealthy = false;
   if (
-    computeType === 'agentcore'
+    heartbeatLivenessApplies(computeType)
     && currentStatus === TaskStatus.RUNNING
     && item?.session_id
     && typeof item.started_at === 'string'
@@ -679,6 +1117,7 @@ export async function pollTaskStatus(
             sessionUnhealthy = true;
             logger.warn('Agent heartbeat stale while task RUNNING', {
               task_id: taskId,
+              compute_type: computeType,
               agent_heartbeat_at: item.agent_heartbeat_at,
               heartbeat_age_sec: Math.round(hbAgeSec),
             });
@@ -690,6 +1129,7 @@ export async function pollTaskStatus(
         sessionUnhealthy = true;
         logger.warn('Agent never sent heartbeat while task RUNNING past grace period', {
           task_id: taskId,
+          compute_type: computeType,
           running_age_sec: Math.round(runningAgeSec),
         });
       }
@@ -720,7 +1160,19 @@ export async function finalizeTask(
   // events it emits — admission→terminal logs must join by {user_id, repo}.
   const { log, correlation } = envelopeFor(task);
 
-  // Lost session: RUNNING but agent heartbeats stopped (crash/OOM) — fail fast
+  // Lost session: RUNNING but agent heartbeats stopped (crash/OOM) — fail fast.
+  //
+  // FINALIZING is in the guard DEFENSIVELY, and is currently unreachable: the
+  // only writer of `sessionUnhealthy` is `pollTaskStatus`, which computes it
+  // under `currentStatus === TaskStatus.RUNNING`, so a FINALIZING task can never
+  // arrive here with the flag set. It is kept rather than removed because the
+  // reachability depends on a predicate in ANOTHER function: the day
+  // `pollTaskStatus` widens its own status gate (P3's suspend policy already has
+  // to revisit that block), a heartbeat-stale FINALIZING task must fail rather
+  // than fall through to the normal terminal path and be reported as a success.
+  // Dropping the arm would make that a silent behaviour change instead of a
+  // no-op. Do NOT "simplify" it away without also pinning `pollTaskStatus`'s
+  // RUNNING-only gate with a test.
   if (
     pollState.sessionUnhealthy
     && (currentStatus === TaskStatus.RUNNING || currentStatus === TaskStatus.FINALIZING)
@@ -730,7 +1182,8 @@ export async function finalizeTask(
       await transitionTask(taskId, currentStatus, TaskStatus.FAILED, {
         completed_at: new Date().toISOString(),
         error_message:
-          'Agent session lost: no recent heartbeat from the runtime (container may have crashed, been OOM-killed, or stopped)',
+          'Agent session lost: no recent heartbeat from the agent '
+          + `(${substrateNoun(task.compute_type)} may have crashed, been OOM-killed, or stopped)`,
       });
       transitioned = true;
     } catch (err) {
@@ -884,6 +1337,53 @@ export async function finalizeTask(
   // Unexpected state — log and release concurrency
   log.error('Unexpected task state during finalization', { status: currentStatus });
   await decrementConcurrency(userId);
+}
+
+/**
+ * Queue a task that hit the per-user admission cap (#441). Transitions
+ * SUBMITTED -> QUEUED and stamps queue bookkeeping; the admission-queue
+ * pickup Lambda later re-attempts admission in FIFO order (by
+ * ``created_at``) as slots free up.
+ *
+ * ``queued_at`` is written only on the FIRST queue entry — a re-queue
+ * after a lost admission race preserves the original timestamp.
+ * ``admission_attempts`` increments on every pass through admission so
+ * repeatedly-losing tasks are visible to operators.
+ *
+ * No concurrency slot is held while QUEUED (admission explicitly did
+ * not acquire one), so there is nothing to release here.
+ *
+ * @param task - the task record (status must be SUBMITTED).
+ * @returns true if the task was queued; false if a concurrent
+ *   transition (e.g. user cancel) won the conditional check.
+ */
+export async function queueTask(task: TaskRecord): Promise<boolean> {
+  try {
+    await transitionTask(task.task_id, TaskStatus.SUBMITTED, TaskStatus.QUEUED, {
+      ...(task.queued_at === undefined && { queued_at: new Date().toISOString() }),
+      admission_attempts: (typeof task.admission_attempts === 'number' ? task.admission_attempts : 0) + 1,
+    });
+  } catch (err) {
+    // A concurrent transition (user cancel between our status read and
+    // this write) wins; the task is no longer SUBMITTED so it must not
+    // be queued. Anything else is unexpected — rethrow so the durable
+    // step retries.
+    if (err && typeof err === 'object' && 'name' in err && err.name === 'ConditionalCheckFailedException') {
+      logger.info('Queue transition lost to a concurrent status change — skipping', { task_id: task.task_id });
+      return false;
+    }
+    throw err;
+  }
+  await emitTaskEvent(task.task_id, 'admission_queued', {
+    reason: 'concurrency_limit',
+    admission_attempts: (typeof task.admission_attempts === 'number' ? task.admission_attempts : 0) + 1,
+  });
+  logger.info('Task queued on admission cap', {
+    task_id: task.task_id,
+    user_id: task.user_id,
+    prior_attempts: task.admission_attempts ?? 0,
+  });
+  return true;
 }
 
 /**

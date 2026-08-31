@@ -89,6 +89,28 @@ test('posts comments through Jira as the app actor', async () => {
   });
 });
 
+test('updates an allowlisted Jira comment as the app actor', async () => {
+  const calls = [];
+  const invoke = handler(async (...args) => {
+    calls.push(args);
+    return jiraResponse(200, '{"id":"10001"}');
+  });
+  const body = { type: 'doc', version: 1, content: [] };
+  const result = await invoke(event({
+    version: 1,
+    operation: 'update_comment',
+    cloud_id: 'cloud-1',
+    issue_key: 'ENG-42',
+    comment_id: '10001',
+    body,
+  }));
+
+  assert.equal(result.statusCode, 200);
+  assert.equal(calls[0][0], '/rest/api/3/issue/ENG-42/comment/10001');
+  assert.equal(calls[0][1].method, 'PUT');
+  assert.deepEqual(JSON.parse(calls[0][1].body), { body });
+});
+
 test('rejects invalid and stale signatures before Jira is called', async () => {
   let calls = 0;
   const invoke = handler(async () => {
@@ -178,6 +200,46 @@ test('rejects traversal issue keys and missing comment bodies', async () => {
   assert.match(traversal.body, /invalid_comment_request/);
   assert.equal(missingBody.statusCode, 400);
   assert.match(missingBody.body, /invalid_comment_request/);
+  assert.equal(calls, 0);
+});
+
+test('rejects unsafe or missing update-comment fields', async () => {
+  let calls = 0;
+  const invoke = handler(async () => {
+    calls += 1;
+    return jiraResponse(200, '{}');
+  });
+  const cases = [
+    {
+      version: 1,
+      operation: 'update_comment',
+      cloud_id: 'cloud-1',
+      issue_key: '../../evil-1',
+      comment_id: '10001',
+      body: { type: 'doc' },
+    },
+    {
+      version: 1,
+      operation: 'update_comment',
+      cloud_id: 'cloud-1',
+      issue_key: 'ENG-42',
+      comment_id: '../10001',
+      body: { type: 'doc' },
+    },
+    {
+      version: 1,
+      operation: 'update_comment',
+      cloud_id: 'cloud-1',
+      issue_key: 'ENG-42',
+      comment_id: '10001',
+    },
+  ];
+
+  for (const payload of cases) {
+    const result = await invoke(event(payload));
+    assert.equal(result.statusCode, 400);
+    assert.match(result.body, /invalid_update_comment_request/);
+  }
   assert.equal(calls, 0);
 });
 

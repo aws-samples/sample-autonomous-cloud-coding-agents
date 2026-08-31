@@ -23,6 +23,7 @@ jest.mock('@aws-sdk/lib-dynamodb', () => ({
   DynamoDBDocumentClient: { from: jest.fn(() => ({ send: ddbSend })) },
   GetCommand: jest.fn((input: unknown) => ({ _type: 'Get', input })),
   ScanCommand: jest.fn((input: unknown) => ({ _type: 'Scan', input })),
+  UpdateCommand: jest.fn((input: unknown) => ({ _type: 'Update', input })),
 }));
 
 const createTaskCoreMock = jest.fn();
@@ -31,8 +32,10 @@ jest.mock('../../src/handlers/shared/create-task-core', () => ({
 }));
 
 const reportIssueFailureMock = jest.fn();
+const postIssueCommentMock = jest.fn();
 jest.mock('../../src/handlers/shared/jira-feedback', () => ({
   reportIssueFailure: (...args: unknown[]) => reportIssueFailureMock(...args),
+  postIssueComment: (...args: unknown[]) => postIssueCommentMock(...args),
 }));
 
 const resolveJiraOauthTokenMock = jest.fn();
@@ -160,6 +163,8 @@ describe('jira-webhook-processor handler', () => {
     createTaskCoreMock.mockReset();
     reportIssueFailureMock.mockReset();
     reportIssueFailureMock.mockResolvedValue(undefined);
+    postIssueCommentMock.mockReset();
+    postIssueCommentMock.mockResolvedValue('ack-comment-1');
     resolveJiraOauthTokenMock.mockReset();
     // Default: tenant IS resolvable. Drop-path tests override per-case
     // with `.mockResolvedValueOnce(null)`.
@@ -213,10 +218,34 @@ describe('jira-webhook-processor handler', () => {
       },
     };
 
+    function mockCommentDdb(
+      userMapping?: Record<string, unknown>,
+      projectMapping: Record<string, unknown> = {
+        repo: 'org/repo',
+        status: 'active',
+        label_filter: 'bgagent',
+      },
+    ): void {
+      ddbSend.mockImplementation((command: { input: { TableName?: string } }) => {
+        if (command.input.TableName === 'JiraProjects') {
+          return Promise.resolve({ Item: projectMapping });
+        }
+        if (command.input.TableName === 'JiraUsers') {
+          return Promise.resolve({ Item: userMapping });
+        }
+        return Promise.resolve({});
+      });
+    }
+
+    beforeEach(() => {
+      mockCommentDdb();
+    });
+
     test('ADF @bgagent comment creates a PR iteration for the linked comment author', async () => {
       resolveTaskByJiraIssueMock.mockResolvedValueOnce(priorTask);
-      ddbSend.mockResolvedValueOnce({
-        Item: { platform_user_id: 'linked-reviewer', status: 'active' },
+      mockCommentDdb({
+        platform_user_id: 'linked-reviewer',
+        status: 'active',
       });
       createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: '{}' });
 
@@ -248,24 +277,121 @@ describe('jira-webhook-processor handler', () => {
         jira_status_on_pr: 'Code Review',
         jira_trigger_comment_id: 'comment-1',
         jira_prior_task_id: 'prior-task',
+        trigger_comment_id: 'comment-1',
+        trigger_comment_issue_id: 'ENG-42',
         jira_oauth_secret_arn:
           'arn:aws:secretsmanager:us-east-1:123:secret:bgagent-jira-oauth-cloud-1',
       });
-      expect(reportIssueFailureMock).toHaveBeenCalledWith(
+      expect(postIssueCommentMock).toHaveBeenCalledWith(
         expect.anything(),
         'ENG-42',
-        '👀 ABCA accepted this follow-up and is updating PR #42.',
+        '👀 On it — reading the PR…',
       );
-      // Comment triggers route from the prior task, not the current project
-      // mapping or label state. The only DDB Get is author attribution.
-      expect(ddbSend.mock.calls).toHaveLength(1);
-      expect(ddbSend.mock.calls[0][0].input.Key)
+      const ackUpdate = ddbSend.mock.calls
+        .map(([command]) => command)
+        .find((command) => command?._type === 'Update');
+      expect(ackUpdate.input).toMatchObject({
+        TableName: 'Tasks',
+        UpdateExpression: 'SET channel_metadata.iteration_reply_comment_id = :comment_id',
+        ExpressionAttributeValues: { ':comment_id': 'ack-comment-1' },
+      });
+      // Comment triggers validate the active project mapping, then attribute
+      // the task to the linked comment author. The additional write stores the
+      // maturing acknowledgement id.
+      const gets = ddbSend.mock.calls
+        .map(([command]) => command)
+        .filter((command) => command?._type === 'Get');
+      expect(gets).toHaveLength(2);
+      const userGet = gets.find((command) =>
+        command.input.TableName === 'JiraUsers');
+      expect(userGet?.input.Key)
         .toEqual({ jira_identity: 'cloud-1#reviewer-1' });
+      expect(userGet?.input.ConsistentRead).toBe(true);
+    });
+
+    test('an orchestrated child iteration preserves routing and marks the restack source', async () => {
+      resolveTaskByJiraIssueMock.mockResolvedValueOnce({
+        ...priorTask,
+        channel_metadata: {
+          ...priorTask.channel_metadata,
+          orchestration_id: 'orch-1',
+          orchestration_sub_issue_id: 'ENG-42',
+        },
+      });
+      ddbSend.mockResolvedValueOnce({
+        Item: { platform_user_id: 'linked-reviewer', status: 'active' },
+      });
+      createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: '{}' });
+
+      await handler(eventWith(comment()));
+
+      expect(createTaskCoreMock.mock.calls[0][1].channelMetadata).toMatchObject({
+        orchestration_id: 'orch-1',
+        orchestration_sub_issue_id: 'ENG-42',
+        orchestration_iteration: 'true',
+        trigger_comment_id: 'comment-1',
+        trigger_comment_issue_id: 'ENG-42',
+      });
+      expect(postIssueCommentMock).toHaveBeenCalledTimes(1);
+    });
+
+    test('an acknowledgement that posts but cannot persist its id does not fail task creation', async () => {
+      resolveTaskByJiraIssueMock.mockResolvedValueOnce(priorTask);
+      createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: '{}' });
+      ddbSend.mockImplementation((command: {
+        _type?: string;
+        input: { TableName?: string; UpdateExpression?: string };
+      }) => {
+        if (command.input.TableName === 'JiraProjects') {
+          return Promise.resolve({
+            Item: { repo: 'org/repo', status: 'active', label_filter: 'bgagent' },
+          });
+        }
+        if (command.input.TableName === 'JiraUsers') {
+          return Promise.resolve({ Item: undefined });
+        }
+        if (
+          command._type === 'Update'
+          && command.input.UpdateExpression?.includes('iteration_reply_comment_id')
+        ) {
+          return Promise.reject(new Error('DynamoDB unavailable'));
+        }
+        return Promise.resolve({});
+      });
+
+      await expect(handler(eventWith(comment()))).resolves.toBeUndefined();
+
+      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+      expect(postIssueCommentMock).toHaveBeenCalledTimes(1);
+    });
+
+    test('an orchestrated child iteration preserves routing and marks the restack source', async () => {
+      resolveTaskByJiraIssueMock.mockResolvedValueOnce({
+        ...priorTask,
+        channel_metadata: {
+          ...priorTask.channel_metadata,
+          orchestration_id: 'orch-1',
+          orchestration_sub_issue_id: 'ENG-42',
+        },
+      });
+      ddbSend.mockResolvedValueOnce({
+        Item: { platform_user_id: 'linked-reviewer', status: 'active' },
+      });
+      createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: '{}' });
+
+      await handler(eventWith(comment()));
+
+      expect(createTaskCoreMock.mock.calls[0][1].channelMetadata).toMatchObject({
+        orchestration_id: 'orch-1',
+        orchestration_sub_issue_id: 'ENG-42',
+        orchestration_iteration: 'true',
+        trigger_comment_id: 'comment-1',
+        trigger_comment_issue_id: 'ENG-42',
+      });
     });
 
     test('ADF mention node creates a PR iteration', async () => {
       resolveTaskByJiraIssueMock.mockResolvedValueOnce(priorTask);
-      ddbSend.mockResolvedValueOnce({ Item: undefined });
       createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: '{}' });
       const payload = comment();
       (payload.comment as Record<string, unknown>).body = {
@@ -292,7 +418,6 @@ describe('jira-webhook-processor handler', () => {
 
     test('preserves ADF hard breaks in a multiline instruction', async () => {
       resolveTaskByJiraIssueMock.mockResolvedValueOnce(priorTask);
-      ddbSend.mockResolvedValueOnce({ Item: undefined });
       createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: '{}' });
       const payload = comment();
       (payload.comment as Record<string, unknown>).body = {
@@ -322,7 +447,6 @@ describe('jira-webhook-processor handler', () => {
         pr_number: undefined,
         pr_url: 'https://github.com/org/repo/pull/73',
       });
-      ddbSend.mockResolvedValueOnce({ Item: undefined });
       createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: '{}' });
       const payload = comment();
       (payload.comment as Record<string, unknown>).body = '@bgagent rename the flag';
@@ -337,7 +461,6 @@ describe('jira-webhook-processor handler', () => {
 
     test('bare mention uses the latest-review fallback instruction', async () => {
       resolveTaskByJiraIssueMock.mockResolvedValueOnce(priorTask);
-      ddbSend.mockResolvedValueOnce({ Item: undefined });
       createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: '{}' });
       const payload = comment();
       (payload.comment as Record<string, unknown>).body = '@bgagent';
@@ -356,6 +479,77 @@ describe('jira-webhook-processor handler', () => {
       await handler(eventWith(payload));
 
       expect(resolveTaskByJiraIssueMock).not.toHaveBeenCalled();
+      expect(createTaskCoreMock).not.toHaveBeenCalled();
+      expect(reportIssueFailureMock).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      ['unmapped', undefined],
+      ['removed', { repo: 'org/repo', status: 'removed' }],
+    ])('keeps @bgagent comments in %s projects silent', async (_state, projectMapping) => {
+      mockCommentDdb(undefined, projectMapping ?? {});
+
+      await handler(eventWith(comment()));
+
+      expect(resolveTaskByJiraIssueMock).not.toHaveBeenCalled();
+      expect(createTaskCoreMock).not.toHaveBeenCalled();
+      expect(reportIssueFailureMock).not.toHaveBeenCalled();
+    });
+
+    test('routes @bgagent comments without a project key through the active prior task project', async () => {
+      resolveTaskByJiraIssueMock.mockResolvedValueOnce(priorTask);
+      createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: '{}' });
+      const payload = comment();
+      delete (payload.issue as { fields: { project: Record<string, unknown> } }).fields.project.key;
+
+      await handler(eventWith(payload));
+
+      expect(resolveTaskByJiraIssueMock).toHaveBeenCalledWith(
+        expect.anything(),
+        'Tasks',
+        'cloud-1',
+        'ENG-42',
+      );
+      expect(ddbSend.mock.calls[0][0].input).toMatchObject({
+        TableName: 'JiraProjects',
+        Key: { jira_project_identity: 'cloud-1#ENG' },
+        ConsistentRead: true,
+      });
+      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+      expect(createTaskCoreMock.mock.calls[0][1].channelMetadata.jira_project_key).toBe('ENG');
+      expect(postIssueCommentMock).toHaveBeenCalledWith(
+        expect.anything(),
+        'ENG-42',
+        '👀 On it — reading the PR…',
+      );
+    });
+
+    test('keeps @bgagent comments without a project key or prior task silent', async () => {
+      const payload = comment();
+      delete (payload.issue as { fields: { project: Record<string, unknown> } }).fields.project.key;
+
+      await handler(eventWith(payload));
+
+      expect(resolveTaskByJiraIssueMock).toHaveBeenCalledTimes(1);
+      expect(ddbSend).not.toHaveBeenCalled();
+      expect(createTaskCoreMock).not.toHaveBeenCalled();
+      expect(reportIssueFailureMock).not.toHaveBeenCalled();
+    });
+
+    test('keeps @bgagent comments without a project key silent when the prior project was removed', async () => {
+      resolveTaskByJiraIssueMock.mockResolvedValueOnce(priorTask);
+      mockCommentDdb(undefined, { repo: 'org/repo', status: 'removed' });
+      const payload = comment();
+      delete (payload.issue as { fields: { project: Record<string, unknown> } }).fields.project.key;
+
+      await handler(eventWith(payload));
+
+      expect(ddbSend).toHaveBeenCalledTimes(1);
+      expect(ddbSend.mock.calls[0][0].input).toMatchObject({
+        TableName: 'JiraProjects',
+        Key: { jira_project_identity: 'cloud-1#ENG' },
+        ConsistentRead: true,
+      });
       expect(createTaskCoreMock).not.toHaveBeenCalled();
       expect(reportIssueFailureMock).not.toHaveBeenCalled();
     });
@@ -404,7 +598,6 @@ describe('jira-webhook-processor handler', () => {
         ...priorTask,
         user_id: undefined,
       });
-      ddbSend.mockResolvedValueOnce({ Item: undefined });
 
       await handler(eventWith(comment()));
 
@@ -414,18 +607,17 @@ describe('jira-webhook-processor handler', () => {
 
     test('idempotent replay creates no duplicate task acknowledgement', async () => {
       resolveTaskByJiraIssueMock.mockResolvedValueOnce(priorTask);
-      ddbSend.mockResolvedValueOnce({ Item: undefined });
       createTaskCoreMock.mockResolvedValueOnce({ statusCode: 200, body: '{}' });
 
       await handler(eventWith(comment()));
 
       expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
       expect(reportIssueFailureMock).not.toHaveBeenCalled();
+      expect(postIssueCommentMock).not.toHaveBeenCalled();
     });
 
     test('task admission failure is reported instead of acknowledged', async () => {
       resolveTaskByJiraIssueMock.mockResolvedValueOnce(priorTask);
-      ddbSend.mockResolvedValueOnce({ Item: undefined });
       createTaskCoreMock.mockResolvedValueOnce({
         statusCode: 400,
         body: JSON.stringify({
@@ -444,7 +636,6 @@ describe('jira-webhook-processor handler', () => {
 
     test('transient admission failure tells the reviewer to post a new comment', async () => {
       resolveTaskByJiraIssueMock.mockResolvedValueOnce(priorTask);
-      ddbSend.mockResolvedValueOnce({ Item: undefined });
       createTaskCoreMock.mockResolvedValueOnce({ statusCode: 503, body: '{}' });
 
       await handler(eventWith(comment()));
@@ -509,6 +700,7 @@ describe('jira-webhook-processor handler', () => {
     createTaskCoreMock.mockResolvedValue({ task_id: 'T1' });
     await handler(eventWith(payload));
     expect(createTaskCoreMock).toHaveBeenCalled();
+    expect(ddbSend.mock.calls[0][0].input.ConsistentRead).toBe(true);
   });
 
   // ─── Stack-wide-verified deliveries: cloudId is not trusted from the body ──
@@ -565,12 +757,25 @@ describe('jira-webhook-processor handler', () => {
     ddbSend.mockResolvedValueOnce({ Item: undefined });
     await handler(eventWith(issue()));
     expect(createTaskCoreMock).not.toHaveBeenCalled();
+    expect(reportIssueFailureMock).not.toHaveBeenCalled();
   });
 
   test('skips when project mapping is removed', async () => {
     ddbSend.mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'removed' } });
     await handler(eventWith(issue()));
     expect(createTaskCoreMock).not.toHaveBeenCalled();
+    expect(reportIssueFailureMock).not.toHaveBeenCalled();
+  });
+
+  test('keeps an ordinary event in an unmapped project completely silent', async () => {
+    ddbSend.mockResolvedValueOnce({ Item: undefined });
+    const payload = issue();
+    (payload.issue as { fields: Record<string, unknown> }).fields.labels = ['other'];
+
+    await handler(eventWith(payload));
+
+    expect(createTaskCoreMock).not.toHaveBeenCalled();
+    expect(reportIssueFailureMock).not.toHaveBeenCalled();
   });
 
   test('skips when trigger label is absent on create', async () => {
@@ -615,10 +820,15 @@ describe('jira-webhook-processor handler', () => {
     expect(createTaskCoreMock).not.toHaveBeenCalled();
   });
 
-  test('skips when accountId has no linked platform user', async () => {
+  test.each([
+    ['missing', undefined],
+    ['pending', { platform_user_id: 'cognito-user-1', status: 'pending' }],
+    ['revoked', { platform_user_id: 'cognito-user-1', status: 'revoked' }],
+    ['active but missing platform_user_id', { platform_user_id: '', status: 'active' }],
+  ])('skips when the user mapping is %s', async (_case, userMapping) => {
     ddbSend
       .mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'active' } })
-      .mockResolvedValueOnce({ Item: undefined });
+      .mockResolvedValueOnce({ Item: userMapping });
     await handler(eventWith(issue()));
     expect(createTaskCoreMock).not.toHaveBeenCalled();
   });
@@ -708,6 +918,7 @@ describe('jira-webhook-processor handler', () => {
 
     const getCall = ddbSend.mock.calls.find(([cmd]) => cmd._type === 'Get');
     expect(getCall![0].input.Key.jira_project_identity).toBe('cloud-1#ENG');
+    expect(getCall![0].input.ConsistentRead).toBe(true);
   });
 
   test('fires on update when changelog labels diff newly contains the trigger', async () => {
@@ -766,6 +977,7 @@ describe('jira-webhook-processor handler', () => {
 
     const userGetCall = ddbSend.mock.calls.filter(([cmd]) => cmd._type === 'Get')[1];
     expect(userGetCall[0].input.Key.jira_identity).toBe('cloud-1#reporter-acc');
+    expect(userGetCall[0].input.ConsistentRead).toBe(true);
   });
 
   test('drops event when tenant resolves to null (registry miss / inactive / unreadable secret)', async () => {
@@ -781,47 +993,32 @@ describe('jira-webhook-processor handler', () => {
   });
 
   describe('user-visible feedback on silent-failure paths', () => {
-    test('posts comment when issue has no project.key', async () => {
+    test('keeps an issue with no project.key silent because onboarding cannot be established', async () => {
       const payload = issue();
       delete (payload.issue as { fields: { project: Record<string, unknown> } }).fields.project.key;
 
       await handler(eventWith(payload));
 
-      expect(reportIssueFailureMock).toHaveBeenCalledTimes(1);
-      const [ctx, issueIdOrKey, message] = reportIssueFailureMock.mock.calls[0];
-      expect(ctx).toEqual({
-        cloudId: 'cloud-1',
-        registryTableName: process.env.JIRA_WORKSPACE_REGISTRY_TABLE_NAME,
-      });
-      expect(issueIdOrKey).toBe('ENG-42');
-      expect(message).toContain("isn't in a project");
+      expect(reportIssueFailureMock).not.toHaveBeenCalled();
     });
 
-    test('posts feedback when project is not onboarded', async () => {
+    test('keeps a trigger-labeled issue in an unmapped project silent', async () => {
       ddbSend.mockResolvedValueOnce({ Item: undefined });
 
       await handler(eventWith(issue()));
 
-      expect(reportIssueFailureMock).toHaveBeenCalledTimes(1);
-      const [, issueKey, message] = reportIssueFailureMock.mock.calls[0];
-      expect(issueKey).toBe('ENG-42');
-      expect(message).toContain("isn't onboarded");
-      // The suggested command must be the real one (`map`) with the required
-      // cloud-id + project-key positionals, not the non-existent
-      // `onboard-project`.
-      expect(message).toContain('bgagent jira map cloud-1 ENG --repo');
-      expect(message).not.toContain('onboard-project');
+      expect(reportIssueFailureMock).not.toHaveBeenCalled();
     });
 
-    test('posts feedback when project mapping is removed', async () => {
+    test('keeps a trigger-labeled issue with a removed mapping silent', async () => {
       ddbSend.mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'removed' } });
 
       await handler(eventWith(issue()));
 
-      expect(reportIssueFailureMock).toHaveBeenCalledTimes(1);
+      expect(reportIssueFailureMock).not.toHaveBeenCalled();
     });
 
-    test('posts feedback when accountId has no linked platform user', async () => {
+    test('posts actionable feedback for the selected Jira actor in an onboarded project', async () => {
       ddbSend
         .mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'active' } })
         .mockResolvedValueOnce({ Item: undefined });
@@ -831,7 +1028,8 @@ describe('jira-webhook-processor handler', () => {
       expect(reportIssueFailureMock).toHaveBeenCalledTimes(1);
       const [, , message] = reportIssueFailureMock.mock.calls[0];
       expect(message).toContain("isn't linked to a platform user");
-      expect(message).toContain('bgagent jira link');
+      expect(message).toContain('accountId: `acc-1`');
+      expect(message).toContain('bgagent jira invite-user cloud-1 acc-1');
     });
 
     test('surfaces guardrail block message on createTaskCore 400', async () => {
@@ -905,19 +1103,21 @@ describe('jira-webhook-processor handler', () => {
       reportIssueFailureMock.mockImplementationOnce(() => {
         throw new Error('synthetic synchronous throw');
       });
-      const payload = issue();
-      delete (payload.issue as { fields: { project: Record<string, unknown> } }).fields.project.key;
+      ddbSend
+        .mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'active' } })
+        .mockResolvedValueOnce({ Item: undefined });
 
-      await expect(handler(eventWith(payload))).resolves.toBeUndefined();
+      await expect(handler(eventWith(issue()))).resolves.toBeUndefined();
       expect(reportIssueFailureMock).toHaveBeenCalledTimes(1);
     });
 
     test('safeReportIssueFailure: async rejection from reportIssueFailure does not propagate', async () => {
       reportIssueFailureMock.mockRejectedValueOnce(new Error('async failure'));
-      const payload = issue();
-      delete (payload.issue as { fields: { project: Record<string, unknown> } }).fields.project.key;
+      ddbSend
+        .mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'active' } })
+        .mockResolvedValueOnce({ Item: undefined });
 
-      await expect(handler(eventWith(payload))).resolves.toBeUndefined();
+      await expect(handler(eventWith(issue()))).resolves.toBeUndefined();
       expect(reportIssueFailureMock).toHaveBeenCalledTimes(1);
     });
   });

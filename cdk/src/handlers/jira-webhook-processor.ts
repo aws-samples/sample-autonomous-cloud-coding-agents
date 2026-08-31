@@ -20,7 +20,7 @@
 import * as crypto from 'crypto';
 import { BedrockRuntimeClient, ApplyGuardrailCommand } from '@aws-sdk/client-bedrock-runtime';
 import { S3Client } from '@aws-sdk/client-s3';
-import { GetCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { ulid } from 'ulid';
 import type { ScreeningConfig } from './shared/attachment-screening';
 import {
@@ -28,6 +28,7 @@ import {
   parseCommentTrigger,
 } from './shared/comment-trigger';
 import { createTaskCore } from './shared/create-task-core';
+import { renderMaturingReply } from './shared/iteration-reply';
 import { extractDescriptionMarkdown } from './shared/jira-adf';
 import {
   cleanupPreScreenedAttachments,
@@ -38,12 +39,35 @@ import {
 } from './shared/jira-attachments';
 import { reportIssueFailure } from './shared/jira-feedback';
 import { resolveJiraOauthToken } from './shared/jira-oauth-resolver';
+import type { JiraSubIssueNode } from './shared/jira-subissue-fetch';
 import {
   prNumberFromTask,
   resolveTaskByJiraIssue,
   type JiraIssueTask,
 } from './shared/jira-task-by-issue';
+import { resolveSoleActiveJiraTenant } from './shared/jira-tenant-registry';
+import type { SubIssueNode } from './shared/linear-subissue-fetch';
 import { logger } from './shared/logger';
+import type { CommentRef } from './shared/orchestration-channel';
+import { makeJiraChannel } from './shared/orchestration-channel-jira';
+import { parseRetryIntent } from './shared/orchestration-comment-trigger';
+import { discoverOrchestration } from './shared/orchestration-discovery';
+import { jiraGraphSource } from './shared/orchestration-graph-source';
+import { computeEpicRetryPlan } from './shared/orchestration-reconcile';
+import {
+  applyTerminalCreateFailures,
+  readConcurrencyBudget,
+  releaseReadyChildren,
+} from './shared/orchestration-release';
+import { upsertEpicPanel } from './shared/orchestration-rollup';
+import {
+  claimCommentAck,
+  clearRollupClaim,
+  deriveOrchestrationId,
+  loadOrchestration,
+  setStatusCommentId,
+  type OrchestrationReleaseContext,
+} from './shared/orchestration-store';
 import type { Attachment, PassedAttachmentRecord } from './shared/types';
 import { makeClient, makeDocClient } from './shared/ua';
 import { MAX_TASK_DESCRIPTION_LENGTH } from './shared/validation';
@@ -55,7 +79,11 @@ const PROJECT_MAPPING_TABLE = process.env.JIRA_PROJECT_MAPPING_TABLE_NAME!;
 const USER_MAPPING_TABLE = process.env.JIRA_USER_MAPPING_TABLE_NAME!;
 const TASK_TABLE = process.env.TASK_TABLE_NAME!;
 const WORKSPACE_REGISTRY_TABLE = process.env.JIRA_WORKSPACE_REGISTRY_TABLE_NAME;
+const ORCHESTRATION_TABLE = process.env.ORCHESTRATION_TABLE_NAME;
+const USER_CONCURRENCY_TABLE = process.env.USER_CONCURRENCY_TABLE_NAME;
+const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT_TASKS_PER_USER ?? '10');
 const DEFAULT_LABEL_FILTER = 'bgagent';
+const COMMENT_ACK_TTL_SECONDS = 86_400;
 
 /** Max length of the idempotency key (matches validation's IDEMPOTENCY_KEY_PATTERN). */
 const MAX_IDEMPOTENCY_KEY_LENGTH = 128;
@@ -110,55 +138,6 @@ async function safeReportIssueFailure(
       error: err instanceof Error ? err.message : String(err),
     });
   }
-}
-
-/**
- * Safe single-tenant fallback for `cloudId`.
- *
- * Webhooks created through the Jira **Settings → System → Webhooks** UI do
- * not include a top-level `cloudId` in their payload (only app/OAuth-
- * registered dynamic webhooks do). Without `cloudId` the processor can't
- * resolve the tenant. For the common single-tenant install we recover by
- * reading the workspace registry: if **exactly one** `active` tenant is
- * registered, that must be the sender, so we use it.
- *
- * This deliberately does NOT guess when multiple active tenants exist —
- * doing so could mis-route an event from site B to site A's repo/user.
- * In that case we return `undefined` and the caller drops the event, so
- * the multi-tenant design is preserved: a multi-tenant operator must use a
- * webhook that carries its own `cloudId`.
- */
-async function resolveSoleTenantCloudId(): Promise<string | undefined> {
-  if (!WORKSPACE_REGISTRY_TABLE) return undefined;
-  // Full-table Scan: the workspace registry holds one row per OAuth-installed
-  // tenant and is expected to stay small (tens of rows at most), so a Scan is
-  // cheap. The >1-active-tenant short-circuit below caps the work regardless.
-  // If this table ever grows large, add a GSI on `status` and Query it.
-  let activeCloudIds: string[] = [];
-  let lastKey: Record<string, unknown> | undefined;
-  do {
-    const page = await ddb.send(new ScanCommand({
-      TableName: WORKSPACE_REGISTRY_TABLE,
-      ProjectionExpression: 'jira_cloud_id, #s',
-      ExpressionAttributeNames: { '#s': 'status' },
-      ExclusiveStartKey: lastKey,
-    }));
-    for (const item of page.Items ?? []) {
-      if (item.status === 'active' && typeof item.jira_cloud_id === 'string') {
-        activeCloudIds.push(item.jira_cloud_id);
-      }
-    }
-    lastKey = page.LastEvaluatedKey;
-    // Short-circuit: once we've seen more than one active tenant the
-    // fallback is ambiguous, so stop scanning.
-    if (activeCloudIds.length > 1) break;
-  } while (lastKey);
-
-  if (activeCloudIds.length === 1) return activeCloudIds[0];
-  logger.warn('Cannot infer cloudId: registry does not have exactly one active tenant', {
-    active_tenant_count: activeCloudIds.length,
-  });
-  return undefined;
 }
 
 /**
@@ -278,12 +257,12 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   //   lookup only when the body omits it (Settings-UI webhooks).
   // - Stack-wide fallback signature: the secret is not bound to any tenant,
   //   so a body-supplied `cloudId` is attacker-controllable. We IGNORE it and
-  //   bind the delivery to the sole active tenant; `resolveSoleTenantCloudId`
+  //   bind the delivery to the sole active tenant; `resolveSoleActiveJiraTenant`
   //   returns undefined (→ drop) when zero or multiple tenants are active, so
   //   a stack-wide secret can never steer an event at a chosen tenant.
   let cloudId: string | undefined;
   if (event.verified_via_stack_wide) {
-    cloudId = await resolveSoleTenantCloudId();
+    cloudId = await resolveSoleActiveJiraTenant(ddb, WORKSPACE_REGISTRY_TABLE);
     if (payload.cloudId && payload.cloudId !== cloudId) {
       logger.warn('Ignoring body cloudId on stack-wide-verified webhook; binding to sole active tenant', {
         body_cloud_id: payload.cloudId,
@@ -292,7 +271,8 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       });
     }
   } else {
-    cloudId = payload.cloudId ?? (await resolveSoleTenantCloudId());
+    cloudId = payload.cloudId
+      ?? (await resolveSoleActiveJiraTenant(ddb, WORKSPACE_REGISTRY_TABLE));
   }
 
   if (isCommentEvent) {
@@ -302,7 +282,14 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       });
       return;
     }
-    await handleCommentTrigger(payload, issue, cloudId);
+    const commentProjectKey = issue.fields?.project?.key;
+    if (
+      commentProjectKey
+      && !await getActiveProjectMapping(cloudId, commentProjectKey, issue.key)
+    ) {
+      return;
+    }
+    await handleCommentTrigger(payload, issue, cloudId, commentProjectKey);
     return;
   }
 
@@ -311,11 +298,6 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     logger.info('Jira issue has no project.key — skipping (cannot route to a repo)', {
       issue_key: issue.key,
     });
-    await safeReportIssueFailure(
-      issue.key,
-      cloudId,
-      "❌ This Jira issue isn't in a project — ABCA needs a Jira project to route the task to a repo. Move the issue into a project and re-apply the trigger label.",
-    );
     return;
   }
 
@@ -331,25 +313,12 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     return;
   }
 
-  const projectIdentity = `${cloudId}#${projectKey}`;
-  const mapping = await ddb.send(new GetCommand({
-    TableName: PROJECT_MAPPING_TABLE,
-    Key: { jira_project_identity: projectIdentity },
-  }));
-  if (!mapping.Item || mapping.Item.status !== 'active') {
-    logger.info('Jira project is not onboarded or is removed — skipping', {
-      jira_project_identity: projectIdentity,
-      issue_key: issue.key,
-    });
-    await safeReportIssueFailure(
-      issue.key,
-      cloudId,
-      `❌ This Jira project isn't onboarded to ABCA. An admin can onboard it with \`bgagent jira map ${cloudId} ${projectKey} --repo <owner>/<repo>\` (add \`--label <trigger>\` to change the trigger label).`,
-    );
+  const mapping = await getActiveProjectMapping(cloudId, projectKey, issue.key);
+  if (!mapping) {
     return;
   }
-  const repo = mapping.Item.repo as string;
-  const labelFilter = (mapping.Item.label_filter as string | undefined) ?? DEFAULT_LABEL_FILTER;
+  const repo = mapping.repo as string;
+  const labelFilter = (mapping.label_filter as string | undefined) ?? DEFAULT_LABEL_FILTER;
 
   if (!shouldTrigger(payload, labelFilter)) {
     logger.info('Jira webhook does not match trigger criteria', {
@@ -362,13 +331,24 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     return;
   }
 
-  const accountId = payload.user?.accountId
-    ?? issue.fields?.reporter?.accountId
-    ?? issue.fields?.creator?.accountId;
+  const actorAccountId = payload.user?.accountId;
+  const reporterAccountId = issue.fields?.reporter?.accountId;
+  const creatorAccountId = issue.fields?.creator?.accountId;
+  const accountId = actorAccountId ?? reporterAccountId ?? creatorAccountId;
+  const accountSource = actorAccountId
+    ? 'webhook_user'
+    : reporterAccountId
+      ? 'issue_reporter'
+      : creatorAccountId
+        ? 'issue_creator'
+        : undefined;
   if (!accountId) {
     logger.warn('Jira webhook missing user.accountId — cannot attribute task', {
       issue_key: issue.key,
       jira_cloud_id: cloudId,
+      jira_actor_account_id: actorAccountId,
+      jira_reporter_account_id: reporterAccountId,
+      jira_creator_account_id: creatorAccountId,
     });
     await safeReportIssueFailure(
       issue.key,
@@ -383,12 +363,18 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     logger.warn('Jira account has no linked platform user — skipping task creation', {
       jira_cloud_id: cloudId,
       jira_account_id: accountId,
+      jira_account_source: accountSource,
+      jira_actor_account_id: actorAccountId,
+      jira_reporter_account_id: reporterAccountId,
+      jira_creator_account_id: creatorAccountId,
+      jira_identity_lookup_key: `${cloudId}#${accountId}`,
       issue_key: issue.key,
     });
     await safeReportIssueFailure(
       issue.key,
       cloudId,
-      "❌ This Jira user isn't linked to a platform user. Run `bgagent jira link <code>` from a Cognito-authenticated CLI session to complete linking.",
+      `❌ The Jira user for this trigger isn't linked to a platform user (accountId: \`${accountId}\`). `
+      + `Ask an admin to run \`bgagent jira invite-user ${cloudId} ${accountId}\`, then redeem the generated link code.`,
     );
     return;
   }
@@ -408,8 +394,8 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   // admin configured `bgagent jira map ... --status-on-start/--status-on-pr`,
   // stamp them so the agent's best-effort transition helpers prefer these
   // status names over the built-in statusCategory / "In Review" heuristics.
-  const statusOnStart = mapping.Item.status_on_start as string | undefined;
-  const statusOnPr = mapping.Item.status_on_pr as string | undefined;
+  const statusOnStart = mapping.status_on_start as string | undefined;
+  const statusOnPr = mapping.status_on_pr as string | undefined;
   if (statusOnStart) {
     channelMetadata.jira_status_on_start = statusOnStart;
   }
@@ -422,6 +408,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   // tenants that only verified via the stack-wide fallback (workspace
   // unknown to the registry) — we'd burn agent quota with no resolvable
   // Jira OAuth token for the outbound REST progress comments.
+  let resolvedJira: Awaited<ReturnType<typeof resolveJiraOauthToken>> = null;
   if (WORKSPACE_REGISTRY_TABLE) {
     const resolved = await resolveJiraOauthToken(cloudId, WORKSPACE_REGISTRY_TABLE);
     if (!resolved) {
@@ -431,8 +418,60 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       });
       return;
     }
+    resolvedJira = resolved;
     channelMetadata.jira_oauth_secret_arn = resolved.oauthSecretArn;
     channelMetadata.jira_site_url = resolved.siteUrl;
+  }
+
+  let orchestrationChildren: readonly SubIssueNode[] | undefined;
+  let existingOrchestration = false;
+  if (ORCHESTRATION_TABLE && resolvedJira) {
+    // Re-read an existing orchestration's authored graph so genuinely-new Jira
+    // subtasks can be appended. The flag also prevents parent attachments from
+    // being uploaded again below: the meta row already pins the first seed's S3
+    // versions, and replacing them would eventually expire those pinned objects.
+    const existing = await loadOrchestration(
+      ddb,
+      ORCHESTRATION_TABLE,
+      deriveOrchestrationId(issue.key),
+    );
+    existingOrchestration = existing !== null;
+
+    const graphResult = await jiraGraphSource(
+      resolvedJira.accessToken,
+      cloudId,
+      issue.key,
+    )();
+    if (graphResult.kind === 'error') {
+      await safeReportIssueFailure(
+        issue.key,
+        cloudId,
+        `❌ ABCA couldn't read this issue's Jira subtasks: ${graphResult.message}`,
+      );
+      return;
+    }
+    if (graphResult.kind === 'no_children' && existingOrchestration) {
+      logger.info('Jira orchestration re-trigger has no current subtasks — no-op', {
+        issue_key: issue.key,
+      });
+      return;
+    }
+    if (graphResult.kind === 'ok') {
+      const routed = await routeJiraOrchestrationChildren({
+        cloudId,
+        parentProjectKey: projectKey,
+        parentMapping: mapping,
+        parentRepo: repo,
+        children: graphResult.children as readonly JiraSubIssueNode[],
+        oauthSecretArn: resolvedJira.oauthSecretArn,
+        siteUrl: resolvedJira.siteUrl,
+      });
+      if (!routed.ok) {
+        await safeReportIssueFailure(issue.key, cloudId, `❌ ${routed.message}`);
+        return;
+      }
+      orchestrationChildren = routed.children;
+    }
   }
 
   // Embedded HTTPS image URLs from the description (unchanged, #577 preserves).
@@ -447,7 +486,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   // fail-closed (a selected-but-unscreenable attachment rejects the task).
   let comments: RenderedComment[] = [];
   let preScreenedAttachments: PassedAttachmentRecord[] = [];
-  if (WORKSPACE_REGISTRY_TABLE) {
+  if (WORKSPACE_REGISTRY_TABLE && !existingOrchestration) {
     const tenantCtx = { cloudId, registryTableName: WORKSPACE_REGISTRY_TABLE };
 
     // Recent human comments — advisory context, never gate task creation.
@@ -506,6 +545,226 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   }
 
   const taskDescription = buildTaskDescription(issue, descriptionMarkdown, comments);
+
+  if (ORCHESTRATION_TABLE && orchestrationChildren) {
+    const releaseContext: OrchestrationReleaseContext = {
+      platform_user_id: platformUserId,
+      channel_source: 'jira',
+      trigger_label: (labelFilter || DEFAULT_LABEL_FILTER).trim().toLowerCase(),
+      ...(statusOnStart && { jira_status_on_start: statusOnStart }),
+      ...(statusOnPr && { jira_status_on_pr: statusOnPr }),
+      parent_context: {
+        ...(issue.fields?.summary && { title: issue.fields.summary }),
+        ...(descriptionMarkdown && { description: descriptionMarkdown }),
+      },
+      ...(preScreenedAttachments.length > 0 && {
+        pre_screened_attachments: preScreenedAttachments,
+      }),
+    };
+    const discovery = await discoverOrchestration({
+      ddb,
+      tableName: ORCHESTRATION_TABLE,
+      parentIssueRef: issue.key,
+      credentialsRef: cloudId,
+      repo,
+      now: new Date().toISOString(),
+      releaseContext,
+      graphSource: async () => ({ kind: 'ok', children: orchestrationChildren }),
+    });
+
+    if (discovery.kind === 'rejected' || discovery.kind === 'error') {
+      if (preScreenedAttachments.length > 0 && s3Client && ATTACHMENTS_BUCKET) {
+        await cleanupPreScreenedAttachments(s3Client, ATTACHMENTS_BUCKET, preScreenedAttachments);
+      }
+      await safeReportIssueFailure(
+        issue.key,
+        cloudId,
+        `❌ ABCA couldn't create this Jira orchestration: ${discovery.message}`,
+      );
+      return;
+    }
+
+    // A concurrent replay can win between the preflight read and the seed
+    // condition. The shared discovery path returns that race as an empty extend;
+    // any attachment objects uploaded by this invocation are duplicates.
+    if (discovery.kind === 'seeded' && discovery.alreadyExisted) {
+      if (preScreenedAttachments.length > 0 && s3Client && ATTACHMENTS_BUCKET) {
+        await cleanupPreScreenedAttachments(s3Client, ATTACHMENTS_BUCKET, preScreenedAttachments);
+      }
+      return;
+    }
+
+    if (discovery.kind === 'seeded') {
+      const snapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId);
+      if (snapshot) {
+        const now = new Date().toISOString();
+        const budget = USER_CONCURRENCY_TABLE
+          ? await readConcurrencyBudget(
+            ddb,
+            USER_CONCURRENCY_TABLE,
+            snapshot.meta.release_context.platform_user_id,
+            MAX_CONCURRENT,
+          )
+          : undefined;
+        const results = await releaseReadyChildren(
+          ddb,
+          ORCHESTRATION_TABLE,
+          snapshot.children,
+          snapshot.meta.release_context,
+          createTaskCore,
+          now,
+          snapshot.children,
+          'main',
+          budget,
+        );
+        await applyTerminalCreateFailures(
+          ddb,
+          ORCHESTRATION_TABLE,
+          discovery.orchestrationId,
+          snapshot.children,
+          results,
+          now,
+        );
+
+        if (WORKSPACE_REGISTRY_TABLE) {
+          try {
+            const fresh = await loadOrchestration(
+              ddb,
+              ORCHESTRATION_TABLE,
+              discovery.orchestrationId,
+            );
+            if (fresh) {
+              const commentId = await upsertEpicPanel({
+                channel: makeJiraChannel(WORKSPACE_REGISTRY_TABLE),
+                parent: {
+                  issueId: issue.key,
+                  credentialsRef: cloudId,
+                  stateOverrides: {
+                    ...(statusOnStart && { started: statusOnStart }),
+                    ...(statusOnPr && { inReview: statusOnPr }),
+                  },
+                },
+                children: fresh.children,
+                labelFilter,
+              });
+              if (commentId) {
+                await setStatusCommentId(
+                  ddb,
+                  ORCHESTRATION_TABLE,
+                  discovery.orchestrationId,
+                  commentId,
+                );
+              }
+            }
+          } catch (err) {
+            logger.warn('Failed to post Jira orchestration panel at seed (non-fatal)', {
+              issue_key: issue.key,
+              orchestration_id: discovery.orchestrationId,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
+      }
+      logger.info('Jira orchestration seeded — parent task suppressed', {
+        issue_key: issue.key,
+        orchestration_id: discovery.orchestrationId,
+        child_count: discovery.childCount,
+      });
+      return;
+    }
+    if (discovery.kind === 'extended') {
+      if (discovery.addedSubIssueIds.length === 0) {
+        logger.info('Jira orchestration re-trigger added no new subtasks', {
+          issue_key: issue.key,
+          orchestration_id: discovery.orchestrationId,
+        });
+        return;
+      }
+
+      const snapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId);
+      if (snapshot) {
+        const releasableRows = snapshot.children.filter(
+          (child) => discovery.releasableSubIssueIds.includes(child.sub_issue_id)
+            && child.child_status === 'ready',
+        );
+        let panelSnapshot = snapshot;
+        if (releasableRows.length > 0) {
+          const now = new Date().toISOString();
+          const results = await releaseReadyChildren(
+            ddb,
+            ORCHESTRATION_TABLE,
+            releasableRows,
+            snapshot.meta.release_context,
+            createTaskCore,
+            now,
+            snapshot.children,
+          );
+          await applyTerminalCreateFailures(
+            ddb,
+            ORCHESTRATION_TABLE,
+            discovery.orchestrationId,
+            snapshot.children,
+            results,
+            now,
+          );
+          panelSnapshot = await loadOrchestration(
+            ddb,
+            ORCHESTRATION_TABLE,
+            discovery.orchestrationId,
+          ) ?? snapshot;
+        }
+
+        if (WORKSPACE_REGISTRY_TABLE) {
+          try {
+            // Unlike seed, extension already has a durable snapshot. Refresh the
+            // panel from it even if a post-release read is temporarily unavailable.
+            const commentId = await upsertEpicPanel({
+              channel: makeJiraChannel(WORKSPACE_REGISTRY_TABLE),
+              parent: {
+                issueId: issue.key,
+                credentialsRef: cloudId,
+                stateOverrides: {
+                  ...(panelSnapshot.meta.release_context.jira_status_on_start && {
+                    started: panelSnapshot.meta.release_context.jira_status_on_start,
+                  }),
+                  ...(panelSnapshot.meta.release_context.jira_status_on_pr && {
+                    inReview: panelSnapshot.meta.release_context.jira_status_on_pr,
+                  }),
+                },
+              },
+              ...(panelSnapshot.meta.status_comment_id && {
+                statusCommentId: panelSnapshot.meta.status_comment_id,
+              }),
+              children: panelSnapshot.children,
+              inProgress: true,
+              labelFilter,
+            });
+            if (commentId && !panelSnapshot.meta.status_comment_id) {
+              await setStatusCommentId(
+                ddb,
+                ORCHESTRATION_TABLE,
+                discovery.orchestrationId,
+                commentId,
+              );
+            }
+          } catch (err) {
+            logger.warn('Failed to refresh Jira orchestration panel on extend (non-fatal)', {
+              issue_key: issue.key,
+              orchestration_id: discovery.orchestrationId,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
+      }
+      logger.info('Jira orchestration extended with new subtasks', {
+        issue_key: issue.key,
+        orchestration_id: discovery.orchestrationId,
+        added_count: discovery.addedSubIssueIds.length,
+        releasable_count: discovery.releasableSubIssueIds.length,
+      });
+      return;
+    }
+  }
 
   const requestId = crypto.randomUUID();
   const result = await createTaskCore(
@@ -579,14 +838,16 @@ export async function handler(event: ProcessorEvent): Promise<void> {
 /**
  * Handle `comment_created` independently of the label-trigger path.
  *
- * The prior task is the routing source of truth: comments do not require the
- * trigger label to still be present or the Jira project mapping to remain
- * active. This preserves reviewer follow-ups after the original run.
+ * When Jira supplies project.key, the caller establishes that its mapping is
+ * active. Otherwise the prior task supplies the project key and this handler
+ * revalidates that mapping before producing feedback or creating a task.
+ * Comments do not require the trigger label to remain present.
  */
 async function handleCommentTrigger(
   payload: JiraIssueEvent,
   issue: NonNullable<JiraIssueEvent['issue']>,
   cloudId: string,
+  verifiedProjectKey?: string,
 ): Promise<void> {
   const comment = payload.comment;
   if (!comment?.id) {
@@ -615,12 +876,54 @@ async function handleCommentTrigger(
     return;
   }
 
+  let linkedCommentAuthor: string | null | undefined;
+  if (parseRetryIntent(trigger.instruction)) {
+    linkedCommentAuthor = comment.author?.accountId
+      ? await lookupPlatformUser(cloudId, comment.author.accountId)
+      : null;
+    if (!linkedCommentAuthor) {
+      logger.warn('Jira epic retry refused: commenter has no linked platform user', {
+        jira_cloud_id: cloudId,
+        jira_account_id: comment.author?.accountId,
+        issue_key: issue.key,
+        comment_id: comment.id,
+      });
+      await safeReportIssueFailure(
+        issue.key,
+        cloudId,
+        'I can only retry an orchestration for a linked ABCA user. '
+          + 'Link your Jira account first, then comment `@bgagent retry` again.',
+      );
+      return;
+    }
+    if (await handleJiraEpicRetry(issue.key, cloudId, comment.id)) {
+      return;
+    }
+  }
+
   const priorTask = await resolveTaskByJiraIssue(
     ddb,
     TASK_TABLE,
     cloudId,
     issue.key,
   );
+  if (!verifiedProjectKey) {
+    const priorProjectKey = priorTask?.channel_metadata?.jira_project_key;
+    if (!priorProjectKey) {
+      logger.info(
+        'Jira comment issue has no project.key or prior project metadata — skipping silently',
+        { issue_key: issue.key },
+      );
+      return;
+    }
+    if (!await getActiveProjectMapping(cloudId, priorProjectKey, issue.key)) {
+      return;
+    }
+    logger.warn('Jira comment issue has no project.key — routing via active prior task project', {
+      issue_key: issue.key,
+      project_key: priorProjectKey,
+    });
+  }
   const prNumber = priorTask ? prNumberFromTask(priorTask) : null;
   if (!priorTask || prNumber === null) {
     await safeReportIssueFailure(
@@ -639,7 +942,7 @@ async function handleCommentTrigger(
     return;
   }
 
-  const linkedCommentAuthor = comment.author?.accountId
+  linkedCommentAuthor ??= comment.author?.accountId
     ? await lookupPlatformUser(cloudId, comment.author.accountId)
     : null;
   const platformUserId = linkedCommentAuthor ?? priorTask.user_id;
@@ -679,6 +982,7 @@ async function handleCommentTrigger(
   );
   const idempotencyKey = buildCommentIdempotencyKey(cloudId, issue.key, comment.id);
   const requestId = crypto.randomUUID();
+  const taskId = ulid();
   const result = await createTaskCore(
     {
       repo: priorTask.repo,
@@ -691,6 +995,7 @@ async function handleCommentTrigger(
       channelSource: 'jira',
       channelMetadata,
       idempotencyKey,
+      taskId,
     },
     requestId,
   );
@@ -723,12 +1028,39 @@ async function handleCommentTrigger(
     return;
   }
 
-  await safeReportIssueFailure(
-    issue.key,
-    cloudId,
-    `👀 ABCA accepted this follow-up and is updating PR #${prNumber}.`,
-  );
+  let reply: CommentRef | null = null;
+  try {
+    reply = await makeJiraChannel(WORKSPACE_REGISTRY_TABLE).postComment(
+      { issueId: issue.key, credentialsRef: cloudId },
+      renderMaturingReply({ state: 'on_it' }),
+    );
+  } catch (err) {
+    logger.warn('Jira iteration acknowledgement post failed (non-fatal)', {
+      task_id: taskId,
+      issue_key: issue.key,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+  if (reply?.commentId) {
+    try {
+      await ddb.send(new UpdateCommand({
+        TableName: TASK_TABLE,
+        Key: { task_id: taskId },
+        UpdateExpression: 'SET channel_metadata.iteration_reply_comment_id = :comment_id',
+        ConditionExpression: 'attribute_exists(task_id)',
+        ExpressionAttributeValues: { ':comment_id': reply.commentId },
+      }));
+    } catch (err) {
+      logger.warn('Jira iteration acknowledgement posted but its comment id was not persisted', {
+        task_id: taskId,
+        issue_key: issue.key,
+        comment_id: reply.commentId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
   logger.info('Jira comment-triggered PR iteration task created', {
+    task_id: taskId,
     issue_key: issue.key,
     comment_id: comment.id,
     prior_task_id: priorTask.task_id,
@@ -737,6 +1069,153 @@ async function handleCommentTrigger(
     attributed_to_linked_comment_author: Boolean(linkedCommentAuthor),
     request_id: requestId,
   });
+}
+
+/**
+ * Retry a terminal Jira parent orchestration without requiring the parent to
+ * have its own task or PR. Successful children remain untouched; only failed
+ * and transitively skipped nodes are reset and released.
+ */
+async function handleJiraEpicRetry(
+  parentIssueKey: string,
+  cloudId: string,
+  commentId: string,
+): Promise<boolean> {
+  if (!ORCHESTRATION_TABLE) return false;
+  const orchestrationId = deriveOrchestrationId(parentIssueKey);
+  const snapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, orchestrationId);
+  if (!snapshot || snapshot.meta.parent_issue_ref !== parentIssueKey) return false;
+
+  const now = new Date().toISOString();
+  const claimed = await claimCommentAck(
+    ddb,
+    ORCHESTRATION_TABLE,
+    orchestrationId,
+    `retry:${commentId}`,
+    now,
+    Math.floor(Date.now() / 1000) + COMMENT_ACK_TTL_SECONDS,
+  );
+  if (!claimed) return true;
+
+  const plan = computeEpicRetryPlan(snapshot.children);
+  if (plan.statusUpdates.length === 0) {
+    const allSucceeded = plan.succeededCount === snapshot.children.length
+      && snapshot.children.length > 0;
+    await safeReportIssueFailure(
+      parentIssueKey,
+      cloudId,
+      allSucceeded
+        ? "👋 Everything in this orchestration already succeeded — there's nothing to retry."
+        : "👋 This orchestration is still running — nothing has failed yet, so there's nothing to retry.",
+    );
+    return true;
+  }
+
+  const previousStatus = new Map(
+    snapshot.children.map((child) => [child.sub_issue_id, child.child_status]),
+  );
+  for (const update of plan.statusUpdates) {
+    const prior = previousStatus.get(update.sub_issue_id);
+    try {
+      await ddb.send(new UpdateCommand({
+        TableName: ORCHESTRATION_TABLE,
+        Key: { orchestration_id: orchestrationId, sub_issue_id: update.sub_issue_id },
+        UpdateExpression: 'SET child_status = :next, updated_at = :now',
+        ConditionExpression: 'child_status = :prior',
+        ExpressionAttributeValues: {
+          ':next': update.child_status,
+          ':prior': prior,
+          ':now': now,
+        },
+      }));
+    } catch (err) {
+      logger.warn('Jira epic retry child reset lost a race; continuing best-effort', {
+        orchestration_id: orchestrationId,
+        sub_issue_id: update.sub_issue_id,
+        prior_status: prior,
+        next_status: update.child_status,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  await clearRollupClaim(ddb, ORCHESTRATION_TABLE, orchestrationId, now);
+
+  const reset = await loadOrchestration(ddb, ORCHESTRATION_TABLE, orchestrationId);
+  if (!reset) return true;
+  const ready = reset.children.filter(
+    (child) => plan.toRelease.includes(child.sub_issue_id)
+      && child.child_status === 'ready',
+  );
+  const budget = USER_CONCURRENCY_TABLE
+    ? await readConcurrencyBudget(
+      ddb,
+      USER_CONCURRENCY_TABLE,
+      reset.meta.release_context.platform_user_id,
+      MAX_CONCURRENT,
+    )
+    : undefined;
+  const releaseResults = await releaseReadyChildren(
+    ddb,
+    ORCHESTRATION_TABLE,
+    ready,
+    reset.meta.release_context,
+    createTaskCore,
+    now,
+    reset.children,
+    'main',
+    budget,
+    true,
+  );
+  await applyTerminalCreateFailures(
+    ddb,
+    ORCHESTRATION_TABLE,
+    orchestrationId,
+    reset.children,
+    releaseResults,
+    now,
+  );
+
+  await safeReportIssueFailure(
+    parentIssueKey,
+    cloudId,
+    `🔄 Retrying ${plan.failedCount} failed and ${plan.skippedCount} skipped sub-issue(s); `
+      + `${plan.succeededCount} successful sub-issue(s) are unchanged.`,
+  );
+  if (WORKSPACE_REGISTRY_TABLE) {
+    const refreshed = await loadOrchestration(ddb, ORCHESTRATION_TABLE, orchestrationId);
+    if (refreshed) {
+      const panelId = await upsertEpicPanel({
+        channel: makeJiraChannel(WORKSPACE_REGISTRY_TABLE),
+        parent: {
+          issueId: parentIssueKey,
+          credentialsRef: cloudId,
+          stateOverrides: {
+            ...(refreshed.meta.release_context.jira_status_on_start && {
+              started: refreshed.meta.release_context.jira_status_on_start,
+            }),
+            ...(refreshed.meta.release_context.jira_status_on_pr && {
+              inReview: refreshed.meta.release_context.jira_status_on_pr,
+            }),
+          },
+        },
+        children: refreshed.children,
+        statusCommentId: refreshed.meta.status_comment_id,
+        inProgress: true,
+        labelFilter: refreshed.meta.release_context.trigger_label,
+      });
+      if (panelId) {
+        await setStatusCommentId(ddb, ORCHESTRATION_TABLE, orchestrationId, panelId);
+      }
+    }
+  }
+  logger.info('Jira epic retry released failed/skipped graph', {
+    orchestration_id: orchestrationId,
+    parent_issue_key: parentIssueKey,
+    failed: plan.failedCount,
+    skipped: plan.skippedCount,
+    succeeded: plan.succeededCount,
+  });
+  return true;
 }
 
 function buildIterationChannelMetadata(
@@ -756,6 +1235,8 @@ function buildIterationChannelMetadata(
     jira_site_url: siteUrl,
     jira_trigger_comment_id: commentId,
     jira_prior_task_id: priorTask.task_id,
+    trigger_comment_id: commentId,
+    trigger_comment_issue_id: issue.key,
   };
 
   const projectKey = issue.fields?.project?.key ?? previous.jira_project_key;
@@ -766,7 +1247,81 @@ function buildIterationChannelMetadata(
   if (previous.jira_status_on_pr) {
     metadata.jira_status_on_pr = previous.jira_status_on_pr;
   }
+  if (previous.orchestration_id && previous.orchestration_sub_issue_id) {
+    metadata.orchestration_id = previous.orchestration_id;
+    metadata.orchestration_sub_issue_id = previous.orchestration_sub_issue_id;
+    metadata.orchestration_iteration = 'true';
+  }
   return metadata;
+}
+
+type ProjectMapping = Readonly<Record<string, unknown>>;
+
+async function routeJiraOrchestrationChildren(params: {
+  readonly cloudId: string;
+  readonly parentProjectKey: string;
+  readonly parentMapping: ProjectMapping;
+  readonly parentRepo: string;
+  readonly children: readonly JiraSubIssueNode[];
+  readonly oauthSecretArn: string;
+  readonly siteUrl: string;
+}): Promise<
+  | { readonly ok: true; readonly children: readonly SubIssueNode[] }
+  | { readonly ok: false; readonly message: string }
+> {
+  const mappings = new Map<string, ProjectMapping>([
+    [params.parentProjectKey, params.parentMapping],
+  ]);
+  for (const projectKey of new Set(params.children.map((child) => child.project_key))) {
+    if (mappings.has(projectKey)) continue;
+    const result = await ddb.send(new GetCommand({
+      TableName: PROJECT_MAPPING_TABLE,
+      Key: { jira_project_identity: `${params.cloudId}#${projectKey}` },
+    }));
+    if (result.Item) mappings.set(projectKey, result.Item);
+  }
+
+  for (const child of params.children) {
+    const childMapping = mappings.get(child.project_key);
+    if (!childMapping || childMapping.status !== 'active' || typeof childMapping.repo !== 'string') {
+      return {
+        ok: false,
+        message: `${child.identifier ?? child.id} belongs to Jira project ${child.project_key}, `
+          + 'which is not actively mapped to an ABCA repository. Map that project and re-apply the trigger label.',
+      };
+    }
+    if (childMapping.repo !== params.parentRepo) {
+      return {
+        ok: false,
+        message: `${child.identifier ?? child.id} maps to ${childMapping.repo}, but the parent maps to `
+          + `${params.parentRepo}. All executable Jira subtasks must map to the same repository.`,
+      };
+    }
+  }
+
+  return {
+    ok: true,
+    children: params.children.map((child) => {
+      const childMapping = mappings.get(child.project_key)!;
+      return {
+        ...child,
+        channel_metadata: {
+          jira_cloud_id: params.cloudId,
+          jira_project_key: child.project_key,
+          jira_issue_id: child.issue_id,
+          jira_issue_key: child.identifier ?? child.id,
+          jira_oauth_secret_arn: params.oauthSecretArn,
+          jira_site_url: params.siteUrl,
+          ...(typeof childMapping.status_on_start === 'string' && {
+            jira_status_on_start: childMapping.status_on_start,
+          }),
+          ...(typeof childMapping.status_on_pr === 'string' && {
+            jira_status_on_pr: childMapping.status_on_pr,
+          }),
+        },
+      };
+    }),
+  };
 }
 
 function buildCommentIdempotencyKey(
@@ -972,7 +1527,7 @@ async function screenCommentsOrDrop(
       jira_cloud_id: cloudId,
       error: err instanceof Error ? err.message : String(err),
     });
-    return [];
+    return []; // nosemgrep: ts-silent-success-masking -- comments are advisory enrichment; a screening outage drops them (logged) and the reporter's task still proceeds. Fail-open is the deliberate posture, not a masked bug (#756 Category 3)
   }
 }
 
@@ -1021,7 +1576,38 @@ async function lookupPlatformUser(cloudId: string, accountId: string): Promise<s
   const result = await ddb.send(new GetCommand({
     TableName: USER_MAPPING_TABLE,
     Key: { jira_identity: key },
+    ConsistentRead: true,
   }));
-  if (!result.Item || result.Item.status === 'pending') return null;
-  return (result.Item.platform_user_id as string) ?? null;
+  const platformUserId = result.Item?.platform_user_id;
+  if (
+    result.Item?.status !== 'active'
+    || typeof platformUserId !== 'string'
+    || !platformUserId
+  ) {
+    return null;
+  }
+  return platformUserId;
+}
+
+async function getActiveProjectMapping(
+  cloudId: string,
+  projectKey: string,
+  issueKey: string,
+): Promise<Record<string, unknown> | null> {
+  const projectIdentity = `${cloudId}#${projectKey}`;
+  const mapping = await ddb.send(new GetCommand({
+    TableName: PROJECT_MAPPING_TABLE,
+    Key: { jira_project_identity: projectIdentity },
+    ConsistentRead: true,
+  }));
+  if (!mapping.Item || mapping.Item.status !== 'active') {
+    // Jira admin-console webhooks fire site-wide. An unmapped project has not
+    // opted into ABCA, so it must remain a true no-op for every event type.
+    logger.info('Jira project is not onboarded or is removed — skipping silently', {
+      jira_project_identity: projectIdentity,
+      issue_key: issueKey,
+    });
+    return null;
+  }
+  return mapping.Item;
 }

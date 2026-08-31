@@ -30,8 +30,9 @@ import { NagSuppressions } from 'cdk-nag';
 import { Construct, type Node } from 'constructs';
 import { AgentMemory } from './agent-memory';
 import { AgentSessionRole } from './agent-session-role';
-import { resolveBedrockModelIds } from './bedrock-models';
+import { resolveBedrockGeoRegion, resolveBedrockModelIds } from './bedrock-models';
 import { buildAppId } from './solution-ua-aspect';
+import { ToolGateway } from './tool-gateway';
 
 export interface EcsAgentClusterProps {
   readonly vpc: ec2.IVpc;
@@ -103,6 +104,16 @@ export interface EcsAgentClusterProps {
    * memory-less deployments.
    */
   readonly agentMemory?: AgentMemory;
+
+  /**
+   * Tool-federation Gateway (ADR-019 P1). When provided, the ECS task role is
+   * granted ``bedrock-agentcore:InvokeGateway`` and the container gets
+   * ``ABCA_TOOL_GATEWAY_URL`` — parity with the AgentCore runtime, so a
+   * gateway-federated MCP tool works on the ECS substrate too. Omitted when the
+   * gateway is not provisioned (the default) or in isolated construct tests →
+   * no grant, no env.
+   */
+  readonly toolGateway?: ToolGateway;
 }
 
 /** HTTPS port — the only egress allowed from the agent task ENIs. */
@@ -381,6 +392,9 @@ export class EcsAgentCluster extends Construct {
       // #319 outbound SDK solution attribution — set on the shared base so both
       // task defs emit `app/uksb-wt64nei4u6#{stack}`.
       ...(sdkUaAppId ? { AWS_SDK_UA_APP_ID: sdkUaAppId } : {}),
+      // ADR-019 P1: federated-tool Gateway URL, parity with the AgentCore
+      // runtime env. Present only when the gateway is provisioned.
+      ...(props.toolGateway && { ABCA_TOOL_GATEWAY_URL: props.toolGateway.gatewayUrl }),
     };
     const image = ecs.ContainerImage.fromDockerImageAsset(props.agentImageAsset);
     const makeTaskDef = (
@@ -533,6 +547,13 @@ export class EcsAgentCluster extends Construct {
       props.agentMemory.grantReadWrite(taskRole);
     }
 
+    // ADR-019 P1: parity with the AgentCore runtime's InvokeGateway grant in
+    // agent.ts — the ECS task role SigV4-invokes the same tool Gateway. Without
+    // this, a gateway-federated MCP tool AccessDenies on the ECS substrate.
+    if (props.toolGateway) {
+      props.toolGateway.grantInvoke(taskRole);
+    }
+
     // Per-workspace Linear/Jira OAuth tokens live in Secrets Manager under
     // `bgagent-linear-oauth-*` (written by the CLI at setup). For a
     // Linear/Jira-channel task the agent resolves that token at startup
@@ -564,10 +585,12 @@ export class EcsAgentCluster extends Construct {
 
     // Bedrock model invocation — scoped to explicit foundation-model and
     // cross-region inference-profile ARNs (parity with the AgentCore runtime
-    // grants in agent.ts), NOT a Resource: '*' wildcard. The model set is the
-    // shared, context-overridable list (constructs/bedrock-models.ts) so the
-    // ECS and AgentCore backends can't drift.
+    // grants in agent.ts), NOT a Resource: '*' wildcard. The model set and the
+    // inference-profile geography are both the shared, context-overridable
+    // values (constructs/bedrock-models.ts: `bedrockModels`, `bedrockGeoRegion`)
+    // so the ECS and AgentCore backends can't drift.
     const stack = Stack.of(this);
+    const bedrockGeoRegion = resolveBedrockGeoRegion(this.node);
     const bedrockResources: string[] = [];
     for (const modelId of resolveBedrockModelIds(this.node)) {
       bedrockResources.push(
@@ -582,7 +605,10 @@ export class EcsAgentCluster extends Construct {
         stack.formatArn({
           service: 'bedrock',
           resource: 'inference-profile',
-          resourceName: `us.${modelId}`,
+          // Same `<geo>.<modelId>` shape CrossRegionInferenceProfile.fromConfig
+          // builds for the AgentCore grant — regional + account-qualified for
+          // every geography, `global.` included.
+          resourceName: `${bedrockGeoRegion}.${modelId}`,
           arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
         }),
       );

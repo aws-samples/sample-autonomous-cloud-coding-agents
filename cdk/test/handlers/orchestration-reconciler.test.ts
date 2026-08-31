@@ -68,6 +68,23 @@ jest.mock('../../src/handlers/shared/linear-feedback', () => ({
   EMOJI_NEEDS_INPUT: 'question',
 }));
 
+const jiraPostIssueCommentMock = jest.fn();
+const jiraUpdateIssueCommentMock = jest.fn();
+const jiraPostIssueCommentAdfMock = jest.fn();
+const jiraUpdateIssueCommentAdfMock = jest.fn();
+const jiraBuildAdfDocumentMock = jest.fn(
+  (paragraphs: ReadonlyArray<ReadonlyArray<{ text: string }>>) => ({ _adf: paragraphs }),
+);
+const jiraTransitionIssueStateMock = jest.fn();
+jest.mock('../../src/handlers/shared/jira-feedback', () => ({
+  postIssueComment: (...args: unknown[]) => jiraPostIssueCommentMock(...args),
+  updateIssueComment: (...args: unknown[]) => jiraUpdateIssueCommentMock(...args),
+  postIssueCommentAdf: (...args: unknown[]) => jiraPostIssueCommentAdfMock(...args),
+  updateIssueCommentAdf: (...args: unknown[]) => jiraUpdateIssueCommentAdfMock(...args),
+  buildAdfDocument: (...args: unknown[]) => jiraBuildAdfDocumentMock(...args),
+  transitionIssueState: (...args: unknown[]) => jiraTransitionIssueStateMock(...args),
+}));
+
 jest.mock('../../src/handlers/shared/logger', () => ({
   logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
 }));
@@ -77,6 +94,7 @@ process.env.TASK_TABLE_NAME = 'TaskTable';
 // Cascade surfacing: the cascade posts Linear comments only when the
 // workspace registry is configured. Set it so the surfacing path is exercised.
 process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME = 'WorkspaceRegistry';
+process.env.JIRA_WORKSPACE_REGISTRY_TABLE_NAME = 'JiraWorkspaceRegistry';
 process.env.ARTIFACTS_BUCKET_NAME = 'ArtifactsBucket';
 
 import { TERMINAL_STATUSES } from '../../src/constructs/task-status';
@@ -101,6 +119,11 @@ function taskRecord(fields: {
   error_message?: string;
   // Whether the agent actually edited code; false marks a question/answer run.
   code_changed?: boolean;
+  iteration_reply_comment_id?: string;
+  cost_usd?: number;
+  duration_s?: number;
+  turns_attempted?: number;
+  max_turns?: number;
   // Stream sequence number (itemIdentifier for partial-batch reporting).
   sequenceNumber?: string;
 }): DynamoDBRecord {
@@ -109,6 +132,10 @@ function taskRecord(fields: {
   if (fields.status) img.status = { S: fields.status };
   if (fields.build_passed !== undefined) img.build_passed = { BOOL: fields.build_passed };
   if (fields.code_changed !== undefined) img.code_changed = { BOOL: fields.code_changed };
+  if (fields.cost_usd !== undefined) img.cost_usd = { N: String(fields.cost_usd) };
+  if (fields.duration_s !== undefined) img.duration_s = { N: String(fields.duration_s) };
+  if (fields.turns_attempted !== undefined) img.turns_attempted = { N: String(fields.turns_attempted) };
+  if (fields.max_turns !== undefined) img.max_turns = { N: String(fields.max_turns) };
   if (fields.error_message) img.error_message = { S: fields.error_message };
   // PRODUCTION SHAPE: createTaskCore persists orchestration_id INSIDE the
   // nested channel_metadata MAP, not as a top-level attribute. The stream
@@ -125,6 +152,9 @@ function taskRecord(fields: {
   if (fields.orchestration_iteration) cm.orchestration_iteration = { S: 'true' };
   if (fields.trigger_comment_id) cm.trigger_comment_id = { S: fields.trigger_comment_id };
   if (fields.trigger_comment_issue_id) cm.trigger_comment_issue_id = { S: fields.trigger_comment_issue_id };
+  if (fields.iteration_reply_comment_id) {
+    cm.iteration_reply_comment_id = { S: fields.iteration_reply_comment_id };
+  }
   if (Object.keys(cm).length > 0) img.channel_metadata = { M: cm };
   return {
     eventName: fields.eventName ?? 'MODIFY',
@@ -738,19 +768,22 @@ describe('feedback surface is chosen from the orchestration row, not assumed', (
     expect(upsertStatusCommentMock).toHaveBeenCalled();
   });
 
-  test('a row whose surface has no configured registry skips feedback instead of posting to Linear', async () => {
-    // The Jira tenant registry is unset in this handler's env, so a Jira-sourced
-    // orchestration has no adapter. It must stay silent — NOT fall through and
-    // address the Linear workspace, which is a different tenant's data.
+  test('a Jira row drives the Jira adapter instead of posting to Linear', async () => {
+    jiraPostIssueCommentMock.mockResolvedValue('jira-panel-1');
     mockOrchestration({
       subIssueId: 'A',
       children: [{ sub_issue_id: 'A', child_status: 'released' }],
-      meta: { channel_source: 'jira' },
+      meta: {
+        channel_source: 'jira',
+        parent_issue_ref: 'KAN-1',
+        credentials_ref: 'cloud-1',
+      },
     });
     await handler(completed());
     expect(upsertStatusCommentMock).not.toHaveBeenCalled();
     expect(swapIssueReactionMock).not.toHaveBeenCalled();
     expect(transitionIssueStateMock).not.toHaveBeenCalled();
+    expect(jiraPostIssueCommentMock).toHaveBeenCalled();
   });
 });
 
@@ -1121,6 +1154,15 @@ describe('orchestration-reconciler handler — the iteration ack reply', () => {
     transitionIssueStateMock.mockReset().mockResolvedValue(true);
     replyToCommentMock.mockReset().mockResolvedValue('reply-1');
     upsertThreadedReplyMock.mockReset().mockResolvedValue('reply-1');
+    jiraPostIssueCommentMock.mockReset().mockResolvedValue('jira-reply-1');
+    jiraUpdateIssueCommentMock.mockReset().mockResolvedValue(true);
+    jiraPostIssueCommentAdfMock.mockReset().mockResolvedValue({
+      ok: true,
+      commentId: 'jira-result-1',
+    });
+    jiraUpdateIssueCommentAdfMock.mockReset().mockResolvedValue({ ok: true });
+    jiraBuildAdfDocumentMock.mockClear();
+    jiraTransitionIssueStateMock.mockReset().mockResolvedValue(true);
   });
 
   /** An iteration event carrying the human comment id that triggered it. */
@@ -1156,6 +1198,245 @@ describe('orchestration-reconciler handler — the iteration ack reply', () => {
     // The channel passes the same-category-regression flag explicitly; a plain
     // advance never allows one.
     expect(transitionIssueStateMock).toHaveBeenCalledWith(expect.anything(), 'A', 'started', ['In Review'], false);
+  });
+
+  test('a Jira orchestration iteration finishes its progress comment and posts metrics separately', async () => {
+    mockCascade(
+      [{
+        sub_issue_id: 'KAN-2',
+        child_status: 'succeeded',
+        child_task_id: 'task-A',
+        child_branch_name: 'branch-A',
+      }],
+      {
+        channel_source: 'jira',
+        parent_issue_ref: 'KAN-1',
+        credentials_ref: 'cloud-1',
+      },
+    );
+
+    await handler({
+      Records: [taskRecord({
+        task_id: 'iter-task-1',
+        status: 'COMPLETED',
+        orchestration_id: 'orch_1',
+        orchestration_sub_issue_id: 'KAN-2',
+        orchestration_iteration: true,
+        trigger_comment_id: 'human-cmt-1',
+        trigger_comment_issue_id: 'KAN-2',
+        iteration_reply_comment_id: 'jira-status-1',
+        cost_usd: 1.25,
+        duration_s: 125,
+        turns_attempted: 12,
+        max_turns: 100,
+      })],
+    } as never);
+
+    const statusUpdate = jiraUpdateIssueCommentAdfMock.mock.calls.find(
+      (([, , commentId]) => commentId === 'jira-status-1'),
+    );
+    expect(statusUpdate).toBeDefined();
+    const [ctx, issueKey, commentId, body] = statusUpdate!;
+    expect(ctx).toEqual({
+      cloudId: 'cloud-1',
+      registryTableName: 'JiraWorkspaceRegistry',
+    });
+    expect(issueKey).toBe('KAN-2');
+    expect(commentId).toBe('jira-status-1');
+    expect(body).toEqual({
+      _adf: [[{ text: '✅ Finished — result posted below.', strong: true }]],
+    });
+    const finalPost = jiraPostIssueCommentAdfMock.mock.calls.find(
+      (([, postedIssueKey, postedBody]) => {
+        const text = (postedBody._adf as Array<Array<{ text: string }>>)
+          .flat()
+          .map((run) => run.text)
+          .join('');
+        return postedIssueKey === 'KAN-2'
+          && text.includes('cost: $1.25 • turns: 12 / 100 • duration: 2m 5s');
+      }),
+    );
+    expect(finalPost).toBeDefined();
+    const finalRuns = (finalPost![2]._adf as Array<Array<{ text: string; href?: string }>>).flat();
+    expect(finalRuns.map((run) => run.text).join('')).toContain('task iter-task-1');
+    expect(finalRuns).toContainEqual(expect.objectContaining({
+      text: expect.stringContaining('/pull/'),
+      href: expect.stringContaining('/pull/'),
+    }));
+    expect(upsertThreadedReplyMock).not.toHaveBeenCalled();
+  });
+
+  test('a failed Jira terminal update releases the claim for redelivery', async () => {
+    mockCascade(
+      [{
+        sub_issue_id: 'KAN-2',
+        child_status: 'succeeded',
+        child_task_id: 'task-A',
+        child_branch_name: 'branch-A',
+      }],
+      {
+        channel_source: 'jira',
+        parent_issue_ref: 'KAN-1',
+        credentials_ref: 'cloud-1',
+      },
+    );
+    jiraUpdateIssueCommentAdfMock.mockImplementation(
+      (_ctx, _issueKey, commentId) => Promise.resolve(
+        commentId === 'jira-status-1'
+          ? { ok: false, retryable: false }
+          : { ok: true },
+      ),
+    );
+
+    await handler({
+      Records: [taskRecord({
+        task_id: 'iter-task-1',
+        status: 'COMPLETED',
+        orchestration_id: 'orch_1',
+        orchestration_sub_issue_id: 'KAN-2',
+        orchestration_iteration: true,
+        trigger_comment_id: 'human-cmt-1',
+        trigger_comment_issue_id: 'KAN-2',
+        iteration_reply_comment_id: 'jira-status-1',
+      })],
+    } as never);
+
+    const claims = ddbSend.mock.calls
+      .map(([command]) => command as {
+        _type?: string;
+        input?: {
+          UpdateExpression?: string;
+          ExpressionAttributeValues?: Record<string, unknown>;
+        };
+      })
+      .filter(command =>
+        command._type === 'Update'
+        && /ack_replied_at/.test(command.input?.UpdateExpression ?? ''),
+      );
+    expect(claims[0].input?.UpdateExpression).toBe('SET ack_replied_at = :now');
+    expect(claims[1].input?.UpdateExpression).toContain('REMOVE ack_replied_at');
+    expect(claims[1].input?.ExpressionAttributeValues?.[':ours'])
+      .toBe(claims[0].input?.ExpressionAttributeValues?.[':now']);
+    expect(jiraPostIssueCommentAdfMock).not.toHaveBeenCalled();
+  });
+
+  test('a terminal Jira result-post failure folds the full ADF outcome into the status comment', async () => {
+    mockCascade(
+      [{
+        sub_issue_id: 'KAN-2',
+        child_status: 'succeeded',
+        child_task_id: 'task-A',
+        child_branch_name: 'branch-A',
+      }],
+      {
+        channel_source: 'jira',
+        parent_issue_ref: 'KAN-1',
+        credentials_ref: 'cloud-1',
+      },
+    );
+    jiraPostIssueCommentAdfMock.mockResolvedValue({
+      ok: false,
+      retryable: false,
+    });
+
+    await handler({
+      Records: [taskRecord({
+        task_id: 'iter-task-1',
+        status: 'COMPLETED',
+        orchestration_id: 'orch_1',
+        orchestration_sub_issue_id: 'KAN-2',
+        orchestration_iteration: true,
+        trigger_comment_id: 'human-cmt-1',
+        trigger_comment_issue_id: 'KAN-2',
+        iteration_reply_comment_id: 'jira-status-1',
+        cost_usd: 1.25,
+      })],
+    } as never);
+
+    expect(jiraUpdateIssueCommentAdfMock).toHaveBeenCalledTimes(2);
+    const [, , commentId, fallbackBody] = jiraUpdateIssueCommentAdfMock.mock.calls[1];
+    expect(commentId).toBe('jira-status-1');
+    const runs = (fallbackBody._adf as Array<Array<{ text: string; href?: string }>>).flat();
+    expect(runs.map((run) => run.text).join('')).toContain('cost: $1.25');
+    expect(runs).toContainEqual(expect.objectContaining({
+      href: expect.stringContaining('/pull/'),
+    }));
+    const releases = ddbSend.mock.calls
+      .map(([command]) => command as {
+        _type?: string;
+        input?: { UpdateExpression?: string };
+      })
+      .filter(command =>
+        command._type === 'Update'
+        && /REMOVE ack_replied_at/.test(command.input?.UpdateExpression ?? ''),
+      );
+    expect(releases).toHaveLength(0);
+  });
+
+  test('redelivered Jira iteration matures its status comment once', async () => {
+    mockCascade(
+      [{
+        sub_issue_id: 'KAN-2',
+        child_status: 'succeeded',
+        child_task_id: 'task-A',
+        child_branch_name: 'branch-A',
+      }],
+      {
+        channel_source: 'jira',
+        parent_issue_ref: 'KAN-1',
+        credentials_ref: 'cloud-1',
+      },
+    );
+    let ackClaims = 0;
+    const base = ddbSend.getMockImplementation()!;
+    ddbSend.mockImplementation(async (command: {
+      _type: string;
+      input: Record<string, unknown>;
+    }) => {
+      if (
+        command._type === 'Update'
+        && String(command.input.UpdateExpression).includes('ack_replied_at')
+      ) {
+        ackClaims += 1;
+        if (ackClaims > 1) {
+          throw Object.assign(new Error('claimed'), {
+            name: 'ConditionalCheckFailedException',
+          });
+        }
+        return {};
+      }
+      return base(command);
+    });
+    const event = {
+      Records: [taskRecord({
+        task_id: 'iter-task-1',
+        status: 'COMPLETED',
+        orchestration_id: 'orch_1',
+        orchestration_sub_issue_id: 'KAN-2',
+        orchestration_iteration: true,
+        trigger_comment_id: 'human-cmt-1',
+        trigger_comment_issue_id: 'KAN-2',
+        iteration_reply_comment_id: 'jira-status-1',
+      })],
+    } as never;
+
+    await handler(event);
+    await handler(event);
+
+    const statusUpdates = jiraUpdateIssueCommentAdfMock.mock.calls.filter(
+      (([, , commentId]) => commentId === 'jira-status-1'),
+    );
+    expect(statusUpdates).toHaveLength(1);
+    const resultPosts = jiraPostIssueCommentAdfMock.mock.calls.filter(
+      (([, issueKey, body]) => {
+        const text = (body._adf as Array<Array<{ text: string }>>)
+          .flat()
+          .map((run) => run.text)
+          .join('');
+        return issueKey === 'KAN-2' && text.includes('task iter-task-1');
+      }),
+    );
+    expect(resultPosts).toHaveLength(1);
   });
 
   test('a no-change iteration (a question) settles 💬 and leaves the sub-issue state alone', async () => {

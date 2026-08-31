@@ -22,6 +22,7 @@ import { allPolicies } from '../../src/bootstrap/policies';
 import { applicationPolicy } from '../../src/bootstrap/policies/application';
 import { computeAgentcorePolicy } from '../../src/bootstrap/policies/compute-agentcore';
 import { computeEcsPolicy } from '../../src/bootstrap/policies/compute-ecs';
+import { computeLambdaMicrovmPolicy } from '../../src/bootstrap/policies/compute-lambda-microvm';
 import { infrastructurePolicy } from '../../src/bootstrap/policies/infrastructure';
 import { observabilityPolicy } from '../../src/bootstrap/policies/observability';
 
@@ -61,6 +62,24 @@ describe('infrastructurePolicy', () => {
     const unique = new Set(sids);
 
     expect(unique.size).toBe(sids.length);
+  });
+
+  it('KEEPS the iam:PassedToService allowlist on IAMPassRole', () => {
+    // ADR-021 P2r2-F9 added an UNCONDITIONED `iam:PassRole` to the
+    // `compute-lambda-microvm` policy, because the Lambda MicroVMs service presents
+    // no usable value for this key. That fix must not spread: this statement covers
+    // every role in the stack by prefix, so dropping its condition here would
+    // relax ~30 roles to fix two. The narrow statement lives in the conditional
+    // per-backend policy precisely so this one can stay as it is.
+    const resolvedDoc = stack.resolve(doc);
+    const statements = resolvedDoc.Statement as Array<{
+      Sid: string;
+      Condition?: { StringEquals?: Record<string, string[]> };
+    }>;
+    const passRole = statements.find((st) => st.Sid === 'IAMPassRole')!;
+    const services = passRole.Condition?.StringEquals?.['iam:PassedToService'];
+    expect(services).toBeDefined();
+    expect(services).toContain('lambda.amazonaws.com');
   });
 
   it('covers the expected service prefixes', () => {
@@ -111,6 +130,8 @@ describe('IaCRole-ABCA-Application', () => {
       'WAFv2',
       'EventBridge',
       'SQS',
+      'SNS',
+      'StepFunctions',
       'CloudFront',
       'SecretsManager',
       'SecretsManagerAccountLevel',
@@ -143,7 +164,9 @@ describe('IaCRole-ABCA-Application', () => {
         'events',
         'lambda',
         'secretsmanager',
+        'sns',
         'sqs',
+        'states',
         'wafv2',
       ]),
     );
@@ -210,6 +233,23 @@ describe('IaCRole-ABCA-Application', () => {
       expect(resources).toContain(`arn:aws:secretsmanager:*:*:secret:${prefix}*`);
     }
   });
+
+  it('SNS statement grants the create + subscribe verbs the OperationalAlerts topic needs (#629)', () => {
+    // Per-verb guard (mirrors the #409/#407 provisioned-concurrency and
+    // event-source-mapping-tagging guards): a missing verb is invisible to
+    // the service-prefix check above (still `sns:`) but rolls back a fresh
+    // deploy with AccessDenied. CreateTopic creates the topic;
+    // Subscribe/GetTopicAttributes are exercised when `-c alertEmail=...`
+    // adds an email subscription.
+    const resolvedDoc = stack.resolve(doc);
+    const statements = resolvedDoc.Statement as Array<{ Sid: string; Action?: string | string[] }>;
+    const sns = statements.find((s) => s.Sid === 'SNS');
+    expect(sns).toBeDefined();
+    const actions = Array.isArray(sns!.Action) ? sns!.Action : [sns!.Action];
+    for (const action of ['sns:CreateTopic', 'sns:Subscribe', 'sns:GetTopicAttributes']) {
+      expect(actions).toContain(action);
+    }
+  });
 });
 
 describe('IaCRole-ABCA-Observability', () => {
@@ -238,6 +278,8 @@ describe('IaCRole-ABCA-Observability', () => {
       'S3CDKAssets',
       'S3ApplicationBuckets',
       'KMSForCDKAssets',
+      'KMSCustomerManagedKeys',
+      'KMSCustomerManagedKeysLifecycle',
       'ECRForDockerAssets',
       'ECRAuthToken',
       'XRay',
@@ -308,6 +350,46 @@ describe('IaCRole-ABCA-Observability', () => {
     ]) {
       expect(actions).toContain(action);
     }
+  });
+
+  it('KMSCustomerManagedKeys grants CreateKey + tag on * (the unscopable create path) (#629)', () => {
+    // kms:CreateKey and kms:TagResource must be unconditioned on `*`:
+    // the key ARN does not exist at create time and TagResource applies
+    // the very tag that scopes the lifecycle statement below.
+    const resolvedDoc = stack.resolve(doc);
+    const statements = resolvedDoc.Statement as Array<{
+      Sid: string;
+      Action?: string | string[];
+      Condition?: unknown;
+    }>;
+    const create = statements.find((s) => s.Sid === 'KMSCustomerManagedKeys');
+    expect(create).toBeDefined();
+    const actions = Array.isArray(create!.Action) ? create!.Action : [create!.Action];
+    expect(actions).toContain('kms:CreateKey');
+    expect(actions).toContain('kms:TagResource');
+    // The create/read statement must NOT carry policy-mutation actions —
+    // those belong to the tag-scoped lifecycle statement.
+    expect(actions).not.toContain('kms:PutKeyPolicy');
+    expect(actions).not.toContain('kms:ScheduleKeyDeletion');
+    expect(create!.Condition).toBeUndefined();
+  });
+
+  it('KMSCustomerManagedKeysLifecycle gates key-takeover actions on the ABCA resource tag (#629)', () => {
+    // PutKeyPolicy / ScheduleKeyDeletion on `*` would let the deploy role
+    // take over or delete any CMK in the account. They are confined to
+    // keys carrying the `ABCA=operational-alerts` tag the construct stamps.
+    const resolvedDoc = stack.resolve(doc);
+    const statements = resolvedDoc.Statement as Array<{
+      Sid: string;
+      Action?: string | string[];
+      Condition?: { StringEquals?: Record<string, string> };
+    }>;
+    const lifecycle = statements.find((s) => s.Sid === 'KMSCustomerManagedKeysLifecycle');
+    expect(lifecycle).toBeDefined();
+    const actions = Array.isArray(lifecycle!.Action) ? lifecycle!.Action : [lifecycle!.Action];
+    expect(actions).toContain('kms:PutKeyPolicy');
+    expect(actions).toContain('kms:ScheduleKeyDeletion');
+    expect(lifecycle!.Condition?.StringEquals?.['aws:ResourceTag/ABCA']).toBe('operational-alerts');
   });
 });
 
@@ -399,6 +481,160 @@ describe('IaCRole-ABCA-Compute-ECS', () => {
   });
 });
 
+describe('computeLambdaMicrovmPolicy', () => {
+  const stack = new Stack();
+  const doc = computeLambdaMicrovmPolicy();
+  const json = doc.toJSON();
+  const rendered = JSON.stringify(json);
+
+  it('produces valid JSON', () => {
+    expect(() => JSON.parse(rendered)).not.toThrow();
+  });
+
+  it('is under 6144 characters when serialized', () => {
+    // AWS managed policy size limit
+    expect(rendered.length).toBeLessThan(6144);
+  });
+
+  it('contains the expected SIDs', () => {
+    const resolvedDoc = stack.resolve(doc);
+    const statements = resolvedDoc.Statement as Array<{ Sid: string }>;
+
+    expect(statements.map((s) => s.Sid)).toEqual(['LambdaMicrovms', 'MicrovmPassRoles']);
+  });
+
+  it('covers the expected service prefixes', () => {
+    const resolvedDoc = stack.resolve(doc);
+    const statements = resolvedDoc.Statement as Array<{ Action: string | string[] }>;
+    const allActions = statements.flatMap((s) =>
+      Array.isArray(s.Action) ? s.Action : [s.Action],
+    );
+    const prefixes = new Set(allActions.map((a) => a.split(':')[0]));
+
+    // `iam` joins `lambda` as of the MicrovmPassRoles statement (ADR-021 P2r2-F9).
+    expect(prefixes).toEqual(new Set(['lambda', 'iam']));
+  });
+
+  describe('MicrovmPassRoles (ADR-021 P2r2-F9)', () => {
+    function passRoleStatement() {
+      const resolvedDoc = stack.resolve(doc);
+      const statements = resolvedDoc.Statement as Array<{
+        Sid: string;
+        Action: string | string[];
+        Resource: string | string[];
+        Condition?: unknown;
+      }>;
+      return statements.find((st) => st.Sid === 'MicrovmPassRoles')!;
+    }
+
+    it('carries NO iam:PassedToService condition — the service presents no usable value', () => {
+      // The whole point of the statement. `infrastructure`'s IAMPassRole already
+      // matches these roles by prefix, but its `iam:PassedToService` allowlist is
+      // DENIED on this path: live 2026-08-07, CloudFormation could not pass the
+      // build role to CreateMicrovmImage ("...is not authorized to perform:
+      // iam:PassRole ... (Service: LambdaMicrovms, Status Code: 403)") while the
+      // out-of-band create-image call passed the SAME role successfully with
+      // unconditioned operator credentials. Re-adding a condition here re-breaks
+      // the CDK-managed image path.
+      expect(passRoleStatement().Condition).toBeUndefined();
+    });
+
+    it('grants only iam:PassRole', () => {
+      expect(passRoleStatement().Action).toBe('iam:PassRole');
+    });
+
+    it('is scoped to the build + connector-operator role prefixes only', () => {
+      const resources = passRoleStatement().Resource as string[];
+      expect(resources).toEqual([
+        'arn:aws:iam::*:role/backgroundagent-dev-LambdaMicrovmComputeBuild*',
+        'arn:aws:iam::*:role/backgroundagent-dev-LambdaMicrovmComputeConnector*',
+      ]);
+      // NOT the stack-wide role prefix the conditioned statement uses: an
+      // unconditioned pass on `backgroundagent-dev-*` would drop the
+      // iam:PassedToService constraint for every role in the stack to fix two.
+      expect(resources).not.toContain('arn:aws:iam::*:role/backgroundagent-dev-*');
+    });
+
+    it('does NOT cover the MicroVM execution role', () => {
+      // CloudFormation never passes it — the orchestrator does, at RunMicrovm,
+      // under its own exact-ARN grant (task-orchestrator.ts). Including it here
+      // would extend an unconditioned pass to the role that runs untrusted repo
+      // code, for no deploy-time reason. The live physical name is
+      // `backgroundagent-dev-LambdaMicrovmComputeExecutionRo-<suffix>`.
+      const resources = passRoleStatement().Resource as string[];
+      const executionRoleArn =
+        'arn:aws:iam::123456789012:role/backgroundagent-dev-LambdaMicrovmComputeExecutionRo-abc123';
+      const matches = resources.some((pattern) => {
+        const re = new RegExp(`^${pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')}$`);
+        return re.test(executionRoleArn);
+      });
+      expect(matches).toBe(false);
+    });
+
+    it('matches the live physical names CloudFormation generated for both roles', () => {
+      // Regression guard on the truncation window: CFN truncates the logical id to
+      // fit 64 chars before appending a random suffix, so a pattern that reaches
+      // past the cut silently matches nothing. The ROLE-NAME segments below are
+      // verbatim from the live run (the build role's is the one in the
+      // AccessDenied above) — that is the part the assertion exercises. The
+      // account id is the repo's standard placeholder, not the live one: the glob
+      // match depends only on the role-name segment, and this is a public sample
+      // repo.
+      const resources = passRoleStatement().Resource as string[];
+      const live = [
+        'arn:aws:iam::123456789012:role/backgroundagent-dev-LambdaMicrovmComputeBuildRoleF0-9FxjQbiJC3px',
+        'arn:aws:iam::123456789012:role/backgroundagent-dev-LambdaMicrovmComputeConnectorOp-Ab12Cd34Ef56',
+      ];
+      for (const arn of live) {
+        const matched = resources.some((pattern) => {
+          const re = new RegExp(`^${pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')}$`);
+          return re.test(arn);
+        });
+        expect(matched).toBe(true);
+      }
+    });
+  });
+
+  it('covers both CFN resource types the construct synthesizes', () => {
+    const resolvedDoc = stack.resolve(doc);
+    const statements = resolvedDoc.Statement as Array<{ Action: string | string[] }>;
+    const allActions = statements.flatMap((s) =>
+      Array.isArray(s.Action) ? s.Action : [s.Action],
+    );
+
+    // AWS::Lambda::MicrovmImage + AWS::Lambda::NetworkConnector, plus the
+    // documented dependent of CreateMicrovmImage.
+    expect(allActions).toContain('lambda:CreateMicrovmImage');
+    expect(allActions).toContain('lambda:CreateNetworkConnector');
+    expect(allActions).toContain('lambda:PassNetworkConnector');
+  });
+
+  it('grants NO runtime session lifecycle actions (those belong to the orchestrator role)', () => {
+    // A deploy role that can start, suspend, or mint tokens for MicroVMs is a
+    // privilege escalation — the orchestrator gets those, per-deployment.
+    // Compared as exact actions, not substrings: `lambda:GetMicrovmImage` (which
+    // the deploy role legitimately needs) contains `lambda:GetMicrovm`.
+    const resolvedDoc = stack.resolve(doc);
+    const statements = resolvedDoc.Statement as Array<{ Action: string | string[] }>;
+    const allActions = new Set(statements.flatMap((s) =>
+      Array.isArray(s.Action) ? s.Action : [s.Action],
+    ));
+
+    for (const action of [
+      'lambda:RunMicrovm',
+      'lambda:GetMicrovm',
+      'lambda:TerminateMicrovm',
+      'lambda:SuspendMicrovm',
+      'lambda:ResumeMicrovm',
+      'lambda:CreateMicrovmAuthToken',
+      'lambda:CreateMicrovmShellAuthToken',
+      'lambda:ConnectMicrovm',
+    ]) {
+      expect(allActions.has(action)).toBe(false);
+    }
+  });
+});
+
 describe('Cross-policy validation', () => {
   const stack = new Stack();
   const policies = allPolicies();
@@ -416,8 +652,10 @@ describe('Cross-policy validation', () => {
     expect(unique.size).toBe(allSids.length);
   });
 
-  it('returns exactly 5 policies', () => {
-    expect(policies).toHaveLength(5);
+  it('returns exactly 6 policies', () => {
+    // infrastructure, application, observability, compute-agentcore,
+    // compute-ecs, compute-lambda-microvm (ADR-021).
+    expect(policies).toHaveLength(6);
   });
 
   it('every policy is under 6144 character limit', () => {

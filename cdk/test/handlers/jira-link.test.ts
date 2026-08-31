@@ -95,6 +95,8 @@ describe('jira-link handler', () => {
 
     const result = await handler(makeEvent({ code: 'link-3f8b4a2c' }, 'cognito-user-1'));
     expect(result.statusCode).toBe(200);
+    const getCall = ddbSend.mock.calls.find(([cmd]) => cmd._type === 'Get');
+    expect(getCall![0].input.ConsistentRead).toBe(true);
     const putCall = ddbSend.mock.calls.find(([cmd]) => cmd._type === 'Put');
     expect(putCall).toBeTruthy();
     expect(putCall![0].input.Item.jira_identity).toBe('cloud-1#acc-1');

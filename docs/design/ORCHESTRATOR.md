@@ -28,7 +28,7 @@ The orchestrator is deliberately scoped. It handles coordination and bookkeeping
 | Task lifecycle | Accept tasks, drive them through the state machine to a terminal state, persist state at each transition |
 | Admission control | Validate repo onboarding, concurrency limits, rate limits, idempotency |
 | Context hydration | Assemble the agent prompt from user input, GitHub data, memory, and repo config |
-| Session management | Start the compute session, monitor liveness via heartbeat, detect completion |
+| Session management | Start the compute session, monitor backend liveness and heartbeats where applicable, detect completion |
 | Result inference | Determine success or failure from agent response, DynamoDB record, and GitHub state |
 | Finalization | Update status, emit events, release concurrency, persist audit records |
 | Cancellation | Stop the session and drive the task to CANCELLED at any point |
@@ -40,19 +40,20 @@ The orchestrator is deliberately scoped. It handles coordination and bookkeeping
 |---|---|---|
 | Request authentication | Input gateway | [INPUT_GATEWAY.md](./INPUT_GATEWAY.md) |
 | Agent logic (clone, code, test, PR) | Agent runtime | [COMPUTE.md](./COMPUTE.md) |
-| Compute session lifecycle (VM, image pull) | AgentCore Runtime | [COMPUTE.md](./COMPUTE.md) |
+| Compute substrate internals (VM/task provisioning, image pull) | Selected compute service | [COMPUTE.md](./COMPUTE.md) |
 | Memory storage and retrieval | AgentCore Memory | [MEMORY.md](./MEMORY.md) |
 | Repository onboarding | Blueprint construct | [REPO_ONBOARDING.md](./REPO_ONBOARDING.md) |
 
 ## Task state machine
 
-Every task moves through a finite set of states from creation to a terminal outcome. The state machine is the backbone of the orchestrator: it determines what actions are valid at each point, when resources are acquired or released, and how the platform recovers from failures. Four of the ten states are terminal, meaning the task is done and no further transitions occur.
+Every task moves through a finite set of states from creation to a terminal outcome. The state machine is the backbone of the orchestrator: it determines what actions are valid at each point, when resources are acquired or released, and how the platform recovers from failures. Four of the eleven states are terminal, meaning the task is done and no further transitions occur.
 
 ### States
 
 | State | Description | Duration |
 |---|---|---|
 | `PENDING_UPLOADS` | Presigned-upload task awaiting client file uploads | Minutes (30-min auto-cancel) |
+| `QUEUED` | Admission-capped task awaiting a free concurrency slot (#441) | Minutes to hours (24h backstop) |
 | `SUBMITTED` | Task accepted, awaiting orchestration | Milliseconds |
 | `HYDRATING` | Fetching GitHub data, querying memory, assembling prompt | Seconds |
 | `RUNNING` | Agent session active in compute environment | Minutes to hours |
@@ -74,8 +75,13 @@ stateDiagram-v2
     PENDING_UPLOADS --> CANCELLED : User cancels or 30-min auto-cancel
 
     SUBMITTED --> HYDRATING : Admission passes
+    SUBMITTED --> QUEUED : Concurrency cap hit
     SUBMITTED --> FAILED : Admission rejected
     SUBMITTED --> CANCELLED : User cancels
+
+    QUEUED --> SUBMITTED : Queue pickup (slot free)
+    QUEUED --> CANCELLED : User cancels
+    QUEUED --> FAILED : Queue-age backstop (24h)
 
     HYDRATING --> RUNNING : Session started
     HYDRATING --> AWAITING_APPROVAL : Cedar soft-deny gate
@@ -105,14 +111,18 @@ stateDiagram-v2
 | `PENDING_UPLOADS` | `FAILED` | Screening blocked | Any attachment fails security screening |
 | `PENDING_UPLOADS` | `CANCELLED` | User cancels or auto-cancel | Upload window expired (30 min) or explicit cancel |
 | `SUBMITTED` | `HYDRATING` | Admission passes | Concurrency slot acquired |
-| `SUBMITTED` | `FAILED` | Admission rejected | Repo not onboarded, rate/concurrency limit, validation error |
-| `HYDRATING` | `RUNNING` | Hydration complete | `invoke_agent_runtime` returns session ID |
+| `SUBMITTED` | `QUEUED` | Concurrency cap hit | Per-user cap reached; task parked in FIFO admission queue (#441). No slot held. |
+| `SUBMITTED` | `FAILED` | Admission rejected | Repo not onboarded, validation error |
+| `QUEUED` | `SUBMITTED` | Queue pickup | Admission-queue pickup Lambda sees free capacity; re-invokes the orchestrator. FIFO by `created_at`. |
+| `QUEUED` | `CANCELLED` | User cancels | Explicit cancel removes the task from the queue |
+| `QUEUED` | `FAILED` | Queue-age backstop | Task waited longer than `QUEUE_MAX_AGE_SECONDS` (default 24h) without admission |
+| `HYDRATING` | `RUNNING` | Hydration complete | Selected `ComputeStrategy.startSession` returns a session handle |
 | `HYDRATING` | `AWAITING_APPROVAL` | Cedar soft-deny gate fires | Tool call triggers a soft-deny policy rule during hydration |
 | `HYDRATING` | `FAILED` | Hydration error | GitHub API failure, guardrail blocks content, Bedrock unavailable |
 | `RUNNING` | `AWAITING_APPROVAL` | Cedar soft-deny gate fires | Tool call triggers a soft-deny policy rule during execution |
 | `RUNNING` | `FINALIZING` | Session ends | Response received or session terminated |
-| `RUNNING` | `TIMED_OUT` | Max duration exceeded | AgentCore terminates the session at its 8h cap; the orchestrator's own safety-net poll window is `MAX_POLL_ATTEMPTS` (1020) × 30s ≈ 8.5h, after which a still-`RUNNING` task is driven to `TIMED_OUT` |
-| `RUNNING` | `FAILED` | Session crash | Heartbeat lost (see Liveness monitoring) |
+| `RUNNING` | `TIMED_OUT` | Max duration exceeded | AgentCore and Lambda MicroVMs have an 8h substrate cap; the orchestrator's own safety-net poll window is `MAX_POLL_ATTEMPTS` (1020) × 30s ≈ 8.5h, after which a still-`RUNNING` task is driven to `TIMED_OUT` |
+| `RUNNING` | `FAILED` | Session crash | Heartbeat or substrate liveness lost (see Liveness monitoring) |
 | `AWAITING_APPROVAL` | `RUNNING` | Approved or denied | Human decision received; agent resumes |
 | `AWAITING_APPROVAL` | `CANCELLED` | User cancels | Explicit cancel while awaiting approval |
 | `AWAITING_APPROVAL` | `FAILED` | Stranded reconciler | Approval request orphaned (agent died mid-wait) |
@@ -126,21 +136,24 @@ Users can cancel a task at any point. The orchestrator's response depends on how
 | State when cancel arrives | Action |
 |---|---|
 | `PENDING_UPLOADS` | Transition to `CANCELLED`. Clean up S3 objects under the task's attachment prefix. No concurrency slot to release. |
+| `QUEUED` | Transition to `CANCELLED`. Removes the task from the admission queue. No compute or concurrency slot to release (a queued task never held one). |
 | `SUBMITTED` | Transition to `CANCELLED`. No cleanup needed. |
 | `HYDRATING` | Abort hydration, release concurrency slot, transition to `CANCELLED`. |
-| `RUNNING` | Call `stop_runtime_session`, wait for confirmation, release concurrency, transition to `CANCELLED`. Partial work on GitHub remains for the user to inspect. |
-| `AWAITING_APPROVAL` | Call `stop_runtime_session`, release concurrency slot, transition to `CANCELLED`. The pending approval row transitions to `STRANDED`. |
+| `RUNNING` | Transition to `CANCELLED` and stop the selected compute session best-effort. Partial work on GitHub remains for the user to inspect. |
+| `AWAITING_APPROVAL` | Transition to `CANCELLED`. The pending approval row transitions to `STRANDED`. |
 | `FINALIZING` | Let finalization complete. Mark `CANCELLED` only if the terminal state was not yet written. |
 | Terminal | Reject the cancel request. |
 
+For a running cancellation, backend dispatch calls ECS `StopTask`, Lambda `TerminateMicrovm`, or AgentCore `StopRuntimeSession`. The `lambda-microvm` branch is evaluated before the AgentCore `RUNTIME_ARN` fallback; otherwise a mixed deployment could stop an unrelated AgentCore session and leave the MicroVM billing until its cap.
+
 ### Timeouts
 
-Multiple timeout mechanisms work together to prevent runaway tasks. Time-based limits (session duration, idle) are enforced by AgentCore; cost-based limits (turns, budget) are enforced by the agent SDK. The orchestrator acts as a safety net when external timeouts fire.
+Multiple timeout mechanisms work together to prevent runaway tasks. Substrate time limits vary by backend; cost-based limits (turns, budget) are enforced by the agent SDK. The orchestrator acts as a safety net when external timeouts fire.
 
 | Type | Default | Effect |
 |---|---|---|
-| Max session duration | 8 hours | AgentCore terminates the session at its 8h cap. The orchestrator's safety-net poll loop runs up to `MAX_POLL_ATTEMPTS` (1020) × 30s ≈ 8.5h; a task still `RUNNING` when that window is exhausted is driven to `TIMED_OUT`. |
-| Idle timeout | 15 minutes | AgentCore terminates if agent is idle. See Liveness monitoring. |
+| Max session duration | 8 hours | AgentCore caps a session at 8h; Lambda MicroVMs use `maximumDurationInSeconds: 28,800`, including suspended time. The orchestrator's safety-net poll loop runs up to `MAX_POLL_ATTEMPTS` (1020) × 30s ≈ 8.5h; a task still `RUNNING` when that window is exhausted is driven to `TIMED_OUT`. |
+| Idle timeout | Backend-specific | AgentCore has an idle timeout. Lambda MicroVMs omit `idlePolicy` because inbound-traffic idleness would suspend an outbound-only agent while it is working. See Liveness monitoring. |
 | Max turns | 100 (range 1-500) | Agent stops after N model invocations. Configurable per task or per repo. |
 | Max cost budget | $0.01-$100 | Agent stops when budget is reached. Per-task or per-repo via Blueprint. |
 | Hydration timeout | 2 minutes | Fail the task if context assembly takes too long. |
@@ -165,16 +178,16 @@ The orchestrator (`orchestrate-task.ts`) runs these as distinct durable-executio
 Validates the task before any compute is consumed. Checks run in order:
 
 1. **Repo onboarding** - `GetItem` on `RepoTable`. If not found or inactive, reject with `REPO_NOT_ONBOARDED`. This runs at the API handler level (`createTaskCore`) for fast rejection.
-2. **User concurrency** - Atomic check-and-increment on `UserConcurrency` counter. If at limit (default 3-5), reject.
-3. **System concurrency** - Compare total running + hydrating tasks to system limit (bounded by AgentCore quotas).
-4. **Rate limiting** - Sliding window counter (10 tasks/hour per user). Exceeded tasks are rejected, not queued.
+2. **User concurrency** - Atomic check-and-increment on `UserConcurrency` counter. If at limit (default 10), the task is **queued, not failed** (#441): it transitions `SUBMITTED → QUEUED` and a scheduled admission-queue pickup Lambda re-attempts admission in FIFO order (by `created_at`) as slots free up, flipping `QUEUED → SUBMITTED` and re-invoking the orchestrator. The pickup Lambda does a read-only capacity pre-check; the orchestrator's atomic increment remains the single writer of the counter, so a pickup that loses the race harmlessly re-queues without losing FIFO position. `GET /tasks/{id}` surfaces `queue_position` and `estimated_wait_s` while queued.
+3. **System concurrency** - Compare total running + hydrating tasks to the configured system limit and selected-backend quotas.
+4. **Rate limiting** - Sliding window counter (10 tasks/hour per user). Rate-limit rejections happen at submit time and are rejected, not queued (unlike the concurrency cap, which queues).
 5. **Idempotency** - If the request includes an idempotency key and a task with that key exists, return the existing task.
 
 On acceptance, the concurrency slot is acquired and the orchestrator proceeds to pre-flight.
 
 ### Step 2: Pre-flight checks
 
-Runs as a distinct top-level step (`pre-flight` in `orchestrate-task.ts`, via `runPreflightChecks`) **after** admission and **before** hydration, so external-dependency failures are caught before any prompt assembly or Bedrock screening consumes work. It verifies the GitHub token has sufficient permissions for the task type, catches inaccessible or closed PRs, and confirms GitHub API reachability. On failure it drives the task to `FAILED` and emits a `preflight_failed` event, surfacing clear errors like `INSUFFICIENT_GITHUB_REPO_PERMISSIONS` before AgentCore runtime is consumed.
+Runs as a distinct top-level step (`pre-flight` in `orchestrate-task.ts`, via `runPreflightChecks`) **after** admission and **before** hydration, so external-dependency failures are caught before any prompt assembly or Bedrock screening consumes work. It verifies the GitHub token has sufficient permissions for the task type, catches inaccessible or closed PRs, and confirms GitHub API reachability. On failure it drives the task to `FAILED` and emits a `preflight_failed` event, surfacing clear errors like `INSUFFICIENT_GITHUB_REPO_PERMISSIONS` before a compute session is consumed.
 
 ### Step 3: Context hydration
 
@@ -188,19 +201,23 @@ Regardless of workflow, the assembled prompt is screened through Amazon Bedrock 
 
 ### Step 4: Session start
 
-The orchestrator calls `invoke_agent_runtime` with the hydrated payload. The agent receives it, starts the coding task in a background thread (via `add_async_task`), and returns an acknowledgment immediately. The orchestrator records the `(task_id, session_id)` mapping and transitions to `RUNNING`.
+The orchestrator resolves the repository's `ComputeStrategy` and calls `startSession` with the hydrated payload. AgentCore invokes the runtime, ECS starts a Fargate task, and Lambda MicroVMs launch a snapshot and deliver the payload through `/run`. The orchestrator persists the returned backend handle in `compute_metadata`, records the `(task_id, session_id)` mapping, and transitions to `RUNNING`.
 
-The session ID is pre-generated and reused on retry, making session start idempotent after a crash.
+AgentCore's session ID is pre-generated and reused on retry. ECS and Lambda MicroVMs use their substrate identifiers as session IDs.
+
+If `RunMicrovm` succeeds but persisting the session handle or emitting the start event fails, the start step terminates the MicroVM best-effort using its in-memory handle before propagating the original error. This orphan reap is required because no later poll or finalization step can recover an unpersisted handle.
 
 ### Step 5: Await completion
 
-The orchestrator polls for completion using `waitForCondition` from the Durable Execution SDK. At configurable intervals (default 30s), it re-invokes on the same session (sticky routing). The agent responds with its current status:
+The orchestrator polls for completion using `waitForCondition` from the Durable Execution SDK at configurable intervals (default 30s). DynamoDB task status is common to all backends; backend-specific checks supplement it:
 
-- `running` - Orchestrator suspends until next interval (no compute charges)
-- `completed` - Orchestrator resumes to finalization with the result
-- `failed` - Same, with error payload
+| Backend | Additional poll signal |
+|---|---|
+| AgentCore | Agent heartbeat; `/ping` keeps the runtime healthy while the task thread works |
+| ECS | `DescribeTasks`, including container exit status and exit code |
+| Lambda MicroVMs | `GetMicrovm` state plus agent heartbeat |
 
-If the session is terminated externally (crash, timeout, cancellation), the poll detects it and the orchestrator proceeds to finalization using GitHub-based result inference as fallback.
+While waiting between polls, the durable orchestrator suspends without compute charges. If the session is terminated externally (crash, timeout, cancellation), the poll detects it and the orchestrator proceeds to finalization using GitHub-based result inference as fallback.
 
 ### Step 6: Finalization
 
@@ -225,13 +242,13 @@ After the session ends, the orchestrator determines the outcome from multiple si
 | error | No | any | `FAILED` |
 | unknown | - | - | `FAILED` |
 
-**Cleanup:** Update task status with metadata (PR URL, cost, duration). Set TTL for data retention (default 90 days). Emit task events. Release concurrency counter. Send notifications. Persist code attribution to memory.
+**Cleanup:** Update task status with metadata (PR URL, cost, duration). Set TTL for data retention (default 90 days). Emit task events. Release concurrency counter. Send notifications. Persist code attribution to memory. For `lambda-microvm`, finalization must call `TerminateMicrovm` after writing the terminal outcome: nothing in the guest self-terminates, and the 28,800-second maximum is a safety bound rather than cleanup.
 
 ### Step execution contract
 
 Every step in the pipeline satisfies these properties:
 
-- **Idempotent** - Safe to retry after crashes. Context hydration produces the same prompt for the same inputs; session start reuses a pre-generated session ID.
+- **Idempotent** - Safe to retry after crashes. Context hydration produces the same prompt for the same inputs; session-start retry semantics are implemented by each backend strategy.
 - **Timeout-bounded** - Each step has a configurable timeout to prevent blocking the pipeline.
 - **Failure-aware** - Returns `success` or `failed`. Infrastructure failures (throttle, transient errors) trigger exponential backoff retries (default: 2 retries, base 1s, max 10s). Explicit failures transition to `FAILED` without retry.
 - **Least-privilege input** - Each step receives only the `blueprintConfig` fields it needs. Custom Lambda steps get credential ARNs stripped.
@@ -241,7 +258,7 @@ Every step in the pipeline satisfies these properties:
 
 Per [REPO_ONBOARDING.md](./REPO_ONBOARDING.md), blueprints customize execution through three layers:
 
-1. **Parameterized strategies** - Select built-in implementations without code. Example: `compute.type: 'agentcore'` vs `compute.type: 'ecs'`.
+1. **Parameterized strategies** - Select built-in implementations without code: `agentcore`, `ecs`, or `lambda-microvm`.
 2. **Lambda-backed custom steps** - Inject custom logic at `pre-agent` or `post-agent` phases. Example: SAST scan before the agent, custom lint after.
 3. **Custom step sequences** - Override the default step order entirely via an ordered `step_sequence` list.
 
@@ -253,9 +270,9 @@ Agent sessions run for minutes to hours inside isolated compute environments. Th
 
 ### Liveness monitoring
 
-Liveness detection varies by compute backend. AgentCore sessions use DynamoDB heartbeats and a `/ping` health endpoint; ECS Fargate tasks rely on the ECS `DescribeTasks` API since the ECS entrypoint does not write heartbeats.
+Liveness detection varies by compute backend. AgentCore sessions use DynamoDB heartbeats and a `/ping` health endpoint; ECS Fargate tasks rely on the ECS `DescribeTasks` API; Lambda MicroVMs combine control-plane state with the same in-guest heartbeat used by AgentCore.
 
-**DynamoDB heartbeat (AgentCore only).** The agent writes `agent_heartbeat_at` every 45 seconds via a daemon thread. The orchestrator applies two thresholds during polling when `computeType === 'agentcore'`:
+**DynamoDB heartbeat (AgentCore and Lambda MicroVMs).** The agent writes `agent_heartbeat_at` every 45 seconds via a daemon thread. The orchestrator applies the same thresholds to both backends, only while task status is `RUNNING`:
 
 - **Grace period** (120s) - After entering `RUNNING`, the orchestrator waits before expecting heartbeats (covers container startup).
 - **Stale threshold** (240s) - If the heartbeat exists but is older than this, the session is treated as lost.
@@ -264,6 +281,14 @@ Liveness detection varies by compute backend. AgentCore sessions use DynamoDB he
 When the session is unhealthy, the task transitions to `FAILED` with "Agent session lost: no recent heartbeat."
 
 **ECS task status polling (ECS only).** The orchestrator calls `computeStrategy.pollSession` (ECS `DescribeTasks`) on each poll cycle. Three failure modes are detected: container failure (immediate `FAILED`), container exit without DynamoDB terminal write (fail after 5 consecutive completed polls), and repeated API failures (fail after 3 consecutive errors). ECS does not have heartbeat-based hung-process detection; a hung but alive container polls for the full `MAX_POLL_ATTEMPTS` window (~8.5h) before timing out.
+
+**Lambda MicroVM state polling.** Liveness is a dual signal. The strategy maps `GetMicrovm` mechanically: `PENDING`/`RUNNING` report `running`, `SUSPENDING`/`SUSPENDED` report `suspended`, and `TERMINATING`/`TERMINATED` report terminal completion. The orchestrator supplies the health interpretation:
+
+- `suspended` is healthy only while the task is `AWAITING_APPROVAL`; in any other task state it emits an anomaly and keeps polling rather than failing recoverable work.
+- A terminal substrate report paired with a non-terminal task is a failure, but the orchestrator first re-reads the task row to confirm the agent did not write a terminal result between the original read and VM termination.
+- Substrate state detects a dead VM; heartbeat staleness detects a hung, deadlocked, or OOM-killed pipeline inside a VM that still reports `RUNNING`.
+
+`TERMINATED` is the normal terminal signal and remains observable for at least 10 minutes. `ResourceNotFoundException` maps to completion only as a late fallback after the control-plane record is eventually reaped; polling does not wait for `NotFound`.
 
 **`/ping` health endpoint (AgentCore only).** The agent's FastAPI server responds to AgentCore's `/ping` calls while the coding task runs in a separate thread. AgentCore sees `HealthyBusy` and keeps the session alive.
 
@@ -287,9 +312,9 @@ Long-running distributed systems fail. The orchestrator is designed so that ever
 | Hydration | Memory service unavailable | Proceed without memory (it is enrichment, not required) |
 | Hydration | Guardrail blocks content | Fail the task (content is adversarial, no retry) |
 | Hydration | Guardrail API unavailable | Fail the task (fail-closed: unscreened content never reaches agent) |
-| Session start | `invoke_agent_runtime` throttled | Exponential backoff. Fail after retries exhausted. |
-| Session start | Session crashes immediately | AgentCore: heartbeat never set, detected after 360s grace window. ECS: `DescribeTasks` reports failure on next poll. |
-| Running | Agent crashes mid-task | AgentCore: heartbeat goes stale. ECS: `DescribeTasks` reports stopped task. Finalization inspects GitHub for partial work. |
+| Session start | Selected compute service throttled | Exponential backoff. Fail after retries exhausted. |
+| Session start | Session crashes immediately | AgentCore: heartbeat never set, detected after 360s grace window. ECS: `DescribeTasks` reports failure. Lambda MicroVMs: `GetMicrovm` reports terminal state or the heartbeat never appears. |
+| Running | Agent crashes mid-task | AgentCore: heartbeat goes stale. ECS: `DescribeTasks` reports stopped task. Lambda MicroVMs: `GetMicrovm` detects VM death and heartbeat staleness detects an in-guest hang. Finalization inspects GitHub for partial work. |
 | Running | Agent hits turn or budget limit | Session ends normally. Finalize based on what was produced. |
 | Running | Idle for 15 min | AgentCore kills session. Task transitions to `TIMED_OUT`. |
 | Finalization | GitHub API down | Retry 3x. If still failing, mark `FAILED` with infrastructure reason. |
@@ -314,7 +339,7 @@ Each task runs in its own isolated compute session with no shared mutable state 
 | `invoke_agent_runtime` TPS | 25 per agent/account | AgentCore quota (adjustable) |
 | Concurrent sessions | Account-level limit | AgentCore quota |
 | Per-user concurrency | Configurable (default 3-5) | Platform config |
-| System-wide max tasks | Configurable | Bounded by AgentCore session limit |
+| System-wide max tasks | Configurable | Bounded by selected-backend quotas |
 
 ### Counter management
 
@@ -333,7 +358,7 @@ Key properties:
 - **Sequential code, not a DSL.** The blueprint maps naturally to TypeScript with durable operations. No Amazon States Language or state machine abstractions.
 - **Built-in retry with checkpointing.** Steps support configurable retry strategies without re-executing completed work.
 
-### Session monitoring pattern
+### AgentCore session monitoring pattern
 
 ```mermaid
 sequenceDiagram
@@ -389,7 +414,9 @@ Three DynamoDB tables back the orchestrator: one for task state, one for the aud
 | `pr_number` | Number? | PR number (required for PR workflows) |
 | `task_description` | String? | Free-text description |
 | `branch_name` | String | `bgagent/{task_id}/{slug}` for new tasks; PR's `head_ref` for PR tasks |
-| `session_id` | String? | AgentCore session ID |
+| `session_id` | String? | Backend session identifier (AgentCore session ID, ECS task ARN, or MicroVM ID) |
+| `compute_type` | String? | Selected backend: `agentcore`, `ecs`, or `lambda-microvm` |
+| `compute_metadata` | Map? | Backend lifecycle handle; Lambda MicroVMs persist `microvmId` and `endpoint` |
 | `execution_id` | String? | Durable execution ID |
 | `pr_url` | String? | PR URL (set during finalization) |
 | `error_message` | String? | Error reason if FAILED |

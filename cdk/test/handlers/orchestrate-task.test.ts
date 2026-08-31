@@ -55,6 +55,14 @@ jest.mock('../../src/handlers/shared/repo-config', () => ({
   checkRepoOnboarded: jest.fn(),
 }));
 
+// Registry client (#246): the orchestrator resolves Blueprint registry:// refs
+// through this factory. Mock it so hydrateAndTransition tests can drive the
+// resolve → stamp → payload path without the AgentCore SDK.
+const mockRegistryResolve = jest.fn();
+jest.mock('../../src/handlers/shared/registry/factory', () => ({
+  makeRegistryClient: jest.fn(() => ({ resolve: mockRegistryResolve })),
+}));
+
 let ulidCounter = 0;
 jest.mock('ulid', () => ({ ulid: jest.fn(() => `ULID${ulidCounter++}`) }));
 
@@ -67,6 +75,7 @@ process.env.MAX_CONCURRENT_TASKS_PER_USER = '3';
 process.env.TASK_RETENTION_DAYS = '90';
 process.env.MEMORY_ID = 'mem-test-default';
 
+import { classifyError } from '../../src/handlers/shared/error-classifier';
 import {
   admissionControl,
   emitTaskEvent,
@@ -77,8 +86,10 @@ import {
   loadBlueprintConfig,
   loadTask,
   pollTaskStatus,
+  queueTask,
   transitionTask,
 } from '../../src/handlers/shared/orchestrator';
+import { RegistryResolutionError } from '../../src/handlers/shared/registry/types';
 
 const baseTask = {
   task_id: 'TASK001',
@@ -552,6 +563,58 @@ describe('pollTaskStatus', () => {
     expect(result.lastStatus).toBeUndefined();
   });
 
+  // The gate `finalizeTask`'s defensive FINALIZING arm depends on. That arm is
+  // currently unreachable BECAUSE of this predicate, and its comment says so — so
+  // this test is what keeps the comment true. If `pollTaskStatus` ever widens the
+  // status gate, the arm becomes live and this test is the place that says the
+  // reachability changed.
+  test.each([
+    'FINALIZING',
+    'AWAITING_APPROVAL',
+    'HYDRATING',
+    'QUEUED',
+  ])('never sets sessionUnhealthy for a %s task — the flag is RUNNING-scoped', async (status) => {
+    const longAgo = new Date(Date.now() - 3_600_000).toISOString();
+    mockDdbSend.mockResolvedValueOnce({
+      Item: {
+        status,
+        session_id: 'sess-1',
+        started_at: longAgo,
+        // Stale by any measure: an hour old against a 45 s cadence.
+        agent_heartbeat_at: longAgo,
+      },
+    });
+
+    const result = await pollTaskStatus('TASK001', { attempts: 5 }, 'lambda-microvm');
+
+    expect(result.lastStatus).toBe(status);
+    expect(result.sessionUnhealthy).toBe(false);
+  });
+
+  test('DOES set it for RUNNING with the same stale inputs (proves the above is not vacuous)', async () => {
+    const longAgo = new Date(Date.now() - 3_600_000).toISOString();
+    mockDdbSend.mockResolvedValueOnce({
+      Item: {
+        status: 'RUNNING',
+        session_id: 'sess-1',
+        started_at: longAgo,
+        agent_heartbeat_at: longAgo,
+      },
+    });
+
+    const result = await pollTaskStatus('TASK001', { attempts: 5 }, 'lambda-microvm');
+
+    expect(result.sessionUnhealthy).toBe(true);
+  });
+
+  test('rejects an unknown compute type instead of silently skipping heartbeat liveness', async () => {
+    mockDdbSend.mockResolvedValueOnce({ Item: { status: 'RUNNING' } });
+
+    await expect(pollTaskStatus('TASK001', { attempts: 0 }, 'unknown' as never)).rejects.toThrow(
+      'Unknown compute type for heartbeat liveness: unknown',
+    );
+  });
+
   test('sets sessionUnhealthy when agent heartbeat is stale (RUNNING)', async () => {
     const old = new Date(Date.now() - 400_000).toISOString();
     mockDdbSend.mockResolvedValueOnce({
@@ -643,6 +706,119 @@ describe('pollTaskStatus', () => {
     });
     const result = await pollTaskStatus('TASK001', { attempts: 1 }, 'agentcore');
     expect(result.sessionUnhealthy).toBe(true);
+  });
+
+  // --- ADR-021 P2: heartbeat liveness on lambda-microvm ---
+  //
+  // The gap this closes: the agent writes `agent_heartbeat_at` on every substrate,
+  // but the orchestrator only ACTED on it for agentcore. On a MicroVM the
+  // substrate `GetMicrovm` cross-check catches a VM that DIED and nothing else —
+  // an alive, healthy VM whose in-guest pipeline is hung or was OOM-killed inside
+  // the guest looks perfectly fine (nothing self-terminates on this substrate, and
+  // it stays RUNNING with no stateReason). That task would burn the full ~8.5 h
+  // poll window while billing an 8-hour reservation. So liveness here is substrate
+  // state AND agent heartbeat.
+
+  test('sets sessionUnhealthy for lambda-microvm when the heartbeat is stale', async () => {
+    const old = new Date(Date.now() - 400_000).toISOString();
+    mockDdbSend.mockResolvedValueOnce({
+      Item: {
+        status: 'RUNNING',
+        session_id: 'mvm-0123456789abcdef',
+        started_at: old,
+        agent_heartbeat_at: old,
+      },
+    });
+    const result = await pollTaskStatus('TASK001', { attempts: 1 }, 'lambda-microvm');
+    expect(result.sessionUnhealthy).toBe(true);
+  });
+
+  test('sets sessionUnhealthy for lambda-microvm when the agent never heartbeat past the window', async () => {
+    // The in-guest early-crash case: the /run hook returned 200, the pipeline died
+    // before its first heartbeat, and the MicroVM is still happily RUNNING.
+    mockDdbSend.mockResolvedValueOnce({
+      Item: {
+        status: 'RUNNING',
+        session_id: 'mvm-0123456789abcdef',
+        started_at: new Date(Date.now() - 400_000).toISOString(),
+      },
+    });
+    const result = await pollTaskStatus('TASK001', { attempts: 1 }, 'lambda-microvm');
+    expect(result.sessionUnhealthy).toBe(true);
+  });
+
+  test('lambda-microvm uses the SAME thresholds as agentcore — a fresh heartbeat is healthy', async () => {
+    // Shared thresholds on purpose: the timestamp is written by the same pipeline
+    // code at the same cadence regardless of substrate, so a backend-specific grace
+    // window would encode a difference that does not exist.
+    const started = new Date(Date.now() - 200_000).toISOString();
+    const heartbeat = new Date(Date.now() - 30_000).toISOString();
+    const item = {
+      status: 'RUNNING',
+      session_id: 'mvm-0123456789abcdef',
+      started_at: started,
+      agent_heartbeat_at: heartbeat,
+    };
+
+    mockDdbSend.mockResolvedValueOnce({ Item: item });
+    const microvm = await pollTaskStatus('TASK001', { attempts: 1 }, 'lambda-microvm');
+    mockDdbSend.mockResolvedValueOnce({ Item: item });
+    const agentcore = await pollTaskStatus('TASK001', { attempts: 1 }, 'agentcore');
+
+    expect(microvm.sessionUnhealthy).toBe(false);
+    expect(microvm.sessionUnhealthy).toBe(agentcore.sessionUnhealthy);
+  });
+
+  test('lambda-microvm within the grace period is healthy, exactly as agentcore is', async () => {
+    const item = {
+      status: 'RUNNING',
+      session_id: 'mvm-0123456789abcdef',
+      started_at: new Date(Date.now() - 60_000).toISOString(),
+    };
+    mockDdbSend.mockResolvedValueOnce({ Item: item });
+    const microvm = await pollTaskStatus('TASK001', { attempts: 1 }, 'lambda-microvm');
+    mockDdbSend.mockResolvedValueOnce({ Item: item });
+    const agentcore = await pollTaskStatus('TASK001', { attempts: 1 }, 'agentcore');
+
+    expect(microvm.sessionUnhealthy).toBe(false);
+    expect(agentcore.sessionUnhealthy).toBe(false);
+  });
+
+  test('a stale heartbeat on a NON-RUNNING lambda-microvm task is not unhealthy', async () => {
+    // AWAITING_APPROVAL is the case that matters: from P3 the orchestrator SUSPENDS
+    // the MicroVM during an approval wait, which stops the in-guest pipeline (and
+    // its heartbeats) by design. Failing that task would be the worst possible
+    // regression — the check is scoped to RUNNING for exactly this reason.
+    const old = new Date(Date.now() - 400_000).toISOString();
+    mockDdbSend.mockResolvedValueOnce({
+      Item: {
+        status: 'AWAITING_APPROVAL',
+        session_id: 'mvm-0123456789abcdef',
+        started_at: old,
+        agent_heartbeat_at: old,
+      },
+    });
+    const result = await pollTaskStatus('TASK001', { attempts: 1 }, 'lambda-microvm');
+    expect(result.sessionUnhealthy).toBe(false);
+    expect(result.lastStatus).toBe('AWAITING_APPROVAL');
+  });
+
+  test('ECS remains untouched by the widening', async () => {
+    // The one backend deliberately left out: DescribeTasks reports a real container
+    // exit (including OOM-kill / exit 137) with an exit code, and the ECS poll block
+    // interprets it with its own patience counters. Layering the heartbeat on top
+    // would give one backend two independently-tuned kill paths for one failure.
+    const old = new Date(Date.now() - 400_000).toISOString();
+    mockDdbSend.mockResolvedValueOnce({
+      Item: {
+        status: 'RUNNING',
+        session_id: 'arn:aws:ecs:us-east-1:123456789012:task/agent/abc',
+        started_at: old,
+        agent_heartbeat_at: old,
+      },
+    });
+    const result = await pollTaskStatus('TASK001', { attempts: 1 }, 'ecs');
+    expect(result.sessionUnhealthy).toBe(false);
   });
 });
 
@@ -896,6 +1072,125 @@ describe('hydrateAndTransition with blueprint config', () => {
   });
 });
 
+describe('hydrateAndTransition — registry asset resolution (#246)', () => {
+  const mockHydratedContext = {
+    version: 1,
+    user_prompt: 'Task ID: TASK001\nRepository: org/repo\n\n## Task\n\nFix the bug',
+    sources: ['task_description'],
+    token_estimate: 20,
+    truncated: false,
+    content_trust: { task_description: 'trusted' },
+  };
+
+  const resolvedAsset = (over: Record<string, unknown>) => ({
+    kind: 'mcp_server',
+    namespace: 'acme',
+    name: 'pdf-tools',
+    version: '1.0.0',
+    runtime: { transport: 'http', url: 'https://x' },
+    warnings: [],
+    ...over,
+  });
+
+  test('stamps resolved_assets on the TaskRecord and threads the bundle into the payload', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    mockRegistryResolve.mockResolvedValueOnce(resolvedAsset({}));
+
+    const payload = await hydrateAndTransition(baseTask as any, {
+      compute_type: 'agentcore',
+      runtime_arn: 'arn:test',
+      mcp_servers: ['registry://mcp_server/acme/pdf-tools@^1.0.0'],
+    });
+
+    // Threaded into the agent payload.
+    expect(payload.resolved_assets).toEqual([
+      expect.objectContaining({ kind: 'mcp_server', namespace: 'acme', name: 'pdf-tools', version: '1.0.0' }),
+    ]);
+    // Stamped on the TaskRecord via an UpdateCommand carrying resolved_assets.
+    const stamp = mockDdbSend.mock.calls
+      .map((c) => c[0])
+      .find((cmd: any) => cmd._type === 'Update' && cmd.input?.ExpressionAttributeNames?.['#ra'] === 'resolved_assets');
+    expect(stamp).toBeDefined();
+    expect(stamp.input.ExpressionAttributeValues[':ra']).toEqual([
+      { kind: 'mcp_server', id: 'acme/pdf-tools', version: '1.0.0' },
+    ]);
+  });
+
+  test('emits a registry_asset_warning TaskEvent for a DEPRECATED asset', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    mockRegistryResolve.mockResolvedValueOnce(resolvedAsset({ warnings: ['DEPRECATED'] }));
+
+    await hydrateAndTransition(baseTask as any, {
+      compute_type: 'agentcore',
+      runtime_arn: 'arn:test',
+      mcp_servers: ['registry://mcp_server/acme/pdf-tools@^1.0.0'],
+    });
+
+    // A TaskEvent Put (event_type registry_asset_warning) was written.
+    const warnPut = mockDdbSend.mock.calls
+      .map((c) => c[0])
+      .find((cmd: any) => cmd._type === 'Put' && JSON.stringify(cmd.input?.Item ?? {}).includes('registry_asset_warning'));
+    expect(warnPut).toBeDefined();
+    // The stamped audit triple keeps the warning too.
+    const stamp = mockDdbSend.mock.calls
+      .map((c) => c[0])
+      .find((cmd: any) => cmd._type === 'Update' && cmd.input?.ExpressionAttributeNames?.['#ra'] === 'resolved_assets');
+    expect(stamp.input.ExpressionAttributeValues[':ra'][0].warnings).toEqual(['DEPRECATED']);
+  });
+
+  test('merges resolved cedar_policy_module text after inline blueprint policies', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    mockRegistryResolve.mockResolvedValueOnce(resolvedAsset({
+      kind: 'cedar_policy_module',
+      name: 'guard',
+      runtime: { cedar_text: 'forbid (principal, action, resource);' },
+    }));
+
+    const payload = await hydrateAndTransition(baseTask as any, {
+      compute_type: 'agentcore',
+      runtime_arn: 'arn:test',
+      cedar_policies: ['permit (principal, action, resource);'],
+      cedar_policy_modules: ['registry://cedar_policy_module/acme/guard@^1.0.0'],
+    });
+
+    expect(payload.cedar_policies).toEqual([
+      'permit (principal, action, resource);',
+      'forbid (principal, action, resource);',
+    ]);
+  });
+
+  test('fails closed when a pinned cedar_policy_module resolves to empty cedar_text', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    mockRegistryResolve.mockResolvedValueOnce(resolvedAsset({
+      kind: 'cedar_policy_module',
+      name: 'guard',
+      runtime: { cedar_text: '   ' },
+    }));
+
+    await expect(hydrateAndTransition(baseTask as any, {
+      compute_type: 'agentcore',
+      runtime_arn: 'arn:test',
+      cedar_policy_modules: ['registry://cedar_policy_module/acme/guard@^1.0.0'],
+    })).rejects.toThrow(/empty cedar_text/);
+  });
+
+  test('fails closed (propagates) when a registry ref cannot be resolved', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    mockRegistryResolve.mockRejectedValueOnce(new RegistryResolutionError('NO_MATCHING_VERSION', 'r', 'none'));
+
+    await expect(hydrateAndTransition(baseTask as any, {
+      compute_type: 'agentcore',
+      runtime_arn: 'arn:test',
+      mcp_servers: ['registry://mcp_server/acme/pdf-tools@^9.0.0'],
+    })).rejects.toBeInstanceOf(RegistryResolutionError);
+  });
+});
+
 describe('finalizeTask', () => {
   test('handles already-terminal task', async () => {
     mockDdbSend
@@ -923,6 +1218,79 @@ describe('finalizeTask', () => {
     expect(eventCall.input.Item.metadata.reason).toBe('agent_heartbeat_stale');
     // Terminal event carries the correlation envelope (#245).
     expect(eventCall.input.Item).toMatchObject({ user_id: 'user-123', repo: 'org/repo' });
+  });
+
+  // --- substrate noun in the heartbeat-stale message (ayushtr nit 5) ---
+  //
+  // The message hard-coded "container", which was true for the only two backends
+  // that existed when it was written and became false the moment `lambda-microvm`
+  // joined the heartbeat path: a MicroVM has no container, so the copy sent the
+  // operator looking for one. Same defect class as "substrate state completed".
+
+  test.each([
+    ['lambda-microvm', 'the MicroVM'],
+    ['ecs', 'the container'],
+    ['agentcore', 'the container'],
+  ])('names the right substrate in the heartbeat-stale message for %s', async (computeType, noun) => {
+    mockDdbSend
+      .mockResolvedValueOnce({ Item: { ...baseTask, status: 'RUNNING', compute_type: computeType } })
+      .mockResolvedValue({});
+
+    await finalizeTask(
+      'TASK001',
+      { attempts: 12, lastStatus: 'RUNNING', sessionUnhealthy: true },
+      'user-123',
+    );
+
+    const message = mockDdbSend.mock.calls[1][0].input
+      .ExpressionAttributeValues[':attr_error_message'] as string;
+    expect(message).toBe(
+      `Agent session lost: no recent heartbeat from the agent (${noun} may have crashed, `
+      + 'been OOM-killed, or stopped)',
+    );
+  });
+
+  test('degrades to a true generic on a record with no compute_type', async () => {
+    // `compute_type` is optional on TaskRecord (absent on older records), and the
+    // fallback must be accurate rather than a guess at the likely backend.
+    const { compute_type: _dropped, ...noComputeType } = { ...baseTask, compute_type: 'ecs' };
+    mockDdbSend
+      .mockResolvedValueOnce({ Item: { ...noComputeType, status: 'RUNNING' } })
+      .mockResolvedValue({});
+
+    await finalizeTask(
+      'TASK001',
+      { attempts: 12, lastStatus: 'RUNNING', sessionUnhealthy: true },
+      'user-123',
+    );
+
+    const message = mockDdbSend.mock.calls[1][0].input
+      .ExpressionAttributeValues[':attr_error_message'] as string;
+    expect(message).toContain('(the runtime may have crashed');
+    // ...and the sentence does not stutter. The prefix names WHO stopped beating
+    // (the agent); the parenthetical names WHAT it was running on. When the noun
+    // degrades to the generic "the runtime", a prefix that also said "the runtime"
+    // produced "no recent heartbeat from the runtime (the runtime may have…)".
+    expect(message).toBe(
+      'Agent session lost: no recent heartbeat from the agent '
+      + '(the runtime may have crashed, been OOM-killed, or stopped)',
+    );
+  });
+
+  test('the heartbeat-stale message still classifies as a lost session', async () => {
+    // The noun swap must not break the classifier pattern.
+    mockDdbSend
+      .mockResolvedValueOnce({ Item: { ...baseTask, status: 'RUNNING', compute_type: 'lambda-microvm' } })
+      .mockResolvedValue({});
+    await finalizeTask(
+      'TASK001',
+      { attempts: 12, lastStatus: 'RUNNING', sessionUnhealthy: true },
+      'user-123',
+    );
+    const message = mockDdbSend.mock.calls[1][0].input
+      .ExpressionAttributeValues[':attr_error_message'] as string;
+
+    expect(classifyError(message)!.title).toBe('Agent session lost');
   });
 
   test('transitions RUNNING to TIMED_OUT on poll timeout', async () => {
@@ -1020,6 +1388,61 @@ describe('failTask', () => {
 
     await expect(failTask('TASK001', 'HYDRATING', 'durable replay', 'user-123', true)).resolves.toBeUndefined();
     expect(mockDdbSend).toHaveBeenCalledTimes(1); // transition attempt only; no Put, no concurrency Update
+  });
+});
+
+describe('queueTask (#441 admission queue)', () => {
+  test('transitions SUBMITTED -> QUEUED, stamps queued_at + admission_attempts, emits admission_queued', async () => {
+    mockDdbSend.mockResolvedValue({});
+    const result = await queueTask(baseTask as any);
+    expect(result).toBe(true);
+
+    const transition = mockDdbSend.mock.calls[0][0];
+    expect(transition._type).toBe('Update');
+    expect(transition.input.ExpressionAttributeValues[':fromStatus']).toBe('SUBMITTED');
+    expect(transition.input.ExpressionAttributeValues[':toStatus']).toBe('QUEUED');
+    // First queue entry stamps queued_at and attempts=1
+    expect(transition.input.ExpressionAttributeValues[':attr_queued_at']).toBeDefined();
+    expect(transition.input.ExpressionAttributeValues[':attr_admission_attempts']).toBe(1);
+
+    const event = mockDdbSend.mock.calls[1][0];
+    expect(event._type).toBe('Put');
+    expect(event.input.Item.event_type).toBe('admission_queued');
+    expect(event.input.Item.metadata.reason).toBe('concurrency_limit');
+  });
+
+  test('re-queue preserves original queued_at and increments admission_attempts', async () => {
+    mockDdbSend.mockResolvedValue({});
+    const requeued = { ...baseTask, queued_at: '2024-01-01T00:00:00Z', admission_attempts: 2 };
+    await queueTask(requeued as any);
+
+    const transition = mockDdbSend.mock.calls[0][0];
+    // queued_at already set — must NOT be overwritten
+    expect(transition.input.ExpressionAttributeValues[':attr_queued_at']).toBeUndefined();
+    expect(transition.input.ExpressionAttributeValues[':attr_admission_attempts']).toBe(3);
+  });
+
+  test('returns false without emitting when a concurrent transition wins the conditional check', async () => {
+    const condErr = new Error('The conditional request failed');
+    condErr.name = 'ConditionalCheckFailedException';
+    mockDdbSend.mockRejectedValueOnce(condErr);
+
+    const result = await queueTask(baseTask as any);
+    expect(result).toBe(false);
+    expect(mockDdbSend).toHaveBeenCalledTimes(1); // transition attempt only, no event
+  });
+
+  test('rethrows unexpected DDB errors so the durable step retries', async () => {
+    mockDdbSend.mockRejectedValueOnce(new Error('DDB timeout'));
+    await expect(queueTask(baseTask as any)).rejects.toThrow('DDB timeout');
+  });
+
+  test('never touches the concurrency counter (no slot held while QUEUED)', async () => {
+    mockDdbSend.mockResolvedValue({});
+    await queueTask(baseTask as any);
+    for (const call of mockDdbSend.mock.calls) {
+      expect(call[0].input.TableName).not.toBe('UserConcurrency');
+    }
   });
 });
 
