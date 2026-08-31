@@ -31,6 +31,11 @@ jest.mock('@aws-sdk/client-ecs', () => ({
   ECSClient: jest.fn(() => ({ send: mockEcsSend })),
   StopTaskCommand: jest.fn((input: unknown) => ({ _type: 'StopTask', input })),
 }));
+const mockMicrovmSend = jest.fn();
+jest.mock('@aws-sdk/client-lambda-microvms', () => ({
+  LambdaMicrovmsClient: jest.fn(() => ({ send: mockMicrovmSend })),
+  TerminateMicrovmCommand: jest.fn((input: unknown) => ({ _type: 'TerminateMicrovm', input })),
+}));
 jest.mock('@aws-sdk/client-dynamodb', () => ({ DynamoDBClient: jest.fn(() => ({})) }));
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
   DynamoDBDocumentClient: { from: jest.fn(() => ({ send: mockSend })) },
@@ -325,6 +330,70 @@ describe('cancel-task handler', () => {
     expect(result.statusCode).toBe(200);
     expect(mockEcsSend).not.toHaveBeenCalled();
     expect(mockAgentCoreSend).not.toHaveBeenCalled();
+  });
+
+  test('cancels a lambda-microvm task via TerminateMicrovm, not AgentCore or ECS', async () => {
+    mockSend.mockReset();
+    // NOTE: RUNNING_TASK carries `agent_runtime_arn`, and RUNTIME_ARN is also set
+    // in this suite's env — exactly the mixed-deployment shape that would send a
+    // MicroVM task down the AgentCore branch if the microvm check did not come
+    // first. This test is the regression guard for that branch ordering.
+    const microvmTask = {
+      ...RUNNING_TASK,
+      compute_type: 'lambda-microvm',
+      session_id: 'mvm-0123456789abcdef',
+      compute_metadata: {
+        microvmId: 'mvm-0123456789abcdef',
+        endpoint: 'https://mvm-0123456789abcdef.microvm.lambda.us-east-1.amazonaws.com',
+      },
+    };
+    mockSend
+      .mockResolvedValueOnce({ Item: microvmTask })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({});
+
+    const result = await handler(makeEvent());
+    expect(result.statusCode).toBe(200);
+    expect(mockMicrovmSend).toHaveBeenCalledTimes(1);
+    const cmd = mockMicrovmSend.mock.calls[0][0];
+    expect(cmd._type).toBe('TerminateMicrovm');
+    // The SDK request key is `microvmIdentifier`, not `microvmId`.
+    expect(cmd.input).toEqual({ microvmIdentifier: 'mvm-0123456789abcdef' });
+    expect(mockAgentCoreSend).not.toHaveBeenCalled();
+    expect(mockEcsSend).not.toHaveBeenCalled();
+  });
+
+  test('skips TerminateMicrovm when compute_metadata.microvmId is missing', async () => {
+    mockSend.mockReset();
+    const microvmTask = { ...RUNNING_TASK, compute_type: 'lambda-microvm', compute_metadata: {} };
+    mockSend
+      .mockResolvedValueOnce({ Item: microvmTask })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({});
+
+    const result = await handler(makeEvent());
+    expect(result.statusCode).toBe(200);
+    expect(mockMicrovmSend).not.toHaveBeenCalled();
+    // Must NOT silently fall through to stopping an unrelated AgentCore runtime.
+    expect(mockAgentCoreSend).not.toHaveBeenCalled();
+  });
+
+  test('a TerminateMicrovm failure still returns 200 (the CANCELLED write stands)', async () => {
+    mockSend.mockReset();
+    const microvmTask = {
+      ...RUNNING_TASK,
+      compute_type: 'lambda-microvm',
+      compute_metadata: { microvmId: 'mvm-0123456789abcdef', endpoint: 'https://x' },
+    };
+    mockSend
+      .mockResolvedValueOnce({ Item: microvmTask })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({});
+    mockMicrovmSend.mockRejectedValueOnce(new Error('ResourceNotFoundException'));
+
+    const result = await handler(makeEvent());
+    expect(result.statusCode).toBe(200);
+    expect(mockMicrovmSend).toHaveBeenCalledTimes(1);
   });
 
   test('falls back to AgentCore stop when compute_type is unrecognized but RUNTIME_ARN is available', async () => {

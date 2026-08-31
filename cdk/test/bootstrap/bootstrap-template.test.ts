@@ -48,6 +48,15 @@ describe('Bootstrap template', () => {
       expect(template.Conditions.IncludeComputeEcs).toBeDefined();
       expect(template.Conditions.IncludeComputeEcs['Fn::Not']).toBeDefined();
     });
+
+    it('has IncludeComputeLambdaMicrovms condition matching the full backend token', () => {
+      const condition = template.Conditions.IncludeComputeLambdaMicrovms;
+      expect(condition).toBeDefined();
+      expect(condition['Fn::Not']).toBeDefined();
+      // Split on the WHOLE `lambda-microvm` token: splitting on a `lambda`
+      // prefix would also fire for any future `lambda*` backend name.
+      expect(JSON.stringify(condition)).toContain('lambda-microvm');
+    });
   });
 
   describe('Managed policy resources', () => {
@@ -57,6 +66,7 @@ describe('Bootstrap template', () => {
       'IaCRoleABCAObservability',
       'IaCRoleABCAComputeAgentcore',
       'IaCRoleABCAComputeEcs',
+      'IaCRoleABCAComputeLambdaMicrovms',
     ];
 
     for (const logicalId of expectedPolicies) {
@@ -75,9 +85,40 @@ describe('Bootstrap template', () => {
       expect(template.Resources.IaCRoleABCAComputeEcs.Condition).toBe('IncludeComputeEcs');
     });
 
-    it('non-ECS policies do not have a condition', () => {
-      const nonEcs = expectedPolicies.filter((p) => p !== 'IaCRoleABCAComputeEcs');
-      for (const logicalId of nonEcs) {
+    it('IaCRoleABCAComputeLambdaMicrovms has IncludeComputeLambdaMicrovms condition', () => {
+      expect(template.Resources.IaCRoleABCAComputeLambdaMicrovms.Condition)
+        .toBe('IncludeComputeLambdaMicrovms');
+    });
+
+    it('IaCRoleABCAComputeLambdaMicrovms carries the unconditioned MicrovmPassRoles statement', () => {
+      // ADR-021 P2r2-F9, asserted on the artifact operators actually deploy rather
+      // than only on the TypeScript source: CloudFormation cannot pass the MicroVM
+      // build role while an `iam:PassedToService` condition is in force, so the
+      // CDK-managed image path depends on this statement reaching the YAML with no
+      // Condition key. It lives in the CONDITIONAL per-backend policy, so an
+      // agentcore-only bootstrap never gains the unconditioned pass at all.
+      const statements = template.Resources.IaCRoleABCAComputeLambdaMicrovms
+        .Properties.PolicyDocument.Statement as Array<{
+        Sid: string;
+        Action: string | string[];
+        Resource: string | string[];
+        Condition?: unknown;
+      }>;
+      const passRole = statements.find((s) => s.Sid === 'MicrovmPassRoles');
+      expect(passRole).toBeDefined();
+      expect(passRole!.Action).toBe('iam:PassRole');
+      expect(passRole!.Condition).toBeUndefined();
+      expect(passRole!.Resource).toEqual([
+        'arn:aws:iam::*:role/backgroundagent-dev-LambdaMicrovmComputeBuild*',
+        'arn:aws:iam::*:role/backgroundagent-dev-LambdaMicrovmComputeConnector*',
+      ]);
+    });
+
+    it('non-optional-compute policies do not have a condition', () => {
+      const unconditional = expectedPolicies.filter(
+        (p) => p !== 'IaCRoleABCAComputeEcs' && p !== 'IaCRoleABCAComputeLambdaMicrovms',
+      );
+      for (const logicalId of unconditional) {
         expect(template.Resources[logicalId].Condition).toBeUndefined();
       }
     });
@@ -122,6 +163,15 @@ describe('Bootstrap template', () => {
       expect(ecsEntry).toBeDefined();
       expect(ecsEntry['Fn::If'][1]).toEqual({ Ref: 'IaCRoleABCAComputeEcs' });
       expect(ecsEntry['Fn::If'][2]).toEqual({ Ref: 'AWS::NoValue' });
+
+      // ...and so should Lambda MicroVMs (ADR-021).
+      const microvmEntry = fallback.find(
+
+        (item: any) => item['Fn::If'] && item['Fn::If'][0] === 'IncludeComputeLambdaMicrovms',
+      );
+      expect(microvmEntry).toBeDefined();
+      expect(microvmEntry['Fn::If'][1]).toEqual({ Ref: 'IaCRoleABCAComputeLambdaMicrovms' });
+      expect(microvmEntry['Fn::If'][2]).toEqual({ Ref: 'AWS::NoValue' });
     });
 
     it('does not reference AdministratorAccess', () => {
@@ -157,10 +207,13 @@ describe('Bootstrap template', () => {
 
       // ECS should be conditional
 
-      const ecsItem = items.find((item: any) => item['Fn::If']);
-      expect(ecsItem).toBeDefined();
-      expect(ecsItem['Fn::If'][0]).toBe('IncludeComputeEcs');
-      expect(ecsItem['Fn::If'][1]).toBe('Compute-ECS');
+      const conditionalItems = items.filter((item: any) => item['Fn::If']);
+      expect(conditionalItems.map((item: any) => item['Fn::If'][0])).toEqual([
+        'IncludeComputeEcs',
+        'IncludeComputeLambdaMicrovms',
+      ]);
+      expect(conditionalItems[0]['Fn::If'][1]).toBe('Compute-ECS');
+      expect(conditionalItems[1]['Fn::If'][1]).toBe('Compute-LambdaMicrovms');
     });
   });
 

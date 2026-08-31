@@ -19,21 +19,30 @@
 
 const resolveJiraOauthTokenMock = jest.fn();
 jest.mock('../../../src/handlers/shared/jira-oauth-resolver', () => ({
-  resolveJiraOauthToken: (...args: unknown[]) => resolveJiraOauthTokenMock(...args),
+  resolveJiraOutboundAuth: (...args: unknown[]) => resolveJiraOauthTokenMock(...args),
 }));
 
-import { postIssueComment, reportIssueFailure } from '../../../src/handlers/shared/jira-feedback';
+import {
+  buildAdfDocument,
+  parseMarkdownRuns,
+  postIssueComment,
+  postIssueCommentAdf,
+  reportIssueFailure,
+  transitionIssueState,
+  updateIssueComment,
+} from '../../../src/handlers/shared/jira-feedback';
 
 const CTX = { cloudId: 'cloud-uuid-1', registryTableName: 'JiraWorkspaceRegistry' };
 
 // ``fetch`` is the global transport; each test installs its own mock.
 const originalFetch = global.fetch;
 
-function mockResponse(status: number): Response {
+function mockResponse(status: number, body = '{"id":"10001"}'): Response {
   return {
     ok: status >= 200 && status < 300,
     status,
     json: async () => ({}),
+    text: async () => body,
   } as unknown as Response;
 }
 
@@ -56,13 +65,61 @@ afterEach(() => {
 });
 
 describe('jira-feedback: postIssueComment', () => {
+  test('uses the configured Forge app actor with an HMAC-signed request', async () => {
+    resolveJiraOauthTokenMock.mockResolvedValueOnce({
+      kind: 'app',
+      appActor: {
+        proxyUrl: 'https://install.webtrigger.atlassian.app/public/trigger-id',
+        sharedSecret: 's'.repeat(64),
+      },
+      siteUrl: 'https://acme.atlassian.net',
+      oauthSecretArn: 'arn:secret:acme',
+    });
+    const fetchMock = jest.fn().mockResolvedValue(mockResponse(201));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const commentId = await postIssueComment(CTX, 'ENG-42', 'hello');
+
+    expect(commentId).toBe('10001');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://install.webtrigger.atlassian.app/public/trigger-id');
+    const headers = init.headers as Record<string, string>;
+    expect(headers.Authorization).toBeUndefined();
+    expect(headers['X-Bgagent-Signature']).toMatch(/^sha256=[a-f0-9]{64}$/);
+    expect(headers['X-Bgagent-Timestamp']).toMatch(/^\d+$/);
+    expect(JSON.parse(init.body as string)).toMatchObject({
+      version: 1,
+      operation: 'comment',
+      cloud_id: 'cloud-uuid-1',
+      issue_key: 'ENG-42',
+    });
+  });
+
+  test('does not fall back to OAuth when a configured app actor rejects the request', async () => {
+    resolveJiraOauthTokenMock.mockResolvedValueOnce({
+      kind: 'app',
+      appActor: {
+        proxyUrl: 'https://install.webtrigger.atlassian.app/public/trigger-id',
+        sharedSecret: 's'.repeat(64),
+      },
+      siteUrl: 'https://acme.atlassian.net',
+      oauthSecretArn: 'arn:secret:acme',
+    });
+    global.fetch = jest.fn().mockResolvedValue(mockResponse(403)) as unknown as typeof fetch;
+
+    await expect(postIssueComment(CTX, 'ENG-42', 'hello')).resolves.toBeNull();
+    expect(resolveJiraOauthTokenMock).toHaveBeenCalledTimes(1);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
   test('posts to the api.atlassian.com gateway base scoped by cloudId — NOT the site host', async () => {
     const fetchMock = jest.fn().mockResolvedValue(mockResponse(201));
     global.fetch = fetchMock as unknown as typeof fetch;
 
-    const ok = await postIssueComment(CTX, 'ENG-42', 'hello');
+    const commentId = await postIssueComment(CTX, 'ENG-42', 'hello');
 
-    expect(ok).toBe(true);
+    expect(commentId).toBe('10001');
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0];
 
@@ -97,9 +154,9 @@ describe('jira-feedback: postIssueComment', () => {
     const fetchMock = jest.fn();
     global.fetch = fetchMock as unknown as typeof fetch;
 
-    const ok = await postIssueComment(CTX, 'ENG-42', 'hello');
+    const commentId = await postIssueComment(CTX, 'ENG-42', 'hello');
 
-    expect(ok).toBe(false);
+    expect(commentId).toBeNull();
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -110,9 +167,9 @@ describe('jira-feedback: postIssueComment', () => {
     const fetchMock = jest.fn();
     global.fetch = fetchMock as unknown as typeof fetch;
 
-    const ok = await postIssueComment(CTX, 'ENG-42', 'hello');
+    const commentId = await postIssueComment(CTX, 'ENG-42', 'hello');
 
-    expect(ok).toBe(false);
+    expect(commentId).toBeNull();
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -125,9 +182,9 @@ describe('jira-feedback: postIssueComment', () => {
     const fetchMock = jest.fn().mockResolvedValueOnce(mockResponse(401));
     global.fetch = fetchMock as unknown as typeof fetch;
 
-    const ok = await postIssueComment(CTX, 'ENG-42', 'hello');
+    const commentId = await postIssueComment(CTX, 'ENG-42', 'hello');
 
-    expect(ok).toBe(false);
+    expect(commentId).toBeNull();
     // Only the first POST happened; the retry never got a token.
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(resolveJiraOauthTokenMock).toHaveBeenCalledTimes(2);
@@ -139,9 +196,9 @@ describe('jira-feedback: postIssueComment', () => {
     const fetchMock = jest.fn().mockResolvedValue(mockResponse(500));
     global.fetch = fetchMock as unknown as typeof fetch;
 
-    const ok = await postIssueComment(CTX, 'ENG-42', 'hello');
+    const commentId = await postIssueComment(CTX, 'ENG-42', 'hello');
 
-    expect(ok).toBe(false);
+    expect(commentId).toBeNull();
     // 5xx is terminal — no forced-refresh retry, no second POST.
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(resolveJiraOauthTokenMock).toHaveBeenCalledTimes(1);
@@ -153,6 +210,79 @@ describe('jira-feedback: postIssueComment', () => {
       .mockRejectedValue(new Error('network down')) as unknown as typeof fetch;
 
     await expect(reportIssueFailure(CTX, 'ENG-42', '❌ nope')).resolves.toBeUndefined();
+  });
+});
+
+describe('jira-feedback: transitionIssueState', () => {
+  test('moves a To Do parent to the configured start status', async () => {
+    const fetchMock = jest.fn()
+      .mockResolvedValueOnce({
+        ...mockResponse(200),
+        text: async () => JSON.stringify({
+          fields: {
+            status: {
+              name: 'To Do',
+              statusCategory: { key: 'new' },
+            },
+          },
+          transitions: [
+            {
+              id: '31',
+              hasScreen: false,
+              to: {
+                name: 'Doing',
+                statusCategory: { key: 'indeterminate' },
+              },
+            },
+          ],
+        }),
+      })
+      .mockResolvedValueOnce(mockResponse(204));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(transitionIssueState(
+      CTX,
+      'ENG-1',
+      'started',
+      { started: 'Doing' },
+    )).resolves.toBe(true);
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body as string))
+      .toEqual({ transition: { id: '31' } });
+  });
+
+  test('permits the explicit same-category review-to-progress reopen', async () => {
+    const fetchMock = jest.fn()
+      .mockResolvedValueOnce({
+        ...mockResponse(200),
+        text: async () => JSON.stringify({
+          fields: {
+            status: {
+              name: 'In Review',
+              statusCategory: { key: 'indeterminate' },
+            },
+          },
+          transitions: [
+            {
+              id: '11',
+              hasScreen: false,
+              to: {
+                name: 'In Progress',
+                statusCategory: { key: 'indeterminate' },
+              },
+            },
+          ],
+        }),
+      })
+      .mockResolvedValueOnce(mockResponse(204));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(transitionIssueState(
+      CTX,
+      'ENG-1',
+      'started',
+      {},
+      { allowRegression: true },
+    )).resolves.toBe(true);
   });
 });
 
@@ -179,9 +309,9 @@ describe('jira-feedback: 401 → forced refresh → retry (issue #370)', () => {
       .mockResolvedValueOnce(mockResponse(201)); // retry: fresh token accepted
     global.fetch = fetchMock as unknown as typeof fetch;
 
-    const ok = await postIssueComment(CTX, 'ENG-42', 'hello');
+    const commentId = await postIssueComment(CTX, 'ENG-42', 'hello');
 
-    expect(ok).toBe(true);
+    expect(commentId).toBe('10001');
     // Two POSTs, and the second carried the refreshed bearer token.
     expect(fetchMock).toHaveBeenCalledTimes(2);
     const firstHeaders = (fetchMock.mock.calls[0][1] as RequestInit).headers as Record<string, string>;
@@ -204,9 +334,9 @@ describe('jira-feedback: 401 → forced refresh → retry (issue #370)', () => {
       .mockResolvedValueOnce(mockResponse(201));
     global.fetch = fetchMock as unknown as typeof fetch;
 
-    const ok = await postIssueComment(CTX, 'ENG-42', 'hello');
+    const commentId = await postIssueComment(CTX, 'ENG-42', 'hello');
 
-    expect(ok).toBe(true);
+    expect(commentId).toBe('10001');
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
@@ -217,9 +347,9 @@ describe('jira-feedback: 401 → forced refresh → retry (issue #370)', () => {
     const fetchMock = jest.fn().mockResolvedValue(mockResponse(401));
     global.fetch = fetchMock as unknown as typeof fetch;
 
-    const ok = await postIssueComment(CTX, 'ENG-42', 'hello');
+    const commentId = await postIssueComment(CTX, 'ENG-42', 'hello');
 
-    expect(ok).toBe(false);
+    expect(commentId).toBeNull();
     expect(fetchMock).toHaveBeenCalledTimes(1); // no retry with an unchanged token
     expect(resolveJiraOauthTokenMock).toHaveBeenCalledTimes(2);
   });
@@ -231,9 +361,9 @@ describe('jira-feedback: 401 → forced refresh → retry (issue #370)', () => {
     const fetchMock = jest.fn().mockResolvedValueOnce(mockResponse(401));
     global.fetch = fetchMock as unknown as typeof fetch;
 
-    const ok = await postIssueComment(CTX, 'ENG-42', 'hello');
+    const commentId = await postIssueComment(CTX, 'ENG-42', 'hello');
 
-    expect(ok).toBe(false);
+    expect(commentId).toBeNull();
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
@@ -247,11 +377,301 @@ describe('jira-feedback: 401 → forced refresh → retry (issue #370)', () => {
       .mockResolvedValueOnce(mockResponse(401)); // fresh also rejected → give up
     global.fetch = fetchMock as unknown as typeof fetch;
 
-    const ok = await postIssueComment(CTX, 'ENG-42', 'hello');
+    const commentId = await postIssueComment(CTX, 'ENG-42', 'hello');
 
-    expect(ok).toBe(false);
+    expect(commentId).toBeNull();
     // Exactly two POSTs — the retry is bounded at one attempt.
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(resolveJiraOauthTokenMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('jira-feedback: buildAdfDocument (multi-paragraph ADF, #573)', () => {
+  test('parses generated bold, code, and PR links into ADF marks', () => {
+    expect(parseMarkdownRuns(
+      '- ✅ **TG-5** — succeeded — [PR](https://github.com/acme/repo/pull/26) `task-1`',
+    )).toEqual([
+      { text: '- ✅ ' },
+      { text: 'TG-5', strong: true },
+      { text: ' — succeeded — ' },
+      { text: 'PR', href: 'https://github.com/acme/repo/pull/26' },
+      { text: ' ' },
+      { text: 'task-1', code: true },
+    ]);
+  });
+
+  test('maps each paragraph to an ADF paragraph node, preserving order', () => {
+    const doc = buildAdfDocument([
+      [{ text: 'header', strong: true }],
+      [{ text: 'metrics line' }],
+      [{ text: 'task t-1', em: true }],
+    ]);
+    expect(doc.type).toBe('doc');
+    expect(doc.version).toBe(1);
+    const content = doc.content as Array<{ type: string; content: Array<Record<string, unknown>> }>;
+    expect(content).toHaveLength(3);
+    expect(content.every((p) => p.type === 'paragraph')).toBe(true);
+    expect(content[1].content[0]).toEqual({ type: 'text', text: 'metrics line' });
+  });
+
+  test('emits strong / em marks only when the run flags them', () => {
+    const doc = buildAdfDocument([[
+      { text: 'bold', strong: true },
+      { text: 'italic', em: true },
+      { text: 'both', strong: true, em: true },
+      { text: 'plain' },
+    ]]);
+    const runs = (doc.content as Array<{ content: Array<Record<string, unknown>> }>)[0].content;
+    expect(runs[0]).toEqual({ type: 'text', text: 'bold', marks: [{ type: 'strong' }] });
+    expect(runs[1]).toEqual({ type: 'text', text: 'italic', marks: [{ type: 'em' }] });
+    expect(runs[2]).toEqual({ type: 'text', text: 'both', marks: [{ type: 'strong' }, { type: 'em' }] });
+    // A plain run carries no marks key at all.
+    expect(runs[3]).toEqual({ type: 'text', text: 'plain' });
+  });
+
+  test('an empty run list yields an empty paragraph (blank-line spacing)', () => {
+    const doc = buildAdfDocument([[]]);
+    const content = doc.content as Array<{ type: string; content: unknown[] }>;
+    expect(content[0]).toEqual({ type: 'paragraph', content: [] });
+  });
+
+  test('an href run emits an ADF link mark (bare URLs are not auto-linked)', () => {
+    const doc = buildAdfDocument([[
+      { text: 'PR: ' },
+      { text: 'https://github.com/o/r/pull/7', href: 'https://github.com/o/r/pull/7' },
+    ]]);
+    const runs = (doc.content as Array<{ content: Array<Record<string, unknown>> }>)[0].content;
+    expect(runs[0]).toEqual({ type: 'text', text: 'PR: ' });
+    expect(runs[1]).toEqual({
+      type: 'text',
+      text: 'https://github.com/o/r/pull/7',
+      marks: [{ type: 'link', attrs: { href: 'https://github.com/o/r/pull/7' } }],
+    });
+  });
+
+  test('href composes with strong/em marks on the same run', () => {
+    const doc = buildAdfDocument([[
+      { text: 'link', strong: true, href: 'https://x.example/pull/1' },
+    ]]);
+    const runs = (doc.content as Array<{ content: Array<Record<string, unknown>> }>)[0].content;
+    expect(runs[0]).toEqual({
+      type: 'text',
+      text: 'link',
+      marks: [{ type: 'strong' }, { type: 'link', attrs: { href: 'https://x.example/pull/1' } }],
+    });
+  });
+});
+
+describe('jira-feedback: postIssueCommentAdf (classified result, #573)', () => {
+  const ADF = { type: 'doc', version: 1, content: [] };
+
+  test('returns { ok: true } on 201 and posts the supplied ADF document verbatim', async () => {
+    const fetchMock = jest.fn().mockResolvedValue(mockResponse(201));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await postIssueCommentAdf(CTX, 'ENG-42', ADF);
+
+    expect(result).toEqual({ ok: true, commentId: '10001' });
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(JSON.parse(init.body as string)).toEqual({ body: ADF });
+  });
+
+  test('classifies 5xx as retryable', async () => {
+    global.fetch = jest.fn().mockResolvedValue(mockResponse(503)) as unknown as typeof fetch;
+    const result = await postIssueCommentAdf(CTX, 'ENG-42', ADF);
+    expect(result).toEqual({ ok: false, retryable: true });
+  });
+
+  test('classifies 429 as retryable', async () => {
+    global.fetch = jest.fn().mockResolvedValue(mockResponse(429)) as unknown as typeof fetch;
+    const result = await postIssueCommentAdf(CTX, 'ENG-42', ADF);
+    expect(result).toEqual({ ok: false, retryable: true });
+  });
+
+  test('classifies a 400 as terminal (non-retryable)', async () => {
+    global.fetch = jest.fn().mockResolvedValue(mockResponse(400)) as unknown as typeof fetch;
+    const result = await postIssueCommentAdf(CTX, 'ENG-42', ADF);
+    expect(result).toEqual({ ok: false, retryable: false });
+  });
+
+  test('classifies a network rejection as retryable', async () => {
+    global.fetch = jest.fn().mockRejectedValue(new Error('ECONNRESET')) as unknown as typeof fetch;
+    const result = await postIssueCommentAdf(CTX, 'ENG-42', ADF);
+    expect(result).toEqual({ ok: false, retryable: true });
+  });
+
+  test('token resolution failure is terminal (never retryable)', async () => {
+    resolveJiraOauthTokenMock.mockReset().mockResolvedValueOnce(null);
+    const fetchMock = jest.fn();
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await postIssueCommentAdf(CTX, 'ENG-42', ADF);
+
+    expect(result).toEqual({ ok: false, retryable: false });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  test('401 → forced refresh → retry succeeds returns { ok: true }', async () => {
+    resolveJiraOauthTokenMock
+      .mockReset()
+      .mockResolvedValueOnce({ accessToken: 'stale', scope: '', siteUrl: '', oauthSecretArn: 'x' })
+      .mockResolvedValueOnce({ accessToken: 'fresh', scope: '', siteUrl: '', oauthSecretArn: 'x' });
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce(mockResponse(401))
+      .mockResolvedValueOnce(mockResponse(201));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await postIssueCommentAdf(CTX, 'ENG-42', ADF);
+
+    expect(result).toEqual({ ok: true, commentId: '10001' });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  test('a second auth rejection after refresh is terminal', async () => {
+    resolveJiraOauthTokenMock
+      .mockReset()
+      .mockResolvedValueOnce({ accessToken: 'stale', scope: '', siteUrl: '', oauthSecretArn: 'x' })
+      .mockResolvedValueOnce({ accessToken: 'fresh', scope: '', siteUrl: '', oauthSecretArn: 'x' });
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce(mockResponse(401))
+      .mockResolvedValueOnce(mockResponse(403));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await postIssueCommentAdf(CTX, 'ENG-42', ADF);
+
+    expect(result).toEqual({ ok: false, retryable: false });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  test('a transient error on the post-refresh retry stays retryable', async () => {
+    resolveJiraOauthTokenMock
+      .mockReset()
+      .mockResolvedValueOnce({ accessToken: 'stale', scope: '', siteUrl: '', oauthSecretArn: 'x' })
+      .mockResolvedValueOnce({ accessToken: 'fresh', scope: '', siteUrl: '', oauthSecretArn: 'x' });
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce(mockResponse(401))
+      .mockResolvedValueOnce(mockResponse(500));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await postIssueCommentAdf(CTX, 'ENG-42', ADF);
+
+    expect(result).toEqual({ ok: false, retryable: true });
+  });
+});
+
+describe('jira-feedback: updateIssueComment', () => {
+  test('updates the requested comment with ADF via OAuth', async () => {
+    const fetchMock = jest.fn().mockResolvedValue(mockResponse(200));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(updateIssueComment(CTX, 'ENG-42', '10001', 'working')).resolves.toBe(true);
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(
+      'https://api.atlassian.com/ex/jira/cloud-uuid-1/rest/api/3/issue/ENG-42/comment/10001',
+    );
+    expect(init.method).toBe('PUT');
+    expect(JSON.parse(init.body as string)).toEqual({
+      body: {
+        type: 'doc',
+        version: 1,
+        content: [{
+          type: 'paragraph',
+          content: [{ type: 'text', text: 'working' }],
+        }],
+      },
+    });
+  });
+
+  test('uses the Forge update_comment operation when app auth is configured', async () => {
+    resolveJiraOauthTokenMock.mockResolvedValueOnce({
+      kind: 'app',
+      appActor: {
+        proxyUrl: 'https://install.webtrigger.atlassian.app/public/trigger-id',
+        sharedSecret: 's'.repeat(64),
+      },
+      siteUrl: 'https://acme.atlassian.net',
+      oauthSecretArn: 'arn:secret:acme',
+    });
+    const fetchMock = jest.fn().mockResolvedValue(mockResponse(200));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(updateIssueComment(CTX, 'ENG-42', '10001', 'done')).resolves.toBe(true);
+
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body as string)).toMatchObject({
+      operation: 'update_comment',
+      issue_key: 'ENG-42',
+      comment_id: '10001',
+    });
+  });
+
+  test('forces one OAuth refresh on 401 and retries the PUT', async () => {
+    resolveJiraOauthTokenMock
+      .mockReset()
+      .mockResolvedValueOnce({ accessToken: 'stale', scope: '', siteUrl: '', oauthSecretArn: 'x' })
+      .mockResolvedValueOnce({ accessToken: 'fresh', scope: '', siteUrl: '', oauthSecretArn: 'x' });
+    const fetchMock = jest.fn()
+      .mockResolvedValueOnce(mockResponse(401))
+      .mockResolvedValueOnce(mockResponse(200));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(updateIssueComment(CTX, 'ENG-42', '10001', 'done')).resolves.toBe(true);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect((fetchMock.mock.calls[0][1].headers as Record<string, string>).Authorization)
+      .toBe('Bearer stale');
+    expect((fetchMock.mock.calls[1][1].headers as Record<string, string>).Authorization)
+      .toBe('Bearer fresh');
+    expect(resolveJiraOauthTokenMock.mock.calls[1][2]).toEqual({ forceRefresh: true });
+  });
+
+  test('returns false for a missing comment and never throws on a resolver failure', async () => {
+    global.fetch = jest.fn().mockResolvedValue(mockResponse(404)) as unknown as typeof fetch;
+    await expect(updateIssueComment(CTX, 'ENG-42', '99999', 'done')).resolves.toBe(false);
+
+    resolveJiraOauthTokenMock.mockReset().mockRejectedValueOnce(new Error('registry down'));
+    await expect(updateIssueComment(CTX, 'ENG-42', '10001', 'done')).resolves.toBe(false);
+  });
+
+  test('treats a create response without an id as a successful, non-editable post', async () => {
+    global.fetch = jest.fn().mockResolvedValue(mockResponse(201, '{}')) as unknown as typeof fetch;
+    await expect(postIssueComment(CTX, 'ENG-42', 'hello')).resolves.toBe('');
+  });
+
+  test('coerces a numeric Jira comment id to a usable string', async () => {
+    global.fetch = jest.fn().mockResolvedValue(
+      mockResponse(201, '{"id":10002}'),
+    ) as unknown as typeof fetch;
+    await expect(postIssueComment(CTX, 'ENG-42', 'hello')).resolves.toBe('10002');
+  });
+
+  test('Forge app comment creation returns its comment id end to end', async () => {
+    resolveJiraOauthTokenMock.mockResolvedValueOnce({
+      kind: 'app',
+      appActor: {
+        proxyUrl: 'https://install.webtrigger.atlassian.app/public/trigger-id',
+        sharedSecret: 's'.repeat(64),
+      },
+      siteUrl: 'https://acme.atlassian.net',
+      oauthSecretArn: 'arn:secret:acme',
+    });
+    global.fetch = jest.fn().mockResolvedValue(
+      mockResponse(201, '{"id":"10003"}'),
+    ) as unknown as typeof fetch;
+
+    await expect(postIssueComment(CTX, 'ENG-42', 'hello')).resolves.toBe('10003');
+  });
+
+  test('rejects a non-numeric update comment id before resolving credentials', async () => {
+    await expect(updateIssueComment(
+      CTX,
+      'ENG-42',
+      '../comments/1',
+      'hello',
+    )).resolves.toBe(false);
+    expect(resolveJiraOauthTokenMock).not.toHaveBeenCalled();
   });
 });

@@ -44,6 +44,7 @@
         "cloudwatch:TagResource",
         "cloudwatch:UntagResource",
         "logs:CreateDelivery",
+        "logs:UpdateDeliveryConfiguration",
         "logs:DescribeDeliveries",
         "logs:GetDelivery",
         "logs:GetDeliveryDestination",
@@ -115,6 +116,35 @@
       "Effect": "Allow",
       "Resource": "*",
       "Sid": "KMSForCDKAssets"
+    },
+    {
+      "Action": [
+        "kms:CreateKey",
+        "kms:GetKeyPolicy",
+        "kms:GetKeyRotationStatus",
+        "kms:TagResource",
+        "kms:ListResourceTags"
+      ],
+      "Effect": "Allow",
+      "Resource": "*",
+      "Sid": "KMSCustomerManagedKeys"
+    },
+    {
+      "Action": [
+        "kms:PutKeyPolicy",
+        "kms:ScheduleKeyDeletion",
+        "kms:EnableKeyRotation",
+        "kms:DisableKeyRotation",
+        "kms:UntagResource"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/ABCA": "operational-alerts"
+        }
+      },
+      "Effect": "Allow",
+      "Resource": "*",
+      "Sid": "KMSCustomerManagedKeysLifecycle"
     },
     {
       "Action": [

@@ -22,10 +22,9 @@
 // Tests: cdk/test/handlers/shared/create-task-core.test.ts, cdk/test/handlers/create-task.test.ts
 
 import { BedrockRuntimeClient, ApplyGuardrailCommand } from '@aws-sdk/client-bedrock-runtime';
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
 import { PutObjectCommand, DeleteObjectsCommand, S3Client } from '@aws-sdk/client-s3';
-import { DynamoDBDocumentClient, PutCommand, QueryCommand, GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { PutCommand, QueryCommand, GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { createPresignedPost } from '@aws-sdk/s3-presigned-post';
 import type { APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
@@ -53,7 +52,8 @@ import {
   type TaskRecord,
   toTaskDetail,
 } from './types';
-import { computeTtlEpoch, hasTaskSpec, isValidIdempotencyKey, isValidRepo, isValidTaskDescriptionLength, MAX_ATTACHMENT_SIZE_BYTES, MAX_TASK_DESCRIPTION_LENGTH, validateAttachments, validateMaxBudgetUsd, validateMaxTurns, validatePrNumber } from './validation';
+import { makeClient, makeDocClient } from './ua';
+import { computeTtlEpoch, hasTaskSpec, isValidIdempotencyKey, isValidRepo, isValidTaskDescriptionLength, MAX_ATTACHMENT_SIZE_BYTES, MAX_TASK_DESCRIPTION_LENGTH, MAX_TOTAL_ATTACHMENT_SIZE_BYTES, validateAttachments, validateMaxBudgetUsd, validateMaxTurns, validatePrNumber } from './validation';
 import { disallowedWorkflowModel, getWorkflowDescriptor, isValidWorkflowRef, resolveWorkflowRef, resolveWorkflowRefError } from './workflows';
 import { ATTACHMENT_OBJECT_KEY_PREFIX } from '../../constructs/attachments-bucket';
 import { TaskStatus } from '../../constructs/task-status';
@@ -66,12 +66,34 @@ export interface TaskCreationContext {
   readonly channelSource: ChannelSource;
   readonly channelMetadata: Record<string, string>;
   readonly idempotencyKey?: string;
+  /**
+   * Task ID to use instead of minting one. Only trusted server-side callers
+   * set this — a webhook processor that downloads + screens + uploads
+   * attachments to S3 *before* calling createTaskCore needs the task ID up
+   * front so the S3 object keys match the eventual task record.
+   */
+  readonly taskId?: string;
+  /**
+   * Attachment records the caller has already downloaded, screened (status
+   * `passed`), and uploaded to S3 — e.g. Jira `media` file attachments a
+   * trusted webhook processor fetched authenticated and ran through the same
+   * Bedrock Guardrail pipeline. Merged verbatim into the
+   * persisted attachments and NOT re-screened here. Every record MUST be a
+   * passed record with storage fields populated; a non-`passed` record is a
+   * caller contract violation and fails the request closed.
+   *
+   * These bypass the wire `Attachment`/`validateAttachments` path (which caps
+   * inline at 500 KB and can't authenticate a Jira download), so the caller is
+   * responsible for enforcing the per-file / total-size / count limits before
+   * upload.
+   */
+  readonly preScreenedAttachments?: readonly AttachmentRecord[];
 }
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
-const lambdaClient = process.env.ORCHESTRATOR_FUNCTION_ARN ? new LambdaClient({}) : undefined;
+const ddb = makeDocClient();
+const lambdaClient = process.env.ORCHESTRATOR_FUNCTION_ARN ? makeClient(LambdaClient) : undefined;
 const bedrockClient = (process.env.GUARDRAIL_ID && process.env.GUARDRAIL_VERSION)
-  ? new BedrockRuntimeClient({}) : undefined;
+  ? makeClient(BedrockRuntimeClient) : undefined;
 if (process.env.GUARDRAIL_ID && !process.env.GUARDRAIL_VERSION) {
   logger.error('GUARDRAIL_ID is set but GUARDRAIL_VERSION is missing — guardrail screening disabled', {
     metric_type: 'guardrail_misconfiguration',
@@ -81,7 +103,7 @@ const TABLE_NAME = process.env.TASK_TABLE_NAME!;
 const EVENTS_TABLE_NAME = process.env.TASK_EVENTS_TABLE_NAME!;
 const TASK_RETENTION_DAYS = Number(process.env.TASK_RETENTION_DAYS ?? '90');
 const ATTACHMENTS_BUCKET = process.env.ATTACHMENTS_BUCKET_NAME;
-const s3Client = ATTACHMENTS_BUCKET ? new S3Client({}) : undefined;
+const s3Client = ATTACHMENTS_BUCKET ? makeClient(S3Client) : undefined;
 
 /** Human-readable description of a workflow's required-input contract (for 400s). */
 function describeRequiredInputs(requiredInputs: { allOf?: readonly string[]; oneOf?: readonly string[] }): string {
@@ -108,7 +130,7 @@ export async function createTaskCore(
   context: TaskCreationContext,
   requestId: string,
 ): Promise<APIGatewayProxyResult> {
-  // 1. Resolve the workflow first (#248). workflow_ref replaces task_type: an
+  // 1. Resolve the workflow first. workflow_ref replaces task_type: an
   // explicit ref resolves to its pinned {id, version}; an absent ref falls back
   // to the platform default. An unknown ref is a 400. The resolved workflow's
   // ``requiresRepo`` then decides whether ``repo`` is mandatory — a repo-less
@@ -116,11 +138,16 @@ export async function createTaskCore(
   if (!isValidWorkflowRef(body.workflow_ref)) {
     return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid workflow_ref. Expected "<domain>/<name>-vN[@<constraint>]".', requestId);
   }
+  // A repo-bound task with no explicit workflow_ref must run the disciplined
+  // coding workflow (coding/new-task-v1), not the repo-less default/agent-v1.
+  // That decision now lives at each channel's call site (they pin
+  // CODING_WORKFLOW_ID explicitly), NOT in a resolver-level hasRepo default —
+  // so resolveWorkflowRef takes only the ref here.
   const resolvedWorkflow = resolveWorkflowRef(body.workflow_ref);
   if (resolvedWorkflow === null) {
     // Distinguish an unknown id from an unsatisfiable @version pin so the caller
-    // learns which it is (#296 finding #6 — a bad pin no longer silently runs
-    // the shipped version).
+    // learns which it is — a bad pin no longer silently runs the shipped
+    // version.
     const reason = resolveWorkflowRefError(body.workflow_ref);
     const message = reason === 'unsatisfiable_version'
       ? `workflow_ref "${body.workflow_ref}" pins a version that is not available.`
@@ -339,7 +366,11 @@ export async function createTaskCore(
         parseResult.scope.startsWith('bash_pattern:')
         || parseResult.scope.startsWith('write_path:')
       ) {
-        const value = parseResult.scope.split(':', 2)[1] ?? '';
+        // Take everything after the first colon — the value itself may
+        // contain colons (e.g. ``bash_pattern:git log --format=%h:%s``), so a
+        // ``split(':', 2)`` would truncate it and could turn a legitimate
+        // pattern into a degenerate-looking fragment, producing a spurious 400.
+        const value = parseResult.scope.slice(parseResult.scope.indexOf(':') + 1);
         if (isDegeneratePattern(value)) {
           return errorResponse(
             400,
@@ -382,8 +413,11 @@ export async function createTaskCore(
     }
   }
 
-  // Generate task ID early so attachment S3 keys use the correct task ID
-  const taskId = ulid();
+  // Generate task ID early so attachment S3 keys use the correct task ID.
+  // A trusted server-side caller (e.g. the Jira webhook processor) may
+  // supply the ID so the S3 keys of attachments it uploaded before this call
+  // match the eventual task record.
+  const taskId = context.taskId ?? ulid();
 
   // 2b. Process inline attachments: screen (with retry + EXIF strip), upload to S3, build records.
   // Presigned attachments are deferred to confirm-uploads; URL attachments are resolved during hydration.
@@ -533,6 +567,59 @@ export async function createTaskCore(
     }
   }
 
+  // Pre-screened attachments: records a trusted server-side caller already
+  // downloaded, screened (passed), and uploaded to S3 — e.g. Jira `media`
+  // attachments fetched authenticated by the webhook processor. They
+  // bypass the wire `Attachment` path, so they are merged verbatim and never
+  // re-screened. Fail closed on a caller contract violation: a non-`passed`
+  // record must never reach the agent.
+  if (context.preScreenedAttachments && context.preScreenedAttachments.length > 0) {
+    for (const rec of context.preScreenedAttachments) {
+      if (rec.screening.status !== 'passed') {
+        logger.error('Pre-screened attachment is not in passed state (fail-closed)', {
+          attachment_filename: rec.filename,
+          screening_status: rec.screening.status,
+          request_id: requestId,
+          metric_type: 'prescreened_attachment_invalid',
+        });
+        // Roll back any inline uploads this call made (empty on the Jira
+        // webhook path, which supplies no wire attachments) before failing.
+        if (s3Client) await cleanupOrphanedAttachments(s3Client, uploadedS3Keys);
+        return errorResponse(500, ErrorCode.INTERNAL_ERROR,
+          'A pre-screened attachment was not in a passed state.', requestId);
+      }
+    }
+    attachmentRecords.push(...context.preScreenedAttachments);
+  }
+
+  // Aggregate size ceiling ACROSS sources (review): each source enforces its own
+  // subtotal (wire inline, the URL resolver per-URL, the Linear batch's own total),
+  // but nothing summed the MERGED set — so N sources could each pass their own
+  // check and jointly blow past the task-wide cap (e.g. 5×10 MB public images +
+  // 5×10 MB Linear files ≈ 100 MB under a 50 MB limit). Sum every record whose
+  // size is known NOW (inline + pre-screened; presigned uploads are still `pending`
+  // and are bounded separately at confirm-uploads time) and fail closed.
+  const knownTotalBytes = attachmentRecords.reduce(
+    (sum, r) => sum + (typeof (r as { size_bytes?: number }).size_bytes === 'number' ? (r as { size_bytes: number }).size_bytes : 0),
+    0,
+  );
+  if (knownTotalBytes > MAX_TOTAL_ATTACHMENT_SIZE_BYTES) {
+    logger.warn('Combined attachment size exceeds the task-wide limit (fail-closed)', {
+      total_bytes: knownTotalBytes,
+      limit_bytes: MAX_TOTAL_ATTACHMENT_SIZE_BYTES,
+      attachment_count: attachmentRecords.length,
+      request_id: requestId,
+      metric_type: 'attachment_total_size_exceeded',
+    });
+    // Don't orphan any inline uploads this call made before rejecting.
+    if (s3Client) await cleanupOrphanedAttachments(s3Client, uploadedS3Keys);
+    return errorResponse(
+      400, ErrorCode.VALIDATION_ERROR,
+      `Combined attachment size exceeds the ${MAX_TOTAL_ATTACHMENT_SIZE_BYTES}-byte task limit.`,
+      requestId,
+    );
+  }
+
   // 3. Check idempotency key
   if (context.idempotencyKey !== undefined && context.idempotencyKey !== null) {
     if (!isValidIdempotencyKey(context.idempotencyKey)) {
@@ -557,7 +644,7 @@ export async function createTaskCore(
       if (existingTask.Item) {
         const existingRecord = existingTask.Item as TaskRecord;
         // ``repo`` and ``branch_name`` are intentionally NOT required here: a
-        // repo-less workflow (#248 Phase 3) persists no repo and an empty
+        // repo-less workflow persists no repo and an empty
         // ``branch_name`` (it never branches). Both are legitimately falsy on a
         // valid repo-less record, so a falsy check would wrongly reject a valid
         // repo-less replay as "incomplete" (500). Only the true identity/audit
@@ -630,6 +717,22 @@ export async function createTaskCore(
     ...(context.idempotencyKey && { idempotency_key: context.idempotencyKey }),
     channel_source: context.channelSource,
     channel_metadata: context.channelMetadata,
+    // Hoist linear_issue_id to the top level so the sparse
+    // LinearIssueIndex GSI can resolve an issue → its newest task + PR (a GSI
+    // cannot key off the nested channel_metadata map). Linear-origin only.
+    ...(context.channelMetadata?.linear_issue_id && {
+      linear_issue_id: context.channelMetadata.linear_issue_id,
+    }),
+    // DynamoDB GSIs cannot key on nested map values. Hoist the tenant-scoped
+    // Jira issue identity so JiraIssueIndex can resolve comment triggers back
+    // to the newest PR-producing task.
+    ...(context.channelSource === 'jira'
+      && context.channelMetadata?.jira_cloud_id
+      && context.channelMetadata?.jira_issue_key
+      && {
+        jira_issue_identity:
+          `${context.channelMetadata.jira_cloud_id}#${context.channelMetadata.jira_issue_key}`,
+      }),
     ...(attachmentRecords.length > 0 && { attachments: attachmentRecords }),
     status_created_at: `${initialStatus}#${now}`,
     created_at: now,

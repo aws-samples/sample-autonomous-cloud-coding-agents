@@ -17,12 +17,14 @@
  *  SOFTWARE.
  */
 
-// `findLinearIssueByIdentifier` is covered by PR #275's broader test
-// suite (mocks the registry scan + GraphQL); this file only locks in
-// `extractLinearIdentifier` since it's a pure function and the g-flag
-// regex's `lastIndex` reset behavior is easy to regress across releases.
+// `findLinearIssueByIdentifier` needs the registry scan and the GraphQL call
+// mocked, so it is covered elsewhere. This file locks in the pure identifier
+// parsers, whose g-flagged regex `lastIndex` reset behavior is easy to regress.
 
-import { extractLinearIdentifier } from '../../../src/handlers/shared/linear-issue-lookup';
+import {
+  extractLinearIdentifier,
+  extractLinearIdentifierFromBranch,
+} from '../../../src/handlers/shared/linear-issue-lookup';
 
 describe('extractLinearIdentifier', () => {
   test('returns null for null / undefined / empty input', () => {
@@ -57,10 +59,10 @@ describe('extractLinearIdentifier', () => {
     expect(extractLinearIdentifier('ABCA-1234567890')).toBeNull();
   });
 
-  // The regex is g-flagged at module scope.
-  // scope, which means `RegExp.prototype.exec` carries `lastIndex`
-  // across calls. The implementation explicitly resets it; this test
-  // pins the behavior so nobody removes the reset thinking it's dead.
+  // The regex is g-flagged and lives at module scope, which means
+  // `RegExp.prototype.exec` carries `lastIndex` across calls. The
+  // implementation explicitly resets it; this test pins the behavior so
+  // nobody removes the reset thinking it's dead code.
   test('back-to-back calls do not skip due to leftover g-flag lastIndex', () => {
     // Run the same call twice — without the explicit reset, the second
     // call would start scanning from where the first call left off and
@@ -76,5 +78,34 @@ describe('extractLinearIdentifier', () => {
     expect(extractLinearIdentifier('third PLAT-9 ABCA-1')).toBe('PLAT-9');
     expect(extractLinearIdentifier(null)).toBeNull();
     expect(extractLinearIdentifier('fourth ABCA-1')).toBe('ABCA-1');
+  });
+});
+
+describe('extractLinearIdentifierFromBranch', () => {
+  test('pulls the canonical identifier from an agent task branch (lowercased slug)', () => {
+    // Branch shape is bgagent/{taskId}/{slug}, where the slug is a slugified
+    // "<identifier>: <issue title>" and so has lost the original casing.
+    expect(
+      extractLinearIdentifierFromBranch('bgagent/01KTSK8XGXHRMT0JX44GYRPJG7/abca-151-add-lisbon-guidehtml'),
+    ).toBe('ABCA-151');
+  });
+
+  test('the ULID task-id segment does not false-match before the identifier', () => {
+    // The ULID has no dash, so it cannot produce a <KEY>-<n> match; the
+    // first real match is the issue identifier in the slug.
+    expect(
+      extractLinearIdentifierFromBranch('bgagent/01KTSKET9040HDJP3P2QE15DXC/abca-152-link-lisbon-from-destinationsht'),
+    ).toBe('ABCA-152');
+  });
+
+  test('returns null for a branch with no identifier', () => {
+    expect(extractLinearIdentifierFromBranch('bgagent/01TASK/task')).toBeNull();
+    expect(extractLinearIdentifierFromBranch('feature/some-thing')).toBeNull();
+  });
+
+  test('returns null on null/undefined/empty', () => {
+    expect(extractLinearIdentifierFromBranch(null)).toBeNull();
+    expect(extractLinearIdentifierFromBranch(undefined)).toBeNull();
+    expect(extractLinearIdentifierFromBranch('')).toBeNull();
   });
 });

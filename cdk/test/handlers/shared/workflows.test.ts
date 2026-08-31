@@ -21,6 +21,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as yaml from 'js-yaml';
 import {
+  CODING_WORKFLOW_ID,
   DEFAULT_WORKFLOW_ID,
   WORKFLOW_MODEL_ALLOWLIST,
   disallowedWorkflowModel,
@@ -72,10 +73,19 @@ describe('resolveWorkflowRef', () => {
     expect(resolveWorkflowRefError(undefined)).toBeNull();
   });
 
-  test('falls back to the platform default when ref is absent', () => {
+  test('falls back to the repo-less platform default when ref is absent', () => {
     expect(resolveWorkflowRef(undefined)).toEqual({ id: DEFAULT_WORKFLOW_ID, version: '1.0.0' });
     expect(resolveWorkflowRef(null)).toEqual({ id: DEFAULT_WORKFLOW_ID, version: '1.0.0' });
     expect(resolveWorkflowRef('')).toEqual({ id: DEFAULT_WORKFLOW_ID, version: '1.0.0' });
+  });
+
+  test('CODING_WORKFLOW_ID resolves to the disciplined coding workflow', () => {
+    // The channel processors pin this at the call site for a repo-bound task
+    // (the "repo task ⇒ coding workflow" decision lives per-channel, not in the
+    // resolver default). Assert the constant points at a real, repo-bound,
+    // non-read-only workflow so a descriptor rename can't silently mispoint it.
+    const resolved = resolveWorkflowRef(CODING_WORKFLOW_ID);
+    expect(resolved).toEqual({ id: 'coding/new-task-v1', version: '1.0.0' });
   });
 
   test('returns null for an unknown but well-formed ref', () => {
@@ -140,6 +150,30 @@ describe('CDK descriptors stay in sync with agent/workflows/**', () => {
     return out;
   })();
 
+  // The reverse direction. The check above walks YAML → descriptor, so a
+  // descriptor with no workflow file is invisible to it. That orphan is worse
+  // than a missing descriptor: DESCRIPTORS is the live admission table, so a
+  // submitted ref resolves, the caller gets a 201, and the agent then dies when
+  // load_workflow can't find the file — an accepted task that cannot run.
+  test('every CDK descriptor has a shipped workflow file (no orphan admissions)', () => {
+    const shippedIds = new Set(yamlFiles.map((file) => {
+      const doc = yaml.load(fs.readFileSync(file, 'utf8')) as Record<string, unknown>;
+      return doc.id as string;
+    }));
+    // DESCRIPTORS is intentionally not exported (it is internal to the resolver),
+    // so read the ids off the source the same way this file already cross-checks
+    // the agent's own constants.
+    const workflowsTs = fs.readFileSync(
+      path.resolve(__dirname, '../../../src/handlers/shared/workflows.ts'), 'utf8',
+    );
+    const table = workflowsTs.slice(workflowsTs.indexOf('const DESCRIPTORS'));
+    const declaredIds = [...table.matchAll(/^\s{4}id: '([^']+)',$/gm)].map((m) => m[1]);
+    expect(declaredIds.length).toBeGreaterThan(0);
+
+    const orphans = declaredIds.filter((id) => !shippedIds.has(id));
+    expect(orphans).toEqual([]);
+  });
+
   test('every shipped workflow file has a matching CDK descriptor', () => {
     expect(yamlFiles.length).toBeGreaterThan(0);
     for (const file of yamlFiles) {
@@ -194,7 +228,9 @@ describe('CDK descriptors stay in sync with agent/workflows/**', () => {
     const configPy = fs.readFileSync(
       path.resolve(__dirname, '../../../../agent/src/config.py'), 'utf8',
     );
-    const match = configPy.match(/_KNOWN_WRITEABLE_WORKFLOW_IDS\s*=\s*frozenset\(\(([^)]*)\)\)/s);
+    // Tolerate ruff's formatting of the frozenset: it may render single-line
+    // ``frozenset(("a", "b"))`` or multi-line with whitespace between the parens.
+    const match = configPy.match(/_KNOWN_WRITEABLE_WORKFLOW_IDS\s*=\s*frozenset\(\s*\(([^)]*)\)\s*\)/s);
     expect(match).not.toBeNull();
     const agentWriteable = new Set(
       [...match![1].matchAll(/"([^"]+)"/g)].map(m => m[1]),
@@ -267,5 +303,21 @@ describe('disallowedWorkflowModel (WORKFLOWS.md rule 13)', () => {
   test('the allow-list covers both bare and us-prefixed inference-profile ids', () => {
     expect(WORKFLOW_MODEL_ALLOWLIST).toContain('anthropic.claude-sonnet-4-6');
     expect(WORKFLOW_MODEL_ALLOWLIST).toContain('us.anthropic.claude-sonnet-4-6');
+  });
+
+  test('every bare allow-listed id is paired with its us- inference-profile form', () => {
+    // An id admitted in only one of the two forms is a latent rejection: the
+    // workflow YAML may legitimately pin either, and admission compares the
+    // literal string. Pairing them is the invariant, so assert it for every
+    // entry rather than spot-checking one model.
+    const bare = WORKFLOW_MODEL_ALLOWLIST.filter(id => !id.startsWith('us.'));
+    expect(bare.length).toBeGreaterThan(0);
+    const missing = bare.filter(id => !WORKFLOW_MODEL_ALLOWLIST.includes(`us.${id}`));
+    expect(missing).toEqual([]);
+    // ...and no us- entry is orphaned (its bare form must be admitted too).
+    const orphaned = WORKFLOW_MODEL_ALLOWLIST
+      .filter(id => id.startsWith('us.'))
+      .filter(id => !WORKFLOW_MODEL_ALLOWLIST.includes(id.slice('us.'.length)));
+    expect(orphaned).toEqual([]);
   });
 });

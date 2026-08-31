@@ -79,6 +79,7 @@ export function observabilityPolicy(): iam.PolicyDocument {
           'cloudwatch:TagResource',
           'cloudwatch:UntagResource',
           'logs:CreateDelivery',
+          'logs:UpdateDeliveryConfiguration',
           'logs:DescribeDeliveries',
           'logs:GetDelivery',
           'logs:GetDeliveryDestination',
@@ -151,6 +152,52 @@ export function observabilityPolicy(): iam.PolicyDocument {
           'kms:GenerateDataKey',
         ],
         resources: ['*'],
+      }),
+
+      new iam.PolicyStatement({
+        // Create/read/tag for customer-managed keys the stack provisions
+        // (e.g. the OperationalAlerts SNS topic key, issue #629), distinct
+        // from the CDK bootstrap asset key above. kms:CreateKey cannot be
+        // resource-scoped (the key ARN does not exist yet) and CMK ARNs
+        // are UUIDs, so `*` is unavoidable here. This statement holds only
+        // create + read + tag actions — none can escalate privilege on an
+        // existing key. kms:TagResource must stay unconditioned because it
+        // applies the very `ABCA` tag that scopes the mutation statement
+        // below (a tag condition would deny the call that sets the tag).
+        sid: 'KMSCustomerManagedKeys',
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'kms:CreateKey',
+          'kms:GetKeyPolicy',
+          'kms:GetKeyRotationStatus',
+          'kms:TagResource',
+          'kms:ListResourceTags',
+        ],
+        resources: ['*'],
+      }),
+
+      new iam.PolicyStatement({
+        // Policy-mutation and deletion actions that COULD take over or
+        // destroy an unrelated account CMK if granted on `*`. CMK ARNs are
+        // UUIDs (still unscopable), so instead we gate them on the `ABCA`
+        // resource tag that the OperationalAlerts construct stamps on its
+        // key at creation (CloudFormation tags atomically in the CreateKey
+        // call, so an existing key always carries the tag by the time any
+        // of these run). This bounds the blast radius to keys this
+        // solution owns. Issue #629 review — MEDIUM 2.
+        sid: 'KMSCustomerManagedKeysLifecycle',
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'kms:PutKeyPolicy',
+          'kms:ScheduleKeyDeletion',
+          'kms:EnableKeyRotation',
+          'kms:DisableKeyRotation',
+          'kms:UntagResource',
+        ],
+        resources: ['*'],
+        conditions: {
+          StringEquals: { 'aws:ResourceTag/ABCA': 'operational-alerts' },
+        },
       }),
 
       new iam.PolicyStatement({

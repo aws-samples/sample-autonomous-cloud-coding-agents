@@ -8,7 +8,7 @@
   "scripts": {
     "compile": "tsc --build tsconfig.json",
     "watch": "tsc --build -w tsconfig.json",
-    "test": "jest",
+    "test": "jest --maxWorkers=${JEST_MAX_WORKERS:-25%}",
     "eslint": "eslint --fix src test",
     "synth": "npx cdk synth",
     "synth:quiet": "npx cdk synth -q"
@@ -16,13 +16,17 @@
   "dependencies": {
     "@aws-cdk/aws-bedrock-alpha": "2.260.0-alpha.0",
     "@aws-crypto/sha256-js": "^5.2.0",
+    "@aws-sdk/client-agent-registry-control": "^3.1116.0",
     "@aws-sdk/client-bedrock-agentcore": "^3.1078.0",
     "@aws-sdk/client-bedrock-runtime": "^3.1078.0",
     "@aws-sdk/client-dynamodb": "^3.1078.0",
+    "@aws-sdk/client-ec2": "^3.1078.0",
     "@aws-sdk/client-ecs": "^3.1078.0",
     "@aws-sdk/client-lambda": "^3.1078.0",
+    "@aws-sdk/client-lambda-microvms": "^3.1098.0",
     "@aws-sdk/client-s3": "^3.1078.0",
     "@aws-sdk/client-secrets-manager": "^3.1078.0",
+    "@aws-sdk/client-sts": "^3.1078.0",
     "@aws-sdk/credential-provider-node": "^3.972.61",
     "@aws-sdk/lib-dynamodb": "^3.1078.0",
     "@aws-sdk/s3-presigned-post": "^3.1078.0",
@@ -32,10 +36,11 @@
     "@smithy/protocol-http": "^5.5.5",
     "@smithy/signature-v4": "^5.6.1",
     "aws-cdk-lib": "^2.260.0",
+    "aws-jwt-verify": "^5.2.1",
     "cdk-nag": "^2.38.2",
     "constructs": "^10.6.0",
     "js-yaml": "^4.1.1",
-    "pdf-parse": "^2.4.5",
+    "pdf-parse": "2.4.5",
     "ulid": "^3.0.2",
     "ws": "^8.21.0"
   },
@@ -48,7 +53,6 @@
     "@types/jest": "^30.0.0",
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^26",
-    "@types/pdf-parse": "^1.1.5",
     "@types/ws": "^8.18.1",
     "@typescript-eslint/eslint-plugin": "^8",
     "@typescript-eslint/parser": "^8",
@@ -77,6 +81,8 @@
       "<rootDir>/@(src|test)/**/*(*.)@(spec|test).ts?(x)",
       "<rootDir>/@(src|test)/**/__tests__/**/*.ts?(x)"
     ],
+    "maxWorkers": "25%",
+    "workerIdleMemoryLimit": "1536MB",
     "clearMocks": true,
     "collectCoverage": true,
     "coverageReporters": [

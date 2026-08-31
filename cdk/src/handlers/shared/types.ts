@@ -47,6 +47,88 @@ export type ResolvedWorkflow = {
   readonly version: string;
 };
 
+/**
+ * A resolved registry-asset pin stamped on the TaskRecord for audit (#246):
+ * ``{kind, id, version}`` where ``id`` is ``namespace/name``. The full runtime
+ * payload is NOT persisted here — it rides in the agent invocation payload; this
+ * triple is the immutable record of *what* the task loaded.
+ */
+export type ResolvedAssetTriple = {
+  readonly kind: string;
+  readonly id: string;
+  readonly version: string;
+};
+
+// --- Agent asset registry (#246) API wire types ------------------------------
+// snake_case wire shapes shared with the CLI. The substrate-neutral *domain*
+// types (RegistryRecord, ResolvedAsset, the RegistryClient port) live in
+// ``handlers/shared/registry/`` and are intentionally NOT part of the CLI
+// types-sync contract — only these request/response envelopes are.
+
+/** `POST /registry/records` request body. */
+export type RegistryPublishRequest = {
+  readonly kind: string;
+  readonly namespace: string;
+  readonly name: string;
+  /** semver string, immutable once written. */
+  readonly asset_version: string;
+  /** discovery descriptor body (server.json / SKILL.md / arbitrary JSON). */
+  readonly discovery: Record<string, unknown>;
+  /** ABCA runtime payload (connection config / cedar text / prompt fragment). */
+  readonly runtime: Record<string, unknown>;
+  /** force CUSTOM (verbatim) storage instead of a native descriptor. */
+  readonly custom?: boolean;
+  /** dev convenience: drive create→submit→approve so the record resolves. */
+  readonly auto_approve?: boolean;
+};
+
+/** One version row in a `show` response. */
+export type RegistryVersionSummary = {
+  readonly version: string;
+  readonly status: string;
+  readonly created_at: string | null;
+  readonly publisher: string | null;
+};
+
+/** `GET /registry/records/{kind}/{namespace}/{name}` response — one asset's
+ *  versions. Named (rather than inlined on the handler + client) so it rides the
+ *  CDK↔CLI types-sync guard like the other registry envelopes. */
+export type RegistryShowResponse = {
+  readonly kind: string;
+  readonly namespace: string;
+  readonly name: string;
+  readonly versions: readonly RegistryVersionSummary[];
+};
+
+/** A record envelope returned by publish / show. */
+export type RegistryRecordResponse = {
+  readonly kind: string;
+  readonly namespace: string;
+  readonly name: string;
+  readonly version: string;
+  readonly status: string;
+  readonly storage_mode: string;
+};
+
+/** `GET /registry/resolve?ref=…` response. */
+export type RegistryResolveResponse = {
+  readonly kind: string;
+  readonly namespace: string;
+  readonly name: string;
+  readonly version: string;
+  readonly runtime: Record<string, unknown>;
+  readonly warnings: readonly string[];
+};
+
+/** One asset row in a `list` response. */
+export type RegistryListEntry = {
+  readonly kind: string;
+  readonly namespace: string;
+  readonly name: string;
+  readonly latest_version: string | null;
+  readonly status: string;
+};
+
 /** Shared across all attachment interfaces. Add new types here (e.g., 'audio'). */
 export type AttachmentType = 'image' | 'file' | 'url';
 
@@ -85,6 +167,9 @@ export interface TaskRecord {
   /** The pinned ``{id, version}`` this task runs. Resolved at the create-task
    *  boundary; optional only on records that predate the cutover. */
   readonly resolved_workflow?: ResolvedWorkflow;
+  /** Registry assets (#246) resolved for this task, stamped by the orchestrator
+   *  at task start for audit. Absent when the blueprint pins no assets. */
+  readonly resolved_assets?: ResolvedAssetTriple[];
   readonly pr_number?: number;
   readonly task_description?: string;
   readonly branch_name: string;
@@ -95,10 +180,40 @@ export interface TaskRecord {
   readonly agent_heartbeat_at?: string;
   readonly execution_id?: string;
   readonly pr_url?: string;
+  /**
+   * Public CloudFront URL of the deploy-preview screenshot captured for this
+   * task's PR (#247). Persisted best-effort by the screenshot pipeline
+   * (github-webhook-processor) keyed off the taskId in the deploy branch, so
+   * the orchestration reconciler can embed the INTEGRATION node's combined
+   * preview in the parent epic panel. Absent until a preview deploys (and for
+   * tasks with no UI to screenshot).
+   */
+  readonly screenshot_url?: string;
+  /**
+   * Live deploy-preview URL the {@link screenshot_url} image was captured from
+   * (e.g. the Vercel/Netlify preview deploy). Persisted alongside
+   * ``screenshot_url`` so the orchestration reconciler can make the INTEGRATION
+   * node's combined preview in the parent epic panel a clickable deep-link to
+   * the running combined site, not just a static image (#247 UX.17). Absent
+   * when no preview deployed.
+   */
+  readonly screenshot_preview_url?: string;
   readonly error_message?: string;
   readonly idempotency_key?: string;
   readonly channel_source: ChannelSource;
   readonly channel_metadata?: Record<string, string>;
+  /**
+   * Linear issue UUID, hoisted to the top level from
+   * ``channel_metadata.linear_issue_id`` at task-create time (#247 UX.3).
+   * Top-level because a DynamoDB GSI (``LinearIssueIndex``) cannot key off a
+   * nested map field — the standalone ``@bgagent`` comment trigger queries
+   * this index to resolve a plain issue back to its newest ABCA task + PR.
+   * Present only for Linear-origin tasks; absent for GitHub/Slack/API tasks
+   * (which keeps the GSI sparse).
+   */
+  readonly linear_issue_id?: string;
+  /** Sparse JiraIssueIndex key (`{cloudId}#{issueKey}`); internal only. */
+  readonly jira_issue_identity?: string;
   readonly status_created_at: string;
   readonly created_at: string;
   readonly updated_at: string;
@@ -107,6 +222,21 @@ export interface TaskRecord {
   readonly cost_usd?: number;
   readonly duration_s?: number;
   readonly build_passed?: boolean;
+  /**
+   * A6/#299: whether a PR-iteration advanced the branch HEAD (a real commit) vs.
+   * ran with no change (a question-only ``@bgagent`` comment). Absent for
+   * pre-fix tasks / non-iterations → the settle reply defaults to "✅ Updated".
+   */
+  readonly code_changed?: boolean;
+  /** A6/#299: the agent's answer, surfaced on a no-change iteration reply. */
+  readonly answer_text?: string;
+  /**
+   * The branch HEAD sha this iteration pushed. The screenshot webhook matches a
+   * deploy's commit sha → the iteration task that pushed it, so the preview
+   * thumbnail lands on the right reply when iterations overlap on one PR. Absent
+   * on pre-fix / non-PR tasks → the webhook falls back to the newest reply.
+   */
+  readonly head_sha?: string;
   /** Whether the post-run lint gate passed (#515). Written with `build_passed`
    *  at terminal state; absent on tasks that predate the field. */
   readonly lint_passed?: boolean;
@@ -175,6 +305,22 @@ export interface TaskRecord {
    * record). Absent until the first successful post.
    */
   readonly linear_final_comment_event_id?: string;
+  /**
+   * Event ID of the ``pr_created`` milestone whose Linear "PR opened"
+   * courtesy comment was successfully posted (fan-out plane, ADR-016 P4.5).
+   * Makes the first-run PR-opened comment post-once across partial-batch
+   * Lambda retries — the analogue of ``linear_final_comment_event_id`` for
+   * the mid-run PR notification. Absent until the first successful post.
+   */
+  readonly linear_pr_comment_event_id?: string;
+  /**
+   * Event ID of the terminal event whose ordinary Jira final-status comment
+   * was successfully posted (fan-out plane). This marker makes that create
+   * idempotent across partial-batch Lambda retries. Comment-triggered
+   * iterations edit their stored status comment instead and do not use this
+   * marker. Absent until the first successful ordinary-task post.
+   */
+  readonly jira_final_comment_event_id?: string;
   readonly attachments?: AttachmentRecord[];
   /**
    * Cedar HITL: per-task default approval timeout (design §10.2).
@@ -215,6 +361,46 @@ export interface TaskRecord {
    * atomically on resume (§10.2, §9).
    */
   readonly awaiting_approval_request_id?: string;
+  /**
+   * Admission queue (#441): ISO timestamp of the task's FIRST entry
+   * into QUEUED (set once; a re-queue after a lost admission race does
+   * not overwrite it). Used for observability — FIFO order itself is
+   * keyed on ``created_at``, which never changes.
+   */
+  readonly queued_at?: string;
+  /**
+   * Admission queue (#441): number of admission attempts made by the
+   * queue pickup Lambda. Incremented on each pickup attempt; used to
+   * spot tasks that repeatedly lose the admission race.
+   */
+  readonly admission_attempts?: number;
+  /**
+   * Linear parent/sub-issue orchestration (issue #247, Mode A).
+   * ``orchestration_id`` PK of the row in ``OrchestrationTable`` whose
+   * DAG this task is a child of. Absent on ordinary (non-orchestrated)
+   * tasks. PR A1 introduces the field; graph discovery (A2) and the
+   * reconciler (A3) populate and read it. Until then it is always
+   * ``undefined`` at runtime.
+   */
+  readonly orchestration_id?: string;
+  /**
+   * Linear orchestration (#247): the ``task_id`` of the parent task
+   * for attribution and rollup, when a parent task exists. Absent on
+   * non-orchestrated tasks and on root children whose parent is the
+   * Linear issue rather than an ABCA task. Introduced in PR A1;
+   * unused at runtime until A2/A3.
+   */
+  readonly parent_task_id?: string;
+  /**
+   * Linear orchestration (#247): sibling ``sub_issue_id``s this child
+   * is blocked by — the predecessors that must reach terminal-success
+   * (``COMPLETED`` with ``build_passed !== false``) before the
+   * reconciler releases this child. Empty/absent for root children.
+   * Authoritative gating state lives on the ``OrchestrationTable`` row;
+   * this is the denormalized copy threaded onto the task record.
+   * Introduced in PR A1; unused at runtime until A3.
+   */
+  readonly depends_on?: readonly string[];
 }
 
 /** Per-channel override for one notification channel. See
@@ -239,6 +425,7 @@ export interface TaskNotificationsConfig {
   readonly email?: ChannelConfig;
   readonly github?: ChannelConfig;
   readonly linear?: ChannelConfig;
+  readonly jira?: ChannelConfig;
 }
 
 /**
@@ -252,6 +439,8 @@ export interface TaskDetail {
   readonly repo: string | null;
   readonly issue_number: number | null;
   readonly resolved_workflow: ResolvedWorkflow | null;
+  /** Registry assets resolved for this task (#246); null when none pinned. */
+  readonly resolved_assets: ResolvedAssetTriple[] | null;
   readonly pr_number: number | null;
   readonly task_description: string | null;
   readonly branch_name: string;
@@ -269,6 +458,22 @@ export interface TaskDetail {
   readonly updated_at: string;
   readonly started_at: string | null;
   readonly completed_at: string | null;
+  /**
+   * ISO timestamp of the agent's last heartbeat, written by the in-guest pipeline
+   * every 45 s on every compute backend (``agent/src/server.py``
+   * ``_heartbeat_worker``). ``null`` before the first beat, on tasks that never
+   * ran, and on records predating the field.
+   *
+   * Surfaced (ADR-021 P2r2-F11) because it was the platform's only in-guest
+   * liveness signal and the API hid it: the orchestrator reads it for
+   * hang detection (``orchestrator.ts`` ``heartbeatLivenessApplies``) but
+   * ``toTaskDetail`` never mapped it, so ``bgagent status`` reported ``None``
+   * while DynamoDB held a 6-second-old value. That gap produced a WRONG
+   * live-verification conclusion ("heartbeats not observed", attributed to a
+   * different defect entirely), which is the cost of an internal signal no
+   * operator can see. Keep in sync with ``cli/src/types.ts::TaskDetail``.
+   */
+  readonly agent_heartbeat_at: string | null;
   readonly duration_s: number | null;
   readonly cost_usd: number | null;
   readonly build_passed: boolean | null;
@@ -314,6 +519,18 @@ export interface TaskDetail {
   /** Cedar HITL: when ``status = AWAITING_APPROVAL``, the
    *  ``request_id`` of the pending approval row. Null otherwise. */
   readonly awaiting_approval_request_id: string | null;
+  /** Admission queue (#441): ISO timestamp the task first entered
+   *  QUEUED; null for tasks that were admitted directly. */
+  readonly queued_at: string | null;
+  /** Admission queue (#441): 1-based FIFO position among the caller's
+   *  QUEUED tasks when ``status = QUEUED``. Computed at read time by
+   *  the get-task handler (never persisted — it changes as the queue
+   *  drains); null otherwise or when the handler could not compute it. */
+  readonly queue_position: number | null;
+  /** Admission queue (#441): rough ETA (seconds) until this task is
+   *  picked up, derived from queue_position × the recent average task
+   *  duration heuristic. Null when queue_position is null. */
+  readonly estimated_wait_s: number | null;
 }
 
 /**
@@ -326,12 +543,29 @@ export interface TaskSummary {
   readonly repo: string | null;
   readonly issue_number: number | null;
   readonly resolved_workflow: ResolvedWorkflow | null;
+  /** Registry assets resolved for this task (#246); null when none pinned. */
+  readonly resolved_assets: ResolvedAssetTriple[] | null;
   readonly pr_number: number | null;
   readonly task_description: string | null;
   readonly branch_name: string;
   readonly pr_url: string | null;
   readonly created_at: string;
   readonly updated_at: string;
+  /**
+   * Last in-guest liveness beat (ISO-8601), or ``null`` when the agent has not
+   * beaten yet, on a substrate whose agent never beats, or on records predating
+   * the field.
+   *
+   * On the SUMMARY as well as the detail (ADR-021 P2r2-F11 follow-up) because
+   * liveness is a list-level question: "is anything still alive?" is asked across
+   * tasks, and answering it one `bgagent status` at a time is how a hung task
+   * goes unnoticed. The field's history is the argument — while `toTaskDetail`
+   * omitted it, `bgagent status` reported `None` against a 6-second-old DynamoDB
+   * value, and that produced a WRONG live-verification conclusion attributed to a
+   * different defect entirely. Keep in sync with the sibling declaration in the
+   * other package's `types.ts`.
+   */
+  readonly agent_heartbeat_at: string | null;
 }
 
 /**
@@ -690,9 +924,15 @@ export interface AgentAttachmentPayload {
  * the helper when adding new numeric fields.
  *
  * @param record - the DynamoDB task record.
+ * @param queueInfo - read-time queue position/ETA for QUEUED tasks (#441).
+ *   Computed by the caller (get-task) because position changes as the
+ *   queue drains and must never be persisted; omitted everywhere else.
  * @returns the API-facing task detail.
  */
-export function toTaskDetail(record: TaskRecord): TaskDetail {
+export function toTaskDetail(
+  record: TaskRecord,
+  queueInfo?: { readonly queue_position: number; readonly estimated_wait_s: number | null },
+): TaskDetail {
   const ctx = { task_id: record.task_id };
   return {
     task_id: record.task_id,
@@ -700,6 +940,7 @@ export function toTaskDetail(record: TaskRecord): TaskDetail {
     repo: record.repo ?? null,
     issue_number: record.issue_number ?? null,
     resolved_workflow: record.resolved_workflow ?? null,
+    resolved_assets: record.resolved_assets ?? null,
     pr_number: record.pr_number ?? null,
     task_description: record.task_description ?? null,
     branch_name: record.branch_name,
@@ -712,6 +953,9 @@ export function toTaskDetail(record: TaskRecord): TaskDetail {
     updated_at: record.updated_at,
     started_at: record.started_at ?? null,
     completed_at: record.completed_at ?? null,
+    // ADR-021 P2r2-F11: written by every backend, consumed by the orchestrator for
+    // hang detection, and — until this line — invisible to every API consumer.
+    agent_heartbeat_at: record.agent_heartbeat_at ?? null,
     duration_s: coerceNumericOrNull(record.duration_s, { ...ctx, field: 'duration_s' }, logger),
     cost_usd: coerceNumericOrNull(record.cost_usd, { ...ctx, field: 'cost_usd' }, logger),
     build_passed: record.build_passed ?? null,
@@ -746,6 +990,9 @@ export function toTaskDetail(record: TaskRecord): TaskDetail {
       logger,
     ),
     awaiting_approval_request_id: record.awaiting_approval_request_id ?? null,
+    queued_at: record.queued_at ?? null,
+    queue_position: queueInfo?.queue_position ?? null,
+    estimated_wait_s: queueInfo?.estimated_wait_s ?? null,
   };
 }
 
@@ -869,6 +1116,95 @@ export function toWebhookDetail(record: WebhookRecord): WebhookDetail {
 }
 
 /**
+ * Scopes a platform API key may hold. Phase 1 ships `webhooks:manage`;
+ * the remaining values are reserved for Phase 2 (read-only task APIs) so keys
+ * minted now can be validated against a stable vocabulary.
+ */
+export type ApiKeyScope = 'webhooks:manage' | 'webhooks:invoke' | 'tasks:read' | 'tasks:cancel';
+
+/** Scopes recognized by the platform. Order is not significant. */
+export const API_KEY_SCOPES: readonly ApiKeyScope[] = [
+  'webhooks:manage',
+  'webhooks:invoke',
+  'tasks:read',
+  'tasks:cancel',
+];
+
+/**
+ * Full platform API key record as stored in DynamoDB.
+ *
+ * `key_hash` is the SHA-256 hex digest of the secret portion of the presented
+ * key. The raw secret is never stored — it is returned once at creation.
+ */
+export interface ApiKeyRecord {
+  readonly key_id: string;
+  readonly user_id: string;
+  readonly name: string;
+  readonly key_hash: string;
+  readonly scopes: readonly ApiKeyScope[];
+  readonly status: 'active' | 'revoked';
+  readonly created_at: string;
+  readonly updated_at: string;
+  readonly expires_at?: string;
+  readonly revoked_at?: string;
+  readonly ttl?: number;
+}
+
+/**
+ * Platform API key detail for API responses. Excludes `key_hash` and `user_id`.
+ */
+export interface ApiKeyDetail {
+  readonly key_id: string;
+  readonly name: string;
+  readonly scopes: readonly ApiKeyScope[];
+  readonly status: 'active' | 'revoked';
+  readonly created_at: string;
+  readonly updated_at: string;
+  readonly expires_at: string | null;
+  readonly revoked_at: string | null;
+}
+
+/**
+ * Create API key request body.
+ */
+export interface CreateApiKeyRequest {
+  readonly name: string;
+  readonly scopes?: readonly ApiKeyScope[];
+  readonly expires_at?: string;
+}
+
+/**
+ * Create API key response — includes the full key material (shown only once).
+ * The `key` is the value the caller sends in the `X-API-Key` header.
+ */
+export interface CreateApiKeyResponse {
+  readonly key_id: string;
+  readonly name: string;
+  readonly key: string;
+  readonly scopes: readonly ApiKeyScope[];
+  readonly expires_at: string | null;
+  readonly created_at: string;
+}
+
+/**
+ * Map a DynamoDB API key record to the API detail response shape.
+ * @param record - the DynamoDB API key record.
+ * @returns the API-facing API key detail (never includes the hash or owner).
+ */
+export function toApiKeyDetail(record: ApiKeyRecord): ApiKeyDetail {
+  return {
+    key_id: record.key_id,
+    name: record.name,
+    scopes: record.scopes,
+    status: record.status,
+    created_at: record.created_at,
+    updated_at: record.updated_at,
+    expires_at: record.expires_at ?? null,
+    revoked_at: record.revoked_at ?? null,
+  };
+}
+
+/**
  * Map a DynamoDB task record to the API summary response shape.
  * @param record - the DynamoDB task record.
  * @returns the API-facing task summary.
@@ -880,12 +1216,14 @@ export function toTaskSummary(record: TaskRecord): TaskSummary {
     repo: record.repo ?? null,
     issue_number: record.issue_number ?? null,
     resolved_workflow: record.resolved_workflow ?? null,
+    resolved_assets: record.resolved_assets ?? null,
     pr_number: record.pr_number ?? null,
     task_description: record.task_description ?? null,
     branch_name: record.branch_name,
     pr_url: record.pr_url ?? null,
     created_at: record.created_at,
     updated_at: record.updated_at,
+    agent_heartbeat_at: record.agent_heartbeat_at ?? null,
   };
 }
 

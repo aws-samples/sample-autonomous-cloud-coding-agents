@@ -58,6 +58,7 @@ process.env.LINEAR_WEBHOOK_PROCESSOR_FUNCTION_NAME = 'linear-processor';
 
 import { handler } from '../../src/handlers/linear-webhook';
 import { invalidateLinearSecretCache } from '../../src/handlers/shared/linear-verify';
+import { logger } from '../../src/handlers/shared/logger';
 
 const WEBHOOK_SECRET = 'test-linear-webhook-secret';
 
@@ -138,18 +139,74 @@ describe('linear-webhook handler', () => {
     expect(lambdaSend).not.toHaveBeenCalled();
   });
 
-  test('ignores non-Issue event types with 200', async () => {
+  test('ignores unrecognized event types with 200 (e.g. Reaction)', async () => {
     const body = JSON.stringify({
       action: 'create',
-      type: 'Comment',
+      type: 'Reaction',
       webhookTimestamp: Date.now(),
       webhookId: 'wh-2',
-      data: { id: 'cmt-1' },
+      data: { id: 'rx-1' },
     });
     const result = await handler(makeEvent(body, sign(body)));
     expect(result.statusCode).toBe(200);
     expect(ddbSend).not.toHaveBeenCalled();
     expect(lambdaSend).not.toHaveBeenCalled();
+  });
+
+  test('acks agent-mode webhooks (AppUserNotification) with 200 and never forwards them', async () => {
+    // Fingerprint of an OAuth app configured as a Linear AGENT (agent/app
+    // events on). ABCA is a plain-comment integration — it must ack (so Linear
+    // stops retrying) but never forward, and it logs a WARN so an operator can
+    // spot "this workspace's app is in agent mode" (which breaks comment-thread
+    // UX). Here we assert the ack + non-forward; the WARN copy is covered by
+    // the source comment / docs, not a log-spy assertion (matches this suite).
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    for (const type of ['AppUserNotification', 'AgentSession', 'AgentSessionEvent', 'AgentActivity']) {
+      warnSpy.mockClear();
+      const body = JSON.stringify({
+        action: 'create',
+        type,
+        webhookTimestamp: Date.now(),
+        webhookId: `wh-agent-${type}`,
+        organizationId: 'org-agentmode',
+        data: { id: `evt-${type}` },
+      });
+      const result = await handler(makeEvent(body, sign(body)));
+      expect(result.statusCode).toBe(200);
+      expect(lambdaSend).not.toHaveBeenCalled(); // never forwarded to the processor
+      expect(warnSpy).toHaveBeenCalledTimes(1); // surfaced loudly, not a silent INFO ignore
+    }
+    warnSpy.mockRestore();
+  });
+
+  test('forwards a Comment:create event to the processor (the @bgagent comment trigger)', async () => {
+    const body = JSON.stringify({
+      action: 'create',
+      type: 'Comment',
+      webhookTimestamp: Date.now(),
+      webhookId: 'wh-2c',
+      organizationId: 'org-1',
+      data: { id: 'cmt-1', body: '@bgagent fix it', issueId: 'iss-9' },
+    });
+    ddbSend.mockResolvedValueOnce({}); // dedup Put succeeds
+    lambdaSend.mockResolvedValueOnce({});
+    const result = await handler(makeEvent(body, sign(body)));
+    expect(result.statusCode).toBe(200);
+    expect(ddbSend).toHaveBeenCalled(); // deduped
+    expect(lambdaSend).toHaveBeenCalled(); // forwarded to processor
+  });
+
+  test('ignores a non-create Comment event (edited/removed) with 200', async () => {
+    const body = JSON.stringify({
+      action: 'update',
+      type: 'Comment',
+      webhookTimestamp: Date.now(),
+      webhookId: 'wh-2u',
+      data: { id: 'cmt-2', body: '@bgagent edited', issueId: 'iss-9' },
+    });
+    const result = await handler(makeEvent(body, sign(body)));
+    expect(result.statusCode).toBe(200);
+    expect(lambdaSend).not.toHaveBeenCalled(); // not forwarded
   });
 
   test('400s when data.id is missing on an Issue event', async () => {

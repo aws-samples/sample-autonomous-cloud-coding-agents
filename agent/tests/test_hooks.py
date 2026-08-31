@@ -8,12 +8,16 @@ import pytest
 cedarpy = pytest.importorskip("cedarpy")
 
 from hooks import (
+    _is_self_reclone,
     _reset_blocker_reason_for_tests,
+    _stuck_guard_between_turns_hook,
     build_hook_matchers,
     detect_egress_denial,
     last_blocker_reason,
+    last_stuck_summary,
     post_tool_use_hook,
     pre_tool_use_hook,
+    reset_stuck_summary,
 )
 from policy import PolicyEngine
 
@@ -189,6 +193,193 @@ class TestPreToolUseHook:
             "tool input is not an object"
             in (result["hookSpecificOutput"]["permissionDecisionReason"])
         )
+
+
+class TestSelfRecloneGuard:
+    """Lost-deliverable defense, layer 1: block a Bash re-clone of the task's
+    OWN repo (the agent
+    sometimes cloned into a sibling dir and stranded its work off the tracked
+    branch). Scoped to the task repo — dependency/fixture clones must pass."""
+
+    def test_matches_gh_repo_clone_bare_slug(self):
+        assert _is_self_reclone("cd /workspace && gh repo clone owner/repo", "owner/repo")
+
+    def test_matches_git_clone_https_url(self):
+        assert _is_self_reclone("git clone https://github.com/owner/repo.git /tmp/x", "owner/repo")
+
+    def test_matches_git_clone_scp_form(self):
+        assert _is_self_reclone("git clone git@github.com:owner/repo.git", "owner/repo")
+
+    def test_matches_git_dash_c_clone(self):
+        assert _is_self_reclone("git -C /workspace clone owner/repo", "owner/repo")
+
+    def test_case_insensitive_and_dotgit_config(self):
+        # config.repo_url may carry a trailing .git or mixed case.
+        assert _is_self_reclone("gh repo clone Owner/Repo", "owner/repo.git")
+
+    def test_ignores_clone_of_a_different_repo(self):
+        # A dependency/fixture clone is legitimate and must NOT be blocked.
+        assert not _is_self_reclone("git clone https://github.com/other/dep.git", "owner/repo")
+
+    def test_ignores_non_clone_git_command(self):
+        assert not _is_self_reclone("git status && git commit -am wip", "owner/repo")
+
+    def test_ignores_mention_of_repo_without_clone_verb(self):
+        # Naming the repo in a non-clone command (e.g. a gh pr create) is fine.
+        assert not _is_self_reclone("gh pr create --repo owner/repo --title x", "owner/repo")
+
+    def test_no_repo_url_is_noop(self):
+        assert not _is_self_reclone("gh repo clone owner/repo", "")
+
+    def test_ignores_clone_phrase_inside_pr_body(self):
+        # Observed false positive: the clone command quoted inside a --body value
+        # is PROSE, not an executed clone. Must NOT be blocked.
+        cmd = (
+            'gh pr create --repo owner/repo --base main --title "add marker" '
+            '--body "I deliberately did NOT run gh repo clone owner/repo; I worked in place."'
+        )
+        assert not _is_self_reclone(cmd, "owner/repo")
+
+    def test_ignores_clone_phrase_in_body_file_and_commit_message(self):
+        assert not _is_self_reclone(
+            "gh pr create --repo owner/repo --body-file /tmp/b.md", "owner/repo"
+        )
+        assert not _is_self_reclone(
+            'git commit -m "note: do not gh repo clone owner/repo again"', "owner/repo"
+        )
+
+    def test_still_blocks_clone_before_a_body_arg(self):
+        # A REAL clone chained before a body-carrying command must still be caught
+        # (the free-text truncation only drops what's AFTER the first body arg).
+        cmd = 'gh repo clone owner/repo && gh pr create --repo owner/repo --body "x"'
+        assert _is_self_reclone(cmd, "owner/repo")
+
+    def test_blocks_clone_using_the_branch_short_flag(self):
+        # ``-b`` is git clone's own ``--branch`` short form AND gh's ``--body``.
+        # The guard used to cut the command at the first free-text flag BEFORE
+        # looking for the clone verb, so this ordinary command slipped through
+        # entirely — reopening the stranded-work failure the guard exists to stop.
+        assert _is_self_reclone(
+            "git clone -b main https://github.com/owner/repo /w/repo", "owner/repo"
+        )
+        assert _is_self_reclone("gh repo clone -b main owner/repo", "owner/repo")
+        assert _is_self_reclone(
+            "git clone -b feature/x git@github.com:owner/repo.git /w/repo", "owner/repo"
+        )
+        assert _is_self_reclone(
+            "cd /tmp && git clone -b main --depth 1 https://github.com/owner/repo x",
+            "owner/repo",
+        )
+
+    def test_blocks_clone_chained_after_an_unrelated_message_flag(self):
+        # The ``-m`` belongs to the commit, not to the clone that follows it. A
+        # free-text argument must only swallow the rest of ITS OWN shell segment.
+        assert _is_self_reclone(
+            "git commit -m wip && gh repo clone owner/repo /w/repo", "owner/repo"
+        )
+
+    def test_still_ignores_prose_after_a_body_flag_in_the_same_segment(self):
+        # The counterpart: within one segment, a verb appearing after the body
+        # value opens is prose. These must stay allowed.
+        assert not _is_self_reclone(
+            'gh pr create --body "do not run gh repo clone owner/repo"', "owner/repo"
+        )
+        assert not _is_self_reclone(
+            "gh issue comment -m 'see gh repo clone owner/repo for context'", "owner/repo"
+        )
+
+    def test_blocks_a_clone_wrapped_across_lines_with_a_backslash(self):
+        """A trailing backslash continues the SAME command onto the next line.
+
+        Splitting on a bare newline separated the verb from the repo, so the slug
+        was never found in the verb's segment and a wrapped self re-clone walked
+        through — including the ``-b`` form this guard was hardened to catch."""
+        assert _is_self_reclone(
+            "git clone \\\n  https://github.com/owner/repo /w/repo", "owner/repo"
+        )
+        assert _is_self_reclone(
+            "git clone -b main \\\n  https://github.com/owner/repo /w/repo", "owner/repo"
+        )
+        assert _is_self_reclone(
+            "git clone --depth 1 \\\n  https://github.com/owner/repo x", "owner/repo"
+        )
+        # The continuation can split the VERB itself, not just its arguments —
+        # this is the case that needs the joining, since no amount of segment
+        # handling reunites ``git`` with ``clone`` across the break.
+        assert _is_self_reclone("git \\\n  clone https://github.com/owner/repo x", "owner/repo")
+
+    def test_ignores_a_clone_quoted_inside_a_MULTI_LINE_body(self):
+        """A multi-line --body/-m value is the normal way an agent writes a PR body.
+
+        Its quoted text routinely documents a clone command. Treating a bare
+        newline as a command separator put that line in its own segment with no
+        preceding free-text flag, so a legitimate ``gh pr create`` was denied."""
+        body = "## Setup\ngit clone https://github.com/owner/repo\ncd repo\nmise run setup"
+        assert not _is_self_reclone(
+            f'gh pr create --title "docs: onboarding" --body "{body}"',
+            "owner/repo",
+        )
+        assert not _is_self_reclone(
+            'git commit -m "steps:\n  git clone https://github.com/owner/repo"',
+            "owner/repo",
+        )
+
+    def test_requires_command_position_not_substring(self):
+        # The verb must be in command position (start / after a separator), not an
+        # arbitrary substring like a path or flag value.
+        assert _is_self_reclone("echo hi; gh repo clone owner/repo", "owner/repo")
+        assert not _is_self_reclone("ls /tmp/gh-repo-clone-notes/owner/repo", "owner/repo")
+
+    def test_hook_denies_self_reclone_with_redirect(self):
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+        hook_input = {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "cd /workspace && gh repo clone owner/repo"},
+            "tool_use_id": "test-reclone",
+            "session_id": "sess-1",
+            "transcript_path": "/tmp/t",
+            "cwd": "/workspace",
+        }
+        result = _run(
+            pre_tool_use_hook(hook_input, "test-reclone", {}, engine=engine, repo_url="owner/repo")
+        )
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        assert "already cloned" in reason.lower()
+        assert "work in place" in reason.lower()
+
+    def test_hook_allows_dependency_clone(self):
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+        hook_input = {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "git clone https://github.com/other/dep.git vendor/dep"},
+            "tool_use_id": "test-dep",
+            "session_id": "sess-1",
+            "transcript_path": "/tmp/t",
+            "cwd": "/workspace",
+        }
+        result = _run(
+            pre_tool_use_hook(hook_input, "test-dep", {}, engine=engine, repo_url="owner/repo")
+        )
+        # Not blocked by the reclone guard — falls through to Cedar (which permits).
+        assert result["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+    def test_hook_without_repo_url_does_not_block(self):
+        # Legacy call shape (no repo_url threaded) must not crash or over-block.
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+        hook_input = {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "gh repo clone owner/repo"},
+            "tool_use_id": "test-legacy",
+            "session_id": "sess-1",
+            "transcript_path": "/tmp/t",
+            "cwd": "/workspace",
+        }
+        result = _run(pre_tool_use_hook(hook_input, "test-legacy", {}, engine=engine))
+        assert result["hookSpecificOutput"]["permissionDecision"] == "allow"
 
 
 class TestTruncate:
@@ -1697,3 +1888,128 @@ class TestRemainingMaxlifetime:
     def test_unparseable_started_at_returns_none(self, monkeypatch):
         monkeypatch.setenv("TASK_STARTED_AT", "not-a-timestamp")
         assert hooks._remaining_maxlifetime_s() is None
+
+
+class TestStuckGuardHookIntegration:
+    """PostToolUse feeds the guard; the between-turns hook steers (advisory)."""
+
+    def _oom(self):
+        return "[//cdk:test] FAILED (exit 134)\nJavaScript heap out of memory"
+
+    def test_post_tool_use_records_failures_into_the_guard(self):
+        from stuck_guard import STEER_THRESHOLD, StuckGuard
+
+        guard = StuckGuard()
+        cmd = {"command": "mise //cdk:test"}
+        for _ in range(STEER_THRESHOLD):
+            hook_input = {
+                "hook_event_name": "PostToolUse",
+                "tool_name": "Bash",
+                "tool_input": cmd,
+                "tool_response": self._oom(),
+            }
+            _run(post_tool_use_hook(hook_input, "t", {}, stuck_guard=guard))
+        # the guard now has enough failures to steer
+        assert guard.evaluate().kind == "steer"
+
+    def test_between_turns_hook_latches_stuck_summary_from_the_guard(self):
+        # Pin the PRODUCTION write path for the _LAST_STUCK_SUMMARY latch
+        # (hooks.py:1464-1465). The enrichment tests monkeypatch the getter, so
+        # without this test deleting those two lines would leave the latch
+        # permanently None and every test would still pass. Drive the real hook
+        # with a failure-dominated guard and assert the module latch is populated.
+        from stuck_guard import WINDOW, StuckGuard
+
+        reset_stuck_summary()
+        assert last_stuck_summary() is None
+        guard = StuckGuard()
+        cmd = {"command": "mise //cdk:test"}
+        # recent_failure_summary needs a FULL window (>= WINDOW) of byte-identical
+        # failures (WINDOW_FAIL_THRESHOLD of them) — fill it past WINDOW.
+        for _ in range(WINDOW + 2):
+            guard.record_tool_result("Bash", cmd, self._oom())
+        # Precondition: the guard itself considers the window failure-dominated.
+        assert guard.recent_failure_summary() is not None
+
+        result = _stuck_guard_between_turns_hook({"stuck_guard": guard})
+        # advisory steer text returned…
+        assert isinstance(result, list)
+        # …and, crucially, the terminal-reason latch was written by the hook.
+        summary = last_stuck_summary()
+        assert summary is not None
+        assert "last tool calls repeated" in summary
+        reset_stuck_summary()
+
+    def test_between_turns_hook_clears_stuck_summary_when_not_failure_dominated(self):
+        # Symmetric guard: a recovered task (clean window) must CLEAR the latch,
+        # not leave a stale "stuck" summary that a later max_turns cap would echo.
+        # Pre-seed a stale latch via a failure-dominated guard.
+        from stuck_guard import WINDOW, StuckGuard
+
+        stuck = StuckGuard()
+        for _ in range(WINDOW + 2):
+            stuck.record_tool_result("Bash", {"command": "mise //cdk:test"}, self._oom())
+        _stuck_guard_between_turns_hook({"stuck_guard": stuck})
+        assert last_stuck_summary() is not None
+
+        # A fresh, healthy guard on the next turn clears it (recent_failure_summary None).
+        healthy = StuckGuard()
+        healthy.record_tool_result("Read", {"file": "a.py"}, "def hello(): return 1")
+        _stuck_guard_between_turns_hook({"stuck_guard": healthy})
+        assert last_stuck_summary() is None
+        reset_stuck_summary()
+
+    def test_post_tool_use_record_error_never_blocks_screening(self):
+        # A guard that raises on record must not break the PASS_THROUGH path.
+        from stuck_guard import StuckGuard
+
+        class _Boom(StuckGuard):
+            def record_tool_result(self, *a, **k):
+                raise RuntimeError("boom")
+
+        hook_input = {
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "echo hi"},
+            "tool_response": "hi",
+        }
+        result = _run(post_tool_use_hook(hook_input, "t", {}, stuck_guard=_Boom()))
+        assert result["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
+
+    def test_stop_hook_steers_not_bails(self):
+        # Advisory-only: a persistent identical-failure spin produces a STEER
+        # (a 'block' decision that injects the nudge as the next user message),
+        # NEVER a continue_=False kill. The max_turns cap is the real backstop.
+        from stuck_guard import STEER_THRESHOLD, StuckGuard
+
+        guard = StuckGuard()
+        cmd = {"command": "mise //cdk:test"}
+        for _ in range(STEER_THRESHOLD + 5):
+            guard.record_tool_result("Bash", cmd, self._oom())
+        result = _run(hooks.stop_hook({}, None, {}, task_id="t", stuck_guard=guard))
+        # a steer is a 'block' decision carrying the advisory text; never a kill
+        assert result.get("continue_") is not False
+        assert result.get("decision") == "block"
+        assert "STOP retrying" in (result.get("reason") or "")
+
+    def test_stop_hook_steers_when_guard_says_so(self):
+        from stuck_guard import STEER_THRESHOLD, StuckGuard
+
+        guard = StuckGuard()
+        cmd = {"command": "mise //cdk:test"}
+        for _ in range(STEER_THRESHOLD):
+            guard.record_tool_result("Bash", cmd, self._oom())
+        result = _run(hooks.stop_hook({}, None, {}, task_id="t", stuck_guard=guard))
+        # a steer is injected as a block decision (SDK continues with the text)
+        assert result.get("decision") == "block"
+        assert "STOP retrying" in result.get("reason", "")
+
+    def test_stop_hook_no_guard_is_a_noop(self):
+        # Back-compat: absent a guard, the stuck path never fires.
+        result = _run(hooks.stop_hook({}, None, {}, task_id="t"))
+        assert result == {}
+
+    def test_build_hook_matchers_creates_a_guard_without_crashing(self):
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+        matchers = build_hook_matchers(engine, task_id="t")
+        assert "PostToolUse" in matchers and "Stop" in matchers

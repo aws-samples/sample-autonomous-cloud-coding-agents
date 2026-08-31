@@ -20,11 +20,11 @@ description = "Test fixture signing secret in Slack verification unit test (not 
 stopwords = ["test-signing-secret-abc123"]
 
 [[allowlists]]
-# Test idempotency-key fixture in orchestration-release.test.ts (not a real
-# credential). Suppressed by stopword rather than a .gitleaksignore commit-SHA
-# fingerprint: the finding lives in history and SHA fingerprints break whenever
-# history is rewritten (rebases / dep-bump merges), which is exactly how #530's
-# baseline regressed. A stopword is SHA-independent. See #537 (regression of #530).
+# Test idempotency-key fixture in orchestration tests (not a real credential).
+# Suppressed by stopword rather than a .gitleaksignore commit-SHA fingerprint:
+# the finding lives in history and SHA fingerprints break whenever history is
+# rewritten (rebases / dep-bump merges), which is exactly how #530's baseline
+# regressed. A stopword is SHA-independent. See #537 (regression of #530).
 description = "Test idempotency-key fixture 'orch_abc_SUB-1' (not a real credential)."
 stopwords = ["orch_abc_SUB-1"]
 
@@ -68,6 +68,33 @@ paths = [
 ]
 # Per-line opt-out: append `# gitleaks:allow account-id` on a legitimate line.
 stopwords = ["gitleaks:allow account-id"]
+
+[[rules.allowlists]]
+# Retired fixture value from PR #733 (#645), kept suppressed SHA-INDEPENDENTLY.
+#
+# `agent/tests/test_server.py` briefly used `999988887777` as the "foreign
+# account" in the ARN-pinning tests. HEAD uses the AWS-published placeholder
+# `111122223333` instead, but the original value survives in the already-pushed
+# `baa365fc` blob, and the per-PR gate scans a COMMIT RANGE
+# (`security-pr.yml` -> `security:secrets:range`, `PR_BASE_SHA..PR_HEAD_SHA`), so
+# that blob is in scope until the branch merges.
+#
+# A regex here rather than only a `.gitleaksignore` fingerprint, for the reason
+# `.gitleaksignore` itself records against #537: a fingerprint is keyed on the
+# commit SHA, so a rebase or squash of this branch silently invalidates it and
+# reddens a required security gate. This block cannot rot that way.
+#
+# SCOPED TO THE ONE FILE on purpose. `999988887777` is NOT an AWS-published
+# placeholder (unlike the four in the block above), so allowlisting it repo-wide
+# would mean a future real account that happens to match goes unflagged forever.
+# Confined to this path, the exemption cannot outlive its cause.
+description = "Retired foreign-account test fixture from #645; superseded by 111122223333 at HEAD."
+regexes = [
+    '''999988887777''',
+]
+paths = [
+    '''(.*/)?agent/tests/test_server\.py$''',
+]
 
 [[rules.allowlists]]
 # False positives where a 12-digit run is NOT an AWS account ID:

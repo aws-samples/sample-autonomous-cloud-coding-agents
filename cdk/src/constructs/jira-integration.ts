@@ -18,36 +18,41 @@
  */
 
 import * as path from 'path';
-import { ArnFormat, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
+import { ArnFormat, Aspects, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import * as apigw from 'aws-cdk-lib/aws-apigateway';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import { Runtime, Architecture } from 'aws-cdk-lib/aws-lambda';
 import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
+import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 import { JiraProjectMappingTable } from './jira-project-mapping-table';
 import { JiraUserMappingTable } from './jira-user-mapping-table';
 import { JiraWorkspaceRegistryTable } from './jira-workspace-registry-table';
+import { ComponentUaAspect } from './solution-ua-aspect';
 
 /** Default task-record retention used for TTL computation (days). */
 const DEFAULT_TASK_RETENTION_DAYS = 90;
 
-/** Webhook-processor Lambda timeout (seconds). */
-const WEBHOOK_PROCESSOR_TIMEOUT_SECONDS = 30;
+/**
+ * Webhook-processor Lambda timeout (seconds). The processor is invoked
+ * asynchronously (not behind the API Gateway 30s deadline), so it can run
+ * longer than the receiver. #577 added serial authenticated download +
+ * Bedrock screening of up to 10 Jira attachments; the per-attachment fetch
+ * timeout alone (10s) can sum past 60s across a full batch, and a mid-loop
+ * kill would orphan objects and force an idempotent retry. 300s covers the
+ * worst-case serial batch with headroom. (A future optimization could
+ * parallelize the download/screen loop and lower this again.)
+ */
+const WEBHOOK_PROCESSOR_TIMEOUT_SECONDS = 300;
 
 /**
  * Marker key embedded in the auto-generated stack-wide webhook-secret
- * placeholder. The CLI (`bgagent jira setup`) recognizes a secret carrying
- * this key as "never configured" and seeds the operator's value over it.
- *
- * MUST stay in sync with `JIRA_WEBHOOK_SECRET_PLACEHOLDER_KEY` in
- * `cli/src/commands/jira.ts`. Unlike Linear (whose real secrets always start
- * with `lin_wh_`), Atlassian webhook signing secrets are operator-chosen bare
- * strings with no fixed shape, so the *placeholder* — not the real value — is
- * the thing we make recognizable. See #368.
+ * placeholder. `bgagent jira setup` replaces the complete placeholder with
+ * the sole active tenant's admin-console webhook secret.
  */
 const JIRA_WEBHOOK_SECRET_PLACEHOLDER_KEY = 'abca_jira_webhook_placeholder';
 
@@ -75,6 +80,18 @@ export interface JiraIntegrationProps {
   /** The DynamoDB task events table. */
   readonly taskEventsTable: dynamodb.ITable;
 
+  /** Shared orchestration DAG table. Omit to retain one-issue/one-task mode. */
+  readonly orchestrationTable?: dynamodb.ITable;
+
+  /**
+   * User concurrency counter table. When provided with ``orchestrationTable``,
+   * seed and retry releases are limited to the user's current free slots.
+   */
+  readonly userConcurrencyTable?: dynamodb.ITable;
+
+  /** Per-user concurrency cap shared with task admission. Default 10. */
+  readonly maxConcurrentTasksPerUser?: number;
+
   /** The DynamoDB repo config table (optional — for repo onboarding checks). */
   readonly repoTable?: dynamodb.ITable;
 
@@ -87,6 +104,14 @@ export interface JiraIntegrationProps {
   /** Bedrock Guardrail version for input screening. */
   readonly guardrailVersion?: string;
 
+  /**
+   * S3 bucket for task attachment storage. Required for the webhook processor
+   * to fetch, screen, and store Jira `media` file attachments at task-admission
+   * time (issue #577). When omitted, issues carrying supported file attachments
+   * are rejected with a Jira comment rather than silently dropping them.
+   */
+  readonly attachmentsBucket?: s3.IBucket;
+
   /** Task retention in days for TTL computation. */
   readonly taskRetentionDays?: number;
 
@@ -97,11 +122,10 @@ export interface JiraIntegrationProps {
 /**
  * CDK construct that adds Jira Cloud integration to the ABCA platform.
  *
- * Inbound-only adapter: Jira → webhook → task creation. Outbound progress
- * updates happen agent-side via the Jira REST v3 API (see
- * agent/src/jira_reactions.py; ADR-015 explains why outbound is REST and not
- * the Atlassian Remote MCP), so there is NO DynamoDB Streams consumer and NO
- * outbound-notify Lambda here. Mirrors the Linear adapter shape.
+ * This construct owns Jira → webhook → task creation. Outbound progress uses
+ * the Forge app actor (or the OAuth migration fallback) through
+ * agent/src/jira_reactions.py and the shared fan-out consumer; those writers
+ * are wired outside this inbound construct. See ADR-015.
  *
  * Creates:
  * - JiraProjectMappingTable (`{cloudId}#{projectKey}` → GitHub repo)
@@ -130,7 +154,7 @@ export class JiraIntegration extends Construct {
    */
   public readonly workspaceRegistryTable: dynamodb.Table;
 
-  /** Webhook dedup table — `{issueKey}#{webhookEvent}#{timestamp}` keys with 8h TTL. */
+  /** Webhook dedup table — issue timestamps or stable comment IDs, with an 8h TTL. */
   public readonly webhookDedupTable: dynamodb.Table;
 
   /** Jira webhook signing secret (placeholder — populated by `bgagent jira setup`). */
@@ -138,6 +162,13 @@ export class JiraIntegration extends Construct {
 
   constructor(scope: Construct, id: string, props: JiraIntegrationProps) {
     super(scope, id);
+
+    // Solution-attribution component label (#319): every Lambda in this Jira
+    // integration is part of the webhook ingest surface. One aspect labels
+    // them all (and any future function added here) without per-function env
+    // edits; the universal `app/` segment is set by the stack-level aspect.
+    // Matches slack/linear/github-screenshot integrations.
+    Aspects.of(this).add(new ComponentUaAspect('webhook'));
 
     const removalPolicy = props.removalPolicy ?? RemovalPolicy.DESTROY;
 
@@ -150,7 +181,8 @@ export class JiraIntegration extends Construct {
     this.workspaceRegistryTable = workspaceRegistry.table;
 
     // Dedup table: Jira webhook retries collapse to a single processor invoke
-    // within the 8h TTL window. Keyed on `{issueKey}#{webhookEvent}#{timestamp}`.
+    // within the 8h TTL window. Issue events use the event timestamp; comment
+    // events use the stable Jira comment ID.
     this.webhookDedupTable = new dynamodb.Table(this, 'WebhookDedupTable', {
       partitionKey: { name: 'dedup_key', type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
@@ -161,24 +193,18 @@ export class JiraIntegration extends Construct {
 
     // --- Webhook signing secret (placeholder, populated by `bgagent jira setup`) ---
     // Per-tenant OAuth tokens live in `bgagent-jira-oauth-<cloudId>` secrets
-    // created by the CLI at runtime — not here. This stack-wide secret is
-    // a back-compat fallback for single-tenant installs predating per-
-    // tenant signing.
+    // created by the CLI at runtime — not here. Jira admin-console webhooks
+    // omit cloudId, so a single-tenant install verifies them against this
+    // stack-wide copy of the tenant's signing secret.
     //
-    // The initial value is an explicit JSON placeholder carrying
-    // `JIRA_WEBHOOK_SECRET_PLACEHOLDER_KEY`. Without `generateSecretString`,
-    // CDK seeds a BARE random string — which the CLI's placeholder heuristic
-    // mistook for an already-configured secret, so `setup` never seeded the
-    // operator's value and every admin-UI webhook delivery (whose payload has
-    // no `cloudId`, forcing stack-wide verification) failed HMAC with 401,
-    // silently (#368). Making the placeholder explicit lets the CLI reliably
-    // tell "never configured" from an operator-set value.
+    // The generated JSON is a non-operational initial value. Setup
+    // unconditionally replaces the complete value before the webhook is enabled.
     this.webhookSecret = new secretsmanager.Secret(this, 'WebhookSecret', {
       description: 'Jira webhook signing secret — populate via `bgagent jira setup`',
       removalPolicy,
       generateSecretString: {
-        // Yields `{"abca_jira_webhook_placeholder":true,"value":"<random>"}`:
-        // a JSON object (starts with `{`) with an explicit marker key.
+        // Yields `{"abca_jira_webhook_placeholder":true,"value":"<random>"}`.
+        // No runtime code interprets the marker key.
         secretStringTemplate: JSON.stringify({ [JIRA_WEBHOOK_SECRET_PLACEHOLDER_KEY]: true }),
         generateStringKey: 'value',
       },
@@ -188,6 +214,15 @@ export class JiraIntegration extends Construct {
     const handlersDir = path.join(__dirname, '..', 'handlers');
     const commonBundling: lambda.BundlingOptions = {
       externalModules: ['@aws-sdk/*'],
+    };
+    // pdf-parse (v2, pdfjs-based) can't be esbuild-bundled — its pdfjs/native
+    // (@napi-rs/canvas) deps break at import (`DOMMatrix is not defined`,
+    // Ship it unbundled via `nodeModules` so it resolves natively at
+    // runtime. Mirrors TaskApi's attachment-screening bundling. Jira's #619
+    // attachment path screens PDFs, so its webhook processor needs the carve-out.
+    const attachmentScreeningBundling: lambda.BundlingOptions = {
+      ...commonBundling,
+      nodeModules: ['pdf-parse'],
     };
 
     // --- Task creation environment (matches LinearIntegration / SlackIntegration pattern) ---
@@ -205,6 +240,18 @@ export class JiraIntegration extends Construct {
     if (props.guardrailId && props.guardrailVersion) {
       createTaskEnv.GUARDRAIL_ID = props.guardrailId;
       createTaskEnv.GUARDRAIL_VERSION = props.guardrailVersion;
+    }
+    if (props.attachmentsBucket) {
+      createTaskEnv.ATTACHMENTS_BUCKET_NAME = props.attachmentsBucket.bucketName;
+    }
+    if (props.orchestrationTable) {
+      createTaskEnv.ORCHESTRATION_TABLE_NAME = props.orchestrationTable.tableName;
+    }
+    if (props.orchestrationTable && props.userConcurrencyTable) {
+      createTaskEnv.USER_CONCURRENCY_TABLE_NAME = props.userConcurrencyTable.tableName;
+      createTaskEnv.MAX_CONCURRENT_TASKS_PER_USER = String(
+        props.maxConcurrentTasksPerUser ?? 10,
+      );
     }
 
     // --- Cognito Authorizer (for /jira/link) ---
@@ -237,7 +284,8 @@ export class JiraIntegration extends Construct {
         JIRA_USER_MAPPING_TABLE_NAME: this.userMappingTable.tableName,
         JIRA_WORKSPACE_REGISTRY_TABLE_NAME: this.workspaceRegistryTable.tableName,
       },
-      bundling: commonBundling,
+      // Uses the PDF attachment-screening path (#619) — pdf-parse must stay unbundled.
+      bundling: attachmentScreeningBundling,
     });
     this.projectMappingTable.grantReadData(webhookProcessorFn);
     this.userMappingTable.grantReadData(webhookProcessorFn);
@@ -259,6 +307,12 @@ export class JiraIntegration extends Construct {
     }));
     props.taskTable.grantReadWriteData(webhookProcessorFn);
     props.taskEventsTable.grantReadWriteData(webhookProcessorFn);
+    if (props.orchestrationTable) {
+      props.orchestrationTable.grantReadWriteData(webhookProcessorFn);
+    }
+    if (props.orchestrationTable && props.userConcurrencyTable) {
+      props.userConcurrencyTable.grantReadData(webhookProcessorFn);
+    }
     if (props.repoTable) {
       props.repoTable.grantReadData(webhookProcessorFn);
     }
@@ -279,6 +333,13 @@ export class JiraIntegration extends Construct {
           }),
         ],
       }));
+    }
+    // The processor downloads Jira `media` attachments, screens them, and
+    // writes the cleaned bytes to the attachments bucket before creating the
+    // task (#577). ReadWrite mirrors the confirm-uploads path (Put + Get for
+    // multipart/versioned writes).
+    if (props.attachmentsBucket) {
+      props.attachmentsBucket.grantReadWrite(webhookProcessorFn);
     }
 
     // --- Webhook receiver (verifies HMAC, dedups, invokes processor) ---

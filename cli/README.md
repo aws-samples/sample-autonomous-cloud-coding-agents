@@ -107,6 +107,8 @@ bgagent list \
   --output <text|json>        Output format (default: text)
 ```
 
+The `HEARTBEAT` column is the age of the agent's last in-guest liveness beat, so `is anything still alive?` can be answered across tasks rather than one `bgagent status` at a time. The agent beats every 45 s on the `agentcore` and `lambda-microvm` backends, so anything much past that on a `RUNNING` task means the agent is hung. It shows `—` for terminal tasks (the last beat is noise next to a final status), and on `ecs`, where the agent runs the pipeline directly instead of serving HTTP and so beats only once at start.
+
 ### `bgagent status <task-id>`
 
 Get detailed status for a specific task.
@@ -302,6 +304,42 @@ With no flags, writes to the platform default `GitHubTokenSecretArn` stack outpu
 
 Configure the preview-deploy screenshot pipeline webhook. See [Deploy preview screenshots guide](../docs/guides/DEPLOY_PREVIEW_SCREENSHOTS_GUIDE.md).
 
+### `bgagent jira app-template` / `setup` / `update-webhook-secret` / `app-setup` / `map` / `invite-user` / `link`
+
+Manage the Jira Cloud integration. `setup` authorizes a tenant via OAuth (3LO) for inbound reads and human lookup. `update-webhook-secret` rotates the admin-console webhook secret in both required Secrets Manager locations without repeating OAuth. `app-setup` verifies and stores the signed Forge proxy used for outbound comments and transitions as the dedicated `bgagent` app actor. `map` routes a Jira project to a GitHub repo; the two-step `invite-user` → `link` handshake links a teammate's Jira identity to their platform user. See the [Jira setup guide](../docs/guides/JIRA_SETUP_GUIDE.md) for Forge deployment, secret handling, permissions, and the full walkthrough.
+
+```
+bgagent jira app-template
+
+bgagent jira setup \
+  --region <region> \
+  --stack-name <stack-name>
+
+bgagent jira update-webhook-secret <cloud-id> \
+  --region <region> \
+  --stack-name <stack-name>
+
+bgagent jira app-setup <cloud-id> \
+  --proxy-url https://<installation>.webtrigger.atlassian.app/public/<id> \
+  --region <region> \
+  --stack-name <stack-name>
+
+bgagent jira map <cloud-id> <PROJECT-KEY> \
+  --repo owner/repo \
+  --region <region> \
+  --stack-name <stack-name>
+
+bgagent jira invite-user <cloud-id> <account-id-or-email> \
+  --region <region>            AWS region (defaults to configured region) \
+  --stack-name <name>          CloudFormation stack name (default: backgroundagent-dev)
+
+bgagent jira link <code>
+```
+
+All Jira admin commands default to `backgroundagent-dev`; pass `--stack-name` for every custom stack. `app-setup` prompts for `BGAGENT_PROXY_SECRET` so the value stays out of shell history and refuses to save unless the Forge identity probe returns `accountType=app` from the expected Jira site.
+
+`invite-user` resolves the teammate's Jira identity through the tenant OAuth token, then writes a `pending#<code>` row (24h TTL) and prints the `bgagent jira link <code>` the teammate runs from their own machine. The teammate previews the Jira identity before confirming, so a wrong pick can be aborted rather than misattributed. If the identity is already linked, the command warns but still issues the code.
+
 ### `bgagent admin invite-user` / `list-users` / `delete-user` / `reset-password`
 
 Manage Cognito users with operator AWS credentials (`cognito-idp:Admin*` on the deployment user pool). Works **before** `bgagent configure` when `--stack-name` is passed (reads `UserPoolId` from CloudFormation).
@@ -326,7 +364,7 @@ bgagent admin reset-password <email> \
 
 **Text mode** (default) prints human-readable output:
 - `status` and `submit` show a key-value detail view
-- `list` shows an aligned table (TASK ID, STATUS, REPO, CREATED, DESCRIPTION)
+- `list` shows an aligned table (TASK ID, STATUS, REPO, CREATED, HEARTBEAT, DESCRIPTION)
 - `events` shows a timeline (TIMESTAMP, EVENT TYPE, METADATA)
 - `webhook create` shows webhook details and the one-time HMAC secret
 - `webhook list` shows an aligned table (WEBHOOK ID, NAME, STATUS, CREATED)

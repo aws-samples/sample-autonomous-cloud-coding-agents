@@ -34,6 +34,7 @@ export const CFN_TYPES_WITHOUT_EXEC_ROLE_IAM = new Set([
   'AWS::ApiGateway::Stage',
   'AWS::ApiGateway::Account',
   'AWS::S3::BucketPolicy',
+  'AWS::SNS::TopicPolicy',
   'AWS::SQS::QueuePolicy',
   'AWS::EC2::VPCGatewayAttachment',
   'AWS::EC2::SubnetRouteTableAssociation',
@@ -55,14 +56,26 @@ export const RESOURCE_ACTION_MAP: Record<string, readonly string[]> = {
   'AWS::ApiGateway::RestApi': ['apigateway:POST'],
   'AWS::Bedrock::Guardrail': ['bedrock:CreateGuardrail'],
   'AWS::Bedrock::GuardrailVersion': ['bedrock:CreateGuardrailVersion'],
+  // ADR-019 tool-gateway feature. Only synthesized under
+  // `--context enableToolGateway=true`, so the default-context synth-coverage
+  // test never sees these — they are mapped anyway so the map stays a complete
+  // statement of what the bootstrap bundle must cover (same pattern as the
+  // lambda-microvm entries below). All create actions fall under the
+  // `bedrock-agentcore:*` grant in `policies/compute-agentcore.ts`.
+  'AWS::BedrockAgentCore::Gateway': ['bedrock-agentcore:CreateGateway'],
+  'AWS::BedrockAgentCore::GatewayTarget': ['bedrock-agentcore:CreateGatewayTarget'],
   'AWS::BedrockAgentCore::Memory': ['bedrock-agentcore:CreateMemory'],
   'AWS::BedrockAgentCore::Runtime': ['bedrock-agentcore:CreateRuntime'],
   'AWS::CloudFront::Distribution': ['cloudfront:CreateDistribution'],
   'AWS::CloudFront::OriginAccessControl': ['cloudfront:CreateOriginAccessControl'],
+  // NestedStack for Agent Registry (#246) — CFN creates a child stack.
+  'AWS::CloudFormation::Stack': ['cloudformation:CreateStack'],
   'AWS::CloudWatch::Alarm': ['cloudwatch:PutMetricAlarm'],
   'AWS::CloudWatch::Dashboard': ['cloudwatch:PutDashboard'],
   'AWS::Cognito::UserPool': ['cognito-idp:CreateUserPool'],
   'AWS::Cognito::UserPoolClient': ['cognito-idp:CreateUserPoolClient'],
+  // RegistryPublisher / RegistryApprover groups (#246).
+  'AWS::Cognito::UserPoolGroup': ['cognito-idp:CreateGroup'],
   'AWS::DynamoDB::Table': ['dynamodb:CreateTable'],
   'AWS::EC2::EIP': ['ec2:AllocateAddress'],
   'AWS::EC2::FlowLog': ['ec2:CreateFlowLogs'],
@@ -77,10 +90,46 @@ export const RESOURCE_ACTION_MAP: Record<string, readonly string[]> = {
   'AWS::Events::Rule': ['events:PutRule'],
   'AWS::IAM::Policy': ['iam:CreatePolicy', 'iam:PutRolePolicy'],
   'AWS::IAM::Role': ['iam:CreateRole'],
+  'AWS::KMS::Key': ['kms:CreateKey'],
   'AWS::Lambda::EventInvokeConfig': ['lambda:PutFunctionEventInvokeConfig'],
   'AWS::Lambda::EventSourceMapping': ['lambda:CreateEventSourceMapping'],
   'AWS::Lambda::Function': ['lambda:CreateFunction'],
   'AWS::Lambda::LayerVersion': ['lambda:PublishLayerVersion'],
+  // ADR-021 lambda-microvm backend. Only synthesized under
+  // `--context compute_type=lambda-microvm`, so the default-context
+  // synth-coverage test never sees these — they are mapped anyway so the map
+  // stays a complete statement of what the bootstrap bundle must cover.
+  //
+  // `iam:PassRole` is listed on BOTH because CloudFormation hands a role to the
+  // Lambda MicroVMs service for each: `buildRoleArn` on the image and
+  // `operatorRole` on the (VPC_EGRESS) connector. Its absence here is what let
+  // ADR-021 P2r2-F9 through — the bundle's shared `IAMPassRole` statement carries
+  // an `iam:PassedToService` allowlist that this service presents no usable value
+  // for, so the deploy failed with `iam:PassRole … not authorized` on the build
+  // role while every mapped action was covered. The unconditioned pass now lives in
+  // the conditional `compute-lambda-microvm` policy. Evidence inlined in
+  // ADR-021 §4.
+  //
+  // NOTE: listing the action here does NOT guard that statement.
+  // `collectBootstrapAllowActions` (this file) compares action STRINGS only —
+  // `Resource` and `Condition` are discarded — and `policies/infrastructure.ts`'s
+  // conditioned `IAMPassRole` already contributes a bare `iam:PassRole` to every
+  // bundle, so the requirement is satisfied by the very statement P2r2-F9 proved
+  // is denied on this path. Deleting `MicrovmPassRoles` leaves this check green.
+  // Compounding it, `synth-coverage.test.ts` synthesizes only the default context,
+  // where `AWS::Lambda::MicrovmImage` is never emitted, so these two entries are
+  // never even consulted there.
+  //
+  // The REAL guard against dropping the unconditioned pass is
+  // `test/bootstrap/policies.test.ts` ("MicrovmPassRoles"), which asserts the sid
+  // list, the two name-prefix resources, the ABSENT condition, and the
+  // execution-role exclusion — plus `test/bootstrap/bootstrap-template.test.ts`,
+  // which asserts it survives into the rendered template. These entries DOCUMENT
+  // the create-time need; they do not enforce it. Making the map enforce it would
+  // need `findMissingBootstrapActions` to require an *unconditioned* match for a
+  // declared subset of actions — deliberately not done here.
+  'AWS::Lambda::MicrovmImage': ['lambda:CreateMicrovmImage', 'iam:PassRole'],
+  'AWS::Lambda::NetworkConnector': ['lambda:CreateNetworkConnector', 'iam:PassRole'],
   'AWS::Logs::Delivery': ['logs:CreateDelivery'],
   'AWS::Logs::DeliveryDestination': ['logs:PutDeliveryDestination'],
   'AWS::Logs::DeliverySource': ['logs:PutDeliverySource'],
@@ -92,10 +141,16 @@ export const RESOURCE_ACTION_MAP: Record<string, readonly string[]> = {
   'AWS::Route53Resolver::ResolverQueryLoggingConfigAssociation': ['route53resolver:AssociateResolverQueryLogConfig'],
   'AWS::S3::Bucket': ['s3:CreateBucket'],
   'AWS::SecretsManager::Secret': ['secretsmanager:CreateSecret'],
+  'AWS::SNS::Subscription': ['sns:Subscribe'],
+  'AWS::SNS::Topic': ['sns:CreateTopic'],
   'AWS::SQS::Queue': ['sqs:CreateQueue'],
+  // The Agent Registry provisioning custom resource uses the CDK Provider
+  // framework, whose async waiter is a Step Functions state machine (#246).
+  'AWS::StepFunctions::StateMachine': ['states:CreateStateMachine'],
   'AWS::WAFv2::WebACL': ['wafv2:CreateWebACL'],
   'AWS::WAFv2::WebACLAssociation': ['wafv2:AssociateWebACL'],
   'Custom::AWS': ['lambda:InvokeFunction'],
+  'Custom::AgentRegistry': ['lambda:InvokeFunction'],
   'Custom::S3AutoDeleteObjects': ['lambda:InvokeFunction'],
   'Custom::VpcRestrictDefaultSG': ['lambda:InvokeFunction'],
 };
@@ -104,7 +159,7 @@ export const RESOURCE_ACTION_MAP: Record<string, readonly string[]> = {
  * Returns true when {@link allowedAction} covers {@link requiredAction}.
  * Supports service-level wildcards (e.g. `bedrock-agentcore:*`).
  */
-export function actionIsAllowed(requiredAction: string, allowedAction: string): boolean {
+function actionIsAllowed(requiredAction: string, allowedAction: string): boolean {
   if (allowedAction === requiredAction) {
     return true;
   }

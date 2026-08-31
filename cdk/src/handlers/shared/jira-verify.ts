@@ -18,15 +18,14 @@
  */
 
 import * as crypto from 'crypto';
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
-import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { isUsableHmacSecret } from './hmac-secret';
 import { getOauthSecretStrict, getRegistryRowStrict } from './jira-oauth-resolver';
 import { logger } from './logger';
+import { makeClient, makeDocClient } from './ua';
 
-const sm = new SecretsManagerClient({});
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const sm = makeClient(SecretsManagerClient);
+const ddb = makeDocClient();
 
 /** Prefix for Jira-related secrets in Secrets Manager. */
 export const JIRA_SECRET_PREFIX = 'bgagent/jira/';
@@ -192,8 +191,9 @@ export async function verifyJiraRequest(
  * - `'revoked'` — registry row exists but status is not `active`.
  *   Reject; do NOT fall back.
  * - `'no-per-tenant-secret'` — no registry row, OR the stored secret
- *   has no `webhook_signing_secret`. Caller should fall back to the
- *   stack-wide secret for back-compat with single-tenant installs.
+ *   has no `webhook_signing_secret`. Caller should use the stack-wide
+ *   verifier. This is also the normal path for admin-console payloads, which
+ *   omit cloudId before tenant selection is possible.
  *
  * Strict lookups (throw on infra errors) are used so a transient DDB or
  * SM error doesn't silently downgrade a per-tenant-secured tenant to

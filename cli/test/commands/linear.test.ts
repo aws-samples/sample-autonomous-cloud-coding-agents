@@ -21,13 +21,12 @@ import { PutCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
 import {
   autoLinkTokenOwner,
   findReusableOauthAppCredentials,
-  generateInviteCode,
-  INVITE_CODE_ALPHABET,
   isWebhookSecretConfigured,
   queryLinearTeamKeys,
   renderLinearAppTemplate,
 } from '../../src/commands/linear';
 import * as config from '../../src/config';
+import { generateInviteCode, INVITE_CODE_ALPHABET } from '../../src/invite-code';
 
 jest.mock('@aws-sdk/lib-dynamodb', () => {
   const actual = jest.requireActual('@aws-sdk/lib-dynamodb');
@@ -161,6 +160,15 @@ describe('renderLinearAppTemplate', () => {
     expect(out).toContain('bgagent[bot]');
     expect(out).toContain('Webhooks:            ON');
     expect(out).toContain('REQUIRED for actor=app');
+  });
+
+  test('warns against enabling Linear agent / app-notification events (breaks comment-thread UX)', () => {
+    // ABCA is a comment-based integration; an OAuth app in Linear "agent" mode
+    // makes @mentions render as interactive agent activity instead of comment
+    // threads. The template must steer operators away from that toggle.
+    const out = renderLinearAppTemplate();
+    expect(out.toLowerCase()).toContain('agent');
+    expect(out).toMatch(/do not enable .*agent/i);
   });
 
   test('defaults the callback URL to the localhost endpoint that setup listens on', () => {

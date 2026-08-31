@@ -22,6 +22,7 @@
       "Effect": "Allow",
       "Resource": [
         "arn:aws:cloudformation:*:*:stack/backgroundagent-dev/*",
+        "arn:aws:cloudformation:*:*:stack/backgroundagent-dev-*",
         "arn:aws:cloudformation:*:*:stack/CDKToolkit/*"
       ],
       "Sid": "CloudFormationSelf"
@@ -75,6 +76,7 @@
             "bedrock.amazonaws.com",
             "bedrock-agentcore.amazonaws.com",
             "events.amazonaws.com",
+            "states.amazonaws.com",
             "vpc-flow-logs.amazonaws.com"
           ]
         }
@@ -153,6 +155,7 @@
         "route53resolver:UpdateFirewallDomains",
         "route53resolver:AssociateFirewallRuleGroup",
         "route53resolver:DisassociateFirewallRuleGroup",
+        "route53resolver:UpdateFirewallRuleGroupAssociation",
         "route53resolver:GetFirewallRuleGroupAssociation",
         "route53resolver:ListFirewallRuleGroupAssociations",
         "route53resolver:UpdateFirewallConfig",

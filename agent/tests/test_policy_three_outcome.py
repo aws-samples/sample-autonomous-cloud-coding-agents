@@ -715,6 +715,19 @@ class TestLoadTimeValidation:
                 blueprint_soft_policies=big,
             )
 
+    def test_registry_extra_policies_counted_in_64kb_cap(self):
+        # #246 review: registry cedar_policy_module assets arrive via the legacy
+        # extra_policies path, which previously bypassed the cap entirely. An
+        # oversized registry policy must be rejected just like blueprint text.
+        big = 'forbid (principal, action, resource) when { context.x like "*aaaaaaaaaa*" };' * 1000
+        assert len(big) > POLICIES_MAX_BYTES
+        with pytest.raises(ValueError, match="64 KB cap"):
+            PolicyEngine(
+                task_type="new_task",
+                repo="owner/repo",
+                extra_policies=[big],
+            )
+
     def test_blueprint_soft_rule_missing_rule_id_rejected(self):
         bad = '@tier("soft") forbid (principal, action, resource) when { context.x like "*foo*" };'
         with pytest.raises(ValueError, match="missing @rule_id"):

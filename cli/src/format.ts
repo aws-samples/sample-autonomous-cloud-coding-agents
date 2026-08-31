@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { CreateWebhookResponse, DEFAULT_CODING_WORKFLOW_ID, ReplayBundle, TaskDetail, TaskEvent, TaskSummary, TERMINAL_STATUSES, WebhookDetail } from './types';
+import { ApiKeyDetail, CreateApiKeyResponse, CreateWebhookResponse, DEFAULT_CODING_WORKFLOW_ID, ReplayBundle, TaskDetail, TaskEvent, TaskSummary, TERMINAL_STATUSES, WebhookDetail } from './types';
 
 /** Decimal places when rendering USD cost figures (tenth of a cent matters for LLM spend). */
 export const COST_USD_DECIMALS = 4;
@@ -32,8 +32,17 @@ export function formatVerdict(passed: boolean | null, dash = '—'): string {
   return passed === null ? dash : passed ? 'PASSED' : 'FAILED';
 }
 
-/** Format a TaskDetail as a key-value detail view. */
-export function formatTaskDetail(task: TaskDetail): string {
+/**
+ * Format a TaskDetail as a key-value detail view.
+ *
+ * @param task - the task detail from ``GET /tasks/{id}``.
+ * @param now - reference time for relative durations (epoch ms). Injected rather
+ *   than read inside, matching {@link formatStatusSnapshot}: the heartbeat line
+ *   renders an AGE, so without an anchor this function is non-deterministic and
+ *   its only interesting case (a stale beat) cannot be asserted. Defaults to
+ *   ``Date.now()`` in production; tests pass a fixed value.
+ */
+export function formatTaskDetail(task: TaskDetail, now: number = Date.now()): string {
   const lines: string[] = [
     `Task:        ${task.task_id}`,
     `Status:      ${task.status}`,
@@ -55,6 +64,10 @@ export function formatTaskDetail(task: TaskDetail): string {
   // when there is one.
   if (task.branch_name) {
     lines.push(`Branch:      ${task.branch_name}`);
+  }
+  // Admission queue (#441): show FIFO position + rough ETA while QUEUED.
+  if (task.status === 'QUEUED' && task.queue_position !== null) {
+    lines.push(`Queue:       position ${task.queue_position}${formatQueueEta(task.estimated_wait_s)}`);
   }
   if (task.max_turns !== null) {
     lines.push(`Max Turns:   ${task.max_turns}`);
@@ -84,6 +97,15 @@ export function formatTaskDetail(task: TaskDetail): string {
   if (task.completed_at) {
     lines.push(`Completed:   ${task.completed_at}`);
   }
+  // In-guest liveness (ADR-021 P2r2-F11). Shown only while the task is still
+  // going: that is the window in which "is the agent alive?" is a live question,
+  // and where a stale value is the actionable signal — the orchestrator's own hang
+  // detector reads the same field. On a terminal task the last beat is just noise
+  // next to Completed/Duration. The relative age is what an operator actually
+  // needs, so it is rendered alongside the timestamp rather than instead of it.
+  if (task.agent_heartbeat_at && !isTerminalStatus(task.status)) {
+    lines.push(`Heartbeat:   ${task.agent_heartbeat_at} (${heartbeatAge(task.agent_heartbeat_at, now)})`);
+  }
   if (task.duration_s !== null) {
     lines.push(`Duration:    ${task.duration_s}s`);
   }
@@ -96,13 +118,29 @@ export function formatTaskDetail(task: TaskDetail): string {
   return lines.join('\n');
 }
 
-/** Format a list of TaskSummary as an aligned table. */
-export function formatTaskList(tasks: TaskSummary[]): string {
+/** Render the ``~Xm wait`` suffix for a queued task's position line (#441).
+ *  Empty string when the server could not estimate a wait. */
+function formatQueueEta(estimatedWaitS: number | null): string {
+  if (estimatedWaitS === null || !Number.isFinite(estimatedWaitS)) {
+    return '';
+  }
+  const minutes = Math.max(1, Math.round(estimatedWaitS / 60));
+  return ` (est. wait ~${minutes}m)`;
+}
+
+/**
+ * Format a list of TaskSummary as an aligned table.
+ *
+ * @param tasks - the summaries from ``GET /v1/tasks``.
+ * @param now - reference time for the HEARTBEAT column's relative age (epoch ms).
+ *   Injected for the same reason as {@link formatStatusSnapshot}'s.
+ */
+export function formatTaskList(tasks: TaskSummary[], now: number = Date.now()): string {
   if (tasks.length === 0) {
     return 'No tasks found.';
   }
 
-  const headers = ['TASK ID', 'STATUS', 'REPO', 'CREATED', 'DESCRIPTION'];
+  const headers = ['TASK ID', 'STATUS', 'REPO', 'CREATED', 'HEARTBEAT', 'DESCRIPTION'];
   const rows = tasks.map(t => {
     let desc = t.task_description || (t.issue_number !== null ? `#${t.issue_number}` : '-');
     if (t.resolved_workflow?.id === 'coding/pr-iteration-v1' && t.pr_number !== null) {
@@ -114,6 +152,14 @@ export function formatTaskList(tasks: TaskSummary[]): string {
       // Repo-less workflows (#248 Phase 3) have no repo — show a dash.
       t.repo ?? '—',
       t.created_at,
+      // In-guest liveness, at LIST level: "is anything still alive?" is asked
+      // across tasks, and one `bgagent status` at a time is how a hung task goes
+      // unnoticed. Suppressed on a terminal task (the last beat is noise beside a
+      // final status) and where the agent has not beaten — same rule as the detail
+      // view, so the two never disagree.
+      t.agent_heartbeat_at && !isTerminalStatus(t.status)
+        ? `${heartbeatAge(t.agent_heartbeat_at, now)} ago`
+        : PLACEHOLDER,
       truncate(desc, DESCRIPTION_COLUMN_WIDTH),
     ];
   });
@@ -196,6 +242,11 @@ export function formatStatusSnapshot(
   if (task.task_description) {
     lines.push(...formatDescriptionLines(task.task_description));
   }
+  // Admission queue (#441): while QUEUED the pipeline has not started, so
+  // position + ETA are the most useful lines a user can see.
+  if (task.status === 'QUEUED' && task.queue_position !== null) {
+    lines.push(`  Queue:         position ${task.queue_position}${formatQueueEta(task.estimated_wait_s)}`);
+  }
   lines.push(
     `  Turn:          ${describeTurn(task, lastTurnEvent)}`,
     `  Last milestone: ${describeMilestone(milestoneEvent, now)}`,
@@ -229,6 +280,16 @@ export function formatStatusSnapshot(
   }
   if (task.artifact_uri) {
     lines.push(`  Artifact:      ${task.artifact_uri}`);
+  }
+  // In-guest liveness, next to the control-plane freshness line it complements
+  // (ADR-021 P2r2-F11). `Last event:` says when the platform last heard *about*
+  // the task; `Heartbeat:` says when the agent last said it was alive — the same
+  // field the orchestrator's hang detector reads, on a fixed 45 s cadence, so its
+  // AGE is the diagnostic. Suppressed on a terminal task (the last beat is noise
+  // beside a final status) and when the agent has not beaten yet.
+  if (task.agent_heartbeat_at && !isTerminalStatus(task.status)) {
+    const age = relativeTime(task.agent_heartbeat_at, now) ?? PLACEHOLDER;
+    lines.push(`  Heartbeat:     ${age} ago`);
   }
   lines.push(`  Last event:    ${lastEventLine}`);
 
@@ -370,6 +431,58 @@ export function formatWebhookDetail(webhook: WebhookDetail): string {
   ];
   if (webhook.revoked_at) {
     lines.push(`Revoked:     ${webhook.revoked_at}`);
+  }
+  return lines.join('\n');
+}
+
+/** Format a newly created API key (includes the one-time key material). */
+export function formatApiKeyCreated(res: CreateApiKeyResponse): string {
+  return [
+    `Key ID:      ${res.key_id}`,
+    `Name:        ${res.name}`,
+    `Scopes:      ${res.scopes.join(', ')}`,
+    `Expires:     ${res.expires_at ?? 'never'}`,
+    `Created:     ${res.created_at}`,
+    '',
+    'API key (store securely — shown only once):',
+    res.key,
+    '',
+    'Use it with `--api-key <key>` or the BGAGENT_API_KEY environment variable.',
+  ].join('\n');
+}
+
+/** Format a list of ApiKeyDetail as an aligned table. */
+export function formatApiKeyList(keys: ApiKeyDetail[]): string {
+  if (keys.length === 0) {
+    return 'No API keys found.';
+  }
+
+  const headers = ['KEY ID', 'NAME', 'SCOPES', 'STATUS', 'EXPIRES', 'CREATED'];
+  const rows = keys.map(k => [
+    k.key_id,
+    k.name,
+    k.scopes.join(','),
+    k.status,
+    k.expires_at ?? 'never',
+    k.created_at,
+  ]);
+
+  return formatTable(headers, rows);
+}
+
+/** Format an ApiKeyDetail as a key-value detail view. */
+export function formatApiKeyDetail(key: ApiKeyDetail): string {
+  const lines: string[] = [
+    `Key ID:      ${key.key_id}`,
+    `Name:        ${key.name}`,
+    `Scopes:      ${key.scopes.join(', ')}`,
+    `Status:      ${key.status}`,
+    `Expires:     ${key.expires_at ?? 'never'}`,
+    `Created:     ${key.created_at}`,
+    `Updated:     ${key.updated_at}`,
+  ];
+  if (key.revoked_at) {
+    lines.push(`Revoked:     ${key.revoked_at}`);
   }
   return lines.join('\n');
 }
@@ -581,6 +694,28 @@ function readNumberField(meta: Record<string, unknown> | undefined, key: string)
   if (!meta) return null;
   const v = meta[key];
   return typeof v === 'number' && Number.isFinite(v) ? v : null;
+}
+
+/**
+ * Age of the agent's last heartbeat, as the detail view renders it.
+ *
+ * Wraps {@link relativeTime} with a placeholder, because the heartbeat's VALUE is
+ * the age rather than the timestamp: the beat is written every 45 s, so anything
+ * much past that is the signal an operator is looking for (it is the same field
+ * the orchestrator's own hang detector reads). Unparseable input degrades to a
+ * dash rather than throwing — a malformed timestamp must not take out
+ * `bgagent status`.
+ *
+ * `now` is a required parameter here rather than defaulting to `Date.now()`, so
+ * that the two exported formatters above own the one anchor each render uses and a
+ * new heartbeat line cannot quietly acquire its own clock. Those exported
+ * functions DO default to `Date.now()` — that is the public-API boundary, matching
+ * {@link formatStatusSnapshot}, and it is what lets `commands/list.ts` and
+ * `commands/status.ts` stay clock-free. The rule is "one anchor per render,
+ * injectable at the edge", not "no defaults anywhere".
+ */
+function heartbeatAge(isoTimestamp: string, now: number): string {
+  return relativeTime(isoTimestamp, now) ?? PLACEHOLDER;
 }
 
 /**

@@ -2,7 +2,7 @@
 
 This document defines least-privilege IAM policies for the CloudFormation execution role used during `cdk deploy`. The default CDK bootstrap grants `AdministratorAccess` to this role; the policies below scope it to only what ABCA needs.
 
-> **Origin**: These IAM policies were derived from a thorough review of the repository's CDK constructs, stacks, and handler code, then **validated against a live deployment** in `us-east-1` (create, update, task execution, and destroy). CloudTrail analysis identified 36 additional actions beyond the initial code review, and 7 deployment iterations refined the policies to their current form. The policies are split into five managed policies — three always-applied (Infrastructure, Application, Observability) plus two compute-variant policies (Compute-AgentCore, Compute-ECS) — to stay under the IAM 6,144-character limit and to support per-compute-backend bootstrap selection. The policy sources live in `cdk/src/bootstrap/policies/*.ts` and are compiled to `cdk/bootstrap/policies/*.json`.
+> **Origin**: These IAM policies were derived from a thorough review of the repository's CDK constructs, stacks, and handler code, then **validated against a live deployment** in `us-east-1` (create, update, task execution, and destroy). CloudTrail analysis identified 36 additional actions beyond the initial code review, and 7 deployment iterations refined the policies to their current form. The policies are split into six managed policies — three always-applied (Infrastructure, Application, Observability) plus three compute-variant policies (Compute-AgentCore, Compute-ECS, Compute-LambdaMicrovms) — to stay under the IAM 6,144-character limit and to support per-compute-backend bootstrap selection. The policy sources live in `cdk/src/bootstrap/policies/*.ts` and are compiled to `cdk/bootstrap/policies/*.json`.
 
 ## How CDK deployment roles work
 
@@ -17,28 +17,38 @@ The policy below is a **CloudFormation Execution Role** replacement. The other t
 
 ## Using these policies
 
-The policies are split into five IAM managed policies (each under the 6,144-character limit):
+The policies are split into six IAM managed policies (each under the 6,144-character limit):
 
 | Policy Name | Scope | When applied |
 |-------------|-------|--------------|
 | `IaCRole-ABCA-Infrastructure` | CloudFormation, IAM, VPC networking, Route 53 Resolver DNS Firewall | Always |
-| `IaCRole-ABCA-Application` | DynamoDB, Lambda, API Gateway, Cognito, WAFv2, EventBridge, SQS, CloudFront, Secrets Manager | Always |
+| `IaCRole-ABCA-Application` | DynamoDB, Lambda, API Gateway, Cognito, WAFv2, EventBridge, SQS, SNS, CloudFront, Secrets Manager | Always |
 | `IaCRole-ABCA-Observability` | Bedrock Guardrails, CloudWatch, X-Ray, S3, ECR, KMS, SSM, STS | Always |
 | `IaCRole-ABCA-Compute-Agentcore` | Bedrock AgentCore (`bedrock-agentcore:*`) | Always (default compute backend) |
 | `IaCRole-ABCA-Compute-ECS` | ECS cluster + task-definition operations | Only when `ecs` is in `ComputeTypes` |
+| `IaCRole-ABCA-Compute-LambdaMicrovms` | Lambda MicroVM image + network-connector operations | Only when `lambda-microvm` is in `ComputeTypes` |
 
 > **Placeholder substitution**: Replace `ACCOUNT_ID` with your 12-digit AWS account ID and `REGION` with your deployment region (e.g., `us-east-1`) throughout this document.
 
-These policies are not created or attached manually. The repository generates them — and a custom bootstrap template that wires all five into the CloudFormation execution role — from the TypeScript sources, then bootstraps with that template:
+These policies are not created or attached manually. The repository generates them — and a custom bootstrap template that wires all six into the CloudFormation execution role — from the TypeScript sources, then bootstraps with that template:
 
 ```bash
 # Regenerate artifacts (policies JSON + template YAML) and bootstrap.
-# Default ComputeTypes is "agentcore"; pass ECS via context to also include Compute-ECS:
+# ComputeTypes defaults to "agentcore".
 MISE_EXPERIMENTAL=1 mise //cdk:bootstrap
-MISE_EXPERIMENTAL=1 mise //cdk:bootstrap -- --context ComputeTypes=agentcore,ecs
+
+# To ALSO enable the ECS compute backend (attach IaCRole-ABCA-Compute-ECS), set the
+# ComputeTypes CFN *parameter*. `cdk bootstrap` cannot pass template parameters — it
+# has no --parameters flag, and --context sets CDK construct context, not a CFN
+# parameter — so bootstrap first (above), then update the parameter on CDKToolkit:
+aws cloudformation update-stack --stack-name CDKToolkit --use-previous-template \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --parameters ParameterKey=ComputeTypes,ParameterValue=agentcore\,ecs
+# verify it took:
+aws cloudformation describe-stacks --stack-name CDKToolkit --query 'Stacks[0].Parameters'
 ```
 
-Under the hood, `mise //cdk:bootstrap` runs `npx cdk bootstrap --template bootstrap/bootstrap-template.yaml` (see `cdk/mise.toml`). The generated template defines five inline `AWS::IAM::ManagedPolicy` resources that **replace** the default `AdministratorAccess` on the CloudFormation execution role; the `IaCRole-ABCA-Compute-ECS` policy is conditional on the `ComputeTypes` parameter including `ecs`. The policy sources are `cdk/src/bootstrap/policies/{infrastructure,application,observability,compute-agentcore,compute-ecs}.ts`, compiled to `cdk/bootstrap/policies/*.json` by `cdk/scripts/generate-bootstrap-artifacts.ts`.
+Under the hood, `mise //cdk:bootstrap` runs `npx cdk bootstrap --template bootstrap/bootstrap-template.yaml` (see `cdk/mise.toml`). The generated template defines six inline `AWS::IAM::ManagedPolicy` resources that **replace** the default `AdministratorAccess` on the CloudFormation execution role; the `IaCRole-ABCA-Compute-ECS` and `IaCRole-ABCA-Compute-LambdaMicrovms` policies are conditional on the `ComputeTypes` parameter including their respective backend. The policy sources are `cdk/src/bootstrap/policies/{infrastructure,application,observability,compute-agentcore,compute-ecs,compute-lambda-microvm}.ts`, compiled to `cdk/bootstrap/policies/*.json` by `cdk/scripts/generate-bootstrap-artifacts.ts`.
 
 ## Trust policy
 
@@ -73,7 +83,7 @@ Under the hood, `mise //cdk:bootstrap` runs `npx cdk bootstrap --template bootst
 
 For deploying the `backgroundagent-dev` stack. This single stack contains all platform resources including the AgentCore runtime, ECS compute (when enabled), API Gateway, Cognito, DynamoDB tables, VPC, DNS Firewall, and observability infrastructure.
 
-> **IAM managed policy size limit**: A single managed policy cannot exceed 6,144 characters. The permissions below are split into five policies to stay under this limit (three always-applied, plus two compute-variant policies). They are wired into the CloudFormation execution role by the generated bootstrap template; see [Using these policies](#using-these-policies).
+> **IAM managed policy size limit**: A single managed policy cannot exceed 6,144 characters. The permissions below are split into six policies to stay under this limit (three always-applied, plus three compute-variant policies). They are wired into the CloudFormation execution role by the generated bootstrap template; see [Using these policies](#using-these-policies).
 
 ### IaCRole-ABCA-Infrastructure
 
@@ -106,6 +116,7 @@ CloudFormation stack operations, IAM roles/policies, VPC networking, and Route 5
       ],
       "Resource": [
         "arn:aws:cloudformation:*:*:stack/backgroundagent-dev/*",
+        "arn:aws:cloudformation:*:*:stack/backgroundagent-dev-*",
         "arn:aws:cloudformation:*:*:stack/CDKToolkit/*"
       ]
     },
@@ -161,6 +172,7 @@ CloudFormation stack operations, IAM roles/policies, VPC networking, and Route 5
             "bedrock.amazonaws.com",
             "bedrock-agentcore.amazonaws.com",
             "events.amazonaws.com",
+            "states.amazonaws.com",
             "vpc-flow-logs.amazonaws.com"
           ]
         }
@@ -238,6 +250,7 @@ CloudFormation stack operations, IAM roles/policies, VPC networking, and Route 5
         "route53resolver:UpdateFirewallDomains",
         "route53resolver:AssociateFirewallRuleGroup",
         "route53resolver:DisassociateFirewallRuleGroup",
+        "route53resolver:UpdateFirewallRuleGroupAssociation",
         "route53resolver:GetFirewallRuleGroupAssociation",
         "route53resolver:ListFirewallRuleGroupAssociations",
         "route53resolver:UpdateFirewallConfig",
@@ -381,6 +394,10 @@ DynamoDB tables, Lambda functions, API Gateway, Cognito, WAFv2, EventBridge, SQS
         "cognito-idp:DeleteUserPoolClient",
         "cognito-idp:DescribeUserPoolClient",
         "cognito-idp:UpdateUserPoolClient",
+        "cognito-idp:CreateGroup",
+        "cognito-idp:DeleteGroup",
+        "cognito-idp:GetGroup",
+        "cognito-idp:UpdateGroup",
         "cognito-idp:TagResource",
         "cognito-idp:UntagResource",
         "cognito-idp:ListTagsForResource",
@@ -438,6 +455,38 @@ DynamoDB tables, Lambda functions, API Gateway, Cognito, WAFv2, EventBridge, SQS
         "sqs:ListQueueTags"
       ],
       "Resource": "arn:aws:sqs:*:*:backgroundagent-dev-*"
+    },
+    {
+      "Sid": "SNS",
+      "Effect": "Allow",
+      "Action": [
+        "sns:CreateTopic",
+        "sns:DeleteTopic",
+        "sns:GetTopicAttributes",
+        "sns:SetTopicAttributes",
+        "sns:Subscribe",
+        "sns:Unsubscribe",
+        "sns:GetSubscriptionAttributes",
+        "sns:ListSubscriptionsByTopic",
+        "sns:TagResource",
+        "sns:UntagResource",
+        "sns:ListTagsForResource"
+      ],
+      "Resource": "arn:aws:sns:*:*:backgroundagent-dev-*"
+    },
+    {
+      "Sid": "StepFunctions",
+      "Effect": "Allow",
+      "Action": [
+        "states:CreateStateMachine",
+        "states:DeleteStateMachine",
+        "states:DescribeStateMachine",
+        "states:UpdateStateMachine",
+        "states:TagResource",
+        "states:UntagResource",
+        "states:ListTagsForResource"
+      ],
+      "Resource": "arn:aws:states:*:*:stateMachine:backgroundagent-dev-*"
     },
     {
       "Sid": "CloudFront",
@@ -557,6 +606,7 @@ Bedrock Guardrails, CloudWatch Logs/Dashboards/Alarms, X-Ray, S3 (CDK assets), K
         "cloudwatch:TagResource",
         "cloudwatch:UntagResource",
         "logs:CreateDelivery",
+        "logs:UpdateDeliveryConfiguration",
         "logs:DescribeDeliveries",
         "logs:GetDelivery",
         "logs:GetDeliveryDestination",
@@ -626,6 +676,35 @@ Bedrock Guardrails, CloudWatch Logs/Dashboards/Alarms, X-Ray, S3 (CDK assets), K
         "kms:GenerateDataKey"
       ],
       "Resource": "*"
+    },
+    {
+      "Sid": "KMSCustomerManagedKeys",
+      "Effect": "Allow",
+      "Action": [
+        "kms:CreateKey",
+        "kms:GetKeyPolicy",
+        "kms:GetKeyRotationStatus",
+        "kms:TagResource",
+        "kms:ListResourceTags"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "KMSCustomerManagedKeysLifecycle",
+      "Effect": "Allow",
+      "Action": [
+        "kms:PutKeyPolicy",
+        "kms:ScheduleKeyDeletion",
+        "kms:EnableKeyRotation",
+        "kms:DisableKeyRotation",
+        "kms:UntagResource"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/ABCA": "operational-alerts"
+        }
+      }
     },
     {
       "Sid": "ECRForDockerAssets",
@@ -701,7 +780,7 @@ Bedrock AgentCore runtime/memory operations — a single statement granting `bed
 
 ### IaCRole-ABCA-Compute-ECS
 
-When the ECS Fargate compute backend is enabled (bootstrap with `--context ComputeTypes=agentcore,ecs`), the generated template conditionally attaches this policy to the CloudFormation execution role. It is a standalone managed policy, not an addition to `IaCRole-ABCA-Application`.
+When the ECS Fargate compute backend is enabled (set the `ComputeTypes` CFN parameter to `agentcore,ecs` on the `CDKToolkit` stack — see the bootstrap snippet near the top of this doc), the generated template conditionally attaches this policy to the CloudFormation execution role. It is a standalone managed policy, not an addition to `IaCRole-ABCA-Application`.
 
 ```json
 {
@@ -724,6 +803,57 @@ When the ECS Fargate compute backend is enabled (bootstrap with `--context Compu
     "ecs:PutAccountSetting"
   ],
   "Resource": "*"
+}
+```
+
+### IaCRole-ABCA-Compute-LambdaMicrovms
+
+When the Lambda MicroVM compute backend is enabled (include `lambda-microvm` in the `ComputeTypes` CFN parameter on the `CDKToolkit` stack), the generated template conditionally attaches this policy to the CloudFormation execution role. It permits CloudFormation to manage MicroVM images and network connectors; runtime session lifecycle permissions remain on the orchestrator role.
+
+The second statement, `MicrovmPassRoles`, is the one exception to the rule that every `iam:PassRole` in this bundle carries an `iam:PassedToService` condition (`IaCRole-ABCA-Infrastructure` → `IAMPassRole`). It has to be: the Lambda MicroVMs service does not present a usable value for that key, so the conditioned statement is **denied** when CloudFormation passes the build role to `CreateMicrovmImage` — live-verified in `us-east-1` (ADR-021 P2r2-F9), with the out-of-band `create-microvm-image` call passing the *same* role successfully as the control. It is deliberately scoped to the two role-name prefixes CloudFormation actually passes (the image build role and the network-connector operator role) and excludes the MicroVM **execution** role, which only the orchestrator passes, at `RunMicrovm`. The shared allowlisted `IAMPassRole` statement (`role/backgroundagent-dev-*`) is left intact to avoid widening the grant for ~30 other roles in the stack, so while it technically matches the execution role, only the orchestrator actively reaches for it.
+
+> **Operators must re-bootstrap for this.** The statement ships in bootstrap policy bundle **1.6.0**; a CDKToolkit stack bootstrapped at 1.5.0 or earlier will fail the CDK-managed MicroVM image deploy with a caller-side `iam:PassRole` AccessDenied on the build role. Check `CDKToolkit`'s `BootstrapPolicyVersion` output, and re-run `mise //cdk:bootstrap` (with `ComputeTypes` including `lambda-microvm`) if it is behind.
+
+```json
+{
+  "Statement": [
+    {
+      "Action": [
+        "lambda:CreateMicrovmImage",
+        "lambda:GetMicrovmImage",
+        "lambda:UpdateMicrovmImage",
+        "lambda:DeleteMicrovmImage",
+        "lambda:ListMicrovmImages",
+        "lambda:GetMicrovmImageVersion",
+        "lambda:UpdateMicrovmImageVersion",
+        "lambda:DeleteMicrovmImageVersion",
+        "lambda:ListMicrovmImageVersions",
+        "lambda:GetMicrovmImageBuild",
+        "lambda:ListMicrovmImageBuilds",
+        "lambda:ListManagedMicrovmImages",
+        "lambda:ListManagedMicrovmImageVersions",
+        "lambda:CreateNetworkConnector",
+        "lambda:GetNetworkConnector",
+        "lambda:UpdateNetworkConnector",
+        "lambda:DeleteNetworkConnector",
+        "lambda:ListNetworkConnectors",
+        "lambda:PassNetworkConnector"
+      ],
+      "Effect": "Allow",
+      "Resource": "*",
+      "Sid": "LambdaMicrovms"
+    },
+    {
+      "Action": "iam:PassRole",
+      "Effect": "Allow",
+      "Resource": [
+        "arn:aws:iam::*:role/backgroundagent-dev-LambdaMicrovmComputeBuild*",
+        "arn:aws:iam::*:role/backgroundagent-dev-LambdaMicrovmComputeConnector*"
+      ],
+      "Sid": "MicrovmPassRoles"
+    }
+  ],
+  "Version": "2012-10-17"
 }
 ```
 

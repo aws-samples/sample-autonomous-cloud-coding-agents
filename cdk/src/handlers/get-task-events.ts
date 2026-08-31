@@ -17,14 +17,14 @@
  *  SOFTWARE.
  */
 
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, GetCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
 import { extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
 import { ErrorCode, errorResponse, paginatedResponse } from './shared/response';
 import type { EventRecord, TaskRecord } from './shared/types';
+import { makeDocClient } from './shared/ua';
 import {
   decodePaginationToken,
   encodePaginationToken,
@@ -33,7 +33,7 @@ import {
   ULID_LENGTH,
 } from './shared/validation';
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const ddb = makeDocClient();
 const TABLE_NAME = process.env.TASK_TABLE_NAME!;
 const EVENTS_TABLE_NAME = process.env.TASK_EVENTS_TABLE_NAME!;
 const LOG_LEVEL = (process.env.LOG_LEVEL ?? 'INFO').toUpperCase();
@@ -118,7 +118,16 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       );
     }
 
-    const afterValid = typeof afterRaw === 'string' && afterRaw.length === ULID_LENGTH ? afterRaw : undefined;
+    // Normalize the cursor to upper-case before it reaches the DynamoDB key
+    // condition. ``isValidUlid`` accepts lower-case callers (it uppercases
+    // before matching), but stored ``event_id``s are upper-case Crockford
+    // Base32. DynamoDB compares raw bytes, and lower-case ASCII sorts *after*
+    // upper-case, so a lower-case cursor would be "greater than" every stored
+    // id and ``event_id > :after`` would return zero rows — silently dropping
+    // the rest of the event stream for a contract-valid input.
+    const afterValid = typeof afterRaw === 'string' && afterRaw.length === ULID_LENGTH
+      ? afterRaw.toUpperCase()
+      : undefined;
 
     // 3b. ``desc`` combined with ``after`` makes no semantic sense: ``after``
     // is a forward-walking ULID cursor. Reject the combination rather than

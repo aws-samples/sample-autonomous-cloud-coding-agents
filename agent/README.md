@@ -119,14 +119,21 @@ The `run.sh` script overrides the container's default CMD to run `python /app/sr
 | `AWS_SECRET_ACCESS_KEY` | Conditional† | | Explicit keys, if you are not using CLI-based resolution |
 | `AWS_SESSION_TOKEN` | No | | For temporary credentials |
 | `AWS_PROFILE` | No | | Profile for `aws configure export-credentials` in `run.sh`, or default profile when using the `~/.aws` mount fallback |
-| `ANTHROPIC_MODEL` | No | `us.anthropic.claude-sonnet-4-6` | Bedrock **inference profile** or model ID for `InvokeModel` (see [inference profiles](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-use.html)) |
+| `ANTHROPIC_MODEL` | No | `us.anthropic.claude-opus-5` | Bedrock **inference profile** ID for `InvokeModel` (see [inference profiles](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-use.html)). Must be the `us.`-prefixed profile ID, not a bare foundation-model ID — see [Model configuration](../docs/guides/DEVELOPER_GUIDE.md#model-configuration) |
 | `MAX_TURNS` | No | `100` | Max agent turns before stopping |
 | `MAX_BUDGET_USD` | No | | **Local batch only** (shell env when running `entrypoint.py` directly). Range 0.01–100; agent stops when the budget is reached. For deployed AgentCore **server** mode and production tasks, set **`max_budget_usd`** on task creation (REST API, CLI `--max-budget`, or Blueprint default); the orchestrator sends it in the `/invocations` JSON body — server mode does not read `MAX_BUDGET_USD` from the environment. |
 | `DRY_RUN` | No | | Set to `1` to validate config and print the prompt without running the agent |
-| `ANTHROPIC_DEFAULT_HAIKU_MODEL` | No | `anthropic.claude-haiku-4-5-20251001-v1:0` | Bedrock model ID for the pre-flight safety check (see below) |
+| `ANTHROPIC_DEFAULT_HAIKU_MODEL` | No | `us.anthropic.claude-haiku-4-5-20251001-v1:0` | Bedrock **inference profile** ID for the small/fast auxiliary model — the pre-flight safety check and WebFetch summarization (see below). Set by the CDK stack (`cdk/src/stacks/agent.ts` (the runtime environment block)); the `us.` prefix is required |
 | `NUDGES_TABLE_NAME` | No | | **Phase 2.** DynamoDB table for mid-task user nudges (`<user_nudge>` XML blocks injected between turns). If unset, the agent runs without nudge support — `nudge_reader.read_pending()` returns `[]` and logs a WARN once. Set automatically by the CDK stack on both AgentCore runtimes. |
+| `JIRA_APP_ACTOR_PROXY_URL` | No | | Resolved per-task from the Jira tenant secret. Forge v2 web-trigger URL used for app-authored Jira comments and transitions. |
+| `JIRA_APP_ACTOR_SHARED_SECRET` | No | | Resolved per-task from the Jira tenant secret. HMAC key for the Forge proxy; redacted from agent diagnostics. |
+| `JIRA_API_TOKEN` | No | | Legacy per-task Jira 3LO token. Used for outbound writes only when no app actor is configured. |
 
-**Bedrock model access (main model):** Configuring `ANTHROPIC_MODEL` and IAM credentials is not enough. Your AWS account must be able to **invoke** that model in Amazon Bedrock: follow [Request access to models](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) (Marketplace permissions on first use, Anthropic first-time use where required, valid payment method for Marketplace-backed models). Use an inference profile ID such as `us.anthropic.claude-sonnet-4-6` when Bedrock requires it. If the CLI stops with a message that the model is not available on your Bedrock deployment, fix model access in the console or switch `ANTHROPIC_MODEL` to an entitled profile, then retry.
+`run_task` removes all Jira credential variables before every invocation,
+including non-Jira tasks, so a warm AgentCore process cannot expose one
+tenant's OAuth or Forge credential to the next task.
+
+**Bedrock model access (main model):** Configuring `ANTHROPIC_MODEL` and IAM credentials is not enough. Your AWS account must be able to **invoke** that model in Amazon Bedrock: follow [Request access to models](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) (Marketplace permissions on first use, Anthropic first-time use where required, valid payment method for Marketplace-backed models). Always use an inference profile ID such as `us.anthropic.claude-opus-5`: a bare foundation-model ID cannot be invoked with on-demand throughput and Bedrock rejects it with `ValidationException`. IAM must also grant the model — see [Model configuration](../docs/guides/DEVELOPER_GUIDE.md#model-configuration) for the full layering. If the CLI stops with a message that the model is not available on your Bedrock deployment, fix model access in the console or switch `ANTHROPIC_MODEL` to an entitled profile, then retry.
 
 **Pre-flight check model**: Claude Code runs a quick safety verification using a small Haiku model before executing each tool command. On Bedrock, the default Haiku model ID may not be enabled in your account, causing the check to time out with *"Pre-flight check is taking longer than expected"* warnings. The agent sets `ANTHROPIC_DEFAULT_HAIKU_MODEL` to a known-available Bedrock Haiku model ID to avoid this. If you see pre-flight timeout warnings, verify that this model is enabled in your Bedrock model access settings.
 
@@ -138,7 +145,8 @@ The `run.sh` script overrides the container's default CMD to run `python /app/sr
 # Dry run — validate config, fetch issue, print assembled prompt, then exit
 DRY_RUN=1 ./agent/run.sh "owner/repo" 42
 
-# Run with a specific model
+# Run with a specific model (overrides the us.anthropic.claude-opus-5 default).
+# Must be a `us.`-prefixed inference profile that IAM grants — see Model configuration.
 ANTHROPIC_MODEL="us.anthropic.claude-sonnet-4-6" ./agent/run.sh "owner/repo" 42
 
 # Limit agent to 50 turns
@@ -210,6 +218,81 @@ Immediate response (acceptance):
 ```
 
 Final metrics (PR URL, cost, turns, build status, etc.) appear in **container logs**, in **DynamoDB** when configured, and in the **REST API** for deployed tasks (`GET /v1/tasks/{task_id}` via the `bgagent` CLI or HTTP client).
+
+### AWS Lambda MicroVMs lifecycle hooks (ADR-021 P1 + P2)
+
+The same uvicorn process also serves the **Lambda MicroVMs** lifecycle hooks, on the same port (8080 — the port declared in the image's `hooks.port`). On that backend there is no `InvokeAgentRuntime` and no orchestrator→agent HTTP path at all: the task payload arrives as the `/run` hook body and nothing else dials in.
+
+**`POST /aws/lambda-microvms/runtime/v1/ready`** — Build hook. **Mandatory**, not optional: `CreateMicrovmImage` refuses an image that enables *any* lifecycle hook without `/ready`, and with the hook enabled but unserved every build fails with `Ready hook check failed: the application returned a client error (HTTP 4xx) response`.
+
+Its 200 is the signal the service waits for before **taking the snapshot**, which makes it the only hook that can put a warm page in that snapshot — so it does two things:
+
+1. reports that uvicorn is bound and `server` imported cleanly (which pulls in `pipeline` → `runner` → the policy engine, so a missing policy file fails the *build* rather than the first task);
+2. **warms the heavyweight binaries** by exec'ing `claude --version` (required), plus `git` and `node` best-effort.
+
+That warm-up exists because of a live defect (ADR-021 P2-F5): `claude` is a **225 MiB statically-linked ELF**, and on a MicroVM restored from a snapshot that never touched it, the first `exec` had to fault every page in from lazily-restored storage — `runner.py`'s version probe timed out at 10 s and **every task died at turn 0**, reproducibly, while the same binary in the same image answers in under a second locally. If a *required* warm-up fails, `/ready` returns **503** (the hook contract's "not ready yet"), so the service keeps asking within the `/ready` budget and, failing that, fails the image build — the right trade, since a snapshot that cannot exec `claude` cannot run one task. The `/ready` hook budget is 300 s for the same reason (`READY_HOOK_TIMEOUT_SECONDS` in `cdk/src/constructs/lambda-microvm-compute.ts`); build hooks are allowed up to 3600 s. Budgets are composed, not stacked: `claude` runs **first** with its own 120 s, the best-effort commands then **share** what is left of a 240 s total ceiling (and are skipped once the remainder is too small to warm anything), so the whole warm-up stays inside the hook budget and a hung `git`/`node` can never hold up a 200 the required warm-up has already earned. All three numbers live in `contracts/constants.json` → `microvm_hook_budgets`, read by this server *and* by the CDK construct, because `warmup_required < warmup_total < ready_hook` is a relationship neither side can enforce alone — `scripts/check-constants-sync.ts` asserts the ordering and bans a literal re-declaration on either side. A `--version` exec is not an AWS call and touches no network, so the hook stays AWS-silent (below).
+
+The warm-up is the *primary* fix; the probe that failed is also now non-fatal. `runner.py`'s `_log_claude_cli_version` keeps its loosened 60 s bound but additionally downgrades every `subprocess.SubprocessError`/`OSError` to a `WARN` — a diagnostic whose entire output is a log line must not be able to end a task at turn 0, however it fails.
+
+**`POST /aws/lambda-microvms/runtime/v1/validate`** — Build hook (P2). A **shallow self-check only**: server alive, every hook route registered, interpreter floor, `platform_config` contract loaded. Returns 200 with the individual check results, or 503 while still initialising (which fails the build if it never clears — the right outcome for a broken snapshot). That 503 branch is a **refactor tripwire**, not a state you can reach today: `_module_initialized` is set as the module's last statement and uvicorn accepts no request until the import completes, so it only becomes reachable once someone moves warm-up work behind the bind — and a hook with only a 200 path would then report a still-initialising snapshot as valid.
+
+It runs under the **build role**, which deliberately holds no Bedrock / Secrets Manager / DynamoDB grants, so it **makes zero AWS API calls and must keep making zero** — including its own logging (both build hooks log to stdout via `_build_hook_log`, never through the CloudWatch writer). Two reasons: a Logs write under the build role can only fail, and each failure pollutes the shared `_debug_cw_failures` alarm signal; and `boto3.client(...)` populates `boto3.DEFAULT_SESSION`, a module global holding a resolved credential chain plus the build-time region, which the snapshot would then freeze in for every MicroVM launched from that image version. "Deeper warm-up assertions" (Bedrock reachability, Memory access, tool availability) are therefore *not* implementable here. The one member of that list that turned out to be partly implementable — proving the local `claude` binary execs — lives on `/ready` instead, as a side effect of warming it (above): a local `exec` is not an AWS call, and it belongs to the hook whose 200 gates the snapshot.
+
+Baked secrets are **reported, not enforced**: `warnings` lists the names (never values) of any credential-shaped env var present in the snapshot, because the build environment's own credentials may legitimately be in that env and failing here would fail every build.
+
+**`POST /aws/lambda-microvms/runtime/v1/terminate`** — Runtime hook (P2). Best-effort: emits one final structured log line and returns 200 — always, inside the hook budget, even with nothing running, and for **any body**: malformed JSON, a wrong content-type, an empty body or no body at all. That is why the handler takes the raw request instead of a typed body model — FastAPI validates a typed body *before* the handler runs, so a truncated body would answer 422 and report a hook failure for a teardown that actually succeeded. It does **not** join the pipeline thread (that is `lifespan`'s job on graceful shutdown) and it **never writes terminal task status**: the orchestrator finalizes the task and *then* calls `TerminateMicrovm`, so a status write here would race that finalization. Nothing is buffered to flush — `ProgressWriter` does a synchronous `put_item` per event, so progress is already durable at call time.
+
+`microvmId` is parsed defensively and **arrives empty in practice**: the service sends `""` here, unlike `/run` where it is populated (live-verified, ADR-021 P2-F8). So an empty id is expected-normal, not a degraded read — and this hook therefore **cannot** join the guest's record to the control-plane one. `/run`'s `hook accepted task_id=… microvm_id=…` line carries that correlation; `/terminate`'s value is the pipeline-state snapshot it reports.
+
+**`POST /aws/lambda-microvms/runtime/v1/run`** — Payload delivery. Validates the body, installs `platform_config` (below), starts the pipeline in a background thread (the same `_extract_invocation_params` → `_spawn_background` path `/invocations` uses), and returns 200 inside the 1–60 s hook budget. Body:
+
+```json
+{
+  "microvmId": "microvm-b44b69d9-…",
+  "runHookPayload": "{\"agent_payload_s3_uri\": \"s3://bucket/<task_id>/payload.json\", \"platform_config\": {…}}"
+}
+```
+
+`runHookPayload` is an opaque **string** the service passes through from `RunMicrovm`. ABCA's contract for it is one of two shapes, mirroring the ECS container env contract (`AGENT_PAYLOAD` / `AGENT_PAYLOAD_S3_URI`):
+
+| Envelope | When |
+|---|---|
+| `{"agent_payload": {…}, "platform_config": {…}}` | the whole orchestrator payload inline — only when it fits |
+| `{"agent_payload_s3_uri": "s3://bucket/key", "platform_config": {…}}` | pointer to the payload in the platform payload bucket |
+
+The service caps `runHookPayload` at **4 096 bytes**, so the **pointer form is the normal one** — a hydrated payload is essentially always larger. Fetching it needs no new env var: the MicroVM execution role holds read-only access to that bucket and the URI carries bucket + key.
+
+#### `platform_config` — the agent's env, delivered per task (P2)
+
+On AgentCore and ECS the agent's non-secret platform env arrives as runtime env / container overrides. A MicroVM boots from a **snapshot**, so its env is frozen at *image build* time; baking the deployment's identifiers in would make every image version describe a deployment that may since have been redeployed. They therefore travel with the task, as a **sibling** of `agent_payload` (per-task fields like `memory_id` stay *inside* `agent_payload` — `platform_config` configures the process, `agent_payload` describes the task):
+
+```json
+{ "platform_config": { "task_table_name": "…", "github_token_secret_arn": "arn:…" } }
+```
+
+Each snake_case key installs into its UPPER_SNAKE env var, and a payload value **wins** over any image/pre-existing value (the payload describes the live deployment; the snapshot describes a past one). Installation happens **before** any credential or pipeline initialisation — the very next step resolves the GitHub token from `GITHUB_TOKEN_SECRET_ARN`. Everything the hook logs before that point goes to stdout only (`[server/run-pre-config]`), for the same reason the build hooks do: the CloudWatch writer resolves AWS credentials and pins `boto3.DEFAULT_SESSION` (region included), and until the install has run the only environment available is whatever the snapshot baked. The single AWS call allowed before the install is the S3 payload fetch, because the config is inside the object being fetched. The allowlist lives in `contracts/constants.json` → `microvm_platform_config` (produced by the orchestrator, consumed here; shape enforced by `mise run check:constants-sync`):
+
+| Key | Env var | Required |
+|---|---|---|
+| `task_table_name` | `TASK_TABLE_NAME` | ✅ |
+| `task_events_table_name` | `TASK_EVENTS_TABLE_NAME` | ✅ |
+| `github_token_secret_arn` | `GITHUB_TOKEN_SECRET_ARN` | ✅ |
+| `agent_session_role_arn` | `AGENT_SESSION_ROLE_ARN` | ✅ |
+| `task_approvals_table_name` | `TASK_APPROVALS_TABLE_NAME` | |
+| `nudges_table_name` | `NUDGES_TABLE_NAME` | |
+| `log_group_name` | `LOG_GROUP_NAME` | |
+| `artifacts_bucket_name` | `ARTIFACTS_BUCKET_NAME` | |
+| `trace_artifacts_bucket_name` | `TRACE_ARTIFACTS_BUCKET_NAME` | |
+| `linear_oauth_secret_arn` | `LINEAR_OAUTH_SECRET_ARN` | |
+| `jira_oauth_secret_arn` | `JIRA_OAUTH_SECRET_ARN` | |
+| `aws_sdk_ua_app_id` | `AWS_SDK_UA_APP_ID` | |
+| `anthropic_default_haiku_model` | `ANTHROPIC_DEFAULT_HAIKU_MODEL` | |
+
+Values are **non-secret identifiers only** — secrets are still fetched at `/run` time from Secrets Manager using the ARNs delivered here, so the snapshot stays secret-free. The allowlist **fails closed**: these values land in `os.environ` of the process that spawns the agent's tool subprocesses, so an unrecognised key is an env-injection attempt (`LD_PRELOAD`, `AWS_ENDPOINT_URL`, …) and the whole run is rejected with nothing installed. Blank/`null` values for optional keys are skipped rather than clobbering an image value; blank required keys are rejected. An envelope with no `platform_config` at all is accepted with a loud warning (the image and the orchestrator deploy on independent cadences).
+
+Rejections are structured so they are readable in the MicroVM log group: `400 MICROVM_RUN_PAYLOAD_INVALID` (unusable envelope — retrying the same body cannot help), `500 MICROVM_RUN_PAYLOAD_UNREADABLE` (the S3 fetch failed), `400 MICROVM_RUN_PLATFORM_CONFIG_INVALID` (key off the allowlist, non-object block, or non-string value — fix the producer), `400 MICROVM_RUN_PLATFORM_CONFIG_INCOMPLETE` (a required key missing or blank — fix the deployment wiring), `400 TASK_RECORD_INCOMPLETE` (same validator and vocabulary as `/invocations`).
+
+`/suspend` and `/resume` are deliberately **not** served — declaring a hook nothing answers fails the corresponding lifecycle transition, so the CDK construct declares exactly the hooks the agent serves. They land in P3 with the ComputeStrategy interface widening.
 
 ### Testing Server Mode Locally
 
@@ -368,7 +451,7 @@ agent/
 │   ├── repo.py          Repository setup: clone, branch, git auth, mise trust/install/build/lint
 │   ├── shell.py         Shell utilities: log(), run_cmd(), redact_secrets(), slugify(), truncate()
 │   ├── telemetry.py     Metrics, disk usage, trajectory writer (_TrajectoryWriter with write_policy_decision)
-│   ├── server.py        FastAPI — async /invocations (background thread), /ping health check, heartbeat daemon; OTEL session correlation
+│   ├── server.py        FastAPI — async /invocations (background thread), /ping health check, MicroVM /ready + /run lifecycle hooks, heartbeat daemon; OTEL session correlation
 │   ├── task_state.py    Best-effort DynamoDB task status and heartbeat writes (no-op if TASK_TABLE_NAME unset)
 │   ├── observability.py OpenTelemetry helpers (e.g. AgentCore session id)
 │   ├── memory.py        Optional memory / episode integration for the agent

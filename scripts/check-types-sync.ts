@@ -96,6 +96,9 @@ const CDK_ONLY_ALLOWLIST = new Set<string>([
   'NudgeRecord',
   'EventRecord',
   'WebhookRecord',
+  // Platform API key persistence shape — stores the secret hash and owner,
+  // neither of which the CLI ever sees (CLI uses ApiKeyDetail).
+  'ApiKeyRecord',
   'ApprovalDecisionRecordedEvent',
   // Server-side helper / internal contracts:
   'TaskNotificationsConfig',

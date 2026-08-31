@@ -123,8 +123,15 @@ describe('github-webhook receiver', () => {
     expect(lambdaSend).not.toHaveBeenCalled();
   });
 
-  test('200 silently ignores non-deployment_status events', async () => {
-    const res = await handler(event('{}', { 'X-GitHub-Event': 'pull_request' }));
+  test('200 silently ignores pull_request events (re-stack is no longer a GitHub-webhook path)', async () => {
+    // Re-stack is driven by the reconciler off a Linear
+    // @bgagent comment, not a GitHub pull_request webhook (those are
+    // WAF-blocked anyway). pull_request events are a plain 200 no-op — no
+    // restack invoke.
+    const res = await handler(event(
+      JSON.stringify({ action: 'synchronize', pull_request: { head: { ref: 'branch-A', sha: 's' } } }),
+      { 'X-GitHub-Event': 'pull_request' },
+    ));
     expect(res.statusCode).toBe(200);
     expect(lambdaSend).not.toHaveBeenCalled();
   });

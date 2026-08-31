@@ -252,10 +252,13 @@ Returns full details of a task. Users can only access their own tasks.
     "created_at": "2025-03-15T10:30:00Z",
     "updated_at": "2025-03-15T10:31:15Z",
     "started_at": "2025-03-15T10:31:10Z",
-    "completed_at": null
+    "completed_at": null,
+    "agent_heartbeat_at": "2025-03-15T10:36:02Z"
   }
 }
 ```
+
+`agent_heartbeat_at` is the agent's last in-guest liveness beat, or `null`. The agent writes it every 45 s on the `agentcore` and `lambda-microvm` backends; on `ecs` it is written once at start, because that backend runs the pipeline directly instead of serving HTTP. The orchestrator reads the same field to detect a hung agent inside a healthy compute environment ([ORCHESTRATOR.md](/sample-autonomous-cloud-coding-agents/architecture/orchestrator#dynamodb-heartbeat-agentcore-and-lambda-microvms)), so a value that is minutes old on a `RUNNING` task is the signal, not the timestamp itself. `null` on records written before the field existed.
 
 `error_classification` is a derived field computed at response time from `error_message`. When `error_message` is `null`, `error_classification` is `null`. When present, it contains:
 
@@ -302,6 +305,8 @@ Returns the authenticated user's tasks, newest first. Paginated.
 | `next_token` | String | - | Pagination token from previous response |
 
 Returns a summary subset of fields. Use `GET /v1/tasks/{task_id}` for full details.
+
+The summary includes `agent_heartbeat_at` (same semantics as on the task detail above). It is on the summary as well as the detail because liveness is a list-level question — "is anything still alive?" is asked across tasks, and answering it one task at a time is how a hung task goes unnoticed.
 
 **Errors:** `400 VALIDATION_ERROR`, `401 UNAUTHORIZED`.
 

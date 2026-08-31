@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Background coding agent — runs tasks in isolated cloud environments and produces pull requests"
 requires-python = ">=3.13"
 dependencies = [
-    "boto3==1.43.38", #https://pypi.org/project/boto3/
+    "boto3==1.43.78", #https://pypi.org/project/boto3/
     # Vestigial from the parked AgentCore Identity flow (Phase 2.0a).
     # Phase 2.0b reads per-workspace Linear OAuth tokens directly from
     # Secrets Manager because AgentCore Identity's USER_FEDERATION
@@ -15,11 +15,11 @@ dependencies = [
     # try/except (ImportError, AttributeError), so removing this dep
     # would degrade gracefully — but for now we keep the dep to
     # preserve the clean code path.
-    "bedrock-agentcore==1.16.0", #https://pypi.org/project/bedrock-agentcore/
+    "bedrock-agentcore==1.18.1", #https://pypi.org/project/bedrock-agentcore/
     "claude-agent-sdk==0.2.110", #https://github.com/anthropics/claude-agent-sdk-python/releases/tag/v0.2.110 (bundles claude CLI 2.1.191; kept in lockstep with the npm CLI pin in the Dockerfile, #215)
     "requests==2.34.2", #https://pypi.org/project/requests/
     "fastapi==0.139.0", #https://pypi.org/project/fastapi/
-    "uvicorn==0.49.0", #https://pypi.org/project/uvicorn/
+    "uvicorn==0.50.0", #https://pypi.org/project/uvicorn/
     "aws-opentelemetry-distro==0.18.0", #https://pypi.org/project/aws-opentelemetry-distro/
     "mcp==1.28.1", #https://pypi.org/project/mcp/
     # CEDAR ENGINE PARITY — DO NOT BUMP IN ISOLATION.
@@ -49,6 +49,14 @@ dependencies = [
     "jsonschema==4.26.0", #https://pypi.org/project/jsonschema/
 ]
 
+# The uv-missing-dependency-cooldown rule wants a global exclude-newer window.
+# We intentionally do NOT set one: deps are exact-pinned (==) and lockfile-managed
+# via upgrade-main.yml, and a global cooldown conflicts with fresh exact pins
+# (fastapi/bedrock-agentcore/boto3 were published within the last week) — it makes
+# `uv sync` unsatisfiable and re-breaks on every pin bump. The rule's threat model
+# (surprise malicious/unstable version) is already covered by exact pins + reviewed
+# lock upgrades. See #532.
+# nosemgrep: uv-missing-dependency-cooldown
 [tool.uv]
 constraint-dependencies = [
     "pyjwt>=2.13.0",  # PYSEC-2026-175/177/178/179 — transitive via mcp; remove when mcp bumps floor (#267)
@@ -81,6 +89,7 @@ dev = [
     "pytest",
     "pygments==2.20.0",
     "pytest-cov==7.1.0",
+    "pytest-timeout==2.4.0",  # per-test wall-clock cap: a single hung test (network/subprocess/Bedrock without its own timeout) must fail LOUDLY with a traceback, not silently burn the whole build-verify budget (ABCA-684/686: one hang stalled the baseline build past its 3600s ceiling)
     "vulture==2.16",  # dead-code detection (#282): unused functions/classes ruff F can't see
 ]
 
@@ -122,6 +131,39 @@ ignore = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+# Non-TTY output ergonomics. In a captured/piped context (the ECS build gate, CI,
+# an agent's Bash tool) pytest's default is a wall of featureless progress dots
+# with the "N passed" summary easy to lose in a tail — live-caught on ABCA-691,
+# where an agent burned ~6 turns re-running the full suite with different flags
+# because it couldn't confirm the result from the dots. ``count`` renders progress
+# as an explicit "N/M passed" so a captured log always shows how far it got and how
+# many passed; ``-ra`` appends a short summary of every non-passing outcome (with
+# reasons) at the end. Both are display-only — they never change test results.
+addopts = "-ra"
+console_output_style = "count"
+# pytest-timeout: hard wall-clock cap PER TEST. A unit test that blocks (an
+# unmocked network/subprocess/Bedrock call with no timeout of its own) otherwise
+# hangs the whole `mise run build` until the 3600s build-verify ceiling kills it,
+# turning one flaky test into an un-diagnosable 60-min stall (ABCA-684/686). With
+# this, the offending test fails with a dumped stack in 120s and the suite moves on.
+# method="signal" (SIGALRM) actually ABORTS the hung test — pytest runs
+# single-threaded in the main thread here, so the alarm interrupts even a blocked
+# C-level/socket call. method="thread" only PRINTS the stack and cannot interrupt a
+# syscall-blocked test (proven live on ABCA-688: the thread method dumped the stack
+# but the build kept hanging ~55 min until the 3600s ceiling). signal is the real fix.
+timeout = 120
+timeout_method = "signal"
+# faulthandler backstop for hangs signal-timeout CANNOT interrupt. SIGALRM only
+# fires in the MAIN thread during a test's call phase, so a hang in a WORKER
+# thread (a deadlocked Barrier/join), a fixture, or a C-level socket read the
+# main thread never returns from is invisible to it — exactly the ECS-only stall
+# chased across ABCA-684/686/688 and again on the warm-cache run (53 min of
+# silence, signal never fired). This arms faulthandler's dedicated C watchdog
+# thread (immune to the GIL and blocked syscalls) to dump EVERY thread's Python
+# stack after 300s in a test, so the next hang self-reports the exact file:line
+# instead of stalling blind to the 3600s build ceiling. A session-level
+# hard-exit watchdog for hangs OUTSIDE any test lives in tests/conftest.py.
+faulthandler_timeout = 300
 
 [tool.coverage.run]
 branch = true

@@ -67,9 +67,11 @@ def _reset_shared_circuit_breaker_state():
     yield
     _reset_circuit_breakers()
 
+
 class TestGenerateUlid:
     def test_length_is_26(self):
         assert len(_generate_ulid()) == 26
+
 
 # ❌ Bad — no isolation, test order dependency
 def test_a():
@@ -89,3 +91,4 @@ def test_a():
 - **Cedar parity** — `cedarpy==4.8.4` (agent) and `@cedar-policy/cedar-wasm` 4.8.2 (cdk) must move together. See [cdk/AGENTS.md](../cdk/AGENTS.md) and `docs/design/CEDAR_HITL_GATES.md` §15.6.
 - **Forgotten consumer** — Progress event schema changes need `cli/src/commands/watch.ts` and `test_progress_writer.py` updates.
 - **Image bundle** — CDK deploys this tree; root `mise run build` always runs agent quality.
+- **Un-attributed AWS SDK client (#319)** — build clients via `aws_session.tenant_client`/`tenant_resource` (tenant-scoped) or `aws_session.platform_client` (unscoped, still attributed); a naked `boto3.client(...)` silently drops solution attribution.

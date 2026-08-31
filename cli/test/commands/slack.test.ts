@@ -18,9 +18,21 @@
  */
 
 import { ApiClient } from '../../src/api-client';
-import { makeSlackCommand } from '../../src/commands/slack';
+import { makeSlackCommand, resolveSlackTeamId } from '../../src/commands/slack';
 
 jest.mock('../../src/api-client');
+
+jest.mock('@aws-sdk/lib-dynamodb', () => {
+  const actual = jest.requireActual('@aws-sdk/lib-dynamodb');
+  return {
+    ...actual,
+    DynamoDBDocumentClient: {
+      from: jest.fn(() => ({ send: ddbSend })),
+    },
+  };
+});
+
+const ddbSend = jest.fn();
 
 describe('slack command', () => {
   let consoleSpy: jest.SpiedFunction<typeof console.log>;
@@ -82,6 +94,60 @@ describe('slack command', () => {
       await cmd.parseAsync(['node', 'test', 'link', 'XYZ789']);
 
       expect(mockSlackLink).toHaveBeenCalledWith('XYZ789');
+    });
+  });
+
+  describe('resolveSlackTeamId', () => {
+    let exitSpy: jest.SpiedFunction<typeof process.exit>;
+    let errorSpy: jest.SpiedFunction<typeof console.error>;
+
+    beforeEach(() => {
+      ddbSend.mockReset();
+      errorSpy = jest.spyOn(console, 'error').mockImplementation();
+      // Make process.exit throw so the function stops like it would in the CLI,
+      // and the test can assert it was reached.
+      exitSpy = jest.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+        throw new Error(`process.exit:${code}`);
+      }) as never);
+    });
+
+    afterEach(() => {
+      exitSpy.mockRestore();
+      errorSpy.mockRestore();
+    });
+
+    test('prefers an explicit --team-id without touching DynamoDB', async () => {
+      const teamId = await resolveSlackTeamId('us-east-1', 'SlackInstall', 'T-EXPLICIT');
+      expect(teamId).toBe('T-EXPLICIT');
+      expect(ddbSend).not.toHaveBeenCalled();
+    });
+
+    test('auto-resolves the single active installation', async () => {
+      ddbSend.mockResolvedValueOnce({ Items: [{ team_id: 'T-ONLY', status: 'active' }] });
+      const teamId = await resolveSlackTeamId('us-east-1', 'SlackInstall', undefined);
+      expect(teamId).toBe('T-ONLY');
+    });
+
+    test('exits asking for --team-id when multiple installations exist', async () => {
+      ddbSend.mockResolvedValueOnce({
+        Items: [
+          { team_id: 'T-A', status: 'active' },
+          { team_id: 'T-B', status: 'active' },
+        ],
+      });
+      await expect(resolveSlackTeamId('us-east-1', 'SlackInstall', undefined)).rejects.toThrow('process.exit');
+      const msgs = errorSpy.mock.calls.map(c => String(c[0]));
+      expect(msgs.some(m => m.includes('Multiple Slack workspaces'))).toBe(true);
+    });
+
+    test('exits when no active installations exist', async () => {
+      ddbSend.mockResolvedValueOnce({ Items: [] });
+      await expect(resolveSlackTeamId('us-east-1', 'SlackInstall', undefined)).rejects.toThrow('process.exit');
+    });
+
+    test('exits when the installation table name is unavailable', async () => {
+      await expect(resolveSlackTeamId('us-east-1', null, undefined)).rejects.toThrow('process.exit');
+      expect(ddbSend).not.toHaveBeenCalled();
     });
   });
 });

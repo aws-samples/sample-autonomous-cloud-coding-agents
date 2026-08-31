@@ -1,6 +1,6 @@
 # Identity and authentication — worked examples
 
-ABCA today carries its own inbound identity (Amazon Cognito for the CLI and REST API, HMAC-SHA256 for webhooks) and resolves outbound credentials per integration through hand-rolled Secrets Manager resolvers (`resolve_github_token`, `resolve_linear_api_token`, the new Jira resolver in PR #302). This doc maps each of those integration shapes onto the [Amazon Bedrock AgentCore Identity](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/identity.html) primitives: workload identity, the token vault, and the three outbound flows. A contributor adding a new integration can then see which flow to pick and what the wire looks like at each hop. Every code block below is grounded in the [AgentCore developer guide](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/identity.html) and the [CreateOauth2CredentialProvider API reference](https://docs.aws.amazon.com/bedrock-agentcore-control/latest/APIReference/API_CreateOauth2CredentialProvider.html); the binding decision for ABCA is captured in [ADR-016](../decisions/ADR-016-pluggable-identity-and-auth.md).
+ABCA today carries its own inbound identity (Amazon Cognito for the CLI and REST API, HMAC-SHA256 for webhooks) and resolves outbound credentials per integration through hand-rolled Secrets Manager resolvers (`resolve_github_token`, `resolve_linear_api_token`, and the Jira OAuth/Forge resolver). This doc maps each of those integration shapes onto the [Amazon Bedrock AgentCore Identity](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/identity.html) primitives: workload identity, the token vault, and the three outbound flows. A contributor adding a new integration can then see which flow to pick and what the wire looks like at each hop. Every code block below is grounded in the [AgentCore developer guide](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/identity.html) and the [CreateOauth2CredentialProvider API reference](https://docs.aws.amazon.com/bedrock-agentcore-control/latest/APIReference/API_CreateOauth2CredentialProvider.html); the binding decision for ABCA is captured in [ADR-016](../decisions/ADR-016-pluggable-identity-and-auth.md).
 
 - **Use this doc for:** picking the right outbound flow (USER_FEDERATION / M2M / OBO) for a new integration, reading the principal at each hop of a webhook-triggered async agent, and seeing the Linear before/after the token vault replaces.
 - **Related docs:** [SECURITY.md](./SECURITY.md) for the security boundaries and the shared-PAT limitation, [ADR-016](../decisions/ADR-016-pluggable-identity-and-auth.md) for the two-seam pluggable-auth decision, and the Authentication page (`/using/authentication`) for ABCA's current inbound auth.
@@ -17,15 +17,16 @@ ABCA today carries its own inbound identity (Amazon Cognito for the CLI and REST
 
 ## ABCA today
 
-The before-state, verified at `origin/main`. Inbound is ABCA's own Cognito and HMAC, not AgentCore's inbound authorizers. Outbound is per-integration Secrets Manager resolvers behind one `resolve_<integration>_token()` shape. The AgentCore workload-access-token path is wired through the whole pipeline but stays dormant.
+The current implementation uses ABCA's own Cognito and HMAC inbound authentication, not AgentCore's inbound authorizers. Outbound credentials are selected by per-integration Secrets Manager resolvers. The AgentCore workload-access-token path is wired through the whole pipeline but stays dormant.
 
 | Integration | Inbound | Outbound credential | File | Scope |
 |---|---|---|---|---|
 | CLI / REST API | Cognito User Pool JWT, validated by API Gateway Cognito authorizer; handler reads `sub` as `user_id` | n/a | `using/Authentication.md` | per-user |
 | Webhooks (GitHub, Linear, Jira) | HMAC-SHA256, per-integration shared secret in Secrets Manager, Lambda REQUEST authorizer | n/a | `using/Authentication.md` | per-tenant |
+| Webhook management (headless) | Platform API key **or** Cognito JWT — one unified Lambda REQUEST authorizer branches on `X-API-Key` vs `Authorization`. Keys are `bgak_<key_id>_<secret>`; the SHA-256 of the secret is stored in DynamoDB keyed by `key_id` (looked up per request), and the authorizer returns the key's owner `user_id` + scopes as context. Scoped to `webhooks:manage`. | n/a | `cdk/src/handlers/api-key-authorizer.ts` | per-user (key inherits creator's `user_id`) |
 | GitHub | n/a | Single shared PAT from Secrets Manager (`GITHUB_TOKEN_SECRET_ARN`), cached in `os.environ["GITHUB_TOKEN"]` | `agent/src/config.py:resolve_github_token()` | one token, all repos and users |
 | Linear | n/a | Per-workspace OAuth token (`actor=app`), DDB registry keyed by `linearWorkspaceId` → Secrets Manager, Lambda resolver refreshes within 60s of expiry | `cdk/src/handlers/shared/linear-oauth-resolver.ts` (594 LOC) + `agent/src/config.py:resolve_linear_api_token()` | per-workspace, not per-user |
-| Jira (PR #302) | n/a | Per-tenant OAuth 3LO → Secrets Manager, same pattern as Linear | `cdk/src/handlers/shared/jira-oauth-resolver.ts` + `cli/src/jira-oauth.ts` | per-tenant |
+| Jira (PR #302, issue #642) | n/a | Per-tenant bundle: OAuth 3LO for inbound reads/human lookup; HMAC-signed Forge proxy for app-authored writes; 3LO write fallback only before Forge migration | `cdk/src/handlers/shared/jira-oauth-resolver.ts`, `cdk/src/handlers/shared/jira-app-actor.ts`, `agent/src/jira_reactions.py` | per-tenant |
 
 **The dormant AgentCore path.** ABCA runs on AgentCore Runtime and the workload-access-token (WAT) propagation path is wired through the whole pipeline but unused. The orchestrator sets `runtimeUserId` on `InvokeAgentRuntimeCommand` (`agentcore-strategy.ts:56`), holds `InvokeAgentRuntimeForUser` (`task-orchestrator.ts:288-289`), and the agent reads the `WorkloadAccessToken` header and re-injects it across the pipeline thread (`server.py:283-310, 387-413`). `bedrock-agentcore` stays in `agent/pyproject.toml` as a vestigial dependency. ADR-016 resumes this path; it does not build from scratch.
 
@@ -183,6 +184,8 @@ The config field is `grantType`, singular. The nested actor field is `actorToken
 
 A human creates a ticket and adds a label (`agent:triage` on Jira; the same shape covers the GitHub-issue-label trigger the ABCA team is discussing in #abca). Automation fires a webhook, the agent triages, comments, and maybe closes, acting on the user's behalf where write-back matters. This is the realistic trigger pattern: no interactive browser, identity arrives as webhook payload, and consent happens later when the agent calls back.
 
+> **Illustrative target, not the shipped Jira write path.** The flow below shows a future user-bound token-vault design. Current ABCA Jira uses 3LO only for inbound reads and human lookup. Outbound writes go to an HMAC-signed Forge web trigger, which calls Jira with `api.asApp()` so the actor is the installed `bgagent` app. The human Jira account remains task-attribution data, not the outbound credential. See [ADR-015](../decisions/ADR-015-jira-integration.md).
+
 The architecture chain:
 
 ```mermaid
@@ -215,13 +218,13 @@ The principal at each hop:
 | Webhook Lambda → SQS | Lambda execution role | IAM SigV4 | full AWS trust |
 | Dispatcher → Runtime | Dispatcher IAM role (InvokeAgentRuntime + InvokeAgentRuntimeForUser) | SigV4 + X-Amzn-Bedrock-AgentCore-Runtime-User-Id | your org asserts the user |
 | Runtime → agent process | Runtime-managed workload identity (SLR) | WorkloadAccessToken payload header | internal |
-| Agent → Jira REST | user via 3LO cached token OR workload identity via M2M | Authorization: Bearer <user-token \| service-token> | consent-gated at the real OAuth boundary |
+| Agent → ticket REST (illustrative target) | user via 3LO cached token OR workload identity via M2M | Authorization: Bearer <user-token \| service-token> | consent-gated at the real OAuth boundary |
 
 **The honest caveat.** A plain webhook authenticates *the tenant*, not the user. The user identity (`user.accountId`) arrives as *data* in the payload, not as a verifiable credential. A malicious tenant admin could fabricate events. Treat the webhook's authenticated identity and the user identity as two different things and reconcile downstream. The real OAuth consent moment happens when the agent calls the ticket system back, not at the webhook.
 
 Two mitigations:
 
-1. **Prefer a signed app over a plain webhook.** An Atlassian Connect / Forge app receives a JWT signed by Atlassian carrying `sub` = the user account ID, verifiable against Atlassian's keys.
+1. **Prefer a signed app over a plain webhook when verifiable inbound user identity is required.** An Atlassian Connect / Forge app can receive an Atlassian-signed user context. ABCA's current Jira webhook remains tenant-authenticated HMAC, while its separate Forge app is outbound-only and deliberately acts as the app rather than the triggering user.
 2. **Gate write-back on fresh consent.** If `(workload, user_id)` has no cached token, post a consent URL as a ticket comment and wait. Read-only triage can run under `M2M` with a service account.
 
 **The IAM gate on impersonation.** The dispatcher role needs `bedrock-agentcore:InvokeAgentRuntimeForUser` to send the user header. Keep two IAM statements separate, each with explicit resource ARNs: `InvokeAgentRuntime` invokes as self, `InvokeAgentRuntimeForUser` invokes while asserting a user. A too-broad policy lets any caller act as any user.

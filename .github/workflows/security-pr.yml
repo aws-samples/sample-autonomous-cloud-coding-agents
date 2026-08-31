@@ -3,10 +3,15 @@ name: security-pr
 # (#313: secrets reaching history because the scan only ran weekly) at PR time.
 #
 # Scope is deliberately the FAST scanners only — secrets (range-scoped),
-# dependencies, and workflow static-analysis — so this stays off the slow path
-# (<~3 min) and can be a required status check without throttling the inner loop.
-# The heavy image + SAST suite (trivy/grype/semgrep) runs in security.yml and is
-# tracked separately by #235; the full-history secret sweep also lives there.
+# dependencies, workflow static-analysis, and the silent-success-masking rule
+# (ratcheted to newly-introduced findings only) — so this stays off the slow
+# path (<~3 min) and can be a required status check without throttling the inner
+# loop. The masking scan is diff-scoped via --baseline-commit: it blocks a PR
+# that ADDS a finding without re-flagging the pre-existing debt on main (#756).
+# The heavy image + full SAST suite (trivy/grype/semgrep auto rules) runs in
+# security.yml and is tracked separately by #235; the full-repo blocking masking
+# scan (security:sast:masking) also runs there and in the pre-push hook. The
+# full-history secret sweep lives in security.yml too.
 on:
   pull_request: {}
   # Must also run on merge_group so this check reports inside the merge queue;
@@ -36,7 +41,7 @@ jobs:
       AQUA_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Full history so the range scan can resolve the base ref. A shallow
           # clone would leave origin/<base> unresolvable for the commit-range diff.
@@ -44,7 +49,7 @@ jobs:
           persist-credentials: false
 
       - name: Install mise
-        uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+        uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
         with:
           cache: true
 
@@ -58,28 +63,49 @@ jobs:
           MG_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
         run: |
           set -euo pipefail
+          # `range` is the gitleaks A..B commit range; `baseline` is the single
+          # commit semgrep diffs against (--baseline-commit reports only findings
+          # ADDED since it). Both derive from the same base SHA.
           case "$EVENT_NAME" in
             pull_request)
               # Scan exactly the commits this PR introduces.
-              echo "range=${PR_BASE_SHA}..${PR_HEAD_SHA}" >> "$GITHUB_OUTPUT"
+              range="${PR_BASE_SHA}..${PR_HEAD_SHA}"
+              baseline="${PR_BASE_SHA}"
               ;;
             merge_group)
               # Scan only the queued merge commits — not full history. An empty
               # range would walk every ref and fail on secrets on other branches
               # (#334 merge-queue ejection).
-              echo "range=${MG_BASE_SHA}..${MG_HEAD_SHA}" >> "$GITHUB_OUTPUT"
+              range="${MG_BASE_SHA}..${MG_HEAD_SHA}"
+              baseline="${MG_BASE_SHA}"
               ;;
             workflow_dispatch|*)
               # Manual dispatch: scan HEAD only (safe default, not full history).
-              echo "range=HEAD" >> "$GITHUB_OUTPUT"
+              # baseline=HEAD reports only uncommitted findings (none in CI), so
+              # the ratchet is a no-op here — the full scan lives in security.yml.
+              range="HEAD"
+              baseline="HEAD"
               ;;
           esac
-          echo "Resolved GITLEAKS_RANGE='$(tail -n1 "$GITHUB_OUTPUT" | cut -d= -f2-)'"
+          echo "range=${range}" >> "$GITHUB_OUTPUT"
+          echo "baseline=${baseline}" >> "$GITHUB_OUTPUT"
+          echo "Resolved GITLEAKS_RANGE='${range}'"
+          echo "Resolved SEMGREP_MASKING_BASELINE='${baseline}'"
 
       - name: Secret scan (gitleaks, range-scoped)
         env:
           GITLEAKS_RANGE: ${{ steps.range.outputs.range }}
         run: mise run security:secrets:range
+
+      # This step is part of the "Secrets, deps, and workflow scan" job, which is
+      # a required status check on main (repo ruleset) and re-runs in the merge
+      # queue using trunk's copy of this workflow — so a fork PR cannot gut this
+      # step to slip a masking regression past merge. Do not remove this step or
+      # rename the job: the required-check binding is by job name.
+      - name: Silent-success masking scan (semgrep, ratcheted to new findings)
+        env:
+          SEMGREP_MASKING_BASELINE: ${{ steps.range.outputs.baseline }}
+        run: mise run security:sast:masking:range
 
       - name: Dependency scan (osv-scanner)
         run: mise run security:deps

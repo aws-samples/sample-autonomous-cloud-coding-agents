@@ -17,19 +17,21 @@
  *  SOFTWARE.
  */
 
-import { ConditionalCheckFailedException, DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
-import { DeleteCommand, DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
+import { DeleteCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
+import { resolveSoleActiveJiraTenant } from './shared/jira-tenant-registry';
 import {
   isWebhookTimestampFresh,
   verifyJiraRequest,
   verifyJiraRequestForTenant,
 } from './shared/jira-verify';
 import { logger } from './shared/logger';
+import { makeClient, makeDocClient } from './shared/ua';
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
-const lambdaClient = new LambdaClient({});
+const ddb = makeDocClient();
+const lambdaClient = makeClient(LambdaClient);
 
 const WEBHOOK_SECRET_ARN = process.env.JIRA_WEBHOOK_SECRET_ARN!;
 const DEDUP_TABLE_NAME = process.env.JIRA_WEBHOOK_DEDUP_TABLE_NAME!;
@@ -59,6 +61,9 @@ interface JiraWebhookEnvelope {
     readonly key?: string;
     readonly fields?: { readonly project?: { readonly id?: string; readonly key?: string } };
   };
+  readonly comment?: {
+    readonly id?: string;
+  };
   /** `cloudId` is delivered as a top-level field on Atlassian Cloud webhooks. */
   readonly matchedWebhookIds?: number[];
   readonly user?: { readonly accountId?: string };
@@ -79,7 +84,8 @@ interface JiraEnvelopeWithCloud extends JiraWebhookEnvelope {
  * POST /v1/jira/webhook — Jira Cloud webhook receiver.
  *
  * Verifies the `X-Hub-Signature` HMAC over the raw body, dedups on
- * `(issueKey, webhookEvent, timestamp)` with an 8h TTL, and async-invokes
+ * issue events on `(issueKey, webhookEvent, timestamp)` and comment events on
+ * `(issueKey, comment_created, commentId)` with an 8h TTL, then async-invokes
  * the processor Lambda so we can ack quickly. Atlassian sends the
  * algorithm prefix (`sha256=…`) — `verifyJiraSignature` strips it before
  * comparison.
@@ -117,10 +123,10 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return jsonResponse(400, { error: 'Invalid JSON' });
     }
 
-    // Per-tenant verification first. Falls through to stack-wide if (a) registry
+    // Per-tenant verification first. Uses the stack-wide verifier if (a) registry
     // table not configured, (b) no cloudId in body, (c) tenant not in registry,
     // or (d) tenant's stored secret lacks `webhook_signing_secret`.
-    // Per-tenant MISMATCH and REVOKED are fatal — no fallback.
+    // Per-tenant MISMATCH and REVOKED are fatal — no alternate verification.
     //
     // `verifiedViaStackWide` is propagated to the processor: a per-tenant
     // signature proves the sender knows *that* tenant's secret (so the
@@ -130,10 +136,12 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     // binding it to the sole active tenant instead.
     let verified = false;
     let verifiedViaStackWide = false;
-    if (WORKSPACE_REGISTRY_TABLE && payload.cloudId) {
+    const verificationCloudId = payload.cloudId
+      ?? await resolveSoleActiveJiraTenant(ddb, WORKSPACE_REGISTRY_TABLE);
+    if (WORKSPACE_REGISTRY_TABLE && verificationCloudId) {
       const result = await verifyJiraRequestForTenant(
         WORKSPACE_REGISTRY_TABLE,
-        payload.cloudId,
+        verificationCloudId,
         signature,
         event.body,
       );
@@ -142,15 +150,17 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       } else if (result === 'mismatch') {
         logger.warn('Jira webhook signature mismatch against per-tenant secret', {
           jira_cloud_id: payload.cloudId,
+          verified_jira_cloud_id: verificationCloudId,
         });
         return jsonResponse(401, { error: 'Invalid signature' });
       } else if (result === 'revoked') {
-        logger.warn('Jira webhook from revoked tenant — rejecting without stack-wide fallback', {
+        logger.warn('Jira webhook from revoked tenant — rejecting without stack-wide verification', {
           jira_cloud_id: payload.cloudId,
+          verified_jira_cloud_id: verificationCloudId,
         });
         return jsonResponse(401, { error: 'Tenant not active' });
       }
-      // 'no-per-tenant-secret' falls through to stack-wide.
+      // 'no-per-tenant-secret' uses the stack-wide verifier.
     }
 
     if (!verified) {
@@ -161,7 +171,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
         return jsonResponse(401, { error: 'Invalid signature' });
       }
       verifiedViaStackWide = true;
-      logger.info('Jira webhook verified via stack-wide fallback secret', {
+      logger.info('Jira webhook verified via stack-wide secret', {
         jira_cloud_id: payload.cloudId,
         per_tenant_registry_configured: Boolean(WORKSPACE_REGISTRY_TABLE),
       });
@@ -184,9 +194,12 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     const webhookEvent = payload.webhookEvent;
-    if (webhookEvent !== 'jira:issue_created' && webhookEvent !== 'jira:issue_updated') {
-      // Silent 200 so Atlassian doesn't retry — every non-issue event is acked.
-      logger.info('Ignoring non-Issue Jira webhook', { webhookEvent });
+    const isIssueEvent =
+      webhookEvent === 'jira:issue_created' || webhookEvent === 'jira:issue_updated';
+    const isCommentEvent = webhookEvent === 'comment_created';
+    if (!isIssueEvent && !isCommentEvent) {
+      // Silent 200 so Atlassian doesn't retry unsupported event types.
+      logger.info('Ignoring unsupported Jira webhook', { webhookEvent });
       return jsonResponse(200, { ok: true });
     }
 
@@ -194,18 +207,25 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     const issueId = issue?.id;
     const issueKey = issue?.key;
     if (!issueId || !issueKey) {
-      logger.warn('Jira Issue webhook missing issue.id or issue.key', { webhookEvent });
+      logger.warn('Jira webhook missing issue.id or issue.key', { webhookEvent });
       return jsonResponse(400, { error: 'Missing issue identifier' });
+    }
+    const commentId = payload.comment?.id;
+    if (isCommentEvent && !commentId) {
+      logger.warn('Jira comment webhook missing comment.id', { issue_key: issueKey });
+      return jsonResponse(400, { error: 'Missing comment identifier' });
     }
 
     // Dedup via conditional PutItem.
     //
-    // Atlassian doesn't expose a per-delivery message ID we can rely on. The
-    // payload's top-level `timestamp` (UNIX ms) is set when the event was
-    // queued and remains stable across retries of the same delivery.
-    // Composing `${issueKey}#${webhookEvent}#${timestamp}` collapses retries
-    // (same timestamp) without merging distinct events.
-    const dedupKey = `${issueKey}#${webhookEvent}#${payload.timestamp ?? 'unknown'}`;
+    // Comment ids are stable and unique, so they are the strongest dedup key
+    // for comment_created. Issue events have no entity id beyond the issue and
+    // continue using the delivery timestamp so separate label additions do not
+    // collapse into one event.
+    const dedupDiscriminator = isCommentEvent
+      ? commentId!
+      : payload.timestamp ?? 'unknown';
+    const dedupKey = `${issueKey}#${webhookEvent}#${dedupDiscriminator}`;
     const nowSeconds = Math.floor(Date.now() / 1000);
     try {
       await ddb.send(new PutCommand({
