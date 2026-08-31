@@ -36,6 +36,18 @@ AgentCore Identity not available in us-east-1 — using Secrets Manager.
 
 A workspace that started on Secrets Manager and later moves to the vault **keeps** its Secrets Manager token as a fallback. A workspace onboarded straight onto the vault has no such token by design — it needs the vault to be reachable.
 
+When a workspace's authorization dies, ABCA records it on the registry row and publishes to the stack's operational alert topic. That topic has **no subscribers unless you deployed with `alertEmail`**, so set it if you want to hear about a dead workspace rather than discover it from `bgagent platform doctor`.
+
+#### One workload identity per stack
+
+The vault mints tokens under an AgentCore workload identity named after the stack (for example `abca_linear_oauth_AbcaAgentStack`), published as the `LinearVaultWorkloadName` output. These names are unique per account **and region**, so two vault-enabled stacks must not share one — the second to deploy would overwrite the first's consent-callback allowlist.
+
+A grant is bound to that name, so **renaming it orphans every consent already given**. If you deployed the vault before this was stack-scoped, pin the old name instead of re-authorizing every workspace:
+
+```bash
+--context linearVaultWorkloadName=abca_linear_oauth
+```
+
 ### Multi-workspace
 
 One ABCA deployment can serve several Linear workspaces. Each gets its own registry row and its own `bgagent-linear-oauth-<slug>` secret, keyed by Linear's `organizationId`. Run setup once per workspace.
@@ -319,3 +331,22 @@ aws dynamodb update-item \
 ```
 
 Then delete the webhook from [Linear Settings → API](https://linear.app/settings/api) and uninstall the app from [Workspace Settings → Integrations](https://linear.app/settings/integrations).
+
+### Vault-managed workspaces: the credential provider outlives the stack
+
+If the workspace was onboarded with the Identity vault (its registry row has a
+`provider_name`), `setup` created an **AgentCore credential provider** outside
+CloudFormation. `cdk destroy` removes the workload identity but leaves the provider
+behind, holding your Linear Client ID, Client Secret, and a live grant that keeps
+refreshing. It will not appear in `cdk diff` or drift detection.
+
+List and delete them explicitly:
+
+```bash
+aws bedrock-agentcore-control list-oauth2-credential-providers --region <region>
+aws bedrock-agentcore-control delete-oauth2-credential-provider \
+  --name bgagent-linear-oauth-<slug> --region <region>
+```
+
+Do this **before** `cdk destroy` if you can — afterwards you have to know the provider
+names, since nothing left in the account references them.

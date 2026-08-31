@@ -93,25 +93,39 @@ export class LinearIdentityVault extends Construct {
       environment: { ABCA_COMPONENT: 'linear-identity-provisioning' },
     });
 
-    // Workload-identity lifecycle. The directory + identity are scoped to
-    // `workload-identity-directory/*`: the identity name is ours but the
-    // directory segment is `default`, and Create authorizes against the
-    // directory before the identity exists.
+    // Workload-identity lifecycle, split by what each action can actually be scoped
+    // to. Create is the only one that must name the DIRECTORY: it authorizes before
+    // the identity exists, so there is nothing narrower to point at. The rest are
+    // scoped to this stack's own identity.
+    //
+    // The split matters because of what Update does. It REPLACES
+    // `allowedResourceOauth2ReturnUrls`, so `workload-identity-directory/*` let this
+    // Lambda rewrite the consent allowlist of any workload identity in the account —
+    // including another stack's, whose consent would then start failing the allowlist
+    // with nothing in either template to explain it. Even `…-directory/default` is
+    // too broad if the service authorizes Update against the directory rather than
+    // the identity; if a deploy ever shows that, widen it back with the AccessDenied
+    // quoted here rather than pre-emptively.
     onEventFn.addToRolePolicy(
       new iam.PolicyStatement({
-        actions: [
-          'bedrock-agentcore:CreateWorkloadIdentity',
-          'bedrock-agentcore:GetWorkloadIdentity',
-          'bedrock-agentcore:UpdateWorkloadIdentity',
-          'bedrock-agentcore:DeleteWorkloadIdentity',
-        ],
+        actions: ['bedrock-agentcore:CreateWorkloadIdentity'],
         resources: [
           Stack.of(this).formatArn({
             service: 'bedrock-agentcore',
             resource: 'workload-identity-directory',
-            resourceName: '*',
+            resourceName: 'default',
           }),
         ],
+      }),
+    );
+    onEventFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: [
+          'bedrock-agentcore:GetWorkloadIdentity',
+          'bedrock-agentcore:UpdateWorkloadIdentity',
+          'bedrock-agentcore:DeleteWorkloadIdentity',
+        ],
+        resources: [this.workloadIdentityArn],
       }),
     );
 
@@ -222,12 +236,13 @@ export class LinearIdentityVault extends Construct {
     grantee.grantPrincipal.addToPrincipalPolicy(
       new iam.PolicyStatement({
         actions: ['bedrock-agentcore:GetResourceOauth2Token'],
-        resources: [
-          workloadDirectoryArn,
-          this.workloadIdentityArn,
-          tokenVaultArn,
-          credentialProviderArn,
-        ],
+        // The vault and the per-provider path only. The workload-identity directory
+        // and identity ARNs were also listed here, which was speculative: the live
+        // AccessDenied for this action named `token-vault/default`, and the directory
+        // is already granted for `GetWorkloadAccessTokenForUserId` above where it IS
+        // required. Listing resources an action was never shown to authorize against
+        // is breadth with nothing behind it.
+        resources: [tokenVaultArn, credentialProviderArn],
       }),
     );
     // The vault stores each provider's client secret in a service-owned secret

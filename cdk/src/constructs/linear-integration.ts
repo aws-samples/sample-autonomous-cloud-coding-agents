@@ -323,7 +323,21 @@ export class LinearIntegration extends Construct {
     // write — it is the path a revoked workspace hits on every event, and the
     // update is conditioned on `installed_at` so a verdict can never revoke the
     // successor installation.
-    this.workspaceRegistryTable.grantReadWriteData(webhookProcessorFn);
+    //
+    // `UpdateItem` only, NOT `grantReadWriteData`. The handler's entire write
+    // vocabulary on this table is three conditional updates (latch, un-latch,
+    // announcement claim); `grantReadWriteData` would additionally hand it
+    // PutItem/DeleteItem/BatchWriteItem, and on the indexes. That breadth matters
+    // more here than usual: this is the Lambda that runs `pdf-parse` over
+    // attacker-supplied attachments, and a row in THIS table selects which signing
+    // secret verifies an inbound webhook HMAC — so create/delete on it would be a
+    // path from a malicious attachment to accepting forged webhooks.
+    this.workspaceRegistryTable.grantReadData(webhookProcessorFn);
+    webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:UpdateItem'],
+      // The base table only. No `index/*`: UpdateItem never targets an index.
+      resources: [this.workspaceRegistryTable.tableArn],
+    }));
     // Seed the orchestration DAG + release root children.
     if (props.orchestrationTable) {
       props.orchestrationTable.grantReadWriteData(webhookProcessorFn);
