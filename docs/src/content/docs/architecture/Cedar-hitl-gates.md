@@ -4,12 +4,11 @@ title: Cedar hitl gates
 
 # Cedar HITL Approval Gates
 
-> **Status:** Detailed design, pre-implementation.
-> **Companion:** [`INTERACTIVE_AGENTS.md`](/architecture/interactive-agents) §9.3 (pointing here), §7 (state machine).
-> **Visual:** [`/sample-autonomous-cloud-coding-agents/diagrams/phase3-cedar-hitl.drawio`](/sample-autonomous-cloud-coding-agents/diagrams/phase3-cedar-hitl.drawio) (12 pages; supplemented by inline Mermaid diagrams below).
+> **Status:** Core implemented; this document remains the authoritative design reference.
+> **Companion:** [`INTERACTIVE_AGENTS.md`](/sample-autonomous-cloud-coding-agents/architecture/interactive-agents) §9.3 (pointing here), §7 (state machine).
 > **Design locked:** 2026-04-23 (Sam ↔ assistant discussion).
 > **Rev:** 5 (2026-05-06 — fold in parallel adversarial + advocate review of the timeout design: late-approval re-read on TIMED_OUT ConditionCheckFailed; user-visible timeout-cap milestones; ceiling-shrink milestone; Runtime JWT bound verified as auto-refreshed IAM; three new tuning metrics; explicit off-hours trade-off section; notification-delivery-failure boundary. IMPL-24 through IMPL-28 added.).
-> **Implementation:** not started.
+> **Implementation:** Core shipped. The 3-outcome engine (`agent/src/policy.py`), default policy sets (`agent/policies/hard_deny.cedar`, `agent/policies/soft_deny.cedar`), approval Lambdas (`cdk/src/handlers/{approve-task,deny-task,get-pending,get-policies}.ts`) wired into `cdk/src/constructs/task-api.ts` (routes `/tasks/{id}/approve`, `/deny`, `/pending`, `/repos/{repo_id}/policies`), the cross-engine parity fixtures (`contracts/cedar-parity/`), and the exact engine pins are all on `main`. §15's task list is preserved as a historical implementation record; see the note at the top of §15 for what (if anything) remains unbuilt.
 
 ---
 
@@ -148,7 +147,7 @@ Settled during the 2026-04-23 design discussion and extended after the 2026-04-2
 
 ## 4. End-to-end request flow
 
-Narrative walk-through of the happy path. Sequence diagrams in [phase3-cedar-hitl.drawio pages 3-6](/sample-autonomous-cloud-coding-agents/diagrams/phase3-cedar-hitl.drawio), supplemented by the round-trip Mermaid below.
+Narrative walk-through of the happy path. Sequence diagrams in the round-trip Mermaid below.
 
 ### Setup (task start)
 
@@ -670,7 +669,7 @@ def evaluate_tool_use(self, tool_name: str, tool_input: dict) -> PolicyDecision:
 
 The recent-decision cache is a simple `dict[(tool_name, input_sha), (decision, reason, inserted_at)]` with a 60-second sliding window. Entries are added by the PreToolUse hook whenever an approval resolves to DENIED or TIMED_OUT — not on APPROVED (we don't want to accidentally auto-deny a tool call the user just approved). Cache is in-process, **lost on container restart** — a re-gating of the same recently-denied action is possible if the container restarts mid-task. See §12.8 and finding #3 scenario below.
 
-**Scenario (finding #3):** A developer submits `--task "clean up /tmp"` and the agent runs `Bash: rm -rf /tmp/build-cache-*`. The soft-deny rule `rm_rf_path` fires; the user clicks deny with reason "use the cache-clean target in the Makefile instead". The agent's recent-decision cache now holds `(Bash, sha256("rm -rf /tmp/build-cache-*"))` for 60 seconds. The agent tries the same command on its next turn (cached → auto-deny, no new approval request — this is the point). Now imagine a container restart at this moment (AWS spot interruption, OOM-kill, manual redeploy). The new container's `PolicyEngine` has an empty cache. The agent tries the same command again. The soft-deny fires again. The user gets the same prompt they denied 30 seconds ago. This is annoying but bounded: the persistent per-task `approvalGateCap` (decision #13, default 50) means even with worst-case restart + retry amplification, the user sees at most `approvalGateCap` prompts before the task is force-failed. We accept this as a threat-model caveat rather than persisting the cache to DDB because (a) container restarts are rare, (b) DDB persistence would add latency to every denied call's write path, and (c) the persistent gate cap provides the terminal safety regardless of cache state. An operator monitoring the `approval_cap_exceeded` dashboard widget will see anomalous retry patterns if they become systemic. A persistent decision cache is noted in §17 as future work, gated on actual restart telemetry justifying the complexity.
+**Scenario (finding #3):** A developer submits `--task "ship the hotfix to main"` and the agent runs `Bash: git push --force origin main`. The soft-deny rule `force_push_main` fires; the user clicks deny with reason "open a PR instead of force-pushing main". The agent's recent-decision cache now holds `(Bash, sha256("git push --force origin main"))` for 60 seconds. The agent tries the same command on its next turn (cached → auto-deny, no new approval request — this is the point). Now imagine a container restart at this moment (AWS spot interruption, OOM-kill, manual redeploy). The new container's `PolicyEngine` has an empty cache. The agent tries the same command again. The soft-deny fires again. The user gets the same prompt they denied 30 seconds ago. This is annoying but bounded: the persistent per-task `approvalGateCap` (decision #13, default 50) means even with worst-case restart + retry amplification, the user sees at most `approvalGateCap` prompts before the task is force-failed. We accept this as a threat-model caveat rather than persisting the cache to DDB because (a) container restarts are rare, (b) DDB persistence would add latency to every denied call's write path, and (c) the persistent gate cap provides the terminal safety regardless of cache state. An operator monitoring the `approval_cap_exceeded` dashboard widget will see anomalous retry patterns if they become systemic. A persistent decision cache is noted in §17 as future work, gated on actual restart telemetry justifying the complexity.
 
 ### 6.3 Annotation merging
 
@@ -1589,20 +1588,29 @@ Extend `TaskDashboard` (`cdk/src/constructs/task-dashboard.ts`). These are read-
 
 Every `agent_milestone("approval_*")` event carries `trace_id` / `span_id`. A span `hitl.approval_wait` brackets the PreToolUse poll loop: `span.duration = decided_at - created_at`. `hitl.approval_race_loss` emitted when the agent's local timeout fired <5s before a late user decision (useful for tuning).
 
-### 11.5 CloudWatch alarms — deferred (notification-channel gated)
+### 11.5 CloudWatch alarms
 
-Operator-facing CloudWatch alarms that would page on:
+**DLQ-depth alarms (shipped):** CloudWatch alarms on `ApproximateNumberOfMessagesVisible >= 1` (5-min period, Maximum statistic, `treatMissingData: NOT_BREACHING`) are deployed for:
+
+- **FanOutConsumer DLQ** — poison-pill DynamoDB Stream records that failed three consecutive Lambda invocations.
+- **ApprovalMetricsPublisher DLQ** — same failure mode for the metrics-publisher consumer.
+- **GitHubScreenshotIntegration processor DLQ** — failed async invocations of the screenshot pipeline (same threshold-1 shape).
+
+These alarms transition to `ALARM` state in CloudWatch and appear in the console/dashboard, providing operator visibility into silent record loss, and prevent poison records from accumulating silently for the full 14-day DLQ retention window.
+
+**Notification channel wiring (shipped, issue #629):** All three DLQ-depth alarms above are wired to a stack-wide SNS topic via `alarm.addAlarmAction(new SnsAction(topic))`. The topic is provisioned by the reusable `OperationalAlerts` construct (`cdk/src/constructs/operational-alerts.ts`) and its ARN is exported as the `OperationalAlertsTopicArn` stack output.
+
+- **Encryption.** The topic is encrypted with a **customer-managed KMS key**, not the AWS-managed `alias/aws/sns` key. This is load-bearing: CloudWatch cannot publish to a topic on the AWS-managed key (its key policy can't be edited to grant the `cloudwatch.amazonaws.com` service principal `kms:Decrypt` / `kms:GenerateDataKey*`), so the alarm action would fail silently at delivery. The CMK grants CloudWatch exactly those actions.
+- **Delivery target (configurable).** Pass `-c alertEmail=ops@example.com` at deploy to create an email subscription (AWS sends a confirmation link that must be clicked). With no context set, the topic ships with no subscription — operators subscribe Slack / PagerDuty / email manually against the exported topic ARN. Delivery is not hard-coded.
+
+**Additional alarms (not yet shipped):** The following remain deferred (each is a rate/latency condition that needs metric-math or composite-alarm design beyond the threshold-1 DLQ shape); now that the notification channel exists they can be wired to the same `OperationalAlerts` topic as separate follow-ups:
+
 - High approval-timeout rate (users not responding, notifications broken)
 - Tasks stuck in AWAITING_APPROVAL beyond `timeout_s + 60s` (reconciler failure)
 - High approval-write failure rate (DDB throttled or IAM drift)
 - Approval-gate cap hit (suspicious retry loop)
-- Publisher / fanout DLQ non-empty (persistent consumer-side poison pills)
 - `MetricEmitSkipped` sustained > 0 (publisher schema mismatch — agent / publisher version skew)
 - `MetricsPublisherHeartbeat` flat-line (publisher pipeline broken)
-
-…are **out of scope for v1** because the project does not yet have a notification channel (Slack / PagerDuty / SNS topic / email distribution list) configured for operational alerts. Adding alarms without a notification channel produces CloudWatch widgets that nobody sees — no safety benefit.
-
-**Plumbing status (post-Chunk 8):** the supporting metric data now flows as native CloudWatch metrics in namespace `ABCA/Cedar-HITL` via `ApprovalMetricsPublisherFn` (§11.3). Alarm wiring becomes a per-threshold `cloudwatch.Alarm` + `SnsAction`; no additional metric-extraction infra is needed. The remaining gap is the SNS topic + subscriber wiring itself — when that lands, the alarms above are a small bounded follow-up (not a multi-PR metrics build-out as they were pre-Chunk-8).
 
 ---
 
@@ -1817,7 +1825,7 @@ The scenario is bounded by the polling cadence (2-5s ticks) and DDB's strongly-c
 
 ### 13.13 Runtime JWT expiry during approval wait
 
-**Context in this codebase (verified 2026-05-06).** The AgentCore Runtime container authenticates outbound AWS API calls (DynamoDB, Secrets Manager, etc.) via the container's IAM role, which the SDK resolves through the instance-metadata-service equivalent and auto-refreshes transparently. There is no user-presented JWT with a short rolling expiry consumed by the container's own API calls — `grep -rn -iE 'runtime.jwt|jwt.refresh|token_expiry' agent/src/` returns nothing (only `token_usage` for LLM billing and `GITHUB_TOKEN` for git operations). AgentCore Runtime invocation on the Lambda side uses sigv4 via `InvokeAgentRuntimeCommand` (see `cdk/src/handlers/shared/strategies/agentcore-strategy.ts`) — also auto-refreshed AWS credentials, not a user JWT. The "Runtime-JWT" label in §4 step 6 and the phase3-cedar-hitl.drawio diagrams refers to the **caller-facing SSE auth** (Terminal A's Cognito ID token presented to API Gateway to stream task events) — it does not authenticate the container's own DDB writes.
+**Context in this codebase (verified 2026-05-06).** The AgentCore Runtime container authenticates outbound AWS API calls (DynamoDB, Secrets Manager, etc.) via the container's IAM role, which the SDK resolves through the instance-metadata-service equivalent and auto-refreshes transparently. There is no user-presented JWT with a short rolling expiry consumed by the container's own API calls — `grep -rn -iE 'runtime.jwt|jwt.refresh|token_expiry' agent/src/` returns nothing (only `token_usage` for LLM billing and `GITHUB_TOKEN` for git operations). AgentCore Runtime invocation on the Lambda side uses sigv4 via `InvokeAgentRuntimeCommand` (see `cdk/src/handlers/shared/strategies/agentcore-strategy.ts`) — also auto-refreshed AWS credentials, not a user JWT. The "Runtime-JWT" label in §4 step 6 and the sequence diagrams below refers to the **caller-facing SSE auth** (Terminal A's Cognito ID token presented to API Gateway to stream task events) — it does not authenticate the container's own DDB writes.
 
 **Therefore, for v1: no separate Runtime JWT expiry term is required in the ceiling computation.** The `maxLifetime` term (AgentCore's hard lifetime of 8h) is the only upper bound we control; IAM credentials refresh automatically within that window. The ceiling definition in decision #6 stands as `min(1h, maxLifetime_remaining - cleanup_margin)`.
 
@@ -1857,6 +1865,36 @@ flowchart LR
 ```
 
 Every exceptional branch terminates in DENY. The only path to ALLOW is the happy path through a valid approval or pre-approval — no failure mode accidentally approves.
+
+### 13.16 Observable blocker signal (#251)
+
+When the agent cannot make progress for an **environmental** reason — a missing secret, an egress denial, an unreachable dependency, or a fail-closed *policy-engine error* (as opposed to an intentional hard-deny) — it emits a typed, machine-readable **`agent_blocked`** progress event instead of silently burning turns or failing opaquely. This is distinct from the HITL `AWAITING_APPROVAL` pause (§11): that pause is for *policy* decisions a human must make; a blocker is for *environmental* faults the platform or agent can diagnose or (where safe) fix.
+
+A blocker does **not** introduce a new task status. Blockers surface as events during `RUNNING`; the terminal outcome stays `FAILED` (or `COMPLETED` if self-remediation succeeds), just with precise classification.
+
+**Blocker taxonomy (closed set).** The kind set is defined once, agent-side, in `agent/src/progress_writer.py` (`BLOCKER_KINDS`), and mirrored by the CDK error classifier (`cdk/src/handlers/shared/error-classifier.ts`). Keep all three — code, classifier, and this table — in lockstep.
+
+| kind | meaning | retryable | remediation posture |
+|---|---|---|---|
+| `missing_secret` | a required secret was never wired into the blueprint | no | report the exact secret name; never acquire |
+| `egress_denied` | a connection to a non-allowlisted host was blocked | no | report the exact host to allowlist; never widen egress |
+| `dependency_unreachable` | transient failure reaching a dependency/registry | yes | bounded retry with backoff, then report |
+| `policy_fail_closed` | Cedar engine error/unavailable (NOT an intentional hard-deny — see §13.4, §13.15) | no | report; distinct from hard-deny |
+| `auth_failure` | credential present but rejected | no | report; no self-heal (reserved — no v1 detection site) |
+| `unknown_environmental` | environmental fault not otherwise classified | no | report best-effort detail (fallback only) |
+
+**`agent_blocked` event metadata schema:** `{ kind, detail, remediation_hint, retryable: bool, resource?: str }`. `detail` and `remediation_hint` are truncated to the standard preview cap (§10.1).
+
+**Canonical terminal-reason contract (single source of truth).** When a blocker reaches finalization, the agent's `TaskResult.error` carries a canonical string so the orchestrator's `failTask` persists it verbatim and the classifier can attach a precise remedy:
+
+```
+BLOCKED[<kind>]: <detail>
+BLOCKED[<kind>]: <detail> (resource: <resource>)   # when a resource is named
+```
+
+`format_blocker_reason(kind, detail, resource=None)` in `agent/src/progress_writer.py` produces this string (and `formatBlockerReason` in `cdk/src/handlers/shared/error-classifier.ts` is the orchestration-side twin for reasons written directly by the platform, e.g. a missing secret detected during hydration); the classifier keys on the `BLOCKED[<kind>]` prefix (case-insensitively) and separately extracts the `(resource: …)` segment so the operator-facing remedy names the exact secret or host — the two are matched independently rather than one end-anchored regex, so a reason wrapped with trailing text or a stack trace by `failTask` still yields the resource (e.g. "wire the secret `OPENAI_API_KEY` into the blueprint", "allowlist the domain `registry.npmjs.org` in the DNS Firewall"). `auth_failure` and `unknown_environmental` are in the closed enum but have no v1 detection site — reserved so callers and the classifier can handle them without a follow-up enum change.
+
+**Bounded self-remediation (safe-by-default).** For `dependency_unreachable` only, repo setup retries the exact same network command (`git clone` / PR-branch `git fetch`) with capped exponential backoff (`run_cmd_with_backoff` in `agent/src/shell.py`) when the failure signature looks transient (DNS blip, registry 5xx / 429, connection reset). Each retry emits an auditable `agent_blocked` event; on exhaustion the task fails with the canonical `dependency_unreachable` reason. Permanent failures (auth denied, repo not found) fail fast without retry. A **DNS name-resolution failure that names a host** (`could not resolve host: <host>`, `getaddrinfo ENOTFOUND <host>`) bails out of backoff immediately — it is not retried and emits no `dependency_unreachable` events — and is reclassified as a non-retryable `egress_denied` naming that host: a name that cannot be resolved is a firewalled / non-existent endpoint, and retrying never helps. A transient **TCP-connect** failure to an otherwise-reachable host (`failed to connect to <host> … connection timed out`) and a host-*less* name-resolution blip (`temporary failure in name resolution`) both stay retryable; if a TCP failure persists past the retries it is still reclassified to `egress_denied` at exhaustion. Either way the setup path and the PostToolUse egress detector reach a consistent verdict. `missing_secret` and `egress_denied` are **report-only, never self-healed** — remediation is scope-preserving by construction: it re-invokes the same command with the same credentials and DNS rules, granting no new scope and mutating no IAM policy or egress allowlist. Model-issued installs (`npm install` in a Bash tool call) cannot be retried in-hook under the Agent SDK — PostToolUse fires post-execution — so they are only *reported* as blockers, not retried.
 
 ---
 
@@ -1919,22 +1957,22 @@ $ bgagent run --repo my-org/my-app \
     --approval-timeout 600
 ```
 
-Agent tries `Bash: rm -rf src/dashboard/v1`. Soft-deny rule `rm_rf_path` hits. `approval_requested` → user:
+Agent finishes the rewrite, then tries to publish it by rewriting history on the default branch: `Bash: git push --force origin main`. Soft-deny rule `force_push_main` hits. `approval_requested` → user:
 
 ```bash
 $ bgagent deny 01KPW... 01KPR... \
-    --reason "move it to src/dashboard/v1.deprecated instead of deleting; we may need to reference it in migrations"
+    --reason "don't force-push main; open a PR and keep src/dashboard/v1 around (move it to src/dashboard/v1.deprecated) — we may need it for migrations"
 ```
 
 `DenyTaskFn` sanitizes (no secrets in this reason, passes through unchanged), writes to DDB. Agent's poll reads DENIED.
 
-Hook executes: atomic resume to RUNNING → queue denial injection via `between_turns_hooks` → return to SDK with `permissionDecisionReason = "move it to src/dashboard/v1.deprecated..."` (truncated, guaranteed surface).
+Hook executes: atomic resume to RUNNING → queue denial injection via `between_turns_hooks` → return to SDK with `permissionDecisionReason = "don't force-push main; open a PR..."` (truncated, guaranteed surface).
 
 Next Stop seam fires. The between-turns injector emits (best-effort; pre-empted if cancel hook short-circuits first):
 
 ```xml
 <user_denial request_id="01KPR..." timestamp="2026-04-23T14:30:08Z">
-move it to src/dashboard/v1.deprecated instead of deleting; we may need to reference it in migrations
+don't force-push main; open a PR and keep src/dashboard/v1 around (move it to src/dashboard/v1.deprecated) — we may need it for migrations
 </user_denial>
 ```
 
@@ -1943,6 +1981,8 @@ Agent reads the denial on its next turn, adapts:
 ```
 [14:30:12]  ▶ Bash: git mv src/dashboard/v1 src/dashboard/v1.deprecated
 [14:30:13]  ◀ Bash: (success)
+[14:30:15]  ▶ Bash: git push origin feat/dashboard-v2   (opens a PR instead of force-pushing main)
+[14:30:17]  ◀ Bash: (success)
 ```
 
 Task proceeds. If the user had concurrently cancelled, the `permissionDecisionReason` surface still carries the reason — the agent sees enough context to not blindly retry; the richer XML injection is best-effort.
@@ -2060,6 +2100,8 @@ See §17.18 for the off-hours escalation future-work primitive, and §13.14 for 
 
 ## 15. Implementation plan
 
+> **Status note (post-implementation):** The v1 core described below is **shipped on `main`** — the 3-outcome engine, hard/soft default policy sets, the approval/deny/pending/policies Lambdas and their API routes, and the cross-engine parity contract all exist and are tested. The task list and scenarios in this section are retained as the historical design-and-build record; treat them as descriptive of what was built rather than as outstanding work. Items still explicitly deferred are tracked in §15.1 ("Future work — polish") and §17 (e.g. CLI inline streaming prompt, `approve --defer` / allowlist revocation, CloudWatch alarm plumbing, persistent recent-decision cache, persistent per-minute rate limit).
+
 ### 15.1 Milestone structure
 
 **v1 — core feature (3-4 weeks of work):**
@@ -2074,7 +2116,7 @@ See §17.18 for the off-hours escalation future-work primitive, and §13.14 for 
 **Future work — polish (tracked in §17):**
 - CLI inline streaming prompt (UX research first)
 - `approve --defer` / allowlist revocation (`bgagent revoke-approval`)
-- CloudWatch alarm plumbing (§11.5) — deferred until an operational notification channel is available
+- ~~CloudWatch alarm SNS notification wiring (§11.5) — DLQ-depth alarms ship without an action target; add `SnsAction` once a notification channel is provisioned~~ — **shipped (issue #629):** all three DLQ-depth alarms are wired to the `OperationalAlerts` SNS topic (§11.5)
 - More soft-deny policies in the default set based on real usage
 - Persistent recent-decision cache (if container-restart telemetry justifies it)
 - Persistent per-minute rate limit (if restart amplification becomes significant)
@@ -2086,7 +2128,7 @@ See §17.18 for the off-hours escalation future-work primitive, and §13.14 for 
 | # | Package | File | Change |
 |---|---|---|---|
 | 1 | agent | Spike | Validate cedarpy.policies_to_json_str() returns annotations. Confirm `diagnostics.reasons` shape for multi-match. If API diverges, update §6 before proceeding. |
-| 2 | mise + agent + cdk | `mise.toml`, `agent/pyproject.toml`, `cdk/package.json` | Pin `cedarpy==<version>` (agent) and `@cedar-policy/cedar-wasm==4.10.0` (cdk). Both pinned exactly, not `^` or `~` — decision #23 / finding #1. |
+| 2 | mise + agent + cdk | `mise.toml`, `agent/pyproject.toml`, `cdk/package.json` | Pin `cedarpy==4.8.0` (agent) and `@cedar-policy/cedar-wasm==4.10.0` (cdk). The two bindings are intentionally on different version lines — verified compatible via the parity fixtures, not required to be equal. Both pinned exactly, not `^` or `~` — decision #23 / finding #1. |
 | 3 | agent + cdk | `contracts/cedar-parity/*.json` (shared fixture dir; follows precedent set by `contracts/memory-hash-vectors.json`) | Golden-file parity fixtures: `(policy_set, input) → {decision, matching_rule_ids}`. Agent side loads via `cedarpy`; Lambda side via `cedar-wasm`. Divergence fails CI. |
 | 4 | agent | `src/policy.py` | Extend `PolicyDecision` (outcome/timeout_s/severity/matching_rule_ids/allowed-property). Split `_DEFAULT_POLICIES` into hard + soft. Add annotation parsing. Implement `ApprovalAllowlist` + `RecentDecisionCache` (50-entry LRU cap, independent of `approvalGateCap`). Load-time validation (rule_id uniqueness, tier mismatch, annotation floor, 64 KB cap, disable-list hard-deny rejection, `approvalGateCap` bounds check `1 ≤ N ≤ 500`). `PolicyEngine.__init__` accepts `approval_gate_cap` sourced from blueprint (default 50). |
 | 5 | agent | `policies/hard_deny.cedar` (new) | Migrate current hard-deny rules + add DROP TABLE. Annotations. |
@@ -2227,10 +2269,10 @@ Rollout steps:
 
 ### 15.6 Shared Cedar parsing — cross-engine parity contract
 
-The agent runtime uses Python [`cedarpy`](https://pypi.org/project/cedarpy/); the Lambda side (`CreateTaskFn`, `ApproveTaskFn`, `DenyTaskFn`, `GetPoliciesFn`) uses [`@cedar-policy/cedar-wasm@4.10.0`](https://www.npmjs.com/package/@cedar-policy/cedar-wasm) — AWS's official WASM-compiled Cedar engine. Same Rust core, two bindings. Because these engines evolve independently, we ship a **parity contract** (decision #23, finding #1) to catch drift before deploy.
+The agent runtime uses Python [`cedarpy@4.8.0`](https://pypi.org/project/cedarpy/); the Lambda side (`CreateTaskFn`, `ApproveTaskFn`, `DenyTaskFn`, `GetPoliciesFn`) uses [`@cedar-policy/cedar-wasm@4.10.0`](https://www.npmjs.com/package/@cedar-policy/cedar-wasm) — AWS's official WASM-compiled Cedar engine. Same Rust core, two bindings. Because these engines evolve independently, we ship a **parity contract** (decision #23, finding #1) to catch drift before deploy.
 
-**Version pinning.** Both engines are pinned exactly (not `^` or `~`) in the monorepo's canonical manifest files:
-- `agent/pyproject.toml`: `cedarpy==<version>`
+**Version pinning.** Both engines are pinned exactly (not `^` or `~`) in the monorepo's canonical manifest files. The two bindings are deliberately on **different version lines** — they are NOT required to be equal. `cedarpy` and `cedar-wasm` follow independent release cadences over the shared Cedar Rust core, and the currently-shipped pins (`cedarpy==4.8.0` ↔ `@cedar-policy/cedar-wasm==4.10.0`) are an intentional, tested-compatible skew: the parity fixtures in `contracts/cedar-parity/` are what certify that this specific pair produces identical `(decision, matching_rule_ids)` on every fixture. The rule is "move together and re-verify parity when you bump either side," not "keep the version strings equal."
+- `agent/pyproject.toml`: `cedarpy==4.8.0`
 - `cdk/package.json`: `"@cedar-policy/cedar-wasm": "4.10.0"`
 - `mise.toml` documents the pinned versions in a comment for operator visibility
 
@@ -2279,7 +2321,7 @@ flowchart LR
 
 When policy authors upgrade either engine, the parity fixture must be re-generated (a small helper script dumps decisions from both engines; the human confirms the change is intentional).
 
-**Scenario (finding #1):** A platform engineer runs `mise run deps:update` which bumps cedarpy from 4.10.1 to 4.11.0. They notice cedar-wasm is still 4.10.0 but assume it's fine because both say "4.x". Between these versions, cedarpy added support for a new `context has` operator that cedar-wasm doesn't yet have. A new blueprint soft-deny rule uses `context has "approved_context"`. On deploy:
+**Scenario (finding #1, illustrative):** This example uses hypothetical versions (e.g. cedarpy `4.10.1` → `4.11.0`) to show the *class* of bug the parity contract catches; it does not describe the real shipped pins (which are the intentional `cedarpy==4.8.0` ↔ `cedar-wasm==4.10.0` skew documented above). The point is that closeness of version strings — even within the same minor line — is no guarantee of behavioral parity, which is exactly why the golden fixtures, not the version numbers, are the source of truth. A platform engineer runs `mise run deps:update` which bumps cedarpy from 4.10.1 to 4.11.0. They notice cedar-wasm is still 4.10.0 but assume it's fine because both say "4.x". Between these versions, cedarpy added support for a new `context has` operator that cedar-wasm doesn't yet have. A new blueprint soft-deny rule uses `context has "approved_context"`. On deploy:
 - Agent-side `PolicyEngine.__init__` parses the rule successfully; engine loads normally.
 - `CreateTaskFn` on the Lambda side calls cedar-wasm `policyToJson()` — it throws: `ParseError: unknown operator 'has' at line 3`.
 - User submits a task against that repo. `CreateTaskFn` crashes mid-validation. Error message: "500 Internal Server Error" (because the Lambda didn't handle the upstream parse error gracefully).

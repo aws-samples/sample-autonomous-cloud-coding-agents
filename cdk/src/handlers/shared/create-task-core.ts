@@ -22,10 +22,9 @@
 // Tests: cdk/test/handlers/shared/create-task-core.test.ts, cdk/test/handlers/create-task.test.ts
 
 import { BedrockRuntimeClient, ApplyGuardrailCommand } from '@aws-sdk/client-bedrock-runtime';
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
 import { PutObjectCommand, DeleteObjectsCommand, S3Client } from '@aws-sdk/client-s3';
-import { DynamoDBDocumentClient, PutCommand, QueryCommand, GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { PutCommand, QueryCommand, GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { createPresignedPost } from '@aws-sdk/s3-presigned-post';
 import type { APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
@@ -49,13 +48,13 @@ import {
   createAttachmentRecord,
   INITIAL_APPROVALS_MAX_ENTRIES,
   type InlineAttachment,
-  isPrTaskType,
   type PresignedAttachment,
   type TaskRecord,
-  type TaskType,
   toTaskDetail,
 } from './types';
-import { computeTtlEpoch, DEFAULT_MAX_TURNS, hasTaskSpec, isValidIdempotencyKey, isValidRepo, isValidTaskDescriptionLength, isValidTaskType, MAX_ATTACHMENT_SIZE_BYTES, MAX_TASK_DESCRIPTION_LENGTH, validateAttachments, validateMaxBudgetUsd, validateMaxTurns, validatePrNumber } from './validation';
+import { makeClient, makeDocClient } from './ua';
+import { computeTtlEpoch, hasTaskSpec, isValidIdempotencyKey, isValidRepo, isValidTaskDescriptionLength, MAX_ATTACHMENT_SIZE_BYTES, MAX_TASK_DESCRIPTION_LENGTH, MAX_TOTAL_ATTACHMENT_SIZE_BYTES, validateAttachments, validateMaxBudgetUsd, validateMaxTurns, validatePrNumber } from './validation';
+import { disallowedWorkflowModel, getWorkflowDescriptor, isValidWorkflowRef, resolveWorkflowRef, resolveWorkflowRefError } from './workflows';
 import { ATTACHMENT_OBJECT_KEY_PREFIX } from '../../constructs/attachments-bucket';
 import { TaskStatus } from '../../constructs/task-status';
 
@@ -67,12 +66,34 @@ export interface TaskCreationContext {
   readonly channelSource: ChannelSource;
   readonly channelMetadata: Record<string, string>;
   readonly idempotencyKey?: string;
+  /**
+   * Task ID to use instead of minting one. Only trusted server-side callers
+   * set this — a webhook processor that downloads + screens + uploads
+   * attachments to S3 *before* calling createTaskCore needs the task ID up
+   * front so the S3 object keys match the eventual task record.
+   */
+  readonly taskId?: string;
+  /**
+   * Attachment records the caller has already downloaded, screened (status
+   * `passed`), and uploaded to S3 — e.g. Jira `media` file attachments a
+   * trusted webhook processor fetched authenticated and ran through the same
+   * Bedrock Guardrail pipeline. Merged verbatim into the
+   * persisted attachments and NOT re-screened here. Every record MUST be a
+   * passed record with storage fields populated; a non-`passed` record is a
+   * caller contract violation and fails the request closed.
+   *
+   * These bypass the wire `Attachment`/`validateAttachments` path (which caps
+   * inline at 500 KB and can't authenticate a Jira download), so the caller is
+   * responsible for enforcing the per-file / total-size / count limits before
+   * upload.
+   */
+  readonly preScreenedAttachments?: readonly AttachmentRecord[];
 }
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
-const lambdaClient = process.env.ORCHESTRATOR_FUNCTION_ARN ? new LambdaClient({}) : undefined;
+const ddb = makeDocClient();
+const lambdaClient = process.env.ORCHESTRATOR_FUNCTION_ARN ? makeClient(LambdaClient) : undefined;
 const bedrockClient = (process.env.GUARDRAIL_ID && process.env.GUARDRAIL_VERSION)
-  ? new BedrockRuntimeClient({}) : undefined;
+  ? makeClient(BedrockRuntimeClient) : undefined;
 if (process.env.GUARDRAIL_ID && !process.env.GUARDRAIL_VERSION) {
   logger.error('GUARDRAIL_ID is set but GUARDRAIL_VERSION is missing — guardrail screening disabled', {
     metric_type: 'guardrail_misconfiguration',
@@ -82,7 +103,19 @@ const TABLE_NAME = process.env.TASK_TABLE_NAME!;
 const EVENTS_TABLE_NAME = process.env.TASK_EVENTS_TABLE_NAME!;
 const TASK_RETENTION_DAYS = Number(process.env.TASK_RETENTION_DAYS ?? '90');
 const ATTACHMENTS_BUCKET = process.env.ATTACHMENTS_BUCKET_NAME;
-const s3Client = ATTACHMENTS_BUCKET ? new S3Client({}) : undefined;
+const s3Client = ATTACHMENTS_BUCKET ? makeClient(S3Client) : undefined;
+
+/** Human-readable description of a workflow's required-input contract (for 400s). */
+function describeRequiredInputs(requiredInputs: { allOf?: readonly string[]; oneOf?: readonly string[] }): string {
+  const parts: string[] = [];
+  if (requiredInputs.allOf?.length) {
+    parts.push(requiredInputs.allOf.join(' and '));
+  }
+  if (requiredInputs.oneOf?.length) {
+    parts.push(`one of ${requiredInputs.oneOf.join(' or ')}`);
+  }
+  return parts.length > 0 ? parts.join(', plus ') : 'a task specification';
+}
 
 /**
  * Core task creation logic shared by the Cognito create-task handler
@@ -97,86 +130,130 @@ export async function createTaskCore(
   context: TaskCreationContext,
   requestId: string,
 ): Promise<APIGatewayProxyResult> {
-  // 1. Validate request body
-  if (!body.repo || !isValidRepo(body.repo)) {
-    return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid or missing repo. Expected format: owner/repo.', requestId);
+  // 1. Resolve the workflow first. workflow_ref replaces task_type: an
+  // explicit ref resolves to its pinned {id, version}; an absent ref falls back
+  // to the platform default. An unknown ref is a 400. The resolved workflow's
+  // ``requiresRepo`` then decides whether ``repo`` is mandatory — a repo-less
+  // workflow (Phase 3) is submitted with no repo and skips onboarding.
+  if (!isValidWorkflowRef(body.workflow_ref)) {
+    return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid workflow_ref. Expected "<domain>/<name>-vN[@<constraint>]".', requestId);
+  }
+  // A repo-bound task with no explicit workflow_ref must run the disciplined
+  // coding workflow (coding/new-task-v1), not the repo-less default/agent-v1.
+  // That decision now lives at each channel's call site (they pin
+  // CODING_WORKFLOW_ID explicitly), NOT in a resolver-level hasRepo default —
+  // so resolveWorkflowRef takes only the ref here.
+  const resolvedWorkflow = resolveWorkflowRef(body.workflow_ref);
+  if (resolvedWorkflow === null) {
+    // Distinguish an unknown id from an unsatisfiable @version pin so the caller
+    // learns which it is — a bad pin no longer silently runs the shipped
+    // version.
+    const reason = resolveWorkflowRefError(body.workflow_ref);
+    const message = reason === 'unsatisfiable_version'
+      ? `workflow_ref "${body.workflow_ref}" pins a version that is not available.`
+      : `Unknown workflow_ref "${body.workflow_ref}".`;
+    return errorResponse(400, ErrorCode.VALIDATION_ERROR, message, requestId);
+  }
+  const workflow = getWorkflowDescriptor(resolvedWorkflow.id)!;
+
+  // 1a-model. Rule 13 (WORKFLOWS.md §"Model selection"): a workflow that pins a
+  // preferred model must pin one on the platform allow-list. An unpermitted id
+  // FAILS admission rather than silently downgrading (fail-closed, consistent
+  // with the rest of admission). Workflows that declare no model inherit the
+  // Blueprint/platform default and are always admitted.
+  const badModel = disallowedWorkflowModel(resolvedWorkflow.id);
+  if (badModel !== null) {
+    return errorResponse(400, ErrorCode.VALIDATION_ERROR, `The "${resolvedWorkflow.id}" workflow requests model "${badModel}", which is not on the platform allow-list.`, requestId);
   }
 
-  // 1b. Single RepoTable GetItem covers BOTH the onboarding gate AND
-  //     the Cedar HITL blueprint-cap resolution (§4 step 5, decision
-  //     #13). Capturing the cap at submit-time means mid-task blueprint
-  //     edits cannot shift the cap beneath a running task. Previously
-  //     this path issued two back-to-back GetItems for the same key;
-  //     ``lookupRepo`` consolidates them.
-  const { onboarded, config: repoConfig } = await lookupRepo(body.repo);
-  if (!onboarded) {
-    return errorResponse(422, ErrorCode.REPO_NOT_ONBOARDED, `Repository '${body.repo}' is not onboarded. Register it with a Blueprint before submitting tasks.`, requestId);
+  // 1a. Repo validation. ``requiresRepo`` decides whether a repo is *mandatory*;
+  // ``requiresRepo: false`` means repo-OPTIONAL (a repo-less workflow may still
+  // run against a repo). A repo, when present, must be well-formed regardless.
+  if (workflow.requiresRepo && !body.repo) {
+    return errorResponse(400, ErrorCode.VALIDATION_ERROR, `The "${resolvedWorkflow.id}" workflow requires a repo. Expected format: owner/repo.`, requestId);
   }
-  const blueprintCap = repoConfig?.approval_gate_cap;
+  if (body.repo && !isValidRepo(body.repo)) {
+    return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid repo. Expected format: owner/repo.', requestId);
+  }
+
+  // 1b. Onboarding gate + Cedar HITL blueprint-cap resolution (§4 step 5,
+  //     decision #13) — runs whenever a repo is present (a repo-less submission
+  //     has no repo to onboard). A single RepoTable GetItem covers BOTH
+  //     (capturing the cap at submit-time means mid-task blueprint edits cannot
+  //     shift the cap beneath a running task). A repo-less task takes the
+  //     platform default cap.
   let resolvedApprovalGateCap: number = APPROVAL_GATE_CAP_DEFAULT;
-  if (blueprintCap !== undefined) {
-    if (typeof blueprintCap !== 'number' || !Number.isInteger(blueprintCap)) {
-      // Blueprint construct's synth-time validation should have caught
-      // this, but a hand-edited RepoConfig row could bypass it. Fail
-      // closed rather than persisting junk onto the TaskRecord.
-      // 503 (not 500) — the condition is permanent until the blueprint
-      // is re-deployed, but from the user's perspective this is "platform
-      // can't accept this right now"; 500 would misleadingly suggest a
-      // transient internal glitch worth retrying.
-      logger.error('Blueprint misconfiguration — approval_gate_cap is not an integer', {
-        repo: body.repo,
-        blueprint_cap: blueprintCap,
-        request_id: requestId,
-      });
-      return errorResponse(
-        503,
-        ErrorCode.SERVICE_UNAVAILABLE,
-        `Blueprint misconfiguration: approval_gate_cap for '${body.repo}' is not an integer. `
-          + 'Ask the platform admin to re-deploy the blueprint with a valid cap.',
-        requestId,
-      );
+  // Whether the cap came from a blueprint (vs the platform default) — surfaced
+  // in the "Task created" log. A repo-less submission has no blueprint, so it
+  // stays false.
+  let capFromBlueprint = false;
+  if (body.repo) {
+    const { onboarded, config: repoConfig } = await lookupRepo(body.repo);
+    if (!onboarded) {
+      return errorResponse(422, ErrorCode.REPO_NOT_ONBOARDED, `Repository '${body.repo}' is not onboarded. Register it with a Blueprint before submitting tasks.`, requestId);
     }
-    if (blueprintCap < APPROVAL_GATE_CAP_MIN || blueprintCap > APPROVAL_GATE_CAP_MAX) {
-      logger.error('Blueprint misconfiguration — approval_gate_cap out of bounds', {
-        repo: body.repo,
-        blueprint_cap: blueprintCap,
-        min: APPROVAL_GATE_CAP_MIN,
-        max: APPROVAL_GATE_CAP_MAX,
-        request_id: requestId,
-      });
-      return errorResponse(
-        503,
-        ErrorCode.SERVICE_UNAVAILABLE,
-        `Blueprint misconfiguration: approval_gate_cap for '${body.repo}' is `
-          + `${blueprintCap}; must be between ${APPROVAL_GATE_CAP_MIN} and `
-          + `${APPROVAL_GATE_CAP_MAX}. Ask the platform admin to re-deploy the blueprint.`,
-        requestId,
-      );
+    const blueprintCap = repoConfig?.approval_gate_cap;
+    if (blueprintCap !== undefined) {
+      if (typeof blueprintCap !== 'number' || !Number.isInteger(blueprintCap)) {
+        // Blueprint construct's synth-time validation should have caught
+        // this, but a hand-edited RepoConfig row could bypass it. Fail
+        // closed rather than persisting junk onto the TaskRecord.
+        // 503 (not 500) — the condition is permanent until the blueprint
+        // is re-deployed, but from the user's perspective this is "platform
+        // can't accept this right now"; 500 would misleadingly suggest a
+        // transient internal glitch worth retrying.
+        logger.error('Blueprint misconfiguration — approval_gate_cap is not an integer', {
+          repo: body.repo,
+          blueprint_cap: blueprintCap,
+          request_id: requestId,
+        });
+        return errorResponse(
+          503,
+          ErrorCode.SERVICE_UNAVAILABLE,
+          `Blueprint misconfiguration: approval_gate_cap for '${body.repo}' is not an integer. `
+            + 'Ask the platform admin to re-deploy the blueprint with a valid cap.',
+          requestId,
+        );
+      }
+      if (blueprintCap < APPROVAL_GATE_CAP_MIN || blueprintCap > APPROVAL_GATE_CAP_MAX) {
+        logger.error('Blueprint misconfiguration — approval_gate_cap out of bounds', {
+          repo: body.repo,
+          blueprint_cap: blueprintCap,
+          min: APPROVAL_GATE_CAP_MIN,
+          max: APPROVAL_GATE_CAP_MAX,
+          request_id: requestId,
+        });
+        return errorResponse(
+          503,
+          ErrorCode.SERVICE_UNAVAILABLE,
+          `Blueprint misconfiguration: approval_gate_cap for '${body.repo}' is `
+            + `${blueprintCap}; must be between ${APPROVAL_GATE_CAP_MIN} and `
+            + `${APPROVAL_GATE_CAP_MAX}. Ask the platform admin to re-deploy the blueprint.`,
+          requestId,
+        );
+      }
+      resolvedApprovalGateCap = blueprintCap;
+      capFromBlueprint = true;
     }
-    resolvedApprovalGateCap = blueprintCap;
   }
 
-  if (!hasTaskSpec(body)) {
-    return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'At least one of issue_number or task_description is required.', requestId);
+  // A pr_* workflow resolves an existing PR rather than opening a new branch.
+  const isPrTask = workflow.requiredInputs.allOf?.includes('pr_number') ?? false;
+
+  if (!hasTaskSpec(body, workflow.requiredInputs)) {
+    return errorResponse(400, ErrorCode.VALIDATION_ERROR, `The "${resolvedWorkflow.id}" workflow requires ${describeRequiredInputs(workflow.requiredInputs)}.`, requestId);
   }
 
-  // Validate task_type
-  if (!isValidTaskType(body.task_type)) {
-    return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid task_type. Must be "new_task", "pr_iteration", or "pr_review".', requestId);
-  }
-  const taskType: TaskType = (body.task_type as TaskType) ?? 'new_task';
-  const isPrTask = isPrTaskType(taskType);
-
-  // Validate pr_number
+  // Validate pr_number against the resolved workflow's input contract.
   const prNumberResult = validatePrNumber(body.pr_number);
   if (prNumberResult === null) {
     return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid pr_number. Must be a positive integer.', requestId);
   }
   if (isPrTask && prNumberResult === undefined) {
-    return errorResponse(400, ErrorCode.VALIDATION_ERROR, `pr_number is required when task_type is "${taskType}".`, requestId);
+    return errorResponse(400, ErrorCode.VALIDATION_ERROR, `pr_number is required for the "${resolvedWorkflow.id}" workflow.`, requestId);
   }
   if (!isPrTask && prNumberResult !== undefined) {
-    return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'pr_number is only allowed when task_type is "pr_iteration" or "pr_review".', requestId);
+    return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'pr_number is only allowed for a pull-request workflow (e.g. coding/pr-iteration-v1, coding/pr-review-v1).', requestId);
   }
 
   if (body.task_description && !isValidTaskDescriptionLength(body.task_description)) {
@@ -289,7 +366,11 @@ export async function createTaskCore(
         parseResult.scope.startsWith('bash_pattern:')
         || parseResult.scope.startsWith('write_path:')
       ) {
-        const value = parseResult.scope.split(':', 2)[1] ?? '';
+        // Take everything after the first colon — the value itself may
+        // contain colons (e.g. ``bash_pattern:git log --format=%h:%s``), so a
+        // ``split(':', 2)`` would truncate it and could turn a legitimate
+        // pattern into a degenerate-looking fragment, producing a spurious 400.
+        const value = parseResult.scope.slice(parseResult.scope.indexOf(':') + 1);
         if (isDegeneratePattern(value)) {
           return errorResponse(
             400,
@@ -332,8 +413,11 @@ export async function createTaskCore(
     }
   }
 
-  // Generate task ID early so attachment S3 keys use the correct task ID
-  const taskId = ulid();
+  // Generate task ID early so attachment S3 keys use the correct task ID.
+  // A trusted server-side caller (e.g. the Jira webhook processor) may
+  // supply the ID so the S3 keys of attachments it uploaded before this call
+  // match the eventual task record.
+  const taskId = context.taskId ?? ulid();
 
   // 2b. Process inline attachments: screen (with retry + EXIF strip), upload to S3, build records.
   // Presigned attachments are deferred to confirm-uploads; URL attachments are resolved during hydration.
@@ -472,7 +556,6 @@ export async function createTaskCore(
       if (att.delivery !== 'presigned') continue;
       const presignedAtt = att as PresignedAttachment;
       const attachmentId = ulid();
-      const s3Key = `${ATTACHMENT_OBJECT_KEY_PREFIX}${context.userId}/${taskId}/${attachmentId}/${presignedAtt.filename}`;
 
       attachmentRecords.push(createAttachmentRecord({
         attachment_id: attachmentId,
@@ -482,6 +565,59 @@ export async function createTaskCore(
         screening: { status: 'pending' },
       }));
     }
+  }
+
+  // Pre-screened attachments: records a trusted server-side caller already
+  // downloaded, screened (passed), and uploaded to S3 — e.g. Jira `media`
+  // attachments fetched authenticated by the webhook processor. They
+  // bypass the wire `Attachment` path, so they are merged verbatim and never
+  // re-screened. Fail closed on a caller contract violation: a non-`passed`
+  // record must never reach the agent.
+  if (context.preScreenedAttachments && context.preScreenedAttachments.length > 0) {
+    for (const rec of context.preScreenedAttachments) {
+      if (rec.screening.status !== 'passed') {
+        logger.error('Pre-screened attachment is not in passed state (fail-closed)', {
+          attachment_filename: rec.filename,
+          screening_status: rec.screening.status,
+          request_id: requestId,
+          metric_type: 'prescreened_attachment_invalid',
+        });
+        // Roll back any inline uploads this call made (empty on the Jira
+        // webhook path, which supplies no wire attachments) before failing.
+        if (s3Client) await cleanupOrphanedAttachments(s3Client, uploadedS3Keys);
+        return errorResponse(500, ErrorCode.INTERNAL_ERROR,
+          'A pre-screened attachment was not in a passed state.', requestId);
+      }
+    }
+    attachmentRecords.push(...context.preScreenedAttachments);
+  }
+
+  // Aggregate size ceiling ACROSS sources (review): each source enforces its own
+  // subtotal (wire inline, the URL resolver per-URL, the Linear batch's own total),
+  // but nothing summed the MERGED set — so N sources could each pass their own
+  // check and jointly blow past the task-wide cap (e.g. 5×10 MB public images +
+  // 5×10 MB Linear files ≈ 100 MB under a 50 MB limit). Sum every record whose
+  // size is known NOW (inline + pre-screened; presigned uploads are still `pending`
+  // and are bounded separately at confirm-uploads time) and fail closed.
+  const knownTotalBytes = attachmentRecords.reduce(
+    (sum, r) => sum + (typeof (r as { size_bytes?: number }).size_bytes === 'number' ? (r as { size_bytes: number }).size_bytes : 0),
+    0,
+  );
+  if (knownTotalBytes > MAX_TOTAL_ATTACHMENT_SIZE_BYTES) {
+    logger.warn('Combined attachment size exceeds the task-wide limit (fail-closed)', {
+      total_bytes: knownTotalBytes,
+      limit_bytes: MAX_TOTAL_ATTACHMENT_SIZE_BYTES,
+      attachment_count: attachmentRecords.length,
+      request_id: requestId,
+      metric_type: 'attachment_total_size_exceeded',
+    });
+    // Don't orphan any inline uploads this call made before rejecting.
+    if (s3Client) await cleanupOrphanedAttachments(s3Client, uploadedS3Keys);
+    return errorResponse(
+      400, ErrorCode.VALIDATION_ERROR,
+      `Combined attachment size exceeds the ${MAX_TOTAL_ATTACHMENT_SIZE_BYTES}-byte task limit.`,
+      requestId,
+    );
   }
 
   // 3. Check idempotency key
@@ -507,7 +643,13 @@ export async function createTaskCore(
 
       if (existingTask.Item) {
         const existingRecord = existingTask.Item as TaskRecord;
-        const requiredReplayFields = ['task_id', 'user_id', 'status', 'repo', 'branch_name', 'channel_source', 'created_at', 'updated_at'] as const;
+        // ``repo`` and ``branch_name`` are intentionally NOT required here: a
+        // repo-less workflow persists no repo and an empty
+        // ``branch_name`` (it never branches). Both are legitimately falsy on a
+        // valid repo-less record, so a falsy check would wrongly reject a valid
+        // repo-less replay as "incomplete" (500). Only the true identity/audit
+        // fields that every record must carry are required.
+        const requiredReplayFields = ['task_id', 'user_id', 'status', 'channel_source', 'created_at', 'updated_at'] as const;
         const missingFields = requiredReplayFields.filter(f => !existingRecord[f]);
         if (missingFields.length > 0) {
           logger.error('Idempotent replay: existing task record is incomplete', {
@@ -540,9 +682,17 @@ export async function createTaskCore(
 
   // 4. Generate identifiers and timestamps
   const now = new Date().toISOString();
-  const branchName = isPrTask
-    ? 'pending:pr_resolution'
-    : generateBranchName(taskId, body.task_description ?? body.repo);
+  // A task with no repo never clones, branches, or opens a PR (the agent prompt
+  // forbids it), so a bgagent/<id>/... branch name is misleading noise. Key off
+  // the actual absence of a repo, NOT workflow.requiresRepo — a repo-OPTIONAL
+  // workflow that WAS given a repo runs the repo-bound path and still gets a
+  // branch. PR tasks resolve their real branch later; other repo-bound tasks
+  // get the generated working-branch name.
+  const branchName = !body.repo
+    ? ''
+    : isPrTask
+      ? 'pending:pr_resolution'
+      : generateBranchName(taskId, body.task_description ?? body.repo);
 
   // Determine initial status: PENDING_UPLOADS if any presigned attachments need uploading,
   // otherwise SUBMITTED (inline/url/no attachments go straight to the pipeline).
@@ -554,9 +704,10 @@ export async function createTaskCore(
     task_id: taskId,
     user_id: context.userId,
     status: initialStatus,
-    repo: body.repo,
+    ...(body.repo ? { repo: body.repo } : {}),
     ...(body.issue_number !== undefined && { issue_number: body.issue_number }),
-    task_type: taskType,
+    ...(body.workflow_ref !== undefined && { workflow_ref: body.workflow_ref }),
+    resolved_workflow: resolvedWorkflow,
     ...(prNumberResult !== undefined && { pr_number: prNumberResult }),
     ...(body.task_description !== undefined && { task_description: body.task_description }),
     branch_name: branchName,
@@ -566,6 +717,22 @@ export async function createTaskCore(
     ...(context.idempotencyKey && { idempotency_key: context.idempotencyKey }),
     channel_source: context.channelSource,
     channel_metadata: context.channelMetadata,
+    // Hoist linear_issue_id to the top level so the sparse
+    // LinearIssueIndex GSI can resolve an issue → its newest task + PR (a GSI
+    // cannot key off the nested channel_metadata map). Linear-origin only.
+    ...(context.channelMetadata?.linear_issue_id && {
+      linear_issue_id: context.channelMetadata.linear_issue_id,
+    }),
+    // DynamoDB GSIs cannot key on nested map values. Hoist the tenant-scoped
+    // Jira issue identity so JiraIssueIndex can resolve comment triggers back
+    // to the newest PR-producing task.
+    ...(context.channelSource === 'jira'
+      && context.channelMetadata?.jira_cloud_id
+      && context.channelMetadata?.jira_issue_key
+      && {
+        jira_issue_identity:
+          `${context.channelMetadata.jira_cloud_id}#${context.channelMetadata.jira_issue_key}`,
+      }),
     ...(attachmentRecords.length > 0 && { attachments: attachmentRecords }),
     status_created_at: `${initialStatus}#${now}`,
     created_at: now,
@@ -604,7 +771,7 @@ export async function createTaskCore(
         timestamp: now,
         ttl: computeTtlEpoch(TASK_RETENTION_DAYS),
         metadata: {
-          repo: body.repo,
+          repo: body.repo ?? null,
           issue_number: body.issue_number ?? null,
           channel_source: context.channelSource,
         },
@@ -630,7 +797,7 @@ export async function createTaskCore(
     // "blueprint" when the blueprint explicitly configured the value,
     // "platform_default" when it fell through to 50.
     approval_gate_cap: resolvedApprovalGateCap,
-    approval_gate_cap_source: blueprintCap !== undefined ? 'blueprint' : 'platform_default',
+    approval_gate_cap_source: capFromBlueprint ? 'blueprint' : 'platform_default',
   });
 
   // 8. Async-invoke the orchestrator (fire-and-forget).
@@ -694,7 +861,7 @@ export async function createTaskCore(
       return errorResponse(500, ErrorCode.INTERNAL_ERROR,
         'Failed to generate upload instructions. Please try again.', requestId);
     }
-    const taskExpiresAt = new Date(Date.now() + 30 * 60 * 1000).toISOString(); // 30 min auto-cancel window
+    const taskExpiresAt = new Date(Date.now() + PENDING_UPLOAD_EXPIRY_MINUTES * 60 * 1000).toISOString();
     return successResponse(202, {
       ...toTaskDetail(taskRecord),
       upload_instructions: uploadInstructions,
@@ -705,12 +872,18 @@ export async function createTaskCore(
   return successResponse(201, toTaskDetail(taskRecord), requestId);
 }
 
+/** Auto-cancel window for tasks awaiting presigned uploads (minutes). */
+const PENDING_UPLOAD_EXPIRY_MINUTES = 30;
+
 const BASE64_PATTERN = /^[A-Za-z0-9+/]*={0,2}$/;
+
+/** Base64 encodes 3 bytes into 4 characters — length must be a multiple of this. */
+const BASE64_GROUP_SIZE = 4;
 
 /** Validate that a string is well-formed base64. */
 function isValidBase64(data: string): boolean {
   if (data.length === 0) return false;
-  if (data.length % 4 !== 0) return false;
+  if (data.length % BASE64_GROUP_SIZE !== 0) return false;
   return BASE64_PATTERN.test(data);
 }
 

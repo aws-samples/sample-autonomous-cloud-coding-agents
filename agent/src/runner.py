@@ -1,7 +1,7 @@
 """Agent invocation: environment setup and Claude Agent SDK execution.
 
-Between-turns injection seam (Phase 2 Nudges)
----------------------------------------------
+Between-turns injection seam (nudges)
+-------------------------------------
 User nudges and other synthetic mid-task steering messages are injected via
 the Claude Agent SDK's ``Stop`` hook (registered in ``hooks.build_hook_matchers``),
 NOT the message-receive loop below.
@@ -15,8 +15,8 @@ Rationale for the Stop hook seam:
     ``{"decision": "block", "reason": "<text>"}`` causes the SDK to continue
     the conversation with ``<text>`` as the next user message, which is
     exactly the semantics we need for nudge injection.
-  * A module-level registry ``hooks.between_turns_hooks`` lets Phase 3
-    approval gates add additional hooks without touching this file.
+  * A module-level registry ``hooks.between_turns_hooks`` lets other
+    producers (e.g. approval gates) add hooks without touching this file.
 
 Turn counting (``result.turns``) is incremented on ``AssistantMessage`` only
 and is NOT affected by the Stop hook's block/continue decision — nudge
@@ -27,10 +27,16 @@ from __future__ import annotations
 
 import os
 import subprocess
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import quote
 
+from clarification_tool import (
+    CLARIFICATION_SERVER_NAME,
+    CLARIFICATION_TOOL_NAME,
+    build_clarification_server,
+)
 from config import AGENT_WORKSPACE
+from gateway_tools import GATEWAY_SERVER_NAME, build_gateway_server
 from models import AgentResult, TaskConfig, TokenUsage
 from progress_writer import _ProgressWriter
 from shell import log, log_error_cw, truncate
@@ -59,6 +65,58 @@ def _parse_token_usage(raw_usage: Any) -> TokenUsage:
     return TokenUsage(**values)
 
 
+def _setup_bedrock_cost_attribution(config: TaskConfig) -> None:
+    """Wire Bedrock cost attribution for the Claude Code subprocess.
+
+    Claude Code makes the ``InvokeModel`` calls, so attribution is configured
+    through *its* credential + header channels, not the agent's boto3:
+
+    1. **Per-user/repo chargeback (CUR 2.0 / Cost Explorer).** Write the
+       SessionRole ARN + ``{user_id, repo, task_id}`` STS tags to a 0600 file
+       that ``bedrock_creds_helper.py`` reads. Claude Code's managed-settings
+       ``awsCredentialExport`` runs that helper and signs Bedrock requests with
+       the tagged assumed-role credentials. Skipped when ``AGENT_SESSION_ROLE_ARN``
+       is unset (local/dev) — the helper then fails open to ambient creds.
+
+    2. **Per-call forensics (model-invocation logs).** Set
+       ``X-Amzn-Bedrock-Request-Metadata`` via ``ANTHROPIC_CUSTOM_HEADERS`` on the
+       process env. One container = one task = one Claude Code session, so a
+       static-per-process header is effectively per-task. Set via the process
+       env (not project settings) so the untrusted cloned repo cannot alter it.
+    """
+    import json
+
+    from aws_session import MAX_TAG_VALUE_LEN, build_session_tags
+
+    role_arn = os.environ.get("AGENT_SESSION_ROLE_ARN", "").strip()
+    tags = build_session_tags(config.user_id, config.repo_url, config.task_id)
+    if role_arn and tags:
+        try:
+            from bedrock_creds_helper import write_attribution_file
+
+            write_attribution_file(role_arn, tags)
+        except OSError as exc:
+            # Fail open: attribution is observability, not isolation. Bedrock
+            # still works on the compute role; we just lose tagged chargeback.
+            log("WARN", f"Bedrock attribution file not written ({exc}); spend will be untagged")
+
+    # Per-request metadata mirrors the STS tag values. Bedrock limits keys/values
+    # to 256 chars and records them under ``requestMetadata`` in invocation logs.
+    #
+    # Unlike the tenant-data tags (kept out of os.environ so untrusted repo
+    # subprocesses don't inherit them), this header MUST go on os.environ —
+    # Claude Code reads ANTHROPIC_CUSTOM_HEADERS from the process env. The
+    # exposure is acceptable: the values are the task's OWN {user_id, repo,
+    # task_id} (self-referential, non-secret), so a spawned subprocess learns
+    # only who it is already running for. json.dumps escapes newlines/quotes, so
+    # a crafted repo slug cannot inject an extra (newline-separated) header.
+    metadata = {t["Key"]: t["Value"][:MAX_TAG_VALUE_LEN] for t in tags}
+    if metadata:
+        os.environ["ANTHROPIC_CUSTOM_HEADERS"] = (
+            f"X-Amzn-Bedrock-Request-Metadata: {json.dumps(metadata, separators=(',', ':'))}"
+        )
+
+
 def _setup_agent_env(config: TaskConfig) -> tuple[str | None, str | None]:
     """Configure process environment for the Claude Code CLI subprocess.
 
@@ -72,13 +130,21 @@ def _setup_agent_env(config: TaskConfig) -> tuple[str | None, str | None]:
     os.environ["ANTHROPIC_MODEL"] = config.anthropic_model
     os.environ["GITHUB_TOKEN"] = config.github_token
     os.environ["GH_TOKEN"] = config.github_token
+
+    _setup_bedrock_cost_attribution(config)
     # DO NOT set ANTHROPIC_LOG — any logging level causes the CLI to write to
     # stderr, which fills the OS pipe buffer (64 KB) and deadlocks the
     # single-threaded Node.js CLI process (blocked stderr write prevents stdout
     # writes, while the SDK is waiting on stdout).  The stderr callback in
     # ClaudeAgentOptions cannot drain fast enough to prevent this.
     os.environ.pop("ANTHROPIC_LOG", None)
-    os.environ["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = "anthropic.claude-haiku-4-5-20251001-v1:0"
+    # Small/fast auxiliary model (WebFetch summarization etc.), from config like
+    # ANTHROPIC_MODEL above — resolved from the deployed ANTHROPIC_DEFAULT_HAIKU_MODEL
+    # env (agent.ts) with a platform default in config.py. Must be a cross-region
+    # INFERENCE-PROFILE id (``us.`` prefix): Claude 4.x cannot be invoked on-demand
+    # by bare model id on Bedrock (400 "on-demand throughput isn't supported",
+    # seen on WebFetch's Haiku sub-calls); config.py resolves that default.
+    os.environ["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = config.haiku_model
 
     # Save OTLP endpoint/protocol configured by ADOT auto-instrumentation
     # before stripping, so we can re-use it for Claude Code CLI telemetry.
@@ -188,11 +254,10 @@ def _initialize_policy_engine_and_hooks(
     Handles:
 
     * Threading per-task approval params (``initial_approvals``,
-      ``approval_timeout_s``, and Chunk 7's ``initial_approval_gate_count``)
+      ``approval_timeout_s``, and ``initial_approval_gate_count``)
       through to ``PolicyEngine.__init__``.
-    * Emitting the ``pre_approvals_loaded`` milestone (§4 step 7, §11.1)
-      unconditionally so "no pre-approvals seeded" is explicit rather than
-      inferred from silence.
+    * Emitting the ``pre_approvals_loaded`` milestone unconditionally so
+      "no pre-approvals seeded" is explicit rather than inferred from silence.
     * Building the SDK hook matchers that route PreToolUse / PostToolUse /
       Stop invocations through the engine.
     """
@@ -200,46 +265,43 @@ def _initialize_policy_engine_and_hooks(
     from policy import PolicyEngine
 
     cedar_policies = config.cedar_policies
-    # Cedar HITL (§7.3, §10.2) — per-task approval defaults threaded
-    # from the orchestrator payload. Engine clamps invalid values
-    # at construction.
+    # Per-task approval defaults threaded from the orchestrator payload.
+    # Engine clamps invalid values at construction.
     engine_kwargs: dict = {}
     if config.initial_approvals:
         engine_kwargs["initial_approvals"] = list(config.initial_approvals)
     if config.approval_timeout_s is not None:
         engine_kwargs["task_default_timeout_s"] = config.approval_timeout_s
-    # Chunk 7 (§13.6): seed the session counter from the TaskTable
-    # persisted value so a container restart mid-task resumes the
-    # cumulative gate budget and the ``approval_gate_cap`` remains
-    # the terminal bound across restarts.
+    # Seed the session counter from the TaskTable persisted value so a
+    # container restart mid-task resumes the cumulative gate budget and the
+    # ``approval_gate_cap`` remains the terminal bound across restarts.
     if config.initial_approval_gate_count:
         engine_kwargs["initial_approval_gate_count"] = config.initial_approval_gate_count
-    # Chunk 7b (§4 step 5, decision #13): adopt the per-task cap
-    # resolved at submit-time (blueprint override or platform default,
-    # frozen on the TaskRecord). When absent (legacy task predating
-    # Chunk 7b), ``PolicyEngine`` falls back to DEFAULT_APPROVAL_GATE_CAP
-    # so the behavior matches pre-Chunk-7b deploys.
+    # Adopt the per-task cap resolved at submit-time (blueprint override or
+    # platform default, frozen on the TaskRecord). When absent (a legacy task
+    # that predates the persisted cap), ``PolicyEngine`` falls back to
+    # DEFAULT_APPROVAL_GATE_CAP.
     if config.approval_gate_cap is not None:
         engine_kwargs["approval_gate_cap"] = config.approval_gate_cap
     policy_engine = PolicyEngine(
-        task_type=config.task_type,
+        task_type=config.policy_principal,
         repo=config.repo_url,
+        read_only=config.read_only,
         extra_policies=cedar_policies if cedar_policies else None,
         **engine_kwargs,
     )
-    # Chunk 7c: surface the resolved cap + its source so operators can
-    # distinguish a blueprint-threaded value from the engine's compile-time
-    # default on a container restart. Mirrors the ``approval_gate_cap_source``
-    # field on the handler's "Task created" log so both ends of the cascade
-    # carry the same key name — CloudWatch Insights queries can
-    # filter/group by ``approval_gate_cap_source`` across handler +
-    # agent events. Value domains differ intentionally: the handler
-    # distinguishes ``blueprint`` vs ``platform_default``, but the
-    # agent only sees the threaded number (blueprint-set or default-50
-    # frozen on the TaskRecord both look the same from here), so it
-    # emits ``threaded`` vs ``engine_default`` (the latter only fires
-    # for legacy tasks that predate Chunk 7b and have no cap on the
-    # TaskRecord at all). Cross-reference handler log at
+    # Surface the resolved cap + its source so operators can distinguish a
+    # blueprint-threaded value from the engine's compile-time default on a
+    # container restart. Mirrors the ``approval_gate_cap_source`` field on the
+    # handler's "Task created" log so both ends of the cascade carry the same
+    # key name — CloudWatch Insights queries can filter/group by
+    # ``approval_gate_cap_source`` across handler + agent events. Value domains
+    # differ intentionally: the handler distinguishes ``blueprint`` vs
+    # ``platform_default``, but the agent only sees the threaded number
+    # (blueprint-set or default-50 frozen on the TaskRecord both look the same
+    # from here), so it emits ``threaded`` vs ``engine_default`` (the latter
+    # only fires for legacy tasks that have no cap on the TaskRecord at all).
+    # Cross-reference the handler log at
     # ``create-task-core.ts::logger.info('Task created', ...)`` for the
     # ground-truth blueprint-vs-default distinction.
     if config.approval_gate_cap is not None:
@@ -248,16 +310,15 @@ def _initialize_policy_engine_and_hooks(
         cap_log = " approval_gate_cap=unset approval_gate_cap_source=engine_default"
     log(
         "AGENT",
-        f"Cedar policy engine initialized for task_type={config.task_type}"
+        f"Cedar policy engine initialized for task_type={config.policy_principal}"
         + (f" with {len(cedar_policies)} extra policies" if cedar_policies else "")
         + cap_log,
     )
 
-    # §4 step 7, §11.1: surface the starting pre-approval posture to the
-    # live SSE stream + 90d DDB record so operators can see exactly which
-    # scopes were seeded at task start. Emit unconditionally (count=0,
-    # scopes=[]) so "no pre-approvals seeded" is explicit rather than
-    # inferred from silence.
+    # Surface the starting pre-approval posture to the live SSE stream +
+    # retained DDB record so operators can see exactly which scopes were
+    # seeded at task start. Emit unconditionally (count=0, scopes=[]) so "no
+    # pre-approvals seeded" is explicit rather than inferred from silence.
     progress.write_approval_pre_approvals_loaded(
         count=len(config.initial_approvals),
         scopes=list(config.initial_approvals),
@@ -269,8 +330,187 @@ def _initialize_policy_engine_and_hooks(
         task_id=config.task_id or "",
         progress=progress,
         user_id=config.user_id or "",
+        repo_url=config.repo_url or "",
     )
     return policy_engine, hooks
+
+
+# The built-in full tool surface, used when a config carries no workflow tool
+# list (legacy/batch callers that never resolved a workflow).
+_FULL_TOOL_SURFACE = ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch"]
+# Tools that mutate the working tree — dropped from the SDK surface for any
+# read-only workflow.
+_WRITE_TOOLS = frozenset(("Write", "Edit"))
+# Clarify-before-spend (UX #4): workflows that do NOT get the request_clarification
+# tool. pr-iteration already has its own answer-only path; web/default artifact
+# tasks don't open PRs. Only the plain PR-producing new_task path benefits from an
+# ask-instead-of-guess signal.
+_NO_CLARIFICATION_WORKFLOW_IDS = frozenset(
+    (
+        "coding/pr-iteration-v1",
+        "coding/pr-review-v1",
+        "coding/restack-v1",
+        "default/agent-v1",
+        "web/research-v1",
+    )
+)
+
+# Tools that DEFER work off-session and are hard-blocked for every task. These
+# launch detached / cross-session orchestration that a one-shot headless agent
+# has no supervisor to await: the ``Workflow`` tool returns a task id and runs
+# in the background (its result arrives via a notification into an interactive
+# session that does not exist here), and ``Task``/``Agent`` can spawn background
+# subagents. We saw a repo-less task launch a background ``Workflow`` and then
+# finalize on the first ResultMessage with a placeholder artifact while the real
+# research ran on, detached (task 01KWDEFQH6...). CRITICAL: ``allowed_tools`` is
+# only an auto-APPROVE list — per the Agent SDK docs it does NOT restrict the
+# surface; unlisted tools fall through to ``permission_mode``, and under
+# ``bypassPermissions`` they are simply allowed. ``disallowed_tools`` is the
+# only hard lock (it removes the tool from the model's context even under
+# bypass), so the block must live there, not in the allow-list.
+# ``Workflow`` (background multi-agent orchestration) is the one that bit us;
+# ``Task``/``Agent`` are the sub-agent spawners (name varies by CLI version, so
+# block both); ``Monitor`` streams a background command's output mid-turn;
+# ``SendMessage`` resumes/relaunches background agents; the ``Cron*`` tools
+# schedule deferred work. All are "return now, work continues off-session"
+# vectors a one-shot task cannot await. NOT blockable here: background ``Bash``
+# (a ``run_in_background`` PARAMETER of Bash, not a tool name) — but a detached
+# Bash child dies with the MicroVM on return, so it can't produce
+# arrives-later work the way a cloud Workflow does; the deliver-artifact
+# deferral guard (deliverers._reject_if_deferral) is the backstop for anything
+# that still ends in a placeholder.
+_DISALLOWED_TOOLS = [
+    "Workflow",
+    "Task",
+    "Agent",
+    "Monitor",
+    "SendMessage",
+    "CronCreate",
+    "CronDelete",
+    "CronList",
+]
+
+
+def _resolve_allowed_tools(config: TaskConfig) -> list[str]:
+    """Resolve the SDK ``allowed_tools`` (auto-approve) list for a task.
+
+    - The resolved workflow's ``agent_config.allowed_tools`` (threaded onto
+      ``config.allowed_tools``) is passed to the SDK verbatim. An empty list —
+      legacy/batch callers that never resolved a workflow — falls back to the
+      built-in full surface.
+    - ``Write``/``Edit`` are dropped whenever ``config.read_only`` is true.
+
+    IMPORTANT: this list only governs auto-approval, NOT the reachable surface.
+    Per the Agent SDK, a tool omitted here is not blocked — it falls through to
+    ``permission_mode`` (``bypassPermissions`` ⇒ allowed). The actual surface
+    lock is ``_DISALLOWED_TOOLS`` passed to ``disallowed_tools``. NOTE the Cedar
+    PreToolUse hooks are NOT a backstop for an unknown tool name: the engine
+    default-permits on no-match (``policy.py``), so it only denies the specific
+    actions it has ``forbid`` rules for (e.g. Write/Edit under read_only) —
+    ``Workflow``/``Task``/``Agent`` match nothing and would be allowed. So
+    ``disallowed_tools`` is the ONLY thing keeping them out; do not rely on this
+    allow-list, nor on Cedar, to remove a tool from the surface.
+    """
+    tools = list(config.allowed_tools) if config.allowed_tools else list(_FULL_TOOL_SURFACE)
+    if config.read_only:
+        tools = [t for t in tools if t not in _WRITE_TOOLS]
+    return tools
+
+
+def _resolve_setting_sources(config: TaskConfig) -> list[Literal["user", "project", "local"]]:
+    """Which on-disk Claude Code settings the CLI may load for this task.
+
+    A task with a cloned repo loads ``["project"]`` so the repo's own
+    ``.claude/`` config is honored. A task with no repo loads nothing —
+    defense-in-depth that also stops a stray on-disk skill (e.g. one that spawns
+    a background Workflow) from being reachable. Kept as a named helper so the
+    policy is unit-testable without driving the SDK.
+
+    Keys on ``repo_url`` (repo presence), NOT ``requires_repo`` (a static
+    workflow property): a repo-optional workflow given a repo takes the
+    repo-bound clone path (``pipeline.py`` gates on ``not requires_repo and not
+    repo_url``), so keying on ``requires_repo`` would clone the repo but drop
+    its ``.claude/`` config. Mirrors ``create-task-core.ts`` keying
+    ``branch_name`` on repo presence for the same reason.
+    """
+    return ["project"] if config.repo_url else []
+
+
+#: Timeout (seconds) for the ``claude --version`` diagnostic probe.
+#:
+#: 60, not the original 10 (ADR-021 P2-F5, live 2026-08-07). This probe killed
+#: EVERY task on the ``lambda-microvm`` backend at turn 0, reproducibly:
+#:
+#:   TimeoutExpired: Command '['claude', '--version']' timed out after 10 seconds
+#:
+#: The binary was fine — the same image answers ``2.1.191 (Claude Code)`` in under
+#: a second locally. It is a 225 MiB (236,305,136-byte) statically linked ELF, and
+#: on a MicroVM restored from a snapshot that never touched it, the first ``exec``
+#: must fault all of its pages in from lazily-restored storage.
+#:
+#: The real fix is warming the binary BEFORE the snapshot is captured
+#: (``_warm_snapshot_binaries`` in ``server.py``'s ``/ready`` hook); this bound is
+#: the belt to that braces, and it is deliberately loose because a tight bound buys
+#: NOTHING here: the call prints a version string into a log line, and its failure
+#: mode is a dead task. Any cold-start environment (a fresh container, a cold page
+#: cache, a throttled volume) has to fit inside it. 60 s still fails loudly on a
+#: genuinely broken binary.
+_CLAUDE_VERSION_PROBE_TIMEOUT_S = 60
+
+#: Timeout (seconds) for ``which claude``. Unchanged at 5: a PATH lookup touches no
+#: page of the 225 MiB binary, so it is not subject to the hydration cost above.
+_WHICH_CLAUDE_TIMEOUT_S = 5
+
+
+def _log_claude_cli_version() -> None:
+    """Log the resolved ``claude`` path and version, for protocol-mismatch triage.
+
+    Diagnostics only — nothing branches on the result, which is exactly why the
+    timeout above is loose. Extracted from ``run_agent`` so the probe is assertable
+    in a unit test without standing up the SDK client: this line, and only this
+    line, is what failed every task on the MicroVM backend (P2-F5).
+
+    **Diagnostics-only means it cannot fail the task.** Raising the timeout to 60 s
+    made P2-F5 unlikely; it did not make it impossible, and a probe whose entire
+    output is a log line has no business propagating. So every failure mode of the
+    two ``subprocess.run`` calls is caught and downgraded to a ``WARN``:
+    ``TimeoutExpired`` (``SubprocessError``) for a still-hydrating binary,
+    ``FileNotFoundError`` / ``PermissionError`` (``OSError``) for a missing or
+    non-executable ``which``/``claude``. The real ``claude`` invocation happens
+    inside the SDK client below and still fails loudly — this line does not.
+    """
+    try:
+        cli_path = subprocess.run(
+            ["which", "claude"], capture_output=True, text=True, timeout=_WHICH_CLAUDE_TIMEOUT_S
+        )
+        if cli_path.returncode != 0:
+            log("WARN", "claude CLI not found on PATH")
+            return
+        cli_ver = subprocess.run(
+            ["claude", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=_CLAUDE_VERSION_PROBE_TIMEOUT_S,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        log("WARN", f"claude CLI version probe failed (non-fatal): {type(exc).__name__}: {exc}")
+        return
+    log("AGENT", f"claude CLI: {cli_path.stdout.strip()} version={cli_ver.stdout.strip()}")
+
+
+def _register_gateway_server(mcp_servers: dict[str, Any]) -> None:
+    """Register the AgentCore Gateway bridge into ``mcp_servers`` if enabled.
+
+    Mutates ``mcp_servers`` in place, adding the bridge under
+    :data:`GATEWAY_SERVER_NAME` when :func:`build_gateway_server` returns a
+    server (feature deployed + SDK present). A no-op otherwise. Extracted from
+    ``run_agent`` so the registration wiring is unit-testable without driving
+    the whole SDK session (the #641 P1 review flagged this path as untested).
+    """
+    gateway_server = build_gateway_server()
+    if gateway_server is not None:
+        mcp_servers[GATEWAY_SERVER_NAME] = gateway_server
+        log("AGENT", "AgentCore Gateway tool bridge registered (mcp__abca_gateway__*)")
 
 
 async def run_agent(
@@ -308,18 +548,10 @@ async def run_agent(
 
     sdk_version = getattr(_sdk, "__version__", "unknown")
     log("AGENT", f"claude-agent-sdk version: {sdk_version}")
-    cli_path = subprocess.run(["which", "claude"], capture_output=True, text=True, timeout=5)
-    if cli_path.returncode == 0:
-        cli_ver = subprocess.run(
-            ["claude", "--version"], capture_output=True, text=True, timeout=10
-        )
-        log("AGENT", f"claude CLI: {cli_path.stdout.strip()} version={cli_ver.stdout.strip()}")
-    else:
-        log("WARN", "claude CLI not found on PATH")
+    _log_claude_cli_version()
 
-    # All tools are allowed at the SDK level; Cedar policy engine enforces
-    # per-task-type restrictions via PreToolUse hooks.
-    allowed_tools = ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch"]
+    # SDK tool surface — see _resolve_allowed_tools for the policy.
+    allowed_tools = _resolve_allowed_tools(config)
 
     # Create trajectory writer and Cedar policy engine with hook matchers.
     # ``trace=config.trace`` is load-bearing: this writer emits the turn /
@@ -331,11 +563,16 @@ async def run_agent(
     # When the caller (pipeline.py) injects a pre-built ``trajectory`` we
     # use it as-is so the pipeline can retain access to the accumulator
     # after ``run_agent`` returns (the --trace S3 upload runs in
-    # pipeline.py on terminal state — see design §10.1). For standalone
+    # pipeline.py on terminal state). For standalone
     # invocations we fall back to a fresh writer with no accumulator.
     if trajectory is None:
         trajectory = _TrajectoryWriter(config.task_id or "unknown")
-    progress = _ProgressWriter(config.task_id or "unknown", trace=config.trace)
+    progress = _ProgressWriter(
+        config.task_id or "unknown",
+        trace=config.trace,
+        user_id=config.user_id,
+        repo=config.repo_url,
+    )
 
     # Map tool_use_id → tool_name so we can label ToolResultBlocks that arrive
     # in UserMessages (ToolResultBlock carries only the id, not the name).
@@ -349,17 +586,49 @@ async def run_agent(
         progress=progress,
     )
 
+    # Clarify-before-spend (UX #4): register the in-process request_clarification
+    # tool for writeable PR-producing workflows (new_task). It lets the agent STOP
+    # and ask a question instead of guessing on a vague request; the runner
+    # captures the call below. Gated OFF for read-only workflows (pr-review) and
+    # artifact planners — they have their own terminal shapes and
+    # shouldn't grow an ask-instead path. Best-effort: a null server (SDK missing)
+    # just means the tool isn't offered.
+    mcp_servers: dict[str, Any] = {}
+    workflow_id = (config.resolved_workflow or {}).get("id", "")
+    offer_clarification = not config.read_only and workflow_id not in _NO_CLARIFICATION_WORKFLOW_IDS
+    if offer_clarification:
+        clar_server = build_clarification_server()
+        if clar_server is not None:
+            mcp_servers[CLARIFICATION_SERVER_NAME] = clar_server
+            # Under bypassPermissions MCP tools surface without being in
+            # allowed_tools, but list it explicitly so intent is clear + robust
+            # to a future permission-mode change.
+            allowed_tools = [*allowed_tools, CLARIFICATION_TOOL_NAME]
+
+    # AgentCore Gateway federation (ADR-019 P1): register the in-process
+    # SigV4-signed bridge to the Gateway's read-only tools when the feature is
+    # deployed (ABCA_TOOL_GATEWAY_URL set via --context enableToolGateway=true).
+    # Offered regardless of read_only — the tool is itself read-only. No-op when
+    # the URL is unset or the SDK is unavailable.
+    _register_gateway_server(mcp_servers)
+
     options = ClaudeAgentOptions(
         model=config.anthropic_model,
         system_prompt=system_prompt,
         allowed_tools=allowed_tools,
+        # Hard surface lock (NOT allowed_tools — that is auto-approve only). Keeps
+        # off-session/defer vectors out of the model's context even under
+        # bypassPermissions, so a one-shot headless task cannot launch detached
+        # work it has no supervisor to await. See _DISALLOWED_TOOLS.
+        disallowed_tools=list(_DISALLOWED_TOOLS),
         permission_mode="bypassPermissions",
         cwd=cwd,
         max_turns=config.max_turns,
-        setting_sources=["project"],
+        setting_sources=_resolve_setting_sources(config),
         hooks=hooks,
         max_budget_usd=config.max_budget_usd,
         stderr=_on_stderr,
+        **({"mcp_servers": mcp_servers} if mcp_servers else {}),
     )
 
     result = AgentResult()
@@ -404,7 +673,22 @@ async def run_agent(
                         turn_text += block.text + "\n"
                     elif isinstance(block, ToolUseBlock):
                         tool_input = block.input
-                        if block.name == "Bash":
+                        # Clarify-before-spend (UX #4): the agent called the
+                        # request_clarification tool → capture its question. This
+                        # is the deterministic hold signal (a tool call, not a
+                        # reproduced sentinel). Last call wins if it somehow asks
+                        # twice; the pipeline treats any non-empty value as a hold.
+                        if block.name == CLARIFICATION_TOOL_NAME:
+                            q = ""
+                            if isinstance(tool_input, dict):
+                                q = str(tool_input.get("question", "")).strip()
+                            # Any non-empty value flags the hold; " " if the arg
+                            # was blank so the signal still fires.
+                            result.clarification_question = (
+                                q or result.clarification_question or " "
+                            )
+                            log("TOOL", f"request_clarification: {truncate(q, 300)}")
+                        elif block.name == "Bash":
                             cmd = tool_input.get("command", "")
                             log("TOOL", f"Bash: {truncate(cmd, 300)}")
                         elif block.name in ("Read", "Glob", "Grep"):
@@ -470,6 +754,11 @@ async def run_agent(
 
                 err_payload = getattr(message, "result", None)
                 is_terminal_error = bool(getattr(message, "is_error", False))
+                # On a non-error result, ``message.result`` is the agent's final
+                # text — the deliverable for a repo-less knowledge task. Capture
+                # it so deliver_artifact can upload/post it.
+                if not is_terminal_error and err_payload:
+                    result.result_text = str(err_payload)
                 # The Claude Code CLI may emit ResultMessage with subtype "success"
                 # while setting is_error for Bedrock entitlement / model-access failures.
                 # Treat that as a hard failure so the pipeline writes FAILED (not COMPLETED).

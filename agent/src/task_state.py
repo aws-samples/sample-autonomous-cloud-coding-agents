@@ -15,13 +15,12 @@ from shell import log, log_error_cw
 class ApprovalRow(TypedDict):
     """Schema for the approval row written by ``transact_write_approval_request``.
 
-    Mirrors the DDB column layout described in design §10.1 and the
-    TypeScript ``ApprovalRecord`` discriminated union in
-    ``cdk/src/handlers/shared/types.ts``. Used as the typed contract
-    between the PreToolUse hook (which builds the row) and the
-    transactional writer (which serializes it to DDB attributes).
-    Pre-S7 the function accepted a bare ``dict`` so missing or
-    misspelled fields would fail at runtime, not at the call site.
+    Mirrors the DDB column layout and the TypeScript ``ApprovalRecord``
+    discriminated union in ``cdk/src/handlers/shared/types.ts``. Used as
+    the typed contract between the PreToolUse hook (which builds the row)
+    and the transactional writer (which serializes it to DDB attributes).
+    Earlier the function accepted a bare ``dict`` so missing or misspelled
+    fields would fail at runtime, not at the call site.
     """
 
     task_id: str
@@ -246,7 +245,9 @@ def write_terminal(task_id: str, status: str, result: dict | None = None) -> Non
             return
         now = _now_iso()
         expr_names = {"#s": "status"}
-        expr_values = {
+        # Mixed value types: most are strings, but build_passed/lint_passed are
+        # persisted as native booleans (the reconciler reads them via .BOOL).
+        expr_values: dict[str, object] = {
             ":s": status,
             ":t": now,
             ":sca": f"{status}#{now}",
@@ -257,9 +258,8 @@ def write_terminal(task_id: str, status: str, result: dict | None = None) -> Non
             # mid-gate can still record the terminal transition. Without
             # it, a crash while the user is deciding leaves the task
             # stuck until the stranded-task reconciler catches it (~2h).
-            # Cedar HITL state machine (design §9): RUNNING ↔
-            # AWAITING_APPROVAL, both can transition straight to a
-            # terminal state.
+            # Approval state machine: RUNNING ↔ AWAITING_APPROVAL, both can
+            # transition straight to a terminal state.
             ":awaiting_approval": "AWAITING_APPROVAL",
         }
         update_parts = ["#s = :s", "completed_at = :t", "status_created_at = :sca"]
@@ -280,8 +280,8 @@ def write_terminal(task_id: str, status: str, result: dict | None = None) -> Non
             if result.get("turns") is not None:
                 update_parts.append("turns = :turns")
                 expr_values[":turns"] = str(result["turns"])
-            # Rev-5 DATA-1: dual counters so operators can distinguish
-            # SDK-attempted vs pipeline-completed turn counts.
+            # Dual counters so operators can distinguish SDK-attempted vs
+            # pipeline-completed turn counts.
             if result.get("turns_attempted") is not None:
                 update_parts.append("turns_attempted = :ta")
                 expr_values[":ta"] = str(result["turns_attempted"])
@@ -294,13 +294,55 @@ def write_terminal(task_id: str, status: str, result: dict | None = None) -> Non
             if result.get("memory_written") is not None:
                 update_parts.append("memory_written = :mw")
                 expr_values[":mw"] = result["memory_written"]
-            # --trace artifact URI (design §10.1). Written atomically
-            # with the terminal-status transition so a consumer that
-            # reads TaskRecord.trace_s3_uri immediately after
-            # status becomes terminal sees a consistent view.
+            # Persist the post-hook verify outcomes so they're observable on the
+            # task record (orchestration reconciler / dashboards / replay
+            # bundle), not just consumed in-process by the gate. build_passed/
+            # lint_passed were historically dropped here (present on TaskResult but
+            # never written) — persist both so a consumer sees WHY a task passed/
+            # failed verification, as a structured signal.
+            if result.get("build_passed") is not None:
+                update_parts.append("build_passed = :bp")
+                expr_values[":bp"] = bool(result["build_passed"])
+            if result.get("lint_passed") is not None:
+                update_parts.append("lint_passed = :lp")
+                expr_values[":lp"] = bool(result["lint_passed"])
+            # Whether a PR-iteration advanced the branch HEAD (a real commit
+            # landed) vs. ran with no change (a question-only comment).
+            # The Linear/Slack settle reply reads this to avoid a false
+            # "✅ Updated" on a no-op iteration. None ⇒ not persisted (the
+            # consumer defaults to the change-made side, back-compat).
+            if result.get("code_changed") is not None:
+                update_parts.append("code_changed = :cc")
+                expr_values[":cc"] = bool(result["code_changed"])
+            # The pushed HEAD sha — lets the screenshot webhook match a deploy's
+            # commit to the iteration task that pushed it (correct preview-reply
+            # attribution when two iterations overlap on one PR). Skip empties.
+            if result.get("head_sha"):
+                update_parts.append("head_sha = :hsha")
+                expr_values[":hsha"] = str(result["head_sha"])
+            if result.get("answer_text"):
+                update_parts.append("answer_text = :ans")
+                # Bound the persisted answer so a verbose agent can't bloat the
+                # row; the reply renderer truncates again for display.
+                expr_values[":ans"] = str(result["answer_text"])[:2000]
+            # OTEL trace id for cross-plane correlation. Absent on tasks
+            # that predate this field and when tracing is unavailable.
+            if result.get("otel_trace_id"):
+                update_parts.append("otel_trace_id = :otid")
+                expr_values[":otid"] = result["otel_trace_id"]
+            # --trace artifact URI. Written atomically with the
+            # terminal-status transition so a consumer that reads
+            # TaskRecord.trace_s3_uri immediately after status becomes
+            # terminal sees a consistent view.
             if result.get("trace_s3_uri"):
                 update_parts.append("trace_s3_uri = :ts3")
                 expr_values[":ts3"] = result["trace_s3_uri"]
+            # Repo-less delivered artifact URI. Persisted with the terminal
+            # write so TaskDetail.artifact_uri surfaces the deliverable
+            # — otherwise the S3 object exists but its URI is undiscoverable.
+            if result.get("artifact_uri"):
+                update_parts.append("artifact_uri = :au")
+                expr_values[":au"] = result["artifact_uri"]
 
         table.update_item(
             Key={"task_id": task_id},
@@ -321,9 +363,9 @@ def write_terminal(task_id: str, status: str, result: dict | None = None) -> Non
                 "[task_state] write_terminal skipped: "
                 "status precondition not met (task may have been cancelled)",
             )
-            # K2 final review SIG-1: ConditionalCheckFailed on the
-            # happy path after a successful S3 trace upload orphans
-            # the S3 object — the URI never lands on the TaskRecord,
+            # A ConditionalCheckFailed on the happy path after a
+            # successful S3 trace upload orphans the S3 object — the URI
+            # never lands on the TaskRecord,
             # so ``get-trace-url`` will 404 ``TRACE_NOT_AVAILABLE``
             # indefinitely. Without this dedicated log the orphan
             # is invisible; the generic skip message above doesn't
@@ -458,35 +500,35 @@ def get_task(task_id: str) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
-# Cedar HITL approval primitives (§6.5, §9.1, IMPL-24)
+# Approval primitives (Cedar human-in-the-loop gates)
 # ---------------------------------------------------------------------------
 #
-# ``TaskApprovalsTable`` and the AWAITING_APPROVAL status transitions land
-# physically in Chunk 4 (CDK). The agent-side helpers below are written to
-# that contract and exposed so Chunk 3's ``pre_tool_use_hook`` can be
-# implemented + unit-tested now (via mocked boto3 clients); Chunk 4 sets
-# ``TASK_APPROVALS_TABLE_NAME`` + grants IAM and the same helpers start
-# making real DDB calls with no further code change on the agent side.
+# ``TaskApprovalsTable`` and the AWAITING_APPROVAL status transitions are
+# provisioned by the CDK stack. The agent-side helpers below are written to
+# that contract and exposed so the ``pre_tool_use_hook`` can be implemented +
+# unit-tested (via mocked boto3 clients); once the stack sets
+# ``TASK_APPROVALS_TABLE_NAME`` + grants IAM, the same helpers start making
+# real DDB calls with no further code change on the agent side.
 #
 # Primitives exposed:
 #   - ``transact_write_approval_request`` — atomic Put(TaskApprovals) +
 #     Update(TaskTable: RUNNING → AWAITING_APPROVAL). Raises
 #     ``ApprovalWriteError`` on ``TransactionCanceledException`` so the
-#     hook can return DENY + ``approval_write_failed`` (§13.1).
+#     hook can return DENY + ``approval_write_failed``.
 #   - ``transact_resume_from_approval`` — atomic Update(TaskTable:
 #     AWAITING_APPROVAL → RUNNING) gated on
 #     ``awaiting_approval_request_id = request_id``. Raises
-#     ``ApprovalResumeError`` on cancellation (§13.9).
+#     ``ApprovalResumeError`` on cancellation.
 #   - ``best_effort_update_approval_status`` — conditional Update on the
 #     approval row (``status = :pending`` guard). Returns ``False`` on
-#     ``ConditionCheckFailed`` so IMPL-24's re-read re-read path fires.
+#     ``ConditionCheckFailed`` so the late-approval re-read path fires.
 #   - ``get_approval_row`` — strongly-consistent GetItem; default
-#     ``consistent_read=True`` because IMPL-24's race fix relies on it.
+#     ``consistent_read=True`` because the race fix relies on it.
 #
 # Errors beyond the structural conditions (unreachable DDB, IAM drift,
 # missing env var) raise ``ApprovalTablesUnavailable`` so the hook can
-# fail CLOSED without guessing. The hook maps that to DENY so a
-# pre-Chunk-4 deploy cannot silently bypass gates.
+# fail CLOSED without guessing. The hook maps that to DENY so a deploy
+# without the approvals table cannot silently bypass gates.
 
 TASK_APPROVALS_TABLE_ENV = "TASK_APPROVALS_TABLE_NAME"
 TASK_TABLE_ENV = "TASK_TABLE_NAME"
@@ -500,9 +542,8 @@ _STATUS_AWAITING_APPROVAL = "AWAITING_APPROVAL"
 class ApprovalTablesUnavailable(RuntimeError):
     """Either ``TASK_APPROVALS_TABLE_NAME`` or ``TASK_TABLE_NAME`` is unset.
 
-    Hook maps to DENY (fail-closed); see §13.15. Distinct from
-    ``TaskFetchError`` so callers do not collapse a config problem with a
-    transient read failure.
+    Hook maps to DENY (fail-closed). Distinct from ``TaskFetchError`` so
+    callers do not collapse a config problem with a transient read failure.
     """
 
 
@@ -512,7 +553,7 @@ class ApprovalWriteError(RuntimeError):
     Fired when the cross-table atomic write is cancelled — either the
     TaskTable precondition fails (task already cancelled / advanced past
     RUNNING) or the approval row already exists. Hook maps to DENY +
-    ``approval_write_failed`` (§13.1). The underlying cancellation reasons
+    ``approval_write_failed``. The underlying cancellation reasons
     are stashed on ``.cancellation_reasons`` for triage.
     """
 
@@ -525,7 +566,7 @@ class ApprovalResumeError(RuntimeError):
     """``transact_resume_from_approval`` TransactionCanceledException.
 
     Fired when the resume transition fails — typically because the user
-    cancelled the task mid-approval (§13.9). Hook maps to DENY +
+    cancelled the task mid-approval. Hook maps to DENY +
     ``approval_resume_failed``.
     """
 
@@ -568,8 +609,8 @@ def _py_to_ddb_attr(value):
 
     Handles the subset we actually write: ``str``, ``int``, ``bool``,
     ``None``, lists-of-str. More exotic types would need marshalling
-    support; ``approval_row`` values are constrained to the §10.1 schema
-    which falls entirely inside this subset.
+    support; ``approval_row`` values are constrained to the approval-row
+    schema, which falls entirely inside this subset.
     """
     if value is None:
         return {"NULL": True}
@@ -701,7 +742,7 @@ def transact_resume_from_approval(
 
     The condition ``status = AWAITING_APPROVAL AND
     awaiting_approval_request_id = :rid`` prevents:
-      - resuming a task that's been cancelled mid-approval (§13.9);
+      - resuming a task that's been cancelled mid-approval;
       - resuming with a stale request_id after a race with the
         reconciler / a concurrent approval.
 
@@ -755,10 +796,10 @@ def best_effort_update_approval_status(
 ) -> bool:
     """Conditionally flip ``status`` on an approval row.
 
-    The condition ``status = :pending`` is the design-doc guard from §6.5.
-    Used on the TIMED_OUT write path: if the row has already transitioned
-    to APPROVED or DENIED, the update fails and the caller (the hook) must
-    re-read the row with ConsistentRead (IMPL-24).
+    The condition ``status = :pending`` guards the write. Used on the
+    TIMED_OUT write path: if the row has already transitioned to APPROVED
+    or DENIED, the update fails and the caller (the hook) must re-read the
+    row with ConsistentRead.
 
     Returns ``True`` on successful write, ``False`` on
     ``ConditionalCheckFailedException``. All other errors propagate.
@@ -799,11 +840,11 @@ def get_approval_row(
     consistent_read: bool = True,
     client=None,
 ) -> dict | None:
-    """Fetch an approval row. Defaults to strongly-consistent read (IMPL-24).
+    """Fetch an approval row. Defaults to a strongly-consistent read.
 
     Returns a Python dict with unmarshalled attribute values, or ``None`` if
     the row does not exist (TTL reaped, wrong IDs, etc.). Callers use the
-    ``None`` return to detect the row-gone branch in §13.12.
+    ``None`` return to detect the row-gone branch of the late-approval race.
     """
     _, approvals_table = _require_tables()
     ddb = _get_ddb_client(client=client)
@@ -825,19 +866,19 @@ def increment_approval_gate_count_in_ddb(
 ) -> bool:
     """Best-effort atomic increment of ``approval_gate_count`` on TaskTable.
 
-    Chunk 7 persistence layer for decision #13's per-task gate counter. The
-    session counter (``PolicyEngine._approval_gate_count``) stays
-    authoritative WITHIN a container — this write exists so that a container
-    restart (§13.6) can seed the new container's counter from the persisted
-    value instead of resetting to 0 and re-exposing the user to another
-    ``approval_gate_cap`` worth of gates.
+    Persistence layer for the per-task gate counter. The session counter
+    (``PolicyEngine._approval_gate_count``) stays authoritative WITHIN a
+    container — this write exists so that a container restart can seed the
+    new container's counter from the persisted value instead of resetting to
+    0 and re-exposing the user to another ``approval_gate_cap`` worth of
+    gates.
 
-    **Best-effort semantics (§13.6):** the counter is a safety bound, not a
+    **Best-effort semantics:** the counter is a safety bound, not a
     correctness bound. A DDB write failure here MUST NOT block the gate —
     the session counter still enforces the cap within this container, and
-    the §13.6 analysis accepts at most one lost increment per restart as
-    acceptable damage. Returns ``True`` on success, ``False`` on any
-    failure (config missing, IAM drift, throttling). Never raises.
+    losing at most one increment per restart is acceptable damage. Returns
+    ``True`` on success, ``False`` on any failure (config missing, IAM
+    drift, throttling). Never raises.
 
     Uses a pure ADD UpdateExpression without a ConditionExpression — the
     counter is monotonic and concurrent writes from different hooks on the
@@ -846,9 +887,9 @@ def increment_approval_gate_count_in_ddb(
     applying the ADD, matching the CreateTaskFn seed of
     ``approval_gate_count: 0`` (see cdk/src/handlers/shared/create-task-core.ts).
 
-    Deliberately kept separate from the resume TransactWriteItems (§6.5): the
+    Deliberately kept separate from the resume TransactWriteItems: the
     joint-update invariant on ``status`` + ``awaiting_approval_request_id``
-    (§10.2) must not be burdened with a non-safety-critical counter bump.
+    must not be burdened with a non-safety-critical counter bump.
     """
     try:
         task_table, _ = _require_tables()

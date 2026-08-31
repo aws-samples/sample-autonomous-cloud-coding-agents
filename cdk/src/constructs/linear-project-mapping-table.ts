@@ -55,6 +55,9 @@ export interface LinearProjectMappingTableProps {
  * - label_filter — Linear issue label that triggers a task (default `bgagent`)
  * - status — 'active' | 'removed'
  * - onboarded_at, updated_at — ISO timestamps
+ *
+ * The table is schemaless apart from the partition key, so added fields are
+ * additive and read with defaults — an existing row needs no migration.
  */
 export class LinearProjectMappingTable extends Construct {
   /**

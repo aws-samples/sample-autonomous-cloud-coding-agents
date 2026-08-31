@@ -18,13 +18,14 @@
  */
 
 import * as crypto from 'crypto';
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
 import { createTaskCore } from './shared/create-task-core';
 import { logger } from './shared/logger';
 import { slackFetch } from './shared/slack-api';
 import { getSlackSecret, SLACK_SECRET_PREFIX } from './shared/slack-verify';
 import type { Attachment } from './shared/types';
+import { makeDocClient } from './shared/ua';
+import { CODING_WORKFLOW_ID } from './shared/workflows';
 import type { SlackCommandPayload } from './slack-commands';
 
 /**
@@ -76,13 +77,20 @@ function normalizeEvent(event: RawEvent): CommandProcessorEvent {
   return { ...event, source: 'slash' };
 }
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const ddb = makeDocClient();
 
 const USER_MAPPING_TABLE = process.env.SLACK_USER_MAPPING_TABLE_NAME!;
 const INSTALLATION_TABLE = process.env.SLACK_INSTALLATION_TABLE_NAME!;
+const CHANNEL_MAPPING_TABLE = process.env.SLACK_CHANNEL_MAPPING_TABLE_NAME;
 
 /** Link code TTL. */
 const LINK_CODE_TTL_S = 10 * 60; // 10 minutes
+
+/** Random bytes for slash-command account-link codes (→ 6 hex chars). */
+const LINK_CODE_ENTROPY_BYTES = 3;
+
+/** Prefix length when logging Slack response_url values (avoid leaking tokens). */
+const RESPONSE_URL_LOG_PREFIX_LEN = 80;
 
 /**
  * Async processor for Slack slash commands and @mention triggers.
@@ -188,11 +196,27 @@ async function handleSubmit(event: MentionEvent, args: string[], reply: ReplyFn)
     return;
   }
 
-  // Parse repo and optional issue number from first arg: "org/repo#42" or "org/repo".
+  // Resolve the target repo. Two ways:
+  //   1. The user typed it: "org/repo#42 <description>" — first arg is the repo,
+  //      the rest is the description.
+  //   2. The user omitted it and the channel has an onboarded default repo
+  //      (`bgagent slack onboard-channel`) — the WHOLE message is the description.
   const repoArg = args[0];
-  const { repo, issueNumber } = parseRepoArg(repoArg);
+  let { repo, issueNumber } = parseRepoArg(repoArg);
+  let description: string | undefined;
+  if (repo) {
+    description = args.slice(1).join(' ') || undefined;
+  } else {
+    const defaultRepo = await lookupChannelDefaultRepo(event.team_id, event.channel_id);
+    if (defaultRepo) {
+      repo = defaultRepo;
+      issueNumber = undefined;
+      // No repo token was consumed, so the entire message is the description.
+      description = args.join(' ') || undefined;
+    }
+  }
   if (!repo) {
-    await reply(`Invalid repo format: \`${repoArg}\`. Expected \`org/repo\` or \`org/repo#42\`.`);
+    await reply('Please include a repo — e.g. `@Shoof fix the bug in org/repo#42`. Or ask an admin to set a default with `bgagent slack onboard-channel`.');
     if (event.mention_thread_ts) {
       await swapReaction(event.team_id, event.channel_id, event.mention_thread_ts, 'eyes', 'x');
     }
@@ -205,9 +229,6 @@ async function handleSubmit(event: MentionEvent, args: string[], reply: ReplyFn)
     await reply(channelCheck.error!);
     return;
   }
-
-  // Remaining args are the task description.
-  const description = args.slice(1).join(' ') || undefined;
 
   // handleSubmit is only invoked for the mention path, so there's no response_url.
   // Notifications thread under the user's @mention message using mention_thread_ts.
@@ -237,6 +258,11 @@ async function handleSubmit(event: MentionEvent, args: string[], reply: ReplyFn)
       repo,
       issue_number: issueNumber,
       task_description: description,
+      // Explicit coding workflow: a Slack-submitted task targets a repo, so it
+      // must not fall through the resolution ladder to the repo-less
+      // default/agent-v1 (which never commits or opens a PR). Mirrors the Jira
+      // processor. See CODING_WORKFLOW_ID.
+      workflow_ref: CODING_WORKFLOW_ID,
       ...(attachments.length > 0 && { attachments }),
     },
     {
@@ -277,7 +303,7 @@ function parseRepoArg(arg: string): { repo: string | null; issueNumber?: number 
 
 async function handleLink(event: CommandProcessorEvent, reply: ReplyFn): Promise<void> {
   // Generate a 6-character alphanumeric code.
-  const code = crypto.randomBytes(3).toString('hex').toUpperCase();
+  const code = crypto.randomBytes(LINK_CODE_ENTROPY_BYTES).toString('hex').toUpperCase();
   const now = new Date().toISOString();
   const ttl = Math.floor(Date.now() / 1000) + LINK_CODE_TTL_S;
 
@@ -516,9 +542,34 @@ async function lookupPlatformUser(teamId: string, userId: string): Promise<strin
   return (result.Item.platform_user_id as string) ?? null;
 }
 
+/**
+ * Resolve a channel's default repo from the onboarding table
+ * (`bgagent slack onboard-channel`). Returns the mapped `owner/repo` when an
+ * active mapping exists, else null. Fails open (returns null) on any error so a
+ * lookup blip degrades to the "please include a repo" path rather than a 500.
+ */
+async function lookupChannelDefaultRepo(teamId: string, channelId: string): Promise<string | null> {
+  if (!CHANNEL_MAPPING_TABLE) return null;
+  const key = `${teamId}#${channelId}`;
+  try {
+    const result = await ddb.send(new GetCommand({
+      TableName: CHANNEL_MAPPING_TABLE,
+      Key: { channel_id: key },
+    }));
+    if (!result.Item || result.Item.status !== 'active') return null;
+    return (result.Item.repo as string) ?? null;
+  } catch (err) {
+    logger.warn('Channel default repo lookup failed, falling back to explicit-repo path', {
+      channel_id: key,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null; // nosemgrep: ts-silent-success-masking -- fail-open is intentional; absent default → explicit-repo error path
+  }
+}
+
 async function postToSlack(responseUrl: string, text: string): Promise<void> {
   logger.info('Posting to Slack response_url', {
-    response_url: responseUrl.substring(0, 80),
+    response_url: responseUrl.substring(0, RESPONSE_URL_LOG_PREFIX_LEN),
     text_length: text.length,
   });
   try {
@@ -531,7 +582,7 @@ async function postToSlack(responseUrl: string, text: string): Promise<void> {
       const body = await response.text().catch(() => '');
       logger.warn('Failed to post to Slack response_url', {
         status: response.status,
-        response_url: responseUrl.substring(0, 80),
+        response_url: responseUrl.substring(0, RESPONSE_URL_LOG_PREFIX_LEN),
         body,
       });
     } else {

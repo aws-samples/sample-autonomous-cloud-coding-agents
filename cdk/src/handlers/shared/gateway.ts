@@ -21,14 +21,39 @@ import type { APIGatewayProxyEvent } from 'aws-lambda';
 
 /**
  * Extract the authenticated user_id from the API Gateway event.
- * The Cognito authorizer places claims in event.requestContext.authorizer.claims.
+ *
+ * Two authorizer shapes place the identity in different spots:
+ * - The native Cognito authorizer sets `authorizer.claims.sub`.
+ * - A custom REQUEST authorizer (webhook / API-key) sets `authorizer.userId`
+ *   as a top-level context value.
+ *
+ * Both resolve to the same IdP-namespaced platform user ID, so a handler behind
+ * either authorizer reads identity through this one call.
  * @param event - the API Gateway proxy event.
- * @returns the Cognito `sub` claim (platform user ID), or null if missing.
+ * @returns the platform user ID, or null if missing.
  */
 export function extractUserId(event: APIGatewayProxyEvent): string | null {
-  const claims = event.requestContext.authorizer?.claims;
-  if (!claims || typeof claims.sub !== 'string') return null;
-  return claims.sub;
+  const authorizer = event.requestContext.authorizer;
+  if (!authorizer) return null;
+  if (typeof authorizer.claims?.sub === 'string') return authorizer.claims.sub;
+  if (typeof authorizer.userId === 'string') return authorizer.userId;
+  return null;
+}
+
+/**
+ * Check whether the authenticated caller is in a Cognito group. Cognito places
+ * group membership in the `cognito:groups` claim, which the authorizer surfaces
+ * either as a comma/space-separated string or an array depending on the token
+ * shape — this normalizes both. Used to gate registry publish/approve (#246).
+ * @param event - the API Gateway proxy event.
+ * @param group - the Cognito group name to check for.
+ * @returns true if the caller is a member of `group`.
+ */
+export function userInGroup(event: APIGatewayProxyEvent, group: string): boolean {
+  const raw = event.requestContext.authorizer?.claims?.['cognito:groups'];
+  if (!raw) return false;
+  const groups = Array.isArray(raw) ? raw : String(raw).split(/[,\s]+/);
+  return groups.includes(group);
 }
 
 /**
@@ -94,6 +119,9 @@ export function buildWebhookChannelMetadata(
  * Lowercases, replaces non-alphanumeric with hyphens, collapses consecutive hyphens,
  * trims leading/trailing hyphens, and truncates to 50 characters.
  */
+/** Maximum slug length for gateway path segments. */
+const SLUG_MAX_LENGTH = 50;
+
 function slugify(text?: string): string {
   if (!text) return '';
   return text
@@ -101,5 +129,5 @@ function slugify(text?: string): string {
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/-+/g, '-')
     .replace(/^-|-$/g, '')
-    .slice(0, 50);
+    .slice(0, SLUG_MAX_LENGTH);
 }

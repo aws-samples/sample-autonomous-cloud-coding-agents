@@ -17,14 +17,14 @@
  *  SOFTWARE.
  */
 
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
   GetSecretValueCommand,
   PutSecretValueCommand,
   SecretsManagerClient,
 } from '@aws-sdk/client-secrets-manager';
-import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { logger } from './logger';
+import { makeClient, makeDocClient } from './ua';
 
 /**
  * Lambda-side resolver for the per-workspace Linear OAuth token written
@@ -59,11 +59,18 @@ const REFRESH_THRESHOLD_SECONDS = 60;
  *  row blocks resolution rather than silently granting access. */
 type RegistryRowStatus = 'active' | 'revoked';
 
-interface RegistryRow {
+export interface RegistryRow {
   readonly linear_workspace_id: string;
   readonly workspace_slug: string;
   readonly oauth_secret_arn: string;
   readonly status: RegistryRowStatus;
+  /**
+   * When the CURRENT authorization was installed. Rewritten by every
+   * (re-)authorization, which is what makes it usable as an installation
+   * identity: a diagnosis about one grant must not be applied to its successor.
+   * Optional — rows written before it was recorded have none.
+   */
+  readonly installed_at?: string;
 }
 
 export interface StoredOauthToken {
@@ -80,6 +87,17 @@ export interface StoredOauthToken {
   readonly installed_at: string;
   readonly updated_at: string;
   readonly installed_by_platform_user_id: string;
+  /** Per-workspace Linear webhook signing secret (`lin_wh_…`).
+   *
+   *  Linear generates a fresh signing secret per webhook subscription, and
+   *  webhook subscriptions are workspace-scoped — so a single stack-wide
+   *  signing secret can't verify events from multiple workspaces. The
+   *  webhook receiver looks this up by orgId at verify time.
+   *
+   *  Optional for back-compat: tokens written before the per-workspace
+   *  signing flow won't have it, and the receiver falls back to the
+   *  stack-wide `LINEAR_WEBHOOK_SECRET_ARN` for those installs. */
+  readonly webhook_signing_secret?: string;
 }
 
 export interface ResolverOptions {
@@ -90,6 +108,13 @@ export interface ResolverOptions {
   readonly dynamoDbClient?: DynamoDBDocumentClient;
   /** Override fetch for token-endpoint refresh in tests. */
   readonly fetchImpl?: typeof fetch;
+  /**
+   * Called once the authorization is known dead (the refresh token was rejected
+   * and no concurrent caller had rotated it). Injected rather than written
+   * inline so this module keeps doing one job — resolving a token — and callers
+   * with registry write access opt in. Must not throw; the caller wraps it.
+   */
+  readonly onAuthorizationRevoked?: (linearWorkspaceId: string) => Promise<void>;
 }
 
 interface CacheEntry<T> {
@@ -141,8 +166,8 @@ export async function resolveLinearOauthToken(
   options: ResolverOptions = {},
 ): Promise<ResolvedLinearToken | null> {
   const region = options.region ?? process.env.AWS_REGION ?? 'us-east-1';
-  const ddb = options.dynamoDbClient ?? DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
-  const sm = options.secretsManagerClient ?? new SecretsManagerClient({ region });
+  const ddb = options.dynamoDbClient ?? makeDocClient({ region });
+  const sm = options.secretsManagerClient ?? makeClient(SecretsManagerClient, { region });
 
   // ─── Step 1: Registry row ────────────────────────────────────────
   const row = await getRegistryRow(ddb, registryTableName, linearWorkspaceId);
@@ -177,6 +202,17 @@ export async function resolveLinearOauthToken(
 
   // ─── Step 3: Refresh if expiring ─────────────────────────────────
   if (isTokenExpiring(token.expires_at)) {
+    // The revoked-marker is OPT-IN, not defaulted.
+    //
+    // Every Lambda that resolves a token holds READ-ONLY access to the registry
+    // table, and no stack grants it write. Defaulting the marker on therefore
+    // meant the write ran and failed AccessDenied on every revoked refresh, and
+    // the failure was swallowed — so the feature read as working while being
+    // permanently inert, which is worse than being visibly absent.
+    //
+    // A caller that genuinely holds registry write (or supplies its own recorder)
+    // passes ``onAuthorizationRevoked`` explicitly. When the grant lands, flip the
+    // default here in the same change — not before.
     const refreshed = await refreshLinearToken(token, sm, row.oauth_secret_arn, options);
     if (!refreshed) {
       // Refresh failed — return null so the caller can fall back to
@@ -198,7 +234,107 @@ export async function resolveLinearOauthToken(
   };
 }
 
-async function getRegistryRow(
+/**
+ * Strict variant of {@link getRegistryRow}: throws on infra error
+ * (DDB throttle, network) instead of returning null. Use this from the
+ * webhook signature-verification path where a `null` return would let
+ * a transient throttle silently downgrade per-workspace verification
+ * to the stack-wide fallback secret.
+ *
+ * The lenient `null`-on-error variant is kept for `resolveLinearOauthToken`,
+ * whose graceful no-op contract is intentional (an MCP token lookup
+ * failing should let the agent run without Linear, not blow up the
+ * task). Mixing the two contracts in one function silently fails open;
+ * splitting them keeps each call site honest.
+ */
+/**
+ * Mark a workspace's registry row as ``revoked``, so the dead authorization is
+ * discoverable instead of living only in a log line. The resolver already
+ * refuses a non-active row, so this also stops the pointless
+ * refresh-then-fail work on every subsequent event.
+ *
+ * NOT YET EFFECTIVE IN PRODUCTION: every Lambda that resolves a token currently
+ * has READ-ONLY access to the registry table, so this write fails AccessDenied
+ * and is swallowed (deliberately — recording the diagnosis must never break token
+ * resolution). Granting the write is deferred; until then the operator-facing
+ * signal is the indeterminate state from `bgagent platform doctor`, which reports
+ * that the workspace could not be confirmed rather than claiming it is fine.
+ * Tracked in the backlog under the Linear auth-revocation item.
+ *
+ * Scoped to the installation it actually diagnosed. ``status = active`` alone is
+ * not enough: a re-authorization writes ``active`` again, so a straggler holding
+ * the OLD token — a queued event, a retry, another Lambda mid-flight — would find
+ * the condition satisfied and revoke the working grant the operator had just
+ * installed, taking the workspace down again with a stale verdict. Conditioning
+ * on ``installed_at`` (rewritten by every re-authorization) makes the write apply
+ * only while the row still describes the same installation. ``expectedInstalledAt``
+ * is passed by the caller rather than re-read here, because a re-read would race
+ * the same way.
+ *
+ * When the caller has no ``installed_at`` to name (a row written before it was
+ * recorded), the write falls back to requiring the attribute to still be absent —
+ * so a re-authorization, which adds it, likewise takes the row out of scope.
+ */
+export async function markWorkspaceRevoked(
+  ddb: DynamoDBDocumentClient,
+  tableName: string,
+  linearWorkspaceId: string,
+  expectedInstalledAt?: string,
+  now: string = new Date().toISOString(),
+): Promise<void> {
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: tableName,
+      Key: { linear_workspace_id: linearWorkspaceId },
+      UpdateExpression: 'SET #s = :revoked, revoked_at = :now, revoked_reason = :reason',
+      ConditionExpression: expectedInstalledAt === undefined
+        ? '#s = :active AND attribute_not_exists(installed_at)'
+        : '#s = :active AND installed_at = :installed',
+      ExpressionAttributeNames: { '#s': 'status' },
+      ExpressionAttributeValues: {
+        ':revoked': 'revoked',
+        ':active': 'active',
+        ':now': now,
+        ':reason': 'refresh_token_rejected',
+        ...(expectedInstalledAt !== undefined && { ':installed': expectedInstalledAt }),
+      },
+    }));
+    logger.warn('Marked Linear workspace as revoked — re-authorization required', {
+      linear_workspace_id: linearWorkspaceId,
+    });
+  } catch (err) {
+    if ((err as { name?: string })?.name === 'ConditionalCheckFailedException') {
+      // Already marked, or re-authorized since this diagnosis was made — either
+      // way the verdict no longer describes the row, so leave it alone.
+      logger.info('Skipped the revoked marker — the registry row is no longer the installation diagnosed', {
+        linear_workspace_id: linearWorkspaceId,
+      });
+      return;
+    }
+    throw err;
+  }
+  registryCache.delete(linearWorkspaceId);
+}
+
+export async function getRegistryRowStrict(
+  ddb: DynamoDBDocumentClient,
+  tableName: string,
+  linearWorkspaceId: string,
+): Promise<RegistryRow | null> {
+  const cached = registryCache.get(linearWorkspaceId);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
+
+  // No try/catch — caller (verifyLinearRequestForWorkspace) wants the
+  // error to bubble so the receiver returns 500 and Linear retries,
+  // rather than silently falling back to the stack-wide secret.
+  const result = await ddb.send(new GetCommand({
+    TableName: tableName,
+    Key: { linear_workspace_id: linearWorkspaceId },
+  }));
+  return parseRegistryRow(result.Item, linearWorkspaceId);
+}
+
+export async function getRegistryRow(
   ddb: DynamoDBDocumentClient,
   tableName: string,
   linearWorkspaceId: string,
@@ -224,10 +360,19 @@ async function getRegistryRow(
       linear_workspace_id: linearWorkspaceId,
       error: err instanceof Error ? err.message : String(err),
     });
-    return null;
+    return null; // nosemgrep: ts-silent-success-masking -- transient DDB throttle degrades to "workspace not in registry"; avoids webhook retry storm
   }
 
-  const item = result.Item as Partial<RegistryRow> | undefined;
+  return parseRegistryRow(result.Item, linearWorkspaceId);
+}
+
+/**
+ * Shared parser for raw DDB items into a {@link RegistryRow}, used by
+ * both {@link getRegistryRow} (lenient) and {@link getRegistryRowStrict}
+ * (throws on infra). Caches on success.
+ */
+function parseRegistryRow(rawItem: unknown, linearWorkspaceId: string): RegistryRow | null {
+  const item = rawItem as Partial<RegistryRow> | undefined;
   if (!item || !item.oauth_secret_arn || !item.workspace_slug) return null;
 
   // Fail-closed on the status field: missing or unknown values are
@@ -249,6 +394,7 @@ async function getRegistryRow(
     workspace_slug: item.workspace_slug,
     oauth_secret_arn: item.oauth_secret_arn,
     status,
+    ...(typeof item.installed_at === 'string' && { installed_at: item.installed_at }),
   };
   registryCache.set(linearWorkspaceId, { value: row, expiresAt: Date.now() + REGISTRY_CACHE_TTL_MS });
   return row;
@@ -280,32 +426,65 @@ const STORED_OAUTH_TOKEN_REQUIRED_FIELDS: ReadonlyArray<keyof StoredOauthToken> 
   'installed_by_platform_user_id',
 ];
 
-async function getOauthSecret(
+export async function getOauthSecret(
   sm: SecretsManagerClient,
   secretArn: string,
 ): Promise<StoredOauthToken | null> {
   try {
     const res = await sm.send(new GetSecretValueCommand({ SecretId: secretArn }));
     if (!res.SecretString) return null;
-    const parsed = JSON.parse(res.SecretString) as StoredOauthToken;
-    const missing = STORED_OAUTH_TOKEN_REQUIRED_FIELDS.filter(
-      (f) => typeof parsed[f] !== 'string' || (parsed[f] as string).length === 0,
-    );
-    if (missing.length > 0) {
-      logger.error('Linear OAuth secret JSON is missing required fields', {
-        secret_arn: secretArn,
-        missing_fields: missing,
-      });
-      return null;
-    }
-    return parsed;
+    return parseOauthSecret(res.SecretString, secretArn);
   } catch (err) {
     logger.error('Failed to fetch Linear OAuth secret', {
       secret_arn: secretArn,
       error: err instanceof Error ? err.message : String(err),
     });
+    return null; // nosemgrep: ts-silent-success-masking -- lenient OAuth fetch for task hydration; strict variant getOauthSecretStrict rethrows SM errors
+  }
+}
+
+/**
+ * Strict variant of {@link getOauthSecret}: throws on Secrets Manager
+ * error (network, IAM) instead of returning null. Use this from the
+ * webhook signature-verification path where a `null` return would let
+ * a transient SM error silently downgrade per-workspace verification
+ * to the stack-wide fallback secret. Only returns null for a row that
+ * exists but has no string value or fails JSON-shape validation.
+ */
+export async function getOauthSecretStrict(
+  sm: SecretsManagerClient,
+  secretArn: string,
+): Promise<StoredOauthToken | null> {
+  // No outer try/catch — caller (verifyLinearRequestForWorkspace) wants
+  // SM errors to bubble so the receiver returns 500 and Linear retries,
+  // rather than silently falling back to the stack-wide secret.
+  const res = await sm.send(new GetSecretValueCommand({ SecretId: secretArn }));
+  if (!res.SecretString) return null;
+  return parseOauthSecret(res.SecretString, secretArn);
+}
+
+function parseOauthSecret(secretString: string, secretArn: string): StoredOauthToken | null {
+  let parsed: StoredOauthToken;
+  try {
+    parsed = JSON.parse(secretString) as StoredOauthToken;
+  } catch (err) {
+    logger.error('Linear OAuth secret value is not valid JSON', {
+      secret_arn: secretArn,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null; // nosemgrep: ts-silent-success-masking -- corrupt secret JSON is logged ERROR; null triggers re-onboard path, not a masked infra failure
+  }
+  const missing = STORED_OAUTH_TOKEN_REQUIRED_FIELDS.filter(
+    (f) => typeof parsed[f] !== 'string' || (parsed[f] as string).length === 0,
+  );
+  if (missing.length > 0) {
+    logger.error('Linear OAuth secret JSON is missing required fields', {
+      secret_arn: secretArn,
+      missing_fields: missing,
+    });
     return null;
   }
+  return parsed;
 }
 
 /**
@@ -355,6 +534,24 @@ async function refreshLinearToken(
       secret_arn: secretArn,
       workspace_id: current.workspace_id,
     });
+    // RECORD the verdict, don't just log it. This is the only moment the
+    // platform knows the authorization is dead: from here on every event for
+    // this workspace is dropped, and without a durable marker the sole evidence
+    // is this log line — so an operator sees their trigger label do nothing and
+    // has no way to find out why (live-caught 2026-07-25, silent for over an
+    // hour). Marking the registry row makes `bgagent platform doctor` able to
+    // report it and name the remedy. Best-effort: a failed write must not turn a
+    // feedback outage into a thrown handler.
+    if (options.onAuthorizationRevoked) {
+      try {
+        await options.onAuthorizationRevoked(current.workspace_id);
+      } catch (err) {
+        logger.warn('Could not mark the Linear workspace as revoked (non-fatal)', {
+          workspace_id: current.workspace_id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
     invalidateLinearOauthCache(current.workspace_id, secretArn);
     return null;
   }

@@ -18,11 +18,14 @@
  */
 
 import { ApplyGuardrailCommand, BedrockRuntimeClient } from '@aws-sdk/client-bedrock-runtime';
-import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
+import { GetSecretValueCommand, ResourceNotFoundException, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
+import { formatBlockerReason } from './error-classifier';
 import { logger } from './logger';
 import { loadMemoryContext, type MemoryContext } from './memory';
 import { sanitizeExternalContent } from './sanitization';
-import { isPrTaskType, type TaskRecord, type TaskType } from './types';
+import { type TaskRecord } from './types';
+import { makeClient } from './ua';
+import { workflowIsReadOnly, workflowUsesPr } from './workflows';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -129,7 +132,7 @@ const USER_PROMPT_TOKEN_BUDGET = Number(process.env.USER_PROMPT_TOKEN_BUDGET ?? 
 const GITHUB_API_TIMEOUT_MS = 30_000;
 const GUARDRAIL_ID = process.env.GUARDRAIL_ID;
 const GUARDRAIL_VERSION = process.env.GUARDRAIL_VERSION;
-const bedrockClient = (GUARDRAIL_ID && GUARDRAIL_VERSION) ? new BedrockRuntimeClient({}) : undefined;
+const bedrockClient = (GUARDRAIL_ID && GUARDRAIL_VERSION) ? makeClient(BedrockRuntimeClient) : undefined;
 if (GUARDRAIL_ID && !GUARDRAIL_VERSION) {
   logger.error('GUARDRAIL_ID is set but GUARDRAIL_VERSION is missing — guardrail screening disabled', {
     metric_type: 'guardrail_misconfiguration',
@@ -169,6 +172,37 @@ export class AttachmentResolutionError extends AttachmentError {
   constructor(message: string, options?: { cause?: unknown }) {
     super(message, options);
     this.name = 'AttachmentResolutionError';
+  }
+}
+
+/**
+ * A required secret was never wired into the blueprint (#251, missing_secret
+ * blocker). Carries the canonical ``BLOCKED[missing_secret]: … (resource: …)``
+ * reason as its message so the hydration catch can propagate it verbatim to
+ * ``failTask`` and ``classifyError`` surfaces the exact remedy — rather than
+ * silently degrading to minimal context, which strands the task with an opaque
+ * failure the agent cannot recover from (it has no token to clone/push).
+ */
+export class MissingSecretError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'MissingSecretError';
+  }
+}
+
+/**
+ * A required secret exists but could not be read (#251, auth_failure blocker) —
+ * e.g. Secrets Manager AccessDenied or exhausted throttling. Distinct from
+ * MissingSecretError (secret absent/empty): the credential is present but the
+ * agent's principal cannot retrieve it, so this is an environmental fault, not
+ * a code bug. Carries the canonical ``BLOCKED[auth_failure]: … (resource: …)``
+ * reason so the hydration catch propagates it verbatim rather than silently
+ * degrading to minimal context and stranding the task with no token.
+ */
+export class SecretUnreadableError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'SecretUnreadableError';
   }
 }
 
@@ -310,9 +344,10 @@ export async function screenWithGuardrail(text: string, taskId: string): Promise
 // ---------------------------------------------------------------------------
 
 const tokenCache = new Map<string, { token: string; expiresAt: number }>();
-const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const SECRET_CACHE_TTL_MINUTES = 5;
+const CACHE_TTL_MS = SECRET_CACHE_TTL_MINUTES * 60 * 1000; // 5 minutes
 
-const smClient = new SecretsManagerClient({});
+const smClient = makeClient(SecretsManagerClient);
 
 /**
  * Resolve the GitHub token from Secrets Manager with per-ARN caching.
@@ -325,9 +360,35 @@ export async function resolveGitHubToken(secretArn: string): Promise<string> {
     return cached.token;
   }
 
-  const result = await smClient.send(new GetSecretValueCommand({ SecretId: secretArn }));
+  // #251: a secret that does not exist or is empty is a `missing_secret`
+  // blocker — the required credential was never wired into the blueprint.
+  // Throw a typed error carrying the canonical reason (with the secret ARN as
+  // the resource) so callers can propagate it to a precise terminal remedy
+  // instead of silently degrading. The blocker is NOT retryable and the agent
+  // must never acquire the secret itself.
+  let result;
+  try {
+    result = await smClient.send(new GetSecretValueCommand({ SecretId: secretArn }));
+  } catch (err) {
+    if (err instanceof ResourceNotFoundException) {
+      throw new MissingSecretError(
+        formatBlockerReason('missing_secret', 'the required GitHub token secret does not exist', secretArn),
+        { cause: err },
+      );
+    }
+    // Secret exists but is unreadable (AccessDenied, throttling exhausted, …) —
+    // an environmental auth_failure, not a code bug. Carry the canonical reason
+    // so the hydration catch propagates it instead of degrading to minimal
+    // context (which would strand the task: no token to clone/push). (#251)
+    throw new SecretUnreadableError(
+      formatBlockerReason('auth_failure', 'the required GitHub token secret could not be read', secretArn),
+      { cause: err },
+    );
+  }
   if (!result.SecretString) {
-    throw new Error('GitHub token secret is empty');
+    throw new MissingSecretError(
+      formatBlockerReason('missing_secret', 'the required GitHub token secret is empty', secretArn),
+    );
   }
 
   tokenCache.set(secretArn, { token: result.SecretString, expiresAt: Date.now() + CACHE_TTL_MS });
@@ -423,7 +484,7 @@ export async function fetchGitHubIssue(
     logger.warn('GitHub issue fetch error', {
       repo, issue_number: issueNumber, error: err instanceof Error ? err.message : String(err),
     });
-    return null;
+    return null; // nosemgrep: ts-silent-success-masking -- GitHub issue fetch is optional hydration; null skips issue context without failing the task
   }
 }
 
@@ -558,7 +619,7 @@ async function fetchReviewCommentsGraphQL(
     logger.warn('GitHub GraphQL review threads fetch error', {
       repo, pr_number: prNumber, error: err instanceof Error ? err.message : String(err),
     });
-    return [];
+    return []; // nosemgrep: ts-silent-success-masking -- review-thread fetch is optional; empty list degrades PR context without failing hydration
   }
 
   return comments;
@@ -684,7 +745,7 @@ export async function fetchGitHubPullRequest(
     logger.warn('GitHub PR fetch error', {
       repo, pr_number: prNumber, error: err instanceof Error ? err.message : String(err),
     });
-    return null;
+    return null; // nosemgrep: ts-silent-success-masking -- GitHub PR fetch is optional hydration; null skips PR context without failing the task
   }
 }
 
@@ -698,8 +759,11 @@ export async function fetchGitHubPullRequest(
  * @param text - the input text.
  * @returns the estimated token count.
  */
+/** Rough token estimate: ~4 chars per token for English text. */
+const CHARS_PER_TOKEN_ESTIMATE = 4;
+
 export function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 4);
+  return Math.ceil(text.length / CHARS_PER_TOKEN_ESTIMATE);
 }
 
 /**
@@ -767,14 +831,17 @@ export function enforceTokenBudget(
  */
 export function assembleUserPrompt(
   taskId: string,
-  repo: string,
+  repo: string | undefined,
   issue?: GitHubIssueContext,
   taskDescription?: string,
 ): string {
   const parts: string[] = [];
 
   parts.push(`Task ID: ${taskId}`);
-  parts.push(`Repository: ${repo}`);
+  // Repo-less workflows (#248 Phase 3) have no repository line.
+  if (repo) {
+    parts.push(`Repository: ${repo}`);
+  }
 
   if (issue) {
     parts.push(`\n## GitHub Issue #${issue.number}: ${sanitizeExternalContent(issue.title)}\n`);
@@ -982,7 +1049,38 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
     const memoryId = options?.memoryId ?? process.env.MEMORY_ID;
     const tokenSecretArn = options?.githubTokenSecretArn ?? GITHUB_TOKEN_SECRET_ARN;
 
-    const isPrTask = isPrTaskType(task.task_type as TaskType);
+    const workflowId = task.resolved_workflow?.id ?? 'coding/new-task-v1';
+    const isPrTask = workflowUsesPr(workflowId);
+
+    // Repo-less task (#248 Phase 3): no repo present ⇒ no GitHub issue/PR to
+    // fetch and nothing to clone — the prompt is assembled from task_description
+    // (+ attachments, handled by the agent) only. Keys off repo *absence*, not
+    // the workflow's requires_repo: a repo-optional workflow given a repo still
+    // takes the repo-bound path below. Memory is keyed per-user (user:{user_id})
+    // rather than per-repo (ADR-014 addendum 2026-06-08).
+    if (!task.repo) {
+      const memId = options?.memoryId ?? process.env.MEMORY_ID;
+      const repolessMemory = memId
+        ? await loadMemoryContext(memId, `user:${task.user_id}`, task.task_description)
+        : undefined;
+      const repolessSources: string[] = [];
+      if (repolessMemory) repolessSources.push('memory');
+      if (task.task_description) repolessSources.push('task_description');
+      const repolessPrompt = assembleUserPrompt(task.task_id, undefined, undefined, task.task_description);
+      return {
+        version: 1,
+        user_prompt: repolessPrompt,
+        memory_context: repolessMemory,
+        sources: repolessSources,
+        token_estimate: estimateTokens(repolessPrompt),
+        truncated: false,
+        content_trust: buildContentTrust(repolessSources),
+      };
+    }
+
+    // Past the repo-less early-return, the workflow requires a repo, which
+    // admission guarantees is present — narrow it for the repo-bound path.
+    const repo = task.repo as string;
 
     // eslint-disable-next-line @cdklabs/promiseall-no-unbounded-parallelism
     const [issueResult, memoryResult, prResult] = await Promise.all([
@@ -992,8 +1090,12 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
         if (task.issue_number !== undefined && tokenSecretArn) {
           try {
             const token = await resolveGitHubToken(tokenSecretArn);
-            return await fetchGitHubIssue(task.repo, task.issue_number, token) ?? undefined;
+            return await fetchGitHubIssue(repo, task.issue_number, token) ?? undefined;
           } catch (err) {
+            // A missing or unreadable secret is a blocker, not optional-context
+            // degradation — propagate so the outer catch fails the task with the
+            // canonical reason (#251). Other fetch errors stay best-effort.
+            if (err instanceof MissingSecretError || err instanceof SecretUnreadableError) throw err;
             logger.warn('Failed to resolve GitHub token or fetch issue', {
               task_id: task.task_id, error: err instanceof Error ? err.message : String(err),
             });
@@ -1003,15 +1105,17 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
       })(),
       // Memory context load (fail-open)
       memoryId
-        ? loadMemoryContext(memoryId, task.repo, task.task_description)
+        ? loadMemoryContext(memoryId, repo, task.task_description)
         : Promise.resolve(undefined),
       // PR fetch (only for PR task types)
       (async () => {
         if (isPrTask && task.pr_number !== undefined && tokenSecretArn) {
           try {
             const token = await resolveGitHubToken(tokenSecretArn);
-            return await fetchGitHubPullRequest(task.repo, task.pr_number, token) ?? undefined;
+            return await fetchGitHubPullRequest(repo, task.pr_number, token) ?? undefined;
           } catch (err) {
+            // Missing/unreadable secret → propagate as a blocker (#251); see issue-fetch note.
+            if (err instanceof MissingSecretError || err instanceof SecretUnreadableError) throw err;
             logger.warn('Failed to fetch PR context', {
               task_id: task.task_id,
               pr_number: task.pr_number,
@@ -1047,10 +1151,10 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
     if (isPrTask) {
       if (!prResult) {
         // PR fetch failed — log error and return minimal context
-        logger.error(`PR context fetch failed for ${task.task_type} task`, {
-          task_id: task.task_id, pr_number: task.pr_number, task_type: task.task_type,
+        logger.error(`PR context fetch failed for ${workflowId} task`, {
+          task_id: task.task_id, pr_number: task.pr_number, resolved_workflow: workflowId,
         });
-        const fallbackPrompt = assembleUserPrompt(task.task_id, task.repo, undefined, task.task_description);
+        const fallbackPrompt = assembleUserPrompt(task.task_id, repo, undefined, task.task_description);
         const fallbackSources = task.task_description ? ['task_description'] : [];
         return {
           version: 1,
@@ -1066,11 +1170,11 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
       // Enforce token budget on the assembled PR prompt
       const budgetResult = enforceTokenBudget(undefined, task.task_description, USER_PROMPT_TOKEN_BUDGET);
       let effectiveTaskDescription = budgetResult.taskDescription;
-      if (!effectiveTaskDescription && task.task_type === 'pr_review') {
-        logger.info('Using default task description for pr_review task', { task_id: task.task_id });
+      if (!effectiveTaskDescription && workflowIsReadOnly(workflowId)) {
+        logger.info('Using default task description for read-only PR task', { task_id: task.task_id });
         effectiveTaskDescription = 'Review this pull request. Follow the workflow in your system instructions.';
       }
-      userPrompt = assemblePrIterationPrompt(task.task_id, task.repo, prResult, effectiveTaskDescription);
+      userPrompt = assemblePrIterationPrompt(task.task_id, repo, prResult, effectiveTaskDescription);
 
       // Trim PR context if the assembled prompt exceeds the token budget
       let truncated = budgetResult.truncated;
@@ -1106,7 +1210,7 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
         };
         const estimateTrimmed = (): number =>
           estimateTokens(assemblePrIterationPrompt(
-            task.task_id, task.repo, trimmedPr, budgetResult.taskDescription,
+            task.task_id, repo, trimmedPr, budgetResult.taskDescription,
           ));
 
         // Trim oldest issue comments first
@@ -1127,7 +1231,7 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
           trimmedPr = { ...trimmedPr, review_comments: trimmedReviewComments };
         }
 
-        userPrompt = assemblePrIterationPrompt(task.task_id, task.repo, trimmedPr, budgetResult.taskDescription);
+        userPrompt = assemblePrIterationPrompt(task.task_id, repo, trimmedPr, budgetResult.taskDescription);
         const finalEstimate = estimateTokens(userPrompt);
         if (finalEstimate > USER_PROMPT_TOKEN_BUDGET) {
           logger.warn('Token budget still exceeded after trimming all comments — non-comment content too large', {
@@ -1167,7 +1271,7 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
     const budgetResult = enforceTokenBudget(issue, task.task_description, USER_PROMPT_TOKEN_BUDGET);
     issue = budgetResult.issue;
 
-    userPrompt = assembleUserPrompt(task.task_id, task.repo, issue, budgetResult.taskDescription);
+    userPrompt = assembleUserPrompt(task.task_id, repo, issue, budgetResult.taskDescription);
     const tokenEstimate = estimateTokens(userPrompt);
 
     // Screen assembled prompt when it includes GitHub issue content (attacker-controlled input).
@@ -1196,6 +1300,20 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
     }
     // Attachment errors must propagate — user explicitly provided attachments; proceeding without them is wrong
     if (err instanceof AttachmentError) {
+      throw err;
+    }
+    // Missing-secret blockers must propagate (#251) — degrading to minimal
+    // context would strand the task: the agent has no token to clone/push and
+    // would fail opaquely. Propagating carries the canonical BLOCKED[missing_secret]
+    // reason to failTask so classifyError surfaces the exact secret to wire.
+    if (err instanceof MissingSecretError) {
+      throw err;
+    }
+    // Unreadable-secret blockers must propagate too (#251, auth_failure) — the
+    // secret is wired but the agent's principal can't read it (AccessDenied /
+    // throttling). Degrading strands the task with no token, same as a missing
+    // secret; the canonical BLOCKED[auth_failure] reason routes to the remedy.
+    if (err instanceof SecretUnreadableError) {
       throw err;
     }
     // Programming errors (bugs) should fail the task, not silently degrade context

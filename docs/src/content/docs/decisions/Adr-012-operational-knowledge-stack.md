@@ -155,7 +155,7 @@ Organized by persona:
 ```markdown
 # Contributor Workflow
 
-> Operationalizes [ADR-003](/architecture/adr-003-contribution-governance)
+> Operationalizes [ADR-003](/sample-autonomous-cloud-coding-agents/architecture/adr-003-contribution-governance)
 
 ## For Planners
 - Issue quality bar (what makes an issue "ready")

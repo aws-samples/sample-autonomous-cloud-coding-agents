@@ -20,7 +20,11 @@ pids
 # Coverage & test reports
 # ──────────────────────────────────────────────
 coverage
+agent/.coverage
 *.lcov
+# Codecov uploader binary + signature files downloaded by codecov-action at CI time
+codecov
+codecov.*
 .nyc_output
 .jest-cache
 *.tsbuildinfo
@@ -34,8 +38,12 @@ junit.xml
 # Node / JS
 # ──────────────────────────────────────────────
 node_modules/
+# Also match a SYMLINK named node_modules. The trailing-slash form above matches
+# directories only, so a symlink (e.g. one pointing at a shared install in
+# another worktree) slips past it and can be committed by `git add -A`. A
+# committed symlink then breaks CI at install time with EEXIST.
+node_modules
 jspm_packages/
-*.tsbuildinfo
 .eslintcache
 *.tgz
 .yarn-integrity
@@ -59,6 +67,18 @@ cdk.out/
 cdk.context.json
 /assets/
 
+# integ-runner snapshots: these bundle every Lambda handler asset (~100 MB) and
+# are regenerated on each run. CI always deploys-then-verifies (integ-runner
+# --force) rather than diffing a committed snapshot, so the snapshot is a build
+# artifact, not source. Also catch integ-runner's temp synth dir.
+/cdk/test/integ/*.snapshot/
+/cdk/test/integ/cdk-integ.out.*/
+
+# ──────────────────────────────────────────────
+# CI artifacts (generated during build)
+# ──────────────────────────────────────────────
+deploy-intent.json
+
 # ──────────────────────────────────────────────
 # Build outputs (compiled TS → JS)
 # ──────────────────────────────────────────────
@@ -78,7 +98,7 @@ local-docs/
 # ──────────────────────────────────────────────
 .idea
 .vscode
-*.DS_STORE
+.DS_Store
 
 # ──────────────────────────────────────────────
 # Security scan outputs
@@ -106,10 +126,8 @@ agent/gitleaks-report.json
 *.bkp
 Plans/
 
-# draw.io editor artifacts + any rendered screenshots kept locally for review
+# draw.io editor artifacts
 .$*.drawio.bkp
-docs/diagrams/*.png
-docs/diagrams/screenshots/
 
 # ──────────────────────────────────────────────
 # Explicit keeps (override ignores above)

@@ -271,13 +271,18 @@ function coerceTimeout(value: string | undefined): number | undefined {
  * tree; we stringify the first expression and cap at ~160 chars so
  * the `GET /v1/repos/{repo}/policies` response stays terse.
  */
+/** Cedar summary truncation length when stringifying `when` conditions. */
+const CEDAR_SUMMARY_MAX_LENGTH = 160;
+const CEDAR_SUMMARY_ELLIPSIS_LENGTH = 3;
+const CEDAR_SUMMARY_TRUNCATE_LENGTH = CEDAR_SUMMARY_MAX_LENGTH - CEDAR_SUMMARY_ELLIPSIS_LENGTH;
+
 function deriveSummary(conditions: unknown): string {
   if (!conditions) {
     return '(no summary)';
   }
   const raw = JSON.stringify(conditions);
-  if (raw.length <= 160) {
+  if (raw.length <= CEDAR_SUMMARY_MAX_LENGTH) {
     return raw;
   }
-  return raw.slice(0, 157) + '...';
+  return raw.slice(0, CEDAR_SUMMARY_TRUNCATE_LENGTH) + '...';
 }

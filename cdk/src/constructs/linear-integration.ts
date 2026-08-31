@@ -18,19 +18,41 @@
  */
 
 import * as path from 'path';
-import { ArnFormat, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
+import { ArnFormat, Aspects, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import * as apigw from 'aws-cdk-lib/aws-apigateway';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import { Runtime, Architecture } from 'aws-cdk-lib/aws-lambda';
 import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
+import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 import { LinearProjectMappingTable } from './linear-project-mapping-table';
 import { LinearUserMappingTable } from './linear-user-mapping-table';
 import { LinearWorkspaceRegistryTable } from './linear-workspace-registry-table';
+import { ComponentUaAspect } from './solution-ua-aspect';
+
+/** Default task-record retention used for TTL computation (days). */
+const DEFAULT_TASK_RETENTION_DAYS = 90;
+
+/**
+ * Webhook-processor Lambda timeout (seconds). One event drives a chain of real
+ * synchronous work: resolve the workspace OAuth token, probe the issue, fetch +
+ * screen + store every attachment (each a network round-trip plus a guardrail
+ * call), seed the sub-issue graph, and release the root children — each release
+ * being its own task admission. At the old 30s ceiling an issue with several
+ * attachments or a wide root layer was killed mid-call, which surfaces as a
+ * silent hang plus an async-retry storm and no user-facing comment. 120s leaves
+ * room for the worst realistic case. Safe: the receiver returns 200 and
+ * async-invokes this processor (InvocationType 'Event'), so nothing waits
+ * synchronously on it.
+ */
+const WEBHOOK_PROCESSOR_TIMEOUT_SECONDS = 120;
+
+/** Webhook-processor Lambda memory (MB). */
+const WEBHOOK_PROCESSOR_MEMORY_MB = 512;
 
 /**
  * Properties for LinearIntegration construct.
@@ -51,14 +73,46 @@ export interface LinearIntegrationProps {
   /** The DynamoDB repo config table (optional — for repo onboarding checks). */
   readonly repoTable?: dynamodb.ITable;
 
+  /**
+   * OrchestrationTable for parent/sub-issue orchestration.
+   * When provided, the webhook processor probes labeled parent issues for
+   * a sub-issue graph (seeds the DAG + releases root children). When
+   * omitted, the orchestration path is dormant (ORCHESTRATION_TABLE_NAME
+   * unset) and the processor behaves as one-issue → one-task.
+   */
+  readonly orchestrationTable?: dynamodb.ITable;
+
   /** Orchestrator Lambda function ARN for async task invocation. */
   readonly orchestratorFunctionArn?: string;
+
+  /**
+   * User concurrency counter table. When provided alongside
+   * ``orchestrationTable``, the webhook processor throttles the seed-time
+   * ROOT release to the user's free concurrency budget so a wide-root epic
+   * (many independent sub-issues, no shared foundation) doesn't over-release
+   * roots that admission then hard-fails. A failed root is UNRECOVERABLE
+   * (the sweep can only re-release a child whose predecessor still shows
+   * succeeded — a root has none), so throttling here matters most. Omitted
+   * → release all roots (back-compat; admission still gates).
+   */
+  readonly userConcurrencyTable?: dynamodb.ITable;
+
+  /** Per-user concurrency cap, shared with the orchestrator. Default 10. */
+  readonly maxConcurrentTasksPerUser?: number;
 
   /** Bedrock Guardrail ID for input screening. */
   readonly guardrailId?: string;
 
   /** Bedrock Guardrail version for input screening. */
   readonly guardrailVersion?: string;
+
+  /**
+   * S3 bucket for attachment storage. Required to support image attachments
+   * extracted from issue descriptions (markdown `![alt](https://…)` images).
+   * When omitted, Linear-triggered tasks with image attachments fail at
+   * `createTaskCore` with "Attachment storage is not configured."
+   */
+  readonly attachmentsBucket?: s3.IBucket;
 
   /** Task retention in days for TTL computation. */
   readonly taskRetentionDays?: number;
@@ -70,9 +124,11 @@ export interface LinearIntegrationProps {
 /**
  * CDK construct that adds Linear integration to the ABCA platform.
  *
- * Inbound-only adapter: Linear → webhook → task creation. Outbound progress
- * updates happen agent-side via the Linear MCP server (see agent/src/channel_mcp.py),
- * so there is NO DynamoDB Streams consumer and NO outbound-notify Lambda here.
+ * Inbound-only adapter: Linear → webhook → task creation. Outbound updates are
+ * deterministic (ADR-016 — there is NO Linear MCP): reactions + state transitions
+ * from the agent's direct GraphQL (`linear_reactions.py`), and start / PR-opened /
+ * terminal comments from the Lambda tier (webhook processor + fan-out dispatcher).
+ * So there is NO DynamoDB Streams consumer and NO outbound-notify Lambda here.
  *
  * Creates:
  * - LinearProjectMappingTable (Linear project → GitHub repo mapping)
@@ -109,6 +165,12 @@ export class LinearIntegration extends Construct {
   constructor(scope: Construct, id: string, props: LinearIntegrationProps) {
     super(scope, id);
 
+    // Solution-attribution component label (#319): every Lambda in this Linear
+    // integration is part of the webhook ingest surface. One aspect labels
+    // them all (and any future function added here); the universal `app/`
+    // segment is set by the stack-level aspect.
+    Aspects.of(this).add(new ComponentUaAspect('webhook'));
+
     const removalPolicy = props.removalPolicy ?? RemovalPolicy.DESTROY;
 
     // --- DynamoDB tables ---
@@ -142,12 +204,21 @@ export class LinearIntegration extends Construct {
     const commonBundling: lambda.BundlingOptions = {
       externalModules: ['@aws-sdk/*'],
     };
+    // pdf-parse (v2, pdfjs-based) can't be esbuild-bundled — its pdfjs/native
+    // (@napi-rs/canvas) deps break at import (`DOMMatrix is not defined`).
+    // Ship it unbundled via `nodeModules` so it resolves natively at
+    // runtime. Mirrors TaskApi's attachment-screening bundling (task-api.ts) and
+    // the task-orchestrator. Used by the webhook processor's PDF attachment path.
+    const attachmentScreeningBundling: lambda.BundlingOptions = {
+      ...commonBundling,
+      nodeModules: ['pdf-parse'],
+    };
 
     // --- Task creation environment (matches TaskApi / SlackIntegration pattern) ---
     const createTaskEnv: Record<string, string> = {
       TASK_TABLE_NAME: props.taskTable.tableName,
       TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
-      TASK_RETENTION_DAYS: String(props.taskRetentionDays ?? 90),
+      TASK_RETENTION_DAYS: String(props.taskRetentionDays ?? DEFAULT_TASK_RETENTION_DAYS),
     };
     if (props.repoTable) {
       createTaskEnv.REPO_TABLE_NAME = props.repoTable.tableName;
@@ -158,6 +229,9 @@ export class LinearIntegration extends Construct {
     if (props.guardrailId && props.guardrailVersion) {
       createTaskEnv.GUARDRAIL_ID = props.guardrailId;
       createTaskEnv.GUARDRAIL_VERSION = props.guardrailVersion;
+    }
+    if (props.attachmentsBucket) {
+      createTaskEnv.ATTACHMENTS_BUCKET_NAME = props.attachmentsBucket.bucketName;
     }
 
     // --- Cognito Authorizer (for /linear/link) ---
@@ -182,18 +256,44 @@ export class LinearIntegration extends Construct {
       handler: 'handler',
       runtime: Runtime.NODEJS_24_X,
       architecture: Architecture.ARM_64,
-      timeout: Duration.seconds(30),
+      timeout: Duration.seconds(WEBHOOK_PROCESSOR_TIMEOUT_SECONDS),
+      // Default 128 MB OOMs at module init since the attachment-screening
+      // path bundles pdf-parse + URL-resolver libs alongside the
+      // existing AWS SDK + bedrock-agentcore deps. 512 MB gives ~4× headroom
+      // and lifts CPU enough that p99 startup stays under the API Gateway
+      // 30s deadline on cold starts.
+      memorySize: WEBHOOK_PROCESSOR_MEMORY_MB,
       environment: {
         ...createTaskEnv,
         LINEAR_PROJECT_MAPPING_TABLE_NAME: this.projectMappingTable.tableName,
         LINEAR_USER_MAPPING_TABLE_NAME: this.userMappingTable.tableName,
         LINEAR_WORKSPACE_REGISTRY_TABLE_NAME: this.workspaceRegistryTable.tableName,
+        // When set, enables parent/sub-issue orchestration
+        // (seed DAG + release roots). Unset → orchestration path dormant.
+        ...(props.orchestrationTable && {
+          ORCHESTRATION_TABLE_NAME: props.orchestrationTable.tableName,
+        }),
+        // Throttle the seed-time root release to the free concurrency
+        // budget (see prop doc). Only wired when both tables are present.
+        ...(props.orchestrationTable && props.userConcurrencyTable && {
+          USER_CONCURRENCY_TABLE_NAME: props.userConcurrencyTable.tableName,
+          MAX_CONCURRENT_TASKS_PER_USER: String(props.maxConcurrentTasksPerUser ?? 10),
+        }),
       },
-      bundling: commonBundling,
+      // Uses the PDF attachment-screening path — pdf-parse must stay unbundled.
+      bundling: attachmentScreeningBundling,
     });
     this.projectMappingTable.grantReadData(webhookProcessorFn);
     this.userMappingTable.grantReadData(webhookProcessorFn);
     this.workspaceRegistryTable.grantReadData(webhookProcessorFn);
+    // Seed the orchestration DAG + release root children.
+    if (props.orchestrationTable) {
+      props.orchestrationTable.grantReadWriteData(webhookProcessorFn);
+    }
+    // Read the user concurrency counter to throttle the root release.
+    if (props.orchestrationTable && props.userConcurrencyTable) {
+      props.userConcurrencyTable.grantReadData(webhookProcessorFn);
+    }
     // Phase 2.0b-O2: per-workspace OAuth token secrets are created by the
     // CLI at setup time (`bgagent-linear-oauth-<slug>`), not by CDK. Grant
     // the webhook processor Get + Put on the prefix so it can read tokens
@@ -233,6 +333,20 @@ export class LinearIntegration extends Construct {
         ],
       }));
     }
+    // No bedrock:InvokeModel grant: this processor never calls a model directly.
+    // Its only Bedrock use is ApplyGuardrail above, to screen third-party text and
+    // attachment bytes before they reach an agent. All model inference happens
+    // inside the agent runtime, under the agent's own role.
+    //
+    // Issue descriptions can carry markdown `![alt](https://…)` images, which
+    // `extractImageUrlAttachments` (linear-webhook-processor.ts) turns into
+    // URL attachments. `createTaskCore` then uploads the screened bytes to
+    // `ATTACHMENTS_BUCKET_NAME`, mirroring the TaskApi/Slack paths. Without
+    // grantPut + grantDelete here, that upload fails closed with 503.
+    if (props.attachmentsBucket) {
+      props.attachmentsBucket.grantPut(webhookProcessorFn);
+      props.attachmentsBucket.grantDelete(webhookProcessorFn);
+    }
 
     // --- Webhook receiver (verifies HMAC, dedups, invokes processor) ---
     const webhookFn = new lambda.NodejsFunction(this, 'WebhookFn', {
@@ -245,11 +359,32 @@ export class LinearIntegration extends Construct {
         LINEAR_WEBHOOK_SECRET_ARN: this.webhookSecret.secretArn,
         LINEAR_WEBHOOK_DEDUP_TABLE_NAME: this.webhookDedupTable.tableName,
         LINEAR_WEBHOOK_PROCESSOR_FUNCTION_NAME: webhookProcessorFn.functionName,
+        // Per-workspace signing-secret lookup — selects the right
+        // workspace's `webhook_signing_secret` from the OAuth secret
+        // bundle so multi-workspace installs verify correctly. Receiver
+        // falls back to LINEAR_WEBHOOK_SECRET_ARN when this lookup
+        // misses (back-compat for single-workspace installs).
+        LINEAR_WORKSPACE_REGISTRY_TABLE_NAME: this.workspaceRegistryTable.tableName,
       },
       bundling: commonBundling,
     });
     this.webhookSecret.grantRead(webhookFn);
     this.webhookDedupTable.grantReadWriteData(webhookFn);
+    this.workspaceRegistryTable.grantReadData(webhookFn);
+    // Read-only on the per-workspace OAuth secret prefix — we extract
+    // `webhook_signing_secret` for verification but never mutate; the
+    // CLI owns the lifecycle of these secrets.
+    webhookFn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['secretsmanager:GetSecretValue'],
+      resources: [
+        Stack.of(this).formatArn({
+          service: 'secretsmanager',
+          resource: 'secret',
+          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+          resourceName: 'bgagent-linear-oauth-*',
+        }),
+      ],
+    }));
     webhookProcessorFn.grantInvoke(webhookFn);
 
     // --- Account linking (Cognito-authenticated) ---
@@ -319,7 +454,11 @@ export class LinearIntegration extends Construct {
         },
         {
           id: 'AwsSolutions-IAM5',
-          reason: 'Wildcard permissions are scoped by DynamoDB index ARN patterns',
+          reason:
+            'Wildcards cover (a) DynamoDB index ARN patterns from CDK grant helpers, '
+            + 'and (b) the Secrets Manager `bgagent-linear-oauth-*` prefix grant — '
+            + 'the per-workspace OAuth secret name is not known at synth time '
+            + '(operators add workspaces by slug at runtime via `bgagent linear add-workspace`).',
         },
       ], true);
     }

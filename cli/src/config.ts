@@ -27,6 +27,9 @@ const CONFIG_DIR_ENV = 'BGAGENT_CONFIG_DIR';
 const CONFIG_FILE = 'config.json';
 const CREDENTIALS_FILE = 'credentials.json';
 
+/** Owner-only read/write — credentials must never be group/world readable. */
+export const SECRET_FILE_MODE = 0o600;
+
 /** Returns the config directory path (~/.bgagent or BGAGENT_CONFIG_DIR). */
 export function getConfigDir(): string {
   return process.env[CONFIG_DIR_ENV] || path.join(os.homedir(), '.bgagent');
@@ -71,21 +74,32 @@ export function tryLoadConfig(): CliConfig | null {
   try {
     return JSON.parse(fs.readFileSync(p, 'utf-8')) as CliConfig;
   } catch {
-    return null;
+    return null; // nosemgrep: ts-silent-success-masking -- corrupt config file treated as absent; caller falls back to configure flow
   }
 }
 
-/** Load cached credentials. Returns null if no credentials file exists. */
+/** Load cached credentials. Returns null if no credentials file exists.
+ *  A corrupt (non-JSON) credentials file throws a ``CliError`` pointing the
+ *  user at ``bgagent login`` rather than surfacing a raw ``SyntaxError``. */
 export function loadCredentials(): Credentials | null {
   const p = credentialsPath();
   if (!fs.existsSync(p)) {
     return null;
   }
-  return JSON.parse(fs.readFileSync(p, 'utf-8')) as Credentials;
+  try {
+    return JSON.parse(fs.readFileSync(p, 'utf-8')) as Credentials;
+  } catch {
+    throw new CliError('Credentials file is corrupt. Run `bgagent login` to re-authenticate.');
+  }
 }
 
 /** Save credentials with restricted permissions. */
 export function saveCredentials(creds: Credentials): void {
   ensureConfigDir();
-  fs.writeFileSync(credentialsPath(), JSON.stringify(creds, null, 2) + '\n', { mode: 0o600 });
+  const p = credentialsPath();
+  fs.writeFileSync(p, JSON.stringify(creds, null, 2) + '\n', { mode: SECRET_FILE_MODE });
+  // writeFileSync only honors `mode` when CREATING the file; overwriting a
+  // pre-existing loose-permissions file leaves its bits untouched. chmod
+  // makes the 0600 intent durable across re-logins.
+  fs.chmodSync(p, SECRET_FILE_MODE);
 }

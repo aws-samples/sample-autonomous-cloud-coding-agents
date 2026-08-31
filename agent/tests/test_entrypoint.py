@@ -372,22 +372,47 @@ class TestBuildSystemPrompt:
         assert "Always use tabs" in result
         assert "Additional instructions" in result
 
+    def test_resolved_skill_fragment_appended_to_system_prompt(self):
+        # #246: a resolved skill's prompt_fragment must reach the system prompt.
+        config = TaskConfig(
+            repo_url="o/r",
+            task_id="t1",
+            max_turns=10,
+            github_token="ghp_test",
+            aws_region="us-east-1",
+            resolved_assets=[
+                {
+                    "kind": "skill",
+                    "namespace": "acme",
+                    "name": "readme-helper",
+                    "version": "1.0.0",
+                    "runtime": {"prompt_fragment": "Add an ABCA-REVIEWED marker."},
+                }
+            ],
+        )
+        setup = RepoSetup(repo_dir="/workspace/t1", branch="b", default_branch="main", notes=[])
+        result = _build_system_prompt(config, setup, None, "")
+        assert "## Skills" in result
+        assert "Add an ABCA-REVIEWED marker." in result
+
 
 # ---------------------------------------------------------------------------
-# build_config — task_type handling
+# build_config — workflow resolution
 # ---------------------------------------------------------------------------
 
 
-class TestBuildConfigTaskType:
+class TestBuildConfigWorkflow:
     def test_pr_iteration_with_pr_number(self):
         config = build_config(
             repo_url="owner/repo",
             github_token="ghp_test",
             aws_region="us-east-1",
-            task_type="pr_iteration",
+            resolved_workflow={"id": "coding/pr-iteration-v1", "version": "1.0.0"},
             pr_number="42",
         )
-        assert config.task_type == "pr_iteration"
+        assert config.resolved_workflow is not None
+        assert config.resolved_workflow["id"] == "coding/pr-iteration-v1"
+        assert config.is_pr_workflow is True
         assert config.pr_number == "42"
 
     def test_pr_iteration_without_pr_number_raises(self):
@@ -396,7 +421,7 @@ class TestBuildConfigTaskType:
                 repo_url="owner/repo",
                 github_token="ghp_test",
                 aws_region="us-east-1",
-                task_type="pr_iteration",
+                resolved_workflow={"id": "coding/pr-iteration-v1", "version": "1.0.0"},
             )
 
     def test_new_task_default(self):
@@ -406,17 +431,21 @@ class TestBuildConfigTaskType:
             github_token="ghp_test",
             aws_region="us-east-1",
         )
-        assert config.task_type == "new_task"
+        assert config.resolved_workflow is not None
+        assert config.resolved_workflow["id"] == "coding/new-task-v1"
+        assert config.policy_principal == "new_task"
 
     def test_pr_review_with_pr_number(self):
         config = build_config(
             repo_url="owner/repo",
             github_token="ghp_test",
             aws_region="us-east-1",
-            task_type="pr_review",
+            resolved_workflow={"id": "coding/pr-review-v1", "version": "1.0.0"},
             pr_number="55",
         )
-        assert config.task_type == "pr_review"
+        assert config.resolved_workflow is not None
+        assert config.resolved_workflow["id"] == "coding/pr-review-v1"
+        assert config.policy_principal == "pr_review"
         assert config.pr_number == "55"
 
     def test_pr_review_without_pr_number_raises(self):
@@ -425,22 +454,22 @@ class TestBuildConfigTaskType:
                 repo_url="owner/repo",
                 github_token="ghp_test",
                 aws_region="us-east-1",
-                task_type="pr_review",
+                resolved_workflow={"id": "coding/pr-review-v1", "version": "1.0.0"},
             )
 
 
 # ---------------------------------------------------------------------------
-# _build_system_prompt — task_type handling
+# _build_system_prompt — workflow-driven prompt selection
 # ---------------------------------------------------------------------------
 
 
-class TestBuildSystemPromptTaskType:
+class TestBuildSystemPromptWorkflow:
     def test_selects_new_task_prompt(self):
         config = TaskConfig(
             repo_url="owner/repo",
             task_id="test-123",
             max_turns=100,
-            task_type="new_task",
+            resolved_workflow={"id": "coding/new-task-v1", "version": "1.0.0"},
             github_token="ghp_test",
             aws_region="us-east-1",
         )
@@ -458,7 +487,7 @@ class TestBuildSystemPromptTaskType:
             repo_url="owner/repo",
             task_id="test-123",
             max_turns=100,
-            task_type="pr_iteration",
+            resolved_workflow={"id": "coding/pr-iteration-v1", "version": "1.0.0"},
             pr_number="42",
             github_token="ghp_test",
             aws_region="us-east-1",
@@ -479,7 +508,7 @@ class TestBuildSystemPromptTaskType:
             repo_url="owner/repo",
             task_id="test-123",
             max_turns=100,
-            task_type="pr_review",
+            resolved_workflow={"id": "coding/pr-review-v1", "version": "1.0.0"},
             pr_number="55",
             github_token="ghp_test",
             aws_region="us-east-1",
@@ -494,3 +523,94 @@ class TestBuildSystemPromptTaskType:
         assert "READ-ONLY" in prompt
         assert "must NOT modify" in prompt
         assert "55" in prompt
+
+
+# ---------------------------------------------------------------------------
+# _build_system_prompt — Linear channel addendum
+# ---------------------------------------------------------------------------
+
+
+class TestBuildSystemPromptLinearChannel:
+    """The Linear-channel addendum is appended only for channel_source=='linear'."""
+
+    def _setup(self) -> RepoSetup:
+        return RepoSetup(
+            repo_dir="/workspace/t1",
+            branch="b",
+            default_branch="main",
+            notes=[],
+        )
+
+    def test_no_addendum_when_channel_is_blank(self):
+        config = TaskConfig(
+            repo_url="o/r",
+            task_id="t1",
+            max_turns=10,
+            github_token="ghp_test",
+            aws_region="us-east-1",
+        )
+        prompt = _build_system_prompt(config, self._setup(), None, "")
+        assert "## Linear issue" not in prompt
+
+    def test_no_addendum_for_slack_channel(self):
+        config = TaskConfig(
+            repo_url="o/r",
+            task_id="t1",
+            max_turns=10,
+            github_token="ghp_test",
+            aws_region="us-east-1",
+            channel_source="slack",
+        )
+        prompt = _build_system_prompt(config, self._setup(), None, "")
+        assert "## Linear issue" not in prompt
+
+    def test_addendum_present_for_linear_channel(self):
+        config = TaskConfig(
+            repo_url="o/r",
+            task_id="t1",
+            max_turns=10,
+            github_token="ghp_test",
+            aws_region="us-east-1",
+            channel_source="linear",
+            channel_metadata={
+                "linear_issue_id": "issue-uuid-1",
+                "linear_issue_identifier": "ABC-42",
+                "linear_project_id": "project-uuid-1",
+            },
+        )
+        prompt = _build_system_prompt(config, self._setup(), None, "")
+        assert "## Linear issue" in prompt
+        assert "ABC-42" in prompt
+
+    def test_linear_addendum_references_no_mcp_tools(self):
+        # ADR-016: Linear is fully deterministic — the agent has no Linear MCP.
+        # The addendum must NOT name any mcp__linear-server__* tool (a leftover
+        # reference would send the agent groping for a tool that doesn't exist).
+        config = TaskConfig(
+            repo_url="o/r",
+            task_id="t1",
+            max_turns=10,
+            github_token="ghp_test",
+            aws_region="us-east-1",
+            channel_source="linear",
+            channel_metadata={"linear_issue_id": "issue-uuid-1"},
+        )
+        prompt = _build_system_prompt(config, self._setup(), None, "")
+        assert "mcp__linear-server" not in prompt
+
+    def test_linear_addendum_states_context_prehydrated_and_status_automatic(self):
+        # The agent must be told (a) inbound context is already provided (nothing
+        # to fetch) and (b) not to post Linear comments or change state.
+        config = TaskConfig(
+            repo_url="o/r",
+            task_id="t1",
+            max_turns=10,
+            github_token="ghp_test",
+            aws_region="us-east-1",
+            channel_source="linear",
+            channel_metadata={"linear_issue_id": "i"},
+        )
+        prompt = _build_system_prompt(config, self._setup(), None, "")
+        assert "Context is already here" in prompt
+        assert "Status is automatic" in prompt
+        assert "Do NOT post Linear comments" in prompt

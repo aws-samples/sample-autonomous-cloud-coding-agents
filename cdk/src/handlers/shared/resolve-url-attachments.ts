@@ -52,6 +52,20 @@ const URL_FETCH_TIMEOUT_MS = 10_000;
 const MAX_FETCH_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB
 const MAX_REDIRECTS = 2;
 
+/** RFC 1918 172.16.0.0/12 — second-octet bounds (inclusive). */
+const RFC1918_172_SECOND_OCTET_MIN = 16;
+const RFC1918_172_SECOND_OCTET_MAX = 31;
+
+/** RFC 6598 100.64.0.0/10 (CGN) — second-octet bounds (inclusive). */
+const RFC6598_CGN_SECOND_OCTET_MIN = 64;
+const RFC6598_CGN_SECOND_OCTET_MAX = 127;
+
+/** Inclusive lower bound for HTTP redirect status codes (3xx). */
+const HTTP_REDIRECT_STATUS_MIN = 300;
+
+/** Exclusive upper bound for HTTP redirect status codes (first non-3xx). */
+const HTTP_REDIRECT_STATUS_MAX = 400;
+
 /** RFC 1918 + link-local + loopback + CGN + IPv6 equivalents + IPv4-mapped IPv6. */
 const PRIVATE_IP_RANGES = [
   // IPv4
@@ -60,7 +74,7 @@ const PRIVATE_IP_RANGES = [
     prefix: '172.',
     mask: (ip: string) => {
       const second = parseInt(ip.split('.')[1], 10);
-      return second >= 16 && second <= 31;
+      return second >= RFC1918_172_SECOND_OCTET_MIN && second <= RFC1918_172_SECOND_OCTET_MAX;
     },
   },
   { prefix: '192.168.', mask: null },
@@ -71,7 +85,7 @@ const PRIVATE_IP_RANGES = [
     prefix: '100.',
     mask: (ip: string) => {
       const second = parseInt(ip.split('.')[1], 10);
-      return second >= 64 && second <= 127; // 100.64.0.0/10 (RFC 6598)
+      return second >= RFC6598_CGN_SECOND_OCTET_MIN && second <= RFC6598_CGN_SECOND_OCTET_MAX; // 100.64.0.0/10 (RFC 6598)
     },
   },
   // IPv6
@@ -344,7 +358,7 @@ async function ssrfSafeFetch(
     }
 
     // Handle redirects
-    if (response.status >= 300 && response.status < 400) {
+    if (response.status >= HTTP_REDIRECT_STATUS_MIN && response.status < HTTP_REDIRECT_STATUS_MAX) {
       const location = response.headers.get('location');
       if (!location) {
         throw new AttachmentResolutionError(

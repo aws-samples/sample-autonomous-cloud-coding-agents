@@ -1,0 +1,76 @@
+{
+  "name": "rule7-repo-less-discover-and-provider",
+  "description": "knowledge default (repo-less) but repo_config sets discover:true and a provider; schema only catches explicit requires_repo:false, not the domain default.",
+  "workflow": {
+    "id": "knowledge/note-v1",
+    "version": "1.0.0",
+    "domain": "knowledge",
+    "description": "Research a topic and deliver a cited artifact. No repo.",
+    "read_only": false,
+    "prompt": {
+      "template": "registry://prompt/web-research-workflow"
+    },
+    "hydration": {
+      "sources": [
+        "task_description"
+      ]
+    },
+    "agent_config": {
+      "tier": "elevated",
+      "allowed_tools": [
+        "Read",
+        "WebFetch"
+      ],
+      "mcp_servers": [
+        "registry://mcp/web-search-v1"
+      ],
+      "cedar_policy_modules": [
+        "builtin/hard_deny",
+        "builtin/soft_deny"
+      ],
+      "skills": [
+        "registry://skill/research-synthesis-v1"
+      ]
+    },
+    "repo_config": {
+      "discover": true,
+      "provider": "github"
+    },
+    "required_inputs": {
+      "all_of": [
+        "task_description"
+      ]
+    },
+    "steps": [
+      {
+        "kind": "hydrate_context"
+      },
+      {
+        "kind": "run_agent"
+      },
+      {
+        "kind": "deliver_artifact",
+        "target": "s3_and_comment"
+      }
+    ],
+    "terminal_outcomes": {
+      "primary": "artifact"
+    },
+    "limits": {
+      "max_turns": 25,
+      "max_budget_usd": 5
+    },
+    "promotion_gate": {
+      "requires": [
+        "eval:web-research-quality"
+      ]
+    },
+    "status": "production"
+  },
+  "expected": {
+    "valid": false,
+    "violations": [
+      "rule-7"
+    ]
+  }
+}

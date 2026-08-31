@@ -20,10 +20,9 @@
 // Admission / pre-invoke checks before orchestration. See docs/design/ORCHESTRATOR.md (admission control).
 // Tests: cdk/test/handlers/shared/preflight.test.ts
 
-import { resolveGitHubToken } from './context-hydration';
+import { resolveGitHubToken, MissingSecretError, SecretUnreadableError } from './context-hydration';
 import { logger } from './logger';
 import type { BlueprintConfig } from './repo-config';
-import type { TaskType } from './types';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -35,6 +34,11 @@ export const PreflightFailureReason = {
   REPO_NOT_FOUND_OR_NO_ACCESS: 'REPO_NOT_FOUND_OR_NO_ACCESS',
   RUNTIME_UNAVAILABLE: 'RUNTIME_UNAVAILABLE',
   PR_NOT_FOUND_OR_CLOSED: 'PR_NOT_FOUND_OR_CLOSED',
+  // #251: token-secret blockers are misconfiguration, not GitHub being
+  // unreachable — an accurate reason so tooling keyed on failureReason routes
+  // operators to the secret/IAM fix rather than a network red herring.
+  GITHUB_TOKEN_SECRET_MISSING: 'GITHUB_TOKEN_SECRET_MISSING',
+  GITHUB_TOKEN_SECRET_UNREADABLE: 'GITHUB_TOKEN_SECRET_UNREADABLE',
 } as const;
 
 export type PreflightFailureReasonType = typeof PreflightFailureReason[keyof typeof PreflightFailureReason];
@@ -69,10 +73,6 @@ const CONTENTS_WRITE_LEVELS = new Set(['WRITE', 'MAINTAIN', 'ADMIN']);
  * See GitHub collaborator roles; TRIAGE can manage PRs without push.
  */
 const PR_REVIEW_INTERACTION_LEVELS = new Set(['TRIAGE', 'WRITE', 'MAINTAIN', 'ADMIN']);
-
-function taskRequiresContentsWrite(taskType: TaskType): boolean {
-  return taskType === 'new_task' || taskType === 'pr_iteration';
-}
 
 function splitRepo(repo: string): { owner: string; name: string } | undefined {
   const idx = repo.indexOf('/');
@@ -110,7 +110,7 @@ async function fetchViewerPermission(repo: string, token: string): Promise<strin
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     logger.warn('GitHub GraphQL viewerPermission lookup failed', { repo, error: detail });
-    return undefined;
+    return undefined; // nosemgrep: ts-silent-success-masking -- permission preflight is fail-open; undefined skips the check without blocking task creation
   }
 }
 
@@ -153,7 +153,7 @@ async function checkGitHubReachability(token: string): Promise<PreflightCheckRes
   }
 }
 
-async function checkRepoAccess(repo: string, token: string, taskType: TaskType): Promise<PreflightCheckResult> {
+async function checkRepoAccess(repo: string, token: string, readOnly: boolean): Promise<PreflightCheckResult> {
   const start = Date.now();
   try {
     const resp = await fetch(`https://api.github.com/repos/${repo}`, {
@@ -209,7 +209,7 @@ async function checkRepoAccess(repo: string, token: string, taskType: TaskType):
     const contentsWriteOk = restPush || (viewerPermission !== undefined && CONTENTS_WRITE_LEVELS.has(viewerPermission));
     const prReviewOk = restPush || (viewerPermission !== undefined && PR_REVIEW_INTERACTION_LEVELS.has(viewerPermission));
 
-    const needsWrite = taskRequiresContentsWrite(taskType);
+    const needsWrite = !readOnly;
     const sufficient = needsWrite ? contentsWriteOk : prReviewOk;
 
     if (!sufficient) {
@@ -297,6 +297,10 @@ async function checkRuntimeAvailability(): Promise<PreflightCheckResult> {
 
 /** Order for surfacing the most actionable failure when multiple checks fail. */
 const PREFLIGHT_FAILURE_PRIORITY: readonly PreflightFailureReasonType[] = [
+  // Token-secret misconfiguration is the most actionable + specific — surface
+  // it ahead of the generic unreachable reason (#251).
+  PreflightFailureReason.GITHUB_TOKEN_SECRET_MISSING,
+  PreflightFailureReason.GITHUB_TOKEN_SECRET_UNREADABLE,
   PreflightFailureReason.GITHUB_UNREACHABLE,
   PreflightFailureReason.INSUFFICIENT_GITHUB_REPO_PERMISSIONS,
   PreflightFailureReason.REPO_NOT_FOUND_OR_NO_ACCESS,
@@ -319,12 +323,32 @@ function pickPrimaryPreflightFailure(failedChecks: PreflightCheckResult[]): Pref
 // ---------------------------------------------------------------------------
 
 export async function runPreflightChecks(
-  repo: string,
+  repo: string | undefined,
   blueprintConfig: BlueprintConfig,
   prNumber?: number,
-  taskType: TaskType = 'new_task',
+  readOnly = false,
+  requiresRepo = true,
 ): Promise<PreflightResult> {
   const checks: PreflightCheckResult[] = [];
+
+  // Repo-less workflows (requires_repo:false) have no repo to pre-flight —
+  // short-circuit to passed. The seam exists from Phase 1 so the Phase-3
+  // repo-optional refactor flips behavior, not structure.
+  if (!requiresRepo) {
+    return { passed: true, checks };
+  }
+
+  // Past this point requiresRepo is true, so a repo-bound task always carries
+  // a repo (enforced at admission in create-task-core). Narrow for the checks
+  // below, which are repo-specific.
+  if (!repo) {
+    return {
+      passed: false,
+      checks,
+      failureReason: PreflightFailureReason.GITHUB_UNREACHABLE,
+      failureDetail: 'repo-bound workflow has no repo (internal invariant violation)',
+    };
+  }
 
   if (blueprintConfig.github_token_secret_arn) {
     // Resolve token — fail immediately if token resolution fails
@@ -334,18 +358,28 @@ export async function runPreflightChecks(
       token = await resolveGitHubToken(blueprintConfig.github_token_secret_arn);
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
-      logger.error('GitHub token resolution failed', { repo, error: detail });
+      // #251: distinguish token-secret misconfiguration from GitHub being
+      // unreachable. resolveGitHubToken throws MissingSecretError (absent/empty)
+      // or SecretUnreadableError (AccessDenied/throttling); anything else stays
+      // GITHUB_UNREACHABLE. The canonical BLOCKED[...] detail still drives
+      // classifyError; this only corrects the failureReason label.
+      const reason = err instanceof MissingSecretError
+        ? PreflightFailureReason.GITHUB_TOKEN_SECRET_MISSING
+        : err instanceof SecretUnreadableError
+          ? PreflightFailureReason.GITHUB_TOKEN_SECRET_UNREADABLE
+          : PreflightFailureReason.GITHUB_UNREACHABLE;
+      logger.error('GitHub token resolution failed', { repo, error: detail, reason });
       checks.push({
         check: 'github_token_resolution',
         passed: false,
-        reason: PreflightFailureReason.GITHUB_UNREACHABLE,
+        reason,
         detail,
         durationMs: Date.now() - tokenStart,
       });
       return {
         passed: false,
         checks,
-        failureReason: PreflightFailureReason.GITHUB_UNREACHABLE,
+        failureReason: reason,
         failureDetail: detail,
       };
     }
@@ -354,7 +388,7 @@ export async function runPreflightChecks(
 
     const results = await Promise.allSettled([
       checkGitHubReachability(token),
-      checkRepoAccess(repo, token, taskType),
+      checkRepoAccess(repo, token, readOnly),
       ...(prNumber !== undefined ? [checkPrAccessible(repo, prNumber, token)] : []),
     ]);
 

@@ -44,6 +44,7 @@
         "cloudwatch:TagResource",
         "cloudwatch:UntagResource",
         "logs:CreateDelivery",
+        "logs:UpdateDeliveryConfiguration",
         "logs:DescribeDeliveries",
         "logs:GetDelivery",
         "logs:GetDeliveryDestination",
@@ -82,6 +83,30 @@
     },
     {
       "Action": [
+        "s3:CreateBucket",
+        "s3:DeleteBucket",
+        "s3:PutBucketPolicy",
+        "s3:DeleteBucketPolicy",
+        "s3:PutBucketPublicAccessBlock",
+        "s3:GetBucketPublicAccessBlock",
+        "s3:PutEncryptionConfiguration",
+        "s3:PutLifecycleConfiguration",
+        "s3:PutBucketVersioning",
+        "s3:GetBucketVersioning",
+        "s3:GetBucketLocation",
+        "s3:ListBucket",
+        "s3:PutBucketTagging",
+        "s3:GetBucketTagging"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "arn:aws:s3:::backgroundagent-dev-*",
+        "arn:aws:s3:::backgroundagent-dev-*/*"
+      ],
+      "Sid": "S3ApplicationBuckets"
+    },
+    {
+      "Action": [
         "kms:CreateGrant",
         "kms:Decrypt",
         "kms:DescribeKey",
@@ -91,6 +116,35 @@
       "Effect": "Allow",
       "Resource": "*",
       "Sid": "KMSForCDKAssets"
+    },
+    {
+      "Action": [
+        "kms:CreateKey",
+        "kms:GetKeyPolicy",
+        "kms:GetKeyRotationStatus",
+        "kms:TagResource",
+        "kms:ListResourceTags"
+      ],
+      "Effect": "Allow",
+      "Resource": "*",
+      "Sid": "KMSCustomerManagedKeys"
+    },
+    {
+      "Action": [
+        "kms:PutKeyPolicy",
+        "kms:ScheduleKeyDeletion",
+        "kms:EnableKeyRotation",
+        "kms:DisableKeyRotation",
+        "kms:UntagResource"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/ABCA": "operational-alerts"
+        }
+      },
+      "Effect": "Allow",
+      "Resource": "*",
+      "Sid": "KMSCustomerManagedKeysLifecycle"
     },
     {
       "Action": [

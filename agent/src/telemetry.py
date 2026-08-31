@@ -30,12 +30,15 @@ def get_disk_usage(path: str = AGENT_WORKSPACE) -> float:
         return 0
 
 
+_BYTES_PER_UNIT = 1024
+
+
 def format_bytes(size: float) -> str:
     """Human-readable byte size."""
     for unit in ("B", "KB", "MB", "GB"):
-        if abs(size) < 1024:
+        if abs(size) < _BYTES_PER_UNIT:
             return f"{size:.1f} {unit}"
-        size /= 1024
+        size /= _BYTES_PER_UNIT
     return f"{size:.1f} TB"
 
 
@@ -53,10 +56,10 @@ def _emit_metrics_to_cloudwatch(json_payload: dict) -> None:
     try:
         import contextlib
 
-        import boto3
+        from aws_session import platform_client
 
         region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
-        client = boto3.client("logs", region_name=region)
+        client = platform_client("logs", region_name=region)
 
         task_id = json_payload.get("task_id", "unknown")
         log_stream = f"metrics/{task_id}"
@@ -161,10 +164,10 @@ class _TrajectoryWriter:
 
         import contextlib
 
-        import boto3
+        from aws_session import platform_client
 
         region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
-        self._client = boto3.client("logs", region_name=region)
+        self._client = platform_client("logs", region_name=region)
 
         log_stream = f"trajectory/{self._task_id}"
         with contextlib.suppress(self._client.exceptions.ResourceAlreadyExistsException):
@@ -468,6 +471,7 @@ def upload_trace_to_s3(
         return f"s3://{bucket}/{key}"
     except ImportError:
         print("[trace/upload] boto3 not available — skipping", flush=True)
+        # nosemgrep: py-silent-success-masking -- trace upload optional; missing boto3 skips upload
         return None
     except Exception as e:
         exc_type = type(e).__name__
@@ -481,6 +485,7 @@ def upload_trace_to_s3(
                 "[trace/upload] WARNING: IAM misconfiguration likely — trace artifact is lost.",
                 flush=True,
             )
+        # nosemgrep: py-silent-success-masking -- S3 trace upload best-effort; failure logged
         return None
 
 

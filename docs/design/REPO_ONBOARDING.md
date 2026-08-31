@@ -3,7 +3,7 @@
 Before users can submit tasks for a repository, that repository must be onboarded to the platform. Onboarding registers the repo and produces a per-repo configuration that the orchestrator uses at task time: compute strategy, model, credentials, networking, and pipeline customizations. If a user submits a task for a non-onboarded repo, the API returns `422 REPO_NOT_ONBOARDED`.
 
 - **Use this doc for:** the Blueprint construct interface, RepoConfig schema, override precedence, compute strategy interface, and pipeline customization model.
-- **For practical usage:** see [Quick Start](../guides/QUICK_START.md) for onboarding your first repo and [User Guide](../guides/USER_GUIDE.md) for per-repo overrides.
+- **For practical usage:** see [Quick Start](../guides/QUICK_START.mdx) for onboarding your first repo and [User Guide](../guides/USER_GUIDE.md) for per-repo overrides.
 - **Related docs:** [ORCHESTRATOR.md](./ORCHESTRATOR.md) for how the orchestrator consumes blueprint config, [COMPUTE.md](./COMPUTE.md) for compute backends, [SECURITY.md](./SECURITY.md) for custom step trust boundaries.
 
 ## Why onboarding?
@@ -17,9 +17,26 @@ Repositories vary in ways that affect how the agent works: different languages, 
 
 ## Onboarding mechanism
 
-Onboarding is **CDK-based**. Each repo is an instance of the `Blueprint` construct in the CDK stack. The construct writes a `RepoConfig` record to DynamoDB. Deploying the stack = onboarding or updating repos. There is no runtime API for repo CRUD.
+The **canonical** onboarding path is **CDK-based**. Each repo is an instance of the `Blueprint` construct in the CDK stack. The construct writes a `RepoConfig` record to DynamoDB. Deploying the stack = onboarding or updating repos. There is no **task-submitter** REST API for repo CRUD — the orchestrator gate reads `RepoTable` at runtime.
 
 This treats blueprints as infrastructure, not runtime config. Each repo's blueprint defines AWS resources (compute, networking, credentials). CDK manages the lifecycle. The gate (rejecting tasks for non-onboarded repos) reads DynamoDB at runtime, keeping the runtime path simple.
+
+### Operator CLI path (day-2)
+
+For operators with IAM access to the deployed stack, `bgagent repo onboard` and `bgagent repo offboard` write `RepoTable` directly (no Cognito login, no CDK redeploy). This path ships in [#378](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/378) / PR [#385](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/pull/385) ahead of a future `POST /v1/repos` API.
+
+| Aspect | CDK `Blueprint` | `bgagent repo onboard` / `offboard` |
+|--------|-----------------|-------------------------------------|
+| **Who** | Deploy role at `mise //cdk:deploy` | Operator AWS credentials (`operator-context`) |
+| **What it writes** | Full `RepoConfig` + supporting AWS resources | `RepoTable` row only (same schema) |
+| **Soft-delete** | `status=removed` + 30-day TTL on stack removal | Same semantics on `offboard` |
+| **Custom runtime / token IAM** | `additionalRuntimeArns` / `additionalSecretArns` in CDK | Stored in the row, but orchestrator IAM still requires a CDK deploy |
+| **Cedar, egress, pipeline steps** | Supported via construct props | Not exposed — use CDK |
+| **Audit trail** | CloudFormation change set + deploy logs | CLI stdout only today (see [ADR-017](../decisions/ADR-017-operator-cli-repo-onboarding.md)) |
+
+Use the CLI path for quick day-2 registration with platform defaults (runtime ARN, GitHub token secret). Use CDK when the repo needs durable infrastructure, custom IAM, Cedar policies, egress rules, or pipeline customization. The onboard command prints notes explaining which platform defaults apply and when a redeploy is still required.
+
+See also: [Using the CLI — operator commands](../guides/USER_GUIDE.md#operator-commands-stack-admin) and [ADR-017](../decisions/ADR-017-operator-cli-repo-onboarding.md).
 
 ### Blueprint construct
 
@@ -103,9 +120,9 @@ From lowest to highest priority:
 |---|---|---|
 | `compute_type` | `agentcore` | Platform constant |
 | `runtime_arn` | Stack-level env var | CDK stack props |
-| `model_id` | Claude Sonnet 4 | CDK stack props |
+| `model_id` | `us.anthropic.claude-opus-5` | Python literal in `agent/src/config.py` (no CDK prop or env knob today) — see [Model configuration](../guides/DEVELOPER_GUIDE.md#model-configuration) |
 | `max_turns` | 100 | Platform constant |
-| `max_budget_usd` | None (unlimited) | - |
+| `max_budget_usd` | None (unlimited) | No platform default by design — a global ceiling would kill long tasks mid-change. Set a per-repo default with Blueprint `agent.maxBudgetUsd` (`0.01`–`100`, validated at synth) or per task with `--max-budget` / `max_budget_usd`. See [Per-repo overrides](../guides/USER_GUIDE.md#per-repo-overrides) for the complete list of surfaces a budget can come from |
 | `memory_token_budget` | 2000 | Platform constant |
 | `github_token_secret_arn` | Stack-level secret | CDK stack props |
 | `poll_interval_ms` | 30000 | Orchestrator constant |
@@ -128,11 +145,13 @@ The orchestrator reads `RepoConfig` at task time. Each pipeline step consumes sp
 
 Blueprints customize the orchestrator pipeline through three progressively powerful layers. See [ORCHESTRATOR.md](./ORCHESTRATOR.md) for how the framework enforces invariants regardless of customization.
 
+> **Implementation status:** Only **Layer 1** is shipped today. The Blueprint construct's `pipeline` prop currently exposes a single override, `pollIntervalMs` (`cdk/src/constructs/blueprint.ts`); there is no `customSteps`/`stepSequence` support, no `CustomStepConfig`/`StepRef` wiring, and no `INVALID_STEP_SEQUENCE` validation in code. **Layer 2 (Lambda-backed custom steps)** and **Layer 3 (custom step sequences)** below describe a planned design — tracked as [GitHub issues](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues). The interfaces and validation rules in those subsections are forward-looking, not current behavior.
+
 ### Layer 1: Parameterized strategies
 
-Select and configure built-in step implementations without writing code. Set `compute.type`, `agent.modelId`, `agent.maxTurns`, and other Blueprint props.
+Select and configure built-in step implementations without writing code. Set `compute.type`, `agent.modelId`, `agent.maxTurns`, and other Blueprint props. (The only pipeline-stage override available today is `pipeline.pollIntervalMs`.)
 
-### Layer 2: Lambda-backed custom steps
+### Layer 2: Lambda-backed custom steps (planned)
 
 Inject custom logic at `pre-agent` or `post-agent` phases:
 
@@ -147,7 +166,7 @@ interface CustomStepConfig {
 }
 ```
 
-### Layer 3: Custom step sequences
+### Layer 3: Custom step sequences (planned)
 
 Override the default step order entirely:
 
@@ -160,7 +179,7 @@ interface StepRef {
 
 ### Step sequence validation
 
-When a `stepSequence` is provided, the framework validates it at CDK synth time and at runtime. Invalid sequences cause `INVALID_STEP_SEQUENCE`.
+When a `stepSequence` is provided, the framework will validate it at CDK synth time and at runtime, raising `INVALID_STEP_SEQUENCE` on misconfiguration. (Planned — see the status note above; not enforced in code today.)
 
 **Required steps:**
 

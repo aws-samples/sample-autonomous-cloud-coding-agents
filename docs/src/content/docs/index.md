@@ -36,24 +36,24 @@ Eight attributes distinguish a real dark factory from a coding agent wrapped in 
 
 ### Where ABCA stands today
 
-Maturity along these axes is a continuum, not a binary. Organizations typically stop at a "lights-sparse" state for a long time, because the governance burden rises sharply as autonomy expands from code generation to deployment authority. The scorecard below maps each attribute to what the sample already ships and what is still on the [Roadmap](/sample-autonomous-cloud-coding-agents/roadmap/roadmap).
+Maturity along these axes is a continuum, not a binary. Organizations typically stop at a "lights-sparse" state for a long time, because the governance burden rises sharply as autonomy expands from code generation to deployment authority. The scorecard below maps each attribute to what the sample already ships and what remains planned.
 
 | # | Attribute | Status | Evidence in this sample |
 |---|-----------|--------|-------------------------|
 | 1 | Machine-actionable intake | Strong | Typed task schema, CLI/REST API with idempotency keys, HMAC webhooks, input guardrails |
 | 2 | Isolated execution | Strong | AgentCore Runtime MicroVM per task, VPC with private subnets, DNS firewall, per-blueprint scoped credentials |
-| 3 | Durable, replayable orchestration | Partial | Lambda Durable Functions with checkpoint/resume, typed state machine, concurrency drift reconciliation; deterministic replay bundles are roadmap |
-| 4 | Intrinsic evaluation | Partial | Pre-flight checks, build/lint verification, Bedrock Guardrails, Cedar tool policy; tiered validation, PR risk classification, and evaluation pipeline are roadmap |
-| 5 | Persistent memory with guardrails | Partial | AgentCore Memory with semantic and episodic strategies, SHA-256 provenance, fail-open writes; trust-aware retrieval, decay, quarantine, and procedural memory are roadmap |
+| 3 | Durable, replayable orchestration | Partial | Lambda Durable Functions with checkpoint/resume, typed state machine, concurrency drift reconciliation; deterministic replay bundles are planned |
+| 4 | Intrinsic evaluation | Partial | Pre-flight checks, build/lint verification, Bedrock Guardrails, Cedar tool policy; tiered validation, PR risk classification, and evaluation pipeline are planned |
+| 5 | Persistent memory with guardrails | Partial | AgentCore Memory with semantic and episodic strategies, SHA-256 provenance, fail-open writes; trust-aware retrieval, decay, quarantine, and procedural memory are planned |
 | 6 | Observability, attribution, and auditability | Strong | OpenTelemetry spans, operator dashboard, TaskEvents audit trail, model-invocation logging, prompt versioning, per-commit `Task-Id` trailers |
-| 7 | Metered cost, capacity, and blast radius | Partial | Per-task turn caps, USD budget, per-user concurrency, WAF rate limits, tool-call policy; team/monthly budgets and cost-aware routing are roadmap |
-| 8 | Governed, reversible release path | Roadmap | Human PR review is the current gate; signed artifacts, staging→prod promotion, deployment evidence bundles, and rollback lineage are roadmap |
+| 7 | Metered cost, capacity, and blast radius | Partial | Per-task turn caps, USD budget, per-user concurrency, WAF rate limits, tool-call policy; team/monthly budgets and cost-aware routing are planned |
+| 8 | Governed, reversible release path | Planned | Human PR review is the current gate; signed artifacts, staging→prod promotion, deployment evidence bundles, and rollback lineage are planned |
 
-The [Roadmap](/sample-autonomous-cloud-coding-agents/roadmap/roadmap#strategy-retire-risk-then-raise-autonomy) sequences the work needed to move each row from Partial or Roadmap to Strong, grouped by the risk each milestone retires.
+Planned work to move each row from Partial or Planned to Strong is tracked as [GitHub issues](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues) with priority labels (`P0`, `P1`, etc.).
 
 ## The use case
 
-Users submit tasks through webhooks, CLI, or Slack. For each task, the orchestrator executes the blueprint: an isolated environment is provisioned, an agent clones the target GitHub repository and works on it. Depending on the task type, the agent creates a new branch and opens a pull request (`new_task`), iterates on an existing PR to address review feedback (`pr_iteration`), or performs a read-only review and posts structured comments on an existing PR (`pr_review`).
+Users submit tasks through webhooks, CLI, or Slack. For each task, the orchestrator executes the blueprint: an isolated environment is provisioned, an agent clones the target GitHub repository and works on it. Depending on the resolved workflow, the agent creates a new branch and opens a pull request (`coding/new-task-v1`), iterates on an existing PR to address review feedback (`coding/pr-iteration-v1`, CLI `--pr`), or performs a read-only review and posts structured comments on an existing PR (`coding/pr-review-v1`, CLI `--review-pr`).
 
 Key characteristics:
 

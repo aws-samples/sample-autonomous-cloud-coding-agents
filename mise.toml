@@ -5,8 +5,8 @@
 # decision #23): both engines are pinned EXACTLY (no ^/~) and must move
 # together. Golden-file parity fixtures under contracts/cedar-parity/ fail
 # CI if the engines diverge on any (policy, input) pair.
-#   - agent:   cedarpy==4.8.0                 (agent/pyproject.toml)
-#   - cdk:     @cedar-policy/cedar-wasm@4.10.0 (cdk/package.json)
+#   - agent:   cedarpy==4.8.4                 (agent/pyproject.toml)
+#   - cdk:     @cedar-policy/cedar-wasm@4.8.2  (cdk/package.json)
 min_version = "2026.2.6"
 
 experimental_monorepo_root = true
@@ -18,6 +18,12 @@ experimental = true
 node = "22"
 prek = "latest"
 gitleaks = "latest"
+# uv must be declared so it is on PATH before semgrep installs: mise's
+# `pipx.uvx` default routes pipx tools through `uv tool install` when uv is
+# present, avoiding the classic-pipx "Failed to upgrade shared libraries" path
+# that breaks under the mise 2026.6.x default `minimum_release_age`
+# (jdx/mise#10279; see #320).
+uv = "latest"
 semgrep = "latest"
 osv-scanner = "latest"
 "grype" = "latest"
@@ -41,6 +47,24 @@ run = [
   "bash -c 'git rev-parse --git-dir >/dev/null 2>&1 || exit 0; prek install --prepare-hooks'",
 ]
 
+# Dependency upgrades for the scheduled upgrade-main workflow (and local use).
+# Upgrades stay WITHIN the ranges/pins declared in each manifest — no
+# range-widening flags (e.g. `yarn upgrade --latest`) — so exact pins are never
+# rewritten. This is what keeps the Cedar engine parity contract intact:
+# cedarpy (agent/pyproject.toml) and @cedar-policy/cedar-wasm (cdk/package.json)
+# are exact pins that must only ever move together, by hand, with refreshed
+# contracts/cedar-parity/ fixtures (CEDAR_HITL_GATES.md §15.6, decision #23).
+[tasks.upgrade]
+description = "Upgrade dependencies within declared ranges: yarn workspaces (cdk, cli, docs) + agent uv lockfile. Exact pins (incl. Cedar parity) are not rewritten."
+run = [
+  # Regenerate the lockfile rather than `yarn upgrade`: Yarn 1 has a known bug
+  # where `yarn upgrade` copies `resolutions` entries into `dependencies` in
+  # package.json. A fresh resolve upgrades within declared ranges (and honors
+  # resolutions) without mutating any manifest.
+  "rm -f yarn.lock && yarn install",
+  "cd agent && mise run upgrade",
+]
+
 ##################
 ###### QUALITY ###
 ##################
@@ -54,10 +78,6 @@ run = [
   "MISE_EXPERIMENTAL=1 mise //docs:check",
 ]
 
-##################
-#### SECURITY ####
-##################
-
 [tasks."check:types-sync"]
 description = "Drift check: CDK shared/types.ts ↔ cli/src/types.ts (S8). Fails if a public type exists in both with different shapes, or if CLI exports a name CDK doesn't."
 run = "node --experimental-strip-types scripts/check-types-sync.ts"
@@ -66,26 +86,118 @@ run = "node --experimental-strip-types scripts/check-types-sync.ts"
 description = "Drift check: cross-language constants in contracts/constants.json (S9). Fails if agent/src/policy.py declares a literal for a name owned by the JSON contract."
 run = "node --experimental-strip-types scripts/check-constants-sync.ts"
 
+[tasks."check:coverage-thresholds-sync"]
+description = "Drift check: contracts/coverage-thresholds.json ↔ cdk/cli jest coverageThreshold and agent pytest fail_under"
+run = "node --experimental-strip-types scripts/check-coverage-thresholds-sync.ts"
+
+[tasks."test:jira-forge-app"]
+description = "Test the standalone Jira Forge app-actor proxy"
+run = "npm test --prefix integrations/jira-forge-app"
+
 [tasks."sync:abca-commands"]
 description = "Generate commands stubs from .abca/commands for multiple AI assistants"
 run = "node scripts/sync-abca-commands.mjs"
 
+[tasks.deadcode]
+description = "Dead-code detection across TS workspaces via knip (#282, cairn MVG gate #6). Lists unused files/exports/deps; run `yarn knip --fix` locally to auto-remove."
+run = "yarn knip"
+
+[tasks."check:deadcode-ratchet"]
+description = "Dead-code ratchet (#282): fail only if knip's issue count rises above knip-baseline.json. Advisory in CI for now; flips to blocking once the baseline is driven to zero."
+run = "node scripts/check-deadcode-ratchet.mjs"
+
+[tasks."check:transitive-pin-sync"]
+description = "Transitive-pin sync guard (#712): fail if a package pinned in root `resolutions` resolves below that floor in integrations/jira-forge-app's npm lockfile — the standalone project root `resolutions` can't reach."
+run = "node scripts/check-transitive-pin-sync.mjs"
+
+[tasks."drift-prevention"]
+description = "Run checks to prevent drift in contracts between packages and documentation links"
+run = [
+  { task = "sync:abca-commands" },
+  { task = "check:constants-sync" },
+  { task = "check:types-sync" },
+  { task = "check:coverage-thresholds-sync" },
+  { task = "check:transitive-pin-sync" },
+  { task = "//docs:link-check" },
+]
+
+##################
+#### SECURITY ####
+##################
+
 [tasks."security:secrets"]
-description = "Scan for secrets with gitleaks"
-run = "gitleaks detect --source . --no-banner"
+description = "Scan the checked-out history for secrets with gitleaks (scheduled sweep + pre-push)"
+# `gitleaks git` (history-aware) replaces the deprecated `gitleaks detect`
+# (removed from --help in v8.19.0).
+#
+# Scoped to `HEAD` rather than left bare (#721, decision ratified in #723).
+# Bare `gitleaks git .` walks EVERY fetched ref, so a secret in an unmerged,
+# no-PR branch reddens this scan for everyone — it trains reviewers to ignore a
+# red security gate, which is the worst outcome for one.
+#
+# `HEAD` is deliberate, and is NOT interchangeable with `main` here. HEAD is
+# relative: in the scheduled CI run it resolves to `main`, but on pre-push in a
+# feature worktree it also covers the commits being pushed. Pinning this to
+# `main` would skip the developer's own commits — the pre-push hook would stop
+# catching the secret you are about to publish.
+#
+# Do NOT "scope" this with a ref pattern like `--remotes=origin/main`: that
+# matches no ref in a plain worktree, walks 0 commits, and silently turns the
+# scan into a fail-OPEN no-op.
+#
+# Secrets introduced by a PR are independently caught at merge time by the
+# required range-scoped check (`security:secrets:range`, see security-pr.yml).
+run = 'gitleaks git . --no-banner --redact --log-opts="HEAD"'
+
+[tasks."security:secrets:range"]
+description = "gitleaks over a commit range only (per-PR gate). Set GITLEAKS_RANGE, e.g. origin/main..HEAD"
+# Range-scoped scan: only the commits a branch/PR introduces, not full history.
+# Defaults to the full history when GITLEAKS_RANGE is unset so the task is safe
+# to run anywhere. The per-PR CI job sets GITLEAKS_RANGE=origin/$BASE..HEAD.
+run = 'gitleaks git . --no-banner --redact --log-opts="${GITLEAKS_RANGE:-}"'
 
 [tasks."security:secrets:staged"]
 description = "gitleaks on staged changes (pre-commit hook)"
-run = "gitleaks protect --staged --no-banner"
+# `gitleaks git --staged` replaces the deprecated `gitleaks protect --staged`.
+run = "gitleaks git . --staged --no-banner --redact"
 
 [tasks."security:sast"]
 description = "SAST scan with semgrep (auto + OWASP top 10)"
 run = "semgrep scan --config auto --config p/python --config p/typescript --config p/owasp-top-ten --config p/security-audit --error --quiet ."
 
+[tasks."security:sast:masking"]
+description = "Custom semgrep rules: silent-success masking (AI004, #257). Blocking — intentional degraded-mode fallbacks use inline justified nosemgrep on the return line."
+# `semgrep test` validates the rules against their .semgrep/ fixtures first.
+# The scan excludes those fixtures (they trigger by design) and writes SARIF
+# to test-reports/ (gitignored) so findings stay agent-routable (CA-06).
+run = [
+  "semgrep test .semgrep/",
+  "mkdir -p test-reports",
+  "semgrep scan --config .semgrep/silent-success-masking.yaml --exclude '.semgrep/*' --sarif-output=test-reports/semgrep-silent-success-masking.sarif --error --quiet .",
+]
+
+[tasks."security:sast:masking:range"]
+description = "Masking scan ratcheted to newly-introduced findings only (per-PR gate). Set SEMGREP_MASKING_BASELINE, e.g. origin/main."
+# Ratchet, not a full scan: --baseline-commit reports only findings a branch
+# ADDS relative to the baseline, so the pre-existing findings on main (tracked
+# in #756) don't block PRs that don't touch them — while any NEW masking
+# regression fails here at PR time. Mirrors security:secrets:range. The full
+# blocking scan (security:sast:masking) still runs in security.yml and the
+# pre-push hook.
+# `semgrep test .semgrep/` runs first (as in the full task) so a PR that WEAKENS
+# the rule or breaks a fixture fails at PR time too — otherwise a rule-weakening
+# change would only be caught weekly / at pre-push (which is currently bypassable
+# with --no-verify). Defaults the baseline to origin/main so the task is safe to
+# run anywhere; the per-PR CI job sets SEMGREP_MASKING_BASELINE to the PR base SHA.
+run = [
+  "semgrep test .semgrep/",
+  "semgrep scan --config .semgrep/silent-success-masking.yaml --exclude '.semgrep/*' --baseline-commit \"${SEMGREP_MASKING_BASELINE:-origin/main}\" --error --quiet .",
+]
+
 [tasks."security:deps"]
 description = "Audit dependencies for known vulnerabilities (osv-scanner)"
 # Yarn workspaces use the repo-root lockfile only; do not scan stale cli/docs yarn.lock copies.
-run = "osv-scanner scan --lockfile agent/uv.lock --lockfile yarn.lock"
+run = "osv-scanner scan --lockfile agent/uv.lock --lockfile yarn.lock --lockfile integrations/jira-forge-app/package-lock.json"
 
 [tasks."security:grype"]
 description = "Run Grype on source files; generated/vendor dirs are excluded because lockfile, Retire, and image scans cover dependencies and runtime artifacts"
@@ -110,6 +222,7 @@ run = [
     { task = "security:secrets" },
     { task = "security:deps" },
     { task = "security:sast" },
+    { task = "security:sast:masking" },
     { task = "security:grype" },
     { task = "security:retire" },
     { task = "security:gh-actions" },
@@ -159,7 +272,14 @@ run = [
 # Agent quality runs alongside CDK/CLI/docs — no sequential bottleneck.
 [tasks.build]
 description = "Monorepo build (agent, cdk, cli, docs in parallel)"
-depends = ["//agent:quality", "//cdk:build", "//cli:build", "//docs:build", "sync:abca-commands"]
+depends = [
+  "//agent:quality",
+  "//cdk:build",
+  "//cli:build",
+  "//docs:build",
+  ":test:jira-forge-app",
+  ":drift-prevention"
+]
 
 [tasks.default]
 description = "Install + build"

@@ -19,16 +19,18 @@
 
 import * as crypto from 'crypto';
 import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
+import { isUsableHmacSecret } from './hmac-secret';
+import { getOauthSecretStrict, getRegistryRowStrict } from './linear-oauth-resolver';
 import { logger } from './logger';
+import { makeClient, makeDocClient } from './ua';
 
-const sm = new SecretsManagerClient({});
-
-/** Prefix for Linear-related secrets in Secrets Manager. */
-export const LINEAR_SECRET_PREFIX = 'bgagent/linear/';
+const sm = makeClient(SecretsManagerClient);
+const ddb = makeDocClient();
 
 // In-memory secret cache with 5-minute TTL (same pattern as slack-verify.ts).
 const secretCache = new Map<string, { secret: string; expiresAt: number }>();
-const CACHE_TTL_MS = 5 * 60 * 1000;
+const CACHE_TTL_MINUTES = 5;
+const CACHE_TTL_MS = CACHE_TTL_MINUTES * 60 * 1000;
 
 /** Maximum age of a Linear webhookTimestamp (ms) before it is rejected (replay protection). */
 export const MAX_WEBHOOK_TIMESTAMP_AGE_MS = 60 * 1000;
@@ -50,7 +52,12 @@ export async function getLinearSecret(secretId: string, forceRefresh = false): P
 
   try {
     const result = await sm.send(new GetSecretValueCommand({ SecretId: secretId }));
-    if (!result.SecretString) {
+    // Treat empty / whitespace-only SecretString as null — an empty secret
+    // must never be used for HMAC, or HMAC('', body) becomes forgeable.
+    if (!isUsableHmacSecret(result.SecretString)) {
+      logger.error('Linear webhook secret is empty — refusing to use for HMAC', {
+        secret_id: secretId,
+      });
       secretCache.delete(secretId);
       return null;
     }
@@ -61,7 +68,7 @@ export async function getLinearSecret(secretId: string, forceRefresh = false): P
     if (errorName === 'ResourceNotFoundException') {
       logger.error('Linear secret not found in Secrets Manager', { secret_id: secretId });
       secretCache.delete(secretId);
-      return null;
+      return null; // nosemgrep: ts-silent-success-masking -- missing Linear signing secret means "cannot verify"; ResourceNotFound is expected before setup
     }
     logger.error('Failed to fetch Linear secret from Secrets Manager', {
       secret_id: secretId,
@@ -97,6 +104,14 @@ export function verifyLinearSignature(
   signature: string,
   body: string,
 ): boolean {
+  // Defense-in-depth: getLinearSecret already filters empty secrets, but
+  // callers like verifyLinearRequestForWorkspace pass secrets from other
+  // sources (per-workspace OAuth bundles) — HMAC('') must always be
+  // rejected or an attacker can forge signatures against a misconfigured
+  // empty secret.
+  if (!isUsableHmacSecret(webhookSecret)) {
+    return false;
+  }
   const expected = crypto.createHmac('sha256', webhookSecret).update(body).digest('hex');
   try {
     return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signature));
@@ -149,4 +164,75 @@ export async function verifyLinearRequest(
   if (!fresh) return false;
   if (fresh === cached) return false;
   return verifyLinearSignature(fresh, signature, body);
+}
+
+/**
+ * Verify a Linear webhook request against the **per-workspace** signing
+ * secret stored alongside the workspace's OAuth token bundle.
+ *
+ * Linear generates a fresh signing secret per webhook subscription, and
+ * webhook subscriptions are workspace-scoped — so a stack-wide signing
+ * secret cannot verify events from multiple workspaces. This path:
+ *
+ *   1. Looks up the registry row keyed on `linear_workspace_id` (the
+ *      orgId from the webhook payload — claimed, not yet trusted).
+ *   2. Reads the per-workspace OAuth secret to extract
+ *      `webhook_signing_secret`.
+ *   3. Verifies the HMAC signature against that secret.
+ *
+ * The orgId is untrusted input from the webhook body; an attacker can
+ * claim any orgId. But it only **selects which secret to verify
+ * against** — they still need the correct signing secret to forge a
+ * valid signature, which they don't have. The trust model is
+ * preserved.
+ *
+ * Returns:
+ * - `'verified'` — signature matches the per-workspace secret. Caller
+ *   trusts the body.
+ * - `'mismatch'` — registry row + secret were found, but the signature
+ *   doesn't match. Caller MUST reject (do not fall back to stack-wide;
+ *   that would let an attacker bypass the per-workspace secret by
+ *   tricking us into re-checking against the stack-wide one).
+ * - `'revoked'` — registry row exists but its status is not `active`.
+ *   Treated like `mismatch` by the receiver: 401, no fallback. Without
+ *   this distinct outcome a revoked workspace would collapse to
+ *   `no-per-workspace-secret` and the stack-wide fallback would
+ *   re-grant access (since `setup` mirrors the first workspace's
+ *   secret into the stack-wide one and revocation never clears it).
+ * - `'no-per-workspace-secret'` — no registry row at all, secret JSON
+ *   has no `webhook_signing_secret` field. Caller should fall back to
+ *   the stack-wide secret for back-compat with single-workspace
+ *   installs predating per-workspace secrets.
+ *
+ * Uses strict lookups (`getRegistryRowStrict`, `getOauthSecretStrict`)
+ * that throw on infra error rather than returning null. A DDB throttle
+ * during a webhook burst must NOT silently downgrade a per-workspace-
+ * secured workspace to stack-wide verification — let the error bubble,
+ * the receiver's outer try/catch returns 500, and Linear retries.
+ *
+ * @param registryTableName - DynamoDB table for `LinearWorkspaceRegistryTable`.
+ * @param linearWorkspaceId - the claimed `organizationId` from the body.
+ * @param signature - the `Linear-Signature` header value.
+ * @param body - the raw request body string.
+ */
+export async function verifyLinearRequestForWorkspace(
+  registryTableName: string,
+  linearWorkspaceId: string,
+  signature: string,
+  body: string,
+): Promise<'verified' | 'mismatch' | 'revoked' | 'no-per-workspace-secret'> {
+  const row = await getRegistryRowStrict(ddb, registryTableName, linearWorkspaceId);
+  if (!row) {
+    return 'no-per-workspace-secret';
+  }
+  if (row.status !== 'active') {
+    return 'revoked';
+  }
+  const stored = await getOauthSecretStrict(sm, row.oauth_secret_arn);
+  if (!stored || !stored.webhook_signing_secret) {
+    return 'no-per-workspace-secret';
+  }
+  return verifyLinearSignature(stored.webhook_signing_secret, signature, body)
+    ? 'verified'
+    : 'mismatch';
 }

@@ -17,8 +17,7 @@
  *  SOFTWARE.
  */
 
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
 import { TERMINAL_STATUSES } from '../constructs/task-status';
@@ -28,8 +27,9 @@ import { logger } from './shared/logger';
 import { formatMinuteBucket } from './shared/rate-limit';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
 import { NUDGE_MAX_MESSAGE_LENGTH, type NudgeRecord, type NudgeRequest, type TaskRecord } from './shared/types';
+import { makeDocClient } from './shared/ua';
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const ddb = makeDocClient();
 const TASK_TABLE_NAME = process.env.TASK_TABLE_NAME;
 const NUDGES_TABLE_NAME = process.env.NUDGES_TABLE_NAME;
 if (!TASK_TABLE_NAME || !NUDGES_TABLE_NAME) {
@@ -38,8 +38,9 @@ if (!TASK_TABLE_NAME || !NUDGES_TABLE_NAME) {
   );
 }
 const RATE_LIMIT_PER_MINUTE = Number(process.env.NUDGE_RATE_LIMIT_PER_MINUTE ?? '10');
-/** TTL for stored nudge rows (~30 days). */
-const NUDGE_RETENTION_SECONDS = 30 * 24 * 60 * 60;
+/** TTL for stored nudge rows (days). */
+const NUDGE_RETENTION_DAYS = 30;
+const NUDGE_RETENTION_SECONDS = NUDGE_RETENTION_DAYS * 86400;
 /** TTL for rate-limit counter rows (~2 minutes — only need the current minute bucket). */
 const RATE_LIMIT_ROW_TTL_SECONDS = 120;
 

@@ -23,6 +23,30 @@ node lib/bin/bgagent.js configure \
 node lib/bin/bgagent.js login --username user@example.com
 ```
 
+### Operator commands (stack admin)
+
+Stack admins can introspect deployment state and run smoke checks **without Cognito login** — these commands use operator AWS credentials (IAM profile / `AWS_REGION`):
+
+```bash
+# Print stack outputs (ApiUrl, UserPoolId, AppClientId, GitHubTokenSecretArn, …)
+bgagent platform outputs --stack-name backgroundagent-dev
+
+# Smoke-check API, Cognito, GitHub token, Bedrock model, onboarded repos
+bgagent platform doctor --stack-name backgroundagent-dev
+
+# List onboarded repositories
+bgagent repo list
+
+# Show RepoConfig for one repo (secret ARNs redacted)
+bgagent repo show owner/repo
+
+# Store the platform GitHub PAT (or a per-blueprint secret via --repo)
+bgagent github set-token
+bgagent github set-token --repo owner/repo
+```
+
+The read-only operator commands (`platform`, `repo`, `runtime`, `ops`, `webhook test`, `admin list-users`) accept `--output json`; the credential-writing `github` and `admin invite-user`/`delete-user`/`reset-password` commands do not. Region defaults to `bgagent configure --region` or `AWS_REGION`.
+
 ### Submitting a task
 
 ```bash
@@ -44,6 +68,9 @@ node lib/bin/bgagent.js submit --repo owner/repo --review-pr 55
 # Review a PR with a specific focus area
 node lib/bin/bgagent.js submit --repo owner/repo --review-pr 55 --task "Focus on security and error handling"
 
+# Select an explicit workflow (overrides the one --pr/--review-pr would imply)
+node lib/bin/bgagent.js submit --repo owner/repo --task "Research the tradeoffs" --workflow knowledge/web-research-v1
+
 # Submit with attachments (local files)
 node lib/bin/bgagent.js submit --repo owner/repo --task "Fix this bug" \
   --attachment screenshot.png \
@@ -60,13 +87,13 @@ node lib/bin/bgagent.js submit --repo owner/repo --issue 42 --wait
 **Example** (default `text` output immediately after a successful submit  - task is `SUBMITTED`, branch name reserved):
 
 ```bash
-node lib/bin/bgagent.js submit --repo krokoko/agent-plugins --task "add codeowners field to RFC issue template"
+node lib/bin/bgagent.js submit --repo awslabs/agent-plugins --task "add codeowners field to RFC issue template"
 ```
 
 ```text
 Task:        01KN37PZ77P1W19D71DTZ15X6X
 Status:      SUBMITTED
-Repo:        krokoko/agent-plugins
+Repo:        awslabs/agent-plugins
 Description: add codeowners field to RFC issue template
 Branch:      bgagent/01KN37PZ77P1W19D71DTZ15X6X/add-codeowners-field-to-rfc-issue-template
 Created:     2026-04-01T00:39:51.271Z
@@ -79,8 +106,9 @@ Created:     2026-04-01T00:39:51.271Z
 | `--repo` | GitHub repository (`owner/repo`). Required. |
 | `--issue` | GitHub issue number. |
 | `--task` | Task description text. |
-| `--pr` | PR number to iterate on. Sets task type to `pr_iteration`. The agent checks out the PR's branch, reads review feedback, and pushes updates. |
-| `--review-pr` | PR number to review. Sets task type to `pr_review`. The agent checks out the PR's branch, analyzes changes read-only, and posts structured review comments. |
+| `--pr` | PR number to iterate on. Selects the `coding/pr-iteration-v1` workflow. The agent checks out the PR's branch, reads review feedback, and pushes updates. |
+| `--review-pr` | PR number to review. Selects the `coding/pr-review-v1` workflow. The agent checks out the PR's branch, analyzes changes read-only, and posts structured review comments. |
+| `--workflow` | Workflow to run, as `<id>[@<constraint>]` (e.g. `coding/new-task-v1`). Overrides the workflow implied by `--pr`/`--review-pr`; omit to let the server resolve a default. |
 | `--attachment` | Attach a file or URL (repeatable). Local files ≤ 500 KB are sent inline; larger files use presigned upload. URLs are fetched during hydration. See [Attachments](#attachments) below. |
 | `--max-turns` | Maximum agent turns (1–500). Overrides per-repo Blueprint default. Platform default: 100. |
 | `--max-budget` | Maximum cost budget in USD (0.01–100). Overrides per-repo Blueprint default. No default limit. |
@@ -168,11 +196,11 @@ node lib/bin/bgagent.js status 01KN37PZ77P1W19D71DTZ15X6X
 ```text
 Task:        01KN37PZ77P1W19D71DTZ15X6X
 Status:      COMPLETED
-Repo:        krokoko/agent-plugins
+Repo:        awslabs/agent-plugins
 Description: add codeowners field to RFC issue template
 Branch:      bgagent/01KN37PZ77P1W19D71DTZ15X6X/add-codeowners-field-to-rfc-issue-template
 Session:     9891af91-bfc6-488f-bfe6-ce8f8c9a63cf
-PR:          https://github.com/krokoko/agent-plugins/pull/60
+PR:          https://github.com/awslabs/agent-plugins/pull/43
 Created:     2026-04-01T00:39:51.271Z
 Started:     2026-04-01T00:39:56.647Z
 Completed:   2026-04-01T00:43:49Z
@@ -187,6 +215,20 @@ node lib/bin/bgagent.js list
 node lib/bin/bgagent.js list --status RUNNING,SUBMITTED
 node lib/bin/bgagent.js list --repo owner/repo --limit 10
 ```
+
+The table is `TASK ID`, `STATUS`, `REPO`, `CREATED`, `HEARTBEAT`, `DESCRIPTION`.
+
+#### Is a running task actually alive? (`HEARTBEAT`)
+
+While a task is `RUNNING` the agent writes a liveness beat every 45 seconds. `bgagent status` shows it as a `Heartbeat:` line and `bgagent list` as a `HEARTBEAT` column, both as an **age** rather than a timestamp, because the age is the signal:
+
+```text
+Heartbeat:   2026-04-01T00:41:02.118Z (12s ago)
+```
+
+- **Under ~1 minute** - healthy; the agent is working.
+- **Several minutes and climbing** - the agent is hung, deadlocked, or was OOM-killed inside an otherwise-healthy compute environment. The platform detects this itself and fails the task rather than letting it burn its full timeout, so you do not need to act; the failure message will name the compute substrate.
+- **`—`** - nothing to report. Shown for terminal tasks (the last beat means nothing next to a final status), before the first beat arrives, and on the `ecs` backend, where the agent runs the pipeline directly rather than serving HTTP and so beats only once at start.
 
 ### Viewing task events
 

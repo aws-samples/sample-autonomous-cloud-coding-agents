@@ -31,8 +31,11 @@ import {
   AttachmentType,
   AttachmentUploadInstruction,
   CreateTaskRequest,
+  DEFAULT_CODING_WORKFLOW_ID,
   INITIAL_APPROVALS_MAX_ENTRIES,
   INITIAL_APPROVALS_MAX_ENTRY_LENGTH,
+  MAX_BUDGET_USD_MAX,
+  MAX_BUDGET_USD_MIN,
 } from '../types';
 import { exitCodeForStatus, waitForTask } from '../wait';
 
@@ -59,13 +62,18 @@ function collect<T>(value: T, previous: readonly T[]): readonly T[] {
 export function makeSubmitCommand(): Command {
   return new Command('submit')
     .description('Submit a new task')
-    .requiredOption('--repo <owner/repo>', 'GitHub repository (owner/repo)')
+    .option('--repo <owner/repo>', 'GitHub repository (owner/repo). Required unless --workflow selects a repo-less workflow (e.g. knowledge/web-research-v1).')
     .option('--issue <number>', 'GitHub issue number', parseInt)
     .option('--task <description>', 'Task description')
     .option('--max-turns <number>', 'Maximum agent turns (1-500)', parseInt)
     .option('--max-budget <dollars>', 'Maximum budget in USD (0.01-100)', parseFloat)
-    .option('--pr <number>', 'PR number to iterate on (sets task_type to pr_iteration)', parseInt)
-    .option('--review-pr <number>', 'PR number to review (sets task_type to pr_review)', parseInt)
+    .option('--pr <number>', 'PR number to iterate on (selects the coding/pr-iteration-v1 workflow)', parseInt)
+    .option('--review-pr <number>', 'PR number to review (selects the coding/pr-review-v1 workflow)', parseInt)
+    .option(
+      '--workflow <id>',
+      'Workflow to run, as <id>[@<constraint>] (e.g. coding/new-task-v1). '
+        + 'Overrides the workflow implied by --pr/--review-pr; omit to let the server resolve a default.',
+    )
     .option('--idempotency-key <key>', 'Idempotency key for deduplication')
     .option('--trace', 'Capture 4 KB debug previews (design §10.1). Opt-in per task; not routine observability.')
     .option(
@@ -103,6 +111,19 @@ export function makeSubmitCommand(): Command {
       if (opts.pr === undefined && opts.reviewPr === undefined && opts.issue === undefined && !opts.task) {
         throw new CliError('At least one of --issue, --task, --pr, or --review-pr is required.');
       }
+      // --repo is required for repo-bound workflows (the common case) but a
+      // repo-less workflow (e.g. knowledge/web-research-v1, default/agent-v1)
+      // runs without one. The CLI can't see each workflow's requires_repo flag
+      // (the server owns that), so the rule is: --repo is mandatory UNLESS the
+      // caller explicitly selected a workflow with --workflow — then the server
+      // admits or rejects based on that workflow's requires_repo. --pr/--review-pr
+      // always imply a repo-bound coding workflow, so they still require --repo.
+      if (!opts.repo && !opts.workflow) {
+        throw new CliError('--repo is required (omit it only with --workflow for a repo-less workflow).');
+      }
+      if (!opts.repo && (opts.pr !== undefined || opts.reviewPr !== undefined)) {
+        throw new CliError('--repo is required with --pr/--review-pr (PR workflows operate on a repo).');
+      }
       if (opts.issue !== undefined && isNaN(opts.issue)) {
         throw new CliError('--issue must be a valid number.');
       }
@@ -112,8 +133,8 @@ export function makeSubmitCommand(): Command {
         }
       }
       if (opts.maxBudget !== undefined) {
-        if (isNaN(opts.maxBudget) || opts.maxBudget < 0.01 || opts.maxBudget > 100) {
-          throw new CliError('--max-budget must be a number between 0.01 and 100.');
+        if (isNaN(opts.maxBudget) || opts.maxBudget < MAX_BUDGET_USD_MIN || opts.maxBudget > MAX_BUDGET_USD_MAX) {
+          throw new CliError(`--max-budget must be a number between ${MAX_BUDGET_USD_MIN} and ${MAX_BUDGET_USD_MAX}.`);
         }
       }
       if (opts.approvalTimeout !== undefined) {
@@ -169,16 +190,40 @@ export function makeSubmitCommand(): Command {
         }
       }
 
+      // Resolve the workflow selector. --pr/--review-pr imply the coding pr_*
+      // workflows; an explicit --workflow overrides. The published mapping
+      // (WORKFLOWS.md §"Replacing task types") is new_task→coding/new-task-v1,
+      // pr_iteration→coding/pr-iteration-v1, pr_review→coding/pr-review-v1.
+      let workflowRef: string | undefined = opts.workflow;
+      if (workflowRef === undefined && opts.pr !== undefined) {
+        workflowRef = 'coding/pr-iteration-v1';
+      } else if (workflowRef === undefined && opts.reviewPr !== undefined) {
+        workflowRef = 'coding/pr-review-v1';
+      } else if (workflowRef === undefined && opts.repo) {
+        // A bare repo-present submit (no --workflow/--pr/--review-pr) is the old
+        // `new_task` default: clone → build → open a PR. The SERVER ladder
+        // deliberately resolves an absent workflow_ref to the repo-less
+        // default/agent-v1 (WORKFLOWS.md §"Resolution order"), so the CLI must
+        // send the coding workflow EXPLICITLY rather than omit it — otherwise
+        // `bgagent submit --repo X --task Y` silently regresses from "opens a PR"
+        // to "emits an S3 markdown artifact". A repo-less submit (no --repo, with
+        // --workflow) is unaffected: it carries its explicit workflow_ref above.
+        workflowRef = DEFAULT_CODING_WORKFLOW_ID;
+      }
+      const prNumber = opts.pr ?? opts.reviewPr;
+
       const client = new ApiClient();
       const body: CreateTaskRequest = {
-        repo: opts.repo,
+        // Omitted entirely for a repo-less workflow (#248 Phase 3) — sending
+        // ``repo: undefined`` would serialize as an explicit null on some paths.
+        ...(opts.repo && { repo: opts.repo }),
         ...(opts.issue !== undefined && { issue_number: opts.issue }),
         ...(opts.task && { task_description: opts.task }),
         ...(opts.maxTurns !== undefined && { max_turns: opts.maxTurns }),
         ...(opts.maxBudget !== undefined && { max_budget_usd: opts.maxBudget }),
         // Note: --pr and --review-pr are mutually exclusive (validated above).
-        ...(opts.pr !== undefined && { task_type: 'pr_iteration' as const, pr_number: opts.pr }),
-        ...(opts.reviewPr !== undefined && { task_type: 'pr_review' as const, pr_number: opts.reviewPr }),
+        ...(workflowRef !== undefined && { workflow_ref: workflowRef }),
+        ...(prNumber !== undefined && { pr_number: prNumber }),
         ...(opts.trace && { trace: true }),
         ...(opts.approvalTimeout !== undefined && { approval_timeout_s: opts.approvalTimeout }),
         ...(initialApprovals !== undefined && { initial_approvals: initialApprovals }),
@@ -197,7 +242,7 @@ export function makeSubmitCommand(): Command {
             throw new CliError(`No local file found for upload instruction: ${instruction.filename}`);
           }
           const filePath = attachmentArgs.find(arg =>
-            !arg.startsWith('http') && path.basename(safeResolvePath(arg)) === instruction.filename,
+            !isUrlArg(arg) && path.basename(safeResolvePath(arg)) === instruction.filename,
           );
           if (!filePath) {
             throw new CliError(`Cannot locate local file for presigned upload: ${instruction.filename}`);
@@ -258,6 +303,16 @@ const MIME_BY_EXT: Record<string, string> = {
 };
 
 const IMAGE_MIMES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+
+/** True when the attachment argument is a URL (http:// or https://) rather
+ *  than a local file path. Mirrors the scheme detection in
+ *  ``resolveAttachmentArg`` so URL vs. local-file classification stays
+ *  consistent across the upload-confirmation path. A bare ``http://`` is
+ *  still a URL here (it's rejected as non-HTTPS earlier in resolution); the
+ *  point is that it must never be treated as a local file path. */
+function isUrlArg(arg: string): boolean {
+  return arg.startsWith('https://') || arg.startsWith('http://');
+}
 
 /**
  * Resolve a CLI --attachment argument to an Attachment object.

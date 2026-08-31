@@ -18,21 +18,24 @@
  */
 
 import * as crypto from 'crypto';
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { CreateSecretCommand, DeleteSecretCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
-import { DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
+import { PutCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
 import { extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
 import type { CreateWebhookRequest, CreateWebhookResponse, WebhookRecord } from './shared/types';
+import { makeClient, makeDocClient } from './shared/ua';
 import { isValidWebhookName, parseBody } from './shared/validation';
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
-const sm = new SecretsManagerClient({});
+const ddb = makeDocClient();
+const sm = makeClient(SecretsManagerClient);
 const TABLE_NAME = process.env.WEBHOOK_TABLE_NAME!;
 const SECRET_PREFIX = 'bgagent/webhook/';
+
+/** Webhook HMAC secret entropy (bytes; 256-bit). */
+const WEBHOOK_SECRET_BYTES = 32;
 
 /**
  * POST /v1/webhooks — Create a new webhook integration.
@@ -61,7 +64,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     const webhookId = ulid();
-    const secret = crypto.randomBytes(32).toString('hex');
+    const secret = crypto.randomBytes(WEBHOOK_SECRET_BYTES).toString('hex');
     const now = new Date().toISOString();
 
     // 1. Create secret in Secrets Manager (tags inline to avoid separate TagResource IAM action)

@@ -1,10 +1,13 @@
 """Unit tests for policy.py — Cedar policy engine."""
 
+from unittest.mock import patch
+
 import pytest
 
 cedarpy = pytest.importorskip("cedarpy")
 
-from policy import PolicyDecision, PolicyEngine
+import policy
+from policy import PolicyDecision, PolicyEngine, _validate_constants
 
 
 class TestPolicyDecision:
@@ -51,37 +54,88 @@ class TestNewTaskPermissions:
         assert result.allowed is True
 
 
-class TestPrReviewPermissions:
+class TestReadOnlyPermissions:
+    # #248 Phase 2a: read-only enforcement keys off the ``read_only`` context
+    # attribute, not the principal literal. A read-only engine forbids
+    # Write/Edit for any principal; reads/globs/greps/bash still pass.
     def test_denies_write(self):
-        engine = PolicyEngine(task_type="pr_review", repo="owner/repo")
+        engine = PolicyEngine(task_type="pr_review", repo="owner/repo", read_only=True)
         result = engine.evaluate_tool_use("Write", {"file_path": "src/main.py"})
         assert result.allowed is False
-        assert "pr_review" in result.reason
 
     def test_denies_edit(self):
-        engine = PolicyEngine(task_type="pr_review", repo="owner/repo")
+        engine = PolicyEngine(task_type="pr_review", repo="owner/repo", read_only=True)
         result = engine.evaluate_tool_use("Edit", {"file_path": "src/main.py"})
         assert result.allowed is False
 
+    def test_denies_write_for_any_read_only_principal(self):
+        # The deny attaches to the property, not the "pr_review" literal — a
+        # non-pr_review principal that is read-only is still denied Write.
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo", read_only=True)
+        result = engine.evaluate_tool_use("Write", {"file_path": "src/main.py"})
+        assert result.allowed is False
+
+    def test_writeable_principal_allows_write(self):
+        # Inverse guard: read_only=False must NOT block Write (the deny is gated
+        # on context.read_only == true). A pr_review principal that is not
+        # read-only can write — proving enforcement no longer rides the literal.
+        engine = PolicyEngine(task_type="pr_review", repo="owner/repo", read_only=False)
+        result = engine.evaluate_tool_use("Write", {"file_path": "src/main.py"})
+        assert result.allowed is True
+
     def test_allows_read(self):
-        engine = PolicyEngine(task_type="pr_review", repo="owner/repo")
+        engine = PolicyEngine(task_type="pr_review", repo="owner/repo", read_only=True)
         result = engine.evaluate_tool_use("Read", {"file_path": "src/main.py"})
         assert result.allowed is True
 
     def test_allows_glob(self):
-        engine = PolicyEngine(task_type="pr_review", repo="owner/repo")
+        engine = PolicyEngine(task_type="pr_review", repo="owner/repo", read_only=True)
         result = engine.evaluate_tool_use("Glob", {"pattern": "**/*.py"})
         assert result.allowed is True
 
     def test_allows_grep(self):
-        engine = PolicyEngine(task_type="pr_review", repo="owner/repo")
+        engine = PolicyEngine(task_type="pr_review", repo="owner/repo", read_only=True)
         result = engine.evaluate_tool_use("Grep", {"pattern": "TODO"})
         assert result.allowed is True
 
     def test_allows_bash(self):
-        engine = PolicyEngine(task_type="pr_review", repo="owner/repo")
+        engine = PolicyEngine(task_type="pr_review", repo="owner/repo", read_only=True)
         result = engine.evaluate_tool_use("Bash", {"command": "npm test"})
         assert result.allowed is True
+
+
+class TestReadOnlyMissingAttributeFailsClosed:
+    """The read-only forbid rules are ``when { context.read_only == true }``.
+    If ``read_only`` is ABSENT from the context, Cedar errors on the attribute
+    access, SKIPS the forbid rule, and the base permit wins → native Allow
+    (proven by contracts/cedar-parity/read-only-missing-attribute.json on both
+    engines). Production safety on this path therefore does NOT rest on Cedar's
+    native decision — it rests on ``_eval_tier`` re-raising on
+    ``diagnostics.errors`` so the outer handler maps to a fail-closed DENY.
+    These tests pin that re-raise + injection discipline (#248).
+    """
+
+    def test_eval_tier_reraises_on_missing_read_only_attribute(self):
+        # Drive _eval_tier directly with a context that omits read_only against
+        # the hard-deny tier. cedarpy returns Allow + diagnostics.errors; the
+        # re-raise is the ONLY thing standing between that Allow and a write.
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo", read_only=True)
+        with pytest.raises(RuntimeError, match="Cedar policy parse/eval errors"):
+            engine._eval_tier(
+                policies_text=engine._hard_policies,
+                action="invoke_tool",
+                resource_type="Agent::Tool",
+                resource_id="Write",
+                context={},  # read_only deliberately absent
+            )
+
+    def test_evaluate_tool_use_always_injects_read_only(self):
+        # The companion guard: evaluate_tool_use must ALWAYS put read_only in the
+        # context so the missing-attribute path above is never reached in normal
+        # operation. A read-only engine denies Write through the normal path.
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo", read_only=True)
+        result = engine.evaluate_tool_use("Write", {"file_path": "src/app.py"})
+        assert result.allowed is False
 
 
 class TestProtectedPaths:
@@ -218,7 +272,7 @@ class TestDurationMetrics:
         assert result.duration_ms >= 0
 
     def test_denied_decision_has_nonnegative_duration(self):
-        engine = PolicyEngine(task_type="pr_review", repo="owner/repo")
+        engine = PolicyEngine(task_type="pr_review", repo="owner/repo", read_only=True)
         result = engine.evaluate_tool_use("Write", {"file_path": "test.py"})
         assert result.duration_ms >= 0
 
@@ -231,3 +285,66 @@ class TestTaskTypeProperty:
     def test_task_type_pr_review(self):
         engine = PolicyEngine(task_type="pr_review", repo="owner/repo")
         assert engine.task_type == "pr_review"
+
+
+class TestConstantsSemanticValidation:
+    """Verify _validate_constants rejects invariant violations."""
+
+    def test_rejects_approval_timeout_min_zero(self):
+        with (
+            patch.object(policy, "FLOOR_TIMEOUT_S", 0),
+            pytest.raises(ValueError, match=r"approval_timeout_s\.min must be > 0"),
+        ):
+            _validate_constants()
+
+    def test_rejects_approval_timeout_min_negative(self):
+        with (
+            patch.object(policy, "FLOOR_TIMEOUT_S", -1),
+            pytest.raises(ValueError, match=r"approval_timeout_s\.min must be > 0"),
+        ):
+            _validate_constants()
+
+    def test_rejects_approval_timeout_default_below_min(self):
+        with (
+            patch.object(policy, "FLOOR_TIMEOUT_S", 60),
+            patch.object(policy, "DEFAULT_TASK_TIMEOUT_S", 30),
+            pytest.raises(ValueError, match=r"approval_timeout_s\.default .* must be >= min"),
+        ):
+            _validate_constants()
+
+    def test_rejects_approval_timeout_max_below_default(self):
+        with (
+            patch.object(policy, "FLOOR_TIMEOUT_S", 30),
+            patch.object(policy, "DEFAULT_TASK_TIMEOUT_S", 300),
+            patch.object(policy, "_ATS", {"min": 30, "max": 100, "default": 300}),
+            pytest.raises(ValueError, match=r"approval_timeout_s\.max .* must be >= default"),
+        ):
+            _validate_constants()
+
+    def test_rejects_approval_gate_cap_min_zero(self):
+        with (
+            patch.object(policy, "APPROVAL_GATE_CAP_MIN", 0),
+            pytest.raises(ValueError, match=r"approval_gate_cap\.min must be > 0"),
+        ):
+            _validate_constants()
+
+    def test_rejects_approval_gate_cap_default_below_min(self):
+        with (
+            patch.object(policy, "APPROVAL_GATE_CAP_MIN", 10),
+            patch.object(policy, "DEFAULT_APPROVAL_GATE_CAP", 5),
+            pytest.raises(ValueError, match=r"approval_gate_cap\.default .* must be >= min"),
+        ):
+            _validate_constants()
+
+    def test_rejects_approval_gate_cap_max_below_default(self):
+        with (
+            patch.object(policy, "APPROVAL_GATE_CAP_MIN", 1),
+            patch.object(policy, "DEFAULT_APPROVAL_GATE_CAP", 100),
+            patch.object(policy, "APPROVAL_GATE_CAP_MAX", 50),
+            pytest.raises(ValueError, match=r"approval_gate_cap\.max .* must be >= default"),
+        ):
+            _validate_constants()
+
+    def test_passes_with_valid_constants(self):
+        """Sanity: the real constants pass validation."""
+        _validate_constants()

@@ -17,8 +17,7 @@
  *  SOFTWARE.
  */
 
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
 import {
@@ -28,19 +27,21 @@ import {
 import { CedarPolicyParseError, concatPolicies, parseRules } from './shared/cedar-policy';
 import { extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
-import { formatMinuteBucket } from './shared/rate-limit';
+import { formatMinuteBucket, RATE_LIMIT_ROW_TTL_SECONDS } from './shared/rate-limit';
 import { checkRepoOnboarded, loadRepoConfig } from './shared/repo-config';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
 import type { GetPoliciesResponse, PolicyRuleSummary } from './shared/types';
+import { makeDocClient } from './shared/ua';
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const ddb = makeDocClient();
 const TASK_APPROVALS_TABLE_NAME = process.env.TASK_APPROVALS_TABLE_NAME;
 const POLICIES_RATE_LIMIT_PER_MINUTE = Number(process.env.POLICIES_RATE_LIMIT_PER_MINUTE ?? '30');
 
 // In-Lambda cache keyed by repo; 5 minutes. Keeps repeated `bgagent
 // policies list` calls snappy without hitting DDB + re-parsing the
 // policy set every time. Cold starts throw the cache away.
-const CACHE_TTL_MS = 5 * 60 * 1000;
+const CACHE_TTL_MINUTES = 5;
+const CACHE_TTL_MS = CACHE_TTL_MINUTES * 60 * 1000;
 interface CacheEntry {
   readonly response: GetPoliciesResponse;
   readonly expiresAt: number;
@@ -96,7 +97,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
           ExpressionAttributeValues: {
             ':one': 1,
             ':max': POLICIES_RATE_LIMIT_PER_MINUTE,
-            ':ttl': nowEpoch + 120,
+            ':ttl': nowEpoch + RATE_LIMIT_ROW_TTL_SECONDS,
           },
         }));
       } catch (err: unknown) {

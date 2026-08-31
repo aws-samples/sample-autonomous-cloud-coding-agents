@@ -79,6 +79,15 @@ class TestFailSafe:
         assert is_scoped() is False
 
 
+# NOTE: the conftest-scrub regression guard for AGENT_SESSION_ROLE_ARN lives in
+# tests/test_conftest_env_scrub.py — deliberately in its OWN module with NO local
+# autouse fixture. This file's `_reset` fixture (above) itself does
+# `monkeypatch.delenv(SESSION_ROLE_ARN_ENV)`, which would MASK whether conftest's
+# `_clean_env` performs the scrub — a guard placed here passes even if the
+# conftest line is deleted. Only a fixture-free module truly
+# guards the fix.
+
+
 # ---------------------------------------------------------------------------
 # Scoped: SessionRole ARN set → refreshable assumed-role session
 # ---------------------------------------------------------------------------
@@ -131,7 +140,15 @@ class TestScopedSession:
             return MagicMock(name="scoped")
 
         def _worker() -> None:
-            start.wait()
+            # Bounded barrier wait. A bare Barrier(20).wait() blocks FOREVER if
+            # even one of the 20 threads never arrives (e.g. a worker reaped under
+            # container memory pressure, or thread creation throttled) — every
+            # survivor then hangs here and the main thread hangs in join() below,
+            # stalling the whole `mise run build` until the 3600s ceiling. This is
+            # the ECS-only flaky hang we chased for weeks (pytest-timeout
+            # only fixed the SYMPTOM; this Barrier is the ROOT cause). A timeout
+            # makes the barrier raise BrokenBarrierError so the test fails fast.
+            start.wait(timeout=30)
             session = get_session()
             with lock:
                 results.append(session)
@@ -140,8 +157,11 @@ class TestScopedSession:
             threads = [threading.Thread(target=_worker) for _ in range(20)]
             for t in threads:
                 t.start()
+            # Bounded joins for the same reason — a worker that died before
+            # appending must not hang the suite; a leftover live thread trips the
+            # assertion below (results != 20) rather than blocking indefinitely.
             for t in threads:
-                t.join()
+                t.join(timeout=60)
 
         mk_build.assert_called_once()
         assert len(results) == 20
@@ -298,3 +318,116 @@ class TestTagTruncation:
         assert len(tags["repo"]) == _MAX_TAG_VALUE_LEN == 256
         # Untruncated values are passed through unchanged.
         assert tags["user_id"] == "u-1"
+
+
+class TestSolutionUserAgent:
+    """The static md/ solution-attribution segment (#319) rides every client."""
+
+    def test_platform_client_carries_md_segment(self, monkeypatch):
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        from aws_session import platform_client
+
+        with patch("boto3.client", return_value=MagicMock(name="logs")) as mk:
+            platform_client("logs", region_name="us-east-1")
+
+        cfg = mk.call_args.kwargs["config"]
+        assert cfg.user_agent_extra == "md/uksb-wt64nei4u6#agent"
+
+    def test_unscoped_tenant_client_carries_md_segment(self, monkeypatch):
+        # No SESSION_ROLE_ARN -> unscoped path delegates to boto3.client.
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        from aws_session import tenant_client
+
+        with patch("boto3.client", return_value=MagicMock(name="ddb")) as mk:
+            tenant_client("dynamodb")
+
+        cfg = mk.call_args.kwargs["config"]
+        assert cfg.user_agent_extra == "md/uksb-wt64nei4u6#agent"
+
+    def test_caller_config_is_merged_not_overwritten(self, monkeypatch):
+        from botocore.config import Config
+
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        from aws_session import platform_client
+
+        # A caller that sets BOTH a non-colliding key (read_timeout) and the
+        # colliding key (user_agent_extra). botocore's Config.merge gives
+        # precedence to the argument, so a naive merge would drop 'caller/1.0';
+        # _merge_ua_config concatenates instead so both segments survive.
+        with patch("boto3.client", return_value=MagicMock()) as mk:
+            platform_client("logs", config=Config(read_timeout=7, user_agent_extra="caller/1.0"))
+
+        cfg = mk.call_args.kwargs["config"]
+        # Non-colliding caller key survives.
+        assert cfg.read_timeout == 7
+        # Both the caller's UA extra and our md/ segment survive the merge.
+        assert "caller/1.0" in cfg.user_agent_extra
+        assert "md/uksb-wt64nei4u6#agent" in cfg.user_agent_extra
+
+    def test_caller_config_without_ua_extra_gets_md_segment(self, monkeypatch):
+        from botocore.config import Config
+
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        from aws_session import platform_client
+
+        # No colliding user_agent_extra: non-colliding key survives and our md/
+        # segment is applied.
+        with patch("boto3.client", return_value=MagicMock()) as mk:
+            platform_client("logs", config=Config(read_timeout=7))
+
+        cfg = mk.call_args.kwargs["config"]
+        assert cfg.read_timeout == 7
+        assert cfg.user_agent_extra == "md/uksb-wt64nei4u6#agent"
+
+    def test_merge_ua_config_preserves_other_caller_config_keys(self):
+        from botocore.config import Config
+
+        import aws_session
+
+        # The collision branch must merge the combined UA onto the caller's OWN
+        # Config so every other caller key survives — a fresh Config would drop
+        # connect_timeout (and any other key the caller carried). (#319)
+        caller = Config(read_timeout=7, connect_timeout=3, user_agent_extra="caller/1.0")
+        merged = aws_session._merge_ua_config({"config": caller})["config"]
+        assert merged.read_timeout == 7
+        assert merged.connect_timeout == 3  # <-- dropped today
+        assert "caller/1.0" in merged.user_agent_extra
+        assert "md/uksb-wt64nei4u6#agent" in merged.user_agent_extra
+
+    def test_collision_branch_preserves_ua_config_own_keys(self):
+        from botocore.config import Config
+
+        import aws_session
+
+        # Symmetry with the no-collision branch: the collision branch must keep
+        # every key ua.client_config() carries, not just user_agent_extra. If it
+        # rebuilds a fresh Config(user_agent_extra=...), any OTHER key the helper
+        # grows (here read_timeout=99) is silently dropped. A colliding caller
+        # user_agent_extra forces the collision branch. (#319 review)
+        ua_config = Config(user_agent_extra="md/uksb-wt64nei4u6#agent", read_timeout=99)
+        caller = Config(user_agent_extra="caller/1.0", connect_timeout=3)
+        with patch("ua.client_config", return_value=ua_config):
+            merged = aws_session._merge_ua_config({"config": caller})["config"]
+        # Our-side key from ua_config survives (dropped by the fresh-Config form).
+        assert merged.read_timeout == 99
+        # Caller's own key survives.
+        assert merged.connect_timeout == 3
+        # Both UA extras survive the collision.
+        assert "caller/1.0" in merged.user_agent_extra
+        assert "md/uksb-wt64nei4u6#agent" in merged.user_agent_extra
+
+    def test_scoped_session_sets_session_level_extra(self, monkeypatch):
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        monkeypatch.setenv(SESSION_ROLE_ARN_ENV, "arn:aws:iam::111122223333:role/abca-session")
+        configure_session(user_id="u-1", repo="owner/repo", task_id="t-abc")
+
+        fake_botocore_session = MagicMock(name="botocore-session")
+        with (
+            patch("boto3.client", return_value=MagicMock(name="sts")),
+            patch("boto3.Session", return_value=MagicMock(name="boto3-session")),
+            patch("botocore.credentials.DeferredRefreshableCredentials"),
+            patch("botocore.session.get_session", return_value=fake_botocore_session),
+        ):
+            get_session()
+
+        assert fake_botocore_session.user_agent_extra == "md/uksb-wt64nei4u6#agent"

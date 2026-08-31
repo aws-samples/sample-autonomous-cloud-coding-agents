@@ -2,7 +2,30 @@
 
 ## Default owners for everything in the repo
 
-*                                   @aws-samples/coding-agents-admin
+*                                   @aws-samples/coding-agents-admin @aws-samples/coding-agents-maintainers
+
+.abca                               @aws-samples/coding-agents-admin
+.claude/settings.json               @aws-samples/coding-agents-admin
+.gitallowed                         @aws-samples/coding-agents-admin
+.gitattributes                      @aws-samples/coding-agents-admin
+.github                             @aws-samples/coding-agents-admin
+.gitignore                          @aws-samples/coding-agents-admin
+.gitleaks.toml                      @aws-samples/coding-agents-admin
+.gitleaksignore                     @aws-samples/coding-agents-admin
+.mergify.yml                        @aws-samples/coding-agents-admin
+.npmignore                          @aws-samples/coding-agents-admin
+.pre-commit-config.yaml             @aws-samples/coding-agents-admin
+.semgrep                            @aws-samples/coding-agents-admin
+.threat-composer                    @aws-samples/coding-agents-admin
+AGENTS.md                           @aws-samples/coding-agents-admin
+**/AGENTS.md                        @aws-samples/coding-agents-admin
+CLAUDE.md                           @aws-samples/coding-agents-admin
+CODE_OF_CONDUCT.md                  @aws-samples/coding-agents-admin
+contracts                           @aws-samples/coding-agents-admin
+CONTRIBUTING.md                     @aws-samples/coding-agents-admin
+LEGAL_DISCLAIMER.md                 @aws-samples/coding-agents-admin
+LICENSE                             @aws-samples/coding-agents-admin
+mise.toml                           @aws-samples/coding-agents-admin
 
 ## File must end with CODEOWNERS file
 

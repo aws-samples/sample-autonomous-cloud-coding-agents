@@ -17,17 +17,39 @@
  *  SOFTWARE.
  */
 
-import { CreateWebhookResponse, TaskDetail, TaskEvent, TaskSummary, TERMINAL_STATUSES, WebhookDetail } from './types';
+import { ApiKeyDetail, CreateApiKeyResponse, CreateWebhookResponse, DEFAULT_CODING_WORKFLOW_ID, ReplayBundle, TaskDetail, TaskEvent, TaskSummary, TERMINAL_STATUSES, WebhookDetail } from './types';
 
-/** Format a TaskDetail as a key-value detail view. */
-export function formatTaskDetail(task: TaskDetail): string {
+/** Decimal places when rendering USD cost figures (tenth of a cent matters for LLM spend). */
+export const COST_USD_DECIMALS = 4;
+
+/** Render a USD cost as ``$0.0000`` (shared by the detail view and replay bundle). */
+export function formatCostUsd(cost: number | string): string {
+  return `$${Number(cost).toFixed(COST_USD_DECIMALS)}`;
+}
+
+/** Render a pass/fail gate verdict; ``dash`` for a null (gate did not run). */
+export function formatVerdict(passed: boolean | null, dash = '—'): string {
+  return passed === null ? dash : passed ? 'PASSED' : 'FAILED';
+}
+
+/**
+ * Format a TaskDetail as a key-value detail view.
+ *
+ * @param task - the task detail from ``GET /tasks/{id}``.
+ * @param now - reference time for relative durations (epoch ms). Injected rather
+ *   than read inside, matching {@link formatStatusSnapshot}: the heartbeat line
+ *   renders an AGE, so without an anchor this function is non-deterministic and
+ *   its only interesting case (a stale beat) cannot be asserted. Defaults to
+ *   ``Date.now()`` in production; tests pass a fixed value.
+ */
+export function formatTaskDetail(task: TaskDetail, now: number = Date.now()): string {
   const lines: string[] = [
     `Task:        ${task.task_id}`,
     `Status:      ${task.status}`,
-    `Repo:        ${task.repo}`,
+    `Repo:        ${task.repo ?? '— (repo-less)'}`,
   ];
-  if (task.task_type && task.task_type !== 'new_task') {
-    lines.push(`Type:        ${task.task_type}`);
+  if (task.resolved_workflow && task.resolved_workflow.id !== DEFAULT_CODING_WORKFLOW_ID) {
+    lines.push(`Workflow:    ${task.resolved_workflow.id}`);
   }
   if (task.pr_number !== null) {
     lines.push(`PR #:        ${task.pr_number}`);
@@ -38,7 +60,15 @@ export function formatTaskDetail(task: TaskDetail): string {
   if (task.task_description) {
     lines.push(`Description: ${task.task_description}`);
   }
-  lines.push(`Branch:      ${task.branch_name}`);
+  // Repo-less workflows have no branch (branch_name is ''); only show the line
+  // when there is one.
+  if (task.branch_name) {
+    lines.push(`Branch:      ${task.branch_name}`);
+  }
+  // Admission queue (#441): show FIFO position + rough ETA while QUEUED.
+  if (task.status === 'QUEUED' && task.queue_position !== null) {
+    lines.push(`Queue:       position ${task.queue_position}${formatQueueEta(task.estimated_wait_s)}`);
+  }
   if (task.max_turns !== null) {
     lines.push(`Max Turns:   ${task.max_turns}`);
   }
@@ -54,6 +84,9 @@ export function formatTaskDetail(task: TaskDetail): string {
   if (task.trace_s3_uri) {
     lines.push(`Trace S3:    ${task.trace_s3_uri}`);
   }
+  if (task.artifact_uri) {
+    lines.push(`Artifact:    ${task.artifact_uri}`);
+  }
   if (task.error_message) {
     lines.push(...formatErrorLines(task));
   }
@@ -64,36 +97,70 @@ export function formatTaskDetail(task: TaskDetail): string {
   if (task.completed_at) {
     lines.push(`Completed:   ${task.completed_at}`);
   }
+  // In-guest liveness (ADR-021 P2r2-F11). Shown only while the task is still
+  // going: that is the window in which "is the agent alive?" is a live question,
+  // and where a stale value is the actionable signal — the orchestrator's own hang
+  // detector reads the same field. On a terminal task the last beat is just noise
+  // next to Completed/Duration. The relative age is what an operator actually
+  // needs, so it is rendered alongside the timestamp rather than instead of it.
+  if (task.agent_heartbeat_at && !isTerminalStatus(task.status)) {
+    lines.push(`Heartbeat:   ${task.agent_heartbeat_at} (${heartbeatAge(task.agent_heartbeat_at, now)})`);
+  }
   if (task.duration_s !== null) {
     lines.push(`Duration:    ${task.duration_s}s`);
   }
   if (task.cost_usd != null) {
-    lines.push(`Cost:        $${Number(task.cost_usd).toFixed(4)}`);
+    lines.push(`Cost:        ${formatCostUsd(task.cost_usd)}`);
   }
   if (task.build_passed !== null) {
-    lines.push(`Build:       ${task.build_passed ? 'PASSED' : 'FAILED'}`);
+    lines.push(`Build:       ${formatVerdict(task.build_passed)}`);
   }
   return lines.join('\n');
 }
 
-/** Format a list of TaskSummary as an aligned table. */
-export function formatTaskList(tasks: TaskSummary[]): string {
+/** Render the ``~Xm wait`` suffix for a queued task's position line (#441).
+ *  Empty string when the server could not estimate a wait. */
+function formatQueueEta(estimatedWaitS: number | null): string {
+  if (estimatedWaitS === null || !Number.isFinite(estimatedWaitS)) {
+    return '';
+  }
+  const minutes = Math.max(1, Math.round(estimatedWaitS / 60));
+  return ` (est. wait ~${minutes}m)`;
+}
+
+/**
+ * Format a list of TaskSummary as an aligned table.
+ *
+ * @param tasks - the summaries from ``GET /v1/tasks``.
+ * @param now - reference time for the HEARTBEAT column's relative age (epoch ms).
+ *   Injected for the same reason as {@link formatStatusSnapshot}'s.
+ */
+export function formatTaskList(tasks: TaskSummary[], now: number = Date.now()): string {
   if (tasks.length === 0) {
     return 'No tasks found.';
   }
 
-  const headers = ['TASK ID', 'STATUS', 'REPO', 'CREATED', 'DESCRIPTION'];
+  const headers = ['TASK ID', 'STATUS', 'REPO', 'CREATED', 'HEARTBEAT', 'DESCRIPTION'];
   const rows = tasks.map(t => {
     let desc = t.task_description || (t.issue_number !== null ? `#${t.issue_number}` : '-');
-    if (t.task_type === 'pr_iteration' && t.pr_number !== null) {
+    if (t.resolved_workflow?.id === 'coding/pr-iteration-v1' && t.pr_number !== null) {
       desc = `PR #${t.pr_number}` + (t.task_description ? `: ${t.task_description}` : '');
     }
     return [
       t.task_id,
       t.status,
-      t.repo,
+      // Repo-less workflows (#248 Phase 3) have no repo — show a dash.
+      t.repo ?? '—',
       t.created_at,
-      truncate(desc, 40),
+      // In-guest liveness, at LIST level: "is anything still alive?" is asked
+      // across tasks, and one `bgagent status` at a time is how a hung task goes
+      // unnoticed. Suppressed on a terminal task (the last beat is noise beside a
+      // final status) and where the agent has not beaten — same rule as the detail
+      // view, so the two never disagree.
+      t.agent_heartbeat_at && !isTerminalStatus(t.status)
+        ? `${heartbeatAge(t.agent_heartbeat_at, now)} ago`
+        : PLACEHOLDER,
+      truncate(desc, DESCRIPTION_COLUMN_WIDTH),
     ];
   });
 
@@ -141,6 +208,7 @@ export function formatStatusSnapshot(
   const lastCostEvent = findLatest(sorted, 'agent_cost_update');
   const lastTurnEvent = findLatest(sorted, 'agent_turn');
   const lastActivityEvent = findLatestActivity(sorted);
+  const blockerEvent = findLatest(sorted, 'agent_blocked');
 
   // ``TaskEvent.timestamp`` is typed ``string``, but the event table is
   // weakly typed at the storage layer — an agent regression could write
@@ -153,7 +221,7 @@ export function formatStatusSnapshot(
 
   const lines: string[] = [
     header,
-    `  Repo:          ${task.repo}`,
+    `  Repo:          ${task.repo ?? '— (repo-less)'}`,
     // Channel provenance — ``api`` for CLI / Cognito submits,
     // ``webhook`` for HMAC-signed inbound webhook submits. Shown on
     // every task so a user looking at a surprising task's status can
@@ -161,12 +229,12 @@ export function formatStatusSnapshot(
     // webhook vs. a manual submission.
     `  Channel:       ${task.channel_source || PLACEHOLDER}`,
   ];
-  // Non-default task types carry meaningful context for the default
-  // snapshot (a pr_iteration against #42 is a different mental model
-  // than a new_task). Mirrors the ``formatTaskDetail`` treatment.
-  if (task.task_type && task.task_type !== 'new_task') {
+  // Non-default workflows carry meaningful context for the default
+  // snapshot (a coding/pr-iteration-v1 against #42 is a different mental
+  // model than coding/new-task-v1). Mirrors the ``formatTaskDetail`` treatment.
+  if (task.resolved_workflow && task.resolved_workflow.id !== DEFAULT_CODING_WORKFLOW_ID) {
     const prSuffix = task.pr_number !== null ? ` (PR #${task.pr_number})` : '';
-    lines.push(`  Type:          ${task.task_type}${prSuffix}`);
+    lines.push(`  Workflow:      ${task.resolved_workflow.id}${prSuffix}`);
   }
   // Render the task description under its own heading with wrapped
   // continuation lines so long prompts stay readable in a ~80-column
@@ -174,12 +242,26 @@ export function formatStatusSnapshot(
   if (task.task_description) {
     lines.push(...formatDescriptionLines(task.task_description));
   }
+  // Admission queue (#441): while QUEUED the pipeline has not started, so
+  // position + ETA are the most useful lines a user can see.
+  if (task.status === 'QUEUED' && task.queue_position !== null) {
+    lines.push(`  Queue:         position ${task.queue_position}${formatQueueEta(task.estimated_wait_s)}`);
+  }
   lines.push(
     `  Turn:          ${describeTurn(task, lastTurnEvent)}`,
     `  Last milestone: ${describeMilestone(milestoneEvent, now)}`,
     `  Current:       ${describeCurrent(task, lastActivityEvent)}`,
     `  Cost:          ${describeCost(task, lastCostEvent)}`,
   );
+  // #251: surface the latest environmental blocker prominently — a missing
+  // secret / egress denial is the single most actionable thing a watcher can
+  // see, and it may precede the terminal failure by many turns. Suppress it on
+  // a COMPLETED task: the blocker was recovered from (e.g. self-remediated), so
+  // a historical ⛔ line would misrepresent a successful outcome as blocked.
+  const blockerLine = task.status === 'COMPLETED' ? null : describeBlocker(blockerEvent, now);
+  if (blockerLine !== null) {
+    lines.push(`  Blocker:       ${blockerLine}`);
+  }
   // Non-COMPLETED terminal statuses should show the reason inline so
   // users do not have to chase it through ``status --wait`` or an
   // ``events`` log grep. Prefer the structured classification when the
@@ -195,6 +277,19 @@ export function formatStatusSnapshot(
   }
   if (task.trace_s3_uri) {
     lines.push(`  Trace S3:      ${task.trace_s3_uri}`);
+  }
+  if (task.artifact_uri) {
+    lines.push(`  Artifact:      ${task.artifact_uri}`);
+  }
+  // In-guest liveness, next to the control-plane freshness line it complements
+  // (ADR-021 P2r2-F11). `Last event:` says when the platform last heard *about*
+  // the task; `Heartbeat:` says when the agent last said it was alive — the same
+  // field the orchestrator's hang detector reads, on a fixed 45 s cadence, so its
+  // AGE is the diagnostic. Suppressed on a terminal task (the last beat is noise
+  // beside a final status) and when the agent has not beaten yet.
+  if (task.agent_heartbeat_at && !isTerminalStatus(task.status)) {
+    const age = relativeTime(task.agent_heartbeat_at, now) ?? PLACEHOLDER;
+    lines.push(`  Heartbeat:     ${age} ago`);
   }
   lines.push(`  Last event:    ${lastEventLine}`);
 
@@ -340,9 +435,103 @@ export function formatWebhookDetail(webhook: WebhookDetail): string {
   return lines.join('\n');
 }
 
+/** Format a newly created API key (includes the one-time key material). */
+export function formatApiKeyCreated(res: CreateApiKeyResponse): string {
+  return [
+    `Key ID:      ${res.key_id}`,
+    `Name:        ${res.name}`,
+    `Scopes:      ${res.scopes.join(', ')}`,
+    `Expires:     ${res.expires_at ?? 'never'}`,
+    `Created:     ${res.created_at}`,
+    '',
+    'API key (store securely — shown only once):',
+    res.key,
+    '',
+    'Use it with `--api-key <key>` or the BGAGENT_API_KEY environment variable.',
+  ].join('\n');
+}
+
+/** Format a list of ApiKeyDetail as an aligned table. */
+export function formatApiKeyList(keys: ApiKeyDetail[]): string {
+  if (keys.length === 0) {
+    return 'No API keys found.';
+  }
+
+  const headers = ['KEY ID', 'NAME', 'SCOPES', 'STATUS', 'EXPIRES', 'CREATED'];
+  const rows = keys.map(k => [
+    k.key_id,
+    k.name,
+    k.scopes.join(','),
+    k.status,
+    k.expires_at ?? 'never',
+    k.created_at,
+  ]);
+
+  return formatTable(headers, rows);
+}
+
+/** Format an ApiKeyDetail as a key-value detail view. */
+export function formatApiKeyDetail(key: ApiKeyDetail): string {
+  const lines: string[] = [
+    `Key ID:      ${key.key_id}`,
+    `Name:        ${key.name}`,
+    `Scopes:      ${key.scopes.join(', ')}`,
+    `Status:      ${key.status}`,
+    `Expires:     ${key.expires_at ?? 'never'}`,
+    `Created:     ${key.created_at}`,
+    `Updated:     ${key.updated_at}`,
+  ];
+  if (key.revoked_at) {
+    lines.push(`Revoked:     ${key.revoked_at}`);
+  }
+  return lines.join('\n');
+}
+
 /** Format data as JSON. */
 export function formatJson(data: unknown): string {
   return JSON.stringify(data, null, 2);
+}
+
+/**
+ * Format a replay bundle (#515) as a human-readable summary: the correlation
+ * metadata as aligned key-value lines, then a compact chronological event list.
+ * Use {@link formatJson} for the machine-readable form. Absent fields render as
+ * ``—`` so the operator sees "not captured" explicitly rather than a blank.
+ */
+export function formatReplay(bundle: ReplayBundle): string {
+  const dash = '—';
+  const lines: string[] = [
+    `Task:        ${bundle.task_id}`,
+    `Workflow:    ${bundle.resolved_workflow ? `${bundle.resolved_workflow.id}@${bundle.resolved_workflow.version}` : (bundle.workflow_ref ?? dash)}`,
+    `Prompt ver:  ${bundle.prompt_version ?? dash}`,
+    `Cost:        ${bundle.cost_usd != null ? formatCostUsd(bundle.cost_usd) : dash}`,
+    `OTEL trace:  ${bundle.otel_trace_id ?? dash}`,
+    `Session:     ${bundle.session_id ?? dash}`,
+    `Trace URI:   ${bundle.trace_uri ?? dash}`,
+  ];
+  if (bundle.verification) {
+    const v = bundle.verification;
+    lines.push(`Build:       ${formatVerdict(v.build_passed, dash)}`);
+    lines.push(`Lint:        ${formatVerdict(v.lint_passed, dash)}`);
+  } else {
+    lines.push(`Verification: ${dash} (no gate result persisted)`);
+  }
+  lines.push(`Collected:   ${bundle.collected_at}`);
+  lines.push('');
+  const truncated = bundle.events_truncation;
+  lines.push(`Events (${bundle.events.length}${truncated ? ', TRUNCATED' : ''}):`);
+  if (bundle.events.length === 0) {
+    lines.push('  (none)');
+  } else {
+    for (const e of bundle.events) {
+      lines.push(`  ${e.timestamp}  ${e.event_type}`);
+    }
+  }
+  if (truncated) {
+    const cap = truncated.reason === 'max_bytes' ? 'size' : 'count';
+    lines.push(`  … list clipped at the ${cap} cap — use \`bgagent events ${bundle.task_id}\` for the full feed.`);
+  }
+  return lines.join('\n');
 }
 
 function formatErrorLines(task: TaskDetail): string[] {
@@ -373,9 +562,14 @@ function formatTable(headers: string[], rows: string[][]): string {
   return [headerLine, separator, ...dataLines].join('\n');
 }
 
+/** Max width of the DESCRIPTION column in `bgagent list` table output. */
+const DESCRIPTION_COLUMN_WIDTH = 40;
+
+const ELLIPSIS = '...';
+
 function truncate(text: string, maxLen: number): string {
   if (text.length <= maxLen) return text;
-  return text.slice(0, maxLen - 3) + '...';
+  return text.slice(0, maxLen - ELLIPSIS.length) + ELLIPSIS;
 }
 
 // -- status-snapshot helpers --------------------------------------------------
@@ -427,6 +621,21 @@ function describeMilestone(milestoneEvent: TaskEvent | null, now: number): strin
   const name = readStringField(milestoneEvent.metadata, 'milestone') ?? 'milestone';
   const ago = relativeTime(milestoneEvent.timestamp, now);
   return ago ? `${name} (${ago} ago)` : name;
+}
+
+/** Render the latest ``agent_blocked`` event for the status snapshot (#251).
+ *  Returns ``null`` when there is no blocker so the caller skips the line. */
+function describeBlocker(blockerEvent: TaskEvent | null, now: number): string | null {
+  if (!blockerEvent) return null;
+  const kind = readStringField(blockerEvent.metadata, 'kind') ?? 'unknown_environmental';
+  const resource = readStringField(blockerEvent.metadata, 'resource');
+  const hint = readStringField(blockerEvent.metadata, 'remediation_hint');
+  const ago = relativeTime(blockerEvent.timestamp, now);
+  let line = kind;
+  if (resource) line += ` [${resource}]`;
+  if (ago) line += ` (${ago} ago)`;
+  if (hint) line += ` — ${hint}`;
+  return line;
 }
 
 function describeCurrent(task: TaskDetail, activity: TaskEvent | null): string {
@@ -485,6 +694,28 @@ function readNumberField(meta: Record<string, unknown> | undefined, key: string)
   if (!meta) return null;
   const v = meta[key];
   return typeof v === 'number' && Number.isFinite(v) ? v : null;
+}
+
+/**
+ * Age of the agent's last heartbeat, as the detail view renders it.
+ *
+ * Wraps {@link relativeTime} with a placeholder, because the heartbeat's VALUE is
+ * the age rather than the timestamp: the beat is written every 45 s, so anything
+ * much past that is the signal an operator is looking for (it is the same field
+ * the orchestrator's own hang detector reads). Unparseable input degrades to a
+ * dash rather than throwing — a malformed timestamp must not take out
+ * `bgagent status`.
+ *
+ * `now` is a required parameter here rather than defaulting to `Date.now()`, so
+ * that the two exported formatters above own the one anchor each render uses and a
+ * new heartbeat line cannot quietly acquire its own clock. Those exported
+ * functions DO default to `Date.now()` — that is the public-API boundary, matching
+ * {@link formatStatusSnapshot}, and it is what lets `commands/list.ts` and
+ * `commands/status.ts` stay clock-free. The rule is "one anchor per render,
+ * injectable at the edge", not "no defaults anywhere".
+ */
+function heartbeatAge(isoTimestamp: string, now: number): string {
+  return relativeTime(isoTimestamp, now) ?? PLACEHOLDER;
 }
 
 /**

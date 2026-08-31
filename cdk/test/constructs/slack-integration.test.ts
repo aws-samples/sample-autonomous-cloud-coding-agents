@@ -52,14 +52,24 @@ describe('SlackIntegration construct', () => {
     template = Template.fromStack(stack);
   });
 
-  test('creates two DynamoDB tables (installation + user mapping)', () => {
-    // TaskTable + TaskEventsTable + SlackInstallation + SlackUserMapping = 4
-    template.resourceCountIs('AWS::DynamoDB::Table', 4);
+  test('creates three Slack DynamoDB tables (installation + user mapping + channel mapping)', () => {
+    // TaskTable + TaskEventsTable + SlackInstallation + SlackUserMapping + SlackChannelMapping = 5
+    template.resourceCountIs('AWS::DynamoDB::Table', 5);
+  });
+
+  test('command processor receives the channel-mapping table env var', () => {
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: {
+        Variables: Match.objectLike({
+          SLACK_CHANNEL_MAPPING_TABLE_NAME: Match.anyValue(),
+        }),
+      },
+    });
   });
 
   test('creates 6 Lambda functions', () => {
     // oauth-callback, events, commands, command-processor, link, interactions
-    // (issue #64: notify migrated onto FanOutConsumer as a dispatcher)
+    // (outbound notify runs on FanOutConsumer as a dispatcher, not its own fn)
     template.resourceCountIs('AWS::Lambda::Function', 6);
   });
 
@@ -94,8 +104,8 @@ describe('SlackIntegration construct', () => {
     });
   });
 
-  test('construct no longer owns a TaskEventsTable stream consumer (issue #64)', () => {
-    // Before issue #64 this construct owned ``SlackNotifyFn`` plus its
+  test('construct no longer owns a TaskEventsTable stream consumer', () => {
+    // This construct used to own ``SlackNotifyFn`` plus its
     // own ``DynamoEventSource`` on ``TaskEventsTable``. Outbound Slack
     // delivery now runs through ``FanOutConsumer`` as a per-channel
     // dispatcher so ``TaskEventsTable`` stays within the DynamoDB

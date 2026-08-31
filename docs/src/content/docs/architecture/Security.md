@@ -7,7 +7,7 @@ title: Security
 ABCA agents execute code with repository access. This document describes how the platform contains that risk: isolated sessions, scoped credentials, input screening, policy enforcement, and memory integrity controls. The design aligns with [AWS prescriptive guidance for agentic AI security](https://docs.aws.amazon.com/prescriptive-guidance/latest/agentic-ai-security/best-practices.html).
 
 - **Use this doc for:** understanding the security boundaries, what can go wrong, and how the platform mitigates each threat.
-- **Related docs:** [COMPUTE.md](/architecture/compute) for runtime isolation details, [MEMORY.md](/architecture/memory) for memory threat analysis, [REPO_ONBOARDING.md](/architecture/repo-onboarding) for per-repo security configuration, [INPUT_GATEWAY.md](/architecture/input-gateway) for authentication flows.
+- **Related docs:** [COMPUTE.md](/sample-autonomous-cloud-coding-agents/architecture/compute) for runtime isolation details, [MEMORY.md](/sample-autonomous-cloud-coding-agents/architecture/memory) for memory threat analysis, [REPO_ONBOARDING.md](/sample-autonomous-cloud-coding-agents/architecture/repo-onboarding) for per-repo security configuration, [INPUT_GATEWAY.md](/sample-autonomous-cloud-coding-agents/architecture/input-gateway) for authentication flows, [IDENTITY_AND_AUTH.md](/sample-autonomous-cloud-coding-agents/architecture/identity-and-auth) for the worked identity/auth examples and the credential-plane direction.
 
 ## Design principle
 
@@ -31,25 +31,28 @@ The agent runs with full permissions inside the sandbox but cannot escape it. Th
 
 ## Authentication and authorization
 
-Two authentication mechanisms protect the platform, matching the two input channels:
+Three authentication mechanisms protect the platform, matching its input channels:
 
 | Channel | Mechanism | Details |
 |---------|-----------|---------|
 | CLI / REST API | Amazon Cognito JWT | Users authenticate and receive tokens. The input gateway verifies every request. |
 | Webhooks | HMAC-SHA256 | Per-integration shared secrets stored in Secrets Manager. Secrets are shown once at creation and scheduled for deletion with a 7-day recovery window on revocation. |
+| Webhook management (headless) | Platform API key | Long-lived, scoped keys for CI / automation to manage webhooks without a Cognito user. The webhook management routes accept **either** a Cognito JWT **or** a `webhooks:manage` API key via one unified Lambda authorizer. Keys are `bgak_<key_id>_<secret>`; only the SHA-256 hash of the secret is stored (in DynamoDB, so the authorizer can look it up by `key_id` on every request), and the raw key is shown once at creation. Minting a key still requires an interactive Cognito user. |
 
-**Authorization** is user-scoped: any authenticated user can submit tasks, but users can only view and cancel their own tasks (`user_id` enforcement). Webhook management enforces ownership with 404 (not 403) to avoid leaking webhook existence.
+**Authorization** is user-scoped: any authenticated user can submit tasks, but users can only view and cancel their own tasks (`user_id` enforcement). Both webhook and API key management enforce ownership with 404 (not 403) to avoid leaking resource existence. A platform API key inherits its creator's `user_id`, so a webhook created via a key is attributed to that owner exactly as an interactive session would be. Key scopes gate which routes a key may call (Phase 1: `webhooks:manage`); reserved scopes (`tasks:read`, `tasks:cancel`) are validated but not yet wired to any route.
 
-**Agent credentials** - GitHub access currently uses a PAT stored in Secrets Manager. The orchestrator reads the secret at hydration time and passes it to the agent runtime. The model never receives the token in its context. Planned: replace the shared PAT with a GitHub App via AgentCore Identity Token Vault, providing per-task, repo-scoped, short-lived tokens (see [ROADMAP.md](/roadmap/roadmap)).
+**Agent credentials** - GitHub access currently uses a PAT stored in Secrets Manager. The orchestrator reads the secret at hydration time and passes it to the agent runtime. The model never receives the token in its context. Planned: replace the shared PAT with a GitHub App via AgentCore Identity Token Vault, providing per-task, repo-scoped, short-lived tokens (see [GitHub issues](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues), the [ADR-016](/sample-autonomous-cloud-coding-agents/architecture/adr-016-pluggable-identity-and-auth) two-seam design, and the [IDENTITY_AND_AUTH.md](/sample-autonomous-cloud-coding-agents/architecture/identity-and-auth) worked examples).
 
-**Per-session IAM scoping** - The agent does not use its long-lived compute role (the AgentCore Runtime `ExecutionRole` or the ECS Fargate task role) for tenant data. Instead, at task startup it assumes a per-task **SessionRole** via `sts:AssumeRole` with session tags `{user_id, repo, task_id}`, and uses the resulting short-lived credentials for all DynamoDB and S3 tenant-data access. The SessionRole's policies self-constrain on those tags:
+**Per-session IAM scoping** - The agent does not use its long-lived compute role (the AgentCore Runtime `ExecutionRole`, ECS Fargate task role, or Lambda MicroVMs execution role) for tenant data. Instead, at task startup it assumes a per-task **SessionRole** via `sts:AssumeRole` with session tags `{user_id, repo, task_id}`, and uses the resulting short-lived credentials for all DynamoDB and S3 tenant-data access. The SessionRole's policies self-constrain on those tags:
 
 - **DynamoDB**: item access on the four `task_id`-partitioned tables (task, events, approvals, nudges) is gated by a `dynamodb:LeadingKeys` condition equal to `${aws:PrincipalTag/task_id}`, so a session can read or write only its own task's rows. `Scan` is not granted (it ignores leading-keys). `task_id` is the isolation boundary because it is the base-table partition key — `LeadingKeys` cannot bind to a GSI partition key such as `user_id`.
 - **S3**: trace writes and attachment reads are scoped to the `<prefix>/${aws:PrincipalTag/user_id}/` object prefix.
 
-The compute role retains only non-tenant access (Bedrock model invocation — already ARN-scoped; CloudWatch Logs; the GitHub PAT secret, read once before the SessionRole is assumed; AgentCore Memory) plus `sts:AssumeRole`/`sts:TagSession` on the SessionRole. Because the agent runs under credentials that are themselves an assumed role, its `AssumeRole` is *role chaining* — capped at one hour regardless of the role's max session duration — so the agent uses a **refreshable** credential provider that re-assumes before expiry (tasks can run up to the 8-hour `maxLifetime`). The design is backend-agnostic: the same SessionRole and agent code serve both the AgentCore and ECS backends. A compromised agent session is therefore confined to its own task's data, enforced at the IAM layer rather than by application-code conventions. The policy structure (the `dynamodb:LeadingKeys` condition on `${aws:PrincipalTag/task_id}`, per-user S3 prefixes, and `Scan` exclusion) is asserted by CDK template tests, and the refreshable-credential and session-tag flow by agent unit tests; the matching-tag → allow / mismatched-or-absent-tag → deny behaviour was additionally confirmed once via the IAM policy simulator during development.
+The compute role retains only non-tenant access (Bedrock model invocation — already ARN-scoped; CloudWatch Logs; the GitHub PAT secret, read once before the SessionRole is assumed; AgentCore Memory) plus `sts:AssumeRole`/`sts:TagSession` on the SessionRole. Because the agent runs under credentials that are themselves an assumed role, its `AssumeRole` is *role chaining* — capped at one hour regardless of the role's max session duration — so the agent uses a **refreshable** credential provider that re-assumes before expiry (tasks can run up to the 8-hour `maxLifetime`). The design is backend-agnostic: the same SessionRole and agent code serve all three backends (AgentCore Runtime, ECS Fargate, Lambda MicroVMs). A compromised agent session is therefore confined to its own task's data, enforced at the IAM layer rather than by application-code conventions. The policy structure (the `dynamodb:LeadingKeys` condition on `${aws:PrincipalTag/task_id}`, per-user S3 prefixes, and `Scan` exclusion) is asserted by CDK template tests, and the refreshable-credential and session-tag flow by agent unit tests; the matching-tag → allow / mismatched-or-absent-tag → deny behaviour was additionally confirmed once via the IAM policy simulator during development.
 
-> Out of scope for this control and tracked separately on the roadmap: replacing the shared GitHub PAT (GitHub App / Token Vault), binding credentials to the MicroVM via attestation, and scoping AgentCore Memory (namespace isolation by `actorId`/`sessionId` remains its boundary).
+**Lambda MicroVMs compute-role delta** - On this backend the compute role additionally holds prefix-scoped `secretsmanager:GetSecretValue` on the per-workspace channel-OAuth secrets (`bgagent-linear-oauth-*`, `bgagent-jira-oauth-*`), read access to the `/run` payload bucket (the task payload arrives as an S3 object, not as environment), and `ec2:DescribeAvailabilityZones` (`Resource: *`, read-only — EC2 describe actions have no resource-level scoping) for a CDK repo's own synth gate. It is also **the only compute role in the platform whose trust policy carries no confused-deputy condition**: the Lambda MicroVMs service populates no `aws:SourceAccount` or `aws:SourceArn` when it assumes the role, so a trust policy carrying one is unassumable — verified live, not assumed (connector creation failed deterministically, and `RunMicrovm` surfaced the same root cause as a misleading caller-side `iam:PassRole` denial). The compensating controls are that each of the three MicroVM roles can be passed to `lambda.amazonaws.com` only by a named principal — the orchestrator, via an `iam:PassRole` scoped to the execution role's exact ARN, and the CloudFormation deployment role for the build and connector-operator roles — that every other resource they reach is account-scoped by ARN apart from two justified `Resource: *` read/create-time statements, and that none of them holds `iam:*`, cross-account trust, or any `sts:AssumeRole` beyond the execution role's scoped hop to the per-task SessionRole. Full evidence, the two-arm PassRole experiment, and the alternatives considered are in [ADR-021 §4](/sample-autonomous-cloud-coding-agents/architecture/adr-021-lambda-microvms-compute-backend#4-infra-and-iam-conditional-resources-behind-bootstrap-computetypes).
+
+> Out of scope for this control and tracked separately as GitHub issues: replacing the shared GitHub PAT (GitHub App / Token Vault), binding credentials to the MicroVM via attestation, and scoping AgentCore Memory (namespace isolation by `actorId`/`sessionId` remains its boundary).
 
 ## Input validation and guardrails
 
@@ -58,8 +61,8 @@ Input screening happens at two points in the pipeline, forming a defense-in-dept
 ### Submission-time screening
 
 - **Input validation** - Required fields, types, and size limits are enforced before any processing. Task descriptions are capped at 10,000 characters.
-- **Bedrock Guardrails** - A `PROMPT_ATTACK` content filter at `MEDIUM` input strength screens task descriptions for prompt injection.
-- **Attachment screening** - All attachments (images, text files, URLs) pass through security screening before reaching the agent. Images (PNG and JPEG only) are validated via magic bytes and dimension checks, then screened through Bedrock Guardrails (image content blocks). Text files and PDFs are extracted and screened through Bedrock Guardrails text content screening. URL attachments undergo SSRF protection (DNS resolution pinning, private IP blocking, redirect validation) and content screening during hydration. See [ATTACHMENTS.md](/architecture/attachments) for the full screening pipeline.
+- **Bedrock Guardrails** - A `PROMPT_ATTACK` content filter at `MEDIUM` input strength screens task descriptions for prompt injection. `MEDIUM` is deliberate: `HIGH` (which also blocks LOW-confidence) false-positives on ordinary imperative task descriptions ("make no changes, just inspect…", "ignore the legacy config and migrate…"). A 2026-06 empirical pass against the live guardrail confirmed `MEDIUM` blocks the prompt-injection class (instructions to ignore/override/reveal the system prompt, exfiltrate credentials) while passing benign imperatives with no false positives. **Scope:** this filter catches *attacks on the model*, not *destructive-but-honest task requests* (e.g. "delete .github/workflows and force-push to main") — those are not prompt injection and are intentionally NOT this layer's job. They are caught downstream at the agent tool-use layer by the Cedar HITL gates (`force_push_main`, `write_git_internals`, `rm_rf_root`; see [CEDAR_HITL_GATES.md](/sample-autonomous-cloud-coding-agents/architecture/cedar-hitl-gates)). Input screening + Cedar tool gates are complementary layers, not redundant.
+- **Attachment screening** - All attachments (images, text files, URLs) pass through security screening before reaching the agent. Images (PNG and JPEG only) are validated via magic bytes and dimension checks, then screened through Bedrock Guardrails (image content blocks). Text files and PDFs are extracted and screened through Bedrock Guardrails text content screening. URL attachments undergo SSRF protection (DNS resolution pinning, private IP blocking, redirect validation) and content screening during hydration. See [ATTACHMENTS.md](/sample-autonomous-cloud-coding-agents/architecture/attachments) for the full screening pipeline.
 - **Fail-closed** - If the Bedrock API is unavailable, submissions are rejected (HTTP 503). Unscreened content never reaches the agent.
 
 ### Hydration-time screening
@@ -82,11 +85,11 @@ Per-repo tool profiles are stored in onboarding config and loaded during context
 
 ## Blueprint custom steps
 
-The blueprint framework ([REPO_ONBOARDING.md](/architecture/repo-onboarding)) allows per-repo custom Lambda steps in the orchestrator pipeline. These are a trust boundary that requires specific attention.
+The blueprint framework ([REPO_ONBOARDING.md](/sample-autonomous-cloud-coding-agents/architecture/repo-onboarding)) allows per-repo custom Lambda steps in the orchestrator pipeline. These are a trust boundary that requires specific attention.
 
 **Deployment control** - Custom steps are defined in the `Blueprint` CDK construct and deployed via `cdk deploy`. Only principals with CDK deployment permissions can add or modify them. There is no runtime API for custom step CRUD.
 
-The **same deploy-only property extends to `Blueprint.security.cedarPolicies`** — user-authored Cedar policies live in the CDK source, are typed as `readonly string[]` on the construct, and reach `RepoTable` only through a CloudFormation custom resource invoked at deploy time. The Cedar-driven HITL approval gates feature (see [`CEDAR_HITL_GATES.md`](/architecture/cedar-hitl-gates)) is load-bearing on this property: the engine treats Cedar policies loaded at task start as trusted content. If the blueprint model ever changes to accept user-uploaded policy text via an API path, the §12 trust model in that doc must be re-evaluated (add per-blueprint policy count cap, per-eval timeout, size cap).
+The **same deploy-only property extends to `Blueprint.security.cedarPolicies`** — user-authored Cedar policies live in the CDK source, are typed as `readonly string[]` on the construct, and reach `RepoTable` only through a CloudFormation custom resource invoked at deploy time. The Cedar-driven HITL approval gates feature (see [`CEDAR_HITL_GATES.md`](/sample-autonomous-cloud-coding-agents/architecture/cedar-hitl-gates)) is load-bearing on this property: the engine treats Cedar policies loaded at task start as trusted content. If the blueprint model ever changes to accept user-uploaded policy text via an API path, the §12 trust model in that doc must be re-evaluated (add per-blueprint policy count cap, per-eval timeout, size cap).
 
 **Input filtering** - The framework strips credential ARNs (`github_token_secret_arn`) and networking configuration (`egress_allowlist`) from the config before passing it to custom Lambda steps. If a custom step needs secrets, it must declare them explicitly and the operator must grant IAM permissions.
 
@@ -116,11 +119,11 @@ The platform is self-hosted in the customer's AWS account. No code or repo data 
 | Audit | Bedrock model invocation logging (90-day retention) | Prompt injection investigation, compliance |
 | Deployment | CDK infrastructure as code | Consistent, auditable deployments |
 
-**DNS Firewall note:** Currently in observation mode (non-allowlisted domains are logged as ALERT but not blocked). Per-repo `egressAllowlist` entries are aggregated into the platform-wide policy. DNS Firewall does not block direct IP connections, which is acceptable for the "confused agent" threat model but not for sophisticated adversaries. See [COMPUTE.md](/architecture/compute) for the enforcement rollout process.
+**DNS Firewall note:** Currently in observation mode (non-allowlisted domains are logged as ALERT but not blocked). Per-repo `egressAllowlist` entries are aggregated into the platform-wide policy. DNS Firewall does not block direct IP connections, which is acceptable for the "confused agent" threat model but not for sophisticated adversaries. See [COMPUTE.md](/sample-autonomous-cloud-coding-agents/architecture/compute) for the enforcement rollout process.
 
 ## Policy enforcement
 
-The platform enforces policies at multiple points in the task lifecycle. Today, these are implemented inline across handlers, constructs, and agent code. A centralized Cedar-based policy framework is planned (see [ROADMAP.md](/roadmap/roadmap)).
+The platform enforces policies at multiple points in the task lifecycle. Today, these are implemented inline across handlers, constructs, and agent code. A centralized Cedar-based policy framework is planned (see [GitHub issues](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues)).
 
 ### Current enforcement map
 
@@ -161,7 +164,7 @@ flowchart LR
 | Finalization | Build/lint verification | `agent/src/post_hooks.py` | Task record and PR body |
 | Infrastructure | DNS Firewall, WAF | CDK constructs | CloudWatch logs |
 
-**Audit gap:** Submission-time rejections currently return HTTP errors without structured audit events. Planned: a unified `PolicyDecisionEvent` schema across all phases (see [ROADMAP.md](/roadmap/roadmap)).
+**Audit gap:** Submission-time rejections currently return HTTP errors without structured audit events. Planned: a unified `PolicyDecisionEvent` schema across all phases (see [GitHub issues](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues)).
 
 ### Mid-execution enforcement
 
@@ -176,7 +179,7 @@ Once an agent session starts, two mechanisms enforce policy without requiring an
 
 ## Memory threats
 
-The platform's memory system ([MEMORY.md](/architecture/memory)) faces threats from both intentional attacks and emergent corruption. OWASP classifies memory poisoning as **ASI06** in the 2026 Top 10 for Agentic Applications, recognizing that persistent memory attacks are fundamentally different from single-session prompt injection: poisoned entries influence every subsequent interaction.
+The platform's memory system ([MEMORY.md](/sample-autonomous-cloud-coding-agents/architecture/memory)) faces threats from both intentional attacks and emergent corruption. OWASP classifies memory poisoning as **ASI06** in the 2026 Top 10 for Agentic Applications, recognizing that persistent memory attacks are fundamentally different from single-session prompt injection: poisoned entries influence every subsequent interaction.
 
 ### Attack vectors
 
@@ -198,7 +201,7 @@ The platform's memory system ([MEMORY.md](/architecture/memory)) faces threats f
 5. **Review feedback quorum** - Only promote feedback to persistent rules if the same pattern appears from multiple trusted reviewers across multiple PRs. Single review comments never become permanent rules.
 6. **Blast radius containment** - Even if poisoned rules get through, the agent cannot modify CI/CD pipelines, change branch protection, access secrets beyond its scoped token, or push to protected branches.
 
-**Planned:** Trust-scored retrieval with temporal decay, anomaly detection on write patterns, and write-ahead guardian validation (see [ROADMAP.md](/roadmap/roadmap)).
+**Planned:** Trust-scored retrieval with temporal decay, anomaly detection on write patterns, and write-ahead guardian validation (see [GitHub issues](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues)).
 
 ## Data protection
 

@@ -17,8 +17,94 @@
  *  SOFTWARE.
  */
 
-/** Valid task types for task creation. */
-export type TaskType = 'new_task' | 'pr_iteration' | 'pr_review';
+/**
+ * A resolved workflow pin: the ``{id, version}`` produced at the create-task
+ * boundary from a ``workflow_ref`` (or the resolution fallback). Replaces the
+ * former ``task_type`` enum end-to-end (#248).
+ *
+ * Mirrors ``cdk/src/handlers/shared/types.ts::ResolvedWorkflow`` per the CLI
+ * types-sync contract.
+ */
+export type ResolvedWorkflow = {
+  readonly id: string;
+  readonly version: string;
+};
+
+/**
+ * A resolved registry-asset pin stamped on the TaskRecord for audit (#246).
+ * Mirrors ``cdk/src/handlers/shared/types.ts::ResolvedAssetTriple``.
+ */
+export type ResolvedAssetTriple = {
+  readonly kind: string;
+  readonly id: string;
+  readonly version: string;
+};
+
+// --- Agent asset registry (#246) API wire types ------------------------------
+// Mirrors ``cdk/src/handlers/shared/types.ts`` per the CLI types-sync contract.
+
+/** `POST /registry/records` request body. */
+export type RegistryPublishRequest = {
+  readonly kind: string;
+  readonly namespace: string;
+  readonly name: string;
+  /** semver string, immutable once written. */
+  readonly asset_version: string;
+  /** discovery descriptor body (server.json / SKILL.md / arbitrary JSON). */
+  readonly discovery: Record<string, unknown>;
+  /** ABCA runtime payload (connection config / cedar text / prompt fragment). */
+  readonly runtime: Record<string, unknown>;
+  /** force CUSTOM (verbatim) storage instead of a native descriptor. */
+  readonly custom?: boolean;
+  /** dev convenience: drive create→submit→approve so the record resolves. */
+  readonly auto_approve?: boolean;
+};
+
+/** One version row in a `show` response. */
+export type RegistryVersionSummary = {
+  readonly version: string;
+  readonly status: string;
+  readonly created_at: string | null;
+  readonly publisher: string | null;
+};
+
+/** `GET /registry/records/{kind}/{namespace}/{name}` response — one asset's
+ *  versions. Mirrors cdk/src/handlers/shared/types.ts (types-sync contract). */
+export type RegistryShowResponse = {
+  readonly kind: string;
+  readonly namespace: string;
+  readonly name: string;
+  readonly versions: readonly RegistryVersionSummary[];
+};
+
+/** A record envelope returned by publish / show. */
+export type RegistryRecordResponse = {
+  readonly kind: string;
+  readonly namespace: string;
+  readonly name: string;
+  readonly version: string;
+  readonly status: string;
+  readonly storage_mode: string;
+};
+
+/** `GET /registry/resolve?ref=…` response. */
+export type RegistryResolveResponse = {
+  readonly kind: string;
+  readonly namespace: string;
+  readonly name: string;
+  readonly version: string;
+  readonly runtime: Record<string, unknown>;
+  readonly warnings: readonly string[];
+};
+
+/** One asset row in a `list` response. */
+export type RegistryListEntry = {
+  readonly kind: string;
+  readonly namespace: string;
+  readonly name: string;
+  readonly latest_version: string | null;
+  readonly status: string;
+};
 
 /** Shared across all attachment interfaces. Add new types here (e.g., 'audio'). */
 export type AttachmentType = 'image' | 'file' | 'url';
@@ -31,6 +117,7 @@ export type AttachmentType = 'image' | 'file' | 'url';
  */
 export type TaskStatusType =
   | 'PENDING_UPLOADS'
+  | 'QUEUED'
   | 'SUBMITTED'
   | 'HYDRATING'
   | 'RUNNING'
@@ -47,15 +134,16 @@ export type TaskStatusType =
  * - ``webhook``: HMAC-signed inbound webhook submissions (generic webhook endpoint)
  * - ``slack``: Slack @mention / slash-command submissions
  * - ``linear``: Linear label-triggered submissions
+ * - ``jira``: Jira Cloud label-triggered submissions
  *
  * Mirrors ``cdk/src/handlers/shared/types.ts::ChannelSource`` per the CLI
  * types-sync contract so downstream switches/predicates get exhaustiveness
  * checking on both sides of the wire.
  */
-export type ChannelSource = 'api' | 'webhook' | 'slack' | 'linear';
+export type ChannelSource = 'api' | 'webhook' | 'slack' | 'linear' | 'jira';
 
 /** Error categories produced by the runtime error classifier. */
-export type ErrorCategoryType = 'auth' | 'network' | 'concurrency' | 'compute' | 'agent' | 'guardrail' | 'config' | 'timeout' | 'unknown';
+export type ErrorCategoryType = 'auth' | 'network' | 'concurrency' | 'compute' | 'agent' | 'guardrail' | 'config' | 'timeout' | 'blocked' | 'unknown';
 
 /** Structured classification of a task error (computed by the API from error_message). */
 export interface ErrorClassification {
@@ -64,15 +152,23 @@ export interface ErrorClassification {
   readonly description: string;
   readonly remedy: string;
   readonly retryable: boolean;
+  /** Retry-semantics axis: transient (self-heals on retry) vs service (admin
+   *  must fix) vs user (change the request/code). Optional (older classifications
+   *  omit it; absent ⇒ user). Inlined (not a named export) to mirror the cdk
+   *  ErrorClassification field without introducing a CLI-only exported type. */
+  readonly errorClass?: 'transient' | 'service' | 'user';
 }
 
 /** Task detail returned by GET /v1/tasks/{task_id}. */
 export interface TaskDetail {
   readonly task_id: string;
   readonly status: TaskStatusType;
-  readonly repo: string;
+  /** ``null`` for a repo-less workflow (#248 Phase 3). */
+  readonly repo: string | null;
   readonly issue_number: number | null;
-  readonly task_type: TaskType;
+  readonly resolved_workflow: ResolvedWorkflow | null;
+  /** Registry assets resolved for this task (#246); null when none pinned. */
+  readonly resolved_assets: ResolvedAssetTriple[] | null;
   readonly pr_number: number | null;
   readonly task_description: string | null;
   readonly branch_name: string;
@@ -93,9 +189,21 @@ export interface TaskDetail {
   readonly updated_at: string;
   readonly started_at: string | null;
   readonly completed_at: string | null;
+  /** ISO timestamp of the agent's last heartbeat (45 s cadence, every compute
+   *  backend); ``null`` before the first beat or on tasks that never ran. The
+   *  platform's only in-guest liveness signal, surfaced through the API as of
+   *  ADR-021 P2r2-F11 — it was written and consumed internally but hidden from
+   *  every operator, which produced a wrong live-verification conclusion. Mirrors
+   *  ``cdk/src/handlers/shared/types.ts::TaskDetail``. */
+  readonly agent_heartbeat_at: string | null;
   readonly duration_s: number | null;
   readonly cost_usd: number | null;
   readonly build_passed: boolean | null;
+  /** Post-run lint gate result (#515); null on tasks that predate the field. */
+  readonly lint_passed: boolean | null;
+  /** OTEL trace id (32-char hex) for cross-plane correlation (#515); null when
+   *  unavailable or on tasks that predate the field. */
+  readonly otel_trace_id: string | null;
   readonly max_turns: number | null;
   readonly max_budget_usd: number | null;
   /** Rev-5 DATA-1: attempts counter from the SDK (may be `max_turns + 1`
@@ -121,6 +229,8 @@ export interface TaskDetail {
    *  the URI in ``status --output json`` lets users / scripts detect
    *  completion without an extra round trip. */
   readonly trace_s3_uri: string | null;
+  /** S3 URI of a repo-less delivered artifact (#248 Phase 3); ``null`` otherwise. */
+  readonly artifact_uri: string | null;
   readonly attachments: AttachmentSummary[] | null;
   /** Cedar HITL: running counter of approval gates fired on this
    *  task. Null only on pre-Cedar-HITL records. */
@@ -132,6 +242,18 @@ export interface TaskDetail {
   /** Cedar HITL: when ``status = AWAITING_APPROVAL``, the
    *  ``request_id`` of the pending approval row. Null otherwise. */
   readonly awaiting_approval_request_id: string | null;
+  /** Admission queue (#441): ISO timestamp the task first entered
+   *  QUEUED; null for tasks that were admitted directly. Mirrors
+   *  ``cdk/src/handlers/shared/types.ts::TaskDetail``. */
+  readonly queued_at: string | null;
+  /** Admission queue (#441): 1-based FIFO position among the caller's
+   *  QUEUED tasks when ``status = QUEUED``; null otherwise. Computed
+   *  at read time by the server — it changes as the queue drains. */
+  readonly queue_position: number | null;
+  /** Admission queue (#441): rough ETA (seconds) until pickup, derived
+   *  from queue position and recent task durations. Null when
+   *  ``queue_position`` is null. */
+  readonly estimated_wait_s: number | null;
 }
 
 /** Response body of ``GET /v1/tasks/{task_id}/trace`` (design §10.1). */
@@ -142,19 +264,94 @@ export interface TraceUrlResponse {
   readonly expires_at: string;
 }
 
+/**
+ * Verification verdict in a {@link ReplayBundle}. Mirrors
+ * ``cdk/src/handlers/shared/types.ts::VerificationReport``. Either field is
+ * ``null`` when the corresponding gate did not run / predates persistence.
+ */
+export interface VerificationReport {
+  readonly build_passed: boolean | null;
+  readonly lint_passed: boolean | null;
+}
+
+/**
+ * A single event embedded in a {@link ReplayBundle}. Mirrors
+ * ``cdk/src/handlers/shared/types.ts::ReplayEvent``. Normalized to the same
+ * shape as the events feed ({@link TaskEvent}): ``task_id``/``ttl`` stripped and
+ * ``metadata`` defaulted to ``{}``, so ``event.metadata.x`` is always safe.
+ */
+export interface ReplayEvent {
+  readonly event_id: string;
+  readonly event_type: string;
+  readonly timestamp: string;
+  readonly metadata: Record<string, unknown>;
+  // Correlation envelope (#245): present per-event when the source stamped it.
+  readonly user_id?: string;
+  readonly repo?: string;
+  readonly trace_id?: string;
+}
+
+/**
+ * Truncation marker on a {@link ReplayBundle}. Mirrors
+ * ``cdk/src/handlers/shared/types.ts::ReplayTruncation``. Non-null when the
+ * event list was clipped by a cap; ``null`` when the full list fit.
+ */
+export interface ReplayTruncation {
+  readonly reason: 'max_events' | 'max_bytes';
+  readonly returned_events: number;
+}
+
+/**
+ * Response body of ``GET /v1/tasks/{task_id}/replay`` (#515). Mirrors
+ * ``cdk/src/handlers/shared/types.ts::ReplayBundle``. Aggregates existing
+ * telemetry; absent sources are ``null``/empty rather than omitted.
+ */
+export interface ReplayBundle {
+  readonly task_id: string;
+  readonly workflow_ref: string | null;
+  readonly resolved_workflow: ResolvedWorkflow | null;
+  readonly prompt_version: string | null;
+  readonly events: ReplayEvent[];
+  readonly events_truncation: ReplayTruncation | null;
+  readonly verification: VerificationReport | null;
+  readonly trace_uri: string | null;
+  readonly otel_trace_id: string | null;
+  readonly session_id: string | null;
+  readonly cost_usd: number | null;
+  readonly collected_at: string;
+}
+
 /** Task summary returned by GET /v1/tasks list responses. */
 export interface TaskSummary {
   readonly task_id: string;
   readonly status: TaskStatusType;
-  readonly repo: string;
+  /** ``null`` for a repo-less workflow (#248 Phase 3). */
+  readonly repo: string | null;
   readonly issue_number: number | null;
-  readonly task_type: TaskType;
+  readonly resolved_workflow: ResolvedWorkflow | null;
+  /** Registry assets resolved for this task (#246); null when none pinned. */
+  readonly resolved_assets: ResolvedAssetTriple[] | null;
   readonly pr_number: number | null;
   readonly task_description: string | null;
   readonly branch_name: string;
   readonly pr_url: string | null;
   readonly created_at: string;
   readonly updated_at: string;
+  /**
+   * Last in-guest liveness beat (ISO-8601), or ``null`` when the agent has not
+   * beaten yet, on a substrate whose agent never beats, or on records predating
+   * the field.
+   *
+   * On the SUMMARY as well as the detail (ADR-021 P2r2-F11 follow-up) because
+   * liveness is a list-level question: "is anything still alive?" is asked across
+   * tasks, and answering it one `bgagent status` at a time is how a hung task
+   * goes unnoticed. The field's history is the argument — while `toTaskDetail`
+   * omitted it, `bgagent status` reported `None` against a 6-second-old DynamoDB
+   * value, and that produced a WRONG live-verification conclusion attributed to a
+   * different defect entirely. Keep in sync with the sibling declaration in the
+   * other package's `types.ts`.
+   */
+  readonly agent_heartbeat_at: string | null;
 }
 
 /** Task event returned by GET /v1/tasks/{task_id}/events. */
@@ -163,6 +360,11 @@ export interface TaskEvent {
   readonly event_type: string;
   readonly timestamp: string;
   readonly metadata: Record<string, unknown>;
+  // Correlation envelope (#245): present per-event when the source stamped it;
+  // absent on task_created and pre-envelope safety-net writers.
+  readonly user_id?: string;
+  readonly repo?: string;
+  readonly trace_id?: string;
 }
 
 /**
@@ -221,12 +423,15 @@ export interface CreateTaskResponse extends TaskDetail {
 
 /** Create task request body for POST /v1/tasks. */
 export interface CreateTaskRequest {
-  readonly repo: string;
+  /** Optional since #248 Phase 3: repo-less workflows submit without it. */
+  readonly repo?: string;
   readonly issue_number?: number;
   readonly task_description?: string;
   readonly max_turns?: number;
   readonly max_budget_usd?: number;
-  readonly task_type?: TaskType;
+  /** Workflow selector ``<id>[@<constraint>]``. Replaces ``task_type`` (#248).
+   *  Omitted ⇒ the create-task boundary resolves via the fallback ladder. */
+  readonly workflow_ref?: string;
   readonly pr_number?: number;
   readonly attachments?: readonly Attachment[];
   /**
@@ -327,6 +532,49 @@ export interface CreateWebhookResponse {
   readonly created_at: string;
 }
 
+/**
+ * Scopes a platform API key may hold. Mirrors
+ * ``cdk/src/handlers/shared/types.ts`` per the CLI types-sync contract.
+ */
+export type ApiKeyScope = 'webhooks:manage' | 'webhooks:invoke' | 'tasks:read' | 'tasks:cancel';
+
+/** Scopes recognized by the platform. Order is not significant. */
+export const API_KEY_SCOPES: readonly ApiKeyScope[] = [
+  'webhooks:manage',
+  'webhooks:invoke',
+  'tasks:read',
+  'tasks:cancel',
+];
+
+/** Platform API key detail returned by API responses. */
+export interface ApiKeyDetail {
+  readonly key_id: string;
+  readonly name: string;
+  readonly scopes: readonly ApiKeyScope[];
+  readonly status: 'active' | 'revoked';
+  readonly created_at: string;
+  readonly updated_at: string;
+  readonly expires_at: string | null;
+  readonly revoked_at: string | null;
+}
+
+/** Create API key request body for POST /v1/api-keys. */
+export interface CreateApiKeyRequest {
+  readonly name: string;
+  readonly scopes?: readonly ApiKeyScope[];
+  readonly expires_at?: string;
+}
+
+/** Create API key response — includes the key material (shown only once). */
+export interface CreateApiKeyResponse {
+  readonly key_id: string;
+  readonly name: string;
+  readonly key: string;
+  readonly scopes: readonly ApiKeyScope[];
+  readonly expires_at: string | null;
+  readonly created_at: string;
+}
+
 /** Slack link response from POST /v1/slack/link. */
 export interface SlackLinkResponse {
   readonly slack_team_id: string;
@@ -334,16 +582,45 @@ export interface SlackLinkResponse {
   readonly linked_at: string;
 }
 
-/** Linear link response from POST /v1/linear/link. */
+/** Linear link response from POST /v1/linear/link.
+ *
+ * `dry_run: true` returns the identity attached to the code without
+ * writing the mapping. CLI uses it to preview before the user confirms.
+ * `linked_at` is omitted from the dry-run response. */
 export interface LinearLinkResponse {
+  readonly dry_run?: boolean;
   readonly linear_workspace_id: string;
+  readonly linear_workspace_slug?: string;
   readonly linear_user_id: string;
-  readonly linked_at: string;
+  readonly linear_user_name?: string;
+  readonly linear_user_email?: string;
+  readonly linked_at?: string;
+}
+
+/** Jira link response from POST /v1/jira/link.
+ *
+ * Mirrors LinearLinkResponse semantics: `dry_run: true` returns the
+ * identity attached to the code without writing. The CLI uses dry-run
+ * to render a preview before the user confirms. `linked_at` is omitted
+ * from the dry-run response. */
+export interface JiraLinkResponse {
+  readonly dry_run?: boolean;
+  readonly jira_cloud_id: string;
+  readonly jira_site_url?: string;
+  readonly jira_account_id: string;
+  readonly jira_user_name?: string;
+  readonly jira_user_email?: string;
+  readonly linked_at?: string;
 }
 
 /** CLI config stored in ~/.bgagent/config.json. */
 export interface CliConfig {
   readonly api_url: string;
+  /** URL of the agent asset registry API (#246), which is a separate API
+   *  Gateway from `api_url` (see RegistryApiUrl stack output). Optional for
+   *  backward compatibility with configs written before the registry shipped;
+   *  `bgagent registry` commands require it. */
+  readonly registry_api_url?: string;
   readonly region: string;
   readonly user_pool_id: string;
   readonly client_id: string;
@@ -363,6 +640,16 @@ export interface Credentials {
 
 /** Terminal task statuses. */
 export const TERMINAL_STATUSES = ['COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT'] as const;
+
+/**
+ * Default coding workflow id. A bare ``bgagent submit --repo X --task Y``
+ * (no ``--workflow``/``--pr``/``--review-pr``) maps to this workflow — the
+ * old ``new_task`` default that clones, builds, and opens a PR. Also used by
+ * the formatters to suppress a redundant "Workflow:" line when the resolved
+ * workflow is just the default. Hoisted to a single constant so the literal
+ * is not duplicated across ``submit.ts`` and ``format.ts``.
+ */
+export const DEFAULT_CODING_WORKFLOW_ID = 'coding/new-task-v1';
 
 // ---------------------------------------------------------------------------
 // Cedar HITL approval types — mirrored from
@@ -486,3 +773,11 @@ export const APPROVAL_TIMEOUT_S_MAX = 3600;
 
 /** Default approval_timeout_s when the submit payload omits it. */
 export const APPROVAL_TIMEOUT_S_DEFAULT = 300;
+
+/** Minimum allowed max_budget_usd (1 cent).
+ *  Sourced from ``contracts/constants.json`` via cdk types.ts (#258). */
+export const MAX_BUDGET_USD_MIN = 0.01;
+
+/** Maximum allowed max_budget_usd ($100).
+ *  Sourced from ``contracts/constants.json`` via cdk types.ts (#258). */
+export const MAX_BUDGET_USD_MAX = 100;

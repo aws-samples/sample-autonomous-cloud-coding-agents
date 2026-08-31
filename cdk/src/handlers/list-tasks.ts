@@ -17,18 +17,24 @@
  *  SOFTWARE.
  */
 
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, QueryCommand } from '@aws-sdk/lib-dynamodb';
+import { QueryCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
 import { extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
 import { ErrorCode, errorResponse, paginatedResponse } from './shared/response';
 import { type TaskRecord, toTaskSummary } from './shared/types';
+import { makeDocClient } from './shared/ua';
 import { decodePaginationToken, encodePaginationToken, parseLimit, parseStatusFilter } from './shared/validation';
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const ddb = makeDocClient();
 const TABLE_NAME = process.env.TASK_TABLE_NAME!;
+
+/** Default page size when the caller omits ``?limit=``. */
+const DEFAULT_PAGE_LIMIT = 20;
+
+/** Hard page-size ceiling. */
+const MAX_PAGE_LIMIT = 100;
 
 /**
  * GET /v1/tasks — List tasks for the authenticated user.
@@ -45,7 +51,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     // 2. Parse query parameters
     const params = event.queryStringParameters ?? {};
-    const limit = parseLimit(params.limit, 20, 100);
+    const limit = parseLimit(params.limit, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT);
     const statusFilter = params.status !== undefined ? parseStatusFilter(params.status) : null;
     const repoFilter = params.repo;
     const startKey = decodePaginationToken(params.next_token);

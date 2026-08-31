@@ -32,7 +32,7 @@ function buildTask(overrides: Partial<TaskDetail> = {}): TaskDetail {
     status: 'RUNNING',
     repo: 'org/repo',
     issue_number: null,
-    task_type: 'new_task',
+    resolved_workflow: { id: 'coding/new-task-v1', version: '1.0.0' },
     pr_number: null,
     task_description: 'fix bug',
     branch_name: 'bgagent/abc123/fix',
@@ -46,6 +46,10 @@ function buildTask(overrides: Partial<TaskDetail> = {}): TaskDetail {
     updated_at: '2026-04-29T15:30:00Z',
     started_at: '2026-04-29T15:27:06Z', // 3m 14s before NOW
     completed_at: null,
+    // Default null: the exact-output assertion below must not have to carry a
+    // Heartbeat line, and "the agent has not beaten yet" is the honest default for
+    // a freshly-built fixture.
+    agent_heartbeat_at: null,
     duration_s: null,
     cost_usd: null,
     build_passed: null,
@@ -55,10 +59,14 @@ function buildTask(overrides: Partial<TaskDetail> = {}): TaskDetail {
     turns_completed: null,
     trace: false,
     trace_s3_uri: null,
+    artifact_uri: null,
     attachments: null,
     approval_gate_count: 0,
     approval_gate_cap: 50,
     awaiting_approval_request_id: null,
+    queued_at: null,
+    queue_position: null,
+    estimated_wait_s: null,
     ...overrides,
   };
 }
@@ -74,6 +82,25 @@ function mkEvent(overrides: Partial<TaskEvent>): TaskEvent {
 }
 
 describe('formatStatusSnapshot', () => {
+  test('QUEUED task shows queue position + ETA line (#441)', () => {
+    const task = buildTask({
+      status: 'QUEUED',
+      started_at: null,
+      queued_at: '2026-04-29T15:27:30Z',
+      queue_position: 2,
+      estimated_wait_s: 600,
+    });
+    const rendered = formatStatusSnapshot(task, [], NOW);
+    expect(rendered).toContain('Task abc123 — QUEUED');
+    expect(rendered).toContain('  Queue:         position 2 (est. wait ~10m)');
+  });
+
+  test('QUEUED task with null position omits the queue line (GSI fail-open)', () => {
+    const task = buildTask({ status: 'QUEUED', started_at: null, queue_position: null });
+    const rendered = formatStatusSnapshot(task, [], NOW);
+    expect(rendered).not.toContain('Queue:');
+  });
+
   test('happy path renders the full template', () => {
     const task = buildTask();
     // Events are newest-first per the ``?desc=1`` contract. ULIDs are
@@ -248,6 +275,48 @@ describe('formatStatusSnapshot', () => {
     );
   });
 
+  describe('agent_heartbeat_at — in-guest liveness (ADR-021 P2r2-F11)', () => {
+    // `bgagent status` renders this snapshot, so this is the surface that decides
+    // whether the heartbeat is observable at all. It was not: the field lived in
+    // DynamoDB, drove the orchestrator's hang detector, and never reached the API —
+    // so a live verification run polled `status`, saw nothing, and recorded
+    // "heartbeats NOT observed" against the wrong defect.
+
+    test('shows the age beside the Last event line while the task is live', () => {
+      const task = buildTask({ agent_heartbeat_at: '2026-04-29T15:29:36Z' }); // 44s before NOW
+      const rendered = formatStatusSnapshot(task, [], NOW);
+      expect(rendered).toContain('  Heartbeat:     44s ago');
+      // Ordering is the point of putting it here: control-plane freshness
+      // (`Last event`) and in-guest freshness (`Heartbeat`) read together.
+      expect(rendered.indexOf('Heartbeat:')).toBeLessThan(rendered.indexOf('Last event:'));
+    });
+
+    test('a stale beat is visible as a large age rather than being hidden', () => {
+      // The actionable case: the substrate says RUNNING and the guest went quiet.
+      // 45 s is the write cadence, so ~4 minutes is unambiguous.
+      const task = buildTask({ agent_heartbeat_at: '2026-04-29T15:26:20Z' });
+      expect(formatStatusSnapshot(task, [], NOW)).toContain('  Heartbeat:     4m 00s ago');
+    });
+
+    test('is suppressed on a terminal task', () => {
+      const task = buildTask({
+        status: 'COMPLETED',
+        completed_at: '2026-04-29T15:29:50Z',
+        agent_heartbeat_at: '2026-04-29T15:29:38Z',
+      });
+      expect(formatStatusSnapshot(task, [], NOW)).not.toContain('Heartbeat:');
+    });
+
+    test('is omitted entirely when the agent has not beaten yet', () => {
+      expect(formatStatusSnapshot(buildTask(), [], NOW)).not.toContain('Heartbeat:');
+    });
+
+    test('degrades to a placeholder on an unparseable timestamp', () => {
+      const task = buildTask({ agent_heartbeat_at: 'garbage' });
+      expect(formatStatusSnapshot(task, [], NOW)).toContain('  Heartbeat:     — ago');
+    });
+  });
+
   test('missing / non-string timestamp degrades "Last event" to placeholder', () => {
     // The event table is weakly typed at the storage layer: a malformed
     // agent write could produce a row without ``timestamp``. Without the
@@ -314,33 +383,56 @@ describe('formatStatusSnapshot', () => {
     expect(rendered).not.toContain('Trace S3:');
   });
 
-  // ---- Type + Reason (PR #52 CLI UX carry-forward) ----
-
-  test('renders Type line for pr_iteration tasks with PR number', () => {
-    const task = buildTask({ task_type: 'pr_iteration', pr_number: 42 });
+  test('renders Artifact line when artifact_uri is non-null (#248 Phase 3)', () => {
+    const task = buildTask({ artifact_uri: 's3://artifacts-bkt/artifacts/abc123/result.md' });
     const rendered = formatStatusSnapshot(task, [], NOW);
-    expect(rendered).toContain('Type:          pr_iteration (PR #42)');
+    expect(rendered).toContain('Artifact:      s3://artifacts-bkt/artifacts/abc123/result.md');
   });
 
-  test('renders Type line for pr_review tasks', () => {
-    const task = buildTask({ task_type: 'pr_review', pr_number: 7 });
+  test('omits Artifact line when artifact_uri is null', () => {
+    const task = buildTask();
     const rendered = formatStatusSnapshot(task, [], NOW);
-    expect(rendered).toContain('Type:          pr_review (PR #7)');
+    expect(rendered).not.toContain('Artifact:');
   });
 
-  test('omits Type line for new_task (the compact default path)', () => {
-    const task = buildTask({ task_type: 'new_task' });
+  // ---- Workflow + Reason (PR #52 CLI UX carry-forward) ----
+
+  test('renders Workflow line for pr_iteration tasks with PR number', () => {
+    const task = buildTask({
+      resolved_workflow: { id: 'coding/pr-iteration-v1', version: '1.0.0' },
+      pr_number: 42,
+    });
     const rendered = formatStatusSnapshot(task, [], NOW);
-    expect(rendered).not.toContain('Type:');
+    expect(rendered).toContain('Workflow:      coding/pr-iteration-v1 (PR #42)');
   });
 
-  test('omits PR-number suffix on Type line when pr_number is absent', () => {
+  test('renders Workflow line for pr_review tasks', () => {
+    const task = buildTask({
+      resolved_workflow: { id: 'coding/pr-review-v1', version: '1.0.0' },
+      pr_number: 7,
+    });
+    const rendered = formatStatusSnapshot(task, [], NOW);
+    expect(rendered).toContain('Workflow:      coding/pr-review-v1 (PR #7)');
+  });
+
+  test('omits Workflow line for the default coding/new-task-v1 (compact path)', () => {
+    const task = buildTask({
+      resolved_workflow: { id: 'coding/new-task-v1', version: '1.0.0' },
+    });
+    const rendered = formatStatusSnapshot(task, [], NOW);
+    expect(rendered).not.toContain('Workflow:');
+  });
+
+  test('omits PR-number suffix on Workflow line when pr_number is absent', () => {
     // Defensive: a pr_iteration task without a pr_number would be a
     // server-side data shape oddity, but the renderer must not emit a
     // dangling "PR #undefined".
-    const task = buildTask({ task_type: 'pr_iteration', pr_number: null });
+    const task = buildTask({
+      resolved_workflow: { id: 'coding/pr-iteration-v1', version: '1.0.0' },
+      pr_number: null,
+    });
     const rendered = formatStatusSnapshot(task, [], NOW);
-    expect(rendered).toContain('Type:          pr_iteration\n');
+    expect(rendered).toContain('Workflow:      coding/pr-iteration-v1\n');
     expect(rendered).not.toContain('PR #');
   });
 
@@ -498,5 +590,111 @@ describe('formatStatusSnapshot', () => {
     // the wrapper splits on whitespace.
     expect(rendered).toContain('Description:   Fix the bug');
     expect(rendered).not.toContain('  Description:     ');
+  });
+
+  // --- #251: blocker surface ---
+
+  test('surfaces the latest agent_blocked event with resource + hint', () => {
+    const task = buildTask();
+    const events: TaskEvent[] = [
+      mkEvent({
+        event_id: '01ARZ3NDEKTSV4RRFFQ69G5F10',
+        event_type: 'agent_blocked',
+        timestamp: '2026-04-29T15:29:20Z', // 60s before NOW
+        metadata: {
+          kind: 'egress_denied',
+          detail: 'connection refused',
+          remediation_hint: 'allowlist registry.npmjs.org in DNS Firewall',
+          retryable: false,
+          resource: 'registry.npmjs.org',
+        },
+      }),
+    ];
+    const rendered = formatStatusSnapshot(task, events, NOW);
+    expect(rendered).toContain('Blocker:       egress_denied [registry.npmjs.org] (1m 00s ago) — allowlist registry.npmjs.org in DNS Firewall');
+  });
+
+  test('surfaces the most recent blocker when several were emitted', () => {
+    const task = buildTask();
+    const events: TaskEvent[] = [
+      mkEvent({
+        event_id: '01ARZ3NDEKTSV4RRFFQ69G5F10',
+        event_type: 'agent_blocked',
+        timestamp: '2026-04-29T15:00:00Z', // earlier
+        metadata: {
+          kind: 'dependency_unreachable',
+          detail: 'npm registry timeout',
+          remediation_hint: 'retry the task',
+          retryable: true,
+          resource: 'registry.npmjs.org',
+        },
+      }),
+      mkEvent({
+        event_id: '01ARZ3NDEKTSV4RRFFQ69G5F20',
+        event_type: 'agent_blocked',
+        timestamp: '2026-04-29T15:29:20Z', // later → wins
+        metadata: {
+          kind: 'egress_denied',
+          detail: 'connection refused',
+          remediation_hint: 'allowlist api.example.com in DNS Firewall',
+          retryable: false,
+          resource: 'api.example.com',
+        },
+      }),
+    ];
+    const rendered = formatStatusSnapshot(task, events, NOW);
+    expect(rendered).toContain('Blocker:       egress_denied [api.example.com]');
+    expect(rendered).not.toContain('dependency_unreachable');
+  });
+
+  test('omits the Blocker line when there is no agent_blocked event', () => {
+    const task = buildTask();
+    const rendered = formatStatusSnapshot(task, [], NOW);
+    expect(rendered).not.toContain('Blocker:');
+  });
+
+  test('suppresses a historical Blocker line on a COMPLETED task (#251 review)', () => {
+    // A task that hit a blocker, self-remediated, and reached COMPLETED must not
+    // show the stale ⛔ — that would misrepresent a success as blocked.
+    const task = buildTask({ status: 'COMPLETED' });
+    const events: TaskEvent[] = [
+      mkEvent({
+        event_id: '01ARZ3NDEKTSV4RRFFQ69G5F30',
+        event_type: 'agent_blocked',
+        timestamp: '2026-04-29T15:29:20Z',
+        metadata: {
+          kind: 'dependency_unreachable',
+          detail: 'npm registry timeout',
+          remediation_hint: 'retry the task',
+          retryable: true,
+          resource: 'registry.npmjs.org',
+        },
+      }),
+    ];
+    const rendered = formatStatusSnapshot(task, events, NOW);
+    expect(rendered).not.toContain('Blocker:');
+  });
+
+  test('still shows the Blocker line on a FAILED task (#251 review — guard is COMPLETED-only)', () => {
+    // The suppression is narrow: on a failure state the blocker is the
+    // actionable cause and must stay visible. Guards against a mistaken
+    // broadening to isTerminalStatus().
+    const task = buildTask({ status: 'FAILED' });
+    const events: TaskEvent[] = [
+      mkEvent({
+        event_id: '01ARZ3NDEKTSV4RRFFQ69G5F40',
+        event_type: 'agent_blocked',
+        timestamp: '2026-04-29T15:29:20Z',
+        metadata: {
+          kind: 'egress_denied',
+          detail: 'connection refused',
+          remediation_hint: 'allowlist api.example.com in DNS Firewall',
+          retryable: false,
+          resource: 'api.example.com',
+        },
+      }),
+    ];
+    const rendered = formatStatusSnapshot(task, events, NOW);
+    expect(rendered).toContain('Blocker:       egress_denied [api.example.com]');
   });
 });

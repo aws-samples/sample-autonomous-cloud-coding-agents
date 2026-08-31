@@ -23,9 +23,12 @@
  * @param maxLen - the maximum length of the returned string (including the "...").
  * @returns the truncated string.
  */
+/** Length of the "..." suffix appended by {@link truncate}. */
+const TRUNCATE_ELLIPSIS_LENGTH = 3;
+
 export function truncate(text: string, maxLen: number): string {
   if (text.length <= maxLen) return text;
-  return text.slice(0, maxLen - 3) + '...';
+  return text.slice(0, maxLen - TRUNCATE_ELLIPSIS_LENGTH) + '...';
 }
 
 /**

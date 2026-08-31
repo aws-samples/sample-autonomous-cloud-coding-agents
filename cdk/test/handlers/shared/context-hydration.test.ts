@@ -19,9 +19,18 @@
 
 // --- Mocks ---
 const mockSmSend = jest.fn();
+// Minimal stand-in for the SDK's ResourceNotFoundException so `instanceof`
+// checks in resolveGitHubToken work against thrown mock errors (#251).
+class MockResourceNotFoundException extends Error {
+  constructor(message = 'Secrets Manager can’t find the specified secret.') {
+    super(message);
+    this.name = 'ResourceNotFoundException';
+  }
+}
 jest.mock('@aws-sdk/client-secrets-manager', () => ({
   SecretsManagerClient: jest.fn(() => ({ send: mockSmSend })),
   GetSecretValueCommand: jest.fn((input: unknown) => ({ _type: 'GetSecretValue', input })),
+  ResourceNotFoundException: MockResourceNotFoundException,
 }));
 
 const mockBedrockSend = jest.fn();
@@ -54,7 +63,6 @@ import {
   hydrateContext,
   resolveGitHubToken,
   screenWithGuardrail,
-  type ContentTrustLevel,
   type GitHubIssueContext,
   type GuardrailScreeningResult,
   type IssueComment,
@@ -67,6 +75,15 @@ global.fetch = mockFetch as unknown as typeof fetch;
 beforeEach(() => {
   jest.clearAllMocks();
   clearTokenCache();
+  // hydrateContext falls back to process.env.MEMORY_ID when no memoryId option
+  // is passed (context-hydration.ts:990). If MEMORY_ID leaks into the jest
+  // process env (set by another test file, or the deploy env when the suite
+  // runs in-container), the "memoryId not provided" tests would spuriously call
+  // loadMemoryContext and fail — an order/environment-dependent flake that
+  // forced the fork's build-gate to be bypassed with `git push --no-verify`.
+  // Pin a clean "no ambient memory" baseline; tests that want memory pass the
+  // memoryId option explicitly.
+  delete process.env.MEMORY_ID;
 });
 
 // ---------------------------------------------------------------------------
@@ -121,9 +138,41 @@ describe('resolveGitHubToken', () => {
     expect(mockSmSend).toHaveBeenCalledTimes(1); // Only one SM call
   });
 
-  test('throws when secret is empty', async () => {
+  test('throws a missing_secret blocker when secret is empty', async () => {
     mockSmSend.mockResolvedValueOnce({ SecretString: undefined });
-    await expect(resolveGitHubToken('arn:test')).rejects.toThrow('GitHub token secret is empty');
+    // #251: empty secret → canonical BLOCKED[missing_secret] reason naming the ARN.
+    await expect(resolveGitHubToken('arn:test')).rejects.toThrow(
+      'BLOCKED[missing_secret]: the required GitHub token secret is empty (resource: arn:test)',
+    );
+  });
+
+  test('throws a missing_secret blocker when secret does not exist', async () => {
+    mockSmSend.mockRejectedValueOnce(new MockResourceNotFoundException());
+    // #251: ResourceNotFoundException → canonical reason naming the ARN so the
+    // classifier can tell the operator exactly which secret to wire.
+    const arn = 'arn:aws:secretsmanager:us-east-1:123:secret:missing';
+    await expect(resolveGitHubToken(arn)).rejects.toThrow(
+      `BLOCKED[missing_secret]: the required GitHub token secret does not exist (resource: ${arn})`,
+    );
+  });
+
+  test('wraps an unreadable-secret SM error as an auth_failure blocker', async () => {
+    // #251 review fix: a secret that exists but can't be read (AccessDenied,
+    // throttling exhausted) is an environmental auth_failure — not a missing
+    // secret and not a silent-degrade. Wrap with the canonical reason naming the
+    // ARN so the classifier routes to the auth remedy instead of stranding the
+    // task with minimal context and no token.
+    const arn = 'arn:aws:secretsmanager:us-east-1:123:secret:denied';
+    mockSmSend.mockRejectedValueOnce(new Error('AccessDeniedException'));
+    await expect(resolveGitHubToken(arn)).rejects.toThrow(
+      `BLOCKED[auth_failure]: the required GitHub token secret could not be read (resource: ${arn})`,
+    );
+  });
+
+  test('preserves the underlying SM error as the cause on an unreadable secret', async () => {
+    const underlying = new Error('AccessDeniedException');
+    mockSmSend.mockRejectedValueOnce(underlying);
+    await expect(resolveGitHubToken('arn:test')).rejects.toMatchObject({ cause: underlying });
   });
 
   test('caches tokens per ARN (different ARNs get different tokens)', async () => {
@@ -571,6 +620,71 @@ describe('hydrateContext', () => {
     updated_at: '2024-01-01T00:00:00Z',
   };
 
+  test('repo-less task: assembles from task_description, no GitHub fetch (#248 Phase 3)', async () => {
+    // No repo ⇒ the repo-less branch: no issue/PR fetch, no Repository: line,
+    // prompt is task_description only.
+    const { repo: _omit, ...repoless } = baseTask;
+    const task = {
+      ...repoless,
+      resolved_workflow: { id: 'default/agent-v1', version: '1.0.0' },
+      task_description: 'Summarise these papers',
+    };
+    const result = await hydrateContext(task as any);
+
+    expect(result.version).toBe(1);
+    expect(result.sources).toContain('task_description');
+    expect(result.sources).not.toContain('issue');
+    expect(result.sources).not.toContain('pull_request');
+    expect(result.user_prompt).toContain('Summarise these papers');
+    expect(result.user_prompt).not.toContain('Repository:');
+    // No GitHub calls for a repo-less task.
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  test('repo-less task: memory is keyed per-user (user:{user_id}), not per-repo (#248 Phase 3)', async () => {
+    // ADR-014 addendum: a repo-less task has no repo namespace; memory keys on
+    // user:{user_id}. This is the assertion that pins the per-user keying.
+    const { repo: _omit, ...repoless } = baseTask;
+    const task = {
+      ...repoless,
+      user_id: 'cognito-sub-xyz',
+      resolved_workflow: { id: 'default/agent-v1', version: '1.0.0' },
+      task_description: 'Summarise these papers',
+    };
+    mockLoadMemoryContext.mockResolvedValueOnce({ repo_knowledge: ['prior'], past_episodes: [] });
+
+    const result = await hydrateContext(task as any, { memoryId: 'mem-test-1' });
+
+    expect(mockLoadMemoryContext).toHaveBeenCalledWith(
+      'mem-test-1', 'user:cognito-sub-xyz', 'Summarise these papers',
+    );
+    expect(result.sources).toContain('memory');
+  });
+
+  test('repo-OPTIONAL workflow given a repo takes the repo-bound path (#248 Phase 3)', async () => {
+    // default/agent-v1 is repo-optional, but when a repo IS present the repo-bound
+    // branch runs (issue fetch, repo-keyed memory) — keyed on repo presence, not
+    // the workflow flag.
+    mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_test' });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ number: 7, title: 'T', body: 'B', comments: 0 }),
+    });
+    mockBedrockSend.mockResolvedValueOnce({ action: 'NONE' });
+
+    const task = {
+      ...baseTask, // has repo: 'org/repo'
+      resolved_workflow: { id: 'default/agent-v1', version: '1.0.0' },
+      issue_number: 7,
+      task_description: 'Do it',
+    };
+    const result = await hydrateContext(task as any);
+
+    // Repo present ⇒ Repository: line + issue fetched (repo-bound path).
+    expect(result.user_prompt).toContain('Repository: org/repo');
+    expect(mockFetch).toHaveBeenCalled();
+  });
+
   test('full path: issue + task description', async () => {
     mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_test' });
     mockFetch
@@ -638,15 +752,15 @@ describe('hydrateContext', () => {
     process.env.GITHUB_TOKEN_SECRET_ARN = originalArn;
   });
 
-  test('Secrets Manager failure — proceeds without issue', async () => {
+  test('unreadable token secret propagates as an auth_failure blocker (no silent degrade)', async () => {
+    // #251 review fix: a token secret that exists but can't be read (SM
+    // AccessDenied / unavailable) must NOT degrade to minimal context — the
+    // agent would have no token to clone/push and fail opaquely. Propagate the
+    // canonical BLOCKED[auth_failure] reason so the classifier surfaces it.
     mockSmSend.mockRejectedValueOnce(new Error('SM unavailable'));
 
     const task = { ...baseTask, issue_number: 42, task_description: 'Fix' };
-    const result = await hydrateContext(task as any);
-
-    expect(result.sources).not.toContain('issue');
-    expect(result.sources).toContain('task_description');
-    expect(result.user_prompt).toContain('Fix');
+    await expect(hydrateContext(task as any)).rejects.toThrow('BLOCKED[auth_failure]:');
   });
 
   test('no issue and no task description — minimal prompt', async () => {
@@ -739,7 +853,7 @@ describe('hydrateContext', () => {
 
     const task = {
       ...baseTask,
-      task_type: 'pr_review',
+      resolved_workflow: { id: 'coding/pr-review-v1', version: '1.0.0' },
       pr_number: 55,
     };
     const result = await hydrateContext(task as any);
@@ -1198,7 +1312,7 @@ describe('hydrateContext — guardrail screening', () => {
     status_created_at: 'SUBMITTED#2024-01-01T00:00:00Z',
     created_at: '2024-01-01T00:00:00Z',
     updated_at: '2024-01-01T00:00:00Z',
-    task_type: 'pr_iteration',
+    resolved_workflow: { id: 'coding/pr-iteration-v1', version: '1.0.0' },
     pr_number: 10,
   };
 
@@ -1277,7 +1391,7 @@ describe('hydrateContext — guardrail screening', () => {
 
     const prReviewTask = {
       ...basePrTask,
-      task_type: 'pr_review',
+      resolved_workflow: { id: 'coding/pr-review-v1', version: '1.0.0' },
       pr_number: 20,
     };
     const result = await hydrateContext(prReviewTask as any);
@@ -1297,7 +1411,7 @@ describe('hydrateContext — guardrail screening', () => {
     status_created_at: 'SUBMITTED#2024-01-01T00:00:00Z',
     created_at: '2024-01-01T00:00:00Z',
     updated_at: '2024-01-01T00:00:00Z',
-    task_type: 'new_task',
+    resolved_workflow: { id: 'coding/new-task-v1', version: '1.0.0' },
     task_description: 'Fix it',
   };
 
@@ -1432,7 +1546,7 @@ describe('hydrateContext — content_trust metadata', () => {
     status_created_at: 'SUBMITTED#2024-01-01T00:00:00Z',
     created_at: '2024-01-01T00:00:00Z',
     updated_at: '2024-01-01T00:00:00Z',
-    task_type: 'new_task',
+    resolved_workflow: { id: 'coding/new-task-v1', version: '1.0.0' },
     task_description: 'Fix the bug',
   };
 
@@ -1485,7 +1599,7 @@ describe('hydrateContext — content_trust metadata', () => {
 
     const prTask = {
       ...baseTask,
-      task_type: 'pr_iteration',
+      resolved_workflow: { id: 'coding/pr-iteration-v1', version: '1.0.0' },
       pr_number: 10,
     };
     const result = await hydrateContext(prTask as any);
@@ -1497,7 +1611,7 @@ describe('hydrateContext — content_trust metadata', () => {
   test('PR fetch fallback includes content_trust for task_description only', async () => {
     const prTask = {
       ...baseTask,
-      task_type: 'pr_iteration',
+      resolved_workflow: { id: 'coding/pr-iteration-v1', version: '1.0.0' },
       pr_number: 10,
     };
     // No SM mock — PR fetch will fail

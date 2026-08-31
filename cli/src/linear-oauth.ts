@@ -86,7 +86,28 @@ export interface StoredLinearOauthToken {
   readonly updated_at: string;
   /** Cognito sub of the admin who ran `bgagent linear setup`. Audit only. */
   readonly installed_by_platform_user_id: string;
+  /**
+   * Per-workspace Linear webhook signing secret (`lin_wh_…`).
+   *
+   * Linear generates a fresh signing secret per webhook subscription, and
+   * webhook subscriptions are workspace-scoped — so a single stack-wide
+   * signing secret can't verify events from multiple workspaces. The
+   * webhook receiver looks this up by orgId at verify time.
+   *
+   * Optional for back-compat: tokens written before the per-workspace
+   * signing flow won't have it, and the receiver falls back to the
+   * stack-wide `LINEAR_WEBHOOK_SECRET_ARN` for those installs.
+   */
+  readonly webhook_signing_secret?: string;
 }
+
+/**
+ * Common prefix for all per-workspace Linear OAuth secrets. The full
+ * secret name is `${LINEAR_OAUTH_SECRET_PREFIX}<slug>`. Use this when
+ * scanning Secrets Manager for every workspace install (e.g. the CLI's
+ * `list-projects` command queries every workspace it can find).
+ */
+export const LINEAR_OAUTH_SECRET_PREFIX = 'bgagent-linear-oauth-';
 
 /**
  * Build the secret name for a given Linear workspace slug. Matches the
@@ -94,7 +115,7 @@ export interface StoredLinearOauthToken {
  * so changes here MUST be matched by the IAM resource pattern in CDK.
  */
 export function linearOauthSecretName(workspaceSlug: string): string {
-  return `bgagent-linear-oauth-${workspaceSlug}`;
+  return `${LINEAR_OAUTH_SECRET_PREFIX}${workspaceSlug}`;
 }
 
 /**
@@ -127,7 +148,8 @@ export function isAccessTokenExpiring(
  * complete PKCE. Without it, Linear rejects with `invalid_grant`.
  */
 export function generatePkce(): { codeVerifier: string; codeChallenge: string } {
-  const verifierBytes = crypto.randomBytes(32);
+  const VERIFIER_BYTES = 32;
+  const verifierBytes = crypto.randomBytes(VERIFIER_BYTES);
   const codeVerifier = verifierBytes.toString('base64url');
   const challengeBytes = crypto.createHash('sha256').update(codeVerifier).digest();
   const codeChallenge = challengeBytes.toString('base64url');
@@ -137,6 +159,14 @@ export function generatePkce(): { codeVerifier: string; codeChallenge: string } 
 /**
  * Build the Linear authorization URL the CLI opens in the browser.
  * `actorApp: true` adds `actor=app` (the Agent install variant).
+ *
+ * ``forceConsent`` adds ``prompt=consent``, which Linear documents as showing
+ * the consent screen "every time, even if all scopes were previously granted".
+ * That is what makes RE-authorization possible: without it, an app already
+ * installed in the workspace short-circuits with "already installed" and never
+ * returns an authorization code — so the one command meant to recover a revoked
+ * authorization could not recover it (live-caught 2026-07-25, where a workspace's
+ * grant was revoked while the app install stayed active).
  */
 export function buildAuthorizationUrl(opts: {
   clientId: string;
@@ -145,6 +175,7 @@ export function buildAuthorizationUrl(opts: {
   codeChallenge: string;
   scopes?: readonly string[];
   actorApp?: boolean;
+  forceConsent?: boolean;
 }): string {
   const params = new URLSearchParams({
     client_id: opts.clientId,
@@ -160,6 +191,9 @@ export function buildAuthorizationUrl(opts: {
   });
   if (opts.actorApp ?? true) {
     params.set('actor', 'app');
+  }
+  if (opts.forceConsent) {
+    params.set('prompt', 'consent');
   }
   return `${LINEAR_AUTHORIZE_ENDPOINT}?${params.toString()}`;
 }
@@ -231,7 +265,7 @@ async function parseTokenResponse(
   let body: unknown;
   try {
     body = await response.json();
-  } catch (err) {
+  } catch (_err) {
     throw new CliError(
       `Linear /oauth/token returned non-JSON during ${contextLabel}: HTTP ${response.status}`,
     );
@@ -270,4 +304,163 @@ function isLinearTokenResponse(value: unknown): value is LinearTokenResponse {
  */
 export function computeExpiresAt(expiresInSeconds: number, now: Date = new Date()): string {
   return new Date(now.getTime() + expiresInSeconds * 1000).toISOString();
+}
+
+/** What `bgagent linear setup` should do about the webhook signing secret. */
+export type WebhookSecretAction =
+  /** This workspace already has its own signing secret — keep it (re-run). */
+  | { readonly kind: 'preserve'; readonly secret: string }
+  /** No per-workspace secret; mirror the stack-wide one (safe for the first
+   *  workspace, ambiguous for an additional one — caller should warn). */
+  | { readonly kind: 'mirror-stackwide' }
+  /** No secret anywhere — prompt the operator for it (first install). */
+  | { readonly kind: 'prompt' };
+
+/**
+ * Decide which webhook signing secret `setup` should use, WITHOUT clobbering a
+ * working per-workspace secret.
+ *
+ * The bug this fixes: re-running `setup` on an already-installed workspace used
+ * to lift the *stack-wide* signing secret into the per-workspace bundle. That's
+ * correct only for the FIRST workspace — the stack-wide secret belongs to
+ * whichever workspace installed first, so for any additional workspace it
+ * overwrites the correct per-workspace secret with the wrong one, silently
+ * breaking signature verification (webhook 401 "Invalid signature").
+ *
+ * Rule: an existing valid per-workspace secret always wins (rotation is
+ * `update-webhook-secret`'s job); else mirror the stack-wide secret if present;
+ * else prompt. Pure — the caller supplies what it read from Secrets Manager.
+ *
+ * @param existingPerWorkspaceSecret the `webhook_signing_secret` on this
+ *        workspace's OAuth bundle BEFORE the setup rewrite (undefined if none).
+ * @param stackWideConfigured whether the stack-wide fallback secret is set.
+ */
+export function resolveWebhookSecretAction(
+  existingPerWorkspaceSecret: string | undefined,
+  stackWideConfigured: boolean,
+): WebhookSecretAction {
+  if (existingPerWorkspaceSecret?.startsWith('lin_wh_')) {
+    return { kind: 'preserve', secret: existingPerWorkspaceSecret };
+  }
+  if (stackWideConfigured) {
+    return { kind: 'mirror-stackwide' };
+  }
+  return { kind: 'prompt' };
+}
+
+/**
+ * Read this workspace's EXISTING `webhook_signing_secret` before `setup`
+ * overwrites the OAuth bundle — FAIL CLOSED (#612 review B1).
+ *
+ * `fetchSecretString` fetches the prior per-workspace OAuth `SecretString`
+ * (typically a `SecretsManagerClient.send(GetSecretValueCommand)` wrapper). The
+ * value fed to {@link resolveWebhookSecretAction} decides whether the existing
+ * secret is preserved or the stack-wide one is mirrored over it — so a wrong
+ * `undefined` here re-arms the #611 clobber. Therefore:
+ *
+ *   • secret missing (`ResourceNotFoundException`) → genuine first install,
+ *     return undefined (nothing to preserve).
+ *   • secret present with a valid `lin_wh_…` `webhook_signing_secret` → return it.
+ *   • secret present but no/malformed secret → return undefined (nothing valid
+ *     to preserve; the caller mirrors/prompts).
+ *   • ANY OTHER error (AccessDenied, KMSAccessDenied, Throttling, network, or a
+ *     corrupt-JSON bundle) → THROW. Swallowing it would leave undefined and
+ *     silently clobber a working secret behind a green "Setup complete".
+ *
+ * `isNotFound` classifies the fetch error; callers pass an
+ * `name === 'ResourceNotFoundException'` check. On a throw the caller re-raises
+ * a CliError with an IAM/KMS hint (mirroring `isWebhookSecretConfigured`).
+ */
+export async function readExistingWebhookSecret(
+  fetchSecretString: () => Promise<string | undefined>,
+  isNotFound: (err: unknown) => boolean,
+): Promise<string | undefined> {
+  let raw: string | undefined;
+  try {
+    raw = await fetchSecretString();
+  } catch (err) {
+    if (isNotFound(err)) return undefined; // genuine first install
+    throw err; // fail closed — caller wraps with an actionable CliError
+  }
+  if (!raw) return undefined;
+  // A corrupt-but-present bundle must surface (JSON.parse throws → propagates),
+  // NOT silently become "nothing to preserve" → mirror-stackwide.
+  const bundle = JSON.parse(raw) as Partial<StoredLinearOauthToken>;
+  return bundle.webhook_signing_secret?.startsWith('lin_wh_')
+    ? bundle.webhook_signing_secret
+    : undefined;
+}
+
+/**
+ * Attempt a workspace's refresh and PERSIST the rotated token — the only way to
+ * settle "is this expired token's grant still alive?" definitively.
+ *
+ * Persistence is the whole safety property, not a convenience. Linear rotates the
+ * refresh token on every use, so a caller that refreshes and discards the result
+ * has silently consumed the workspace's only key: the stored token is now the
+ * spent one, and the workspace is stranded exactly as if it had been revoked.
+ * (That is not hypothetical — an ad-hoc probe did it to a healthy workspace on
+ * 2026-07-25 and it had to be repaired by hand.) So this function refreshes and
+ * writes in one step, and reports `error` rather than a verdict if the write
+ * fails, because a rotation that happened but wasn't saved is the dangerous case
+ * and must not be reported as health.
+ *
+ * `readSecret` / `writeSecret` are injected so this stays testable without
+ * Secrets Manager and so the caller owns client construction.
+ */
+export async function verifyLinearRefreshAndPersist(args: {
+  readSecret: () => Promise<string | undefined>;
+  writeSecret: (secretString: string) => Promise<void>;
+  fetchImpl?: typeof fetch;
+  now?: Date;
+}): Promise<'refreshed' | 'rejected' | 'error'> {
+  let stored: StoredLinearOauthToken;
+  try {
+    const raw = await args.readSecret();
+    if (!raw) return 'error';
+    stored = JSON.parse(raw) as StoredLinearOauthToken;
+  } catch {
+    return 'error';
+  }
+  if (!stored.refresh_token || !stored.client_id || !stored.client_secret) {
+    // Nothing to attempt: without these the grant cannot be renewed by anyone,
+    // which is a real dead end rather than an inconclusive probe.
+    return 'rejected';
+  }
+
+  let refreshed;
+  try {
+    refreshed = await refreshAccessToken({
+      refreshToken: stored.refresh_token,
+      clientId: stored.client_id,
+      clientSecret: stored.client_secret,
+      ...(args.fetchImpl && { fetchImpl: args.fetchImpl }),
+    });
+  } catch (err) {
+    // Only Linear's own `invalid_grant` proves the grant is dead. A network
+    // blip, a 5xx, or a malformed body must NOT be reported as revoked — that
+    // would send an operator to re-authorize a working workspace.
+    const message = err instanceof Error ? err.message : String(err);
+    return message.includes('invalid_grant') ? 'rejected' : 'error';
+  }
+
+  const now = args.now ?? new Date();
+  const next: StoredLinearOauthToken = {
+    ...stored,
+    access_token: refreshed.access_token,
+    // Persist the ROTATED refresh token; re-using the old one always fails.
+    refresh_token: refreshed.refresh_token ?? stored.refresh_token,
+    expires_at: computeExpiresAt(refreshed.expires_in, now),
+    scope: refreshed.scope,
+    updated_at: now.toISOString(),
+  };
+  try {
+    await args.writeSecret(JSON.stringify(next));
+  } catch {
+    // The rotation HAPPENED but wasn't saved, so the stored token is now spent.
+    // Report `error`, never `refreshed`: the operator must see that this needs
+    // attention rather than a green tick over a workspace we just stranded.
+    return 'error';
+  }
+  return 'refreshed';
 }

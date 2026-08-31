@@ -19,13 +19,15 @@
 
 import {
   type CreateTaskRequest,
-  type TaskType,
   type AttachmentType,
   type ValidatedAttachment,
   type InlineAttachment,
   type PresignedAttachment,
   type UrlAttachment,
+  MAX_BUDGET_USD_MIN,
+  MAX_BUDGET_USD_MAX,
 } from './types';
+import { type WorkflowRequiredInputs } from './workflows';
 import { TaskStatus } from '../../constructs/task-status';
 
 /** Default maximum agent turns per task. */
@@ -36,16 +38,16 @@ export const MIN_MAX_TURNS = 1;
 export const MAX_MAX_TURNS = 500;
 /** Maximum allowed length for task_description. */
 export const MAX_TASK_DESCRIPTION_LENGTH = 10_000;
-/** Minimum allowed value for max_budget_usd (1 cent). */
-export const MIN_MAX_BUDGET_USD = 0.01;
-/** Maximum allowed value for max_budget_usd ($100). */
-export const MAX_MAX_BUDGET_USD = 100;
 
-const REPO_PATTERN = /^[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+$/;
+// Dots are legal inside segments (`vercel/next.js`) but a segment of ONLY
+// dots (`owner/..`, `./repo`) is a path token, not a repo name — the
+// lookaheads reject those so URL/key interpolation never sees `.`/`..`.
+const REPO_PATTERN = /^(?!\.+\/)[a-zA-Z0-9._-]+\/(?!\.+$)[a-zA-Z0-9._-]+$/;
 const IDEMPOTENCY_KEY_PATTERN = /^[a-zA-Z0-9_-]{1,128}$/;
 const WEBHOOK_NAME_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9 _-]{0,62}[a-zA-Z0-9]$/;
 // ULID format: 26 chars, Crockford Base32 alphabet (0-9, A-Z excluding I, L, O, U).
 // Matches the ``_generate_ulid`` output in ``agent/src/progress_writer.py``.
+export const ULID_LENGTH = 26;
 const ULID_PATTERN = /^[0-9A-HJKMNP-TV-Z]{26}$/;
 const ALL_STATUSES = new Set(Object.values(TaskStatus));
 
@@ -59,7 +61,7 @@ export function parseBody<T>(body: string | null): T | null {
   try {
     return JSON.parse(body) as T;
   } catch {
-    return null;
+    return null; // nosemgrep: ts-silent-success-masking -- parseBody contract: invalid JSON yields null, same as a missing body
   }
 }
 
@@ -73,17 +75,44 @@ export function isValidRepo(repo: string): boolean {
 }
 
 /**
- * Validate that a create task request has at least one task specification.
- * @param req - the parsed create task request.
- * @returns true if the request has a sufficient task specification:
- *   issue_number or task_description for new_task; pr_number for pr_iteration or pr_review.
+ * Whether a single workflow input is satisfied by the request body.
  */
-export function hasTaskSpec(req: CreateTaskRequest): boolean {
-  if ((req.task_type === 'pr_iteration' || req.task_type === 'pr_review') && req.pr_number !== undefined && req.pr_number !== null) {
-    return true;
+function inputSatisfied(req: CreateTaskRequest, input: string): boolean {
+  switch (input) {
+    case 'issue_number':
+      return req.issue_number !== undefined && req.issue_number !== null;
+    case 'pr_number':
+      return req.pr_number !== undefined && req.pr_number !== null;
+    case 'task_description':
+      return req.task_description !== undefined
+        && req.task_description !== null
+        && req.task_description.trim().length > 0;
+    default:
+      // Unknown inputs are not CDK-validatable; treat as satisfied so the
+      // agent-side validator remains the authority for novel inputs.
+      return true;
   }
-  return (req.issue_number !== undefined && req.issue_number !== null) ||
-    (req.task_description !== undefined && req.task_description !== null && req.task_description.trim().length > 0);
+}
+
+/**
+ * Validate that a create task request satisfies the resolved workflow's
+ * required-input contract (replaces the former ``task_type``-keyed check).
+ * @param req - the parsed create task request.
+ * @param requiredInputs - the resolved workflow's ``required_inputs`` (CDK mirror).
+ * @returns true if the request supplies the inputs the workflow needs.
+ */
+export function hasTaskSpec(req: CreateTaskRequest, requiredInputs: WorkflowRequiredInputs): boolean {
+  const allOf = requiredInputs.allOf ?? [];
+  if (!allOf.every((input) => inputSatisfied(req, input))) {
+    return false;
+  }
+  const oneOf = requiredInputs.oneOf ?? [];
+  if (oneOf.length > 0 && !oneOf.some((input) => inputSatisfied(req, input))) {
+    return false;
+  }
+  // A workflow that declares neither all_of nor one_of has no input contract
+  // CDK must enforce (the agent-side validator still governs); accept.
+  return true;
 }
 
 /**
@@ -136,7 +165,7 @@ export function decodePaginationToken(token: string | undefined): Record<string,
     const json = Buffer.from(token, 'base64').toString('utf-8');
     return JSON.parse(json) as Record<string, unknown>;
   } catch {
-    return undefined;
+    return undefined; // nosemgrep: ts-silent-success-masking -- invalid pagination token is rejected; undefined is the decode contract, not masked infra failure
   }
 }
 
@@ -160,7 +189,7 @@ export function encodePaginationToken(lastKey: Record<string, unknown> | undefin
  * @returns true if the value matches the ULID shape.
  */
 export function isValidUlid(value: string): boolean {
-  if (typeof value !== 'string' || value.length !== 26) return false;
+  if (typeof value !== 'string' || value.length !== ULID_LENGTH) return false;
   return ULID_PATTERN.test(value.toUpperCase());
 }
 
@@ -196,7 +225,11 @@ export function validateMaxTurns(value: unknown): number | null | undefined {
 export function validateMaxBudgetUsd(value: unknown): number | null | undefined {
   if (value === undefined || value === null) return undefined;
   if (typeof value !== 'number') return null;
-  if (value < MIN_MAX_BUDGET_USD || value > MAX_MAX_BUDGET_USD) return null;
+  // NaN passes the typeof check and both range comparisons below are false
+  // for it — guard explicitly (JSON.parse can't produce NaN, but non-JSON
+  // callers can).
+  if (!Number.isFinite(value)) return null;
+  if (value < MAX_BUDGET_USD_MIN || value > MAX_BUDGET_USD_MAX) return null;
   return value;
 }
 
@@ -216,23 +249,6 @@ export function isValidTaskDescriptionLength(description: string): boolean {
  */
 export function computeTtlEpoch(retentionDays: number): number {
   return Math.floor(Date.now() / 1000) + retentionDays * 86400;
-}
-
-/** Valid task type values. Compile-time check ensures this stays in sync with TaskType. */
-const TASK_TYPE_LIST = ['new_task', 'pr_iteration', 'pr_review'] as const satisfies readonly TaskType[];
-type _AssertExhaustive = Exclude<TaskType, (typeof TASK_TYPE_LIST)[number]> extends never ? true : never;
-const _exhaustiveCheck: _AssertExhaustive = true;
-export const VALID_TASK_TYPES = new Set<string>(TASK_TYPE_LIST);
-
-/**
- * Validate a task_type value from a request body.
- * @param value - the raw value from the request.
- * @returns true if the value is a valid task type or undefined/null (defaults to 'new_task').
- */
-export function isValidTaskType(value: unknown): boolean {
-  if (value === undefined || value === null) return true;
-  if (typeof value !== 'string') return false;
-  return VALID_TASK_TYPES.has(value);
 }
 
 /**
@@ -256,17 +272,29 @@ export function validatePrNumber(value: unknown): number | null | undefined {
 export const MAX_ATTACHMENTS_PER_TASK = 10;
 /** Maximum decoded size for inline attachments. */
 export const MAX_INLINE_ATTACHMENT_SIZE_BYTES = 500 * 1024;
+/** Maximum total decoded inline size per request (MiB). */
+const MAX_TOTAL_INLINE_SIZE_MB = 3;
 /** Maximum total decoded inline size per request. */
-export const MAX_TOTAL_INLINE_SIZE_BYTES = 3 * 1024 * 1024;
+export const MAX_TOTAL_INLINE_SIZE_BYTES = MAX_TOTAL_INLINE_SIZE_MB * 1024 * 1024;
+/** Maximum total attachment size per task (MiB). */
+const MAX_TOTAL_ATTACHMENT_SIZE_MB = 50;
 /** Maximum size per attachment (inline or presigned, decoded). */
 export const MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024;
 /** Maximum total attachment size per task. */
-export const MAX_TOTAL_ATTACHMENT_SIZE_BYTES = 50 * 1024 * 1024;
+export const MAX_TOTAL_ATTACHMENT_SIZE_BYTES = MAX_TOTAL_ATTACHMENT_SIZE_MB * 1024 * 1024;
 
 /** Compile-time exhaustiveness check for AttachmentType. */
 const ATTACHMENT_TYPE_LIST = ['image', 'file', 'url'] as const satisfies readonly AttachmentType[];
 type _AssertAttachmentExhaustive = Exclude<AttachmentType, (typeof ATTACHMENT_TYPE_LIST)[number]> extends never ? true : never;
+// The ASSIGNMENT is the guard: if AttachmentType gains a member missing from
+// ATTACHMENT_TYPE_LIST, _AssertAttachmentExhaustive resolves to `never` and
+// assigning `true` is a hard compile error. (A `true as never` assertion would
+// NOT error — assertions are permitted whenever either side is assignable — so
+// it must stay an assignment.) `void` consumes the binding to satisfy
+// tsconfig noUnusedLocals, which — unlike @typescript-eslint/no-unused-vars,
+// already exempt via its ^_ varsIgnorePattern — does not honor the _ prefix.
 const _attachmentExhaustiveCheck: _AssertAttachmentExhaustive = true;
+void _attachmentExhaustiveCheck;
 const VALID_ATTACHMENT_TYPES = new Set<string>(ATTACHMENT_TYPE_LIST);
 
 /** Allowed image MIME types (PNG and JPEG only — passed directly to Bedrock). */
@@ -289,11 +317,23 @@ const ALLOWED_FILE_MIME_TYPES = new Set([
  * Magic byte signatures for content type validation.
  * Prevents polyglot files from bypassing screening.
  */
+/* eslint-disable @typescript-eslint/no-magic-numbers -- file format magic-byte signatures */
 const MAGIC_BYTES: ReadonlyArray<{ readonly mime: string; readonly bytes: readonly number[]; readonly offset?: number }> = [
   { mime: 'image/png', bytes: [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A] },
   { mime: 'image/jpeg', bytes: [0xFF, 0xD8, 0xFF] },
   { mime: 'application/pdf', bytes: [0x25, 0x50, 0x44, 0x46, 0x2D] }, // %PDF-
 ];
+/* eslint-enable @typescript-eslint/no-magic-numbers */
+
+/** Bytes scanned when validating text/JSON content for embedded nulls. */
+const TEXT_MAGIC_BYTE_CHECK_BYTES = 8192;
+
+/** First-byte markers that suggest JSON content. */
+const JSON_OBJECT_START_BYTE = 0x7B;
+const JSON_ARRAY_START_BYTE = 0x5B;
+
+/** Maximum filename length (bytes). */
+const MAX_FILENAME_LENGTH = 255;
 
 /**
  * Validate content against declared MIME type using magic bytes.
@@ -308,11 +348,26 @@ export function validateMagicBytes(data: Buffer, contentType: string): boolean {
     return sig.bytes.every((b, i) => data[offset + i] === b);
   }
 
-  // Text types: valid UTF-8, no null bytes in first 8 KB
+  // Text types: the WHOLE buffer must be valid, null-free UTF-8 (review #3 — an
+  // 8 KB ASCII preamble followed by binary must NOT pass; validate everything, not
+  // just a prefix). Attachments are already size-capped (MAX_ATTACHMENT_SIZE_BYTES),
+  // and this runs once at admission, so full-buffer decode is affordable.
+  //
+  // What this does and does NOT guarantee: it proves the bytes are decodable UTF-8
+  // text with no embedded NULs — enough to safely feed them to the text guardrail
+  // and store them. It does NOT prove the content is "harmless" — a valid-UTF-8
+  // SVG or HTML file labeled .txt passes (it IS text), and is then SCREENED AS TEXT
+  // by the Bedrock guardrail like any other text attachment. That's the intended
+  // contract: text is screened as text; binary (non-UTF-8 / NUL-bearing) is rejected.
   if (contentType.startsWith('text/') || contentType === 'application/json') {
-    const check = data.subarray(0, 8192);
-    for (let i = 0; i < check.length; i++) {
-      if (check[i] === 0) return false;
+    try {
+      // fatal:true throws on any invalid UTF-8 sequence (no U+FFFD substitution).
+      new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(data);
+    } catch {
+      return false; // not valid UTF-8 end-to-end → not a text attachment
+    }
+    for (let i = 0; i < data.length; i++) {
+      if (data[i] === 0) return false; // embedded NUL → binary, not text
     }
     return true;
   }
@@ -323,6 +378,29 @@ export function validateMagicBytes(data: Buffer, contentType: string): boolean {
 
 /**
  * Detect MIME type from magic bytes (for inline attachments without content_type).
+ *
+ * This is a DETECTION HEURISTIC, not a validation gate, and it deliberately
+ * keeps the cheap 8 KB prefix scan that {@link validateMagicBytes} no longer
+ * uses. The two differ on purpose:
+ *
+ *  - Here the answer is only a GUESS at what the caller probably sent, used to
+ *    fill in a missing `content_type`. Guessing `text/plain` grants nothing:
+ *    whatever this returns is handed straight to `isAllowedMimeType` and then
+ *    to `validateMagicBytes`, which re-checks the WHOLE buffer. A wrong guess
+ *    is caught one call later, so scanning more bytes here buys no safety.
+ *  - There the answer is an admission decision with nothing downstream to catch
+ *    a mistake, so it must hold for every byte.
+ *
+ * That re-check is what makes this safe, so it is load-bearing rather than
+ * incidental: `validateAttachments` deliberately runs `validateMagicBytes` on
+ * every inline attachment, DETECTED types included. It used to run only on
+ * declared ones, which left this path's 8 KB guess as the final word and let
+ * ~8 KB of ASCII followed by binary through as `text/plain`. Do not narrow that
+ * call site back to declared types only.
+ *
+ * Keep this function itself lenient: making it strict would reject attachments
+ * validation would have accepted (returning `null` instead of the correct type),
+ * turning a detection miss into a spurious rejection.
  */
 export function detectMimeTypeFromMagicBytes(data: Buffer): string | null {
   for (const sig of MAGIC_BYTES) {
@@ -332,7 +410,7 @@ export function detectMimeTypeFromMagicBytes(data: Buffer): string | null {
     }
   }
   // Try text detection
-  const check = data.subarray(0, 8192);
+  const check = data.subarray(0, TEXT_MAGIC_BYTE_CHECK_BYTES);
   let hasNullByte = false;
   for (let i = 0; i < check.length; i++) {
     if (check[i] === 0) { hasNullByte = true; break; }
@@ -340,7 +418,7 @@ export function detectMimeTypeFromMagicBytes(data: Buffer): string | null {
   if (!hasNullByte && data.length > 0) {
     // Guess JSON if it starts with { or [
     const first = data[0];
-    if (first === 0x7B || first === 0x5B) return 'application/json';
+    if (first === JSON_OBJECT_START_BYTE || first === JSON_ARRAY_START_BYTE) return 'application/json';
     return 'text/plain';
   }
   return null;
@@ -368,7 +446,7 @@ function isValidHttpsUrl(urlStr: string): boolean {
 
 /** Reject filenames with path traversal, null bytes, or unusual characters. */
 export function isValidFilename(filename: string): boolean {
-  if (filename.length === 0 || filename.length > 255) return false;
+  if (filename.length === 0 || filename.length > MAX_FILENAME_LENGTH) return false;
   if (filename.includes('/') || filename.includes('\\')) return false;
   if (filename.includes('\0')) return false;
   if (filename.startsWith('.') || filename.startsWith('-')) return false;
@@ -379,7 +457,7 @@ export function isValidFilename(filename: string): boolean {
 }
 
 /** Generate a default filename when none was provided. */
-function generateFilename(type: string, contentType: string, index: number): string {
+function generateFilename(_type: string, contentType: string, index: number): string {
   const ext = MIME_TO_EXTENSION[contentType] ?? 'bin';
   return `attachment_${index}.${ext}`;
 }
@@ -389,7 +467,7 @@ function filenameFromUrl(url: string, index: number): string {
   try {
     const parsed = new URL(url);
     const lastSegment = parsed.pathname.split('/').filter(Boolean).pop();
-    if (lastSegment && lastSegment.includes('.') && lastSegment.length <= 255) {
+    if (lastSegment && lastSegment.includes('.') && lastSegment.length <= MAX_FILENAME_LENGTH) {
       // Decode percent-encoding (e.g., %20 → space) then sanitize
       let decoded: string;
       try {
@@ -408,7 +486,16 @@ function filenameFromUrl(url: string, index: number): string {
   return `url_attachment_${index}`;
 }
 
-const MIME_TO_EXTENSION: Record<string, string> = {
+/**
+ * Canonical MIME → file-extension map for the platform-allowed attachment types.
+ * This is the single source of truth for the type↔extension relationship: other
+ * modules that need the reverse (extension → MIME, e.g. to type a generic
+ * `application/octet-stream` download) derive it from {@link EXTENSION_TO_MIME}
+ * rather than re-listing the types — so adding a supported type is a one-line
+ * change here, inherited in both directions. Keep in step with
+ * ALLOWED_IMAGE_MIME_TYPES / ALLOWED_FILE_MIME_TYPES.
+ */
+export const MIME_TO_EXTENSION: Record<string, string> = {
   'image/png': 'png',
   'image/jpeg': 'jpg',
   'text/plain': 'txt',
@@ -418,6 +505,28 @@ const MIME_TO_EXTENSION: Record<string, string> = {
   'application/pdf': 'pdf',
   'text/x-log': 'log',
 };
+
+/**
+ * Reverse of {@link MIME_TO_EXTENSION}: file-extension → MIME, for typing a
+ * download whose HTTP content-type is generic. Derived (not hand-listed) so it
+ * can never drift from the canonical map. `jpg` → `image/jpeg` covers the common
+ * `.jpeg` alias too via the extra entry below.
+ */
+export const EXTENSION_TO_MIME: Readonly<Record<string, string>> = Object.freeze({
+  ...Object.fromEntries(Object.entries(MIME_TO_EXTENSION).map(([mime, ext]) => [ext, mime])),
+  jpeg: 'image/jpeg', // `.jpeg` is a common alias MIME_TO_EXTENSION collapses to `jpg`
+});
+
+/**
+ * Human-friendly list of supported attachment file extensions, derived from
+ * {@link EXTENSION_TO_MIME}'s KEYS (deduped, upper-cased) — e.g. "PNG, JPG, JPEG,
+ * TXT, CSV, MD, JSON, PDF, LOG". Keyed off EXTENSION_TO_MIME (not MIME_TO_EXTENSION)
+ * so the accepted `.jpeg` alias is listed too — the label is exactly the set of
+ * extensions the type-inference will actually accept. For user-facing
+ * "unsupported file type" messages, so the list can never drift from the allowlist.
+ */
+export const SUPPORTED_ATTACHMENT_EXTENSIONS_LABEL: string =
+  [...new Set(Object.keys(EXTENSION_TO_MIME))].map((e) => e.toUpperCase()).join(', ');
 
 export type AttachmentValidationResult =
   | { readonly valid: true; readonly parsed: ValidatedAttachment[] }
@@ -514,8 +623,14 @@ export function validateAttachments(
       return { valid: false, error: `attachments[${i}]: content_type is required for presigned uploads` };
     }
 
-    // Magic bytes check against declared content_type (for inline data with declared type)
-    if (decoded && att.content_type) {
+    // Magic-bytes check for ALL inline data, whether the type was DECLARED or
+    // DETECTED. Gating this on `att.content_type` left the detected path
+    // unvalidated, which is the weaker of the two: `detectMimeTypeFromMagicBytes`
+    // only scans an 8 KB prefix for NULs, so ~8 KB of clean ASCII followed by
+    // binary was guessed `text/plain` and admitted with no whole-buffer check —
+    // exactly the laundering `validateMagicBytes` was hardened to stop. A
+    // detected type is a GUESS and needs verifying more than a declared one does.
+    if (decoded) {
       if (!validateMagicBytes(decoded, resolvedContentType)) {
         return { valid: false, error: `attachments[${i}]: content does not match declared type` };
       }

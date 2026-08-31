@@ -66,6 +66,7 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from shared_constants import SHARED_CONSTANTS
 from shell import log
 
 if TYPE_CHECKING:
@@ -78,31 +79,7 @@ if TYPE_CHECKING:
 WARN_TIMEOUT_S: int = 120  # IMPL-25: sub-120s emits WARN on blueprint load
 
 
-def _load_shared_constants() -> dict:
-    """Read ``contracts/constants.json`` (S9 — see ``contracts/constants.md``).
-
-    Two candidate paths cover both the deployed image
-    (``/app/contracts/constants.json`` — Dockerfile copies ``contracts/``
-    to ``/app/contracts``) and the local repo layout
-    (``<repo>/contracts/constants.json`` — for tests + dev). Fail-fast on
-    missing: a missing contract should crash import, not silently fall
-    back to literals that would re-introduce the drift the contract is
-    designed to prevent.
-    """
-    here = Path(__file__).resolve()
-    candidates = [
-        here.parent.parent / "contracts" / "constants.json",  # /app/contracts/
-        here.parent.parent.parent / "contracts" / "constants.json",  # <repo>/contracts/
-    ]
-    for path in candidates:
-        if path.is_file():
-            return json.loads(path.read_text())
-    raise FileNotFoundError(
-        "contracts/constants.json not found; checked: " + ", ".join(str(p) for p in candidates),
-    )
-
-
-_SHARED_CONSTANTS = _load_shared_constants()
+_SHARED_CONSTANTS = SHARED_CONSTANTS
 _AGC = _SHARED_CONSTANTS["approval_gate_cap"]
 DEFAULT_APPROVAL_GATE_CAP: int = int(_AGC["default"])  # decision #13 default
 APPROVAL_GATE_CAP_MIN: int = int(_AGC["min"])
@@ -110,6 +87,43 @@ APPROVAL_GATE_CAP_MAX: int = int(_AGC["max"])
 _ATS = _SHARED_CONSTANTS["approval_timeout_s"]
 FLOOR_TIMEOUT_S: int = int(_ATS["min"])  # §6 decision #6: rejected below this at load
 DEFAULT_TASK_TIMEOUT_S: int = int(_ATS["default"])  # §6 decision #6 default
+
+
+def _validate_constants() -> None:
+    """Fail-fast on invariant violations in contracts/constants.json."""
+    if FLOOR_TIMEOUT_S <= 0:
+        raise ValueError(
+            f"contracts/constants.json: approval_timeout_s.min must be > 0, got {FLOOR_TIMEOUT_S}"
+        )
+    if DEFAULT_TASK_TIMEOUT_S < FLOOR_TIMEOUT_S:
+        raise ValueError(
+            f"contracts/constants.json: approval_timeout_s.default ({DEFAULT_TASK_TIMEOUT_S}) "
+            f"must be >= min ({FLOOR_TIMEOUT_S})"
+        )
+    ats_max = int(_ATS["max"])
+    if ats_max < DEFAULT_TASK_TIMEOUT_S:
+        raise ValueError(
+            f"contracts/constants.json: approval_timeout_s.max ({ats_max}) "
+            f"must be >= default ({DEFAULT_TASK_TIMEOUT_S})"
+        )
+    if APPROVAL_GATE_CAP_MIN <= 0:
+        raise ValueError(
+            f"contracts/constants.json: approval_gate_cap.min must be > 0, "
+            f"got {APPROVAL_GATE_CAP_MIN}"
+        )
+    if DEFAULT_APPROVAL_GATE_CAP < APPROVAL_GATE_CAP_MIN:
+        raise ValueError(
+            f"contracts/constants.json: approval_gate_cap.default ({DEFAULT_APPROVAL_GATE_CAP}) "
+            f"must be >= min ({APPROVAL_GATE_CAP_MIN})"
+        )
+    if APPROVAL_GATE_CAP_MAX < DEFAULT_APPROVAL_GATE_CAP:
+        raise ValueError(
+            f"contracts/constants.json: approval_gate_cap.max ({APPROVAL_GATE_CAP_MAX}) "
+            f"must be >= default ({DEFAULT_APPROVAL_GATE_CAP})"
+        )
+
+
+_validate_constants()
 CACHE_MAX_ENTRIES: int = 50  # §12.9: decoupled from approvalGateCap
 CACHE_TTL_S: float = 60.0  # §12.8 sliding-window TTL on DENIED/TIMED_OUT
 POLICIES_MAX_BYTES: int = 64 * 1024  # finding #12: reject blueprints > 64 KB
@@ -168,6 +182,7 @@ class PolicyDecision:
     __slots__ = (
         "cache_hit_metadata",
         "duration_ms",
+        "fail_closed",
         "matching_rule_ids",
         "outcome",
         "reason",
@@ -186,6 +201,7 @@ class PolicyDecision:
         matching_rule_ids: tuple[str, ...] = (),
         duration_ms: float = 0.0,
         cache_hit_metadata: dict | None = None,
+        fail_closed: bool = False,
     ) -> None:
         if outcome is None and allowed is None:
             raise TypeError("PolicyDecision requires either outcome= or allowed=")
@@ -207,6 +223,16 @@ class PolicyDecision:
         # decisions with different original_decision_ts values still
         # represent the same deny outcome.
         self.cache_hit_metadata = cache_hit_metadata
+        # #251 (decision E): structured discriminator for environmental
+        # fail-closed denies (Cedar engine errored / unavailable) vs.
+        # intentional hard-denies and cache-driven denies. The hook branches
+        # on THIS flag — not a brittle ``reason.startswith("fail-closed:")``
+        # string match — to decide whether to emit a ``policy_fail_closed``
+        # blocker event. Set True ONLY at engine-error/unavailable deny sites;
+        # hard-deny and cache-deny leave it False. Like ``cache_hit_metadata``,
+        # NOT part of __eq__/__hash__ (it is derived from outcome+reason, and
+        # legacy equality-based tests predate the field).
+        self.fail_closed = fail_closed
 
     @property
     def allowed(self) -> bool:
@@ -259,8 +285,15 @@ class PolicyDecision:
         return cls(outcome=Outcome.ALLOW, reason=reason, duration_ms=duration_ms)
 
     @classmethod
-    def deny(cls, reason: str, duration_ms: float = 0.0) -> PolicyDecision:
-        return cls(outcome=Outcome.DENY, reason=reason, duration_ms=duration_ms)
+    def deny(
+        cls, reason: str, duration_ms: float = 0.0, fail_closed: bool = False
+    ) -> PolicyDecision:
+        return cls(
+            outcome=Outcome.DENY,
+            reason=reason,
+            duration_ms=duration_ms,
+            fail_closed=fail_closed,
+        )
 
     @classmethod
     def require_approval(
@@ -733,6 +766,7 @@ class PolicyEngine:
         task_type: str,
         repo: str,
         *,
+        read_only: bool = False,
         extra_policies: list[str] | None = None,
         blueprint_hard_policies: str | None = None,
         blueprint_soft_policies: str | None = None,
@@ -744,6 +778,7 @@ class PolicyEngine:
     ) -> None:
         self._task_type = task_type
         self._repo = repo
+        self._read_only = read_only
         self._disabled = False
         self._task_default_timeout_s = task_default_timeout_s
 
@@ -776,13 +811,13 @@ class PolicyEngine:
         # IMPL-26: ``approval_ceiling_shrinking`` is emit-once per task.
         self._emitted_ceiling_shrinking: bool = False
 
-        # Validate task_type (non-fatal WARN to match Phase 1 behavior).
-        from models import TaskType
-
-        try:
-            TaskType(task_type)
-        except ValueError:
-            log("WARN", f"Unknown task_type '{task_type}' — using default deny-list policies")
+        # ``task_type`` here is the workflow-derived Cedar principal identity
+        # (config.policy_principal): new_task / pr_iteration / pr_review.
+        # Read-only enforcement no longer keys off this principal literal —
+        # since #248 Phase 2a it keys off the ``read_only`` context attribute
+        # (threaded below into every Cedar request), so the hard-deny Write/Edit
+        # rules fire for *any* read-only workflow, not just coding/pr-review.
+        # See ADR-014 addendum 2026-06-08.
 
         # Import cedarpy lazily so the module still loads in environments
         # without the native extension (tests can monkey-patch).
@@ -844,13 +879,26 @@ class PolicyEngine:
         if legacy_extra:
             soft_text = soft_text + "\n" + "\n".join(legacy_extra)
 
-        # 64 KB cap on combined blueprint text (finding #12). Built-ins do
-        # not count against the cap — they are trusted platform content.
-        blueprint_text = "".join(filter(None, [blueprint_hard_policies, blueprint_soft_policies]))
-        if len(blueprint_text.encode("utf-8")) > POLICIES_MAX_BYTES:
+        # 64 KB cap on combined operator-supplied policy text (finding #12).
+        # Built-ins do not count — they are trusted platform content. Registry
+        # cedar_policy_module assets arrive via the legacy ``extra_policies``
+        # path, so they MUST be counted here too; otherwise a large registry
+        # policy bypasses the cap entirely (#246 review). Count the raw operator
+        # text (pre-synthetic-wrapper) so the bound reflects authored bytes.
+        operator_text = "".join(
+            filter(
+                None,
+                [
+                    blueprint_hard_policies,
+                    blueprint_soft_policies,
+                    *(extra_policies or []),
+                ],
+            )
+        )
+        if len(operator_text.encode("utf-8")) > POLICIES_MAX_BYTES:
             raise ValueError(
                 f"cedar_policies exceeds {POLICIES_MAX_BYTES // 1024} KB cap "
-                f"({len(blueprint_text.encode('utf-8'))} bytes)"
+                f"({len(operator_text.encode('utf-8'))} bytes)"
             )
 
         # Parse + validate annotations on each tier.
@@ -1025,7 +1073,11 @@ class PolicyEngine:
                     "principal": f'Agent::TaskAgent::"{self._task_type}"',
                     "action": 'Agent::Action::"invoke_tool"',
                     "resource": 'Agent::Tool::"Read"',
-                    "context": {"task_type": self._task_type, "repo": self._repo},
+                    "context": {
+                        "task_type": self._task_type,
+                        "repo": self._repo,
+                        "read_only": self._read_only,
+                    },
                 },
                 policies_text,
                 [
@@ -1110,9 +1162,14 @@ class PolicyEngine:
             return PolicyDecision.deny(
                 reason="policy engine unavailable",
                 duration_ms=(time.monotonic() - start) * 1000,
+                fail_closed=True,
             )
 
-        base_context = {"task_type": self._task_type, "repo": self._repo}
+        base_context = {
+            "task_type": self._task_type,
+            "repo": self._repo,
+            "read_only": self._read_only,
+        }
 
         # Compute input_sha separately so a TypeError from json.dumps
         # surfaces with a distinct fail-closed reason instead of being
@@ -1127,6 +1184,7 @@ class PolicyEngine:
             return PolicyDecision.deny(
                 reason="fail-closed: unhashable_tool_input",
                 duration_ms=(time.monotonic() - start) * 1000,
+                fail_closed=True,
             )
 
         try:
@@ -1259,6 +1317,7 @@ class PolicyEngine:
             return PolicyDecision.deny(
                 reason=f"fail-closed: {type(exc).__name__}",
                 duration_ms=(time.monotonic() - start) * 1000,
+                fail_closed=True,
             )
 
     # ---- Per-action routing ------------------------------------------------

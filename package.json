@@ -14,18 +14,23 @@
   ],
   "scripts": {
     "install:all": "MISE_EXPERIMENTAL=1 mise run install",
-    "build": "MISE_EXPERIMENTAL=1 mise run build"
+    "build": "MISE_EXPERIMENTAL=1 mise run build",
+    "knip": "knip"
   },
   "devDependencies": {
-    "@astrojs/check": "^0.9.8"
+    "@astrojs/check": "^0.9.9",
+    "knip": "6.23.0"
   },
   "resolutions": {
-    "basic-ftp": "^5.2.2",
-    "defu": "^6.1.6",
+    "@astrojs/markdown-remark": "7.2.0",
+    "@astrojs/mdx": "6.0.3",
+    "brace-expansion": "^5.0.9",
+    "fast-uri": "^3.1.5",
     "fast-xml-parser": "^5.7.0",
-    "postcss": "^8.5.10",
-    "uuid": "^14.0.0",
-    "vite": "^7.3.2",
+    "ip-address": "^10.3.1",
+    "js-yaml": "^4.3.1",
+    "nanoid": "^3.3.17",
+    "undici": "^7.29.0",
     "yaml": "^2.8.3"
   }
 }

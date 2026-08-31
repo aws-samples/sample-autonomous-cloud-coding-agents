@@ -19,19 +19,23 @@
 
 import * as crypto from 'crypto';
 import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
+import { isUsableHmacSecret } from './hmac-secret';
 import { logger } from './logger';
+import { makeClient } from './ua';
 
-const sm = new SecretsManagerClient({});
+const sm = makeClient(SecretsManagerClient);
 
 /** Prefix for Slack-related secrets in Secrets Manager. */
 export const SLACK_SECRET_PREFIX = 'bgagent/slack/';
 
 // In-memory secret cache with 5-minute TTL (same pattern as webhook handler).
 const secretCache = new Map<string, { secret: string; expiresAt: number }>();
-const CACHE_TTL_MS = 5 * 60 * 1000;
+const CACHE_TTL_MINUTES = 5;
+const CACHE_TTL_MS = CACHE_TTL_MINUTES * 60 * 1000;
 
 /** Maximum age of a Slack request timestamp before it is rejected (replay protection). */
-const MAX_TIMESTAMP_AGE_S = 5 * 60;
+const MAX_TIMESTAMP_AGE_MINUTES = 5;
+const MAX_TIMESTAMP_AGE_S = MAX_TIMESTAMP_AGE_MINUTES * 60;
 
 /**
  * Fetch a secret from Secrets Manager with in-memory caching.
@@ -50,7 +54,12 @@ export async function getSlackSecret(secretId: string, forceRefresh = false): Pr
 
   try {
     const result = await sm.send(new GetSecretValueCommand({ SecretId: secretId }));
-    if (!result.SecretString) {
+    // Treat empty / whitespace-only SecretString as null — an empty secret
+    // must never be used for HMAC, or HMAC('', input) becomes forgeable.
+    if (!isUsableHmacSecret(result.SecretString)) {
+      logger.error('Slack signing secret is empty — refusing to use for HMAC', {
+        secret_id: secretId,
+      });
       secretCache.delete(secretId);
       return null;
     }
@@ -61,7 +70,7 @@ export async function getSlackSecret(secretId: string, forceRefresh = false): Pr
     if (errorName === 'ResourceNotFoundException') {
       logger.error('Slack secret not found in Secrets Manager', { secret_id: secretId });
       secretCache.delete(secretId);
-      return null;
+      return null; // nosemgrep: ts-silent-success-masking -- missing Slack signing secret means "cannot verify"; ResourceNotFound is expected before setup
     }
     logger.error('Failed to fetch Slack secret from Secrets Manager', {
       secret_id: secretId,
@@ -98,6 +107,12 @@ export function verifySlackSignature(
   timestamp: string,
   body: string,
 ): boolean {
+  // Defense-in-depth: getSlackSecret already filters empty secrets, but
+  // if a future caller wires a different secret source we still want
+  // HMAC('') rejected — anyone can compute it.
+  if (!isUsableHmacSecret(signingSecret)) {
+    return false;
+  }
   // Reject requests with stale timestamps (replay protection).
   const ts = parseInt(timestamp, 10);
   if (isNaN(ts)) {

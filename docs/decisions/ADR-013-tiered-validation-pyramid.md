@@ -31,7 +31,7 @@ The root cause: there is no **Tier 2** — a local, fast, high-fidelity validati
 | Tier | Time | What it catches | Gap |
 |------|------|-----------------|-----|
 | Pre-commit (Tier 0) | < 5s | Formatting, secrets, trailing whitespace | None — works well |
-| mise build (Tier 1) | 30–90s | Compile, unit tests, CDK synth, docs sync, linting | Partial — available but not gated on push |
+| mise build (Tier 1) | 30–90s | Compile, unit tests, CDK synth, docs sync, linting | Wired as a pre-push gate (prek `pre-push` hooks run tests + security); the `mise run build` superset is available on demand |
 | Remote CI (Tier 3) | 5–20 min | Full matrix, security, E2E, deploy | Authoritative but slow |
 | **Local integration (Tier 2)** | — | **Does not exist** | Integration-level validation without remote round-trip |
 
@@ -92,9 +92,9 @@ Status: **Implemented** (prek hooks)
 - Type sync drift (CDK ↔ CLI types in sync)
 - Constants drift (cross-language contract check)
 
-Status: **Partially implemented** — available as `mise run build` but not enforced as a push gate. Agents can invoke this but often skip it.
+Status: **Implemented as a pre-push gate.** `.pre-commit-config.yaml` sets `default_install_hook_types: [pre-commit, pre-push]`, and the `monorepo-tests-pre-push` and `monorepo-security-pre-push` hooks (both `stages: [pre-push]`) run `mise run hooks:pre-push:tests` (→ `mise //cdk:test`, `mise //cli:test`, and the agent test suite) and `mise run hooks:pre-push:security` (→ `mise run security`) on every push. Note the shipped gate runs tests + security rather than the full `mise run build` superset (which additionally covers CDK synth, docs sync, and type/constants drift); those remain available on demand and are enforced authoritatively in Tier 3.
 
-Requirement: Make `mise run build` (or a subset) the pre-push gate. Consider splitting into `mise run check:fast` (compile + lint, 30s) and `mise run check:full` (compile + test + synth, 90s).
+Remaining refinement: consider splitting into `mise run check:fast` (compile + lint, 30s) and `mise run check:full` (compile + test + synth, 90s), and folding synth/docs-sync/drift checks into the push gate for full Tier 1 coverage.
 
 **Tier 2 — Local sandbox (1–5 min, on-demand before PR)**
 
@@ -129,6 +129,20 @@ Progressive build-out:
 
 Status: **Implemented** (GitHub Actions). This remains the authoritative gate for merge.
 
+> **Deployed runtime E2E — Phase 0 landed (issue #236).** `@aws-cdk/integ-tests-alpha` + `integ-runner` provide deploy-then-verify coverage: `mise //cdk:integ` deploys a trimmed Task API stack to a real account, asserts the create-and-persist happy path (task persists at `SUBMITTED`), then tears it down. In CI (`.github/workflows/integ.yml`) it is triggered per-PR via `workflow_run` only when the diff touches `cdk/**` or `agent/**` (docs/cli-only PRs get an immediate green skip), runs behind the reused `deploy` environment's admin-approval gate so it never assumes the deploy role unattended, and posts a required `integ-smoke` status that blocks merge. Because it is path-filtered and admin-gated it does not slow non-infra PRs. `workflow_dispatch` is retained for manual runs against `main`. Phase 1 (full lifecycle / real agent runs) and Phase 2 (channels) are follow-ups.
+
+#### Residual risk acceptance — fork PR integ execution
+
+The deployed E2E gate runs **fork-authored test code** (`cdk/test/integ/**`) against the shared AWS account. This is intentional: a fork `pull_request` job gets no secrets/OIDC, so the `workflow_run` trigger is the only way to give fork PRs the same deploy-verify coverage that branch PRs get. The accepted risk is that fork code executes with the shared `GitHub` deploy role (reused from `deploy.yml`), which is capable of CloudFormation operations in the shared account.
+
+Mitigations layered against that risk:
+
+- **Two human gates before fork code runs.** The `resolve` job requires a maintainer-applied `safe-to-test` label on fork PRs, and the `integ` job requires explicit approval of the `deploy` GitHub environment (required reviewers: `coding-agents-admin` / `coding-agents-maintainers`, self-review prevented). The approver MUST review `cdk/test/integ/**` changes before approving.
+- **Environment reuse over a dedicated role.** Phase 0 reuses `deploy.yml`'s existing `deploy` environment and `GitHub` deploy role rather than provisioning a separate least-privilege role — the environment and its OIDC trust are already configured, so no account-side IAM change is needed to go live. The tradeoff is that integ (including approved fork code) runs with the full deploy role; the human gates above and forced teardown below are the compensating controls. Scoping a dedicated least-privilege integ role remains an option a maintainer can adopt later if the blast radius is judged too wide.
+- **Status-only tokens and forced teardown.** Each job gets minimal `permissions`; the report path only posts commit statuses, and teardown runs `if: always()` with a fail-loud `wait` so a stranded stack surfaces rather than leaking billable resources.
+
+Residual risk after these mitigations (a malicious fork PR that passes maintainer review and operates strictly within the scoped stacks) is **accepted** for Phase 0.
+
 ### Enforcement model
 
 | Event | Required tier | Enforcement |
@@ -162,7 +176,7 @@ The gap analysis dictates priority:
 
 | Priority | Investment | Impact |
 |----------|-----------|--------|
-| P0 | Enforce Tier 1 as pre-push gate | Eliminates "pushed without building" class of CI failures |
+| P0 | ~~Enforce Tier 1 as pre-push gate~~ **(largely done)** — test + security push gate is wired (prek `pre-push` hooks); remaining work is folding synth/docs-sync/drift into the gate | Eliminates "pushed without building" class of CI failures |
 | P1 | `mise run test:integration` (Tier 2a — LocalStack) | Eliminates 60%+ of CI-only failures (AWS API contract mismatches) |
 | P2 | Agent smoke test (Tier 2b) | Catches agent runtime regressions before PR |
 | P3 | Ephemeral stack deploy (Tier 2c) | Catches IAM/wiring issues that only surface in real deployment |
@@ -207,7 +221,7 @@ Escape hatches must be explicit (noted in PR description, not silent).
 - ADR-002 — bootstrap policies (Tier 2c validates IAM preflight locally)
 - ADR-008 — definition of done (tier requirements per DoD level)
 - ADR-012 (prerequisite) — operational knowledge stack; this ADR depends on 012's skill model for agent interaction with validation tiers
-- Current hooks: `.pre-commit-config.yaml` (Tier 0 implementation)
+- Current hooks: `.pre-commit-config.yaml` — the config file keeps the `pre-commit` name, but the runner is **prek** (pinned in `mise.toml` `[tools]`; `prek install --prepare-hooks` wires both `pre-commit` and `pre-push` stages). Implements Tier 0 (`pre-commit` stage) and the Tier 1 push gate (`pre-push` stage).
 - Current build: `mise.toml` root + package-level configs (Tier 1 implementation)
 - LocalStack: https://localstack.cloud (candidate for Tier 2a)
 - Firecracker MicroVMs: https://firecracker-microvm.github.io (candidate for Tier 2d)

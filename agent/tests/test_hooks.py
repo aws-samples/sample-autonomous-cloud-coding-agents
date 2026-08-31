@@ -7,8 +7,28 @@ import pytest
 
 cedarpy = pytest.importorskip("cedarpy")
 
-from hooks import build_hook_matchers, post_tool_use_hook, pre_tool_use_hook
+from hooks import (
+    _is_self_reclone,
+    _reset_blocker_reason_for_tests,
+    _stuck_guard_between_turns_hook,
+    build_hook_matchers,
+    detect_egress_denial,
+    last_blocker_reason,
+    last_stuck_summary,
+    post_tool_use_hook,
+    pre_tool_use_hook,
+    reset_stuck_summary,
+)
 from policy import PolicyEngine
+
+
+@pytest.fixture(autouse=True)
+def _reset_blocker_latch():
+    """Clear the #251 blocker latch between tests so one test's detected
+    blocker doesn't leak into the next (module-level, process-lifetime)."""
+    _reset_blocker_reason_for_tests()
+    yield
+    _reset_blocker_reason_for_tests()
 
 
 def _run(coro):
@@ -32,7 +52,9 @@ class TestPreToolUseHook:
         assert result["hookSpecificOutput"]["permissionDecision"] == "allow"
 
     def test_denies_restricted_tool(self):
-        engine = PolicyEngine(task_type="pr_review", repo="owner/repo")
+        # #248 Phase 2a: a read-only engine hard-denies Write (keyed on
+        # context.read_only, not the principal literal).
+        engine = PolicyEngine(task_type="pr_review", repo="owner/repo", read_only=True)
         hook_input = {
             "hook_event_name": "PreToolUse",
             "tool_name": "Write",
@@ -44,7 +66,7 @@ class TestPreToolUseHook:
         }
         result = _run(pre_tool_use_hook(hook_input, "test-456", {}, engine=engine))
         assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
-        assert "pr_review" in result["hookSpecificOutput"]["permissionDecisionReason"]
+        assert "read_only_forbid_write" in result["hookSpecificOutput"]["permissionDecisionReason"]
 
     def test_denies_git_internals_path(self):
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")
@@ -122,6 +144,270 @@ class TestPreToolUseHook:
         result = _run(pre_tool_use_hook(hook_input, "test-bad", {}, engine=engine))
         assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
         assert "unparseable tool input" in result["hookSpecificOutput"]["permissionDecisionReason"]
+
+    def _non_dict_hook_input(self, tool_input):
+        return {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Read",
+            "tool_input": tool_input,
+            "tool_use_id": "test-nd",
+            "session_id": "sess-1",
+            "transcript_path": "/tmp/t",
+            "cwd": "/workspace",
+        }
+
+    def test_denies_string_json_list_tool_input(self):
+        # A string that decodes to a JSON list ("[1,2]") is valid JSON but not
+        # an object — must fail closed with the explicit reason.
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+        result = _run(
+            pre_tool_use_hook(self._non_dict_hook_input("[1,2]"), "test-nd", {}, engine=engine)
+        )
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert (
+            "tool input is not an object"
+            in (result["hookSpecificOutput"]["permissionDecisionReason"])
+        )
+
+    def test_denies_string_json_scalar_tool_input(self):
+        # A string that decodes to a JSON scalar ('"foo"') is valid JSON but
+        # not an object.
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+        result = _run(
+            pre_tool_use_hook(self._non_dict_hook_input('"foo"'), "test-nd", {}, engine=engine)
+        )
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert (
+            "tool input is not an object"
+            in (result["hookSpecificOutput"]["permissionDecisionReason"])
+        )
+
+    def test_denies_direct_non_dict_tool_input(self):
+        # A non-dict passed directly (not via a JSON string) — e.g. a list.
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+        result = _run(
+            pre_tool_use_hook(self._non_dict_hook_input([1, 2]), "test-nd", {}, engine=engine)
+        )
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert (
+            "tool input is not an object"
+            in (result["hookSpecificOutput"]["permissionDecisionReason"])
+        )
+
+
+class TestSelfRecloneGuard:
+    """Lost-deliverable defense, layer 1: block a Bash re-clone of the task's
+    OWN repo (the agent
+    sometimes cloned into a sibling dir and stranded its work off the tracked
+    branch). Scoped to the task repo — dependency/fixture clones must pass."""
+
+    def test_matches_gh_repo_clone_bare_slug(self):
+        assert _is_self_reclone("cd /workspace && gh repo clone owner/repo", "owner/repo")
+
+    def test_matches_git_clone_https_url(self):
+        assert _is_self_reclone("git clone https://github.com/owner/repo.git /tmp/x", "owner/repo")
+
+    def test_matches_git_clone_scp_form(self):
+        assert _is_self_reclone("git clone git@github.com:owner/repo.git", "owner/repo")
+
+    def test_matches_git_dash_c_clone(self):
+        assert _is_self_reclone("git -C /workspace clone owner/repo", "owner/repo")
+
+    def test_case_insensitive_and_dotgit_config(self):
+        # config.repo_url may carry a trailing .git or mixed case.
+        assert _is_self_reclone("gh repo clone Owner/Repo", "owner/repo.git")
+
+    def test_ignores_clone_of_a_different_repo(self):
+        # A dependency/fixture clone is legitimate and must NOT be blocked.
+        assert not _is_self_reclone("git clone https://github.com/other/dep.git", "owner/repo")
+
+    def test_ignores_non_clone_git_command(self):
+        assert not _is_self_reclone("git status && git commit -am wip", "owner/repo")
+
+    def test_ignores_mention_of_repo_without_clone_verb(self):
+        # Naming the repo in a non-clone command (e.g. a gh pr create) is fine.
+        assert not _is_self_reclone("gh pr create --repo owner/repo --title x", "owner/repo")
+
+    def test_no_repo_url_is_noop(self):
+        assert not _is_self_reclone("gh repo clone owner/repo", "")
+
+    def test_ignores_clone_phrase_inside_pr_body(self):
+        # Observed false positive: the clone command quoted inside a --body value
+        # is PROSE, not an executed clone. Must NOT be blocked.
+        cmd = (
+            'gh pr create --repo owner/repo --base main --title "add marker" '
+            '--body "I deliberately did NOT run gh repo clone owner/repo; I worked in place."'
+        )
+        assert not _is_self_reclone(cmd, "owner/repo")
+
+    def test_ignores_clone_phrase_in_body_file_and_commit_message(self):
+        assert not _is_self_reclone(
+            "gh pr create --repo owner/repo --body-file /tmp/b.md", "owner/repo"
+        )
+        assert not _is_self_reclone(
+            'git commit -m "note: do not gh repo clone owner/repo again"', "owner/repo"
+        )
+
+    def test_still_blocks_clone_before_a_body_arg(self):
+        # A REAL clone chained before a body-carrying command must still be caught
+        # (the free-text truncation only drops what's AFTER the first body arg).
+        cmd = 'gh repo clone owner/repo && gh pr create --repo owner/repo --body "x"'
+        assert _is_self_reclone(cmd, "owner/repo")
+
+    def test_blocks_clone_using_the_branch_short_flag(self):
+        # ``-b`` is git clone's own ``--branch`` short form AND gh's ``--body``.
+        # The guard used to cut the command at the first free-text flag BEFORE
+        # looking for the clone verb, so this ordinary command slipped through
+        # entirely — reopening the stranded-work failure the guard exists to stop.
+        assert _is_self_reclone(
+            "git clone -b main https://github.com/owner/repo /w/repo", "owner/repo"
+        )
+        assert _is_self_reclone("gh repo clone -b main owner/repo", "owner/repo")
+        assert _is_self_reclone(
+            "git clone -b feature/x git@github.com:owner/repo.git /w/repo", "owner/repo"
+        )
+        assert _is_self_reclone(
+            "cd /tmp && git clone -b main --depth 1 https://github.com/owner/repo x",
+            "owner/repo",
+        )
+
+    def test_blocks_clone_chained_after_an_unrelated_message_flag(self):
+        # The ``-m`` belongs to the commit, not to the clone that follows it. A
+        # free-text argument must only swallow the rest of ITS OWN shell segment.
+        assert _is_self_reclone(
+            "git commit -m wip && gh repo clone owner/repo /w/repo", "owner/repo"
+        )
+
+    def test_still_ignores_prose_after_a_body_flag_in_the_same_segment(self):
+        # The counterpart: within one segment, a verb appearing after the body
+        # value opens is prose. These must stay allowed.
+        assert not _is_self_reclone(
+            'gh pr create --body "do not run gh repo clone owner/repo"', "owner/repo"
+        )
+        assert not _is_self_reclone(
+            "gh issue comment -m 'see gh repo clone owner/repo for context'", "owner/repo"
+        )
+
+    def test_blocks_a_clone_wrapped_across_lines_with_a_backslash(self):
+        """A trailing backslash continues the SAME command onto the next line.
+
+        Splitting on a bare newline separated the verb from the repo, so the slug
+        was never found in the verb's segment and a wrapped self re-clone walked
+        through — including the ``-b`` form this guard was hardened to catch."""
+        assert _is_self_reclone(
+            "git clone \\\n  https://github.com/owner/repo /w/repo", "owner/repo"
+        )
+        assert _is_self_reclone(
+            "git clone -b main \\\n  https://github.com/owner/repo /w/repo", "owner/repo"
+        )
+        assert _is_self_reclone(
+            "git clone --depth 1 \\\n  https://github.com/owner/repo x", "owner/repo"
+        )
+        # The continuation can split the VERB itself, not just its arguments —
+        # this is the case that needs the joining, since no amount of segment
+        # handling reunites ``git`` with ``clone`` across the break.
+        assert _is_self_reclone("git \\\n  clone https://github.com/owner/repo x", "owner/repo")
+
+    def test_ignores_a_clone_quoted_inside_a_MULTI_LINE_body(self):
+        """A multi-line --body/-m value is the normal way an agent writes a PR body.
+
+        Its quoted text routinely documents a clone command. Treating a bare
+        newline as a command separator put that line in its own segment with no
+        preceding free-text flag, so a legitimate ``gh pr create`` was denied."""
+        body = "## Setup\ngit clone https://github.com/owner/repo\ncd repo\nmise run setup"
+        assert not _is_self_reclone(
+            f'gh pr create --title "docs: onboarding" --body "{body}"',
+            "owner/repo",
+        )
+        assert not _is_self_reclone(
+            'git commit -m "steps:\n  git clone https://github.com/owner/repo"',
+            "owner/repo",
+        )
+
+    def test_requires_command_position_not_substring(self):
+        # The verb must be in command position (start / after a separator), not an
+        # arbitrary substring like a path or flag value.
+        assert _is_self_reclone("echo hi; gh repo clone owner/repo", "owner/repo")
+        assert not _is_self_reclone("ls /tmp/gh-repo-clone-notes/owner/repo", "owner/repo")
+
+    def test_hook_denies_self_reclone_with_redirect(self):
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+        hook_input = {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "cd /workspace && gh repo clone owner/repo"},
+            "tool_use_id": "test-reclone",
+            "session_id": "sess-1",
+            "transcript_path": "/tmp/t",
+            "cwd": "/workspace",
+        }
+        result = _run(
+            pre_tool_use_hook(hook_input, "test-reclone", {}, engine=engine, repo_url="owner/repo")
+        )
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        assert "already cloned" in reason.lower()
+        assert "work in place" in reason.lower()
+
+    def test_hook_allows_dependency_clone(self):
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+        hook_input = {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "git clone https://github.com/other/dep.git vendor/dep"},
+            "tool_use_id": "test-dep",
+            "session_id": "sess-1",
+            "transcript_path": "/tmp/t",
+            "cwd": "/workspace",
+        }
+        result = _run(
+            pre_tool_use_hook(hook_input, "test-dep", {}, engine=engine, repo_url="owner/repo")
+        )
+        # Not blocked by the reclone guard — falls through to Cedar (which permits).
+        assert result["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+    def test_hook_without_repo_url_does_not_block(self):
+        # Legacy call shape (no repo_url threaded) must not crash or over-block.
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+        hook_input = {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "gh repo clone owner/repo"},
+            "tool_use_id": "test-legacy",
+            "session_id": "sess-1",
+            "transcript_path": "/tmp/t",
+            "cwd": "/workspace",
+        }
+        result = _run(pre_tool_use_hook(hook_input, "test-legacy", {}, engine=engine))
+        assert result["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+
+class TestTruncate:
+    def test_returns_text_when_under_max(self):
+        from hooks import _truncate
+
+        assert _truncate("hello", 100) == "hello"
+
+    def test_none_returns_empty(self):
+        from hooks import _truncate
+
+        assert _truncate(None, 10) == ""
+
+    def test_adds_ellipsis_when_over_max(self):
+        from hooks import _truncate
+
+        out = _truncate("abcdefghij", 8)
+        assert out == "abcde..."
+        assert len(out) == 8
+
+    def test_small_max_len_does_not_slice_negatively(self):
+        # Regression: for max_len <= 3, ``max_len - 3`` slices negatively
+        # (dropping chars off the END). Guard returns a plain prefix instead.
+        from hooks import _truncate
+
+        assert _truncate("abcdef", 2) == "ab"
+        assert _truncate("abcdef", 3) == "abc"
+        assert _truncate("abcdef", 0) == ""
 
 
 class TestPostToolUseHook:
@@ -265,6 +551,156 @@ class TestPostToolUseHook:
         assert any("SCANNER_ERROR" in f for f in call_args[0][1])
 
 
+class TestDetectEgressDenial:
+    """#251 egress-denial signature scan."""
+
+    def test_no_match_on_clean_output(self):
+        assert detect_egress_denial("Successfully installed package\n") == (False, None)
+        assert detect_egress_denial("") == (False, None)
+
+    def test_curl_could_not_resolve_host(self):
+        detected, host = detect_egress_denial("curl: (6) Could not resolve host: pypi.org")
+        assert detected is True
+        assert host == "pypi.org"
+
+    def test_npm_getaddrinfo_enotfound(self):
+        detected, host = detect_egress_denial(
+            "npm ERR! network getaddrinfo ENOTFOUND registry.npmjs.org"
+        )
+        assert detected is True
+        assert host == "registry.npmjs.org"
+
+    def test_git_failed_to_connect(self):
+        detected, host = detect_egress_denial(
+            "fatal: unable to access: Failed to connect to github.com port 443"
+        )
+        assert detected is True
+        assert host == "github.com"
+
+    def test_connection_refused_without_host(self):
+        # Detection-only signature — fires but names no host.
+        detected, host = detect_egress_denial("Error: connect ECONNREFUSED — Connection refused")
+        assert detected is True
+        assert host is None
+
+    def test_urllib3_captures_real_host_not_class_path(self):
+        # The requests/urllib3 error embeds the urllib3 class path BEFORE the
+        # real host; a naive lazy match would grab the class path. We anchor on
+        # HTTPSConnectionPool(host='…') / Failed to resolve '…' instead.
+        stderr = (
+            "HTTPSConnectionPool(host='pypi.org', port=443): Max retries exceeded "
+            "with url: /simple/ (Caused by NameResolutionError("
+            '"<urllib3.connection.HTTPSConnection object at 0x7f>: '
+            "Failed to resolve 'pypi.org' ([Errno -3] Temporary failure)\"))"
+        )
+        detected, host = detect_egress_denial(stderr)
+        assert detected is True
+        assert host == "pypi.org"
+        assert host != "urllib3.connection.HTTPSConnection"
+
+
+class TestPostToolUseEgressBlocker:
+    """#251: PostToolUse emits egress_denied + latches the terminal reason."""
+
+    def test_emits_egress_denied_event_with_host(self, progress):
+        hook_input = {
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_response": "npm ERR! network getaddrinfo ENOTFOUND registry.npmjs.org",
+        }
+        _run(post_tool_use_hook(hook_input, "t-egress", {}, progress=progress))
+        blocked = [c for c in progress.calls if c[0] == "write_agent_blocked"]
+        assert len(blocked) == 1
+        kwargs = blocked[0][1]
+        assert kwargs["kind"] == "egress_denied"
+        assert kwargs["resource"] == "registry.npmjs.org"
+        assert kwargs["retryable"] is False
+
+    def test_latches_canonical_reason_even_without_progress(self):
+        hook_input = {
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_response": "curl: (6) Could not resolve host: api.example.com",
+        }
+        _run(post_tool_use_hook(hook_input, "t-latch", {}))
+        reason = last_blocker_reason()
+        assert reason is not None
+        assert reason.startswith("BLOCKED[egress_denied]:")
+        assert "(resource: api.example.com)" in reason
+
+    def test_clean_output_does_not_latch_or_emit(self, progress):
+        hook_input = {
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Read",
+            "tool_response": "def hello():\n    return 'world'\n",
+        }
+        _run(post_tool_use_hook(hook_input, "t-clean", {}, progress=progress))
+        assert last_blocker_reason() is None
+        assert not [c for c in progress.calls if c[0] == "write_agent_blocked"]
+
+    def test_hostless_signature_emits_event_but_does_not_latch_terminal_reason(self, progress):
+        # A detection-only signature ("Connection refused") commonly fires for an
+        # internal localhost race, not an egress denial. It should surface as an
+        # observability event but MUST NOT poison the authoritative terminal
+        # reason (which would send the operator to the DNS Firewall for nothing).
+        hook_input = {
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_response": "curl http://127.0.0.1:8080 — Connection refused",
+        }
+        _run(post_tool_use_hook(hook_input, "t-hostless", {}, progress=progress))
+        # Event fired (heuristic live-stream signal)…
+        assert [c for c in progress.calls if c[0] == "write_agent_blocked"]
+        # …but the terminal carry-path was NOT latched (no host captured).
+        assert last_blocker_reason() is None
+
+
+class TestPreToolUsePolicyFailClosed:
+    """#251 (decision E): fail-closed denies emit policy_fail_closed; intentional
+    hard-denies do NOT. Branches on the structured flag, not a reason string."""
+
+    def _deny_input(self):
+        return {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "echo hi"},
+        }
+
+    def test_fail_closed_deny_emits_blocker(self, progress):
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+        engine._cedarpy = None  # force "policy engine unavailable" fail-closed
+        result = _run(
+            pre_tool_use_hook(self._deny_input(), "t-fc", {}, engine=engine, progress=progress)
+        )
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+        blocked = [c for c in progress.calls if c[0] == "write_agent_blocked"]
+        assert len(blocked) == 1
+        assert blocked[0][1]["kind"] == "policy_fail_closed"
+        # Terminal carry-path latched too.
+        assert (last_blocker_reason() or "").startswith("BLOCKED[policy_fail_closed]:")
+
+    def test_hard_deny_does_not_emit_blocker(self, progress):
+        # A read-only engine hard-denies Write — intentional, fail_closed=False.
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo", read_only=True)
+        hook_input = {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Write",
+            "tool_input": {"file_path": "x.py", "content": "y"},
+        }
+        result = _run(pre_tool_use_hook(hook_input, "t-hd", {}, engine=engine, progress=progress))
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert not [c for c in progress.calls if c[0] == "write_agent_blocked"]
+        assert last_blocker_reason() is None
+
+    def test_fail_closed_still_denies_without_progress(self):
+        # No-fail-closed-regression (cross-cutting AC): the deny is unchanged
+        # whether or not the blocker emit is wired.
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+        engine._cedarpy = None
+        result = _run(pre_tool_use_hook(self._deny_input(), "t-fc2", {}, engine=engine))
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
 class TestBuildHookMatchers:
     def test_returns_correct_structure(self):
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")
@@ -319,6 +755,7 @@ class TestBuildHookMatchers:
 import hashlib
 import json as _json
 from collections import deque
+from datetime import UTC
 from typing import Any
 
 import hooks
@@ -1410,3 +1847,169 @@ class TestDenialBetweenTurnsHook:
         # DDB and returns []. Denial should be injected.
         assert result.get("decision") == "block"
         assert "<user_denial" in result.get("reason", "")
+
+
+class TestRemainingMaxlifetime:
+    """_remaining_maxlifetime_s parses TASK_STARTED_AT correctly."""
+
+    def test_iso_timestamp_parsed_as_utc_regardless_of_local_tz(self, monkeypatch):
+        # The trailing Z means UTC. Before the fix, strptime produced a naive
+        # datetime whose .timestamp() used the container's local TZ, skewing
+        # the remaining-lifetime math by the UTC offset (wrong approval
+        # timeouts / spurious insufficient-lifetime denies on non-UTC hosts).
+        import time as time_module
+        from datetime import datetime
+
+        started = datetime(2026, 6, 11, 12, 0, 0, tzinfo=UTC)
+        monkeypatch.setenv("TASK_STARTED_AT", "2026-06-11T12:00:00Z")
+        monkeypatch.setenv("AGENTCORE_MAX_LIFETIME_S", "28800")
+        # Freeze "now" at exactly 1000s after the UTC start time.
+        monkeypatch.setattr(hooks.time, "time", lambda: started.timestamp() + 1000, raising=True)
+        # Simulate a non-UTC container: if the implementation regresses to
+        # local-time interpretation, the result shifts by the TZ offset.
+        monkeypatch.setenv("TZ", "America/New_York")
+        time_module.tzset()
+        try:
+            assert hooks._remaining_maxlifetime_s() == 28800 - 1000
+        finally:
+            monkeypatch.delenv("TZ")
+            time_module.tzset()
+
+    def test_epoch_seconds_passthrough(self, monkeypatch):
+        monkeypatch.setenv("TASK_STARTED_AT", "1000000")
+        monkeypatch.setenv("AGENTCORE_MAX_LIFETIME_S", "500")
+        monkeypatch.setattr(hooks.time, "time", lambda: 1000100, raising=True)
+        assert hooks._remaining_maxlifetime_s() == 400
+
+    def test_missing_started_at_returns_none(self, monkeypatch):
+        monkeypatch.delenv("TASK_STARTED_AT", raising=False)
+        assert hooks._remaining_maxlifetime_s() is None
+
+    def test_unparseable_started_at_returns_none(self, monkeypatch):
+        monkeypatch.setenv("TASK_STARTED_AT", "not-a-timestamp")
+        assert hooks._remaining_maxlifetime_s() is None
+
+
+class TestStuckGuardHookIntegration:
+    """PostToolUse feeds the guard; the between-turns hook steers (advisory)."""
+
+    def _oom(self):
+        return "[//cdk:test] FAILED (exit 134)\nJavaScript heap out of memory"
+
+    def test_post_tool_use_records_failures_into_the_guard(self):
+        from stuck_guard import STEER_THRESHOLD, StuckGuard
+
+        guard = StuckGuard()
+        cmd = {"command": "mise //cdk:test"}
+        for _ in range(STEER_THRESHOLD):
+            hook_input = {
+                "hook_event_name": "PostToolUse",
+                "tool_name": "Bash",
+                "tool_input": cmd,
+                "tool_response": self._oom(),
+            }
+            _run(post_tool_use_hook(hook_input, "t", {}, stuck_guard=guard))
+        # the guard now has enough failures to steer
+        assert guard.evaluate().kind == "steer"
+
+    def test_between_turns_hook_latches_stuck_summary_from_the_guard(self):
+        # Pin the PRODUCTION write path for the _LAST_STUCK_SUMMARY latch
+        # (hooks.py:1464-1465). The enrichment tests monkeypatch the getter, so
+        # without this test deleting those two lines would leave the latch
+        # permanently None and every test would still pass. Drive the real hook
+        # with a failure-dominated guard and assert the module latch is populated.
+        from stuck_guard import WINDOW, StuckGuard
+
+        reset_stuck_summary()
+        assert last_stuck_summary() is None
+        guard = StuckGuard()
+        cmd = {"command": "mise //cdk:test"}
+        # recent_failure_summary needs a FULL window (>= WINDOW) of byte-identical
+        # failures (WINDOW_FAIL_THRESHOLD of them) — fill it past WINDOW.
+        for _ in range(WINDOW + 2):
+            guard.record_tool_result("Bash", cmd, self._oom())
+        # Precondition: the guard itself considers the window failure-dominated.
+        assert guard.recent_failure_summary() is not None
+
+        result = _stuck_guard_between_turns_hook({"stuck_guard": guard})
+        # advisory steer text returned…
+        assert isinstance(result, list)
+        # …and, crucially, the terminal-reason latch was written by the hook.
+        summary = last_stuck_summary()
+        assert summary is not None
+        assert "last tool calls repeated" in summary
+        reset_stuck_summary()
+
+    def test_between_turns_hook_clears_stuck_summary_when_not_failure_dominated(self):
+        # Symmetric guard: a recovered task (clean window) must CLEAR the latch,
+        # not leave a stale "stuck" summary that a later max_turns cap would echo.
+        # Pre-seed a stale latch via a failure-dominated guard.
+        from stuck_guard import WINDOW, StuckGuard
+
+        stuck = StuckGuard()
+        for _ in range(WINDOW + 2):
+            stuck.record_tool_result("Bash", {"command": "mise //cdk:test"}, self._oom())
+        _stuck_guard_between_turns_hook({"stuck_guard": stuck})
+        assert last_stuck_summary() is not None
+
+        # A fresh, healthy guard on the next turn clears it (recent_failure_summary None).
+        healthy = StuckGuard()
+        healthy.record_tool_result("Read", {"file": "a.py"}, "def hello(): return 1")
+        _stuck_guard_between_turns_hook({"stuck_guard": healthy})
+        assert last_stuck_summary() is None
+        reset_stuck_summary()
+
+    def test_post_tool_use_record_error_never_blocks_screening(self):
+        # A guard that raises on record must not break the PASS_THROUGH path.
+        from stuck_guard import StuckGuard
+
+        class _Boom(StuckGuard):
+            def record_tool_result(self, *a, **k):
+                raise RuntimeError("boom")
+
+        hook_input = {
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "echo hi"},
+            "tool_response": "hi",
+        }
+        result = _run(post_tool_use_hook(hook_input, "t", {}, stuck_guard=_Boom()))
+        assert result["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
+
+    def test_stop_hook_steers_not_bails(self):
+        # Advisory-only: a persistent identical-failure spin produces a STEER
+        # (a 'block' decision that injects the nudge as the next user message),
+        # NEVER a continue_=False kill. The max_turns cap is the real backstop.
+        from stuck_guard import STEER_THRESHOLD, StuckGuard
+
+        guard = StuckGuard()
+        cmd = {"command": "mise //cdk:test"}
+        for _ in range(STEER_THRESHOLD + 5):
+            guard.record_tool_result("Bash", cmd, self._oom())
+        result = _run(hooks.stop_hook({}, None, {}, task_id="t", stuck_guard=guard))
+        # a steer is a 'block' decision carrying the advisory text; never a kill
+        assert result.get("continue_") is not False
+        assert result.get("decision") == "block"
+        assert "STOP retrying" in (result.get("reason") or "")
+
+    def test_stop_hook_steers_when_guard_says_so(self):
+        from stuck_guard import STEER_THRESHOLD, StuckGuard
+
+        guard = StuckGuard()
+        cmd = {"command": "mise //cdk:test"}
+        for _ in range(STEER_THRESHOLD):
+            guard.record_tool_result("Bash", cmd, self._oom())
+        result = _run(hooks.stop_hook({}, None, {}, task_id="t", stuck_guard=guard))
+        # a steer is injected as a block decision (SDK continues with the text)
+        assert result.get("decision") == "block"
+        assert "STOP retrying" in result.get("reason", "")
+
+    def test_stop_hook_no_guard_is_a_noop(self):
+        # Back-compat: absent a guard, the stuck path never fires.
+        result = _run(hooks.stop_hook({}, None, {}, task_id="t"))
+        assert result == {}
+
+    def test_build_hook_matchers_creates_a_guard_without_crashing(self):
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+        matchers = build_hook_matchers(engine, task_id="t")
+        assert "PostToolUse" in matchers and "Stop" in matchers

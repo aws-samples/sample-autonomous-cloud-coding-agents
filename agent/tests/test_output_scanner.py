@@ -63,6 +63,23 @@ class TestScanToolOutput:
         assert "GITHUB_PAT detected" in result.findings
         assert "[REDACTED-GITHUB_PAT]" in result.redacted_content
 
+    def test_detects_token_longer_than_36_chars(self):
+        # Token lengths vary across generations; the pattern must not be
+        # anchored to exactly 36 chars.
+        content = "token: ghs_" + "A" * 48
+        result = scan_tool_output(content)
+        assert result.has_sensitive_content is True
+        assert "GITHUB_TOKEN detected" in result.findings
+        assert "ghs_" not in result.redacted_content
+
+    def test_detects_token_in_remote_url(self):
+        # `git remote -v` style output with x-access-token credentials.
+        content = "origin  https://x-access-token:ghs_secret123@github.com/owner/repo.git (push)"
+        result = scan_tool_output(content)
+        assert result.has_sensitive_content is True
+        assert "GITHUB_URL_TOKEN detected" in result.findings
+        assert "ghs_secret123" not in result.redacted_content
+
     # ---- Private keys ----
 
     def test_detects_rsa_private_key(self):

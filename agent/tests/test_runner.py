@@ -9,11 +9,28 @@ verified without spinning up the Claude Agent SDK client.
 
 from __future__ import annotations
 
+import asyncio
+import subprocess
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+import runner
+from gateway_tools import GATEWAY_SERVER_NAME
 from models import TaskConfig
-from runner import _initialize_policy_engine_and_hooks
+from runner import (
+    _CLAUDE_VERSION_PROBE_TIMEOUT_S,
+    _DISALLOWED_TOOLS,
+    _FULL_TOOL_SURFACE,
+    _initialize_policy_engine_and_hooks,
+    _log_claude_cli_version,
+    _register_gateway_server,
+    _resolve_allowed_tools,
+    _resolve_setting_sources,
+    _setup_agent_env,
+    _setup_bedrock_cost_attribution,
+)
 
 
 def _config(**overrides: Any) -> TaskConfig:
@@ -87,6 +104,33 @@ class TestInitializePolicyEngineAndHooks:
         kwargs = mock_policy_engine.call_args.kwargs
         assert kwargs["initial_approvals"] == ["tool_type:Read", "rule:force_push_any"]
         assert kwargs["task_default_timeout_s"] == 600
+
+    @patch("hooks.build_hook_matchers")
+    @patch("policy.PolicyEngine")
+    def test_read_only_threaded_to_engine(self, mock_policy_engine, _mock_build_hooks):
+        # SECURITY (#248 Phase 2a): config.read_only MUST reach
+        # PolicyEngine(read_only=...) — that is the seam between "config computes
+        # read_only" and "Cedar enforces context.read_only". Without this
+        # assertion, dropping the kwarg passes every other test while silently
+        # disabling the Write/Edit hard-deny for read-only workflows.
+        config = _config(read_only=True)
+        progress = MagicMock()
+
+        _initialize_policy_engine_and_hooks(config=config, trajectory=None, progress=progress)
+
+        assert mock_policy_engine.call_args.kwargs["read_only"] is True
+
+    @patch("hooks.build_hook_matchers")
+    @patch("policy.PolicyEngine")
+    def test_writeable_read_only_false_threaded_to_engine(
+        self, mock_policy_engine, _mock_build_hooks
+    ):
+        config = _config(read_only=False)
+        progress = MagicMock()
+
+        _initialize_policy_engine_and_hooks(config=config, trajectory=None, progress=progress)
+
+        assert mock_policy_engine.call_args.kwargs["read_only"] is False
 
     @patch("hooks.build_hook_matchers")
     @patch("policy.PolicyEngine")
@@ -185,7 +229,7 @@ class TestInitializePolicyEngineAndHooks:
     @patch("hooks.build_hook_matchers")
     @patch("policy.PolicyEngine")
     def test_init_log_includes_cap_and_threaded_source(
-        self, _mock_policy_engine, _mock_build_hooks, capsys
+        self, _mock_policy_engine, _mock_build_hooks, capfd
     ):
         # Non-None cap came from the orchestrator payload (blueprint value
         # or the platform-default-50 frozen on the TaskRecord at submit).
@@ -196,7 +240,7 @@ class TestInitializePolicyEngineAndHooks:
         config = _config(approval_gate_cap=200)
         _initialize_policy_engine_and_hooks(config=config, trajectory=None, progress=MagicMock())
 
-        captured = capsys.readouterr()
+        captured = capfd.readouterr()
         assert "Cedar policy engine initialized" in captured.out
         assert "approval_gate_cap=200" in captured.out
         assert "approval_gate_cap_source=threaded" in captured.out
@@ -204,7 +248,7 @@ class TestInitializePolicyEngineAndHooks:
     @patch("hooks.build_hook_matchers")
     @patch("policy.PolicyEngine")
     def test_init_log_marks_engine_default_when_cap_none(
-        self, _mock_policy_engine, _mock_build_hooks, capsys
+        self, _mock_policy_engine, _mock_build_hooks, capfd
     ):
         # Legacy task — cap falls through to ``PolicyEngine``'s own
         # default. Operator signal is ``approval_gate_cap_source=engine_default``
@@ -217,6 +261,318 @@ class TestInitializePolicyEngineAndHooks:
         config = _config(approval_gate_cap=None)
         _initialize_policy_engine_and_hooks(config=config, trajectory=None, progress=MagicMock())
 
-        captured = capsys.readouterr()
+        captured = capfd.readouterr()
         assert "approval_gate_cap_source=engine_default" in captured.out
         assert "approval_gate_cap=unset" in captured.out
+
+
+class TestResolveAllowedTools:
+    """The SDK tool surface (``allowed_tools``) is the second enforcement layer
+    the design promises alongside Cedar's ``context.read_only``. These tests pin
+    the seam between "config carries the workflow tool list" and "the SDK
+    receives it" — previously every allowed_tools assertion lived at the
+    validator/loader layer with zero coverage of the runtime hand-off (#248).
+    """
+
+    def test_workflow_tool_list_passed_through_verbatim(self):
+        # A writeable workflow's declared list reaches the SDK unchanged.
+        config = _config(allowed_tools=["Bash", "Read", "Write", "Edit"], read_only=False)
+        assert _resolve_allowed_tools(config) == ["Bash", "Read", "Write", "Edit"]
+
+    def test_empty_list_falls_back_to_full_surface(self):
+        # Legacy/batch callers that never resolved a workflow get the built-in
+        # full surface (preserves pre-#248 behavior). A copy, not the shared list.
+        config = _config(allowed_tools=[], read_only=False)
+        resolved = _resolve_allowed_tools(config)
+        assert resolved == _FULL_TOOL_SURFACE
+        assert resolved is not _FULL_TOOL_SURFACE
+
+    def test_read_only_drops_write_and_edit_from_full_surface(self):
+        # read_only with no explicit list: full surface minus Write/Edit.
+        config = _config(allowed_tools=[], read_only=True)
+        resolved = _resolve_allowed_tools(config)
+        assert "Write" not in resolved
+        assert "Edit" not in resolved
+        assert resolved == ["Bash", "Read", "Glob", "Grep", "WebFetch"]
+
+    def test_read_only_drops_write_and_edit_from_workflow_list(self):
+        # Even if a (misconfigured) read-only workflow declares Write/Edit, the
+        # runner strips them — the SDK can never receive a mutating tool on a
+        # read-only lane. This is the defense-in-depth the HIGH finding flagged.
+        config = _config(allowed_tools=["Bash", "Read", "Write", "Edit"], read_only=True)
+        assert _resolve_allowed_tools(config) == ["Bash", "Read"]
+
+    def test_read_leaning_default_lane_keeps_its_restricted_list(self):
+        # default/agent-v1 and web-research-v1 declare [Read, Glob, Grep,
+        # WebFetch] and are read_only:false — Cedar's read_only rules do NOT
+        # fire, so the tool list is the ONLY thing keeping Write/Bash off the
+        # lane. Verify the restricted list survives intact (no fallback widening).
+        restricted = ["Read", "Glob", "Grep", "WebFetch"]
+        config = _config(allowed_tools=list(restricted), read_only=False)
+        assert _resolve_allowed_tools(config) == restricted
+        assert "Bash" not in _resolve_allowed_tools(config)
+        assert "Write" not in _resolve_allowed_tools(config)
+
+
+class TestBedrockCostAttribution:
+    """#215: wire Claude Code's Bedrock attribution channels (creds + header)."""
+
+    def test_writes_attribution_file_and_sets_metadata_header_when_role_set(self, monkeypatch):
+        monkeypatch.setenv("AGENT_SESSION_ROLE_ARN", "arn:aws:iam::1:role/SR")
+        monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)
+        config = _config(user_id="alice", repo_url="owner/repo", task_id="t-9")
+
+        with patch("bedrock_creds_helper.write_attribution_file") as mock_write:
+            _setup_bedrock_cost_attribution(config)
+
+        role_arn, tags = mock_write.call_args.args
+        assert role_arn == "arn:aws:iam::1:role/SR"
+        assert {"Key": "user_id", "Value": "alice"} in tags
+
+        header = __import__("os").environ["ANTHROPIC_CUSTOM_HEADERS"]
+        name, _, value = header.partition(": ")
+        assert name == "X-Amzn-Bedrock-Request-Metadata"
+        import json as _json
+
+        assert _json.loads(value) == {
+            "user_id": "alice",
+            "repo": "owner/repo",
+            "task_id": "t-9",
+        }
+
+    def test_no_attribution_file_when_role_unset_but_header_still_set(self, monkeypatch):
+        # Local/dev: no SessionRole → no tagged creds (helper fails open), but the
+        # invocation-log metadata header is still useful and harmless.
+        monkeypatch.delenv("AGENT_SESSION_ROLE_ARN", raising=False)
+        config = _config(user_id="bob", repo_url="o/r", task_id="t-1")
+        with patch("bedrock_creds_helper.write_attribution_file") as mock_write:
+            _setup_bedrock_cost_attribution(config)
+        mock_write.assert_not_called()
+        assert "X-Amzn-Bedrock-Request-Metadata" in __import__("os").environ.get(
+            "ANTHROPIC_CUSTOM_HEADERS", ""
+        )
+
+
+class TestToolSurfaceHardening:
+    """The off-session/defer vectors are hard-blocked via disallowed_tools (not
+    the allow-list, which is auto-approve only), and repo-less tasks load no
+    on-disk settings. Regression guard for the background-Workflow bug where a
+    repo-less task launched a detached Workflow and finalized prematurely."""
+
+    def test_workflow_task_agent_are_disallowed(self):
+        # These must be present so they are removed from the model's context
+        # even under permission_mode="bypassPermissions".
+        assert "Workflow" in _DISALLOWED_TOOLS
+        assert "Task" in _DISALLOWED_TOOLS
+        assert "Agent" in _DISALLOWED_TOOLS
+
+    def test_disallowed_tool_set_is_pinned(self):
+        # #523: the block list is hand-enumerated ("name varies by CLI version"),
+        # so a silent drop/rename would reopen the detached-work bug with nothing
+        # to catch it. Pin the exact set — a deliberate change must update this,
+        # forcing a look at whether a renamed off-session tool needs adding.
+        assert set(_DISALLOWED_TOOLS) == {
+            "Workflow",
+            "Task",
+            "Agent",
+            "Monitor",
+            "SendMessage",
+            "CronCreate",
+            "CronDelete",
+            "CronList",
+        }
+
+    def test_repo_less_loads_no_setting_sources(self):
+        # requires_repo=False → no cloned repo → load nothing (keeps stray
+        # on-disk skills that could spawn a background Workflow out of reach).
+        config = _config(requires_repo=False, repo_url="", github_token="")
+        assert _resolve_setting_sources(config) == []
+
+    def test_repo_bound_loads_project_settings(self):
+        config = _config(requires_repo=True)
+        assert _resolve_setting_sources(config) == ["project"]
+
+    def test_repo_optional_with_repo_loads_project_settings(self):
+        # #523: a repo-optional workflow (requires_repo=False) GIVEN a repo takes
+        # the clone path (pipeline gates on `not requires_repo and not repo_url`),
+        # so it must load the cloned repo's ``.claude/`` config. Keying on
+        # requires_repo would wrongly drop it — key on repo presence.
+        config = _config(requires_repo=False, repo_url="owner/repo")
+        assert _resolve_setting_sources(config) == ["project"]
+
+
+class TestSetupAgentEnv:
+    """Environment the Claude Code subprocess inherits."""
+
+    def test_haiku_model_env_is_set_from_config(self, monkeypatch):
+        # The env var is now sourced from config.haiku_model (not hardcoded), so
+        # it is per-task overridable like ANTHROPIC_MODEL. Regression: bare
+        # foundation-model id 400s on Bedrock — WebFetch's Haiku sub-calls hit
+        # this — so config's default must be the us.* inference profile.
+        import os
+
+        # _setup_agent_env writes ANTHROPIC_DEFAULT_HAIKU_MODEL and
+        # CLAUDE_CODE_USE_BEDROCK straight to os.environ. Pre-claim them through
+        # monkeypatch so its teardown restores them and this test can't leak into
+        # order-dependent neighbors (#523).
+        monkeypatch.setenv("ANTHROPIC_DEFAULT_HAIKU_MODEL", "")
+        monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "")
+
+        config = _config(haiku_model="us.anthropic.claude-haiku-4-5-20251001-v1:0")
+        _setup_agent_env(config)
+        assert (
+            os.environ["ANTHROPIC_DEFAULT_HAIKU_MODEL"]
+            == "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+        )
+
+    def test_config_default_haiku_model_is_an_inference_profile(self):
+        # The platform default (no override) must be a us.* profile, never a bare
+        # foundation-model id — the whole point of the fix.
+        assert _config().haiku_model.startswith("us.")
+
+
+class TestClaudeCliVersionProbe:
+    """The diagnostic probe that killed every MicroVM task at turn 0 (P2-F5).
+
+    ``agent/src/runner.py`` used ``timeout=10`` on ``claude --version``. On the
+    ``lambda-microvm`` backend that failed EVERY task, reproducibly:
+
+        TimeoutExpired: Command '['claude', '--version']' timed out after 10 seconds
+
+    The binary answers in under a second in the same image locally; it is a 225 MiB
+    statically linked ELF whose pages had never been touched before the snapshot was
+    captured, so the first ``exec`` on a restored guest had to fault them all in.
+    The primary fix is warming it in ``/ready`` (``server._warm_snapshot_binaries``);
+    this bound is the backstop, and the point of these tests is that it stays loose.
+    """
+
+    def test_the_version_probe_bound_is_loose_enough_for_a_cold_start(self):
+        # A version string for a log line: nothing branches on it, and the failure
+        # mode is a dead task. Any cold-start environment must fit inside it.
+        assert _CLAUDE_VERSION_PROBE_TIMEOUT_S >= 60
+
+    def test_the_probe_passes_that_timeout_to_the_version_call_only(self, monkeypatch):
+        calls: list[tuple[list[str], float]] = []
+
+        def fake_run(argv, **kwargs):
+            calls.append((list(argv), kwargs["timeout"]))
+            return MagicMock(returncode=0, stdout="/usr/bin/claude\n")
+
+        monkeypatch.setattr(runner.subprocess, "run", fake_run)
+        _log_claude_cli_version()
+
+        assert calls[0][0] == ["which", "claude"]
+        assert calls[1][0] == ["claude", "--version"]
+        # The PATH lookup keeps its tight bound — it touches none of the 225 MiB —
+        # while the exec that DOES gets the loose one. Sharing one number would
+        # either loosen a lookup that cannot hang or re-tighten the exec that can.
+        assert calls[1][1] == _CLAUDE_VERSION_PROBE_TIMEOUT_S
+        assert calls[0][1] < calls[1][1]
+
+    def test_a_missing_cli_warns_and_skips_the_version_call(self, monkeypatch):
+        calls: list[list[str]] = []
+
+        def fake_run(argv, **_kwargs):
+            calls.append(list(argv))
+            return MagicMock(returncode=1, stdout="")
+
+        monkeypatch.setattr(runner.subprocess, "run", fake_run)
+        _log_claude_cli_version()
+        # No point exec'ing a binary `which` could not find — and no exception:
+        # this is diagnostics, so it must never be the thing that fails a task.
+        assert calls == [["which", "claude"]]
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            subprocess.TimeoutExpired(["claude", "--version"], 60),
+            FileNotFoundError(2, "No such file or directory", "claude"),
+            PermissionError(13, "Permission denied", "claude"),
+        ],
+        ids=["timeout", "missing-binary", "not-executable"],
+    )
+    def test_a_failing_version_call_warns_instead_of_killing_the_task(
+        self, monkeypatch, capfd, error
+    ):
+        # The other half of P2-F5. A looser timeout makes the 10 s failure unlikely,
+        # not impossible — and a probe whose entire output is a log line must not be
+        # able to end a task at turn 0 no matter how it fails.
+        def fake_run(argv, **_kwargs):
+            if argv[0] == "which":
+                return MagicMock(returncode=0, stdout="/usr/bin/claude\n")
+            raise error
+
+        monkeypatch.setattr(runner.subprocess, "run", fake_run)
+
+        _log_claude_cli_version()  # must not raise
+
+        out = capfd.readouterr().out
+        assert "claude CLI version probe failed (non-fatal)" in out
+        assert type(error).__name__ in out
+        # Degraded, not silent — and NOT reported as a successful probe.
+        assert "claude CLI:" not in out
+
+    def test_a_failing_path_lookup_also_only_warns(self, monkeypatch, capfd):
+        # `which` itself can be absent on a minimal image; same rule applies.
+        def fake_run(_argv, **_kwargs):
+            raise FileNotFoundError(2, "No such file or directory", "which")
+
+        monkeypatch.setattr(runner.subprocess, "run", fake_run)
+
+        _log_claude_cli_version()
+
+        assert "claude CLI version probe failed (non-fatal)" in capfd.readouterr().out
+
+    def test_run_agent_invokes_the_cli_version_probe(self):
+        sentinel = RuntimeError("stop after version probe")
+        with (
+            patch.object(runner, "_setup_agent_env"),
+            patch.object(runner, "_log_claude_cli_version", side_effect=sentinel) as probe,
+        ):
+            try:
+                asyncio.run(runner.run_agent("prompt", "system", _config()))
+            except RuntimeError as error:
+                assert error is sentinel
+            else:
+                raise AssertionError("run_agent continued past the version probe")
+
+        probe.assert_called_once_with()
+
+
+class TestRegisterGatewayServer:
+    """The runner-side wiring that registers the AgentCore Gateway bridge.
+
+    ``gateway_tools`` unit tests cover ``build_gateway_server`` itself; these
+    pin the ``run_agent`` registration path — that a built server lands under
+    ``GATEWAY_SERVER_NAME`` and that a disabled bridge adds nothing (#641 P1
+    review flagged this wiring as untested / N6).
+    """
+
+    def test_registers_built_server_under_gateway_name(self):
+        sentinel = object()
+        with patch("runner.build_gateway_server", return_value=sentinel) as mock_build:
+            mcp_servers: dict[str, Any] = {}
+            _register_gateway_server(mcp_servers)
+        mock_build.assert_called_once_with()
+        assert mcp_servers == {GATEWAY_SERVER_NAME: sentinel}
+
+    def test_no_registration_when_bridge_disabled(self):
+        # build_gateway_server returns None when the feature is off (URL unset)
+        # or the SDK is missing — the runner must then offer no gateway tool.
+        with patch("runner.build_gateway_server", return_value=None):
+            mcp_servers: dict[str, Any] = {}
+            _register_gateway_server(mcp_servers)
+        assert mcp_servers == {}
+
+    def test_preserves_other_servers_already_registered(self):
+        # Registration must be additive — a pre-registered server (e.g. the
+        # clarification tool) is left untouched.
+        sentinel = object()
+        existing = object()
+        with patch("runner.build_gateway_server", return_value=sentinel):
+            mcp_servers: dict[str, Any] = {"clarification": existing}
+            _register_gateway_server(mcp_servers)
+        assert mcp_servers == {
+            "clarification": existing,
+            GATEWAY_SERVER_NAME: sentinel,
+        }

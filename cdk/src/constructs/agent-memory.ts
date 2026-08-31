@@ -17,11 +17,14 @@
  *  SOFTWARE.
  */
 
-import * as agentcore from '@aws-cdk/aws-bedrock-agentcore-alpha';
 import { Duration } from 'aws-cdk-lib';
+import * as agentcore from 'aws-cdk-lib/aws-bedrockagentcore';
 import type * as iam from 'aws-cdk-lib/aws-iam';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
+
+/** Default short-term memory event expiration (days). */
+const DEFAULT_EXPIRATION_DAYS = 365;
 
 /**
  * Properties for the AgentMemory construct.
@@ -56,7 +59,7 @@ export interface AgentMemoryProps {
  *   The extraction strategies use namespace templates to place extracted records
  *   into hierarchical paths keyed by repository:
  *
- *   - Semantic: `/{actorId}/knowledge/`  →  e.g. `/krokoko/agent-plugins/knowledge/`
+ *   - Semantic: `/{actorId}/knowledge/`  →  e.g. `/awslabs/agent-plugins/knowledge/`
  *   - Episodic: `/{actorId}/episodes/{sessionId}/`  →  per-task episodes
  *   - Episodic reflection: `/{actorId}/episodes/`  →  cross-task summaries
  */
@@ -72,14 +75,14 @@ export class AgentMemory extends Construct {
     this.memory = new agentcore.Memory(this, 'Memory', {
       memoryName: props?.memoryName,
       description: 'Cross-task interaction memory for background coding agents',
-      expirationDuration: props?.expirationDuration ?? Duration.days(365),
+      expirationDuration: props?.expirationDuration ?? Duration.days(DEFAULT_EXPIRATION_DAYS),
       memoryStrategies: [
         agentcore.MemoryStrategy.usingSemantic({
-          name: 'SemanticKnowledge',
+          strategyName: 'SemanticKnowledge',
           namespaces: ['/{actorId}/knowledge/'],
         }),
         agentcore.MemoryStrategy.usingEpisodic({
-          name: 'TaskEpisodes',
+          strategyName: 'TaskEpisodes',
           namespaces: ['/{actorId}/episodes/{sessionId}/'],
           reflectionConfiguration: {
             namespaces: ['/{actorId}/episodes/'],

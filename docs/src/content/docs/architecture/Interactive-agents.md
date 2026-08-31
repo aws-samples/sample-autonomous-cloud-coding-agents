@@ -23,7 +23,7 @@ This document describes the interactivity surfaces layered on top of that model 
 3. **Watch** — `bgagent watch <id>` polls `TaskEventsTable` with an adaptive interval (500 ms when events are arriving, back-off to 5 s when idle). Same endpoint used under the hood for foreground-block UX on `ask` and for HITL approval waits.
 4. **Nudge** — `bgagent nudge <id> "<text>"` writes a row into `TaskNudgesTable`. The agent reads pending nudges between turns, acknowledges with a `nudge_acknowledged` milestone event, and integrates the nudge on its next turn.
 5. **Ask** — `bgagent ask <id> "<question>"` (Phase 2) writes a question row. The agent answers at the next between-turns boundary; the answer surfaces as a `status_response` event. CLI default is foreground block-and-poll with a spinner; task and answer are both durable if the CLI disconnects.
-6. **Approval gates** — Phase 3 Cedar-driven hard gates. Agent emits `approval_requested`, waits for a decision from `bgagent approve` / `bgagent deny` or a Slack button-press. Detailed design in [`CEDAR_HITL_GATES.md`](/architecture/cedar-hitl-gates).
+6. **Approval gates** — Phase 3 Cedar-driven hard gates. Agent emits `approval_requested`, waits for a decision from `bgagent approve` / `bgagent deny` or a Slack button-press. Detailed design in [`CEDAR_HITL_GATES.md`](/sample-autonomous-cloud-coding-agents/architecture/cedar-hitl-gates).
 
 ### Core architectural choices
 
@@ -226,7 +226,7 @@ Consumer: agent between-turns hook reads pending nudges, emits `nudge_acknowledg
 
 ### 3.7 TaskApprovalsTable (Phase 3)
 
-Phase 3 approval-request spine. Detailed schema in [`CEDAR_HITL_GATES.md`](/architecture/cedar-hitl-gates). Semantics summary:
+Phase 3 approval-request spine. Detailed schema in [`CEDAR_HITL_GATES.md`](/sample-autonomous-cloud-coding-agents/architecture/cedar-hitl-gates). Semantics summary:
 - Agent writes an approval row with the request context.
 - Agent transitions `RUNNING → AWAITING_APPROVAL` and enters a poll loop.
 - User responds via REST (`POST /tasks/{id}/approvals/{request_id}`) or via a Slack button dispatched by the notification plane.
@@ -234,11 +234,11 @@ Phase 3 approval-request spine. Detailed schema in [`CEDAR_HITL_GATES.md`](/arch
 
 ### 3.8 FanOutConsumer (router)
 
-Lambda subscribed to `TaskEventsTable` DDB Streams (`ParallelizationFactor: 1`, preserving per-`task_id` ordering by shard). Reads per-task notification config (from `TaskTable` metadata or `RepoTable` defaults), filters events by channel subscription, and invokes per-channel dispatcher Lambdas.
+Lambda subscribed to `TaskEventsTable` DDB Streams (relying on the DynamoDB Streams **default** `ParallelizationFactor` of 1, which preserves per-`task_id` ordering by shard — not set explicitly in `fanout-consumer.ts`; see §6.1). Reads per-task notification config (from `TaskTable` metadata or `RepoTable` defaults), filters events by channel subscription, and invokes per-channel dispatcher Lambdas.
 
 - **SlackDispatchFn** — posts to configured channel / DM. Includes action buttons for `approval_required` events.
 - **EmailDispatchFn** — SES.
-- **GitHubDispatchFn** — edits a single GitHub issue comment in place via `PATCH /repos/{o}/{r}/issues/comments/{id}`. On 404 (comment deleted upstream) falls back to POSTing a fresh comment. Per-task ordering is guaranteed upstream by DDB Stream `ParallelizationFactor: 1`, so no conditional-request header is needed (and GitHub's REST API does not accept `If-Match` on this endpoint — see §6.4).
+- **GitHubDispatchFn** — edits a single GitHub issue comment in place via `PATCH /repos/{o}/{r}/issues/comments/{id}`. On 404 (comment deleted upstream) falls back to POSTing a fresh comment. Per-task ordering is guaranteed upstream by the DDB Streams default `ParallelizationFactor` of 1 (see §6.1), so no conditional-request header is needed (and GitHub's REST API does not accept `If-Match` on this endpoint — see §6.4).
 
 Detailed routing and default filters in §6.
 
@@ -413,7 +413,7 @@ Flags:
 
 ### 5.6 `bgagent approve` / `deny` / `pending` / `policies` (Phase 3)
 
-HITL approval commands. All flows are REST + DDB; no streaming. Detailed design in [`CEDAR_HITL_GATES.md`](/architecture/cedar-hitl-gates). Summary:
+HITL approval commands. All flows are REST + DDB; no streaming. Detailed design in [`CEDAR_HITL_GATES.md`](/sample-autonomous-cloud-coding-agents/architecture/cedar-hitl-gates). Summary:
 
 - Agent emits `approval_required` with the tool context.
 - Notification plane dispatches the event (Slack with action buttons, email, GitHub).
@@ -444,7 +444,7 @@ TaskEventsTable ──DDB Stream──▶ FanOutConsumer
 ```
 
 - Single Lambda subscribes to the DDB Stream. Stateless; fails-forward into SQS DLQ on per-event errors.
-- `ParallelizationFactor: 1` on the event-source mapping → per-`task_id` shard ordering preserved for free.
+- Per-`task_id` shard ordering is preserved for free because the DynamoDB Streams `ParallelizationFactor` **defaults to 1**. Note: `cdk/src/constructs/fanout-consumer.ts` configures the `DynamoEventSource` **without** setting `parallelizationFactor`, so this ordering guarantee rests on the AWS default rather than an explicit setting. If this guarantee must be enforced against future default changes or accidental edits, set `parallelizationFactor: 1` explicitly on the event source.
 - Router reads per-task notification config (channel enablement + event-type filters), then invokes the relevant dispatcher Lambda(s) per event.
 - Dispatchers are separate Lambdas so a GitHub API outage doesn't block Slack notifications.
 
@@ -466,7 +466,7 @@ Rationale: if Slack pings on every milestone, users mute the bot within days. De
 
 A single comment per task, edited in place as the agent progresses (terminal states + `pr_created` by default).
 
-**Concurrency:** Per-`task_id` ordering is guaranteed upstream by DDB Streams on `TaskEventsTable` with `ParallelizationFactor: 1`, and the fanout Lambda is the only writer on its own comment, so concurrent edits of the same comment body are not possible — last-writer-wins is safe because there is no concurrent writer to lose to. The dispatcher issues a single PATCH per event (no GET round-trip, no conditional headers). If the comment has been deleted upstream (404), it falls back to POSTing a fresh comment.
+**Concurrency:** Per-`task_id` ordering is guaranteed upstream by DDB Streams on `TaskEventsTable` via the default `ParallelizationFactor` of 1 (not set explicitly in `fanout-consumer.ts` — see §6.1), and the fanout Lambda is the only writer on its own comment, so concurrent edits of the same comment body are not possible — last-writer-wins is safe because there is no concurrent writer to lose to. The dispatcher issues a single PATCH per event (no GET round-trip, no conditional headers). If the comment has been deleted upstream (404), it falls back to POSTing a fresh comment.
 
 **Tolerated races (bounded, logged, not silenced):**
 
@@ -554,7 +554,7 @@ RUNNING ──▶ AWAITING_APPROVAL ──▶ RUNNING    (approve or deny-with-s
               └──▶ FAILED       (stranded reconciler catches abandoned approval)
 ```
 
-The `AWAITING_APPROVAL` state holds the user's concurrency slot (paused but alive). See [`CEDAR_HITL_GATES.md`](/architecture/cedar-hitl-gates) for full semantics.
+The `AWAITING_APPROVAL` state holds the user's concurrency slot (paused but alive). See [`CEDAR_HITL_GATES.md`](/sample-autonomous-cloud-coding-agents/architecture/cedar-hitl-gates) for full semantics.
 
 ### 8.3 Write rules
 
@@ -682,7 +682,7 @@ Phase 3 ships hard gates. No soft questions, no "proceed with default if no resp
 
 ### AD-9. GitHub edit-in-place via DDB-Stream ordering, not SQS FIFO
 
-DDB Streams on `TaskEventsTable` with `ParallelizationFactor: 1` give per-`task_id` ordering. The fanout Lambda is the only writer on its own comment, so no concurrent writer exists to race — last-writer-wins is safe. The dispatcher PATCHes directly (no GET-then-PATCH, no conditional headers).
+DDB Streams on `TaskEventsTable` give per-`task_id` ordering via the **default** `ParallelizationFactor` of 1. This default is relied upon rather than set explicitly: `cdk/src/constructs/fanout-consumer.ts` configures the `DynamoEventSource` without `parallelizationFactor`. If the ordering guarantee must be made robust against default changes, set `parallelizationFactor: 1` explicitly. The fanout Lambda is the only writer on its own comment, so no concurrent writer exists to race — last-writer-wins is safe. The dispatcher PATCHes directly (no GET-then-PATCH, no conditional headers).
 
 *Why:* Simpler than SQS FIFO (no queue, no DLQ, no per-group throughput ceiling), and lower latency than a GET-then-PATCH round-trip.
 
@@ -737,7 +737,7 @@ Opt-in per task: 4 KB previews + full trajectory to S3 with TTL.
 - Hard-gate approval gates with Cedar policy evaluation
 - `bgagent approve` / `deny` / `pending` / `policies`
 - `AWAITING_APPROVAL` state + orchestrator handling
-- Full design in [`CEDAR_HITL_GATES.md`](/architecture/cedar-hitl-gates)
+- Full design in [`CEDAR_HITL_GATES.md`](/sample-autonomous-cloud-coding-agents/architecture/cedar-hitl-gates)
 
 ### Phase 4 — Dispatcher polish
 
@@ -749,8 +749,8 @@ Opt-in per task: 4 KB previews + full trajectory to S3 with TTL.
 
 ### Deferred
 
-- **LLM-synthesized status summary** — `bgagent ask` without targeting the agent; Lambda calls an LLM to narrate state. Cost + hallucination trade-offs; revisit if v1 feedback warrants. Tracked on the product roadmap as **LLM-synthesized status summary (optional)** under **Smart progress updates** ([ROADMAP.md](/roadmap/roadmap)).
-- **Cedar `effect: "advise"` tier** — non-blocking FYI policy tier for post-v1. Design sketch in [`CEDAR_HITL_GATES.md`](/architecture/cedar-hitl-gates).
+- **LLM-synthesized status summary** — `bgagent ask` without targeting the agent; Lambda calls an LLM to narrate state. Cost + hallucination trade-offs; revisit if v1 feedback warrants. Tracked as a [GitHub issue](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues) under **Smart progress updates**.
+- **Cedar `effect: "advise"` tier** — non-blocking FYI policy tier for post-v1. Design sketch in [`CEDAR_HITL_GATES.md`](/sample-autonomous-cloud-coding-agents/architecture/cedar-hitl-gates).
 - **Outbound WebSocket from agent** — only if a concrete sub-200 ms latency requirement surfaces. Agent-initiated egress avoids dual-auth problems and works on any compute.
 - **Multi-user watch** — multiple users attached to the same task's live event stream (teams).
 
@@ -770,9 +770,17 @@ Opt-in per task: 4 KB previews + full trajectory to S3 with TTL.
 
 ## Appendix A — Claude Agent SDK reference
 
-Pinned version: `claude-agent-sdk==0.1.53` (Python).
+Pinned version: `claude-agent-sdk==0.2.82` (Python; see `agent/pyproject.toml`).
 
-### A.1 Hook surface (v0.1.53)
+> **Caution — re-verify against 0.2.x.** The hook-surface details in this
+> appendix (the `HookEvent` enum members, `PostToolUseFailure`, the Stop-hook
+> return-value contract, etc.) were originally written against
+> `claude-agent-sdk==0.1.53`. The pin has since advanced to `0.2.82`, and the
+> SDK's hook API may have changed across that range. Before relying on any
+> specific enum member or hook signature below, verify it against the installed
+> 0.2.x SDK and the actual usage in `agent/src/hooks.py`.
+
+### A.1 Hook surface (verify against 0.2.x — originally documented for v0.1.53)
 
 `HookEvent` enum: `PreToolUse | PostToolUse | PostToolUseFailure | UserPromptSubmit | Stop | SubagentStart | SubagentStop | PreCompact | PermissionRequest | Notification`.
 

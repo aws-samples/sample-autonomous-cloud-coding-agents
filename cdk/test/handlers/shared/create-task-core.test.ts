@@ -52,6 +52,16 @@ jest.mock('../../../src/handlers/shared/repo-config', () => ({
   lookupRepo: mockLookupRepo,
 }));
 
+// Partial-mock the workflows module: keep every real resolver/descriptor, but
+// make ``disallowedWorkflowModel`` controllable so the rule-13 admission path
+// can be exercised without shipping a workflow that pins a bad model. Defaults
+// to the real implementation (null for all shipped workflows) via beforeEach.
+const mockDisallowedWorkflowModel = jest.fn();
+jest.mock('../../../src/handlers/shared/workflows', () => {
+  const actual = jest.requireActual('../../../src/handlers/shared/workflows');
+  return { ...actual, disallowedWorkflowModel: mockDisallowedWorkflowModel };
+});
+
 let ulidCounter = 0;
 jest.mock('ulid', () => ({ ulid: jest.fn(() => `ULID${ulidCounter++}`) }));
 
@@ -83,6 +93,9 @@ beforeEach(() => {
   // Default: repo is onboarded, no blueprint config (submit path
   // resolves to the platform-default approval_gate_cap of 50).
   mockLookupRepo.mockResolvedValue({ onboarded: true, config: null });
+  // Default: the resolved workflow's model is permitted (matches the real
+  // implementation for every shipped workflow). Rule-13 tests override this.
+  mockDisallowedWorkflowModel.mockReturnValue(null);
 });
 
 describe('createTaskCore', () => {
@@ -101,10 +114,180 @@ describe('createTaskCore', () => {
     expect(mockLambdaSend).toHaveBeenCalledTimes(1);
   });
 
+  test('hoists tenant-scoped Jira issue identity for the sparse lookup index', async () => {
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_description: 'Fix the Jira issue' },
+      makeContext({
+        channelSource: 'jira',
+        channelMetadata: {
+          jira_cloud_id: 'cloud-1',
+          jira_issue_key: 'ENG-42',
+        },
+      }),
+      'req-jira-identity',
+    );
+
+    expect(result.statusCode).toBe(201);
+    const taskPut = mockSend.mock.calls.find(
+      ([command]) => command._type === 'Put' && command.input.TableName === 'Tasks',
+    );
+    expect(taskPut![0].input.Item.jira_issue_identity).toBe('cloud-1#ENG-42');
+  });
+
+  test('does not hoist Jira issue identity for incomplete or non-Jira metadata', async () => {
+    await createTaskCore(
+      { repo: 'org/repo', task_description: 'Regular task' },
+      makeContext({
+        channelSource: 'api',
+        channelMetadata: {
+          jira_cloud_id: 'cloud-1',
+          jira_issue_key: 'ENG-42',
+        },
+      }),
+      'req-no-jira-identity',
+    );
+
+    const taskPut = mockSend.mock.calls.find(
+      ([command]) => command._type === 'Put' && command.input.TableName === 'Tasks',
+    );
+    expect(taskPut![0].input.Item).not.toHaveProperty('jira_issue_identity');
+  });
+
+  test('accepts an initial_approvals pattern whose value contains a colon', async () => {
+    // Regression: the degenerate-pattern guard used split(':', 2)[1], which
+    // truncated the value at the next colon. For "ab:cdefgh" that yields the
+    // 2-char fragment "ab", which isDegeneratePattern flags as degenerate —
+    // a spurious 400. The full value "ab:cdefgh" is not degenerate, so the
+    // scope must be accepted.
+    const result = await createTaskCore(
+      {
+        repo: 'org/repo',
+        task_description: 'Fix the bug',
+        initial_approvals: ['bash_pattern:ab:cdefgh'],
+      } as any,
+      makeContext(),
+      'req-1',
+    );
+    expect(result.statusCode).toBe(201);
+  });
+
+  test('still rejects a genuinely degenerate initial_approvals pattern', async () => {
+    const result = await createTaskCore(
+      {
+        repo: 'org/repo',
+        task_description: 'Fix the bug',
+        initial_approvals: ['bash_pattern:*'],
+      } as any,
+      makeContext(),
+      'req-1',
+    );
+    expect(result.statusCode).toBe(400);
+    expect(JSON.parse(result.body).error.code).toBe('VALIDATION_ERROR');
+  });
+
   test('returns 400 for invalid repo', async () => {
     const result = await createTaskCore({ repo: 'invalid' } as any, makeContext(), 'req-1');
     expect(result.statusCode).toBe(400);
     expect(JSON.parse(result.body).error.code).toBe('VALIDATION_ERROR');
+  });
+
+  test('accepts a repo-less submission', async () => {
+    // No repo + the repo-optional default workflow ⇒ 201, no onboarding lookup,
+    // no repo persisted on the record.
+    const result = await createTaskCore(
+      { workflow_ref: 'default/agent-v1', task_description: 'Summarise these papers' },
+      makeContext(),
+      'req-1',
+    );
+    expect(result.statusCode).toBe(201);
+    const body = JSON.parse(result.body);
+    expect(body.data.status).toBe('SUBMITTED');
+    expect(body.data.repo).toBeNull();
+    // Repo-less ⇒ no branch is created (the agent never clones/branches/PRs), so
+    // branch_name is empty rather than a misleading bgagent/<id>/... slug.
+    expect(body.data.branch_name).toBe('');
+    // Repo-less ⇒ the onboarding/blueprint RepoTable lookup is skipped entirely.
+    expect(mockLookupRepo).not.toHaveBeenCalled();
+    expect(mockSend).toHaveBeenCalledTimes(2); // task + event
+  });
+
+  test('returns 400 for an unsatisfiable @version pin', async () => {
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_description: 'Fix it', workflow_ref: 'coding/new-task-v1@2.0.0' },
+      makeContext(),
+      'req-1',
+    );
+    expect(result.statusCode).toBe(400);
+    const body = JSON.parse(result.body);
+    expect(body.error.code).toBe('VALIDATION_ERROR');
+    expect(body.error.message).toContain('not available');
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
+  test('returns 400 when a repo-bound workflow is missing its repo', async () => {
+    const result = await createTaskCore(
+      { workflow_ref: 'coding/new-task-v1', task_description: 'Fix it' },
+      makeContext(),
+      'req-1',
+    );
+    expect(result.statusCode).toBe(400);
+    expect(JSON.parse(result.body).error.message).toContain('repo');
+  });
+
+  test('rejects a malformed repo on a repo-bound workflow', async () => {
+    // The repo-present-but-malformed branch: a repo-bound workflow with a
+    // bad-format repo is a 400 with the new "Invalid repo." message.
+    const result = await createTaskCore(
+      { workflow_ref: 'coding/new-task-v1', repo: 'not-a-repo', task_description: 'Fix it' } as any,
+      makeContext(),
+      'req-1',
+    );
+    expect(result.statusCode).toBe(400);
+    expect(JSON.parse(result.body).error.message).toContain('Invalid repo');
+  });
+
+  test('repo-OPTIONAL workflow given a valid repo runs the repo-bound path', async () => {
+    // default/agent-v1 is repo-optional; when a repo IS supplied it must still
+    // be onboarded-checked and persisted (requires_repo:false means optional,
+    // not forbidden).
+    const result = await createTaskCore(
+      { workflow_ref: 'default/agent-v1', repo: 'org/repo', task_description: 'Do it' },
+      makeContext(),
+      'req-1',
+    );
+    expect(result.statusCode).toBe(201);
+    const body = JSON.parse(result.body);
+    expect(body.data.repo).toBe('org/repo');
+    // Repo present ⇒ the onboarding/blueprint lookup DID run.
+    expect(mockLookupRepo).toHaveBeenCalledWith('org/repo');
+  });
+
+  test('returns 400 when the resolved workflow pins a disallowed model (rule 13)', async () => {
+    // WORKFLOWS.md rule 13: a workflow whose agent_config.model.id is not on the
+    // platform allow-list FAILS admission (no silent downgrade).
+    mockDisallowedWorkflowModel.mockReturnValue('anthropic.some-unapproved-model');
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_description: 'Fix the bug' },
+      makeContext(),
+      'req-1',
+    );
+    expect(result.statusCode).toBe(400);
+    const body = JSON.parse(result.body);
+    expect(body.error.code).toBe('VALIDATION_ERROR');
+    expect(body.error.message).toContain('not on the platform allow-list');
+    // Rejected at admission — no task/event writes, no orchestrator invoke.
+    expect(mockSend).not.toHaveBeenCalled();
+    expect(mockLambdaSend).not.toHaveBeenCalled();
+  });
+
+  test('admits a task when the resolved workflow model is permitted (rule 13 pass)', async () => {
+    mockDisallowedWorkflowModel.mockReturnValue(null);
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_description: 'Fix the bug' },
+      makeContext(),
+      'req-1',
+    );
+    expect(result.statusCode).toBe(201);
   });
 
   test('returns 400 when no task spec', async () => {
@@ -141,7 +324,7 @@ describe('createTaskCore', () => {
       user_id: 'user-123',
       status: 'SUBMITTED',
       repo: 'org/repo',
-      task_type: 'new_task',
+      resolved_workflow: { id: 'coding/new-task-v1', version: '1.0.0' },
       task_description: 'Original work',
       branch_name: 'bgagent/existing/slug',
       channel_source: 'api',
@@ -169,6 +352,37 @@ describe('createTaskCore', () => {
     expect(mockLambdaSend).not.toHaveBeenCalled();
   });
 
+  test('returns 200 for a repo-less idempotency replay despite empty branch_name', async () => {
+    // Regression: a repo-less record legitimately persists branch_name='' (and
+    // no repo). The replay completeness check must not treat those falsy fields
+    // as "missing" and 500 — only true identity/audit fields are required.
+    const existingItem = {
+      task_id: 'existing-repoless',
+      user_id: 'user-123',
+      status: 'SUBMITTED',
+      resolved_workflow: { id: 'knowledge/web-research-v1', version: '1.0.0' },
+      task_description: 'Summarise these papers',
+      branch_name: '',
+      channel_source: 'api',
+      status_created_at: 'SUBMITTED#2020-01-01T00:00:00.000Z',
+      created_at: '2020-01-01T00:00:00.000Z',
+      updated_at: '2020-01-01T00:00:00.000Z',
+      idempotency_key: 'rl-key',
+    };
+    mockSend
+      .mockResolvedValueOnce({ Items: [{ task_id: 'existing-repoless' }] })
+      .mockResolvedValueOnce({ Item: existingItem });
+
+    const result = await createTaskCore(
+      { workflow_ref: 'knowledge/web-research-v1', task_description: 'Summarise these papers' },
+      makeContext({ idempotencyKey: 'rl-key' }),
+      'req-1',
+    );
+    expect(result.statusCode).toBe(200);
+    expect(result.headers?.['Idempotent-Replay']).toBe('true');
+    expect(JSON.parse(result.body).data.task_id).toBe('existing-repoless');
+  });
+
   test('returns 409 when idempotency key belongs to another user', async () => {
     mockSend
       .mockResolvedValueOnce({ Items: [{ task_id: 'existing' }] })
@@ -178,7 +392,7 @@ describe('createTaskCore', () => {
           user_id: 'other-user',
           status: 'SUBMITTED',
           repo: 'org/repo',
-          task_type: 'new_task',
+          resolved_workflow: { id: 'coding/new-task-v1', version: '1.0.0' },
           branch_name: 'bgagent/existing/slug',
           channel_source: 'api',
           status_created_at: 'SUBMITTED#2020-01-01T00:00:00.000Z',
@@ -414,30 +628,61 @@ describe('createTaskCore', () => {
     expect(result.statusCode).toBe(201);
   });
 
-  test('creates pr_iteration task with pr_number', async () => {
+  test('resolves the platform default when workflow_ref is omitted (repo present)', async () => {
+    // createTaskCore does NOT infer the coding workflow from the mere presence
+    // of a repo — that "repo task ⇒ coding workflow" decision is pinned by each
+    // CHANNEL processor at its call site (Linear/Jira/Slack pass
+    // workflow_ref: CODING_WORKFLOW_ID; see those processors' tests). A raw
+    // createTaskCore call with no ref falls through the resolution ladder to the
+    // repo-less platform default, whether or not a repo is attached.
     const result = await createTaskCore(
-      { repo: 'org/repo', task_type: 'pr_iteration', pr_number: 42 },
+      { repo: 'org/repo', task_description: 'Fix the bug' },
+      makeContext(),
+      'req-default',
+    );
+    expect(result.statusCode).toBe(201);
+    const body = JSON.parse(result.body);
+    expect(body.data.resolved_workflow).toEqual({ id: 'default/agent-v1', version: '1.0.0' });
+  });
+
+  test('resolves the platform default when workflow_ref is omitted AND no repo (symmetric)', async () => {
+    // §6 symmetric coverage: the repo-less path through the real caller. Guards
+    // against a future fallback-branch inversion that a repo-pinned test would
+    // miss (the repo-less default must stay default/agent-v1).
+    const result = await createTaskCore(
+      { task_description: 'Do some research' },
+      makeContext(),
+      'req-default-norepo',
+    );
+    expect(result.statusCode).toBe(201);
+    const body = JSON.parse(result.body);
+    expect(body.data.resolved_workflow).toEqual({ id: 'default/agent-v1', version: '1.0.0' });
+  });
+
+  test('creates a pr-iteration workflow task with pr_number', async () => {
+    const result = await createTaskCore(
+      { repo: 'org/repo', workflow_ref: 'coding/pr-iteration-v1', pr_number: 42 },
       makeContext(),
       'req-pr-1',
     );
     expect(result.statusCode).toBe(201);
     const body = JSON.parse(result.body);
-    expect(body.data.task_type).toBe('pr_iteration');
+    expect(body.data.resolved_workflow).toEqual({ id: 'coding/pr-iteration-v1', version: '1.0.0' });
     expect(body.data.pr_number).toBe(42);
     expect(body.data.branch_name).toBe('pending:pr_resolution');
   });
 
-  test('returns 400 for pr_iteration without pr_number', async () => {
+  test('returns 400 for a pr workflow without pr_number', async () => {
     const result = await createTaskCore(
-      { repo: 'org/repo', task_type: 'pr_iteration', task_description: 'Fix it' },
+      { repo: 'org/repo', workflow_ref: 'coding/pr-iteration-v1', task_description: 'Fix it' },
       makeContext(),
       'req-pr-2',
     );
     expect(result.statusCode).toBe(400);
-    expect(result.body).toContain('pr_number is required');
+    expect(result.body).toContain('pr_number');
   });
 
-  test('returns 400 for pr_number without pr_iteration task_type', async () => {
+  test('returns 400 for pr_number on a non-pr workflow', async () => {
     const result = await createTaskCore(
       { repo: 'org/repo', task_description: 'Fix it', pr_number: 42 } as any,
       makeContext(),
@@ -447,47 +692,47 @@ describe('createTaskCore', () => {
     expect(result.body).toContain('pr_number is only allowed');
   });
 
-  test('returns 400 for invalid task_type', async () => {
+  test('returns 400 for an unknown workflow_ref', async () => {
     const result = await createTaskCore(
-      { repo: 'org/repo', task_description: 'Fix it', task_type: 'invalid' as any },
+      { repo: 'org/repo', task_description: 'Fix it', workflow_ref: 'coding/does-not-exist-v1' },
       makeContext(),
       'req-pr-4',
     );
     expect(result.statusCode).toBe(400);
-    expect(result.body).toContain('Invalid task_type');
+    expect(result.body).toContain('Unknown workflow_ref');
   });
 
-  test('creates pr_review task with pr_number', async () => {
+  test('returns 400 for a malformed workflow_ref', async () => {
     const result = await createTaskCore(
-      { repo: 'org/repo', task_type: 'pr_review', pr_number: 99 },
+      { repo: 'org/repo', task_description: 'Fix it', workflow_ref: 'not-a-valid-ref' },
+      makeContext(),
+      'req-pr-4b',
+    );
+    expect(result.statusCode).toBe(400);
+    expect(result.body).toContain('Invalid workflow_ref');
+  });
+
+  test('creates a pr-review workflow task with pr_number', async () => {
+    const result = await createTaskCore(
+      { repo: 'org/repo', workflow_ref: 'coding/pr-review-v1', pr_number: 99 },
       makeContext(),
       'req-review-1',
     );
     expect(result.statusCode).toBe(201);
     const body = JSON.parse(result.body);
-    expect(body.data.task_type).toBe('pr_review');
+    expect(body.data.resolved_workflow).toEqual({ id: 'coding/pr-review-v1', version: '1.0.0' });
     expect(body.data.pr_number).toBe(99);
     expect(body.data.branch_name).toBe('pending:pr_resolution');
   });
 
-  test('returns 400 for pr_review without pr_number', async () => {
+  test('returns 400 for a pr-review workflow without pr_number', async () => {
     const result = await createTaskCore(
-      { repo: 'org/repo', task_type: 'pr_review', task_description: 'Review it' },
+      { repo: 'org/repo', workflow_ref: 'coding/pr-review-v1', task_description: 'Review it' },
       makeContext(),
       'req-review-2',
     );
     expect(result.statusCode).toBe(400);
-    expect(result.body).toContain('pr_number is required');
-  });
-
-  test('returns 400 for pr_number with new_task', async () => {
-    const result = await createTaskCore(
-      { repo: 'org/repo', task_description: 'Fix it', pr_number: 42 } as any,
-      makeContext(),
-      'req-review-3',
-    );
-    expect(result.statusCode).toBe(400);
-    expect(result.body).toContain('pr_number is only allowed');
+    expect(result.body).toContain('pr_number');
   });
 
   // -- trace flag (design §10.1) --------------------------------------
@@ -562,7 +807,7 @@ describe('createTaskCore', () => {
     expect(JSON.parse(result.body).error.message).toContain('trace');
   });
 
-  // --- Chunk 7b: approval_gate_cap resolution (§4 step 5, decision #13) ---
+  // --- approval_gate_cap resolution ---
 
   function getPersistedTaskRecord() {
     const putCall = mockSend.mock.calls.find(
@@ -691,5 +936,125 @@ describe('createTaskCore', () => {
     );
     expect(mockLookupRepo).toHaveBeenCalledTimes(1);
     expect(mockLookupRepo).toHaveBeenCalledWith('org/repo');
+  });
+
+  // --- pre-screened attachments + caller-supplied taskId ---
+
+  describe('preScreenedAttachments and taskId', () => {
+    function persistedTaskItem() {
+      const putCall = mockSend.mock.calls.find(
+        (c: any) => c[0]?._type === 'Put' && c[0]?.input?.TableName === 'Tasks',
+      );
+      return putCall?.[0]?.input?.Item;
+    }
+
+    const passedRecord = {
+      attachment_id: 'att-jira-1',
+      type: 'file' as const,
+      content_type: 'text/plain',
+      filename: 'error.log',
+      s3_key: 'attachments/user-123/T-577/att-jira-1/error.log',
+      s3_version_id: 'v1',
+      size_bytes: 128,
+      checksum_sha256: 'sum',
+      screening: { status: 'passed' as const, screened_at: '2026-07-14T00:00:00Z' },
+    };
+
+    test('merges pre-screened records onto the task without re-screening', async () => {
+      const result = await createTaskCore(
+        { repo: 'org/repo', task_description: 'Fix', workflow_ref: 'coding/new-task-v1' },
+        makeContext({ preScreenedAttachments: [passedRecord] }),
+        'req-577-a',
+      );
+
+      expect(result.statusCode).toBe(201);
+      const item = persistedTaskItem();
+      expect(item.attachments).toHaveLength(1);
+      expect(item.attachments[0].attachment_id).toBe('att-jira-1');
+      expect(item.attachments[0].screening.status).toBe('passed');
+      // The pre-screened path must NOT re-run the guardrail on the attachment
+      // bytes. createTaskCore still screens the task DESCRIPTION text, so the
+      // guardrail may be called — but only with the description, never with any
+      // attachment content (the record carries no bytes to screen).
+      const guardrailContents = mockBedrockSend.mock.calls.map(
+        (c: any) => JSON.stringify(c[0]?.input?.content ?? []),
+      );
+      for (const content of guardrailContents) {
+        expect(content).not.toContain('error.log');
+        expect(content).toContain('Fix'); // only the description was screened
+      }
+    });
+
+    test('honors a caller-supplied taskId', async () => {
+      const result = await createTaskCore(
+        { repo: 'org/repo', task_description: 'Fix' },
+        makeContext({ taskId: 'T-explicit-577' }),
+        'req-577-b',
+      );
+
+      expect(result.statusCode).toBe(201);
+      expect(persistedTaskItem().task_id).toBe('T-explicit-577');
+      expect(JSON.parse(result.body).data.task_id).toBe('T-explicit-577');
+    });
+
+    test('fails closed if a pre-screened record is not in passed state', async () => {
+      const badRecord = {
+        ...passedRecord,
+        screening: { status: 'pending' as const },
+      };
+      const result = await createTaskCore(
+        { repo: 'org/repo', task_description: 'Fix' },
+        // Cast: this is a contract violation we deliberately construct to prove
+        // the fail-closed guard rejects it rather than persisting it.
+        makeContext({ preScreenedAttachments: [badRecord as never] }),
+        'req-577-c',
+      );
+
+      expect(result.statusCode).toBe(500);
+      expect(JSON.parse(result.body).error.code).toBe('INTERNAL_ERROR');
+      // No task persisted.
+      expect(persistedTaskItem()).toBeUndefined();
+    });
+
+    test('rejects when COMBINED attachment size exceeds the task-wide limit (aggregate check)', async () => {
+      // Review: each source's own subtotal can pass while the merged set blows
+      // past the 50 MB task cap. Simulate that with several large passed records
+      // (the shape both Linear-hosted files and resolved public images arrive as
+      // by the time they reach createTaskCore). 6 × 10 MB = 60 MB > 50 MB.
+      const tenMB = 10 * 1024 * 1024;
+      const big = Array.from({ length: 6 }, (_, i) => ({
+        ...passedRecord,
+        attachment_id: `att-big-${i}`,
+        filename: `big-${i}.bin`,
+        s3_key: `attachments/user-123/T/att-big-${i}/big-${i}.bin`,
+        size_bytes: tenMB,
+      }));
+      const result = await createTaskCore(
+        { repo: 'org/repo', task_description: 'Fix', workflow_ref: 'coding/new-task-v1' },
+        makeContext({ preScreenedAttachments: big }),
+        'req-577-agg',
+      );
+      expect(result.statusCode).toBe(400);
+      expect(JSON.parse(result.body).error.message).toMatch(/Combined attachment size exceeds/i);
+      expect(persistedTaskItem()).toBeUndefined();
+    });
+
+    test('allows a combined size within the task-wide limit', async () => {
+      const fiveMB = 5 * 1024 * 1024;
+      const ok = Array.from({ length: 4 }, (_, i) => ({
+        ...passedRecord,
+        attachment_id: `att-ok-${i}`,
+        filename: `ok-${i}.bin`,
+        s3_key: `attachments/user-123/T/att-ok-${i}/ok-${i}.bin`,
+        size_bytes: fiveMB, // 4 × 5 MB = 20 MB < 50 MB
+      }));
+      const result = await createTaskCore(
+        { repo: 'org/repo', task_description: 'Fix', workflow_ref: 'coding/new-task-v1' },
+        makeContext({ preScreenedAttachments: ok }),
+        'req-577-agg-ok',
+      );
+      expect(result.statusCode).toBe(201);
+      expect(persistedTaskItem().attachments).toHaveLength(4);
+    });
   });
 });

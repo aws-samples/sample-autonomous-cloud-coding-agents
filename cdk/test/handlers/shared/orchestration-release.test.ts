@@ -1,0 +1,1095 @@
+/**
+ *  MIT No Attribution
+ *
+ *  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ *
+ *  Permission is hereby granted, free of charge, to any person obtaining a copy of
+ *  the Software without restriction, including without limitation the rights to
+ *  use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+ *  the Software, and to permit persons to whom the Software is furnished to do so.
+ *
+ *  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ *  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ *  SOFTWARE.
+ */
+
+import { UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import {
+  applyTerminalCreateFailures,
+  readConcurrencyBudget,
+  releaseChild,
+  releaseReadyChildren,
+} from '../../../src/handlers/shared/orchestration-release';
+import { deriveOrchestrationId, type OrchestrationChildRow } from '../../../src/handlers/shared/orchestration-store';
+import { isValidIdempotencyKey } from '../../../src/handlers/shared/validation';
+
+jest.mock('../../../src/handlers/shared/logger', () => ({
+  logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
+}));
+
+const NOW = '2026-06-09T12:00:00.000Z';
+
+function makeRow(overrides: Partial<OrchestrationChildRow> = {}): OrchestrationChildRow {
+  return {
+    orchestration_id: 'orch_abc',
+    sub_issue_id: 'SUB-1',
+    parent_issue_ref: 'PARENT',
+    credentials_ref: 'WS',
+    repo: 'owner/repo',
+    depends_on: [],
+    child_status: 'ready',
+    display_id: 'ENG-1',
+    title: 'Build the thing',
+    created_at: NOW,
+    updated_at: NOW,
+    ...overrides,
+  };
+}
+
+function created(taskId: string) {
+  return jest.fn().mockResolvedValue({ statusCode: 201, body: JSON.stringify({ data: { task_id: taskId } }) });
+}
+
+describe('releaseChild — idempotency key is accepted by the REAL validator', () => {
+  // Regression: the key was originally `${orchestration_id}#${sub_issue_id}`,
+  // but createTaskCore validates against /^[a-zA-Z0-9_-]{1,128}$/ — the '#'
+  // was rejected with a 400 and the child silently never started. Mocked
+  // createTaskCore tests didn't catch it; this asserts the generated key
+  // against the actual validator with production-shaped ids.
+  test('PARALLEL children each receive the parent\'s shared contract, verbatim', async () => {
+    // The incident this prevents: an epic fanned out an API child and a UI child at
+    // the same time. Each saw only its own sub-issue text, so each chose its own
+    // names — `kyoto` with `checkIn`/`checkOut` on one side, `wander-kyoto` with
+    // `startDate`/`endDate` on the other. Both passed their own tests, the branches
+    // merged without conflict, and the deployed flow was broken. Neither child was
+    // wrong in isolation; the agreement only ever existed in the parent.
+    //
+    // So the assertion is not "context is attached somewhere" but "BOTH siblings got
+    // the SAME contract text" — the property whose absence caused the divergence.
+    const parentContext = {
+      title: 'Booking flow for Kyoto trips',
+      description: 'Slug is `kyoto`. Dates are `checkIn`/`checkOut` (ISO-8601).',
+    };
+    const descriptions: string[] = [];
+    for (const [id, title] of [['api', 'Add the booking API'], ['ui', 'Add the booking form']]) {
+      const createTaskCore = created(`T-${id}`);
+      await releaseChild({
+        ddb: { send: jest.fn().mockResolvedValue({}) } as never,
+        tableName: 'OrchestrationTable',
+        row: makeRow({ sub_issue_id: id, title }),
+        platformUserId: 'user-1',
+        createTaskCore: createTaskCore as never,
+        parentContext,
+        now: NOW,
+      });
+      descriptions.push(createTaskCore.mock.calls[0][0].task_description as string);
+    }
+
+    for (const d of descriptions) {
+      // Delimited and labelled, so the agent can tell the epic-wide agreement from
+      // its own task rather than reading one run-on prompt.
+      expect(d).toContain('--- SHARED ORCHESTRATION CONTEXT (the parent epic) ---');
+      expect(d).toContain('--- END SHARED ORCHESTRATION CONTEXT ---');
+      // The contract itself — the exact strings that diverged in the incident.
+      expect(d).toContain('Slug is `kyoto`');
+      expect(d).toContain('`checkIn`/`checkOut`');
+      // Told that siblings share it, which is what makes it binding rather than FYI.
+      expect(d).toMatch(/in parallel/i);
+    }
+    // And each still carries its OWN task below the shared block.
+    expect(descriptions[0]).toContain('Add the booking API');
+    expect(descriptions[1]).toContain('Add the booking form');
+  });
+
+  test('the shared-context preamble stays DESCRIPTIVE, so the guardrail admits the child', async () => {
+    // The task description is screened by a Bedrock guardrail at admission. An
+    // instruction-shaped preamble ("use it exactly", "do not invent an alternative")
+    // stacks with the epic's own imperatives and trips PROMPT_ATTACK at MEDIUM
+    // confidence — the child then fails with "blocked by content policy" before it
+    // ever runs. Live-reproduced against the deployed guardrail: the imperative
+    // wording blocked, this wording passed, with identical epic text after it.
+    //
+    // So this asserts the VOICE, which is the property that keeps children
+    // admittable. The constraint is still conveyed — by stating what the siblings
+    // are already working to, rather than commanding this one.
+    const createTaskCore = created('T-1');
+    await releaseChild({
+      ddb: { send: jest.fn().mockResolvedValue({}) } as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow({}),
+      platformUserId: 'user-1',
+      createTaskCore: createTaskCore as never,
+      parentContext: { title: 'Epic', description: 'Key is `quickNote`.' },
+      now: NOW,
+    });
+    const d = createTaskCore.mock.calls[0][0].task_description as string;
+    const preamble = d.slice(0, d.indexOf('Epic:'));
+    // Second-person commands are what the filter keys on.
+    expect(preamble).not.toMatch(/\buse it exactly\b/i);
+    expect(preamble).not.toMatch(/\bdo not invent\b/i);
+    expect(preamble).not.toMatch(/\byou must\b/i);
+    // …and the constraint is still there, stated descriptively.
+    expect(preamble).toMatch(/in parallel/i);
+    expect(preamble).toMatch(/shared with/i);
+  });
+
+  test('an epic with no context does not pad the child prompt with an empty heading', async () => {
+    // Rows seeded before parent_context existed, and bare parents, must behave
+    // exactly as before rather than gaining a hollow "SHARED CONTEXT" section.
+    const createTaskCore = created('T-1');
+    await releaseChild({
+      ddb: { send: jest.fn().mockResolvedValue({}) } as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow({}),
+      platformUserId: 'user-1',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+    expect(createTaskCore.mock.calls[0][0].task_description).not.toContain('SHARED ORCHESTRATION CONTEXT');
+  });
+
+  test('the integration child ALSO gets the shared contract — it verifies the boundary', async () => {
+    // The integration node is where a cross-boundary defect actually shows up, so
+    // it needs the contract most: without it the merge agent cannot tell a genuine
+    // mismatch from two equally-plausible conventions.
+    const createTaskCore = created('T-int');
+    await releaseChild({
+      ddb: { send: jest.fn().mockResolvedValue({}) } as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow({ sub_issue_id: 'orch_abc__integration', depends_on: ['api', 'ui'] }),
+      platformUserId: 'user-1',
+      createTaskCore: createTaskCore as never,
+      parentContext: { title: 'Booking flow', description: 'Slug is `kyoto`.' },
+      now: NOW,
+    });
+    const d = createTaskCore.mock.calls[0][0].task_description as string;
+    expect(d).toContain('SHARED ORCHESTRATION CONTEXT');
+    expect(d).toContain('Slug is `kyoto`');
+    expect(d).toContain('Integrate the completed sub-issue branches');
+  });
+
+  test('pins the coding workflow — a child must never fall back to the repo-less default', async () => {
+    // Every other channel pins CODING_WORKFLOW_ID at its own call site, because a
+    // repo-bound task with no workflow_ref resolves to the repo-OPTIONAL
+    // default/agent-v1, whose setup skips the stacked-base and predecessor-merge
+    // path entirely.
+    //
+    // A chain hides that: its child needs no merge, so the agent works from the
+    // base it was handed and the result looks right. A DIAMOND does not — the
+    // integration node is handed predecessor branches to merge, gets a clean
+    // default branch instead, and the agent writes a plausible approximation of
+    // one arm while silently dropping the other's work. Observed in production
+    // before this pin existed.
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    const createTaskCore = created('T-1');
+    await releaseChild({
+      ddb: ddb as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow({}),
+      platformUserId: 'user-1',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+    // The REQUEST body (calls[0][0]), not the context — the workflow is part of
+    // what is being submitted, and nothing here asserted it before.
+    const body = createTaskCore.mock.calls[0][0];
+    expect(body.workflow_ref).toBe('coding/new-task-v1');
+  });
+
+  test('an INTEGRATION node also pins the coding workflow — it is the case that breaks', async () => {
+    // The integration node is the one child that MUST merge (two predecessor
+    // branches), so it is the one that fails hardest on the wrong workflow.
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    const createTaskCore = created('T-int');
+    await releaseChild({
+      ddb: ddb as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow({ sub_issue_id: 'orch_abc__integration', depends_on: ['SUB-1', 'SUB-2'] }),
+      platformUserId: 'user-1',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+    expect(createTaskCore.mock.calls[0][0].workflow_ref).toBe('coding/new-task-v1');
+  });
+
+  test('generated key passes isValidIdempotencyKey for real-world ids', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    const createTaskCore = created('T-1');
+    const realRow = makeRow({
+      // orch_<32 hex> — exactly what deriveOrchestrationId produces.
+      orchestration_id: deriveOrchestrationId('d27fcf21-4876-4be2-96c0-78099bf152de'),
+      // sub_issue_id is a Linear UUID in production.
+      sub_issue_id: 'a00650a1-4b97-46a3-9977-baede9a8f001',
+    });
+
+    await releaseChild({
+      ddb: ddb as never,
+      tableName: 'OrchestrationTable',
+      row: realRow,
+      platformUserId: 'user-1',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+
+    const ctx = createTaskCore.mock.calls[0][1];
+    expect(isValidIdempotencyKey(ctx.idempotencyKey)).toBe(true);
+    expect(ctx.idempotencyKey).not.toContain('#');
+  });
+
+  test('key stays within the 128-char limit for max-length ids', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    const createTaskCore = created('T-1');
+    await releaseChild({
+      ddb: ddb as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow({
+        orchestration_id: deriveOrchestrationId('x'.repeat(64)),
+        sub_issue_id: 'a00650a1-4b97-46a3-9977-baede9a8f001',
+      }),
+      platformUserId: 'user-1',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+    const ctx = createTaskCore.mock.calls[0][1];
+    expect(ctx.idempotencyKey.length).toBeLessThanOrEqual(128);
+    expect(isValidIdempotencyKey(ctx.idempotencyKey)).toBe(true);
+  });
+});
+
+describe('releaseChild — a retry salts the idempotency key with the prior task id', () => {
+  test('retry=true + a prior child_task_id → key salted so a NEW task is created', async () => {
+    const createTaskCore = created('T-new');
+    await releaseChild({
+      ddb: { send: jest.fn().mockResolvedValue({}) } as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow({ child_task_id: '01KX0WFC2DAKSEQY78ZX7WY0W4' }), // the prior FAILED task
+      platformUserId: 'user-1',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+      retry: true,
+    });
+    const ctx = createTaskCore.mock.calls[0][1];
+    // Salted with the prior task id → distinct from the original 'orch_abc_SUB-1'
+    // key, so createTaskCore does NOT idempotently replay the failed task.
+    expect(ctx.idempotencyKey).toBe('orch_abc_SUB-1_01KX0WFC2DAKSEQY78ZX7WY0W4');
+    expect(isValidIdempotencyKey(ctx.idempotencyKey)).toBe(true);
+  });
+
+  test('retry=true but NO prior task id (never-run child) → back-compat key', async () => {
+    const createTaskCore = created('T-1');
+    await releaseChild({
+      ddb: { send: jest.fn().mockResolvedValue({}) } as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow(), // no child_task_id
+      platformUserId: 'user-1',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+      retry: true,
+    });
+    expect(createTaskCore.mock.calls[0][1].idempotencyKey).toBe('orch_abc_SUB-1');
+  });
+
+  test('the key is salted whenever a prior child_task_id exists, even without retry=true', async () => {
+    // A child re-released while it still carries a child_task_id inherently means
+    // that prior task is TERMINAL (a live child is 'released', not back in
+    // ready/blocked). The salt must fire on the id's PRESENCE — NOT the retry
+    // flag — else a downstream chain child (reset to blocked, later released by
+    // the reconciler with retry=false) replays its dead task under the unsalted
+    // key. This is the fix; the OLD behavior (only salt on retry=true) was the bug.
+    const createTaskCore = created('T-1');
+    await releaseChild({
+      ddb: { send: jest.fn().mockResolvedValue({}) } as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow({ child_task_id: 'OLD-TASK' }),
+      platformUserId: 'user-1',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+      // NOTE: retry intentionally omitted (defaults false) — the salt still fires.
+    });
+    expect(createTaskCore.mock.calls[0][1].idempotencyKey).toBe('orch_abc_SUB-1_OLD-TASK');
+  });
+
+  test('first release (no prior task id) → unsalted back-compat key', async () => {
+    const createTaskCore = created('T-1');
+    await releaseChild({
+      ddb: { send: jest.fn().mockResolvedValue({}) } as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow(), // no child_task_id
+      platformUserId: 'user-1',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+    expect(createTaskCore.mock.calls[0][1].idempotencyKey).toBe('orch_abc_SUB-1');
+  });
+
+  test('salted key stays valid + within 128 chars for production-shaped ids (uuid + ulid)', async () => {
+    const createTaskCore = created('T-new');
+    await releaseChild({
+      ddb: { send: jest.fn().mockResolvedValue({}) } as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow({
+        orchestration_id: deriveOrchestrationId('d27fcf21-4876-4be2-96c0-78099bf152de'),
+        sub_issue_id: 'a00650a1-4b97-46a3-9977-baede9a8f001',
+        child_task_id: '01KX0WFC2DAKSEQY78ZX7WY0W4',
+      }),
+      platformUserId: 'user-1',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+      retry: true,
+    });
+    const key = createTaskCore.mock.calls[0][1].idempotencyKey;
+    expect(key.length).toBeLessThanOrEqual(128);
+    expect(isValidIdempotencyKey(key)).toBe(true);
+  });
+});
+
+describe('releaseChild — happy path', () => {
+  test('forwards adapter metadata while protecting orchestration-owned keys', async () => {
+    const createTaskCore = created('T-jira');
+    await releaseChild({
+      ddb: { send: jest.fn().mockResolvedValue({}) } as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow({
+        channel_metadata: {
+          jira_cloud_id: 'cloud-1',
+          jira_issue_key: 'ENG-2',
+          orchestration_id: 'adapter-cannot-override',
+        },
+      }),
+      platformUserId: 'user-1',
+      channelSource: 'jira',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+
+    expect(createTaskCore.mock.calls[0][1].channelMetadata).toMatchObject({
+      jira_cloud_id: 'cloud-1',
+      jira_issue_key: 'ENG-2',
+      orchestration_id: 'orch_abc',
+      orchestration_sub_issue_id: 'SUB-1',
+    });
+  });
+
+  test('creates a task and flips the row to released', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    const createTaskCore = created('T-100');
+
+    const result = await releaseChild({
+      ddb: ddb as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow(),
+      platformUserId: 'user-1',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+
+    expect(result).toEqual({ kind: 'released', taskId: 'T-100' });
+
+    // createTaskCore called with linear channel + orchestration metadata + idempotency key.
+    const [body, ctx, requestId] = createTaskCore.mock.calls[0];
+    expect(body).toMatchObject({ repo: 'owner/repo' });
+    expect(body.task_description).toContain('ENG-1');
+    expect(ctx).toMatchObject({
+      userId: 'user-1',
+      channelSource: 'linear',
+      idempotencyKey: 'orch_abc_SUB-1',
+    });
+    expect(ctx.channelMetadata).toMatchObject({
+      orchestration_id: 'orch_abc',
+      orchestration_sub_issue_id: 'SUB-1',
+      parent_linear_issue_id: 'PARENT',
+    });
+    expect(requestId).toBe('orch_abc_SUB-1');
+
+    // Flip-then-create: TWO conditional updates.
+    // Call 0 = the CLAIM (blocked|ready → releasing), BEFORE createTaskCore.
+    const claim = ddb.send.mock.calls[0][0] as UpdateCommand;
+    expect(claim).toBeInstanceOf(UpdateCommand);
+    expect(claim.input.ConditionExpression).toContain('child_status IN');
+    expect(claim.input.ExpressionAttributeValues![':releasing']).toBe('releasing');
+    // Call 1 = the FINALIZE (releasing → released), stamps task id + branch.
+    const finalize = ddb.send.mock.calls[1][0] as UpdateCommand;
+    expect(finalize.input.ConditionExpression).toBe('child_status = :releasing');
+    expect(finalize.input.ExpressionAttributeValues![':tid']).toBe('T-100');
+    expect(finalize.input.ExpressionAttributeValues![':released']).toBe('released');
+  });
+
+  test('the planner scope (description) reaches the child task_description below the title', async () => {
+    const createTaskCore = created('T-desc');
+    await releaseChild({
+      ddb: { send: jest.fn().mockResolvedValue({}) } as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow({
+        title: 'Add a team dashboard page',
+        description: 'Create `dashboard.html` at the site root showing per-team stats.',
+      }),
+      platformUserId: 'user-1',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+    const body = createTaskCore.mock.calls[0][0];
+    // Title headline AND the promised deliverable both reach the agent.
+    expect(body.task_description).toContain('ENG-1: Add a team dashboard page');
+    expect(body.task_description).toContain('dashboard.html');
+  });
+
+  test('a description that just echoes the title is not duplicated', async () => {
+    const createTaskCore = created('T-echo');
+    await releaseChild({
+      ddb: { send: jest.fn().mockResolvedValue({}) } as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow({ title: 'Fix the header', description: 'Fix the header' }),
+      platformUserId: 'user-1',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+    const body = createTaskCore.mock.calls[0][0];
+    // "Fix the header" appears once (in the "ENG-1: ..." line), not twice.
+    expect(body.task_description.match(/Fix the header/g)?.length).toBe(1);
+  });
+
+  test('defaults channelSource to linear when omitted (back-compat)', async () => {
+    const createTaskCore = created('T-def');
+    await releaseChild({
+      ddb: { send: jest.fn().mockResolvedValue({}) } as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow(),
+      platformUserId: 'user-1',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+    expect(createTaskCore.mock.calls[0][1].channelSource).toBe('linear');
+  });
+
+  test('threads an explicit channelSource onto the child task (trigger-agnostic)', async () => {
+    const createTaskCore = created('T-ch');
+    await releaseChild({
+      ddb: { send: jest.fn().mockResolvedValue({}) } as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow(),
+      platformUserId: 'user-1',
+      channelSource: 'webhook',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+    expect(createTaskCore.mock.calls[0][1].channelSource).toBe('webhook');
+  });
+
+  test('a non-Linear child carries the neutral orchestration keys and NO Linear ids', async () => {
+    // The released child must not be handed ids naming rows in a workspace it has
+    // nothing to do with. The orchestration pair is what the reconciler maps
+    // back on, so that stays regardless of surface.
+    const createTaskCore = created('T-neutral');
+    await releaseChild({
+      ddb: { send: jest.fn().mockResolvedValue({}) } as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow({ display_id: 'ENG-1' }),
+      platformUserId: 'user-1',
+      channelSource: 'webhook',
+      linearProjectId: 'proj-1',
+      linearOauthSecretArn: 'arn:secret',
+      linearWorkspaceSlug: 'acme',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+    const cm = createTaskCore.mock.calls[0][1].channelMetadata as Record<string, string>;
+    expect(cm.orchestration_id).toBeDefined();
+    expect(cm.orchestration_sub_issue_id).toBeDefined();
+    for (const key of [
+      'linear_workspace_id',
+      'linear_issue_id',
+      'linear_issue_identifier',
+      'linear_project_id',
+      'linear_oauth_secret_arn',
+      'linear_workspace_slug',
+      'parent_linear_issue_id',
+    ]) {
+      expect(cm[key]).toBeUndefined();
+    }
+  });
+
+  test('a Linear child still carries every Linear key it did before', async () => {
+    // The gate must not quietly drop metadata the agent + orchestrator read.
+    const createTaskCore = created('T-linear');
+    await releaseChild({
+      ddb: { send: jest.fn().mockResolvedValue({}) } as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow({ display_id: 'ENG-1' }),
+      platformUserId: 'user-1',
+      channelSource: 'linear',
+      linearProjectId: 'proj-1',
+      linearOauthSecretArn: 'arn:secret',
+      linearWorkspaceSlug: 'acme',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+    const cm = createTaskCore.mock.calls[0][1].channelMetadata as Record<string, string>;
+    expect(cm).toMatchObject({
+      linear_workspace_id: 'WS',
+      linear_issue_identifier: 'ENG-1',
+      linear_project_id: 'proj-1',
+      linear_oauth_secret_arn: 'arn:secret',
+      linear_workspace_slug: 'acme',
+    });
+    expect(cm.linear_issue_id).toBeDefined();
+    expect(cm.parent_linear_issue_id).toBeDefined();
+  });
+
+  test('threads Linear OAuth metadata when provided', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    const createTaskCore = created('T-1');
+    await releaseChild({
+      ddb: ddb as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow(),
+      platformUserId: 'user-1',
+      linearOauthSecretArn: 'arn:secret',
+      linearWorkspaceSlug: 'acme',
+      linearProjectId: 'proj-1',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+    const ctx = createTaskCore.mock.calls[0][1];
+    expect(ctx.channelMetadata).toMatchObject({
+      linear_oauth_secret_arn: 'arn:secret',
+      linear_workspace_slug: 'acme',
+      linear_project_id: 'proj-1',
+    });
+  });
+
+  test('treats 200 idempotent replay as success', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    const createTaskCore = jest.fn().mockResolvedValue({
+      statusCode: 200,
+      body: JSON.stringify({ data: { task_id: 'T-existing' } }),
+    });
+    const result = await releaseChild({
+      ddb: ddb as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow(),
+      platformUserId: 'user-1',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+    expect(result).toEqual({ kind: 'released', taskId: 'T-existing' });
+  });
+});
+
+describe('releaseChild — idempotency + failure', () => {
+  test('ConditionalCheckFailed on the flip → already_released (no throw)', async () => {
+    const conditionalErr = Object.assign(new Error('conditional'), { name: 'ConditionalCheckFailedException' });
+    const ddb = { send: jest.fn().mockRejectedValue(conditionalErr) };
+    const createTaskCore = created('T-1');
+
+    const result = await releaseChild({
+      ddb: ddb as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow(),
+      platformUserId: 'user-1',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+    expect(result).toEqual({ kind: 'already_released' });
+  });
+
+  test('createTaskCore non-success → create_failed, claim rolled back to ready', async () => {
+    // The claim (call 0) succeeds, createTaskCore fails, so the claim
+    // is rolled BACK to 'ready' (call 1) — not left stranded in 'releasing'.
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    const createTaskCore = jest.fn().mockResolvedValue({ statusCode: 503, body: '{"error":{"message":"down"}}' });
+
+    const result = await releaseChild({
+      ddb: ddb as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow(),
+      platformUserId: 'user-1',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+    expect(result.kind).toBe('create_failed');
+    if (result.kind === 'create_failed') expect(result.statusCode).toBe(503);
+    expect(ddb.send).toHaveBeenCalledTimes(2);
+    const claim = ddb.send.mock.calls[0][0] as UpdateCommand;
+    expect(claim.input.ExpressionAttributeValues![':releasing']).toBe('releasing');
+    const rollback = ddb.send.mock.calls[1][0] as UpdateCommand;
+    expect(rollback.input.ConditionExpression).toBe('child_status = :releasing');
+    expect(rollback.input.ExpressionAttributeValues![':ready']).toBe('ready');
+  });
+
+  test('createTaskCore throw → error, claim rolled back to ready', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    const createTaskCore = jest.fn().mockRejectedValue(new Error('boom'));
+    const result = await releaseChild({
+      ddb: ddb as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow(),
+      platformUserId: 'user-1',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+    expect(result.kind).toBe('error');
+    // claim (call 0) + rollback (call 1)
+    expect(ddb.send).toHaveBeenCalledTimes(2);
+    const rollback = ddb.send.mock.calls[1][0] as UpdateCommand;
+    expect(rollback.input.ExpressionAttributeValues![':ready']).toBe('ready');
+  });
+
+  // A DETERMINISTIC 4xx create failure (guardrail / validation) must NOT roll
+  // back to 'ready' (which loops forever every sweep, an infinite silent
+  // strand) — it must terminally FAIL the child so the epic settles
+  // finished-with-failures.
+  test('a guardrail 400 → create_failed_terminal, claim flipped to failed (NOT ready) + reason', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    const createTaskCore = jest.fn().mockResolvedValue({
+      statusCode: 400,
+      body: '{"error":{"message":"Task description was blocked by content policy."}}',
+    });
+    const result = await releaseChild({
+      ddb: ddb as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow(),
+      platformUserId: 'user-1',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+    expect(result.kind).toBe('create_failed_terminal');
+    if (result.kind === 'create_failed_terminal') {
+      expect(result.statusCode).toBe(400);
+      // user-facing, actionable reason (guardrail is the one the user can fix)
+      expect(result.failureReason.toLowerCase()).toContain('content policy');
+    }
+    // claim (call 0) + terminal-fail (call 1): flips to 'failed', not 'ready'
+    expect(ddb.send).toHaveBeenCalledTimes(2);
+    const fail = ddb.send.mock.calls[1][0] as UpdateCommand;
+    expect(fail.input.ConditionExpression).toBe('child_status = :releasing');
+    expect(fail.input.ExpressionAttributeValues![':failed']).toBe('failed');
+    expect(fail.input.ExpressionAttributeValues![':ready']).toBeUndefined();
+    expect(fail.input.ExpressionAttributeValues![':reason']).toContain('content policy');
+  });
+
+  // Against the codes createTaskCore ACTUALLY returns: 400 (validation/guardrail)
+  // + 422 (repo-not-onboarded) are terminal; 409 (dup) + 5xx are transient.
+  test('422 REPO_NOT_ONBOARDED is TERMINAL with an "onboard it" reason (sweep can\'t bound it)', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    const createTaskCore = jest.fn().mockResolvedValue({
+      statusCode: 422,
+      body: '{"error":{"code":"REPO_NOT_ONBOARDED","message":"not onboarded"}}',
+    });
+    const result = await releaseChild({
+      ddb: ddb as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow(),
+      platformUserId: 'user-1',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+    expect(result.kind).toBe('create_failed_terminal');
+    if (result.kind === 'create_failed_terminal') expect(result.failureReason).toMatch(/onboard/i);
+    const fail = ddb.send.mock.calls[1][0] as UpdateCommand;
+    expect(fail.input.ExpressionAttributeValues![':failed']).toBe('failed');
+  });
+
+  test('5xx (server) + 409 (duplicate replay) are TRANSIENT — roll back to ready', async () => {
+    for (const statusCode of [503, 500, 409]) {
+      const ddb = { send: jest.fn().mockResolvedValue({}) };
+      const createTaskCore = jest.fn().mockResolvedValue({ statusCode, body: '{"error":{"message":"later"}}' });
+      const result = await releaseChild({
+        ddb: ddb as never,
+        tableName: 'OrchestrationTable',
+        row: makeRow(),
+        platformUserId: 'user-1',
+        createTaskCore: createTaskCore as never,
+        now: NOW,
+      });
+      expect(result.kind).toBe('create_failed');
+      const rollback = ddb.send.mock.calls[1][0] as UpdateCommand;
+      expect(rollback.input.ExpressionAttributeValues![':ready']).toBe('ready');
+    }
+  });
+
+  test('a racing releaser loses the claim (blocked|ready→releasing) and does NOT create a task', async () => {
+    // The core exactly-once guarantee: if the atomic claim fails
+    // (ConditionalCheckFailed — another releaser already claimed the row),
+    // releaseChild returns already_released and NEVER calls createTaskCore.
+    const ddb = {
+      send: jest.fn().mockRejectedValue(
+        Object.assign(new Error('claimed'), { name: 'ConditionalCheckFailedException' }),
+      ),
+    };
+    const createTaskCore = created('SHOULD-NOT-RUN');
+    const result = await releaseChild({
+      ddb: ddb as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow(),
+      platformUserId: 'user-1',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+    expect(result).toEqual({ kind: 'already_released' });
+    expect(createTaskCore).not.toHaveBeenCalled(); // no double-create
+    expect(ddb.send).toHaveBeenCalledTimes(1); // only the failed claim
+  });
+
+  test('non-conditional DDB error on flip → error', async () => {
+    const ddb = { send: jest.fn().mockRejectedValue(new Error('throttle')) };
+    const createTaskCore = created('T-1');
+    const result = await releaseChild({
+      ddb: ddb as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow(),
+      platformUserId: 'user-1',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+    expect(result.kind).toBe('error');
+  });
+
+  test('falls back to sub_issue_id in description when title absent', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    const createTaskCore = created('T-1');
+    await releaseChild({
+      ddb: ddb as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow({ title: undefined, display_id: undefined }),
+      platformUserId: 'user-1',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+    expect(createTaskCore.mock.calls[0][0].task_description).toContain('SUB-1');
+  });
+});
+
+describe('releaseReadyChildren — the concurrency throttle', () => {
+  // 5 ready leaves, all roots (no deps) so base selection is trivial.
+  const readyRows = (n: number): OrchestrationChildRow[] =>
+    Array.from({ length: n }, (_, i) =>
+      makeRow({ sub_issue_id: `L${String(i).padStart(2, '0')}`, child_status: 'ready', depends_on: [] }));
+
+  function createOk() {
+    let i = 0;
+    return jest.fn().mockImplementation(() =>
+      Promise.resolve({ statusCode: 201, body: JSON.stringify({ data: { task_id: `T-${i++}` } }) }));
+  }
+
+  test('undefined budget → releases ALL ready children (back-compat)', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    const createTaskCore = createOk();
+    const results = await releaseReadyChildren(
+      ddb as never, 'OrchTable', readyRows(5), { platform_user_id: 'u1' } as never,
+      createTaskCore as never, NOW, readyRows(5), 'main', undefined,
+    );
+    expect(results.filter((r) => r.kind === 'released')).toHaveLength(5);
+    expect(createTaskCore).toHaveBeenCalledTimes(5);
+  });
+
+  test('budget caps the number released; the rest are NOT created (no fail)', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    const createTaskCore = createOk();
+    const rows = readyRows(5);
+    const results = await releaseReadyChildren(
+      ddb as never, 'OrchTable', rows, { platform_user_id: 'u1' } as never,
+      createTaskCore as never, NOW, rows, 'main', 2, // budget = 2 free slots
+    );
+    // Only 2 tasks created — the other 3 are simply not released this pass.
+    expect(createTaskCore).toHaveBeenCalledTimes(2);
+    expect(results).toHaveLength(2);
+    expect(results.every((r) => r.kind === 'released')).toBe(true);
+  });
+
+  test('budget 0 → releases nothing this pass (no tasks created, no failures)', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    const createTaskCore = createOk();
+    const rows = readyRows(5);
+    const results = await releaseReadyChildren(
+      ddb as never, 'OrchTable', rows, { platform_user_id: 'u1' } as never,
+      createTaskCore as never, NOW, rows, 'main', 0,
+    );
+    expect(createTaskCore).not.toHaveBeenCalled();
+    expect(results).toHaveLength(0);
+  });
+
+  test('negative budget is treated as 0 (releases nothing)', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    const createTaskCore = createOk();
+    const rows = readyRows(3);
+    await releaseReadyChildren(
+      ddb as never, 'OrchTable', rows, { platform_user_id: 'u1' } as never,
+      createTaskCore as never, NOW, rows, 'main', -4,
+    );
+    expect(createTaskCore).not.toHaveBeenCalled();
+  });
+
+  test('release order is deterministic by sub_issue_id when throttled', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    const createTaskCore = createOk();
+    // Shuffled input; budget 2 should pick L00, L01 (sorted), not input order.
+    const rows = [makeRow({ sub_issue_id: 'L02', child_status: 'ready' }),
+      makeRow({ sub_issue_id: 'L00', child_status: 'ready' }),
+      makeRow({ sub_issue_id: 'L01', child_status: 'ready' })];
+    const results = await releaseReadyChildren(
+      ddb as never, 'OrchTable', rows, { platform_user_id: 'u1' } as never,
+      createTaskCore as never, NOW, rows, 'main', 2,
+    );
+    expect(results).toHaveLength(2);
+    // Flip-then-create: each release issues TWO UpdateCommands
+    // (claim ready→releasing, then finalize releasing→released), both keyed on
+    // the same sub_issue_id. Dedup consecutive duplicates to get the release
+    // ORDER, which must be sorted L00 then L01 (not the shuffled input order).
+    const subsPerCall = (ddb.send.mock.calls as { 0: { input?: { Key?: { sub_issue_id?: string } } } }[])
+      .map((c) => c[0]?.input?.Key?.sub_issue_id)
+      .filter(Boolean);
+    const releaseOrder = subsPerCall.filter((s, i) => s !== subsPerCall[i - 1]);
+    expect(releaseOrder).toEqual(['L00', 'L01']);
+  });
+});
+
+describe('readConcurrencyBudget', () => {
+  test('free budget = cap - active_count', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({ Item: { active_count: 3 } }) };
+    expect(await readConcurrencyBudget(ddb as never, 'ConcTable', 'u1', 10)).toBe(7);
+  });
+
+  test('no row yet → full cap available', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    expect(await readConcurrencyBudget(ddb as never, 'ConcTable', 'u1', 10)).toBe(10);
+  });
+
+  test('at cap → 0 (never negative)', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({ Item: { active_count: 12 } }) };
+    expect(await readConcurrencyBudget(ddb as never, 'ConcTable', 'u1', 10)).toBe(0);
+  });
+
+  test('read error → degrades to full cap (admission still gates)', async () => {
+    const ddb = { send: jest.fn().mockRejectedValue(new Error('ddb down')) };
+    expect(await readConcurrencyBudget(ddb as never, 'ConcTable', 'u1', 10)).toBe(10);
+  });
+});
+
+describe('releaseChild — parent attachments inherited by children', () => {
+  const ATT = [{
+    attachment_id: 'a1',
+    type: 'file',
+    content_type: 'application/pdf',
+    filename: 'spec.pdf',
+    s3_key: 'attachments/user-1/epic-P/a1/spec.pdf',
+    s3_version_id: 'v1',
+    size_bytes: 42,
+    screening: { status: 'passed', screened_at: NOW },
+    checksum_sha256: 'x'.repeat(64),
+  }] as never;
+
+  test('a real feature child receives the parent preScreenedAttachments', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    const createTaskCore = created('T-1');
+    await releaseChild({
+      ddb: ddb as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow({ sub_issue_id: 'uuid-A' }),
+      platformUserId: 'user-1',
+      preScreenedAttachments: ATT,
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+    const ctx = createTaskCore.mock.calls[0][1];
+    expect(ctx.preScreenedAttachments).toHaveLength(1);
+    expect(ctx.preScreenedAttachments[0].s3_key).toBe('attachments/user-1/epic-P/a1/spec.pdf');
+  });
+
+  test('an INTEGRATION node does NOT receive attachments (pure merge, no spec needed)', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    const createTaskCore = created('T-1');
+    await releaseChild({
+      ddb: ddb as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow({ sub_issue_id: 'orch_abc__integration' }),
+      platformUserId: 'user-1',
+      preScreenedAttachments: ATT,
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+    const ctx = createTaskCore.mock.calls[0][1];
+    expect(ctx.preScreenedAttachments).toBeUndefined();
+  });
+
+  test('no attachments provided → context omits the field (back-compat)', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    const createTaskCore = created('T-1');
+    await releaseChild({
+      ddb: ddb as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow({ sub_issue_id: 'uuid-A' }),
+      platformUserId: 'user-1',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+    expect(createTaskCore.mock.calls[0][1].preScreenedAttachments).toBeUndefined();
+  });
+
+  // A sub-issue's OWN attachments (stamped on the child row) merge
+  // with the inherited parent spec, de-duped, capped, own-first.
+  const ownRec = (id: string, name: string) => ({
+    attachment_id: id,
+    type: 'file',
+    content_type: 'image/png',
+    filename: name,
+    s3_key: `attachments/user-1/child-SUB/${id}/${name}`,
+    s3_version_id: 'v1',
+    size_bytes: 10,
+    screening: { status: 'passed', screened_at: NOW },
+    checksum_sha256: 'y'.repeat(64),
+  });
+
+  test('a child with its OWN attachment receives parent spec + own (merged, own first)', async () => {
+    const createTaskCore = created('T-1');
+    await releaseChild({
+      ddb: { send: jest.fn().mockResolvedValue({}) } as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow({ sub_issue_id: 'uuid-A', pre_screened_attachments: [ownRec('own1', 'mock.png')] as never }),
+      platformUserId: 'user-1',
+      preScreenedAttachments: ATT, // parent spec (a1)
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+    const ctx = createTaskCore.mock.calls[0][1];
+    expect(ctx.preScreenedAttachments).toHaveLength(2);
+    // own first, then inherited parent
+    expect(ctx.preScreenedAttachments.map((r: { attachment_id: string }) => r.attachment_id)).toEqual(['own1', 'a1']);
+  });
+
+  test('a file on BOTH parent and child is de-duped by attachment_id', async () => {
+    const createTaskCore = created('T-1');
+    await releaseChild({
+      ddb: { send: jest.fn().mockResolvedValue({}) } as never,
+      tableName: 'OrchestrationTable',
+      // child's own list re-declares a1 (same id as the parent spec)
+      row: makeRow({ sub_issue_id: 'uuid-A', pre_screened_attachments: [ownRec('a1', 'dup.pdf')] as never }),
+      platformUserId: 'user-1',
+      preScreenedAttachments: ATT,
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+    const ctx = createTaskCore.mock.calls[0][1];
+    expect(ctx.preScreenedAttachments).toHaveLength(1);
+    expect(ctx.preScreenedAttachments[0].attachment_id).toBe('a1');
+  });
+
+  test('merged set over the per-task cap is trimmed to 10, dropping parent-spec files first', async () => {
+    const createTaskCore = created('T-1');
+    const own = Array.from({ length: 8 }, (_, i) => ownRec(`own${i}`, `own${i}.png`));
+    const parent = Array.from({ length: 5 }, (_, i) => ({ ...ownRec(`par${i}`, `par${i}.pdf`), attachment_id: `par${i}` }));
+    await releaseChild({
+      ddb: { send: jest.fn().mockResolvedValue({}) } as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow({ sub_issue_id: 'uuid-A', pre_screened_attachments: own as never }),
+      platformUserId: 'user-1',
+      preScreenedAttachments: parent as never,
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+    const ctx = createTaskCore.mock.calls[0][1];
+    // 8 own + 5 parent = 13 → capped at 10; all 8 own survive, only 2 parent.
+    expect(ctx.preScreenedAttachments).toHaveLength(10);
+    const ids = ctx.preScreenedAttachments.map((r: { attachment_id: string }) => r.attachment_id);
+    expect(ids.filter((i: string) => i.startsWith('own'))).toHaveLength(8);
+    expect(ids.filter((i: string) => i.startsWith('par'))).toHaveLength(2);
+  });
+});
+
+describe('applyTerminalCreateFailures — a child that never became a task', () => {
+  const ORCH = 'orch_1';
+  /** A child row, minimal but with the fields the planner reads. */
+  const row = (id: string, status: string, deps: string[] = []): OrchestrationChildRow => ({
+    orchestration_id: ORCH,
+    sub_issue_id: id,
+    parent_issue_ref: 'PARENT',
+    credentials_ref: 'WS',
+    repo: 'o/r',
+    depends_on: deps,
+    child_status: status as OrchestrationChildRow['child_status'],
+    created_at: NOW,
+    updated_at: NOW,
+  });
+
+  test('skips the failed root\'s dependents and reports them as terminal', async () => {
+    // Why this exists at all: a guardrail rejection means no task, so no task event
+    // will ever wake the reconciler for this node. Nothing else would skip B or let
+    // the epic reach all-terminal — the panel would sit at "🔄 n/m" until a sweep.
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    const children = [row('A', 'releasing'), row('B', 'blocked', ['A'])];
+
+    const out = await applyTerminalCreateFailures(
+      ddb as never, 'OrchestrationTable', ORCH, children,
+      [{ kind: 'create_failed_terminal', subIssueId: 'A', statusCode: 400, failureReason: 'Blocked by content policy' }] as never,
+      NOW,
+    );
+
+    expect(out.find((c) => c.sub_issue_id === 'A')).toMatchObject({
+      child_status: 'failed', failure_reason: 'Blocked by content policy',
+    });
+    expect(out.find((c) => c.sub_issue_id === 'B')?.child_status).toBe('skipped');
+    // The skip is PERSISTED, not just patched in memory.
+    const writes = ddb.send.mock.calls.map((c) => c[0] as UpdateCommand)
+      .filter((cmd) => (cmd.input.ExpressionAttributeValues as Record<string, unknown>)?.[':s'] === 'skipped');
+    expect(writes).toHaveLength(1);
+    expect((writes[0].input.Key as { sub_issue_id: string }).sub_issue_id).toBe('B');
+  });
+
+  test('a skip write can never stamp a LIVE sibling terminal', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    await applyTerminalCreateFailures(
+      ddb as never, 'OrchestrationTable', ORCH,
+      [row('A', 'releasing'), row('B', 'blocked', ['A'])],
+      [{ kind: 'create_failed_terminal', subIssueId: 'A', statusCode: 400, failureReason: 'r' }] as never,
+      NOW,
+    );
+    const cmd = ddb.send.mock.calls[0][0] as UpdateCommand;
+    // Guarded on a non-live source, so a skip racing a re-release cannot mark a
+    // released/running child terminal and let the epic claim its rollup early.
+    expect(cmd.input.ConditionExpression).toBe('child_status IN (:blocked, :ready)');
+  });
+
+  test('returns the SAME array when nothing failed terminally (callers key on identity)', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    const children = [row('A', 'released')];
+
+    const out = await applyTerminalCreateFailures(
+      ddb as never, 'OrchestrationTable', ORCH, children,
+      [{ kind: 'released', subIssueId: 'A' }] as never, NOW,
+    );
+
+    expect(out).toBe(children); // identity: the seed path uses this to detect "nothing to settle"
+    expect(ddb.send).not.toHaveBeenCalled();
+  });
+
+  test('a diamond whose two failed roots share a leaf skips that leaf once', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    const out = await applyTerminalCreateFailures(
+      ddb as never, 'OrchestrationTable', ORCH,
+      [row('A', 'releasing'), row('B', 'releasing'), row('C', 'blocked', ['A', 'B'])],
+      [
+        { kind: 'create_failed_terminal', subIssueId: 'A', statusCode: 400, failureReason: 'r' },
+        { kind: 'create_failed_terminal', subIssueId: 'B', statusCode: 400, failureReason: 'r' },
+      ] as never,
+      NOW,
+    );
+    expect(out.find((c) => c.sub_issue_id === 'C')?.child_status).toBe('skipped');
+    const skipWrites = ddb.send.mock.calls.map((c) => c[0] as UpdateCommand)
+      .filter((cmd) => (cmd.input.ExpressionAttributeValues as Record<string, unknown>)?.[':s'] === 'skipped');
+    expect(skipWrites).toHaveLength(1);
+  });
+
+  test('an already-skipped dependent is not re-written', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    await applyTerminalCreateFailures(
+      ddb as never, 'OrchestrationTable', ORCH,
+      [row('A', 'releasing'), row('B', 'skipped', ['A'])],
+      [{ kind: 'create_failed_terminal', subIssueId: 'A', statusCode: 400, failureReason: 'r' }] as never,
+      NOW,
+    );
+    expect(ddb.send).not.toHaveBeenCalled();
+  });
+});
