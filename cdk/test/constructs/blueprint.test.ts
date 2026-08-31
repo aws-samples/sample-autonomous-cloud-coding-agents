@@ -21,6 +21,7 @@ import { App, Stack } from 'aws-cdk-lib';
 import { Annotations, Template, Match } from 'aws-cdk-lib/assertions';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import { Blueprint, type BlueprintProps } from '../../src/constructs/blueprint';
+import { MAX_BUDGET_USD_MAX, MAX_BUDGET_USD_MIN } from '../../src/handlers/shared/types';
 
 function createStack(props?: Partial<BlueprintProps>): { stack: Stack; template: Template } {
   const app = new App();
@@ -140,6 +141,92 @@ describe('Blueprint construct', () => {
     const parts = getCreateJoinParts(template);
     const serialized = parts.join('');
     expect(serialized).toContain('"max_turns":{"N":"50"}');
+  });
+
+  // --- #748: agent.maxBudgetUsd (mirrors agent.maxTurns) ------------------
+
+  test('maps agent max budget prop', () => {
+    const { template } = createStack({
+      agent: { maxBudgetUsd: 25 },
+    });
+    const parts = getCreateJoinParts(template);
+    const serialized = parts.join('');
+    expect(serialized).toContain('"max_budget_usd":{"N":"25"}');
+  });
+
+  test('maps a fractional agent max budget prop without rounding', () => {
+    const { template } = createStack({
+      agent: { maxBudgetUsd: 2.5 },
+    });
+    const parts = getCreateJoinParts(template);
+    const serialized = parts.join('');
+    expect(serialized).toContain('"max_budget_usd":{"N":"2.5"}');
+  });
+
+  test('omits max_budget_usd when agent is absent', () => {
+    const { template } = createStack();
+    const parts = getCreateJoinParts(template);
+    const serialized = parts.join('');
+    expect(serialized).not.toContain('max_budget_usd');
+  });
+
+  test('omits max_budget_usd when maxBudgetUsd is undefined', () => {
+    const { template } = createStack({
+      agent: { maxTurns: 50 },
+    });
+    const parts = getCreateJoinParts(template);
+    const serialized = parts.join('');
+    expect(serialized).not.toContain('max_budget_usd');
+  });
+
+  test('exposes maxBudgetUsd as a public property when configured', () => {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack');
+    const repoTable = new dynamodb.Table(stack, 'RepoTable', {
+      partitionKey: { name: 'repo', type: dynamodb.AttributeType.STRING },
+    });
+
+    const blueprint = new Blueprint(stack, 'Blueprint', {
+      repo: 'org/my-repo',
+      repoTable,
+      agent: { maxBudgetUsd: 12.5 },
+    });
+
+    expect(blueprint.maxBudgetUsd).toBe(12.5);
+  });
+
+  test('maxBudgetUsd public property is undefined when absent', () => {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack');
+    const repoTable = new dynamodb.Table(stack, 'RepoTable', {
+      partitionKey: { name: 'repo', type: dynamodb.AttributeType.STRING },
+    });
+
+    const blueprint = new Blueprint(stack, 'Blueprint', {
+      repo: 'org/my-repo',
+      repoTable,
+    });
+
+    expect(blueprint.maxBudgetUsd).toBeUndefined();
+  });
+
+  test('onUpdate includes max_budget_usd in UpdateExpression', () => {
+    const { template } = createStack({
+      agent: { maxBudgetUsd: 7.25 },
+    });
+    const parts = getUpdateJoinParts(template);
+    const serialized = parts.join('');
+    expect(serialized).toContain('#max_budget_usd');
+    expect(serialized).toContain('"N":"7.25"');
+  });
+
+  test('onUpdate omits max_budget_usd when not configured', () => {
+    const { template } = createStack({
+      agent: { maxTurns: 50 },
+    });
+    const parts = getUpdateJoinParts(template);
+    const serialized = parts.join('');
+    expect(serialized).not.toContain('max_budget_usd');
   });
 
   test('maps system prompt overrides prop', () => {
@@ -522,6 +609,90 @@ describe('Blueprint construct', () => {
     });
 
     expect(() => Template.fromStack(stack)).toThrow(/Invalid security.approvalGateCap: 3.14.*integer/);
+  });
+
+  // --- #748: agent.maxBudgetUsd bounds must match the CLI's 0.01–100 ------
+
+  test('rejects maxBudgetUsd below minimum at synth', () => {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack');
+    const repoTable = new dynamodb.Table(stack, 'RepoTable', {
+      partitionKey: { name: 'repo', type: dynamodb.AttributeType.STRING },
+    });
+
+    new Blueprint(stack, 'Blueprint', {
+      repo: 'org/my-repo',
+      repoTable,
+      agent: { maxBudgetUsd: 0 },
+    });
+
+    expect(() => Template.fromStack(stack)).toThrow(/Invalid agent.maxBudgetUsd: 0.*between 0.01 and 100/);
+  });
+
+  test('rejects maxBudgetUsd above maximum at synth', () => {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack');
+    const repoTable = new dynamodb.Table(stack, 'RepoTable', {
+      partitionKey: { name: 'repo', type: dynamodb.AttributeType.STRING },
+    });
+
+    new Blueprint(stack, 'Blueprint', {
+      repo: 'org/my-repo',
+      repoTable,
+      agent: { maxBudgetUsd: 100.01 },
+    });
+
+    expect(() => Template.fromStack(stack)).toThrow(/Invalid agent.maxBudgetUsd: 100.01.*between 0.01 and 100/);
+  });
+
+  test('rejects a non-finite maxBudgetUsd at synth', () => {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack');
+    const repoTable = new dynamodb.Table(stack, 'RepoTable', {
+      partitionKey: { name: 'repo', type: dynamodb.AttributeType.STRING },
+    });
+
+    new Blueprint(stack, 'Blueprint', {
+      repo: 'org/my-repo',
+      repoTable,
+      agent: { maxBudgetUsd: Number.NaN },
+    });
+
+    expect(() => Template.fromStack(stack)).toThrow(/Invalid agent.maxBudgetUsd: NaN.*finite number/);
+  });
+
+  test('accepts maxBudgetUsd boundary values matching the CLI range', () => {
+    const appMin = new App();
+    const stackMin = new Stack(appMin, 'TestStackMin');
+    const tableMin = new dynamodb.Table(stackMin, 'RepoTable', {
+      partitionKey: { name: 'repo', type: dynamodb.AttributeType.STRING },
+    });
+    new Blueprint(stackMin, 'Blueprint', {
+      repo: 'org/min',
+      repoTable: tableMin,
+      agent: { maxBudgetUsd: MAX_BUDGET_USD_MIN },
+    });
+    expect(() => Template.fromStack(stackMin)).not.toThrow();
+
+    const appMax = new App();
+    const stackMax = new Stack(appMax, 'TestStackMax');
+    const tableMax = new dynamodb.Table(stackMax, 'RepoTable', {
+      partitionKey: { name: 'repo', type: dynamodb.AttributeType.STRING },
+    });
+    new Blueprint(stackMax, 'Blueprint', {
+      repo: 'org/max',
+      repoTable: tableMax,
+      agent: { maxBudgetUsd: MAX_BUDGET_USD_MAX },
+    });
+    expect(() => Template.fromStack(stackMax)).not.toThrow();
+  });
+
+  test('blueprint bounds are the SAME constants the task-submit path validates against', () => {
+    // #748 — the whole point of the prop is that a per-repo default and a
+    // per-task override cannot disagree about what is in range. Both must read
+    // ``contracts/constants.json``, not two hand-copied literals.
+    expect(MAX_BUDGET_USD_MIN).toBe(0.01);
+    expect(MAX_BUDGET_USD_MAX).toBe(100);
   });
 
   test('accepts boundary values (min and max)', () => {

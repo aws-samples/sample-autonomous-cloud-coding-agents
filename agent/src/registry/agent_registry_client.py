@@ -1,9 +1,9 @@
-"""Read-side AgentCore implementation of the ``RegistryClient`` port (#246).
+"""Read-side AWS Agent Registry implementation of the ``RegistryClient`` port.
 
 The agent only reads: ``get_record`` and ``resolve``. This is the one Python file
-that talks to the AgentCore control plane (via boto3) — everything upstream uses
+that talks to the Agent Registry control plane (via boto3) — everything upstream uses
 the port, so a substrate swap is confined here. Mirrors the read half of
-``cdk/src/handlers/shared/registry/agentcore-client.ts``.
+``cdk/src/handlers/shared/registry/agent-registry-client.ts``.
 """
 
 from __future__ import annotations
@@ -27,22 +27,22 @@ _NAME_MIN_PARTS = 2
 # The reverse-DNS key under which ABCA runtime config rides in a native `_meta`
 # block (matches RUNTIME_META_KEY in registry/types.ts).
 _RUNTIME_META_KEY = "dev.abca.runtime"
-# Frontmatter key carrying the runtime payload (JSON) in a native AGENT_SKILLS
-# SKILL.md — mirrors SKILL_RUNTIME_FM_KEY in registry/agentcore-client.ts.
+# Frontmatter key carrying the runtime payload (JSON) in a native SKILL record's
+# SKILL.md — mirrors SKILL_RUNTIME_FM_KEY in registry/agent-registry-client.ts.
 _SKILL_RUNTIME_FM_KEY = "x-abca-runtime"
 # Match the whole frontmatter block between the first ---/--- pair. We parse that
 # block as one YAML document (not a per-line regex) so a caller-controlled
 # `description` containing a newline cannot inject a shadowing runtime key
-# (#246 review B1/B2) — mirrors parseSkillFrontmatter in agentcore-client.ts.
+# (#246 review B1/B2) — mirrors parseSkillFrontmatter in agent-registry-client.ts.
 _SKILL_FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---", re.DOTALL)
 _RESOLVABLE_STATUSES = ("APPROVED", "DEPRECATED")
 
 
-class AgentCoreRegistryClient:
-    """Read-only registry access backed by AgentCore."""
+class AgentRegistryClient:
+    """Read-only registry access backed by AWS Agent Registry."""
 
     def __init__(self, registry_id: str, client: Any) -> None:
-        # ``client`` is a boto3 ``bedrock-agentcore-control`` client, injected so
+        # ``client`` is a boto3 ``agent-registry-control`` client, injected so
         # the agent's scoped-session helper (aws_session) owns credential wiring.
         self._registry_id = registry_id
         self._client = client
@@ -65,15 +65,18 @@ class AgentCoreRegistryClient:
 
     def _extract_runtime(self, raw: dict[str, Any]) -> dict[str, Any]:
         descriptors = raw.get("descriptors", {}) or {}
-        descriptor_type = raw.get("descriptorType")
-        if descriptor_type == "CUSTOM":
-            body = json.loads(descriptors.get("custom", {}).get("inlineContent", "{}"))
+        record_type = raw.get("recordType")
+        if record_type == "CUSTOM":
+            body = json.loads(descriptors.get("custom", {}).get("data", "{}"))
             return body.get("runtime", {})
-        if descriptor_type == "AGENT_SKILLS":
+        if record_type == "SKILL":
             # SKILL.md is Markdown frontmatter, not JSON — recover the runtime
             # from the `x-abca-runtime` frontmatter key (mirrors the TS adapter).
             skill_md = (
-                descriptors.get("agentSkills", {}).get("skillMd", {}).get("inlineContent", "")
+                descriptors.get("agentSkillsDefinition", {})
+                .get("additionalData", {})
+                .get("skillMd", {})
+                .get("data", "")
             )
             m = _SKILL_FRONTMATTER_RE.search(skill_md)
             if not m:
@@ -81,6 +84,7 @@ class AgentCoreRegistryClient:
             try:
                 fm = yaml.safe_load(m.group(1))
             except yaml.YAMLError:
+                # nosemgrep: py-silent-success-masking -- invalid YAML is unreadable payload
                 return {}
             if not isinstance(fm, dict):
                 return {}
@@ -93,7 +97,7 @@ class AgentCoreRegistryClient:
                 return json.loads(raw_value)
             return json.loads(base64.b64decode(raw_value).decode("utf-8"))
         # MCP: JSON server.json with the runtime in a `_meta` block.
-        inline = descriptors.get("mcp", {}).get("server", {}).get("inlineContent") or "{}"
+        inline = descriptors.get("mcpServer", {}).get("data") or "{}"
         body = json.loads(inline)
         return body.get("_meta", {}).get(_RUNTIME_META_KEY, {})
 

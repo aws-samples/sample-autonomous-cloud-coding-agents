@@ -27,24 +27,40 @@ import {
   findMissingBootstrapActions,
   resolveBootstrapPolicies,
 } from '../../src/bootstrap/resource-action-map';
+import { AgentRegistryStack } from '../../src/constructs/registry';
 import { AgentStack } from '../../src/stacks/agent';
 
 describe('Bootstrap policy synth coverage', () => {
   let template: Template;
+  let registryTemplate: Template;
   let allowedActions: Set<string>;
 
   beforeAll(() => {
     const app = new App();
-    new AgentStack(app, 'backgroundagent-dev', {
+    const stack = new AgentStack(app, 'backgroundagent-dev', {
       env: { account: '123456789012', region: 'us-east-1' },
     });
-    template = Template.fromStack(
-      app.node.tryFindChild('backgroundagent-dev') as Stack,
-    );
+    template = Template.fromStack(stack);
+    const registryStack = stack.node.tryFindChild('AgentRegistryStack') as
+      AgentRegistryStack | undefined;
+    if (!registryStack) {
+      throw new Error('AgentRegistryStack was not synthesized');
+    }
+    registryTemplate = Template.fromStack(registryStack);
 
     const resolver = new Stack();
     resolveBootstrapPolicies(resolver);
     allowedActions = collectBootstrapAllowActions();
+  });
+
+  it('maps the nested Agent Registry custom resource to bootstrap actions', () => {
+    const resources = registryTemplate.toJSON().Resources as Record<string, { Type: string }>;
+    const typesInTemplate = new Set(Object.values(resources).map((r) => r.Type));
+    const cfnType = 'Custom::AgentRegistry';
+
+    expect(typesInTemplate.has(cfnType)).toBe(true);
+    expect(cfnType in RESOURCE_ACTION_MAP).toBe(true);
+    expect(findMissingBootstrapActions(cfnType, allowedActions)).toEqual([]);
   });
 
   it('maps every synthesized CFN type (that needs IAM) to bootstrap actions', () => {

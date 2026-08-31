@@ -107,6 +107,8 @@ bgagent list \
   --output <text|json>        Output format (default: text)
 ```
 
+The `HEARTBEAT` column is the age of the agent's last in-guest liveness beat, so `is anything still alive?` can be answered across tasks rather than one `bgagent status` at a time. The agent beats every 45 s on the `agentcore` and `lambda-microvm` backends, so anything much past that on a `RUNNING` task means the agent is hung. It shows `—` for terminal tasks (the last beat is noise next to a final status), and on `ecs`, where the agent runs the pipeline directly instead of serving HTTP and so beats only once at start.
+
 ### `bgagent status <task-id>`
 
 Get detailed status for a specific task.
@@ -362,7 +364,7 @@ bgagent admin reset-password <email> \
 
 **Text mode** (default) prints human-readable output:
 - `status` and `submit` show a key-value detail view
-- `list` shows an aligned table (TASK ID, STATUS, REPO, CREATED, DESCRIPTION)
+- `list` shows an aligned table (TASK ID, STATUS, REPO, CREATED, HEARTBEAT, DESCRIPTION)
 - `events` shows a timeline (TIMESTAMP, EVENT TYPE, METADATA)
 - `webhook create` shows webhook details and the one-time HMAC secret
 - `webhook list` shows an aligned table (WEBHOOK ID, NAME, STATUS, CREATED)
