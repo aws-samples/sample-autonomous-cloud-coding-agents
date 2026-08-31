@@ -45,6 +45,40 @@ describe('AgentStack', () => {
     expect(template).toBeDefined();
   });
 
+  /**
+   * CloudFormation refuses a template over 1 MB, and it refuses it at CHANGESET
+   * CREATION — after synth succeeds, after every asset is built and pushed. The
+   * message is `Template may not exceed 1000000 bytes in size.` and it names no
+   * resource, so it reads as an infrastructure fault rather than "this template
+   * grew". Worse, the stack's own status stays at whatever the previous deploy left,
+   * so a status check reports success while nothing shipped.
+   *
+   * This is not hypothetical headroom: `--context compute_type=lambda-microvm`
+   * synthesizes OVER the ceiling on `main` today and cannot be deployed at all. The
+   * default substrate is a few thousand bytes behind it.
+   *
+   * Asserted as a BUDGET below the real ceiling so the failure lands here — in a
+   * test that says what the limit is and what to do — rather than at the end of a
+   * deploy. Raising this number is not the fix; moving resources under a nested
+   * stack (the stack already has two) is.
+   */
+  test('stays inside a deployable template budget (CloudFormation hard-fails at 1 MB)', () => {
+    // Measured the way the CDK CLI WRITES the template, which is how CloudFormation
+    // counts it: `JSON.stringify(t, null, 2)`. This matters more than it looks —
+    // compact serialization of the same template is ~700 KB while the file the CLI
+    // uploads is ~1,010 KB. About 310 KB is indentation. A budget asserted against
+    // compact bytes passes comfortably while the real deploy fails, which is exactly
+    // the trap the first version of this test fell into.
+    const bytes = Buffer.byteLength(JSON.stringify(template.toJSON(), null, 2), 'utf8');
+    const CFN_TEMPLATE_LIMIT_BYTES = 1_000_000;
+    // 5% below the ceiling, so this fires while there is still room to land the
+    // change that trips it rather than at the end of a deploy that has already
+    // pushed its assets.
+    const BUDGET_BYTES = 950_000;
+    expect(bytes).toBeLessThan(CFN_TEMPLATE_LIMIT_BYTES);
+    expect(bytes).toBeLessThan(BUDGET_BYTES);
+  });
+
   test('creates exactly 21 DynamoDB tables', () => {
     // task, task-events, repo, user-concurrency, webhook, task-nudges,
     // task-approvals (Cedar HITL V2),
