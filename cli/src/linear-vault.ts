@@ -166,6 +166,7 @@ export async function lookupLinearVaultCallbackUrl(args: {
     );
     return existing.callbackUrl ?? null;
   } catch {
+    // nosemgrep: ts-silent-success-masking -- the only caller renders a template and prints a "NOT FOUND" line naming how to create the provider; "absent" and "unreadable" lead to identical output, and raising would make the command that explains onboarding unusable before onboarding
     return null;
   }
 }
@@ -254,6 +255,7 @@ export async function mintLinearTokenFromVault(args: {
     // null rather than surfacing a URL a non-interactive command cannot use.
     return resp.accessToken ?? null;
   } catch {
+    // nosemgrep: ts-silent-success-masking -- callers fall back to the Secrets-Manager path on null, which is exactly what they do for a grant that needs consent; distinguishing "no grant" from "API error" would not change the caller's action, and the interactive consent path reports errors itself
     return null;
   }
 }

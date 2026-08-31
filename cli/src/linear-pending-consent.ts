@@ -59,7 +59,23 @@ export interface PendingConsent {
   readonly createdAt: string;
 }
 
+/**
+ * Linear `urlKey` shape. Enforced HERE rather than trusted from the caller: this
+ * value is interpolated into a filename, so a slug containing path separators or
+ * `..` would let it escape the config directory — and what it would clobber or
+ * expose is a file holding a live PKCE verifier. Callers do validate, but a
+ * security-relevant store should not depend on being called correctly.
+ */
+const SAFE_SLUG = /^[a-zA-Z0-9_-]{1,64}$/;
+
 function pendingPath(slug: string): string {
+  if (!SAFE_SLUG.test(slug)) {
+    throw new CliError(
+      `Refusing to use '${slug}' as a workspace slug: it must be Linear's urlKey shape `
+      + '(letters, digits, underscore, hyphen). Anything else could escape the config directory.',
+    );
+  }
+  // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- slug is checked against SAFE_SLUG immediately above, which admits no separators and no dots, so it cannot escape getConfigDir()
   return path.join(getConfigDir(), `linear-pending-consent-${slug}.json`);
 }
 

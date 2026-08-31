@@ -113,6 +113,16 @@ describe('pending consent refusals', () => {
     expect(() => takePendingConsent('acme')).toThrow(/expired/);
   });
 
+  test('a slug with path separators is REFUSED, not interpolated into a path', () => {
+    // The slug becomes part of a filename, and the file holds a live PKCE verifier.
+    // Callers do validate, but a security-relevant store must not depend on being
+    // called correctly — so the check lives here too.
+    for (const bad of ['../../etc/passwd', 'a/b', '..', './x', 'a\\b', '']) {
+      expect(() => takePendingConsent(bad)).toThrow(/Refusing to use|No pending consent/);
+      expect(() => savePendingConsent(entry({ slug: bad }))).toThrow(/Refusing to use/);
+    }
+  });
+
   test('missing entry names the command that starts one', () => {
     expect(() => takePendingConsent('nope')).toThrow(/setup nope --hosted/);
   });
