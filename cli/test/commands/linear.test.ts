@@ -309,11 +309,14 @@ describe('renderLinearAppTemplate', () => {
     // typo. Linear validates the whole Redirect URIs field on save, so an extra bad
     // line loses the good ones with it — and the failure then reads as though it
     // were about the line just added. One entry, matching what the CLI sends.
-    const out = renderLinearAppTemplate({ hostedConsentUrl: 'https://d2ud1woydykuxp.cloudfront.net/' });
+    const hosted = 'https://d2ud1woydykuxp.cloudfront.net/';
+    const slashless = hosted.replace(/\/$/, '');
+    const out = renderLinearAppTemplate({ hostedConsentUrl: hosted });
+    // Exact equality, not a prefix test: a prefix test on a URL reads as (incomplete)
+    // sanitization to static analysis, and equality is the stronger assertion anyway —
+    // it would also catch a THIRD variant being printed.
     const lines = out.split('\n').map((l) => l.trim());
-    expect(lines.filter((l) => l.startsWith('https://d2ud1woydykuxp.cloudfront.net'))).toEqual([
-      'https://d2ud1woydykuxp.cloudfront.net/',
-    ]);
+    expect(lines.filter((l) => l === hosted || l === slashless)).toEqual([hosted]);
   });
 
   test('with a hosted page but no vault callback, it says setup will print one', () => {
