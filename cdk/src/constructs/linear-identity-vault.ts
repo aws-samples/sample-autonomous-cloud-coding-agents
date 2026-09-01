@@ -39,6 +39,17 @@ import { Construct } from 'constructs';
 const PROVISION_TIMEOUT_SECONDS = 60;
 const PROVISION_MEMORY_MB = 256;
 
+/**
+ * Name prefix for the per-workspace Linear credential providers, as minted by
+ * `bgagent linear setup` (`bgagent-linear-oauth-<slug>`).
+ *
+ * Exists so the mint grant can be scoped to THIS surface's providers rather than every
+ * provider in the account's token vault. Must match `linearCredentialProviderName` in
+ * `cli/src/linear-vault.ts`; a drift here does not fail synth, it fails the mint at
+ * runtime with an AccessDenied naming the provider.
+ */
+export const LINEAR_CREDENTIAL_PROVIDER_PREFIX = 'bgagent-linear-oauth-';
+
 export interface LinearIdentityVaultProps {
   /**
    * Name of the AgentCore workload identity to provision. Stable natural id;
@@ -230,15 +241,25 @@ export class LinearIdentityVault extends Construct {
       resource: 'token-vault',
       resourceName: 'default',
     });
-    // Provider names are per-workspace (`bgagent-linear-oauth-<slug>`) and created
-    // at onboarding time by `bgagent linear setup`, so they are unknown at
-    // synth — scope to the account's oauth2 credential providers in the default
-    // token vault rather than a single name. Kept alongside the vault ARN above
-    // so the grant still holds if the service moves to per-provider authorization.
+    // Provider names are per-workspace (`bgagent-linear-oauth-<slug>`, minted by
+    // `bgagent linear setup`) so an exact name is unknown at synth — but the PREFIX
+    // is known, and prefix-scoping here is the difference between "this role can mint
+    // Linear tokens" and "this role can mint anything in the account's token vault".
+    //
+    // `oauth2credentialprovider/*` was not a theoretical over-grant: this account's
+    // vault already holds a `GithubOauth2` provider alongside the Linear ones, so the
+    // wildcard let every Linear-writing Lambda mint against GitHub. It gets worse the
+    // moment ADR-016 P7 adds Jira and Slack providers to the same vault.
+    //
+    // Live-proven scopable: with this statement scoped to the Linear prefix, minting
+    // the GitHub provider is denied on
+    // `…:token-vault/default/oauth2credentialprovider/github-oauth-cell-a` while
+    // minting a Linear provider still succeeds. Keep in sync with
+    // `linearCredentialProviderName` in cli/src/linear-vault.ts.
     const credentialProviderArn = stack.formatArn({
       service: 'bedrock-agentcore',
       resource: 'token-vault',
-      resourceName: 'default/oauth2credentialprovider/*',
+      resourceName: `default/oauth2credentialprovider/${LINEAR_CREDENTIAL_PROVIDER_PREFIX}*`,
     });
 
     grantee.grantPrincipal.addToPrincipalPolicy(
@@ -250,13 +271,27 @@ export class LinearIdentityVault extends Construct {
     grantee.grantPrincipal.addToPrincipalPolicy(
       new iam.PolicyStatement({
         actions: ['bedrock-agentcore:GetResourceOauth2Token'],
-        // The vault and the per-provider path only. The workload-identity directory
-        // and identity ARNs were also listed here, which was speculative: the live
-        // AccessDenied for this action named `token-vault/default`, and the directory
-        // is already granted for `GetWorkloadAccessTokenForUserId` above where it IS
-        // required. Listing resources an action was never shown to authorize against
-        // is breadth with nothing behind it.
-        resources: [tokenVaultArn, credentialProviderArn],
+        // ALL FOUR are required. This action authorizes against the token vault, the
+        // specific credential provider, the workload identity AND the workload-identity
+        // directory — and IAM reports only the first resource it cannot authorize, so
+        // the set is invisible until each one is granted in turn.
+        //
+        // Established by assuming a role with each candidate subset and minting for
+        // real. Dropping any one of them denies the mint, each time naming the missing
+        // resource: with the vault alone → the provider; + provider → the identity;
+        // + identity → the directory; all four → succeeds.
+        //
+        // An earlier pass here trimmed this to the vault and the provider, reasoning
+        // that only `token-vault/default` had appeared in a live denial. That was
+        // wrong, and it silently broke minting for every Linear-writing Lambda: the
+        // mint I used to "verify" it ran under an admin principal, which is not the
+        // thing the grant applies to. Only the provider ARN is narrowable here.
+        resources: [
+          tokenVaultArn,
+          credentialProviderArn,
+          this.workloadIdentityArn,
+          workloadDirectoryArn,
+        ],
       }),
     );
     // The vault stores each provider's client secret in a service-owned secret

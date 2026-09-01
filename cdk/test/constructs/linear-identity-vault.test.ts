@@ -20,7 +20,10 @@
 import { App, Stack } from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
 import * as iam from 'aws-cdk-lib/aws-iam';
-import { LinearIdentityVault } from '../../src/constructs/linear-identity-vault';
+import {
+  LINEAR_CREDENTIAL_PROVIDER_PREFIX,
+  LinearIdentityVault,
+} from '../../src/constructs/linear-identity-vault';
 
 function build(returnUrls: string[] = ['http://localhost:8080/oauth/callback']): {
   vault: LinearIdentityVault;
@@ -147,7 +150,6 @@ describe('LinearIdentityVault construct', () => {
       JSON.stringify(p.Properties.Roles ?? '').includes('Consumer'),
     );
     const rendered = JSON.stringify(consumerPolicy?.Properties.PolicyDocument.Statement ?? []);
-
     // Both token actions present.
     expect(rendered).toContain('bedrock-agentcore:GetWorkloadAccessTokenForUserId');
     expect(rendered).toContain('bedrock-agentcore:GetResourceOauth2Token');
@@ -181,14 +183,29 @@ describe('LinearIdentityVault construct', () => {
     };
     expect(watResources.map(arnTail).some((tail) => tail.endsWith('workload-identity-directory/default')))
       .toBe(true);
-    // GetResourceOauth2Token authorizes against the token VAULT itself — a second
-    // live AccessDenied ("… on resource: …:token-vault/default") proved the
-    // credential-provider sub-path alone is not enough. Both are granted: the
-    // vault (what the service checks today) and the per-provider path (scoped to
-    // this account's oauth2 providers rather than '*', since provider names are
-    // created at onboarding time and unknown at synth).
-    expect(rendered).toContain('token-vault/default"');
-    expect(rendered).toContain('token-vault/default/oauth2credentialprovider/*');
+    // GetResourceOauth2Token authorizes against FOUR resources, all required. Each was
+    // found by granting a subset and minting for real: the denial names the first
+    // missing one, so the set only appears one member at a time.
+    const tokenResources = statements
+      .filter((st) => JSON.stringify(st.Action ?? '').includes('GetResourceOauth2Token'))
+      .flatMap((st) => (Array.isArray(st.Resource) ? st.Resource : [st.Resource]) as unknown[])
+      .map(arnTail);
+    expect(tokenResources).toHaveLength(4);
+    for (const suffix of [
+      'token-vault/default',
+      `token-vault/default/oauth2credentialprovider/${LINEAR_CREDENTIAL_PROVIDER_PREFIX}*`,
+      'workload-identity-directory/default',
+      'workload-identity-directory/default/workload-identity/abca_linear_oauth',
+    ]) {
+      expect(tokenResources.some((t) => t.endsWith(suffix))).toBe(true);
+    }
+    // The provider path must be PREFIX-scoped, never the bare wildcard. This account's
+    // vault already holds a GithubOauth2 provider next to the Linear ones, so
+    // `oauth2credentialprovider/*` let every Linear-writing Lambda mint a GitHub token —
+    // and ADR-016 P7 adds Jira and Slack to the same vault. Live-proven to restrict:
+    // scoped to this prefix, minting `github-oauth-cell-a` is denied on that provider's
+    // own ARN while a Linear mint still succeeds.
+    expect(tokenResources.some((t) => t.endsWith('oauth2credentialprovider/*'))).toBe(false);
     // The vault reads each provider's client secret through the caller.
     expect(rendered).toContain('bedrock-agentcore-identity!*');
 
