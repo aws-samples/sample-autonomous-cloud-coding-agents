@@ -206,8 +206,25 @@ describe('LinearIdentityVault construct', () => {
     // scoped to this prefix, minting `github-oauth-cell-a` is denied on that provider's
     // own ARN while a Linear mint still succeeds.
     expect(tokenResources.some((t) => t.endsWith('oauth2credentialprovider/*'))).toBe(false);
-    // The vault reads each provider's client secret through the caller.
-    expect(rendered).toContain('bedrock-agentcore-identity!*');
+    // The vault reads each provider's client secret through the caller — scoped to
+    // THIS surface's providers, never the account-wide `bedrock-agentcore-identity!*`.
+    //
+    // That wildcard is not a cosmetic over-grant. These are raw OAuth CLIENT secrets,
+    // grantMintToken is applied to roles that run untrusted repository code, and a live
+    // vault already holds a GitHub provider and an unrelated API key beside the Linear
+    // ones. A leaked client secret mints and refreshes offline, outliving the revocation
+    // #812 exists to surface. Live-checked: the scoped grant still mints, and is denied
+    // the GitHub provider's secret.
+    const secretResources = statements
+      .filter((st) => JSON.stringify(st.Action ?? '').includes('secretsmanager:GetSecretValue'))
+      .flatMap((st) => (Array.isArray(st.Resource) ? st.Resource : [st.Resource]) as unknown[])
+      .map(arnTail);
+    expect(secretResources).toHaveLength(1);
+    expect(secretResources[0]!.endsWith(
+      `bedrock-agentcore-identity!default/oauth2/${LINEAR_CREDENTIAL_PROVIDER_PREFIX}*`,
+    )).toBe(true);
+    // The wildcard form must be gone entirely.
+    expect(rendered).not.toContain('bedrock-agentcore-identity!*');
 
     // Still least-privilege: no control-plane lifecycle, no wildcard resource.
     expect(rendered).not.toContain('CreateWorkloadIdentity');

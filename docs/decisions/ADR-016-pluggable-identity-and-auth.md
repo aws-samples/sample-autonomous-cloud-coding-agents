@@ -160,7 +160,7 @@ Per-user `McpCredential` selection requires the Gateway to know *which task-user
 | P6 | **Trusted task-user identity propagation** (prerequisite for per-user MCP on the general plane, P5): specify + validate a user-scoped inbound identity the Gateway authorizer trusts, replacing the M2M JWT for per-user credential selection. | **Blocks per-user `McpCredential`.** Until done, MCP credentials are workspace-scoped at best. |
 | P7 | Jira + Slack `ChannelCredential` (same shape as P1); GitHub `GithubOauth2` behind a flag, retire the shared PAT; OBO `act`-claim delegation feeding #237. | Flag-gated; per-surface. |
 
-**Substrate independence (verified 2026-07-21, both proven live):** the vault path works on any compute. AgentCore Runtime injects the Workload Access Token as the `WorkloadAccessToken` header; ECS/Fargate/Lambda bootstrap it via `GetWorkloadAccessTokenForJWT(workloadName, userToken=<Cognito M2M JWT>)` against a **standalone** (non-service-linked) workload identity, then call `GetResourceOauth2Token`. Runtime-managed (service-linked) workload identities cannot self-vend, so the ECS path needs a manually-created workload identity. The runtime execution role today has `GetWorkloadAccessToken*` but **not** `GetResourceOauth2Token` — P1 adds it (+ `GetSecretValue` on `bedrock-agentcore-identity!*`), mirroring the gateway service role.
+**Substrate independence (verified 2026-07-21, both proven live):** the vault path works on any compute. AgentCore Runtime injects the Workload Access Token as the `WorkloadAccessToken` header; ECS/Fargate/Lambda bootstrap it via `GetWorkloadAccessTokenForJWT(workloadName, userToken=<Cognito M2M JWT>)` against a **standalone** (non-service-linked) workload identity, then call `GetResourceOauth2Token`. Runtime-managed (service-linked) workload identities cannot self-vend, so the ECS path needs a manually-created workload identity. The runtime execution role today has `GetWorkloadAccessToken*` but **not** `GetResourceOauth2Token` — P1 adds it, plus `GetSecretValue` scoped to that surface's providers (`bedrock-agentcore-identity!default/oauth2/<prefix>*`; see the implementation notes below for why this is narrower than the wildcard first anticipated here).
 
 ## Phase-1 implementation notes (learned live, 2026-08-28)
 
@@ -187,10 +187,21 @@ found only by a live `AccessDenied`, because a unit test can only assert the ARN
 
 - `GetWorkloadAccessTokenForUserId` authorizes against the workload-identity **directory**
   (`workload-identity-directory/default`), *not* the named identity beneath it.
-- `GetResourceOauth2Token` authorizes against the token **vault** (`token-vault/default`), *not* only
-  the `oauth2credentialprovider/<name>` sub-path.
-- `secretsmanager:GetSecretValue` on `bedrock-agentcore-identity!*` is required, as this ADR
-  anticipated — the vault reads the provider's client secret through the caller's credentials.
+- `GetResourceOauth2Token` authorizes against **four** resources, all required: the token vault
+  (`token-vault/default`), the specific `oauth2credentialprovider/<name>`, the named workload
+  identity, and the workload-identity directory. IAM names only the first resource it cannot
+  authorize, so the set is invisible until each one is granted in turn — it took three
+  successive denials to enumerate. Of the four, only the credential-provider ARN is narrowable.
+- `secretsmanager:GetSecretValue` is required — the vault reads the provider's client secret
+  through the caller's credentials — but **not** on the `bedrock-agentcore-identity!*` wildcard
+  this ADR originally anticipated. **Superseded (2026-09-01):** the secret name embeds the
+  provider, so the grant is scoped to `!default/oauth2/<surface-prefix>*` instead. The wildcard
+  is wider than it reads: these are raw OAuth *client* secrets, `grantMintToken` is applied to
+  roles that execute untrusted repository code, and the account's vault already holds a GitHub
+  provider and an unrelated API key beside the Linear ones — with Jira and Slack to come under
+  P7. A leaked client secret mints and refreshes offline, surviving the revocation P1/#812 exist
+  to make actionable. Verified live: the scoped grant still mints, and is denied the GitHub
+  provider's secret. Per-surface scoping is therefore the rule for P7, not the wildcard.
 
 **A cached grant is keyed by the whole token request, `customParameters` included.** Resolving without
 the same `customParameters` used at consent time returns an `authorizationUrl` ("consent required")

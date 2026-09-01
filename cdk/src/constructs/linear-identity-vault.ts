@@ -44,7 +44,7 @@ const PROVISION_MEMORY_MB = 256;
  * `bgagent linear setup` (`bgagent-linear-oauth-<slug>`).
  *
  * Exists so the mint grant can be scoped to THIS surface's providers rather than every
- * provider in the account's token vault. Must match `linearCredentialProviderName` in
+ * provider in the account's token vault. Must match `linearVaultProviderName` in
  * `cli/src/linear-vault.ts`; a drift here does not fail synth, it fails the mint at
  * runtime with an AccessDenied naming the provider.
  */
@@ -255,7 +255,7 @@ export class LinearIdentityVault extends Construct {
     // the GitHub provider is denied on
     // `…:token-vault/default/oauth2credentialprovider/github-oauth-cell-a` while
     // minting a Linear provider still succeeds. Keep in sync with
-    // `linearCredentialProviderName` in cli/src/linear-vault.ts.
+    // `linearVaultProviderName` in cli/src/linear-vault.ts.
     const credentialProviderArn = stack.formatArn({
       service: 'bedrock-agentcore',
       resource: 'token-vault',
@@ -294,10 +294,29 @@ export class LinearIdentityVault extends Construct {
         ],
       }),
     );
-    // The vault stores each provider's client secret in a service-owned secret
-    // named `bedrock-agentcore-identity!…`; resolving a token reads it through
-    // the caller's credentials, so without this the exchange fails on
-    // GetSecretValue (ADR-016 P1 notes this same grant).
+    // The vault keeps each provider's client secret in a service-owned secret and
+    // reads it through the CALLER's credentials during the token exchange, so without
+    // this grant the mint fails on GetSecretValue (ADR-016 P1 notes the same grant).
+    //
+    // Scoped to this surface's providers, NOT the `bedrock-agentcore-identity!*`
+    // wildcard ADR-016 P1 sanctioned "mirroring the gateway role". That wildcard is a
+    // materially wider grant than it reads as, because these are raw OAuth CLIENT
+    // secrets and grantMintToken is applied to roles that execute untrusted repository
+    // code (the AgentCore runtime, the MicroVM guest, the ECS task). Live names in a
+    // working deployment:
+    //
+    //   bedrock-agentcore-identity!default/oauth2/bgagent-linear-oauth-<slug>-<id>
+    //   bedrock-agentcore-identity!default/oauth2/github-oauth-<name>-<id>
+    //   bedrock-agentcore-identity!default/apikey/linear-api-key-<id>
+    //
+    // so the wildcard handed agent code the GitHub client secret and an unrelated API
+    // key, and would hand it Jira's and Slack's under ADR-016 P7. A client secret is
+    // worse to leak than an access token: it mints and refreshes offline, surviving
+    // the vault revocation that #812 exists to make actionable.
+    //
+    // Live-verified rather than reasoned: under the scoped grant a Linear mint for a
+    // consented workspace succeeds, and `GetSecretValue` on the GitHub provider's
+    // secret is denied. The trailing `*` covers the id suffix the service appends.
     grantee.grantPrincipal.addToPrincipalPolicy(
       new iam.PolicyStatement({
         actions: ['secretsmanager:GetSecretValue'],
@@ -306,7 +325,7 @@ export class LinearIdentityVault extends Construct {
             service: 'secretsmanager',
             resource: 'secret',
             arnFormat: ArnFormat.COLON_RESOURCE_NAME,
-            resourceName: 'bedrock-agentcore-identity!*',
+            resourceName: `bedrock-agentcore-identity!default/oauth2/${LINEAR_CREDENTIAL_PROVIDER_PREFIX}*`,
           }),
         ],
       }),
