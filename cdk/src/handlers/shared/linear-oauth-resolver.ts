@@ -486,7 +486,27 @@ export async function resolveLinearOauthToken(
   if (cached && cached.expiresAt > Date.now() && !isTokenExpiring(cached.value.expires_at)) {
     token = cached.value;
   } else {
-    const fetched = await getOauthSecret(sm, row.oauth_secret_arn);
+    // Read through the variant that separates "there is no grant" from "the read
+    // failed", because the latch below treats a null as grounds to take the workspace
+    // offline. `getOauthSecret` collapses a throttle, a network blip and an IAM denial
+    // into the same null as a genuinely grant-less bundle — and a vault-dead /
+    // SM-alive workspace (the state `readExistingOauthTokens` deliberately preserves)
+    // runs entirely off that Secrets-Manager token. Latching it on one blip is
+    // unrecoverable: the row goes `revoked`, and from then on the vault re-probe
+    // answers `consent-required` again, so Secrets Manager is never consulted a second
+    // time. A transient error is not evidence that a credential was withdrawn.
+    let fetched: StoredOauthToken | null;
+    try {
+      fetched = await getOauthSecretForResolve(sm, row.oauth_secret_arn);
+    } catch (err) {
+      logger.error('Could not read the Linear OAuth secret — declining to treat this as a revocation', {
+        oauth_secret_arn: row.oauth_secret_arn,
+        linear_workspace_id: linearWorkspaceId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      // Resolution fails for THIS event; the next one retries. Nothing is latched.
+      return null;
+    }
     if (!fetched) {
       logger.error('Linear OAuth secret missing or unreadable', {
         oauth_secret_arn: row.oauth_secret_arn,
@@ -560,19 +580,6 @@ export async function resolveLinearOauthToken(
   };
 }
 
-/**
- * Strict variant of {@link getRegistryRow}: throws on infra error
- * (DDB throttle, network) instead of returning null. Use this from the
- * webhook signature-verification path where a `null` return would let
- * a transient throttle silently downgrade per-workspace verification
- * to the stack-wide fallback secret.
- *
- * The lenient `null`-on-error variant is kept for `resolveLinearOauthToken`,
- * whose graceful no-op contract is intentional (an MCP token lookup
- * failing should let the agent run without Linear, not blow up the
- * task). Mixing the two contracts in one function silently fails open;
- * splitting them keeps each call site honest.
- */
 /**
  * Mark a workspace's registry row as ``revoked``, so the dead authorization is
  * discoverable instead of living only in a log line. The resolver already
@@ -776,6 +783,19 @@ export async function clearWorkspaceRevocation(
   return true;
 }
 
+/**
+ * Strict variant of {@link getRegistryRow}: throws on infra error
+ * (DDB throttle, network) instead of returning null. Use this from the
+ * webhook signature-verification path where a `null` return would let
+ * a transient throttle silently downgrade per-workspace verification
+ * to the stack-wide fallback secret.
+ *
+ * The lenient `null`-on-error variant is kept for `resolveLinearOauthToken`,
+ * whose graceful no-op contract is intentional (an MCP token lookup
+ * failing should let the agent run without Linear, not blow up the
+ * task). Mixing the two contracts in one function silently fails open;
+ * splitting them keeps each call site honest.
+ */
 export async function getRegistryRowStrict(
   ddb: DynamoDBDocumentClient,
   tableName: string,
@@ -873,18 +893,6 @@ function parseRegistryRow(rawItem: unknown, linearWorkspaceId: string): Registry
 }
 
 /**
- * Required fields on the StoredOauthToken JSON in Secrets Manager.
- * Validated as a set at deserialization so a missing field fails fast
- * here, not 24 hours later inside `tryRefreshOnce` when the refresh
- * call needs `client_id` / `client_secret` and finds them undefined.
- *
- * Keep this list in sync with the `StoredOauthToken` interface above
- * AND the CLI-side `StoredLinearOauthToken` shape (see
- * `cli/src/linear-oauth.ts`). The contract test in
- * `cdk/test/contracts/stored-oauth-token-parity.test.ts` enforces
- * the cross-language match.
- */
-/**
  * The four fields that describe an OAUTH GRANT, as opposed to the workspace
  * identity and the webhook signing secret that live in the same bundle.
  *
@@ -902,6 +910,18 @@ const STORED_OAUTH_GRANT_FIELDS: ReadonlyArray<keyof StoredOauthToken> = [
   'scope',
 ];
 
+/**
+ * Required fields on the StoredOauthToken JSON in Secrets Manager.
+ * Validated as a set at deserialization so a missing field fails fast
+ * here, not 24 hours later inside `tryRefreshOnce` when the refresh
+ * call needs `client_id` / `client_secret` and finds them undefined.
+ *
+ * Keep this list in sync with the `StoredOauthToken` interface above
+ * AND the CLI-side `StoredLinearOauthToken` shape (see
+ * `cli/src/linear-oauth.ts`). The contract test in
+ * `cdk/test/contracts/stored-oauth-token-parity.test.ts` enforces
+ * the cross-language match.
+ */
 const STORED_OAUTH_TOKEN_REQUIRED_FIELDS: ReadonlyArray<keyof StoredOauthToken> = [
   'access_token',
   'refresh_token',
@@ -930,6 +950,37 @@ export async function getOauthSecret(
       error: err instanceof Error ? err.message : String(err),
     });
     return null; // nosemgrep: ts-silent-success-masking -- lenient OAuth fetch for task hydration; strict variant getOauthSecretStrict rethrows SM errors
+  }
+}
+
+/**
+ * Read the stored grant for token resolution, distinguishing "there is no grant"
+ * from "the read did not complete".
+ *
+ * Returns null only for a DEFINITE absence — the secret does not exist, holds no
+ * string, or holds JSON without the grant fields. Every other Secrets-Manager error
+ * throws, because `resolveLinearOauthToken` uses a null here as grounds to latch the
+ * workspace `revoked`, and that verdict must rest on evidence rather than on a
+ * throttle.
+ *
+ * Deliberately not {@link getOauthSecretStrict}: that one parses `without-grant` for
+ * the webhook-signature path, where a bundle with no access token is valid. Here the
+ * missing grant is the whole question, so the full contract is required.
+ */
+async function getOauthSecretForResolve(
+  sm: SecretsManagerClient,
+  secretArn: string,
+): Promise<StoredOauthToken | null> {
+  try {
+    const res = await sm.send(new GetSecretValueCommand({ SecretId: secretArn }));
+    if (!res.SecretString) return null;
+    return parseOauthSecret(res.SecretString, secretArn);
+  } catch (err) {
+    // A deleted secret IS a definite absence; anything else is not a verdict.
+    if ((err as { name?: string } | undefined)?.name === 'ResourceNotFoundException') {
+      return null; // nosemgrep: ts-silent-success-masking -- ResourceNotFound IS the empty success this function reports: the secret does not exist, so there is definitively no stored grant. Every other error rethrows on the next line, which is the whole point of the function.
+    }
+    throw err;
   }
 }
 
@@ -998,15 +1049,6 @@ function parseOauthSecret(
   return parsed;
 }
 
-/**
- * Outcome of a single Linear /oauth/token POST. Three terminal states:
- * - `success` — refreshed token (caller persists + caches)
- * - `invalid_grant` — Linear rejected the refresh_token, likely
- *    because another caller rotated it first. Caller can retry once
- *    after re-reading the secret.
- * - `failure` — any other error (network, 5xx, missing fields). No
- *    retry; surface null upward.
- */
 /** Milliseconds per hour — for the token-age diagnostics. */
 const MS_PER_HOUR = 3_600_000;
 /** Length of the truncated token fingerprint logged for lineage. */
@@ -1058,6 +1100,15 @@ function tokenLineage(token: StoredOauthToken): Record<string, string | number> 
   };
 }
 
+/**
+ * Outcome of a single Linear /oauth/token POST. Three terminal states:
+ * - `success` — refreshed token (caller persists + caches)
+ * - `invalid_grant` — Linear rejected the refresh_token, likely
+ *    because another caller rotated it first. Caller can retry once
+ *    after re-reading the secret.
+ * - `failure` — any other error (network, 5xx, missing fields). No
+ *    retry; surface null upward.
+ */
 type RefreshOutcome =
   | { kind: 'success'; token: StoredOauthToken }
   | { kind: 'invalid_grant' }

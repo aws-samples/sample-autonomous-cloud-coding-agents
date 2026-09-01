@@ -33,6 +33,7 @@ import {
 import { logger } from '../../../src/handlers/shared/logger';
 
 const REGISTRY_TABLE = 'TestLinearWorkspaceRegistry';
+const WS_ACME = 'ws-uuid-1';
 
 function makeStoredToken(overrides: Partial<StoredOauthToken> = {}): StoredOauthToken {
   const now = new Date();
@@ -68,6 +69,8 @@ function makeFakeClients(opts: {
   updateShouldFail?: Error;
   storedToken?: StoredOauthToken | null;
   putSecretValueShouldFail?: boolean;
+  /** Make GetSecretValue throw, to separate "read failed" from "no grant stored". */
+  getSecretValueError?: Error;
 }) {
   const ddbSend = jest.fn().mockImplementation((command: { constructor: { name: string } }) => {
     if (command.constructor.name === 'UpdateCommand' && opts.updateShouldFail) {
@@ -78,6 +81,7 @@ function makeFakeClients(opts: {
   const smSend = jest.fn().mockImplementation((command: { constructor: { name: string } }) => {
     const name = command.constructor.name;
     if (name === 'GetSecretValueCommand') {
+      if (opts.getSecretValueError) throw opts.getSecretValueError;
       if (opts.storedToken === null) return { SecretString: undefined };
       return { SecretString: JSON.stringify(opts.storedToken) };
     }
@@ -777,6 +781,127 @@ describe('markWorkspaceRevoked — the verdict must not outlive the grant it jud
     expect(updates[0].input!.ConditionExpression).toContain('installed_at = :installed');
     expect((updates[0].input!.ExpressionAttributeValues as Record<string, unknown>)[':installed'])
       .toBe(INSTALLED);
+  });
+});
+
+describe('a transient Secrets Manager error is not a revocation', () => {
+  // The latch takes a workspace offline and, once latched, the vault re-probe answers
+  // `consent-required` again — so Secrets Manager is never consulted a second time.
+  // That makes the verdict effectively permanent, which is only acceptable when the
+  // absence of a grant was actually established. A vault-dead / SM-alive workspace is
+  // a real state (`readExistingOauthTokens` preserves it deliberately) and it runs
+  // entirely off the Secrets-Manager token, so latching it on one throttled
+  // GetSecretValue would be exactly the silent, unrecoverable outage #812 was filed
+  // to eliminate.
+  const WORKLOAD = 'abca_linear_oauth';
+  let savedWorkload: string | undefined;
+  let savedEnabled: string | undefined;
+
+  const vaultRow = {
+    workspace_slug: 'acme',
+    oauth_secret_arn: 'arn:secret:acme',
+    status: 'active',
+    provider_name: 'bgagent-linear-oauth-acme',
+    vault_user_id: 'linear-ws-acme',
+    installed_at: '2026-08-01T00:00:00.000Z',
+  };
+  const consentRequired = async () => ({
+    kind: 'consent-required' as const,
+    authorizationUrl: 'https://x/authorize',
+  });
+  const updatesFrom = (clients: { ddbSend: jest.Mock }) => clients.ddbSend.mock.calls
+    .map((c) => c[0] as { constructor: { name: string } })
+    .filter((cmd) => cmd.constructor.name === 'UpdateCommand');
+
+  beforeEach(() => {
+    _resetCachesForTesting();
+    savedWorkload = process.env.LINEAR_WORKLOAD_IDENTITY_NAME;
+    savedEnabled = process.env.LINEAR_VAULT_ENABLED;
+    process.env.LINEAR_WORKLOAD_IDENTITY_NAME = WORKLOAD;
+    process.env.LINEAR_VAULT_ENABLED = 'true';
+  });
+  afterEach(() => {
+    if (savedWorkload === undefined) delete process.env.LINEAR_WORKLOAD_IDENTITY_NAME;
+    else process.env.LINEAR_WORKLOAD_IDENTITY_NAME = savedWorkload;
+    if (savedEnabled === undefined) delete process.env.LINEAR_VAULT_ENABLED;
+    else process.env.LINEAR_VAULT_ENABLED = savedEnabled;
+  });
+
+  test.each([
+    ['a throttle', Object.assign(new Error('slow down'), { name: 'ThrottlingException' })],
+    ['an IAM denial', Object.assign(new Error('denied'), { name: 'AccessDeniedException' })],
+    ['a network blip', Object.assign(new Error('socket hang up'), { name: 'TimeoutError' })],
+  ])('vault says consent-required and the SM read hits %s → NO latch', async (_label, err) => {
+    const clients = makeFakeClients({ registryItem: vaultRow, getSecretValueError: err });
+    const recorder = jest.fn();
+
+    const result = await resolveLinearOauthToken(WS_ACME, REGISTRY_TABLE, {
+      ...clients,
+      resolveViaVault: consentRequired,
+      onAuthorizationRevoked: recorder,
+    });
+
+    expect(result).toBeNull();
+    expect(recorder).not.toHaveBeenCalled();
+    expect(updatesFrom(clients)).toHaveLength(0);
+  });
+
+  test('a DELETED secret IS definitive, so it still latches', async () => {
+    // ResourceNotFound is evidence, not noise: the fallback genuinely no longer
+    // exists, so with the vault also refusing there is nothing left to resolve.
+    const clients = makeFakeClients({
+      registryItem: vaultRow,
+      getSecretValueError: Object.assign(new Error('gone'), { name: 'ResourceNotFoundException' }),
+    });
+    const recorder = jest.fn();
+
+    expect(await resolveLinearOauthToken(WS_ACME, REGISTRY_TABLE, {
+      ...clients,
+      resolveViaVault: consentRequired,
+      onAuthorizationRevoked: recorder,
+    })).toBeNull();
+
+    expect(recorder).toHaveBeenCalledWith(expect.objectContaining({
+      source: 'vault-consent-required',
+      installedAt: vaultRow.installed_at,
+    }));
+  });
+
+  test('a bundle present but carrying no grant IS definitive, so it still latches', async () => {
+    // The fresh-vault-onboarding shape: real JSON, client credentials and signing
+    // secret, no access/refresh token. Reading it succeeded; there is simply no grant.
+    const clients = makeFakeClients({
+      registryItem: vaultRow,
+      storedToken: makeStoredToken({ access_token: '', refresh_token: '' }),
+    });
+    const recorder = jest.fn();
+
+    expect(await resolveLinearOauthToken(WS_ACME, REGISTRY_TABLE, {
+      ...clients,
+      resolveViaVault: consentRequired,
+      onAuthorizationRevoked: recorder,
+    })).toBeNull();
+
+    expect(recorder).toHaveBeenCalledWith(expect.objectContaining({ source: 'vault-consent-required' }));
+  });
+
+  test('an SM-alive workspace keeps working when the vault needs consent', async () => {
+    // The state the whole guard protects: vault dead, Secrets Manager fine. It must
+    // resolve normally and record nothing.
+    const clients = makeFakeClients({
+      registryItem: vaultRow,
+      storedToken: makeStoredToken({ access_token: 'lin_oauth_sm_alive' }),
+    });
+    const recorder = jest.fn();
+
+    const result = await resolveLinearOauthToken(WS_ACME, REGISTRY_TABLE, {
+      ...clients,
+      resolveViaVault: consentRequired,
+      onAuthorizationRevoked: recorder,
+    });
+
+    expect(result?.accessToken).toBe('lin_oauth_sm_alive');
+    expect(recorder).not.toHaveBeenCalled();
   });
 });
 
