@@ -84,7 +84,14 @@ fi
 # ABCA_SKIP_LOG_DELIVERY_PREFLIGHT=1 skips. See docs/design/OBSERVABILITY.md.
 [tasks."preflight:log-delivery"]
 description = "Migrate pre-#703 pinned log-delivery resources before deploy (no-op otherwise)"
-run = "npx tsx scripts/preflight-log-delivery.ts"
+# `node --experimental-strip-types`, matching the `check:*-sync` script tasks and this
+# script's own tests. `npx tsx` (as `bootstrap:generate` uses) also works, but tsx is
+# in neither package.json, so npx FETCHES it on first use — observed: "The following
+# package was not found and will be installed: tsx@4.23.13". Acceptable for an
+# occasional codegen task; not for a task on the deploy path, which would take an
+# unpinned download on every deploy and fail outright with no network. Type stripping
+# needs no dependency at all.
+run = "node --experimental-strip-types scripts/preflight-log-delivery.ts"
 
 [tasks.deploy]
 description = "cdk deploy (pass args after --)"
