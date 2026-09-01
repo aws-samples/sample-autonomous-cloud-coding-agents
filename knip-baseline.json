@@ -1,4 +1,4 @@
 {
-  "count": 78,
-  "comment": "Dead-code ratchet baseline for issue #282 (cairn MVG gate #6). This is the knip issue count at the time the gate was introduced — pre-existing unused exports/types that are out of scope to remove in the gate PR. The ratchet (scripts/check-deadcode-ratchet.mjs) fails the build only if the count rises above this number. When dead code is removed and the count drops, lower this value in the same PR to lock in the gain. Per-category false positives belong in knip.json, not here."
+  "count": 85,
+  "comment": "Dead-code ratchet baseline for issue #282 (cairn MVG gate #6). The ratchet (scripts/check-deadcode-ratchet.mjs) reads only `count` and fails the build only if the current knip issue count rises above it; when dead code is removed and the count drops, lower this value in the same PR to lock in the gain. Suppress false positives in knip.json — via ignore/ignoreDependencies, or by declaring the workspace so its entry points are reachable — never absorb them into this baseline. The remaining 85 are pre-existing unused exports and types, tracked in #682."
 }
