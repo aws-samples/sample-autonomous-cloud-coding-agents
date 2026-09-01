@@ -202,12 +202,13 @@ Pick the teammate from the list of human members. You get a one-time code (24h T
 
 They need an ABCA account first. If they don't have one:
 
-1. **Admin**: `bgagent admin invite-user teammate@example.com` creates their Cognito user (see [User guide → Joining an existing deployment](./USER_GUIDE.md#joining-an-existing-deployment)).
-2. **Teammate**:
+1. **Admin** runs `bgagent admin invite-user teammate@example.com` to create their Cognito user (see [User guide → Joining an existing deployment](./USER_GUIDE.md#joining-an-existing-deployment) for the full Cognito-side flow).
+2. **Teammate** pastes the bundle + temp password from the admin into:
 
    ```bash
    bgagent configure --from-bundle <bundle>
    bgagent login --username teammate@example.com
+   # first login prompts you to set a permanent password (temp password is one-time)
    ```
 
 3. **Teammate**: `bgagent linear link <code>`
