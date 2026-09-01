@@ -143,14 +143,42 @@ describe('linear-identity-provisioning onEvent', () => {
     expect(updateCall.input.allowedResourceOauth2ReturnUrls).toEqual(newUrls);
   });
 
-  test('malformed AllowedReturnUrls degrades to an empty allowlist rather than throwing', async () => {
-    mockSend.mockResolvedValue({});
-    await onEvent({
-      RequestType: 'Create',
-      ResourceProperties: { WorkloadName: 'abca_linear_oauth', AllowedReturnUrls: 'not-json{' },
+  describe('an unusable AllowedReturnUrls fails the resource instead of emptying the allowlist', () => {
+    // It previously degraded to `[]`, which is the worst available outcome: the identity
+    // is provisioned — or on an Update, REWRITTEN — with no permitted consent-callback
+    // URL, so every consent afterwards fails the allowlist while the stack reports a
+    // clean deploy. Nothing downstream can tell that apart from "the operator asked for
+    // no URLs", so the failure has to surface here.
+    test.each([
+      ['malformed JSON', 'not-json{', /not valid JSON/],
+      ['a JSON scalar', '"just-a-string"', /not a JSON array of strings/],
+      ['an array of non-strings', '[1,2]', /not a JSON array of strings/],
+      ['missing entirely', undefined, /is missing/],
+    ])('%s is refused', async (_label, raw, expected) => {
+      mockSend.mockResolvedValue({});
+      await expect(
+        onEvent({
+          RequestType: 'Create',
+          ResourceProperties: {
+            WorkloadName: 'abca_linear_oauth',
+            ...(raw !== undefined && { AllowedReturnUrls: raw }),
+          },
+        }),
+      ).rejects.toThrow(expected);
+      // And nothing was sent: refusing after the call would already have clobbered a
+      // live allowlist on the Update path.
+      expect(mockSend).not.toHaveBeenCalled();
     });
-    const call = mockSend.mock.calls[0][0] as TaggedCall;
-    expect(call.input.allowedResourceOauth2ReturnUrls).toEqual([]);
+
+    test('an EXPLICITLY empty array is still honoured — that is a caller choice, not a parse failure', async () => {
+      mockSend.mockResolvedValue({});
+      await onEvent({
+        RequestType: 'Create',
+        ResourceProperties: { WorkloadName: 'abca_linear_oauth', AllowedReturnUrls: '[]' },
+      });
+      const call = mockSend.mock.calls[0][0] as TaggedCall;
+      expect(call.input.allowedResourceOauth2ReturnUrls).toEqual([]);
+    });
   });
 
   test('Delete tolerates an already-absent workload identity (idempotent)', async () => {

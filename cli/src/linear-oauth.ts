@@ -429,6 +429,7 @@ export async function readExistingOauthTokens(
   try {
     raw = await fetchSecretString();
   } catch (err) {
+    // nosemgrep: ts-silent-success-masking -- "no such secret" IS the empty success here: a first install has no bundle, so there is no token to carry forward. Every other error rethrows below, which is the fail-closed half of the contract this function exists for.
     if (isNotFound(err)) return undefined; // genuine first install
     throw err;
   }

@@ -65,22 +65,38 @@ interface OnEventResponse {
 // a naked `new BedrockAgentCoreControlClient({})` silently drops attribution.
 const client = makeClient(BedrockAgentCoreControlClient);
 
+/**
+ * Decode the JSON-encoded return-URL allowlist from the CloudFormation property.
+ *
+ * THROWS on missing or malformed input rather than falling back to empty. An empty
+ * allowlist is not a harmless default: the workload identity is provisioned — or, on
+ * an Update, REWRITTEN — with no permitted consent-callback URL, and every consent
+ * from then on fails the allowlist. The operator gets a broken OAuth flow attached to
+ * a stack that deployed green, which is the worst possible place to be quiet. Only
+ * Create and Update call this, so a throw fails the resource it describes and never
+ * blocks a stack deletion.
+ *
+ * An explicitly empty array is passed through — that is the caller asking for none,
+ * not a parse failure.
+ */
 function parseReturnUrls(raw?: string): string[] {
-  if (!raw) return [];
+  const refuse = (reason: string): never => {
+    throw new Error(
+      `AllowedReturnUrls ${reason} — refusing to provision a workload identity with no `
+      + 'consent-callback allowlist, which would fail every consent',
+    );
+  };
+  if (raw === undefined) return refuse('is missing');
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(raw) as unknown;
-    if (Array.isArray(parsed) && parsed.every((u) => typeof u === 'string')) {
-      return parsed as string[];
-    }
-    logger.warn('AllowedReturnUrls is not a string[]; treating as empty', { raw });
-    return [];
+    parsed = JSON.parse(raw) as unknown;
   } catch (err) {
-    logger.warn('AllowedReturnUrls is not valid JSON; treating as empty', {
-      raw,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return [];
+    return refuse(`is not valid JSON (${err instanceof Error ? err.message : String(err)})`);
   }
+  if (!Array.isArray(parsed) || !parsed.every((u) => typeof u === 'string')) {
+    return refuse('is not a JSON array of strings');
+  }
+  return parsed;
 }
 
 /**
