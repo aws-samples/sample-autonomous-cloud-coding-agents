@@ -217,6 +217,14 @@ Triggers via `workflow_run` when `build.yml` completes successfully. The pipelin
 
 ## Known deployment issues
 
+### Log-delivery rename on upgrade (pin-table removal, #703)
+
+**Affects:** `backgroundagent-dev` stacks (the default name) whose last deploy happened while the stack still pinned the log-delivery logical ids — including stacks *created fresh* from those versions. Custom-named stacks are never affected. A currently-working deployment is **not** evidence of being unaffected: the failure only appears on the first deploy after upgrading past the pin removal.
+
+**Symptom:** The update fails on a new `AWS::Logs::DeliverySource` with `AlreadyExists` ("This ResourceId has already been used in another Delivery Source in this account") and the whole stack rolls back. The stack keeps running on its previous template.
+
+**Resolution:** None needed if you deploy with `mise //cdk:deploy` — its preflight detects the legacy resources on the live stack and applies the one-time migration automatically (deleting exactly those resources, scoped to the stack, before the deploy). To preview without changing anything: `mise //cdk:preflight:log-delivery -- --check-only`. Deploying without mise, or after the rollback above: follow the manual steps in [Observability — AgentCore log delivery](../design/OBSERVABILITY.md#agentcore-log-delivery).
+
 ### AgentCore unsupported Availability Zones
 
 **Affects:** Fresh deploys in accounts whose default Availability Zones don't line up with the zones AgentCore supports for the region.

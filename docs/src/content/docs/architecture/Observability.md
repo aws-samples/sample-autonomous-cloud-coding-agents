@@ -212,39 +212,35 @@ The cost of this choice is bounded and one-time: a stack deployed before a libra
 
 Fresh deployments need nothing here. A stack whose live delivery resources already match what the library generates needs nothing either, and `cdk diff` will show the six resources untouched.
 
-A stack still on older ids has to converge, and because the create-before-delete collision above applies, the old resources must be gone before the new ones are created. Check first:
+A stack still on older ids has to converge, and because the create-before-delete collision above applies, the old resources must be gone before the new ones are created.
+
+**`mise //cdk:deploy` handles this automatically.** The deploy task runs a preflight (`cdk/scripts/preflight-log-delivery.ts`) that reads the stack's own resource list and, only when it finds delivery resources under the retired pinned ids (a `CDKSource` or `CdkLogGroup` segment in the logical id), deletes exactly those before the deploy proceeds. It deletes by the physical ids CloudFormation reports for *this stack*, so other delivery configurations in the account — even on a shared account — are unreachable by construction. Already-migrated stacks and fresh installs pass through untouched, so the preflight is safe to leave on every deploy.
+
+Affected populations, concretely: a stack deployed with a custom name was never pinned and is never touched. The default `backgroundagent-dev` stack is affected **whenever the pin table was in effect when it was last deployed — which includes stacks created fresh from any commit that carried the table**, not only long-lived ones. "It deploys fine today" therefore does not mean "unaffected"; the preflight exists precisely because the affected operators cannot be enumerated or notified.
+
+Knobs, all optional:
 
 ```bash
-aws cloudformation list-stack-resources \
-  --stack-name backgroundagent-dev \
-  --query "StackResourceSummaries[?contains(ResourceType,\
-'Logs::Delivery')].LogicalResourceId" --output text
+mise //cdk:preflight:log-delivery -- --check-only   # report what would be deleted, change nothing (exit 2 if migration needed)
+STACK_NAME=my-stack mise //cdk:deploy                # non-default stack name (only 'backgroundagent-dev' was ever pinned)
+ABCA_SKIP_LOG_DELIVERY_PREFLIGHT=1 mise //cdk:deploy # skip the preflight entirely (at your own risk)
 ```
 
-Logical ids of the form `RuntimeApplicationLogsDeliverySource<hash>` are current — nothing to do. Ids carrying a `CDKSource` segment or the stack name (`RuntimeCDKSourceAPPLICATIONLOGS<stack>Runtime<hash>`) predate the rename and need the one-time step below.
-
-Delete the delivery configuration out of band, then deploy. Deliveries first — they reference the source and destination:
+To migrate by hand instead (e.g. deploying without mise), list the stack's delivery resources and delete only those, deliveries first — they reference the source and destination:
 
 ```bash
-REGION=us-east-1
-for d in $(aws logs describe-deliveries --region "$REGION" \
-    --query 'deliveries[].id' --output text); do
-  aws logs delete-delivery --region "$REGION" --id "$d"
-done
-for s in $(aws logs describe-delivery-sources --region "$REGION" \
-    --query 'deliverySources[].name' --output text); do
-  aws logs delete-delivery-source --region "$REGION" --name "$s"
-done
-for t in $(aws logs describe-delivery-destinations --region "$REGION" \
-    --query 'deliveryDestinations[].name' --output text); do
-  aws logs delete-delivery-destination --region "$REGION" --name "$t"
-done
-mise //cdk:deploy
+aws cloudformation list-stack-resources --stack-name backgroundagent-dev \
+  --query "StackResourceSummaries[?contains(ResourceType,'Logs::Delivery')].\
+[ResourceType,LogicalResourceId,PhysicalResourceId]" --output text
+# For each row whose LogicalResourceId carries a CDKSource/CdkLogGroup segment:
+#   AWS::Logs::Delivery            -> aws logs delete-delivery --id <PhysicalResourceId>
+#   AWS::Logs::DeliverySource      -> aws logs delete-delivery-source --name <PhysicalResourceId>
+#   AWS::Logs::DeliveryDestination -> aws logs delete-delivery-destination --name <PhysicalResourceId>
 ```
 
-The loops above delete **every** delivery configuration in the account and region, which is what you want on a dedicated deployment account and is not what you want anywhere else. On a shared account, filter to the six resources the previous command listed.
+Do the deletion immediately before deploying, not in advance: agent logs stop being delivered from the deletion until the deploy completes, and a full deploy (image build included) can take an hour. The deploy then creates the delivery trio under the library's naming and drops the old logical ids, whose underlying resources are already gone — CloudFormation treats a delete of an absent resource as done. Nothing else is affected, and no log data already in CloudWatch is touched.
 
-The deploy then creates the delivery trio under the library's naming and drops the old logical ids, whose underlying resources are already gone — CloudFormation treats a delete of an absent resource as done. Agent logs stop being delivered between the deletion and the end of the deploy; nothing else is affected, and no log data already in CloudWatch is touched.
+If the migration is skipped, the failure is loud but unexplained: the update fails on the new `AWS::Logs::DeliverySource` with `AlreadyExists` ("This ResourceId has already been used in another Delivery Source") and the whole stack rolls back. The stack keeps running on its previous template; run the preflight (or the manual steps) and deploy again.
 
 ## Deployment safety
 

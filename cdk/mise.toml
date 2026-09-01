@@ -73,11 +73,25 @@ else
 fi
 '''
 
+# One-time migration guard for stacks that predate the log-delivery pin-table
+# removal (#703): without it, their first deploy after the change fails
+# mid-update (DeliverySource AlreadyExists) and rolls back with no hint of the
+# cause. Detects the legacy ids on the live stack and deletes exactly those
+# resources so the deploy can recreate them; no-ops for fresh installs and
+# already-migrated stacks. STACK_NAME env or --stack-name selects a
+# non-default stack (only 'backgroundagent-dev' was ever pinned). Escape
+# hatches: --check-only reports without deleting;
+# ABCA_SKIP_LOG_DELIVERY_PREFLIGHT=1 skips. See docs/design/OBSERVABILITY.md.
+[tasks."preflight:log-delivery"]
+description = "Migrate pre-#703 pinned log-delivery resources before deploy (no-op otherwise)"
+run = "npx tsx scripts/preflight-log-delivery.ts"
+
 [tasks.deploy]
 description = "cdk deploy (pass args after --)"
 # Reclaim disk first — the agent-image Docker build + CDK asset bundling need
 # several GB of working space, and uv/Docker caches accumulate across runs.
-depends = [":clean:disk"]
+# Then the log-delivery preflight (see its task comment above).
+depends = [":clean:disk", ":preflight:log-delivery"]
 run = "npx cdk deploy"
 
 # Bootstraps with ComputeTypes=agentcore (the template default). To ALSO enable the
