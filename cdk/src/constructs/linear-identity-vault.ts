@@ -93,39 +93,53 @@ export class LinearIdentityVault extends Construct {
       environment: { ABCA_COMPONENT: 'linear-identity-provisioning' },
     });
 
-    // Workload-identity lifecycle, split by what each action can actually be scoped
-    // to. Create is the only one that must name the DIRECTORY: it authorizes before
-    // the identity exists, so there is nothing narrower to point at. The rest are
-    // scoped to this stack's own identity.
+    // Workload-identity lifecycle, scoped to the `default` DIRECTORY and the identities
+    // in it — deliberately not to this stack's own identity, because the service will
+    // not authorize it that way and it is worth recording why.
     //
-    // The split matters because of what Update does. It REPLACES
-    // `allowedResourceOauth2ReturnUrls`, so `workload-identity-directory/*` let this
-    // Lambda rewrite the consent allowlist of any workload identity in the account —
-    // including another stack's, whose consent would then start failing the allowlist
-    // with nothing in either template to explain it. Even `…-directory/default` is
-    // too broad if the service authorizes Update against the directory rather than
-    // the identity; if a deploy ever shows that, widen it back with the AccessDenied
-    // quoted here rather than pre-emptively.
+    // These actions perform a multi-resource authorization check that includes the bare
+    // directory. IAM reports only the first resource it could not authorize, so the
+    // shape is invisible until you run it and each grant reveals the next. Three
+    // successive live denials, from three attempts to scope this down:
+    //
+    //   Create, granted `…-directory/default`            → denied on
+    //     …-directory/default/workload-identity/*
+    //   Create, granted that wildcard instead            → denied on
+    //     …-directory/default
+    //   Update, granted `…/workload-identity/<this name>` → denied on
+    //     …-directory/default
+    //
+    // So `UpdateWorkloadIdentity` authorizes at the DIRECTORY, and no identity-based
+    // policy can restrict it to a single identity. That is worth being explicit about,
+    // because it means the cross-stack hazard this was meant to fence off — Update
+    // REPLACES `allowedResourceOauth2ReturnUrls`, so one stack can silently drop
+    // another's consent URL from the allowlist — **cannot be prevented with IAM**. What
+    // prevents it is the workload identity NAME being stack-derived, so two stacks never
+    // address the same identity in the first place, plus this grant living only on the
+    // construct's own provisioning Lambda.
+    //
+    // Still a real narrowing over the original `workload-identity-directory/*`, which
+    // also matched every other directory in the account.
     onEventFn.addToRolePolicy(
       new iam.PolicyStatement({
-        actions: ['bedrock-agentcore:CreateWorkloadIdentity'],
+        actions: [
+          'bedrock-agentcore:CreateWorkloadIdentity',
+          'bedrock-agentcore:GetWorkloadIdentity',
+          'bedrock-agentcore:UpdateWorkloadIdentity',
+          'bedrock-agentcore:DeleteWorkloadIdentity',
+        ],
         resources: [
           Stack.of(this).formatArn({
             service: 'bedrock-agentcore',
             resource: 'workload-identity-directory',
             resourceName: 'default',
           }),
+          Stack.of(this).formatArn({
+            service: 'bedrock-agentcore',
+            resource: 'workload-identity-directory',
+            resourceName: 'default/workload-identity/*',
+          }),
         ],
-      }),
-    );
-    onEventFn.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: [
-          'bedrock-agentcore:GetWorkloadIdentity',
-          'bedrock-agentcore:UpdateWorkloadIdentity',
-          'bedrock-agentcore:DeleteWorkloadIdentity',
-        ],
-        resources: [this.workloadIdentityArn],
       }),
     );
 

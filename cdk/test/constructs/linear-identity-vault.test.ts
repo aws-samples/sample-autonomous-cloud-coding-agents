@@ -76,7 +76,7 @@ describe('LinearIdentityVault construct', () => {
     });
   });
 
-  test('the onEvent handler gets the full lifecycle, but Update/Delete are scoped to THIS identity', () => {
+  test('the onEvent handler lifecycle is scoped to the default directory, not the account', () => {
     const { template } = synth();
     const actions = allPolicyActions(template);
     for (const a of [
@@ -88,14 +88,15 @@ describe('LinearIdentityVault construct', () => {
       expect(actions).toContain(a);
     }
 
-    // Create names the DIRECTORY because it authorizes before the identity exists —
-    // there is nothing narrower to point at. Everything else must not.
+    // Two resources, both under `default`, and never the account-wide
+    // `workload-identity-directory/*` this replaced.
     //
-    // Update is the one that makes this a real boundary, not hygiene: it REPLACES
-    // `allowedResourceOauth2ReturnUrls`, so a directory-wide grant lets this Lambda
-    // rewrite the consent allowlist of any workload identity in the account,
-    // including another stack's — whose consent then starts failing with nothing in
-    // either template to explain it.
+    // Not scoped to a single identity NAME, and that is a service constraint rather
+    // than an oversight: these actions authorize against the bare directory too, so
+    // three live attempts to narrow them produced three AccessDenied responses (see the
+    // construct). One consequence worth pinning here: an identity-based policy CANNOT
+    // stop this Lambda updating another identity in the same directory, so the fence
+    // against cross-stack allowlist clobbering is the stack-derived NAME, not this grant.
     const statements = Object.values(template.findResources('AWS::IAM::Policy'))
       .flatMap((p) => (p.Properties.PolicyDocument.Statement ?? []) as Array<{
         Action?: unknown; Resource?: unknown;
@@ -114,20 +115,17 @@ describe('LinearIdentityVault construct', () => {
       return typeof last === 'string' ? last : String(resource);
     };
 
-    const createTails = forAction('bedrock-agentcore:CreateWorkloadIdentity').map(arnTail);
-    expect(createTails.length).toBeGreaterThan(0);
-    // `default`, not `*` — the directory segment is always `default`.
-    expect(createTails.every((t) => t.endsWith('workload-identity-directory/default'))).toBe(true);
-
     for (const action of [
+      'bedrock-agentcore:CreateWorkloadIdentity',
       'bedrock-agentcore:UpdateWorkloadIdentity',
       'bedrock-agentcore:DeleteWorkloadIdentity',
+      'bedrock-agentcore:GetWorkloadIdentity',
     ]) {
       const tails = forAction(action).map(arnTail);
-      expect(tails.length).toBeGreaterThan(0);
-      // Every resource must name a specific identity UNDER the directory.
-      expect(tails.every((t) => /workload-identity-directory\/default\/workload-identity\/.+$/.test(t)))
+      expect(tails.some((t) => t.endsWith('workload-identity-directory/default'))).toBe(true);
+      expect(tails.some((t) => t.endsWith('workload-identity-directory/default/workload-identity/*')))
         .toBe(true);
+      // The account-wide form must be gone.
       expect(tails.some((t) => t.endsWith('workload-identity-directory/*'))).toBe(false);
     }
   });
