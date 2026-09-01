@@ -21,16 +21,29 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider';
-import { getAuthToken, login } from '../src/auth';
+import { changePassword, getAuthToken, login } from '../src/auth';
 import { saveConfig, saveCredentials } from '../src/config';
 
-// Mock the Cognito SDK
+// Mock the Cognito SDK. Each command constructor tags its params with a
+// ``__command`` discriminator so tests can drive ``mockSend`` per command type
+// (InitiateAuth vs RespondToAuthChallenge vs ChangePassword) instead of relying
+// on brittle call-order alone.
 const mockSend = jest.fn();
 jest.mock('@aws-sdk/client-cognito-identity-provider', () => ({
   CognitoIdentityProviderClient: jest.fn().mockImplementation(() => ({ send: mockSend })),
-  InitiateAuthCommand: jest.fn().mockImplementation((params) => params),
+  InitiateAuthCommand: jest.fn().mockImplementation((params) => ({ __command: 'InitiateAuth', ...params })),
+  RespondToAuthChallengeCommand: jest.fn().mockImplementation((params) => ({ __command: 'RespondToAuthChallenge', ...params })),
+  ChangePasswordCommand: jest.fn().mockImplementation((params) => ({ __command: 'ChangePassword', ...params })),
   AuthFlowType: { USER_PASSWORD_AUTH: 'USER_PASSWORD_AUTH', REFRESH_TOKEN_AUTH: 'REFRESH_TOKEN_AUTH' },
+  ChallengeNameType: { NEW_PASSWORD_REQUIRED: 'NEW_PASSWORD_REQUIRED' },
 }));
+
+/** Build a base64url-encoded ID token carrying the given claims (no signature). */
+function fakeIdToken(claims: Record<string, unknown>): string {
+  const header = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url');
+  const payload = Buffer.from(JSON.stringify(claims)).toString('base64url');
+  return `${header}.${payload}.sig`;
+}
 
 describe('auth', () => {
   let tmpDir: string;
@@ -92,6 +105,171 @@ describe('auth', () => {
     test('throws on missing auth result', async () => {
       mockSend.mockResolvedValue({ AuthenticationResult: null });
       await expect(login('user@example.com', 'pass')).rejects.toThrow('Unexpected authentication response');
+    });
+
+    test('maps NotAuthorizedException to an expired-temp-password hint (no secret leaked)', async () => {
+      // Invited users lapse into a dead temp password after Cognito's default
+      // 7-day window; Cognito answers with a bare NotAuthorizedException. The
+      // CLI should point at a remedy that WORKS for an existing account, not
+      // let the user retype a doomed password — and must not echo the attempted
+      // password. `reset-password`, not `invite-user`: the latter calls
+      // AdminCreateUser, which rejects an existing account, so naming it sends
+      // the admin to a command that refuses (#238 review N7).
+      mockSend.mockRejectedValue(
+        Object.assign(new Error('Incorrect username or password.'), { name: 'NotAuthorizedException' }),
+      );
+      const err = (await login('user@example.com', 'ExpiredTemp1!').catch((e: Error) => e)) as Error;
+      expect(err.message).toMatch(/temporary password expired/);
+      expect(err.message).toContain('bgagent admin reset-password');
+      expect(err.message).not.toContain('invite-user');
+      expect(err.message).not.toContain('ExpiredTemp1!');
+    });
+
+    test('rethrows non-auth InitiateAuth errors unchanged', async () => {
+      mockSend.mockRejectedValue(
+        Object.assign(new Error('getaddrinfo ENOTFOUND cognito-idp'), { name: 'TypeError' }),
+      );
+      await expect(login('user@example.com', 'pass')).rejects.toThrow('getaddrinfo ENOTFOUND');
+    });
+  });
+
+  describe('login — NEW_PASSWORD_REQUIRED first-login challenge', () => {
+    test('prompts for a new password, responds to the challenge, and persists tokens', async () => {
+      mockSend.mockImplementation((cmd: { __command: string }) => {
+        if (cmd.__command === 'InitiateAuth') {
+          return Promise.resolve({ ChallengeName: 'NEW_PASSWORD_REQUIRED', Session: 'sess-abc' });
+        }
+        if (cmd.__command === 'RespondToAuthChallenge') {
+          return Promise.resolve({
+            AuthenticationResult: { IdToken: 'new-id', RefreshToken: 'new-refresh', ExpiresIn: 3600 },
+          });
+        }
+        throw new Error(`unexpected command ${cmd.__command}`);
+      });
+
+      const prompt = jest.fn().mockResolvedValue('N3w$trongPass!');
+      await login('user@example.com', 'TempPass1!', prompt);
+
+      expect(prompt).toHaveBeenCalledTimes(1);
+      // The challenge response must carry the challenged USERNAME + NEW_PASSWORD
+      // and echo the InitiateAuth Session.
+      const challengeCall = mockSend.mock.calls
+        .map((c) => c[0])
+        .find((c: { __command: string }) => c.__command === 'RespondToAuthChallenge');
+      expect(challengeCall).toMatchObject({
+        ChallengeName: 'NEW_PASSWORD_REQUIRED',
+        Session: 'sess-abc',
+        ChallengeResponses: { USERNAME: 'user@example.com', NEW_PASSWORD: 'N3w$trongPass!' },
+      });
+
+      const creds = JSON.parse(fs.readFileSync(path.join(tmpDir, 'credentials.json'), 'utf-8'));
+      expect(creds.id_token).toBe('new-id');
+      expect(creds.refresh_token).toBe('new-refresh');
+    });
+
+    test('errors clearly when the challenge fires but no prompt is supplied (non-interactive)', async () => {
+      mockSend.mockResolvedValue({ ChallengeName: 'NEW_PASSWORD_REQUIRED', Session: 'sess-abc' });
+      await expect(login('user@example.com', 'TempPass1!')).rejects.toThrow(
+        /requires a new password on first login/,
+      );
+    });
+
+    test('surfaces Cognito password-policy rejection on the new password', async () => {
+      mockSend.mockImplementation((cmd: { __command: string }) => {
+        if (cmd.__command === 'InitiateAuth') {
+          return Promise.resolve({ ChallengeName: 'NEW_PASSWORD_REQUIRED', Session: 'sess-abc' });
+        }
+        return Promise.reject(
+          Object.assign(new Error('Password did not conform with policy: minimum length 12'), {
+            name: 'InvalidPasswordException',
+          }),
+        );
+      });
+
+      const prompt = jest.fn().mockResolvedValue('weak');
+      const err = (await login('user@example.com', 'TempPass1!', prompt).catch((e: Error) => e)) as Error;
+      expect(err.message).toContain('New password rejected');
+      expect(err.message).toContain('minimum length 12');
+    });
+  });
+
+  describe('changePassword', () => {
+    beforeEach(() => {
+      // A valid session is required; username comes from the ID token's email claim.
+      saveCredentials({
+        id_token: fakeIdToken({ email: 'user@example.com', sub: 'uuid-1' }),
+        refresh_token: 'refresh-token',
+        token_expiry: new Date(Date.now() + 3600_000).toISOString(),
+      });
+    });
+
+    test('re-authenticates with the current password, then changes it (no persisted access token)', async () => {
+      mockSend.mockImplementation((cmd: { __command: string }) => {
+        if (cmd.__command === 'InitiateAuth') {
+          return Promise.resolve({ AuthenticationResult: { AccessToken: 'acc-token' } });
+        }
+        if (cmd.__command === 'ChangePassword') {
+          return Promise.resolve({});
+        }
+        throw new Error(`unexpected command ${cmd.__command}`);
+      });
+
+      await changePassword('OldPass1!', 'N3w$trongPass!');
+
+      const changeCall = mockSend.mock.calls
+        .map((c) => c[0])
+        .find((c: { __command: string }) => c.__command === 'ChangePassword');
+      expect(changeCall).toMatchObject({
+        AccessToken: 'acc-token',
+        PreviousPassword: 'OldPass1!',
+        ProposedPassword: 'N3w$trongPass!',
+      });
+
+      // The access token is used in-memory only, never written to disk.
+      const creds = JSON.parse(fs.readFileSync(path.join(tmpDir, 'credentials.json'), 'utf-8'));
+      expect(creds.access_token).toBeUndefined();
+    });
+
+    test('wrong current password surfaces a clear error and never calls ChangePassword', async () => {
+      mockSend.mockImplementation((cmd: { __command: string }) => {
+        if (cmd.__command === 'InitiateAuth') {
+          return Promise.reject(
+            Object.assign(new Error('Incorrect username or password.'), { name: 'NotAuthorizedException' }),
+          );
+        }
+        throw new Error(`unexpected command ${cmd.__command}`);
+      });
+
+      await expect(changePassword('WrongPass1!', 'N3w$trongPass!')).rejects.toThrow(
+        'Current password is incorrect.',
+      );
+      const changeCalled = mockSend.mock.calls
+        .map((c) => c[0])
+        .some((c: { __command: string }) => c.__command === 'ChangePassword');
+      expect(changeCalled).toBe(false);
+    });
+
+    test('weak new password surfaces the Cognito policy error', async () => {
+      mockSend.mockImplementation((cmd: { __command: string }) => {
+        if (cmd.__command === 'InitiateAuth') {
+          return Promise.resolve({ AuthenticationResult: { AccessToken: 'acc-token' } });
+        }
+        return Promise.reject(
+          Object.assign(new Error('Password does not conform to policy: not long enough'), {
+            name: 'InvalidPasswordException',
+          }),
+        );
+      });
+
+      const err = (await changePassword('OldPass1!', 'weak').catch((e: Error) => e)) as Error;
+      expect(err.message).toContain('New password rejected');
+      expect(err.message).toContain('not long enough');
+    });
+
+    test('no active session yields a clear "not authenticated" error', async () => {
+      fs.rmSync(path.join(tmpDir, 'credentials.json'), { force: true });
+      await expect(changePassword('OldPass1!', 'N3w$trongPass!')).rejects.toThrow('Not authenticated');
+      expect(mockSend).not.toHaveBeenCalled();
     });
   });
 
