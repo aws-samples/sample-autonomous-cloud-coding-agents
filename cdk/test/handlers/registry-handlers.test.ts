@@ -34,6 +34,7 @@ const mockClient: jest.Mocked<RegistryClient> = {
   publish: mockPublish,
   getRecord: jest.fn(),
   listRecords: jest.fn(),
+  listBrowseEntries: jest.fn(),
   resolve: jest.fn(),
 };
 jest.mock('../../src/handlers/shared/registry/factory', () => {
@@ -330,19 +331,32 @@ describe('registry-list handler', () => {
 
 describe('registry-show handler', () => {
   test('404 when the asset has no versions', async () => {
-    mockClient.listRecords.mockResolvedValue([]);
+    mockClient.listBrowseEntries.mockResolvedValue([]);
     const res = await showHandler(makeEvent({ httpMethod: 'GET', pathParameters: { kind: 'mcp_server', namespace: 'acme', name: 'nope' } }));
     expect(res.statusCode).toBe(404);
   });
 
   test('200 lists versions highest-first', async () => {
-    mockClient.listRecords.mockResolvedValue([
-      { kind: 'mcp_server', namespace: 'acme', name: 'pdf-tools', version: '1.0.0', status: 'DEPRECATED', storageMode: 'native', discovery: {}, runtime: {} as never },
-      { kind: 'mcp_server', namespace: 'acme', name: 'pdf-tools', version: '1.2.0', status: 'APPROVED', storageMode: 'native', discovery: {}, runtime: {} as never },
+    mockClient.listBrowseEntries.mockResolvedValue([
+      { malformed: false, record: { kind: 'mcp_server', namespace: 'acme', name: 'pdf-tools', version: '1.0.0', status: 'DEPRECATED', storageMode: 'native', discovery: {}, runtime: {} as never } },
+      { malformed: false, record: { kind: 'mcp_server', namespace: 'acme', name: 'pdf-tools', version: '1.2.0', status: 'APPROVED', storageMode: 'native', discovery: {}, runtime: {} as never } },
     ]);
     const res = await showHandler(makeEvent({ httpMethod: 'GET', pathParameters: { kind: 'mcp_server', namespace: 'acme', name: 'pdf-tools' } }));
     expect(res.statusCode).toBe(200);
     const versions = JSON.parse(res.body).data.versions;
     expect(versions[0].version).toBe('1.2.0');
+  });
+
+  test('surfaces a malformed-only asset (flagged) instead of 404-ing it', async () => {
+    // An asset whose only version has a corrupt descriptor must not masquerade
+    // as absent — the operator needs to see the corruption exists (#791).
+    mockClient.listBrowseEntries.mockResolvedValue([
+      { malformed: true, kind: 'skill', namespace: 'acme', name: 'readme-helper', version: '1.0.0', status: 'APPROVED' },
+    ]);
+    const res = await showHandler(makeEvent({ httpMethod: 'GET', pathParameters: { kind: 'skill', namespace: 'acme', name: 'readme-helper' } }));
+    expect(res.statusCode).toBe(200);
+    const versions = JSON.parse(res.body).data.versions;
+    expect(versions).toHaveLength(1);
+    expect(versions[0]).toMatchObject({ version: '1.0.0', status: 'APPROVED', malformed: true, publisher: null, created_at: null });
   });
 });
