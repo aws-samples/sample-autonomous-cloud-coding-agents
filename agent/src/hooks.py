@@ -1599,7 +1599,7 @@ def _stuck_guard_between_turns_hook(ctx: dict) -> list[str]:
         _LAST_STUCK_SUMMARY = guard.recent_failure_summary()
     except Exception as exc:
         log("WARN", f"stuck-guard evaluate raised (ignored): {type(exc).__name__}: {exc}")
-        return []
+        return []  # nosemgrep: py-silent-success-masking -- stuck guard is ADVISORY ONLY (see docstring); a guard bug must never wedge a healthy agent, max_turns is the real backstop. [] means "no steer this turn", not a masked failure (#756 Category 3)  # noqa: E501
 
     if action.kind == "steer":
         _emit_nudge_milestone(ctx, "stuck_steer", action.message[:_NUDGE_PREVIEW_LEN])
