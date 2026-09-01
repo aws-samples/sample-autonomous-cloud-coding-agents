@@ -77,7 +77,7 @@ _LINEAR_VAULT_RETURN_URL = "http://localhost:8080/oauth/callback"
 # resolve time: AgentCore keys a cached grant by the full token-request shape,
 # customParameters included — live-proven that the same user + provider returns
 # the cached token when these are passed and "needs consent" when they are
-# omitted. Must match what `bgagent linear vault-setup` sent at consent time, or
+# omitted. Must match what `bgagent linear setup` sent at consent time, or
 # every resolve is a cache miss that silently falls back to Secrets Manager.
 # Mirrors LINEAR_VAULT_CUSTOM_PARAMS in cdk/src/handlers/shared/linear-vault-token.ts.
 _LINEAR_VAULT_CUSTOM_PARAMS = {"actor": "app", "prompt": "consent"}

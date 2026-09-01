@@ -206,7 +206,14 @@ function isAlreadyExistsError(err: unknown): boolean {
  */
 export function isVaultUnavailableError(err: unknown): boolean {
   const name = (err as { name?: string } | undefined)?.name ?? '';
+  // The service REJECTING our input — surface it, the vault is plainly there.
   if (name === 'ValidationException' || name === 'ConflictException') return false;
+  // Nor is a permissions problem an availability problem. Reporting it as one tells a
+  // first-time operator "AgentCore Identity not available in <region>" when the real
+  // cause is a missing `CreateOauth2CredentialProvider` on their own principal — they
+  // then go looking at regional availability instead of at their IAM policy, and the
+  // onboarding silently completes on Secrets Manager as though the vault were absent.
+  if (name === 'AccessDeniedException' || name === 'UnauthorizedException') return false;
   return true;
 }
 
@@ -345,7 +352,10 @@ export async function beginVaultConsent(args: {
         oauth2Flow: 'USER_FEDERATION',
         resourceOauth2ReturnUrl: args.returnUrl,
         // Forward the agent-install params onto Linear's authorize URL (spike F1).
-        customParameters: { actor: 'app', prompt: 'consent' },
+        // From the shared constant, not inlined: this is the call that DEFINES the
+        // cache key every resolver is required to reproduce, so a divergence here
+        // silently turns every later resolve into a cache miss.
+        customParameters: { ...LINEAR_VAULT_CUSTOM_PARAMS },
         ...(forceAuth ? { forceAuthentication: true } : {}),
       }),
     );

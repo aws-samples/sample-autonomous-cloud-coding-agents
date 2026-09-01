@@ -279,12 +279,24 @@ describe('isVaultUnavailableError', () => {
   test('an absent service / endpoint / credential failure is UNAVAILABLE', () => {
     for (const name of [
       'UnknownEndpoint', 'EndpointError', 'CredentialsProviderError',
-      'AccessDeniedException', 'ThrottlingException', 'TimeoutError',
+      'ThrottlingException', 'TimeoutError',
     ]) {
       expect(isVaultUnavailableError(Object.assign(new Error('x'), { name }))).toBe(true);
     }
     // A bare network error carries no name at all.
     expect(isVaultUnavailableError(new Error('socket hang up'))).toBe(true);
+  });
+
+  test('AccessDenied is a PERMISSIONS problem, not an availability one', () => {
+    // This case used to be pinned as unavailable, which sent the operator to the wrong
+    // place: a first onboarding without `CreateOauth2CredentialProvider` on their own
+    // principal was told "AgentCore Identity not available in <region>", so they went
+    // looking at regional availability while their IAM policy was the cause — and the
+    // onboarding quietly finished on Secrets Manager as though there were no vault.
+    // The service answering "you may not do that" is the service being present.
+    for (const name of ['AccessDeniedException', 'UnauthorizedException']) {
+      expect(isVaultUnavailableError(Object.assign(new Error('x'), { name }))).toBe(false);
+    }
   });
 
   test('a ValidationException is the service REJECTING our input — surface it', () => {

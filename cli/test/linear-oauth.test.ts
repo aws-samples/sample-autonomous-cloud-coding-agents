@@ -29,6 +29,7 @@ import {
   LINEAR_TOKEN_ENDPOINT,
   linearOauthSecretName,
   readExistingOauthTokens,
+  resolveStoredGrantFields,
   readExistingWebhookSecret,
   refreshAccessToken,
   resolveWebhookSecretAction,
@@ -617,5 +618,53 @@ describe('resolveWebhookSecretAction — inherited vs owned', () => {
   test('no stored secret still mirrors or prompts as before', () => {
     expect(resolveWebhookSecretAction(undefined, true, STACKWIDE)).toEqual({ kind: 'mirror-stackwide' });
     expect(resolveWebhookSecretAction(undefined, false, undefined)).toEqual({ kind: 'prompt' });
+  });
+});
+
+describe('resolveStoredGrantFields — a preserved grant must never be overwritten with blanks', () => {
+  // The precedence that decides whether `bgagent linear setup` keeps or destroys a
+  // working Secrets-Manager grant when a workspace moves onto the vault. A vault
+  // onboarding issues no token of its own, so if the preserved values are not carried
+  // forward the bundle is written with empty strings — and nothing fails until the
+  // vault is unreachable and the documented fallback turns out not to exist.
+  const NOW = new Date('2026-09-01T00:00:00.000Z');
+  const issued = {
+    access_token: 'lin_new',
+    refresh_token: 'rt_new',
+    expires_in: 3600,
+    scope: 'read write',
+    token_type: 'Bearer',
+  } as never;
+  const preserved = {
+    access_token: 'lin_old',
+    refresh_token: 'rt_old',
+    expires_at: '2026-08-01T00:00:00.000Z',
+    scope: 'read',
+  };
+
+  test('a freshly issued token wins, and its expiry is recomputed from expires_in', () => {
+    const out = resolveStoredGrantFields(issued, preserved, NOW);
+    expect(out.access_token).toBe('lin_new');
+    expect(out.refresh_token).toBe('rt_new');
+    expect(out.scope).toBe('read write');
+    // Absolute, derived from the relative `expires_in` — NOT the preserved timestamp.
+    expect(out.expires_at).toBe('2026-09-01T01:00:00.000Z');
+  });
+
+  test('with no token issued, the preserved grant is carried forward verbatim', () => {
+    // The vault path. Getting this wrong destroys the only credential that still works
+    // if the vault becomes unreachable.
+    expect(resolveStoredGrantFields(undefined, preserved, NOW)).toEqual(preserved);
+  });
+
+  test('a preserved ABSOLUTE expiry is kept as-is, not recomputed', () => {
+    expect(resolveStoredGrantFields(undefined, preserved, NOW).expires_at)
+      .toBe('2026-08-01T00:00:00.000Z');
+  });
+
+  test('with neither, the fields are empty — a genuinely fresh vault onboarding', () => {
+    expect(resolveStoredGrantFields(undefined, undefined, NOW)).toEqual({
+      access_token: '', refresh_token: '', expires_at: '', scope: '',
+    });
   });
 });

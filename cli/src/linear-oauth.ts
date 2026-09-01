@@ -406,6 +406,39 @@ export async function readExistingWebhookSecret(
     : undefined;
 }
 
+/** The four grant fields of a stored bundle — what a fresh token supplies and a
+ *  preserved one substitutes for. */
+export type StoredGrantFields =
+  Pick<StoredLinearOauthToken, 'access_token' | 'refresh_token' | 'expires_at' | 'scope'>;
+
+/**
+ * Decide the grant fields to persist: a freshly issued token if there is one, else the
+ * grant already stored, else empty.
+ *
+ * Extracted from `bgagent linear setup` so the PRECEDENCE is testable. Inline, it was
+ * four `??` chains inside a long command handler, and getting one of them backwards is
+ * silent and destructive: writing empty strings over a live grant is what turns the
+ * documented Secrets-Manager fallback into a fiction, and nothing fails until the vault
+ * is unreachable and there is no longer anything to fall back to.
+ *
+ * A vault onboarding issues no token of its own, which is why `preserved` exists at all
+ * — see {@link readExistingOauthTokens}.
+ */
+export function resolveStoredGrantFields(
+  issued: LinearTokenResponse | undefined,
+  preserved: StoredGrantFields | undefined,
+  now: Date = new Date(),
+): StoredGrantFields {
+  return {
+    access_token: issued?.access_token ?? preserved?.access_token ?? '',
+    refresh_token: issued?.refresh_token ?? preserved?.refresh_token ?? '',
+    // Recomputed from `expires_in` when freshly issued, because that value is relative
+    // to issuance; a preserved bundle already holds an absolute timestamp.
+    expires_at: issued ? computeExpiresAt(issued.expires_in, now) : preserved?.expires_at ?? '',
+    scope: issued?.scope ?? preserved?.scope ?? '',
+  };
+}
+
 /**
  * The OAuth token fields of an existing bundle, or undefined when there is no
  * usable one.

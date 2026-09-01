@@ -44,6 +44,7 @@ import {
   linearOauthSecretName,
   type LinearTokenResponse,
   readExistingOauthTokens,
+  resolveStoredGrantFields,
   readExistingWebhookSecret,
   resolveWebhookSecretAction,
   StoredLinearOauthToken,
@@ -1256,12 +1257,9 @@ export function makeLinearCommand(): Command {
           }
         }
         const stored: StoredLinearOauthToken = {
-          access_token: tokenResponse?.access_token ?? preservedTokens?.access_token ?? '',
-          refresh_token: tokenResponse?.refresh_token ?? preservedTokens?.refresh_token ?? '',
-          expires_at: tokenResponse
-            ? computeExpiresAt(tokenResponse.expires_in)
-            : preservedTokens?.expires_at ?? '',
-          scope: tokenResponse?.scope ?? preservedTokens?.scope ?? '',
+          // Precedence lives in resolveStoredGrantFields so it can be tested; writing
+          // empty strings over a live grant here is silent and unrecoverable.
+          ...resolveStoredGrantFields(tokenResponse, preservedTokens),
           // Co-located so Lambda-side refresh works without per-Lambda
           // env vars — one secret holds everything needed to renew.
           client_id: clientId,
