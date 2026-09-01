@@ -306,6 +306,21 @@ export class LinearIntegration extends Construct {
         // resolver's revocation recorder is enabled here. Elsewhere the conditional
         // write would fail AccessDenied and be swallowed, which is the
         // inert-but-looks-implemented state the issue exists to remove.
+        //
+        // What that leaves uncovered, stated rather than assumed: the other minting
+        // Lambdas (fan-out, orchestrator, screenshot processor, reconciler, heartbeat)
+        // discover a dead grant log-only. For most of them a latch follows anyway,
+        // because the workspace keeps delivering inbound events to this processor. The
+        // orchestration reconciler is the exception — it is driven by the task table's
+        // DynamoDB stream, not by anything inbound from Linear — so an orchestration
+        // whose workspace dies mid-run, with no further human activity in Linear, is
+        // discovered here and never latched, and therefore never alerted on. The
+        // operator-facing signal in that case is `bgagent platform doctor`, which
+        // probes the grant live rather than reading the row.
+        //
+        // Not fixed by granting the reconciler the write: that widens the one grant
+        // whose breadth this construct's threat-model comment below argues down, to
+        // cover a path that only loses the alert, not the diagnosis.
         LINEAR_REVOCATION_RECORDING: 'true',
       },
       // Uses the PDF attachment-screening path — pdf-parse must stay unbundled.

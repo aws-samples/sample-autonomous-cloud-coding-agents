@@ -170,6 +170,10 @@ describe('beginVaultConsent', () => {
       .mockResolvedValueOnce({ accessToken: 'lin_oauth_minted' }); // Token (poll → minted)
 
     const step = await beginVaultConsent(args);
+    expect(step.kind).toBe('consent-required');
+    // The tag is what narrows the consent fields into existence — reading them off the
+    // already-consented arm is now a compile error rather than an empty string.
+    if (step.kind !== 'consent-required') throw new Error('expected consent-required');
     expect(step.authorizationUrl).toContain('/authorize?request_uri=');
     // customParameters forward the agent-install params (spike F1).
     const tokenCall = dataSend.mock.calls[1][0] as Tagged;
@@ -187,7 +191,10 @@ describe('beginVaultConsent', () => {
       .mockResolvedValueOnce({ workloadAccessToken: 'wat-1' })
       .mockResolvedValueOnce({ accessToken: 'lin_oauth_cached' });
     const step = await beginVaultConsent(args);
-    expect(step.authorizationUrl).toBe('');
+    // Tagged, not an empty-string sentinel: there is no authorizationUrl on this arm
+    // to mistake for a real one.
+    expect(step.kind).toBe('already-consented');
+    expect(step).not.toHaveProperty('authorizationUrl');
     expect(await step.poll()).toBe('lin_oauth_cached');
     // The cached probe must NOT set forceAuthentication.
     const probe = dataSend.mock.calls[1][0] as Tagged;
@@ -209,6 +216,7 @@ describe('beginVaultConsent', () => {
         sessionUri: 'urn:ietf:params:oauth:request_uri:abc123',
       });
     const step = await beginVaultConsent(args);
+    if (step.kind !== 'consent-required') throw new Error('expected consent-required');
     expect(step.sessionUri).toBe('urn:ietf:params:oauth:request_uri:abc123');
   });
 

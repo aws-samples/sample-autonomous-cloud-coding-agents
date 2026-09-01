@@ -991,7 +991,7 @@ export function makeLinearCommand(): Command {
               returnUrl,
             });
 
-            if (consent.authorizationUrl) {
+            if (consent.kind === 'consent-required') {
               // One URL, one action. The page the browser lands on shows the session
               // id and names itself, so printing it here is noise; the redirect URIs
               // were dealt with on the first run above.

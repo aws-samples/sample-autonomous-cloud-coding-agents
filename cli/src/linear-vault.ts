@@ -267,19 +267,40 @@ export async function mintLinearTokenFromVault(args: {
   }
 }
 
-export interface VaultConsentStep {
-  /** URL the operator opens to consent (AgentCore PAR → Linear authorize). */
-  readonly authorizationUrl: string;
-  /**
-   * The federation session this consent belongs to
-   * (`urn:ietf:params:oauth:request_uri:…`). AgentCore appends the same value to
-   * the return URL as `?session_id=…` once consent completes, and it must be
-   * handed to {@link finalizeVaultConsent} before a token can be fetched.
-   */
-  readonly sessionUri: string;
-  /** Poll this to check whether the token has been minted yet. */
-  readonly poll: () => Promise<string | null>;
-}
+/**
+ * What `beginVaultConsent` found: either the grant is already good, or a browser
+ * round-trip is required.
+ *
+ * Tagged rather than a flat record with empty-string sentinels. Under the old shape
+ * "already consented" was `authorizationUrl: ''` and callers branched on truthiness,
+ * so a partially-populated step — a URL with no session, or a session with no URL —
+ * was a constructable value that read as valid. The consent fields now exist only on
+ * the arm that has them, which is the same reason `VaultTokenResult` is a union.
+ */
+export type VaultConsentStep =
+  | {
+    readonly kind: 'already-consented';
+    /** Poll this to read the cached token. */
+    readonly poll: () => Promise<string | null>;
+  }
+  | {
+    readonly kind: 'consent-required';
+    /** URL the operator opens to consent (AgentCore PAR → Linear authorize). */
+    readonly authorizationUrl: string;
+    /**
+     * The federation session this consent belongs to
+     * (`urn:ietf:params:oauth:request_uri:…`). AgentCore appends the same value to
+     * the return URL as `?session_id=…` once consent completes, and it must be
+     * handed to {@link finalizeVaultConsent} before a token can be fetched.
+     *
+     * Exposed even though `bgagent linear setup` currently finalizes with the id the
+     * operator pastes from the landing page: dropping it is what made the first
+     * implementation hang, and a non-interactive caller needs it.
+     */
+    readonly sessionUri: string;
+    /** Poll this to check whether the token has been minted yet. */
+    readonly poll: () => Promise<string | null>;
+  };
 
 /**
  * Finalize a consented federation session so the vault mints + caches the token.
@@ -372,13 +393,13 @@ export async function beginVaultConsent(args: {
   // name. Only when there is no usable grant do we force a fresh authorization.
   const cached = await requestToken(false);
   if (cached.token) {
-    return { authorizationUrl: '', sessionUri: cached.sessionUri ?? '', poll: async () => cached.token };
+    return { kind: 'already-consented', poll: async () => cached.token };
   }
 
   const first = await requestToken(true);
   if (first.token) {
     // Raced with another consent between the two calls — take the token.
-    return { authorizationUrl: '', sessionUri: first.sessionUri ?? '', poll: async () => first.token };
+    return { kind: 'already-consented', poll: async () => first.token };
   }
   if (!first.authUrl) {
     throw new CliError(
@@ -387,6 +408,7 @@ export async function beginVaultConsent(args: {
     );
   }
   return {
+    kind: 'consent-required',
     authorizationUrl: first.authUrl,
     sessionUri: first.sessionUri ?? '',
     poll: async () => (await requestToken(false)).token,
