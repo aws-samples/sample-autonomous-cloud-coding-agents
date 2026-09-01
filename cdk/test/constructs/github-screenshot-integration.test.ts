@@ -71,7 +71,12 @@ describe('GitHubScreenshotIntegration construct', () => {
     // crashes reach the queue — each one means the screenshot pipeline is
     // silently down. Without the alarm the queue is "for operator
     // inspection" that no operator is ever told to make.
-    template.resourceCountIs('AWS::CloudWatch::Alarm', 1);
+    //
+    // Two alarms total: this DLQ-depth alarm (a record LANDED) and the
+    // Lambda-Errors alarm below (invocations are FAILING, before Lambda's
+    // async retries have exhausted onto the DLQ). They are complementary,
+    // not redundant — see the next test.
+    template.resourceCountIs('AWS::CloudWatch::Alarm', 2);
     template.hasResourceProperties('AWS::CloudWatch::Alarm', {
       MetricName: 'ApproximateNumberOfMessagesVisible',
       Namespace: 'AWS/SQS',
@@ -85,6 +90,44 @@ describe('GitHubScreenshotIntegration construct', () => {
           Name: 'QueueName',
           Value: Match.objectLike({
             'Fn::GetAtt': Match.arrayWith([Match.stringLikeRegexp('WebhookProcessorDlq')]),
+          }),
+        }),
+      ]),
+    });
+  });
+
+  test('alarms on the processor Lambda Errors metric (>=1 in 5min, 2 eval periods)', () => {
+    // #284 AC: an alarm on the processor's Errors metric. This is DISTINCT
+    // from the DLQ-depth alarm above — the DLQ-depth alarm only fires once
+    // a failure has survived Lambda's async retry ladder and LANDED on the
+    // queue, whereas an Errors alarm fires as soon as invocations start
+    // failing, catching a systemic break (IAM regression, AgentCore quota
+    // exhaustion, dependency outage) at the first faulting invocation.
+    // Mirrors `task-orchestrator.ts` OrchestratorErrorAlarm's idiom.
+    template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      MetricName: 'Errors',
+      Namespace: 'AWS/Lambda',
+      // metricErrors() defaults to Sum — the correct statistic for an
+      // error COUNT (vs Average/Maximum). Pin it so a future edit that
+      // swaps the statistic can't silently change the alarm's semantics.
+      Statistic: 'Sum',
+      Period: 300,
+      Threshold: 1,
+      // >= 1, not > 1. Relies on a CDK default otherwise, and
+      // GreaterThanThreshold would silently require TWO errors to fire.
+      ComparisonOperator: 'GreaterThanOrEqualToThreshold',
+      EvaluationPeriods: 2,
+      // 1-of-2, not 2-of-2. Unset, DatapointsToAlarm defaults to
+      // EvaluationPeriods, and a single-event crash would never alarm
+      // (its Errors datapoints land in one period; NOT_BREACHING fills
+      // the neighbour). Pinned so that regression is caught here.
+      DatapointsToAlarm: 1,
+      TreatMissingData: 'notBreaching',
+      Dimensions: Match.arrayWith([
+        Match.objectLike({
+          Name: 'FunctionName',
+          Value: Match.objectLike({
+            Ref: Match.stringLikeRegexp('WebhookProcessorFn'),
           }),
         }),
       ]),
