@@ -274,6 +274,42 @@ describe('preflight-log-delivery', () => {
     expect(viaEnv.calls[0]).toContain('--stack-name env-stack');
   });
 
+  test('accepts CDK context form, so a direct invocation cannot target a different stack', () => {
+    // `cdk deploy` selects its stack from `stackName` CONTEXT, not from --stack-name.
+    // Reading only the flag/env let this script inspect one stack while the deploy it
+    // gates built another — and this script deletes, so the two must not diverge.
+    for (const args of [
+      ['-c', 'stackName=ctx-stack'],
+      ['--context', 'stackName=ctx-stack'],
+      ['--context=stackName=ctx-stack'],
+    ]) {
+      const r = runPreflight({ listResponse: LIBRARY_IDS, args });
+      expect(r.calls[0]).toContain('--stack-name ctx-stack');
+    }
+  });
+
+  test('the flag wins over the env var, and both over context', () => {
+    // Precedence pinned because the three can disagree on a real command line.
+    const r = runPreflight({
+      listResponse: LIBRARY_IDS,
+      args: ['--stack-name', 'flag-stack', '-c', 'stackName=ctx-stack'],
+      env: { STACK_NAME: 'env-stack' },
+    });
+    expect(r.calls[0]).toContain('--stack-name flag-stack');
+  });
+
+  test('names the stack AND where the name came from, so a mismatch is visible', () => {
+    // The one gap that cannot be closed in-script: context passed to `cdk deploy` after
+    // `--` never reaches a mise `depends` task. Printing the resolved target is what
+    // turns that from an invisible divergence into something an operator can see in the
+    // deploy log before anything is deleted.
+    const r = runPreflight({ listResponse: LIBRARY_IDS, env: { STACK_NAME: 'env-stack' } });
+    expect(r.stdout).toContain("inspecting stack 'env-stack' (from STACK_NAME)");
+
+    const dflt = runPreflight({ listResponse: LIBRARY_IDS });
+    expect(dflt.stdout).toContain("inspecting stack 'backgroundagent-dev' (from default)");
+  });
+
   test('ABCA_SKIP_LOG_DELIVERY_PREFLIGHT=1 skips without touching AWS', () => {
     const r = runPreflight({
       listResponse: PINNED_IDS,

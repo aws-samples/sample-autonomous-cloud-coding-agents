@@ -221,9 +221,23 @@ Affected populations, concretely: a stack deployed with a custom name was never 
 Knobs, all optional:
 
 ```bash
-mise //cdk:preflight:log-delivery -- --check-only   # report what would be deleted, change nothing (exit 2 if migration needed)
-STACK_NAME=my-stack mise //cdk:deploy                # non-default stack name (only 'backgroundagent-dev' was ever pinned)
-ABCA_SKIP_LOG_DELIVERY_PREFLIGHT=1 mise //cdk:deploy # skip the preflight entirely (at your own risk)
+# Report what would be deleted; exit 2 if migration is needed
+mise //cdk:preflight:log-delivery -- --check-only
+
+# Non-default stack: set BOTH — see the note below
+STACK_NAME=my-stack mise //cdk:deploy -- -c stackName=my-stack
+
+# Skip the preflight entirely (at your own risk)
+ABCA_SKIP_LOG_DELIVERY_PREFLIGHT=1 mise //cdk:deploy
+```
+
+**A non-default stack needs the name given twice, and the two are not interchangeable.** `cdk deploy` selects its stack from `stackName` CDK *context*, while the preflight reads `STACK_NAME` (or `--stack-name`, or `stackName` in `cdk.json` context). Arguments after `--` are appended to the `cdk deploy` command and never reach a mise `depends` task, so `-c stackName=x` alone leaves the preflight on its default target — and `STACK_NAME=x` alone leaves the *deploy* on its default target. Setting only one is how you end up migrating one stack while deploying another.
+
+This is bounded rather than dangerous: only `backgroundagent-dev` was ever pinned, so a custom-named stack has nothing for the preflight to find and the mismatch is a no-op. It matters in one case — an account running both a legacy-pinned `backgroundagent-dev` and a second, custom-named stack — where deploying the second with only `-c` would migrate the first. The preflight prints the stack it is inspecting and where that name came from on every run, so check that line if you are unsure:
+
+```
+log-delivery preflight: inspecting stack 'backgroundagent-dev'
+  (from default)
 ```
 
 To migrate by hand instead (e.g. deploying without mise), list the stack's delivery resources and delete only those, deliveries first — they reference the source and destination:

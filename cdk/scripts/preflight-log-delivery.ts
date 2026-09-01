@@ -59,6 +59,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 
 const DELIVERY_TYPES = [
   'AWS::Logs::Delivery',
@@ -85,6 +86,64 @@ interface StackResource {
 
 function aws(args: string[]): string {
   return execFileSync('aws', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+}
+
+/** Default stack name, mirroring `buildApp` in src/main.ts. */
+const DEFAULT_STACK_NAME = 'backgroundagent-dev';
+
+/**
+ * Resolve which stack to inspect, from the same places the CDK app looks plus this
+ * script's own flag.
+ *
+ * The app takes its stack from `stackName` CDK **context** (`src/main.ts`), so a
+ * resolution that only read `--stack-name`/`STACK_NAME` could disagree with the deploy
+ * it gates — and this script deletes resources, so disagreeing is not merely untidy.
+ * `cdk.json` context is therefore read here too, exactly as `cdk deploy` would.
+ *
+ * One gap remains and cannot be closed from inside this script: context passed on the
+ * CDK command line (`mise //cdk:deploy -- -c stackName=x`) is appended to `cdk deploy`
+ * and never reaches a mise `depends` task, so this script cannot observe it. Verified,
+ * not assumed. For a non-default stack the operator must therefore set BOTH — the env
+ * var for this preflight and the context for the deploy:
+ *
+ *   STACK_NAME=x mise //cdk:deploy -- -c stackName=x
+ *
+ * The resolved target is printed on every run so a mismatch is visible in the deploy
+ * log rather than inferred from what got deleted. `-c stackName=`/`--context stackName=`
+ * are also accepted here, for a direct `mise //cdk:preflight:log-delivery` invocation.
+ */
+function resolveStackName(argv: readonly string[]): { stackName: string; source: string } {
+  const flag = argv.indexOf('--stack-name');
+  if (flag >= 0 && argv[flag + 1]) return { stackName: argv[flag + 1]!, source: '--stack-name' };
+
+  // CDK's own context forms, when handed straight to this script.
+  for (let i = 0; i < argv.length; i += 1) {
+    const a = argv[i]!;
+    if ((a === '-c' || a === '--context') && argv[i + 1]?.startsWith('stackName=')) {
+      return { stackName: argv[i + 1]!.slice('stackName='.length), source: `${a} stackName=` };
+    }
+    if (a.startsWith('--context=stackName=')) {
+      return { stackName: a.slice('--context=stackName='.length), source: '--context=stackName=' };
+    }
+  }
+
+  if (process.env.STACK_NAME) return { stackName: process.env.STACK_NAME, source: 'STACK_NAME' };
+
+  // Persisted context — what `cdk deploy` would read when no flag is given.
+  try {
+    const cfg = JSON.parse(readFileSync(new URL('../cdk.json', import.meta.url), 'utf8')) as {
+      context?: Record<string, unknown>;
+    };
+    const fromContext = cfg.context?.stackName;
+    if (typeof fromContext === 'string' && fromContext) {
+      return { stackName: fromContext, source: 'cdk.json context' };
+    }
+  } catch {
+    // No readable cdk.json (or no context block) — fall through to the default, which
+    // is what the app itself does. Not an error worth failing a deploy over.
+  }
+
+  return { stackName: DEFAULT_STACK_NAME, source: 'default' };
 }
 
 /** `null` means the stack does not exist (fresh install — nothing to migrate). */
@@ -141,13 +200,14 @@ function main(): number {
   }
 
   const argv = process.argv.slice(2);
-  const nameFlag = argv.indexOf('--stack-name');
-  const stackName =
-    (nameFlag >= 0 ? argv[nameFlag + 1] : undefined) ??
-    process.env.STACK_NAME ??
-    'backgroundagent-dev';
+  const { stackName, source } = resolveStackName(argv);
   const checkOnly =
     argv.includes('--check-only') || process.env.ABCA_LOG_DELIVERY_PREFLIGHT === 'check';
+
+  // Printed unconditionally: this script deletes, and its target is resolved
+  // independently of the `cdk deploy` it gates (see resolveStackName). Naming both the
+  // stack and where the name came from makes a mismatch visible in the deploy log.
+  console.log(`log-delivery preflight: inspecting stack '${stackName}' (from ${source})`);
 
   const resources = listStackResources(stackName);
   if (resources === null) {
