@@ -118,11 +118,12 @@ The CLI shows a picker of human Linear members in the workspace. After you pick 
 The teammate needs their own ABCA account first (Cognito user + configured CLI). If they don't have one yet:
 
 1. **Admin** runs `bgagent admin invite-user teammate@example.com` to create their Cognito user (see [User guide → Joining an existing deployment](./USER_GUIDE.md#joining-an-existing-deployment) for the full Cognito-side flow).
-2. **Teammate** pastes the bundle + password from the admin into:
+2. **Teammate** pastes the bundle + temp password from the admin into:
 
    ```bash
    bgagent configure --from-bundle <bundle>
    bgagent login --username teammate@example.com
+   # first login prompts you to set a permanent password (temp password is one-time)
    ```
 
 3. **Teammate** redeems the Linear invite code:
