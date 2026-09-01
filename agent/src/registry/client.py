@@ -33,13 +33,29 @@ class ResolvedAsset:
 
 class RegistryResolutionError(Exception):
     """Raised when a ref cannot be resolved. ``reason`` matches the TS token set
-    (``NO_MATCHING_VERSION`` / ``REMOVED`` / ``INVALID_CONSTRAINT`` /
-    ``INVALID_REGISTRY_REF``) so both languages agree on *why*."""
+    (``NO_MATCHING_VERSION`` / ``REMOVED`` / ``MALFORMED`` /
+    ``INVALID_CONSTRAINT`` / ``INVALID_REGISTRY_REF``) so both languages agree on
+    *why*."""
 
     def __init__(self, reason: str, ref: str, message: str) -> None:
         super().__init__(message)
         self.reason = reason
         self.ref = ref
+
+
+class RegistryRecordMalformedError(Exception):
+    """Raised when a record's descriptor payload is present but unparseable — a
+    SKILL.md frontmatter block that fails to YAML-parse, an ``x-abca-runtime``
+    value that is not decodable base64/JSON, or a CUSTOM/MCP body that is not valid
+    JSON. Distinct from an *absent* record and from an *empty* runtime: a malformed
+    payload must be rejected, not silently collapsed to ``{}``. Collapsing erases
+    the runtime the agent is here to load (and, on the TS write/read side, the
+    publisher attribution), making a malformed record indistinguishable from a
+    legitimately empty one (#791). Mirrors ``RegistryRecordMalformedError`` in
+    ``cdk/src/handlers/shared/registry/types.ts`` — the TS twin additionally
+    carries an explicit ``reason`` discriminator field the agent has no consumer
+    for, so that field is omitted here; the underlying cause still travels on
+    ``__cause__`` via ``raise ... from exc`` at every raise site."""
 
 
 class RegistryClient(Protocol):
