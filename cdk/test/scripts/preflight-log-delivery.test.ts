@@ -133,13 +133,21 @@ function runPreflight(opts: {
   env?: Record<string, string>;
 }): RunResult {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'preflight-test-'));
-  // `cdk.context.json` is resolved relative to the SCRIPT, not this fake root, so it has to
-  // be placed in the real `cdk/` directory and restored in `finally`. Declared out here so
-  // the restore can see it. Only touched when a test asks for it, so no other test's
-  // environment is perturbed.
-  const contextPath = path.resolve(SCRIPT, '../../cdk.context.json');
-  const contextBefore = fs.existsSync(contextPath) ? fs.readFileSync(contextPath, 'utf8') : null;
-  if (opts.cdkContext) fs.writeFileSync(contextPath, JSON.stringify(opts.cdkContext));
+  // Context files come from the scratch root via ABCA_PREFLIGHT_CONTEXT_DIR, NOT the real
+  // `cdk/` directory. Two reasons, both learned the hard way:
+  //
+  //  - whether a real `cdk.context.json` exists is an ENVIRONMENT fact. Locally it usually
+  //    does not; CI's `build.yml` writes `{"stackName":"pr<N>-<compute>"}` into it before
+  //    the test job. Reading it made every test expecting the DEFAULT stack resolve to the
+  //    pipeline's stack — green locally, two failures in CI.
+  //  - the real file is CDK's lookup cache, shared with every suite jest runs in PARALLEL.
+  //    Writing or deleting it from here raced the stack-synth tests: 73 failures, from a
+  //    cached availability-zone lookup disappearing mid-synth.
+  //
+  // So the suite owns its own directory and the repo is never touched.
+  if (opts.cdkContext) {
+    fs.writeFileSync(path.join(root, 'cdk.context.json'), JSON.stringify(opts.cdkContext));
+  }
   try {
     const callsFile = path.join(root, 'calls.log');
     fs.writeFileSync(callsFile, '');
@@ -203,6 +211,7 @@ process.exit(99);
       ABCA_SKIP_LOG_DELIVERY_PREFLIGHT: '',
       ABCA_LOG_DELIVERY_PREFLIGHT: '',
       STACK_NAME: '',
+      ABCA_PREFLIGHT_CONTEXT_DIR: root,
       ...opts.env,
     };
 
@@ -225,10 +234,6 @@ process.exit(99);
     return { status, stdout, stderr, calls };
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
-    if (opts.cdkContext) {
-      if (contextBefore === null) fs.rmSync(contextPath, { force: true });
-      else fs.writeFileSync(contextPath, contextBefore);
-    }
   }
 }
 

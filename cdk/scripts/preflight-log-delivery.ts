@@ -63,6 +63,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
 
 const DELIVERY_TYPES = [
   'AWS::Logs::Delivery',
@@ -208,18 +209,22 @@ function resolveStackName(argv: readonly string[]): { stackName: string; source:
     // `cdk.context.json` for every pipeline stack (`pr<N>-<compute>`). The CI path
     // therefore resolved to the default and would have inspected, and deleted from, a
     // different stack than the one being deployed.
-    // Display name carried alongside the path, not derived by stripping `../` from it:
-    // a single-occurrence string replace on a path is what CodeQL's
-    // js/incomplete-sanitization rule looks for (alert #43, HIGH), and removing the
-    // construct is cheaper than justifying it.
-    const CONTEXT_FILES = [
-      { path: '../cdk.context.json', name: 'cdk.context.json' },
-      { path: '../cdk.json', name: 'cdk.json' },
-    ] as const;
-    for (const { path: file, name } of CONTEXT_FILES) {
+    // Bare filenames, so the display name IS the path — no `file.replace('../', '')`,
+    // which CodeQL flags as js/incomplete-sanitization (alert #43, HIGH) because a
+    // single-occurrence replace on a path is the shape of broken traversal sanitization.
+    const CONTEXT_FILES = ['cdk.context.json', 'cdk.json'] as const;
+    // Directory the context files are read from — the `cdk/` package root, i.e. one level
+    // up from `scripts/`. Overridable ONLY for tests: the real `cdk/cdk.context.json` is
+    // CDK's own lookup cache, shared with every suite jest runs in parallel, so a test
+    // that wrote or deleted it raced the stack-synth tests. Pointing the tests at a
+    // scratch directory keeps the resolution chain testable without touching the repo.
+    const contextDir = process.env.ABCA_PREFLIGHT_CONTEXT_DIR
+      ? pathToFileURL(`${process.env.ABCA_PREFLIGHT_CONTEXT_DIR}/`)
+      : new URL('../', import.meta.url);
+    for (const name of CONTEXT_FILES) {
       let cfg: { context?: Record<string, unknown>; stackName?: unknown };
       try {
-        cfg = JSON.parse(readFileSync(new URL(file, import.meta.url), 'utf8'));
+        cfg = JSON.parse(readFileSync(new URL(name, contextDir), 'utf8'));
       } catch {
         // nosemgrep: ts-silent-success-masking -- an absent context file is the normal case (cdk.context.json is generated, and cdk.json has no context block here), not a failure; the next source is tried and 'default' is the documented floor
         continue;
