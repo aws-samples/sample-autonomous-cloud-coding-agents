@@ -48,6 +48,8 @@ import { makeClient } from './ua';
 /** Consent-time parameters. Part of the vault's cache key, so every resolve must
  *  send the identical set or a live grant reads as "needs consent". */
 const LINEAR_VAULT_CUSTOM_PARAMS: Record<string, string> = { actor: 'app', prompt: 'consent' };
+/** Exported for the contract-parity test only — see contracts/constants.json linear_vault. */
+export const LINEAR_VAULT_CUSTOM_PARAMS_FOR_TEST = LINEAR_VAULT_CUSTOM_PARAMS;
 
 /** Linear OAuth issuer, for the CustomOauth2 discovery metadata. */
 const LINEAR_ISSUER = 'https://linear.app';

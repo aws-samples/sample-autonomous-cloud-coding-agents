@@ -6,6 +6,7 @@ import uuid
 from datetime import UTC
 
 from models import AttachmentConfig, TaskConfig
+from shared_constants import SHARED_CONSTANTS
 from shell import log
 
 AGENT_WORKSPACE = os.environ.get("AGENT_WORKSPACE", "/workspace")
@@ -66,21 +67,21 @@ def resolve_github_token() -> str:
     return ""
 
 
-# Linear agent-install scopes, mirrored from cli/src/linear-oauth.ts and the
-# Lambda-side linear-vault-token.ts.
-_LINEAR_VAULT_SCOPES = ["read", "write", "app:assignable", "app:mentionable"]
+# Sourced from contracts/constants.json, not re-declared. AgentCore keys a cached
+# grant by the WHOLE token request, customParameters included — live-proven that the
+# same user and provider return the cached token when these are passed and "needs
+# consent" when they are omitted. So a one-token divergence between any two of the
+# four copies (here, the Lambda resolver, and both CLI paths) makes every resolve a
+# cache miss, which since #812 is reported as consent-required and can latch a healthy
+# workspace `revoked`. Four "keep in sync" comments could not enforce that; the
+# contract plus check:constants-sync can.
+_LINEAR_VAULT_CONTRACT = SHARED_CONSTANTS["linear_vault"]
+_LINEAR_VAULT_SCOPES = list(_LINEAR_VAULT_CONTRACT["scopes"])
+_LINEAR_VAULT_CUSTOM_PARAMS = dict(_LINEAR_VAULT_CONTRACT["custom_parameters"])
 # USER_FEDERATION requires a return URL (spike F7) even though the grant is
 # already consented in this non-interactive path, so it is never visited. The
 # CLI localhost loopback is always on the workload identity allowlist.
 _LINEAR_VAULT_RETURN_URL = "http://localhost:8080/oauth/callback"
-# Extra authorize-URL parameters for Linear's agent install. NOT optional at
-# resolve time: AgentCore keys a cached grant by the full token-request shape,
-# customParameters included — live-proven that the same user + provider returns
-# the cached token when these are passed and "needs consent" when they are
-# omitted. Must match what `bgagent linear setup` sent at consent time, or
-# every resolve is a cache miss that silently falls back to Secrets Manager.
-# Mirrors LINEAR_VAULT_CUSTOM_PARAMS in cdk/src/handlers/shared/linear-vault-token.ts.
-_LINEAR_VAULT_CUSTOM_PARAMS = {"actor": "app", "prompt": "consent"}
 
 
 def _resolve_linear_token_via_vault(
