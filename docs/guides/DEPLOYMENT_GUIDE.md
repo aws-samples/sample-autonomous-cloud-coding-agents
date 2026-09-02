@@ -219,11 +219,21 @@ Triggers via `workflow_run` when `build.yml` completes successfully. The pipelin
 
 ### Log-delivery rename on upgrade (pin-table removal, #703)
 
-**Affects:** `backgroundagent-dev` stacks (the default name) whose last deploy happened while the stack still pinned the log-delivery logical ids — including stacks *created fresh* from those versions. Custom-named stacks are never affected. A currently-working deployment is **not** evidence of being unaffected: the failure only appears on the first deploy after upgrading past the pin removal.
+**Affects:** any stack — **whatever its name** — whose live `AWS::Logs::Delivery*` logical ids contain `CDKSource` or `CdkLogGroup`. In practice that is any stack last deployed before the CDK library switch in #339 (2026-06-13), plus any stack deployed while the pin table held those ids. The legacy names come from the *previous library version*, not from the pin table, so a custom stack name confers no immunity. A currently-working deployment is **not** evidence of being unaffected: the failure only appears on the first deploy after upgrading past the pin removal.
+
+Check any stack in one command — it deletes nothing:
+
+```bash
+STACK_NAME=<stack> mise //cdk:preflight:log-delivery -- --check-only
+```
 
 **Symptom:** The update fails on a new `AWS::Logs::DeliverySource` with `AlreadyExists` ("This ResourceId has already been used in another Delivery Source in this account") and the whole stack rolls back. The stack keeps running on its previous template.
 
-**Resolution:** None needed if you deploy with `mise //cdk:deploy` — its preflight detects the legacy resources on the live stack and applies the one-time migration automatically (deleting exactly those resources, scoped to the stack, before the deploy). To preview without changing anything: `mise //cdk:preflight:log-delivery -- --check-only`. Deploying without mise, or after the rollback above: follow the manual steps in [Observability — AgentCore log delivery](../design/OBSERVABILITY.md#agentcore-log-delivery).
+**Resolution:** None needed if you deploy with `mise //cdk:deploy`. The preflight is the first command of that task, so it detects the legacy resources on the live stack and applies the one-time migration — deleting exactly those resources, scoped to that stack, in the same account and region as the deploy, because the task forwards its own arguments to it.
+
+**The GitHub Actions pipeline does not migrate automatically.** Its deploy job calls `cdk deploy` directly and so inherits none of that task's steps. What it does do is *report*: the read-only **diff** job runs the preflight with `--check-only` and writes the result into the job summary, so a stack needing migration is visible in the run summary before the approval gate rather than discovered as a rollback afterwards. Migrate it with `STACK_NAME=<stack> mise //cdk:deploy`, or the manual sequence below, then re-run the pipeline.
+
+A bare `cdk deploy` (no mise, no pipeline) does **not** run the preflight. On that path, or after the rollback above, run the check command shown under *Affects* and then follow the manual steps in [Observability — AgentCore log delivery](../design/OBSERVABILITY.md#agentcore-log-delivery).
 
 ### AgentCore unsupported Availability Zones
 

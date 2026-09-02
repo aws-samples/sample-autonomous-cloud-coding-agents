@@ -78,9 +78,15 @@ fi
 # mid-update (DeliverySource AlreadyExists) and rolls back with no hint of the
 # cause. Detects the legacy ids on the live stack and deletes exactly those
 # resources so the deploy can recreate them; no-ops for fresh installs and
-# already-migrated stacks. STACK_NAME env or --stack-name selects a
-# non-default stack (only 'backgroundagent-dev' was ever pinned). Escape
-# hatches: --check-only reports without deleting;
+# already-migrated stacks.
+#
+# The affected set is a property of DEPLOYED STATE, not of the stack's name: the legacy
+# ids are the pre-#339 library's naming, so any stack last deployed before 2026-06-13 has
+# them whatever it is called. A custom stack name is not immunity. Select the stack with
+# STACK_NAME, --stack-name, or -c stackName=; the deploy task forwards its own arguments
+# here so the two cannot disagree.
+#
+# Escape hatches: --check-only reports without deleting;
 # ABCA_SKIP_LOG_DELIVERY_PREFLIGHT=1 skips. See docs/design/OBSERVABILITY.md.
 [tasks."preflight:log-delivery"]
 description = "Migrate pre-#703 pinned log-delivery resources before deploy (no-op otherwise)"
@@ -97,9 +103,25 @@ run = "node --experimental-strip-types scripts/preflight-log-delivery.ts"
 description = "cdk deploy (pass args after --)"
 # Reclaim disk first — the agent-image Docker build + CDK asset bundling need
 # several GB of working space, and uv/Docker caches accumulate across runs.
-# Then the log-delivery preflight (see its task comment above).
-depends = [":clean:disk", ":preflight:log-delivery"]
-run = "npx cdk deploy"
+depends = [":clean:disk"]
+# The log-delivery preflight runs as the FIRST command of this task rather than as a
+# `depends`, so that the arguments after `--` reach BOTH it and `cdk deploy`. As a
+# `depends` it could not see them: mise forwards `--` args only to the invoked task's own
+# `run`, so `mise //cdk:deploy -- -c stackName=x` deployed stack `x` while the preflight
+# resolved (and would have deleted from) the default stack. Verified, not assumed. This
+# is a step that DELETES resources, so the two must not be able to disagree about which
+# stack, account, or region they are operating on.
+#
+# A non-zero exit from the first command aborts the task, which is the intended
+# fail-closed behaviour: the deploy must not proceed into a known-bad migration state.
+#
+# `required=false` is load-bearing — without it a bare `mise //cdk:deploy` (the common
+# case, and what the guides tell operators to run) fails with a usage error instead of
+# deploying.
+run = [
+  "node --experimental-strip-types scripts/preflight-log-delivery.ts {{arg(name='cdkargs', var=true, required=false)}}",
+  "npx cdk deploy {{arg(name='cdkargs', var=true, required=false)}}",
+]
 
 # Bootstraps with ComputeTypes=agentcore (the template default). To ALSO enable the
 # ECS compute backend you must set the ComputeTypes CFN *parameter* — `cdk bootstrap`

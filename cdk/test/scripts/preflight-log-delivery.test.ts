@@ -62,6 +62,18 @@ const LIBRARY_IDS = {
 const PINNED_IDS = {
   StackResourceSummaries: [
     {
+      // NOT a delivery resource, but its logical id DOES match LEGACY_ID — the library
+      // really creates this at stack scope (`observability.js`, policyId
+      // "CdkLogGroupLogsDeliveryPolicy"). Only the resource-type filter keeps it out of
+      // the delete set, and nothing pinned that filter before this row existed. It is a
+      // stack-wide policy: deleting it would break log delivery for every log type at
+      // once, and CloudFormation would not recreate it from a rename.
+      LogicalResourceId: 'CdkLogGroupLogsDeliveryPolicyResourcePolicy4',
+      PhysicalResourceId: 'backgroundagent-dev-CdkLogGroupLogsDeliveryPolicy',
+      ResourceType: 'AWS::Logs::ResourcePolicy',
+      ResourceStatus: 'UPDATE_COMPLETE',
+    },
+    {
       LogicalResourceId:
         'RuntimeCDKSourceAPPLICATIONLOGSbackgroundagentdevRuntimeBC0AE9ED96A02E02',
       PhysicalResourceId: 'cdk-applicationlogs-source-backgroundagentdevRuntimeBC0AE9ED',
@@ -112,6 +124,8 @@ interface RunResult {
  */
 function runPreflight(opts: {
   listResponse?: object;
+  /** Written to `cdk/cdk.context.json` for the duration of the run (B3c). */
+  cdkContext?: object;
   stackMissing?: boolean;
   listFails?: boolean;
   failDeletes?: Record<string, string>;
@@ -119,6 +133,13 @@ function runPreflight(opts: {
   env?: Record<string, string>;
 }): RunResult {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'preflight-test-'));
+  // `cdk.context.json` is resolved relative to the SCRIPT, not this fake root, so it has to
+  // be placed in the real `cdk/` directory and restored in `finally`. Declared out here so
+  // the restore can see it. Only touched when a test asks for it, so no other test's
+  // environment is perturbed.
+  const contextPath = path.resolve(SCRIPT, '../../cdk.context.json');
+  const contextBefore = fs.existsSync(contextPath) ? fs.readFileSync(contextPath, 'utf8') : null;
+  if (opts.cdkContext) fs.writeFileSync(contextPath, JSON.stringify(opts.cdkContext));
   try {
     const callsFile = path.join(root, 'calls.log');
     fs.writeFileSync(callsFile, '');
@@ -132,8 +153,15 @@ function runPreflight(opts: {
 const fs = require('node:fs');
 const path = require('node:path');
 const root = ${JSON.stringify(root)};
-const args = process.argv.slice(2);
-fs.appendFileSync(path.join(root, 'calls.log'), args.join(' ') + '\\n');
+const argv = process.argv.slice(2);
+fs.appendFileSync(path.join(root, 'calls.log'), argv.join(' ') + '\\n');
+// Skip leading global options the way the real CLI does, so the command match below
+// still works when --profile/--region are forwarded ahead of the subcommand.
+const args = [];
+for (let i = 0; i < argv.length; i += 1) {
+  if (argv[i] === '--profile' || argv[i] === '--region') { i += 1; continue; }
+  args.push(argv[i]);
+}
 if (args[0] === 'cloudformation' && args[1] === 'list-stack-resources') {
   if (${JSON.stringify(opts.stackMissing ?? false)}) {
     process.stderr.write('An error occurred (ValidationError): Stack with id x does not exist');
@@ -144,6 +172,14 @@ if (args[0] === 'cloudformation' && args[1] === 'list-stack-resources') {
     process.exit(254);
   }
   process.stdout.write(fs.readFileSync(path.join(root, 'list-response.json'), 'utf8'));
+  process.exit(0);
+}
+if (args[0] === 'sts' && args[1] === 'get-caller-identity') {
+  process.stdout.write('123456789012\\n');
+  process.exit(0);
+}
+if (args[0] === 'configure' && args[1] === 'get' && args[2] === 'region') {
+  process.stdout.write('us-east-1\\n');
   process.exit(0);
 }
 if (args[0] === 'logs' && args[1].startsWith('delete-')) {
@@ -189,10 +225,37 @@ process.exit(99);
     return { status, stdout, stderr, calls };
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
+    if (opts.cdkContext) {
+      if (contextBefore === null) fs.rmSync(contextPath, { force: true });
+      else fs.writeFileSync(contextPath, contextBefore);
+    }
   }
 }
 
-const deleteCalls = (r: RunResult) => r.calls.filter((c) => c.startsWith('logs delete-'));
+/**
+ * Strip the forwarded global options (`--profile x`, `--region y`) that now prefix every
+ * logged call, so a call can be matched on its subcommand regardless of whether the test
+ * supplied them. Mirrors how the real CLI reads them.
+ */
+const subcommand = (call: string) =>
+  call.split(' ').reduce<string[]>((acc, tok, i, all) => {
+    if (tok === '--profile' || tok === '--region') return acc;
+    if (i > 0 && (all[i - 1] === '--profile' || all[i - 1] === '--region')) return acc;
+    return [...acc, tok];
+  }, []).join(' ');
+
+const deleteCalls = (r: RunResult) =>
+  r.calls.map(subcommand).filter((c) => c.startsWith('logs delete-'));
+/**
+ * The `list-stack-resources` call, located by CONTENT rather than by index.
+ *
+ * These assertions used `calls[0]`, which broke the moment the script gained an
+ * `sts get-caller-identity` (it now reports the account it resolved to, so a delete can
+ * be attributed after the fact). The subject of these tests is *which stack was
+ * inspected*, not the call ordering, so pin the former and let the latter move.
+ */
+const listCall = (r: RunResult) =>
+  r.calls.map(subcommand).find((c) => c.startsWith('cloudformation list-stack-resources')) ?? '';
 
 describe('preflight-log-delivery', () => {
   test('no-ops when the stack does not exist (fresh install)', () => {
@@ -222,6 +285,135 @@ describe('preflight-log-delivery', () => {
     // resource types — it must survive the migration.
     expect(deletes.join('\n')).not.toContain('backgroundagent-dev-Runtime-USAGE_LOGS');
     expect(r.stdout).toContain('migration applied');
+    // The stack-scoped AWS::Logs::ResourcePolicy in the fixture matches LEGACY_ID by
+    // logical id and is excluded ONLY by the resource-type filter. Asserted by name as
+    // well as by the exact-set equality above, so a regression that widened the filter
+    // fails with a message naming the resource rather than a diff of three strings.
+    expect(deletes.join('\n')).not.toContain('CdkLogGroupLogsDeliveryPolicy');
+    expect(deletes.join('\n')).not.toContain('ResourcePolicy');
+  });
+
+  test('refuses to delete when arguments were given but the stack fell back to the default', () => {
+    // The compound failure this guards: an account holding a legacy `backgroundagent-dev`
+    // plus a second stack, deployed with an argument this script does not understand.
+    // Without the guard it deleted the FIRST stack's delivery resources — and
+    // CloudFormation would not recreate them, because that stack is not the one being
+    // deployed, so its agent logging simply goes dark.
+    const r = runPreflight({ listResponse: PINNED_IDS, args: ['--profile', 'prod'] });
+    expect(r.status).toBe(1);
+    expect(deleteCalls(r)).toHaveLength(0);
+    expect(r.stderr).toContain('refusing to delete');
+    expect(r.stderr).toContain('--profile prod');
+    // And it must offer the way out rather than just refusing.
+    expect(r.stderr).toMatch(/STACK_NAME|--stack-name|-c stackName=/);
+  });
+
+  test('an explicit stack name re-enables deletion even with other arguments present', () => {
+    // The guard must not block the legitimate case: name the stack and it proceeds.
+    const r = runPreflight({
+      listResponse: PINNED_IDS,
+      args: ['--profile', 'prod', '--stack-name', 'backgroundagent-dev'],
+    });
+    expect(r.status).toBe(0);
+    expect(deleteCalls(r)).toHaveLength(3);
+  });
+
+  test('forwards --profile and --region to its own AWS calls', () => {
+    // Otherwise the deploy targets one account while this script reads — and deletes —
+    // in whatever the ambient profile points at. A delete in the wrong account is the
+    // worst outcome available to this script.
+    const r = runPreflight({
+      listResponse: PINNED_IDS,
+      args: ['--profile', 'prod', '--region', 'eu-west-1', '--stack-name', 'backgroundagent-dev'],
+    });
+    expect(r.status).toBe(0);
+    for (const call of r.calls) {
+      expect(call).toContain('--profile prod');
+      expect(call).toContain('--region eu-west-1');
+    }
+  });
+
+  test('ABCA_LOG_DELIVERY_PREFLIGHT=check behaves like --check-only', () => {
+    // Documented as an equivalent knob but only the flag was covered.
+    const r = runPreflight({
+      listResponse: PINNED_IDS,
+      env: { ABCA_LOG_DELIVERY_PREFLIGHT: 'check' },
+    });
+    expect(r.status).toBe(2);
+    expect(deleteCalls(r)).toHaveLength(0);
+    expect(r.stdout).toContain('Check-only mode');
+  });
+
+  test('skips a resource already reported DELETE_COMPLETE', () => {
+    // A re-run after a partially applied migration: CloudFormation still lists the
+    // resource, with a status saying it is gone. Deleting again is a wasted call whose
+    // failure mode is a raw CLI error on the deploy path.
+    const r = runPreflight({
+      listResponse: {
+        StackResourceSummaries: [
+          {
+            LogicalResourceId: 'RuntimeCDKSourceAPPLICATIONLOGSbackgroundagentdevRuntimeBC0AE9ED96A02E02',
+            PhysicalResourceId: 'already-deleted-source',
+            ResourceType: 'AWS::Logs::DeliverySource',
+            ResourceStatus: 'DELETE_COMPLETE',
+          },
+        ],
+      },
+    });
+    expect(r.status).toBe(0);
+    expect(deleteCalls(r)).toHaveLength(0);
+    expect(r.stdout).toContain('already on library-managed ids');
+  });
+
+  test('aborts rather than guessing when a legacy resource has no physical id', () => {
+    // No physical id means nothing safe to pass to `delete-delivery*`; the only correct
+    // move is to stop before the deploy rather than delete something else.
+    const r = runPreflight({
+      listResponse: {
+        StackResourceSummaries: [
+          {
+            LogicalResourceId: 'RuntimeCDKSourceAPPLICATIONLOGSbackgroundagentdevRuntimeBC0AE9ED96A02E02',
+            ResourceType: 'AWS::Logs::DeliverySource',
+            ResourceStatus: 'UPDATE_COMPLETE',
+          },
+        ],
+      },
+    });
+    expect(r.status).toBe(1);
+    expect(deleteCalls(r)).toHaveLength(0);
+    expect(r.stderr).toContain('no physical id');
+  });
+
+  test('resolves the stack from cdk.context.json — the file the CI pipeline writes', () => {
+    // Mutation-caught gap: removing `cdk.context.json` from the resolution chain left the
+    // whole suite green. It is the load-bearing source in CI — `build.yml` writes
+    // `stackName` there for every pipeline stack (`pr<N>-<compute>`), and this repo's
+    // `cdk.json` has NO `context` block at all, so reading only `cdk.json` meant the
+    // pipeline resolved to the default and would have inspected the wrong stack.
+    const r = runPreflight({
+      listResponse: LIBRARY_IDS,
+      cdkContext: { stackName: 'pr705-agentcore' },
+    });
+    expect(r.status).toBe(0);
+    expect(listCall(r)).toContain('--stack-name pr705-agentcore');
+    expect(r.stdout).toContain('(from cdk.context.json)');
+  });
+
+  test('an explicit flag still outranks cdk.context.json', () => {
+    // Precedence must match `cdk` itself: an argument beats persisted context.
+    const r = runPreflight({
+      listResponse: LIBRARY_IDS,
+      cdkContext: { stackName: 'from-context' },
+      args: ['--stack-name', 'from-flag'],
+    });
+    expect(listCall(r)).toContain('--stack-name from-flag');
+  });
+
+  test('names the account and region it resolved, not just the stack', () => {
+    // A stack name alone is ambiguous across accounts, and this script deletes — the log
+    // has to be enough to reconstruct the scope after the fact.
+    const r = runPreflight({ listResponse: LIBRARY_IDS });
+    expect(r.stdout).toMatch(/inspecting stack '[^']+' \(from [^)]+\) in account 123456789012/);
   });
 
   test('--check-only reports the pinned resources, deletes nothing, exits 2', () => {
@@ -268,10 +460,10 @@ describe('preflight-log-delivery', () => {
       listResponse: LIBRARY_IDS,
       args: ['--stack-name', 'my-custom-stack'],
     });
-    expect(viaFlag.calls[0]).toContain('--stack-name my-custom-stack');
+    expect(listCall(viaFlag)).toContain('--stack-name my-custom-stack');
 
     const viaEnv = runPreflight({ listResponse: LIBRARY_IDS, env: { STACK_NAME: 'env-stack' } });
-    expect(viaEnv.calls[0]).toContain('--stack-name env-stack');
+    expect(listCall(viaEnv)).toContain('--stack-name env-stack');
   });
 
   test('accepts CDK context form, so a direct invocation cannot target a different stack', () => {
@@ -284,7 +476,7 @@ describe('preflight-log-delivery', () => {
       ['--context=stackName=ctx-stack'],
     ]) {
       const r = runPreflight({ listResponse: LIBRARY_IDS, args });
-      expect(r.calls[0]).toContain('--stack-name ctx-stack');
+      expect(listCall(r)).toContain('--stack-name ctx-stack');
     }
   });
 
@@ -295,7 +487,7 @@ describe('preflight-log-delivery', () => {
       args: ['--stack-name', 'flag-stack', '-c', 'stackName=ctx-stack'],
       env: { STACK_NAME: 'env-stack' },
     });
-    expect(r.calls[0]).toContain('--stack-name flag-stack');
+    expect(listCall(r)).toContain('--stack-name flag-stack');
   });
 
   test('names the stack AND where the name came from, so a mismatch is visible', () => {

@@ -214,9 +214,19 @@ Fresh deployments need nothing here. A stack whose live delivery resources alrea
 
 A stack still on older ids has to converge, and because the create-before-delete collision above applies, the old resources must be gone before the new ones are created.
 
-**`mise //cdk:deploy` handles this automatically.** The deploy task runs a preflight (`cdk/scripts/preflight-log-delivery.ts`) that reads the stack's own resource list and, only when it finds delivery resources under the retired pinned ids (a `CDKSource` or `CdkLogGroup` segment in the logical id), deletes exactly those before the deploy proceeds. It deletes by the physical ids CloudFormation reports for *this stack*, so other delivery configurations in the account — even on a shared account — are unreachable by construction. Already-migrated stacks and fresh installs pass through untouched, so the preflight is safe to leave on every deploy.
+**`mise //cdk:deploy` handles this automatically** (the CI pipeline reports it but does not migrate — see the deployment guide's known-issues entry)**.** The deploy task runs a preflight (`cdk/scripts/preflight-log-delivery.ts`) that reads the stack's own resource list and, only when it finds delivery resources under the retired pinned ids (a `CDKSource` or `CdkLogGroup` segment in the logical id), deletes exactly those before the deploy proceeds. It deletes by the physical ids CloudFormation reports for *this stack*, so other delivery configurations in the account — even on a shared account — are unreachable by construction. Already-migrated stacks and fresh installs pass through untouched, so the preflight is safe to leave on every deploy.
 
-Affected populations, concretely: a stack deployed with a custom name was never pinned and is never touched. The default `backgroundagent-dev` stack is affected **whenever the pin table was in effect when it was last deployed — which includes stacks created fresh from any commit that carried the table**, not only long-lived ones. "It deploys fine today" therefore does not mean "unaffected"; the preflight exists precisely because the affected operators cannot be enumerated or notified.
+**Which stacks are affected is a property of deployed state, not of the stack's name.** The legacy ids are the *previous library's* naming, not a product of the pin table: `#339` (`9a58797c`, 2026-06-13) switched the stack from `@aws-cdk/aws-bedrock-agentcore-alpha` to `aws-cdk-lib/aws-bedrockagentcore`, and the pin table only landed seven weeks later in `#695` (`4357c353`, 2026-08-03). The alpha generated the `RuntimeCDKSource…` / `RuntimeCdkLogGroup…` shapes; `aws-cdk-lib` generates `RuntimeApplicationLogsDeliverySource<hash>`.
+
+So the affected predicate is exactly what the preflight itself tests: **the stack's live `AWS::Logs::Delivery*` logical ids contain `CDKSource` or `CdkLogGroup`** — true of any stack last deployed before that library switch, whatever it is called, and whether or not the pin table ever applied to it. A custom-named stack is *not* immune, and neither is a stack created fresh from a commit that carried the table. "It deploys fine today" does not mean "unaffected", because the collision only appears on the deploy that renames.
+
+Run the check once per stack, regardless of name — it deletes nothing:
+
+```bash
+STACK_NAME=<stack> mise //cdk:preflight:log-delivery -- --check-only
+```
+
+Exit 0 means nothing to migrate; exit 2 lists what would be deleted. The preflight exists because the affected operators cannot be enumerated or notified.
 
 Knobs, all optional:
 
@@ -233,7 +243,9 @@ ABCA_SKIP_LOG_DELIVERY_PREFLIGHT=1 mise //cdk:deploy
 
 **A non-default stack needs the name given twice, and the two are not interchangeable.** `cdk deploy` selects its stack from `stackName` CDK *context*, while the preflight reads `STACK_NAME` (or `--stack-name`, or `stackName` in `cdk.json` context). Arguments after `--` are appended to the `cdk deploy` command and never reach a mise `depends` task, so `-c stackName=x` alone leaves the preflight on its default target — and `STACK_NAME=x` alone leaves the *deploy* on its default target. Setting only one is how you end up migrating one stack while deploying another.
 
-This is bounded rather than dangerous: only `backgroundagent-dev` was ever pinned, so a custom-named stack has nothing for the preflight to find and the mismatch is a no-op. It matters in one case — an account running both a legacy-pinned `backgroundagent-dev` and a second, custom-named stack — where deploying the second with only `-c` would migrate the first. The preflight prints the stack it is inspecting and where that name came from on every run, so check that line if you are unsure:
+This is now closed rather than merely documented: the preflight runs as the first command of the `deploy` task, so the arguments after `--` reach it and `cdk deploy` alike, and `--profile` / `--region` are forwarded to its own AWS calls. It also reads `cdk.context.json` (the file the CI pipeline writes `stackName` into), not just `cdk.json`.
+
+If the stack name still resolves from the built-in default *while arguments were supplied*, the preflight refuses to delete rather than guess — the case that would otherwise migrate one stack's delivery resources while deploying another, leaving the first one's agent logging dark until it is deployed itself. Every run prints the stack, where the name came from, and the account and region it resolved to:
 
 ```
 log-delivery preflight: inspecting stack 'backgroundagent-dev'
