@@ -280,10 +280,41 @@ async function parseTokenResponse(
   if (!isLinearTokenResponse(body)) {
     throw new CliError(
       `Linear /oauth/token returned an unexpected shape for ${contextLabel}: `
-      + `${JSON.stringify(body).slice(0, 200)}`,
+      + describeTokenShape(body),
     );
   }
   return body;
+}
+
+/**
+ * Describe an off-contract token response WITHOUT echoing it.
+ *
+ * This message used to interpolate `JSON.stringify(body).slice(0, 200)`, and the first
+ * 200 characters of a token response ARE the token. `isLinearTokenResponse` requires
+ * `expires_in` and `scope`, so a 200 carrying a perfectly good `access_token` alongside,
+ * say, a string `expires_in` failed the guard and printed the credential to the
+ * operator's terminal — and into any CI log capturing stdout, where it outlives the
+ * session that leaked it.
+ *
+ * Field names and types are what diagnoses a contract change; the values are exactly
+ * what must not be shown. Reporting which required field is wrong is also more useful
+ * than a truncated blob, so this is not a redaction that costs debuggability.
+ */
+function describeTokenShape(value: unknown): string {
+  if (typeof value !== 'object' || value === null) {
+    return `not a JSON object (got ${value === null ? 'null' : typeof value})`;
+  }
+  const obj = value as Record<string, unknown>;
+  const problems = ([
+    ['access_token', 'string'],
+    ['token_type', 'string'],
+    ['expires_in', 'number'],
+    ['scope', 'string'],
+  ] as ReadonlyArray<readonly [string, string]>)
+    .filter(([key, want]) => typeof obj[key] !== want)
+    .map(([key, want]) => `${key} expected ${want}, got ${obj[key] === undefined ? 'absent' : typeof obj[key]}`);
+  // Key NAMES only. Never a value — one of them is the credential.
+  return `${problems.join('; ')} (keys present: ${Object.keys(obj).sort().join(', ')})`;
 }
 
 function isLinearTokenResponse(value: unknown): value is LinearTokenResponse {

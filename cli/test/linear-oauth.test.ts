@@ -265,6 +265,41 @@ describe('exchangeAuthorizationCode', () => {
     })).rejects.toThrow(/unexpected shape/);
   });
 
+  test('an off-contract 200 does NOT print the access token it carried', async () => {
+    // The dangerous case is not a missing token — it is a PRESENT one alongside some
+    // other field being off-contract. The guard requires `expires_in` and `scope`, so a
+    // 200 carrying a perfectly good credential with a string `expires_in` failed it, and
+    // the message interpolated the raw body: the token went to the operator's terminal
+    // and into any CI log capturing stdout, where it outlives the session that leaked it.
+    const secret = 'lin_oauth_SUPER_SECRET_VALUE';
+    const fetchImpl = jest.fn().mockResolvedValueOnce(mockResponse(200, {
+      access_token: secret,
+      refresh_token: 'lin_refresh_ALSO_SECRET',
+      token_type: 'Bearer',
+      expires_in: '3600', // string, not number — off contract
+      scope: 'read write',
+    }));
+
+    const attempt = exchangeAuthorizationCode({
+      code: 'authcode',
+      codeVerifier: 'verifier',
+      redirectUri: 'https://localhost:8443/oauth/callback',
+      clientId: 'cid',
+      clientSecret: 'csec',
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    await expect(attempt).rejects.toThrow(/unexpected shape/);
+    const message = await attempt.catch((err: unknown) => String(err));
+    // No credential material, in any form.
+    expect(message).not.toContain(secret);
+    expect(message).not.toContain('lin_refresh_ALSO_SECRET');
+    // Still diagnostic: names the field that is wrong and what was expected.
+    expect(message).toContain('expires_in expected number, got string');
+    // Key NAMES are safe and useful; values are not.
+    expect(message).toContain('keys present: access_token');
+  });
+
   test('rejects non-JSON responses (Linear maintenance / proxy intercepts)', async () => {
     const fetchImpl = jest.fn().mockResolvedValueOnce({
       ok: false,
