@@ -75,11 +75,26 @@ async function detectRevocation(opts: {
   publishSucceeds: boolean;
   claimAlreadyHeld?: boolean;
   latchFails?: boolean;
+  /**
+   * Drive the VAULT source instead of a rejected refresh: the vault reports
+   * consent-required and the stored bundle carries no grant, which is the state a
+   * fresh vault onboarding is in. Without this the reason ternary has only one arm
+   * exercised, and collapsing it to a constant leaves the suite green.
+   */
+  viaVaultConsent?: boolean;
 } ) {
-  const updates: Array<{ UpdateExpression: string; ConditionExpression?: string }> = [];
+  const updates: Array<{
+    UpdateExpression: string;
+    ConditionExpression?: string;
+    values: Record<string, unknown>;
+  }> = [];
   const ddbSend = jest.fn().mockImplementation((command: {
     constructor: { name: string };
-    input: { UpdateExpression?: string; ConditionExpression?: string };
+    input: {
+      UpdateExpression?: string;
+      ConditionExpression?: string;
+      ExpressionAttributeValues?: Record<string, unknown>;
+    };
   }) => {
     if (command.constructor.name !== 'UpdateCommand') {
       return {
@@ -88,11 +103,22 @@ async function detectRevocation(opts: {
           oauth_secret_arn: 'arn:secret:acme',
           status: 'active',
           installed_at: INSTALLED,
+          // The vault branch is gated on a recorded provider, so the vault-source case
+          // needs one; the refresh-rejection case must NOT have it or it would take the
+          // vault path instead.
+          ...(opts.viaVaultConsent && {
+            provider_name: 'bgagent-linear-oauth-acme',
+            vault_user_id: 'linear-ws-acme',
+          }),
         },
       };
     }
     const expression = command.input.UpdateExpression ?? '';
-    updates.push({ UpdateExpression: expression, ConditionExpression: command.input.ConditionExpression });
+    updates.push({
+      UpdateExpression: expression,
+      ConditionExpression: command.input.ConditionExpression,
+      values: command.input.ExpressionAttributeValues ?? {},
+    });
     if (expression.includes('revocation_announced_at') && !expression.startsWith('REMOVE')
       && opts.claimAlreadyHeld) {
       throw Object.assign(new Error('claimed'), { name: 'ConditionalCheckFailedException' });
@@ -104,21 +130,37 @@ async function detectRevocation(opts: {
   });
   const smSend = jest.fn().mockImplementation((command: { constructor: { name: string } }) => {
     if (command.constructor.name === 'GetSecretValueCommand') {
-      return { SecretString: JSON.stringify(storedToken()) };
+      const token = opts.viaVaultConsent
+        // Grant-less bundle: valid JSON, client credentials only — no access/refresh
+        // token. Definite absence, so the latch is allowed to fire.
+        ? { ...storedToken(), access_token: '', refresh_token: '' }
+        : storedToken();
+      return { SecretString: JSON.stringify(token) };
     }
     return {};
   });
   announceMock.mockResolvedValue(opts.publishSucceeds);
+  const savedWorkload = process.env.LINEAR_WORKLOAD_IDENTITY_NAME;
+  if (opts.viaVaultConsent) process.env.LINEAR_WORKLOAD_IDENTITY_NAME = 'abca_linear_oauth';
 
   const result = await resolveLinearOauthToken(WS, REGISTRY_TABLE, {
     dynamoDbClient: { send: ddbSend } as never,
     secretsManagerClient: { send: smSend } as never,
+    ...(opts.viaVaultConsent && {
+      resolveViaVault: async () => ({
+        kind: 'consent-required' as const,
+        authorizationUrl: 'https://x/authorize',
+      }),
+    }),
     fetchImpl: (async () => ({
       ok: false,
       status: 400,
       json: async () => ({ error: 'invalid_request', error_description: 'Refresh token revoked' }),
     })) as unknown as typeof fetch,
   });
+
+  if (savedWorkload === undefined) delete process.env.LINEAR_WORKLOAD_IDENTITY_NAME;
+  else process.env.LINEAR_WORKLOAD_IDENTITY_NAME = savedWorkload;
 
   return { result, updates };
 }
@@ -207,12 +249,25 @@ describe('the default revocation recorder announces BEFORE it latches', () => {
       .toEqual(['SET #s = :revoked, revoked_at = :now, revoked_reason = :reason']);
   });
 
-  test('the recorded reason distinguishes Linear refusing from a vault inference', async () => {
-    // `refresh_token_rejected` is a fact and is never re-probed;
-    // `vault_consent_required` is an inference the resolver retries. Writing the wrong
-    // one turns a self-healing latch into a permanent one, or the reverse.
+  test('a rejected refresh records refresh_token_rejected', async () => {
+    // The two reasons are not interchangeable: `refresh_token_rejected` is Linear's own
+    // refusal and is never re-probed, while `vault_consent_required` is an inference the
+    // resolver retries. Writing the wrong one either makes a self-healing latch permanent
+    // or re-probes a workspace Linear has already condemned. Asserted on the VALUE —
+    // checking the condition expression instead let the whole ternary collapse to a
+    // constant with the suite still green.
     const { updates } = await detectRevocation({ publishSucceeds: true });
     const latch = updates.find((u) => u.UpdateExpression.includes('revoked_reason'))!;
+    expect(latch.values[':reason']).toBe('refresh_token_rejected');
     expect(latch.ConditionExpression).toContain('installed_at = :installed');
+  });
+
+  test('a vault consent-required records vault_consent_required — the re-probeable reason', async () => {
+    // The arm that was never driven. It is the one the self-heal keys off, so if this
+    // path wrote the other reason a wrongly-latched workspace would stay offline until a
+    // human re-consented.
+    const { updates } = await detectRevocation({ publishSucceeds: true, viaVaultConsent: true });
+    const latch = updates.find((u) => u.UpdateExpression.includes('revoked_reason'))!;
+    expect(latch.values[':reason']).toBe('vault_consent_required');
   });
 });

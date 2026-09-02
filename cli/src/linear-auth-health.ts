@@ -35,10 +35,11 @@
  * on every idle workspace, and reporting "revoked" as fine would hide a total
  * outage. So we ask the surface, and only treat a rejected REFRESH as a failure.
  *
- * Read-only: this never consumes a refresh token (which would rotate it and
- * disrupt the very thing being diagnosed). It probes with the stored access
- * token, and only when that is rejected does it distinguish expiry from
- * revocation using the locally-known expiry.
+ * Read-only BY DEFAULT: it probes with the stored access token, and only when that is
+ * rejected does it distinguish expiry from revocation using the locally-known expiry.
+ * Supplying `verifyRefresh` opts into a real rotation — `verifyLinearRefreshAndPersist`
+ * consumes the refresh token and writes the rotated bundle back — which is why it is a
+ * caller-supplied option rather than the default.
  */
 
 import {
@@ -49,7 +50,7 @@ import {
 import { ScanCommand } from '@aws-sdk/lib-dynamodb';
 import { documentClient } from './dynamo-clients';
 import { verifyLinearRefreshAndPersist } from './linear-oauth';
-import { linearVaultUserId, mintLinearTokenFromVault } from './linear-vault';
+import { linearVaultUserId, mintLinearTokenFromVault, type VaultMintResult } from './linear-vault';
 import { makeClient } from './ua';
 
 /** Linear's GraphQL endpoint — a cheap authenticated probe target. */
@@ -227,7 +228,7 @@ export interface CheckLinearAuthOptions {
     readonly providerName: string;
     readonly userId?: string;
     readonly workspaceId: string;
-  }) => Promise<string | null>;
+  }) => Promise<VaultMintResult>;
   readonly now?: Date;
 }
 
@@ -283,12 +284,15 @@ export async function checkLinearWorkspaceAuth(
       const staleLatchSuspected = row.revoked_reason === 'vault_consent_required'
         && Boolean(row.provider_name) && Boolean(options.mintVaultToken);
       if (staleLatchSuspected) {
-        const vaultToken = await options.mintVaultToken!({
+        const reprobe = await options.mintVaultToken!({
           providerName: row.provider_name!,
           userId: row.vault_user_id,
           workspaceId,
-        }).catch(() => null);
-        if (vaultToken && await probe(vaultToken) === 'accepted') {
+        });
+        // Only a MINTED token overturns the record. `unavailable` leaves the recorded
+        // verdict standing, which is the conservative direction here: the row already
+        // says revoked, and a failure to re-probe is no evidence against it.
+        if (reprobe.kind === 'token' && await probe(reprobe.accessToken) === 'accepted') {
           out.push({
             workspaceId,
             workspaceSlug: slug,
@@ -335,21 +339,37 @@ export async function checkLinearWorkspaceAuth(
         });
         continue;
       }
-      const vaultToken = await options.mintVaultToken({
+      const minted = await options.mintVaultToken({
         providerName: row.provider_name,
         userId: row.vault_user_id,
         workspaceId,
-      }).catch(() => null);
-      if (!vaultToken) {
+      });
+      if (minted.kind === 'unavailable') {
+        // Not a verdict about the grant. `platform doctor` renders `revoked` as a hard
+        // fail whose remedy is `bgagent linear setup`, and a re-consent can replace the
+        // Linear installation — so calling a throttle or a missing permission "revoked"
+        // sends an operator to destroy a grant that works. Same choice this module
+        // already makes when it has no way to query the vault at all.
+        out.push({
+          workspaceId,
+          workspaceSlug: slug,
+          state: 'unknown',
+          detail: `Could not ask the AgentCore Identity vault about this workspace (${minted.reason}), `
+            + 'so its grant is unconfirmed rather than known bad.',
+        });
+        continue;
+      }
+      if (minted.kind === 'consent-required') {
         out.push({
           workspaceId,
           workspaceSlug: slug,
           state: 'revoked',
-          detail: 'The AgentCore Identity vault would not mint a token for this workspace — the grant needs a '
-            + `fresh consent. Run \`bgagent linear setup ${slug}\`.`,
+          detail: 'The AgentCore Identity vault reports this workspace needs a fresh consent. '
+            + `Run \`bgagent linear setup ${slug}\`.`,
         });
         continue;
       }
+      const vaultToken = minted.accessToken;
       // `hasRefreshToken: false` and no expiry: the vault owns renewal, so there is
       // no `expired_indeterminate` case to land in — a minted token that Linear
       // rejects is simply dead. Reporting it indeterminate would also point the

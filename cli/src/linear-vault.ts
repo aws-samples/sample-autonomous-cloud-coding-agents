@@ -218,7 +218,7 @@ export function isVaultUnavailableError(err: unknown): boolean {
 }
 
 /**
- * Mint a Linear token from an EXISTING vault grant, or null if there isn't one.
+ * Mint a Linear token from an EXISTING vault grant.
  *
  * Read-only: no `forceAuthentication`, so it can never open a browser or start a
  * consent. That is what makes it safe for ordinary CLI commands — they want a
@@ -233,19 +233,26 @@ export function isVaultUnavailableError(err: unknown): boolean {
  * workspace consented through the hosted page and minted with the loopback URL —
  * so callers do not have to know which one consent used.
  */
+export type VaultMintResult =
+  | { readonly kind: 'token'; readonly accessToken: string }
+  /** The vault answered with an authorization URL: this grant needs a fresh consent. */
+  | { readonly kind: 'consent-required' }
+  /** The vault could not be asked (permissions, throttle, not in this region). */
+  | { readonly kind: 'unavailable'; readonly reason: string };
+
 export async function mintLinearTokenFromVault(args: {
   region: string;
   workloadName: string;
   providerName: string;
   userId: string;
   returnUrl?: string;
-}): Promise<string | null> {
+}): Promise<VaultMintResult> {
   try {
     const dataplane = makeClient(BedrockAgentCoreClient, { region: args.region });
     const wat = await dataplane.send(
       new GetWorkloadAccessTokenForUserIdCommand({ workloadName: args.workloadName, userId: args.userId }),
     );
-    if (!wat.workloadAccessToken) return null;
+    if (!wat.workloadAccessToken) return { kind: 'unavailable', reason: 'no_workload_access_token' };
     const resp = await dataplane.send(
       new GetResourceOauth2TokenCommand({
         workloadIdentityToken: wat.workloadAccessToken,
@@ -258,12 +265,20 @@ export async function mintLinearTokenFromVault(args: {
         customParameters: { ...LINEAR_VAULT_CUSTOM_PARAMS },
       }),
     );
-    // An authorizationUrl with no token means the grant is gone. Report that as
-    // null rather than surfacing a URL a non-interactive command cannot use.
-    return resp.accessToken ?? null;
-  } catch {
-    // nosemgrep: ts-silent-success-masking -- callers fall back to the Secrets-Manager path on null, which is exactly what they do for a grant that needs consent; distinguishing "no grant" from "API error" would not change the caller's action, and the interactive consent path reports errors itself
-    return null;
+    if (resp.accessToken) return { kind: 'token', accessToken: resp.accessToken };
+    // An authorizationUrl with no token means the grant needs re-consent, which a
+    // non-interactive command cannot drive.
+    return { kind: 'consent-required' };
+  } catch (err) {
+    // Distinguished, not collapsed. `bgagent platform doctor` turns a verdict into a
+    // hard `fail` whose remedy is `bgagent linear setup`, and a re-consent can replace
+    // the Linear installation — so reporting a throttle or a missing permission as
+    // "revoked" tells an operator to destroy a grant that is working. Mirrors the
+    // cdk-side `VaultTokenResult` for the same reason.
+    return {
+      kind: 'unavailable',
+      reason: (err as { name?: string } | undefined)?.name ?? 'unknown_error',
+    };
   }
 }
 

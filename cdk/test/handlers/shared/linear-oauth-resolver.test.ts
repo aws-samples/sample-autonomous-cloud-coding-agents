@@ -959,6 +959,9 @@ describe('a vault_consent_required latch must be able to self-heal', () => {
     const result = await resolveLinearOauthToken('ws-uuid-1', REGISTRY_TABLE, {
       ...clients,
       resolveViaVault,
+      // Supplying a recorder is what marks this caller as holding the registry write —
+      // the clear is gated on it, exactly as the latch is.
+      onAuthorizationRevoked: async () => undefined,
     });
 
     expect(resolveViaVault).toHaveBeenCalled();
@@ -969,6 +972,27 @@ describe('a vault_consent_required latch must be able to self-heal', () => {
     expect(updates).toHaveLength(1);
     expect(updates[0].input!.UpdateExpression).toContain('revoked_reason');
     expect(updates[0].input!.ConditionExpression).toContain('installed_at = :installed');
+  });
+
+  test('a read-only role serves the token but does NOT attempt the clear', async () => {
+    // Five of the six minting Lambdas hold read-only on the registry. An ungated clear
+    // meant an AccessDenied logged at `error` on every event for a workspace the resolver
+    // was serving correctly. The row stays latched until the one write-capable role — the
+    // webhook processor — re-probes, which is the asymmetry the latch already has.
+    const clients = makeFakeClients({
+      registryItem: latchedRow('vault_consent_required'),
+      storedToken: makeStoredToken({ access_token: '', refresh_token: '' }),
+    });
+
+    const result = await resolveLinearOauthToken('ws-uuid-1', REGISTRY_TABLE, {
+      ...clients,
+      resolveViaVault: async () => ({ kind: 'token', accessToken: 'lin_oauth_alive' }),
+      // No recorder supplied ⇒ no registry write available.
+    });
+
+    // The token is still served — refusing to resolve would be the worse failure.
+    expect(result?.accessToken).toBe('lin_oauth_alive');
+    expect(updatesFrom(clients)).toHaveLength(0);
   });
 
   test('a refresh_token_rejected latch is NOT re-probed — Linear already refused', async () => {

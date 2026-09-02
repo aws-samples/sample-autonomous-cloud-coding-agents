@@ -144,11 +144,16 @@ export async function resolveLinearTokenViaVault(
   workloadIdentityName: string,
 ): Promise<VaultTokenResult> {
   const region = input.region ?? process.env.AWS_REGION ?? 'us-east-1';
-  const client = input.client ?? makeClient(BedrockAgentCoreClient, { region });
   // Recorded id wins; derive only for workspaces onboarded before it was stored.
   const userId = input.vaultUserId?.trim() || workspaceUserId(input.linearWorkspaceId);
 
+  // Client construction is INSIDE the try: this function's contract is that it never
+  // throws, and a constructor is not obviously safe. If the runtime's bundled SDK ever
+  // lacks a command this file names, the throw would otherwise escape the `unavailable`
+  // classification and out of `resolveLinearOauthToken`, whose Step 1b has no try —
+  // turning a degradable condition into a hard failure for every vault workspace.
   try {
+    const client = input.client ?? makeClient(BedrockAgentCoreClient, { region });
     // Step 1: user-bound workload token (F2).
     const wat = await client.send(
       new GetWorkloadAccessTokenForUserIdCommand({

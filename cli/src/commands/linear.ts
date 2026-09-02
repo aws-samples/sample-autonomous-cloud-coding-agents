@@ -97,7 +97,13 @@ const LINEAR_VAULT_WORKLOAD_NAME_FALLBACK = 'abca_linear_oauth';
  * way: consent succeeds, the grant just lands under an identity nothing resolves.
  */
 async function resolveLinearVaultWorkloadName(region: string, stackName: string): Promise<string> {
-  const fromStack = await getStackOutput(region, stackName, 'LinearVaultWorkloadName').catch(() => null);
+  // No `.catch` here on purpose. `getStackOutput` already returns null for a stack that
+  // does not exist and rethrows auth and other errors, and swallowing those turned a
+  // DescribeStacks AccessDenied into the fallback name — which no current stack uses,
+  // since the name became stack-scoped. The operator then got a mint failure against an
+  // identity that was never provisioned instead of being told they cannot read the stack.
+  // The fallback is for the one thing it documents: a stack deployed before this output.
+  const fromStack = await getStackOutput(region, stackName, 'LinearVaultWorkloadName');
   return fromStack?.trim() || LINEAR_VAULT_WORKLOAD_NAME_FALLBACK;
 }
 
@@ -866,7 +872,7 @@ export function makeLinearCommand(): Command {
           );
         }
 
-        // HOSTED FINISH. `--code` resumes the consent the --hosted run started: the
+        // HOSTED FINISH. `--code` resumes the consent an earlier run started: the
         // PKCE verifier and `state` come from the saved pending entry (the code alone
         // cannot complete a PKCE exchange), and it is consumed on read so one
         // verifier can never be replayed.
@@ -926,8 +932,33 @@ export function makeLinearCommand(): Command {
           : undefined;
         const alreadyOnVault = Boolean(priorRow?.provider_name);
         const useVault = Boolean(consentPageUrl) && !resumed;
+        // A workspace already on the vault must never take the Secrets-Manager path by
+        // omission. The row is rewritten whole below, so a run that skips the vault
+        // drops `provider_name`/`vault_user_id` — demoting a short-lived minted
+        // credential back to a stored long-lived one behind a "Setup complete", and
+        // orphaning the AgentCore provider. The two ways to get here are a stack whose
+        // last deploy omitted the vault context (it has to be repeated every deploy)
+        // and a `--code` resume, which is the Secrets-Manager flow.
+        if (alreadyOnVault && !useVault) {
+          throw new CliError(
+            `Workspace '${slug}' is already onboarded through the AgentCore Identity vault, but this `
+            + 'run would re-register it on Secrets Manager and discard that binding.\n\n'
+            + (resumed
+              ? '  `--code` resumes the Secrets Manager authorization-code flow. A vault workspace '
+                + 'finishes its consent in one run — re-run without `--code`.'
+              : `  The stack '${stackName}' publishes no LinearVaultConsentUrl, so its last deploy `
+                + 'omitted `--context enableLinearIdentityVault=true`. Re-deploy with it, or move '
+                + 'this workspace off the vault deliberately by deleting its registry row first.'),
+          );
+        }
         if (!consentPageUrl && !resumed) {
-          console.log(`  AgentCore Identity not available in ${region} — using Secrets Manager.`);
+          // Deliberately NOT "not available in <region>": nothing probed regional
+          // availability, only this stack's outputs. Naming the real cause is what lets
+          // an operator fix it, and the wrong cause sends them to the AWS region table.
+          console.log(
+            `  Stack '${stackName}' has no Identity vault (deployed without `
+            + '`--context enableLinearIdentityVault=true`) — using Secrets Manager.',
+          );
         }
 
         // ─── Step 0b: one consent, through the vault ──────────────────
@@ -1989,13 +2020,16 @@ export function makeLinearCommand(): Command {
         if (inviteProvider) {
           const recordedSubject = registryRow.vault_user_id as string | undefined;
           const inviteWorkspaceId = registryRow.linear_workspace_id as string | undefined;
-          inviteToken = await mintLinearTokenFromVault({
+          const minted = await mintLinearTokenFromVault({
             region,
             workloadName: await resolveLinearVaultWorkloadName(region, stackName),
             providerName: inviteProvider,
             userId: recordedSubject
               ?? (inviteWorkspaceId ? linearVaultUserId(inviteWorkspaceId) : linearVaultUserIdForSlug(slug)),
-          }) ?? stored.access_token;
+          });
+          // Either non-token outcome falls back to the stored bundle: this command wants
+          // a token, and it has no way to drive a consent.
+          inviteToken = minted.kind === 'token' ? minted.accessToken : stored.access_token;
         }
         if (!inviteToken) {
           console.log(' ✗');
@@ -2201,12 +2235,13 @@ export function makeLinearCommand(): Command {
               const recorded = row?.vault_user_id as string | undefined;
               const userId = recorded
                 ?? (workspaceId ? linearVaultUserId(workspaceId) : linearVaultUserIdForSlug(slug));
-              accessToken = await mintLinearTokenFromVault({
+              const minted = await mintLinearTokenFromVault({
                 region,
                 workloadName: vaultWorkloadName,
                 providerName,
                 userId,
-              }) ?? undefined;
+              });
+              accessToken = minted.kind === 'token' ? minted.accessToken : undefined;
             }
           }
 

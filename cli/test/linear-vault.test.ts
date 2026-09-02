@@ -368,7 +368,8 @@ describe('mintLinearTokenFromVault', () => {
     dataSend
       .mockResolvedValueOnce({ workloadAccessToken: 'wat-xyz' })
       .mockResolvedValueOnce({ accessToken: 'lin_oauth_vault' });
-    await expect(mintLinearTokenFromVault(args)).resolves.toBe('lin_oauth_vault');
+    await expect(mintLinearTokenFromVault(args))
+      .resolves.toEqual({ kind: 'token', accessToken: 'lin_oauth_vault' });
   });
 
   test('sends the consent-time customParameters — they are part of the cache key', async () => {
@@ -391,22 +392,31 @@ describe('mintLinearTokenFromVault', () => {
     expect(tok.input.forceAuthentication).toBeUndefined();
   });
 
-  test('a grant that needs consent yields null, not an authorization URL', async () => {
-    // Returning the URL would tempt a non-interactive caller into printing
-    // something it cannot complete.
+  test('a grant needing consent reports consent-required, not the authorization URL', async () => {
+    // Returning the URL would tempt a non-interactive caller into printing something it
+    // cannot complete.
     dataSend
       .mockResolvedValueOnce({ workloadAccessToken: 'wat-xyz' })
       .mockResolvedValueOnce({ authorizationUrl: 'https://linear.app/oauth/authorize?x=1' });
-    await expect(mintLinearTokenFromVault(args)).resolves.toBeNull();
+    await expect(mintLinearTokenFromVault(args)).resolves.toEqual({ kind: 'consent-required' });
   });
 
-  test('no workload token yields null', async () => {
+  test('no workload token is UNAVAILABLE, not a verdict about the grant', async () => {
     dataSend.mockResolvedValueOnce({});
-    await expect(mintLinearTokenFromVault(args)).resolves.toBeNull();
+    await expect(mintLinearTokenFromVault(args))
+      .resolves.toEqual({ kind: 'unavailable', reason: 'no_workload_access_token' });
   });
 
-  test('an API failure yields null so the caller can fall back', async () => {
-    dataSend.mockRejectedValueOnce(new Error('AccessDenied'));
-    await expect(mintLinearTokenFromVault(args)).resolves.toBeNull();
+  test.each([
+    ['AccessDeniedException'],
+    ['ThrottlingException'],
+    ['UnknownServiceError'],
+  ])('an API failure (%s) is UNAVAILABLE and never revoked', async (name) => {
+    // The distinction is load-bearing: `platform doctor` turns a `revoked` verdict into a
+    // hard fail whose remedy is `bgagent linear setup`, and a re-consent can replace the
+    // Linear installation — so reporting a throttle as revoked tells an operator to
+    // destroy a working grant.
+    dataSend.mockRejectedValueOnce(Object.assign(new Error('nope'), { name }));
+    await expect(mintLinearTokenFromVault(args)).resolves.toEqual({ kind: 'unavailable', reason: name });
   });
 });

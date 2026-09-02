@@ -132,7 +132,6 @@ def _resolve_linear_token_via_vault(
         # nosemgrep: py-silent-success-masking -- optional vault token; boto3 unavailable
         return ""
 
-    client = platform_client("bedrock-agentcore", region_name=region)
     # One bot identity per workspace. Prefer the id recorded at consent time: the
     # organization UUID is only knowable once a token exists, so deriving it would
     # force a second consent during onboarding just to learn the org. Workspaces
@@ -141,6 +140,11 @@ def _resolve_linear_token_via_vault(
     user_id = recorded_user_id.strip() or f"linear-workspace-{workspace_id}"
 
     try:
+        # Inside the try: client construction raises UnknownServiceError on an SDK that
+        # predates AgentCore and InvalidRegionError on a bad region, neither of which is
+        # caught outside it — so this function, documented to return "" on any failure,
+        # would instead abort the task before the 👀 acknowledgement.
+        client = platform_client("bedrock-agentcore", region_name=region)
         wat = client.get_workload_access_token_for_user_id(
             workloadName=workload_name,
             userId=user_id,

@@ -242,7 +242,7 @@ describe('checkLinearWorkspaceAuth — the real function, end to end', () => {
         region: 'us-east-1',
         registryTableName: 'Reg',
         probe: async () => 'accepted',
-        mintVaultToken: async () => 'lin_oauth_from_vault',
+        mintVaultToken: async () => ({ kind: 'token' as const, accessToken: 'lin_oauth_from_vault' }),
       });
       expect(health[0].state).toBe('active');
       expect(health[0].detail).toMatch(/AgentCore Identity token vault/);
@@ -253,7 +253,7 @@ describe('checkLinearWorkspaceAuth — the real function, end to end', () => {
       // from the organization UUID at onboarding time. Minting under the wrong one
       // does not fail loudly — it returns no token, which reads as a dead workspace.
       ddbSend.mockResolvedValue({ Items: [vaultRow()] });
-      const mint = jest.fn().mockResolvedValue('lin_oauth_from_vault');
+      const mint = jest.fn().mockResolvedValue({ kind: 'token', accessToken: 'lin_oauth_from_vault' });
       await checkLinearWorkspaceAuth({
         region: 'us-east-1',
         registryTableName: 'Reg',
@@ -269,10 +269,45 @@ describe('checkLinearWorkspaceAuth — the real function, end to end', () => {
         region: 'us-east-1',
         registryTableName: 'Reg',
         probe: async () => 'accepted',
-        mintVaultToken: async () => null,
+        mintVaultToken: async () => ({ kind: 'consent-required' as const }),
       });
       expect(health[0].state).toBe('revoked');
       expect(health[0].detail).toMatch(/needs a\s+fresh consent/);
+    });
+
+    test.each([
+      ['AccessDeniedException'],
+      ['ThrottlingException'],
+    ])('a vault we could not ASK (%s) is unknown, NOT revoked', async (reason) => {
+      // The remedy attached to `revoked` is `bgagent linear setup`, and a re-consent can
+      // replace the Linear installation — so a throttled or unauthorized probe reported
+      // as revoked sends an operator to destroy a grant that is working. `platform doctor`
+      // renders revoked as a hard fail, unknown as a warn.
+      ddbSend.mockResolvedValue({ Items: [vaultRow()] });
+      const health = await checkLinearWorkspaceAuth({
+        region: 'us-east-1',
+        registryTableName: 'Reg',
+        probe: async () => 'accepted',
+        mintVaultToken: async () => ({ kind: 'unavailable' as const, reason }),
+      });
+      expect(health[0].state).toBe('unknown');
+      expect(health[0].state).not.toBe('revoked');
+      expect(health[0].detail).toContain(reason);
+    });
+
+    test('a latch is NOT overturned by a vault we could not ask', async () => {
+      // The conservative direction: the row already says revoked, and a failed re-probe
+      // is no evidence against it. Only a minted token overturns the record.
+      ddbSend.mockResolvedValue({
+        Items: [vaultRow({ status: 'revoked', revoked_reason: 'vault_consent_required' })],
+      });
+      const health = await checkLinearWorkspaceAuth({
+        region: 'us-east-1',
+        registryTableName: 'Reg',
+        probe: async () => 'accepted',
+        mintVaultToken: async () => ({ kind: 'unavailable' as const, reason: 'ThrottlingException' }),
+      });
+      expect(health[0].state).toBe('revoked');
     });
 
     test('with no way to query the vault the verdict is unknown, NOT revoked', async () => {
@@ -295,7 +330,7 @@ describe('checkLinearWorkspaceAuth — the real function, end to end', () => {
         region: 'us-east-1',
         registryTableName: 'Reg',
         probe: async () => 'rejected',
-        mintVaultToken: async () => 'lin_oauth_from_vault',
+        mintVaultToken: async () => ({ kind: 'token' as const, accessToken: 'lin_oauth_from_vault' }),
       });
       expect(health[0].state).toBe('revoked');
       expect(health[0].state).not.toBe('expired_indeterminate');
@@ -312,7 +347,7 @@ describe('checkLinearWorkspaceAuth — the real function, end to end', () => {
         region: 'us-east-1',
         registryTableName: 'Reg',
         probe: async () => 'accepted',
-        mintVaultToken: async () => 'lin_oauth_from_vault',
+        mintVaultToken: async () => ({ kind: 'token' as const, accessToken: 'lin_oauth_from_vault' }),
       });
       expect(health[0].state).toBe('active');
       expect(health[0].detail).toMatch(/stale/);
@@ -341,7 +376,7 @@ describe('checkLinearWorkspaceAuth — the real function, end to end', () => {
         region: 'us-east-1',
         registryTableName: 'Reg',
         probe: async () => 'accepted',
-        mintVaultToken: async () => null,
+        mintVaultToken: async () => ({ kind: 'consent-required' as const }),
       });
       expect(health[0].state).toBe('revoked');
     });

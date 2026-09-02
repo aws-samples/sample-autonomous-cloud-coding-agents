@@ -72,10 +72,12 @@ const REFRESH_THRESHOLD_SECONDS = 60;
  * string — the writer, the re-probe guard and the un-latch condition — and a typo
  * in any one of them silently turns the self-healing path off.
  */
-const VAULT_CONSENT_REVOCATION_REASON = 'vault_consent_required';
+type LinearRevocationReason = 'refresh_token_rejected' | 'vault_consent_required';
+
+const VAULT_CONSENT_REVOCATION_REASON: LinearRevocationReason = 'vault_consent_required';
 
 /** `revoked_reason` written when Linear itself rejected the refresh token. */
-const REFRESH_REJECTED_REVOCATION_REASON = 'refresh_token_rejected';
+const REFRESH_REJECTED_REVOCATION_REASON: LinearRevocationReason = 'refresh_token_rejected';
 
 /** Registry row status values. Anything else (missing, unknown
  *  string) is treated as `revoked` so a corrupt or partially-written
@@ -125,7 +127,9 @@ export interface RegistryRow {
    * grant that still works is never consulted again. Rows latched on the
    * inference are therefore re-probed — see `resolveLinearOauthToken`.
    */
-  readonly revoked_reason?: string;
+  readonly revoked_reason?: LinearRevocationReason;
+  /** When the latch was applied, written alongside `revoked_reason`. */
+  readonly revoked_at?: string;
 }
 
 export interface StoredOauthToken {
@@ -304,9 +308,9 @@ function defaultRevocationRecorder(
       );
     } catch (err) {
       // `error`, not `warn`: the diagnosis is true and now unrecorded, and nothing
-      // downstream retries this write. A recording layer that fails quietly is the
-      // thing #812 was filed to remove. The operator has still been told, because
-      // the announcement above already went out.
+      // downstream retries this write. On the announced path the operator already knows;
+      // with no alert topic configured this log is the ONLY signal there is, which is
+      // the case that decides the level.
       logger.error('Could not record the revoked Linear authorization', {
         linear_workspace_id: detail.linearWorkspaceId,
         source: detail.source,
@@ -395,7 +399,7 @@ export async function resolveLinearOauthToken(
   // `refresh_token_rejected` is NOT re-probed: there Linear itself rejected the
   // refresh token, and no amount of retrying changes that.
   const latchedOnVaultInference = row.status === 'revoked'
-    && row.revoked_reason === 'vault_consent_required';
+    && row.revoked_reason === VAULT_CONSENT_REVOCATION_REASON;
   if (row.status !== 'active' && !latchedOnVaultInference) {
     logger.warn('Linear workspace registry status is not active', {
       linear_workspace_id: linearWorkspaceId,
@@ -433,13 +437,16 @@ export async function resolveLinearOauthToken(
     // row `revoked` while resolution still succeeds would take a functioning
     // workspace offline (the resolver refuses a non-active row).
     vaultConsentRequired = vaultResult.kind === 'consent-required';
-    if (vaultResult.kind === 'token' && latchedOnVaultInference) {
-      // The re-probe answered with a token, so the latch described a grant that is
-      // in fact alive. Clear it before returning: leaving the row `revoked` while
-      // handing back a working token means `platform doctor` and the alerting keep
-      // reporting a dead workspace, and the next cold Lambda re-probes again.
-      // Best-effort — a failed un-latch must not fail the resolve that just
-      // succeeded, and the next event retries it.
+    // Gated on `recordRevocation` for the same reason the latch is: it is present only
+    // where the role holds the registry write. Five of the six minting Lambdas hold
+    // read-only, so an ungated clear meant an AccessDenied logged at `error` on every
+    // event for a workspace the resolver was serving correctly. The row then stays
+    // latched until the webhook processor — the one role that can write — re-probes,
+    // which is the same asymmetry the latch already has.
+    if (vaultResult.kind === 'token' && latchedOnVaultInference && recordRevocation) {
+      // Best-effort: a failed un-latch must not fail the resolve that just succeeded,
+      // and leaving the row `revoked` while returning a token would keep
+      // `platform doctor` and the alerting reporting a workspace that works.
       try {
         await clearWorkspaceRevocation(ddb, registryTableName, linearWorkspaceId, row.installed_at);
       } catch (err) {
@@ -605,11 +612,10 @@ export async function resolveLinearOauthToken(
  * recorded), the write falls back to requiring the attribute to still be absent —
  * so a re-authorization, which adds it, likewise takes the row out of scope.
  *
- * Returns whether THIS call latched the row. That boolean is the dedup key for
- * notification (#812): a revoked workspace keeps producing events, and each one
- * re-detects the same dead grant, so alerting on detection would page once per
- * event. Only the caller that actually flipped `active → revoked` should announce
- * it; everyone else gets `false` because the conditional write did not apply.
+ * Returns whether THIS call latched the row, for callers that want to distinguish
+ * "I flipped it" from "it was already flipped". Notification dedup does NOT use it —
+ * that is the independent `revocation_announced_at` claim, because keying the
+ * announcement off this write made a failed publish permanently silent.
  */
 export async function markWorkspaceRevoked(
   ddb: DynamoDBDocumentClient,
@@ -617,7 +623,7 @@ export async function markWorkspaceRevoked(
   linearWorkspaceId: string,
   expectedInstalledAt?: string,
   now: string = new Date().toISOString(),
-  reason: string = 'refresh_token_rejected',
+  reason: LinearRevocationReason = REFRESH_REJECTED_REVOCATION_REASON,
 ): Promise<boolean> {
   try {
     await ddb.send(new UpdateCommand({
@@ -1117,9 +1123,8 @@ type RefreshOutcome =
 /**
  * Does this token-endpoint rejection mean the refresh token itself is dead?
  *
- * LIVE-CORRECTED: this used to test `error === 'invalid_grant'` only, which is what
- * RFC 6749 specifies — and which Linear does not send. Linear answers a dead
- * refresh token with HTTP 400 and:
+ * Not RFC 6749's `invalid_grant` — Linear does not send it. Verified against the live
+ * endpoint: a dead refresh token comes back as HTTP 400 with:
  *
  *     { "error": "invalid_request", "error_description": "Refresh token revoked" }
  *     { "error": "invalid_request", "error_description": "Invalid refresh token" }
