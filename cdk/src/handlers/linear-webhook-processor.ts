@@ -638,22 +638,15 @@ interface ProcessorEvent {
 /**
  * The vault fields a task needs so the AGENT can mint its own Linear token.
  *
- * Every channel_metadata builder must spread this. They were added to the
- * label-trigger path only, so tasks started from a comment — iteration, new work,
- * clarify-resume — reached the agent without them, and it fell back to a
- * Secrets-Manager token a vault-managed workspace does not have: no reactions, no
- * state transitions, on work that otherwise succeeded. Third occurrence of the same
- * mistake in this change (after the row parser and the vault-success return), which
- * is why it is a helper with a test that finds unspread builders rather than four
- * more hand-edits.
+ * Every channel_metadata builder must spread this. A builder that omits it hands the
+ * agent no provider, so it falls back to a Secrets-Manager token a vault-managed
+ * workspace does not have: no reactions and no state transitions, on work that
+ * otherwise succeeded.
  *
- * The source-level guard keys off the object-LITERAL form, so it cannot see a builder
- * that assigns onto an existing object — which is how the label-trigger path, the one
- * this helper was written for, stayed outside its own check. That path now calls the
- * helper too, and a behavioural test asserts the fields actually reach
- * `channel_metadata`, since the two checks fail for different reasons: the structural
- * one catches a builder nobody exercised, the behavioural one catches a builder the
- * structural pattern cannot express.
+ * Two checks guard it, because they fail for different reasons. The source-level one
+ * (in the test file) catches a builder nobody exercised, but keys off the object-literal
+ * form and cannot see a builder that assigns onto an existing object; the behavioural
+ * one asserts the fields actually reach `channel_metadata`.
  */
 function vaultMetadata(resolved: { providerName?: string; vaultUserId?: string }): Record<string, string> {
   return {
@@ -907,7 +900,8 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     if (resolved.providerName) {
       // Through the shared helper, not hand-rolled. This builder assigns onto an
       // existing object rather than constructing a literal, which is what hid it from
-      // the source-level guard below `vaultMetadata` — the guard keys off the literal
+      // the source-level guard in cdk/test/handlers/linear-webhook-processor.test.ts —
+      // that guard keys off the literal
       // form, so the ONE path it was written for was the one path it never covered.
       // The subject inside the helper is recorded rather than derived from the
       // workspace id, so a single consent can onboard a workspace whose org UUID is

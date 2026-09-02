@@ -46,7 +46,7 @@ jest.mock('../../src/linear-vault');
 
 const lookupVaultCallback = jest.mocked(linearVault.lookupLinearVaultCallbackUrl);
 
-const HOSTED = 'https://d2ud1woydykuxp.cloudfront.net/';
+const HOSTED = 'https://d111111abcdef8.cloudfront.net/';
 const VAULT = 'https://bedrock-agentcore.us-east-1.amazonaws.com/identities/oauth2/callback/f8804c1b';
 
 /** A DescribeStacks reply exposing the consent-page output. */

@@ -1086,12 +1086,22 @@ describe('every channel_metadata builder carries the vault fields', () => {
   );
 
   test('each builder that writes the workspace slug also spreads vaultMetadata', () => {
+    // Scans to the end of the enclosing object literal rather than demanding the spread
+    // on the very next line: adjacency made a harmless key reorder fail, which trains
+    // people to "fix" the guard. What it must still catch is a NEW builder that omits
+    // the spread entirely — something the behavioural test cannot, since that only
+    // covers builders somebody remembered to exercise.
     const lines = src.split('\n');
     const offenders: number[] = [];
     lines.forEach((line, i) => {
       if (line.trim() !== 'linear_workspace_slug: resolved.workspaceSlug,') return;
-      const next = (lines[i + 1] ?? '').trim();
-      if (next !== '...vaultMetadata(resolved),') offenders.push(i + 1);
+      for (let j = i + 1; j < lines.length; j += 1) {
+        const cur = lines[j]!.trim();
+        if (cur === '...vaultMetadata(resolved),') return;
+        // End of this literal — the spread never appeared in it.
+        if (cur === '};' || cur === '});') break;
+      }
+      offenders.push(i + 1);
     });
     expect(offenders).toEqual([]);
   });

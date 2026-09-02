@@ -24,6 +24,8 @@ One of two places, chosen automatically at setup time:
 | **AgentCore Identity vault** | The stack was deployed with `--context enableLinearIdentityVault=true` | Nothing long-lived. AgentCore holds the refresh token and mints short-lived access tokens on demand. |
 | **Secrets Manager** | Otherwise — including regions where AgentCore Identity isn't available | An OAuth token bundle in `bgagent-linear-oauth-<slug>`, refreshed and rotated by ABCA. |
 
+The vault is unavailable on the `lambda-microvm` substrate — see [Not available with `compute_type=lambda-microvm`](#not-available-with-compute_typelambda-microvm) below.
+
 `bgagent linear setup` picks whichever the deployment supports and tells you which one it used. There is no flag. If the vault isn't available it prints one line and continues on Secrets Manager:
 
 ```
@@ -33,6 +35,10 @@ AgentCore Identity not available in us-east-1 — using Secrets Manager.
 A workspace that started on Secrets Manager and later moves to the vault **keeps** its Secrets Manager token as a fallback. A workspace onboarded straight onto the vault has no such token by design — it needs the vault to be reachable.
 
 When a workspace's authorization dies, ABCA records it on the registry row and publishes to the stack's operational alert topic. That topic has **no subscribers unless you deployed with `alertEmail`**, so set it if you want to hear about a dead workspace rather than discover it from `bgagent platform doctor`.
+
+#### Not available with `compute_type=lambda-microvm`
+
+The vault and the Lambda MicroVMs substrate cannot be enabled on the same stack. Together they synthesize 505 CloudFormation resources against a hard limit of 500 (MicroVM alone is 496, the vault alone 488), so `cdk deploy` refuses the combination by name at synth rather than failing partway through. Use the vault on the `agentcore` or `ecs` substrate; a MicroVM stack stays on Secrets Manager until the stack reclaims room.
 
 #### One workload identity per stack
 

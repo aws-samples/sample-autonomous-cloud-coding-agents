@@ -1718,21 +1718,22 @@ describe('AgentStack Linear identity vault gate (#809)', () => {
     expect([...workloadNames]).toEqual(['abca_linear_oauth_LinearVaultWritersStack']);
   });
 
-  test('MicroVM + vault currently EXCEEDS CloudFormation\'s 500-resource limit', () => {
-    // Deliberately pinning a limitation, not a behaviour. The vault IS wired for the
-    // MicroVM substrate — platform_config carries the workload name and the guest's
-    // execution role gets the mint grant — but the two cannot be enabled together
-    // today: 505 resources against a HARD limit of 500 (microvm alone 496, vault
-    // alone 488). The wiring is therefore unreachable, and claiming MicroVM support
-    // without saying this would be false.
+  test('MicroVM + vault is REFUSED by name, not left to the resource counter', () => {
+    // Pinning a limitation, not a behaviour. The vault IS wired for the MicroVM substrate
+    // — platform_config carries the workload name and the guest's execution role gets the
+    // mint grant — but the two cannot be enabled together today: 505 resources against a
+    // HARD limit of 500 (microvm alone 496, the vault alone 488). Claiming MicroVM support
+    // without saying so would be false.
     //
-    // Reclaiming room means moving a subsystem into a nested stack. The API Gateway
-    // surface (64 Methods + 33 Resources + 6 Authorizers) is the obvious candidate,
-    // but re-homing an existing RestApi changes its logical id and therefore its URL,
-    // which breaks every registered webhook — so it is a migration, not a refactor.
+    // The stack refuses the combination itself rather than letting the counter throw,
+    // because the counter's message is a per-type census that never mentions either flag —
+    // the operator cannot tell from it what to change.
     //
-    // When that room is found this test will FAIL, which is the point: it is the
-    // trigger to restore a real parity assertion here.
+    // Reclaiming room means nesting a subsystem. MicroVM (+19 resources) is the cheapest
+    // candidate and currently deployed nowhere, but nesting it needs the session-role trust
+    // wiring to stop referencing a child resource (it creates a parent↔child cycle today).
+    //
+    // When the room is found, this test should be replaced by a real parity assertion.
     const app = new App({
       context: { enableLinearIdentityVault: true, compute_type: 'lambda-microvm' },
     });
@@ -1740,7 +1741,7 @@ describe('AgentStack Linear identity vault gate (#809)', () => {
       new AgentStack(app, 'LinearVaultMicrovmStack', {
         env: { account: '123456789012', region: 'us-east-1' },
       }),
-    )).toThrow(/greater than allowed maximum of 500/);
+    )).toThrow(/enableLinearIdentityVault cannot be combined with compute_type=lambda-microvm/);
   });
 
   test('the source graph names no Linear-minting handler that is unwired', () => {

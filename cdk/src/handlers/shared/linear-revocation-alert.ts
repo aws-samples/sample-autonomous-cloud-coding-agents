@@ -26,8 +26,10 @@
 // TWO PROPERTIES THIS FILE EXISTS TO GUARANTEE.
 //
 // 1. ANNOUNCE ONCE. A revoked workspace keeps receiving events, so alerting on
-//    detection would page per event. The registry latch is the dedup key: only the
-//    caller whose conditional write actually flipped `active → revoked` announces.
+//    detection would page per event. Dedup is an independent `revocation_announced_at`
+//    claim, NOT the status latch — the caller announces BEFORE latching, because a
+//    publish that failed after the latch could never be retried (every later event saw
+//    an already-revoked row and said nothing).
 //
 // 2. DO NOT ANNOUNCE THROUGH THE BROKEN CHANNEL. The dead credential is Linear's
 //    own, so a Linear comment cannot report it — that is precisely the path that no

@@ -291,10 +291,10 @@ describe('renderLinearAppTemplate', () => {
     // menu that got the wrong subset registered and produced an opaque
     // "Invalid redirect_uri".
     const out = renderLinearAppTemplate({
-      hostedConsentUrl: 'https://d2ud1woydykuxp.cloudfront.net/',
+      hostedConsentUrl: 'https://d111111abcdef8.cloudfront.net/',
       vaultCallbackUrl: 'https://bedrock-agentcore.us-east-1.amazonaws.com/identities/oauth2/callback/f88',
     });
-    expect(out).toContain('https://d2ud1woydykuxp.cloudfront.net/');
+    expect(out).toContain('https://d111111abcdef8.cloudfront.net/');
     expect(out).toContain('https://bedrock-agentcore.us-east-1.amazonaws.com/identities/oauth2/callback/f88');
     // The loopback is NOT one of the listed URIs when a hosted page exists — setup
     // will not redirect to it. (A trap further down may still explain that the older
@@ -314,8 +314,8 @@ describe('renderLinearAppTemplate', () => {
   test('the hosted URI REPLACES the loopback rather than joining it', () => {
     // Two URIs for two flows was the confusion; setup picks one substrate, so the
     // template lists one.
-    const out = renderLinearAppTemplate({ hostedConsentUrl: 'https://d2ud1woydykuxp.cloudfront.net/' });
-    expect(out).toContain('https://d2ud1woydykuxp.cloudfront.net/');
+    const out = renderLinearAppTemplate({ hostedConsentUrl: 'https://d111111abcdef8.cloudfront.net/' });
+    expect(out).toContain('https://d111111abcdef8.cloudfront.net/');
     expect(redirectUriBlock(out)).not.toContain('localhost:8080');
   });
 
@@ -324,7 +324,7 @@ describe('renderLinearAppTemplate', () => {
     // typo. Linear validates the whole Redirect URIs field on save, so an extra bad
     // line loses the good ones with it — and the failure then reads as though it
     // were about the line just added. One entry, matching what the CLI sends.
-    const hosted = 'https://d2ud1woydykuxp.cloudfront.net/';
+    const hosted = 'https://d111111abcdef8.cloudfront.net/';
     const slashless = hosted.replace(/\/$/, '');
     const out = renderLinearAppTemplate({ hostedConsentUrl: hosted });
     // Exact equality, not a prefix test: a prefix test on a URL reads as (incomplete)
@@ -338,7 +338,7 @@ describe('renderLinearAppTemplate', () => {
     // The vault callback id does not exist until the provider is created, which
     // `setup` does on its first run — so the template promises it rather than
     // pretending it is unavailable.
-    const out = renderLinearAppTemplate({ hostedConsentUrl: 'https://d2ud1woydykuxp.cloudfront.net/' });
+    const out = renderLinearAppTemplate({ hostedConsentUrl: 'https://d111111abcdef8.cloudfront.net/' });
     expect(out).toMatch(/prints one more URI the first time it runs/);
   });
 

@@ -365,6 +365,20 @@ export class AgentStack extends Stack {
     // second chance to disagree.
     const linearVaultWorkload = linearVaultWorkloadName(this);
 
+    // Fail here, naming both flags, rather than 500 resources later. The two features
+    // together synthesize 505 resources against CloudFormation's hard 500 limit (MicroVM
+    // alone 496, the vault alone 488), so the combination is not deployable today. Left to
+    // the resource counter, the operator gets a per-type census and no hint that two
+    // context flags are the cause.
+    if (linearIdentityVaultEnabled && computeType === 'lambda-microvm') {
+      throw new Error(
+        'enableLinearIdentityVault cannot be combined with compute_type=lambda-microvm: the two '
+        + 'together exceed CloudFormation\'s 500-resource limit for this stack (505). Deploy the '
+        + 'vault on the agentcore or ecs substrate, or omit enableLinearIdentityVault. See '
+        + 'docs/design/ADR-016 and the LINEAR_SETUP_GUIDE.',
+      );
+    }
+
     // The operator-supplied MicroVM image inputs, resolved HERE (pure context
     // reads, no construct dependency) rather than at the construct's call site
     // below, because TaskApi — created well before the MicroVM construct — needs
@@ -629,8 +643,9 @@ export class AgentStack extends Stack {
       // RFC #249 Phase 1 (context-gated `enableLinearIdentityVault`): tell the
       // agent's Linear token resolver to mint via the AgentCore Token Vault when
       // a task carries a provider name. Absent → the agent stays on the
-      // Secrets-Manager path. Workload name matches the LinearIdentityVault
-      // construct's fixed `abca_linear_oauth`.
+      // Secrets-Manager path. The workload name is the stack-derived value computed
+      // above and passed INTO the construct — the construct has no default of its own,
+      // and a rename orphans every consent already given.
       ...(linearIdentityVaultEnabled
         ? { LINEAR_VAULT_ENABLED: 'true', LINEAR_WORKLOAD_IDENTITY_NAME: linearVaultWorkload }
         : {}),

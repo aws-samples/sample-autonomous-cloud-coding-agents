@@ -29,7 +29,7 @@
 // This page is the substrate-independent alternative: consent lands on a URL that
 // is reachable from anywhere, and the page shows the value the operator pastes back.
 // It serves BOTH onboarding steps, which is what removes localhost entirely:
-//   * direct OAuth (`bgagent linear setup --hosted`) redirects here with `code`
+//   * direct OAuth (`bgagent linear setup`, Secrets-Manager path) redirects here with `code`
 //   * the vault 3LO bounce (`bgagent linear setup`) arrives with `session_id`
 // Registering this one URL on the Linear app therefore replaces the localhost
 // callback rather than merely supplementing it.
