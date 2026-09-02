@@ -31,7 +31,16 @@ repos:
         stages: [commit-msg]
 
       # ADR-003: feature branch must match (feat|fix|chore|docs)/<issue-number>-*.
-      # Runs at pre-push (branch name is stable by then); reads the current branch.
+      # Runs at pre-push and validates the refs actually being pushed (local AND
+      # remote side of each refspec), not merely HEAD — pushing a compliant
+      # branch to a non-compliant remote name must not slip through.
+      #
+      # No stdin/args are forwarded here on purpose: prek's git shim is what git
+      # invokes, so prek — not the hook — consumes git's `<local-ref> <local-sha>
+      # <remote-ref> <remote-sha>` lines, and it forwards neither those nor git's
+      # `<remote-name> <remote-url>` argv to the entry. It re-publishes the first
+      # pushed ref pair as PRE_COMMIT_LOCAL_BRANCH / PRE_COMMIT_REMOTE_BRANCH,
+      # which the script reads from the environment. See the script header.
       - id: adr003-branch-name
         name: ADR-003 branch naming convention
         entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && node scripts/hooks/check-branch-name.mjs'

@@ -33,10 +33,34 @@ not advice — if any check below fails, STOP and do not begin implementation.
 - The issue is unassigned, or is assigned to someone other than the acting
   identity without declared intentionality (multiple assignees need
   intentionality per ADR-003 "Assignments").
+- The governance repository resolves to a **fork** (see Step 0) — a fork's
+  issue tracker is writable by the contributor, so its `approved` label is
+  self-grantable and gates nothing.
 
 In any of these cases, respond with the specific failure and the remediation
 (create the issue / request the `approved` label from an admin / self-assign),
 then STOP. Do NOT create branches, write files, or run implementation commands.
+
+## Step 0: Resolve the governance repository
+
+**Every `gh` call below must be pinned with `--repo`.** CONTRIBUTING tells
+contributors to "push to a fork and open a PR against `main`", so in the normal
+workflow the local `origin` is the contributor's own fork. An unpinned
+`gh issue view`/`edit`/`comment` resolves the repository from the git remotes,
+which on a fork can land on the contributor's copy — where they can add the
+`approved` label themselves and self-bypass this entire gate.
+
+```bash
+# Source of truth for issues and the `approved` label. Override to reuse this
+# skill in another repository (see "Adapting this skill" at the end).
+REPO="${ABCA_GOVERNANCE_REPO:-aws-samples/sample-autonomous-cloud-coding-agents}"
+
+# Hard-fail if the governance repo is a fork — its `approved` label is
+# self-grantable, so the gate would be decorative. This also stops
+# ABCA_GOVERNANCE_REPO from being used as a bypass.
+gh repo view "$REPO" --json isFork,nameWithOwner \
+  --jq 'if .isFork then error("governance repo \(.nameWithOwner) is a fork") else .nameWithOwner end'
+```
 
 ## Step 1: Identify the issue
 
@@ -57,7 +81,7 @@ Query GitHub. The issue must exist, be OPEN, carry the `approved` label, and be
 assigned.
 
 ```bash
-gh issue view <N> --json number,title,state,labels,assignees \
+gh issue view <N> --repo "$REPO" --json number,title,state,labels,assignees \
   --jq '{number,title,state,labels:[.labels[].name],assignees:[.assignees[].login]}'
 ```
 
@@ -72,10 +96,10 @@ Validate the response:
 If `assignees` is empty, self-assign before proceeding:
 
 ```bash
-gh issue edit <N> --add-assignee @me
+gh issue edit <N> --repo "$REPO" --add-assignee @me
 # then re-read to confirm sole ownership (self-assignment is not atomic —
 # ADR-003 warns concurrent agents may race; verify after claiming)
-gh issue view <N> --json assignees --jq '[.assignees[].login]'
+gh issue view <N> --repo "$REPO" --json assignees --jq '[.assignees[].login]'
 ```
 
 ## Step 3: Pre-start synthesis (ADR-003 "Pre-start review")
@@ -98,7 +122,7 @@ Before implementing, synthesize context so the body + thread are unambiguous:
           trackedInIssues(first:20){ nodes{ number title state } }   # blockedBy
         }
       }
-    }' -f owner=<owner> -f repo=<repo> -F num=<N>
+    }' -f owner="${REPO%%/*}" -f repo="${REPO##*/}" -F num=<N>
   ```
 
   If any blocking issue is OPEN, this issue is **not ready** — hard-fail.
@@ -115,7 +139,7 @@ Only if ALL checks pass:
 2. Confirm to the user that the gate passed and implementation may begin.
 
 ```bash
-gh issue comment <N> --body "Starting implementation."
+gh issue comment <N> --repo "$REPO" --body "Starting implementation."
 ```
 
 If any check failed, you have already stopped at that step. Do not reach Step 4.
@@ -134,3 +158,32 @@ also gets):
 The hooks catch *unreferenced* work mechanically; this skill catches
 *unapproved* work before it starts (the hooks cannot query the `approved` label
 without network access at commit time).
+
+## Adapting this skill to another repository
+
+The gate itself is generic — only the policy it enforces is ABCA-specific. To
+reuse it elsewhere, set one environment variable:
+
+```bash
+export ABCA_GOVERNANCE_REPO=<owner>/<repo>
+```
+
+That repointing is deliberately the *only* runtime knob, because it is the one
+with a security consequence: point it at a repository whose labels the
+contributor cannot grant themselves (Step 0 hard-fails on a fork for exactly
+this reason). Everything else below is policy a forking project edits once in
+its own copy of this file:
+
+| Assumption | Where it appears | ABCA value |
+|------------|------------------|------------|
+| Governance repo | Step 0 (`$REPO`) | `aws-samples/sample-autonomous-cloud-coding-agents` |
+| Approval label | Steps 2, 4 | `approved` |
+| Branch-name pattern | Step 1 | `(feat\|fix\|chore\|docs)/<issue-number>-<desc>` |
+| Blocker markers | Step 3 | `**UNRESOLVED:**` blocks; `**DEFERRED:** … tracked in #N` does not |
+| Blocking-dependency source | Step 3 | GraphQL `trackedInIssues` (the dependency graph, not prose) |
+| Start signal | Step 4 | a `Starting implementation.` issue comment |
+| Governing document | throughout | [ADR-003](../../../decisions/ADR-003-contribution-governance.md) |
+
+Keep the branch-name pattern in sync with `scripts/hooks/check-branch-name.mjs`
+and the issue-reference keywords with `scripts/hooks/check-commit-msg.mjs` — the
+skill and the hooks enforce two halves of the same policy.

@@ -134,6 +134,61 @@ test('does NOT exempt a normal commit whose body merely mentions "merge"', () =>
   assert.equal(r.ok, false);
 });
 
+// The exemption is scoped to the subjects git itself emits. An authored subject
+// that merely STARTS with "Merge"/"Revert"/"squash" is contribution work and
+// must still carry an issue reference (#679 review).
+test('exempts every auto-generated merge subject form git emits', () => {
+  const generated = [
+    "Merge branch 'main'",
+    "Merge branch 'main' into feat/186-adr003-hooks",
+    "Merge branch 'main' of github.com:aws-samples/sample-autonomous-cloud-coding-agents",
+    "Merge branches 'a' and 'b'", // octopus merge — plural
+    "Merge remote-tracking branch 'origin/main'",
+    "Merge tag 'v1.2.3'",
+    "Merge commit 'abc1234'",
+    'Merge pull request #12 from owner/feat/9-x', // GitHub — has #N but no keyword
+  ];
+  for (const subject of generated) {
+    assert.equal(
+      validateCommitMessage(`${subject}\n`).ok,
+      true,
+      `expected "${subject}" to be exempt`,
+    );
+  }
+});
+
+test('does NOT exempt an authored subject that merely starts with Merge/Revert', () => {
+  const authored = [
+    'Merge behavior for schema handling',
+    'Revert reviewer nudge copy', // git revert always quotes: `Revert "..."`
+    'Merged the two resolvers',
+    'Reverting the earlier approach',
+  ];
+  for (const subject of authored) {
+    assert.equal(
+      validateCommitMessage(`${subject}\n\nno reference here`).ok,
+      false,
+      `expected "${subject}" to be gated`,
+    );
+  }
+});
+
+test('does NOT exempt an authored subject resembling an autosquash prefix', () => {
+  // The required space after fixup!/squash!/amend! keeps these gated.
+  for (const subject of ['squashed the bug', 'fixup the layout', 'amendment to the guide']) {
+    assert.equal(
+      validateCommitMessage(`${subject}\n\nno reference here`).ok,
+      false,
+      `expected "${subject}" to be gated`,
+    );
+  }
+});
+
+test('an exempt merge subject still passes when it does carry a reference', () => {
+  // Exemption short-circuits; a referenced merge must not regress to a failure.
+  assert.equal(validateCommitMessage("Merge branch 'main'\n\nRefs #186").ok, true);
+});
+
 test('handles CRLF line endings (comment stripped, body ref survives)', () => {
   // Real COMMIT_EDITMSG files may carry \r\n (Windows / core.autocrlf).
   assert.equal(validateCommitMessage('feat: x\r\n\r\nCloses #7\r\n').ok, true);

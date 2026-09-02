@@ -30,11 +30,15 @@
  * satisfy the gate — the reference must be intentional, not incidental prose.
  *
  * Exempt commits (git-generated, not authored contribution work): merge
- * commits (`Merge ...`), reverts (`Revert ...`), and fixup!/squash! commits.
- * These carry auto-generated subjects with no issue link; requiring one would
- * make a routine `git merge origin/main` — which the contribution guide tells
- * contributors to run — impossible. This mirrors the default ignore set of
- * conventional commit-msg linters (commitlint et al.).
+ * commits (`Merge branch|branches|remote-tracking branch|tag|commit|pull
+ * request ...`), reverts (`Revert "..."`), and `fixup! `/`squash! `/`amend! `
+ * commits. These carry auto-generated subjects with no issue link; requiring
+ * one would make a routine `git merge origin/main` — which the contribution
+ * guide tells contributors to run — impossible. The exemption is keyed to the
+ * exact forms git emits rather than a bare `Merge`/`Revert` prefix, so an
+ * authored subject that happens to begin with either word is still gated.
+ * This mirrors the default ignore set of conventional commit-msg linters
+ * (commitlint et al.).
  *
  * Wiring: a `commit-msg`-type local hook in `.pre-commit-config.yaml`. prek /
  * pre-commit invoke commit-msg hooks with the path to the commit message file
@@ -54,8 +58,22 @@ const ISSUE_REF =
 
 // Git-generated / non-authored commits whose subject lines are auto-produced
 // and carry no issue link. Matched on the first non-comment line only.
+//
+// Scoped to the exact subject forms git itself emits — NOT any subject that
+// merely starts with "Merge" or "Revert". An authored `Merge behavior for
+// schema handling` or `Revert reviewer nudge copy` is contribution work and
+// must still carry an issue reference. The forms below are:
+//   `Merge branch 'x'` / `... into y` / `... of <url>`   git merge
+//   `Merge branches 'a' and 'b'`                          git merge (octopus)
+//   `Merge remote-tracking branch 'origin/main' into y`   git merge
+//   `Merge tag 'v1'` / `Merge commit '<sha>'`             git merge
+//   `Merge pull request #N from owner/branch`             GitHub
+//   `Revert "<original subject>"`                         git revert (always quoted)
+//   `fixup! ` / `squash! ` / `amend! `                    git commit --fixup/--squash
+// The required space after the autosquash prefixes keeps an authored
+// `squashed the bug` out of the exemption.
 const EXEMPT_SUBJECT =
-  /^(?:Merge\b|Revert\b|fixup!|squash!|amend!)/i;
+  /^(?:Merge (?:branch(?:es)?|remote-tracking branch(?:es)?|tag|commit|pull request)\b|Revert "|(?:fixup|squash|amend)! )/i;
 
 /**
  * Strip git comment lines (those beginning with `#`), which git removes before
