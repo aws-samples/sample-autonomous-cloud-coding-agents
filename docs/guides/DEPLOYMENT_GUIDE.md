@@ -136,7 +136,7 @@ For the full cost model including per-task costs, see [COST_MODEL.md](../design/
 
 | Service | Used By | Scales to Zero |
 |---------|---------|---------------|
-| Bedrock (Claude Sonnet 4.6, Opus 4, Haiku 4.5) | Agent reasoning, cross-region inference profiles | Yes |
+| Bedrock (Claude Sonnet 4.6, Opus 4.8, Opus 5, Haiku 4.5) | Agent reasoning, cross-region inference profiles | Yes |
 | Bedrock Guardrails | Prompt injection detection on task input | Yes |
 | Bedrock AgentCore Memory | Semantic + episodic extraction strategies | Yes |
 | AWS Agent Registry (preview, default-on) | Versioned agent asset catalog and governance | N/A (managed preview service) |

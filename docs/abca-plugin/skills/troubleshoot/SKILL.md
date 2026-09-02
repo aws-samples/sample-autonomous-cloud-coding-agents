@@ -111,7 +111,7 @@ node cli/lib/bin/bgagent.js events <TASK_ID> --output json
 - Common: repo build/test commands not documented in CLAUDE.md
 
 **403 "not authorized to perform bedrock:InvokeModelWithResponseStream":**
-- The repo's `model_id` is a model the runtime IAM role wasn't granted. The runtime only has `grantInvoke` for the models in the stack's configured set (Sonnet 4.6, Opus 4, Opus 4.8, Opus 5, Haiku 4.5 by default).
+- The repo's `model_id` is a model the runtime IAM role wasn't granted. The runtime only has `grantInvoke` for the models in the stack's configured set — read it from the `BedrockModelIds` stack output rather than a list here (Sonnet 4.6, Opus 4.8, Opus 5, Haiku 4.5 by default).
 - **Quick fix:** point the repo at an already-granted model — `bgagent repo onboard <owner/repo> --model global.anthropic.claude-opus-5` (no redeploy).
 - **To add a new model to the runtime:** grant it in the stack and redeploy. The model set is the shared list in `cdk/src/constructs/bedrock-models.ts` — add the model via the `bedrockModels` CDK context (`cdk.json`) so both the AgentCore and ECS backends grant it (#433). Adding a model also requires **account-level Bedrock access** for it (separate from IAM — see the next row).
 
@@ -142,7 +142,7 @@ node cli/lib/bin/bgagent.js events <TASK_ID> --output json
      ```
 - Causes:
   - **Stale model_id in DynamoDB** (most common) — the Blueprint `onUpdate` only sets fields present in props; removing a `modelId` prop does NOT remove the field from DynamoDB. The task keeps using the old model.
-  - Bedrock service-level throttling for the specific model (especially Opus 4 which has limited availability)
+  - Bedrock service-level throttling for the specific model (Opus-class models have tighter limits than Sonnet or Haiku)
   - Account quota limits reached
 - Fix:
   1. **Check and fix the DynamoDB record first** — remove stale `model_id` if present:
@@ -153,7 +153,7 @@ node cli/lib/bin/bgagent.js events <TASK_ID> --output json
        --update-expression "REMOVE model_id"
      ```
   2. If model_id is correct, wait and retry — throttling is often transient
-  3. Switch to a model with higher availability (Sonnet 4.6 > Opus 4 > Haiku)
+  3. Switch to a model with higher availability (Haiku 4.5 > Sonnet 4.6 > Opus)
   4. Request a Bedrock quota increase for `InvokeModel` RPM on your model
 
 **`task_timed_out`:**

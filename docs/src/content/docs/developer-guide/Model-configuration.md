@@ -102,7 +102,7 @@ Token ratio 1.169; cost ratio 1.169 — identical. **The per-token rate is uncha
 
 **Unlimited-by-default is deliberate — pair it with the escape hatch.** Because no platform budget ceiling applies, the documented mitigation for cost is choosing a lighter-token model rather than relying on a cap:
 
-- **Per repo:** Blueprint `agent.modelId` (e.g. `us.anthropic.claude-sonnet-4-6`) — no code change, no agent redeploy
+- **Per repo:** Blueprint `agent.modelId` — no code change, no agent redeploy. Prefix it with the geography the stack grants, read from its `BedrockGeoRegion` output; a `us.` prefix on a `global` deployment is granted nothing and fails at turn 0.
 - **Per task:** `model_id` in the task payload
 - **Platform-wide:** the `bedrockModels` context plus the layer-2 call sites above
 

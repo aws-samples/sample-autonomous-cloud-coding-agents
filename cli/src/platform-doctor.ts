@@ -61,6 +61,32 @@ const DEFAULT_BEDROCK_MODEL_ID =
 
 export type DoctorCheckStatus = 'pass' | 'fail' | 'warn';
 
+/**
+ * Why a probe failed, which decides whether its remedy may be stated as fact.
+ *
+ * `fail` remedies here are directive — "remove the model", "enable model access",
+ * "check the Region" — so they may only be given when the service ANSWERED and the
+ * answer was negative. A binary `accessDenied ? warn : fail` also routed throttling,
+ * 5xx, timeouts and expired credentials into that branch, reporting healthy
+ * deployments as broken and exiting doctor non-zero because one call happened to fail.
+ */
+type ProbeFailure = 'denied' | 'absent' | 'unverified';
+
+function classifyProbeFailure(err: unknown): ProbeFailure {
+  // Name AND message: a real denial carries the identifier only in `err.name`
+  // (`AccessDeniedException`), while its message reads "User: … is not authorized to
+  // perform: …", so matching the message alone never fires.
+  const text = `${err instanceof Error ? err.name : ''} ${err instanceof Error ? err.message : String(err)}`;
+  if (/AccessDenied|Unauthorized|not authorized/i.test(text)) return 'denied';
+  if (/ResourceNotFound|ValidationException|NoSuchResource|not found|does not exist/i.test(text)) {
+    return 'absent';
+  }
+  return 'unverified';
+}
+
+/** `absent` is the only definite negative, so it is the only one that fails. */
+const statusFor = (f: ProbeFailure): DoctorCheckStatus => (f === 'absent' ? 'fail' : 'warn');
+
 export interface DoctorCheckResult {
   readonly id: string;
   readonly label: string;
@@ -373,16 +399,18 @@ async function checkLambdaMicrovmAvailability(
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    const errorName = err instanceof Error ? err.name : '';
-    const accessDenied = /AccessDenied|Unauthorized|not authorized/i.test(`${errorName} ${message}`);
+    const failure = classifyProbeFailure(err);
     return {
       id,
       label,
-      status: accessDenied ? 'warn' : 'fail',
-      detail: accessDenied
+      status: statusFor(failure),
+      detail: failure === 'denied'
         ? `${message}. Cannot verify Lambda MicroVM availability in ${region}; check IAM permissions for `
           + 'lambda-microvms List* actions.'
-        : `${message}. ${LAMBDA_MICROVM_REMEDY}`,
+        : failure === 'absent'
+          ? `${message}. ${LAMBDA_MICROVM_REMEDY}`
+          : `${message}. The check did not complete, so MicroVM availability in ${region} is unknown — `
+            + 'not evidence it is unavailable. Re-run.',
     };
   }
 }
@@ -407,14 +435,15 @@ async function checkBedrockModel(region: string, modelId: string): Promise<Docto
     // perform: …". So `message.includes('AccessDenied')` never fires, and an
     // operator on a least-privilege role got `fail` — which exits doctor non-zero
     // and reports a healthy stack as broken.
-    const errorName = err instanceof Error ? err.name : '';
-    const accessDenied = /AccessDenied|Unauthorized|not authorized/i.test(`${errorName} ${message}`);
-    const status: DoctorCheckStatus = accessDenied ? 'warn' : 'fail';
+    const failure = classifyProbeFailure(err);
     return {
       id,
       label,
-      status,
-      detail: `${message} Enable model access in the Bedrock console if tasks fail at invoke time.`,
+      status: statusFor(failure),
+      detail: failure === 'unverified'
+        ? `${message} The check did not complete, so model access is unknown — re-run before `
+          + 'changing anything.'
+        : `${message} Enable model access in the Bedrock console if tasks fail at invoke time.`,
     };
   }
 }

@@ -157,8 +157,8 @@ describe('geoPrefixOf', () => {
 
   it('matches us-gov as us-gov regardless of list order', () => {
     // Independent of ordering: the match requires `<geo>` followed by a literal `.`,
-    // so `us.` cannot match `us-gov.…`. Asserted because the list is written
-    // longest-first and a future tidy-up must not be read as load-bearing.
+    // so `us.` cannot match `us-gov.…`. The list is NOT sorted by length (`apac`
+    // follows `us`), which is why this is asserted behaviourally.
     expect(geoPrefixOf('us-gov.anthropic.claude-opus-5')).toBe('us-gov');
     expect(geoPrefixOf('us.anthropic.claude-opus-5')).toBe('us');
   });

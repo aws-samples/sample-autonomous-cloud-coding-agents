@@ -218,10 +218,10 @@ export interface BlueprintProps {
  *
  * Create: PutItem with status='active' and all config fields. Update: UpdateItem,
  * which SETs the fields a Blueprint declares and REMOVEs only per-repo **asset
- * refs** it no longer declares. Other dropped overrides are intentionally carried
- * forward rather than cleared — see `clearedOverrideFields` for why a blanket clear
- * was destructive (onUpdate runs on every deploy, and the CLI is a sanctioned
- * co-writer per ADR-017).
+ * refs** it no longer declares. Other dropped overrides are carried forward, not
+ * cleared: `onUpdate` runs on every deploy and `bgagent repo onboard --model` is a
+ * sanctioned second writer of the same row (ADR-017), so a blanket clear deleted an
+ * operator's CLI pin on unrelated redeploys.
  * Delete: UpdateItem to set status='removed' and TTL for eventual cleanup.
  *
  * NOTE: Timestamps (onboarded_at, updated_at) are captured at CDK synth time,
@@ -376,12 +376,12 @@ export class Blueprint extends Construct {
         parameters: {
           TableName: props.repoTable.tableName,
           Key: { repo: { S: props.repo } },
-          UpdateExpression: `SET #status = :active, #updated = :now${this.buildUpdateFields(props)}${this.buildRemoveClause(props)}`,
+          UpdateExpression: `SET #status = :active, #updated = :now${this.buildUpdateFields(props)}${this.buildRemoveClause()}`,
           ExpressionAttributeNames: {
             '#status': 'status',
             '#updated': 'updated_at',
             ...this.buildExpressionNames(props),
-            ...this.buildRemoveNames(props),
+            ...this.buildRemoveNames(),
           },
           ExpressionAttributeValues: {
             ':active': { S: 'active' },
@@ -496,36 +496,14 @@ export class Blueprint extends Construct {
     return empty;
   }
 
-  /** Per-repo overrides to clear when their prop is dropped.
-   *
-   *  EMPTY, deliberately, and this is the second attempt at it. Clearing `model_id`
-   *  when a Blueprint declares no `agent.modelId` looked symmetric with the asset
-   *  refs above, but it is not: `onUpdate`'s parameters embed a synth-time timestamp,
-   *  so CloudFormation issues an Update on EVERY deploy, and `bgagent repo onboard
-   *  --model` is a sanctioned second writer of this same row (ADR-017) that
-   *  deliberately carries the value forward. The clear therefore deleted an
-   *  operator's CLI pin on every unrelated redeploy — and the troubleshooting guide
-   *  prescribes that CLI pin as the fix for a wrong model.
-   *
-   *  Worst case was this very upgrade: a deployer who pinned `us.` per repo would
-   *  lose the pin AND get the default flipped to `global.` in one deploy.
-   *
-   *  The underlying gap is real but wider than one column — 12 other SET-only fields
-   *  survive being dropped too — and fixing it needs an explicit "clear" signal
-   *  (`modelId: null`) plus a warning, not a silent delete. Tracked separately.
-   */
-  private clearedOverrideFields(_props: BlueprintProps): string[] {
-    return [];
-  }
-
-  private buildRemoveClause(props?: BlueprintProps): string {
-    const fields = [...this.emptyAssetFields(), ...(props ? this.clearedOverrideFields(props) : [])];
+  private buildRemoveClause(): string {
+    const fields = this.emptyAssetFields();
     return fields.length > 0 ? ` REMOVE ${fields.map(f => `#${f}`).join(', ')}` : '';
   }
 
-  private buildRemoveNames(props?: BlueprintProps): Record<string, string> {
+  private buildRemoveNames(): Record<string, string> {
     const names: Record<string, string> = {};
-    const fields = [...this.emptyAssetFields(), ...(props ? this.clearedOverrideFields(props) : [])];
+    const fields = this.emptyAssetFields();
     for (const f of fields) names[`#${f}`] = f;
     return names;
   }
