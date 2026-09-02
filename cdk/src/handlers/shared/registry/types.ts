@@ -100,6 +100,23 @@ export interface RegistryRecord {
   readonly createdAt?: string;
 }
 
+/** A record as a browse surface (`show`) sees it: either fully parsed, or a
+ *  marker that a record exists at these coordinates but its descriptor payload
+ *  did not parse. The envelope coordinates (name/version/status) stay readable
+ *  even when the payload is corrupt, so `show` can surface the version — flagged
+ *  as malformed — instead of dropping it and 404-ing an asset whose only
+ *  versions are corrupt (#791). */
+export type RegistryBrowseEntry =
+  | { readonly malformed: false; readonly record: RegistryRecord }
+  | {
+    readonly malformed: true;
+    readonly kind: string;
+    readonly namespace: string;
+    readonly name: string;
+    readonly version: string;
+    readonly status: RegistryStatus;
+  };
+
 /** What the resolver hands back for one ref: enough to load the asset without the
  *  caller knowing where the bytes live. */
 export interface ResolvedAsset {
@@ -121,6 +138,7 @@ export interface ResolvedAssetBundle {
 export type ResolutionFailureReason =
   | 'NO_MATCHING_VERSION'
   | 'REMOVED'
+  | 'MALFORMED'
   | 'INVALID_CONSTRAINT'
   | 'INVALID_REGISTRY_REF';
 
@@ -132,6 +150,45 @@ export class RegistryResolutionError extends Error {
   ) {
     super(message);
     this.name = 'RegistryResolutionError';
+  }
+}
+
+/** Which stage of descriptor decoding failed. Every arm is a *present but
+ *  unparseable* payload — the discriminator lets a reader tell YAML-frontmatter
+ *  corruption apart from a bad `x-abca-runtime` value or a non-JSON CUSTOM/MCP
+ *  body without re-inspecting the cause. */
+export type MalformedReason =
+  // MALFORMED_FRONTMATTER: SKILL.md frontmatter block failed to YAML-parse.
+  // MALFORMED_RUNTIME: `x-abca-runtime` value is not decodable base64/JSON.
+  // MALFORMED_DESCRIPTOR: CUSTOM or MCP descriptor body is not valid JSON.
+  | 'MALFORMED_FRONTMATTER'
+  | 'MALFORMED_RUNTIME'
+  | 'MALFORMED_DESCRIPTOR';
+
+/**
+ * Raised when a record's descriptor payload is present but unparseable — a
+ * SKILL.md frontmatter block that fails to YAML-parse, an `x-abca-runtime` value
+ * that is not decodable base64/JSON, or a CUSTOM/MCP body that is not valid JSON
+ * (see {@link MalformedReason}). Distinct from an *absent* record and from an
+ * *empty* runtime: a malformed payload must be rejected, not silently collapsed
+ * to `{}`. Collapsing erases the publisher (attribution) and runtime, making a
+ * malformed record indistinguishable from a legitimately empty one and letting
+ * attacker-influenced input drop an audit-critical trust field (#791). The
+ * frontmatter-injection defense itself (#246 review B1/B2) lives on the *write*
+ * side — `buildSkillMd` emits every value through a YAML dumper that
+ * quotes/escapes newlines, so no discovery field can smuggle a shadowing key;
+ * surfacing a genuine parse failure here is about not masking corruption, not
+ * about the injection defense. Mirrors `RegistryRecordMalformedError` in
+ * `agent/src/registry/client.py`.
+ */
+export class RegistryRecordMalformedError extends Error {
+  constructor(
+    readonly reason: MalformedReason,
+    message: string,
+    readonly cause?: unknown,
+  ) {
+    super(message);
+    this.name = 'RegistryRecordMalformedError';
   }
 }
 
