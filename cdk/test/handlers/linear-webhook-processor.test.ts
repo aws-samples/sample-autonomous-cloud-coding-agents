@@ -19,24 +19,6 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-/**
- *  MIT No Attribution
- *
- *  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
- *
- *  Permission is hereby granted, free of charge, to any person obtaining a copy of
- *  the Software without restriction, including without limitation the rights to
- *  use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
- *  the Software, and to permit persons to whom the Software is furnished to do so.
- *
- *  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- *  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- *  SOFTWARE.
- */
 
 const ddbSend = jest.fn();
 jest.mock('@aws-sdk/client-dynamodb', () => ({ DynamoDBClient: jest.fn(() => ({})) }));
@@ -1112,6 +1094,81 @@ describe('every channel_metadata builder carries the vault fields', () => {
       if (next !== '...vaultMetadata(resolved),') offenders.push(i + 1);
     });
     expect(offenders).toEqual([]);
+  });
+
+  test('the LABEL-trigger path actually emits the vault fields (behavioural)', async () => {
+    // The structural check above cannot see this builder: it assigns onto an existing
+    // object instead of constructing a literal, so the one path `vaultMetadata` was
+    // written for was the one path its own guard never covered. Asserted on the
+    // channel_metadata that reaches createTaskCore, because that is the thing the agent
+    // reads — a source pattern cannot prove the fields arrive.
+    ddbSend
+      .mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'active' } })
+      .mockResolvedValueOnce({
+        Item: {
+          linear_identity: 'org-1#user-1',
+          platform_user_id: 'cognito-user-1',
+          status: 'active',
+        },
+      });
+    resolveLinearOauthTokenMock.mockResolvedValue({
+      accessToken: 'lin_at',
+      scope: 'read write',
+      workspaceSlug: 'acme',
+      oauthSecretArn: 'arn:aws:secretsmanager:us-east-1:123:secret:bgagent-linear-oauth-acme',
+      providerName: 'bgagent-linear-oauth-acme',
+      vaultUserId: 'linear-ws-acme',
+    });
+    createTaskCoreMock.mockResolvedValueOnce({
+      statusCode: 201,
+      body: JSON.stringify({ data: { task_id: 'T1' } }),
+    });
+
+    await handler(eventWith(issue()));
+
+    expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+    const [, ctx] = createTaskCoreMock.mock.calls[0];
+    expect(ctx.channelMetadata).toMatchObject({
+      linear_provider_name: 'bgagent-linear-oauth-acme',
+      linear_vault_user_id: 'linear-ws-acme',
+      linear_workspace_id: 'org-1',
+    });
+  });
+
+  test('a workspace with NO provider gets no vault fields, so SM-only installs are unchanged', async () => {
+    // The absent-provider case is what keeps the helper honest: spreading it
+    // unconditionally would hand the agent a provider name for a workspace that has
+    // none, and it would try to mint against a provider that does not exist.
+    //
+    // The resolver mock is set explicitly rather than leaning on the suite default —
+    // this describe has no beforeEach of its own, so an ambient value would carry over
+    // from the vault-enabled test above and the assertion would pass or fail on
+    // ordering rather than on behaviour.
+    resolveLinearOauthTokenMock.mockResolvedValue({
+      accessToken: 'lin_at',
+      scope: 'read write',
+      workspaceSlug: 'acme',
+      oauthSecretArn: 'arn:aws:secretsmanager:us-east-1:123:secret:bgagent-linear-oauth-acme',
+    });
+    ddbSend
+      .mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'active' } })
+      .mockResolvedValueOnce({
+        Item: {
+          linear_identity: 'org-1#user-1',
+          platform_user_id: 'cognito-user-1',
+          status: 'active',
+        },
+      });
+    createTaskCoreMock.mockResolvedValueOnce({
+      statusCode: 201,
+      body: JSON.stringify({ data: { task_id: 'T1' } }),
+    });
+
+    await handler(eventWith(issue()));
+
+    const [, ctx] = createTaskCoreMock.mock.calls[0];
+    expect(ctx.channelMetadata).not.toHaveProperty('linear_provider_name');
+    expect(ctx.channelMetadata).not.toHaveProperty('linear_vault_user_id');
   });
 
   test('there is more than one such builder, so the check is not vacuous', () => {

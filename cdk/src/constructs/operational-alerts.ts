@@ -184,7 +184,8 @@ export class OperationalAlerts extends Construct {
    * role's inline policy overflows, CDK spills the excess into an `OverflowPolicy`
    * created during synth — after `addResourceSuppressions(..., applyToChildren)`
    * has already resolved the child tree — so a construct-scoped suppression
-   * silently misses it. See {@link suppressPublisherKmsWildcard}.
+   * silently misses it. `OVERFLOW_SUPPRESSIONS` in `cdk/src/stacks/agent.ts` is
+   * where that by-path pass lives; add the grantee's overflow-policy path there.
    */
   public grantPublish(grantee: iam.IGrantable): void {
     this.topic.grantPublish(grantee);

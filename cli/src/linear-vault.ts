@@ -296,8 +296,15 @@ export type VaultConsentStep =
      * Exposed even though `bgagent linear setup` currently finalizes with the id the
      * operator pastes from the landing page: dropping it is what made the first
      * implementation hang, and a non-interactive caller needs it.
+     *
+     * OPTIONAL, and deliberately not enforced. AgentCore models `sessionUri` as
+     * optional on the token response, so an absent value is the service's contract
+     * rather than a fault — throwing would refuse a consent the interactive flow can
+     * still complete from the pasted id. Optionality puts the absence in the type so a
+     * non-interactive caller has to handle it, instead of an empty string that reads
+     * as a session.
      */
-    readonly sessionUri: string;
+    readonly sessionUri?: string;
     /** Poll this to check whether the token has been minted yet. */
     readonly poll: () => Promise<string | null>;
   };
@@ -410,7 +417,7 @@ export async function beginVaultConsent(args: {
   return {
     kind: 'consent-required',
     authorizationUrl: first.authUrl,
-    sessionUri: first.sessionUri ?? '',
+    ...(first.sessionUri && { sessionUri: first.sessionUri }),
     poll: async () => (await requestToken(false)).token,
   };
 }
