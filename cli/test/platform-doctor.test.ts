@@ -238,6 +238,54 @@ describe('doctor Bedrock catalog check', () => {
   });
 });
 
+/**
+ * The `bedrock_model` catalog check's own error classification.
+ *
+ * Its two siblings each pin Throttling and ResourceNotFound; this one pinned only the
+ * pass path, so reverting its call site to the old binary form left the CLI suite green.
+ * `fail` here tells the operator to enable model access in the console — wrong, and
+ * wasted effort, when the call simply did not complete.
+ */
+describe('doctor Bedrock catalog check error classification', () => {
+  async function catalogCheck(err: unknown): Promise<DoctorCheckResult> {
+    bedrockSendMock.mockRejectedValue(err);
+    stackOutputMock.mockImplementation(async (_r: string, _s: string, output: string) =>
+      (output === 'LinearWorkspaceRegistryTableName' ? REGISTRY : null));
+    const checks = await runPlatformDoctor({ region: 'us-east-1', stackName: 'Abca' });
+    const check = checks.find((c) => c.id === 'bedrock_model');
+    if (!check) throw new Error('doctor no longer reports a Bedrock catalog check');
+    return check;
+  }
+
+  it.each([
+    ['ThrottlingException', 'Rate exceeded'],
+    ['InternalServerException', 'Internal server error'],
+    ['TimeoutError', 'socket hang up'],
+  ])('warns without prescribing console changes on a %s', async (name, msg) => {
+    const err = new Error(msg);
+    err.name = name;
+    const check = await catalogCheck(err);
+    expect(check.status).toBe('warn');
+    expect(check.detail).toMatch(/did not complete/);
+    expect(check.detail).not.toMatch(/Enable model access/);
+  });
+
+  it('warns on a denial — a least-privilege caller says nothing about the model', async () => {
+    const denied = new Error('User: … is not authorized to perform: bedrock:GetFoundationModel');
+    denied.name = 'AccessDeniedException';
+    expect((await catalogCheck(denied)).status).toBe('warn');
+  });
+
+  it('FAILS, with the console remedy, when the model is definitively absent', async () => {
+    // The one case that earns the directive remedy: the service answered "no such model".
+    const absent = new Error('ResourceNotFoundException: model not found');
+    absent.name = 'ResourceNotFoundException';
+    const check = await catalogCheck(absent);
+    expect(check.status).toBe('fail');
+    expect(check.detail).toMatch(/Enable model access/);
+  });
+});
+
 describe('doctor Bedrock inference-profile check', () => {
   /** Drive the doctor with a given BedrockGeoRegion output and Bedrock behaviour. */
   async function profileCheck(

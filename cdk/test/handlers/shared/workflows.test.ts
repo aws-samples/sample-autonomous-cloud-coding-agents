@@ -337,11 +337,13 @@ describe('disallowedWorkflowModel (WORKFLOWS.md rule 13)', () => {
     expect(missing).toEqual([]);
   });
 
-  test('the allow-list admits nothing that is not granted', () => {
-    // The other direction, which the old test could not see: an id admitted here but
-    // absent from the grant list passes admission and then fails at turn 0 with
-    // AccessDenied. The file's own comment warns about exactly this; now it is
-    // enforced instead of hoped for.
+  test('the allow-list is exactly the granted set × every geography (admission is geo-blind)', () => {
+    // NOT a grant-parity proof, and worth being explicit about: both sides are built by
+    // the same `flatMap` over the same two constants, so this can only fail if that
+    // one-line derivation is edited. What it does pin is that the derivation stays
+    // exactly "granted models × all geographies" — which means six of the seven
+    // geographies are admitted while the deploy grants none of them. That gap is
+    // deliberate and tracked in #846; the fallback is a turn-0 AccessDenied.
     const grantedForms = new Set<string>();
     for (const bare of DEFAULT_BEDROCK_MODEL_IDS) {
       grantedForms.add(bare);

@@ -149,10 +149,44 @@ it('treats an all-whitespace deployedGeo as unknown, not as a match', () => {
 });
 
 describe('geoPrefixOf', () => {
-  it('recognizes every geography the CDK models', () => {
+  it('recognizes every geography in its own list', () => {
     for (const geo of BEDROCK_GEO_PREFIXES) {
       expect(geoPrefixOf(`${geo}.anthropic.claude-opus-5`)).toBe(geo);
     }
+  });
+
+  /**
+   * The forcing function this list previously lacked.
+   *
+   * `BEDROCK_GEO_PREFIXES` is a hand-written mirror of the CDK's geography list (the CLI
+   * is a separate package and does not depend on CDK). The loop above cannot detect
+   * drift, because it iterates the very list it validates — so when the alpha enum gains
+   * a geography, the CDK literal is forced to update by its own parity test while this
+   * one silently lags. On a `-c bedrockGeoRegion=<new>` deploy that lag makes
+   * `assertModelIdUsable` reject a correctly-formed granted model as "a bare
+   * foundation-model id", and stops `platform-doctor` stripping the prefix at all.
+   *
+   * Read as TEXT rather than imported, because importing the CDK module here is what the
+   * package boundary exists to prevent — the same technique
+   * `cdk/test/contracts/model-default-docs-parity.test.ts` uses to pin `agent/src/models.py`.
+   */
+  it('stays in sync with the CDK geography list', () => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const fs = require('fs') as typeof import('fs');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const path = require('path') as typeof import('path');
+    const src = fs.readFileSync(
+      path.resolve(__dirname, '../../cdk/src/handlers/shared/bedrock-model-constants.ts'),
+      'utf8',
+    );
+    // Anchor on the declaration, and skip past the type annotation: `readonly string[]`
+    // contains an empty `[]` that a naive first-bracket search matches instead.
+    const decl = src.slice(src.indexOf('export const BEDROCK_GEO_REGIONS'));
+    const assign = decl.slice(decl.indexOf('='));
+    const literal = assign.slice(assign.indexOf('['), assign.indexOf(']') + 1);
+    const cdkGeos = [...literal.matchAll(/'([a-z-]+)'/g)].map((m) => m[1]);
+    expect(cdkGeos.length).toBeGreaterThan(0);
+    expect([...BEDROCK_GEO_PREFIXES].sort()).toEqual([...cdkGeos].sort());
   });
 
   it('matches us-gov as us-gov regardless of list order', () => {

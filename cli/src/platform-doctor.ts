@@ -511,29 +511,18 @@ async function checkBedrockInferenceProfile(
     // perform: …". So `message.includes('AccessDenied')` never fires, and an
     // operator on a least-privilege role got `fail` — which exits doctor non-zero
     // and reports a healthy stack as broken.
-    const errorName = err instanceof Error ? err.name : '';
-    const both = `${errorName} ${message}`;
-    const accessDenied = /AccessDenied|Unauthorized|not authorized/i.test(both);
-    // THREE outcomes. `fail` here tells the operator the model or geography is wrong,
-    // so it must be reserved for an error that PROVES it: the service answered, and
-    // the answer was "no such profile". A binary `accessDenied ? warn : fail` also
-    // routed throttling, 5xx, timeouts and expired credentials into that verdict —
-    // reporting a healthy deployment as broken and exiting doctor non-zero because a
-    // call happened to fail.
-    const definitivelyAbsent =
-      /ResourceNotFound|ValidationException|NoSuchResource|not found|does not exist/i.test(both);
-    const status: DoctorCheckStatus = accessDenied || !definitivelyAbsent ? 'warn' : 'fail';
+    const failure = classifyProbeFailure(err);
     // The remedy depends on WHICH happened, so it cannot be shared. Rendering the
     // denial case showed why the old shared string was wrong: it appended "Either
     // <model> has no profile in that geography … tasks would fail at turn 0", drawing
     // a conclusion about the PROFILE from an error about the CALLER.
     let detail: string;
-    if (accessDenied) {
+    if (failure === 'denied') {
       detail = `${message} That is a permissions gap on the caller, not evidence the profile is `
         + `missing — the deployment grants '${geoRegion}' profiles (bedrockGeoRegion), and `
         + 'whether this one resolves is unknown until re-run with credentials holding '
         + 'bedrock:GetInferenceProfile.';
-    } else if (definitivelyAbsent) {
+    } else if (failure === 'absent') {
       detail = `${message} The deployment grants '${geoRegion}' profiles (bedrockGeoRegion). `
         + `Either ${bareModelId} has no profile in that geography, or this account lacks its `
         + 'entitlements — tasks would fail at turn 0 with AccessDenied.';
@@ -542,7 +531,7 @@ async function checkBedrockInferenceProfile(
         + `${bareModelId} resolves in '${geoRegion}' — treat it as unverified, not as a `
         + 'misconfiguration, and re-run.';
     }
-    return { id, label, status, detail };
+    return { id, label, status: statusFor(failure), detail };
   }
 }
 
@@ -604,19 +593,19 @@ async function checkGrantedModelProfiles(
     try {
       await bedrock.send(new GetInferenceProfileCommand({ inferenceProfileIdentifier: profileId }));
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
       const errorName = err instanceof Error ? err.name : '';
-      const both = `${errorName} ${message}`;
-      // Name AND message: a denial carries the identifier only in `err.name`.
-      if (/AccessDenied|Unauthorized|not authorized/i.test(both)) {
-        denied.push(profileId);
-      } else if (/ResourceNotFound|ValidationException|NoSuchResource|not found|does not exist/i.test(both)) {
-        // Definitive: the service answered, and its answer was "no such profile".
-        missing.push(profileId);
-      } else {
-        // Everything else — throttling, 5xx, timeouts, DNS, expired creds. The check
-        // did not run, which is not evidence about the model either way.
-        unverified.push(`${profileId} (${errorName || 'unknown error'})`);
+      switch (classifyProbeFailure(err)) {
+        case 'denied':
+          denied.push(profileId);
+          break;
+        case 'absent':
+          // The service answered, and its answer was "no such profile".
+          missing.push(profileId);
+          break;
+        default:
+          // Throttling, 5xx, timeouts, DNS, expired creds — the check did not run, which
+          // is not evidence about the model either way.
+          unverified.push(`${profileId} (${errorName || 'unknown error'})`);
       }
     }
   }

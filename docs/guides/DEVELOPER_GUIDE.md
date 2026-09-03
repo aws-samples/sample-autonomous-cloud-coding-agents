@@ -123,7 +123,7 @@ See the [Cedar policy guide](./CEDAR_POLICY_GUIDE.md) for the full authoring ref
 | # | Layer | What it controls | Where | ID form |
 |---|---|---|---|---|
 | 1 | **IAM invoke allowlist** | Which models the agent's roles may invoke at all, and in which geography. The outer gate — everything below fails without it. | `DEFAULT_BEDROCK_MODEL_IDS` (`cdk/src/constructs/bedrock-models.ts`); override with CDK context `bedrockModels`. Geography via context `bedrockGeoRegion` (default `us`) | **Bare** (`anthropic.claude-…`) |
-| 2 | **Platform default model** | The model used when nothing narrower is set. Injected by the stack as `ANTHROPIC_MODEL`, derived from `bedrockGeoRegion`; the Python literal is the fallback a run with no env reaches. | `agent/src/config.py:563` (the `ANTHROPIC_MODEL` fallback) and `agent/src/models.py:157` (`TaskConfig.anthropic_model`) | Prefixed (`<geo>.anthropic.…`) |
+| 2 | **Platform default model** | The model used when nothing narrower is set. Injected by the stack as `ANTHROPIC_MODEL`, derived from `bedrockGeoRegion`; the Python literal is the fallback a run with no env reaches. | `PLATFORM_DEFAULT_MODEL_ID` (`cdk/src/handlers/shared/bedrock-model-constants.ts`) — the value actually injected, so the one to change; then the no-env fallbacks `agent/src/config.py:563` and `agent/src/models.py:157` (`TaskConfig.anthropic_model`) | Prefixed (`<geo>.anthropic.…`) |
 | 3 | **Auxiliary / fast model** | The small model Claude Code uses for auxiliary work (WebFetch page summarization, the pre-flight safety check). | Stack env `ANTHROPIC_DEFAULT_HAIKU_MODEL` (`cdk/src/stacks/agent.ts` (the runtime environment block)); agent-side fallback at `agent/src/config.py:569` | Prefixed (`<geo>.anthropic.…`) |
 | 4 | **Per-repo override** | One repository's model, with no agent redeploy. | Blueprint `agent.modelId` (`cdk/src/constructs/blueprint.ts`, `BlueprintProps.agent.modelId`) → RepoTable `model_id` (`cdk/src/handlers/shared/repo-config.ts:37`) → ECS injects `ANTHROPIC_MODEL` (`cdk/src/handlers/shared/strategies/ecs-strategy.ts:217`) | Prefixed (`<geo>.anthropic.…`) |
 | 5 | **Per-task / local** | One task's model. Payload `model_id` is aliased to `anthropic_model` (`agent/src/pipeline.py`, `_PAYLOAD_KEY_ALIASES`); local batch runs read `ANTHROPIC_MODEL` from the shell via `agent/run.sh`. | Task payload `model_id`; shell `ANTHROPIC_MODEL` | Prefixed (`<geo>.anthropic.…`) |
@@ -185,11 +185,12 @@ Changing the geography requires a **redeploy**, because the IAM grants are scope
 
 ### Bumping the default model
 
-1. Add the **bare** ID to `DEFAULT_BEDROCK_MODEL_IDS` (`cdk/src/constructs/bedrock-models.ts`) and deploy, so the grant exists before anything tries to use it.
+1. Add the **bare** ID to `DEFAULT_BEDROCK_MODEL_IDS` (`cdk/src/handlers/shared/bedrock-model-constants.ts`) and deploy, so the grant exists before anything tries to use it.
 2. Confirm account-level Bedrock access for the model in the target Region.
-3. Update the **prefixed** ID in `agent/src/config.py` and `agent/src/models.py`.
-4. **Verify the SDK price table recognizes the model.** The `max_budget_usd` guardrail is computed from a price table bundled into the Claude Agent SDK at build time, so an unrecognized model silently degrades budget enforcement. Run `agent/scripts/diagnostics/test_sdk_smoke.py` with `ANTHROPIC_MODEL` set to the new ID, divide the reported cost by the input-token count, and confirm the implied rate matches [published Bedrock pricing](https://aws.amazon.com/bedrock/pricing/). A `$0.00` or wildly-off result means the table does not know the model and budgets cannot be trusted.
-5. The doc-drift test (`cdk/test/contracts/model-default-docs-parity.test.ts`) fails until the documented defaults here and in `agent/README.md` match `config.py`. That failure is the reminder, not a nuisance — update both.
+3. Change `PLATFORM_DEFAULT_MODEL_ID` (`cdk/src/handlers/shared/bedrock-model-constants.ts`). **This is the step that changes what deployed tasks run** — the stack injects it as `ANTHROPIC_MODEL` on every substrate, so editing only the Python literals below has no effect on any deployed task.
+4. Update the **prefixed** ID in `agent/src/config.py` and `agent/src/models.py` too. These are the fallback a run with no env reaches (a local batch run), and the doc-drift test compares against them.
+5. **Verify the SDK price table recognizes the model.** The `max_budget_usd` guardrail is computed from a price table bundled into the Claude Agent SDK at build time, so an unrecognized model silently degrades budget enforcement. Run `agent/scripts/diagnostics/test_sdk_smoke.py` with `ANTHROPIC_MODEL` set to the new ID, divide the reported cost by the input-token count, and confirm the implied rate matches [published Bedrock pricing](https://aws.amazon.com/bedrock/pricing/). A `$0.00` or wildly-off result means the table does not know the model and budgets cannot be trusted.
+6. The doc-drift test (`cdk/test/contracts/model-default-docs-parity.test.ts`) fails until the documented defaults here and in `agent/README.md` match `config.py`. That failure is the reminder, not a nuisance — update both.
 
 ### Cost and model selection
 
@@ -218,7 +219,7 @@ Token ratio 1.169; cost ratio 1.169 — identical. **The per-token rate is uncha
 
 - **Per repo:** Blueprint `agent.modelId` — no code change, no agent redeploy. Prefix it with the geography the stack grants, read from its `BedrockGeoRegion` output; a `us.` prefix on a `global` deployment is granted nothing and fails at turn 0.
 - **Per task:** `model_id` in the task payload
-- **Platform-wide:** the `bedrockModels` context plus the layer-2 call sites above
+- **Platform-wide:** `PLATFORM_DEFAULT_MODEL_ID` (what every substrate is told to invoke) plus the `bedrockModels` context (what it is granted) — both, or the deploy fails at synth for disagreeing
 
 The model must be in the IAM grant list (layer 1) or the task fails at turn 0 with `AccessDenied` — the grant is the gate, so a lighter model is only reachable if it is granted.
 

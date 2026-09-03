@@ -30,8 +30,8 @@ import { CliError } from './errors';
  * `us-gov.…` — the dot fails against the hyphen. The order below is arbitrary (it is
  * NOT sorted by length: `apac` follows `us`), and a test asserts the `us-gov` case
  * behaviourally so a future re-sort cannot be mistaken for load-bearing.
- * (`platform-doctor` builds a REGEX from a similar list, where alternation order
- * does matter more visibly — same reasoning recorded there.)
+ * (`platform-doctor` builds its `GEO_PREFIX_RE` from THIS list — it imports the constant
+ * rather than keeping a second copy.)
  */
 export const BEDROCK_GEO_PREFIXES = [
   'global', 'us-gov', 'us', 'eu', 'apac', 'jp', 'au',
@@ -60,11 +60,8 @@ export function geoPrefixOf(modelId: string): string | undefined {
  *    `<geo>.<model>` profile ARNs resolved at synth, so a `us.` model on a stack
  *    deployed with `bedrockGeoRegion=global` is granted nothing.
  *
- * Checks membership in the granted set when the stack exports one (`BedrockModelIds`).
- * An earlier version did not, on the reasoning that the CLI could not read
- * `bedrockModels` — which was wrong: it is recoverable from the deployed template, and
- * is now published as an output. Skipped only when the output is absent, i.e. on a
- * stack deployed before it existed.
+ * Checks membership in the granted set the stack exports (`BedrockModelIds`), and skips
+ * that check only when the output is absent — i.e. on a stack deployed before it existed.
  *
  * `deployedGeo` is null on a stack that predates the `BedrockGeoRegion` output — the
  * geography check is then skipped rather than assumed, but the bare-id check still

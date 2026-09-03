@@ -695,7 +695,37 @@ export class AgentStack extends Stack {
     // Scoping stays per-model (no Resource:'*'); account-level Bedrock access
     // remains the outer gate.
     const invokableBedrockModels: bedrock.IBedrockInvokable[] = [];
-    for (const modelId of resolveBedrockModelIds(this.node)) {
+    const grantedModelIds = resolveBedrockModelIds(this.node);
+
+    // The platform's OWN defaults must be inside the set this deploy grants.
+    //
+    // Asserted HERE rather than in `resolveBedrockModelIds` because this stack is where
+    // the two facts meet: it builds the grant from that list AND injects
+    // `PLATFORM_DEFAULT_MODEL_ID` / `PLATFORM_DEFAULT_AUX_MODEL_ID` as `ANTHROPIC_MODEL`
+    // / `ANTHROPIC_DEFAULT_HAIKU_MODEL` on all three substrates. The resolver only
+    // validates the list's shape and has no business knowing the defaults.
+    //
+    // Without this, `-c bedrockModels='["anthropic.claude-sonnet-4-6"]'` — a documented,
+    // code-change-free override — synthesizes clean while granting only Sonnet profiles
+    // and telling every substrate to invoke Opus 5. Every task with no per-repo pin then
+    // fails at turn 0 with AccessDenied naming no cause. Verified before fixing.
+    //
+    // This is the boundary the PR's other guards missed: a repo naming an ungranted model
+    // is rejected by `repo onboard --model`, a workflow naming one by admission — the
+    // platform naming one for itself was checked nowhere.
+    const ungrantedDefaults = [PLATFORM_DEFAULT_MODEL_ID, PLATFORM_DEFAULT_AUX_MODEL_ID]
+      .filter((m) => !grantedModelIds.includes(m));
+    if (ungrantedDefaults.length > 0) {
+      throw new Error(
+        'Context \'bedrockModels\' omits the platform default model(s) '
+        + `${ungrantedDefaults.map((m) => `'${m}'`).join(' and ')}. Every substrate is told to `
+        + 'invoke them regardless of that list, so tasks with no per-repo model would fail at '
+        + 'turn 0 with AccessDenied. Add them to the override, or change the platform default '
+        + 'in cdk/src/handlers/shared/bedrock-model-constants.ts alongside it.',
+      );
+    }
+
+    for (const modelId of grantedModelIds) {
       const foundationModel = new bedrock.BedrockFoundationModel(modelId, {
         supportsAgents: true,
         supportsCrossRegion: true,
@@ -984,6 +1014,14 @@ export class AgentStack extends Stack {
     // runtime. ``ecs`` implies the AgentCore runtime is ALSO available (the ECS
     // gate is additive), so an agentcore repo works on either substrate — and the
     // same holds for ``lambda-microvm`` (ADR-021).
+    new CfnOutput(this, 'ComputeSubstrate', {
+      value: ecsCluster ? 'ecs' : (lambdaMicrovm ? 'lambda-microvm' : 'agentcore'),
+      description: 'Compute substrate provisioned by this deploy: "agentcore" (default), "ecs" '
+        + '(deployed with --context compute_type=ecs; adds the Fargate substrate alongside AgentCore) '
+        + 'or "lambda-microvm" (--context compute_type=lambda-microvm; adds the Lambda MicroVMs '
+        + 'substrate alongside AgentCore).',
+    });
+
     // Both outputs are consumed by `platform doctor` and `repo onboard --model` to
     // reject an ungranted or wrong-geography model before a task reaches turn 0.
     new CfnOutput(this, 'BedrockModelIds', {
@@ -997,14 +1035,6 @@ export class AgentStack extends Stack {
       description: 'Cross-Region inference-profile geography this deploy grants (the '
         + '`bedrockGeoRegion` context key; "global" in the shipped cdk.json, "us" if no '
         + 'context is supplied at all). Model ids are invoked as `<geo>.<modelId>`.',
-    });
-
-    new CfnOutput(this, 'ComputeSubstrate', {
-      value: ecsCluster ? 'ecs' : (lambdaMicrovm ? 'lambda-microvm' : 'agentcore'),
-      description: 'Compute substrate provisioned by this deploy: "agentcore" (default), "ecs" '
-        + '(deployed with --context compute_type=ecs; adds the Fargate substrate alongside AgentCore) '
-        + 'or "lambda-microvm" (--context compute_type=lambda-microvm; adds the Lambda MicroVMs '
-        + 'substrate alongside AgentCore).',
     });
 
     if (lambdaMicrovm) {

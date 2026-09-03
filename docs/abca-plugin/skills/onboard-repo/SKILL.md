@@ -77,7 +77,8 @@ bgagent repo show <owner/repo>    # full resolved config (secret ARNs redacted)
 That's it — the repo is onboarded. Submit a task with the `submit-task` skill.
 
 **Pick a model that is already wired into the runtime.** With no `--model`, the repo
-uses the platform default (Sonnet 4.6). If you pass `--model`, use a cross-Region
+uses the platform default — read it from the stack's `BedrockGeoRegion` +
+`BedrockModelIds` outputs rather than a literal here. If you pass `--model`, use a cross-Region
 **inference profile ID** (e.g. `global.anthropic.claude-opus-5`), not a raw
 `anthropic.*` foundation-model ID. Only models the stack has granted the runtime can
 be invoked — see "Model not yet wired into the runtime" before choosing a model the
@@ -116,7 +117,8 @@ editing the stack and redeploying.
 ## Model not yet wired into the runtime (the one real code change)
 
 A repo can only use a model the **runtime IAM role has `grantInvoke` for**. The granted
-set is `DEFAULT_BEDROCK_MODEL_IDS` in `cdk/src/constructs/bedrock-models.ts` — Sonnet 4.6,
+set is `DEFAULT_BEDROCK_MODEL_IDS` in
+`cdk/src/handlers/shared/bedrock-model-constants.ts` — Sonnet 4.6,
 Opus 4.8, Opus 5, and Haiku 4.5 — and a deployed stack publishes it as the
 `BedrockModelIds` output, so read that rather than trusting this list to stay current:
 
@@ -133,12 +135,15 @@ Pin the **geo-prefixed inference-profile** form, matching the stack's `BedrockGe
 output (e.g. `global.anthropic.claude-opus-4-8`), not the bare id — Bedrock refuses bare
 ids for on-demand invocation, and the IAM grant is scoped to one geography's profile ARNs.
 
-Granting a **new** model is a deploy-time change, not a construct edit: the list is
-overridable via CDK context. `bedrockModels` takes an **array**, and that rules out the
-command-line form — `-c` supplies each value as a string, so
-`-c bedrockModels='["anthropic.claude-opus-5"]'` is rejected at synth ("must be a
-non-empty array"), and `--context-file` is accepted but has no effect on it. Set it in
-the `context` block of `cdk.json` and redeploy:
+Granting a **new** model is a deploy-time change, not a construct edit: the list is overridable via CDK context, either on the command line or in `cdk.json`. Both forms behave identically — the resolver JSON-parses the string `-c` delivers.
+
+```bash
+cdk deploy -c bedrockModels='["anthropic.claude-opus-5","anthropic.claude-haiku-4-5-20251001-v1:0","anthropic.claude-sonnet-4-6"]'
+```
+
+The override **REPLACES** the default list rather than adding to it, so it must include the two models the stack injects as `ANTHROPIC_MODEL` and `ANTHROPIC_DEFAULT_HAIKU_MODEL` — Opus 5 and Haiku 4.5. Omitting either fails at synth, naming the missing model, because every substrate is told to invoke them regardless of this list. (`--context-file` does not work for this: it is accepted and silently ignored.)
+
+For a persistent setting, put the same array in the `context` block of `cdk.json`:
 
 ```jsonc
 // cdk.json — this REPLACES the default list, so include the platform defaults

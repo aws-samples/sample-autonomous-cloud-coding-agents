@@ -64,9 +64,12 @@ export const BEDROCK_GEO_REGION_CONTEXT_KEY = 'bedrockGeoRegion';
 export const DEFAULT_BEDROCK_GEO_REGION = CrossRegionInferenceProfileRegion.US;
 
 /**
- * The geographies `@aws-cdk/aws-bedrock-alpha` actually models, as ENUM members —
- * the allow-list `resolveBedrockGeoRegion` validates against and the source of the
- * prefix rejection in `resolveBedrockModelIds`.
+ * The geographies `@aws-cdk/aws-bedrock-alpha` actually models, as ENUM members.
+ *
+ * Used for ONE thing: building {@link GEO_PREFIX_RE}, the prefix rejection in
+ * `resolveBedrockModelIds`. `resolveBedrockGeoRegion` validates against the exported
+ * `BEDROCK_GEO_REGIONS` literal instead, so widening the accepted set means editing
+ * that — not this.
  *
  * Construct-layer only, and deliberately NOT exported: this is the
  * `Object.values()` read of the alpha enum that pulls in `aws-cdk-lib`, so a runtime
@@ -201,5 +204,6 @@ export function resolveBedrockModelIds(node: Node): readonly string[] {
       );
     }
   }
+
   return override as string[];
 }

@@ -73,18 +73,21 @@ export interface WorkflowDescriptor {
 
 /**
  * Platform allow-list of Bedrock model ids a workflow may pin via
- * `agent_config.model.id` (WORKFLOWS.md rule 13 / §"Model selection"). Should
- * mirror the foundation models the agent runtime is granted to invoke — the
- * shared list in `cdk/src/constructs/bedrock-models.ts`
- * (`DEFAULT_BEDROCK_MODEL_IDS` / the `bedrockModels` context, #433) — accepting
- * both the bare id and the `us.`-prefixed cross-region inference-profile form.
+ * `agent_config.model.id` (WORKFLOWS.md rule 13 / §"Model selection").
  *
- * NOTE (#433 follow-up): this is a SEPARATE, hand-maintained list from the IAM
- * grant source. The `repo onboard --model` path is NOT gated by it (repo
- * `model_id` isn't validated here), but a custom workflow pinning a model added
- * via the `bedrockModels` context would still be rejected at create-task until
- * it's added here too. A future Phase 4 will source this from the repo
- * Blueprint; consolidating it with `bedrock-models.ts` is tracked separately.
+ * DERIVED from `DEFAULT_BEDROCK_MODEL_IDS`, not hand-maintained: each granted model's
+ * bare id plus one form per geography. Adding a model to that list widens this
+ * automatically, so the two cannot drift.
+ *
+ * Deliberately GEOGRAPHY-BLIND: it admits all seven geographies regardless of which one
+ * the deploy grants, because the deployed geography is not available where a
+ * module-level constant is built. A workflow pinning an undeployed geography therefore
+ * passes admission and fails at turn 0 with AccessDenied — the one boundary in this
+ * area that still resolves late. Tracked in #846; no shipped workflow pins a model
+ * today, so nothing reaches it yet.
+ *
+ * The `repo onboard --model` path is NOT gated by this list; it checks the stack's
+ * `BedrockModelIds` output instead, which is geography-aware.
  */
 export const WORKFLOW_MODEL_ALLOWLIST: readonly string[] = DEFAULT_BEDROCK_MODEL_IDS.flatMap(
   (bare) => [bare, ...BEDROCK_GEO_REGIONS.map((geo) => `${geo}.${bare}`)],
