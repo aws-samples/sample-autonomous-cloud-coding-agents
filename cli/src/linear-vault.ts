@@ -181,7 +181,7 @@ export async function lookupLinearVaultCallbackUrl(args: {
  * AgentCore reports a duplicate provider name as a **`ValidationException`**
  * ("Credential provider with name: <name> already exists"), NOT the
  * `ConflictException` the name suggests — live-caught when a second
- * `vault-setup` run aborted instead of updating. `ConflictException` is still
+ * onboarding run aborted instead of updating. `ConflictException` is still
  * accepted in case the service tightens this later, and the message check keeps
  * genuine validation errors (bad endpoints, malformed config) surfacing.
  */
@@ -336,8 +336,8 @@ export type VaultConsentStep =
  * Until `CompleteResourceTokenAuth` is called with that `session_id`, the session
  * stays open and `GetResourceOauth2Token` keeps returning an `authorizationUrl`
  * as if consent never happened — so a caller that only polls waits forever.
- * Live-caught: the first vault-setup implementation skipped this and hung on the
- * poll while the browser 404'd on an unlistened return URL.
+ * Live-caught: the first implementation skipped this and hung on the poll while the
+ * browser 404'd on an unlistened return URL.
  */
 export async function finalizeVaultConsent(args: {
   region: string;

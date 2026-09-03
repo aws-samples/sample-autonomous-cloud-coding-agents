@@ -916,8 +916,8 @@ describe('a vault_consent_required latch must be able to self-heal', () => {
   // goes to `revoked`, the resolver then returns before the vault is ever consulted
   // again, and nothing short of a human re-consent can overturn it. That would be
   // fine if the verdict were a measurement — but it is an inference from a token-less
-  // vault response, and this PR already fixed one bug (a row-parser fault) that
-  // produced it for a perfectly healthy workspace.
+  // vault response, and any upstream fault that drops the recorded subject produces
+  // it for a perfectly healthy workspace.
   const WORKLOAD = 'abca_linear_oauth';
   const INSTALLED_AT = '2026-08-01T00:00:00.000Z';
   let savedWorkload: string | undefined;

@@ -19,7 +19,7 @@
 
 /**
  * Tests for the pending-consent store, which carries a PKCE verifier between the
- * two `bgagent linear setup --hosted` invocations.
+ * two `bgagent linear setup` invocations a paste-back consent takes.
  *
  * The verifier is a ONE-TIME SECRET: with it plus a stolen authorization code an
  * attacker could complete the exchange. So the properties under test are security
@@ -84,7 +84,7 @@ describe('pending consent round-trip', () => {
     expect(fs.statSync(p).mode & 0o777).toBe(0o600);
   });
 
-  test('re-running --hosted overwrites the previous attempt rather than accumulating', () => {
+  test('re-running setup overwrites the previous attempt rather than accumulating', () => {
     savePendingConsent(entry({ codeVerifier: 'first' }));
     savePendingConsent(entry({ codeVerifier: 'second' }));
     expect(takePendingConsent('acme').codeVerifier).toBe('second');

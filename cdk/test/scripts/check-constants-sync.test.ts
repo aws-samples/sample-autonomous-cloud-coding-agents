@@ -21,9 +21,9 @@
  * Tests for `scripts/check-constants-sync.ts` — the cross-language constants
  * drift gate.
  *
- * WHY THESE EXIST: the script grew ~170 lines in this PR (the `platform_config`
- * allowlist, the hook-budget invariant, the ARN-pinning contract) with no test
- * anywhere, and it is a GATE — a rejection pattern that silently stops matching
+ * WHY THESE EXIST: the script carries several rejection patterns (the
+ * `platform_config` allowlist, the hook-budget invariant, the ARN-pinning contract)
+ * and it is a GATE — a rejection pattern that silently stops matching
  * turns the whole check into a no-op that still prints "OK". A gate whose failure
  * mode is a false pass has to be tested by making it fail.
  *

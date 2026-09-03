@@ -23,9 +23,10 @@
 // A workload identity is the AgentCore-side identity a task presents to the
 // Token Vault. It carries the allowlist of return URLs the 3LO
 // (USER_FEDERATION) consent flow is permitted to bounce back to — both the
-// hosted onboarding page and the CLI localhost loopback (spike findings F8/F9/
-// F11: the return URL is mandatory, allowlist-enforced, and multiple entries
-// coexist so the caller picks per-call).
+// hosted onboarding page and the CLI localhost loopback (spike findings F7/F8/
+// F9/F11: the return URL is mandatory, a hosted https URL works identically to
+// localhost, the allowlist is enforced, and both entries coexist so the caller
+// picks per-call).
 //
 // Unlike the Agent Registry (registry.ts), Create/Delete of a workload identity
 // are *synchronous* — the spike showed an immediate response — so this uses a

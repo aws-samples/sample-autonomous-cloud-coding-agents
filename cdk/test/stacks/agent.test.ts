@@ -1620,8 +1620,9 @@ describe('AgentStack Linear identity vault gate (#809)', () => {
     expect(rendered).toContain('abca_linear_oauth');
 
     // Hosted consent page ships with the gate, and its URL is published so
-    // `vault-setup --hosted` can find it. Without the output the CLI cannot
-    // resolve a return URL and --hosted fails closed.
+    // `bgagent linear setup` can read it from the stack. Without the output the CLI
+    // has no return URL to register and falls back to the localhost loopback, which
+    // is exactly what the hosted page exists to avoid.
     const outputs = template.toJSON().Outputs as Record<string, unknown>;
     expect(Object.keys(outputs)).toContain('LinearVaultConsentUrl');
     // The page ships in a NESTED stack so its ~13 resources do not eat the root's

@@ -133,11 +133,10 @@ def _resolve_linear_token_via_vault(
         # nosemgrep: py-silent-success-masking -- optional vault token; boto3 unavailable
         return ""
 
-    # One bot identity per workspace. Prefer the id recorded at consent time: the
-    # organization UUID is only knowable once a token exists, so deriving it would
-    # force a second consent during onboarding just to learn the org. Workspaces
-    # onboarded before it was recorded fall back to the derived form, which is what
-    # their grant is under. Must stay in step with the Lambda resolver.
+    # One bot identity per workspace. Prefer the id recorded at consent time — see
+    # `linearVaultUserIdForSlug` in cli/src/linear-vault.ts for why it is recorded
+    # rather than derived. The derived form below is the pre-#809 fallback, and must
+    # stay in step with `legacyWorkspaceUserId` in the Lambda resolver.
     user_id = recorded_user_id.strip() or f"linear-workspace-{workspace_id}"
 
     try:

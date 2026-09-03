@@ -28,9 +28,10 @@
 //
 // This page is the substrate-independent alternative: consent lands on a URL that
 // is reachable from anywhere, and the page shows the value the operator pastes back.
-// It serves BOTH onboarding steps, which is what removes localhost entirely:
-//   * direct OAuth (`bgagent linear setup`, Secrets-Manager path) redirects here with `code`
-//   * the vault 3LO bounce (`bgagent linear setup`) arrives with `session_id`
+// `bgagent linear setup` has two redirect legs, and this page serves BOTH, which is
+// what removes localhost entirely:
+//   * the direct OAuth leg (Secrets-Manager path) redirects here with `code`
+//   * the vault 3LO bounce arrives with `session_id`
 // Registering this one URL on the Linear app therefore replaces the localhost
 // callback rather than merely supplementing it.
 //
@@ -168,10 +169,10 @@ export class LinearVaultConsentPage extends Construct {
  *
  * The page + its delivery machinery (bucket, bucket policy, auto-delete custom
  * resource, distribution, OAC, and CDK's BucketDeployment singleton with its
- * AWS-CLI layer, role and policy) contribute ~10 resources. The root `AgentStack`
- * was at 486 and CloudFormation's hard limit is 500 per stack, so carrying them in
- * the root would spend most of the remaining headroom on a landing page. Nesting
- * gives them their own budget and costs the parent a single
+ * AWS-CLI layer, role and policy) contribute ~10 resources. `AgentStack` runs close
+ * enough to CloudFormation's hard 500-resource limit that carrying them in the root
+ * would spend a meaningful share of the remaining headroom on a landing page.
+ * Nesting gives them their own budget and costs the parent a single
  * `AWS::CloudFormation::Stack` — the same trade the Agent Registry makes.
  *
  * `consentUrl` is surfaced so the parent can register it on the workload identity's
