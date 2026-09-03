@@ -41,7 +41,7 @@ git clone https://github.com/aws-samples/sample-autonomous-cloud-coding-agents.g
 cd sample-autonomous-cloud-coding-agents
 
 # Trust mise config and install tools
-curl https://mise.run | sh
+command -v mise >/dev/null || curl https://mise.run | sh
 eval "$(mise activate bash)"
 mise trust
 mise install
