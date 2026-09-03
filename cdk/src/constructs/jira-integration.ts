@@ -405,7 +405,7 @@ export class JiraIntegration extends Construct {
     const webhookResource = jira.addResource('webhook');
     const webhookMethod = webhookResource.addMethod(
       'POST',
-      new apigw.LambdaIntegration(webhookFn),
+      new apigw.LambdaIntegration(webhookFn, { allowTestInvoke: false }),
       noneAuthOptions,
     );
 
@@ -413,7 +413,7 @@ export class JiraIntegration extends Construct {
     const linkResource = jira.addResource('link');
     linkResource.addMethod(
       'POST',
-      new apigw.LambdaIntegration(linkFn),
+      new apigw.LambdaIntegration(linkFn, { allowTestInvoke: false }),
       cognitoAuthOptions,
     );
 
