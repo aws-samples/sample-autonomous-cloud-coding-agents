@@ -17,6 +17,7 @@
  *  SOFTWARE.
  */
 
+import * as fs from 'fs';
 import { App, Stack } from 'aws-cdk-lib';
 import { Annotations, Match, Template } from 'aws-cdk-lib/assertions';
 import {
@@ -151,5 +152,43 @@ describe('buildApp — AgentCore AZ wiring', () => {
         appProps: { context: { [AGENTCORE_AZS_CONTEXT_KEY]: 'us-east-1b' } },
       }),
     ).rejects.toThrow(/must be a JSON array of availability-zone names/);
+  });
+});
+
+describe('buildApp — CloudFormation template-body budget (#852)', () => {
+  // CloudFormation caps a template body at 1 MB; CDK checks against
+  // `TEMPLATE_BODY_MAXIMUM_SIZE = 1e6` and, unlike the 500-resource ceiling, only
+  // raises an `@aws-cdk/core:Stack.templateSize` *warning* — so this ceiling fails
+  // **open**. A template can grow past it, synthesize cleanly, and fail at deploy.
+  // These assertions read the emitted artifact rather than `Template.fromStack`,
+  // because indentation is the thing under test and `Template` has already parsed
+  // it away.
+  const CDK_TEMPLATE_BODY_MAXIMUM_SIZE = 1_000_000;
+  // CDK starts warning at 80% of the maximum. Budgeting to the same number means a
+  // regression trips this assertion at exactly the point CDK would start warning,
+  // instead of silently riding the warning band up to the hard limit.
+  const TEMPLATE_BODY_BUDGET = CDK_TEMPLATE_BODY_MAXIMUM_SIZE * 0.8;
+
+  let templateText: string;
+
+  beforeAll(async () => {
+    const built = await app();
+    templateText = fs.readFileSync(
+      built.synth().getStackByName(STACK_NAME).templateFullPath,
+      'utf8',
+    );
+  });
+
+  it('emits the template without pretty-print indentation', () => {
+    // `suppressTemplateIndentation: true` in main.ts makes CDK pass `undefined` as
+    // JSON.stringify's `space` argument, collapsing the document to a single line.
+    // Roughly 31% of this template was indentation bytes, all of which counted
+    // against the 1 MB ceiling. Assert the shape, not the saving, so the test does
+    // not need re-baselining every time a resource is added.
+    expect(templateText).not.toContain('\n  ');
+  });
+
+  it('stays inside the template-body budget', () => {
+    expect(Buffer.byteLength(templateText, 'utf8')).toBeLessThan(TEMPLATE_BODY_BUDGET);
   });
 });

@@ -92,6 +92,13 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<App> {
       env,
       agentCoreAvailabilityZones: azResolution.zones,
       description: 'ABCA Development Stack (uksb-wt64nei4u6)',
+      // Emit compact JSON. ~31% of this template is pretty-print indentation, and
+      // CloudFormation's 1 MB template-body ceiling counts those bytes. Unlike the
+      // 500-resource ceiling — which CDK enforces by throwing `TooManyResourcesInStack`
+      // — the byte ceiling only raises an `@aws-cdk/core:Stack.templateSize` warning,
+      // so it fails *open*: a template can grow past it and still synthesize. CDK's own
+      // warning text names this prop as the remedy. Refs #852.
+      suppressTemplateIndentation: true,
     },
   );
 

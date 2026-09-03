@@ -1576,6 +1576,57 @@ describe('AgentStack tool-gateway gate (ADR-019 P1)', () => {
   });
 });
 
+describe('AgentStack CloudFormation resource budget (#852)', () => {
+  // The 500-resource limit is a hard, non-adjustable CloudFormation template quota,
+  // and CDK enforces it by *throwing* `TooManyResourcesInStack` during synth. The
+  // widest cell of the deploy gate is `compute_type=lambda-microvm` with the ADR-019
+  // tool gateway on: the MicroVM substrate is additive over AgentCore, and the gateway
+  // adds a flat +7 on every substrate. Before #852 that pairing synthesized 504
+  // resources — `main` could not produce a template for it at all — yet CI stayed
+  // green because no test had ever constructed the two flags *together*. This block
+  // exists so that the widest cell, not the default one, is what guards the ceiling.
+  //
+  // Budget is deliberately below 500 so this fails as a readable assertion with a
+  // named remedy, ten resources before synth starts throwing.
+  const WIDEST_CONFIG_RESOURCE_BUDGET = 490;
+
+  let template: Template;
+  let resourceCount: number;
+
+  beforeAll(() => {
+    const app = new App({
+      context: { compute_type: 'lambda-microvm', enableToolGateway: true },
+    });
+    const stack = new AgentStack(app, 'WidestConfigStack', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    });
+    // Throws `TooManyResourcesInStack` if this cell is over the hard ceiling, so
+    // reaching the assertions below is itself part of the guard.
+    template = Template.fromStack(stack);
+    resourceCount = Object.keys(template.toJSON().Resources ?? {}).length;
+  });
+
+  test('the widest deploy-gate cell stays inside the resource budget', () => {
+    // `Template.fromStack` counts one fewer than `cdk synth`, which also emits
+    // `AWS::CDK::Metadata`. Budget the synthesized number, so add that resource back.
+    expect(resourceCount + 1).toBeLessThanOrEqual(WIDEST_CONFIG_RESOURCE_BUDGET);
+  });
+
+  test('no Lambda permission is emitted for the API Gateway console test-invoke stage', () => {
+    // Every `LambdaIntegration` in this app passes `allowTestInvoke: false`. Left at
+    // its default `true`, CDK emits a second `AWS::Lambda::Permission` per method
+    // scoped to `method.testMethodArn` — 30 resources of the 500-resource budget, plus
+    // 30 extra `lambda:InvokeFunction` grants, so the API Gateway console's "TEST"
+    // button works. Nothing in this solution invokes it. Naming the offending logical
+    // IDs makes a regressed call site point straight at its own construct.
+    const offenders = Object.entries(template.findResources('AWS::Lambda::Permission'))
+      .filter(([, resource]) => JSON.stringify(resource).includes('test-invoke-stage'))
+      .map(([logicalId]) => logicalId);
+
+    expect(offenders).toEqual([]);
+  });
+});
+
 describe('AgentStack Agent Registry gate', () => {
   test.each([undefined, true, 'true'])(
     'enableAgentRegistry=%p includes the registry by default or explicit enablement',
