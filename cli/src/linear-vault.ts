@@ -64,9 +64,10 @@ export function linearVaultProviderName(workspaceSlug: string): string {
   return `bgagent-linear-oauth-${workspaceSlug}`;
 }
 
-/** The per-workspace user id bound to the vault federation session. One bot
- *  identity per workspace — must match the runtime resolvers' workspaceUserId
- *  (linear-vault-token.ts / config.py). */
+/** Subject for workspaces onboarded before `vault_user_id` was recorded on the
+ *  registry row. Fresh installs use {@link linearVaultUserIdForSlug}. Must match
+ *  the runtime fallbacks: `legacyWorkspaceUserId` (linear-vault-token.ts) and the
+ *  inlined form in `agent/src/config.py`. */
 export function linearVaultUserId(linearWorkspaceId: string): string {
   return `linear-workspace-${linearWorkspaceId}`;
 }

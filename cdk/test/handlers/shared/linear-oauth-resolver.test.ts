@@ -366,11 +366,17 @@ describe('resolveLinearOauthToken', () => {
     expect(sent.get('refresh_token')).toBe('rt-old');
     expect(sent.get('client_id')).toBe('cid');
     expect(sent.get('client_secret')).toBe('csec');
-    // PutSecretValue should have persisted the rotated token.
+    // PutSecretValue must persist the ROTATED pair, not just be called. The stored
+    // bundle is what the NEXT invocation reads: persisting the old refresh token
+    // leaves this call green while the following refresh replays a token Linear
+    // already invalidated on rotation — a grant that dies on its first refresh.
     const putCalls = clients.smSend.mock.calls.filter(
       (c) => c[0]!.constructor.name === 'PutSecretValueCommand',
     );
     expect(putCalls).toHaveLength(1);
+    const persisted = JSON.parse(putCalls[0][0].input.SecretString as string);
+    expect(persisted.access_token).toBe('lin_oauth_new');
+    expect(persisted.refresh_token).toBe('rt-new');
   });
 
   test('returns null when refresh request fails', async () => {

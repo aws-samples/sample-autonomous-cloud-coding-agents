@@ -64,6 +64,9 @@ const SECRET_CACHE_TTL_MS = 60_000;
 /** Refresh threshold: refresh tokens with <60s remaining. */
 const REFRESH_THRESHOLD_SECONDS = 60;
 
+/** Why a registry row was latched `revoked`. */
+type LinearRevocationReason = 'refresh_token_rejected' | 'vault_consent_required';
+
 /**
  * `revoked_reason` written when the vault answered with an authorization URL
  * instead of a token and no Secrets-Manager token could cover for it.
@@ -72,8 +75,6 @@ const REFRESH_THRESHOLD_SECONDS = 60;
  * string — the writer, the re-probe guard and the un-latch condition — and a typo
  * in any one of them silently turns the self-healing path off.
  */
-type LinearRevocationReason = 'refresh_token_rejected' | 'vault_consent_required';
-
 const VAULT_CONSENT_REVOCATION_REASON: LinearRevocationReason = 'vault_consent_required';
 
 /** `revoked_reason` written when Linear itself rejected the refresh token. */
@@ -106,12 +107,10 @@ export interface RegistryRow {
    */
   readonly provider_name?: string;
   /**
-   * The user id the vault grant was bound to at consent time.
-   *
-   * Recorded rather than derived from `linear_workspace_id`, because the
-   * organization UUID is only knowable once a token exists — deriving it forces a
-   * second consent just to learn the org. Absent on workspaces onboarded before
-   * this was stored; those fall back to the derived form.
+   * The user id the vault grant was bound to at consent time. Recorded rather than
+   * derived from `linear_workspace_id` — see `linearVaultUserIdForSlug` in
+   * `cli/src/linear-vault.ts`. Absent on workspaces onboarded before this was
+   * stored; those fall back to the derived form.
    */
   readonly vault_user_id?: string;
   /**
@@ -119,12 +118,10 @@ export interface RegistryRow {
    *
    * Read, not just written, because the two reasons differ in how much they are
    * worth believing. `refresh_token_rejected` is Linear itself refusing a refresh
-   * token — a fact. `vault_consent_required` is an INFERENCE from the vault
-   * answering with an authorization URL instead of a token, and this PR has
-   * already shipped one bug (`d415fd1f`, a row-parser fault) that produced that
-   * answer spuriously. Since the latch makes the resolver refuse the row, a
-   * spurious inference would be permanent: the vault is never retried, so the
-   * grant that still works is never consulted again. Rows latched on the
+   * token — a fact. `vault_consent_required` is an INFERENCE, which any upstream
+   * fault can produce spuriously. Since the latch makes the resolver refuse the
+   * row, a spurious inference would be permanent: the vault is never retried, so
+   * the grant that still works is never consulted again. Rows latched on the
    * inference are therefore re-probed — see `resolveLinearOauthToken`.
    */
   readonly revoked_reason?: LinearRevocationReason;
@@ -200,12 +197,8 @@ export interface ResolverOptions {
    */
   readonly onAuthorizationRevoked?: (detail: RevocationDetail) => Promise<void>;
   /**
-   * Override the vault token resolver in tests. Production leaves this unset and
-   * uses {@link resolveLinearTokenViaVault}. Returns the access token string, or
-   * null to fall back to the Secrets-Manager token.
-   */
-  /**
-   * Test seam for the vault call. Takes the FULL request, not a few unpacked
+   * Test seam for the vault call. Production leaves this unset and uses
+   * {@link resolveLinearTokenViaVault}. Takes the FULL request, not a few unpacked
    * fields: the earlier three-argument shape could not observe `vaultUserId`, so no
    * test at this seam could catch the subject being dropped upstream — and one was,
    * silently, by the row parser. A mock narrower than the real call hides exactly
@@ -241,18 +234,6 @@ export function isTokenExpiring(expiresAt: string, thresholdSec: number = REFRES
   return Date.now() + thresholdSec * 1000 >= ts;
 }
 
-/**
- * Resolve a usable Linear OAuth access token for the given workspace.
- *
- * On success: returns `{ accessToken, scope, workspaceSlug }`. Refreshes
- * silently if the cached token is expiring. Returns null on any failure
- * (registry miss, secret missing, refresh-token revoked) so callers can
- * gracefully no-op rather than blowing up.
- *
- * Throws ONLY for environment misconfigurations (e.g. workspace registry
- * env var unset, Linear OAuth client credentials env vars unset) — those
- * are deploy bugs, not runtime conditions.
- */
 export interface ResolvedLinearToken {
   readonly accessToken: string;
   readonly scope: string;
@@ -369,6 +350,16 @@ function defaultRevocationRecorder(
   };
 }
 
+/**
+ * Resolve a usable Linear OAuth access token for the given workspace. Refreshes
+ * silently if the cached token is expiring. Returns null on any failure
+ * (registry miss, secret missing, refresh-token revoked) so callers can
+ * gracefully no-op rather than blowing up.
+ *
+ * Throws ONLY for environment misconfigurations (e.g. workspace registry
+ * env var unset, Linear OAuth client credentials env vars unset) — those
+ * are deploy bugs, not runtime conditions.
+ */
 export async function resolveLinearOauthToken(
   linearWorkspaceId: string,
   registryTableName: string,
@@ -415,10 +406,11 @@ export async function resolveLinearOauthToken(
   // ─── Step 1b: AgentCore Identity vault (RFC #249 Phase 1) ────────
   // When the vault is enabled AND this workspace was onboarded through it
   // (provider_name recorded), mint the token via the Token Vault. Any failure
-  // (not consented, permission, throttle, provider missing) returns null and
-  // falls through to the Secrets-Manager path below — the vault NEVER blocks
-  // token resolution. Absent provider_name / disabled flag skips it entirely,
-  // so SM-only installs are unaffected.
+  // (not consented, permission, throttle, provider missing) classifies as
+  // `unavailable` and falls through to the Secrets-Manager path below. The one
+  // exception is a row already latched on the vault inference, which stops at the
+  // re-probe rather than falling through (see below). Absent provider_name /
+  // disabled flag skips this entirely, so SM-only installs are unaffected.
   const workloadName = vaultWorkloadIdentityName();
   if (row.provider_name && workloadName && (isVaultEnabled() || options.resolveViaVault)) {
     const viaVault = options.resolveViaVault ?? resolveLinearTokenViaVault;
@@ -437,12 +429,9 @@ export async function resolveLinearOauthToken(
     // row `revoked` while resolution still succeeds would take a functioning
     // workspace offline (the resolver refuses a non-active row).
     vaultConsentRequired = vaultResult.kind === 'consent-required';
-    // Gated on `recordRevocation` for the same reason the latch is: it is present only
-    // where the role holds the registry write. Five of the six minting Lambdas hold
-    // read-only, so an ungated clear meant an AccessDenied logged at `error` on every
-    // event for a workspace the resolver was serving correctly. The row then stays
-    // latched until the webhook processor — the one role that can write — re-probes,
-    // which is the same asymmetry the latch already has.
+    // Gated on `recordRevocation` for the same reason the latch is — it is present
+    // only where the role holds the registry write. The row therefore stays latched
+    // until the webhook processor, the one role that can write, re-probes.
     if (vaultResult.kind === 'token' && latchedOnVaultInference && recordRevocation) {
       // Best-effort: a failed un-latch must not fail the resolve that just succeeded,
       // and leaving the row `revoked` while returning a token would keep
@@ -465,11 +454,9 @@ export async function resolveLinearOauthToken(
         // returned so downstream SM-fallback wiring stays populated.
         oauthSecretArn: row.oauth_secret_arn,
         providerName: row.provider_name,
-        // The agent mints its own token and must use the SAME subject. Omitting it
-        // here — while the Secrets-Manager return below carried it — meant the
-        // SUCCESSFUL vault path was the one that failed to pass it on, so the agent
-        // derived the legacy subject, found no grant, and dropped back to a dead
-        // Secrets-Manager token: reactions 401'd while the Lambda's own calls worked.
+        // The agent mints its own token and must use the SAME subject, so this has to
+        // be carried through — the Secrets-Manager return below does the same. Without
+        // it the agent derives the legacy subject and finds no grant.
         ...(row.vault_user_id && { vaultUserId: row.vault_user_id }),
       };
     }
@@ -493,15 +480,9 @@ export async function resolveLinearOauthToken(
   if (cached && cached.expiresAt > Date.now() && !isTokenExpiring(cached.value.expires_at)) {
     token = cached.value;
   } else {
-    // Read through the variant that separates "there is no grant" from "the read
-    // failed", because the latch below treats a null as grounds to take the workspace
-    // offline. `getOauthSecret` collapses a throttle, a network blip and an IAM denial
-    // into the same null as a genuinely grant-less bundle — and a vault-dead /
-    // SM-alive workspace (the state `readExistingOauthTokens` deliberately preserves)
-    // runs entirely off that Secrets-Manager token. Latching it on one blip is
-    // unrecoverable: the row goes `revoked`, and from then on the vault re-probe
-    // answers `consent-required` again, so Secrets Manager is never consulted a second
-    // time. A transient error is not evidence that a credential was withdrawn.
+    // Strict variant deliberately: a throttle must not read as a missing grant,
+    // because a null here can latch the row `revoked` — see the contract on
+    // `getOauthSecretForResolve`.
     let fetched: StoredOauthToken | null;
     try {
       fetched = await getOauthSecretForResolve(sm, row.oauth_secret_arn);
@@ -546,17 +527,6 @@ export async function resolveLinearOauthToken(
 
   // ─── Step 3: Refresh if expiring ─────────────────────────────────
   if (isTokenExpiring(token.expires_at)) {
-    // The revoked-marker is OPT-IN, not defaulted.
-    //
-    // Every Lambda that resolves a token holds READ-ONLY access to the registry
-    // table, and no stack grants it write. Defaulting the marker on therefore
-    // meant the write ran and failed AccessDenied on every revoked refresh, and
-    // the failure was swallowed — so the feature read as working while being
-    // permanently inert, which is worse than being visibly absent.
-    //
-    // A caller that genuinely holds registry write (or supplies its own recorder)
-    // passes ``onAuthorizationRevoked`` explicitly. When the grant lands, flip the
-    // default here in the same change — not before.
     // Pass the RESOLVED recorder (caller-supplied or env-gated default) so the
     // permanent-rejection branch inside the refresh can record + announce.
     const refreshed = await refreshLinearToken(token, sm, row.oauth_secret_arn, {
@@ -594,9 +564,7 @@ export async function resolveLinearOauthToken(
  * refresh-then-fail work on every subsequent event.
  *
  * Effective only where the registry write is granted, which is why the caller is
- * gated on `LINEAR_REVOCATION_RECORDING`: a role holding READ-ONLY on the table
- * would fail AccessDenied here and have it swallowed, which is the
- * looks-implemented-does-nothing state this function exists to leave behind.
+ * gated on `LINEAR_REVOCATION_RECORDING` — see {@link defaultRevocationRecorder}.
  *
  * Scoped to the installation it actually diagnosed. ``status = active`` alone is
  * not enough: a re-authorization writes ``active`` again, so a straggler holding
@@ -614,8 +582,7 @@ export async function resolveLinearOauthToken(
  *
  * Returns whether THIS call latched the row, for callers that want to distinguish
  * "I flipped it" from "it was already flipped". Notification dedup does NOT use it —
- * that is the independent `revocation_announced_at` claim, because keying the
- * announcement off this write made a failed publish permanently silent.
+ * see {@link claimRevocationAnnouncement}.
  */
 export async function markWorkspaceRevoked(
   ddb: DynamoDBDocumentClient,
@@ -663,11 +630,8 @@ export async function markWorkspaceRevoked(
 /**
  * Claim the right to announce this revocation, exactly once per installation.
  *
- * Deliberately independent of the `active → revoked` status latch. Keying the
- * announcement off that write coupled "recorded" to "notified", so a publish that
- * failed after a successful record could never be retried — the row was already
- * `revoked`, so every later detection was deduped away. Here the notification has
- * its own `attribute_not_exists` claim, which a failed publish releases.
+ * Independent of the status latch so a failed publish stays retryable — see the
+ * caller for the ordering that depends on it.
  *
  * Conditioned on `installed_at` and NOT on `status`. A re-authorization rewrites
  * `installed_at`, so a verdict about the previous installation cannot announce
@@ -1129,12 +1093,8 @@ type RefreshOutcome =
  *     { "error": "invalid_request", "error_description": "Refresh token revoked" }
  *     { "error": "invalid_request", "error_description": "Invalid refresh token" }
  *
- * so every real revocation was classified as a generic `failure`. The consequence
- * was invisible but total: the permanent-rejection branch never ran, so the
- * registry was never marked revoked and no operator was ever notified — the
- * detection existed and could not fire. Confirmed against the token-lineage logs
- * from the #807 investigation and reproduced deliberately with a bogus refresh
- * token (#812).
+ * Matching only `invalid_grant` therefore classifies every real revocation as a
+ * generic `failure`, and the permanent-rejection branch never runs.
  *
  * `invalid_request` alone is NOT enough to conclude the grant is dead — it is also
  * what a malformed request (our bug) returns — so the description must name the

@@ -122,4 +122,26 @@ describe('announceRevocation', () => {
     await announceRevocation(detail({ workspaceSlug: 'x'.repeat(200) }), opts());
     expect(published().input.Subject.length).toBeLessThanOrEqual(100);
   });
+
+  // The assertions above all use `toContain`, which cannot see a command rendered
+  // TWICE — and the vault branch did render it twice, appending an annotated copy
+  // under the plain one. These pin the shape of the message an operator reads, not
+  // just its substrings.
+  test.each([
+    ['secrets-manager-refresh'],
+    ['vault-consent-required'],
+  ] as const)('%s names the recovery command exactly once', async (source) => {
+    await announceRevocation(detail({ source }), opts());
+    const lines = (published().input.Message as string).split('\n');
+    expect(lines.filter((l) => l.includes('bgagent linear setup'))).toHaveLength(1);
+  });
+
+  test('paragraph breaks survive into the delivered message', async () => {
+    // The lines were assembled with `''` separators and then run through a
+    // `.filter(line => line !== '')`, which stripped every one of them — collapsing
+    // the whole email into an unreadable block. Invisible in the source; obvious the
+    // moment the message is rendered.
+    await announceRevocation(detail(), opts());
+    expect(published().input.Message as string).toContain('\n\n');
+  });
 });

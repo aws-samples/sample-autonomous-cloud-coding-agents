@@ -21,13 +21,14 @@
 // Vault (RFC #249 Phase 1). This is the vault half of the Linear token
 // resolver; `linear-oauth-resolver.ts` calls it first when the vault is
 // enabled and falls back to the per-workspace Secrets-Manager token on any
-// null return.
+// non-`token` result.
 //
 // The flow (proven by the Phase-0 spike):
 //   1. `GetWorkloadAccessTokenForUserId` mints a USER-BOUND workload token
 //      (spike F2: USER_FEDERATION requires a user-bound token, not a plain one).
-//      The user id is `linear-workspace-<organizationId>` — one bgagent[bot]
-//      identity per workspace, as the registry-table design documents.
+//      The user id is the `vault_user_id` recorded on the registry row at consent
+//      time (slug-derived, `linear-ws-<slug>`) — one bgagent[bot] identity per
+//      workspace. `linear-workspace-<organizationId>` is the pre-#809 fallback.
 //   2. `GetResourceOauth2Token` (USER_FEDERATION) exchanges it for the Linear
 //      access token from the credential provider `bgagent linear setup` created.
 //
@@ -44,7 +45,11 @@ import {
 import { logger } from './logger';
 import { makeClient } from './ua';
 
-/** Linear agent-install scopes, mirrored from cli/src/linear-oauth.ts. */
+/**
+ * Linear agent-install scopes. Enforced against `contracts/constants.json` by
+ * `cdk/test/contracts/linear-vault-cache-key-parity.test.ts` — change the
+ * contract, not this literal.
+ */
 export const LINEAR_VAULT_SCOPES = ['read', 'write', 'app:assignable', 'app:mentionable'] as const;
 
 /**
@@ -58,8 +63,7 @@ export const LINEAR_VAULT_SCOPES = ['read', 'write', 'app:assignable', 'app:ment
  * consent time, or every resolve is a cache miss that silently degrades to the
  * Secrets-Manager fallback.
  *
- * Keep in sync with `cli/src/linear-vault.ts` (consent) and
- * `agent/src/config.py::_LINEAR_VAULT_CUSTOM_PARAMS` (agent-side resolve).
+ * Contract-enforced like the scopes above — change `contracts/constants.json`.
  */
 export const LINEAR_VAULT_CUSTOM_PARAMS: Record<string, string> = {
   actor: 'app',
@@ -82,15 +86,9 @@ export interface VaultTokenInput {
   readonly providerName: string;
   /**
    * The user id the grant was actually bound to, as recorded at consent time.
-   *
-   * Preferred over deriving it, because the organization UUID is only knowable
-   * AFTER a token exists — so an onboarding that derives the id from it needs one
-   * consent to learn the org, then a second to bind the vault. Recording the id
-   * instead lets `bgagent linear setup` bind a grant before it knows the org, and
-   * onboard with a single consent.
-   *
-   * Absent on workspaces onboarded before this was recorded; those fall back to
-   * the derived form, which is what their grant is under.
+   * Preferred over deriving it — see `linearVaultUserIdForSlug` in
+   * `cli/src/linear-vault.ts` for why. Absent on workspaces onboarded before this
+   * was recorded; those fall back to the derived form their grant is under.
    */
   readonly vaultUserId?: string;
   /** AWS region for the SDK client. */
@@ -99,12 +97,10 @@ export interface VaultTokenInput {
   readonly client?: BedrockAgentCoreClient;
 }
 
-/**
- * The per-workspace user id bound to the federation session. One bot identity
- * per workspace; all members' triggered tasks share it (matches the v1
- * personal-API-key semantics — see LinearWorkspaceRegistryTable docs).
- */
-export function workspaceUserId(linearWorkspaceId: string): string {
+/** Subject for workspaces onboarded before `vault_user_id` was recorded on the
+ *  registry row. Fresh installs use the slug-derived id the CLI records at
+ *  consent time — see `linearVaultUserIdForSlug` in `cli/src/linear-vault.ts`. */
+export function legacyWorkspaceUserId(linearWorkspaceId: string): string {
   return `linear-workspace-${linearWorkspaceId}`;
 }
 
@@ -121,14 +117,11 @@ export function workspaceUserId(linearWorkspaceId: string): string {
 export type VaultTokenResult =
   | { readonly kind: 'token'; readonly accessToken: string }
   /**
-   * Carries the authorization URL rather than being a bare tag, so the verdict
-   * cannot be reached without the evidence for it. "This workspace needs a fresh
-   * consent" is a terminal diagnosis that latches the registry row `revoked`
-   * (#812), and it used to be the fall-through for ANY tokenless response — an
-   * empty body, a partial response, an unrecognised `sessionStatus`. Requiring
-   * the URL makes the difference between "the grant is gone" and "the call came
-   * back malformed" unconstructable in the type rather than a code-reading
-   * exercise.
+   * Carries the authorization URL rather than being a bare tag, so this verdict
+   * cannot be constructed without the evidence for it. It latches the registry row
+   * `revoked`, so it must not be reachable as the fall-through for any tokenless
+   * response — an empty body or an unrecognised `sessionStatus` is malformed, not a
+   * dead grant.
    */
   | { readonly kind: 'consent-required'; readonly authorizationUrl: string }
   | { readonly kind: 'unavailable'; readonly reason: string };
@@ -145,7 +138,7 @@ export async function resolveLinearTokenViaVault(
 ): Promise<VaultTokenResult> {
   const region = input.region ?? process.env.AWS_REGION ?? 'us-east-1';
   // Recorded id wins; derive only for workspaces onboarded before it was stored.
-  const userId = input.vaultUserId?.trim() || workspaceUserId(input.linearWorkspaceId);
+  const userId = input.vaultUserId?.trim() || legacyWorkspaceUserId(input.linearWorkspaceId);
 
   // Client construction is INSIDE the try: this function's contract is that it never
   // throws, and a constructor is not obviously safe. If the runtime's bundled SDK ever

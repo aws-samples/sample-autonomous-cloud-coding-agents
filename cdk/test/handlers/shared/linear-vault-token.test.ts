@@ -35,7 +35,7 @@ jest.mock('@aws-sdk/client-bedrock-agentcore', () => ({
 
 import {
   resolveLinearTokenViaVault,
-  workspaceUserId,
+  legacyWorkspaceUserId,
   isVaultEnabled,
   vaultWorkloadIdentityName,
 } from '../../../src/handlers/shared/linear-vault-token';
@@ -49,9 +49,11 @@ beforeEach(() => {
   mockSend.mockReset();
 });
 
-describe('workspaceUserId', () => {
-  test('is one bot identity per workspace (matches registry-table convention)', () => {
-    expect(workspaceUserId('org-abc')).toBe('linear-workspace-org-abc');
+describe('legacyWorkspaceUserId', () => {
+  test('keeps the pre-vault_user_id form, which existing grants are bound under', () => {
+    // Pinned, not merely exercised: workspaces onboarded before `vault_user_id` was
+    // recorded have grants under this exact string, so changing it orphans them.
+    expect(legacyWorkspaceUserId('org-abc')).toBe('linear-workspace-org-abc');
   });
 });
 

@@ -45,8 +45,8 @@ import { makeClient } from './ua';
 
 /**
  * Mirrors `RevocationDetail` from the resolver, declared locally ON PURPOSE: the
- * resolver owns the latch and calls into this module, so importing its types here
- * would create a cycle (resolver → alert → resolver).
+ * resolver owns the latch and calls into this module, so this module depends on
+ * nothing of the resolver's. The `source` union appearing in both is the contract.
  */
 export interface AnnounceableRevocation {
   readonly linearWorkspaceId: string;
@@ -71,11 +71,8 @@ export function revocationAlertTopicArn(): string | undefined {
 /**
  * Announce ONE revoked authorization to the operator.
  *
- * A revoked workspace keeps producing events, so this must be deduped — but NOT on
- * the `active → revoked` status latch. The caller holds a dedicated announcement
- * claim instead (`claimRevocationAnnouncement`), because a publish failure has to
- * stay retryable: keyed off the status write, one throttled publish meant every
- * later detection found an already-revoked row and said nothing, permanently.
+ * Dedup is the caller's `claimRevocationAnnouncement`, not the status latch, so a
+ * failed publish stays retryable.
  *
  * Never throws — this runs inside token resolution, where an exception would turn a
  * notification outage into a broken webhook handler. It RETURNS whether the publish
@@ -96,14 +93,13 @@ export async function announceRevocation(
     'applying the trigger label will appear to do nothing.',
     '',
     'To fix it, run:',
-    `  bgagent linear setup ${slug}`,
     detail.source === 'vault-consent-required'
       ? `  bgagent linear setup ${slug}    (re-consents; restores the Token Vault path)`
-      : '',
+      : `  bgagent linear setup ${slug}`,
     '',
     `Workspace id: ${detail.linearWorkspaceId}`,
     `Detected by:  ${detail.source}`,
-  ].filter((line) => line !== '').join('\n');
+  ].join('\n');
 
   try {
     const sns = opts.snsClient
