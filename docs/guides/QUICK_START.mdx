@@ -19,7 +19,7 @@ Install these before you begin:
 - **Docker** - for building the agent container image. On an **x86_64** host you also need QEMU/binfmt to build the arm64 (Graviton) image — see the caution in Step 3.
 - **Node.js** v20 or later (Node 24 is the supported maximum — see CI matrix)
 - **mise** - task runner ([install guide](https://mise.jdx.dev/getting-started.html))
-- **AWS CDK CLI** - `npm install -g aws-cdk` (after mise is active)
+- **AWS CDK CLI** — **no global install needed.** Step 1's `mise run install` provisions the version pinned in `cdk/package.json` into the `cdk/` workspace, and every command in this guide reaches it through `mise //cdk:*` (which runs `npx cdk`). A global `npm install -g aws-cdk` can drift from the pinned version and shadow it on `PATH`.
 - **GitHub account** — You need a [GitHub profile](https://github.com/join) to fork the sample repository and create a **fine-grained personal access token (PAT)** the agent uses to push branches and open pull requests. A free github.com account is sufficient.
 
 :::note[mise provisions Node, Yarn, and the CDK CLI for you]
@@ -45,7 +45,6 @@ command -v mise >/dev/null || curl https://mise.run | sh
 eval "$(mise activate bash)"
 mise trust
 mise install
-npm install -g aws-cdk
 
 # Enable Yarn via Corepack
 corepack enable
