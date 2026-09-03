@@ -155,19 +155,19 @@ describe('buildApp — AgentCore AZ wiring', () => {
   });
 });
 
-describe('buildApp — CloudFormation template-body budget (#852)', () => {
+describe('buildApp — CloudFormation template-body budget within 80% 1Mb budget', () => {
   // CloudFormation caps a template body at 1 MB; CDK checks against
-  // `TEMPLATE_BODY_MAXIMUM_SIZE = 1e6` and, unlike the 500-resource ceiling, only
+  // `TEMPLATE_BODY_MAXIMUM_SIZE = 1e6` and only
   // raises an `@aws-cdk/core:Stack.templateSize` *warning* — so this ceiling fails
   // **open**. A template can grow past it, synthesize cleanly, and fail at deploy.
   // These assertions read the emitted artifact rather than `Template.fromStack`,
   // because indentation is the thing under test and `Template` has already parsed
   // it away.
   const CDK_TEMPLATE_BODY_MAXIMUM_SIZE = 1_000_000;
-  // CDK starts warning at 80% of the maximum. Budgeting to the same number means a
-  // regression trips this assertion at exactly the point CDK would start warning,
+  // Budget to the point CDK starts warning, so a regression trips a readable assertion
   // instead of silently riding the warning band up to the hard limit.
-  const TEMPLATE_BODY_BUDGET = CDK_TEMPLATE_BODY_MAXIMUM_SIZE * 0.8;
+  const WARNING_THRESHOLD = 0.8;
+  const TEMPLATE_BODY_BUDGET = CDK_TEMPLATE_BODY_MAXIMUM_SIZE * WARNING_THRESHOLD;
 
   let templateText: string;
 
@@ -180,10 +180,7 @@ describe('buildApp — CloudFormation template-body budget (#852)', () => {
   });
 
   it('emits the template without pretty-print indentation', () => {
-    // `suppressTemplateIndentation: true` in main.ts makes CDK pass `undefined` as
-    // JSON.stringify's `space` argument, collapsing the document to a single line.
-    // Roughly 31% of this template was indentation bytes, all of which counted
-    // against the 1 MB ceiling. Assert the shape, not the saving, so the test does
+    // Assert the shape, not the saving, so the test does
     // not need re-baselining every time a resource is added.
     expect(templateText).not.toContain('\n  ');
   });

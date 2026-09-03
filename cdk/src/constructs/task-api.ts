@@ -844,15 +844,14 @@ export class TaskApi extends Construct {
     const allFunctions: lambda.NodejsFunction[] = [createTaskFn, getTaskFn, listTasksFn, cancelTaskFn, getTaskEventsFn, getTaskReplayFn];
     if (confirmUploadsFn) allFunctions.push(confirmUploadsFn);
 
-    // Every `LambdaIntegration` below passes `allowTestInvoke: false`. The default
-    // (`true`) makes CDK emit a *second* `AWS::Lambda::Permission` per method, scoped
-    // to `method.testMethodArn`, so that the API Gateway console's "TEST" button works.
-    // Across the app that is 30 of the stack's 500-resource CloudFormation budget —
-    // and 30 extra `lambda:InvokeFunction` grants — spent on a console affordance
-    // nothing in this solution invokes. Real traffic is unaffected: with
-    // `scopePermissionToMethod` left at its default `true`, each route keeps its own
-    // narrowly-scoped `SourceArn`. Keep new routes consistent; `task-api.test.ts`
-    // asserts no `test-invoke-stage` permission is ever emitted. Refs #852.
+    // Every `LambdaIntegration` below passes `allowTestInvoke: false`, dropping the
+    // second `AWS::Lambda::Permission` per method that CDK emits by default for the
+    // API Gateway console's "TEST" button, which nothing here invokes. Real traffic is
+    // unaffected: `scopePermissionToMethod` stays at its default `true`, so each route
+    // keeps its own narrowly-scoped `SourceArn`. Keep new routes consistent;
+    // `test/stacks/agent.test.ts` asserts no `test-invoke-stage` permission is ever
+    // emitted.
+
     // --- API resource tree: /tasks ---
     const tasks = this.api.root.addResource('tasks');
     tasks.addMethod('POST', new apigw.LambdaIntegration(createTaskFn, { allowTestInvoke: false }), cognitoAuthOptions);
