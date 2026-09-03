@@ -218,6 +218,13 @@ function currentBranch() {
 }
 
 /**
+ * The only two fd-0 errnos that mean "there is no ref list here" rather than
+ * "the read failed": an empty non-blocking pipe, and fd 0 closed outright.
+ * Everything else is a genuine failure and must not be degraded to ''.
+ */
+const NO_REF_LIST_ERRNOS = new Set(['EAGAIN', 'EBADF']);
+
+/**
  * Read git's ref list from fd 0.
  *
  * Returns '' when no ref list is available — which is the normal case under
@@ -225,27 +232,37 @@ function currentBranch() {
  * fall-THROUGH, not a fall-back to a pass: `resolveBranchesToCheck` then
  * resolves the refs from the environment or from HEAD, so the gate still runs.
  * A blocking read on a TTY would hang the hook, hence the isTTY guard.
+ *
+ * An *unexpected* read failure is re-thrown so it reaches `main`, which fails
+ * closed (exit 2). Reporting it as '' would be a security bug, not a nicety:
+ * the fall-through ends at HEAD, and on a `main` checkout HEAD is exempt — so a
+ * masked read failure would pass the very gate this hook exists to enforce.
+ * @param {{isTTY?: boolean, read?: () => string}} [io] seams for tests
  * @returns {string}
  */
-function readRefListFromStdin() {
-  if (process.stdin.isTTY) return '';
+function readRefListFromStdin(io = {}) {
+  const { isTTY = process.stdin.isTTY, read = () => readFileSync(0, 'utf8') } = io;
+  if (isTTY) return '';
   try {
-    return readFileSync(0, 'utf8');
-  } catch {
-    // EAGAIN on an empty non-blocking pipe, or fd 0 closed outright.
-    return '';
+    return read();
+  } catch (err) {
+    if (!NO_REF_LIST_ERRNOS.has(err?.code)) throw err;
   }
+  return '';
 }
 
 function main(argv, io = {}) {
   const {
-    stdin = readRefListFromStdin(),
     env = process.env,
     readCurrentBranch = currentBranch,
+    readRefList = readRefListFromStdin,
   } = io;
 
   let resolved;
   try {
+    // Read stdin inside the `try` so an unexpected fd-0 failure lands in the
+    // catch below (exit 2) instead of escaping `main` as an uncaught throw.
+    const stdin = io.stdin ?? readRefList();
     resolved = resolveBranchesToCheck({ argv, stdin, env, readCurrentBranch });
   } catch (err) {
     console.error(`check-branch-name: could not determine the branch(es) being pushed: ${err.message}`);
@@ -267,7 +284,7 @@ function main(argv, io = {}) {
   return 1;
 }
 
-export { main };
+export { main, readRefListFromStdin };
 
 // Run only when invoked directly, not when imported by the test suite.
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {

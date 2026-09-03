@@ -23,6 +23,7 @@ import {
   branchFromRef,
   main,
   parsePrePushStdin,
+  readRefListFromStdin,
   resolveBranchesToCheck,
   validateBranchName,
 } from './check-branch-name.mjs';
@@ -257,4 +258,48 @@ test('main exits 2 when the branch cannot be determined', () => {
   });
   assert.equal(code, 2);
   assert.match(stderr, /not a git repository/);
+});
+
+// --- reading the ref list from fd 0 ---------------------------------------
+
+test('readRefListFromStdin returns "" without reading on a TTY', () => {
+  // A blocking read on a TTY would hang the hook.
+  assert.equal(
+    readRefListFromStdin({
+      isTTY: true,
+      read: () => assert.fail('must not read fd 0 on a TTY'),
+    }),
+    '',
+  );
+});
+
+test('readRefListFromStdin degrades to "" only for empty/closed fd 0', () => {
+  for (const code of ['EAGAIN', 'EBADF']) {
+    const read = () => {
+      throw Object.assign(new Error(code), { code });
+    };
+    assert.equal(readRefListFromStdin({ isTTY: false, read }), '');
+  }
+});
+
+test('readRefListFromStdin re-throws an unexpected read failure', () => {
+  // Masking it would fall through to HEAD, which is exempt on `main` — i.e. it
+  // would pass the gate on the strength of a failed read.
+  const read = () => {
+    throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
+  };
+  assert.throws(() => readRefListFromStdin({ isTTY: false, read }), /permission denied/);
+});
+
+test('main exits 2 when the ref list cannot be read', () => {
+  const { code, stderr } = runMain([], {
+    // No `stdin` key, so main reads fd 0 through the (stubbed) reader.
+    readRefList: () => {
+      throw Object.assign(new Error('input/output error'), { code: 'EIO' });
+    },
+    env: {},
+    readCurrentBranch: () => 'main',
+  });
+  assert.equal(code, 2);
+  assert.match(stderr, /input\/output error/);
 });
