@@ -393,7 +393,7 @@ export class SlackIntegration extends Construct {
     const oauthCallbackResource = oauthResource.addResource('callback');
     const oauthCallbackMethod = oauthCallbackResource.addMethod(
       'GET',
-      new apigw.LambdaIntegration(oauthCallbackFn),
+      new apigw.LambdaIntegration(oauthCallbackFn, { allowTestInvoke: false }),
       noneAuthOptions,
     );
 
@@ -401,7 +401,7 @@ export class SlackIntegration extends Construct {
     const eventsResource = slack.addResource('events');
     const eventsMethod = eventsResource.addMethod(
       'POST',
-      new apigw.LambdaIntegration(slackEventsAlias),
+      new apigw.LambdaIntegration(slackEventsAlias, { allowTestInvoke: false }),
       noneAuthOptions,
     );
 
@@ -409,7 +409,7 @@ export class SlackIntegration extends Construct {
     const commandsResource = slack.addResource('commands');
     const commandsMethod = commandsResource.addMethod(
       'POST',
-      new apigw.LambdaIntegration(slackCommandsFn),
+      new apigw.LambdaIntegration(slackCommandsFn, { allowTestInvoke: false }),
       noneAuthOptions,
     );
 
@@ -417,7 +417,7 @@ export class SlackIntegration extends Construct {
     const interactionsResource = slack.addResource('interactions');
     const interactionsMethod = interactionsResource.addMethod(
       'POST',
-      new apigw.LambdaIntegration(slackInteractionsFn),
+      new apigw.LambdaIntegration(slackInteractionsFn, { allowTestInvoke: false }),
       noneAuthOptions,
     );
 
@@ -425,7 +425,7 @@ export class SlackIntegration extends Construct {
     const linkResource = slack.addResource('link');
     linkResource.addMethod(
       'POST',
-      new apigw.LambdaIntegration(slackLinkFn),
+      new apigw.LambdaIntegration(slackLinkFn, { allowTestInvoke: false }),
       cognitoAuthOptions,
     );
 

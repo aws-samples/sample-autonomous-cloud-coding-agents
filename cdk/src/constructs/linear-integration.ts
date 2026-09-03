@@ -411,7 +411,7 @@ export class LinearIntegration extends Construct {
     const webhookResource = linear.addResource('webhook');
     const webhookMethod = webhookResource.addMethod(
       'POST',
-      new apigw.LambdaIntegration(webhookFn),
+      new apigw.LambdaIntegration(webhookFn, { allowTestInvoke: false }),
       noneAuthOptions,
     );
 
@@ -419,7 +419,7 @@ export class LinearIntegration extends Construct {
     const linkResource = linear.addResource('link');
     linkResource.addMethod(
       'POST',
-      new apigw.LambdaIntegration(linkFn),
+      new apigw.LambdaIntegration(linkFn, { allowTestInvoke: false }),
       cognitoAuthOptions,
     );
 
