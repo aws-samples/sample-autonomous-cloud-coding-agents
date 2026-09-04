@@ -28,7 +28,7 @@ import {
   ResourceExistsException,
   SecretsManagerClient,
 } from '@aws-sdk/client-secrets-manager';
-import { DynamoDBDocumentClient, PutCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, PutCommand, ScanCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { Command } from 'commander';
 import { ApiClient } from '../api-client';
 import { loadConfig, loadCredentials } from '../config';
@@ -572,6 +572,257 @@ export async function findWorkspaceRowBySlug(
     ExpressionAttributeValues: { ':s': slug },
   }));
   return (result.Items ?? []).find((item) => item.workspace_slug === slug);
+}
+
+/**
+ * Every `active` row in the workspace registry.
+ *
+ * Same unbounded-Scan reasoning as {@link findWorkspaceRowBySlug}: the registry holds
+ * one small row per install. Rows whose `status` is anything other than `active` are
+ * dropped here rather than by the caller, matching the runtime resolver's fail-closed
+ * reading of that column (a half-written row is not an install). Exported for tests.
+ */
+export async function listActiveWorkspaceRows(
+  ddb: DynamoDBDocumentClient,
+  registryTableName: string,
+): Promise<Array<Record<string, unknown>>> {
+  const rows: Array<Record<string, unknown>> = [];
+  let lastKey: Record<string, unknown> | undefined;
+  do {
+    const page = await ddb.send(new ScanCommand({
+      TableName: registryTableName,
+      ExclusiveStartKey: lastKey,
+    }));
+    for (const item of page.Items ?? []) {
+      if (item.status === 'active') rows.push(item);
+    }
+    lastKey = page.LastEvaluatedKey;
+  } while (lastKey);
+  return rows;
+}
+
+/**
+ * Slugs of every onboarded workspace, registry first.
+ *
+ * The registry is authoritative when present because it carries `status`, so a revoked
+ * install is not offered as a candidate. Installs predating the registry have only the
+ * `bgagent-linear-oauth-*` secrets, so that prefix listing is the fallback — the same
+ * two-source order `list-projects` uses.
+ */
+export async function listOnboardedWorkspaceSlugs(args: {
+  readonly sm: SecretsManagerClient;
+  readonly ddb?: DynamoDBDocumentClient;
+  readonly registryTableName?: string;
+}): Promise<string[]> {
+  if (args.ddb && args.registryTableName) {
+    const rows = await listActiveWorkspaceRows(args.ddb, args.registryTableName);
+    const slugs = rows
+      .map((r) => r.workspace_slug as string | undefined)
+      .filter((s): s is string => Boolean(s));
+    if (slugs.length > 0) return slugs;
+  }
+
+  // ListSecretsCommand caps at 100 per page; paginate so a deployment with more
+  // matching secrets than that does not silently miss installs after page one.
+  const collected: string[] = [];
+  let nextToken: string | undefined;
+  do {
+    const listed = await args.sm.send(new ListSecretsCommand({
+      Filters: [{ Key: 'name', Values: [LINEAR_OAUTH_SECRET_PREFIX] }],
+      MaxResults: 100,
+      NextToken: nextToken,
+    }));
+    for (const s of listed.SecretList ?? []) {
+      const name = s.Name ?? '';
+      if (name.startsWith(LINEAR_OAUTH_SECRET_PREFIX)) {
+        collected.push(name.slice(LINEAR_OAUTH_SECRET_PREFIX.length));
+      }
+    }
+    nextToken = listed.NextToken;
+  } while (nextToken);
+  return collected;
+}
+
+/** Outcome of resolving a usable Linear access token for one workspace. */
+export type WorkspaceTokenResult =
+  | { readonly kind: 'token'; readonly accessToken: string }
+  | { readonly kind: 'unavailable'; readonly reason: string };
+
+/**
+ * Resolve a usable Linear access token for one workspace, vault first.
+ *
+ * Vault-before-Secrets-Manager mirrors the runtime resolver, and the order matters for
+ * more than preference: a vault-managed workspace holds no usable Secrets Manager
+ * token, so reading the bundle first reports a bare 401 on precisely the workspaces
+ * that are healthy.
+ *
+ * Returns a reason rather than throwing because every caller iterates workspaces and
+ * must keep going when one is unreachable — a single unreadable install should narrow
+ * the answer, not abort the command.
+ */
+export async function resolveWorkspaceAccessToken(args: {
+  readonly slug: string;
+  readonly sm: SecretsManagerClient;
+  readonly ddb?: DynamoDBDocumentClient;
+  readonly registryTableName?: string;
+  readonly region: string;
+  readonly vaultWorkloadName: string;
+}): Promise<WorkspaceTokenResult> {
+  const { slug, sm, ddb, registryTableName, vaultWorkloadName } = args;
+
+  if (ddb && registryTableName) {
+    const row = await findWorkspaceRowBySlug(ddb, registryTableName, slug).catch(() => undefined);
+    const providerName = row?.provider_name as string | undefined;
+    if (providerName) {
+      const workspaceId = row?.linear_workspace_id as string | undefined;
+      const recorded = row?.vault_user_id as string | undefined;
+      const userId = recorded
+        ?? (workspaceId ? linearVaultUserId(workspaceId) : linearVaultUserIdForSlug(slug));
+      const minted = await mintLinearTokenFromVault({
+        region: args.region,
+        workloadName: vaultWorkloadName,
+        providerName,
+        userId,
+      });
+      if (minted.kind === 'token') return { kind: 'token', accessToken: minted.accessToken };
+    }
+  }
+
+  try {
+    const resp = await sm.send(new GetSecretValueCommand({ SecretId: linearOauthSecretName(slug) }));
+    const stored = JSON.parse(resp.SecretString ?? '{}') as { access_token?: string };
+    if (!stored.access_token) {
+      return { kind: 'unavailable', reason: `secret ${linearOauthSecretName(slug)} is missing access_token` };
+    }
+    return { kind: 'token', accessToken: stored.access_token };
+  } catch (err) {
+    return {
+      kind: 'unavailable',
+      reason: `failed to read ${linearOauthSecretName(slug)}: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+}
+
+/** Which workspace a project belongs to, as Linear itself reports it. */
+export type ProjectOwnerResult =
+  | { readonly kind: 'found'; readonly slug: string; readonly workspaceId: string }
+  | { readonly kind: 'not-found'; readonly searched: readonly string[]; readonly errors: readonly string[] };
+
+/**
+ * Ask Linear which onboarded workspace owns `projectId`.
+ *
+ * Resolved from the provider rather than taken as an operator flag on purpose. The
+ * owning workspace is the value the webhook path will later check a delivery against,
+ * so a typo'd flag would durably write a mapping that points one tenant's project at
+ * another tenant's repository — the exact state the check exists to make unreachable.
+ * Linear answering "this project is visible to this workspace's token" is the only
+ * authority on the question that does not depend on the operator being careful.
+ *
+ * `organization.id` comes from the same authenticated response as the project rather
+ * than from the registry row, so the recorded id is the workspace Linear says owns the
+ * project, not the workspace we assumed we were asking.
+ */
+export async function findProjectOwnerWorkspace(args: {
+  readonly projectId: string;
+  readonly slugs: readonly string[];
+  readonly sm: SecretsManagerClient;
+  readonly ddb?: DynamoDBDocumentClient;
+  readonly registryTableName?: string;
+  readonly region: string;
+  readonly vaultWorkloadName: string;
+  readonly fetchImpl?: typeof fetch;
+}): Promise<ProjectOwnerResult> {
+  const doFetch = args.fetchImpl ?? fetch;
+  const errors: string[] = [];
+
+  for (const slug of args.slugs) {
+    const token = await resolveWorkspaceAccessToken({ ...args, slug });
+    if (token.kind !== 'token') {
+      errors.push(`${slug}: ${token.reason}`);
+      continue;
+    }
+
+    try {
+      const res = await doFetch('https://api.linear.app/graphql', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token.accessToken}`,
+        },
+        body: JSON.stringify({
+          query: 'query($id: String!) { organization { id } project(id: $id) { id } }',
+          variables: { id: args.projectId },
+        }),
+      });
+      if (!res.ok) {
+        errors.push(`${slug}: Linear API returned ${res.status}`);
+        continue;
+      }
+      const body = await res.json() as {
+        data?: { organization?: { id?: string }; project?: { id?: string } | null };
+      };
+      // A workspace whose token cannot see the project answers `project: null` with a
+      // 200 — that is the "not this workspace" signal, not an error worth reporting.
+      const foundId = body.data?.project?.id;
+      const orgId = body.data?.organization?.id;
+      if (foundId === args.projectId && orgId) {
+        return { kind: 'found', slug, workspaceId: orgId };
+      }
+    } catch (err) {
+      errors.push(`${slug}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  return { kind: 'not-found', searched: args.slugs, errors };
+}
+
+/**
+ * Every project id visible to one workspace's token, with its organization id.
+ *
+ * Paginated deliberately. `list-projects` asks for `projects(first: 100)` and stops,
+ * which is fine for a human browsing but not for a backfill: a workspace with more
+ * than a page of projects would leave the overflow unresolved and silently keep the
+ * mappings the enforcement path is about to start rejecting.
+ */
+export async function listWorkspaceProjectIds(args: {
+  readonly accessToken: string;
+  readonly fetchImpl?: typeof fetch;
+}): Promise<{ readonly workspaceId?: string; readonly projectIds: string[] }> {
+  const doFetch = args.fetchImpl ?? fetch;
+  const projectIds: string[] = [];
+  let workspaceId: string | undefined;
+  let cursor: string | undefined;
+
+  do {
+    const res = await doFetch('https://api.linear.app/graphql', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${args.accessToken}`,
+      },
+      body: JSON.stringify({
+        query: 'query($after: String) { organization { id } '
+          + 'projects(first: 250, after: $after) { nodes { id } pageInfo { hasNextPage endCursor } } }',
+        variables: { after: cursor ?? null },
+      }),
+    });
+    if (!res.ok) throw new CliError(`Linear API returned ${res.status}`);
+    const body = await res.json() as {
+      data?: {
+        organization?: { id?: string };
+        projects?: {
+          nodes?: Array<{ id: string }>;
+          pageInfo?: { hasNextPage?: boolean; endCursor?: string };
+        };
+      };
+    };
+    workspaceId ??= body.data?.organization?.id;
+    for (const n of body.data?.projects?.nodes ?? []) projectIds.push(n.id);
+    const pageInfo = body.data?.projects?.pageInfo;
+    cursor = pageInfo?.hasNextPage ? pageInfo.endCursor : undefined;
+  } while (cursor);
+
+  return { workspaceId, projectIds };
 }
 
 export function makeLinearCommand(): Command {
@@ -2105,6 +2356,12 @@ export function makeLinearCommand(): Command {
       .requiredOption('--repo <owner/repo>', 'GitHub repository the mapped project should route tasks to')
       .option('--label <label>', `Label that triggers a task (default: ${DEFAULT_LABEL_FILTER})`, DEFAULT_LABEL_FILTER)
       .option('--team-id <id>', 'Optional Linear team UUID for the project (stored for debug)')
+      .option('--slug <slug>', 'Only look for the project in this workspace (default: every onboarded workspace)')
+      .option(
+        '--workspace-id <uuid>',
+        'Record this owning workspace instead of asking Linear. For when the Linear API is '
+        + 'unreachable — a wrong value routes this project\'s tasks nowhere.',
+      )
       .option('--region <region>', 'AWS region (defaults to configured region)')
       .option('--stack-name <name>', 'CloudFormation stack name', 'backgroundagent-dev')
       .action(async (projectId: string, opts) => {
@@ -2136,10 +2393,60 @@ export function makeLinearCommand(): Command {
 
         const now = new Date().toISOString();
         const ddb = makeDocClient({ region });
+
+        // Record WHICH workspace owns this project. The mapping table is keyed on the
+        // project id alone, so without this the webhook path has nothing to check a
+        // body-supplied `projectId` against and any onboarded workspace can name any
+        // other workspace's project to steer a task at its repository.
+        let ownerWorkspaceId: string | undefined;
+        let ownerLabel: string | undefined;
+        if (opts.workspaceId) {
+          if (!UUID_RE.test(opts.workspaceId)) {
+            console.error(`Invalid --workspace-id value: ${opts.workspaceId}. Expected a UUID.`);
+            process.exit(1);
+          }
+          ownerWorkspaceId = opts.workspaceId;
+          ownerLabel = `${ownerWorkspaceId} (from --workspace-id, not verified with Linear)`;
+        } else {
+          process.stdout.write('→ Resolving which workspace owns the project...');
+          const sm = makeClient(SecretsManagerClient, { region });
+          const registryTableName = await getStackOutput(region, opts.stackName, 'LinearWorkspaceRegistryTableName');
+          const slugs = opts.slug
+            ? [opts.slug as string]
+            : await listOnboardedWorkspaceSlugs({ sm, ddb, registryTableName: registryTableName ?? undefined });
+
+          const owner = await findProjectOwnerWorkspace({
+            projectId,
+            slugs,
+            sm,
+            ddb,
+            registryTableName: registryTableName ?? undefined,
+            region,
+            vaultWorkloadName: await resolveLinearVaultWorkloadName(region, opts.stackName),
+          });
+
+          if (owner.kind !== 'found') {
+            console.log(' ✗');
+            console.error(`Could not determine which workspace owns project ${projectId}.`);
+            console.error('');
+            console.error(`Searched: ${owner.searched.length > 0 ? owner.searched.join(', ') : '(no onboarded workspaces)'}`);
+            for (const e of owner.errors) console.error(`  - ${e}`);
+            console.error('');
+            console.error('Run `bgagent linear list-projects` to confirm the project UUID, or pass');
+            console.error('--slug to narrow the search. If the Linear API is unreachable, pass');
+            console.error('--workspace-id <uuid> to record the owner without verifying it.');
+            process.exit(1);
+          }
+          ownerWorkspaceId = owner.workspaceId;
+          ownerLabel = `${owner.slug} (${ownerWorkspaceId})`;
+          console.log(' ✓');
+        }
+
         await ddb.send(new PutCommand({
           TableName: tableName,
           Item: {
             linear_project_id: projectId,
+            linear_workspace_id: ownerWorkspaceId,
             repo: opts.repo,
             label_filter: opts.label,
             ...(opts.teamId && { team_id: opts.teamId }),
@@ -2150,9 +2457,137 @@ export function makeLinearCommand(): Command {
         }));
 
         console.log(`✓ Mapped Linear project ${projectId} → ${opts.repo}`);
-        console.log(`  Trigger label: ${opts.label}`);
+        console.log(`  Trigger label:    ${opts.label}`);
+        console.log(`  Owning workspace: ${ownerLabel}`);
         if (opts.teamId) {
-          console.log(`  Team: ${opts.teamId}`);
+          console.log(`  Team:             ${opts.teamId}`);
+        }
+      }),
+  );
+
+  linear.addCommand(
+    new Command('backfill-project-workspaces')
+      .description('Record the owning workspace on project mappings that predate that field')
+      .option('--region <region>', 'AWS region (defaults to configured region)')
+      .option('--stack-name <name>', 'CloudFormation stack name', 'backgroundagent-dev')
+      .option('--dry-run', 'Report what would change without writing')
+      .action(async (opts) => {
+        const config = loadConfig();
+        const region = opts.region || config.region;
+
+        const tableName = await getStackOutput(region, opts.stackName, 'LinearProjectMappingTableName');
+        if (!tableName) {
+          console.error('Could not find LinearProjectMappingTableName in stack outputs. Deploy the stack first.');
+          process.exit(1);
+        }
+
+        const ddb = makeDocClient({ region });
+        const sm = makeClient(SecretsManagerClient, { region });
+        const registryTableName = await getStackOutput(region, opts.stackName, 'LinearWorkspaceRegistryTableName');
+
+        // Only rows missing the field are candidates. A row that already names a
+        // workspace is left alone even if it disagrees with Linear — re-pointing a
+        // live mapping is `onboard-project`'s job, not a backfill's.
+        const unbacked: Array<{ projectId: string; repo?: string }> = [];
+        let lastKey: Record<string, unknown> | undefined;
+        do {
+          const page = await ddb.send(new ScanCommand({ TableName: tableName, ExclusiveStartKey: lastKey }));
+          for (const item of page.Items ?? []) {
+            if (!item.linear_workspace_id && typeof item.linear_project_id === 'string') {
+              unbacked.push({ projectId: item.linear_project_id, repo: item.repo as string | undefined });
+            }
+          }
+          lastKey = page.LastEvaluatedKey;
+        } while (lastKey);
+
+        if (unbacked.length === 0) {
+          console.log('✓ Every project mapping already records its owning workspace.');
+          return;
+        }
+        console.log(`${unbacked.length} mapping(s) missing an owning workspace.`);
+        console.log();
+
+        // One pass per workspace rather than one lookup per row: a workspace with N
+        // unbacked projects would otherwise cost N round trips to learn the same thing.
+        const slugs = await listOnboardedWorkspaceSlugs({ sm, ddb, registryTableName: registryTableName ?? undefined });
+        const vaultWorkloadName = await resolveLinearVaultWorkloadName(region, opts.stackName);
+        const ownerByProject = new Map<string, { slug: string; workspaceId: string }>();
+
+        for (const slug of slugs) {
+          const token = await resolveWorkspaceAccessToken({
+            slug, sm, ddb, registryTableName: registryTableName ?? undefined, region, vaultWorkloadName,
+          });
+          if (token.kind !== 'token') {
+            console.log(`  ⚠ ${slug}: ${token.reason} — projects owned here cannot be resolved`);
+            continue;
+          }
+          try {
+            const listed = await listWorkspaceProjectIds({ accessToken: token.accessToken });
+            if (!listed.workspaceId) {
+              console.log(`  ⚠ ${slug}: Linear did not return an organization id`);
+              continue;
+            }
+            for (const id of listed.projectIds) {
+              // First writer wins, and a second claim is a real anomaly worth naming:
+              // one project id must not be visible to two workspaces.
+              const existing = ownerByProject.get(id);
+              if (existing && existing.workspaceId !== listed.workspaceId) {
+                console.log(`  ⚠ project ${id} is visible to both ${existing.slug} and ${slug} — skipping`);
+                ownerByProject.delete(id);
+                continue;
+              }
+              ownerByProject.set(id, { slug, workspaceId: listed.workspaceId });
+            }
+          } catch (err) {
+            console.log(`  ⚠ ${slug}: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+
+        let updated = 0;
+        const unresolved: string[] = [];
+        for (const row of unbacked) {
+          const owner = ownerByProject.get(row.projectId);
+          if (!owner) {
+            unresolved.push(row.projectId);
+            continue;
+          }
+          if (opts.dryRun) {
+            console.log(`  would set ${row.projectId} → ${owner.slug} (${owner.workspaceId})`);
+          } else {
+            await ddb.send(new UpdateCommand({
+              TableName: tableName,
+              Key: { linear_project_id: row.projectId },
+              UpdateExpression: 'SET linear_workspace_id = :w, updated_at = :u',
+              // Do not resurrect a row deleted while this command was running, and do
+              // not overwrite a workspace id written concurrently by onboard-project.
+              ConditionExpression: 'attribute_exists(linear_project_id) AND attribute_not_exists(linear_workspace_id)',
+              ExpressionAttributeValues: { ':w': owner.workspaceId, ':u': new Date().toISOString() },
+            })).catch((err: unknown) => {
+              if ((err as { name?: string })?.name === 'ConditionalCheckFailedException') {
+                console.log(`  · ${row.projectId} changed underneath the backfill — skipped`);
+                return;
+              }
+              throw err;
+            });
+            console.log(`  ✓ ${row.projectId} → ${owner.slug} (${owner.workspaceId})`);
+          }
+          updated += 1;
+        }
+
+        console.log();
+        if (opts.dryRun) {
+          console.log(`Dry run: ${updated} mapping(s) would be updated.`);
+        } else {
+          console.log(`✓ Updated ${updated} mapping(s).`);
+        }
+        if (unresolved.length > 0) {
+          console.log();
+          console.log(`⚠ ${unresolved.length} mapping(s) could not be resolved to a workspace:`);
+          for (const id of unresolved) console.log(`    ${id}`);
+          console.log();
+          console.log('These name projects no onboarded workspace can see — a deleted project, or a');
+          console.log('workspace that is no longer installed. Re-run `bgagent linear onboard-project`');
+          console.log('for the ones still in use and remove the rest before enforcement is enabled.');
         }
       }),
   );

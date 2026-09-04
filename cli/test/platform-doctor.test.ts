@@ -47,6 +47,7 @@ jest.mock('@aws-sdk/client-bedrock', () => ({
 
 import {
   checkJiraAppIdentity,
+  checkLinearProjectWorkspaces,
   runPlatformDoctor,
   type DoctorCheckResult,
 } from '../src/platform-doctor';
@@ -70,6 +71,75 @@ beforeEach(() => {
   ddbSendMock.mockResolvedValue({ Items: [] });
   stackOutputMock.mockImplementation(async (_region: string, _stack: string, output: string) =>
     (output === 'LinearWorkspaceRegistryTableName' ? REGISTRY : null));
+});
+
+describe('doctor verdict for Linear project → workspace binding', () => {
+  const MAPPING = 'LinearProjectMapping';
+
+  test('warns and names the rows that record no owning workspace', async () => {
+    ddbSendMock.mockResolvedValue({
+      Items: [
+        { linear_project_id: 'proj-backed', linear_workspace_id: 'org-1', status: 'active' },
+        { linear_project_id: 'proj-unbacked', status: 'active' },
+      ],
+    });
+
+    const check = await checkLinearProjectWorkspaces('us-east-1', MAPPING);
+
+    expect(check.status).toBe('warn');
+    expect(check.detail).toContain('proj-unbacked');
+    expect(check.detail).not.toContain('proj-backed');
+    expect(check.detail).toContain('bgagent linear backfill-project-workspaces');
+  });
+
+  test('caps the named ids so a large install does not bury the rest of the report', async () => {
+    ddbSendMock.mockResolvedValue({
+      Items: Array.from({ length: 14 }, (_, i) => ({ linear_project_id: `proj-${i}`, status: 'active' })),
+    });
+
+    const check = await checkLinearProjectWorkspaces('us-east-1', MAPPING);
+
+    expect(check.detail).toContain('(and 4 more)');
+    expect(check.detail).toContain('proj-9');
+    expect(check.detail).not.toContain('proj-10');
+  });
+
+  test('passes once every active mapping records an owning workspace', async () => {
+    ddbSendMock.mockResolvedValue({
+      Items: [{ linear_project_id: 'proj-1', linear_workspace_id: 'org-1', status: 'active' }],
+    });
+
+    const check = await checkLinearProjectWorkspaces('us-east-1', MAPPING);
+
+    expect(check.status).toBe('pass');
+    expect(check.detail).toContain('All 1 active');
+  });
+
+  test('ignores inactive rows — an offboarded mapping is not work to do', async () => {
+    ddbSendMock.mockResolvedValue({
+      Items: [{ linear_project_id: 'proj-old', status: 'inactive' }],
+    });
+
+    expect((await checkLinearProjectWorkspaces('us-east-1', MAPPING)).status).toBe('pass');
+  });
+
+  test('passes when the Linear integration is not deployed', async () => {
+    expect((await checkLinearProjectWorkspaces('us-east-1', null)).status).toBe('pass');
+  });
+
+  test('warns when the mapping table cannot be read', async () => {
+    ddbSendMock.mockRejectedValue(new Error('AccessDeniedException'));
+    const check = await checkLinearProjectWorkspaces('us-east-1', MAPPING);
+    expect(check.status).toBe('warn');
+    expect(check.detail).toContain('AccessDeniedException');
+  });
+
+  test('is reported by the full doctor run', async () => {
+    stackOutputMock.mockImplementation(async (_region: string, _stack: string, output: string) =>
+      (output === 'LinearProjectMappingTableName' ? MAPPING : null));
+    const checks = await runPlatformDoctor({ region: 'us-east-1', stackName: 'Abca' });
+    expect(checks.map((c) => c.id)).toContain('linear_project_workspaces');
+  });
 });
 
 describe('doctor verdict for Jira app identity', () => {

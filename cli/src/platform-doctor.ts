@@ -91,6 +91,7 @@ export async function runPlatformDoctor(
     linearRegistryTableName,
     jiraRegistryTableName,
     linearVaultWorkloadName,
+    linearProjectMappingTableName,
   ] = await Promise.all([
     getStackOutput(region, stackName, 'ApiUrl'),
     getStackOutput(region, stackName, 'UserPoolId'),
@@ -102,6 +103,7 @@ export async function runPlatformDoctor(
     // Absent unless the stack was deployed with the Linear identity vault enabled.
     // Its absence is the signal that no workspace here is vault-managed.
     getStackOutput(region, stackName, 'LinearVaultWorkloadName'),
+    getStackOutput(region, stackName, 'LinearProjectMappingTableName'),
   ]);
 
   const checks: DoctorCheckResult[] = [];
@@ -122,9 +124,90 @@ export async function runPlatformDoctor(
     region, linearRegistryTableName, options.linearProbe, options.linearVerifyRefresh,
     linearVaultWorkloadName,
   ));
+  checks.push(await checkLinearProjectWorkspaces(region, linearProjectMappingTableName));
   checks.push(await checkJiraAppIdentity(region, jiraRegistryTableName));
 
   return checks;
+}
+
+/**
+ * Report project mappings that do not record which workspace owns them.
+ *
+ * The mapping table is keyed on the project id alone, so a row with no
+ * `linear_workspace_id` gives the webhook path nothing to check a body-supplied
+ * `projectId` against. Those rows are the population that must be backfilled before
+ * the enforcement path can move from warning to rejecting — this check is how an
+ * operator knows whether that work is finished.
+ */
+export async function checkLinearProjectWorkspaces(
+  region: string,
+  mappingTableName: string | null,
+): Promise<DoctorCheckResult> {
+  const id = 'linear_project_workspaces';
+  const label = 'Linear project → workspace binding';
+  if (!mappingTableName) {
+    return {
+      id,
+      label,
+      status: 'pass',
+      detail: 'No Linear project mapping table on this stack (integration not deployed).',
+    };
+  }
+
+  try {
+    const ddb = documentClient(region);
+    const rows: Array<{ linear_project_id?: string; linear_workspace_id?: string; status?: string }> = [];
+    let startKey: Record<string, unknown> | undefined;
+    do {
+      const page = await ddb.send(new ScanCommand({
+        TableName: mappingTableName,
+        ProjectionExpression: ['linear_project_id', 'linear_workspace_id', '#status'].join(', '),
+        ExpressionAttributeNames: { '#status': 'status' },
+        ...(startKey && { ExclusiveStartKey: startKey }),
+      }));
+      rows.push(...(page.Items ?? []) as typeof rows);
+      startKey = page.LastEvaluatedKey;
+    } while (startKey);
+
+    const active = rows.filter((row) => row.status === 'active');
+    if (active.length === 0) {
+      return { id, label, status: 'pass', detail: 'No active Linear project mappings yet.' };
+    }
+
+    const unbacked = active.filter((row) => !row.linear_workspace_id);
+    if (unbacked.length === 0) {
+      return {
+        id,
+        label,
+        status: 'pass',
+        detail: `All ${active.length} active Linear project mapping(s) record an owning workspace.`,
+      };
+    }
+
+    // Named, but capped: the point of listing ids is to give the operator somewhere to
+    // start, and an uncapped list on a large install buries every other doctor line.
+    const NAMED_LIMIT = 10;
+    const allIds = unbacked.map((row) => row.linear_project_id ?? '<unknown-project-id>');
+    const projectIds = allIds.length > NAMED_LIMIT
+      ? `${allIds.slice(0, NAMED_LIMIT).join(', ')} (and ${allIds.length - NAMED_LIMIT} more)`
+      : allIds.join(', ');
+    return {
+      id,
+      label,
+      status: 'warn',
+      detail: `${unbacked.length} of ${active.length} active Linear project mapping(s) do not record an `
+        + 'owning workspace, so a webhook naming them cannot be checked against the workspace that '
+        + `signed it: ${projectIds}. Run \`bgagent linear backfill-project-workspaces --stack-name `
+        + '<stack>\` (add `--dry-run` first).',
+    };
+  } catch (err) {
+    return {
+      id,
+      label,
+      status: 'warn',
+      detail: `Could not read the Linear project mapping table: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
 }
 
 interface JiraRegistryIdentityRow {
