@@ -219,7 +219,7 @@ If you submit a task against a repository that has not been onboarded, the API r
 }
 ```
 
-Contact your platform administrator to onboard a new repository. For details on how administrators register repositories, see the [Developer guide](./DEVELOPER_GUIDE.md#repository-onboarding).
+Contact your platform administrator to onboard a new repository. For details on how administrators register repositories, see the [Developer guide](./DEVELOPER_GUIDE.md#repository-preparation).
 
 ## Per-repo overrides
 
@@ -229,7 +229,7 @@ Blueprints can configure per-repository settings that override platform defaults
 |---|---|---|
 | `compute_type` | Compute strategy (`agentcore`, `ecs`, or `lambda-microvm`) | `agentcore` |
 | `runtime_arn` | AgentCore runtime ARN override | Platform default |
-| `model_id` | Bedrock inference-profile ID (`us.`-prefixed) | `us.anthropic.claude-opus-5` |
+| `model_id` | Bedrock inference-profile ID (geo-prefixed, matching the deployment's `bedrockGeoRegion`) | `global.anthropic.claude-opus-5` |
 | `max_turns` | Default turn limit for tasks | 100 |
 | `max_budget_usd` | Default cost budget in USD per task, `0.01`–`100` (Blueprint `agent.maxBudgetUsd`) | None (unlimited) |
 | `system_prompt_overrides` | Additional system prompt instructions | None |
@@ -1149,7 +1149,7 @@ The platform is a shared resource - compute, model tokens, and GitHub API calls 
 The agent is only as good as the context it receives. A well-prepared repository leads to faster, higher-quality results.
 
 - **Onboard first** - Repositories must be registered via a Blueprint construct before tasks can target them. If you get a `REPO_NOT_ONBOARDED` error, contact your platform administrator.
-- **Add a CLAUDE.md** - This is the single most impactful thing you can do. The agent loads project configuration from `CLAUDE.md`, `.claude/rules/*.md`, `.claude/settings.json`, and `.mcp.json` in your repository. Use these to document build commands, coding conventions, architecture decisions, and constraints. A good `CLAUDE.md` prevents the agent from guessing and reduces wasted turns. See the [Prompt guide](./PROMPT_GUIDE.md#repo-level-customization) for examples.
+- **Add a CLAUDE.md** - This is the single most impactful thing you can do. The agent loads project configuration from `CLAUDE.md`, `.claude/rules/*.md`, `.claude/settings.json`, and `.mcp.json` in your repository. Use these to document build commands, coding conventions, architecture decisions, and constraints. A good `CLAUDE.md` prevents the agent from guessing and reduces wasted turns. See the [Prompt guide](./PROMPT_GUIDE.md#repo-level-instructions) for examples.
 - **Keep your PAT aligned** - If tasks fail with `preflight_failed`, the GitHub PAT likely lacks the permissions the task type needs. Check the event's `reason` field and update the secret in Secrets Manager. See [Repository preparation](./DEVELOPER_GUIDE.md#repository-preparation) for the full permissions table.
 
 ### Write effective task descriptions

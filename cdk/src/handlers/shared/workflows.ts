@@ -33,7 +33,12 @@
  * asserts the ids/versions match the YAML.
  */
 
+import { BEDROCK_GEO_REGIONS, DEFAULT_BEDROCK_MODEL_IDS } from './bedrock-model-constants';
 import { ResolvedWorkflow } from './types';
+// Bundle boundary: these come from the dependency-free constants module, NOT from
+// `constructs/bedrock-models.ts`. That module derives its geography list from an
+// alpha-CDK enum at runtime, which esbuild cannot tree-shake — importing it here put
+// all of `aws-cdk-lib` into every Lambda that reaches this file (6.8 KB → 57 MB).
 
 /** The required-input contract a workflow declares (mirrors the YAML). */
 export interface WorkflowRequiredInputs {
@@ -68,43 +73,25 @@ export interface WorkflowDescriptor {
 
 /**
  * Platform allow-list of Bedrock model ids a workflow may pin via
- * `agent_config.model.id` (WORKFLOWS.md rule 13 / §"Model selection"). Should
- * mirror the foundation models the agent runtime is granted to invoke — the
- * shared list in `cdk/src/constructs/bedrock-models.ts`
- * (`DEFAULT_BEDROCK_MODEL_IDS` / the `bedrockModels` context, #433) — accepting
- * both the bare id and the `us.`-prefixed cross-region inference-profile form.
+ * `agent_config.model.id` (WORKFLOWS.md rule 13 / §"Model selection").
  *
- * NOTE (#433 follow-up): this is a SEPARATE, hand-maintained list from the IAM
- * grant source. The `repo onboard --model` path is NOT gated by it (repo
- * `model_id` isn't validated here), but a custom workflow pinning a model added
- * via the `bedrockModels` context would still be rejected at create-task until
- * it's added here too. A future Phase 4 will source this from the repo
- * Blueprint; consolidating it with `bedrock-models.ts` is tracked separately.
+ * DERIVED from `DEFAULT_BEDROCK_MODEL_IDS`, not hand-maintained: each granted model's
+ * bare id plus one form per geography. Adding a model to that list widens this
+ * automatically, so the two cannot drift.
+ *
+ * Deliberately GEOGRAPHY-BLIND: it admits all seven geographies regardless of which one
+ * the deploy grants, because the deployed geography is not available where a
+ * module-level constant is built. A workflow pinning an undeployed geography therefore
+ * passes admission and fails at turn 0 with AccessDenied — the one boundary in this
+ * area that still resolves late. Tracked in #846; no shipped workflow pins a model
+ * today, so nothing reaches it yet.
+ *
+ * The `repo onboard --model` path is NOT gated by this list; it checks the stack's
+ * `BedrockModelIds` output instead, which is geography-aware.
  */
-export const WORKFLOW_MODEL_ALLOWLIST: readonly string[] = [
-  'anthropic.claude-sonnet-4-6',
-  'us.anthropic.claude-sonnet-4-6',
-  'anthropic.claude-opus-4-20250514-v1:0',
-  'us.anthropic.claude-opus-4-20250514-v1:0',
-  // Claude Opus 4.8. Admitting an id here does NOT grant permission to invoke
-  // it — this list and the IAM grant in `bedrock-models.ts` are independent, and
-  // a model must be on BOTH to be usable. A workflow pinning an allow-listed but
-  // un-granted id passes admission and then fails at turn 0 with AccessDenied,
-  // so keep the two in step: when adding an id here, add it there (or to the
-  // `bedrockModels` context) in the same change.
-  'anthropic.claude-opus-4-8',
-  'us.anthropic.claude-opus-4-8',
-  // Claude Opus 5 (#744) — kept in step with the IAM grant added to
-  // DEFAULT_BEDROCK_MODEL_IDS in the same change, per the note above. Only the
-  // bare and `us.`-prefixed forms: `global.anthropic.claude-opus-5` is a live
-  // profile but is deliberately withheld until the grant sites derive the
-  // `global.` ARN (#747) — admitting it here first would pass admission and then
-  // fail at turn 0 with AccessDenied, exactly the drift this comment warns about.
-  'anthropic.claude-opus-5',
-  'us.anthropic.claude-opus-5',
-  'anthropic.claude-haiku-4-5-20251001-v1:0',
-  'us.anthropic.claude-haiku-4-5-20251001-v1:0',
-];
+export const WORKFLOW_MODEL_ALLOWLIST: readonly string[] = DEFAULT_BEDROCK_MODEL_IDS.flatMap(
+  (bare) => [bare, ...BEDROCK_GEO_REGIONS.map((geo) => `${geo}.${bare}`)],
+);
 
 /**
  * Validate a resolved workflow's declared model against the platform allow-list

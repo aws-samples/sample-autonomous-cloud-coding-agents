@@ -30,7 +30,13 @@ import { NagSuppressions } from 'cdk-nag';
 import { Construct, type Node } from 'constructs';
 import { AgentMemory } from './agent-memory';
 import { AgentSessionRole } from './agent-session-role';
-import { resolveBedrockGeoRegion, resolveBedrockModelIds } from './bedrock-models';
+import {
+  PLATFORM_DEFAULT_AUX_MODEL_ID,
+  PLATFORM_DEFAULT_MODEL_ID,
+  inferenceProfileId,
+  resolveBedrockGeoRegion,
+  resolveBedrockModelIds,
+} from './bedrock-models';
 import { buildAppId } from './solution-ua-aspect';
 import { ToolGateway } from './tool-gateway';
 
@@ -367,8 +373,22 @@ export class EcsAgentCluster extends Construct {
     // IDENTICAL; only the enclosing task def's cpu/mem differ. BUILD_VERIFY_TIMEOUT_S
     // is a build-tier concern (a read-only planner never runs the post-agent build
     // verify), so it's set per-def below, not here.
+    // Resolved once, above baseEnvironment: the env vars below and the IAM grants
+    // further down must name the SAME geography, so they read one value.
+    const bedrockGeoRegion = resolveBedrockGeoRegion(this.node);
+
     const baseEnvironment: Record<string, string> = {
       CLAUDE_CODE_USE_BEDROCK: '1',
+      // Both models as geo-prefixed inference-profile ids, from the same resolved
+      // geography as the IAM grants below. Previously neither was set here, so an
+      // ECS task fell through to the literals in agent/src/config.py — which a
+      // geography change does not touch — and a non-default `bedrockGeoRegion`
+      // granted one geography while the agent called another's profile. Parity with
+      // the AgentCore runtime env (stacks/agent.ts) is the point: the two substrates
+      // must not disagree about which model a task runs.
+      ANTHROPIC_MODEL: inferenceProfileId(bedrockGeoRegion, PLATFORM_DEFAULT_MODEL_ID),
+      ANTHROPIC_DEFAULT_HAIKU_MODEL:
+        inferenceProfileId(bedrockGeoRegion, PLATFORM_DEFAULT_AUX_MODEL_ID),
       TASK_TABLE_NAME: props.taskTable.tableName,
       TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
       USER_CONCURRENCY_TABLE_NAME: props.userConcurrencyTable.tableName,
@@ -590,7 +610,6 @@ export class EcsAgentCluster extends Construct {
     // values (constructs/bedrock-models.ts: `bedrockModels`, `bedrockGeoRegion`)
     // so the ECS and AgentCore backends can't drift.
     const stack = Stack.of(this);
-    const bedrockGeoRegion = resolveBedrockGeoRegion(this.node);
     const bedrockResources: string[] = [];
     for (const modelId of resolveBedrockModelIds(this.node)) {
       bedrockResources.push(

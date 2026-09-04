@@ -101,6 +101,10 @@ describe('AgentStack', () => {
       'TRACE_ARTIFACTS_BUCKET_NAME',
       'AGENT_SESSION_ROLE_ARN',
       'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+      // Added with the main model's injection: this parity guard is exactly what a
+      // declared-but-never-read prop slips past — every synth assertion passed while
+      // `anthropicModel` went nowhere (see task-orchestrator.ts).
+      'ANTHROPIC_MODEL',
     ]) {
       expect(env[key]).toBeDefined();
     }
@@ -131,6 +135,10 @@ describe('AgentStack', () => {
       'TRACE_ARTIFACTS_BUCKET_NAME',
       'AGENT_SESSION_ROLE_ARN',
       'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+      // Added with the main model's injection: this parity guard is exactly what a
+      // declared-but-never-read prop slips past — every synth assertion passed while
+      // `anthropicModel` went nowhere (see task-orchestrator.ts).
+      'ANTHROPIC_MODEL',
       'TASK_TABLE_NAME',
       'TASK_EVENTS_TABLE_NAME',
       'GITHUB_TOKEN_SECRET_ARN',
@@ -143,6 +151,28 @@ describe('AgentStack', () => {
     // The CLI reads this to refuse onboarding a repo as compute_type=ecs on a
     // stack that never provisioned the ECS substrate.
     template.hasOutput('ComputeSubstrate', { Value: 'agentcore' });
+  });
+
+  test('outputs BedrockGeoRegion so a client can check the profile it will invoke', () => {
+    // `platform doctor` reads this. Without it, its Bedrock check can only ask "is
+    // this model published in this Region", which passes on a stack granted
+    // profiles the account cannot invoke — the failure then lands at turn 0 as
+    // AccessDenied. Defaults to `us`; the test app passes no context.
+    template.hasOutput('BedrockGeoRegion', { Value: 'us' });
+  });
+
+  test('outputs BedrockModelIds — the linchpin both new consumers read', () => {
+    // Asserted on the PRODUCER side because two independent consumers depend on this
+    // output and BOTH degrade SILENTLY without it: `repo onboard --model`'s grant
+    // check and doctor's `checkGrantedModelProfiles` each skip themselves when the
+    // output is absent (deliberately, so an older stack is not blocked). A refactor
+    // that dropped or renamed it would therefore turn two guards into no-ops with
+    // nothing failing anywhere — every consumer-side test would still pass.
+    //
+    // Value asserted, not just presence: the consumers parse it as a comma-separated
+    // list of BARE ids, so a formatting change (JSON array, geo-prefixed entries)
+    // breaks them just as thoroughly as a missing output.
+    template.hasOutput('BedrockModelIds', { Value: DEFAULT_BEDROCK_MODEL_IDS.join(',') });
   });
 
   test('outputs CedarWasmLayerArn', () => {
@@ -343,7 +373,7 @@ describe('AgentStack', () => {
     const serialized = JSON.stringify(template.findResources('AWS::IAM::Policy'));
     expect(serialized).toContain('foundation-model/anthropic.claude-sonnet-4-6');
     expect(serialized).toContain('inference-profile/us.anthropic.claude-sonnet-4-6');
-    expect(serialized).toContain('anthropic.claude-opus-4-20250514-v1:0');
+    expect(serialized).toContain('anthropic.claude-opus-4-8');
     expect(serialized).toContain('anthropic.claude-haiku-4-5-20251001-v1:0');
     // Claude Opus 5 (#744). Granted ahead of any default flip: the bare id is
     // not on-demand invocable (Bedrock returns ValidationException), so the
@@ -362,7 +392,20 @@ describe('AgentStack', () => {
     // The runtime-role half of the override contract (the ECS side is covered in
     // ecs-agent-cluster.test.ts): a context override must replace the runtime's
     // granted models too — overridden model present, defaults absent, still scoped.
-    const app = new App({ context: { bedrockModels: ['anthropic.claude-opus-4-8'] } });
+    // The override ADDS opus-4-8 and DROPS sonnet-4-6, while keeping the two models the
+    // stack injects as `ANTHROPIC_MODEL` / `ANTHROPIC_DEFAULT_HAIKU_MODEL`. Dropping
+    // those became a synth error in this change: the stack tells every substrate to
+    // invoke them regardless of this list, so an override without them grants one set and
+    // calls another. Sonnet's absence below is what still proves replace-not-append.
+    const app = new App({
+      context: {
+        bedrockModels: [
+          'anthropic.claude-opus-4-8',
+          'anthropic.claude-opus-5',
+          'anthropic.claude-haiku-4-5-20251001-v1:0',
+        ],
+      },
+    });
     const stack = new AgentStack(app, 'OverrideAgentStack', {
       env: { account: '123456789012', region: 'us-east-1' },
     });
@@ -407,9 +450,10 @@ describe('AgentStack', () => {
     // Overridden model is granted...
     expect(serialized).toContain('foundation-model/anthropic.claude-opus-4-8');
     expect(serialized).toContain('inference-profile/us.anthropic.claude-opus-4-8');
-    // ...defaults are NOT (override replaces, not appends)...
+    // ...a non-overridden model is NOT (override replaces, not appends). Sonnet carries
+    // this assertion now; haiku cannot, because it is a platform default the override is
+    // required to keep.
     expect(serialized).not.toContain('claude-sonnet-4-6');
-    expect(serialized).not.toContain('claude-haiku-4-5');
     // ...and the grant is never a bare wildcard.
     expect(serialized).not.toContain('"*"');
   });
@@ -437,15 +481,19 @@ describe('AgentStack', () => {
    * differ between two synths of the SAME tree and so cannot be asserted here.
    * The Bedrock resources are the change's entire blast radius.)
    */
-  test('default-context Bedrock grants are byte-identical to the pre-#746 template', () => {
-    const PRE_CHANGE_BEDROCK_RESOURCE_NAMES = [
+  test('default-context Bedrock grants are the exact expected set, nothing wider', () => {
+    // `anthropic.claude-opus-4-20250514-v1:0` was REMOVED from this baseline
+    // deliberately: it has no cross-Region inference profile in any geography, so
+    // the pair of ARNs it contributed granted a profile that cannot exist while
+    // making the model pass every admission check that reads the grant list. This
+    // exact-set assertion is what makes that removal reviewable — a grant cannot be
+    // added, dropped, or re-prefixed without failing here.
+    const EXPECTED_BEDROCK_RESOURCE_NAMES = [
       'foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0',
-      'foundation-model/anthropic.claude-opus-4-20250514-v1:0',
       'foundation-model/anthropic.claude-opus-4-8',
       'foundation-model/anthropic.claude-opus-5',
       'foundation-model/anthropic.claude-sonnet-4-6',
       'inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0',
-      'inference-profile/us.anthropic.claude-opus-4-20250514-v1:0',
       'inference-profile/us.anthropic.claude-opus-4-8',
       'inference-profile/us.anthropic.claude-opus-5',
       'inference-profile/us.anthropic.claude-sonnet-4-6',
@@ -455,7 +503,7 @@ describe('AgentStack', () => {
     const found = [...new Set(
       serialized.match(/(?:foundation-model|inference-profile)\/[^"]+/g) ?? [],
     )].sort();
-    expect(found).toEqual(PRE_CHANGE_BEDROCK_RESOURCE_NAMES);
+    expect(found).toEqual(EXPECTED_BEDROCK_RESOURCE_NAMES);
 
     // Sanity: the set is derived from the shared model list, so a model added to
     // DEFAULT_BEDROCK_MODEL_IDS without updating this baseline fails loudly here
@@ -488,6 +536,28 @@ describe('AgentStack', () => {
         env: { account: '123456789012', region: 'us-east-1' },
       });
       geoTemplate = Template.fromStack(stack);
+    });
+
+    test('injects BOTH models into the runtime env at this geography', () => {
+      // The headline fix, and it had no guard: deleting the ANTHROPIC_MODEL line from
+      // the runtime env survived the whole suite. The stack previously injected only
+      // the auxiliary model, so the main one fell through to a Python literal a
+      // geography change does not touch — grants moved, the agent did not, and every
+      // task with no per-repo override failed at turn 0 with AccessDenied.
+      //
+      // Asserted per geography rather than once, because the failure only appears
+      // when the two disagree.
+      const runtimes = geoTemplate.findResources('AWS::BedrockAgentCore::Runtime');
+      const envs = Object.values(runtimes).map(
+        (r) => (r as { Properties?: { EnvironmentVariables?: Record<string, string> } })
+          .Properties?.EnvironmentVariables ?? {},
+      );
+      expect(envs.length).toBeGreaterThan(0);
+      for (const env of envs) {
+        expect(env.ANTHROPIC_MODEL).toBe(`${geo}.anthropic.claude-opus-5`);
+        expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL)
+          .toBe(`${geo}.anthropic.claude-haiku-4-5-20251001-v1:0`);
+      }
     });
 
     test('re-prefixes every inference-profile ARN and drops the us. ones', () => {
@@ -958,6 +1028,56 @@ describe('AgentStack', () => {
   });
 });
 
+/**
+ * The platform naming a model for ITSELF that the deploy does not grant.
+ *
+ * Every other boundary is guarded — `repo onboard --model` rejects an ungranted per-repo
+ * pin, workflow admission rejects an ungranted pinned workflow model — but the stack
+ * injects `ANTHROPIC_MODEL` / `ANTHROPIC_DEFAULT_HAIKU_MODEL` from constants that are
+ * independent of `bedrockModels`, so a narrowing override made the two disagree with
+ * nothing to catch it. Verified before fixing: `-c
+ * bedrockModels='["anthropic.claude-sonnet-4-6"]'` synthesized clean while granting only
+ * Sonnet and injecting `global.anthropic.claude-opus-5`.
+ */
+describe('AgentStack platform-default / grant-list coherence', () => {
+  const synth = (bedrockModels?: string[]) => () => {
+    const app = new App({ context: bedrockModels ? { bedrockModels } : {} });
+    const stack = new AgentStack(app, 'TestAgentStackDefaults', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    });
+    Template.fromStack(stack);
+  };
+
+  test('fails at synth when the override omits the main platform default', () => {
+    const t = synth(['anthropic.claude-sonnet-4-6']);
+    expect(t).toThrow(/omits the platform default model/);
+    // Names every missing default, not just the first one found.
+    expect(t).toThrow(/anthropic\.claude-opus-5/);
+    expect(t).toThrow(/claude-haiku-4-5/);
+    // And says WHY, because the override looks self-consistent on its own.
+    expect(t).toThrow(/told to invoke them regardless/);
+  });
+
+  test('fails when only the AUXILIARY default is omitted', () => {
+    // The easy one to miss: adding a model while dropping Haiku breaks only the
+    // auxiliary path (WebFetch summarisation), which no task-level failure names.
+    expect(synth(['anthropic.claude-opus-5', 'anthropic.claude-sonnet-4-6']))
+      .toThrow(/claude-haiku-4-5/);
+  });
+
+  test('accepts an override that keeps both defaults', () => {
+    expect(synth([
+      'anthropic.claude-opus-5',
+      'anthropic.claude-haiku-4-5-20251001-v1:0',
+      'anthropic.claude-sonnet-4-6',
+    ])).not.toThrow();
+  });
+
+  test('accepts the default path, which passes no override at all', () => {
+    expect(synth()).not.toThrow();
+  });
+});
+
 describe('AgentStack with the ECS substrate gate (--context compute_type=ecs)', () => {
   let template: Template;
 
@@ -969,6 +1089,32 @@ describe('AgentStack with the ECS substrate gate (--context compute_type=ecs)', 
       env: { account: '123456789012', region: 'us-east-1' },
     });
     template = Template.fromStack(stack);
+  });
+
+  /**
+   * CloudFormation refuses a template over 1 MB, and refuses it at CHANGESET CREATION —
+   * after synth succeeds and every asset is pushed. The message names no resource, and
+   * the stack's own status stays at whatever the previous deploy left, so checking stack
+   * status instead of the deploy's exit code reads as success.
+   *
+   * Asserted on the ECS template because that is the substrate deployments use, and it is
+   * the larger of the two: 894,261 bytes here versus 858,062 for the default at the time
+   * of writing. Measured the way the CDK CLI WRITES the template (`null, 2`), which is how
+   * CloudFormation counts it — compact serialization of the same template is ~300 KB
+   * smaller, so a budget checked against compact bytes passes while the deploy fails.
+   *
+   * These in-test figures are lower than what `cdk synth` writes to disk, because the CLI
+   * resolves asset hashes and account/region tokens that `Template.fromStack` leaves
+   * symbolic. The budget is therefore a trend guard on the relative number, not a
+   * prediction of the byte count CloudFormation will receive.
+   *
+   * Reuses the template this describe already synthesizes; no extra synth.
+   */
+  test('stays inside a deployable template budget (CloudFormation hard-fails at 1 MB)', () => {
+    const bytes = Buffer.byteLength(JSON.stringify(template.toJSON(), null, 2), 'utf8');
+    expect(bytes).toBeLessThan(1_000_000);
+    // 5% under, so this fires while there is still room to land the change that trips it.
+    expect(bytes).toBeLessThan(950_000);
   });
 
   test('provisions an ECS cluster + both Fargate task definitions (build + planning)', () => {

@@ -111,19 +111,22 @@ node cli/lib/bin/bgagent.js events <TASK_ID> --output json
 - Common: repo build/test commands not documented in CLAUDE.md
 
 **403 "not authorized to perform bedrock:InvokeModelWithResponseStream":**
-- The repo's `model_id` is a model the runtime IAM role wasn't granted. The runtime only has `grantInvoke` for the models in the stack's configured set (Sonnet 4.6, Opus 4, Haiku 4.5 by default).
-- **Quick fix:** point the repo at an already-granted model — `bgagent repo onboard <owner/repo> --model us.anthropic.claude-sonnet-4-6` (no redeploy).
+- The repo's `model_id` is a model the runtime IAM role wasn't granted. The runtime only has `grantInvoke` for the models in the stack's configured set — read it from the `BedrockModelIds` stack output rather than a list here (Sonnet 4.6, Opus 4.8, Opus 5, Haiku 4.5 by default).
+- **Quick fix:** point the repo at an already-granted model — `bgagent repo onboard <owner/repo> --model global.anthropic.claude-opus-5` (no redeploy).
 - **To add a new model to the runtime:** grant it in the stack and redeploy. The model set is the shared list in `cdk/src/constructs/bedrock-models.ts` — add the model via the `bedrockModels` CDK context (`cdk.json`) so both the AgentCore and ECS backends grant it (#433). Adding a model also requires **account-level Bedrock access** for it (separate from IAM — see the next row).
 
 **Model not enabled / "not available on your Bedrock deployment" (often immediate failure, few turns, zero or near-zero tokens):**
 - **IAM is necessary but not sufficient.** The AgentCore role may already have `bedrock:InvokeModel*`, but the **account** must also satisfy [Amazon Bedrock model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html): Marketplace subscription flow on first serverless use (with `aws-marketplace:Subscribe` / `ViewSubscriptions` where needed), Anthropic **first-time use** details (`PutUseCaseForModelAccess` or the console model catalog), and a valid payment method for Marketplace-backed models.
-- **Use an inference profile ID** in the Blueprint / DynamoDB `model_id` when Bedrock requires it for on-demand invocation (for example `us.anthropic.claude-sonnet-4-6` for US Sonnet 4.6). See [Use an inference profile in model invocation](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-use.html). Raw `anthropic.*` IDs often hit "on-demand not supported" or wrong routing — see the **400** row below.
+- **Use an inference profile ID** in the Blueprint / DynamoDB `model_id` when Bedrock requires it for on-demand invocation (for example `global.anthropic.claude-opus-5` for global Opus 5). See [Use an inference profile in model invocation](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-use.html). Raw `anthropic.*` IDs often hit "on-demand not supported" or wrong routing — see the **400** row below.
 - **Cross-Region profiles** route across Regions in a geography; ensure IAM and any SCPs allow Bedrock in **all destination Regions** for that profile. See [Supported Regions and models for inference profiles](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-support.html).
 - **Task status:** When the Claude CLI reports a terminal error via `ResultMessage.is_error`, the agent marks the task **FAILED** (not COMPLETED) and persists `error_message` in DynamoDB.
 
 **400 "Invocation with on-demand throughput isn't supported":**
-- The Blueprint `modelId` uses a raw foundation model ID (e.g. `anthropic.claude-opus-4-20250514-v1:0`)
-- Fix: change to the inference profile ID (e.g. `us.anthropic.claude-opus-4-20250514-v1:0`), update DynamoDB via redeploy
+- The Blueprint `modelId` uses a raw foundation model ID (e.g. `anthropic.claude-opus-4-8`)
+- Fix: change to the inference profile ID, prefixed with the geography the stack grants —
+  its `BedrockGeoRegion` output (e.g. `global.anthropic.claude-opus-4-8`) — then update
+  DynamoDB via redeploy. A prefix from a *different* geography raises `AccessDenied`
+  rather than this 400, since the IAM grant is scoped per geography.
 
 **503 "Too many connections" / task completes with 0 tokens after long duration:**
 - Bedrock is throttling model invocations. The agent retries for minutes then gives up.
@@ -139,7 +142,7 @@ node cli/lib/bin/bgagent.js events <TASK_ID> --output json
      ```
 - Causes:
   - **Stale model_id in DynamoDB** (most common) — the Blueprint `onUpdate` only sets fields present in props; removing a `modelId` prop does NOT remove the field from DynamoDB. The task keeps using the old model.
-  - Bedrock service-level throttling for the specific model (especially Opus 4 which has limited availability)
+  - Bedrock service-level throttling for the specific model (Opus-class models have tighter limits than Sonnet or Haiku)
   - Account quota limits reached
 - Fix:
   1. **Check and fix the DynamoDB record first** — remove stale `model_id` if present:
@@ -150,7 +153,7 @@ node cli/lib/bin/bgagent.js events <TASK_ID> --output json
        --update-expression "REMOVE model_id"
      ```
   2. If model_id is correct, wait and retry — throttling is often transient
-  3. Switch to a model with higher availability (Sonnet 4.6 > Opus 4 > Haiku)
+  3. Switch to a model with higher availability (Haiku 4.5 > Sonnet 4.6 > Opus)
   4. Request a Bedrock quota increase for `InvokeModel` RPM on your model
 
 **`task_timed_out`:**

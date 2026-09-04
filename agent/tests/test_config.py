@@ -52,8 +52,10 @@ class TestWorkflowResolution:
         assert config.is_pr_workflow is False
 
     def test_haiku_model_defaults_to_inference_profile(self, monkeypatch):
-        # No override, no env → platform default, which must be a us.* inference
-        # profile (Claude 4.x can't be invoked on-demand by bare model id).
+        # No override, no env → platform default, which must be a GEO-PREFIXED
+        # inference profile (Claude 4.x can't be invoked on-demand by bare model
+        # id). The geography must match the deployment's bedrockGeoRegion, or a run
+        # with no env set calls a profile the IAM grant does not cover.
         monkeypatch.delenv("ANTHROPIC_DEFAULT_HAIKU_MODEL", raising=False)
         config = build_config(
             repo_url="owner/repo",
@@ -61,7 +63,7 @@ class TestWorkflowResolution:
             github_token="ghp_test123",
             aws_region="us-east-1",
         )
-        assert config.haiku_model == "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+        assert config.haiku_model == "global.anthropic.claude-haiku-4-5-20251001-v1:0"
 
     def test_haiku_model_resolves_from_env(self, monkeypatch):
         # The deployed ANTHROPIC_DEFAULT_HAIKU_MODEL (set by agent.ts) flows

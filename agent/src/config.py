@@ -560,13 +560,18 @@ def build_config(
     resolved_github_token = github_token or resolve_github_token()
     resolved_aws_region = aws_region or os.environ.get("AWS_REGION", "")
     resolved_anthropic_model = anthropic_model or os.environ.get(
-        "ANTHROPIC_MODEL", "us.anthropic.claude-opus-5"
+        "ANTHROPIC_MODEL", "global.anthropic.claude-opus-5"
     )
     # Small/fast auxiliary model (WebFetch summarization etc.). Falls back to the
     # deployed ANTHROPIC_DEFAULT_HAIKU_MODEL env, then the platform default. Must
-    # be an inference-profile id (us.*), not a bare model id (see runner).
+    # be a geo-prefixed inference-profile id, not a bare model id (see runner).
+    #
+    # This fallback is a SEPARATE value from the env var the stack injects, which
+    # derives its prefix from the bedrockGeoRegion context key. Only a run with no
+    # env set at all reaches this literal, so the two must be moved together or a
+    # local run silently uses a different geography than a deployed one.
     resolved_haiku_model = haiku_model or os.environ.get(
-        "ANTHROPIC_DEFAULT_HAIKU_MODEL", "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL", "global.anthropic.claude-haiku-4-5-20251001-v1:0"
     )
 
     # Resolve the workflow id (the create-task boundary already pinned it; local

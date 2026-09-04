@@ -31,7 +31,8 @@
       "jira_oauth_secret_arn": "JIRA_OAUTH_SECRET_ARN",
       "agent_session_role_arn": "AGENT_SESSION_ROLE_ARN",
       "aws_sdk_ua_app_id": "AWS_SDK_UA_APP_ID",
-      "anthropic_default_haiku_model": "ANTHROPIC_DEFAULT_HAIKU_MODEL"
+      "anthropic_default_haiku_model": "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+      "anthropic_model": "ANTHROPIC_MODEL"
     },
     "required": [
       "task_table_name",

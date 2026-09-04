@@ -825,6 +825,10 @@ describe('TaskOrchestrator with the Lambda MicroVMs backend (ADR-021)', () => {
 describe('TaskOrchestrator agentPlatformConfig (ADR-021 P2 platform_config transport)', () => {
   const SESSION_ROLE_ARN = 'arn:aws:iam::123456789012:role/AbcaAgentSessionRole';
   const HAIKU_PROFILE = 'us.anthropic.claude-haiku-4-5-20251001-v1:0';
+  // Deliberately a NON-`global` geography, matching HAIKU_PROFILE above. A `global.`
+  // fixture would pass even if the construct dropped the value, because the agent's
+  // own fallback literal is `global.`-prefixed — the bug this asserts against.
+  const MAIN_PROFILE = 'us.anthropic.claude-opus-5';
 
   /**
    * Stack with real approvals/nudges tables and buckets, so the "forwards the
@@ -859,6 +863,7 @@ describe('TaskOrchestrator agentPlatformConfig (ADR-021 P2 platform_config trans
           traceArtifactsBucketName: traceBucket.bucketName,
           agentSessionRoleArn: SESSION_ROLE_ARN,
           anthropicDefaultHaikuModel: HAIKU_PROFILE,
+          anthropicModel: MAIN_PROFILE,
         },
       }),
     });
@@ -880,7 +885,7 @@ describe('TaskOrchestrator agentPlatformConfig (ADR-021 P2 platform_config trans
     withoutConfigTemplate = createPlatformConfigStack(false).template;
   });
 
-  test('injects the seven forwarded identifiers under the names the strategy reads', () => {
+  test('injects the eight forwarded identifiers under the names the strategy reads', () => {
     // These names are a CONTRACT with
     // `handlers/shared/strategies/lambda-microvm-strategy.ts`'s
     // PLATFORM_CONFIG_ENV_VARS map, and with the AgentCore runtime env block in
@@ -894,6 +899,14 @@ describe('TaskOrchestrator agentPlatformConfig (ADR-021 P2 platform_config trans
     expect(env.TRACE_ARTIFACTS_BUCKET_NAME).toEqual({ Ref: expect.stringMatching(/^TraceArtifactsBucket/) });
     expect(env.AGENT_SESSION_ROLE_ARN).toBe(SESSION_ROLE_ARN);
     expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe(HAIKU_PROFILE);
+    // The MAIN model. This test asserted seven identifiers while the interface
+    // declared eight, and that gap is exactly how the missing one shipped:
+    // `anthropicModel` was a required prop the stack dutifully passed, so the
+    // compiler was satisfied, but no line here or in the construct read it. The two
+    // substrates that inject the model into a runtime env directly were unaffected,
+    // leaving MicroVM on the `global.` literal in `agent/src/config.py` regardless
+    // of the deployed geography.
+    expect(env.ANTHROPIC_MODEL).toBe(MAIN_PROFILE);
   });
 
   test('carries the four REQUIRED platform_config sources together (never a partial set)', () => {
@@ -910,6 +923,7 @@ describe('TaskOrchestrator agentPlatformConfig (ADR-021 P2 platform_config trans
         traceArtifactsBucketName: 'traces',
         agentSessionRoleArn: SESSION_ROLE_ARN,
         anthropicDefaultHaikuModel: HAIKU_PROFILE,
+        anthropicModel: MAIN_PROFILE,
       },
     }).template);
     expect(env.TASK_TABLE_NAME).toBeDefined();
@@ -928,6 +942,7 @@ describe('TaskOrchestrator agentPlatformConfig (ADR-021 P2 platform_config trans
       'TRACE_ARTIFACTS_BUCKET_NAME',
       'AGENT_SESSION_ROLE_ARN',
       'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+      'ANTHROPIC_MODEL',
     ]) {
       expect(env[key]).toBeUndefined();
     }

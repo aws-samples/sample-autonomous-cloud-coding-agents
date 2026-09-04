@@ -259,8 +259,13 @@ describe('runPlatformDoctor', () => {
     const results = await runPlatformDoctor({ region: 'us-east-1', stackName: 'dev' });
     const check = results.find((r) => r.id === 'lambda_microvm_availability');
 
-    expect(check?.status).toBe('fail');
+    // `warn`, not `fail`: the subject of this test is that a non-Error rejection is still
+    // surfaced in the detail. Its status used to be `fail`, which carried the directive
+    // "check the Region / model availability" remedy — wrong for a transient service
+    // error, which says nothing about whether MicroVMs are available.
+    expect(check?.status).toBe('warn');
     expect(check?.detail).toContain('service unavailable');
+    expect(check?.detail).toContain('did not complete');
   });
 });
 

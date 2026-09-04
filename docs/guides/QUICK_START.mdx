@@ -519,7 +519,7 @@ Here is what the platform did after you ran `node lib/bin/bgagent.js submit`:
 | Runtime rollback: `NotStabilized` / "subnets are in unsupported availability zones" | VPC subnets landed in AZs AgentCore doesn't support (auto-pin skipped for env-agnostic synth, or region not in the built-in map) | Set the `agentcore:availabilityZones` override to supported zone names — see [Known deployment issues](./DEPLOYMENT_GUIDE.md#agentcore-unsupported-availability-zones) |
 | Synth fails with `[AgentCore AZs] Could not resolve …` or `… Synth credentials resolve to account …` | Auto-pin could not verify supported zones: missing `ec2:DescribeAvailabilityZones`, expired credentials, or the app process resolving a different account than the deploy target | Grant the permission / refresh credentials / `export AWS_PROFILE=<profile>`, or set the `agentcore:availabilityZones` override. Failing closed is intentional — a silent fallback yields a template that looks pinned but isn't |
 | `put-secret-value` returns double-dot endpoint | `REGION` variable is empty | Set `REGION=us-east-1` (or your actual region) before running the command |
-| Model / Bedrock errors in logs (`not available on your bedrock`, zero tokens) | Model not entitled for the account or Region, wrong `modelId` shape, or missing Marketplace / FTU steps | Follow **Amazon Bedrock before your first task** above; confirm [model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) and use an [inference profile](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-use.html) ID such as `us.anthropic.claude-sonnet-4-6` where required; keep `grantInvoke` in `agent.ts` aligned with that model |
+| Model / Bedrock errors in logs (`not available on your bedrock`, zero tokens) | Model not entitled for the account or Region, wrong `modelId` shape, or missing Marketplace / FTU steps | Follow **Amazon Bedrock before your first task** above; confirm [model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) and use an [inference profile](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-use.html) ID prefixed with the geography the stack grants (its `BedrockGeoRegion` output); the model must be in the stack's `BedrockModelIds` output, which `bedrockModels` CDK context controls |
 | `REPO_NOT_ONBOARDED` on task submit | Blueprint `repo` does not match what you passed to the CLI | Confirm `BLUEPRINT_REPO`, CDK context `blueprintRepo`, or the `repo` prop on the `Blueprint` in `cdk/src/stacks/agent.ts` resolves to exactly the same `owner/repo` you pass to the CLI |
 | `INSUFFICIENT_GITHUB_REPO_PERMISSIONS` | PAT is missing required permissions or is scoped to the wrong repo | Regenerate the PAT with Contents (read/write) and Pull requests (read/write) scoped to your fork, then update Secrets Manager |
 | Task stuck in `SUBMITTED` | Orchestrator Lambda may not have been invoked | Check CloudWatch logs for the orchestrator Lambda; verify the stack deployed successfully |
@@ -549,7 +549,7 @@ new Blueprint(this, 'CustomBlueprint', {
   repo: 'my-org/my-service',
   repoTable: repoTable.table,
   agent: {
-    modelId: 'us.anthropic.claude-sonnet-4-6',
+    modelId: 'global.anthropic.claude-opus-5',
     maxTurns: 50,
     systemPromptOverrides: 'Always write tests. Use conventional commits.',
   },

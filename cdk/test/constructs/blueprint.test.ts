@@ -424,8 +424,34 @@ describe('Blueprint construct', () => {
     expect(serialized).toContain('#mcp_servers');
     expect(serialized).toContain('#cedar_policy_modules');
     expect(serialized).toContain('#skills');
-    // All three populated → nothing to REMOVE.
-    expect(serialized).not.toContain('REMOVE');
+    // All three populated → none of the ASSET columns is removed. Asserted per
+    // column rather than as "no REMOVE anywhere": the clause is shared with the
+    // per-repo overrides, and this blueprint declares no `agent.modelId`, so it
+    // legitimately removes `model_id`. A blanket assertion coupled this test to
+    // an unrelated field and failed for the wrong reason.
+    // Only the REMOVE clause of the UpdateExpression — not everything after the
+    // word, which would sweep in ExpressionAttributeNames and match every column.
+    const removeClause = /REMOVE ([^"\\]*)/.exec(serialized)?.[1] ?? '';
+    expect(removeClause).not.toContain('#mcp_servers');
+    expect(removeClause).not.toContain('#cedar_policy_modules');
+    expect(removeClause).not.toContain('#skills');
+  });
+
+  test('onUpdate does NOT remove model_id — the CLI is a sanctioned co-writer of it', () => {
+    // Regression guard for a fix that was WRONG. Clearing `model_id` when a Blueprint
+    // declares none looked symmetric with the asset refs, but onUpdate runs on every
+    // deploy (its parameters embed a synth-time timestamp) and `bgagent repo onboard
+    // --model` deliberately carries the value forward (ADR-017 sanctions both writers).
+    // The clear therefore deleted an operator's CLI pin on every unrelated redeploy,
+    // while the troubleshooting guide prescribes that pin as the fix for a wrong model.
+    const noModel = /REMOVE ([^"\\]*)/.exec(getUpdateJoinParts(createStack().template).join(''))?.[1] ?? '';
+    expect(noModel).not.toContain('#model_id');
+
+    // And a declared override is still written, not merely left alone.
+    const withModel = getUpdateJoinParts(
+      createStack({ agent: { modelId: 'global.anthropic.claude-opus-5' } }).template,
+    ).join('');
+    expect(withModel).toContain('#model_id = :model_id');
   });
 
   test('onUpdate REMOVEs asset columns that are now empty (detach on redeploy)', () => {

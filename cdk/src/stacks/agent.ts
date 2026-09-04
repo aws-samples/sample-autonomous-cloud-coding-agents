@@ -37,7 +37,9 @@ import { ApiKeyTable } from '../constructs/api-key-table';
 import { ApprovalMetricsPublisherConsumer } from '../constructs/approval-metrics-publisher-consumer';
 import { AttachmentsBucket } from '../constructs/attachments-bucket';
 import {
-  haikuInferenceProfileId,
+  PLATFORM_DEFAULT_AUX_MODEL_ID,
+  PLATFORM_DEFAULT_MODEL_ID,
+  inferenceProfileId,
   resolveBedrockGeoRegion,
   resolveBedrockModelIds,
 } from '../constructs/bedrock-models';
@@ -513,16 +515,25 @@ export class AgentStack extends Stack {
       AWS_REGION: process.env.AWS_REGION ?? 'us-east-1',
       CLAUDE_CODE_USE_BEDROCK: '1',
       ANTHROPIC_LOG: 'debug',
-      // Cross-region inference-profile id (geo prefix, `us.` by default), NOT
-      // the bare foundation-model id: Claude 4.x can't be invoked on-demand by
-      // bare id (400 "on-demand throughput isn't supported"). Derived through
-      // bedrock-models.ts's `haikuInferenceProfileId` so (a) the prefix comes from
-      // `bedrockGeoRegion` rather than a second hardcode that would silently split
-      // this auxiliary model from the granted profiles on any non-`us` deploy, and
-      // (b) the model id itself comes from the same constant the grant list
-      // interpolates. The lambda-microvm `platform_config` block below calls the
-      // same helper with the same geography. runner.py re-sets this at spawn time.
-      ANTHROPIC_DEFAULT_HAIKU_MODEL: haikuInferenceProfileId(bedrockGeoRegion),
+      // Cross-region inference-profile ids (geo prefix), NOT bare foundation-model
+      // ids: Claude 4.x can't be invoked on-demand by bare id (400 "on-demand
+      // throughput isn't supported"). Both are derived from `bedrockGeoRegion` rather
+      // than hardcoded, so neither can silently split from the granted profiles on a
+      // non-default deploy, and the model ids come from the same constants the grant
+      // list interpolates.
+      //
+      // The MAIN model is set here deliberately, and was previously absent: only the
+      // auxiliary var was injected, so the main model fell through to a literal in
+      // agent/src/config.py that a geography change does not touch. A deploy with a
+      // different `bedrockGeoRegion` therefore granted one geography's profiles while
+      // the agent asked for another's, and every task with no per-repo override failed
+      // at turn 0 with AccessDenied.
+      //
+      // The lambda-microvm `platform_config` block below derives the same two values
+      // from the same geography. runner.py re-sets both at spawn time; a per-repo
+      // `model_id` still overrides.
+      ANTHROPIC_MODEL: inferenceProfileId(bedrockGeoRegion, PLATFORM_DEFAULT_MODEL_ID),
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: inferenceProfileId(bedrockGeoRegion, PLATFORM_DEFAULT_AUX_MODEL_ID),
       TASK_TABLE_NAME: taskTable.table.tableName,
       TASK_EVENTS_TABLE_NAME: taskEventsTable.table.tableName,
       NUDGES_TABLE_NAME: taskNudgesTable.table.tableName,
@@ -676,7 +687,7 @@ export class AgentStack extends Stack {
 
     // Grant the runtime invoke on each configured foundation model + its
     // cross-Region inference profile in the configured geography
-    // (`bedrockGeoRegion`, default `us`). The model set is a single source of
+    // (`bedrockGeoRegion` — `global` in the shipped cdk.json, `us` absent any context). The model set is a single source of
     // truth (constructs/bedrock-models.ts), shared with the ECS task role and
     // overridable via the `bedrockModels` CDK context. Each invokable is also
     // collected so the same set is granted to the SessionRole below (for cost
@@ -684,7 +695,37 @@ export class AgentStack extends Stack {
     // Scoping stays per-model (no Resource:'*'); account-level Bedrock access
     // remains the outer gate.
     const invokableBedrockModels: bedrock.IBedrockInvokable[] = [];
-    for (const modelId of resolveBedrockModelIds(this.node)) {
+    const grantedModelIds = resolveBedrockModelIds(this.node);
+
+    // The platform's OWN defaults must be inside the set this deploy grants.
+    //
+    // Asserted HERE rather than in `resolveBedrockModelIds` because this stack is where
+    // the two facts meet: it builds the grant from that list AND injects
+    // `PLATFORM_DEFAULT_MODEL_ID` / `PLATFORM_DEFAULT_AUX_MODEL_ID` as `ANTHROPIC_MODEL`
+    // / `ANTHROPIC_DEFAULT_HAIKU_MODEL` on all three substrates. The resolver only
+    // validates the list's shape and has no business knowing the defaults.
+    //
+    // Without this, `-c bedrockModels='["anthropic.claude-sonnet-4-6"]'` — a documented,
+    // code-change-free override — synthesizes clean while granting only Sonnet profiles
+    // and telling every substrate to invoke Opus 5. Every task with no per-repo pin then
+    // fails at turn 0 with AccessDenied naming no cause. Verified before fixing.
+    //
+    // This is the boundary the PR's other guards missed: a repo naming an ungranted model
+    // is rejected by `repo onboard --model`, a workflow naming one by admission — the
+    // platform naming one for itself was checked nowhere.
+    const ungrantedDefaults = [PLATFORM_DEFAULT_MODEL_ID, PLATFORM_DEFAULT_AUX_MODEL_ID]
+      .filter((m) => !grantedModelIds.includes(m));
+    if (ungrantedDefaults.length > 0) {
+      throw new Error(
+        'Context \'bedrockModels\' omits the platform default model(s) '
+        + `${ungrantedDefaults.map((m) => `'${m}'`).join(' and ')}. Every substrate is told to `
+        + 'invoke them regardless of that list, so tasks with no per-repo model would fail at '
+        + 'turn 0 with AccessDenied. Add them to the override, or change the platform default '
+        + 'in cdk/src/handlers/shared/bedrock-model-constants.ts alongside it.',
+      );
+    }
+
+    for (const modelId of grantedModelIds) {
       const foundationModel = new bedrock.BedrockFoundationModel(modelId, {
         supportsAgents: true,
         supportsCrossRegion: true,
@@ -981,6 +1022,21 @@ export class AgentStack extends Stack {
         + 'substrate alongside AgentCore).',
     });
 
+    // Both outputs are consumed by `platform doctor` and `repo onboard --model` to
+    // reject an ungranted or wrong-geography model before a task reaches turn 0.
+    new CfnOutput(this, 'BedrockModelIds', {
+      value: resolveBedrockModelIds(this.node).join(','),
+      description: 'Comma-separated BARE foundation-model ids this deploy grants. '
+        + 'Invoked as `<BedrockGeoRegion>.<modelId>`.',
+    });
+
+    new CfnOutput(this, 'BedrockGeoRegion', {
+      value: bedrockGeoRegion,
+      description: 'Cross-Region inference-profile geography this deploy grants (the '
+        + '`bedrockGeoRegion` context key; "global" in the shipped cdk.json, "us" if no '
+        + 'context is supplied at all). Model ids are invoked as `<geo>.<modelId>`.',
+    });
+
     if (lambdaMicrovm) {
       // Emitted so the packaging helper (cdk/scripts/package-microvm-artifact.sh)
       // can discover where to upload the zip+Dockerfile and which log group /
@@ -1073,7 +1129,13 @@ export class AgentStack extends Stack {
         // Same helper, same resolved geography as the AgentCore runtime env
         // above (#764) — the two substrates cannot be told to call different
         // inference profiles.
-        anthropicDefaultHaikuModel: haikuInferenceProfileId(bedrockGeoRegion),
+        anthropicDefaultHaikuModel: inferenceProfileId(bedrockGeoRegion, PLATFORM_DEFAULT_AUX_MODEL_ID),
+        // The MAIN model, delivered the same way for the same reason. Only the auxiliary
+        // one was, so on this substrate the main model came from a literal in
+        // agent/src/config.py that a geography change does not touch: a non-default
+        // `bedrockGeoRegion` granted one geography while the agent asked for another,
+        // and every task with no per-repo override failed at turn 0 with AccessDenied.
+        anthropicModel: inferenceProfileId(bedrockGeoRegion, PLATFORM_DEFAULT_MODEL_ID),
       },
       // Route ``compute_type: 'ecs'`` repos to the Fargate cluster above —
       // only when the cluster was synthesized (deploy --context compute_type=ecs).

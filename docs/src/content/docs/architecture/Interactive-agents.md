@@ -770,12 +770,12 @@ Opt-in per task: 4 KB previews + full trajectory to S3 with TTL.
 
 ## Appendix A — Claude Agent SDK reference
 
-Pinned version: `claude-agent-sdk==0.2.82` (Python; see `agent/pyproject.toml`).
+Pinned version: `claude-agent-sdk==0.2.110` (Python; see `agent/pyproject.toml`).
 
 > **Caution — re-verify against 0.2.x.** The hook-surface details in this
 > appendix (the `HookEvent` enum members, `PostToolUseFailure`, the Stop-hook
 > return-value contract, etc.) were originally written against
-> `claude-agent-sdk==0.1.53`. The pin has since advanced to `0.2.82`, and the
+> `claude-agent-sdk==0.1.53`. The pin has since advanced to `0.2.110`, and the
 > SDK's hook API may have changed across that range. Before relying on any
 > specific enum member or hook signature below, verify it against the installed
 > 0.2.x SDK and the actual usage in `agent/src/hooks.py`.

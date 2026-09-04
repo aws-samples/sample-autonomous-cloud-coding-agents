@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { BedrockClient, GetFoundationModelCommand } from '@aws-sdk/client-bedrock';
+import { BedrockClient, GetFoundationModelCommand, GetInferenceProfileCommand } from '@aws-sdk/client-bedrock';
 import {
   CognitoIdentityProviderClient,
   DescribeUserPoolClientCommand,
@@ -32,23 +32,60 @@ import {
   probeLambdaMicrovmAvailability,
 } from './lambda-microvm-availability';
 import { checkLinearWorkspaceAuth, type LinearProbe, type LinearRefreshVerifier } from './linear-auth-health';
+import { BEDROCK_GEO_PREFIXES } from './model-id';
 import { PLATFORM_REPO_DEFAULTS } from './repo-display';
 import { listRepoConfigs, RepoConfigRow } from './repo-lookup';
 import { getStackOutput } from './stack-outputs';
 import { makeClient } from './ua';
 
 /**
+ * Strips a leading `<geo>.` inference-profile prefix, if present.
+ *
+ * Built from the ONE geography list (`model-id.ts`) rather than a second copy. Two
+ * copies is how this broke: the list here matched only `us|eu|apac`, so when the
+ * platform default moved to `global.` the strip silently did nothing and
+ * `GetFoundationModel` was handed a profile id it cannot resolve.
+ */
+const GEO_PREFIX_RE = new RegExp(`^(?:${BEDROCK_GEO_PREFIXES.join('|')})\\.`);
+
+/**
  * Default foundation model checked when no onboarded repo specifies model_id.
  *
  * Derived from the platform default model so the two never drift on a model
- * bump: `PLATFORM_REPO_DEFAULTS.model_id` is the cross-region inference profile
- * (`us.anthropic.…`) used at invoke time, while `GetFoundationModel` requires
- * the bare foundation-model id, so we strip the regional inference prefix.
+ * bump: `PLATFORM_REPO_DEFAULTS.model_id` is the cross-Region inference profile
+ * used at invoke time, while `GetFoundationModel` requires the bare
+ * foundation-model id, so the geo prefix is stripped.
  */
 const DEFAULT_BEDROCK_MODEL_ID =
-  PLATFORM_REPO_DEFAULTS.model_id.replace(/^(us|eu|apac)\./, '');
+  PLATFORM_REPO_DEFAULTS.model_id.replace(GEO_PREFIX_RE, '');
 
 export type DoctorCheckStatus = 'pass' | 'fail' | 'warn';
+
+/**
+ * Why a probe failed, which decides whether its remedy may be stated as fact.
+ *
+ * `fail` remedies here are directive — "remove the model", "enable model access",
+ * "check the Region" — so they may only be given when the service ANSWERED and the
+ * answer was negative. A binary `accessDenied ? warn : fail` also routed throttling,
+ * 5xx, timeouts and expired credentials into that branch, reporting healthy
+ * deployments as broken and exiting doctor non-zero because one call happened to fail.
+ */
+type ProbeFailure = 'denied' | 'absent' | 'unverified';
+
+function classifyProbeFailure(err: unknown): ProbeFailure {
+  // Name AND message: a real denial carries the identifier only in `err.name`
+  // (`AccessDeniedException`), while its message reads "User: … is not authorized to
+  // perform: …", so matching the message alone never fires.
+  const text = `${err instanceof Error ? err.name : ''} ${err instanceof Error ? err.message : String(err)}`;
+  if (/AccessDenied|Unauthorized|not authorized/i.test(text)) return 'denied';
+  if (/ResourceNotFound|ValidationException|NoSuchResource|not found|does not exist/i.test(text)) {
+    return 'absent';
+  }
+  return 'unverified';
+}
+
+/** `absent` is the only definite negative, so it is the only one that fails. */
+const statusFor = (f: ProbeFailure): DoctorCheckStatus => (f === 'absent' ? 'fail' : 'warn');
 
 export interface DoctorCheckResult {
   readonly id: string;
@@ -85,6 +122,8 @@ export async function runPlatformDoctor(
     repoTableName,
     linearRegistryTableName,
     jiraRegistryTableName,
+    bedrockGeoRegion,
+    bedrockModelIds,
   ] = await Promise.all([
     getStackOutput(region, stackName, 'ApiUrl'),
     getStackOutput(region, stackName, 'UserPoolId'),
@@ -93,6 +132,8 @@ export async function runPlatformDoctor(
     getStackOutput(region, stackName, 'RepoTableName'),
     getStackOutput(region, stackName, 'LinearWorkspaceRegistryTableName'),
     getStackOutput(region, stackName, 'JiraWorkspaceRegistryTableName'),
+    getStackOutput(region, stackName, 'BedrockGeoRegion'),
+    getStackOutput(region, stackName, 'BedrockModelIds'),
   ]);
 
   const checks: DoctorCheckResult[] = [];
@@ -103,6 +144,8 @@ export async function runPlatformDoctor(
   const activeRepoResult = await loadActiveRepos(region, repoTableName);
   checks.push(checkActiveRepos(repoTableName, activeRepoResult));
   checks.push(await checkBedrockModel(region, DEFAULT_BEDROCK_MODEL_ID));
+  checks.push(await checkBedrockInferenceProfile(region, DEFAULT_BEDROCK_MODEL_ID, bedrockGeoRegion));
+  checks.push(await checkGrantedModelProfiles(region, bedrockModelIds, bedrockGeoRegion));
   if (activeRepoResult.repos.some((repo) => repo.compute_type === 'lambda-microvm')) {
     checks.push(await checkLambdaMicrovmAvailability(
       region,
@@ -356,16 +399,18 @@ async function checkLambdaMicrovmAvailability(
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    const errorName = err instanceof Error ? err.name : '';
-    const accessDenied = /AccessDenied|Unauthorized|not authorized/i.test(`${errorName} ${message}`);
+    const failure = classifyProbeFailure(err);
     return {
       id,
       label,
-      status: accessDenied ? 'warn' : 'fail',
-      detail: accessDenied
+      status: statusFor(failure),
+      detail: failure === 'denied'
         ? `${message}. Cannot verify Lambda MicroVM availability in ${region}; check IAM permissions for `
           + 'lambda-microvms List* actions.'
-        : `${message}. ${LAMBDA_MICROVM_REMEDY}`,
+        : failure === 'absent'
+          ? `${message}. ${LAMBDA_MICROVM_REMEDY}`
+          : `${message}. The check did not complete, so MicroVM availability in ${region} is unknown — `
+            + 'not evidence it is unavailable. Re-run.',
     };
   }
 }
@@ -384,14 +429,227 @@ async function checkBedrockModel(region: string, modelId: string): Promise<Docto
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    const status: DoctorCheckStatus = message.includes('AccessDenied') ? 'warn' : 'fail';
+    // Match on name AND message, the idiom `checkGithubToken` above already uses. A
+    // real denial carries the identifier ONLY in `err.name`
+    // (`AccessDeniedException`); its message reads "User: … is not authorized to
+    // perform: …". So `message.includes('AccessDenied')` never fires, and an
+    // operator on a least-privilege role got `fail` — which exits doctor non-zero
+    // and reports a healthy stack as broken.
+    const failure = classifyProbeFailure(err);
     return {
       id,
       label,
-      status,
-      detail: `${message} Enable model access in the Bedrock console if tasks fail at invoke time.`,
+      status: statusFor(failure),
+      detail: failure === 'unverified'
+        ? `${message} The check did not complete, so model access is unknown — re-run before `
+          + 'changing anything.'
+        : `${message} Enable model access in the Bedrock console if tasks fail at invoke time.`,
     };
   }
+}
+
+/**
+ * Check the cross-Region inference profile the deployment will actually invoke.
+ *
+ * Distinct from the catalog check above, and the reason both exist: the catalog
+ * answers "is this model published in this Region", while the agent invokes a
+ * `<geo>.<modelId>` PROFILE and the IAM grant is scoped to profile ARNs. A stack
+ * configured for a geography whose profile does not exist — or whose entitlements
+ * the account lacks — passes the catalog check and then fails every task at turn 0
+ * with AccessDenied, which is exactly what doctor is supposed to pre-empt.
+ *
+ * Keeping the two separate also keeps the remedies distinct: a missing catalog
+ * entry means the model is unavailable here at all, while a missing profile means
+ * the geography is wrong for this model or Region.
+ *
+ * `geoRegion` is null when the stack predates the `BedrockGeoRegion` output. That
+ * is reported rather than defaulted: guessing `us` and passing would state a
+ * verification that never happened.
+ */
+async function checkBedrockInferenceProfile(
+  region: string,
+  bareModelId: string,
+  geoRegion: string | null,
+): Promise<DoctorCheckResult> {
+  const id = 'bedrock_inference_profile';
+  if (!geoRegion) {
+    return {
+      id,
+      label: 'Bedrock inference profile',
+      status: 'warn',
+      detail: 'Stack does not export BedrockGeoRegion, so the inference profile the '
+        + 'agent invokes cannot be determined. Redeploy to surface it; until then this '
+        + 'check is skipped rather than assuming a geography.',
+    };
+  }
+
+  const profileId = `${geoRegion}.${bareModelId}`;
+  // Labelled as VISIBILITY, not readiness. This resolves under the operator's
+  // credentials while tasks invoke under the workload role, so a PASS here can
+  // coexist with AccessDenied at turn 0 — and a PASS feeding "All checks passed"
+  // would otherwise read as "the workload can call this".
+  const label = `Bedrock inference profile visible (${profileId})`;
+  const bedrock = makeClient(BedrockClient, { region });
+  try {
+    await bedrock.send(new GetInferenceProfileCommand({ inferenceProfileIdentifier: profileId }));
+    return {
+      id,
+      label,
+      status: 'pass',
+      // Deliberately not claiming invocability: resolving a profile proves it
+      // exists and is reachable, not that a task can call it. Only InvokeModel
+      // proves that, and doctor does not spend a token to find out.
+      detail: `Inference profile ${profileId} resolves in ${region} for these operator `
+        + 'credentials. Does not prove the workload role can invoke it — that grant is '
+        + 'checked at task time.',
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    // Match on name AND message, the idiom `checkGithubToken` above already uses. A
+    // real denial carries the identifier ONLY in `err.name`
+    // (`AccessDeniedException`); its message reads "User: … is not authorized to
+    // perform: …". So `message.includes('AccessDenied')` never fires, and an
+    // operator on a least-privilege role got `fail` — which exits doctor non-zero
+    // and reports a healthy stack as broken.
+    const failure = classifyProbeFailure(err);
+    // The remedy depends on WHICH happened, so it cannot be shared. Rendering the
+    // denial case showed why the old shared string was wrong: it appended "Either
+    // <model> has no profile in that geography … tasks would fail at turn 0", drawing
+    // a conclusion about the PROFILE from an error about the CALLER.
+    let detail: string;
+    if (failure === 'denied') {
+      detail = `${message} That is a permissions gap on the caller, not evidence the profile is `
+        + `missing — the deployment grants '${geoRegion}' profiles (bedrockGeoRegion), and `
+        + 'whether this one resolves is unknown until re-run with credentials holding '
+        + 'bedrock:GetInferenceProfile.';
+    } else if (failure === 'absent') {
+      detail = `${message} The deployment grants '${geoRegion}' profiles (bedrockGeoRegion). `
+        + `Either ${bareModelId} has no profile in that geography, or this account lacks its `
+        + 'entitlements — tasks would fail at turn 0 with AccessDenied.';
+    } else {
+      detail = `${message} The check did not complete, so this says nothing about whether `
+        + `${bareModelId} resolves in '${geoRegion}' — treat it as unverified, not as a `
+        + 'misconfiguration, and re-run.';
+    }
+    return { id, label, status: statusFor(failure), detail };
+  }
+}
+
+/**
+ * Every model the stack GRANTS, not just the one it defaults to.
+ *
+ * A granted model with no inference profile is invisible to every other check the
+ * platform has, because they all read the same grant list: `repo onboard --model`
+ * admits it (it is granted), workflow admission admits it (same list), and the IAM
+ * policy carries a grant for a profile ARN that cannot exist. The first signal is a
+ * task failing at turn 0. That was live —
+ * `anthropic.claude-opus-4-20250514-v1:0` was granted with no profile in any
+ * geography — and removing it only stays fixed if something notices the next one.
+ *
+ * Reported as ONE check rather than N so a wide grant list cannot bury the rest of
+ * doctor's output, and named per-model in the detail so the offender is actionable.
+ *
+ * Severity mirrors {@link checkBedrockInferenceProfile}: a denial is a `warn`
+ * (the operator's own credentials are least-privilege, which says nothing about
+ * the model), while a genuine not-found is a `fail` — that one is a real defect in
+ * the grant list regardless of who is looking.
+ */
+async function checkGrantedModelProfiles(
+  region: string,
+  bedrockModelIds: string | null,
+  geoRegion: string | null,
+): Promise<DoctorCheckResult> {
+  const id = 'bedrock_granted_model_profiles';
+  const label = 'Every granted Bedrock model has an inference profile';
+  if (!bedrockModelIds || !geoRegion) {
+    return {
+      id,
+      label,
+      status: 'warn',
+      detail: 'Stack does not export BedrockModelIds and BedrockGeoRegion, so the granted '
+        + 'set cannot be enumerated. Redeploy to surface them; until then this check is '
+        + 'skipped rather than assuming a list.',
+    };
+  }
+
+  const bare = bedrockModelIds.split(',').map((s) => s.trim()).filter(Boolean);
+  if (bare.length === 0) {
+    return { id, label, status: 'warn', detail: 'BedrockModelIds is exported but empty.' };
+  }
+
+  const bedrock = makeClient(BedrockClient, { region });
+  // THREE buckets, not two. The remedy for a missing profile is "remove this model
+  // from the grant set", and that is destructive advice: applied to a model that is
+  // actually fine, it narrows a working deployment. So it may only be given for an
+  // error that PROVES the profile does not exist. A binary
+  // `accessDenied ? warn : fail` sent every throttle, 5xx, expired credential, and
+  // unreachable-endpoint into that branch — telling an operator to delete a healthy
+  // model because the check happened to run during a blip.
+  const missing: string[] = [];
+  const denied: string[] = [];
+  const unverified: string[] = [];
+  for (const model of bare) {
+    const profileId = `${geoRegion}.${model}`;
+    try {
+      await bedrock.send(new GetInferenceProfileCommand({ inferenceProfileIdentifier: profileId }));
+    } catch (err) {
+      const errorName = err instanceof Error ? err.name : '';
+      switch (classifyProbeFailure(err)) {
+        case 'denied':
+          denied.push(profileId);
+          break;
+        case 'absent':
+          // The service answered, and its answer was "no such profile".
+          missing.push(profileId);
+          break;
+        default:
+          // Throttling, 5xx, timeouts, DNS, expired creds — the check did not run, which
+          // is not evidence about the model either way.
+          unverified.push(`${profileId} (${errorName || 'unknown error'})`);
+      }
+    }
+  }
+
+  if (missing.length > 0) {
+    return {
+      id,
+      label,
+      status: 'fail',
+      detail: `${missing.length} of ${bare.length} granted model(s) have no inference profile in `
+        + `'${geoRegion}': ${missing.join(', ')}. Each is granted by IAM and passes `
+        + '`repo onboard --model` and workflow admission, then fails at turn 0. Remove it from '
+        + 'the bedrockModels context, or deploy a geography where it resolves.',
+    };
+  }
+  if (denied.length > 0) {
+    return {
+      id,
+      label,
+      status: 'warn',
+      detail: `${denied.length} of ${bare.length} granted model(s) could not be resolved under `
+        + `these operator credentials: ${denied.join(', ')}. That is a permissions gap on the `
+        + 'caller, not evidence the profile is missing — re-run with credentials holding '
+        + 'bedrock:GetInferenceProfile to settle it.',
+    };
+  }
+  if (unverified.length > 0) {
+    return {
+      id,
+      label,
+      status: 'warn',
+      detail: `${unverified.length} of ${bare.length} granted model(s) could not be checked: `
+        + `${unverified.join(', ')}. The call failed for a reason unrelated to the model, so this `
+        + 'says nothing about whether the profile exists — do NOT remove anything from the grant '
+        + 'set on the strength of it. Re-run to settle.',
+    };
+  }
+  return {
+    id,
+    label,
+    status: 'pass',
+    detail: `All ${bare.length} granted model(s) resolve as '${geoRegion}.' inference profiles in `
+      + `${region}. Visibility only: does not prove the workload role can invoke them.`,
+  };
 }
 
 /**
