@@ -179,6 +179,91 @@ For post-mortems, eval-harness input, and compliance export, the API exposes a s
 
 Fields whose source did not run for a given task are returned `null`/empty (e.g. no `--trace` → `trace_uri: null`), so the schema is stable for consumers.
 
+## AgentCore log delivery
+
+The agent runtime's application and usage logs reach CloudWatch through a trio of resources per log type — `AWS::Logs::DeliverySource`, `AWS::Logs::DeliveryDestination`, and an `AWS::Logs::Delivery` link joining them. The stack does not declare these. The AgentCore `Runtime` L2 construct creates them from the `loggingConfigs` passed to it, and names them from its own internal construct path.
+
+**The stack deliberately does not override their logical ids.** That is a load-bearing decision rather than an oversight, because the obvious alternatives are worse in a way that is not obvious until a deployment fails.
+
+### Why a rename of these resources is fatal
+
+A `DeliverySource` is unique per `(resource ARN, log type)` for the whole account. The agent runtime's ARN does not change when the delivery resources are renamed, so:
+
+1. Changing a delivery resource's logical id makes CloudFormation treat it as a new resource, which it **creates before deleting** the old one.
+2. The new source points at the same runtime ARN as the live one, which still exists at that moment.
+3. CloudWatch Logs rejects it — `AlreadyExists`, "This ResourceId has already been used in another Delivery Source in this account."
+4. The whole stack update rolls back.
+
+The counter-intuitive consequence: **no choice of name avoids this.** The conflict is on the ARN the sources point at, not on their own names, so renaming them to library-generated ids, to hand-picked stable ids, or to anything else collides identically. Only leaving a logical id untouched avoids it, because that is what makes CloudFormation update in place instead of creating a second source for the same runtime.
+
+### Why the ids are not pinned in the template
+
+An earlier version of the stack held a table of logical ids to override, keyed by stack name, with values read off a live stack. This does not work, because **stack name is not a proxy for deployed state.** Two accounts running a stack of the same name can sit on different library versions' naming, so one set of literals is correct for one account and actively causes the fatal rename on the other. Re-recording the table inverts which account breaks rather than fixing either.
+
+Since no set of literals can describe every account's deployed state, the stack holds none. Log delivery is left to the library, which generates the ids from the construct path — deterministically, identically in every account, with nothing to keep in sync.
+
+The cost of this choice is bounded and one-time: a stack deployed before a library-side rename, or held on older ids by the pin table, must converge once. See the migration below. The cost of the alternative was unbounded — a hand-maintained table that silently breaks a different account every time any library version or any deployment moves.
+
+### Migrating a stack that predates the current naming
+
+Fresh deployments need nothing here. A stack whose live delivery resources already match what the library generates needs nothing either, and `cdk diff` will show the six resources untouched.
+
+A stack still on older ids has to converge, and because the create-before-delete collision above applies, the old resources must be gone before the new ones are created.
+
+**`mise //cdk:deploy` handles this automatically** (the CI pipeline reports it but does not migrate — see the deployment guide's known-issues entry)**.** The deploy task runs a preflight (`cdk/scripts/preflight-log-delivery.ts`) that reads the stack's own resource list and, only when it finds delivery resources under the retired pinned ids (a `CDKSource` or `CdkLogGroup` segment in the logical id), deletes exactly those before the deploy proceeds. It deletes by the physical ids CloudFormation reports for *this stack*, so other delivery configurations in the account — even on a shared account — are unreachable by construction. Already-migrated stacks and fresh installs pass through untouched, so the preflight is safe to leave on every deploy.
+
+**Which stacks are affected is a property of deployed state, not of the stack's name.** The legacy ids are the *previous library's* naming, not a product of the pin table: `#339` (`9a58797c`, 2026-06-13) switched the stack from `@aws-cdk/aws-bedrock-agentcore-alpha` to `aws-cdk-lib/aws-bedrockagentcore`, and the pin table only landed seven weeks later in `#695` (`4357c353`, 2026-08-03). The alpha generated the `RuntimeCDKSource…` / `RuntimeCdkLogGroup…` shapes; `aws-cdk-lib` generates `RuntimeApplicationLogsDeliverySource<hash>`.
+
+So the affected predicate is exactly what the preflight itself tests: **the stack's live `AWS::Logs::Delivery*` logical ids contain `CDKSource` or `CdkLogGroup`** — true of any stack last deployed before that library switch, whatever it is called, and whether or not the pin table ever applied to it. A custom-named stack is *not* immune, and neither is a stack created fresh from a commit that carried the table. "It deploys fine today" does not mean "unaffected", because the collision only appears on the deploy that renames.
+
+Run the check once per stack, regardless of name — it deletes nothing:
+
+```bash
+STACK_NAME=<stack> mise //cdk:preflight:log-delivery -- --check-only
+```
+
+Exit 0 means nothing to migrate; exit 2 lists what would be deleted. The preflight exists because the affected operators cannot be enumerated or notified.
+
+Knobs, all optional:
+
+```bash
+# Report what would be deleted; exit 2 if migration is needed
+mise //cdk:preflight:log-delivery -- --check-only
+
+# Non-default stack: set BOTH — see the note below
+STACK_NAME=my-stack mise //cdk:deploy -- -c stackName=my-stack
+
+# Skip the preflight entirely (at your own risk)
+ABCA_SKIP_LOG_DELIVERY_PREFLIGHT=1 mise //cdk:deploy
+```
+
+**A non-default stack needs the name given twice, and the two are not interchangeable.** `cdk deploy` selects its stack from `stackName` CDK *context*, while the preflight reads `STACK_NAME` (or `--stack-name`, or `stackName` in `cdk.json` context). Arguments after `--` are appended to the `cdk deploy` command and never reach a mise `depends` task, so `-c stackName=x` alone leaves the preflight on its default target — and `STACK_NAME=x` alone leaves the *deploy* on its default target. Setting only one is how you end up migrating one stack while deploying another.
+
+This is now closed rather than merely documented: the preflight runs as the first command of the `deploy` task, so the arguments after `--` reach it and `cdk deploy` alike, and `--profile` / `--region` are forwarded to its own AWS calls. It also reads `cdk.context.json` (the file the CI pipeline writes `stackName` into), not just `cdk.json`.
+
+If the stack name still resolves from the built-in default *while arguments were supplied*, the preflight refuses to delete rather than guess — the case that would otherwise migrate one stack's delivery resources while deploying another, leaving the first one's agent logging dark until it is deployed itself. Every run prints the stack, where the name came from, and the account and region it resolved to:
+
+```
+log-delivery preflight: inspecting stack 'backgroundagent-dev'
+  (from default)
+```
+
+To migrate by hand instead (e.g. deploying without mise), list the stack's delivery resources and delete only those, deliveries first — they reference the source and destination:
+
+```bash
+aws cloudformation list-stack-resources --stack-name backgroundagent-dev \
+  --query "StackResourceSummaries[?contains(ResourceType,'Logs::Delivery')].\
+[ResourceType,LogicalResourceId,PhysicalResourceId]" --output text
+# For each row whose LogicalResourceId carries a CDKSource/CdkLogGroup segment:
+#   AWS::Logs::Delivery            -> aws logs delete-delivery --id <PhysicalResourceId>
+#   AWS::Logs::DeliverySource      -> aws logs delete-delivery-source --name <PhysicalResourceId>
+#   AWS::Logs::DeliveryDestination -> aws logs delete-delivery-destination --name <PhysicalResourceId>
+```
+
+Do the deletion immediately before deploying, not in advance: agent logs stop being delivered from the deletion until the deploy completes, and a full deploy (image build included) can take an hour. The deploy then creates the delivery trio under the library's naming and drops the old logical ids, whose underlying resources are already gone — CloudFormation treats a delete of an absent resource as done. Nothing else is affected, and no log data already in CloudWatch is touched.
+
+If the migration is skipped, the failure is loud but unexplained: the update fails on the new `AWS::Logs::DeliverySource` with `AlreadyExists` ("This ResourceId has already been used in another Delivery Source") and the whole stack rolls back. The stack keeps running on its previous template; run the preflight (or the manual steps) and deploy again.
+
 ## Deployment safety
 
 Agent sessions run for up to 8 hours. CDK deployments replace Lambda functions, which can orphan in-flight orchestrator executions. The platform handles this through multiple mechanisms:
