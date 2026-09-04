@@ -94,6 +94,13 @@ run = "node --experimental-strip-types scripts/check-coverage-thresholds-sync.ts
 description = "Test the standalone Jira Forge app-actor proxy"
 run = "npm test --prefix integrations/jira-forge-app"
 
+[tasks."test:hooks"]
+description = "Unit-test the ADR-003 governance hook scripts (#186) via node --test"
+# Explicit glob (not the directory) so Node reports real pass/fail — a directory
+# arg on Node 22 emits a spurious top-level failure. Runs in the build DAG so the
+# governance gate's own regression tests cannot silently rot.
+run = "node --test scripts/hooks/*.test.mjs"
+
 [tasks."sync:abca-commands"]
 description = "Generate commands stubs from .abca/commands for multiple AI assistants"
 run = "node scripts/sync-abca-commands.mjs"
@@ -278,6 +285,7 @@ depends = [
   "//cli:build",
   "//docs:build",
   ":test:jira-forge-app",
+  ":test:hooks",
   ":drift-prevention"
 ]
 
