@@ -718,6 +718,38 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       mappingItem = mapping.Item;
     }
   }
+
+  // The mapping table is keyed on the project id alone, so `projectId` selects a
+  // repository on its own — and it arrives in the request body. Check the mapping
+  // against the workspace the delivery claims to be from, so naming another
+  // workspace's project cannot steer a task at that workspace's repository.
+  //
+  // Drop rather than reply. The reply would go to the sender's own workspace, and
+  // "that project belongs to someone else" both confirms the project exists and tells
+  // a prober the attempt was seen. The log line is the diagnostic surface instead.
+  const mappedWorkspaceId = mappingItem?.linear_workspace_id as string | undefined;
+  if (mappingItem && mappedWorkspaceId && mappedWorkspaceId !== payload.organizationId) {
+    logger.warn('Linear project is mapped to a different workspace than this webhook — dropping', {
+      issue_id: issue.id,
+      linear_project_id: projectId,
+      event_workspace_id: payload.organizationId,
+      mapped_workspace_id: mappedWorkspaceId,
+    });
+    return;
+  }
+  if (mappingItem && !mappedWorkspaceId) {
+    // Allowed for now: rows written before the owning workspace was recorded have
+    // nothing to check against, and rejecting them would break working installs on
+    // deploy. `bgagent linear backfill-project-workspaces` fills them in and
+    // `bgagent platform doctor` reports what is left, which is what makes it safe to
+    // turn this into a rejection later.
+    logger.warn('Linear project mapping records no owning workspace — cannot verify the tenant', {
+      issue_id: issue.id,
+      linear_project_id: projectId,
+      event_workspace_id: payload.organizationId,
+    });
+  }
+
   const labelFilter = (mappingItem?.label_filter as string | undefined) ?? DEFAULT_LABEL_FILTER;
 
   // ``<base>:help`` — post a one-time explainer of what the trigger labels do

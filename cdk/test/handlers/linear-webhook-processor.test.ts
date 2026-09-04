@@ -90,6 +90,7 @@ process.env.GUARDRAIL_VERSION = '1';
 
 import { handler } from '../../src/handlers/linear-webhook-processor';
 import { LinearAttachmentError } from '../../src/handlers/shared/linear-attachments';
+import { logger } from '../../src/handlers/shared/logger';
 
 function eventWith(payload: Record<string, unknown>): { raw_body: string } {
   return { raw_body: JSON.stringify(payload) };
@@ -308,6 +309,84 @@ describe('linear-webhook-processor handler', () => {
       linear_workspace_id: 'org-1',
       linear_project_id: 'project-1',
       linear_team_id: 'team-1',
+    });
+  });
+
+  // The mapping table is keyed on the project id alone and `projectId` arrives in the
+  // request body, so the row's owning workspace is the only thing standing between a
+  // signed event and another tenant's repository.
+  describe('project → workspace binding', () => {
+    test('drops an event whose project is mapped to a different workspace', async () => {
+      ddbSend.mockResolvedValueOnce({
+        Item: { repo: 'victim/repo', status: 'active', linear_workspace_id: 'org-victim' },
+      });
+
+      await handler(eventWith(issue()));
+
+      expect(createTaskCoreMock).not.toHaveBeenCalled();
+      // Silent on the wire: replying would confirm the project exists to whoever named
+      // it, and the reply would land in the sender's own workspace.
+      expect(reportIssueFailureMock).not.toHaveBeenCalled();
+    });
+
+    test('proceeds when the mapping names the workspace the event came from', async () => {
+      ddbSend
+        .mockResolvedValueOnce({
+          Item: { repo: 'org/repo', status: 'active', linear_workspace_id: 'org-1' },
+        })
+        .mockResolvedValueOnce({ Item: { platform_user_id: 'cognito-user-1', status: 'active' } });
+      createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: JSON.stringify({ data: { task_id: 'T1' } }) });
+
+      await handler(eventWith(issue()));
+
+      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+      expect(createTaskCoreMock.mock.calls[0][0].repo).toBe('org/repo');
+    });
+
+    test('still proceeds when the mapping predates the owning-workspace field', async () => {
+      // Back-compat: rejecting unbacked rows on deploy would break every install that
+      // has not run the backfill yet. Enforcement for these is a later, gated step.
+      const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => undefined);
+      try {
+        ddbSend
+          .mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'active' } })
+          .mockResolvedValueOnce({ Item: { platform_user_id: 'cognito-user-1', status: 'active' } });
+        createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: JSON.stringify({ data: { task_id: 'T1' } }) });
+
+        await handler(eventWith(issue()));
+
+        expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+        // The warning is the only signal that this install still has rows to backfill,
+        // so it is asserted rather than left to the source comment.
+        expect(warnSpy).toHaveBeenCalledWith(
+          expect.stringContaining('records no owning workspace'),
+          expect.objectContaining({ linear_project_id: 'project-1' }),
+        );
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    // Asserted on the log rather than on `createTaskCore`, because an event with no
+    // workspace id never creates a task anyway — it fails later at attribution. Only
+    // the guard's own line proves the drop happened HERE, at the binding check.
+    test('drops at the binding check when the event carries no workspace id', async () => {
+      const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => undefined);
+      try {
+        ddbSend.mockResolvedValueOnce({
+          Item: { repo: 'org/repo', status: 'active', linear_workspace_id: 'org-1' },
+        });
+
+        await handler(eventWith(issue({ organizationId: undefined })));
+
+        expect(createTaskCoreMock).not.toHaveBeenCalled();
+        expect(warnSpy).toHaveBeenCalledWith(
+          expect.stringContaining('mapped to a different workspace'),
+          expect.objectContaining({ mapped_workspace_id: 'org-1' }),
+        );
+      } finally {
+        warnSpy.mockRestore();
+      }
     });
   });
 
