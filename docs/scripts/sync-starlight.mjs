@@ -44,7 +44,6 @@ function rewriteDocsLinkTarget(target) {
     CONTRIBUTING: '/developer-guide/contributing',
     SLACK_SETUP_GUIDE: '/using/slack-setup-guide',
     LINEAR_SETUP_GUIDE: '/using/linear-setup-guide',
-    LINEAR_PAK_MIGRATION_RUNBOOK: '/using/linear-pak-migration-runbook',
     JIRA_SETUP_GUIDE: '/using/jira-setup-guide',
     DEPLOY_PREVIEW_SCREENSHOTS_GUIDE: '/using/deploy-preview-screenshots-guide',
     CEDAR_POLICY_GUIDE: '/customizing/cedar-policies',
@@ -281,12 +280,6 @@ mirrorMarkdownFile(
 mirrorMarkdownFile(
   path.join(docsRoot, 'guides', 'LINEAR_SETUP_GUIDE.md'),
   path.join('src', 'content', 'docs', 'using', 'Linear-setup-guide.md'),
-);
-
-// --- Linear PAK migration runbook: mirror to using/ ---
-mirrorMarkdownFile(
-  path.join(docsRoot, 'guides', 'LINEAR_PAK_MIGRATION_RUNBOOK.md'),
-  path.join('src', 'content', 'docs', 'using', 'Linear-pak-migration-runbook.md'),
 );
 
 // --- Jira Setup Guide: mirror to using/ ---

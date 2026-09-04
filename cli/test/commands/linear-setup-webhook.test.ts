@@ -177,6 +177,44 @@ describe('linear setup — second-workspace re-run preserves the per-workspace w
     global.fetch = originalFetch;
   });
 
+  test('refuses to proceed when the workspace has no signing secret of its own', async () => {
+    // Skipping here is exactly how a workspace ended up holding the stack-wide
+    // secret and 401ing on every delivery while looking installed. With nothing
+    // legitimate to keep there is nothing to skip TO, so it is refused rather than
+    // warned about — and refused BEFORE consent, so no browser work is wasted.
+    smSend.mockImplementation((cmd: unknown) => {
+      if (cmd instanceof GetSecretValueCommand) {
+        const id = (cmd as GetSecretValueCommand).input.SecretId ?? '';
+        if (String(id).includes('bgagent-linear-oauth-')) {
+          // No prior bundle at all — a genuine first install for this workspace.
+          return Promise.reject(Object.assign(new Error('nope'), { name: 'ResourceNotFoundException' }));
+        }
+        return Promise.resolve({ SecretString: 'lin_wh_stackWideOther' });
+      }
+      return Promise.resolve({});
+    });
+
+    // Stub the CLI config: without it this passes only on a machine that happens to
+    // have `bgagent configure` run, and fails on a clean runner with "Not
+    // configured" — which is what CI caught.
+    const cfgSpy = jest.spyOn(configMod, 'loadConfig').mockReturnValue(
+      { region: 'us-west-2', api_url: 'https://api.example.test' } as ReturnType<typeof configMod.loadConfig>,
+    );
+    const credSpy = jest.spyOn(configMod, 'loadCredentials').mockReturnValue(
+      { id_token: FAKE_ID_TOKEN } as ReturnType<typeof configMod.loadCredentials>,
+    );
+    try {
+      const program = makeLinearCommand();
+      await expect(program.parseAsync([
+        'node', 'bgagent', 'setup', 'zzsecondws',
+        '--client-id', 'cid', '--client-secret', 'csecret', '--webhook-secret', '', '--no-browser',
+      ])).rejects.toThrow(/no webhook signing secret of its own/);
+    } finally {
+      cfgSpy.mockRestore();
+      credSpy.mockRestore();
+    }
+  });
+
   test('the final per-workspace PutSecretValue keeps THIS workspace secret, not the stack-wide other', async () => {
     // SM.send routing by command + target:
     //  1. pre-read GetSecretValue(per-workspace bundle) → prior bundle carrying
@@ -219,7 +257,9 @@ describe('linear setup — second-workspace re-run preserves the per-workspace w
       const program = makeLinearCommand();
       await program.parseAsync([
         'node', 'bgagent', 'setup', 'demo',
-        '--client-id', 'cid', '--client-secret', 'csecret', '--no-browser',
+        // Empty webhook secret = "skip", which is what exercises the PRESERVE path
+        // this test is about. Passed as a flag so the run stays non-interactive.
+        '--client-id', 'cid', '--client-secret', 'csecret', '--webhook-secret', '', '--no-browser',
       ]);
     } finally {
       cfgSpy.mockRestore();

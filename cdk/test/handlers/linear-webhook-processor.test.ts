@@ -17,6 +17,9 @@
  *  SOFTWARE.
  */
 
+import * as fs from 'fs';
+import * as path from 'path';
+
 const ddbSend = jest.fn();
 jest.mock('@aws-sdk/client-dynamodb', () => ({ DynamoDBClient: jest.fn(() => ({})) }));
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
@@ -1062,5 +1065,127 @@ describe('probeLinearIssueContext', () => {
       attachmentTitles: string[];
     };
     expect(result.attachmentTitles).toEqual([]);
+  });
+});
+
+describe('every channel_metadata builder carries the vault fields', () => {
+  // The agent mints its own Linear token, so a task's channel_metadata must carry the
+  // provider and the subject. They were added to the label-trigger builder only, and
+  // the four comment-triggered builders (iteration, new work, clarify-resume, routed
+  // comment) each construct their own object — so agents launched from a comment on a
+  // vault-managed workspace fell back to a Secrets-Manager token that does not exist
+  // there: no reactions, no state transitions, on work that otherwise succeeded.
+  //
+  // Asserted over the SOURCE because the failure is a missing line in a new builder,
+  // and a behavioural test only covers the builders someone remembered to exercise.
+  // This is the third instance of the same mistake in this change — after the row
+  // parser and the vault-success return — hence a structural check.
+  const src = fs.readFileSync(
+    path.join(__dirname, '..', '..', 'src', 'handlers', 'linear-webhook-processor.ts'),
+    'utf8',
+  );
+
+  test('each builder that writes the workspace slug also spreads vaultMetadata', () => {
+    // Scans to the end of the enclosing object literal rather than demanding the spread
+    // on the very next line: adjacency made a harmless key reorder fail, which trains
+    // people to "fix" the guard. What it must still catch is a NEW builder that omits
+    // the spread entirely — something the behavioural test cannot, since that only
+    // covers builders somebody remembered to exercise.
+    const lines = src.split('\n');
+    const offenders: number[] = [];
+    lines.forEach((line, i) => {
+      if (line.trim() !== 'linear_workspace_slug: resolved.workspaceSlug,') return;
+      for (let j = i + 1; j < lines.length; j += 1) {
+        const cur = lines[j]!.trim();
+        if (cur === '...vaultMetadata(resolved),') return;
+        // End of this literal — the spread never appeared in it.
+        if (cur === '};' || cur === '});') break;
+      }
+      offenders.push(i + 1);
+    });
+    expect(offenders).toEqual([]);
+  });
+
+  test('the LABEL-trigger path actually emits the vault fields (behavioural)', async () => {
+    // The structural check above cannot see this builder: it assigns onto an existing
+    // object instead of constructing a literal, so the one path `vaultMetadata` was
+    // written for was the one path its own guard never covered. Asserted on the
+    // channel_metadata that reaches createTaskCore, because that is the thing the agent
+    // reads — a source pattern cannot prove the fields arrive.
+    ddbSend
+      .mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'active' } })
+      .mockResolvedValueOnce({
+        Item: {
+          linear_identity: 'org-1#user-1',
+          platform_user_id: 'cognito-user-1',
+          status: 'active',
+        },
+      });
+    resolveLinearOauthTokenMock.mockResolvedValue({
+      accessToken: 'lin_at',
+      scope: 'read write',
+      workspaceSlug: 'acme',
+      oauthSecretArn: 'arn:aws:secretsmanager:us-east-1:123:secret:bgagent-linear-oauth-acme',
+      providerName: 'bgagent-linear-oauth-acme',
+      vaultUserId: 'linear-ws-acme',
+    });
+    createTaskCoreMock.mockResolvedValueOnce({
+      statusCode: 201,
+      body: JSON.stringify({ data: { task_id: 'T1' } }),
+    });
+
+    await handler(eventWith(issue()));
+
+    expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+    const [, ctx] = createTaskCoreMock.mock.calls[0];
+    expect(ctx.channelMetadata).toMatchObject({
+      linear_provider_name: 'bgagent-linear-oauth-acme',
+      linear_vault_user_id: 'linear-ws-acme',
+      linear_workspace_id: 'org-1',
+    });
+  });
+
+  test('a workspace with NO provider gets no vault fields, so SM-only installs are unchanged', async () => {
+    // The absent-provider case is what keeps the helper honest: spreading it
+    // unconditionally would hand the agent a provider name for a workspace that has
+    // none, and it would try to mint against a provider that does not exist.
+    //
+    // The resolver mock is set explicitly rather than leaning on the suite default —
+    // this describe has no beforeEach of its own, so an ambient value would carry over
+    // from the vault-enabled test above and the assertion would pass or fail on
+    // ordering rather than on behaviour.
+    resolveLinearOauthTokenMock.mockResolvedValue({
+      accessToken: 'lin_at',
+      scope: 'read write',
+      workspaceSlug: 'acme',
+      oauthSecretArn: 'arn:aws:secretsmanager:us-east-1:123:secret:bgagent-linear-oauth-acme',
+    });
+    ddbSend
+      .mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'active' } })
+      .mockResolvedValueOnce({
+        Item: {
+          linear_identity: 'org-1#user-1',
+          platform_user_id: 'cognito-user-1',
+          status: 'active',
+        },
+      });
+    createTaskCoreMock.mockResolvedValueOnce({
+      statusCode: 201,
+      body: JSON.stringify({ data: { task_id: 'T1' } }),
+    });
+
+    await handler(eventWith(issue()));
+
+    const [, ctx] = createTaskCoreMock.mock.calls[0];
+    expect(ctx.channelMetadata).not.toHaveProperty('linear_provider_name');
+    expect(ctx.channelMetadata).not.toHaveProperty('linear_vault_user_id');
+  });
+
+  test('there is more than one such builder, so the check is not vacuous', () => {
+    // If the builders are ever refactored into one, this test should be deleted
+    // rather than left passing over nothing.
+    const count = src.split('\n')
+      .filter((l) => l.trim() === 'linear_workspace_slug: resolved.workspaceSlug,').length;
+    expect(count).toBeGreaterThanOrEqual(4);
   });
 });

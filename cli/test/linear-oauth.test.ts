@@ -28,6 +28,8 @@ import {
   LINEAR_OAUTH_SCOPES,
   LINEAR_TOKEN_ENDPOINT,
   linearOauthSecretName,
+  readExistingOauthTokens,
+  resolveStoredGrantFields,
   readExistingWebhookSecret,
   refreshAccessToken,
   resolveWebhookSecretAction,
@@ -261,6 +263,41 @@ describe('exchangeAuthorizationCode', () => {
       clientSecret: 'csec',
       fetchImpl: fetchImpl as unknown as typeof fetch,
     })).rejects.toThrow(/unexpected shape/);
+  });
+
+  test('an off-contract 200 does NOT print the access token it carried', async () => {
+    // The dangerous case is not a missing token — it is a PRESENT one alongside some
+    // other field being off-contract. The guard requires `expires_in` and `scope`, so a
+    // 200 carrying a perfectly good credential with a string `expires_in` failed it, and
+    // the message interpolated the raw body: the token went to the operator's terminal
+    // and into any CI log capturing stdout, where it outlives the session that leaked it.
+    const secret = 'lin_oauth_SUPER_SECRET_VALUE';
+    const fetchImpl = jest.fn().mockResolvedValueOnce(mockResponse(200, {
+      access_token: secret,
+      refresh_token: 'lin_refresh_ALSO_SECRET',
+      token_type: 'Bearer',
+      expires_in: '3600', // string, not number — off contract
+      scope: 'read write',
+    }));
+
+    const attempt = exchangeAuthorizationCode({
+      code: 'authcode',
+      codeVerifier: 'verifier',
+      redirectUri: 'https://localhost:8443/oauth/callback',
+      clientId: 'cid',
+      clientSecret: 'csec',
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    await expect(attempt).rejects.toThrow(/unexpected shape/);
+    const message = await attempt.catch((err: unknown) => String(err));
+    // No credential material, in any form.
+    expect(message).not.toContain(secret);
+    expect(message).not.toContain('lin_refresh_ALSO_SECRET');
+    // Still diagnostic: names the field that is wrong and what was expected.
+    expect(message).toContain('expires_in expected number, got string');
+    // Key NAMES are safe and useful; values are not.
+    expect(message).toContain('keys present: access_token');
   });
 
   test('rejects non-JSON responses (Linear maintenance / proxy intercepts)', async () => {
@@ -519,5 +556,150 @@ describe('readExistingWebhookSecret — fail-closed pre-read (#612 review B1/B2)
     await expect(
       readExistingWebhookSecret(async () => '{not valid json', notFound),
     ).rejects.toThrow();
+  });
+});
+
+describe('readExistingOauthTokens — keeps the fallback real when moving to the vault', () => {
+  // A fresh vault onboarding stores no Linear token, which is the point. But a
+  // workspace MOVING onto the vault already has a working one, and writing empty
+  // strings over it would destroy the only credential that still works if the vault
+  // becomes unreachable — making the documented Secrets-Manager fallback a fiction.
+  const notFound = (err: unknown) => (err as { name?: string }).name === 'ResourceNotFoundException';
+
+  test('returns the token fields worth preserving', async () => {
+    const got = await readExistingOauthTokens(async () => JSON.stringify({
+      access_token: 'lin_oauth_a',
+      refresh_token: 'lin_refresh_b',
+      expires_at: '2026-09-01T00:00:00.000Z',
+      scope: 'read write',
+      webhook_signing_secret: 'lin_wh_zzz',
+    }), notFound);
+    expect(got).toEqual({
+      access_token: 'lin_oauth_a',
+      refresh_token: 'lin_refresh_b',
+      expires_at: '2026-09-01T00:00:00.000Z',
+      scope: 'read write',
+    });
+  });
+
+  test('a bundle with NO refresh token has nothing worth preserving', async () => {
+    // Without a refresh token the bundle cannot renew itself, so it is not a
+    // fallback — carrying it forward would only look like one.
+    const got = await readExistingOauthTokens(
+      async () => JSON.stringify({ access_token: 'lin_oauth_a', webhook_signing_secret: 'lin_wh_z' }),
+      notFound,
+    );
+    expect(got).toBeUndefined();
+  });
+
+  test('a genuine first install yields undefined, not an error', async () => {
+    const got = await readExistingOauthTokens(async () => {
+      throw Object.assign(new Error('nope'), { name: 'ResourceNotFoundException' });
+    }, notFound);
+    expect(got).toBeUndefined();
+  });
+
+  test('any OTHER read failure throws — silently discarding a live token is worse', async () => {
+    // AccessDenied/KMS/throttle must not be mistaken for "nothing to preserve".
+    await expect(readExistingOauthTokens(async () => {
+      throw Object.assign(new Error('denied'), { name: 'AccessDeniedException' });
+    }, notFound)).rejects.toThrow(/denied/);
+  });
+
+  test('a corrupt bundle surfaces rather than being read as empty', async () => {
+    await expect(readExistingOauthTokens(async () => '{not json', notFound)).rejects.toThrow();
+  });
+
+  test('an empty secret string yields undefined', async () => {
+    expect(await readExistingOauthTokens(async () => '', notFound)).toBeUndefined();
+  });
+});
+
+describe('resolveWebhookSecretAction — inherited vs owned', () => {
+  // These two states are byte-identical on disk and demand different handling. A
+  // workspace that inherited the stack-wide secret by an earlier mirror was being
+  // reported as owning its own, which silenced the mirror warning permanently — so
+  // an additional workspace holding the wrong secret 401s on every delivery and is
+  // never told why. Observed live on a second workspace.
+  const OWN = 'lin_wh_this_workspaces_own_secret';
+  const STACKWIDE = 'lin_wh_the_stack_wide_secret';
+
+  test('a stored secret that EQUALS the stack-wide one is reported as inherited', () => {
+    expect(resolveWebhookSecretAction(STACKWIDE, true, STACKWIDE))
+      .toEqual({ kind: 'preserve-inherited', secret: STACKWIDE });
+  });
+
+  test('a stored secret that DIFFERS is genuinely this workspace\'s own', () => {
+    expect(resolveWebhookSecretAction(OWN, true, STACKWIDE))
+      .toEqual({ kind: 'preserve', secret: OWN });
+  });
+
+  test('the value is preserved either way — this changes what is SAID, not what is stored', () => {
+    // Rewriting the credential on a warning would risk breaking a first workspace
+    // for which the stack-wide secret is the correct one.
+    const a = resolveWebhookSecretAction(STACKWIDE, true, STACKWIDE);
+    const b = resolveWebhookSecretAction(OWN, true, STACKWIDE);
+    expect('secret' in a && a.secret).toBe(STACKWIDE);
+    expect('secret' in b && b.secret).toBe(OWN);
+  });
+
+  test('without the stack-wide value it cannot tell, and does not guess', () => {
+    // Reading the stack-wide secret is best-effort; an unreadable one must not turn
+    // a legitimate owned secret into a warning.
+    expect(resolveWebhookSecretAction(STACKWIDE, true, undefined))
+      .toEqual({ kind: 'preserve', secret: STACKWIDE });
+  });
+
+  test('no stored secret still mirrors or prompts as before', () => {
+    expect(resolveWebhookSecretAction(undefined, true, STACKWIDE)).toEqual({ kind: 'mirror-stackwide' });
+    expect(resolveWebhookSecretAction(undefined, false, undefined)).toEqual({ kind: 'prompt' });
+  });
+});
+
+describe('resolveStoredGrantFields — a preserved grant must never be overwritten with blanks', () => {
+  // The precedence that decides whether `bgagent linear setup` keeps or destroys a
+  // working Secrets-Manager grant when a workspace moves onto the vault. A vault
+  // onboarding issues no token of its own, so if the preserved values are not carried
+  // forward the bundle is written with empty strings — and nothing fails until the
+  // vault is unreachable and the documented fallback turns out not to exist.
+  const NOW = new Date('2026-09-01T00:00:00.000Z');
+  const issued = {
+    access_token: 'lin_new',
+    refresh_token: 'rt_new',
+    expires_in: 3600,
+    scope: 'read write',
+    token_type: 'Bearer',
+  } as never;
+  const preserved = {
+    access_token: 'lin_old',
+    refresh_token: 'rt_old',
+    expires_at: '2026-08-01T00:00:00.000Z',
+    scope: 'read',
+  };
+
+  test('a freshly issued token wins, and its expiry is recomputed from expires_in', () => {
+    const out = resolveStoredGrantFields(issued, preserved, NOW);
+    expect(out.access_token).toBe('lin_new');
+    expect(out.refresh_token).toBe('rt_new');
+    expect(out.scope).toBe('read write');
+    // Absolute, derived from the relative `expires_in` — NOT the preserved timestamp.
+    expect(out.expires_at).toBe('2026-09-01T01:00:00.000Z');
+  });
+
+  test('with no token issued, the preserved grant is carried forward verbatim', () => {
+    // The vault path. Getting this wrong destroys the only credential that still works
+    // if the vault becomes unreachable.
+    expect(resolveStoredGrantFields(undefined, preserved, NOW)).toEqual(preserved);
+  });
+
+  test('a preserved ABSOLUTE expiry is kept as-is, not recomputed', () => {
+    expect(resolveStoredGrantFields(undefined, preserved, NOW).expires_at)
+      .toBe('2026-08-01T00:00:00.000Z');
+  });
+
+  test('with neither, the fields are empty — a genuinely fresh vault onboarding', () => {
+    expect(resolveStoredGrantFields(undefined, undefined, NOW)).toEqual({
+      access_token: '', refresh_token: '', expires_at: '', scope: '',
+    });
   });
 });

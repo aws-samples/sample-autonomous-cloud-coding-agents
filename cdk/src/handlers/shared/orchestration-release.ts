@@ -115,6 +115,11 @@ export interface ReleaseChildParams {
    *  (reactions/state via linear_reactions.py — there is no Linear MCP). */
   readonly linearOauthSecretArn?: string;
   readonly linearWorkspaceSlug?: string;
+  /** Vault credential-provider name for vault-onboarded workspaces (RFC #249
+   *  Phase 1); workspace id rides the existing credentials_ref stamp. Absent ⇒
+   *  Secrets-Manager path. */
+  readonly linearProviderName?: string;
+  readonly linearVaultUserId?: string;
   readonly linearProjectId?: string;
   /** The base branch this child stacks on. Absent → root (off main). */
   readonly baseBranch?: string;
@@ -372,6 +377,11 @@ export async function releaseChild(params: ReleaseChildParams): Promise<ReleaseC
     if (params.linearProjectId) channelMetadata.linear_project_id = params.linearProjectId;
     if (params.linearOauthSecretArn) channelMetadata.linear_oauth_secret_arn = params.linearOauthSecretArn;
     if (params.linearWorkspaceSlug) channelMetadata.linear_workspace_slug = params.linearWorkspaceSlug;
+    // RFC #249 Phase 1: pass the vault provider name to sub-issue children so
+    // the agent-side resolver can mint via the vault (linear_workspace_id is
+    // already stamped above from row.credentials_ref). Absent ⇒ SM path.
+    if (params.linearProviderName) channelMetadata.linear_provider_name = params.linearProviderName;
+    if (params.linearVaultUserId) channelMetadata.linear_vault_user_id = params.linearVaultUserId;
   }
   // Stacked base branch + (diamond) predecessor merge-list. The
   // orchestrator reads these to set the agent payload's base_branch +
@@ -713,6 +723,12 @@ export async function releaseReadyChildren(
       }),
       ...(releaseContext.linear_workspace_slug !== undefined && {
         linearWorkspaceSlug: releaseContext.linear_workspace_slug,
+      }),
+      ...(releaseContext.linear_provider_name !== undefined && {
+        linearProviderName: releaseContext.linear_provider_name,
+      }),
+      ...(releaseContext.linear_vault_user_id !== undefined && {
+        linearVaultUserId: releaseContext.linear_vault_user_id,
       }),
       ...(releaseContext.linear_project_id !== undefined && {
         linearProjectId: releaseContext.linear_project_id,

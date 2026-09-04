@@ -260,3 +260,47 @@ describe('LinearIntegration construct — attachmentsBucket wiring', () => {
     });
   });
 });
+
+describe('revoked-authorization recording (#812)', () => {
+  // The whole point of the issue: markWorkspaceRevoked existed but every
+  // token-resolving role held read-only registry access, so the conditional write
+  // failed AccessDenied and was swallowed — a feature that read as implemented
+  // while being permanently inert. The grant is the fix; assert it exists, so a
+  // future least-privilege tightening cannot quietly make it dormant again.
+  test('the webhook processor holds registry WRITE, not just read', () => {
+    const app = new App();
+    const stack = new Stack(app, 'RevocationStack');
+    const api = new apigw.RestApi(stack, 'TestApi');
+    const userPool = new cognito.UserPool(stack, 'TestUserPool');
+    const taskTable = new dynamodb.Table(stack, 'TaskTable', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+    });
+    const taskEventsTable = new dynamodb.Table(stack, 'TaskEventsTable', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'event_id', type: dynamodb.AttributeType.STRING },
+    });
+    new LinearIntegration(stack, 'LinearIntegration', { api, userPool, taskTable, taskEventsTable });
+    const template = Template.fromStack(stack);
+
+    const processorPolicy = Object.values(template.findResources('AWS::IAM::Policy')).find((p) =>
+      JSON.stringify(p.Properties.Roles ?? '').includes('WebhookProcessorFn'),
+    );
+    expect(processorPolicy).toBeDefined();
+    // Scoped to the statement that actually covers the REGISTRY table. Stringifying
+    // the whole statement list and grepping for `dynamodb:UpdateItem` proved nothing:
+    // this same role holds grantReadWriteData on taskTable and taskEventsTable, which
+    // contribute that action anyway — so the assertion stayed green with the registry
+    // grant reverted to read-only, leaving `markWorkspaceRevoked` permanently inert,
+    // which is the dormancy this grant exists to end. Mutation-checked by reverting it.
+    const statements = processorPolicy!.Properties.PolicyDocument.Statement as Array<{
+      Action?: unknown;
+      Resource?: unknown;
+    }>;
+    const registryStatements = statements.filter((s) =>
+      JSON.stringify(s.Resource ?? '').includes('WorkspaceRegistryTable'),
+    );
+    expect(registryStatements.length).toBeGreaterThan(0);
+    // UpdateItem is what markWorkspaceRevoked needs; a read-only grant omits it.
+    expect(JSON.stringify(registryStatements.map((s) => s.Action))).toContain('dynamodb:UpdateItem');
+  });
+});

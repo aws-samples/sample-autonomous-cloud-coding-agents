@@ -29,6 +29,7 @@ import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
+import { LinearIdentityVault } from './linear-identity-vault';
 import { LinearProjectMappingTable } from './linear-project-mapping-table';
 import { LinearUserMappingTable } from './linear-user-mapping-table';
 import { LinearWorkspaceRegistryTable } from './linear-workspace-registry-table';
@@ -119,6 +120,17 @@ export interface LinearIntegrationProps {
 
   /** Removal policy for Linear DynamoDB tables. */
   readonly removalPolicy?: RemovalPolicy;
+
+  /**
+   * Optional AgentCore Identity vault backing Linear OAuth tokens (RFC #249
+   * Phase 1). When provided, the webhook processor is granted the token
+   * data-plane permissions and told which workload identity to use via
+   * `LINEAR_VAULT_ENABLED` / `LINEAR_WORKLOAD_IDENTITY_NAME`; the resolver then
+   * mints tokens through the vault, falling back to the per-workspace Secrets
+   * Manager token when issuance is unavailable. Omitted (the default) ⇒ the
+   * existing Secrets-Manager-only path, synthesized byte-for-byte unchanged.
+   */
+  readonly identityVault?: LinearIdentityVault;
 }
 
 /**
@@ -161,6 +173,9 @@ export class LinearIntegration extends Construct {
 
   /** Linear webhook signing secret (placeholder — populated by `bgagent linear setup`). */
   public readonly webhookSecret: secretsmanager.Secret;
+
+  /** Webhook async processor — resolves the workspace OAuth token (vault or SM). */
+  public readonly webhookProcessorFn: lambda.NodejsFunction;
 
   constructor(scope: Construct, id: string, props: LinearIntegrationProps) {
     super(scope, id);
@@ -279,13 +294,55 @@ export class LinearIntegration extends Construct {
           USER_CONCURRENCY_TABLE_NAME: props.userConcurrencyTable.tableName,
           MAX_CONCURRENT_TASKS_PER_USER: String(props.maxConcurrentTasksPerUser ?? 10),
         }),
+        // RFC #249 Phase 1: when an identity vault is wired, resolve Linear
+        // tokens through the AgentCore Token Vault (falling back to the
+        // per-workspace SM token when issuance is unavailable). Unset ⇒ the
+        // resolver stays on the Secrets-Manager-only path.
+        ...(props.identityVault && {
+          LINEAR_VAULT_ENABLED: 'true',
+          LINEAR_WORKLOAD_IDENTITY_NAME: props.identityVault.workloadName,
+        }),
+        // #812: this role — and ONLY this role — holds registry write, so the recorder
+        // runs here; elsewhere the conditional write fails AccessDenied and is swallowed.
+        // The cost is that the other minting Lambdas discover a dead grant log-only. Most
+        // still get a latch, because the workspace keeps delivering events to this
+        // processor; the orchestration reconciler does not — it is driven by the task
+        // table's stream, not by Linear — so a workspace dying mid-orchestration with no
+        // further Linear activity is never alerted on, and `platform doctor` (which probes
+        // live) is the signal there. Granting the reconciler write would widen the grant
+        // the threat-model note below argues down, to recover an alert, not a diagnosis.
+        LINEAR_REVOCATION_RECORDING: 'true',
       },
       // Uses the PDF attachment-screening path — pdf-parse must stay unbundled.
       bundling: attachmentScreeningBundling,
     });
+    this.webhookProcessorFn = webhookProcessorFn;
     this.projectMappingTable.grantReadData(webhookProcessorFn);
     this.userMappingTable.grantReadData(webhookProcessorFn);
+    // WRITE, not just read (#812). `markWorkspaceRevoked` has existed since the
+    // revocation was first diagnosed but was permanently inert: every
+    // token-resolving role held read-only registry access, so the conditional
+    // update failed AccessDenied and the failure was deliberately swallowed (a
+    // diagnosis must never break token resolution). The feature therefore read as
+    // implemented while doing nothing. This processor is the right holder of the
+    // write — it is the path a revoked workspace hits on every event, and the
+    // update is conditioned on `installed_at` so a verdict can never revoke the
+    // successor installation.
+    //
+    // `UpdateItem` only, NOT `grantReadWriteData`. The handler's entire write
+    // vocabulary on this table is three conditional updates (latch, un-latch,
+    // announcement claim); `grantReadWriteData` would additionally hand it
+    // PutItem/DeleteItem/BatchWriteItem, and on the indexes. That breadth matters
+    // more here than usual: this is the Lambda that runs `pdf-parse` over
+    // attacker-supplied attachments, and a row in THIS table selects which signing
+    // secret verifies an inbound webhook HMAC — so create/delete on it would be a
+    // path from a malicious attachment to accepting forged webhooks.
     this.workspaceRegistryTable.grantReadData(webhookProcessorFn);
+    webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:UpdateItem'],
+      // The base table only. No `index/*`: UpdateItem never targets an index.
+      resources: [this.workspaceRegistryTable.tableArn],
+    }));
     // Seed the orchestration DAG + release root children.
     if (props.orchestrationTable) {
       props.orchestrationTable.grantReadWriteData(webhookProcessorFn);
@@ -310,6 +367,12 @@ export class LinearIntegration extends Construct {
         }),
       ],
     }));
+    // RFC #249 Phase 1: grant the vault token data-plane calls when an identity
+    // vault is wired. The SM grant above stays regardless — it is the fallback
+    // path when vault issuance is unavailable.
+    if (props.identityVault) {
+      props.identityVault.grantMintToken(webhookProcessorFn);
+    }
     props.taskTable.grantReadWriteData(webhookProcessorFn);
     props.taskEventsTable.grantReadWriteData(webhookProcessorFn);
     if (props.repoTable) {

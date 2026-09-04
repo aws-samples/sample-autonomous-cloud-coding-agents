@@ -1576,6 +1576,230 @@ describe('AgentStack tool-gateway gate (ADR-019 P1)', () => {
   });
 });
 
+describe('AgentStack Linear identity vault gate (#809)', () => {
+  test('default synth omits the vault: no workload identity, no token grant, no agent env', () => {
+    const app = new App();
+    const stack = new AgentStack(app, 'LinearVaultOffStack', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    });
+    const rendered = JSON.stringify(Template.fromStack(stack).toJSON());
+    expect(rendered).not.toContain('Custom::LinearWorkloadIdentity');
+    expect(rendered).not.toContain('GetResourceOauth2Token');
+    expect(rendered).not.toContain('LINEAR_WORKLOAD_IDENTITY_NAME');
+    // The hosted consent page is part of the same gate.
+    expect(rendered).not.toContain('LinearVaultConsentPage');
+    expect(rendered).not.toContain('LinearVaultConsentUrl');
+  });
+
+  test('flag on: agent runtime role gets the token data-plane grant + the agent env is set', () => {
+    const app = new App({ context: { enableLinearIdentityVault: true } });
+    const template = Template.fromStack(
+      new AgentStack(app, 'LinearVaultOnStack', {
+        env: { account: '123456789012', region: 'us-east-1' },
+      }),
+    );
+    // The workload identity is provisioned.
+    template.resourceCountIs('Custom::LinearWorkloadIdentity', 1);
+    // Some role is granted the two token data-plane actions. Asserted on the
+    // rendered policies rather than a fixed Action shape: the two actions live in
+    // separate statements (they authorize against different resources), and CDK
+    // renders a single-action statement as a string, not a one-element array.
+    const policyJson = JSON.stringify(template.findResources('AWS::IAM::Policy'));
+    expect(policyJson).toContain('bedrock-agentcore:GetWorkloadAccessTokenForUserId');
+    expect(policyJson).toContain('bedrock-agentcore:GetResourceOauth2Token');
+    // NOT asserted here: that the mint grant covers the workload-identity DIRECTORY,
+    // the resource whose omission caused a live AccessDenied. At this level the claim
+    // is unfalsifiable — the AgentCore Runtime L2 grants its own role
+    // `GetWorkloadAccessToken*` on `workload-identity-directory/default` for reasons
+    // unrelated to Linear, so the assertion passes with `grantMintToken`'s directory
+    // resource deleted. Verified by deleting it. The falsifiable, per-resource guard
+    // lives in linear-identity-vault.test.ts, scoped to one grantee's own policy.
+    // The agent runtime carries the vault env so config.py takes the vault path.
+    const rendered = JSON.stringify(template.toJSON());
+    expect(rendered).toContain('LINEAR_WORKLOAD_IDENTITY_NAME');
+    expect(rendered).toContain('abca_linear_oauth');
+
+    // Hosted consent page ships with the gate, and its URL is published so
+    // `bgagent linear setup` can read it from the stack. Without the output the CLI
+    // has no return URL to register and falls back to the localhost loopback, which
+    // is exactly what the hosted page exists to avoid.
+    const outputs = template.toJSON().Outputs as Record<string, unknown>;
+    expect(Object.keys(outputs)).toContain('LinearVaultConsentUrl');
+    // The page ships in a NESTED stack so its ~13 resources do not eat the root's
+    // headroom against the 500-per-stack ceiling; the root therefore pays only a
+    // single AWS::CloudFormation::Stack for it.
+    expect(rendered).not.toContain('Custom::CDKBucketDeployment');
+    expect(rendered).toContain('LinearVaultConsentPageStack');
+  });
+
+  test('the workload identity name is STACK-scoped, so two stacks cannot share one', () => {
+    // AgentCore workload identity names are unique per account+region; stacks are not.
+    // Sharing one is not a benign no-op: the second stack's CreateWorkloadIdentity
+    // conflicts, falls back to an update, and that update REPLACES
+    // allowedResourceOauth2ReturnUrls — dropping the first stack's consent page from
+    // the allowlist, so its consent begins failing. A Delete from either then removes
+    // the identity both were using.
+    const nameFor = (id: string): string => {
+      const app = new App({ context: { enableLinearIdentityVault: true } });
+      const rendered = JSON.stringify(Template.fromStack(
+        new AgentStack(app, id, { env: { account: '123456789012', region: 'us-east-1' } }),
+      ).toJSON());
+      const match = /"(abca_linear_oauth[A-Za-z0-9_]*)"/.exec(rendered);
+      return match![1];
+    };
+    const first = nameFor('AlphaAgentStack');
+    const second = nameFor('BetaAgentStack');
+    expect(first).not.toBe(second);
+    expect(first).toContain('AlphaAgentStack');
+    // 64 characters is the AgentCore limit; a long stack name must be truncated to
+    // fit rather than rejected at deploy time.
+    const long = nameFor('AgentStackWithAVeryLongDeliberatelyExcessiveNameForTruncation');
+    expect(long.length).toBeLessThanOrEqual(64);
+    expect(long.startsWith('abca_linear_oauth_')).toBe(true);
+  });
+
+  test('the workload identity name can be pinned by context, for an existing deployment', () => {
+    // A grant is bound to (workload identity, user id), so renaming the identity
+    // orphans every consent already given. An operator already running the vault
+    // pins the old name instead of re-consenting every workspace.
+    const app = new App({
+      context: { enableLinearIdentityVault: true, linearVaultWorkloadName: 'abca_linear_oauth' },
+    });
+    const template = Template.fromStack(
+      new AgentStack(app, 'PinnedNameStack', { env: { account: '123456789012', region: 'us-east-1' } }),
+    );
+    const outputs = template.toJSON().Outputs as Record<string, { Value: unknown }>;
+    // Published so `bgagent linear setup` consents against the identity this stack
+    // actually created, instead of carrying its own copy of the name.
+    expect(outputs.LinearVaultWorkloadName.Value).toBe('abca_linear_oauth');
+    const fns = template.findResources('AWS::Lambda::Function');
+    const withEnv = Object.values(fns).filter((f) => (f as {
+      Properties?: { Environment?: { Variables?: Record<string, unknown> } };
+    }).Properties?.Environment?.Variables?.LINEAR_WORKLOAD_IDENTITY_NAME === 'abca_linear_oauth');
+    expect(withEnv.length).toBeGreaterThan(0);
+  });
+
+  test('EVERY Lambda that can mint a Linear token has the vault env + grant', () => {
+    // Pinned as a SET, and cross-checked against the source graph below. The earlier
+    // version asserted a hardcoded count of 4, derived by grepping handlers that
+    // import a Linear module DIRECTLY — which silently omitted the two that reach a
+    // minting resolver two hops away, through orchestration-channel-factory. A guard
+    // built from an incomplete inventory just encodes the incompleteness.
+    const app = new App({ context: { enableLinearIdentityVault: true } });
+    const template = Template.fromStack(
+      new AgentStack(app, 'LinearVaultWritersStack', {
+        env: { account: '123456789012', region: 'us-east-1' },
+      }),
+    );
+    const fns = template.findResources('AWS::Lambda::Function');
+    const withVaultEnv = Object.entries(fns)
+      .filter(([, f]) => {
+        const vars = (f as { Properties?: { Environment?: { Variables?: Record<string, unknown> } } })
+          .Properties?.Environment?.Variables ?? {};
+        return vars.LINEAR_VAULT_ENABLED === 'true';
+      })
+      .map(([id]) => id);
+
+    for (const fragment of [
+      'LinearIntegrationWebhookProcessor',
+      'FanOut',
+      'Orchestrator',
+      'OrchestrationReconciler',
+      'IterationHeartbeat',
+      'GitHubScreenshot',
+    ]) {
+      expect(withVaultEnv.join(' ')).toContain(fragment);
+    }
+    // Every one also carries the workload name, or the env is inert — and they all
+    // carry the SAME one. Two Lambdas naming different identities is a partial
+    // outage that no single-Lambda assertion would catch: one mints, one 404s.
+    const workloadNames = new Set(withVaultEnv.map((id) => (fns[id] as {
+      Properties: { Environment: { Variables: Record<string, unknown> } };
+    }).Properties.Environment.Variables.LINEAR_WORKLOAD_IDENTITY_NAME));
+    expect([...workloadNames]).toEqual(['abca_linear_oauth_LinearVaultWritersStack']);
+  });
+
+  test('MicroVM + vault is REFUSED by name, not left to the resource counter', () => {
+    // Pinning a limitation, not a behaviour. The vault IS wired for the MicroVM substrate
+    // — platform_config carries the workload name and the guest's execution role gets the
+    // mint grant — but the two cannot be enabled together today: 505 resources against a
+    // HARD limit of 500 (microvm alone 496, the vault alone 488). Claiming MicroVM support
+    // without saying so would be false.
+    //
+    // The stack refuses the combination itself rather than letting the counter throw,
+    // because the counter's message is a per-type census that never mentions either flag —
+    // the operator cannot tell from it what to change.
+    //
+    // Reclaiming room means nesting a subsystem. MicroVM (+19 resources) is the cheapest
+    // candidate and currently deployed nowhere, but nesting it needs the session-role trust
+    // wiring to stop referencing a child resource (it creates a parent↔child cycle today).
+    //
+    // When the room is found, this test should be replaced by a real parity assertion.
+    const app = new App({
+      context: { enableLinearIdentityVault: true, compute_type: 'lambda-microvm' },
+    });
+    expect(() => Template.fromStack(
+      new AgentStack(app, 'LinearVaultMicrovmStack', {
+        env: { account: '123456789012', region: 'us-east-1' },
+      }),
+    )).toThrow(/enableLinearIdentityVault cannot be combined with compute_type=lambda-microvm/);
+  });
+
+  test('the source graph names no Linear-minting handler that is unwired', () => {
+    // The completeness half. Recomputes, from the handler sources, which Lambdas can
+    // reach `resolveLinearOauthToken` at runtime — following VALUE imports only,
+    // since `import type` is erased — and fails if that set grows beyond the handlers
+    // known to be wired. Adding an import is then a test failure rather than a
+    // production 401 on a vault-managed workspace.
+    const handlersDir = path.join(__dirname, '..', '..', 'src', 'handlers');
+    const sharedDir = path.join(handlersDir, 'shared');
+    const valueImports = (file: string): Set<string> => {
+      const src = fs.readFileSync(file, 'utf8');
+      const found = new Set<string>();
+      const re = /import\s+(type\s+)?(?:\{[^}]*\}|\*\s+as\s+\w+|\w+)\s+from\s+'(?:\.\/)?(?:shared\/)?([a-z0-9-]+)'/gs;
+      for (let m = re.exec(src); m !== null; m = re.exec(src)) {
+        if (!m[1]) found.add(m[2]!);
+      }
+      return found;
+    };
+    const sharedFiles = fs.readdirSync(sharedDir).filter((f) => f.endsWith('.ts'));
+    // Seed: shared modules that CALL the resolver (not merely import its file — the
+    // signature-verification helpers import a different export and never mint).
+    const minters = new Set<string>(
+      sharedFiles
+        .filter((f) => /\bresolveLinearOauthToken\s*\(/.test(fs.readFileSync(path.join(sharedDir, f), 'utf8')))
+        .map((f) => f.replace(/\.ts$/, '')),
+    );
+    for (let grew = true; grew;) {
+      grew = false;
+      for (const f of sharedFiles) {
+        const name = f.replace(/\.ts$/, '');
+        if (minters.has(name)) continue;
+        for (const dep of valueImports(path.join(sharedDir, f))) {
+          if (minters.has(dep)) { minters.add(name); grew = true; break; }
+        }
+      }
+    }
+    const reaching = fs.readdirSync(handlersDir)
+      .filter((f) => f.endsWith('.ts'))
+      .filter((f) => [...valueImports(path.join(handlersDir, f))].some((d) => minters.has(d)))
+      .sort();
+
+    // linear-webhook is the RECEIVER: it imports the resolver file for
+    // getOauthSecretStrict (signature verification) and never mints, so it needs no
+    // grant. Everything else here must be wired above.
+    expect(reaching).toEqual([
+      'fanout-task-events.ts',
+      'github-webhook-processor.ts',
+      'iteration-heartbeat-sweep.ts',
+      'linear-webhook-processor.ts',
+      'linear-webhook.ts',
+      'orchestrate-task.ts',
+      'orchestration-reconciler.ts',
+    ]);
+  });
+});
+
 describe('AgentStack CloudFormation resource budget 500 with cushion', () => {
   // The 500-resource limit is a hard, non-adjustable CloudFormation template quota,
   // and CDK enforces it by *throwing* `TooManyResourcesInStack` during synth.

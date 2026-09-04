@@ -385,6 +385,34 @@
     "@smithy/types" "^4.15.1"
     tslib "^2.6.2"
 
+"@aws-sdk/client-bedrock-agentcore-control@^3.1078.0":
+  version "3.1121.0"
+  resolved "https://registry.yarnpkg.com/@aws-sdk/client-bedrock-agentcore-control/-/client-bedrock-agentcore-control-3.1121.0.tgz#1cf8e54e2cc4de7234af2812a43fef4c86442c18"
+  integrity sha512-zta1MHik3+WbRUVwRFyFWSGTEfhaMPDDG+qdzmLAAyK3m7gqYHJr6+p+6dvBeiO6U15FQ1PWSjj2C3O5ikiyAw==
+  dependencies:
+    "@aws-sdk/core" "^3.977.9"
+    "@aws-sdk/credential-provider-node" "^3.972.81"
+    "@aws-sdk/types" "^3.974.5"
+    "@smithy/core" "^3.33.3"
+    "@smithy/fetch-http-handler" "^5.7.2"
+    "@smithy/node-http-handler" "^4.11.3"
+    "@smithy/types" "^4.17.2"
+    tslib "^2.6.2"
+
+"@aws-sdk/client-bedrock-agentcore@3.1078.0":
+  version "3.1078.0"
+  resolved "https://registry.yarnpkg.com/@aws-sdk/client-bedrock-agentcore/-/client-bedrock-agentcore-3.1078.0.tgz#a483de7306dd4c5bfd9e52df1959f8413ffb5842"
+  integrity sha512-2UUyqmkCShdCO7PTbcq+kijYdG2e28vMSlnxoPH09/zMQra0/9TtvUlxxDMe9WnElwoZ/ulpXpC9rsVtDAo7SQ==
+  dependencies:
+    "@aws-sdk/core" "^3.974.26"
+    "@aws-sdk/credential-provider-node" "^3.972.61"
+    "@aws-sdk/types" "^3.973.15"
+    "@smithy/core" "^3.29.0"
+    "@smithy/fetch-http-handler" "^5.6.2"
+    "@smithy/node-http-handler" "^4.9.2"
+    "@smithy/types" "^4.15.1"
+    tslib "^2.6.2"
+
 "@aws-sdk/client-bedrock-agentcore@^3.1078.0":
   version "3.1081.0"
   resolved "https://registry.yarnpkg.com/@aws-sdk/client-bedrock-agentcore/-/client-bedrock-agentcore-3.1081.0.tgz#7b652ffe2daef75cf85895dfcf427879e6df386c"
@@ -592,6 +620,20 @@
     "@smithy/fetch-http-handler" "^5.6.2"
     "@smithy/node-http-handler" "^4.9.2"
     "@smithy/types" "^4.15.1"
+    tslib "^2.6.2"
+
+"@aws-sdk/client-sns@^3.1078.0":
+  version "3.1121.0"
+  resolved "https://registry.yarnpkg.com/@aws-sdk/client-sns/-/client-sns-3.1121.0.tgz#6a69fe6f8e9cbac1a1e707eb614d9bc510c4261f"
+  integrity sha512-/MMC9YNR9YMvCw+l3rvFxFcxIAl7+AbyQa5PNmZsSsyDNJoLVsVdR54D0Fx1ZxVb3QVz/M92WT1iK3NFmuRZ7g==
+  dependencies:
+    "@aws-sdk/core" "^3.977.9"
+    "@aws-sdk/credential-provider-node" "^3.972.81"
+    "@aws-sdk/types" "^3.974.5"
+    "@smithy/core" "^3.33.3"
+    "@smithy/fetch-http-handler" "^5.7.2"
+    "@smithy/node-http-handler" "^4.11.3"
+    "@smithy/types" "^4.17.2"
     tslib "^2.6.2"
 
 "@aws-sdk/client-sts@^3.1078.0":
