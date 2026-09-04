@@ -9,6 +9,13 @@ from types import SimpleNamespace
 import pytest
 
 from models import TaskConfig
+from tests.git_env import (
+    GIT_LOCATION_VARS,
+    TEST_IDENTITY_EMAIL,
+    TEST_IDENTITY_NAME,
+    fingerprint_git_config,
+    shared_git_config_path,
+)
 
 # Session-wide hang backstop. SIGALRM (pytest-timeout method="signal") fires only
 # in the MAIN thread during a test's *call* phase, so a deadlock in a WORKER
@@ -58,15 +65,93 @@ _hang_watchdog.daemon = True
 _hang_watchdog.start()
 
 
-def pytest_sessionfinish(session, exitstatus):
-    """Cancel the hang watchdog on a clean session finish.
+# Layer 2 of the #855 git-config guard: DETECT. Captured at session start and
+# re-read at session finish. `None` means there is nothing to protect (no git, or
+# not inside a checkout — e.g. the built container image), which is a real
+# no-risk case rather than a failure to look.
+_SHARED_GIT_CONFIG: tuple[str, tuple[str, frozenset[str]]] | None = None
 
-    Without this, a legitimately slow-but-passing suite that finishes just after
+
+def pytest_sessionstart(session):
+    """Fingerprint the repository-shared ``.git/config`` before any test runs (#855).
+
+    This is the backstop for the autouse fixture below, and it is deliberately
+    mechanism-INDEPENDENT: it does not care *how* the file was written, so it also
+    catches routes the fixture does not anticipate. Four previous fixes for this leak
+    were each scoped to one file and each was defeated by the next file added; a
+    whole-session before/after comparison cannot be outrun that way.
+    """
+    global _SHARED_GIT_CONFIG
+    path = shared_git_config_path()
+    if path is None:
+        return
+    fingerprint = fingerprint_git_config(path)
+    if fingerprint is None:
+        return
+    _SHARED_GIT_CONFIG = (path, fingerprint)
+
+
+def _report_shared_git_config_mutation(session) -> None:
+    """Fail the session if the shared ``.git/config`` changed during the run (#855).
+
+    Reports key NAMES only, never values: a ``.git/config`` may hold a remote URL
+    with embedded credentials, and this text goes to CI logs.
+
+    Does not repair the file. A test suite that silently rewrites ``.git/config``
+    would be the same class of surprise as the bug it is guarding against — so this
+    prints the exact remedy and leaves the decision to a human.
+    """
+    if _SHARED_GIT_CONFIG is None:
+        return
+    path, (digest_before, names_before) = _SHARED_GIT_CONFIG
+    current = fingerprint_git_config(path)
+    if current is None:
+        detail = "the file is now unreadable or gone"
+    else:
+        digest_after, names_after = current
+        if digest_after == digest_before:
+            return
+        added = sorted(names_after - names_before)
+        removed = sorted(names_before - names_after)
+        changed = sorted(names_after & names_before)
+        parts = []
+        if added:
+            parts.append(f"keys added: {', '.join(added)}")
+        if removed:
+            parts.append(f"keys removed: {', '.join(removed)}")
+        if not added and not removed:
+            parts.append(f"value(s) changed among: {', '.join(changed)}")
+        detail = "; ".join(parts)
+
+    print(
+        f"\nSHARED GIT CONFIG MUTATED — {path}\n"
+        f"  {detail}\n"
+        "  A test wrote into the repository's shared config. This is the #855 leak: a\n"
+        "  fixture shelling out to git while a GIT_DIR is inherited from the environment\n"
+        "  (which git exports to hooks in a linked worktree) escapes cwd, --local and the\n"
+        "  GIT_CONFIG_* pins alike.\n"
+        "  Fix the fixture: pass env=isolated_git_env(repo) from tests/git_env.py.\n"
+        f"  Clean up the repo:  git config --file {path} --unset-all core.worktree\n"
+        f"                      git config --file {path} --remove-section user",
+        file=sys.stderr,
+        flush=True,
+    )
+    session.exitstatus = pytest.ExitCode.TESTS_FAILED
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Cancel the hang watchdog on a clean session finish, then run the #855 check.
+
+    Without the cancel, a legitimately slow-but-passing suite that finishes just after
     the 600s deadline (e.g. during teardown / coverage write) would be hard-exited
     by ``_reap_on_hang`` and turn green red with a thread-dump uncorrelated to any
     failed test. ``Timer.cancel()`` is a no-op if the timer already fired (a true
-    hang), so this only prevents the false-positive kill."""
+    hang), so this only prevents the false-positive kill.
+
+    The config check runs here rather than as a test because no test can observe a
+    mutation made by a test that runs after it."""
     _hang_watchdog.cancel()
+    _report_shared_git_config_mutation(session)
 
 
 class FakeRunCmd:
@@ -161,6 +246,46 @@ _AGENT_ENV_VARS = [
     # env strip AND the cache reset are both required).
     "AGENT_SESSION_ROLE_ARN",
 ]
+
+
+@pytest.fixture(autouse=True)
+def _isolate_git_location(monkeypatch, tmp_path):
+    """Layer 1 of the #855 guard: PREVENT. Applies to every test, unconditionally.
+
+    Placement is the whole point. #720/#731 got the *content* of this right but put it
+    in a per-class fixture inside ``test_post_hooks.py``, so #665 was free to add a
+    fresh unguarded ``_git()`` helper in ``test_registry_loader.py`` seven days later
+    and reopen the leak. An autouse fixture in ``conftest.py`` is the only placement
+    that also covers test files nobody has written yet.
+
+    Two distinct jobs:
+
+    1. **Strip the repo-LOCATION vars.** While any of them is set, ``git -C <tmp>``,
+       ``cwd=``, ``--local`` and the ``GIT_CONFIG_*`` pins are all bypassed, because
+       an explicit ``GIT_DIR`` overrides repository discovery outright. Git exports
+       these to hooks in a linked worktree, which is exactly how this suite runs as a
+       pre-push gate from ``.worktrees/``.
+
+    2. **Pin config resolution and identity.** So that a fixture which shells out to
+       git *without* using ``isolated_git_env`` still cannot reach the developer's
+       ``~/.gitconfig``, and any commit it makes is attributed to the reserved test
+       identity rather than to whoever happens to be running the suite.
+
+    Production code is a beneficiary too, not just fixtures: ``post_hooks`` and
+    ``repo`` shell out to git with the ambient environment, so an inherited ``GIT_DIR``
+    would point the code under test at the real repository and the assertions would
+    silently describe the wrong one.
+    """
+    for var in GIT_LOCATION_VARS:
+        monkeypatch.delenv(var, raising=False)
+
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / ".gitconfig-test"))
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.setenv("GIT_AUTHOR_NAME", TEST_IDENTITY_NAME)
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", TEST_IDENTITY_EMAIL)
+    monkeypatch.setenv("GIT_COMMITTER_NAME", TEST_IDENTITY_NAME)
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", TEST_IDENTITY_EMAIL)
 
 
 @pytest.fixture(autouse=True)

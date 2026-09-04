@@ -22,6 +22,24 @@ repos:
 
   - repo: local
     hooks:
+      # Runs at BOTH stages, and first: while the shared config is corrupted,
+      # `git status` and `git revert` lie, so every later hook is reasoning about a
+      # tree that is not the one on disk.
+      #
+      # Deliberately the ONLY hook here without `cd "$(git rev-parse
+      # --show-toplevel)"`: `core.worktree`, one of the values this gate detects,
+      # REDIRECTS --show-toplevel, so that prologue would cd the check out of the
+      # repository whenever it had something to find. `mise run` locates mise.toml by
+      # walking the filesystem, and the script locates the shared config the same
+      # way, so neither needs git to answer correctly. See #855.
+      - id: git-config-clean
+        name: shared .git/config uncorrupted (#855)
+        entry: bash -lc 'mise run check:git-config-clean'
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit, pre-push]
+
       - id: gitleaks
         name: gitleaks (staged)
         entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && mise run security:secrets:staged'

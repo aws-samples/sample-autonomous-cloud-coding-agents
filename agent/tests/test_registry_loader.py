@@ -13,6 +13,7 @@ from registry.loader import (
     apply_resolved_assets,
     build_skill_prompt_fragment,
 )
+from tests.git_env import isolated_git_env
 
 
 def _read_mcp(repo_dir) -> dict:
@@ -295,17 +296,27 @@ class TestMcpJsonNotCommittable:
 
     @staticmethod
     def _git(repo, *args) -> subprocess.CompletedProcess:
+        # ``env=`` is load-bearing (#855). Without it, an inherited GIT_DIR — which
+        # git exports to hooks in a linked worktree, i.e. whenever this suite runs
+        # as a pre-push gate from .worktrees/ — overrides repository discovery, so
+        # `-C <tmp_path>` is ignored and every command below operates on the REAL
+        # repository. ``check=False`` is why that stayed invisible: re-initing the
+        # real repo and rewriting its config both exit 0.
         return subprocess.run(
             ["git", "-C", str(repo), *args],
             capture_output=True,
             text=True,
             check=False,
+            env=isolated_git_env(repo),
         )
 
     def _init_repo(self, tmp_path):
+        # No `git config user.*` here on purpose: isolated_git_env supplies the
+        # identity through GIT_AUTHOR_*/GIT_COMMITTER_*, which outrank every config
+        # file, so the commit below is attributed without any config write at all.
+        # The two writes this replaces are the literal source of #720 — `t <t@t>`
+        # was transcribed into a real repository's config and then into real commits.
         self._git(tmp_path, "init", "-q")
-        self._git(tmp_path, "config", "user.email", "t@t")
-        self._git(tmp_path, "config", "user.name", "t")
         (tmp_path / "README.md").write_text("x")
         self._git(tmp_path, "add", "README.md")
         self._git(tmp_path, "commit", "-qm", "init")
