@@ -30,6 +30,7 @@ import {
   RepoConfigRow,
   RepoNotOnboardedError,
 } from './repo-lookup';
+import type { GitProviderType } from './types';
 
 /** TTL (days) for soft-deleted repo rows — matches Blueprint construct. */
 export const REMOVED_REPO_TTL_DAYS = 30;
@@ -41,6 +42,7 @@ export interface OnboardRepoOptions {
   readonly maxTurns?: number;
   readonly githubTokenSecretArn?: string;
   readonly pollIntervalMs?: number;
+  readonly provider?: GitProviderType;
 }
 
 export interface OnboardRepoDependencies {
@@ -103,6 +105,12 @@ export async function onboardRepo(
 
   if (options.pollIntervalMs !== undefined) {item.poll_interval_ms = options.pollIntervalMs;} else if (existing?.poll_interval_ms !== undefined) {
     item.poll_interval_ms = existing.poll_interval_ms;
+  }
+
+  if (options.provider) {
+    item.provider = options.provider;
+  } else if (existing && 'provider' in existing) {
+    item.provider = (existing as Record<string, unknown>).provider;
   }
 
   if (existing?.system_prompt_overrides) {

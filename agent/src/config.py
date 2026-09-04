@@ -683,11 +683,13 @@ def build_config(
     initial_approval_gate_count: int = 0,
     approval_gate_cap: int | None = None,
     attachments: list[dict] | None = None,
+    git_provider: str = "",
 ) -> TaskConfig:
     """Build and validate configuration from explicit parameters.
 
     Parameters fall back to environment variables if empty.
     """
+    resolved_git_provider = git_provider or os.environ.get("GIT_PROVIDER", "github")
     resolved_repo_url = repo_url or os.environ.get("REPO_URL", "")
     resolved_issue_number = issue_number or os.environ.get("ISSUE_NUMBER", "")
     resolved_task_description = task_description or os.environ.get("TASK_DESCRIPTION", "")
@@ -774,6 +776,7 @@ def build_config(
 
     return TaskConfig(
         repo_url=resolved_repo_url,
+        git_provider=resolved_git_provider,
         issue_number=resolved_issue_number,
         task_description=resolved_task_description,
         github_token=resolved_github_token,
@@ -817,6 +820,7 @@ def get_config() -> TaskConfig:
             task_description=os.environ.get("TASK_DESCRIPTION", ""),
             issue_number=os.environ.get("ISSUE_NUMBER", ""),
             github_token=os.environ.get("GITHUB_TOKEN", ""),
+            git_provider=os.environ.get("GIT_PROVIDER", "github"),
             anthropic_model=os.environ.get("ANTHROPIC_MODEL", ""),
             max_turns=int(os.environ.get("MAX_TURNS", "100")),
             max_budget_usd=float(os.environ.get("MAX_BUDGET_USD", "0")) or None,

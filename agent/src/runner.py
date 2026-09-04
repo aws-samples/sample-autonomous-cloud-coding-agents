@@ -128,8 +128,11 @@ def _setup_agent_env(config: TaskConfig) -> tuple[str | None, str | None]:
     os.environ["CLAUDE_CODE_USE_BEDROCK"] = "1"
     os.environ["AWS_REGION"] = config.aws_region
     os.environ["ANTHROPIC_MODEL"] = config.anthropic_model
-    os.environ["GITHUB_TOKEN"] = config.github_token
-    os.environ["GH_TOKEN"] = config.github_token
+    from git_provider import get_provider
+
+    provider = get_provider(config.git_provider)
+    for key, val in provider.env_vars(config.github_token).items():
+        os.environ[key] = val
 
     _setup_bedrock_cost_attribution(config)
     # DO NOT set ANTHROPIC_LOG — any logging level causes the CLI to write to

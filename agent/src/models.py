@@ -153,6 +153,7 @@ class TaskConfig(BaseModel):
     issue_number: str = ""
     task_description: str = ""
     github_token: str = ""
+    git_provider: str = "github"
     aws_region: str
     anthropic_model: str = "us.anthropic.claude-opus-5"
     # The "small/fast" model Claude Code uses for auxiliary work (e.g. WebFetch
