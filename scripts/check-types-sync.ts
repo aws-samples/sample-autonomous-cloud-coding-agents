@@ -144,6 +144,7 @@ const CLI_ONLY_ALLOWLIST = new Set<string>([
   'CancelTaskResponse',
   'SlackLinkResponse',
   'LinearLinkResponse',
+  'LinearRemoveWorkspaceResponse',
   'JiraLinkResponse',
   'TraceUrlResponse',
   // Error classification — derived server-side via a function and
