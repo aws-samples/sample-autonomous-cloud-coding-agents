@@ -13,6 +13,11 @@ name: integ
 # `integ-smoke` is posted back to the PR head so it shows up as a (required)
 # check that blocks merge.
 #
+# The scheduled integ-sweeper (.github/workflows/integ-sweeper.yml) runs under its
+# own `environment: integ`; a cron trigger cannot satisfy a manual approval, so
+# keeping the sweeper on a separate environment from this workflow's `deploy` gate
+# is deliberate.
+#
 # Local dev path is unchanged: run `mise //cdk:integ` with your own AWS creds.
 #
 # Nightly schedule was intentionally dropped (previously 07:00 UTC) — the per-PR
@@ -161,7 +166,7 @@ jobs:
             exit 1
           fi
           if echo "$CHANGED" | grep -Eq '^(cdk|agent)/'; then
-            post_status pending "awaiting admin approval / running"
+            post_status pending "awaiting integ run"
             echo "applicable=true" >> "$GITHUB_OUTPUT"
             echo "PR #$PR_NUMBER touches cdk/** or agent/** — integ applies."
           else
@@ -180,7 +185,12 @@ jobs:
     name: CDK integ smoke (Task API)
     runs-on: ubuntu-latest
     environment: deploy
-    timeout-minutes: 45
+    # The lifecycle test (integ.task-lifecycle.ts) deploys the full AgentStack
+    # (orchestrator + AgentCore runtime + Docker image build) and drives real
+    # agent runs through their terminal states before destroying — far heavier
+    # than the Phase-0 trimmed smoke test. 90 min covers deploy + cold Docker
+    # build + agent runs + teardown with margin.
+    timeout-minutes: 90
     permissions:
       id-token: write
       contents: read
@@ -219,36 +229,71 @@ jobs:
       - name: Install dependencies
         run: yarn install --immutable
 
+      - name: Run integ tests (deploy → assert → destroy)
+        # Two integ tests deploy in this one integ-runner pass and MUST get
+        # distinct CloudFormation names, so each reads its own env var:
+        #   • Phase-0 smoke (integ.task-api-smoke.ts) → INTEG_STACK_NAME
+        #     (`int-<sha>-<run>`; the run number distinguishes same-commit
+        #     re-runs). Fixed default `backgroundagent-integ-local` for local runs.
+        #   • Phase-1 lifecycle (integ.task-lifecycle.ts) → COMMIT_HASH
+        #     (`int-<hash>`, see cdk/mise.toml). Read via process.env because
+        #     integ-runner synths in a subprocess that inherits the env but not
+        #     our shell's CDK context.
+        # Per-run-unique names mean a stranded stack from a cancelled/crashed run
+        # never collides with or head-of-line blocks a later run.
+        #
+        # INTEG_SANDBOX_REPO / INTEG_PAT_SECRET_ID bind the gate scenarios (3 & 4)
+        # to the account's provisioned sandbox repo + PAT secret instead of a
+        # hardcoded contributor repo. Same vars the sandbox-cleanup step reads.
+        # When unset, the test falls back to its literals and the gates degrade to
+        # clone-failures (still synthesizes).
+        env:
+          COMMIT_HASH: ${{ needs.resolve.outputs.head_sha }}
+          INTEG_STACK_NAME: int-${{ needs.resolve.outputs.head_sha }}-${{ github.run_number }}
+          INTEG_SANDBOX_REPO: ${{ vars.INTEG_SANDBOX_REPO }}
+          INTEG_PAT_SECRET_ID: ${{ vars.INTEG_PAT_SECRET_ID }}
+        run: mise //cdk:integ
+
       # Teardown: integ-runner forces `cdk destroy` on success and failure (via
       # the CDK bootstrap roles, which hold the CloudFormation permissions). No
-      # raw-CLI safety net here: the GitHub OIDC role has no
-      # cloudformation:DeleteStack/DescribeStacks, so such a step can only fail
-      # (#566). If a cancelled/crashed run strands the stack, reclaim is the
-      # stranded-stack cleanup owned by #400/#72 — and the run-unique name below
-      # means a stranded stack never blocks a later run.
-      #
-      # INTEG_STACK_NAME maps the stack to the commit under test plus the run
-      # number (`int-<sha>-<run>`), replacing the single fixed
-      # `backgroundagent-integ` name. The run number makes same-commit re-runs
-      # distinct; the `int-` prefix marks it ephemeral for #72's sweep. HEAD_SHA
-      # is the resolved PR head (or dispatched ref) and RUN_NUMBER is a positive
-      # integer, so both are already lowercase-alphanumeric — no sanitizing
-      # needed to stay CloudFormation-valid.
-      - name: Run integ tests (deploy → assert → destroy)
+      # raw-CLI CloudFormation safety net here — the GitHub OIDC role has no
+      # cloudformation:DeleteStack/DescribeStacks, so such a step can only
+      # AccessDenied and fail an otherwise-passing run (#566/#567). If a
+      # cancelled/crashed run strands a stack, the per-run-unique `int-*` name
+      # keeps it from blocking later runs; reclaim is owned by the scheduled
+      # sweep (integ-sweeper.yml / #72) and non-blocking cleanup (#400).
+
+      # Sandbox cleanup for the gate scenarios (3 & 4): coding/new-task-v1 pushes
+      # a `bgagent/<task_id>/<slug>` branch and (on approve) opens a PR on the
+      # sandbox repo. The agent never closes these, so each run would accumulate
+      # stale branches/PRs. Reconstructing the exact branch name in the test is
+      # fragile (it depends on the agent-side slug), so we sweep by prefix here:
+      # delete every `bgagent/*` branch on the sandbox, which also closes the
+      # associated PRs. Reads the same PAT the agent used, from the pre-seeded
+      # secret. Gated on the repo vars being set so this is a no-op until the
+      # sandbox + secret are provisioned. Never fails the job — best-effort.
+      - name: Clean up sandbox PRs/branches
+        if: always() && vars.INTEG_SANDBOX_REPO != '' && vars.INTEG_PAT_SECRET_ID != ''
         env:
-          HEAD_SHA: ${{ needs.resolve.outputs.head_sha }}
-          RUN_NUMBER: ${{ github.run_number }}
+          AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+          AWS_DEFAULT_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+          SANDBOX_REPO: ${{ vars.INTEG_SANDBOX_REPO }}
+          PAT_SECRET_ID: ${{ vars.INTEG_PAT_SECRET_ID }}
         run: |
           set -euo pipefail
-          export INTEG_STACK_NAME="int-${HEAD_SHA:0:12}-${RUN_NUMBER}"
-          echo "Integ stack name: $INTEG_STACK_NAME"
-          mise //cdk:integ -- --all --require-approval never \
-            -c stackName="integ-${{ github.run_id }}-${{ github.run_attempt }}" \
-            -c github:sha="$(git rev-parse HEAD)" \
-            -c github:ref="$(git branch --show-current || echo "detached")" \
-            -c github:actor="${{ github.triggering_actor }}" \
-            -c github:repository="$(gh repo view --json nameWithOwner --jq .nameWithOwner)" \
-            -c github:clean="$([ -z "$(git status --porcelain)" ] && echo true || echo false)"
+          GH_TOKEN="$(aws secretsmanager get-secret-value \
+            --secret-id "$PAT_SECRET_ID" \
+            --query SecretString --output text)"
+          export GH_TOKEN
+          # List bgagent/* branch refs; delete each (deleting the branch closes
+          # any open PR from it). Best-effort: never fail the job on cleanup.
+          gh api "repos/${SANDBOX_REPO}/git/matching-refs/heads/bgagent/" \
+            --jq '.[].ref | sub("^refs/heads/"; "")' 2>/dev/null \
+          | while read -r branch; do
+              [ -n "$branch" ] || continue
+              echo "Deleting sandbox branch: $branch"
+              gh api -X DELETE "repos/${SANDBOX_REPO}/git/refs/heads/${branch}" || true
+            done || true
 
   # Post the final integ-smoke status back to the PR head so the check flips from
   # pending to success/failure. Skipped for workflow_dispatch (no PR to gate).
