@@ -187,7 +187,7 @@
           "kind": {
             "type": "string",
             "description": "Dispatches to a registered step handler.",
-            "enum": ["clone_repo", "hydrate_context", "run_agent", "verify_build", "verify_lint", "ensure_pr", "post_review", "deliver_artifact"]
+            "enum": ["clone_repo", "hydrate_context", "run_agent", "verify_build", "verify_lint", "self_review", "ensure_pr", "post_review", "deliver_artifact"]
           },
           "name": {
             "type": "string",
@@ -212,6 +212,17 @@
           "target": {
             "type": "string",
             "description": "For deliver_artifact: the name of a registered Python deliverer (workflow/deliverers.py / DELIVERERS) to route the produced output through. Open string, not a closed enum, so a new delivery method is a registered deliverer, not a schema change (ADR-014 addendum 2026-06-08). First-party names: s3, comment, s3_and_comment. Each deliverer declares the terminal outcomes it produces; validator rule 11 consults that registry.",
+            "minLength": 1
+          },
+          "max_turns": {
+            "type": "integer",
+            "description": "For self_review: cap on agent turns the self-review loop may use (drawn from the task's remaining turn/budget allowance). Defaults to 5 when omitted.",
+            "minimum": 1,
+            "maximum": 20
+          },
+          "prompt": {
+            "type": "string",
+            "description": "For self_review: custom review prompt template, rendered with {diff} and {task_description} placeholders. Must contain {diff}. The built-in prompt is used when omitted, and as a logged fail-open fallback when the template is malformed or lacks {diff}.",
             "minLength": 1
           }
         }
@@ -295,7 +306,7 @@
           "steps": {
             "items": {
               "properties": {
-                "kind": { "not": { "enum": ["clone_repo", "ensure_pr", "post_review", "verify_build", "verify_lint"] } }
+                "kind": { "not": { "enum": ["clone_repo", "ensure_pr", "post_review", "verify_build", "verify_lint", "self_review"] } }
               }
             }
           },
