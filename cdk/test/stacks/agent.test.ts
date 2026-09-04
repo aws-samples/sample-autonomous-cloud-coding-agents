@@ -1445,7 +1445,8 @@ describe('AgentStack solution attribution (#319): AWS_SDK_UA_APP_ID via stack-le
     // A loose `toBeGreaterThan` let a whole integration construct disappear
     // unnoticed; the exact count fails if a Lambda is dropped OR if a new one
     // is added without being attributed below.
-    expect(abcaLambdas.length).toBe(46);
+    // 47 = 46 on main + RemoveWorkspaceFn (DELETE /v1/linear/workspaces/{slug}).
+    expect(abcaLambdas.length).toBe(47);
     // Every ABCA-authored Lambda must carry the canonical `#` app-id. Collect
     // any offenders so a failure names the exact logical id(s) that are naked.
     const unattributed = abcaLambdas

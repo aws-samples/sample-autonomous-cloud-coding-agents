@@ -534,7 +534,7 @@ export class LinearIntegration extends Construct {
     const workspaceBySlug = workspacesResource.addResource('{slug}');
     workspaceBySlug.addMethod(
       'DELETE',
-      new apigw.LambdaIntegration(removeWorkspaceFn),
+      new apigw.LambdaIntegration(removeWorkspaceFn, { allowTestInvoke: false }),
       cognitoAuthOptions,
     );
 
