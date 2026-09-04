@@ -30,12 +30,14 @@ import { AgentMemory } from '../../src/constructs/agent-memory';
 import { AgentSessionRole } from '../../src/constructs/agent-session-role';
 import { DEFAULT_BEDROCK_MODEL_IDS } from '../../src/constructs/bedrock-models';
 import { EcsAgentCluster, resolveEcsTaskSizing } from '../../src/constructs/ecs-agent-cluster';
+import { LinearIdentityVault } from '../../src/constructs/linear-identity-vault';
 
 function createStack(overrides?: {
   memoryId?: string;
   bedrockModels?: string[];
   bedrockGeoRegion?: string;
   withMemory?: boolean;
+  withLinearVault?: boolean;
   taskSizing?: {
     buildTaskCpu?: number;
     buildTaskMemoryMiB?: number;
@@ -76,6 +78,13 @@ function createStack(overrides?: {
 
   const agentMemory = overrides?.withMemory ? new AgentMemory(stack, 'AgentMemory') : undefined;
 
+  const linearIdentityVault = overrides?.withLinearVault
+    ? new LinearIdentityVault(stack, 'LinearIdentityVault', {
+      workloadName: 'abca_linear_oauth',
+      allowedReturnUrls: ['http://localhost:8080/oauth/callback'],
+    })
+    : undefined;
+
   new EcsAgentCluster(stack, 'EcsAgentCluster', {
     vpc,
     agentImageAsset,
@@ -85,6 +94,7 @@ function createStack(overrides?: {
     githubTokenSecret,
     memoryId: overrides?.memoryId,
     agentMemory,
+    ...(linearIdentityVault && { linearIdentityVault }),
     ...(overrides?.taskSizing && { taskSizing: overrides.taskSizing }),
   });
 
@@ -622,6 +632,42 @@ describe('EcsAgentCluster construct', () => {
       const policies = Template.fromStack(stack).findResources('AWS::IAM::Policy');
       const asJson = JSON.stringify(policies);
       expect(asJson).not.toMatch(/bedrock-agentcore:[A-Za-z]*Event/);
+    });
+  });
+
+  // Same ECS-parity class as F-2 above (RFC #249 Phase 1). The AgentCore runtime
+  // gets the vault env + token grant in agent.ts; this container has its OWN
+  // baseEnvironment and task role, so BOTH must be wired here or the ECS agent
+  // silently stays on the Secrets-Manager path (vault call → AccessDenied →
+  // logged fallback), and the vault is never exercised on ECS.
+  describe('Linear identity vault parity (#809)', () => {
+    test('wires the vault env AND the token grant onto the task role', () => {
+      const { template } = createStack({ withLinearVault: true });
+      // Env parity with the AgentCore runtime.
+      template.hasResourceProperties('AWS::ECS::TaskDefinition', {
+        ContainerDefinitions: Match.arrayWith([
+          Match.objectLike({
+            Environment: Match.arrayWith([
+              Match.objectLike({ Name: 'LINEAR_VAULT_ENABLED', Value: 'true' }),
+              Match.objectLike({ Name: 'LINEAR_WORKLOAD_IDENTITY_NAME', Value: 'abca_linear_oauth' }),
+            ]),
+          }),
+        ]),
+      });
+      // Token grant, on the resources the service actually authorizes against.
+      const asJson = JSON.stringify(template.findResources('AWS::IAM::Policy'));
+      expect(asJson).toContain('bedrock-agentcore:GetWorkloadAccessTokenForUserId');
+      expect(asJson).toContain('bedrock-agentcore:GetResourceOauth2Token');
+      expect(asJson).toContain('workload-identity-directory/default');
+    });
+
+    test('omits both the env and the grant when the vault is not passed', () => {
+      // Negative proof — otherwise the positive test above proves nothing.
+      const { stack, template } = createStack();
+      const asJson = JSON.stringify(template.findResources('AWS::IAM::Policy'));
+      expect(asJson).not.toContain('GetResourceOauth2Token');
+      expect(JSON.stringify(Template.fromStack(stack).toJSON()))
+        .not.toContain('LINEAR_WORKLOAD_IDENTITY_NAME');
     });
   });
 

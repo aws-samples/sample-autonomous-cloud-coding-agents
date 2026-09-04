@@ -48,7 +48,8 @@ const CONSTANTS_JSON = path.join(REPO_ROOT, 'contracts/constants.json');
 const POLICY_PY = path.join(REPO_ROOT, 'agent/src/policy.py');
 const JIRA_REACTIONS_PY = path.join(REPO_ROOT, 'agent/src/jira_reactions.py');
 const SERVER_PY = path.join(REPO_ROOT, 'agent/src/server.py');
-const PYTHON_CONSUMERS = [POLICY_PY, JIRA_REACTIONS_PY, SERVER_PY];
+const CONFIG_PY = path.join(REPO_ROOT, 'agent/src/config.py');
+const PYTHON_CONSUMERS = [POLICY_PY, JIRA_REACTIONS_PY, SERVER_PY, CONFIG_PY];
 const MICROVM_COMPUTE_TS = path.join(REPO_ROOT, 'cdk/src/constructs/lambda-microvm-compute.ts');
 const TS_CONSUMERS = [MICROVM_COMPUTE_TS];
 
@@ -97,6 +98,18 @@ const OWNED_PYTHON_PATTERNS: ReadonlyArray<{ name: string; regex: RegExp }> = [
   // timeout are a RELATIONSHIP (`warmup_total < ready_hook`), and a relationship
   // cannot be enforced from one side — so neither side may re-declare its half as
   // a literal. A contract-sourced `= _HOOK_BUDGETS["…"]` does not match.
+  // Collection literals, like the MICROVM_PLATFORM_CONFIG_* pair above: these are the
+  // vault's cache key, and a divergence between any two of the four copies makes every
+  // resolve a cache miss that #812 now reports as consent-required. A contract-sourced
+  // `= list(_LINEAR_VAULT_CONTRACT["scopes"])` does not match.
+  {
+    name: '_LINEAR_VAULT_SCOPES',
+    regex: /^\s*_LINEAR_VAULT_SCOPES\s*(?::[^=]+)?=\s*(?:list\(|tuple\()?\s*[[{]/m,
+  },
+  {
+    name: '_LINEAR_VAULT_CUSTOM_PARAMS',
+    regex: /^\s*_LINEAR_VAULT_CUSTOM_PARAMS\s*(?::[^=]+)?=\s*(?:dict\()?\s*[[{]/m,
+  },
   {
     name: '_READY_WARMUP_TOTAL_BUDGET_SECONDS',
     regex: /^\s*_READY_WARMUP_TOTAL_BUDGET_SECONDS\s*(?::\s*(?:int|float))?\s*=\s*-?\d+\b/m,
