@@ -280,10 +280,41 @@ async function parseTokenResponse(
   if (!isLinearTokenResponse(body)) {
     throw new CliError(
       `Linear /oauth/token returned an unexpected shape for ${contextLabel}: `
-      + `${JSON.stringify(body).slice(0, 200)}`,
+      + describeTokenShape(body),
     );
   }
   return body;
+}
+
+/**
+ * Describe an off-contract token response WITHOUT echoing it.
+ *
+ * This message used to interpolate `JSON.stringify(body).slice(0, 200)`, and the first
+ * 200 characters of a token response ARE the token. `isLinearTokenResponse` requires
+ * `expires_in` and `scope`, so a 200 carrying a perfectly good `access_token` alongside,
+ * say, a string `expires_in` failed the guard and printed the credential to the
+ * operator's terminal — and into any CI log capturing stdout, where it outlives the
+ * session that leaked it.
+ *
+ * Field names and types are what diagnoses a contract change; the values are exactly
+ * what must not be shown. Reporting which required field is wrong is also more useful
+ * than a truncated blob, so this is not a redaction that costs debuggability.
+ */
+function describeTokenShape(value: unknown): string {
+  if (typeof value !== 'object' || value === null) {
+    return `not a JSON object (got ${value === null ? 'null' : typeof value})`;
+  }
+  const obj = value as Record<string, unknown>;
+  const problems = ([
+    ['access_token', 'string'],
+    ['token_type', 'string'],
+    ['expires_in', 'number'],
+    ['scope', 'string'],
+  ] as ReadonlyArray<readonly [string, string]>)
+    .filter(([key, want]) => typeof obj[key] !== want)
+    .map(([key, want]) => `${key} expected ${want}, got ${obj[key] === undefined ? 'absent' : typeof obj[key]}`);
+  // Key NAMES only. Never a value — one of them is the credential.
+  return `${problems.join('; ')} (keys present: ${Object.keys(obj).sort().join(', ')})`;
 }
 
 function isLinearTokenResponse(value: unknown): value is LinearTokenResponse {
@@ -310,6 +341,13 @@ export function computeExpiresAt(expiresInSeconds: number, now: Date = new Date(
 export type WebhookSecretAction =
   /** This workspace already has its own signing secret — keep it (re-run). */
   | { readonly kind: 'preserve'; readonly secret: string }
+  /**
+   * The stored secret is byte-identical to the stack-wide one, so it was inherited
+   * by an earlier mirror rather than taken from this workspace's own webhook. Keep
+   * it — it may well be correct for the FIRST workspace — but say so, because for
+   * any additional workspace it is the wrong secret and every delivery 401s.
+   */
+  | { readonly kind: 'preserve-inherited'; readonly secret: string }
   /** No per-workspace secret; mirror the stack-wide one (safe for the first
    *  workspace, ambiguous for an additional one — caller should warn). */
   | { readonly kind: 'mirror-stackwide' }
@@ -338,8 +376,16 @@ export type WebhookSecretAction =
 export function resolveWebhookSecretAction(
   existingPerWorkspaceSecret: string | undefined,
   stackWideConfigured: boolean,
+  stackWideSecret?: string,
 ): WebhookSecretAction {
   if (existingPerWorkspaceSecret?.startsWith('lin_wh_')) {
+    // A stored value equal to the stack-wide secret is NOT evidence this workspace
+    // has its own: an earlier run mirrored it. Treating it as owned silences the
+    // mirror warning forever, so a workspace that inherited the wrong secret can
+    // never be told about it again — it just 401s on every delivery. Seen live.
+    if (stackWideSecret && existingPerWorkspaceSecret === stackWideSecret) {
+      return { kind: 'preserve-inherited', secret: existingPerWorkspaceSecret };
+    }
     return { kind: 'preserve', secret: existingPerWorkspaceSecret };
   }
   if (stackWideConfigured) {
@@ -389,6 +435,79 @@ export async function readExistingWebhookSecret(
   return bundle.webhook_signing_secret?.startsWith('lin_wh_')
     ? bundle.webhook_signing_secret
     : undefined;
+}
+
+/** The four grant fields of a stored bundle — what a fresh token supplies and a
+ *  preserved one substitutes for. */
+export type StoredGrantFields =
+  Pick<StoredLinearOauthToken, 'access_token' | 'refresh_token' | 'expires_at' | 'scope'>;
+
+/**
+ * Decide the grant fields to persist: a freshly issued token if there is one, else the
+ * grant already stored, else empty.
+ *
+ * Extracted from `bgagent linear setup` so the PRECEDENCE is testable. Inline, it was
+ * four `??` chains inside a long command handler, and getting one of them backwards is
+ * silent and destructive: writing empty strings over a live grant is what turns the
+ * documented Secrets-Manager fallback into a fiction, and nothing fails until the vault
+ * is unreachable and there is no longer anything to fall back to.
+ *
+ * A vault onboarding issues no token of its own, which is why `preserved` exists at all
+ * — see {@link readExistingOauthTokens}.
+ */
+export function resolveStoredGrantFields(
+  issued: LinearTokenResponse | undefined,
+  preserved: StoredGrantFields | undefined,
+  now: Date = new Date(),
+): StoredGrantFields {
+  return {
+    access_token: issued?.access_token ?? preserved?.access_token ?? '',
+    refresh_token: issued?.refresh_token ?? preserved?.refresh_token ?? '',
+    // Recomputed from `expires_in` when freshly issued, because that value is relative
+    // to issuance; a preserved bundle already holds an absolute timestamp.
+    expires_at: issued ? computeExpiresAt(issued.expires_in, now) : preserved?.expires_at ?? '',
+    scope: issued?.scope ?? preserved?.scope ?? '',
+  };
+}
+
+/**
+ * The OAuth token fields of an existing bundle, or undefined when there is no
+ * usable one.
+ *
+ * Used when a workspace MOVES onto the Identity vault. A fresh vault onboarding
+ * has no Linear token to store, so the bundle is written without one — but a
+ * workspace that already had a working Secrets-Manager token would have it
+ * overwritten with empty strings, destroying the only credential that still works
+ * if the vault later becomes unreachable. Carrying it forward keeps that fallback
+ * real instead of vestigial.
+ *
+ * Same fail-closed contract as {@link readExistingWebhookSecret}: only a genuine
+ * "no such secret" yields undefined; anything else throws so the caller can refuse
+ * to proceed rather than silently discard a live credential.
+ */
+export async function readExistingOauthTokens(
+  fetchSecretString: () => Promise<string | undefined>,
+  isNotFound: (err: unknown) => boolean,
+): Promise<Pick<StoredLinearOauthToken, 'access_token' | 'refresh_token' | 'expires_at' | 'scope'> | undefined> {
+  let raw: string | undefined;
+  try {
+    raw = await fetchSecretString();
+  } catch (err) {
+    // nosemgrep: ts-silent-success-masking -- "no such secret" IS the empty success here: a first install has no bundle, so there is no token to carry forward. Every other error rethrows below, which is the fail-closed half of the contract this function exists for.
+    if (isNotFound(err)) return undefined; // genuine first install
+    throw err;
+  }
+  if (!raw) return undefined;
+  const bundle = JSON.parse(raw) as Partial<StoredLinearOauthToken>;
+  // A refresh token is what makes the bundle usable on its own; without one there
+  // is nothing worth preserving.
+  if (!bundle.refresh_token) return undefined;
+  return {
+    access_token: bundle.access_token ?? '',
+    refresh_token: bundle.refresh_token,
+    expires_at: bundle.expires_at ?? '',
+    scope: bundle.scope ?? '',
+  };
 }
 
 /**

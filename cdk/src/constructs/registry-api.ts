@@ -163,17 +163,17 @@ export class RegistryApi extends NestedStack {
     // --- Routes: /registry ---
     const registry = this.api.root.addResource('registry');
     const records = registry.addResource('records');
-    records.addMethod('POST', new apigw.LambdaIntegration(publishFn), authOptions);
-    records.addMethod('GET', new apigw.LambdaIntegration(listFn), authOptions);
+    records.addMethod('POST', new apigw.LambdaIntegration(publishFn, { allowTestInvoke: false }), authOptions);
+    records.addMethod('GET', new apigw.LambdaIntegration(listFn, { allowTestInvoke: false }), authOptions);
 
     const resolve = registry.addResource('resolve');
-    resolve.addMethod('GET', new apigw.LambdaIntegration(resolveFn), authOptions);
+    resolve.addMethod('GET', new apigw.LambdaIntegration(resolveFn, { allowTestInvoke: false }), authOptions);
 
     // show: /registry/records/{kind}/{namespace}/{name}
     const byKind = records.addResource('{kind}');
     const byNamespace = byKind.addResource('{namespace}');
     const byName = byNamespace.addResource('{name}');
-    byName.addMethod('GET', new apigw.LambdaIntegration(showFn), authOptions);
+    byName.addMethod('GET', new apigw.LambdaIntegration(showFn, { allowTestInvoke: false }), authOptions);
 
     this.apiUrl = this.api.url;
 

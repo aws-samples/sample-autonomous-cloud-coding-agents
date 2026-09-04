@@ -26,6 +26,7 @@ import type { ParsedRef } from './ref';
 import type {
   ListFilter,
   PublishInput,
+  RegistryBrowseEntry,
   RegistryRecord,
   ResolvedAsset,
 } from './types';
@@ -49,6 +50,14 @@ export interface RegistryClient {
 
   /** List records (optionally filtered by kind/namespace). */
   listRecords(filter?: ListFilter): Promise<readonly RegistryRecord[]>;
+
+  /**
+   * Like {@link listRecords} but includes malformed records as envelope-only
+   * markers instead of dropping them. `show` uses this so an asset whose only
+   * versions have corrupt descriptors surfaces (flagged) rather than 404-ing as
+   * if it did not exist (#791). `listRecords` stays the tolerant browse default.
+   */
+  listBrowseEntries(filter?: ListFilter): Promise<readonly RegistryBrowseEntry[]>;
 
   /**
    * Resolve a parsed ref to a single asset: gather candidate versions, rank by

@@ -1,109 +1,200 @@
 # Linear integration setup guide
 
-Set up the ABCA Linear integration so that applying a label to a Linear issue triggers an autonomous task. The agent posts progress comments back on the issue as it works.
+Set up the ABCA Linear integration so that applying a label to a Linear issue triggers an autonomous task. The agent posts progress comments back on the issue as it works, and opens a pull request.
 
 ## Prerequisites
 
 - ABCA CDK stack deployed (see [Developer guide](./DEVELOPER_GUIDE.md))
 - A Cognito user account configured (see [User guide](./USER_GUIDE.md))
-- A Linear workspace where you have **admin** access
+- A Linear workspace where you have **admin** access — `actor=app` installs are workspace-wide and Linear requires an admin to approve them
 - The `bgagent` CLI installed and logged in (`bgagent configure` + `bgagent login`)
 
 ## How it works
 
-A Linear-workspace admin creates a Linear OAuth app and authorizes it on the workspace. The OAuth token is stored in a per-workspace Secrets Manager secret (`bgagent-linear-oauth-<slug>`). When a user adds the trigger label to a Linear issue, Linear fires a webhook to ABCA; the receiver verifies the HMAC, looks up the workspace, refreshes the access token if needed, and creates a task. The agent clones the repo, opens a PR, and comments on the Linear issue as `bgagent[bot]`.
+You create a Linear OAuth app and authorize it on your workspace. When someone adds the trigger label to an issue in a mapped project, Linear fires a webhook at ABCA; the receiver verifies the HMAC signature, looks up the workspace, resolves a Linear API token, and creates a task. The agent clones the repo, makes the change, opens a PR, and comments back on the issue.
 
-**Multi-workspace**: a single ABCA deployment can serve multiple Linear workspaces. Each workspace gets its own per-workspace OAuth secret + signing secret. Webhook subscriptions are workspace-scoped (Linear generates a fresh signing secret per subscription), so each workspace must configure its own webhook in Linear.
+The app is installed with `actor=app`, so everything ABCA writes is attributed to the app rather than to whoever clicked Authorize.
 
-## Setup walkthrough
+### Where the Linear credential lives
 
-This walkthrough covers both the first install and adding additional workspaces. The branching is small — call out at each step which commands run for which case.
+One of two places, chosen automatically at setup time:
 
-### 1. Decide the workspace `<slug>`
+| | When it's used | What's stored |
+|---|---|---|
+| **AgentCore Identity vault** | The stack was deployed with `--context enableLinearIdentityVault=true` | Nothing long-lived. AgentCore holds the refresh token and mints short-lived access tokens on demand. |
+| **Secrets Manager** | Otherwise — including regions where AgentCore Identity isn't available | An OAuth token bundle in `bgagent-linear-oauth-<slug>`, refreshed and rotated by ABCA. |
 
-The slug is the URL key from `https://linear.app/<slug>/...`. Find it in Linear → Settings → Workspace → URL key, or look at any URL while logged into the workspace.
+The vault is unavailable on the `lambda-microvm` substrate — see [Not available with `compute_type=lambda-microvm`](#not-available-with-compute_typelambda-microvm) below.
 
-### 2. Create a Linear OAuth app
+`bgagent linear setup` picks whichever the deployment supports and tells you which one it used. There is no flag. If the vault isn't available it prints one line and continues on Secrets Manager:
+
+```
+AgentCore Identity not available in us-east-1 — using Secrets Manager.
+```
+
+A workspace that started on Secrets Manager and later moves to the vault **keeps** its Secrets Manager token as a fallback. A workspace onboarded straight onto the vault has no such token by design — it needs the vault to be reachable.
+
+When a workspace's authorization dies, ABCA records it on the registry row and publishes to the stack's operational alert topic. That topic has **no subscribers unless you deployed with `alertEmail`**, so set it if you want to hear about a dead workspace rather than discover it from `bgagent platform doctor`.
+
+#### Not available with `compute_type=lambda-microvm`
+
+The vault and the Lambda MicroVMs substrate cannot be enabled on the same stack. Together they synthesize 505 CloudFormation resources against a hard limit of 500 (MicroVM alone is 496, the vault alone 488), so `cdk deploy` refuses the combination by name at synth rather than failing partway through. Use the vault on the `agentcore` or `ecs` substrate; a MicroVM stack stays on Secrets Manager until the stack reclaims room.
+
+#### One workload identity per stack
+
+The vault mints tokens under an AgentCore workload identity named after the stack (for example `abca_linear_oauth_AbcaAgentStack`), published as the `LinearVaultWorkloadName` output. These names are unique per account **and region**, so two vault-enabled stacks must not share one — the second to deploy would overwrite the first's consent-callback allowlist.
+
+A grant is bound to that name, so **renaming it orphans every consent already given**. If you deployed the vault before this was stack-scoped, pin the old name instead of re-authorizing every workspace:
+
+```bash
+--context linearVaultWorkloadName=abca_linear_oauth
+```
+
+### Multi-workspace
+
+One ABCA deployment can serve several Linear workspaces. Each gets its own registry row and its own `bgagent-linear-oauth-<slug>` secret, keyed by Linear's `organizationId`. Run setup once per workspace.
+
+## Setup
+
+### 1. Find the workspace slug
+
+The slug is the URL key in `https://linear.app/<slug>/…`. Linear → Settings → Workspace → URL key, or read it off any URL while signed into the workspace.
+
+### 2. Create the Linear OAuth app
 
 ```bash
 bgagent linear app-template
 ```
 
-The command prints exact field values to paste. Open [Linear Settings → API → New application](https://linear.app/settings/api/applications/new) (signed into the right workspace — use Linear's sidebar workspace switcher if needed) and fill in the fields exactly as the template lists.
+This prints the exact field values to paste, with the URLs already resolved from your stack — you shouldn't need to look anything up. Open [Linear Settings → API → New application](https://linear.app/settings/api/applications/new), **signed into the workspace you're onboarding** (use Linear's sidebar switcher if needed), and fill in what it prints.
 
-The template marks which fields are required for the `actor=app` agent flow; missing them produces a cryptic "Invalid redirect_uri" error.
+Two fields deserve attention:
 
-Click **Save**, then copy the **Client ID** and **Client Secret** from the app's detail page.
+- **Redirect URIs** — paste exactly what the template prints, one per line. Linear compares these as exact strings, and reports any mismatch as a cryptic `Invalid redirect_uri parameter for the application`. Don't retype them, don't add variants, and don't let a line wrap into two entries.
+- **Webhooks** — turn this ON and fill in the URL the template prints, with **Issues** and **Comments** both ticked under *Data change events*. Leave every **App events** checkbox off (see the warning below). Then copy the **Webhook signing secret** (`lin_wh_…`); setup asks for it.
 
-> **Adding a second workspace?** You only need a new OAuth app if you want per-workspace isolation. Otherwise, edit your existing app and toggle **Public: ON** so it can be authorized from any workspace. Trade-off: shared apps revoke together; per-workspace apps don't.
+Click **Create** and copy the **Client ID** and **Client Secret**.
 
-> **⚠️ Do NOT enable Linear "agent" / app-notification events on the OAuth app.** ABCA is a **comment-based** integration: it posts a maturing threaded reply and reacts 👀→✅ on ordinary Linear comments. If the OAuth app is configured as a Linear **agent** (agent-session / app-notification events turned on), Linear renders an `@mention` of the app as its **interactive agent-activity surface** instead of a normal comment thread — which breaks the reply/reaction UX (mentions appear "interactive" and the agent's comment thread doesn't behave like a comment). ABCA does not consume agent-session events; the webhook receiver ignores them and logs a WARN naming the workspace. **Leave agent/app events OFF and rely on the Issues + Comments webhook events (step 4).** If comments start behaving "interactively" instead of as threads, this toggle is the cause.
+> **Don't enable Linear's agent / app-notification events.** ABCA is a **comment-based** integration: it posts a maturing threaded reply and reacts 👀→✅ on ordinary comments. With agent-session events on, Linear renders an `@mention` of the app as its interactive agent-activity surface instead of a comment thread, which breaks the reply/reaction UX. ABCA ignores agent-session events and logs a WARN naming the workspace. If comments start behaving "interactively", this toggle is why.
 
-### 3. Authorize the app on the workspace
+> **One webhook, not two.** The app's own webhook is all ABCA needs. A separate workspace webhook (Linear → Settings → API → Webhooks) works equally well as an *alternative* — but pointing both at ABCA delivers every event twice under two different signing secrets, and only one of them can verify. Pick one.
 
-For your first workspace:
+### 3. Authorize the app
 
 ```bash
 bgagent linear setup <slug>
 ```
 
-For each additional workspace after the first:
+It prompts for the three values from step 2 — **Client ID**, **Client Secret**, and the **webhook signing secret** — then prints one URL to open and waits. Authorize in the browser, then paste back the value the page shows. One command, one consent — and because consent happens in a browser that never needs to reach your machine, this works from a cloud desktop, an SSH session, or a container.
 
-```bash
-bgagent linear add-workspace <slug>
+**On the vault, the first run stops early.** The vault redirects Linear through a callback URL that AgentCore mints while registering your app, so it cannot exist before that first run. Setup prints it and stops:
+
+```
+  → Registering the Linear app with the Identity vault... ✓
+
+  One more Redirect URI to add to the Linear app.
+  Copy the whole line below — leading spaces make it invalid:
+
+https://bedrock-agentcore.us-east-1.amazonaws.com/identities/oauth2/callback/<id>
+
+  Then re-run:  bgagent linear setup <slug>
 ```
 
-Both commands prompt for the **Client ID** and **Client Secret**, open your browser to Linear's consent screen, and store the OAuth token bundle. **Make sure your browser is signed into the right workspace** before authorizing — that's where the app gets installed.
+Add that URI to the app, re-run the same command, and it proceeds to consent. This happens once per workspace. (`bgagent linear app-template --slug <slug>` will include the URI once the provider exists, if you'd rather regenerate the whole template.)
 
-`add-workspace` defaults the Client ID to the existing workspace's value; press Enter to reuse it (Public app), or paste a new one (per-workspace app).
+The signing secret is **required** the first time a workspace is onboarded — there is nothing to fall back to, and a workspace without its own secret fails every signature check while looking perfectly installed. On later runs the prompt offers to keep the stored one, so re-running (say, to re-authorize after a revocation) doesn't send you back to the Linear app page.
 
-`setup` also pauses at a `Webhook signing secret:` prompt and you can finish the webhook configuration inline. `add-workspace` exits after the OAuth dance — you'll configure the webhook in steps 4–5.
+All three values can also be passed as flags (`--client-id`, `--client-secret`, `--webhook-secret`) for non-interactive use; interactive is preferred so secrets stay out of shell history.
 
-### 4. Configure the Linear webhook
+Finally it offers a picker so you can map your own Linear identity to your ABCA account — pick yourself. ([Why a picker is needed.](#why-the-two-step-handshake))
 
-```bash
-bgagent linear webhook-info
-```
+### 4. Create the trigger labels in Linear
 
-This prints the URL and values to paste into Linear. Open `https://linear.app/<slug>/settings/api/webhooks` and create the webhook with those values.
+ABCA matches labels **by name**, so you create them yourself: Linear → Settings → Labels, or inline on any issue.
 
-Under **Resource types**, enable both **Issues** and **Comments**:
+| Label | Give it this description |
+|---|---|
+| `bgagent` | Hand this issue to ABCA — makes the change and opens a PR |
+| `bgagent:help` | ABCA explains what its labels do |
 
-- **Issues** — label-triggered tasks and parent/sub-issue epic orchestration.
-- **Comments** — the `@bgagent` re-iteration trigger: a reviewer comments `@bgagent <change>` on a sub-issue and ABCA updates that sub-issue's PR, then re-stacks its dependents. Without the Comments subscription this trigger silently never fires.
+Add the descriptions. Linear shows them on hover in the label picker, which is the only hint a first-time teammate gets. Grouping both under a shared label group keeps them together in the picker.
 
-Then open the webhook detail page and copy the **signing secret** (`lin_wh_…`).
-
-### 5. Tell ABCA the signing secret
-
-If you ran `setup` and it's paused at `Webhook signing secret:`, paste the value there.
-
-If you ran `add-workspace` (or you skipped step 4 during `setup`):
+### 5. Map a Linear project to a GitHub repo
 
 ```bash
-bgagent linear update-webhook-secret <slug>
+bgagent linear list-projects --slug <slug>          # find the project UUID
+bgagent linear onboard-project <project-uuid> --repo owner/repo
 ```
 
-Paste the secret at the prompt. ABCA stores it on the workspace's per-workspace OAuth bundle — the receiver Lambda looks it up by `organizationId` at verify time.
+Pass `--label <name>` to use a trigger label other than `bgagent`. Also available: `--team-id` (debug only), `--region`, `--stack-name`.
 
-### 6. Onboard a project
+### 6. Test
 
-```bash
-bgagent linear list-projects --slug <slug>     # find the project UUID
-bgagent linear onboard-project <project-uuid> --repo owner/repo --label abca
-```
+Apply the trigger label to an issue in that project. Within ~30 seconds the agent posts `🤖 Starting on this issue…`, then a PR link when it's done.
 
-Default trigger label is `bgagent`; pass `--label <name>` to override.
+## Using it
 
-Optional flags on `onboard-project`: `--team-id` (Linear team UUID, debug only), `--region`, `--stack-name`.
+- **Trigger a task** — apply the trigger label to an issue in a mapped project. The title and description become the task.
+- **Iterate** — reply to ABCA's comment with `@bgagent <what you want>`. The trigger phrase is always `@bgagent`, whatever you named the app.
+- **Check status** — the issue's progress comments, or `bgagent list` / `bgagent status <task-id>`.
+- **Cancel** — `bgagent cancel <task-id>`. Removing the label does *not* cancel a running task.
 
-### 7. Test
+### Trigger labels
 
-Apply the trigger label to a Linear issue in the onboarded project. The agent should start within ~30 seconds, post a `🤖 Starting on this issue…` comment, then a PR link when ready.
+| Label | What it does | Use it when |
+|-------|--------------|-------------|
+| `bgagent` | **Do it.** Reads the issue, makes the change, opens a PR. If the issue already has sub-issues, runs those in dependency order instead (see [orchestration](#parentsub-issue-orchestration)). | The issue is a single well-defined piece of work, or a parent whose sub-issues you've already written. |
+| `bgagent:help` | **Explain the labels.** Posts a one-time comment describing each label, creates no task. Remove it afterward. | You want a reminder of the options. |
+
+**You decide the breakdown.** ABCA runs the graph you declare — it does not split an issue for you. For multi-part work, create the sub-issues and their `Blocks` / `Blocked by` links yourself, then label the parent. A plain label on a multi-part issue runs it as ONE task.
+
+### Parent/sub-issue orchestration
+
+Apply the trigger label to a **parent issue that has sub-issues** and ABCA orchestrates the epic instead of creating one task:
+
+1. **Discovery** — reads the sub-issues and their `blocked by` / `blocking` relations, builds a DAG, and rejects cycles with a terminal comment on the parent.
+2. **Dependency-ordered execution** — root sub-issues start immediately; a blocked sub-issue waits until **all** its blockers reach terminal success (one that completes but fails its build does **not** release its dependents). Independent sub-issues run in parallel.
+3. **Stacked PRs** — a sub-issue with one predecessor branches from that predecessor's branch; with several, it branches from the default branch and merges all predecessors in. Review the stack bottom-up.
+4. **Rollup** — when every sub-issue is terminal, ABCA posts an aggregate comment on the parent (succeeded / failed / skipped, plus per-child status). Each sub-issue also gets its own final comment.
+5. **Failure handling** — a failed or cancelled sub-issue causes its transitive dependents to be **skipped**; independent siblings still finish.
+
+The parent issue itself spawns no task — a human-authored sub-issue graph is treated as consent to execute.
+
+#### Adding a sub-issue to a running epic
+
+The graph is read **at trigger time**, so a sub-issue created afterward isn't picked up automatically. Create it (with its `blocked by` edges), then **re-apply the trigger label to the parent**. ABCA diffs the current graph against what it has, adds only the new nodes, and releases any that are immediately runnable. Re-applying with no new sub-issues is a safe no-op.
+
+Re-applying the label is deliberately the explicit "execute this" signal — the same consent model as the initial trigger — so newly drafted sub-issues don't start the instant you create them.
+
+Current limitations:
+
+- **No "cancel the whole epic" command.** Cancelling one sub-issue's task stops it and skips its dependents, but there's no single command for an in-flight orchestration.
+- A scheduled backstop (~10 min) recovers sub-issues whose terminal events were lost to a transient outage, so a stalled orchestration self-heals.
+- Multi-predecessor ("diamond") sub-issues merge their predecessors' branches at start time; re-integrating a dependent after a predecessor is edited in review is a tracked follow-up.
+
+### Attachments and documents
+
+The platform pre-hydrates context and hands it to the agent at task-creation time. The agent has **no Linear tools** and fetches nothing at runtime — it works from that snapshot.
+
+Gathered on **every** trigger path (labelled issue, orchestration, `@bgagent` comment): the issue title and description, recent human comments, the reporter's uploaded files (inline images and paperclip attachments), and any project wiki documents.
+
+- Every attachment is screened through **Bedrock Guardrails** before entering the agent's context.
+- **Supported**: images (PNG, JPEG) and text-family files (PDF, plain text, CSV, Markdown, JSON, log).
+- **Rejected**: everything else (`.docx`, `.zip`, …). The reporter gets a comment asking them to remove or convert the file and re-trigger.
+
+No extra setup — this is automatic once the workspace and project are onboarded.
+
+## Adding another workspace
+
+Run `bgagent linear setup <slug>` again for the new workspace. It's the only command that supports the Identity vault, and it will walk the same one-consent flow.
+
+You need a new OAuth app only if you want per-workspace isolation. To reuse one app across workspaces, edit it and toggle **Public: ON** so it can be authorized from any workspace. Trade-off: a shared app revokes everywhere at once; per-workspace apps fail independently.
+
+`bgagent linear add-workspace <slug>` is an older, Secrets-Manager-only path that defaults the Client ID to your existing workspace's value (press Enter to reuse). It does not use the vault; prefer `setup` unless you specifically want that.
 
 ## Inviting teammates
 
-The setup walkthrough offers an inline self-link picker that lets the **person running the wizard** map their own Linear identity to their Cognito sub. To onboard additional teammates so they can trigger tasks from Linear from their own ABCA accounts, run:
+Setup links **your** Linear identity to your ABCA account. Teammates need their own binding so their triggers run under their account — their concurrency, cost attribution, and notifications.
 
 ### Admin: generate the invite
 
@@ -111,11 +202,11 @@ The setup walkthrough offers an inline self-link picker that lets the **person r
 bgagent linear invite-user <slug>
 ```
 
-The CLI shows a picker of human Linear members in the workspace. After you pick the teammate, it generates a one-time code (24h TTL) and prints a CLI command to send them via Slack/email/etc.
+Pick the teammate from the list of human members. You get a one-time code (24h TTL) and a command to send them.
 
-### Teammate: redeem the invite
+### Teammate: redeem it
 
-The teammate needs their own ABCA account first (Cognito user + configured CLI). If they don't have one yet:
+They need an ABCA account first. If they don't have one:
 
 1. **Admin** runs `bgagent admin invite-user teammate@example.com` to create their Cognito user (see [User guide → Joining an existing deployment](./USER_GUIDE.md#joining-an-existing-deployment) for the full Cognito-side flow).
 2. **Teammate** pastes the bundle + temp password from the admin into:
@@ -126,166 +217,95 @@ The teammate needs their own ABCA account first (Cognito user + configured CLI).
    # first login prompts you to set a permanent password (temp password is one-time)
    ```
 
-3. **Teammate** redeems the Linear invite code:
+3. **Teammate**: `bgagent linear link <code>`
 
-   ```bash
-   bgagent linear link <code>
-   ```
+The CLI shows them the Linear name and email and asks for confirmation **before** writing the mapping. If the admin picked the wrong person, the teammate sees it and aborts.
 
-   The CLI shows them the Linear identity name+email and asks for confirmation **before** writing the mapping row. If the admin picked the wrong member, the teammate sees the mismatch and aborts. After confirmation, the binding is recorded — the teammate can now apply the trigger label to a Linear issue and it'll fire as a task under their ABCA account (their concurrency, their cost attribution, their notifications).
+### Why the two-step handshake
 
-### Why this two-step handshake
+`actor=app` installs the app under a synthetic bot user (`<uuid>@oauthapp.linear.app`). Linear's `viewer` query during setup returns that bot user, not the human who clicked Authorize — hence the picker for self-linking.
 
-ABCA's `actor=app` OAuth flow installs the Linear app under a synthetic **bot user** (e.g. `<uuid>@oauthapp.linear.app`). Linear's `viewer` query during `setup` returns this bot user — not the human who clicked Authorize. Setup gets around this by showing a member picker so the admin can self-link inline.
+For teammates, the admin can't authenticate as them, so the binding splits in two: the admin asserts the Linear identity, the teammate confirms from their own authenticated session. No API keys change hands, and no admin can silently misattribute.
 
-For teammates, the admin can't authenticate as them — so `invite-user` separates the two halves of the binding: admin asserts the Linear identity (picker), teammate confirms with their own Cognito-authenticated CLI session. No PAKs change hands; no admin can silently misattribute since the teammate sees the identity before confirming.
+## Reference
 
-## How webhook signature verification works
+### How webhook signature verification works
 
-Linear generates a fresh signing secret **per webhook subscription**, and webhook subscriptions are **workspace-scoped**. Multi-workspace ABCA installs need each workspace's signing secret stored separately, indexed by `organizationId`.
+Linear generates a fresh signing secret per webhook subscription. ABCA stores each workspace's secret on its OAuth bundle (`bgagent-linear-oauth-<slug>`) and, on each event:
 
-ABCA stores each workspace's signing secret on its per-workspace OAuth bundle (`bgagent-linear-oauth-<slug>`). On each event, the webhook receiver:
+1. Parses the body for `organizationId` — untrusted at this point, used only to select which secret to verify against.
+2. Looks up that workspace's registry row. If `status='active'` and the bundle has a `webhook_signing_secret`, verifies the HMAC. Match → dispatch. **Mismatch → 401 with no fallback**, since falling back to the stack-wide secret would let an attacker bypass the per-workspace one.
+3. If there's no row, or no per-workspace secret (a pre-migration single-workspace install), falls back to the stack-wide `LinearWebhookSecret`. Match → trusted, otherwise 401.
 
-1. Parses the body to extract `organizationId` (untrusted at this point — only used to select which secret to verify against).
-2. Looks up the registry row for that `organizationId`. If `status='active'` and the bundle has a `webhook_signing_secret`:
-   - Verify HMAC. If it matches → trusted, dispatch.
-   - If it doesn't match → reject 401. **No fallback** to the stack-wide secret; that would let an attacker bypass the per-workspace secret.
-3. If the registry has no row, or the bundle lacks `webhook_signing_secret` (pre-migration single-workspace install), fall back to the stack-wide `LinearWebhookSecret`. Match → trusted; no match → 401.
+**Trust model.** `organizationId` is attacker-controlled but only *selects* the secret; forging a signature still requires the secret itself. The no-fallback-on-mismatch rule is what prevents cross-workspace impersonation.
 
-The fallback path keeps existing single-workspace deployments working without re-onboarding. Migration to the per-workspace shape happens automatically the next time you run `bgagent linear setup <slug>`.
+### Limits and quotas
 
-**Trust model.** The `organizationId` in the body is attacker-controlled, but it only **selects** which secret to verify against; an attacker still needs the matching signing secret to forge a valid signature. Cross-workspace impersonation is prevented by the no-fallback-on-mismatch rule.
+Linear's rate limits per installed app, per workspace: **5,000 requests/hour** and **3,000,000 complexity points/hour**. A typical task makes ~10 calls.
 
-## Attachments and documents
-
-Beyond the issue title and description, Linear stores additional context the agent may need:
-
-- **Paperclip attachments** (PDFs, logs, spec files attached to an issue)
-- **Inline images** embedded in the description or a comment (`![alt](https://…)`)
-- **Project documents** (Linear's wiki-style docs attached to a project)
-- **Recent human comments** on the issue (clarifications, spec detail)
-
-All of this is **pre-hydrated by the platform** and handed to the agent as task context at task-creation time. The agent has **no Linear tools** and fetches nothing from Linear at runtime — it works from the snapshot it was given. Concretely:
-
-- Before a task is dispatched, the platform fetches the issue title + description, the recent human comments, the reporter's uploaded files (both inline images and paperclip attachments), and the content of any project wiki documents. This hydration runs on **every** trigger path — the initial labeled-issue path, the parent/sub-issue orchestration paths, and the `@bgagent` comment paths — so the agent always starts from a complete snapshot regardless of how the task began.
-- Every fetched attachment is screened through **Bedrock Guardrails** before it enters the agent's context, exactly like a file uploaded through the CLI.
-- **Supported attachment types** are images (PNG / JPEG) and text-family files (PDF, plain text, CSV, Markdown, JSON, log). Unsupported types (`.docx`, `.zip`, and similar) are **rejected** — the reporter gets a comment asking them to remove or convert the unsupported files and re-trigger the task.
-
-No additional setup is required — this happens automatically once the workspace and project are onboarded (steps above).
-
-## Usage
-
-- **Trigger a task**: apply the trigger label to an issue in a mapped Linear project. The issue title + description becomes the task description.
-- **Check status**: from the Linear issue (progress comments) or `bgagent list` / `bgagent status <task-id>`.
-- **Cancel**: `bgagent cancel <task-id>`. Removing the Linear label does not cancel a running task.
-
-## Trigger labels
-
-The base trigger label (default `bgagent`, or whatever you passed to `--label` at onboarding) has one variant. All examples below assume the default `bgagent`; substitute your workspace's label if you overrode it.
-
-| Label | What it does | Use it when |
-|-------|--------------|-------------|
-| `bgagent` | **Do it.** Reads the issue, makes the change, opens a PR. If the issue already has sub-issues, it runs those in dependency order instead (see [orchestration](#parentsub-issue-orchestration)). | The issue is a single, well-defined piece of work, or a parent whose sub-issues you have already written. |
-| `bgagent:help` | **Explain the labels.** Posts a one-time comment describing what each label does, then creates no task. Remove it afterward. | You're new to ABCA on this issue and want a reminder of the options. |
-
-> **Create these labels in Linear and give each a one-line description.** ABCA matches labels by name, so you create them yourself (Linear → Settings → Labels, or inline on any issue). Add a short description to each — Linear shows it on hover in the label picker, which is the only discoverability a first-time teammate gets. Suggested descriptions: **`bgagent`** — "Hand this issue to ABCA — makes the change and opens a PR"; **`bgagent:help`** — "ABCA explains what its labels do". Grouping them under a shared label prefix/group also keeps them together and away from unrelated labels in the picker.
-
-Notes:
-
-- **You decide the breakdown.** ABCA runs the graph you declare — it does not split an issue for you. For work with several parts, create the sub-issues yourself (and the `Blocks`/`Blocked by` links between them), then label the parent; see [orchestration](#parentsub-issue-orchestration). A plain label on a multi-part issue runs it as ONE task.
-- **Once ABCA is working**, reply to its comments with `@bgagent <what you want>` to ask a question or request a change.
-
-## Parent/sub-issue orchestration
-
-If you apply the trigger label to a **parent issue that has sub-issues**, ABCA orchestrates the whole epic instead of creating one task:
-
-1. **Discovery** — it reads the sub-issues and their `blocked by` / `blocking` relations, builds a dependency graph (DAG), and rejects cycles with a terminal comment on the parent.
-2. **Dependency-ordered execution** — root sub-issues (no blockers) start immediately; a blocked sub-issue does not start until **all** its blockers reach terminal-success (a sub-issue that completes but fails its build does **not** release its dependents). Independent sub-issues run in parallel.
-3. **Stacked PRs** — a sub-issue with a single predecessor branches from that predecessor's branch (so it sees its code before merge); a sub-issue with multiple predecessors branches from the default branch and merges all predecessor branches in. Review/merge the resulting stack bottom-up.
-4. **Rollup** — when every sub-issue reaches a terminal state, ABCA posts an aggregate **rollup comment on the parent** (succeeded / failed / skipped counts + per-child status). Each sub-issue also gets its own final-status comment.
-5. **Failure handling** — if a sub-issue fails (or is cancelled), its transitive dependents are **skipped** (never started); independent siblings still finish. The parent rollup reflects the partial outcome.
-
-### Adding a sub-issue to a running (or finished) epic
-
-The graph is read **at trigger time**, so a sub-issue created after the epic started is *not* picked up automatically. To fold it in:
-
-1. Create the new sub-issue under the same parent, with its `blocked by` edges to any sub-issues it depends on.
-2. **Re-apply the trigger label to the parent** (remove it and add it again, or add it if it was removed).
-
-ABCA diffs the current Linear graph against what it already has, adds only the genuinely-new node(s), and releases any that are immediately runnable (their predecessors already succeeded); the rest wait their turn. Re-applying the label with no new sub-issues is a safe no-op.
-
-> **Why it isn't automatic:** re-applying the label is the explicit "execute this" signal — the same consent model as the initial trigger — so newly-drafted sub-issues don't start running the instant you create them. Automatic pickup on sub-issue creation is a possible future enhancement.
-
-Notes and current limitations:
-
-- The parent issue itself spawns **no task** — a human-authored sub-issue graph is treated as consent to execute.
-- **No "cancel the whole epic" button yet.** Cancelling an individual sub-issue's task (`bgagent cancel <task-id>`) stops it and skips its dependents, but there is no single command to cancel a whole in-flight orchestration. Tracked as a follow-up.
-- A scheduled backstop (every ~10 min) recovers sub-issues whose terminal events were lost during a transient outage, so a stalled orchestration self-heals rather than hanging.
-- Multi-predecessor ("diamond") sub-issues merge their predecessors' branches at start time; if a predecessor is later edited in review, re-integration of the dependent is a tracked follow-up.
+Linear access tokens expire in 24h. On the Secrets Manager path ABCA refreshes via the stored `refresh_token` and writes the rotated token back; if Linear returns `invalid_grant` because a concurrent caller already refreshed, the resolver re-reads the secret and uses the fresh token. On the vault path AgentCore owns refresh entirely.
 
 ## Troubleshooting
+
+### "Invalid redirect_uri parameter for the application"
+
+The URI you're being redirected to isn't registered on the app. Linear reports this at authorize time and the error names the *application*, not the URI, so compare carefully:
+
+- **Is every URI the template printed actually listed?** On the vault, that includes the AgentCore callback that the first `setup` run prints — a missing one fails here, mid-consent.
+- **Did the save take?** Reload the app page and confirm the field still holds the value. Linear validates the whole field at once, so one bad line loses the good ones — and the error then looks like it's about the line you just added.
+- **Any leading or trailing whitespace?** A copied line can carry indentation. Linear rejects that URI as invalid.
+- **One URI per line, no wildcards, no line wrapping.** A wrapped URI becomes two malformed entries.
+
+If the app has been edited repeatedly through failed saves, creating a fresh app with the correct URIs from the start is faster than auditing it.
 
 ### Webhook doesn't trigger a task
 
 - Is the project mapped? `aws dynamodb scan --table-name <LinearProjectMappingTableName>`
-- Is the workspace registered? Scan `LinearWorkspaceRegistryTable` for the `organizationId` from the webhook payload.
-- Is the label spelled exactly as configured? Match is case-insensitive but must be the same word.
-- Check CloudWatch logs for `WebhookFn` and `WebhookProcessorFn` — common errors include `Invalid Linear webhook signature`, `Linear workspace is not onboarded`, `Linear project is not onboarded`, `Linear actor has no linked platform user`.
+- Is the workspace registered? Scan `LinearWorkspaceRegistryTable` for the payload's `organizationId`.
+- Is **Comments** ticked on the webhook as well as **Issues**? Without it, labels still work but `@bgagent` replies silently never arrive.
+- Is the label spelled as configured? Matching is case-insensitive but must be the same word.
+- Check CloudWatch for `WebhookFn` and `WebhookProcessorFn`. Common: `Invalid Linear webhook signature`, `Linear workspace is not onboarded`, `Linear project is not onboarded`, `Linear actor has no linked platform user`.
 
 ### Webhook signature verification fails repeatedly
 
-The signing secret stored on this workspace's OAuth bundle doesn't match the webhook subscription Linear is sending from. Most often: you configured the webhook in Linear but didn't run `update-webhook-secret` (or rotated the secret in Linear without re-running it). Fix:
+The stored signing secret doesn't match the subscription Linear is sending from — usually because the webhook was configured in Linear without telling ABCA, or the secret was rotated:
 
 ```bash
 bgagent linear update-webhook-secret <slug>
 ```
 
-To inspect what's currently stored:
+To see what's stored:
 
 ```bash
-aws secretsmanager get-secret-value --secret-id bgagent-linear-oauth-<slug> --query SecretString --output text | jq .webhook_signing_secret
+aws secretsmanager get-secret-value --secret-id bgagent-linear-oauth-<slug> \
+  --query SecretString --output text | jq .webhook_signing_secret
 ```
 
-If the failing event's `organizationId` doesn't match any registered workspace and the stack-wide secret also doesn't match, you have a webhook configured in a Linear workspace you haven't onboarded — either onboard it via `add-workspace` or remove the webhook in Linear.
+If the failing event's `organizationId` matches no registered workspace and the stack-wide secret doesn't match either, a Linear workspace you haven't onboarded has a webhook pointed here — onboard it or remove the webhook.
 
-### Comments render as "interactive agent activity" instead of a comment thread
+### Comments render as "interactive agent activity"
 
-Symptom: when you `@mention` the bot in Linear it shows up as an interactive agent widget rather than a normal comment, and the agent's replies/reactions don't behave like a comment thread. Cause: the Linear **OAuth app is configured as an agent** — agent-session / app-notification events are enabled on it. ABCA is a comment-based integration and does not use Linear's agent model; agent mode makes Linear render mentions as agent activity, which breaks the comment-thread UX.
+An `@mention` shows up as an interactive agent widget rather than a comment, and replies/reactions don't behave like a thread. The OAuth app is configured as a Linear **agent**.
 
-Fix: in the Linear OAuth app settings, **turn OFF the agent / app-notification event subscriptions**. Keep only the workspace **webhook** with **Issues** and **Comments** resource types (step 4). No redeploy needed — it's a Linear-side app setting.
+Fix: untick the app's **App events** checkboxes (agent session events, inbox notifications, permission changes). Keep the webhook enabled with the **Issues** and **Comments** data-change events. No redeploy needed.
 
-To confirm ABCA is seeing agent-mode traffic from a workspace, grep the receiver logs:
+To confirm ABCA is seeing agent-mode traffic:
 
 ```bash
 aws logs filter-log-events --log-group-name /aws/lambda/<stack>-LinearIntegrationWebhookFn... \
   --filter-pattern "agent-mode"
 ```
 
-A `WARN … Ignoring Linear agent-mode webhook …` line (with `linear_workspace_id`) means that workspace's app has agent events on — advise disabling them.
-
-### "Invalid redirect_uri parameter for the application" during step 3
-
-Linear's misleading error for `actor=app` flows where the OAuth app config is incomplete (it reports `Invalid redirect_uri` regardless of which required field is actually missing). In your Linear app settings, confirm:
-
-- **GitHub username** is filled in (Linear's inline help describes the field and the `[bot]` suffix) — a blank value triggers this error.
-- **Webhooks** toggle is ON.
-- The Callback URL is on a **single line** (line-wrapped URLs become two malformed entries Linear silently rejects).
-
-Re-run `bgagent linear setup` after fixing.
+A `WARN … Ignoring Linear agent-mode webhook …` line names the offending workspace.
 
 ### Agent doesn't post comments to Linear
 
-- Verify the per-workspace OAuth secret exists: `aws secretsmanager describe-secret --secret-id bgagent-linear-oauth-<slug>`.
-- Verify the registry row's `oauth_secret_arn` matches that secret and `status = 'active'`.
-- Check the webhook-processor Lambda logs for the pre-hydration / attachment-screening step (comments, attachments, and project docs are fetched here before the task is dispatched). A failure to resolve the workspace token or screen an attachment shows up in these logs, not in the agent container.
-- Check for `WARN linear_reactions: HTTP 401 from Linear` — usually means the refresh token was revoked Linear-side. Re-run `bgagent linear setup <slug>`.
-- Check for `resolve_linear_api_token: invalid_grant` — Linear permanently rejected the refresh token. Re-run `bgagent linear setup <slug>` to issue a new one.
-
-## Limits and quotas
-
-Linear API rate limits per OAuth-installed app, per workspace: **5,000 requests/hour, 3,000,000 complexity points/hour**. A typical task makes ~10 Linear API calls — nowhere near the ceiling.
-
-Linear access tokens expire in 24h. The webhook processor and orchestrator auto-refresh via the stored `refresh_token` and write the rotated token back to Secrets Manager. If Linear returns `invalid_grant` (a concurrent caller already refreshed), the resolver re-reads the secret and uses the freshly-rotated token.
+- Does the secret exist? `aws secretsmanager describe-secret --secret-id bgagent-linear-oauth-<slug>`
+- Does the registry row's `oauth_secret_arn` match it, with `status='active'`?
+- Check the webhook-processor logs, not the agent container — token resolution and attachment screening happen there, before the task is dispatched.
+- `WARN linear_reactions: HTTP 401 from Linear` — the refresh token was revoked Linear-side. Re-run `bgagent linear setup <slug>`.
+- `resolve_linear_api_token: invalid_grant` — Linear permanently rejected the refresh token. Re-run setup to issue a new one.
+- On the vault path, a "consent required" outcome means the grant is gone; re-run setup.
 
 ## Removing the integration
 
@@ -313,4 +333,23 @@ aws dynamodb update-item \
   --expression-attribute-values '{":revoked":{"S":"revoked"}}'
 ```
 
-Then delete the Linear webhook from [Linear Settings → API](https://linear.app/settings/api) and uninstall the OAuth app from [Workspace Settings → Integrations](https://linear.app/settings/integrations) on the Linear side.
+Then delete the webhook from [Linear Settings → API](https://linear.app/settings/api) and uninstall the app from [Workspace Settings → Integrations](https://linear.app/settings/integrations).
+
+### Vault-managed workspaces: the credential provider outlives the stack
+
+If the workspace was onboarded with the Identity vault (its registry row has a
+`provider_name`), `setup` created an **AgentCore credential provider** outside
+CloudFormation. `cdk destroy` removes the workload identity but leaves the provider
+behind, holding your Linear Client ID, Client Secret, and a live grant that keeps
+refreshing. It will not appear in `cdk diff` or drift detection.
+
+List and delete them explicitly:
+
+```bash
+aws bedrock-agentcore-control list-oauth2-credential-providers --region <region>
+aws bedrock-agentcore-control delete-oauth2-credential-provider \
+  --name bgagent-linear-oauth-<slug> --region <region>
+```
+
+Do this **before** `cdk destroy` if you can — afterwards you have to know the provider
+names, since nothing left in the account references them.

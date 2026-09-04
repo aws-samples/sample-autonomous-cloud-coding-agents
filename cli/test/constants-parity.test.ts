@@ -23,6 +23,8 @@ import {
   FORGE_WEBTRIGGER_SUFFIX,
   JIRA_APP_ACTOR_MIN_SECRET_LENGTH,
 } from '../src/jira-app-actor';
+import { LINEAR_OAUTH_SCOPES } from '../src/linear-oauth';
+import { LINEAR_VAULT_CUSTOM_PARAMS_FOR_TEST } from '../src/linear-vault';
 import {
   APPROVAL_TIMEOUT_S_DEFAULT,
   APPROVAL_TIMEOUT_S_MAX,
@@ -73,5 +75,26 @@ describe('CLI constants parity with contracts/constants.json', () => {
     expect(FORGE_WEBTRIGGER_SUFFIX).toBe(
       contracts.jira_app_actor.forge_webtrigger_suffix,
     );
+  });
+});
+
+describe('linear_vault cache-key parity', () => {
+  // AgentCore keys a cached grant by the WHOLE token request, customParameters included,
+  // so consent time and every resolve must send an identical set. Four copies exist —
+  // this file's, the Lambda resolver's, the CLI vault helper's and the agent's — and a
+  // one-token divergence makes every resolve a cache miss, which since #812 is reported
+  // as consent-required and can latch a healthy workspace `revoked`. The agent side is
+  // enforced differently: `check:constants-sync` forbids it re-declaring these literals
+  // at all.
+  const contract = JSON.parse(
+    fs.readFileSync(path.join(__dirname, '..', '..', 'contracts', 'constants.json'), 'utf8'),
+  ).linear_vault as { scopes: string[]; custom_parameters: Record<string, string> };
+
+  test('the CLI OAuth scopes match the contract', () => {
+    expect([...LINEAR_OAUTH_SCOPES]).toEqual(contract.scopes);
+  });
+
+  test('the consent-time customParameters match the contract', () => {
+    expect(LINEAR_VAULT_CUSTOM_PARAMS_FOR_TEST).toEqual(contract.custom_parameters);
   });
 });

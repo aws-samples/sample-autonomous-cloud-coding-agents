@@ -6,6 +6,7 @@ import uuid
 from datetime import UTC
 
 from models import AttachmentConfig, TaskConfig
+from shared_constants import SHARED_CONSTANTS
 from shell import log
 
 AGENT_WORKSPACE = os.environ.get("AGENT_WORKSPACE", "/workspace")
@@ -66,6 +67,124 @@ def resolve_github_token() -> str:
     return ""
 
 
+# Sourced from contracts/constants.json, not re-declared. AgentCore keys a cached
+# grant by the WHOLE token request, customParameters included — live-proven that the
+# same user and provider return the cached token when these are passed and "needs
+# consent" when they are omitted. So a one-token divergence between any two of the
+# four copies (here, the Lambda resolver, and both CLI paths) makes every resolve a
+# cache miss, which since #812 is reported as consent-required and can latch a healthy
+# workspace `revoked`. Four "keep in sync" comments could not enforce that; the
+# contract plus check:constants-sync can.
+_LINEAR_VAULT_CONTRACT = SHARED_CONSTANTS["linear_vault"]
+_LINEAR_VAULT_SCOPES = list(_LINEAR_VAULT_CONTRACT["scopes"])
+_LINEAR_VAULT_CUSTOM_PARAMS = dict(_LINEAR_VAULT_CONTRACT["custom_parameters"])
+# USER_FEDERATION requires a return URL (spike F7) even though the grant is
+# already consented in this non-interactive path, so it is never visited. The
+# CLI localhost loopback is always on the workload identity allowlist.
+_LINEAR_VAULT_RETURN_URL = "http://localhost:8080/oauth/callback"
+
+
+def _resolve_linear_token_via_vault(
+    channel_metadata: dict[str, str] | None = None,
+) -> str:
+    """Mint a Linear access token via the AgentCore Identity Token Vault.
+
+    Returns the access token, or "" if the vault is not enabled / not
+    applicable / unavailable for any reason — the caller then falls back to the
+    Secrets-Manager token, so a vault hiccup must never raise.
+
+    Self-mints through boto3 (``get_workload_access_token_for_user_id`` then
+    ``get_resource_oauth2_token``) rather than reading the AgentCore-injected
+    ``WorkloadAccessToken`` header, so it behaves identically on the AgentCore
+    and ECS substrates (both authorize against the agent session role's IAM).
+    The grant must already be consented (done at ``bgagent linear setup`` time);
+    if the vault returns an ``authorizationUrl`` instead of a token, that means
+    consent is required and we fall back rather than block on a browser.
+    """
+    if os.environ.get("LINEAR_VAULT_ENABLED") != "true":
+        return ""
+    workload_name = os.environ.get("LINEAR_WORKLOAD_IDENTITY_NAME", "")
+    if not workload_name:
+        return ""
+
+    provider_name = ""
+    workspace_id = ""
+    recorded_user_id = ""
+    if channel_metadata:
+        provider_name = channel_metadata.get("linear_provider_name", "")
+        workspace_id = channel_metadata.get("linear_workspace_id", "")
+        recorded_user_id = channel_metadata.get("linear_vault_user_id", "")
+    if not provider_name or not workspace_id:
+        # SM-only install (or missing context) — skip the vault entirely.
+        return ""
+
+    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+    if not region:
+        log("WARN", "_resolve_linear_token_via_vault: AWS_REGION not set; skipping vault")
+        return ""
+
+    try:
+        import boto3  # noqa: F401  -- availability probe for the graceful skip below
+        from botocore.exceptions import BotoCoreError, ClientError
+
+        from aws_session import platform_client
+    except ImportError as e:
+        log("WARN", f"_resolve_linear_token_via_vault: boto3 unavailable ({e}); skipping")
+        # nosemgrep: py-silent-success-masking -- optional vault token; boto3 unavailable
+        return ""
+
+    # One bot identity per workspace. Prefer the id recorded at consent time — see
+    # `linearVaultUserIdForSlug` in cli/src/linear-vault.ts for why it is recorded
+    # rather than derived. The derived form below is the pre-#809 fallback, and must
+    # stay in step with `legacyWorkspaceUserId` in the Lambda resolver.
+    user_id = recorded_user_id.strip() or f"linear-workspace-{workspace_id}"
+
+    try:
+        # Inside the try: client construction raises UnknownServiceError on an SDK that
+        # predates AgentCore and InvalidRegionError on a bad region, neither of which is
+        # caught outside it — so this function, documented to return "" on any failure,
+        # would instead abort the task before the 👀 acknowledgement.
+        client = platform_client("bedrock-agentcore", region_name=region)
+        wat = client.get_workload_access_token_for_user_id(
+            workloadName=workload_name,
+            userId=user_id,
+        )
+        workload_token = wat.get("workloadAccessToken", "")
+        if not workload_token:
+            log("WARN", "_resolve_linear_token_via_vault: no workload token; falling back to SM")
+            return ""
+
+        resp = client.get_resource_oauth2_token(
+            workloadIdentityToken=workload_token,
+            resourceCredentialProviderName=provider_name,
+            scopes=_LINEAR_VAULT_SCOPES,
+            oauth2Flow="USER_FEDERATION",
+            resourceOauth2ReturnUrl=_LINEAR_VAULT_RETURN_URL,
+            customParameters=_LINEAR_VAULT_CUSTOM_PARAMS,
+        )
+        access = resp.get("accessToken", "")
+        if access:
+            log(
+                "INFO",
+                f"linear_vault_token_ok workspace_id={workspace_id} provider={provider_name}",
+            )
+            return access
+        # No token → consent required; fall back to SM.
+        log(
+            "WARN",
+            "_resolve_linear_token_via_vault: consent required (no cached grant); SM fallback",
+        )
+        # nosemgrep: py-silent-success-masking -- vault needs consent; SM fallback follows
+        return ""
+    except (ClientError, BotoCoreError) as e:
+        log(
+            "WARN",
+            f"_resolve_linear_token_via_vault: vault call failed ({type(e).__name__}); SM fallback",
+        )
+        # nosemgrep: py-silent-success-masking -- vault unavailable; SM fallback follows
+        return ""
+
+
 def resolve_linear_api_token(channel_metadata: dict[str, str] | None = None) -> str:
     """Resolve the Linear OAuth access token from Secrets Manager.
 
@@ -86,13 +205,28 @@ def resolve_linear_api_token(channel_metadata: dict[str, str] | None = None) -> 
     then skips its reactions/state calls (best-effort, logged). This function is
     only called when ``channel_source == 'linear'``.
 
-    Phase 2.0a (parked) used AgentCore Identity. Phase 2.0b-O2 reads
-    Secrets Manager directly because AgentCore Identity's USER_FEDERATION
-    flow has an open service-side bug (see memory/project_oauth_2_0b.md).
+    RFC #249 Phase 1 re-introduces AgentCore Identity as the PREFERRED path
+    (``_resolve_linear_token_via_vault``, tried first above) for workspaces
+    onboarded through the vault; Secrets Manager remains the fallback and the
+    only path for SM-only installs. The Phase-0 spike confirmed the
+    USER_FEDERATION service-side issue that parked Phase 2.0a no longer
+    reproduces and that the flow forwards the ``actor=app`` agent install.
     """
     cached = os.environ.get("LINEAR_API_TOKEN", "")
     if cached:
         return cached
+
+    # RFC #249 Phase 1: when the vault is enabled AND this task carries a
+    # provider name (vault-onboarded workspace), mint the token through the
+    # AgentCore Identity Token Vault first. Any failure returns "" here, so we
+    # fall through to the Secrets-Manager path below — the vault never blocks a
+    # task. The Phase-0 spike proved USER_FEDERATION forwards the actor=app
+    # install and re-enables the path that was parked in 2.0a (the service-side
+    # USER_FEDERATION bug it cited no longer reproduces).
+    vault_token = _resolve_linear_token_via_vault(channel_metadata)
+    if vault_token:
+        os.environ["LINEAR_API_TOKEN"] = vault_token
+        return vault_token
 
     # Prefer the per-task channel_metadata; fall back to env var so the
     # function can be called early (e.g. before pipeline construction)
