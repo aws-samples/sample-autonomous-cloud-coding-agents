@@ -414,7 +414,7 @@ export class GitHubScreenshotIntegration extends Construct {
     const webhookResource = githubResource.addResource('webhook');
     const webhookMethod = webhookResource.addMethod(
       'POST',
-      new apigw.LambdaIntegration(this.webhookFn),
+      new apigw.LambdaIntegration(this.webhookFn, { allowTestInvoke: false }),
       { authorizationType: apigw.AuthorizationType.NONE },
     );
 

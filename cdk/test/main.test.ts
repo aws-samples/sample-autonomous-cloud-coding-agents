@@ -17,6 +17,7 @@
  *  SOFTWARE.
  */
 
+import * as fs from 'fs';
 import { App, Stack } from 'aws-cdk-lib';
 import { Annotations, Match, Template } from 'aws-cdk-lib/assertions';
 import {
@@ -151,5 +152,40 @@ describe('buildApp — AgentCore AZ wiring', () => {
         appProps: { context: { [AGENTCORE_AZS_CONTEXT_KEY]: 'us-east-1b' } },
       }),
     ).rejects.toThrow(/must be a JSON array of availability-zone names/);
+  });
+});
+
+describe('buildApp — CloudFormation template-body budget within 80% 1Mb budget', () => {
+  // CloudFormation caps a template body at 1 MB; CDK checks against
+  // `TEMPLATE_BODY_MAXIMUM_SIZE = 1e6` and only
+  // raises an `@aws-cdk/core:Stack.templateSize` *warning* — so this ceiling fails
+  // **open**. A template can grow past it, synthesize cleanly, and fail at deploy.
+  // These assertions read the emitted artifact rather than `Template.fromStack`,
+  // because indentation is the thing under test and `Template` has already parsed
+  // it away.
+  const CDK_TEMPLATE_BODY_MAXIMUM_SIZE = 1_000_000;
+  // Budget to the point CDK starts warning, so a regression trips a readable assertion
+  // instead of silently riding the warning band up to the hard limit.
+  const WARNING_THRESHOLD = 0.8;
+  const TEMPLATE_BODY_BUDGET = CDK_TEMPLATE_BODY_MAXIMUM_SIZE * WARNING_THRESHOLD;
+
+  let templateText: string;
+
+  beforeAll(async () => {
+    const built = await app();
+    templateText = fs.readFileSync(
+      built.synth().getStackByName(STACK_NAME).templateFullPath,
+      'utf8',
+    );
+  });
+
+  it('emits the template without pretty-print indentation', () => {
+    // Assert the shape, not the saving, so the test does
+    // not need re-baselining every time a resource is added.
+    expect(templateText).not.toContain('\n  ');
+  });
+
+  it('stays inside the template-body budget', () => {
+    expect(Buffer.byteLength(templateText, 'utf8')).toBeLessThan(TEMPLATE_BODY_BUDGET);
   });
 });
